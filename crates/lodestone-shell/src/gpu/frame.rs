@@ -355,6 +355,14 @@ impl RenderState {
         let sign_text_count = self.sign_text.prepare(queue, &view_proj, &signs);
         stats.sign_text_vertices = sign_text_count;
 
+        // `text_display` glyphs and background panels, same "upload before
+        // the pass opens" constraint. Unlike sign text, this *does* need a
+        // camera basis — a `text_display`'s billboard mode can track the
+        // camera, unlike a sign's fixed orientation — so `camera` (not just
+        // `camera.position`) is threaded through. See `gpu/display_text.rs`'s
+        // module doc.
+        let display_text_count = self.display_text.prepare(queue, &view_proj, &self.display_draws, camera);
+
         // Beacon beams, same "upload before the pass opens" constraint and
         // the same not-derived-from-`entities` shape as sign text above — a
         // beacon is a *block*, gathered from world state. See
@@ -640,7 +648,13 @@ impl RenderState {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                // GPU frame profiling (`gpu::gpu_timing`): `None` whenever the
+                // device lacks `Features::TIMESTAMP_QUERY`, in which case this
+                // is byte-identical to before this existed. The borrow this
+                // creates is a temporary scoped to this statement — dropped
+                // before `render_inner` later calls `self.gpu_timer.borrow_mut()`
+                // to resolve it, so it cannot panic on a double borrow.
+                timestamp_writes: self.gpu_timer.borrow().as_ref().and_then(|t| t.writes("world")),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1054,6 +1068,12 @@ impl RenderState {
             // text's own polygon-offset bias to win against. See
             // `gpu/sign_text.rs`'s module doc for the depth pipeline.
             self.sign_text.draw(&mut pass, sign_text_count);
+
+            // `text_display` glyphs and background panels, right after sign
+            // text for the same "already in the depth buffer, opaque/cutout
+            // geometry" reasoning, though this pass carries no polygon-offset
+            // bias of its own — see `gpu/display_text.rs`'s module doc.
+            self.display_text.draw(&mut pass, display_text_count);
 
             // The beacon beam's **solid core** only — opaque, depth-writing
             // (`BEACON_BEAM_OPAQUE`, see `gpu/beacon_beam.rs`'s module doc),
@@ -1516,7 +1536,21 @@ impl RenderState {
             }
         }
 
+        // GPU frame profiling: resolve this frame's queries into their ring
+        // slot before `finish`/`submit` (both are encoder commands), then
+        // kick off the async readback right after submission — see
+        // `gpu::gpu_timing`'s module doc for why this is lagged by design
+        // rather than a synchronous stall. No-op whenever `gpu_timer` is
+        // `None`. `borrow_mut` here is safe: every `borrow()` this function
+        // took above was a statement-scoped temporary already dropped (see
+        // the `timestamp_writes` sites' own comments).
+        if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
+            timer.resolve(&mut encoder);
+        }
         queue.submit(std::iter::once(encoder.finish()));
+        if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
+            timer.after_submit(device);
+        }
 
         // Residency, measured — **not** `vram_bytes(stats.total_quads)`, which is
         // what this was. `total_quads` only accumulates over sections that

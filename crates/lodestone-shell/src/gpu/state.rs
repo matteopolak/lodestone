@@ -33,6 +33,7 @@ use glam::Vec3;
 use crate::particles::{ParticleInstance, ParticleRenderer};
 
 use super::first_person;
+use super::gpu_timing;
 use super::terrain::{
     MODEL_ORIGIN_ARENA_SLOTS, ModelRenderer, PACKED_ORIGIN_ARENA_SLOTS, SectionOriginArena,
     anim_slots_at,
@@ -43,8 +44,9 @@ use super::{
     BlockEntityRenderer, BlockEntitySource, BrushableSource, CampfireSource, ConduitSource,
     CopperGolemStatueSource, ShelfSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
-    DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
-    HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
+    DebugLineRenderer, DebugLineVertex, DebugLinesSource, DisplayTextRenderer, EntityLightSource,
+    EntityRenderer, HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource,
+    MovingPistonSource,
     NameTagRenderer, OutlineRenderer, OutlineShapeSource,
     PluginBillboardInstance, PluginBillboardRenderer, PluginBillboardsSource,
     RenderState, SKY_COLOR, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
@@ -137,6 +139,7 @@ impl RenderState {
         let entities = EntityRenderer::new(device, queue, color_format);
         let nametag = NameTagRenderer::new(device, color_format);
         let sign_text = SignTextRenderer::new(device, color_format);
+        let display_text = DisplayTextRenderer::new(device, color_format);
         let beacon_beam = BeaconBeamRenderer::new(device, queue, color_format);
         let end_portal = EndPortalRenderer::new(device, queue, color_format);
 
@@ -392,6 +395,10 @@ impl RenderState {
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
             sign_source: SignSource::default(),
+            display_text,
+            // No display entities until `set_display_draws` installs this
+            // frame's extract — see that method's doc.
+            display_draws: Vec::new(),
             beacon_beam,
             // No beacon beams until the shell installs a world source; see
             // `set_beacon_source`.
@@ -438,6 +445,25 @@ impl RenderState {
             // `TerrainOcclusion` for the two weaker settings and when to reach
             // for them.
             occlusion_mode: super::TerrainOcclusion::On,
+            // `None` whenever the device was not granted `Features::TIMESTAMP_QUERY`
+            // — see `gpu_timing`'s module doc for why that check reads
+            // `device.features()` rather than the adapter's advertised set.
+            // `["world", "first_person"]`: the sky pass, the individual screen
+            // overlays and the HUD's own separate encoder are not separately
+            // GPU-timed (kept out of scope deliberately — see
+            // `docs/frame-profiling.md`), so their cost is absent from every
+            // segment here rather than folded silently into one of them.
+            // `render_inner`'s block pass — terrain, entities,
+            // block entities, particles, weather, the outline/debug/nametag
+            // overlays — is one real `wgpu` render pass, not several, so
+            // `"world"` is reported as one number because that is what it
+            // genuinely is.
+            gpu_timer: std::cell::RefCell::new(gpu_timing::GpuQueryTimer::new(
+                device,
+                queue,
+                "lodestone-frame-gpu-timer",
+                &["world", "first_person"],
+            )),
         }
     }
 
@@ -452,6 +478,38 @@ impl RenderState {
     /// (`tests/client_chunk_cycles.rs`).
     pub fn set_terrain_culling(&mut self, enabled: bool) {
         self.terrain_culling = enabled;
+    }
+
+    /// This session's GPU-timing capability: `false` when the device was not
+    /// granted `Features::TIMESTAMP_QUERY` (see `gpu_timing`'s module doc) —
+    /// a caller building the debug overlay/tracing line must show this
+    /// explicitly rather than reporting the segments below as empty.
+    #[must_use]
+    pub fn gpu_timing_available(&self) -> bool {
+        self.gpu_timer.borrow().is_some()
+    }
+
+    /// Per-segment GPU pass timings from the last completed readback —
+    /// `(name, None)` for a segment with no reading yet (start-of-session
+    /// latency, or a pass that has never run), `(name, Some(ms))` otherwise.
+    /// Empty when [`Self::gpu_timing_available`] is `false`. See
+    /// `gpu_timing::GpuQueryTimer::results_ms`'s doc for why a `None` here
+    /// must never be rendered as `0.0`.
+    #[must_use]
+    pub fn gpu_timing_report(&self) -> Vec<(&'static str, Option<f32>)> {
+        self.gpu_timer
+            .borrow()
+            .as_ref()
+            .map(|t| t.results_ms().collect())
+            .unwrap_or_default()
+    }
+
+    /// Frames where GPU-timing readback fell behind — see
+    /// `gpu_timing::GpuQueryTimer::stalled_frames`'s doc. `0` whenever GPU
+    /// timing is unavailable, same as every other counter here.
+    #[must_use]
+    pub fn gpu_timing_stalled_frames(&self) -> u64 {
+        self.gpu_timer.borrow().as_ref().map_or(0, gpu_timing::GpuQueryTimer::stalled_frames)
     }
 
     /// Replace the distance-fog settings (colour + range) **and the sky disc's
@@ -1634,6 +1692,20 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::SignSpawn> + Send + Sync + 'static,
     ) {
         self.sign_source = SignSource(Some(Box::new(f)));
+    }
+
+    /// Install this frame's extracted `Display`-family entities
+    /// (`text_display`/`item_display`/`block_display`) — the caller (`Sim`'s
+    /// per-frame render-source wiring) is expected to pass
+    /// `crate::display_entities::extracted_display_draws(world)` here every
+    /// frame, the same way `entities: &[EntityDraw]` already reaches
+    /// [`RenderState::render`] from `extracted_entity_draws`. Unlike that
+    /// one, this is a setter rather than a `render` parameter: threading a
+    /// sixth top-level per-frame input through `render`'s own already-long
+    /// signature (and every helper it calls) would touch far more of this
+    /// file for the same information a two-line setter already carries.
+    pub fn set_display_draws(&mut self, draws: Vec<crate::display_entities::DisplayDraw>) {
+        self.display_draws = draws;
     }
 
     /// Install the source for this frame's beacon beams — same shape as
