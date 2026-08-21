@@ -202,6 +202,15 @@ const GUI_SPRITES: &[&str] = &[
     MERCHANT_TRADE_ARROW,
     MERCHANT_TRADE_ARROW_OUT_OF_STOCK,
     MERCHANT_DISCOUNT_STRIKETHROUGH,
+    // The player-inventory status-effect column's two backgrounds
+    // (`EffectsInInventory`). Both are `nine_slice` in the pack — the only
+    // sprites in this atlas that are — so their declared scaling is read at
+    // build time and applied by `ContainerBackground::scaled_sprite_quads`,
+    // not by the whole-sprite `sprite_quad`. Their *icons* are not here:
+    // `mob_effect/**` is a second source directory of the GUI atlas, loaded
+    // separately (see `ContainerBackground::mob_effect_icons`).
+    crate::effects::EFFECT_BACKGROUND_SPRITE,
+    crate::effects::EFFECT_BACKGROUND_AMBIENT_SPRITE,
 ];
 
 /// [`GUI_SPRITES`] plus the creative screen's 28 tab buttons and 2 scroller

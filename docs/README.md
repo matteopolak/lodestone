@@ -782,11 +782,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   It is the first thing in this workspace to draw a full 3-D entity rig inside a 2-D
   GUI panel, and the first to use a GPU scissor.
 - [Potion effects in the inventory](./inventory-potion-effects.md) —
-  `EffectsInInventory` (`26.2`): the column of active-effect chips drawn beside the
-  player's own inventory screen — name, amplifier level, remaining time and an icon
-  per active effect. Ported by reusing the existing top-right HUD chip's
-  fold/tint/font machinery in `crates/lodestone-shell/src/effects.rs`, rather than
-  building a second effect-rendering pipeline next to it.
+  `EffectsInInventory` (`26.2`): the column of active-effect widgets drawn beside the
+  player's own inventory screen — the effect's real icon sprite, its translated name
+  with a level numeral, and the remaining time — on a nine-sliced background sprite.
+  Drawn inside the container screen's own geometry pass, which is where the GUI sprite
+  atlas and the vanilla proportional font already are.
 - [Island detection (`cargo xtask islands`)](./island-detection.md) — A `syn`-based
   static scanner, `cargo xtask islands` (`xtask/src/islands.rs`), that reports four
   things per workspace crate: functions/methods with zero production call sites,

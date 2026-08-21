@@ -371,6 +371,20 @@ impl ContainerGeometry {
                 [0.22, 0.20, 0.17, 0.70],
             );
         }
+        // The player-inventory status-effect column (`EffectsInInventory`).
+        // Vanilla's `InventoryScreen.extractRenderState` calls
+        // `this.effects.extractRenderState(...)` **before** `super`'s, so the
+        // column belongs in this same under-the-slots bucket. It never
+        // overlaps the panel, so the order is a faithfulness point rather than
+        // a visual one.
+        //
+        // Drawn here — inside the container's own geometry — rather than as a
+        // separate composited overlay because this is where the real GUI
+        // sprites and the real proportional font already are. The overlay it
+        // replaces had neither, and drew a hash-derived colour swatch, a flat
+        // grey rect and a 5x7 bitmap font at 2x scale in their place.
+        draw_effect_column(&mut b, frame, background, &layout, x, y, w);
+
         // The furnace family's lit-flame and burn-progress bars, and the
         // brewing stand's fuel/brew/bubble bars. Vanilla draws
         // both in `extractBackground`, immediately after the panel blit and
@@ -1407,6 +1421,399 @@ fn drag_preview(menu: &Menu, drag: Option<(i32, &[usize])>) -> Option<DragPrevie
 /// `b.shadowed_label` call commented out (the historical bug, reproduced):
 /// [`the_rename_box_draws_real_glyph_geometry_not_one_flat_quad`] and
 /// [`glyph_vertex_count_scales_with_the_known_strings_own_width`] both went
+/// `EffectsInInventory.extractEffects` — the status-effect column beside the
+/// player inventory panel.
+///
+/// A no-op unless `frame.effects` is non-empty. The caller decides *which*
+/// screens populate it: vanilla constructs an `EffectsInInventory` only in
+/// `InventoryScreen`/`CreativeModeInventoryScreen`, and `Screen`'s own
+/// `showsActiveEffects()` is `false` everywhere else.
+///
+/// `x`/`y` are the panel's origin (`leftPos`/`topPos`) and `w` the logical
+/// canvas width (`screen.width`), all in the same logical GUI space every
+/// other draw in this module uses.
+///
+/// The icon and the background are real sprites; without a `background`
+/// attached (a jar-less run) the whole column is skipped rather than drawn as
+/// coloured rectangles — a stand-in for art that exists is indistinguishable
+/// from art that failed to load, and this widget spent its whole life being
+/// read as the latter.
+fn draw_effect_column(
+    b: &mut Builder<'_>,
+    frame: &ContainerFrame<'_>,
+    background: Option<&ContainerBackground>,
+    layout: &SlotLayout,
+    x: f32,
+    y: f32,
+    w: f32,
+) {
+    use crate::effects::{
+        EFFECT_BACKGROUND_AMBIENT_SPRITE, EFFECT_BACKGROUND_SPRITE, INV_BACKGROUND, INV_ICON_SIZE,
+        INV_SPACING, INV_TEXT_X_OFFSET, inventory_can_see_effects, inventory_column_x0,
+        inventory_max_width, inventory_texture_width, inventory_y_step,
+    };
+
+    if frame.effects.is_empty() {
+        return;
+    }
+    let Some(bg) = background else {
+        return;
+    };
+    let x0 = inventory_column_x0(x, layout.width);
+    let available_width = w - x0;
+    if !inventory_can_see_effects(available_width) {
+        return;
+    }
+    let max_width = inventory_max_width(available_width);
+    let y_step = inventory_y_step(frame.effects.len());
+
+    let mut y0 = y;
+    for row in frame.effects {
+        let texture_width = inventory_texture_width(
+            b.text_width(&row.name, 1.0),
+            b.text_width(&row.duration, 1.0),
+            max_width,
+        );
+        let sprite = if row.ambient {
+            EFFECT_BACKGROUND_AMBIENT_SPRITE
+        } else {
+            EFFECT_BACKGROUND_SPRITE
+        };
+        for q in bg.scaled_sprite_quads(sprite, x0, y0, texture_width, INV_BACKGROUND) {
+            b.bg_sprite(q);
+        }
+
+        // `extractText`. Vanilla's five-argument `graphics.text(...)` overload
+        // defaults `dropShadow` to `true`, unlike the two container labels'
+        // explicit `false` — hence `shadowed_label` here and `label` there.
+        let max_text_width = texture_width - INV_TEXT_X_OFFSET - INV_SPACING;
+        if max_text_width > 0.0 {
+            let text_x = x0 + INV_TEXT_X_OFFSET;
+            let text_y = y0 + INV_SPACING;
+            // `ComponentRenderUtils.clipText`: the longest prefix that fits in
+            // `maxTextWidth` minus the ellipsis' own width, plus the ellipsis.
+            let name = if b.text_width(&row.name, 1.0) > max_text_width {
+                let budget = max_text_width - b.text_width(ELLIPSIS, 1.0);
+                format!("{}{ELLIPSIS}", b.substr_by_width(&row.name, budget, 1.0))
+            } else {
+                row.name.clone()
+            };
+            b.shadowed_label(&name, text_x, text_y, 1.0, EFFECT_NAME_INK);
+            b.shadowed_label(
+                &row.duration,
+                text_x,
+                text_y + EFFECT_DURATION_DY,
+                1.0,
+                EFFECT_DURATION_INK,
+            );
+        }
+
+        // The icon last, over the background — vanilla's own submission order.
+        if let Some(q) = bg.mob_effect_icon_quad(
+            &row.sprite,
+            x0 + INV_SPACING,
+            y0 + INV_SPACING,
+            INV_ICON_SIZE,
+            INV_ICON_SIZE,
+        ) {
+            b.bg_sprite(q);
+        }
+        y0 += y_step;
+    }
+}
+
+/// `CommonComponents.ELLIPSIS`, the suffix `ComponentRenderUtils.clipText`
+/// appends to a name too wide for its widget.
+const ELLIPSIS: &str = "...";
+
+/// `EffectsInInventory.extractText`'s name colour — the literal `-1`, i.e.
+/// opaque white.
+const EFFECT_NAME_INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// `EffectsInInventory.extractText`'s duration colour — the literal
+/// `-8355712`, i.e. ARGB `0xFF808080`.
+const EFFECT_DURATION_INK: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
+
+/// The duration line's offset below the name — the literal `+ 9` in
+/// `EffectsInInventory.extractText`, which is one line of vanilla's font.
+const EFFECT_DURATION_DY: f32 = 9.0;
+
+
+/// The player-inventory status-effect column, end to end against the real
+/// pack: a wire-shaped [`ActiveEffects`] → [`crate::effects::inventory_rows`]
+/// (which is where the language table is consulted) → [`ContainerFrame`] →
+/// [`ContainerGeometry::build_inner`] → the background vertex stream.
+///
+/// This is deliberately **not** a hermetic fixture. The reported bug was four
+/// symptoms of one cause — the widget never reached the pack at all, so it
+/// drew a hash-derived swatch, a flat rect, a 5x7 debug font and a raw
+/// registry path — and a gate that installs its own sprites and its own
+/// translations reproduces exactly the blindness that let all four ship. Every
+/// input here comes from `client.jar`.
+///
+/// `#[ignore]`d on the pack, and a **failure** rather than a skip when the
+/// pack is absent, so a green run is never vacuous.
+#[cfg(test)]
+mod effect_column_tests {
+    use super::*;
+    use crate::effects::{
+        EFFECT_BACKGROUND_SPRITE, INV_ICON_SIZE, INV_SPACING, inventory_rows, mob_effect_sprite,
+    };
+    use lodestone_assets::{Language, ResourceLocation, ResourceManager};
+    use lodestone_game::effect::{ActiveEffects, StatusEffect};
+    use lodestone_model::Identifier;
+
+    fn pack() -> ResourceManager {
+        crate::resources::open_vanilla_pack_stack().expect(
+            "this gate is opted in via --ignored but no vanilla pack was found; put \
+             client.jar under .cache/mc/<ver> (or set LODESTONE_ASSETS) — do not 'skip', \
+             a silent pass here would assert nothing",
+        )
+    }
+
+    /// Two effects, exactly as `update_mob_effect` folds them: Speed at
+    /// amplifier 1 (so the level suffix is exercised) for 90 s, and an ambient
+    /// Night Vision (so the ambient background and the infinite duration are).
+    fn wire_effects() -> ActiveEffects {
+        let mut fx = ActiveEffects::new();
+        fx.apply(StatusEffect::new(
+            Identifier::new("minecraft", "speed").expect("valid id"),
+            1,
+            1800,
+        ));
+        fx.apply(StatusEffect {
+            id: Identifier::new("minecraft", "night_vision").expect("valid id"),
+            amplifier: 0,
+            duration_ticks: -1,
+            ambient: true,
+            show_particles: true,
+            show_icon: true,
+        });
+        fx
+    }
+
+    /// The reported symptom, stated as an assertion: the row's name must be
+    /// the pack's own words, not the registry path. "Speed II" — the
+    /// `effect.minecraft.speed` value plus `enchantment.level.2`, both read
+    /// out of the real `en_us.json`.
+    ///
+    /// The wrong hypothesis is `"speed II"`/`"speed"`, which is what a widget
+    /// that never consults the language table produces; both differ from the
+    /// expectation here, so this input discriminates.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn the_column_names_effects_in_the_packs_own_words() {
+        let manager = pack();
+        let lang = Language::merged_from_stack(&manager, "minecraft", "en_us")
+            .expect("the vanilla pack must carry en_us.json");
+        let rows = inventory_rows(&wire_effects(), &lang.translator());
+
+        assert_eq!(rows.len(), 2, "both effects must occupy a row");
+        let speed = rows
+            .iter()
+            .find(|r| r.sprite == mob_effect_sprite("speed"))
+            .expect("the speed row must be present");
+        assert_eq!(
+            speed.name, "Speed II",
+            "the effect name must be translated through the language table and carry \
+             vanilla's own level numeral; a raw registry path here is the reported bug"
+        );
+        assert_eq!(
+            speed.duration, "01:30",
+            "MobEffectUtil.formatDuration renders 1800 ticks at 20 tps as mm:ss"
+        );
+
+        let night_vision = rows
+            .iter()
+            .find(|r| r.sprite == mob_effect_sprite("night_vision"))
+            .expect("the night vision row must be present");
+        assert_eq!(night_vision.name, "Night Vision");
+        assert_eq!(
+            night_vision.duration,
+            lang.get("effect.duration.infinite")
+                .expect("the pack must carry effect.duration.infinite"),
+            "an infinite effect shows the pack's own infinity string, not a clock"
+        );
+    }
+
+    /// The icon and the background must be **real sprites out of the pack**,
+    /// reaching the background vertex stream with the atlas' own UVs.
+    ///
+    /// Two things make this able to fail rather than merely run:
+    ///
+    /// * the icon's expected UV window is read from the atlas independently of
+    ///   the draw, so a quad pointing at any other sprite (or at nothing) is a
+    ///   miss — a white box, the first reported symptom, is what an absent
+    ///   `mob_effect/**` source produces;
+    /// * the background must decompose into **more than one** quad, which is
+    ///   what distinguishes a real nine-slice blit from the whole-sprite
+    ///   stretch every other sprite in this atlas uses. A stretched `32x32`
+    ///   border smeared across a 150 px widget is the second symptom.
+    ///
+    /// The negative control is the same build with no effects: it must produce
+    /// neither, which is what proves both counts came from this column and not
+    /// from the panel art that also fills this stream.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn the_column_draws_real_pack_sprites_for_the_icon_and_the_background() {
+        let manager = pack();
+        let lang = Language::merged_from_stack(&manager, "minecraft", "en_us")
+            .expect("the vanilla pack must carry en_us.json");
+        let background = ContainerBackground::build(&manager).expect("the container atlas builds");
+        let font = VanillaFont::from_manager(&manager).expect("the vanilla font loads");
+        let rows = inventory_rows(&wire_effects(), &lang.translator());
+
+        // Wide enough that `availableWidth >= 120`, so the name column is not
+        // clipped away — the state the widget exists for.
+        let (width, height) = (960u32, 540u32);
+        let gui_scale = 2u32;
+        let menu = Menu::player();
+
+        let build = |effects: &[crate::effects::InventoryEffectRow]| {
+            ContainerGeometry::build_inner(
+                &ContainerFrame::new(Some(&menu), "Crafting").with_effects(effects),
+                width,
+                height,
+                gui_scale,
+                &IconAssets {
+                    items: None,
+                    models: None,
+                },
+                Some(&font),
+                Some(&background),
+            )
+        };
+        let with_effects = build(&rows);
+        let without = build(&[]);
+
+        // Where the icon must land: `x0 + 7`, `topPos + 7`, `18 x 18`, in the
+        // logical canvas — derived from the same layout call the draw uses,
+        // never from a transcribed constant.
+        let layout = slot_layout(&menu);
+        let (canvas_w, _) = crate::menu::render::logical_canvas(gui_scale, width, height);
+        let (panel_x, panel_y) = panel_origin_with_scale(&layout, gui_scale, width, height);
+        let x0 = crate::effects::inventory_column_x0(panel_x, layout.width);
+        assert!(
+            crate::effects::inventory_can_see_effects(canvas_w - x0),
+            "the fixture canvas must actually have room beside the panel, or this gate \
+             measures the empty branch"
+        );
+
+        // The atlas' own placement for the speed icon, resolved independently
+        // of the draw.
+        let atlas = background.atlas();
+        let icon_loc =
+            ResourceLocation::new("minecraft", "mob_effect/speed").expect("valid location");
+        let icon_sprite = atlas.sprite(&icon_loc).unwrap_or_else(|| {
+            panic!(
+                "the container atlas carries no mob_effect/speed sprite — \
+                 textures/mob_effect/** is a second source directory of the GUI atlas \
+                 and is exactly what a gui/sprites-only enumeration misses"
+            )
+        });
+
+        // Recover each background quad's `dst` and UV window from the stream.
+        // Layout is `[x, y, u, v, r, g, b, a]` per vertex, six vertices a quad.
+        let quads = |geo: &ContainerGeometry| -> Vec<([f32; 2], [f32; 2])> {
+            geo.bg_verts
+                .chunks_exact(BG_FLOATS_PER_VERTEX * 6)
+                .map(|q| {
+                    let (mut umin, mut vmin) = (f32::MAX, f32::MAX);
+                    let (mut umax, mut vmax) = (f32::MIN, f32::MIN);
+                    for v in q.chunks_exact(BG_FLOATS_PER_VERTEX) {
+                        umin = umin.min(v[2]);
+                        umax = umax.max(v[2]);
+                        vmin = vmin.min(v[3]);
+                        vmax = vmax.max(v[3]);
+                    }
+                    ([umin, vmin], [umax, vmax])
+                })
+                .collect()
+        };
+
+        let icon_uv_min = icon_sprite.uv_min;
+        let icon_uv_max = icon_sprite.uv_max;
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        let icon_quads = |geo: &ContainerGeometry| {
+            quads(geo)
+                .into_iter()
+                .filter(|(min, max)| {
+                    near(min[0], icon_uv_min[0])
+                        && near(min[1], icon_uv_min[1])
+                        && near(max[0], icon_uv_max[0])
+                        && near(max[1], icon_uv_max[1])
+                })
+                .count()
+        };
+
+        assert_eq!(
+            icon_quads(&without),
+            0,
+            "the negative control drew the speed icon with no active effects — \
+             this gate is counting something other than the effect column"
+        );
+        assert_eq!(
+            icon_quads(&with_effects),
+            1,
+            "the speed icon's own atlas UV window never reached the background stream; \
+             a missing mob_effect sprite is the plain white box that was reported"
+        );
+
+        // The background sprite must be nine-sliced, i.e. decomposed. Counted
+        // through the same helper the draw uses, so the assertion is about the
+        // sprite's declared scaling rather than about this gate's arithmetic.
+        let widget_w = crate::effects::inventory_texture_width(
+            font.width(&rows[0].name, 1.0),
+            font.width(&rows[0].duration, 1.0),
+            crate::effects::inventory_max_width(canvas_w - x0),
+        );
+        let pieces = background.scaled_sprite_quads(
+            EFFECT_BACKGROUND_SPRITE,
+            x0,
+            panel_y,
+            widget_w,
+            crate::effects::INV_BACKGROUND,
+        );
+        assert!(
+            pieces.len() > 1,
+            "the effect background drew as {} quad(s) — a nine-slice sprite stretched \
+             whole is the flat grey box that was reported",
+            pieces.len()
+        );
+        assert!(
+            widget_w > crate::effects::INV_BACKGROUND,
+            "the widget must be wider than the compact icon-only form, or the \
+             nine-slice has nothing to stretch"
+        );
+
+        // And the pieces must tile the target exactly, so "more than one quad"
+        // cannot be satisfied by a decomposition that leaves a gap.
+        let covered: f32 = pieces.iter().map(|q| q.dst[2] * q.dst[3]).sum();
+        assert!(
+            (covered - widget_w.round() * crate::effects::INV_BACKGROUND).abs() < 1.0,
+            "the nine-slice pieces cover {covered} px^2 of a {widget_w} x {} widget",
+            crate::effects::INV_BACKGROUND
+        );
+
+        // The icon sits inside the widget it belongs to — the `+7` inset,
+        // checked against the widget rect rather than restated.
+        assert!(
+            INV_SPACING + INV_ICON_SIZE + INV_SPACING <= widget_w,
+            "the icon does not fit inside the widget"
+        );
+
+        // Finally, the text: real glyph ink, drawn with the proportional font.
+        // The delta is against the same frame with no effects, so the panel's
+        // own title and label cannot account for it.
+        let glyph_floats = with_effects.verts.len() - without.verts.len();
+        assert!(
+            glyph_floats > 0,
+            "the effect column added no colour-stream geometry at all — the name and \
+             duration lines never drew"
+        );
+    }
+}
+
 /// red, confirming the gate actually fires on the regression it exists to
 /// catch.
 #[cfg(test)]

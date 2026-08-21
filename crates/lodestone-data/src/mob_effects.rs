@@ -37,3 +37,23 @@ pub fn mob_effect_id(name: &str) -> Option<i32> {
         .position(|candidate| *candidate == name)
         .and_then(|index| i32::try_from(index).ok())
 }
+
+/// `MobEffect.getColor()` for a network mob-effect registry id — the
+/// constructor colour argument [`crate::generated_mob_effect_colors`] carries,
+/// as opaque ARGB.
+///
+/// Exposed because it is a **sort key**, not only a tint: vanilla's
+/// `MobEffectInstance.compareTo` breaks ties on `getColor()`, so the
+/// inventory effect column's row order is not reproducible without it.
+///
+/// `None` for an id outside the registry, exactly like [`mob_effect_name`].
+#[must_use]
+pub fn mob_effect_color(id: i32) -> Option<u32> {
+    usize::try_from(id)
+        .ok()
+        .and_then(|index| {
+            crate::generated_mob_effect_colors::MOB_EFFECT_COLORS
+                .get(index)
+                .copied()
+        })
+}
