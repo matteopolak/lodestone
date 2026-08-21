@@ -3322,6 +3322,13 @@ pub fn framed_item_matrix(
 pub const EXPERIENCE_ORB_TEXTURE: &str =
     "assets/minecraft/textures/entity/experience/experience_orb.png";
 
+/// Where the entity ground-shadow sprite lives in the vanilla jar — a
+/// standalone radial-gradient decal, not a slice of any atlas, matching
+/// [`EXPERIENCE_ORB_TEXTURE`]'s own shape. `textures/misc/shadow.png`, from
+/// `ShadowFeatureRenderer`'s own
+/// `Identifier.withDefaultNamespace("textures/misc/shadow.png")`.
+pub const SHADOW_TEXTURE: &str = "assets/minecraft/textures/misc/shadow.png";
+
 /// How many distinct sprite cells [`experience_orb_icon`] can return, i.e. the
 /// number of baked orb quads a renderer needs.
 pub const EXPERIENCE_ORB_ICON_COUNT: u32 = 11;
