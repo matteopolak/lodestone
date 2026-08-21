@@ -954,7 +954,19 @@ impl WindowApp {
                         // Fresh every frame, by construction — see the field doc.
                         memo: Default::default(),
                     };
-                    weather_columns_for_frame(w, &camera, tick, self.sim.interp_alpha(), &probe)
+                    // The radius is the live `options.weatherRadius`, polled
+                    // here rather than pushed on change like every other video
+                    // option this function reads — the call already took a
+                    // radius and was handed
+                    // `lodestone_render::DEFAULT_WEATHER_RADIUS`.
+                    weather_columns_for_frame(
+                        w,
+                        &camera,
+                        tick,
+                        self.sim.interp_alpha(),
+                        self.nav.options().weather_radius,
+                        &probe,
+                    )
                 })
                 .unwrap_or_default();
             render.prepare_weather(device, queue, &columns, rain_columns, &camera);
