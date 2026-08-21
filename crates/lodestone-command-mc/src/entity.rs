@@ -484,7 +484,7 @@ fn enforce(
     arg: EntityArg,
 ) -> Result<(), ParseError> {
     let position = reader.cursor();
-    if arg.single && selector.max_results != 1 {
+    if arg.single && !selector.is_single() {
         return Err(refuse(position, "selector must match at most one entity"));
     }
     if arg.players_only && selector.includes_entities && !selector.current_entity {
