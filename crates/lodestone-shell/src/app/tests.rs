@@ -2363,6 +2363,77 @@ fn pushing_debug_feedback_through_the_real_chat_log_survives_as_a_bold_yellow_sp
     assert_eq!(debug_spans[1].text, " Chunk borders: hidden");
 }
 
+/// The end-to-end gap `resolve_key`'s own tests cannot see: the owner
+/// reported F3+B/F3+G producing *no chat feedback at all* — not thin lines,
+/// nothing — while F3+H, driven the same way, worked. A resolver-level
+/// assertion (`the_debug_chords_need_the_modifier_held`) already proves all
+/// three `KeyOutcome`s are *produced* correctly; this drives them through
+/// [`WindowApp::apply_key_outcome`] — the real effect half of
+/// `handle_keyboard_input`, split out because winit's `KeyEvent` cannot be
+/// constructed outside winit itself (a private `platform_specific` field),
+/// which is exactly why nothing before this test reached past the resolver —
+/// and asserts on the *real* atomics and the *real* chat log, side by side
+/// with F3+H as the owner's own working control.
+#[test]
+fn f3_b_and_f3_g_flip_their_atomic_and_push_chat_through_the_real_key_path() {
+    use std::sync::atomic::Ordering;
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+
+    // F3 down — the same `DebugModifier(true)` outcome a real F3 keydown
+    // resolves to, driven through the real effect path.
+    app.apply_key_outcome(Some(KeyOutcome::DebugModifier(true)), true, Some(KeyCode::F3), None);
+    assert!(app.debug_held, "F3 down must set debug_held through the real path");
+
+    app.apply_key_outcome(Some(KeyOutcome::ToggleHitboxes), true, Some(KeyCode::KeyB), None);
+    assert!(
+        app.debug_hitboxes.load(Ordering::Relaxed),
+        "F3+B must flip the hitboxes atomic through the real path"
+    );
+
+    app.apply_key_outcome(Some(KeyOutcome::ToggleChunkBorders), true, Some(KeyCode::KeyG), None);
+    assert!(
+        app.debug_chunk_borders.load(Ordering::Relaxed),
+        "F3+G must flip the chunk-borders atomic through the real path"
+    );
+
+    let tooltips_before = app.nav.advanced_item_tooltips();
+    app.apply_key_outcome(Some(KeyOutcome::ToggleAdvancedTooltips), true, Some(KeyCode::KeyH), None);
+    assert_ne!(
+        app.nav.advanced_item_tooltips(),
+        tooltips_before,
+        "F3+H must flip the tooltip option through the real path (the owner's own working control)"
+    );
+
+    let recent = app.sim.recent_chat_spans(3);
+    assert_eq!(
+        recent.len(),
+        3,
+        "all three chords must each push exactly one chat line through the real path, got {recent:?}"
+    );
+    let text_of = |spans: &[lodestone_model::text::TextSpan]| -> String {
+        spans.iter().map(|s| s.text.clone()).collect::<String>()
+    };
+    assert!(
+        text_of(&recent[0].0).contains("Hitboxes"),
+        "F3+B's chat line is missing or wrong: {:?}",
+        recent[0]
+    );
+    assert!(
+        text_of(&recent[1].0).contains("Chunk borders"),
+        "F3+G's chat line is missing or wrong: {:?}",
+        recent[1]
+    );
+    assert!(
+        text_of(&recent[2].0).contains("Advanced tooltips"),
+        "F3+H's chat line is missing or wrong: {:?}",
+        recent[2]
+    );
+}
+
 /// F3+P's toggle+persist half, through the real `MenuNav` — the same shape
 /// `toggle_advanced_item_tooltips` already has no dedicated test for, closed
 /// here since this change adds the option. Persistence itself (writing no
