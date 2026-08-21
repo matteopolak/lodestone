@@ -3630,6 +3630,53 @@ pub fn copper_golem_statue_oxidation_from_item_path(
     })
 }
 
+/// The entity-corpus model name a held `minecraft:trident` draws —
+/// `TridentSpecialRenderer.bake`'s `new TridentModel(bakeLayer(ModelLayers.TRIDENT))`.
+///
+/// # Why this is not an arm in [`special_item_rig`]
+///
+/// Not because the rig is unported — it has been in the tree all along. The
+/// trident's mesh is `lodestone_assets::entity_models`' `"trident"` entry, the
+/// same one `ThrownTridentRenderer` draws a thrown trident with, and
+/// [`special_item_rig`]'s contract is that its `&'static str` is a key into
+/// [`BLOCK_ENTITY_MODELS`]. Returning an entity-corpus name from there would
+/// type-check, resolve to nothing in every one of that function's callers, and
+/// draw exactly the blank hand this exists to fix — so the *corpus* is part of
+/// the return type's meaning, and a separate entry point is how that is said.
+///
+/// This mirrors vanilla more closely than folding it in would: every one of
+/// these renderers bakes out of `context.entityModelSet()`, and which corpus a
+/// rig happens to live in on our side is our own storage decision, not a
+/// statement about the item.
+///
+/// # The sheet is the corpus entry's own
+///
+/// Unlike a chest, there is no second key to return: the entity corpus binds a
+/// texture per entry (`EntityTexture::Fixed("entity/trident/trident")`, which is
+/// `TridentModel.TEXTURE`), so a caller looks the sheet up by this same name
+/// rather than by a stem. That is why this returns one string and not a pair.
+///
+/// # The GUI is deliberately not a caller
+///
+/// `trident.json` is a `select` on `minecraft:display_context` whose
+/// `gui`/`ground`/`fixed`/`on_shelf` case is a plain `minecraft:model`
+/// (`item/trident`, the flat sprite) — only the *fallback* reaches a
+/// `minecraft:trident` special node. So an inventory trident is a sprite in
+/// vanilla too, and a rig in the slot would be the regression, not the fix.
+///
+/// `None` for any path that is not the trident itself, so a datapack item
+/// naming this `kind` over something else draws nothing rather than a trident.
+#[must_use]
+pub fn trident_item_rig(item_path: &str) -> Option<&'static str> {
+    (item_path == "trident").then_some(TRIDENT_ENTITY_MODEL)
+}
+
+/// The `lodestone_assets::entity_models` corpus entry a trident is registered
+/// under — shared by [`trident_item_rig`] and `ThrownTridentRenderer`'s own
+/// projectile path so the held and thrown tridents cannot drift onto two
+/// meshes.
+pub const TRIDENT_ENTITY_MODEL: &str = "trident";
+
 /// The `minecraft:banner` item rig — [`special_item_rig`]'s own doc table lists
 /// this `kind` as one of the six that resolve to `None` ("needs the ordered
 /// translucent pattern-mask pass, not one rig"), which was the honest state the
@@ -6101,6 +6148,61 @@ mod special_item_tests {
             4,
             "the four oxidation levels collapsed to {distinct:?} — keying the sheet on \
              the `kind` alone draws every statue unaffected-copper"
+        );
+    }
+
+    /// [`trident_item_rig`] names an entry that really exists **in the entity
+    /// corpus**, and one whose geometry is the trident's own rather than the arrow
+    /// rig it sits beside.
+    ///
+    /// This is the island check for the trident, and it is a different one from
+    /// every other rig in this module because the failure mode is different. A
+    /// chest's name is wrong-or-right within one corpus; the trident's name is a
+    /// `&'static str` that would look equally plausible in *either*, and looking it
+    /// up in [`BLOCK_ENTITY_MODELS`] — which does not hold it — returns `None` and
+    /// draws precisely the empty hand this rig exists to fill. So the assertion is
+    /// "absent from one corpus, present in the other", both directions stated,
+    /// rather than "it resolves somewhere".
+    ///
+    /// The quad count is the magnitude half. `trident` and `arrow` are the two
+    /// projectile rigs and a mislookup between them resolves, draws, and looks like
+    /// a texture bug — `entity.rs`'s own corpus gate already pins that they differ,
+    /// and this restates it at the item surface so a future corpus edit that
+    /// collapsed them would fail here too rather than only there.
+    #[test]
+    fn the_trident_rig_lives_in_the_entity_corpus_and_is_not_the_arrow() {
+        let entry = trident_item_rig("trident").expect("a trident item");
+        assert_eq!(entry, TRIDENT_ENTITY_MODEL);
+        assert_eq!(
+            trident_item_rig("not_a_trident"),
+            None,
+            "a datapack item naming this kind over something else must draw nothing"
+        );
+
+        let block_entities = BlockEntityModelSet::load();
+        assert!(
+            block_entities.get(entry).is_none(),
+            "the trident is in BLOCK_ENTITY_MODELS after all — if it moved there, \
+             `trident_item_rig`'s whole reason for being a separate entry point is \
+             gone and the hand's entity-corpus lookup is now the wrong one"
+        );
+
+        let entities = crate::entity::EntityModelSet::load();
+        let trident = entities
+            .get(entry)
+            .unwrap_or_else(|| panic!("{entry:?} is not in the entity corpus either, so \
+                 the held trident resolves to nothing and draws an empty hand"));
+        let arrow = entities.get("arrow").expect("the arrow rig");
+        assert_ne!(
+            trident.quad_count(),
+            arrow.quad_count(),
+            "trident and arrow bake to the same quad count, so a mislookup between \
+             the two would resolve and draw and read as a texture bug"
+        );
+        assert!(
+            trident.quad_count() > 0,
+            "an empty mesh uploads no part ranges, and `build_entity_rig_hand_draw` \
+             returns None for that — an empty hand wearing a resolved rig's name"
         );
     }
 
