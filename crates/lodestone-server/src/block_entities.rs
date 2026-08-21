@@ -41,14 +41,15 @@
 //!   hopper next to a furnace simply never transfers, same as a hopper next
 //!   to open air. Extending this needs a `Container`-shaped seam over the
 //!   furnace's three slots, deliberately not built here.
-//! * **No visual sync.** Ticking a furnace lit/unlit or a composter to
-//!   ready does not write anything back through [`crate::chunk::ChunkSource`]
-//!   — the block state a client is streamed does not reflect
-//!   [`Furnace::is_lit`](crate::furnace::Furnace::is_lit) or
-//!   [`Composter::is_ready`](crate::composter::Composter::is_ready). That is
-//!   a real, separate gap (closing it needs `ChunkSource::set_block`, which
-//!   this module has no handle to), not attempted here — this module's job
-//!   is *simulating*, not *rendering*.
+//! * **Partial visual sync.** A furnace's `lit` flip
+//!   ([`Furnace::is_lit`](crate::furnace::Furnace::is_lit), carried out of
+//!   this module as [`BlockEntity::tick_non_hopper`]'s `Option<bool>` return)
+//!   now reaches the client — `crate::tick::run_tick_loop` is the one caller
+//!   holding both this registry and a `ChunkSource::set_block`, so that is
+//!   where the write happens, not here. Ticking a composter to ready
+//!   ([`Composter::is_ready`](crate::composter::Composter::is_ready)) still
+//!   does not write anything back — a real, separate, still-open gap, not
+//!   attempted here — this module's job is *simulating*, not *rendering*.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -602,19 +603,27 @@ impl BlockEntity {
     /// which only [`BlockEntityRegistry::tick_hopper`] (holding `&mut self`
     /// over the whole map) can resolve, so it is deliberately excluded here
     /// and ticked separately.
-    fn tick_non_hopper(&mut self) {
+    ///
+    /// Returns `Some(now_lit)` when a [`Furnace`]'s `AbstractFurnaceBlock.LIT`
+    /// flipped this tick — [`FurnaceTick::lit_changed`], forwarded rather than
+    /// dropped so the caller (which holds the [`ChunkSource`](crate::chunk::ChunkSource)
+    /// this registry does not) can write the block state through. Composter
+    /// `is_ready`/brewing-stand visual sync remain the same disclosed gap this
+    /// module's doc comment names — narrower than before, not attempted here.
+    fn tick_non_hopper(&mut self) -> Option<bool> {
         match self {
             BlockEntity::Composter(c) => {
                 c.tick();
+                None
             }
-            BlockEntity::Furnace(f) => {
-                f.tick();
-            }
+            BlockEntity::Furnace(f) => f.tick().lit_changed,
             BlockEntity::BrewingStand(b) => {
                 b.tick();
+                None
             }
             BlockEntity::Hopper(_) => {
                 debug_assert!(false, "hoppers are ticked via tick_hopper, not this path");
+                None
             }
             // A command block is driven by scheduled redstone/chain ticks
             // (`crate::command_block::{on_power_changed, tick,
@@ -642,9 +651,9 @@ impl BlockEntity {
             // follows from not having a driver here.
             // No `craftingTicksRemaining` countdown here — see this variant's
             // own doc comment for why the trigger itself is out of scope.
-            BlockEntity::Crafter { .. } => {}
+            BlockEntity::Crafter { .. } => None,
             BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
-            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => {}
+            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => None,
         }
     }
 }
@@ -865,8 +874,8 @@ impl BlockEntityRegistry {
     /// concurrently with a tick since both hold the same registry lock, see
     /// [`BlockEntityHandle`]), so this is a complete, order-independent pass
     /// over exactly what existed when the tick started.
-    pub fn tick_all(&mut self) {
-        self.tick_all_with_hopper_lock(&|_| true, &|_| true);
+    pub fn tick_all(&mut self) -> Vec<(BlockPos, bool)> {
+        self.tick_all_with_hopper_lock(&|_| true, &|_| true)
     }
 
     /// [`tick_all`](Self::tick_all), with each hopper's redstone lock supplied
@@ -906,12 +915,18 @@ impl BlockEntityRegistry {
     /// use this one** — it is the only place holding both a `ChunkSource` and
     /// this registry, and a hopper ticked through the shorthand can never be
     /// locked or bounded.
+    ///
+    /// Returns every furnace-kind position whose `lit` flipped this tick
+    /// (`(pos, now_lit)`), for that same caller to write through
+    /// `ChunkSource::set_block` — see [`BlockEntity::tick_non_hopper`]'s own
+    /// doc for why this registry cannot write it itself.
     pub fn tick_all_with_hopper_lock(
         &mut self,
         is_loaded: &dyn Fn(BlockPos) -> bool,
         enabled: &dyn Fn(BlockPos) -> bool,
-    ) {
+    ) -> Vec<(BlockPos, bool)> {
         let positions: Vec<BlockPos> = self.entities.keys().copied().collect();
+        let mut lit_changes = Vec::new();
         for pos in positions {
             if !is_loaded(pos) {
                 continue;
@@ -919,10 +934,13 @@ impl BlockEntityRegistry {
             let is_hopper = matches!(self.entities.get(&pos), Some(BlockEntity::Hopper(_)));
             if is_hopper {
                 self.tick_hopper(pos, enabled(pos));
-            } else if let Some(entity) = self.entities.get_mut(&pos) {
-                entity.tick_non_hopper();
+            } else if let Some(entity) = self.entities.get_mut(&pos)
+                && let Some(now_lit) = entity.tick_non_hopper()
+            {
+                lit_changes.push((pos, now_lit));
             }
         }
+        lit_changes
     }
 
     /// Ticks the hopper at `pos` against its `above`/`below` neighbours,
@@ -1383,6 +1401,30 @@ mod tests {
             panic!("furnace must still be registered after a tick");
         };
         assert!(f.is_lit(), "fuel + ingredient must light the furnace on its first tick");
+    }
+
+    /// [`BlockEntity::tick_non_hopper`]'s `Option<bool>` return must actually
+    /// reach [`BlockEntityRegistry::tick_all`]'s caller — this registry has no
+    /// `ChunkSource` to write the block state itself (see the module doc's
+    /// "Partial visual sync" note), so `crate::tick::run_tick_loop` is the one
+    /// that can, and it can only if the lit flip survives the trip out of
+    /// `tick_all_with_hopper_lock`. A second tick with nothing left to ignite
+    /// must report no changes at all, not a stale repeat of the first.
+    #[test]
+    fn tick_all_reports_a_furnace_lit_flip_to_its_caller() {
+        let mut reg = BlockEntityRegistry::new();
+        let pos = BlockPos::new(0, 70, 0);
+        let mut furnace = Furnace::new(FurnaceKind::Furnace);
+        furnace.set_fuel(Some(stack("minecraft:coal", 1)));
+        furnace.set_input(Some(stack("minecraft:iron_ore", 1)));
+        reg.insert(pos, BlockEntity::Furnace(furnace));
+
+        assert_eq!(reg.tick_all(), vec![(pos, true)]);
+        assert_eq!(
+            reg.tick_all(),
+            Vec::new(),
+            "already-lit furnace must not report a spurious flip every tick"
+        );
     }
 
     /// Two hoppers stacked (`below` sits directly under `above`) move

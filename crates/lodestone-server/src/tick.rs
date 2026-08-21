@@ -2046,12 +2046,27 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // has no eviction). `is_column_resident` answers with no generation at
         // all, so a hopper outside every loaded chunk now costs a `HashMap`
         // lookup instead of a worldgen call.
-        block_entities.with(|registry| {
+        let furnace_lit_changes = block_entities.with(|registry| {
             registry.tick_all_with_hopper_lock(
                 &|pos| world.is_column_resident(pos.x.div_euclid(16), pos.z.div_euclid(16)),
                 &|pos| crate::redstone::hopper_enabled(&world.block_state(pos.x, pos.y, pos.z)),
-            );
+            )
         });
+        // `BlockEntityRegistry` has no `ChunkSource` handle of its own (see its
+        // module doc's "No visual sync" note), so this is where
+        // `FurnaceTick::lit_changed` finally reaches the block a client is
+        // streamed — the same shape as the target-block write just above, and
+        // the one production caller that module's own doc names as holding
+        // both a `ChunkSource` and the registry.
+        for (pos, lit) in furnace_lit_changes {
+            let state = world.block_state(pos.x, pos.y, pos.z);
+            let new_state =
+                crate::redstone::with_property(&state, "lit", if lit { "true" } else { "false" });
+            if new_state != state {
+                world.set_block(pos.x, pos.y, pos.z, &new_state);
+                block_tick_out.publish(pos.x, pos.y, pos.z, new_state);
+            }
+        }
 
         // Issue #224 (the spawner half): `minecraft:spawner` block entities.
         // `tick_all_with_hopper_lock` above deliberately does not advance one —
@@ -5228,6 +5243,69 @@ mod tests {
             remaining.as_ref().and_then(|slots| slots[0].as_ref().map(|s| s.count)),
             Some(2),
             "the container's slot 0 must go from 3 to 2, not stay at 3 or empty out entirely: {remaining:?}"
+        );
+    }
+
+    /// The island shape rule 1 names, for `FurnaceTick::lit_changed`: a
+    /// registered furnace with fuel and an ingredient really does flip
+    /// `Furnace::is_lit` (`tick_all_advances_a_registered_furnace` above
+    /// proves that in isolation), but until this arm existed nothing carried
+    /// that flip out through `BlockEntityRegistry::tick_all_with_hopper_lock`
+    /// into a `ChunkSource::set_block` — so the block a client is streamed
+    /// stayed `lit=false` forever. This drives the real production loop, not
+    /// the registry directly, so it proves the whole chain.
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_syncs_a_lit_furnace_to_its_own_block_state() {
+        let pos = (11, 6, 9);
+        let (px, py, pz) = pos;
+        let world = ColumnBackedWorld::with(&[(pos, "minecraft:furnace[facing=north,lit=false]")]);
+        let feed = BlockTickFeed::default();
+        let (mobs, out, block_entities) = handles();
+        block_entities.with(|reg| {
+            let mut furnace = crate::furnace::Furnace::new(crate::furnace::FurnaceKind::Furnace);
+            furnace.set_fuel(Some(lodestone_model::ItemStack::new(
+                "minecraft:coal".parse().expect("valid item key"),
+                1,
+            )));
+            furnace.set_input(Some(lodestone_model::ItemStack::new(
+                "minecraft:iron_ore".parse().expect("valid item key"),
+                1,
+            )));
+            reg.insert(
+                BlockPos::new(px, py, pz),
+                crate::block_entities::BlockEntity::Furnace(furnace),
+            );
+        });
+        tokio::spawn(run_tick_loop(
+            mobs.clone(),
+            out,
+            block_entities.clone(),
+            Arc::new(TickClock::new()),
+            Arc::clone(&world),
+            feed.clone(),
+            (0..=0, 0..=0),
+            ExplosionFeed::default(),
+            crate::region_source::ScheduledTickHandle::default(),
+            crate::tick_area::TickFollow::default(),
+        ));
+        tokio::task::yield_now().await;
+
+        let mut lit_at_tick = None;
+        for tick in 1..=8 {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+            if crate::redstone::get_bool_property(&world.block_state(px, py, pz), "lit") == Some(true) {
+                lit_at_tick = Some(tick);
+                break;
+            }
+        }
+        assert!(
+            lit_at_tick.is_some(),
+            "furnace block state never reached lit=true — the tick loop never wrote the flip through"
+        );
+        assert!(
+            world.block_state(px, py, pz).starts_with("minecraft:furnace["),
+            "the write must preserve the block's own identity and other properties, not just append lit"
         );
     }
 
