@@ -417,15 +417,22 @@ Toggles are `Arc<AtomicBool>` because the source closure is
   `physical_key`, the resolved `code`/`pressed`/`debug_held`/`outcome` — at
   exactly the seam neither test above can see: whether the *real* event for a
   B/G press ever carries `Some(KeyCode::KeyB)` with `debug_held` true in the
-  first place. `resolve_key`'s `let code = code?;` returns `None` for
-  *everything* the moment `code` is `None`, and `code` is `None` whenever
-  winit reports `PhysicalKey::Unidentified` for that key — an unusual
-  keyboard/driver/OS-locale combination is a real, if unverified, candidate
-  for "identical code, two adjacent physical keys behave differently, a third
-  one does not." **Open**: the owner needs to reproduce with that log line
-  enabled and report what it printed for a failing B/G press (or its
-  absence, which would mean the OS never delivered the event to the app at
-  all) before this can be closed.
+  first place. **Resolved, and the answer was above this
+  code entirely.** The owner ran with that log enabled: F3 printed
+  `Code(F3)` and H printed `Code(KeyH)`, both resolving correctly, while a
+  failing G press printed **no line at all** — not a `None` outcome, no
+  event. Since that log is unconditional for every event reaching
+  `handle_keyboard_input`, and the `WindowEvent::KeyboardInput` arm is not
+  shadowed (the two other `KeyboardInput` mentions in that function are
+  `if matches!` guards for the AFK pacer and browser audio, not match arms),
+  winit was never delivering the keypress. The cause was the **`fn`
+  modifier**: F3 on that keyboard requires holding `fn`, and `fn`+G is not a
+  combination the keyboard reports at all, so the chord never left the
+  hardware. Releasing `fn` before pressing G works. The
+  `PhysicalKey::Unidentified` hypothesis above was wrong — nothing was ever
+  unidentified — and no code defect existed. The log stays: it is what made
+  a hardware-level absence distinguishable from a resolve failure, which is
+  a distinction no test in this crate can draw.
 - **Not built**: the four debug charts, the lightmap blit, vanilla's runtime
   entry-enable screen and its `debug-profile.json`, and the nine `visualize_*`
   world overlays. All are additions; none is a gap in what is here. The

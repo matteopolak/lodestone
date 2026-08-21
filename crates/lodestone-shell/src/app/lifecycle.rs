@@ -1001,23 +1001,25 @@ impl WindowApp {
         {
             self.sim.queue_plugin_key_event(key, pressed);
         }
-        // Instrumentation for the F3+B/F3+G "no chat feedback at all" report:
-        // `resolve_key`'s own tests already prove `KeyOutcome::ToggleHitboxes`/
-        // `ToggleChunkBorders` are *produced* correctly whenever `code` is
-        // `Some(KeyCode::KeyB/KeyG)` and `gate.debug_held` is true, and
-        // `apply_key_outcome`'s own real-path test proves the effect side
-        // (the atomic store, `Sim::push_local_chat`) runs correctly given
-        // that outcome. Neither of those can see whether the *real* event
-        // ever carries `Some(KeyCode::KeyB)` with `debug_held` true in the
-        // first place — a physical key winit reports as
-        // `PhysicalKey::Unidentified` (an unusual keyboard/driver/locale
-        // combination) collapses `code` to `None`, and `resolve_key` returns
-        // `None` for *everything* once that happens, including a chord that
-        // would otherwise fire. `RUST_LOG=debug_keys=debug` prints this once
-        // per real key event; deliberately not gated on `debug_held` or on
-        // which outcome resulted, so a genuinely unidentified key shows up
-        // here even though nothing downstream could ever have told us about
-        // it.
+        // One line per real key event, behind `RUST_LOG=debug_keys=debug`.
+        // Deliberately **not** gated on `debug_held`, on `pressed`, or on
+        // which outcome resulted, because its whole value is covering the
+        // seam no test in this crate can reach: whether an event arrived at
+        // all. `resolve_key`'s own tests prove which `KeyOutcome` a given
+        // `code`/`gate` pair produces, and `apply_key_outcome`'s real-path
+        // test proves the effect side runs given that outcome — but neither
+        // can see an event that the window never received.
+        //
+        // That distinction is what this log was built for and it paid off
+        // immediately. A report that F3+B/F3+G did nothing while F3+H worked
+        // looked like a resolve failure; the log showed `Code(F3)` and
+        // `Code(KeyH)` resolving normally and **no line at all** for G. An
+        // absent line means the event never reached this function, so the
+        // cause was below us: that keyboard needs `fn` held to produce F3,
+        // and `fn`+G is not a combination it reports, so the chord never
+        // left the hardware. Keep this ungated — a missing line is the
+        // signal, and any condition here can only turn a real absence into
+        // an ambiguous one.
         tracing::debug!(
             target: "debug_keys",
             physical_key = ?event.physical_key,
