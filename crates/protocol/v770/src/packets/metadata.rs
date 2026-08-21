@@ -77,7 +77,7 @@ use lodestone_core::{
 };
 use lodestone_model::{
     BlockPos, EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate, EntityPose,
-    EntityVariant, Identifier, ItemStack, Reported,
+    EntityVariant, Identifier, ItemStack, Quat, Reported, Vec3f,
 };
 
 use lodestone_data::attribute_types::{attribute_id, attribute_name};
@@ -263,6 +263,63 @@ const IDX_CRYSTAL_BEAM_TARGET: u8 = 8;
 /// `FishingHook.DATA_BITING` are the other two), hence the
 /// [`MetadataClass::EndCrystal`] guard.
 const IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
+
+/// `Display.DATA_TRANSLATION_ID` (`Display.java`), index 11 — a `VECTOR3`.
+/// Self-identifying: no other claimant at index 11 in the 26.2 jar dump uses
+/// that serializer (see `EntityMetadataUpdate::display_translation`'s doc in
+/// `lodestone-model` for the full argument), so this needs no class guard.
+const IDX_DISPLAY_TRANSLATION: u8 = 11;
+/// `Display.DATA_SCALE_ID`, index 12 — a `VECTOR3`, self-identifying for the
+/// same reason as [`IDX_DISPLAY_TRANSLATION`].
+const IDX_DISPLAY_SCALE: u8 = 12;
+/// `Display.DATA_LEFT_ROTATION_ID`, index 13 — a `QUATERNION`,
+/// self-identifying: no other claimant at index 13 uses that serializer.
+/// Applied **before** scale (`Transformation.compose`).
+const IDX_DISPLAY_LEFT_ROTATION: u8 = 13;
+/// `Display.DATA_RIGHT_ROTATION_ID`, index 14 — a `QUATERNION`,
+/// self-identifying for the same reason as [`IDX_DISPLAY_LEFT_ROTATION`].
+/// Applied **after** scale.
+const IDX_DISPLAY_RIGHT_ROTATION: u8 = 14;
+/// `Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`, index 15 — a `BYTE`.
+///
+/// **This index is ambiguous and does need a class guard**, unlike the four
+/// translation/scale/rotation fields above: it is the same wire index as
+/// [`IDX_MOB_FLAGS`] (`Mob.DATA_MOB_FLAGS_ID`) and
+/// `ArmorStand.DATA_CLIENT_FLAGS`, all three `BYTE`. Gated on
+/// [`is_display_class`] rather than a single `MetadataClass` variant because
+/// all three `Display` subtypes carry this exact field at this exact index.
+const IDX_DISPLAY_BILLBOARD: u8 = 15;
+/// The per-variant payload every `Display` subtype carries at index 23:
+/// `Display.BlockDisplay.DATA_BLOCK_STATE_ID` (`BLOCK_STATE`),
+/// `Display.ItemDisplay.DATA_ITEM_STACK_ID` (`ITEM_STACK`, self-identifying
+/// and handled before the index match — see [`read_entity_metadata`]'s early
+/// return), or `Display.TextDisplay.DATA_TEXT_ID` (`COMPONENT`).
+///
+/// **Only the block-state arm needs a class guard.** `Cat.DATA_COLLAR_COLOR`
+/// is the other `INT`-shaped claimant at this index (block-state ids decode
+/// to a plain integer, same shape as any other `INT`), so an ungated arm
+/// would read a cat's dye ordinal as a block-state id. The `COMPONENT` arm
+/// carries a guard too, for consistency with every other `Display` field in
+/// this module, though the jar dump shows no real collision at this index.
+const IDX_DISPLAY_VARIANT_PAYLOAD: u8 = 23;
+/// The per-variant *second* payload every `Display` subtype but `BlockDisplay`
+/// carries at index 24: `Display.ItemDisplay.DATA_ITEM_DISPLAY_ID` (`BYTE`,
+/// the `ItemDisplayContext` ordinal) or `Display.TextDisplay.DATA_LINE_WIDTH_ID`
+/// (`INT`, the wrap width in pixels). Self-identifying by value shape (no
+/// other claimant at index 24 in the jar dump is a bare `BYTE` or `INT`), but
+/// guarded by class anyway for the same consistency reason as
+/// [`IDX_DISPLAY_VARIANT_PAYLOAD`]'s `COMPONENT` arm.
+const IDX_DISPLAY_VARIANT_EXTRA: u8 = 24;
+/// `Display.TextDisplay.DATA_BACKGROUND_COLOR_ID`, index 25 — a packed ARGB
+/// `INT`. The sole claimant of this index in the jar dump.
+const IDX_TEXT_BACKGROUND_COLOR: u8 = 25;
+/// `Display.TextDisplay.DATA_TEXT_OPACITY_ID`, index 26 — a `BYTE`. The sole
+/// claimant of this index in the jar dump.
+const IDX_TEXT_OPACITY: u8 = 26;
+/// `Display.TextDisplay.DATA_STYLE_FLAGS_ID`, index 27 — a `BYTE`. The sole
+/// claimant of this index in the jar dump.
+const IDX_TEXT_STYLE_FLAGS: u8 = 27;
+
 // Both of index 18's claimants share nothing (`BYTE` vs `BOOLEAN`), so the
 // serializer alone tells them apart at decode time — but see the module's
 // `decode_value` for why the *index* still needs a class guard: a mob this
@@ -333,6 +390,23 @@ pub enum MetadataClass {
     /// "hologram" (an invisible, nametagged armour stand) needs alongside the
     /// shared-flags invisible bit and the custom-name pair.
     ArmorStand,
+    /// `Display.TextDisplay` — gates index 23's `COMPONENT` (the text itself)
+    /// and 24-27 (line width, background colour, opacity, style flags), none
+    /// of which any other entity type carries at those indices in the 26.2
+    /// jar dump. Kept as its own variant rather than a shared `Display`
+    /// variant because indices 23/24 decode to a genuinely different shape
+    /// per subtype — see [`ItemDisplay`](Self::ItemDisplay)/
+    /// [`BlockDisplay`](Self::BlockDisplay).
+    TextDisplay,
+    /// `Display.ItemDisplay` — gates index 24's `BYTE` (`ItemDisplayContext`
+    /// ordinal). Index 23's item stack needs no class guard: it is
+    /// self-identifying by the `ITEM_STACK` serializer, handled before the
+    /// index match ever runs (see [`read_entity_metadata`]'s early return).
+    ItemDisplay,
+    /// `Display.BlockDisplay` — gates index 23's `BLOCK_STATE` against
+    /// `Cat.DATA_COLLAR_COLOR`, the other `INT`-shaped claimant at that index
+    /// (see [`IDX_DISPLAY_VARIANT_PAYLOAD`]'s doc).
+    BlockDisplay,
 }
 
 /// Classifies a resolved entity-type identifier into the [`MetadataClass`] whose
@@ -356,8 +430,24 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         "minecraft:ender_dragon" => Some(MetadataClass::Dragon),
         "minecraft:end_crystal" => Some(MetadataClass::EndCrystal),
         "minecraft:armor_stand" => Some(MetadataClass::ArmorStand),
+        "minecraft:text_display" => Some(MetadataClass::TextDisplay),
+        "minecraft:item_display" => Some(MetadataClass::ItemDisplay),
+        "minecraft:block_display" => Some(MetadataClass::BlockDisplay),
         _ => None,
     }
+}
+
+/// Whether `class` is one of the three `Display` subtypes — the gate for the
+/// fields every subtype shares (billboard mode; translation/scale/rotation
+/// are self-identifying by value shape and need no such gate, see
+/// [`EntityMetadataUpdate::display_translation`](lodestone_model::EntityMetadataUpdate::display_translation)'s
+/// doc).
+#[must_use]
+fn is_display_class(class: Option<MetadataClass>) -> bool {
+    matches!(
+        class,
+        Some(MetadataClass::TextDisplay | MetadataClass::ItemDisplay | MetadataClass::BlockDisplay)
+    )
 }
 
 /// What the adapter remembers about a spawned entity so a later
@@ -467,6 +557,21 @@ enum Value {
     OptBlockPos(Option<BlockPos>),
     /// A resolved registry-holder appearance variant (cat, cow, wolf, …).
     Keyed(Identifier),
+    /// A decoded `VECTOR3` — `Display.DATA_TRANSLATION_ID`/`DATA_SCALE_ID`,
+    /// the only claimants of that serializer in the 26.2 jar dump. See
+    /// [`IDX_DISPLAY_TRANSLATION`]/[`IDX_DISPLAY_SCALE`].
+    Vector3(Vec3f),
+    /// A decoded `QUATERNION` — `Display.DATA_LEFT_ROTATION_ID`/
+    /// `DATA_RIGHT_ROTATION_ID`, the only claimants of that serializer. See
+    /// [`IDX_DISPLAY_LEFT_ROTATION`]/[`IDX_DISPLAY_RIGHT_ROTATION`].
+    Quaternion(Quat),
+    /// A decoded `COMPONENT` (not the `OPTIONAL_COMPONENT` [`OptText`](Self::OptText)
+    /// already carries), reduced to plain text the same way `OptText` is.
+    /// Surfaced for `Display.TextDisplay.DATA_TEXT_ID` alone; the other
+    /// `COMPONENT` claimant in the jar dump (`MinecartCommandBlock.DATA_ID_LAST_OUTPUT`,
+    /// a different index) is filtered out by index at the call site, not
+    /// here — same pattern as [`OptBlockPos`](Self::OptBlockPos).
+    Text(String),
     /// A resolved villager type/profession/level composite.
     Villager {
         kind: Identifier,
@@ -564,9 +669,13 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             reader.string(MAX_STRING)?;
             Value::Consumed
         }
+        // Surfaced as plain text for `Display.TextDisplay.DATA_TEXT_ID` —
+        // every other `COMPONENT` claimant (`MinecartCommandBlock`'s last
+        // output) is filtered out by index at the call site, matching
+        // `OPTIONAL_BLOCK_POS`'s pattern. See [`Value::Text`].
         SER_COMPONENT => {
-            read_network_nbt(reader)?;
-            Value::Consumed
+            let component = read_network_nbt(reader)?;
+            Value::Text(plain_text_from_nbt_component(&component))
         }
         SER_OPTIONAL_COMPONENT => {
             if reader.bool()? {
@@ -594,14 +703,22 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
                 Value::OptBlockPos(None)
             }
         }
-        SER_DIRECTION
-        | SER_BLOCK_STATE
-        | SER_OPTIONAL_BLOCK_STATE
-        | SER_OPTIONAL_UNSIGNED_INT
-        | SER_HUMANOID_ARM => {
+        SER_DIRECTION | SER_OPTIONAL_BLOCK_STATE | SER_OPTIONAL_UNSIGNED_INT | SER_HUMANOID_ARM => {
             reader.var_i32()?;
             Value::Consumed
         }
+        // The global block-state id, as a plain `VarInt` — surfaced as
+        // `Value::Int` (the same shape any other `INT` field decodes to)
+        // rather than a dedicated variant, since nothing about the wire
+        // representation is special. Its only surfaced claimant is
+        // `Display.BlockDisplay.DATA_BLOCK_STATE_ID` at index 23, gated on
+        // [`MetadataClass::BlockDisplay`] in the caller because index 23 also
+        // carries `Cat.DATA_COLLAR_COLOR`, an unrelated `INT` — see
+        // [`IDX_DISPLAY_VARIANT_PAYLOAD`]. `PrimedTnt.DATA_BLOCK_STATE_ID`
+        // (index 9) uses this same serializer and is intentionally left
+        // unsurfaced (no arm claims `(9, Value::Int(_))`), matching this
+        // module's existing "decoded for alignment but not surfaced" pattern.
+        SER_BLOCK_STATE => Value::Int(reader.var_i32()?),
         SER_OPTIONAL_LIVING_ENTITY_REFERENCE => {
             if reader.bool()? {
                 reader.uuid()?;
@@ -651,18 +768,26 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             }
             Value::Consumed
         }
+        // `Display.DATA_TRANSLATION_ID`/`DATA_SCALE_ID` — the only claimants
+        // of this serializer in the jar dump, so no index/class filtering is
+        // needed here; the caller's `(index, Value::Vector3(_))` match arms
+        // still key on the index to tell translation from scale.
         SER_VECTOR3 => {
-            reader.f32()?;
-            reader.f32()?;
-            reader.f32()?;
-            Value::Consumed
+            let x = reader.f32()?;
+            let y = reader.f32()?;
+            let z = reader.f32()?;
+            Value::Vector3(Vec3f::new(x, y, z))
         }
+        // `Display.DATA_LEFT_ROTATION_ID`/`DATA_RIGHT_ROTATION_ID` — the only
+        // claimants of this serializer. Wire order is `x, y, z, w`
+        // (`FriendlyByteBuf.readQuaternion`: `new Quaternionf(x, y, z, w)`),
+        // matching `Quat::new`'s own field order exactly.
         SER_QUATERNION => {
-            reader.f32()?;
-            reader.f32()?;
-            reader.f32()?;
-            reader.f32()?;
-            Value::Consumed
+            let x = reader.f32()?;
+            let y = reader.f32()?;
+            let z = reader.f32()?;
+            let w = reader.f32()?;
+            Value::Quaternion(Quat::new(x, y, z, w))
         }
         // A dropped item's entire identity. Delegated to the adapter's single
         // clientbound item-stack codec — never re-implemented here — so both
@@ -835,6 +960,52 @@ pub fn read_entity_metadata(
             // the bare serializer could not).
             (IDX_CRYSTAL_BEAM_TARGET, Value::OptBlockPos(pos)) => {
                 md.crystal_beam_target = Reported::Reported(pos);
+            }
+            // `Display.DATA_TRANSLATION_ID`/`DATA_SCALE_ID`/
+            // `DATA_LEFT_ROTATION_ID`/`DATA_RIGHT_ROTATION_ID`. No class guard:
+            // the `VECTOR3`/`QUATERNION` value shape already disambiguates —
+            // see [`IDX_DISPLAY_TRANSLATION`]'s doc.
+            (IDX_DISPLAY_TRANSLATION, Value::Vector3(v)) => md.display_translation = Some(v),
+            (IDX_DISPLAY_SCALE, Value::Vector3(v)) => md.display_scale = Some(v),
+            (IDX_DISPLAY_LEFT_ROTATION, Value::Quaternion(q)) => md.display_left_rotation = Some(q),
+            (IDX_DISPLAY_RIGHT_ROTATION, Value::Quaternion(q)) => md.display_right_rotation = Some(q),
+            // `Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`. Guarded on
+            // [`is_display_class`]: index 15's `BYTE` is also `Mob.DATA_MOB_FLAGS_ID`
+            // and `ArmorStand.DATA_CLIENT_FLAGS` — see [`IDX_DISPLAY_BILLBOARD`].
+            (IDX_DISPLAY_BILLBOARD, Value::Byte(b)) if is_display_class(class) => {
+                md.display_billboard = Some(b as u8);
+            }
+            // `Display.BlockDisplay.DATA_BLOCK_STATE_ID`. Guarded on class: index
+            // 23 is also `Cat.DATA_COLLAR_COLOR`, an unrelated `INT` — see
+            // [`IDX_DISPLAY_VARIANT_PAYLOAD`].
+            (IDX_DISPLAY_VARIANT_PAYLOAD, Value::Int(v)) if class == Some(MetadataClass::BlockDisplay) => {
+                md.display_block_state = Some(v as u32);
+            }
+            // `Display.TextDisplay.DATA_TEXT_ID`.
+            (IDX_DISPLAY_VARIANT_PAYLOAD, Value::Text(text)) if class == Some(MetadataClass::TextDisplay) => {
+                md.display_text = Reported::Reported(Some(text));
+            }
+            // `Display.ItemDisplay.DATA_ITEM_DISPLAY_ID` — the `ItemDisplayContext`
+            // ordinal this item poses in.
+            (IDX_DISPLAY_VARIANT_EXTRA, Value::Byte(b)) if class == Some(MetadataClass::ItemDisplay) => {
+                md.display_item_context = Some(b as u8);
+            }
+            // `Display.TextDisplay.DATA_LINE_WIDTH_ID`.
+            (IDX_DISPLAY_VARIANT_EXTRA, Value::Int(v)) if class == Some(MetadataClass::TextDisplay) => {
+                md.display_line_width = Some(v);
+            }
+            // `Display.TextDisplay.DATA_BACKGROUND_COLOR_ID`. Sole claimant of
+            // this index in the jar dump — see [`IDX_TEXT_BACKGROUND_COLOR`].
+            (IDX_TEXT_BACKGROUND_COLOR, Value::Int(v)) if class == Some(MetadataClass::TextDisplay) => {
+                md.display_background_color = Some(v);
+            }
+            // `Display.TextDisplay.DATA_TEXT_OPACITY_ID`.
+            (IDX_TEXT_OPACITY, Value::Byte(b)) if class == Some(MetadataClass::TextDisplay) => {
+                md.display_text_opacity = Some(b);
+            }
+            // `Display.TextDisplay.DATA_STYLE_FLAGS_ID`.
+            (IDX_TEXT_STYLE_FLAGS, Value::Byte(b)) if class == Some(MetadataClass::TextDisplay) => {
+                md.display_text_style_flags = Some(b as u8);
             }
             // Registry-holder variants identify themselves by serializer, so the
             // index is irrelevant and no class context is needed.

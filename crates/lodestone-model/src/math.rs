@@ -352,3 +352,50 @@ impl Rotation {
         Self { yaw, pitch }
     }
 }
+
+/// A rotation quaternion, kept as raw `(x, y, z, w)` components rather than
+/// pulling a real quaternion-math crate (`glam`) into this dependency-light
+/// model crate — `lodestone_model::Vec3`/`Vec3f` already make the same choice
+/// for plain vectors. This exists for the wire's `QUATERNION` metadata
+/// serializer (`Display.DATA_LEFT_ROTATION_ID`/`DATA_RIGHT_ROTATION_ID`,
+/// `26.2`): a version adapter decodes `x, y, z, w` in that order (matching
+/// `FriendlyByteBuf.readQuaternion`'s `new Quaternionf(x, y, z, w)`) and hands
+/// it through unmodified. A consumer that already depends on `glam` converts
+/// with `glam::Quat::from_xyzw(q.x, q.y, q.z, q.w)` — the field order is
+/// identical, so this is a relabelling, not a transform.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Quat {
+    /// X component.
+    pub x: f32,
+    /// Y component.
+    pub y: f32,
+    /// Z component.
+    pub z: f32,
+    /// W (scalar) component.
+    pub w: f32,
+}
+
+impl Quat {
+    /// Creates a quaternion from raw components, in wire order.
+    #[must_use]
+    pub const fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
+        Self { x, y, z, w }
+    }
+
+    /// The identity rotation — `Transformation.IDENTITY`'s
+    /// `left`/`rightRotation` and the `DATA_LEFT_ROTATION_ID`/
+    /// `DATA_RIGHT_ROTATION_ID` accessors' own defaults.
+    pub const IDENTITY: Self = Self::new(0.0, 0.0, 0.0, 1.0);
+}
+
+impl Default for Quat {
+    /// **Not** `(0, 0, 0, 0)` — a quaternion's meaningful "no rotation" value
+    /// is [`Self::IDENTITY`], so `Default` returns that rather than the
+    /// all-zero value `#[derive(Default)]` would give every other field-`0`
+    /// type here. A caller that wants the derived all-zero value almost
+    /// certainly wanted `IDENTITY` instead; giving them the same value either
+    /// way removes the trap.
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
