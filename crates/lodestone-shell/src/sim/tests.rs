@@ -1225,6 +1225,125 @@ fn connected_sim_emits_one_move_per_physics_tick() {
     );
 }
 
+/// The live-server loop (owner report): a repeated `PLAYER_POSITION` to the
+/// same absolute coordinate, a fresh teleport id every time, forever. Traced
+/// to `Sim::step`'s own documented ordering — "one `Update` schedule, then N
+/// catch-up `GameTick` schedules, then `poll_net`/`fold_entities`/`Extract`"
+/// — which means a `NetUpdate::Teleport` already sitting in the channel when
+/// `step` is called is not applied to `PhysicsState` until *after* this
+/// frame's `TickSet::Send` has already queued an outbound `Move` from the
+/// **pre-teleport** position. `select_move_packet`'s own doc names exactly
+/// this symptom ("still reports the old world's coordinates after a
+/// transfer/reconfigure") and points upstream at whatever feeds `pos` —
+/// this is that upstream.
+///
+/// A `far` target (500, 80, -500) rather than anything near the default
+/// spawn, so a stale pre-teleport claim cannot coincide with it by chance.
+#[test]
+fn move_sent_the_same_tick_as_a_teleport_carries_the_new_position() {
+    use crate::net::NetUpdate;
+    let (net, actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    sim.poll_net(); // -> Connected, zero ticks run yet.
+    assert_eq!(sim.session_phase(), SessionPhase::Connected);
+
+    let far = lodestone_client::Vec3::new(500.0, 80.0, -500.0);
+    feed.send(NetUpdate::Teleport {
+        pos: far,
+        rotation: Rotation::new(0.0, 0.0),
+        flags: lodestone_model::event::TeleportFlags {
+            relative_x: false,
+            relative_y: false,
+            relative_z: false,
+            relative_yaw: false,
+            relative_pitch: false,
+        },
+    })
+    .unwrap();
+
+    // One tick: the teleport must be visible to *this* tick's Send, not next
+    // frame's.
+    sim.step(1.0 / 20.0);
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    let mv = sent
+        .iter()
+        .find_map(|a| match a {
+            ClientAction::Move { pos, .. } => Some(*pos),
+            _ => None,
+        })
+        .expect("a connected, in-world sim must send exactly one Move this tick");
+
+    assert!(
+        (mv.x - far.x).abs() < 0.01 && (mv.y - far.y).abs() < 0.01 && (mv.z - far.z).abs() < 0.01,
+        "the outbound Move sent in the same tick a teleport arrives must claim the \
+         teleported position, not a stale pre-teleport one: got {mv:?}, wanted ~{far:?}"
+    );
+}
+
+/// The brief's requested control on link 1 (the `relatives` bitmask): the
+/// same wire rotation must produce genuinely different local player state
+/// depending on whether it is flagged relative or absolute. Non-zero,
+/// pairwise-distinct baseline/delta (`CLAUDE.md`'s evidence-standards
+/// rule) so an accidental "always absolute" or "always relative"
+/// implementation cannot coincidentally pass.
+#[test]
+fn teleport_relative_rotation_differs_from_absolute_rotation() {
+    use crate::net::NetUpdate;
+
+    fn teleported_rotation(relative: bool) -> (f32, f32) {
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+        sim.poll_net(); // -> Connected
+
+        // A non-zero baseline rotation, distinct from the packet's own delta.
+        sim.player_mut(|p| {
+            p.yaw = 10.0;
+            p.pitch = 5.0;
+        });
+
+        feed.send(NetUpdate::Teleport {
+            pos: lodestone_client::Vec3::new(0.0, 0.0, 0.0),
+            rotation: Rotation::new(20.0, 7.0),
+            flags: lodestone_model::event::TeleportFlags {
+                relative_x: false,
+                relative_y: false,
+                relative_z: false,
+                relative_yaw: relative,
+                relative_pitch: relative,
+            },
+        })
+        .unwrap();
+        sim.poll_net();
+
+        let p = sim.player();
+        (p.yaw, p.pitch)
+    }
+
+    let relative = teleported_rotation(true);
+    let absolute = teleported_rotation(false);
+
+    assert_eq!(
+        relative,
+        (30.0, 12.0),
+        "relative_yaw/relative_pitch must add the packet's delta to the current pose"
+    );
+    assert_eq!(
+        absolute,
+        (20.0, 7.0),
+        "an absolute rotation flag must overwrite, not add to, the current pose"
+    );
+    assert_ne!(
+        relative, absolute,
+        "the relatives bitmask must change the outcome -- a fix that ignores it \
+         entirely would otherwise still pass"
+    );
+}
+
 #[test]
 fn move_is_withheld_until_connected() {
     // A sim that is merely Connecting (attached, not yet logged in) must send
