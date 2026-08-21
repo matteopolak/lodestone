@@ -131,8 +131,10 @@ never draw. Currently 24 declared, all installed.
 ## The census, as of this writing
 
 Run it rather than quoting this section — a coverage number recalled from a doc
-has been wrong in this repo four times in four different ways. Findings: 118
-across 332 subjects.
+has been wrong in this repo four times in four different ways. Findings: 59
+across 332 subjects at the last run recorded here, down from 118 when this
+document was written; the particle half of that drop is the whole of the
+difference.
 
 ### Entity types — 124 drawn, 19 stranded, 12 absent, 3 no-vanilla-rig
 
@@ -172,35 +174,54 @@ The single gap is `test_instance_block`, a creative/dev-only renderer, which is
 also the one exception `docs/block-entity-renderers.md` names. This population
 is in good shape and the census says so.
 
-### Particle types — 39 drawn, 1 stranded, 85 absent
+### Particle types — 85 drawn, 0 stranded, 40 absent
 
-**Stranded**: `enchanted_hit`. `Sheet::frames` declares its sprite sheet, it is
-in `Sheet::all()`, the atlas loads it — and no emitter produces it, so the
-frames are resident and unreachable. `effect`/`entity_effect` and `enchant` are
-the same shape one layer removed: their sheets exist too, but the registry names
-do not match a sheet frame stem, so they land in *absent* instead.
+**This section's first version read 39 drawn / 1 stranded / 85 absent**, and is
+kept here because what the census found there has since been acted on: the
+stranded `enchanted_hit`, and the three dead sheets below, are closed. See
+[`particle-catalogue.md`](./particle-catalogue.md) for the per-family writeup.
+Run the tool rather than trusting either number.
 
-**Absent**: 85 of 125. This is the largest single body of unreached content in
-the client, and unlike the entity list it is not disguised — `spawn_one`'s
-catch-all logs and drops. Worth reading as a backlog rather than as a defect
-report.
+**Stranded**: none. `enchanted_hit` was the one, and it is now emitted by
+`Particles::spawn_one`.
+
+**Absent**: 40 of 125, down from 85 — still the largest single body of unreached
+content in the client, and unlike the entity list it is not disguised:
+`spawn_one`'s catch-all logs and drops. Worth reading as a backlog rather than
+as a defect report. What is left is mostly the option-carrying types (`block`,
+`block_marker`, `falling_dust`, `item_*`, the leaf families), the 26.2 additions
+(`geyser*`, `noxious_gas*`, `sulfur_*`, `firefly`) and a handful of one-off
+classes.
 
 **Dead sprite sheets, found by hand rather than by the tool.** `Sheet::Effect`,
-`Sheet::Enchant` and `Sheet::EnchantedHit` are declared, are in `Sheet::all()`,
-and are therefore stitched into the particle atlas — and no production code
-constructs any of the three; every reference outside `Sheet::all()` is in a
-test. Atlas-resident and unreachable. The census cannot see this: it reports the
-*subject* side, and only `enchanted_hit` happens to share a name with a sheet
-frame stem. See the gap note below.
+`Sheet::Enchant` and `Sheet::EnchantedHit` were declared, were in `Sheet::all()`,
+and were therefore stitched into the particle atlas — with no production code
+constructing any of the three; every reference outside `Sheet::all()` was in a
+test. Atlas-resident and unreachable. The census could not see it: it reports the
+*subject* side, and only `enchanted_hit` happened to share a name with a sheet
+frame stem.
+
+All three are now live. **The reverse query is also a gate now**, which is the
+part worth keeping: `no_sheet_is_atlas_resident_and_unreachable_from_the_dispatch`
+(`crates/lodestone-shell/src/particles.rs`) drives the whole 125-entry particle
+registry through `spawn_particles` and requires every `Sheet::all()` entry to come
+back, so a sheet added without an emitter fails by name. That is the
+particle-population half of the "reverse direction" gap noted below; the
+block-entity half is still open.
 
 ## Known gaps in the instrument
 
 * **The reverse direction is only implemented for entities.** "A renderer no
   subject routes to" is computed against the `entity_models()` corpus and
-  nowhere else, so a dead `BlockEntityModelEntry` or a dead particle `Sheet`
-  goes unreported — as the three sheets above did. Closing this means one
-  reverse query per population, each keyed differently, which is why it is
-  written down here rather than half-built.
+  nowhere else, so a dead `BlockEntityModelEntry` goes unreported — as the three
+  particle sheets above did before anyone looked. Closing this inside the tool
+  means one reverse query per population, each keyed differently, which is why it
+  is written down here rather than half-built. **The particle half now has a
+  guard, but it lives in the subject crate rather than in this tool**
+  (`no_sheet_is_atlas_resident_and_unreachable_from_the_dispatch`), because it
+  can drive the real dispatch and this scanner can only read `match` patterns.
+  That is a reasonable split and worth knowing about: a green
+  `world-coverage` run says nothing about dead block-entity models.
 * **Granularity is the registry entry.** A type that draws *something* reads as
   drawn even if a distinguishing part of it does not: a framed map drawing with
   no frame border around it would satisfy any per-type check. This is the same
