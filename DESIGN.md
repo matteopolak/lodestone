@@ -8965,3 +8965,105 @@ template's yaw 0 the frame's back plate faces the camera and occludes its own co
 `cargo test -p lodestone-shell --lib --no-fail-fast -- --test-threads=2`: **2085 passed, 0 failed**, 72
 ignored. `cargo check --workspace --all-targets` and `cargo check -p lodestone-shell
 --no-default-features` both clean. `lodestone-v770 --lib` 193/0, `lodestone-render --lib -- frame` 32/0.
+
+**12.174 Three fixes landed with passing pixel gates and all three were still broken in real play. One
+sentence covers two of them: every gate installed its own input, so none of them could see a producer
+that never supplied one.** Reported as three unrelated symptoms — an item frame's contents invisible,
+`text_display` text z-fighting, sign text absent — after §12.173 and its sibling commit shipped with
+measured gates (1334 px for a framed item, `1/1/0` counters; 389→438 glyph px for the pipeline split).
+
+**Item frames: the producer refused, and its refusal was one clause long.** `extract_entity_draws` read
+the recorded stack as
+`(kind.0.as_ref() == ITEM_ENTITY_TYPE_PATH).then(|| stacks.0.get(&id.0)).flatten()`. `ItemStacks` is
+only ever written for an entity whose metadata actually carried the `ITEM_STACK` serializer, so the
+type test added nothing and answered `None` for every other claimant of that serializer:
+`ItemFrame.DATA_ITEM`, a framed `filled_map`, and a projectile's real stack. All three consumers are
+written, tested and reached from the real frame path — `merge_framed_items`, `prepare_framed_maps` and
+`merge_thrown_item`'s "the wire is preferred over the table" arm, whose own doc comment asserted the
+value "is already populated … with no new plumbing". It was not, and had never been. **`prepare_framed_maps`
+had never once run**, which means the framed-map pose correction that landed the same day was fixing
+geometry no player had ever seen.
+
+The metadata half was innocent and was checked first: the decode keys the stack on the **serializer**
+rather than the index, `ingest::apply_entity_metadata` inserts `DisplayItem` for any entity type, and
+`fold_entities` records it for any entity type. Exactly one hop narrowed it, three hops downstream of
+where the symptom pointed.
+
+The evidence standard the old gates could not meet: `tests/live_framed_item_wire.rs` drives
+`Sim::new` → `connect_as` → `step` → `entity_draws` — the accessor `app/redraw.rs` itself calls — against
+a real item frame the creative oracle placed. **Control observed**: with the type test restored it
+reports `item=None` and fails; without it, `diamond` and `rot=3`. `EntityInterpolator` was deliberately
+*not* used, because a caller has to bridge each `EntityView` into ingest components by hand, which is
+the same blindness one layer down.
+
+**Signs: the parse was right and the format was not. `TAG_List` boxes a mixed list's elements as
+`{"": element}`, and this NBT decoder passed the box straight through.** `ListTag.write` writes a
+heterogeneous list as `TAG_Compound` and wraps every element that is not already a plain compound
+(`wrapIfNeeded`/`wrapElement`); `ListTag.load` strips it again (`addAndUnwrap`/`tryUnwrap`). It is a
+property of the *format*, not of any schema. A sign's `messages` is
+`ComponentSerialization.CODEC.listOf()`, whose encoder collapses an unstyled component to a bare
+`TAG_String` and emits a compound for a styled one — so colouring **one** line makes the list mixed.
+
+Captured twice, independently: a live vanilla 26.2 server sends
+`[{color:"red",text:"REDLINE"}, {text:"BOLDY",bold:1b}, {"":"plain"}, {"":""}]`, and its own saved
+region file holds the same. Our component walk looked for `text` on each element, found none on the
+boxed ones, and contributed no spans — so **the unstyled lines of any styled sign rendered as nothing**.
+The same shape reaches chat, nametags and `text_display` through a component's `extra` list; the second
+probe sign shows it there too (`extra: [{color:"green",text:"AA"}, {"":"BB"}]`, and `"BB"` was lost).
+
+Two things worth carrying. **This was found by re-doing the capture, not by reading the parser** — the
+parser is a correct port of a codec it had correctly transcribed, and the wrapper is applied a layer
+*below* the codec, where nothing in `SignText.DIRECT_CODEC` mentions it. And the previous capture's own
+lesson repeated in a new form: the earlier probe wrote its sign with SNBT containing literal quotes and
+concluded the wire form was JSON; this one had to write a **styled** line, because an all-plain sign is
+a homogeneous list of strings and cannot see the wrapper at all. `tests/live_sign_text_wire.rs` uses a
+mixed fixture for exactly that reason and failed on precisely the boxed line before the fix.
+
+The encoder had to change with it: it *rejected* a mixed list, so it could not reproduce bytes its own
+decoder now accepts. It now derives the header from the elements (`identifyRawElementType`) and boxes
+them, double-boxing a genuine single-`""`-key compound so the round trip closes.
+
+**`text_display`: two of five style-flag bits were decoded, carried to the draw site and dropped, and
+the module doc filed that as a simplification.** `FLAG_SEE_THROUGH` selects `TEXT_SEE_THROUGH` /
+`TEXT_BACKGROUND_SEE_THROUGH`, whose depth state is `withDepthStencilState(Optional.empty())` — no test,
+no write. An entity carrying it is deliberately placed inside or flush against geometry, which is what
+a server-side hologram usually is, so drawing it through the depth-tested pipelines is not a near-miss.
+`FLAG_USE_DEFAULT_BACKGROUND` resolves to `(int)(getBackgroundOpacity(0.25F) * 255) << 24` =
+`0x3F000000`, **one alpha step** from `Display.TextDisplay`'s own accessor default of `0x40000000` that
+`display_entities.rs` already carries — two defaults that would have been invisible folded together.
+
+**And the reason the panel/glyph fight existed at all is measured, not argued.** The panel sits `0.01`
+behind the ink in local glyph space, which `text_glyph_transform`'s `0.025` scale turns into
+**0.00025 blocks**. Through this renderer's `Depth32Float` with a **forward** `[0,1]` projection
+(near `0.05`, far `512`), that separation is, in ULPs of the stored `f32`: **53 at 2 blocks, 9 at 5, 3
+at 8, 2 at 10, 1 at 14, 1 at 20, and 0 at 64** — bit-identical. Through vanilla's reversed-Z it never
+falls below **53**. So the polygon offset is the only thing separating them past about ten blocks, and
+the general consequence is larger than this pass: **any ported sub-millimetre depth separation in this
+renderer is unresolvable at ordinary viewing distance**, because reversed-Z is exactly the arrangement
+that makes vanilla's constants work and we do not have it. Pinned as an exact per-distance curve in
+`lodestone_render::display`'s own tests, with the reversed-Z column as the control, computed straight
+from the two planes rather than as `1.0 - forward` (which inherits the forward value's rounding and
+measures nothing — it read `0` ULPs on the first attempt).
+
+**The generalisation.** The repo already knows "a gate that installs its own input proves the renderer
+and says nothing about the producer". What these three add is *where to look for the missing producer*,
+because in none of the three was it in the layer that was reported:
+
+| reported | actually |
+|---|---|
+| the framed item does not draw | the draw site is correct; **one clause in `extract_entity_draws`** never gave it an item |
+| the sign parser mishandles styled lines | the parser is right; the **NBT layer below the codec** never unwrapped the box |
+| the glyph pipeline needs a depth bias | it did — and two **style-flag bits** upstream were choosing the wrong pipeline entirely |
+
+And the audit question that would have found all three cheaply, which is the dual of "what consumes
+this?": **for every field a draw site reads, count the production sites that assign it something other
+than the default, and check the count is not zero.** `EntityDraw::item` had exactly one such site and it
+was type-gated away; `SignTextSpan` had one and the boxed elements never reached it. Neither
+`connectedness` nor a pixel gate can ask that question, and both fields were assigned *somewhere*, so
+"is this field ever written?" answers yes for both.
+
+Landed: `lodestone-core` NBT list wrapper (34/0), `extract_entity_draws` (`check --workspace
+--all-targets` clean, `check -p lodestone-shell --no-default-features` clean), the two `text_display`
+flags (9/0 `display_text` lib tests), plus `tests/live_sign_text_wire.rs` and
+`tests/live_framed_item_wire.rs`, both `#[ignore]`d behind `--features live` against the creative
+oracle on `:25570`.

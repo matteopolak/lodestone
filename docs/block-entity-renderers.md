@@ -531,6 +531,36 @@ match, closing a `decode(encode(x)) == x` loop that no gate on either side could
 **real** server the cost was total: any coloured or formatted line arrives as a `Compound`, matched no
 arm in the parse, and every such sign drew its board with no text at all.
 
+**And a third capture found a third thing, one layer below the codec: `TAG_List` boxes a mixed list's
+elements.** `ListTag.write` cannot name two element tags in one header, so a heterogeneous list is
+written as `TAG_Compound` with every element that is not already a plain compound wrapped as
+`{"": element}` (`wrapIfNeeded`/`wrapElement`), and `ListTag.load` strips the box again
+(`addAndUnwrap`/`tryUnwrap`). Nothing in `SignText.DIRECT_CODEC` mentions this — it is a property of the
+NBT *format*, applied beneath the codec — and `lodestone-core`'s decoder passed the box straight
+through until it was made to unwrap.
+
+It bites signs immediately, because the collapse rule above is exactly what makes the list mixed: style
+one line and the other three stop being `TAG_String`. A live 26.2 server sends
+
+```text
+messages: [ {color: "red", text: "REDLINE"},
+            {text: "BOLDY", bold: 1b},
+            {"": "plain"},
+            {"": ""} ]
+```
+
+captured off the wire by `crates/lodestone-shell/tests/live_sign_text_wire.rs` and, independently, out
+of that server's own saved region file. The walk below looks for `text` on each element, found none on
+the boxed ones, and contributed no spans — so **the unstyled lines of any styled sign rendered as
+nothing**, with the styled ones drawing perfectly beside them. The same shape reaches a component's
+`extra` list, so chat, nametags and `text_display` had it too.
+
+Two lessons, and neither is about this parser. **An all-plain fixture structurally cannot see it** — a
+homogeneous list of strings is never boxed — so the discriminating fixture is a *mixed* one, which is
+why the live gate writes one styled line and one plain. And **the wrapper is invisible from the codec**:
+re-deriving `SignText.LINES_CODEC` correctly, twice, could not have found it; only re-doing the capture
+did.
+
 `sign_text.rs`'s `append_component_spans` now walks the structural form into a `Vec<SignTextSpan>` —
 one already-flattened, fully-inherited run per node, carrying its own resolved colour (named or
 `#rrggbb` hex) plus bold/italic/underline/strikethrough. A `String` element is a literal, never

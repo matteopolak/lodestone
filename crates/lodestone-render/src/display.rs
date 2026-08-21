@@ -578,4 +578,85 @@ mod tests {
         assert!((unpacked[2] - 0x44 as f32 / 255.0).abs() < 1e-6, "blue channel: {unpacked:?}");
         assert!((unpacked[3] - 0x11 as f32 / 255.0).abs() < 1e-6, "alpha channel: {unpacked:?}");
     }
+
+    /// **Why the glyph pipeline's polygon offset is load-bearing rather than
+    /// belt-and-braces, as a number.**
+    ///
+    /// `TextDisplayRenderer.submitInner` puts the background panel `0.01`
+    /// behind the glyphs in local glyph space, which
+    /// [`text_glyph_transform`]'s `0.025` scale turns into **0.00025 blocks**.
+    /// Vanilla resolves that comfortably because its depth buffer is
+    /// *reversed*-Z float, where precision is concentrated at distance. This
+    /// project's is `Depth32Float` with a forward `[0, 1]` projection
+    /// (`crate::DEPTH_FORMAT`, `Camera::view_projection`), which is the
+    /// opposite arrangement: almost the whole mantissa is spent between the
+    /// near plane and a few blocks out.
+    ///
+    /// The separation is asserted in **ULPs of the stored `f32`**, at
+    /// vanilla's own near plane and this camera's default far plane, and the
+    /// exact per-distance figures are pinned rather than a direction — a
+    /// "it gets smaller with distance" assertion is true of any projection.
+    /// The measured collapse is steep: 53 ULPs at 2 blocks, 2 at 10, **1 by
+    /// 14** (a single ULP is exactly a `LessEqual` tie once interpolation
+    /// across an oblique quad moves either plane), and **0 at 64**, where the
+    /// panel and the ink are bit-identical.
+    ///
+    /// The reversed-Z column is the control, computed straight from the
+    /// projection rather than as `1.0 - forward` (which would inherit the
+    /// forward value's rounding and measure nothing): the identical geometry
+    /// through the arrangement vanilla actually uses never falls below 53
+    /// ULPs. If this renderer ever switches to reversed-Z, this test goes red
+    /// and should be deleted along with the workaround it documents.
+    #[test]
+    fn the_panel_and_the_ink_collapse_to_one_depth_value_with_distance() {
+        /// `Camera::PROJECTION_Z_NEAR`.
+        const NEAR: f32 = 0.05;
+        /// `Camera::default().far`.
+        const FAR: f32 = 512.0;
+        /// `TEXT_BACKGROUND_OFFSET` (`-0.01`) through `text_glyph_transform`'s
+        /// `0.025` scale.
+        const SEPARATION: f32 = 0.01 * 0.025;
+
+        /// Forward `[0, 1]` window depth for a point `d` blocks in front of
+        /// the eye — the `z/w` a `glam` DirectX-style RH perspective writes.
+        fn forward(d: f32) -> f32 {
+            (FAR / (FAR - NEAR)) * (1.0 - NEAR / d)
+        }
+        /// The reversed-Z depth for the same point, derived from the same two
+        /// planes rather than from [`forward`]'s already-rounded result.
+        fn reversed(d: f32) -> f32 {
+            (NEAR / (FAR - NEAR)) * (FAR / d - 1.0)
+        }
+        fn ulps_apart(a: f32, b: f32) -> u32 {
+            let ulp = f32::from_bits(a.to_bits() + 1) - a;
+            ((a - b).abs() / ulp).round() as u32
+        }
+
+        let mut measured = Vec::new();
+        for distance in [2.0_f32, 5.0, 8.0, 10.0, 14.0, 20.0, 64.0] {
+            let nearer = distance - SEPARATION;
+            let control = ulps_apart(reversed(distance), reversed(nearer));
+            assert!(
+                control >= 53,
+                "control: reversed-Z must keep the two planes far apart at \
+                 {distance} blocks, got {control} ULPs — if this fires the \
+                 measurement below is not about the projection",
+            );
+            measured.push((distance, ulps_apart(forward(distance), forward(nearer))));
+        }
+        // Collected rather than asserted per distance, so a run reports the
+        // whole curve instead of only the first row that moved.
+        assert_eq!(
+            measured,
+            vec![
+                (2.0, 53),
+                (5.0, 9),
+                (8.0, 3),
+                (10.0, 2),
+                (14.0, 1),
+                (20.0, 1),
+                (64.0, 0),
+            ],
+        );
+    }
 }

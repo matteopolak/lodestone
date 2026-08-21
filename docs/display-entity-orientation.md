@@ -139,9 +139,38 @@ head-tilt tracking, while still looking plausible in a screenshot taken from
 directly in front of the entity. That is exactly the kind of defect a
 screenshot cannot catch and a unit test can.
 
+### The style flags decide the pipeline, and two of them used to decide nothing
+
+`Display.TextDisplay` carries five bits. `FLAG_ALIGN_LEFT`/`RIGHT` were consumed;
+`FLAG_SEE_THROUGH` and `FLAG_USE_DEFAULT_BACKGROUND` were decoded, carried all the way to the draw
+site, and dropped — disclosed in `gpu/display_text.rs`'s own module doc as a simplification, and
+tracked by nothing.
+
+`FLAG_SEE_THROUGH` is not cosmetic. `TextDisplayRenderer.submitInner` picks
+`Font.DisplayMode.SEE_THROUGH` and `RenderTypes.textBackgroundSeeThrough()` for it, resolving to
+`TEXT_SEE_THROUGH`/`TEXT_BACKGROUND_SEE_THROUGH` — both `withDepthStencilState(Optional.empty())`,
+i.e. **no depth test and no depth write**. An entity carrying that flag is deliberately placed inside
+or flush against geometry, which is what a server-side hologram usually is, so drawing it through the
+depth-tested pipelines occludes or fights it for exactly as long as the flag is set. There is a third
+pipeline for it now (the two vanilla see-through pipelines have identical depth state and differ only
+in a shader this pass does not port), drawn **last** so a range that writes no depth cannot occlude
+the two that do.
+
+`FLAG_USE_DEFAULT_BACKGROUND` resolves to `(int)(getBackgroundOpacity(0.25F) * 255) << 24` =
+`0x3F000000`. Note that is **one alpha step** from `Display.TextDisplay`'s own accessor default of
+`0x40000000`, which `display_entities.rs` already carries under a similar name: two different
+defaults, and folding them together would have been invisible. `Options.getBackgroundOpacity` returns
+its fallback whenever `backgroundForChatOnly` is set and vanilla defaults that on, so the fallback is
+used unconditionally rather than reading an accessibility option this client does not model.
+
+Which pipeline a display lands on is decided by `partition_display_text`, a free function precisely
+so it is assertable with no GPU. Its gate is a pair: the identical display differing only in the flag
+must put every vertex in the depth-tested ranges and none in the see-through one, then the exact
+reverse.
+
 ### The glyph pipeline's polygon offset is load-bearing — do not merge it away
 
-`gpu/display_text.rs` builds **two** pipelines from one descriptor: the
+`gpu/display_text.rs` builds **three** pipelines from one descriptor: the
 background panel through `RenderPipelines.TEXT_BACKGROUND`'s plain
 `DepthStencilState.DEFAULT`, and the glyphs through
 `RenderPipelines.TEXT_POLYGON_OFFSET`
@@ -165,6 +194,17 @@ at 40°: **389** glyph px with the panel against **438** without, restored to
 **438/438** once the glyphs got their own biased pipeline. The loss is
 per-pixel scatter across the whole block, not a clean edge, which is why it
 reads as "the text is broken at some angles" rather than as a depth bug.
+
+**How little room there actually is, measured.** That 0.00025-block separation, expressed in ULPs of
+the stored `f32` through this renderer's `Depth32Float` and **forward** `[0,1]` projection (near
+`0.05`, far `512`): **53** at 2 blocks, **9** at 5, **3** at 8, **2** at 10, **1** at 14, **1** at 20,
+**0** at 64 — bit-identical. Through vanilla's *reversed*-Z it never falls below **53**. So the bias
+is the only thing separating the two planes past about ten blocks, and the consequence generalises
+past this pass: **any ported sub-millimetre depth separation is unresolvable here at ordinary viewing
+distance**, because reversed-Z is the arrangement that makes vanilla's constants work and this
+renderer does not have it. Pinned as an exact per-distance curve in `lodestone_render::display`'s own
+tests, with the reversed-Z column as the control — computed straight from the two planes, not as
+`1.0 - forward`, which inherits the forward value's rounding and reads `0` ULPs.
 
 `text_display_pixels.rs` cannot see this and never could: it asserts only
 that more than 100 non-sky pixels land in the entity's rect, which the panel
