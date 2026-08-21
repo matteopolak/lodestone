@@ -6770,6 +6770,64 @@ fn end_session_clears_the_entity_tracks() {
     assert!(sim.entity_draws().is_empty());
 }
 
+/// **Production-path control for the `text_display` island**: a real
+/// `text_display` folded through the same `ClientEvent` -> `IngestQueue` ->
+/// `NetIngest` path production uses (`ingest`, exactly like
+/// [`end_session_clears_the_entity_tracks`] above), then through the same
+/// `Extract` schedule [`crate::sim::step::Sim::step`] runs every frame, must
+/// reach [`Sim::display_draws`] with no hand-installed draw anywhere in this
+/// test.
+///
+/// This is deliberately **not** a test that calls
+/// `crate::display_entities::extracted_display_draws`/`set_display_draws`
+/// itself — a GPU pixel gate already proved those two functions individually
+/// correct, by installing a draw it built by hand and rendering it. That
+/// proves the *renderer*, not that anything in production ever calls the
+/// installer: `RenderState::set_display_draws` had zero production callers
+/// until `app::redraw` was wired to call `Sim::display_draws()`, so a
+/// `text_display` was resolved all the way to a draw-ready snapshot and then
+/// dropped on the floor. This test's job is to fail if that hop goes missing
+/// again, which a hand-installed-draw gate structurally cannot do.
+#[test]
+fn a_real_text_display_folded_through_ingest_and_extract_reaches_sim_display_draws() {
+    let mut sim = Sim::with_demo_world(test_config());
+    ingest(
+        &mut sim,
+        lodestone_client::ClientEvent::EntitySpawned {
+            entity_id: 9,
+            uuid: None,
+            entity_type: "minecraft:text_display".parse().expect("valid entity type key"),
+            pos: lodestone_model::Vec3::new(1.0, 64.0, 1.0),
+            rotation: Rotation::new(0.0, 0.0),
+            velocity: None,
+        },
+    );
+    ingest(
+        &mut sim,
+        lodestone_client::ClientEvent::EntityMetadataUpdated {
+            entity_id: 9,
+            metadata: lodestone_model::EntityMetadataUpdate {
+                display_text: lodestone_client::Reported::Reported(Some("hello".to_string())),
+                ..Default::default()
+            },
+        },
+    );
+    // The same two-step production sequence `Sim::step` runs every frame
+    // (`sim/step.rs`): fold, then the `Extract` schedule that populates
+    // `ExtractedDisplayDraws` (`display_entities::DisplayEntityPlugin`,
+    // installed in `Sim::client_app`).
+    sim.fold_entities();
+    sim.write(|w| w.run_schedule(Extract));
+
+    let draws = sim.display_draws();
+    let draw = draws
+        .iter()
+        .find(|d| d.id == 9)
+        .unwrap_or_else(|| panic!("entity 9 never reached Sim::display_draws: {draws:?}"));
+    assert_eq!(draw.type_path, crate::display_entities::TEXT_DISPLAY_TYPE_PATH);
+    assert_eq!(draw.text.as_deref(), Some("hello"));
+}
+
 // -- world border + spawn point + game rules (issue #436) --------------
 //
 // `SessionWorldBorder`, `SessionSpawnPoint` and `SessionGameRules` were

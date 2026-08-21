@@ -1,7 +1,13 @@
 //! The `Display` entity family's draw-ready snapshot: `text_display`/
 //! `item_display`/`block_display`, extracted from the ingest ECS into the
-//! plain [`DisplayDraw`] PODs `gpu/display_text.rs` and the block/item merge
-//! sites in `gpu/moving_blocks.rs`/`gpu/world_items.rs` consume.
+//! plain [`DisplayDraw`] PODs `gpu/display_text.rs` consumes.
+//!
+//! **`item_display`/`block_display` have no GPU consumer yet.** A block/item
+//! merge site in `gpu/moving_blocks.rs`/`gpu/world_items.rs` was the planned
+//! shape and is not built; every `DisplayDraw` still reaches
+//! [`extracted_display_draws`] regardless of `type_path`, and
+//! `RenderState::set_display_draws` logs each unsupported one once so the gap
+//! is visible rather than a silent no-op.
 //!
 //! # Why this is a separate extract system from [`crate::entities::extract_entity_draws`]
 //!
@@ -31,8 +37,11 @@
 //! `lodestone_ecs::ingest::apply_display_metadata` folds the result into the
 //! `Display*` components this file queries. This is the next hop: ingest
 //! components → draw-ready snapshot. The **last** hop — a GPU pass that
-//! actually rasterises one — is `gpu/display_text.rs` for `text_display`,
-//! and the block/item merge sites named above for the other two.
+//! actually rasterises one — is `gpu/display_text.rs` for `text_display`.
+//! That pass installs from `app::redraw` via `Sim::display_draws()` ->
+//! `RenderState::set_display_draws` every frame — `RenderState` had this
+//! setter with no production caller for a while after it landed, which is
+//! its own note on that method.
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Query, ResMut, Resource};
 use glam::{Quat, Vec3};

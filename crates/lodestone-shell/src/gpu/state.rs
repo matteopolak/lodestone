@@ -399,6 +399,7 @@ impl RenderState {
             // No display entities until `set_display_draws` installs this
             // frame's extract — see that method's doc.
             display_draws: Vec::new(),
+            warned_unsupported_display: std::collections::HashSet::new(),
             beacon_beam,
             // No beacon beams until the shell installs a world source; see
             // `set_beacon_source`.
@@ -1695,16 +1696,48 @@ impl RenderState {
     }
 
     /// Install this frame's extracted `Display`-family entities
-    /// (`text_display`/`item_display`/`block_display`) — the caller (`Sim`'s
-    /// per-frame render-source wiring) is expected to pass
-    /// `crate::display_entities::extracted_display_draws(world)` here every
-    /// frame, the same way `entities: &[EntityDraw]` already reaches
+    /// (`text_display`/`item_display`/`block_display`) — `app::redraw` calls
+    /// this every frame with `Sim::display_draws()`
+    /// (`crate::display_entities::extracted_display_draws(world)` underneath),
+    /// the same way `entities: &[EntityDraw]` already reaches
     /// [`RenderState::render`] from `extracted_entity_draws`. Unlike that
     /// one, this is a setter rather than a `render` parameter: threading a
     /// sixth top-level per-frame input through `render`'s own already-long
     /// signature (and every helper it calls) would touch far more of this
     /// file for the same information a two-line setter already carries.
+    ///
+    /// **This had zero production callers for a while after it was
+    /// written** — the extract system, the ingest fold and the
+    /// `text_display` GPU pass below were all wired and individually tested,
+    /// and nothing above this method ever called it, so a real `text_display`
+    /// resolved all the way to a `DisplayDraw` and then never reached the
+    /// screen. `app::redraw`'s call site says so at the point it was added;
+    /// this note stays as the reason a doc-comment claim of "the caller is
+    /// expected to…" is not evidence a caller exists.
     pub fn set_display_draws(&mut self, draws: Vec<crate::display_entities::DisplayDraw>) {
+        // `item_display`/`block_display` have no GPU consumer yet — only
+        // `gpu/display_text.rs`'s pass reads `self.display_draws`, and only
+        // for `text_display`. Without this, an `item_display`/`block_display`
+        // in the world is resolved all the way to a draw-ready snapshot and
+        // then silently drops off the edge of the pipeline, indistinguishable
+        // from "nothing there" — the exact island shape this repo's evidence
+        // standards call a resolved-but-unconsumed value. Said once per
+        // entity id rather than left to look like an idle frame.
+        for draw in &draws {
+            if draw.type_path != crate::display_entities::TEXT_DISPLAY_TYPE_PATH
+                && self.warned_unsupported_display.insert(draw.id)
+            {
+                tracing::warn!(
+                    target: "display_entities",
+                    entity_id = draw.id,
+                    type_path = draw.type_path,
+                    "a {} entity was extracted but has no GPU consumer yet; it will not \
+                     draw (see display_entities.rs's module doc for the block/item merge \
+                     sites this still needs)",
+                    draw.type_path,
+                );
+            }
+        }
         self.display_draws = draws;
     }
 
