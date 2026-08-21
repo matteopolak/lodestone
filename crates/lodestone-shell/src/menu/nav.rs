@@ -4633,6 +4633,10 @@ impl MenuNav {
                 self.cycle_particle_level(1);
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::BiomeBlendRadius) => {
+                self.step_biome_blend_radius(1);
+                MenuAction::None
+            }
         }
     }
 
@@ -4917,6 +4921,23 @@ impl MenuNav {
         self.persist_options();
     }
 
+    /// Steps `biomeBlendRadius` by one and wraps, then persists —
+    /// [`Self::step_weather_radius`]'s shape, over vanilla's `IntRange(0, 7)`.
+    ///
+    /// Steps the **radius**, which is what the value set ranges over; the row's
+    /// label turns it into the window width. No consumer push:
+    /// `app/redraw.rs` hands the field to `Sim::set_blend_radius` every
+    /// presented frame, whose own equality guard is what stops that poll
+    /// re-meshing the world every frame.
+    fn step_biome_blend_radius(&mut self, delta: i32) {
+        use crate::config::{MAX_BIOME_BLEND_RADIUS, MIN_BIOME_BLEND_RADIUS};
+        let span = MAX_BIOME_BLEND_RADIUS - MIN_BIOME_BLEND_RADIUS + 1;
+        let offset = self.options.biome_blend_radius - MIN_BIOME_BLEND_RADIUS;
+        self.options.biome_blend_radius =
+            MIN_BIOME_BLEND_RADIUS + (offset + delta).rem_euclid(span);
+        self.persist_options();
+    }
+
     /// Steps `menuBackgroundBlurriness` by one and wraps, then persists —
     /// [`Self::step_weather_radius`]'s shape, over vanilla's `IntRange(0, 10)`.
     ///
@@ -5045,7 +5066,18 @@ impl MenuNav {
                         crate::config::MAX_MENU_BACKGROUND_BLURRINESS as i32,
                     ) as u32;
                 }
-                // `int_range` only answers for the seven above; an eighth would
+                // `biomeBlendRadius`' bucket is the radius itself
+                // (`IntRange(0, 7)`, no xmap). Clamped to `config`'s own
+                // bounds, whose maximum is also `BlendRowCursor`'s ring
+                // capacity — so this clamp is a memory bound as well as a
+                // fidelity one.
+                LiveOption::BiomeBlendRadius => {
+                    self.options.biome_blend_radius = value.clamp(
+                        crate::config::MIN_BIOME_BLEND_RADIUS,
+                        crate::config::MAX_BIOME_BLEND_RADIUS,
+                    );
+                }
+                // `int_range` only answers for the eight above; a ninth would
                 // have to add its own write here, and falling through to
                 // `false` is the honest result until it does.
                 _ => return false,

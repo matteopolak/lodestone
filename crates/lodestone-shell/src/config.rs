@@ -74,6 +74,26 @@ pub const MIN_WEATHER_RADIUS: i32 = 3;
 /// See [`MIN_WEATHER_RADIUS`].
 pub const MAX_WEATHER_RADIUS: i32 = lodestone_render::DEFAULT_WEATHER_RADIUS;
 
+/// Vanilla's `biomeBlendRadius` bounds and default — `IntRange(0, 7)`
+/// defaulting to `2` (`Options.java`). The same pair
+/// `menu::options::INT_RANGE_SLIDERS`' `"biomeBlendRadius"` row places the
+/// handle with.
+///
+/// The stored number is the window **radius**; vanilla's label shows the
+/// *width* `2r + 1` ("5x5 (Normal)" at the default `2`), so the two are not
+/// interchangeable and a label written against the radius would be off by a
+/// factor of two and a bit at every value.
+///
+/// The maximum is named through [`lodestone_assets::tint::MAX_BLEND_RADIUS`],
+/// which is the width of `BlendRowCursor`'s ring buffer, rather than spelled
+/// `7` here: vanilla's option maximum and this client's cursor capacity have to
+/// be the same number, and a second literal is how they would stop being one.
+pub const MIN_BIOME_BLEND_RADIUS: i32 = 0;
+/// See [`MIN_BIOME_BLEND_RADIUS`].
+pub const MAX_BIOME_BLEND_RADIUS: i32 = lodestone_assets::tint::MAX_BLEND_RADIUS;
+/// See [`MIN_BIOME_BLEND_RADIUS`] — vanilla's shipped default, `5x5 (Normal)`.
+pub const DEFAULT_BIOME_BLEND_RADIUS: i32 = lodestone_render::biome_tint::BLEND_RADIUS;
+
 /// Vanilla's `menuBackgroundBlurriness` bounds and default —
 /// `IntRange(0, 10)` defaulting to `BLURRINESS_DEFAULT_VALUE = 5`
 /// (`Options.java`). The same pair
@@ -931,6 +951,23 @@ pub struct Options {
     /// already transcribed that function's *other* half (the 32-block cutoff
     /// and its `overrideLimiter` bypass) and was missing only the level test.
     pub particles: ParticleLevel,
+    /// Vanilla's **Biome Blend** option (`options.biomeBlendRadius`,
+    /// `Options.java`): `IntRange(0, 7)`, default `2`. The stored number is the
+    /// window **radius**; the row's label shows the width `2r + 1`.
+    ///
+    /// The half-width of the square of biomes each tinted vertex averages its
+    /// grass/foliage/water colour over. Reaches
+    /// `lodestone_render::biome_tint::BlendedTintCursor::new` through
+    /// `mesher::mesh_one`, whose three view constructors all took
+    /// `lodestone_render::biome_tint::BLEND_RADIUS` — the render crate's own doc
+    /// for that constant already said it was the default "unless a caller has
+    /// an actual video-settings" value, and no caller did.
+    ///
+    /// Changing this forces a remesh of every loaded column
+    /// (`Sim::set_blend_radius`), matching vanilla's own
+    /// `operateOnLevelExtractor(LevelExtractor::allChanged)` — the blend is
+    /// baked per vertex, so there is no uniform to update in place.
+    pub biome_blend_radius: i32,
 }
 
 impl Default for Options {
@@ -982,6 +1019,7 @@ impl Default for Options {
             menu_background_blurriness: DEFAULT_MENU_BACKGROUND_BLURRINESS,
             attack_indicator: AttackIndicator::default(),
             particles: ParticleLevel::default(),
+            biome_blend_radius: DEFAULT_BIOME_BLEND_RADIUS,
         }
     }
 }
@@ -1285,6 +1323,17 @@ impl Options {
             .and_then(serde_json::Value::as_str)
             .and_then(particle_level_from_name)
             .unwrap_or_default();
+        // Clamped to vanilla's own `IntRange(0, 7)` — which is also
+        // `BlendRowCursor`'s ring capacity, so this clamp is a memory bound as
+        // well as a fidelity one. `BlendedTintCursor::new` clamps again on its
+        // own side; both are cheap and neither is the other's excuse.
+        let biome_blend_radius = obj
+            .get("biome_blend_radius")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .map_or(DEFAULT_BIOME_BLEND_RADIUS, |v| {
+                v.clamp(MIN_BIOME_BLEND_RADIUS, MAX_BIOME_BLEND_RADIUS)
+            });
         Self {
             gui_scale,
             keybinds,
@@ -1330,6 +1379,7 @@ impl Options {
             menu_background_blurriness,
             attack_indicator,
             particles,
+            biome_blend_radius,
         }
     }
 
@@ -1525,6 +1575,12 @@ impl Options {
         }
         if self.weather_radius != default.weather_radius {
             obj.insert("weather_radius".into(), self.weather_radius.into());
+        }
+        if self.biome_blend_radius != default.biome_blend_radius {
+            obj.insert(
+                "biome_blend_radius".into(),
+                self.biome_blend_radius.into(),
+            );
         }
         if self.particles != default.particles {
             obj.insert("particles".into(), particle_level_name(self.particles).into());

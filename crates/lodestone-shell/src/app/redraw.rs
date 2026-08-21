@@ -107,6 +107,13 @@ impl WindowApp {
         // rebuilt on every session start and a one-shot push would be lost
         // across a reconnect. A plain enum write, so no equality guard.
         self.sim.set_particle_level(self.nav.options().particles);
+        // Vanilla's Biome Blend option. Polled per frame beside See-Through
+        // Leaves, and for the identical reason it needs the same treatment: a
+        // real change re-meshes every loaded column, so
+        // `TerrainMesh::set_blend_radius`'s equality guard — not this call
+        // site — is what stops that happening every frame.
+        self.sim
+            .set_blend_radius(self.nav.options().biome_blend_radius);
         // Vanilla's Entity Shadows option (owner report: "entity shadows are
         // missing"). Polled per frame like the options above; a plain bool
         // write, so no equality guard is needed the way `set_cutout_leaves`'s
