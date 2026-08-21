@@ -1088,8 +1088,13 @@ impl<'a> FontLoader<'a> {
                     // it was always the latter. Print unconditionally under
                     // the same flag the bitmap header already uses.
                     if debug {
+                        let entries: String = advances
+                            .iter()
+                            .map(|(cp, adv)| format!("U+{cp:04X}:{adv}"))
+                            .collect::<Vec<_>>()
+                            .join(",");
                         eprintln!(
-                            "lodestone-assets: space provider font={id} provider[{provider_index}] {} advances",
+                            "lodestone-assets: space provider font={id} provider[{provider_index}] {} advances [{entries}]",
                             advances.len()
                         );
                     }
