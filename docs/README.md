@@ -717,6 +717,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   hand pass, and `RenderState` itself, the coordinator). Issue #359 split it into
   `gpu.rs` (the root, unchanged in role) plus a `gpu/` folder of submodules. This is a
   pure reorganisation — no rendering behaviour changed, and no test file was edited.
+- [Ground-plate rendering](./ground-plate-rendering.md) — Flat, ground-hugging
+  blocks — leaf litter, carpets, moss carpets, snow layers, pressure plates, rails,
+  lily pads, frogspawn, redstone dust — render as a thin horizontal plate a fraction
+  of a block above the floor of their own cell, which puts them within millimetres of
+  the top face of the block underneath. This page records what that geometry actually
+  is, how far the depth buffer can separate it, and which of the obvious explanations
+  for "flat blocks flicker" have been measured and ruled out.
 - [GUI item icons (the draw half)](./gui-item-icons.md) — The **draw half** of
   putting an item in a GUI slot: the shell code that turns a resolved item icon into
   pixels. It serves **both** screens that have slots — the hotbar (`hud.rs`) and the
