@@ -46,8 +46,8 @@ use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::resource::Resource;
 use lodestone_model::{
-    EntityAttributeSnapshot, EntityEquipment, EntityPose, EntityVariant, ItemStack, ResourceKey,
-    Vec3,
+    EntityAttributeSnapshot, EntityEquipment, EntityPose, EntityVariant, ItemStack, Quat,
+    ResourceKey, Vec3, Vec3f,
 };
 use uuid::Uuid;
 
@@ -555,6 +555,110 @@ pub struct Equipment(pub Vec<EntityEquipment>);
 /// regression lives in.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct DisplayItem(pub Option<ItemStack>);
+
+/// A `Display` entity's billboard-constraint byte
+/// (`Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`, raw wire ordinal —
+/// `0`=fixed, `1`=vertical, `2`=horizontal, `3`=center), folded from
+/// [`lodestone_model::event::EntityMetadataUpdate::display_billboard`].
+///
+/// **Absent** until first reported, on every `text_display`/`item_display`/
+/// `block_display` — a consumer reading absence should fall back to `Fixed`
+/// (wire id `0`, the accessor's own default), matching
+/// `lodestone_render::display::BillboardMode::from_wire`'s own fallback.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayBillboard(pub u8);
+
+/// A `Display` entity's `DATA_TRANSLATION_ID`, in blocks — one quarter of the
+/// shared `Transformation` every subtype carries, folded from
+/// [`lodestone_model::event::EntityMetadataUpdate::display_translation`].
+/// **Absent** until first reported; a consumer should default to
+/// `Vec3f::default()` (zero), the accessor's own default.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
+pub struct DisplayTranslation(pub Vec3f);
+
+/// A `Display` entity's `DATA_SCALE_ID` — the second quarter of the shared
+/// `Transformation`. **Absent** until first reported; a consumer should
+/// default to `(1, 1, 1)`, the accessor's own default — **not**
+/// `Vec3f::default()`'s zero, which would collapse the model to nothing.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct DisplayScale(pub Vec3f);
+
+impl Default for DisplayScale {
+    fn default() -> Self {
+        Self(Vec3f::new(1.0, 1.0, 1.0))
+    }
+}
+
+/// A `Display` entity's `DATA_LEFT_ROTATION_ID` — applied **before** scale
+/// (`Transformation.compose`). **Absent** until first reported; a consumer
+/// should default to [`Quat::IDENTITY`], the accessor's own default.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
+pub struct DisplayLeftRotation(pub Quat);
+
+/// A `Display` entity's `DATA_RIGHT_ROTATION_ID` — applied **after** scale.
+/// Same default contract as [`DisplayLeftRotation`].
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
+pub struct DisplayRightRotation(pub Quat);
+
+/// A `text_display`'s current text (`Display.TextDisplay.DATA_TEXT_ID`),
+/// folded from [`lodestone_model::event::EntityMetadataUpdate::display_text`].
+/// **Absent** until first reported — vanilla's own accessor default is the
+/// empty string, so a consumer reading absence should draw no text, exactly
+/// as it would for `Some(String::new())`.
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct DisplayText(pub String);
+
+/// A `text_display`'s wrap width in pixels
+/// (`Display.TextDisplay.DATA_LINE_WIDTH_ID`). **Absent** until first
+/// reported; a consumer should default to `200`, the accessor's own default.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayLineWidth(pub i32);
+
+/// A `text_display`'s background panel colour, packed ARGB
+/// (`Display.TextDisplay.DATA_BACKGROUND_COLOR_ID`). **Absent** until first
+/// reported; a consumer should default to `0x4000_0000`
+/// (vanilla's translucent-black panel), the accessor's own default.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayBackgroundColor(pub i32);
+
+/// A `text_display`'s text alpha (`Display.TextDisplay.DATA_TEXT_OPACITY_ID`,
+/// a signed byte). **Absent** until first reported; a consumer should default
+/// to `-1` (fully opaque, read as the top byte of an ARGB colour), the
+/// accessor's own default.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayTextOpacity(pub i8);
+
+/// A `text_display`'s style-flags byte
+/// (`Display.TextDisplay.DATA_STYLE_FLAGS_ID`: `0x01` shadow, `0x02`
+/// see-through, `0x04` use-viewer's-own-default-background, `0x08`/`0x10`
+/// alignment). **Absent** until first reported; a consumer should default to
+/// `0` (no shadow, opaque, explicit background colour, centre-aligned).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayStyleFlags(pub u8);
+
+/// A `block_display`'s imitated block state
+/// (`Display.BlockDisplay.DATA_BLOCK_STATE_ID`), as a global block-state id —
+/// the same id space [`FallingBlockState`] and `World::set_block` use.
+/// **Absent** until first reported, and forever for every entity that is not
+/// a `block_display` (the adapter withholds index 23's `INT` for those — see
+/// `lodestone_model::event::EntityMetadataUpdate::display_block_state`).
+///
+/// Deliberately its **own** component rather than reusing
+/// [`FallingBlockState`]: that one is populated once from the spawn packet's
+/// Object Data field and never updated (vanilla sends no revision packet for
+/// it), while this one rides the ordinary incremental metadata channel and
+/// can change at any time a `/data merge` or plugin edits the entity.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayBlockState(pub u32);
+
+/// An `item_display`'s `ItemDisplayContext` ordinal
+/// (`Display.ItemDisplay.DATA_ITEM_DISPLAY_ID`) — which perspective (`GUI`,
+/// `GROUND`, `FIXED`, …) the item's own model should be posed in. **Absent**
+/// until first reported; a consumer should default to `FIXED` (the
+/// item-frame-style no-perspective context vanilla itself falls back to for
+/// most non-hand contexts), not `NONE` (ordinal `0`, which draws nothing).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayItemContext(pub u8);
 
 /// Who is riding this entity, in mounting order — `Entity.passengers`, folded
 /// from `ClientboundSetPassengersPacket` by
