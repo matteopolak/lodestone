@@ -1,5 +1,9 @@
-//! Does a **real** `assets/minecraft/items/trident.json` reach the trident rig
-//! when it is held, and deliberately *not* when it sits in a slot?
+//! Do the **real** 26.2 item definitions reach the rigs this crate keys on when
+//! an item is held — and, for the trident, deliberately *not* when it sits in a
+//! slot?
+//!
+//! Covers the four `minecraft:special` kinds whose held form used to draw
+//! nothing: `conduit`, `decorated_pot`, `copper_golem_statue` and `trident`.
 //!
 //! # Why a jar-backed gate and not a transcribed fixture
 //!
@@ -49,11 +53,13 @@
 //! `ok` while asserting nothing.
 //!
 //! Run with:
-//! `cargo test -p lodestone-render --test trident_hand_rig_resolution -- --ignored --nocapture`
+//! `cargo test -p lodestone-render --test special_item_hand_rig_resolution -- --ignored --nocapture`
 
 use lodestone_assets::{DisplaySlot, ResourceLocation, ResourceManager, ZipSource};
 use lodestone_model::BlockStateRegistry;
-use lodestone_render::{BlockModels, ItemStateContext, blocks_json_registry, trident_item_rig};
+use lodestone_render::{
+    BlockModels, ItemStateContext, blocks_json_registry, decorated_pot_item_rig, trident_item_rig,
+};
 
 mod gate_harness;
 use gate_harness::{require_blocks_report, require_client_jar};
@@ -154,5 +160,75 @@ fn a_held_trident_resolves_to_the_trident_rig_and_a_slotted_one_does_not() {
         variants.resolve(&gui).is_some(),
         "the GUI context resolved to neither a rig nor a baked model, so the \
          assertion above passed by measuring a parse failure"
+    );
+}
+
+/// The same island question for the other three rigs this pass wired: does the
+/// **real** item definition reach the `kind` each of them is keyed on, in a
+/// first-person hand?
+///
+/// A rig that resolves perfectly from a `kind` nothing ever produces draws
+/// exactly the empty hand it was written to fill, and no hermetic test in this
+/// crate can tell the two apart — `special_item_rig`'s own gates supply the
+/// `kind` as a literal, which is the closed loop this one breaks.
+///
+/// The copper golem statue is the sharp subject: its definition is a `select` on
+/// `minecraft:block_state`, so the *fallback* is what an ordinary stack must
+/// reach. If that resolved to nothing, the eight statue items would draw nothing
+/// while `special_item_rig("minecraft:copper_golem_statue", …)` kept answering
+/// happily in every unit test.
+#[test]
+#[ignore = "reads the pinned 26.2 client.jar"]
+fn the_conduit_pot_and_statue_definitions_all_reach_their_kind_in_hand() {
+    let (models, _manager, _registry) = build_models();
+    let hand = ItemStateContext::new(DisplaySlot::FirstPersonRightHand);
+
+    let mut wrong: Vec<String> = Vec::new();
+    for (path, expected_kind) in [
+        ("conduit", "minecraft:conduit"),
+        ("decorated_pot", "minecraft:decorated_pot"),
+        ("copper_golem_statue", "minecraft:copper_golem_statue"),
+        // Both ends of the oxidation range plus a waxed one, so an arm that only
+        // covered the unwaxed names cannot pass.
+        (
+            "oxidized_copper_golem_statue",
+            "minecraft:copper_golem_statue",
+        ),
+        (
+            "waxed_weathered_copper_golem_statue",
+            "minecraft:copper_golem_statue",
+        ),
+    ] {
+        let id = ResourceLocation::parse(&format!("minecraft:{path}")).expect("a valid id");
+        let Some(variants) = models.item_forms(&id) else {
+            wrong.push(format!("{path}: the jar ships no item definition"));
+            continue;
+        };
+        match variants.resolve_special(&hand) {
+            None => wrong.push(format!(
+                "{path}: resolved to no special form in hand, so its rig is an island"
+            )),
+            Some(form) if form.kind != expected_kind => wrong.push(format!(
+                "{path}: reached kind {:?}, not {expected_kind:?}",
+                form.kind
+            )),
+            Some(_) => {}
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+
+    // And the rigs those kinds map to really are populated, so "the kind arrives"
+    // and "the kind resolves to geometry" are both observed rather than one being
+    // inferred from the other.
+    let pot = decorated_pot_item_rig(None, None, None, None);
+    assert_eq!(
+        pot.parts().len(),
+        5,
+        "a pot is a base plus four faces; a shorter rig means faces were dropped"
+    );
+    assert_eq!(
+        trident_item_rig("trident"),
+        Some("trident"),
+        "the trident rig stopped naming its entity-corpus entry"
     );
 }

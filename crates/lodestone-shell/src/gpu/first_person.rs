@@ -990,6 +990,40 @@ impl RenderState {
             return Some((vec![base_draw], layers));
         }
 
+        // A decorated pot is five draws sharing one placement — a base and four
+        // independently sheeted faces, which is `DecoratedPotRenderer.submit`'s
+        // own decomposition and the reason it cannot be a `special_item_rig`
+        // pair. Unlike a banner's layers these are ordinary opaque draws, so
+        // there is no translucent list to return alongside them.
+        //
+        // **The four sherds are `PotDecorations.EMPTY` here, not the stack's
+        // own.** That is exactly what vanilla does for a stack carrying no
+        // `minecraft:pot_decorations`
+        // (`Objects.requireNonNullElse(decorations, PotDecorations.EMPTY)`), so
+        // an undecorated pot — the overwhelmingly common one — is *correct*
+        // rather than approximate. A pot that really does carry sherds draws
+        // with the four default side sprites, and the missing link is named
+        // rather than left to be rediscovered: `lodestone_model` already
+        // decodes the component into a real `PotDecorations`, but the shell's
+        // hotbar record does not carry it, so it never reaches `MainHandItem`
+        // and cannot reach here. Threading it is the same one-field-per-layer
+        // walk `banner_patterns` and `base_color` already made; do that rather
+        // than reading this as an unported rig.
+        if form.kind == "minecraft:decorated_pot" && item.path() == "decorated_pot" {
+            let rig = lodestone_render::decorated_pot_item_rig(None, None, None, None);
+            let draws: Vec<SpecialHandDraw<'a>> = rig
+                .parts()
+                .into_iter()
+                .filter_map(|part| {
+                    self.build_special_hand_draw(device, part, [255, 255, 255], placement, light)
+                })
+                .collect();
+            if draws.is_empty() {
+                return None;
+            }
+            return Some((draws, Vec::new()));
+        }
+
         // The trident is the one special rig whose mesh lives in the **entity**
         // corpus rather than in `BLOCK_ENTITY_MODELS` — it is the same
         // `"trident"` entry `ThrownTridentRenderer` draws a thrown one with, and

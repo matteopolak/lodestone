@@ -3630,6 +3630,92 @@ pub fn copper_golem_statue_oxidation_from_item_path(
     })
 }
 
+/// [`decorated_pot_item_rig`]'s result: five opaque draws sharing one
+/// placement, in `DecoratedPotRenderer.submit`'s own submission order.
+///
+/// Five rather than two (a banner) or one (a shield) because the thing that
+/// varies here is the **diffuse sheet per quad**, not a tint over one mesh —
+/// which is a shape the ordinary batcher was already built for. See
+/// [`BlockEntityModelSet::resolve_decorated_pot`], the placed-pot twin, whose
+/// own doc carries the derivation; this is the same decomposition at the item
+/// surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecoratedPotItemRig {
+    /// `(model, texture)` for the neck/top/bottom body — always the base sheet.
+    pub base: (&'static str, &'static str),
+    /// `(model, texture)` for the front face.
+    pub front: (&'static str, &'static str),
+    /// `(model, texture)` for the back face.
+    pub back: (&'static str, &'static str),
+    /// `(model, texture)` for the left face.
+    pub left: (&'static str, &'static str),
+    /// `(model, texture)` for the right face.
+    pub right: (&'static str, &'static str),
+}
+
+impl DecoratedPotItemRig {
+    /// The five draws in submission order, for a caller that wants to iterate
+    /// rather than name each face — the shape every consumer actually uses.
+    #[must_use]
+    pub const fn parts(&self) -> [(&'static str, &'static str); 5] {
+        [self.base, self.front, self.back, self.left, self.right]
+    }
+}
+
+/// The `minecraft:decorated_pot` item rig — `DecoratedPotSpecialRenderer.submit`,
+/// which forwards straight to the same `DecoratedPotRenderer.submit` a placed pot
+/// uses with `Objects.requireNonNullElse(decorations, PotDecorations.EMPTY)`.
+///
+/// The four arguments are the sherd **item paths** off the stack's own
+/// `minecraft:pot_decorations` component, namespace stripped, in vanilla's
+/// record order. `None` is a plain brick face rather than "unknown" —
+/// `PotDecorations::getItem` maps `Items.BRICK` to `Optional.empty()` on the way
+/// in, so a blank face and a brick face are the same state by construction.
+///
+/// # Every side always draws
+///
+/// An undecorated side takes [`DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM`] rather
+/// than being skipped, because vanilla's `submit` calls `submitModelPart` for
+/// all four faces unconditionally. Skipping blank sides would draw a pot with
+/// three invisible faces for the overwhelmingly common undecorated stack, and
+/// then **silently autocorrect** the moment a player added their first sherd —
+/// which is the failure that looks like a component-decode bug rather than a
+/// draw one.
+///
+/// # This returns the whole rig even when a sherd is unrecognised
+///
+/// A datapack sherd path that [`decorated_pot_pattern_texture_stem`] declines
+/// falls back to the default side sprite for **that face only**. The pot still
+/// draws. That is deliberately unlike [`special_item_rig`]'s "decline the whole
+/// item rather than guess", and the asymmetry is the point: there, an
+/// unrecognised path means we do not know what rig the item wants; here we know
+/// exactly what rig it wants and only one of its four sheets is unknown, and
+/// vanilla's own `getSideSprite` takes precisely this fallback.
+///
+/// Unlike a banner's, no argument here is optional-by-shortfall — the sherds are
+/// a real decoded component (`lodestone_model::PotDecorations`), so a caller
+/// that has the stack can pass the truth.
+#[must_use]
+pub fn decorated_pot_item_rig(
+    back: Option<&str>,
+    left: Option<&str>,
+    right: Option<&str>,
+    front: Option<&str>,
+) -> DecoratedPotItemRig {
+    let side = |sherd: Option<&str>| -> &'static str {
+        sherd
+            .and_then(decorated_pot_pattern_texture_stem)
+            .unwrap_or(DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM)
+    };
+    DecoratedPotItemRig {
+        base: (DECORATED_POT_BASE, DECORATED_POT_BASE_TEXTURE_STEM),
+        front: (DECORATED_POT_SIDE_FRONT, side(front)),
+        back: (DECORATED_POT_SIDE_BACK, side(back)),
+        left: (DECORATED_POT_SIDE_LEFT, side(left)),
+        right: (DECORATED_POT_SIDE_RIGHT, side(right)),
+    }
+}
+
 /// The entity-corpus model name a held `minecraft:trident` draws —
 /// `TridentSpecialRenderer.bake`'s `new TridentModel(bakeLayer(ModelLayers.TRIDENT))`.
 ///
@@ -6148,6 +6234,106 @@ mod special_item_tests {
             4,
             "the four oxidation levels collapsed to {distinct:?} — keying the sheet on \
              the `kind` alone draws every statue unaffected-copper"
+        );
+    }
+
+    /// [`decorated_pot_item_rig`] names five real meshes and five real sheets, an
+    /// undecorated pot takes the default side sprite on all four faces rather than
+    /// dropping them, and a decorated one puts a **distinct** sheet on each face.
+    ///
+    /// The distinctness arm is the one that matters, and it is not a tautology: the
+    /// four faces share one mesh *shape* and differ only in which sherd sprite they
+    /// sample, so a rig that returned the same stem four times would resolve, draw a
+    /// complete pot, and be wrong in exactly the way nobody looks for. Four different
+    /// sherds are passed for that reason — passing the same sherd twice is the
+    /// coincident input that would let a transposed pair through.
+    ///
+    /// The face-to-argument mapping is checked by giving each face a sherd whose
+    /// stem names it, because `PotDecorations`' record order is `back, left, right,
+    /// front` while the *draw* order is base, front, back, left, right — two
+    /// same-typed sequences in different orders, which is precisely the transposition
+    /// this repo's rules say survives every round trip.
+    #[test]
+    fn a_pot_rig_sheets_four_faces_independently_and_defaults_the_blank_ones() {
+        let models = BlockEntityModelSet::load();
+        let stems = block_entity_texture_stems();
+
+        // Undecorated: every face draws, and draws the default sprite.
+        let plain = decorated_pot_item_rig(None, None, None, None);
+        let mut wrong: Vec<String> = Vec::new();
+        for (model, stem) in plain.parts() {
+            if models.get(model).is_none() {
+                wrong.push(format!("model {model:?} is not in BLOCK_ENTITY_MODELS"));
+            }
+            if !stems.contains(&stem) {
+                wrong.push(format!("sheet {stem:?} is not in the preload list"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+        for (model, stem) in [plain.front, plain.back, plain.left, plain.right] {
+            assert_eq!(
+                stem, DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM,
+                "{model} skipped its blank face instead of drawing the default \
+                 sprite — vanilla's submit calls submitModelPart for all four \
+                 unconditionally, and skipping silently autocorrects the moment a \
+                 player adds their first sherd"
+            );
+        }
+        assert_eq!(
+            plain.base,
+            (DECORATED_POT_BASE, DECORATED_POT_BASE_TEXTURE_STEM),
+            "the body is always the base sheet, whatever the sides carry"
+        );
+
+        // Decorated: four different sherds, one per face, checked by name so a
+        // transposition between the record order and the draw order cannot pass.
+        let decorated = decorated_pot_item_rig(
+            Some("angler_pottery_sherd"),
+            Some("blade_pottery_sherd"),
+            Some("burn_pottery_sherd"),
+            Some("danger_pottery_sherd"),
+        );
+        for (face, got, sherd) in [
+            ("back", decorated.back.1, "angler"),
+            ("left", decorated.left.1, "blade"),
+            ("right", decorated.right.1, "burn"),
+            ("front", decorated.front.1, "danger"),
+        ] {
+            assert!(
+                got.contains(sherd),
+                "the {face} face took {got:?}, which is not the {sherd} sherd it was \
+                 given — `PotDecorations` orders its fields back/left/right/front \
+                 while the draws go base/front/back/left/right, so a transposition \
+                 here still draws a complete pot"
+            );
+        }
+        let mut sheets = [
+            decorated.front.1,
+            decorated.back.1,
+            decorated.left.1,
+            decorated.right.1,
+        ];
+        sheets.sort_unstable();
+        let distinct = {
+            let mut s = sheets.to_vec();
+            s.dedup();
+            s.len()
+        };
+        assert_eq!(
+            distinct, 4,
+            "four different sherds collapsed onto {sheets:?} — a rig returning one \
+             stem for every face draws a complete, uniformly wrong pot"
+        );
+
+        // An unrecognised sherd falls back for that face **only**, unlike
+        // `special_item_rig`'s decline-the-whole-item contract. See the rig's own
+        // doc for why the two differ.
+        let datapack = decorated_pot_item_rig(Some("mypack:teapot_sherd"), None, None, None);
+        assert_eq!(datapack.back.1, DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM);
+        assert_eq!(
+            datapack.base,
+            plain.base,
+            "one unknown sherd must not cost the pot its body"
         );
     }
 
