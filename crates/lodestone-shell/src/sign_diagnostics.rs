@@ -49,10 +49,18 @@
 //! the whole packet, so a malformed sign NBT rejects the entire chunk and
 //! shows up as missing terrain, not as a blank sign.
 //!
+//! [`report`] also names, separately, any sign whose record **did** parse into
+//! real spans and which is nonetheless absent from this frame's spawn list,
+//! with its distance beside `block_entities::VIEW_DISTANCE`. "Culled" and
+//! "had no text" are different answers and a log that conflates them sends the
+//! next reader at the wrong layer; beyond the cutoff vanilla drops the sign
+//! too and there is nothing to fix, inside it the *draw* dropped it and
+//! [`report_draw_budget`] will have said so in the same run.
+//!
 //! # How to change it
 //!
-//! It is off unless `RUST_LOG` names the `signs` target at `debug`, and it is
-//! rate-limited by a call counter rather than a clock — `Instant::now()` traps
+//! The scan is off unless `RUST_LOG` names the `signs` target at `debug`, and
+//! it is rate-limited by a call counter rather than a clock — `Instant::now()` traps
 //! on `wasm32` and this crate links into the browser bundle, so there is no
 //! timer here on purpose.
 //!
@@ -61,10 +69,16 @@
 //! `block_entities::VIEW_DISTANCE`, since the question is always about a sign
 //! the owner is standing in front of.
 //!
+//! [`report_draw_budget`] is the one thing here that is **not** opt-in: the
+//! sign-text pass dropping signs it was handed is a visible defect rather than
+//! an investigation aid, so it warns unconditionally, latched on the drop
+//! count.
+//!
 //! # Configuration
 //!
-//! * `RUST_LOG=signs=debug` — turn it on. Nothing is scanned or logged
-//!   otherwise; the whole body is behind one `tracing::enabled!` check.
+//! * `RUST_LOG=signs=debug` — turn the per-sign scan on. Nothing is scanned or
+//!   logged by [`report`] otherwise; its whole body is behind one
+//!   `tracing::enabled!` check. [`report_draw_budget`] is unaffected.
 //! * `LODESTONE_SIGN_DIAG_RADIUS` — scan radius in blocks, default
 //!   [`DEFAULT_SCAN_RADIUS`].
 //! * `LODESTONE_SIGN_DIAG_INTERVAL` — report once every this many calls
@@ -78,7 +92,7 @@
 //! — reused rather than re-derived, so a divergence between this instrument
 //! and the real gather is impossible by construction.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use glam::Vec3;
 use lodestone_core::Nbt;
@@ -269,6 +283,42 @@ pub fn report(handle: &SharedHandle, eye: Vec3, spawned: &[SignSpawn]) {
             _ => None,
         })
         .collect();
+
+    // **"Culled" and "no text" are different answers and the log has to say
+    // which.** A sign whose record parsed into real spans and which is
+    // nonetheless absent from this frame's spawn list was not silent about
+    // its text — it was removed on the way to the draw, and the only two
+    // things that remove one are `block_entities::VIEW_DISTANCE` and the
+    // sign-text pass's own vertex budget. Printing the distance beside the
+    // cutoff separates them without another instrument: beyond it, vanilla
+    // drops the sign too and there is nothing to fix; inside it, the budget
+    // did, and `report_draw_budget` will have warned in the same run.
+    for (block, front, back) in ok
+        .iter()
+        .filter(|(block, _, _)| !spawned.iter().any(|s| s.pos == **block))
+        .take(MAX_LINES)
+    {
+        let centre = Vec3::new(
+            block[0] as f32 + 0.5,
+            block[1] as f32 + 0.5,
+            block[2] as f32 + 0.5,
+        );
+        let distance = centre.distance(eye);
+        let verdict = if distance > crate::block_entities::VIEW_DISTANCE {
+            "beyond VIEW_DISTANCE, as vanilla would also drop it"
+        } else {
+            "INSIDE VIEW_DISTANCE — the draw dropped it, not the gather"
+        };
+        tracing::debug!(
+            target: TARGET,
+            "has-text-but-not-drawn at {},{},{} (front {front}, back {back}):              {distance:.1} blocks from the eye against a {:.0}-block cutoff — {verdict}",
+            block[0],
+            block[1],
+            block[2],
+            crate::block_entities::VIEW_DISTANCE,
+        );
+    }
+
     tracing::debug!(
         target: TARGET,
         "scanned {radius} blocks around {:.1},{:.1},{:.1}: {} sign state(s), {blank} drawing no text, {} with spans ({}), {} spawn(s) submitted this frame",
@@ -423,6 +473,51 @@ fn write_nbt(nbt: &Nbt, out: &mut String) {
             out.push('}');
         }
     }
+}
+
+/// The last drop count [`report_draw_budget`] reported, so a binding budget
+/// is announced when it *changes* rather than every frame. `usize::MAX` is
+/// "nothing reported yet", which no real count can collide with.
+static LAST_DROPPED: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Says, once per change, that the sign-text pass could not draw every sign
+/// the gather handed it.
+///
+/// This exists because the pass used to drop the tail of its list in
+/// complete silence — no log, no counter, no red test — which is the failure
+/// mode `CLAUDE.md`'s "nothing may be silently skipped" rule is about, and
+/// which presents to a player as whole boards blinking in and out as they
+/// move. Unlike the rest of this module it is **not** gated behind
+/// `RUST_LOG=signs=debug`: a dropped sign is a visible defect rather than an
+/// investigation aid, so it warns unconditionally. It is latched on the drop
+/// count, so a scene that steadily overflows says so once, not sixty times a
+/// second, and a scene that recovers says that too.
+///
+/// * `gathered` — what `block_entities::sign_spawns` returned.
+/// * `in_front` — how many of those were not discarded as behind the eye.
+/// * `drawn` — how many actually reached the vertex buffer.
+pub(crate) fn report_draw_budget(
+    gathered: usize,
+    in_front: usize,
+    drawn: usize,
+    vertices: usize,
+    capacity: usize,
+) {
+    let dropped = in_front.saturating_sub(drawn);
+    if LAST_DROPPED.swap(dropped, Ordering::Relaxed) == dropped {
+        return;
+    }
+    if dropped == 0 {
+        tracing::debug!(
+            target: TARGET,
+            "sign-text budget no longer binding: {drawn} of {gathered} gathered sign(s)              drawn, {vertices}/{capacity} vertices"
+        );
+        return;
+    }
+    tracing::warn!(
+        target: TARGET,
+        "sign-text budget exhausted: {dropped} of {in_front} in-front sign(s) drew NO text          ({gathered} gathered, {vertices}/{capacity} vertices). The farthest signs are          dropped first; they will blink back as you approach. Raise          MAX_SIGN_TEXT_VERTICES in gpu/sign_text.rs."
+    );
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {

@@ -2691,6 +2691,18 @@ fn sign_candidates(
             let state_id = chunk
                 .column
                 .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            // `chunk.block_entities` is every block entity in the column —
+            // chests, furnaces, hoppers, barrels, beds — not just signs, and
+            // this runs once per rendered frame. Resolving the state first
+            // costs one table lookup and skips a full NBT walk plus a
+            // `SignText` allocation for every non-sign record in a 64-block
+            // sphere. Behaviour is unchanged: [`sign_spawn`] already drops
+            // anything whose state is not a sign, so this only stops the work
+            // being done twice over on records that were always going to be
+            // discarded.
+            if sign_kind_for_state(state_id).is_none() {
+                continue;
+            }
             candidates.push(([x, y, z], state_id, SignText::parse(&be.nbt)));
         }
     }

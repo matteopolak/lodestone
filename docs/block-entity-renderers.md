@@ -689,6 +689,86 @@ a flat `String`, and `gpu/sign_text.rs` draws through `gpu::nametag::layout_styl
 styled world-space glyph layout nametags and `text_display` use — instead of the old unstyled
 `layout_styled_ink_runs`. See the typed-parse section above for the dye-as-default rule.
 
+### The draw budget, and why "signs flicker in and out when far away" was not a culling bug
+
+Owner report from real play: *"signs flicker in and out (completely) when they're far away and I
+move"*. Three findings came out of it; the first two are exclusions and the third is the fix.
+
+**The distance cutoff is right.** `block_entities::VIEW_DISTANCE` is 64 blocks, which is
+`BlockEntityRenderer.getViewDistance`'s default, and **no sign renderer overrides it** —
+`AbstractSignRenderer` has no `getViewDistance`, and neither does `StandingSignRenderer` or
+`HangingSignRenderer` (`BeaconRenderer`, `PistonHeadRenderer`, `TheEndGatewayRenderer` and
+`BlockEntityWithBoundingBoxRenderer` are the only ones in 26.2 that do). Nor does vanilla apply a
+*shorter* cutoff to the text: the only distance in `AbstractSignRenderer` is
+`OUTLINE_RENDER_DISTANCE = 16²`, which gates the glow outline, not the glyphs.
+
+**The ink/board depth separation is one representable step at range, and the polygon offset is what
+carries it.** A plain sign's ink plane sits `0.005` blocks in front of its board face —
+`TEXT_OFFSET.z` of `0.046666667` against `template_sign_rot_0.json`'s board face at
+`8.66667/16 - 0.5`. Measured through the real projection into a `Depth32Float` attachment, that
+standoff is worth:
+
+| distance (blocks) | 4 | 8 | 16 | 24 | 32 | 48 | 63 |
+|---|---|---|---|---|---|---|---|
+| ULPs of separation | 262 | 65 | 15 | 7 | 5 | **1** | **1** |
+
+Two exactly parallel planes one ULP apart is the textbook recipe for the reported symptom, because a
+parallel pair flips *whole* rather than speckling — which is why this had to be measured rather than
+argued. It was then **excluded**: rendered over a real meshed board at all seven distances and across
+sub-block camera displacements, the ink holds at a constant 657 px.
+`TEXT_POLYGON_OFFSET`'s `constant: -10` — ten ULPs at the fragment's own exponent — really does carry
+the ordering the geometry stopped carrying. Read the table as *the offset is load-bearing*: the
+`0.005`-block standoff is not headroom, and anything that removes or shrinks the bias breaks signs at
+range and nowhere near the camera. (Under vanilla's reversed-Z the same standoff would stay
+comfortable at every one of those ranges; this is the `[0,1]`-forward-depth cost `CLAUDE.md`'s
+rendering constraints record.)
+
+**The actual defect was the sign-text pass's fixed vertex buffer.** `MAX_SIGN_TEXT_VERTICES` was
+40,000, and the ink walk emits one quad per *horizontal run of ink texels per glyph row* — not one
+per glyph. Measured through the real builder with the jar's own font: a four-line two-sided plain
+sign is **7,632** vertices, a three-short-line one-sided sign **1,392**, a one-line chest label
+**384**. So 40,000 was **5.2** fully-written signs, and 120 chest labels (46,080) overflowed it too.
+Past the cap `prepare` did `vertices.len().min(MAX)`, which
+
+- dropped the tail of a list sorted by **block position** — an order with nothing to do with the
+  camera, so which signs vanished was effectively arbitrary and changed as the player moved and the
+  in-range set changed, and
+- cut a flat vertex vector at an arbitrary index, which can sever a triangle, and
+- said nothing at all: no log, no counter, no red test.
+
+The fix is three parts, all inside `gpu/sign_text.rs` because `prepare` takes `&self` from
+`RenderState::render` (also `&self`, with no device in scope) and so cannot reallocate:
+
+1. **Capacity 262,144** — 7.34 MB at 28 bytes a vertex, against ~67 MB of terrain mesh at render
+   distance 8. Buys 34 fully-written signs or ~188 ordinary ones in front of the camera.
+2. **Spend it nearest-first, and skip what is behind the eye.** `order_by_forward_distance` sorts on
+   `clip.w`, which for a perspective projection is exactly `-z_view`, so it needs no camera basis and
+   no eye position — the view-projection the pass already receives carries both. Signs more than one
+   block behind the eye plane project to nothing and were eating roughly half the budget. The
+   caller's position sort is untouched; the reorder is local to the upload.
+3. **Truncate whole signs and say so.** `sign_diagnostics::report_draw_budget` warns — *not* behind
+   `RUST_LOG=signs=debug`, because a dropped sign is a visible defect rather than an investigation
+   aid — latched on the drop count so a steadily-overflowing scene says it once rather than sixty
+   times a second, and says so again when it recovers.
+
+Gates: `gpu/sign_text.rs`'s own `the_vertex_budget_holds_a_real_rooms_worth_of_signs` (a magnitude
+prediction — it evaluates the population against *both* the old 40,000 and the current capacity, and
+was observed failing at 40,000) and `the_budget_is_spent_nearest_first_and_skips_signs_behind_the_eye`;
+`tests/sign_text_distance_stability_pixels.rs` for the depth arm.
+
+Two things the same investigation turned up that are worth carrying:
+
+- **`sign_candidates` was parsing sign NBT for every block entity in range, every frame** — chests,
+  furnaces, hoppers, beds — because it pushed the whole `chunk.block_entities` list and let
+  `sign_spawn` filter afterwards. It resolves the block state first now. Behaviour is identical;
+  only the wasted `SignText::parse` per non-sign record is gone.
+- **A hermetic sign gate whose world is uploaded but whose fade clock is never advanced renders its
+  "real board" as sky.** A section uploaded this frame is mid-fade-in and draws nothing, so every
+  depth claim such a gate makes is vacuous. The distance gate measured exactly that on its first run
+  — 0 board pixels at all seven distances — and now asserts board coverage as a precondition rather
+  than assuming it. Any sign gate that means to put a board in the depth buffer needs
+  `RenderState::update_animation` past the fade.
+
 ### Hanging signs: the same renderer, four numbers apart
 
 **26.2's `HangingSignRenderer` declares no model.** It is `AbstractSignRenderer` plus one
