@@ -6,6 +6,13 @@ redistributed; everything is ported from the published protocol, the decompiled 
 under `.cache/` (never checked in — see [`docs/legal-notices.md`](./docs/legal-notices.md)),
 and Mojang's own data generators.
 
+> [!NOTE]
+> **AI was used extensively to write this code.** A from-scratch client is far more code
+> than one person can write by hand in any reasonable time, so the bulk of it was authored
+> with AI assistance. It has been read over closely and playtested by hand — the bugs that
+> shaped most of it were found by actually playing on real servers, not by a model deciding
+> it was finished.
+
 > [!IMPORTANT]
 > **Lodestone is not affiliated with, endorsed by, or associated with Mojang Studios,
 > Microsoft, or Minecraft in any way.** "Minecraft" is a trademark of Mojang Synergies AB.
