@@ -9073,53 +9073,65 @@ flags (9/0 `display_text` lib tests), plus `tests/live_sign_text_wire.rs` and
 `tests/live_framed_item_wire.rs`, both `#[ignore]`d behind `--features live` against the creative
 oracle on `:25570`.
 
-### A GPU timestamp bracket made of dummy passes: what the spec suggested, and what the bench measured
+### A GPU timestamp bracket made of dummy passes does not work here, and I got the reason wrong first
 
-The shell's `gpu::gpu_timing` times a *span of passes* by opening two throwaway 1x1 render passes
-around them and hanging `timestamp_writes` off those — `CommandEncoder::write_timestamp` needs
+The shell's `gpu::gpu_timing` times a *span of passes* by opening two throwaway 1x1 render passes around
+them and hanging `timestamp_writes` off those — `CommandEncoder::write_timestamp` needs
 `TIMESTAMP_QUERY_INSIDE_ENCODERS`, whose own doc excludes Apple GPUs by name, so a pass boundary is the
 only place a timestamp can be written on this adapter.
 
-Those bracketing passes were **empty**. A change made them draw one triangle, on the reasoning that
+Those bracketing passes were empty. A change made them draw one triangle, on the reading that
 `timestamp_writes` samples at *stage* boundaries and a pass with no vertex or fragment stage therefore
-has no boundary to sample, so the pair it reports is not a duration of anything. That reading of the
-spec is plausible and it is what the occasional inversions looked like. `benches/frame_profile.rs`
-settled it, and it settled it the other way. All figures at `ground_forward`, demo world radius 6,
-1280x720, medians over 30 frames after 12 warm-up:
+has no boundary to sample. `benches/frame_profile.rs` measured that change making the spans **worse**:
+at `ground_forward`, `world_total` against the block pass it encloses went from 0.608 / 0.574 / 0.729 ms
+(three runs, empty, always enclosing) to 0.072, then 0.516, then 1.373 ms against a 0.296 ms pass —
+wrong in both directions.
 
-| stamp pass | `world_total` | block pass it encloses |
+**The obvious conclusion from that — "the triangle broke it" — was drawn, committed, and is false.**
+Reverting to the empty pass and re-running on a quiet machine:
+
+| waypoint | `world_total` | block pass it encloses |
 |---|---|---|
-| empty, three runs | 0.608 / 0.574 / 0.729 ms | 0.299 / 0.311 / 0.495 ms |
-| one triangle, run 1 | **0.072 ms** | 0.319 ms |
-| one triangle, run 2 | 0.516 ms | 0.316 ms |
-| one triangle, run 3 | **1.373 ms** | 0.296 ms |
+| ground_forward | 0.592 ms | 0.348 ms |
+| ground_oblique | **0.059 ms** | 0.234 ms |
+| high_down | **0.114 ms** | 0.451 ms |
+| low_up | 0.121 ms | 0.085 ms |
 
-Empty: three for three, always enclosing, tracking the scene. Triangle: one plausible reading out of
-three, wrong in **both** directions — 4.4x too small once and 4.6x too large once, and at `high_down` in
-run 3 the span was 0.212 ms against a 0.479 ms block pass with **100% of readbacks** summing above the
-span. The triangle was reverted.
+Two of four below their own contents. The bracket is unreliable in **both** designs; the triangle was
+neither the cause nor a fix. It stays reverted only because it was added to fix something it does not
+fix, and dead code does not stay in the tree.
 
-The mechanism that fits is that a stamp pass carrying real work shares no attachment with the frame's
-own passes, so nothing orders it against them and the GPU may retire it whenever it likes; an empty pass
-appears to be kept in submission order as a marker. That is an inference about one driver. The table is
-the evidence.
+What the runs correlate with is the readback stall count: the single run whose four waypoints all came
+out enclosing had the fewest stalls per waypoint, and was the run on a *heavily loaded* machine, where
+the slower CPU frame loop let readback keep up. That is a correlation over a handful of runs and is
+explicitly **not** an established mechanism.
 
-Three things generalise:
+Three things generalise, and the second is the one that cost the most:
 
-- **A change justified by reading a spec is a hypothesis, and this repo's standard applies to it
-  unchanged.** Nothing about the triangle looked wrong on inspection — it had a shader file, a doc
-  comment explaining stage boundaries, and a named symptom it claimed to fix. The only thing that
-  distinguished it from a correct change was a measurement nobody had taken yet.
-- **The self-validating gate is what caught it**, and it caught it because it asserts a *relation between
-  two numbers measured in the same run* (a span at or above the pass it encloses) rather than a
-  millisecond threshold. A gate on an absolute figure would have passed run 2 and failed runs 1 and 3 for
-  unrelated reasons.
-- **That gate could only report one of its four arms.** It was an `assert!` inside the per-waypoint loop,
-  so run 1 aborted at the first waypoint and printed nothing else — and the shape *across* waypoints (a
-  broken bracket reads roughly flat while the block pass it contains varies severalfold) is exactly what
-  separates a real pairing bug from a scene that is genuinely cheap. Restructured to collect the
-  violations and assert on the collection, run 3 reported all four and named the one that failed. Same
-  lesson as the item-settling neuter: collect, then assert.
+- **A change justified by reading a spec is a hypothesis and gets no discount.** Nothing about the
+  triangle looked wrong: it had a shader file, a doc comment explaining stage boundaries, and a named
+  symptom it claimed to fix. The only thing separating it from a correct change was a measurement nobody
+  had taken.
+- **A revert that does not restore the old behaviour refutes the diagnosis, and the first commit had
+  already written the diagnosis down as fact — into this log.** Three runs before and three after looked
+  like ample evidence for "the triangle did it"; the confirming run said otherwise. Two habits follow:
+  **run the confirming measurement before writing the causal claim, not after**, and when a *revert* is
+  the fix, treat the post-revert run as the actual experiment rather than as a formality. A wrong entry
+  in this log is worse than no entry, because everything downstream is built on it.
+- **The gate had to be demoted, and a demotion needs to be as loud as the gate was.** "A span is at
+  least as long as what it brackets" is a sound premise that this instrument does not meet, so the
+  assertion failed on healthy code. It now prints the violation count every run, **including when it is
+  zero** — otherwise a silent line cannot be told apart from one that never ran, and the bracket could
+  quietly get better or worse with nobody noticing.
+
+The reliable half is unaffected and is what the F3 overlay now reports: the per-pass segments (`world`,
+the block pass; `first_person`, the hand pass) are single real passes with their own edges, and they
+track the scene consistently across every run recorded here. The overlay had been summing the two
+bracket spans into a "gpu frame total" line, which was a fabricated figure; it now reports the sum of
+the real passes, labelled as the **floor** it is — a sum of per-pass GPU times is not a frame's GPU
+time, because passes overlap on a tile-based deferred GPU. The durable fix is to hang the frame's edges
+off the real first and last passes, which share an attachment with the work and so genuinely serialise;
+those live in `lodestone-render`.
 
 ### `world.submit` was two costs with opposite fixes, and the fused number could not name either
 

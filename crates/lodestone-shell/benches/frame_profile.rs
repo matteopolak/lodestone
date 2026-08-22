@@ -26,12 +26,16 @@
 //! millisecond figure. What *is* asserted is either a count or a relation
 //! between two numbers measured in the same run:
 //!
-//! * **`world_total`'s median is at or above the block pass's median.** The
-//!   instrument validating itself: a mis-stamped span reads as near-zero or
-//!   garbage, not as a few percent under the pass it encloses, so this still
-//!   fails outright if the bracketing stamps are recorded in the wrong order,
-//!   if the resolve executes before an edge is written, or if the four segment
-//!   indices are rebased by a reordering of `RenderState`'s segment-name list.
+//! * **The bracketing spans are reported, not asserted, and that demotion is
+//!   itself one of this bench's findings.** `world_total`'s median at or above
+//!   the block pass it encloses *was* the instrument validating itself. The
+//!   premise is sound and the instrument does not meet it: across four runs,
+//!   with the stamp pass empty and again with it drawing a triangle, the span
+//!   comes out below the enclosed pass at some waypoints (0.059 ms of span
+//!   against a 0.234 ms pass) and several times above it at others — on a
+//!   quiet machine, in both designs. A gate that fails on healthy code is not
+//!   a gate, so the violation count prints every run instead, including when
+//!   it is zero.
 //!
 //!   The stronger, obvious forms are **not** invariants here, and both were
 //!   tried and observed failing. `world_total >= world + first_person` failed
@@ -615,21 +619,36 @@ fn bench_frame_profile(c: &mut Criterion) {
         }
     }
 
-    assert!(
-        span_below_pass.is_empty(),
-        "the `world_total` bracketing span came out **below** the block pass it encloses at \
-         {} of {} waypoints: {:?} (label, span ms, block-pass ms).\n\nA span shorter than its \
-         own contents is not a small error, it is a different quantity. The bracket is stamped \
-         by two 1x1 render passes that share no attachment with the real work, and a GPU free \
-         to run passes without a data dependency concurrently will retire both stamps at the \
-         head of the command buffer -- measuring the stamps rather than the frame. The \
-         diagnostic is in the numbers just printed: a bracket that has stopped enclosing \
-         anything is roughly **flat** across these waypoints, while the block pass it nominally \
-         contains varies severalfold with the scene. Check that before changing anything about \
-         the stamp passes.",
+    // **Reported, not asserted — and that demotion is itself a measurement.**
+    //
+    // This was an assertion: a span cannot be shorter than what it brackets,
+    // and a violation means the timestamps are being paired wrongly. The
+    // premise is sound and the instrument does not meet it. Both stamp-pass
+    // designs were tried across four runs — empty, and drawing one triangle —
+    // and both produce spans below the block pass they enclose at some
+    // waypoints and several times above it at others, on a quiet machine. See
+    // `gpu::gpu_timing::GpuQueryTimer::stamp` for the table.
+    //
+    // A gate that fails on healthy code is not a gate, so this prints instead.
+    // It deliberately prints *every* run, pass or fail, and prints the count:
+    // a silent line would let the bracket quietly start working (or quietly
+    // get worse) with nobody noticing, and "0 of 4" is the only form in which
+    // this line reporting nothing is distinguishable from it not having run.
+    // The per-pass segments below are unaffected — they are single real passes
+    // with their own edges, and they are what the CPU-vs-GPU verdict should be
+    // read from.
+    println!(
+        "-- bracketing spans: {} of {} waypoints had `world_total` BELOW the block pass it \
+         encloses{}\n   These two segments (`world_total`, `hud_total`) are diagnostics, not \
+         measurements: do not sum them into a frame GPU total. The per-pass `world` and \
+         `first_person` figures above are the trustworthy ones.\n",
         span_below_pass.len(),
         PATH.len(),
-        span_below_pass,
+        if span_below_pass.is_empty() {
+            String::new()
+        } else {
+            format!(" -- {span_below_pass:?} (label, span ms, block-pass ms)")
+        },
     );
 
     rotation_does_not_move_residency(device, queue, &mut target, &state);
