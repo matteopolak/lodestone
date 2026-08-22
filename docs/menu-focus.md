@@ -215,15 +215,19 @@ not own.
 
 ## Deliberate gaps, each with the reason
 
-- **Left/Right/Home/End are still not produced from a real keystroke** —
-  `app::menus::WindowApp::menu_key_for` still does not translate the arrow
-  keys or Home/End into `MenuKey`, only Up/Down/Enter/Escape/Tab/Backspace/
-  Delete, plus (now) select-all/copy/cut/paste. `EditBox::handle_key`
-  already handles Left/Right/Home/End correctly and is unit-tested on them;
-  nothing has reported caret-only navigation as broken, so this gap is
-  deliberately unclosed rather than pre-emptively wired. **This bullet used to
-  claim the same about every modifier, which was wrong in a way that shipped a
-  bug**: `menu_key_for` never tracked `winit`'s modifier state at all, so
+- **Left/Right/Home/End are produced now, and were not for a long time.**
+  `menu_key_for` translated only Up/Down/Enter/Escape/Tab/Backspace/Delete
+  plus select-all/copy/cut/paste, so no arrow key or Home/End ever reached a
+  focused field. `EditBox::handle_key` had implemented all four correctly, and
+  was unit-tested on them, the entire time — the closed loop this file exists
+  to warn about, since the leaf's own suite is green whether or not anything
+  calls it. They now arrive as `MenuKey::Edit`, which carries the whole
+  `focus::KeyEvent` instead of abstracting it: for caret motion the modifiers
+  *are* the meaning (Left, Shift+Left, Cmd/Ctrl+Left and both together are
+  four different edits), which an abstract `Left` variant could not express.
+  `app::input::text_key_event` is the one translator, shared with the chat
+  box. **This bullet used to claim the same about every modifier, which was
+  wrong in a way that shipped a bug**: `menu_key_for` never tracked `winit`'s modifier state at all, so
   Cmd+A/Cmd+V — reported as "it inserts an a"/"inserts a v" — were
   indistinguishable from plain `a`/`v` in production despite `EditBox` and
   `KeyEvent::is_select_all`/`is_copy`/`is_cut`/`is_paste` being correct and

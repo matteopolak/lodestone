@@ -18,8 +18,8 @@ use super::*;
 /// running on a different platform, and getting this exact mapping wrong is
 /// invisible on Linux and Windows (Ctrl already worked there) while breaking
 /// every shortcut on a Mac. [`WindowApp::menu_key_for`] and
-/// [`WindowApp::chat_shortcut_modifier_held`] both call this with the real
-/// `cfg!` value; the tests at the bottom of this file call it with both.
+/// [`WindowApp::handle_chat_key_parts`] both call this with the real `cfg!`
+/// value; the tests at the bottom of this file call it with both.
 pub(super) fn shortcut_modifier_held(modifiers: ModifiersState, is_macos: bool) -> bool {
     if is_macos {
         modifiers.super_key()
@@ -88,6 +88,15 @@ impl WindowApp {
                 }
                 KeyCode::KeyV if shortcut_held && !modifiers.shift_key() && !modifiers.alt_key() => {
                     return Some(MenuKey::Paste);
+                }
+                // Caret motion, carried whole rather than abstracted, because
+                // for these four the modifiers *are* the meaning — Left,
+                // Shift+Left, Cmd/Ctrl+Left and both together are four
+                // different edits. `super::input::text_key_event` is the same
+                // translator the chat box uses, so the menu fields and the
+                // chat line cannot drift apart in what a chord means.
+                KeyCode::ArrowLeft | KeyCode::ArrowRight | KeyCode::Home | KeyCode::End => {
+                    return super::input::text_key_event(physical_key, modifiers).map(MenuKey::Edit);
                 }
                 _ => {}
             }

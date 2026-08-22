@@ -847,10 +847,16 @@ impl WindowApp {
 /// Home/End, shift-selection, word skip or select-all, and copy/cut with
 /// nothing to read. All of that is already ported, once, on
 /// [`crate::menu::edit_box::EditBox`] — the missing piece was a *producer*, a
-/// way to get a real `KeyEvent` out of a winit event. `menu_key_for` is not it:
-/// it targets [`crate::menu::nav::MenuKey`], whose vocabulary has no
-/// Left/Right/Home/End at all (`KeyEvent::from_menu_key`'s own doc says so),
-/// so routing chat through it could never have carried caret motion.
+/// way to get a real `KeyEvent` out of a winit event. `menu_key_for` could not
+/// be it as it stood: it targets [`crate::menu::nav::MenuKey`], whose
+/// vocabulary had no Left/Right/Home/End at all, so routing chat through it
+/// could never have carried caret motion — and for the same reason the menu's
+/// own text fields (the sign, the book, the command block, the server-edit
+/// form) had none either, silently, since `EditBox` implements all four and
+/// simply never received them. `menu_key_for` now produces
+/// [`crate::menu::nav::MenuKey::Edit`] from *this* function for exactly those
+/// keys, so both paths share one translator and cannot drift apart in what a
+/// chord means.
 ///
 /// # The modifier mapping is faithful, not platform-folded
 ///
@@ -1377,6 +1383,259 @@ mod chat_editing {
             assert!(
                 text_key_event(PhysicalKey::Code(code), ModifiersState::empty()).is_none(),
                 "{code:?} is not a text-editing key"
+            );
+        }
+    }
+}
+
+/// The **other** text fields — the server-edit form, the sign, the book and the
+/// command block — reached through the same translator the chat line uses.
+///
+/// # What was missing, and why nothing was red
+///
+/// Those four already had select-all, copy, cut and paste, because
+/// `menu_key_for` produces a [`crate::menu::nav::MenuKey`] for each and
+/// `KeyEvent::from_menu_key` knows the GLFW code and modifier bit each stands
+/// for. They had **no caret motion at all**: `MenuKey`'s vocabulary had no
+/// Left, Right, Home or End, so a real arrow key reached
+/// [`crate::menu::edit_box::EditBox`] — which has implemented all four,
+/// correctly and with its own tests, the whole time — as nothing.
+///
+/// That is the closed loop `CLAUDE.md` names: `EditBox`'s own suite is green
+/// either way, because it calls `handle_key` directly. The gates below go in
+/// through `menu_key_for` and [`crate::menu::nav::MenuNav::key`] instead — the
+/// real producer and the real dispatch — so they fail if either end of the
+/// chain is missing rather than only if the leaf is.
+///
+/// The screens are not interchangeable and each is checked: the command block
+/// and the sign own their `EditBox` directly and were given an explicit arm,
+/// while the server-edit form routes every key through the focus layer and
+/// needed no change — a difference that is invisible from the leaf and is
+/// exactly what a per-screen gate is for.
+#[cfg(test)]
+mod menu_text_editing {
+    use super::*;
+    use crate::menu::command_block::CommandBlockOpen;
+    use crate::menu::UiState;
+    use crate::menu::nav::{MenuKey, MenuNav};
+    use crate::menu::sign_edit::SignEditOpen;
+
+    /// The platform's edit-shortcut modifier as winit reports it. Same
+    /// derivation, and same reason, as `chat_editing::edit_mod`.
+    fn edit_mod() -> ModifiersState {
+        if cfg!(target_os = "macos") {
+            ModifiersState::SUPER
+        } else {
+            ModifiersState::CONTROL
+        }
+    }
+
+    /// One real key press, all the way from a winit code to whichever field the
+    /// open screen focuses — `menu_key_for` then `MenuNav::key`, with nothing
+    /// short-circuited in between.
+    fn press(
+        ui: &mut UiState,
+        nav: &mut MenuNav,
+        code: KeyCode,
+        text: Option<&str>,
+        modifiers: ModifiersState,
+    ) {
+        let key = WindowApp::menu_key_for(PhysicalKey::Code(code), text, modifiers)
+            .expect("this gate presses a key the menu layer understands");
+        nav.key(ui, key);
+    }
+
+    /// A command-block screen open on `command`, with the caret at the end.
+    fn command_block(command: &str) -> (UiState, MenuNav) {
+        let (mut ui, mut nav) = (UiState::default(), MenuNav::default());
+        ui.enter_dev_world();
+        nav.open_command_block(
+            &mut ui,
+            CommandBlockOpen {
+                command: command.to_owned(),
+                ..CommandBlockOpen::default()
+            },
+        );
+        (ui, nav)
+    }
+
+    fn command_field(nav: &MenuNav) -> &crate::menu::edit_box::EditBox {
+        &nav.command_block().expect("the screen is open").command
+    }
+
+    /// The headline claim, and the one that was false: an arrow key moves the
+    /// caret in a menu text field.
+    ///
+    /// Asserted as a collection so the neuter reports every arm rather than
+    /// stopping at the first — with the arm inside a loop, three of these four
+    /// numbers would never be printed.
+    #[test]
+    fn the_caret_keys_reach_a_menu_text_field() {
+        let (mut ui, mut nav) = command_block("say hi");
+        let mut seen: Vec<(&str, usize, usize)> = Vec::new();
+        let mut claim = |label: &'static str, actual: usize, expected: usize| {
+            if actual != expected {
+                seen.push((label, actual, expected));
+            }
+        };
+
+        claim("the caret starts at the end", command_field(&nav).cursor_position(), 6);
+        press(&mut ui, &mut nav, KeyCode::ArrowLeft, None, ModifiersState::empty());
+        claim("Left steps one back", command_field(&nav).cursor_position(), 5);
+        press(&mut ui, &mut nav, KeyCode::Home, None, ModifiersState::empty());
+        claim("Home goes to the start", command_field(&nav).cursor_position(), 0);
+        press(&mut ui, &mut nav, KeyCode::ArrowRight, None, ModifiersState::empty());
+        claim("Right steps one forward", command_field(&nav).cursor_position(), 1);
+        press(&mut ui, &mut nav, KeyCode::End, None, ModifiersState::empty());
+        claim("End goes to the end", command_field(&nav).cursor_position(), 6);
+
+        assert!(seen.is_empty(), "(label, got, want): {seen:#?}");
+    }
+
+    /// Typing lands **at** the caret. This is the observable half of the fix:
+    /// before it, every character went to the end of the line no matter where
+    /// the player had tried to put the caret, because the caret could not be
+    /// put anywhere.
+    #[test]
+    fn a_typed_character_lands_at_the_moved_caret() {
+        let (mut ui, mut nav) = command_block("say hi");
+        press(&mut ui, &mut nav, KeyCode::Home, None, ModifiersState::empty());
+        press(&mut ui, &mut nav, KeyCode::KeyX, Some("X"), ModifiersState::empty());
+        assert_eq!(
+            command_field(&nav).value(),
+            "Xsay hi",
+            "appending would give `say hiX`"
+        );
+    }
+
+    /// The modifiers travel with the key, which is the whole reason this went
+    /// through a variant carrying a `KeyEvent` rather than an abstract `Left`:
+    /// under the platform's edit modifier the same physical key is a *word*
+    /// skip, and under Shift it extends a selection instead of moving.
+    #[test]
+    fn the_same_arrow_is_four_different_edits_depending_on_the_modifiers() {
+        let (mut ui, mut nav) = command_block("say hi:there");
+
+        press(&mut ui, &mut nav, KeyCode::ArrowLeft, None, ModifiersState::empty());
+        assert_eq!(command_field(&nav).cursor_position(), 11, "plain: one character");
+
+        let (mut ui, mut nav) = command_block("say hi:there");
+        press(&mut ui, &mut nav, KeyCode::ArrowLeft, None, edit_mod());
+        assert_eq!(
+            command_field(&nav).cursor_position(),
+            4,
+            "the edit modifier skips a whole word, and a colon is not a word \
+             break — a punctuation-aware skip would stop at 7"
+        );
+
+        let (mut ui, mut nav) = command_block("say hi:there");
+        press(&mut ui, &mut nav, KeyCode::ArrowLeft, None, ModifiersState::SHIFT);
+        let field = command_field(&nav);
+        assert_eq!(
+            (field.cursor_position(), field.highlight_position()),
+            (11, 12),
+            "Shift extends a selection rather than collapsing to a caret"
+        );
+
+        let (mut ui, mut nav) = command_block("say hi:there");
+        press(
+            &mut ui,
+            &mut nav,
+            KeyCode::ArrowLeft,
+            None,
+            edit_mod() | ModifiersState::SHIFT,
+        );
+        let field = command_field(&nav);
+        assert_eq!(
+            (field.cursor_position(), field.highlight_position()),
+            (4, 12),
+            "both together select the whole word"
+        );
+    }
+
+    /// The sign is a second screen with its own arm, and its own focus notion
+    /// (one of four lines). A caret key must reach the *active* line.
+    #[test]
+    fn the_caret_keys_reach_the_signs_active_line() {
+        let (mut ui, mut nav) = (UiState::default(), MenuNav::default());
+        ui.enter_dev_world();
+        nav.open_sign_edit(
+            &mut ui,
+            SignEditOpen {
+                lines: [
+                    "top".to_owned(),
+                    "second".to_owned(),
+                    String::new(),
+                    String::new(),
+                ],
+                ..SignEditOpen::default()
+            },
+        );
+        // Down moves to line 1 (`AbstractSignEditScreen`'s own line cycling),
+        // so the caret keys below must act on `second`, not on `top`.
+        press(&mut ui, &mut nav, KeyCode::ArrowDown, None, ModifiersState::empty());
+        press(&mut ui, &mut nav, KeyCode::Home, None, ModifiersState::empty());
+        press(&mut ui, &mut nav, KeyCode::KeyZ, Some("Z"), ModifiersState::empty());
+        let state = nav.sign_edit().expect("the screen is open");
+        assert_eq!(state.lines[1].value(), "Zsecond");
+        assert_eq!(state.lines[0].value(), "top", "the inactive line is untouched");
+    }
+
+    /// The server-edit form takes the same key through a *different* route —
+    /// `EditForm::handle_key` hands it to the focus layer rather than to a
+    /// field it owns — so it needed no arm of its own. That is a claim about
+    /// production wiring, not about `EditBox`, and only a gate on this screen
+    /// can make it.
+    #[test]
+    fn the_caret_keys_reach_the_server_edit_form_through_the_focus_layer() {
+        let (mut ui, mut nav) = (UiState::default(), MenuNav::default());
+        ui.open_server_list();
+        ui.open_server_edit();
+        for ch in "abc".chars() {
+            press(
+                &mut ui,
+                &mut nav,
+                KeyCode::KeyA,
+                Some(&ch.to_string()),
+                ModifiersState::empty(),
+            );
+        }
+        assert_eq!(nav.form().name(), "abc", "premise: the name field has focus");
+        press(&mut ui, &mut nav, KeyCode::Home, None, ModifiersState::empty());
+        press(&mut ui, &mut nav, KeyCode::KeyA, Some("Z"), ModifiersState::empty());
+        assert_eq!(
+            nav.form().name(),
+            "Zabc",
+            "Home reached the focused box; appending would give `abcZ`"
+        );
+    }
+
+    /// `menu_key_for` produces the caret keys as
+    /// [`crate::menu::nav::MenuKey::Edit`] carrying the real event, and
+    /// `from_menu_key` hands that same event straight back — the round trip the
+    /// three screens above rely on.
+    #[test]
+    fn the_caret_keys_round_trip_through_menu_key_and_back() {
+        for (code, glfw) in [
+            (KeyCode::ArrowLeft, crate::menu::focus::KEY_LEFT),
+            (KeyCode::ArrowRight, crate::menu::focus::KEY_RIGHT),
+            (KeyCode::Home, crate::menu::focus::KEY_HOME),
+            (KeyCode::End, crate::menu::focus::KEY_END),
+        ] {
+            let key = WindowApp::menu_key_for(
+                PhysicalKey::Code(code),
+                None,
+                ModifiersState::SHIFT | ModifiersState::SUPER,
+            )
+            .expect("a caret key is a menu key");
+            let event = crate::menu::focus::KeyEvent::from_menu_key(key)
+                .expect("`Edit` always yields its own event back");
+            assert_eq!(event.key, glfw, "{code:?} carries its GLFW code");
+            assert!(event.has_shift_down(), "{code:?} keeps Shift");
+            assert_eq!(
+                event.modifiers,
+                crate::menu::focus::MOD_SHIFT | crate::menu::focus::MOD_SUPER,
+                "{code:?} keeps every modifier, not just the ones it uses"
             );
         }
     }

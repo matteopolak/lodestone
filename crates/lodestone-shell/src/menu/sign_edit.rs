@@ -257,11 +257,16 @@ impl SignEditState {
         self.lines[self.active_line].handle_char(ch)
     }
 
-    /// One non-printable key into the active line (Backspace/Delete/Home/End/
-    /// select-all/clipboard — see [`EditBox::handle_key`]). Left/Right are not
-    /// routed through this in [`crate::menu::nav::MenuNav::key_sign_edit`] for
-    /// the same reason [`super::command_block`]'s own doc gives: `app.rs` does
-    /// not produce them from `MenuKey` yet.
+    /// One non-printable key into the active line — Backspace/Delete,
+    /// Left/Right/Home/End caret motion (plain, word-wise under the platform's
+    /// edit modifier, extending the selection under Shift), select-all and the
+    /// clipboard. See [`EditBox::handle_key`], which implements all of it.
+    ///
+    /// The caret keys reach here as [`crate::menu::nav::MenuKey::Edit`],
+    /// which carries the whole [`KeyEvent`] rather than abstracting it — for
+    /// these four the modifiers are the meaning. They act on the **active**
+    /// line only, which is what a gate has to check: `active_line` is this
+    /// screen's own focus notion and nothing in `EditBox` knows about it.
     pub fn handle_key(&mut self, event: KeyEvent) -> bool {
         self.lines[self.active_line].handle_key(event)
     }
