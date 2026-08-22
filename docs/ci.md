@@ -507,8 +507,12 @@ failure.
 Measured from run `32393158291`'s log (the job took 95.1 minutes end to end):
 **85.8 minutes of that is test *execution*** summed over 695 timed binaries, so
 compilation — the thing `sccache` and `Swatinem/rust-cache` accelerate — is
-roughly 9 minutes, under 10% of the job. Caching work therefore has almost no
-headroom to win here.
+roughly 9 minutes, under 10% of the job.
+
+Caching therefore has no headroom left to win, and that is measured rather than
+inferred: **that same job's `sccache` summary is 191 hits, 0 misses, 100.00%**.
+There is nothing to improve on the caching axis; a 95-minute job with a perfect
+compile cache is a job whose cost is somewhere else.
 
 The distribution is extremely top-heavy: the five slowest binaries are **70%**
 of all test time and the top eighteen are 88%.
