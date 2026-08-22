@@ -342,8 +342,24 @@ pub mod clipboard {
     /// Always empty — see the module doc's "why `get` degrades" note. Kept as
     /// a real function rather than deleted so `EditBox::handle_key`'s paste
     /// arm needs no `cfg` of its own.
+    ///
+    /// The decline is **logged**, once per session, rather than silent. A
+    /// paste that inserts nothing is indistinguishable from a paste that
+    /// inserted an empty clipboard, so without this line the only report
+    /// anyone can make is "paste does nothing in the browser" with no way to
+    /// tell a missing feature from a broken one. Once, not per keystroke:
+    /// this is on the key path of every Cmd+V.
     #[must_use]
     pub fn get() -> String {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            tracing::info!(
+                "clipboard read declined on wasm32: `navigator.clipboard.readText` is \
+                 async and permission-gated, and no text field here can suspend. Paste \
+                 inserts nothing; copy and cut still write the real clipboard."
+            );
+        }
         String::new()
     }
 
