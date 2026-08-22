@@ -130,7 +130,38 @@ async fn main() {
     let mob_area = (-radius..=radius, -radius..=radius);
     let mob_center = (0, 0);
 
-    let protocol = lodestone_v770::V770ServerProtocol;
+    // The family to host, asked for by protocol number rather than named. The
+    // registry is the one crate allowed to know which families are compiled
+    // in (see this crate's `Cargo.toml`), so "what can this build serve?" is
+    // the union of `supported_protocols` filtered by which of them
+    // `server_protocol_for_protocol` actually answers for — a family whose
+    // *client* adapter is compiled in need not implement `ServerProtocol`.
+    // Highest wins, so adding a newer servable family here needs no code
+    // change.
+    //
+    // `None` is a real product state, not an error to route around: a build
+    // with no servable family compiled in cannot host anything, and must say
+    // so rather than starting and refusing every join.
+    let Some((protocol_version, protocol)) = lodestone_registry::supported_protocols()
+        .into_iter()
+        .filter_map(|version| {
+            lodestone_registry::server_protocol_for_protocol(version)
+                .map(|protocol| (version, protocol))
+        })
+        .max_by_key(|(version, _)| *version)
+    else {
+        tracing::error!(
+            "this build has no protocol family that can be hosted (client families compiled in: {:?}, \
+             servable: {:?}) — rebuild with a servable version feature enabled",
+            lodestone_registry::compiled_families(),
+            lodestone_registry::compiled_server_families(),
+        );
+        std::process::exit(1);
+    };
+    tracing::info!(
+        "hosting protocol {protocol_version} ({:?})",
+        lodestone_registry::compiled_server_families()
+    );
     let (mut server, client_end, _world) = match IntegratedServer::open_persistent_with_mobs(
         protocol,
         &world_dir,
@@ -243,13 +274,27 @@ async fn run_until_shutdown(server: IntegratedServer) {
     // "stop server" button) sends SIGTERM, not a synthetic Ctrl-C, and a
     // dedicated server that only reacted to the terminal signal would lose
     // its world under exactly the stop mechanism a hosting panel actually
-    // uses. `tokio::signal::unix` is Unix-only by construction (there is no
-    // SIGTERM on Windows to listen for) — this binary targets the platforms a
-    // dedicated server actually runs on (Linux/macOS hosting, matching this
-    // repo's own dev platform), and does not build for wasm32 regardless
-    // (see this crate's own `Cargo.toml`).
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    // uses.
+    //
+    // `tokio::signal::unix` is `#![cfg(unix)]` **inside tokio**, so naming it
+    // unconditionally is not a portability wart that degrades on Windows — it
+    // is a hard `E0433: cannot find `unix` in `signal`` that fails the whole
+    // build there, and it did: the `check (windows-latest)` CI leg was red on
+    // this alone while macOS and Linux were green. `cargo check` on the dev
+    // machine structurally cannot see it.
+    //
+    // The Windows arm is `ctrl_shutdown`, which is the genuine analogue rather
+    // than a stub: the OS raises it when the machine is shutting down, the same
+    // "you are about to be stopped, flush now" event a supervisor's SIGTERM is.
+    // What Windows does *not* have is a way for one process to send it to
+    // another, so `taskkill /F` still cannot be made graceful — that is an OS
+    // property, not something this loop can fix.
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("failed to install SIGTERM handler");
+    #[cfg(windows)]
+    let mut terminate =
+        tokio::signal::windows::ctrl_shutdown().expect("failed to install CTRL_SHUTDOWN handler");
 
     loop {
         tokio::select! {
@@ -257,8 +302,8 @@ async fn run_until_shutdown(server: IntegratedServer) {
                 tracing::info!("received Ctrl-C, saving and stopping");
                 break;
             },
-            _ = sigterm.recv() => {
-                tracing::info!("received SIGTERM, saving and stopping");
+            _ = terminate.recv() => {
+                tracing::info!("received a termination signal, saving and stopping");
                 break;
             },
             line = lines.next_line() => {

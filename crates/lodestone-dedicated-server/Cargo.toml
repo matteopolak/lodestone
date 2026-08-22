@@ -25,11 +25,25 @@ path = "src/main.rs"
 
 [dependencies]
 lodestone-server = { path = "../lodestone-server" }
-# `V770ServerProtocol` — 26.2 is the one family that implements
-# `ServerProtocol` (see the repo's own `CLAUDE.md`: `Family`/`ServerFamily`
-# are different tables for exactly that reason), so it is the only protocol a
-# dedicated server can host regardless of what a client might join with.
-lodestone-v770 = { workspace = true }
+# The `ServerProtocol` to host, reached through the registry rather than by
+# naming a version crate directly.
+#
+# This crate used to depend on `lodestone-v770` and construct
+# `V770ServerProtocol` by name. That is a required shared -> version edge, and
+# `cargo xtask check-isolation` fails on it: a version family must stay
+# deletable as a single folder plus a feature line, and a required edge from a
+# crate outside `crates/protocol/` makes it undeletable. `lodestone-registry`
+# is the *one* crate allowed to name versions, through optional feature-gated
+# edges, so a consumer that needs a concrete family asks it for one — exactly
+# as `lodestone-shell`'s singleplayer launch does.
+#
+# 26.2 remains the only family implementing `ServerProtocol` (`Family` and
+# `ServerFamily` are two tables for exactly that reason), so `v770` is the
+# feature enabled here; that is a *manifest* line the deletion procedure
+# already removes, not a code dependency. `main` never spells the family:
+# it asks `server_protocol_for_protocol` and reports when the answer is
+# `None`.
+lodestone-registry = { workspace = true, features = ["v770"] }
 # `has_joined`'s crypto-provider install, required once before the first
 # `reqwest` TLS call online-mode makes — the same requirement
 # `lodestone-server`'s own `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`
