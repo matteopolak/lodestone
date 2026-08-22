@@ -1232,8 +1232,10 @@ impl RenderState {
 
             // `text_display` glyphs and background panels, right after sign
             // text for the same "already in the depth buffer, opaque/cutout
-            // geometry" reasoning. Three ranges through three pipelines —
-            // unbiased panel, polygon-offset ink, and the see-through pair
+            // geometry" reasoning. Four ranges through four pipelines —
+            // unbiased panel, polygon-offset shadow, ink at twice that
+            // offset in both terms so a near-grazing plane's own depth
+            // gradient cannot let the shadow win, and the see-through pair
             // that neither tests nor writes depth, which is why it is drawn
             // last. See `gpu/display_text.rs`'s module doc.
             self.display_text.draw(&mut pass, display_text_counts);
