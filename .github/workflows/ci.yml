@@ -1,6 +1,7 @@
 # CI for lodestone. See docs/ci.md for the full rationale, what is
-# intentionally NOT run here (the 219 `#[ignore]`d live/GPU/jar-dependent
-# tests), and how to reproduce any of these jobs locally.
+# intentionally NOT run here (the `#[ignore]`d live/GPU/jar-dependent tests —
+# that doc carries the count and a warning that it is stale), and how to
+# reproduce any of these jobs locally.
 #
 # Six jobs, eight legs: `check-default` is a 3-OS matrix (Linux / macOS /
 # Windows) and every other job is Linux-only on purpose — see that job's comment

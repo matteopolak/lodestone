@@ -23,9 +23,10 @@ its own crate instead.
 $ cargo tree -p lodestone-dedicated-server
 ```
 
-The graph pulls in `lodestone-server`, `lodestone-v770` (26.2 is the only
-family that implements `ServerProtocol` — see the repo's own `CLAUDE.md` on
-why `Family`/`ServerFamily` are different tables), `lodestone-auth` (the
+The graph pulls in `lodestone-server`, `lodestone-registry` with its `v770`
+feature (26.2 is the only family that implements `ServerProtocol` — see the
+repo's own `CLAUDE.md` on why `Family`/`ServerFamily` are different tables),
+`lodestone-auth` (the
 crypto-provider install online-mode's TLS call needs), `reqwest` (the same
 HTTP client `OnlineModeConfig` already required), and `tokio`/`tracing`/
 `tracing-subscriber`. **No `lodestone-shell`, no `lodestone-render`, no GPU or
@@ -41,6 +42,37 @@ graph for one target, which is exactly the class of thing this repo's own
 wasm-hazard record says goes stale silently. A separate crate needs no gate
 at all — nothing in the browser bundle or `lodestone-shell` depends on it, so
 it is never even considered for a wasm32 build.
+
+#### Why the registry rather than the version crate
+
+This crate originally depended on `lodestone-v770` and constructed
+`V770ServerProtocol` by name, which is the shortest path to the only family
+that can be hosted. `cargo xtask check-isolation` fails on it, and correctly:
+a *required* edge from a crate outside `crates/protocol/` to a version crate
+is precisely what makes that family undeletable, and the invariant is that a
+family stays deletable as its folder plus a manifest line. `lodestone-registry`
+is the one crate exempted from that rule, through optional feature-gated edges.
+
+So `main` asks `lodestone_registry::server_protocol_for_protocol` for the
+highest protocol in `supported_protocols()` that actually answers — a family
+whose *client* adapter is compiled in need not implement `ServerProtocol` —
+and never spells a family name. `None` is a real product state, reported and
+exited on, not an error to route around: a build with no servable family
+cannot host anything and must say so rather than starting and refusing every
+join. `check-deletable v770` reports the crate cleanly deletable again.
+
+#### `tokio::signal::unix` is a Windows compile error, not a degradation
+
+The shutdown loop below races `Ctrl-C` against SIGTERM, and
+`tokio::signal::unix` is `#![cfg(unix)]` *inside tokio*. Naming it
+unconditionally is therefore `E0433: cannot find 'unix' in 'signal'` on
+Windows — a hard build failure for the whole crate, which the CI matrix's
+Windows leg caught and no `cargo check` on a Mac or Linux box can. The Windows
+arm is `tokio::signal::windows::ctrl_shutdown`, the genuine analogue: the OS
+raises it as the machine shuts down, which is the same "flush now" event a
+supervisor's SIGTERM is. Windows has no way for one process to *send* it to
+another, so `taskkill /F` still cannot be made graceful; that is an OS
+property, not something the loop can fix.
 
 ### Startup sequence
 
@@ -72,7 +104,8 @@ only. In order:
 9. `IntegratedServer::start_rcon` if `enable-rcon=true` and a non-empty
    `rcon.password` is set.
 10. Read stdin lines as console commands (`lodestone_server::console::run`),
-    racing `Ctrl-C`/`SIGTERM`; `stop`, `Ctrl-C` or `SIGTERM` all break the
+    racing `Ctrl-C`/SIGTERM (`CTRL_SHUTDOWN` on Windows — see above); `stop`,
+    `Ctrl-C` or a termination signal all break the
     loop into `IntegratedServer::shutdown().await`, which flushes the world
     (region files, `level.dat`, entities, POI) before the process exits.
 
@@ -288,7 +321,7 @@ not something this doc's own binary can fix from the outside.
 
 ## Dependencies
 
-`lodestone-server`, `lodestone-v770`, `lodestone-auth`, `reqwest`, `tokio`
+`lodestone-server`, `lodestone-registry` (feature `v770`), `lodestone-auth`, `reqwest`, `tokio`
 (`rt-multi-thread`, `net`, `signal`, `io-std`, `time`, `sync`, `macros`),
 `tracing`, `tracing-subscriber`. No client, renderer, GPU, or windowing
 crate — see "How it works" for the measured `cargo tree`.

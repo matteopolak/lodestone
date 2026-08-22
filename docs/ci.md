@@ -337,8 +337,13 @@ interesting but not a failure (the workspace run already exited 0).
 `/vendor/` and `/.cache/`) — no vanilla `client.jar`, no decompiled sources,
 no `minecraft-data` checkout exists on a fresh runner — and a hosted runner
 has no GPU adapter and no Docker Minecraft oracle listening on `:25565`/etc.
-**219 tests are `#[ignore]`d** for exactly these reasons (live oracle, GPU
-adapter, or vanilla jar) and none of them run in this workflow. This was
+Tests are `#[ignore]`d for exactly these reasons (live oracle, GPU adapter, or
+vanilla jar) and none of them run in this workflow. **The count below is stale
+and is left as the record of what was audited, not as a current figure**: it
+was `219` when this section was written, and a mechanical
+`grep -c '#\[ignore' crates/ xtask/` now reports **730**. The per-function
+classification has not been redone at the larger number; do not quote either
+figure without re-counting. This was
 verified by reading every file that references `.cache/mc`, `GpuContext::new`,
 `wgpu::Instance::new`, or `request_adapter` across the workspace and checking
 each `#[test]`/`#[tokio::test]` function individually — not by trusting the
@@ -409,6 +414,127 @@ future agent doesn't have to re-derive them:
   `include_str!`'d from a **committed** `tests/support/*_jvm.txt` file, not
   read from `.cache/` at test time. Grep for the actual `Path`/`join` call,
   not for the string `.cache/mc` anywhere in the file.
+
+### Five the census missed, and why its key was wrong
+
+The audit above enumerated jar/GPU tests by grepping for `.cache/mc`,
+`GpuContext::new`, `wgpu::Instance::new` and `request_adapter`. Five
+non-ignored tests need a vanilla jar and match **none** of those four
+patterns, so they were invisible to it and only surfaced when the `test` job
+went red:
+
+| test | how it reaches the jar |
+|---|---|
+| `sim::collide`'s `mesher_and_collision_place_the_same_block_at_the_same_world_y_in_both_dimensions` | `BlockResources::load(true)` → `vanilla_atlas` |
+| `sim::collide`'s `the_check_fails_when_collision_is_fed_the_wrong_min_y` | the control for the above |
+| `sim::tests::a_healthy_live_session_never_fires_the_id_space_diagnostic` | `Mode::Window` config → the live load path |
+| `singleplayer_terrain_arrives`'s `a_singleplayer_spawn_column_meshes_into_real_geometry` | `BlockResources::load(true)` |
+| `singleplayer_terrain_arrives`'s `a_sim_at_the_owners_render_distance_drains_real_terrain_meshes` | `Sim::refresh_mesh_policy` → the same load |
+
+All five are now `#[ignore]`d with the same wording as the rest of the
+jar-dependent corpus. The generalisable part is the census key: **the shell
+does not name `.cache/mc` anywhere**, because resolving the pack is a
+*function*, not a path literal. Grep for the resolver — `BlockResources::load`,
+`vanilla_atlas`, `LODESTONE_ASSETS` — not for the directory it eventually
+reads, exactly as the bullet above says to grep for the `Path`/`join` call
+rather than the string. A census keyed on the wrong layer reports zero and
+looks complete.
+
+Note also what each of these did right, which is why they were findable at all:
+every one fails loudly with a message naming the fix rather than skipping. A
+silent skip would have kept the suite green and the coverage gone.
+
+## Three axes on which a green dev machine says nothing about a runner
+
+The matrix section above frames the platform question as **OS**, because that
+is what `runs-on` varies. Three failures found in one sweep were nothing to do
+with the OS name, and each looked like a flaky or environment-specific test
+until it was traced:
+
+- **Architecture, through the codegen backend.** `lodestone-assets`'
+  `font_ttf` binary died with `SIGABRT` on every Linux run:
+  `llvm.x86.sse.cvtss2si is not yet supported`. That is `fontdue`'s
+  `platform::as_i32`, whose x86/x86_64 body is `_mm_cvtss_si32` behind its
+  default-on `simd` feature, and Cranelift — this workspace's debug backend —
+  has no lowering for it. The panic is *non-unwinding*, so it takes the whole
+  test binary down rather than failing one test. The feature is inert on
+  aarch64, so no dev machine could ever see it. Fixed by turning the feature
+  off workspace-wide, which also removes a real parity wart: that intrinsic
+  rounds to nearest-even where the scalar fallback truncates, so glyphs
+  rasterised differently on the two architectures.
+- **Architecture, through float semantics.** `mth::tests::`
+  `inv_sqrt_matches_joml_reference_bits` pinned the raw bits of every case
+  including a negative input. The *sign* of a NaN from the square root of a
+  negative is architecture-specific: aarch64 gives `0x7FC00000`, x86_64
+  `0xFFC00000`, because SSE's `sqrtsd` sets the sign bit and AArch64's `fsqrt`
+  does not. Bits are the right thing to assert for every finite row and the
+  wrong thing for that one.
+- **`cfg!` read inside the function under test.** Five
+  `menu_key_shortcut_conversion` gates drove `ModifiersState::SUPER` and
+  expected `MenuKey::SelectAll`, while `menu_key_for` resolved the modifier
+  from `cfg!(target_os = "macos")` internally — true on a Mac, false on the
+  runner. `shortcut_modifier_held` one layer down already took `is_macos` as a
+  parameter *for exactly this reason*, with a doc comment saying so, and the
+  layer above it did not. `menu_key_for_platform` now does, and each gate
+  drives both splits.
+
+The habit worth keeping: when a test passes here and fails on a runner, the OS
+is only one of the things that changed. **Architecture and codegen backend
+changed too**, and both can alter behaviour without any `cfg` in our source —
+so neither `just check` nor a wasm census can see them.
+
+There is a fourth axis with the opposite shape, and `cargo check` on this
+machine structurally cannot see it either: **a dependency's own `#![cfg(unix)]`
+is a hard compile error elsewhere, not a graceful absence.**
+`lodestone-dedicated-server` named `tokio::signal::unix` unconditionally, which
+is `E0433: cannot find 'unix' in 'signal'` on the Windows leg. Nothing about
+the call site looks conditional; the gate is inside tokio.
+
+### The 6-hour runs were `apt-get`, not the test suite
+
+Two runs hit GitHub's 6-hour job limit (`360.5` and `360.7` minutes). Both were
+the `test` job and neither had compiled a line of Rust: the log's largest gap
+is `358.9` and `359.7` minutes respectively, in both cases immediately after
+`Get:5 https://archive.ubuntu.com/ubuntu noble-security InRelease` — the
+`libasound2-dev` install step, which is the job's *first* step and carries no
+timeout. Reading "6 hours" as "the suite is enormous" is the wrong conclusion;
+it is an unbounded network wait on a mirror, and a `timeout-minutes` on that
+step (plus a retry) would turn a 6-hour billing sink into a fast, honest
+failure.
+
+### Where the `test` job's time actually goes
+
+Measured from run `32393158291`'s log (the job took 95.1 minutes end to end):
+**85.8 minutes of that is test *execution*** summed over 695 timed binaries, so
+compilation — the thing `sccache` and `Swatinem/rust-cache` accelerate — is
+roughly 9 minutes, under 10% of the job. Caching work therefore has almost no
+headroom to win here.
+
+The distribution is extremely top-heavy: the five slowest binaries are **70%**
+of all test time and the top eighteen are 88%.
+
+| seconds | binary |
+|---|---|
+| 1551.5 | `lodestone-shell` lib |
+| 1149.4 | `lodestone-server` lib |
+| 484.9 | `lodestone-server` `tests/world_type_selection.rs` |
+| 217.6 | `lodestone-shell` `tests/singleplayer_saved_world_terrain_arrives.rs` |
+| 207.7 | `lodestone-shell` `tests/singleplayer_persistence.rs` |
+
+By crate: `lodestone-shell` 36.2 min, `lodestone-server` 32.3 min,
+`lodestone-v770` 7.5 min, `lodestone-worldgen` 5.1 min.
+
+Two things follow for anyone shortening this, neither of them done here.
+Splitting the job by crate would parallelise across runners but cannot beat
+26 minutes while one lib binary takes that long by itself, so the two lib
+suites are where the work is. And **Cranelift is a live question rather than an
+obvious win for this job**: it was adopted for a 2.0x–7.3x *compile*-time
+measurement (`docs/compile-times.md`), and it buys that by generating slower
+code — in a job that is 90% execution, that trade may run the wrong way.
+Nobody has measured the same suite under `CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm`,
+and a timing taken on the shared dev machine while other agents build would be
+attributed to the wrong cause, so that measurement needs a quiet machine or an
+isolated runner before anything is changed.
 
 ## How to reproduce a CI failure locally
 
