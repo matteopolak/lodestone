@@ -136,22 +136,31 @@ Gotchas, each of which cost a run:
 * **Every scene shares one world**, so a scene must build what it needs and must not assume
   its plot is empty. Each file starts with its own `fill … air` and `kill`.
 
-### What is deliberately not photographed
+### Four reports that were the scene, and one that was not
 
-A screenshot must not launder a defect. Three block-entity types were once pulled out of the
-block-entity scene as broken. Re-measured against the same oracle, **two of the three were
-the scene's own placement, not the renderer** — and both misdiagnoses are worth keeping,
-because both produce a picture that looks exactly like a render bug:
+**Nothing is currently held out of these images.** This section is kept because of what
+the four false reports have in common, not because anything is still excluded.
+
+Four block-entity subjects were reported as rendering wrongly and pulled from the
+block-entity scene. Re-measured against the same oracle, **three of the four were the
+scene's own placement**, and each produced a picture that looks exactly like a renderer bug:
 
 | subject | reported as | actually |
 |---|---|---|
-| `conduit` | a huge translucent blue sheet over the whole stage | `minecraft:conduit`'s default state is `waterlogged=true`, so a bare `setblock` puts a real water source on the stage; the server floods it out to a radius-6 diamond, and with the eye 0.125 blocks above that surface the water fills the frame. Vanilla does the same. Place it `waterlogged=false` |
+| `conduit` | a huge translucent blue sheet over the whole stage | `minecraft:conduit`'s default state is `waterlogged=true`, so a bare `setblock` puts a real water source on the stage; the server floods it to a radius-6 diamond, and with the eye 0.125 blocks above that surface the water fills the frame. Vanilla does the same. Place it `waterlogged=false` |
 | `skeleton_skull` / `zombie_head` | a plain untextured cube | the camera was square on to `rotation=8`, which is the **back** of the head — segment 0 faces north (`-Z`). The back of a skeleton skull is uniform light grey and of a zombie head uniform green. At `rotation=0` both draw their faces, and so do the creeper, wither-skeleton and player heads |
-| `dragon_head` (and `piglin_head`) | draws nothing at all | real: `DragonHeadModel`/`PiglinHeadModel` are multi-part rigs, unrelated to the shared 8×8×8 `SkullModel` box, and were not ported |
+| the double chest | half a chest each way, "a hole on each side" | `type=left`/`type=right` is only half the placement — `ChestBlock.getConnectedDirection` pairs `LEFT` with `facing.getClockWise()`, so at `facing=south` the scene's `left` looked west and its `right` looked east and neither found a partner. Two orphans, each drawing the seam face it exists to hide |
+| `dragon_head` (and `piglin_head`) | draws nothing at all | **real**: `DragonHeadModel`/`PiglinHeadModel` are multi-part rigs unrelated to the shared 8×8×8 `SkullModel` box, and were unported. Now ported, and in the scene |
 
-The lesson generalises past these two: **an A/B that removes the subject proves the subject
-is involved, not that the subject's renderer is at fault.** Both of these were confirmed by
-removing the block and watching the artefact go, and both were still the scene.
+Three things generalise:
+
+* **An A/B that removes the subject proves the subject is *involved*, not that the subject's
+  renderer is at fault.** All four were confirmed that way and three were still the scene.
+* **A block's default state is not the state you meant to place.** `waterlogged`, `type`,
+  `facing`, `rotation` and `powered` all have defaults, and `setblock` takes them silently.
+* **Half the reports were a subject photographed from behind.** A skull at `rotation=8`, a
+  chest at `facing=south` with the camera on `-Z`: no face, no latch. Check which way the
+  subject is pointing before believing the renderer dropped a texture.
 
 Two smaller divergences the images do show, honestly, rather than hide: legacy `§` codes in
 sign text render as literal section signs (this client deliberately never turns them into
