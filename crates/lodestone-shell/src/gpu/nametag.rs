@@ -35,13 +35,67 @@
 //!   `depth_write_enabled: false`. This is what makes a tag behind a wall
 //!   read as *dimmed* rather than fully hidden — it always draws, faded.
 //!
-//! Vanilla's color for each pass (`SubmitNodeCollection.java`/`:117`):
-//! normal is opaque white (`-1`), see-through is `-2130706433` =
-//! `0x81_FFFFFF` — white at alpha `129/255 ≈ 0.506`. Both are plain
-//! `BlendFunction.TRANSLUCENT` (`wgpu::BlendState::ALPHA_BLENDING` here);
-//! with the normal pass's alpha at `1.0` the blend is a no-op, so draw order
-//! between the two passes does not affect the final pixel where both cover
-//! the same texel.
+//! # What each pass carries, and why the plate is in only one of them
+//!
+//! `SubmitNodeCollection.submitNameTag` makes **two different submissions**
+//! depending on `!isDiscrete`, and the two differ in *three* things at once —
+//! glyph colour, background colour and which group they land in. Transcribed
+//! from that method rather than inferred from the symptom:
+//!
+//! | not discrete (the usual case) | discrete (sneaking) |
+//! |---|---|
+//! | `nameTags`: colour `-1` (opaque white), background `0` — **no plate** | `nameTags`: colour `-2130706433`, background `getBackgroundOpacity` — **plate** |
+//! | `seeThroughNameTags`: colour `-2130706433` (`0x81_FFFFFF`, white at `129/255`), background `getBackgroundOpacity` — **plate** | *(nothing)* |
+//!
+//! So the plate is drawn exactly once per tag, in whichever group draws
+//! *last*, and it deliberately paints **over** the opaque copy the normal
+//! pass already laid down: the phase list (`SubmitNodeCollection`'s own
+//! `nameTags, seeThroughNameTags` ordering) runs the see-through group
+//! second, which this pass matches in [`NameTagRenderer::draw`]. The
+//! resulting composite for a non-sneaking tag is glyph ink at
+//! `1 - 0.25·(1 - 0.506)` of full white over a backdrop the plate has
+//! darkened to `0.75` of itself — the familiar bright-name-on-dark-slab look.
+//! Both groups are plain `BlendFunction.TRANSLUCENT`
+//! (`wgpu::BlendState::ALPHA_BLENDING` here).
+//!
+//! **The plate is drawn before the glyphs within its own group**, matching
+//! `Font.PreparedTextBuilder.visit`, which emits the background effect first
+//! and every glyph after it. Vanilla additionally pushes the plate `-0.01`
+//! along local `z`; nothing here does, and nothing needs to — a nametag
+//! billboard's plane is perpendicular to the view axis, so every vertex in it
+//! shares one window depth and the depth test cannot separate the plate from
+//! the glyphs at all. Submission order is what separates them, and
+//! `LessEqual` passes the resulting tie. (Porting the `-0.01` faithfully
+//! would also be inert: through the `0.025` text scale it is `0.00025`
+//! blocks, which is 0–2 ULP of `Depth32Float` at any real viewing distance
+//! under this project's forward `[0,1]` projection. See `docs/shaders.md`
+//! and CLAUDE.md's rendering constraints.)
+//!
+//! # The plate's alpha is a linear-blend divergence, not a wrong constant
+//!
+//! The plate colour is black at `getBackgroundOpacity(0.25F)`, and that
+//! accessor returns its **fallback** `0.25` unless `backgroundForChatOnly`
+//! is turned off — an option vanilla defaults *on* and this crate does not
+//! model at all, exactly as `gpu/display_text.rs`'s `DEFAULT_BACKGROUND_ARGB`
+//! already records for the same accessor. So `0x40000000` is the faithful
+//! value for an unconfigured client, and `Options::chat_background_opacity`
+//! (this crate's chat-HUD slider) is deliberately **not** threaded in here:
+//! vanilla's chat-only default means it would not feed this value either.
+//!
+//! What *is* a real divergence: vanilla composites this plate on raw gamma
+//! bytes, while every pipeline in this pass targets the swapchain's **sRGB**
+//! view, so the hardware blends in linear light — the same colour-space
+//! mismatch `docs/tab-list.md` records for the HUD's flat-colour stream. For
+//! a pure-black source the two agree only at a black backdrop and diverge
+//! monotonically toward white: re-derived from the sRGB transfer function,
+//! `0.75·bg` (vanilla) against `encode(0.75·decode(bg))` (here) is `0` at
+//! `bg = 0`, ≈+7/255 at `bg = 64`, ≈+16/255 at `bg = 128` and ≈+33/255 at
+//! `bg = 255`, i.e. the plate reads **too weak against a bright backdrop**.
+//! The fix is structural — the flat-colour geometry has to reach a raw
+//! (non-sRGB) view, which for a world pass means its own render pass and
+//! `lodestone_render::target` work — and is **not** a constant to tune here;
+//! `gpu/sign_text.rs` and `gpu/display_text.rs`'s panels have the identical
+//! exposure and should move together with it.
 //!
 //! # Anchor height and distance cutoff
 //!
@@ -66,12 +120,6 @@
 //!
 //! # What is deliberately not built
 //!
-//! * **The background plate.** Vanilla draws a `TEXT_BACKGROUND`/
-//!   `TEXT_BACKGROUND_SEE_THROUGH` quad behind the glyphs, coloured from the
-//!   `chatOpacity` game option (`SubmitNodeCollection.java`). Not in the
-//!   issue's explicit scope checklist and not required for legibility (the
-//!   drop shadow already separates text from background); a genuine gap, not
-//!   an oversight.
 //! * **Per-frame packed-light modulation.** Vanilla forces near-full
 //!   brightness for the normal pass
 //!   (`LightCoordsUtil.lightCoordsWithEmission(lightCoords, 2)`,
@@ -140,17 +188,41 @@ const ATTACHMENT_PADDING: f32 = 0.5;
 /// The player's own height — a reasonable middle ground.
 const FALLBACK_HEIGHT: f32 = 1.8;
 
-/// Opaque white — the normal pass's colour (`-1` in `SubmitNodeCollection.java`).
-/// Only its alpha (`1.0`) is read now: the RGB half of a `StyledRect` is
+/// Opaque white — vanilla's `-1`, and the colour of **only** the
+/// non-discrete normal-pass submission (`SubmitNodeCollection.submitNameTag`).
+/// Only its alpha (`1.0`) is read: the RGB half of a `StyledRect` is
 /// already resolved (white when a span's own colour is unspecified, real
-/// per-span colour otherwise) by [`layout_styled_ink_runs`] — see
-/// [`push_entity_quads`]'s doc for the per-pass alpha/colour split this and
-/// [`SEE_THROUGH_COLOR`] now supply.
+/// per-span colour otherwise) by [`layout_styled_ink_runs`] — see the module
+/// doc's table for which submission takes this and which takes
+/// [`SEE_THROUGH_COLOR`].
 const NORMAL_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-/// White at `129/255`, vanilla's `-2130706433` (`0x81_FFFFFF`) — the
-/// see-through pass's colour (`SubmitNodeCollection.java`). Same "alpha
-/// only" reading as [`NORMAL_COLOR`].
+/// White at `129/255`, vanilla's `-2130706433` (`0x81_FFFFFF`). Same "alpha
+/// only" reading as [`NORMAL_COLOR`]. Carried by the see-through submission
+/// **and** by the discrete (sneaking) normal-pass one — the module doc's
+/// table; reading this as "the see-through pass's colour" is what made a
+/// sneaking tag draw at full opacity where vanilla fades it.
 const SEE_THROUGH_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 129.0 / 255.0];
+
+/// The background plate's packed ARGB: black at
+/// `Options.getBackgroundOpacity(0.25F)`, which resolves to its `0.25`
+/// fallback on an unconfigured client — `ARGB.color(0.25F, -16777216)` =
+/// `as8BitChannel(0.25) << 24` = `64 << 24`. See the module doc for why the
+/// option is not read here, and for the linear-blend divergence this value
+/// is *not* responsible for.
+///
+/// The same number as `gpu/display_text.rs`'s `DEFAULT_BACKGROUND_ARGB`? No —
+/// that one is `0x3F000000`, one step darker, because it rounds the same
+/// `0.25` through `(int)(x * 255)` truncation rather than `as8BitChannel`'s
+/// `Math.round`. Two accessors, one off by one; folding them would be
+/// invisible.
+const BACKGROUND_ARGB: i32 = 0x4000_0000_u32 as i32;
+
+/// The plate's padding left of the pen and above the line's top edge, in
+/// logical font pixels — `Font.PreparedTextBuilder.markBackground`'s
+/// `x - 1.0F` / `y - 1.0F`. Its right edge is the line's full advance and its
+/// bottom edge is `y + 9.0F` ([`metrics::LINE_HEIGHT`]), with no padding on
+/// either, so the rect is deliberately **not** symmetric.
+const BACKGROUND_PAD: f32 = 1.0;
 
 /// Fixed vertex capacity per pass (six vertices per glyph-row ink run). Same
 /// fixed-buffer idiom as `gpu/debug_lines.rs`'s `MAX_DEBUG_LINE_SEGMENTS` —
@@ -502,40 +574,52 @@ fn push_entity_quads(
     }
     let half_width = total_width / 2.0;
 
-    // The shadow copy first (whole string), then the text — same order
-    // `VanillaFont::draw` uses, for the same reason (a later glyph's ink
-    // must sit on top of an earlier glyph's shadow, not the other way
-    // round). The shadow's own colour follows the glyph's resolved colour
-    // scaled to a quarter (`Font.java::getShadowColor`'s no-explicit-colour
-    // branch, `ARGB.scaleRGB(textColor, 0.25F)`), not a flat grey — so a
-    // coloured name's shadow is a dim version of *that* colour.
-    let shadow_offset = metrics::SHADOW_OFFSET;
-    for rect in rects {
-        let shadow_rect = StyledRect {
-            x: rect.x + shadow_offset,
-            y: rect.y + shadow_offset,
-            ..*rect
-        };
-        let color = [
-            rect.color[0] * metrics::SHADOW_BRIGHTNESS,
-            rect.color[1] * metrics::SHADOW_BRIGHTNESS,
-            rect.color[2] * metrics::SHADOW_BRIGHTNESS,
-            NORMAL_COLOR[3],
-        ];
-        normal_out.extend(quad_vertices(shadow_rect, half_width, anchor, right, up, color));
-    }
-    for rect in rects {
-        // The normal pass's own alpha is `1.0` and every `StyledRect` is
-        // already opaque, so the pass contributes nothing beyond the
-        // resolved colour itself — unlike the see-through pass below, which
-        // overrides alpha but keeps the same resolved colour.
-        normal_out.extend(quad_vertices(*rect, half_width, anchor, right, up, rect.color));
-    }
-    if tag.see_through {
+    // The plate, in the same local logical-pixel space the ink runs are laid
+    // out in. `Font.PreparedTextBuilder.markBackground` seeds the rect at the
+    // pen (`x - 1`, `y - 1`, `x + 0`, `y + 9`) and grows its right edge by
+    // each glyph's advance; this layout starts its pen at local `(0, 0)`, so
+    // the finished rect is `(-1, -1)` to `(total_width, 9)`.
+    let plate = StyledRect {
+        x: -BACKGROUND_PAD,
+        y: -BACKGROUND_PAD,
+        w: total_width + BACKGROUND_PAD,
+        h: metrics::LINE_HEIGHT + BACKGROUND_PAD,
+        color: lodestone_render::display::text_background_color(BACKGROUND_ARGB),
+    };
+    let plate_quad = |out: &mut Vec<NameTagVertex>| {
+        out.extend(quad_vertices(plate, half_width, anchor, right, up, plate.color));
+    };
+    let glyph_quads = |out: &mut Vec<NameTagVertex>, alpha: f32| {
         for rect in rects {
-            let color = [rect.color[0], rect.color[1], rect.color[2], SEE_THROUGH_COLOR[3]];
-            see_through_out.extend(quad_vertices(*rect, half_width, anchor, right, up, color));
+            // Only alpha comes from the pass; the RGB is the span's own
+            // resolved colour, which `layout_styled_ink_runs` deliberately
+            // leaves at alpha `1.0` so one cached layout can serve every
+            // pass at a different opacity.
+            let color = [rect.color[0], rect.color[1], rect.color[2], alpha];
+            out.extend(quad_vertices(*rect, half_width, anchor, right, up, color));
         }
+    };
+
+    // No drop shadow, in either branch: `NameTagFeatureRenderer.prepareText`
+    // calls `Font.prepareText(..., drawShadow = false, ...)`, and
+    // `Font.PreparedTextBuilder.getShadowColor` returns a fully transparent
+    // `0` for a style carrying no explicit shadow colour when that flag is
+    // clear, so vanilla emits no shadow renderable at all. The plate is what
+    // separates a nametag from the world behind it; this pass used to draw a
+    // quarter-brightness shadow copy *instead of* the plate, which is the
+    // thing that made a name read as bare text.
+    if tag.see_through {
+        // Not discrete. The depth-tested submission is opaque white with a
+        // background colour of literally `0`; the plate travels with the
+        // faded see-through copy, which draws second and paints over it.
+        glyph_quads(normal_out, NORMAL_COLOR[3]);
+        plate_quad(see_through_out);
+        glyph_quads(see_through_out, SEE_THROUGH_COLOR[3]);
+    } else {
+        // Discrete (sneaking): one submission only, to the depth-tested
+        // group, and it carries both the plate and the faded glyph alpha.
+        plate_quad(normal_out);
+        glyph_quads(normal_out, SEE_THROUGH_COLOR[3]);
     }
 }
 
@@ -1308,13 +1392,17 @@ mod tests {
 
     /// End-to-end colour control at [`push_entity_quads`] itself (not just
     /// the layout helper): a player/mob nametag carrying a `§c`-coloured
-    /// span must reach the normal-pass vertex buffer with red, and its
-    /// shadow copy must be a quarter-brightness *red* (`Font.java`'s
-    /// `getShadowColor`'s `ARGB.scaleRGB(textColor, 0.25F)`), not the flat
-    /// grey `SHADOW_COLOR` this pass drew for every name before this fix —
-    /// see the module's `push_entity_quads` doc.
+    /// span must reach the vertex buffer with red rather than the plain
+    /// white fallback.
+    ///
+    /// The subject is a **sneaking** tag (`see_through: false`), so vanilla's
+    /// single discrete submission puts both the plate and the glyphs in the
+    /// normal pass at [`SEE_THROUGH_COLOR`]'s `129/255` — asserted here
+    /// exactly, because the wrong hypothesis (this pass's earlier behaviour:
+    /// opaque white alpha for *every* normal-pass tag) differs only in that
+    /// one number and nothing else in the buffer would show it.
     #[test]
-    fn push_entity_quads_resolves_a_coloured_nametag_span_and_its_shadow() {
+    fn push_entity_quads_resolves_a_coloured_nametag_span_at_the_discrete_alpha() {
         let opaque_cell = vec![255u8; 32 * 32 * 4];
         let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
         rgba.extend_from_slice(&opaque_cell);
@@ -1372,26 +1460,48 @@ mod tests {
             (hex & 0xff) as f32 / 255.0,
         ];
         let is_close = |a: f32, b: f32| (a - b).abs() < 1e-3;
-        let has_red_at_alpha_one = normal
-            .iter()
-            .any(|v| is_close(v.color[0], red_rgb[0]) && is_close(v.color[1], red_rgb[1]) && is_close(v.color[2], red_rgb[2]) && is_close(v.color[3], 1.0));
+        let has_red_at_discrete_alpha = normal.iter().any(|v| {
+            is_close(v.color[0], red_rgb[0])
+                && is_close(v.color[1], red_rgb[1])
+                && is_close(v.color[2], red_rgb[2])
+                && is_close(v.color[3], SEE_THROUGH_COLOR[3])
+        });
         assert!(
-            has_red_at_alpha_one,
-            "the normal pass must draw the §c span in full-brightness red: {:?}",
+            has_red_at_discrete_alpha,
+            "a sneaking tag's normal pass must draw the §c span in red at \
+             alpha {} (vanilla's -2130706433), not at the opaque white \
+             alpha this pass used to give every normal-pass tag: {:?}",
+            SEE_THROUGH_COLOR[3],
             normal.iter().map(|v| v.color).collect::<Vec<_>>()
         );
+        // The wrong hypothesis, asserted absent rather than merely not
+        // looked for: no glyph vertex may carry the old opaque alpha. The
+        // plate is black, so restricting this to red-carrying vertices keeps
+        // it about the glyphs.
+        let opaque_red = normal.iter().any(|v| {
+            is_close(v.color[0], red_rgb[0]) && is_close(v.color[3], 1.0)
+        });
+        assert!(
+            !opaque_red,
+            "no glyph vertex of a sneaking tag may be opaque: {:?}",
+            normal.iter().map(|v| v.color).collect::<Vec<_>>()
+        );
+        // And no quarter-brightness copy of it: vanilla's nametags pass
+        // `drawShadow = false`, so a shadow renderable is never emitted.
         let shadow_rgb = [
             red_rgb[0] * metrics::SHADOW_BRIGHTNESS,
             red_rgb[1] * metrics::SHADOW_BRIGHTNESS,
             red_rgb[2] * metrics::SHADOW_BRIGHTNESS,
         ];
-        let has_red_shadow = normal
-            .iter()
-            .any(|v| is_close(v.color[0], shadow_rgb[0]) && is_close(v.color[1], shadow_rgb[1]) && is_close(v.color[2], shadow_rgb[2]));
+        let has_shadow_copy = normal.iter().any(|v| {
+            is_close(v.color[0], shadow_rgb[0])
+                && is_close(v.color[1], shadow_rgb[1])
+                && is_close(v.color[2], shadow_rgb[2])
+        });
         assert!(
-            has_red_shadow,
-            "the shadow copy must be a quarter-brightness *red*, not flat \
-             grey: wanted {shadow_rgb:?}, got {:?}",
+            !has_shadow_copy,
+            "a nametag must emit no drop-shadow copy ({shadow_rgb:?}) — the \
+             plate is what separates it from the world: {:?}",
             normal.iter().map(|v| v.color).collect::<Vec<_>>()
         );
     }
@@ -1487,18 +1597,266 @@ mod tests {
             (hex & 0xff) as f32 / 255.0,
         ];
         let is_close = |a: f32, b: f32| (a - b).abs() < 1e-3;
-        let has_hex_at_alpha_one = normal.iter().any(|v| {
+        // `see_through: false` above, so this is vanilla's discrete
+        // submission: normal pass, glyphs at `129/255`.
+        let has_hex = normal.iter().any(|v| {
             is_close(v.color[0], want_hex[0])
                 && is_close(v.color[1], want_hex[1])
                 && is_close(v.color[2], want_hex[2])
-                && is_close(v.color[3], 1.0)
+                && is_close(v.color[3], SEE_THROUGH_COLOR[3])
         });
         assert!(
-            has_hex_at_alpha_one,
+            has_hex,
             "the normal pass must draw the hex-coloured span in its real \
              colour {want_hex:?}, reached through `NameTag::text`'s direct \
              `to_spans()` (no legacy round trip): got {:?}",
             normal.iter().map(|v| v.color).collect::<Vec<_>>()
+        );
+    }
+
+    /// A named pig at the origin, carrying `text` and the given discreteness
+    /// — the shape [`crate::entities::entity_facts`] hands the render list
+    /// for a mob whose `CUSTOM_NAME` is set and whose `CUSTOM_NAME_VISIBLE`
+    /// metadata is `true`. Nothing about the plate is data-driven, so this is
+    /// the whole of the production input the plate gates below need; that
+    /// resolution step has its own gates in `crate::entities`' `name_tag`
+    /// module.
+    fn named_pig(text: Text, see_through: bool) -> EntityDraw {
+        EntityDraw {
+            hurt: false,
+            id: 1,
+            type_path: std::sync::Arc::from("pig"),
+            item: None,
+            main_arm_left: false,
+            equipment: Vec::new(),
+            equipment_dye: Vec::new(),
+            equipment_trim: Vec::new(),
+            feet: Vec3::ZERO,
+            yaw: 0.0,
+            head_yaw: 0.0,
+            pitch: 0.0,
+            scale: 1.0,
+            anim: lodestone_render::AnimInput::REST,
+            wool: None,
+            block_state: None,
+            item_frame_rotation: 0,
+            count: 1,
+            foil: false,
+            item_dyed_color: None,
+            item_potion_color: None,
+            name_tag: Some(crate::entities::NameTag { text, see_through }),
+            item_use: None,
+            creeper_swelling: 0.0,
+            swim_amount: 0.0,
+            death_time: 0.0,
+            on_fire: false,
+            invisible: false,
+            armor_stand: None,
+            player_skin: None,
+            variant_sheet: None,
+            experience_orb_value: None,
+            cape_sway: (0.0, 0.0, 0.0),
+        }
+    }
+
+    /// The plate's own colour as [`push_entity_quads`] emits it.
+    fn plate_color() -> [f32; 4] {
+        lodestone_render::display::text_background_color(BACKGROUND_ARGB)
+    }
+
+    /// Inverts [`quad_vertices`]' world placement back to the local
+    /// logical-pixel space the plate rect is derived in, for the `right =
+    /// +X` / `up = +Y` basis every gate here passes.
+    fn to_local(v: &NameTagVertex, anchor: Vec3, half_width: f32) -> (f32, f32) {
+        let p = Vec3::from(v.position) - anchor;
+        (p.x / PX_SCALE + half_width, -p.y / PX_SCALE)
+    }
+
+    /// **The plate gate.** A non-sneaking named mob must draw a background
+    /// plate, and vanilla puts it in a specific place: the depth-tested
+    /// submission carries `backgroundColor = 0` and the see-through one
+    /// carries the real colour (`SubmitNodeCollection.submitNameTag`, the
+    /// module doc's table). So the discriminating assertion is not "a plate
+    /// exists somewhere" — it is that the normal pass has **none** and the
+    /// see-through pass leads with exactly one, before its glyphs.
+    ///
+    /// Uses the synthetic jar-free raster so this runs in CI regardless of
+    /// whether a real client jar is present.
+    #[test]
+    fn a_visible_nametag_draws_its_plate_in_the_see_through_pass_only() {
+        let opaque_cell = vec![255u8; 32 * 32 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let raster = scaled_raster("AB", 32, 20, &rgba);
+        let ink = StyledInkLayoutCache::default();
+
+        let draw = named_pig(Text::from_legacy("AB"), true);
+        let mut normal = Vec::new();
+        let mut see_through = Vec::new();
+        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+
+        let want = plate_color();
+        assert_eq!(want, [0.0, 0.0, 0.0, 64.0 / 255.0], "the plate is black at 64/255");
+
+        assert!(
+            !normal.iter().any(|v| v.color == want),
+            "vanilla's non-discrete depth-tested submission carries \
+             `backgroundColor = 0`, so the normal pass must contain no plate"
+        );
+        assert!(
+            see_through.len() >= 6,
+            "the see-through pass must carry a plate quad plus glyphs, got {} vertices",
+            see_through.len()
+        );
+        assert!(
+            see_through[..6].iter().all(|v| v.color == want),
+            "the see-through pass's first six vertices must be the plate — \
+             `Font.PreparedTextBuilder.visit` emits the background before any \
+             glyph: got {:?}",
+            &see_through[..6].iter().map(|v| v.color).collect::<Vec<_>>()
+        );
+        assert!(
+            !see_through[6..].iter().any(|v| v.color == want),
+            "exactly one plate quad, not one per glyph"
+        );
+        // Both passes carry the same glyph set, so the see-through pass is
+        // longer by exactly one quad and no more.
+        assert_eq!(
+            see_through.len(),
+            normal.len() + 6,
+            "the see-through pass must be the normal pass's glyphs plus one \
+             plate quad"
+        );
+    }
+
+    /// The plate's rect, predicted from
+    /// `Font.PreparedTextBuilder.markBackground` rather than eyeballed, with
+    /// the plausible wrong hypothesis evaluated at the same input: a plate
+    /// sized to the ink's own bounds (`0 .. total_width` by `0 ..
+    /// LINE_HEIGHT`) instead of vanilla's asymmetric one-pixel lead-in on the
+    /// left and top only. The two differ by 1 px on three edges, which no
+    /// "a plate exists" assertion can separate.
+    #[test]
+    fn the_plate_rect_is_vanillas_asymmetric_one_not_the_ink_bounds() {
+        let opaque_cell = vec![255u8; 32 * 32 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let raster = scaled_raster("AB", 32, 20, &rgba);
+        let ink = StyledInkLayoutCache::default();
+
+        let text = Text::from_legacy("AB");
+        let (_, total_width) = layout_styled_ink_runs(&raster, &text.to_spans());
+        let draw = named_pig(text, true);
+        let anchor = draw.feet
+            + Vec3::new(
+                0.0,
+                entity_base_height(&draw.type_path) * draw.scale + ATTACHMENT_PADDING,
+                0.0,
+            );
+        let half_width = total_width / 2.0;
+
+        let mut normal = Vec::new();
+        let mut see_through = Vec::new();
+        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+
+        let corners: Vec<(f32, f32)> = see_through[..6]
+            .iter()
+            .map(|v| to_local(v, anchor, half_width))
+            .collect();
+        let min_x = corners.iter().map(|c| c.0).fold(f32::MAX, f32::min);
+        let max_x = corners.iter().map(|c| c.0).fold(f32::MIN, f32::max);
+        let min_y = corners.iter().map(|c| c.1).fold(f32::MAX, f32::min);
+        let max_y = corners.iter().map(|c| c.1).fold(f32::MIN, f32::max);
+
+        // Collected, not asserted one at a time: an `assert!` per edge stops
+        // at the first failure and the remaining three edges stay arguments
+        // rather than observations.
+        let want = [
+            ("left", min_x, -BACKGROUND_PAD, 0.0),
+            ("right", max_x, total_width, total_width),
+            ("top", min_y, -BACKGROUND_PAD, 0.0),
+            ("bottom", max_y, metrics::LINE_HEIGHT, metrics::LINE_HEIGHT),
+        ];
+        let mismatches: Vec<String> = want
+            .iter()
+            .filter(|(_, got, vanilla, _)| (got - vanilla).abs() > 1e-3)
+            .map(|(edge, got, vanilla, ink_bounds)| {
+                format!("{edge}: got {got}, vanilla {vanilla}, ink-bounds hypothesis {ink_bounds}")
+            })
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "plate rect edges must be `markBackground`'s: {}",
+            mismatches.join("; ")
+        );
+        // The two hypotheses genuinely differ at this input — otherwise the
+        // assertion above would pass under either.
+        assert!(
+            (want[0].2 - want[0].3).abs() > 0.5 && (want[2].2 - want[2].3).abs() > 0.5,
+            "the ink-bounds hypothesis must differ from vanilla's on the left \
+             and top edges, or this gate measures nothing"
+        );
+    }
+
+    /// The discrete (sneaking) branch: vanilla makes **one** submission, to
+    /// the depth-tested group, carrying the plate. The see-through pass must
+    /// stay empty — the pre-existing rule this file already gates — and the
+    /// plate must have moved rather than vanished, which is the half a
+    /// "see-through pass is empty" assertion cannot see.
+    #[test]
+    fn a_sneaking_nametag_carries_its_plate_in_the_normal_pass() {
+        let opaque_cell = vec![255u8; 32 * 32 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let raster = scaled_raster("AB", 32, 20, &rgba);
+        let ink = StyledInkLayoutCache::default();
+
+        let draw = named_pig(Text::from_legacy("AB"), false);
+        let mut normal = Vec::new();
+        let mut see_through = Vec::new();
+        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+
+        let want = plate_color();
+        assert!(
+            see_through.is_empty(),
+            "sneaking suppresses the see-through pass entirely"
+        );
+        assert!(
+            normal.len() >= 6 && normal[..6].iter().all(|v| v.color == want),
+            "a sneaking tag's plate must lead the normal pass: got {:?}",
+            normal.iter().take(6).map(|v| v.color).collect::<Vec<_>>()
+        );
+        assert!(
+            !normal[6..].iter().any(|v| v.color == want),
+            "exactly one plate quad"
+        );
+    }
+
+    /// An empty name emits no plate either — the plate is sized from the
+    /// line's advance, so a zero-width one would still be a visible
+    /// two-pixel smudge floating over the entity if the early return moved
+    /// below it.
+    #[test]
+    fn an_empty_name_emits_no_plate() {
+        let opaque_cell = vec![255u8; 32 * 32 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let raster = scaled_raster("AB", 32, 20, &rgba);
+        let ink = StyledInkLayoutCache::default();
+
+        let draw = named_pig(Text::default(), true);
+        let mut normal = Vec::new();
+        let mut see_through = Vec::new();
+        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+        assert!(
+            normal.is_empty() && see_through.is_empty(),
+            "an empty name must contribute nothing at all, plate included: {} + {}",
+            normal.len(),
+            see_through.len()
         );
     }
 }

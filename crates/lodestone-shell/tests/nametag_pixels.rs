@@ -233,7 +233,7 @@ fn a_named_entity_draws_text_pixels_above_it() {
         "the subject/control frames must differ somewhere — got byte-identical frames, which \
          means the nametag pass drew nothing at all",
     );
-    // Generous tolerance: text width/height plus the shadow offset, given
+    // Generous tolerance: the plate's own width/height, given
     // `PX_SCALE` at this distance projects to a handful of screen pixels per
     // logical text pixel — not a tight pixel-perfect box, just "near the
     // analytic anchor, not somewhere unrelated on screen".
