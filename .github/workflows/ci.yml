@@ -159,6 +159,12 @@ jobs:
       # not in the dependency graph on the other two legs at all.
       - name: Install system audio dev headers (alsa-sys build dependency)
         if: runner.os == 'Linux'
+        # Bounded because this step, not the suite, is what produced this
+        # workflow's six-hour runs: two stalled about 359 minutes inside
+        # apt-get update at the identical mirror line, before compiling
+        # anything. It is the job's first step, so unbounded a hung mirror
+        # burns the whole job budget and reports as a timeout of the build.
+        timeout-minutes: 10
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -213,6 +219,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system audio dev headers (alsa-sys build dependency)
+        # Bounded because this step, not the suite, is what produced this
+        # workflow's six-hour runs: two stalled about 359 minutes inside
+        # apt-get update at the identical mirror line, before compiling
+        # anything. It is the job's first step, so unbounded a hung mirror
+        # burns the whole job budget and reports as a timeout of the build.
+        timeout-minutes: 10
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -233,6 +245,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system audio dev headers (alsa-sys build dependency)
+        # Bounded because this step, not the suite, is what produced this
+        # workflow's six-hour runs: two stalled about 359 minutes inside
+        # apt-get update at the identical mirror line, before compiling
+        # anything. It is the job's first step, so unbounded a hung mirror
+        # burns the whole job budget and reports as a timeout of the build.
+        timeout-minutes: 10
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -349,6 +367,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system audio dev headers (alsa-sys build dependency)
+        # Bounded because this step, not the suite, is what produced this
+        # workflow's six-hour runs: two stalled about 359 minutes inside
+        # apt-get update at the identical mirror line, before compiling
+        # anything. It is the job's first step, so unbounded a hung mirror
+        # burns the whole job budget and reports as a timeout of the build.
+        timeout-minutes: 10
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@master
         with:
