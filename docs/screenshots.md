@@ -34,7 +34,7 @@ verbatim. Editing a scene therefore costs no recompile of a crate whose test bin
 minutes.
 
 ```text
-@size 768 432          # framebuffer, and therefore the PNG
+@size 2560 1440        # framebuffer, and therefore the PNG
 @camera 0.0 65.1 10.5  # eye position, world coordinates
 @look 0.0 65.1 13.6    # aim at a point…
 @yawpitch 180 8        # …or aim explicitly, in the render camera's convention
@@ -108,6 +108,25 @@ Gotchas, each of which cost a run:
   format whose stored bytes are what a player sees, and therefore what belongs in a PNG; a
   linear target would build every pipeline against a linear write and the file would come
   out dark.
+* **The README set renders at 2560x1440, and PNG size scales nowhere near the pixel
+  count.** 1440p is 11.1x the pixels of the old 768x432, and the four re-rendered scenes
+  grew only **2.7-3.7x** (386 KB total to 1.19 MB) — Minecraft art is flat, low-entropy
+  colour, so the compressor absorbs most of the extra resolution. Budget by measuring, not
+  by scaling: the whole five-scene set lands near 1.6 MB, well inside what a README should
+  carry, so there was no need to fall back to 1080p.
+* **Do not post-process the committed PNGs.** A lossless re-encode (PIL `optimize=True`) was
+  measured at **0.9%** — 1,214,413 B to 1,203,387 B across the four — and no PNG optimiser
+  (`oxipng`, `pngquant`, `optipng`, `zopflipng`, `pngcrush`, ImageMagick) is installed here
+  anyway. It is not worth it even where a tool exists: the harness is the generator, so an
+  optimised file no longer matches what a re-render produces, and every subsequent run shows
+  a spurious diff. Keep the committed bytes exactly what the harness wrote.
+* **A few hundred pixels per image come out non-opaque**, and it is worth knowing before
+  anyone "fixes" it: the nametag, glowing-sign and XP text passes write their own alpha into
+  the framebuffer, so `02-signs`, `04-entities` and `05-hud` each carry 200-530 pixels
+  (0.005-0.014% of the frame) at alpha 128-254, clustered exactly on that text. GitHub
+  composites those against the page background. It is invisible at this scale and dropping
+  the alpha channel would save only ~8%, which is why the images stay RGBA — but a pass that
+  starts leaking alpha over a *large* area would show up here first.
 * **Water is the one thing a scene cannot clean up after itself.** A `fill … air` over a
   stage leaves the sources outside it, which flow back in and flood the next scene. The
   harness purges water once per run over a box wider than any stage.

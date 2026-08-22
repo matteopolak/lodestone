@@ -23,7 +23,7 @@
 //! crate, and the camera belongs beside the build that it is aimed at.
 //!
 //! ```text
-//! @size 768 432          # framebuffer, and therefore the PNG
+//! @size 2560 1440        # framebuffer, and therefore the PNG
 //! @camera 0.5 -58.0 2.0  # eye position, world coordinates
 //! @look 0.5 -57.6 12.0   # aim at a point (mutually exclusive with @yawpitch)
 //! @yawpitch 180 8        # or aim explicitly, in the render camera's convention
@@ -104,7 +104,13 @@ const CAMERA_NAME: &str = "Lodestone";
 const COMPANIONS: [&str; 4] = ["Ferris", "Basalt", "Cinder", "Quartz"];
 
 /// The framebuffer, unless a scene overrides it with `@size`.
-const DEFAULT_SIZE: (u32, u32) = (768, 432);
+///
+/// 1440p, matching what every README scene asks for explicitly, so a new one
+/// added without an `@size` lands in the committed set at the right size
+/// rather than a sixth of it. The `zz-*` probe scenes all name their own
+/// smaller sizes and are unaffected — a probe is read once and deleted, and
+/// there is no reason to pay 11x the pixels for one.
+const DEFAULT_SIZE: (u32, u32) = (2560, 1440);
 
 fn main_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

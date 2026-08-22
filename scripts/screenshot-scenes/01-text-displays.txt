@@ -13,7 +13,7 @@
 # a flat world; ours does not know the world is flat. Building up here shows
 # the renderer rather than that gap.
 
-@size 768 432
+@size 2560 1440
 @camera 0.0 66.5 4.6
 @look 0.0 66.4 15.0
 @fov 65

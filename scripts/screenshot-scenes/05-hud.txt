@@ -13,7 +13,7 @@
 # server never sends a tab-list header or footer — that packet has no command
 # behind it — so there is none here.
 
-@size 768 432
+@size 2560 1440
 @camera 0.0 65.6 6.4
 @look 0.0 65.1 15.5
 @fov 70

@@ -23,7 +23,7 @@
 #     `BannerRenderer` applies no `scale(-1, -1, 1)` flip, so their segment 0
 #     points the other way.
 
-@size 768 432
+@size 2560 1440
 @camera 0.0 66.3 4.6
 @look 0.0 64.9 12.4
 @fov 68
