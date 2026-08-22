@@ -731,6 +731,26 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             }
         }
         SER_BOOLEAN => Value::Bool(reader.bool()?),
+        // **Not carried yet — this is a gap, not a decision.** The only
+        // claimants of this serializer are an armour stand's six pose
+        // accessors, `ArmorStand.DATA_HEAD_POSE` through
+        // `DATA_RIGHT_LEG_POSE` (indices 16-21), each an `(x, y, z)` triple of
+        // Euler degrees. Every one is read for alignment and dropped here, so
+        // a stand posed by a builder arrives with its pose on the wire and
+        // reaches no component.
+        //
+        // The consequence is not "the stand looks neutral", which is what a
+        // dropped cosmetic usually costs. Vanilla's armour-stand model applies
+        // the shared humanoid walk cycle first and then **overwrites** all six
+        // part rotations from these poses, so the swing is computed and thrown
+        // away; with the poses missing, nothing overwrites it and the walk
+        // cycle survives instead. A moving stand therefore swings its arms,
+        // and an item in its hand — posed off that same arm — swings with it.
+        //
+        // Wiring this needs the whole chain in one change (a pose component,
+        // an `EntityDraw` field, the rig applying it, and the walk cycle
+        // suppressed for this type); decoding it here alone would only add a
+        // field nothing reads.
         SER_ROTATIONS => {
             reader.f32()?;
             reader.f32()?;
