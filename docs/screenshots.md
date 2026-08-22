@@ -20,8 +20,8 @@ nothing else: the keybind reads the window's swapchain, this reads a headless ta
 1. join the oracle with `Sim` — the same type `WindowApp` drives — via `Sim::connect_as`,
    and pump `Sim::step` + `drain_removals`/`drain_meshes` the way `app/redraw.rs` does;
 2. install the render sources `app/session.rs`'s `install_session_render_sources` and
-   `app/redraw.rs` install: the sky pass, the entity light sampler, the time-of-day clock,
-   and every block-entity/display source;
+   `app/redraw.rs` install: the sky pass, the entity light sampler, the shadow ground
+   sampler, the time-of-day clock, and every block-entity/display source;
 3. for each scene, run its RCON commands, keep pumping for its settle time, then render one
    frame through `RenderState::render` (plus `HudRenderer::render_with_item_models` when the
    scene asks for a HUD);
@@ -90,6 +90,16 @@ Gotchas, each of which cost a run:
   first-person-hand suppressor was installed only for scenes without `@hand`, which left it
   in place for the `@hand` scene that came after — captured with no hand at all, and nothing
   red anywhere. Install both arms of any such switch, never one.
+* **And the mirror image: a source that is never installed at all.** The entity ground
+  shadows shipped with no `ShadowGroundSource` here, so `RenderState::prepare_shadows`
+  sampled `None` for every candidate cell, emitted zero vertices, and every mob in every
+  capture stood on a shadow-free floor. Neither half of the surrounding wiring objected —
+  the option gate (`set_entity_shadows_enabled`) defaults on, the shadow texture loads from
+  the vanilla pack, the pass ran and produced nothing. Re-rendering with the source
+  installed moved **3,673 px in `04-entities` (3,671 of them darker)** and 811 in `05-hud`,
+  all inside the ground band under the entities. This harness is a second, silent
+  implementation of `install_session_render_sources`' wiring: when that function grows a
+  source, mirror it here in the same commit, because nothing mechanical connects the two.
 * **`HudRenderer::new` takes the *raw* (non-sRGB) format and every `attach_*` takes the
   corrected one.** Vanilla's 2-D GUI blending is not colour-managed, so the flat-colour pass
   draws into a raw view of the same texture. Building the whole thing against one format is
@@ -106,15 +116,20 @@ Gotchas, each of which cost a run:
 
 ### What is deliberately not photographed
 
-A screenshot must not launder a defect. Three block-entity types were composed into the
-block-entity scene, found to render wrongly, and removed with a comment in the scene file
-saying so — put them back when they are fixed:
+A screenshot must not launder a defect. Three block-entity types were once pulled out of the
+block-entity scene as broken. Re-measured against the same oracle, **two of the three were
+the scene's own placement, not the renderer** — and both misdiagnoses are worth keeping,
+because both produce a picture that looks exactly like a render bug:
 
-| subject | what it does today |
-|---|---|
-| `conduit` | its shell draws as a huge translucent blue sheet across the whole stage, not a one-block cage |
-| any skull/head (`skeleton_skull`, `zombie_head`) | draws as a plain untextured cube; the face texture never reaches its front quad, with the camera square on to `rotation=8` |
-| `dragon_head` | draws nothing at all, while ordinary skulls beside it draw |
+| subject | reported as | actually |
+|---|---|---|
+| `conduit` | a huge translucent blue sheet over the whole stage | `minecraft:conduit`'s default state is `waterlogged=true`, so a bare `setblock` puts a real water source on the stage; the server floods it out to a radius-6 diamond, and with the eye 0.125 blocks above that surface the water fills the frame. Vanilla does the same. Place it `waterlogged=false` |
+| `skeleton_skull` / `zombie_head` | a plain untextured cube | the camera was square on to `rotation=8`, which is the **back** of the head — segment 0 faces north (`-Z`). The back of a skeleton skull is uniform light grey and of a zombie head uniform green. At `rotation=0` both draw their faces, and so do the creeper, wither-skeleton and player heads |
+| `dragon_head` (and `piglin_head`) | draws nothing at all | real: `DragonHeadModel`/`PiglinHeadModel` are multi-part rigs, unrelated to the shared 8×8×8 `SkullModel` box, and were not ported |
+
+The lesson generalises past these two: **an A/B that removes the subject proves the subject
+is involved, not that the subject's renderer is at fault.** Both of these were confirmed by
+removing the block and watching the artefact go, and both were still the scene.
 
 Two smaller divergences the images do show, honestly, rather than hide: legacy `§` codes in
 sign text render as literal section signs (this client deliberately never turns them into

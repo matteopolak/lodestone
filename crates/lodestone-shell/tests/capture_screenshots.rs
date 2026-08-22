@@ -852,13 +852,24 @@ fn install_frame_sources(render: &mut RenderState, sim: &Sim) {
 
 /// The once-per-session installs `app/session.rs`'s
 /// `install_session_render_sources` performs: the sky pass and its textures,
-/// the per-dimension ambient floor, the time-of-day clock and the entity light
-/// sampler.
+/// the per-dimension ambient floor, the time-of-day clock, the entity light
+/// sampler and the shadow ground sampler.
 ///
 /// Without the light sampler every mob and every block entity renders at a
 /// constant brightness, which looks *plausible* in a screenshot and is wrong —
 /// exactly the failure this harness must not ship, so it is installed here even
 /// though nothing would go red without it.
+///
+/// The shadow ground sampler is the same class and was missed for exactly that
+/// reason: `RenderState::prepare_shadows` asks it what block sits under each
+/// candidate cell, and an *unset* source samples `None` for every one of them,
+/// so the pass emits zero vertices and every entity in every capture stands on
+/// its own reflection-free patch of floor. Nothing goes red — the option half
+/// of vanilla's gate (`set_entity_shadows_enabled`) already defaults on, the
+/// shadow texture already loads from the vanilla pack, and the only tell is a
+/// missing decal in the image. Any *new* source `app/session.rs` grows has to
+/// be mirrored here for the same reason; this harness is a second, silent
+/// implementation of that function's wiring.
 fn install_render_sources(
     render: &mut RenderState,
     sim: &Sim,
@@ -896,6 +907,22 @@ fn install_render_sources(
             sky_policy.get(),
         )
     });
+    // `app/session.rs`'s `install_shadow_ground_source`, verbatim: a cheap
+    // one-position read through a cloned handle, answering "what block is
+    // this" and leaving "does that state catch a shadow" to the collision
+    // data on the render side.
+    let ground = handle.clone();
+    render.set_shadow_ground_source(move |[x, y, z]| {
+        ground
+            .get()?
+            .block_at(lodestone_client::BlockPos::new(x, y, z))
+    });
+    // The option half of vanilla's `entityShadows && !isInvisible` gate. The
+    // live client polls `nav.options().entity_shadows` every presented frame
+    // in `app/redraw.rs`; this harness has no options menu, so it states the
+    // value it wants once rather than resting on `RenderState::new`'s default.
+    render.set_entity_shadows_enabled(true);
+
     // The raw day-time tick, not `sky_darken`'s derived factor — the sky pass
     // needs the tick itself to place the sun, the moon and the cloud scroll.
     // `app/session.rs` wraps this in `ContinuousTimeOfDay` so the clouds do not
