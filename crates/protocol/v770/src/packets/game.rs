@@ -6,16 +6,23 @@ use uuid::Uuid;
 /// Clientbound `login` (game-join) packet.
 ///
 /// Only the prefix needed to surface a canonical login event is modelled; the
-/// trailing fields (previous game type, debug/flat flags, last death location,
-/// portal cooldown, sea level, and the secure-chat booleans) are swallowed by
-/// the final [`rest`](GameLogin::rest) field since they are not needed yet.
+/// trailing fields (last death location, portal cooldown, sea level, and the
+/// secure-chat booleans) are swallowed by the final [`rest`](GameLogin::rest)
+/// field since they are not needed yet.
 ///
 /// Modelled wire layout: signed int entity id, boolean hardcore, a
 /// varint-prefixed list of dimension names, varint max players, varint view
 /// distance, varint simulation distance, boolean reduced debug info, boolean
 /// show death screen, boolean limited crafting, then the spawn info prefix of
 /// varint dimension-type holder id, string dimension name, big-endian 64-bit
-/// hashed seed, and unsigned byte game type.
+/// hashed seed, unsigned byte game type, signed byte previous game type,
+/// boolean is-debug, and boolean is-flat.
+///
+/// The three fields after `game_type` are the same `CommonPlayerSpawnInfo`
+/// prefix [`Respawn`] carries, and are modelled for the same reason: `is_flat`
+/// is what vanilla's `ClientLevelData.voidDarknessOnsetRange()` reads, so
+/// swallowing it into `rest` left the client unable to tell a superflat world
+/// from a normal one and applying a 32-block void fade in both.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:login", state = Play, bound = Client)]
 pub struct GameLogin {
@@ -49,6 +56,14 @@ pub struct GameLogin {
     pub seed: i64,
     /// Game mode (`0` survival, `1` creative, `2` adventure, `3` spectator).
     pub game_type: u8,
+    /// Previous game mode, or `-1` when there was none.
+    pub previous_game_type: i8,
+    /// Whether this is a debug world.
+    pub is_debug: bool,
+    /// Whether the level uses the flat world generator. Drives
+    /// `ClientLevelData.voidDarknessOnsetRange()` — `1.0` when flat, `32.0`
+    /// otherwise — and so the whole void-fog curve.
+    pub is_flat: bool,
     /// Remaining spawn-info bytes that are not modelled yet.
     #[mc(remaining)]
     pub rest: Vec<u8>,

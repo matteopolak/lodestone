@@ -744,11 +744,15 @@ have confirmed all three guesses at once whether or not any was right, which is
 why the authority for the shape is the live gate and the hermetic sibling
 (`registry_data.rs`) is scoped to the holder-id mapping and the failure modes.
 
-Also still open: the below-horizon dark disc, and void fog's `min_y`/`onset_range`
-come from `VoidFog::OVERWORLD` (`-64`/`32.0`) rather than the real dimension
-height. `lodestone_ecs::ChunkWorld::extent` already carries `min_y`; threading it
-to `RenderState` is a two-site `app.rs` change plus a source closure, and was
-skipped here to keep this change out of two more shared files.
+Also still open: the below-horizon dark disc. Void fog's `min_y`/`onset_range`
+**no longer** come from `VoidFog::OVERWORLD` — `Sim::void_fog` resolves both from
+the connected level (`DimensionTypeInfo::min_y`, and the login/respawn packet's
+`is_flat` through `VoidFog::for_level`) and `app/redraw.rs` pushes them per frame
+through `RenderState::set_void_fog`. The old hardcoding was wrong in two visible
+ways: the Nether and End start at `y=0`, so a `-64` floor suppressed their fade
+entirely (brightness `1.0` at a Nether floor of `y=10`, against vanilla's `0.098`),
+and a superflat level's onset is `1.0` rather than `32.0`, so its own surface
+rendered at `0.042` instead of fully lit.
 
 ### The gates, and the two premises that were false
 

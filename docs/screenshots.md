@@ -77,11 +77,14 @@ harness needs to know about it. To change what the README shows, edit the table 
 
 Gotchas, each of which cost a run:
 
-* **Build high, not on the oracle's own surface.** The superflat world's ground is `y=-61`,
-  and this client applies vanilla's *non-flat* void fog everywhere (a 32-block fade above
-  the world bottom, `VoidFog::OVERWORLD`), so a camera down there renders a near-black sky.
-  Vanilla uses a 1-block snap in a flat world; we do not know the world is flat. Every scene
-  therefore builds a stage at `y=63`.
+* **Build high, not on the oracle's own surface — though the reason has changed.** The
+  superflat world's ground is `y=-61`, and this client used to apply vanilla's *non-flat*
+  void fog everywhere (a 32-block fade above the world bottom), so a camera down there
+  rendered a near-black sky: brightness `0.042` at `y=-57.4`. That is fixed — the level's
+  own `is_flat` now reaches the renderer and a flat level's onset is `1.0`, so the oracle's
+  surface renders fully lit. Every scene still builds a stage at `y=63`, because the stone
+  plate reads better than the oracle's grass and because a stage at the world bottom has no
+  horizon behind it.
 * **26.2 renamed every game rule to snake_case.** `advance_time`, not `doDaylightCycle`;
   `mob_drops`, not `doMobLoot`. The camelCase spellings do not parse at all, and
   `/gamerule` reports that as `Incorrect argument for command`. Ask the server

@@ -2493,9 +2493,6 @@ fn encode_rotate_head(entity_id: i32, head_yaw: f32) -> Vec<u8> {
 /// their exact values only need to be well-formed, not vanilla-authentic.
 fn encode_game_login_rest() -> Vec<u8> {
     let mut w = Writer::default();
-    w.i8(-1); // previous_game_type: none
-    w.bool(false); // is_debug
-    w.bool(false); // is_flat
     w.bool(false); // has_last_death_location
     w.var_i32(0); // portal_cooldown
     w.var_i32(OVERWORLD_SEA_LEVEL); // sea_level
@@ -4543,6 +4540,13 @@ impl ServerProtocol for V770ServerProtocol {
             // `GameLogin::game_type` is the unsigned byte the wire carries, and
             // the ordinal table is `0..=3`, so the cast is total.
             game_type: crate::adapter::game_mode_to_ordinal(mode) as u8,
+            previous_game_type: -1,
+            is_debug: false,
+            // This server's own worldgen is not the superflat generator, so
+            // the client applies the ordinary 32-block void fade. A flat
+            // integrated world would have to set this, not just generate flat
+            // terrain: the client has no other way to know.
+            is_flat: false,
             rest: encode_game_login_rest(),
         };
 

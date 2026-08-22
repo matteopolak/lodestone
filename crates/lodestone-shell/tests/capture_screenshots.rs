@@ -543,6 +543,14 @@ fn shoot(
     render.set_fog(sim.fog_settings(), RENDER_DISTANCE);
     render.set_clear_color_tracked(sim.fog_settings().color);
     render.set_sky_mode(sim.sky_mode());
+    // Mirrored from `app/redraw.rs` in the same commit that added it there —
+    // this harness is a second, silent implementation of that function's
+    // wiring, which is exactly how the shadow ground source came to be missing
+    // here for its whole life. The flat oracle *is* a superflat world, so this
+    // one is load-bearing: without it every scene renders under the non-flat
+    // 32-block void fade and a stage built near the world bottom photographs
+    // under a near-black sky.
+    render.set_void_fog(sim.void_fog());
     render.update_animation(queue, sim.tick_count());
     let particles = sim.extract_particles(&camera);
     let _ = particles;

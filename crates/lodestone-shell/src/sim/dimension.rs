@@ -120,6 +120,53 @@ impl Sim {
         }
     }
 
+    /// This level's void fog — the two numbers vanilla's
+    /// `FogRenderer.computeFogColor` reads, resolved from the connected
+    /// dimension rather than assumed.
+    ///
+    /// Pushed to the renderer once per frame by `app/redraw.rs`, exactly like
+    /// [`Sim::sky_mode`], and recomputed per frame for the same reason: it is a
+    /// state, not a transition, so it needs no edge detector.
+    ///
+    /// # This replaced two hardcoded constants, and both were visibly wrong
+    ///
+    /// The frame builder used `VoidFog::OVERWORLD` for every dimension and
+    /// every level:
+    ///
+    /// - **`min_y` was always `-64`.** The Nether and the End start at `0`, so
+    ///   the fade belongs below `y = 32` there and was suppressed outright —
+    ///   measured at a Nether floor of `y = 10`, vanilla's brightness is
+    ///   `0.098` and ours was `1.0`.
+    /// - **the onset was always `32`.** A superflat level's is `1.0`, so its
+    ///   own surface (`y = -57.4` on the flat oracle) rendered at brightness
+    ///   `0.042` — a near-black sky at ground level — where vanilla leaves it
+    ///   fully lit.
+    ///
+    /// # The fallback when the server has told us nothing
+    ///
+    /// [`VoidFog::OVERWORLD`], stated here rather than inherited: before login
+    /// there is no dimension and no level, and the offline fixture world is an
+    /// ordinary overworld. That is a *fallback*, not a default that quietly
+    /// applies to a resolved dimension — an unresolvable dimension type keeps
+    /// it too, which is the same "state your own fallback explicitly" rule
+    /// [`Sim::dimension`] documents.
+    #[must_use]
+    pub fn void_fog(&self) -> lodestone_render::fog::VoidFog {
+        let Some(player) = self
+            .net
+            .as_ref()
+            .and_then(|net| net.shared_handle().get().map(|h| h.player()))
+        else {
+            return lodestone_render::fog::VoidFog::OVERWORLD;
+        };
+        match player.dimension_type.as_ref() {
+            Some(info) => {
+                lodestone_render::fog::VoidFog::for_level(info.min_y as f32, player.world_is_flat)
+            }
+            None => lodestone_render::fog::VoidFog::OVERWORLD,
+        }
+    }
+
     /// The portal overlay's strength this frame, `0.0..=1.0` — vanilla's
     /// `Mth.lerp(partialTicks, oPortalEffectIntensity, portalEffectIntensity)`.
     ///
@@ -503,6 +550,25 @@ mod tests {
         assert!(
             sim.sky_mode().draws_sky_geometry(),
             "the offline world must still draw a sky"
+        );
+    }
+
+    /// With no connection there is no level either, so the void fog falls back
+    /// to the ordinary overworld's rather than to anything derived from a
+    /// dimension that was never reported.
+    ///
+    /// The direction matters: the *other* fallback — a flat level's 1-block
+    /// onset — would silently switch the void fade off for every offline world
+    /// and every unresolved dimension, which is invisible until someone flies
+    /// to the world bottom.
+    #[test]
+    fn no_connection_falls_back_to_the_ordinary_overworld_void_fog() {
+        let sim = Sim::with_demo_world(headless_config());
+        assert_eq!(sim.void_fog(), lodestone_render::fog::VoidFog::OVERWORLD);
+        assert_eq!(
+            sim.void_fog().onset_range,
+            32.0,
+            "the fallback must be the non-flat onset, not a flat level's 1.0"
         );
     }
 

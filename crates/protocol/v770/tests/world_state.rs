@@ -127,6 +127,7 @@ fn handle_play_respawn_emits_respawned_event() {
             Directive::Emit(ClientEvent::DimensionTypeChanged {
                 holder_id,
                 dimension_type,
+                is_flat,
             }),
             Directive::Emit(ClientEvent::Respawned {
                 dimension,
@@ -136,6 +137,12 @@ fn handle_play_respawn_emits_respawned_event() {
             }),
         ] => {
             assert_eq!(*holder_id, 0, "the golden respawn's dimension_type varint");
+            assert!(
+                !*is_flat,
+                "the golden respawn's own is_flat byte is 0 — see \
+                 `a_flat_respawn_carries_is_flat_through_to_the_event` for the \
+                 arm that would catch a hardcoded false"
+            );
             assert_eq!(
                 *dimension_type, None,
                 "no registry_data was fed, so the holder id must not resolve — \
@@ -565,6 +572,43 @@ fn a_clock_update_for_another_dimension_does_not_re_anchor_us() {
     );
 }
 
+/// A **flat** respawn must carry `is_flat: true` through to the event.
+///
+/// The discriminating arm for that field, and it needs its own fixture: every
+/// other respawn fixture in this file sets the byte to `0`, so an adapter that
+/// hardcoded `false` would pass all of them. `is_flat` is what a client's
+/// `voidDarknessOnsetRange()` reads — `1.0` when flat against `32.0` otherwise
+/// — so getting it stuck at one value is a whole-sky difference in a superflat
+/// world, with nothing red anywhere.
+#[test]
+fn a_flat_respawn_carries_is_flat_through_to_the_event() {
+    let adapter = V770Adapter::new();
+    let mut bytes = respawn_golden();
+    // The `is_flat` byte sits three past the game type: dimension-type varint,
+    // the length-prefixed dimension name, the 8-byte seed, game type,
+    // previous game type, is_debug, then this one. Located by its known `0`
+    // value rather than a literal index so a fixture edit above cannot silently
+    // move it — asserted, not assumed.
+    let flat_index = 1 + 1 + "minecraft:the_nether".len() + 8 + 1 + 1 + 1;
+    assert_eq!(bytes[flat_index], 0x00, "the golden respawn's is_flat byte moved");
+    bytes[flat_index] = 0x01;
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::RESPAWN,
+            &bytes,
+        )
+        .expect("handle respawn");
+    match directives.as_slice() {
+        [
+            Directive::Emit(ClientEvent::DimensionTypeChanged { is_flat, .. }),
+            Directive::Emit(ClientEvent::Respawned { .. }),
+        ] => assert!(*is_flat, "a flat respawn must reach the event as flat"),
+        other => panic!("expected DimensionTypeChanged then Respawned, got {other:?}"),
+    }
+}
+
 /// The `respawn` arm emits the dimension type *before* `Respawned`, so a consumer
 /// folding both sees the geometry before the level name that depends on it.
 #[test]
@@ -584,6 +628,7 @@ fn respawn_emits_the_dimension_type_before_the_respawned_event() {
             Directive::Emit(ClientEvent::DimensionTypeChanged {
                 holder_id,
                 dimension_type,
+                ..
             }),
             Directive::Emit(ClientEvent::Respawned { .. }),
         ] => {

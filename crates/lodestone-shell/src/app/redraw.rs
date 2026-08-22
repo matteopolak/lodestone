@@ -846,6 +846,10 @@ impl WindowApp {
         // `SkyRenderer::render`, and no uniform upload. A change-detected version
         // would need a second `applied_*` field for no measurable saving.
         render.set_sky_mode(self.sim.sky_mode());
+        // Beside `set_sky_mode` because it is the same shape: a per-frame read
+        // of the connected dimension with no edge detector. See
+        // `Sim::void_fog` for the two constants this replaced.
+        render.set_void_fog(self.sim.void_fog());
 
         // Filled maps (issue #184). This is the hop that turns the `SessionMaps`
         // fold from an F3 readout into the picture itself — the palette, the

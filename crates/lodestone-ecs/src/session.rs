@@ -501,8 +501,25 @@ pub struct ServerDimension(pub Option<DimensionId>);
 /// nothing usable, and every consumer has to state its own fallback — see
 /// `lodestone_shell::mesher::sky_default_for_dimension`, which keeps its
 /// original name match for exactly this case.
+/// # Why the flat-world flag lives here too
+///
+/// `is_flat` is not part of the `minecraft:dimension_type` registry entry —
+/// it comes straight off the login/respawn packet. It is folded into the same
+/// component because it arrives on the same event, changes on exactly the same
+/// edges, and every consumer that wants one wants the other: vanilla keeps
+/// both in `ClientLevelData` side by side, where `voidDarknessOnsetRange()`
+/// reads `isFlat` and the void-fog span reads the dimension type's `min_y`.
+/// It is deliberately **not** a field of [`DimensionTypeInfo`], which is a
+/// decode of one registry entry and must stay one-sourced.
 #[derive(Component, Debug, Clone, Default, PartialEq)]
-pub struct ServerDimensionType(pub Option<DimensionTypeInfo>);
+pub struct ServerDimensionType {
+    /// The resolved dimension type, or `None` when the holder id did not
+    /// resolve. **`None` must not be read as "the overworld"** — see this
+    /// type's own doc.
+    pub info: Option<DimensionTypeInfo>,
+    /// Whether the level uses the flat world generator.
+    pub is_flat: bool,
+}
 
 /// Every biome's `minecraft:visual/sky_color` as the server declared it in the
 /// Configuration `registry_data`, **indexed by biome holder id**.
@@ -908,9 +925,11 @@ pub fn apply_local_player_state(
                 // than an honest `None`.
                 ClientEvent::DimensionTypeChanged {
                     dimension_type: info,
+                    is_flat,
                     ..
                 } => {
-                    dimension_type.0 = info.clone();
+                    dimension_type.info = info.clone();
+                    dimension_type.is_flat = *is_flat;
                 }
                 // Assigned unconditionally for the same reason the
                 // arm above is: an empty table must **clear** the previous one.
@@ -2099,7 +2118,7 @@ mod tests {
     fn a_net_ingest_run_folds_the_registry_dimension_type_and_a_portal_trip_moves_it() {
         let (mut app, entity) = session_app();
         assert_eq!(
-            app.world().get::<ServerDimensionType>(entity).unwrap().0,
+            app.world().get::<ServerDimensionType>(entity).unwrap().info,
             None,
             "pre-login there is no dimension type — not a defaulted overworld"
         );
@@ -2109,13 +2128,14 @@ mod tests {
             ClientEvent::DimensionTypeChanged {
                 holder_id: 0,
                 dimension_type: Some(dim_type("overworld", true)),
+                is_flat: false,
             },
         );
         let folded = app
             .world()
             .get::<ServerDimensionType>(entity)
             .unwrap()
-            .0
+            .info
             .clone()
             .expect("the fold must reach the component");
         assert!(folded.has_skylight);
@@ -2129,13 +2149,14 @@ mod tests {
             ClientEvent::DimensionTypeChanged {
                 holder_id: 3,
                 dimension_type: Some(dim_type("the_nether", false)),
+                is_flat: false,
             },
         );
         let nether = app
             .world()
             .get::<ServerDimensionType>(entity)
             .unwrap()
-            .0
+            .info
             .clone()
             .expect("a portal trip must install the new type");
         assert!(
@@ -2152,10 +2173,11 @@ mod tests {
             ClientEvent::DimensionTypeChanged {
                 holder_id: 99,
                 dimension_type: None,
+                is_flat: false,
             },
         );
         assert_eq!(
-            app.world().get::<ServerDimensionType>(entity).unwrap().0,
+            app.world().get::<ServerDimensionType>(entity).unwrap().info,
             None,
             "an unresolved holder id must clear the previous dimension type"
         );
@@ -3476,6 +3498,7 @@ mod tests {
         assert!(handles_event(&ClientEvent::DimensionTypeChanged {
             holder_id: 0,
             dimension_type: None,
+            is_flat: false,
         }));
         assert!(handles_event(&ClientEvent::BiomeVisuals {
             sky_colors: Vec::new(),

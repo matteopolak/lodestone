@@ -112,6 +112,7 @@ impl V770Adapter {
                 Directive::Emit(ClientEvent::DimensionTypeChanged {
                     holder_id: body.dimension_type,
                     dimension_type,
+                    is_flat: body.is_flat,
                 }),
                 Directive::Emit(ClientEvent::BiomeVisuals {
                     sky_colors: biome_sky_colors,
