@@ -2831,8 +2831,8 @@ name = "lodestone-dedicated-server"
 version = "0.1.0"
 dependencies = [
  "lodestone-auth",
+ "lodestone-registry",
  "lodestone-server",
- "lodestone-v770",
  "reqwest",
  "tokio",
  "tracing",
