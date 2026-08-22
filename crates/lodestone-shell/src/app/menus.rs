@@ -57,7 +57,33 @@ impl WindowApp {
         text: Option<&str>,
         modifiers: ModifiersState,
     ) -> Option<MenuKey> {
-        let shortcut_held = shortcut_modifier_held(modifiers, cfg!(target_os = "macos"));
+        Self::menu_key_for_platform(
+            physical_key,
+            text,
+            modifiers,
+            cfg!(target_os = "macos"),
+        )
+    }
+
+    /// [`Self::menu_key_for`] with the platform split supplied rather than
+    /// read from `cfg!`.
+    ///
+    /// Same reasoning as [`shortcut_modifier_held`]'s own `is_macos`
+    /// parameter, one layer up, and it is not theoretical: the shortcut tests
+    /// at the bottom of `app::tests` drive `ModifiersState::SUPER` and expect
+    /// `MenuKey::SelectAll`, which is true on macOS and false everywhere
+    /// else. Reading `cfg!` inside made those five gates assertions about the
+    /// machine rather than about the mapping — green on the dev Macs, red on
+    /// every Linux CI runner, with nothing in the source to suggest it. With
+    /// the flag passed in, each one asserts **both** platforms, which is
+    /// strictly more than either arm could say before.
+    pub(super) fn menu_key_for_platform(
+        physical_key: PhysicalKey,
+        text: Option<&str>,
+        modifiers: ModifiersState,
+        is_macos: bool,
+    ) -> Option<MenuKey> {
+        let shortcut_held = shortcut_modifier_held(modifiers, is_macos);
         if let PhysicalKey::Code(code) = physical_key {
             match code {
                 KeyCode::ArrowUp => return Some(MenuKey::Up),

@@ -357,14 +357,51 @@ mod tests {
             (16.0, 1048576000),   // 0.25, exact
             (100.0, 1036831949),  // 0.1
             (0.0, 2139095040),    // +Inf
-            (-1.0, 2143289344),   // NaN (Math.sqrt of a negative double)
             (1.0E-30, 1482907561),
             (1.0E30, 646978941),
             (f32::INFINITY, 0),   // 0.0
         ];
+        let mut mismatches = Vec::new();
         for &(x, want) in cases {
             let got = inv_sqrt_f32(x).to_bits();
-            assert_eq!(got, want, "inv_sqrt_f32({x}) diverges from JOML");
+            if got != want {
+                mismatches.push(format!("inv_sqrt_f32({x}): got {got}, want {want} (JOML)"));
+            }
         }
+        assert!(
+            mismatches.is_empty(),
+            "diverged from JOML:\n{}",
+            mismatches.join("\n")
+        );
+
+        // A negative input is deliberately **not** in the bit table above,
+        // and this is the one place the "assert bits, not values" rule has to
+        // give way: the *sign* of a NaN produced by taking the square root of
+        // a negative is architecture-specific, not a property of the port.
+        // Measured — aarch64 yields the default quiet NaN `0x7FC00000`
+        // (2143289344), x86_64 the "real indefinite" `0xFFC00000`
+        // (4290772992), because SSE's `sqrtsd` sets the sign bit and AArch64's
+        // `fsqrt` does not; `1.0 / NaN` then propagates whichever it got. A
+        // raw-bits expectation transcribed on one of the two therefore fails
+        // on the other for a reason that has nothing to do with `invSqrt` —
+        // which is exactly what happened: this gate was green on the dev Macs
+        // and red on every x86_64 CI runner.
+        //
+        // What is still worth asserting is everything a wrong port would get
+        // wrong anyway: the result is NaN (not `Inf`, not a finite number
+        // from a magic-constant Newton iterate), and it is *quiet*, so it
+        // propagates rather than trapping.
+        let negative = inv_sqrt_f32(-1.0);
+        assert!(
+            negative.is_nan(),
+            "inv_sqrt_f32(-1.0) must be NaN like Math.sqrt of a negative double, got {negative}"
+        );
+        assert_eq!(
+            negative.to_bits() & 0x7FFF_FFFF,
+            0x7FC0_0000,
+            "inv_sqrt_f32(-1.0) must be the canonical *quiet* NaN payload (sign ignored: it is \
+             architecture-specific), got {:#010X}",
+            negative.to_bits()
+        );
     }
 }
