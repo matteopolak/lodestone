@@ -3,9 +3,25 @@
 #
 # Banners (layered loom patterns composited into one flag mesh, with sway),
 # decorated pots (four independent sherd faces), chests and shulker boxes,
-# a conduit (shell + spinning eye), a lit campfire cooking real items, a
-# lectern holding a book, a bell, an enchanting table (four animated book
-# values, none of them on the wire), and a beacon firing its beam.
+# skulls and heads, an inactive conduit shell, a lit campfire cooking real
+# items, a lectern holding a book, a bell, an enchanting table (four animated
+# book values, none of them on the wire), and a beacon firing its beam.
+#
+# Two placement traps, each of which produced a false defect report:
+#
+#   * `minecraft:conduit`'s default block state is `waterlogged=true`, so a
+#     bare `setblock` puts a real water source on the stage and the server
+#     floods it out to a radius-6 diamond. That is vanilla behaviour, not a
+#     renderer bug; place it `waterlogged=false`. With no prismarine frame
+#     around it the conduit is *inactive*, which is the small spinning shell
+#     drawn from `entity/conduit/base` — no cage, no wind, no eye.
+#   * a skull's `rotation` segment 0 faces **north** (`-Z`), so a camera on
+#     the `-Z` side sees the face at `rotation=0` and the back of the head at
+#     `rotation=8`. The back of a skeleton skull or a zombie head is a flat
+#     untextured-looking field of one colour, which reads exactly like a
+#     missing texture. Banners here use `rotation=8` for the opposite reason:
+#     `BannerRenderer` applies no `scale(-1, -1, 1)` flip, so their segment 0
+#     points the other way.
 
 @size 768 432
 @camera 0.0 66.3 4.6
@@ -43,26 +59,17 @@ setblock 3 64 13 minecraft:campfire[lit=true,facing=south]{Items:[{Slot:0b,id:"m
 setblock 5 64 13 minecraft:bell[facing=south,attachment=floor]
 setblock 6 64 13 minecraft:trapped_chest[facing=south]
 
-# --- front row: shulkers, pots, conduit ------------------------------------
+# --- front row: shulkers, pots, heads, conduit -----------------------------
 setblock -5 64 9 minecraft:purple_shulker_box[facing=up]
 setblock -4 64 9 minecraft:light_blue_shulker_box[facing=south]
+setblock -3 64 9 minecraft:zombie_head[rotation=0]
 setblock -2 64 9 minecraft:decorated_pot[facing=south]{sherds:["minecraft:angler_pottery_sherd","minecraft:brewer_pottery_sherd","minecraft:danger_pottery_sherd","minecraft:explorer_pottery_sherd"]}
+setblock -1 64 9 minecraft:player_head[rotation=0]
 setblock 0 64 9 minecraft:decorated_pot[facing=south]{sherds:["minecraft:heart_pottery_sherd","minecraft:friend_pottery_sherd","minecraft:mourner_pottery_sherd","minecraft:skull_pottery_sherd"]}
+setblock 1 64 9 minecraft:skeleton_skull[rotation=0]
 setblock 2 64 9 minecraft:barrel[facing=south]
+setblock 3 64 9 minecraft:conduit[waterlogged=false]
 setblock 4 64 9 minecraft:lime_shulker_box[facing=up]
 setblock 5 64 9 minecraft:blue_shulker_box[facing=south]
-
-# Three block-entity types are deliberately NOT in this scene, because they
-# render wrongly today and a screenshot must not launder a defect:
-#
-#   * a **conduit**'s shell draws as a huge translucent blue sheet over the
-#     whole stage, not a 1-block cage;
-#   * a **skull/head** draws as a plain untextured cube — the face texture
-#     never reaches its front quad (measured on skeleton_skull and
-#     zombie_head, camera square on to `rotation=8`);
-#   * a **dragon_head** draws nothing at all, while the skulls beside it draw.
-#
-# All three are block-entity-rendered types, so they belong here on merit.
-# Put them back when they are fixed.
 
 tp Lodestone 0.0 64.0 28.0 180 8
