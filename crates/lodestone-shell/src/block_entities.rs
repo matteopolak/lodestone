@@ -4122,20 +4122,34 @@ mod skull_tests {
         );
     }
 
+    /// Every skull/head block path in vanilla 26.2, floor and wall — the list
+    /// this renderer must resolve in full.
+    ///
+    /// **Named once on purpose.** It used to be two lists: this one, plus a
+    /// "declined" list holding `dragon_*`/`piglin_*` that a sibling gate
+    /// asserted resolved to `None`. That second list was a premise with an
+    /// expiry date nothing tracked, and porting the two rigs made it assert
+    /// the opposite of the truth. One list cannot go out of step with itself.
+    const EVERY_SKULL_BLOCK_PATH: [&str; 14] = [
+        "skeleton_skull",
+        "skeleton_wall_skull",
+        "wither_skeleton_skull",
+        "wither_skeleton_wall_skull",
+        "zombie_head",
+        "zombie_wall_head",
+        "creeper_head",
+        "creeper_wall_head",
+        "player_head",
+        "player_wall_head",
+        "dragon_head",
+        "dragon_wall_head",
+        "piglin_head",
+        "piglin_wall_head",
+    ];
+
     #[test]
     fn every_ported_skull_block_in_the_real_table_resolves() {
-        for path in [
-            "skeleton_skull",
-            "skeleton_wall_skull",
-            "wither_skeleton_skull",
-            "wither_skeleton_wall_skull",
-            "zombie_head",
-            "zombie_wall_head",
-            "creeper_head",
-            "creeper_wall_head",
-            "player_head",
-            "player_wall_head",
-        ] {
+        for path in EVERY_SKULL_BLOCK_PATH {
             let name = format!("minecraft:{path}");
             let found = (0..lodestone_data::block_states::STATE_COUNT)
                 .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()));
@@ -4151,22 +4165,27 @@ mod skull_tests {
         }
     }
 
-    /// The two real skull types this renderer declines — dragon and piglin —
-    /// must still be *present* in the state table (so this is testing the
-    /// decline, not a stale block name) and must resolve to no skull type.
+    /// [`EVERY_SKULL_BLOCK_PATH`] really is every one — vanilla's seven
+    /// `SkullBlock.Types` in a floor and a wall variant each — checked against
+    /// the 26.2 state table itself rather than against a second hand-written
+    /// list. A vanilla skull block missing from that constant would otherwise
+    /// be silently unguarded: the gate above only proves the paths it is given
+    /// resolve, never that it was given all of them.
     #[test]
-    fn declined_skull_types_are_present_but_resolve_to_nothing() {
-        for path in ["dragon_head", "dragon_wall_head", "piglin_head", "piglin_wall_head"] {
-            let name = format!("minecraft:{path}");
-            let found = (0..lodestone_data::block_states::STATE_COUNT)
-                .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()));
-            let id = found.unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
-            assert_eq!(
-                skull_type_for_state(id),
-                None,
-                "{name} unexpectedly resolved a skull type"
-            );
-        }
+    fn the_skull_path_list_is_every_skull_block_in_the_real_table() {
+        let mut in_table: Vec<&str> = (0..lodestone_data::block_states::STATE_COUNT)
+            .filter_map(lodestone_data::block_states::block_name)
+            .filter_map(|name| name.strip_prefix("minecraft:"))
+            .filter(|path| {
+                (path.ends_with("_skull") || path.ends_with("_head"))
+                    && SkullType::from_block_path(path).is_some()
+            })
+            .collect();
+        in_table.sort_unstable();
+        in_table.dedup();
+        let mut listed: Vec<&str> = EVERY_SKULL_BLOCK_PATH.to_vec();
+        listed.sort_unstable();
+        assert_eq!(in_table, listed, "the constant and the 26.2 state table disagree");
     }
 
     /// A non-skull block entity with a `facing` property (a furnace) must not
