@@ -1251,12 +1251,29 @@ impl WindowApp {
                         None => format!("gpu {name}: <no reading yet>"),
                     });
                 }
-                // The CPU-bound-or-GPU-bound line, and the reason the two
-                // `*_total` spans exist: between them they cover every pass
-                // this shell submits, so their sum against the real presented
-                // frame interval is the whole question. Every other line in
-                // this block is *recording* cost — `queue.submit` only
-                // enqueues — and cannot answer it.
+                // The CPU-bound-or-GPU-bound line — built from the two
+                // **real** passes this timer can see, and labelled as the
+                // lower bound it is.
+                //
+                // This used to add the `world_total` and `hud_total`
+                // bracketing spans instead, on the grounds that between them
+                // they cover every pass the shell submits. They do, in
+                // submission terms, and the number was still not usable:
+                // `benches/frame_profile.rs` measures those spans reading
+                // **below the block pass they enclose** at two of four camera
+                // waypoints on a quiet machine (0.059 ms of span against a
+                // 0.234 ms pass at one of them). A span shorter than its own
+                // contents is a different quantity, not a noisy one, so
+                // showing its sum here as "gpu frame total" put a fabricated
+                // figure on the overlay. The bracket segments are still
+                // listed individually by the loop above, where they read as
+                // what they are; they are just no longer summed into a claim.
+                //
+                // A sum of per-pass GPU times is **not** a frame's GPU time
+                // either — passes overlap on a tile-based deferred GPU — so
+                // this is stated as a floor rather than a total. It is enough
+                // for the question it exists to answer: a floor already above
+                // the frame budget settles GPU-bound outright.
                 //
                 // Denominator is the pacer's counted frame rate, not the
                 // `frame_ms` figure a few lines above: that one is measured
@@ -1267,25 +1284,24 @@ impl WindowApp {
                 let span = |name: &str| {
                     report.iter().find(|(n, _)| *n == name).and_then(|(_, ms)| *ms)
                 };
-                if let (Some(world_total), Some(hud_total)) =
-                    (span("world_total"), span("hud_total"))
-                {
-                    let gpu_ms = world_total + hud_total;
+                if let (Some(block), Some(hand)) = (span("world"), span("first_person")) {
+                    let floor_ms = block + hand;
                     let fps = self.pacer.fps() as f32;
                     // A share is only meaningful once the pacer has actually
                     // counted a presented frame; before that, report the
-                    // total alone rather than dividing by zero into a
+                    // figure alone rather than dividing by zero into a
                     // fabricated percentage.
                     if fps > 0.0 {
                         let budget_ms = 1000.0 / fps;
                         lines.push(format!(
-                            "gpu frame total: {gpu_ms:.2} ms = {:.0}% of the {budget_ms:.2} ms presented \
-                             interval (readback lags a few frames)",
-                            100.0 * gpu_ms / budget_ms,
+                            "gpu measured passes: {floor_ms:.2} ms >= {:.0}% of the {budget_ms:.2} ms \
+                             presented interval (block+hand only, a floor; readback lags a few frames)",
+                            100.0 * floor_ms / budget_ms,
                         ));
                     } else {
                         lines.push(format!(
-                            "gpu frame total: {gpu_ms:.2} ms (no presented-frame interval yet)"
+                            "gpu measured passes: {floor_ms:.2} ms (block+hand only, a floor; no \
+                             presented-frame interval yet)"
                         ));
                     }
                 }

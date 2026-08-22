@@ -250,38 +250,52 @@ impl GpuQueryTimer {
     /// is to carry a boundary. The target is 1x1 and never sampled, so the
     /// pass has no measurable cost of its own.
     ///
-    /// # The pass must stay empty, and that is a measurement
+    /// # These spans are **unreliable on this adapter**, and that is measured
     ///
-    /// A previous version of this method drew one triangle here, on the
-    /// reasoning that `timestamp_writes` samples at *stage* boundaries and a
-    /// pass with no vertex or fragment stage therefore has no boundary to
-    /// sample. That reasoning is plausible, it is what the spec language
-    /// suggests, and the bench says it is wrong: it made the spans **worse**,
-    /// not better.
+    /// A bracketing span is not a trustworthy number here. `benches/
+    /// frame_profile.rs` measures `world_total` reading **below the block
+    /// pass it encloses** — a span shorter than its own contents, which is a
+    /// different quantity rather than a noisy one — at two of four camera
+    /// waypoints on an otherwise quiet machine:
     ///
-    /// Measured at `ground_forward` on the 1280x720 demo world, `world_total`
-    /// against the block pass it encloses:
+    /// | waypoint | `world_total` | block pass |
+    /// |---|---|---|
+    /// | ground_forward | 0.592 ms | 0.348 ms |
+    /// | ground_oblique | **0.059 ms** | 0.234 ms |
+    /// | high_down | **0.114 ms** | 0.451 ms |
+    /// | low_up | 0.121 ms | 0.085 ms |
     ///
-    /// | stamp pass | `world_total` | block pass | verdict |
-    /// |---|---|---|---|
-    /// | empty, three runs | 0.608 / 0.574 / 0.729 ms | 0.299 / 0.311 / 0.495 | tracks the scene, always encloses |
-    /// | one triangle, run 1 | 0.072 ms | 0.319 | **below its own contents** |
-    /// | one triangle, run 2 | 0.516 ms | 0.316 | plausible |
-    /// | one triangle, run 3 | 1.373 ms | 0.296 | 4.6x the pass, and 0.212 against 0.479 at another waypoint |
+    /// Two hypotheses were tried and **both are refuted**, which is the part
+    /// worth carrying because each is individually plausible:
     ///
-    /// The mechanism that fits: a stamp pass carrying real work shares no
-    /// attachment with the frame's own passes, so nothing orders it against
-    /// them and the GPU is free to retire it whenever it likes — the span
-    /// then measures the stamps rather than the frame, in either direction.
-    /// An empty pass appears to be handled as a marker instead, keeping its
-    /// place in the submission order. That is an inference about a driver and
-    /// is not guaranteed anywhere; what is *established* is the table above.
+    /// * *"the pass must not be empty — `timestamp_writes` samples at stage
+    ///   boundaries, and a pass with no vertex or fragment stage has none"*.
+    ///   Drawing one triangle here made the spans **worse**, not better:
+    ///   1.373 ms against a 0.296 ms pass on one run, 0.072 ms against 0.319
+    ///   on another. Wrong in both directions.
+    /// * *"the triangle is what broke it"* — the obvious reading of that
+    ///   result, and also wrong. Reverting to the empty pass produced the
+    ///   table above. The behaviour is the same either way.
     ///
-    /// So: **do not put work in this pass.** If the spans start reading as
-    /// noise again, the durable fix is to hang the frame's timestamps off the
-    /// real first and last passes — which genuinely do share an attachment and
-    /// so genuinely serialise — rather than to make these dummies more
-    /// substantial. Those passes live in `lodestone-render`.
+    /// What the runs *do* correlate with is [`Self::stalled_frames`]: the one
+    /// run whose four waypoints all came out enclosing was the one with the
+    /// fewest stalls per waypoint, and it happened to be running on a heavily
+    /// loaded machine, where the slower CPU frame loop let readback keep up.
+    /// That is a correlation across a handful of runs and **not** an
+    /// established mechanism; do not write it down as one.
+    ///
+    /// So: treat `world_total` and `hud_total` as diagnostics to look at, not
+    /// as measurements to reason from, and never sum them into a frame total
+    /// — `app/redraw.rs` did exactly that on the F3 overlay until this was
+    /// measured. The per-pass segments (`world`, `first_person`) are a
+    /// different matter: they are single real passes with their own edges,
+    /// they track the scene consistently across every run recorded here, and
+    /// they are what the overlay reports now.
+    ///
+    /// The durable fix is to hang the frame's edges off the **real** first
+    /// and last passes, which share an attachment with the work and so
+    /// genuinely serialise, rather than off dummies that share nothing. Those
+    /// passes live in `lodestone-render`.
     ///
     /// # Spans may cross command buffers
     ///
