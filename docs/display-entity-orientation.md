@@ -180,13 +180,15 @@ reverse.
 
 ### The glyph pipeline's polygon offset is load-bearing — do not merge it away
 
-`gpu/display_text.rs` builds **three** pipelines from one descriptor: the
+`gpu/display_text.rs` builds **four** pipelines from one descriptor: the
 background panel through `RenderPipelines.TEXT_BACKGROUND`'s plain
-`DepthStencilState.DEFAULT`, and the glyphs through
+`DepthStencilState.DEFAULT`, the glyphs' drop shadows through
 `RenderPipelines.TEXT_POLYGON_OFFSET`
 (`DepthStencilState(GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`, which flips
-to `constant: -10, slope_scale: -1.0` in this project's `[0,1]` depth). They
-look identical apart from that bias, which is exactly why one earlier version
+to `constant: -10, slope_scale: -1.0` in this project's `[0,1]` depth), and
+the ink itself through **two** of that same offset — see the drop-shadow
+section below. (The fourth is the see-through pipeline above.) They look
+identical apart from the bias, which is exactly why one earlier version
 collapsed them into a single unbiased pipeline with the comment "nothing
 coplanar to fight".
 
@@ -220,6 +222,63 @@ tests, with the reversed-Z column as the control — computed straight from the 
 that more than 100 non-sky pixels land in the entity's rect, which the panel
 alone satisfies. Any gate for this has to measure the **ink** against a
 reference with the panel switched off.
+
+### The drop shadow is separated by polygon offset, and vanilla's geometric offset is deliberately *not* ported
+
+Owner report, once the drop shadow landed: *"the shadow text is z-fighting with the real text in
+places where both are on the same 'pixel' for holograms"*.
+
+A shadow is the same ink rect one font pixel away **in the text's own plane**. An in-plane
+translation only changes depth when the plane is oblique to the view — which is a hologram seen from
+anywhere but straight on, and never `gpu/nametag.rs`'s always-camera-facing plane, which is why the
+report named holograms. Where the two quads overlap they are two *different* triangles interpolating
+window `z` at one pixel, so float rounding decides the winner per fragment. The symptom being
+**speckle** is itself the diagnosis: two exactly parallel planes one representable step apart flip
+whole, so per-pixel fighting means the surfaces are not parallel.
+
+Vanilla separates them geometrically — `BakedSheetGlyph.renderChar` emits the shadow at local
+`z = 0` and a shadowed glyph at `0.03`. **That port was written, measured, and removed**, for two
+reasons in order of weight:
+
+- It **encodes which side is the front into the geometry**, and a `text_display` is visible from
+  both. `0.03` local is `0.00075 · scale` blocks along the plane's own normal, so it moves the glyph
+  toward the eye from the front and *away* from it from behind, where it swamps any ULP-denominated
+  correction because it is orders of magnitude larger.
+- It is **under a ULP where it matters anyway** — three times the panel-versus-ink separation the
+  table above already measures at `0` ULP past 64 blocks.
+
+What replaces it: the shadow keeps vanilla's `TEXT_POLYGON_OFFSET` unchanged (so text flush against a
+block face still beats the face), and the ink takes that offset **twice, in both terms**. The slope
+term is doubled and not just the constant because the constant is denominated in ULPs of the
+primitive's own depth — view-angle-blind — while the rounding a near-grazing plane has to beat grows
+with its depth *gradient*, which only the slope term tracks. A polygon offset is measured from the
+camera rather than baked into the geometry, which is precisely why it survives being walked around.
+
+Measured, twelve headless configurations spanning face-on to 85° oblique, front and back, 3 to 24
+blocks at constant angular size. Ink lost of ~15–18k drawn, worst row per group:
+
+| shadow/ink separation | 70° back | 80° back | 85° back | 80° front |
+|---|---|---|---|---|
+| one pipeline, no geometry — as shipped | 1,014 | 1,141 | 2,883 | — |
+| constant term only, no geometry | 4 | 34 | 1,204 | — |
+| constant + slope, **plus** vanilla's `0.03` | 101 | 297 | 3,120 | 189 |
+| **constant + slope, no geometry** | **0** | **0** | **0** | **0** |
+
+Row three is the one worth reading twice: **the faithful port made things worse than doing nothing**
+from behind. Row two is why the slope term is doubled.
+
+Two mechanisms considered and not taken. Drawing the shadow with depth *write* off removes the
+contest outright and is precision-proof — but the shadow range is batched across every display in the
+frame, so a near display's shadow would stop occluding a far display's ink drawn later in the same
+pass; keeping the write is what lets the four ranges stay global instead of per-display. And giving
+the shadow *no* offset (leaving the ink on vanilla's single step) loses the shadow's own protection
+against world geometry, which is what vanilla's offset on text exists for.
+
+The gate is
+`world_text_over_geometry_pixels.rs::a_glyph_wins_against_its_own_drop_shadow_at_every_distance_and_angle`,
+which sweeps **obliquity as well as distance** — the axis every other `text_display` fixture in this
+tree was holding fixed. At the ~40° look those fixtures use, a build with no separation at all loses
+**1 ink pixel of 438**; at 80–85° the same build loses **983–2,974 of ~15–18k**.
 
 ### How the two model consumers are posed
 
