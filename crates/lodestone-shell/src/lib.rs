@@ -41,6 +41,11 @@ pub mod entities;
 pub mod gpu;
 pub mod hud;
 pub mod interact;
+/// Which username and UUID a join presents: the selected Microsoft account, or
+/// the persisted offline identity when there is none. One producer, so the
+/// account switcher and the join path cannot disagree. See
+/// `docs/join-identity.md`.
+pub mod join_identity;
 pub mod keybinds;
 pub mod menu;
 pub mod mesher;
