@@ -48,6 +48,11 @@ minutes.
 `LODESTONE_SCENES=02-signs,05-hud` restricts a run to those stems, which is how you iterate
 on one image.
 
+A re-run is **reproducible but not byte-identical**: the world state is pinned (spawn, time,
+weather, game rules) but a campfire's flame, a mob's idle sway and a chat line's fade age are
+all phase-dependent, so the PNGs differ by a few hundred bytes between runs. That is why
+there is no drift gate over them.
+
 ### The control
 
 A capture tool's worst failure is a *silent* one — a black frame, or a camera inside a
