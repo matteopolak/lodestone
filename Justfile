@@ -359,6 +359,19 @@ oracle-terrain:
 oracle-survival:
     ./scripts/live-oracles/survival.sh
 
+# Re-capture the README's in-game screenshots into docs/images/, by joining the
+# flat creative oracle with the real client and rendering one frame per scene.
+# Needs `just oracle-creative` up first, plus a GPU adapter and the vanilla
+# assets under .cache/mc/26.2. Scenes are data — scripts/screenshot-scenes/*.txt
+# — so editing one costs no recompile; LODESTONE_SCENES=stem1,stem2 restricts a
+# run to those files. See docs/screenshots.md.
+#
+# --test-threads=1 is not tidiness: every scene shares one world, one session
+# and one GPU context, and the harness rebuilds the stage between shots.
+[doc("re-capture docs/images/*.png from a live session (needs `just oracle-creative`)")]
+screenshots:
+    cargo test {{jflag}} --target-dir {{tdir}} -p lodestone-shell --features live --test capture_screenshots -- --ignored --nocapture --test-threads=1
+
 # Re-dump the per-block blast-resistance + flammability facts (#312/#313) from
 # the real 26.2 server, over the committed anchor
 # (crates/lodestone-data/tests/support/blast_fire_jvm.txt). Needs Apple

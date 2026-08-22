@@ -1,0 +1,51 @@
+# Text-display holograms: styled, shadowed, panelled world text.
+#
+# `text_display` is the entity family whose glyph pass this client rewrote —
+# the shadow is a polygon offset rather than vanilla's geometry, and a
+# `text_display` is legible from *behind*, which is exactly the premise the
+# ported one-sided constant violated. Two of the panels are turned away from
+# the camera's axis for that reason.
+#
+# The stage sits at y=63 rather than on the flat world's own surface: the
+# superflat oracle's ground is y=-61, and this client applies vanilla's
+# non-flat void fog (a 32-block fade above the world bottom) everywhere, so a
+# camera down there sees a near-black sky. Real vanilla uses a 1-block snap in
+# a flat world; ours does not know the world is flat. Building up here shows
+# the renderer rather than that gap.
+
+@size 768 432
+@camera 0.0 66.5 4.6
+@look 0.0 66.4 15.0
+@fov 65
+@wait 2500
+
+# --- the stage -----------------------------------------------------------
+fill -12 63 2 12 76 28 minecraft:air
+kill @e[type=!player,x=-12,y=60,z=2,dx=24,dy=20,dz=26]
+fill -12 63 2 12 63 28 minecraft:polished_deepslate
+fill -8 63 6 8 63 22 minecraft:deepslate_bricks
+fill -8 63 6 8 63 6 minecraft:deepslate_tiles
+fill -8 63 22 8 63 22 minecraft:deepslate_tiles
+fill -10 64 19 10 66 19 minecraft:deepslate_bricks
+fill -10 67 19 10 67 19 minecraft:deepslate_brick_wall
+fill -6 64 19 6 65 19 minecraft:polished_deepslate
+setblock -3 65 19 minecraft:sea_lantern
+setblock 3 65 19 minecraft:sea_lantern
+setblock -10 68 19 minecraft:sea_lantern
+setblock 10 68 19 minecraft:sea_lantern
+setblock -7 64 11 minecraft:lantern[hanging=false]
+setblock 7 64 11 minecraft:lantern[hanging=false]
+setblock -7 64 23 minecraft:lantern[hanging=false]
+setblock 7 64 23 minecraft:lantern[hanging=false]
+
+# --- the holograms -------------------------------------------------------
+summon text_display 0.0 67.4 15.0 {billboard:"fixed",Rotation:[180f,0f],line_width:400,alignment:"center",text:{text:"LODESTONE",color:"#F2B233",bold:true},transformation:{scale:[3.0f,3.0f,3.0f],translation:[0f,0f,0f],left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f]}}
+summon text_display 0.0 66.7 15.0 {billboard:"fixed",Rotation:[180f,0f],line_width:400,alignment:"center",text:[{text:"a Minecraft client written ","color":"#C9D1D9"},{text:"from scratch","color":"#7EE787",bold:true},{text:" in ","color":"#F78166",italic:true},{text:"Rust","color":"#F78166",bold:true,italic:true}],transformation:{scale:[1.1f,1.1f,1.1f],translation:[0f,0f,0f],left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f]}}
+summon text_display -4.3 65.4 11.4 {billboard:"fixed",Rotation:[215f,0f],line_width:260,alignment:"center",background:1275068416,text:[{text:"four protocol families\n","color":"aqua"},{text:"1.8.9  1.12.2  1.16.5  26.2","color":"white",bold:true}],transformation:{scale:[0.72f,0.72f,0.72f],translation:[0f,0f,0f],left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f]}}
+summon text_display 4.3 65.4 11.4 {billboard:"fixed",Rotation:[145f,0f],line_width:260,alignment:"center",background:1275068416,see_through:true,text:[{text:"see-through, no shadow\n","color":"light_purple",italic:true},{text:"strikethrough","color":"yellow",strikethrough:true},{text:"  ","color":"white"},{text:"underline","color":"green",underlined:true}],shadow:false,transformation:{scale:[0.72f,0.72f,0.72f],translation:[0f,0f,0f],left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f]}}
+
+# The same entity family carrying geometry instead of glyphs.
+summon block_display -1.6 64.2 9.6 {block_state:{Name:"minecraft:sea_lantern"},transformation:{scale:[0.7f,0.7f,0.7f],translation:[0f,0.4f,0f],left_rotation:[0.19f,0.36f,0.08f,0.91f],right_rotation:[0f,0f,0f,1f]}}
+summon item_display 1.6 64.9 9.6 {item:{id:"minecraft:netherite_pickaxe",count:1},item_display:"gui",transformation:{scale:[1.1f,1.1f,1.1f],translation:[0f,0f,0f],left_rotation:[0f,0.3827f,0f,0.9239f],right_rotation:[0f,0f,0f,1f]}}
+
+tp Lodestone 0.0 64.0 26.0 180 10
