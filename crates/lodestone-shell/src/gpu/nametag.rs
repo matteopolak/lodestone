@@ -82,20 +82,28 @@
 //! (this crate's chat-HUD slider) is deliberately **not** threaded in here:
 //! vanilla's chat-only default means it would not feed this value either.
 //!
-//! What *is* a real divergence: vanilla composites this plate on raw gamma
-//! bytes, while every pipeline in this pass targets the swapchain's **sRGB**
-//! view, so the hardware blends in linear light — the same colour-space
-//! mismatch `docs/tab-list.md` records for the HUD's flat-colour stream. For
-//! a pure-black source the two agree only at a black backdrop and diverge
-//! monotonically toward white: re-derived from the sRGB transfer function,
-//! `0.75·bg` (vanilla) against `encode(0.75·decode(bg))` (here) is `0` at
-//! `bg = 0`, ≈+7/255 at `bg = 64`, ≈+16/255 at `bg = 128` and ≈+33/255 at
-//! `bg = 255`, i.e. the plate reads **too weak against a bright backdrop**.
-//! The fix is structural — the flat-colour geometry has to reach a raw
-//! (non-sRGB) view, which for a world pass means its own render pass and
-//! `lodestone_render::target` work — and is **not** a constant to tune here;
-//! `gpu/sign_text.rs` and `gpu/display_text.rs`'s panels have the identical
-//! exposure and should move together with it.
+//! What *was* a real divergence, and is fixed structurally rather than by
+//! touching that constant: vanilla composites this plate on raw gamma bytes,
+//! while every pipeline in this crate targets the swapchain's **sRGB** view, so
+//! the hardware blended in linear light — the same colour-space mismatch
+//! `docs/tab-list.md` records for the HUD's flat-colour stream. For a
+//! pure-black source the two agree only at a black backdrop (white is *not* a
+//! second fixed point, unlike the tab-list case) and diverge monotonically
+//! toward it: re-derived from the sRGB transfer function, `0.75·bg` (vanilla)
+//! against `encode(0.75·decode(bg))` (the bug) is `0` at `bg = 0`, ≈+7/255 at
+//! `bg = 64`, ≈+16/255 at `bg = 128` and ≈+33/255 at `bg = 255`, i.e. the plate
+//! read **too weak against a bright backdrop**.
+//!
+//! This pass therefore draws into a **raw** (non-sRGB) view of the same colour
+//! texture, in its own render pass — a `wgpu` render pass fixes one attachment
+//! format for every pipeline in it, so there is no way to have one pipeline in
+//! the block pass blend differently from its neighbours.
+//! `RenderState::set_world_text_view` installs the view and re-points these
+//! pipelines' format from one expression, so the two cannot be decided apart.
+//! `gpu/sign_text.rs` and `gpu/display_text.rs` had the identical exposure —
+//! all three share this file's shader, so every colour any of them submits is a
+//! vanilla gamma byte — and moved with it. See
+//! `docs/world-text-gamma-blend.md`.
 //!
 //! # Anchor height and distance cutoff
 //!
@@ -629,6 +637,12 @@ fn push_entity_quads(
 pub(super) struct NameTagRenderer {
     normal_pipeline: wgpu::RenderPipeline,
     see_through_pipeline: wgpu::RenderPipeline,
+    /// Kept so [`NameTagRenderer::set_color_format`] can rebuild both
+    /// pipelines against the *same* layout object [`Self::bind_group`] was
+    /// created from. Rebuilding it from an identical descriptor instead would
+    /// rely on `wgpu` deduplicating bind-group layouts by content, which is an
+    /// implementation detail rather than a promise.
+    bind_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     normal_vertices: wgpu::Buffer,
@@ -645,11 +659,6 @@ pub(super) struct NameTagRenderer {
 
 impl NameTagRenderer {
     pub(super) fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("lodestone-nametag-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/nametag.wgsl").into()),
-        });
-
         // One `view_proj` uniform, nothing else — same shape as
         // `gpu/debug_lines.rs`'s bind-group layout, so this pass has no
         // bearing on the model shader's 4-bind-group floor
@@ -699,91 +708,13 @@ impl NameTagRenderer {
             mapped_at_creation: false,
         });
 
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("lodestone-nametag-layout"),
-            bind_group_layouts: &[Some(&bind_layout)],
-            immediate_size: 0,
-        });
-
-        let vertex_buffers = [Some(wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<NameTagVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
-        })];
-
-        let build = |label: &str, depth_stencil: Option<wgpu::DepthStencilState>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &vertex_buffers,
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: color_format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-
-        // Normal pass: depth-tested and depth-written, `LessEqual` — the
-        // sign-flipped port of vanilla's reversed-Z `GREATER_THAN_OR_EQUAL`
-        // (`DepthStencilState.DEFAULT`, see the module doc).
-        let normal_pipeline = build(
-            "lodestone-nametag-normal-pipeline",
-            Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-        );
-        // See-through pass: vanilla's `TEXT_SEE_THROUGH` pipeline has
-        // `Optional.empty()` for its whole depth-stencil state — no depth
-        // attachment at all. `wgpu` has no equivalent for "this pipeline
-        // uses no depth attachment" *while sharing a render pass that has
-        // one*: every pipeline drawn inside a pass with a depth-stencil
-        // attachment must declare a matching format, verified the hard way —
-        // `depth_stencil: None` here validation-errors at draw time
-        // ("Incompatible depth-stencil attachment format: … Some(Depth32Float)
-        // but the RenderPipeline … uses an attachment with format None"),
-        // it does not silently no-op. `CompareFunction::Always` (every
-        // fragment passes, matching the attachment's format so the pass is
-        // valid) plus `depth_write_enabled: false` is the equivalent-in-effect
-        // substitute: no comparison operator to get the sign of, and no write
-        // — precisely "no depth interaction" within the constraint that the
-        // pipeline must still name the format.
-        let see_through_pipeline = build(
-            "lodestone-nametag-see-through-pipeline",
-            Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-        );
+        let (normal_pipeline, see_through_pipeline) =
+            build_pipelines(device, &bind_layout, color_format);
 
         Self {
             normal_pipeline,
             see_through_pipeline,
+            bind_layout,
             bind_group,
             uniform,
             normal_vertices,
@@ -793,6 +724,129 @@ impl NameTagRenderer {
         }
     }
 
+    /// Rebuild both pipelines for a colour attachment of `color_format`,
+    /// keeping the font, the ink cache and every buffer this pass already
+    /// filled.
+    ///
+    /// A pipeline's colour target format has to equal its render pass
+    /// attachment's, and which attachment this pass gets is not known when
+    /// [`RenderState`](crate::gpu::RenderState) is built: a nametag composites
+    /// on **raw gamma bytes** (see the module doc), so on an sRGB target it
+    /// draws into a non-sRGB *view* of the same swapchain texture, and only
+    /// the frame loop can hand that view over. `RenderState::set_world_text_view`
+    /// is the one caller, and it derives the format and the view from the same
+    /// place so the two cannot disagree.
+    pub(super) fn set_color_format(
+        &mut self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) {
+        let (normal, see_through) = build_pipelines(device, &self.bind_layout, color_format);
+        self.normal_pipeline = normal;
+        self.see_through_pipeline = see_through;
+    }
+}
+
+/// Both nametag pipelines for a colour attachment of `color_format`. Shared by
+/// [`NameTagRenderer::new`] and [`NameTagRenderer::set_color_format`] so the
+/// depth states below are written once — a second copy would be free to drift
+/// from vanilla's two records without anything going red.
+fn build_pipelines(
+    device: &wgpu::Device,
+    bind_layout: &wgpu::BindGroupLayout,
+    color_format: wgpu::TextureFormat,
+) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("lodestone-nametag-shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/nametag.wgsl").into()),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("lodestone-nametag-layout"),
+        bind_group_layouts: &[Some(bind_layout)],
+        immediate_size: 0,
+    });
+
+    let vertex_buffers = [Some(wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<NameTagVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+    })];
+
+    let build = |label: &str, depth_stencil: Option<wgpu::DepthStencilState>| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &vertex_buffers,
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+
+    // Normal pass: depth-tested and depth-written, `LessEqual` — the
+    // sign-flipped port of vanilla's reversed-Z `GREATER_THAN_OR_EQUAL`
+    // (`DepthStencilState.DEFAULT`, see the module doc).
+    let normal_pipeline = build(
+        "lodestone-nametag-normal-pipeline",
+        Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+    );
+    // See-through pass: vanilla's `TEXT_SEE_THROUGH` pipeline has
+    // `Optional.empty()` for its whole depth-stencil state — no depth
+    // attachment at all. `wgpu` has no equivalent for "this pipeline
+    // uses no depth attachment" *while sharing a render pass that has
+    // one*: every pipeline drawn inside a pass with a depth-stencil
+    // attachment must declare a matching format, verified the hard way —
+    // `depth_stencil: None` here validation-errors at draw time
+    // ("Incompatible depth-stencil attachment format: … Some(Depth32Float)
+    // but the RenderPipeline … uses an attachment with format None"),
+    // it does not silently no-op. `CompareFunction::Always` (every
+    // fragment passes, matching the attachment's format so the pass is
+    // valid) plus `depth_write_enabled: false` is the equivalent-in-effect
+    // substitute: no comparison operator to get the sign of, and no write
+    // — precisely "no depth interaction" within the constraint that the
+    // pipeline must still name the format.
+    let see_through_pipeline = build(
+        "lodestone-nametag-see-through-pipeline",
+        Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+    );
+
+    (normal_pipeline, see_through_pipeline)
+}
+
+impl NameTagRenderer {
     /// Uploads this frame's view-projection and nametag vertices. Must run
     /// before the render pass opens (buffers cannot be written mid-pass).
     /// Returns `(normal_vertex_count, see_through_vertex_count)`, capped at

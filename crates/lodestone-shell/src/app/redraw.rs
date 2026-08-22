@@ -1153,6 +1153,18 @@ impl WindowApp {
         // production called the gather, so only the local target ever reached
         // this vec.
         let cracks: Vec<crate::gpu::CrackTarget> = self.sim.crack_targets();
+        // Hand the world's three flat-colour text passes — nametags, sign text
+        // and `text_display` — this frame's **raw** (non-sRGB) view of the same
+        // swapchain image. Vanilla composites text and its background plate on
+        // gamma bytes and this shell's native swapchain is viewed as sRGB, so
+        // without this the hardware blends them in linear light and a plate
+        // reads too weak against a bright backdrop. `RenderState` derives both
+        // the format and the view here, so the two cannot be decided apart —
+        // the same structural fix `HudRenderer::flat_colour_view` records for
+        // the HUD's own flat-colour stream. Per frame, before the render call:
+        // a swapchain image is presented at the end of the frame and its view
+        // must not survive into the next one.
+        render.set_world_text_view(device, &frame);
         self.frame_profile.mark(FramePhase::Prepare, Instant::now());
         let stats = render.render_with_crack_and_effects(
             device,

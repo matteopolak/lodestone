@@ -235,6 +235,37 @@ impl GpuQueryTimer {
         })
     }
 
+    /// The **begin** edge of `name` alone, for a span whose two ends fall in
+    /// two *different* render passes of the same encoder — pair with
+    /// [`Self::writes_end`] on the later pass.
+    ///
+    /// This is not the same mechanism as [`Self::stamp`] and does not inherit
+    /// its unreliability: both edges are still real begin-/end-of-pass
+    /// timestamps written by the GPU, just on two passes rather than one. It
+    /// exists because the world's colour work is no longer a single pass — the
+    /// flat-colour text passes need a non-sRGB attachment and so cannot share
+    /// one with the terrain (`gpu/state.rs`'s `set_world_text_view`) — and a
+    /// `"world"` figure that silently stopped at the first segment would be an
+    /// instrument reporting a smaller quantity, not a noisier one.
+    pub(crate) fn writes_begin(&self, name: &str) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        let i = self.index_of(name)?;
+        Some(wgpu::RenderPassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: Some((i * 2) as u32),
+            end_of_pass_write_index: None,
+        })
+    }
+
+    /// The **end** edge of `name` alone — see [`Self::writes_begin`].
+    pub(crate) fn writes_end(&self, name: &str) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        let i = self.index_of(name)?;
+        Some(wgpu::RenderPassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: None,
+            end_of_pass_write_index: Some((i * 2 + 1) as u32),
+        })
+    }
+
     /// Write **one** timestamp edge for each of `begin`/`end` into `encoder`,
     /// through an otherwise-empty render pass on this timer's own 1x1 target.
     ///

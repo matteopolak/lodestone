@@ -57,6 +57,19 @@
 //! camera just enough to win the depth test against the coplanar board
 //! without z-fighting.
 //!
+//! # Colour space: this pass draws into a raw (non-sRGB) view
+//!
+//! Vanilla is not colour-managed, so a sign's resolved run colour —
+//! `ARGB.scaleRGB(dye, 0.4)` for an unlit side, the full dye when glowing — is
+//! a gamma byte written straight to the framebuffer. Every pipeline in this
+//! crate targets the swapchain's *sRGB* view, which would encode it a second
+//! time and read markedly lighter than vanilla. So this pass shares a render
+//! pass with `gpu/display_text.rs` on the target's **raw** view, installed by
+//! `RenderState::set_world_text_view`. Nothing about its position in the frame
+//! changed: it still draws after the block entities and *before* the
+//! translucent water, particles and weather, because a raindrop in front of a
+//! sign must paint over it. See `docs/world-text-gamma-blend.md`.
+//!
 //! # Not a billboard
 //!
 //! Unlike [`super::nametag`], sign text has a fixed world orientation baked
@@ -134,6 +147,10 @@ const BEHIND_EYE_SLACK: f32 = 1.0;
 #[derive(Debug)]
 pub(super) struct SignTextRenderer {
     pipeline: wgpu::RenderPipeline,
+    /// Kept for [`SignTextRenderer::set_color_format`] — see
+    /// [`super::nametag::NameTagRenderer::bind_layout`] for why the layout
+    /// object is retained rather than rebuilt from its descriptor.
+    bind_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     vertices: wgpu::Buffer,
@@ -149,11 +166,6 @@ pub(super) struct SignTextRenderer {
 
 impl SignTextRenderer {
     pub(super) fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("lodestone-sign-text-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/nametag.wgsl").into()),
-        });
-
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lodestone-sign-text-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -191,65 +203,11 @@ impl SignTextRenderer {
             mapped_at_creation: false,
         });
 
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("lodestone-sign-text-layout"),
-            bind_group_layouts: &[Some(&bind_layout)],
-            immediate_size: 0,
-        });
-
-        let vertex_buffers = [Some(wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<SignTextVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
-        })];
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("lodestone-sign-text-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &vertex_buffers,
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                // No culling, matching `gpu/nametag.rs`: the two sides of a
-                // sign already draw independently through their own
-                // transform, so there is no back face for either quad to be.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                // `writeDepth = true` in vanilla's own
-                // `TEXT_POLYGON_OFFSET` record — see the module doc.
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: -10,
-                    slope_scale: -1.0,
-                    clamp: 0.0,
-                },
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = build_pipeline(device, &bind_layout, color_format);
 
         Self {
             pipeline,
+            bind_layout,
             bind_group,
             uniform,
             vertices,
@@ -258,6 +216,94 @@ impl SignTextRenderer {
         }
     }
 
+    /// Rebuild the pipeline for a colour attachment of `color_format`, keeping
+    /// the font, the ink cache and the vertex buffer. See
+    /// [`super::nametag::NameTagRenderer::set_color_format`] for why the format
+    /// cannot be settled when the renderer is built.
+    pub(super) fn set_color_format(
+        &mut self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) {
+        self.pipeline = build_pipeline(device, &self.bind_layout, color_format);
+    }
+}
+
+/// The one sign-text pipeline, for a colour attachment of `color_format` —
+/// shared by [`SignTextRenderer::new`] and
+/// [`SignTextRenderer::set_color_format`] so the ported depth state below is
+/// written once.
+fn build_pipeline(
+    device: &wgpu::Device,
+    bind_layout: &wgpu::BindGroupLayout,
+    color_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("lodestone-sign-text-shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/nametag.wgsl").into()),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("lodestone-sign-text-layout"),
+        bind_group_layouts: &[Some(bind_layout)],
+        immediate_size: 0,
+    });
+
+    let vertex_buffers = [Some(wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<SignTextVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+    })];
+
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("lodestone-sign-text-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &vertex_buffers,
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            // No culling, matching `gpu/nametag.rs`: the two sides of a
+            // sign already draw independently through their own
+            // transform, so there is no back face for either quad to be.
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            // `writeDepth = true` in vanilla's own
+            // `TEXT_POLYGON_OFFSET` record — see the module doc.
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: -10,
+                slope_scale: -1.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    pipeline
+}
+
+impl SignTextRenderer {
     /// Uploads this frame's view-projection and sign-text vertices. Must run
     /// before the render pass opens, same buffer-creation constraint as
     /// every other pass in this file. Returns the vertex count — pass to

@@ -343,6 +343,11 @@ impl RenderState {
             // `install_screen_effects`.
             screen_effects: None,
             nametag,
+            color_format,
+            // Equal to `color_format` until the frame loop asks for the raw
+            // world-text pass; see `set_world_text_view`.
+            world_text_format: color_format,
+            world_text_view: std::cell::RefCell::new(None),
             block_entities: BlockEntityRenderer::new(device, queue, color_format),
             // No chests until the shell installs a world source; see
             // `set_block_entity_source`.
@@ -543,6 +548,88 @@ impl RenderState {
     pub fn set_fog(&mut self, fog: FogSettings, render_distance_chunks: u32) {
         self.fog = fog;
         self.render_distance_chunks = render_distance_chunks;
+    }
+
+    /// The colour format the three flat-colour world-text passes must target,
+    /// given the format the render target itself reports: its **raw**
+    /// (non-sRGB) counterpart, which is the format itself whenever it is
+    /// already raw.
+    ///
+    /// The whole decision, as a pure function, so a gate can assert it against
+    /// a native-shaped format and a web-shaped one without standing up a
+    /// surface — the same seam `lodestone_render::target`'s own
+    /// `choose_view_format` gates are written against.
+    #[must_use]
+    pub fn gamma_text_format(color_format: wgpu::TextureFormat) -> wgpu::TextureFormat {
+        color_format.remove_srgb_suffix()
+    }
+
+    /// The format the world-text pipelines are built for right now. Equal to
+    /// the target's own format until [`Self::set_world_text_view`] is called;
+    /// [`Self::gamma_text_format`] of it afterwards. Exists so a gate can
+    /// assert the pair rather than discover a mismatch as a `wgpu` validation
+    /// abort in whichever frame happens to carry a nametag.
+    #[must_use]
+    pub fn world_text_format(&self) -> wgpu::TextureFormat {
+        self.world_text_format
+    }
+
+    /// Point the three flat-colour world-text passes — nametags, sign text and
+    /// `text_display` panels and glyphs — at `frame`'s **raw** (non-sRGB) view
+    /// of the very texture the world is already drawing into. Call once per
+    /// frame, before [`Self::render`] and friends.
+    ///
+    /// # Why these three want a different view of the same pixels
+    ///
+    /// Vanilla is not colour-managed: `Font`'s glyphs and the plate behind them
+    /// composite straight onto the framebuffer's gamma bytes. Every pipeline in
+    /// this crate targets the swapchain's *sRGB* view, so the hardware decodes
+    /// the destination, blends in linear light and re-encodes. For the plate
+    /// (black at 25% alpha) that reads too weak against a bright backdrop and
+    /// exactly right against black — re-derived from the sRGB transfer
+    /// function, `0.75·bg` (vanilla) against `encode(0.75·decode(bg))` (here)
+    /// is 0 at `bg = 0`, +7/255 at 64, +16/255 at 128 and +33/255 at 255.
+    /// Black is the only fixed point; white is not, unlike the HUD tab-list
+    /// case `docs/tab-list.md` records. The constants are vanilla's own and are
+    /// **not** the bug, so there is nothing to tune: the geometry has to reach
+    /// a raw view instead.
+    ///
+    /// All three move together deliberately. They share one shader
+    /// (`shaders/nametag.wgsl` — flat vertex colour, no texture at all), so
+    /// every colour any of them submits is a vanilla gamma byte: a sign's
+    /// `ARGB.scaleRGB(dye, 0.4)`, a coloured nametag span, a `text_display`
+    /// panel. Fixing one alone would leave the three visibly disagreeing.
+    ///
+    /// # What it costs, and when it is optional
+    ///
+    /// A `wgpu` render pass fixes one attachment format for every pipeline in
+    /// it, so this is a *separate pass* rather than a different pipeline in the
+    /// existing one — the whole-pipeline alternative is what the HUD's own fix
+    /// tried and had to revert. `render_inner` opens those passes only when the
+    /// frame actually has text to draw, so a scene with no signs, holograms or
+    /// nametags pays nothing at all.
+    ///
+    /// On a target that is *already* non-sRGB this changes nothing and calling
+    /// it is optional: every headless pixel gate uses `Rgba8Unorm`, and a
+    /// browser canvas structurally has no sRGB format to be configured with
+    /// (see `lodestone_render::target`'s `choose_view_format`), so in both the
+    /// raw view and `RenderTarget::format`'s view are the same format and the
+    /// blend was always on gamma bytes. **It is the native sRGB swapchain this
+    /// exists for**, which is also why no headless gate can observe the
+    /// difference.
+    pub fn set_world_text_view(
+        &mut self,
+        device: &wgpu::Device,
+        frame: &lodestone_render::AcquiredFrame,
+    ) {
+        let raw = Self::gamma_text_format(self.color_format);
+        if self.world_text_format != raw {
+            self.nametag.set_color_format(device, raw);
+            self.sign_text.set_color_format(device, raw);
+            self.display_text.set_color_format(device, raw);
+            self.world_text_format = raw;
+        }
+        *self.world_text_view.borrow_mut() = Some(frame.create_view(raw));
     }
 
     /// Replace the frame's clear colour — the colour drawn where nothing else
@@ -1929,6 +2016,63 @@ impl RenderState {
                 "sheet particles resolved but no particle sheet is bound; they will draw \
                  nothing. Call RenderState::install_particle_sheet_atlas with the same \
                  ParticleAtlas Particles::with_particle_atlas was given (issue #45)."
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RenderState;
+
+    /// The **decision** half of the world-text gamma fix, with no GPU in it.
+    ///
+    /// `RenderState::set_world_text_view` picks the colour format the three
+    /// flat-colour world-text passes are built for, and the view it hands them,
+    /// from one expression — so this asserts that expression against a
+    /// native-shaped format and a web-shaped one, the two cases
+    /// `lodestone_render::target`'s own `choose_view_format` gates enumerate.
+    ///
+    /// A decision-level assertion rather than a composited byte on purpose:
+    /// this codebase has measured `ALPHA_BLENDING` on Metal as a non-trivial
+    /// function of the fragment alpha that resists a closed form, so "which
+    /// format did the code pick" is a claim that can be checked exactly while
+    /// "which byte came out" cannot.
+    #[test]
+    fn world_text_targets_the_raw_counterpart_of_a_native_swapchain_format() {
+        // What native `wgpu-core`'s `Surface::get_default_config` actually
+        // picks, and what `SurfaceTarget::format` therefore reports.
+        assert_eq!(
+            RenderState::gamma_text_format(wgpu::TextureFormat::Bgra8UnormSrgb),
+            wgpu::TextureFormat::Bgra8Unorm,
+            "on a native sRGB swapchain the world's text must composite through the raw \
+             (non-sRGB) view of the same texture — that is the whole fix"
+        );
+        assert_eq!(
+            RenderState::gamma_text_format(wgpu::TextureFormat::Rgba8UnormSrgb),
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+    }
+
+    /// The web-shaped half: a browser canvas structurally cannot be configured
+    /// with an sRGB format (`wgpu`'s `WebSurface::get_capabilities` never lists
+    /// one), so `config.format` there is already raw and the decision must be
+    /// a no-op rather than an attempt to strip a suffix that is not present.
+    /// Getting this wrong would name a format the swapchain never declared in
+    /// `view_formats`, which is a validation abort on the one platform no gate
+    /// here runs on.
+    #[test]
+    fn world_text_leaves_an_already_raw_format_alone() {
+        for format in [
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba16Float,
+        ] {
+            assert_eq!(
+                RenderState::gamma_text_format(format),
+                format,
+                "{format:?} is already non-sRGB: the raw view and the target's own view are \
+                 the same view, so there is nothing to reinterpret"
             );
         }
     }
