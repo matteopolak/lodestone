@@ -161,7 +161,9 @@ pub struct BlockEntityModelEntry {
 /// not one layer posed three ways — a double chest's halves are 15 texels wide
 /// instead of 14 and each omits the face that meets its partner, so
 /// `left`/`right` cannot be derived from `single` by a transform), plus the two
-/// skull/head canvases — see [`skull_mob_model`]'s doc for why there are two.
+/// skull/head canvases — see [`skull_mob_model`]'s doc for why there are two —
+/// plus the dragon and piglin heads, which are the two skull types that share
+/// no geometry with that box at all.
 pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
     BlockEntityModelEntry {
         name: "chest",
@@ -187,6 +189,16 @@ pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
         name: "skull_humanoid",
         texture: "entity/zombie/zombie",
         build: skull_humanoid_model,
+    },
+    BlockEntityModelEntry {
+        name: "skull_dragon",
+        texture: "entity/enderdragon/dragon",
+        build: dragon_head_model,
+    },
+    BlockEntityModelEntry {
+        name: "skull_piglin",
+        texture: "entity/piglin/piglin",
+        build: piglin_head_model,
     },
     BlockEntityModelEntry {
         name: "bell",
@@ -508,6 +520,134 @@ pub fn skull_humanoid_model() -> EntityModelDef {
         texture_width: 64,
         texture_height: 64,
         root,
+    }
+}
+
+/// The ender dragon's own sheet, 256×256 — the canvas
+/// `DragonHeadModel.createHeadLayer()` declares, and the same
+/// `entity/enderdragon/dragon` PNG the mob renderer samples.
+const DRAGON_HEAD_SHEET: (u32, u32) = (256, 256);
+
+/// The piglin's own sheet, 64×64 — `LayerDefinitions`' `piglinHeadLayer` is
+/// `LayerDefinition.create(PiglinHeadModel.createHeadModel(), 64, 64)`.
+const PIGLIN_HEAD_SHEET: (u32, u32) = (64, 64);
+
+/// The dragon head — `DragonHeadModel.createHeadLayer()`:
+///
+/// ```text
+/// head  offset(0, -7.986666, 0).scaled(0.75)
+///   upper_lip           (-6, -1, -24)  12x5x16   texOffs(176, 44)
+///   upper_head          (-8, -8, -10)  16x16x16  texOffs(112, 30)
+///   scale    [mirror]   (-5, -12, -4)   2x4x6    texOffs(  0,  0)
+///   nostril  [mirror]   (-5, -3, -22)   2x2x4    texOffs(112,  0)
+///   scale               ( 3, -12, -4)   2x4x6    texOffs(  0,  0)
+///   nostril             ( 3, -3, -22)   2x2x4    texOffs(112,  0)
+///   jaw   offset(0, 4, -8)
+///     jaw               (-6,  0, -16)  12x4x16   texOffs(176, 65)
+/// ```
+///
+/// **Nothing about this is the shared 8×8×8 skull box.** It is a real
+/// six-cube rig on the dragon's own 256×256 sheet, scaled to 0.75 at the part
+/// pose — which is why porting it needed [`crate::entity::PartPose::scaled`]
+/// rather than another entry beside [`skull_mob_model`]. The `mirror(true)`
+/// pair matters: the left-hand scale and nostril share their right-hand
+/// siblings' texels, read backwards, so dropping the flag gives two boxes
+/// whose texture runs the wrong way and whose winding is inverted.
+///
+/// The jaw is a **child** of the head, so the head's `0.75` scale carries it;
+/// its own resting angle is not the authored zero but
+/// `lodestone_render::block_entity::dragon_head_jaw_x_rot`'s value, applied by
+/// the renderer the way `DragonHeadModel.setupAnim` applies it.
+#[must_use]
+pub fn dragon_head_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(0.0, -7.986_666, 0.0).scaled(0.75))
+        .with_cube(CubeDef::new(
+            [-6.0, -1.0, -24.0],
+            [12.0, 5.0, 16.0],
+            [176.0, 44.0],
+        ))
+        .with_cube(CubeDef::new(
+            [-8.0, -8.0, -10.0],
+            [16.0, 16.0, 16.0],
+            [112.0, 30.0],
+        ))
+        .with_cube(CubeDef::new([-5.0, -12.0, -4.0], [2.0, 4.0, 6.0], [0.0, 0.0]).mirrored())
+        .with_cube(CubeDef::new([-5.0, -3.0, -22.0], [2.0, 2.0, 4.0], [112.0, 0.0]).mirrored())
+        .with_cube(CubeDef::new([3.0, -12.0, -4.0], [2.0, 4.0, 6.0], [0.0, 0.0]))
+        .with_cube(CubeDef::new([3.0, -3.0, -22.0], [2.0, 2.0, 4.0], [112.0, 0.0]))
+        .with_child(
+            "jaw",
+            PartDef::new(PartPose::offset(0.0, 4.0, -8.0)).with_cube(CubeDef::new(
+                [-6.0, 0.0, -16.0],
+                [12.0, 4.0, 16.0],
+                [176.0, 65.0],
+            )),
+        );
+    EntityModelDef {
+        texture_width: DRAGON_HEAD_SHEET.0,
+        texture_height: DRAGON_HEAD_SHEET.1,
+        root: PartDef::new(PartPose::ZERO).with_child("head", head),
+    }
+}
+
+/// The piglin head — `PiglinHeadModel.createHeadModel()`, which is
+/// `AbstractPiglinModel.addHead(CubeDeformation.NONE, mesh)` verbatim:
+///
+/// ```text
+/// head  PartPose.ZERO
+///   (-5, -8, -4)  10x8x8  texOffs( 0, 0)     the wide snouted skull
+///   (-2, -4, -5)   4x4x1  texOffs(31, 1)     the snout plate
+///   ( 2, -2, -5)   1x2x1  texOffs( 2, 4)     left tusk
+///   (-3, -2, -5)   1x2x1  texOffs( 2, 0)     right tusk
+///   left_ear   offsetAndRotation( 4.5, -6, 0, 0, 0, -PI/6)  ( 0, 0, -2) 1x5x4 texOffs(51, 6)
+///   right_ear  offsetAndRotation(-4.5, -6, 0, 0, 0,  PI/6)  (-1, 0, -2) 1x5x4 texOffs(39, 6)
+/// ```
+///
+/// **Ten texels wide, not eight** — a piglin head is not a cube, so nothing
+/// about it could have been recovered by pointing [`skull_mob_model`] at the
+/// piglin sheet.
+///
+/// The two ears carry an authored `±PI/6` rest rotation that the renderer then
+/// **overrides**: `PiglinHeadModel.setupAnim` assigns `zRot` unconditionally,
+/// so a placed piglin head never shows `±PI/6` — it shows
+/// `lodestone_render::block_entity::piglin_head_ear_z_rots`'s value. The
+/// authored pose is kept faithful here anyway, because it is what the jar
+/// declares and because the offset half of it *is* load-bearing.
+#[must_use]
+pub fn piglin_head_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::ZERO)
+        .with_cube(CubeDef::new([-5.0, -8.0, -4.0], [10.0, 8.0, 8.0], [0.0, 0.0]))
+        .with_cube(CubeDef::new([-2.0, -4.0, -5.0], [4.0, 4.0, 1.0], [31.0, 1.0]))
+        .with_cube(CubeDef::new([2.0, -2.0, -5.0], [1.0, 2.0, 1.0], [2.0, 4.0]))
+        .with_cube(CubeDef::new([-3.0, -2.0, -5.0], [1.0, 2.0, 1.0], [2.0, 0.0]))
+        .with_child(
+            "left_ear",
+            PartDef::new(PartPose::offset_and_rotation(
+                4.5,
+                -6.0,
+                0.0,
+                0.0,
+                0.0,
+                -std::f32::consts::FRAC_PI_6,
+            ))
+            .with_cube(CubeDef::new([0.0, 0.0, -2.0], [1.0, 5.0, 4.0], [51.0, 6.0])),
+        )
+        .with_child(
+            "right_ear",
+            PartDef::new(PartPose::offset_and_rotation(
+                -4.5,
+                -6.0,
+                0.0,
+                0.0,
+                0.0,
+                std::f32::consts::FRAC_PI_6,
+            ))
+            .with_cube(CubeDef::new([-1.0, 0.0, -2.0], [1.0, 5.0, 4.0], [39.0, 6.0])),
+        );
+    EntityModelDef {
+        texture_width: PIGLIN_HEAD_SHEET.0,
+        texture_height: PIGLIN_HEAD_SHEET.1,
+        root: PartDef::new(PartPose::ZERO).with_child("head", head),
     }
 }
 
@@ -1703,25 +1843,103 @@ mod tests {
         assert!((rmax - 16.0).abs() < 1e-4, "right max {rmax}");
     }
 
+    /// The dragon head is the corpus's only `PartPose.scaled` rig and its only
+    /// use of `mirror`, and both are silent when wrong: dropping the `0.75`
+    /// gives a head a third too large that still looks like a dragon, and
+    /// dropping the mirror flags gives two boxes whose texels run backwards.
+    #[test]
+    fn dragon_head_is_a_scaled_six_cube_head_with_a_jaw_child() {
+        let def = dragon_head_model();
+        assert_eq!(def.texture_width, 256);
+        assert_eq!(def.texture_height, 256);
+        assert_eq!(part_names(&def), vec![String::new(), "head".to_string(), "jaw".to_string()]);
+
+        let head = &def.root.children[0].1;
+        assert_eq!(head.pose.scale, [0.75, 0.75, 0.75]);
+        assert!((head.pose.y - -7.986_666).abs() < 1e-5, "{}", head.pose.y);
+        assert_eq!(head.cubes.len(), 6);
+        // Exactly the third and fourth are mirrored — the left-hand scale and
+        // nostril. Asserted as the whole pattern, not "some cube is mirrored".
+        let mirrored: Vec<bool> = head.cubes.iter().map(|c| c.mirror).collect();
+        assert_eq!(mirrored, vec![false, false, true, true, false, false]);
+        // The mirrored pair and its unmirrored partner share texels and differ
+        // only in sign of X — a transposition of the two `scale` boxes would
+        // otherwise round-trip unnoticed.
+        assert_eq!(head.cubes[2].tex_offset, head.cubes[4].tex_offset);
+        assert!((head.cubes[2].origin[0] + 5.0).abs() < 1e-6);
+        assert!((head.cubes[4].origin[0] - 3.0).abs() < 1e-6);
+
+        let jaw = &head.children[0].1;
+        assert_eq!(jaw.cubes.len(), 1);
+        assert_eq!(jaw.cubes[0].tex_offset, [176.0, 65.0]);
+        assert_eq!(jaw.pose.y, 4.0);
+        assert_eq!(jaw.pose.z, -8.0);
+    }
+
+    /// A piglin head is **ten** texels wide, so nothing about it could have
+    /// been recovered by pointing the shared 8×8×8 skull box at the piglin
+    /// sheet — which is the shortcut this model exists to rule out.
+    #[test]
+    fn piglin_head_is_ten_texels_wide_with_two_asymmetric_ears() {
+        let def = piglin_head_model();
+        assert_eq!((def.texture_width, def.texture_height), (64, 64));
+        assert_eq!(
+            part_names(&def),
+            vec![
+                String::new(),
+                "head".to_string(),
+                "left_ear".to_string(),
+                "right_ear".to_string()
+            ]
+        );
+        let quads = crate::entity::bake_entity(&def);
+        let (mut min, mut max) = (f32::MAX, f32::MIN);
+        for q in &quads {
+            for p in &q.positions {
+                min = min.min(p[0]);
+                max = max.max(p[0]);
+            }
+        }
+        // The skull box spans 8 texels; the piglin's own snouted skull spans
+        // 10, and the ears push the silhouette wider still.
+        assert!(
+            (max - min) * 16.0 > 10.0,
+            "piglin head spans {} texels, want more than the 10-wide skull box",
+            (max - min) * 16.0
+        );
+
+        let head = &def.root.children[0].1;
+        let (left, right) = (&head.children[0].1, &head.children[1].1);
+        // Pivots and sheets are pairwise distinct, so a left/right
+        // transposition cannot survive: same `z_rot` magnitude, opposite sign,
+        // opposite pivot, different texel offsets.
+        assert!((left.pose.x - 4.5).abs() < 1e-6, "{}", left.pose.x);
+        assert!((right.pose.x + 4.5).abs() < 1e-6, "{}", right.pose.x);
+        assert!((left.pose.z_rot + std::f32::consts::FRAC_PI_6).abs() < 1e-6);
+        assert!((right.pose.z_rot - std::f32::consts::FRAC_PI_6).abs() < 1e-6);
+        assert_eq!(left.cubes[0].tex_offset, [51.0, 6.0]);
+        assert_eq!(right.cubes[0].tex_offset, [39.0, 6.0]);
+    }
+
     #[test]
     fn every_entry_builds_and_resolves_by_name() {
         for entry in BLOCK_ENTITY_MODELS {
             let def = (entry.build)();
-            // 64 wide on every chest/skull canvas; the bell sheet is 32×32,
-            // and the decorated pot's side quads are the first to be
-            // narrower still (16×16 — see `decorated_pot_side_part`'s doc).
-            assert!(
-                def.texture_width == 16 || def.texture_width == 32 || def.texture_width == 64,
-                "{}: unexpected canvas width {}",
-                entry.name,
-                def.texture_width
-            );
-            assert!(
-                def.texture_height == 16 || def.texture_height == 32 || def.texture_height == 64,
-                "{}: unexpected canvas height {}",
-                entry.name,
-                def.texture_height
-            );
+            // The canvas used to be checked against a literal 16/32/64
+            // allow-list, which is a transcription of the corpus rather than a
+            // rule about it — the dragon head's real 256×256 sheet failed it
+            // on arrival. A power of two in this range is the rule that
+            // actually holds, and it is all this gate can honestly claim: the
+            // stronger "every cube's unwrap lands inside the canvas" check is
+            // false for `decorated_pot_base`, which deliberately unwraps from
+            // a negative texel offset.
+            for (axis, size) in [("width", def.texture_width), ("height", def.texture_height)] {
+                assert!(
+                    size.is_power_of_two() && (16..=256).contains(&size),
+                    "{}: canvas {axis} {size} is not a power of two in 16..=256",
+                    entry.name
+                );
+            }
             assert!(!crate::entity::bake_entity(&def).is_empty());
             assert_eq!(block_entity_model(entry.name).map(|e| e.name), Some(entry.name));
         }

@@ -601,8 +601,9 @@ impl WindowApp {
         }
 
         // Skulls and heads. Same per-frame install as the chests above, though for
-        // a weaker reason: none of the ported skull types animate, so there is no
-        // partial tick to go stale. It is installed here anyway rather than once at
+        // a weaker reason: no skull carries a partial tick that could go stale,
+        // because the one animation they have is driven by a redstone-powered
+        // counter this client does not track. It is installed here anyway rather than once at
         // connect so the two block-entity sources cannot drift into different
         // lifetimes — a skull source that survived a disconnect would keep handing
         // out spawns from a dead world's handle.

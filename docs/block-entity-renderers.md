@@ -406,22 +406,44 @@ to nothing, which reads as a broken renderer rather than a missing texture.
 PNGs instead: each sprite **is** the whole 64×64 sheet, so the model's own UVs (normalised against
 64×64 by the bake) address a direct upload identically, and the atlas would only add a UV remap.
 
-## Skull (skeleton, wither skeleton, zombie, creeper, player)
+## Skull (all seven types)
 
 Like chest, `assets/minecraft/models/block/skull.json` is `{"textures":{"particle":"..."}}` — zero
 elements, a hole in the world. Every visible triangle comes from `SkullBlockRenderer`/`SkullModel`.
 
-**Geometry is shared and trivial: one 8×8×8 box.** `SkullModel.createHeadModel()` is a single `"head"`
-part at `PartPose.ZERO`. What differs across vanilla's seven types is the *canvas*: skeleton, wither
-skeleton and creeper skins are 64×32 (`createMobHeadLayer`), zombie and player are 64×64
-(`createHumanoidHeadLayer`). Baking the same box
-twice, once per canvas, is the whole model corpus — `skull_mob_model()`/`skull_humanoid_model()` in
-`crates/lodestone-assets/src/block_entity_models.rs`. **Two of vanilla's seven skull types are not
-ported: dragon and piglin.** Both use their own multi-part rigs (`DragonHeadModel`/`PiglinHeadModel`)
-unrelated to the shared box, and both are late-game/rare finds — lower value than the five common
-ones for the "player survives an hour" bar this tier targets.
-`lodestone_render::SkullType::from_block_path` declines them explicitly (draws nothing) rather than
-drawing a wrong shape.
+**Five of the seven share one trivial geometry: an 8×8×8 box.** `SkullModel.createHeadModel()` is a
+single `"head"` part at `PartPose.ZERO`. What differs across those five is the *canvas*: skeleton,
+wither skeleton and creeper skins are 64×32 (`createMobHeadLayer`), zombie and player are 64×64
+(`createHumanoidHeadLayer`). Baking the same box twice, once per canvas, covers all five —
+`skull_mob_model()`/`skull_humanoid_model()` in
+`crates/lodestone-assets/src/block_entity_models.rs`.
+
+**The other two share nothing with it.** `DragonHeadModel.createHeadLayer()` is a six-cube head on
+the ender dragon's own 256×256 sheet with a `jaw` child, the whole rig scaled `0.75` at the part
+pose; `PiglinHeadModel.createHeadModel()` is `AbstractPiglinModel.addHead` verbatim — a **ten**-texel-wide
+snouted skull with two tusks and two ear children. `dragon_head_model()`/`piglin_head_model()` port
+both, and `SkullType::Dragon`/`SkullType::Piglin` route to them. Neither could have been recovered by
+pointing the shared box at a different sheet, which is why they were unported for a while and why
+`dragon_head` drew literally nothing.
+
+**They are also the only skull types this renderer *poses*, and the poses do not add to the authored
+rest pose — they replace it.** `DragonHeadModel.setupAnim` assigns `jaw.xRot`, and
+`PiglinHeadModel.setupAnim` assigns both ears' `zRot`, unconditionally; at rest the assigned values
+are `0.2` and `±0.7`, against authored values of `0.0` and `±PI/6`. Drawing either from the mesh's own
+rest pose therefore looks plausible and is wrong (a dragon head with its mouth clamped shut).
+`dragon_head_jaw_x_rot`/`piglin_head_ear_z_rots` in `crates/lodestone-render/src/block_entity.rs`
+port the formulas and `BlockEntityModelSet::resolve_skull` applies them.
+
+**What is not carried: the powered animation.** Vanilla's `animationPos` is
+`SkullBlockEntity.getAnimation`, a per-block tick counter that only advances while the block state's
+`powered` property is set and that freezes rather than resets when power is removed — per-block-entity
+state this client has no tracker for. `SKULL_RESTING_ANIMATION_POS` is the single constant every draw
+uses, and it is deliberately a constant rather than a `SkullSpawn` field no producer would ever write.
+The consequence is exact: an unpowered skull (every skull nobody has wired to redstone) is
+pixel-correct, and a powered dragon head does not chomp. Wiring it is a producer change — a
+per-position counter in the shell gated on `powered` — not a change to either formula, which already
+take the position as an argument. Note the piglin's `1.2` ear asymmetry is invisible at rest, where
+both ears evaluate to `±0.7`: a fixture at `animationPos == 0` cannot tell it from a mirrored pair.
 
 **Placement is the one surprise, and it inverts the chest lesson.** Chest's whole module doc leads
 with "block entities are not Y-flipped, unlike entities" — true for chest, **false for skull**.

@@ -160,6 +160,19 @@ impl PartPose {
         }
     }
 
+    /// Returns the pose with a uniform per-axis scale — vanilla's
+    /// `PartPose.scaled(float)`.
+    ///
+    /// A *part* scale, not a cube grow: it multiplies everything under the
+    /// part, children included, and is applied after the rotation by
+    /// `part_transform`. `CubeDef::grown` inflates one box by a texel amount
+    /// and is the wrong tool for a rig authored at a fraction of its natural
+    /// size (the ender dragon's head, reused whole by the dragon-head skull).
+    pub fn scaled(mut self, v: f32) -> Self {
+        self.scale = [v, v, v];
+        self
+    }
+
     /// A pose with both an offset and a rotation.
     pub fn offset_and_rotation(x: f32, y: f32, z: f32, x_rot: f32, y_rot: f32, z_rot: f32) -> Self {
         Self {
