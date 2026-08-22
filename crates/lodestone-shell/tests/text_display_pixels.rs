@@ -164,6 +164,7 @@ fn test_draw() -> DisplayDraw {
         block_state: None,
         item: None,
         item_display_context: 0,
+        brightness_override: None,
     }
 }
 

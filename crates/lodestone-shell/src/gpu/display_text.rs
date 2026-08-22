@@ -16,9 +16,12 @@
 //!
 //! # Depth and blending
 //!
-//! **Three pipelines. Two because vanilla submits the panel and the glyphs
-//! through two different ones**, and a third because a `text_display` can ask
-//! for neither: `FLAG_SEE_THROUGH` selects `TEXT_SEE_THROUGH` /
+//! **Four pipelines. Two because vanilla submits the panel and the glyphs
+//! through two different ones**, a third because the glyphs' own drop shadow
+//! has to be separated from the glyphs by a mechanism this depth format can
+//! actually resolve (see "The drop shadow needs its own polygon offset"
+//! below), and a fourth because a `text_display` can ask for none of it:
+//! `FLAG_SEE_THROUGH` selects `TEXT_SEE_THROUGH` /
 //! `TEXT_BACKGROUND_SEE_THROUGH`, whose depth state is
 //! `withDepthStencilState(Optional.empty())` — no test, no write. Those two
 //! collapse into one pipeline here because their depth state is identical and
@@ -32,9 +35,12 @@
 //! `new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`.
 //! The two numeric constants are the same polygon offset `gpu/sign_text.rs`
 //! already ports, and the same sign flip applies (vanilla is reversed-Z,
-//! this project's depth is `[0,1]`), giving `constant: -10,
-//! slope_scale: -1.0` on the **glyph** pipeline and no bias at all on the
-//! background one. Straight alpha blending (`ALPHA_BLENDING`) on both.
+//! this project's depth is `[0,1]`), giving [`TEXT_POLYGON_OFFSET`] —
+//! `constant: -10, slope_scale: -1.0` — on the **shadow** pipeline and no
+//! bias at all on the background one. The ink pipeline takes
+//! [`GLYPH_POLYGON_OFFSET`], which is that same offset counted **twice**,
+//! for the reason in the next section. Straight alpha blending
+//! (`ALPHA_BLENDING`) on all of them.
 //!
 //! This pass originally drew everything through one unbiased pipeline, on
 //! the reasoning that "a `text_display`'s glyphs and background panel float
@@ -51,6 +57,99 @@
 //! fell from 438 px to 389 px when the panel was switched on, at a 40°
 //! upward look, and the loss is per-pixel scatter rather than a clean edge.
 //! Do not collapse these back into one pipeline.
+//!
+//! # The drop shadow needs its own polygon offset
+//!
+//! Owner report, after the drop shadow landed: *"the shadow text is
+//! z-fighting with the real text in places where both are on the same
+//! 'pixel' for holograms"*.
+//!
+//! Why the shadow contests depth with the glyph *at all*, given the two are
+//! nominally the same plane: they are **different quads** — the shadow is the
+//! same rect one font pixel away on both axes — so at a pixel they both
+//! cover, their window `z` is interpolated from two different triangles and
+//! the two results differ by float rounding. A tie would be safe (`LessEqual`
+//! passes it and the ink is submitted second), but rounding does not produce
+//! ties; it produces per-fragment noise in both directions, and the fragments
+//! where it lands the wrong way are the speckle the owner saw. That also
+//! explains why the symptom is *speckle* rather than the text vanishing
+//! wholesale: two exactly parallel planes one representable step apart flip
+//! whole, so per-pixel fighting is itself evidence the two surfaces are not
+//! parallel — which an in-plane offset on an angled billboard is exactly.
+//!
+//! Vanilla separates the two **geometrically**, in the text's own plane:
+//! `BakedSheetGlyph.renderChar` emits the shadow copy at local `z = 0` and
+//! the glyph at `z = 0.03` whenever there is a shadow (and at `0` when there
+//! is not — the offset exists only to clear the shadow). **That port was
+//! written, measured, and deliberately removed.** Two reasons, in order of
+//! weight:
+//!
+//! - **It encodes which side is the front into the geometry, and a
+//!   `text_display` is visible from both.** `0.03` local is `0.00075 · scale`
+//!   blocks along the text plane's own normal, so it moves the glyph toward
+//!   the viewer from the front and *away* from it from behind — where it then
+//!   swamps any ULP-denominated offset trying to correct it, because it is
+//!   orders of magnitude larger. Measured on an 85°-oblique hologram viewed
+//!   from behind: 3,120 lost ink px of 17,984 with the constant in, **0**
+//!   with it out.
+//! - **It is under a ULP where it matters anyway.** `0.00075 · scale` blocks
+//!   is three times the panel-versus-ink separation the sweep in
+//!   `tests/world_text_over_geometry_pixels.rs` already measures at between
+//!   6.7 and 0.56 `f32` ULP of a forward `[0,1]` `Depth32Float`. Vanilla can
+//!   spend a separation that small because reversed-Z has orders of magnitude
+//!   more precision at every distance; this renderer cannot. That is
+//!   `CLAUDE.md`'s measured rule about ported sub-millimetre depth
+//!   separations, arriving at this pass.
+//!
+//! What replaces it is a **polygon offset**: the shadow keeps vanilla's own
+//! `TEXT_POLYGON_OFFSET` and the ink takes [`GLYPH_POLYGON_OFFSET`], which is
+//! that same offset counted twice in both its terms. A depth bias against a
+//! float depth format is denominated in ULPs of the primitive's *own* depth
+//! (`r = 2^(exponent(z) - 23)`) plus a multiple of its own depth *gradient*,
+//! so it is scale-adaptive **and** view-angle-adaptive by construction, and
+//! it is measured from the camera rather than baked into the geometry — which
+//! is precisely why it survives being walked around.
+//! `lodestone_render::entity_pipeline::SHADOW_DEPTH_BIAS` is the same
+//! mechanism for the same reason one subsystem over, and its doc carries the
+//! measured ULP-per-block table.
+//!
+//! Measured, twelve headless configurations spanning face-on to 85° oblique,
+//! front and back, 3 to 24 blocks at constant angular size, worst row of each
+//! group (ink lost of ~15–18k drawn):
+//!
+//! | shadow/ink separation | 70° back | 80° back | 85° back | 80° front |
+//! |---|---|---|---|---|
+//! | none — the shipped defect | 1,014 | 1,141 | 2,883 | — |
+//! | constant term only, no geometry | 4 | 34 | 1,204 | — |
+//! | constant + slope, **plus** vanilla's `0.03` | 101 | 297 | 3,120 | 189 |
+//! | **constant + slope, no geometry** | **0** | **0** | **0** | **0** |
+//!
+//! Row three is the one worth reading twice: the faithful port made things
+//! *worse than doing nothing* from behind. Row two is why the slope term is
+//! doubled and not just the constant — a near-grazing plane's rounding grows
+//! with its depth gradient, which only the slope term tracks.
+//!
+//! Two things deliberately **not** done, each of which would also have
+//! worked:
+//!
+//! - **Drawing the shadow with depth write off.** That removes the contest
+//!   outright and is precision-proof, but the shadow range is batched across
+//!   *every* display in the frame, so a near display's shadow would stop
+//!   occluding a far display's ink drawn later in the same pass. Keeping the
+//!   write is what lets the four ranges stay global instead of per-display.
+//! - **Giving the shadow no offset at all** (leaving the ink on vanilla's
+//!   single step). The panel cannot reject the shadow — it does not write
+//!   depth, see the next section — but *world geometry* can, and vanilla's
+//!   offset on text exists precisely so a text plane flush against a block
+//!   face does not fight it. The shadow keeps vanilla's step; the ink takes
+//!   a second one.
+//!
+//! None of this reaches `gpu/nametag.rs`, and that is not an oversight: a
+//! nametag is always camera-facing, so its plane is perpendicular to the view
+//! and an in-plane offset changes no depth at all. Its shadow and its ink are
+//! genuinely coplanar at constant depth, the tie goes to the ink on paint
+//! order, and there is nothing for an offset to decide. The owner's report
+//! named holograms for that reason.
 //!
 //! # The panel does not write depth, and vanilla's does
 //!
@@ -167,6 +266,44 @@ const MAX_DISPLAY_TEXT_VERTICES: usize = 40_000;
 /// copy offset by one font pixel and dimmed to a quarter, the way vanilla's
 /// `Font` shadows chat and every other piece of text.
 const FLAG_SHADOW: u8 = 1;
+
+/// `RenderPipelines.TEXT_POLYGON_OFFSET`'s own polygon offset, sign-flipped
+/// for this project's forward `[0,1]` depth: vanilla's
+/// `new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`
+/// pulls *toward* the camera with positive constants under reversed-Z, and
+/// toward the camera with negative ones here.
+///
+/// One step of this is what every glyph and every glyph shadow gets, so text
+/// lying flush against a block face wins against it rather than tying.
+const TEXT_POLYGON_OFFSET: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: -10,
+    slope_scale: -1.0,
+    clamp: 0.0,
+};
+
+/// [`TEXT_POLYGON_OFFSET`] counted **twice**, both terms, for the ink.
+///
+/// The ink has to clear two near-coplanar layers rather than one — the
+/// background panel *and* its own drop shadow — and at hologram distances
+/// both sit within a couple of ULP of it, so it takes two of vanilla's own
+/// offset steps instead of one.
+///
+/// **The slope term is doubled too, and that is not symmetry for its own
+/// sake.** The constant term is denominated in ULPs of the primitive's own
+/// depth and so is view-angle-blind; the slope term is denominated in the
+/// primitive's own depth *gradient*, which is what grows without bound as the
+/// text plane goes oblique to the view. Doubling only the constant left a
+/// near-grazing hologram still losing ink — measured 1,204 px of 17,984 at 85°
+/// off face-on — because the rounding it has to beat grows with the gradient
+/// while the constant does not. See the module doc's "The drop shadow needs
+/// its own polygon offset" for the full table and for why a world-space
+/// separation cannot substitute for either term.
+const GLYPH_POLYGON_OFFSET: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: 2 * TEXT_POLYGON_OFFSET.constant,
+    slope_scale: 2.0 * TEXT_POLYGON_OFFSET.slope_scale,
+    clamp: TEXT_POLYGON_OFFSET.clamp,
+};
+
 /// `Display.TextDisplay.FLAG_SEE_THROUGH` — draw with no depth test and no
 /// depth write, so the text is readable through the geometry in front of it.
 const FLAG_SEE_THROUGH: u8 = 2;
@@ -220,10 +357,18 @@ pub(super) struct DisplayTextRenderer {
     /// not write depth, and vanilla's does" — that flag is a deliberate
     /// improvement on vanilla, not a port of it.
     background_pipeline: wgpu::RenderPipeline,
-    /// `RenderPipelines.TEXT_POLYGON_OFFSET` — the same two constants
-    /// `gpu/sign_text.rs` ports, so the glyphs win the tie against the panel
-    /// 0.00025 blocks behind them at every viewing angle. See the module
-    /// doc for the measurement that made this necessary.
+    /// `RenderPipelines.TEXT_POLYGON_OFFSET` exactly — the same two constants
+    /// `gpu/sign_text.rs` ports. Vanilla submits a glyph's drop shadow and
+    /// the glyph itself through this one pipeline; here the shadow keeps it
+    /// and the ink takes a second step, so that the ink beats its own shadow
+    /// by a ULP-denominated margin instead of by a world-space separation
+    /// this depth format cannot resolve. See the module doc's "The drop
+    /// shadow needs its own polygon offset".
+    shadow_pipeline: wgpu::RenderPipeline,
+    /// [`GLYPH_POLYGON_OFFSET`] — two steps of `TEXT_POLYGON_OFFSET`, so the
+    /// glyphs win against the panel 0.00025 blocks behind them *and* against
+    /// their own drop shadow, at every viewing angle and every distance. See
+    /// the module doc for the measurements that made each of those necessary.
     glyph_pipeline: wgpu::RenderPipeline,
     /// `RenderPipelines.TEXT_SEE_THROUGH` and `TEXT_BACKGROUND_SEE_THROUGH`,
     /// which are one pipeline here because the only thing this pass ports of
@@ -367,16 +512,18 @@ impl DisplayTextRenderer {
             // panel does not write depth, and vanilla's does".
             tested(false, wgpu::DepthBiasState::default()),
         );
+        // Vanilla's `TEXT_POLYGON_OFFSET` unchanged, and the ink one further
+        // step in front of it. **The shadow still writes depth**, which is
+        // what keeps the shadow and ink ranges batchable across every display
+        // in the frame — see the module doc for the depth-write-off
+        // alternative and why it was not taken.
+        let shadow_pipeline = build(
+            "lodestone-display-text-shadow-pipeline",
+            tested(true, TEXT_POLYGON_OFFSET),
+        );
         let glyph_pipeline = build(
             "lodestone-display-text-glyph-pipeline",
-            tested(
-                true,
-                wgpu::DepthBiasState {
-                    constant: -10,
-                    slope_scale: -1.0,
-                    clamp: 0.0,
-                },
-            ),
+            tested(true, GLYPH_POLYGON_OFFSET),
         );
         // Vanilla's `Optional.empty()` depth state. wgpu still needs the
         // attachment's format on the pipeline (the render pass has a depth
@@ -396,6 +543,7 @@ impl DisplayTextRenderer {
 
         Self {
             background_pipeline,
+            shadow_pipeline,
             glyph_pipeline,
             see_through_pipeline,
             bind_group,
@@ -410,24 +558,23 @@ impl DisplayTextRenderer {
     /// Must run before the render pass opens, same buffer-creation
     /// constraint as every other pass in this crate.
     ///
-    /// Returns `(background_count, glyph_count, see_through_count)` — three
-    /// contiguous ranges of the one vertex buffer, one per pipeline, in the
-    /// order they are drawn. The counts are already clamped so their **sum**
-    /// fits [`MAX_DISPLAY_TEXT_VERTICES`]. Pass the triple straight to
-    /// [`draw`](Self::draw).
+    /// Returns the four contiguous ranges of the one vertex buffer, one per
+    /// pipeline, in the order they are drawn. The counts are already clamped
+    /// so their **sum** fits [`MAX_DISPLAY_TEXT_VERTICES`]. Pass the value
+    /// straight to [`draw`](Self::draw).
     pub(super) fn prepare(
         &self,
         queue: &wgpu::Queue,
         view_proj: &[[f32; 4]; 4],
         draws: &[DisplayDraw],
         camera: &Camera,
-    ) -> (u32, u32, u32) {
+    ) -> DisplayTextRanges {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
         let Some(raster) = &self.font else {
-            return (0, 0, 0);
+            return DisplayTextRanges::default();
         };
 
-        let (backgrounds, glyphs, see_through) =
+        let Partitioned { backgrounds, shadows, glyphs, see_through } =
             partition_display_text(raster, &self.ink, draws, camera);
         // Panels first, then glyphs, so the two ranges are contiguous. The
         // cap is applied to the panels first and to whatever room is left
@@ -452,10 +599,15 @@ impl DisplayTextRenderer {
             offset += len;
             len as u32
         };
-        let background_len = upload(&backgrounds);
-        let glyph_len = upload(&glyphs);
-        let see_through_len = upload(&see_through);
-        (background_len, glyph_len, see_through_len)
+        // Sequential `let`s rather than four struct-literal fields: `upload`
+        // is stateful (it walks `offset` and spends `room`), so these calls
+        // must happen in draw order and a reader must not have to know
+        // Rust's field-evaluation order to see that.
+        let backgrounds = upload(&backgrounds);
+        let shadows = upload(&shadows);
+        let glyphs = upload(&glyphs);
+        let see_through = upload(&see_through);
+        DisplayTextRanges { backgrounds, shadows, glyphs, see_through }
     }
 
     /// Records the three draws (a no-op for any range that is empty,
@@ -467,10 +619,16 @@ impl DisplayTextRenderer {
     /// `submitNodeCollector.order(backgroundColor != 0 ? 1 : 0)` — the text
     /// is explicitly ordered after the background it sits on. The
     /// see-through range comes last because it neither tests nor writes
-    /// depth, so it must not be able to occlude the two that do.
-    pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, counts: (u32, u32, u32)) {
-        let (backgrounds, glyphs, see_through) = counts;
-        if backgrounds == 0 && glyphs == 0 && see_through == 0 {
+    /// depth, so it must not be able to occlude the three that do.
+    ///
+    /// Shadows **before** ink, the same order `Font.java` uses within one
+    /// `drawInBatch`, and the same order `gpu/nametag.rs::push_entity_quads`
+    /// uses: a later glyph's ink must sit on top of an earlier glyph's
+    /// shadow. Unlike that pass, the two here also differ in pipeline — see
+    /// the module doc's "The drop shadow needs its own polygon offset".
+    pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, counts: DisplayTextRanges) {
+        let DisplayTextRanges { backgrounds, shadows, glyphs, see_through } = counts;
+        if backgrounds == 0 && shadows == 0 && glyphs == 0 && see_through == 0 {
             return;
         }
         pass.set_bind_group(0, &self.bind_group, &[]);
@@ -478,6 +636,7 @@ impl DisplayTextRenderer {
         let mut start = 0u32;
         for (count, pipeline) in [
             (backgrounds, &self.background_pipeline),
+            (shadows, &self.shadow_pipeline),
             (glyphs, &self.glyph_pipeline),
             (see_through, &self.see_through_pipeline),
         ] {
@@ -490,49 +649,84 @@ impl DisplayTextRenderer {
     }
 }
 
-/// This frame's `text_display` vertices, split into the three pipeline ranges
-/// [`DisplayTextRenderer::draw`] records — `(depth-tested panels,
-/// polygon-offset glyphs, see-through everything)`.
+/// Vertex counts for [`DisplayTextRenderer::draw`]'s four contiguous ranges,
+/// in draw order.
+///
+/// A named struct rather than a `(u32, u32, u32, u32)` on purpose: four
+/// adjacent same-typed fields transpose without a trace, and every existing
+/// gate for this pass would round-trip a swapped pair unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct DisplayTextRanges {
+    /// Depth-tested, non-writing, unbiased panels.
+    backgrounds: u32,
+    /// Drop shadows, on vanilla's own `TEXT_POLYGON_OFFSET`.
+    shadows: u32,
+    /// Glyph ink, one further offset step in front of the shadows.
+    glyphs: u32,
+    /// Everything a `FLAG_SEE_THROUGH` display contributes — panel, shadow
+    /// and ink alike — through the one pipeline that neither tests nor
+    /// writes depth.
+    see_through: u32,
+}
+
+/// This frame's `text_display` vertices, split into the four pipeline ranges
+/// [`DisplayTextRenderer::draw`] records.
 ///
 /// Free-standing rather than inlined into `prepare` so the routing is
 /// assertable without a GPU: which pipeline a display lands on is decided
 /// entirely by `Display.TextDisplay.FLAG_SEE_THROUGH`, and a gate that has to
 /// build a device to ask cannot be a unit test.
+#[derive(Debug, Default)]
+struct Partitioned {
+    backgrounds: Vec<DisplayTextVertex>,
+    shadows: Vec<DisplayTextVertex>,
+    glyphs: Vec<DisplayTextVertex>,
+    see_through: Vec<DisplayTextVertex>,
+}
+
 fn partition_display_text(
     raster: &RasterFont,
     ink: &super::nametag::StyledInkLayoutCache,
     draws: &[DisplayDraw],
     camera: &Camera,
-) -> (
-    Vec<DisplayTextVertex>,
-    Vec<DisplayTextVertex>,
-    Vec<DisplayTextVertex>,
-) {
-    let mut backgrounds = Vec::new();
-    let mut glyphs = Vec::new();
-    let mut see_through = Vec::new();
+) -> Partitioned {
+    let mut out = Partitioned::default();
     for draw in draws {
         if draw.type_path != TEXT_DISPLAY_TYPE_PATH {
             continue;
         }
         let Some(text) = &draw.text else { continue };
         let mut panel = Vec::new();
+        let mut line_shadow = Vec::new();
         let mut line_ink = Vec::new();
-        push_text_display_quads(raster, ink, draw, text, camera, &mut panel, &mut line_ink);
-        // A see-through display puts *both* its panel and its ink into the one
-        // un-depth-tested range, panel first — vanilla submits them through two
-        // see-through pipelines whose depth state is identical and whose only
-        // difference is the shader, so within that range paint order is all
-        // that separates them.
+        push_text_display_quads(
+            raster,
+            ink,
+            draw,
+            text,
+            camera,
+            &mut panel,
+            &mut line_shadow,
+            &mut line_ink,
+        );
+        // A see-through display puts its panel, its shadows *and* its ink
+        // into the one un-depth-tested range, in that order — vanilla submits
+        // them through two see-through pipelines whose depth state is
+        // identical and whose only difference is the shader, so within that
+        // range paint order is all that separates them. That also means the
+        // shadow/ink contest cannot arise there at all: with no depth test
+        // and no depth write, submission order decides outright.
         if draw.text_style_flags & FLAG_SEE_THROUGH == 0 {
-            backgrounds.append(&mut panel);
-            glyphs.append(&mut line_ink);
+            out.backgrounds.append(&mut panel);
+            out.shadows.append(&mut line_shadow);
+            out.glyphs.append(&mut line_ink);
         } else {
-            see_through.append(&mut panel);
-            see_through.append(&mut line_ink);
+            out.see_through.append(&mut panel);
+            out.see_through.append(&mut line_shadow);
+            out.see_through.append(&mut line_ink);
         }
     }
-    (backgrounds, glyphs, see_through)
+    out
 }
 
 /// Splits a fully-inherited span list on literal `\n` boundaries into
@@ -575,13 +769,15 @@ fn split_spans_into_lines(spans: &[TextSpan]) -> Vec<Vec<TextSpan>> {
 }
 
 /// Lowers one `text_display`'s current text into world-space quads: the
-/// background panel (when non-transparent) onto `background_out`, and every
-/// non-empty line's ink onto `glyph_out`.
+/// background panel (when non-transparent) onto `background_out`, every
+/// non-empty line's drop shadow onto `shadow_out`, and its ink onto
+/// `glyph_out`.
 ///
-/// The two are kept apart because they are drawn through **two different
-/// pipelines** — vanilla's `RenderPipelines.TEXT_BACKGROUND` and
-/// `RenderPipelines.TEXT_POLYGON_OFFSET` — see the module doc for the
-/// measurement that made that split load-bearing rather than cosmetic.
+/// The three are kept apart because they are drawn through **three different
+/// pipelines** — vanilla's `RenderPipelines.TEXT_BACKGROUND`, its
+/// `RenderPipelines.TEXT_POLYGON_OFFSET`, and that same offset counted twice
+/// — see the module doc for the measurement behind each split. Neither is
+/// cosmetic.
 #[allow(clippy::too_many_arguments)]
 fn push_text_display_quads(
     raster: &RasterFont,
@@ -590,6 +786,7 @@ fn push_text_display_quads(
     text: &Text,
     camera: &Camera,
     background_out: &mut Vec<DisplayTextVertex>,
+    shadow_out: &mut Vec<DisplayTextVertex>,
     glyph_out: &mut Vec<DisplayTextVertex>,
 ) {
     // `text` is a real `Text` (the protocol-layer decode and
@@ -665,8 +862,11 @@ fn push_text_display_quads(
     // call, i.e. per line; block-wide grouping differs only where one line's
     // shadow would overlap the next line's ink, which the `10`-pixel line
     // height rules out for the default font.)
-    let mut shadow_out: Vec<DisplayTextVertex> = Vec::new();
-    let mut ink_out: Vec<DisplayTextVertex> = Vec::new();
+    //
+    // Order is no longer the *only* thing separating the two — they now go
+    // through two pipelines a polygon-offset step apart, so depth separates
+    // them as well. Order still matters for the shadow-over-shadow and
+    // ink-over-ink cases within one block, which no depth bias touches.
     for (i, layout) in layouts.iter().enumerate() {
         let (rects, line_width) = (&layout.0, layout.1);
         if rects.is_empty() {
@@ -705,26 +905,23 @@ fn push_text_display_quads(
                     rect.w,
                     rect.h,
                     shadow_color,
-                    &mut shadow_out,
+                    shadow_out,
                 );
             }
-            push_ink_quad(matrix, lx, ly, rect.w, rect.h, color, &mut ink_out);
+            push_ink_quad(matrix, lx, ly, rect.w, rect.h, color, glyph_out);
         }
     }
-    // This display's shadows, then this display's ink. Appending both here —
-    // rather than pushing straight to `glyph_out` — is what keeps the
-    // ordering *per display*: `glyph_out` may already hold an earlier
-    // display's quads, and one display's shadow must not be allowed to land
-    // in front of another's ink.
-    glyph_out.append(&mut shadow_out);
-    glyph_out.append(&mut ink_out);
 }
 
 /// One ink rect's two triangles, in local glyph space, through `matrix`.
 ///
 /// Free-standing because the shadow copy and the glyph itself are the same
 /// geometry at two offsets and two colours — writing it twice is how the two
-/// drift apart.
+/// drift apart. **Both are emitted at local `z = 0`**; what separates them is
+/// the polygon offset on their two pipelines, not their geometry. See the
+/// module doc's "The drop shadow needs its own polygon offset" for the
+/// measurement that ruled the geometric separation out.
+#[allow(clippy::too_many_arguments)]
 fn push_ink_quad(
     matrix: Mat4,
     lx: f32,
@@ -780,10 +977,10 @@ mod tests {
     use super::*;
 
     /// Every gate below wants "all the vertices this draw contributes", in
-    /// submission order — panel first, then ink — which is exactly what the
-    /// one buffer holds. `push_text_display_quads` splits them because they
-    /// go through two pipelines (see the module doc); nothing about that
-    /// split changes what any of these assertions are about.
+    /// submission order — panel, then shadows, then ink — which is exactly
+    /// what the one buffer holds. `push_text_display_quads` splits them
+    /// because they go through three pipelines (see the module doc); nothing
+    /// about that split changes what any of these assertions are about.
     fn all_quads(
         raster: &RasterFont,
         ink: &super::super::nametag::StyledInkLayoutCache,
@@ -792,8 +989,19 @@ mod tests {
         camera: &Camera,
     ) -> Vec<DisplayTextVertex> {
         let mut out = Vec::new();
+        let mut shadows = Vec::new();
         let mut glyphs = Vec::new();
-        push_text_display_quads(raster, ink, draw, text, camera, &mut out, &mut glyphs);
+        push_text_display_quads(
+            raster,
+            ink,
+            draw,
+            text,
+            camera,
+            &mut out,
+            &mut shadows,
+            &mut glyphs,
+        );
+        out.extend(shadows);
         out.extend(glyphs);
         out
     }
@@ -899,9 +1107,13 @@ mod tests {
 
     /// **The see-through discriminating pair.** The identical display, twice,
     /// differing only in `FLAG_SEE_THROUGH`: without it every vertex must land
-    /// in the two depth-tested ranges and none in the third, with it the exact
-    /// reverse. A gate asserting only "the see-through range is non-empty"
-    /// would pass with the routing wired to both.
+    /// in the three depth-tested ranges and none in the fourth, with it the
+    /// exact reverse. A gate asserting only "the see-through range is
+    /// non-empty" would pass with the routing wired to both.
+    ///
+    /// The fixture carries `FLAG_SHADOW` so the **shadow** range is one of
+    /// the three under test rather than an empty vector every assertion below
+    /// would be satisfied by.
     #[test]
     fn the_see_through_flag_moves_every_vertex_to_the_undepth_tested_range() {
         let Some(raster) = super::super::nametag::load_font() else {
@@ -912,23 +1124,38 @@ mod tests {
 
         let mut tested = draw_with_text("LODESTONE");
         tested.text_background_color = 0x4000_0000_u32 as i32;
-        let (bg, glyphs, see) = partition_display_text(&raster, &ink, &[tested.clone()], &camera);
-        assert_eq!(bg.len(), 6, "one background quad");
-        assert!(!glyphs.is_empty(), "real ink");
-        assert!(see.is_empty(), "nothing may reach the see-through range unflagged");
+        tested.text_style_flags = FLAG_SHADOW;
+        let one = partition_display_text(&raster, &ink, &[tested.clone()], &camera);
+        assert_eq!(one.backgrounds.len(), 6, "one background quad");
+        assert!(!one.shadows.is_empty(), "a shadowed display contributes shadow quads");
+        assert_eq!(
+            one.shadows.len(),
+            one.glyphs.len(),
+            "the shadow copy is the same geometry as the ink, quad for quad",
+        );
+        assert!(
+            one.see_through.is_empty(),
+            "nothing may reach the see-through range unflagged",
+        );
 
         let mut through = tested.clone();
         through.text_style_flags |= FLAG_SEE_THROUGH;
-        let (bg2, glyphs2, see2) = partition_display_text(&raster, &ink, &[through], &camera);
-        assert!(bg2.is_empty() && glyphs2.is_empty(), "the depth-tested ranges must be empty");
+        let two = partition_display_text(&raster, &ink, &[through], &camera);
+        assert!(
+            two.backgrounds.is_empty() && two.shadows.is_empty() && two.glyphs.is_empty(),
+            "the three depth-tested ranges must be empty",
+        );
         assert_eq!(
-            see2.len(),
-            bg.len() + glyphs.len(),
+            two.see_through.len(),
+            one.backgrounds.len() + one.shadows.len() + one.glyphs.len(),
             "the same geometry, all of it, in the one un-depth-tested range",
         );
-        // Panel first inside that range, matching the submission order the
-        // depth-tested split enforces with two draws.
-        assert_eq!(&see2[..6], &bg[..]);
+        // Panel, then shadows, then ink inside that range — the submission
+        // order the depth-tested split enforces with three draws, and the
+        // only thing separating the three where there is no depth test.
+        assert_eq!(&two.see_through[..6], &one.backgrounds[..]);
+        assert_eq!(&two.see_through[6..6 + one.shadows.len()], &one.shadows[..]);
+        assert_eq!(&two.see_through[6 + one.shadows.len()..], &one.glyphs[..]);
     }
 
     /// `FLAG_USE_DEFAULT_BACKGROUND` replaces the synced colour with the
@@ -1189,54 +1416,77 @@ mod tests {
         let mut shadowed = plain.clone();
         shadowed.text_style_flags |= FLAG_SHADOW;
 
-        let mut run = |draw: &DisplayDraw| {
-            let (mut panel, mut glyphs) = (Vec::new(), Vec::new());
+        let run = |draw: &DisplayDraw| {
+            let (mut panel, mut shadows, mut glyphs) = (Vec::new(), Vec::new(), Vec::new());
             push_text_display_quads(
-                &raster, &ink, draw, &text, &camera, &mut panel, &mut glyphs,
+                &raster,
+                &ink,
+                draw,
+                &text,
+                &camera,
+                &mut panel,
+                &mut shadows,
+                &mut glyphs,
             );
-            glyphs
+            (shadows, glyphs)
         };
-        let without = run(&plain);
-        let with = run(&shadowed);
+        let (plain_shadows, without) = run(&plain);
+        let (with_shadows, with) = run(&shadowed);
 
         assert!(!without.is_empty(), "the fixture must draw real ink");
+        assert!(
+            plain_shadows.is_empty(),
+            "unflagged text must contribute nothing to the shadow range at all \
+             — otherwise this gate cannot tell the flag from the default: got \
+             {} vertices",
+            plain_shadows.len()
+        );
+        assert_eq!(
+            with_shadows.len(),
+            without.len(),
+            "FLAG_SHADOW must draw every ink rect exactly once more, into the \
+             shadow range: {} ink vertices, {} shadow vertices",
+            without.len(),
+            with_shadows.len()
+        );
         assert_eq!(
             with.len(),
-            without.len() * 2,
-            "FLAG_SHADOW must draw every ink rect exactly twice: {} vertices \
-             unflagged, {} flagged",
             without.len(),
-            with.len()
+            "the flag must not change the ink itself, only add a shadow copy",
         );
         assert!(
-            !without.iter().any(|v| matches(v.color, want_shadow)),
-            "unflagged text must draw no dimmed copy at all — otherwise this \
-             gate cannot tell the flag from the default"
-        );
-
-        // The shadow copy occupies the first half, the ink the second: paint
-        // order is the whole mechanism.
-        let half = without.len();
-        assert!(
-            with[..half].iter().all(|v| matches(v.color, want_shadow)),
-            "every vertex of the first (shadow) half must be quarter-brightness \
-             red {want_shadow:?} — a flat grey or black shadow would fail here, \
-             which is the point: got {:?}",
-            with[..half].iter().map(|v| v.color).take(6).collect::<Vec<_>>()
+            with_shadows.iter().all(|v| matches(v.color, want_shadow)),
+            "every shadow vertex must be quarter-brightness red {want_shadow:?} \
+             — a flat grey or black shadow would fail here, which is the point: \
+             got {:?}",
+            with_shadows.iter().map(|v| v.color).take(6).collect::<Vec<_>>()
         );
         assert!(
-            with[half..].iter().all(|v| matches(v.color, want_red)),
-            "every vertex of the second (ink) half must be the full-brightness \
-             red the span asked for: got {:?}",
-            with[half..].iter().map(|v| v.color).take(6).collect::<Vec<_>>()
+            with.iter().all(|v| matches(v.color, want_red)),
+            "every ink vertex must be the full-brightness red the span asked \
+             for: got {:?}",
+            with.iter().map(|v| v.color).take(6).collect::<Vec<_>>()
         );
 
         // And the copy is genuinely *offset*, not merely dimmed in place —
         // one font pixel through the glyph transform, on both axes.
         assert_ne!(
-            with[0].position, with[half].position,
+            with_shadows[0].position, with[0].position,
             "the shadow copy must be offset from the glyph it shadows, not \
              painted at the same place"
+        );
+        // And the ink itself does **not** move when the flag is set. Vanilla
+        // pushes a shadowed glyph forward by `0.03` in local glyph space;
+        // this pass deliberately does not, because that separation is
+        // view-side-dependent — it inverts the moment you walk behind the
+        // hologram — and the polygon offset that replaces it is not. See the
+        // module doc's "The drop shadow needs its own polygon offset". A
+        // reader who re-ports that constant will fail here, which is the
+        // point.
+        assert_eq!(
+            with[0].position, without[0].position,
+            "the drop shadow must not displace the ink it shadows: this pass \
+             separates the two with a polygon offset, not with geometry",
         );
     }
 
