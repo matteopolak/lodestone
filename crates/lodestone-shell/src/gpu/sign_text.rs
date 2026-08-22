@@ -96,10 +96,38 @@ struct SignTextVertex {
 }
 
 /// Fixed vertex capacity, same fixed-buffer idiom as
-/// [`super::nametag::MAX_NAME_TAG_VERTICES`]. A sign carries at most 8 lines
-/// (4 per side) of at most `MAX_TEXT_LINE_WIDTH` pixels each; this
-/// comfortably covers a screen full of signed boards.
-const MAX_SIGN_TEXT_VERTICES: usize = 40_000;
+/// [`super::nametag::MAX_NAME_TAG_VERTICES`] — `prepare` takes `&self` and
+/// is called from `RenderState::render`, which also takes `&self` and has no
+/// device to hand, so this pass cannot reallocate the way a `&mut self` one
+/// could.
+///
+/// **The old value was 40,000 and a real base exceeded it.** Measured with
+/// the jar's own font through [`push_side_quads`]: the ink walk emits one
+/// quad per *horizontal run of ink texels per glyph row*, not one per glyph,
+/// so a plain sign with four full lines on **both** sides is **7,632**
+/// vertices and one with three short lines on one side is **1,392**. At
+/// 40,000 that is **5.2** fully-written signs, or ~28 ordinary ones — a
+/// storage room's worth of labels. Past it [`prepare`](SignTextRenderer::
+/// prepare) simply dropped the tail of a list sorted by **block position**,
+/// so as the player moved and the in-range set changed, whole signs blinked
+/// completely in and out with nothing logged anywhere.
+///
+/// 262,144 is 7.34 MB at 28 bytes a vertex — against ~67 MB of terrain mesh
+/// at render distance 8, a real but proportionate cost — and buys 34
+/// fully-written signs or ~188 ordinary ones **in front of the camera**
+/// within the 64-block gather. It is still a budget rather than a guarantee,
+/// which is why [`prepare`](SignTextRenderer::prepare) now spends it
+/// nearest-first and says out loud when it binds instead of dropping in
+/// silence.
+const MAX_SIGN_TEXT_VERTICES: usize = 262_144;
+
+/// How far behind the eye plane a sign's centre may sit and still be built.
+/// A sign is under a block across, so one block of slack keeps a board the
+/// camera is standing inside while discarding the half of the 64-block
+/// gather that is strictly behind the player and can contribute no pixel.
+/// This is a **budget** filter, not a visibility cull: everything it drops
+/// projects to nothing anyway.
+const BEHIND_EYE_SLACK: f32 = 1.0;
 
 /// Draws world-space sign text — see the module doc for the depth pipeline
 /// and why this is not a billboard.
@@ -232,8 +260,32 @@ impl SignTextRenderer {
 
     /// Uploads this frame's view-projection and sign-text vertices. Must run
     /// before the render pass opens, same buffer-creation constraint as
-    /// every other pass in this file. Returns the vertex count, capped at
-    /// [`MAX_SIGN_TEXT_VERTICES`] — pass to [`draw`](Self::draw).
+    /// every other pass in this file. Returns the vertex count — pass to
+    /// [`draw`](Self::draw).
+    ///
+    /// # Which signs get the budget, and why the order is not the caller's
+    ///
+    /// `block_entities::sign_spawns` sorts its list by **block position**,
+    /// deliberately, so pixel gates get a deterministic batch order. That is
+    /// the wrong order to *spend a budget* in: it has nothing to do with the
+    /// camera, so when the list overflowed [`MAX_SIGN_TEXT_VERTICES`] the
+    /// signs that vanished were whichever ones happened to sort last, and
+    /// they changed as the player moved and the in-range set changed. Whole
+    /// boards blinked completely in and out.
+    ///
+    /// So this reorders by **forward distance** — `clip.w`, which for a
+    /// perspective projection is exactly `-z_view` — nearest first, and
+    /// discards anything more than [`BEHIND_EYE_SLACK`] behind the eye
+    /// plane, which projects to nothing and was previously eating roughly
+    /// half the budget. The caller's sort is untouched; this one is local to
+    /// the upload.
+    ///
+    /// Truncation is at **whole-sign** granularity. The old `.min()` cut a
+    /// flat vertex vector at an arbitrary index, which could sever a
+    /// triangle and left the boundary sign drawing a fragment of its own
+    /// text; and it was completely silent, which `CLAUDE.md`'s "nothing may
+    /// be silently skipped" forbids. [`crate::sign_diagnostics::
+    /// report_draw_budget`] now names the drop.
     pub(super) fn prepare(
         &self,
         queue: &wgpu::Queue,
@@ -245,8 +297,11 @@ impl SignTextRenderer {
             return 0;
         };
 
+        let ordered = order_by_forward_distance(view_proj, signs);
         let mut vertices = Vec::new();
-        for spawn in signs {
+        let mut drawn = 0usize;
+        for spawn in &ordered {
+            let committed = vertices.len();
             push_side_quads(
                 raster,
                 &self.ink,
@@ -267,12 +322,27 @@ impl SignTextRenderer {
                 false,
                 &mut vertices,
             );
+            if vertices.len() > MAX_SIGN_TEXT_VERTICES {
+                // Sorted nearest-first, so everything left is farther than
+                // this one: stop rather than keep probing for a smaller sign
+                // that happens to fit, which would make the drawn set depend
+                // on text length as well as distance.
+                vertices.truncate(committed);
+                break;
+            }
+            drawn += 1;
         }
-        let len = vertices.len().min(MAX_SIGN_TEXT_VERTICES);
-        if len > 0 {
-            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices[..len]));
+        crate::sign_diagnostics::report_draw_budget(
+            signs.len(),
+            ordered.len(),
+            drawn,
+            vertices.len(),
+            MAX_SIGN_TEXT_VERTICES,
+        );
+        if !vertices.is_empty() {
+            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices));
         }
-        len as u32
+        vertices.len() as u32
     }
 
     /// Records the draw (no-op with zero vertices, including the no-jar
@@ -287,6 +357,35 @@ impl SignTextRenderer {
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..count, 0..1);
     }
+}
+
+/// This frame's signs, nearest first, with everything strictly behind the eye
+/// discarded — see [`SignTextRenderer::prepare`]'s doc for why the caller's
+/// position sort is the wrong order to spend a fixed budget in.
+///
+/// `clip.w` for a perspective projection is `-z_view`, the distance along the
+/// view axis, so this needs no camera basis and no eye position: the
+/// view-projection the pass already receives carries both.
+fn order_by_forward_distance<'a>(
+    view_proj: &[[f32; 4]; 4],
+    signs: &'a [SignSpawn],
+) -> Vec<&'a SignSpawn> {
+    let vp = glam::Mat4::from_cols_array_2d(view_proj);
+    let mut ordered: Vec<(f32, &SignSpawn)> = signs
+        .iter()
+        .filter_map(|spawn| {
+            let centre = glam::Vec4::new(
+                spawn.pos[0] as f32 + 0.5,
+                spawn.pos[1] as f32 + 0.5,
+                spawn.pos[2] as f32 + 0.5,
+                1.0,
+            );
+            let w = (vp * centre).w;
+            (w > -BEHIND_EYE_SLACK).then_some((w, spawn))
+        })
+        .collect();
+    ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
+    ordered.into_iter().map(|(_, spawn)| spawn).collect()
 }
 
 /// This side's resolved default run colour, packed `0x00rrggbb` — the exact
@@ -397,8 +496,10 @@ fn push_side_quads(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use lodestone_render::Camera;
     use lodestone_world::SignDyeColor;
+
+    use super::*;
 
     fn plain_span(text: &str) -> SignTextSpan {
         SignTextSpan {
@@ -484,6 +585,148 @@ mod tests {
         assert!(back.is_empty(), "an untouched back side must contribute nothing");
     }
 
+
+    /// **The magnitude gate for [`MAX_SIGN_TEXT_VERTICES`].** The owner
+    /// reported signs "flicker in and out (completely) when they're far away
+    /// and I move", and the pass's fixed vertex buffer is one of the two
+    /// mechanisms in the sign path that can make a *whole* board's text
+    /// vanish and return with camera motion (the other, a depth tie against
+    /// the sign's own board, is measured and excluded by
+    /// `tests/sign_text_distance_stability_pixels.rs`).
+    ///
+    /// This is deliberately a **prediction**, not a direction: it measures
+    /// the real vertex cost of two real signs through the real
+    /// [`push_side_quads`] and the jar's own font, then evaluates the
+    /// capacity question against **both** hypotheses — the old 40,000 and
+    /// whatever [`MAX_SIGN_TEXT_VERTICES`] is now — so the run has to land on
+    /// one. Asserting only "the capacity is large enough" would pass at any
+    /// value that happened to exceed the fixture.
+    ///
+    /// The population it demands is not a round number picked to be
+    /// comfortable: it is what a storage room looks like. `FULL_SIGNS` is a
+    /// four-line, two-sided sign, the most a `SignBlockEntity` can carry;
+    /// `LABEL_SIGNS` is a one-line chest label, which is what people
+    /// actually place dozens of.
+    #[test]
+    fn the_vertex_budget_holds_a_real_rooms_worth_of_signs() {
+        /// What the cap was when the flicker was reported.
+        const PREVIOUS_CAPACITY: usize = 40_000;
+        /// Four full lines both sides, the most one sign can carry.
+        const FULL_SIGNS: usize = 24;
+        /// One-line chest labels — the common case, in quantity.
+        const LABEL_SIGNS: usize = 120;
+
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+
+        let measure = |spawn: &SignSpawn| -> usize {
+            let mut out = Vec::new();
+            push_side_quads(
+                &raster, &ink, &spawn.front, spawn.pos, spawn.kind, spawn.orientation, true,
+                &mut out,
+            );
+            push_side_quads(
+                &raster, &ink, &spawn.back, spawn.pos, spawn.kind, spawn.orientation, false,
+                &mut out,
+            );
+            out.len()
+        };
+
+        let mut full = SignSpawn::at([0, 0, 0]);
+        for i in 0..4 {
+            let line = vec![plain_span("ABCDEFGHIJKLMNO")];
+            full.front.lines[i] = line.clone();
+            full.back.lines[i] = line;
+        }
+        let mut label = SignSpawn::at([0, 0, 0]);
+        label.front.lines[1] = vec![plain_span("Redstone")];
+
+        let full_cost = measure(&full);
+        let label_cost = measure(&label);
+        assert!(
+            full_cost > 0 && label_cost > 0,
+            "the fixture must produce ink to measure anything: full={full_cost},              label={label_cost}"
+        );
+
+        let full_demand = full_cost * FULL_SIGNS;
+        let label_demand = label_cost * LABEL_SIGNS;
+        println!(
+            "one full sign {full_cost} vertices, one label {label_cost};              {FULL_SIGNS} full = {full_demand}, {LABEL_SIGNS} labels = {label_demand};              capacity {MAX_SIGN_TEXT_VERTICES}, previously {PREVIOUS_CAPACITY}"
+        );
+
+        // The wrong hypothesis, computed rather than described: at the old
+        // capacity both populations overflow, which is what made whole signs
+        // disappear. If this ever stops being true the fixture has drifted
+        // and the arms below prove nothing.
+        assert!(
+            full_demand > PREVIOUS_CAPACITY && label_demand > PREVIOUS_CAPACITY,
+            "the fixture no longer discriminates: at the previous capacity of              {PREVIOUS_CAPACITY} it must overflow, but measured {full_demand}              (full) and {label_demand} (labels)"
+        );
+
+        assert!(
+            full_demand <= MAX_SIGN_TEXT_VERTICES,
+            "{FULL_SIGNS} fully-written signs need {full_demand} vertices and the              pass can hold {MAX_SIGN_TEXT_VERTICES}. Every sign past the budget              draws no text at all, and which ones those are changes as the camera              moves — the reported flicker."
+        );
+        assert!(
+            label_demand <= MAX_SIGN_TEXT_VERTICES,
+            "{LABEL_SIGNS} one-line chest labels need {label_demand} vertices and              the pass can hold {MAX_SIGN_TEXT_VERTICES}"
+        );
+    }
+
+    /// The budget is spent nearest-first, and signs strictly behind the eye
+    /// are not spent on at all.
+    ///
+    /// Before this, `prepare` consumed `sign_spawns`' list in its own order —
+    /// sorted by **block position** for pixel-gate determinism, which is
+    /// unrelated to the camera. So an overflow dropped whichever signs sorted
+    /// last, and moving the player changed the in-range set and therefore the
+    /// cut, which is how a *whole* board blinks. The fixture puts the
+    /// position-sort order deliberately at odds with the distance order, so a
+    /// regression to "just use the caller's list" fails here.
+    #[test]
+    fn the_budget_is_spent_nearest_first_and_skips_signs_behind_the_eye() {
+        let camera = Camera {
+            position: glam::Vec3::new(0.0, 0.0, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_degrees: 70.0,
+            aspect: 16.0 / 9.0,
+            near: 0.05,
+            far: 512.0,
+        };
+        // Yaw 0 faces `+Z` (`Camera::basis`), so `+Z` is in front and `-Z` is
+        // behind. Listed here in **descending** distance so a function that
+        // preserved its input order could not accidentally pass.
+        let near = SignSpawn::at([0, 0, 4]);
+        let mid = SignSpawn::at([0, 0, 20]);
+        let far = SignSpawn::at([0, 0, 50]);
+        let behind = SignSpawn::at([0, 0, -30]);
+        let spawns = vec![far.clone(), behind.clone(), mid.clone(), near.clone()];
+
+        let vp = camera.view_projection().to_cols_array_2d();
+        let ordered = order_by_forward_distance(&vp, &spawns);
+        let order: Vec<[i32; 3]> = ordered.iter().map(|s| s.pos).collect();
+        assert_eq!(
+            order,
+            vec![near.pos, mid.pos, far.pos],
+            "expected nearest-first with the sign behind the eye dropped"
+        );
+
+        // The control for the drop: a sign one block behind the eye plane is
+        // within `BEHIND_EYE_SLACK` and must survive, so the filter is a
+        // budget filter and not a visibility cull that could delete a board
+        // the camera is standing inside.
+        let straddling = SignSpawn::at([0, 0, -1]);
+        let kept = order_by_forward_distance(&vp, std::slice::from_ref(&straddling));
+        assert_eq!(
+            kept.len(),
+            1,
+            "a sign at the eye plane must not be discarded — BEHIND_EYE_SLACK              exists so a board the camera is inside still draws"
+        );
+    }
+
     /// The central control: one line with no colour of its own must draw in
     /// the sign's own dye colour, and a *sibling* line carrying an explicit
     /// **hex** colour (not one of the sixteen legacy colours, so a lossy
@@ -553,3 +796,4 @@ mod tests {
         }
     }
 }
+
