@@ -345,6 +345,11 @@ fn bench_frame_profile(c: &mut Criterion) {
         busy_before.map_or_else(|| "unknown (`ps` unreadable)".to_string(), |n| n.to_string()),
     );
 
+    // Waypoints whose bracketing span came out under the pass it encloses —
+    // see the comment at the push site for why this is collected across the
+    // whole path rather than asserted per waypoint.
+    let mut span_below_pass: Vec<(&str, f64, f64)> = Vec::new();
+
     for wp in &PATH {
         let camera = camera_at(wp.offset, wp.yaw, wp.pitch);
 
@@ -360,7 +365,13 @@ fn bench_frame_profile(c: &mut Criterion) {
         let mut sub_prepare = Samples::default();
         let mut sub_terrain = Samples::default();
         let mut sub_other = Samples::default();
+        // `world.submit` was one bucket until the split; `sub_submit` keeps
+        // its meaning (the two halves added, per frame) so the recorded
+        // `cpu_submit_median_ms` series stays comparable across the change,
+        // while the halves are reported separately beside it.
         let mut sub_submit = Samples::default();
+        let mut sub_finish = Samples::default();
+        let mut sub_queue = Samples::default();
         let mut gpu_total = Samples::default();
         let mut gpu_block = Samples::default();
         let mut gpu_hand = Samples::default();
@@ -383,19 +394,32 @@ fn bench_frame_profile(c: &mut Criterion) {
             cpu_timing_end.push(t1.elapsed().as_secs_f64() * 1e3);
 
             let (subs, counts) = state.take_world_subphase_report();
+            // Added *within* the frame, not by taking two medians and adding
+            // them: a median of sums is not the sum of medians, and the
+            // recorded `cpu_submit_median_ms` series has to keep meaning the
+            // same thing it did before the split.
+            let mut submit_halves = 0.0_f64;
             for (name, ms) in subs {
                 let Some(ms) = ms else { continue };
                 match name {
                     "world.prepare_buffers" => sub_prepare.push(f64::from(ms)),
                     "world.terrain_cull_draw" => sub_terrain.push(f64::from(ms)),
                     "world.other_draws" => sub_other.push(f64::from(ms)),
-                    "world.submit" => sub_submit.push(f64::from(ms)),
+                    "world.encoder_finish" => {
+                        sub_finish.push(f64::from(ms));
+                        submit_halves += f64::from(ms);
+                    }
+                    "world.queue_submit" => {
+                        sub_queue.push(f64::from(ms));
+                        submit_halves += f64::from(ms);
+                    }
                     other => panic!(
                         "unknown world sub-phase {other:?} — this bench's match arms and \
                          gpu::gpu_timing::WorldSubphase have drifted apart"
                     ),
                 }
             }
+            sub_submit.push(submit_halves);
             if counts.is_some() {
                 visited = counts;
             }
@@ -480,17 +504,20 @@ fn bench_frame_profile(c: &mut Criterion) {
             // hardware's actual behaviour. Both per-readback violation rates
             // are printed as measurements rather than folded into a tolerance,
             // because a threshold placed there would be fitted to the answer.
-            assert!(
-                gpu_total.median() >= gpu_block.median(),
-                "waypoint {}: world_total median {:.3} ms is below the block pass median \
-                 {:.3} ms it brackets. Occasional per-readback inversions are expected (pass \
-                 pipelining, and per-segment readback staleness), but the medians crossing means \
-                 the timestamps are being paired wrongly — check the stamp order in gpu::frame \
-                 and that the resolve executes after both edges.",
-                wp.label,
-                gpu_total.median(),
-                gpu_block.median(),
-            );
+            //
+            // **Collected, not asserted here.** An `assert!` inside this loop
+            // aborts at the first waypoint, so three of the four spans would
+            // never be printed and the failure message would be an argument
+            // rather than an observation — and the shape of the numbers across
+            // the four waypoints is precisely what separates a real pairing
+            // bug from a scene that is genuinely cheap. A bracket that has
+            // stopped enclosing anything reads **flat** across waypoints whose
+            // block pass differs threefold; a correct one tracks it. So every
+            // waypoint's summary is printed first and the verdict is taken on
+            // the collection, after the loop.
+            if gpu_total.median() < gpu_block.median() {
+                span_below_pass.push((wp.label, gpu_total.median(), gpu_block.median()));
+            }
         }
 
         let cpu_ms = cpu_world.median();
@@ -514,7 +541,7 @@ fn bench_frame_profile(c: &mut Criterion) {
              \x20  cpu  .prepare_buf {:>8.3} ms\n\
              \x20  cpu  .cull+draw   {:>8.3} ms\n\
              \x20  cpu  .other_draws {:>8.3} ms\n\
-             \x20  cpu  .submit      {:>8.3} ms\n\
+             \x20  cpu  .submit      {:>8.3} ms   = finish {:.3} + queue.submit {:.3}\n\
              \x20  gpu  world_total  {:>8.3} ms   (noise max/median {:.2}x)\n\
              \x20  gpu  world (block){:>8.3} ms\n\
              \x20  gpu  first_person {:>8.3} ms\n\
@@ -536,6 +563,8 @@ fn bench_frame_profile(c: &mut Criterion) {
             sub_terrain.median(),
             sub_other.median(),
             sub_submit.median(),
+            sub_finish.median(),
+            sub_queue.median(),
             gpu_ms,
             gpu_total.noise(),
             gpu_block.median(),
@@ -565,6 +594,8 @@ fn bench_frame_profile(c: &mut Criterion) {
             ("cpu_terrain_cull_draw_median_ms", sub_terrain.median(), "ms"),
             ("cpu_other_draws_median_ms", sub_other.median(), "ms"),
             ("cpu_submit_median_ms", sub_submit.median(), "ms"),
+            ("cpu_encoder_finish_median_ms", sub_finish.median(), "ms"),
+            ("cpu_queue_submit_median_ms", sub_queue.median(), "ms"),
             ("gpu_world_total_median_ms", gpu_total.median(), "ms"),
             ("gpu_world_block_pass_median_ms", gpu_block.median(), "ms"),
             ("gpu_first_person_median_ms", gpu_hand.median(), "ms"),
@@ -583,6 +614,23 @@ fn bench_frame_profile(c: &mut Criterion) {
             });
         }
     }
+
+    assert!(
+        span_below_pass.is_empty(),
+        "the `world_total` bracketing span came out **below** the block pass it encloses at \
+         {} of {} waypoints: {:?} (label, span ms, block-pass ms).\n\nA span shorter than its \
+         own contents is not a small error, it is a different quantity. The bracket is stamped \
+         by two 1x1 render passes that share no attachment with the real work, and a GPU free \
+         to run passes without a data dependency concurrently will retire both stamps at the \
+         head of the command buffer -- measuring the stamps rather than the frame. The \
+         diagnostic is in the numbers just printed: a bracket that has stopped enclosing \
+         anything is roughly **flat** across these waypoints, while the block pass it nominally \
+         contains varies severalfold with the scene. Check that before changing anything about \
+         the stamp passes.",
+        span_below_pass.len(),
+        PATH.len(),
+        span_below_pass,
+    );
 
     rotation_does_not_move_residency(device, queue, &mut target, &state);
     submit_cost_versus_residency(device, queue, &mut target);
@@ -650,13 +698,18 @@ fn submit_cost_versus_residency(
             encode.push(t0.elapsed().as_secs_f64() * 1e3);
             drawn = stats.sections_drawn;
             let (subs, _) = state.take_world_subphase_report();
+            // Both halves of the old `world.submit` bucket, added within the
+            // frame — this row's "of which submit" column means what it meant
+            // before the split, so the sweep stays comparable to earlier runs.
+            let mut submit_halves = 0.0_f64;
             for (name, ms) in subs {
-                if name == "world.submit"
+                if matches!(name, "world.encoder_finish" | "world.queue_submit")
                     && let Some(ms) = ms
                 {
-                    submit.push(f64::from(ms));
+                    submit_halves += f64::from(ms);
                 }
             }
+            submit.push(submit_halves);
         }
         rows.push((radius, meshed, drawn, encode.median(), submit.median()));
     }
