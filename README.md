@@ -13,6 +13,19 @@ and Mojang's own data generators.
 > [`docs/legal-notices.md`](./docs/legal-notices.md) for what that means for licensing,
 > third-party design references, and data sources.
 
+## In game
+
+Every image below is this client rendering a live session against a real vanilla 26.2
+server — no mock-ups, no compositing. They are captured by `just screenshots`, which joins
+the flat creative oracle, builds each scene over RCON and renders one frame through the same
+path the windowed client uses; see [`docs/screenshots.md`](./docs/screenshots.md).
+
+| | |
+|---|---|
+| ![Text-display holograms](./docs/images/01-text-displays.png) **`text_display` holograms** — styled, shadowed and panelled world text, plus `block_display` and `item_display` beside it. | ![Signs](./docs/images/02-signs.png) **Signs** — per-span colour, bold, italic, obfuscated, strikethrough and underline; glowing dye; standing, wall and hanging boards; and one sign turned round to show its separate back text. |
+| ![Block entities](./docs/images/03-block-entities.png) **Block entities** — layered loom banners, decorated pots with four independent sherds, chests and shulker boxes, a cooking campfire, a lectern's book, a bell, an enchanting table and a beacon beam. | ![Entities](./docs/images/04-entities.png) **Entities** — armour stands in six-rotation poses wearing trimmed diamond, netherite and gold, dyed leather, a patterned shield, plus variant mobs and a custom name plate. |
+| ![HUD](./docs/images/05-hud.png) **The HUD** — tab list, scoreboard sidebar, boss bar, styled chat with hex colour, hearts, hunger, armour and XP, 3-D block items in the hotbar, and the first-person hand. | |
+
 ## Goals
 
 - **Play the real game against real servers.** Not a protocol library or a bot framework —

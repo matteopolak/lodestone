@@ -1554,6 +1554,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   screen-space quad after the hand pass" shape closely enough that all seven landed in
   one pass rather than inventing a second pipeline:
   `lodestone_render::ScreenEffectRenderer`.
+- [Screenshots](./screenshots.md) — The README's in-game images, and the harness
+  that produces them. Every PNG under `docs/images/` is this client rendering a live
+  session against the flat creative 26.2 oracle — no mock-ups, no compositing, no
+  editing. `just screenshots` regenerates the whole set, so the images can be
+  refreshed when the renderer changes instead of drifting into a record of how the
+  client looked one afternoon.
 - [The scrollable list primitive](./scrollable-list.md) — `menu::widget::ScrollList`
   is the shared substrate for every list-shaped menu screen: a **pixel** scroll
   offset, a scrollbar, and a `hovered`/`selected` pair that are two genuinely separate
