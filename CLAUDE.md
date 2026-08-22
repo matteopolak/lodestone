@@ -641,6 +641,22 @@ send an agent at a problem that no longer exists, which has now happened repeate
 
 - **Zero hits in the file a stale note names is not evidence a feature is unwired** — **grep for the
   producer across the whole tree, not for the consumer in one named file.**
+- **A correctly transcribed constant can carry a premise that does not hold here, and then the faithful
+  port is worse than porting nothing.** Measured on `text_display`'s glyph shadow. Vanilla's
+  `BakedSheetGlyph.renderChar` offsets a shadow glyph along the plane normal, and that constant was
+  transcribed exactly — but it encodes **which side is the front**, because a chat or GUI glyph is only
+  ever seen from one. A `text_display` is visible from **both**, so from behind the same offset moves the
+  glyph *away* from the eye and swamps any ULP-denominated depth correction. Ink lost from behind, over
+  twelve configurations: shipped one-pipeline **1,014–2,883 px**; polygon offset alone **4–1,204**;
+  polygon offset **plus** the faithful `0.03` **101–3,120**; polygon offset with the geometry removed
+  **0 at every row**. Row three is the finding — adding the correct constant made it worse than omitting
+  it.
+
+  So when you port a constant, **ask what its premise was**, not only whether you copied the value. A
+  one-sided assumption (single viewing direction, a fixed axis, a guaranteed sign) is invisible in the
+  number and fatal when the new caller violates it. The general shape is the same one this file records
+  for a derived constant tuned against a bug: the arithmetic is right and the context is not.
+
 - **Read the record definition, not a summary of the call site.** Vanilla's
   `DepthStencilState(…, 1.0F, 10.0F)` was transcribed as "constant 1.0, slope 10.0" — backwards.
 - **A field declared on a *base* record is inherited by every variant, and reading it on only the variant
