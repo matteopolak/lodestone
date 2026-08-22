@@ -232,6 +232,27 @@ correct it.
   beyond a bare `*args` passthrough — that's a sign the thing you're adding
   belongs in a script or in `xtask`, not here.
 
+### `screenshots`
+
+`just screenshots` regenerates the README's in-game images into `docs/images/`, by joining
+the flat creative oracle with the real client and rendering one frame per scene. It is a
+regeneration recipe in spirit — a committed artifact rebuilt from an authoritative source —
+but it is not in the table above, because there is no drift gate and there could not
+usefully be one: the "expected value" is a PNG of a renderer that is under active
+development, so a byte comparison would be red every time anyone touches a shader.
+
+Two things about the recipe's shape:
+
+- **`--test-threads=1` is not tidiness.** Every scene shares one world, one live session
+  and one GPU context, and the harness rebuilds the stage between shots.
+- **The scenes are data, under `scripts/screenshot-scenes/*.txt`, not arguments.** That
+  keeps the recipe a single literal invocation (this file's rule) *and* means editing a
+  scene costs no recompile of `lodestone-shell`'s test binaries.
+  `LODESTONE_SCENES=stem1,stem2` narrows a run; it is an env var rather than a recipe
+  parameter for the same reason `run-wasm` is its own name.
+
+Prerequisite: `just oracle-creative`. See [`screenshots.md`](./screenshots.md).
+
 ### What deliberately has no recipe here
 
 - **`scripts/profile-cost-table.py`** — 372 lines with its own `argparse`; a
