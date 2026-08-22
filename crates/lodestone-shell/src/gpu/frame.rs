@@ -692,17 +692,18 @@ impl RenderState {
             // `set_fog` last computed for this dimension/submersion state, and
             // `set_clear_color`'s doc records that a second, independently
             // maintained copy of the sky colour is exactly how the horizon has
-            // banded in a colour the sky never is. Void fog uses the vanilla
-            // overworld geometry (`VoidFog::OVERWORLD`, `min_y = -64`,
-            // `onset_range = 32`) because the dimension's real height is not
-            // threaded to this layer yet; see `docs/sky-and-air-bubbles.md`.
+            // banded in a colour the sky never is. Void fog now comes from the
+            // connected level (`RenderState::void_fog`, pushed per frame from
+            // `Sim::void_fog`) rather than the `VoidFog::OVERWORLD` constant
+            // this line used to name: that constant is only right for a
+            // non-flat overworld. See `docs/sky-and-air-bubbles.md`.
             let frame = lodestone_render::SkyFrame::new(
                 self.time_of_day.value(),
                 day_sky_color,
             )
             .with_fog_color(self.fog.color)
             .with_render_distance(self.render_distance_chunks)
-            .with_void_fog(lodestone_render::fog::VoidFog::OVERWORLD)
+            .with_void_fog(self.void_fog)
             // Vanilla's Clouds option. This builder had **zero** production
             // callers, so the pass always drew `CloudStatus::default()` (FANCY):
             // the FAST quad path and the OFF case both existed in

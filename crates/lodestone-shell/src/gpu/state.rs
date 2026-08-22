@@ -396,6 +396,7 @@ impl RenderState {
             // `Overworld` — what the pass drew unconditionally before the
             // dimension had anywhere to enter.
             sky_mode: lodestone_render::SkyMode::default(),
+            void_fog: lodestone_render::fog::VoidFog::OVERWORLD,
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -967,6 +968,22 @@ impl RenderState {
     #[must_use]
     pub fn sky_mode(&self) -> lodestone_render::SkyMode {
         self.sky_mode
+    }
+
+    /// Push this level's void-fog geometry down — the dimension's own `min_y`
+    /// and `ClientLevelData.voidDarknessOnsetRange()`'s flat/non-flat fork.
+    /// See [`crate::gpu::RenderState::void_fog`]'s field doc for what the two
+    /// constants it replaced got wrong.
+    pub fn set_void_fog(&mut self, void_fog: lodestone_render::fog::VoidFog) {
+        self.void_fog = void_fog;
+    }
+
+    /// The void fog this frame's sky pass will use. Exposed for the same reason
+    /// [`Self::sky_mode`] is: a gate can assert the pushed value with no GPU
+    /// adapter at all.
+    #[must_use]
+    pub fn void_fog(&self) -> lodestone_render::fog::VoidFog {
+        self.void_fog
     }
 
     /// [`Self::write_glint_uniform`] for the **world** glint draw — enchanted

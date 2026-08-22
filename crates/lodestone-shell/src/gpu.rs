@@ -253,6 +253,20 @@ pub struct RenderState {
     /// Defaults to `SkyMode::default()` (`Overworld`), so a renderer nobody
     /// pushes this into draws exactly what it drew before.
     sky_mode: lodestone_render::SkyMode,
+    /// This level's void-fog geometry — the dimension's `min_y` and the
+    /// flat-world onset fork. Pushed down per frame by `app/redraw.rs` from
+    /// [`crate::Sim::void_fog`] and stamped onto the `SkyFrame`.
+    ///
+    /// A field rather than the `VoidFog::OVERWORLD` constant the frame builder
+    /// used to name inline, because that constant is only right for a non-flat
+    /// overworld: it hardcoded `min_y = -64` for the Nether and the End (whose
+    /// floor is `0`, so their fade never applied at all) and a 32-block onset
+    /// for superflat levels (whose own is `1.0`, so their ground rendered under
+    /// a near-black sky).
+    ///
+    /// Defaults to [`lodestone_render::fog::VoidFog::OVERWORLD`], so a renderer
+    /// nobody pushes this into draws exactly what it drew before.
+    void_fog: lodestone_render::fog::VoidFog,
     pipeline: BlockPipeline,
     #[allow(dead_code)]
     atlas: GpuAtlas,

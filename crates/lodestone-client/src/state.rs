@@ -118,6 +118,15 @@ pub struct PlayerSnapshot {
     /// consumer must state its own fallback; see
     /// `lodestone_shell::mesher::sky_default_for_dimension`.
     pub dimension_type: Option<DimensionTypeInfo>,
+    /// Whether the level uses the **flat** world generator, from the login and
+    /// respawn packets' own `is_flat` boolean.
+    ///
+    /// Not part of [`DimensionTypeInfo`] on purpose — it is a level property,
+    /// not a registry entry — but it travels with it because vanilla reads the
+    /// two together: `ClientLevelData.voidDarknessOnsetRange()` is `1.0` when
+    /// flat and `32.0` otherwise, and the void fade spans that many blocks
+    /// above the dimension type's own `min_y`.
+    pub world_is_flat: bool,
     /// Every biome's `minecraft:visual/sky_color` as the server declared it in
     /// the Configuration `registry_data` (issue #96), **indexed by biome holder
     /// id** and packed `0x00RR_GGBB` in sRGB bytes. Read from
@@ -162,6 +171,7 @@ impl Default for PlayerSnapshot {
             game_mode: None,
             dimension: None,
             dimension_type: None,
+            world_is_flat: false,
             biome_sky_colors: Arc::from([] as [Option<u32>; 0]),
             alive: true,
             health_known: false,
@@ -753,7 +763,14 @@ impl SharedState {
                 .and_then(|d| d.0.clone()),
             dimension_type: world
                 .get::<ServerDimensionType>(self.session)
-                .and_then(|d| d.0.clone()),
+                .and_then(|d| d.info.clone()),
+            // Absent component reads as *not* flat, which is also the answer
+            // for every protocol family that does not send the flag — and is
+            // the conservative one: it applies vanilla's ordinary 32-block
+            // void fade rather than suppressing it.
+            world_is_flat: world
+                .get::<ServerDimensionType>(self.session)
+                .is_some_and(|d| d.is_flat),
             // A refcount bump, not a copy of the table — see
             // [`ServerBiomeSkyColors`]. Absent component reads as "no biome
             // registry", which the shell renders as its dimension default.

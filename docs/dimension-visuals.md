@@ -116,7 +116,10 @@ This pass had already added the presets to `lodestone-render`:
   > draw — a cube-mapped `end_sky.png`, not the overworld disc), so flat fog
   > remains the right approximation *there*.
 - `lodestone_render::fog::VoidFog` — the world-bottom darkening
-  (`FogRenderer.computeFogColor`'s quadratic `darkness` term). Consumed by the
+  (`FogRenderer.computeFogColor`'s quadratic `darkness` term). Built by
+  `VoidFog::for_level` from the connected dimension's `min_y` and the level's
+  `is_flat` (a `1.0` onset when flat, `32.0` otherwise), resolved per frame by
+  `Sim::void_fog` and pushed through `RenderState::set_void_fog`. Consumed by the
   sky pass via `SkyFrame::with_void_fog`; not yet applied to the *distance* fog
   or the frame clear, which are computed in `sim.rs`/`app.rs`.
 - `lodestone_render::fog::multiply_gamma` / `scale_gamma` — gamma-space colour

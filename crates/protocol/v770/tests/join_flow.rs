@@ -393,6 +393,13 @@ fn full_login_sequence_produces_expected_directives() {
             ClientEvent::DimensionTypeChanged {
                 holder_id: 0,
                 dimension_type: None,
+                // `true`, and it is not a transcription: `GAME_LOGIN_HEX` was
+                // captured from the flat creative oracle. The same capture's
+                // trailing `c1ffffff0f` decodes to a sea level of **-63**,
+                // which is that superflat world's own — so the byte offsets
+                // this field was added at are confirmed by a second value
+                // landing on a number nothing here chose.
+                is_flat: true,
             },
             ClientEvent::BiomeVisuals {
                 sky_colors: Vec::new(),

@@ -377,6 +377,25 @@ impl VoidFog {
         onset_range: 32.0,
     };
 
+    /// The void fog for a connected level: the dimension type's own `min_y`,
+    /// and `ClientLevelData.voidDarknessOnsetRange()`'s fork on flatness —
+    /// `1.0` when the level uses the flat world generator, `32.0` otherwise.
+    ///
+    /// **The flat arm is not a rounding of the normal one, it is a different
+    /// picture.** With an onset of `1.0` the fade is a one-block snap at the
+    /// very bottom of the world, so a superflat world whose ground sits a few
+    /// blocks above `min_y` renders under a normal sky; with `32.0` the same
+    /// ground is deep inside the fade and the sky goes nearly black. Neither
+    /// number can be guessed from the geometry — only the level's own
+    /// `is_flat` flag separates them.
+    #[must_use]
+    pub fn for_level(min_y: f32, is_flat: bool) -> Self {
+        Self {
+            min_y,
+            onset_range: if is_flat { 1.0 } else { 32.0 },
+        }
+    }
+
     /// Void fog turned off: a degenerate onset range, which
     /// [`brightness`](Self::brightness) reports as always `1.0` (no darkening)
     /// rather than dividing by zero.
@@ -1338,13 +1357,53 @@ mod tests {
     /// undarkened on a superflat world is deep into the fade on a normal one.
     #[test]
     fn flat_worlds_have_a_one_block_void_onset() {
-        let flat = VoidFog {
-            min_y: -64.0,
-            onset_range: 1.0,
-        };
+        let flat = VoidFog::for_level(-64.0, true);
+        assert_eq!(flat.onset_range, 1.0);
         assert_eq!(flat.brightness(-63.0), 1.0);
         assert_eq!(flat.brightness(-64.0), 0.0);
         assert!(VoidFog::OVERWORLD.brightness(-63.0) < 0.01);
+    }
+
+    /// [`VoidFog::for_level`] is the only place the `1.0`/`32.0` fork lives,
+    /// and this measures the difference where it is actually visible: the
+    /// superflat oracle's own ground, `y = -57.4`, roughly 6.6 blocks above a
+    /// `-64` world bottom.
+    ///
+    /// Both hypotheses are computed rather than one asserted as a direction —
+    /// a flat level is fully lit there (`1.0`) and a non-flat one is all but
+    /// black (`0.042`), a 24x difference, which is exactly the "any superflat
+    /// world looks wrong" report.
+    #[test]
+    fn for_level_separates_the_two_hypotheses_at_the_superflat_oracles_own_ground() {
+        let ground = -57.4;
+        let flat = VoidFog::for_level(-64.0, true).brightness(ground);
+        let normal = VoidFog::for_level(-64.0, false).brightness(ground);
+        assert_eq!(flat, 1.0, "a flat level is undarkened at its own surface");
+        assert!(
+            (normal - 0.042).abs() < 0.001,
+            "the non-flat reading at the same height is {normal}, want ~0.042"
+        );
+        // Non-flat matches the constant this used to be hardcoded to, so the
+        // change is provably a no-op for every ordinary world.
+        assert_eq!(normal, VoidFog::OVERWORLD.brightness(ground));
+    }
+
+    /// `min_y` is the other half, and it was hardcoded to the overworld's
+    /// `-64` for every dimension. The Nether and End start at `0`, so the fade
+    /// belongs below `y = 32` there — at a Nether floor of `y = 10` the two
+    /// readings are `0.098` and a completely undarkened `1.0`.
+    #[test]
+    fn for_level_uses_the_dimensions_own_min_y_not_the_overworlds() {
+        let nether = VoidFog::for_level(0.0, false).brightness(10.0);
+        assert!(
+            (nether - 0.098).abs() < 0.001,
+            "the Nether reading at y=10 is {nether}, want ~0.098"
+        );
+        assert_eq!(
+            VoidFog::OVERWORLD.brightness(10.0),
+            1.0,
+            "the old hardcoded min_y suppressed the Nether's void fog entirely"
+        );
     }
 
     #[test]

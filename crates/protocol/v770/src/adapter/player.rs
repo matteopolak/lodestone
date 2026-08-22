@@ -199,6 +199,7 @@ impl V770Adapter {
                 Directive::Emit(ClientEvent::DimensionTypeChanged {
                     holder_id: respawn.dimension_type,
                     dimension_type,
+                    is_flat: respawn.is_flat,
                 }),
                 Directive::Emit(ClientEvent::Respawned {
                     dimension,

@@ -3583,6 +3583,7 @@ mod tests {
         let dimension_type_changed = ClientEvent::DimensionTypeChanged {
             holder_id: 0,
             dimension_type: None,
+            is_flat: false,
         };
         assert!(!handles_event(&dimension_type_changed));
         assert!(
