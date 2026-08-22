@@ -945,6 +945,22 @@ patch **before** the hull, depth-rejecting the hull's own below-waterline planks
 `AbstractBoatRenderer.submit` calls `submitModel` *then* `submitTypeAdditions`). **Ask what state the
 feature is for, and check the fixture is actually in it.**
 
+**Removing a subject and watching the artefact go proves the subject is *involved*, not that its renderer
+is at fault.** Measured painfully: five block-entity defects were reported off screenshots, each isolated by
+exactly that A/B, and **three were the scene rather than the renderer**. A conduit "drawing a huge
+translucent blue sheet" was `waterlogged=true` in its own default state, so `setblock` put a real water
+source down and the server flooded a radius-6 diamond the probe camera sat inside. Skulls "drawing as
+untextured cubes" were at `rotation=8`, which from a `-Z` camera is the **back** of the head — uniform grey
+by design. Chests "each missing half a large chest" were two orphaned halves, because `getConnectedDirection`
+pairs `LEFT` with `facing.getClockWise()` and the scene had placed the pair on the wrong axis for its facing.
+All three renderers were faithful, confirmed against the jar.
+
+So an A/B localises to *a subject*, and the next question is always **"is this subject in the state I think
+it is?"** — query the server for what it actually placed, read the block state back, and check the camera is
+where you assume. Prefer varying the subject's **state** (rotation, waterlogged, facing) over varying its
+presence: if the artefact moves with the state, the scene is the story. This is the same shape as a fixture
+whose viewpoint is the bug, one level up.
+
 **Assertions of an absence need a control proving the detector works.** "No corrective teleport", "no
 trailing bytes", "zero unresolved" are only as good as the evidence the mechanism *would* have fired.
 Run the control and observe it fail; do not describe what it would do.
