@@ -335,10 +335,12 @@ impl KeyEvent {
     /// `ModifiersChanged` and `app::menus::menu_key_for` produces
     /// [`super::nav::MenuKey::SelectAll`]/`Copy`/`Cut`/`Paste` only when the
     /// shortcut modifier is held, which is what makes the four arms below
-    /// reachable in production. Left/Right/Home/End are still not produced —
-    /// nothing has reported caret-only navigation as broken, and
-    /// [`super::edit_box::EditBox::handle_key`] already declines them
-    /// correctly (falls through to focus navigation) when they never arrive.
+    /// reachable in production.
+    ///
+    /// Left/Right/Home/End arrive too now, through
+    /// [`super::nav::MenuKey::Edit`] rather than through an abstract variant
+    /// of their own — see that variant's doc for why the modifiers have to
+    /// travel with the key for exactly these four and not for the others.
     #[must_use]
     pub fn from_menu_key(key: super::nav::MenuKey) -> Option<Self> {
         use super::nav::MenuKey;
@@ -364,6 +366,10 @@ impl KeyEvent {
             MenuKey::Copy => Self::with_modifiers(KEY_C, EDIT_SHORTCUT_MODIFIER),
             MenuKey::Cut => Self::with_modifiers(KEY_X, EDIT_SHORTCUT_MODIFIER),
             MenuKey::Paste => Self::with_modifiers(KEY_V, EDIT_SHORTCUT_MODIFIER),
+            // Already a real key event — caret motion carries its modifiers
+            // rather than being abstracted away, because for these keys the
+            // modifiers are the meaning. See [`super::nav::MenuKey::Edit`].
+            MenuKey::Edit(event) => event,
             MenuKey::Char(_) => return None,
         })
     }

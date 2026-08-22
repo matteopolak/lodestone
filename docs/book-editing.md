@@ -45,9 +45,7 @@ Escape path (`onClose()` → `setScreen(null)`) never reaches `saveChanges()`.
 **What is deliberately out of scope**, named rather than silently missing: per-pixel mouse
 caret placement inside the page (a click anywhere in the page area is a no-op; keyboard
 focus already always reaches it since neither layout has a second focusable field to compete
-with it), Left/Right/Home/End caret motion (no `super::focus::KeyEvent` is produced for
-those GLFW codes from `super::nav::MenuKey` yet — the same gap `sign_edit`'s own module doc
-names), and opening this screen for an already-signed `minecraft:written_book` (vanilla's
+with it) and opening this screen for an already-signed `minecraft:written_book` (vanilla's
 read-only `BookViewScreen`, which sends nothing on the wire and is therefore not part of this
 producer at all).
 

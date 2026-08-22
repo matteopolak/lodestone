@@ -122,12 +122,18 @@ only place it could be correct.
   through to the text arm, and must not re-ask the server for suggestions
   either; that is `EditBox`'s own `onValueChange`-gated responder. Folding them
   into one bool gets one of the two wrong.
-- **The other text fields already go through `EditBox`** via the focus layer
-  (`menu::focus::FocusTarget::key_pressed`), so they need nothing from this.
-  What they *do* still lack is Left/Right/Home/End: `menu_key_for` produces
-  `MenuKey`, whose vocabulary has no caret motion at all, so a menu field gets
-  select-all/copy/cut/paste and no arrows. `text_key_event` is the piece that
-  would fix that — route the menu path through it the way chat now does.
+- **The other text fields share this translator too**, so a change to what a
+  chord means changes both. They reach `EditBox` through the focus layer
+  (`menu::focus::FocusTarget::key_pressed`) rather than through
+  `ChatInput::handle_key`, and until the same day as this they had **no caret
+  motion at all**: `menu_key_for` produced a `MenuKey`, whose vocabulary had
+  no Left/Right/Home/End, so a sign, a book, a command block and the
+  server-list name field got select-all/copy/cut/paste and no arrows while
+  `EditBox` implemented all four and was unit-tested on them. `menu_key_for`
+  now calls `text_key_event` for exactly those keys and wraps the result in
+  `MenuKey::Edit`, which carries the whole `KeyEvent` — see that variant's own
+  doc for why the modifiers cannot be abstracted away here as they are for
+  every other menu key, and `app::input::menu_text_editing` for the gates.
 
 ### Open: the drawn caret does not follow the model caret
 

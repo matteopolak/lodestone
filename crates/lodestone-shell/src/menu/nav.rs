@@ -84,6 +84,28 @@ pub enum MenuKey {
     /// selection. `app.rs` produces this only when the shortcut modifier is
     /// held, so it can never collide with a plain `v` (see [`MenuKey::Char`]).
     Paste,
+    /// A key the focused text field acts on that this enum has no abstract
+    /// name for — caret motion (Left/Right/Home/End), with whatever modifiers
+    /// were held.
+    ///
+    /// Every other variant here is an *abstraction*: the winit key is thrown
+    /// away at [`super::super::app::menus`]'s boundary and rebuilt in
+    /// [`focus::KeyEvent::from_menu_key`]. That is right for a key whose
+    /// meaning depends on the screen (`Delete` deletes a server on the list
+    /// and a character in a form), and it is exactly wrong for caret motion,
+    /// because the modifiers *are* the meaning: Left, Shift+Left,
+    /// Cmd/Ctrl+Left and Cmd/Ctrl+Shift+Left are four different edits and an
+    /// abstract `Left` could only carry one of them. Vanilla has no
+    /// abstraction here either — `EditBox.keyPressed` switches on the raw GLFW
+    /// code and reads `hasShiftDown()`/`hasControlDownWithQuirk()` off the
+    /// same event.
+    ///
+    /// So this variant carries the [`focus::KeyEvent`] whole, and
+    /// `from_menu_key` hands it straight back. Only the screens that own a
+    /// text field act on it; a list screen ignores it, which is what
+    /// `EditBox`-less vanilla screens do with an arrow key that no widget
+    /// consumed.
+    Edit(focus::KeyEvent),
     /// A printable character: a command on the list, text in the form.
     Char(char),
 }
@@ -3618,8 +3640,9 @@ impl MenuNav {
     /// target (see [`command_block::CommandBlockState`]'s own doc on why
     /// "Previous Output" is not a second one), so there is no focus layer to
     /// arbitrate — every key already knows where it goes. Left/Right/Home/End
-    /// are not handled for the same reason [`Self::key_edit`]'s doc already
-    /// names: `app.rs` does not produce them from `MenuKey` yet.
+    /// arrive as [`MenuKey::Edit`] and are forwarded with the rest of the
+    /// edit keys, in the same arm, since `from_menu_key` hands that variant's
+    /// event straight back.
     fn key_command_block(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let Some(state) = self.command_block.as_mut() else {
             return MenuAction::None;
@@ -3670,7 +3693,11 @@ impl MenuNav {
             // Select-all/copy/cut/paste on the command field — `from_menu_key`
             // is the one place that knows the GLFW key + modifier each of
             // these stands for, so this forwards rather than re-deriving it.
-            MenuKey::SelectAll | MenuKey::Copy | MenuKey::Cut | MenuKey::Paste => {
+            MenuKey::SelectAll
+            | MenuKey::Copy
+            | MenuKey::Cut
+            | MenuKey::Paste
+            | MenuKey::Edit(_) => {
                 if let Some(event) = KeyEvent::from_menu_key(key) {
                     state.handle_key(event);
                 }
@@ -3781,7 +3808,11 @@ impl MenuNav {
                 state.handle_key(KeyEvent::new(focus::KEY_DELETE));
                 MenuAction::None
             }
-            MenuKey::SelectAll | MenuKey::Copy | MenuKey::Cut | MenuKey::Paste => {
+            MenuKey::SelectAll
+            | MenuKey::Copy
+            | MenuKey::Cut
+            | MenuKey::Paste
+            | MenuKey::Edit(_) => {
                 if let Some(event) = KeyEvent::from_menu_key(key) {
                     state.handle_key(event);
                 }
@@ -3868,7 +3899,11 @@ impl MenuNav {
                 state.handle_key(KeyEvent::new(focus::KEY_DELETE));
                 MenuAction::None
             }
-            MenuKey::SelectAll | MenuKey::Copy | MenuKey::Cut | MenuKey::Paste => {
+            MenuKey::SelectAll
+            | MenuKey::Copy
+            | MenuKey::Cut
+            | MenuKey::Paste
+            | MenuKey::Edit(_) => {
                 if let Some(event) = KeyEvent::from_menu_key(key) {
                     state.handle_key(event);
                 }
@@ -3939,8 +3974,10 @@ impl MenuNav {
     /// **Up/Down are an approximation, and the divergence is named rather
     /// than hidden**: `BookViewScreen.keyPressed` binds GLFW `266`/`267` —
     /// Page Up and Page Down — to the back and forward buttons, and
-    /// [`MenuKey`] carries no variant for either, the same gap
-    /// [`super::sign_edit`]'s own module doc records for Left/Right/Home/End.
+    /// [`MenuKey`] carries no variant for either. (Left/Right/Home/End used
+    /// to be the same gap and no longer are — they travel as
+    /// [`MenuKey::Edit`]; Page Up/Down could go the same way, but only this
+    /// screen wants them and no text field does.)
     /// The arrow keys are the nearest thing this shell can express and are
     /// otherwise unused on this screen, so nothing is shadowed by taking
     /// them. Wiring the real pair means adding them to [`MenuKey`], which is

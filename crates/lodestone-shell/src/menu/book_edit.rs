@@ -38,11 +38,11 @@
 //!   area for a first pass. A click inside the page area is a no-op here
 //!   (keyboard focus already always reaches the page while
 //!   [`BookEditState::signing`] is `false` — there is nothing else on this
-//!   screen to compete for it), and Left/Right/Home/End caret motion is not
-//!   yet wired for the same reason `sign_edit`'s own module doc names: no
-//!   [`super::focus::KeyEvent`] is produced for those GLFW codes from
-//!   [`super::nav::MenuKey`] yet. Up/Down (line-to-line) and typing/
-//!   Backspace/Delete/select-all/copy/cut/paste all work today.
+//!   screen to compete for it). Left/Right/Home/End caret motion, Up/Down
+//!   (line-to-line), typing, Backspace/Delete and select-all/copy/cut/paste
+//!   all work: the caret keys arrive as [`super::nav::MenuKey::Edit`],
+//!   carrying their modifiers, so a word skip and a shift-selection work here
+//!   exactly as they do in the chat box.
 //! - **No pseudo-3D book mesh.** Same simplification `sign_edit`'s own
 //!   module doc names for signs: the page text draws as plain 2D labels, not
 //!   `BookViewScreen`'s curved-page render.
