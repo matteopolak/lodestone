@@ -548,25 +548,39 @@ pub(crate) enum WorldSubphase {
     /// costs enough on its own to be worth a separate checkpoint, and each
     /// is a different subsystem's file this instrument does not own.
     OtherDraws,
-    /// `CommandEncoder::finish` + `Queue::submit`, plus this module's own GPU
-    /// query resolve/`after_submit` bookkeeping immediately around them.
-    /// `queue.submit` only *enqueues* work — see `app::frame_profile`'s
-    /// module doc — so this is deliberately expected to be the smallest of
-    /// the four on a healthy frame; a large reading here points at
-    /// driver/queue contention, not at command-recording cost.
-    Submit,
+    /// `CommandEncoder::finish` alone — turning the recorded command list
+    /// into a command buffer, with nothing handed to the driver yet.
+    ///
+    /// Split from [`Self::QueueSubmit`] because the two answer different
+    /// questions and the combined figure could not distinguish them. This
+    /// half is **pure CPU command translation**, so it scales with how many
+    /// commands were recorded and with nothing else. The other half can
+    /// block.
+    EncoderFinish,
+    /// `Queue::submit` alone.
+    ///
+    /// `queue.submit` only *enqueues* work, so the intuition is that this
+    /// should be nearly free — but that intuition holds only while the queue
+    /// has room. When the CPU is running ahead of the GPU, this is where it
+    /// waits, so **a large reading here is a symptom of GPU backpressure and
+    /// not of CPU cost**, and reading it as "submitting is slow" inverts the
+    /// diagnosis. Its discriminator against [`Self::EncoderFinish`] is that
+    /// this one moves with how much *GPU* work the frame contains while that
+    /// one moves with how many *commands* were recorded.
+    QueueSubmit,
 }
 
 /// [`WorldSubphase`] variant count, kept in one place for the same reason
 /// `app::frame_profile::PHASE_COUNT` is.
-pub(crate) const WORLD_SUBPHASE_COUNT: usize = 4;
+pub(crate) const WORLD_SUBPHASE_COUNT: usize = 5;
 
 impl WorldSubphase {
     pub(crate) const ALL: [WorldSubphase; WORLD_SUBPHASE_COUNT] = [
         WorldSubphase::PrepareBuffers,
         WorldSubphase::TerrainCullAndDraw,
         WorldSubphase::OtherDraws,
-        WorldSubphase::Submit,
+        WorldSubphase::EncoderFinish,
+        WorldSubphase::QueueSubmit,
     ];
 
     /// Short, stable name for the F3/tracing detail line and the CSV dump's
@@ -577,7 +591,8 @@ impl WorldSubphase {
             WorldSubphase::PrepareBuffers => "world.prepare_buffers",
             WorldSubphase::TerrainCullAndDraw => "world.terrain_cull_draw",
             WorldSubphase::OtherDraws => "world.other_draws",
-            WorldSubphase::Submit => "world.submit",
+            WorldSubphase::EncoderFinish => "world.encoder_finish",
+            WorldSubphase::QueueSubmit => "world.queue_submit",
         }
     }
 }

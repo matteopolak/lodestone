@@ -164,18 +164,34 @@ breaks that one number into four, each timed with its own
   one `hud_ui_encode_submit` bucket: none of these individually costs enough
   to be worth its own checkpoint on a healthy frame, and each lives in a
   different subsystem's file.
-- **`world.submit`** — `CommandEncoder::finish` + `Queue::submit` themselves,
-  plus this instrument's own GPU-query resolve/`after_submit` bookkeeping
-  immediately around them. `queue.submit` only *enqueues* work (see the CPU
-  phases section above), so a healthy frame should show this as the smallest
-  of the four; a large reading here points at driver/queue contention, not
-  at command-recording cost.
+- **`world.encoder_finish`** — `CommandEncoder::finish` alone: turning the
+  recorded command list into a command buffer, with nothing handed to the
+  driver yet. Pure CPU command translation, so it scales with how many
+  commands were recorded and with nothing else. This instrument's own
+  bracketing `stamp` pass falls inside it, charging the profiler to itself
+  rather than to the frame.
+- **`world.queue_submit`** — `Queue::submit` alone. The intuition that this
+  should be nearly free holds only while the queue has room: when the CPU is
+  running ahead of the GPU, **this is where it waits**, so a large reading
+  here is a symptom of GPU backpressure and not of CPU cost. Reading it as
+  "submitting is slow" inverts the diagnosis.
 
-These four appear as a bracketed detail on `world_encode_submit`'s own F3
+  The two were **one `world.submit` bucket** until a bench run measured that
+  bucket at 65–72% of the entire `world_encode_submit` phase (0.234 ms of
+  0.380 at the cheapest waypoint, 0.783 of 1.084 at the dearest), against
+  this document's own claim that it should be the smallest of the four. A
+  combined figure cannot distinguish command translation from waiting on a
+  full queue, and those two point at opposite fixes, so the split exists to
+  make that one question answerable. Their discriminator: `encoder_finish`
+  moves with how many *commands* were recorded, `queue_submit` with how much
+  *GPU work* the frame contains.
+
+These five appear as a bracketed detail on `world_encode_submit`'s own F3
 and tracing line — e.g. `world_encode_submit: 3.10/4.20/5.00 ms (240/240, 0
 skip) [world.prepare_buffers: 0.42/0.90/1.10 ms, world.terrain_cull_draw:
-1.85/2.60/3.40 ms, world.other_draws: 0.65/1.10/1.50 ms, world.submit:
-0.18/0.30/0.40 ms, sections visited: 3880 packed + 612 model]` — not as
+1.85/2.60/3.40 ms, world.other_draws: 0.65/1.10/1.50 ms,
+world.encoder_finish: 0.18/0.30/0.40 ms, world.queue_submit: 0.05/0.09/0.12 ms,
+sections visited: 3880 packed + 612 model]` — not as
 separate F3 lines or a new pie-chart wedge, and that is a scope decision, not
 an oversight: **nested** checkpoints inside one already-sequential
 `FramePhase` cannot share `FrameProfiler`'s single "elapsed since previous
@@ -188,8 +204,8 @@ other work at the time this landed. A sub-phase with no sample yet reads
 `<no reading yet>`, never a fabricated `0.00`, exactly like the GPU segments
 below.
 
-The raw CSV dump (`LODESTONE_FRAME_PROFILE_DUMP`) gains four more columns,
-`world.prepare_buffers,world.terrain_cull_draw,world.other_draws,world.submit`,
+The raw CSV dump (`LODESTONE_FRAME_PROFILE_DUMP`) gains five more columns,
+`world.prepare_buffers,world.terrain_cull_draw,world.other_draws,world.encoder_finish,world.queue_submit`,
 appended after the eight base phase columns — empty, never `0`, for a frame
 where `world_encode_submit` itself did not run (see
 `FrameProfiler::drain_world_subphases`'s doc for why a skipped frame must

@@ -1729,16 +1729,23 @@ impl RenderState {
         if let Some(timer) = self.gpu_timer.borrow().as_ref() {
             timer.stamp(&mut encoder, Some("hud_total"), Some("world_total"));
         }
-        queue.submit(std::iter::once(encoder.finish()));
-
-        // Frame-profiling sub-phase timing (`gpu::gpu_timing`): the CPU cost
-        // of `encoder.finish()` + `queue.submit` themselves (plus the
-        // timestamp stamp just above) — see `WorldSubphase::Submit`'s doc.
-        // `queue.submit` only *enqueues* work, so a healthy frame should show
-        // this as the cheapest of the four sub-phases.
+        // Frame-profiling sub-phase timing (`gpu::gpu_timing`): `finish` and
+        // `submit` are recorded **separately**, because a combined figure
+        // cannot distinguish CPU command translation from the CPU waiting on
+        // a full GPU queue — and those two point at opposite fixes. See
+        // `WorldSubphase::EncoderFinish` and `::QueueSubmit` for which is
+        // which. The `stamp` call just above falls inside the `finish` half,
+        // which is this instrument charging itself rather than the frame.
+        let command_buffer = encoder.finish();
+        let world_encode_queue_submit_t0 = crate::platform::Instant::now();
         crate::gpu::gpu_timing::record_world_subphase(
-            crate::gpu::gpu_timing::WorldSubphase::Submit,
+            crate::gpu::gpu_timing::WorldSubphase::EncoderFinish,
             world_encode_submit_t0.elapsed().as_secs_f32() * 1000.0,
+        );
+        queue.submit(std::iter::once(command_buffer));
+        crate::gpu::gpu_timing::record_world_subphase(
+            crate::gpu::gpu_timing::WorldSubphase::QueueSubmit,
+            world_encode_queue_submit_t0.elapsed().as_secs_f32() * 1000.0,
         );
 
         // Residency, measured — **not** `vram_bytes(stats.total_quads)`, which is
