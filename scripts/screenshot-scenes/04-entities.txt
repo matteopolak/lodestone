@@ -1,0 +1,46 @@
+# Entities: posed armour stands, armour trims, dyed leather, variant mobs.
+#
+# An armour stand's pose is six independent rotations decoded off entity
+# metadata, and every one of them is a separate wire field — a stand that
+# ignores them stands to attention, which looks fine until there is another
+# one beside it that does not. Trims are an item *component* reaching an
+# entity model's overlay layer; the dyed leather is `minecraft:dyed_color`
+# through the same path.
+#
+# `difficulty easy`, because peaceful removes hostile mobs the tick they
+# spawn — an empty frame that reads as a broken spawn. `NoAI` keeps them
+# still; it also halts gravity, so every one of them is placed exactly on the
+# floor rather than a fraction above it.
+
+@size 768 432
+@camera 0.0 65.6 4.0
+@look 0.0 65.1 12.5
+@fov 62
+@wait 2500
+
+difficulty easy
+fill -14 63 2 14 80 28 minecraft:air
+kill @e[type=!player,x=-14,y=60,z=2,dx=28,dy=22,dz=26]
+fill -14 63 2 14 63 28 minecraft:grass_block
+fill -9 63 7 9 63 17 minecraft:smooth_sandstone
+fill -9 63 17 9 66 17 minecraft:sandstone
+fill -9 67 17 9 67 17 minecraft:sandstone_wall
+setblock -8 64 17 minecraft:lantern[hanging=false]
+setblock 8 64 17 minecraft:lantern[hanging=false]
+
+# --- back row: armour stands, each in a different pose --------------------
+summon armor_stand -5.4 64.0 13.5 {ShowArms:1b,NoBasePlate:1b,Rotation:[160f,0f],Pose:{Head:[-12f,25f,0f],LeftArm:[-105f,0f,-15f],RightArm:[-25f,0f,12f],LeftLeg:[-12f,0f,-6f],RightLeg:[14f,0f,6f]},equipment:{head:{id:"minecraft:diamond_helmet",count:1,components:{"minecraft:trim":{pattern:"minecraft:silence",material:"minecraft:amethyst"}}},chest:{id:"minecraft:diamond_chestplate",count:1,components:{"minecraft:trim":{pattern:"minecraft:silence",material:"minecraft:amethyst"}}},legs:{id:"minecraft:diamond_leggings",count:1,components:{"minecraft:trim":{pattern:"minecraft:silence",material:"minecraft:amethyst"}}},feet:{id:"minecraft:diamond_boots",count:1,components:{"minecraft:trim":{pattern:"minecraft:silence",material:"minecraft:amethyst"}}},mainhand:{id:"minecraft:trident",count:1}}}
+summon armor_stand -1.8 64.0 13.5 {ShowArms:1b,NoBasePlate:1b,Rotation:[190f,0f],Pose:{Head:[8f,-18f,0f],LeftArm:[-30f,0f,-18f],RightArm:[-95f,0f,20f],LeftLeg:[10f,0f,-4f],RightLeg:[-14f,0f,4f]},equipment:{head:{id:"minecraft:netherite_helmet",count:1,components:{"minecraft:trim":{pattern:"minecraft:ward",material:"minecraft:gold"}}},chest:{id:"minecraft:netherite_chestplate",count:1,components:{"minecraft:trim":{pattern:"minecraft:ward",material:"minecraft:gold"}}},legs:{id:"minecraft:netherite_leggings",count:1,components:{"minecraft:trim":{pattern:"minecraft:ward",material:"minecraft:gold"}}},feet:{id:"minecraft:netherite_boots",count:1,components:{"minecraft:trim":{pattern:"minecraft:ward",material:"minecraft:gold"}}},offhand:{id:"minecraft:shield",count:1,components:{"minecraft:base_color":"red","minecraft:banner_patterns":[{pattern:"minecraft:stripe_bottom",color:"white"},{pattern:"minecraft:cross",color:"black"}]}},mainhand:{id:"minecraft:diamond_axe",count:1}}}
+summon armor_stand 1.8 64.0 13.5 {ShowArms:1b,NoBasePlate:1b,Rotation:[172f,0f],Pose:{Head:[-25f,0f,0f],LeftArm:[-160f,0f,-8f],RightArm:[-160f,0f,8f],LeftLeg:[-4f,0f,-2f],RightLeg:[4f,0f,2f]},equipment:{head:{id:"minecraft:leather_helmet",count:1,components:{"minecraft:dyed_color":3060032}},chest:{id:"minecraft:leather_chestplate",count:1,components:{"minecraft:dyed_color":3060032}},legs:{id:"minecraft:leather_leggings",count:1,components:{"minecraft:dyed_color":16750848}},feet:{id:"minecraft:leather_boots",count:1,components:{"minecraft:dyed_color":16750848}},mainhand:{id:"minecraft:bow",count:1}}}
+summon armor_stand 5.4 64.0 13.5 {ShowArms:1b,NoBasePlate:1b,Rotation:[200f,0f],Pose:{Head:[15f,30f,0f],LeftArm:[-70f,0f,-40f],RightArm:[-70f,0f,40f],LeftLeg:[-20f,0f,-8f],RightLeg:[20f,0f,8f]},equipment:{head:{id:"minecraft:carved_pumpkin",count:1},chest:{id:"minecraft:golden_chestplate",count:1,components:{"minecraft:trim":{pattern:"minecraft:spire",material:"minecraft:redstone"}}},legs:{id:"minecraft:chainmail_leggings",count:1},mainhand:{id:"minecraft:golden_sword",count:1}}}
+
+# --- front row: mobs ------------------------------------------------------
+summon sheep -4.2 64.0 9.5 {NoAI:1b,Rotation:[168f,0f],Color:14b}
+summon wolf -2.1 64.0 9.5 {NoAI:1b,Rotation:[176f,0f],CollarColor:11b,Owner:[I;1,2,3,4]}
+summon axolotl 0.0 64.0 8.6 {NoAI:1b,Rotation:[180f,0f],Variant:2,CustomName:{text:"Sir Squish","color":"gold","bold":true},CustomNameVisible:1b}
+summon fox 2.1 64.0 9.5 {NoAI:1b,Rotation:[184f,0f],Type:"snow"}
+summon sheep 4.2 64.0 9.5 {NoAI:1b,Rotation:[192f,0f],Color:4b}
+summon allay 0.0 65.4 11.4 {NoAI:1b,NoGravity:1b,Rotation:[180f,0f]}
+summon cow -6.6 64.0 15.0 {NoAI:1b,Rotation:[160f,0f]}
+
+tp Lodestone 0.0 64.0 26.0 180 5

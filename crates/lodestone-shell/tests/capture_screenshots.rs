@@ -31,6 +31,7 @@
 //! @wait 1500             # milliseconds to keep pumping the sim after the build
 //! @hud                   # composite the HUD over the world (off by default)
 //! @hand                  # draw the first-person hand (off by default)
+//! @debug                 # also draw the F3 overlay (implies nothing; needs @hud)
 //! ```
 //!
 //! # How to change it
@@ -126,6 +127,7 @@ struct Scene {
     settle: Duration,
     hud: bool,
     hand: bool,
+    debug: bool,
 }
 
 /// Yaw/pitch (degrees) that aim the camera from `eye` at `target`, inverting
@@ -156,6 +158,7 @@ fn parse_scene(path: &Path) -> Scene {
         settle: Duration::from_millis(1500),
         hud: false,
         hand: false,
+        debug: false,
     };
     // `@look` may appear before or after `@camera`, so the aim point is held
     // aside and resolved once the eye is final.
@@ -202,6 +205,7 @@ fn parse_scene(path: &Path) -> Scene {
             }
             "hud" => scene.hud = true,
             "hand" => scene.hand = true,
+            "debug" => scene.debug = true,
             other => panic!("unknown directive @{other} ({where_})"),
         }
     }
@@ -237,6 +241,27 @@ fn scenes() -> Vec<Scene> {
     }
     assert!(!out.is_empty(), "no scenes under {}", dir.display());
     out
+}
+
+/// Run one RCON command and fail if the server could not **parse** it.
+///
+/// `<--[HERE]` is the caret vanilla's `CommandSyntaxException` appends to every
+/// parse failure, whatever the message above it says — one marker beats
+/// guessing at the wording of "Unknown block type", "Expected integer" and
+/// "Incorrect argument for command". A command that parses and then does
+/// nothing (an empty `fill`, a `team remove` for a team that does not exist)
+/// is not an error: scenes legitimately clear ground that is already clear.
+///
+/// The preamble goes through this too, and that is not symmetry for its own
+/// sake — it went unchecked at first, and five silently-rejected `gamerule`
+/// calls rode along for several runs looking exactly like success.
+fn checked(rcon: &mut RconClient, command: &str) -> String {
+    let reply = rcon.cmd(command);
+    assert!(
+        !reply.contains("<--[HERE]"),
+        "the server could not parse:\n  {command}\n  -> {reply}"
+    );
+    reply
 }
 
 /// Step the sim one tick and drain its frame outputs the way `app/redraw.rs`
@@ -288,18 +313,46 @@ fn capture_readme_screenshots() {
             "cannot reach RCON at {RCON_ADDR}: {e}. Fix: ./scripts/live-oracles/creative.sh"
         )
     });
-    rcon.cmd(&format!(
-        "setworldspawn {} {} {}",
-        SPAWN[0], SPAWN[1], SPAWN[2]
-    ));
+    checked(
+        &mut rcon,
+        &format!("setworldspawn {} {} {}", SPAWN[0], SPAWN[1], SPAWN[2]),
+    );
     // Keep the whole build area resident whether or not a player is standing in
     // it; the flat oracle unloads columns aggressively.
-    rcon.cmd("forceload add -32 -32 32 32");
-    rcon.cmd("gamerule doDaylightCycle false");
-    rcon.cmd("gamerule doWeatherCycle false");
-    rcon.cmd("weather clear");
+    checked(&mut rcon, "forceload add -32 -32 32 32");
+    // **26.2 renamed every game rule to snake_case** — `advance_time`, not
+    // `doDaylightCycle`; `mob_drops`, not `doMobLoot`. The camelCase spellings
+    // are not merely deprecated, they do not parse, and `/gamerule` reports
+    // that as `Incorrect argument for command` with the caret after the rule
+    // name. Ask the server (`help gamerule`) rather than trusting a wiki page.
+    checked(&mut rcon, "gamerule advance_time false");
+    checked(&mut rcon, "gamerule advance_weather false");
+    checked(&mut rcon, "weather clear");
+    // Nothing this harness does should leave item entities lying around. Each
+    // scene clears its stage with `kill`, and killing a mob drops its loot —
+    // which then sits in the *next* scene's frame as unexplained litter.
+    checked(&mut rcon, "gamerule mob_drops false");
+    checked(&mut rcon, "gamerule block_drops false");
+    checked(&mut rcon, "gamerule mob_griefing false");
+    // Command feedback goes to *chat*, and the HUD scene photographs chat — a
+    // run's own `/bossbar set` and `/tp` echoes would otherwise be most of
+    // what the frame shows. RCON's own reply is unaffected (verified: a
+    // `setblock` still returns "Changed the block…" and a bad block id still
+    // returns its parse caret), so the command checks above keep working.
+    checked(&mut rcon, "gamerule send_command_feedback false");
+    rcon.cmd("kill @e[type=item]");
+    // Water is the one thing a scene cannot clean up after itself: a `fill …
+    // air` over the stage leaves the sources *outside* it, which flow straight
+    // back in and flood the next scene's floor. Measured — a conduit pool from
+    // an earlier revision of the block-entity scene was still washing over the
+    // stage several scenes later. Purged once per run, over a box wider than
+    // any stage.
+    checked(
+        &mut rcon,
+        "fill -24 62 -4 24 72 34 minecraft:air replace minecraft:water",
+    );
     // Late morning: a high sun, long-ish shadows, no night desaturation.
-    rcon.cmd("time set 2000");
+    checked(&mut rcon, "time set 2000");
 
     let mut sim = Sim::new(live_config());
     assert!(
@@ -314,7 +367,7 @@ fn capture_readme_screenshots() {
     let (mut w, mut h) = scenes[0].size;
     let mut target = HeadlessTarget::new(device, w, h, format);
     let mut render = RenderState::new(device, queue, format, w, h, sim.vanilla_atlas());
-    let mut hud = HudRenderer::new(device, format);
+    let mut hud = build_hud(device, queue, format, &target, &render);
 
     // Join the world before anything else: the sources below capture the
     // session handle, and a scene's blocks only stream to a client that is in.
@@ -367,12 +420,6 @@ fn capture_readme_screenshots() {
         }
         for command in &scene.commands {
             let reply = rcon.cmd(command);
-            // `<--[HERE]` is the caret vanilla's `CommandSyntaxException`
-            // appends to every parse failure, whatever the message above it
-            // says — a single marker beats guessing at the wording of "Unknown
-            // block type", "Expected integer" and the rest. A command that
-            // parses and then fails (an empty `fill`, say) is not an error
-            // here: a scene legitimately clears ground that is already clear.
             assert!(
                 !reply.contains("<--[HERE]"),
                 "scene {:?} command did not parse:\n  {command}\n  -> {reply}",
@@ -439,11 +486,36 @@ fn shoot(
         far: Camera::far_for_render_distance(RENDER_DISTANCE, 0),
     };
 
-    if !scene.hand {
-        // `RenderState` draws an unconditional first-person bare arm whenever no
-        // third-person body is reported, at a fixed screen rect — the hazard
-        // `distant_flat_terrain_holes.rs` records. A disembodied arm in a scenic
-        // shot is noise, so scenes opt into it with `@hand`.
+    // What the first-person pass puts in the hand. Vanilla's
+    // `ItemInHandRenderer` forks on `isEmpty()` and draws *either* the item or
+    // the bare arm, so without this install a `@hand` scene captures an empty
+    // fist even with a sword in slot 0.
+    let held = hotbar_records(sim)
+        .get(sim.selected_slot())
+        .and_then(|record| record.as_ref())
+        .map(|record| lodestone::gpu::MainHandItem {
+            item: record.item.clone(),
+            foil: record.enchanted,
+            dyed_color: record.dyed_color,
+            potion_color: record.potion_color,
+            banner_patterns: record.banner_patterns.clone(),
+            base_color: record.base_color.clone(),
+            skin: None,
+        });
+    render.set_main_hand_source(move || held.clone());
+
+    // `RenderState` draws the first-person hand whenever no third-person body
+    // is reported, at a fixed screen rect — the hazard
+    // `distant_flat_terrain_holes.rs` records. A disembodied arm in a scenic
+    // shot is noise, so scenes opt into it with `@hand`.
+    //
+    // **Installed on both arms, never on one.** A source has no uninstall, and
+    // one `RenderState` serves every scene in a run: installing the suppressor
+    // only for `!hand` left it in place for the `@hand` scene that came after,
+    // which captured with no hand at all and no error anywhere.
+    if scene.hand {
+        render.set_third_person_body_source(|| None);
+    } else {
         render.set_third_person_body_source(|| {
             Some(lodestone::gpu::ThirdPersonBodyState {
                 player_skin: None,
@@ -479,6 +551,17 @@ fn shoot(
         let hotbar = hotbar_records(sim);
         let tab = sim.tab_list_view();
         let sidebar = sim.sidebar();
+        // Chat, boss bars and the action bar come from the same live session
+        // fold the windowed client reads. `chat_spans`, not `chat`: a `§`
+        // string cannot carry a hex `TextColor::Rgb`, and a scene that sends
+        // one over `/tellraw` would silently lose it here.
+        let chat_owned = sim.recent_chat_spans(6);
+        let chat_ages: Vec<(&[lodestone_model::TextSpan], f32)> = chat_owned
+            .iter()
+            .map(|(spans, age)| (spans.as_slice(), *age))
+            .collect();
+        let boss_bars = sim.boss_bars();
+        let action_bar = sim.action_bar_overlay();
         let air = sim.air().map(|a| {
             (
                 a,
@@ -486,9 +569,23 @@ fn shoot(
                 sim.player().eye_in_water,
             )
         });
+        // The one gate that hides the hearts, the hunger row, the bubbles and
+        // the XP bar together — vanilla's `canHurtPlayer()`. Read from the live
+        // session rather than hardcoded, so a creative capture honestly shows
+        // no vitals and a survival one shows them. A scene that wants the bars
+        // puts itself in survival.
+        let can_hurt_player = lodestone::hud::can_hurt_player(
+            sim.net()
+                .and_then(|n| n.shared_handle().get().cloned())
+                .and_then(|h| h.game_mode()),
+        );
         let hud_frame = HudFrame {
+            // `HudFrame::new` defaults this to `true`, which is right for a
+            // gate and wrong for a screenshot: the F3 overlay covers the tab
+            // list and reports a frame time this harness does not really have.
+            show_debug: scene.debug,
             crosshair: true,
-            can_hurt_player: true,
+            can_hurt_player,
             health: sim.health(),
             food: sim.food(),
             saturation: sim.saturation(),
@@ -499,6 +596,9 @@ fn shoot(
             hotbar_items: Some(hotbar.as_slice()),
             players: Some(&tab),
             sidebar: sidebar.as_ref(),
+            chat_spans: &chat_ages,
+            boss_bars: &boss_bars,
+            action_bar,
             attack_cooldown: Some(sim.attack_strength_scale()),
             ..HudFrame::new(&sim.stats)
         };
@@ -629,6 +729,49 @@ fn hotbar_records(sim: &Sim) -> Vec<Option<HotbarSlot>> {
             })
         })
         .collect()
+}
+
+/// Bring the HUD renderer up the way `app/lifecycle.rs` does.
+///
+/// The **raw** (non-sRGB) format goes to `HudRenderer::new` and the corrected
+/// one to every `attach_*`, and that split is not a detail: the flat-colour
+/// stream (text, plates, stack counts) draws into its own pass on a raw view
+/// of the same texture, because vanilla's 2-D GUI blending is not
+/// colour-managed. Building the whole thing against one format is a wgpu
+/// validation error at the first `set_pipeline`, which is how this was found.
+fn build_hud(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+    target: &HeadlessTarget,
+    render: &RenderState,
+) -> HudRenderer {
+    let mut hud = HudRenderer::new(device, target.raw_view_format());
+    if let Some(gui) = lodestone::resources::load_gui_atlas() {
+        hud.attach_gui(device, queue, format, gui);
+    }
+    let item_atlas = lodestone::resources::load_item_atlas();
+    let glint = item_atlas
+        .as_ref()
+        .and_then(|_| lodestone::resources::load_glint_texture());
+    if let Some(items) = item_atlas {
+        hud.attach_items(device, queue, format, items);
+        if let Some(img) = &glint {
+            hud.attach_glint(device, queue, format, img);
+        }
+    }
+    // The 3-D block-item icons, borrowing the world renderer's own atlas,
+    // palette and animation buffers rather than a second copy. Without it a
+    // hotbar of blocks draws flat sprites where the game draws little cubes.
+    if let (Some(atlas_view), Some(atlas_sampler), Some(palette), Some(anim)) = (
+        render.model_atlas_view(),
+        render.model_atlas_sampler(),
+        render.model_palette_buffer(),
+        render.model_anim_buffer(),
+    ) {
+        hud.attach_item_models(device, format, atlas_view, atlas_sampler, palette, anim);
+    }
+    hud
 }
 
 /// The block-entity and display sources `app/redraw.rs` re-installs every
