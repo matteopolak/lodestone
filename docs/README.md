@@ -41,6 +41,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   on screen. Four cuboid meshes baked at **two different inflations**, painted by
   per-material sheets resolved through the `equipment_asset` chain, drawn through the
   entity pipeline over the wearer's own already-animated part matrices.
+- [Armour stand poses](./armour-stand-poses.md) — The chain that turns an armour
+  stand's six synced part rotations into the pose it is drawn in — and, just as
+  importantly, the reason **every** armour stand is posed whether or not a server ever
+  sent one. Without it a stand animates as a walking humanoid: a stand carried along
+  by a moving contraption swings its arms like a running player, and an item in its
+  hand swings off the same arm.
 - [Armour trim decoding, and the component-patch decode cliff](./armour-trim-decode.md) —
   `minecraft:trim` now decodes off the wire into
   `lodestone_model::ItemComponents::trim`, so a smithing-table armour trim reaches the
@@ -1873,6 +1879,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   what makes render distance 30+ playable: before this, every resident section issued
   a draw at every heading, measured at **19,024 instructions per section** — 17.7M
   per frame at the shipped render distance 8 (issue #543).
+- [Terrain sky holes](./terrain-sky-holes.md) — The record of a recurring owner
+  report — *"the sky colour comes through the blocks"* — and of the four pixel
+  gates built to reproduce it. Each gate owns a different regime (far and flat, far
+  and uneven, far and grazing, **near** and grazing), and each has ruled out a
+  different set of causes. This page exists so the next reader can tell which regime
+  is already answered from which is not, without re-running four twenty-minute suites
+  to find out.
 - [Text colour](./text-colour.md) — Server-authored text colour and formatting —
   the sixteen legacy `§` colours, modern `TextColor` hex values, and the five format
   flags — carried from the wire through to the emitted vertex on **every** surface
