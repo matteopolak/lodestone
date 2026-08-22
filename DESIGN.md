@@ -9072,3 +9072,98 @@ Landed: `lodestone-core` NBT list wrapper (34/0), `extract_entity_draws` (`check
 flags (9/0 `display_text` lib tests), plus `tests/live_sign_text_wire.rs` and
 `tests/live_framed_item_wire.rs`, both `#[ignore]`d behind `--features live` against the creative
 oracle on `:25570`.
+
+### A GPU timestamp bracket made of dummy passes: what the spec suggested, and what the bench measured
+
+The shell's `gpu::gpu_timing` times a *span of passes* by opening two throwaway 1x1 render passes
+around them and hanging `timestamp_writes` off those — `CommandEncoder::write_timestamp` needs
+`TIMESTAMP_QUERY_INSIDE_ENCODERS`, whose own doc excludes Apple GPUs by name, so a pass boundary is the
+only place a timestamp can be written on this adapter.
+
+Those bracketing passes were **empty**. A change made them draw one triangle, on the reasoning that
+`timestamp_writes` samples at *stage* boundaries and a pass with no vertex or fragment stage therefore
+has no boundary to sample, so the pair it reports is not a duration of anything. That reading of the
+spec is plausible and it is what the occasional inversions looked like. `benches/frame_profile.rs`
+settled it, and it settled it the other way. All figures at `ground_forward`, demo world radius 6,
+1280x720, medians over 30 frames after 12 warm-up:
+
+| stamp pass | `world_total` | block pass it encloses |
+|---|---|---|
+| empty, three runs | 0.608 / 0.574 / 0.729 ms | 0.299 / 0.311 / 0.495 ms |
+| one triangle, run 1 | **0.072 ms** | 0.319 ms |
+| one triangle, run 2 | 0.516 ms | 0.316 ms |
+| one triangle, run 3 | **1.373 ms** | 0.296 ms |
+
+Empty: three for three, always enclosing, tracking the scene. Triangle: one plausible reading out of
+three, wrong in **both** directions — 4.4x too small once and 4.6x too large once, and at `high_down` in
+run 3 the span was 0.212 ms against a 0.479 ms block pass with **100% of readbacks** summing above the
+span. The triangle was reverted.
+
+The mechanism that fits is that a stamp pass carrying real work shares no attachment with the frame's
+own passes, so nothing orders it against them and the GPU may retire it whenever it likes; an empty pass
+appears to be kept in submission order as a marker. That is an inference about one driver. The table is
+the evidence.
+
+Three things generalise:
+
+- **A change justified by reading a spec is a hypothesis, and this repo's standard applies to it
+  unchanged.** Nothing about the triangle looked wrong on inspection — it had a shader file, a doc
+  comment explaining stage boundaries, and a named symptom it claimed to fix. The only thing that
+  distinguished it from a correct change was a measurement nobody had taken yet.
+- **The self-validating gate is what caught it**, and it caught it because it asserts a *relation between
+  two numbers measured in the same run* (a span at or above the pass it encloses) rather than a
+  millisecond threshold. A gate on an absolute figure would have passed run 2 and failed runs 1 and 3 for
+  unrelated reasons.
+- **That gate could only report one of its four arms.** It was an `assert!` inside the per-waypoint loop,
+  so run 1 aborted at the first waypoint and printed nothing else — and the shape *across* waypoints (a
+  broken bracket reads roughly flat while the block pass it contains varies severalfold) is exactly what
+  separates a real pairing bug from a scene that is genuinely cheap. Restructured to collect the
+  violations and assert on the collection, run 3 reported all four and named the one that failed. Same
+  lesson as the item-settling neuter: collect, then assert.
+
+### `world.submit` was two costs with opposite fixes, and the fused number could not name either
+
+`WorldSubphase::Submit` covered `CommandEncoder::finish` plus `Queue::submit`, and its own doc comment
+said it should be "the smallest of the four on a healthy frame". It was measured as the **largest, by
+4-8x** — 0.234 ms of a 0.380 ms `world_encode_submit` at the cheapest waypoint, 0.783 of 1.084 at the
+dearest, i.e. 65-72% of the phase.
+
+That figure is unactionable as it stands, because the two halves point at opposite fixes: `finish` is
+pure CPU command translation, while `submit` is where the CPU *waits* when it is running ahead of the
+GPU. A large fused reading is either a recording problem or GPU backpressure and the number cannot say
+which. Split, on a quiet machine:
+
+| waypoint | draw calls | `encoder_finish` | `queue_submit` |
+|---|---|---|---|
+| low_up | 104 | 0.103 ms | 0.039 ms |
+| ground_oblique | 288 | 0.186 ms | 0.036 ms |
+| ground_forward | 344 | 0.209 ms | 0.042 ms |
+| high_down | 483 | 0.297 ms | 0.053 ms |
+
+`queue_submit` is flat at 0.036-0.053 ms — there is no backpressure. `encoder_finish` is **linear in
+draw calls**, fitting `0.043 ms + 0.53 us x draw_calls` across a 4.6x range (predicting 0.098 / 0.196 /
+0.225 / 0.299 against the measured 0.103 / 0.186 / 0.209 / 0.297). It is one draw call per drawn
+section, so this cost is proportional to sections drawn and nothing else.
+
+The part worth carrying is where the cost *is not*: recording the draws (`world.terrain_cull_draw`) is
+0.013-0.031 ms, six to ten times cheaper than translating them at `finish`. Reading the fused bucket as
+"submitting is slow" would have sent someone at the queue; reading it as "recording is slow" would have
+sent them at the cull loop. It is neither.
+
+### A bench that does not say the machine was busy will have its numbers attributed to the wrong cause
+
+Two runs of the same binary, minutes apart, differing only in what else was on the machine:
+
+| | other cargo/rustc/test processes | cpu world encode (four waypoints) | verdict |
+|---|---|---|---|
+| run 2 | 11 | 0.746 / 0.702 / 1.084 / 0.380 ms | CPU-bound at all four |
+| run 3 | 1 | 0.334 / 0.296 / 0.466 / 0.218 ms | GPU-bound at two, CPU-bound at one, balanced at one |
+
+The CPU figures roughly **halved** and the headline verdict inverted, with no code change between them.
+`benches/frame_profile.rs` now samples a **count** of concurrent cargo/rustc/test-binary processes
+before the first waypoint and after the last, prints both, and says in its own output that a contended
+run's medians may only be compared against another contended run.
+
+A count rather than a load average deliberately: a load average is a decayed one-minute mean, so it both
+lags a build that started ten seconds ago and stays elevated after one finishes. A failed `ps` prints
+"unknown" rather than zero, so a measurement that did not happen can never read as a quiet machine.
