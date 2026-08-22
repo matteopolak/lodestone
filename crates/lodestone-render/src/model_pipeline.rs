@@ -97,6 +97,25 @@ pub struct ModelPipeline {
     pub anim_layout: wgpu::BindGroupLayout,
 }
 
+/// The name of `model.wgsl`'s pipeline-overridable alpha-test threshold.
+/// `alpha_cutout_override_is_declared_by_the_model_shader` keeps this from
+/// drifting away from the shader, which would otherwise fail at pipeline
+/// creation on a real device and nowhere else.
+const ALPHA_CUTOUT_OVERRIDE: &str = "alpha_cutout";
+
+/// Vanilla `RenderPipelines.CUTOUT_TERRAIN`'s
+/// `withShaderDefine("ALPHA_CUTOUT", 0.5F)`. Also the shader's declared
+/// default, and the value the opaque pass uses — that pass carries solid and
+/// cutout geometry in one mesh, so it must take the stricter of the two.
+const ALPHA_CUTOUT_CUTOUT: f32 = 0.5;
+
+/// Vanilla `RenderPipelines.TRANSLUCENT_TERRAIN`'s
+/// `withShaderDefine("ALPHA_CUTOUT", 0.1F)` — five times looser than the
+/// cutout pass, and the whole reason this is a per-pipeline value: real
+/// stained glass is a partial alpha in the low 0.4s, which a `0.5` test
+/// deletes outright.
+const ALPHA_CUTOUT_TRANSLUCENT: f32 = 0.1;
+
 impl ModelPipeline {
     /// Build the opaque (`Solid`) model pipeline targeting `color_format`.
     #[must_use]
@@ -118,7 +137,15 @@ impl ModelPipeline {
         layer: RenderLayer,
     ) -> Self {
         let translucent = layer == RenderLayer::Translucent;
-        Self::build(device, color_format, MODEL_WGSL, translucent, true, true)
+        Self::build(
+            device,
+            color_format,
+            MODEL_WGSL,
+            translucent,
+            true,
+            true,
+            Some(if translucent { ALPHA_CUTOUT_TRANSLUCENT } else { ALPHA_CUTOUT_CUTOUT }),
+        )
     }
 
     /// Build the translucent **fluid** pipeline: like a `Translucent` model
@@ -134,7 +161,10 @@ impl ModelPipeline {
     /// fix below.
     #[must_use]
     pub fn for_fluid(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        Self::build(device, color_format, FLUID_WGSL, true, false, false)
+        // `None`: `fluid.wgsl` declares no `alpha_cutout` override (water is a
+        // smooth alpha, not a mask, and it runs no discard at all), and wgpu
+        // rejects a constant the module does not declare.
+        Self::build(device, color_format, FLUID_WGSL, true, false, false, None)
     }
 
     /// `cull_back_face` diverges from `translucent` on purpose — they used to
@@ -163,6 +193,13 @@ impl ModelPipeline {
     /// work. `for_fluid` is deliberately left at its prior `cull_mode: None`
     /// — fluid geometry's own two-sidedness (`docs/fluid-rendering.md`'s
     /// `addBackFace`) was not audited here and this fix does not touch it.
+    ///
+    /// `alpha_cutout` is the value bound to `model.wgsl`'s `alpha_cutout`
+    /// pipeline-overridable constant — vanilla's per-pipeline
+    /// `withShaderDefine("ALPHA_CUTOUT", ..)`. `None` is for a shader that does
+    /// not declare it (the fluid one); wgpu rejects a constant the module has
+    /// no override for.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         device: &wgpu::Device,
         color_format: wgpu::TextureFormat,
@@ -170,6 +207,7 @@ impl ModelPipeline {
         translucent: bool,
         with_palette: bool,
         cull_back_face: bool,
+        alpha_cutout: Option<f32>,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lodestone-model-shader"),
@@ -290,6 +328,13 @@ impl ModelPipeline {
             immediate_size: 0,
         });
 
+        // A slice rather than an `Option` at the use site: an empty slice is
+        // exactly "leave every override at its declared default", which is what
+        // a shader with no override wants.
+        let constants: Vec<(&str, f64)> = alpha_cutout
+            .map(|v| vec![(ALPHA_CUTOUT_OVERRIDE, f64::from(v))])
+            .unwrap_or_default();
+
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("lodestone-model-pipeline"),
             layout: Some(&layout),
@@ -297,7 +342,10 @@ impl ModelPipeline {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 buffers: &[Some(ModelVertex::vertex_layout_with_biome_tint())],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    ..Default::default()
+                },
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -311,7 +359,10 @@ impl ModelPipeline {
                     },
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    ..Default::default()
+                },
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1075,5 +1126,33 @@ mod tests {
         // The real-colour biome-tint override (additive, location 4) starts
         // right after it at offset 28.
         assert_eq!(layout.attributes[4].offset, 28);
+    }
+
+    /// The override name and the two thresholds are three separate claims that
+    /// nothing else checks, and each fails in a different place: a drifted name
+    /// is a pipeline-creation error on a real device only, and a drifted value
+    /// is silent everywhere.
+    ///
+    /// This greps `model.wgsl` from a *different* file, deliberately — a
+    /// source-grep gate placed inside the file it greps matches its own
+    /// assertion string and passes with the real line deleted.
+    #[test]
+    fn the_model_shader_declares_the_alpha_cutout_override_this_file_binds() {
+        let src = MODEL_WGSL;
+        assert!(
+            src.contains(&format!("override {ALPHA_CUTOUT_OVERRIDE}: f32 = 0.5;")),
+            "model.wgsl must declare `override {ALPHA_CUTOUT_OVERRIDE}: f32 = 0.5;` — the name is \
+             what `build` binds by string and the default is the cutout threshold the opaque pass \
+             relies on"
+        );
+        assert!(
+            src.contains(&format!("tex.a < {ALPHA_CUTOUT_OVERRIDE}")),
+            "model.wgsl's cutout discard must test against `{ALPHA_CUTOUT_OVERRIDE}`, not against \
+             a literal — a literal is how this was wrong for the translucent pass"
+        );
+        // Vanilla `RenderPipelines`: CUTOUT_TERRAIN 0.5F, TRANSLUCENT_TERRAIN
+        // 0.1F. Transcribed from the 26.2 source, not from each other.
+        assert_eq!(ALPHA_CUTOUT_CUTOUT, 0.5);
+        assert_eq!(ALPHA_CUTOUT_TRANSLUCENT, 0.1);
     }
 }

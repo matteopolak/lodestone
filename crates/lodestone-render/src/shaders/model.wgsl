@@ -202,6 +202,29 @@ struct AnimSlots {
     slots: array<AnimSlot, 256>,
 };
 
+// Vanilla's per-pipeline alpha test threshold, as a pipeline-overridable
+// constant so one shader can serve both terrain passes exactly as
+// `terrain.fsh` does with `#ifdef ALPHA_CUTOUT` and
+// `RenderPipeline.Builder.withShaderDefine("ALPHA_CUTOUT", ...)`.
+//
+// Vanilla ships three terrain pipelines and **three different answers**: the
+// solid one defines no threshold at all and runs no test, the cutout one uses
+// `0.5`, and the translucent one uses `0.1`. This shader used to hardcode
+// `0.5` for every pass, which is right for cutout and wrong for translucent by
+// a factor of five -- and the difference is not academic: 191 of the 256
+// texels in the real 26.2 `white_stained_glass.png` have alpha `102/255 =
+// 0.400`, so three quarters of every stained-glass face was discarded and the
+// background (the sky, for a pane against it) painted instead.
+//
+// The default is the cutout value, because the opaque pass carries both solid
+// and cutout geometry in one mesh and so must keep the stricter test. That is
+// harmless for a solid sprite: `RenderLayer::from_sprite_alpha` calls a sprite
+// `Solid` only when every texel's alpha is exactly 255, and `AtlasBuilder`
+// re-extrudes each sprite's gutter from its own edge pixels at every mip
+// level, so a solid sprite's filtered alpha cannot reach this threshold from
+// any direction.
+override alpha_cutout: f32 = 0.5;
+
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> origin: Origin;
 @group(1) @binding(0) var atlas_tex: texture_2d<f32>;
@@ -470,7 +493,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // correctly on the opaque pass -- unless this quad opted out
     // (`cutout_bypass != 0`, vanilla's FAST leaves: the solid pass never runs
     // this test at all, so the sampled texel simply paints, holes included).
-    if (in.cutout_bypass == 0u && tex.a < 0.5) {
+    //
+    // The threshold is `alpha_cutout`, set per pipeline -- see its declaration
+    // above. It is **not** one constant for all terrain.
+    if (in.cutout_bypass == 0u && tex.a < alpha_cutout) {
         discard;
     }
     // Per-quad tint. `tint_rgb_override.a != 0` means the mesher already
