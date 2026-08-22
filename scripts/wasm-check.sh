@@ -120,6 +120,31 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 TARGET="wasm32-unknown-unknown"
 
+# `.cargo/config.toml` makes Cranelift the dev profile's codegen backend, and
+# **Cranelift cannot emit wasm32**: every `cargo build --target
+# wasm32-unknown-unknown` under it dies with "can't compile for
+# wasm32-unknown-unknown: Support for this target has not been implemented yet",
+# on the *proc-macro and dependency* crates, before a single line of ours is
+# looked at. Measured: all 21 compile checks here failed that way, with error
+# text naming `unicode-ident`, `once_cell` and `cfg-if` — which reads exactly
+# like a real wasm confinement break in a sibling crate, and is not one.
+#
+# So this line is what makes the guard able to run at all, and it is worth
+# stating why it is not merely a speed knob. `cargo check` is unaffected
+# (Cranelift never runs, since nothing is codegen'd), so a `check`-based
+# reproduction of this failure comes back green and sends the reader looking
+# for a difference that is not there. The release profile already pins
+# `codegen-backend = "llvm"` per-crate in the root `Cargo.toml`; the dev
+# profile is the gap, and this is the one command in the repo that needs the
+# dev profile to target a non-native architecture.
+#
+# `cargo xtask wasm-check` — the tested port, and the one CI runs — has carried
+# this same env pair as `WASM_CODEGEN_BACKEND_ENV` all along. Only this script
+# lacked it, which is the parity drift going the *other* way from the one this
+# file's own history records (the xtask once carried 9 of 17 rules). Neither
+# implementation is the master; they have to be diffed in both directions.
+export CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm
+
 CONFINEMENT_ONLY=0
 for arg in "$@"; do
   case "$arg" in
