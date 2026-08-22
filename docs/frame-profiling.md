@@ -40,8 +40,17 @@ the existing engine-internals lines:
 anything.** Every CPU phase measures how long it took to *record* commands;
 `queue.submit` only enqueues. A frame can be 5 ms of CPU recording and 20 ms
 of GPU execution, and there is no way to tell from the CPU column alone.
-`world_total + hud_total` against the frame's wall-clock time is the
-CPU-bound-or-GPU-bound question, and it is the first one to answer.
+The overlay's `gpu measured passes:` line is where to start: the block pass
+plus the hand pass against the presented-frame interval. It is a **floor**,
+not a total — only the passes this timer can put its own edges on — and it is
+labelled that way, which is enough for the question it exists to answer,
+because a floor already above the frame budget settles GPU-bound outright.
+
+That line used to sum `world_total + hud_total` instead, which between them do
+cover every pass the shell submits. **Do not restore that**: those two spans
+are stamped by dummy passes and have been measured reading *below* the pass
+they enclose — see "The bracketing spans are diagnostics, not measurements"
+below.
 
 Press **Shift+F3** (while F3 is held) for the pie chart described below —
 vanilla's own visual, in the bottom-right corner rather than the text
@@ -469,12 +478,28 @@ No millisecond figure passes or fails: a wall-clock duration on a shared
 machine is a sample, not a measurement. What *is* asserted is either a count
 or a relation between two numbers taken in the same run:
 
-- **`world_total`'s median is at or above the block pass's median.** The
-  instrument validating itself: a mis-stamped span reads as near-zero or
-  garbage, not as a few percent under the pass it encloses, so this still
-  fails outright if the bracketing stamps are recorded in the wrong order, if
-  the resolve executes before an edge is written, or if the four segment
-  indices are rebased by someone reordering the segment-name list.
+- **The bracketing spans are diagnostics, not measurements — reported, never
+  asserted.** `world_total`'s median at or above the block pass it encloses
+  *was* an assertion here, and a good one in principle: the instrument
+  validating itself, failing outright if the stamps were recorded in the wrong
+  order, if the resolve executed before an edge was written, or if the segment
+  indices were rebased by someone reordering the segment-name list.
+
+  The instrument does not meet that premise. Across four runs, with the stamp
+  pass empty and again with it drawing a triangle to force a stage boundary,
+  the span comes out below the enclosed pass at some waypoints — 0.059 ms of
+  span against a 0.234 ms block pass at `ground_oblique`, 0.114 against 0.451
+  at `high_down` — and several times above it at others, on a quiet machine,
+  in both designs. A gate that fails on healthy code is not a gate, so the
+  bench prints the violation count every run instead, **including when it is
+  zero**: a silent line cannot be told apart from one that never ran.
+
+  The fix is not a bigger dummy pass. A stamp pass shares no attachment with
+  the frame's real work, so nothing orders it against them; the durable
+  version hangs the frame's edges off the **real** first and last passes,
+  which do share an attachment and so genuinely serialise. Those live in
+  `lodestone-render`. Until then, read the per-pass segments (`world`,
+  `first_person`) and treat the two `*_total` spans as a hint.
 
   **A bracket is an estimate, not a bound**, and both stronger forms were
   tried and observed failing. `world_total >= world + first_person` failed on
