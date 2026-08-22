@@ -119,7 +119,7 @@
 //!
 //! | shadow/ink separation | 70° back | 80° back | 85° back | 80° front |
 //! |---|---|---|---|---|
-//! | none — the shipped defect | 1,014 | 1,141 | 2,883 | — |
+//! | one pipeline, no geometry — as shipped | 1,014 | 1,141 | 2,883 | — |
 //! | constant term only, no geometry | 4 | 34 | 1,204 | — |
 //! | constant + slope, **plus** vanilla's `0.03` | 101 | 297 | 3,120 | 189 |
 //! | **constant + slope, no geometry** | **0** | **0** | **0** | **0** |
