@@ -253,6 +253,19 @@ pub(super) struct StyledRect {
     pub(super) w: f32,
     pub(super) h: f32,
     pub(super) color: [f32; 4],
+    /// How far this rect would be displaced by one step of vanilla's 8×
+    /// text outline — `GlyphInfo.getShadowOffset()` for a run of glyph ink
+    /// (1 px for a sheet glyph, 0.5 for a unihex one), and **`0.0` for an
+    /// underline/strikethrough bar or a background plate**, because
+    /// `Font.prepare8xTextOutline` ends in `outlineOutput.discardEffects()`
+    /// and so outlines the glyphs only.
+    ///
+    /// One field rather than a `glyph: bool` plus a separate offset: the two
+    /// facts are the same fact, and vanilla spells them as one call that
+    /// simply never happens for an effect bar. Only `gpu/sign_text.rs`'s
+    /// glowing-sign outline reads it; the other two consumers draw every rect
+    /// identically and ignore it.
+    pub(super) outline_grow: f32,
 }
 
 /// One string's finished *styled* ink-run layout — the spanned sibling of
@@ -358,6 +371,36 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
 /// visually identical) rects. `§k` obfuscation is not implemented: it needs
 /// per-frame resampling state neither caller here keeps, and is disclosed as
 /// a real gap rather than half-built.
+/// The **advance width** of a styled span list, in logical pixels — the same
+/// number [`layout_styled_ink_runs`] returns as its second element, without
+/// walking a single texel.
+///
+/// This is vanilla's `StringSplitter` measure rather than its `Font` draw:
+/// `new StringSplitter((codepoint, style) -> ...getGlyph(codepoint).info()
+/// .getAdvance(style.isBold()))`, the measure `Font.split` wraps against. It
+/// exists because a wrap calls its measure once per candidate row, and
+/// rasterising a `ttf` glyph (`RasterFont::raster` bakes on demand) to learn a
+/// number that lives on `GlyphInfo` would make wrapping cost more than
+/// drawing.
+///
+/// `GlyphRaster::advance` and `Glyph::advance` are the same three arms over
+/// the same three glyph kinds, so this cannot disagree with the layout's own
+/// cursor — `the_cheap_advance_measure_agrees_with_the_full_ink_walk` is the
+/// gate that keeps it that way, because nothing in the type system would.
+pub(super) fn styled_advance_width(raster: &RasterFont, spans: &[TextSpan]) -> f32 {
+    let font = raster.font();
+    let mut cursor = 0.0f32;
+    for span in spans {
+        let bold = span.style.bold.unwrap_or(false);
+        for ch in span.text.chars() {
+            let cp = ch as u32;
+            cursor += font.advance(cp).unwrap_or(MISSING_ADVANCE)
+                + if bold { font.bold_offset(cp) } else { 0.0 };
+        }
+    }
+    cursor
+}
+
 pub(super) fn layout_styled_ink_runs(raster: &RasterFont, spans: &[TextSpan]) -> (Vec<StyledRect>, f32) {
     const BASE_RGB: [f32; 3] = [1.0, 1.0, 1.0];
 
@@ -380,6 +423,11 @@ pub(super) fn layout_styled_ink_runs(raster: &RasterFont, spans: &[TextSpan]) ->
                 .as_ref()
                 .map_or_else(|| raster.advance(cp).unwrap_or(MISSING_ADVANCE), GlyphRaster::advance);
             let bold_extra = raster.font().bold_offset(cp);
+            // `GlyphInfo.getShadowOffset()` — carried onto every ink rect this
+            // glyph emits so a consumer can reproduce vanilla's 8× outline
+            // without re-resolving the glyph. Half a pixel for unihex, one for
+            // everything else, per glyph rather than per font.
+            let shadow_extra = raster.font().shadow_offset(cp);
             let advance = if bold { base_advance + bold_extra } else { base_advance };
 
             if let Some(r) = &glyph_raster {
@@ -406,9 +454,23 @@ pub(super) fn layout_styled_ink_runs(raster: &RasterFont, spans: &[TextSpan]) ->
                         let rx = x0 + left + shear + run_start as f32 * texel;
                         let ry = top + ty as f32 * texel;
                         let rw = (tx - run_start) as f32 * texel;
-                        rects.push(StyledRect { x: rx, y: ry, w: rw, h: texel, color });
+                        rects.push(StyledRect {
+                            x: rx,
+                            y: ry,
+                            w: rw,
+                            h: texel,
+                            color,
+                            outline_grow: shadow_extra,
+                        });
                         if bold {
-                            rects.push(StyledRect { x: rx + bold_extra, y: ry, w: rw, h: texel, color });
+                            rects.push(StyledRect {
+                                x: rx + bold_extra,
+                                y: ry,
+                                w: rw,
+                                h: texel,
+                                color,
+                                outline_grow: shadow_extra,
+                            });
                         }
                     }
                 }
@@ -433,6 +495,7 @@ pub(super) fn layout_styled_ink_runs(raster: &RasterFont, spans: &[TextSpan]) ->
                         w: effect_x1 - effect_x0,
                         h: thickness,
                         color,
+                        outline_grow: 0.0,
                     });
                 }
                 if underlined {
@@ -443,6 +506,7 @@ pub(super) fn layout_styled_ink_runs(raster: &RasterFont, spans: &[TextSpan]) ->
                         w: effect_x1 - effect_x0,
                         h: thickness,
                         color,
+                        outline_grow: 0.0,
                     });
                 }
             }
@@ -593,6 +657,7 @@ fn push_entity_quads(
         w: total_width + BACKGROUND_PAD,
         h: metrics::LINE_HEIGHT + BACKGROUND_PAD,
         color: lodestone_render::display::text_background_color(BACKGROUND_ARGB),
+        outline_grow: 0.0,
     };
     let plate_quad = |out: &mut Vec<NameTagVertex>| {
         out.extend(quad_vertices(plate, half_width, anchor, right, up, plate.color));
@@ -1316,6 +1381,68 @@ mod tests {
         FontLoader::new(&manager)
             .load_raster(&id, &FontOptions::none())
             .expect("scaled bitmap fixture font loads")
+    }
+
+    /// [`styled_advance_width`] and [`layout_styled_ink_runs`]'s own returned
+    /// cursor must be the *same number*, because `gpu/sign_text.rs` wraps
+    /// against the cheap one and then centres against the expensive one — a
+    /// disagreement puts every truncated sign line off-centre by the
+    /// difference, silently.
+    ///
+    /// The fixture is the `pixel_scale = 0.625` one, deliberately: at
+    /// `pixel_scale == 1.0` a cell width and an advance coincide for these
+    /// glyphs, so the *shared* blind spot of every other font fixture in this
+    /// file would let a cell-width-based measure pass. Bold is asserted
+    /// separately from plain because the bold extra advance is the one term
+    /// the two implementations reach by different routes
+    /// (`Font::bold_offset` here, the same call inline there).
+    #[test]
+    fn the_cheap_advance_measure_agrees_with_the_full_ink_walk() {
+        let opaque_cell = vec![255u8; 32 * 32 * 4];
+        let mut rgba = Vec::with_capacity(opaque_cell.len() * 2);
+        rgba.extend_from_slice(&opaque_cell);
+        rgba.extend_from_slice(&opaque_cell);
+        let raster = scaled_raster("AB", 32, 20, &rgba);
+
+        for bold in [false, true] {
+            let spans = vec![
+                TextSpan {
+                    text: "AB".to_string(),
+                    style: lodestone_model::text::TextStyle {
+                        bold: Some(bold),
+                        ..Default::default()
+                    },
+                },
+                TextSpan {
+                    text: "BA".to_string(),
+                    style: lodestone_model::text::TextStyle::default(),
+                },
+            ];
+            let walked = layout_styled_ink_runs(&raster, &spans).1;
+            let measured = styled_advance_width(&raster, &spans);
+            assert!(
+                (walked - measured).abs() < 1e-4,
+                "bold {bold}: ink walk {walked}, cheap measure {measured}"
+            );
+            // Not vacuous: the two must actually have measured something, and
+            // the bold arm must differ from the plain one.
+            assert!(walked > 0.0, "bold {bold}: measured nothing at all");
+        }
+        let plain = vec![TextSpan {
+            text: "AB".to_string(),
+            style: lodestone_model::text::TextStyle::default(),
+        }];
+        let bolded = vec![TextSpan {
+            text: "AB".to_string(),
+            style: lodestone_model::text::TextStyle {
+                bold: Some(true),
+                ..Default::default()
+            },
+        }];
+        assert!(
+            styled_advance_width(&raster, &bolded) > styled_advance_width(&raster, &plain),
+            "bold must measure wider, or this gate cannot see the bold term at all"
+        );
     }
 
     /// The nametag/sign-text ink walk ([`layout_styled_ink_runs`]) is a

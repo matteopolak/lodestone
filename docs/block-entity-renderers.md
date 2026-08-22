@@ -685,17 +685,65 @@ into `dye_text_color_rgb` (all sixteen `DyeColor` text-colour constants, from th
 float multiply carried through — otherwise). Per `CLAUDE.md`'s rendering constraints this multiply is
 gamma-space, matching every other tint/shade in this codebase.
 
+### Glowing text is an outline, not a brightness
+
+`submitSignText` branches once on `signText.hasGlowingText()` and that branch sets three things:
+the glyph colour (the dye's own `getTextColor()` unscaled, versus `getDarkColor`), the light
+(`15728880`, full bright, versus `state.lightCoords`), and an **outline** drawn behind the glyphs in
+`getDarkColor`. The outline is gated again by
+`drawOutline = textColor == DyeColor.BLACK.getTextColor() || state.drawOutline`, where
+`state.drawOutline` is `isOutlineVisible` — the camera within `Mth.square(16) == 256` of the block
+centre. So black glowing text is outlined at *any* range (its glyphs are colour `0` and the outline is
+the only thing that makes them legible) and every other glowing sign is outlined within 16 blocks.
+`sign_outline_color` is that whole gate; `sign_dark_color_rgb` is `getDarkColor`, including the
+`BLACK_TEXT_OUTLINE_COLOR = -988212` (`0xF0EBCC`) substitution.
+
+**The full-bright half needs no port and that is a symptom, not a success.** This pass samples no
+lightmap at all, so *every* sign already draws full-bright; glowing text is legible in the dark here
+for the reason vanilla's is, but by accident. Closing the `lightCoords` gap below is what will make
+the branch load-bearing.
+
+`gpu/sign_text.rs` builds the outline as **one grown quad per ink run** rather than eight offset
+copies of the whole string. `Font.prepare8xTextOutline` draws the string at every `(dx, dy)` in
+`{-1,0,1}²` except `(0,0)`, displaced by `GlyphInfo.getShadowOffset()`; the union of a *rectangle*
+over that neighbourhood is exactly that rectangle grown by one offset on each side, and every rect the
+ink walk emits is a rectangle — so the covered region is identical at 1× the vertices instead of 8×.
+`StyledRect::outline_grow` carries the per-glyph offset (0.5 for a unihex glyph) and is `0.0` on
+underline/strikethrough bars, which is `outlineOutput.discardEffects()`.
+
+One real difference: vanilla submits the outline through `DisplayMode.NORMAL` and the glyphs through
+`POLYGON_OFFSET`. This pass has one pipeline, so both carry the offset and the separation comes from
+submission order instead (outline first, glyphs second, `LessEqual` depth).
+
+### Line width is per **kind**, and it truncates rather than wrapping
+
+`submitSignText` calls `this.font.split(input, state.maxTextLineWidth)` and then keeps
+`components.get(0)` — the *first* wrapped row. An overlong line is therefore **cut**, not shrunk and
+not scrolled. `state.maxTextLineWidth` is the block entity's: `SignBlockEntity` returns 90 and
+`HangingSignBlockEntity` overrides to 60, which is the only thing keeping a hanging sign's text inside
+a board a third narrower than a standing one's.
+
+`push_side_quads` passes `SignKind::max_text_line_width()` to `split_first_line`, which wraps through
+`hud::wrap_spans_with` (this crate's one styled word-wrap) measured by `nametag::styled_advance_width`
+— vanilla measures its own split with `StringSplitter`'s advance-only callback rather than by laying
+out ink, and a wrap that rasterised every candidate row would cost more than the draw.
+
+**This was shipped wrong twice over and is worth remembering as a pair.** First there was no cap at
+all in the renderer — only the sign-*edit* screen carried one, and it hardcoded `SignKind::Plain`, so
+any line placed by `setblock`/NBT overhung the board. `docs/images/02-signs.png` showed a hanging sign
+whose three lines ran past both edges for as long as the image existed. The two gates are deliberately
+split: `a_hanging_sign_cuts_a_line_a_standing_sign_keeps_whole` passes the cap in by hand and so
+cannot see the producer fetching the wrong one — measured, by neutering that call site to
+`SignKind::Plain`, which leaves it green — and `hanging_sign_text_stays_inside_its_board` is the arm
+that catches it, in world space against the board's own 14/16 width.
+
 **Deferred, and named rather than silently missing:**
 
-- The black-dye-glowing outline (`BLACK_TEXT_OUTLINE_COLOR = -988212`, a second offset glyph pass so
-  glowing black text is not literally invisible). One narrow dye combination.
 - Per-glyph world-light modulation for non-glowing text (vanilla's `state.lightCoords`). This pass
   draws unlit vertex colours unconditionally, the same simplification `gpu/nametag.rs` already
   documents making for its own text (full-bright regardless of the entity's own dimness) — sign text
   reads a little brighter than vanilla in the dark, never darker or absent.
-- Line wrapping past `MAX_TEXT_LINE_WIDTH` (90 px). The four stored lines are trusted to already fit,
-  which the vanilla sign-edit screen enforces at typing time; only a modded server or a hand-edited
-  NBT payload could send an over-width line.
+- `isOutlineVisible`'s scoping-spyglass arm, which only ever *adds* an outline at long range.
 - Click/hover events and translation keys inside one line's component. `append_component_spans`
   flattens `text`/`extra` into styled runs (colour, bold, italic, underline, strikethrough — see the
   typed-parse section above) but carries no interactivity and does not resolve `translate` keys (nor
@@ -1495,13 +1543,35 @@ centre, so a player on the floor below a table on a shelf does not open its book
   book shut — a recorded fidelity gap, and closing it means scanning tracked player entities in the
   tick.
 
-The position gather (`enchanting_table_positions`) is radius-limited to 8 blocks rather than
-`VIEW_DISTANCE`, because it runs at 20 Hz and a table nobody is near can only ever be shut.
-`EnchantingTableBooks::tick` keeps ticking entries it already holds regardless of that list, so a table
-the player walks away from still closes properly — asserted as a duration in
-`a_book_takes_ten_ticks_to_open_and_ten_to_shut`, both directions, with a value predicted at every step.
-A settled-shut entry is then collected, safe for `ChestLids`' reason: `open == 0` folds the lids flat, so
-a shut book and an absent one are the same pixels.
+### A shut book is a **closed** book, and believing otherwise deleted every distant one
+
+The position gather (`enchanting_table_positions`) used to be radius-limited to 8 blocks rather than
+`VIEW_DISTANCE`, and `EnchantingTableBooks::tick` used to collect an entry as soon as it settled shut,
+both on the stated grounds that *"`open == 0` folds the lids flat, so a shut book and an absent one are
+the same pixels"*. **That is false.** `enchanting_table_book_openness(t, 0)` is `0`, and
+`book_part_poses(0, ..)` puts `left_lid` at `PI` against `right_lid` at `0` — a closed book, six real
+posed parts hovering above the table, which is what vanilla draws:
+`EnchantTableRenderer.submit` has **no early return**, it submits the model for every enchanting-table
+block entity it renders and the near-player test decides only whether the book is *open*.
+
+The consequence was that `enchanting_table_spawns` skipped any table the fold had no entry for, so an
+enchanting table nobody had stood next to drew **no book at all** — which is what
+`docs/images/03-block-entities.png` showed. Both halves are fixed: the gather is `VIEW_DISTANCE`-wide
+(matching the draw gather, so the tracked set and the drawn set cannot disagree), an entry is dropped
+when its table leaves the gather rather than when it stops moving, and `enchanting_table_spawns` falls
+back to the shut rest pose for a table the last tick has not reached yet. Keeping every visible table
+tracked is also what makes `time` advance for a distant one, so its hover keeps breathing the way
+vanilla's per-block-entity `time++` does.
+
+The open/shut ramp itself is asserted as a duration in
+`a_book_takes_ten_ticks_to_open_and_ten_to_shut`, both directions, with a value predicted at every
+step, and that gate now also pins the retention rule: a settled-shut book stays tracked, and only
+leaving the gather drops it.
+
+The scene behind that screenshot carries the same trap in miniature — the 3-block trigger is measured
+from the *player*, not the camera, and `scripts/screenshot-scenes/03-block-entities.txt` sets the two
+independently. Its `tp` line stands the player beside the table on purpose; move it away and the shot
+shows a correct, closed, entirely uninformative book.
 
 ### Status
 
@@ -1512,7 +1582,8 @@ Wired end to end: geometry (`enchanting_table_book_placement_matrix`, `..._openn
 `prepare_block_entities`' seven-way emptiness condition.
 
 Open within enchanting-table scope: the nearest-*remote*-player case above. Nothing else — the four
-animated values are complete.
+animated values are complete, and the book is drawn for every table in view whether or not any of them
+is moving.
 
 ## Campfire
 
@@ -3139,10 +3210,10 @@ separate Test Instance renderer remains unimplemented.
 Against the real 26-entry registration list (see above), not the issue's original twelve-item guess:
 
 - **Signs — landed, both registrations** (see the [Sign](#sign-standingwall-text) section above):
-  standing, wall, ceiling-hanging and wall-hanging. Still open within sign scope: the
-  black-dye-glowing outline, per-glyph world-light modulation, line wrapping past the per-kind
-  `max_text_line_width`, and rich per-run text formatting — all named and reasoned about in that
-  section rather than silently missing. **The "hanging signs need a different model set" item that
+  standing, wall, ceiling-hanging and wall-hanging, plus the glowing-text outline and the per-kind
+  `max_text_line_width` truncation. Still open within sign scope: per-glyph world-light modulation
+  (the one thing that makes *non*-glowing text differ from glowing here), and `isOutlineVisible`'s
+  spyglass arm — both named and reasoned about in that section rather than silently missing. **The "hanging signs need a different model set" item that
   used to head this list was a 1.20 memory, not a 26.2 measurement** — it was four numbers.
 - **Lectern — landed**, including the live per-frame install (see [Lectern](#lectern) above). Nothing
   is open within lectern scope: `openness` is a compile-time constant in the jar, so there is no

@@ -691,21 +691,24 @@ impl Sim {
             //
             // Unlike the two above this needs the *world* and the player, because
             // nothing on the wire starts it: the trigger is the player standing
-            // within three blocks of a table. The position gather is deliberately
-            // radius-limited rather than `VIEW_DISTANCE`-limited, since a table
-            // nobody is near can only ever be shut — see
-            // `block_entities::enchanting_table_positions`.
+            // within three blocks of a table. The position gather is
+            // `VIEW_DISTANCE`-wide even so — vanilla draws a book for every
+            // enchanting table it renders, and the near-player test decides only
+            // whether that book *opens*, so a tighter gather here is exactly what
+            // made distant tables draw no book at all. See
+            // `block_entities::EnchantingTableBooks`.
             if let Some(net) = self.net.as_ref() {
                 let handle = net.shared_handle();
                 let player = {
                     let p = self.player();
                     glam::DVec3::new(p.position.x, p.position.y, p.position.z)
                 };
-                // A little slack over the 3.0 trigger radius so a table becomes
-                // trackable a tick before it can wake, rather than on the same
-                // tick the distance test first passes.
+                // The same cutoff `enchanting_table_spawns` draws at, so the
+                // tracked set and the drawn set cannot disagree.
                 let tables = crate::block_entities::enchanting_table_positions(
-                    &handle, player, 8.0,
+                    &handle,
+                    player,
+                    f64::from(crate::block_entities::VIEW_DISTANCE),
                 );
                 self.enchanting_table_books.tick(&tables, player);
                 // Moving pistons, on the same fixed 20 Hz. This one *must* be a tick

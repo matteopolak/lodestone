@@ -1429,17 +1429,6 @@ impl Book {
         self.flip += self.flip_a;
     }
 
-    /// Whether this entry is indistinguishable from having none: a fully shut
-    /// book with no page motion left.
-    ///
-    /// `open == 0` makes [`lodestone_render::enchanting_table_book_openness`] zero
-    /// and `book_part_poses` fold the lids flat, so a shut book renders exactly
-    /// like an absent one — the same property that makes `ChestLids`' garbage
-    /// collection safe. `flip` is not checked because a shut book's pages are
-    /// inside it.
-    fn is_rested(&self) -> bool {
-        self.open == 0.0 && self.o_open == 0.0
-    }
 }
 
 /// `java.util.Random`, whose algorithm is specified in its own documentation —
@@ -1507,9 +1496,27 @@ impl JavaRandom {
 ///
 /// Chest lids and bell shakes are both started by a `BLOCK_EVENT`; this one is
 /// started by the player *standing near a block*, so nothing on the wire would
-/// ever reveal that it had stopped working. Entries are created for tables within
-/// [`ENCHANTING_TABLE_PLAYER_RADIUS`] and dropped once fully shut, which is safe
-/// for [`Book::is_rested`]'s reason.
+/// ever reveal that it had stopped working.
+///
+/// # Every table in the gather gets an entry, shut or not
+///
+/// This fold used to create entries only for tables within
+/// [`ENCHANTING_TABLE_PLAYER_RADIUS`] and collect them again the moment they
+/// settled shut, on the stated grounds that "a shut book renders exactly like an
+/// absent one". **That is false, and it is why an enchanting table nobody stood
+/// next to drew no book at all.** `open == 0` makes
+/// [`lodestone_render::enchanting_table_book_openness`] zero, and
+/// `book_part_poses` at openness `0` poses `left_lid` at `PI` against
+/// `right_lid` at `0` — a **closed** book, which is a real six-part model
+/// hovering above the table, not nothing. `EnchantTableRenderer.submit` has no
+/// early return: vanilla draws the book for every enchanting-table block entity
+/// it renders, and the near-player test only decides whether it is *open*.
+///
+/// So an entry exists for every table the caller gathers, and is dropped when
+/// the table leaves that gather (unloaded, or out of [`VIEW_DISTANCE`]) rather
+/// than when it stops moving — which is also what makes `time` keep advancing
+/// for a distant table, the way vanilla's per-block-entity `time++` does, so its
+/// hover keeps breathing.
 #[derive(Debug, Clone)]
 pub struct EnchantingTableBooks {
     books: HashMap<[i32; 3], Book>,
@@ -1539,12 +1546,12 @@ impl EnchantingTableBooks {
         }
     }
 
-    /// Advances every tracked book one client tick, creating entries for the
-    /// tables in `tables` that a player is close enough to wake.
+    /// Advances one client tick: every position in `tables` gains an entry if it
+    /// has none, every entry not in `tables` is dropped, and the rest tick.
     ///
-    /// `tables` is every enchanting-table position worth considering (the caller
-    /// gathers it — see [`enchanting_table_positions`]) and `player` is the local
-    /// player's position.
+    /// `tables` is every enchanting-table position in view (the caller gathers
+    /// it — see [`enchanting_table_positions`]) and `player` is the local
+    /// player's position, which decides only whether a given book *opens*.
     ///
     /// # Only the local player
     ///
@@ -1556,19 +1563,16 @@ impl EnchantingTableBooks {
     /// silently taken, and closing it means scanning tracked player entities here.
     pub fn tick(&mut self, tables: &[[i32; 3]], player: glam::DVec3) {
         let radius_squared = ENCHANTING_TABLE_PLAYER_RADIUS * ENCHANTING_TABLE_PLAYER_RADIUS;
-        for pos in tables {
-            let centre = glam::DVec3::new(
-                f64::from(pos[0]) + 0.5,
-                f64::from(pos[1]) + 0.5,
-                f64::from(pos[2]) + 0.5,
-            );
-            if centre.distance_squared(player) <= radius_squared {
-                self.books.entry(*pos).or_default();
-            }
+        let live: std::collections::HashSet<[i32; 3]> = tables.iter().copied().collect();
+        for pos in &live {
+            self.books.entry(*pos).or_default();
         }
         // Borrowed separately from `self.rng` because the tick draws from it.
         let rng = &mut self.rng;
         self.books.retain(|pos, book| {
+            if !live.contains(pos) {
+                return false;
+            }
             let centre = glam::DVec3::new(
                 f64::from(pos[0]) + 0.5,
                 f64::from(pos[1]) + 0.5,
@@ -1576,12 +1580,13 @@ impl EnchantingTableBooks {
             );
             let near = (centre.distance_squared(player) <= radius_squared).then_some(player);
             book.tick(*pos, near, rng);
-            !book.is_rested()
+            true
         });
     }
 
     /// This frame's interpolated animation state for the table at `pos`, or `None`
-    /// when there is no entry — which is a fully shut book, i.e. nothing to draw.
+    /// when there is no entry — a table the last tick did not gather, which the
+    /// caller draws at the shut rest pose rather than skipping.
     ///
     /// Returns `(y_rot, time, open, flip)` ready for
     /// [`lodestone_render::EnchantingTableSpawn`]. The `y_rot` lerp is
@@ -2309,12 +2314,17 @@ fn is_enchanting_table(state_id: u32) -> bool {
 /// Every enchanting-table position worth ticking, within `radius` blocks of
 /// `player`.
 ///
-/// A much tighter cutoff than [`VIEW_DISTANCE`] on purpose: this runs at 20 Hz,
-/// and the only thing that *starts* an animation is a player within
-/// [`ENCHANTING_TABLE_PLAYER_RADIUS`]. A table further away than that can only
-/// ever be shut, and [`EnchantingTableBooks::tick`] keeps ticking entries it
-/// already has regardless of this list, so a table the player walks away from
-/// still closes properly.
+/// **`radius` is a view cutoff, not the animation trigger.** It used to be a
+/// much tighter one, on the reasoning that only a player within
+/// [`ENCHANTING_TABLE_PLAYER_RADIUS`] starts an animation — true, and it made
+/// every table beyond that draw **no book at all**, because a table with no
+/// entry was skipped by the gather below. A shut book is still a book; see
+/// [`EnchantingTableBooks`]. The caller passes [`VIEW_DISTANCE`], matching the
+/// draw gather, and the 3-block trigger stays inside
+/// [`EnchantingTableBooks::tick`] where it belongs.
+///
+/// The scan itself walks every loaded chunk's block-entity list regardless, so
+/// widening the radius costs one distance test per record and no more.
 #[must_use]
 pub fn enchanting_table_positions(
     handle: &SharedHandle,
@@ -2354,12 +2364,16 @@ pub fn enchanting_table_positions(
     out
 }
 
-/// Every enchanting-table book to draw this frame.
+/// Every enchanting-table book to draw this frame — **one per table, always**.
 ///
 /// Unlike every other gather here the *appearance* comes from `books` rather than
 /// from the world: the block state says only "there is a table", and all four
-/// animated values are client-simulated. A table with no entry in `books` has a
-/// fully shut book, which renders identically to no book, so it is skipped.
+/// animated values are client-simulated. A table the fold has no entry for still
+/// gets a spawn, at the shut rest pose: `EnchantTableRenderer.submit` draws the
+/// book unconditionally, and openness `0` is a closed book rather than an absent
+/// one. That case is transient by construction — [`EnchantingTableBooks::tick`]
+/// gathers at the same [`VIEW_DISTANCE`] this does — so it lasts at most the one
+/// frame between a table coming into view and the next 20 Hz tick.
 ///
 /// Reuses [`chest_candidates`] exactly as [`lectern_spawns`] does — the block
 /// state is still what confirms the block entity is a table.
@@ -2398,9 +2412,7 @@ pub fn enchanting_table_spawns(
         if !is_enchanting_table(state_id) {
             continue;
         }
-        let Some((y_rot, time, open, flip)) = books.state(block, partial_tick) else {
-            continue;
-        };
+        let (y_rot, time, open, flip) = books.state(block, partial_tick).unwrap_or_default();
         let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
         out.push(lodestone_render::EnchantingTableSpawn {
@@ -4874,14 +4886,65 @@ mod shulker_tests {
                 "closing tick {tick}: open {open}, expected {expected}"
             );
         }
-        // One more tick and the settled-shut entry is collected, the same
-        // garbage-collection `ChestLids` does — and `state` then answers `None`,
-        // which the gather reads as "no book", identical on screen to a shut one.
+        // A settled-shut book is **kept**, because vanilla draws a closed book
+        // for every enchanting table it renders — an entry is dropped when the
+        // table leaves the gather, not when it stops moving. Both arms on one
+        // fixture, so a fold that collected on rest (the behaviour that made
+        // distant tables draw nothing) fails the first.
         books.tick(&[POS], far);
+        assert_eq!(
+            books.len(),
+            1,
+            "a shut book must stay tracked — it is still drawn, closed"
+        );
+        assert!(books.state(POS, 1.0).is_some());
+        books.tick(&[], far);
         assert!(
             books.is_empty(),
-            "a fully shut book should be collected, {} left",
+            "a table no longer in the gather must be dropped, {} left",
             books.len()
+        );
+    }
+
+    /// **The island gate for the missing book.** Every enchanting table in the
+    /// gather yields a spawn, whether or not the fold has ticked it — the
+    /// defect was `enchanting_table_spawns` skipping any table with no entry,
+    /// on the (false) grounds that a shut book is invisible.
+    ///
+    /// Asserted at the fold's boundary rather than through the world gather,
+    /// because the gather needs a live `SharedHandle`: the claim under test is
+    /// that a shut book is a *drawn* pose, and the two hypotheses are computed
+    /// from `lodestone_render`'s own book functions rather than restated. At
+    /// `open == 0` the openness is `0` and `book_part_poses` puts `left_lid` at
+    /// `PI` against `right_lid` at `0` — a closed book, six real posed parts,
+    /// not an absent one.
+    #[test]
+    fn a_shut_book_is_a_closed_book_and_not_an_absent_one() {
+        let shut = lodestone_render::enchanting_table_book_openness(0.0, 0.0);
+        assert_eq!(shut, 0.0);
+        let poses = lodestone_render::book_part_poses(shut, (0.0, 0.0));
+        assert_eq!(poses.len(), 6);
+        let left = poses
+            .iter()
+            .find(|(name, _, _)| *name == "left_lid")
+            .expect("the rig has a left lid");
+        let right = poses
+            .iter()
+            .find(|(name, _, _)| *name == "right_lid")
+            .expect("the rig has a right lid");
+        assert!(
+            (left.1 - std::f32::consts::PI).abs() < 1e-6 && right.1 == 0.0,
+            "a shut book's lids must fold together, got {left:?} / {right:?}"
+        );
+
+        // And the fold's own default — what `enchanting_table_spawns` now draws
+        // for an as-yet-unticked table — is exactly that rest pose rather than a
+        // sentinel the renderer would have to special-case.
+        let (y_rot, time, open, flip) = <(f32, f32, f32, f32)>::default();
+        assert_eq!((y_rot, time, open, flip), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(
+            lodestone_render::enchanting_table_book_openness(time, open),
+            shut
         );
     }
 

@@ -436,7 +436,7 @@ impl RenderState {
         // batch step of its own (see `gpu/sign_text.rs`'s module doc for why
         // this is not a billboard and needs no camera basis).
         let signs = self.sign_source.signs(camera.position);
-        let sign_text_count = self.sign_text.prepare(queue, &view_proj, &signs);
+        let sign_text_count = self.sign_text.prepare(queue, &view_proj, camera.position, &signs);
         stats.sign_text_vertices = sign_text_count;
 
         // `text_display` glyphs and background panels, same "upload before

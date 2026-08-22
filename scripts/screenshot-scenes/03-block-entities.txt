@@ -89,4 +89,11 @@ setblock 3 64 9 minecraft:conduit[waterlogged=false]
 setblock 4 64 9 minecraft:lime_shulker_box[facing=up]
 setblock 5 64 9 minecraft:blue_shulker_box[facing=south]
 
-tp Lodestone 0.0 64.0 28.0 180 8
+# The player position is load-bearing, not tidy-up. `EnchantingTableBlockEntity
+# .bookAnimationTick` opens its book only for a player within 3 blocks of the
+# block centre, so this stands the player beside the enchanting table at
+# (-1, 64, 13): from anywhere further the book is drawn **closed**, which is
+# correct and shows none of the four animated values this scene exists to
+# demonstrate. The render camera is set separately by `@camera`, so moving the
+# player does not move the shot, and the harness draws no player body.
+tp Lodestone -1.0 64.0 15.0 180 8

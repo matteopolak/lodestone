@@ -29,8 +29,13 @@ setblock 4 65 15 minecraft:sea_lantern
 # support is the wall block behind it at z=15.
 setblock -2 65 14 minecraft:spruce_wall_sign[facing=north]{is_waxed:1b,front_text:{has_glowing_text:1b,color:"lime",messages:[{text:"glowing text"},{text:"dyed lime"},{text:"and waxed"},{text:""}]}}
 
-# Hanging sign, under the block placed above it.
-setblock 2 65 14 minecraft:oak_hanging_sign[attached=false,rotation=8]{front_text:{messages:[{text:"hanging sign","color":"gold","bold":true},{text:"narrower board","color":"white"},{text:"tighter lines","color":"gray"},{text:""}]}}
+# Hanging sign, under the block placed above it. Its three lines measure 45,
+# 58 and 49 font pixels against `HangingSignBlockEntity.getMaxTextLineWidth()`
+# of 60 — deliberately close to the cap, so the board looks full while nothing
+# is truncated. Vanilla *cuts* an overlong line (`font.split(...).get(0)`), so
+# a longer line here would demonstrate the truncation rather than the narrower
+# board, and would read as a rendering bug in a README screenshot.
+setblock 2 65 14 minecraft:oak_hanging_sign[attached=false,rotation=8]{front_text:{messages:[{text:"hanging","color":"gold","bold":true},{text:"small board","color":"white"},{text:"tight lines","color":"gray"},{text:""}]}}
 
 # Standing signs. rotation=8 faces the camera; rotation=0 turns its back to it.
 setblock -1 64 13 minecraft:oak_sign[rotation=8]{front_text:{messages:[{text:"Lodestone","color":"#F2B233","bold":true},{text:"styled runs","color":"aqua"},{text:"per span","color":"green","italic":true},{text:"one span each","color":"gray"}]}}
