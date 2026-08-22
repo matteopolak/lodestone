@@ -741,6 +741,61 @@ impl RenderState {
         // before it is ever read.
         let world_encode_other_t0 = std::cell::Cell::new(world_encode_terrain_t0);
 
+        // This frame's raw (non-sRGB) view of the same colour texture `view`
+        // names, for the three flat-colour world-text passes — see
+        // `RenderState::set_world_text_view` for why vanilla's text and its
+        // background plate must composite on gamma bytes rather than through
+        // the sRGB view every other pipeline here targets.
+        //
+        // **Taken**, not borrowed: a swapchain image is presented at the end of
+        // the frame, so a view of it must not survive into the next one.
+        let world_text_view = self.world_text_view.borrow_mut().take();
+        let world_text_target: Option<&wgpu::TextureView> = match world_text_view.as_ref() {
+            Some(v) => Some(v),
+            // No raw view supplied this frame. Falling back to `view` is only
+            // legal while the three text renderers are still built for the
+            // target's own format — true for every caller that has never
+            // called `set_world_text_view`, and for a target that is already
+            // non-sRGB, where the two views have the same format anyway. Once
+            // they have been re-pointed, attaching `view` would put a pipeline
+            // and its attachment at different formats, which `wgpu` rejects at
+            // `set_pipeline` and takes the whole frame down for; drop the text
+            // for this frame instead and say so.
+            None if self.world_text_format == self.color_format => Some(view),
+            None => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::error!(
+                        target: "render",
+                        "world text skipped: set_world_text_view was not called this frame, \
+                         and the text pipelines target {:?} while the frame's view is {:?}",
+                        self.world_text_format,
+                        self.color_format,
+                    );
+                });
+                None
+            }
+        };
+        // Whether either world-text pass has anything to draw. An empty render
+        // pass is not free — it still stores and reloads a colour and a depth
+        // attachment — so a frame with no signs, holograms or nametags opens
+        // neither and is structurally what it always was.
+        let draw_world_text =
+            world_text_target.is_some() && (sign_text_count > 0 || !display_text_counts.is_empty());
+        let draw_nametags = world_text_target.is_some() && name_tag_counts != (0, 0);
+
+        // Tracks the terrain path's own group-0 bind-group object (packed or
+        // model camera) across every draw loop below, by pointer identity —
+        // see `RenderStats::terrain_camera_bind_group_switches`. Intentionally
+        // *not* reset between the packed and model loops: entering the model
+        // loop after the packed one is one real switch, which is exactly what
+        // the counter should show. It is declared out here rather than inside
+        // the first pass because the translucent loops that also bind it live
+        // in a second pass now, and it *is* reset at that boundary — a new
+        // render pass inherits no bindings, so the first bind in it is a real
+        // switch and the counter would otherwise miss one.
+        let mut terrain_cam_group_last: Option<*const wgpu::BindGroup> = None;
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("block pass"),
@@ -776,19 +831,23 @@ impl RenderState {
                 // creates is a temporary scoped to this statement — dropped
                 // before `render_inner` later calls `self.gpu_timer.borrow_mut()`
                 // to resolve it, so it cannot panic on a double borrow.
-                timestamp_writes: self.gpu_timer.borrow().as_ref().and_then(|t| t.writes("world")),
+                //
+                // The **begin** edge only: the world's colour work is more than
+                // one pass now (the flat-colour text passes need a non-sRGB
+                // attachment and so cannot share one with the terrain), and the
+                // matching `writes_end` is on whichever of them closes it. A
+                // plain `writes` here would have quietly redefined `"world"` as
+                // "the first segment of the world".
+                timestamp_writes: self
+                    .gpu_timer
+                    .borrow()
+                    .as_ref()
+                    .and_then(|t| t.writes_begin("world")),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.pipeline.pipeline);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-            // Tracks the terrain path's own group-0 bind-group object (packed
-            // or model camera) across both draw loops below, by pointer
-            // identity — see `RenderStats::terrain_camera_bind_group_switches`.
-            // Intentionally *not* reset between the packed and model loops:
-            // entering the model loop after the packed one is one real switch,
-            // which is exactly what the counter should show.
-            let mut terrain_cam_group_last: Option<*const wgpu::BindGroup> = None;
             for (key, section) in &self.sections {
                 if !terrain_cull.visible(key.coord()) {
                     continue;
@@ -1223,23 +1282,106 @@ impl RenderState {
                 }
             }
 
-            // Sign text, right after the block entities and
-            // before translucent water — a sign's board is real terrain
-            // (unlike a chest, it has a genuine block model), so by this
-            // point in the pass it is already in the depth buffer for the
-            // text's own polygon-offset bias to win against. See
-            // `gpu/sign_text.rs`'s module doc for the depth pipeline.
-            self.sign_text.draw(&mut pass, sign_text_count);
+        }
 
-            // `text_display` glyphs and background panels, right after sign
-            // text for the same "already in the depth buffer, opaque/cutout
-            // geometry" reasoning. Four ranges through four pipelines —
-            // unbiased panel, polygon-offset shadow, ink at twice that
-            // offset in both terms so a near-grazing plane's own depth
-            // gradient cannot let the shadow win, and the see-through pair
-            // that neither tests nor writes depth, which is why it is drawn
-            // last. See `gpu/display_text.rs`'s module doc.
+        // Sign text and `text_display`, in their own pass on the **raw**
+        // (non-sRGB) view of this same colour texture, because vanilla
+        // composites text and its background panel on gamma bytes — see
+        // `RenderState::set_world_text_view`. A `wgpu` render pass fixes one
+        // attachment format for every pipeline in it, so a separate pass is
+        // the only way to have these two blend differently from the terrain
+        // and entities around them.
+        //
+        // **The pass boundary is here, and not later, on purpose.** Sign text
+        // goes right after the block entities and before translucent water — a
+        // sign's board is real terrain (unlike a chest, it has a genuine block
+        // model), so by this point it is already in the depth buffer for the
+        // text's own polygon-offset bias to win against; and `text_display`
+        // goes immediately after sign text for the same "already in the depth
+        // buffer, opaque/cutout geometry" reasoning. Moving either past the
+        // translucent geometry, the particles or the weather below would put a
+        // raindrop in front of a sign *behind* it. See `gpu/sign_text.rs`'s and
+        // `gpu/display_text.rs`'s module docs for the depth pipelines —
+        // `display_text` draws four ranges through four pipelines: unbiased
+        // panel, polygon-offset shadow, ink at twice that offset in both terms
+        // so a near-grazing plane's own depth gradient cannot let the shadow
+        // win, and the see-through pair that neither tests nor writes depth,
+        // which is why it is drawn last.
+        if draw_world_text
+            && let Some(text_view) = world_text_target
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("world text pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: text_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Always `Load`: the block pass above has just drawn
+                        // the terrain and entities this text composites over.
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    // The same depth buffer, loaded rather than cleared —
+                    // sign text tests *and* writes depth, and the block pass
+                    // resuming below depends on both.
+                    view: &self.depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.sign_text.draw(&mut pass, sign_text_count);
             self.display_text.draw(&mut pass, display_text_counts);
+        }
+
+        {
+            // Held in a local so the `Ref` outlives the pass descriptor that
+            // borrows through it; dropped with this block, well before
+            // `render_inner` resolves the timer with `borrow_mut`.
+            let timer = self.gpu_timer.borrow();
+            // The `"world"` span's **end** edge, unless the nametag pass below
+            // closes the frame's world colour work instead — exactly one of the
+            // two must write it, or the query resolves from whatever the last
+            // frame left in it.
+            let world_span_end = if draw_nametags {
+                None
+            } else {
+                timer.as_ref().and_then(|t| t.writes_end("world"))
+            };
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("block pass (translucent and overlays)"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: world_span_end,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // A fresh pass inherits no bind groups, so the next terrain bind is
+            // a genuine switch — see the declaration above.
+            terrain_cam_group_last = None;
 
             // The beacon beam's **solid core** only — opaque, depth-writing
             // (`BEACON_BEAM_OPAQUE`, see `gpu/beacon_beam.rs`'s module doc),
@@ -1630,10 +1772,49 @@ impl RenderState {
             // for draw order.
             self.plugin_billboards.draw(&mut pass, plugin_billboard_count);
 
-            // Nametags last of all, real depth-tested against
-            // this same terrain+entity depth buffer — see `gpu/nametag.rs`'s
-            // module doc for the normal/see-through split and their exact
-            // depth settings.
+        }
+
+        // Nametags last of all, real depth-tested against this same
+        // terrain+entity depth buffer — see `gpu/nametag.rs`'s module doc for
+        // the normal/see-through split and their exact depth settings.
+        //
+        // Their own pass, on the raw (non-sRGB) view, for the same reason the
+        // sign-text pass above has one: the plate is black at vanilla's 25%
+        // background opacity and vanilla blends it on gamma bytes. Both this
+        // pass's pipelines are still drawn in one pass, and in the same order
+        // as before, so the plate still paints over the opaque normal-pass
+        // glyphs exactly as `SubmitNodeCollection`'s phase list does.
+        if draw_nametags
+            && let Some(text_view) = world_text_target
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("world nametag pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: text_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                // The `"world"` span's end edge — see the pass above.
+                timestamp_writes: self
+                    .gpu_timer
+                    .borrow()
+                    .as_ref()
+                    .and_then(|t| t.writes_end("world")),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
             self.nametag.draw(&mut pass, name_tag_counts);
         }
 

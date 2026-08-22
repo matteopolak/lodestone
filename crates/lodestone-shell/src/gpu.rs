@@ -485,6 +485,24 @@ pub struct RenderState {
     /// [`crate::hud::vanilla_font::VanillaFont::shared`]), so nothing
     /// downstream needs to know whether it succeeded.
     nametag: NameTagRenderer,
+    /// The colour format [`RenderState::new`] built every pipeline for — the
+    /// *target's* format, i.e. the sRGB one on a native swapchain. Kept so
+    /// [`RenderState::set_world_text_view`] can derive its non-sRGB
+    /// counterpart itself rather than being told, which is what stops the
+    /// format and the view being decided in two files that can disagree.
+    color_format: wgpu::TextureFormat,
+    /// The colour format the three flat-colour world-text passes
+    /// ([`Self::nametag`], [`Self::sign_text`], [`Self::display_text`]) are
+    /// currently built for. Starts equal to [`Self::color_format`] and becomes
+    /// its raw (non-sRGB) counterpart the first time
+    /// [`RenderState::set_world_text_view`] is called — see that method for
+    /// why vanilla's text has to composite on raw gamma bytes.
+    world_text_format: wgpu::TextureFormat,
+    /// This frame's raw (non-sRGB) view of the same colour texture the world
+    /// is drawing into, installed by [`RenderState::set_world_text_view`] and
+    /// **taken** by `render_inner`, so a view from a swapchain image that has
+    /// already been presented can never be attached a second time.
+    world_text_view: std::cell::RefCell<Option<wgpu::TextureView>>,
     /// Block-entity rigs — chests today. Always constructed, like
     /// [`Self::nametag`] and unlike [`Self::sky`]: it loads its own sheets from
     /// the jar and fail-opens to drawing nothing, so there is no install step for

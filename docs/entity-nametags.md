@@ -236,26 +236,37 @@ records the same reasoning for the same accessor, and lands one step darker
 (`0x3F000000`) only because `Display.TextDisplay`'s own default truncates
 where `ARGB.color(float, int)` rounds.
 
-**The plate's on-screen alpha diverges from vanilla, and the constant is not
-the cause.** Vanilla composites it on raw gamma bytes; every pipeline in this
-pass targets the swapchain's **sRGB** view, so the hardware blends in linear
-light — the same colour-space mismatch `docs/tab-list.md` records for the
-HUD's flat-colour stream, which was fixed there by giving that stream its own
-raw-view pass. For a pure-black source the two agree only at a black backdrop
-and diverge monotonically toward white; re-derived from the sRGB transfer
-function, `0.75·bg` (vanilla) against `encode(0.75·decode(bg))` (here) is `0`
-at `bg = 0`, ≈+7/255 at `bg = 64`, ≈+16/255 at `bg = 128` and ≈+33/255 at
-`bg = 255`. The plate therefore reads **too weak against a bright backdrop**
-(sky) and close to right against a dark one. The fix is structural — the
-flat-colour geometry has to reach a raw (non-sRGB) view, which for a world
-pass means its own render pass plus `lodestone_render::target` work — and is
-**not** a constant to tune in `gpu/nametag.rs`. `gpu/sign_text.rs` and
-`gpu/display_text.rs`'s panels have the identical exposure and should move
-with it.
+**The plate's on-screen alpha used to diverge from vanilla, and the constant
+was never the cause.** Vanilla composites it on raw gamma bytes; every pipeline
+in this pass targeted the swapchain's **sRGB** view, so the hardware blended in
+linear light — the same colour-space mismatch `docs/tab-list.md` records for
+the HUD's flat-colour stream. For a pure-black source the two agree only at a
+black backdrop (white is *not* a second fixed point here, unlike the tab-list
+case) and diverge monotonically toward it; re-derived from the sRGB transfer
+function, `0.75·bg` (vanilla) against `encode(0.75·decode(bg))` (the bug) is
+`0` at `bg = 0`, ≈+7/255 at `bg = 64`, ≈+16/255 at `bg = 128` and ≈+33/255 at
+`bg = 255`, so the plate read **too weak against a bright backdrop** (sky) and
+close to right against a dark one.
 
-Both passes are drawn last in `gpu.rs`'s single "block pass", after
-`debug_lines`, so they read the same depth buffer terrain and every entity
-already wrote this frame — see `RenderState::render_inner`.
+**Fixed structurally, not by tuning the constant** — see
+`docs/world-text-gamma-blend.md`. The three flat-colour world-text passes
+(nametags, sign text, `text_display`) now draw into a **raw** (non-sRGB) view
+of the same colour texture, which because a `wgpu` render pass fixes one
+attachment format for every pipeline in it means two extra render passes rather
+than a different pipeline in the existing one. `RenderState::set_world_text_view`
+installs the view and re-points the pipelines from one expression, and
+`app/redraw.rs` calls it once per frame. Measured live at `Bgra8UnormSrgb`
+against a sky backdrop of 181: the plate now reads **136**, exactly vanilla's
+`181 × 0.749`, where the sRGB pairing gave **159**
+(`tests/world_text_gamma_blend_pixels.rs`).
+
+The nametag pass is drawn last of the world's colour work, after `debug_lines`,
+so it reads the same depth buffer terrain and every entity already wrote this
+frame — see `RenderState::render_inner`. It is its own render pass now rather
+than the tail of the "block pass", but nothing about its ordering changed: both
+its pipelines still draw in one pass, in the same order, so the plate still
+paints over the opaque normal-pass glyphs the way `SubmitNodeCollection`'s
+phase list does.
 
 ## How to change it, and the gotchas
 

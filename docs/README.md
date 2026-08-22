@@ -2148,6 +2148,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `crates/lodestone-server/src/world_state.rs` — closing issues #327 (game rules),
   #328 (difficulty) and #323 (time simulation). Those were the same defect three
   times: **stored-and-broadcast is not enforced, and per-connection is not stored.**
+- [World text and its background plate blend on gamma bytes](./world-text-gamma-blend.md) —
+  The three world-space flat-colour text passes — entity nametags
+  (`gpu/nametag.rs`), sign text (`gpu/sign_text.rs`) and `text_display` glyphs and
+  panels (`gpu/display_text.rs`) — composite into a **raw, non-sRGB view** of the
+  same colour texture the rest of the world draws into, because vanilla is not
+  colour-managed and blends text and its background plate directly on the
+  framebuffer's stored gamma bytes. This is the world-space sibling of the HUD fix
+  `docs/tab-list.md` records; the mechanism differs because a world pass cannot just
+  be handed a second view, it needs a second *render pass*.
 - [One bevy `World` — §4.1(c)](./world-unification.md) — Until this change the
   process held **three** `bevy_ecs::World`s: the net thread's
   (`lodestone_client::state::SharedState`, authoritative over the network read-model),

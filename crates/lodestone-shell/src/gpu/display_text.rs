@@ -190,6 +190,22 @@
 //! later in `gpu/frame.rs` — translucent terrain, particles, weather — which
 //! for a 25%-opaque panel is the point.
 //!
+//! # Colour space: all four pipelines draw into a raw (non-sRGB) view
+//!
+//! Vanilla is not colour-managed, so the background panel's own
+//! `DEFAULT_BACKGROUND_ARGB` — and any synced `text_background_color` — is a
+//! gamma byte composited straight onto the framebuffer's stored bytes. Every
+//! pipeline in this crate targets the swapchain's *sRGB* view, which makes the
+//! hardware blend in linear light and leaves the panel reading too weak against
+//! a bright backdrop (≈+16/255 at a mid-grey, ≈+33/255 at white). So this pass
+//! shares a render pass with `gpu/sign_text.rs` on the target's **raw** view,
+//! installed by `RenderState::set_world_text_view` — a `wgpu` render pass fixes
+//! one attachment format for every pipeline in it, so a separate pass is the
+//! only way to blend differently from the terrain around it. All four ranges
+//! move together and keep their order, and the pass still sits before the
+//! translucent terrain, particles and weather for the reason the section above
+//! gives. See `docs/world-text-gamma-blend.md`.
+//!
 //! # What is deliberately not built (disclosed, not silent)
 //!
 //! - **Wrapping by [`DisplayDraw::text_line_width`] is not implemented.**
@@ -382,6 +398,10 @@ pub(super) struct DisplayTextRenderer {
     /// deliberately placed inside or against geometry, so it is occluded or
     /// fighting for the whole time the flag was asking for neither.
     see_through_pipeline: wgpu::RenderPipeline,
+    /// Kept for [`DisplayTextRenderer::set_color_format`] — see
+    /// [`super::nametag::NameTagRenderer::bind_layout`] for why the layout
+    /// object is retained rather than rebuilt from its descriptor.
+    bind_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     vertices: wgpu::Buffer,
@@ -397,11 +417,6 @@ pub(super) struct DisplayTextRenderer {
 
 impl DisplayTextRenderer {
     pub(super) fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("lodestone-display-text-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/nametag.wgsl").into()),
-        });
-
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lodestone-display-text-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -439,113 +454,14 @@ impl DisplayTextRenderer {
             mapped_at_creation: false,
         });
 
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("lodestone-display-text-layout"),
-            bind_group_layouts: &[Some(&bind_layout)],
-            immediate_size: 0,
-        });
-
-        let vertex_buffers = [Some(wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<DisplayTextVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
-        })];
-
-        // One descriptor, two depth biases — the *only* thing that differs
-        // between `RenderPipelines.TEXT_BACKGROUND` and
-        // `RenderPipelines.TEXT_POLYGON_OFFSET` on our side of the port, so
-        // building them from one closure keeps that visible rather than
-        // burying it in two near-identical literals.
-        let build = |label: &str, depth: wgpu::DepthStencilState| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &vertex_buffers,
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: color_format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    // No culling: the background panel and the glyph quads are
-                    // each built with an explicit, consistent winding, but a
-                    // `Center`-billboarded panel viewed from directly behind an
-                    // entity's own `Fixed` orientation has no "back face" concept
-                    // worth culling, matching `gpu/nametag.rs`/`gpu/sign_text.rs`.
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(depth.clone()),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-
-        // Depth-tested, with the write flag and the polygon offset as the two
-        // axes that differ between the panel and the ink. `LessEqual` is
-        // `GREATER_THAN_OR_EQUAL` through this project's forward `[0,1]`
-        // depth.
-        let tested = |write: bool, bias: wgpu::DepthBiasState| wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: Some(write),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias,
-        };
-        let background_pipeline = build(
-            "lodestone-display-text-background-pipeline",
-            // **Depth write off, where vanilla's `DepthStencilState.DEFAULT`
-            // has it on.** The one deliberate divergence in this file, and it
-            // is a divergence rather than a fix — see the module doc's "The
-            // panel does not write depth, and vanilla's does".
-            tested(false, wgpu::DepthBiasState::default()),
-        );
-        // Vanilla's `TEXT_POLYGON_OFFSET` unchanged, and the ink one further
-        // step in front of it. **The shadow still writes depth**, which is
-        // what keeps the shadow and ink ranges batchable across every display
-        // in the frame — see the module doc for the depth-write-off
-        // alternative and why it was not taken.
-        let shadow_pipeline = build(
-            "lodestone-display-text-shadow-pipeline",
-            tested(true, TEXT_POLYGON_OFFSET),
-        );
-        let glyph_pipeline = build(
-            "lodestone-display-text-glyph-pipeline",
-            tested(true, GLYPH_POLYGON_OFFSET),
-        );
-        // Vanilla's `Optional.empty()` depth state. wgpu still needs the
-        // attachment's format on the pipeline (the render pass has a depth
-        // buffer bound whatever this draw wants), so "no depth state" is
-        // spelled as `Always` plus no write — the same pair of GL calls
-        // `Optional.empty()` compiles down to.
-        let see_through_pipeline = build(
-            "lodestone-display-text-see-through-pipeline",
-            wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            },
-        );
+        let pipelines = build_pipelines(device, &bind_layout, color_format);
 
         Self {
-            background_pipeline,
-            shadow_pipeline,
-            glyph_pipeline,
-            see_through_pipeline,
+            background_pipeline: pipelines.background,
+            shadow_pipeline: pipelines.shadow,
+            glyph_pipeline: pipelines.glyph,
+            see_through_pipeline: pipelines.see_through,
+            bind_layout,
             bind_group,
             uniform,
             vertices,
@@ -554,6 +470,155 @@ impl DisplayTextRenderer {
         }
     }
 
+    /// Rebuild all four pipelines for a colour attachment of `color_format`,
+    /// keeping the font, the ink cache and the vertex buffer. See
+    /// [`super::nametag::NameTagRenderer::set_color_format`] for why the format
+    /// cannot be settled when the renderer is built.
+    pub(super) fn set_color_format(
+        &mut self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) {
+        let pipelines = build_pipelines(device, &self.bind_layout, color_format);
+        self.background_pipeline = pipelines.background;
+        self.shadow_pipeline = pipelines.shadow;
+        self.glyph_pipeline = pipelines.glyph;
+        self.see_through_pipeline = pipelines.see_through;
+    }
+}
+
+/// The four pipelines [`DisplayTextRenderer`] draws through, in draw order.
+struct Pipelines {
+    background: wgpu::RenderPipeline,
+    shadow: wgpu::RenderPipeline,
+    glyph: wgpu::RenderPipeline,
+    see_through: wgpu::RenderPipeline,
+}
+
+/// Build all four for a colour attachment of `color_format` — shared by
+/// [`DisplayTextRenderer::new`] and [`DisplayTextRenderer::set_color_format`]
+/// so the four ported depth states below are written once.
+fn build_pipelines(
+    device: &wgpu::Device,
+    bind_layout: &wgpu::BindGroupLayout,
+    color_format: wgpu::TextureFormat,
+) -> Pipelines {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("lodestone-display-text-shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/nametag.wgsl").into()),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("lodestone-display-text-layout"),
+        bind_group_layouts: &[Some(bind_layout)],
+        immediate_size: 0,
+    });
+
+    let vertex_buffers = [Some(wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<DisplayTextVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+    })];
+
+    // One descriptor, two depth biases — the *only* thing that differs
+    // between `RenderPipelines.TEXT_BACKGROUND` and
+    // `RenderPipelines.TEXT_POLYGON_OFFSET` on our side of the port, so
+    // building them from one closure keeps that visible rather than
+    // burying it in two near-identical literals.
+    let build = |label: &str, depth: wgpu::DepthStencilState| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &vertex_buffers,
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // No culling: the background panel and the glyph quads are
+                // each built with an explicit, consistent winding, but a
+                // `Center`-billboarded panel viewed from directly behind an
+                // entity's own `Fixed` orientation has no "back face" concept
+                // worth culling, matching `gpu/nametag.rs`/`gpu/sign_text.rs`.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(depth.clone()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+
+    // Depth-tested, with the write flag and the polygon offset as the two
+    // axes that differ between the panel and the ink. `LessEqual` is
+    // `GREATER_THAN_OR_EQUAL` through this project's forward `[0,1]`
+    // depth.
+    let tested = |write: bool, bias: wgpu::DepthBiasState| wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(write),
+        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        stencil: wgpu::StencilState::default(),
+        bias,
+    };
+    let background_pipeline = build(
+        "lodestone-display-text-background-pipeline",
+        // **Depth write off, where vanilla's `DepthStencilState.DEFAULT`
+        // has it on.** The one deliberate divergence in this file, and it
+        // is a divergence rather than a fix — see the module doc's "The
+        // panel does not write depth, and vanilla's does".
+        tested(false, wgpu::DepthBiasState::default()),
+    );
+    // Vanilla's `TEXT_POLYGON_OFFSET` unchanged, and the ink one further
+    // step in front of it. **The shadow still writes depth**, which is
+    // what keeps the shadow and ink ranges batchable across every display
+    // in the frame — see the module doc for the depth-write-off
+    // alternative and why it was not taken.
+    let shadow_pipeline = build(
+        "lodestone-display-text-shadow-pipeline",
+        tested(true, TEXT_POLYGON_OFFSET),
+    );
+    let glyph_pipeline = build(
+        "lodestone-display-text-glyph-pipeline",
+        tested(true, GLYPH_POLYGON_OFFSET),
+    );
+    // Vanilla's `Optional.empty()` depth state. wgpu still needs the
+    // attachment's format on the pipeline (the render pass has a depth
+    // buffer bound whatever this draw wants), so "no depth state" is
+    // spelled as `Always` plus no write — the same pair of GL calls
+    // `Optional.empty()` compiles down to.
+    let see_through_pipeline = build(
+        "lodestone-display-text-see-through-pipeline",
+        wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        },
+    );
+
+    Pipelines {
+        background: background_pipeline,
+        shadow: shadow_pipeline,
+        glyph: glyph_pipeline,
+        see_through: see_through_pipeline,
+    }
+}
+
+impl DisplayTextRenderer {
     /// Uploads this frame's view-projection and `text_display` vertices.
     /// Must run before the render pass opens, same buffer-creation
     /// constraint as every other pass in this crate.
@@ -667,6 +732,16 @@ pub(super) struct DisplayTextRanges {
     /// and ink alike — through the one pipeline that neither tests nor
     /// writes depth.
     see_through: u32,
+}
+
+impl DisplayTextRanges {
+    /// Whether this frame has any `text_display` geometry at all. The frame
+    /// loop asks before opening the world-text render pass: an empty pass
+    /// still costs a colour and depth attachment store/load, so a scene with
+    /// no holograms pays nothing for the pass existing.
+    pub(super) const fn is_empty(&self) -> bool {
+        self.backgrounds == 0 && self.shadows == 0 && self.glyphs == 0 && self.see_through == 0
+    }
 }
 
 /// This frame's `text_display` vertices, split into the four pipeline ranges
