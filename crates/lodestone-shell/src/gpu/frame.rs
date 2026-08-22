@@ -1572,29 +1572,46 @@ impl RenderState {
                     }
                 }
 
-                // Opaque-layer particles — block-break debris above all — here,
-                // **before translucent water**, for the same reason the mobs and
-                // block entities above are. Break a block underwater and the
-                // debris used to be painted over the surface however deep it was.
-                //
-                // This is vanilla's split, not a blanket move: `Layer::Opaque`
-                // goes in the `solid` phase and `Layer::Translucent` in
-                // `afterTerrain`, on either side of the translucent terrain draw
-                // (`SubmitNodeCollection.submitQuadParticleGroup` submits the
-                // group into both, and `QuadParticleFeatureRenderer.prepareGroup`
-                // keeps only the layers whose `translucent()` matches). The
-                // translucent half stays below, where every particle used to be.
-                //
-                // Unlike the mobs, this half is still alpha-blended — what makes
-                // the water read correctly is its **depth write**, which the
-                // opaque pipeline has and the translucent one does not: water
-                // tests depth and does not write it, so it can only blend over a
-                // submerged particle that is already in the depth buffer, and can
-                // only be rejected in front of one that is nearer. See
-                // `ParticleRenderer::new`.
-                self.particles
-                    .draw_opaque(&mut pass, &self.particle_atlas_bind_group);
+            }
 
+            // Opaque-layer particles — block-break debris above all — here,
+            // **before translucent water**, for the same reason the mobs and
+            // block entities above are. Break a block underwater and the
+            // debris used to be painted over the surface however deep it was.
+            //
+            // **Outside the `if let Some(model)` gate**, and that placement is
+            // the whole of a bug this pass shipped for two weeks: the gate is
+            // present only because the water and translucent-terrain draws
+            // below need the model renderer, and folding this call into it made
+            // every `Layer::Opaque` particle — all block-break debris, plus
+            // flame, crit, lava, dust and the drips — conditional on a renderer
+            // they do not use. On the packed (demo / no-vanilla-jar) path
+            // `self.model` is `None`, so the debris was uploaded, counted and
+            // never submitted: `particles_drawn` reported 64 over a frame with
+            // nothing in it. The gate is therefore split rather than widened —
+            // the ordering against the items, maps and cracks above and the
+            // water below is unchanged.
+            //
+            // This is vanilla's split, not a blanket move: `Layer::Opaque`
+            // goes in the `solid` phase and `Layer::Translucent` in
+            // `afterTerrain`, on either side of the translucent terrain draw
+            // (`SubmitNodeCollection.submitQuadParticleGroup` submits the
+            // group into both, and `QuadParticleFeatureRenderer.prepareGroup`
+            // keeps only the layers whose `translucent()` matches). The
+            // translucent half stays below, where every particle used to be.
+            //
+            // Unlike the mobs, this half is still alpha-blended — what makes
+            // the water read correctly is its **depth write**, which the
+            // opaque pipeline has and the translucent one does not: water
+            // tests depth and does not write it, so it can only blend over a
+            // submerged particle that is already in the depth buffer, and can
+            // only be rejected in front of one that is nearer. See
+            // `ParticleRenderer::new`.
+            let opaque_submitted = self
+                .particles
+                .draw_opaque(&mut pass, &self.particle_atlas_bind_group);
+
+            if let Some(model) = &self.model {
                 // Translucent water, drawn after all opaque model terrain so the
                 // sea floor already written to depth shows through the surface
                 // (depth test on, depth write off, alpha blend — the fluid
@@ -1730,9 +1747,14 @@ impl RenderState {
             // holds every opaque surface, or fragments behind a wall would show
             // through. Vanilla's `afterTerrain` phase, i.e. after translucent
             // terrain. The outline is drawn after it, as vanilla does.
-            self.particles
-                .draw(&mut pass, &self.particle_atlas_bind_group);
-            stats.particles_drawn = self.particles.count();
+            // Summed from what the two draws **submitted**, not from
+            // `ParticleRenderer::count`, so a half that never reaches its pass
+            // reads as zero here instead of as a full, healthy frame — see
+            // `ParticleRenderer::draw_opaque`.
+            stats.particles_drawn = opaque_submitted
+                + self
+                    .particles
+                    .draw(&mut pass, &self.particle_atlas_bind_group);
             stats.particles_from_sheet = self.particles.sheet_count();
             stats.particle_sheet_atlas_bound = self.particle_sheet_atlas.is_some();
 

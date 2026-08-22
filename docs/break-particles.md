@@ -184,6 +184,7 @@ keeps only the layers whose `translucent()` matches the submission. So
 |---|---|---|
 | vanilla | `OPAQUE_PARTICLE`, `solid` phase | `TRANSLUCENT_PARTICLE`, `afterTerrain` |
 | where in `gpu/frame.rs` | just before the water draw | after it, with weather and the outline |
+| gated on `RenderState::model` | **no** | no |
 | depth write | **on** | off |
 | blend | `ALPHA_BLENDING` | `ALPHA_BLENDING` |
 
@@ -195,6 +196,26 @@ one. Moving the draw without the write would tint particles in front of the surf
 
 `depth_compare` is `Less`, not vanilla's `GREATER_THAN_OR_EQUAL`: depth here is `[0,1]`
 DirectX-style rather than reversed-Z, so every ported comparison flips.
+
+**Neither draw may sit inside `gpu/frame.rs`'s `if let Some(model)` gate, and the row in
+the table above says so because getting it wrong is what shipped.** That gate exists for
+the water and translucent-terrain draws, which need the baked-model renderer; the particle
+pass needs none of it — it binds its own pipeline, its own camera group and its own atlas
+group. When the opaque half was first moved above the water it was written *inside* the
+gate, because that is where the water draw is, and `RenderState::model` is `None` on the
+packed path (the demo world, `--headless`, and any interactive run whose vanilla asset
+load failed and fell back to the demo palette). Every `Layer::Opaque` particle — all
+block-break debris, plus flame, crit, lava, dust and the drips — was then extracted,
+resolved, uploaded and **never submitted**, for two weeks. So the gate is *split* around
+the particle draw rather than the draw being folded into it.
+
+Nothing went red, and the reason is worth carrying: `RenderStats::particles_drawn` was
+sourced from `ParticleRenderer::count`, the size of the *uploaded* buffer, so the debug
+overlay and `break_particles_pixels`' own preamble both reported a healthy 64 over a frame
+with nothing in it. Both `draw_opaque` and `draw` now **return the instance count they
+submitted** and `particles_drawn` is their sum, so a dropped half reads as zero. The pixel
+gate is the other half of the guard: 0 centre pixels before, 24,057 after, with `alive`,
+`drawn` and `unresolved` identical across both.
 
 The one deliberate deviation from vanilla is that `draw_opaque`'s pipeline keeps
 `ALPHA_BLENDING` where vanilla's `OPAQUE_PARTICLE` has no blending at all.
@@ -293,7 +314,14 @@ a gate can prove the table is populated rather than trusting that it is.
   `crates/lodestone-assets/src/bake.rs` (`#particle` resolution) and the multipart
   first-model-wins rule beside it.
 - **Debris draws nothing** → check `ParticleFrame::unresolved` before anything else; an
-  unresolved sprite is silent in pixels but loud in that counter.
+  unresolved sprite is silent in pixels but loud in that counter. If that is `0` and
+  `alive` is not, compare `RenderStats::particles_drawn` against
+  `ParticleRenderer::count`: they are the *submitted* and *uploaded* totals and a gap
+  between them means a draw was skipped, which on the packed path means the opaque half
+  has been folded back inside `gpu/frame.rs`'s `if let Some(model)` gate. Reproduce it
+  without a GPU adapter by nothing at all — this class only shows in pixels, so run
+  `break_particles_pixels`, which uses the demo world precisely because it is the path
+  with no model renderer.
 - **Debris is too bright everywhere, or barely changes between noon and a dark cave** →
   the light term is being applied in the wrong space, not missing. Check that
   `Particles::extract` leaves `ParticleInstance::colour` as the bare tint and that

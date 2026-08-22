@@ -105,7 +105,15 @@ pub struct RenderStats {
     pub entities_drawn: usize,
     /// Entity instances frustum-culled this frame.
     pub entities_culled: usize,
-    /// Particle billboards drawn this frame.
+    /// Particle billboards **submitted** this frame — the sum of what the
+    /// opaque and translucent particle draws each reported, not the size of the
+    /// uploaded instance buffer.
+    ///
+    /// The distinction is load-bearing: this counter used to be sourced from
+    /// the uploaded count, and the opaque half of the pass spent two weeks
+    /// gated behind a renderer it does not use, so every block-break debris
+    /// fragment was uploaded, counted here, and never drawn. A frame with
+    /// nothing in it read exactly like a healthy one.
     pub particles_drawn: usize,
     /// Of [`particles_drawn`](Self::particles_drawn), how many sample the
     /// stitched **particle sheet** (flame, smoke, crits, splashes) rather than
