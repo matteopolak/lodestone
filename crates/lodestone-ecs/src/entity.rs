@@ -456,6 +456,38 @@ pub struct ArmorStandFlags {
     pub marker: bool,
 }
 
+/// An armour stand's six part rotations — `ArmorStand.DATA_HEAD_POSE` through
+/// `DATA_RIGHT_LEG_POSE`
+/// ([`lodestone_model::event::EntityMetadataUpdate::armor_stand_head_pose`] and
+/// its five siblings), merged onto whatever pose the stand already held.
+///
+/// # Why this is merged here rather than carried as six options
+///
+/// A metadata packet mentions only the accessors that changed, so an update
+/// that moves one arm carries one field. This component is the first place the
+/// *previous* pose exists, so it is the first place a merge is possible;
+/// [`lodestone_model::ArmorStandPose::merged`] is that operation, and
+/// [`lodestone_model::ArmorStandPose::VANILLA_DEFAULT`] is what the merge starts
+/// from for a stand seen for the first time — which is not the zero pose, since
+/// vanilla's own `defineId` calls give the arms and legs an authored splay.
+///
+/// # Why a consumer must not treat this component's absence as "no pose"
+///
+/// **Absent** until the first metadata packet carrying one of the six, like
+/// [`ArmorStandFlags`] — but unlike that byte, absence here is *not* the same
+/// as "nothing to apply". Vanilla's `ArmorStandArmorModel.setupAnim` runs the
+/// humanoid `super.setupAnim` — walk cycle, idle bob and all — and then assigns
+/// all six part rotations from the pose unconditionally, so the swing is
+/// computed and discarded on every armour stand in the game, posed or not. A
+/// draw site that applies the pose only when this component exists leaves the
+/// walk cycle standing on every stand that has never been posed, and a stand
+/// moved by a contraption then swings its arms like a running player — with any
+/// held item, resolved off that same arm, swinging with them. The rule is
+/// therefore "every armour stand gets a pose; this component only says whether
+/// it differs from vanilla's default".
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
+pub struct ArmorStandPose(pub lodestone_model::ArmorStandPose);
+
 /// Whether the entity is a baby (ageable mobs only). **Absent** until reported.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Baby(pub bool);

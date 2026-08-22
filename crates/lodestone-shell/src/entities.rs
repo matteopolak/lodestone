@@ -606,6 +606,19 @@ pub const ITEM_ENTITY_TYPE_PATH: &str = "item";
 /// by type path and draws it through the orb billboard pipeline instead.
 pub const EXPERIENCE_ORB_TYPE_PATH: &str = "experience_orb";
 
+/// The entity-type path an **armour stand** reports (`minecraft:armor_stand`).
+///
+/// Unlike [`EXPERIENCE_ORB_TYPE_PATH`] this one does have a model, and the type
+/// test is not about selecting a pipeline — it is the switch that decides
+/// whether the rig runs vanilla's `ArmorStandArmorModel.setupAnim` (pose
+/// assignment) or the plain humanoid one (walk cycle). It has to be answered for
+/// **every** stand, not only for one carrying pose metadata, because vanilla's
+/// assignment is unconditional and a stand nobody has posed still overwrites the
+/// walk cycle — with its own `defineId` defaults. Without this test a stand
+/// carried along by a moving contraption swings its arms like a running player,
+/// and any item in its hand swings off that same arm.
+pub const ARMOR_STAND_TYPE_PATH: &str = "armor_stand";
+
 /// A single entity ready to draw this frame: its model type and interpolated
 /// transform inputs. The renderer turns this into an
 /// [`EntityInstance`](lodestone_render::EntityInstance).
@@ -2025,6 +2038,7 @@ fn render_anim(
     crouching: bool,
     is_passenger: bool,
     swim_amount: f32,
+    armor_stand_pose: Option<lodestone_model::ArmorStandPose>,
 ) -> AnimInput {
     let body = render_yaw(from, to, clock);
     let head = clamp_head_to_body(body, render_head_yaw(from, to, clock), MAX_HEAD_YAW);
@@ -2041,6 +2055,7 @@ fn render_anim(
         crouching,
         is_passenger,
         swim_amount,
+        armor_stand_pose,
     }
 }
 
@@ -2455,11 +2470,21 @@ pub fn extract_entity_draws(
     // `SystemParam`-arity reason. Adding it at the top level really does fail to
     // compile, with an `in_set` "method not found" error a hundred lines away
     // from the parameter that caused it.
-    (tameds, vehicles, armor_stands, item_frame_rotations): (
+    // `ArmorStandPose` lives on the ingest entity too (`ingest::
+    // apply_entity_metadata` merges indices 16-21 into it), bridged the same
+    // way `armor_stands` beside it is and nested here for the same
+    // `SystemParam`-arity reason.
+    //
+    // Read as an `Option` whose **absence still means a pose**: every armour
+    // stand overwrites the humanoid walk cycle in vanilla, posed or not, so a
+    // missing component resolves to `ArmorStandPose::VANILLA_DEFAULT` rather
+    // than to "no pose". See `ARMOR_STAND_TYPE_PATH`.
+    (tameds, vehicles, armor_stands, item_frame_rotations, armor_stand_poses): (
         Query<&lodestone_ecs::entity::Tamed>,
         Query<&lodestone_ecs::entity::Vehicle>,
         Query<&lodestone_ecs::entity::ArmorStandFlags>,
         Query<&ItemFrameRotation>,
+        Query<&lodestone_ecs::entity::ArmorStandPose>,
     ),
     tracks: Query<(
         &MinecraftEntityId,
@@ -2681,6 +2706,23 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| armor_stands.get(entity).ok())
             .copied();
+        // The stand's six part rotations. Gated on the **type**, not on the
+        // component: vanilla's `ArmorStandArmorModel.setupAnim` assigns all six
+        // over the humanoid base pass unconditionally, so a stand that has never
+        // reported a pose still overwrites the walk cycle — with
+        // `ArmorStand`'s own `defineId` defaults, which is what
+        // `ArmorStandPose::default()` carries (and it is not the zero pose).
+        //
+        // Reading the component alone would leave every unposed stand animating
+        // as a walking humanoid, which is the whole defect this chain closes:
+        // a stand moved by a contraption swings its arms, and `merge_held_items`
+        // hangs its item off that same swinging arm.
+        let armor_stand_pose = (kind.0.as_ref() == ARMOR_STAND_TYPE_PATH).then(|| {
+            index
+                .get(id.0)
+                .and_then(|entity| armor_stand_poses.get(entity).ok())
+                .map_or_else(lodestone_model::ArmorStandPose::default, |pose| pose.0)
+        });
         // The imitated block state of a falling block. Bridged off the ingest
         // entity through `index` exactly as `on_fire` above and `hurt` below are,
         // because `lodestone_ecs::ingest::apply_falling_block_state` inserts the
@@ -2785,6 +2827,7 @@ pub fn extract_entity_draws(
                 crouching,
                 is_passenger,
                 swim_amount,
+                armor_stand_pose,
             ),
             name_tag: name_tag.0.clone(),
             hurt,

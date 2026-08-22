@@ -239,6 +239,44 @@ const IDX_CREEPER_POWERED: u8 = 17;
 /// touches `DATA_SWELL_DIR`.
 const IDX_CREEPER_IGNITED: u8 = 18;
 
+/// `ArmorStand.DATA_HEAD_POSE` (`ArmorStand.java`), index 16 — the first of six
+/// consecutive `ROTATIONS` accessors, `DATA_HEAD_POSE` through
+/// `DATA_RIGHT_LEG_POSE` at 16-21, each an `(x, y, z)` triple of Euler degrees.
+///
+/// # Why these six carry no class guard where index 16's `INT` needs two
+///
+/// Index 16 alone is hopeless — the committed jar dump
+/// (`tests/support/entity_data_index_jvm.txt`) lists 29 claimants, which is why
+/// [`IDX_CREEPER_SWELL_DIR`] and [`IDX_DRAGON_PHASE`] each need a
+/// [`MetadataClass`]. But the *serializer* settles it here: grepping that dump
+/// for `ROTATIONS` returns exactly six lines, all six of them `ArmorStand`. So
+/// a `(index, Value::Rotations(_))` pair is unambiguous on the value shape
+/// alone, the same property that lets `VECTOR3`/`QUATERNION` skip a guard, and
+/// the index is only being asked which *part* moved. Adding a class guard would
+/// not be harmless: it would silently drop the pose for any stand whose spawn
+/// packet the adapter could not resolve a class from, which is the failure this
+/// whole chain exists to prevent.
+///
+/// # Why decoding these is load bearing rather than cosmetic
+///
+/// `ArmorStandArmorModel.setupAnim` calls the humanoid `super.setupAnim` —
+/// walk cycle, idle bob and all — and then **assigns** all six part rotations
+/// from these values. Vanilla computes the swing and throws it away. Dropping
+/// these six therefore does not make a stand look neutral; it leaves the walk
+/// cycle in place, so a stand carried by a moving contraption swings its arms
+/// like a running player, and an item in its hand swings with them.
+const IDX_ARMOR_STAND_HEAD_POSE: u8 = 16;
+/// `ArmorStand.DATA_BODY_POSE`, index 17. See [`IDX_ARMOR_STAND_HEAD_POSE`].
+const IDX_ARMOR_STAND_BODY_POSE: u8 = 17;
+/// `ArmorStand.DATA_LEFT_ARM_POSE`, index 18. See [`IDX_ARMOR_STAND_HEAD_POSE`].
+const IDX_ARMOR_STAND_LEFT_ARM_POSE: u8 = 18;
+/// `ArmorStand.DATA_RIGHT_ARM_POSE`, index 19. See [`IDX_ARMOR_STAND_HEAD_POSE`].
+const IDX_ARMOR_STAND_RIGHT_ARM_POSE: u8 = 19;
+/// `ArmorStand.DATA_LEFT_LEG_POSE`, index 20. See [`IDX_ARMOR_STAND_HEAD_POSE`].
+const IDX_ARMOR_STAND_LEFT_LEG_POSE: u8 = 20;
+/// `ArmorStand.DATA_RIGHT_LEG_POSE`, index 21. See [`IDX_ARMOR_STAND_HEAD_POSE`].
+const IDX_ARMOR_STAND_RIGHT_LEG_POSE: u8 = 21;
+
 /// `EnderDragon.DATA_PHASE` (`EnderDragon.java`), `EnderDragon`'s first
 /// `defineId` and therefore index 16 by the same class-hierarchy count as
 /// [`IDX_CREEPER_SWELL_DIR`] (`Entity`(0-7) → `LivingEntity`(8-14) →
@@ -598,6 +636,12 @@ enum Value {
     OptBlockPos(Option<BlockPos>),
     /// A resolved registry-holder appearance variant (cat, cow, wolf, …).
     Keyed(Identifier),
+    /// A decoded `ROTATIONS` — an `(x, y, z)` triple of Euler **degrees**,
+    /// already reduced by `Rotations`' own compact constructor. The six
+    /// `ArmorStand` pose accessors are this serializer's only claimants in the
+    /// jar dump, so no class guard gates the arms that read it; see
+    /// [`IDX_ARMOR_STAND_HEAD_POSE`].
+    Rotations(Vec3f),
     /// A decoded `VECTOR3` — `Display.DATA_TRANSLATION_ID`/`DATA_SCALE_ID`,
     /// the only claimants of that serializer in the 26.2 jar dump. See
     /// [`IDX_DISPLAY_TRANSLATION`]/[`IDX_DISPLAY_SCALE`].
@@ -683,6 +727,24 @@ fn unpack_block_pos(packed: i64) -> BlockPos {
     BlockPos::new(x, y, z)
 }
 
+/// `Rotations`' compact constructor, applied per component: a non-finite value
+/// becomes `0.0`, a finite one is reduced modulo 360.
+///
+/// Vanilla runs this inside the record's own constructor, so **every**
+/// `Rotations` the client holds has already been through it — including the ones
+/// its stream codec decodes straight off the wire. Reproducing it at the decode
+/// site is what keeps a hostile or buggy server from putting a `NaN` into a part
+/// rotation, where it would poison every matrix composed from that part rather
+/// than merely mispose it.
+///
+/// The modulo alone is cosmetically inert (a rotation of 720° draws as 0°); it is
+/// transcribed anyway because it is half of one expression, and splitting a
+/// ported formula on "which half is observable" is how a later reader ends up
+/// re-deriving the whole thing.
+fn rotations_component(raw: f32) -> f32 {
+    if raw.is_finite() { raw % 360.0 } else { 0.0 }
+}
+
 fn unknown_serializer(id: i32) -> Error {
     Error::InvalidEnumVariant {
         name: "v770 entity-data serializer",
@@ -731,31 +793,26 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             }
         }
         SER_BOOLEAN => Value::Bool(reader.bool()?),
-        // **Not carried yet — this is a gap, not a decision.** The only
-        // claimants of this serializer are an armour stand's six pose
-        // accessors, `ArmorStand.DATA_HEAD_POSE` through
-        // `DATA_RIGHT_LEG_POSE` (indices 16-21), each an `(x, y, z)` triple of
-        // Euler degrees. Every one is read for alignment and dropped here, so
-        // a stand posed by a builder arrives with its pose on the wire and
-        // reaches no component.
+        // An armour stand's six pose accessors, `ArmorStand.DATA_HEAD_POSE`
+        // through `DATA_RIGHT_LEG_POSE` (indices 16-21) — each an `(x, y, z)`
+        // triple of Euler **degrees**. They are the *only* claimants of this
+        // serializer in the jar dump, so the value shape alone identifies the
+        // field family and the call site's arms need no class guard, exactly
+        // as for `VECTOR3`/`QUATERNION`; the index still separates the six
+        // parts from each other. See [`IDX_ARMOR_STAND_HEAD_POSE`].
         //
-        // The consequence is not "the stand looks neutral", which is what a
-        // dropped cosmetic usually costs. Vanilla's armour-stand model applies
-        // the shared humanoid walk cycle first and then **overwrites** all six
-        // part rotations from these poses, so the swing is computed and thrown
-        // away; with the poses missing, nothing overwrites it and the walk
-        // cycle survives instead. A moving stand therefore swings its arms,
-        // and an item in its hand — posed off that same arm — swings with it.
-        //
-        // Wiring this needs the whole chain in one change (a pose component,
-        // an `EntityDraw` field, the rig applying it, and the walk cycle
-        // suppressed for this type); decoding it here alone would only add a
-        // field nothing reads.
+        // The canonicalisation mirrors `Rotations`' own compact constructor,
+        // which is applied on construction and therefore on every value the
+        // client ever holds: a non-finite component becomes `0.0`, and a
+        // finite one is reduced modulo 360. The modulo is cosmetically inert
+        // for a rotation; the non-finite clamp is not — a `NaN` reaching the
+        // rig poisons every matrix composed from it, and this is the single
+        // place that can stop it.
         SER_ROTATIONS => {
-            reader.f32()?;
-            reader.f32()?;
-            reader.f32()?;
-            Value::Consumed
+            let x = rotations_component(reader.f32()?);
+            let y = rotations_component(reader.f32()?);
+            let z = rotations_component(reader.f32()?);
+            Value::Rotations(Vec3f::new(x, y, z))
         }
         SER_BLOCK_POS => {
             reader.i64()?;
@@ -1027,6 +1084,30 @@ pub fn read_entity_metadata(
             // negative or out-of-range int is a datapack, not a rotation.
             (IDX_ITEM_FRAME_ROTATION, Value::Int(v)) if class == Some(MetadataClass::ItemFrame) => {
                 md.item_frame_rotation = Some((v.rem_euclid(8)) as u8);
+            }
+            // `ArmorStand`'s six pose accessors. No class guard: `ROTATIONS` has
+            // exactly these six claimants in the jar dump, so the value shape
+            // alone establishes the family and the index only says which part
+            // moved — see [`IDX_ARMOR_STAND_HEAD_POSE`] for why adding a guard
+            // here would be a regression rather than belt-and-braces.
+            //
+            // Six fields rather than one merged pose because a metadata packet
+            // mentions only the accessors that changed; the merge onto the
+            // previous pose happens where that previous pose exists. See
+            // [`lodestone_model::ArmorStandPose`].
+            (IDX_ARMOR_STAND_HEAD_POSE, Value::Rotations(r)) => md.armor_stand_pose.head = Some(r),
+            (IDX_ARMOR_STAND_BODY_POSE, Value::Rotations(r)) => md.armor_stand_pose.body = Some(r),
+            (IDX_ARMOR_STAND_LEFT_ARM_POSE, Value::Rotations(r)) => {
+                md.armor_stand_pose.left_arm = Some(r);
+            }
+            (IDX_ARMOR_STAND_RIGHT_ARM_POSE, Value::Rotations(r)) => {
+                md.armor_stand_pose.right_arm = Some(r);
+            }
+            (IDX_ARMOR_STAND_LEFT_LEG_POSE, Value::Rotations(r)) => {
+                md.armor_stand_pose.left_leg = Some(r);
+            }
+            (IDX_ARMOR_STAND_RIGHT_LEG_POSE, Value::Rotations(r)) => {
+                md.armor_stand_pose.right_leg = Some(r);
             }
             // `EndCrystal.DATA_BEAM_TARGET`. No class guard: the index already
             // disambiguates (see [`IDX_CRYSTAL_BEAM_TARGET`]'s own doc for why
@@ -1980,6 +2061,124 @@ mod tests {
         assert_eq!(md.living_flags, None);
     }
 
+    /// All six `ROTATIONS` accessors, indices 16-21, decode to their own pose
+    /// field — **not** into one another.
+    ///
+    /// # Why every one of the eighteen floats is distinct
+    ///
+    /// Six adjacent fields of one type, each three adjacent floats, is the
+    /// worst possible shape for a transposition: swap any two and the wire
+    /// stays byte-legal, our own round trip stays byte-perfect, and the only
+    /// symptom is a stand whose left arm is where its right leg should be.
+    /// Every value below is unique across the whole fixture, so no pair can be
+    /// exchanged without an assertion moving — and the signs and magnitudes
+    /// differ too, so a mirrored decode cannot pass either.
+    ///
+    /// The bytes are hand-built here rather than produced by an encoder of
+    /// ours: there is no armour-stand pose *encoder* in this crate to round
+    /// trip against, which is the honest form of "the expected value comes
+    /// from outside the code under test" — the layout is `Rotations`'
+    /// stream codec, three big-endian `f32`s, and nothing here can agree with
+    /// a mistake in it.
+    #[test]
+    fn decodes_all_six_armor_stand_pose_accessors_into_distinct_fields() {
+        // (index, x, y, z) — eighteen pairwise-distinct values.
+        let fields: [(u8, f32, f32, f32); 6] = [
+            (IDX_ARMOR_STAND_HEAD_POSE, 11.0, 12.0, 13.0),
+            (IDX_ARMOR_STAND_BODY_POSE, 21.0, 22.0, 23.0),
+            (IDX_ARMOR_STAND_LEFT_ARM_POSE, 31.0, 32.0, 33.0),
+            (IDX_ARMOR_STAND_RIGHT_ARM_POSE, -41.0, -42.0, -43.0),
+            (IDX_ARMOR_STAND_LEFT_LEG_POSE, 51.5, 52.5, 53.5),
+            (IDX_ARMOR_STAND_RIGHT_LEG_POSE, -61.5, -62.5, -63.5),
+        ];
+        let mut bytes = Vec::new();
+        for (index, x, y, z) in fields {
+            bytes.push(index);
+            bytes.extend(varint(SER_ROTATIONS));
+            bytes.extend(x.to_be_bytes());
+            bytes.extend(y.to_be_bytes());
+            bytes.extend(z.to_be_bytes());
+        }
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, an_armor_stand())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        // Collected rather than asserted one at a time: an `assert_eq!` per
+        // part stops at the first mismatch, which for a transposition would
+        // report one wrong part and hide the one it was swapped with.
+        let mut wrong = Vec::new();
+        let decoded = [
+            ("head", md.armor_stand_pose.head),
+            ("body", md.armor_stand_pose.body),
+            ("left_arm", md.armor_stand_pose.left_arm),
+            ("right_arm", md.armor_stand_pose.right_arm),
+            ("left_leg", md.armor_stand_pose.left_leg),
+            ("right_leg", md.armor_stand_pose.right_leg),
+        ];
+        for ((name, got), (_, x, y, z)) in decoded.iter().zip(fields) {
+            let want = Vec3f::new(x, y, z);
+            if *got != Some(want) {
+                wrong.push(format!("{name}: got {got:?}, want {want:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "armour-stand pose mismatches:\n{}", wrong.join("\n"));
+    }
+
+    /// The negative half of the arms above: those six indices are shared with a
+    /// crowd of unrelated accessors, and only the `ROTATIONS` value shape
+    /// separates them. A mob's index-16 `INT` must not land in a pose field.
+    ///
+    /// This is the control for the "no class guard" decision — the arms key on
+    /// the value, so something else at the same index has to be shown *not* to
+    /// reach them.
+    #[test]
+    fn an_int_at_a_pose_index_never_surfaces_as_a_pose() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_ARMOR_STAND_HEAD_POSE); // 16 — also Creeper.DATA_SWELL_DIR
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(1));
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_creeper())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.creeper_swell_dir, Some(1), "the int must still reach its own field");
+        assert_eq!(md.armor_stand_pose.head, None, "and must not reach a pose field");
+    }
+
+    /// `Rotations`' compact constructor, reproduced at the decode site: a
+    /// non-finite component becomes `0.0` and a finite one is reduced modulo
+    /// 360.
+    ///
+    /// The `NaN` case is the one that matters — a `NaN` rotation reaching the
+    /// rig poisons every matrix composed from that part, so it must be stopped
+    /// here rather than mispose one joint. Asserted per component, with the
+    /// three components carrying *different* hazards, so a fix that handled
+    /// only one of them cannot pass.
+    #[test]
+    fn a_non_finite_rotation_is_clamped_and_a_large_one_is_wrapped() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_ARMOR_STAND_BODY_POSE);
+        bytes.extend(varint(SER_ROTATIONS));
+        bytes.extend(f32::NAN.to_be_bytes());
+        bytes.extend(f32::INFINITY.to_be_bytes());
+        bytes.extend(450.0f32.to_be_bytes());
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, an_armor_stand())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(
+            md.armor_stand_pose.body,
+            Some(Vec3f::new(0.0, 0.0, 90.0)),
+            "NaN and infinity become 0.0; 450 wraps to 90"
+        );
+    }
+
     /// The three-way fork over one fixture byte, so no one path's result is a
     /// lone assertion about a shape that might differ between the others.
     /// Mirrors `the_living_guard_is_the_only_difference_between_the_two_decodes`.
@@ -2922,6 +3121,42 @@ mod tests {
                 "IDX_TAMABLE_OR_HORSE_FLAGS",
                 "AbstractHorse.DATA_ID_FLAGS",
                 SER_BYTE,
+            ),
+            (
+                IDX_ARMOR_STAND_HEAD_POSE,
+                "IDX_ARMOR_STAND_HEAD_POSE",
+                "ArmorStand.DATA_HEAD_POSE",
+                SER_ROTATIONS,
+            ),
+            (
+                IDX_ARMOR_STAND_BODY_POSE,
+                "IDX_ARMOR_STAND_BODY_POSE",
+                "ArmorStand.DATA_BODY_POSE",
+                SER_ROTATIONS,
+            ),
+            (
+                IDX_ARMOR_STAND_LEFT_ARM_POSE,
+                "IDX_ARMOR_STAND_LEFT_ARM_POSE",
+                "ArmorStand.DATA_LEFT_ARM_POSE",
+                SER_ROTATIONS,
+            ),
+            (
+                IDX_ARMOR_STAND_RIGHT_ARM_POSE,
+                "IDX_ARMOR_STAND_RIGHT_ARM_POSE",
+                "ArmorStand.DATA_RIGHT_ARM_POSE",
+                SER_ROTATIONS,
+            ),
+            (
+                IDX_ARMOR_STAND_LEFT_LEG_POSE,
+                "IDX_ARMOR_STAND_LEFT_LEG_POSE",
+                "ArmorStand.DATA_LEFT_LEG_POSE",
+                SER_ROTATIONS,
+            ),
+            (
+                IDX_ARMOR_STAND_RIGHT_LEG_POSE,
+                "IDX_ARMOR_STAND_RIGHT_LEG_POSE",
+                "ArmorStand.DATA_RIGHT_LEG_POSE",
+                SER_ROTATIONS,
             ),
         ];
         assert!(!claims.is_empty(), "the claim table is empty, so this test proves nothing");

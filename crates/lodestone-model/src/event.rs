@@ -452,6 +452,32 @@ pub struct EntityMetadataUpdate {
     /// flags", which a consumer must read as "no armour-stand-specific
     /// cosmetics known", never as a cleared bitfield.
     pub armor_stand_flags: Option<u8>,
+    /// An armour stand's six part rotations, as far as *this* packet reported
+    /// them — `ArmorStand.DATA_HEAD_POSE` through `DATA_RIGHT_LEG_POSE`,
+    /// indices 16-21, each an `(x, y, z)` triple of Euler **degrees**.
+    ///
+    /// # Why the six stay individually optional
+    ///
+    /// A metadata packet carries only the accessors that *changed*, so an
+    /// update that moves one arm mentions one index. Collapsing them into a
+    /// whole [`ArmorStandPose`] here would force this type to invent values for
+    /// the five it was not told about, and a consumer could not tell an
+    /// unreported part from one explicitly set back to its default. The merge
+    /// into a whole pose belongs where the *previous* pose exists — see
+    /// [`ArmorStandPose::merged`].
+    ///
+    /// # Why a consumer must apply a pose even when every part is `None`
+    ///
+    /// Vanilla's `ArmorStandArmorModel.setupAnim` calls the humanoid
+    /// `super.setupAnim` — walk cycle, idle bob and all — and then **assigns**
+    /// all six part rotations from the pose, unconditionally. The swing is
+    /// computed and thrown away. A stand that has never reported a pose still
+    /// has one: `ArmorStand`'s own `defineId` defaults, which
+    /// [`ArmorStandPose::VANILLA_DEFAULT`] carries. Treating "nothing reported"
+    /// as "do not overwrite" leaves the walk cycle standing, and a stand carried
+    /// along by a moving contraption then swings its arms — with any held item,
+    /// posed off that same arm, swinging with it.
+    pub armor_stand_pose: ArmorStandPoseUpdate,
     /// The custom name. [`Reported::Unreported`] when this packet did not
     /// mention it; [`Reported::Reported(None)`](Reported::Reported) is an
     /// explicit clear; [`Reported::Reported(Some(name))`](Reported::Reported)
@@ -749,6 +775,7 @@ impl EntityMetadataUpdate {
             && self.living_flags.is_none()
             && self.mob_flags.is_none()
             && self.armor_stand_flags.is_none()
+            && self.armor_stand_pose.is_empty()
             && !self.custom_name.is_reported()
             && self.custom_name_visible.is_none()
             && self.pose.is_none()
@@ -780,6 +807,151 @@ impl EntityMetadataUpdate {
             && self.display_block_state.is_none()
             && self.display_item_context.is_none()
             && self.display_brightness_override.is_none()
+    }
+
+}
+
+/// An armour stand's six part rotations, merged into the whole pose a renderer
+/// applies — vanilla's `ArmorStand.ArmorStandPose` record, in **degrees**.
+///
+/// [`EntityMetadataUpdate`] carries the same six values *individually* and
+/// optionally, because a metadata packet mentions only the accessors that
+/// changed; this is what a consumer gets after merging one such update onto the
+/// pose it already held. [`Self::VANILLA_DEFAULT`] is the starting point, and it
+/// is **not** the all-zero pose: `ArmorStand`'s own `defineId` calls give the
+/// arms and legs a small authored splay, so a stand nobody has ever posed still
+/// has a pose.
+///
+/// # Why this exists as a value type at all
+///
+/// Vanilla's `ArmorStandArmorModel.setupAnim` runs `HumanoidModel`'s whole
+/// `setupAnim` — head tracking, walk cycle, idle bob — and then **assigns** all
+/// six of these over the top. That assignment is the only thing stopping an
+/// armour stand animating like a walking humanoid, so this value has to reach
+/// the rig; a client that decodes it and drops it draws a stand that swings its
+/// arms as it moves, and swings whatever it is holding with them.
+///
+/// Angles are degrees rather than radians because that is what the wire carries
+/// and what a builder types; the single conversion belongs at the rig, next to
+/// the other unit choices its model space makes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArmorStandPose {
+    /// `ArmorStand.getHeadPose()`.
+    pub head: Vec3f,
+    /// `ArmorStand.getBodyPose()`. Also drives the visible stand model's three
+    /// body sticks — see [`EntityMetadataUpdate::armor_stand_body_pose`].
+    pub body: Vec3f,
+    /// `ArmorStand.getLeftArmPose()`.
+    pub left_arm: Vec3f,
+    /// `ArmorStand.getRightArmPose()`.
+    pub right_arm: Vec3f,
+    /// `ArmorStand.getLeftLegPose()`.
+    pub left_leg: Vec3f,
+    /// `ArmorStand.getRightLegPose()`.
+    pub right_leg: Vec3f,
+}
+
+impl ArmorStandPose {
+    /// The pose every armour stand starts with — `ArmorStand`'s six
+    /// `DEFAULT_*_POSE` constants, the values its `defineEntityData` registers
+    /// each accessor with.
+    ///
+    /// Head and body are level; the arms and legs carry a small authored splay,
+    /// which is why this is a named constant rather than [`Default`]'s zeroes.
+    /// A stand that has never sent a pose is in *this* pose, not in a neutral
+    /// one, and not in whatever the walk cycle would have produced.
+    pub const VANILLA_DEFAULT: Self = Self {
+        head: Vec3f::new(0.0, 0.0, 0.0),
+        body: Vec3f::new(0.0, 0.0, 0.0),
+        left_arm: Vec3f::new(-10.0, 0.0, -10.0),
+        right_arm: Vec3f::new(-15.0, 0.0, 10.0),
+        left_leg: Vec3f::new(-1.0, 0.0, -1.0),
+        right_leg: Vec3f::new(1.0, 0.0, 1.0),
+    };
+
+    /// Applies whichever of an update's six parts were reported, leaving the
+    /// rest of this pose alone.
+    ///
+    /// This is the merge the split in [`ArmorStandPoseUpdate`] exists to make
+    /// possible: an update that moves one arm must not reset the other five
+    /// parts, and vanilla's `SynchedEntityData` has exactly these
+    /// per-accessor-overwrite semantics.
+    #[must_use]
+    pub fn merged(mut self, update: ArmorStandPoseUpdate) -> Self {
+        for (slot, reported) in [
+            (&mut self.head, update.head),
+            (&mut self.body, update.body),
+            (&mut self.left_arm, update.left_arm),
+            (&mut self.right_arm, update.right_arm),
+            (&mut self.left_leg, update.left_leg),
+            (&mut self.right_leg, update.right_leg),
+        ] {
+            if let Some(value) = reported {
+                *slot = value;
+            }
+        }
+        self
+    }
+}
+
+/// The armour-stand pose fields one metadata packet reported, each part
+/// independently present or absent — the wire's shape, as against
+/// [`ArmorStandPose`]'s whole-pose shape.
+///
+/// Kept as a named struct rather than six loose fields on
+/// [`EntityMetadataUpdate`] or an array of six because the merge has to be
+/// carried across a deferred command boundary, and six same-typed values in a
+/// row is the shape a transposition survives unnoticed: swap two and every
+/// round trip still agrees while a stand's left arm sits where its right leg
+/// should be. Names are the only thing that makes such a swap a compile error.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ArmorStandPoseUpdate {
+    /// `ArmorStand.DATA_HEAD_POSE`, index 16, in degrees.
+    pub head: Option<Vec3f>,
+    /// `ArmorStand.DATA_BODY_POSE`, index 17, in degrees.
+    ///
+    /// Poses four parts rather than one: vanilla's `ArmorStandModel.setupAnim`
+    /// — the *visible* stand model, one subclass below the armour model — drives
+    /// `right_body_stick`, `left_body_stick` and `shoulder_stick` from this same
+    /// value as well as the body itself.
+    pub body: Option<Vec3f>,
+    /// `ArmorStand.DATA_LEFT_ARM_POSE`, index 18, in degrees.
+    pub left_arm: Option<Vec3f>,
+    /// `ArmorStand.DATA_RIGHT_ARM_POSE`, index 19, in degrees.
+    pub right_arm: Option<Vec3f>,
+    /// `ArmorStand.DATA_LEFT_LEG_POSE`, index 20, in degrees.
+    pub left_leg: Option<Vec3f>,
+    /// `ArmorStand.DATA_RIGHT_LEG_POSE`, index 21, in degrees.
+    pub right_leg: Option<Vec3f>,
+}
+
+impl ArmorStandPoseUpdate {
+    /// Whether this update mentions no part at all, so a fold has nothing to
+    /// merge.
+    ///
+    /// **Not** "this stand has no pose" — every armour stand has one. See
+    /// [`EntityMetadataUpdate::armor_stand_pose`] for why the two readings
+    /// differ and what applying the second one costs.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.head.is_none()
+            && self.body.is_none()
+            && self.left_arm.is_none()
+            && self.right_arm.is_none()
+            && self.left_leg.is_none()
+            && self.right_leg.is_none()
+    }
+}
+
+impl Default for ArmorStandPose {
+    /// [`Self::VANILLA_DEFAULT`], **not** the zero pose.
+    ///
+    /// Deliberate: every caller that reaches for a default here wants "the pose
+    /// an unposed stand is in", and that is the one vanilla registers. A zeroed
+    /// default would silently straighten every stand's arms and legs the first
+    /// time one appeared without metadata.
+    fn default() -> Self {
+        Self::VANILLA_DEFAULT
     }
 }
 

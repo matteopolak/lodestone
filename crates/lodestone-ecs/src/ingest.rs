@@ -48,7 +48,7 @@ use lodestone_model::{AnimationAction, ClientEvent, EntityMovement, Reported};
 use lodestone_physics::Vec3d;
 
 use crate::entity::{
-    ArmorStandFlags, Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName,
+    ArmorStandFlags, ArmorStandPose, Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName,
     CustomNameVisible, DeathTime, DisplayBackgroundColor, DisplayBillboard, DisplayBlockState,
     DisplayBrightness, DisplayItem, DisplayItemContext, DisplayLeftRotation, DisplayLineWidth,
     DisplayRightRotation, DisplayScale, DisplayStyleFlags, DisplayText, DisplayTextOpacity,
@@ -931,6 +931,41 @@ pub fn apply_entity_metadata(
                 no_base_plate: decoded.no_base_plate(),
                 marker: decoded.marker(),
             });
+        }
+        // The armour stand's six `ROTATIONS` pose accessors (indices 16-21),
+        // the other half of what a decorative stand carries alongside the
+        // client-flags byte above. Unlike every insert around it this one
+        // **merges**: a metadata packet mentions only the accessors that
+        // changed, so an update nudging one arm must leave the other five parts
+        // where they were, exactly as vanilla's per-accessor `SynchedEntityData`
+        // does. The base for a stand seen for the first time is vanilla's own
+        // `defineId` default, not zeroes — see `ArmorStandPose`'s doc for why
+        // that distinction is load bearing and why a *missing* component still
+        // means "apply the default pose" rather than "apply nothing".
+        let pose_update = metadata.armor_stand_pose;
+        if !pose_update.is_empty() {
+            // `entry`, not `insert`: this is the one fold in this system that
+            // **merges** rather than replaces. A metadata packet mentions only
+            // the accessors that changed, so an update nudging one arm must
+            // leave the other five parts where they were — exactly vanilla's
+            // per-accessor `SynchedEntityData` semantics.
+            //
+            // It has to be an entry rather than a read-then-insert because
+            // `Commands` is deferred: a `Query` read here would see the
+            // *pre-batch* pose, so two updates to the same stand in one batch
+            // would each merge onto the same stale base and the first would be
+            // silently lost. `and_modify` runs when the command is applied, in
+            // command order, so the second merge sees the first's result.
+            //
+            // The base for a stand seen for the first time is vanilla's own
+            // `defineId` default, not zeroes — and a *missing* component still
+            // means "apply the default pose" rather than "apply nothing"; see
+            // `ArmorStandPose`'s own doc for why that distinction is what
+            // actually stops a moving stand swinging its arms.
+            entity
+                .entry::<ArmorStandPose>()
+                .or_default()
+                .and_modify(move |mut pose| pose.0 = pose.0.merged(pose_update));
         }
         if let Some(variant) = &metadata.variant {
             entity.insert(Variant(variant.clone()));
@@ -2030,6 +2065,126 @@ mod tests {
             }),
             "a health-only update cleared the flags — an unrelated field must not \
              touch this component"
+        );
+    }
+
+    /// The armour-stand pose fold, and the property that makes it different
+    /// from every other arm in `apply_entity_metadata`: it **merges**.
+    ///
+    /// A metadata packet mentions only the accessors that changed, so an update
+    /// nudging one arm must leave the other five parts where they were —
+    /// vanilla's per-accessor `SynchedEntityData` semantics. An arm written with
+    /// `insert` would pass a single-packet test and silently reset five parts on
+    /// the second packet, which is the realistic case (a builder's editor sends
+    /// one part at a time).
+    ///
+    /// Every value here is pairwise distinct across all three packets, so no
+    /// pair of parts can be exchanged without an assertion moving.
+    #[test]
+    fn armor_stand_pose_fields_merge_onto_the_vanilla_default() {
+        use lodestone_model::{ArmorStandPose as Pose, ArmorStandPoseUpdate, Vec3f};
+
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(23, "minecraft:armor_stand"));
+        assert!(
+            entity_for(&world, 23).get::<ArmorStandPose>().is_none(),
+            "absent until the first packet mentions a part — which does NOT mean the \
+             stand has no pose: a draw site must apply the vanilla default in that case, \
+             or an unposed stand keeps the humanoid walk cycle"
+        );
+
+        // First packet: one arm only.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    armor_stand_pose: ArmorStandPoseUpdate {
+                        left_arm: Some(Vec3f::new(31.0, 32.0, 33.0)),
+                        ..ArmorStandPoseUpdate::default()
+                    },
+                    ..EntityMetadataUpdate::default()
+                },
+                23,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 23).get::<ArmorStandPose>(),
+            Some(&ArmorStandPose(Pose {
+                left_arm: Vec3f::new(31.0, 32.0, 33.0),
+                ..Pose::VANILLA_DEFAULT
+            })),
+            "the five unmentioned parts must take vanilla's own defineId defaults, \
+             not zeroes"
+        );
+
+        // Second packet: a *different* part. The first must survive it.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    armor_stand_pose: ArmorStandPoseUpdate {
+                        right_leg: Some(Vec3f::new(-61.0, -62.0, -63.0)),
+                        ..ArmorStandPoseUpdate::default()
+                    },
+                    ..EntityMetadataUpdate::default()
+                },
+                23,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 23).get::<ArmorStandPose>(),
+            Some(&ArmorStandPose(Pose {
+                left_arm: Vec3f::new(31.0, 32.0, 33.0),
+                right_leg: Vec3f::new(-61.0, -62.0, -63.0),
+                ..Pose::VANILLA_DEFAULT
+            })),
+            "the second packet reset the first part — this fold merges, it does not replace"
+        );
+
+        // And an update mentioning no part at all leaves the pose alone.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    health: Some(20.0),
+                    ..EntityMetadataUpdate::default()
+                },
+                23,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 23).get::<ArmorStandPose>(),
+            Some(&ArmorStandPose(Pose {
+                left_arm: Vec3f::new(31.0, 32.0, 33.0),
+                right_leg: Vec3f::new(-61.0, -62.0, -63.0),
+                ..Pose::VANILLA_DEFAULT
+            })),
+            "an unrelated field must not touch this component"
+        );
+    }
+
+    /// The router check for the pose, in the shape this module already uses for
+    /// every other metadata-borne fact: the six accessors ride
+    /// `EntityMetadataUpdated`, and if this module ever stops claiming that
+    /// event `apply_entity_metadata` never runs and every armour stand goes back
+    /// to swinging its arms as it moves.
+    #[test]
+    fn the_metadata_event_carrying_an_armor_stand_pose_is_claimed_by_this_module() {
+        let event = metadata(
+            EntityMetadataUpdate {
+                armor_stand_pose: lodestone_model::ArmorStandPoseUpdate {
+                    head: Some(lodestone_model::Vec3f::new(11.0, 12.0, 13.0)),
+                    ..lodestone_model::ArmorStandPoseUpdate::default()
+                },
+                ..EntityMetadataUpdate::default()
+            },
+            7,
+        );
+        assert!(
+            handles_event(&event),
+            "armour-stand poses ride `EntityMetadataUpdated`; if this module stops \
+             claiming it, `apply_entity_metadata` never folds `ArmorStandPose` and \
+             every stand animates as a walking humanoid"
         );
     }
 

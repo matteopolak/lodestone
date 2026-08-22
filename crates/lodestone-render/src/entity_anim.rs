@@ -524,6 +524,43 @@ pub struct AnimInput {
     /// of its own — vanilla runs it unconditionally for every renderer whose
     /// model extends `HumanoidModel`.
     pub swim_amount: f32,
+    /// An armour stand's six part rotations, in degrees — `Some` for **every**
+    /// armour stand, `None` for everything else.
+    ///
+    /// # This is not "an optional extra pose", it is the whole animation
+    ///
+    /// Vanilla's `ArmorStandArmorModel.setupAnim` calls the humanoid
+    /// `super.setupAnim` — head tracking, walk cycle, crouch, item pose, attack
+    /// swing, idle bob — and then **assigns** `head`, `body`, both arms and both
+    /// legs from these six values. Everything the base pass computed for those
+    /// joints is discarded. [`Skeleton::setup_anim`] does the same, in the same
+    /// order, for exactly the same reason: it is what stops an armour stand
+    /// animating like a walking humanoid.
+    ///
+    /// So `None` here does not mean "leave the stand in a neutral pose" — it
+    /// means "this is not an armour stand". A caller that passes `None` for a
+    /// stand it has no pose data for gets the walk cycle, and a stand carried
+    /// along by a moving contraption then swings its arms like a running
+    /// player, with any held item swinging off the same arm. The honest default
+    /// for a stand nobody has posed is
+    /// [`ArmorStandPose::VANILLA_DEFAULT`](lodestone_model::ArmorStandPose::VANILLA_DEFAULT),
+    /// which is the pose `ArmorStand`'s own `defineId` calls register — arms and
+    /// legs slightly splayed, not zeroed.
+    ///
+    /// # Why the walk cycle is computed and then discarded rather than skipped
+    ///
+    /// Skipping it — an entity-type gate on the family, or a
+    /// [`HumanoidArms`] variant — would be cheaper and would look tidier, and it
+    /// is not what vanilla does. The two differ in a way that shows: the base
+    /// pass writes part *translations* as well as rotations (the crouch's `y`
+    /// offsets, the attack swing's arm orbit and body twist), and the assignment
+    /// covers **rotations only**, so those translations survive in vanilla and
+    /// would vanish under a gate. Matching the overwrite keeps this rig's
+    /// behaviour derived from the source rather than from an argument about what
+    /// ought to be equivalent — see [`HumanoidArms::Zombie`] for the one place
+    /// this crate does take the skip, where the discarded terms provably have no
+    /// such residue.
+    pub armor_stand_pose: Option<lodestone_model::ArmorStandPose>,
 }
 
 impl AnimInput {
@@ -541,6 +578,7 @@ impl AnimInput {
         crouching: false,
         is_passenger: false,
         swim_amount: 0.0,
+        armor_stand_pose: None,
     };
 }
 
@@ -675,6 +713,13 @@ struct Slots {
     left_middle_front_leg: Option<usize>,
     right_wing: Option<usize>,
     left_wing: Option<usize>,
+    /// The three armour-stand-only parts `ArmorStandModel.setupAnim` drives
+    /// from the *body* pose alongside `body` itself. No other model in the
+    /// corpus declares them, so they resolve to `None` everywhere else and cost
+    /// nothing.
+    right_body_stick: Option<usize>,
+    left_body_stick: Option<usize>,
+    shoulder_stick: Option<usize>,
 }
 
 /// A model's animatable skeleton: the part hierarchy stripped of geometry, plus
@@ -720,6 +765,9 @@ impl Skeleton {
             left_middle_front_leg: find("left_middle_front_leg"),
             right_wing: find("right_wing"),
             left_wing: find("left_wing"),
+            right_body_stick: find("right_body_stick"),
+            left_body_stick: find("left_body_stick"),
+            shoulder_stick: find("shoulder_stick"),
         };
         Skeleton {
             parts: parts
@@ -1242,6 +1290,73 @@ impl Skeleton {
                 let leg = |phase: f32| (pos * WALK_FREQ + phase).cos() * 1.4 * amt;
                 set_x_rot(poses, s.right_leg, leg(0.0));
                 set_x_rot(poses, s.left_leg, leg(std::f32::consts::PI));
+            }
+        }
+
+        // `ArmorStandArmorModel.setupAnim`, which is `super.setupAnim(state)`
+        // — everything above — followed by an unconditional assignment of all
+        // six part rotations from the stand's pose. Placed here, last, because
+        // that is where vanilla places it: the base pass has already run in
+        // full and every joint it wrote is about to be overwritten.
+        //
+        // Rotations only. Vanilla assigns `xRot`/`yRot`/`zRot` and never touches
+        // a part's translation, so the crouch's `y` offsets and the attack
+        // swing's arm orbit survive underneath exactly as they do there.
+        if let Some(pose) = input.armor_stand_pose {
+            self.pose_armor_stand(poses, pose);
+        }
+    }
+
+    /// `ArmorStandArmorModel.setupAnim`'s six assignments, plus
+    /// `ArmorStandModel.setupAnim`'s three body sticks.
+    ///
+    /// Two vanilla classes, one function, because the split between them is a
+    /// Java inheritance detail with no counterpart here: `ArmorStandArmorModel`
+    /// exists so the *armour* layer can be posed by the same code as the stand,
+    /// and it drives head/body/arms/legs; `ArmorStandModel` extends it to add
+    /// the stand's own decorative sticks, which take the **body** pose. Our
+    /// corpus has one `armor_stand` model carrying all of it, and a model
+    /// lacking the sticks (any armour layer built on this rig) simply resolves
+    /// those slots to `None`.
+    ///
+    /// # What is deliberately not ported
+    ///
+    /// `ArmorStandModel.setupAnim` also sets `basePlate.yRot = -state.yRot`,
+    /// cancelling the stand's body rotation so the plate stays world-aligned.
+    /// That needs the entity's **absolute** yaw, which [`AnimInput`] does not
+    /// carry — it holds head yaw *relative to the body*, by contract — and the
+    /// whole-entity yaw is applied downstream by
+    /// [`entity_model_matrix`](crate::entity::entity_model_matrix), outside this
+    /// module. So the plate rotates with the stand here where vanilla holds it
+    /// square. Left as a stated gap rather than approximated from the head yaw,
+    /// which is a different angle and would be wrong by exactly the amount the
+    /// head is turned.
+    ///
+    /// Angles arrive in degrees (the wire's units, and the builder's) and are
+    /// converted once, here, next to the model space that consumes them.
+    fn pose_armor_stand(&self, poses: &mut [PartPose], pose: lodestone_model::ArmorStandPose) {
+        let s = &self.slots;
+        // Named pairs, never a positional list: six same-typed triples in a row
+        // is the shape a transposition survives every round trip, and the only
+        // symptom would be a stand whose left arm sits where its right leg
+        // should be.
+        let assignments = [
+            (s.head, pose.head),
+            (s.body, pose.body),
+            (s.left_arm, pose.left_arm),
+            (s.right_arm, pose.right_arm),
+            (s.left_leg, pose.left_leg),
+            (s.right_leg, pose.right_leg),
+            // `ArmorStandModel.setupAnim`: all three sticks take the body pose.
+            (s.right_body_stick, pose.body),
+            (s.left_body_stick, pose.body),
+            (s.shoulder_stick, pose.body),
+        ];
+        for (slot, rotation) in assignments {
+            if let Some(i) = slot {
+                poses[i].x_rot = rotation.x * DEG;
+                poses[i].y_rot = rotation.y * DEG;
+                poses[i].z_rot = rotation.z * DEG;
             }
         }
     }
@@ -3255,5 +3370,238 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A pose whose eighteen degree values are pairwise distinct, so no two
+    /// parts can be exchanged without an assertion moving. Signs and magnitudes
+    /// differ as well, so a mirrored assignment cannot pass either.
+    fn a_distinct_pose() -> lodestone_model::ArmorStandPose {
+        use lodestone_model::Vec3f;
+        lodestone_model::ArmorStandPose {
+            head: Vec3f::new(11.0, 12.0, 13.0),
+            body: Vec3f::new(21.0, 22.0, 23.0),
+            left_arm: Vec3f::new(31.0, 32.0, 33.0),
+            right_arm: Vec3f::new(-41.0, -42.0, -43.0),
+            left_leg: Vec3f::new(51.0, 52.0, 53.0),
+            right_leg: Vec3f::new(-61.0, -62.0, -63.0),
+        }
+    }
+
+    /// A walking, looking-around, mid-swing input — every term of the humanoid
+    /// base pass switched on, so the assertions below are about the *overwrite*
+    /// rather than about an input that happened to leave the joints alone.
+    ///
+    /// `limb_swing` is `7.3` rather than a round number on purpose: a phase that
+    /// divides evenly into the walk frequency can make the leg terms coincide
+    /// with each other, which would let a broken assignment pass for an innocent
+    /// reason.
+    fn a_walking_input() -> AnimInput {
+        AnimInput {
+            head_yaw_deg: 37.0,
+            head_pitch_deg: -21.0,
+            limb_swing: 7.3,
+            limb_swing_amount: 1.0,
+            age_ticks: 41.7,
+            ..AnimInput::REST
+        }
+    }
+
+    /// The armour stand is posed by the wire, not by the walk cycle:
+    /// `ArmorStandArmorModel.setupAnim` runs the whole humanoid `super.setupAnim`
+    /// and then **assigns** head, body, both arms and both legs from the stand's
+    /// six pose accessors, and `ArmorStandModel.setupAnim` drives the three body
+    /// sticks from the body pose on top.
+    ///
+    /// Nine exact predictions — `degrees * PI / 180`, derived from the wire's
+    /// units and nothing in this crate — collected rather than asserted one at a
+    /// time, so a transposition reports both halves of the swap instead of
+    /// aborting on the first.
+    #[test]
+    fn an_armor_stands_pose_assigns_every_part_over_the_walk_cycle() {
+        let skel = skeleton_for("armor_stand");
+        assert_eq!(
+            skel.family(),
+            AnimFamily::Humanoid,
+            "the premise: the stand classifies as a humanoid, so the base pass really does \
+             swing its arms and legs — if this ever fails, the rest of this test is vacuous"
+        );
+        let pose = a_distinct_pose();
+        let poses = skel.posed(&AnimInput {
+            armor_stand_pose: Some(pose),
+            ..a_walking_input()
+        });
+        let expected = [
+            ("head", skel.slots.head, pose.head),
+            ("body", skel.slots.body, pose.body),
+            ("left_arm", skel.slots.left_arm, pose.left_arm),
+            ("right_arm", skel.slots.right_arm, pose.right_arm),
+            ("left_leg", skel.slots.left_leg, pose.left_leg),
+            ("right_leg", skel.slots.right_leg, pose.right_leg),
+            ("right_body_stick", skel.slots.right_body_stick, pose.body),
+            ("left_body_stick", skel.slots.left_body_stick, pose.body),
+            ("shoulder_stick", skel.slots.shoulder_stick, pose.body),
+        ];
+        let mut wrong = Vec::new();
+        for (name, slot, want) in expected {
+            let Some(i) = slot else {
+                wrong.push(format!("{name}: the armour stand model has no such part"));
+                continue;
+            };
+            let got = (poses[i].x_rot, poses[i].y_rot, poses[i].z_rot);
+            let want = (want.x * DEG, want.y * DEG, want.z * DEG);
+            if got != want {
+                wrong.push(format!("{name}: got {got:?}, want {want:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "armour-stand pose assignment mismatches:\n{}", wrong.join("\n"));
+    }
+
+    /// The control for the test above: with no pose the identical input really
+    /// does swing the stand's limbs, so the assertions there are measuring an
+    /// overwrite rather than an input that never moved anything.
+    ///
+    /// Both hypotheses are computed from outside constants and the measurement
+    /// has to land on one of them: the walk value is
+    /// `cos(limbSwing * 0.6662) * 1.4 * limbSwingAmount` from
+    /// `HumanoidModel.setupAnim`, and the pose value is `1 degree` from
+    /// `ArmorStand.DEFAULT_RIGHT_LEG_POSE`. At this phase they are nowhere near
+    /// each other, which is what makes the pair discriminating.
+    #[test]
+    fn without_a_pose_the_same_input_swings_the_stands_limbs() {
+        let skel = skeleton_for("armor_stand");
+        let input = a_walking_input();
+        let poses = skel.posed(&input);
+        let leg = skel.slots.right_leg.expect("armour stand has a right leg");
+        let walk_hypothesis = (input.limb_swing * WALK_FREQ).cos() * 1.4 * input.limb_swing_amount;
+        let pose_hypothesis = 1.0 * DEG;
+        assert!(
+            (walk_hypothesis - pose_hypothesis).abs() > 0.1,
+            "the two hypotheses must be far apart for this input to discriminate: \
+             walk {walk_hypothesis}, pose {pose_hypothesis}"
+        );
+        assert_eq!(
+            poses[leg].x_rot, walk_hypothesis,
+            "with no pose the right leg must take the walk cycle exactly"
+        );
+        // And the head tracks, which the pose assignment also overwrites.
+        let head = skel.slots.head.expect("armour stand has a head");
+        assert_eq!(poses[head].y_rot, input.head_yaw_deg * DEG);
+    }
+
+    /// The case the reported defect was actually in: a stand nobody has posed.
+    ///
+    /// Vanilla's assignment is unconditional, and `ArmorStand`'s own `defineId`
+    /// calls register a *non-zero* default pose, so an unposed stand overwrites
+    /// the walk cycle with a small authored splay rather than keeping it. This
+    /// is the arm that stops a stand carried by a moving contraption swinging
+    /// like a running player; treating "no pose reported" as "leave the base
+    /// pass alone" would pass every other test in this file and still ship the
+    /// bug.
+    #[test]
+    fn the_vanilla_default_pose_also_replaces_the_walk_cycle() {
+        let skel = skeleton_for("armor_stand");
+        let input = AnimInput {
+            armor_stand_pose: Some(lodestone_model::ArmorStandPose::VANILLA_DEFAULT),
+            ..a_walking_input()
+        };
+        let poses = skel.posed(&input);
+        let mut wrong = Vec::new();
+        let expected = [
+            // `ArmorStand.DEFAULT_*_POSE`, in degrees.
+            ("left_arm", skel.slots.left_arm, (-10.0, 0.0, -10.0)),
+            ("right_arm", skel.slots.right_arm, (-15.0, 0.0, 10.0)),
+            ("left_leg", skel.slots.left_leg, (-1.0, 0.0, -1.0)),
+            ("right_leg", skel.slots.right_leg, (1.0, 0.0, 1.0)),
+            ("head", skel.slots.head, (0.0, 0.0, 0.0)),
+            ("body", skel.slots.body, (0.0, 0.0, 0.0)),
+        ];
+        for (name, slot, (x, y, z)) in expected {
+            let i = slot.unwrap_or_else(|| panic!("armour stand has a {name}"));
+            let got = (poses[i].x_rot, poses[i].y_rot, poses[i].z_rot);
+            let want = (x * DEG, y * DEG, z * DEG);
+            if got != want {
+                wrong.push(format!("{name}: got {got:?}, want {want:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "default-pose mismatches:\n{}", wrong.join("\n"));
+    }
+
+    /// The assignment covers **rotations only**, exactly as vanilla's does, so
+    /// the base pass's part *translations* survive underneath it.
+    ///
+    /// This is what makes "compute the walk cycle and overwrite it" different
+    /// from "skip the walk cycle for this rig", which would be cheaper and would
+    /// look equivalent: `setupAttackAnimation` moves the arms' `x`/`z` pivots as
+    /// the torso twists, and nothing assigns those back. A type gate on the
+    /// family would silently delete this motion.
+    #[test]
+    fn the_pose_assignment_leaves_the_base_passs_translations_alone() {
+        let skel = skeleton_for("armor_stand");
+        let arm = skel.slots.right_arm.expect("armour stand has a right arm");
+        let swinging = AnimInput {
+            attack_anim: 0.5,
+            armor_stand_pose: Some(a_distinct_pose()),
+            ..AnimInput::REST
+        };
+        let still = AnimInput {
+            attack_anim: 0.0,
+            ..swinging
+        };
+        let swung = skel.posed(&swinging);
+        let rest = skel.posed(&still);
+        assert_ne!(
+            (swung[arm].x, swung[arm].z),
+            (rest[arm].x, rest[arm].z),
+            "the attack swing's arm orbit is a translation and must survive the pose assignment"
+        );
+        // While the rotations are identical in both, because the pose assigned
+        // over whatever the swing left there.
+        assert_eq!(
+            (swung[arm].x_rot, swung[arm].y_rot, swung[arm].z_rot),
+            (rest[arm].x_rot, rest[arm].y_rot, rest[arm].z_rot),
+            "the pose must assign the same rotations regardless of the swing"
+        );
+    }
+
+    /// A held item hangs off the *posed* arm, not off the walk cycle's arm.
+    ///
+    /// This is the half of the reported defect that made it obvious: the item
+    /// swung. `Skeleton::translate_to_hand` re-derives the pose through the same
+    /// `posed` call the body draw uses, so the pose reaches it for free — but
+    /// "for free" is exactly the kind of claim that turns out to be false when a
+    /// second code path re-implements the chain, so it is asserted rather than
+    /// argued.
+    #[test]
+    fn a_posed_stands_held_item_follows_the_pose_not_the_walk_cycle() {
+        let skel = skeleton_for("armor_stand");
+        let walking = a_walking_input();
+        let posed = AnimInput {
+            armor_stand_pose: Some(a_distinct_pose()),
+            ..walking
+        };
+        let hand_walking = skel
+            .translate_to_hand(&walking, false, HandPoseOverride::Structural)
+            .expect("armour stand has arms");
+        let hand_posed = skel
+            .translate_to_hand(&posed, false, HandPoseOverride::Structural)
+            .expect("armour stand has arms");
+        assert_ne!(
+            hand_walking, hand_posed,
+            "the hand matrix must follow the pose; if these agree, the item is still \
+             hanging off the walk cycle's arm"
+        );
+        // And a posed stand's hand is invariant to the walk cycle entirely —
+        // the property that actually stops the item swinging as the stand moves.
+        let posed_still = AnimInput {
+            limb_swing: 0.0,
+            limb_swing_amount: 0.0,
+            ..posed
+        };
+        assert_eq!(
+            hand_posed,
+            skel.translate_to_hand(&posed_still, false, HandPoseOverride::Structural)
+                .expect("armour stand has arms"),
+            "a posed stand's hand must not move with the walk cycle at all"
+        );
     }
 }
