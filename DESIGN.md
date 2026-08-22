@@ -9179,3 +9179,53 @@ run's medians may only be compared against another contended run.
 A count rather than a load average deliberately: a load average is a decayed one-minute mean, so it both
 lags a build that started ten seconds ago and stays elevated after one finishes. A failed `ps` prints
 "unknown" rather than zero, so a measurement that did not happen can never read as a quiet machine.
+### A draw folded into a neighbouring `if let` gate is a conditional nobody wrote, and the counter above it kept saying 64
+
+`crates/lodestone-shell/tests/break_particles_pixels.rs` failed deterministically for two weeks with
+
+```text
+particles alive      = 64
+particles drawn      = 64
+particles unresolved = 0
+centre px changed    = 0
+border px changed    = 0
+```
+
+Everything upstream was healthy and was independently confirmed so: emission, simulation, extraction, UV
+resolution and buffer upload all worked, and all 64 instances reached `RenderState::prepare_particles`. The
+split was sharp and pointed at the wrong subsystem — sheet-sourced particles rendered
+(`sheet_particle_atlas_pixels` passed), block-sourced debris rendered zero pixels — which reads as an atlas,
+a bind group or a UV-packing defect, and three separate investigations were routed at those.
+
+It was none of them. `ParticleRenderer::draw_opaque` had been placed **inside** `gpu/frame.rs`'s
+`if let Some(model) = &self.model` block, because that is where the water draw it must precede lives. The
+particle pass needs no part of the baked-model renderer — its own pipeline, its own camera group, its own
+atlas group — but `RenderState::model` is `None` on the packed path, which is the demo world, `--headless`,
+and any interactive run whose vanilla asset load failed. `Behaviour::layer()` sends every `Terrain` particle
+to `Layer::Opaque`, so on that path *all* debris (and flame, crit, lava, dust and the drips) was uploaded and
+never submitted. Two probes settled it in one run: the probe inside the gate never printed, and the one below
+printed `model=false, count=64, opaque_count=64`.
+
+Splitting the gate around the draw — closing it before, reopening it after, so the ordering against the
+items, maps, cracks and water is byte-for-byte unchanged — moved the gate from **0 to 24,057** centre pixels
+with `alive`, `drawn` and `unresolved` identical either side, border still 0, and the two sibling gates
+(`sheet_particle_atlas_pixels`, `break_particle_tint`) still green.
+
+Three things this cost, in the order they were paid:
+
+- **The sharp split was real and its natural reading was wrong.** "Sheet particles draw, block particles do
+  not" genuinely does describe the symptom, and every hypothesis it suggests is about texturing. The actual
+  discriminator was not the atlas at all: `sheet_particle_atlas_pixels` constructs its `RenderState` with
+  `Some(&blocks)` and the break gate passes `Sim::vanilla_atlas()`, which the demo world leaves `None` — so
+  the two gates differed in *whether the model renderer existed*, and the atlas difference rode along with
+  it. When two gates disagree, diff how each **constructs** the subject before theorising about what the
+  subject does.
+- **The counter that should have caught it was measuring the wrong side of the transform.**
+  `RenderStats::particles_drawn` was `ParticleRenderer::count` — the size of the uploaded buffer — so the
+  debug overlay and the gate's own preamble both reported a full, healthy 64 over a blank pass. `draw_opaque`
+  and `draw` now each return what they submitted and the stat is their sum. Same shape as `vram_bytes` being
+  computed from a post-cull per-frame quantity while wearing a residency label: the number was not wrong
+  about *something*, it was answering a neighbouring question.
+- **A gate that fails is only evidence if somebody runs it.** This one was correct, well-argued, `#[ignore]`d
+  for a GPU adapter, and red from the day the layer split landed.
+

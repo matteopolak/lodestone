@@ -1489,15 +1489,27 @@ impl ParticleRenderer {
     /// beneath it and depth-rejects over the ones in front of it. See
     /// [`ParticleRenderer::new`] on the pipelines and `gpu/frame.rs`'s module
     /// doc on the ordering rule.
-    pub fn draw_opaque(&self, pass: &mut wgpu::RenderPass<'_>, atlas: &wgpu::BindGroup) {
-        self.draw_range(pass, atlas, &self.opaque_pipeline, 0, self.opaque_count);
+    ///
+    /// Returns the number of instances it actually submitted, which the caller
+    /// is expected to total into `RenderStats::particles_drawn` rather than
+    /// reading [`count`](Self::count). That is not bookkeeping pedantry: this
+    /// pass shipped for two weeks with the opaque half sitting inside a
+    /// `if let Some(model)` gate it did not need, so on the packed (demo) path
+    /// nothing was ever submitted while the counter — sourced from `count` —
+    /// reported the full 64. A submitted-instance total makes a dropped draw
+    /// visible in the debug overlay instead of indistinguishable from a healthy
+    /// frame.
+    pub fn draw_opaque(&self, pass: &mut wgpu::RenderPass<'_>, atlas: &wgpu::BindGroup) -> usize {
+        self.draw_range(pass, atlas, &self.opaque_pipeline, 0, self.opaque_count)
     }
 
     /// Record the **translucent-layer** draw, which runs after translucent
     /// water as vanilla's `afterTerrain` phase does. No-op when the last
     /// [`prepare`](Self::prepare) produced no translucent instances.
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, atlas: &wgpu::BindGroup) {
-        self.draw_range(pass, atlas, &self.pipeline, self.opaque_count, self.count);
+    /// Returns the number of instances submitted, for the reason
+    /// [`draw_opaque`](Self::draw_opaque) documents.
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, atlas: &wgpu::BindGroup) -> usize {
+        self.draw_range(pass, atlas, &self.pipeline, self.opaque_count, self.count)
     }
 
     /// The half of a draw both layers share.
@@ -1513,9 +1525,9 @@ impl ParticleRenderer {
         pipeline: &wgpu::RenderPipeline,
         first: u32,
         end: u32,
-    ) {
+    ) -> usize {
         if end <= first {
-            return;
+            return 0;
         }
         let stride = std::mem::size_of::<ParticleInstance>() as u64;
         pass.set_pipeline(pipeline);
@@ -1523,6 +1535,7 @@ impl ParticleRenderer {
         pass.set_bind_group(1, atlas, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(u64::from(first) * stride..));
         pass.draw(0..4, 0..(end - first));
+        (end - first) as usize
     }
 
     /// The camera bind-group layout, exposed so a caller can rebuild the
