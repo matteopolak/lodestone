@@ -603,6 +603,13 @@ mod min_y_parity_tests {
     /// both reading `ChunkWorld::extent`/`world_extent` off the one store)
     /// and must agree on where a known block sits.
     #[test]
+    // `vanilla_atlas()` is a hard `expect`, deliberately — a silent skip here
+    // would be the precondition species of vacuous test. But that makes the
+    // gate unrunnable wherever `.cache/mc/<version>/` is absent, which is
+    // every CI runner, so it belongs with the rest of the jar-dependent
+    // corpus rather than failing the workspace suite. Run it with
+    // `--ignored` after `cargo xtask fetch-assets`.
+    #[ignore = "requires a fetched vanilla client.jar + blocks.json under .cache/mc/<version>/"]
     fn mesher_and_collision_place_the_same_block_at_the_same_world_y_in_both_dimensions() {
         let atlas = vanilla_atlas();
         let mut mismatches = Vec::new();
@@ -632,6 +639,10 @@ mod min_y_parity_tests {
     /// is only as good as the evidence that the mechanism *would* have caught
     /// disagreement.
     #[test]
+    // Ignored for the same reason as the measurement it controls, and it must
+    // stay paired with it: a control that runs where its subject does not is
+    // proving nothing about that subject.
+    #[ignore = "requires a fetched vanilla client.jar + blocks.json under .cache/mc/<version>/"]
     fn the_check_fails_when_collision_is_fed_the_wrong_min_y() {
         let atlas = vanilla_atlas();
         let reason = check("the_nether_with_overworld_min_y", 0, 8, -64, &atlas);
