@@ -465,15 +465,44 @@ mod chat_scale {
         let want_h = (1.0_f32 * 160.0 + 20.0).floor(); // 180
         assert!(want_w <= cw, "premise: a 320px box must fit the {cw}px canvas");
 
+        // **The plate is not the text column**, and the 12 is vanilla's, not
+        // ours. Vanilla fills the chat background from local `-4` to
+        // `maxWidth + 4 + 4` — screen `0` to `getWidth() + 12 * scale`, four
+        // scaled pixels of padding left of the text and eight right of it, so
+        // asymmetric by construction because the plate is anchored at screen
+        // `x = 0` while the text starts inset. `docs/chat.md` carries that
+        // derivation and the source it came from.
+        //
+        // This gate predates the plate pad and asserted the strip was exactly
+        // `want_w`. That stopped being true the moment the pad landed: the
+        // *premise* went stale, not the measurement, and the production draw
+        // is the half that is right. Spelled as a literal here rather than
+        // imported because `hud::CHAT_PLATE_PAD_PX` is `pub(crate)` and this
+        // test lives outside the crate — which suits the rule anyway, since
+        // both halves are then derived from vanilla's own geometry rather than
+        // read back out of the code under test.
+        const CHAT_PLATE_PAD_PX: f32 = 12.0;
+        let want_plate_w = want_w + CHAT_PLATE_PAD_PX; // 332 at chatScale 1.0
+
         // The input strip's own rect: vertex 0 is `(x0, y0)`, vertex 1 is
         // `(x1, y0)` (`ColourStream::rect`'s first triangle) — its width in
         // NDC converts back with `(x1_ndc + 1) * cw / 2`.
         let x1_px = (geo.verts[STRIDE] + 1.0) * 0.5 * cw;
         assert!(
-            (x1_px - want_w).abs() < 1e-2,
-            "chat panel width must be vanilla's `getWidth(1.0) == 320`px \
+            (x1_px - want_plate_w).abs() < 1e-2,
+            "the chat plate must be vanilla's `getWidth(1.0) == {want_w}`px \
              (unscaled by chatScale — computed outside `pose.scale` in \
-             `ChatComponent.java`), got {x1_px:.2}"
+             `ChatComponent.java`) plus the {CHAT_PLATE_PAD_PX}px plate pad, \
+             i.e. {want_plate_w}px, got {x1_px:.2}"
+        );
+        // The pad is what makes the two numbers different, so a build that
+        // dropped it would still satisfy an `x1_px == want_plate_w` written
+        // against a pad of zero. Assert they are genuinely apart, so this gate
+        // cannot go quietly vacuous the way its predecessor did.
+        assert!(
+            (want_plate_w - want_w).abs() > 1.0,
+            "premise: the plate and the text column must be measurably \
+             different widths for this assertion to distinguish them"
         );
 
         // Height is asserted through the row cap it produces, not through a
