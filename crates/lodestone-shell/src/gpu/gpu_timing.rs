@@ -141,16 +141,10 @@ pub(crate) struct GpuQueryTimer {
     /// transaction split across `queue.submit`.
     skipped_resolve: bool,
     /// A 1x1 colour target existing only so [`Self::stamp`] has something to
-    /// attach its bracketing render pass to — see that method's doc for why a
+    /// attach its (deliberately empty — see that method) bracketing pass to — see that method's doc for why a
     /// bracketing pass is the only way to time a *span of passes* on an adapter
     /// without `TIMESTAMP_QUERY_INSIDE_ENCODERS`.
     stamp_view: wgpu::TextureView,
-    /// One triangle, no bindings, drawn into [`Self::stamp_view`]. The pass
-    /// **must not be empty**: `timestamp_writes` samples at *stage*
-    /// boundaries, and a pass with no vertex or fragment stage has no such
-    /// boundary — see `shaders/gpu_timer_stamp.wgsl`'s own header for the
-    /// measurement that established this.
-    stamp_pipeline: wgpu::RenderPipeline,
 }
 
 impl GpuQueryTimer {
@@ -199,40 +193,6 @@ impl GpuQueryTimer {
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let stamp_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gpu-timer-stamp"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/gpu_timer_stamp.wgsl").into(),
-            ),
-        });
-        let stamp_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("gpu-timer-stamp"),
-            // No bind groups and no vertex buffers: the shader derives its
-            // three positions from `vertex_index`, so an auto layout resolves
-            // to an empty one.
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &stamp_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &stamp_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: STAMP_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
         let slots = (0..FRAMES_IN_FLIGHT)
             .map(|_| Slot {
                 readback: device.create_buffer(&wgpu::BufferDescriptor {
@@ -256,7 +216,6 @@ impl GpuQueryTimer {
             stalled_frames: 0,
             skipped_resolve: false,
             stamp_view,
-            stamp_pipeline,
         })
     }
 
@@ -291,14 +250,38 @@ impl GpuQueryTimer {
     /// is to carry a boundary. The target is 1x1 and never sampled, so the
     /// pass has no measurable cost of its own.
     ///
-    /// It is **not** an empty pass, and that was measured rather than
-    /// reasoned: `timestamp_writes` samples at *stage* boundaries, so a pass
-    /// with no vertex or fragment stage has no boundary to sample and reports
-    /// a pair that is not a duration of anything. The symptom was an
-    /// occasional inversion — a bracketing span reading shorter than a pass it
-    /// encloses — which is what an undefined timestamp looks like once the
-    /// `end > begin` filter has discarded the obviously-broken pairs. So the
-    /// pass draws one triangle; see `shaders/gpu_timer_stamp.wgsl`.
+    /// # The pass must stay empty, and that is a measurement
+    ///
+    /// A previous version of this method drew one triangle here, on the
+    /// reasoning that `timestamp_writes` samples at *stage* boundaries and a
+    /// pass with no vertex or fragment stage therefore has no boundary to
+    /// sample. That reasoning is plausible, it is what the spec language
+    /// suggests, and the bench says it is wrong: it made the spans **worse**,
+    /// not better.
+    ///
+    /// Measured at `ground_forward` on the 1280x720 demo world, `world_total`
+    /// against the block pass it encloses:
+    ///
+    /// | stamp pass | `world_total` | block pass | verdict |
+    /// |---|---|---|---|
+    /// | empty, three runs | 0.608 / 0.574 / 0.729 ms | 0.299 / 0.311 / 0.495 | tracks the scene, always encloses |
+    /// | one triangle, run 1 | 0.072 ms | 0.319 | **below its own contents** |
+    /// | one triangle, run 2 | 0.516 ms | 0.316 | plausible |
+    /// | one triangle, run 3 | 1.373 ms | 0.296 | 4.6x the pass, and 0.212 against 0.479 at another waypoint |
+    ///
+    /// The mechanism that fits: a stamp pass carrying real work shares no
+    /// attachment with the frame's own passes, so nothing orders it against
+    /// them and the GPU is free to retire it whenever it likes — the span
+    /// then measures the stamps rather than the frame, in either direction.
+    /// An empty pass appears to be handled as a marker instead, keeping its
+    /// place in the submission order. That is an inference about a driver and
+    /// is not guaranteed anywhere; what is *established* is the table above.
+    ///
+    /// So: **do not put work in this pass.** If the spans start reading as
+    /// noise again, the durable fix is to hang the frame's timestamps off the
+    /// real first and last passes — which genuinely do share an attachment and
+    /// so genuinely serialise — rather than to make these dummies more
+    /// substantial. Those passes live in `lodestone-render`.
     ///
     /// # Spans may cross command buffers
     ///
@@ -327,7 +310,7 @@ impl GpuQueryTimer {
         if beginning_of_pass_write_index.is_none() && end_of_pass_write_index.is_none() {
             return;
         }
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("gpu-timer-stamp"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &self.stamp_view,
@@ -352,13 +335,6 @@ impl GpuQueryTimer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        // **Not optional.** An empty pass has no vertex or fragment stage, and
-        // `timestamp_writes` samples at stage boundaries — see this type's
-        // `stamp_pipeline` field and the shader's own header. One triangle
-        // over a 1x1 target is the cheapest thing that guarantees both stages
-        // run.
-        pass.set_pipeline(&self.stamp_pipeline);
-        pass.draw(0..3, 0..1);
     }
 
     /// Resolve this frame's queries into the ring slot for `self.frame`.
