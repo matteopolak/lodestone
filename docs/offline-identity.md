@@ -4,9 +4,13 @@
 
 The one persisted, user-editable name the client joins under when no Microsoft
 account is signed in, plus the stable UUID derived from it. It lives in
-`crates/lodestone-shell/src/offline_identity.rs` and is what
-`net.rs`'s login-start packet carries for **every** join this shell makes today,
-singleplayer and multiplayer alike.
+`crates/lodestone-shell/src/offline_identity.rs`.
+
+It is the **fallback rung**, not the join identity: `docs/join-identity.md` is
+the ladder every production join now consults, and it reaches this module only
+when `AccountsMetadata::selected` names no account (or names one `profiles.json`
+has no row for). It is also what `NetClient::connect_as` builds directly, so a
+live gate joins under the exact name it asked for.
 
 Before it existed, the offline arm of `NetClient`'s profile match read
 

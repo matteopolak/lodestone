@@ -400,8 +400,16 @@ only place in this path that can `await`. Three variants:
 | variant | who asks for it | what happens |
 |---|---|---|
 | `SelectedAccount` | `NetClient::connect` — the production multiplayer join | `lodestone_auth::resolve_selected_account`: read `profiles.json`, load the refresh token from the keychain, exchange it with Microsoft |
-| `Offline` | `connect_as` (live gates), singleplayer, Open to LAN, every browser join | present the caller's `OfflineIdentity` verbatim; no keychain, no network |
+| `Offline` | `connect_as` (live gates), singleplayer, Open to LAN, every browser join | present the profile the caller resolved verbatim; no keychain, no network |
 | `Session(_)` | `connect_online` | use the session the caller already resolved |
+
+**`RemoteAuth` is about authentication, not identity — do not read `Offline`
+as "joins as the offline player".** Which username and UUID a join presents is
+`join_identity::join_identity`'s answer (`docs/join-identity.md`), and it
+prefers the selected account for singleplayer and Open to LAN too. Those paths
+are `Offline` here only in the sense that they never authenticate: they read
+`profiles.json`, never the keychain and never the network. `connect_as` is the
+one constructor that is offline in *both* senses.
 
 `connect_as` staying offline is load-bearing rather than tidy: a gate asks for
 an exact username, so resolving the developer's selected account there would

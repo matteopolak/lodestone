@@ -5,11 +5,12 @@
 //! ## What it is
 //!
 //! This is the identity a join presents when no Microsoft account is signed in
-//! and selected. It is no longer the *only* one: `net.rs`'s `RemoteAuth` now
-//! resolves the account switcher's selection on the net thread, so a signed-in
-//! player joins under their real profile and this module covers the
-//! nobody-signed-in case, `connect_as` (live gates), and singleplayer. Before
-//! this module existed the offline arm read
+//! and selected. It is the **fallback rung** of [`crate::join_identity`], which
+//! is the one producer every production join consults — a selected account wins
+//! over this module for singleplayer exactly as it does for a remote join. What
+//! remains this module's own are the nobody-signed-in case and `connect_as`
+//! (live gates, which name their username outright). Before this module existed
+//! the offline arm read
 //!
 //! ```text
 //! username: unique_username(),      // from `lodestone-testsupport`

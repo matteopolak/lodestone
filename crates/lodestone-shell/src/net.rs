@@ -1606,11 +1606,17 @@ impl NetClient {
     /// # Identity
     ///
     /// **The signed-in Microsoft account when there is one, and the persisted
-    /// "Play offline" identity otherwise.** This is the production join, so it
-    /// is the one path that consults
-    /// [`lodestone_auth::AccountsMetadata::selected`]; the resolution happens on
-    /// the net thread ([`RemoteAuth::SelectedAccount`]) because it needs an
-    /// `await` and every caller here is synchronous UI code.
+    /// "Play offline" identity otherwise** —
+    /// [`crate::join_identity::join_identity`], the same ladder
+    /// [`Self::open_singleplayer`] takes.
+    ///
+    /// What is particular to *this* constructor is not the identity but the
+    /// **authentication**: it is the one path that turns the same selection into
+    /// a live session, on the net thread ([`RemoteAuth::SelectedAccount`]),
+    /// because that needs an `await` and every caller here is synchronous UI
+    /// code. The two cannot name different accounts — both read
+    /// [`lodestone_auth::AccountsMetadata::selected`] — and where a session
+    /// resolves, its own profile wins as the fresher copy of the same name.
     ///
     /// A selected account whose saved session cannot be renewed does **not**
     /// abort the join: an offline-mode server never asks for authentication, so
@@ -1618,8 +1624,8 @@ impl NetClient {
     /// and only an online-mode server spends it (as
     /// `lodestone_client::ClientError::OnlineModeSessionUnavailable`).
     ///
-    /// With nothing selected this is exactly what it always was:
-    /// [`OfflineIdentity::load`] — the same name and the same derived UUID every
+    /// With nothing selected this is exactly what it always was: the persisted
+    /// [`OfflineIdentity`] — the same name and the same derived UUID every
     /// launch, which is the whole point (see [`crate::offline_identity`]), and
     /// **no network call is made looking for an account**.
     ///
@@ -1639,7 +1645,7 @@ impl NetClient {
             Self::production_origin(host, port),
             protocol,
             session,
-            OfflineIdentity::load(),
+            crate::join_identity::join_identity(),
         )
     }
 
@@ -1734,7 +1740,7 @@ impl NetClient {
             Self::offline_origin(host, port),
             protocol,
             session,
-            OfflineIdentity::from_username_unchecked(username),
+            OfflineIdentity::from_username_unchecked(username).login_profile(),
         )
     }
 
@@ -1796,7 +1802,7 @@ impl NetClient {
             // parameter is not optional: an online session that failed to produce
             // a profile has no business silently falling back to a *different*
             // identity, so the value here is the same one `connect` would use.
-            OfflineIdentity::load(),
+            crate::join_identity::join_identity(),
         )
     }
 
@@ -1833,12 +1839,24 @@ impl NetClient {
     ///
     /// # Identity
     ///
-    /// The persisted "Play offline" identity, same as [`Self::connect`], and
-    /// singleplayer is where its instability was visible: the integrated server
-    /// **echoes the UUID the client presents** (`login_uuid = Some(uuid)`) rather
-    /// than deriving one from the name, so the old `Uuid::new_v4()` gave the
-    /// player a different account on every launch even before the name did. See
-    /// [`crate::offline_identity`].
+    /// [`crate::join_identity::join_identity`] — the **selected Microsoft
+    /// account** when there is one, and the persisted "Play offline" identity
+    /// otherwise. Exactly the same ladder [`Self::connect`] uses, which is the
+    /// whole point: this constructor used to read `offline.json` directly, so
+    /// choosing an account in the switcher changed the skin (cached at sign-in)
+    /// and not the player, and singleplayer joined as somebody else.
+    ///
+    /// No account is *authenticated* here and none needs to be — vanilla skips
+    /// the encryption request for a memory connection — so this reads
+    /// `profiles.json` and stops. The keychain is not opened and no request is
+    /// made.
+    ///
+    /// The UUID matters more here than anywhere else, because the integrated
+    /// server **echoes the one the client presents** (`login_uuid = Some(uuid)`)
+    /// rather than deriving it from the name, and keys the saved player file on
+    /// it. That is what made the old `Uuid::new_v4()` a different account every
+    /// launch, and it is why switching accounts now starts a world's player data
+    /// fresh — see [`crate::join_identity`] and [`crate::offline_identity`].
     #[must_use]
     pub fn open_singleplayer(
         server_protocol: Box<dyn lodestone_server::ServerProtocol>,
@@ -1864,7 +1882,7 @@ impl NetClient {
             },
             protocol,
             session,
-            OfflineIdentity::load(),
+            crate::join_identity::join_identity(),
         )
     }
 
@@ -1872,8 +1890,9 @@ impl NetClient {
     /// other machines can join it — the pause menu's Open to LAN (issue #535).
     ///
     /// Identical in every other respect: same registry-resolved
-    /// `ServerProtocol`, same seed and world directory, same offline identity,
-    /// same net thread. The local player joins over `127.0.0.1:<port>` rather
+    /// `ServerProtocol`, same seed and world directory, same
+    /// [`crate::join_identity::join_identity`] ladder, same net thread. The
+    /// local player joins over `127.0.0.1:<port>` rather
     /// than the in-memory duplex, so there is exactly one kind of connection on
     /// this server and the host is not a special case.
     ///
@@ -1915,7 +1934,7 @@ impl NetClient {
             },
             protocol,
             session,
-            OfflineIdentity::load(),
+            crate::join_identity::join_identity(),
         )
     }
 
@@ -1923,16 +1942,18 @@ impl NetClient {
     /// [`Self::connect_online`]/[`Self::open_singleplayer`]: spawns the
     /// background net thread and returns immediately.
     ///
-    /// `offline` is the identity the login-start packet carries whenever the
-    /// origin has no authenticated session — which today is every join. It is a
-    /// **parameter rather than a `load()` inside `run`** so the four entry points
-    /// above each state where their identity comes from, and so `connect_as` can
-    /// supply one without a file at all.
+    /// `identity` is the profile the login-start packet carries whenever the
+    /// origin has no authenticated session — which is every singleplayer and LAN
+    /// join, and every remote one against an offline-mode server. It is a
+    /// **parameter rather than a lookup inside `run`** so the four entry points
+    /// above each state where their identity comes from: three of them resolve
+    /// [`crate::join_identity::join_identity`], and `connect_as` supplies a name
+    /// with no file involved at all.
     fn connect_impl(
         origin: Origin,
         protocol: i32,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
-        offline: OfflineIdentity,
+        identity: LoginProfile,
     ) -> Self {
         let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
         let (action_tx, action_rx) = mpsc::sync_channel(ACTION_RELAY_CAPACITY);
@@ -1985,7 +2006,7 @@ impl NetClient {
                     pack_response_rx,
                     pack_policy,
                     session,
-                    offline,
+                    identity,
                 )
             })
             .expect("spawn net thread");
@@ -2021,7 +2042,7 @@ impl NetClient {
             pack_response_rx,
             pack_policy,
             session,
-            offline,
+            identity,
         ));
 
         Self {
@@ -2793,7 +2814,7 @@ async fn run_async(
     pack_response_rx: Receiver<(Uuid, bool)>,
     pack_policy: crate::menu::servers::ServerPackPolicy,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
-    offline: OfflineIdentity,
+    identity: LoginProfile,
 ) {
         let Some(adapter) = lodestone_registry::adapter_for_protocol(protocol) else {
             let _ = tx.try_send(NetUpdate::Error(format!(
@@ -3254,11 +3275,17 @@ async fn run_async(
             RemoteAuth::Session(session) => match session {},
         };
 
-        // Online mode (issue #65) supplies the account's real identity; offline
-        // mode presents the caller's [`OfflineIdentity`] — for `connect` /
-        // `open_singleplayer` the *persisted* one, so the player is the same
-        // account on every launch, and for `connect_as` whatever a live gate
-        // asked for.
+        // An authenticated session supplies its own profile; every other join
+        // presents the `identity` its constructor resolved — for `connect` /
+        // `open_singleplayer` / `open_to_lan` that is
+        // `crate::join_identity::join_identity`, i.e. the selected Microsoft
+        // account or the persisted offline name, and for `connect_as` whatever a
+        // live gate asked for.
+        //
+        // The two cannot disagree about *which* account: the session below and
+        // the `identity` above both key off `AccountsMetadata::selected`. The
+        // session's copy of the name is simply fresher, so it wins where it
+        // exists.
         //
         // **This arm used to be `unique_username()` + `Uuid::new_v4()`**, which
         // is a new offline account every launch: the name because that helper
@@ -3280,14 +3307,14 @@ async fn run_async(
                 uuid: session.profile.id,
             },
             #[cfg(not(target_arch = "wasm32"))]
-            AuthenticationIntent::Offline => offline.login_profile(),
+            AuthenticationIntent::Offline => identity,
             #[cfg(not(target_arch = "wasm32"))]
             AuthenticationIntent::OnlineUnavailable { .. } => unavailable_profile
                 .expect("an unavailable online intent carries its selected profile"),
             #[cfg(target_arch = "wasm32")]
             Some(session) => match *session {},
             #[cfg(target_arch = "wasm32")]
-            None => offline.login_profile(),
+            None => identity,
         };
         // Published immediately, not after login: issue #189's roster refresh
         // needs the identity to exclude as soon as a session exists, and there
@@ -3842,7 +3869,7 @@ fn run(
     pack_response_rx: Receiver<(Uuid, bool)>,
     pack_policy: crate::menu::servers::ServerPackPolicy,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
-    offline: OfflineIdentity,
+    identity: LoginProfile,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -3872,7 +3899,7 @@ fn run(
         pack_response_rx,
         pack_policy,
         session,
-        offline,
+        identity,
     ));
 }
 

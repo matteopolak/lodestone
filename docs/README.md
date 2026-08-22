@@ -881,6 +881,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   drawn and on live stack state. A bow is `item/bow` at rest and `item/bow_pulling_0`,
   `_1` or `_2` as it is drawn; a spyglass is the flat `item/spyglass` sprite in an
   inventory slot and `item/spyglass_in_hand`'s 3-D tube in the hand.
+- [Which player a join presents](./join-identity.md) — The single producer of the
+  local player's username and UUID — `crates/lodestone-shell/src/join_identity.rs`.
+  Every production join, remote and singleplayer alike, asks
+  `join_identity::join_identity()` who it is, and gets one answer: the account the
+  switcher has selected, or the persisted "Play offline" identity when there is none.
 - [Join generation scheduler](./join-scheduler.md) — The server-side scheduler that
   decides in what order, and with how much concurrency, the `(2r + 1)²` chunk columns
   of a joining player's view are generated. It is a **primed sliding window** over the
@@ -1195,9 +1200,7 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [The "Play offline" identity](./offline-identity.md) — The one persisted,
   user-editable name the client joins under when no Microsoft account is signed in,
   plus the stable UUID derived from it. It lives in
-  `crates/lodestone-shell/src/offline_identity.rs` and is what `net.rs`'s login-start
-  packet carries for **every** join this shell makes today, singleplayer and
-  multiplayer alike.
+  `crates/lodestone-shell/src/offline_identity.rs`.
 - [Open to LAN](./open-to-lan.md) — `IntegratedServer::open_to_lan` — the
   TCP-listening entry point, plus the config surface for the four subsystems that were
   implemented, gated, and then unreachable because `IntegratedServer::bind` took no
