@@ -269,8 +269,9 @@ pub use screen_effects::{
 pub use section::{Cell, Face, SECTION_SIZE, SectionNeighborhood, SectionView, SpriteId, Surface};
 pub use section_arena::{INDEX_SIZE, SectionArena, draw_region_for};
 pub use sign::{
-    HANGING_TEXT_LINE_HEIGHT, SignKind, SignOrientation, SignSpawn, TEXT_LINE_HEIGHT,
-    dye_text_color_rgb, sign_side_color, sign_text_transform,
+    BLACK_TEXT_OUTLINE_RGB, HANGING_TEXT_LINE_HEIGHT, OUTLINE_RENDER_DISTANCE_SQUARED, SignKind,
+    SignOrientation, SignSpawn, TEXT_LINE_HEIGHT, dye_text_color_rgb, sign_dark_color_rgb,
+    sign_outline_color, sign_side_color, sign_text_transform,
 };
 pub use spawner::{
     SpawnerMobSpawn, spawner_display_outer_matrix, spawner_display_scale, spawner_spin_degrees,

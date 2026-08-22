@@ -78,22 +78,52 @@
 //! argument and no per-frame camera dependency beyond the shared `view_proj`
 //! uniform every world-space pass in this crate already writes.
 //!
+//! # Glowing text's outline, as one dilated quad rather than eight copies
+//!
+//! `Font.prepare8xTextOutline` draws the whole string **eight** more times,
+//! at every `(dx, dy)` in `{-1, 0, 1}²` except `(0, 0)`, each displaced by
+//! `dx * glyph.getShadowOffset()`, in the outline colour — then
+//! `TextFeatureRenderer` visits that output before the real glyphs.
+//!
+//! Eight copies of an ink-run layout would be an 8× vertex multiplier on a
+//! pass that already has a fixed budget, and it is unnecessary here: the
+//! union of a **rectangle** translated over that 3×3 neighbourhood is exactly
+//! that rectangle grown by one offset on every side (dilation distributes
+//! over union, and the `(0, 0)` copy is contained in the union of the two
+//! horizontal ones). Every ink run [`super::nametag::layout_styled_ink_runs`]
+//! emits *is* a rectangle, so one grown quad per run covers precisely the
+//! region vanilla's eight copies cover, at 1× the vertices instead of 8×.
+//! The outline colour is uniform and opaque, so the overlap the eight copies
+//! have with each other is idempotent and nothing about the coverage differs.
+//!
+//! Two details that are not simplifications: the grow amount is the run's own
+//! per-glyph [`StyledRect::outline_grow`](super::nametag::StyledRect)
+//! (`GlyphInfo.getShadowOffset()`, half a pixel for a unihex glyph), and
+//! underline/strikethrough bars carry `0.0` there and so contribute no
+//! outline at all — vanilla's `outlineOutput.discardEffects()`.
+//!
+//! Vanilla submits the outline through `DisplayMode.NORMAL` and the glyphs
+//! through `POLYGON_OFFSET`, i.e. the outline is *not* pulled toward the
+//! camera and the glyphs are. This pass has one pipeline, so both get the
+//! offset and the separation comes from submission order instead (outline
+//! first, glyphs second, `LessEqual` depth). That is a real difference and it
+//! is safe for the reason vanilla's own arrangement is: the two sets are
+//! coplanar, and the glyphs must win.
+//!
 //! # What is deliberately not built
 //!
-//! See `lodestone_render::sign` module doc's "Deferred" section for the two
-//! real gaps this pass inherits (the black-dye-glowing outline, and
-//! per-glyph world-light modulation) — both documented there rather than
-//! here because they are properties of the *colour this pass is handed*, not
-//! of how this pass draws it. Neither is affected by per-run styling: an
-//! explicit run colour is used verbatim, the same way the pre-existing dye
-//! default was, so this change closes the "no per-run formatting" gap
-//! without touching either of those two.
+//! See `lodestone_render::sign` module doc's "Deferred" section for the one
+//! real gap this pass inherits — per-glyph world-light modulation, which
+//! makes non-glowing sign text brighter here than in vanilla in the dark.
+//! It is documented there rather than here because it is a property of the
+//! *colour this pass is handed*, not of how this pass draws it.
 
 use glam::Vec3;
 use lodestone_assets::font::RasterFont;
 use lodestone_model::text::{TextColor, TextSpan, TextStyle};
 use lodestone_render::{
-    DEPTH_FORMAT, SignKind, SignOrientation, SignSpawn, sign_side_color, sign_text_transform,
+    DEPTH_FORMAT, SignKind, SignOrientation, SignSpawn, sign_outline_color, sign_side_color,
+    sign_text_transform,
 };
 use lodestone_world::{SignSide, SignTextSpan};
 
@@ -336,6 +366,7 @@ impl SignTextRenderer {
         &self,
         queue: &wgpu::Queue,
         view_proj: &[[f32; 4]; 4],
+        eye: Vec3,
         signs: &[SignSpawn],
     ) -> u32 {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
@@ -348,6 +379,14 @@ impl SignTextRenderer {
         let mut drawn = 0usize;
         for spawn in &ordered {
             let committed = vertices.len();
+            // `isOutlineVisible` measures to the block's **centre**
+            // (`Vec3.atCenterOf`), not to its corner or to the text plane.
+            let centre = Vec3::new(
+                spawn.pos[0] as f32 + 0.5,
+                spawn.pos[1] as f32 + 0.5,
+                spawn.pos[2] as f32 + 0.5,
+            );
+            let distance_squared = (centre - eye).length_squared();
             push_side_quads(
                 raster,
                 &self.ink,
@@ -356,6 +395,7 @@ impl SignTextRenderer {
                 spawn.kind,
                 spawn.orientation,
                 true,
+                distance_squared,
                 &mut vertices,
             );
             push_side_quads(
@@ -366,6 +406,7 @@ impl SignTextRenderer {
                 spawn.kind,
                 spawn.orientation,
                 false,
+                distance_squared,
                 &mut vertices,
             );
             if vertices.len() > MAX_SIGN_TEXT_VERTICES {
@@ -471,10 +512,49 @@ fn styled_spans(line: &[SignTextSpan], default_rgb: u32) -> Vec<TextSpan> {
         .collect()
 }
 
+/// One line of a side, already truncated to the sign kind's own
+/// `maxTextLineWidth` — `submitSignText`'s
+/// `this.font.split(input, state.maxTextLineWidth)` followed by
+/// `components.isEmpty() ? EMPTY : components.get(0)`.
+///
+/// **`split` word-wraps and vanilla then keeps only the first row**, so an
+/// overlong line is *cut*, not shrunk and not scrolled. That is easy to
+/// misread as a bug when you see it, and it is the reason a hanging sign's
+/// text stays inside a board that is a third narrower than a standing one's:
+/// `SignBlockEntity.getMaxTextLineWidth()` is 90 and
+/// `HangingSignBlockEntity`'s override is 60, and nothing else in the two
+/// renderers constrains the text horizontally at all.
+///
+/// Wraps through `crate::hud::wrap_spans_with`, this crate's one styled
+/// word-wrap (the same greedy break-on-space / hard-break-an-overlong-word
+/// body chat uses), measured by
+/// [`super::nametag::styled_advance_width`] — vanilla measures its own split
+/// with `StringSplitter`'s advance-only callback rather than by laying out
+/// ink, and doing the same here keeps a wrap from costing more than the draw.
+fn split_first_line(
+    raster: &RasterFont,
+    spans: &[TextSpan],
+    max_width: f32,
+) -> Vec<TextSpan> {
+    let measure = |candidate: &[TextSpan]| super::nametag::styled_advance_width(raster, candidate);
+    let mut rows = crate::hud::wrap_spans_with(measure, spans, max_width);
+    if rows.is_empty() {
+        // `wrap_spans_with` documents that it never returns an empty vector;
+        // this is `components.isEmpty() ? FormattedCharSequence.EMPTY` anyway,
+        // so the two agree on the degenerate case rather than one of them
+        // panicking if the other's guarantee ever changes.
+        return Vec::new();
+    }
+    rows.swap_remove(0)
+}
+
 /// Lowers one text side into world-space quads, appended onto `out`. A no-op
 /// for a side whose four lines are all empty — vanilla's own font-split of
 /// an empty string contributes no ink either, so this is an optimisation,
 /// not a behaviour change.
+///
+/// `distance_squared` is from the camera to the sign block's centre, and is
+/// used for exactly one thing: [`sign_outline_color`]'s 16-block gate.
 #[allow(clippy::too_many_arguments)]
 fn push_side_quads(
     raster: &RasterFont,
@@ -484,6 +564,7 @@ fn push_side_quads(
     kind: SignKind,
     orientation: SignOrientation,
     is_front: bool,
+    distance_squared: f32,
     out: &mut Vec<SignTextVertex>,
 ) {
     if side.lines.iter().all(Vec::is_empty) {
@@ -491,51 +572,76 @@ fn push_side_quads(
     }
     let matrix = sign_text_transform(pos, kind, orientation, is_front);
     let default_rgb = default_run_color(side);
+    let outline = sign_outline_color(side, distance_squared);
+    let max_width = kind.max_text_line_width();
     // `AbstractSignRenderer.submitSignText`: `signMidpoint = 4 *
     // textLineHeight / 2`, i.e. two full lines — line `i`'s top sits at
     // `i * textLineHeight - signMidpoint`. The height is the **block
     // entity's**, not a constant: a hanging sign overrides it to 9.
     let line_height = kind.text_line_height();
     let sign_midpoint = 2.0 * line_height;
+    let mut quad = |rect_x: f32, rect_y: f32, w: f32, h: f32, color: [f32; 4]| {
+        // Fed **unflipped** into the placement matrix: its own `-Y`
+        // scale carries the pixel-space-down to world-space-up flip —
+        // see `lodestone_render::sign`'s module doc.
+        let tl = matrix
+            .transform_point3(Vec3::new(rect_x, rect_y, 0.0))
+            .to_array();
+        let tr = matrix
+            .transform_point3(Vec3::new(rect_x + w, rect_y, 0.0))
+            .to_array();
+        let bl = matrix
+            .transform_point3(Vec3::new(rect_x, rect_y + h, 0.0))
+            .to_array();
+        let br = matrix
+            .transform_point3(Vec3::new(rect_x + w, rect_y + h, 0.0))
+            .to_array();
+        out.extend([
+            SignTextVertex { position: tl, color },
+            SignTextVertex { position: bl, color },
+            SignTextVertex { position: tr, color },
+            SignTextVertex { position: tr, color },
+            SignTextVertex { position: bl, color },
+            SignTextVertex { position: br, color },
+        ]);
+    };
     for (i, line) in side.lines.iter().enumerate() {
         if line.is_empty() {
             continue;
         }
-        let spans = styled_spans(line, default_rgb);
+        let spans = split_first_line(raster, &styled_spans(line, default_rgb), max_width);
+        if spans.is_empty() {
+            continue;
+        }
         let layout = ink.layout(raster, &spans);
         let (rects, total_width) = (&layout.0, layout.1);
         // Each line is centred independently, matching `x1 =
-        // -font.width(line) / 2` — not all four lines sharing one width.
-        // `total_width` already accounts for bold's widened advance (see
-        // `layout_styled_ink_runs`'s doc), so a bold line still centres
-        // correctly against its own (wider) measured width.
+        // -font.width(line) / 2` — not all four lines sharing one width, and
+        // the width of the **truncated** line, since that is the sequence
+        // vanilla hands to `font.width`. `total_width` already accounts for
+        // bold's widened advance (see `layout_styled_ink_runs`'s doc), so a
+        // bold line still centres correctly against its own (wider) width.
         let x1 = -total_width / 2.0;
         let y_off = i as f32 * line_height - sign_midpoint;
+        // The outline first, the whole line's worth of it, then the glyphs —
+        // `TextFeatureRenderer.buildGroup` visits `prepare8xTextOutline`'s
+        // output before `prepareText`'s for exactly this reason, so a
+        // neighbouring glyph's outline cannot paint over this glyph. Depth is
+        // `LessEqual` and both sets are coplanar, so the later draw wins.
+        if let Some(outline_color) = outline {
+            for rect in rects.iter().filter(|r| r.outline_grow > 0.0) {
+                let g = rect.outline_grow;
+                quad(
+                    rect.x + x1 - g,
+                    rect.y + y_off - g,
+                    rect.w + 2.0 * g,
+                    rect.h + 2.0 * g,
+                    outline_color,
+                );
+            }
+        }
         for rect in rects {
-            let lx = rect.x + x1;
-            let ly = rect.y + y_off;
-            // Fed **unflipped** into the placement matrix: its own `-Y`
-            // scale carries the pixel-space-down to world-space-up flip —
-            // see `lodestone_render::sign`'s module doc.
-            let tl = matrix.transform_point3(Vec3::new(lx, ly, 0.0)).to_array();
-            let tr = matrix
-                .transform_point3(Vec3::new(lx + rect.w, ly, 0.0))
-                .to_array();
-            let bl = matrix
-                .transform_point3(Vec3::new(lx, ly + rect.h, 0.0))
-                .to_array();
-            let br = matrix
-                .transform_point3(Vec3::new(lx + rect.w, ly + rect.h, 0.0))
-                .to_array();
-            let color = rect.color;
-            out.extend([
-                SignTextVertex { position: tl, color },
-                SignTextVertex { position: bl, color },
-                SignTextVertex { position: tr, color },
-                SignTextVertex { position: tr, color },
-                SignTextVertex { position: bl, color },
-                SignTextVertex { position: br, color },
-            ]);
+            quad(rect.x + x1, rect.y + y_off, rect.w, rect.h, rect.color);
         }
     }
 }
@@ -579,6 +685,9 @@ mod tests {
             spawn.kind,
             spawn.orientation,
             true,
+            // Well inside `OUTLINE_RENDER_DISTANCE_SQUARED`, so a glowing
+            // side in these fixtures is outlined; a non-glowing one never is.
+            0.0,
             &mut out,
         );
         push_side_quads(
@@ -589,6 +698,9 @@ mod tests {
             spawn.kind,
             spawn.orientation,
             false,
+            // Well inside `OUTLINE_RENDER_DISTANCE_SQUARED`, so a glowing
+            // side in these fixtures is outlined; a non-glowing one never is.
+            0.0,
             &mut out,
         );
         assert!(out.is_empty());
@@ -613,6 +725,9 @@ mod tests {
             spawn.kind,
             spawn.orientation,
             true,
+            // Well inside `OUTLINE_RENDER_DISTANCE_SQUARED`, so a glowing
+            // side in these fixtures is outlined; a non-glowing one never is.
+            0.0,
             &mut front,
         );
         assert!(!front.is_empty(), "front text must contribute vertices");
@@ -626,6 +741,9 @@ mod tests {
             spawn.kind,
             spawn.orientation,
             false,
+            // Well inside `OUTLINE_RENDER_DISTANCE_SQUARED`, so a glowing
+            // side in these fixtures is outlined; a non-glowing one never is.
+            0.0,
             &mut back,
         );
         assert!(back.is_empty(), "an untouched back side must contribute nothing");
@@ -670,11 +788,11 @@ mod tests {
         let measure = |spawn: &SignSpawn| -> usize {
             let mut out = Vec::new();
             push_side_quads(
-                &raster, &ink, &spawn.front, spawn.pos, spawn.kind, spawn.orientation, true,
+                &raster, &ink, &spawn.front, spawn.pos, spawn.kind, spawn.orientation, true, 0.0,
                 &mut out,
             );
             push_side_quads(
-                &raster, &ink, &spawn.back, spawn.pos, spawn.kind, spawn.orientation, false,
+                &raster, &ink, &spawn.back, spawn.pos, spawn.kind, spawn.orientation, false, 0.0,
                 &mut out,
             );
             out.len()
@@ -773,6 +891,287 @@ mod tests {
         );
     }
 
+    /// **The hanging-sign width gate**, at [`split_first_line`]. A line wider
+    /// than a hanging sign's own `maxTextLineWidth` (60) but inside a
+    /// standing sign's (90) must be **cut** on the hanging board and kept
+    /// whole on the standing one.
+    ///
+    /// This gates the split alone: it passes the cap in by hand, so it cannot
+    /// see whether [`push_side_quads`] fetches the *right* cap for the kind
+    /// it is drawing — measured, by neutering that call site to
+    /// `SignKind::Plain`, which leaves this green.
+    /// `hanging_sign_text_stays_inside_its_board` is the arm that catches
+    /// that, and the pair is deliberate rather than redundant.
+    ///
+    /// Both hypotheses are evaluated on one input, which is the only way this
+    /// can fail for the right reason: the defect it exists for was
+    /// `push_side_quads` applying no cap at all, and a cap that (wrongly)
+    /// used `SignKind::Plain`'s 90 for every kind is the other plausible
+    /// mistake — it keeps the whole line on *both* boards and fails the
+    /// hanging arm here. The fixture width is asserted to sit strictly
+    /// between the two caps first, so an input that could not tell them apart
+    /// fails as a bad fixture rather than passing vacuously.
+    #[test]
+    fn a_hanging_sign_cuts_a_line_a_standing_sign_keeps_whole() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let spans = vec![TextSpan {
+            text: "narrower board".to_owned(),
+            style: TextStyle::default(),
+        }];
+        let full = super::super::nametag::styled_advance_width(&raster, &spans);
+        let hanging_cap = SignKind::Hanging.max_text_line_width();
+        let plain_cap = SignKind::Plain.max_text_line_width();
+        assert!(
+            full > hanging_cap && full <= plain_cap,
+            "the fixture must be discriminating: {full} px against caps \
+             {hanging_cap}/{plain_cap}"
+        );
+
+        let kept_plain = split_first_line(&raster, &spans, plain_cap);
+        assert_eq!(
+            kept_plain, spans,
+            "a standing sign must keep this line exactly as written"
+        );
+
+        let kept_hanging = split_first_line(&raster, &spans, hanging_cap);
+        let kept_text: String = kept_hanging.iter().map(|s| s.text.as_str()).collect();
+        assert_ne!(
+            kept_text, "narrower board",
+            "a hanging sign must cut this line, not draw it whole"
+        );
+        assert!(
+            !kept_text.is_empty(),
+            "the cut must keep the first wrapped row, not drop the line"
+        );
+        let kept_width = super::super::nametag::styled_advance_width(&raster, &kept_hanging);
+        assert!(
+            kept_width <= hanging_cap,
+            "the kept row {kept_text:?} measures {kept_width} px, over the \
+             hanging cap of {hanging_cap}"
+        );
+    }
+
+    /// The same claim one layer down, in **world space**, where the reported
+    /// defect actually lives: the drawn quads must stay inside the board.
+    ///
+    /// The bound is derived rather than eyeballed —
+    /// `maxTextLineWidth / 2 * renderScale` is the half-width of the widest
+    /// line vanilla can produce, and a hanging sign's is
+    /// `60 / 2 * 0.0140625 = 0.421875` blocks against
+    /// `block/template_hanging_sign`'s own 14/16-wide board (half-width
+    /// `0.4375`). So a correct line fits the board with 1/64 of a block to
+    /// spare, and the uncapped line does not. The control is the *same*
+    /// fixture measured without the cap, required to exceed the board.
+    #[test]
+    fn hanging_sign_text_stays_inside_its_board() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let mut side = SignSide::default();
+        side.lines[0] = vec![plain_span("narrower board")];
+
+        // `rotation_segment: 0` faces +Z, so the text runs along world X and
+        // the board's own half-width is the X extent from the block centre.
+        let mut out = Vec::new();
+        push_side_quads(
+            &raster,
+            &ink,
+            &side,
+            [0, 0, 0],
+            SignKind::Hanging,
+            SignOrientation::Ground { rotation_segment: 0 },
+            true,
+            0.0,
+            &mut out,
+        );
+        assert!(!out.is_empty(), "the fixture must draw something at all");
+        let extent = out
+            .iter()
+            .map(|v| (v.position[0] - 0.5).abs())
+            .fold(0.0f32, f32::max);
+
+        const BOARD_HALF_WIDTH: f32 = 7.0 / 16.0;
+        let cap_half_width =
+            SignKind::Hanging.max_text_line_width() / 2.0 * SignKind::Hanging.render_scale();
+        assert!(
+            (cap_half_width - 0.421_875).abs() < 1e-6,
+            "the derived bound moved: {cap_half_width}"
+        );
+        assert!(
+            extent <= cap_half_width,
+            "hanging sign text reaches {extent} blocks from the board centre, \
+             past its own {cap_half_width}-block text area (the board itself \
+             is {BOARD_HALF_WIDTH})"
+        );
+
+        // The control, so a pass here cannot mean "the fixture was short
+        // enough anyway": the *uncapped* width of the same line overhangs the
+        // board on both sides.
+        let uncapped_half = super::super::nametag::styled_advance_width(
+            &raster,
+            &[TextSpan {
+                text: "narrower board".to_owned(),
+                style: TextStyle::default(),
+            }],
+        ) / 2.0
+            * SignKind::Hanging.render_scale();
+        assert!(
+            uncapped_half > BOARD_HALF_WIDTH,
+            "this fixture cannot see the defect: uncapped it reaches only \
+             {uncapped_half} blocks, inside the {BOARD_HALF_WIDTH}-block board"
+        );
+    }
+
+    /// **The glowing-outline gate.** A glowing side draws vanilla's outline
+    /// behind its glyphs; a non-glowing one draws none.
+    ///
+    /// The count is a **prediction**, not a direction: the outline is one
+    /// quad per glyph ink run, so the glowing vertex total must be exactly
+    /// `plain + 6 * <glyph runs>`, with the run count read off the layout
+    /// rather than off the thing under test. The wrong hypotheses it
+    /// separates are "no outline at all" (equal totals) and "outline the
+    /// effect bars too" (`discardEffects`), which the underlined fixture
+    /// line exists for.
+    #[test]
+    fn a_glowing_side_draws_an_outline_behind_its_glyphs_and_a_plain_one_does_not() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let mut side = SignSide::default();
+        side.color = SignDyeColor::Lime;
+        side.lines[0] = vec![plain_span("glowing")];
+        // A second line whose runs carry an underline, so `discardEffects` is
+        // exercised: its effect bars must contribute no outline quads.
+        side.lines[1] = vec![SignTextSpan {
+            text: "underlined".to_owned(),
+            underlined: true,
+            ..Default::default()
+        }];
+
+        let draw = |side: &SignSide, distance_squared: f32| {
+            let mut out = Vec::new();
+            push_side_quads(
+                &raster,
+                &ink,
+                side,
+                [0, 0, 0],
+                SignKind::Plain,
+                SignOrientation::Ground { rotation_segment: 0 },
+                true,
+                distance_squared,
+                &mut out,
+            );
+            out
+        };
+
+        let plain = draw(&side, 0.0);
+        assert!(!plain.is_empty(), "the fixture must draw ink at all");
+
+        let mut glowing_side = side.clone();
+        glowing_side.glowing = true;
+        let glowing = draw(&glowing_side, 0.0);
+
+        // The expected extra, computed from the layouts themselves.
+        let glyph_runs: usize = [0usize, 1]
+            .into_iter()
+            .map(|i| {
+                let spans = styled_spans(&glowing_side.lines[i], default_run_color(&glowing_side));
+                let layout = ink.layout(&raster, &spans);
+                layout.0.iter().filter(|r| r.outline_grow > 0.0).count()
+            })
+            .sum();
+        assert!(glyph_runs > 0, "the fixture produced no glyph ink runs");
+        assert_eq!(
+            glowing.len(),
+            plain.len() + 6 * glyph_runs,
+            "glowing must add exactly one quad per glyph ink run and none for \
+             the underline bars ({glyph_runs} runs)"
+        );
+
+        // And the added quads are the dark colour, which is *not* the glyph
+        // colour on a glowing side — the whole point of the outline.
+        let outline = lodestone_render::sign_outline_color(&glowing_side, 0.0)
+            .expect("a glowing lime sign within 16 blocks is outlined");
+        let glyph = sign_side_color(&glowing_side);
+        assert_ne!(outline, glyph, "the outline must differ from the glyphs");
+        let outline_quads = glowing.iter().filter(|v| v.color == outline).count();
+        assert_eq!(outline_quads, 6 * glyph_runs);
+
+        // A non-glowing side draws *only* its own rects, no outline pass at
+        // all. This cannot be asserted by colour: a plain side's glyph colour
+        // **is** `getDarkColor`, the same value the outline uses, so the two
+        // coincide by construction — a colour filter would count every glyph
+        // as an outline. The vertex total against the layout's own rect count
+        // is the assertion that separates them.
+        let all_runs: usize = [0usize, 1]
+            .into_iter()
+            .map(|i| {
+                let spans = styled_spans(&side.lines[i], default_run_color(&side));
+                ink.layout(&raster, &spans).0.len()
+            })
+            .sum();
+        assert_eq!(
+            plain.len(),
+            6 * all_runs,
+            "a non-glowing side must draw one quad per layout rect and nothing more"
+        );
+    }
+
+    /// The outline's distance gate, both arms, on the same fixture — and the
+    /// black arm, which ignores distance entirely.
+    ///
+    /// `Mth.square(16) == 256`, so 15 blocks (225) is inside and 17 (289) is
+    /// out; neither input sits on the boundary, where `<` and `<=` cannot be
+    /// told apart.
+    #[test]
+    fn the_outline_fades_out_past_sixteen_blocks_except_for_black_text() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let mut side = SignSide::default();
+        side.glowing = true;
+        side.color = SignDyeColor::Lime;
+        side.lines[0] = vec![plain_span("glowing")];
+
+        let count = |side: &SignSide, distance_squared: f32| {
+            let mut out = Vec::new();
+            push_side_quads(
+                &raster,
+                &ink,
+                side,
+                [0, 0, 0],
+                SignKind::Plain,
+                SignOrientation::Ground { rotation_segment: 0 },
+                true,
+                distance_squared,
+                &mut out,
+            );
+            out.len()
+        };
+
+        let near = count(&side, 15.0 * 15.0);
+        let far = count(&side, 17.0 * 17.0);
+        assert!(
+            near > far,
+            "a glowing lime sign must lose its outline past 16 blocks: \
+             {near} vertices near, {far} far"
+        );
+
+        let mut black = side.clone();
+        black.color = SignDyeColor::Black;
+        assert_eq!(
+            count(&black, 17.0 * 17.0),
+            near,
+            "black glowing text is outlined at any range — otherwise its \
+             colour-0 glyphs are invisible"
+        );
+    }
+
     /// The central control: one line with no colour of its own must draw in
     /// the sign's own dye colour, and a *sibling* line carrying an explicit
     /// **hex** colour (not one of the sixteen legacy colours, so a lossy
@@ -805,6 +1204,9 @@ mod tests {
             SignKind::Plain,
             SignOrientation::Ground { rotation_segment: 0 },
             true,
+            // Well inside `OUTLINE_RENDER_DISTANCE_SQUARED`, so a glowing
+            // side in these fixtures is outlined; a non-glowing one never is.
+            0.0,
             &mut out,
         );
         assert!(!out.is_empty(), "the fixture must contribute ink to test anything");

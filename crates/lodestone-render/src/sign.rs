@@ -94,15 +94,45 @@
 //! `getTextColor()` unscaled. [`DyeColor.java:30-45`] is the source for
 //! every constant in [`dye_text_color_rgb`] — transcribed, not derived.
 //!
-//! **Deferred**: the black-dye-glowing outline
-//! (`BLACK_TEXT_OUTLINE_COLOR = -988212`, a second offset glyph pass drawn
-//! behind the main one so glowing black text is not literally invisible) and
-//! per-pixel world-light modulation for non-glowing text (`state.lightCoords`
-//! in vanilla). The second is a deliberate simplification mirroring
+//! # Glowing text: the outline is the whole visual difference
+//!
+//! `AbstractSignRenderer.submitSignText` branches once on
+//! `signText.hasGlowingText()`, and the branch decides three things at once:
+//!
+//! | | plain | glowing |
+//! |---|---|---|
+//! | glyph colour | `getDarkColor` | `dye.getTextColor()`, unscaled |
+//! | outline colour | none (`0`) | `getDarkColor` |
+//! | light | `state.lightCoords` | `15728880` — full bright |
+//!
+//! and the outline is gated once more: `drawOutline = textColor ==
+//! DyeColor.BLACK.getTextColor() || state.drawOutline`, where `state.drawOutline`
+//! is `isOutlineVisible` — the camera within `Mth.square(16)` of the block
+//! centre, or a scoping first-person player. So a **black** glowing sign is
+//! outlined at any range (its glyphs are literally colour `0` and the outline
+//! is the only thing that makes them legible), and every other glowing sign
+//! is outlined within 16 blocks. [`sign_outline_color`] is that whole gate.
+//!
+//! [`sign_dark_color_rgb`] is `getDarkColor` itself, including the
+//! substitution this module used to defer: `color == BLACK && glowing`
+//! yields `BLACK_TEXT_OUTLINE_COLOR = -988212` (`0xFFF0EBCC`, a bone white)
+//! rather than `scaleRGB(0, 0.4) == 0`. That substitution is unreachable
+//! from [`sign_side_color`]'s non-glowing arm, where `hasGlowingText()` is
+//! false by construction, so the two functions agree everywhere they overlap.
+//!
+//! **The full-bright half needs no port**: this project's sign-text pass
+//! never samples a lightmap at all (see `gpu/sign_text.rs`), so *every* sign
+//! already draws at full brightness. That makes vanilla's `lightCoords` arm
+//! the remaining gap — non-glowing text is brighter in the dark here than in
+//! vanilla — and leaves glowing text's own "legible in pitch dark" property
+//! satisfied for free. Do not read this as the glow being complete: it is
+//! complete because the *other* arm is unported, and closing the lightmap gap
+//! is what will make this branch load-bearing.
+//!
+//! **Deferred**: per-pixel world-light modulation for non-glowing text
+//! (`state.lightCoords` in vanilla), a deliberate simplification mirroring
 //! `gpu/nametag.rs`'s own documented choice to draw "plain full-bright...
-//! unconditionally" rather than sample a lightmap per glyph; both gaps are
-//! real and both are narrow (one dye combination; one fidelity loss that
-//! reads as "sign text is a little brighter in caves than vanilla").
+//! unconditionally" rather than sample a lightmap per glyph.
 
 use glam::{Mat4, Vec3};
 use lodestone_world::{SignDyeColor, SignSide};
@@ -310,21 +340,93 @@ fn scale_rgb(rgb: u32, scale: f32) -> u32 {
     (ch(r) << 16) | (ch(g) << 8) | ch(b)
 }
 
-/// One text side's resolved draw colour, RGBA in `0..=1` — full dye colour
-/// when [`SignSide::glowing`], `ARGB.scaleRGB(dye, 0.4)` otherwise
-/// (`AbstractSignRenderer.getDarkColor`, minus the black-glowing outline
-/// substitution — see the module doc's Deferred section). Alpha is always
-/// `1.0`; sign text is opaque.
+/// One text side's resolved **glyph** draw colour, RGBA in `0..=1` — full dye
+/// colour when [`SignSide::glowing`], [`sign_dark_color_rgb`] otherwise.
+/// Alpha is always `1.0`; sign text is opaque.
+///
+/// The glowing arm deliberately does **not** take
+/// [`BLACK_TEXT_OUTLINE_RGB`]: vanilla substitutes that into the *outline*
+/// colour, never into the glyphs, so a glowing black sign really does draw
+/// colour-`0` glyphs and relies on [`sign_outline_color`] to make them
+/// legible.
 #[must_use]
 pub fn sign_side_color(side: &SignSide) -> [f32; 4] {
-    let rgb = dye_text_color_rgb(side.color);
-    let rgb = if side.glowing { rgb } else { scale_rgb(rgb, 0.4) };
+    let rgb = if side.glowing {
+        dye_text_color_rgb(side.color)
+    } else {
+        // `getDarkColor` with `hasGlowingText()` false, which can only take
+        // the `scaleRGB` arm — routed through the shared function anyway so
+        // the two cannot drift apart.
+        sign_dark_color_rgb(side)
+    };
     [
         ((rgb >> 16) & 0xFF) as f32 / 255.0,
         ((rgb >> 8) & 0xFF) as f32 / 255.0,
         (rgb & 0xFF) as f32 / 255.0,
         1.0,
     ]
+}
+
+/// `AbstractSignRenderer.BLACK_TEXT_OUTLINE_COLOR`, as 0xRRGGBB — vanilla
+/// spells it `-988212`, an ARGB `int` whose alpha byte is `0xFF`, so the
+/// colour itself is `0xF0EBCC`. Substituted for `scaleRGB(0, 0.4) == 0` when
+/// a **black** side has glowing text, which is the one case where the plain
+/// formula would make the outline the same colour as the glyphs it exists to
+/// separate.
+pub const BLACK_TEXT_OUTLINE_RGB: u32 = 0x00F0_EBCC;
+
+/// `Mth.square(16)` — `AbstractSignRenderer.OUTLINE_RENDER_DISTANCE`, the
+/// squared block distance from the camera to the sign's block *centre* within
+/// which a glowing (non-black) side draws its outline.
+pub const OUTLINE_RENDER_DISTANCE_SQUARED: f32 = 256.0;
+
+/// `AbstractSignRenderer.getDarkColor`, whole — the dye's text colour scaled
+/// by `0.4`, **except** for a black side with glowing text, which yields
+/// [`BLACK_TEXT_OUTLINE_RGB`] instead. Packed 0xRRGGBB.
+///
+/// This is both the glyph colour of a *non*-glowing side and the outline
+/// colour of a glowing one; vanilla computes it once, before the branch, and
+/// uses it for both. Keeping that single derivation is why [`sign_side_color`]
+/// calls this rather than restating the scale.
+#[must_use]
+pub fn sign_dark_color_rgb(side: &SignSide) -> u32 {
+    let rgb = dye_text_color_rgb(side.color);
+    if rgb == dye_text_color_rgb(SignDyeColor::Black) && side.glowing {
+        BLACK_TEXT_OUTLINE_RGB
+    } else {
+        scale_rgb(rgb, 0.4)
+    }
+}
+
+/// The outline colour for one text side, RGBA in `0..=1`, or `None` when this
+/// side draws no outline — `submitSignText`'s `drawOutline ? darkColor : 0`
+/// with its own gate folded in.
+///
+/// `distance_squared` is from the camera to the sign block's **centre**
+/// (`Vec3.atCenterOf`), matching `isOutlineVisible`. The scoping-spyglass half
+/// of that method has no equivalent here and is not modelled; it only ever
+/// *adds* an outline at long range.
+///
+/// A non-glowing side is `None` unconditionally — the outline exists solely to
+/// separate full-brightness glyphs from a bright board, and vanilla's plain
+/// arm hardcodes `drawOutline = false`.
+#[must_use]
+pub fn sign_outline_color(side: &SignSide, distance_squared: f32) -> Option<[f32; 4]> {
+    if !side.glowing {
+        return None;
+    }
+    let text_rgb = dye_text_color_rgb(side.color);
+    let black = text_rgb == dye_text_color_rgb(SignDyeColor::Black);
+    if !black && distance_squared >= OUTLINE_RENDER_DISTANCE_SQUARED {
+        return None;
+    }
+    let rgb = sign_dark_color_rgb(side);
+    Some([
+        ((rgb >> 16) & 0xFF) as f32 / 255.0,
+        ((rgb >> 8) & 0xFF) as f32 / 255.0,
+        (rgb & 0xFF) as f32 / 255.0,
+        1.0,
+    ])
 }
 
 /// A plain sign's text-line height in font pixels
@@ -613,6 +715,99 @@ mod tests {
         )
         .transform_point3(probe);
         assert!((plain_wall - b).length() > 0.2, "plain {plain_wall:?} vs hanging {b:?}");
+    }
+
+    /// `getDarkColor`'s one substitution, and the discriminating input is
+    /// **black plus glowing** — every other combination takes the `scaleRGB`
+    /// arm, so a gate on red or on non-glowing black cannot tell the two
+    /// hypotheses apart. Both are computed here and required to differ:
+    /// `scaleRGB(0, 0.4)` is `0`, the substitution is `0xF0EBCC`.
+    #[test]
+    fn the_dark_colour_substitutes_bone_white_only_for_black_glowing_text() {
+        let side = |color, glowing| SignSide {
+            lines: Default::default(),
+            glowing,
+            color,
+        };
+        assert_eq!(
+            sign_dark_color_rgb(&side(SignDyeColor::Black, true)),
+            BLACK_TEXT_OUTLINE_RGB
+        );
+        assert_eq!(BLACK_TEXT_OUTLINE_RGB, 0x00F0_EBCC);
+        // The wrong hypothesis, computed rather than restated.
+        assert_eq!(scale_rgb(dye_text_color_rgb(SignDyeColor::Black), 0.4), 0);
+        assert_eq!(sign_dark_color_rgb(&side(SignDyeColor::Black, false)), 0);
+        // A non-black glowing side is untouched by the substitution.
+        assert_eq!(sign_dark_color_rgb(&side(SignDyeColor::Red, true)), 0x66_0000);
+        assert_eq!(sign_dark_color_rgb(&side(SignDyeColor::Red, false)), 0x66_0000);
+    }
+
+    /// The outline gate, all three of its arms. `Mth.square(16) == 256`, so a
+    /// sign at 15 blocks (225) is inside and one at 17 (289) is outside —
+    /// inputs chosen either side of the boundary rather than at it, since the
+    /// comparison is strict and a fixture *on* 256 cannot separate `<` from
+    /// `<=`.
+    #[test]
+    fn only_glowing_text_is_outlined_and_only_black_is_outlined_at_any_range() {
+        let side = |color, glowing| SignSide {
+            lines: Default::default(),
+            glowing,
+            color,
+        };
+        let near = 15.0f32 * 15.0;
+        let far = 17.0f32 * 17.0;
+        assert!(near < OUTLINE_RENDER_DISTANCE_SQUARED);
+        assert!(far > OUTLINE_RENDER_DISTANCE_SQUARED);
+
+        // Not glowing: no outline at any range at all.
+        assert_eq!(sign_outline_color(&side(SignDyeColor::Lime, false), near), None);
+        assert_eq!(sign_outline_color(&side(SignDyeColor::Black, false), near), None);
+
+        // Glowing and not black: outlined near, bare far.
+        let lime = sign_outline_color(&side(SignDyeColor::Lime, true), near)
+            .expect("a glowing sign within 16 blocks is outlined");
+        // `scaleRGB(0xBFFF00, 0.4)` is `(76, 102, 0)` — the dark colour, not
+        // the glyph colour, and computed here from the constant rather than
+        // read back off the function under test.
+        assert!((lime[0] - 76.0 / 255.0).abs() < 1e-4, "{lime:?}");
+        assert!((lime[1] - 102.0 / 255.0).abs() < 1e-4, "{lime:?}");
+        assert_eq!(lime[2], 0.0);
+        assert_eq!(sign_outline_color(&side(SignDyeColor::Lime, true), far), None);
+
+        // Glowing and black: outlined at *any* range, in bone white.
+        let black_far = sign_outline_color(&side(SignDyeColor::Black, true), far)
+            .expect("black glowing text is outlined regardless of distance");
+        assert!((black_far[0] - 240.0 / 255.0).abs() < 1e-4, "{black_far:?}");
+        assert!((black_far[1] - 235.0 / 255.0).abs() < 1e-4, "{black_far:?}");
+        assert!((black_far[2] - 204.0 / 255.0).abs() < 1e-4, "{black_far:?}");
+    }
+
+    /// Lime's *text* colour is a yellow-green and that is not a bug: vanilla's
+    /// `DyeColor.LIME` carries `textureDiffuseColor = 8439583` (a green) and
+    /// `textColor = 12582656`, which is `0xBFFF00` — 191 red against 255
+    /// green. A glowing lime sign therefore reads yellowish next to the dyed
+    /// *block*, in vanilla exactly as here, and "the dye is not reaching the
+    /// glyph" is the wrong diagnosis for it. Pinned against both the packed
+    /// constant and its channels so a future transcription slip fails here.
+    #[test]
+    fn limes_text_colour_is_a_yellow_green_in_the_jar_not_a_dropped_dye() {
+        let rgb = dye_text_color_rgb(SignDyeColor::Lime);
+        assert_eq!(rgb, 12_582_656);
+        assert_eq!(rgb, 0x00BF_FF00);
+        assert_eq!((rgb >> 16) & 0xFF, 191);
+        assert_eq!((rgb >> 8) & 0xFF, 255);
+        assert_eq!(rgb & 0xFF, 0);
+        // And the glowing glyph colour is that value unscaled, so a glowing
+        // lime sign draws the full `0xBFFF00` rather than the dark `0x4C6600`.
+        let glowing = SignSide {
+            lines: Default::default(),
+            glowing: true,
+            color: SignDyeColor::Lime,
+        };
+        let c = sign_side_color(&glowing);
+        assert!((c[0] - 191.0 / 255.0).abs() < 1e-4, "{c:?}");
+        assert!((c[1] - 1.0).abs() < 1e-4, "{c:?}");
+        assert_eq!(c[2], 0.0);
     }
 
     #[test]

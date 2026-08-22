@@ -1767,8 +1767,10 @@ pub fn conduit_bob(anim_time: f32) -> f32 {
 ///
 /// Named for the *mesh* rather than for the lectern, because
 /// `LecternRenderer` and `EnchantTableRenderer` bake the same
-/// `ModelLayers.BOOK` layer. Only the lectern consumes it today; the enchanting
-/// table needs its own animation state on top (see [`LECTERN_BOOK_OPENNESS`]).
+/// `ModelLayers.BOOK` layer. Both consume it — [`BlockEntityModels::
+/// resolve_lectern`] and [`BlockEntityModels::resolve_enchanting_table`] — and
+/// the whole difference is the animation state on top: the lectern's is frozen
+/// (see [`LECTERN_BOOK_OPENNESS`]) and the table's is live.
 pub const BOOK: &str = "book";
 
 /// The jar sheet a book draws with — `EnchantTableRenderer.BOOK_TEXTURE`
@@ -3082,8 +3084,15 @@ pub struct EnchantingTableSpawn {
     /// counter, feeding both the hover and the openness breath.
     pub time: f32,
     /// `lerp(partialTicks, oOpen, open)`, `0..1`: how far the book has opened.
-    /// `0` is fully shut and renders identically to no book at all, which is what
-    /// makes garbage-collecting a rested entry safe.
+    /// `0` is fully shut, which is a **closed book** and not an absent one —
+    /// [`enchanting_table_book_openness`] returns `0`, and [`book_part_poses`]
+    /// at openness `0` puts `left_lid` at `PI` against `right_lid` at `0`, i.e.
+    /// the covers folded together over six real posed parts.
+    /// `EnchantTableRenderer.submit` has no early return: vanilla draws a book
+    /// for every enchanting table it renders, and the nearest-player test
+    /// decides only whether it opens. A caller that skips a shut book therefore
+    /// deletes every table nobody is standing at, which is exactly what this
+    /// field's doc used to license.
     pub open: f32,
     /// `lerp(partialTicks, oFlip, flip)` — the page-flip accumulator, **not** a
     /// `0..1` phase. It is unbounded and drifts in either direction; the two

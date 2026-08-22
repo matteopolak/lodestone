@@ -5149,7 +5149,7 @@ fn strip_style_spans(spans: &[TextSpan]) -> Vec<TextSpan> {
 /// and drop the `\n` while keeping every other character's style) and a blank
 /// paragraph still yields one empty row for free, from
 /// [`wrap_spans_paragraph`]'s own "never empty" guarantee below.
-fn wrap_spans_with(
+pub(crate) fn wrap_spans_with(
     measure: impl Fn(&[TextSpan]) -> f32,
     spans: &[TextSpan],
     max_width_px: f32,
