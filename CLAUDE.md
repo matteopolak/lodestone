@@ -106,12 +106,15 @@ All four *checks* are required, and each catches a class the others structurally
   on by default nothing else proves the shell compiles with **no** version family — the entire point of
   the version seam, and the only thing stopping a hardcoded `v770` dependency creeping into shell code.
   Its failure mode is architectural rather than a broken test, so nothing else will catch it.
-- **`just wasm-check` needs LLVM, and under this workspace's default backend it fails in a way that reads
-  as a real break.** Cranelift is the debug backend here and **cannot target `wasm32`**, so it reports the
-  refusal as a per-dependency compile error — a wall of errors naming crates you did not touch. Run it as
-  `CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm just wasm-check`, which reports PASS with all confinement rules
-  green. A wasm-check failure is therefore two claims, not one: check the backend before believing the
-  browser is broken.
+- **`just wasm-check` needs LLVM, and it now sets that itself — but know the failure mode.** Cranelift is
+  this workspace's debug backend and **cannot target `wasm32`**, so before this was fixed the script
+  reported the refusal as a per-dependency compile error: a wall of errors naming crates you never touched
+  (`unicode-ident`, `once_cell`, `cfg-if`), reading exactly like a real confinement break. Both entry
+  points now export `CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm` — `xtask` had it all along and only
+  `scripts/wasm-check.sh` lacked it, which is **parity drift in the opposite direction from the one this
+  file already records**, where the xtask carried a stale subset of the script's rules. So check both
+  directions when they disagree, and if you ever see wasm-check fail inside third-party crates, suspect
+  the backend before the code.
 - **There is a fifth class, and none of the four sees it: `just wasm-check`.** It lives in CI rather than in
   `just health` (a full workspace build is too slow to fold into the command everyone runs), so **all four
   above can be green while `wasm32-unknown-unknown` is broken** — measured: a shutdown-signal fix gated a
