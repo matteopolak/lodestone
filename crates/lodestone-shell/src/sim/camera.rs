@@ -931,6 +931,11 @@ impl Sim {
             // one is the *arm-stroke* input, which reads the same interpolated
             // number but through `AnimInput` rather than `EntityDraw`.
             swim_amount: interp.swim_amount_o + (interp.swim_amount - interp.swim_amount_o) * partial_tick,
+            // The local player is never an armour stand, and `None` here is the
+            // field's own meaning of "not one" rather than a gap — see
+            // `AnimInput::armor_stand_pose`. Stated explicitly, like `arm_pose`
+            // above, rather than spread from `AnimInput::REST`.
+            armor_stand_pose: None,
         }
     }
 }
