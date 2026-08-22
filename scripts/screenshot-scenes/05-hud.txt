@@ -1,0 +1,98 @@
+# The HUD: tab list, scoreboard sidebar, hotbar with 3-D block items, hearts,
+# hunger, XP bar and the first-person hand — over a live world.
+#
+# `@hud` composites the HUD pass over the world frame the way `app/redraw.rs`
+# does, and `@hand` lets the first-person item pass draw (every other scene
+# suppresses it). The player is put in **survival** first: vanilla's
+# `canHurtPlayer()` hides the hearts, the hunger row, the bubbles and the XP
+# bar together in creative, and the harness reads that gate off the live
+# session rather than forcing it, so a creative capture would honestly show
+# an empty HUD.
+#
+# The tab list's other rows are the harness's own companion clients. A vanilla
+# server never sends a tab-list header or footer — that packet has no command
+# behind it — so there is none here.
+
+@size 768 432
+@camera 0.0 65.6 6.4
+@look 0.0 65.1 15.5
+@fov 70
+@wait 2500
+@hud
+@hand
+
+fill -14 63 2 14 80 30 minecraft:air
+kill @e[type=!player,x=-14,y=60,z=2,dx=28,dy=22,dz=28]
+fill -14 63 2 14 63 30 minecraft:grass_block
+fill -9 63 8 9 63 22 minecraft:stone_bricks
+fill -9 63 22 9 66 22 minecraft:stone_bricks
+fill -9 67 22 9 67 22 minecraft:stone_brick_wall
+fill -5 64 22 5 66 22 minecraft:mossy_stone_bricks
+setblock -8 64 22 minecraft:lantern[hanging=false]
+setblock 8 64 22 minecraft:lantern[hanging=false]
+setblock -3 64 16 minecraft:blue_banner[rotation=8]{patterns:[{pattern:"minecraft:rhombus",color:"white"},{pattern:"minecraft:circle",color:"light_blue"}]}
+setblock 3 64 16 minecraft:red_banner[rotation=8]{patterns:[{pattern:"minecraft:stripe_bottom",color:"white"},{pattern:"minecraft:cross",color:"black"}]}
+setblock -1 64 18 minecraft:chest[facing=south,type=left]
+setblock 0 64 18 minecraft:chest[facing=south,type=right]
+setblock 2 64 18 minecraft:campfire[lit=true,facing=south]
+setblock -2 64 18 minecraft:decorated_pot[facing=south]{sherds:["minecraft:angler_pottery_sherd","minecraft:brewer_pottery_sherd","minecraft:danger_pottery_sherd","minecraft:explorer_pottery_sherd"]}
+summon sheep -5.0 64.0 14.0 {NoAI:1b,Rotation:[170f,0f],Color:6b}
+summon cow 5.0 64.0 14.0 {NoAI:1b,Rotation:[195f,0f]}
+
+# --- the player's own state ----------------------------------------------
+gamemode survival Lodestone
+effect clear Lodestone
+xp set Lodestone 0 points
+xp set Lodestone 27 levels
+xp add Lodestone 14 points
+item replace entity Lodestone hotbar.0 with minecraft:diamond_sword
+item replace entity Lodestone hotbar.1 with minecraft:diamond_pickaxe
+item replace entity Lodestone hotbar.2 with minecraft:oak_planks 64
+item replace entity Lodestone hotbar.3 with minecraft:cobblestone 47
+item replace entity Lodestone hotbar.4 with minecraft:torch 12
+item replace entity Lodestone hotbar.5 with minecraft:cooked_beef 8
+item replace entity Lodestone hotbar.6 with minecraft:redstone 32
+item replace entity Lodestone hotbar.7 with minecraft:sea_lantern 5
+item replace entity Lodestone hotbar.8 with minecraft:bucket
+item replace entity Lodestone armor.head with minecraft:diamond_helmet
+item replace entity Lodestone armor.chest with minecraft:diamond_chestplate
+item replace entity Lodestone armor.legs with minecraft:iron_leggings
+item replace entity Lodestone armor.feet with minecraft:iron_boots
+
+# --- the scoreboard sidebar ----------------------------------------------
+scoreboard objectives remove ldshot
+scoreboard objectives add ldshot dummy {"text":"Lodestone","color":"gold","bold":true}
+scoreboard objectives setdisplay sidebar ldshot
+team remove ldrow
+team add ldrow
+team modify ldrow color aqua
+scoreboard players set protocol ldshot 776
+scoreboard players set chunks ldshot 441
+scoreboard players set entities ldshot 63
+scoreboard players set draw_calls ldshot 118
+scoreboard players set sections ldshot 1327
+team join ldrow protocol
+team join ldrow chunks
+team join ldrow entities
+team join ldrow draw_calls
+team join ldrow sections
+
+# --- a boss bar, and some chat to sit under it ---------------------------
+bossbar remove minecraft:ldshot
+bossbar add minecraft:ldshot {"text":"The Ender Dragon","color":"light_purple","bold":true}
+bossbar set minecraft:ldshot color purple
+bossbar set minecraft:ldshot style notched_10
+bossbar set minecraft:ldshot max 200
+bossbar set minecraft:ldshot value 137
+bossbar set minecraft:ldshot players @a
+
+
+tp Lodestone 0.0 64.0 4.0 180 3
+
+# Chat and the action bar go LAST, so they are the newest lines in the log —
+# the frame shows a window onto the tail of it.
+tellraw @a [{"text":"[","color":"dark_gray"},{"text":"Server","color":"gold"},{"text":"] ","color":"dark_gray"},{"text":"Lodestone is a from-scratch Minecraft client in Rust.","color":"white"}]
+tellraw @a [{"text":"<","color":"gray"},{"text":"Ferris","color":"aqua"},{"text":"> ","color":"gray"},{"text":"four protocol families: 1.8.9, 1.12.2, 1.16.5 and 26.2","color":"white"}]
+tellraw @a [{"text":"<","color":"gray"},{"text":"Basalt","color":"green"},{"text":"> ","color":"gray"},{"text":"styled runs ","color":"white"},{"text":"keep ","color":"light_purple","italic":true},{"text":"their ","color":"yellow","bold":true},{"text":"formatting","color":"#7EE787","underlined":true}]
+tellraw @a [{"text":"<","color":"gray"},{"text":"Cinder","color":"red"},{"text":"> ","color":"gray"},{"text":"and hex colours survive the whole way to the glyph","color":"#F78166"}]
+title @a actionbar {"text":"the client renders its own HUD","color":"yellow"}

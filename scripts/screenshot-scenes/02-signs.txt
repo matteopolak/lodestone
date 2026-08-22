@@ -1,0 +1,40 @@
+# Signs: styled front and back text, glowing dye, standing / wall / hanging.
+#
+# Sign glyphs are tiny, so this is the one telephoto shot in the set — a
+# narrow FOV three blocks off the row, rather than a wide one further back.
+# The crimson sign on the right is turned away on purpose (`rotation=0` faces
+# +Z and the camera looks along +Z), so what the frame shows is its
+# **back_text**: a separate side with its own colour and glow flag, and one a
+# fixture that only ever builds a front will never reach.
+
+@size 768 432
+@camera 0.0 65.1 10.5
+@look 0.0 65.1 13.6
+@fov 50
+@wait 2000
+
+fill -12 63 2 12 76 28 minecraft:air
+kill @e[type=!player,x=-12,y=60,z=2,dx=24,dy=20,dz=26]
+fill -12 63 2 12 63 28 minecraft:stripped_spruce_wood
+fill -6 63 11 6 63 16 minecraft:spruce_planks
+
+# Back wall, plus the block the hanging sign hangs from.
+fill -6 64 15 6 68 15 minecraft:deepslate_bricks
+fill -6 66 15 6 66 15 minecraft:chiseled_deepslate
+setblock 2 66 14 minecraft:deepslate_bricks
+setblock -4 65 15 minecraft:sea_lantern
+setblock 4 65 15 minecraft:sea_lantern
+
+# Wall sign — `facing=north` is the face pointing at the camera, and its
+# support is the wall block behind it at z=15.
+setblock -2 65 14 minecraft:spruce_wall_sign[facing=north]{is_waxed:1b,front_text:{has_glowing_text:1b,color:"lime",messages:[{text:"glowing text"},{text:"dyed lime"},{text:"and waxed"},{text:""}]}}
+
+# Hanging sign, under the block placed above it.
+setblock 2 65 14 minecraft:oak_hanging_sign[attached=false,rotation=8]{front_text:{messages:[{text:"hanging sign","color":"gold","bold":true},{text:"narrower board","color":"white"},{text:"tighter lines","color":"gray"},{text:""}]}}
+
+# Standing signs. rotation=8 faces the camera; rotation=0 turns its back to it.
+setblock -1 64 13 minecraft:oak_sign[rotation=8]{front_text:{messages:[{text:"Lodestone","color":"#F2B233","bold":true},{text:"styled runs","color":"aqua"},{text:"per span","color":"green","italic":true},{text:"one span each","color":"gray"}]}}
+setblock 0 64 13 minecraft:birch_sign[rotation=8]{front_text:{messages:[{text:"obfuscated:","color":"white"},{text:"scrambled","color":"red","obfuscated":true},{text:"strikethrough","color":"yellow","strikethrough":true},{text:"underline","color":"blue","underlined":true}]}}
+setblock 1 64 13 minecraft:crimson_sign[rotation=0]{front_text:{messages:[{text:"you cannot"},{text:"read this"},{text:"side"},{text:""}]},back_text:{has_glowing_text:1b,color:"orange",messages:[{text:"BACK TEXT","bold":true},{text:"its own side,"},{text:"colour and"},{text:"glow flag"}]}}
+
+tp Lodestone 0.0 64.0 26.0 180 5
