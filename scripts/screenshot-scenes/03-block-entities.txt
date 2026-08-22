@@ -22,6 +22,21 @@
 #     missing texture. Banners here use `rotation=8` for the opposite reason:
 #     `BannerRenderer` applies no `scale(-1, -1, 1)` flip, so their segment 0
 #     points the other way.
+#   * a double chest's `type=left`/`type=right` is only half the placement —
+#     which neighbour a half pairs with **depends on its `facing`**.
+#     `ChestBlock.getConnectedDirection` gives `LEFT` the block at
+#     `facing.getClockWise()` and `RIGHT` the one at `getCounterClockWise()`,
+#     so for `facing=north` a `left` half pairs **east** and for `facing=south`
+#     it pairs **west**. Get the pair the wrong way round and both halves are
+#     orphans, each drawing the open seam face it exists to hide against its
+#     partner — a chest-shaped hole on each side, which reads as a broken
+#     renderer. The pair below is `left` west of `right` and `facing=north`,
+#     which is consistent.
+#
+# Everything with a front — the chests, the barrel — faces **north**, so the
+# camera sees its face rather than its back. The same trap as the skulls, one
+# block type up: a chest photographed from behind has no latch and looks like a
+# crate.
 
 @size 2560 1440
 @camera 0.0 66.3 4.6
@@ -49,15 +64,17 @@ setblock 4 64 17 minecraft:green_banner[rotation=8]{patterns:[{pattern:"minecraf
 setblock 5 64 17 minecraft:orange_banner[rotation=8]{patterns:[{pattern:"minecraft:diagonal_up_right",color:"magenta"},{pattern:"minecraft:flower",color:"yellow"},{pattern:"minecraft:triangles_bottom",color:"black"}]}
 setblock 6 64 17 minecraft:black_banner[rotation=8]{patterns:[{pattern:"minecraft:mojang",color:"white"},{pattern:"minecraft:border",color:"red"}]}
 
-# --- middle row: chests, lectern, campfire, bell ---------------------------
-setblock -6 64 13 minecraft:chest[facing=south,type=left]
-setblock -5 64 13 minecraft:chest[facing=south,type=right]
-setblock -3 64 13 minecraft:ender_chest[facing=south]
+# --- middle row: chests, heads, lectern, campfire, bell --------------------
+setblock -6 64 13 minecraft:chest[facing=north,type=left]
+setblock -5 64 13 minecraft:chest[facing=north,type=right]
+setblock -4 64 13 minecraft:dragon_head[rotation=0]
+setblock -3 64 13 minecraft:ender_chest[facing=north]
 setblock -1 64 13 minecraft:enchanting_table
 setblock 1 64 13 minecraft:lectern[facing=south,has_book=true]{Book:{id:"minecraft:written_book",count:1,components:{"minecraft:written_book_content":{title:"Lodestone",author:"lodestone",pages:[{raw:"hello"}]}}},Page:0}
 setblock 3 64 13 minecraft:campfire[lit=true,facing=south]{Items:[{Slot:0b,id:"minecraft:porkchop",count:1},{Slot:1b,id:"minecraft:potato",count:1}]}
+setblock 4 64 13 minecraft:piglin_head[rotation=0]
 setblock 5 64 13 minecraft:bell[facing=south,attachment=floor]
-setblock 6 64 13 minecraft:trapped_chest[facing=south]
+setblock 6 64 13 minecraft:trapped_chest[facing=north]
 
 # --- front row: shulkers, pots, heads, conduit -----------------------------
 setblock -5 64 9 minecraft:purple_shulker_box[facing=up]
@@ -67,7 +84,7 @@ setblock -2 64 9 minecraft:decorated_pot[facing=south]{sherds:["minecraft:angler
 setblock -1 64 9 minecraft:player_head[rotation=0]
 setblock 0 64 9 minecraft:decorated_pot[facing=south]{sherds:["minecraft:heart_pottery_sherd","minecraft:friend_pottery_sherd","minecraft:mourner_pottery_sherd","minecraft:skull_pottery_sherd"]}
 setblock 1 64 9 minecraft:skeleton_skull[rotation=0]
-setblock 2 64 9 minecraft:barrel[facing=south]
+setblock 2 64 9 minecraft:barrel[facing=north]
 setblock 3 64 9 minecraft:conduit[waterlogged=false]
 setblock 4 64 9 minecraft:lime_shulker_box[facing=up]
 setblock 5 64 9 minecraft:blue_shulker_box[facing=south]
