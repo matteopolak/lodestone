@@ -430,7 +430,7 @@ the procedural fallback uses a 16 px icon at a 22 px pitch.
   |---|---|---|---|
   | `minecraft:chest` | 13 | all 7 materials | **yes** |
   | `minecraft:shulker_box` | 17 | 17 sheets, one rig | **yes** |
-  | `minecraft:head` / `player_head` | 7 | 5 of 7 types | **yes**, except dragon/piglin |
+  | `minecraft:head` / `player_head` | 7 | all 7 types | **yes** |
   | `minecraft:banner` | 16 | rig exists; needs the ordered mask pass | no |
   | `minecraft:copper_golem_statue` | 32 | not ported | no |
   | `minecraft:shield` | 2 | not ported | no |

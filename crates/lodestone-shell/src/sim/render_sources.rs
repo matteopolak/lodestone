@@ -168,10 +168,12 @@ impl Sim {
     /// [`RenderState::set_skull_source`](crate::gpu::RenderState::set_skull_source).
     ///
     /// Unlike the chest source this captures **no partial tick and no animation
-    /// state**: none of the five ported skull types animate, so there is nothing
-    /// whose interpolation could freeze at the fraction of a tick the closure was
-    /// installed on. That asymmetry is the whole reason these are two sources
-    /// rather than one closure returning a pair.
+    /// state**: a skull's only animation is the dragon jaw / piglin ear wobble,
+    /// which vanilla drives from a redstone-`powered` tick counter this client
+    /// does not carry (see [`lodestone_render::SKULL_RESTING_ANIMATION_POS`]),
+    /// so there is nothing whose interpolation could freeze at the fraction of a
+    /// tick the closure was installed on. That asymmetry is the whole reason
+    /// these are two sources rather than one closure returning a pair.
     #[must_use]
     pub fn skull_source(
         &self,

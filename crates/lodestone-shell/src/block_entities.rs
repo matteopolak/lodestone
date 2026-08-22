@@ -1845,10 +1845,9 @@ fn skull_orientation(state_id: u32) -> Option<SkullOrientation> {
     None
 }
 
-/// Resolves one block state id into a skull/head type, or `None` if it is not
-/// one of the five ported types (see
-/// [`lodestone_render::SkullType::from_block_path`] for what is declined) —
-/// including not being a skull at all.
+/// Resolves one block state id into a skull/head type, or `None` if the block
+/// is not a skull at all. All seven of vanilla's `SkullBlock.Types` resolve —
+/// see [`lodestone_render::SkullType::from_block_path`].
 #[must_use]
 fn skull_type_for_state(state_id: u32) -> Option<SkullType> {
     let name = lodestone_data::block_states::block_name(state_id)?;
@@ -1966,9 +1965,13 @@ fn skull_candidates(
 /// lives there. The gather retains only that URL, alongside the same distance
 /// and state checks every other block entity uses.
 ///
-/// No lid-style animation state: none of the five ported skull types pose
-/// their head (see [`lodestone_render::BlockEntityModelSet::resolve_skull`]'s
-/// doc), so there is nothing here to tick.
+/// No lid-style animation state gathered here. No skull type poses its *head*,
+/// and the two that do pose a child part — the dragon's jaw, the piglin's ears
+/// — are driven by `SkullBlockEntity.getAnimation`, a counter that only
+/// advances while the block is redstone-`powered`. This client carries no such
+/// per-position tracker, so every skull draws at
+/// [`lodestone_render::SKULL_RESTING_ANIMATION_POS`] and there is nothing here
+/// to tick. Wiring the powered animation starts in this function.
 #[must_use]
 pub fn skull_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SkullSpawn> {
     let Some(client) = handle.get() else {
