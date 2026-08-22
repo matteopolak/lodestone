@@ -101,9 +101,31 @@ png = "0.18"
 # (`lodestone_assets::font`). Pure Rust (wraps `ttf-parser`, itself pure
 # Rust), `no_std` + `alloc` with no filesystem or clock access, so it costs
 # nothing extra to confine for wasm32 — verified compiling for
-# `wasm32-unknown-unknown` with its default features (`hashbrown`, `simd`;
-# `simd` is inert off x86/x86_64, per its own feature gate).
-fontdue = "0.9"
+# `wasm32-unknown-unknown`.
+#
+# **`simd` is switched off deliberately, and it is not a performance
+# question.** That feature gates nothing but a handful of x86/x86_64-only
+# bodies in `fontdue::platform` (`as_i32`, `trunc`, `fract`, `sqrt`,
+# `get_bitmap`); on aarch64 it is inert, so turning it off changes nothing at
+# all on this repo's own dev machines. On x86_64 it does two things we do not
+# want:
+#
+# - `as_i32` becomes `_mm_cvtss_si32`, which **Cranelift cannot compile** —
+#   this workspace's debug codegen backend (see `.cargo/config.toml`) aborts
+#   the process at runtime with "llvm.x86.sse.cvtss2si is not yet supported".
+#   That is a *non-unwinding* panic, so it takes the whole test binary down
+#   with SIGABRT rather than failing one test: `lodestone-assets --test
+#   font_ttf` died that way on every x86_64 Linux CI run while passing on
+#   macOS/aarch64, which reads as an environment-specific test bug and is
+#   really a backend/architecture one.
+# - Even under LLVM the two arms are not equivalent: `_mm_cvtss_si32` rounds
+#   to nearest-even, `value as i32` truncates. Leaving the feature on means a
+#   glyph rasterises to different bitmaps on x86_64 and aarch64, so any pixel
+#   expectation derived on one is not evidence about the other.
+#
+# `hashbrown` is a separate default feature and is kept: it is what supplies
+# `fontdue`'s own `HashMap`/`HashSet` in `no_std`.
+fontdue = { version = "0.9", default-features = false, features = ["hashbrown"] }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
