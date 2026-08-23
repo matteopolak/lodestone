@@ -53,6 +53,18 @@ lodestone-world.workspace = true
 # `lodestone-entity` already take it as a plain dependency for the same
 # version-free-census reason, so this does not touch `check-isolation`.
 lodestone-data.workspace = true
+# `java.util.Random`, bit-exact — the lightning bolt's procedural geometry is a
+# pure function of a seed drawn through it. The workspace's one copy, shared
+# with `lodestone-particle`, `lodestone-audio` and `lodestone-shell`'s
+# enchanting table. See `src/lightning_bolt.rs`.
+lodestone-javarandom.workspace = true
+# `Mth.sin`/`Mth.cos` — vanilla's quantized 65,536-entry lookup table, not
+# `f32::sin`/`f32::cos`. `entity_sprite`'s fishing-line anchor evaluates them on
+# a body yaw, where the two agree to within a table quantum in the middle of the
+# range and disagree in sign at the cardinal angles a fixture is most likely to
+# pick. `lodestone-physics` has **no** dependencies of its own, so this adds one
+# leaf to the graph and cannot cycle.
+lodestone-physics.workspace = true
 winit = { workspace = true, optional = true }
 
 # Live-gate deps: optional, enabled only by `live-chunk-gate`. The gate connects
