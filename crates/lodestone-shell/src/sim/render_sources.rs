@@ -724,6 +724,12 @@ impl Sim {
         // The eye, for the ambient scan below. Read before either guard is taken.
         let player = self.player();
         let eye = [player.position.x, player.position.y, player.position.z];
+        let campfire_smoke_sources = self.net.as_ref().map_or_else(Vec::new, |net| {
+            crate::block_entities::campfire_smoke_sources(
+                &net.shared_handle(),
+                glam::Vec3::new(eye[0] as f32, eye[1] as f32, eye[2] as f32),
+            )
+        });
         if self.vanilla_atlas.is_some() && self.net.is_some() && self.collide_against_live_world {
             if let Some(view) = self.live_collision() {
                 // `O(live particles)`, so the emitter comes out of the `World`
@@ -736,6 +742,7 @@ impl Sim {
                 self.with_particles_unlocked(|p| {
                     p.tick(&view);
                     p.ambient_tick(eye, &mut |b| view.block_at(b[0], b[1], b[2]));
+                    p.campfire_block_entity_tick(&campfire_smoke_sources);
                 });
                 return;
             }
@@ -769,6 +776,7 @@ impl Sim {
                         )
                     })
             });
+            p.campfire_block_entity_tick(&campfire_smoke_sources);
         });
     }
 

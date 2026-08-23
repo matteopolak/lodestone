@@ -3958,6 +3958,59 @@ mod tests {
         assert_eq!(seeds, 1, "only `explosion_emitter` may be a no-render seed");
         assert_eq!(frame.drawn, frame.alive - seeds);
     }
+
+    fn campfire_state(lit: bool) -> u32 {
+        (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|id| {
+                if lodestone_data::block_states::block_name(*id) != Some("minecraft:campfire") {
+                    return false;
+                }
+                lodestone_data::block_states::properties(*id)
+                    .unwrap_or(&[])
+                    .iter()
+                    .any(|(name, value)| {
+                        *name == "lit" && *value == if lit { "true" } else { "false" }
+                    })
+            })
+            .expect("the 26.2 state table must contain the requested campfire state")
+    }
+
+    #[test]
+    fn campfire_block_entity_tick_emits_the_vanilla_plume_shape_and_lifetimes() {
+        for (signal, lifetime) in [(false, 80..130), (true, 280..330)] {
+            let mut particles = Particles::new(None);
+            particles.engine = ParticleEngine::seeded(4096);
+            particles.campfire_block_entity_tick(&[([2, 64, 18], signal)]);
+
+            let plume = particles.engine.particles();
+            assert!(
+                (2..=3).contains(&plume.len()),
+                "a successful 26.2 smoke roll emits two or three particles"
+            );
+            for particle in plume {
+                assert_eq!(
+                    particle.behaviour,
+                    lodestone_particle::Behaviour::CampfireSmoke
+                );
+                assert!(lifetime.contains(&particle.lifetime));
+                assert!((2.0 + 1.0 / 6.0..=2.0 + 5.0 / 6.0).contains(&particle.x));
+                assert!((18.0 + 1.0 / 6.0..=18.0 + 5.0 / 6.0).contains(&particle.z));
+                assert!((64.0..66.0).contains(&particle.y));
+                assert!(particle.yd >= 0.07 && particle.yd < 0.072);
+            }
+        }
+    }
+
+    #[test]
+    fn block_animate_tick_does_not_duplicate_the_block_entity_smoke_plume() {
+        let mut particles = Particles::new(None);
+        particles.engine = ParticleEngine::seeded(4096);
+        particles.animate_block([2, 64, 18], campfire_state(true));
+        assert!(
+            particles.engine.particles().is_empty(),
+            "26.2 owns the main plume in CampfireBlockEntity::particleTick"
+        );
+    }
 }
 
 /// How many random block positions the ambient emitter samples per tick, and how
@@ -3975,6 +4028,48 @@ const AMBIENT_SAMPLES: usize = 128;
 const AMBIENT_RANGE: i32 = 8;
 
 impl Particles {
+    /// Tick the main plume for every loaded lit campfire block entity.
+    ///
+    /// Minecraft 26.2 runs this from `CampfireBlockEntity::particleTick`, once
+    /// per client simulation tick. Each source has an independent 11% chance
+    /// to emit a burst of two or three particles. `CampfireBlock::animateTick`
+    /// owns only the occasional lava fleck and crackle sound, so putting this
+    /// in [`Self::ambient_tick`] both misses campfires outside that random scan
+    /// and gives sampled ones the wrong probability.
+    pub fn campfire_block_entity_tick(&mut self, sources: &[([i32; 3], bool)]) {
+        for &(block, signal) in sources {
+            if self.engine.rng().next_f32() >= 0.11 {
+                continue;
+            }
+            let count = self.engine.rng().next_i32_bound(2) + 2;
+            for _ in 0..count {
+                let (x, y, z) = {
+                    let rng = self.engine.rng();
+                    let x_offset = rng.next_f64() / 3.0;
+                    let x_sign = if rng.next_bool() { 1.0 } else { -1.0 };
+                    let y_offset = rng.next_f64() + rng.next_f64();
+                    let z_offset = rng.next_f64() / 3.0;
+                    let z_sign = if rng.next_bool() { 1.0 } else { -1.0 };
+                    (
+                        f64::from(block[0]) + 0.5 + x_offset * x_sign,
+                        f64::from(block[1]) + y_offset,
+                        f64::from(block[2]) + 0.5 + z_offset * z_sign,
+                    )
+                };
+                emit::campfire_smoke(
+                    &mut self.engine,
+                    x,
+                    y,
+                    z,
+                    0.0,
+                    0.07,
+                    0.0,
+                    signal,
+                );
+            }
+        }
+    }
+
     /// Emit this tick's **client-predicted** ambient particles — vanilla's
     /// `Block.animateTick`, which is not on the wire at all.
     ///
@@ -4111,30 +4206,6 @@ impl Particles {
                     0.0,
                     0.0,
                     0.0,
-                );
-            }
-            // `CampfireBlock.animateTick`, gated on `lit` — an unlit campfire
-            // must be silent, and the property is the only thing distinguishing
-            // the two states.
-            "campfire" | "soul_campfire" => {
-                if prop("lit") != Some("true") {
-                    return;
-                }
-                let signal = prop("signal_fire") == Some("true");
-                let rng = self.engine.rng();
-                let (rx, rz) = (
-                    f64::from(rng.next_f32()) * 0.2 - 0.1,
-                    f64::from(rng.next_f32()) * 0.2 - 0.1,
-                );
-                emit::campfire_smoke(
-                    &mut self.engine,
-                    bx + 0.5 + rx,
-                    by + 1.0,
-                    bz + 0.5 + rz,
-                    0.0,
-                    0.07,
-                    0.0,
-                    signal,
                 );
             }
             _ => {}
