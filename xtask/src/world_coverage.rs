@@ -23,10 +23,22 @@
 //!
 //! * **drawn** — something resolves geometry keyed on this subject.
 //! * **stranded** — nothing does, *but the subject is named in the client's
-//!   own draw surface*. This is the bucket that catches an item frame: a type
-//!   with a hitbox entry, a type-path constant, a pose function and a draw
-//!   counter, and no renderer of its own. Code that looks like a consumer and
-//!   is not reachable from any dispatch that emits geometry.
+//!   own draw surface*: a hitbox entry, a type-path constant, a pose function,
+//!   a draw counter — code that looks like a consumer and is not reachable
+//!   from any dispatch that emits geometry.
+//!
+//!   An item frame held exactly this shape until its manifest entry below was
+//!   added, and it is worth naming what the mechanism missed rather than only
+//!   the subject, since a fixed example is the one thing this doc must not
+//!   lean on again: `merge_item_frames` (and its content/light-calc
+//!   counterparts) never spell `"item_frame"` as a literal or a match arm of
+//!   their own — they test membership in `maps::ITEM_FRAME_TYPES`, a table
+//!   defined in a different symbol entirely. Every [`ClaimRule`] here reads
+//!   literals or arm patterns lexically *inside one named anchor symbol*, so a
+//!   renderer whose dispatch is "is this in a table someone else defines" is
+//!   invisible to all of them until a claim is anchored on the table's own
+//!   definition instead of on the function that reads it — see
+//!   `ENTITY_RENDERERS`'s "item frame body" entry.
 //! * **absent** — nothing draws it and nothing in the draw surface names it.
 //!   Honest missing work, and a much cheaper finding to read than a stranded
 //!   one because nobody has half-built it.
@@ -829,6 +841,29 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "prepare_paintings",
         rule: ClaimRule::Explicit(&["painting"]),
     },
+    // `ItemFrameRenderer`'s `frameModel` branch — the frame's own body (border
+    // and back plate), a block-model draw with no `state_id` rather than a rig;
+    // see `moving_blocks.rs`'s `merge_item_frames` doc for why it lives there
+    // instead of in the entity model corpus.
+    //
+    // Anchored on `ITEM_FRAME_TYPES`'s own definition rather than on
+    // `merge_item_frames`, deliberately: the two literals this claims live in
+    // the `maps.rs` const, and `merge_item_frames` (plus `merge_framed_items`'s
+    // contents half and `prepare_entities`' light-calc half) reach them only
+    // through `.contains(&type_path)` on that external table — no literal or
+    // match-arm pattern sits lexically inside any of those three functions for
+    // `LiteralsInSymbol`/`ArmLiteralsInSymbol` to find. This was the actual gap
+    // this population's mechanical rules could not see on their own: a
+    // membership test against a table defined elsewhere, checked from a
+    // "merge" function named after the geometry rather than a dispatch table.
+    // `ITEM_FRAME_TYPES` is the one symbol all three draw sites share, so it is
+    // the anchor whose disappearance should fail this claim.
+    RendererClaim {
+        name: "item frame body (block-model quads)",
+        file: "crates/lodestone-shell/src/gpu/maps.rs",
+        symbol: "ITEM_FRAME_TYPES",
+        rule: ClaimRule::LiteralsInSymbol,
+    },
 ];
 
 /// Particle types that reach geometry through something other than the
@@ -1184,6 +1219,63 @@ fn in_surface(file: &str, surface: &[&str]) -> bool {
         .any(|root| file == *root || file.starts_with(&format!("{root}/")))
 }
 
+/// A dangling alias is the mirror image of the item-frame gap: instead of a
+/// real draw path the mechanical rules cannot see, this is a claim the
+/// mechanical rules *would* over-report on. `ArmVariantsInSymbol` (the "rig
+/// alias" claim in [`ENTITY_RENDERERS`]) marks its population ids `Drawn`
+/// purely from the match arm existing in source — Rust never checks that the
+/// string it returns names a real corpus entry, so a rig deleted out from
+/// under a live alias (or a typo in a new one) would leave every type aliased
+/// onto it silently marked drawn while pointing at nothing. Caught by
+/// planting exactly that: removing `wind_charge`'s own corpus entry left
+/// `breeze_wind_charge` reading `Drawn` regardless, because the alias arm
+/// itself was untouched. Fail the whole run rather than let it stand — the
+/// same choice [`resolve_claim`] already makes for a claim that resolves to
+/// zero subjects or an anchor that has moved.
+///
+/// `literals_in` reads every `LitStr` lexically inside the symbol, and that
+/// includes doc-comment text: a `///` line desugars to `#[doc = "..."]`,
+/// which is a real `LitStr` node the same walk that finds `"wind_charge"`
+/// also finds — `canonical_model_name_for_type`'s own doc paragraph came back
+/// as two dozen "targets" the first time this check ran. None of that prose
+/// is identifier-shaped the way every real return value here is, so
+/// filtering to bare `snake_case` tokens (no space, no punctuation, no
+/// uppercase) discards the doc noise without discarding a real alias —
+/// narrower than fixing the index itself, which other claims also read and
+/// which this fix does not touch. `boat_model_name`'s own literals also
+/// include its `_`-prefixed *suffix* rules (`"_boat"`, `"_chest_boat"`, …)
+/// alongside its `Some("boat")`-style return values — the same two-purpose
+/// scope [`ClaimRule::SuffixLiteralsInSymbol`] already separates by the same
+/// leading-underscore test. A suffix pattern is not a rig name, so it is
+/// excluded here rather than checked against the corpus.
+fn check_alias_targets_exist_in_corpus(
+    alias_targets: &BTreeSet<String>,
+    boat_targets: &BTreeSet<String>,
+    rigs: &BTreeSet<&str>,
+) -> Result<()> {
+    let is_identifier_shaped = |s: &str| {
+        !s.is_empty()
+            && !s.starts_with('_')
+            && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    };
+    for target in alias_targets
+        .iter()
+        .chain(boat_targets.iter())
+        .filter(|t| is_identifier_shaped(t))
+    {
+        if !rigs.contains(target.as_str()) {
+            bail!(
+                "world-coverage: crates/lodestone-render/src/entity.rs aliases {target:?} onto \
+                 a rig the entity model corpus does not have. Every population id routed \
+                 through that alias would be misreported as drawn, so this is a hard failure \
+                 rather than a coverage fact — fix or remove the alias, or restore the corpus \
+                 entry it names."
+            );
+        }
+    }
+    Ok(())
+}
+
 fn entity_population(index: &SourceIndex, oracle: &VanillaOracle) -> Result<PopulationReport> {
     use lodestone_data::entity_type::EntityType;
 
@@ -1240,6 +1332,7 @@ fn entity_population(index: &SourceIndex, oracle: &VanillaOracle) -> Result<Popu
     );
     let boat_targets =
         index.literals_in("crates/lodestone-render/src/entity.rs", "boat_model_name");
+    check_alias_targets_exist_in_corpus(&alias_targets, &boat_targets, &rigs)?;
     for target in alias_targets.into_iter().chain(boat_targets) {
         if rigs.contains(target.as_str()) {
             routed_rigs.insert(target);
@@ -1713,43 +1806,98 @@ mod tests {
             .to_path_buf()
     }
 
-    /// The calibration case, and the reason this tool exists.
+    /// The instrument's own calibration used to pin a real, then-still-open
+    /// gap: an item frame had a hitbox entry, a two-element type-path
+    /// constant, a ported pose matrix and its own `special_item_frames_drawn`
+    /// counter, and drew nothing. That gap is now closed — `merge_item_frames`
+    /// draws the frame body, `merge_framed_items` its contents, and
+    /// `ENTITY_RENDERERS`'s "item frame body" claim anchors the census on the
+    /// shared `ITEM_FRAME_TYPES` table all three consult — so this is now a
+    /// regression guard on the fix rather than a demonstration of a live bug.
+    /// `wind_charge`/`breeze_wind_charge` join it: both were misreported
+    /// stranded for the unrelated reason that neither had a rig at all, fixed
+    /// by porting `wind_charge_model` and aliasing the breeze variant onto it.
     ///
-    /// An item frame has a hitbox entry, a two-element type-path constant, a
-    /// ported pose matrix and its own `special_item_frames_drawn` counter, and
-    /// draws **nothing**: `entity_models` deliberately holds no `item_frame`
-    /// rig (vanilla resolves it through a block-model JSON, not a
-    /// `ModelPart`), and the two passes that key on the type draw the *item*
-    /// hanging in the frame rather than the frame. A census that reports it as
-    /// covered is measuring the wrong thing, so this test is the control that
-    /// says the instrument works at all.
+    /// See [`a_subject_named_but_never_drawn_lands_in_stranded`] for the
+    /// mechanism-level control this test used to double as — pinned there
+    /// against a planted scenario now, specifically so that fixing the next
+    /// real gap can never silently void it the way this one did.
     #[test]
-    fn the_census_reports_item_frames_as_stranded() {
+    fn item_frames_and_wind_charges_read_as_drawn() {
         let report = world_coverage_report(&root()).expect("census runs");
         let entities = report
             .populations
             .iter()
             .find(|p| p.name == "entity types")
             .expect("entity population present");
-        for id in ["item_frame", "glow_item_frame"] {
+        for id in [
+            "item_frame",
+            "glow_item_frame",
+            "wind_charge",
+            "breeze_wind_charge",
+        ] {
             let subject = entities
                 .subjects
                 .iter()
                 .find(|s| s.id == id)
                 .unwrap_or_else(|| panic!("{id} is in the registry population"));
-            assert_eq!(
-                subject.verdict,
-                Verdict::Stranded,
-                "{id} must land in the stranded bucket — it is named all over the draw surface \
-                 and reaches no geometry. Found {:?} instead.",
+            assert!(
+                matches!(subject.verdict, Verdict::Drawn(_)),
+                "{id} now reaches real geometry and must read as drawn; found {:?}",
                 subject.verdict
             );
-            assert!(
-                !subject.mentions.is_empty(),
-                "{id} is stranded, so the report must be able to say where the half-built code \
-                 lives"
-            );
         }
+    }
+
+    /// The mechanism-level control [`item_frames_and_wind_charges_read_as_drawn`]
+    /// used to double as, before the real gap it pinned got fixed out from
+    /// under it. A hand-built index rather than the real one, deliberately: a
+    /// planted scenario can never be "fixed" the way a real subject can, so
+    /// this is the durable half of the calibration, and the production test
+    /// above is the disposable half that documents *which* real gap this tool
+    /// caught.
+    #[test]
+    fn a_subject_named_but_never_drawn_lands_in_stranded() {
+        let file: syn::File = syn::parse_str(
+            r#"
+            const PLANTED: &str = "planted_stranded_subject";
+            "#,
+        )
+        .expect("fixture parses");
+        let mut index = SourceIndex::default();
+        let mut indexer = Indexer {
+            file: "crates/lodestone-render/src/entity.rs".to_owned(),
+            stack: Vec::new(),
+            index: &mut index,
+            in_pattern: 0,
+            in_affix: 0,
+        };
+        indexer.visit_file(&file);
+
+        let population = finish_population(
+            "fixture population",
+            &index,
+            ENTITY_MENTION_SURFACE,
+            &BTreeSet::new(),
+            vec!["planted_stranded_subject".to_owned()],
+            BTreeMap::new(),
+            0,
+            0,
+            1,
+            Vec::new(),
+        );
+        let subject = &population.subjects[0];
+        assert_eq!(
+            subject.verdict,
+            Verdict::Stranded,
+            "a subject named in the mention surface and claimed by no renderer must land in \
+             Stranded; found {:?}",
+            subject.verdict
+        );
+        assert!(
+            !subject.mentions.is_empty(),
+            "a stranded subject's report must be able to say where the half-built code lives"
+        );
     }
 
     /// The other half of the control: a type that genuinely does draw must not
@@ -1880,6 +2028,40 @@ mod tests {
             err.to_string().contains("does not define"),
             "the error must name the missing anchor: {err}"
         );
+    }
+
+    /// Found by planting exactly this against production and watching it fail
+    /// (`wind_charge`'s corpus entry temporarily removed, `breeze_wind_charge`
+    /// still reading `Drawn`) before this check existed. Pinned here directly
+    /// against [`check_alias_targets_exist_in_corpus`] rather than through the
+    /// full [`entity_population`], because every other `ENTITY_RENDERERS`
+    /// claim would need its own anchor present in a fabricated index first.
+    #[test]
+    fn a_dangling_alias_target_is_a_hard_failure() {
+        let alias_targets = BTreeSet::from(["definitely_not_a_real_rig_name".to_owned()]);
+        let boat_targets = BTreeSet::new();
+        let rigs = BTreeSet::from(["skeleton", "player_wide"]);
+        let err = check_alias_targets_exist_in_corpus(&alias_targets, &boat_targets, &rigs)
+            .expect_err("an alias onto a rig the corpus does not have must be an error");
+        assert!(
+            err.to_string().contains("definitely_not_a_real_rig_name"),
+            "the error must name the dangling target: {err}"
+        );
+    }
+
+    /// The companion control: doc-comment prose picked up by the same literal
+    /// scan, and a `boat_model_name`-style leading-underscore suffix rule,
+    /// must not be mistaken for a dangling alias.
+    #[test]
+    fn doc_prose_and_suffix_rules_are_not_checked_as_alias_targets() {
+        let alias_targets = BTreeSet::from([
+            "skeleton".to_owned(),
+            " a whole sentence of doc prose, not a rig name".to_owned(),
+        ]);
+        let boat_targets = BTreeSet::from(["_boat".to_owned(), "boat".to_owned()]);
+        let rigs = BTreeSet::from(["skeleton", "boat"]);
+        check_alias_targets_exist_in_corpus(&alias_targets, &boat_targets, &rigs)
+            .expect("doc prose and a suffix pattern must not be checked as rig names");
     }
 
     /// The scan must not count a mention that exists only in a test fixture:

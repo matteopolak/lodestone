@@ -263,6 +263,12 @@ fn canonical_model_name_for_type(entity_type: EntityType) -> Option<&'static str
         // skeleton is the closest ported mesh. Unlike the drowned alias this is
         // deliberate and outlives no mesh — remove it when `bogged` is ported.
         EntityType::Bogged => return Some("skeleton"),
+        // `EntityRenderers.java` registers both `EntityTypes.WIND_CHARGE` and
+        // `EntityTypes.BREEZE_WIND_CHARGE` against the same `WindChargeRenderer`,
+        // so a breeze's charge rides the plain charge's rig rather than a second
+        // corpus entry — see `wind_charge_model`'s doc for the rig itself and its
+        // known simplifications.
+        EntityType::BreezeWindCharge => return Some("wind_charge"),
         // `MinecartRenderer`/`AbstractMinecartRenderer`: every subclass shares
         // vanilla's one `MinecartModel` cart-frame rig (`MinecartModel.
         // createBodyLayer`) — the subclasses differ only in the block state
@@ -1180,6 +1186,16 @@ pub fn non_living_vehicle_placement(model_name: &str) -> Option<(f32, f32)> {
         // orientation — tolerable only because its three slabs make it symmetric
         // under any quarter turn. The bob is real and is kept.
         "shulker_bullet" => Some((0.15, 0.0)),
+        // `WindChargeRenderer.submit` applies neither a flip nor a rotation —
+        // the dispatcher's bare translate is all it gets, so vanilla's box union
+        // never turns to face travel direction, only its (unported) internal
+        // counter-spin moves. There is no "translate only" placement in this
+        // table to route it through instead, so it takes the ordinary flip and a
+        // zero extra yaw, same as `wither_skull`/`shulker_bullet` above. See
+        // `wind_charge_model`'s doc for why that is tolerable here: both boxes
+        // are close to rotationally symmetric, so the wrong flip and the
+        // yaw-following are not an obvious mirroring defect.
+        "wind_charge" => Some((0.0, 0.0)),
         _ => None,
     }
 }
@@ -3389,8 +3405,14 @@ pub struct ThrownItem {
 /// draw the wrong thing:
 ///
 /// * **`wind_charge` and `breeze_wind_charge` use `WindChargeRenderer`**, a real
-///   cuboid model — not an item billboard. There is no `wind_charge` *item*
-///   sprite to draw either.
+///   cuboid model — not an item billboard, and there is no `wind_charge` *item*
+///   sprite to draw either. Both are now in the
+///   [`entity_models`](lodestone_assets::entity_models) corpus (`wind_charge`
+///   model, `breeze_wind_charge` aliased onto it — see `wind_charge_model`'s
+///   doc), placed by [`non_living_vehicle_matrix`] rather than by
+///   [`entity_model_matrix`]. This entry stays for the same reason the
+///   arrow/trident one below does: it is what stops either type being added to
+///   the table below, which would draw an item billboard over the mesh.
 /// * **`arrow`, `spectral_arrow` and `trident` use `ArrowRenderer`/`ThrownTridentRenderer`**,
 ///   a 3-D cuboid rig, not an item billboard. Those three are now in the
 ///   [`entity_models`](lodestone_assets::entity_models) corpus and are placed by
@@ -5564,6 +5586,7 @@ mod tests {
             match type_path {
                 "player" | "mannequin" => return Some("player_wide"),
                 "bogged" => return Some("skeleton"),
+                "breeze_wind_charge" => return Some("wind_charge"),
                 "chest_minecart"
                 | "furnace_minecart"
                 | "tnt_minecart"
