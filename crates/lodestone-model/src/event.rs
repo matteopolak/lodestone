@@ -1685,6 +1685,18 @@ pub enum ParticleOptions {
         /// dropping it makes every ambient effect mote fully opaque.
         color: [f32; 4],
     },
+    /// `minecraft:dragon_breath` (`PowerParticleOption`) — a bare velocity
+    /// multiplier and nothing else.
+    ///
+    /// Its own variant rather than a reuse of [`Self::Spell`]'s `power`: this
+    /// option class carries no colour at all (`DragonBreathParticle` draws its
+    /// purple out of the RNG), so the wire payload is four bytes against
+    /// `SpellParticleOption`'s eight and the two are not interchangeable.
+    Power {
+        /// Velocity multiplier (`PowerParticleOption::getPower`, applied by
+        /// the provider through `Particle.setPower`).
+        power: f32,
+    },
     /// `minecraft:sculk_charge` (`SculkChargeParticleOptions`).
     SculkCharge {
         /// Roll about the view axis, in radians — the one thing that makes a

@@ -424,6 +424,30 @@ fn handle_add_entity(
         }));
     }
 
+    // Same synthesis, same reason, for a painting's variant. `Painting`'s
+    // accessor defaults to `VariantUtils.getAny(registry)` — the registry's
+    // *first* entry, which for the vanilla `painting_variant` registry is
+    // `minecraft:alban` (the registry is loaded from data files and so is in
+    // sorted key order; see `entity_variants::PAINTING`). A painting hung with
+    // that variant is therefore entirely at its accessors' defaults and puts
+    // **no** index-9 field on the wire, so without this it would draw nothing
+    // at all while every other painting drew fine — the most confusing possible
+    // failure, because 50 of the 51 would work.
+    //
+    // Note there is nothing to synthesize for the painting's *facing*:
+    // `HangingEntity.setDirection` writes it into the entity's ordinary yaw,
+    // which `EntitySpawned` above already carries.
+    if name == PAINTING_TYPE {
+        directives.push(Directive::Emit(ClientEvent::EntityMetadataUpdated {
+            entity_id,
+            metadata: EntityMetadataUpdate {
+                painting_variant: crate::entity_variants::painting_variant(0)
+                    .and_then(|key| key.parse().ok()),
+                ..EntityMetadataUpdate::default()
+            },
+        }));
+    }
+
     // `FallingBlockEntity.recreateFromPacket`: the Object Data field read above is
     // `Block.getId(blockState)` and is the **only** place the imitated state
     // appears on the wire — `defineSynchedData` registers `DATA_START_POS` alone,
@@ -449,6 +473,9 @@ fn handle_add_entity(
     Ok(directives)
 }
 
+/// `EntityTypes.PAINTING`'s registry key — the type whose default variant is
+/// synthesized at spawn, above.
+const PAINTING_TYPE: &str = "minecraft:painting";
 /// `EntityTypes.FALLING_BLOCK`'s registry key — the one entity type whose
 /// `ADD_ENTITY` Object Data field this adapter interprets.
 const FALLING_BLOCK_TYPE: &str = "minecraft:falling_block";

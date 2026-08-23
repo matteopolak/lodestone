@@ -55,6 +55,7 @@ use crate::entity::{
     DisplayTranslation,
     EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
+    PaintingVariant,
     MobState, OnGround,
     Passengers, Pose, Position, Rotation, Tamed, Variant, Vehicle, Velocity,
 };
@@ -900,6 +901,14 @@ pub fn apply_entity_metadata(
         // the wrong router compiles, its unit test passes, and it never runs.
         if let Some(rotation) = metadata.item_frame_rotation {
             entity.insert(ItemFrameRotation(rotation));
+        }
+        // Which painting is hung (`Painting.DATA_PAINTING_VARIANT_ID`).
+        // Per-entity state, so this router and not `crate::session`. Cloned
+        // rather than copied because the key is an owned identifier, and
+        // `insert`'s replace semantics are right: a painting's variant can be
+        // reassigned in place by a plugin.
+        if let Some(ref variant) = metadata.painting_variant {
+            entity.insert(PaintingVariant(variant.clone()));
         }
         // The *mob* flags byte — a different byte at a different
         // index from the living-entity one [`apply_entity_item_use`] folds, and

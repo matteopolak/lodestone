@@ -589,6 +589,10 @@ const SER_STRING: i32 = 4;
 const SER_COMPONENT: i32 = 5;
 const SER_OPTIONAL_COMPONENT: i32 = 6;
 const SER_ITEM_STACK: i32 = 7;
+/// `EntityDataSerializers.PAINTING_VARIANT`. One claimant in the whole 26.2
+/// dump — `Painting.DATA_PAINTING_VARIANT_ID` — which is why the value it
+/// produces needs no index or class guard.
+const SER_PAINTING_VARIANT: i32 = 34;
 const SER_BOOLEAN: i32 = 8;
 const SER_ROTATIONS: i32 = 9;
 const SER_BLOCK_POS: i32 = 10;
@@ -677,6 +681,13 @@ enum Value {
         stack: Option<Box<ItemStack>>,
         complete: bool,
     },
+    /// A `Holder<PaintingVariant>` already resolved to its registry key.
+    ///
+    /// Carries no index because it needs none: `PAINTING_VARIANT` has exactly
+    /// one claimant in the 26.2 entity-data dump, so the serializer alone
+    /// identifies the field — the same property that lets [`Value::Item`] be
+    /// routed ahead of the index match.
+    PaintingVariant(Identifier),
     /// Consumed correctly but not surfaced.
     Consumed,
 }
@@ -879,7 +890,19 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
                 None => Value::Consumed,
             }
         }
-        22 | 24 | 26 | 29 | 31 | 34..=38 => {
+        // A `Holder<PaintingVariant>`: wire value is `id + 1`, with 0 meaning
+        // an inline direct value vanilla never sends for a painting. An id the
+        // table does not cover is a data-pack variant with no size and no
+        // texture here, so it stays aligned and raises nothing rather than
+        // naming some other painting.
+        SER_PAINTING_VARIANT => {
+            let id = reader.var_i32()? - 1;
+            match entity_variants::painting_variant(id) {
+                Some(key) => Value::PaintingVariant(parse_identifier(key)?),
+                None => Value::Consumed,
+            }
+        }
+        22 | 24 | 26 | 29 | 31 | 35..=38 => {
             reader.var_i32()?;
             Value::Consumed
         }
@@ -978,6 +1001,17 @@ pub fn read_entity_metadata(
                     complete: false,
                 });
             }
+            continue;
+        }
+        // Routed ahead of the index match for the same reason the item stack
+        // above is, and it is the same reason: one serializer, one claimant in
+        // the jar dump, so the index carries no information. (It is 9 on a
+        // painting; nothing here needs to know that, and
+        // `painting_variant_is_the_only_claimant_of_its_serializer` asserts
+        // both facts against the jar dump, so the index stays checked without
+        // being depended on.)
+        if let Value::PaintingVariant(key) = value {
+            md.painting_variant = Some(key);
             continue;
         }
         match (index, value) {
@@ -3184,6 +3218,85 @@ mod tests {
     /// *and* `ArmorStand`'s client flags, both `BYTE`, with `0x04` meaning
     /// "aggressive" on one and "show arms" on the other — and since `ArmorStand`
     /// *is* a `LivingEntity`, that one needs a narrower guard than index 8's.
+    /// `PAINTING_VARIANT` has exactly **one** claimant in the jar, which is the
+    /// whole reason `Value::PaintingVariant` is routed ahead of the index match
+    /// rather than gated on an index or a class — the same property
+    /// `SER_ITEM_STACK` relies on.
+    ///
+    /// Two claims, both against the dump rather than against this decoder:
+    /// serializer 34 is claimed by `Painting.DATA_PAINTING_VARIANT_ID` alone,
+    /// and it sits at index **9** — which nothing here depends on, and which is
+    /// asserted anyway so the fact stays checked. It would be easy to assume 8,
+    /// since that is where `HangingEntity.DATA_DIRECTION` sits and `Painting`
+    /// extends it.
+    #[test]
+    fn painting_variant_is_the_only_claimant_of_its_serializer() {
+        let claimants: Vec<(u8, String)> = INDEX_DUMP
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| {
+                let mut tok = line.split_whitespace();
+                let index: u8 = tok.next()?.parse().ok()?;
+                let owner = tok.next()?.to_owned();
+                let serializer: i32 = tok.next()?.parse().ok()?;
+                (serializer == SER_PAINTING_VARIANT).then_some((index, owner))
+            })
+            .collect();
+        assert_eq!(
+            claimants,
+            vec![(9u8, "Painting.DATA_PAINTING_VARIANT_ID".to_owned())],
+            "serializer {SER_PAINTING_VARIANT}'s claimants in the jar dump are not the single              painting accessor this decoder's index-agnostic routing assumes"
+        );
+    }
+
+    /// A painting's variant decodes to its registry key, and the holder's
+    /// `id + 1` wire encoding is respected.
+    ///
+    /// `id = 24` is `minecraft:kebab` — deliberately **not** id 0, because 0 is
+    /// the value the spawn-time default synthesis already produces, so a decoder
+    /// that ignored the wire entirely would still look right at 0. Its wire form
+    /// is `25`.
+    #[test]
+    fn painting_variant_decodes_to_a_registry_key() {
+        let mut bytes = Vec::new();
+        bytes.push(9u8);
+        bytes.extend(varint(SER_PAINTING_VARIANT));
+        bytes.extend(varint(25));
+        bytes.push(EOF_MARKER);
+
+        let mut reader = Reader::new(&bytes);
+        // `TrackedEntity::default()` on purpose: a painting is neither living
+        // nor a mob and has no `MetadataClass`, so this is exactly what the
+        // adapter passes for one — and the decode must not need any of them.
+        let md = read_entity_metadata(&mut reader, TrackedEntity::default())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(
+            md.painting_variant.as_ref().map(ToString::to_string),
+            Some("minecraft:kebab".to_owned())
+        );
+
+        // The control: an id past the table is a data-pack variant with no size
+        // and no sprite here. It must consume its VarInt (so the list stays
+        // aligned and the terminator is reached) and surface nothing, rather
+        // than naming some other painting.
+        let mut bytes = Vec::new();
+        bytes.push(9u8);
+        bytes.extend(varint(SER_PAINTING_VARIANT));
+        bytes.extend(varint(9999));
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, TrackedEntity::default())
+            .expect("an unknown variant must still decode, not error")
+            .metadata;
+        reader
+            .ensure_empty()
+            .expect("the holder VarInt must be consumed even when it is not surfaced");
+        assert_eq!(md.painting_variant, None);
+    }
+
     #[test]
     fn the_jar_dump_contains_the_collisions_the_guards_exist_for() {
         let at_8 = dump_claimants(8);

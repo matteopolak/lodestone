@@ -420,6 +420,7 @@ impl ThirdPersonBodyState {
             // the local player has none — so there is no per-tick lag to
             // interpolate and a non-zero value here would be invented.
             cape_sway: (0.0, 0.0, 0.0),
+            painting: None,
         }
     }
 }

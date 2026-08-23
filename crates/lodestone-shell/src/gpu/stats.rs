@@ -246,6 +246,19 @@ pub struct RenderStats {
     /// with no cape, since there is then no sheet to bind — the same
     /// asymmetry [`wool_layers_drawn`](Self::wool_layers_drawn) documents.
     pub elytra_wings_drawn: usize,
+    /// Paintings drawn this frame — one per frustum-visible painting whose
+    /// variant this build has both a shape and a sprite for.
+    ///
+    /// Counts **paintings**, not draw calls: a painting is two draws (its
+    /// variant front and the shared back/edge frame) and several paintings of
+    /// one shape share an instanced draw, so this is neither a multiple nor a
+    /// bound of `draw_calls`. Zero with no vanilla pack (no sprites), and zero
+    /// for a painting whose variant never reached the draw record — which for a
+    /// painting means it cannot be drawn at all, since its size is a property
+    /// of its variant. That distinction is exactly why this is its own counter:
+    /// a painting missing from the world leaves `entities_drawn` untouched,
+    /// because a painting has no rig to be counted there in the first place.
+    pub paintings_drawn: usize,
     /// Mob-fire billboards drawn this frame — one per on-fire,
     /// frustum-visible entity whose type has a baked flame mesh. Zero with no
     /// vanilla pack (no flame texture) or when no entity currently has

@@ -124,6 +124,33 @@ pub(super) struct EntityRenderer {
     pub(super) elytra_model: lodestone_render::ElytraMesh,
     pub(super) elytra_gpu: Option<GpuEntityModel>,
     pub(super) elytra_texture: Option<wgpu::BindGroup>,
+    /// Paintings: one baked mesh per **shape**, one texture bind group per
+    /// **variant**, plus the shared back/edge tile.
+    ///
+    /// # Why the mesh is keyed by shape and the texture by variant
+    ///
+    /// A painting's geometry is a function of `(width, height)` alone — nine
+    /// distinct shapes across 26.2's 51 variants — while its front texture is
+    /// per variant. Baking per shape rather than per variant is therefore 9
+    /// vertex buffers instead of 51 for identical pixels. Each model carries
+    /// **two** parts, in this order: `parts[0]` is the front face (sampling the
+    /// variant's own sprite) and `parts[1]` the back and four edges (sampling
+    /// `back.png`), because this engine binds one texture per draw and vanilla
+    /// escapes that only by stitching both into its paintings atlas.
+    ///
+    /// `painting_textures` is keyed by
+    /// [`lodestone_render::painting::PAINTING_VARIANTS`]' own `&'static str`,
+    /// which is what `EntityDraw::painting` has already been narrowed to — so a
+    /// miss here means the jar had no such sprite, not that the wire said
+    /// something unexpected.
+    ///
+    /// All three are empty/`None` without a vanilla pack, and paintings then
+    /// draw nothing — the same asymmetry [`Self::wool_texture`] documents. A
+    /// flat-coloured rectangle in place of a painting would read as a rendering
+    /// bug.
+    pub(super) painting_models: Vec<(lodestone_render::painting::PaintingSize, GpuEntityModel)>,
+    pub(super) painting_textures: HashMap<&'static str, wgpu::BindGroup>,
+    pub(super) painting_back_texture: Option<wgpu::BindGroup>,
     /// The mob-fire billboard (player report: "mobs dont show
     /// flames yet"): a fourth pipeline
     /// ([`EntityPipeline::flame_pipeline`]) drawn through the **base**
@@ -323,6 +350,53 @@ impl EntityRenderer {
         let cape_model = lodestone_render::CapeMesh::load();
         let cape_gpu = GpuEntityModel::upload_cape(device, &cape_model);
 
+        // Paintings. Nine shapes baked eagerly (the same reason `flame_gpu_models`
+        // and `gpu_models` are: `prepare_paintings` only ever reads this list),
+        // and one texture per variant the jar actually carries.
+        let painting_models: Vec<(lodestone_render::painting::PaintingSize, GpuEntityModel)> =
+            lodestone_render::painting::painting_sizes()
+                .into_iter()
+                .filter_map(|size| {
+                    let mesh = lodestone_render::painting::painting_mesh(size.width, size.height);
+                    let (mut vertices, mut indices) = mesh.front;
+                    let front = lodestone_render::PartRange {
+                        index_start: 0,
+                        index_count: indices.len() as u32,
+                        vertex_start: 0,
+                        vertex_count: vertices.len() as u32,
+                    };
+                    let frame_index_start = indices.len() as u32;
+                    let frame_vertex_start = vertices.len() as u32;
+                    let base = frame_vertex_start;
+                    indices.extend(mesh.frame.1.iter().map(|i| i + base));
+                    vertices.extend(mesh.frame.0);
+                    let frame = lodestone_render::PartRange {
+                        index_start: frame_index_start,
+                        index_count: indices.len() as u32 - frame_index_start,
+                        vertex_start: frame_vertex_start,
+                        vertex_count: vertices.len() as u32 - frame_vertex_start,
+                    };
+                    GpuEntityModel::upload_parts(device, &vertices, &indices, vec![front, frame])
+                        .map(|gpu| (size, gpu))
+                })
+                .collect();
+        let painting_textures: HashMap<&'static str, wgpu::BindGroup> =
+            load_painting_textures()
+                .into_iter()
+                .map(|(name, img)| {
+                    let view = entity_texture_from_image(device, queue, &img);
+                    (name, pipeline.texture_bind_group(device, &view, &sampler))
+                })
+                .collect();
+        let painting_back_texture = load_jar_image(
+            lodestone_render::painting::PAINTING_BACK_TEXTURE,
+            "painting back tile",
+        )
+        .map(|img| {
+            let view = entity_texture_from_image(device, queue, &img);
+            pipeline.texture_bind_group(device, &view, &sampler)
+        });
+
         // The elytra wings. Code-defined geometry like the cape, so the mesh
         // always bakes; unlike the cape it has a fixed jar sheet, so there is
         // a pack-presence gate on the *texture* the way wool has one.
@@ -487,6 +561,9 @@ impl EntityRenderer {
             elytra_model,
             elytra_gpu,
             elytra_texture,
+            painting_models,
+            painting_textures,
+            painting_back_texture,
             flame_pipeline,
             flame_gpu_models,
             flame_texture,
@@ -687,6 +764,48 @@ fn load_sheep_wool_texture() -> Option<lodestone_assets::Image> {
             None
         }
     }
+}
+
+/// Decode one jar image by full asset path, or `None` if there is no pack or
+/// the file is missing/undecodable — the shared body every `load_*_texture`
+/// here had open-coded.
+///
+/// `what` names the subject in the warning, so a missing file says which
+/// feature will silently draw nothing rather than just printing a path.
+fn load_jar_image(path: &str, what: &str) -> Option<lodestone_assets::Image> {
+    use lodestone_assets::Image;
+
+    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
+    let manager = crate::resources::vanilla_manager()?;
+    let Some(png) = manager.read(path) else {
+        tracing::warn!(target: "assets", "missing {what} {path}");
+        return None;
+    };
+    match Image::decode_png(&png) {
+        Ok(img) => Some(img),
+        Err(e) => {
+            tracing::warn!(target: "assets", "decode {path}: {e}");
+            None
+        }
+    }
+}
+
+/// Decode every painting variant sprite the vanilla `client.jar` carries,
+/// keyed by [`lodestone_render::painting::PAINTING_VARIANTS`]' own name.
+///
+/// Driven off that table rather than off a directory listing, because the table
+/// is what `EntityDraw::painting` has already been narrowed to: a sprite in the
+/// jar with no table entry could not be asked for, and a table entry with no
+/// sprite must be *absent* here so the draw skips it instead of binding
+/// something else. Empty without a vanilla pack.
+fn load_painting_textures() -> Vec<(&'static str, lodestone_assets::Image)> {
+    lodestone_render::painting::PAINTING_VARIANTS
+        .iter()
+        .filter_map(|&(name, ..)| {
+            let path = lodestone_render::painting::painting_texture_path(name);
+            load_jar_image(&path, "painting sprite").map(|img| (name, img))
+        })
+        .collect()
 }
 
 /// Decode the elytra wings' own sheet

@@ -758,6 +758,32 @@ struct ElytraDrawBatch {
     count: u32,
 }
 
+/// One `(painting shape, face)` pair's uploaded instance buffer for a frame.
+///
+/// Two keys, both forced by the same constraint — this engine binds one texture
+/// per draw:
+///
+/// * **shape**, because a painting's geometry is a function of `(width,
+///   height)` and nine shapes cover all 51 vanilla variants;
+/// * **face**, because the front samples the variant's own sprite and the back
+///   and edges sample one shared `back.png`. Vanilla emits both in a single
+///   stream, which it can only do because both live in its paintings atlas.
+///
+/// So a frame containing one 2x1 `sea` and one 2x1 `pool` is three batches: a
+/// `sea` front, a `pool` front, and one shared 2x1 frame carrying both
+/// instances.
+struct PaintingDrawBatch {
+    /// Index into `EntityRenderer::painting_models` — the shape.
+    model: usize,
+    /// Which of that model's two parts: `parts[0]` front, `parts[1]` frame.
+    part: usize,
+    /// The variant whose sprite this batch binds, or `None` for the shared
+    /// back/edge tile.
+    variant: Option<&'static str>,
+    buffer: wgpu::Buffer,
+    count: u32,
+}
+
 /// One model type's uploaded flame-instance buffer for a frame
 /// — the mob-fire counterpart to [`WoolPartAccum`]/`ArmourDrawBatch`, simpler
 /// than either because the flame mesh has no per-part skeleton attachment:

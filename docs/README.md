@@ -1240,6 +1240,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `Codec` in `crates/lodestone-net/src/codec.rs` does the framing and
   `Connection::read_packet` in `connection.rs` splits a frame body into `(packet_id,
   fields)`.
+- [Painting rendering](./painting-rendering.md) — The wall-hung painting entity, end
+  to end: the variant off the wire, the 51-entry size table, one baked mesh per shape,
+  one texture per variant, and the GPU pass that draws them. A painting is neither a
+  rig nor a billboard — it is a flat slab of `width x height` blocks — so it
+  reaches pixels through its own pass rather than through the mob corpus.
 - [The particle catalogue: what's wired, what isn't, and why](./particle-catalogue.md) —
   `lodestone-particle`'s `Sheet` enum names a physical texture sheet under
   `textures/particle/*.png`; `Behaviour` names a per-type tick/quad-size/layer

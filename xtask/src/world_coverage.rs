@@ -773,6 +773,16 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "merge_item_displays",
         rule: ClaimRule::Explicit(&["item_display"]),
     },
+    // `PaintingRenderer`: a flat slab of `width x height` blocks, its front
+    // face the variant's own sprite and its back and edges a shared tile.
+    // Neither a rig nor a billboard, so it has its own pass rather than a
+    // corpus entry.
+    RendererClaim {
+        name: "painting slab",
+        file: "crates/lodestone-shell/src/gpu/entity_passes.rs",
+        symbol: "prepare_paintings",
+        rule: ClaimRule::Explicit(&["painting"]),
+    },
 ];
 
 /// Particle types that reach geometry through something other than the

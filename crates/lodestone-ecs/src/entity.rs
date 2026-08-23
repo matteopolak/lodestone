@@ -574,6 +574,25 @@ pub struct ExperienceOrbValue(pub i32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemFrameRotation(pub u8);
 
+/// Which painting is hung on the wall — `Painting.DATA_PAINTING_VARIANT_ID`
+/// resolved to its registry key
+/// ([`lodestone_model::event::EntityMetadataUpdate::painting_variant`]).
+///
+/// **Absent** for everything that is not a painting, and absent for a painting
+/// whose variant is a data-pack addition this build cannot name. Absence must
+/// draw **nothing**: a painting's size comes from its variant, so there is no
+/// safe stand-in — a 1x1 default in place of a 4x4 reads as a rendering bug.
+/// The one case that would otherwise be absent and should not be — a painting
+/// sitting at the accessor default, which puts nothing on the wire — is
+/// synthesized at spawn by the version adapter, exactly as a sheep's default
+/// fleece is.
+///
+/// The painting's **facing** is deliberately not here: `HangingEntity` writes
+/// the direction into the entity's ordinary yaw, so [`Rotation`] already
+/// carries it.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct PaintingVariant(pub lodestone_model::ids::Identifier);
+
 /// The entity's cosmetic variant (sheep colour, villager profession, …).
 ///
 /// **Absent** means the server sent no variant override, and a consumer should

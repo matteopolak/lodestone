@@ -769,6 +769,26 @@ pub struct EntityDraw {
     /// Bridged off the *ingest* entity through [`EntityIndex`] in
     /// [`extract_entity_draws`], like [`Self::block_state`] above.
     pub item_frame_rotation: u8,
+    /// Which painting is hung, as [`lodestone_render::painting`]'s own static
+    /// variant name — `None` for every entity that is not a painting, and for a
+    /// painting whose variant this build has no table entry for.
+    ///
+    /// **`None` must draw nothing.** A painting's size in blocks is a property
+    /// of its variant, so there is no default shape to fall back on: a 1x1
+    /// stand-in where a 4x4 belongs reads as a rendering bug rather than as an
+    /// unsupported data pack. That is why this is an `Option<&'static str>` and
+    /// not, say, a name with a fallback — the narrowing to a known variant
+    /// happens once here, and the draw site is left with no decision to make.
+    ///
+    /// Bridged off the *ingest* entity's [`lodestone_ecs::entity::PaintingVariant`]
+    /// through [`EntityIndex`] in [`extract_entity_draws`], like
+    /// [`Self::block_state`] and [`Self::item_frame_rotation`] above.
+    ///
+    /// The painting's **facing** is not here and does not need to be:
+    /// `HangingEntity` writes the direction into the entity's ordinary yaw, so
+    /// [`Self::yaw`] already carries it — see
+    /// `lodestone_render::painting::painting_matrix`.
+    pub painting: Option<&'static str>,
     /// This entity's resolved nametag (issue #100), narrowed from
     /// [`RenderNameTag`]. `None` draws nothing — the common case for every
     /// entity with no visible custom name.
@@ -1818,6 +1838,7 @@ pub fn extract_pickup_draws(
             item_frame_rotation: 0,
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+            painting: None,
             feet,
             yaw: 0.0,
             head_yaw: 0.0,
@@ -2479,12 +2500,17 @@ pub fn extract_entity_draws(
     // stand overwrites the humanoid walk cycle in vanilla, posed or not, so a
     // missing component resolves to `ArmorStandPose::VANILLA_DEFAULT` rather
     // than to "no pose". See `ARMOR_STAND_TYPE_PATH`.
-    (tameds, vehicles, armor_stands, item_frame_rotations, armor_stand_poses): (
+    (tameds, vehicles, armor_stands, item_frame_rotations, armor_stand_poses, painting_variants): (
         Query<&lodestone_ecs::entity::Tamed>,
         Query<&lodestone_ecs::entity::Vehicle>,
         Query<&lodestone_ecs::entity::ArmorStandFlags>,
         Query<&ItemFrameRotation>,
         Query<&lodestone_ecs::entity::ArmorStandPose>,
+        // `PaintingVariant` lives on the ingest entity too
+        // (`lodestone_ecs::ingest::apply_entity_metadata` inserts it from the
+        // painting-variant serializer), bridged the same way and nested here
+        // for the same `SystemParam`-arity reason as its neighbours.
+        Query<&lodestone_ecs::entity::PaintingVariant>,
     ),
     tracks: Query<(
         &MinecraftEntityId,
@@ -2757,6 +2783,16 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| item_frame_rotations.get(entity).ok())
             .map_or(0, |rotation| rotation.0);
+        // Which painting is hung, bridged off the ingest entity the same way,
+        // and narrowed to a static table name here rather than at the draw
+        // site: an unrecognised data-pack variant becomes `None` at this
+        // boundary, so nothing downstream has to decide what to draw for one.
+        let painting = index
+            .get(id.0)
+            .and_then(|entity| painting_variants.get(entity).ok())
+            .and_then(|variant| {
+                lodestone_render::painting::painting_variant_name(&variant.0.to_string())
+            });
         // The variant sheet, bridged off the ingest entity's `Variant` exactly as
         // `block_state` and `experience_orb_value` above are, and for their reason:
         // `lodestone_ecs::ingest::apply_entity_metadata` inserts `Variant` *there*,
@@ -2810,6 +2846,7 @@ pub fn extract_entity_draws(
             wool: wool.0,
             block_state,
             item_frame_rotation,
+            painting,
             feet: render_feet(from, to, clock),
             yaw: render_yaw(from, to, clock),
             head_yaw: render_head_yaw(from, to, clock),
@@ -4943,6 +4980,7 @@ mod tests {
                 // A player, not an experience orb.
                 experience_orb_value: None,
                 cape_sway: (0.0, 0.0, 0.0),
+                painting: None,
             }
         }
 
