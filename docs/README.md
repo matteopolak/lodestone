@@ -2590,6 +2590,11 @@ diagnosis is worth keeping *after* the fix lands -- CLAUDE.md's standing claim i
 record of confidently-held false beliefs is the most valuable thing in this repo, and several
 of these caught the *brief* being wrong rather than the code.
 
+- [Design: boat motion, rider masking, lore, and dismount](./superpowers/specs/2026-08-23-boat-motion-lore-collision-design.md) —
+  Fixed-rate boat physics with per-frame render interpolation, water-mask ordering that does
+  not hide riders, styled `minecraft:lore` tooltips, hard boat collision, and authoritative
+  integrated-server dismount placement.
+
 - [Worldgen parity harness](./worldgen-parity.md) —
   `crates/lodestone-worldgen-parity` is the shared chunk-for-chunk comparison harness
   against a real vanilla 26.2 server, for every worldgen phase (epic `#404`: biomes
