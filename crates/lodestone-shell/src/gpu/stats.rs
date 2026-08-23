@@ -259,6 +259,14 @@ pub struct RenderStats {
     /// a painting missing from the world leaves `entities_drawn` untouched,
     /// because a painting has no rig to be counted there in the first place.
     pub paintings_drawn: usize,
+    /// Lightning-bolt **vertices** uploaded this frame.
+    ///
+    /// Vertices rather than bolts, and that is the useful granularity here: one
+    /// bolt is exactly `lodestone_render::lightning_bolt::BOLT_VERTICES`, so
+    /// dividing gives the bolt count while a value that is *not* a multiple of
+    /// it means the fixed-capacity buffer clipped a bolt mid-walk — which is
+    /// the one failure mode of this pass that a bolt count could not express.
+    pub lightning_bolt_vertices: usize,
     /// Mob-fire billboards drawn this frame — one per on-fire,
     /// frustum-visible entity whose type has a baked flame mesh. Zero with no
     /// vanilla pack (no flame texture) or when no entity currently has

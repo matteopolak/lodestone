@@ -38,6 +38,7 @@ mod debug_lines;
 // `pub(super)`, i.e. `pub(in crate::gpu)`.
 pub(crate) mod entities;
 mod beacon_beam;
+mod lightning_bolt;
 mod display_text;
 mod end_portal;
 mod entity_passes;
@@ -95,6 +96,7 @@ pub use sources::{
 pub use stats::RenderStats;
 
 use beacon_beam::BeaconBeamRenderer;
+use lightning_bolt::LightningBoltRenderer;
 use block_entities::BlockEntityRenderer;
 use display_text::DisplayTextRenderer;
 use end_portal::EndPortalRenderer;
@@ -652,6 +654,12 @@ pub struct RenderState {
     /// beacon's block model has real pyramid-frame geometry — but before
     /// this landed a beacon had **no visual sign it was active at all**.
     beacon_beam: BeaconBeamRenderer,
+    /// Lightning bolts. Always constructed and never `Option`: unlike every
+    /// sibling here it needs **no jar asset at all** — a bolt is untextured
+    /// procedural geometry — so there is no pack-presence gate and no
+    /// fail-open case. See `gpu/lightning_bolt.rs`'s module doc for why it
+    /// cannot be an `EntityPipeline` variant.
+    lightning_bolt: LightningBoltRenderer,
     /// Where this frame's beacon beams come from. Same "unset means draw
     /// nothing" convention as [`Self::skull_source`]. See [`BeaconSource`]
     /// for why this needs no per-position tracker the way

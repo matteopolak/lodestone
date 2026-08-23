@@ -45,6 +45,13 @@ protocol change was needed to reach the client — `lodestone-shell`'s `net.rs` 
 had a live `ClientEvent::EntitySpawned` arm for `lightning_bolt` calling into weather
 rendering.
 
+That arm drives the **sky flash** only. The bolt's own geometry is a separate
+feature and lives in [`lightning-rendering.md`](./lightning-rendering.md); it is
+generated entirely client-side from a seed, precisely because the empty metadata
+above means there is nothing to derive it from. Reading "wired end to end" here
+as covering the drawn bolt is the mistake this paragraph now exists to prevent —
+it was true of the flash and not of the geometry for as long as both existed.
+
 `resolve_effect` is the `thunderHit` dispatch table, verified against the 26.2 jar:
 
 | species | effect | applied by this crate |

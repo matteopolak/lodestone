@@ -141,6 +141,7 @@ impl RenderState {
         let sign_text = SignTextRenderer::new(device, color_format);
         let display_text = DisplayTextRenderer::new(device, color_format);
         let beacon_beam = BeaconBeamRenderer::new(device, queue, color_format);
+        let lightning_bolt = super::lightning_bolt::LightningBoltRenderer::new(device, color_format);
         let end_portal = EndPortalRenderer::new(device, queue, color_format);
 
         // The live vanilla atlas carries baked model geometry; build the model
@@ -411,6 +412,7 @@ impl RenderState {
             // frame's extract — see that method's doc.
             display_draws: Vec::new(),
             beacon_beam,
+            lightning_bolt,
             // No beacon beams until the shell installs a world source; see
             // `set_beacon_source`.
             beacon_source: BeaconSource::default(),

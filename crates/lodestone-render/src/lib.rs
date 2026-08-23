@@ -68,6 +68,7 @@ pub mod gui_atlas;
 pub mod gui_entity;
 pub mod item_render;
 pub mod light;
+pub mod lightning_bolt;
 pub mod map_item;
 pub mod mesh;
 pub mod mesher;
