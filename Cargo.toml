@@ -72,6 +72,12 @@ lodestone-data   = { path = "crates/lodestone-data" }
 # Dependency-light and wasm-safe by construction — nearly everything depends on
 # this, so it must stay that way.
 lodestone-time = { path = "crates/lodestone-time" }
+# The workspace's one `java.util.Random` (48-bit LCG), bit-exact against the
+# Java specification. See `crates/lodestone-javarandom/src/lib.rs` for why
+# `lodestone-worldgen-core`'s `LegacyRandomSource` deliberately does not use
+# this crate. Zero dependencies beyond `lodestone-time`'s clock seam, so any
+# leaf crate can take it without pulling in an unrelated subsystem.
+lodestone-javarandom = { path = "crates/lodestone-javarandom" }
 # Shared canonicalisation layer for every pre-1.13 family (epic #343 U1): the
 # JVM-dumped `id:meta` flattening table plus the bridge to canonical 26.2
 # block-state ids. Version-free — it names no protocol family, so it does not
