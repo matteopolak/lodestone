@@ -904,6 +904,16 @@ uses — LLVM happened to fold them to one, Cranelift did not, and two `lodeston
 **deterministically**, reading a real unclaimed species as claimed. The fix is one word: `static`, which
 does have a single address.
 
+**It shipped again**, in a different crate, by a different author: `entity_sprite::ENTITY_SPRITES` was a
+`const`, and recovering a row's index by `std::ptr::eq` against a returned reference matched nothing, so two
+entity types silently drew zero pixels — caught by a pixel gate, not by this paragraph. A rule stated in
+prose after the first incident is documentation of intent, not a guard, and the second incident is the
+proof. It is now checkable: `cargo xtask check-ptr-const` (`xtask::ptr_const`) parses the workspace with
+`syn`, indexes every `const`/`static` name, and fails any `std::ptr::eq`/`addr_eq` call or raw-pointer `==`
+whose operand directly names a `const`. Its own doc comment states the resolution model and its scope limit
+(a comparison that goes through a local variable or a function call is outside what it can see without a
+type checker); read it before trusting or extending the rule.
+
 Two things generalise. **Pointer identity is only meaningful on a `static`** — if you find yourself
 comparing `&CONST` addresses, that is the bug, not the backend. And **a codegen-backend change is a
 behaviour change for anything resting on unspecified details**, so a green suite under LLVM is not evidence
