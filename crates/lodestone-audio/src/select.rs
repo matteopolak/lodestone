@@ -20,8 +20,12 @@
 //!   `ClientboundSoundEntityPacket`); vanilla feeds it through
 //!   `RandomSource.create(seed)` so that **every client hearing the event picks
 //!   the same variant**. To match that, the variant draw must be this exact LCG.
-//!   Validated against a real JVM (see `tests/select.rs` and the committed
-//!   golden vectors), not against anything lodestone wrote.
+//!   The type itself is [`lodestone_javarandom::JavaRandom`] — the workspace's
+//!   one copy, shared with `lodestone-particle`, `lodestone-render`'s lightning
+//!   bolt and `lodestone-shell`'s enchanting-table book — re-exported here so
+//!   every existing caller of `lodestone_audio::JavaRandom` keeps working
+//!   unchanged. Validated against a real JVM (see `tests/select.rs` and the
+//!   committed golden vectors), not against anything lodestone wrote.
 //!
 //! * [`select_weighted`] is vanilla's `WeighedSoundEvents.getSound` walk in
 //!   version-free, asset-free form: draw `roll ∈ [0, total)` and subtract each
@@ -48,127 +52,7 @@
 //! within the referenced event (a second `roll`), exactly as vanilla recurses.
 //! `select_weighted` models one level; the chained descent stays in assets.
 
-/// Vanilla's `LegacyRandomSource`, bit-for-bit identical to `java.util.Random`.
-///
-/// A 48-bit linear congruential generator. Used for sound-variant selection so
-/// that seeded (packet-driven) sounds pick the same variant as vanilla clients.
-/// Pure integer math: no time source, no `getrandom`, so it compiles and runs
-/// identically on native and `wasm32`.
-///
-/// Constants and algorithm transcribed from 26.2
-/// `net.minecraft.world.level.levelgen.LegacyRandomSource` and
-/// `BitRandomSource`.
-#[derive(Debug, Clone)]
-pub struct JavaRandom {
-    /// The 48-bit scrambled state, held in an `i64` (always in `[0, 2^48)`).
-    seed: i64,
-}
-
-impl JavaRandom {
-    const MULTIPLIER: i64 = 0x5DEECE66D;
-    const INCREMENT: i64 = 0xB;
-    const MASK: i64 = (1 << 48) - 1;
-
-    /// Creates a generator seeded exactly as `new java.util.Random(seed)` /
-    /// `RandomSource.create(seed)`: the seed is scrambled by
-    /// `(seed ^ 0x5DEECE66D) & (2^48 - 1)`.
-    pub fn new(seed: i64) -> Self {
-        Self {
-            seed: (seed ^ Self::MULTIPLIER) & Self::MASK,
-        }
-    }
-
-    /// Reseeds in place, matching `Random.setSeed`.
-    pub fn set_seed(&mut self, seed: i64) {
-        self.seed = (seed ^ Self::MULTIPLIER) & Self::MASK;
-    }
-
-    /// The LCG core: advances the state and returns the top `bits` bits, exactly
-    /// as `LegacyRandomSource.next(bits)`. `bits` must be in `1..=32`.
-    fn next(&mut self, bits: u32) -> i32 {
-        debug_assert!((1..=32).contains(&bits));
-        self.seed = self
-            .seed
-            .wrapping_mul(Self::MULTIPLIER)
-            .wrapping_add(Self::INCREMENT)
-            & Self::MASK;
-        // `seed` is non-negative (masked to 48 bits), so the shift is logical.
-        // Casting the low bits to i32 reproduces Java's `(int)` truncation,
-        // which for bits == 32 yields a signed (possibly negative) result.
-        (self.seed >> (48 - bits)) as i32
-    }
-
-    /// A uniformly distributed `i32`, matching `Random.nextInt()`.
-    pub fn next_i32(&mut self) -> i32 {
-        self.next(32)
-    }
-
-    /// A uniform `i32` in `[0, bound)`, matching `Random.nextInt(bound)` exactly,
-    /// including the power-of-two fast path and the modulo-rejection loop that
-    /// removes bias at the top of the range.
-    ///
-    /// Panics if `bound <= 0`, as vanilla throws `IllegalArgumentException`.
-    pub fn next_i32_bound(&mut self, bound: i32) -> i32 {
-        assert!(bound > 0, "bound must be positive");
-        if bound & (bound - 1) == 0 {
-            // Power of two: take the high 31 bits scaled — no rejection needed.
-            return ((bound as i64 * self.next(31) as i64) >> 31) as i32;
-        }
-        loop {
-            let sample = self.next(31);
-            let modulo = sample % bound;
-            // Vanilla's overflow guard, in wrapping i32 to match Java `int`:
-            // retry while `sample - modulo + (bound - 1)` overflows negative.
-            if sample.wrapping_sub(modulo).wrapping_add(bound - 1) >= 0 {
-                return modulo;
-            }
-        }
-    }
-
-    /// A uniform `i64`, matching `Random.nextLong()`:
-    /// `((long) next(32) << 32) + next(32)`.
-    pub fn next_i64(&mut self) -> i64 {
-        let hi = self.next(32) as i64;
-        let lo = self.next(32) as i64;
-        (hi << 32).wrapping_add(lo)
-    }
-
-    /// A uniform `f64` in `[0, 1)`, matching `Random.nextDouble()`:
-    /// `(((long) next(26) << 27) + next(27)) * 2^-53`.
-    ///
-    /// Needed by biome ambient *additions*, which fire on
-    /// `random.nextDouble() < tick_chance` (`BiomeAmbientSoundsHandler.java:65`)
-    /// against chances as small as `0.0111`. Note this consumes **two** LCG steps,
-    /// so substituting `next_i32_bound` scaled would desync any shared stream.
-    pub fn next_f64(&mut self) -> f64 {
-        let hi = (self.next(26) as i64) << 27;
-        let lo = self.next(27) as i64;
-        (hi + lo) as f64 * (1.0 / (1i64 << 53) as f64)
-    }
-
-    /// A uniform `f32` in `[0, 1)`, matching `Random.nextFloat()`:
-    /// `next(24) / 2^24`. One LCG step, unlike [`JavaRandom::next_f64`].
-    ///
-    /// Vanilla uses it for the swim-sound pitch jitter
-    /// `1.0 + (nextFloat() - nextFloat()) * 0.4` (`Entity.java:1490`), which draws
-    /// twice and is therefore order-sensitive.
-    pub fn next_f32(&mut self) -> f32 {
-        self.next(24) as f32 / (1i32 << 24) as f32
-    }
-
-    /// A `roll`-shaped draw for weighted selection: a uniform value in
-    /// `[0, bound)`, the signature `lodestone-assets`' `resolve` expects.
-    ///
-    /// `bound` must be `>= 1` and `<= i32::MAX`. The upper bound is not a
-    /// limitation versus vanilla: vanilla's total weight is a Java `int`, so it
-    /// is already confined to `i32::MAX`, and real sound events sum to a few
-    /// thousand at most.
-    pub fn roll(&mut self, bound: u32) -> u32 {
-        debug_assert!(bound >= 1, "roll bound must be >= 1");
-        debug_assert!(bound <= i32::MAX as u32, "roll bound exceeds i32::MAX");
-        self.next_i32_bound(bound as i32) as u32
-    }
-}
+pub use lodestone_javarandom::JavaRandom;
 
 /// Selects an index into `weights` with probability proportional to each
 /// weight, using vanilla's cumulative-subtraction walk

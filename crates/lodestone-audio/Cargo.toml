@@ -11,6 +11,10 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 glam.workspace = true
+# `java.util.Random`, bit-exact — the workspace's one copy, shared with
+# `lodestone-particle`, `lodestone-render` and `lodestone-shell`'s enchanting
+# table. See `src/select.rs`.
+lodestone-javarandom.workspace = true
 # Pure-Rust Ogg Vorbis decoder. No C deps, compiles to wasm32 cleanly, so it
 # lives in the device-free core alongside the mixer.
 lewton = "0.10"
