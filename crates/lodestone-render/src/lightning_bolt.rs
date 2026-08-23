@@ -20,6 +20,27 @@
 //! for exactly this reason: no hitbox comes close to bounding it, and
 //! `lodestone_data::entity_dimensions` records a lightning bolt as having no
 //! box at all.
+//!
+//! # The RNG is `lodestone-javarandom`, not a local copy
+//!
+//! The bolt's whole shape is the output of a `java.util.Random` walk, so it
+//! has to be bit-exact. This module used to carry its own independent
+//! implementation — the fourth of five copies the workspace had — now
+//! replaced by [`lodestone_javarandom::JavaRandom`], the one shared
+//! implementation also used by `lodestone-particle`, `lodestone-audio` and
+//! `lodestone-shell`'s enchanting-table book. See that crate's docs for the
+//! full accounting and for why `lodestone-worldgen-core`'s
+//! `LegacyRandomSource` is the deliberate holdout. This module's old copy used
+//! plain (non-wrapping) `i32` arithmetic in its rejection loop rather than the
+//! `wrapping_sub`/`wrapping_add` the other four already used — harmless for
+//! the bounds this module actually draws (11 and 31), but a real
+//! inconsistency the shared implementation removes rather than repeats.
+//!
+//! The rejection loop in `JavaRandom::next_i32_bound` is load-bearing: 11 and
+//! 31 are not powers of two, so `next(31) % bound` alone is *not* what Java
+//! produces for the values this module draws.
+
+use lodestone_javarandom::JavaRandom;
 
 /// One bolt vertex: a world-space position and a straight RGBA colour. No UV
 /// and no light — the bolt is untextured and unlit, which is why it cannot
@@ -62,46 +83,6 @@ pub const BOLT_QUADS: usize = 4 * (8 + 3 + 3) * 4;
 /// Vanilla submits `PrimitiveTopology.QUADS`, which this engine does not have,
 /// so each quad becomes two triangles.
 pub const BOLT_VERTICES: usize = BOLT_QUADS * 6;
-
-/// `java.util.Random`, bit-exact, because the bolt's whole shape is its output.
-///
-/// # This is the fourth copy in the workspace
-///
-/// `lodestone_assets::entity_models`' `ghast_model` (tentacle lengths),
-/// `lodestone-audio`'s `select` and `lodestone-particle`'s `rng` each carry
-/// their own. Consolidating them is a real cleanup and is deliberately not done
-/// here — it spans four crates, one of which was being edited concurrently.
-/// Recorded rather than silently repeated, per this repo's rule about the same
-/// fix being discovered twice.
-///
-/// The rejection loop in [`Self::next_int`] is load-bearing: 11 and 31 are not
-/// powers of two, so `next(31) % bound` alone is *not* what Java produces for
-/// the values this module draws.
-struct JavaRandom(i64);
-
-impl JavaRandom {
-    fn new(seed: i64) -> Self {
-        Self((seed ^ 0x5DEE_CE66D) & ((1i64 << 48) - 1))
-    }
-
-    fn next(&mut self, bits: u32) -> i32 {
-        self.0 = self.0.wrapping_mul(0x5DEE_CE66D).wrapping_add(0xB) & ((1i64 << 48) - 1);
-        (self.0 >> (48 - bits)) as i32
-    }
-
-    fn next_int(&mut self, bound: i32) -> i32 {
-        if bound & -bound == bound {
-            return ((i64::from(bound)).wrapping_mul(i64::from(self.next(31))) >> 31) as i32;
-        }
-        loop {
-            let bits = self.next(31);
-            let val = bits % bound;
-            if bits - val + (bound - 1) >= 0 {
-                return val;
-            }
-        }
-    }
-}
 
 /// Build one bolt's whole geometry from its seed, as a triangle list of
 /// exactly [`BOLT_VERTICES`] vertices in bolt-local space.
@@ -151,8 +132,8 @@ pub fn lightning_bolt_vertices(seed: i64) -> Vec<BoltVertex> {
     for h in (0..8usize).rev() {
         x_offs[h] = x_off;
         z_offs[h] = z_off;
-        x_off += (random.next_int(11) - 5) as f32;
-        z_off += (random.next_int(11) - 5) as f32;
+        x_off += (random.next_i32_bound(11) - 5) as f32;
+        z_off += (random.next_i32_bound(11) - 5) as f32;
     }
     let final_x = x_off;
     let final_z = z_off;
@@ -170,11 +151,11 @@ pub fn lightning_bolt_vertices(seed: i64) -> Vec<BoltVertex> {
                 let xo1 = xo0;
                 let zo1 = zo0;
                 if p == 0 {
-                    xo0 += (random.next_int(11) - 5) as f32;
-                    zo0 += (random.next_int(11) - 5) as f32;
+                    xo0 += (random.next_i32_bound(11) - 5) as f32;
+                    zo0 += (random.next_i32_bound(11) - 5) as f32;
                 } else {
-                    xo0 += (random.next_int(31) - 15) as f32;
-                    zo0 += (random.next_int(31) - 15) as f32;
+                    xo0 += (random.next_i32_bound(31) - 15) as f32;
+                    zo0 += (random.next_i32_bound(31) - 15) as f32;
                 }
 
                 let mut rr1 = 0.1 + r as f32 * 0.2;
