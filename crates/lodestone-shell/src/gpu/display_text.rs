@@ -5,6 +5,29 @@
 //! to that one; read its module doc for the shader/pipeline reasoning this
 //! one does not repeat.
 //!
+//! # Light: the brightness override, then the world
+//!
+//! `TextDisplayRenderer.submitInner` sets `.setLight(lightCoords)` on the
+//! background quad and passes the same coords to every `submitText` call, and
+//! `lightCoords` for a `Display` is not the plain sampled value:
+//! `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` substitute the
+//! **brightness override**'s own nibbles whenever it is set, per axis, and
+//! fall back to the sampled world light otherwise. [`display_light`] is that
+//! rule; `DisplayDraw::brightness_override` has been decoded and repacked all
+//! along, so this pass is its third consumer rather than its first.
+//!
+//! As for the two sibling passes, the texel is
+//! [`lodestone_render::light_color`] folded into the vertex colour on the CPU
+//! — the shader is `shaders/nametag.wgsl`, whose whole input is one flat
+//! colour. **Except for the see-through range**: `text.vsh` and
+//! `text_background.vsh` both sample the lightmap only in their
+//! non-`IS_SEE_THROUGH` branch (the see-through branch is literally
+//! `vertexColor = Color` and declares no `UV2` input at all), so a
+//! `FLAG_SEE_THROUGH` display is full-bright in vanilla by construction,
+//! whatever light it was submitted with. Tinting it would be a faithful
+//! reading of the *submission* and a wrong reading of the *shader it
+//! selects*.
+//!
 //! # Not a billboard by default, but can become one
 //!
 //! Unlike [`super::nametag`] (always camera-facing) and unlike
@@ -24,8 +47,10 @@
 //! `FLAG_SEE_THROUGH` selects `TEXT_SEE_THROUGH` /
 //! `TEXT_BACKGROUND_SEE_THROUGH`, whose depth state is
 //! `withDepthStencilState(Optional.empty())` — no test, no write. Those two
-//! collapse into one pipeline here because their depth state is identical and
-//! the shader difference is not something this pass ports.
+//! collapse into one pipeline here because their depth state is identical.
+//! Their *shaders* are not identical, and the difference is not cosmetic —
+//! see the light section below, which is why the see-through range is
+//! partitioned by a flag this pass reads rather than merely drawn last.
 //! `TextDisplayRenderer.submitInner` hands the
 //! background quad to `RenderTypes.textBackground()` —
 //! `RenderPipelines.TEXT_BACKGROUND`, whose depth state is the plain
@@ -633,6 +658,8 @@ impl DisplayTextRenderer {
         view_proj: &[[f32; 4]; 4],
         draws: &[DisplayDraw],
         camera: &Camera,
+        light: super::nametag::WorldTextLight,
+        light_source: &super::EntityLightSource,
     ) -> DisplayTextRanges {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
         let Some(raster) = &self.font else {
@@ -640,7 +667,7 @@ impl DisplayTextRenderer {
         };
 
         let Partitioned { backgrounds, shadows, glyphs, see_through } =
-            partition_display_text(raster, &self.ink, draws, camera);
+            partition_display_text(raster, &self.ink, draws, camera, light, light_source);
         // Panels first, then glyphs, so the two ranges are contiguous. The
         // cap is applied to the panels first and to whatever room is left
         // for the glyphs, which is the right way round: a truncated panel
@@ -759,11 +786,33 @@ struct Partitioned {
     see_through: Vec<DisplayTextVertex>,
 }
 
+/// One `Display`-family entity's packed light: its **brightness override**
+/// when it carries one, the sampled world light at its position otherwise.
+///
+/// `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` substitute the
+/// override's own nibbles for the sampled lightmap whenever it is not `-1`,
+/// which is what makes a server's `brightness:{sky:15,block:15}` hologram
+/// readable in a dark room — the single most common reason a `text_display`
+/// carries the field at all. [`DisplayDraw::override_light`] does the repack
+/// from vanilla's 32-bit coordinate to this renderer's byte.
+///
+/// The probe is the entity's own position with no eye-height offset, matching
+/// `gpu/world_items.rs`'s item-display arm and `gpu/moving_blocks.rs`'s
+/// block-display arm, which resolve the same two-line rule for the same
+/// entity family: a display's `width`/`height` are cosmetic culling bounds
+/// rather than a model extent, so there is no "eye" to raise the probe to.
+#[must_use]
+fn display_light(source: &super::EntityLightSource, draw: &DisplayDraw) -> u8 {
+    draw.override_light().unwrap_or_else(|| source.sample(draw.position))
+}
+
 fn partition_display_text(
     raster: &RasterFont,
     ink: &super::nametag::StyledInkLayoutCache,
     draws: &[DisplayDraw],
     camera: &Camera,
+    light: super::nametag::WorldTextLight,
+    light_source: &super::EntityLightSource,
 ) -> Partitioned {
     let mut out = Partitioned::default();
     for draw in draws {
@@ -771,6 +820,16 @@ fn partition_display_text(
             continue;
         }
         let Some(text) = &draw.text else { continue };
+        let see_through = draw.text_style_flags & FLAG_SEE_THROUGH != 0;
+        // See the module doc's light section: `text.vsh`/`text_background.vsh`
+        // sample the lightmap only in their non-`IS_SEE_THROUGH` branch, so
+        // the whole see-through range is full-bright by construction and the
+        // rest takes the display's own resolved light.
+        let tint = if see_through {
+            [1.0, 1.0, 1.0]
+        } else {
+            light.tint(display_light(light_source, draw))
+        };
         let mut panel = Vec::new();
         let mut line_shadow = Vec::new();
         let mut line_ink = Vec::new();
@@ -780,6 +839,7 @@ fn partition_display_text(
             draw,
             text,
             camera,
+            tint,
             &mut panel,
             &mut line_shadow,
             &mut line_ink,
@@ -791,7 +851,7 @@ fn partition_display_text(
         // range paint order is all that separates them. That also means the
         // shadow/ink contest cannot arise there at all: with no depth test
         // and no depth write, submission order decides outright.
-        if draw.text_style_flags & FLAG_SEE_THROUGH == 0 {
+        if !see_through {
             out.backgrounds.append(&mut panel);
             out.shadows.append(&mut line_shadow);
             out.glyphs.append(&mut line_ink);
@@ -860,6 +920,7 @@ fn push_text_display_quads(
     draw: &DisplayDraw,
     text: &Text,
     camera: &Camera,
+    tint: [f32; 3],
     background_out: &mut Vec<DisplayTextVertex>,
     shadow_out: &mut Vec<DisplayTextVertex>,
     glyph_out: &mut Vec<DisplayTextVertex>,
@@ -914,6 +975,7 @@ fn push_text_display_quads(
             total_width,
             total_height,
             background_argb,
+            tint,
             background_out,
         );
     }
@@ -956,7 +1018,14 @@ fn push_text_display_quads(
         };
         let y_line = i as f32 * TEXT_LINE_HEIGHT;
         for rect in rects {
-            let color = [rect.color[0], rect.color[1], rect.color[2], rect.color[3] * alpha];
+            // The lightmap texel multiplies the resolved run colour, and the
+            // shadow is derived *from that* — vanilla scales the already-lit
+            // vertex colour, and a multiply either way round is the same
+            // number, but deriving from the lit colour keeps one expression.
+            let color = super::nametag::tinted(
+                [rect.color[0], rect.color[1], rect.color[2], rect.color[3] * alpha],
+                tint,
+            );
             let lx = rect.x + offset;
             let ly = rect.y + y_line;
             if shadow {
@@ -1030,9 +1099,10 @@ fn push_background_quad(
     width: f32,
     height: f32,
     argb: i32,
+    tint: [f32; 3],
     out: &mut Vec<DisplayTextVertex>,
 ) {
-    let color = text_background_color(argb);
+    let color = super::nametag::tinted(text_background_color(argb), tint);
     let bl = matrix.transform_point3(Vec3::new(-1.0, -1.0, -0.01)).to_array();
     let tl = matrix.transform_point3(Vec3::new(-1.0, height, -0.01)).to_array();
     let tr = matrix.transform_point3(Vec3::new(width, height, -0.01)).to_array();
@@ -1072,6 +1142,7 @@ mod tests {
             draw,
             text,
             camera,
+            [1.0, 1.0, 1.0],
             &mut out,
             &mut shadows,
             &mut glyphs,
@@ -1200,7 +1271,14 @@ mod tests {
         let mut tested = draw_with_text("LODESTONE");
         tested.text_background_color = 0x4000_0000_u32 as i32;
         tested.text_style_flags = FLAG_SHADOW;
-        let one = partition_display_text(&raster, &ink, &[tested.clone()], &camera);
+        let one = partition_display_text(
+            &raster,
+            &ink,
+            &[tested.clone()],
+            &camera,
+            super::super::nametag::WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
+        );
         assert_eq!(one.backgrounds.len(), 6, "one background quad");
         assert!(!one.shadows.is_empty(), "a shadowed display contributes shadow quads");
         assert_eq!(
@@ -1215,7 +1293,14 @@ mod tests {
 
         let mut through = tested.clone();
         through.text_style_flags |= FLAG_SEE_THROUGH;
-        let two = partition_display_text(&raster, &ink, &[through], &camera);
+        let two = partition_display_text(
+            &raster,
+            &ink,
+            &[through],
+            &camera,
+            super::super::nametag::WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
+        );
         assert!(
             two.backgrounds.is_empty() && two.shadows.is_empty() && two.glyphs.is_empty(),
             "the three depth-tested ranges must be empty",
@@ -1499,6 +1584,7 @@ mod tests {
                 draw,
                 &text,
                 &camera,
+                [1.0, 1.0, 1.0],
                 &mut panel,
                 &mut shadows,
                 &mut glyphs,
@@ -1624,6 +1710,153 @@ mod tests {
              through `DisplayDraw::text`'s direct `to_spans()` (no legacy \
              round trip): got {:?}",
             out.iter().map(|v| v.color).collect::<Vec<_>>()
+        );
+    }
+
+    /// An [`super::EntityLightSource`] answering `packed` everywhere.
+    fn uniform_light(packed: u8) -> super::super::EntityLightSource {
+        super::super::EntityLightSource(Some(Box::new(move |_| Some(packed))))
+    }
+
+    fn partition_at(
+        raster: &RasterFont,
+        draw: &DisplayDraw,
+        source: &super::super::EntityLightSource,
+    ) -> Partitioned {
+        partition_display_text(
+            raster,
+            &super::super::nametag::StyledInkLayoutCache::default(),
+            &[draw.clone()],
+            &Camera::default(),
+            super::super::nametag::WorldTextLight::overworld_noon(),
+            source,
+        )
+    }
+
+    /// `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` take the
+    /// **brightness override**'s own nibbles in place of the sampled lightmap
+    /// whenever it is set — which is the whole reason a server sets
+    /// `brightness:{sky:15,block:15}` on a hologram it wants readable in a
+    /// dark room.
+    ///
+    /// Three arms, each naming its wrong hypothesis:
+    ///
+    /// * no override, dark cell — must take the sampled byte (the pre-fix
+    ///   behaviour is full bright, so this arm fails without the wiring);
+    /// * override, same dark cell — must be **identical to full bright**, not
+    ///   to the sample. Sampling anyway is the failure the field exists to
+    ///   prevent;
+    /// * `FLAG_SEE_THROUGH`, dark cell, no override — must be full bright
+    ///   regardless, because `text.vsh`'s see-through variant samples no
+    ///   lightmap at all.
+    #[test]
+    fn a_text_display_takes_its_brightness_override_over_the_sampled_world_light() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ambient = lodestone_render::light::OVERWORLD_AMBIENT_LIGHT;
+        let dark = uniform_light(0x00);
+        let bright = uniform_light(super::super::nametag::TEXT_FULL_BRIGHT);
+        let want_dark = lodestone_render::light_color(0x00, 1.0, ambient);
+        assert!(
+            want_dark[0] < 0.5,
+            "the dark cell must be dark under the lightmap curve, or no arm \
+             below discriminates: got {want_dark:?}"
+        );
+
+        // A panel as well as ink, so the background quad's own tint is
+        // covered — `text_background.vsh` forks on `IS_SEE_THROUGH` too.
+        let mut plain = draw_with_text("A");
+        plain.text_background_color = 0x4000_0000_u32 as i32;
+
+        let reference = partition_at(&raster, &plain, &bright);
+        let sampled = partition_at(&raster, &plain, &dark);
+        assert!(
+            !reference.glyphs.is_empty() && !reference.backgrounds.is_empty(),
+            "the fixture must draw both ink and a panel"
+        );
+
+        let compare = |measured: &[DisplayTextVertex],
+                       reference: &[DisplayTextVertex],
+                       tint: [f32; 3]| {
+            measured
+                .iter()
+                .zip(reference)
+                .enumerate()
+                .filter(|(_, (m, r))| {
+                    (0..3).any(|c| (m.color[c] - r.color[c] * tint[c]).abs() > 1e-4)
+                })
+                .map(|(i, (m, r))| (i, m.color, r.color))
+                .collect::<Vec<_>>()
+        };
+
+        for (name, measured, reference) in [
+            ("ink", &sampled.glyphs, &reference.glyphs),
+            ("panel", &sampled.backgrounds, &reference.backgrounds),
+        ] {
+            let bad = compare(measured, reference, want_dark);
+            assert!(
+                bad.is_empty(),
+                "a {name} vertex with no brightness override must take the \
+                 sampled world light {want_dark:?}: {} of {} wrong, e.g. \
+                 (index, got, full-bright source) {:?}",
+                bad.len(),
+                measured.len(),
+                bad.first()
+            );
+        }
+        assert!(
+            sampled
+                .glyphs
+                .iter()
+                .zip(&reference.glyphs)
+                .any(|(a, b)| (a.color[0] - b.color[0]).abs() > 0.05),
+            "the unoverridden arm must actually have moved — no movement is \
+             the pre-fix behaviour"
+        );
+
+        // `Brightness.pack()` is `block << 4 | sky << 20`; sky 15, block 15.
+        let mut overridden = plain.clone();
+        overridden.brightness_override = Some((15 << 4) | (15 << 20));
+        assert_eq!(
+            overridden.override_light(),
+            Some(super::super::nametag::TEXT_FULL_BRIGHT),
+            "the fixture's override must repack to full bright, or the arm \
+             below is testing the wrong byte"
+        );
+        let held = partition_at(&raster, &overridden, &dark);
+        let bad = compare(&held.glyphs, &reference.glyphs, [1.0, 1.0, 1.0]);
+        assert!(
+            bad.is_empty(),
+            "a display carrying a full-bright brightness override must ignore \
+             the dark cell it sits in: {} of {} vertices dimmed, e.g. {:?}",
+            bad.len(),
+            held.glyphs.len(),
+            bad.first()
+        );
+
+        // See-through, no override, same dark cell.
+        let mut through = plain.clone();
+        through.text_style_flags |= FLAG_SEE_THROUGH;
+        let through_dark = partition_at(&raster, &through, &dark);
+        let through_bright = partition_at(&raster, &through, &bright);
+        assert!(
+            !through_dark.see_through.is_empty(),
+            "the see-through fixture must contribute to that range"
+        );
+        let bad = compare(
+            &through_dark.see_through,
+            &through_bright.see_through,
+            [1.0, 1.0, 1.0],
+        );
+        assert!(
+            bad.is_empty(),
+            "the see-through range samples no lightmap in vanilla, so it must \
+             be identical in a dark and a bright cell: {} of {} vertices \
+             differed, e.g. {:?}",
+            bad.len(),
+            through_dark.see_through.len(),
+            bad.first()
         );
     }
 }

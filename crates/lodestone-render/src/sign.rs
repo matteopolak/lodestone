@@ -120,19 +120,22 @@
 //! from [`sign_side_color`]'s non-glowing arm, where `hasGlowingText()` is
 //! false by construction, so the two functions agree everywhere they overlap.
 //!
-//! **The full-bright half needs no port**: this project's sign-text pass
-//! never samples a lightmap at all (see `gpu/sign_text.rs`), so *every* sign
-//! already draws at full brightness. That makes vanilla's `lightCoords` arm
-//! the remaining gap — non-glowing text is brighter in the dark here than in
-//! vanilla — and leaves glowing text's own "legible in pitch dark" property
-//! satisfied for free. Do not read this as the glow being complete: it is
-//! complete because the *other* arm is unported, and closing the lightmap gap
-//! is what will make this branch load-bearing.
+//! **All three arms are now ported**, the light one last. It was reported as
+//! needing no port, on the true observation that the sign-text pass sampled
+//! no lightmap at all and so drew every sign full-bright — which made the
+//! glow branch's *other* two arms the only visible difference and left the
+//! feature not load-bearing in the one situation it exists for: a glowing
+//! and a plain sign looked equally bright in the dark. `gpu/sign_text.rs`
+//! now folds vanilla's lightmap texel into each side's vertex colours, taking
+//! `0xFF` (sky 15, block 15) for a glowing side and this spawn's own
+//! [`SignSpawn::light`] for a plain one. That byte was already being
+//! resolved — `block_entities::sign_spawns` fills it from
+//! `net::entity_light_at` — so the gap was one consumer, not a missing
+//! source.
 //!
-//! **Deferred**: per-pixel world-light modulation for non-glowing text
-//! (`state.lightCoords` in vanilla), a deliberate simplification mirroring
-//! `gpu/nametag.rs`'s own documented choice to draw "plain full-bright...
-//! unconditionally" rather than sample a lightmap per glyph.
+//! Note the full-bright constant is **not** [`ENTITY_FULLBRIGHT`]: that is
+//! sky 15 with block 0, and the sky half is scaled by the clock, so a sign
+//! carrying it would fade at dusk. Vanilla's `15728880` sets both halves.
 
 use glam::{Mat4, Vec3};
 use lodestone_world::{SignDyeColor, SignSide};
@@ -460,9 +463,14 @@ pub struct SignSpawn {
     pub front: SignSide,
     /// The side read facing the sign from behind.
     pub back: SignSide,
-    /// Packed sky/block light. Not currently sampled per-glyph (see the
-    /// module doc's Deferred section) — carried on the spawn anyway so a
-    /// future lightmap pass has it without widening this struct again.
+    /// Packed sky/block light (`sky << 4 | block`) at the sign's own block,
+    /// vanilla's `state.lightCoords`.
+    ///
+    /// `gpu/sign_text.rs` multiplies the lightmap texel for this byte into
+    /// every glyph and outline vertex of a **non-glowing** side; a glowing
+    /// side substitutes full bright and ignores it, per
+    /// `AbstractSignRenderer.submitSignText`. Filled by
+    /// `block_entities::sign_spawns` from `net::entity_light_at`.
     pub light: u8,
 }
 

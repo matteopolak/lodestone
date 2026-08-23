@@ -25,6 +25,21 @@ setblock 2 66 14 minecraft:deepslate_bricks
 setblock -4 65 15 minecraft:sea_lantern
 setblock 4 65 15 minecraft:sea_lantern
 
+# Ceiling. Out of frame at this camera by a wide margin (the eye is at y=65.1
+# with a 50-degree vertical FOV three blocks off the row, so the frame covers
+# under two blocks of height), and it is here for the **light**, not the
+# composition: without it this room is open to the sky, every sign sits at sky
+# light 15, and world-space text renders at full brightness whatever the
+# lightmap says. That made the frame unable to show the one thing the glowing
+# flag exists for — a glowing sign and a plain one looked identical.
+#
+# Roofed, the sea lanterns are the only real light in the room, so the plain
+# boards read at block light 8-12 by distance while the glowing wall sign holds
+# vanilla's full-bright `15728880` regardless. Some sky still seeps in
+# horizontally from beyond the roof's edge; that is fine and deliberate, since
+# a *pitch*-dark frame would be a worse screenshot than a dim one.
+fill -12 69 2 12 69 28 minecraft:deepslate_bricks
+
 # Wall sign — `facing=north` is the face pointing at the camera, and its
 # support is the wall block behind it at z=15.
 setblock -2 65 14 minecraft:spruce_wall_sign[facing=north]{is_waxed:1b,front_text:{has_glowing_text:1b,color:"lime",messages:[{text:"glowing text"},{text:"dyed lime"},{text:"and waxed"},{text:""}]}}

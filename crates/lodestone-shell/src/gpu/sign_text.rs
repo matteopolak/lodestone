@@ -110,13 +110,38 @@
 //! is safe for the reason vanilla's own arrangement is: the two sets are
 //! coplanar, and the glyphs must win.
 //!
-//! # What is deliberately not built
+//! # Light: the branch that makes `has_glowing_text` mean anything
 //!
-//! See `lodestone_render::sign` module doc's "Deferred" section for the one
-//! real gap this pass inherits — per-glyph world-light modulation, which
-//! makes non-glowing sign text brighter here than in vanilla in the dark.
-//! It is documented there rather than here because it is a property of the
-//! *colour this pass is handed*, not of how this pass draws it.
+//! `AbstractSignRenderer.submitSignText` sets three things off
+//! `signText.hasGlowingText()`, and the third one is the light coordinate:
+//! `15728880` (`LightCoordsUtil.FULL_BRIGHT` — sky 15 **and** block 15) when
+//! glowing, `state.lightCoords` (the sign block's own sampled light) when
+//! not. The glyph colour and the outline were ported first; this is the
+//! third. Until it existed both arms produced identical pixels, because this
+//! pass sampled no lightmap at all — so a glowing sign and a plain one were
+//! equally bright in the dark, which is the one situation the feature exists
+//! for.
+//!
+//! Three details, each of which is a way to get it wrong:
+//!
+//! * **The flag is per *side*.** A crimson sign can have plain front text and
+//!   glowing back text; [`push_side_quads`] takes one [`SignSide`] and
+//!   resolves the byte from *that* side's `glowing`, not from the spawn.
+//! * **Glowing is [`super::nametag::TEXT_FULL_BRIGHT`] (`0xFF`), not
+//!   [`lodestone_render::ENTITY_FULLBRIGHT`] (`0xF0`).** The latter is sky 15
+//!   with block 0, and `sky_darken` scales the sky half — so at midnight it
+//!   is not bright at all, which is exactly when a glowing sign has to be.
+//! * **The outline takes the same byte as the glyphs.** Vanilla submits it
+//!   through a different *display mode* but the same `lightVal`, and both
+//!   `DisplayMode.NORMAL` and `POLYGON_OFFSET` select a render type whose
+//!   shader does sample the lightmap (only `SEE_THROUGH` does not, and sign
+//!   text is never see-through). The outline only exists for a glowing side
+//!   anyway, so in practice it is always the full-bright byte.
+//!
+//! The sampled byte itself is [`SignSpawn::light`], which
+//! `block_entities::sign_spawns` has been resolving through
+//! `net::entity_light_at` all along — the producer was live and only the
+//! consumer discarded it.
 
 use glam::Vec3;
 use lodestone_assets::font::RasterFont;
@@ -368,6 +393,7 @@ impl SignTextRenderer {
         view_proj: &[[f32; 4]; 4],
         eye: Vec3,
         signs: &[SignSpawn],
+        light: super::nametag::WorldTextLight,
     ) -> u32 {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
         let Some(raster) = &self.font else {
@@ -396,6 +422,8 @@ impl SignTextRenderer {
                 spawn.orientation,
                 true,
                 distance_squared,
+                light,
+                spawn.light,
                 &mut vertices,
             );
             push_side_quads(
@@ -407,6 +435,8 @@ impl SignTextRenderer {
                 spawn.orientation,
                 false,
                 distance_squared,
+                light,
+                spawn.light,
                 &mut vertices,
             );
             if vertices.len() > MAX_SIGN_TEXT_VERTICES {
@@ -565,11 +595,20 @@ fn push_side_quads(
     orientation: SignOrientation,
     is_front: bool,
     distance_squared: f32,
+    light: super::nametag::WorldTextLight,
+    sampled_light: u8,
     out: &mut Vec<SignTextVertex>,
 ) {
     if side.lines.iter().all(Vec::is_empty) {
         return;
     }
+    // `AbstractSignRenderer.submitSignText`'s third glow-gated quantity —
+    // see the module doc. Per side, because `hasGlowingText` is.
+    let tint = light.tint(if side.glowing {
+        super::nametag::TEXT_FULL_BRIGHT
+    } else {
+        sampled_light
+    });
     let matrix = sign_text_transform(pos, kind, orientation, is_front);
     let default_rgb = default_run_color(side);
     let outline = sign_outline_color(side, distance_squared);
@@ -581,6 +620,10 @@ fn push_side_quads(
     let line_height = kind.text_line_height();
     let sign_midpoint = 2.0 * line_height;
     let mut quad = |rect_x: f32, rect_y: f32, w: f32, h: f32, color: [f32; 4]| {
+        // The lightmap texel, folded in here rather than at either caller so
+        // the outline and the glyphs cannot end up on different arms of the
+        // glow branch — vanilla gives both the one `lightVal`.
+        let color = super::nametag::tinted(color, tint);
         // Fed **unflipped** into the placement matrix: its own `-Y`
         // scale carries the pixel-space-down to world-space-up flip —
         // see `lodestone_render::sign`'s module doc.
@@ -688,6 +731,8 @@ mod tests {
             // Well inside `OUTLINE_RENDER_DISTANCE_SQUARED`, so a glowing
             // side in these fixtures is outlined; a non-glowing one never is.
             0.0,
+            super::super::nametag::WorldTextLight::overworld_noon(),
+            super::super::nametag::TEXT_FULL_BRIGHT,
             &mut out,
         );
         push_side_quads(
@@ -701,6 +746,8 @@ mod tests {
             // Well inside `OUTLINE_RENDER_DISTANCE_SQUARED`, so a glowing
             // side in these fixtures is outlined; a non-glowing one never is.
             0.0,
+            super::super::nametag::WorldTextLight::overworld_noon(),
+            super::super::nametag::TEXT_FULL_BRIGHT,
             &mut out,
         );
         assert!(out.is_empty());
@@ -728,6 +775,8 @@ mod tests {
             // Well inside `OUTLINE_RENDER_DISTANCE_SQUARED`, so a glowing
             // side in these fixtures is outlined; a non-glowing one never is.
             0.0,
+            super::super::nametag::WorldTextLight::overworld_noon(),
+            super::super::nametag::TEXT_FULL_BRIGHT,
             &mut front,
         );
         assert!(!front.is_empty(), "front text must contribute vertices");
@@ -744,6 +793,8 @@ mod tests {
             // Well inside `OUTLINE_RENDER_DISTANCE_SQUARED`, so a glowing
             // side in these fixtures is outlined; a non-glowing one never is.
             0.0,
+            super::super::nametag::WorldTextLight::overworld_noon(),
+            super::super::nametag::TEXT_FULL_BRIGHT,
             &mut back,
         );
         assert!(back.is_empty(), "an untouched back side must contribute nothing");
@@ -789,10 +840,12 @@ mod tests {
             let mut out = Vec::new();
             push_side_quads(
                 &raster, &ink, &spawn.front, spawn.pos, spawn.kind, spawn.orientation, true, 0.0,
+                super::super::nametag::WorldTextLight::overworld_noon(), super::super::nametag::TEXT_FULL_BRIGHT,
                 &mut out,
             );
             push_side_quads(
                 &raster, &ink, &spawn.back, spawn.pos, spawn.kind, spawn.orientation, false, 0.0,
+                super::super::nametag::WorldTextLight::overworld_noon(), super::super::nametag::TEXT_FULL_BRIGHT,
                 &mut out,
             );
             out.len()
@@ -985,6 +1038,8 @@ mod tests {
             SignOrientation::Ground { rotation_segment: 0 },
             true,
             0.0,
+            super::super::nametag::WorldTextLight::overworld_noon(),
+            super::super::nametag::TEXT_FULL_BRIGHT,
             &mut out,
         );
         assert!(!out.is_empty(), "the fixture must draw something at all");
@@ -1063,6 +1118,8 @@ mod tests {
                 SignOrientation::Ground { rotation_segment: 0 },
                 true,
                 distance_squared,
+                super::super::nametag::WorldTextLight::overworld_noon(),
+                super::super::nametag::TEXT_FULL_BRIGHT,
                 &mut out,
             );
             out
@@ -1149,6 +1206,8 @@ mod tests {
                 SignOrientation::Ground { rotation_segment: 0 },
                 true,
                 distance_squared,
+                super::super::nametag::WorldTextLight::overworld_noon(),
+                super::super::nametag::TEXT_FULL_BRIGHT,
                 &mut out,
             );
             out.len()
@@ -1207,6 +1266,8 @@ mod tests {
             // Well inside `OUTLINE_RENDER_DISTANCE_SQUARED`, so a glowing
             // side in these fixtures is outlined; a non-glowing one never is.
             0.0,
+            super::super::nametag::WorldTextLight::overworld_noon(),
+            super::super::nametag::TEXT_FULL_BRIGHT,
             &mut out,
         );
         assert!(!out.is_empty(), "the fixture must contribute ink to test anything");
@@ -1243,5 +1304,244 @@ mod tests {
             );
         }
     }
-}
 
+    /// Lays one side out at `sampled` packed light and returns its vertices.
+    /// Everything else is fixed, so the only thing separating two calls is
+    /// the light.
+    fn side_at_light(
+        raster: &RasterFont,
+        side: &SignSide,
+        sampled: u8,
+        light: super::super::nametag::WorldTextLight,
+    ) -> Vec<SignTextVertex> {
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let mut out = Vec::new();
+        push_side_quads(
+            raster,
+            &ink,
+            side,
+            [0, 0, 0],
+            SignKind::Plain,
+            SignOrientation::Ground { rotation_segment: 0 },
+            true,
+            // Inside the outline gate, so a glowing side here is outlined —
+            // which is deliberate: the outline must take the same light byte
+            // as the glyphs, and a fixture that suppressed it could not say so.
+            0.0,
+            light,
+            sampled,
+            &mut out,
+        );
+        out
+    }
+
+    /// A white-dyed side carrying one glyph. White is chosen so the two
+    /// colours this pass can emit are the extremes it has — a glowing side's
+    /// glyphs are the **full** dye (`1.0`) and its outline is
+    /// `scaleRGB(dye, 0.4)` — which keeps a mis-scaled vertex obvious. It is
+    /// not assumed to be `1.0` anywhere: every assertion below measures
+    /// against the *same fixture drawn at full-bright light*, so the base
+    /// colour cancels and what is left is the lightmap texel alone.
+    fn white_side(glowing: bool) -> SignSide {
+        let mut side = SignSide {
+            glowing,
+            color: SignDyeColor::White,
+            ..Default::default()
+        };
+        side.lines[0] = vec![plain_span("A")];
+        side
+    }
+
+    /// Every vertex of `measured` equals the matching vertex of `reference`
+    /// scaled by `tint`, or the list of the ones that do not.
+    ///
+    /// Collected rather than asserted in the loop: an `assert!` inside the
+    /// walk proves exactly one vertex and turns the rest into an argument
+    /// instead of an observation.
+    fn tint_mismatches(
+        measured: &[SignTextVertex],
+        reference: &[SignTextVertex],
+        tint: [f32; 3],
+    ) -> Vec<(usize, [f32; 4], [f32; 3])> {
+        measured
+            .iter()
+            .zip(reference)
+            .enumerate()
+            .filter_map(|(i, (m, r))| {
+                let want = [r.color[0] * tint[0], r.color[1] * tint[1], r.color[2] * tint[2]];
+                let ok = (0..3).all(|c| (m.color[c] - want[c]).abs() < 1e-4);
+                (!ok).then_some((i, m.color, want))
+            })
+            .collect()
+    }
+
+    /// The whole point of the light port, stated as the thing that was false
+    /// before it: **two sides differing only in `glowing`, in the same dark
+    /// cell, must not render the same.**
+    ///
+    /// Both arms are predicted, not merely ordered, and each is measured
+    /// against the *same side drawn at full-bright light* so the dye and the
+    /// outline scale cancel out. The glowing arm must be byte-identical to
+    /// that reference — which is also the regression control for "this fix
+    /// must not make glowing text dimmer than it already was". The plain arm
+    /// must be the reference scaled by `light_color(0x00, …)`, the
+    /// ambient-only floor. Without the second half the gate would pass on the
+    /// pre-fix behaviour, where both arms were full bright.
+    #[test]
+    fn a_glowing_side_stays_full_bright_in_the_dark_and_a_plain_one_does_not() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let light = super::super::nametag::WorldTextLight::overworld_noon();
+        // Pitch dark: no sky reaches the cell and nothing emits.
+        const DARK: u8 = 0x00;
+        const BRIGHT: u8 = super::super::nametag::TEXT_FULL_BRIGHT;
+        let ambient = lodestone_render::light::OVERWORLD_AMBIENT_LIGHT;
+
+        let want_dark = lodestone_render::light_color(DARK, 1.0, ambient);
+        assert_eq!(
+            lodestone_render::light_color(BRIGHT, 1.0, ambient),
+            [1.0, 1.0, 1.0],
+            "vanilla's FULL_BRIGHT must resolve to an identity tint, or the \
+             glow arm is being dimmed by the very fix it is immune to"
+        );
+        assert!(
+            want_dark[0] < 0.5,
+            "the fixture's dark cell must actually be dark under the lightmap \
+             curve, or neither arm can discriminate: got {want_dark:?}"
+        );
+
+        let glow_dark = side_at_light(&raster, &white_side(true), DARK, light);
+        let glow_bright = side_at_light(&raster, &white_side(true), BRIGHT, light);
+        let plain_dark = side_at_light(&raster, &white_side(false), DARK, light);
+        let plain_bright = side_at_light(&raster, &white_side(false), BRIGHT, light);
+        assert!(
+            !glow_dark.is_empty() && !plain_dark.is_empty(),
+            "the fixture must draw ink on both arms to compare anything"
+        );
+
+        let glow_bad = tint_mismatches(&glow_dark, &glow_bright, [1.0, 1.0, 1.0]);
+        assert!(
+            glow_bad.is_empty(),
+            "a glowing side must ignore its block's sampled light entirely — \
+             that is the situation the feature exists for. {} of {} vertices \
+             moved between a dark cell and a bright one, e.g. {:?}",
+            glow_bad.len(),
+            glow_dark.len(),
+            glow_bad.first()
+        );
+
+        let plain_bad = tint_mismatches(&plain_dark, &plain_bright, want_dark);
+        assert!(
+            plain_bad.is_empty(),
+            "a plain side in a dark cell must be its full-bright self scaled \
+             by {want_dark:?}, the lightmap texel for its own block. {} of {} \
+             vertices did not match, e.g. (index, got, want) {:?}",
+            plain_bad.len(),
+            plain_dark.len(),
+            plain_bad.first()
+        );
+        assert!(
+            plain_dark
+                .iter()
+                .zip(&plain_bright)
+                .any(|(a, b)| (a.color[0] - b.color[0]).abs() > 0.05),
+            "the plain arm must actually have moved — identical vertices in a \
+             dark and a bright cell is exactly the pre-fix behaviour"
+        );
+    }
+
+    /// Same side, same everything, three different **sampled** light bytes:
+    /// the vertices must get monotonically brighter. This is the
+    /// producer-facing half — a fixture where every sign sits in the same
+    /// light cannot see a pass that ignores the byte, and that is exactly how
+    /// this gap survived.
+    ///
+    /// The bytes are chosen so no two coincide. Block light 14 does **not**
+    /// work: `BLOCK_FACTOR` is `1.4`, so `brightness(14/15) * 1.4` already
+    /// clamps to `1.0` and a torch reads identical to open sky at noon —
+    /// measured, after the first version of this gate compared `0.4` with
+    /// `0.4` and reported a defect that was not there.
+    #[test]
+    fn two_identical_plain_sides_in_different_light_render_differently() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let light = super::super::nametag::WorldTextLight::overworld_noon();
+        let side = white_side(false);
+
+        let dark = side_at_light(&raster, &side, 0x00, light);
+        let dim = side_at_light(&raster, &side, 0x04, light);
+        let daylit = side_at_light(&raster, &side, 0xF0, light);
+
+        assert!(!dark.is_empty(), "the fixture must draw ink");
+        assert_eq!(
+            dark.len(),
+            dim.len(),
+            "the arms must differ only in colour, never in geometry"
+        );
+
+        let brightness = |v: &[SignTextVertex]| v[0].color[0];
+        assert!(
+            brightness(&dark) < brightness(&dim),
+            "a sign in a pitch-dark cell must be dimmer than the same sign at \
+             block light 4: {} vs {}",
+            brightness(&dark),
+            brightness(&dim)
+        );
+        assert!(
+            brightness(&dim) < brightness(&daylit),
+            "block light 4 must be dimmer than open sky at noon: {} vs {}",
+            brightness(&dim),
+            brightness(&daylit)
+        );
+        // Geometry is identical, so no positional field may have moved.
+        for (a, b) in dark.iter().zip(&daylit) {
+            assert_eq!(a.position, b.position, "light must not move a vertex");
+        }
+    }
+
+    /// The glow arm's byte is `0xFF` — sky 15 **and** block 15 — not
+    /// `ENTITY_FULLBRIGHT`'s `0xF0`, whose sky half the clock scales.
+    ///
+    /// The two candidates coincide at noon, which is why this gate runs at
+    /// midnight: `sky_darken` is `0.24` there, so the wrong constant leaves a
+    /// glowing sign markedly dim exactly when a player needs to read it. The
+    /// measurement is against the same side at noon, so the dye and the
+    /// outline scale cancel and what is compared is the two candidate tints.
+    #[test]
+    fn a_glowing_side_survives_midnight_which_the_sky_only_full_bright_byte_would_not() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        // This project's port of `SKY_LIGHT_FACTOR` at midnight.
+        const MIDNIGHT: f32 = 0.24;
+        let ambient = lodestone_render::light::OVERWORLD_AMBIENT_LIGHT;
+
+        let right =
+            lodestone_render::light_color(super::super::nametag::TEXT_FULL_BRIGHT, MIDNIGHT, ambient);
+        let wrong = lodestone_render::light_color(lodestone_render::ENTITY_FULLBRIGHT, MIDNIGHT, ambient);
+        assert!(
+            right[0] - wrong[0] > 0.3,
+            "the two candidate full-bright bytes must actually disagree at \
+             midnight, or this gate measures nothing: {right:?} vs {wrong:?}"
+        );
+
+        let noon = super::super::nametag::WorldTextLight::overworld_noon();
+        let midnight = super::super::nametag::WorldTextLight::new(MIDNIGHT, ambient);
+        let reference = side_at_light(&raster, &white_side(true), 0x00, noon);
+        let measured = side_at_light(&raster, &white_side(true), 0x00, midnight);
+        assert!(!measured.is_empty(), "the fixture must draw ink");
+
+        let bad = tint_mismatches(&measured, &reference, right);
+        assert!(
+            bad.is_empty(),
+            "glowing sign text at midnight must land on {right:?} (sky 15 AND \
+             block 15) rather than {wrong:?} (sky only): {} of {} vertices \
+             wrong, e.g. (index, got, want) {:?}",
+            bad.len(),
+            measured.len(),
+            bad.first()
+        );
+    }
+}

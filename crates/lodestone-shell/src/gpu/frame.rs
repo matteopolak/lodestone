@@ -422,12 +422,29 @@ impl RenderState {
             None => entities,
         };
 
+        // This frame's lightmap inputs, polled once for all three flat-colour
+        // world-text passes below (nametags, sign text, `text_display`) — the
+        // same two sources the terrain and entity passes already read, and the
+        // same `EntityLightSource` alongside them. Before this the three
+        // sampled no lightmap at all and every glyph in the world drew
+        // full-bright. See `gpu/nametag.rs`'s `WorldTextLight` and
+        // `docs/world-text-lighting.md`.
+        let world_text_light =
+            super::nametag::WorldTextLight::new(self.sky_darken.value(), self.ambient_light.value());
+
         // Nametag vertices, same "upload before the pass opens"
         // constraint as outline/debug-lines above. Reads the same
         // (possibly body-extended) `entities` slice; the local third-person
         // body's own draw always carries `name_tag: None`
         // (`ThirdPersonBodyState::into_draw`), so this is a no-op for it.
-        let name_tag_counts = self.nametag.prepare(queue, &view_proj, camera, entities);
+        let name_tag_counts = self.nametag.prepare(
+            queue,
+            &view_proj,
+            camera,
+            entities,
+            world_text_light,
+            &self.entity_light,
+        );
 
         // Sign text, same "upload before the pass opens"
         // constraint. Not derived from `entities` — a sign is a *block*,
@@ -436,7 +453,8 @@ impl RenderState {
         // batch step of its own (see `gpu/sign_text.rs`'s module doc for why
         // this is not a billboard and needs no camera basis).
         let signs = self.sign_source.signs(camera.position);
-        let sign_text_count = self.sign_text.prepare(queue, &view_proj, camera.position, &signs);
+        let sign_text_count =
+            self.sign_text.prepare(queue, &view_proj, camera.position, &signs, world_text_light);
         stats.sign_text_vertices = sign_text_count;
 
         // `text_display` glyphs and background panels, same "upload before
@@ -449,7 +467,14 @@ impl RenderState {
         // the ink and everything a `FLAG_SEE_THROUGH` display contributes go
         // through three different pipelines, matching vanilla's own
         // `TEXT_BACKGROUND`/`TEXT_POLYGON_OFFSET`/`TEXT_*_SEE_THROUGH` split.
-        let display_text_counts = self.display_text.prepare(queue, &view_proj, &self.display_draws, camera);
+        let display_text_counts = self.display_text.prepare(
+            queue,
+            &view_proj,
+            &self.display_draws,
+            camera,
+            world_text_light,
+            &self.entity_light,
+        );
 
         // Beacon beams, same "upload before the pass opens" constraint and
         // the same not-derived-from-`entities` shape as sign text above — a
