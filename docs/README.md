@@ -892,6 +892,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   drawn and on live stack state. A bow is `item/bow` at rest and `item/bow_pulling_0`,
   `_1` or `_2` as it is drawn; a spyglass is the flat `item/spyglass` sprite in an
   inventory slot and `item/spyglass_in_hand`'s 3-D tube in the hand.
+- [`java.util.Random` (`lodestone-javarandom`)](./java-random.md) — The workspace's
+  one implementation of `java.util.Random` — a 48-bit truncated linear congruential
+  generator, bit-exact against the Java specification. Every vanilla system that needs
+  a seeded, reproducible draw uses it: particle bursts (`lodestone-particle`), the
+  enchanting-table book animation (`lodestone-shell`'s `block_entities.rs`), the
+  lightning bolt's procedural geometry (`lodestone-render`'s `lightning_bolt.rs`), and
+  seeded sound-variant selection (`lodestone-audio`'s `select.rs`).
 - [Which player a join presents](./join-identity.md) — The single producer of the
   local player's username and UUID — `crates/lodestone-shell/src/join_identity.rs`.
   Every production join, remote and singleplayer alike, asks
