@@ -2398,6 +2398,32 @@ fn campfire_facing_yaw(state_id: u32) -> Option<f32> {
         .and_then(|(_, value)| horizontal_facing_yaw(value))
 }
 
+/// Resolve one loaded block-entity position into the source consumed by
+/// `CampfireBlockEntity::particleTick`: its block position and whether hay
+/// underneath turns the plume into signal smoke.
+///
+/// The block state is authoritative. A stale campfire block-entity record at a
+/// position that is now air, or an extinguished campfire whose entity remains
+/// loaded, emits nothing.
+#[must_use]
+fn campfire_smoke_source(block: [i32; 3], state_id: u32) -> Option<([i32; 3], bool)> {
+    let name = lodestone_data::block_states::block_name(state_id)?;
+    if name != "minecraft:campfire" && name != "minecraft:soul_campfire" {
+        return None;
+    }
+    let properties = lodestone_data::block_states::properties(state_id)?;
+    let property = |key: &str| {
+        properties
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| *value)
+    };
+    if property("lit") != Some("true") {
+        return None;
+    }
+    Some((block, property("signal_fire") == Some("true")))
+}
+
 /// The occupied cooking slots in a campfire's NBT, as `(slot, item id)`.
 ///
 /// `ContainerHelper.saveAllItems` writes an `Items` list of
@@ -2494,6 +2520,47 @@ fn campfire_candidates(
     candidates
 }
 
+#[must_use]
+fn campfire_smoke_sources_from_loaded_world(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<([i32; 3], bool)> {
+    let mut sources = campfire_candidates(world, chunks, eye)
+        .into_iter()
+        .filter_map(|(block, state_id, _)| campfire_smoke_source(block, state_id))
+        .collect::<Vec<_>>();
+    sources.sort_by_key(|(block, _)| *block);
+    sources
+}
+
+/// Every loaded, lit campfire whose block-entity smoke tick is close enough to
+/// matter to the camera.
+///
+/// This deliberately walks the decoded block-entity list rather than the
+/// random nearby-block sampler used for `Block::animateTick`. In 26.2 the main
+/// plume belongs to `CampfireBlockEntity::particleTick`, so every loaded
+/// campfire in the normal block-entity render range gets one probability roll
+/// per client tick, independent of its distance from the player's current
+/// random-scan cube.
+#[must_use]
+pub fn campfire_smoke_sources(
+    handle: &SharedHandle,
+    eye: Vec3,
+) -> Vec<([i32; 3], bool)> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+    let world = store.read();
+    campfire_smoke_sources_from_loaded_world(
+        &world,
+        chunks.into_iter().map(|pos| ChunkPos { x: pos.x, z: pos.z }),
+        eye,
+    )
+}
+
 /// Every campfire cooking item to draw this frame — one
 /// [`CampfireItemSpawn`](lodestone_render::CampfireItemSpawn) per **occupied**
 /// slot, so a lit but empty campfire yields none.
@@ -2553,6 +2620,92 @@ pub fn campfire_spawns(
     }
     out.sort_by_key(|s| (s.pos, s.slot));
     out
+}
+
+#[cfg(test)]
+mod campfire_smoke_tests {
+    use super::*;
+    use lodestone_world::{
+        BlockEntity, ChunkColumn, ColumnLight, Heightmaps, LoadedChunk, PaletteKind,
+    };
+
+    fn campfire_state(lit: bool, signal_fire: bool) -> u32 {
+        (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|id| {
+                if lodestone_data::block_states::block_name(*id) != Some("minecraft:campfire") {
+                    return false;
+                }
+                let properties = lodestone_data::block_states::properties(*id).unwrap_or(&[]);
+                let property = |key: &str| {
+                    properties
+                        .iter()
+                        .find(|(name, _)| *name == key)
+                        .map(|(_, value)| *value)
+                };
+                property("lit") == Some(if lit { "true" } else { "false" })
+                    && property("signal_fire")
+                        == Some(if signal_fire { "true" } else { "false" })
+            })
+            .expect("the 26.2 state table must contain the requested campfire state")
+    }
+
+    #[test]
+    fn only_lit_campfires_are_smoke_sources() {
+        let pos = [2, 64, 18];
+        assert_eq!(
+            campfire_smoke_source(pos, campfire_state(true, false)),
+            Some((pos, false))
+        );
+        assert_eq!(
+            campfire_smoke_source(pos, campfire_state(true, true)),
+            Some((pos, true))
+        );
+        assert_eq!(
+            campfire_smoke_source(pos, campfire_state(false, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn loaded_campfire_block_entities_are_found_beyond_the_old_ambient_scan() {
+        let chunk_pos = ChunkPos::new(0, 1);
+        let mut column = ChunkColumn::new(
+            0,
+            16,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            0,
+            0,
+        );
+        let state = campfire_state(true, false);
+        column.set_block(2, 4, 2, state);
+        let mut world = World::new();
+        world.load(
+            chunk_pos,
+            LoadedChunk::new(
+                column,
+                ColumnLight::new(16),
+                Heightmaps::new(),
+                vec![BlockEntity {
+                    rel_x: 2,
+                    rel_z: 2,
+                    y: 4,
+                    type_id: 0,
+                    nbt: lodestone_core::Nbt::End,
+                }],
+            ),
+        );
+
+        assert_eq!(
+            campfire_smoke_sources_from_loaded_world(
+                &world,
+                [chunk_pos],
+                Vec3::new(2.5, 4.5, 0.5),
+            ),
+            vec![([2, 4, 18], false)],
+            "the HUD campfire is outside ±8 but still inside the block-entity render range"
+        );
+    }
 }
 
 /// Resolves a block's registry path into which of vanilla's two sign
