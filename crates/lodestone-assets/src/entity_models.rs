@@ -1146,31 +1146,12 @@ pub fn cave_spider_model() -> EntityModelDef {
 /// java.util.Random LCG). The whole mesh is baked at `scaling(4.5)`. The model's
 /// UV sheet is 64x32 even though the shipped texture is 128x64 (a 2x texture).
 pub fn ghast_model() -> EntityModelDef {
-    // Vanilla java.util.Random, so the tentacle lengths are byte-identical to the
-    // game rather than eyeballed.
-    struct JavaRng(i64);
-    impl JavaRng {
-        fn new(seed: i64) -> Self {
-            JavaRng((seed ^ 0x5DEECE66D) & ((1i64 << 48) - 1))
-        }
-        fn next(&mut self, bits: u32) -> i32 {
-            self.0 = self.0.wrapping_mul(0x5DEECE66D).wrapping_add(0xB) & ((1i64 << 48) - 1);
-            (self.0 >> (48 - bits)) as i32
-        }
-        fn next_int(&mut self, bound: i32) -> i32 {
-            if bound & -bound == bound {
-                return ((bound as i64).wrapping_mul(self.next(31) as i64) >> 31) as i32;
-            }
-            loop {
-                let bits = self.next(31);
-                let val = bits % bound;
-                if bits - val + (bound - 1) >= 0 {
-                    return val;
-                }
-            }
-        }
-    }
-
+    // Vanilla java.util.Random, so the tentacle lengths are byte-identical to
+    // the game rather than eyeballed. This used to be a local reimplementation
+    // — a sixth copy of the same LCG the workspace carried, missed by the
+    // original five-crate consolidation and found by a grep for the
+    // multiplier constant afterwards. It is now `lodestone_javarandom`, the
+    // one shared implementation; see `docs/java-random.md`.
     let mut root = PartDef::new(PartPose::ZERO).with_child(
         "body",
         PartDef::new(PartPose::offset(0.0, 17.6, 0.0)).with_cube(cube(
@@ -1180,13 +1161,13 @@ pub fn ghast_model() -> EntityModelDef {
         )),
     );
 
-    let mut rng = JavaRng::new(1660);
+    let mut rng = lodestone_javarandom::JavaRandom::new(1660);
     for i in 0..9i32 {
         // Transcribed verbatim from GhastModel: xo uses (i % 3) and (i / 3 % 2)
         // with integer division/modulo; yo uses (i / 3).
         let xo = (((i % 3) as f32 - (i / 3 % 2) as f32 * 0.5 + 0.25) / 2.0 * 2.0 - 1.0) * 5.0;
         let yo = ((i / 3) as f32 / 2.0 * 2.0 - 1.0) * 5.0;
-        let len = (rng.next_int(7) + 8) as f32;
+        let len = (rng.next_i32_bound(7) + 8) as f32;
         root = root.with_child(
             &format!("tentacle{i}"),
             PartDef::new(PartPose::offset(xo, 24.6, yo)).with_cube(cube(

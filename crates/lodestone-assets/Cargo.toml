@@ -14,6 +14,11 @@ serde_json.workspace = true
 zip.workspace = true
 png.workspace = true
 fontdue.workspace = true
+# `java.util.Random`, bit-exact — `entity_models::ghast_model`'s nine tentacle
+# lengths are a seeded LCG draw, byte-identical to vanilla. The workspace's one
+# copy, shared with `lodestone-particle`, `lodestone-audio`, `lodestone-render`
+# and `lodestone-shell`'s enchanting table.
+lodestone-javarandom.workspace = true
 
 [dev-dependencies]
 lodestone-model.workspace = true
