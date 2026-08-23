@@ -235,28 +235,22 @@ impl Sim {
     /// `lodestone_ecs::player::pin_passenger_to_vehicle` snaps
     /// [`PhysicsState::position`] to the vehicle's raw, tick-boundary
     /// [`lodestone_ecs::entity::Position`] once per 20 Hz tick — the same
-    /// value the vehicle's own [`crate::entities::InterpTo`] is re-anchored
-    /// toward. But the vehicle's **drawn** position does not jump to that
-    /// value; it eases into it over `entities`'s `INTERP_WINDOW` (150 ms of
-    /// real time, continuously re-anchored on every fresh report — see that
-    /// module's docs), which under sustained movement never fully catches up
-    /// to its own target. A tick-to-tick blend of the *pinned* (target)
-    /// position therefore reaches each new seat well before the vehicle's own
-    /// on-screen mesh does, and the two visibly disagree at every frame that
-    /// is not a tick boundary — the reported "the player should be attached to
-    /// the boat, but they seem to lag behind" / "super choppy when I move".
+    /// value the vehicle's own fixed-tick prediction just produced. The
+    /// controlled vehicle now records the pose on both sides of that tick and
+    /// its mesh samples them with `FrameClock::interp_alpha`; blending the
+    /// already-pinned player independently would create a second path with a
+    /// potentially different endpoint and make the rider slide against the
+    /// hull between ticks.
     ///
     /// Vanilla does not have this seam at all: a passenger's screen position
     /// is composed directly from the vehicle's **already-interpolated**
     /// render transform (`EntityRenderDispatcher` renders a passenger as a
     /// child of the vehicle it just placed), never from a second,
     /// independently-clocked position track. [`Self::riding_seat_this_frame`]
-    /// reproduces that: it reads the vehicle's per-frame eased feet/yaw off
-    /// the *same* [`crate::entities::InterpFrom`]/[`crate::entities::InterpTo`]/
-    /// [`crate::entities::InterpClock`] the vehicle is drawn from, and derives
-    /// the seat from those — so the rider and the vehicle share one clock and
-    /// cannot disagree between frames the way two separately-clocked eases
-    /// can. When it returns `None` (not riding, or any link in the chain is
+    /// reproduces that: it reads the vehicle's per-frame sampled feet/yaw from
+    /// the same source the mesh extractor uses (controlled tick history, or a
+    /// remote entity's network interpolation track) and derives the seat from
+    /// those. When it returns `None` (not riding, or any link in the chain is
     /// not yet resolvable — see its own doc), this falls back to the ordinary
     /// tick-to-tick ease, unchanged from before this existed.
     #[must_use]

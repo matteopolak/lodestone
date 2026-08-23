@@ -146,6 +146,7 @@ use lodestone_ecs::entity::{
 use lodestone_ecs::player::{
     CollisionSource, LocalPlayer, PhysicsState, PlayerCollision, Profile,
 };
+use lodestone_ecs::vehicle::{ControlledVehicle, VehicleRenderPose};
 use lodestone_ecs::{CorePlugin, Extract, ExtractSet, FrameSet, GameTick, TickSet, Update};
 use lodestone_entity::item_entity::{ITEM_AIR_DRAG, ITEM_GRAVITY, ItemMotion};
 use lodestone_entity::pose::{
@@ -1156,32 +1157,16 @@ pub struct InterpClock {
     pub t: f32,
     /// Continuous age in ticks (`ageInTicks`), driving idle bob.
     pub age: f32,
-    /// The real-time length of the current ease. [`INTERP_WINDOW`] for every
-    /// network-reported entity — three ticks of slack absorbs the jitter
-    /// between one `MOVE_ENTITY` and the next, which really does arrive at
-    /// irregular real-time spacing. The vehicle we are currently driving has
-    /// no such jitter: [`interp_window_for`] narrows this to one [`TICK`] for
-    /// it, because `lodestone_ecs::vehicle::tick_controlled_vehicle` writes
-    /// its `Position` locally, exactly once, every single physics tick, with
-    /// nothing to smooth. Stacking the network window on top of an
-    /// already-tick-quantized source compounds: each tick's re-anchor only
-    /// closes `TICK / INTERP_WINDOW` (a third) of the remaining distance
-    /// before the *next* tick moves the target again, so under sustained
-    /// motion the eased draw position never catches up — see
-    /// `riding_render_seat`'s doc for what that looks like on screen (the
-    /// seat, which reads this exact eased position, permanently trailing the
-    /// vehicle's true tick-boundary motion). At `window == TICK`, `alpha`
-    /// reaches `1.0` in exactly the time before the next re-anchor, so the
-    /// draw position coincides with the tick-boundary target every tick
-    /// rather than only in the limit.
+    /// The real-time length of the current network ease. Always
+    /// [`INTERP_WINDOW`]: three ticks of slack absorbs jitter between one
+    /// `MOVE_ENTITY` and the next. A locally controlled vehicle does not use
+    /// this clock at draw time; [`controlled_vehicle_render_pose`] samples its
+    /// explicit fixed-tick endpoints with the shared frame accumulator instead.
     pub window: f32,
 }
 
 impl Default for InterpClock {
-    /// `window` defaults to [`INTERP_WINDOW`] — the network-smoothing case,
-    /// and the only one a bare `Default::default()` (no
-    /// `lodestone_ecs::vehicle::ControlledVehicle` resource in scope to
-    /// narrow it) can mean.
+    /// `window` defaults to [`INTERP_WINDOW`], the network-smoothing case.
     fn default() -> Self {
         Self {
             t: 0.0,
@@ -1968,15 +1953,45 @@ fn render_feet(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> Vec3 {
     from.feet.lerp(to.feet, alpha(clock))
 }
 
+/// Samples a locally controlled vehicle between its two fixed-tick endpoints.
+///
+/// `alpha` is the shared driver's accumulator residual. This function is pure:
+/// calling it once or a hundred times between ticks cannot advance physics.
+fn sample_vehicle_pose(
+    previous: VehicleRenderPose,
+    current: VehicleRenderPose,
+    alpha: f32,
+) -> VehicleRenderPose {
+    let alpha = alpha.clamp(0.0, 1.0);
+    VehicleRenderPose {
+        position: previous.position.add(
+            current
+                .position
+                .subtract(previous.position)
+                .scale(f64::from(alpha)),
+        ),
+        yaw: lerp_angle(previous.yaw, current.yaw, alpha).rem_euclid(360.0),
+        pitch: previous.pitch + (current.pitch - previous.pitch) * alpha,
+    }
+}
+
+/// Returns this frame's fixed-tick sample when `id` is the vehicle the local
+/// client controls. Remote/uncontrolled entities deliberately return `None` and
+/// continue through the generic network interpolation track.
+fn controlled_vehicle_render_pose(
+    controlled: Option<&ControlledVehicle>,
+    id: i32,
+    alpha: f32,
+) -> Option<VehicleRenderPose> {
+    let held = controlled?.0.as_ref()?;
+    (held.server_id == id).then(|| sample_vehicle_pose(held.previous, held.current_pose(), alpha))
+}
+
 /// The local player's seat position **this frame**, derived from the
-/// vehicle's own per-frame interpolated draw pose — [`render_feet`]/
-/// [`render_yaw`], the exact functions the vehicle is drawn from — rather
-/// than its raw tick-boundary [`lodestone_ecs::entity::Position`]. See
-/// [`crate::sim::camera::Sim::interpolated_player`]'s doc for why the two
-/// disagree and what that disagreement looks like on screen: the vehicle's
-/// on-screen mesh eases toward a target over a real-time window and, under
-/// sustained movement, never fully catches up to it; the tick-boundary target
-/// itself has no such lag.
+/// vehicle's own per-frame draw pose. For a controlled vehicle this is
+/// [`sample_vehicle_pose`] over fixed-tick history; for every other vehicle it
+/// is [`render_feet`]/[`render_yaw`] over the network track. The mesh extractor
+/// makes the same choice, so the seat cannot run on a second clock.
 ///
 /// `vehicle_network_id` is [`lodestone_ecs::session::Riding`]'s payload;
 /// `own_network_id` is [`lodestone_ecs::session::ServerEntityId`]'s, used
@@ -1989,8 +2004,8 @@ fn render_feet(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> Vec3 {
 /// # Declines rather than guesses, mirroring `pin_passenger_to_vehicle`
 ///
 /// `None` when any link is missing: the vehicle has no [`EntityIndex`] entry
-/// yet (not spawned client-side), no interpolation track
-/// ([`InterpFrom`]/[`InterpTo`]/[`InterpClock`]) yet, no
+/// yet (not spawned client-side), no render source (controlled pose history or
+/// [`InterpFrom`]/[`InterpTo`]/[`InterpClock`]), no
 /// [`lodestone_ecs::entity::EntityKind`], or [`lodestone_ecs::VersionData`]
 /// holds no adapter or no facts for its type. The caller falls back to the
 /// tick-boundary seat in every such case, so declining here never strands the
@@ -2002,9 +2017,6 @@ pub(crate) fn riding_render_seat(
 ) -> Option<Vec3> {
     let index = world.get_resource::<EntityIndex>()?;
     let vehicle = index.get(vehicle_network_id)?;
-    let from = world.get::<InterpFrom>(vehicle)?;
-    let to = world.get::<InterpTo>(vehicle)?;
-    let clock = world.get::<InterpClock>(vehicle)?;
     let kind = world.get::<lodestone_ecs::entity::EntityKind>(vehicle)?;
     let version = world.get_resource::<lodestone_ecs::VersionData>()?;
     let facts = version.entity_facts(&kind.0)?;
@@ -2016,8 +2028,30 @@ pub(crate) fn riding_render_seat(
         .and_then(|own| passengers.and_then(|list| list.0.iter().position(|id| *id == own)))
         .unwrap_or(0);
 
-    let feet = render_feet(from, to, clock);
-    let yaw = render_yaw(from, to, clock);
+    let controlled_pose = world
+        .get_resource::<lodestone_ecs::FrameClock>()
+        .and_then(|frame| {
+            controlled_vehicle_render_pose(
+                world.get_resource::<ControlledVehicle>(),
+                vehicle_network_id,
+                frame.interp_alpha,
+            )
+        });
+    let (feet, yaw) = if let Some(pose) = controlled_pose {
+        (
+            Vec3::new(
+                pose.position.x as f32,
+                pose.position.y as f32,
+                pose.position.z as f32,
+            ),
+            pose.yaw,
+        )
+    } else {
+        let from = world.get::<InterpFrom>(vehicle)?;
+        let to = world.get::<InterpTo>(vehicle)?;
+        let clock = world.get::<InterpClock>(vehicle)?;
+        (render_feet(from, to, clock), render_yaw(from, to, clock))
+    };
     let seat = lodestone_ecs::riding::player_seat_position(
         Vec3d::new(f64::from(feet.x), f64::from(feet.y), f64::from(feet.z)),
         yaw,
@@ -2421,7 +2455,10 @@ pub fn tick_walk_animation(
 /// This is the boundary `docs/bevy-migration.md` §4.4 draws: the ECS side ends
 /// here, and nothing downstream of it knows bevy exists.
 pub fn extract_entity_draws(
-    clock: Res<lodestone_ecs::FrameClock>,
+    (clock, controlled): (
+        Res<lodestone_ecs::FrameClock>,
+        Option<Res<ControlledVehicle>>,
+    ),
     stacks: Res<ItemStacks>,
     // `AttackSwing` lives on the *ingest* entity (`lodestone_ecs::ingest::
     // apply_entity_animation` resolves `EntityAnimation` through `EntityIndex`),
@@ -2614,6 +2651,29 @@ pub fn extract_entity_draws(
         (fuse, swim, cape_lag),
     ) in &tracks
     {
+        let controlled_pose = controlled_vehicle_render_pose(
+            controlled.as_deref(),
+            id.0,
+            partial_tick,
+        );
+        let drawn_feet = controlled_pose.map_or_else(
+            || render_feet(from, to, clock),
+            |pose| {
+                Vec3::new(
+                    pose.position.x as f32,
+                    pose.position.y as f32,
+                    pose.position.z as f32,
+                )
+            },
+        );
+        let drawn_yaw = controlled_pose.map_or_else(
+            || render_yaw(from, to, clock),
+            |pose| pose.yaw,
+        );
+        let drawn_pitch = controlled_pose.map_or_else(
+            || render_pitch(from, to, clock),
+            |pose| pose.pitch,
+        );
         // One lookup, not two: `item` and `count` both come from the same
         // recorded stack, and a drop with no stack yet must not manufacture a
         // count out of nowhere.
@@ -2748,8 +2808,8 @@ pub fn extract_entity_draws(
         );
         let cape_bob = cape_lag.bob_o + (cape_lag.bob - cape_lag.bob_o) * partial_tick;
         let cape_sway_value = cape_sway(
-            cape_lag_pos - render_feet(from, to, clock),
-            render_yaw(from, to, clock),
+            cape_lag_pos - drawn_feet,
+            drawn_yaw,
             cape_bob,
             walk.walk.position_lerp(partial_tick),
         );
@@ -2909,10 +2969,10 @@ pub fn extract_entity_draws(
             painting,
             firework,
             projectile_owner,
-            feet: render_feet(from, to, clock),
-            yaw: render_yaw(from, to, clock),
+            feet: drawn_feet,
+            yaw: drawn_yaw,
             head_yaw: render_head_yaw(from, to, clock),
-            pitch: render_pitch(from, to, clock),
+            pitch: drawn_pitch,
             scale: scale.0,
             anim: render_anim(
                 from,
@@ -3657,36 +3717,13 @@ pub fn fold_entities(world: &mut World) {
         .retain(|id, _| seen.contains(id));
 }
 
-/// The real-time ease window [`spawn_track`]/[`update_track`] should give this
-/// server entity id's [`InterpClock`] this frame.
-///
-/// [`INTERP_WINDOW`] (three ticks) for everything: it exists to absorb the
-/// jitter between one network-reported position and the next, which is real
-/// for every entity we do not control. `id` gets [`TICK`] instead exactly
-/// when it is the vehicle [`lodestone_ecs::vehicle::ControlledVehicle`] names —
-/// see [`InterpClock::window`]'s own doc for why a locally-ticked, zero-jitter
-/// source needs a narrower window rather than the network one, and
-/// `riding_render_seat`'s doc for the on-screen symptom (the seat trailing the
-/// vehicle's true motion under sustained acceleration) this fixes. `None`
-/// resource (every harness that installs `EntityInterpPlugin` without
-/// `LocalPlayerPlugin` — this module's own ~25 hermetic tests, and the live
-/// GPU gates that drive `EntityInterpolator` directly) is "not riding
-/// anything we control", the same as the resource being present at `None`.
-fn interp_window_for(world: &World, id: i32) -> f32 {
-    let is_our_vehicle = world
-        .get_resource::<lodestone_ecs::vehicle::ControlledVehicle>()
-        .and_then(|held| held.0.as_ref())
-        .is_some_and(|held| held.server_id == id);
-    if is_our_vehicle { TICK } else { INTERP_WINDOW }
-}
-
 /// A newly seen entity is drawn at rest at its reported pose: both ends of the
 /// ease are the same, and the clock starts *finished* so nothing eases from
 /// nowhere.
 fn spawn_track(world: &mut World, snap: &EntityFacts) {
     let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
     let is_creeper = snap.type_path == "creeper";
-    let window = interp_window_for(world, snap.id);
+    let window = INTERP_WINDOW;
     let mut entity = world.spawn((
         MinecraftEntityId(snap.id),
         RenderKind(Arc::from(snap.type_path.as_str())),
@@ -3741,9 +3778,7 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
 /// snapshot that matches the current target only lets the existing ease run to
 /// completion.
 fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
-    // Computed against `world` before `get_entity_mut` below takes it — the
-    // two borrows cannot overlap.
-    let window = interp_window_for(world, snap.id);
+    let window = INTERP_WINDOW;
     let Ok(mut entity) = world.get_entity_mut(entity) else {
         return;
     };
@@ -7947,152 +7982,72 @@ mod tests {
         );
     }
 
-    /// [`interp_window_for`] narrows to one tick for exactly the id
-    /// [`lodestone_ecs::vehicle::ControlledVehicle`] names, and falls back to
-    /// the network window both when the resource is absent (every hermetic
-    /// harness in this module, and the live GPU gates driving
-    /// [`EntityInterpolator`] directly) and when it is present but naming a
-    /// *different* vehicle (on foot, or riding something else).
+    /// A locally predicted vehicle is sampled from fixed-tick endpoint history
+    /// with the driver's residual. The generic entity clock is deliberately not
+    /// an input: render cadence may choose the sample, never advance physics.
     #[test]
-    fn interp_window_narrows_only_for_the_vehicle_we_are_driving() {
-        let mut world = World::new();
-        assert!(
-            (interp_window_for(&world, RIDING_VEHICLE_ID) - INTERP_WINDOW).abs() < 1e-6,
-            "no ControlledVehicle resource at all must fall back to the network window"
-        );
+    fn controlled_vehicle_render_pose_uses_frame_alpha() {
+        use lodestone_ecs::vehicle::VehicleRenderPose;
 
-        world.insert_resource(lodestone_ecs::vehicle::ControlledVehicle(None));
-        assert!(
-            (interp_window_for(&world, RIDING_VEHICLE_ID) - INTERP_WINDOW).abs() < 1e-6,
-            "ControlledVehicle present but None (on foot) must fall back to the network window"
-        );
-
-        let held = lodestone_ecs::vehicle::ControlledVehicleState {
-            server_id: RIDING_VEHICLE_ID,
-            family: lodestone_ecs::vehicle::VehicleFamily::Boat,
-            motion: lodestone_physics::EntityMotion::at(lodestone_physics::Vec3d::new(0.0, 64.0, 0.0)),
-            yaw: 0.0,
+        let previous = VehicleRenderPose {
+            position: lodestone_physics::Vec3d::new(0.0, 64.0, 0.0),
+            yaw: 359.0,
             pitch: 0.0,
-            boat: lodestone_physics::vehicle::BoatState::default(),
-            paddles: (false, false),
         };
-        world.insert_resource(lodestone_ecs::vehicle::ControlledVehicle(Some(held)));
+        let current = VehicleRenderPose {
+            position: lodestone_physics::Vec3d::new(10.0, 64.0, 0.0),
+            yaw: 1.0,
+            pitch: 20.0,
+        };
+
+        let sampled = sample_vehicle_pose(previous, current, 0.25);
+        assert!((sampled.position.x - 2.5).abs() < 1.0e-9);
+        assert!((sampled.position.y - 64.0).abs() < 1.0e-9);
+        assert!((sampled.yaw - 359.5).abs() < 1.0e-4);
+        assert!((sampled.pitch - 5.0).abs() < 1.0e-4);
+
+        let halfway = sample_vehicle_pose(previous, current, 0.5);
         assert!(
-            (interp_window_for(&world, RIDING_VEHICLE_ID) - TICK).abs() < 1e-6,
-            "the id ControlledVehicle actually names must narrow to one tick"
-        );
-        assert!(
-            (interp_window_for(&world, RIDING_VEHICLE_ID + 1) - INTERP_WINDOW).abs() < 1e-6,
-            "a *different* vehicle id (a boat we are not driving) must keep the network window"
+            halfway.yaw.abs() < 1.0e-4,
+            "yaw must take the two-degree short path across zero, got {}",
+            halfway.yaw
         );
     }
 
-    /// **The bug and the fix, both predicted, off the real fold functions.**
-    ///
-    /// Simulates the boat's own reported position advancing by a fixed amount
-    /// every tick — exactly what `lodestone_ecs::vehicle::tick_controlled_vehicle`
-    /// does to the vehicle's `Position`: a deterministic, zero-jitter local
-    /// write, once per physics tick — and folds it through [`update_track`]
-    /// once per tick with one real tick of `advance_interp_clocks`-equivalent
-    /// time passing before the next re-anchor, exactly the cadence
-    /// `Sim::step`'s per-frame `poll_net`/`fold_entities` call has relative to
-    /// the `GameTick` loop.
-    ///
-    /// The wrong hypothesis this bug actually shipped (no `ControlledVehicle`
-    /// resource in scope, so [`interp_window_for`] cannot narrow anything and
-    /// every re-anchor uses the three-tick network window on a source with no
-    /// jitter to smooth) must leave the drawn position — and therefore the
-    /// seat [`riding_render_seat`] reads off it — trailing the true position
-    /// by a real, non-vanishing gap under sustained motion. The fix (the
-    /// resource naming this exact vehicle, narrowing the window to one
-    /// [`TICK`]) must collapse that gap to (near) zero every tick, since
-    /// `alpha` then reaches `1.0` in exactly the time before the next
-    /// re-anchor.
     #[test]
-    fn the_controlled_vehicles_ease_window_eliminates_the_steady_state_lag() {
-        const PER_TICK_DELTA: f32 = 0.4; // ~8 blocks/s forward, well inside a boat's range
-        const TICKS: i32 = 40; // long enough to reach steady state under either window
-
-        fn base_facts() -> EntityFacts {
-            let mut world = World::new();
-            let entity = world
-                .spawn((
-                    EntityKind("oak_boat".parse().expect("valid entity type key")),
-                    Position(to_model_vec3(Vec3::new(0.0, 64.0, 0.0))),
-                    Rotation(lodestone_model::Rotation { yaw: 0.0, pitch: 0.0 }),
-                    HeadYaw(0.0),
-                    OnGround(true),
-                ))
-                .id();
-            facts_for(&world, entity, &lodestone_game::tablist::TabList::new())
-        }
-
-        /// Spawns `base`'s track, then folds `TICKS` snapshots through
-        /// [`update_track`] with `x` advancing [`PER_TICK_DELTA`] each time,
-        /// advancing the clock by one [`TICK`] of real time between each fold
-        /// (the same formula [`advance_interp_clocks`] uses). Returns the true
-        /// target `x` and the drawn `x` after the last tick.
-        fn drive(world: &mut World, base: &EntityFacts) -> (f32, f32) {
-            world.insert_resource(TrackIndex::default());
-            spawn_track(world, base);
-            let track = world.resource::<TrackIndex>().0[&base.id];
-            let mut target_x = base.feet.x;
-            let mut drawn_x = base.feet.x;
-            for _ in 0..TICKS {
-                target_x += PER_TICK_DELTA;
-                let snap = EntityFacts {
-                    feet: Vec3::new(target_x, base.feet.y, base.feet.z),
-                    ..base.clone()
-                };
-                update_track(world, track, &snap);
-                {
-                    let mut clock = world.get_mut::<InterpClock>(track).unwrap();
-                    clock.t = (clock.t + TICK).min(clock.window);
-                }
-                let (from, to, clock) = (
-                    *world.get::<InterpFrom>(track).unwrap(),
-                    *world.get::<InterpTo>(track).unwrap(),
-                    *world.get::<InterpClock>(track).unwrap(),
-                );
-                drawn_x = render_feet(&from, &to, &clock).x;
-            }
-            (target_x, drawn_x)
-        }
-
-        let base = base_facts();
-
-        // The wrong hypothesis this bug shipped.
-        let mut laggy = World::new();
-        let (target, drawn) = drive(&mut laggy, &base);
-        let laggy_gap = target - drawn;
-        assert!(
-            laggy_gap > PER_TICK_DELTA * 0.5,
-            "the network window on a zero-jitter local source must leave a real steady-state \
-             gap under sustained motion, got {laggy_gap} (one tick's own travel is {PER_TICK_DELTA})"
-        );
-
-        // The fix.
-        let mut fixed = World::new();
-        let held = lodestone_ecs::vehicle::ControlledVehicleState {
-            server_id: base.id,
+    fn a_controlled_vehicles_rider_uses_the_same_frame_sample_as_its_mesh() {
+        let mut world = world_with_boat_track(100.0, 100.0, 100.0);
+        let previous = VehicleRenderPose {
+            position: lodestone_physics::Vec3d::new(0.0, 64.0, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+        let mut held = lodestone_ecs::vehicle::ControlledVehicleState {
+            server_id: RIDING_VEHICLE_ID,
             family: lodestone_ecs::vehicle::VehicleFamily::Boat,
             motion: lodestone_physics::EntityMotion::at(lodestone_physics::Vec3d::new(
-                f64::from(base.feet.x),
-                f64::from(base.feet.y),
-                f64::from(base.feet.z),
+                10.0, 64.0, 0.0,
             )),
             yaw: 0.0,
             pitch: 0.0,
+            previous,
             boat: lodestone_physics::vehicle::BoatState::default(),
             paddles: (false, false),
         };
-        fixed.insert_resource(lodestone_ecs::vehicle::ControlledVehicle(Some(held)));
-        let (target, drawn) = drive(&mut fixed, &base);
-        let fixed_gap = (target - drawn).abs();
+        held.motion.velocity = lodestone_physics::Vec3d::new(4.0, 0.0, 0.0);
+        let sampled = sample_vehicle_pose(previous, held.current_pose(), 0.25);
+        world.insert_resource(lodestone_ecs::vehicle::ControlledVehicle(Some(held)));
+        world.insert_resource(lodestone_ecs::FrameClock {
+            interp_alpha: 0.25,
+            ..lodestone_ecs::FrameClock::default()
+        });
+
+        let seat = riding_render_seat(&world, RIDING_VEHICLE_ID, Some(RIDING_OWN_ID))
+            .expect("the controlled boat and its real dimensions are available");
+        assert!((seat.x - sampled.position.x as f32).abs() < 1.0e-4);
         assert!(
-            fixed_gap < 1.0e-4,
-            "one tick's own window must let the drawn position reach the tick-boundary target \
-             every single tick, got a residual gap of {fixed_gap}"
+            (seat.x - 100.0).abs() > 1.0,
+            "the generic network track must not drag the rider away from the controlled mesh"
         );
     }
 

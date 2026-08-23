@@ -277,6 +277,43 @@ fn riding_a_boat_puts_move_vehicle_on_the_queue_and_moves_the_boat() {
     );
 }
 
+/// Render interpolation needs the two authoritative endpoints around the most
+/// recently completed fixed tick. Advancing the render sample must never advance
+/// physics, so the state itself owns the old endpoint before the next tick mutates
+/// `motion`.
+#[test]
+fn a_controlled_vehicle_keeps_the_pose_from_the_start_of_the_last_tick() {
+    let feet = Vec3d::new(0.5, 63.8, 0.5);
+    let (mut app, player, _) = app_in_a_boat(feet);
+    set_input(
+        &mut app,
+        player,
+        MovementInput {
+            forward: 1.0,
+            ..MovementInput::NONE
+        },
+    );
+
+    run_tick(&mut app);
+    let first = app
+        .world()
+        .resource::<ControlledVehicle>()
+        .0
+        .as_ref()
+        .expect("the first tick seeds and advances the boat")
+        .current_pose();
+
+    run_tick(&mut app);
+    let second = app
+        .world()
+        .resource::<ControlledVehicle>()
+        .0
+        .as_ref()
+        .expect("the second tick keeps the controlled boat");
+    assert_eq!(second.previous, first);
+    assert_ne!(second.current_pose(), first, "forward input must advance the new endpoint");
+}
+
 /// The negative arm. A player on foot must produce **no** vehicle packets at all,
 /// and this is what stops the positive arm above from being satisfied by an
 /// unconditional push.
