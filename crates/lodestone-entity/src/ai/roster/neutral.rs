@@ -217,7 +217,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// fixed-angle cone an approximation reaches for first. See
 /// [`is_in_view_cone`](crate::ai::mob::is_in_view_cone)'s own doc comment for
 /// the worked example.
-pub const ENDERMAN: &[Registration] = &[
+pub static ENDERMAN: &[Registration] = &[
     Registration::goal(0, "FloatGoal", float_goal),
     // `EnderMan.EndermanFreezeWhenLookedAt`, flags `{JUMP, MOVE}`.
     // Built on `MobController::is_being_stared_at` — see
@@ -317,7 +317,7 @@ pub const ENDERMAN: &[Registration] = &[
 /// *acquisition* half — a piglin turning its fresh grudge into an actual
 /// `attack_target` — is `NearestAttackableTargetGoal(Player,isAngryAt)`
 /// below, `Coverage::Modelled` via `anger_gated_target`.
-pub const ZOMBIFIED_PIGLIN: &[Registration] = &[
+pub static ZOMBIFIED_PIGLIN: &[Registration] = &[
     // Inherited from `Zombie.registerGoals`.
     Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
     Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
@@ -383,7 +383,7 @@ pub const ZOMBIFIED_PIGLIN: &[Registration] = &[
 /// Setting `stung_at` also clears `anger` (`stopBeingAngry()`), which is what
 /// makes the anger-gated target row below stop re-acquiring without a second
 /// `!hasStung()` check — see that row's own comment.
-pub const BEE: &[Registration] = &[
+pub static BEE: &[Registration] = &[
     // `Bee.BeeAttackGoal(this, 1.4F, true)` extends
     // `MeleeAttackGoal`, but its `Bee.BeeAttackGoal.canUse` adds `isAngry() && !hasStung()`.
     // `Coverage::Modelled` now, as a bare `MeleeAttackGoal` — safe rather than
@@ -492,7 +492,7 @@ pub const BEE: &[Registration] = &[
 /// below, `Coverage::Modelled`. What remains genuinely `Missing`: line of
 /// sight on the alert itself (not modelled anywhere in this census), and the
 /// four goal-type gaps the bullets above already name.
-pub const WOLF: &[Registration] = &[
+pub static WOLF: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
     // `TamableAnimal.TamableAnimalPanicGoal(1.5, DamageTypeTags.PANIC_ENVIRONMENTAL_CAUSES)`
     // extends `PanicGoal`, narrowing it to environmental damage types. Our

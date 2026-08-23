@@ -66,6 +66,24 @@
 //! [`MobController`](super::MobController) by the server's own census, and
 //! already live in `mobs.rs` next to that feed (`avoided_species`, `tempt_food`).
 //! The roster only decides that a spider gets an `AvoidEntityGoal` at all.
+//!
+//! # Every registration table is a `static`, never a `const`
+//!
+//! Several gates here identify a table by comparing `as_ptr()` — "the horse, the
+//! donkey and the mule share one table", "the elder guardian has its own despite
+//! identical rows". That comparison is only meaningful against an item with a
+//! single address, and a `const` does not have one: the language re-promotes it
+//! at every use site, and whether two promotions are deduplicated depends on the
+//! codegen backend and on whether the uses land in the same compilation unit.
+//! [`FALLBACK`] carries the measurement — as a `const` it came back at two
+//! different addresses under this workspace's Cranelift debug profile, and
+//! `is_fallback` reported a real unclaimed species as claimed.
+//!
+//! The other tables were left as `const` when that was fixed, which made them
+//! latent instances of the same bug rather than safe ones: their gates pass only
+//! because the promotions happen to be folded today. They are all `static` now,
+//! so the property the pointer comparisons need holds by construction. Declare
+//! any new table the same way.
 
 use super::goal::Goal;
 use super::goals::{

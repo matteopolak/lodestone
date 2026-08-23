@@ -147,7 +147,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 ///
 /// The only table in the roster with **no** gaps: all eight of vanilla's cow
 /// registrations have an equivalent here.
-pub const COW: &[Registration] = &[
+pub static COW: &[Registration] = &[
     Registration::goal(0, "FloatGoal", float_goal),
     Registration::goal(1, "PanicGoal", panic_2_0),
     Registration::goal(2, "BreedGoal", breed_1_0),
@@ -160,7 +160,7 @@ pub const COW: &[Registration] = &[
 
 /// `Sheep.registerGoals`. Note it assigns `this.eatBlockGoal` before
 /// the first `addGoal`, so the `addGoal` calls themselves come after.
-pub const SHEEP: &[Registration] = &[
+pub static SHEEP: &[Registration] = &[
     Registration::goal(0, "FloatGoal", float_goal),
     Registration::goal(1, "PanicGoal", panic_1_25),
     Registration::goal(2, "BreedGoal", breed_1_0),
@@ -180,7 +180,7 @@ pub const SHEEP: &[Registration] = &[
 ///
 /// A pig is the one species here with **two** `TemptGoal` registrations at the
 /// same priority, for carrot-on-a-stick and for `PIG_FOOD`.
-pub const PIG: &[Registration] = &[
+pub static PIG: &[Registration] = &[
     Registration::goal(0, "FloatGoal", float_goal),
     Registration::goal(1, "PanicGoal", panic_1_25),
     // Vanilla puts a pig's `BreedGoal` at 3, not 2 — nothing occupies 2.
@@ -199,7 +199,7 @@ pub const PIG: &[Registration] = &[
 ];
 
 /// `Chicken.registerGoals`.
-pub const CHICKEN: &[Registration] = &[
+pub static CHICKEN: &[Registration] = &[
     Registration::goal(0, "FloatGoal", float_goal),
     Registration::goal(1, "PanicGoal", panic_1_4),
     Registration::goal(2, "BreedGoal", breed_1_0),
@@ -236,7 +236,7 @@ pub const CHICKEN: &[Registration] = &[
 /// installation is a different mechanism — the one
 /// [`GoalSelector::remove`](crate::ai::goal::GoalSelector::remove) exists for.
 /// Adding them as rows would make the cited line range a lie.
-pub const RABBIT: &[Registration] = &[
+pub static RABBIT: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
     // `ClimbOnTopOfPowderSnowGoal(this, this.level())`. The *cue* half
     // is now answerable — `MobController::block_cues_*` could carry
@@ -317,7 +317,7 @@ pub const RABBIT: &[Registration] = &[
 ///   is is ~100,000 ticks between attempts — a cat parked near its owner or a
 ///   bed essentially does not wander on its own, unlike every other species in
 ///   this family which strolls constantly.
-pub const CAT: &[Registration] = &[
+pub static CAT: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
     Registration::goal(1, "TamableAnimal.TamableAnimalPanicGoal", cat_panic_1_5),
     Registration::goal(2, "SitWhenOrderedToGoal", sit_when_ordered),
@@ -381,7 +381,7 @@ pub const CAT: &[Registration] = &[
 /// `Parrot.canMate` returns `false` and `Parrot.isFood` returns a literal
 /// `false`, so there is nothing to tempt it into breeding with — see
 /// `breeding_food`'s own comment on the empty `"parrot"` row.
-pub const PARROT: &[Registration] = &[
+pub static PARROT: &[Registration] = &[
     Registration::goal(0, "TamableAnimal.TamableAnimalPanicGoal", parrot_panic_1_25),
     Registration::goal(0, "FloatGoal", float_goal),
     Registration::goal(1, "LookAtPlayerGoal(Player)", look_at_player_8),

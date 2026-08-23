@@ -65,7 +65,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// `AbstractHorse.canPerformRearing` returns `true` and neither `Donkey` nor
 /// `Mule` override it), then `addBehaviourGoals`'s three, called last from
 /// inside `registerGoals`.
-pub const HORSE_FAMILY: &[Registration] = &[
+pub static HORSE_FAMILY: &[Registration] = &[
     Registration::missing(Selector::Goal, 1, "RunAroundLikeCrazyGoal"),
     Registration::goal(2, "BreedGoal", breed_1_0),
     Registration::goal(4, "FollowParentGoal", follow_parent_1_0),
