@@ -102,6 +102,28 @@ pub(super) struct EntityRenderer {
     /// which would be a code bug, not a missing pack.
     pub(super) cape_model: lodestone_render::CapeMesh,
     pub(super) cape_gpu: Option<GpuEntityModel>,
+    /// The elytra wings layer: one baked mesh (code-defined geometry, no pack
+    /// dependency — see [`lodestone_assets::entity::elytra_model`]), uploaded
+    /// once, plus **one** jar texture bind group, unlike the cape's per-player
+    /// URL. `elytra_model.parts` is needed on the CPU each frame to pair each
+    /// wing with the wearer's own `"body"` part index, exactly as
+    /// `armour_models`/`wool_models` are.
+    ///
+    /// A player's own sheet can still override the jar one:
+    /// `WingsLayer.getPlayerElytraTexture` prefers `skin.elytra()`, then
+    /// `skin.cape()` when the cape is shown, and falls back to
+    /// `ELYTRA_TEXTURE_PATH`. Only the second and third of those are wired —
+    /// `crate::remote_skins::RemoteSkin` carries no `elytra` field, so the
+    /// `ELYTRA` profile-property URL that `lodestone_assets::skin::ProfileTextures`
+    /// already parses is dropped before it reaches here. See
+    /// `RenderState::prepare_elytra`.
+    ///
+    /// `elytra_texture` is `None` without a vanilla pack, and the wings then
+    /// draw nothing for anyone without a cape — the same asymmetry
+    /// [`Self::wool_texture`] documents, for the same reason.
+    pub(super) elytra_model: lodestone_render::ElytraMesh,
+    pub(super) elytra_gpu: Option<GpuEntityModel>,
+    pub(super) elytra_texture: Option<wgpu::BindGroup>,
     /// The mob-fire billboard (player report: "mobs dont show
     /// flames yet"): a fourth pipeline
     /// ([`EntityPipeline::flame_pipeline`]) drawn through the **base**
@@ -301,6 +323,21 @@ impl EntityRenderer {
         let cape_model = lodestone_render::CapeMesh::load();
         let cape_gpu = GpuEntityModel::upload_cape(device, &cape_model);
 
+        // The elytra wings. Code-defined geometry like the cape, so the mesh
+        // always bakes; unlike the cape it has a fixed jar sheet, so there is
+        // a pack-presence gate on the *texture* the way wool has one.
+        let elytra_model = lodestone_render::ElytraMesh::load();
+        let elytra_gpu = GpuEntityModel::upload_parts(
+            device,
+            &elytra_model.vertices,
+            &elytra_model.indices,
+            elytra_model.parts.iter().map(|(_, r)| *r).collect(),
+        );
+        let elytra_texture = load_elytra_texture().map(|img| {
+            let view = entity_texture_from_image(device, queue, &img);
+            pipeline.texture_bind_group(device, &view, &sampler)
+        });
+
         // The mob-fire billboard. A fourth pipeline over this
         // pipeline's own two bind-group layouts — see
         // `EntityPipeline::flame_pipeline`'s doc for why this is not a fifth
@@ -447,6 +484,9 @@ impl EntityRenderer {
             wool_texture,
             cape_model,
             cape_gpu,
+            elytra_model,
+            elytra_gpu,
+            elytra_texture,
             flame_pipeline,
             flame_gpu_models,
             flame_texture,
@@ -644,6 +684,34 @@ fn load_sheep_wool_texture() -> Option<lodestone_assets::Image> {
         Ok(img) => Some(img),
         Err(e) => {
             tracing::warn!(target: "assets", "decode {PATH}: {e}");
+            None
+        }
+    }
+}
+
+/// Decode the elytra wings' own sheet
+/// ([`lodestone_assets::entity::ELYTRA_TEXTURE_PATH`]) from the vanilla
+/// `client.jar`, or `None` if no pack is found — the elytra equivalent of
+/// [`load_sheep_wool_texture`], reaching the jar the same way through
+/// [`crate::resources::vanilla_manager`].
+///
+/// The sheet is **64×32**, matching what `ElytraModel.createLayer` declares
+/// and what a cape sheet is — which is what lets a player's cape URL stand in
+/// for this one without re-unwrapping anything.
+fn load_elytra_texture() -> Option<lodestone_assets::Image> {
+    use lodestone_assets::Image;
+
+    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
+    let manager = crate::resources::vanilla_manager()?;
+    let path = lodestone_assets::entity::ELYTRA_TEXTURE_PATH;
+    let Some(png) = manager.read(path) else {
+        tracing::warn!(target: "assets", "missing elytra sheet {path}");
+        return None;
+    };
+    match Image::decode_png(&png) {
+        Ok(img) => Some(img),
+        Err(e) => {
+            tracing::warn!(target: "assets", "decode {path}: {e}");
             None
         }
     }

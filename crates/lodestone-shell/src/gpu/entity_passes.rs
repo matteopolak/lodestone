@@ -41,8 +41,9 @@ use crate::entities::EntityDraw;
 use super::block_entities::{BannerLayerDrawBatch, BlockEntityDrawBatch};
 use super::terrain::ModelRenderer;
 use super::{
-    ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, CapeDrawBatch, EntityDrawBatch,
-    FlameBatch, OrbBatch, RenderState, RenderStats, ShadowBatch, WoolPartAccum, humanoid_armour_slot,
+    ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, CapeDrawBatch, ElytraDrawBatch,
+    EntityDrawBatch, FlameBatch, OrbBatch, RenderState, RenderStats, ShadowBatch, WoolPartAccum,
+    humanoid_armour_slot,
 };
 
 /// One entity's own hitbox width in blocks — its type's base width times its age
@@ -1881,6 +1882,155 @@ impl RenderState {
                 let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
                 upload_instances_tinted(device, &transforms, &lights, &tints)
                     .map(|buffer| CapeDrawBatch { url, buffer, count })
+            })
+            .collect()
+    }
+
+    /// Resolve this frame's **elytra wings** into per-`(texture, wing)`
+    /// instance buffers — the layer that replaces the cape
+    /// [`Self::prepare_cape`] suppresses for an elytra wearer.
+    ///
+    /// `WingsLayer.submit` (`26.2`), transcribed: draw when the chest item
+    /// carries an `Equippable` with a non-empty `assetId`, then ask that asset
+    /// for its `WINGS` layers — which for every vanilla item means the elytra
+    /// and nothing else, since a chestplate's asset declares `HUMANOID` layers
+    /// and `renderLayers` then emits nothing. The gate here is therefore the
+    /// same "the chest slot's item path is literally `elytra`" approximation
+    /// [`Self::prepare_cape`] uses to suppress the cape, and the two must stay
+    /// the same predicate or a player will be able to lose their cape and get
+    /// no wings.
+    ///
+    /// Unlike the cape this is **two** instances per wearer, one per
+    /// [`lodestone_render::ElytraMesh::attach`] entry, each with its own
+    /// [`lodestone_render::elytra_wing_transform`] composed onto the wearer's
+    /// `"body"` matrix. `attach` is also what gates on a humanoid rig, so a
+    /// pig handed an elytra by a plugin grows no wings.
+    ///
+    /// # The pose is the resting one, always — a deliberate first cut
+    ///
+    /// `elytra_wing_transform`'s three angles want
+    /// `ElytraAnimationState`'s lerped state, which does not exist on this
+    /// side yet: the pure half is `lodestone_render::elytra_target_rotations`,
+    /// and the impure half (two triples advanced once per game tick by
+    /// `ELYTRA_ROTATION_LERP` and read back interpolated by partial ticks)
+    /// belongs beside `crate::entities::cape_sway`'s lagged cloak position,
+    /// which is where the equivalent cape state already lives. Until it does,
+    /// this passes `lodestone_render::elytra_rest_rotations()` and `false` for
+    /// `crouching` straight through.
+    ///
+    /// That is **correct for a wearer who is standing, walking or running**
+    /// (the rest triple *is* the not-flying-not-crouching branch's target) and
+    /// **wrong during a glide or a crouch**, where the wings will stay spread
+    /// instead of folding back. The check a reader can run: `EntityDraw`
+    /// carries no fall-flying flag and no crouch flag, so there is no input
+    /// here that could select either of the other two branches — closing this
+    /// means adding that state, not editing this function's arithmetic.
+    ///
+    /// # The texture
+    ///
+    /// `getPlayerElytraTexture` prefers `skin.elytra()`, then `skin.cape()`
+    /// when the cape is shown, then the jar sheet. The first preference is
+    /// unreachable here — `crate::remote_skins::RemoteSkin` carries no
+    /// `elytra` field, so `lodestone_assets::skin::ProfileTextures::elytra` is
+    /// dropped at the decode — so this implements the second and third. As in
+    /// [`Self::prepare_cape`], `showCape` is not decoded on this side of the
+    /// wire and is treated as `true`.
+    pub(super) fn prepare_elytra(
+        &self,
+        device: &wgpu::Device,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Vec<ElytraDrawBatch> {
+        if self.entities.elytra_gpu.is_none() {
+            return Vec::new();
+        }
+        let frustum = camera.frustum();
+        type Group = (
+            Option<String>,
+            lodestone_render::PartRange,
+            Vec<glam::Mat4>,
+            Vec<u32>,
+            Vec<InstanceTint>,
+        );
+        let mut groups: Vec<Group> = Vec::new();
+
+        for draw in entities {
+            if draw.invisible {
+                continue;
+            }
+            let wearing_elytra = draw.equipment.iter().any(|(slot, id)| {
+                *slot == EquipmentSlot::Chest && id.namespace() == "minecraft" && id.path() == "elytra"
+            });
+            if !wearing_elytra {
+                continue;
+            }
+            // The wearer's own cape sheet when one is installed, else the jar
+            // sheet — and if neither exists there is nothing to bind, so the
+            // wings draw nothing rather than drawing untextured.
+            let cape_url = draw
+                .player_skin
+                .as_ref()
+                .and_then(|skin| skin.cape.as_ref())
+                .filter(|u| !u.is_empty() && self.entities.player_skins.contains_key(u.as_str()));
+            let texture = match cape_url {
+                Some(url) => Some(url.clone()),
+                None if self.entities.elytra_texture.is_some() => None,
+                None => continue,
+            };
+            let Some(instance) = self.entities.models.resolve(
+                draw.model_type_path(),
+                draw.feet,
+                draw.yaw,
+                draw.scale,
+                &draw.anim,
+            ) else {
+                continue;
+            };
+            if !frustum.intersects_aabb(instance.aabb_min, instance.aabb_max) {
+                continue;
+            }
+            let Some(wearer) = self.entities.models.get(instance.model) else {
+                continue;
+            };
+            let light = u32::from(entity_light(&self.entity_light, draw));
+            let tint = InstanceTint::rgb([255, 255, 255]).with_hurt(draw.hurt);
+            let (x_rot, y_rot, z_rot) = lodestone_render::elytra_rest_rotations();
+            for (wing, range, body_index) in self.entities.elytra_model.attach(&wearer.skeleton) {
+                let Some(body_transform) = instance.part_transforms.get(body_index) else {
+                    continue;
+                };
+                let transform = *body_transform
+                    * lodestone_render::elytra_wing_transform(wing, x_rot, y_rot, z_rot, false);
+                let group = match groups
+                    .iter_mut()
+                    .position(|(t, r, ..)| *t == texture && *r == range)
+                {
+                    Some(i) => &mut groups[i],
+                    None => {
+                        groups.push((texture.clone(), range, Vec::new(), Vec::new(), Vec::new()));
+                        groups.last_mut().expect("just pushed")
+                    }
+                };
+                group.2.push(transform);
+                group.3.push(light);
+                group.4.push(tint);
+                stats.elytra_wings_drawn += 1;
+            }
+        }
+
+        groups
+            .into_iter()
+            .filter_map(|(texture, range, transforms, lights, tints)| {
+                let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
+                upload_instances_tinted(device, &transforms, &lights, &tints).map(|buffer| {
+                    ElytraDrawBatch {
+                        texture,
+                        range,
+                        buffer,
+                        count,
+                    }
+                })
             })
             .collect()
     }

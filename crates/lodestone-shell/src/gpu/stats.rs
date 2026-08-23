@@ -234,6 +234,18 @@ pub struct RenderStats {
     /// non-zero `entities_drawn`" role `wool_layers_drawn` documents — zero
     /// on a body-pass regression that still draws every other player fine.
     pub cape_layers_drawn: usize,
+    /// Elytra **wings** drawn this frame — two per frustum-visible wearer
+    /// whose chest slot carries an elytra and whose rig has a `"body"` pivot
+    /// to hang them off, so an odd number here is itself a defect report.
+    ///
+    /// Counts wings rather than wearers on purpose: `ElytraMesh::attach`
+    /// yields one entry per wing and a bake that produced only one of the two
+    /// (the failure `ElytraMesh::load`'s `!p.quads.is_empty()` filter can
+    /// produce) is exactly the "half the elytra is missing" symptom this
+    /// number should be able to state. Zero with no vanilla pack for a wearer
+    /// with no cape, since there is then no sheet to bind — the same
+    /// asymmetry [`wool_layers_drawn`](Self::wool_layers_drawn) documents.
+    pub elytra_wings_drawn: usize,
     /// Mob-fire billboards drawn this frame — one per on-fire,
     /// frustum-visible entity whose type has a baked flame mesh. Zero with no
     /// vanilla pack (no flame texture) or when no entity currently has
