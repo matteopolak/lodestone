@@ -19,7 +19,11 @@ zip.workspace = true
 # just deriving from one, so the extra feature is requested here rather
 # than widened workspace-wide.
 syn = { workspace = true, features = ["visit"] }
-proc-macro2.workspace = true
+# `span-locations` is what makes a parsed `Span`'s `start()` return a real
+# line number rather than the fallback (0, 0) — needed by `ptr_const`'s
+# guard to name a file:line for a planted violation, the same way
+# `scan_confinement_dir` already does for its grep-based rules.
+proc-macro2 = { workspace = true, features = ["span-locations"] }
 # `world-coverage` enumerates its three populations from the real 26.2
 # registries rather than from a transcription of them, and resolves the entity
 # rig corpus by asking the corpus. Both crates are leaf-ish and version-free
