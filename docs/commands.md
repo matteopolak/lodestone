@@ -336,5 +336,6 @@ client-side option that changes how either is interpreted.
   closing the "constructed nowhere" island the original issue named.
 - `crate::chat::ChatInput` — the input line `complete`/`highlight` are called
   against. Both take the current line as a plain `&str` rather than owning
-  it, matching `ChatInput`'s "cursor is always at the end" invariant
-  (`docs/chat.md`).
+  it. The `&str` they get is always the line **up to the caret** — vanilla's
+  `value.substring(0, cursorPosition)` — so its end is the completion point by
+  construction (`docs/chat-input-editing.md`).
