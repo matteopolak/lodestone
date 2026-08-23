@@ -3257,6 +3257,80 @@ pub fn firework(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya
     engine.add(p);
 }
 
+/// `DragonBreathParticle` — the cloud an ender dragon's breath attack and a
+/// lingering potion leave creeping across the ground
+/// (`ParticleTypes.DRAGON_BREATH`).
+///
+/// The three velocity words are used **directly**: this class chains to
+/// `SingleQuadParticle`'s *no-velocity* constructor and then assigns
+/// `xd`/`yd`/`zd` itself, so unlike most emitters here nothing jitters,
+/// normalises or rescales them. `power` is `PowerParticleOption::getPower`,
+/// applied by the provider as `Particle.setPower` — which rescales `yd` about
+/// the `0.1` bias even though this constructor never added one, because
+/// `setPower` is a base-class method and does not know that.
+///
+/// The tint is drawn per particle out of a narrow purple band and is **not**
+/// wire-controlled: `Mth.nextFloat(random, 0.7176471F, 0.8745098F)` for red,
+/// the same call with `0.0F` for *both* bounds for green (a real draw, not a
+/// constant — omitting it desynchronises every later number in the stream),
+/// and `0.8235294F..0.9764706F` for blue. Its only payload is the power, which
+/// is why `dragon_breath` is a `PowerParticleOption` and not a
+/// `SpellParticleOption`.
+///
+/// `friction = 0.96F`, `quadSize *= 0.75F`,
+/// `lifetime = (int)(20.0 / (nextFloat() * 0.8 + 0.2))`, `hasPhysics = false`.
+/// See [`Behaviour::DragonBreath`] for the tick, which is a full override.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `DragonBreathParticle` constructor argument for argument, plus the \
+              power its provider reads off the options"
+)]
+pub fn dragon_breath(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    power: f32,
+) {
+    /// `Mth.nextFloat(RandomSource, float, float)` — `nextFloat() * (max - min)
+    /// + min`, which draws even when the two bounds are equal.
+    fn next_float_in(engine: &mut ParticleEngine, min: f32, max: f32) -> f32 {
+        rng_next(engine).mul_add(max - min, min)
+    }
+
+    let sheet = Sheet::DragonBreath;
+    let rng = engine.rng();
+    let mut p = Particle::new(x, y, z, SpriteSource::Sheet { sheet, frame: 0 }, rng);
+    p.friction = 0.96;
+    p.xd = xa;
+    p.yd = ya;
+    p.zd = za;
+    p.colour = [
+        next_float_in(engine, 0.717_647_1, 0.874_509_8),
+        next_float_in(engine, 0.0, 0.0),
+        next_float_in(engine, 0.823_529_4, 0.976_470_6),
+    ];
+    p.quad_size *= 0.75;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates; the value is small"
+    )]
+    {
+        p.lifetime = (20.0 / f64::from(rng_next(engine).mul_add(0.8, 0.2))) as i32;
+    }
+    p.has_physics = false;
+    p.behaviour = Behaviour::DragonBreath { hit_ground: false };
+    p.sprite = SpriteSource::Sheet {
+        sheet,
+        frame: sheet.frame_for_age(0, p.lifetime),
+    };
+    p.set_power(power);
+    engine.add(p);
+}
+
 /// `SculkChargeParticle` — the mote a spreading sculk charge leaves behind
 /// (`ParticleTypes.SCULK_CHARGE`).
 ///

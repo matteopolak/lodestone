@@ -550,6 +550,35 @@ Six more, taken in the order a player meets them: `cloud`, `sneeze`, `lava`,
   `(0.2, 0.8, 0.6)` teal, not the alpha-0.6 reading the leading `1.0F` invites.
   Four same-typed arguments in a row, which is the transposition shape again.
 
+### `dragon_breath`, and a payload that carries no colour at all
+
+Every lingering potion leaves a `dragon_breath` cloud on the ground, and the type had no
+dispatch arm at all — it fell into `spawn_one`'s catch-all and drew nothing. It is the fourth
+option-carrying type this decoder handles, and it is the one that shows why an option class
+cannot be inferred from what a particle looks like.
+
+* **`PowerParticleOption` is a bare `ByteBufCodecs.FLOAT` and nothing else.** Four bytes, no
+  colour, against `SpellParticleOption`'s eight — so `dragon_breath` cannot share `effect`'s arm
+  even though both end in a power. `DragonBreathParticle` draws its purple per particle out of
+  two narrow bands (`Mth.nextFloat(random, 0.7176471, 0.8745098)` for red,
+  `0.8235294..0.9764706` for blue) with a **third draw for green whose bounds are both `0.0`** —
+  a real draw, not a constant, so omitting it shifts every later number in the RNG stream.
+* **`Sheet::DragonBreath` is `generic_5`, `generic_6`, `generic_7` — ascending, three frames.**
+  A *subsequence* of `Sheet::Generic`'s eight, in the opposite direction, which is the same
+  "identity is the frame sequence, not the pixels" case `PortalGeneric` and `Generic0` already
+  document. Pointed at `Generic` it would still resolve to a real sprite.
+* **The tick is a full override with no `super.tick()`**, so no gravity, no vertical friction
+  and no ground drag. The tell is horizontal and it is the whole visual: `if (y == yo) { xd *=
+  1.1; zd *= 1.1; }` fires on every tick a `hasPhysics = false` cloud with no vertical velocity
+  takes, so horizontal speed *grows* by `1.1 × 0.96 = 1.056` per tick where a `tick_base` port
+  would damp it by `0.96`. That is what makes a lingering cloud creep across a floor instead of
+  hanging where it landed, and the two hypotheses move the number in opposite directions, so one
+  tick separates them.
+* **`hasHitGround` is transcribed even though it can never become `true`** here: `hasPhysics =
+  false` means `move` never sets `onGround`, so the `yd += 0.002` lift and the vertical friction
+  are both unreachable — in vanilla too. Dropping a clause because it happens to be unreachable
+  is how a later change to one field silently breaks another.
+
 ## Verification
 
 - `crates/lodestone-particle/src/emit.rs`: one test per new emitter asserting an **exact**

@@ -654,6 +654,33 @@ pub struct EntityMetadataUpdate {
     /// recognise the key must draw nothing rather than substitute a variant —
     /// see `lodestone_render::painting::painting_size`.
     pub painting_variant: Option<Identifier>,
+    /// Whether a firework rocket is **attached to a gliding player** —
+    /// `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET` reduced to its presence,
+    /// when present.
+    ///
+    /// Only presence is carried, not the target id, because
+    /// `FireworkRocketEntity.shouldRender` returns false for an attached rocket
+    /// and nothing downstream would read which entity it rides. Reducing it
+    /// here rather than passing the id on is a decision, not a dropped field.
+    ///
+    /// `None` means "never reported", which a consumer must treat as **not**
+    /// attached (vanilla's own empty default) — i.e. a rocket that draws.
+    pub firework_attached: Option<bool>,
+    /// Whether a firework rocket was fired from a crossbow —
+    /// `FireworkRocketEntity.DATA_SHOT_AT_ANGLE`, when present and the entity
+    /// is known to be a firework rocket.
+    ///
+    /// It is what tips the sprite out of the camera plane onto its flight axis
+    /// (`FireworkEntityRenderer.submit`'s three extra rotations).
+    ///
+    /// # Why this can be absent on a packet that carried the byte
+    ///
+    /// Index 10's `BOOLEAN` is also `AbstractArrow.IN_GROUND` and
+    /// `Interaction.DATA_RESPONSE_ID`, and none of the three claimants is a
+    /// living entity, so the `living`/`mob` census cannot separate them. `None`
+    /// therefore means "not known to be a firework's angle bit", which a
+    /// consumer must read as "not shot at an angle", never as a cleared flag.
+    pub firework_shot_at_angle: Option<bool>,
     /// `ItemFrame.DATA_ROTATION` — which of the eight 45° steps the stack in
     /// an item frame is turned to (`ItemFrame.getRotation()`, `0..8`).
     ///
@@ -815,6 +842,8 @@ impl EntityMetadataUpdate {
             && !self.crystal_beam_target.is_reported()
             && self.crystal_show_bottom.is_none()
             && self.painting_variant.is_none()
+            && self.firework_attached.is_none()
+            && self.firework_shot_at_angle.is_none()
             && self.item_frame_rotation.is_none()
             && self.display_billboard.is_none()
             && self.display_translation.is_none()
