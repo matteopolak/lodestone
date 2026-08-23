@@ -932,15 +932,17 @@ impl Particles {
     /// `Minimal` spawns only via the always-show reprieve — `(1/10) x (2/3)`,
     /// i.e. one time in fifteen.
     ///
-    /// **`always_show` is always `false` at this client's only caller**, and
-    /// that is an honest gap rather than a simplification of the rule: the flag
-    /// is a real wire field (`v770`'s `LevelParticles::always_show`, decoded)
-    /// that `ClientEvent::Particles` does not carry, so the shell has no way to
-    /// know it. The parameter exists so the transcription is complete and so
-    /// the day that field is threaded through, this function needs no change.
-    /// Until then `Minimal` drops every packet particle that does not set
-    /// `overrideLimiter` — slightly stronger than vanilla, in the direction the
-    /// option exists for.
+    /// `always_show` reaches here from the wire: `LevelParticles::always_show`
+    /// on a 26.2 connection, threaded through `ClientEvent::Particles` and
+    /// `NetUpdate::Particles` to `net_apply.rs`'s arm. It is `false` on every
+    /// legacy family because the field does not exist on their particle
+    /// packets, which is the same value vanilla's own `addParticle` overload
+    /// passes, not an unported one.
+    ///
+    /// Note the reprieve is a *probability*, not an exemption: an always-show
+    /// particle on `Minimal` still fails fourteen times in fifteen. A gate on
+    /// this therefore has to count over many draws or pin the RNG; a single
+    /// call proves nothing either way.
     ///
     /// Draws from the particle engine's own `JavaRandom`, which is
     /// `java.util.Random`-compatible, so `next_int_bound` is vanilla's

@@ -437,6 +437,7 @@ impl Sim {
                 NetUpdate::Particles {
                     kind,
                     long_distance,
+                    always_show,
                     pos,
                     offset,
                     max_speed,
@@ -484,18 +485,15 @@ impl Sim {
                                  set override-limiter"
                             );
                             false
-                        } else if p.particle_level_permits(level, false) {
+                        } else if p.particle_level_permits(level, always_show) {
                             true
                         } else {
                             tracing::debug!(
                                 target: "particles",
                                 kind = %kind,
                                 ?level,
-                                "dropped: the Particles video option suppressed it. \
-                                 `always_show` is hardcoded false here because \
-                                 the wire field is decoded and not carried on \
-                                 ClientEvent::Particles, so Minimal drops strictly \
-                                 more than vanilla would"
+                                always_show,
+                                "dropped: the Particles video option suppressed it"
                             );
                             false
                         };
