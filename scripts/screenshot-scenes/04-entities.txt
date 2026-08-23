@@ -7,10 +7,16 @@
 # entity model's overlay layer; the dyed leather is `minecraft:dyed_color`
 # through the same path.
 #
-# `difficulty easy`, because peaceful removes hostile mobs the tick they
-# spawn — an empty frame that reads as a broken spawn. `NoAI` keeps them
-# still; it also halts gravity, so every one of them is placed exactly on the
-# floor rather than a fraction above it.
+# `difficulty easy` is kept, but the reason this file used to give for it is
+# not this scene's: peaceful removes *hostile* mobs the tick they spawn, and
+# every mob summoned below — sheep, wolf, axolotl, fox, allay, cow — is
+# passive, so peaceful would leave all of them standing. The command sets the
+# shared world's difficulty, which `05-hud` then photographs a survival player
+# in; treat it as world setup rather than as this frame's own requirement, and
+# do not quote it as the reason the mobs are here.
+#
+# `NoAI` is what keeps them still; it also halts gravity, so every one of them
+# is placed exactly on the floor rather than a fraction above it.
 
 @size 2560 1440
 @camera 0.0 65.6 4.0

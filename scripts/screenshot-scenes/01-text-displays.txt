@@ -6,12 +6,14 @@
 # ported one-sided constant violated. Two of the panels are turned away from
 # the camera's axis for that reason.
 #
-# The stage sits at y=63 rather than on the flat world's own surface: the
-# superflat oracle's ground is y=-61, and this client applies vanilla's
-# non-flat void fog (a 32-block fade above the world bottom) everywhere, so a
-# camera down there sees a near-black sky. Real vanilla uses a 1-block snap in
-# a flat world; ours does not know the world is flat. Building up here shows
-# the renderer rather than that gap.
+# The stage sits at y=63 rather than on the flat world's own surface, and the
+# reason is no longer the one this file used to give. It used to say the client
+# applied vanilla's *non-flat* void fog everywhere, so a camera at the oracle's
+# y=-61 ground photographed a near-black sky; that is fixed — the level's own
+# `is_flat` reaches the renderer and a flat level's onset is a one-block snap,
+# so the surface renders fully lit. What is left is composition: a polished
+# stone plate reads better than the oracle's grass, and a stage at the world
+# bottom has no horizon behind it.
 
 @size 2560 1440
 @camera 0.0 66.5 4.6

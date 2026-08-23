@@ -28,7 +28,8 @@
 //! @look 0.5 -57.6 12.0   # aim at a point (mutually exclusive with @yawpitch)
 //! @yawpitch 180 8        # or aim explicitly, in the render camera's convention
 //! @fov 70                # vertical FOV, degrees (default 70)
-//! @wait 1500             # milliseconds to keep pumping the sim after the build
+//! @wait 1500             # WALL-CLOCK ms to let the build stream back (no ticks)
+//! @ticks 60              # sim ticks to advance after that, before the shot
 //! @hud                   # composite the HUD over the world (off by default)
 //! @hand                  # draw the first-person hand (off by default)
 //! @debug                 # also draw the F3 overlay (implies nothing; needs @hud)
@@ -41,12 +42,43 @@
 //! those stems, which is how you iterate on one image without paying for the
 //! whole set.
 //!
+//! # Why the two settle directives are not one
+//!
+//! A capture with no code change has to produce a **byte-identical** PNG, and
+//! for a while it did not: two runs of the same commit differed by tens of
+//! thousands of pixels. Every one of those differences was an animation phase,
+//! and every animation phase is a function of `Sim::tick_count` — animated
+//! block sprites through `RenderState::update_animation`, the beacon beam's
+//! `floorMod(40)`, banner sway, the enchanting-table book, the campfire flame,
+//! the conduit shell. The old settle loop was `while Instant::now() < until {
+//! pump(); sleep(10ms) }`, so the tick the frame was captured at was whatever
+//! the machine managed in that wall-clock window — 119 ticks on one run of the
+//! first scene, a different number on the next.
+//!
+//! So the two things the settle was doing are now two directives:
+//!
+//! * `@wait` is **wall clock**, and it is for the *network*: RCON edits have to
+//!   travel back over the socket and be meshed. That phase pumps with `dt = 0`,
+//!   which drains the update channel, heals dirty columns and uploads meshes
+//!   while advancing **no** ticks, so a slow machine costs seconds and not
+//!   phase.
+//! * `@ticks` is **sim ticks**, and it is for the *animation*. It runs after
+//!   the drain with no sleep at all, so the frame is always captured at the
+//!   same absolute tick: [`JOIN_BASE_TICK`] plus the running total of every
+//!   scene's `@ticks` before it. The harness asserts that.
+//!
+//! The join is the one phase that cannot be tick-free — a client that never
+//! ticks never sends a position — so its tick cost is variable and is
+//! normalised away by pumping up to [`JOIN_BASE_TICK`] before the first scene.
+//!
 //! Gotchas, each of which cost a run:
 //!
 //! * **A freshly uploaded section is mid-fade and draws nothing** until the
 //!   animation clock passes it — `FADE_COMPLETE_TICK` in
-//!   `live_sign_text_pixels.rs` records the same trap. The pump loop here runs
-//!   long enough that `Sim::tick_count` is well past it.
+//!   `live_sign_text_pixels.rs` records the same trap. `SECTION_FADE_DURATION_SECS`
+//!   is 0.75 s of *animation clock*, so 15 ticks; the `@ticks` default is well
+//!   past it, and the drain phase advances no clock precisely so that a section
+//!   uploaded late in it still gets the whole of `@ticks` to fade in.
 //! * **Every scene shares one world**, so a scene must build what it needs and
 //!   must not assume the plot is empty. Each file starts with its own `fill`.
 //! * **The camera is free**, but only sections the server streamed to the
@@ -103,6 +135,38 @@ const CAMERA_NAME: &str = "Lodestone";
 /// fixed-name tradeoff as [`CAMERA_NAME`].
 const COMPANIONS: [&str; 4] = ["Ferris", "Basalt", "Cinder", "Quartz"];
 
+/// The absolute [`Sim::tick_count`] the clock is wound up to once the camera
+/// client is in the world, before the first scene runs.
+///
+/// The join phase is the one part of a capture that cannot be tick-free, and
+/// how many ticks it costs is a property of the machine and the server, not of
+/// the scenes: measured between 30 and 120 across runs. Normalising to a fixed
+/// value here is what makes every later shot tick a constant, and therefore
+/// what makes the PNGs byte-identical between runs. Raise it (do not remove the
+/// assertion) if a join ever costs more.
+const JOIN_BASE_TICK: u64 = 400;
+
+/// Consecutive tick-free frames with no section upload, no section removal and
+/// no change in the loaded-column count that count as "the world has stopped
+/// arriving" — see [`settle_world`].
+///
+/// Forty frames at the drain loop's 10 ms sleep is a little under half a second
+/// of silence, which is comfortably longer than the gap between two columns of
+/// one streaming batch and far shorter than any scene's `@wait`.
+const QUIET_FRAMES: u32 = 40;
+
+/// Ceiling on one [`settle_world`] call. Reaching it prints a warning and
+/// captures anyway rather than hanging.
+const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Sim ticks a scene advances between its network drain and its shot, unless it
+/// says otherwise with `@ticks`.
+///
+/// Three seconds of animation clock. It has to clear `SECTION_FADE_DURATION_SECS`
+/// (0.75 s, so 15 ticks) with room to spare, because a section uploaded on the
+/// last frame of the drain starts its fade at the drain's tick.
+const DEFAULT_SETTLE_TICKS: u64 = 60;
+
 /// The framebuffer, unless a scene overrides it with `@size`.
 ///
 /// 1440p, matching what every README scene asks for explicitly, so a new one
@@ -130,7 +194,13 @@ struct Scene {
     yaw: f32,
     pitch: f32,
     fov: f32,
+    /// Wall-clock time to drain the network after the scene's commands. Costs
+    /// no sim ticks — see this file's "why the two settle directives are not
+    /// one".
     settle: Duration,
+    /// Sim ticks to advance after that drain, before the shot. This, and not
+    /// [`Self::settle`], is what fixes every animation phase in the frame.
+    ticks: u64,
     hud: bool,
     hand: bool,
     debug: bool,
@@ -162,6 +232,7 @@ fn parse_scene(path: &Path) -> Scene {
         pitch: 0.0,
         fov: 70.0,
         settle: Duration::from_millis(1500),
+        ticks: DEFAULT_SETTLE_TICKS,
         hud: false,
         hand: false,
         debug: false,
@@ -208,6 +279,14 @@ fn parse_scene(path: &Path) -> Scene {
             "wait" => {
                 assert!(nums.len() == 1, "@wait wants one number ({where_})");
                 scene.settle = Duration::from_millis(nums[0] as u64);
+            }
+            "ticks" => {
+                assert!(nums.len() == 1, "@ticks wants one number ({where_})");
+                assert!(
+                    nums[0] >= 1.0,
+                    "@ticks must advance the clock at least once ({where_})"
+                );
+                scene.ticks = nums[0] as u64;
             }
             "hud" => scene.hud = true,
             "hand" => scene.hand = true,
@@ -270,16 +349,130 @@ fn checked(rcon: &mut RconClient, command: &str) -> String {
     reply
 }
 
-/// Step the sim one tick and drain its frame outputs the way `app/redraw.rs`
-/// does — removals **before** uploads, which is the order that file documents.
-fn pump(sim: &mut Sim, render: &mut RenderState, device: &wgpu::Device, queue: &wgpu::Queue) {
-    sim.step(1.0 / 20.0);
+/// Run one `Sim` frame worth `dt` seconds and drain its outputs the way
+/// `app/redraw.rs` does — removals **before** uploads, which is the order that
+/// file documents.
+///
+/// `dt` is the whole determinism seam. [`FrameClock::begin_frame`] banks it and
+/// [`FrameClock::take_tick`] withdraws whole `TICK_PERIOD`s from the bank, so
+/// `dt = 1.0 / 20.0` advances exactly one tick and `dt = 0.0` advances none —
+/// while both run `Update` (and therefore `poll_net`, `heal_dirty_columns` and
+/// the mesh drains below) exactly once. That is what lets the network drain
+/// take as long as the machine needs without moving a single animation phase.
+fn step_and_drain(
+    sim: &mut Sim,
+    render: &mut RenderState,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    dt: f64,
+) -> bool {
+    sim.step(dt);
+    let mut moved = false;
     for key in sim.drain_removals() {
         render.remove_section(&key);
+        moved = true;
     }
     for meshed in sim.drain_meshes() {
         render.upload_section(device, queue, meshed.key, &meshed.mesh);
+        moved = true;
     }
+    moved
+}
+
+/// One frame that advances the sim clock by exactly one tick.
+fn pump(sim: &mut Sim, render: &mut RenderState, device: &wgpu::Device, queue: &wgpu::Queue) {
+    let _ = step_and_drain(sim, render, device, queue, 1.0 / 20.0);
+}
+
+/// One frame that advances the sim clock by nothing — the network drain's unit
+/// of work. Returns whether a section was uploaded or removed. See
+/// [`step_and_drain`].
+fn drain(
+    sim: &mut Sim,
+    render: &mut RenderState,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> bool {
+    step_and_drain(sim, render, device, queue, 0.0)
+}
+
+/// Drain the network until the world has **stopped arriving**, then return.
+///
+/// A fixed wall-clock settle is the wrong instrument and it was measured being
+/// wrong: with `LODESTONE_SCENES=03-block-entities` — no earlier scene to have
+/// paid for the initial stream — two runs of the same commit drew **38 sections
+/// / 15,015 quads** and **36 / 13,991**, because a fixed 3 s is a bet on the
+/// machine rather than a condition on the world. The condition is what this
+/// waits for: [`QUIET_FRAMES`] consecutive frames in which no section was
+/// uploaded, none removed, and the loaded-column count did not move.
+///
+/// `minimum` (the scene's `@wait`) is a floor rather than the whole settle,
+/// because quiet is not the same as finished — a server-side effect a scene
+/// asks for (a teleport landing, water finding its level) can be in flight
+/// while no chunk is. Every frame here is tick-free, so both the floor and the
+/// wait cost seconds and no animation phase.
+fn settle_world(
+    sim: &mut Sim,
+    render: &mut RenderState,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    minimum: Duration,
+    what: &str,
+) {
+    let start = Instant::now();
+    let deadline = start + SETTLE_DEADLINE;
+    let mut quiet = 0u32;
+    let mut last_columns = usize::MAX;
+    loop {
+        let moved = drain(sim, render, device, queue);
+        let columns = sim.net().map_or(0, |n| n.loaded_chunks().len());
+        if moved || columns != last_columns {
+            quiet = 0;
+        } else {
+            quiet += 1;
+        }
+        last_columns = columns;
+        let now = Instant::now();
+        if quiet >= QUIET_FRAMES && now >= start + minimum {
+            return;
+        }
+        if now >= deadline {
+            // Not an assertion: a capture that proceeds against a still-loading
+            // world writes a *visibly* wrong PNG and the two-statistic control
+            // below is what catches that. A hang here would just look like a
+            // slow run.
+            println!(
+                "warning: {what} never went quiet within {:?} ({columns} columns loaded); \
+                 capturing anyway",
+                SETTLE_DEADLINE
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Wind the sim clock forward to exactly `target`, as fast as the machine will
+/// go and with no sleeping — this is animation time, not real time.
+fn advance_to_tick(
+    sim: &mut Sim,
+    render: &mut RenderState,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    target: u64,
+    what: &str,
+) {
+    assert!(
+        sim.tick_count() <= target,
+        "{what} wanted the shot at tick {target} and the clock is already at {}. \
+         The capture's determinism rests on every shot landing on a fixed tick; \
+         raise JOIN_BASE_TICK (or the scene's @ticks) rather than dropping the check.",
+        sim.tick_count()
+    );
+    while sim.tick_count() < target {
+        pump(sim, render, device, queue);
+    }
+    assert_eq!(sim.tick_count(), target, "{what} overshot its tick target");
 }
 
 fn live_config() -> Config {
@@ -397,6 +590,7 @@ fn capture_readme_screenshots() {
         "the server never placed the camera client within 60s (still at the demo spawn \
          {demo_spawn:?}). Fix: ./scripts/live-oracles/creative.sh"
     );
+    println!("joined at tick {}", sim.tick_count());
     rcon.cmd(&format!("gamemode creative {CAMERA_NAME}"));
 
     install_render_sources(&mut render, &sim, device, queue, format);
@@ -417,7 +611,31 @@ fn capture_readme_screenshots() {
         println!("world time (game, day) = {time:?}");
     }
 
+    // Let the whole initial stream land before the first scene runs. Without
+    // this the first scene pays for it out of its own `@wait`, and a run
+    // narrowed with `LODESTONE_SCENES` pays for it out of nothing at all.
+    settle_world(
+        &mut sim,
+        &mut render,
+        device,
+        queue,
+        Duration::from_millis(500),
+        "the initial chunk stream",
+    );
+    // Normalise the clock the join left behind. Everything after this point is
+    // counted in ticks rather than in seconds, so the capture stops depending on
+    // how fast the machine got the camera into the world.
+    advance_to_tick(
+        &mut sim,
+        &mut render,
+        device,
+        queue,
+        JOIN_BASE_TICK,
+        "the join",
+    );
+
     let mut written: Vec<(String, u64)> = Vec::new();
+    let mut shot_tick = JOIN_BASE_TICK;
     for scene in &scenes {
         if scene.size != (w, h) {
             (w, h) = scene.size;
@@ -432,13 +650,29 @@ fn capture_readme_screenshots() {
                 scene.name
             );
         }
-        // Let the edits stream back and the freshly meshed sections leave their
-        // fade-in. `Sim::step` is what pumps the net thread's update channel.
-        let until = Instant::now() + scene.settle;
-        while Instant::now() < until {
-            pump(&mut sim, &mut render, device, queue);
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // Phase one: let the edits stream back and be meshed. Wall clock,
+        // because that is what a socket and a worker pool answer to — and
+        // **tick-free**, so however long it takes costs no animation phase.
+        // `Sim::step` is what pumps the net thread's update channel.
+        settle_world(
+            &mut sim,
+            &mut render,
+            device,
+            queue,
+            scene.settle,
+            &format!("scene {:?}", scene.name),
+        );
+        // Phase two: the animation clock, and the only thing that decides the
+        // phase of every sprite, beam, sway and flame in the frame.
+        shot_tick += scene.ticks;
+        advance_to_tick(
+            &mut sim,
+            &mut render,
+            device,
+            queue,
+            shot_tick,
+            &format!("scene {:?}", scene.name),
+        );
 
         let bytes = shoot(
             scene,
@@ -632,8 +866,9 @@ fn shoot(
 
     let pixels = target.read_texels(device, queue);
     println!(
-        "[{}] {w}x{h} eye {:?} yaw {:.1} pitch {:.1} — {} sections, {} quads, {} entities",
+        "[{}] tick {} — {w}x{h} eye {:?} yaw {:.1} pitch {:.1} — {} sections, {} quads, {} entities",
         scene.name,
+        sim.tick_count(),
         scene.eye,
         scene.yaw,
         scene.pitch,

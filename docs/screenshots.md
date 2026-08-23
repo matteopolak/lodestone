@@ -22,9 +22,10 @@ nothing else: the keybind reads the window's swapchain, this reads a headless ta
 2. install the render sources `app/session.rs`'s `install_session_render_sources` and
    `app/redraw.rs` install: the sky pass, the entity light sampler, the shadow ground
    sampler, the time-of-day clock, and every block-entity/display source;
-3. for each scene, run its RCON commands, keep pumping for its settle time, then render one
-   frame through `RenderState::render` (plus `HudRenderer::render_with_item_models` when the
-   scene asks for a HUD);
+3. for each scene, run its RCON commands, drain the network until the world stops arriving,
+   advance the sim clock by a fixed number of ticks, then render one frame through
+   `RenderState::render` (plus `HudRenderer::render_with_item_models` when the scene asks for
+   a HUD);
 4. read the texels back and write a PNG.
 
 **Scenes are data, not code.** One `scripts/screenshot-scenes/<name>.txt` per image; the
@@ -39,7 +40,8 @@ minutes.
 @look 0.0 65.1 13.6    # aim at a point…
 @yawpitch 180 8        # …or aim explicitly, in the render camera's convention
 @fov 50                # vertical FOV in degrees (default 70)
-@wait 2000             # milliseconds to keep pumping the sim after the build
+@wait 2000             # WALL-CLOCK ms floor on the network drain (costs no ticks)
+@ticks 60              # sim ticks to advance after that drain, before the shot
 @hud                   # composite the HUD over the world
 @hand                  # draw the first-person hand
 @debug                 # also draw the F3 overlay (needs @hud)
@@ -48,10 +50,50 @@ minutes.
 `LODESTONE_SCENES=02-signs,05-hud` restricts a run to those stems, which is how you iterate
 on one image.
 
-A re-run is **reproducible but not byte-identical**: the world state is pinned (spawn, time,
-weather, game rules) but a campfire's flame, a mob's idle sway and a chat line's fade age are
-all phase-dependent, so the PNGs differ by a few hundred bytes between runs. That is why
-there is no drift gate over them.
+### A re-run is byte-identical, and the two settle directives are why
+
+**A capture with no code change reproduces the committed PNG exactly.** Measured: three
+consecutive full runs of the same commit produced the same five md5s
+(`c3cbb47d…`, `5dfb7917…`, `62d244ef…`, `930e309f…`, `f5410329…`). This document used to say
+the opposite — "reproducible but not byte-identical" — and that was not a property of
+screenshots, it was three bugs:
+
+| what moved | measured, run to run |
+|---|---|
+| every animation phase, because the capture tick was whatever the machine managed in a wall-clock window | `02-signs` **78,215–82,094 px** (a sea lantern's animated sprite), `03-block-entities` **77,963–93,798 px** (beacon beam, banner sway, book, conduit), `05-hud` **36,032 px** |
+| the world was not finished arriving | `03-block-entities` alone under `LODESTONE_SCENES` drew **38 sections / 15,015 quads** on one run and **36 / 13,991** on the next |
+| two item entities the scene created without meaning to | see the campfire gotcha below |
+
+The fix is that the settle is now two directives rather than one, because it was doing two
+unrelated jobs:
+
+* **`@wait` is wall clock and it is for the network.** RCON edits have to travel back over
+  the socket and be meshed, and that answers to the machine. This phase pumps `Sim::step`
+  with `dt = 0`, which runs `Update` (and therefore `poll_net`, `heal_dirty_columns` and the
+  mesh drains) while `FrameClock::take_tick` claims **no** tick — so a slow machine costs
+  seconds and not phase. It is a *floor*, not the whole wait: the harness keeps draining
+  until 40 consecutive frames upload no section, remove none, and see no change in the
+  loaded-column count.
+* **`@ticks` is sim ticks and it is for the animation.** It runs after the drain with no
+  sleeping at all, so the frame is captured at a fixed absolute tick — `JOIN_BASE_TICK` plus
+  every earlier scene's `@ticks`. The harness asserts that number rather than trusting it.
+
+The join is the one phase that cannot be tick-free (a client that never ticks never sends a
+position), so its cost is variable — measured at 1 to 120 ticks — and is normalised away by
+winding the clock up to `JOIN_BASE_TICK` before the first scene.
+
+**The residual, so nobody reads it as a new regression.** In 2 of about 15 runs the
+*distant superflat ground* seen past the stage edge in `01-text-displays` (and, through the
+same sections, `02-signs`) rendered **untinted**: neutral grey `(166, 167, 168)` where a
+correct run gives plains green `(85, 111, 55)`, with **91 fewer quads** in both scenes — the
+count moves because a per-position biome tint stops quads merging. It is not an animation
+phase (the tick is pinned), not a streaming race the quiescence wait can see (the wrongly
+tinted mesh is quiet), and it survives every change in this harness, so it is a **client**
+bug rather than a capture one: a player joining that world would see the same grey ground on
+those frames. Only the *initial* chunk stream is affected — every block a scene places
+afterwards re-meshes correctly — which is what points at the join. If a re-render shows a
+grey horizon in those two images, discard it and run again; that is the one difference that
+is still noise.
 
 ### The control
 
@@ -130,11 +172,34 @@ Gotchas, each of which cost a run:
   composites those against the page background. It is invisible at this scale and dropping
   the alpha channel would save only ~8%, which is why the images stay RGBA — but a pass that
   starts leaking alpha over a *large* area would show up here first.
+* **A block-entity NBT field you leave out is not a default, it is a zero — and for a
+  campfire that means the food cooks on the first tick.** `03-block-entities` set
+  `Items:[{porkchop},{potato}]` and nothing else, so `CookingTotalTimes` came out
+  `[I; 0, 0, 0, 0]`, `CampfireBlockEntity.cookTick` found every slot already past its total,
+  and both items were ejected as **real item entities**. Verified over RCON against the
+  offending line: the block read back `Items: []`, and a `Cooked Porkchop` and a
+  `Baked Potato` were lying on the stage at `(2.47, 64.0, 12.90)` and `(4.71, 64.5, 13.55)`.
+  So the scene did not photograph what its own header claimed — an empty campfire, and two
+  pieces of litter whose eject velocity and yaw are rolled fresh every run, which was the
+  last source of run-to-run pixel noise in the set. Give the block the real
+  `CookingTotalTimes:[I;600,600,0,0]` (vanilla's own `CampfireCookingRecipe` time). The
+  general form: the harness's `gamerule mob_drops false` / `block_drops false` preamble stops
+  the *server* dropping items and does nothing about items a scene's own block entities
+  create.
 * **Water is the one thing a scene cannot clean up after itself.** A `fill … air` over a
   stage leaves the sources outside it, which flow back in and flood the next scene. The
   harness purges water once per run over a box wider than any stage.
 * **Every scene shares one world**, so a scene must build what it needs and must not assume
   its plot is empty. Each file starts with its own `fill … air` and `kill`.
+* **A fixed wall-clock settle is a bet on the machine, not a condition on the world.** With
+  `LODESTONE_SCENES=03-block-entities` — no earlier scene having paid for the initial stream
+  — two runs of the same commit drew 38 sections / 15,015 quads and 36 / 13,991 against a
+  three-second `@wait`. The harness now waits for quiet (`QUIET_FRAMES` frames with no
+  upload, no removal and no change in the loaded-column count) with `@wait` as a floor, and
+  does the same before the first scene so a narrowed run does not start against a
+  half-streamed world. It warns and captures anyway at `SETTLE_DEADLINE`, because a capture
+  against an unfinished world writes a visibly wrong PNG that the two-statistic control
+  catches, while a hang would just look like a slow run.
 
 ### Four reports that were the scene, and one that was not
 
@@ -161,6 +226,22 @@ Three things generalise:
 * **Half the reports were a subject photographed from behind.** A skull at `rotation=8`, a
   chest at `facing=south` with the camera on `-Z`: no face, no latch. Check which way the
   subject is pointing before believing the renderer dropped a texture.
+
+### Two scene descriptions that had stopped matching what they built
+
+Found while characterising the noise, and worth knowing the shape of, because `02-signs`
+already had one (it described a dark room and was not roofed):
+
+* `01-text-displays` explained its `y=63` stage by the *non-flat void fog*, which is fixed —
+  the same fix this page's first gotcha records. The stage is still right; the reason had
+  become composition, not a renderer gap.
+* `04-entities` said `difficulty easy` was there "because peaceful removes hostile mobs the
+  tick they spawn". Every mob it summons — sheep, wolf, axolotl, fox, allay, cow — is
+  passive, so peaceful would leave all of them standing. The command is world setup, not this
+  frame's requirement.
+
+Neither was wrong when written and neither is visible in the image, which is exactly why both
+survived. When a scene's build changes, re-read its header in the same edit.
 
 Two smaller divergences the images do show, honestly, rather than hide: legacy `§` codes in
 sign text render as literal section signs (this client deliberately never turns them into
