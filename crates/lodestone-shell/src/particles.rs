@@ -964,7 +964,7 @@ impl Particles {
     /// call proves nothing either way.
     ///
     /// Draws from the particle engine's own `JavaRandom`, which is
-    /// `java.util.Random`-compatible, so `next_int_bound` is vanilla's
+    /// `java.util.Random`-compatible, so `next_i32_bound` is vanilla's
     /// `nextInt` exactly. Not the same *stream* as vanilla's `level.random`,
     /// which does not matter: nothing observes particle randomness across the
     /// wire.
@@ -975,11 +975,11 @@ impl Particles {
     ) -> bool {
         use crate::config::ParticleLevel;
         let mut level = level;
-        if always_show && level == ParticleLevel::Minimal && self.engine.rng().next_int_bound(10) == 0
+        if always_show && level == ParticleLevel::Minimal && self.engine.rng().next_i32_bound(10) == 0
         {
             level = ParticleLevel::Decreased;
         }
-        if level == ParticleLevel::Decreased && self.engine.rng().next_int_bound(3) == 0 {
+        if level == ParticleLevel::Decreased && self.engine.rng().next_i32_bound(3) == 0 {
             level = ParticleLevel::Minimal;
         }
         level != ParticleLevel::Minimal
@@ -991,8 +991,8 @@ impl Particles {
     /// bit-for-bit.
     fn gaussian(&mut self) -> f64 {
         let rng = self.engine.rng();
-        let u1 = rng.next_double().max(1e-12);
-        let u2 = rng.next_double();
+        let u1 = rng.next_f64().max(1e-12);
+        let u2 = rng.next_f64();
         (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
     }
 
@@ -3086,9 +3086,9 @@ impl Particles {
             let span = AMBIENT_RANGE * 2 + 1;
             let rng = self.engine.rng();
             let offset = [
-                rng.next_int_bound(span) - AMBIENT_RANGE,
-                rng.next_int_bound(span) - AMBIENT_RANGE,
-                rng.next_int_bound(span) - AMBIENT_RANGE,
+                rng.next_i32_bound(span) - AMBIENT_RANGE,
+                rng.next_i32_bound(span) - AMBIENT_RANGE,
+                rng.next_i32_bound(span) - AMBIENT_RANGE,
             ];
             let block = [
                 centre[0] + offset[0],
@@ -3145,9 +3145,9 @@ impl Particles {
                 for _ in 0..4 {
                     let rng = self.engine.rng();
                     let (rx, ry, rz) = (
-                        f64::from(rng.next_float()),
-                        f64::from(rng.next_float()),
-                        f64::from(rng.next_float()),
+                        f64::from(rng.next_f32()),
+                        f64::from(rng.next_f32()),
+                        f64::from(rng.next_f32()),
                     );
                     let sign = |r: &mut lodestone_particle::rng::JavaRandom| {
                         if r.next_bool() { 1.0 } else { -1.0 }
@@ -3196,8 +3196,8 @@ impl Particles {
                 let signal = prop("signal_fire") == Some("true");
                 let rng = self.engine.rng();
                 let (rx, rz) = (
-                    f64::from(rng.next_float()) * 0.2 - 0.1,
-                    f64::from(rng.next_float()) * 0.2 - 0.1,
+                    f64::from(rng.next_f32()) * 0.2 - 0.1,
+                    f64::from(rng.next_f32()) * 0.2 - 0.1,
                 );
                 emit::campfire_smoke(
                     &mut self.engine,

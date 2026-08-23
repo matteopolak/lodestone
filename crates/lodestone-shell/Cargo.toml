@@ -56,6 +56,11 @@ lodestone-world = { workspace = true }
 # `lodestone-world` holds `BlockEntity::nbt: Nbt` without re-exporting `Nbt`
 # itself — so this is a direct edge rather than a path through a neighbour.
 lodestone-core = { workspace = true }
+# `java.util.Random`, bit-exact — the enchanting-table book animation in
+# `block_entities.rs` draws from it directly, rather than through
+# `lodestone-particle`'s re-export, so this crate does not pull the particle
+# engine in just to get an RNG.
+lodestone-javarandom = { workspace = true }
 lodestone-registry = { workspace = true }
 lodestone-entity.workspace = true
 # Per-entity-type base hitbox height (issue #100's nametag pass): the same
