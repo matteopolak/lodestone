@@ -789,6 +789,19 @@ pub struct EntityDraw {
     /// [`Self::yaw`] already carries it — see
     /// `lodestone_render::painting::painting_matrix`.
     pub painting: Option<&'static str>,
+    /// A firework rocket's two draw flags, or `None` for every entity that has
+    /// never reported either — which includes every entity that is not a
+    /// firework, and a firework rocket at both vanilla defaults.
+    ///
+    /// **`None` is not "do not draw".** A plain shot rocket reports neither
+    /// flag, so the draw site keys on the entity *type* and reads these with
+    /// their vanilla defaults (`false`, `false`). Only
+    /// [`lodestone_ecs::entity::FireworkFlags::attached`] suppresses the draw,
+    /// and that is `Some(true)` when it does.
+    ///
+    /// Bridged off the *ingest* entity through [`EntityIndex`] in
+    /// [`extract_entity_draws`], like [`Self::painting`] above.
+    pub firework: Option<lodestone_ecs::entity::FireworkFlags>,
     /// This entity's resolved nametag (issue #100), narrowed from
     /// [`RenderNameTag`]. `None` draws nothing — the common case for every
     /// entity with no visible custom name.
@@ -1839,6 +1852,7 @@ pub fn extract_pickup_draws(
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
+            firework: None,
             feet,
             yaw: 0.0,
             head_yaw: 0.0,
@@ -2500,7 +2514,7 @@ pub fn extract_entity_draws(
     // stand overwrites the humanoid walk cycle in vanilla, posed or not, so a
     // missing component resolves to `ArmorStandPose::VANILLA_DEFAULT` rather
     // than to "no pose". See `ARMOR_STAND_TYPE_PATH`.
-    (tameds, vehicles, armor_stands, item_frame_rotations, armor_stand_poses, painting_variants): (
+    (tameds, vehicles, armor_stands, item_frame_rotations, armor_stand_poses, painting_variants, firework_flags): (
         Query<&lodestone_ecs::entity::Tamed>,
         Query<&lodestone_ecs::entity::Vehicle>,
         Query<&lodestone_ecs::entity::ArmorStandFlags>,
@@ -2511,6 +2525,9 @@ pub fn extract_entity_draws(
         // painting-variant serializer), bridged the same way and nested here
         // for the same `SystemParam`-arity reason as its neighbours.
         Query<&lodestone_ecs::entity::PaintingVariant>,
+        // `FireworkFlags` lives on the ingest entity too, bridged the same way
+        // and nested here for the same `SystemParam`-arity reason.
+        Query<&lodestone_ecs::entity::FireworkFlags>,
     ),
     tracks: Query<(
         &MinecraftEntityId,
@@ -2793,6 +2810,14 @@ pub fn extract_entity_draws(
             .and_then(|variant| {
                 lodestone_render::painting::painting_variant_name(&variant.0.to_string())
             });
+        // A firework rocket's flags, bridged off the ingest entity the same
+        // way. Left as an `Option` rather than defaulted here because the draw
+        // site has to distinguish "not a firework" from "a firework at its
+        // defaults" — and it does that by the type path, not by this field.
+        let firework = index
+            .get(id.0)
+            .and_then(|entity| firework_flags.get(entity).ok())
+            .copied();
         // The variant sheet, bridged off the ingest entity's `Variant` exactly as
         // `block_state` and `experience_orb_value` above are, and for their reason:
         // `lodestone_ecs::ingest::apply_entity_metadata` inserts `Variant` *there*,
@@ -2847,6 +2872,7 @@ pub fn extract_entity_draws(
             block_state,
             item_frame_rotation,
             painting,
+            firework,
             feet: render_feet(from, to, clock),
             yaw: render_yaw(from, to, clock),
             head_yaw: render_head_yaw(from, to, clock),
@@ -4981,6 +5007,7 @@ mod tests {
                 experience_orb_value: None,
                 cape_sway: (0.0, 0.0, 0.0),
                 painting: None,
+                firework: None,
             }
         }
 

@@ -574,6 +574,29 @@ pub struct ExperienceOrbValue(pub i32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemFrameRotation(pub u8);
 
+/// A firework rocket's two draw-relevant flags, merged from whichever of them
+/// a metadata packet mentioned.
+///
+/// Both default to `false`, which is vanilla's own accessor default and the
+/// right reading for a rocket that has reported neither: an ordinary shot
+/// rocket, drawn camera-facing.
+///
+/// **Merged, not replaced.** The two arrive as separate metadata fields and a
+/// packet mentions only what changed, so folding one must not clear the other —
+/// which a bare `insert` of a freshly-defaulted value would do. In practice
+/// vanilla sets at most one of them per rocket (a crossbow rocket is angled, an
+/// elytra rocket is attached), so the merge protects against a plugin rather
+/// than against vanilla; it is still the honest fold.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FireworkFlags {
+    /// Riding a gliding player. `FireworkRocketEntity.shouldRender` returns
+    /// false for this case, so a consumer must draw **nothing**.
+    pub attached: bool,
+    /// Fired from a crossbow, and so spun onto its flight axis rather than
+    /// left facing the camera.
+    pub shot_at_angle: bool,
+}
+
 /// Which painting is hung on the wall — `Painting.DATA_PAINTING_VARIANT_ID`
 /// resolved to its registry key
 /// ([`lodestone_model::event::EntityMetadataUpdate::painting_variant`]).

@@ -32,6 +32,19 @@ use lodestone_model::event::EquipmentSlot;
 
 use crate::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
 
+/// `EntityTypes.FIREWORK_ROCKET`'s registry path, as `EntityDraw::type_path`
+/// carries it (namespace stripped).
+///
+/// A type check rather than a `thrown_item_for` row: see
+/// [`PreparedItems::merge_firework_rocket`] for why widening that table would
+/// change what it means.
+const FIREWORK_ROCKET_TYPE_PATH: &str = "firework_rocket";
+
+/// `FireworkRocketEntity.getDefaultItem()` — the stack vanilla's accessor is
+/// *initialised* to, and therefore what a rocket whose item field was never
+/// marked dirty genuinely draws as.
+const FIREWORK_ROCKET_ITEM: &str = "minecraft:firework_rocket";
+
 /// The `select` context an `item_display` resolves its model tree in.
 ///
 /// [`lodestone_assets::DisplayContextItemContext`] is the same idea and is the
@@ -160,7 +173,13 @@ impl RenderState {
         let orientation = camera_orientation(camera.view_matrix());
         for draw in entities {
             if draw.type_path.as_ref() != ITEM_ENTITY_TYPE_PATH {
-                if let Some(thrown) = thrown_item_for(&draw.type_path) {
+                if draw.type_path.as_ref() == FIREWORK_ROCKET_TYPE_PATH {
+                self.merge_firework_rocket(model, draw, orientation, &frustum, &mut combined, stats);
+                // A rocket holds no equipment; skip the held-item scan, as the
+                // thrown-projectile arm below does.
+                continue;
+            }
+            if let Some(thrown) = thrown_item_for(&draw.type_path) {
                     self.merge_thrown_item(
                         model,
                         draw,
@@ -808,6 +827,98 @@ impl RenderState {
     /// returning `15`; it maps onto [`ENTITY_FULLBRIGHT`], the same byte the GUI
     /// item path nails every vertex to. The world sample is used otherwise, so a
     /// snowball crossing a shadow dims and a fireball does not.
+    /// Merge one firework rocket's item model into `combined`, billboarded on
+    /// the camera and — when it was fired from a crossbow — spun onto its
+    /// flight axis.
+    ///
+    /// # Why this is not a row in `thrown_item_for`
+    ///
+    /// `FireworkEntityRenderer` really does draw a billboarded item model in
+    /// `ItemDisplayContext.GROUND`, exactly as `ThrownItemRenderer` does, so the
+    /// temptation to add a row is real. It would be wrong: that table means
+    /// "entity types registered to `ThrownItemRenderer` in `EntityRenderers`",
+    /// its membership is checked against the vanilla registration list by a
+    /// parity gate, and a firework is not one of them. Widening it would change
+    /// what the table *means* and take the parity gate's premise with it. The
+    /// two mechanical differences would not fit either: a firework has no scale
+    /// term (`ThrownItemRenderer` scales before the billboard; this does not)
+    /// and it carries a rotation the table has no column for.
+    ///
+    /// # The three rotations
+    ///
+    /// `FireworkEntityRenderer.submit`, for the shot-at-angle case, appends
+    /// `Axis.ZP 180 deg`, `Axis.YP 180 deg`, `Axis.XP 90 deg` **after** the
+    /// camera orientation, tipping the sprite out of the camera plane. Composed
+    /// into the `orientation` argument rather than added as a parameter to
+    /// [`thrown_item_mesh`], which takes it as an opaque matrix.
+    ///
+    /// # Two suppressions, both vanilla's
+    ///
+    /// A rocket **attached to a gliding player** draws nothing at all —
+    /// `FireworkRocketEntity.shouldRender` returns false — because that is the
+    /// elytra boost riding inside the player rather than a rocket in flight.
+    /// And the stack falls back to a plain `minecraft:firework_rocket` when the
+    /// wire never reported one, which is faithful rather than a papering-over:
+    /// vanilla's accessor *default* is that stack, so a rocket whose field was
+    /// never marked dirty really does draw as a plain one.
+    fn merge_firework_rocket(
+        &self,
+        model: &ModelRenderer,
+        draw: &EntityDraw,
+        orientation: glam::Mat4,
+        frustum: &lodestone_render::Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        let flags = draw.firework.unwrap_or_default();
+        if flags.attached {
+            return;
+        }
+        let ctx = ItemStateContext::new(DisplaySlot::Ground);
+        let geometry = draw
+            .item
+            .as_ref()
+            .and_then(|id| model.items.get(id))
+            .and_then(|v| v.resolve(&ctx))
+            .or_else(|| {
+                let id: lodestone_assets::ResourceLocation =
+                    FIREWORK_ROCKET_ITEM.parse().ok()?;
+                model.items.get(&id)?.resolve(&ctx)
+            });
+        let Some(geometry) = geometry else {
+            return;
+        };
+        // No scale term, so a half-block box is the whole of it — unlike a
+        // fireball, which is drawn at 3x and needs scaled slack.
+        let slack = glam::Vec3::splat(0.5);
+        if !frustum.intersects_aabb(draw.feet - slack, draw.feet + slack) {
+            return;
+        }
+        // `FireworkEntityRenderer` has no `getBlockLightLevel` override, so the
+        // world sample applies — a rocket climbing out of a dark shaft dims.
+        let light = entity_light(&self.entity_light, draw);
+        let orientation = if flags.shot_at_angle {
+            orientation
+                * glam::Mat4::from_rotation_z(std::f32::consts::PI)
+                * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                * glam::Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2)
+        } else {
+            orientation
+        };
+        let ground = ground_transform(&geometry.display, geometry.gui_light);
+        let mesh = thrown_item_mesh(
+            &geometry.quads,
+            geometry.gui_light,
+            &ground,
+            draw.feet,
+            orientation,
+            1.0,
+            light,
+        );
+        combined.merge(&mesh);
+        stats.projectiles_drawn += 1;
+    }
+
     fn merge_thrown_item(
         &self,
         model: &ModelRenderer,

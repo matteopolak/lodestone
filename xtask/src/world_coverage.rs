@@ -773,6 +773,16 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "merge_item_displays",
         rule: ClaimRule::Explicit(&["item_display"]),
     },
+    // `FireworkEntityRenderer`: a billboarded item model, deliberately *not* a
+    // `thrown_item_for` row — that table means "registered to
+    // `ThrownItemRenderer`" and a firework is not, so it gets its own claim
+    // exactly as the display renderers do.
+    RendererClaim {
+        name: "firework rocket billboard",
+        file: "crates/lodestone-shell/src/gpu/world_items.rs",
+        symbol: "merge_firework_rocket",
+        rule: ClaimRule::Explicit(&["firework_rocket"]),
+    },
     // `PaintingRenderer`: a flat slab of `width x height` blocks, its front
     // face the variant's own sprite and its back and edges a shared tile.
     // Neither a rig nor a billboard, so it has its own pass rather than a

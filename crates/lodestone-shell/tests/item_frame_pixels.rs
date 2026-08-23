@@ -118,6 +118,7 @@ fn blank_draw(id: i32, type_path: &str) -> EntityDraw {
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
+        firework: None,
     }
 }
 

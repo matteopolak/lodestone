@@ -688,6 +688,7 @@ fn entity_hitbox_and_chunk_border_vertices_draw_visible_pixels() {
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
+        firework: None,
     };
     state.set_debug_lines_source(move |_| entity_hitbox_vertices(&[zombie.clone()]));
     let frame = target.acquire().expect("acquire");
@@ -1171,6 +1172,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
+        firework: None,
         },
         // A second pig behind the camera so frustum culling has something
         // real to remove — the anti-vacuity guard on the cull path.
@@ -1217,6 +1219,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
+        firework: None,
         },
     ];
 
@@ -1416,6 +1419,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
+        firework: None,
     }];
 
     // Fraction of a mob's bright pixels whose *hue direction* is far from the
@@ -1992,6 +1996,7 @@ fn orb_draw(value: i32) -> EntityDraw {
         experience_orb_value: Some(value),
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
+        firework: None,
     }
 }
 
