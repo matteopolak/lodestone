@@ -1547,6 +1547,16 @@ feature that happens to use it.
    short registry set**, so a wrong list produces no error here — only against a real vanilla client. An
    authoritative source answering a *neighbouring* question is harder to catch than a stale one, because
    nothing about it looks out of date.
+
+   **And for a *dynamic* (datapack) registry, the id order is alphabetical by resource location — NOT the
+   order of the bootstrap class that registers the entries.** Three instances in one session, each a
+   silent off-by-a-few mismapping with a clean decode and no error anywhere: **8 of 11 armour trim
+   materials** wrong, **42 of 43 banner patterns** wrong, and every painting variant wrong (id 0 is
+   `alban`, not the bootstrap class's first entry). The bootstrap class is the natural thing to
+   transcribe — it is a readable ordered list of exactly the right entries — and it is the wrong order.
+   Settle it against a captured `registry_data` fixture, which is what the server actually sends, rather
+   than against any source file. The tell that you have this bug is a feature that renders *something*
+   plausible for every input, consistently shifted.
 2. **Decompiled source** under `.cache/mc/26.2/{src,client-src}` — reference for behaviour only,
    never transliterated. 26.2 ships de-obfuscated, so names are real.
 3. **minecraft-data** — bootstrap and cross-check for **1.8–1.21.11 only**; it has no 26.x data, and
