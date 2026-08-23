@@ -1,4 +1,24 @@
 //! `LegacyRandomSource` — the `java.util.Random` linear congruential generator.
+//!
+//! # Why this is not `lodestone-javarandom`
+//!
+//! The workspace's four other `java.util.Random` copies (particle bursts,
+//! the enchanting-table book, the lightning bolt, sound-variant selection)
+//! are consolidated into `lodestone-javarandom`. This one deliberately is
+//! not: it implements [`RandomSource`] alongside `XoroshiroRandomSource` so
+//! worldgen can be generic over which algorithm a seed was told to use, it
+//! carries [`super::gaussian::Gaussian`]'s cached Box-Muller pair (which
+//! needs direct access to the raw seed, not a call through an opaque
+//! `next(bits)`), and it drives [`LegacyPositionalFactory`] for vanilla's
+//! position- and name-seeded streams — none of which the shared crate's
+//! four other callers need. `lodestone-worldgen-core`'s own `Cargo.toml`
+//! also states its `serde_json` dependency is deliberately the crate's only
+//! non-`std` dependency, "because this is a leaf, and every unit scheduled
+//! against it wants it to stay one"; adding even this small an internal
+//! dependency would break that. See `docs/java-random.md` for the full
+//! accounting. The LCG core below is therefore a deliberate, bounded
+//! duplicate — frozen by the Java specification, so it cannot drift on its
+//! own the way most duplicated logic does.
 
 use super::gaussian::Gaussian;
 use super::{PositionalRandomFactory, RandomSource, get_seed};
