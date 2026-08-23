@@ -29,10 +29,12 @@
 //!   background vanilla used for a decade and which the sprites reproduce. If a
 //!   sprite pass ever lands above the carried stratum, this is the code to
 //!   replace, and [`TOOLTIP_BG`]'s doc has the sprite ids.
-//! * **No `minecraft:lore` lines.** That component is not decoded anywhere in
-//!   this tree (there is no `LORE_COMPONENT`, and `ComponentValue` has no
-//!   list-of-`Text` variant), so there is nothing to read. Checked, not assumed.
-//!   Enchantment lines are absent for a different reason: `ItemEnchantment::id`
+//! * **Authored `minecraft:lore` is styled through a parent.** Vanilla supplies
+//!   dark-purple italics as defaults, but an authored child can explicitly turn
+//!   italics off or select an RGB colour. [`lore_lines`] wraps the decoded tree
+//!   instead of overwriting its root style, so ordinary text inherits the
+//!   defaults and explicit child formatting still wins. Enchantment lines are
+//!   absent for a different reason: `ItemEnchantment::id`
 //!   is a *session-scoped numeric registry id* with no name table on the client,
 //!   so a line for it would read "Enchantment that fix" — a fabrication, which
 //!   this module declines the same way `menu::options` declines a row it cannot
@@ -54,7 +56,7 @@
 
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::Menu;
-use lodestone_model::text::TextSpan;
+use lodestone_model::text::{Text, TextColor, TextSpan, TextStyle};
 
 use crate::hud::VanillaFont;
 
@@ -168,8 +170,8 @@ pub(super) struct TooltipLine {
     pub colour: [f32; 4],
     /// The styled runs behind `text`, when the line was built from a real
     /// [`Text`] tree that might carry a hex colour — currently only the
-    /// title line, via [`lodestone_game::item::styled_hover_name_spans`].
-    /// `None` for every other line, which draws flat in `colour` instead.
+    /// title and authored lore lines. `None` for composed client-owned lines,
+    /// which draw flat in `colour` instead.
     pub spans: Option<Vec<TextSpan>>,
 }
 
@@ -187,6 +189,7 @@ pub(super) struct TooltipLine {
 /// `item.components` is `"%s Component(s)"` in `en_us.json`.
 pub(super) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLine> {
     let mut lines = vec![title_line(stack)];
+    lines.extend(lore_lines(stack));
     // `PotionContents.addToTooltip`/`ItemEnchantments.addToTooltip` both run
     // unconditionally — neither is gated behind `isAdvanced()` the way
     // durability/id/component-count are, so these lines belong before the
@@ -227,6 +230,35 @@ pub(super) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLin
         });
     }
     lines
+}
+
+/// The authored `minecraft:lore` body immediately below the item name.
+///
+/// `ItemLore` applies dark-purple italics as a parent style. Building a wrapper
+/// node is load-bearing: mutating the authored root would replace rather than
+/// inherit formatting, so an explicit child `italic: false` or RGB colour could
+/// no longer override the default.
+fn lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
+    stack
+        .lore()
+        .iter()
+        .map(|line| {
+            let styled = Text {
+                style: TextStyle {
+                    color: Some(TextColor::DarkPurple),
+                    italic: Some(true),
+                    ..TextStyle::default()
+                },
+                extra: vec![line.clone()],
+                ..Text::default()
+            };
+            TooltipLine {
+                text: line.to_plain_string(),
+                colour: DARK_PURPLE,
+                spans: Some(styled.to_spans()),
+            }
+        })
+        .collect()
 }
 
 /// The tooltip title: [`lodestone_game::item::styled_hover_name`], except for a
@@ -972,6 +1004,33 @@ fn draw_bundle_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Authored lore belongs directly below the title. Vanilla supplies a
+    /// dark-purple italic parent style, while explicit formatting on the
+    /// authored component remains authoritative through normal inheritance.
+    #[test]
+    fn authored_lore_renders_after_the_title_with_vanilla_defaults_and_child_overrides() {
+        let mut line = lodestone_model::Text::literal("Ancient ");
+        let mut child = lodestone_model::Text::literal("Rune");
+        child.style.color = Some(lodestone_model::TextColor::Rgb(0x12_ab_ef));
+        child.style.italic = Some(false);
+        line.extra.push(child);
+
+        let mut stack = ItemStack::new("minecraft:paper".parse().expect("valid id"), 1);
+        stack.set_lore(vec![line]);
+        let lines = tooltip_lines(&stack, false);
+
+        assert_eq!(
+            lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+            vec!["Paper", "Ancient Rune"]
+        );
+        let spans = lines[1].spans.as_ref().expect("lore keeps styled spans");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].style.color, Some(lodestone_model::TextColor::DarkPurple));
+        assert_eq!(spans[0].style.italic, Some(true));
+        assert_eq!(spans[1].style.color, Some(lodestone_model::TextColor::Rgb(0x12_ab_ef)));
+        assert_eq!(spans[1].style.italic, Some(false));
+    }
 
     fn potion_stack(item_path: &str, potion_key: &str) -> ItemStack {
         let potion_id = lodestone_data::potion::potion_id(&format!("minecraft:{potion_key}")).expect("known potion");

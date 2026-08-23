@@ -60,6 +60,13 @@ impl ItemStack {
 pub struct ItemComponents {
     /// A player- or server-assigned display name overriding the item's default.
     pub custom_name: Option<Text>,
+    /// `minecraft:lore`'s authored tooltip lines, in wire order.
+    ///
+    /// Each entry remains a full [`Text`] tree rather than a flattened string:
+    /// nested RGB colours and explicit formatting overrides must survive until
+    /// the tooltip applies vanilla's default dark-purple italic parent style.
+    /// An empty vector means the patch carries no lore lines.
+    pub lore: Vec<Text>,
     /// Accumulated durability damage; the item's remaining durability is its
     /// max damage minus this value. `None` when the stack carries no damage
     /// component (either undamaged or not damageable).

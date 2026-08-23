@@ -42,6 +42,8 @@ pub const DAMAGE_COMPONENT: &str = "minecraft:damage";
 pub const MAX_DAMAGE_COMPONENT: &str = "minecraft:max_damage";
 /// Well-known component identifier for a custom display name.
 pub const CUSTOM_NAME_COMPONENT: &str = "minecraft:custom_name";
+/// Well-known component identifier for authored tooltip lore.
+pub const LORE_COMPONENT: &str = "minecraft:lore";
 /// Well-known component identifier for the tool behaviour patch
 /// (`minecraft:tool`).
 pub const TOOL_COMPONENT: &str = "minecraft:tool";
@@ -238,8 +240,11 @@ pub enum ComponentValue {
     Bool(bool),
     /// A UTF-8 string component.
     Str(String),
-    /// A chat-component value (custom name, lore lines, …).
+    /// A single chat-component value (custom name, …).
     Text(Text),
+    /// Authored `minecraft:lore` lines, retained as full styled text trees and
+    /// in wire order.
+    Lore(Vec<Text>),
     /// What the stack's `DataComponentPatch` said about `minecraft:tool`.
     ///
     /// Carried verbatim from [`lodestone_model::ToolPatch`], including the
@@ -565,6 +570,21 @@ impl ItemStack {
     /// Sets or clears the custom display name.
     pub fn set_custom_name(&mut self, name: Option<Text>) {
         self.write_component(CUSTOM_NAME_COMPONENT, name.map(ComponentValue::Text));
+    }
+
+    /// The stack's authored `minecraft:lore` lines, in display order.
+    #[must_use]
+    pub fn lore(&self) -> &[Text] {
+        match self.components.get_str(LORE_COMPONENT) {
+            Some(ComponentValue::Lore(lines)) => lines,
+            _ => &[],
+        }
+    }
+
+    /// Replaces the stack's authored lore, removing the component when empty.
+    pub fn set_lore(&mut self, lore: Vec<Text>) {
+        let value = (!lore.is_empty()).then_some(ComponentValue::Lore(lore));
+        self.write_component(LORE_COMPONENT, value);
     }
 
     /// Accumulated durability damage, or `None` when the stack carries no
@@ -988,6 +1008,12 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Text(name.clone()));
         }
 
+        if !stack.components.lore.is_empty()
+            && let Ok(key) = LORE_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Lore(stack.components.lore.clone()));
+        }
+
         if let Some(damage) = stack.components.damage
             && let Ok(key) = DAMAGE_COMPONENT.parse()
         {
@@ -1217,6 +1243,7 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
     fn from(stack: &ItemStack) -> Self {
         let components = lodestone_model::ItemComponents {
             custom_name: stack.custom_name().cloned(),
+            lore: stack.lore().to_vec(),
             damage: stack.damage().and_then(|d| u32::try_from(d).ok()),
             enchantments: stack.enchantments().to_vec(),
             dyed_color: stack.dyed_color(),
@@ -1574,6 +1601,32 @@ mod tests {
             Some(&ComponentValue::Enchantments(vec![
                 lodestone_model::ItemEnchantment { id: 9, level: 4 }
             ]))
+        );
+    }
+
+    /// Lore crosses the version seam as an ordered list of styled text trees;
+    /// converting a decoded stack must neither flatten nor discard it.
+    #[test]
+    fn lore_is_carried_through_and_exposed_by_the_typed_accessor() {
+        let mut line = Text::literal("Ancient ");
+        let mut child = Text::literal("Rune");
+        child.style.color = Some(lodestone_model::TextColor::Rgb(0x12_ab_ef));
+        child.style.italic = Some(false);
+        line.extra.push(child);
+        let model = lodestone_model::ItemStack {
+            item: id("minecraft:paper"),
+            count: 1,
+            components: ModelItemComponents {
+                lore: vec![line.clone()],
+                ..ModelItemComponents::default()
+            },
+        };
+
+        let converted = ItemStack::from(&model);
+        assert_eq!(converted.lore(), &[line.clone()]);
+        assert_eq!(
+            converted.components().get_str(LORE_COMPONENT),
+            Some(&ComponentValue::Lore(vec![line]))
         );
     }
 

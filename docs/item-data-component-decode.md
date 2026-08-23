@@ -78,16 +78,16 @@ Consumed, grouped by the wire shape they share — each group is one rule, not o
 | fixed-width | `INT` / `FLOAT` / `BOOL` | `dyed_color`, `map_color`, `minimum_attack_charge`, `potion_duration_scale`, `enchantment_glint_override` |
 | six floats | `FLOAT` × 6, no length prefix | `attack_range` |
 | identifier | one UTF-8 string | `item_model`, `tooltip_style`, `note_block_sound` |
-| chat component | network NBT | `custom_name`, `item_name` |
+| chat component | network NBT; `lore` prefixes a capped list count | `custom_name`, `item_name`, `lore` |
 | `TypedEntityData` | registry-scoped VarInt then network NBT ([`read_typed_entity_data`]) | `entity_data`, `block_entity_data` |
 | `CustomData.STREAM_CODEC` | network NBT only, no leading id (unlike plain `custom_data`, which has no `networkSynchronized` at all) | `bucket_entity_data` |
 | `ByteBufCodecs.holder` (`0` inline / `id + 1` reference) | see the reader for each inline body | `instrument`, `provides_trim_material`, `jukebox_playable`, `painting/variant`, plus the pre-existing `trim`, `equippable`'s two sound fields |
 | `HolderSet<T>` | [`read_holder_set`] | `damage_resistant`, `provides_banner_patterns`, plus the pre-existing `repairable` |
 | `List<ConsumeEffect>` | [`read_consume_effects`] — dispatches through the 5-entry `consume_effect_type` registry | `death_protection`, and the tail of `consumable` |
 | `ItemStackTemplate`, truncation-tolerant | [`read_item_stack_template_tolerant`] | `use_remainder`, `sulfur_cube_content`, each entry of `container` |
-| composite | see the reader | `enchantments`, `stored_enchantments`, `tool`, `pot_decorations`, `lore`, `custom_model_data`, `tooltip_display`, `attribute_modifiers`, `potion_contents`, `profile`, `writable_book_content`, `written_book_content`, `bundle_contents`, `charged_projectiles`, `use_effects`, `food`, `consumable`, `use_cooldown`, `weapon`, `blocks_attacks`, `piercing_weapon`, `kinetic_weapon`, `swing_animation`, `suspicious_stew_effects`, `lodestone_tracker`, `firework_explosion`, `fireworks`, `container`, `block_state`, `bees`, `break_sound` |
+| composite | see the reader | `enchantments`, `stored_enchantments`, `tool`, `pot_decorations`, `custom_model_data`, `tooltip_display`, `attribute_modifiers`, `potion_contents`, `profile`, `writable_book_content`, `written_book_content`, `bundle_contents`, `charged_projectiles`, `use_effects`, `food`, `consumable`, `use_cooldown`, `weapon`, `blocks_attacks`, `piercing_weapon`, `kinetic_weapon`, `swing_animation`, `suspicious_stew_effects`, `lodestone_tracker`, `firework_explosion`, `fireworks`, `container`, `block_state`, `bees`, `break_sound` |
 
-`custom_name`, `damage`, `enchantments`, `dyed_color`, `trim`, `map_id`, `pot_decorations`,
+`custom_name`, `lore`, `damage`, `enchantments`, `dyed_color`, `trim`, `map_id`, `pot_decorations`,
 `profile`, `writable_book_content`, `written_book_content`, `bundle_contents`,
 `charged_projectiles` and `attack_range` are **surfaced** into `ItemComponents` as-decoded;
 `potion_contents` is surfaced already mixed into an opaque colour (`potion_color`), and
@@ -97,6 +97,20 @@ opaque byte blob. **Every component in the batch that closed the 60-unmodelled b
 consumed for alignment only** — none gained an `ItemComponents` field, matching the majority
 of the pre-existing census. The value being worthless and consuming the right number of bytes
 being worth a whole packet is the entire point; add a field only when a consumer needs one.
+
+### `minecraft:lore` remains structured until tooltip rendering
+
+`ItemLore.STREAM_CODEC` is a VarInt-counted list of at most 256 network-NBT chat
+components. Each entry decodes through `Text::from_nbt` into
+`ItemComponents::lore`, crosses the game-model boundary as
+`ComponentValue::Lore(Vec<Text>)`, and reaches the container tooltip without
+being flattened. This matters for nested RGB colours and explicit formatting
+such as `italic: false`, neither of which can be reconstructed from plain text.
+
+The tooltip supplies vanilla's dark-purple italic lore formatting as a parent
+`TextStyle`. It does not overwrite the decoded root style: authored children
+inherit those defaults only when they leave a field unspecified, while their
+explicit colour and italic choices remain authoritative.
 
 ### The batch that closed the backlog, and the two that are left
 
