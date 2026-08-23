@@ -914,11 +914,110 @@ impl Particles {
                      payload; dropped"
                 ),
             },
+
+            // -- The water column and weather family ---------------
+            //
+            // `rain` is the splash a raindrop makes where it *lands*, not the
+            // falling streaks: those are `lodestone_render::weather`'s textured
+            // columns, which never become particles at all. Wiring `rain` here
+            // does not duplicate them.
+            "rain" => emit::rain(&mut self.engine, x, y, z),
+            "snowflake" => emit::snowflake(&mut self.engine, x, y, z, xa, ya, za),
+            "bubble_column_up" => {
+                emit::bubble_column_up(&mut self.engine, x, y, z, xa, ya, za);
+            }
+            // `WaterCurrentDownParticle`'s provider ignores the packet's
+            // velocity entirely — the sink speed is a constant and the drift is
+            // the spiral. Passing the wire's words would give every magma
+            // column an initial kick vanilla does not have.
+            "current_down" => emit::current_down(&mut self.engine, x, y, z),
+            "bubble_pop" => emit::bubble_pop(&mut self.engine, x, y, z, xa, ya, za),
+            // The bobber's ring. Its producer is the fishing bobber entity,
+            // which already draws; this is the water it disturbs.
+            "fishing" => emit::fishing(&mut self.engine, x, y, z, xa, ya, za),
+            "dust_plume" => emit::dust_plume(&mut self.engine, x, y, z, xa, ya, za),
+
+            // -- `FallingLeavesParticle` ---------------------------
+            //
+            // One class, three registry types, and the providers differ in five
+            // constants at once — see `emit::LeafParams`, which carries them as
+            // a set so a transposed pair cannot hide. The two untinted variants
+            // take no colour; `tinted_leaves` carries a `ColorParticleOption`.
+            "cherry_leaves" => {
+                emit::falling_leaves(&mut self.engine, x, y, z, emit::LeafParams::cherry(), None);
+            }
+            "pale_oak_leaves" => {
+                emit::falling_leaves(&mut self.engine, x, y, z, emit::LeafParams::pale_oak(), None);
+            }
+            "tinted_leaves" => match options {
+                ParticleOptions::Color { color } => {
+                    emit::falling_leaves(
+                        &mut self.engine,
+                        x,
+                        y,
+                        z,
+                        emit::LeafParams::tinted(),
+                        Some([color[0], color[1], color[2]]),
+                    );
+                }
+                _ => tracing::debug!(
+                    target: "particles",
+                    "tinted_leaves particle with no ColorParticleOption payload; dropped"
+                ),
+            },
+
+            "firefly" => emit::firefly(&mut self.engine, x, y, z, ya),
+            // `FireworkParticles.FlashProvider` reads all four ARGB components:
+            // the alpha byte is a real field here, not padding, and dropping it
+            // makes every firework flash fully opaque.
+            "flash" => match options {
+                ParticleOptions::Color { color } => emit::flash(&mut self.engine, x, y, z, color),
+                _ => tracing::debug!(
+                    target: "particles",
+                    "flash particle with no ColorParticleOption payload; dropped"
+                ),
+            },
+
+            // -- `BreakingItemParticle`'s hardcoded-item providers --
+            //
+            // Three `SimpleParticleType`s with **no wire payload**: each
+            // provider names its own item and calls the four-argument
+            // constructor. The item ids are resolved here rather than baked
+            // into `lodestone-particle`, which knows nothing about the item
+            // registry, and a missing id drops the particle rather than
+            // drawing a wrong sprite.
+            "item_slime" => self.item_burst(pos, "minecraft:slime_ball"),
+            "item_cobweb" => self.item_burst(pos, "minecraft:cobweb"),
+            "item_snowball" => self.item_burst(pos, "minecraft:snowball"),
+
             other => tracing::debug!(
                 target: "particles",
                 "no emitter wired for particle type {other:?}; dropped"
             ),
         }
+    }
+
+    /// One `BreakingItemParticle` from the four-argument constructor, for the
+    /// three registry types whose provider hardcodes an item.
+    ///
+    /// A named helper for the same reason [`Self::drip`] is one: the whole of
+    /// what it adds is the registry lookup and the zero velocity, and spelling
+    /// those three times is three chances to reach for [`emit::item_particle`]
+    /// — the *seven*-argument sibling, which damps the jitter to a tenth and
+    /// would leave these crumbs motionless.
+    fn item_burst(&mut self, pos: [f64; 3], item: &str) {
+        let Some(id) = lodestone_data::items::item_id(item)
+            .and_then(|id| u32::try_from(id).ok())
+        else {
+            tracing::debug!(
+                target: "particles",
+                "no registry id for {item:?}; item particle dropped"
+            );
+            return;
+        };
+        let particle =
+            emit::item_burst_particle(pos[0], pos[1], pos[2], id, self.engine.rng());
+        self.engine.add(particle);
     }
 
     /// One drip of the hang → fall → land chain, at the packet's position.
@@ -1821,6 +1920,25 @@ mod tests {
             ("squid_ink", [0.0, 0.0, 0.0]),
             ("glow_squid_ink", [0.0, 0.0, 0.0]),
             ("sculk_charge_pop", [0.0, 0.0, 0.0]),
+            // The water-column and weather family. `rain` is the impact
+            // splash, not the falling streaks — those are the weather
+            // renderer's textured columns and never become particles.
+            ("rain", [0.0, 0.0, 0.0]),
+            ("snowflake", [0.0, 0.0, 0.0]),
+            ("bubble_column_up", [0.0, 0.0, 0.0]),
+            ("current_down", [0.0, 0.0, 0.0]),
+            ("bubble_pop", [0.0, 0.0, 0.0]),
+            ("fishing", [0.0, 0.0, 0.0]),
+            ("dust_plume", [0.0, 0.0, 0.0]),
+            // `FallingLeavesParticle`'s two payload-free variants. The tinted
+            // third needs a `ColorParticleOption` and so cannot ride this
+            // loop's blanket `ParticleOptions::None`; it is covered by
+            // `no_sheet_is_atlas_resident_and_unreachable_from_the_dispatch`,
+            // which supplies payloads, and by
+            // `the_leaf_variants_differ_in_every_constant_that_separates_them`.
+            ("cherry_leaves", [0.0, 0.0, 0.0]),
+            ("pale_oak_leaves", [0.0, 0.0, 0.0]),
+            ("firefly", [0.0, 0.0, 0.0]),
         ];
         for &(kind, offset) in cases {
             let mut p = resolvable();
@@ -1872,10 +1990,15 @@ mod tests {
             };
             let kind = name.split_once(':').map_or(name, |(_, path)| path);
             let mut p = Particles::new(None);
-            // The two option-carrying types need their payload or they drop;
-            // both sample `Sheet::Generic`, which plain smoke already reaches,
-            // but supplying it keeps this loop a faithful stand-in for the
-            // network path rather than one with two silent holes.
+            // Some types drop outright without their payload, so a bare
+            // `None` here would report their sheets as orphans. This table is
+            // **hand-maintained and it goes stale silently in one direction
+            // only**: a new payload-carrying type left out of it fails this
+            // gate by name (which is how `TintedLeaves` and `Flash` were
+            // caught the day they landed), never the reverse. Types whose
+            // `spawn_one` arm has a payload-less fallback — `effect`,
+            // `instant_effect`, `entity_effect` — deliberately stay out of it,
+            // since exercising the fallback is the more useful arm.
             let options = match kind {
                 "dust" => ParticleOptions::Dust { color: [1.0, 0.0, 0.0], scale: 1.0 },
                 "dust_color_transition" => ParticleOptions::DustColorTransition {
@@ -1883,6 +2006,13 @@ mod tests {
                     to_color: [0.0, 0.0, 1.0],
                     scale: 1.0,
                 },
+                // `ColorParticleOption`, decoded ARGB. Deliberately not grey
+                // and not fully opaque: an arm that transposed a colour
+                // component or dropped the alpha would still pass against
+                // `[1.0; 4]`.
+                "tinted_leaves" | "flash" => {
+                    ParticleOptions::Color { color: [0.25, 0.5, 0.75, 0.6] }
+                }
                 _ => ParticleOptions::None,
             };
             p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.2, 0.3, 0.4], 0.0, 1, options);
@@ -1901,6 +2031,235 @@ mod tests {
             orphans.is_empty(),
             "these sheets are stitched into the particle atlas and no registry type \
              reaches them through the dispatch: {orphans:?}"
+        );
+    }
+
+    /// `item_slime`, `item_cobweb` and `item_snowball` must each carry **their
+    /// own** item's registry id.
+    ///
+    /// These three are the sharpest transposition risk in the dispatch: three
+    /// adjacent arms differing in one string each, all reaching one helper, and
+    /// a swap is invisible everywhere downstream — the particle count, the
+    /// layer, the behaviour and the quad size are byte-identical whichever item
+    /// the arm names, and the only visible difference is the texture. So this
+    /// asserts the id against a registry lookup made *here*, and additionally
+    /// that the three are pairwise distinct, which is what a copy-pasted arm
+    /// fails.
+    ///
+    /// It covers the producer half only: that the right id reaches the
+    /// particle. Whether the *shell* can resolve that id to a sprite is
+    /// `item_uv_table`'s business and is exercised by the crumb gates in
+    /// `consume`.
+    #[test]
+    fn the_three_item_burst_types_carry_their_own_registry_item() {
+        let cases: &[(&str, &str)] = &[
+            ("item_slime", "minecraft:slime_ball"),
+            ("item_cobweb", "minecraft:cobweb"),
+            ("item_snowball", "minecraft:snowball"),
+        ];
+        let mut seen: Vec<u32> = Vec::new();
+        for &(kind, item) in cases {
+            let expected = u32::try_from(
+                lodestone_data::items::item_id(item).expect("a vanilla item is in the registry"),
+            )
+            .expect("a registry id fits u32");
+            let mut p = resolvable();
+            p.spawn_particles(
+                kind,
+                [0.5, 65.0, 0.5],
+                [0.0, 0.0, 0.0],
+                0.0,
+                1,
+                ParticleOptions::None,
+            );
+            let particles = p.engine.particles();
+            assert_eq!(
+                particles.len(),
+                1,
+                "{kind:?} must spawn exactly one particle via the generic dispatch"
+            );
+            assert_eq!(
+                particles[0].sprite,
+                SpriteSource::Item(expected),
+                "{kind:?} must carry {item:?}'s own registry id"
+            );
+            // The four-argument `BreakingItemParticle` constructor, not the
+            // seven-argument one: `gravity = 1.0` and the quad size halved,
+            // with the jitter left undamped.
+            assert!(
+                (particles[0].gravity - 1.0).abs() < f32::EPSILON,
+                "{kind:?} must use `BreakingItemParticle`'s gravity"
+            );
+            seen.push(expected);
+        }
+        let mut distinct = seen.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            seen.len(),
+            "the three item bursts must name three different items; got {seen:?}"
+        );
+    }
+
+    /// The three `FallingLeavesParticle` variants must land on their **own**
+    /// provider constants, not on a sibling's.
+    ///
+    /// One class, three registry types, five constants apart — and the wrong
+    /// set still produces exactly one drifting leaf on the right sheet, so
+    /// every reachability assertion in this module passes either way. This gate
+    /// predicts the value: each arm computes the correct *and* the
+    /// suspected-wrong hypothesis from the provider constants and requires the
+    /// measurement to land on one.
+    ///
+    /// `gravity` is the discriminator because it is the one quantity that is a
+    /// pure function of the provider's `fallAcceleration` with no RNG in it:
+    /// `fallAcceleration * 1.2 * ACCELERATION_SCALE`. `quadSize` and the flow
+    /// scales all consume random draws and so cannot be predicted exactly here.
+    #[test]
+    fn the_leaf_variants_differ_in_every_constant_that_separates_them() {
+        /// `FallingLeavesParticle.ACCELERATION_SCALE`.
+        const ACCELERATION_SCALE: f32 = 0.0025;
+        /// The `1.2F` the constructor multiplies `fallAcceleration` by.
+        const GRAVITY_FACTOR: f32 = 1.2;
+
+        let cherry_gravity = 0.25 * GRAVITY_FACTOR * ACCELERATION_SCALE;
+        let pale_oak_gravity = 0.07 * GRAVITY_FACTOR * ACCELERATION_SCALE;
+        assert!(
+            (cherry_gravity - pale_oak_gravity).abs() > f32::EPSILON,
+            "the two hypotheses must differ, or this gate measures that the code runs"
+        );
+
+        let cases: &[(&str, f32, f32, ParticleOptions)] = &[
+            ("cherry_leaves", cherry_gravity, pale_oak_gravity, ParticleOptions::None),
+            ("pale_oak_leaves", pale_oak_gravity, cherry_gravity, ParticleOptions::None),
+            // `TintedLeavesProvider` takes the **pale oak** constants exactly,
+            // and differs from it only in sheet and colour. Asserting it
+            // against cherry's is the mistake this arm exists to catch.
+            (
+                "tinted_leaves",
+                pale_oak_gravity,
+                cherry_gravity,
+                ParticleOptions::Color { color: [0.25, 0.5, 0.75, 0.6] },
+            ),
+        ];
+        let mut mismatches: Vec<String> = Vec::new();
+        for &(kind, correct, wrong, options) in cases {
+            let mut p = resolvable();
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.0, 0.0, 0.0], 0.0, 1, options);
+            let Some(particle) = p.engine.particles().first() else {
+                mismatches.push(format!("{kind}: spawned nothing"));
+                continue;
+            };
+            let got = particle.gravity;
+            if (got - correct).abs() >= f32::EPSILON {
+                mismatches.push(format!(
+                    "{kind}: gravity {got} is neither its own {correct} nor \
+                     (for diagnosis) the sibling's {wrong}"
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "leaf provider constants are crossed: {mismatches:?}"
+        );
+
+        // The tinted variant is the only one that takes a colour off the wire,
+        // and the three components are deliberately pairwise distinct so a
+        // transposed channel cannot survive.
+        let mut p = resolvable();
+        p.spawn_particles(
+            "tinted_leaves",
+            [0.5, 65.0, 0.5],
+            [0.0, 0.0, 0.0],
+            0.0,
+            1,
+            ParticleOptions::Color { color: [0.25, 0.5, 0.75, 0.6] },
+        );
+        assert_eq!(
+            p.engine.particles()[0].colour,
+            [0.25, 0.5, 0.75],
+            "tinted_leaves must take its RGB from the wire, in order"
+        );
+        // The untinted siblings must be left at the default white — a leaf that
+        // picked up a colour would mean the tint leaked across arms.
+        let mut q = resolvable();
+        q.spawn_particles(
+            "cherry_leaves",
+            [0.5, 65.0, 0.5],
+            [0.0, 0.0, 0.0],
+            0.0,
+            1,
+            ParticleOptions::None,
+        );
+        assert_eq!(
+            q.engine.particles()[0].colour,
+            [1.0, 1.0, 1.0],
+            "cherry_leaves carries no colour payload and must stay untinted"
+        );
+    }
+
+    /// `rain` must be a `WaterDropParticle` at **its own** gravity, and the two
+    /// water-column types must pull in opposite directions.
+    ///
+    /// Three magnitude claims that a reachability gate cannot make, each
+    /// against a specific wrong hypothesis a plausible implementation lands on:
+    ///
+    /// | type | correct | the wrong one |
+    /// |---|---|---|
+    /// | `rain` | `0.06` | `0.04`, `splash`'s — the class it is the base of |
+    /// | `bubble_column_up` | `-0.125` | any positive value, i.e. a sinking bubble |
+    /// | `current_down` | `0.002` | `-0.125`, its sibling's |
+    ///
+    /// The `rain`/`splash` pair is the sharp one: `SplashParticle extends
+    /// WaterDropParticle` and overrides exactly this field, so the natural way
+    /// to write `rain` is to copy `splash` — which silently keeps `0.04` and
+    /// leaves raindrops hanging in the air.
+    #[test]
+    fn the_water_types_carry_their_own_gravity_and_not_a_sibling_s() {
+        fn gravity_of(kind: &str) -> f32 {
+            let mut p = resolvable();
+            p.spawn_particles(
+                kind,
+                [0.5, 65.0, 0.5],
+                [0.0, 0.0, 0.0],
+                0.0,
+                1,
+                ParticleOptions::None,
+            );
+            p.engine
+                .particles()
+                .first()
+                .unwrap_or_else(|| panic!("{kind:?} must spawn a particle"))
+                .gravity
+        }
+
+        let mut mismatches: Vec<String> = Vec::new();
+        for &(kind, correct, wrong) in &[
+            ("rain", 0.06_f32, 0.04_f32),
+            ("splash", 0.04, 0.06),
+            ("bubble_column_up", -0.125, 0.002),
+            ("current_down", 0.002, -0.125),
+        ] {
+            let got = gravity_of(kind);
+            if (got - correct).abs() >= f32::EPSILON {
+                mismatches.push(format!(
+                    "{kind}: gravity {got}, wanted {correct} (the wrong hypothesis is {wrong})"
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "water-family gravities are crossed: {mismatches:?}"
+        );
+
+        // A rising bubble and a sinking one are the whole point of the pair, so
+        // assert the *sign* separately from the magnitudes above: a future
+        // edit that made both `0.002` would satisfy neither claim above only
+        // by accident.
+        assert!(
+            gravity_of("bubble_column_up") < 0.0 && gravity_of("current_down") > 0.0,
+            "a soul-sand column's bubbles must rise and a magma column's must sink"
         );
     }
 

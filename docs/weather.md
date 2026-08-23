@@ -148,7 +148,7 @@ Not reaching pixels, each for a named reason:
 |---|---|
 | **Rain ambience** | `Sim`'s `ShellAudio` is private with no public play method. |
 | **Lightning bolt geometry** | The bolt's own model; deferred (see "Deferred"). |
-| **Rain splash particles** | `ClientLevel.tickWeatherEffects`' `ParticleTypes.RAIN`; needs the per-column heightmap below. |
+| **Rain splash particles**, *locally predicted* | The **particle itself is built and dispatched** — `minecraft:rain` is `WaterDropParticle`, wired in `Particles::spawn_one` and covered in `docs/particle-catalogue.md`, so a server-sent one draws today. What is missing is the *local* producer: `ClientLevel.tickWeatherEffects` spawns these client-side under a raining sky, which needs the per-column heightmap below. **This is a producer gap, not a renderer one** — read it as "nothing here emits them", never as "the particle does not exist". |
 | **Per-column terrain height and `canSeeSky`** | No `column_height` accessor on `ClientHandle`. |
 
 ### Snow: closed
