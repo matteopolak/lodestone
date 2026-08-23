@@ -1156,3 +1156,32 @@ fn the_trident_rig_points_along_negative_y() {
         "the long end must be the +Y one: the tip is the short end at {min_y}"
     );
 }
+
+/// `ghast_model`'s nine tentacle lengths are `SingleThreadedRandomSource(1660)`
+/// draws (`nextInt(7) + 8` each), and used to come from a local reimplementation
+/// of `java.util.Random` — since consolidated into `lodestone-javarandom`. The
+/// expected lengths below come from an **independent** Python re-implementation
+/// of the same LCG (not a call into this workspace's Rust), so this is a real
+/// differential check on the rewrite, not `decode(encode(x)) == x` against our
+/// own code.
+#[test]
+fn ghast_tentacle_lengths_match_an_independent_lcg_reimplementation() {
+    use lodestone_assets::entity_models::ghast_model;
+
+    let model = ghast_model();
+    let mut lengths = Vec::new();
+    for i in 0..9 {
+        let (name, part) = model
+            .root
+            .children
+            .iter()
+            .find(|(n, _)| n == &format!("tentacle{i}"))
+            .expect("every tentacle child must be present");
+        assert_eq!(name, &format!("tentacle{i}"));
+        lengths.push(part.cubes[0].size[1]);
+    }
+    // NB: `ghast_model` bakes the whole rig at `scaling(4.5)`, but the cube
+    // sizes on `PartDef` are pre-bake model-texel values, so these are the raw
+    // `nextInt(7) + 8` draws with no scale factor to undo.
+    assert_eq!(lengths, vec![8.0, 13.0, 9.0, 11.0, 11.0, 10.0, 12.0, 9.0, 12.0]);
+}
