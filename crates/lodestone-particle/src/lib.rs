@@ -1022,14 +1022,14 @@ impl Particle {
             reason = "Java's `(int)` cast on a float truncates; reproduced deliberately"
         )]
         {
-            p.lifetime = (4.0_f32 / rng.next_float().mul_add(0.9, 0.1)) as i32;
+            p.lifetime = (4.0_f32 / rng.next_f32().mul_add(0.9, 0.1)) as i32;
         }
         p
     }
 
     /// `SingleQuadParticle`'s `quadSize` initialiser.
     fn draw_quad_size(&mut self, rng: &mut JavaRandom) {
-        self.quad_size = 0.1 * rng.next_float().mul_add(0.5, 0.5) * 2.0;
+        self.quad_size = 0.1 * rng.next_f32().mul_add(0.5, 0.5) * 2.0;
     }
 
     /// `Particle(level, x, y, z, xa, ya, za)` — the constructor that scatters an
@@ -1059,11 +1059,11 @@ impl Particle {
         let mut p = Self::base(x, y, z, sprite, rng);
         // `xa + (nextFloat() * 2.0F - 1.0F) * 0.4F` — the jitter is computed in
         // float and then widened, so it is quantised to float precision.
-        p.xd = xa + f64::from(rng.next_float().mul_add(2.0, -1.0) * 0.4);
-        p.yd = ya + f64::from(rng.next_float().mul_add(2.0, -1.0) * 0.4);
-        p.zd = za + f64::from(rng.next_float().mul_add(2.0, -1.0) * 0.4);
+        p.xd = xa + f64::from(rng.next_f32().mul_add(2.0, -1.0) * 0.4);
+        p.yd = ya + f64::from(rng.next_f32().mul_add(2.0, -1.0) * 0.4);
+        p.zd = za + f64::from(rng.next_f32().mul_add(2.0, -1.0) * 0.4);
         // `(nextFloat() + nextFloat() + 1.0F) * 0.15F`, in float, then widened.
-        let speed = f64::from((rng.next_float() + rng.next_float() + 1.0) * 0.15);
+        let speed = f64::from((rng.next_f32() + rng.next_f32() + 1.0) * 0.15);
         let dd = p.xd.mul_add(p.xd, p.yd.mul_add(p.yd, p.zd * p.zd)).sqrt();
         let scale = f64::from(0.4_f32);
         p.xd = p.xd / dd * speed * scale;
@@ -1863,7 +1863,7 @@ impl Particle {
         let mut rng = self.tick_rng();
         let mut spawns = Vec::with_capacity(6);
         for _ in 0..6 {
-            let jitter = |r: &mut JavaRandom| (r.next_double() - r.next_double()) * 4.0;
+            let jitter = |r: &mut JavaRandom| (r.next_f64() - r.next_f64()) * 4.0;
             let xx = self.x + jitter(&mut rng);
             let yy = self.y + jitter(&mut rng);
             let zz = self.z + jitter(&mut rng);
@@ -1882,7 +1882,7 @@ impl Particle {
     /// for vanilla's per-particle `random`: particle-burst randomness is not
     /// parity-critical (module docs), only reproducible, and both callers of
     /// this need *several* draws in one tick, which `rng_probe`'s single
-    /// `next_float()` cannot give them.
+    /// `next_f32()` cannot give them.
     fn tick_rng(&self) -> JavaRandom {
         let age_bits = u64::from(self.age.unsigned_abs());
         let seed = (self.x.to_bits() ^ self.z.to_bits() ^ age_bits).cast_signed();
@@ -1893,7 +1893,7 @@ impl Particle {
     /// during `tick`. Derived from the particle's own state so it stays
     /// deterministic without threading the engine RNG through every call.
     fn rng_probe(&self) -> f32 {
-        self.tick_rng().next_float()
+        self.tick_rng().next_f32()
     }
 
     /// `move(double, double, double)`.

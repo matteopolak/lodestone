@@ -21,3 +21,6 @@ lodestone-time = { workspace = true }
 # which is the same swept-AABB code the player uses minus the auto-step, so this
 # reuses it rather than growing a second, silently-diverging copy.
 lodestone-physics = { workspace = true }
+# `java.util.Random`, bit-exact — every particle constant (lifetime, initial
+# velocity, colour jitter, sprite choice) draws from it. See `rng.rs`.
+lodestone-javarandom = { workspace = true }

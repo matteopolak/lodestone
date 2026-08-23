@@ -80,8 +80,8 @@ pub fn terrain_particle(
     p.colour = [0.6 * tint[0], 0.6 * tint[1], 0.6 * tint[2]];
     p.quad_size /= 2.0;
     // Two more draws, *after* the colour is set — order matters for replay.
-    let uo = rng.next_float() * 3.0;
-    let vo = rng.next_float() * 3.0;
+    let uo = rng.next_f32() * 3.0;
+    let vo = rng.next_f32() * 3.0;
     p.behaviour = Behaviour::Terrain { uo, vo };
     p
 }
@@ -180,17 +180,17 @@ pub fn breaking_block_effect(
     // Inset by 0.1 on every axis so the fragment starts inside the face, then
     // one axis is overridden below to sit just outside it.
     let mut xp = rng
-        .next_double()
+        .next_f64()
         .mul_add(shape.max_x - shape.min_x - 0.2, 0.1)
         + x
         + shape.min_x;
     let mut yp = rng
-        .next_double()
+        .next_f64()
         .mul_add(shape.max_y - shape.min_y - 0.2, 0.1)
         + y
         + shape.min_y;
     let mut zp = rng
-        .next_double()
+        .next_f64()
         .mul_add(shape.max_z - shape.min_z - 0.2, 0.1)
         + z
         + shape.min_z;
@@ -251,8 +251,8 @@ pub fn item_particle(
     p.quad_size /= 2.0;
     // Two more draws, *after* the quad size — order matters for replay, exactly as
     // in `terrain_particle`.
-    let uo = rng.next_float() * 3.0;
-    let vo = rng.next_float() * 3.0;
+    let uo = rng.next_f32() * 3.0;
+    let vo = rng.next_f32() * 3.0;
     p.behaviour = Behaviour::Terrain { uo, vo };
     // `xd *= 0.1F; yd *= 0.1F; zd *= 0.1F; xd += xa; …` — see the note above on why
     // this is not `set_power`.
@@ -303,8 +303,8 @@ pub fn spawn_item_particles(
             let rng = engine.rng();
             // `new Vec3((nextFloat() - 0.5) * 0.1, nextFloat() * 0.1 + 0.1, 0.0)`
             let d = (
-                (f64::from(rng.next_float()) - 0.5) * 0.1,
-                f64::from(rng.next_float()).mul_add(0.1, 0.1),
+                (f64::from(rng.next_f32()) - 0.5) * 0.1,
+                f64::from(rng.next_f32()).mul_add(0.1, 0.1),
                 0.0,
             );
             let d = x_rot(d, x_rad);
@@ -316,8 +316,8 @@ pub fn spawn_item_particles(
             // `new Vec3((nextFloat() - 0.5) * 0.3, y1, 0.6)` — note vanilla draws
             // `y1` *before* the horizontal jitter, so the two `nextFloat()` calls
             // are in that order and swapping them desynchronises the sequence.
-            let y1 = (-f64::from(rng.next_float())).mul_add(0.6, -0.3);
-            let p = ((f64::from(rng.next_float()) - 0.5) * 0.3, y1, 0.6);
+            let y1 = (-f64::from(rng.next_f32())).mul_add(0.6, -0.3);
+            let p = ((f64::from(rng.next_f32()) - 0.5) * 0.3, y1, 0.6);
             let p = x_rot(p, x_rad);
             y_rot(p, y_rad)
         };
@@ -607,9 +607,9 @@ pub fn ash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
 /// and toward `-x`/`-z`.
 pub fn white_ash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     let rng = engine.rng();
-    let xa = f64::from(rng.next_float()) * -1.9 * f64::from(rng.next_float()) * 0.1;
-    let ya = f64::from(rng.next_float()) * -0.5 * f64::from(rng.next_float()) * 0.1 * 5.0;
-    let za = f64::from(rng.next_float()) * -1.9 * f64::from(rng.next_float()) * 0.1;
+    let xa = f64::from(rng.next_f32()) * -1.9 * f64::from(rng.next_f32()) * 0.1;
+    let ya = f64::from(rng.next_f32()) * -0.5 * f64::from(rng.next_f32()) * 0.1 * 5.0;
+    let za = f64::from(rng.next_f32()) * -1.9 * f64::from(rng.next_f32()) * 0.1;
     let mut p = base_ash_smoke(
         engine,
         (x, y, z),
@@ -656,7 +656,7 @@ pub fn flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f
     p.xd = p.xd.mul_add(damp, xd);
     p.yd = p.yd.mul_add(damp, yd);
     p.zd = p.zd.mul_add(damp, zd);
-    let jitter = |r: &mut JavaRandom| f64::from((r.next_float() - r.next_float()) * 0.05);
+    let jitter = |r: &mut JavaRandom| f64::from((r.next_f32() - r.next_f32()) * 0.05);
     let rng = engine.rng();
     let (jx, jy, jz) = (jitter(rng), jitter(rng), jitter(rng));
     p.set_pos(p.x + jx, p.y + jy, p.z + jz);
@@ -687,7 +687,7 @@ pub fn bubble(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: 
         rng,
     );
     let rng = engine.rng();
-    let scatter = |r: &mut JavaRandom| f64::from(r.next_float().mul_add(2.0, -1.0) * 0.02);
+    let scatter = |r: &mut JavaRandom| f64::from(r.next_f32().mul_add(2.0, -1.0) * 0.02);
     p.xd = xa.mul_add(f64::from(0.2_f32), scatter(rng));
     p.yd = ya.mul_add(f64::from(0.2_f32), scatter(rng));
     p.zd = za.mul_add(f64::from(0.2_f32), scatter(rng));
@@ -737,7 +737,7 @@ pub fn splash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: 
         p.zd = za;
     }
     p.behaviour = Behaviour::WaterDrop;
-    let frame = engine.rng().next_int_bound(i32::from(Sheet::Splash.frame_count()));
+    let frame = engine.rng().next_i32_bound(i32::from(Sheet::Splash.frame_count()));
     #[expect(
         clippy::cast_sign_loss,
         clippy::cast_possible_truncation,
@@ -754,7 +754,7 @@ pub fn splash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: 
 
 /// One `nextFloat()` from the engine's RNG.
 fn rng_next(engine: &mut ParticleEngine) -> f32 {
-    engine.rng().next_float()
+    engine.rng().next_f32()
 }
 
 /// `AttackSweepParticle` — the arc thrown by a sweeping melee hit.
@@ -957,7 +957,7 @@ pub fn mycelium(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya
 pub fn composter(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let mut p = suspended_town(engine, x, y, z, xa, ya, za, Sheet::Glint);
     p.colour = [1.0, 1.0, 1.0];
-    p.lifetime = 3 + engine.rng().next_int_bound(5);
+    p.lifetime = 3 + engine.rng().next_i32_bound(5);
     engine.add(p);
 }
 
@@ -1052,7 +1052,7 @@ pub fn crimson_spore(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
 /// and a tenth of a crimson spore's collision box.
 pub fn warped_spore(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     let rng = engine.rng();
-    let ya = f64::from(rng.next_float()) * -1.9 * f64::from(rng.next_float()) * 0.1;
+    let ya = f64::from(rng.next_f32()) * -1.9 * f64::from(rng.next_f32()) * 0.1;
     let mut p = suspended(engine, x, y, z, Some((0.0, ya, 0.0)), Sheet::Generic0);
     p.colour = [0.1, 0.1, 0.3];
     p.set_size(0.001, 0.001);
@@ -1071,7 +1071,7 @@ pub fn warped_spore(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
 /// up.
 pub fn spore_blossom_air(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     let mut p = suspended(engine, x, y, z, Some((0.0, -0.8, 0.0)), Sheet::DripFall);
-    p.lifetime = 500 + engine.rng().next_int_bound(501);
+    p.lifetime = 500 + engine.rng().next_i32_bound(501);
     p.gravity = 0.01;
     p.colour = [0.32, 0.5, 0.22];
     engine.add(p);
@@ -1349,7 +1349,7 @@ pub fn sculk_charge_pop(
     p.xd = xa;
     p.yd = ya;
     p.zd = za;
-    p.lifetime = 6 + engine.rng().next_int_bound(4);
+    p.lifetime = 6 + engine.rng().next_i32_bound(4);
     p.behaviour = Behaviour::Animated {
         layer: Layer::Translucent,
     };
@@ -1368,8 +1368,8 @@ pub fn sculk_charge_pop(
 /// docs already give: nothing observes particle randomness across the wire.
 fn gaussian(engine: &mut ParticleEngine) -> f64 {
     let rng = engine.rng();
-    let u1 = rng.next_double().max(1e-12);
-    let u2 = rng.next_double();
+    let u1 = rng.next_f64().max(1e-12);
+    let u2 = rng.next_f64();
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
@@ -1526,8 +1526,8 @@ fn spell_particle(
     sheet: Sheet,
 ) -> Particle {
     let rng = engine.rng();
-    let jitter_x = 0.5 - rng.next_double();
-    let jitter_z = 0.5 - rng.next_double();
+    let jitter_x = 0.5 - rng.next_f64();
+    let jitter_z = 0.5 - rng.next_f64();
     let rng = engine.rng();
     let mut p = Particle::with_velocity(
         x,
@@ -1595,13 +1595,13 @@ pub fn totem_of_undying(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa:
     p.yd = ya;
     p.zd = za;
     p.quad_size *= 0.75;
-    let extra = engine.rng().next_int_bound(12);
+    let extra = engine.rng().next_i32_bound(12);
     p.lifetime = 60 + extra;
     p.sprite = SpriteSource::Sheet {
         sheet: Sheet::Glitter,
         frame: Sheet::Glitter.frame_for_age(0, p.lifetime),
     };
-    let golden = engine.rng().next_int_bound(4) == 0;
+    let golden = engine.rng().next_i32_bound(4) == 0;
     p.colour = if golden {
         [
             rng_next(engine).mul_add(0.2, 0.6),
@@ -1694,7 +1694,7 @@ pub fn huge_explosion(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size:
         reason = "Java's (int) cast on nextInt's own already-integral result; kept for the \
                   same reason every other emitter in this module spells out the cast"
     )]
-    let extra = engine.rng().next_int_bound(4);
+    let extra = engine.rng().next_i32_bound(4);
     p.lifetime = 6 + extra;
     let col = rng_next(engine).mul_add(0.6, 0.4);
     p.colour = [col, col, col];
@@ -2857,7 +2857,7 @@ fn rising(
     p.xd = p.xd.mul_add(damp, xd);
     p.yd = p.yd.mul_add(damp, yd);
     p.zd = p.zd.mul_add(damp, zd);
-    let jitter = |r: &mut JavaRandom| f64::from((r.next_float() - r.next_float()) * 0.05);
+    let jitter = |r: &mut JavaRandom| f64::from((r.next_f32() - r.next_f32()) * 0.05);
     let rng = engine.rng();
     let (jx, jy, jz) = (jitter(rng), jitter(rng), jitter(rng));
     p.set_pos(p.x + jx, p.y + jy, p.z + jz);
@@ -3025,7 +3025,7 @@ pub fn campfire_smoke(
     p.scale(3.0);
     p.set_size(0.25, 0.25);
     let base = if signal { 280 } else { 80 };
-    p.lifetime = engine.rng().next_int_bound(50) + base;
+    p.lifetime = engine.rng().next_i32_bound(50) + base;
     p.gravity = 3.0e-6;
     p.xd = xa;
     p.yd = ya + f64::from(rng_next(engine)) / 500.0;
@@ -3054,7 +3054,7 @@ pub fn end_rod(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya:
     p.yd = ya;
     p.zd = za;
     p.quad_size *= 0.75;
-    p.lifetime = 60 + engine.rng().next_int_bound(12);
+    p.lifetime = 60 + engine.rng().next_i32_bound(12);
     // `has_physics = false` rather than `Behaviour::Flame`: vanilla overrides
     // `move` to skip collision but keeps the ordinary base tick, and the `Flame`
     // behaviour would take flame's own quad-size curve with it.
@@ -3126,7 +3126,7 @@ pub fn electric_spark(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f
     p.xd = xa * 0.25;
     p.yd = ya * 0.25;
     p.zd = za * 0.25;
-    p.lifetime = 2 + engine.rng().next_int_bound(2);
+    p.lifetime = 2 + engine.rng().next_i32_bound(2);
     engine.add(p);
 }
 
@@ -3143,8 +3143,8 @@ pub fn electric_spark(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f
 /// a school of them reads as two populations rather than one colour.
 pub fn glow_squid(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let rng = engine.rng();
-    let jitter_x = 0.5 - rng.next_double();
-    let jitter_z = 0.5 - rng.next_double();
+    let jitter_x = 0.5 - rng.next_f64();
+    let jitter_z = 0.5 - rng.next_f64();
     let mut p = glow_particle(engine, x, y, z, jitter_x, ya, jitter_z, Sheet::Glow);
     p.colour = if engine.rng().next_bool() {
         [0.6, 1.0, 0.8]
@@ -3157,7 +3157,7 @@ pub fn glow_squid(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, 
         p.zd *= f64::from(0.1_f32);
     }
     #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
-    let lifetime = (8.0 / engine.rng().next_double().mul_add(0.8, 0.2)) as i32;
+    let lifetime = (8.0 / engine.rng().next_f64().mul_add(0.8, 0.2)) as i32;
     p.lifetime = lifetime.max(1);
     engine.add(p);
 }
@@ -3182,7 +3182,7 @@ fn copper_sparkle(
     p.xd = xa * horizontal;
     p.yd = ya * 0.01;
     p.zd = za * horizontal;
-    p.lifetime = 10 + engine.rng().next_int_bound(30);
+    p.lifetime = 10 + engine.rng().next_i32_bound(30);
     engine.add(p);
 }
 
@@ -3246,7 +3246,7 @@ pub fn firework(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya
     p.yd = ya;
     p.zd = za;
     p.quad_size *= 0.75;
-    let extra = engine.rng().next_int_bound(12);
+    let extra = engine.rng().next_i32_bound(12);
     p.lifetime = 48 + extra;
     p.sprite = SpriteSource::Sheet {
         sheet: Sheet::Spark,
@@ -3387,7 +3387,7 @@ pub fn sculk_charge(
     p.zd = za;
     p.roll = roll;
     p.o_roll = roll;
-    p.lifetime = engine.rng().next_int_bound(12) + 8;
+    p.lifetime = engine.rng().next_i32_bound(12) + 8;
     // `Animated`, not `AshSmoke`: `SculkChargeParticle` overrides neither
     // `getQuadSize` nor `getLayer`'s default in the way `BaseAshSmokeParticle`
     // does, so borrowing `AshSmoke` here would add a `* 32` fade-in the class
@@ -3485,7 +3485,7 @@ pub fn fly_towards_position(
     let lifetime = (rng_next(engine) * 10.0) as i32 + 30;
     p.lifetime = lifetime;
     p.behaviour = Behaviour::FlyTowardsPosition;
-    let frame = engine.rng().next_int_bound(i32::from(sheet.frame_count()));
+    let frame = engine.rng().next_i32_bound(i32::from(sheet.frame_count()));
     #[expect(
         clippy::cast_sign_loss,
         clippy::cast_possible_truncation,
@@ -3670,7 +3670,7 @@ fn dust_particle(
     // `(int)(8.0 / (random.nextDouble() * 0.8 + 0.2))`, then
     // `(int) Math.max(baseLifetime * scale, 1.0F)`.
     #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
-    let base_lifetime = (8.0 / engine.rng().next_double().mul_add(0.8, 0.2)) as i32;
+    let base_lifetime = (8.0 / engine.rng().next_f64().mul_add(0.8, 0.2)) as i32;
     #[expect(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
