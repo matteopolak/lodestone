@@ -122,6 +122,7 @@ use lodestone_render::{
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
 use lodestone_world::{ChunkPos, SignText, World};
 use lodestone_core::{Nbt, NbtTag};
+use lodestone_javarandom::JavaRandom;
 
 use crate::{
     gpu::{DebugLineVertex, push_box},
@@ -1395,14 +1396,14 @@ impl Book {
             // `open < 0.5` makes the pages riffle *while opening* regardless of
             // the dice, and then it is a 1-in-40 chance per tick. Dropping the
             // first half leaves a book that opens dead still.
-            if self.open < 0.5 || rng.next_int(40) == 0 {
+            if self.open < 0.5 || rng.next_i32_bound(40) == 0 {
                 let old = self.flip_t;
                 // Vanilla's `do { .. } while (old == flipT)`: the difference of
                 // two `nextInt(4)` draws can be zero, and the loop **must**
                 // re-roll rather than accept it. A plain `if` leaves the page
                 // occasionally not turning at all when it was asked to.
                 loop {
-                    self.flip_t += (rng.next_int(4) - rng.next_int(4)) as f32;
+                    self.flip_t += (rng.next_i32_bound(4) - rng.next_i32_bound(4)) as f32;
                     if old != self.flip_t {
                         break;
                     }
@@ -1431,64 +1432,14 @@ impl Book {
 
 }
 
-/// `java.util.Random`, whose algorithm is specified in its own documentation —
-/// a 48-bit truncated linear congruential generator.
-///
-/// Ported rather than pulled in as a dependency (neither `lodestone-shell` nor
-/// `lodestone-render` has an RNG crate) and ported *exactly* rather than
-/// approximated, because it is 12 lines and because `next_int`'s two branches are
-/// not interchangeable: a power-of-two bound is a multiply-and-shift and every
-/// other bound is a **rejection loop**. `nextInt(4)` takes the first path and
-/// `nextInt(40)` the second, and this animation uses both.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct JavaRandom {
-    seed: u64,
-}
-
-impl JavaRandom {
-    const MULTIPLIER: u64 = 0x5DEEC_E66D;
-    const ADDEND: u64 = 0xB;
-    const MASK: u64 = (1 << 48) - 1;
-
-    /// `new Random(seed)` — the constructor scrambles the seed.
-    fn new(seed: u64) -> Self {
-        JavaRandom {
-            seed: (seed ^ Self::MULTIPLIER) & Self::MASK,
-        }
-    }
-
-    /// `next(bits)`.
-    fn next(&mut self, bits: u32) -> i32 {
-        self.seed = self.seed.wrapping_mul(Self::MULTIPLIER).wrapping_add(Self::ADDEND)
-            & Self::MASK;
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the shift leaves at most 32 significant bits, which is what next(bits) returns"
-        )]
-        {
-            (self.seed >> (48 - bits)) as i32
-        }
-    }
-
-    /// `nextInt(bound)`, `bound > 0`.
-    fn next_int(&mut self, bound: i32) -> i32 {
-        debug_assert!(bound > 0);
-        if bound & (bound - 1) == 0 {
-            // Power of two: `(bound * next(31)) >> 31`, in 64-bit arithmetic.
-            return ((i64::from(bound) * i64::from(self.next(31))) >> 31) as i32;
-        }
-        loop {
-            let bits = self.next(31);
-            let value = bits % bound;
-            // Vanilla's overflow guard, kept because it is the *whole* difference
-            // between this and a plain modulo: it rejects the tail that would bias
-            // low values.
-            if bits.wrapping_sub(value).wrapping_add(bound - 1) >= 0 {
-                return value;
-            }
-        }
-    }
-}
+// `JavaRandom` used to be an independent port here, on the stated grounds
+// that neither `lodestone-shell` nor `lodestone-render` had an RNG crate to
+// depend on. Both now do: `lodestone_javarandom::JavaRandom`, the workspace's
+// one copy, shared with `lodestone-particle`, `lodestone-audio` and
+// `lodestone-render`'s lightning bolt (imported at the top of this file).
+// `next_i32_bound`'s two branches are not interchangeable — a power-of-two
+// bound is a multiply-and-shift and every other bound is a rejection loop —
+// and `nextInt(4)`/`nextInt(40)` below take one each.
 
 /// Per-position enchanting-table book animation state, advanced once per client
 /// tick — the third animation fold beside [`ChestLids`] and [`BellShakes`], and
@@ -5061,10 +5012,10 @@ mod shulker_tests {
         let mut seen_low = false;
         let mut seen_high = false;
         for _ in 0..4000 {
-            let a = rng.next_int(4);
+            let a = rng.next_i32_bound(4);
             assert!((0..4).contains(&a), "nextInt(4) produced {a}");
             small[a as usize] = true;
-            let b = rng.next_int(40);
+            let b = rng.next_i32_bound(40);
             assert!((0..40).contains(&b), "nextInt(40) produced {b}");
             seen_low |= b == 0;
             seen_high |= b == 39;

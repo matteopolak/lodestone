@@ -674,9 +674,9 @@ impl Sim {
         self.particles_mut(|p| {
             let engine = p.engine_mut();
             for _ in 0..16 {
-                let xa = f64::from(engine.rng().next_float()) * 2.0 - 1.0;
-                let ya = f64::from(engine.rng().next_float()) * 2.0 - 1.0;
-                let za = f64::from(engine.rng().next_float()) * 2.0 - 1.0;
+                let xa = f64::from(engine.rng().next_f32()) * 2.0 - 1.0;
+                let ya = f64::from(engine.rng().next_f32()) * 2.0 - 1.0;
+                let za = f64::from(engine.rng().next_f32()) * 2.0 - 1.0;
                 if xa * xa + ya * ya + za * za > 1.0 {
                     continue;
                 }
