@@ -897,8 +897,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   generator, bit-exact against the Java specification. Every vanilla system that needs
   a seeded, reproducible draw uses it: particle bursts (`lodestone-particle`), the
   enchanting-table book animation (`lodestone-shell`'s `block_entities.rs`), the
-  lightning bolt's procedural geometry (`lodestone-render`'s `lightning_bolt.rs`), and
-  seeded sound-variant selection (`lodestone-audio`'s `select.rs`).
+  lightning bolt's procedural geometry (`lodestone-render`'s `lightning_bolt.rs`),
+  seeded sound-variant selection (`lodestone-audio`'s `select.rs`), and the ghast
+  model's nine seeded tentacle lengths (`lodestone-assets`'s
+  `entity_models::ghast_model`).
 - [Which player a join presents](./join-identity.md) — The single producer of the
   local player's username and UUID — `crates/lodestone-shell/src/join_identity.rs`.
   Every production join, remote and singleplayer alike, asks

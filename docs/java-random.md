@@ -7,13 +7,18 @@ linear congruential generator, bit-exact against the Java specification. Every
 vanilla system that needs a seeded, reproducible draw uses it: particle bursts
 (`lodestone-particle`), the enchanting-table book animation
 (`lodestone-shell`'s `block_entities.rs`), the lightning bolt's procedural
-geometry (`lodestone-render`'s `lightning_bolt.rs`), and seeded sound-variant
-selection (`lodestone-audio`'s `select.rs`).
+geometry (`lodestone-render`'s `lightning_bolt.rs`), seeded sound-variant
+selection (`lodestone-audio`'s `select.rs`), and the ghast model's nine
+seeded tentacle lengths (`lodestone-assets`'s `entity_models::ghast_model`).
 
-Before this crate existed the identical algorithm was reimplemented **five**
-times across the workspace. Four of those are now this one crate; the fifth,
-`lodestone-worldgen-core::LegacyRandomSource`, deliberately still carries its
-own copy of the LCG core — see "The one deliberate holdout" below.
+Before this crate existed the identical algorithm was reimplemented **six**
+times across the workspace — one more than the count a first grep for
+obvious copies found: `entity_models::ghast_model` had its own local
+`struct JavaRng`, missed by the first pass and found only by grepping for the
+LCG multiplier constant across the whole tree afterwards. Five of those six
+are now this one crate; the sixth, `lodestone-worldgen-core::LegacyRandomSource`,
+deliberately still carries its own copy of the LCG core — see "The one
+deliberate holdout" below.
 
 ## How it works
 
@@ -117,5 +122,5 @@ None — pure integer/float arithmetic, no environment, no feature flags.
 `wasm32`). Every other method needs nothing beyond `std`.
 
 Depended on directly by `lodestone-particle`, `lodestone-audio`,
-`lodestone-render` and `lodestone-shell` — a small leaf crate, so none of
-them pulls in an unrelated subsystem just to get an RNG.
+`lodestone-render`, `lodestone-shell` and `lodestone-assets` — a small leaf
+crate, so none of them pulls in an unrelated subsystem just to get an RNG.
