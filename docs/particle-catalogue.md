@@ -323,13 +323,12 @@ client-predicted per-block-state emitter.
   every other type, and the "target" is simply the packet's own position, with the three
   velocity words carrying the *offset* the mote flies in from. No block-entity wiring was
   involved.
-* **Still not wired:** `dust`/`dust_color_transition` are built, and `tinted_leaves`/`flash`
+* **Still not wired:** `dust`/`dust_color_transition` are built, `tinted_leaves`/`flash`
   now share `entity_effect`'s `ColorParticleOption` arm (see "The everyday environment pass"
-  below). The remaining option-carrying types are the `BlockParticleOption` family (`block`,
-  `block_marker`, `falling_dust`, `block_crumble`, `dust_pillar`) and the `ItemParticleOption`
-  one (`item`) — those two shapes each want a new `ParticleOptions` variant as well as an arm
-  in `decode_particle_options`, which is why they are the ones left. The decoder itself is
-  not the blocker.
+  below), and the whole `BlockParticleOption` family is built (see "The `BlockParticleOption`
+  family" below). The one option-carrying shape left is `ItemParticleOption` (`item`), which
+  wants a new `ParticleOptions` variant as well as an arm in `decode_particle_options`. The
+  decoder itself is not the blocker.
 
 ### The `CritParticle`, `SpellParticle` and `FlyTowardsPositionParticle` families
 
@@ -685,13 +684,61 @@ Still absent from this bucket after the pass, and why:
 * **`elder_guardian`** — the only particle in the registry that is not a quad. It is a full
   `GuardianParticleModel` on its own `ParticleRenderType.ELDER_GUARDIANS` pass, which means a
   rig, a texture and a pipeline rather than an emitter. Genuinely a separate piece of work.
-* **`falling_dust`, `block_crumble`, `dust_pillar`, `block_marker`** — all
-  `BlockParticleOption`, i.e. a block state on the wire, which needs a new
-  `ParticleOptions` variant as well as a decode arm. The geometry side is already built
-  (`SpriteSource::BlockState` and `Behaviour::Terrain` are what `destroy_block` uses), so
-  these are a wire-payload job rather than a rendering one.
 * **`vibration`, `trail`, `shriek`, `vault_connection`, `trial_spawner_detection`** — each
   carries a position or a target on the wire, the same shape.
+
+`falling_dust`, `block_crumble`, `dust_pillar` and `block_marker` **were** on this list and are
+now built — see the section below.
+
+### The `BlockParticleOption` family
+
+Five registry types — `block`, `block_marker`, `block_crumble`, `dust_pillar`, `falling_dust` —
+sharing **one** wire payload and agreeing on nothing else. `BlockParticleOption`'s stream codec
+is `ByteBufCodecs.idMapper(Block.BLOCK_STATE_REGISTRY)`: a single **VarInt** block-state id, and
+the only VarInt in `decode_particle_options`, where every other arm reads a fixed-width `INT` or
+`FLOAT`. It reaches the shell as `ParticleOptions::BlockState { state }`.
+
+The five providers are registered in `ParticleResources`, and reading the shared payload as a
+shared *behaviour* is the mistake to avoid — a `block_marker` would fall and a `falling_dust`
+would wear the block's own texture:
+
+| type | vanilla provider | what it is |
+|---|---|---|
+| `block` | `TerrainParticle.Provider` | the packet's position and velocity, nothing overridden |
+| `block_crumble` | `TerrainParticle.CrumblingProvider` | velocity discarded outright, lifetime re-rolled to `nextInt(10) + 1` |
+| `dust_pillar` | `TerrainParticle.DustPillarProvider` | velocity `(gaussian/30, ya + gaussian/2, gaussian/30)`, lifetime `nextInt(20) + 20` |
+| `block_marker` | `BlockMarker.Provider` | no gravity, no physics, no tint, a flat `0.5` quad size, 80 ticks |
+| `falling_dust` | `FallingDustParticle.Provider` | a **generic sheet mote** tinted from the block, with its own tick |
+
+The predecessor's reading that this was "a wire-payload job, the geometry already exists" was
+right for the first four: `SpriteSource::BlockState` and `Behaviour::Terrain` were already what
+`destroy_block` uses, so those arms are the payload plus a provider's overrides. `falling_dust`
+is the exception — it needed a new `Behaviour::FallingDust`, because its tick is a full override
+whose fall is a **raw** `yd -= 0.003` applied after the move and clamped at a terminal `-0.14`,
+and neither number goes through `gravity`. Reading `0.003` as a gravity multiplier gives a
+thirteenth of the speed and loses the clamp.
+
+`dust_pillar`'s vertical term is the packet's own `ya` **plus** a gaussian, not a gaussian alone;
+that additive base is why a mace smash throws a column upward rather than a puff sideways, and it
+is invisible in a single sample because the gaussian swamps it — the gate that pins it averages
+200 draws and compares the mean against both hypotheses.
+
+Both refusals in `Particles::block_state_payload` are deliberate. A missing payload is a caller
+fault that production cannot produce, since the adapter decodes the state alongside the type. Air
+is vanilla's own — `TerrainParticle.createTerrainParticle` returns `null` for air and for
+`moving_piston` — and it matters because a producer that reads a block *after* removing it sends
+the air state. The provider's third clause, refusing an invisible render shape, is not ported:
+there is no per-state render-shape table here, and the states it would catch have no particle
+sprite either, so they are already refused one layer down.
+
+**One gap, and it is visible.** `FallingDustParticle.Provider` resolves its colour through a
+three-step chain: `FallingBlock.getDustColor`, else the block's tint source, else
+`state.getMapColor(level, pos).col`. This client has data for the middle step only — there is no
+per-state map-colour table anywhere in `lodestone-data`, and neither Mojang's `blocks.json` nor
+`registries.json` carries one — so a block with no tint source arrives white. A sand mote is
+therefore pale rather than sand-coloured. Closing it means dumping `BlockState.getMapColor` off
+the real server the way `crates/lodestone-data/tests/{collision_shapes,hardness}.rs` dump their
+tables; nothing else will do, because a map colour is not derivable from the model or the atlas.
 
 ## Configuration
 
@@ -732,8 +779,8 @@ transcribed vanilla constant, documented inline with its Java source line.
   single frame, not `angry_villager.png`). Add a `Sheet`/`Behaviour` variant only if the tick
   shape is genuinely new; several types share one class and can share a `Behaviour`.
 - The shared `ParticleOptions` decoder now exists (`decode_particle_options`,
-  `crates/protocol/v770/src/adapter/chunk.rs`) — adding another option-carrying type (`block`,
-  `block_marker`, `falling_dust`, `item`, `shriek`, `trail`, `vibration`, …) means a new arm there plus, if the
+  `crates/protocol/v770/src/adapter/chunk.rs`) — adding another option-carrying type (`item`,
+  `shriek`, `trail`, `vibration`, …) means a new arm there plus, if the
   payload's own colour/scale/whatever needs to reach the emitter, a new
   `lodestone_model::event::ParticleOptions` variant threaded through `NetUpdate::Particles` and
   `Particles::spawn_particles`/`spawn_one` (`crates/lodestone-shell/src/particles.rs`) the same

@@ -415,6 +415,53 @@ fn level_particles_decodes_a_dragon_breath_power() {
     assert_eq!(*options, ParticleOptions::Power { power: 0.437_5 });
 }
 
+/// The `BlockParticleOption` family — `block` (1), `block_marker` (2),
+/// `falling_dust` (36), `dust_pillar` (118) and `block_crumble` (122).
+///
+/// One payload type across five registry entries, and the **one width
+/// discontinuity** in `decode_particle_options`: `BlockParticleOption`'s stream
+/// codec is `ByteBufCodecs.idMapper(Block.BLOCK_STATE_REGISTRY)`, which is a
+/// `VarInt`, where every other arm in that function reads a fixed-width `INT`
+/// or `FLOAT`.
+///
+/// The fixture is exactly the two bytes a `VarInt` of 1234 occupies, so the two
+/// hypotheses separate in both directions at once: a four-byte read runs off the
+/// end of the packet and fails outright, and any one-byte read yields 210 rather
+/// than 1234. 1234 is deliberately above 127 for that reason — a state id under
+/// the continuation bit is a single byte and cannot tell the two apart.
+#[test]
+fn level_particles_decodes_the_block_particle_option_family() {
+    // `VarInt(1234)`: low seven bits `1010010` with the continuation bit set,
+    // then `9`. Hand-encoded rather than taken from this crate's own writer.
+    const STATE_BYTES: [u8; 2] = [0xD2, 0x09];
+    const STATE: u32 = 1234;
+
+    let adapter = V770Adapter::new();
+    for (id, name) in [
+        (1u8, "minecraft:block"),
+        (2, "minecraft:block_marker"),
+        (36, "minecraft:falling_dust"),
+        (118, "minecraft:dust_pillar"),
+        (122, "minecraft:block_crumble"),
+    ] {
+        let directives = handle(
+            &adapter,
+            play::clientbound::LEVEL_PARTICLES,
+            &level_particles_bytes(id, &STATE_BYTES),
+        );
+        let Directive::Emit(ClientEvent::Particles { particle, options, .. }) = &directives[0]
+        else {
+            panic!("expected a Particles directive for {name}, got {directives:?}");
+        };
+        assert_eq!(*particle, key(name));
+        assert_eq!(
+            *options,
+            ParticleOptions::BlockState { state: STATE },
+            "{name} must decode its block state as a VarInt"
+        );
+    }
+}
+
 // ---- open_screen ----------------------------------------------------------
 
 #[test]

@@ -1187,6 +1187,14 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 ///   `ByteBufCodecs.FLOAT` power, and no colour, since
 ///   `DragonBreathParticle` draws its purple out of the RNG.
 ///
+/// `minecraft:block`, `minecraft:block_marker`, `minecraft:falling_dust`,
+/// `minecraft:dust_pillar` and `minecraft:block_crumble` carry a
+/// `BlockParticleOption`, whose stream codec is
+/// `ByteBufCodecs.idMapper(Block.BLOCK_STATE_REGISTRY)` — a **VarInt**
+/// block-state id and nothing else. That is the one width discontinuity in
+/// this function: every other arm reads fixed-width `INT`/`FLOAT` fields, and
+/// reading four raw bytes here would decode a state id of 5 as 83,886,080.
+///
 /// `minecraft:tinted_leaves` and `minecraft:flash` carry the **same**
 /// `ColorParticleOption` and share `minecraft:entity_effect`'s arm below. All
 /// three read the alpha byte for real — `FallingLeavesParticle.
@@ -1251,6 +1259,26 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
             let mut reader = Reader::new(bytes);
             let roll = reader.f32().map_err(dec_err)?;
             Ok(ParticleOptions::SculkCharge { roll })
+        }
+        // The whole `BlockParticleOption` family, in one arm because the wire
+        // payload really is one type — `ByteBufCodecs.idMapper(Block.
+        // BLOCK_STATE_REGISTRY)`, i.e. a single **VarInt** block-state id, not
+        // the fixed-width `INT` every arm above reads. The five differ only in
+        // which particle class the provider builds from it.
+        "minecraft:block"
+        | "minecraft:block_marker"
+        | "minecraft:falling_dust"
+        | "minecraft:dust_pillar"
+        | "minecraft:block_crumble" => {
+            let mut reader = Reader::new(bytes);
+            let raw = reader.var_i32().map_err(dec_err)?;
+            let state = u32::try_from(raw).map_err(|_| {
+                AdapterError::Decode(format!(
+                    "{name}: block-state id {raw} is negative — \
+                     `Block.BLOCK_STATE_REGISTRY` ids are non-negative"
+                ))
+            })?;
+            Ok(ParticleOptions::BlockState { state })
         }
         _ => Ok(ParticleOptions::None),
     }
