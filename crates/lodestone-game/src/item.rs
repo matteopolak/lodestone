@@ -1769,6 +1769,7 @@ mod tests {
             count: 3,
             components: ModelItemComponents {
                 custom_name: Some(Text::literal("Excalibur")),
+                lore: vec![Text::literal("Forged beneath the old mountain")],
                 damage: Some(37),
                 enchantments: vec![ItemEnchantment { id: 12, level: 4 }],
                 dyed_color: Some(0x00_11_22_33),
