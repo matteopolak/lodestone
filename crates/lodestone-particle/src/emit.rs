@@ -1413,13 +1413,13 @@ pub fn witch(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f
 /// decide the sheet; the type's own `particles/<name>.json` does, which is why
 /// this takes one.
 ///
-/// `colour` is the provider's `setColor` call. The three
-/// `ParticleOptions`-carrying types (`effect` and `instant_effect` read a
-/// `SpellParticleOption`; `entity_effect` reads a `ColorParticleOption`) supply
-/// theirs from the wire — neither payload is decoded by any protocol family
-/// here yet, so the shell passes white and the caller sees an uncoloured mote.
-/// The parameter exists so that gap lives at the decoder rather than in this
-/// transcription.
+/// `colour` is the provider's `setColor` call. This entry point is the one for
+/// the three types registered against `SpellParticle.Provider`, which take a
+/// bare `SimpleParticleType` and therefore never colour themselves at all:
+/// `infested`, `raid_omen` and `trial_omen`, whose sprites are already tinted
+/// in the texture. The three payload-carrying types have their own entry
+/// points — [`spell_instant`] and [`spell_mob_effect`] — because their tint is
+/// a wire field rather than a caller's constant.
 #[expect(
     clippy::too_many_arguments,
     reason = "mirrors the `SpellParticle` constructor argument for argument, plus the sheet \
@@ -1438,6 +1438,75 @@ pub fn spell(
 ) {
     let mut p = spell_particle(engine, x, y, z, xa, ya, za, sheet);
     p.colour = colour;
+    engine.add(p);
+}
+
+/// `SpellParticle.InstantProvider` — `effect` and `instant_effect`, whose
+/// `SpellParticleOption` names both a tint and a velocity multiplier.
+///
+/// The provider is `setColor(getRed, getGreen, getBlue)` followed by
+/// `setPower(getPower)`, in that order. `setPower` scales `xd`/`zd` and
+/// rescales `yd` about the `0.1` upward bias the base constructor applied, so
+/// it must run **after** [`spell_particle`]'s own `yd *= 0.2F` damp rather than
+/// being folded into the velocity the caller passes — a power applied to the
+/// constructor's arguments instead would multiply a different quantity.
+///
+/// `effect` names [`Sheet::Effect`] and `instant_effect` [`Sheet::Spell`];
+/// the class decides neither, so the sheet is a parameter as it is for
+/// [`spell`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `SpellParticle` constructor argument for argument, plus the sheet \
+              and the two `SpellParticleOption` fields its provider applies"
+)]
+pub fn spell_instant(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    sheet: Sheet,
+    colour: [f32; 3],
+    power: f32,
+) {
+    let mut p = spell_particle(engine, x, y, z, xa, ya, za, sheet);
+    p.colour = colour;
+    p.set_power(power);
+    engine.add(p);
+}
+
+/// `SpellParticle.MobEffectProvider` — `entity_effect`, whose
+/// `ColorParticleOption` is a four-component ARGB word.
+///
+/// `setColor` then `setAlpha`. The alpha is the part it is easiest to drop:
+/// vanilla's own `MobEffectProvider` is the only `SpellParticle` provider that
+/// sets one, and an ambient mob-effect mote is drawn part-transparent by
+/// design. `SpellParticle.setAlpha` also records the value as `originalAlpha`
+/// and its `tick` lerps back towards it — that lerp only ever has something to
+/// do when `isCloseToScopingPlayer()` has forced the alpha to zero (a spyglass
+/// held in first person), which this crate does not model, so holding the
+/// alpha fixed is the same result rather than an approximation.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `SpellParticle` constructor argument for argument, plus the sheet \
+              and the ARGB word its provider applies"
+)]
+pub fn spell_mob_effect(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    sheet: Sheet,
+    colour: [f32; 4],
+) {
+    let mut p = spell_particle(engine, x, y, z, xa, ya, za, sheet);
+    p.colour = [colour[0], colour[1], colour[2]];
+    p.alpha = colour[3];
     engine.add(p);
 }
 
@@ -3188,9 +3257,80 @@ pub fn firework(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya
     engine.add(p);
 }
 
-/// An animated ambient sheet with ordinary physics — `SCULK_CHARGE`, `GUST`,
-/// `SMALL_GUST` and `SONIC_BOOM`, which differ from each other in sheet, scale
-/// and lifetime rather than in tick shape.
+/// `SculkChargeParticle` — the mote a spreading sculk charge leaves behind
+/// (`ParticleTypes.SCULK_CHARGE`).
+///
+/// Its own emitter rather than an [`animated_ambient`] call, because three of
+/// the things its provider does are not that function's shape: the roll comes
+/// off the wire (`SculkChargeParticleOptions::roll`, which is what makes a
+/// charge's motes lie along the direction it is spreading instead of all
+/// sharing one orientation), the lifetime is a per-particle draw
+/// (`random.nextInt(12) + 8`) rather than a constant, and the provider
+/// overwrites the jittered velocity outright with `setParticleSpeed` — so the
+/// packet's three velocity words really are the velocity here, unlike in the
+/// base constructor that scattered them.
+///
+/// `scale(1.5F)`, `friction = 0.96F`, `hasPhysics = false`, `setAlpha(1.0F)`.
+/// `getLightCoords` is `LightCoordsUtil.withBlock(super…, 15)` — a *boost* of
+/// the sampled world light rather than a bare full-bright constant, which this
+/// crate does not model for any behaviour, so a charge in the dark comes out
+/// dimmer than vanilla and never brighter.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `SculkChargeParticle` constructor argument for argument, plus the \
+              roll its provider reads off the options"
+)]
+pub fn sculk_charge(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    roll: f32,
+) {
+    let sheet = Sheet::SculkCharge;
+    let rng = engine.rng();
+    let mut p = Particle::with_velocity(
+        x,
+        y,
+        z,
+        xa,
+        ya,
+        za,
+        SpriteSource::Sheet { sheet, frame: 0 },
+        rng,
+    );
+    p.friction = 0.96;
+    p.scale(1.5);
+    p.has_physics = false;
+    p.alpha = 1.0;
+    // `setParticleSpeed(xAux, yAux, zAux)` — the provider discards the
+    // jitter `with_velocity` just applied and installs the packet's own words.
+    p.xd = xa;
+    p.yd = ya;
+    p.zd = za;
+    p.roll = roll;
+    p.o_roll = roll;
+    p.lifetime = engine.rng().next_int_bound(12) + 8;
+    // `Animated`, not `AshSmoke`: `SculkChargeParticle` overrides neither
+    // `getQuadSize` nor `getLayer`'s default in the way `BaseAshSmokeParticle`
+    // does, so borrowing `AshSmoke` here would add a `* 32` fade-in the class
+    // does not have — and its layer is `TRANSLUCENT`.
+    p.behaviour = Behaviour::Animated {
+        layer: Layer::Translucent,
+    };
+    p.sprite = SpriteSource::Sheet {
+        sheet,
+        frame: sheet.frame_for_age(0, p.lifetime),
+    };
+    engine.add(p);
+}
+
+/// An animated ambient sheet with ordinary physics — `GUST`, `SMALL_GUST` and
+/// `SONIC_BOOM`, which differ from each other in sheet, scale and lifetime
+/// rather than in tick shape.
 ///
 /// [`Behaviour::AshSmoke`] again for [`soul`]'s reason: it means "advance the
 /// sheet by age", which is all `setSpriteFromAge` in each of these classes does.

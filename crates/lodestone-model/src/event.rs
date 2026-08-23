@@ -1633,6 +1633,43 @@ pub enum ParticleOptions {
         /// Size multiplier.
         scale: f32,
     },
+    /// `minecraft:effect` and `minecraft:instant_effect`
+    /// (`SpellParticleOption`) — the potion-effect motes trailing an entity
+    /// under a status effect, and a splash potion's instant burst.
+    Spell {
+        /// Tint, unpacked from the wire's packed RGB24 `i32` the same way
+        /// [`Self::Dust`]'s `color` is. `SpellParticleOption`'s own accessors
+        /// read only the low three bytes (`getRed`/`getGreen`/`getBlue`), so
+        /// the top byte of the wire word is not an alpha here — that is
+        /// [`Self::Color`]'s field, on a different option type.
+        color: [f32; 3],
+        /// Velocity multiplier (`SpellParticleOption::getPower`, applied by
+        /// the provider through `Particle.setPower`). Defaults to `1.0` in the
+        /// data codec but is unconditional on the wire.
+        power: f32,
+    },
+    /// `minecraft:entity_effect` (`ColorParticleOption`) — the ambient motes a
+    /// mob under a status effect, or a lingering potion's cloud, gives off.
+    ///
+    /// Distinct from [`Self::Spell`] despite both driving the same
+    /// `SpellParticle` class: this one is a **four**-component ARGB word with
+    /// no power field, and the two are not interchangeable on the wire (8
+    /// bytes against 4).
+    Color {
+        /// Tint and alpha, unpacked from the wire's packed **ARGB** `i32` —
+        /// `[ARGB.red, ARGB.green, ARGB.blue, ARGB.alpha]`, each `/ 255.0`.
+        /// The alpha byte is the top one and is genuinely used
+        /// (`SpellParticle.MobEffectProvider` calls `setAlpha` with it), so
+        /// dropping it makes every ambient effect mote fully opaque.
+        color: [f32; 4],
+    },
+    /// `minecraft:sculk_charge` (`SculkChargeParticleOptions`).
+    SculkCharge {
+        /// Roll about the view axis, in radians — the one thing that makes a
+        /// sculk charge's motes lie along the direction the charge is
+        /// spreading rather than all sharing one orientation.
+        roll: f32,
+    },
 }
 
 /// Things that happen to the client after a version adapter lifts a packet into
