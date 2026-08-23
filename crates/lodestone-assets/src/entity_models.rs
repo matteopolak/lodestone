@@ -5199,6 +5199,51 @@ pub fn llama_spit_model() -> EntityModelDef {
     }
 }
 
+/// Wind charge / breeze wind charge: two boxes under one `bone` pivot, sheet
+/// 64×32 — transcribed from `WindChargeModel.createBodyLayer`.
+///
+/// `bone`'s two children are named `wind` (a flattened ring, two boxes tilted
+/// 45° about Y) and `wind_charge` (the plain 4×4×4 inner cube). Both entity
+/// types share this rig: `EntityRenderers.java` registers both
+/// `EntityTypes.WIND_CHARGE` and `EntityTypes.BREEZE_WIND_CHARGE` against the
+/// same `WindChargeRenderer`, so `breeze_wind_charge` is an alias in
+/// [`canonical_model_name_for_type`](crate::entity::canonical_model_name_for_type)
+/// rather than a second corpus entry — the same shape as `Bogged` → `skeleton`.
+///
+/// # What this rig does not carry
+///
+/// `WindChargeModel.setupAnim` spins `wind_charge` and `wind` in opposite
+/// directions at 16°/tick, driven by `ageInTicks`; there is no per-tick clock
+/// plumbed to a corpus rig's parts here (the same gap [`shulker_bullet_model`]
+/// documents for its own three-axis tumble), so both parts are baked at their
+/// rest pose. And unlike every other entry in this table,
+/// `WindChargeRenderer.submit` applies **neither** `scale(-1, -1, 1)` nor any
+/// `mulPose` rotation — it submits the model at the dispatcher's bare
+/// translate, so the vanilla box union does not turn to face the entity's
+/// direction of travel at all, only the (unported) internal spin moves it.
+/// [`non_living_vehicle_placement`](crate::entity::non_living_vehicle_placement)
+/// has no "translate only" placement to route this through, so it takes the
+/// same fixed-orientation-under-flip treatment as `shulker_bullet`/
+/// `wither_skull` — a whole-body yaw rotation and a scale flip vanilla does not
+/// apply. Both boxes are close to rotationally symmetric (a 45°-tilted square
+/// ring plus a cube), which is what makes the flip and the extra yaw
+/// non-obvious on screen rather than a visible mirroring defect.
+pub fn wind_charge_model() -> EntityModelDef {
+    let wind = PartDef::new(PartPose::offset_and_rotation(0.0, 0.0, 0.0, 0.0, -0.785_4, 0.0))
+        .with_cube(cube([-4.0, -1.0, -4.0], [8.0, 2.0, 8.0], [15.0, 20.0]))
+        .with_cube(cube([-3.0, -2.0, -3.0], [6.0, 4.0, 6.0], [0.0, 9.0]));
+    let wind_charge =
+        PartDef::new(PartPose::ZERO).with_cube(cube([-2.0, -2.0, -2.0], [4.0, 4.0, 4.0], [0.0, 0.0]));
+    let bone = PartDef::new(PartPose::ZERO)
+        .with_child("wind", wind)
+        .with_child("wind_charge", wind_charge);
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root: PartDef::new(PartPose::ZERO).with_child("bone", bone),
+    }
+}
+
 /// Elder guardian: the guardian mesh baked at a 2.35× mesh scale, on its own sheet.
 ///
 /// The scale is the only geometric difference — same twelve spikes, same eye, same
@@ -6177,6 +6222,14 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
             name: "llama_spit",
             texture: EntityTexture::Fixed("entity/llama/llama_spit"),
             build: llama_spit_model,
+        },
+        // `breeze_wind_charge` shares this rig via an alias in
+        // `canonical_model_name_for_type` rather than a second entry here — see
+        // `wind_charge_model`'s doc.
+        EntityModelEntry {
+            name: "wind_charge",
+            texture: EntityTexture::Fixed("entity/projectiles/wind_charge"),
+            build: wind_charge_model,
         },
         EntityModelEntry {
             name: "elder_guardian",
