@@ -941,6 +941,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   *lightmap*: a 16x16 texture indexed by `(block_level, sky_level)` that `block.vsh`
   folds into the vertex colour with `vertexColor = Color * sample_lightmap(Sampler2,
   UV2)`.
+- [Lightning bolt rendering](./lightning-rendering.md) — The lightning bolt's own
+  geometry: four concentric hollow square tubes traced along one seeded random walk,
+  128 blocks tall, untextured, blended additively. Distinct from the **sky flash**,
+  which `lodestone-render`'s `weather` module has carried since long before this
+  landed — and that split is exactly why the gap survived, because a storm looked
+  like it was doing something.
 - [Lightning](./lightning.md) — Vanilla's thunderstorm lightning: per-chunk
   strike-target selection during a thunderstorm, the `LightningBolt` entity's
   life-cycle, and its entity-facing effects (damage, ignition, and species

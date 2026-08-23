@@ -484,6 +484,11 @@ impl RenderState {
         let beacons = self.beacon_source.beacons(camera.position);
         let (beacon_solid_count, beacon_glow_count) =
             self.beacon_beam.prepare(queue, &view_proj, &beacons);
+
+        // Lightning bolts, rebuilt from scratch each frame exactly as vanilla's
+        // own `submit` does. Before the pass opens, like every sibling here.
+        let lightning_bolt_count = self.lightning_bolt.prepare(queue, &view_proj, entities);
+        stats.lightning_bolt_vertices = lightning_bolt_count as usize;
         stats.beacon_beam_solid_vertices = beacon_solid_count;
         stats.beacon_beam_glow_vertices = beacon_glow_count;
 
@@ -1835,6 +1840,12 @@ impl RenderState {
             // buffer that already holds every opaque surface, including
             // translucent water and blocks, or it would show through them.
             self.beacon_beam.draw_glow(&mut pass, beacon_glow_count);
+            // Lightning bolts, with the translucent geometry and for a
+            // sharper version of the same reason: the pass is **additive**, so
+            // whatever it should brighten has to already be in the framebuffer,
+            // and anything drawn opaquely over it afterward would erase it. See
+            // `gpu/lightning_bolt.rs`'s module doc.
+            self.lightning_bolt.draw(&mut pass, lightning_bolt_count);
             // The end gateway teleport beam's own glow — same placement
             // reasoning as the beacon's, own texture and buffer.
             self.beacon_beam

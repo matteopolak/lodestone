@@ -773,6 +773,15 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "merge_item_displays",
         rule: ClaimRule::Explicit(&["item_display"]),
     },
+    // `LightningBoltRenderer`: procedural geometry from a seeded random walk,
+    // untextured and additively blended. Its own pipeline, its own module and
+    // its own shader — nothing about it fits the entity family.
+    RendererClaim {
+        name: "lightning bolt walk",
+        file: "crates/lodestone-shell/src/gpu/lightning_bolt.rs",
+        symbol: "LIGHTNING_BOLT_TYPE_PATH",
+        rule: ClaimRule::Explicit(&["lightning_bolt"]),
+    },
     // `FireworkEntityRenderer`: a billboarded item model, deliberately *not* a
     // `thrown_item_for` row — that table means "registered to
     // `ThrownItemRenderer`" and a firework is not, so it gets its own claim
