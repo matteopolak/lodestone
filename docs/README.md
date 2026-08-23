@@ -2157,6 +2157,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   framebuffer's stored gamma bytes. This is the world-space sibling of the HUD fix
   `docs/tab-list.md` records; the mechanism differs because a world pass cannot just
   be handed a second view, it needs a second *render pass*.
+- [World-space text samples the lightmap](./world-text-lighting.md) — The three
+  world-space flat-colour text passes — entity nametags (`gpu/nametag.rs`), sign
+  text (`gpu/sign_text.rs`) and `text_display` glyphs and panels
+  (`gpu/display_text.rs`) — multiply vanilla's lightmap texel into every vertex
+  colour they emit, so a sign in a dark room reads dark and a glowing one does not.
+  Until this landed none of the three sampled any lightmap at all and every glyph in
+  the world drew at full brightness, which made `has_glowing_text` a feature with no
+  visible effect in the one situation it exists for.
 - [One bevy `World` — §4.1(c)](./world-unification.md) — Until this change the
   process held **three** `bevy_ecs::World`s: the net thread's
   (`lodestone_client::state::SharedState`, authoritative over the network read-model),

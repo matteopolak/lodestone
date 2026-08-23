@@ -47,16 +47,38 @@
 //! | `nameTags`: colour `-1` (opaque white), background `0` — **no plate** | `nameTags`: colour `-2130706433`, background `getBackgroundOpacity` — **plate** |
 //! | `seeThroughNameTags`: colour `-2130706433` (`0x81_FFFFFF`, white at `129/255`), background `getBackgroundOpacity` — **plate** | *(nothing)* |
 //!
-//! So the plate is drawn exactly once per tag, in whichever group draws
-//! *last*, and it deliberately paints **over** the opaque copy the normal
-//! pass already laid down: the phase list (`SubmitNodeCollection`'s own
-//! `nameTags, seeThroughNameTags` ordering) runs the see-through group
-//! second, which this pass matches in [`NameTagRenderer::draw`]. The
-//! resulting composite for a non-sneaking tag is glyph ink at
-//! `1 - 0.25·(1 - 0.506)` of full white over a backdrop the plate has
-//! darkened to `0.75` of itself — the familiar bright-name-on-dark-slab look.
-//! Both groups are plain `BlendFunction.TRANSLUCENT`
-//! (`wgpu::BlendState::ALPHA_BLENDING` here).
+//! So the plate is drawn exactly once per tag, in whichever group carries it,
+//! and for a non-sneaking tag that is the **see-through** group — which
+//! `FeatureRenderDispatcher.executeTranslucent` runs *first*, before the
+//! depth-tested `nameTags` phase. [`NameTagRenderer::draw`] matches that, and
+//! its own doc records why the earlier reading (the field declaration order
+//! in `SubmitNodeCollection`) was the wrong source. The resulting composite
+//! for a non-sneaking tag is the plate and a faded full-bright copy laid
+//! down first, with the lit opaque copy painting over both wherever the tag
+//! is not occluded — the familiar bright-name-on-dark-slab look, and behind a
+//! wall only the faded copy survives. Both groups are plain
+//! `BlendFunction.TRANSLUCENT` (`wgpu::BlendState::ALPHA_BLENDING` here).
+//!
+//! # Light: only one of the two groups samples a lightmap
+//!
+//! `text.vsh` is compiled per render type, and its `IS_SEE_THROUGH` variant
+//! declares no `UV2` input at all: that branch is `vertexColor = Color`,
+//! while the plain branch is `vertexColor = Color * sample_lightmap(Sampler2,
+//! UV2)`. `text_background.vsh` forks identically. So a see-through name tag
+//! is full-bright in vanilla **by construction**, however its `lightCoords`
+//! argument was computed, and only the depth-tested group takes the world's
+//! light.
+//!
+//! That group's light is not the raw sample either:
+//! `SubmitNodeCollection.submitNameTag` passes
+//! `LightCoordsUtil.lightCoordsWithEmission(lightCoords, 2)` for the
+//! non-discrete case — both halves floored at 2 — and the raw coords for the
+//! discrete (sneaking) one, which is a second thing that submission carries
+//! and the see-through one does not. [`WorldTextLight`] turns the resulting
+//! byte into vanilla's own lightmap texel via
+//! [`lodestone_render::light_color`], on the CPU, because this pass's entire
+//! shader input is one flat vertex colour and vanilla's own multiply is in
+//! its vertex stage too.
 //!
 //! **The plate is drawn before the glyphs within its own group**, matching
 //! `Font.PreparedTextBuilder.visit`, which emits the background effect first
@@ -176,6 +198,86 @@ use crate::entities::EntityDraw;
 struct NameTagVertex {
     position: [f32; 3],
     color: [f32; 4],
+}
+
+/// `LightCoordsUtil.FULL_BRIGHT` (`15728880` = sky 15, block 15) in this
+/// renderer's one-byte `sky << 4 | block` layout.
+///
+/// **Not** [`lodestone_render::ENTITY_FULLBRIGHT`], which is `15 << 4` — sky
+/// 15 and block **0**. That one is a *fallback* for a caller with no world to
+/// sample and still dims with the clock, because `sky_darken` scales the sky
+/// half. Vanilla's `FULL_BRIGHT` sets both halves, and block light does not
+/// dim at dusk, so this byte is the only one that means "bright at midnight
+/// too" — which is exactly what glowing sign text is for. The same
+/// distinction `gpu/entity_passes.rs::framed_content_light` already spells as
+/// `ENTITY_FULLBRIGHT | 0x0F` for a glow item frame's contents.
+pub(super) const TEXT_FULL_BRIGHT: u8 = 0xFF;
+
+/// This frame's two world-scoped lightmap inputs, so a pass that turns a
+/// packed light byte into a tint carries one value rather than two loose
+/// floats.
+///
+/// Both are per-*frame*, not per-draw: `sky_darken` is the clock's
+/// `SKY_LIGHT_FACTOR` and `ambient` is the current dimension's
+/// `AMBIENT_LIGHT_COLOR`. `RenderState` already polls both once a frame for
+/// the terrain and entity passes (`SkyDarkenSource`/`AmbientLightSource`);
+/// this is the seam that hands the same two numbers to the three flat-colour
+/// world-text passes, which had been sampling no lightmap at all.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WorldTextLight {
+    sky_darken: f32,
+    ambient: [f32; 3],
+}
+
+impl WorldTextLight {
+    /// From this frame's already-polled sources — see the type's own doc.
+    pub(super) fn new(sky_darken: f32, ambient: [f32; 3]) -> Self {
+        Self { sky_darken, ambient }
+    }
+
+    /// Overworld noon: `sky_darken = 1.0` and the dimension's default ambient
+    /// colour, which is what `SkyDarkenSource`/`AmbientLightSource` resolve to
+    /// with no world attached.
+    ///
+    /// Every gate in these three passes that predates world-text lighting is
+    /// about *colour resolution* or *layout*, so each takes this plus a
+    /// full-bright packed byte and keeps asserting exactly what it always
+    /// asserted. The gates that are about the light say so in their names and
+    /// pass a real byte instead — a helper that made the tint unconditionally
+    /// `[1, 1, 1]` would have made those unfalsifiable.
+    #[cfg(test)]
+    pub(super) fn overworld_noon() -> Self {
+        Self::new(1.0, lodestone_render::light::OVERWORLD_AMBIENT_LIGHT)
+    }
+
+    /// Vanilla's lightmap texel for `packed`, as an RGB multiplier.
+    ///
+    /// This is [`lodestone_render::light_color`] and nothing else — the one
+    /// authority `shaders/model.wgsl`, `shaders/entity.wgsl` and
+    /// `shaders/fluid.wgsl` all duplicate. It is resolved on the CPU here
+    /// rather than in `shaders/nametag.wgsl` because that shader's whole
+    /// input is one flat vertex colour: vanilla's `text.vsh` does
+    /// `vertexColor = Color * sample_lightmap(Sampler2, UV2)` in its *vertex*
+    /// stage too, so folding the texel into the colour before upload is the
+    /// same arithmetic at the same rate, with no new vertex attribute, no
+    /// second uniform and no lightmap texture to keep in sync.
+    ///
+    /// The multiply is a plain one in **gamma** space, with no sRGB
+    /// round-trip: vanilla is not colour-managed, and these three passes draw
+    /// into the target's raw (non-sRGB) view for exactly that reason — see
+    /// the module doc's colour-space section.
+    #[must_use]
+    pub(super) fn tint(self, packed: u8) -> [f32; 3] {
+        lodestone_render::light_color(packed, self.sky_darken, self.ambient)
+    }
+}
+
+/// `color` with `tint` multiplied into its RGB and its alpha untouched —
+/// `text.vsh`'s `Color * sample_lightmap(...)`, whose alpha channel the
+/// lightmap texture leaves at `1.0`.
+#[must_use]
+pub(super) fn tinted(color: [f32; 4], tint: [f32; 3]) -> [f32; 4] {
+    [color[0] * tint[0], color[1] * tint[1], color[2] * tint[2], color[3]]
 }
 
 /// Vanilla's per-name-tag world scale
@@ -605,6 +707,7 @@ fn quad_vertices(
 /// appended onto `normal_out` (and, when [`crate::entities::NameTag::see_through`]
 /// is set, `see_through_out`). A no-op for an entity with no tag, an empty
 /// tag, or one further than [`MAX_DISTANCE`] from the camera.
+#[allow(clippy::too_many_arguments)]
 fn push_entity_quads(
     raster: &RasterFont,
     ink: &StyledInkLayoutCache,
@@ -612,6 +715,8 @@ fn push_entity_quads(
     camera_position: Vec3,
     right: Vec3,
     up: Vec3,
+    light: WorldTextLight,
+    light_source: &super::EntityLightSource,
     normal_out: &mut Vec<NameTagVertex>,
     see_through_out: &mut Vec<NameTagVertex>,
 ) {
@@ -659,17 +764,58 @@ fn push_entity_quads(
         color: lodestone_render::display::text_background_color(BACKGROUND_ARGB),
         outline_grow: 0.0,
     };
-    let plate_quad = |out: &mut Vec<NameTagVertex>| {
-        out.extend(quad_vertices(plate, half_width, anchor, right, up, plate.color));
+    // The tag's own packed light, exactly as every other entity pass resolves
+    // it (eye-height probe, fire forcing the block half) — `submitNameTag`
+    // takes `state.lightCoords`, the same field `LivingEntityRenderer` hands
+    // its model.
+    //
+    // The **normal** group's non-discrete submission takes
+    // `LightCoordsUtil.lightCoordsWithEmission(lightCoords, 2)`, which floors
+    // *both* halves at 2, so an unoccluded name never goes fully black in a
+    // pitch-dark cave. The discrete (sneaking) submission takes the raw
+    // coords. See-through gets no tint at all — see `see_through_tint` below.
+    let packed = super::entity_passes::entity_light(light_source, draw);
+    let normal_tint = light.tint(if tag.see_through {
+        light_coords_with_emission(packed, 2)
+    } else {
+        packed
+    });
+    // `RenderTypes.textSeeThrough`'s shader is `text.vsh` compiled with
+    // `IS_SEE_THROUGH`, and that branch is literally `vertexColor = Color` —
+    // it declares no `UV2` input and samples no lightmap, so a see-through
+    // name tag is full-bright in vanilla *by construction*, whatever
+    // `lightCoords` it was submitted with. Reading the submission's light
+    // argument rather than the shader it selects is what would make this
+    // range double-dim.
+    let see_through_tint = [1.0, 1.0, 1.0];
+    let plate_quad = |out: &mut Vec<NameTagVertex>, tint: [f32; 3]| {
+        // `text_background.vsh` forks on `IS_SEE_THROUGH` the same way its
+        // glyph sibling does, so the plate takes whichever tint its own group
+        // takes.
+        out.extend(quad_vertices(
+            plate,
+            half_width,
+            anchor,
+            right,
+            up,
+            tinted(plate.color, tint),
+        ));
     };
-    let glyph_quads = |out: &mut Vec<NameTagVertex>, alpha: f32| {
+    let glyph_quads = |out: &mut Vec<NameTagVertex>, alpha: f32, tint: [f32; 3]| {
         for rect in rects {
             // Only alpha comes from the pass; the RGB is the span's own
             // resolved colour, which `layout_styled_ink_runs` deliberately
             // leaves at alpha `1.0` so one cached layout can serve every
             // pass at a different opacity.
             let color = [rect.color[0], rect.color[1], rect.color[2], alpha];
-            out.extend(quad_vertices(*rect, half_width, anchor, right, up, color));
+            out.extend(quad_vertices(
+                *rect,
+                half_width,
+                anchor,
+                right,
+                up,
+                tinted(color, tint),
+            ));
         }
     };
 
@@ -684,16 +830,33 @@ fn push_entity_quads(
     if tag.see_through {
         // Not discrete. The depth-tested submission is opaque white with a
         // background colour of literally `0`; the plate travels with the
-        // faded see-through copy, which draws second and paints over it.
-        glyph_quads(normal_out, NORMAL_COLOR[3]);
-        plate_quad(see_through_out);
-        glyph_quads(see_through_out, SEE_THROUGH_COLOR[3]);
+        // faded see-through copy. `NameTagRenderer::draw` records the
+        // see-through group **first** and the depth-tested one over it, which
+        // is the order `FeatureRenderDispatcher.executeTranslucent` runs the
+        // two phases in — see that method's doc for why the field
+        // declaration order in `SubmitNodeCollection` is not it.
+        glyph_quads(normal_out, NORMAL_COLOR[3], normal_tint);
+        plate_quad(see_through_out, see_through_tint);
+        glyph_quads(see_through_out, SEE_THROUGH_COLOR[3], see_through_tint);
     } else {
         // Discrete (sneaking): one submission only, to the depth-tested
         // group, and it carries both the plate and the faded glyph alpha.
-        plate_quad(normal_out);
-        glyph_quads(normal_out, SEE_THROUGH_COLOR[3]);
+        plate_quad(normal_out, normal_tint);
+        glyph_quads(normal_out, SEE_THROUGH_COLOR[3], normal_tint);
     }
+}
+
+/// `LightCoordsUtil.lightCoordsWithEmission`, in this renderer's one-byte
+/// layout: each half of `packed` floored at `emission` independently.
+///
+/// Vanilla's is `pack(max(block, e), max(sky, e))` on a 32-bit light
+/// coordinate; here the halves are the two nibbles of a byte. The only caller
+/// is the non-discrete name tag's depth-tested submission, at `e = 2`.
+#[must_use]
+fn light_coords_with_emission(packed: u8, emission: u8) -> u8 {
+    let sky = ((packed >> 4) & 0x0F).max(emission);
+    let block = (packed & 0x0F).max(emission);
+    (sky << 4) | block
 }
 
 /// Draws billboarded nametag text above every [`EntityDraw`] carrying one —
@@ -922,6 +1085,8 @@ impl NameTagRenderer {
         view_proj: &[[f32; 4]; 4],
         camera: &Camera,
         entities: &[EntityDraw],
+        light: WorldTextLight,
+        light_source: &super::EntityLightSource,
     ) -> (u32, u32) {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
         let Some(raster) = &self.font else {
@@ -945,6 +1110,8 @@ impl NameTagRenderer {
                 camera.position,
                 right,
                 up,
+                light,
+                light_source,
                 &mut normal,
                 &mut see_through,
             );
@@ -971,19 +1138,40 @@ impl NameTagRenderer {
     /// Records both passes' draws (whichever have vertices). No-op with the
     /// no-jar `font: None` state, since [`prepare`](Self::prepare) always
     /// returns `(0, 0)` there.
+    ///
+    /// # The see-through group draws FIRST
+    ///
+    /// `FeatureRenderDispatcher.executeTranslucent` runs
+    /// `executePhase(collection.seeThroughNameTags)` and *then*
+    /// `executePhase(collection.nameTags)`. This file used to record the
+    /// opposite order, citing the field **declaration** order in
+    /// `SubmitNodeCollection` (`nameTags` then `seeThroughNameTags`) — the
+    /// same trap as reading a packet's wire order off its record's field
+    /// list rather than off its `write` method. The dispatcher is the one
+    /// that runs.
+    ///
+    /// It is not cosmetic, and it is what makes name-tag lighting
+    /// load-bearing. The see-through copy is un-depth-tested, full-bright by
+    /// construction (see [`push_entity_quads`]'s `see_through_tint`) and
+    /// carries the plate; the depth-tested copy is opaque white multiplied by
+    /// the real lightmap. Drawn in vanilla's order the lit copy wins wherever
+    /// the tag is unoccluded, so a name in a dark room reads dark. Drawn the
+    /// other way round a 129/255 full-bright copy paints over the lit one and
+    /// roughly half the darkening is thrown away — the light would reach the
+    /// vertex buffer and mostly not reach the screen.
     pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, counts: (u32, u32)) {
         let (normal_count, see_through_count) = counts;
-        if normal_count > 0 {
-            pass.set_pipeline(&self.normal_pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.normal_vertices.slice(..));
-            pass.draw(0..normal_count, 0..1);
-        }
         if see_through_count > 0 {
             pass.set_pipeline(&self.see_through_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.see_through_vertices.slice(..));
             pass.draw(0..see_through_count, 0..1);
+        }
+        if normal_count > 0 {
+            pass.set_pipeline(&self.normal_pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.normal_vertices.slice(..));
+            pass.draw(0..normal_count, 0..1);
         }
     }
 }
@@ -1130,6 +1318,8 @@ mod tests {
             Vec3::ZERO,
             Vec3::X,
             Vec3::Y,
+            WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
             &mut normal,
             &mut see_through,
         );
@@ -1204,6 +1394,8 @@ mod tests {
             Vec3::ZERO,
             Vec3::X,
             Vec3::Y,
+            WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
             &mut normal,
             &mut see_through,
         );
@@ -1234,6 +1426,8 @@ mod tests {
             Vec3::ZERO,
             Vec3::X,
             Vec3::Y,
+            WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
             &mut normal2,
             &mut see_through2,
         );
@@ -1310,6 +1504,8 @@ mod tests {
             Vec3::ZERO,
             Vec3::X,
             Vec3::Y,
+            WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
             &mut normal,
             &mut see_through,
         );
@@ -1631,7 +1827,18 @@ mod tests {
         };
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
-        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+        push_entity_quads(
+            &raster,
+            &ink,
+            &draw,
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
+            &mut normal,
+            &mut see_through,
+        );
         assert!(!normal.is_empty(), "a coloured, in-range named entity must still contribute normal-pass ink");
 
         let hex = TextColor::Red.rgb();
@@ -1770,7 +1977,18 @@ mod tests {
         };
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
-        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+        push_entity_quads(
+            &raster,
+            &ink,
+            &draw,
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
+            &mut normal,
+            &mut see_through,
+        );
 
         let want_hex = [
             ((hex >> 16) & 0xff) as f32 / 255.0,
@@ -1875,7 +2093,18 @@ mod tests {
         let draw = named_pig(Text::from_legacy("AB"), true);
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
-        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+        push_entity_quads(
+            &raster,
+            &ink,
+            &draw,
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
+            &mut normal,
+            &mut see_through,
+        );
 
         let want = plate_color();
         assert_eq!(want, [0.0, 0.0, 0.0, 64.0 / 255.0], "the plate is black at 64/255");
@@ -1940,7 +2169,18 @@ mod tests {
 
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
-        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+        push_entity_quads(
+            &raster,
+            &ink,
+            &draw,
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
+            &mut normal,
+            &mut see_through,
+        );
 
         let corners: Vec<(f32, f32)> = see_through[..6]
             .iter()
@@ -1998,7 +2238,18 @@ mod tests {
         let draw = named_pig(Text::from_legacy("AB"), false);
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
-        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+        push_entity_quads(
+            &raster,
+            &ink,
+            &draw,
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
+            &mut normal,
+            &mut see_through,
+        );
 
         let want = plate_color();
         assert!(
@@ -2032,12 +2283,181 @@ mod tests {
         let draw = named_pig(Text::default(), true);
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
-        push_entity_quads(&raster, &ink, &draw, Vec3::ZERO, Vec3::X, Vec3::Y, &mut normal, &mut see_through);
+        push_entity_quads(
+            &raster,
+            &ink,
+            &draw,
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            WorldTextLight::overworld_noon(),
+            &super::super::EntityLightSource::default(),
+            &mut normal,
+            &mut see_through,
+        );
         assert!(
             normal.is_empty() && see_through.is_empty(),
             "an empty name must contribute nothing at all, plate included: {} + {}",
             normal.len(),
             see_through.len()
+        );
+    }
+
+    /// An [`super::EntityLightSource`] that answers `packed` everywhere.
+    fn uniform_light(packed: u8) -> super::super::EntityLightSource {
+        super::super::EntityLightSource(Some(Box::new(move |_| Some(packed))))
+    }
+
+    /// Draws `draw` under `source` and returns `(normal, see_through)`.
+    fn tag_at_light(
+        raster: &RasterFont,
+        draw: &EntityDraw,
+        source: &super::super::EntityLightSource,
+    ) -> (Vec<NameTagVertex>, Vec<NameTagVertex>) {
+        let (mut normal, mut see_through) = (Vec::new(), Vec::new());
+        push_entity_quads(
+            raster,
+            &StyledInkLayoutCache::default(),
+            draw,
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            WorldTextLight::overworld_noon(),
+            source,
+            &mut normal,
+            &mut see_through,
+        );
+        (normal, see_through)
+    }
+
+    /// The two groups take **different** light, and only one of them takes any.
+    ///
+    /// `text.vsh`'s `IS_SEE_THROUGH` variant is `vertexColor = Color` and
+    /// declares no `UV2` input, so vanilla's see-through name tag is
+    /// full-bright by construction whatever `lightCoords` it was submitted
+    /// with; the depth-tested one is `Color * sample_lightmap(...)` at
+    /// `lightCoordsWithEmission(lightCoords, 2)`.
+    ///
+    /// Three claims, each with the wrong hypothesis named:
+    ///
+    /// * the see-through range must be **byte-identical** in a pitch-dark cell
+    ///   and a bright one — dimming it would be a faithful reading of the
+    ///   submission's light argument and a wrong reading of the shader it
+    ///   selects;
+    /// * the depth-tested range must move — not moving is the pre-fix
+    ///   behaviour;
+    /// * and it must land on the **floored** byte `0x22`, not on the raw
+    ///   `0x00`. Those two differ by a real margin, asserted before the
+    ///   comparison so the gate cannot pass by their coinciding.
+    #[test]
+    fn a_name_tag_dims_only_in_its_depth_tested_group_and_floors_at_emission_two() {
+        let Some(raster) = load_font() else {
+            return;
+        };
+        let ambient = lodestone_render::light::OVERWORLD_AMBIENT_LIGHT;
+        let draw = named_pig(Text::literal("Babe"), true);
+
+        let dark = uniform_light(0x00);
+        let bright = uniform_light(TEXT_FULL_BRIGHT);
+        let (dark_normal, dark_see_through) = tag_at_light(&raster, &draw, &dark);
+        let (bright_normal, bright_see_through) = tag_at_light(&raster, &draw, &bright);
+        assert!(
+            !dark_normal.is_empty() && !dark_see_through.is_empty(),
+            "a non-discrete tag must contribute to both groups for this gate \
+             to compare them"
+        );
+
+        let as_pairs = |v: &[NameTagVertex]| {
+            v.iter().map(|x| (x.position, x.color)).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            as_pairs(&dark_see_through),
+            as_pairs(&bright_see_through),
+            "the see-through group samples no lightmap in vanilla, so a \
+             pitch-dark cell and a full-bright one must produce identical \
+             vertices — plate included"
+        );
+
+        let floored = light_coords_with_emission(0x00, 2);
+        assert_eq!(floored, 0x22, "the emission floor must apply to both nibbles");
+        let want = lodestone_render::light_color(floored, 1.0, ambient);
+        let unfloored = lodestone_render::light_color(0x00, 1.0, ambient);
+        assert!(
+            want[0] - unfloored[0] > 0.02,
+            "the floored and unfloored tints must differ measurably, or this \
+             gate cannot tell `lightCoordsWithEmission` from a plain sample: \
+             {want:?} vs {unfloored:?}"
+        );
+
+        let bad: Vec<_> = dark_normal
+            .iter()
+            .zip(&bright_normal)
+            .enumerate()
+            .filter(|(_, (d, b))| {
+                (0..3).any(|c| (d.color[c] - b.color[c] * want[c]).abs() > 1e-4)
+            })
+            .map(|(i, (d, b))| (i, d.color, b.color))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "the depth-tested group in a dark cell must be its full-bright \
+             self scaled by {want:?}: {} of {} vertices wrong, e.g. (index, \
+             got, full-bright source) {:?}",
+            bad.len(),
+            dark_normal.len(),
+            bad.first()
+        );
+        assert!(
+            dark_normal
+                .iter()
+                .zip(&bright_normal)
+                .any(|(d, b)| (d.color[0] - b.color[0]).abs() > 0.05),
+            "the depth-tested group must actually have moved — identical \
+             vertices in a dark and a bright cell is the pre-fix behaviour"
+        );
+    }
+
+    /// A **sneaking** tag has only the depth-tested group, and takes the raw
+    /// sampled light rather than the emission-floored byte — the second thing
+    /// `submitNameTag`'s two branches differ in, after the colour.
+    #[test]
+    fn a_sneaking_name_tag_takes_the_raw_sample_not_the_emission_floor() {
+        let Some(raster) = load_font() else {
+            return;
+        };
+        let ambient = lodestone_render::light::OVERWORLD_AMBIENT_LIGHT;
+        let draw = named_pig(Text::literal("Babe"), false);
+
+        let (dark_normal, dark_see_through) = tag_at_light(&raster, &draw, &uniform_light(0x00));
+        let (bright_normal, _) = tag_at_light(&raster, &draw, &uniform_light(TEXT_FULL_BRIGHT));
+        assert!(!dark_normal.is_empty(), "a sneaking tag must draw ink");
+        assert!(
+            dark_see_through.is_empty(),
+            "a sneaking tag contributes nothing to the see-through group"
+        );
+
+        let raw = lodestone_render::light_color(0x00, 1.0, ambient);
+        let floored = lodestone_render::light_color(light_coords_with_emission(0x00, 2), 1.0, ambient);
+        assert!(
+            floored[0] - raw[0] > 0.02,
+            "the two hypotheses must differ, or this gate measures nothing: \
+             {raw:?} vs {floored:?}"
+        );
+
+        let bad: Vec<_> = dark_normal
+            .iter()
+            .zip(&bright_normal)
+            .enumerate()
+            .filter(|(_, (d, b))| (0..3).any(|c| (d.color[c] - b.color[c] * raw[c]).abs() > 1e-4))
+            .map(|(i, (d, _))| (i, d.color))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "a sneaking tag must take the raw sample {raw:?}, not the \
+             emission-floored {floored:?}: {} of {} vertices wrong, e.g. {:?}",
+            bad.len(),
+            dark_normal.len(),
+            bad.first()
         );
     }
 }
