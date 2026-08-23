@@ -42,8 +42,8 @@ use super::block_entities::{BannerLayerDrawBatch, BlockEntityDrawBatch};
 use super::terrain::ModelRenderer;
 use super::{
     ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, CapeDrawBatch, ElytraDrawBatch,
-    EntityDrawBatch, FlameBatch, OrbBatch, PaintingDrawBatch, RenderState, RenderStats, ShadowBatch,
-    WoolPartAccum, humanoid_armour_slot,
+    EntityDrawBatch, EntitySpriteBatch, FlameBatch, OrbBatch, PaintingDrawBatch, RenderState,
+    RenderStats, ShadowBatch, WoolPartAccum, humanoid_armour_slot,
 };
 
 /// One entity's own hitbox width in blocks — its type's base width times its age
@@ -684,6 +684,28 @@ fn eye_probe_offset(type_path: &str, age_scale: f32) -> f32 {
     lodestone_data::entity_type::EntityType::from_name(type_path)
         .map(lodestone_data::entity_dimensions::base_dimensions_for)
         .map_or(0.0, |dims| dims.height * 0.85 * age_scale)
+}
+
+/// How far above its feet the **fishing line's** owner keeps its eye, in blocks.
+///
+/// Vanilla's `getPlayerHandPos` builds its offset from
+/// `owner.getEyePosition(partialTicks)`, and `getEyePosition` reads the eye
+/// height of the entity's **current pose** — so a crouching caster's line leaves
+/// 0.35 blocks lower than a standing one's, on top of the separate `-0.1875`
+/// crouch term the offset itself carries.
+///
+/// [`eye_probe_offset`] alone cannot answer that: its table is the *standing*
+/// eye height, which is the right answer for a light probe (vanilla's own
+/// `getLightProbePosition` is called on entities whose pose this client mostly
+/// does not track) and the wrong one here for the one entity type whose crouch
+/// this client does know about. So this forks on the player's crouch and falls
+/// through to the shared probe offset for everything else, rather than
+/// introducing a second eye-height table.
+fn fishing_owner_eye_offset(owner: &EntityDraw) -> f32 {
+    if owner.anim.crouching {
+        return lodestone_physics::pose::Pose::Crouching.eye_height() * owner.scale;
+    }
+    eye_probe_offset(&owner.type_path, owner.scale)
 }
 
 /// The packed `sky << 4 | block` light one entity draws with — the whole of
@@ -1664,6 +1686,274 @@ impl RenderState {
                 })
             })
             .collect()
+    }
+
+    /// The camera-facing entity sprites — a dragon fireball and a fishing
+    /// bobber, the two 26.2 entity renderers that build a textured quad vertex
+    /// by vertex instead of posing a rig.
+    ///
+    /// Mirrors [`prepare_orbs`](Self::prepare_orbs) exactly, with one
+    /// difference: the orb's eleven cells share one sheet so its batch key
+    /// selects only geometry, while these two sprites are two *separate*
+    /// sheets, so the batch key selects the group-1 bind group as well. Both
+    /// come out of the same index — see `EntityRenderer::sprite_gpu_model`.
+    ///
+    /// The billboard rotation is per *frame*, not per entity, for
+    /// `prepare_orbs`' reason: it depends only on the camera.
+    ///
+    /// # What this pass does **not** draw
+    ///
+    /// The fishing line. It is line geometry through a screen-space ribbon
+    /// pipeline, not a textured quad — see
+    /// [`fishing_line_vertices`](Self::fishing_line_vertices).
+    pub(super) fn prepare_entity_sprites(
+        &self,
+        device: &wgpu::Device,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Vec<EntitySpriteBatch> {
+        let Some(model) = &self.entities.sprite_gpu_model else {
+            return Vec::new();
+        };
+        let orientation = lodestone_render::entity::camera_orientation(camera.view_matrix());
+        let frustum = camera.frustum();
+        // One accumulator per table row, indexed by the row — a `Vec` rather
+        // than a map for `prepare_orbs`' reason: the key is a small dense
+        // integer.
+        let mut accum: Vec<(Vec<glam::Mat4>, Vec<u32>)> =
+            lodestone_render::entity_sprite::ENTITY_SPRITES
+                .iter()
+                .map(|_| (Vec::new(), Vec::new()))
+                .collect();
+
+        for draw in entities {
+            // The **index**, not a reference: it selects the baked geometry and
+            // the texture bind group as well as the row, and recovering it from
+            // a `&'static EntitySprite` by address cannot work — `ENTITY_SPRITES`
+            // is a `const`, so it is inlined per use site. That is not
+            // hypothetical: this pass shipped that way for one run and drew
+            // zero pixels with every table value correct.
+            let Some(index) =
+                lodestone_render::entity_sprite::entity_sprite_index_for(&draw.type_path)
+            else {
+                continue;
+            };
+            let Some(sprite) = lodestone_render::entity_sprite::entity_sprite_at(index) else {
+                continue;
+            };
+            // No sheet, no draw — a sprite whose texture the pack does not
+            // carry contributes nothing rather than an untextured quad, the
+            // same asymmetry `prepare_orbs` and the flame pass document. Tested
+            // **here**, before the counter below, so `entity_sprites_drawn`
+            // never reports a sprite that no draw call will reach: a counter
+            // that leads its own draw is the shape `CLAUDE.md` records for
+            // `vram_bytes`, one layer down.
+            if self
+                .entities
+                .sprite_textures
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_none()
+            {
+                continue;
+            }
+            // A sprite is at most `scale` blocks across after the billboard
+            // rotation, so a box of that half-extent around the feet covers it
+            // however the camera is turned. No `EntityModelSet::resolve` to take
+            // an AABB from: these types have no rig, which is why this pass
+            // exists.
+            let extent = glam::Vec3::splat(sprite.scale.max(0.5));
+            if !frustum.intersects_aabb(draw.feet - extent, draw.feet + extent) {
+                continue;
+            }
+            let Some((transforms, lights)) = accum.get_mut(index) else {
+                continue;
+            };
+            transforms.push(lodestone_render::entity_sprite::entity_sprite_matrix(
+                draw.feet,
+                orientation,
+                sprite.scale,
+            ));
+            // `entity_light` is the shared eye probe every other entity layer
+            // here uses. `full_bright` forces the **block** nibble only, which
+            // is where vanilla's `getBlockLightLevel` override sits — forcing
+            // the whole byte would give a fireball in a dark cave a daytime sky
+            // as well, the same asymmetry `experience_orb_light` records.
+            let packed = entity_light(&self.entity_light, draw);
+            lights.push(u32::from(if sprite.full_bright {
+                packed | 0x0F
+            } else {
+                packed
+            }));
+            stats.entity_sprites_drawn += 1;
+        }
+
+        accum
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (transforms, _))| !transforms.is_empty())
+            .filter_map(|(sprite, (transforms, lights))| {
+                let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
+                // Both vanilla renderers pass `setColor(-1)`, i.e. plain white,
+                // so there is no per-instance tint to carry — an empty slice
+                // leaves every instance at `EntityInstanceRaw`'s untinted
+                // default.
+                upload_instances_tinted(device, &transforms, &lights, &[]).map(|buffer| {
+                    EntitySpriteBatch {
+                        sprite,
+                        buffer,
+                        count,
+                    }
+                })
+            })
+            .filter(|batch| {
+                model
+                    .parts
+                    .get(batch.sprite)
+                    .is_some_and(|range| range.index_count > 0)
+            })
+            .collect()
+    }
+
+    /// This frame's fishing lines, as the flat vertex-pair wire shape
+    /// [`super::debug_lines::DebugLineRenderer::prepare`] expands into
+    /// screen-space ribbons.
+    ///
+    /// One line per `fishing_bobber` whose spawn packet carried an owner id
+    /// ([`EntityDraw::projectile_owner`]), sixteen segments each
+    /// ([`lodestone_render::entity_sprite::fishing_line_points`]).
+    ///
+    /// # Resolving the anchor, which is the whole of the interesting part
+    ///
+    /// Vanilla forks on `getCameraType().isFirstPerson() && owner ==
+    /// Minecraft.getInstance().player`: our own rod seen from our own eyes gets
+    /// a near-plane projection, everything else gets an offset off the owner
+    /// entity's body. This reproduces that fork **without** knowing our own
+    /// entity id, because two facts already encode it:
+    ///
+    /// * `entities::extract_entity_draws` deliberately excludes the local
+    ///   player, so a lookup by the wire's owner id missing means "the owner is
+    ///   us";
+    /// * `ThirdPersonBodyState::into_draw` pushes a synthetic draw under
+    ///   [`super::sources::LOCAL_PLAYER_DRAW_ID`] **iff** the camera is
+    ///   detached.
+    ///
+    /// So: found by real id → third-person branch on that entity; not found but
+    /// the synthetic body is present → third-person branch on our own body;
+    /// neither → first person, and the camera is the anchor. Each of the three
+    /// is exactly the branch vanilla would take.
+    ///
+    /// The one case this gets wrong is a bobber whose owner is a *remote* player
+    /// outside tracking range: vanilla draws nothing at all (`shouldRender`
+    /// requires a non-null player owner) and this anchors the line at our own
+    /// hand. A bobber is always within a few blocks of its caster, so a visible
+    /// bobber whose owner is untracked is close to unreachable — but it is a
+    /// real difference and not a rounding one.
+    pub(super) fn fishing_line_vertices(
+        &self,
+        camera: &Camera,
+        entities: &[EntityDraw],
+    ) -> Vec<super::debug_lines::DebugLineVertex> {
+        use lodestone_render::entity_sprite as sprite;
+
+        let frustum = camera.frustum();
+        let mut out = Vec::new();
+        for draw in entities {
+            if draw.type_path.as_ref() != sprite::FISHING_BOBBER_TYPE_PATH {
+                continue;
+            }
+            let Some(owner_id) = draw.projectile_owner else {
+                continue;
+            };
+            // The line can be long, so the cull box is the *pair* of endpoints
+            // rather than the bobber alone — a bobber just off screen still has
+            // a line crossing it.
+            let owner = entities
+                .iter()
+                .find(|d| d.id == owner_id)
+                .or_else(|| entities.iter().find(|d| d.id == super::sources::LOCAL_PLAYER_DRAW_ID));
+            let hand = match owner {
+                Some(owner) => {
+                    // `getHoldingArm`: the rod's own hand, or the opposite when
+                    // the main hand is holding something else.
+                    let rod_in_main_hand = owner.equipment.iter().any(|(slot, item)| {
+                        *slot == EquipmentSlot::MainHand && item.path() == "fishing_rod"
+                    });
+                    let arm = sprite::fishing_holding_arm_sign(
+                        owner.main_arm_left,
+                        rod_in_main_hand,
+                    );
+                    sprite::fishing_hand_anchor_third_person(
+                        owner.feet
+                            + glam::Vec3::new(0.0, fishing_owner_eye_offset(owner), 0.0),
+                        owner.yaw,
+                        owner.scale,
+                        arm,
+                        owner.anim.crouching,
+                    )
+                }
+                None => {
+                    // First person, and the owner is us. `camera_orientation`'s
+                    // columns are the camera basis in world space — the same
+                    // matrix every billboard here shares — so `right`/`up`/
+                    // `forward` come out of it rather than from a second,
+                    // independently-derived Euler expansion.
+                    let orientation =
+                        lodestone_render::entity::camera_orientation(camera.view_matrix());
+                    let right = orientation.x_axis.truncate();
+                    let up = orientation.y_axis.truncate();
+                    let forward = -orientation.z_axis.truncate();
+                    // The local player has no draw record, so the two owner
+                    // facts vanilla reads off the entity come from elsewhere.
+                    //
+                    // The swing is real: `HandSwingSource` is the same
+                    // `Sim::hand_swing_progress` the first-person arm pass
+                    // polls, i.e. exactly the `getAttackAnim(partialTicks)`
+                    // vanilla passes here — so the rod tip carries the cast
+                    // rather than hanging at rest. Feeding this a constant is
+                    // the defect shape `CLAUDE.md` records for
+                    // `creeper_swelling`, and the source already existed.
+                    //
+                    // The **arm** is not: `Player.getMainArm()` is a synced
+                    // client option this build does not decode for anyone,
+                    // local player included, so right-handed is vanilla's own
+                    // default rather than a guess — the same gap
+                    // `ThirdPersonBodyState::into_draw`'s `main_arm_left`
+                    // states for our own body. It is `1.0` here and not a read
+                    // of `EntityDraw::main_arm_left` because there is no draw
+                    // record to read it from.
+                    sprite::fishing_hand_anchor_first_person(
+                        camera.position,
+                        right,
+                        up,
+                        forward,
+                        camera.near,
+                        camera.fov_y_degrees,
+                        camera.aspect,
+                        sprite::fishing_swing_shaping(self.hand_swing.value()),
+                        1.0,
+                    )
+                }
+            };
+            let lo = draw.feet.min(hand) - glam::Vec3::splat(0.5);
+            let hi = draw.feet.max(hand) + glam::Vec3::splat(0.5);
+            if !frustum.intersects_aabb(lo, hi) {
+                continue;
+            }
+            let points = sprite::fishing_line_points(draw.feet, hand);
+            for pair in points.windows(2) {
+                out.push(super::debug_lines::DebugLineVertex {
+                    position: pair[0].to_array(),
+                    color: sprite::FISHING_LINE_COLOR,
+                });
+                out.push(super::debug_lines::DebugLineVertex {
+                    position: pair[1].to_array(),
+                    color: sprite::FISHING_LINE_COLOR,
+                });
+            }
+        }
+        out
     }
 
     /// Sheep wool layers, over the same instances `prepare_entities`
@@ -2834,6 +3124,7 @@ mod tests {
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
             firework: None,
+            projectile_owner: None,
         }
     }
 

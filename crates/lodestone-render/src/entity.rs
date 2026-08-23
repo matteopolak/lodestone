@@ -3322,7 +3322,7 @@ pub fn brushable_item_mesh(
 /// every vertex to [`GUI_ITEM_LIGHT`](crate::GUI_ITEM_LIGHT) (an inventory slot
 /// is full-bright by definition), and a world-placed item is not, so the caller's
 /// own world sample overwrites it here, in one place, after meshing.
-fn mesh_item_quads_with_light(
+pub(crate) fn mesh_item_quads_with_light(
     quads: &[BakedQuad],
     pose: Mat4,
     gui_light: GuiLight,

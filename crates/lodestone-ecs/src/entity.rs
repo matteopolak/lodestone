@@ -210,6 +210,28 @@ pub struct DeathTime(pub u32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FallingBlockState(pub u32);
 
+/// Who launched this projectile — `Projectile.getOwner()`'s entity id, as the
+/// spawn packet's Object Data field reported it.
+///
+/// Folded by [`crate::ingest::apply_projectile_owner`] from
+/// [`lodestone_model::ClientEvent::ProjectileOwner`]. **Absent** on every entity
+/// the adapter has not established an owner reading for — today only
+/// `minecraft:fishing_bobber` — so absence is the switch a consumer keys on,
+/// exactly as [`FallingBlockState`] above.
+///
+/// Never updated after the spawn: vanilla has no packet that revises Object Data,
+/// and neither `Projectile` nor `FishingHook` synchs an owner field. A hook that
+/// changed owner would be a different entity.
+///
+/// # It is an id, not a resolved entity
+///
+/// Resolving it here would mean holding an ECS `Entity` that can dangle the
+/// moment the owner leaves tracking range, and re-resolving on every removal.
+/// The one consumer (the fishing line's anchor) already walks the frame's draw
+/// list, so an id it can look up there costs nothing and cannot go stale.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectileOwner(pub i32);
+
 /// A **remote** entity's arm-swing progress — vanilla's `LivingEntity`
 /// `swingTime`/`swinging`/`attackAnim`/`oAttackAnim`, folded from
 /// `ClientboundAnimatePacket`'s `SWING_MAIN_HAND` action (id `0`) by

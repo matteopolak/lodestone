@@ -292,6 +292,34 @@ pub struct RenderStats {
     /// same sprite cell share one instanced draw, so this is always ≥ the number
     /// of orb draw calls.
     pub experience_orbs_drawn: usize,
+    /// Camera-facing entity sprites drawn this frame — one per frustum-visible
+    /// `dragon_fireball` or `fishing_bobber`. Zero with no vanilla pack (no
+    /// sheet for either), and zero when neither is on screen; see
+    /// `RenderState::prepare_entity_sprites`.
+    ///
+    /// Counts **entities**, not draw calls: two fireballs on screen share one
+    /// instanced draw, so this is always ≥ the number of sprite draw calls.
+    pub entity_sprites_drawn: usize,
+    /// Fishing-line **segments** submitted this frame — sixteen per bobber whose
+    /// spawn packet carried an owner id and whose line is not culled, so a
+    /// non-zero value that is not a multiple of sixteen means the line producer
+    /// truncated.
+    ///
+    /// Separate from [`Self::entity_sprites_drawn`] on purpose: the bobber's
+    /// billboard and its line go through two different pipelines and failed
+    /// independently while this was being built. One counter would report "the
+    /// bobber is drawing" with the line missing.
+    pub fishing_line_segments: usize,
+    /// Ominous-item-spawner item **copies** meshed this frame — one to five per
+    /// visible spawner whose `DATA_ITEM` has arrived and resolves to baked
+    /// geometry (`lodestone_render::entity::rendered_amount` decides how many),
+    /// and zero for a spawner on the tick it appears, when its grow-in scale is
+    /// still exactly zero.
+    ///
+    /// Copies rather than spawners for the reason `item_drops_drawn` beside it
+    /// counts copies: the cluster is the thing that can silently collapse to
+    /// one, and a per-entity counter cannot see that.
+    pub ominous_spawner_items_drawn: usize,
     /// `minecraft:special` items (chest, shulker box, skull) drawn as **dropped
     /// stacks** this frame, through the block-entity rig rather than baked quads.
     ///

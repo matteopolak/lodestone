@@ -57,7 +57,7 @@ use crate::entity::{
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
     FireworkFlags, PaintingVariant,
     MobState, OnGround,
-    Passengers, Pose, Position, Rotation, Tamed, Variant, Vehicle, Velocity,
+    Passengers, Pose, Position, ProjectileOwner, Rotation, Tamed, Variant, Vehicle, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -480,6 +480,35 @@ pub fn apply_falling_block_state(
             commands
                 .entity(entity)
                 .insert(FallingBlockState(*block_state_id));
+        }
+    }
+}
+
+/// `IngestSet::Apply`: `ClientEvent::ProjectileOwner` → [`ProjectileOwner`].
+///
+/// The mirror of [`apply_falling_block_state`] immediately above, on the other
+/// reading of the same spawn-packet field, and it relies on the same `.chain()`
+/// sync point for the same reason: the adapter emits `EntitySpawned` and then
+/// this, in one batch, so the index always resolves.
+///
+/// A `None` from `index.get` is silently skipped, matching every other system in
+/// this set — an event for an entity we never spawned is a packet for something
+/// out of view, not an error.
+pub fn apply_projectile_owner(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    mut commands: Commands,
+) {
+    for event in batch.events() {
+        let ClientEvent::ProjectileOwner {
+            entity_id,
+            owner_id,
+        } = event
+        else {
+            continue;
+        };
+        if let Some(entity) = index.get(*entity_id) {
+            commands.entity(entity).insert(ProjectileOwner(*owner_id));
         }
     }
 }
@@ -1438,7 +1467,19 @@ impl Plugin for IngestPlugin {
                 // the same `.chain()` sync point after `apply_entity_spawn` that
                 // `apply_entity_passengers` below spells out — the adapter emits
                 // `FallingBlockState` in the same batch as the entity's `AddEntity`.
-                apply_falling_block_state,
+                // Nested rather than listed flat, and the nesting is structural:
+                // `.chain()`'s tuple impl stops at 20 elements and this list is
+                // at that ceiling. The pair inside has no ordering requirement
+                // between its two halves — they read disjoint events and write
+                // disjoint components — so folding them into one set costs
+                // nothing, while both still sit after `apply_entity_spawn`'s
+                // sync point, which is what the id lookups need.
+                (
+                    apply_falling_block_state,
+                    // The other reading of the same spawn field — a fishing
+                    // hook's caster.
+                    apply_projectile_owner,
+                ),
                 // Ordered after `apply_entity_spawn` by the same `.chain()` sync
                 // point the id-addressed systems above rely on, which is what lets
                 // a `SET_PASSENGERS` in the *same* batch as the vehicle's
@@ -2716,6 +2757,57 @@ mod tests {
         );
     }
 
+    /// A fishing bobber's caster reaches [`ProjectileOwner`] — the other
+    /// reading of the same spawn field the test above covers, and the only
+    /// channel it has.
+    ///
+    /// The batched arm is the load-bearing one: the adapter emits
+    /// `EntitySpawned` and `ProjectileOwner` from a single `ADD_ENTITY`, so this
+    /// depends on exactly the `.chain()` sync point after `apply_entity_spawn`
+    /// that the falling block's does.
+    ///
+    /// The owner id is chosen **distinct from the bobber's own** so a fold that
+    /// stored the wrong one of the two adjacent `i32`s cannot pass.
+    #[test]
+    fn a_fishing_bobbers_owner_reaches_its_component() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:fishing_bobber"));
+        assert!(
+            entity_for(&world, 1).get::<ProjectileOwner>().is_none(),
+            "absent until the spawn packet's Object Data is folded — absence is the \
+             switch the line pass keys on"
+        );
+
+        feed(
+            &mut world,
+            ClientEvent::ProjectileOwner {
+                entity_id: 1,
+                owner_id: 44,
+            },
+        );
+        assert_eq!(
+            entity_for(&world, 1).get::<ProjectileOwner>().map(|o| o.0),
+            Some(44),
+            "the owner id must reach the component, or the line has nowhere to anchor"
+        );
+
+        // Spawn and owner in one batch, which is how it really arrives.
+        let mut world = ingest_world();
+        world
+            .resource_mut::<IngestQueue>()
+            .push(spawn_event(2, "minecraft:fishing_bobber"));
+        world.resource_mut::<IngestQueue>().push(ClientEvent::ProjectileOwner {
+            entity_id: 2,
+            owner_id: 55,
+        });
+        world.run_schedule(NetIngest);
+        assert_eq!(
+            entity_for(&world, 2).get::<ProjectileOwner>().map(|o| o.0),
+            Some(55),
+            "a spawn and its Object Data in one batch must both land"
+        );
+    }
+
     /// Both hurt reports reset the same countdown to the same value —
     /// `LivingEntity.handleDamageEvent` and `LivingEntity.animateHurt` write
     /// the identical pair of fields in vanilla.
@@ -3534,6 +3626,14 @@ mod tests {
         assert!(handles_event(&ClientEvent::FallingBlockState {
             entity_id: 1,
             block_state_id: 7,
+        }));
+        // The other reading of the same spawn field. Routed to `ingest` for the
+        // same reason and, like every row here, unreachable in production if the
+        // router does not claim it — `SharedState::apply` forwards only what the
+        // switch lists.
+        assert!(handles_event(&ClientEvent::ProjectileOwner {
+            entity_id: 1,
+            owner_id: 44,
         }));
         // `EntityLeashed` (decoded from `SET_ENTITY_LINK`) — per-entity like
         // `FallingBlockState` immediately above, and used to sit in

@@ -346,6 +346,7 @@ impl RenderState {
             queue,
             &view_proj,
             (self.depth.width, self.depth.height),
+            super::debug_lines::MIN_LINE_WIDTH_PX,
             &self.debug_lines_source.sample(camera.position),
         );
 
@@ -583,6 +584,28 @@ impl RenderState {
         // no cuboid rig, so `prepare_entities` above skips it entirely — this is
         // the only thing that puts an orb on screen.
         let orb_batches = self.prepare_orbs(device, camera, entities, &mut stats);
+
+        // The camera-facing entity sprites — a dragon fireball and a fishing
+        // bobber. Same reasoning as the orbs immediately above: neither has a
+        // cuboid rig, so `prepare_entities` skips both and this is the only
+        // thing that puts either on screen.
+        let sprite_batches = self.prepare_entity_sprites(device, camera, entities, &mut stats);
+        // The fishing line back to whoever cast it. Uploaded here, before the
+        // pass opens, for the reason everything in this block is: buffers
+        // cannot be written mid-pass. Reads the same (possibly body-extended)
+        // `entities` slice, which is load-bearing rather than incidental — the
+        // synthetic third-person body's presence in it is exactly how
+        // `fishing_line_vertices` tells a detached camera from a first-person
+        // one.
+        let fishing_line_vertices = self.fishing_line_vertices(camera, entities);
+        stats.fishing_line_segments = fishing_line_vertices.len() / 2;
+        let fishing_line_count = self.fishing_line.prepare(
+            queue,
+            &view_proj,
+            (self.depth.width, self.depth.height),
+            super::debug_lines::VANILLA_LINE_WIDTH_PX,
+            &fishing_line_vertices,
+        );
 
         // Block entities (chests, that fix). Not derived from `entities` — a
         // chest is a *block*, gathered from the world's block-entity records by
@@ -1553,6 +1576,52 @@ impl RenderState {
                     stats.draw_calls += 1;
                 }
             }
+
+            // The camera-facing entity sprites, immediately after the orbs and
+            // before translucent water for the reason they are: both write
+            // depth, so drawing either after the water surface would paint a
+            // submerged bobber over it.
+            //
+            // The **base** entity pipeline, not the orb's: vanilla's
+            // `entityCutout`/`entityCutoutCull` is `DepthStencilState.DEFAULT`
+            // plus a `0.5` alpha cutout, which is exactly what `fs_main` already
+            // is — see `EntityRenderer::sprite_gpu_model`. One vertex/index
+            // binding for both sprites and one instanced draw per sprite on
+            // screen, but group 1 is rebound per batch because the two sprites
+            // are two separate standalone sheets rather than two cells of one.
+            if !sprite_batches.is_empty()
+                && let Some(model) = &self.entities.sprite_gpu_model
+            {
+                pass.set_pipeline(&self.entities.pipeline.pipeline);
+                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                pass.set_vertex_buffer(0, model.vertices.slice(..));
+                pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for batch in &sprite_batches {
+                    let (Some(range), Some(Some(texture))) = (
+                        model.parts.get(batch.sprite),
+                        self.entities.sprite_textures.get(batch.sprite),
+                    ) else {
+                        continue;
+                    };
+                    if range.index_count == 0 {
+                        continue;
+                    }
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(1, batch.buffer.slice(..));
+                    let end = range.index_start + range.index_count;
+                    pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
+                    stats.draw_calls += 1;
+                }
+            }
+
+            // The fishing line, immediately after the bobber it hangs off, so
+            // the two reach the frame together and a missing one is
+            // unambiguous. Depth-tested against terrain (a line behind a wall
+            // does not bleed through) but not depth-writing, which is this
+            // pass's own state rather than vanilla's `RenderTypes.lines()` —
+            // at 2.5 logical pixels the difference is whether two overlapping
+            // lines z-fight, and they do not.
+            self.fishing_line.draw(&mut pass, fishing_line_count);
 
             if let Some(model) = &self.model {
                 // Dropped items, through the *model* pipeline rather than the

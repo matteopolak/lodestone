@@ -298,6 +298,21 @@ pub struct RenderState {
     /// a source.
     debug_lines: DebugLineRenderer,
     debug_lines_source: DebugLinesSource,
+    /// The fishing line — a **second** [`DebugLineRenderer`], not a second
+    /// implementation of one.
+    ///
+    /// It is separate from `debug_lines` above rather than sharing its buffer
+    /// for two reasons, and only the first is obvious: the F3 overlay is toggled
+    /// off almost always and this is gameplay geometry that must draw
+    /// regardless, and the two want different on-screen widths (see
+    /// `debug_lines::VANILLA_LINE_WIDTH_PX`). Everything expensive — the
+    /// pipeline, the shader, the ribbon expansion — is shared, which is the
+    /// point: that expansion already exists twice in this module tree and a
+    /// third copy is how they stop agreeing.
+    ///
+    /// Fed by `RenderState::fishing_line_vertices`, drawn immediately after the
+    /// entity sprite pass so the bobber and its line reach the frame together.
+    fishing_line: DebugLineRenderer,
     /// The render half of `ExtractSet::Debug`'s billboard channel (issue
     /// #161, `docs/plugin-api.md`) — [`DebugLinesSource`]'s sibling for
     /// textured/billboard-style plugin draws rather than plain lines. See
@@ -828,6 +843,24 @@ struct ShadowBatch {
 struct OrbBatch {
     /// Which sprite cell, i.e. which part of the shared orb mesh.
     icon: u32,
+    buffer: wgpu::Buffer,
+    count: u32,
+}
+
+/// One camera-facing entity sprite's uploaded instance buffer for a frame — the
+/// [`lodestone_render::entity_sprite`] counterpart to [`OrbBatch`].
+///
+/// The batch key is the **sprite**, i.e. the row of
+/// [`lodestone_render::entity_sprite::ENTITY_SPRITES`], because unlike the orb's
+/// eleven cells the two sprites are two separate sheets and therefore two
+/// separate group-1 bind groups. `sprite` indexes both
+/// `EntityRenderer::sprite_gpu_model`'s part list and
+/// `EntityRenderer::sprite_textures`, which is the invariant that keeps the
+/// geometry and the sheet from being chosen independently.
+struct EntitySpriteBatch {
+    /// Which row of `ENTITY_SPRITES`, i.e. which part of the shared mesh and
+    /// which texture bind group.
+    sprite: usize,
     buffer: wgpu::Buffer,
     count: u32,
 }

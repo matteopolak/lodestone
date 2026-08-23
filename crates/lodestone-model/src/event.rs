@@ -1903,6 +1903,34 @@ pub enum ClientEvent {
         /// `Block.getId(BlockState)` numbers them for this protocol version.
         block_state_id: u32,
     },
+    /// A projectile's **owner** entity id, from its spawn packet's
+    /// **Object Data** field — the same trailing VarInt
+    /// [`FallingBlockState`](Self::FallingBlockState) reads, under the reading
+    /// `Projectile.getAddEntityPacket` gives it.
+    ///
+    /// `Projectile` writes `owner == null ? 0 : owner.getId()` there, and
+    /// `FishingHook` overrides that to `owner == null ? this.getId() : owner.getId()`
+    /// so the field is never `0` for a hook. Like the falling block's state, this
+    /// is the **only** channel it travels on: neither `Projectile` nor
+    /// `FishingHook.defineSynchedData` registers an owner accessor, so no
+    /// `SET_ENTITY_DATA` packet ever carries it and a consumer that ignores this
+    /// event can never learn who cast the rod.
+    ///
+    /// Emitted immediately after the entity's own [`EntitySpawned`](Self::EntitySpawned),
+    /// so a consumer keyed on the entity id always has the entity first.
+    ///
+    /// Adapters emit this only for the types whose Object Data they have
+    /// *established* means an owner id — today that is `minecraft:fishing_bobber`,
+    /// the one type with a live consumer (the line drawn back to the caster's
+    /// hand). Widening it to every `Projectile` subclass is a decode change, not a
+    /// new event.
+    ProjectileOwner {
+        /// The projectile's entity id.
+        entity_id: i32,
+        /// The owner's entity id, as the spawn packet's Object Data field
+        /// reported it.
+        owner_id: i32,
+    },
     /// An entity's attributes were (re)published.
     ///
     /// Each snapshot fully replaces the named attribute's base value and modifier
@@ -3782,6 +3810,10 @@ pub fn route(event: &ClientEvent) -> Route {
         // shell instead would compile, test green, and never run — `apply` consults
         // both switches and only forwards what each lists.
         | ClientEvent::FallingBlockState { .. }
+        // The other reading of the same spawn field, routed the same way and for
+        // the same reason: the owner id becomes `ProjectileOwner` on the ingest
+        // entity and the render extract bridges it through `EntityIndex`.
+        | ClientEvent::ProjectileOwner { .. }
         // Per-entity despite carrying no entity id, and the distinction is worth
         // stating because "no id" reads as a local-player scalar. The server sends
         // `ClientboundMoveVehiclePacket` only to *reject* a position the
@@ -4244,7 +4276,7 @@ mod route_tests {
         // Asserting the two counts agree turns it into evidence a reader can see,
         // and catches a variant named twice.
         assert_eq!(
-            total, 133,
+            total, 134,
             "the `ClientEvent` variant count changed. That is fine and expected — \
              update `docs/event-routing.md` and this number together, which is the \
              whole point of this gate firing."

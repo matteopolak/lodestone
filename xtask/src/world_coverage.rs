@@ -792,6 +792,33 @@ const ENTITY_RENDERERS: &[RendererClaim] = &[
         symbol: "merge_firework_rocket",
         rule: ClaimRule::Explicit(&["firework_rocket"]),
     },
+    // `DragonFireballRenderer`/`FishingHookRenderer`: one camera-facing quad
+    // each, off their own standalone sheets. One anchor for both because one
+    // pass draws both — the same shape as the moving-block claim above, and
+    // unlike the display renderers, which are three separate functions.
+    //
+    // `Explicit` rather than `LiteralsInSymbol` over `ENTITY_SPRITES` for the
+    // reason the rule's own doc gives: this is a dedicated per-type pass. The
+    // table it reads names one of the two through a `const` rather than a
+    // literal, so a literal scan would silently claim only the fireball —
+    // exactly the half-covered reading a reviewed list avoids.
+    RendererClaim {
+        name: "entity sprite billboard",
+        file: "crates/lodestone-shell/src/gpu/entity_passes.rs",
+        symbol: "prepare_entity_sprites",
+        rule: ClaimRule::Explicit(&["dragon_fireball", "fishing_bobber"]),
+    },
+    // `OminousItemSpawnerRenderer`: the contained stack's own item model, grown
+    // in over 50 ticks and spun at 40 degrees a tick. Its own claim rather than
+    // a second id on the dropped-item one, for the same anchor-check reason the
+    // display renderers give: `merge_ominous_spawner_item` disappearing must
+    // fail this scan.
+    RendererClaim {
+        name: "ominous spawner item",
+        file: "crates/lodestone-shell/src/gpu/world_items.rs",
+        symbol: "merge_ominous_spawner_item",
+        rule: ClaimRule::Explicit(&["ominous_item_spawner"]),
+    },
     // `PaintingRenderer`: a flat slab of `width x height` blocks, its front
     // face the variant's own sprite and its back and edges a shared tile.
     // Neither a rig nor a billboard, so it has its own pass rather than a

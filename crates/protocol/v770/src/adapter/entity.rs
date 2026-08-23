@@ -459,6 +459,23 @@ fn handle_add_entity(
     // spawn: the field means something different for every type that reads it
     // (a display block, an item-frame rotation), and one event that claimed to
     // carry "a block state" for all of them would be wrong for most.
+    // `FishingHook.getAddEntityPacket` puts the caster's entity id in the same
+    // Object Data field — `owner == null ? this.getId() : owner.getId()`, so it
+    // is never the `0` a bare `Projectile` would write for an ownerless shot.
+    // Nothing else carries it: `FishingHook.defineSynchedData` registers only
+    // `DATA_HOOKED_ENTITY` and `DATA_BITING`, so a client that drops this field
+    // has no way to learn where the line is anchored and can only draw the
+    // bobber floating unattached.
+    //
+    // Guarded on the type for the reason the falling block's arm below is: this
+    // one VarInt means something different for every type that reads it.
+    if name == FISHING_BOBBER_TYPE {
+        directives.push(Directive::Emit(ClientEvent::ProjectileOwner {
+            entity_id,
+            owner_id: data,
+        }));
+    }
+
     if name == FALLING_BLOCK_TYPE {
         directives.push(Directive::Emit(ClientEvent::FallingBlockState {
             entity_id,
@@ -476,9 +493,12 @@ fn handle_add_entity(
 /// `EntityTypes.PAINTING`'s registry key — the type whose default variant is
 /// synthesized at spawn, above.
 const PAINTING_TYPE: &str = "minecraft:painting";
-/// `EntityTypes.FALLING_BLOCK`'s registry key — the one entity type whose
-/// `ADD_ENTITY` Object Data field this adapter interprets.
+/// `EntityTypes.FALLING_BLOCK`'s registry key — one of the two entity types
+/// whose `ADD_ENTITY` Object Data field this adapter interprets.
 const FALLING_BLOCK_TYPE: &str = "minecraft:falling_block";
+/// `EntityTypes.FISHING_BOBBER`'s registry key — the other. Its Object Data is
+/// the caster's entity id, not a block state; see the arm that reads it.
+const FISHING_BOBBER_TYPE: &str = "minecraft:fishing_bobber";
 /// Decodes `remove_entities` (a VarInt-length list of VarInt ids) into a removal
 /// event.
 fn handle_remove_entities(

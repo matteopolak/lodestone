@@ -802,6 +802,24 @@ pub struct EntityDraw {
     /// Bridged off the *ingest* entity through [`EntityIndex`] in
     /// [`extract_entity_draws`], like [`Self::painting`] above.
     pub firework: Option<lodestone_ecs::entity::FireworkFlags>,
+    /// Who launched this projectile — the caster's entity id, or `None` for
+    /// every entity the adapter has not established an owner reading for. Today
+    /// that means it is `Some` on a `fishing_bobber` and `None` on everything
+    /// else, which is the switch the fishing-line pass keys on.
+    ///
+    /// Bridged off the *ingest* entity's
+    /// [`lodestone_ecs::entity::ProjectileOwner`] through [`EntityIndex`] in
+    /// [`extract_entity_draws`], like [`Self::firework`] above.
+    ///
+    /// **An id, deliberately, and one that need not resolve.** The draw site
+    /// looks it up in the same frame's draw slice; a miss means the owner is the
+    /// *local player*, who `extract_entity_draws` excludes by construction, so
+    /// the anchor falls back to the camera exactly as vanilla's own
+    /// first-person branch does. A remote owner outside tracking range would
+    /// take that same fallback and anchor the line at our own hand — vanilla
+    /// draws nothing at all there, but a bobber whose owner is untracked is
+    /// already outside anything this client can see.
+    pub projectile_owner: Option<i32>,
     /// This entity's resolved nametag (issue #100), narrowed from
     /// [`RenderNameTag`]. `None` draws nothing — the common case for every
     /// entity with no visible custom name.
@@ -1853,6 +1871,9 @@ pub fn extract_pickup_draws(
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
             firework: None,
+            // A pickup animation is a dropped item in flight, never a
+            // projectile — nothing cast it, so there is no owner to anchor to.
+            projectile_owner: None,
             feet,
             yaw: 0.0,
             head_yaw: 0.0,
@@ -2514,7 +2535,7 @@ pub fn extract_entity_draws(
     // stand overwrites the humanoid walk cycle in vanilla, posed or not, so a
     // missing component resolves to `ArmorStandPose::VANILLA_DEFAULT` rather
     // than to "no pose". See `ARMOR_STAND_TYPE_PATH`.
-    (tameds, vehicles, armor_stands, item_frame_rotations, armor_stand_poses, painting_variants, firework_flags): (
+    (tameds, vehicles, armor_stands, item_frame_rotations, armor_stand_poses, painting_variants, firework_flags, projectile_owners): (
         Query<&lodestone_ecs::entity::Tamed>,
         Query<&lodestone_ecs::entity::Vehicle>,
         Query<&lodestone_ecs::entity::ArmorStandFlags>,
@@ -2528,6 +2549,12 @@ pub fn extract_entity_draws(
         // `FireworkFlags` lives on the ingest entity too, bridged the same way
         // and nested here for the same `SystemParam`-arity reason.
         Query<&lodestone_ecs::entity::FireworkFlags>,
+        // `ProjectileOwner` lives on the ingest entity too
+        // (`lodestone_ecs::ingest::apply_projectile_owner` inserts it from the
+        // spawn packet's Object Data field, the same field `FallingBlockState`
+        // reads under a different type's interpretation), bridged the same way
+        // and nested here for the same `SystemParam`-arity reason.
+        Query<&lodestone_ecs::entity::ProjectileOwner>,
     ),
     tracks: Query<(
         &MinecraftEntityId,
@@ -2818,6 +2845,14 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| firework_flags.get(entity).ok())
             .copied();
+        // Who cast this projectile, bridged off the ingest entity the same way.
+        // `None` for every entity type the adapter has not established an owner
+        // reading for — today everything but a fishing bobber — which is the
+        // switch the fishing-line pass keys on.
+        let projectile_owner = index
+            .get(id.0)
+            .and_then(|entity| projectile_owners.get(entity).ok())
+            .map(|owner| owner.0);
         // The variant sheet, bridged off the ingest entity's `Variant` exactly as
         // `block_state` and `experience_orb_value` above are, and for their reason:
         // `lodestone_ecs::ingest::apply_entity_metadata` inserts `Variant` *there*,
@@ -2873,6 +2908,7 @@ pub fn extract_entity_draws(
             item_frame_rotation,
             painting,
             firework,
+            projectile_owner,
             feet: render_feet(from, to, clock),
             yaw: render_yaw(from, to, clock),
             head_yaw: render_head_yaw(from, to, clock),
@@ -5008,6 +5044,7 @@ mod tests {
                 cape_sway: (0.0, 0.0, 0.0),
                 painting: None,
                 firework: None,
+                projectile_owner: None,
             }
         }
 

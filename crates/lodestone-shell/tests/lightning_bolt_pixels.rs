@@ -65,6 +65,7 @@ fn bolt(id: i32, type_path: &str, at: glam::Vec3) -> EntityDraw {
         item_frame_rotation: 0,
         painting: None,
         firework: None,
+        projectile_owner: None,
         id,
         type_path: std::sync::Arc::from(type_path),
         item: None,

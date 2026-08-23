@@ -192,6 +192,13 @@ impl RenderState {
                     // A projectile holds no equipment; skip the held-item scan.
                     continue;
                 }
+                if draw.type_path.as_ref()
+                    == lodestone_render::entity_sprite::OMINOUS_ITEM_SPAWNER_TYPE_PATH
+                {
+                    self.merge_ominous_spawner_item(model, draw, &frustum, &mut combined, stats);
+                    // A spawner holds no equipment either.
+                    continue;
+                }
                 self.merge_held_items(model, draw, &frustum, &mut combined, stats);
                 continue;
             }
@@ -990,6 +997,118 @@ impl RenderState {
         );
         combined.merge(&mesh);
         stats.projectiles_drawn += 1;
+    }
+
+    /// Merge an ominous item spawner's floating item into `combined` —
+    /// `OminousItemSpawnerRenderer.submit`.
+    ///
+    /// The spawner entity itself has **no** geometry at all: vanilla's renderer
+    /// draws only the contained stack, so an entity whose `DATA_ITEM` has not
+    /// arrived (or whose stack is empty) contributes nothing, exactly as
+    /// `if (!state.item.isEmpty())` does.
+    ///
+    /// # Not a dropped item, and not a thrown one either
+    ///
+    /// It shares the drop's *cluster* (up to five copies, jittered by
+    /// [`rendered_amount`]/[`item_cluster_jitter`]) and shares the projectile's
+    /// full-bright light, but its own transform is neither: it grows in over 50
+    /// ticks and spins at 40°/tick about `+Y`, with **no** bob, no hover lift
+    /// and no camera billboarding. See
+    /// [`lodestone_render::entity_sprite::ominous_spawner_item_matrix`] for what
+    /// reusing either sibling's matrix would look like.
+    ///
+    /// # Two deliberate divergences
+    ///
+    /// * The scale ramp is driven by `EntityDraw::anim.age_ticks`, which counts
+    ///   from when this client first *tracked* the entity rather than from the
+    ///   server-side spawn. A spawner that comes into view mid-life therefore
+    ///   grows in again. Vanilla's own `ageInTicks` is the entity's `tickCount`,
+    ///   which a client also only learns from the moment it spawns the entity —
+    ///   so the two agree for a spawner created in view and differ for one that
+    ///   walks into range, which is the same approximation the dropped item's
+    ///   bob phase already accepts.
+    /// * The cluster jitter is seeded from the entity id, where vanilla seeds it
+    ///   from `getSeedForItemStack` (item id plus damage). Same choice, same
+    ///   reason, as the drop path above: `item_cluster_jitter` is the one seed
+    ///   this renderer has, and two spawners holding the same item scattering
+    ///   identically is not the readable outcome.
+    fn merge_ominous_spawner_item(
+        &self,
+        model: &ModelRenderer,
+        draw: &EntityDraw,
+        frustum: &lodestone_render::Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        use lodestone_render::entity_sprite as sprite;
+
+        // `ItemDisplayContext.GROUND` — `extractItemGroupRenderState` resolves
+        // in `GROUND`, the same context a drop and a thrown projectile use.
+        let Some(geometry) = draw
+            .item
+            .as_ref()
+            .and_then(|id| model.items.get(id))
+            .and_then(|v| v.resolve(&ItemStateContext::new(DisplaySlot::Ground)))
+        else {
+            return;
+        };
+        // The spawner's hitbox is 0.25 blocks and the item never exceeds one, so
+        // a half-block box round the feet covers it at full scale.
+        if !frustum.intersects_aabb(
+            draw.feet - glam::Vec3::splat(0.5),
+            draw.feet + glam::Vec3::splat(0.5),
+        ) {
+            return;
+        }
+        let item_scale = sprite::ominous_spawner_item_scale(draw.anim.age_ticks);
+        // Nothing to draw on the tick it appears, and a zero scale collapses
+        // every vertex onto one point rather than drawing a degenerate sliver.
+        if item_scale <= 0.0 {
+            return;
+        }
+        let spin = sprite::ominous_spawner_spin_degrees(draw.anim.age_ticks);
+        let ground = ground_transform(&geometry.display, geometry.gui_light);
+        let live_components = lodestone_model::item::ItemComponents {
+            dyed_color: draw.item_dyed_color,
+            potion_color: draw.item_potion_color,
+            ..Default::default()
+        };
+        // The same up-to-five-copy cluster the drop path builds, and the same
+        // flat-versus-solid fork: `submitMultipleFromCount` fans a flat sprite
+        // along `z` and jitters a solid model in all three axes.
+        let (min_z, max_z) = posed_item_z_extent(&geometry.quads, &ground);
+        let depth = max_z - min_z;
+        let flat = depth <= FLAT_ITEM_DEPTH_THRESHOLD;
+        let amount = rendered_amount(draw.count);
+        let fan_step = depth * 1.5;
+        let jitter_extent = if flat { 0.075 } else { 0.15 };
+        for copy in 0..amount {
+            let mut offset = item_cluster_jitter(draw.id, copy, jitter_extent);
+            if flat {
+                offset.z =
+                    fan_step * (copy as f32 - (amount.saturating_sub(1) as f32) / 2.0);
+            }
+            let mut mesh = sprite::ominous_spawner_item_mesh(
+                &geometry.quads,
+                geometry.gui_light,
+                &ground,
+                draw.feet,
+                item_scale,
+                spin,
+                offset,
+                // `15728880` — `LightTexture.FULL_BRIGHT`, passed literally by
+                // the vanilla renderer, which never samples the world.
+                ENTITY_FULLBRIGHT,
+            );
+            lodestone_render::stamp_live_item_tint(
+                &mut mesh,
+                &geometry.quads,
+                &geometry.live_tints,
+                &live_components,
+            );
+            combined.merge(&mesh);
+            stats.ominous_spawner_items_drawn += 1;
+        }
     }
 
     /// Merge whatever `draw` is holding into `combined`, posed off its own arm.

@@ -191,6 +191,36 @@ pub(super) struct EntityRenderer {
     pub(super) orb_pipeline: wgpu::RenderPipeline,
     pub(super) orb_gpu_model: Option<GpuEntityModel>,
     pub(super) orb_texture: Option<wgpu::BindGroup>,
+    /// The camera-facing entity sprites
+    /// ([`lodestone_render::entity_sprite::ENTITY_SPRITES`]) — one shared mesh
+    /// with one [`lodestone_render::PartRange`] per sprite, plus one texture
+    /// bind group per sprite.
+    ///
+    /// # Same shape as the orb above, one bind group wider
+    ///
+    /// The orb's eleven cells all live on **one** sheet, so it needs a single
+    /// bind group and selects a cell by part index. These two sprites are two
+    /// separate standalone sheets, so the part index selects the geometry and
+    /// the parallel `sprite_textures` entry selects the sheet; the pass rebinds
+    /// group 1 per batch. Two sprites, so the rebind is at most one extra
+    /// binding per frame.
+    ///
+    /// They ride the **base** entity pipeline rather than a sixth of their own:
+    /// both vanilla renderers use `RenderTypes.entityCutout`/`entityCutoutCull`,
+    /// which is `DepthStencilState.DEFAULT` plus a `0.5` alpha cutout — exactly
+    /// what `build_entity_pipeline`'s `fs_main` arm already is. The orb needed
+    /// its own pipeline because `ENTITY_TRANSLUCENT` blends and cuts at `0.1`;
+    /// nothing here does.
+    ///
+    /// An entry is `None` when the vanilla pack has no such sheet, and that
+    /// sprite then draws nothing — the same asymmetry
+    /// [`Self::orb_texture`]/[`Self::flame_texture`] document, and for the same
+    /// reason: a magenta stand-in reads as a rendering bug.
+    pub(super) sprite_gpu_model: Option<GpuEntityModel>,
+    /// One entry per row of [`lodestone_render::entity_sprite::ENTITY_SPRITES`],
+    /// in that table's order, so an index is valid for both this and
+    /// `sprite_gpu_model`'s part list. See [`Self::sprite_gpu_model`].
+    pub(super) sprite_textures: Vec<Option<wgpu::BindGroup>>,
     /// The boat water-clip mask (owner report: "placing down a boat still
     /// shows water through the bottom"): a sixth pipeline
     /// ([`EntityPipeline::water_mask_pipeline`], colour writes disabled)
@@ -485,6 +515,45 @@ impl EntityRenderer {
             pipeline.texture_bind_group(device, &view, &sampler)
         });
 
+        // The camera-facing entity sprites (dragon fireball, fishing bobber).
+        // One mesh with one part per table row, baked exactly the way the orb's
+        // eleven cells above are — the part index is the table index, which is
+        // what lets `prepare_entity_sprites` carry one `usize` instead of a
+        // name. See `EntityRenderer::sprite_gpu_model`.
+        let sprite_gpu_model = {
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            let mut parts = Vec::new();
+            for sprite in lodestone_render::entity_sprite::ENTITY_SPRITES {
+                let (quad_vertices, quad_indices) =
+                    lodestone_render::entity_sprite::entity_sprite_mesh(sprite);
+                let vertex_start = u32::try_from(vertices.len()).unwrap_or(0);
+                let index_start = u32::try_from(indices.len()).unwrap_or(0);
+                // No `base_vertex` at the draw, so each sprite's indices are
+                // rebased onto its own slice of the shared vertex buffer here —
+                // the orb's loop above does the same and for the same reason.
+                indices.extend(quad_indices.iter().map(|i| i + vertex_start));
+                let vertex_count = u32::try_from(quad_vertices.len()).unwrap_or(0);
+                vertices.extend(quad_vertices);
+                parts.push(lodestone_render::PartRange {
+                    index_start,
+                    index_count: u32::try_from(indices.len()).unwrap_or(0) - index_start,
+                    vertex_start,
+                    vertex_count,
+                });
+            }
+            GpuEntityModel::upload_parts(device, &vertices, &indices, parts)
+        };
+        let sprite_textures = lodestone_render::entity_sprite::ENTITY_SPRITES
+            .iter()
+            .map(|sprite| {
+                load_entity_sprite_texture(sprite.texture).map(|img| {
+                    let view = entity_texture_from_image(device, queue, &img);
+                    pipeline.texture_bind_group(device, &view, &sampler)
+                })
+            })
+            .collect();
+
         // The boat water-clip mask. No geometry/texture of its own to build:
         // `"boat_water_patch"` went through the corpus loop above like every
         // other rig, so `gpu_models`/`textures` already carry it.
@@ -570,6 +639,8 @@ impl EntityRenderer {
             orb_pipeline,
             orb_gpu_model,
             orb_texture,
+            sprite_gpu_model,
+            sprite_textures,
             water_mask_pipeline,
             shadow_pipeline,
             shadow_texture,
@@ -872,6 +943,33 @@ fn load_experience_orb_texture() -> Option<lodestone_assets::Image> {
     let path = lodestone_render::EXPERIENCE_ORB_TEXTURE;
     let Some(png) = manager.read(path) else {
         tracing::warn!(target: "assets", "missing experience orb sheet {path}");
+        return None;
+    };
+    match Image::decode_png(&png) {
+        Ok(img) => Some(img),
+        Err(e) => {
+            tracing::warn!(target: "assets", "decode {path}: {e}");
+            None
+        }
+    }
+}
+
+/// Decode one camera-facing entity sprite's sheet from the vanilla
+/// `client.jar`, or `None` if no pack is found — the
+/// [`lodestone_render::entity_sprite`] equivalent of
+/// [`load_experience_orb_texture`], reaching the jar the same way through
+/// [`crate::resources::vanilla_manager`].
+///
+/// Takes the path rather than hardcoding one, because unlike the orb there is
+/// more than one sheet and the table is what decides which — see
+/// `EntityRenderer::sprite_textures`.
+fn load_entity_sprite_texture(path: &str) -> Option<lodestone_assets::Image> {
+    use lodestone_assets::Image;
+
+    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
+    let manager = crate::resources::vanilla_manager()?;
+    let Some(png) = manager.read(path) else {
+        tracing::warn!(target: "assets", "missing entity sprite sheet {path}");
         return None;
     };
     match Image::decode_png(&png) {
