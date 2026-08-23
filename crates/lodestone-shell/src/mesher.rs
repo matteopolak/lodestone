@@ -28,6 +28,7 @@
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 // The worker pool's plumbing. Native-only: `MeshScheduler`'s browser arm has no
 // threads and no channels — it meshes in-frame under a time budget. See that type.
@@ -853,6 +854,68 @@ pub fn mesh_snapshot<C: BlockClassifier>(snapshot: &SectionSnapshot, classifier:
     mesh_simple(&hood)
 }
 
+/// Per-section instrumentation for the biome-tint path — the answer to "did
+/// this mesh tint at all, and against which registry", which no counter in
+/// this file could answer before.
+///
+/// The distinction it exists to draw is the one a screenshot cannot: a quad
+/// that resolved a *wrong* biome and a quad that took no tint path at all
+/// look like two different colours, but "no tint path" and "block that is
+/// simply not tinted" look identical. So every call to
+/// [`SnapshotModelView::biome_tint_at`] lands in exactly one bucket below and
+/// the buckets are reported together with the registry the snapshot carried.
+///
+/// Accumulated in a thread-local because a mesh worker owns its section for
+/// the whole of [`mesh_one`] and nothing else runs on that thread in between —
+/// which is also why the counters can be plain `Cell`s rather than atomics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TintProbe {
+    /// Quads offered to the tint path (every quad the model mesher emits).
+    pub quads: u32,
+    /// The baked quad carries no `tint_index` at all — slot 255. Not a defect:
+    /// stone, dirt and most of the game are here.
+    pub untinted: u32,
+    /// A real palette slot, but not one of the four position-dependent kinds
+    /// (`Constant`/`RedstonePower`/…). Takes the frame-shared palette entry.
+    pub not_blended: u32,
+    /// A biome-blended kind whose tint was **skipped** because
+    /// [`BlockModels::colormaps`] is absent. This is the one bucket that is a
+    /// silent downgrade: the quad keeps its palette slot and never learns the
+    /// biome.
+    pub no_colormaps: u32,
+    /// The blend itself returned nothing.
+    pub unresolved: u32,
+    /// A real, position-resolved biome colour reached the vertex.
+    pub resolved: u32,
+}
+
+thread_local! {
+    static TINT_PROBE: std::cell::Cell<TintProbe> = const {
+        std::cell::Cell::new(TintProbe {
+            quads: 0,
+            untinted: 0,
+            not_blended: 0,
+            no_colormaps: 0,
+            unresolved: 0,
+            resolved: 0,
+        })
+    };
+}
+
+/// Record one [`SnapshotModelView::biome_tint_at`] outcome on this worker.
+fn probe_tint(f: impl FnOnce(&mut TintProbe)) {
+    TINT_PROBE.with(|p| {
+        let mut v = p.get();
+        f(&mut v);
+        p.set(v);
+    });
+}
+
+/// Take and clear this worker's counters.
+fn take_tint_probe() -> TintProbe {
+    TINT_PROBE.with(|p| p.replace(TintProbe::default()))
+}
+
 /// A [`ModelSectionView`] over a [`SectionSnapshot`], driving the model mesh
 /// path for the live vanilla world.
 ///
@@ -1138,8 +1201,21 @@ impl ModelSectionView for SnapshotModelView<'_> {
     /// (tolerated — falls back to the reserved slot's plains default in the
     /// palette, exactly as before this existed).
     fn biome_tint_at(&self, x: usize, y: usize, z: usize, slot: u8) -> Option<[u8; 3]> {
-        let kind = biome_tint_kind_for_slot(slot)?;
-        let colormaps = self.models.colormaps()?;
+        probe_tint(|p| p.quads += 1);
+        let Some(kind) = biome_tint_kind_for_slot(slot) else {
+            probe_tint(|p| {
+                if slot == 255 {
+                    p.untinted += 1;
+                } else {
+                    p.not_blended += 1;
+                }
+            });
+            return None;
+        };
+        let Some(colormaps) = self.models.colormaps() else {
+            probe_tint(|p| p.no_colormaps += 1);
+            return None;
+        };
         let biome = NamedBiomeTint::new(|pos| biome_name_at(self.snapshot, pos));
         // `self.tint.resolve` in place of `resolve_blended_tint`: bit-identical,
         // ~5x fewer samples along a row. It keys itself on `(kind, y, z, x)`, and
@@ -1147,14 +1223,18 @@ impl ModelSectionView for SnapshotModelView<'_> {
         // are all `Grass`, but a neighbouring foliage quad is not), so a mixed
         // section rebuilds more often than the fluid path does — never worse than
         // the plain call, which is what a rebuild is.
-        let rgb = self.tint.borrow_mut().resolve(
+        let Some(rgb) = self.tint.borrow_mut().resolve(
             kind,
             colormaps,
             &biome,
             x as i32,
             y as i32,
             z as i32,
-        )?;
+        ) else {
+            probe_tint(|p| p.unresolved += 1);
+            return None;
+        };
+        probe_tint(|p| p.resolved += 1);
         Some(rgb_to_bytes(rgb))
     }
 }
@@ -1595,6 +1675,8 @@ fn mesh_one(
     ).entered();
     // The vanilla classifier carries baked models → mesh through the model path;
     // the demo classifier has none → mesh through the packed full-cube path.
+    let biome_names_len = snap.biome_names.len();
+    let _ = take_tint_probe();
     let mesh = match classifier.models() {
         Some(models) => {
             let (mut opaque, translucent_blocks) =
@@ -1613,10 +1695,112 @@ fn mesh_one(
         }
         None => SectionGeometry::Packed(mesh_snapshot(&snap, classifier)),
     };
+    report_tint_probe(
+        snap.key,
+        biome_names_len,
+        mesh.quad_count(),
+        matches!(mesh, SectionGeometry::Packed(_)),
+        take_tint_probe(),
+    );
     Meshed {
         key: snap.key,
         mesh,
     }
+}
+
+/// Report one section's [`TintProbe`], so a tint that resolved to *nothing* is
+/// distinguishable from a block that simply has no tint.
+///
+/// `names` is how many biome names the snapshot could see — `0` means
+/// `biome_name_at` fell back to `FALLBACK_BIOME_NAMES` rather than the
+/// server's own `registry_data` order, which is a *different* answer, not a
+/// missing one.
+///
+/// Two sinks on purpose. `tracing` is the shipped one, and it is a `warn!`
+/// only for the bucket that is a silent downgrade (a blended kind whose
+/// colormaps were absent); everything else is `debug!`. The stderr line is for
+/// a harness that installs no subscriber at all — the screenshot capture is
+/// one — and stays off unless `LODESTONE_TINT_PROBE` is set, because this
+/// fires once per meshed section and a render-distance-8 join meshes thousands.
+fn report_tint_probe(
+    key: SectionKey,
+    names: usize,
+    quads: usize,
+    packed: bool,
+    probe: TintProbe,
+) {
+    BIOME_TINT_RESOLVED.fetch_add(u64::from(probe.resolved), Ordering::Relaxed);
+    let skipped = probe.no_colormaps + probe.unresolved;
+    if skipped > 0 {
+        let before = BIOME_TINT_SKIPPED.fetch_add(u64::from(skipped), Ordering::Relaxed);
+        if before == 0 {
+            tracing::warn!(
+                target: "mesh",
+                cx = key.cx,
+                cz = key.cz,
+                si = key.si,
+                no_colormaps = probe.no_colormaps,
+                unresolved = probe.unresolved,
+                "biome tint skipped for a blended quad: it keeps the frame-shared \
+                 palette's plains default instead of this position's own biome \
+                 colour. Logged once per session; the running total is \
+                 mesher::biome_tint_counts"
+            );
+        }
+    }
+    tracing::debug!(
+        target: "mesh",
+        cx = key.cx,
+        cz = key.cz,
+        si = key.si,
+        names,
+        quads,
+        resolved = probe.resolved,
+        unresolved = probe.unresolved,
+        untinted = probe.untinted,
+        "section meshed"
+    );
+    static STDERR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *STDERR.get_or_init(|| std::env::var_os("LODESTONE_TINT_PROBE").is_some()) {
+        eprintln!(
+            "tint-probe cx={} cz={} si={} path={} names={names} quads={quads} \
+offered={} resolved={} unresolved={} no_colormaps={} not_blended={} untinted={}",
+            key.cx,
+            key.cz,
+            key.si,
+            if packed { "packed" } else { "model" },
+            probe.quads,
+            probe.resolved,
+            probe.unresolved,
+            probe.no_colormaps,
+            probe.not_blended,
+            probe.untinted,
+        );
+    }
+}
+
+/// Blended-kind quads whose tint was resolved for real, this process.
+static BIOME_TINT_RESOLVED: AtomicU64 = AtomicU64::new(0);
+/// Blended-kind quads whose tint was **skipped** — absent colormaps, or a
+/// blend that returned nothing — and which therefore fell back to the
+/// frame-shared palette's plains default.
+static BIOME_TINT_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// `(resolved, skipped)` blended-kind quads since process start.
+///
+/// A running total rather than a per-section one because the mesh workers have
+/// no `Sim` to report into, and because the question this answers is a session
+/// question: *did any terrain in this session render its biome tint from the
+/// palette default rather than from the position?* A neutral-grey ground and a
+/// correctly plains-green one are indistinguishable on a plains-only world —
+/// the palette default **is** plains — so a screenshot cannot tell them apart
+/// and this counter is the only thing that can.
+#[must_use]
+pub fn biome_tint_counts() -> (u64, u64) {
+    (
+        BIOME_TINT_RESOLVED.load(Ordering::Relaxed),
+        BIOME_TINT_SKIPPED.load(Ordering::Relaxed),
+    )
 }
 
 /// A fixed pool of worker threads that mesh snapshots off the main thread.

@@ -9229,3 +9229,57 @@ Three things this cost, in the order they were paid:
 - **A gate that fails is only evidence if somebody runs it.** This one was correct, well-argued, `#[ignore]`d
   for a GPU adapter, and red from the day the layer split landed.
 
+
+**12.175 "Untinted" and "the wrong biome" are two different defects, and the biome registry can only
+ever cause the second. Both named suspects for a grey-ground report were pixel-inert, measured.**
+
+The screenshot harness's own commit message recorded a residual: in 2 of ~15 runs the ground past the
+stage edge in `01-text-displays` (and `02-signs`, through the same sections) rendered **neutral grey
+(166, 167, 168)** instead of plains green **(85, 111, 55)**, with **91 fewer quads**, affecting only the
+initial chunk stream. Two candidate sites were named — `Sim::refresh_mesh_policy` publishing
+`TerrainMesh::biome_names` at the *top* of `poll_net`, before that same poll drains its own updates, and
+`SnapshotModelView::biome_tint_at`'s empty-registry fallback. Neither had been proven.
+
+Neither can produce it, and the arithmetic says so before any run does. Every unresolvable path in
+`mesher::biome_name_at` → `NamedBiomeTint::effects` lands on `biome_tint.rs`'s `PLAINS_FALLBACK`, whose
+climate is plains' own, which resolves to the exact colour `BlockModels::build` interned at
+`GRASS_TINT_SLOT`. A stale, short or absent registry therefore renders *plains* — indistinguishable from
+correct on a plains world, and green on any other. Neutral grey needs the tint **skipped**:
+`tint_rgb_override` absent *and* the vertex's palette slot at 255, which is `model.wgsl`'s white.
+
+Three measurements, all against the live creative oracle through the real capture harness:
+
+- **Forcing `biome_tint_at` to return `None` for every quad produced a byte-identical PNG** — 0 pixels
+  changed, 4837 quads either way. That is the whole of the registry hypothesis, and it moves nothing,
+  because the palette default it falls through to *is* the plains colour the biome path computes.
+- **Forcing it to return white changed exactly 24,821 pixels** — precisely the pixels that are green in a
+  good run — to neutral greys whose mode is `(148, 149, 150)`, with the reported signature (`b > g > r`
+  by one, from the lightmap's cool sky term). At the 1,301 pixels a good run renders as exactly the
+  reported `(85, 111, 55)`, the white arm renders `(148, 149, 150)`. So the reported grey is untinted
+  grass — but ~12% brighter than untinted grass through this pipeline, so the bad frame differs in
+  something else as well (which the 91-quad delta already says).
+- **Forcing the packed/greedy mesh path renders the same ground green** at those pixels and costs **278**
+  quads, not 91 — so "the initial stream was meshed through the demo classifier" is out too.
+
+Two supporting facts. `BlockModels::build` is deterministic across four builds in one process: 32,366
+states, 415,364 quads, identical palettes, slot 251 = `(0.569, 0.741, 0.349)` = plains green, 805 quads
+carrying it. And the previous report's explanation of the quad delta — *"a per-position biome tint stops
+quads merging"* — cannot be right: the model path emits one quad per model face and **never merges**
+(`is_packed_cube` has no production consumer), so 91 fewer quads is 91 fewer *faces*, a geometry
+difference, not a tint one.
+
+**Not reproduced: 61 scene-01 captures plus 6 full five-scene runs, every one byte-identical to the
+committed image.** 27 warm, 14 under seven busy cores, 12 against a freshly restarted oracle. At the
+reported 2-in-15 rate the chance of that is under 1%, so either the rate is environment-bound or
+something in the tree moved. The instrument is landed rather than the fix: `mesher.rs`'s `TintProbe`
+buckets every `biome_tint_at` call (resolved / unresolved / colormaps absent / not a blended kind /
+untinted quad), `mesher::biome_tint_counts()` carries the session totals, the first skip logs a
+`tracing::warn!`, and `LODESTONE_TINT_PROBE` prints one line per meshed section to stderr for a harness
+with no subscriber. Across all 61 captures it reported `names=66` and `path=model` for every one of the
+621 sections meshed per join, and zero skips.
+
+The rule this pays for: **a colour that is "not any of the values the feature can produce" is evidence
+the feature never ran, not evidence it ran wrong** — and the two have disjoint suspect lists. Deriving
+what the *wrong* answers would have looked like (here: 66 biome greens and one plains fallback, none of
+them neutral) costs one reading of the fallback constant and retires a whole hypothesis before the first
+reproduction attempt.
