@@ -376,6 +376,25 @@ Editing, and reading the tree:
   individual failures are deterministic. So: **disclaim ownership if you like, but run the one command before
   calling a failure environmental**, and say which you established — "not mine" and "not a bug" are two
   claims and the second needs its own evidence.
+
+  **But the implication only runs one way, and reading it as an equivalence clears real bugs.** "Fails alone"
+  proves a defect; **"passes alone" proves nothing**, because a defect whose trigger is an *ordering* needs
+  adverse scheduling to reach, and a quiet machine is the condition under which it hides. Measured: a LAN
+  join gate failed in CI by exhausting a 30 s deadline, then passed alone in **5 s** and passed inside its
+  own full 945-test suite on a 10-core box — and it was a **live production defect**. `serve_play`'s
+  `select!` called the entity-stream pass from the `read_packet` arm only, so **a connection's view of the
+  world advanced only when that connection itself sent a packet**: a player standing still saw everyone
+  else move in one-second jumps, and a silent client never learned about a later joiner at all. The CI
+  runner's 2 cores were not the bug, they were the only scheduler adverse enough to expose it.
+
+  So when a CI failure will not reproduce locally, the honest next step is **not** "environmental" — it is
+  to *construct* the interleaving you suspect (a barrier, an injected delay, a single-worker runtime, a
+  paused clock) and watch it fail. Here the reproduction was one new gate — a client that joins and never
+  speaks again — which was red before the fix and red again under its neuter. Note also the assertion
+  message accused a **composition** defect, and the failure being *intermittent at all* retires that
+  hypothesis on its own: a wiring that is wrong is wrong on every machine. **An intermittent failure is
+  evidence about the class of cause**, and a stale accusation in an assertion message will otherwise be
+  quoted forward as a diagnosis.
 - **A clean log for *your* files, in a build someone else broke, is not evidence your files are clean —
   unless you prove the compiler got that far.** The control is cheap: **plant a deliberate type error in your
   own lib file, and a second inside your own crate's test file, then check which ones come back.** Both cases
