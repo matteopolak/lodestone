@@ -232,6 +232,7 @@ fn a_mob_wearing_an_elytra_draws_wings_the_same_mob_bare_does_not() {
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
         firework: None,
+        projectile_owner: None,
     };
     // The negative control: identical in every respect except the chest slot.
     let control = EntityDraw {

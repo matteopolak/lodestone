@@ -292,6 +292,7 @@ fn subject_at(distance: f32) -> EntityDraw {
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
         firework: None,
+        projectile_owner: None,
     }
 }
 

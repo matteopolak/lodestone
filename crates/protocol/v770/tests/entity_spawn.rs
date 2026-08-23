@@ -166,6 +166,90 @@ fn an_ordinary_mob_with_object_data_emits_no_falling_block_state() {
     );
 }
 
+/// The registry id of `minecraft:fishing_bobber` for protocol 776, resolved the
+/// same way [`falling_block_type_id`] is and for the same reason.
+fn fishing_bobber_type_id() -> i32 {
+    (0..2000)
+        .find(|id| {
+            lodestone_data::entity_types::entity_type_name(*id)
+                == Some("minecraft:fishing_bobber")
+        })
+        .expect("protocol 776 has a `minecraft:fishing_bobber` entity type")
+}
+
+/// A fishing bobber's `ADD_ENTITY` yields the **caster's** entity id out of the
+/// same Object Data field the falling block reads a block state from.
+///
+/// `FishingHook.getAddEntityPacket` writes
+/// `owner == null ? this.getId() : owner.getId()` there, and — exactly like the
+/// falling block's state — nothing else carries it:
+/// `FishingHook.defineSynchedData` registers only `DATA_HOOKED_ENTITY` and
+/// `DATA_BITING`. An adapter that discards the field leaves the client with a
+/// bobber it cannot anchor a line to.
+///
+/// The owner id is picked **distinct from the bobber's own id** on purpose: the
+/// two are adjacent VarInts of the same type in this decode, and a fixture that
+/// used one value for both could not tell a correct decode from one that echoed
+/// the entity id back.
+#[test]
+fn a_fishing_bobbers_add_entity_carries_its_owner_id() {
+    let adapter = V770Adapter::new();
+    let payload = add_entity_bytes_with_data(
+        21,
+        Uuid::from_u128(13),
+        fishing_bobber_type_id(),
+        (4.5, 62.0, -1.5),
+        44,
+    );
+    let directives = handle(&adapter, play::clientbound::ADD_ENTITY, &payload);
+    assert_eq!(
+        directives.last(),
+        Some(&Directive::Emit(ClientEvent::ProjectileOwner {
+            entity_id: 21,
+            owner_id: 44,
+        })),
+        "the Object Data field must reach a consumer, and last so the entity exists"
+    );
+    assert!(
+        matches!(
+            directives.first(),
+            Some(Directive::Emit(ClientEvent::EntitySpawned { .. }))
+        ),
+        "the spawn must still come first"
+    );
+    // And it must not also claim to be a block state — the two readings of one
+    // field must stay disjoint or a hook would spawn a falling block too.
+    assert!(
+        !directives.iter().any(|d| matches!(
+            d,
+            Directive::Emit(ClientEvent::FallingBlockState { .. })
+        )),
+        "a fishing bobber is not a falling block: {directives:?}"
+    );
+}
+
+/// Control: an ordinary mob's `ADD_ENTITY` emits **no** `ProjectileOwner`, even
+/// with a non-zero Object Data field.
+///
+/// The mirror of `an_ordinary_mob_with_object_data_emits_no_falling_block_state`
+/// and load-bearing for the same reason: without it the gate above is satisfied
+/// by an adapter that emits the event for every spawn, which would claim "this
+/// is an owner id" about a falling block's state.
+#[test]
+fn an_ordinary_mob_with_object_data_emits_no_projectile_owner() {
+    let adapter = V770Adapter::new();
+    let payload =
+        add_entity_bytes_with_data(22, Uuid::from_u128(2), 100, (0.0, 0.0, 0.0), 44);
+    let directives = handle(&adapter, play::clientbound::ADD_ENTITY, &payload);
+    assert!(
+        !directives.iter().any(|d| matches!(
+            d,
+            Directive::Emit(ClientEvent::ProjectileOwner { .. })
+        )),
+        "a pig has no fishing line: {directives:?}"
+    );
+}
+
 #[test]
 fn add_entity_emits_spawn_and_head_rotation() {
     let adapter = V770Adapter::new();

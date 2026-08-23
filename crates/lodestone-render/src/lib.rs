@@ -60,6 +60,10 @@ pub mod end_portal;
 pub mod entity;
 pub mod entity_anim;
 pub mod entity_pipeline;
+/// Camera-facing sprite billboards for the two entity types whose vanilla
+/// renderer builds a quad vertex by vertex, plus the fishing line one of them
+/// hangs off and the ominous item spawner's spin/scale.
+pub mod entity_sprite;
 pub mod fluid_grid;
 pub mod fog;
 pub mod frame;

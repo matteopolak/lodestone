@@ -114,6 +114,9 @@ impl RenderState {
         let depth = DepthBuffer::new(device, width.max(1), height.max(1));
         let outline = OutlineRenderer::new(device, color_format);
         let debug_lines = DebugLineRenderer::new(device, color_format);
+        // A second instance of the same renderer for the fishing line — see
+        // `RenderState::fishing_line`'s own doc for why it is not the same one.
+        let fishing_line = DebugLineRenderer::new(device, color_format);
         // The billboard channel's own sprite table — the block atlas's
         // `ResourceLocation` → UV rect index `plugin_billboard_vertices`
         // resolves `PluginTexture::Named` against. Built once here, from the
@@ -294,6 +297,7 @@ impl RenderState {
             outline,
             debug_lines,
             debug_lines_source: DebugLinesSource::default(),
+            fishing_line,
             plugin_billboards,
             plugin_billboards_source: PluginBillboardsSource::default(),
             plugin_atlas_sprites: std::sync::Arc::new(plugin_atlas_sprites),

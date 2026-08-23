@@ -422,6 +422,10 @@ impl ThirdPersonBodyState {
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
             firework: None,
+            // The local player's own body is not a projectile, so it has no
+            // caster — `None` by construction, exactly like `painting` and
+            // `firework` above.
+            projectile_owner: None,
         }
     }
 }

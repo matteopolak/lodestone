@@ -88,6 +88,7 @@ fn rocket(id: i32, type_path: &str, flags: Option<FireworkFlags>, at: glam::Vec3
         item_frame_rotation: 0,
         painting: None,
         firework: flags,
+        projectile_owner: None,
         id,
         type_path: std::sync::Arc::from(type_path),
         // Left `None` deliberately: the draw path falls back to

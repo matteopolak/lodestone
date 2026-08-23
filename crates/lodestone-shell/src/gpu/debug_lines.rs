@@ -297,8 +297,19 @@ const FLOATS_PER_RIBBON_VERT: usize = 3 + 3 + 1 + 4;
 /// F3+B/F3+G read as "too thin" (and, at a real gameplay resolution, close
 /// to invisible) even while the closure feeding them was producing correct
 /// geometry the whole time — see `docs/debug-overlay.md`'s line-width note.
-const MIN_LINE_WIDTH_PX: f32 = 1.5;
-const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
+pub(super) const MIN_LINE_WIDTH_PX: f32 = 1.5;
+pub(super) const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
+
+/// `Window.getAppropriateLineWidth`'s own minimum — `max(2.5F, getWidth() /
+/// 1920.0F * 2.5F)` — for the passes that draw a line vanilla itself draws
+/// through `RenderTypes.lines()` rather than a diagnostic wireframe.
+///
+/// The fishing line is one (`FishingHookRenderer` reads
+/// `windowRenderState.appropriateLineWidth` verbatim), and so is the
+/// block-highlight box, which is why [`OutlineRenderer`] carries the same
+/// number under its own name. [`MIN_LINE_WIDTH_PX`] above is **not** this: it is
+/// deliberately thinner so an F3 overlay reads as a diagnostic.
+pub(super) const VANILLA_LINE_WIDTH_PX: f32 = 2.5;
 
 /// Draws arbitrary coloured world-space line segments — a pathfinder's
 /// planned route, a reachability probe, anything a plugin wants visible for
@@ -461,8 +472,25 @@ impl DebugLineRenderer {
     /// shape callers already build (flat, two [`DebugLineVertex`]s per
     /// segment); this expands each pair into [`VERTS_PER_SEGMENT`] on-screen
     /// ribbon vertices, capped at [`MAX_DEBUG_LINE_SEGMENTS`] segments.
-    /// `viewport_px` is the render target's size in physical pixels — see
-    /// [`MIN_LINE_WIDTH_PX`]'s doc for how it sizes the on-screen thickness.
+    /// `viewport_px` is the render target's size in physical pixels and
+    /// `min_width_px` the on-screen thickness floor, scaled by
+    /// `Window.getAppropriateLineWidth`'s own `max(min, width / 1920 * min)`
+    /// shape — see [`MIN_LINE_WIDTH_PX`]'s doc for why this pass is not a
+    /// `LineList`, and [`VANILLA_LINE_WIDTH_PX`] for the other value callers
+    /// pass.
+    ///
+    /// # Why the width is a parameter rather than the constant
+    ///
+    /// This renderer has **two** instances. The F3 overlay wants a thin
+    /// diagnostic wireframe ([`MIN_LINE_WIDTH_PX`]); the fishing line is a piece
+    /// of gameplay geometry vanilla draws at `appropriateLineWidth`
+    /// ([`VANILLA_LINE_WIDTH_PX`]), and rendering it at the diagnostic width
+    /// makes it read as a hairline that vanishes at distance. Everything else —
+    /// the pipeline, the shader, the ribbon expansion below — is shared, which
+    /// is the point: this expansion already exists twice in this module tree
+    /// (here and in [`OutlineRenderer`]) and a third copy is how the two
+    /// gradually stop agreeing.
+    ///
     /// Returns the vertex count actually written — pass it to
     /// [`draw`](Self::draw).
     ///
@@ -473,13 +501,13 @@ impl DebugLineRenderer {
         queue: &wgpu::Queue,
         view_proj: &[[f32; 4]; 4],
         viewport_px: (u32, u32),
+        min_width_px: f32,
         vertices: &[DebugLineVertex],
     ) -> u32 {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
 
-        let width_px = (viewport_px.0.max(1) as f32 / LINE_WIDTH_REFERENCE_PX
-            * MIN_LINE_WIDTH_PX)
-            .max(MIN_LINE_WIDTH_PX);
+        let width_px = (viewport_px.0.max(1) as f32 / LINE_WIDTH_REFERENCE_PX * min_width_px)
+            .max(min_width_px);
         let viewport_uniform: [f32; 4] = [
             viewport_px.0.max(1) as f32,
             viewport_px.1.max(1) as f32,

@@ -599,6 +599,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `VersionAdapter::handle_packet`; comment-stripped, the only difference between them
   is six literals, not a code-shape difference — so this is a fixture table, not a
   templated test body.
+- [Entity sprite renderers](./entity-sprite-renderers.md) — The draw path for the
+  three entity types that had **no** draw path at all until this landed:
+  `dragon_fireball`, `fishing_bobber` and `ominous_item_spawner`. `cargo xtask
+  world-coverage` reported all three as *stranded* — named in `SHADOW_RADII`,
+  decoded off the wire, reaching zero pixels — and the census moved from 148 drawn /
+  7 stranded to 151 drawn / 4 stranded when they were wired.
 - [Entity tick drivers: `ProjectileRegistry` and `ItemEntityRegistry`](./entity-tick-drivers.md) —
   Two small per-tick driver types in `lodestone-entity` that own a *collection* of
   already-correct, previously-unconsumed entity mechanics and advance all of them

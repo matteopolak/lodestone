@@ -491,6 +491,7 @@ fn boat_draw(type_path: &str) -> EntityDraw {
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
         firework: None,
+        projectile_owner: None,
     }
 }
 
