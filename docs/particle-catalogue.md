@@ -683,7 +683,43 @@ Still absent from this bucket after the pass, and why:
 
 * **`elder_guardian`** — the only particle in the registry that is not a quad. It is a full
   `GuardianParticleModel` on its own `ParticleRenderType.ELDER_GUARDIANS` pass, which means a
-  rig, a texture and a pipeline rather than an emitter. Genuinely a separate piece of work.
+  rig, a texture and a pipeline rather than an emitter. Still a separate piece of work; four
+  things about it were checked against the 26.2 decompile while the `BlockParticleOption` family
+  was being built, and each removes a guess:
+
+  * **The rig is already correct and needs no change.** `ElderGuardianParticle` bakes
+    `ModelLayers.ELDER_GUARDIAN`, and that layer *is* `GuardianModel.createBodyLayer().apply(
+    ELDER_GUARDIAN_SCALE)` with `ELDER_GUARDIAN_SCALE = MeshTransformer.scaling(2.35F)` — a
+    **mesh** transform, not the renderer's. `ElderGuardianRenderer`'s own `2.35`-looking
+    constructor argument is `1.2F`, a shadow radius. So `lodestone_assets::entity_models::
+    elder_guardian_model`, which is `scaled(guardian_model(), 2.35)`, is exactly the layer the
+    particle bakes. `GuardianParticleModel` itself adds nothing: it is a bare `Model<Unit>` over
+    the baked root, with no `setupAnim`, so the rig is drawn in its bind pose.
+  * **It is drawn camera-relative and never reads its own position.**
+    `ElderGuardianParticleGroup.ElderGuardianParticleRenderState.fromParticle` builds a fresh
+    `PoseStack` — camera rotation, then `Axis.XP.rotationDegrees(60 - 150 * ageScale)`, then
+    `scale(0.42553192, -0.42553192, -0.42553192)`, then `translate(0, -0.56, 3.5)` — and the
+    particle's `x`/`y`/`z` appear nowhere in it. Level render space is camera-relative, so the
+    guardian hangs at a fixed offset in front of the eye regardless of where the packet put the
+    particle. That is the effect as played: the curse shows a guardian in your face, not one out
+    in the water. A pass that placed it at the particle's world position would be wrong in a way
+    no structural check could see.
+  * **`0.42553192` is `1 / 2.35`, exactly**, so the scale step *undoes* the layer's own mesh
+    scale and the guardian is drawn at plain guardian size. It is not a free constant: if the
+    baked rig's scale ever changes, this must change with it, and transcribing the number without
+    that premise is how the two silently stop cancelling.
+  * **The alpha lane is the actual blocker, not the rig or the pose.** The render type is
+    `RenderTypes.entityTranslucent` and the per-instance colour is
+    `ARGB.colorFromFloat(0.05 + 0.5 * sin(ageScale * PI), 1, 1, 1)` — a real blend alpha that
+    fades in and out over the 30-tick life. `EntityPipeline::banner_layer_pipeline` already
+    supplies the right *state* (`ALPHA_BLENDING`, no cutout, depth write off) over the same
+    bind-group layouts, but `EntityInstanceRaw` has nowhere to put the alpha: its `tint` word's
+    top byte is the hurt-overlay alpha and `white_overlay`'s low byte is the creeper flash. So
+    the pass needs either a spare lane in that shared struct or an instance format of its own.
+  * The simulation half is the small half: `gravity = 0`, `lifetime = 30`, no tick override at
+    all. It wants a `Behaviour` that is **excluded from `ParticleEngine::extract`**, the way
+    `Behaviour::HugeExplosionSeed` already is, so it never emits a quad — and building that half
+    alone would be an island, since nothing would draw it.
 * **`vibration`, `trail`, `shriek`, `vault_connection`, `trial_spawner_detection`** — each
   carries a position or a target on the wire, the same shape.
 
