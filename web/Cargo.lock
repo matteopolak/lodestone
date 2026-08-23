@@ -2344,6 +2344,7 @@ name = "lodestone-assets"
 version = "0.1.0"
 dependencies = [
  "fontdue",
+ "lodestone-javarandom",
  "lodestone-model",
  "png",
  "serde_json",
@@ -2358,6 +2359,7 @@ dependencies = [
  "cpal",
  "glam 0.33.2",
  "lewton",
+ "lodestone-javarandom",
  "thiserror 2.0.19",
 ]
 
@@ -2480,6 +2482,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-javarandom"
+version = "0.1.0"
+dependencies = [
+ "lodestone-time",
+]
+
+[[package]]
 name = "lodestone-macros"
 version = "0.1.0"
 dependencies = [
@@ -2525,6 +2534,7 @@ dependencies = [
 name = "lodestone-particle"
 version = "0.1.0"
 dependencies = [
+ "lodestone-javarandom",
  "lodestone-physics",
  "lodestone-time",
 ]
@@ -2563,7 +2573,9 @@ dependencies = [
  "glam 0.33.2",
  "lodestone-assets",
  "lodestone-data",
+ "lodestone-javarandom",
  "lodestone-model",
+ "lodestone-physics",
  "lodestone-world",
  "pollster",
  "rayon",
@@ -2629,6 +2641,7 @@ dependencies = [
  "lodestone-ecs",
  "lodestone-entity",
  "lodestone-game",
+ "lodestone-javarandom",
  "lodestone-model",
  "lodestone-net",
  "lodestone-particle",
@@ -2730,7 +2743,6 @@ name = "lodestone-world"
 version = "0.1.0"
 dependencies = [
  "lodestone-core",
- "serde_json",
  "thiserror 2.0.19",
 ]
 

@@ -545,20 +545,34 @@ connect.
   A second warning names up to eight `missing_textures`, which was previously a
   bare count; with the jar alone it is always 0, so any non-zero value is
   something a pack introduced.
-- **The item atlas's live refresh is coupled to the *block* atlas's.**
-  `app::redraw`'s reload block is one `if let Some(atlas) =
-  sim.reload_resource_pack_atlas()`, and everything inside it — the GUI atlases,
-  the flat `ItemAtlas`, the glint sheet, the 3-D block-item pass, the special-icon
-  latch — only runs when that returns `Some`. `Sim::reload_resource_pack_atlas`
-  advances `last_pack_generation` **before** its own guards and returns `None` on
-  three further conditions (no `net`, no `vanilla_atlas`, or its own
-  `BlockResources::load(true)` falling back to the demo palette). Each of those
-  consumes the generation, so a single such frame strands the item atlas on the
-  previous pack **for the rest of the process** — there is no later retry, because
-  the counter only ever moves forward and the next comparison is already equal.
-  The item atlas neither needs nor reads the block atlas; if you are touching that
-  block, give the icon surfaces their own generation latch so they refresh on the
-  pack change itself rather than on the block reload's success.
+- **The item atlas's live refresh used to be coupled to the *block* atlas's, and
+  that was a shipped bug: "the server's texture pack applied to fonts but not to
+  my items — held, slot, or on the ground".** `app::redraw`'s reload block was one
+  `if let Some(atlas) = sim.reload_resource_pack_atlas()`, and everything inside
+  it — the GUI atlases, the flat `ItemAtlas`, the glint sheet, the 3-D block-item
+  pass, the special-icon latch — only ran when that returned `Some`.
+  `Sim::reload_resource_pack_atlas` advances `last_pack_generation` **before** its
+  own guards and returns `None` on three further conditions (no `net`, no
+  `vanilla_atlas`, or its own `BlockResources::load(true)` falling back to the
+  demo palette). Each of those consumes the generation, so a single such frame
+  stranded every icon surface on the previous pack **for the rest of the
+  process** — no later retry, because the counter only moves forward and the next
+  comparison is already equal.
+
+  Fonts were immune, and that asymmetry is the diagnostic: `vanilla_font`
+  re-resolves lazily per generation (a *pull*), while every icon surface was
+  pushed exactly once from a consumed edge. **A push keyed on a consumed counter
+  has no second chance; a lazy pull keyed on the same counter has one every
+  frame.** When something updates on a pack change and something else does not,
+  check which of the two shapes each uses before looking at either loader.
+
+  Fixed by giving the icon surfaces their own latch —
+  `WindowApp::last_icon_pack_generation`, compared against
+  `resources::pack_generation()` directly. Only `reload_block_atlas` and
+  `attach_item_models` remain inside the `if let`: the latter re-binds the very
+  GPU objects the former replaces, so it is meaningless on a frame where that did
+  not run. Nothing else in the block reads the block atlas at all, so gating them
+  on it was never right on its own terms either.
 
 - **`decide_resource_pack_push` is a pure function, tested against a full
   truth table.** If vanilla's own condition in
