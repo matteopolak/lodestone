@@ -290,6 +290,7 @@ fn subject_at(distance: f32) -> EntityDraw {
         variant_sheet: None,
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
+        painting: None,
     }
 }
 

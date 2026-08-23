@@ -1300,6 +1300,7 @@ mod tests {
             // billboard pass entirely.
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+            painting: None,
         };
         // A raster is required to reach the distance check at all in
         // `prepare`, but `push_entity_quads` itself only needs one to lay
@@ -1386,6 +1387,7 @@ mod tests {
             // billboard pass entirely.
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+            painting: None,
         };
         push_entity_quads(
             &raster,
@@ -1496,6 +1498,7 @@ mod tests {
             // billboard pass entirely.
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+            painting: None,
         };
         push_entity_quads(
             &raster,
@@ -1824,6 +1827,7 @@ mod tests {
             variant_sheet: None,
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+            painting: None,
         };
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
@@ -1974,6 +1978,7 @@ mod tests {
             variant_sheet: None,
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+            painting: None,
         };
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
@@ -2055,6 +2060,7 @@ mod tests {
             variant_sheet: None,
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+            painting: None,
         }
     }
 

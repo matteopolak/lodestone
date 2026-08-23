@@ -42,8 +42,8 @@ use super::block_entities::{BannerLayerDrawBatch, BlockEntityDrawBatch};
 use super::terrain::ModelRenderer;
 use super::{
     ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, CapeDrawBatch, ElytraDrawBatch,
-    EntityDrawBatch, FlameBatch, OrbBatch, RenderState, RenderStats, ShadowBatch, WoolPartAccum,
-    humanoid_armour_slot,
+    EntityDrawBatch, FlameBatch, OrbBatch, PaintingDrawBatch, RenderState, RenderStats, ShadowBatch,
+    WoolPartAccum, humanoid_armour_slot,
 };
 
 /// One entity's own hitbox width in blocks — its type's base width times its age
@@ -2035,6 +2035,130 @@ impl RenderState {
             .collect()
     }
 
+    /// Resolve this frame's **paintings** into per-`(shape, face)` instance
+    /// buffers.
+    ///
+    /// `PaintingRenderer.submit` (26.2), which is unusually short: rotate by
+    /// `180 - direction.get2DDataValue() * 90` and emit a `width x height` grid
+    /// of cells. Both halves are in
+    /// [`lodestone_render::painting`]; this function is the batching and the
+    /// culling.
+    ///
+    /// # A painting with no variant draws nothing, and that is the design
+    ///
+    /// `EntityDraw::painting` is `None` for a variant this build has no table
+    /// entry for, and there is no fallback shape to draw instead — a painting's
+    /// size in blocks *is* a property of its variant. The same applies one step
+    /// later to a missing sprite: [`Self::painting_texture`] is keyed by the
+    /// same static name, so a variant in the table whose PNG is not in the pack
+    /// is skipped rather than bound to something else.
+    ///
+    /// # The facing needs no field
+    ///
+    /// `HangingEntity.setDirection` writes the direction into the entity's
+    /// ordinary yaw (`setYRot(direction.get2DDataValue() * 90)`), so
+    /// `draw.yaw` already carries it and nothing had to be decoded out of the
+    /// spawn packet's Object Data. The four legal yaws survive the wire's
+    /// byte-angle quantisation exactly.
+    ///
+    /// # Light is per painting, not per cell
+    ///
+    /// Vanilla samples the wall **once per 1x1 cell** — that is the entire
+    /// reason its geometry is a grid — and lights each cell separately, so a
+    /// 4x4 painting half in torchlight is visibly graded. This engine carries
+    /// light per *instance*, so all cells share the painting's own entity
+    /// probe. The grid geometry is built anyway (see
+    /// [`lodestone_render::painting::painting_mesh`]), so closing this is a
+    /// change to how the light lane is fed, not a re-bake.
+    pub(super) fn prepare_paintings(
+        &self,
+        device: &wgpu::Device,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Vec<PaintingDrawBatch> {
+        if self.entities.painting_models.is_empty() {
+            return Vec::new();
+        }
+        let frustum = camera.frustum();
+        type Group = (usize, usize, Option<&'static str>, Vec<glam::Mat4>, Vec<u32>, Vec<InstanceTint>);
+        let mut groups: Vec<Group> = Vec::new();
+
+        for draw in entities {
+            if draw.invisible {
+                continue;
+            }
+            let Some(variant) = draw.painting else {
+                continue;
+            };
+            let Some(size) = lodestone_render::painting::painting_size(variant) else {
+                continue;
+            };
+            // Skipped rather than drawn untextured: a white rectangle where a
+            // painting belongs reads as a rendering bug, not as a missing pack.
+            if !self.entities.painting_textures.contains_key(variant)
+                || self.entities.painting_back_texture.is_none()
+            {
+                continue;
+            }
+            let Some(model) = self
+                .entities
+                .painting_models
+                .iter()
+                .position(|(candidate, _)| *candidate == size)
+            else {
+                continue;
+            };
+            // The entity's wire position is the slab's **centre** (a painting is
+            // placed by `Painting.calculateBoundingBox`, not stood on the
+            // ground), so the cull box is centred on it too. Half the diagonal
+            // in every axis covers the slab whichever of the four ways it
+            // faces, which is cheaper and safer than rotating a tight box.
+            let reach = 0.5 * (size.width.max(size.height) as f32) + 0.5;
+            if !frustum.intersects_aabb(
+                draw.feet - glam::Vec3::splat(reach),
+                draw.feet + glam::Vec3::splat(reach),
+            ) {
+                continue;
+            }
+            let transform = lodestone_render::painting::painting_matrix(draw.feet, draw.yaw);
+            let light = u32::from(entity_light(&self.entity_light, draw));
+            let tint = InstanceTint::rgb([255, 255, 255]).with_hurt(draw.hurt);
+            for (part, texture) in [(0usize, Some(variant)), (1usize, None)] {
+                let group = match groups
+                    .iter_mut()
+                    .position(|(m, p, t, ..)| *m == model && *p == part && *t == texture)
+                {
+                    Some(i) => &mut groups[i],
+                    None => {
+                        groups.push((model, part, texture, Vec::new(), Vec::new(), Vec::new()));
+                        groups.last_mut().expect("just pushed")
+                    }
+                };
+                group.3.push(transform);
+                group.4.push(light);
+                group.5.push(tint);
+            }
+            stats.paintings_drawn += 1;
+        }
+
+        groups
+            .into_iter()
+            .filter_map(|(model, part, variant, transforms, lights, tints)| {
+                let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
+                upload_instances_tinted(device, &transforms, &lights, &tints).map(|buffer| {
+                    PaintingDrawBatch {
+                        model,
+                        part,
+                        variant,
+                        buffer,
+                        count,
+                    }
+                })
+            })
+            .collect()
+    }
+
     /// Resolve this frame's block entities (chests, that fix) into per-part
     /// instance buffers, frustum-culled and batched by `(model, sheet)`.
     ///
@@ -2708,6 +2832,7 @@ mod tests {
             // A flame subject, not an orb.
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+            painting: None,
         }
     }
 

@@ -145,6 +145,7 @@ fn armor_stand_draw(feet: glam::Vec3, invisible: bool, name_tag: Option<NameTag>
         variant_sheet: None,
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
+        painting: None,
     }
 }
 

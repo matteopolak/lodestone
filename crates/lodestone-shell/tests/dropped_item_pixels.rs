@@ -153,6 +153,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         variant_sheet: None,
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
+        painting: None,
     }
 }
 
@@ -503,6 +504,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         variant_sheet: None,
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
+        painting: None,
     };
     // The same camera, turned to put the projectile squarely behind it.
     let away = Camera {

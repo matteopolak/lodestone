@@ -97,6 +97,85 @@ const VILLAGER_PROFESSION: &[&str] = &[
     "minecraft:weaponsmith",
 ];
 
+/// `minecraft:painting_variant`'s 51 entries **in registry order**, which is
+/// the order a holder id indexes.
+///
+/// # The order is alphabetical, and that is measured rather than assumed
+///
+/// It would be natural to transcribe `PaintingVariants.bootstrap`'s
+/// registration order, and that is **wrong**: painting variants are a data-pack
+/// registry loaded from `data/minecraft/painting_variant/*.json` through the
+/// resource manager, which lists keys sorted. Decoding the repo's own captured
+/// `registry_data` payload for this registry
+/// (`tests/fixtures/registry_data_painting_variant.hex`, taken from a real
+/// vanilla 26.2 server) gives id 0 = `minecraft:alban`, not the bootstrap
+/// class's first entry `kebab`, and all 51 names in exactly `sorted()` order.
+/// The fixture is the outside source here; the bootstrap class is not.
+///
+/// # What a data pack breaks
+///
+/// A pack that adds or removes a variant shifts every id after it, and this
+/// table would then name the wrong painting — silently, since every id still
+/// resolves. The authoritative per-server answer is
+/// [`ClientRegistries::entry_names`](crate::packets::registry::ClientRegistries::entry_names),
+/// which already holds this registry's names as sent; wiring it here needs a
+/// registry handle threaded into `read_entity_metadata`, whose signature has
+/// more than fifty call sites. This table matches the house pattern the
+/// appearance-variant tables above already set, and carries the same hazard.
+const PAINTING: &[&str] = &[
+    "minecraft:alban",
+    "minecraft:aztec",
+    "minecraft:aztec2",
+    "minecraft:backyard",
+    "minecraft:baroque",
+    "minecraft:bomb",
+    "minecraft:bouquet",
+    "minecraft:burning_skull",
+    "minecraft:bust",
+    "minecraft:cavebird",
+    "minecraft:changing",
+    "minecraft:cotan",
+    "minecraft:courbet",
+    "minecraft:creebet",
+    "minecraft:dennis",
+    "minecraft:donkey_kong",
+    "minecraft:earth",
+    "minecraft:endboss",
+    "minecraft:fern",
+    "minecraft:fighters",
+    "minecraft:finding",
+    "minecraft:fire",
+    "minecraft:graham",
+    "minecraft:humble",
+    "minecraft:kebab",
+    "minecraft:lowmist",
+    "minecraft:match",
+    "minecraft:meditative",
+    "minecraft:orb",
+    "minecraft:owlemons",
+    "minecraft:passage",
+    "minecraft:pigscene",
+    "minecraft:plant",
+    "minecraft:pointer",
+    "minecraft:pond",
+    "minecraft:pool",
+    "minecraft:prairie_ride",
+    "minecraft:sea",
+    "minecraft:skeleton",
+    "minecraft:skull_and_roses",
+    "minecraft:stage",
+    "minecraft:sunflowers",
+    "minecraft:sunset",
+    "minecraft:tides",
+    "minecraft:unpacked",
+    "minecraft:void",
+    "minecraft:wanderer",
+    "minecraft:wasteland",
+    "minecraft:water",
+    "minecraft:wind",
+    "minecraft:wither",
+];
+
 fn lookup(table: &[&'static str], id: i32) -> Option<&'static str> {
     usize::try_from(id).ok().and_then(|i| table.get(i)).copied()
 }
@@ -120,6 +199,17 @@ pub fn appearance_variant(serializer: i32, id: i32) -> Option<&'static str> {
         _ => return None,
     };
     lookup(table, id)
+}
+
+/// Resolves a `minecraft:painting_variant` holder id to its registry key.
+///
+/// The id is the wire value **minus one** (a `Holder` sends `id + 1`, with 0
+/// reserved for an inline direct value that vanilla never sends for a
+/// painting), exactly as [`appearance_variant`]'s is. `None` for an id past
+/// the vanilla table, which is a data-pack-added variant this build has no
+/// size or texture for.
+pub fn painting_variant(id: i32) -> Option<&'static str> {
+    lookup(PAINTING, id)
 }
 
 /// Resolves a `minecraft:villager_type` id to its key.

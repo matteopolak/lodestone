@@ -558,6 +558,12 @@ impl RenderState {
         // resting triple for every wearer until the animation state lands.
         let elytra_batches = self.prepare_elytra(device, camera, entities, &mut stats);
 
+        // Paintings, over the same entity slice and for the same reason as
+        // everything above: no buffer creation mid-pass. Not part of the mob
+        // batch — a painting has no rig at all, so `prepare_entities` never
+        // sees one. See `RenderState::prepare_paintings`.
+        let painting_batches = self.prepare_paintings(device, camera, entities, &mut stats);
+
         // The mob-fire billboard, over the same instances, for
         // the same reason armour/wool are: no buffer creation mid-pass.
         let flame_batches = self.prepare_flame(device, camera, entities, &mut stats);
@@ -1198,6 +1204,38 @@ impl RenderState {
                     pass.set_vertex_buffer(1, batch.buffer.slice(..));
                     let end = batch.range.index_start + batch.range.index_count;
                     pass.draw_indexed(batch.range.index_start..end, 0, 0..batch.count);
+                    stats.draw_calls += 1;
+                }
+            }
+
+            // Paintings, right after the elytra. Through the **base** entity
+            // pipeline: a painting is ordinary opaque cutout geometry with no
+            // second coplanar layer, exactly like wool and the cape. Group 1 is
+            // rebound per batch — the variant's own sprite for a front batch,
+            // the shared back tile for a frame batch.
+            if !painting_batches.is_empty() {
+                pass.set_pipeline(&self.entities.pipeline.pipeline);
+                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                for batch in &painting_batches {
+                    let Some((_, model)) = self.entities.painting_models.get(batch.model) else {
+                        continue;
+                    };
+                    let Some(range) = model.parts.get(batch.part) else {
+                        continue;
+                    };
+                    let texture = match batch.variant {
+                        Some(variant) => self.entities.painting_textures.get(variant),
+                        None => self.entities.painting_back_texture.as_ref(),
+                    };
+                    let Some(texture) = texture else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(0, model.vertices.slice(..));
+                    pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_vertex_buffer(1, batch.buffer.slice(..));
+                    let end = range.index_start + range.index_count;
+                    pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
                     stats.draw_calls += 1;
                 }
             }
