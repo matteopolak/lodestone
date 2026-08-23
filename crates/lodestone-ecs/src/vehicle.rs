@@ -169,6 +169,22 @@ pub fn mount_rule(path: &str) -> Option<MountRule> {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct ControlledVehicle(pub Option<ControlledVehicleState>);
 
+/// One fixed-tick endpoint of a locally controlled vehicle's render transform.
+///
+/// Physics remains entirely in [`ControlledVehicleState::motion`] and advances
+/// only from [`tick_controlled_vehicle`]. This copy exists so a renderer can
+/// sample the last completed tick at frame cadence without either integrating
+/// motion again or making the physics result depend on frame rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VehicleRenderPose {
+    /// The vehicle's feet/origin position.
+    pub position: Vec3d,
+    /// Body yaw in degrees.
+    pub yaw: f32,
+    /// Pitch in degrees.
+    pub pitch: f32,
+}
+
 /// The per-tick state [`ControlledVehicle`] holds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ControlledVehicleState {
@@ -188,12 +204,38 @@ pub struct ControlledVehicleState {
     /// The vehicle's own pitch. A boat never changes it; a land mount takes
     /// **half** its rider's.
     pub pitch: f32,
+    /// The authoritative pose at the start of the most recently completed
+    /// fixed tick. Render code samples from this to [`Self::current_pose`] with
+    /// [`crate::FrameClock::interp_alpha`]; it never mutates simulation state.
+    pub previous: VehicleRenderPose,
     /// `AbstractBoat`'s between-tick state. Carried for a land mount too (unused,
     /// at its [`Default`]) rather than making the whole struct an enum — the two
     /// families share every other field and an enum would double every read site.
     pub boat: BoatState,
     /// This tick's `setPaddleState` pair, for `ClientAction::PaddleBoat`.
     pub paddles: (bool, bool),
+}
+
+impl ControlledVehicleState {
+    /// The authoritative endpoint produced by the latest fixed physics tick.
+    #[must_use]
+    pub fn current_pose(&self) -> VehicleRenderPose {
+        VehicleRenderPose {
+            position: self.motion.position,
+            yaw: self.yaw,
+            pitch: self.pitch,
+        }
+    }
+
+    /// Discards local prediction after the server rejects a vehicle move.
+    fn reset_to(&mut self, pose: VehicleRenderPose) {
+        self.motion = EntityMotion::at(pose.position);
+        self.yaw = pose.yaw;
+        self.pitch = pose.pitch;
+        self.previous = pose;
+        self.boat = BoatState::default();
+        self.paddles = (false, false);
+    }
 }
 
 /// The rider's jump-key charge, mirroring `LocalPlayer.jumpRidingTicks` /
@@ -374,12 +416,18 @@ pub fn tick_controlled_vehicle(
         .as_ref()
         .is_none_or(|held| held.server_id != vehicle_id);
     if stale {
+        let seeded_pose = VehicleRenderPose {
+            position: Vec3d::new(position.0.x, position.0.y, position.0.z),
+            yaw: rotation.0.yaw,
+            pitch: rotation.0.pitch,
+        };
         controlled.0 = Some(ControlledVehicleState {
             server_id: vehicle_id,
             family,
-            motion: EntityMotion::at(Vec3d::new(position.0.x, position.0.y, position.0.z)),
+            motion: EntityMotion::at(seeded_pose.position),
             yaw: rotation.0.yaw,
             pitch: rotation.0.pitch,
+            previous: seeded_pose,
             boat: BoatState::default(),
             paddles: (false, false),
         });
@@ -398,6 +446,11 @@ pub fn tick_controlled_vehicle(
         0.0,
     );
     let intent = intent.0;
+
+    // Capture the start endpoint before the one and only fixed-rate integrator
+    // mutates `motion`/rotation below. Per-frame rendering reads these two
+    // endpoints; it never runs any part of this tick again.
+    held.previous = held.current_pose();
 
     let mut speed_known = true;
     source.with_view(&mut |view| match family {
@@ -595,11 +648,11 @@ pub fn apply_vehicle_moved(
         if let Some(held) = controlled.0.as_mut()
             && held.server_id == vehicle_id
         {
-            held.motion = EntityMotion::at(Vec3d::new(pos.x, pos.y, pos.z));
-            held.yaw = *yaw;
-            held.pitch = *pitch;
-            held.boat = BoatState::default();
-            held.paddles = (false, false);
+            held.reset_to(VehicleRenderPose {
+                position: Vec3d::new(pos.x, pos.y, pos.z),
+                yaw: *yaw,
+                pitch: *pitch,
+            });
         }
     }
 }
@@ -638,5 +691,37 @@ mod tests {
         assert_eq!(VehicleFamily::for_type_path("minecart"), None);
         assert_eq!(VehicleFamily::for_type_path("chest_minecart"), None);
         assert_eq!(VehicleFamily::for_type_path("cow"), None);
+    }
+
+    #[test]
+    fn a_vehicle_correction_resets_both_render_endpoints() {
+        let old = VehicleRenderPose {
+            position: Vec3d::new(1.0, 64.0, 2.0),
+            yaw: 45.0,
+            pitch: 3.0,
+        };
+        let corrected = VehicleRenderPose {
+            position: Vec3d::new(9.0, 70.0, -4.0),
+            yaw: 270.0,
+            pitch: -8.0,
+        };
+        let mut held = ControlledVehicleState {
+            server_id: 42,
+            family: VehicleFamily::Boat,
+            motion: EntityMotion::at(old.position),
+            yaw: old.yaw,
+            pitch: old.pitch,
+            previous: old,
+            boat: BoatState::default(),
+            paddles: (true, true),
+        };
+        held.motion.velocity = Vec3d::new(1.0, 2.0, 3.0);
+
+        held.reset_to(corrected);
+
+        assert_eq!(held.previous, corrected);
+        assert_eq!(held.current_pose(), corrected);
+        assert_eq!(held.motion.velocity, Vec3d::ZERO);
+        assert_eq!(held.paddles, (false, false));
     }
 }
