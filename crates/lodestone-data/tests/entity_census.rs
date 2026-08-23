@@ -61,7 +61,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use lodestone_data::entity_census::{is_mob, pushes_players, TYPE_COUNT};
+use lodestone_data::entity_census::{can_be_collided_with, is_mob, pushes_players, TYPE_COUNT};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -170,6 +170,27 @@ const PUSH_MODEL: &[(&str, Effect, &str)] = &[
         "Warden.java:529 — records a disturbance, then calls super.doPush",
     ),
 ];
+
+/// Implementation classes whose `canBeCollidedWith` override can return true.
+/// The dump carries the concrete class, so every wood variant follows its
+/// shared boat implementation without a hand-maintained entity-name list.
+const HARD_COLLISION_CLASSES: &[(&str, &str)] = &[
+    ("Boat", "AbstractBoat.canBeCollidedWith — unconditional true"),
+    ("ChestBoat", "inherits AbstractBoat.canBeCollidedWith"),
+    ("Raft", "inherits AbstractBoat.canBeCollidedWith"),
+    ("ChestRaft", "inherits AbstractBoat.canBeCollidedWith"),
+    ("Shulker", "Shulker.canBeCollidedWith — isAlive()"),
+    (
+        "HappyGhast",
+        "HappyGhast.canBeCollidedWith — true in eligible runtime states",
+    ),
+];
+
+fn classify_hard_collision(row: &Row) -> bool {
+    HARD_COLLISION_CLASSES
+        .iter()
+        .any(|(class, _)| *class == row.impl_class)
+}
 
 fn effect_of(class: &str) -> Effect {
     PUSH_MODEL
@@ -350,6 +371,25 @@ fn generate(rows: &[Row]) -> String {
     }
     out.push_str("];\n");
 
+    let _ = writeln!(
+        out,
+        "\n/// Whether this type can participate in another entity's hard movement collision."
+    );
+    let _ = writeln!(
+        out,
+        "pub static ENTITY_CAN_BE_COLLIDED_WITH: [bool; {count}] = ["
+    );
+    for row in rows {
+        let collidable = classify_hard_collision(row);
+        let literal = format!("{collidable},");
+        let _ = writeln!(
+            out,
+            "    {literal:<7}// {} {} — {}",
+            row.id, row.name, row.impl_class
+        );
+    }
+    out.push_str("];\n");
+
     // The raw `living` column, shipped unreduced. It is a *different* fact from
     // `ENTITY_PUSHES_PLAYERS` above and cannot be recovered from it: `bat`,
     // `armor_stand` and `parrot` are all `LivingEntity` subclasses that do not
@@ -425,9 +465,44 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
              (living={}, pushEntities={:?}, doPush={:?})",
             row.name, row.id, row.living, row.push_entities_decl, row.do_push_decl
         );
+        assert_eq!(
+            can_be_collided_with(row.id as i32),
+            Some(classify_hard_collision(row)),
+            "hard-collision mismatch for {} (id {}, class {})",
+            row.name,
+            row.id,
+            row.impl_class
+        );
         checked += 1;
     }
     assert_eq!(checked, 158, "expected 158 entity types checked, got {checked}");
+}
+
+#[test]
+fn hard_collision_is_a_separate_default_deny_capability() {
+    let rows = parse_dump(DUMP);
+    for name in [
+        "minecraft:oak_boat",
+        "minecraft:oak_chest_boat",
+        "minecraft:bamboo_raft",
+        "minecraft:bamboo_chest_raft",
+        "minecraft:shulker",
+        "minecraft:happy_ghast",
+    ] {
+        let row = rows
+            .iter()
+            .find(|row| row.name == name)
+            .expect("known collider");
+        assert_eq!(can_be_collided_with(row.id as i32), Some(true), "{name}");
+    }
+    for name in ["minecraft:player", "minecraft:zombie", "minecraft:item"] {
+        let row = rows
+            .iter()
+            .find(|row| row.name == name)
+            .expect("known control");
+        assert_eq!(can_be_collided_with(row.id as i32), Some(false), "{name}");
+    }
+    assert_eq!(can_be_collided_with(TYPE_COUNT as i32), None);
 }
 
 #[test]

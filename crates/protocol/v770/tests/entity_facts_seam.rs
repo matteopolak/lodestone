@@ -86,6 +86,20 @@ fn the_briefed_control_cases_come_back_through_the_seam() {
     }
     assert!(
         adapter
+            .entity_facts(&key("minecraft:oak_boat"))
+            .expect("boat resolves")
+            .collidable,
+        "a boat is a hard collider even though it is not a LivingEntity crowd pusher"
+    );
+    assert!(
+        !adapter
+            .entity_facts(&key("minecraft:zombie"))
+            .expect("zombie resolves")
+            .collidable,
+        "ordinary living entities push softly but are not hard colliders"
+    );
+    assert!(
+        adapter
             .entity_facts(&key("minecraft:zombie"))
             .expect("zombie resolves")
             .pushes_players,

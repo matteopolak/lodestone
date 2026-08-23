@@ -186,6 +186,13 @@ pub struct NearbyEntity {
     /// `false` for the `Entity` base class, so an arrow, an item or an armour
     /// stand (`ArmorStand.java:169`) never participates.
     pub pushable: bool,
+    /// Whether this entity is a producer for `LivingEntity.pushEntities()`.
+    ///
+    /// This differs from [`Self::pushable`], which is the *receiver* predicate
+    /// `Entity.isPushable()`. A boat is neither a crowd-push producer nor a
+    /// pushable living entity, but it can still be present in this mixed
+    /// snapshot because [`Self::collidable`] is true.
+    pub pushes_players: bool,
     /// `Entity.canBeCollidedWith(us)` — hard collision. `false` for players and
     /// every mob; `true` only for boats, shulkers and (conditionally) happy
     /// ghasts. See this module's header table.
@@ -221,6 +228,7 @@ impl NearbyEntity {
             position,
             bounding_box,
             pushable: true,
+            pushes_players: true,
             collidable: false,
             is_vehicle: false,
             no_physics: false,
@@ -357,6 +365,11 @@ fn pair_admitted(
     // intersection with **no epsilon inflation**. `getEntityCollisions` inflates
     // its query by 1.0E-7 and this one does not; keep them distinct.
     if !self_box.intersects(&other.bounding_box) {
+        return false;
+    }
+    // This mixed snapshot also carries hard colliders. Only entities whose own
+    // tick runs `LivingEntity.pushEntities()` may enter this crowd pass.
+    if !other.pushes_players {
         return false;
     }
     // `EntitySelector.NO_SPECTATORS` on the pushee (us) and, via `noPhysics`, on

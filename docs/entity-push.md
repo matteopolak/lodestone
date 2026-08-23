@@ -10,9 +10,10 @@ The two things that happen when two entities occupy the same space, ported into
 | **soft push** — a horizontal velocity shove, every tick, while boxes overlap | `LivingEntity.pushEntities` → `Entity.push(Entity)` | `push::entity_push_impulse` / `push::apply_entity_push` / `player::tick_among_entities` |
 | **hard collision** — entity boxes clipping movement | `EntityGetter.getEntityCollisions` → `Entity.collide`, and the entity term of `noCollision` | `push::entity_collision_boxes`, `collision::collide_among_entities`, `entity::move_entity_among_entities`, `push::no_entity_collision` / `push::no_collision_among_entities` |
 
-**The client-side half — a local player feeling a push from nearby
-entities — is still inert**; see [Wiring](#wiring-what-is-still-owed). Nothing
-in `lodestone-shell`, `lodestone-ecs` or `lodestone-client` calls it.
+**The client-side half is wired.** `Sim::tick_nearby_entities` builds one mixed
+snapshot of living crowd-push producers and hard colliders, and
+`lodestone_ecs::player::player_physics` hands it to
+`player::tick_among_entities` once per fixed tick.
 
 **The server-side half now has a real consumer.**
 `lodestone_server::mobs::MobSim::push_entities` calls `pair_push_vector` to
@@ -212,7 +213,7 @@ Two things this consumer is, on purpose, that the client-facing API above is not
   `MobSim::push_entities`'s own doc comment, along with why `isPushable`/vehicle
   exclusions and cramming damage are not modelled either.
 
-## Wiring: what is still owed
+## Wiring
 
 ### The interface the physics crate wants
 
@@ -227,6 +228,7 @@ pub struct NearbyEntity {
     pub position: Vec3d,        // Entity.position() — feet centre; only x/z are read
     pub bounding_box: Aabb,     // Entity.getBoundingBox(), world space
     pub pushable: bool,         // Entity.isPushable()
+    pub pushes_players: bool,   // this entity runs LivingEntity.pushEntities()
     pub collidable: bool,       // Entity.canBeCollidedWith(us)
     pub is_vehicle: bool,       // Entity.isVehicle() — has passengers
     pub no_physics: bool,       // Entity.noPhysics
@@ -237,8 +239,9 @@ pub struct NearbyEntity {
 }
 ```
 
-`NearbyEntity::living(position, bounding_box)` is the shape almost every entity
-takes (pushable, not collidable, no team, no passengers).
+`NearbyEntity::living(position, bounding_box)` is the shape almost every living
+crowd-push producer takes (pushable and push-producing, not collidable, no team,
+no passengers).
 
 **What the shell must supply, and how:**
 
@@ -259,9 +262,11 @@ takes (pushable, not collidable, no team, no passengers).
    the `Entity` base (items, arrows, XP orbs) → `false`;
    boats → `true`. Getting this wrong in the permissive direction manufactures
    pushes from dropped items, which is very visible.
-4. **`collidable` is `false` for everything except boats, shulkers and happy
-   ghasts.** Until the shell can identify those three, hardcoding `false` is exactly
-   right and the hard-collision half stays inert with no loss.
+4. **`pushes_players` and `collidable` are independent producer capabilities.**
+   The generated v770 census marks `LivingEntity.pushEntities` producers in the
+   first column and the exhaustive `canBeCollidedWith` override families — boats,
+   shulkers and happy ghasts — in the second. The shell includes a candidate when
+   either is true. Unknown ids default-deny both.
 5. **Teams**: `ClientboundSetPlayerTeamPacket` carries the collision rule. Until it
    is decoded, `CollisionRule::Always` + `allied: false` is the correct value for
    every server with no scoreboard teams — i.e. the overwhelming majority — and it
@@ -271,24 +276,18 @@ takes (pushable, not collidable, no team, no passengers).
    client. It deliberately has no `Default` — `bool::default()` would make `alive`
    false and silently produce a corpse no push can move.
 
-Then swap `lodestone_physics::tick(...)` for
-`lodestone_physics::tick_among_entities(..., nearby, PushSelf::LIVING_PLAYER)` in
-`lodestone_ecs::player::player_physics` (`crates/lodestone-ecs/src/player.rs`). The
-snapshot must be built **outside** the `World` write guard — same constraint as the
-attribute fold in [`swimming.md`](./swimming.md) and rule 1 in
-[`world-unification.md`](./world-unification.md).
+The production path is
+`Sim::tick_nearby_entities → NearbyEntities → player_physics →
+tick_among_entities`. The shell resolves dimensions and the two type-level
+capabilities through `VersionAdapter::entity_facts`; the physics crate never
+queries the ECS world itself.
 
-### What stays inert, and why that is not the whole story
+### What stays incomplete
 
-* **The push** is inert only because nobody passes a non-empty slice. One call-site
-  change turns it on.
-* **Hard collision** is inert *twice over*: nobody passes colliders, and there is
-  no producer that could — `canBeCollidedWith` is false for every entity this client
-  currently knows how to represent. It is reachable through
-  `collide_among_entities` / `move_entity_among_entities` and tested there.
-  Threading it through `tick`/`tick_air`/`travel_in_air`/`move_entity` would mean
-  widening five public signatures that crates outside `lodestone-physics` call; that
-  is a change to make when a caller can supply boats, not before.
+* **Per-instance collider refinements** are not yet carried by the ECS snapshot.
+  The type census is a maximum: a shulker must also be alive, and a happy ghast
+  has its own state machine. Boats are unconditional and are the production case
+  this wiring fixes.
 * **`noBorderCollision`** is still unmodelled (no world border). It is now the
   *only* remaining unmodelled term of `noCollision`'s three.
 
@@ -307,7 +306,8 @@ earlier investigation had concluded it did.
 * **`MoveContext` did not gain a field, on purpose.** It is a `Copy` value type of
   plain scalars, constructed outside this crate; a borrowed slice would give it a
   lifetime and take `Copy` with it, and it already lost `Eq` when it gained an
-  `f64`. `move_entity_among_entities` is a second entry point instead.
+  `f64`. `move_entity_among_entities` remains the box-slice entry point;
+  `move_entity_with_nearby` is the crate-private player adapter.
 * **Entity colliders are gathered once, from the *movement* box, and reused for the
   step-up pass** even though `stepUpAABB` is strictly larger (`Entity.collide`).
   An entity overlapping only the taller step-up box is invisible to the step. Do

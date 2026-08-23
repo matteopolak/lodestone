@@ -17,7 +17,8 @@
 
 use crate::collision::{CollisionView, no_collision};
 use crate::entity::{
-    AirTravelContext, EntityDimensions, EntityMotion, MoveContext, move_entity, travel_in_air,
+    AirTravelContext, EntityDimensions, EntityMotion, MoveContext, move_entity,
+    move_entity_with_nearby, travel_in_air_among_entities,
 };
 use crate::fluid::apply_fluid_push;
 use crate::fluid_state::{FluidState, compute_fluid_state};
@@ -906,6 +907,7 @@ fn do_move(
     profile: &PhysicsProfile,
     suppress_bounce: bool,
     staying_on_ground_surface: bool,
+    nearby: &[crate::push::NearbyEntity],
 ) {
     let mut motion = EntityMotion {
         position: state.position,
@@ -935,7 +937,7 @@ fn do_move(
         // player to `tick_air` instead.
         suppress_block_speed_factor: state.flying || state.fall_flying,
     };
-    move_entity(&mut motion, state.dimensions(), view, profile, ctx);
+    move_entity_with_nearby(&mut motion, state.dimensions(), view, profile, ctx, nearby);
     state.position = motion.position;
     state.velocity = motion.velocity;
     state.on_ground = motion.on_ground;
@@ -1872,6 +1874,16 @@ pub fn tick_air(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
+    tick_air_among_entities(state, input, view, profile, &[]);
+}
+
+fn tick_air_among_entities(
+    state: &mut PlayerState,
+    input: MovementInput,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    nearby: &[crate::push::NearbyEntity],
+) {
     // `LocalPlayer.aiStep`'s auto-jump spend (`LocalPlayer.java:784-789`): a
     // decision made by [`update_auto_jump`] at the end of the *previous* tick's
     // move is spent here as a forced jump, one tick later, via the same
@@ -1982,7 +1994,7 @@ pub fn tick_air(
         // `Player.onClimbable()` (`Player.java:2025`).
         suppress_climbable: state.flying,
     };
-    travel_in_air(
+    travel_in_air_among_entities(
         &mut motion,
         state.dimensions(),
         (xxa, zza),
@@ -1990,6 +2002,7 @@ pub fn tick_air(
         ctx,
         view,
         profile,
+        nearby,
     );
     state.position = motion.position;
     state.velocity = motion.velocity;
@@ -2304,6 +2317,17 @@ pub fn tick_water(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
+    tick_water_among_entities(state, input, fluid, view, profile, &[]);
+}
+
+fn tick_water_among_entities(
+    state: &mut PlayerState,
+    input: MovementInput,
+    fluid: &FluidState,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    nearby: &[crate::push::NearbyEntity],
+) {
     match profile.fluid_model {
         FluidModel::Modern => {}
         // Structural seam: 1.8 fluid handling is a different branch (no swimming
@@ -2425,7 +2449,7 @@ pub fn tick_water(
 
     let accel = input_vector(xxa, zza, speed, state.yaw);
     state.velocity = state.velocity.add(accel);
-    do_move(state, view, profile, input.sneak, input.sneak);
+    do_move(state, view, profile, input.sneak, input.sneak, nearby);
 
     // `Entity.move()`'s `checkFallDamage` call. `in_water` is `true` — the reset
     // above already zeroed `fall_distance` for this whole tick, and vanilla's own
@@ -2484,6 +2508,17 @@ pub fn tick_lava(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
+    tick_lava_among_entities(state, input, fluid, view, profile, &[]);
+}
+
+fn tick_lava_among_entities(
+    state: &mut PlayerState,
+    input: MovementInput,
+    fluid: &FluidState,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    nearby: &[crate::push::NearbyEntity],
+) {
     match profile.fluid_model {
         FluidModel::Modern => {}
         FluidModel::Legacy1_8 => {
@@ -2529,7 +2564,7 @@ pub fn tick_lava(
     // moveRelative(0.02) → move → shallow/deep branch → -baseGravity/4.
     let accel = input_vector(xxa, zza, profile.fluid_input_speed, state.yaw);
     state.velocity = state.velocity.add(accel);
-    do_move(state, view, profile, input.sneak, input.sneak);
+    do_move(state, view, profile, input.sneak, input.sneak, nearby);
 
     // `Entity.move()`'s `checkFallDamage` call. Not water on this path.
     accumulate_fall_distance(state, state.position.y - old_y, false);
@@ -2650,6 +2685,16 @@ pub fn tick_elytra(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
+    tick_elytra_among_entities(state, input, view, profile, &[]);
+}
+
+fn tick_elytra_among_entities(
+    state: &mut PlayerState,
+    input: MovementInput,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    nearby: &[crate::push::NearbyEntity],
+) {
     // onClimbable: vanilla stops fall-flying and reverts to the walking path.
     if view.is_climbable(
         mth::floor(state.position.x),
@@ -2657,7 +2702,7 @@ pub fn tick_elytra(
         mth::floor(state.position.z),
     ) {
         state.fall_flying = false;
-        tick_air(state, input, view, profile);
+        tick_air_among_entities(state, input, view, profile, nearby);
         return;
     }
 
@@ -2668,7 +2713,7 @@ pub fn tick_elytra(
 
     state.velocity = update_fall_flying_movement(state, profile, collapsed);
     let old_y = state.position.y;
-    do_move(state, view, profile, false, input.sneak);
+    do_move(state, view, profile, false, input.sneak, nearby);
 
     // `Entity.move()`'s `checkFallDamage` call. Not water on this path.
     accumulate_fall_distance(state, state.position.y - old_y, false);
@@ -3112,7 +3157,7 @@ pub fn tick(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
-    travel_and_check_inside_blocks(state, input, view, profile);
+    travel_and_check_inside_blocks(state, input, view, profile, &[]);
     // `Player.updatePlayerPose()` with no entity snapshot: the block half of the
     // fit gate. See `tick_among_entities` for the full predicate.
     update_player_pose(state, input, view, &[]);
@@ -3131,6 +3176,7 @@ fn travel_and_check_inside_blocks(
     input: MovementInput,
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
+    nearby: &[crate::push::NearbyEntity],
 ) {
     // The position *before* this tick's travel dispatch moves it — the "from"
     // half of vanilla's `checkInsideBlocks(from, to, …)` segment, needed by
@@ -3236,13 +3282,13 @@ fn travel_and_check_inside_blocks(
     // bit and vanilla's dispatch still honours it if both are somehow set.
     let affected_by_fluids = !state.flying;
     if affected_by_fluids && fluid.in_water() {
-        tick_water(state, input, &fluid, view, profile);
+        tick_water_among_entities(state, input, &fluid, view, profile, nearby);
     } else if affected_by_fluids && fluid.in_lava() {
-        tick_lava(state, input, &fluid, view, profile);
+        tick_lava_among_entities(state, input, &fluid, view, profile, nearby);
     } else if state.fall_flying {
-        tick_elytra(state, input, view, profile);
+        tick_elytra_among_entities(state, input, view, profile, nearby);
     } else {
-        tick_air(state, input, view, profile);
+        tick_air_among_entities(state, input, view, profile, nearby);
     }
     // The Y overwrite, closing `Player.travel`. `with(Direction.Axis.Y, …)` — the
     // X and Z the dispatch produced are kept untouched. There is **no** horizontal
@@ -3298,21 +3344,11 @@ fn travel_and_check_inside_blocks(
 /// impulse a neighbour delivers this tick is integrated on the **next** one, and
 /// this tick's collision sweep never sees it.
 ///
-/// Passing an empty `nearby` is bit-for-bit [`tick`] — [`crate::push::apply_entity_push`]
-/// returns immediately, and the hard-collision half is not reached at all (see the
-/// note below). That is what makes this addition provably inert for existing
-/// callers.
-///
-/// **What this does not do, and cannot do without a producer.** The *hard*
-/// collision half — `Entity.collide`'s entity colliders — is not threaded through
-/// here. Doing so means widening `tick`/`tick_air`/`tick_water`/`tick_lava`/
-/// `tick_elytra`/`travel_in_air`/`move_entity`, all of which are public and called
-/// from crates this change may not touch, for a case that currently has **no**
-/// producer: `getEntityCollisions` filters on `canBeCollidedWith`, which only boats,
-/// shulkers and happy ghasts satisfy. The capability exists and is tested as
-/// [`crate::collision::collide_among_entities`] /
-/// [`crate::entity::move_entity_among_entities`]; wiring it into the player
-/// pipeline is a signature change to make when a caller can supply boats.
+/// Passing an empty `nearby` is bit-for-bit [`tick`]: movement takes the ordinary
+/// block-only entry point and [`crate::push::apply_entity_push`] returns
+/// immediately. A mixed snapshot may carry both hard colliders (boats, shulkers,
+/// eligible happy ghasts) and living crowd-push producers; the two independent
+/// flags on [`crate::push::NearbyEntity`] keep those mechanisms separate.
 pub fn tick_among_entities(
     state: &mut PlayerState,
     input: MovementInput,
@@ -3321,7 +3357,7 @@ pub fn tick_among_entities(
     nearby: &[crate::push::NearbyEntity],
     self_flags: crate::push::PushSelf,
 ) {
-    travel_and_check_inside_blocks(state, input, view, profile);
+    travel_and_check_inside_blocks(state, input, view, profile, nearby);
     crate::push::apply_entity_push(state, view, profile, nearby, self_flags);
     // The pose comes *after* the push, because `pushEntities` is the tail of
     // `aiStep` (inside `super.tick()`) and `updatePlayerPose` is the tail of

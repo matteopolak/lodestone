@@ -3990,6 +3990,28 @@ fn tick_nearby_entities_resolves_a_neighbours_scoreboard_team() {
     );
 }
 
+#[test]
+fn tick_nearby_entities_keeps_a_boat_as_a_hard_collider_without_making_it_a_crowd_pusher() {
+    let mut sim = Sim::new(test_config());
+    let feet = sim.player().position;
+    ingest(
+        &mut sim,
+        lodestone_model::ClientEvent::EntitySpawned {
+            entity_id: 9010,
+            uuid: None,
+            entity_type: "minecraft:oak_boat".parse().expect("valid boat key"),
+            pos: lodestone_model::Vec3::new(feet.x + 1.0, feet.y, feet.z),
+            rotation: Rotation::new(0.0, 0.0),
+            velocity: None,
+        },
+    );
+
+    let nearby = sim.tick_nearby_entities();
+    assert_eq!(nearby.list.len(), 1, "the non-pushing boat must not be filtered out");
+    assert!(nearby.list[0].collidable);
+    assert!(!nearby.list[0].pushes_players);
+}
+
 // -----------------------------------------------------------------------
 // Local placement prediction (issue #381)
 // -----------------------------------------------------------------------

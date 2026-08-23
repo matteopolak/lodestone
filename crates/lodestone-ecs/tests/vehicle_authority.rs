@@ -99,6 +99,7 @@ impl lodestone_model::VersionAdapter for BoatFactsAdapter {
                 height: 0.5625,
             },
             pushes_players: false,
+            collidable: true,
         })
     }
     fn begin_login(

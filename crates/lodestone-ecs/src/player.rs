@@ -848,20 +848,21 @@ impl Default for Profile {
     }
 }
 
-/// This tick's entity-push neighbourhood — every nearby entity
-/// [`lodestone_physics::push::apply_entity_push`] should test the local
-/// player against, refreshed by the driver once per tick before `GameTick`
-/// runs. Same pattern as [`PlayerCollision`]: the *decision* (which entities,
-/// how their boxes are sized) is the shell's, because it owns the ECS world
-/// query and whatever per-type geometry it can resolve, but the snapshot is
-/// handed to the ECS as an owned `Vec` so [`player_physics`] can stay a plain
-/// scheduled system rather than reaching back into the world itself.
+/// This tick's entity-interaction neighbourhood — every nearby soft-push
+/// producer and hard movement collider the local player should be tested
+/// against, refreshed by the driver once per tick before `GameTick` runs.
+/// Same pattern as [`PlayerCollision`]: the *decision* (which entities, how
+/// their boxes are sized) is the shell's, because it owns the ECS world query
+/// and per-type geometry, but the snapshot is handed to the ECS as an owned
+/// `Vec` so [`player_physics`] can stay a plain scheduled system rather than
+/// reaching back into the world itself.
 ///
 /// Empty (the [`Default`]) reproduces prior behaviour exactly: passing an
 /// empty slice to [`lodestone_physics::tick_among_entities`] is bit-for-bit
-/// [`lodestone_physics::tick`] (`apply_entity_push` returns immediately), so a
-/// driver that never populates this — every existing test harness, and
-/// `--headless` — sees no behaviour change at all.
+/// [`lodestone_physics::tick`] (the movement core takes its ordinary block-only
+/// path and `apply_entity_push` returns immediately), so a driver that never
+/// populates this — every existing test harness, and `--headless` — sees no
+/// behaviour change at all.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct NearbyEntities {
     /// The neighbourhood itself.
@@ -3261,6 +3262,7 @@ mod tests {
                     height: self.height,
                 },
                 pushes_players: false,
+                collidable: false,
             })
         }
 

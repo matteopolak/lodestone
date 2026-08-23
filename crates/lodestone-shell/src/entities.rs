@@ -7744,6 +7744,7 @@ mod tests {
                     height: self.height,
                 },
                 pushes_players: false,
+                collidable: true,
             })
         }
 
