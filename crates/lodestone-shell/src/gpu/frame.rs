@@ -523,14 +523,16 @@ impl RenderState {
         // buffers can't be created mid-pass, and the entity camera uniform (no
         // section origin; the world position lives in each instance matrix) must
         // be written first too.
-        let mut entity_batches = self.prepare_entities(device, queue, camera, entities, &mut stats);
+        let mut entity_batches =
+            self.prepare_entities(device, queue, camera, entities, &mut stats);
 
         // The mob spawner's/trial spawner's spinning display mob — not a
         // `BlockEntitySource` consumer, but the ordinary mob pipeline at a
         // nested placement (see `gpu/spawner_mobs.rs`). Appended into the
-        // *same* batch vec `prepare_entities` returns, so the draw loop below
-        // needs no changes: a spawner's mob is, from that loop's point of
-        // view, just another `EntityDrawBatch`.
+        // same **visible** batch vec `prepare_entities` returns, so the draw
+        // loop below needs no changes: a spawner's mob is, from that loop's
+        // point of view, just another `EntityDrawBatch`. It never joins the
+        // separate invisible water-mask phase.
         //
         // `write_entity_camera_uniform` runs unconditionally first, for the
         // reason its own doc gives: `prepare_entities` only rewrites group 0
@@ -538,7 +540,9 @@ impl RenderState {
         // in view.
         self.write_entity_camera_uniform(queue, camera);
         let spawner_spawns = self.spawner_source.spawner_mobs(camera.position);
-        entity_batches.extend(self.prepare_spawner_mobs(device, camera, &spawner_spawns));
+        entity_batches
+            .visible
+            .extend(self.prepare_spawner_mobs(device, camera, &spawner_spawns));
 
         // Humanoid armour layers, over the same instances — resolved from the
         // same `entities` slice and the same resolver, so a helmet cannot be
@@ -1042,33 +1046,13 @@ impl RenderState {
             // and the water surface then blends over it. Fogging the entity
             // shader is a separate fix and does not achieve this on its own:
             // fog tints a mob by distance, it does not put water in front of it.
-            if !entity_batches.is_empty() {
+            if !entity_batches.visible.is_empty() {
                 pass.set_pipeline(&self.entities.pipeline.pipeline);
                 pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
-                // `"boat_water_patch"` is the one model in this loop that
-                // must **not** draw through the base pipeline: it is a boat's
-                // own extra, colour-write-disabled instance
-                // (`gpu/entity_passes.rs`'s `prepare_entities`), and drawing
-                // it through the textured pipeline would paint a second,
-                // visible mirrored hull plank inside every boat rather than
-                // leaving the gap it exists to occlude invisible. See
-                // `EntityPipeline::water_mask_pipeline`'s doc. Switched back
-                // for the next batch in the same loop rather than split into
-                // a second pass, so cam group 0 stays bound throughout.
-                let mut water_mask_bound = false;
-                for batch in &entity_batches {
+                for batch in &entity_batches.visible {
                     let Some(model) = self.entities.gpu_models.get(batch.model) else {
                         continue;
                     };
-                    let is_water_mask = batch.model == "boat_water_patch";
-                    if is_water_mask != water_mask_bound {
-                        pass.set_pipeline(if is_water_mask {
-                            &self.entities.water_mask_pipeline
-                        } else {
-                            &self.entities.pipeline.pipeline
-                        });
-                        water_mask_bound = is_water_mask;
-                    }
                     // A fetched player skin wins over the model's own sheet, and a
                     // miss falls through to it. That fallback covers three cases
                     // at once and none of them is an error: no skin declared
@@ -1783,6 +1767,37 @@ impl RenderState {
             let opaque_submitted = self
                 .particles
                 .draw_opaque(&mut pass, &self.particle_atlas_bind_group);
+
+            // Boat-interior water masks, after every visible opaque/cutout
+            // draw and immediately before translucent water. They write depth
+            // but no colour. This phase boundary is what prevents the mask
+            // from erasing a rider's legs/arms where they intersect the hull:
+            // every visible fragment is already in colour and depth before a
+            // mask can run, while the water surface below still fails against
+            // the mask as intended.
+            if !entity_batches.water_masks.is_empty()
+                && let Some(texture) = self.entities.textures.get("boat_water_patch")
+            {
+                pass.set_pipeline(&self.entities.water_mask_pipeline);
+                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                pass.set_bind_group(1, texture, &[]);
+                for batch in &entity_batches.water_masks {
+                    let Some(model) = self.entities.gpu_models.get(batch.model) else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(0, model.vertices.slice(..));
+                    pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for (range, buffer) in model.parts.iter().zip(&batch.parts) {
+                        let (Some(buffer), true) = (buffer.as_ref(), range.index_count > 0) else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, buffer.slice(..));
+                        let end = range.index_start + range.index_count;
+                        pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
+                        stats.draw_calls += 1;
+                    }
+                }
+            }
 
             if let Some(model) = &self.model {
                 // Translucent water, drawn after all opaque model terrain so the

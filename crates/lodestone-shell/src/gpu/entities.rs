@@ -232,8 +232,8 @@ pub(super) struct EntityRenderer {
     /// same loop every other rig goes through — the pipeline object is the
     /// only thing this pass needs that a normal batch does not already have.
     /// See `gpu/entity_passes.rs`'s `prepare_entities` for where the second,
-    /// per-boat instance is built, and `gpu/frame.rs` for the draw-loop arm
-    /// that selects this pipeline by `batch.model == "boat_water_patch"`.
+    /// per-boat instance is built into the dedicated water-mask phase, and
+    /// `gpu/frame.rs` for the draw immediately before translucent water.
     pub(super) water_mask_pipeline: wgpu::RenderPipeline,
     /// The entity ground-shadow decal (owner report: "entity shadows are
     /// missing"): a seventh pipeline ([`EntityPipeline::shadow_pipeline`]),

@@ -900,6 +900,20 @@ struct EntityDrawBatch {
     variant_sheet: Option<&'static str>,
 }
 
+/// Entity uploads split by render phase.
+///
+/// Boat water patches are invisible depth writers, not visible entity models.
+/// Keeping them in a separate list makes it structurally impossible for a
+/// material/skin batch boundary to place one between a boat and its rider.
+#[derive(Debug, Default)]
+struct PreparedEntityBatches {
+    /// Ordinary visible entity bodies.
+    visible: Vec<EntityDrawBatch>,
+    /// Invisible boat-interior depth masks, submitted after all visible opaque
+    /// geometry and immediately before translucent water.
+    water_masks: Vec<EntityDrawBatch>,
+}
+
 /// One `(armour slot, texture)` group's uploaded instance buffers for a frame.
 ///
 /// The **order of these in the returned `Vec` is load bearing**: leather's

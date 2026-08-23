@@ -42,8 +42,9 @@ use super::block_entities::{BannerLayerDrawBatch, BlockEntityDrawBatch};
 use super::terrain::ModelRenderer;
 use super::{
     ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, CapeDrawBatch, ElytraDrawBatch,
-    EntityDrawBatch, EntitySpriteBatch, FlameBatch, OrbBatch, PaintingDrawBatch, RenderState,
-    RenderStats, ShadowBatch, WoolPartAccum, humanoid_armour_slot,
+    EntityDrawBatch, EntitySpriteBatch, FlameBatch, OrbBatch, PaintingDrawBatch,
+    PreparedEntityBatches, RenderState, RenderStats, ShadowBatch, WoolPartAccum,
+    humanoid_armour_slot,
 };
 
 /// One entity's own hitbox width in blocks — its type's base width times its age
@@ -899,9 +900,9 @@ impl RenderState {
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
-    ) -> Vec<EntityDrawBatch> {
+    ) -> PreparedEntityBatches {
         if entities.is_empty() {
-            return Vec::new();
+            return PreparedEntityBatches::default();
         }
 
         // Rewrite the entity group-0 uniform: view-projection (world position
@@ -946,6 +947,7 @@ impl RenderState {
         // the *skin's* reason rather than the tint's: it selects a bind group, so a
         // shared group would draw one breed's sheet on every breed.
         let mut groups: Vec<(bool, u8, Option<String>, Option<&'static str>, Vec<_>)> = Vec::new();
+        let mut water_mask_instances = Vec::new();
         for e in entities {
             // `LivingEntityRenderer.submit`'s `isBodyVisible` gate on its own
             // `submitModel` call: an invisible entity draws no body/rig at
@@ -1041,24 +1043,13 @@ impl RenderState {
             // both. `_raft`/`_chest_raft` never match, matching
             // `RaftRenderer`'s own empty `submitTypeAdditions` — see
             // `lodestone_assets::entity_models::boat_water_patch_model`'s doc
-            // for why rafts get none of this. Pushed into the *same* `groups`
-            // key as the boat's own instance: the patch shares no colour with
-            // anything (`write_mask` is empty), so `white` riding along is
-            // inert, and keeping one key means one fewer linear scan of
-            // `groups` per boat rather than two.
-            //
-            // **After the boat's own instance, never before, and this is not a
-            // cosmetic ordering.** `plan_entities` batches in first-appearance
-            // order and `gpu/frame.rs` draws the batches in that order, so a
-            // patch pushed first writes depth at the waterline *before* the
-            // hull is drawn and the hull's own below-waterline planks then fail
-            // the depth test — a colour-write-disabled draw leaves whatever was
-            // already in the target, so the boat's interior comes out as
-            // background. Measured: 5,492 px of hull replaced by sky, with no
-            // water anywhere in the scene. Vanilla's order is explicit —
-            // `AbstractBoatRenderer.submit` calls `submitModel(this.model(),
-            // …)` and *then* `this.submitTypeAdditions(…)`, which is where
-            // `BoatRenderer` submits the patch.
+            // for why rafts get none of this. The patch is accumulated in a
+            // separate phase, never in `groups`: even pushing it after this
+            // boat is insufficient because a later material/skin group can
+            // contain the rider. A depth-only patch between those batches
+            // erased 798 rider pixels in the dry GPU gate. `gpu/frame.rs`
+            // submits the entire phase only after every visible opaque/cutout
+            // draw and immediately before translucent water.
             let patch = if e.type_path.as_ref().ends_with("_boat") {
                 self.entities
                     .models
@@ -1085,12 +1076,7 @@ impl RenderState {
             }
 
             if let Some(patch) = patch {
-                match groups.iter_mut().position(|(hurt, flash, url, s, _)| {
-                    *hurt == e.hurt && *flash == white && *url == skin && *s == sheet
-                }) {
-                    Some(i) => groups[i].4.push(patch),
-                    None => groups.push((e.hurt, white, skin, sheet, vec![patch])),
-                }
+                water_mask_instances.push(patch);
             }
         }
 
@@ -1112,7 +1098,7 @@ impl RenderState {
         // part-local, so a limb only moves if its own matrices are uploaded
         // separately. A mob is ~10–35 parts but hundreds of quads, so this moves
         // roughly 1% of the data a per-entity vertex re-bake would.
-        plans
+        let visible = plans
             .iter()
             .flat_map(|(hurt, white, skin, sheet, frame)| {
                 frame
@@ -1148,7 +1134,34 @@ impl RenderState {
                     variant_sheet: sheet,
                 }
             })
-            .collect()
+            .collect();
+
+        let water_mask_frame = plan_entities(&water_mask_instances, &frustum);
+        let water_masks = water_mask_frame
+            .batches
+            .iter()
+            .map(|batch| {
+                let count = u32::try_from(batch.transforms.len()).unwrap_or(u32::MAX);
+                let tints = vec![InstanceTint::NONE; batch.transforms.len()];
+                let parts = batch
+                    .parts
+                    .iter()
+                    .map(|part| upload_instances_tinted(device, part, &batch.lights, &tints))
+                    .collect();
+                EntityDrawBatch {
+                    model: batch.model,
+                    count,
+                    parts,
+                    skin: None,
+                    variant_sheet: None,
+                }
+            })
+            .collect();
+
+        PreparedEntityBatches {
+            visible,
+            water_masks,
+        }
     }
 
     /// Resolve this frame's **humanoid armour layers** into per-`(slot, texture)`
