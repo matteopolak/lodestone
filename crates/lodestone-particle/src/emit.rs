@@ -212,6 +212,161 @@ pub fn breaking_block_effect(
     engine.add(p);
 }
 
+/// `TerrainParticle.Provider` — the wire-driven `minecraft:block` particle.
+///
+/// The plain provider: a [`terrain_particle`] built from the packet's own
+/// position and velocity, with nothing overridden afterwards. This is *not* the
+/// same thing as [`destroy_block_effect`], which is the local block-break burst
+/// and derives sixty-four positions from a block's outline shape; a server that
+/// sends `minecraft:block` is asking for exactly one fragment where it said.
+pub fn block_fragment(
+    engine: &mut ParticleEngine,
+    pos: [f64; 3],
+    vel: [f64; 3],
+    state: u32,
+    tint: [f32; 3],
+) {
+    let p = terrain_particle(
+        pos[0], pos[1], pos[2], vel[0], vel[1], vel[2], state, tint, engine.rng(),
+    );
+    engine.add(p);
+}
+
+/// `TerrainParticle.CrumblingProvider` (`minecraft:block_crumble`) — the flecks
+/// a creaking heart and a trial-spawner ejection shed off a block.
+///
+/// A [`terrain_particle`] whose velocity is then **discarded entirely** and
+/// whose lifetime is re-rolled short: `setParticleSpeed(0, 0, 0)` and
+/// `setLifetime(nextInt(10) + 1)`, so a crumb hangs where it was placed for at
+/// most half a second. The construction still happens with the packet's
+/// velocity — vanilla builds the particle first and overrides afterwards — so
+/// the RNG draws that jitter it are made and thrown away, exactly as there.
+pub fn block_crumble(
+    engine: &mut ParticleEngine,
+    pos: [f64; 3],
+    vel: [f64; 3],
+    state: u32,
+    tint: [f32; 3],
+) {
+    let mut p = terrain_particle(
+        pos[0], pos[1], pos[2], vel[0], vel[1], vel[2], state, tint, engine.rng(),
+    );
+    p.xd = 0.0;
+    p.yd = 0.0;
+    p.zd = 0.0;
+    p.lifetime = engine.rng().next_i32_bound(10) + 1;
+    engine.add(p);
+}
+
+/// `TerrainParticle.DustPillarProvider` (`minecraft:dust_pillar`) — the column a
+/// mace's smash attack throws up out of the ground it lands on.
+///
+/// A [`terrain_particle`] whose velocity is replaced by
+/// `(gaussian/30, ya + gaussian/2, gaussian/30)` and whose lifetime is re-rolled
+/// to `nextInt(20) + 20`. The vertical term is the packet's **own** `ya` plus a
+/// gaussian, not a gaussian alone — that additive base is the whole reason the
+/// pillar goes up rather than merely dispersing, and it is the one term a
+/// reading of "three gaussians at different scales" loses.
+pub fn dust_pillar(
+    engine: &mut ParticleEngine,
+    pos: [f64; 3],
+    vel: [f64; 3],
+    state: u32,
+    tint: [f32; 3],
+) {
+    let mut p = terrain_particle(
+        pos[0], pos[1], pos[2], vel[0], vel[1], vel[2], state, tint, engine.rng(),
+    );
+    p.xd = gaussian(engine) / 30.0;
+    p.yd = vel[1] + gaussian(engine) / 2.0;
+    p.zd = gaussian(engine) / 30.0;
+    p.lifetime = engine.rng().next_i32_bound(20) + 20;
+    engine.add(p);
+}
+
+/// `BlockMarker.Provider` (`minecraft:block_marker`) — the ghost block a light
+/// block or a barrier shows while you hold its item.
+///
+/// The only member of the `BlockParticleOption` family that is **not** a
+/// `TerrainParticle`, and every one of its four constructor lines is a
+/// departure from one: it takes the block's *whole* particle sprite rather than
+/// a random quarter, it is untinted (no `0.6` grey, no tint-source multiply),
+/// it has `gravity = 0`, `hasPhysics = false` and no velocity, and its
+/// `getQuadSize` returns a flat `0.5F` for its whole 80-tick life.
+///
+/// That last one is why this carries [`Behaviour::Plain`] rather than a variant
+/// of its own: `Plain`'s size is `quad_size` unchanged, so setting the field to
+/// `0.5` *is* the override. The constructed random size is drawn and discarded,
+/// as in vanilla, since the draw happens in the superclass constructor.
+pub fn block_marker(engine: &mut ParticleEngine, pos: [f64; 3], state: u32) {
+    let mut p = Particle::new(
+        pos[0],
+        pos[1],
+        pos[2],
+        SpriteSource::BlockState(state),
+        engine.rng(),
+    );
+    p.gravity = 0.0;
+    p.lifetime = 80;
+    p.has_physics = false;
+    p.quad_size = 0.5;
+    engine.add(p);
+}
+
+/// `FallingDustParticle.Provider` (`minecraft:falling_dust`) — the trickle under
+/// an unsupported sand, gravel or concrete-powder column.
+///
+/// Textured from [`Sheet::Generic`] and **tinted** from the block, which is the
+/// inverse of the other four in this family: they wear the block's own atlas
+/// sprite and (mostly) no tint, this one wears a generic grey mote and carries
+/// all of the block's identity in its colour.
+///
+/// `tint` is that colour, already resolved by the caller. Vanilla resolves it
+/// through a three-step chain — `FallingBlock.getDustColor`, else the block's
+/// tint source, else `state.getMapColor(level, pos).col` — and this client has
+/// data for the middle step only, so an untinted block arrives here as white
+/// rather than as its map colour. See `docs/particle-catalogue.md`; the visible
+/// consequence is that a sand mote is pale rather than sand-coloured, not that
+/// it is missing.
+///
+/// Note the lifetime is **two** expressions, not one: a base
+/// `(int)(32.0 / (nextFloat() * 0.8 + 0.2))` and then
+/// `(int) max(base * 0.9F, 1.0F)`. Folding the `0.9` into the divisor changes
+/// the truncation point and therefore the distribution, and the `max(…, 1)`
+/// floor is what stops a mote with a zero-length life from being drawn at all.
+pub fn falling_dust(engine: &mut ParticleEngine, pos: [f64; 3], tint: [f32; 3]) {
+    let mut p = Particle::new(
+        pos[0],
+        pos[1],
+        pos[2],
+        SpriteSource::Sheet { sheet: Sheet::Generic, frame: 0 },
+        engine.rng(),
+    );
+    p.colour = tint;
+    p.quad_size *= 0.674_999_95;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates towards zero; reproduced deliberately"
+    )]
+    {
+        let base = (32.0 / f64::from(rng_next(engine).mul_add(0.8, 0.2))) as i32;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the base lifetime is at most 160; Java promotes it to float here"
+        )]
+        let scaled = (base as f32 * 0.9).max(1.0);
+        p.lifetime = scaled as i32;
+    }
+    let rot_speed = (rng_next(engine) - 0.5) * 0.1;
+    p.roll = rng_next(engine) * core::f32::consts::TAU;
+    p.behaviour = Behaviour::FallingDust { rot_speed };
+    // Vanilla's constructor also calls `setSpriteFromAge(sprites)`. That is a
+    // no-op at construction — `frame_for_age` at age 0 is frame 0 for every
+    // sheet, which is what `Sheet::Generic`'s first texture already is — so it
+    // is deliberately not repeated here rather than accidentally omitted.
+    engine.add(p);
+}
+
 /// `new BreakingItemParticle(...)` — one crumb of an item.
 ///
 /// The same shape as [`terrain_particle`] and deliberately so: vanilla's

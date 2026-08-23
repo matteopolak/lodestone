@@ -882,6 +882,29 @@ pub enum Behaviour {
     /// *negative* on the first tick — vanilla's own arrangement, and what makes
     /// the flash bloom from nothing rather than pop in at full size.
     FireworkFlash,
+    /// `FallingDustParticle` — the mote a sand or gravel column sheds while it
+    /// has nothing under it.
+    ///
+    /// A full `tick()` override, and the two ways it differs from the base tick
+    /// are both easy to lose. Its downward acceleration is a **raw**
+    /// `yd -= 0.003` applied after the move rather than the base tick's
+    /// `yd -= 0.04 * gravity`, and that fall is **terminal-velocity clamped**
+    /// at `-0.14`; there is no friction term at all, so a mote that has reached
+    /// the clamp descends at a constant rate forever. Reading `0.003` as a
+    /// `gravity` value would make it fall at a thirteenth of the right speed
+    /// *and* remove the clamp.
+    ///
+    /// It also spins: `roll` advances by `PI * rotSpeed * 2` every tick and is
+    /// **reset to zero the moment it lands**, which is what stops a settled
+    /// mote from rotating on the floor.
+    ///
+    /// The quad-size ramp is [`Self::AshSmoke`]'s `* 32` fade-in and the layer
+    /// is opaque, so those two are shared rather than duplicated.
+    FallingDust {
+        /// `rotSpeed`, fixed at construction from `(nextFloat() - 0.5) * 0.1`.
+        /// Signed: half of all motes spin the other way.
+        rot_speed: f32,
+    },
 }
 
 /// Which of vanilla's seven drip fluids a [`Behaviour::Drip`] belongs to.
@@ -988,6 +1011,7 @@ impl Behaviour {
         match (self, sprite) {
             (
                 Self::AshSmoke
+                | Self::FallingDust { .. }
                 | Self::SimpleAnimated { .. }
                 | Self::SweepAttack
                 | Self::Spell
@@ -1070,6 +1094,8 @@ impl Behaviour {
             | Self::Wake
             | Self::BubblePop
             | Self::FallingLeaves { .. }
+            // `FallingDustParticle.getLayer` is `OPAQUE` explicitly.
+            | Self::FallingDust { .. }
             | Self::DustColorTransition { .. } => Layer::Opaque,
         }
     }
@@ -1355,6 +1381,8 @@ impl Particle {
             // `DustPlumeParticle` inherits `BaseAshSmokeParticle.getQuadSize`,
             // which is this same expression.
             | Behaviour::DustPlume
+            // `FallingDustParticle.getQuadSize` is the same expression again.
+            | Behaviour::FallingDust { .. }
             | Behaviour::DustColorTransition { .. } => {
                 self.quad_size * (normalised() * 32.0).clamp(0.0, 1.0)
             }
@@ -1510,6 +1538,10 @@ impl Particle {
                 self.tick_firefly(view);
                 Vec::new()
             }
+            Behaviour::FallingDust { rot_speed } => {
+                self.tick_falling_dust(view, rot_speed);
+                Vec::new()
+            }
             Behaviour::SweepAttack => {
                 self.tick_sweep_attack();
                 Vec::new()
@@ -1647,6 +1679,51 @@ impl Particle {
             }
             _ => {}
         }
+    }
+
+    /// `FallingDustParticle.tick()` — a full override that calls neither
+    /// `super.tick()` nor any `gravity` term.
+    ///
+    /// ```java
+    /// this.xo = this.x; this.yo = this.y; this.zo = this.z;
+    /// if (this.age++ >= this.lifetime) { this.remove(); }
+    /// else {
+    ///    this.setSpriteFromAge(this.sprites);
+    ///    this.oRoll = this.roll;
+    ///    this.roll = this.roll + (float) Math.PI * this.rotSpeed * 2.0F;
+    ///    if (this.onGround) { this.oRoll = this.roll = 0.0F; }
+    ///    this.move(this.xd, this.yd, this.zd);
+    ///    this.yd -= 0.003F;
+    ///    this.yd = Math.max(this.yd, -0.14F);
+    /// }
+    /// ```
+    ///
+    /// Three orderings in there are load-bearing and none of them is
+    /// interchangeable with the base tick's. The spin is applied **before** the
+    /// move, so the landing test that zeroes it reads the *previous* tick's
+    /// `on_ground`; the acceleration is applied **after** the move, so a mote's
+    /// first tick travels at its constructed velocity; and the clamp is on the
+    /// velocity rather than on the distance, so it is a terminal velocity and
+    /// not a per-tick step limit.
+    fn tick_falling_dust(&mut self, view: &dyn CollisionView, rot_speed: f32) {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        self.age += 1;
+        if self.age > self.lifetime {
+            self.remove();
+            return;
+        }
+        self.set_sprite_from_age();
+        self.o_roll = self.roll;
+        self.roll += core::f32::consts::PI * rot_speed * 2.0;
+        if self.on_ground {
+            self.roll = 0.0;
+            self.o_roll = 0.0;
+        }
+        self.move_by(self.xd, self.yd, self.zd, view);
+        self.yd -= f64::from(0.003_f32);
+        self.yd = self.yd.max(f64::from(-0.14_f32));
     }
 
     /// `setSpriteFromAge(SpriteSet)`.

@@ -915,6 +915,52 @@ impl Particles {
                 ),
             },
 
+            // -- The `BlockParticleOption` family ------------------
+            //
+            // One wire payload, five providers. The payload is shared and the
+            // *behaviour* is not: three build a `TerrainParticle` (differing in
+            // speed and lifetime), one a physics-free marker quad, one a
+            // sheet-textured mote wearing the block's colour rather than its
+            // texture. Every arm goes through `block_state_payload`, which is
+            // where the `isAir`/`moving_piston` refusal lives — vanilla's
+            // `createTerrainParticle` returns `null` for those and a fragment of
+            // air is a fragment of nothing.
+            "block" => {
+                if let Some(state) = self.block_state_payload(kind, options) {
+                    let tint = self.state_tint_of(state, [1.0; 3]);
+                    emit::block_fragment(&mut self.engine, pos, vel, state, tint);
+                }
+            }
+            "block_crumble" => {
+                if let Some(state) = self.block_state_payload(kind, options) {
+                    let tint = self.state_tint_of(state, [1.0; 3]);
+                    emit::block_crumble(&mut self.engine, pos, vel, state, tint);
+                }
+            }
+            "dust_pillar" => {
+                if let Some(state) = self.block_state_payload(kind, options) {
+                    let tint = self.state_tint_of(state, [1.0; 3]);
+                    emit::dust_pillar(&mut self.engine, pos, vel, state, tint);
+                }
+            }
+            // No tint: `BlockMarker`'s constructor never touches `rCol`, so a
+            // marker over grass is the grass sprite at full brightness, not the
+            // `0.6`-grey-times-biome-tint a fragment of it would be.
+            "block_marker" => {
+                if let Some(state) = self.block_state_payload(kind, options) {
+                    emit::block_marker(&mut self.engine, pos, state);
+                }
+            }
+            // The tint is the *whole* identity here — the sprite is a generic
+            // grey mote — so this one reads `state_tint_of` for a purpose the
+            // other four only decorate with.
+            "falling_dust" => {
+                if let Some(state) = self.block_state_payload(kind, options) {
+                    let tint = self.state_tint_of(state, [1.0; 3]);
+                    emit::falling_dust(&mut self.engine, pos, tint);
+                }
+            }
+
             // -- The water column and weather family ---------------
             //
             // `rain` is the splash a raindrop makes where it *lands*, not the
@@ -995,6 +1041,53 @@ impl Particles {
                 "no emitter wired for particle type {other:?}; dropped"
             ),
         }
+    }
+
+    /// The block state a `BlockParticleOption` particle should wear, or `None`
+    /// if this one must not spawn at all.
+    ///
+    /// Two refusals, and they are different in kind. A missing payload is a
+    /// *caller* fault — production cannot produce one, since the adapter decodes
+    /// the state alongside the type and hands both through together, so this can
+    /// only be reached from a test or a future non-network producer, and it is
+    /// logged rather than asserted for the same reason every other payload arm
+    /// here logs.
+    ///
+    /// The second is vanilla's own: `createTerrainParticle` returns `null` for
+    /// air and for `moving_piston`, and `FallingDustParticle.Provider` refuses
+    /// an invisible-render-shape state. Air is the one that matters — a
+    /// `LevelEvent`-adjacent producer that reads a block *after* it has been
+    /// removed sends the air state, and without this test the client spends a
+    /// full burst of particles on a sprite that resolves to nothing and lands in
+    /// [`ParticleFrame::unresolved`], where it reads as a broken atlas rather
+    /// than as a refusal vanilla also makes.
+    ///
+    /// `moving_piston` is included because it is the second half of the same
+    /// vanilla condition and costs one string compare; the invisible-render-shape
+    /// clause is **not** ported, because this client has no per-state render-shape
+    /// table and the states it would catch (barriers, structure voids, light
+    /// blocks) have no particle sprite either, so they are already refused one
+    /// layer down.
+    fn block_state_payload(&self, kind: &str, options: ParticleOptions) -> Option<u32> {
+        let ParticleOptions::BlockState { state } = options else {
+            tracing::debug!(
+                target: "particles",
+                "{kind} particle with no BlockParticleOption payload; dropped"
+            );
+            return None;
+        };
+        if matches!(
+            lodestone_data::block_states::block_name(state),
+            Some(
+                "minecraft:air"
+                    | "minecraft:cave_air"
+                    | "minecraft:void_air"
+                    | "minecraft:moving_piston"
+            )
+        ) {
+            return None;
+        }
+        Some(state)
     }
 
     /// One `BreakingItemParticle` from the four-argument constructor, for the
@@ -2013,6 +2106,20 @@ mod tests {
                 "tinted_leaves" | "flash" => {
                     ParticleOptions::Color { color: [0.25, 0.5, 0.75, 0.6] }
                 }
+                // The `BlockParticleOption` family. `falling_dust` is the only
+                // one of the five that reaches a `Sheet` at all, so it is the
+                // only one this gate's orphan set can see — but all five are
+                // listed, because the table's job is "give every payload-
+                // carrying type a payload" and singling one out would leave
+                // the next reader to work out why the other four are absent.
+                // The state must be a real, non-air block: `block_state_payload`
+                // refuses air exactly as vanilla's provider does, so a `0` here
+                // would silently drop all five.
+                "block" | "block_marker" | "block_crumble" | "dust_pillar"
+                | "falling_dust" => ParticleOptions::BlockState {
+                    state: lodestone_data::block_states::state_id("minecraft:stone")
+                        .expect("stone is in the block-state registry"),
+                },
                 _ => ParticleOptions::None,
             };
             p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.2, 0.3, 0.4], 0.0, 1, options);
@@ -3007,6 +3114,457 @@ mod tests {
         }
     }
 
+    // -- The `BlockParticleOption` family ----------------------------------
+    //
+    // Five registry types, one wire payload, five different providers. Every
+    // gate below exists because the shared payload is the *only* thing they
+    // share: a copy of one arm into another compiles, spawns a particle, draws,
+    // and is wrong in exactly one constant.
+
+    /// A non-air block state to hand the family, resolved from the registry
+    /// here rather than written as a literal — `block_state_payload` refuses
+    /// air, so a hardcoded `0` would make every gate below pass vacuously by
+    /// spawning nothing.
+    use lodestone_particle::{Behaviour, Particle};
+
+    fn stone_state() -> u32 {
+        lodestone_data::block_states::state_id("minecraft:stone")
+            .expect("stone is in the block-state registry")
+    }
+
+    /// Spawns one particle of `kind` with a stone `BlockParticleOption` payload
+    /// and returns it. `vel` is delivered exactly, via the `count == 0` branch.
+    fn spawn_block_particle(p: &mut Particles, kind: &str, vel: [f32; 3]) -> Particle {
+        let before = p.engine.particles().len();
+        p.spawn_particles(
+            kind,
+            [0.5, 65.0, 0.5],
+            vel,
+            1.0,
+            0,
+            ParticleOptions::BlockState { state: stone_state() },
+        );
+        assert_eq!(
+            p.engine.particles().len(),
+            before + 1,
+            "{kind:?} must spawn exactly one particle from a BlockState payload"
+        );
+        p.engine.particles()[before].clone()
+    }
+
+    /// Each of the five must wear the sprite its own provider gives it.
+    ///
+    /// Four take the block's atlas sprite and one — `falling_dust` — takes a
+    /// generic sheet mote and carries the block's identity in its *colour*
+    /// instead. That inversion is the single most copy-pasteable mistake in the
+    /// family: a `falling_dust` arm written from its neighbour would render the
+    /// block's own texture, which looks plausible in a screenshot and is not
+    /// what a falling sand column sheds.
+    #[test]
+    fn the_block_particle_family_splits_four_atlas_sprites_from_one_sheet_mote() {
+        let state = stone_state();
+        for kind in ["block", "block_crumble", "dust_pillar", "block_marker"] {
+            let mut p = resolvable();
+            let particle = spawn_block_particle(&mut p, kind, [0.0, 0.0, 0.0]);
+            assert_eq!(
+                particle.sprite,
+                SpriteSource::BlockState(state),
+                "{kind:?} must wear the block's own particle sprite"
+            );
+        }
+
+        let mut p = resolvable();
+        let particle = spawn_block_particle(&mut p, "falling_dust", [0.0, 0.0, 0.0]);
+        assert!(
+            matches!(particle.sprite, SpriteSource::Sheet { sheet: Sheet::Generic, .. }),
+            "falling_dust must wear a generic sheet mote, not the block's sprite; got {:?}",
+            particle.sprite
+        );
+    }
+
+    /// The constants that separate the five, other than lifetime.
+    ///
+    /// Every expectation is transcribed from the provider it belongs to, and
+    /// each one is the constant that a copy of the *neighbouring* arm would get
+    /// wrong: `block_marker` alone has no gravity, no physics and a flat quad
+    /// size; `block_crumble` alone discards the packet's velocity outright;
+    /// `block`/`block_crumble`/`dust_pillar` alone carry `TerrainParticle`'s
+    /// `0.6` grey.
+    #[test]
+    fn the_block_particle_family_differs_in_every_constant_that_separates_them() {
+        let mut p = resolvable();
+        let block = spawn_block_particle(&mut p, "block", [0.0, 0.0, 0.0]);
+        assert_eq!(block.gravity, 1.0, "TerrainParticle sets gravity = 1.0F");
+        assert_eq!(
+            block.colour,
+            [0.6, 0.6, 0.6],
+            "TerrainParticle starts at a 0.6 grey; an untinted block keeps it exactly"
+        );
+        assert!(block.has_physics, "a block fragment collides");
+        assert!(
+            matches!(block.behaviour, Behaviour::Terrain { .. }),
+            "a block fragment takes a random quarter of the sprite"
+        );
+
+        // `setParticleSpeed(0.0, 0.0, 0.0)` — exactly zero, on all three axes.
+        // The construction still runs through `Particle(level, x, y, z, xa, ya,
+        // za)`, which can never produce a zero `yd` (it adds a flat `+ 0.1`), so
+        // a crumble arm that forgot the override would fail this on `yd` alone.
+        let mut p = resolvable();
+        let crumble = spawn_block_particle(&mut p, "block_crumble", [1.0, 1.0, 1.0]);
+        assert_eq!(
+            [crumble.xd, crumble.yd, crumble.zd],
+            [0.0, 0.0, 0.0],
+            "CrumblingProvider discards the constructed velocity entirely"
+        );
+
+        // `BlockMarker`: gravity 0, no physics, no tint, and `getQuadSize`
+        // returning a flat `0.5F`. The quad size is asserted at age 0, where the
+        // `* 32` fade-in every other member of this family's neighbours use
+        // would read 0.0 — the one sample that separates a constant from a ramp.
+        let mut p = resolvable();
+        let marker = spawn_block_particle(&mut p, "block_marker", [1.0, 1.0, 1.0]);
+        assert_eq!(marker.gravity, 0.0, "BlockMarker sets gravity = 0.0F");
+        assert!(!marker.has_physics, "BlockMarker sets hasPhysics = false");
+        assert_eq!(
+            marker.colour,
+            [1.0, 1.0, 1.0],
+            "BlockMarker never touches rCol — it is not a TerrainParticle"
+        );
+        assert_eq!(
+            marker.quad_size(0.0),
+            0.5,
+            "BlockMarker.getQuadSize returns a flat 0.5F; a `* 32` fade-in ramp \
+             would read 0.0 at age 0"
+        );
+        assert_eq!(
+            marker.quad_size(0.0),
+            marker.quad_size(1.0),
+            "a flat size does not move with the partial tick"
+        );
+
+        // `FallingDustParticle` carries the block's colour and nothing of its
+        // texture, and its quad size is the `* 32` ramp — the exact opposite of
+        // the marker above, which is why the two are asserted against each other.
+        let mut p = resolvable();
+        p.state_tint = Arc::new(vec![[1.0; 3]; stone_state() as usize + 1]);
+        let dust = spawn_block_particle(&mut p, "falling_dust", [0.0, 0.0, 0.0]);
+        assert!(
+            matches!(dust.behaviour, Behaviour::FallingDust { .. }),
+            "falling_dust needs its own tick — the raw 0.003 fall and the -0.14 clamp"
+        );
+        assert_eq!(
+            dust.quad_size(0.0),
+            0.0,
+            "FallingDustParticle.getQuadSize is the `* 32` fade-in, which is 0 at age 0"
+        );
+        assert!(
+            dust.quad_size(0.0) < dust.quad_size(1.0),
+            "the ramp must actually rise between two partial ticks"
+        );
+    }
+
+    /// `falling_dust` must carry the block's tint into its **colour**, since
+    /// that is where all of the block's identity lives for this one type.
+    ///
+    /// The tint is deliberately neither grey nor white: an arm that transposed
+    /// two channels, or that dropped the tint for `TerrainParticle`'s `0.6`
+    /// grey, passes against `[1.0; 3]` and fails here.
+    #[test]
+    fn falling_dust_wears_the_block_tint_as_its_colour() {
+        let tint = [0.25f32, 0.5, 0.75];
+        let state = stone_state();
+        let mut p = resolvable();
+        let mut table = vec![[1.0f32; 3]; state as usize + 1];
+        table[state as usize] = tint;
+        p.state_tint = Arc::new(table);
+        let dust = spawn_block_particle(&mut p, "falling_dust", [0.0, 0.0, 0.0]);
+        assert_eq!(
+            dust.colour, tint,
+            "the block tint is falling_dust's whole identity — the sprite is a grey mote"
+        );
+
+        // The control: the same tint must *not* reach a terrain-family member
+        // undivided, because those multiply it into `TerrainParticle`'s 0.6.
+        let mut p = resolvable();
+        let mut table = vec![[1.0f32; 3]; state as usize + 1];
+        table[state as usize] = tint;
+        p.state_tint = Arc::new(table);
+        let block = spawn_block_particle(&mut p, "block", [0.0, 0.0, 0.0]);
+        assert_eq!(
+            block.colour,
+            [0.6 * tint[0], 0.6 * tint[1], 0.6 * tint[2]],
+            "a block fragment is the tint times TerrainParticle's 0.6 grey"
+        );
+    }
+
+    /// Each provider's lifetime roll, as a closed interval derived from its own
+    /// expression rather than from the code under test.
+    ///
+    /// The four intervals are the sharpest discriminator this family has, and
+    /// three of them are *reachable in full* — `nextInt(10) + 1` and
+    /// `nextInt(20) + 20` hit both ends within a few hundred draws, so the
+    /// observed extremes are asserted exactly and an off-by-one in either the
+    /// bound or the offset fails by name. The base constructor's own
+    /// `(int)(4.0F / (nextFloat() * 0.9F + 0.1F))` reaches `40` only at
+    /// `nextFloat() == 0.0` (one draw in 2²⁴), so its upper end is asserted as
+    /// containment plus a floor that the *wrong* hypothesis — a copy of
+    /// `block_crumble`'s roll, capped at 10 — cannot reach.
+    #[test]
+    fn each_block_particle_provider_rolls_its_own_lifetime_interval() {
+        /// Enough draws that a 1-in-20 outcome is certain and a 1-in-2²⁴ one is
+        /// still out of reach, which is what makes the assertions below split
+        /// into "exact extremes" and "containment plus a floor".
+        const DRAWS: usize = 2_000;
+
+        struct Case {
+            kind: &'static str,
+            /// `[min, max]`, from the provider's own expression.
+            interval: [i32; 2],
+            /// The lowest value whose observation rules out the neighbouring
+            /// provider's roll, or `None` when both extremes are reachable and
+            /// asserted exactly instead.
+            floor: Option<i32>,
+        }
+        let cases = [
+            // `Particle(level, …)`'s own `(int)(4.0F / (nextFloat() * 0.9F +
+            // 0.1F))`, untouched by TerrainParticle.Provider. A copy of
+            // `block_crumble`'s `nextInt(10) + 1` would top out at 10.
+            Case { kind: "block", interval: [4, 40], floor: Some(11) },
+            // `CrumblingProvider`: `setLifetime(random.nextInt(10) + 1)`.
+            // Dropping the `+ 1` gives [0, 9]; both ends are asserted.
+            Case { kind: "block_crumble", interval: [1, 10], floor: None },
+            // `DustPillarProvider`: `setLifetime(random.nextInt(20) + 20)`.
+            Case { kind: "dust_pillar", interval: [20, 39], floor: None },
+            // `BlockMarker`: a flat `this.lifetime = 80`.
+            Case { kind: "block_marker", interval: [80, 80], floor: None },
+            // `FallingDustParticle`: base `(int)(32.0 / (nextFloat() * 0.8 +
+            // 0.2))` in [32, 160], then `(int) max(base * 0.9F, 1.0F)` in
+            // [28, 144]. Dropping the `* 0.9` leaves the base interval, whose
+            // upper half this containment check excludes; 144 itself needs
+            // `nextFloat() == 0.0` and so is not asserted as an extreme.
+            Case { kind: "falling_dust", interval: [28, 144], floor: Some(130) },
+        ];
+
+        for case in &cases {
+            let mut p = resolvable();
+            let mut lo = i32::MAX;
+            let mut hi = i32::MIN;
+            for _ in 0..DRAWS {
+                let particle = spawn_block_particle(&mut p, case.kind, [0.0, 0.0, 0.0]);
+                lo = lo.min(particle.lifetime);
+                hi = hi.max(particle.lifetime);
+                p.engine.clear();
+            }
+            let [want_lo, want_hi] = case.interval;
+            assert!(
+                lo >= want_lo && hi <= want_hi,
+                "{}: lifetimes {lo}..={hi} escaped the provider's own interval \
+                 {want_lo}..={want_hi}",
+                case.kind
+            );
+            assert_eq!(
+                lo, want_lo,
+                "{}: the lowest lifetime in {DRAWS} draws must be the interval's own \
+                 minimum, not one above or below it",
+                case.kind
+            );
+            match case.floor {
+                None => assert_eq!(
+                    hi, want_hi,
+                    "{}: both ends of this roll are reachable, so the highest lifetime \
+                     in {DRAWS} draws must be the interval's own maximum",
+                    case.kind
+                ),
+                Some(floor) => assert!(
+                    hi >= floor,
+                    "{}: the highest lifetime in {DRAWS} draws was {hi}, below the {floor} \
+                     that separates this roll from the neighbouring provider's",
+                    case.kind
+                ),
+            }
+        }
+    }
+
+    /// `DustPillarProvider`'s vertical velocity is the packet's own `ya`
+    /// **plus** a gaussian, not a gaussian alone.
+    ///
+    /// That additive base is the whole reason a mace smash throws a column
+    /// upward rather than a puff sideways, and it is invisible in a single
+    /// sample because the gaussian swamps it. Averaging pins it: with `ya = 7`
+    /// the mean must sit on 7 to within a few hundredths, where the
+    /// gaussian-alone hypothesis sits on 0. Both hypotheses are computed, and
+    /// the tolerance is derived from the roll's own standard error
+    /// (`0.5 / sqrt(n)`, so `~0.035` at n = 200) rather than picked.
+    #[test]
+    fn dust_pillar_adds_the_packets_own_vertical_velocity_to_its_gaussian() {
+        const DRAWS: usize = 200;
+        const YA: f64 = 7.0;
+
+        let mut p = resolvable();
+        let mut sum = 0.0f64;
+        let mut horizontal = 0.0f64;
+        for _ in 0..DRAWS {
+            #[expect(clippy::cast_possible_truncation, reason = "7.0 is exact in f32")]
+            let particle = spawn_block_particle(&mut p, "dust_pillar", [0.0, YA as f32, 0.0]);
+            sum += particle.yd;
+            horizontal += particle.xd.abs() + particle.zd.abs();
+            p.engine.clear();
+        }
+        #[expect(clippy::cast_precision_loss, reason = "200 is exact in f64")]
+        let mean = sum / DRAWS as f64;
+        assert!(
+            (mean - YA).abs() < 0.25,
+            "mean yd was {mean}, not the packet's own {YA} — the gaussian-alone \
+             hypothesis puts this on 0.0"
+        );
+
+        // And the horizontal axes must *not* pick the same base up: they are
+        // `gaussian / 30` with no `xa`/`za` term at all, so a mean absolute
+        // value well under one is the shape, and copying the vertical line
+        // across would put them on 7 as well.
+        #[expect(clippy::cast_precision_loss, reason = "200 is exact in f64")]
+        let mean_horizontal = horizontal / (2.0 * DRAWS as f64);
+        assert!(
+            mean_horizontal < 0.1,
+            "mean |xd|/|zd| was {mean_horizontal}; the horizontal terms are \
+             `gaussian / 30` and carry no velocity from the packet"
+        );
+    }
+
+    /// `FallingDustParticle.tick` falls by a **raw** `0.003` per tick and
+    /// clamps at `-0.14`, and neither number goes through `gravity`.
+    ///
+    /// Both hypotheses are computed from outside constants. The correct one
+    /// gives `yd == -0.003 * n` for the first few ticks; reading `0.003` as a
+    /// `gravity` multiplier instead would put it through the base tick's
+    /// `yd -= 0.04 * gravity` and give `-0.00012 * n`, a thirteenth of the
+    /// speed — and would lose the clamp entirely, so a long run separates them
+    /// a second way.
+    #[test]
+    fn falling_dust_falls_at_a_raw_rate_and_clamps_at_terminal_velocity() {
+        struct Air;
+        impl CollisionView for Air {
+            fn collision_boxes(
+                &self,
+                _x: i32,
+                _y: i32,
+                _z: i32,
+                _out: &mut Vec<lodestone_physics::Aabb>,
+            ) {
+            }
+        }
+
+        // A mote with no initial velocity, so `yd` is purely the fall term.
+        let mut p = resolvable();
+        p.spawn_particles(
+            "falling_dust",
+            [0.5, 65.0, 0.5],
+            [0.0, 0.0, 0.0],
+            0.0,
+            0,
+            ParticleOptions::BlockState { state: stone_state() },
+        );
+        assert_eq!(p.engine.particles().len(), 1);
+
+        const TICKS: i32 = 5;
+        for _ in 0..TICKS {
+            p.tick(&Air);
+        }
+        let yd = p.engine.particles()[0].yd;
+        let correct = -f64::from(0.003_f32) * f64::from(TICKS);
+        let as_gravity = -0.04 * f64::from(0.003_f32) * f64::from(TICKS);
+        assert!(
+            (yd - correct).abs() < 1e-9,
+            "yd after {TICKS} ticks was {yd}; the raw-0.003 fall predicts {correct} and \
+             the `gravity = 0.003` reading predicts {as_gravity}"
+        );
+
+        // Long enough to pass the clamp several times over: 0.14 / 0.003 is
+        // ~47 ticks, and the mote's lifetime is at least 28, so this is run on
+        // a fresh one whose lifetime is long enough to observe it.
+        let mut clamped = None;
+        for _ in 0..400 {
+            let mut p = resolvable();
+            p.spawn_particles(
+                "falling_dust",
+                [0.5, 65.0, 0.5],
+                [0.0, 0.0, 0.0],
+                0.0,
+                0,
+                ParticleOptions::BlockState { state: stone_state() },
+            );
+            if p.engine.particles()[0].lifetime < 60 {
+                continue;
+            }
+            for _ in 0..60 {
+                p.tick(&Air);
+            }
+            if let Some(particle) = p.engine.particles().first() {
+                clamped = Some(particle.yd);
+            }
+            break;
+        }
+        let yd = clamped.expect("a mote with a 60-tick lifetime within 400 rolls");
+        assert_eq!(
+            yd,
+            f64::from(-0.14_f32),
+            "60 ticks of a raw 0.003 fall is -0.18 unclamped; FallingDustParticle \
+             holds it at -0.14, and the `gravity` reading would be at -0.0072"
+        );
+    }
+
+    /// The two refusals, each with a control proving the detector fires.
+    ///
+    /// Air is vanilla's own (`createTerrainParticle` returns `null` for it), and
+    /// a missing payload is ours. Both are silent drops, so without the control
+    /// arm below an emitter that spawned *nothing at all* would satisfy them.
+    #[test]
+    fn the_block_particle_family_refuses_air_and_a_missing_payload() {
+        let air = lodestone_data::block_states::air_state_id();
+        for kind in ["block", "block_crumble", "dust_pillar", "block_marker", "falling_dust"] {
+            let mut p = resolvable();
+            p.spawn_particles(
+                kind,
+                [0.5, 65.0, 0.5],
+                [0.0, 0.0, 0.0],
+                0.0,
+                1,
+                ParticleOptions::BlockState { state: air },
+            );
+            assert_eq!(
+                p.engine.particles().len(),
+                0,
+                "{kind:?} must refuse the air state, as createTerrainParticle does"
+            );
+
+            let mut p = resolvable();
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.0, 0.0, 0.0], 0.0, 1, ParticleOptions::None);
+            assert_eq!(
+                p.engine.particles().len(),
+                0,
+                "{kind:?} must drop rather than guess when the payload is absent"
+            );
+
+            // The control: the same call with a real state must spawn.
+            let mut p = resolvable();
+            p.spawn_particles(
+                kind,
+                [0.5, 65.0, 0.5],
+                [0.0, 0.0, 0.0],
+                0.0,
+                1,
+                ParticleOptions::BlockState { state: stone_state() },
+            );
+            assert_eq!(
+                p.engine.particles().len(),
+                1,
+                "{kind:?} must spawn for a real block state, or the two refusals above \
+                 prove nothing"
+            );
+        }
+    }
+
     /// The light term must match the model shader's, which is now vanilla's own
     /// `lightmap.fsh` curve rather than the retired `0.2 + 0.8 * max(sky,
     /// block)` ramp. A particle lit differently from the block it came from
@@ -3347,6 +3905,16 @@ mod tests {
                     to_color: [0.0, 0.0, 1.0],
                     scale: 1.0,
                 },
+                // The `BlockParticleOption` family is deliberately left
+                // payload-free here, unlike in
+                // `no_sheet_is_atlas_resident_and_unreachable_from_the_dispatch`:
+                // four of the five wear a `SpriteSource::BlockState`, and this
+                // `Particles` was built with no `BlockModels`, so giving them a
+                // payload would spawn particles that resolve against nothing and
+                // fail this gate's `unresolved == 0` for a reason that has
+                // nothing to do with the particle *sheet* atlas it exists to
+                // check. Their sprite resolution is `resolved_terrain_particles_
+                // produce_instances_inside_the_sprite_rect`'s subject.
                 _ => ParticleOptions::None,
             };
             let before = p.engine.particles().len();

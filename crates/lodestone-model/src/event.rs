@@ -1733,6 +1733,26 @@ pub enum ParticleOptions {
         /// spreading rather than all sharing one orientation.
         roll: f32,
     },
+    /// The `BlockParticleOption` family — `minecraft:block`,
+    /// `minecraft:block_marker`, `minecraft:block_crumble`,
+    /// `minecraft:dust_pillar` and `minecraft:falling_dust`.
+    ///
+    /// One payload type shared by five registry entries whose *providers* have
+    /// nothing else in common: three build a `TerrainParticle` (with different
+    /// speeds and lifetimes), one builds a physics-free marker quad and one
+    /// builds a sheet-textured falling mote tinted from the block. The wire
+    /// payload is identical for all five, so they share this variant and the
+    /// emitters differ — reading the shared payload as a shared *behaviour* is
+    /// what would make a `block_marker` fall and a `falling_dust` wear the
+    /// block's own texture.
+    BlockState {
+        /// The block state, by **block-state** network id — the index into
+        /// vanilla's `Block.BLOCK_STATE_REGISTRY`, not a block id and not an
+        /// item id. The same numbering `lodestone_data::block_states` uses and
+        /// that `lodestone_particle::SpriteSource::BlockState` resolves
+        /// against, so it can be handed straight to a particle.
+        state: u32,
+    },
 }
 
 /// Things that happen to the client after a version adapter lifts a packet into
