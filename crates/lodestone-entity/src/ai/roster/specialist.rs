@@ -365,7 +365,7 @@ pub fn elder_guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// `MeleeAttackGoal` already carries and is left alone for the same reason; its
 /// one visible effect is that our guardian may glance around while strolling,
 /// where vanilla's cannot.
-pub const GUARDIAN: &[Registration] = &[
+pub static GUARDIAN: &[Registration] = &[
     Registration::goal(4, "Guardian.GuardianAttackGoal", guardian_beam),
     Registration::missing(Selector::Goal, 5, "MoveTowardsRestrictionGoal"),
     Registration::goal(7, "RandomStrollGoal", stroll),
@@ -396,7 +396,7 @@ pub const GUARDIAN: &[Registration] = &[
 /// predicts the *tick count* can tell these two species apart, which is what
 /// `the_beam_lands_on_vanillas_ninetieth_tick_and_the_elders_on_its_seventieth`
 /// is for.
-pub const ELDER_GUARDIAN: &[Registration] = &[
+pub static ELDER_GUARDIAN: &[Registration] = &[
     Registration::goal(4, "Guardian.GuardianAttackGoal", elder_guardian_beam),
     Registration::missing(Selector::Goal, 5, "MoveTowardsRestrictionGoal"),
     Registration::goal(7, "RandomStrollGoal", stroll),
@@ -440,7 +440,7 @@ pub const ELDER_GUARDIAN: &[Registration] = &[
 ///   `MobController`, issue #456) and the charging sound/visual state.
 /// * **The target row** at 1 is `Player.class` with a ±4-block vertical band,
 ///   which ours does not model.
-pub const GHAST: &[Registration] = &[
+pub static GHAST: &[Registration] = &[
     Registration::missing(Selector::Goal, 5, "Ghast.RandomFloatAroundGoal"),
     Registration::missing(Selector::Goal, 7, "Ghast.GhastLookGoal"),
     Registration::goal(7, "Ghast.GhastShootFireballGoal", super::ranged::ghast_fireball),

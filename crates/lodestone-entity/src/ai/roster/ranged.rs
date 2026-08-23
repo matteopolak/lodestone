@@ -794,7 +794,7 @@ fn patrol_goal(ctx: &SpeciesContext) -> Box<dyn Goal> {
 
 /// `Blaze.registerGoals`. No `super.registerGoals()` call, so this is the
 /// blaze's whole table.
-pub const BLAZE: &[Registration] = &[
+pub static BLAZE: &[Registration] = &[
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
     Registration::target(2, "NearestAttackableTargetGoal", nearest_attackable_target),
     Registration::goal(4, "Blaze.BlazeAttackGoal", blaze_fireball),
@@ -809,7 +809,7 @@ pub const BLAZE: &[Registration] = &[
 ];
 
 /// `SnowGolem.registerGoals`. No `super.registerGoals()` call.
-pub const SNOW_GOLEM: &[Registration] = &[
+pub static SNOW_GOLEM: &[Registration] = &[
     // `NearestAttackableTargetGoal<>(this, Mob.class, 10, true, false, target -> target instanceof Enemy)`
     // (`SnowGolem.registerGoals`) — a snow golem hunts *hostile mobs*, not players. Our
     // `NearestAttackableTargetGoal` resolves through
@@ -842,7 +842,7 @@ pub const SNOW_GOLEM: &[Registration] = &[
 /// gate comparing this table against the jar sees the whole `addGoal` set.
 ///
 /// The ranged row itself is real, and it is what this family exists for.
-pub const WITCH: &[Registration] = &[
+pub static WITCH: &[Registration] = &[
     // -- inherited from PatrollingMonster / Raider --
     Registration::missing(Selector::Goal, 4, "PatrollingMonster.LongDistancePatrolGoal"),
     Registration::missing(Selector::Goal, 1, "Raider.ObtainRaidLeaderBannerGoal"),
@@ -878,7 +878,7 @@ pub const WITCH: &[Registration] = &[
 /// row in the inherited chain that is real rather than raid machinery, because
 /// it is patrol machinery instead; `docs/pillager-patrols.md` has the full
 /// account, including what the goal itself does not port.
-pub const PILLAGER: &[Registration] = &[
+pub static PILLAGER: &[Registration] = &[
     // -- inherited from PatrollingMonster / Raider --
     // Pillager patrols. This row was `Missing` alongside the
     // witch's identical one — both inherit `PatrollingMonster.registerGoals`

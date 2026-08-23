@@ -180,7 +180,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// **-1** to get "swell preempts melee", with a comment explaining the private
 /// scale. Vanilla's own numbers — swell 2, melee 4 — express the same precedence
 /// directly and can be checked against the jar.
-pub const CREEPER: &[Registration] = &[
+pub static CREEPER: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
     Registration::goal(2, "SwellGoal", swell),
     // `AvoidEntityGoal<>(this, Ocelot.class, 6.0F, 1.0, 1.2)`. Vanilla's last two
@@ -205,7 +205,7 @@ pub const CREEPER: &[Registration] = &[
 ];
 
 /// `Spider.registerGoals`.
-pub const SPIDER: &[Registration] = &[
+pub static SPIDER: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
     // `AvoidEntityGoal<>(this, Armadillo.class, 6.0F, 1.0, 1.2, e -> !e.isScared())`.
     // The `isScared` filter is not modelled — see `mobs.rs`'s `avoided_species`,
@@ -235,7 +235,7 @@ pub const SPIDER: &[Registration] = &[
 ///
 /// A zombie gets **no** `FloatGoal`, which is not an omission: vanilla does not
 /// register one, because zombies sink and walk along the bottom.
-pub const ZOMBIE: &[Registration] = &[
+pub static ZOMBIE: &[Registration] = &[
     // `Zombie.ZombieAttackTurtleEggGoal(this, 1.0, 3)` — a `RemoveBlockGoal`
     // subclass: a 24-block spiral search (vertical range 3) for a `turtle_egg`,
     // then break-progress and a destroy intent. Neither the candidate search
@@ -281,7 +281,7 @@ pub const ZOMBIE: &[Registration] = &[
 /// [`crate::spawn_equipment`] can say which drowned are holding one. Four of
 /// the eight still-`Missing` rows are the amphibious navigation, which this
 /// repo has no water-aware pathing for at all.
-pub const DROWNED: &[Registration] = &[
+pub static DROWNED: &[Registration] = &[
     // -- inherited from `Zombie.registerGoals` --------------------------------
     Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
     Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
@@ -371,7 +371,7 @@ pub const DROWNED: &[Registration] = &[
 /// table.
 ///
 /// [`GoalSelector::remove`]: crate::ai::GoalSelector::remove
-pub const SKELETON: &[Registration] = &[
+pub static SKELETON: &[Registration] = &[
     // `RestrictSunGoal(this)` and `FleeSunGoal(this, 1.0)` — two different
     // mechanisms, both absent. `RestrictSunGoal` reads no block: its gate is a
     // daytime query plus an empty HEAD slot, and its *effect* is
@@ -415,7 +415,7 @@ pub const SKELETON: &[Registration] = &[
 /// multiset gate can actually check against the jar — and
 /// `wither_skeleton_is_the_base_table_plus_the_piglin_row` pins the duplication so
 /// the two cannot drift.
-pub const WITHER_SKELETON: &[Registration] = &[
+pub static WITHER_SKELETON: &[Registration] = &[
     // `NearestAttackableTargetGoal<>(this, AbstractPiglin.class, true)`
     // (`WitherSkeleton.registerGoals`). No piglin can exist in this sim.
     Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(AbstractPiglin)"),
