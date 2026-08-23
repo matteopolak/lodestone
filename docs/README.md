@@ -544,9 +544,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Elytra rendering](./elytra-rendering.md) — The elytra's two wings as a wearable
   layer over the humanoid rig: a mesh baked from `ElytraModel.createLayer`, a per-wing
   transform posed off the wearer's own `body` part matrix, and the three-way
-  glide/crouch/rest pose that `ElytraAnimationState` lerps toward. The geometry and
-  pose half is landed; the GPU draw that consumes it is not, so **an elytra reaches
-  zero pixels today** — see "What is missing" for the exact remaining patch.
+  glide/crouch/rest pose that `ElytraAnimationState` lerps toward. Geometry, pose and
+  the GPU draw are all landed; the wings reach pixels. What is **not** landed is the
+  per-tick animation state, so every wearer is posed at the resting triple — see
+  "The pose is the resting one" below for what that is right and wrong for.
 - [Enchantment glint](./enchantment-glint.md) — The shimmering foil overlay an
   enchanted item carries: a scrolling, rotated, additively-blended pass over the
   item's **own geometry**, using vanilla's `enchanted_glint_item.png`. This doc covers

@@ -551,6 +551,13 @@ impl RenderState {
         // than by wearer part — see `RenderState::prepare_cape`'s doc.
         let cape_batches = self.prepare_cape(device, camera, entities, &mut stats);
 
+        // The elytra wings — the layer the cape pass suppresses itself for,
+        // over the same instances and for the same reason as everything
+        // above: no buffer creation mid-pass. See
+        // `RenderState::prepare_elytra`'s doc, including why its pose is the
+        // resting triple for every wearer until the animation state lands.
+        let elytra_batches = self.prepare_elytra(device, camera, entities, &mut stats);
+
         // The mob-fire billboard, over the same instances, for
         // the same reason armour/wool are: no buffer creation mid-pass.
         let flame_batches = self.prepare_flame(device, camera, entities, &mut stats);
@@ -1162,6 +1169,35 @@ impl RenderState {
                     pass.set_vertex_buffer(1, batch.buffer.slice(..));
                     let end = range.index_start + range.index_count;
                     pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
+                    stats.draw_calls += 1;
+                }
+            }
+
+            // The elytra wings, right after the cape — the layer that
+            // replaces it for a wearer with an elytra in the chest slot.
+            // Through the **base** entity pipeline, same reason wool and the
+            // cape are: no second layer at the same inflation to correct
+            // z-fighting for. Group 1 is rebound per batch, off the jar sheet
+            // for a wearer with no cape and off `player_skins` for one with.
+            if !elytra_batches.is_empty()
+                && let Some(model) = &self.entities.elytra_gpu
+            {
+                pass.set_pipeline(&self.entities.pipeline.pipeline);
+                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                pass.set_vertex_buffer(0, model.vertices.slice(..));
+                pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for batch in &elytra_batches {
+                    let texture = match &batch.texture {
+                        Some(url) => self.entities.player_skins.get(url),
+                        None => self.entities.elytra_texture.as_ref(),
+                    };
+                    let Some(texture) = texture else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(1, batch.buffer.slice(..));
+                    let end = batch.range.index_start + batch.range.index_count;
+                    pass.draw_indexed(batch.range.index_start..end, 0, 0..batch.count);
                     stats.draw_calls += 1;
                 }
             }

@@ -5,9 +5,10 @@
 The elytra's two wings as a wearable layer over the humanoid rig: a mesh baked
 from `ElytraModel.createLayer`, a per-wing transform posed off the wearer's own
 `body` part matrix, and the three-way glide/crouch/rest pose that
-`ElytraAnimationState` lerps toward. The geometry and pose half is landed; the
-GPU draw that consumes it is not, so **an elytra reaches zero pixels today** —
-see "What is missing" for the exact remaining patch.
+`ElytraAnimationState` lerps toward. Geometry, pose and the GPU draw are all
+landed; the wings reach pixels. What is **not** landed is the per-tick
+animation state, so every wearer is posed at the resting triple — see "The
+pose is the resting one" below for what that is right and wrong for.
 
 ## What exists
 
@@ -21,6 +22,10 @@ see "What is missing" for the exact remaining patch.
 | `lodestone_render::elytra_rest_rotations` | the standing triple, `(π/12, 0, −π/12)` |
 | `lodestone_render::ELYTRA_ROTATION_LERP` | the per-tick approach rate, `0.3` |
 | `crates/lodestone-render/tests/elytra_wings.rs` | six hermetic gates over both |
+| `lodestone_shell::gpu`'s `prepare_elytra` | the per-frame instance batches |
+| `EntityRenderer::elytra_model`/`elytra_gpu`/`elytra_texture` | the bake, its upload and the jar sheet |
+| `RenderStats::elytra_wings_drawn` | wings, not wearers — an odd count is a defect |
+| `crates/lodestone-shell/tests/elytra_wings_pixels.rs` | the pixel gate over the real draw |
 
 Companion to [`player-capes.md`](./player-capes.md), which shares the
 `"body"`-part attachment discipline and nothing else, and
@@ -100,40 +105,78 @@ The discriminating input is a shallow dive: `motion = (0.5, −0.5, 0)` gives
 `a_shallow_dive_lands_strictly_between_the_two_glide_endpoints` asserts that
 property rather than assuming it.
 
-## What is missing
+## The draw
 
-**Nothing draws an `ElytraMesh`.** The remaining work is entirely inside
-`crates/lodestone-shell/src/gpu/`, and it is a near-copy of the cape's own
-pass:
+`RenderState::prepare_elytra` (`gpu/entity_passes.rs`) is the cape pass's
+sibling and runs beside it every frame. Three things differ from the cape:
 
-1. `gpu/entities.rs` — bake `ElytraMesh::load()` beside `cape_model`, upload it
-   the way `GpuEntityModel::upload_cape` uploads the cape, and load
-   `ELYTRA_TEXTURE_PATH` as a bind group. Unlike the cape this has a **jar
-   texture**, so it needs no remote fetch and no per-URL grouping — one sheet,
-   with a player's own `skin.elytra` (then `skin.cape`) overriding it when
-   present, per `WingsLayer.getPlayerElytraTexture`.
-2. `gpu.rs` — an `ElytraDrawBatch` beside `CapeDrawBatch`.
-3. `gpu/entity_passes.rs` — a `prepare_elytra` mirroring `prepare_capes`, with
-   two differences: the gate is the **chest equipment slot** carrying
-   `minecraft:elytra` (`prepare_capes` already computes exactly this predicate,
-   to suppress the cape), and it pushes **two** instances per wearer, one per
-   `ElytraMesh::attach` entry, each with its own `elytra_wing_transform`.
-4. `gpu/stats.rs` — an `elytra_layers_drawn` counter.
+* **The gate is the chest slot**, not a skin field — the same
+  "the chest item's path is literally `elytra`" predicate `prepare_cape` uses
+  to *suppress* the cape. The two must stay one predicate: if they ever
+  disagree a wearer can lose the cape and gain no wings, which is exactly the
+  state this feature shipped in between capes landing and this pass existing.
+  `WingsLayer.submit`'s real gate is an `Equippable` with a non-empty
+  `assetId` whose asset declares a `WINGS` layer, which for every vanilla item
+  means the elytra and nothing else.
+* **Two instances per wearer**, one per `ElytraMesh::attach` entry, each
+  carrying its own `elytra_wing_transform` composed onto the wearer's `body`
+  matrix. `RenderStats::elytra_wings_drawn` therefore counts wings: an odd
+  number means the bake produced one wing, which is the "half the elytra is
+  missing" symptom `ElytraMesh::load`'s own `!quads.is_empty()` filter can
+  produce.
+* **The batch key is `(texture, wing)`.** The two wings are different geometry
+  and cannot share an instanced draw; the texture is the jar sheet for almost
+  everyone and the wearer's own **cape** sheet when they have one.
+  `WingsLayer.getPlayerElytraTexture` prefers `skin.elytra()` first, and that
+  preference is **not** wired: `lodestone_shell::remote_skins::RemoteSkin`
+  carries no `elytra` field, so `ProfileTextures::elytra` is dropped at the
+  decode. Adding it is a `RemoteSkin` change, not a render one.
 
-Note what step 3 means: **the cape pass already suppresses itself for an elytra
-wearer and nothing replaces it**, so an elytra-wearing player with a cape
-currently loses the cape and gains nothing. Half of this feature has been wired
-since capes landed.
+Drawn through the **base** entity pipeline, immediately after the cape, for
+the same reason wool and the cape are: no second layer at the same inflation
+to correct z-fighting for.
 
-**The animation state is also absent.** `elytra_target_rotations` is the pure
-half; the impure half is two lerped triples (`rot*`, `rot*Old`) advanced once
-per game tick by `current += (target − current) * ELYTRA_ROTATION_LERP` and
-read back interpolated by partial ticks — that belongs beside
-`lodestone_shell::entities::cape_sway`'s lagged cloak position. Until it
-exists, passing `elytra_rest_rotations()` straight through is correct for every
-wearer who is standing, walking or running, and wrong only during a glide or a
-crouch. That is a legitimate first cut, not a bug, provided it is written down
-as one.
+### The pose is the resting one, always — a deliberate first cut
+
+`elytra_target_rotations` is the pure half of `ElytraAnimationState`; the
+impure half is two lerped triples (`rot*`, `rot*Old`) advanced once per game
+tick by `current += (target − current) * ELYTRA_ROTATION_LERP` and read back
+interpolated by partial ticks. That belongs beside
+`lodestone_shell::entities::cape_sway`'s lagged cloak position, and it does
+not exist yet. Until it does, `prepare_elytra` passes
+`elytra_rest_rotations()` and `crouching: false` straight through.
+
+**What that is right and wrong for:** correct for every wearer who is
+standing, walking or running — the rest triple *is* the
+not-flying-not-crouching branch's target — and wrong during a **glide** or a
+**crouch**, where the wings stay spread instead of folding back. The check a
+reader can run without trusting this paragraph: `EntityDraw` carries no
+fall-flying flag and no crouch flag, so there is no input reaching
+`prepare_elytra` that could select either of the other two branches. Closing
+this means adding that state, not editing the pass's arithmetic.
+
+### What the pixel gate covers, and what it does not
+
+`crates/lodestone-shell/tests/elytra_wings_pixels.rs` drives the real
+`RenderState::render` and measures the pixels that change between an
+elytra-wearing zombie and the same zombie with an empty chest slot, bracketed
+against the two wings' analytic projected silhouette (the summed shoelace area
+of their front-facing quads, cross-checked against the back-facing sum) and
+localised to the wings' own projected rect.
+
+Measured: **4710** changed pixels against a **7044** px analytic silhouette
+(67%), and **0** with the draw-loop arm disabled — the neuter was observed
+failing, not described. Note `elytra_wings_drawn` still read **2** under that
+neuter, because it is incremented in `prepare_elytra`, one layer above the
+draw: the counter is corroboration and the pixels are the evidence.
+
+The gate installs its own `EntityDraw`, so it verifies the draw half only. It
+says nothing about whether the wire's equipment packet actually lands
+`(EquipmentSlot::Chest, minecraft:elytra)` in that field.
+
+Its fixture orientation is load-bearing and was measured rather than assumed:
+at `yaw: 180.0` (facing the camera) the torso occludes the wings and only 974
+pixels change, all of them new sky rather than repaints.
 
 ## How to change it
 
@@ -156,7 +199,8 @@ pack replaces it through the ordinary `ResourceManager` stack.
 
 ## Dependencies
 
-`lodestone-assets` (the model definition and the bake), `lodestone-render` (the
-mesh, the transform, the pose maths), `glam`. The missing draw depends on
-`lodestone-shell`'s GPU entity passes and on `EntityDraw::equipment` already
-carrying the chest slot, which it does.
+`lodestone-assets` (the model definition, the bake and the jar sheet),
+`lodestone-render` (the mesh, the transform, the pose maths), `glam`. The draw
+lives in `lodestone-shell`'s GPU entity passes and reads `EntityDraw::equipment`
+for the chest slot and `EntityDraw::player_skin`'s cape URL for the texture
+override.

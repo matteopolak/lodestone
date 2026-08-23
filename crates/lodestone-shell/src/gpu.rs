@@ -736,6 +736,28 @@ struct CapeDrawBatch {
     count: u32,
 }
 
+/// One wing's uploaded elytra-instance buffer for a frame, keyed by
+/// `(texture, wing)`.
+///
+/// Two keys rather than the cape's one, because the elytra differs from the
+/// cape on both axes at once: it has **two** parts (`"left_wing"` and
+/// `"right_wing"`, which carry different geometry and so cannot share one
+/// instanced draw), and its texture is *usually* the fixed jar sheet but is
+/// the wearer's own cape sheet when they have one — see
+/// `RenderState::prepare_elytra` for the `WingsLayer.getPlayerElytraTexture`
+/// preference order this implements.
+struct ElytraDrawBatch {
+    /// The cape texture URL this batch's instances share, looked up in
+    /// `EntityRenderer::player_skins` at draw time — or `None` for the jar
+    /// sheet in `EntityRenderer::elytra_texture`, which is what a wearer with
+    /// no cape (i.e. almost every mob, and most players) draws with.
+    texture: Option<String>,
+    /// Which wing, as a range into `EntityRenderer::elytra_gpu`.
+    range: lodestone_render::PartRange,
+    buffer: wgpu::Buffer,
+    count: u32,
+}
+
 /// One model type's uploaded flame-instance buffer for a frame
 /// — the mob-fire counterpart to [`WoolPartAccum`]/`ArmourDrawBatch`, simpler
 /// than either because the flame mesh has no per-part skeleton attachment:

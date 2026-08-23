@@ -8,10 +8,10 @@
 //! right triple. They rasterise nothing and they touch no producer.
 //!
 //! They therefore say nothing at all about whether an elytra reaches pixels
-//! in play — that needs a draw site consuming [`lodestone_render::ElytraMesh`]
-//! and a chest-slot gate feeding it, which live in the shell's GPU passes.
-//! Read a pass here as "the geometry and the pose are right", never as "the
-//! feature works".
+//! in play. That is
+//! `crates/lodestone-shell/tests/elytra_wings_pixels.rs`, which drives the
+//! shell's `prepare_elytra` and the real draw loop; read a pass *here* as
+//! "the geometry and the pose are right", never as "the feature works".
 //!
 //! Every expected value below is derived from the 26.2 record definitions
 //! (see `docs/elytra-rendering.md` for the citations), never from our own
