@@ -326,6 +326,30 @@ const SPRINT_ATTACK_KNOCKBACK_POWER: f64 = 0.5;
 #[cfg(not(target_arch = "wasm32"))]
 const VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Cadence of the server-driven entity/player streaming pass ([`stream_pass`]).
+///
+/// **Why this timer exists at all.** Every other caller of [`stream_pass`] in
+/// this file is packet-driven: the join sync, and the `read_packet` arm of
+/// [`serve_play`]'s loop. That made a connection's whole view of the world
+/// advance only when *it* spoke, which is not what vanilla does — its entity
+/// tracker runs from the server tick, independent of any client's input. Two
+/// measured consequences of the packet-driven form, both real:
+///
+/// - A player who joins after you were already online is invisible until your
+///   own next outbound packet. A client that has gone quiet (our own
+///   `select_move_packet` port only re-sends an idle position every 20 ticks)
+///   therefore learns about them up to a second late — and one that sends
+///   nothing at all never learns about them.
+/// - The same holds for every mob's movement, so standing perfectly still made
+///   the rest of the world advance in one-second jumps.
+///
+/// The value is [`MILLIS_PER_TICK`], the same 20 TPS stand-in
+/// [`VITALS_TICK_INTERVAL`] uses and the rate vanilla's tracker runs at. The
+/// pass is a diff — [`EntityStreamer`] emits nothing when nothing changed — so
+/// an idle connection costs one snapshot comparison per tick and no packets.
+#[cfg(not(target_arch = "wasm32"))]
+const ENTITY_STREAM_INTERVAL: Duration = Duration::from_millis(50);
+
 /// [`VITALS_TICK_INTERVAL`]'s wasm32 counterpart — same value (vanilla's 20
 /// TPS, same as every other timer in this file), kept as its own literal
 /// rather than sharing the native constant. Independent literals that happen
@@ -13356,6 +13380,20 @@ where
         crate::tick::PlayTimerInstant::now() + CONTAINER_SYNC_INTERVAL,
         CONTAINER_SYNC_INTERVAL,
     );
+    // Same anchoring reasoning again: the initial pass `serve_connection` ran
+    // just before calling this function is this connection's first, so a tick
+    // firing in the same instant would only re-diff a state nothing has
+    // changed yet.
+    let mut entity_stream_tick = tokio::time::interval_at(
+        crate::tick::PlayTimerInstant::now() + ENTITY_STREAM_INTERVAL,
+        ENTITY_STREAM_INTERVAL,
+    );
+    // `Delay`, for the same reason `keep_alive_tick` sets it: tokio's default
+    // `Burst` fires every missed tick back to back with no delay, so a pass
+    // that overran (a chunk strip, a container click) would be followed by a
+    // run of streaming passes in one instant, each re-diffing state that
+    // cannot have changed between them.
+    entity_stream_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let play_start = crate::tick::PlayTimerInstant::now();
     let mut next_keep_alive_id: i64 = 0;
     // The deferred join stream's own batch bookkeeping — see
@@ -13791,6 +13829,28 @@ where
                 // this loop has. A `PlayerMoved` that crosses a chunk boundary
                 // awaits a whole strip of columns inside `dispatch_play_packet`.
                 watch.pass("read_packet");
+            }
+
+            // The server-driven streaming pass. Identical body to the one at
+            // the tail of the `read_packet` arm above, which stays where it is:
+            // that one has to run *after* the packet it just handled (a move
+            // republishes this player's position into the registry, a dig
+            // removes an entity), so folding the two into this timer would
+            // delay every such consequence by up to a tick. This arm is what
+            // covers the other direction — everything that changes while this
+            // connection says nothing. See [`ENTITY_STREAM_INTERVAL`].
+            _ = entity_stream_tick.tick() => {
+                watch.enter();
+                for directive in stream_pass(
+                    proto,
+                    entities,
+                    &mut streamer,
+                    &mut player_list,
+                    player_ticket.as_ref(),
+                ) {
+                    apply(conn, &mut state, directive).await?;
+                }
+                watch.pass("entity_stream_tick");
             }
 
             _ = keep_alive_tick.tick() => {

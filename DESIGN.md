@@ -9283,3 +9283,52 @@ the feature never ran, not evidence it ran wrong** — and the two have disjoint
 what the *wrong* answers would have looked like (here: 66 biome greens and one plains fallback, none of
 them neutral) costs one reading of the fallback constant and retires a whole hypothesis before the first
 reproduction attempt.
+
+
+**12.176 A CI "flake" was a real defect, and the test's own assertion message named the wrong cause.**
+
+`lan_player_stream.rs`'s `two_lan_clients_receive_each_others_player_entities` failed once in CI at
+**31.12 s** — the whole 30 s `ARRIVAL_DEADLINE` plus the join — reporting *"B must receive A's player
+entity over LAN — got []. An empty list means `bind` is still handing each connection the bare mob source
+instead of a `PlayerAwareSource`."* It passed alone in **5.08 s**, and the crate was **945 passed / 0
+failed** on a 10-core machine. Every ingredient of an "environmental, not mine" verdict was present.
+
+The message was a stale guess and could be retired by reading it: a composition defect fails on **every**
+run, deterministically. What the code actually permits is narrower. B sends nothing after
+`FINISH_CONFIGURATION`, so there was exactly one call site that could ever have delivered A to B — the
+join-time `stream_pass` — because `serve_play`'s only other `stream_pass` lived in the `read_packet` arm
+of its `select!`. **A connection's whole view of the world therefore advanced only when that connection
+spoke.**
+
+Made deterministic rather than argued: a second gate,
+`a_silent_client_learns_about_a_later_joiner`, joins B into an empty world, never speaks again, and joins
+A afterwards. Red before the fix with the same empty list, after the full 30 s. Its control — A's own join
+pass carrying B, who was already registered — passed throughout, so the registry was never in question and
+the silent-client claim was not vacuous.
+
+The fix is a sixth `select!` arm, `ENTITY_STREAM_INTERVAL` at 50 ms, running the same pass from a timer as
+vanilla's entity tracker does. The `read_packet` pass stays: it must run *after* the packet it handled (a
+move republishes the sender's position, a dig removes an entity), so folding the two would delay every such
+consequence by a tick. Neuter control: with the timer arm's directives dropped (`.take(0)`), the new gate
+failed in **33.28 s**; restored from an md5-checked backup, **946 passed / 0 failed across 121 binaries**,
+and the file's own run fell from **38.59 s to 9.34 s**.
+
+Three things this paid for.
+
+**The harness was also weak, and the two halves are separable.** `join` used a 400 ms gap-terminated drain
+as evidence that a player had finished joining. A silence is not evidence of a presence, and a join has
+several windows that can outlast 400 ms on a slow box — the world-spawn spiral before the *first* packet,
+the command-tree encode, the join view's generation. Measured here at a 1 ms gap, the whole join is
+**~11 ms and 31 packets**, so this machine could not reproduce the ordering at all; that is a fact about
+the machine, not about the tree. `join` now terminates on `player_info_update`, the first packet sent
+*after* `PlayerRegistry::join` and the only positive evidence that this player is visible to others.
+
+**The gameplay cost was not confined to a two-client test.** Our own port of `LocalPlayer.sendPosition`
+re-sends an idle position only every 20 ticks, so a player standing perfectly still received every other
+player's and every mob's movement in **one-second jumps**.
+
+**A doc stated the defect as a design note and it read as reassurance.** `docs/player-entities.md` carried
+*"Cadence is packet-driven … Adequate in practice (a real client sends a movement or status packet every
+tick)"* — accurate about the mechanism, wrong about the consequence, and the same shape as a fixture whose
+own docs explain which path is not exercised. The phrase to grep for is a doc justifying an absence by
+what callers "in practice" do.
