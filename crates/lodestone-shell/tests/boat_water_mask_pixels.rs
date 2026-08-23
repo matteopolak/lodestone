@@ -54,13 +54,15 @@
 //! Three separate claims come out of that, and each has failed for a
 //! different reason during this gate's life:
 //!
-//! 1. **The mask must not occlude the boat it belongs to.** With no water
+//! 1. **The mask must not occlude visible entity geometry.** With no water
 //!    anywhere, a depth-only draw has nothing behind it to hide, so adding the
-//!    mask instance must change **zero** pixels. Measured at 5,492 px when
+//!    mask instance must change **zero** boat pixels. Measured at 5,492 px when
 //!    `prepare_entities` pushed the patch *before* the boat's own instance:
 //!    `plan_entities` batches in first-appearance order, so the patch's depth
 //!    write depth-rejected the hull's own below-waterline planks and, having
-//!    no colour to write, left background showing through them.
+//!    no colour to write, left background showing through them. The rider A/B
+//!    below measured the subtler form from the owner report: 798 player pixels
+//!    vanished when a later player batch followed the mask.
 //! 2. **Without the mask, water paints inside the hull.** Measured: 4,578 of
 //!    the hull's 11,124 silhouette pixels.
 //! 3. **With the mask, it does not.** Measured: 645 — the residue being the
@@ -495,6 +497,23 @@ fn boat_draw(type_path: &str) -> EntityDraw {
     }
 }
 
+/// A remote-player draw at the boat's real first passenger attachment height.
+/// The seated pose puts the legs and lower arms through the hull volume, which
+/// is exactly where a prematurely submitted depth-only water patch can erase
+/// only the intersecting fragments.
+fn rider_draw() -> EntityDraw {
+    let mut rider = boat_draw("player");
+    rider.id = 2;
+    rider.feet.y = BOAT_FEET_Y + 0.5625 / 3.0 - 0.6;
+    rider.yaw = BOAT_YAW;
+    rider.head_yaw = BOAT_YAW;
+    rider.anim = AnimInput {
+        is_passenger: true,
+        ..AnimInput::REST
+    };
+    rider
+}
+
 /// Looking down and slightly across into the boat's open top, close enough
 /// that the hull fills a real fraction of the frame — the "grazing angle
 /// into an occupied or empty boat" `boat_water_patch_model`'s own doc names
@@ -543,6 +562,38 @@ fn render_frame(
     upload_terrain: bool,
     entity_type_path: Option<&str>,
 ) -> (Vec<u8>, lodestone::gpu::RenderStats) {
+    let entity = entity_type_path.map(boat_draw);
+    let entities: &[EntityDraw] = match &entity {
+        Some(e) => std::slice::from_ref(e),
+        None => &[],
+    };
+    render_entities_frame(
+        device,
+        queue,
+        format,
+        target,
+        atlas,
+        world,
+        models,
+        camera,
+        upload_terrain,
+        entities,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_entities_frame(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+    target: &mut HeadlessTarget,
+    atlas: &lodestone_render::BlockAtlas,
+    world: &World,
+    models: &lodestone_render::BlockModels,
+    camera: &Camera,
+    upload_terrain: bool,
+    entities: &[EntityDraw],
+) -> (Vec<u8>, lodestone::gpu::RenderStats) {
     let mut state = RenderState::new(device, queue, format, W, H, Some(atlas));
     suppress_first_person_arm(&mut state);
     let uploaded = upload_all(world, models, &mut state, device, queue, upload_terrain);
@@ -560,14 +611,60 @@ fn render_frame(
     // records the measurement that makes this mandatory — the real background
     // is `SkyFrame::clear_color`, a time-of-day and eye-height resolved fog
     // colour under a sky disc, not any `SKY_COLOR` a test could hardcode.
-    let entity = entity_type_path.map(boat_draw);
-    let entities: &[EntityDraw] = match &entity {
-        Some(e) => std::slice::from_ref(e),
-        None => &[],
-    };
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), camera, None, entities);
     (target.read_texels(device, queue), stats)
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn the_water_mask_never_depth_rejects_a_rider_drawn_in_the_hull() {
+    let ctx = gpu();
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let (_resources, atlas) = load_vanilla();
+    let models = atlas
+        .models()
+        .expect("the vanilla load must attach baked block models");
+    let world = water_world();
+    let cam = camera();
+
+    let rider = rider_draw();
+    let masked = [boat_draw("oak_boat"), rider.clone()];
+    let unmasked = [boat_draw("boat"), rider];
+    let boat_only = [boat_draw("oak_boat")];
+
+    let (with_mask, _) = render_entities_frame(
+        device, queue, format, &mut target, &atlas, &world, models, &cam, false, &masked,
+    );
+    let (without_mask, _) = render_entities_frame(
+        device, queue, format, &mut target, &atlas, &world, models, &cam, false, &unmasked,
+    );
+    let (without_rider, _) = render_entities_frame(
+        device,
+        queue,
+        format,
+        &mut target,
+        &atlas,
+        &world,
+        models,
+        &cam,
+        false,
+        &boat_only,
+    );
+
+    let rider_pixels = diff_count(&without_mask, &without_rider);
+    let clipped_pixels = diff_count(&with_mask, &without_mask);
+    assert!(
+        rider_pixels > 100,
+        "the seated player changed only {rider_pixels} pixels; the fixture does not visibly draw a rider"
+    );
+    assert_eq!(
+        clipped_pixels, 0,
+        "with no water in the scene, the invisible boat mask changed {clipped_pixels} pixels of an otherwise identical boat+rider draw; it can only be depth-rejecting rider fragments submitted after the mask"
+    );
 }
 
 
@@ -857,9 +954,9 @@ fn the_boat_water_mask_hides_the_hollow_interior_a_bare_boat_rig_does_not() {
          depth-rejecting geometry drawn after it, i.e. the boat's own hull, which then shows \
          background. Vanilla submits the model first (`AbstractBoatRenderer.submit`: \
          `submitModel(this.model(), ...)` then `this.submitTypeAdditions(...)`), so \
-         `prepare_entities` must push the patch instance after the boat's own — \
-         `plan_entities` batches in first-appearance order and `gpu/frame.rs` draws them in \
-         that order. Measured in the wrong order: 5,492 px of hull replaced by sky"
+         `prepare_entities` must keep the patch out of visible batches and `gpu/frame.rs` must \
+         submit the mask phase only after all visible opaque/cutout geometry. Measured in the \
+         wrong order: 5,492 px of hull replaced by sky"
     );
 
     // --- The mask does its job ----------------------------------------------
