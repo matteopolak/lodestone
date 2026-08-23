@@ -133,6 +133,31 @@ matching vanilla's own `ClientLevel.calculateBlockTint` box-blend.
     associativity and on the division staying where vanilla puts it. If you change the accumulator
     type or the division point, the identity gates will tell you, and they are the only thing that
     will.
+- **A stale or absent biome registry cannot render terrain *untinted* — it can only ever render
+  it as plains, and telling those two apart is what the instrument below is for.** The ordering
+  that invites the mistake is real: `Sim::refresh_mesh_policy` publishes `TerrainMesh::biome_names`
+  at the *top* of `poll_net`, before that same poll drains its own updates, so a section meshed in
+  the poll carrying the server's `registry_data` is tinted against the registry as it stood a
+  moment earlier. But every unresolvable path — an empty table, a table too short for the id, a
+  name absent from `BIOME_EFFECTS` — lands on `biome_tint.rs`'s `PLAINS_FALLBACK`, whose climate
+  is plains' own, which resolves to the exact colour `BlockModels::build` interned at
+  `GRASS_TINT_SLOT`. Measured both ways: hermetically by
+  `an_unresolvable_biome_id_renders_the_plains_default_and_keeps_the_grass_palette_slot`, and end
+  to end against the live creative oracle, where forcing `SnapshotModelView::biome_tint_at` to
+  return `None` for **every** quad produced a **byte-identical** screenshot capture (0 pixels
+  changed) while forcing it to return white changed exactly the 24,821 ground pixels to neutral
+  grey. **So neutral-grey ground is never a registry story** — it needs the tint to be skipped
+  (`tint_rgb_override` absent *and* the vertex's palette slot at 255), which is a different
+  mechanism.
+- **The two failures look identical on a plains world, so a screenshot cannot separate them.**
+  `mesher.rs`'s `TintProbe` buckets every `biome_tint_at` call — resolved, unresolved, colormaps
+  absent, not a blended kind, untinted quad — and `mesher::biome_tint_counts()` exposes the
+  running `(resolved, skipped)` totals for the process. The first skip logs a `tracing::warn!` on
+  target `mesh`; setting `LODESTONE_TINT_PROBE` additionally prints one line per meshed section to
+  stderr (`path=`, `names=` and the whole histogram), which is how you read this in a harness that
+  installs no `tracing` subscriber. Use it before theorising about a tint that looks wrong: it
+  answers *"did this section tint at all, and against how many biome names"*, which is the
+  question, and it is not derivable from the pixels.
 - **Adding a biome means keeping `BIOME_EFFECTS` sorted.** `FIRST_BYTE_INDEX` assumes entries with
   the same first byte are contiguous; an entry in the wrong place resolves to `None` and renders the
   plains fallback, with no compile error. Sort with `LC_ALL=C sort` — `_` is `0x5F`, *below* every
@@ -239,6 +264,14 @@ nothing currently overrides it.
   proves the two ids resolve to the *opposite* biome from what `FALLBACK_BIOME_NAMES` would give,
   with a fired control confirming the fallback path alone still gives the old (wrong-if-real-server)
   answer on the identical snapshot.
+- `crates/lodestone-shell/tests/biome_tint_live_mesh.rs`'s
+  `an_unresolvable_biome_id_renders_the_plains_default_and_keeps_the_grass_palette_slot` — the
+  gate for the gotcha above: an id past the end of a real (non-empty) registry must render exactly
+  the palette's plains default *and* keep `GRASS_TINT_SLOT` on every top-face vertex, never 255.
+  Its control names the same id `minecraft:swamp` and requires swamp's colormap-independent
+  constant instead, so the first arm cannot pass for a mesher that resolves no biome at all. Fired
+  control: making the unresolved arm answer `minecraft:badlands` fails it with `[144, 129, 77]`
+  against the plains default `[145, 189, 89]`.
 - `crates/lodestone-shell/src/net.rs`'s own `#[cfg(test)]` module —
   `forward_folds_biome_registry_names_into_the_cell_without_using_the_channel` proves the real
   `forward` function folds `ClientEvent::BiomeRegistryNames` into `BiomeNameCell` and that it never

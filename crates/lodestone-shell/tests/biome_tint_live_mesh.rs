@@ -456,3 +456,159 @@ fn live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the
          to prove the flip above is real"
     );
 }
+
+/// The palette slot byte (`ModelVertex::tint`) every tinted top-face vertex of
+/// the grass block at `(x, 8, z)` carries — the *other* half of a tint, and the
+/// one a colour assertion cannot see.
+///
+/// `tint_on_top_face` above reads `tint_rgb_override`, the per-position colour.
+/// This reads the frame-shared palette index the shader falls back to when that
+/// override is absent (`model.wgsl`: `tint_rgb_override.a != 0` wins, else
+/// `palette.colors[tint_idx]`, and slot 255 is white). A grass quad that ever
+/// reached the GPU carrying 255 would render its raw greyscale texture — the
+/// neutral grey a screenshot shows for "no tint at all", which is a different
+/// defect from "the wrong biome" and is invisible to any assertion on colour.
+fn slot_on_top_face(mesh: &ModelMesh, x: f32, z: f32) -> Vec<u8> {
+    mesh.vertices
+        .iter()
+        .filter(|v| {
+            v.position[1] > 8.99
+                && v.position[0] >= x
+                && v.position[0] <= x + 1.0
+                && v.position[2] >= z
+                && v.position[2] <= z + 1.0
+                && v.tint_rgb_override[3] != 0
+        })
+        .map(|v| v.tint)
+        .collect()
+}
+
+/// A biome id the mesher **cannot resolve** still renders the palette's plains
+/// default — it never renders untinted.
+///
+/// # What this rules out, and why that needed measuring
+///
+/// `Sim::refresh_mesh_policy` publishes `TerrainMesh::biome_names` at the top of
+/// `poll_net`, *before* that same poll drains its own updates, so a section
+/// meshed in the poll that carries the server's `registry_data` is tinted
+/// against the registry as it stood a moment earlier — empty, or short. That
+/// ordering is real, and it was the leading suspect for a reported defect where
+/// the ground of a freshly joined world renders **neutral grey** instead of
+/// plains green on a minority of joins.
+///
+/// It cannot be the cause, and this is the reason: every unresolvable path in
+/// `mesher::biome_name_at` → `NamedBiomeTint::effects` lands on
+/// `biome_tint::PLAINS_FALLBACK`, whose climate is plains' own, which resolves
+/// to the very colour `BlockModels::build` already interned into
+/// [`GRASS_TINT_SLOT`]. So the worst a stale or absent registry can do is render
+/// *plains* — indistinguishable from correct on a plains world, and green
+/// everywhere else. Grey requires the tint to be **skipped**, which is a
+/// different mechanism entirely.
+///
+/// Measured the same conclusion end to end, against the live creative oracle
+/// through the screenshot harness: forcing `SnapshotModelView::biome_tint_at`
+/// to return `None` for *every* quad produced a **byte-identical** capture
+/// (0 pixels changed), while forcing it to return white changed exactly the
+/// 24,821 ground pixels to neutral grey. This gate is the hermetic, permanent
+/// form of the first of those two arms.
+///
+/// # The control
+///
+/// The second arm names the same id `minecraft:swamp`, which has a
+/// colormap-independent constant, and requires a different colour and the same
+/// slot. Without it the first arm would pass for a mesher that ignored biomes
+/// altogether.
+#[test]
+#[ignore = "needs a real client.jar under .cache/mc/<version>/"]
+fn an_unresolvable_biome_id_renders_the_plains_default_and_keeps_the_grass_palette_slot() {
+    let root = pack_root();
+    let models = load_models(&root);
+    let reg = registry(&root);
+    let air = air_id(&reg);
+    let grass = grass_block_id(&reg);
+
+    let plains_default = models.tint_palette()[GRASS_TINT_SLOT as usize];
+    let plains_default_bytes = [
+        (plains_default[0] * 255.0).round() as u8,
+        (plains_default[1] * 255.0).round() as u8,
+        (plains_default[2] * 255.0).round() as u8,
+    ];
+
+    let snapshot = || {
+        let world = filled_world(air, grass, DESERT_ID, SWAMP_ID);
+        snapshot_section_in(
+            &world,
+            subject_key(),
+            Some(SECTIONS),
+            SkyDefault::Full,
+            ColumnSource::Complete,
+        )
+        .any()
+        .expect("filled 3x3 world snapshots as Ready")
+    };
+
+    // Arm 1: a registry that is real but **too short** to hold `DESERT_ID` —
+    // the shape a mesh submitted before the registry finished arriving sees.
+    // One entry, so it is non-empty (the empty case takes `biome_name_at`'s
+    // `FALLBACK_BIOME_NAMES` branch instead, which resolves a real name and is
+    // therefore *not* the unresolved path this arm is about).
+    let short: std::sync::Arc<[&'static str]> = std::sync::Arc::from(vec!["minecraft:plains"]);
+    assert!(
+        (DESERT_ID as usize) >= short.len(),
+        "fixture premise: DESERT_ID must be past the end of the short registry, \
+         or this arm measures a resolved name"
+    );
+    let short_mesh = mesh_snapshot_models(&snapshot().with_biome_names(short), &models, true);
+    let unresolved = tint_on_top_face(&short_mesh, 2.0, 2.0);
+    let unresolved_slots = slot_on_top_face(&short_mesh, 2.0, 2.0);
+    println!(
+        "unresolved id: rgb={:?} slots={unresolved_slots:?} (plains default = {plains_default_bytes:?})",
+        &unresolved[..3]
+    );
+
+    // Arm 2, the control: the same id, named a biome with a known constant.
+    let mut named: Vec<&'static str> = vec!["minecraft:plains"; (DESERT_ID as usize) + 1];
+    named[DESERT_ID as usize] = "minecraft:swamp";
+    let named_mesh =
+        mesh_snapshot_models(&snapshot().with_biome_names(std::sync::Arc::from(named)), &models, true);
+    let resolved = tint_on_top_face(&named_mesh, 2.0, 2.0);
+    let resolved_slots = slot_on_top_face(&named_mesh, 2.0, 2.0);
+    println!("named swamp: rgb={:?} slots={resolved_slots:?}", &resolved[..3]);
+
+    assert_eq!(
+        [unresolved[0], unresolved[1], unresolved[2]],
+        plains_default_bytes,
+        "an unresolvable biome id must resolve to PLAINS_FALLBACK's climate, which is \
+         the same colour BlockModels interned at GRASS_TINT_SLOT — so a stale or absent \
+         registry can only ever render plains, never an untinted quad"
+    );
+    assert_eq!(
+        [resolved[0], resolved[1], resolved[2]],
+        SWAMP_GRASS,
+        "control: the same id named minecraft:swamp must render swamp's constant, or the \
+         arm above passes for a mesher that resolves no biome at all"
+    );
+    assert_ne!(
+        [resolved[0], resolved[1], resolved[2]],
+        plains_default_bytes,
+        "control premise: swamp's constant must differ from the plains default"
+    );
+
+    // Neither arm may reach the GPU on the untinted slot. This is the assertion
+    // a colour check cannot make: `tint_rgb_override` is what these vertices
+    // carry today, and if it ever went absent the shader falls through to
+    // `palette.colors[tint]` — green if the slot is right, raw grey if it is 255.
+    for (label, slots) in [("unresolved", &unresolved_slots), ("named", &resolved_slots)] {
+        assert!(
+            !slots.is_empty(),
+            "{label}: no tinted top-face vertex found — fixture premise broken"
+        );
+        for slot in slots.iter() {
+            assert_eq!(
+                *slot, GRASS_TINT_SLOT,
+                "{label}: a grass top face must carry the reserved grass palette slot, never \
+                 255 (untinted, which renders the raw greyscale texture). Slots seen: {slots:?}"
+            );
+        }
+    }
+}
