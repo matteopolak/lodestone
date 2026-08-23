@@ -317,6 +317,28 @@ const IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
 /// spawn and move packet.
 const IDX_ITEM_FRAME_ROTATION: u8 = 10;
 
+/// `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET`, index 9 — an
+/// `OPTIONAL_UNSIGNED_INT`.
+///
+/// Self-identifying by `(index, serializer)` and so **unguarded**: the jar dump
+/// has four `OPTIONAL_UNSIGNED_INT` claimants and the other three
+/// (`Frog.DATA_TONGUE_TARGET_ID`, the player's two shoulder parrots) sit at
+/// indices 19 and 20. Present means the rocket is riding a gliding player, and
+/// `FireworkRocketEntity.shouldRender` returns false for that case — it is the
+/// elytra boost, not a shot rocket.
+const IDX_FIREWORK_ATTACHED: u8 = 9;
+
+/// `FireworkRocketEntity.DATA_SHOT_AT_ANGLE`, index 10 — a `BOOLEAN`, and the
+/// one firework field that **does** need a class guard.
+///
+/// Index 10's `BOOLEAN` has three claimants in the jar dump:
+/// `AbstractArrow.IN_GROUND`, `Interaction.DATA_RESPONSE_ID` and this. None of
+/// the three is a `LivingEntity`, so neither the `living` nor the `mob` census
+/// separates them — this is the case `MetadataClass::FireworkRocket` exists
+/// for. Ungated, an arrow stuck in the ground would report itself as fired from
+/// a crossbow.
+const IDX_FIREWORK_SHOT_AT_ANGLE: u8 = 10;
+
 /// `Display.DATA_TRANSLATION_ID` (`Display.java`), index 11 — a `VECTOR3`.
 /// Self-identifying: no other claimant at index 11 in the 26.2 jar dump uses
 /// that serializer (see `EntityMetadataUpdate::display_translation`'s doc in
@@ -481,6 +503,18 @@ pub enum MetadataClass {
     /// before the index match runs — which is why a chest in a frame already
     /// drew while its rotation did not.
     ItemFrame,
+    /// `FireworkRocketEntity`, gating its **shot-at-angle** bit alone.
+    ///
+    /// Needed because index 10's `BOOLEAN` has three claimants in the jar dump
+    /// — `AbstractArrow.IN_GROUND`, `Interaction.DATA_RESPONSE_ID` and this —
+    /// and neither the `living`/`mob` census nor the serializer separates them:
+    /// none of the three is living. Ungated, an arrow that has stuck into the
+    /// ground would report itself as a crossbow-fired rocket.
+    ///
+    /// Its two *other* fields need no class: the stack at index 8 is
+    /// self-identifying by `ITEM_STACK`, and index 9's `OPTIONAL_UNSIGNED_INT`
+    /// has exactly one claimant *at that index* in the dump.
+    FireworkRocket,
 }
 
 /// Classifies a resolved entity-type identifier into the [`MetadataClass`] whose
@@ -508,6 +542,7 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         "minecraft:item_display" => Some(MetadataClass::ItemDisplay),
         "minecraft:block_display" => Some(MetadataClass::BlockDisplay),
         "minecraft:item_frame" | "minecraft:glow_item_frame" => Some(MetadataClass::ItemFrame),
+        "minecraft:firework_rocket" => Some(MetadataClass::FireworkRocket),
         _ => None,
     }
 }
@@ -688,6 +723,9 @@ enum Value {
     /// identifies the field — the same property that lets [`Value::Item`] be
     /// routed ahead of the index match.
     PaintingVariant(Identifier),
+    /// An `OPTIONAL_UNSIGNED_INT`: `None` for the empty case (wire `0`),
+    /// `Some(n)` for a present value (wire `n + 1`).
+    OptionalUnsignedInt(Option<u32>),
     /// Consumed correctly but not surfaced.
     Consumed,
 }
@@ -836,9 +874,17 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
                 Value::OptBlockPos(None)
             }
         }
-        SER_DIRECTION | SER_OPTIONAL_BLOCK_STATE | SER_OPTIONAL_UNSIGNED_INT | SER_HUMANOID_ARM => {
+        SER_DIRECTION | SER_OPTIONAL_BLOCK_STATE | SER_HUMANOID_ARM => {
             reader.var_i32()?;
             Value::Consumed
+        }
+        // `FriendlyByteBuf.writeOptionalUnsignedInt`: `0` is empty and any other
+        // value is `n + 1`. A negative wire value is not representable as an
+        // entity id and reads as empty rather than wrapping into a plausible
+        // one.
+        SER_OPTIONAL_UNSIGNED_INT => {
+            let raw = reader.var_i32()?;
+            Value::OptionalUnsignedInt(u32::try_from(raw - 1).ok())
         }
         // The global block-state id, as a plain `VarInt` — surfaced as
         // `Value::Int` (the same shape any other `INT` field decodes to)
@@ -1118,6 +1164,23 @@ pub fn read_entity_metadata(
             // negative or out-of-range int is a datapack, not a rotation.
             (IDX_ITEM_FRAME_ROTATION, Value::Int(v)) if class == Some(MetadataClass::ItemFrame) => {
                 md.item_frame_rotation = Some((v.rem_euclid(8)) as u8);
+            }
+            // Whether a firework rocket is riding a gliding player. Only
+            // presence matters downstream — vanilla suppresses the draw
+            // entirely for an attached rocket — so the target id is dropped
+            // rather than carried, and that is a decision rather than an
+            // oversight: nothing here would read it.
+            (IDX_FIREWORK_ATTACHED, Value::OptionalUnsignedInt(target)) => {
+                md.firework_attached = Some(target.is_some());
+            }
+            // Gated on the class, not merely decoded: see
+            // [`IDX_FIREWORK_SHOT_AT_ANGLE`]. An arrow's index-10 `BOOLEAN` is
+            // consumed for alignment by the `_ => {}` arm below and deliberately
+            // not surfaced.
+            (IDX_FIREWORK_SHOT_AT_ANGLE, Value::Bool(b))
+                if class == Some(MetadataClass::FireworkRocket) =>
+            {
+                md.firework_shot_at_angle = Some(b);
             }
             // `ArmorStand`'s six pose accessors. No class guard: `ROTATIONS` has
             // exactly these six claimants in the jar dump, so the value shape
@@ -3051,6 +3114,17 @@ mod tests {
     }
 
     /// Every `Owner.FIELD` the dump reports at `index`, with its serializer.
+    /// A tracked entity that is a firework rocket — neither living nor a mob,
+    /// which is exactly why the class is the only thing that can gate index
+    /// 10's `BOOLEAN` for it.
+    fn a_firework() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::FireworkRocket),
+            living: false,
+            mob: false,
+        }
+    }
+
     fn dump_claimants(index: u8) -> Vec<(String, i32)> {
         let mut out = Vec::new();
         for line in INDEX_DUMP.lines() {
@@ -3218,7 +3292,85 @@ mod tests {
     /// *and* `ArmorStand`'s client flags, both `BYTE`, with `0x04` meaning
     /// "aggressive" on one and "show arms" on the other — and since `ArmorStand`
     /// *is* a `LivingEntity`, that one needs a narrower guard than index 8's.
-    /// `PAINTING_VARIANT` has exactly **one** claimant in the jar, which is the
+    /// A firework's angle bit is surfaced only for a firework, and its
+    /// attached flag only for the empty/present distinction.
+    ///
+    /// The control is the point: index 10's `BOOLEAN` is also
+    /// `AbstractArrow.IN_GROUND`, so the same bytes fed with a non-firework
+    /// subject must consume the byte for alignment and surface nothing. Without
+    /// the class guard an arrow stuck in the ground would report itself as
+    /// crossbow-fired and be spun onto a flight axis it does not have.
+    #[test]
+    fn index_10_bool_is_the_angle_bit_only_for_a_firework() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_FIREWORK_SHOT_AT_ANGLE);
+        bytes.extend(varint(SER_BOOLEAN));
+        bytes.push(1);
+        bytes.push(EOF_MARKER);
+
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_firework())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.firework_shot_at_angle, Some(true));
+        // And it did not also land in the other index-10 claimant's field.
+        assert_eq!(md.item_frame_rotation, None);
+
+        let mut reader = Reader::new(&bytes);
+        let control = read_entity_metadata(&mut reader, TrackedEntity::default())
+            .expect("a non-firework must still decode, not error")
+            .metadata;
+        reader
+            .ensure_empty()
+            .expect("the BOOLEAN must be consumed for alignment even when it is not surfaced");
+        assert_eq!(
+            control.firework_shot_at_angle, None,
+            "an arrow's in-ground bit must not report itself as a firework's angle bit"
+        );
+    }
+
+    /// `OPTIONAL_UNSIGNED_INT`'s empty and present encodings both reach the
+    /// draw record as the boolean the renderer actually needs.
+    ///
+    /// Two arms because they are the two cases vanilla distinguishes and they
+    /// differ by exactly one wire byte: `0` is empty (an ordinary shot rocket,
+    /// which draws) and `n + 1` is present (the elytra boost, which does not).
+    /// A decoder that dropped the `- 1` would read empty as entity 0 and
+    /// suppress every rocket in the game.
+    #[test]
+    fn firework_attached_distinguishes_empty_from_present() {
+        let payload = |wire: i32| {
+            let mut bytes = Vec::new();
+            bytes.push(IDX_FIREWORK_ATTACHED);
+            bytes.extend(varint(SER_OPTIONAL_UNSIGNED_INT));
+            bytes.extend(varint(wire));
+            bytes.push(EOF_MARKER);
+            bytes
+        };
+
+        let bytes = payload(0);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_firework())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.firework_attached, Some(false), "wire 0 is the empty case");
+
+        // 43 rather than 1: its wire form is 44, so a decoder that forgot the
+        // `- 1` and one that did not would both produce a *present* value here,
+        // and the distinguishing case is the `0` arm above. Using a
+        // recognisable id keeps the two arms from looking interchangeable.
+        let bytes = payload(44);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_firework())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.firework_attached, Some(true), "wire 44 is entity 43, present");
+    }
+
+    /// `PAINTING_VARIANT` has exactly **one** claimant in the jar,    /// `PAINTING_VARIANT` has exactly **one** claimant in the jar, which is the
     /// whole reason `Value::PaintingVariant` is routed ahead of the index match
     /// rather than gated on an index or a class — the same property
     /// `SER_ITEM_STACK` relies on.

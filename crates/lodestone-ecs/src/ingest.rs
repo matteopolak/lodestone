@@ -55,7 +55,7 @@ use crate::entity::{
     DisplayTranslation,
     EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
-    PaintingVariant,
+    FireworkFlags, PaintingVariant,
     MobState, OnGround,
     Passengers, Pose, Position, Rotation, Tamed, Variant, Vehicle, Velocity,
 };
@@ -909,6 +909,29 @@ pub fn apply_entity_metadata(
         // reassigned in place by a plugin.
         if let Some(ref variant) = metadata.painting_variant {
             entity.insert(PaintingVariant(variant.clone()));
+        }
+        // A firework rocket's two flags, merged rather than replaced: they
+        // arrive as separate metadata fields and a packet mentions only what
+        // changed, so inserting a freshly-defaulted value for one would clear
+        // the other.
+        if metadata.firework_attached.is_some() || metadata.firework_shot_at_angle.is_some() {
+            // `entry`/`and_modify`, not a read-then-insert, for the same
+            // reason `ArmorStandPose` above uses it: `Commands` is deferred, so
+            // a `Query` read here would see the pre-batch value and two updates
+            // in one batch would each merge onto the same stale base.
+            let attached = metadata.firework_attached;
+            let angled = metadata.firework_shot_at_angle;
+            entity
+                .entry::<FireworkFlags>()
+                .or_default()
+                .and_modify(move |mut flags| {
+                    if let Some(attached) = attached {
+                        flags.attached = attached;
+                    }
+                    if let Some(angled) = angled {
+                        flags.shot_at_angle = angled;
+                    }
+                });
         }
         // The *mob* flags byte — a different byte at a different
         // index from the living-entity one [`apply_entity_item_use`] folds, and

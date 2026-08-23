@@ -158,6 +158,7 @@ fn entity_shadows_draw_a_ring_the_bare_silhouette_does_not() {
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
+        firework: None,
     };
 
     let mut shoot = |state: &RenderState| -> (Vec<u8>, lodestone::gpu::RenderStats) {

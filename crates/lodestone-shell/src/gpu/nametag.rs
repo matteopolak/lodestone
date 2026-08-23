@@ -1301,6 +1301,7 @@ mod tests {
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
+            firework: None,
         };
         // A raster is required to reach the distance check at all in
         // `prepare`, but `push_entity_quads` itself only needs one to lay
@@ -1388,6 +1389,7 @@ mod tests {
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
+            firework: None,
         };
         push_entity_quads(
             &raster,
@@ -1499,6 +1501,7 @@ mod tests {
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
+            firework: None,
         };
         push_entity_quads(
             &raster,
@@ -1828,6 +1831,7 @@ mod tests {
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
+            firework: None,
         };
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
@@ -1979,6 +1983,7 @@ mod tests {
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
+            firework: None,
         };
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
@@ -2061,6 +2066,7 @@ mod tests {
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
+            firework: None,
         }
     }
 

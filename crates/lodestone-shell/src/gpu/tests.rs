@@ -483,6 +483,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
+        firework: None,
     };
 
     let instance = models

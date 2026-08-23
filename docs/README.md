@@ -668,6 +668,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   a fire ages toward burnout, eats the blocks around it, spreads onto flammable
   neighbours at vanilla's own odds, is put out by rain, and burns forever over
   netherrack. Lava's own random tick is what lights the first one.
+- [Firework rocket rendering](./firework-rocket-rendering.md) — The flying firework
+  rocket entity: a billboarded item model, spun onto its flight axis when it was fired
+  from a crossbow, and suppressed entirely when it is the elytra boost riding inside a
+  gliding player.
 - [First-person held item](./first-person-held-item.md) — The item in the local
   player's hand in first person — vanilla's `ItemInHandRenderer.submitArmWithItem`
   non-empty branch. It replaces the bare arm rather than joining it, and it is one

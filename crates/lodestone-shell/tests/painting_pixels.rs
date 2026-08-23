@@ -116,6 +116,7 @@ fn painting_draw(id: i32, variant: Option<&'static str>, centre: glam::Vec3) -> 
         block_state: None,
         item_frame_rotation: 0,
         painting: variant,
+        firework: None,
         id,
         type_path: std::sync::Arc::from("painting"),
         item: None,
