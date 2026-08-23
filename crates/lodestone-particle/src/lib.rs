@@ -40,7 +40,7 @@ pub mod emit;
 pub mod rng;
 
 use lodestone_physics::collision::collide;
-use lodestone_physics::{Aabb, CollisionView, Vec3d};
+use lodestone_physics::{Aabb, CollisionView, Vec3d, mth};
 use rng::JavaRandom;
 
 /// `Mth.square(100.0)` — above this speed vanilla skips collision entirely,
@@ -203,6 +203,27 @@ pub enum Sheet {
     /// Another case where a sheet's identity is its frame *sequence* and not
     /// its pixels, like [`Self::PortalGeneric`] and [`Self::Generic0`].
     DragonBreath,
+    /// `particle/bubble_pop_0` … `bubble_pop_4` — five frames, ascending.
+    ///
+    /// Its own textures, unrelated to [`Self::Bubble`]'s single `bubble`
+    /// despite the shared name prefix: this is the burst a bubble column's
+    /// bubble makes when it reaches the surface, not the bubble itself.
+    BubblePop,
+    /// `particle/cherry_0` … `cherry_11` — twelve frames, ascending.
+    CherryLeaves,
+    /// `particle/pale_oak_0` … `pale_oak_11` — twelve frames, ascending.
+    PaleOakLeaves,
+    /// `particle/leaf_0` … `leaf_11` — twelve frames, ascending.
+    ///
+    /// The *untinted* leaf sheet the `tinted_leaves` type colours from its
+    /// wire payload. A third physical sheet, not a recolour of
+    /// [`Self::CherryLeaves`] or [`Self::PaleOakLeaves`]: all three name their
+    /// own twelve textures in their own definition files.
+    TintedLeaves,
+    /// `particle/flash` — a firework's one-frame detonation overlay.
+    Flash,
+    /// `particle/firefly` — the firefly bush's mote.
+    Firefly,
 }
 
 impl Sheet {
@@ -336,6 +357,40 @@ impl Sheet {
             // Ascending, per `dragon_breath.json` -- and only the last three
             // of `generic_N`, not all eight.
             Self::DragonBreath => &["generic_5", "generic_6", "generic_7"],
+            Self::BubblePop => &[
+                "bubble_pop_0",
+                "bubble_pop_1",
+                "bubble_pop_2",
+                "bubble_pop_3",
+                "bubble_pop_4",
+            ],
+            // Ascending, per `cherry_leaves.json`.
+            Self::CherryLeaves => &[
+                "cherry_0", "cherry_1", "cherry_2", "cherry_3", "cherry_4", "cherry_5", "cherry_6",
+                "cherry_7", "cherry_8", "cherry_9", "cherry_10", "cherry_11",
+            ],
+            // Ascending, per `pale_oak_leaves.json`.
+            Self::PaleOakLeaves => &[
+                "pale_oak_0",
+                "pale_oak_1",
+                "pale_oak_2",
+                "pale_oak_3",
+                "pale_oak_4",
+                "pale_oak_5",
+                "pale_oak_6",
+                "pale_oak_7",
+                "pale_oak_8",
+                "pale_oak_9",
+                "pale_oak_10",
+                "pale_oak_11",
+            ],
+            // Ascending, per `tinted_leaves.json`.
+            Self::TintedLeaves => &[
+                "leaf_0", "leaf_1", "leaf_2", "leaf_3", "leaf_4", "leaf_5", "leaf_6", "leaf_7",
+                "leaf_8", "leaf_9", "leaf_10", "leaf_11",
+            ],
+            Self::Flash => &["flash"],
+            Self::Firefly => &["firefly"],
         }
     }
 
@@ -417,6 +472,12 @@ impl Sheet {
             Self::Lava,
             Self::SculkChargePop,
             Self::DragonBreath,
+            Self::BubblePop,
+            Self::CherryLeaves,
+            Self::PaleOakLeaves,
+            Self::TintedLeaves,
+            Self::Flash,
+            Self::Firefly,
         ]
     }
 
@@ -716,6 +777,111 @@ pub enum Behaviour {
         /// Where in the hang → fall → land chain this particle sits.
         phase: DripPhase,
     },
+    /// `BubbleColumnUpParticle` — the bubbles a soul-sand column drives upward.
+    ///
+    /// The base tick plus one clause: it dies the instant it leaves water. Not
+    /// [`Self::Bubble`], which is a different class with a *full* tick override
+    /// (a `lifetime--` countdown and a fixed `yd += 0.002` rise, no gravity
+    /// term at all). This one rises because its `gravity` is **negative**
+    /// (`-0.125`), which the shared `yd -= 0.04 * gravity` turns into lift, and
+    /// so it is genuinely the base tick and not a copy of the bubble's.
+    BubbleColumnUp,
+    /// `WaterCurrentDownParticle` — the bubbles a magma-block column drags
+    /// down, spiralling as they sink.
+    ///
+    /// A full `tick()` override with `hasPhysics = false`, so nothing here
+    /// touches block geometry. The spiral is an angle advanced `0.08` rad per
+    /// tick and fed through `Mth.cos`/`Mth.sin` — the **quantized lookup
+    /// table**, not the library trig, which is why this reaches for
+    /// [`lodestone_physics::mth`]. `radius` in vanilla is a local `0.6F` that
+    /// is used directly rather than through the named variable; both spellings
+    /// are the same number.
+    WaterCurrentDown {
+        /// The spiral phase, in radians, advanced every tick.
+        angle: f32,
+    },
+    /// `SnowflakeParticle` — the flakes a powder-snow cauldron and a
+    /// snow-golem's steps throw off.
+    ///
+    /// The base tick plus `setSpriteFromAge` and a **per-axis** damping applied
+    /// *after* the base tick's uniform `friction`: `xd *= 0.95`, `yd *= 0.9`,
+    /// `zd *= 0.95`. Its own `friction` is `1.0`, so the base tick's uniform
+    /// damping is the identity and these three are the whole of it — folding
+    /// the vertical `0.9` into `friction` would damp the horizontal axes by the
+    /// same amount and make a flake drop straight down.
+    Snowflake,
+    /// `DustPlumeParticle` — the puff a block landing in a decorated pot or a
+    /// brushed suspicious block throws up.
+    ///
+    /// [`Self::AshSmoke`] (it extends `BaseAshSmokeParticle`, fade-in and all)
+    /// **plus** a compounding decay applied *before* each tick:
+    /// `gravity *= 0.88`, `friction *= 0.92`. The plume therefore stalls in
+    /// mid-air rather than arcing, which is the whole look of it.
+    DustPlume,
+    /// `WakeParticle` — the ring a fishing bobber leaves on the water.
+    ///
+    /// A full `tick()` override whose sprite frame and quad size are both
+    /// functions of `60 - lifetime`, a value that **counts up** as the
+    /// countdown runs down. Nothing else in this crate keys off that quantity,
+    /// and the sign is what makes the ring grow rather than shrink.
+    Wake,
+    /// `BubblePopParticle` — the five-frame burst a bubble makes at the
+    /// surface.
+    ///
+    /// A full `tick()` override: no friction, no ground drag, and a `gravity`
+    /// subtracted **raw** rather than through the base tick's `0.04 *` scale.
+    BubblePop,
+    /// `FallingLeavesParticle` — `cherry_leaves`, `pale_oak_leaves` and
+    /// `tinted_leaves`, which differ only in their sheet, their provider
+    /// constants and (for the tinted one) a wire colour.
+    ///
+    /// A full `tick()` override with a lifetime that **counts down** from 300
+    /// while the drift is driven by the *elapsed* fraction, so the two run in
+    /// opposite directions and reading one for the other inverts the whole
+    /// motion. Two independent horizontal accelerations, either or both of
+    /// which a provider may enable, are summed before a single `* 0.0025`
+    /// scale.
+    FallingLeaves {
+        /// `windBig`, the provider's `sideAcceleration` — the magnitude both
+        /// horizontal terms are scaled by.
+        wind_big: f32,
+        /// Whether the swirl term is active (`pale_oak`/`tinted`, not
+        /// `cherry`).
+        swirl: bool,
+        /// Whether the flow-away term is active (`cherry`, not the others).
+        flow_away: bool,
+        /// `xaFlowScale`, fixed at construction from one RNG draw.
+        xa_flow_scale: f64,
+        /// `zaFlowScale`, from the same draw.
+        za_flow_scale: f64,
+        /// `swirlPeriod`, from the same draw.
+        swirl_period: f64,
+        /// `rotSpeed`, which accumulates `spinAcceleration / 20` every tick.
+        rot_speed: f32,
+        /// `spinAcceleration`, fixed at construction.
+        spin_acceleration: f32,
+    },
+    /// `FireflyParticle` — the firefly bush's drifting mote.
+    ///
+    /// The base tick plus three things: it dies the moment it is inside a
+    /// non-air block, its alpha follows a fade-in/fade-out ramp over its
+    /// lifetime, and roughly one tick in twenty (plus tick 1 unconditionally)
+    /// it picks an entirely new velocity.
+    ///
+    /// Vanilla also overrides `getLightCoords` here, and that override is
+    /// **not** a packed light value — it is the same fade fraction scaled by
+    /// 255. It is deliberately not ported: this crate's extract step reads
+    /// either a bare full-bright constant or the sampled world light, and a
+    /// fraction is neither.
+    Firefly,
+    /// `FireworkParticles.OverlayParticle` — the `flash` a firework's
+    /// detonation paints over itself.
+    ///
+    /// Four ticks of nothing but the base tick; the whole particle is its size
+    /// and alpha curves, both of which are functions of `age - 1` and so are
+    /// *negative* on the first tick — vanilla's own arrangement, and what makes
+    /// the flash bloom from nothing rather than pop in at full size.
+    FireworkFlash,
 }
 
 /// Which of vanilla's seven drip fluids a [`Behaviour::Drip`] belongs to.
@@ -831,7 +997,10 @@ impl Behaviour {
                 | Self::Cloud
                 | Self::SquidInk
                 | Self::DustColorTransition { .. }
-                | Self::DragonBreath { .. },
+                | Self::DragonBreath { .. }
+                | Self::Snowflake
+                | Self::DustPlume
+                | Self::BubblePop,
                 SpriteSource::Sheet { sheet, .. },
             ) => Some(sheet),
             _ => None,
@@ -853,7 +1022,13 @@ impl Behaviour {
             | Self::Spell
             | Self::CampfireSmoke
             | Self::Cloud
-            | Self::SquidInk => Layer::Translucent,
+            | Self::SquidInk
+            // `FireflyParticle.getLayer` and
+            // `FireworkParticles.OverlayParticle.getLayer` are both
+            // `TRANSLUCENT`; both fade by alpha, which an alpha-tested layer
+            // cannot express.
+            | Self::Firefly
+            | Self::FireworkFlash => Layer::Translucent,
             Self::Animated { layer } => layer,
             Self::Plain
             | Self::Terrain { .. }
@@ -883,6 +1058,18 @@ impl Behaviour {
             // `DragonBreathParticle.getLayer` is `OPAQUE` too -- it is a
             // dense cloud, not a translucent mote.
             | Self::DragonBreath { .. }
+            // Every one of these overrides `getLayer` to `OPAQUE` explicitly:
+            // `BubbleColumnUpParticle`, `WaterCurrentDownParticle`,
+            // `SnowflakeParticle`, `BubblePopParticle`, `WakeParticle` and
+            // `FallingLeavesParticle`. `DustPlumeParticle` inherits
+            // `BaseAshSmokeParticle`'s, which is opaque too.
+            | Self::BubbleColumnUp
+            | Self::WaterCurrentDown { .. }
+            | Self::Snowflake
+            | Self::DustPlume
+            | Self::Wake
+            | Self::BubblePop
+            | Self::FallingLeaves { .. }
             | Self::DustColorTransition { .. } => Layer::Opaque,
         }
     }
@@ -1165,8 +1352,28 @@ impl Particle {
             | Behaviour::Dust
             | Behaviour::Cloud
             | Behaviour::DragonBreath { .. }
+            // `DustPlumeParticle` inherits `BaseAshSmokeParticle.getQuadSize`,
+            // which is this same expression.
+            | Behaviour::DustPlume
             | Behaviour::DustColorTransition { .. } => {
                 self.quad_size * (normalised() * 32.0).clamp(0.0, 1.0)
+            }
+            // `FireworkParticles.OverlayParticle.getQuadSize`:
+            // `7.1F * Mth.sin((age + a - 1.0F) * 0.25F * PI)`, which ignores
+            // `quadSize` entirely. The `- 1.0` makes the first tick's argument
+            // negative and so the size negative; that is vanilla's own, and it
+            // is what keeps the flash invisible for the tick before it blooms.
+            // `Mth.sin` is the quantized table rather than `f32::sin` — the two
+            // disagree exactly at the zero crossing this expression starts on.
+            Behaviour::FireworkFlash => {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a flash lives four ticks; mirrors Java's int-to-float promotion"
+                )]
+                let a = self.age as f32 + partial_tick - 1.0;
+                // `Mth.sin` takes a `double` in 26.2 — there is no float
+                // overload — so the argument widens exactly as Java's does.
+                7.1 * mth::sin(f64::from(a * 0.25 * core::f32::consts::PI))
             }
             // `LavaParticle.getQuadSize`: `quadSize * (1 - s * s)`. Note the
             // missing `* 0.5F` that `Behaviour::Flame` has — a lava pop shrinks
@@ -1246,6 +1453,61 @@ impl Particle {
             }
             Behaviour::Bubble => {
                 self.tick_bubble(view);
+                Vec::new()
+            }
+            Behaviour::BubbleColumnUp => {
+                self.tick_base(view);
+                // `if (!this.removed && !fluidState.is(WATER)) remove()` — the
+                // `removed` guard matters: the base tick may already have
+                // killed it on age, and re-removing is harmless but the
+                // fluid lookup is not free.
+                if !self.removed {
+                    let (bx, by, bz) = block_containing(self.x, self.y, self.z);
+                    if !view.is_water(bx, by, bz) {
+                        self.remove();
+                    }
+                }
+                Vec::new()
+            }
+            Behaviour::WaterCurrentDown { angle } => {
+                self.tick_water_current_down(view, angle);
+                Vec::new()
+            }
+            Behaviour::Snowflake => {
+                self.tick_base(view);
+                self.set_sprite_from_age();
+                if !self.removed {
+                    // Applied *after* the base tick's uniform `friction`, which
+                    // for this class is `1.0` and so a no-op.
+                    self.xd *= f64::from(0.95_f32);
+                    self.yd *= f64::from(0.9_f32);
+                    self.zd *= f64::from(0.95_f32);
+                }
+                Vec::new()
+            }
+            Behaviour::DustPlume => {
+                // Both decays run *before* `super.tick()`, so the very first
+                // tick already falls at `0.88` of the constructed gravity.
+                self.gravity *= 0.88;
+                self.friction *= 0.92;
+                self.tick_base(view);
+                self.set_sprite_from_age();
+                Vec::new()
+            }
+            Behaviour::Wake => {
+                self.tick_wake(view);
+                Vec::new()
+            }
+            Behaviour::BubblePop => {
+                self.tick_bubble_pop(view);
+                Vec::new()
+            }
+            Behaviour::FallingLeaves { .. } => {
+                self.tick_falling_leaves(view);
+                Vec::new()
+            }
+            Behaviour::Firefly => {
+                self.tick_firefly(view);
                 Vec::new()
             }
             Behaviour::SweepAttack => {
@@ -1778,6 +2040,262 @@ impl Particle {
         }
     }
 
+    /// `WaterCurrentDownParticle.tick()` — a full override, and the only one
+    /// here that carries a phase forward in its own [`Behaviour`].
+    ///
+    /// The spiral is two accelerations added to the *existing* velocity and
+    /// then damped hard (`* 0.07`), so the horizontal speed is essentially
+    /// `0.6 * 0.07` in the current direction rather than an integration — the
+    /// damping is what keeps the radius bounded instead of letting the mote
+    /// spiral outward forever.
+    ///
+    /// The angle advances **after** the move, so the first tick uses `0.0` and
+    /// the sink starts straight down. Advancing it first tilts every column's
+    /// first tick and is invisible in a screenshot.
+    fn tick_water_current_down(&mut self, view: &dyn CollisionView, angle: f32) {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        let should_remove = self.age >= self.lifetime;
+        self.age += 1;
+        if should_remove {
+            self.remove();
+            return;
+        }
+        // `Mth.cos`/`Mth.sin`, the quantized table — the library trig diverges
+        // from it exactly at the axis crossings this angle sweeps through.
+        self.xd += 0.6 * f64::from(mth::cos(f64::from(angle)));
+        self.zd += 0.6 * f64::from(mth::sin(f64::from(angle)));
+        self.xd *= 0.07;
+        self.zd *= 0.07;
+        self.move_by(self.xd, self.yd, self.zd, view);
+        let (bx, by, bz) = block_containing(self.x, self.y, self.z);
+        if !view.is_water(bx, by, bz) || self.on_ground {
+            self.remove();
+        }
+        self.behaviour = Behaviour::WaterCurrentDown { angle: angle + 0.08 };
+    }
+
+    /// `WakeParticle.tick()` — a full override whose sprite and size are driven
+    /// by `60 - lifetime`, which **counts up** as the countdown runs down.
+    ///
+    /// `life` is read *before* the decrement, so a wake constructed with
+    /// `lifetime = L` starts at `60 - L` and not at zero. That offset is what
+    /// makes a short-lived wake start already-grown, and dropping it gives
+    /// every ring the same opening frame.
+    ///
+    /// `setSprite(sprites.get(life % 4, 4))` is `sprites[(life % 4) * 4 / 4]`,
+    /// i.e. the frame index is `life % 4` outright — a four-frame cycle over
+    /// the splash sheet rather than an age ramp, so this is deliberately not
+    /// [`Self::set_sprite_from_age`].
+    fn tick_wake(&mut self, view: &dyn CollisionView) {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        let life = 60 - self.lifetime;
+        self.lifetime -= 1;
+        if self.lifetime < 0 {
+            self.remove();
+            return;
+        }
+        self.yd -= f64::from(self.gravity);
+        self.move_by(self.xd, self.yd, self.zd, view);
+        let drag = f64::from(0.98_f32);
+        self.xd *= drag;
+        self.yd *= drag;
+        self.zd *= drag;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a wake's life is well under f32's exact-integer range"
+        )]
+        let size = life as f32 * 0.001;
+        self.set_size(size, size);
+        if let SpriteSource::Sheet { sheet, .. } = self.sprite {
+            #[expect(
+                clippy::cast_sign_loss,
+                clippy::cast_possible_truncation,
+                reason = "`life % 4` is in 0..4 whenever `life` is non-negative, and \
+                          `rem_euclid` keeps it there if a wake is ever built with a \
+                          lifetime above 60"
+            )]
+            let frame = (life.rem_euclid(4) as u16).min(sheet.frame_count().saturating_sub(1));
+            self.sprite = SpriteSource::Sheet { sheet, frame };
+        }
+    }
+
+    /// `BubblePopParticle.tick()` — a full override with no friction and no
+    /// ground drag.
+    ///
+    /// The gravity term is `yd -= gravity` **raw**, not the base tick's
+    /// `yd -= 0.04 * gravity`. Routing this through [`Self::tick_base`] would
+    /// make the burst fall at a twenty-fifth of its real rate and hang in the
+    /// air for its whole four ticks.
+    fn tick_bubble_pop(&mut self, view: &dyn CollisionView) {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        let should_remove = self.age >= self.lifetime;
+        self.age += 1;
+        if should_remove {
+            self.remove();
+            return;
+        }
+        self.yd -= f64::from(self.gravity);
+        self.move_by(self.xd, self.yd, self.zd, view);
+        self.set_sprite_from_age();
+    }
+
+    /// `FallingLeavesParticle.tick()` — a full override.
+    ///
+    /// Two counters run in **opposite** directions and both are load-bearing:
+    /// `lifetime` counts *down* from 300 while `aliveTicks = 300 - lifetime`
+    /// counts up, and the drift is a function of the latter. Reading `age` for
+    /// the elapsed fraction gives a leaf that drifts hardest when it spawns.
+    ///
+    /// The early-out is also not the usual one: a leaf dies if it lands **or**
+    /// if either horizontal velocity has collapsed to exactly zero after its
+    /// first tick, which is how a leaf that hits a wall stops existing rather
+    /// than sliding down it.
+    fn tick_falling_leaves(&mut self, view: &dyn CollisionView) {
+        /// `FallingLeavesParticle.ACCELERATION_SCALE`.
+        const ACCELERATION_SCALE: f64 = 0.0025;
+        /// `FallingLeavesParticle.INITIAL_LIFETIME`, which is also its
+        /// `CURVE_ENDPOINT_TIME`.
+        const INITIAL_LIFETIME: i32 = 300;
+
+        let Behaviour::FallingLeaves {
+            wind_big,
+            swirl,
+            flow_away,
+            xa_flow_scale,
+            za_flow_scale,
+            swirl_period,
+            mut rot_speed,
+            spin_acceleration,
+        } = self.behaviour
+        else {
+            return;
+        };
+
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        // `if (this.lifetime-- <= 0) remove()` — and then vanilla falls through
+        // to the body guarded only by `!removed`, so a leaf that dies this tick
+        // still skips the rest rather than moving one last time.
+        let expired = self.lifetime <= 0;
+        self.lifetime -= 1;
+        if expired {
+            self.remove();
+        }
+        if self.removed {
+            return;
+        }
+
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "lifetimes here are at most 300; mirrors Java's int-to-float promotion"
+        )]
+        let alive_ticks = (INITIAL_LIFETIME - self.lifetime) as f32;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the same promotion, on the same small integers"
+        )]
+        let relative_age = (alive_ticks / INITIAL_LIFETIME as f32).min(1.0);
+        let relative_age = f64::from(relative_age);
+
+        let mut xa = 0.0_f64;
+        let mut za = 0.0_f64;
+        if flow_away {
+            xa += xa_flow_scale * relative_age.powf(1.25);
+            za += za_flow_scale * relative_age.powf(1.25);
+        }
+        if swirl {
+            // `Math.cos`/`Math.sin` here, not `Mth` — vanilla genuinely calls
+            // the library trig on this one, on a `double`.
+            xa += relative_age * (relative_age * swirl_period).cos() * f64::from(wind_big);
+            za += relative_age * (relative_age * swirl_period).sin() * f64::from(wind_big);
+        }
+        self.xd += xa * ACCELERATION_SCALE;
+        self.zd += za * ACCELERATION_SCALE;
+        self.yd -= f64::from(self.gravity);
+        rot_speed += spin_acceleration / 20.0;
+        self.o_roll = self.roll;
+        self.roll += rot_speed / 20.0;
+        self.behaviour = Behaviour::FallingLeaves {
+            wind_big,
+            swirl,
+            flow_away,
+            xa_flow_scale,
+            za_flow_scale,
+            swirl_period,
+            rot_speed,
+            spin_acceleration,
+        };
+        self.move_by(self.xd, self.yd, self.zd, view);
+        if self.on_ground
+            || (self.lifetime < INITIAL_LIFETIME - 1 && (self.xd == 0.0 || self.zd == 0.0))
+        {
+            self.remove();
+        }
+        if !self.removed {
+            let friction = f64::from(self.friction);
+            self.xd *= friction;
+            self.yd *= friction;
+            self.zd *= friction;
+        }
+    }
+
+    /// `FireflyParticle.tick()` — the base tick plus a death test, an alpha
+    /// ramp and an occasional complete change of direction.
+    ///
+    /// The death test is vanilla's `!getBlockState(pos).isAir()`, approximated
+    /// here as [`CollisionView::blocks_motion`]: this view cannot answer "is
+    /// this air" and the distinction the clause exists to make is "has the
+    /// firefly drifted into the world". The approximation errs one way only —
+    /// a firefly survives inside grass or a flower where vanilla kills it,
+    /// which is the direction that keeps a mote alive rather than deleting one
+    /// that should be visible.
+    ///
+    /// The alpha ramp is deliberately fed the **pre**-increment age nowhere:
+    /// vanilla reads `this.age` after `super.tick()` has already advanced it,
+    /// so the first visible frame is age 1 — which is also the tick the
+    /// unconditional direction change fires on.
+    fn tick_firefly(&mut self, view: &dyn CollisionView) {
+        /// `PARTICLE_FADE_IN_ALPHA_TIME`.
+        const FADE_IN_ALPHA: f32 = 0.3;
+        /// `PARTICLE_FADE_OUT_ALPHA_TIME`.
+        const FADE_OUT_ALPHA: f32 = 0.5;
+
+        self.tick_base(view);
+        if self.removed {
+            return;
+        }
+        let (bx, by, bz) = block_containing(self.x, self.y, self.z);
+        if view.blocks_motion(bx, by, bz) {
+            self.remove();
+            return;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a firefly lives at most 300 ticks; mirrors Java's promotion"
+        )]
+        let progress = (self.age as f32 / self.lifetime as f32).clamp(0.0, 1.0);
+        self.alpha = firefly_fade_amount(progress, FADE_IN_ALPHA, FADE_OUT_ALPHA);
+        // `tick_rng`, not `rng_probe`: this needs four draws in one tick and
+        // `rng_probe` reseeds from the particle's own state every call, so it
+        // would hand back the same number four times and give every direction
+        // change a perfectly diagonal velocity.
+        let mut rng = self.tick_rng();
+        if rng.next_f32() > 0.95 || self.age == 1 {
+            // `setParticleSpeed` overwrites all three outright — this is not an
+            // impulse added to the existing drift.
+            self.xd = f64::from(0.1_f32.mul_add(rng.next_f32(), -0.05));
+            self.yd = f64::from(0.1_f32.mul_add(rng.next_f32(), -0.05));
+            self.zd = f64::from(0.1_f32.mul_add(rng.next_f32(), -0.05));
+        }
+    }
+
     /// `AttackSweepParticle.tick()` — a full override with no `move()` call at
     /// all: the sweep quad is stationary for its whole 4-tick life.
     ///
@@ -1961,6 +2479,26 @@ fn block_containing(x: f64, y: f64, z: f64) -> (i32, i32, i32) {
     )]
     {
         (x.floor() as i32, y.floor() as i32, z.floor() as i32)
+    }
+}
+
+/// `FireflyParticle.getFadeAmount` — a ramp that rises over the first
+/// `fade_out` of the lifetime, holds at `1.0`, then falls over the last
+/// `fade_in`.
+///
+/// **The parameter names are vanilla's and they read backwards**: the argument
+/// vanilla calls `fadeInTime` governs the ramp at the *end* of the life and
+/// `fadeOutTime` the one at the start. They are transcribed rather than swapped
+/// so the call sites still line up with `PARTICLE_FADE_IN_*` /
+/// `PARTICLE_FADE_OUT_*`; renaming them here and not at the call sites is how a
+/// firefly ends up blinking on instead of off.
+fn firefly_fade_amount(progress: f32, fade_in: f32, fade_out: f32) -> f32 {
+    if progress >= 1.0 - fade_in {
+        (1.0 - progress) / fade_in
+    } else if progress <= fade_out {
+        progress / fade_out
+    } else {
+        1.0
     }
 }
 

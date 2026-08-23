@@ -323,10 +323,13 @@ client-predicted per-block-state emitter.
   every other type, and the "target" is simply the packet's own position, with the three
   velocity words carrying the *offset* the mote flies in from. No block-entity wiring was
   involved.
-* **Still not wired:** `dust`/`dust_color_transition` are built, but the other option-carrying
-  types (`block`, `block_marker`, `falling_dust`, `item`, …) still want their own arm in
-  `decode_particle_options`; the decoder itself is no longer the blocker, only the per-type
-  payload shape.
+* **Still not wired:** `dust`/`dust_color_transition` are built, and `tinted_leaves`/`flash`
+  now share `entity_effect`'s `ColorParticleOption` arm (see "The everyday environment pass"
+  below). The remaining option-carrying types are the `BlockParticleOption` family (`block`,
+  `block_marker`, `falling_dust`, `block_crumble`, `dust_pillar`) and the `ItemParticleOption`
+  one (`item`) — those two shapes each want a new `ParticleOptions` variant as well as an arm
+  in `decode_particle_options`, which is why they are the ones left. The decoder itself is
+  not the blocker.
 
 ### The `CritParticle`, `SpellParticle` and `FlyTowardsPositionParticle` families
 
@@ -600,6 +603,95 @@ cannot be inferred from what a particle looks like.
   (`"sweep"`, `"spell"`, `"angry"`, `"glint"`) names a texture that actually exists in the
   jar, not a plausible-looking guess — measured `unresolved: 0` across all ten emitted
   instances (the pre-existing three plus the seven new ones) the last time this was run.
+
+### The everyday environment pass
+
+Fifteen types a player sees constantly, taking `cargo xtask world-coverage`'s particle bucket
+from **86 drawn / 39 absent** to **101 drawn / 24 absent**. All fifteen were genuinely absent
+— no struct, no codec, no sheet, no dispatch arm — which was checked type by type before any
+code was written, because this repo has repeatedly found work already done and merely
+undispatched.
+
+| type | vanilla class | reuses | new |
+|---|---|---|---|
+| `rain` | `WaterDropParticle` | `Sheet::Splash`, `Behaviour::WaterDrop` | — |
+| `fishing` | `WakeParticle` | `Sheet::Splash` | `Behaviour::Wake` |
+| `bubble_column_up` | `BubbleColumnUpParticle` | `Sheet::Bubble` | `Behaviour::BubbleColumnUp` |
+| `current_down` | `WaterCurrentDownParticle` | `Sheet::Bubble` | `Behaviour::WaterCurrentDown` |
+| `bubble_pop` | `BubblePopParticle` | — | `Sheet::BubblePop`, `Behaviour::BubblePop` |
+| `snowflake` | `SnowflakeParticle` | `Sheet::Generic` | `Behaviour::Snowflake` |
+| `dust_plume` | `DustPlumeParticle` | `Sheet::Generic`, `emit::base_ash_smoke` | `Behaviour::DustPlume` |
+| `cherry_leaves` | `FallingLeavesParticle.CherryProvider` | — | `Sheet::CherryLeaves`, `Behaviour::FallingLeaves` |
+| `pale_oak_leaves` | `…PaleOakProvider` | `Behaviour::FallingLeaves` | `Sheet::PaleOakLeaves` |
+| `tinted_leaves` | `…TintedLeavesProvider` | `Behaviour::FallingLeaves`, `ParticleOptions::Color` | `Sheet::TintedLeaves` |
+| `firefly` | `FireflyParticle` | — | `Sheet::Firefly`, `Behaviour::Firefly` |
+| `flash` | `FireworkParticles.FlashProvider` | `ParticleOptions::Color` | `Sheet::Flash`, `Behaviour::FireworkFlash` |
+| `item_slime` | `BreakingItemParticle.SlimeProvider` | `SpriteSource::Item`, `Behaviour::Terrain` | `emit::item_burst_particle` |
+| `item_cobweb` | `…CobwebProvider` | the same | — |
+| `item_snowball` | `…SnowballProvider` | the same | — |
+
+Seven things this pass paid for, in rough order of how much time each would cost the next
+person:
+
+* **`rain` is not the falling rain.** `WeatherEffectRenderer`'s textured columns
+  (`crates/lodestone-render/src/weather.rs`, and `docs/weather.md`) are the streaks; the
+  `minecraft:rain` registry type is `WaterDropParticle`, the splash on impact. They are two
+  independent subsystems and wiring one says nothing about the other. The same split holds
+  for `snowflake`, which is a real particle and not the snow columns.
+* **`rain` and `splash` differ in exactly one number, and the natural way to write `rain`
+  gets it wrong.** `SplashParticle extends WaterDropParticle` and overrides `gravity` from
+  `0.06` to `0.04` — so copying the already-written `emit::splash` silently keeps the
+  splash's value and leaves raindrops hanging in the air. Nothing downstream can see it:
+  the count, the sheet, the layer and the behaviour are identical.
+  `the_water_types_carry_their_own_gravity_and_not_a_sibling_s` predicts both hypotheses and
+  requires the measurement to land on one; observed failing with `0.04` planted.
+* **The three `item_*` types take `BreakingItemParticle`'s *four*-argument constructor**, not
+  the seven-argument one `emit::item_particle` already implements. The seven-argument sibling
+  damps the constructor's jitter to a tenth before adding the caller's velocity, and these
+  three have no caller velocity at all — routing them through it leaves the crumbs
+  motionless. `emit::item_burst_particle` is the four-argument form.
+* **Those same three are the sharpest transposition risk in `spawn_one`**: three adjacent
+  arms differing in one item name each, all reaching one helper, and a swap changes nothing
+  observable except the texture.
+  `the_three_item_burst_types_carry_their_own_registry_item` asserts each id against a
+  registry lookup made in the test *and* that the three are pairwise distinct.
+* **`FallingLeavesParticle` is one class and three providers that differ in five constants at
+  once**, and the tinted variant takes the **pale oak** set rather than a third one of its
+  own. `emit::LeafParams` carries them as a named set for exactly that reason; a loose
+  argument list is five chances to transpose a pair.
+* **`tinted_leaves` and `flash` share `entity_effect`'s decode arm.** All three carry a
+  `ColorParticleOption` — one packed ARGB word — and all three use the alpha byte for real
+  (`FlashProvider` calls `setAlpha` with it). The arm must stay four-component; narrowing it
+  to RGB24 for the leaf's sake would make every firework flash opaque. `decode_particle_options`
+  previously carried a comment saying these two were deliberately absent "until the emitter
+  lands"; that comment is now the decode arm, which is the point — a comment asserting an
+  absence is evidence about the moment it was written.
+* **`FireflyParticle` overrides `getLightCoords` and the override is not a light value.** It
+  returns the fade fraction scaled by 255. `ParticleEngine::extract`'s own doc already named
+  this as the trap; it is not ported, and the firefly samples world light like everything
+  else. Its death test (`!getBlockState(pos).isAir()`) is approximated as
+  `CollisionView::blocks_motion`, because this view cannot answer "is this air" — the
+  approximation errs only toward keeping a mote alive inside grass, never toward deleting a
+  visible one.
+
+Two of these needed the quantized trig rather than the library's: `WaterCurrentDownParticle`'s
+spiral and `OverlayParticle`'s size curve both call `Mth.cos`/`Mth.sin`, and both sweep through
+the axis crossings where the table and `f32::cos` disagree. `FallingLeavesParticle`'s swirl
+calls `Math.cos`/`Math.sin` — the library trig — and is transcribed that way; the two are not
+interchangeable and vanilla itself uses both, in the same file.
+
+Still absent from this bucket after the pass, and why:
+
+* **`elder_guardian`** — the only particle in the registry that is not a quad. It is a full
+  `GuardianParticleModel` on its own `ParticleRenderType.ELDER_GUARDIANS` pass, which means a
+  rig, a texture and a pipeline rather than an emitter. Genuinely a separate piece of work.
+* **`falling_dust`, `block_crumble`, `dust_pillar`, `block_marker`** — all
+  `BlockParticleOption`, i.e. a block state on the wire, which needs a new
+  `ParticleOptions` variant as well as a decode arm. The geometry side is already built
+  (`SpriteSource::BlockState` and `Behaviour::Terrain` are what `destroy_block` uses), so
+  these are a wire-payload job rather than a rendering one.
+* **`vibration`, `trail`, `shriek`, `vault_connection`, `trial_spawner_detection`** — each
+  carries a position or a target on the wire, the same shape.
 
 ## Configuration
 

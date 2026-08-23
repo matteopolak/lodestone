@@ -1711,6 +1711,530 @@ pub fn huge_explosion(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size:
     engine.add(p);
 }
 
+/// `WaterDropParticle` — the splash a raindrop makes where it lands, and the
+/// base class [`splash`]'s `SplashParticle` extends.
+///
+/// **This is not the falling rain.** The streaks are `WeatherEffectRenderer`'s
+/// textured columns, which live in the renderer and never become particles;
+/// this is the pop on impact, which the server sends as `minecraft:rain`.
+///
+/// The one number that separates it from [`splash`] is `gravity`: `0.06` here
+/// against the splash's `0.04`, and the splash additionally replaces the whole
+/// velocity when the packet's is purely horizontal. Copying [`splash`] and
+/// leaving the gravity alone gives raindrops that hang in the air.
+pub fn rain(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::with_velocity(
+        x,
+        y,
+        z,
+        0.0,
+        0.0,
+        0.0,
+        SpriteSource::Sheet {
+            sheet: Sheet::Splash,
+            frame: 0,
+        },
+        rng,
+    );
+    p.xd *= f64::from(0.3_f32);
+    p.zd *= f64::from(0.3_f32);
+    p.yd = f64::from(rng_next(engine).mul_add(0.2, 0.1));
+    p.set_size(0.01, 0.01);
+    p.gravity = 0.06;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates; the value is small"
+    )]
+    let lifetime = (f64::from(8.0_f32) / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
+    p.lifetime = lifetime;
+    p.behaviour = Behaviour::WaterDrop;
+    // `WaterDropParticle.Provider` draws its frame from the sheet
+    // (`sprite.get(random)`), exactly as the splash provider does.
+    let frame = engine.rng().next_i32_bound(i32::from(Sheet::Splash.frame_count()));
+    #[expect(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "bounded by the sheet's frame count"
+    )]
+    {
+        p.sprite = SpriteSource::Sheet {
+            sheet: Sheet::Splash,
+            frame: frame as u16,
+        };
+    }
+    engine.add(p);
+}
+
+/// `BubbleColumnUpParticle` — a soul-sand column's rising bubble.
+///
+/// The negative `gravity` is what lifts it: the shared tick's
+/// `yd -= 0.04 * gravity` becomes an upward term. Flipping the sign and adding
+/// a positive `yd` instead would look right for one tick and then sink.
+pub fn bubble_column_up(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::Bubble,
+            frame: 0,
+        },
+        rng,
+    );
+    p.gravity = -0.125;
+    p.friction = 0.85;
+    p.set_size(0.02, 0.02);
+    p.quad_size *= rng_next(engine).mul_add(0.6, 0.2);
+    // `xa * 0.2F + (nextFloat() * 2 - 1) * 0.02F`, per axis and in this order.
+    p.xd = xa.mul_add(f64::from(0.2_f32), f64::from(rng_next(engine).mul_add(2.0, -1.0) * 0.02));
+    p.yd = ya.mul_add(f64::from(0.2_f32), f64::from(rng_next(engine).mul_add(2.0, -1.0) * 0.02));
+    p.zd = za.mul_add(f64::from(0.2_f32), f64::from(rng_next(engine).mul_add(2.0, -1.0) * 0.02));
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates; the value is small"
+    )]
+    let lifetime = (f64::from(40.0_f32) / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
+    p.lifetime = lifetime;
+    p.behaviour = Behaviour::BubbleColumnUp;
+    engine.add(p);
+}
+
+/// `WaterCurrentDownParticle` — a magma-block column's sinking, spiralling
+/// bubble.
+///
+/// `has_physics = false`, so it passes through geometry and only the water test
+/// and the `on_ground` flag can kill it — and `on_ground` can never be set
+/// without physics, which is vanilla's own arrangement.
+pub fn current_down(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::Bubble,
+            frame: 0,
+        },
+        rng,
+    );
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast on a small float"
+    )]
+    let lifetime = (rng_next(engine) * 60.0) as i32;
+    p.lifetime = lifetime + 30;
+    p.has_physics = false;
+    p.xd = 0.0;
+    p.yd = -0.05;
+    p.zd = 0.0;
+    p.set_size(0.02, 0.02);
+    p.quad_size *= rng_next(engine).mul_add(0.6, 0.2);
+    p.gravity = 0.002;
+    p.behaviour = Behaviour::WaterCurrentDown { angle: 0.0 };
+    engine.add(p);
+}
+
+/// `SnowflakeParticle` — a powder-snow cauldron's and a snow golem's flakes.
+///
+/// `friction = 1.0` is deliberate and load-bearing: the per-axis damping in
+/// [`Behaviour::Snowflake`]'s tick is the *whole* of this particle's drag, so
+/// leaving the default `0.98` here would damp it twice.
+pub fn snowflake(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::Generic,
+            frame: 0,
+        },
+        rng,
+    );
+    p.gravity = 0.225;
+    p.friction = 1.0;
+    p.xd = xa + f64::from(rng_next(engine).mul_add(2.0, -1.0) * 0.05);
+    p.yd = ya + f64::from(rng_next(engine).mul_add(2.0, -1.0) * 0.05);
+    p.zd = za + f64::from(rng_next(engine).mul_add(2.0, -1.0) * 0.05);
+    // `0.1F * (nextFloat() * nextFloat() * 1.0F + 1.0F)` — two draws, and the
+    // product is what biases the flakes small.
+    let a = rng_next(engine);
+    let b = rng_next(engine);
+    p.quad_size = 0.1 * a.mul_add(b, 1.0);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates; the value is small"
+    )]
+    let lifetime = (f64::from(16.0_f32) / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
+    p.lifetime = lifetime + 2;
+    // `SnowflakeParticle.Provider` tints every flake the same pale blue.
+    p.colour = [0.923, 0.964, 0.999];
+    p.behaviour = Behaviour::Snowflake;
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::Generic,
+        frame: Sheet::Generic.frame_for_age(0, p.lifetime),
+    };
+    engine.add(p);
+}
+
+/// `DustPlumeParticle` — the puff a block dropped into a decorated pot throws
+/// up, and the one brushing a suspicious block makes.
+///
+/// A `BaseAshSmokeParticle` whose colour the subclass **overwrites**: the base
+/// constructor's grey draw still happens (so the RNG stream matches) and its
+/// result is discarded in favour of `0xBAB1C2` shifted down by a second draw.
+/// `ya` is biased `+0.15` before the base sees it, which is the whole of the
+/// plume's initial lift.
+pub fn dust_plume(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    /// `DustPlumeParticle.COLOR_RGB24`.
+    const COLOUR_RGB24: u32 = 12_235_202;
+
+    let mut p = base_ash_smoke(
+        engine,
+        (x, y, z),
+        (xa, ya + f64::from(0.15_f32), za),
+        Sheet::Generic,
+        1.0,
+        AshSmokeParams {
+            dir: [0.7, 0.6, 0.7],
+            colour_random: 0.5,
+            max_lifetime: 7,
+            gravity: 0.5,
+            has_physics: false,
+        },
+    );
+    let shift = rng_next(engine) * 0.2;
+    p.colour = [
+        f32::from(((COLOUR_RGB24 >> 16) & 0xff) as u8) / 255.0 - shift,
+        f32::from(((COLOUR_RGB24 >> 8) & 0xff) as u8) / 255.0 - shift,
+        f32::from((COLOUR_RGB24 & 0xff) as u8) / 255.0 - shift,
+    ];
+    p.behaviour = Behaviour::DustPlume;
+    engine.add(p);
+}
+
+/// `WakeParticle` — the expanding ring a fishing bobber leaves on the water,
+/// which the server sends as `minecraft:fishing`.
+///
+/// Every one of the base constructor's velocity terms is drawn and then
+/// **overwritten** by the packet's, and its `set_size` is likewise superseded
+/// by the tick's per-tick resize. Both are kept because the draws are part of
+/// the stream and dropping them shifts everything after.
+pub fn fishing(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::with_velocity(
+        x,
+        y,
+        z,
+        0.0,
+        0.0,
+        0.0,
+        SpriteSource::Sheet {
+            sheet: Sheet::Splash,
+            frame: 0,
+        },
+        rng,
+    );
+    p.xd *= f64::from(0.3_f32);
+    p.zd *= f64::from(0.3_f32);
+    p.yd = f64::from(rng_next(engine).mul_add(0.2, 0.1));
+    p.set_size(0.01, 0.01);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates; the value is small"
+    )]
+    let lifetime = (f64::from(8.0_f32) / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
+    p.lifetime = lifetime;
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::Splash,
+        frame: Sheet::Splash.frame_for_age(0, p.lifetime),
+    };
+    p.gravity = 0.0;
+    p.xd = xa;
+    p.yd = ya;
+    p.zd = za;
+    p.behaviour = Behaviour::Wake;
+    engine.add(p);
+}
+
+/// `BubblePopParticle` — the five-frame burst a column's bubble makes as it
+/// breaks the surface.
+pub fn bubble_pop(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::BubblePop,
+            frame: 0,
+        },
+        rng,
+    );
+    p.lifetime = 4;
+    p.gravity = 0.008;
+    p.xd = xa;
+    p.yd = ya;
+    p.zd = za;
+    p.behaviour = Behaviour::BubblePop;
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::BubblePop,
+        frame: Sheet::BubblePop.frame_for_age(0, p.lifetime),
+    };
+    engine.add(p);
+}
+
+/// The provider constants that separate `cherry_leaves`, `pale_oak_leaves` and
+/// `tinted_leaves`, which are otherwise one class.
+///
+/// Grouped rather than passed loose because the three sets differ in *five*
+/// numbers at once and a transposed pair is invisible: cherry alone flows away
+/// and does not swirl, and it is the only one with a zero start velocity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LeafParams {
+    /// `fallAcceleration`.
+    pub fall_acceleration: f32,
+    /// `sideAcceleration`, i.e. `windBig`.
+    pub side_acceleration: f32,
+    /// Whether the swirl term is enabled.
+    pub swirl: bool,
+    /// Whether the flow-away term is enabled.
+    pub flow_away: bool,
+    /// Multiplier on the quad size.
+    pub scale: f32,
+    /// Initial downward speed, applied as `yd = -start_velocity`.
+    pub start_velocity: f32,
+    /// Which sheet the leaf is drawn from.
+    pub sheet: Sheet,
+}
+
+impl LeafParams {
+    /// `FallingLeavesParticle.CherryProvider` —
+    /// `(0.25, 2.0, swirl=false, flowAway=true, 1.0, 0.0)`.
+    #[must_use]
+    pub const fn cherry() -> Self {
+        Self {
+            fall_acceleration: 0.25,
+            side_acceleration: 2.0,
+            swirl: false,
+            flow_away: true,
+            scale: 1.0,
+            start_velocity: 0.0,
+            sheet: Sheet::CherryLeaves,
+        }
+    }
+
+    /// `FallingLeavesParticle.PaleOakProvider` —
+    /// `(0.07, 10.0, swirl=true, flowAway=false, 2.0, 0.021)`.
+    #[must_use]
+    pub const fn pale_oak() -> Self {
+        Self {
+            fall_acceleration: 0.07,
+            side_acceleration: 10.0,
+            swirl: true,
+            flow_away: false,
+            scale: 2.0,
+            start_velocity: 0.021,
+            sheet: Sheet::PaleOakLeaves,
+        }
+    }
+
+    /// `FallingLeavesParticle.TintedLeavesProvider` — the pale-oak constants
+    /// exactly, on the untinted `leaf_N` sheet and with a wire colour.
+    #[must_use]
+    pub const fn tinted() -> Self {
+        Self {
+            sheet: Sheet::TintedLeaves,
+            ..Self::pale_oak()
+        }
+    }
+}
+
+/// `FallingLeavesParticle` — the drifting leaves under a cherry or pale-oak
+/// canopy, and the tinted variant a resource pack can colour.
+///
+/// `colour` is `None` for the two `SimpleParticleType` variants and `Some` for
+/// `tinted_leaves`, whose provider calls `setColor` from its
+/// `ColorParticleOption` payload.
+///
+/// The draw order is Java's: the provider picks the sprite first, then the base
+/// constructor runs, then the two instance-field initialisers
+/// (`rotSpeed`, `spinAcceleration`) — which in Java execute **after**
+/// `super(...)` — then the constructor body's size and flow draws.
+pub fn falling_leaves(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    params: LeafParams,
+    colour: Option<[f32; 3]>,
+) {
+    /// `FallingLeavesParticle.ACCELERATION_SCALE`.
+    const ACCELERATION_SCALE: f32 = 0.0025;
+
+    // `this.sprites.get(random)` in the provider, before the constructor.
+    let frame = engine.rng().next_i32_bound(i32::from(params.sheet.frame_count()));
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: params.sheet,
+            frame: 0,
+        },
+        rng,
+    );
+    #[expect(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "bounded by the sheet's frame count"
+    )]
+    {
+        p.sprite = SpriteSource::Sheet {
+            sheet: params.sheet,
+            frame: frame as u16,
+        };
+    }
+    // The two field initialisers, in declaration order.
+    let rot_speed = if engine.rng().next_bool() { -30.0_f32 } else { 30.0 }.to_radians();
+    let spin_acceleration = if engine.rng().next_bool() { -5.0_f32 } else { 5.0 }.to_radians();
+
+    p.lifetime = 300;
+    p.gravity = params.fall_acceleration * 1.2 * ACCELERATION_SCALE;
+    let size = params.scale * if engine.rng().next_bool() { 0.05 } else { 0.075 };
+    p.quad_size = size;
+    p.set_size(size, size);
+    p.friction = 1.0;
+    p.yd = f64::from(-params.start_velocity);
+    let particle_random = rng_next(engine);
+    // `Math.cos`/`Math.sin` on a `double` — the library trig, not `Mth`'s
+    // table, because vanilla itself calls `Math` here.
+    let radians = f64::from(particle_random * 60.0).to_radians();
+    let xa_flow_scale = radians.cos() * f64::from(params.side_acceleration);
+    let za_flow_scale = radians.sin() * f64::from(params.side_acceleration);
+    let swirl_period = f64::from(particle_random.mul_add(3000.0, 1000.0)).to_radians();
+    if let Some(colour) = colour {
+        p.colour = colour;
+    }
+    p.behaviour = Behaviour::FallingLeaves {
+        wind_big: params.side_acceleration,
+        swirl: params.swirl,
+        flow_away: params.flow_away,
+        xa_flow_scale,
+        za_flow_scale,
+        swirl_period,
+        rot_speed,
+        spin_acceleration,
+    };
+    engine.add(p);
+}
+
+/// `FireflyParticle` — the firefly bush's drifting mote.
+///
+/// The provider builds the velocity itself rather than passing the packet's
+/// through: `x` and `z` are `0.5 - nextDouble()` regardless of what the server
+/// sent, and only `ya` survives — with a coin flip on its **sign**, which is
+/// what makes half the swarm rise and half sink from one emission.
+pub fn firefly(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, ya: f64) {
+    let xa = 0.5 - engine.rng().next_f64();
+    let ya = if engine.rng().next_bool() { ya } else { -ya };
+    let za = 0.5 - engine.rng().next_f64();
+    let frame = engine.rng().next_i32_bound(i32::from(Sheet::Firefly.frame_count()));
+    let rng = engine.rng();
+    #[expect(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "bounded by the sheet's frame count"
+    )]
+    let sprite = SpriteSource::Sheet {
+        sheet: Sheet::Firefly,
+        frame: frame as u16,
+    };
+    let mut p = Particle::with_velocity(x, y, z, xa, ya, za, sprite, rng);
+    p.speed_up_when_y_blocked = true;
+    p.friction = 0.96;
+    p.quad_size *= 0.75;
+    p.yd *= f64::from(0.8_f32);
+    p.xd *= f64::from(0.8_f32);
+    p.zd *= f64::from(0.8_f32);
+    // `random.nextIntBetweenInclusive(200, 300)`.
+    p.lifetime = 200 + engine.rng().next_i32_bound(101);
+    p.scale(1.5);
+    // The provider's own `setAlpha(0.0F)`: a firefly is invisible on the tick
+    // it spawns and the ramp brings it up from there.
+    p.alpha = 0.0;
+    p.behaviour = Behaviour::Firefly;
+    engine.add(p);
+}
+
+/// `BreakingItemParticle`'s **four**-argument constructor — the one
+/// `item_slime`, `item_cobweb` and `item_snowball` reach.
+///
+/// Those three are `SimpleParticleType`s with no wire payload at all: each
+/// provider hardcodes its own item (`Items.SLIME_BALL`, `Items.COBWEB`,
+/// `Items.SNOWBALL`) and calls this constructor, so the shell supplies the
+/// registry id and nothing comes off the wire.
+///
+/// **Not [`item_particle`]**, which is the seven-argument sibling: that one
+/// additionally damps the constructor's jitter to a tenth and adds the caller's
+/// velocity on top. Routing these three through it leaves their crumbs
+/// essentially motionless, since the velocity they would add is zero and the
+/// jitter is all they have.
+#[must_use]
+pub fn item_burst_particle(
+    x: f64,
+    y: f64,
+    z: f64,
+    item: u32,
+    rng: &mut JavaRandom,
+) -> Particle {
+    let mut p = Particle::with_velocity(x, y, z, 0.0, 0.0, 0.0, SpriteSource::Item(item), rng);
+    p.gravity = 1.0;
+    p.quad_size /= 2.0;
+    // Two more draws, *after* the quad size — order matters for replay, exactly
+    // as in `terrain_particle` and `item_particle`.
+    let uo = rng.next_f32() * 3.0;
+    let vo = rng.next_f32() * 3.0;
+    p.behaviour = Behaviour::Terrain { uo, vo };
+    p
+}
+
+/// `FireworkParticles.OverlayParticle` — the white bloom a firework star paints
+/// over its own burst, which the server sends as `minecraft:flash`.
+///
+/// Its `colour` and `alpha` both come off the wire as a `ColorParticleOption`,
+/// and its size and alpha are then functions of age alone — see
+/// [`Behaviour::FireworkFlash`], whose curves start *negative* by design.
+pub fn flash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, colour: [f32; 4]) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::Flash,
+            frame: 0,
+        },
+        rng,
+    );
+    p.lifetime = 4;
+    p.colour = [colour[0], colour[1], colour[2]];
+    p.alpha = colour[3];
+    p.behaviour = Behaviour::FireworkFlash;
+    engine.add(p);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

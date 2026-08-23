@@ -1187,10 +1187,12 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 ///   `ByteBufCodecs.FLOAT` power, and no colour, since
 ///   `DragonBreathParticle` draws its purple out of the RNG.
 ///
-/// Two further registry types (`minecraft:tinted_leaves`, `minecraft:flash`)
-/// also carry a `ColorParticleOption`, and are deliberately absent below: this
-/// client has no emitter for either, so decoding them would build a payload
-/// nothing can consume. Add the arm when the emitter lands, not before.
+/// `minecraft:tinted_leaves` and `minecraft:flash` carry the **same**
+/// `ColorParticleOption` and share `minecraft:entity_effect`'s arm below. All
+/// three read the alpha byte for real — `FallingLeavesParticle.
+/// TintedLeavesProvider` drops it and `FireworkParticles.FlashProvider` calls
+/// `setAlpha` with it — so one four-component decode serves them and the arm
+/// must not be narrowed to RGB24 for the leaf's sake.
 fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, AdapterError> {
     fn rgb24(reader: &mut Reader<'_>) -> Result<[f32; 3], AdapterError> {
         let packed = reader.i32().map_err(dec_err)?;
@@ -1235,7 +1237,7 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
             let power = reader.f32().map_err(dec_err)?;
             Ok(ParticleOptions::Spell { color, power })
         }
-        "minecraft:entity_effect" => {
+        "minecraft:entity_effect" | "minecraft:tinted_leaves" | "minecraft:flash" => {
             let mut reader = Reader::new(bytes);
             let color = argb(&mut reader)?;
             Ok(ParticleOptions::Color { color })
