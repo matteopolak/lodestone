@@ -71,7 +71,21 @@ setblock -4 64 13 minecraft:dragon_head[rotation=0]
 setblock -3 64 13 minecraft:ender_chest[facing=north]
 setblock -1 64 13 minecraft:enchanting_table
 setblock 1 64 13 minecraft:lectern[facing=south,has_book=true]{Book:{id:"minecraft:written_book",count:1,components:{"minecraft:written_book_content":{title:"Lodestone",author:"lodestone",pages:[{raw:"hello"}]}}},Page:0}
-setblock 3 64 13 minecraft:campfire[lit=true,facing=south]{Items:[{Slot:0b,id:"minecraft:porkchop",count:1},{Slot:1b,id:"minecraft:potato",count:1}]}
+# `CookingTotalTimes` is not optional decoration, and leaving it out is what a
+# `setblock` with a bare `Items` list does: `CampfireBlockEntity.cookTick`
+# compares each slot's elapsed time against its total, an absent total reads as
+# **0**, and both items therefore finish on the first tick and are ejected as
+# real item entities. Measured, over RCON, against exactly the line this
+# replaces: the block came back `Items: []` with `CookingTotalTimes: [I; 0, 0,
+# 0, 0]`, and a `Cooked Porkchop` and a `Baked Potato` were lying on the stage.
+#
+# So the scene did not photograph what its own header claims — the campfire was
+# empty, and the two things beside it were litter whose eject velocity and yaw
+# are rolled fresh every run. That was the last source of run-to-run pixel noise
+# in this set: two loose items drifting somewhere different each capture. 600
+# ticks is vanilla's own `CampfireCookingRecipe` time, so the food sits on the
+# grill for thirty seconds, which is far longer than a capture.
+setblock 3 64 13 minecraft:campfire[lit=true,facing=south]{Items:[{Slot:0b,id:"minecraft:porkchop",count:1},{Slot:1b,id:"minecraft:potato",count:1}],CookingTimes:[I;0,0,0,0],CookingTotalTimes:[I;600,600,0,0]}
 setblock 4 64 13 minecraft:piglin_head[rotation=0]
 setblock 5 64 13 minecraft:bell[facing=south,attachment=floor]
 setblock 6 64 13 minecraft:trapped_chest[facing=north]
