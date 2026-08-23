@@ -146,6 +146,29 @@ impl<'w> MobSim<'w> {
         Some(id)
     }
 
+    /// Vanilla `AbstractBoat.getDismountLocationForPassenger` for one tracked
+    /// boat, evaluated against the live chunk source the connection is using.
+    ///
+    /// The preferred point is one collision-width outside the hull in the
+    /// passenger's facing direction. Vanilla tries the floor in that cell, then
+    /// the floor one cell below, across the player's dismount poses; if neither
+    /// fits (or the lower cell is water), `Entity`'s fallback is the centre of
+    /// the boat's top face. Returns `None` only when `id` is not a tracked boat.
+    #[must_use]
+    pub fn vehicle_dismount_position(
+        &self,
+        id: i32,
+        passenger_yaw: f32,
+        block_state: &dyn Fn(i32, i32, i32) -> String,
+    ) -> Option<Vec3> {
+        let vehicle = self.vehicles.get(&id)?;
+        Some(boat_dismount_position(
+            vehicle.motion.position,
+            passenger_yaw,
+            block_state,
+        ))
+    }
+
     /// Accepts a client-authoritative `MoveVehicle` for the vehicle
     /// `player_entity_id` is riding.
     ///
@@ -376,6 +399,96 @@ impl CollisionView for VehicleCollision<'_> {
     }
 }
 
+/// The block-floor rule shared by both target cells in vanilla's boat dismount
+/// search (`BlockGetter.getBlockFloorHeight`).
+fn block_floor_height(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> f64 {
+    let top = view.collision_top(x, y, z);
+    if top > 0.0 {
+        return top;
+    }
+    let below_top = view.collision_top(x, y - 1, z);
+    if below_top >= 1.0 {
+        below_top - 1.0
+    } else {
+        f64::NEG_INFINITY
+    }
+}
+
+fn boat_dismount_position(
+    boat_position: Vec3d,
+    passenger_yaw: f32,
+    block_state: &dyn Fn(i32, i32, i32) -> String,
+) -> Vec3 {
+    const BOAT_HEIGHT: f64 = 0.5625;
+
+    // `Entity.getCollisionHorizontalEscapeVector`: every trigonometric and max
+    // operation is `float` in vanilla before widening into the returned Vec3.
+    let collider_width = f64::from(1.375f32 * std::f32::consts::SQRT_2);
+    let colliding_width = f64::from(0.6f32);
+    let distance = (collider_width
+        + colliding_width
+        + f64::from(1.0E-5f32))
+        / 2.0;
+    let radians = passenger_yaw * (std::f64::consts::PI / 180.0) as f32;
+    let direction_x = -radians.sin();
+    let direction_z = radians.cos();
+    let scale = direction_x.abs().max(direction_z.abs());
+    let target_x = boat_position.x + f64::from(direction_x) * distance / f64::from(scale);
+    let target_z = boat_position.z + f64::from(direction_z) * distance / f64::from(scale);
+    let target_y = (boat_position.y + BOAT_HEIGHT).floor() as i32;
+    let target_block_x = target_x.floor() as i32;
+    let target_block_z = target_z.floor() as i32;
+    let view = VehicleCollision { block_state };
+
+    if !view.is_water(target_block_x, target_y - 1, target_block_z) {
+        let mut targets = Vec::with_capacity(2);
+        let target_floor = block_floor_height(&view, target_block_x, target_y, target_block_z);
+        if target_floor.is_finite() && target_floor < 1.0 {
+            targets.push(Vec3d::new(
+                target_x,
+                f64::from(target_y) + target_floor,
+                target_z,
+            ));
+        }
+        let below_floor = block_floor_height(
+            &view,
+            target_block_x,
+            target_y - 1,
+            target_block_z,
+        );
+        if below_floor.is_finite() && below_floor < 1.0 {
+            targets.push(Vec3d::new(
+                target_x,
+                f64::from(target_y - 1) + below_floor,
+                target_z,
+            ));
+        }
+
+        // `Player.getDismountPoses`: standing, crouching, then swimming.
+        for dims in [
+            EntityDimensions::PLAYER,
+            EntityDimensions::new(0.6, 1.5, 0.6),
+            EntityDimensions::new(0.6, 0.6, 0.6),
+        ] {
+            for target in &targets {
+                if lodestone_physics::collision::no_collision(
+                    &view,
+                    dims.bounding_box(*target),
+                ) {
+                    return Vec3::new(target.x, target.y, target.z);
+                }
+            }
+        }
+    }
+
+    // `Entity.getDismountLocationForPassenger`: the vehicle centre at maxY.
+    Vec3::new(
+        boat_position.x,
+        boat_position.y + BOAT_HEIGHT,
+        boat_position.z,
+    )
+}
+
 #[cfg(test)]
 mod vehicle_tests {
     use super::*;
@@ -400,6 +513,37 @@ mod vehicle_tests {
     /// one.
     fn world() -> ChunkWorld {
         ChunkWorld::new(-64, 384)
+    }
+
+    #[test]
+    fn boat_dismount_prefers_the_passenger_facing_side_and_falls_back_to_the_deck() {
+        let floor = |_x: i32, y: i32, _z: i32| {
+            if y <= 7 {
+                "minecraft:stone".to_owned()
+            } else {
+                "minecraft:air".to_owned()
+            }
+        };
+        let preferred = boat_dismount_position(Vec3d::new(8.0, 8.0, 8.0), 0.0, &floor);
+        assert_eq!(preferred.x, 8.0);
+        assert_eq!(preferred.y, 8.0);
+        assert!(
+            preferred.z > 9.27 && preferred.z < 9.28,
+            "yaw zero escapes toward +Z by the combined collision widths: {preferred:?}"
+        );
+
+        let blocked = |_x: i32, y: i32, _z: i32| {
+            if y <= 8 {
+                "minecraft:stone".to_owned()
+            } else {
+                "minecraft:air".to_owned()
+            }
+        };
+        assert_eq!(
+            boat_dismount_position(Vec3d::new(8.0, 8.0, 8.0), 0.0, &blocked),
+            Vec3::new(8.0, 8.5625, 8.0),
+            "when neither side floor is below one block, Entity's deck fallback wins"
+        );
     }
 
     /// **Mounting, and the two refusals that make it mean something.**

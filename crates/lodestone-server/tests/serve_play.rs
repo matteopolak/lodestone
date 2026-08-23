@@ -101,6 +101,8 @@ const TAKE_ITEM_ENTITY_S2C: i32 = 60;
 /// VarInt array, matching the real wire shape `encode_set_passengers`'s own
 /// doc comment describes. Dismounting is this packet with an empty array.
 const SET_PASSENGERS_S2C: i32 = 61;
+/// Stand-in post-join position sync: `f64` x/y/z then `f32` yaw/pitch.
+const PLAYER_POSITION_S2C: i32 = 62;
 /// A stand-in `change_game_mode` (one byte ordinal). Needed because
 /// `SET_CREATIVE_MODE_SLOT` is gated on creative mode server-side — vanilla's own
 /// `hasInfiniteMaterials()` check — so a test that gives itself an item has to be
@@ -631,6 +633,19 @@ impl ServerProtocol for FakeProtocol {
         }
         ServerDirective::Send {
             packet_id: SET_PASSENGERS_S2C,
+            payload: w.as_slice().to_vec(),
+        }
+    }
+
+    fn encode_teleport(&self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.f64(x);
+        w.f64(y);
+        w.f64(z);
+        w.f32(yaw);
+        w.f32(pitch);
+        ServerDirective::Send {
+            packet_id: PLAYER_POSITION_S2C,
             payload: w.as_slice().to_vec(),
         }
     }
@@ -5264,6 +5279,31 @@ async fn sneaking_dismounts_a_boat_on_the_wire() {
         count, 0,
         "dismounting sends the vehicle's whole (now empty) passenger list, not a delta"
     );
+
+    let teleport = packets
+        .iter()
+        .find(|(id, _)| *id == PLAYER_POSITION_S2C)
+        .map(|(_, payload)| payload)
+        .unwrap_or_else(|| {
+            panic!(
+                "dismounting must authoritatively place the player; got packet ids {:?}",
+                packets.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+            )
+        });
+    let mut r = Reader::new(teleport);
+    let placed = (
+        r.f64().expect("dismount x"),
+        r.f64().expect("dismount y"),
+        r.f64().expect("dismount z"),
+    );
+    let yaw = r.f32().expect("dismount yaw");
+    let pitch = r.f32().expect("dismount pitch");
+    assert_eq!(
+        placed,
+        (8.0, 8.5625, 8.0),
+        "an all-air world has no safe side floor, so vanilla falls back to the boat deck"
+    );
+    assert_eq!((yaw, pitch), (0.0, 0.0));
 
     assert_eq!(
         mobs.with(|sim| sim.vehicle_ridden_by(LOCAL_PLAYER_ENTITY_ID)),
