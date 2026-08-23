@@ -659,6 +659,16 @@ send an agent at a problem that no longer exists, which has now happened repeate
 
 - **Read the record definition, not a summary of the call site.** Vanilla's
   `DepthStencilState(…, 1.0F, 10.0F)` was transcribed as "constant 1.0, slope 10.0" — backwards.
+- **A subclass that overrides exactly one constant is indistinguishable from its parent everywhere
+  except that constant, so copying the sibling you already ported is the natural mistake.** Measured:
+  `minecraft:rain` and the already-written splash emitter differ *only* in gravity — the subclass
+  overrides `0.06` to `0.04` and changes nothing else. Sheet, layer, count and behaviour are identical,
+  so a copied emitter passes every structural check and leaves raindrops hanging in the air. The same
+  shape one level over: the three `item_*` break bursts take a **four**-argument constructor where the
+  existing item-particle helper implements the seven-argument one. So when a vanilla class extends
+  another, **diff the two class bodies and port the delta explicitly** rather than reusing our port of
+  the parent; and when the delta is a single number, say so in the comment, because the next reader
+  will otherwise see two near-identical emitters and 'simplify' them back together.
 - **A field declared on a *base* record is inherited by every variant, and reading it on only the variant
   you cared about silently drops it everywhere else.** Measured: `"transformation"` is a field of every
   `ItemModel.Unbaked`, not of `SpecialModelWrapper.Unbaked` alone — `bake(context, transformation)` threads
