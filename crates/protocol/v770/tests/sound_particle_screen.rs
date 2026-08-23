@@ -250,6 +250,145 @@ fn level_particles_decodes_a_dust_payload() {
     );
 }
 
+
+/// A `LEVEL_PARTICLES` payload with a fixed prefix, `particle_id` as its
+/// registry id, and `options` as the trailing type-specific bytes.
+///
+/// The prefix values are arbitrary but pairwise distinct so a field
+/// transposition inside the fixed part cannot hide; the tests using this
+/// helper assert on `options`, and lean on
+/// `level_particles_decodes_position_and_count` above to pin the prefix.
+fn level_particles_bytes(particle_id: u8, options: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.push(0x00); // override limiter = false
+    bytes.push(0x00); // always show = false
+    bytes.extend_from_slice(&2.0f64.to_be_bytes()); // x
+    bytes.extend_from_slice(&65.0f64.to_be_bytes()); // y
+    bytes.extend_from_slice(&3.0f64.to_be_bytes()); // z
+    bytes.extend_from_slice(&0.0f32.to_be_bytes()); // x dist
+    bytes.extend_from_slice(&0.0f32.to_be_bytes()); // y dist
+    bytes.extend_from_slice(&0.0f32.to_be_bytes()); // z dist
+    bytes.extend_from_slice(&0.0f32.to_be_bytes()); // max speed
+    bytes.extend_from_slice(&1i32.to_be_bytes()); // count
+    bytes.push(particle_id); // every id used here is < 0x80, so one VarInt byte
+    bytes.extend_from_slice(options);
+    bytes
+}
+
+/// The potion-effect family's payloads, which `decode_particle_options` had no
+/// arm for until this pass: the colour rode the wire, was captured into
+/// `#[mc(remaining)]`, and was then dropped, so every `effect`,
+/// `instant_effect` and `entity_effect` particle reached the shell as
+/// `ParticleOptions::None` and drew white.
+///
+/// Three registry types, three *different* option classes, and they cannot
+/// share one arm — which is exactly the thing this asserts. Registry ids come
+/// from `PARTICLE_TYPE_NAMES` (generated from the real 26.2 registry report):
+/// 23 `effect`, 53 `instant_effect`, 28 `entity_effect`.
+///
+/// * `SpellParticleOption::streamCodec` is
+///   `StreamCodec.composite(ByteBufCodecs.INT, colour, ByteBufCodecs.FLOAT,
+///   power)` — eight bytes, and its accessors read only the three low bytes of
+///   the word, so the top byte is **not** an alpha here.
+/// * `ColorParticleOption::streamCodec` is `ByteBufCodecs.INT` alone — four
+///   bytes, ARGB, and `SpellParticle.MobEffectProvider` really does call
+///   `setAlpha(options.getAlpha())` with the top byte.
+///
+/// Every byte in every colour word below is pairwise distinct, so neither a
+/// channel transposition nor an ARGB/RGB24 mix-up can survive: `0x44` as the
+/// `entity_effect` alpha would show up as a red channel under the wrong
+/// unpacking.
+#[test]
+fn level_particles_decodes_the_potion_effect_payloads() {
+    let adapter = V770Adapter::new();
+
+    // `effect`: RGB24 0x00112233 then power 2.5.
+    let mut spell_payload = Vec::new();
+    spell_payload.extend_from_slice(&0x0011_2233i32.to_be_bytes());
+    spell_payload.extend_from_slice(&2.5f32.to_be_bytes());
+    let directives = handle(
+        &adapter,
+        play::clientbound::LEVEL_PARTICLES,
+        &level_particles_bytes(23, &spell_payload),
+    );
+    let Directive::Emit(ClientEvent::Particles { particle, options, .. }) = &directives[0] else {
+        panic!("expected a Particles directive, got {directives:?}");
+    };
+    assert_eq!(*particle, key("minecraft:effect"));
+    assert_eq!(
+        *options,
+        ParticleOptions::Spell {
+            color: [0x11 as f32 / 255.0, 0x22 as f32 / 255.0, 0x33 as f32 / 255.0],
+            power: 2.5,
+        },
+        "effect must decode a SpellParticleOption: RGB24 then an f32 power"
+    );
+
+    // `instant_effect` reads the same option class, over a different sheet.
+    let directives = handle(
+        &adapter,
+        play::clientbound::LEVEL_PARTICLES,
+        &level_particles_bytes(53, &spell_payload),
+    );
+    let Directive::Emit(ClientEvent::Particles { particle, options, .. }) = &directives[0] else {
+        panic!("expected a Particles directive, got {directives:?}");
+    };
+    assert_eq!(*particle, key("minecraft:instant_effect"));
+    assert_eq!(
+        *options,
+        ParticleOptions::Spell {
+            color: [0x11 as f32 / 255.0, 0x22 as f32 / 255.0, 0x33 as f32 / 255.0],
+            power: 2.5,
+        },
+    );
+
+    // `entity_effect`: one ARGB word, alpha 0x44 in the top byte.
+    let directives = handle(
+        &adapter,
+        play::clientbound::LEVEL_PARTICLES,
+        &level_particles_bytes(28, &0x4411_2233u32.to_be_bytes()),
+    );
+    let Directive::Emit(ClientEvent::Particles { particle, options, .. }) = &directives[0] else {
+        panic!("expected a Particles directive, got {directives:?}");
+    };
+    assert_eq!(*particle, key("minecraft:entity_effect"));
+    assert_eq!(
+        *options,
+        ParticleOptions::Color {
+            color: [
+                0x11 as f32 / 255.0,
+                0x22 as f32 / 255.0,
+                0x33 as f32 / 255.0,
+                0x44 as f32 / 255.0,
+            ],
+        },
+        "entity_effect must decode a ColorParticleOption, alpha included"
+    );
+}
+
+/// `sculk_charge` (registry id 45) carries a single `ByteBufCodecs.FLOAT`
+/// roll — `SculkChargeParticleOptions::STREAM_CODEC`. The value is what makes
+/// a spreading charge's motes lie along the direction it is travelling; with
+/// the payload dropped they all shared one orientation.
+///
+/// A deliberately non-round angle: a roll that divides evenly into anything
+/// (0, π, π/2) could agree with a zero default or a mis-scaled value by
+/// coincidence.
+#[test]
+fn level_particles_decodes_a_sculk_charge_roll() {
+    let adapter = V770Adapter::new();
+    let directives = handle(
+        &adapter,
+        play::clientbound::LEVEL_PARTICLES,
+        &level_particles_bytes(45, &1.234_5f32.to_be_bytes()),
+    );
+    let Directive::Emit(ClientEvent::Particles { particle, options, .. }) = &directives[0] else {
+        panic!("expected a Particles directive, got {directives:?}");
+    };
+    assert_eq!(*particle, key("minecraft:sculk_charge"));
+    assert_eq!(*options, ParticleOptions::SculkCharge { roll: 1.234_5 });
+}
+
 // ---- open_screen ----------------------------------------------------------
 
 #[test]

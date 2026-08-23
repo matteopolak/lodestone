@@ -359,11 +359,24 @@ Three things this cost, worth carrying:
   flight also *ends* at its deepest point, 1.2 blocks below the target — a glyph dives into the
   table rather than landing on it, and "it lands on the target" was this gate's first predicted
   value and was wrong by exactly that 1.2.
-* **`effect`, `entity_effect` and `instant_effect` draw white.** Their real tint rides a
-  `SpellParticleOption` (colour + power) or `ColorParticleOption` (colour + alpha) that no
-  protocol family here decodes, so `spawn_one` passes the module's `WHITE` constant. The emitter
-  takes the colour as a parameter so the gap stays at the decoder; closing it is an arm in
-  `decode_particle_options` plus a `ParticleOptions` variant, exactly as for `dust`.
+* **`effect`, `entity_effect` and `instant_effect` drew white, and no longer do.** Their tint
+  rides a `SpellParticleOption` (an RGB24 word plus an f32 power) or a `ColorParticleOption` (one
+  ARGB word), and `decode_particle_options` had no arm for either — the bytes were captured into
+  `LEVEL_PARTICLES`'s `#[mc(remaining)]` field and dropped, so every potion mote reached
+  `spawn_one` as `ParticleOptions::None` and took the module's `WHITE` constant. `v770` now
+  decodes all three into `ParticleOptions::Spell`/`Color`, and `emit::spell_instant`/
+  `spell_mob_effect` apply the provider's `setColor`/`setPower`/`setAlpha` calls.
+
+  Three things this cost. **The three types are three different option classes** — eight bytes
+  for the two `SpellParticleOption` ones against four for `ColorParticleOption` — so they cannot
+  share a decode arm, and the alpha byte only exists on the `entity_effect` one
+  (`MobEffectProvider` is the only `SpellParticle` provider that calls `setAlpha`). **The
+  fallback still draws white rather than dropping**, because the legacy families do not carry
+  the payload in this shape at all — 1.12's `WORLD_PARTICLES` puts a mob-spell tint in the offset
+  words — and dropping would be a visible regression there; the fallback arms log on the
+  `particles` target instead, since an untinted mote looks exactly like a working one and that is
+  why this survived so long. **`setPower` is not a velocity multiply**: it is
+  `yd = (yd - 0.1) * power + 0.1`, rescaling about the upward bias the base constructor added.
 
 ### The ambient and biome family
 
@@ -566,14 +579,18 @@ transcribed vanilla constant, documented inline with its Java source line.
   needed, now built (see "Built" above). `explosion`/`explosion_emitter` and `firework` are
   **not** in that list (see "Built"/"Correction" above); none of the three needed the decoder,
   only the render `Behaviour`/`emit::` function this pass and the firework fix added.
-  `sculk_charge` is **not** fixed by this pass despite the name grouping it with `dust` above in
-  an earlier draft of this doc: `ParticleTypes.SCULK_CHARGE` is
-  `SculkChargeParticleOptions(float roll)`, a real one-field payload
+  `sculk_charge` **is** now decoded: `ParticleTypes.SCULK_CHARGE` is
+  `SculkChargeParticleOptions(float roll)`, a one-field payload
   (`.cache/mc/26.2/client-src/net/minecraft/core/particles/SculkChargeParticleOptions.java`),
-  and `decode_particle_options` does not have an arm for it — its existing dispatch arm
-  (`Particles::spawn_one`'s `"sculk_charge"` case) spawns and animates correctly but reads no
-  roll, matching this doc's own "explicitly not attempted" convention rather than a discovered
-  bug.
+  and it has an arm in `decode_particle_options` plus its own `emit::sculk_charge` — the roll is
+  what makes a spreading charge's motes lie along the direction it is travelling instead of all
+  sharing one orientation. Writing that emitter surfaced two things the shared
+  `emit::animated_ambient` call it replaced had wrong: the lifetime is a per-particle
+  `random.nextInt(12) + 8` draw rather than a constant, and borrowing `Behaviour::AshSmoke` added
+  a `* 32` quad-size fade-in that `SculkChargeParticle` does not have (it overrides neither
+  `getQuadSize` nor the default layer — `Behaviour::Animated { layer: Translucent }` is the
+  matching pair). The provider also calls `setParticleSpeed` with the packet's own words, so the
+  base constructor's velocity jitter is discarded for this type.
 
 ## How to change it
 
@@ -586,7 +603,7 @@ transcribed vanilla constant, documented inline with its Java source line.
   shape is genuinely new; several types share one class and can share a `Behaviour`.
 - The shared `ParticleOptions` decoder now exists (`decode_particle_options`,
   `crates/protocol/v770/src/adapter/chunk.rs`) — adding another option-carrying type (`block`,
-  `block_marker`, `falling_dust`, `item`, `sculk_charge`, …) means a new arm there plus, if the
+  `block_marker`, `falling_dust`, `item`, `shriek`, `trail`, `vibration`, …) means a new arm there plus, if the
   payload's own colour/scale/whatever needs to reach the emitter, a new
   `lodestone_model::event::ParticleOptions` variant threaded through `NetUpdate::Particles` and
   `Particles::spawn_particles`/`spawn_one` (`crates/lodestone-shell/src/particles.rs`) the same

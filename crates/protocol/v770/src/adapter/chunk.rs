@@ -1162,6 +1162,25 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 /// to `[0, 1]` via `red(color) = color >> 16 & 0xFF`, ditto green/blue) then a
 /// big-endian `f32` scale — `StreamCodec.composite(ByteBufCodecs.INT, …,
 /// ByteBufCodecs.FLOAT, …)`, ordinary fixed-width fields, not VarInts.
+///
+/// The potion-effect family reads the same way and is three *different* option
+/// types, which is why they cannot share one arm:
+///
+/// * `minecraft:effect`/`minecraft:instant_effect` carry a
+///   `SpellParticleOption` — `StreamCodec.composite(ByteBufCodecs.INT, colour,
+///   ByteBufCodecs.FLOAT, power)`, eight bytes. Its accessors read only the
+///   low three bytes of the word, so the colour unpacks exactly like `dust`'s.
+/// * `minecraft:entity_effect` carries a `ColorParticleOption` —
+///   `ByteBufCodecs.INT` alone, four bytes, and **ARGB** rather than RGB24:
+///   `MobEffectProvider` calls `setAlpha(options.getAlpha())`, so the top byte
+///   is a real field here.
+/// * `minecraft:sculk_charge` carries a `SculkChargeParticleOptions` — one
+///   `ByteBufCodecs.FLOAT` roll.
+///
+/// Two further registry types (`minecraft:tinted_leaves`, `minecraft:flash`)
+/// also carry a `ColorParticleOption`, and are deliberately absent below: this
+/// client has no emitter for either, so decoding them would build a payload
+/// nothing can consume. Add the arm when the emitter lands, not before.
 fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, AdapterError> {
     fn rgb24(reader: &mut Reader<'_>) -> Result<[f32; 3], AdapterError> {
         let packed = reader.i32().map_err(dec_err)?;
@@ -1169,6 +1188,17 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
             f32::from(((packed >> 16) & 0xff) as u8) / 255.0,
             f32::from(((packed >> 8) & 0xff) as u8) / 255.0,
             f32::from((packed & 0xff) as u8) / 255.0,
+        ])
+    }
+    /// `ARGB.red`/`green`/`blue`/`alpha` over one packed word — the same three
+    /// low bytes [`rgb24`] reads, plus the top byte as alpha.
+    fn argb(reader: &mut Reader<'_>) -> Result<[f32; 4], AdapterError> {
+        let packed = reader.i32().map_err(dec_err)?;
+        Ok([
+            f32::from(((packed >> 16) & 0xff) as u8) / 255.0,
+            f32::from(((packed >> 8) & 0xff) as u8) / 255.0,
+            f32::from((packed & 0xff) as u8) / 255.0,
+            f32::from(((packed >> 24) & 0xff) as u8) / 255.0,
         ])
     }
     // `name` is the fully-namespaced registry id (`PARTICLE_TYPE_NAMES`'
@@ -1188,6 +1218,22 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
             let to_color = rgb24(&mut reader)?;
             let scale = reader.f32().map_err(dec_err)?;
             Ok(ParticleOptions::DustColorTransition { from_color, to_color, scale })
+        }
+        "minecraft:effect" | "minecraft:instant_effect" => {
+            let mut reader = Reader::new(bytes);
+            let color = rgb24(&mut reader)?;
+            let power = reader.f32().map_err(dec_err)?;
+            Ok(ParticleOptions::Spell { color, power })
+        }
+        "minecraft:entity_effect" => {
+            let mut reader = Reader::new(bytes);
+            let color = argb(&mut reader)?;
+            Ok(ParticleOptions::Color { color })
+        }
+        "minecraft:sculk_charge" => {
+            let mut reader = Reader::new(bytes);
+            let roll = reader.f32().map_err(dec_err)?;
+            Ok(ParticleOptions::SculkCharge { roll })
         }
         _ => Ok(ParticleOptions::None),
     }

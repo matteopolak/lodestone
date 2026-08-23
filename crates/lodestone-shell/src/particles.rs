@@ -61,11 +61,14 @@ use wgpu::util::DeviceExt;
 
 /// The untinted particle colour.
 ///
-/// Named rather than spelled inline at each `emit::spell` call so the three
-/// arms whose real tint arrives in an undecoded `ParticleOptions` payload
-/// (`effect`, `entity_effect`, `instant_effect`) are greppable as one set: this
-/// constant is the placeholder standing in for that payload, not a vanilla
-/// value any of them actually uses.
+/// Two unrelated uses, and only one of them is a real vanilla value.
+/// `infested`, `raid_omen` and `trial_omen` are registered against
+/// `SpellParticle.Provider`, which takes a bare `SimpleParticleType` and never
+/// calls `setColor` at all — white *is* their colour, and their sprites carry
+/// the tint. `effect`, `entity_effect` and `instant_effect` reach it only on
+/// the fallback arms, where a connection's protocol family gave this client no
+/// `ParticleOptions` payload to read a tint out of; those arms log before
+/// drawing, because an untinted potion mote looks like a working particle.
 const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
 
 /// Which stitched texture a [`ParticleInstance`]'s UVs address.
@@ -553,18 +556,88 @@ impl Particles {
             // member; it draws its tint from the RNG rather than from a
             // provider constant, so it keeps its own emitter.
             //
-            // `effect`/`instant_effect` carry a `SpellParticleOption` and
-            // `entity_effect` a `ColorParticleOption`, both of which name the
-            // real tint. No protocol family here decodes either payload, so
-            // `options` is `ParticleOptions::None` for all three and the tint
-            // below is white — an uncoloured mote rather than a missing one.
-            // Threading the colour is a decoder change, not a change here.
-            "effect" | "entity_effect" => {
-                emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::Effect, WHITE);
-            }
-            "instant_effect" => {
-                emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::Spell, WHITE);
-            }
+            // `effect`/`instant_effect` carry a `SpellParticleOption` (an RGB
+            // word plus a velocity multiplier) and `entity_effect` a
+            // `ColorParticleOption` (an ARGB word). Those payloads are the
+            // *whole* of a potion particle's colour — the class has no palette
+            // of its own — so a missing one draws a white mote, which looks
+            // like a working particle and is why this went unnoticed. `v770`
+            // decodes all three; the legacy families do not carry the payload
+            // in this shape at all (1.12's `WORLD_PARTICLES` puts a mob-spell
+            // tint in the offset words instead), so the fallback arms below
+            // keep drawing white and **say so** rather than dropping the
+            // particle, which would be a visible regression on those servers.
+            "effect" => match options {
+                ParticleOptions::Spell { color, power } => {
+                    emit::spell_instant(
+                        &mut self.engine,
+                        x,
+                        y,
+                        z,
+                        xa,
+                        ya,
+                        za,
+                        Sheet::Effect,
+                        color,
+                        power,
+                    );
+                }
+                _ => {
+                    tracing::debug!(
+                        target: "particles",
+                        "effect particle with no SpellParticleOption payload; \
+                         drawing an untinted white mote"
+                    );
+                    emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::Effect, WHITE);
+                }
+            },
+            "instant_effect" => match options {
+                ParticleOptions::Spell { color, power } => {
+                    emit::spell_instant(
+                        &mut self.engine,
+                        x,
+                        y,
+                        z,
+                        xa,
+                        ya,
+                        za,
+                        Sheet::Spell,
+                        color,
+                        power,
+                    );
+                }
+                _ => {
+                    tracing::debug!(
+                        target: "particles",
+                        "instant_effect particle with no SpellParticleOption payload; \
+                         drawing an untinted white mote"
+                    );
+                    emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::Spell, WHITE);
+                }
+            },
+            "entity_effect" => match options {
+                ParticleOptions::Color { color } => {
+                    emit::spell_mob_effect(
+                        &mut self.engine,
+                        x,
+                        y,
+                        z,
+                        xa,
+                        ya,
+                        za,
+                        Sheet::Effect,
+                        color,
+                    );
+                }
+                _ => {
+                    tracing::debug!(
+                        target: "particles",
+                        "entity_effect particle with no ColorParticleOption payload; \
+                         drawing an untinted white mote"
+                    );
+                    emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::Effect, WHITE);
+                }
+            },
             "infested" => {
                 emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::Infested, WHITE);
             }
@@ -674,11 +747,25 @@ impl Particles {
             // never blocked on the `ParticleOptions` decoder the way it first
             // looked: `ParticleTypes.FIREWORK` is a `SimpleParticleType`.
             "firework" => emit::firework(&mut self.engine, x, y, z, xa, ya, za),
-            // Sheet, scale and lifetime are what separate these four; the tick
+            // `SculkChargeParticle` has its own emitter rather than sharing
+            // `animated_ambient` with the three below: its roll is a wire
+            // field, its lifetime a per-particle draw, and its provider
+            // installs the packet's velocity words verbatim.
+            "sculk_charge" => match options {
+                ParticleOptions::SculkCharge { roll } => {
+                    emit::sculk_charge(&mut self.engine, x, y, z, xa, ya, za, roll);
+                }
+                _ => {
+                    tracing::debug!(
+                        target: "particles",
+                        "sculk_charge particle with no SculkChargeParticleOptions payload; \
+                         drawing at zero roll"
+                    );
+                    emit::sculk_charge(&mut self.engine, x, y, z, xa, ya, za, 0.0);
+                }
+            },
+            // Sheet, scale and lifetime are what separate these three; the tick
             // shape is identical. Lifetimes are each class's own constructor.
-            "sculk_charge" => emit::animated_ambient(
-                &mut self.engine, x, y, z, xa, ya, za, Sheet::SculkCharge, 1.0, 15,
-            ),
             "gust" => {
                 emit::animated_ambient(&mut self.engine, x, y, z, 0.0, 0.0, 0.0, Sheet::Gust, 3.0, 12)
             }
@@ -1964,6 +2051,176 @@ mod tests {
             "near the end of its life the lerp must have moved decisively \
              towards to_color's blue, got {later_colour:?} (started at \
              {start_colour:?}, lifetime {lifetime})"
+        );
+    }
+
+
+    /// The potion-effect colour, driven from **real wire bytes** rather than a
+    /// hand-built `ParticleOptions`.
+    ///
+    /// The defect this closes was entirely at the decoder: `emit::spell`
+    /// already took a colour, so any gate that handed it one would have passed
+    /// throughout — proving the emitter and nothing about the producer. So the
+    /// input here is a `LEVEL_PARTICLES` payload transcribed from the packet's
+    /// own wire layout, run through the same registry-resolved adapter `net.rs`
+    /// obtains from `lodestone_registry::adapter_for_protocol(776)`, and only
+    /// the namespace strip in between is done by hand — that hop has its own
+    /// gate in `net.rs` (`forward_translates_particles_with_stripped_namespace`).
+    ///
+    /// The colour bytes are pairwise distinct (`0x11`/`0x22`/`0x33`, plus
+    /// `0x44` as `entity_effect`'s alpha) so neither a channel transposition
+    /// nor an ARGB/RGB24 confusion survives, and none of them is `0xFF`, so a
+    /// regression back to the white default is a visible mismatch on all three
+    /// channels rather than on one.
+    #[cfg(feature = "live")]
+    #[test]
+    fn a_real_potion_effect_packet_tints_the_particle_it_spawns() {
+        use lodestone_client::{ClientEvent, ConnectionState, Directive};
+
+        /// `LEVEL_PARTICLES`'s wire layout: bool override-limiter, bool
+        /// always-show, 3×f64 position, 3×f32 spread, f32 max speed, i32
+        /// count, VarInt particle-type registry id, then the type's own
+        /// option bytes to end of packet.
+        fn payload(particle_id: u8, options: &[u8]) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            bytes.push(0x00); // override limiter
+            bytes.push(0x00); // always show
+            bytes.extend_from_slice(&0.5f64.to_be_bytes());
+            bytes.extend_from_slice(&65.0f64.to_be_bytes());
+            bytes.extend_from_slice(&0.5f64.to_be_bytes());
+            bytes.extend_from_slice(&0.0f32.to_be_bytes());
+            bytes.extend_from_slice(&0.0f32.to_be_bytes());
+            bytes.extend_from_slice(&0.0f32.to_be_bytes());
+            bytes.extend_from_slice(&0.0f32.to_be_bytes());
+            bytes.extend_from_slice(&1i32.to_be_bytes()); // count
+            bytes.push(particle_id);
+            bytes.extend_from_slice(options);
+            bytes
+        }
+
+        /// Feeds one payload through the real adapter and hands the decoded
+        /// event to the real dispatch, returning the spawned particle.
+        fn spawn_from_wire(particle_id: u8, options: &[u8]) -> lodestone_particle::Particle {
+            let adapter = lodestone_registry::adapter_for_protocol(776)
+                .expect("the `live` feature compiles a family in for protocol 776");
+            let mut world = lodestone_world::World::new();
+            let directives = adapter
+                .handle_packet(
+                    &mut world,
+                    ConnectionState::Play,
+                    47, // play::clientbound::LEVEL_PARTICLES
+                    &payload(particle_id, options),
+                )
+                .expect("a byte-accurate level_particles payload must decode");
+            let [Directive::Emit(ClientEvent::Particles {
+                particle,
+                pos,
+                offset,
+                max_speed,
+                count,
+                options,
+                ..
+            })] = directives.as_slice()
+            else {
+                panic!("expected exactly one Particles directive, got {directives:?}");
+            };
+            let kind = particle.path().to_owned();
+            let mut p = resolvable();
+            p.spawn_particles(
+                &kind,
+                [pos.x, pos.y, pos.z],
+                [offset.x, offset.y, offset.z],
+                *max_speed,
+                *count,
+                *options,
+            );
+            assert_eq!(
+                p.engine.particles().len(),
+                1,
+                "{kind} must dispatch to an emitter"
+            );
+            p.engine.particles()[0].clone()
+        }
+
+        let want_rgb = [
+            0x11 as f32 / 255.0,
+            0x22 as f32 / 255.0,
+            0x33 as f32 / 255.0,
+        ];
+        // `SpellParticleOption`: RGB24 then an f32 power. Power 1.0 here so
+        // this gate measures only the tint; `spell_instant`'s velocity
+        // multiplier has its own gate below.
+        let mut spell_options = Vec::new();
+        spell_options.extend_from_slice(&0x0011_2233i32.to_be_bytes());
+        spell_options.extend_from_slice(&1.0f32.to_be_bytes());
+
+        for (id, name) in [(23u8, "effect"), (53, "instant_effect")] {
+            let particle = spawn_from_wire(id, &spell_options);
+            assert_eq!(
+                particle.colour, want_rgb,
+                "{name}'s SpellParticleOption colour must reach the particle, \
+                 not the white default"
+            );
+        }
+
+        // `ColorParticleOption`: one ARGB word, alpha in the top byte.
+        let particle = spawn_from_wire(28, &0x4411_2233u32.to_be_bytes());
+        assert_eq!(
+            particle.colour, want_rgb,
+            "entity_effect's ColorParticleOption colour must reach the particle"
+        );
+        assert!(
+            (particle.alpha - 0x44 as f32 / 255.0).abs() < 1e-6,
+            "entity_effect's alpha byte is a real field (MobEffectProvider calls \
+             setAlpha with it); got {}",
+            particle.alpha
+        );
+
+        // `SculkChargeParticleOptions`: one f32 roll. Deliberately not a round
+        // multiple of anything, so it cannot coincide with the zero default.
+        let particle = spawn_from_wire(45, &1.234_5f32.to_be_bytes());
+        assert_eq!(particle.roll, 1.234_5, "sculk_charge's roll must reach the particle");
+        assert_eq!(
+            particle.o_roll, 1.234_5,
+            "and its previous-tick roll too, or the first drawn frame interpolates \
+             from zero"
+        );
+    }
+
+    /// `SpellParticleOption`'s second field, on the one input where the right
+    /// formula and the plausible wrong one give different answers regardless of
+    /// what the RNG drew.
+    ///
+    /// `Particle.setPower` is `xd *= p; yd = (yd - 0.1) * p + 0.1; zd *= p` --
+    /// it rescales the vertical component **about** the `0.1` upward bias the
+    /// base constructor added, rather than multiplying it. At `power = 0.0`
+    /// the correct formula lands on exactly `(0, 0.1, 0)` while a naive
+    /// `yd *= p` lands on exactly `(0, 0, 0)`, so the two hypotheses are
+    /// separated by a deterministic value and the entropy-seeded engine cannot
+    /// blur them. Any power in between would need the seed pinned to say
+    /// anything at all.
+    ///
+    /// A zero power is also a legal wire value, not a contrivance: the field is
+    /// unconditional on the wire and its data-codec default is `1.0`, so
+    /// nothing stops a datapack sending one.
+    #[test]
+    fn a_spell_particles_power_rescales_velocity_about_the_upward_bias() {
+        let mut p = resolvable();
+        p.spawn_particles(
+            "effect",
+            [0.5, 65.0, 0.5],
+            [0.0; 3],
+            0.0,
+            1,
+            ParticleOptions::Spell { color: [0.5, 0.25, 0.75], power: 0.0 },
+        );
+        assert_eq!(p.engine.particles().len(), 1);
+        let particle = &p.engine.particles()[0];
+        assert_eq!(
+            [particle.xd, particle.yd, particle.zd],
+            [0.0, 0.1, 0.0],
+            "setPower(0) must leave the 0.1 upward bias standing (a naive `yd *= power` \
+             gives 0.0 here, and an unapplied power leaves the constructor's jitter)"
         );
     }
 
