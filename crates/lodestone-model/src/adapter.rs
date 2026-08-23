@@ -371,8 +371,8 @@ pub struct EntityBaseDimensions {
 }
 
 /// The version-free per-entity-type facts a physics consumer needs about a
-/// *neighbouring* entity: its base hitbox, and whether it can shove the local
-/// player.
+/// *neighbouring* entity: its base hitbox, whether it can shove the local
+/// player, and whether it can hard-block movement.
 ///
 /// This is the [`VersionAdapter::entity_facts`] seam's return type. It is keyed
 /// by [`ResourceKey`] rather than by network id, which is what makes it usable
@@ -415,6 +415,15 @@ pub struct EntityFacts {
     /// version reports `false` for those families rather than approximating them
     /// into the wrong pass.
     pub pushes_players: bool,
+    /// Whether another entity's movement sweep may treat this entity as a hard
+    /// collider through `Entity.canBeCollidedWith`.
+    ///
+    /// This is deliberately separate from [`Self::pushes_players`]. Boats are
+    /// hard colliders but do not run the living-entity crowd pass; ordinary mobs
+    /// run that crowd pass but are not hard colliders. As with the push flag,
+    /// `true` is a type-level maximum and per-instance state gates remain the
+    /// consumer's responsibility.
+    pub collidable: bool,
 }
 
 /// One axis-aligned collision box of a block state, in **block-local**

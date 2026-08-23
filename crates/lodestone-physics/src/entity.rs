@@ -37,6 +37,7 @@ use crate::player::{
     restitute_movement_after_collisions,
 };
 use crate::profile::PhysicsProfile;
+use crate::push::{NearbyEntity, entity_collision_boxes};
 
 /// The per-entity movement inputs that are **not** version knowledge: the
 /// collision hitbox (`width`/`height`) and the auto-step height (`step_height`).
@@ -354,6 +355,35 @@ pub fn move_entity_among_entities(
         .multiply_each(block_speed_factor, 1.0, block_speed_factor);
 }
 
+/// [`move_entity`] with hard colliders selected from a mixed nearby-entity
+/// snapshot at the point the movement sweep begins.
+///
+/// The query uses the current hitbox expanded toward the current velocity, just
+/// like vanilla's `getEntityCollisions`. A pending stuck multiplier can only
+/// shrink that velocity inside [`move_entity_among_entities`], so querying with
+/// the unscaled vector is a conservative superset and cannot introduce a false
+/// collision: the axis sweep still rejects every box the actual move does not
+/// reach.
+pub(crate) fn move_entity_with_nearby(
+    motion: &mut EntityMotion,
+    dims: EntityDimensions,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    ctx: MoveContext,
+    nearby: &[NearbyEntity],
+) {
+    if nearby.is_empty() {
+        move_entity(motion, dims, view, profile, ctx);
+        return;
+    }
+    let query = dims
+        .bounding_box(motion.position)
+        .expand_towards(motion.velocity.x, motion.velocity.y, motion.velocity.z);
+    let mut colliders = Vec::new();
+    entity_collision_boxes(query, nearby, &mut colliders);
+    move_entity_among_entities(motion, dims, view, profile, ctx, &colliders);
+}
+
 /// Per-entity / per-situation inputs to [`travel_in_air`] that are not part of
 /// the core [`EntityMotion`] — the flags and effects vanilla's `travelInAir`
 /// branches on. A plain falling mob passes `AirTravelContext { yaw, ..default }`;
@@ -454,6 +484,23 @@ pub fn travel_in_air(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
+    travel_in_air_among_entities(motion, dims, input, speed, ctx, view, profile, &[]);
+}
+
+/// The player-facing variant of [`travel_in_air`] that includes hard entity
+/// colliders. Kept crate-private so the public entity movement seam does not
+/// acquire a second world-snapshot API.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn travel_in_air_among_entities(
+    motion: &mut EntityMotion,
+    dims: EntityDimensions,
+    input: (f32, f32),
+    speed: f32,
+    ctx: AirTravelContext,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    nearby: &[NearbyEntity],
+) {
     let block_friction = if motion.on_ground {
         let (fx, fy, fz) = friction_block(motion.position);
         mth::compute_modified_friction(view.friction(fx, fy, fz), profile.friction_modifier)
@@ -504,7 +551,7 @@ pub fn travel_in_air(
         edge_back_off: ctx.edge_back_off,
         suppress_block_speed_factor: ctx.suppress_block_speed_factor,
     };
-    move_entity(motion, dims, view, profile, move_ctx);
+    move_entity_with_nearby(motion, dims, view, profile, move_ctx, nearby);
 
     let mut movement = motion.velocity;
     if (motion.horizontal_collision || ctx.jumping) && climbing {

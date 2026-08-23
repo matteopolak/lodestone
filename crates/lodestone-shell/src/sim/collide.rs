@@ -196,7 +196,8 @@ impl Sim {
             // exactly as the pre-existing `version` handle already had to
             // (see its own comment): a borrow taken first would have to
             // outlive `query()`'s `&mut`, which the borrow checker refuses.
-            let mut state = w.query::<(&Position, &EntityKind, Option<&EntityUuid>)>();
+            let mut state =
+                w.query::<(&Position, &EntityKind, &MinecraftEntityId, Option<&EntityUuid>)>();
 
             // Both are on `self.local` in the shell's own mirrored world —
             // the same component `Sim::sidebar` reads `SessionScoreboard`
@@ -206,6 +207,7 @@ impl Sim {
                 .get::<SessionScoreboard>(local)
                 .map(|board| &board.0);
             let tab_list = w.get::<SessionTabList>(local).map(|list| &list.0);
+            let ridden_vehicle = w.get::<Riding>(local).and_then(|riding| riding.0);
 
             // `Entity.getTeam()` for the local player itself — the other half
             // of the team gate that a neighbour's own `CollisionRule` below
@@ -232,7 +234,7 @@ impl Sim {
             let version = w.resource::<VersionData>();
             let list = state
                 .iter(w)
-                .filter_map(|(pos, kind, uuid)| {
+                .filter_map(|(pos, kind, entity_id, uuid)| {
                     let feet = Vec3d::new(pos.0.x, pos.0.y, pos.0.z);
                     if (feet.x - center.x).abs() > NEARBY_ENTITY_RADIUS
                         || (feet.y - center.y).abs() > NEARBY_ENTITY_RADIUS
@@ -243,7 +245,7 @@ impl Sim {
                     // A type outside the census, or no adapter at all, is a
                     // miss — never a permissive fallthrough.
                     let facts = version.entity_facts(&kind.0)?;
-                    if !facts.pushes_players {
+                    if !facts.pushes_players && !facts.collidable {
                         return None;
                     }
                     // `step_height` plays no part in vanilla's `makeBoundingBox`;
@@ -252,6 +254,10 @@ impl Sim {
                     let dims =
                         EntityDimensions::new(facts.dimensions.width, facts.dimensions.height, 0.6);
                     let mut neighbour = NearbyEntity::living(feet, dims.bounding_box(feet));
+                    neighbour.pushes_players = facts.pushes_players;
+                    neighbour.pushable = facts.pushes_players;
+                    neighbour.collidable = facts.collidable;
+                    neighbour.same_vehicle = ridden_vehicle == Some(entity_id.0);
 
                     // `EntitySelector.pushableBy`'s team gate — see
                     // `lodestone_physics::push::team_allows_push`. A neighbour

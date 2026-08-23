@@ -16,8 +16,10 @@ use lodestone_physics::entity::{
     EntityDimensions, EntityMotion, MoveContext, move_entity, move_entity_among_entities,
 };
 use lodestone_physics::geometry::{Aabb, Vec3d};
+use lodestone_physics::player::{MovementInput, PlayerState, tick_among_entities};
 use lodestone_physics::push::{
-    NearbyEntity, entity_collision_boxes, no_collision_among_entities, no_entity_collision,
+    NearbyEntity, PushSelf, entity_collision_boxes, no_collision_among_entities,
+    no_entity_collision,
 };
 
 /// A floor of unit cubes at `y = 0` spanning `-r..=r`, and nothing else.
@@ -160,6 +162,44 @@ fn auto_step_mounts_a_collidable_entity_the_way_it_mounts_a_slab() {
     // and not about the collider being ignored.
     let blocked = collide_among_entities(&view, movement, bb, true, 0.5, &colliders);
     assert!(blocked.x < 0.4 && blocked.y == 0.0);
+}
+
+/// The direct movement core already accepted entity colliders; this is the
+/// missing production seam. A whole player tick must resolve its downward move
+/// against a boat deck, not merely consult the boat during the later pose gate.
+#[test]
+fn tick_among_entities_lands_on_a_boat_deck_and_the_noncollidable_control_falls_through() {
+    let view = Floor(6);
+    let profile = PhysicsProfile::mc_1_21();
+    let mut deck = boat(0.5, 0.5);
+    deck.pushes_players = false;
+
+    let mut landed = PlayerState::at(Vec3d::new(0.5, 2.0, 0.5), 0.0);
+    landed.velocity = Vec3d::new(0.0, -0.8, 0.0);
+    tick_among_entities(
+        &mut landed,
+        MovementInput::NONE,
+        &view,
+        &profile,
+        &[deck],
+        PushSelf::LIVING_PLAYER,
+    );
+    assert_eq!(landed.position.y, 1.5625, "feet must stop on the boat's exact deck height");
+    assert!(landed.on_ground, "a downward collision with the deck is ground contact");
+
+    let mut ghost = deck;
+    ghost.collidable = false;
+    let mut through = PlayerState::at(Vec3d::new(0.5, 2.0, 0.5), 0.0);
+    through.velocity = Vec3d::new(0.0, -0.8, 0.0);
+    tick_among_entities(
+        &mut through,
+        MovementInput::NONE,
+        &view,
+        &profile,
+        &[ghost],
+        PushSelf::LIVING_PLAYER,
+    );
+    assert!(through.position.y < 1.5625, "the control must fall through when hard collision is disabled");
 }
 
 #[test]

@@ -26,6 +26,9 @@ INTERACT ─ MobSim::mount_vehicle ─ ServerProtocol::encode_set_passengers
 MOVE_VEHICLE ─ MobSim::apply_vehicle_move  (the client owns the boat; we write it down)
 
 world tick  ─ MobSim::tick_vehicles        (UNRIDDEN boats only: float_boat + move_entity)
+
+player tick ─ Sim::tick_nearby_entities ─ NearbyEntities ─ tick_among_entities
+                                                       └ boat hull is a hard collider
 ```
 
 ### The raytrace
@@ -77,6 +80,23 @@ same packet with an empty list.
 
 This is also the first reader of `ServerBound::InteractEntity::using_secondary_action`:
 `player.isSecondaryUseActive()` means sneak-clicking a boat must not board it.
+
+### Standing on a boat
+
+The client resolves standing and walking against the boat's real `1.375 ×
+0.5625` entity box during the fixed 20 Hz player tick. v770's generated entity
+census exposes `canBeCollidedWith` separately from the living-entity crowd-push
+capability; `Sim::tick_nearby_entities` therefore keeps boats in the snapshot
+without treating them like mobs that shove the player. The movement sweep runs
+through `lodestone_physics::player::tick_among_entities` for air, water, lava and
+elytra paths, while the empty-snapshot public APIs remain block-only and
+bit-identical.
+
+The ridden boat is marked `same_vehicle`, so its box is excluded while the
+passenger seat constraint owns the player's position. The type census also names
+shulkers and happy ghasts as potential hard colliders, but their per-instance
+alive/state gates are not yet represented; boats are unconditional and are the
+complete production case here.
 
 ## How to change it
 

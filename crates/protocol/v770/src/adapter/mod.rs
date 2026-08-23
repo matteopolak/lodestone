@@ -918,6 +918,7 @@ impl VersionAdapter for V770Adapter {
         Some(EntityFacts {
             dimensions: lodestone_data::entity_dimensions::base_dimensions(id)?,
             pushes_players: lodestone_data::entity_census::pushes_players(id)?,
+            collidable: lodestone_data::entity_census::can_be_collided_with(id)?,
         })
     }
 

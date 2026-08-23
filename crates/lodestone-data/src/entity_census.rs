@@ -1,7 +1,8 @@
-//! Per-entity-type **push census** for protocol 776 (Minecraft 26.2): which
-//! entity types can shove the local player, keyed by network registry id.
+//! Per-entity-type **interaction census** for protocol 776 (Minecraft 26.2):
+//! which entity types can shove the local player or hard-block another entity's
+//! movement, keyed by network registry id.
 //!
-//! # The question this answers, precisely
+//! # The push question this answers, precisely
 //!
 //! `lodestone_physics::push` models the local player as the *pushee* of vanilla
 //! `LivingEntity.pushEntities()`. From that side, the player's own
@@ -59,6 +60,12 @@
 //! rather than approximated. The census dump carries each type's implementation
 //! class precisely so those passes can be modelled later without re-dumping.
 //!
+//! The separate hard-collision column answers
+//! `Entity.canBeCollidedWith(other)`. The exhaustive override families are
+//! `AbstractBoat`, `Shulker` and `HappyGhast`; the generated table records their
+//! implementation classes, with per-instance alive/state refinements left to
+//! the consumer. Unknown ids default-deny this capability too.
+//!
 //! # Data source: interrogate the real jar
 //!
 //! Generated from `tests/support/entity_census_jvm.txt`, a dump from a headless
@@ -77,7 +84,9 @@
 //! network entity-type registry id — the same id space as [`crate::entity_types`]
 //! and [`crate::entity_dimensions`].
 
-use crate::generated_entity_census::{ENTITY_IS_LIVING, ENTITY_IS_MOB, ENTITY_PUSHES_PLAYERS};
+use crate::generated_entity_census::{
+    ENTITY_CAN_BE_COLLIDED_WITH, ENTITY_IS_LIVING, ENTITY_IS_MOB, ENTITY_PUSHES_PLAYERS,
+};
 pub use crate::generated_entity_census::TYPE_COUNT;
 
 /// Whether an entity of this network type id is a vanilla `LivingEntity`.
@@ -164,6 +173,21 @@ pub fn pushes_players(id: i32) -> Option<bool> {
     usize::try_from(id)
         .ok()
         .and_then(|index| ENTITY_PUSHES_PLAYERS.get(index).copied())
+}
+
+/// Whether an entity of this network type can participate in another entity's
+/// hard movement collision through `Entity.canBeCollidedWith`.
+///
+/// This is independent of [`pushes_players`]: boats are hard colliders but do
+/// not run `LivingEntity.pushEntities`, while ordinary mobs do the reverse.
+/// Per-instance predicates remain the consumer's responsibility (`Shulker` must
+/// be alive, and `HappyGhast` has its own state gate). Unknown ids return
+/// `None`, which callers must treat as default-deny.
+#[must_use]
+pub fn can_be_collided_with(id: i32) -> Option<bool> {
+    usize::try_from(id)
+        .ok()
+        .and_then(|index| ENTITY_CAN_BE_COLLIDED_WITH.get(index).copied())
 }
 
 /// The widest and tallest base hitbox among entity types that can push the
