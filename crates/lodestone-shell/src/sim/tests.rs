@@ -2093,6 +2093,7 @@ fn net_particles_reaches_the_emitter_and_resolves() {
     feed.send(NetUpdate::Particles {
         kind: "flame".into(),
         long_distance: false,
+        always_show: false,
         pos: Vec3::new(origin.x, origin.y, origin.z),
         offset: Vec3f::new(0.1, 0.1, 0.1),
         max_speed: 0.02,
@@ -2396,8 +2397,8 @@ fn a_frame_takes_many_short_world_guards_and_no_long_one() {
 /// `Particles::particle_level_permits` transcribes
 /// `calculateParticleLevel`, which is probabilistic for `DECREASED` (one spawn
 /// in three is folded down to `MINIMAL`) but not for the other two: `ALL` never
-/// folds and `MINIMAL` cannot be lifted without the always-show flag, which
-/// `ClientEvent::Particles` does not carry. So `All` -> 9 and `Minimal` -> 0 are
+/// folds, and `MINIMAL` is lifted only by the always-show flag, which this
+/// fixture deliberately leaves clear. So `All` -> 9 and `Minimal` -> 0 are
 /// exact counts, and a `Decreased` arm would need a statistical bound to say
 /// anything — deliberately not asserted here rather than asserted loosely.
 ///
@@ -2428,6 +2429,7 @@ fn the_particles_option_gates_the_spawn_and_all_is_not_a_no_op() {
         feed.send(NetUpdate::Particles {
             kind: "flame".into(),
             long_distance: false,
+            always_show: false,
             pos: Vec3::new(origin.x, origin.y, origin.z),
             offset: Vec3f::new(0.1, 0.1, 0.1),
             max_speed: 0.02,
@@ -2455,6 +2457,118 @@ fn the_particles_option_gates_the_spawn_and_all_is_not_a_no_op() {
         9,
         "control failed to fail: All must spawn the same burst the Minimal arm \
          dropped, or the zero above says nothing about the option"
+    );
+}
+
+/// `alwaysShow` — the second bool on `ClientboundLevelParticlesPacket`, which
+/// was decoded and then dropped: `ClientEvent::Particles` did not carry it, so
+/// `net_apply.rs` passed a literal `false` and the **Minimal** setting deleted
+/// every packet particle that did not also set `overrideLimiter`.
+///
+/// The rule is a *reprieve*, not an exemption, which is what makes this gate's
+/// shape unusual. `ClientLevel.calculateParticleLevel` lifts `MINIMAL` to
+/// `DECREASED` one time in ten, and `DECREASED` folds back down one time in
+/// three, so an always-show burst on `Minimal` survives with probability
+/// `1/10 x 2/3 = 1/15`. A single send therefore proves nothing in either
+/// direction and only a count over many sends can separate the hypotheses:
+///
+/// | hypothesis | spawns out of `SENDS` bursts |
+/// |---|---|
+/// | the flag never reaches `particle_level_permits` (the bug) | exactly 0 |
+/// | the flag is an *exemption* (the plausible wrong port) | exactly `SENDS` |
+/// | vanilla's reprieve | ~`SENDS / 15` |
+///
+/// `SENDS = 900` puts the expected count at 60 and makes a zero result
+/// impossible in practice — `(14/15)^900` is about `1e-27` — while the
+/// exemption hypothesis is separated by a factor of fifteen, far outside any
+/// binomial spread. The bounds below are therefore wide on purpose: they are
+/// there to tell three hypotheses apart, not to pin a number.
+///
+/// The `always_show: false` arm is the control, and it is *exact*: with the
+/// flag clear the fold is deterministic and no burst may survive at all. It
+/// runs on the same `Sim`, at the same level, with the same one-particle
+/// burst, so the only difference between the two arms is the field under test.
+#[test]
+fn always_show_gives_a_minimal_setting_particle_a_reprieve_and_not_an_exemption() {
+    use crate::net::NetUpdate;
+    use lodestone_client::Vec3;
+    use lodestone_particle::Sheet;
+
+    const SENDS: usize = 900;
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    sim.poll_net();
+    sim.particles_mut(|p| {
+        p.install_test_sheet_uv(HashMap::from([(
+            (Sheet::Flame, 0u16),
+            [0.0f32, 0.0, 0.0625, 0.0625],
+        )]));
+    });
+    sim.set_particle_level(crate::config::ParticleLevel::Minimal);
+
+    let origin = sim.player().position;
+    // One particle per burst and a zero lifetime is not available, so the
+    // engine is drained between sends instead: the count under test is "how
+    // many bursts got through", and a burst that spawns leaves exactly one
+    // particle behind.
+    // Each burst carries `count: 1` with no offset, so a burst that survives
+    // the filter leaves exactly one particle behind and the engine's population
+    // *is* the number that got through. Queued in one batch and drained with a
+    // single `poll_net` rather than one step per send, which is the whole
+    // difference between a two-second gate and a half-minute one; the relay
+    // channel holds 1024, comfortably above `SENDS`.
+    let mut survivors = |feed: &std::sync::mpsc::SyncSender<NetUpdate>,
+                         sim: &mut Sim,
+                         always_show: bool| {
+        for _ in 0..SENDS {
+            feed.send(NetUpdate::Particles {
+                kind: "flame".into(),
+                // Clear, so nothing bypasses the level filter by the other
+                // route: `overrideLimiter` skips the particle-level test
+                // entirely, and with it set this gate would pass whatever
+                // `always_show` did.
+                long_distance: false,
+                always_show,
+                pos: Vec3::new(origin.x, origin.y, origin.z),
+                offset: Vec3f::new(0.0, 0.0, 0.0),
+                max_speed: 0.0,
+                count: 1,
+                options: lodestone_model::event::ParticleOptions::None,
+            })
+            .unwrap();
+        }
+        sim.poll_net();
+        sim.particles_mut(|p| {
+            let n = p.engine_mut().particles().len();
+            p.engine_mut().clear();
+            n
+        })
+    };
+
+    let with_flag = survivors(&feed, &mut sim, true);
+    let without_flag = survivors(&feed, &mut sim, false);
+
+    assert_eq!(
+        without_flag, 0,
+        "control: with always_show clear, Minimal must drop every one of {SENDS} \
+         non-override bursts — if this is non-zero the level filter is not \
+         running at all and the other arm says nothing"
+    );
+    assert!(
+        with_flag > 0,
+        "always_show never reached particle_level_permits: {SENDS} bursts and not \
+         one survived, where vanilla's one-in-fifteen reprieve makes zero a \
+         1e-27 event"
+    );
+    assert!(
+        with_flag < SENDS / 2,
+        "always_show is being treated as an exemption rather than a reprieve: \
+         {with_flag} of {SENDS} bursts survived, where vanilla's fold predicts \
+         about {}",
+        SENDS / 15
     );
 }
 
@@ -2489,6 +2603,7 @@ fn long_distance_flag_gates_the_far_away_cutoff() {
     feed.send(NetUpdate::Particles {
         kind: "flame".into(),
         long_distance: false,
+        always_show: false,
         pos: far,
         offset: Vec3f::new(0.0, 0.0, 0.0),
         max_speed: 0.0,
@@ -2506,6 +2621,7 @@ fn long_distance_flag_gates_the_far_away_cutoff() {
     feed.send(NetUpdate::Particles {
         kind: "flame".into(),
         long_distance: true,
+        always_show: false,
         pos: far,
         offset: Vec3f::new(0.0, 0.0, 0.0),
         max_speed: 0.0,

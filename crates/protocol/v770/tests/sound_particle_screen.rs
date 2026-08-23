@@ -191,6 +191,10 @@ fn level_particles_decodes_registry_particle() {
         vec![Directive::Emit(ClientEvent::Particles {
             particle: key("minecraft:angry_villager"),
             long_distance: true,
+            // The fixture's second byte, deliberately the opposite of
+            // `long_distance` so the two adjacent bools cannot transpose
+            // unnoticed -- they coincide half the time by chance otherwise.
+            always_show: false,
             pos: Vec3 {
                 x: 1.0,
                 y: 64.0,

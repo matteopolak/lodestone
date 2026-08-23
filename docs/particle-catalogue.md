@@ -272,13 +272,22 @@ The nesting matters: `overrideLimiter` bypasses **both** filters, in one branch.
 into a single `&&` would let a `Minimal` setting suppress exactly the particles the server marked
 un-suppressible.
 
-**Known gap:** vanilla's `MINIMAL` gives an always-show particle a one-in-ten reprieve
-(`calculateParticleLevel`'s first `if`), and `ClientEvent::Particles` does not carry that flag —
-`v770`'s `LevelParticles::always_show` is decoded and then dropped by the adapter, the
-"read off the wire and discarded at the decode site" shape. `particle_level_permits` takes the
-parameter anyway so the transcription is complete; its only caller passes `false`. Until the flag
-is threaded through, `Minimal` drops every non-override packet particle — slightly stronger than
-vanilla, in the direction the option exists for.
+**The always-show flag now reaches this fold.** It used to be the "read off the wire and
+discarded at the decode site" shape in its purest form: `v770` decoded
+`LevelParticles::always_show`, `ClientEvent::Particles` did not carry it, `net_apply.rs` passed a
+literal `false`, and `particle_level_permits` had taken the parameter all along. So on `Minimal`
+every non-override packet particle was deleted, where vanilla's `calculateParticleLevel` gives an
+always-show one a one-in-ten lift to `DECREASED`.
+
+Two things about it. It is a **reprieve, not an exemption** — the lift is followed by
+`DECREASED`'s own one-in-three fold back down, so the real survival rate on `Minimal` is
+`1/10 x 2/3`, one in fifteen. And it is `false` on every legacy family for a reason that is not a
+gap: the field does not exist on the pre-26.2 particle packets at all (1.12's `WORLD_PARTICLES`
+carries `longDistance` and nothing else), so `false` is what vanilla's own three-argument
+`addParticle` overload passes there too. A gate on this cannot be a single send — see
+`always_show_gives_a_minimal_setting_particle_a_reprieve_and_not_an_exemption`, which counts over
+900 bursts precisely because zero, `SENDS`, and `SENDS/15` are the three hypotheses it has to
+tell apart.
 
 **Ambient/environmental: landed.** Fourteen new sheets, two new behaviours, seventeen
 new `spawn_one` arms and — the half this section previously called out as the real gap — a

@@ -633,6 +633,27 @@ pub struct EntityMetadataUpdate {
     /// means "not known to be an end crystal", which a consumer must treat as
     /// "draw the base" (vanilla's own default), never as a cleared flag.
     pub crystal_show_bottom: Option<bool>,
+    /// `Painting.DATA_PAINTING_VARIANT_ID` — which painting is hung, as its
+    /// registry key (`minecraft:kebab`), when present.
+    ///
+    /// # Why this one needs no class guard
+    ///
+    /// Unlike almost every other field here, it is self-identifying by
+    /// **serializer**: `PAINTING_VARIANT` has exactly one claimant in the 26.2
+    /// entity-data dump, so a decoder that sees it knows what it is without
+    /// establishing the entity type, exactly as [`item`](Self::item) does for
+    /// `ITEM_STACK`. The index it arrives at is therefore not load-bearing.
+    ///
+    /// # Why a key and not the wire's holder id
+    ///
+    /// The wire carries a `Holder<PaintingVariant>`, i.e. an index into the
+    /// server's own `minecraft:painting_variant` registry, and a data pack can
+    /// change what that index means. Surfacing the id would push that hazard
+    /// onto every consumer; the version adapter resolves it once, against the
+    /// registry order it knows, and hands on the key. A consumer that does not
+    /// recognise the key must draw nothing rather than substitute a variant —
+    /// see `lodestone_render::painting::painting_size`.
+    pub painting_variant: Option<Identifier>,
     /// `ItemFrame.DATA_ROTATION` — which of the eight 45° steps the stack in
     /// an item frame is turned to (`ItemFrame.getRotation()`, `0..8`).
     ///
@@ -793,6 +814,7 @@ impl EntityMetadataUpdate {
             && self.dragon_phase.is_none()
             && !self.crystal_beam_target.is_reported()
             && self.crystal_show_bottom.is_none()
+            && self.painting_variant.is_none()
             && self.item_frame_rotation.is_none()
             && self.display_billboard.is_none()
             && self.display_translation.is_none()
@@ -2020,6 +2042,19 @@ pub enum ClientEvent {
         particle: ResourceKey,
         /// Whether the particles should be visible at long distance.
         long_distance: bool,
+        /// Whether the particles survive the **Minimal** particle setting —
+        /// `ClientboundLevelParticlesPacket`'s `alwaysShow`, which
+        /// `ClientLevel.calculateParticleLevel` turns into a one-in-ten
+        /// reprieve rather than an exemption.
+        ///
+        /// Distinct from `long_distance`, which is the *distance* cutoff, and
+        /// the two are independent on the wire. **`false` on every legacy
+        /// family**, and honestly so rather than by omission: the field does
+        /// not exist on the pre-26.2 particle packets at all (1.12's
+        /// `WORLD_PARTICLES` carries `longDistance` and nothing else), so
+        /// there is no value to carry and `false` is what vanilla's own
+        /// `addParticle` overload passes.
+        always_show: bool,
         /// Particle origin.
         pos: Vec3,
         /// Randomized offset bounds.

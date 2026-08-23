@@ -2059,6 +2059,12 @@ impl V340Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Particles {
                 particle,
                 long_distance,
+                // 1.12's `WORLD_PARTICLES` has no always-show field: the
+                // packet carries `longDistance` and nothing else, and the
+                // flag was added with the 26.2-era packet. `false` is
+                // therefore the honest value here, not an unported one --
+                // there is nothing on this wire to port.
+                always_show: false,
                 pos: Vec3::new(f64::from(x), f64::from(y), f64::from(z)),
                 offset: Vec3f::new(offset_x, offset_y, offset_z),
                 max_speed,

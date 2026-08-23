@@ -916,6 +916,12 @@ pub enum NetUpdate {
         /// cutoff (`ClientLevel.doAddParticle`'s `overrideLimiter`, `1024.0`
         /// being `32.0` squared).
         long_distance: bool,
+        /// Whether the particle survives the **Minimal** particle setting --
+        /// `ClientLevel.calculateParticleLevel`'s one-in-ten reprieve, not an
+        /// exemption. Independent of `long_distance`, which is the *distance*
+        /// gate; `false` on every legacy family because the field does not
+        /// exist on their particle packets.
+        always_show: bool,
         /// World-space origin.
         pos: Vec3,
         /// Randomized per-axis offset bound when `count > 0`, or a raw
@@ -4574,6 +4580,7 @@ fn forward(
         ClientEvent::Particles {
             particle,
             long_distance,
+            always_show,
             pos,
             offset,
             max_speed,
@@ -4582,6 +4589,7 @@ fn forward(
         } => NetUpdate::Particles {
             kind: particle.path().to_string(),
             long_distance,
+            always_show,
             pos,
             offset,
             max_speed,
@@ -5502,6 +5510,10 @@ mod tests {
         let event = ClientEvent::Particles {
             particle: ResourceKey::from_str("minecraft:flame").unwrap(),
             long_distance: true,
+            // Opposite to `long_distance` on purpose: two adjacent bools set
+            // the same way cannot show a transposition, and these two gate
+            // different things (distance against the particle-level filter).
+            always_show: false,
             pos: Vec3::new(1.0, 2.0, 3.0),
             offset: Vec3f::new(0.1, 0.2, 0.3),
             max_speed: 0.5,
@@ -5516,6 +5528,7 @@ mod tests {
             NetUpdate::Particles {
                 kind,
                 long_distance,
+                always_show,
                 pos,
                 offset,
                 max_speed,
@@ -5524,6 +5537,11 @@ mod tests {
             } => {
                 assert_eq!(kind, "flame", "namespace must be stripped, matching Sound");
                 assert!(long_distance);
+                assert!(
+                    !always_show,
+                    "always_show must survive the hop independently of long_distance, \
+                     not be aliased to it"
+                );
                 assert_eq!(pos, Vec3::new(1.0, 2.0, 3.0));
                 assert_eq!(offset, Vec3f::new(0.1, 0.2, 0.3));
                 assert_eq!(max_speed, 0.5);

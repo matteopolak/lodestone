@@ -628,6 +628,7 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Particles {
                 particle: parse_key(name, "particle")?,
                 long_distance: particles.override_limiter,
+                always_show: particles.always_show,
                 pos: Vec3 {
                     x: particles.x,
                     y: particles.y,
@@ -1121,6 +1122,12 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         Directive::Emit(ClientEvent::Particles {
             particle: parse_key("explosion_emitter", "particle")?,
             long_distance: false,
+            // `ClientPacketListener.handleExplosion` reaches the three-argument
+            // `Level.addParticle` overload, which passes `false` for both the
+            // limiter override and always-show. Neither is a field of
+            // `ClientboundExplodePacket`, so this is vanilla's value rather
+            // than a value we chose.
+            always_show: false,
             pos: Vec3::new(x, y, z),
             offset: Vec3f::new(0.0, 0.0, 0.0),
             max_speed: 0.0,

@@ -1013,6 +1013,10 @@ fn client_event_carriers_cover_play_state_gameplay_packets_without_protocol_ids(
         ClientEvent::Particles {
             particle,
             long_distance: true,
+            // Deliberately the opposite of `long_distance`: the two are
+            // independent gates (distance against particle-level) and a
+            // fixture setting both the same way cannot see them transposed.
+            always_show: false,
             pos: Vec3::new(4.0, 5.0, 6.0),
             offset: Vec3f::new(0.1, 0.2, 0.3),
             max_speed: 0.4,

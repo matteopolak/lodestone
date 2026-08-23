@@ -166,8 +166,10 @@ grep for the hardcoded constant.
 arm had already transcribed `ClientLevel.doAddParticle`'s 32-block cutoff *and* its
 `overrideLimiter` bypass, and was missing only the sibling `particleLevel != MINIMAL`
 test three lines away. See `docs/particle-catalogue.md` for the fold's probabilistic
-shape and for the one honest gap (the always-show flag is decoded by `v770` and
-dropped by the adapter, so `MINIMAL`'s one-in-ten reprieve is unreachable).
+shape. The always-show flag that used to be dropped between the adapter and the
+fold — leaving `MINIMAL`'s one-in-ten reprieve unreachable — now rides
+`ClientEvent::Particles` and `NetUpdate::Particles` through to
+`particle_level_permits`.
 
 `attackIndicator` is a third shape again, and the one worth reading: **two of
 its three states already had a consumer and the third did not.** The crosshair
