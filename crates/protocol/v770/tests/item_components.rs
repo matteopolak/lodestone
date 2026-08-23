@@ -20,10 +20,10 @@
 //! component whose shape is inferred rather than observed should get a captured
 //! fixture too.
 
-use lodestone_core::{Nbt, Writer, write_network_nbt};
+use lodestone_core::{Nbt, NbtTag, Writer, write_network_nbt};
 use lodestone_model::{
-    ClientEvent, ConnectionState, Directive, EquipmentSlot, ItemEnchantment, Text, ToolBlocks,
-    ToolPatch, VersionAdapter,
+    ClientEvent, ConnectionState, Directive, EquipmentSlot, ItemEnchantment, Text, TextColor,
+    ToolBlocks, ToolPatch, VersionAdapter,
 };
 use lodestone_v770::V770Adapter;
 use lodestone_data::data_component_types::component_type_name;
@@ -170,6 +170,47 @@ fn decodes_modeled_components() {
         item.components.enchantments,
         vec![ItemEnchantment { id: 12, level: 4 }]
     );
+    assert!(!item.components.has_unmodeled);
+}
+
+/// Lore is a list of full chat-component trees, not a list of flattened
+/// strings. In particular a child can override both the line's inherited
+/// formatting and its colour with an RGB value that has no legacy-code form.
+#[test]
+fn lore_preserves_nested_rgb_and_explicit_style_overrides() {
+    let mut patch = Writer::default();
+    patch.var_i32(1); // one added component
+    patch.var_i32(0); // none removed
+    patch.var_i32(component_id("minecraft:lore"));
+    patch.var_i32(1); // one lore line
+    write_network_nbt(
+        &mut patch,
+        &Nbt::Compound(vec![
+            ("text".into(), Nbt::String("Ancient ".into())),
+            (
+                "extra".into(),
+                Nbt::List {
+                    element_type: NbtTag::Compound,
+                    elements: vec![Nbt::Compound(vec![
+                        ("text".into(), Nbt::String("Rune".into())),
+                        ("color".into(), Nbt::String("#12abef".into())),
+                        ("italic".into(), Nbt::Byte(0)),
+                    ])],
+                },
+            ),
+        ]),
+    )
+    .unwrap();
+
+    let payload = set_slot_with_patch("minecraft:paper", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert_eq!(item.components.lore.len(), 1);
+    assert_eq!(item.components.lore[0].to_plain_string(), "Ancient Rune");
+    let spans = item.components.lore[0].to_spans();
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[1].style.color, Some(TextColor::Rgb(0x12_ab_ef)));
+    assert_eq!(spans[1].style.italic, Some(false));
     assert!(!item.components.has_unmodeled);
 }
 

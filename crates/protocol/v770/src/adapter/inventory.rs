@@ -1144,8 +1144,10 @@ fn read_component_patch(
                         "lore declares {lines} lines; ByteBufCodecs.list(256) permits at most 256"
                     )));
                 }
+                components.lore.reserve(lines);
                 for _ in 0..lines {
-                    read_network_nbt(reader).map_err(dec_err)?;
+                    let line = read_network_nbt(reader).map_err(dec_err)?;
+                    components.lore.push(Text::from_nbt(&line));
                 }
             }
 
