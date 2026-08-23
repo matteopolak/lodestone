@@ -2594,6 +2594,9 @@ of these caught the *brief* being wrong rather than the code.
   Fixed-rate boat physics with per-frame render interpolation, water-mask ordering that does
   not hide riders, styled `minecraft:lore` tooltips, hard boat collision, and authoritative
   integrated-server dismount placement.
+- [Implementation plan: boat motion, lore, collision, and dismount](./superpowers/plans/2026-08-23-boat-motion-lore-collision.md) —
+  The task-by-task red/green sequence for the approved design, including focused test and
+  repository-health commands.
 
 - [Worldgen parity harness](./worldgen-parity.md) —
   `crates/lodestone-worldgen-parity` is the shared chunk-for-chunk comparison harness
