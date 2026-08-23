@@ -1183,6 +1183,9 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 ///   is a real field here.
 /// * `minecraft:sculk_charge` carries a `SculkChargeParticleOptions` — one
 ///   `ByteBufCodecs.FLOAT` roll.
+/// * `minecraft:dragon_breath` carries a `PowerParticleOption` — one
+///   `ByteBufCodecs.FLOAT` power, and no colour, since
+///   `DragonBreathParticle` draws its purple out of the RNG.
 ///
 /// Two further registry types (`minecraft:tinted_leaves`, `minecraft:flash`)
 /// also carry a `ColorParticleOption`, and are deliberately absent below: this
@@ -1236,6 +1239,11 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
             let mut reader = Reader::new(bytes);
             let color = argb(&mut reader)?;
             Ok(ParticleOptions::Color { color })
+        }
+        "minecraft:dragon_breath" => {
+            let mut reader = Reader::new(bytes);
+            let power = reader.f32().map_err(dec_err)?;
+            Ok(ParticleOptions::Power { power })
         }
         "minecraft:sculk_charge" => {
             let mut reader = Reader::new(bytes);

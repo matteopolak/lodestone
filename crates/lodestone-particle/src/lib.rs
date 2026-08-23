@@ -195,6 +195,14 @@ pub enum Sheet {
     /// Its own sheet, not [`Self::Soul`]'s: `sculk_soul.json` names
     /// `sculk_soul_N`, and only the frame *count* coincides.
     SculkSoul,
+    /// `particle/generic_5`, `generic_6`, `generic_7` — `dragon_breath.json`.
+    ///
+    /// **Three** frames, ascending, and a *subsequence* of [`Self::Generic`]'s
+    /// eight rather than a sheet of its own textures: the pack file lists only
+    /// the last three, ascending, where `Generic` runs all eight descending.
+    /// Another case where a sheet's identity is its frame *sequence* and not
+    /// its pixels, like [`Self::PortalGeneric`] and [`Self::Generic0`].
+    DragonBreath,
 }
 
 impl Sheet {
@@ -325,6 +333,9 @@ impl Sheet {
                 "sculk_soul_5", "sculk_soul_6", "sculk_soul_7", "sculk_soul_8", "sculk_soul_9",
                 "sculk_soul_10",
             ],
+            // Ascending, per `dragon_breath.json` -- and only the last three
+            // of `generic_N`, not all eight.
+            Self::DragonBreath => &["generic_5", "generic_6", "generic_7"],
         }
     }
 
@@ -405,6 +416,7 @@ impl Sheet {
             Self::SculkSoul,
             Self::Lava,
             Self::SculkChargePop,
+            Self::DragonBreath,
         ]
     }
 
@@ -644,6 +656,29 @@ pub enum Behaviour {
     /// colour, so its absence reads as a slightly less clingy cloud rather than
     /// a missing particle.
     Cloud,
+    /// `DragonBreathParticle` — the lingering cloud a dragon's breath attack
+    /// and a lingering potion leave on the ground.
+    ///
+    /// A full `tick()` override that never calls `super.tick()`, so none of
+    /// [`Particle::tick_base`]'s gravity, vertical friction or ground drag
+    /// applies: it damps `xd`/`zd` only, and accelerates *horizontally* when
+    /// its height stops changing (`if (y == yo) { xd *= 1.1; zd *= 1.1; }`),
+    /// which is what makes the cloud creep outward across a floor rather than
+    /// settling. It also fades **in** over the first thirty-second of its life,
+    /// the same `clamp((age + a) / lifetime * 32, 0, 1)` ramp
+    /// [`Self::Crit`] and [`Self::AshSmoke`] have.
+    ///
+    /// `hit_ground` is `DragonBreathParticle.hasHitGround`, which arms the
+    /// `yd += 0.002` lift and the vertical friction. It is transcribed rather
+    /// than dropped even though `hasPhysics = false` means
+    /// [`Particle::move_by`] can never set `on_ground` and so it can never
+    /// become `true` — that is vanilla's own arrangement, and a port that
+    /// silently omits a clause because the clause happens to be unreachable is
+    /// how a later change to one field quietly breaks another.
+    DragonBreath {
+        /// Whether the cloud has touched a surface.
+        hit_ground: bool,
+    },
     /// `LavaParticle` — the pops off a lava surface, and the only particle in
     /// this crate that spawns a **different type** as it lives.
     ///
@@ -795,7 +830,8 @@ impl Behaviour {
                 | Self::Animated { .. }
                 | Self::Cloud
                 | Self::SquidInk
-                | Self::DustColorTransition { .. },
+                | Self::DustColorTransition { .. }
+                | Self::DragonBreath { .. },
                 SpriteSource::Sheet { sheet, .. },
             ) => Some(sheet),
             _ => None,
@@ -844,6 +880,9 @@ impl Behaviour {
             | Self::Lava
             // `DripParticle.getLayer` is `OPAQUE`.
             | Self::Drip { .. }
+            // `DragonBreathParticle.getLayer` is `OPAQUE` too -- it is a
+            // dense cloud, not a translucent mote.
+            | Self::DragonBreath { .. }
             | Self::DustColorTransition { .. } => Layer::Opaque,
         }
     }
@@ -1125,6 +1164,7 @@ impl Particle {
             | Behaviour::Heart
             | Behaviour::Dust
             | Behaviour::Cloud
+            | Behaviour::DragonBreath { .. }
             | Behaviour::DustColorTransition { .. } => {
                 self.quad_size * (normalised() * 32.0).clamp(0.0, 1.0)
             }
@@ -1217,6 +1257,10 @@ impl Particle {
                 Vec::new()
             }
             Behaviour::HugeExplosionSeed => self.tick_huge_explosion_seed(),
+            Behaviour::DragonBreath { hit_ground } => {
+                self.tick_dragon_breath(view, hit_ground);
+                Vec::new()
+            }
             Behaviour::Lava => {
                 self.tick_base(view);
                 if self.removed {
@@ -1354,6 +1398,65 @@ impl Particle {
                 frame: sheet.frame_for_age(self.age, self.lifetime),
             };
         }
+    }
+
+    /// `DragonBreathParticle.tick()` — a full override that calls neither
+    /// `super.tick()` nor any gravity term.
+    ///
+    /// ```java
+    /// this.xo = this.x; this.yo = this.y; this.zo = this.z;
+    /// if (this.age++ >= this.lifetime) { this.remove(); }
+    /// else {
+    ///    this.setSpriteFromAge(this.sprites);
+    ///    if (this.onGround) { this.yd = 0.0; this.hasHitGround = true; }
+    ///    if (this.hasHitGround) { this.yd += 0.002; }
+    ///    this.move(this.xd, this.yd, this.zd);
+    ///    if (this.y == this.yo) { this.xd *= 1.1; this.zd *= 1.1; }
+    ///    this.xd = this.xd * this.friction;
+    ///    this.zd = this.zd * this.friction;
+    ///    if (this.hasHitGround) { this.yd = this.yd * this.friction; }
+    /// }
+    /// ```
+    ///
+    /// Two things a reader should not "fix". The horizontal `* 1.1` fires on
+    /// `y == yo` — an exact comparison against the *previous* position, so it
+    /// fires whenever the cloud's height did not change at all this tick, which
+    /// for a `hasPhysics = false` particle with no vertical velocity is every
+    /// tick. That is the outward creep, not a bug. And `yd` is damped **only**
+    /// once the cloud has hit ground: an airborne one keeps whatever vertical
+    /// speed the packet gave it, undamped, forever.
+    fn tick_dragon_breath(&mut self, view: &dyn CollisionView, hit_ground: bool) {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        // `age++ >= lifetime` compares the pre-increment value, so this is the
+        // same test `tick_base` spells as `age += 1; age > lifetime`.
+        self.age += 1;
+        if self.age > self.lifetime {
+            self.remove();
+            return;
+        }
+        self.set_sprite_from_age();
+        let mut hit_ground = hit_ground;
+        if self.on_ground {
+            self.yd = 0.0;
+            hit_ground = true;
+        }
+        if hit_ground {
+            self.yd += 0.002;
+        }
+        self.move_by(self.xd, self.yd, self.zd, view);
+        if (self.y - self.yo).abs() < f64::EPSILON {
+            self.xd *= 1.1;
+            self.zd *= 1.1;
+        }
+        let friction = f64::from(self.friction);
+        self.xd *= friction;
+        self.zd *= friction;
+        if hit_ground {
+            self.yd *= friction;
+        }
+        self.behaviour = Behaviour::DragonBreath { hit_ground };
     }
 
     /// `PortalParticle.tick()` — a full override that **recomputes** the

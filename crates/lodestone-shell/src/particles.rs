@@ -747,6 +747,25 @@ impl Particles {
             // never blocked on the `ParticleOptions` decoder the way it first
             // looked: `ParticleTypes.FIREWORK` is a `SimpleParticleType`.
             "firework" => emit::firework(&mut self.engine, x, y, z, xa, ya, za),
+            // `DragonBreathParticle` — a dragon's breath attack and, far more
+            // commonly, every lingering potion cloud. Its `PowerParticleOption`
+            // is a velocity multiplier and nothing else; the purple is drawn
+            // per particle inside the emitter, so a missing payload costs
+            // motion rather than colour and the fallback is power 1.0
+            // (`PowerParticleOption`'s own data-codec default).
+            "dragon_breath" => match options {
+                ParticleOptions::Power { power } => {
+                    emit::dragon_breath(&mut self.engine, x, y, z, xa, ya, za, power);
+                }
+                _ => {
+                    tracing::debug!(
+                        target: "particles",
+                        "dragon_breath particle with no PowerParticleOption payload; \
+                         drawing at unit power"
+                    );
+                    emit::dragon_breath(&mut self.engine, x, y, z, xa, ya, za, 1.0);
+                }
+            },
             // `SculkChargeParticle` has its own emitter rather than sharing
             // `animated_ambient` with the three below: its roll is a wire
             // field, its lifetime a per-particle draw, and its provider
@@ -2223,6 +2242,140 @@ mod tests {
             [0.0, 0.1, 0.0],
             "setPower(0) must leave the 0.1 upward bias standing (a naive `yd *= power` \
              gives 0.0 here, and an unapplied power leaves the constructor's jitter)"
+        );
+    }
+
+    /// `dragon_breath`, which had no dispatch arm at all: a dragon's breath
+    /// attack and — far more often — every lingering potion cloud fell into the
+    /// catch-all and drew nothing.
+    ///
+    /// Three things at once, because they are three failure modes of the same
+    /// port. **The sheet** is `dragon_breath.json`'s own three-frame ascending
+    /// `generic_5..generic_7`, not `Sheet::Generic`'s eight descending; a
+    /// particle pointed at `Generic` still resolves to a real sprite, so
+    /// nothing would be red. **The tint** is drawn per particle out of two
+    /// narrow bands whose ranges do not overlap, so asserting each channel
+    /// against its own band catches a transposition — reading blue's band into
+    /// green makes green non-zero, which is the assertion that fires.
+    ///
+    /// What this deliberately does **not** claim to catch is green's draw being
+    /// replaced by a bare `0.0`: `Mth.nextFloat` draws even when both bounds
+    /// are equal, so omitting it shifts every later number in the RNG stream —
+    /// but every shifted number is still a uniform float mapped into the same
+    /// band, so no assertion here can see it. The transcription is right and
+    /// this gate is not the thing that proves it; only the source is. **The
+    /// power** is the `PowerParticleOption` payload.
+    #[test]
+    fn dragon_breath_draws_its_own_sheet_and_its_own_purple_band() {
+        let mut p = resolvable();
+        p.spawn_particles(
+            "dragon_breath",
+            [0.5, 65.0, 0.5],
+            [0.0; 3],
+            0.0,
+            1,
+            ParticleOptions::Power { power: 1.0 },
+        );
+        assert_eq!(p.engine.particles().len(), 1, "dragon_breath must dispatch");
+        let particle = &p.engine.particles()[0];
+        assert!(
+            matches!(
+                particle.sprite,
+                SpriteSource::Sheet { sheet: Sheet::DragonBreath, .. }
+            ),
+            "dragon_breath.json names generic_5..7 ascending, which is Sheet::DragonBreath \
+             and not Sheet::Generic; got {:?}",
+            particle.sprite
+        );
+        let [r, g, b] = particle.colour;
+        assert!(
+            (0.717_647_1..=0.874_509_8).contains(&r),
+            "red must come from Mth.nextFloat(random, 0.7176471, 0.8745098), got {r}"
+        );
+        assert_eq!(
+            g, 0.0,
+            "green's two bounds are both 0.0 -- but it is still a real draw, and a \
+             non-zero value here means the blue band was read into it"
+        );
+        assert!(
+            (0.823_529_4..=0.976_470_6).contains(&b),
+            "blue must come from Mth.nextFloat(random, 0.8235294, 0.9764706), got {b}"
+        );
+    }
+
+    /// `PowerParticleOption` reaching `Particle.setPower`, on the same
+    /// deterministic input the `effect` gate uses and for the same reason: at
+    /// `power = 0.0` the correct formula lands on exactly `(0, 0.1, 0)` and the
+    /// plausible wrong one (`yd *= power`) on `(0, 0, 0)`.
+    ///
+    /// `dragon_breath` is the sharper of the two subjects, because unlike
+    /// `SpellParticle` its constructor assigns the packet's velocity words
+    /// **directly** — no jitter, no `0.1` bias — so the `+ 0.1` that survives
+    /// here can only have come from `setPower` itself.
+    #[test]
+    fn dragon_breaths_power_reaches_set_power() {
+        let mut p = resolvable();
+        p.spawn_particles(
+            "dragon_breath",
+            [0.5, 65.0, 0.5],
+            // `count == 0` takes the branch that uses `offset * max_speed` as a
+            // raw velocity, so these three words are the particle's own
+            // velocity rather than a scatter bound -- the only way to hand this
+            // constructor a known `yd`.
+            [1.0, 1.0, 1.0],
+            0.5,
+            0,
+            ParticleOptions::Power { power: 0.0 },
+        );
+        assert_eq!(p.engine.particles().len(), 1);
+        let particle = &p.engine.particles()[0];
+        assert_eq!(
+            [particle.xd, particle.yd, particle.zd],
+            [0.0, 0.1, 0.0],
+            "setPower(0) rescales yd about the 0.1 bias rather than multiplying it"
+        );
+    }
+
+    /// [`Behaviour::DragonBreath`]'s tick is a **full override**, and the tell
+    /// is horizontal: `if (y == yo) { xd *= 1.1; zd *= 1.1; }` fires on every
+    /// tick a `hasPhysics = false` cloud with no vertical velocity takes, so
+    /// its horizontal speed *grows* by `1.1 * friction` — `1.1 * 0.96 = 1.056`
+    /// per tick — where `tick_base` would only damp it by `0.96`. The two
+    /// hypotheses therefore move the number in opposite directions, which is
+    /// what makes a single tick enough.
+    ///
+    /// That creep is the whole visual: it is what makes a lingering potion
+    /// cloud spread across a floor instead of hanging where it landed.
+    #[test]
+    fn a_dragon_breath_cloud_accelerates_outward_rather_than_being_damped() {
+        struct NoCollision;
+        impl CollisionView for NoCollision {
+            fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<lodestone_physics::Aabb>) {}
+        }
+
+        let mut p = resolvable();
+        p.spawn_particles(
+            "dragon_breath",
+            [0.5, 65.0, 0.5],
+            // `count == 0` again: a purely horizontal velocity, so `y == yo`
+            // holds and the creep branch is the one under test.
+            [1.0, 0.0, 0.0],
+            0.25,
+            0,
+            ParticleOptions::Power { power: 1.0 },
+        );
+        let before = p.engine.particles()[0].xd;
+        p.tick(&NoCollision);
+        let after = p.engine.particles()[0].xd;
+        assert!(
+            after > before,
+            "a dragon_breath cloud must accelerate horizontally ({before} -> {after}); \
+             tick_base's plain friction would have damped it instead"
+        );
+        assert!(
+            (after / before - 1.056).abs() < 1e-6,
+            "the growth must be exactly 1.1 * friction (0.96), got {}",
+            after / before
         );
     }
 

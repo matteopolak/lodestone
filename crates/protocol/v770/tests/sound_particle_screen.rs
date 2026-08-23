@@ -393,6 +393,28 @@ fn level_particles_decodes_a_sculk_charge_roll() {
     assert_eq!(*options, ParticleOptions::SculkCharge { roll: 1.234_5 });
 }
 
+/// `dragon_breath` (registry id 15) carries a `PowerParticleOption` — one
+/// `ByteBufCodecs.FLOAT` power and nothing else. It is a *different* option
+/// class from `effect`'s `SpellParticleOption` despite both ending in a power:
+/// `DragonBreathParticle` draws its purple out of the RNG, so there is no
+/// colour word in front of it and the payload is four bytes rather than eight.
+/// Reading it as a `SpellParticleOption` would consume the power as a colour
+/// and then run off the end of the packet.
+#[test]
+fn level_particles_decodes_a_dragon_breath_power() {
+    let adapter = V770Adapter::new();
+    let directives = handle(
+        &adapter,
+        play::clientbound::LEVEL_PARTICLES,
+        &level_particles_bytes(15, &0.437_5f32.to_be_bytes()),
+    );
+    let Directive::Emit(ClientEvent::Particles { particle, options, .. }) = &directives[0] else {
+        panic!("expected a Particles directive, got {directives:?}");
+    };
+    assert_eq!(*particle, key("minecraft:dragon_breath"));
+    assert_eq!(*options, ParticleOptions::Power { power: 0.437_5 });
+}
+
 // ---- open_screen ----------------------------------------------------------
 
 #[test]
