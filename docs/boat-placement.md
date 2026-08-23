@@ -23,6 +23,9 @@ INTERACT ─ MobSim::mount_vehicle ─ ServerProtocol::encode_set_passengers
                                                    └ client: session::Riding
                                                        └ ecs::vehicle::tick_controlled_vehicle
 
+PLAYER_INPUT(shift) ─ vanilla dismount search ─ SET_PASSENGERS(empty)
+                                            └ PLAYER_POSITION at the chosen point
+
 MOVE_VEHICLE ─ MobSim::apply_vehicle_move  (the client owns the boat; we write it down)
 
 world tick  ─ MobSim::tick_vehicles        (UNRIDDEN boats only: float_boat + move_entity)
@@ -97,6 +100,27 @@ passenger seat constraint owns the player's position. The type census also names
 shulkers and happy ghasts as potential hard colliders, but their per-instance
 alive/state gates are not yet represented; boats are unconditional and are the
 complete production case here.
+
+### Dismounting
+
+Sneaking while aboard reaches the integrated server as `PLAYER_INPUT.shift`.
+The server clears the passenger list, computes
+`AbstractBoat.getDismountLocationForPassenger`, updates its connection-local
+player position, and sends both `SET_PASSENGERS` with an empty list and an
+absolute `PLAYER_POSITION` sync in the same dispatch transition.
+
+The preferred point is outside the hull in the passenger's facing direction,
+at `(boat width × √2 + player width + 1e-5F) / 2`. The search checks the floor
+in that cell and the cell below, in standing/crouching/swimming pose order,
+against the real block collision shapes. A water cell below skips the side
+search. When no candidate fits, vanilla's base `Entity` fallback is the boat
+centre at its exact top (`feet Y + 0.5625`); the client-side hard collision
+described above makes that fallback stable instead of letting the player fall
+through the hull.
+
+Only boats use this resolver. Minecart and mob dismounts retain their existing
+placement behaviour; their vehicle-specific vanilla searches are separate
+algorithms and should not be approximated through the boat constants.
 
 ## How to change it
 
@@ -248,8 +272,9 @@ complete production case here.
   `entity/chest_boat/bamboo`), and vanilla's species *is* a texture rather than geometry, so a
   spruce boat is oak-coloured. Fixing it means a variant texture on the four `lodestone-assets`
   entries, not a change to the name mapping.
-* **No dismount packet has a producer.** There is no shift-to-get-out send in the shell, so a
-  rider stays aboard until they disconnect. `MobSim::dismount_rider` is ready for it.
+* **Dismount position is server-authoritative.** Do not clear `Riding` locally and
+  invent a client offset: the integrated server's collision-valid candidate and
+  fallback arrive through `PLAYER_POSITION`, beside the empty passenger list.
 * **A vanished rider is evicted by roster diff, not by a disconnect hook.** `tick_vehicles`
   clears a rider absent from `MobSim::set_players`, guarded on the roster being non-empty —
   `set_players` is position-driven and legitimately empty before anyone has moved, so an

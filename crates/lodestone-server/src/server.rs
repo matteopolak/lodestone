@@ -12318,16 +12318,50 @@ where
             // minecart, then mob in sequence finds whichever one (if any) is
             // occupied without risking a double-dismount.
             if shift {
+                let rotation = player_rot.unwrap_or_default();
+                let terrain = source.get();
                 let dismounted = mobs.with(|sim| {
-                    sim.dismount_rider(player_entity_id)
-                        .or_else(|| sim.dismount_minecart_rider(player_entity_id))
-                        .or_else(|| sim.dismount_mob(player_entity_id))
+                    if let Some(vehicle_id) = sim.vehicle_ridden_by(player_entity_id) {
+                        let position = sim.vehicle_dismount_position(
+                            vehicle_id,
+                            rotation.yaw,
+                            &|x, y, z| terrain.block_state(x, y, z),
+                        );
+                        sim.dismount_rider(player_entity_id)
+                            .map(|id| (id, position))
+                    } else {
+                        sim.dismount_minecart_rider(player_entity_id)
+                            .or_else(|| sim.dismount_mob(player_entity_id))
+                            .map(|id| (id, None))
+                    }
                 });
-                if let Some(vehicle_id) = dismounted {
+                if let Some((vehicle_id, dismount_position)) = dismounted {
                     // `Entity.stopRiding`'s own wire consequence — the vehicle's
                     // whole (now empty) passenger list, the same `SET_PASSENGERS`
                     // handoff every mount arm above uses to announce boarding.
                     apply(conn, state, proto.encode_set_passengers(vehicle_id, &[])).await?;
+                    if let Some(position) = dismount_position {
+                        // `LivingEntity.removeVehicle`: the server applies the
+                        // vehicle's dismount location and the client receives
+                        // that authoritative position in the same transition.
+                        // Updating the connection-local mirror first keeps the
+                        // next movement delta and the player registry on the
+                        // same side of the teleport.
+                        *player_pos = Some((position.x, position.y, position.z));
+                        *player_rot = Some(rotation);
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_teleport(
+                                position.x,
+                                position.y,
+                                position.z,
+                                rotation.yaw,
+                                rotation.pitch,
+                            ),
+                        )
+                        .await?;
+                    }
                 }
             }
         }
