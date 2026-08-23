@@ -112,10 +112,38 @@ allocator once the server-ECS migration (#433) gives both a common owner.
   rest follow. Handling only `move_player_rot` looks right in a test where the
   subject stands still and leaves every *walking* player frozen — the failure
   is silent and only shows up in the case a stationary test cannot reach.
-* **Cadence is packet-driven.** A player's movement reaches another connection
-  on that connection's *next inbound packet*, not on a timer. Adequate in
-  practice (a real client sends a movement or status packet every tick) and
-  identical to how mob positions already propagate.
+* **Cadence is a timer, and it used to be packet-driven — that was a real bug.**
+  `serve_play` runs `stream_pass` from `ENTITY_STREAM_INTERVAL` (50 ms, the same
+  20 TPS stand-in every other timer in `server.rs` uses, and the rate vanilla's
+  own entity tracker runs at) *as well as* at the tail of its `read_packet` arm.
+  Both call sites are load-bearing: the packet-driven one has to run after the
+  packet it just handled, because a move republishes the sender's position into
+  the registry and a dig removes an entity, so folding it into the timer would
+  delay every such consequence by up to a tick.
+
+  Before the timer existed, a connection's whole view of the world advanced only
+  when *that connection* spoke, and both consequences were real. A client that
+  has gone quiet re-sends an idle position only every 20 ticks (vanilla's
+  `LocalPlayer.sendPosition` reminder, which this repo ports), so a player
+  standing perfectly still saw everyone else — and every mob — move in
+  one-second jumps. Worse, a connection that sends *nothing* got exactly one
+  streaming pass for its entire life, the one at join: anyone who joined after
+  it was invisible forever, and waiting longer could not help. That is what
+  turned `lan_player_stream.rs` red in CI, where it presented as a flake and its
+  own assertion message blamed the `PlayerAwareSource` composition — a
+  composition defect would have failed on every run, deterministically, which is
+  the tell that the accusation was wrong.
+
+  `crates/protocol/v770/tests/lan_player_stream.rs`'s
+  `a_silent_client_learns_about_a_later_joiner` is the gate: B joins an empty
+  world, never speaks again, and must still be told about A. Observed failing
+  with the timer arm's directives dropped, and passing with them.
+
+  The `wasm32` `serve_play` has no such timer — its loop has one
+  `BrowserInterval` and no `select!` — so browser singleplayer keeps the old
+  packet-driven cadence. That is the same documented per-target gap as
+  `vitals`/`container_sync` there, and it costs nothing today because that world
+  has exactly one connection.
 * **`bind` starves a current-thread tokio runtime.** Its `run_tick_loop` at
   20 TPS prevents a `#[tokio::test]`'s own `tokio::time::timeout` timers from
   firing: login and configuration complete, then every read hangs with the

@@ -29,6 +29,31 @@
 //! one-thread contention `crate::server::SourceRef`'s doc comment describes,
 //! seen from the test side; the shell runs its own runtime and is
 //! unaffected.
+//!
+//! # What the 30-second CI failure here actually was
+//!
+//! `two_lan_clients_receive_each_others_player_entities` consumed the whole of
+//! [`ARRIVAL_DEADLINE`] on a two-core runner and then reported *"B must receive
+//! A's player entity over LAN — got []"*. Its own message blamed `bind` for
+//! handing out a bare mob source; that hypothesis was wrong, and wrong in a way
+//! worth stating because the message had been read as a finding — a composition
+//! defect fails on every machine, deterministically, not once under load.
+//!
+//! The real cause was a **production** defect, one layer down. `serve_play`'s
+//! streaming pass ran only in the `read_packet` arm of its loop, so a
+//! connection's view of the world advanced only when *that connection* spoke.
+//! B joins, is told about whoever is registered at that instant, and then — in
+//! this test — never sends another packet, so it had exactly one pass for its
+//! whole life. Any join whose registration landed after that pass was invisible
+//! to it forever, and waiting longer could not help.
+//!
+//! Two things had to line up, and both were real: A's registration landed after
+//! B's pass (see [`join`] for the silent windows in a join that let the old
+//! gap-terminated wait return early), and nothing re-sent afterwards. Only the
+//! first is a harness problem. `crate::server`'s `ENTITY_STREAM_INTERVAL` fixes
+//! the second by running the pass from a timer at 20 TPS, as vanilla's entity
+//! tracker does; `a_silent_client_learns_about_a_later_joiner` below is the
+//! deterministic gate for it and was observed failing without it.
 
 use std::time::Duration;
 
@@ -206,15 +231,40 @@ async fn handshake<T: lodestone_net::Transport>(
         .unwrap();
 }
 
-/// A join whose caller asserts an **absence**, so the gap-terminated [`drain`] is
-/// the only instrument available.
+/// A join that returns once this player is registered, carrying everything the
+/// server sent on the way in.
+///
+/// The caller asserts an **absence** over the result (no other player's
+/// `add_entity`), which still needs the gap-terminated [`drain`] — but the
+/// *stopping* condition is the positive event below, because "this player is
+/// now joined" is a presence and a silence is no evidence of one.
 async fn join<T: lodestone_net::Transport>(
     client: &mut Connection<T>,
     name: &str,
     uuid: Uuid,
 ) -> Vec<(i32, Vec<u8>)> {
     handshake(client, name, uuid).await;
-    drain(client).await
+    // Terminated on this connection's **own** roster entry, not on a silence.
+    // `player_info_update` is the first packet the server sends after
+    // `PlayerRegistry::join`, and every roster carries the viewer itself (only
+    // the *entity* half of a view excludes it), so receiving one is the only
+    // positive evidence available that this player is now visible to every
+    // other connection.
+    //
+    // A gap-terminated drain cannot establish that, and the difference is not
+    // theoretical: the join sequence has several silent windows — the world-spawn
+    // spiral before the first packet, the command-tree encode, the join view's
+    // chunk generation — any of which can outlast [`QUIET_GAP`] on a slow or
+    // oversubscribed machine, at which point this returns with the player still
+    // unregistered and the caller's next join races it. `drain_until` still
+    // appends its trailing gap-terminated drain, so a caller asserting an
+    // absence keeps the quiet window it needs.
+    drain_until(client, |packets| {
+        packets
+            .iter()
+            .any(|(id, _)| *id == play::clientbound::PLAYER_INFO_UPDATE)
+    })
+    .await
 }
 
 /// A join whose caller asserts a packet **arrives**, so it waits for the event
@@ -292,8 +342,12 @@ async fn two_lan_clients_receive_each_others_player_entities() {
         .unwrap_or_else(|| {
             panic!(
                 "B must receive A's player entity over LAN — got {spawns:?}. \
-                 An empty list means `bind` is still handing each connection the \
-                 bare mob source instead of a `PlayerAwareSource`."
+                 An empty list means the registry never reached this connection: \
+                 either `bind` handed it a bare mob source instead of a \
+                 `PlayerAwareSource` (which would fail on every run, not just \
+                 this one), or A was still unregistered when B's join pass ran \
+                 and no later pass corrected it — see this file's own module \
+                 docs, and `a_silent_client_learns_about_a_later_joiner` below."
             )
         });
     assert_eq!(
@@ -330,6 +384,90 @@ async fn two_lan_clients_receive_each_others_player_entities() {
             .any(|(_, uuid, type_id)| *uuid == uuid_b && *type_id == PLAYER_ENTITY_TYPE_ID),
         "A must receive B's player entity over LAN, got {:?}",
         add_entities(&a_after)
+    );
+
+    drop(client_a);
+    drop(client_b);
+    server.shutdown().await;
+}
+
+/// A connection that has said nothing since `FINISH_CONFIGURATION` must still
+/// learn about a player who joins **after** its own initial sync.
+///
+/// # Why this is a separate test from the one above
+///
+/// That test joins A first, so A is already in the registry when B's join runs
+/// its one initial streaming pass, and B is told about A on the way in. This
+/// one inverts the order: B joins into an empty world, then A arrives. Nothing B holds can be brought up to date by a pass B does not
+/// trigger, so this fails unless the server streams entities on a timer of its
+/// own rather than only when the client speaks.
+///
+/// That is the same defect the first test hits under adverse scheduling — a
+/// join whose registration lands *after* another connection's initial pass is
+/// observationally identical to a join that simply happened later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_client_learns_about_a_later_joiner() {
+    let server = IntegratedServer::bind("127.0.0.1:0", V770ServerProtocol, AirSource, 0)
+        .await
+        .expect("bind on an ephemeral port");
+    let addr = server.local_addr().expect("a bound listener has an address");
+
+    let name_a = unique_username();
+    let name_b = unique_username();
+    assert_ne!(name_a, name_b);
+    let uuid_a = Uuid::from_u128(0x4380_0000_0000_0000_0000_0000_0000_0011);
+    let uuid_b = Uuid::from_u128(0x4380_0000_0000_0000_0000_0000_0000_0012);
+
+    let mut client_b = Connection::new(
+        tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client B connects"),
+    );
+    // B joins an empty world and then sends nothing at all for the rest of the
+    // test — the whole point.
+    let b_join = join(&mut client_b, &name_b, uuid_b).await;
+    assert!(
+        add_entities(&b_join).is_empty(),
+        "B joined an empty LAN world, got {:?}",
+        add_entities(&b_join)
+    );
+
+    let mut client_a = Connection::new(
+        tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client A connects"),
+    );
+    let a_join = join_awaiting(&mut client_a, &name_a, uuid_a, |packets| {
+        add_entities(packets)
+            .iter()
+            .any(|(_, uuid, _)| *uuid == uuid_b)
+    })
+    .await;
+    // The control for the assertion below: A's *own* initial pass sees B,
+    // because B was registered first. If this fails the registry is broken and
+    // the silent-client claim below would be vacuous.
+    assert!(
+        add_entities(&a_join)
+            .iter()
+            .any(|(_, uuid, type_id)| *uuid == uuid_b && *type_id == PLAYER_ENTITY_TYPE_ID),
+        "A's own join pass must carry B, who was already online — got {:?}",
+        add_entities(&a_join)
+    );
+
+    let b_after = drain_until(&mut client_b, |packets| {
+        add_entities(packets)
+            .iter()
+            .any(|(_, uuid, _)| *uuid == uuid_a)
+    })
+    .await;
+    assert!(
+        add_entities(&b_after)
+            .iter()
+            .any(|(_, uuid, type_id)| *uuid == uuid_a && *type_id == PLAYER_ENTITY_TYPE_ID),
+        "B sent no packet after joining and must still be told about A — got {:?}. \
+         An empty list means the entity streaming pass runs only when this \
+         connection speaks.",
+        add_entities(&b_after)
     );
 
     drop(client_a);
