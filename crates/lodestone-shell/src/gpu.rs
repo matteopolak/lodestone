@@ -19,11 +19,11 @@
 //! (written once per frame) and one [`SectionOriginArena`] of per-section
 //! origins addressed by a dynamic offset at draw time (written once, at
 //! upload). See `docs/section-camera-uniform.md`.
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range};
 
 use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
 use lodestone_render::{
-    BlockPipeline, DepthBuffer, GpuAtlas, InstanceBufferPool, InstanceTint, fog::FogSettings,
+    BlockPipeline, DepthBuffer, GpuAtlas, InstanceBufferArena, InstanceTint, fog::FogSettings,
 };
 
 use lodestone_model::event::EquipmentSlot;
@@ -332,9 +332,9 @@ pub struct RenderState {
     /// tint there, exactly as an unresolved id does.
     plugin_atlas_sprites: std::sync::Arc<HashMap<String, [f32; 4]>>,
     entities: EntityRenderer,
-    /// Retained slots for every tinted entity/block-entity instance upload in a
-    /// frame. The cursor resets in `render_inner`; the buffers do not.
-    instance_buffers: InstanceBufferPool,
+    /// Retained CPU bytes and one GPU buffer for every tinted entity/block-entity
+    /// instance in a frame. `render_inner` clears, appends, then uploads it once.
+    instance_arena: InstanceBufferArena,
     /// Render-frame counter driving the mob-fire billboard's texture
     /// animation — see `prepare_flame`'s doc for why this counts
     /// render frames rather than the real 20 Hz game tick.
@@ -760,7 +760,7 @@ struct CapeDrawBatch {
     /// `EntityRenderer::player_skins` at draw time, the same cache (and the
     /// same "not installed yet" fallback behaviour) a body's own skin uses.
     url: String,
-    buffer: wgpu::Buffer,
+    instances: Range<u64>,
     count: u32,
 }
 
@@ -782,7 +782,7 @@ struct ElytraDrawBatch {
     texture: Option<String>,
     /// Which wing, as a range into `EntityRenderer::elytra_gpu`.
     range: lodestone_render::PartRange,
-    buffer: wgpu::Buffer,
+    instances: Range<u64>,
     count: u32,
 }
 
@@ -808,7 +808,7 @@ struct PaintingDrawBatch {
     /// The variant whose sprite this batch binds, or `None` for the shared
     /// back/edge tile.
     variant: Option<&'static str>,
-    buffer: wgpu::Buffer,
+    instances: Range<u64>,
     count: u32,
 }
 
@@ -848,7 +848,7 @@ struct ShadowBatch {
 struct OrbBatch {
     /// Which sprite cell, i.e. which part of the shared orb mesh.
     icon: u32,
-    buffer: wgpu::Buffer,
+    instances: Range<u64>,
     count: u32,
 }
 
@@ -866,7 +866,7 @@ struct EntitySpriteBatch {
     /// Which row of `ENTITY_SPRITES`, i.e. which part of the shared mesh and
     /// which texture bind group.
     sprite: usize,
-    buffer: wgpu::Buffer,
+    instances: Range<u64>,
     count: u32,
 }
 
@@ -877,7 +877,7 @@ struct EntitySpriteBatch {
 struct EntityDrawBatch {
     model: &'static str,
     count: u32,
-    parts: Vec<Option<wgpu::Buffer>>,
+    parts: Vec<Option<Range<u64>>>,
     /// The fetched-skin texture URL every instance in this batch shares, or
     /// `None` for the model's own default sheet.
     ///
@@ -931,9 +931,9 @@ struct PreparedEntityBatches {
 struct ArmourDrawBatch {
     slot: ArmourSlot,
     texture: ArmourTextureKey,
-    /// `(index range, instance buffer, instance count)` per armour part that
+    /// `(index range, shared instance-buffer range, instance count)` per armour part that
     /// anything in this group used.
-    parts: Vec<(lodestone_render::PartRange, wgpu::Buffer, u32)>,
+    parts: Vec<(lodestone_render::PartRange, Range<u64>, u32)>,
 }
 
 /// Which sheet an [`ArmourDrawBatch`] samples: a material's own armour sheet, or a

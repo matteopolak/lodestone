@@ -77,7 +77,7 @@
 //! pixel, enough on its own to make a mob brighter than the brightest sunlit
 //! block face.
 
-use std::cell::RefCell;
+use std::{cell::RefCell, ops::Range};
 
 use wgpu::util::DeviceExt;
 
@@ -1006,81 +1006,105 @@ impl Default for InstanceTint {
 }
 
 #[derive(Debug)]
-struct InstanceBufferSlot<T> {
+struct InstanceArenaBuffer<T> {
     handle: T,
     capacity: u64,
 }
 
 #[derive(Debug)]
-struct InstanceBufferPoolState<T> {
-    cursor: usize,
-    slots: Vec<InstanceBufferSlot<T>>,
+struct InstanceBufferArenaState<T> {
+    bytes: Vec<u8>,
+    uploaded: bool,
+    buffer: Option<InstanceArenaBuffer<T>>,
 }
 
-impl<T> Default for InstanceBufferPoolState<T> {
+impl<T> Default for InstanceBufferArenaState<T> {
     fn default() -> Self {
         Self {
-            cursor: 0,
-            slots: Vec::new(),
+            bytes: Vec::new(),
+            uploaded: false,
+            buffer: None,
         }
     }
 }
 
-impl<T: Clone> InstanceBufferPoolState<T> {
+impl<T: Clone> InstanceBufferArenaState<T> {
     fn begin_frame(&mut self) {
-        self.cursor = 0;
+        self.bytes.clear();
+        self.uploaded = false;
     }
 
-    fn take(&mut self, required: u64, mut create: impl FnMut(u64) -> T) -> T {
-        debug_assert!(required > 0, "empty instance uploads return before taking a slot");
-        let index = self.cursor;
-        self.cursor += 1;
+    #[cfg(test)]
+    fn append(&mut self, contents: &[u8]) -> Option<Range<u64>> {
+        debug_assert!(!self.uploaded, "instance data appended after arena upload");
+        if contents.is_empty() {
+            return None;
+        }
+
+        let start = u64::try_from(self.bytes.len()).expect("instance arena offset exceeds u64");
+        self.bytes.extend_from_slice(contents);
+        let end = u64::try_from(self.bytes.len()).expect("instance arena length exceeds u64");
+        Some(start..end)
+    }
+
+    fn upload_buffer(&mut self, mut create: impl FnMut(u64) -> T) -> Option<T> {
+        debug_assert!(!self.uploaded, "instance arena uploaded more than once");
+        self.uploaded = true;
+        let required = u64::try_from(self.bytes.len()).expect("instance arena length exceeds u64");
+        if required == 0 {
+            return None;
+        }
         let capacity = required.checked_next_power_of_two().unwrap_or(required);
 
-        if index == self.slots.len() {
-            self.slots.push(InstanceBufferSlot {
+        if self
+            .buffer
+            .as_ref()
+            .is_none_or(|buffer| buffer.capacity < required)
+        {
+            self.buffer = Some(InstanceArenaBuffer {
                 handle: create(capacity),
                 capacity,
             });
-        } else if self.slots[index].capacity < required {
-            self.slots[index] = InstanceBufferSlot {
-                handle: create(capacity),
-                capacity,
-            };
         }
-        self.slots[index].handle.clone()
+        self.buffer.as_ref().map(|buffer| buffer.handle.clone())
     }
 }
 
-/// Frame-reused vertex buffers for dynamic entity and block-entity instances.
+/// One frame-reused upload arena for dynamic entity and block-entity instances.
 ///
 /// Call [`begin_frame`](Self::begin_frame) exactly once before preparing a
-/// frame. Uploads then consume distinct retained slots in call order. A slot is
-/// rewritten through the queue when it is large enough and replaced only when
-/// the new contents outgrow it, avoiding the per-model-part buffer allocation
-/// that otherwise dominates dense entity scenes.
+/// frame, append every tinted instance batch, then call [`upload`](Self::upload)
+/// exactly once before encoding draws. Batches keep the returned byte ranges and
+/// bind slices of the one shared buffer, avoiding one native wgpu staging
+/// allocation and queue write per model part.
 #[derive(Debug, Default)]
-pub struct InstanceBufferPool {
-    state: RefCell<InstanceBufferPoolState<wgpu::Buffer>>,
+pub struct InstanceBufferArena {
+    state: RefCell<InstanceBufferArenaState<wgpu::Buffer>>,
 }
 
-impl InstanceBufferPool {
-    /// Reset the upload cursor while retaining every allocated GPU buffer.
+impl InstanceBufferArena {
+    /// Clear this frame's bytes while retaining CPU and GPU capacity.
     pub fn begin_frame(&self) {
         self.state.borrow_mut().begin_frame();
     }
 
-    fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue, contents: &[u8]) -> wgpu::Buffer {
-        let buffer = self.state.borrow_mut().take(contents.len() as u64, |capacity| {
+    /// Upload every appended batch with one queue write and return its buffer.
+    ///
+    /// `None` means no tinted instances were prepared this frame. The retained
+    /// buffer grows geometrically and is reused on later frames when sufficient.
+    #[must_use]
+    pub fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<wgpu::Buffer> {
+        let mut state = self.state.borrow_mut();
+        let buffer = state.upload_buffer(|capacity| {
             device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("lodestone-pooled-entity-instances"),
+                label: Some("lodestone-entity-instance-arena"),
                 size: capacity,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
-        });
-        queue.write_buffer(&buffer, 0, contents);
-        buffer
+        })?;
+        queue.write_buffer(&buffer, 0, &state.bytes);
+        Some(buffer)
     }
 }
 
@@ -1111,21 +1135,50 @@ pub fn upload_instances_tinted(
     )
 }
 
-/// Pooled form of [`upload_instances_tinted`] for per-frame render paths.
+/// Append tinted instances to a frame arena and return their exact byte range.
 ///
-/// The returned handle owns a distinct slot for this frame, while the pool
-/// retains the underlying allocation for the same ordinal upload next frame.
+/// All ranges returned between [`InstanceBufferArena::begin_frame`] and
+/// [`InstanceBufferArena::upload`] address the shared buffer returned by that
+/// upload. Empty transforms return `None` and append no bytes.
 #[must_use]
-pub fn upload_instances_tinted_pooled(
-    pool: &InstanceBufferPool,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+pub fn stage_instances_tinted(
+    arena: &InstanceBufferArena,
     transforms: &[glam::Mat4],
     lights: &[u32],
     tints: &[InstanceTint],
-) -> Option<wgpu::Buffer> {
-    let raw = tinted_instances(transforms, lights, tints)?;
-    Some(pool.upload(device, queue, bytemuck::cast_slice(&raw)))
+) -> Option<Range<u64>> {
+    if transforms.is_empty() {
+        return None;
+    }
+
+    let mut state = arena.state.borrow_mut();
+    debug_assert!(!state.uploaded, "instance data appended after arena upload");
+    let start = u64::try_from(state.bytes.len()).expect("instance arena offset exceeds u64");
+    let record_bytes = core::mem::size_of::<EntityInstanceRaw>();
+    let additional = transforms
+        .len()
+        .checked_mul(record_bytes)
+        .expect("instance arena byte count overflow");
+    state.bytes.reserve(additional);
+    for (i, transform) in transforms.iter().enumerate() {
+        let raw = tinted_instance(*transform, lights.get(i).copied(), tints.get(i).copied());
+        state.bytes.extend_from_slice(bytemuck::bytes_of(&raw));
+    }
+    let end = u64::try_from(state.bytes.len()).expect("instance arena length exceeds u64");
+    Some(start..end)
+}
+
+fn tinted_instance(
+    transform: glam::Mat4,
+    light: Option<u32>,
+    tint: Option<InstanceTint>,
+) -> EntityInstanceRaw {
+    let fallback = u32::from(crate::entity::ENTITY_FULLBRIGHT);
+    let inst = EntityInstanceRaw::new(transform, light.unwrap_or(fallback));
+    match tint {
+        Some(tint) => tint.apply(inst),
+        None => inst,
+    }
 }
 
 fn tinted_instances(
@@ -1136,16 +1189,11 @@ fn tinted_instances(
     if transforms.is_empty() {
         return None;
     }
-    let fallback = u32::from(crate::entity::ENTITY_FULLBRIGHT);
     let raw: Vec<EntityInstanceRaw> = transforms
         .iter()
         .enumerate()
-        .map(|(i, m)| {
-            let inst = EntityInstanceRaw::new(*m, lights.get(i).copied().unwrap_or(fallback));
-            match tints.get(i) {
-                Some(tint) => tint.apply(inst),
-                None => inst,
-            }
+        .map(|(i, transform)| {
+            tinted_instance(*transform, lights.get(i).copied(), tints.get(i).copied())
         })
         .collect();
     Some(raw)
@@ -2156,8 +2204,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn instance_buffer_slots_reuse_handles_and_replace_only_undersized_slots() {
-        let mut pool = InstanceBufferPoolState::default();
+    fn instance_buffer_arena_appends_contiguous_aligned_ranges() {
+        let mut arena = InstanceBufferArenaState::<()>::default();
+
+        assert_eq!(arena.append(&[]), None);
+        assert_eq!(arena.append(&[0; 76]), Some(0..76));
+        assert_eq!(arena.append(&[0; 152]), Some(76..228));
+        assert_eq!(arena.bytes.len(), 228);
+        assert_eq!(core::mem::size_of::<EntityInstanceRaw>() % 4, 0);
+        assert_eq!(228 % 4, 0);
+    }
+
+    #[test]
+    fn instance_buffer_arena_reuses_cpu_and_gpu_capacity_across_frames() {
+        let mut arena = InstanceBufferArenaState::default();
         let next_id = std::cell::Cell::new(0usize);
         let mut create = |capacity| {
             let id = next_id.get() + 1;
@@ -2165,24 +2225,61 @@ mod tests {
             (id, capacity)
         };
 
-        let first_a = pool.take(76, &mut create);
-        let first_b = pool.take(152, &mut create);
-        assert_eq!(first_a.0, 1);
-        assert_eq!(first_b.0, 2);
-        assert_eq!(next_id.get(), 2);
+        arena.append(&[0; 76]);
+        let first = arena.upload_buffer(&mut create).unwrap();
+        assert_eq!(first, (1, 128));
+        let cpu_capacity = arena.bytes.capacity();
 
-        pool.begin_frame();
-        let reused_a = pool.take(76, &mut create);
-        let reused_b = pool.take(76, &mut create);
-        assert_eq!((reused_a.0, reused_b.0), (1, 2));
-        assert_eq!(next_id.get(), 2, "a stable frame must allocate no new slots");
+        arena.begin_frame();
+        assert_eq!(arena.bytes.len(), 0);
+        assert_eq!(arena.bytes.capacity(), cpu_capacity);
+        arena.append(&[0; 76]);
+        let reused = arena.upload_buffer(&mut create).unwrap();
+        assert_eq!(reused, first);
+        assert_eq!(next_id.get(), 1, "a stable frame must allocate no new buffer");
 
-        pool.begin_frame();
-        let grown_a = pool.take(first_a.1 + 1, &mut create);
-        let still_reused_b = pool.take(76, &mut create);
-        assert_eq!(grown_a.0, 3, "only the undersized slot is replaced");
-        assert_eq!(still_reused_b.0, 2, "later sufficient slots remain reusable");
-        assert_eq!(next_id.get(), 3);
+        arena.begin_frame();
+        arena.append(&[0; 129]);
+        let grown = arena.upload_buffer(&mut create).unwrap();
+        assert_eq!(grown, (2, 256));
+
+        arena.begin_frame();
+        arena.append(&[0; 76]);
+        assert_eq!(arena.upload_buffer(&mut create).unwrap(), grown);
+        assert_eq!(next_id.get(), 2, "GPU capacity must not shrink");
+    }
+
+    #[test]
+    #[should_panic(expected = "instance data appended after arena upload")]
+    fn instance_buffer_arena_rejects_append_after_upload() {
+        let mut arena = InstanceBufferArenaState::default();
+        arena.append(&[0; 76]);
+        arena.upload_buffer(|_| ());
+        arena.append(&[0; 76]);
+    }
+
+    #[test]
+    #[should_panic(expected = "instance arena uploaded more than once")]
+    fn instance_buffer_arena_rejects_a_second_upload() {
+        let mut arena = InstanceBufferArenaState::default();
+        arena.append(&[0; 76]);
+        arena.upload_buffer(|_| ());
+        arena.upload_buffer(|_| ());
+    }
+
+    #[test]
+    fn staged_instances_match_the_standalone_tinted_conversion() {
+        let arena = InstanceBufferArena::default();
+        let transforms = [glam::Mat4::from_translation(glam::vec3(1.0, 2.0, 3.0))];
+        let lights = [0xD7];
+        let tints = [InstanceTint::rgb([12, 34, 56]).with_hurt(true)];
+
+        let range = stage_instances_tinted(&arena, &transforms, &lights, &tints).unwrap();
+        let expected = tinted_instances(&transforms, &lights, &tints).unwrap();
+        let state = arena.state.borrow();
+
+        assert_eq!(range, 0..core::mem::size_of::<EntityInstanceRaw>() as u64);
+        assert_eq!(state.bytes, bytemuck::cast_slice::<_, u8>(&expected));
     }
 
     #[test]

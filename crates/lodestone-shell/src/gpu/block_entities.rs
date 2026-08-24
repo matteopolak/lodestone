@@ -50,7 +50,7 @@
 //!   layers and before translucent water — see the call site in `gpu.rs` for why
 //!   that position and not another.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range};
 
 use lodestone_render::{
     BlockEntityModelSet, BlockEntityTexture, CONDUIT_WIND_TEXTURE_STEM, CONDUIT_WIND_VERTICAL_TEXTURE_STEM,
@@ -295,7 +295,7 @@ pub(super) struct BlockEntityDrawBatch {
     pub(super) model: &'static str,
     pub(super) texture: BlockEntityTexture,
     pub(super) count: u32,
-    pub(super) parts: Vec<Option<wgpu::Buffer>>,
+    pub(super) parts: Vec<Option<Range<u64>>>,
 }
 
 /// One banner pattern layer, uploaded and ready to draw.
@@ -308,7 +308,7 @@ pub(super) struct BlockEntityDrawBatch {
 pub(super) struct BannerLayerDrawBatch {
     /// Bare pattern asset id, keying [`BlockEntityRenderer::banner_patterns`].
     pub(super) pattern: String,
-    /// A one-instance buffer carrying the flag part's world matrix, this layer's
+    /// A one-instance range carrying the flag part's world matrix, this layer's
     /// gamma-space colour as the instance tint, and the block's light.
-    pub(super) instances: wgpu::Buffer,
+    pub(super) instances: Range<u64>,
 }
