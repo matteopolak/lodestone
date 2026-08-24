@@ -74,6 +74,7 @@ use lodestone_game::menu::Menu;
 use lodestone_game::recipe::RecipeBook;
 
 mod advancements_screen;
+mod benchmark;
 mod container_input;
 mod creative_screen;
 mod frame_profile;
