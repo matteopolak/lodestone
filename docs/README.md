@@ -349,6 +349,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   The harness is `crates/lodestone-shell/tests/client_chunk_cycles.rs`; this doc is
   how to read it, what it found, and how to extend it without reintroducing a defect
   it already caught.
+- [Client frame performance — 2026-08-24](./client-frame-performance-2026-08-24.md) —
+  This is a measured client-rendering investigation at a physical 2560×1440, render
+  distance 24, release configuration. It covers ordinary Java terrain and a dense
+  Java-hosted showcase containing signs, player heads, patterned banners, mapped item
+  frames, equipped entities, particles, displays, and block entities.
 - [Client-side relight](./client-relight.md) — The client's own light engine: a
   block change queues a relight, and once a frame the client recomputes sky and block
   light in a bounded box around each change and re-meshes what moved. It is vanilla's
