@@ -73,7 +73,7 @@ Do not run `cargo fmt`; format only edited lines by hand. Diagnose failures befo
 
 ## Task 5: Repeat the live benchmark and profile
 
-Build the release client and run the identical Java-backed dense showcase at 2560×1440, render distance 24, unlimited frame cap, and VSync disabled. Record three trials for the same stationary and moving segments.
+Build the release client and run the Java-backed dense showcase at render distance 24, unlimited frame cap, and VSync disabled. The original plan specified the identical 2560×1440 windowed presentation; the user amended it during execution to require hardware-selected fullscreen on the laptop panel. Record three trials for the same stationary and moving segments, and do not attribute cross-presentation frame/acquire changes to the arena.
 
 Compare against commit `8305a24f` using:
 
@@ -83,7 +83,7 @@ Compare against commit `8305a24f` using:
 - RSS peak;
 - a new Samply profile's `Queue::write_buffer` and `StagingBuffer::new` stacks.
 
-The frame median may remain at the 120 Hz 8.333 ms cadence. Accept the change only if preparation improves beyond trial noise and the repeated staging stack materially shrinks without a functional regression. If the arena loses, preserve the measurements and restore the pooled implementation in a follow-up commit rather than obscuring the result.
+Accept the change only if preparation improves beyond trial noise without a functional regression. The frame median is presentation-dependent and is not an arena acceptance gate after the fullscreen amendment. If the arena loses, preserve the measurements and restore the pooled implementation in a follow-up commit rather than obscuring the result.
 
 ## Task 6: Document, index, and commit the verified result
 

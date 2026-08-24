@@ -93,8 +93,9 @@ visible tinted objects
 
 ## Scope
 
-This arena covers only the existing `EntityInstanceRaw` tinted-instance path.
-Flames, shadows, fishing lines, water masks, map textures, uniforms, and other
+This arena covers only the existing `EntityInstanceRaw` tinted-instance path,
+including the placement record used to draw entity water-mask geometry.
+Flames, shadows, fishing lines, the water-mask mesh itself, map textures, uniforms, and other
 dynamic formats retain their current buffers. Fine-grained GPU timestamp capture,
 present-mode selection, static geometry caches, and multi-draw changes are separate
 measurement-driven work.
@@ -107,14 +108,16 @@ lifecycle guard. Existing entity/render tests cover conversion and draw-batch
 behavior. Targeted shell checks cover all migrated callers and the version-free
 seam.
 
-The performance acceptance test repeats the same 2560 x 1440, render-distance-24
-dense Java showcase used for the pooled-buffer baseline. The primary metric is
+The original performance acceptance test called for the same 2560 x 1440,
+render-distance-24 dense Java showcase used for the pooled-buffer baseline. During
+execution the user required hardware-selected fullscreen on the laptop panel
+(3024 x 1898 drawable). The report therefore treats the explicitly instrumented
+CPU phases as directional before/after evidence and does not attribute the
+frame-interval or acquire change to the arena. The primary metric remains
 `world.prepare_buffers`; secondary evidence is active CPU frame time, world encode
-time, frame percentiles, RSS, and a new Samply profile. Success requires a
-repeatable improvement beyond trial spread and removal or material reduction of the
-per-batch `Queue::write_buffer` / `StagingBuffer::new` stack. The 8.333 ms frame
-median may remain unchanged because swapchain acquisition currently paces the run
-at the 120 Hz display cadence.
+time, frame percentiles, GPU pass timestamps, RSS, and a new Samply capture.
+Success requires a repeatable preparation improvement beyond trial spread without
+a functional regression.
 
 ## How to change it
 
