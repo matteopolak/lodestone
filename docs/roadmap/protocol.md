@@ -25,20 +25,16 @@ cargo xtask connectedness
 
 ```
 protocol connectedness (denominators from each family play::{clientbound,serverbound} packet_ids.rs):
-v47  clientbound decoded 17/74; emits 17/74; decoded-but-stranded 0; serverbound encoded 17/26; examined 17 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
-v340  clientbound decoded 16/80; emits 16/80; decoded-but-stranded 0; serverbound encoded 20/33; examined 16 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
-v735  clientbound decoded 17/92; emits 17/92; decoded-but-stranded 0; serverbound encoded 21/48; examined 17 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
-v770  clientbound decoded 112/141; emits 111/141; decoded-but-stranded 0; serverbound encoded 54/69; examined 113 arm(s); serverbound decoded 60/69, connected 13/69; examined 60 arm(s); decodes-to-Ignored-only 47
+v47  clientbound decoded 59/74; emits 59/74; decoded-but-stranded 0; serverbound encoded 21/26; examined 59 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
+v340  clientbound decoded 62/80; emits 62/80; decoded-but-stranded 0; serverbound encoded 24/33; examined 62 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
+v735  clientbound decoded 54/92; emits 54/92; decoded-but-stranded 0; serverbound encoded 25/48; examined 54 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
+v770  clientbound decoded 141/141; emits 139/141; decoded-but-stranded 0; serverbound encoded 68/69; examined 141 arm(s); serverbound decoded 66/69, connected 47/69; examined 66 arm(s); decodes-to-Ignored-only 19 [ACCEPT_TELEPORTATION, BLOCK_ENTITY_TAG_QUERY, CHAT_ACK, CLIENT_TICK_END, CONFIGURATION_ACKNOWLEDGED, CUSTOM_CLICK_ACTION, ENTITY_TAG_QUERY, JIGSAW_GENERATE, PLAYER_ABILITIES, PLAYER_LOADED, PONG, RECIPE_BOOK_CHANGE_SETTINGS, RECIPE_BOOK_SEEN_RECIPE, RESOURCE_PACK, SEEN_ADVANCEMENTS, SET_COMMAND_MINECART, SET_JIGSAW_BLOCK, SET_STRUCTURE_BLOCK, SET_TEST_BLOCK]
 ```
 
-Re-measured 2026-08-04 (same day, a later pass than the one below), after adding
-`lodestone-server` consumers for four of the 47 decode-to-`Ignored` arms — see
-["Consumer landed, decode arm still off-limits"](#consumer-landed-decode-arm-still-off-limits-2026-08-04)
-below. **`connected` is unchanged at 13/69**: this measurement joins the protocol-crate decode
-arm against the server-crate consumer, and the decode-arm half of that join was not touched
-this pass (`crates/protocol/v770/src/server_protocol.rs` was off-limits). The
-clientbound/serverbound-*encoded* deltas above (111→112, 53→54) are unrelated concurrent work
-by other agents in this same session, not anything filed here.
+Re-measured 2026-08-23. This leading block is the current snapshot; the dated sections below
+retain their original measurements because they describe the state before and after specific
+historical changes. Re-run the command before quoting current coverage rather than promoting a
+dated subsection's count back into this block.
 
 ### `connected` moved to 15/69: `CLIENT_INFORMATION`/`CHUNK_BATCH_RECEIVED` were dead-code decode arms (2026-08-04)
 
