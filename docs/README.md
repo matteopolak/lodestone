@@ -973,6 +973,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   that calls the per-chunk gate every tick and applies the one effect `MobSim` cannot
   apply itself (fire ignition, since `MobSim::world` is a frozen pathfinding snapshot,
   not the live world).
+- [Live client frame benchmark](./live-client-frame-benchmark.md) — The live client
+  frame benchmark measures Lodestone’s real windowed client while it is joined to a
+  Java 26.2 server. It records frame intervals and CPU phase timings for a
+  normal-terrain workload and a dense render showcase, then summarizes stationary and
+  moving segments separately.
 - [Live mob simulation (issue #217)](./live-mob-sim.md) — The production wiring that
   turns `lodestone-server`'s `MobSim` (AI-driven mob motion, computed server-side)
   into mobs a real client actually watches move. Before this, `mobs.rs`'s own module
