@@ -33,7 +33,7 @@ use lodestone_model::event::EquipmentSlot;
 use lodestone_render::{
     Camera, CameraUniform, EntityCameraUniform, InstanceTint, ItemStateContext,
     entity::{Arm, armour_layer_tint_with_dye, armour_layers, ground_transform, hand_transform},
-    plan_block_entities, plan_entities, upload_instances_tinted_pooled,
+    plan_block_entities, plan_entities, stage_instances_tinted,
 };
 
 use crate::entities::EntityDraw;
@@ -895,7 +895,7 @@ impl RenderState {
     /// `plan_entities` on an empty slice returns no batches).
     pub(super) fn prepare_entities(
         &self,
-        device: &wgpu::Device,
+        _device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
@@ -1125,10 +1125,8 @@ impl RenderState {
                     .parts
                     .iter()
                     .map(|p| {
-                        upload_instances_tinted_pooled(
-                            &self.instance_buffers,
-                            device,
-                            queue,
+                        stage_instances_tinted(
+                            &self.instance_arena,
                             p,
                             &batch.lights,
                             &tints,
@@ -1156,10 +1154,8 @@ impl RenderState {
                     .parts
                     .iter()
                     .map(|part| {
-                        upload_instances_tinted_pooled(
-                            &self.instance_buffers,
-                            device,
-                            queue,
+                        stage_instances_tinted(
+                            &self.instance_arena,
                             part,
                             &batch.lights,
                             &tints,
@@ -1226,8 +1222,8 @@ impl RenderState {
     /// * **Enchantment glint.** `hasFoil` is not on this side of the wire.
     pub(super) fn prepare_armour(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -1376,15 +1372,13 @@ impl RenderState {
                     .into_iter()
                     .filter_map(|p| {
                         let count = u32::try_from(p.transforms.len()).unwrap_or(u32::MAX);
-                        upload_instances_tinted_pooled(
-                            &self.instance_buffers,
-                            device,
-                            queue,
+                        stage_instances_tinted(
+                            &self.instance_arena,
                             &p.transforms,
                             &p.lights,
                             &p.tints,
                         )
-                            .map(|buffer| (p.range, buffer, count))
+                            .map(|instances| (p.range, instances, count))
                     })
                     .collect(),
             })
@@ -1655,8 +1649,8 @@ impl RenderState {
     /// `prepare_item_geometry` does for thrown projectiles.
     pub(super) fn prepare_orbs(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -1717,18 +1711,16 @@ impl RenderState {
             .filter(|(_, (transforms, ..))| !transforms.is_empty())
             .filter_map(|(icon, (transforms, lights, tints))| {
                 let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
-                upload_instances_tinted_pooled(
-                    &self.instance_buffers,
-                    device,
-                    queue,
+                stage_instances_tinted(
+                    &self.instance_arena,
                     &transforms,
                     &lights,
                     &tints,
                 )
-                .map(|buffer| {
+                .map(|instances| {
                     OrbBatch {
                         icon: u32::try_from(icon).unwrap_or(0),
-                        buffer,
+                        instances,
                         count,
                     }
                 })
@@ -1756,8 +1748,8 @@ impl RenderState {
     /// [`fishing_line_vertices`](Self::fishing_line_vertices).
     pub(super) fn prepare_entity_sprites(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -1848,18 +1840,16 @@ impl RenderState {
                 // so there is no per-instance tint to carry — an empty slice
                 // leaves every instance at `EntityInstanceRaw`'s untinted
                 // default.
-                upload_instances_tinted_pooled(
-                    &self.instance_buffers,
-                    device,
-                    queue,
+                stage_instances_tinted(
+                    &self.instance_arena,
                     &transforms,
                     &lights,
                     &[],
                 )
-                .map(|buffer| {
+                .map(|instances| {
                     EntitySpriteBatch {
                         sprite,
-                        buffer,
+                        instances,
                         count,
                     }
                 })
@@ -2041,12 +2031,12 @@ impl RenderState {
     ///   scope" list, unchanged by this pass.
     pub(super) fn prepare_wool(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
-    ) -> Vec<(lodestone_render::PartRange, wgpu::Buffer, u32)> {
+    ) -> Vec<(lodestone_render::PartRange, std::ops::Range<u64>, u32)> {
         // No pack, no sheet, nothing to draw — and no synthetic fallback, on
         // purpose (see `EntityRenderer::wool_texture`).
         let (Some(wool_texture), Some(_wool_gpu)) =
@@ -2123,15 +2113,13 @@ impl RenderState {
             .into_iter()
             .filter_map(|p| {
                 let count = u32::try_from(p.transforms.len()).unwrap_or(u32::MAX);
-                upload_instances_tinted_pooled(
-                    &self.instance_buffers,
-                    device,
-                    queue,
+                stage_instances_tinted(
+                    &self.instance_arena,
                     &p.transforms,
                     &p.lights,
                     &p.tints,
                 )
-                    .map(|buffer| (p.range, buffer, count))
+                    .map(|instances| (p.range, instances, count))
             })
             .collect()
     }
@@ -2158,8 +2146,8 @@ impl RenderState {
     /// vanilla's own default when the byte has never been reported.
     pub(super) fn prepare_cape(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -2236,15 +2224,13 @@ impl RenderState {
             .into_iter()
             .filter_map(|(url, transforms, lights, tints)| {
                 let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
-                upload_instances_tinted_pooled(
-                    &self.instance_buffers,
-                    device,
-                    queue,
+                stage_instances_tinted(
+                    &self.instance_arena,
                     &transforms,
                     &lights,
                     &tints,
                 )
-                .map(|buffer| CapeDrawBatch { url, buffer, count })
+                .map(|instances| CapeDrawBatch { url, instances, count })
             })
             .collect()
     }
@@ -2300,8 +2286,8 @@ impl RenderState {
     /// wire and is treated as `true`.
     pub(super) fn prepare_elytra(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -2387,19 +2373,17 @@ impl RenderState {
             .into_iter()
             .filter_map(|(texture, range, transforms, lights, tints)| {
                 let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
-                upload_instances_tinted_pooled(
-                    &self.instance_buffers,
-                    device,
-                    queue,
+                stage_instances_tinted(
+                    &self.instance_arena,
                     &transforms,
                     &lights,
                     &tints,
                 )
-                .map(|buffer| {
+                .map(|instances| {
                     ElytraDrawBatch {
                         texture,
                         range,
-                        buffer,
+                        instances,
                         count,
                     }
                 })
@@ -2444,8 +2428,8 @@ impl RenderState {
     /// change to how the light lane is fed, not a re-bake.
     pub(super) fn prepare_paintings(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -2519,20 +2503,18 @@ impl RenderState {
             .into_iter()
             .filter_map(|(model, part, variant, transforms, lights, tints)| {
                 let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
-                upload_instances_tinted_pooled(
-                    &self.instance_buffers,
-                    device,
-                    queue,
+                stage_instances_tinted(
+                    &self.instance_arena,
                     &transforms,
                     &lights,
                     &tints,
                 )
-                .map(|buffer| {
+                .map(|instances| {
                     PaintingDrawBatch {
                         model,
                         part,
                         variant,
-                        buffer,
+                        instances,
                         count,
                     }
                 })
@@ -2806,7 +2788,7 @@ impl RenderState {
     /// See [`Self::special_item_instances`].
     pub(super) fn prepare_block_entities(
         &self,
-        device: &wgpu::Device,
+        _device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
@@ -2994,10 +2976,8 @@ impl RenderState {
                 // would wash every dye toward white — vanilla is not
                 // colour-managed, and the shader multiplies in gamma too.
                 let rgb = lodestone_render::gamma_rgb_to_bytes(layer.color);
-                let Some(buffer) = upload_instances_tinted_pooled(
-                    &self.instance_buffers,
-                    device,
-                    queue,
+                let Some(instances) = stage_instances_tinted(
+                    &self.instance_arena,
                     &[layer.transform],
                     &[u32::from(layer.light)],
                     &[InstanceTint::rgb(rgb)],
@@ -3006,7 +2986,7 @@ impl RenderState {
                 };
                 banner_layers.push(BannerLayerDrawBatch {
                     pattern: pattern.to_string(),
-                    instances: buffer,
+                    instances,
                 });
             }
             instances.push(resolved.body);
@@ -3046,10 +3026,8 @@ impl RenderState {
                     .parts
                     .iter()
                     .map(|p| {
-                        upload_instances_tinted_pooled(
-                            &self.instance_buffers,
-                            device,
-                            queue,
+                        stage_instances_tinted(
+                            &self.instance_arena,
                             p,
                             &batch.lights,
                             &batch.tints,

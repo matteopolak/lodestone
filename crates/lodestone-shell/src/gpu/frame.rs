@@ -243,7 +243,7 @@ impl RenderState {
         // itself create or write a buffer) — see `WorldSubphase::PrepareBuffers`'s
         // own doc. A single `Instant::now()` local; nothing else here changes.
         let world_encode_t0 = crate::platform::Instant::now();
-        self.instance_buffers.begin_frame();
+        self.instance_arena.begin_frame();
 
         // Cache this frame's camera block position for `upload_section`'s
         // near-distance fade skip — see `RenderState::last_camera_block_pos`'s
@@ -623,6 +623,11 @@ impl RenderState {
         // so they belong to this pass and not `prepare_item_geometry`'s.
         let (block_entity_batches, banner_layer_batches) =
             self.prepare_block_entities(device, queue, camera, entities, &mut stats);
+
+        // Every world-space `EntityInstanceRaw` producer above appended bytes
+        // to one CPU arena. Upload them together now, after the final producer
+        // and before any draw can consume one of the recorded ranges.
+        let instance_buffer = self.instance_arena.upload(device, queue);
 
         // Dropped items *and* items in mobs' hands, meshed and uploaded before
         // the pass for the same reason as everything else here (no buffer
@@ -1082,11 +1087,15 @@ impl RenderState {
                     pass.set_bind_group(1, texture, &[]);
                     pass.set_vertex_buffer(0, model.vertices.slice(..));
                     pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    for (range, buffer) in model.parts.iter().zip(&batch.parts) {
-                        let (Some(buffer), true) = (buffer.as_ref(), range.index_count > 0) else {
+                    for (range, instances) in model.parts.iter().zip(&batch.parts) {
+                        let (Some(instances), true) = (instances.as_ref(), range.index_count > 0)
+                        else {
                             continue;
                         };
-                        pass.set_vertex_buffer(1, buffer.slice(..));
+                        let Some(instance_buffer) = instance_buffer.as_ref() else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, instance_buffer.slice(instances.clone()));
                         let end = range.index_start + range.index_count;
                         pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
                         stats.draw_calls += 1;
@@ -1131,8 +1140,11 @@ impl RenderState {
                     pass.set_bind_group(1, texture, &[]);
                     pass.set_vertex_buffer(0, model.vertices.slice(..));
                     pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    for (range, buffer, count) in &batch.parts {
-                        pass.set_vertex_buffer(1, buffer.slice(..));
+                    for (range, instances, count) in &batch.parts {
+                        let Some(instance_buffer) = instance_buffer.as_ref() else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, instance_buffer.slice(instances.clone()));
                         let end = range.index_start + range.index_count;
                         pass.draw_indexed(range.index_start..end, 0, 0..*count);
                         stats.draw_calls += 1;
@@ -1156,8 +1168,11 @@ impl RenderState {
                     pass.set_bind_group(1, texture, &[]);
                     pass.set_vertex_buffer(0, model.vertices.slice(..));
                     pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    for (range, buffer, count) in &wool_batches {
-                        pass.set_vertex_buffer(1, buffer.slice(..));
+                    for (range, instances, count) in &wool_batches {
+                        let Some(instance_buffer) = instance_buffer.as_ref() else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, instance_buffer.slice(instances.clone()));
                         let end = range.index_start + range.index_count;
                         pass.draw_indexed(range.index_start..end, 0, 0..*count);
                         stats.draw_calls += 1;
@@ -1186,7 +1201,10 @@ impl RenderState {
                         continue;
                     };
                     pass.set_bind_group(1, texture, &[]);
-                    pass.set_vertex_buffer(1, batch.buffer.slice(..));
+                    let Some(instance_buffer) = instance_buffer.as_ref() else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(1, instance_buffer.slice(batch.instances.clone()));
                     let end = range.index_start + range.index_count;
                     pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
                     stats.draw_calls += 1;
@@ -1215,7 +1233,10 @@ impl RenderState {
                         continue;
                     };
                     pass.set_bind_group(1, texture, &[]);
-                    pass.set_vertex_buffer(1, batch.buffer.slice(..));
+                    let Some(instance_buffer) = instance_buffer.as_ref() else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(1, instance_buffer.slice(batch.instances.clone()));
                     let end = batch.range.index_start + batch.range.index_count;
                     pass.draw_indexed(batch.range.index_start..end, 0, 0..batch.count);
                     stats.draw_calls += 1;
@@ -1247,7 +1268,10 @@ impl RenderState {
                     pass.set_bind_group(1, texture, &[]);
                     pass.set_vertex_buffer(0, model.vertices.slice(..));
                     pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.set_vertex_buffer(1, batch.buffer.slice(..));
+                    let Some(instance_buffer) = instance_buffer.as_ref() else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(1, instance_buffer.slice(batch.instances.clone()));
                     let end = range.index_start + range.index_count;
                     pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
                     stats.draw_calls += 1;
@@ -1334,11 +1358,15 @@ impl RenderState {
                     pass.set_bind_group(1, texture, &[]);
                     pass.set_vertex_buffer(0, model.vertices.slice(..));
                     pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    for (range, buffer) in model.parts.iter().zip(&batch.parts) {
-                        let (Some(buffer), true) = (buffer.as_ref(), range.index_count > 0) else {
+                    for (range, instances) in model.parts.iter().zip(&batch.parts) {
+                        let (Some(instances), true) = (instances.as_ref(), range.index_count > 0)
+                        else {
                             continue;
                         };
-                        pass.set_vertex_buffer(1, buffer.slice(..));
+                        let Some(instance_buffer) = instance_buffer.as_ref() else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, instance_buffer.slice(instances.clone()));
                         let end = range.index_start + range.index_count;
                         pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
                         stats.draw_calls += 1;
@@ -1388,7 +1416,10 @@ impl RenderState {
                         continue;
                     };
                     pass.set_bind_group(1, mask, &[]);
-                    pass.set_vertex_buffer(1, layer.instances.slice(..));
+                    let Some(instance_buffer) = instance_buffer.as_ref() else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(1, instance_buffer.slice(layer.instances.clone()));
                     let end = range.index_start + range.index_count;
                     pass.draw_indexed(range.index_start..end, 0, 0..1);
                     stats.draw_calls += 1;
@@ -1556,7 +1587,10 @@ impl RenderState {
                     if range.index_count == 0 {
                         continue;
                     }
-                    pass.set_vertex_buffer(1, batch.buffer.slice(..));
+                    let Some(instance_buffer) = instance_buffer.as_ref() else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(1, instance_buffer.slice(batch.instances.clone()));
                     let end = range.index_start + range.index_count;
                     pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
                     stats.draw_calls += 1;
@@ -1593,7 +1627,10 @@ impl RenderState {
                         continue;
                     }
                     pass.set_bind_group(1, texture, &[]);
-                    pass.set_vertex_buffer(1, batch.buffer.slice(..));
+                    let Some(instance_buffer) = instance_buffer.as_ref() else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(1, instance_buffer.slice(batch.instances.clone()));
                     let end = range.index_start + range.index_count;
                     pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
                     stats.draw_calls += 1;
@@ -1789,11 +1826,15 @@ impl RenderState {
                     };
                     pass.set_vertex_buffer(0, model.vertices.slice(..));
                     pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    for (range, buffer) in model.parts.iter().zip(&batch.parts) {
-                        let (Some(buffer), true) = (buffer.as_ref(), range.index_count > 0) else {
+                    for (range, instances) in model.parts.iter().zip(&batch.parts) {
+                        let (Some(instances), true) = (instances.as_ref(), range.index_count > 0)
+                        else {
                             continue;
                         };
-                        pass.set_vertex_buffer(1, buffer.slice(..));
+                        let Some(instance_buffer) = instance_buffer.as_ref() else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, instance_buffer.slice(instances.clone()));
                         let end = range.index_start + range.index_count;
                         pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
                         stats.draw_calls += 1;
