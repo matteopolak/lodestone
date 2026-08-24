@@ -347,6 +347,19 @@ worldgen-sweep *args:
 bench-frame:
     cargo bench {{jflag}} --target-dir {{tdir}} -p lodestone-shell --bench frame_profile
 
+# Three Java-backed normal-terrain trials at physical 2560x1440, RD24,
+# unlimited/no-VSync. The foreground runner owns the child until it exits.
+bench-client-terrain:
+    python3 scripts/client-frame-benchmark.py --workload terrain
+
+# Three trials of the dense signs/heads/banners/maps/entities/particles scene.
+bench-client-showcase:
+    python3 scripts/client-frame-benchmark.py --workload showcase
+
+# One 2s/2s/3s showcase run: the end-to-end gate before expensive trials.
+bench-client-smoke:
+    python3 scripts/client-frame-benchmark.py --workload showcase --smoke
+
 # Live-oracle launchers — one recipe per canonical oracle. Each script
 # creates a fresh container and tears it down when it exits. See
 # docs/oracle-runtimes.md and CLAUDE.md for the spawn contracts.
