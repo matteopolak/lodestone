@@ -314,6 +314,20 @@ pub(crate) struct FrameProfiler {
     /// closes it out. Cleared (after finalising into `windows`) at the top of
     /// every [`Self::begin_frame`].
     pending: [Option<f32>; PHASE_COUNT],
+    /// Start-to-start interval for the pending frame. It becomes known at
+    /// the following [`Self::begin_frame`], immediately before that frame is
+    /// finalised into the CSV.
+    pending_interval_ms: Option<f32>,
+    /// Segment captured when the pending frame began. Kept separate from
+    /// `segment` so a transition at the next frame boundary cannot relabel
+    /// the frame being finalised.
+    pending_segment: Option<&'static str>,
+    /// Segment selected by the benchmark driver for the next frame.
+    segment: Option<&'static str>,
+    /// Start of the pending frame, used to derive its start-to-start
+    /// interval when the following frame begins. `None` before the first
+    /// call to [`Self::begin_frame`].
+    last_frame_start: Option<Instant>,
     /// Wall-clock instant the *previous* mark (or `begin_frame`) was taken —
     /// what the next `mark` measures elapsed time against.
     cursor: Instant,
@@ -377,6 +391,10 @@ impl FrameProfiler {
         Self {
             windows: [const { PhaseWindow::new() }; PHASE_COUNT],
             pending: [None; PHASE_COUNT],
+            pending_interval_ms: None,
+            pending_segment: None,
+            segment: None,
+            last_frame_start: None,
             cursor: now,
             frame_count: 0,
             dump: dump_path.map(super::frame_profile_dump::DumpWriter::open),
@@ -415,8 +433,21 @@ impl FrameProfiler {
     /// first — see the module doc for why finalisation is deferred to here
     /// rather than requiring every `redraw` early-return to call something.
     pub(crate) fn begin_frame(&mut self, now: Instant) {
-        self.finalise();
+        if let Some(previous_start) = self.last_frame_start {
+            self.pending_interval_ms = Some(
+                now.saturating_duration_since(previous_start).as_secs_f32() * 1000.0,
+            );
+            self.finalise();
+        }
+        self.pending_segment = self.segment;
+        self.last_frame_start = Some(now);
         self.cursor = now;
+    }
+
+    /// Label the next frame begun with [`Self::begin_frame`]. Ordinary play
+    /// leaves this as `None`, which writes an empty CSV field.
+    pub(crate) fn set_segment(&mut self, segment: Option<&'static str>) {
+        self.segment = segment;
     }
 
     /// Close out the phase that ran between the last mark (or `begin_frame`)
@@ -481,16 +512,13 @@ impl FrameProfiler {
     }
 
     fn finalise(&mut self) {
-        // The very first `begin_frame` of a session has no previous frame to
-        // finalise — `frame_count == 0` and nothing has ever been marked.
-        // Without this guard every phase's `skipped` counter would take a
-        // phantom +1 before the first real frame ever ran, which is exactly
-        // the "fabricated" reading this module's own doc promises not to
-        // produce.
-        if self.frame_count == 0 && self.pending.iter().all(Option::is_none) {
-            return;
-        }
+        // `begin_frame` calls this only after observing `last_frame_start`,
+        // so even a frame that returned before its first phase mark is real
+        // and must contribute skips. The old pending-array guard discarded
+        // exactly that all-skipped first frame.
         self.frame_count += 1;
+        let interval_ms = self.pending_interval_ms.take();
+        let segment = self.pending_segment.take();
         let mut world_encode_ran_this_frame = false;
         // Captured before `pending` is cleared, because the CSV row below has
         // to be able to tell a phase that was skipped from one that was
@@ -540,7 +568,7 @@ impl FrameProfiler {
                 } else {
                     [None; crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT]
                 };
-            dump.write_row(self.frame_count, row, world_row, hud_row);
+            dump.write_row(self.frame_count, interval_ms, segment, row, world_row, hud_row);
         }
     }
 
@@ -945,6 +973,50 @@ mod tests {
              did reach it: {text}"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Raw benchmark analysis needs the real presentation interval and the
+    /// workload segment on the same row as the phase timings. The interval
+    /// for a frame becomes known only when the next frame begins, while the
+    /// label must remain the one captured when that frame started.
+    #[test]
+    fn dump_carries_frame_interval_and_benchmark_segment() {
+        let path = std::env::temp_dir().join("lodestone-frame-profile-segment-control.csv");
+        let _ = std::fs::remove_file(&path);
+        {
+            let t0 = Instant::now();
+            let mut profiler = FrameProfiler::new(t0, Some(&path));
+            profiler.set_segment(Some("terrain.stationary"));
+            profiler.begin_frame(t0);
+            profiler.mark(FramePhase::Setup, t0 + Duration::from_millis(2));
+
+            profiler.set_segment(Some("terrain.moving"));
+            profiler.begin_frame(t0 + Duration::from_millis(17));
+            profiler.mark(FramePhase::Setup, t0 + Duration::from_millis(19));
+            profiler.begin_frame(t0 + Duration::from_millis(34));
+        }
+
+        let csv = std::fs::read_to_string(&path).expect("dump file must exist");
+        let mut lines = csv.lines();
+        assert!(
+            lines
+                .next()
+                .expect("header row")
+                .starts_with("frame,frame_interval_ms,segment,")
+        );
+        assert!(
+            lines
+                .next()
+                .expect("stationary row")
+                .starts_with("1,17.0000,terrain.stationary,")
+        );
+        assert!(
+            lines
+                .next()
+                .expect("moving row")
+                .starts_with("2,17.0000,terrain.moving,")
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     /// The end-to-end magnitude control for the `world_encode_submit`

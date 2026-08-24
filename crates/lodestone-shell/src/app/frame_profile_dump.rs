@@ -61,7 +61,7 @@ impl DumpWriter {
 
     fn write_header(&mut self) {
         let Some(w) = &mut self.file else { return };
-        let mut header = String::from("frame");
+        let mut header = String::from("frame,frame_interval_ms,segment");
         for phase in FramePhase::ALL {
             header.push(',');
             header.push_str(phase.name());
@@ -99,12 +99,22 @@ impl DumpWriter {
     pub(crate) fn write_row(
         &mut self,
         frame: u64,
+        interval_ms: Option<f32>,
+        segment: Option<&str>,
         values: [Option<f32>; PHASE_COUNT],
         world_subphases: [Option<f32>; WORLD_SUBPHASE_COUNT],
         hud_subphases: [Option<f32>; HUD_SUBPHASE_COUNT],
     ) {
         let Some(w) = &mut self.file else { return };
         let mut line = frame.to_string();
+        line.push(',');
+        if let Some(ms) = interval_ms {
+            line.push_str(&format!("{ms:.4}"));
+        }
+        line.push(',');
+        if let Some(segment) = segment {
+            line.push_str(segment);
+        }
         for v in values.into_iter().chain(world_subphases).chain(hud_subphases) {
             line.push(',');
             if let Some(ms) = v {
