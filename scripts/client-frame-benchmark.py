@@ -30,7 +30,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "bench-results" / "live_frame_profile.jsonl"
 SCENE = ROOT / "scripts" / "benchmark-scenes" / "showcase.txt"
 RCON_PASSWORD = "lodestone"
-PHYSICAL_SIZE = (2560, 1440)
 RENDER_DISTANCE = 24
 SERVER_VIEW_DISTANCE = RENDER_DISTANCE + 1
 METADATA_COLUMNS = {"frame", "frame_interval_ms", "segment"}
@@ -101,15 +100,26 @@ def summarize_rows(rows: list[Mapping[str, str]]) -> dict:
     }
 
 
-def validate_run(rows: list[Mapping[str, str]], log_text: str, workload: str) -> None:
+def validate_run(
+    rows: list[Mapping[str, str]], log_text: str, workload: str
+) -> tuple[int, int]:
     """Reject incomplete or mislabeled runs before they enter the history."""
     if "benchmark complete" not in log_text:
         raise ValueError("completion marker missing from client log")
-    if not (
-        "framebuffer_width=2560" in log_text
-        and "framebuffer_height=1440" in log_text
-    ):
-        raise ValueError("client log does not confirm the requested physical window size")
+    if "selected hardware built-in display for fullscreen benchmark" not in log_text:
+        raise ValueError("client log does not confirm hardware built-in display selection")
+    ready = re.search(
+        r"benchmark window ready[^\n]*framebuffer_width=(\d+)"
+        r"[^\n]*framebuffer_height=(\d+)[^\n]*fullscreen=(true|false)",
+        log_text,
+    )
+    if ready is None:
+        raise ValueError("client log does not contain parseable framebuffer/fullscreen metadata")
+    if ready.group(3) != "true":
+        raise ValueError("client log does not confirm fullscreen presentation")
+    framebuffer = (int(ready.group(1)), int(ready.group(2)))
+    if framebuffer[0] <= 0 or framebuffer[1] <= 0:
+        raise ValueError(f"invalid physical framebuffer size: {framebuffer}")
 
     measured = {
         row.get("segment", "")
@@ -123,6 +133,7 @@ def validate_run(rows: list[Mapping[str, str]], log_text: str, workload: str) ->
         label = f"{workload}.{suffix}"
         if not any(row.get("segment") == label for row in rows):
             raise ValueError(f"{suffix} segment has no frame rows")
+    return framebuffer
 
 
 def _build_frame(request_id: int, packet_type: int, payload: str) -> bytes:
@@ -429,7 +440,7 @@ def run_trial(
             raise RuntimeError("client exited without writing its frame CSV")
 
         rows = _read_csv(csv_path)
-        validate_run(rows, log_text, workload)
+        framebuffer = validate_run(rows, log_text, workload)
         segments = {}
         for suffix in ("stationary", "moving"):
             label = f"{workload}.{suffix}"
@@ -446,6 +457,7 @@ def run_trial(
             "username": username,
             "segments": segments,
             "rss_bytes": rss,
+            "framebuffer": framebuffer,
             "log": log_text,
         }
 
@@ -498,7 +510,7 @@ def _append_records(
         "trial": result["trial"],
         "binary": str(binary),
         "render_distance": RENDER_DISTANCE,
-        "framebuffer": list(PHYSICAL_SIZE),
+        "framebuffer": list(result["framebuffer"]),
         "durations_seconds": {
             "warmup": durations[0],
             "stationary": durations[1],

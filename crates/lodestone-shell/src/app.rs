@@ -50,7 +50,8 @@ use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
-use winit::window::{CursorGrabMode, Window, WindowId};
+use winit::monitor::MonitorHandle;
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::chat::ChatInput;
 use crate::config::{Config, Mode};
@@ -188,25 +189,42 @@ fn window_physical_size(config: &Config) -> Option<(u32, u32)> {
         .map(|_| crate::config::BenchmarkConfig::PHYSICAL_SIZE)
 }
 
-/// Names macOS uses for the laptop panel across Intel and Apple-silicon Macs.
-/// External Apple displays deliberately do not match.
-fn is_builtin_monitor_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.contains("built-in")
-        || name.contains("built in")
-        || name.contains("color lcd")
-        || name.contains("liquid retina")
+/// Select the one monitor carrying the platform's hardware built-in flag.
+/// Names and primary-monitor status are deliberately absent: macOS can expose
+/// generic names, and either external monitor may be the desktop primary.
+fn select_builtin_monitor<T>(monitors: impl IntoIterator<Item = (T, bool)>) -> Option<T> {
+    monitors
+        .into_iter()
+        .find_map(|(monitor, built_in)| built_in.then_some(monitor))
 }
 
-/// Find the laptop panel's desktop origin without assuming it is the primary
-/// monitor. macOS remembers an application's last display, which can otherwise
-/// move a benchmark onto a smaller external panel and invalidate its framebuffer.
-fn builtin_monitor_origin(
-    monitors: impl IntoIterator<Item = (Option<String>, winit::dpi::PhysicalPosition<i32>)>,
-) -> Option<winit::dpi::PhysicalPosition<i32>> {
-    monitors.into_iter().find_map(|(name, origin)| {
-        name.as_deref().is_some_and(is_builtin_monitor_name).then_some(origin)
-    })
+#[cfg(target_os = "macos")]
+fn benchmark_builtin_monitor(event_loop: &ActiveEventLoop) -> Option<MonitorHandle> {
+    use winit::platform::macos::MonitorHandleExtMacOS;
+
+    select_builtin_monitor(event_loop.available_monitors().map(|monitor| {
+        let built_in = objc2_core_graphics::CGDisplayIsBuiltin(monitor.native_id());
+        (monitor, built_in)
+    }))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn benchmark_builtin_monitor(event_loop: &ActiveEventLoop) -> Option<MonitorHandle> {
+    // Other platforms do not expose CoreGraphics' laptop-panel flag. Keep the
+    // benchmark usable there while macOS remains fail-closed and exact.
+    event_loop.primary_monitor()
+}
+
+#[cfg(target_os = "macos")]
+fn monitor_native_id(monitor: &MonitorHandle) -> Option<u32> {
+    use winit::platform::macos::MonitorHandleExtMacOS;
+
+    Some(monitor.native_id())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn monitor_native_id(_monitor: &MonitorHandle) -> Option<u32> {
+    None
 }
 
 /// Benchmark sessions must measure the client rather than a persisted frame

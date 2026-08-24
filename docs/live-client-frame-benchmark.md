@@ -2,7 +2,7 @@
 
 ## What it is
 
-The live client frame benchmark measures Lodestone’s real windowed client while it is joined to a Java 26.2 server. It records frame intervals and CPU phase timings for a normal-terrain workload and a dense render showcase, then summarizes stationary and moving segments separately.
+The live client frame benchmark measures Lodestone’s real fullscreen client while it is joined to a Java 26.2 server. It records frame intervals and CPU/GPU phase timings for a normal-terrain workload and a dense render showcase, then summarizes stationary and moving segments separately.
 
 This is the reproducible workload used for client performance investigations. The synthetic `frame_profile` criterion bench remains an instrumentation control; it is not a substitute for these live measurements.
 
@@ -10,7 +10,9 @@ This is the reproducible workload used for client performance investigations. Th
 
 `scripts/client-frame-benchmark.py` starts the matching Java oracle and does not return until every client child has exited. The runner temporarily launches Java with `view-distance=25`, which lets Lodestone’s render distance 24 request receive its one-column meshing buffer ring. It restores the persistent `server.properties` immediately after startup, so later oracle launches keep their previous configuration.
 
-Each trial gets a new `LODESTONE_DATA_DIR` and offline username. This prevents an old player file, persisted graphics option, or selected Microsoft account from changing the workload. The client launches at a physical 2560×1440 framebuffer with render distance 24, no frame cap, `wgpu::PresentMode::AutoNoVsync`, and deterministic input. Focus loss still releases the cursor but does not pause or background-throttle a benchmark.
+Each trial gets a new `LODESTONE_DATA_DIR` and offline username. This prevents an old player file, persisted graphics option, or selected Microsoft account from changing the workload. The client launches borderless fullscreen with render distance 24, no frame cap, `wgpu::PresentMode::AutoNoVsync`, and deterministic input. Focus loss still releases the cursor but does not pause or background-throttle a benchmark.
+
+On macOS the benchmark does not trust display names or primary-monitor status. Winit can call every attached panel `Monitor #…`, and either external monitor can be the desktop primary. The shell maps each winit monitor to its CoreGraphics display ID and accepts only the display for which `CGDisplayIsBuiltin` is true, then enables winit’s game-fullscreen presentation so the menu bar and Dock do not cover the run. The startup log records the native ID, panel bounds, fullscreen state, and physical drawable size. The runner fails closed unless it sees both the hardware-built-in selection marker and `fullscreen=true`; it parses and records the actual framebuffer because laptop panel modes differ. On this MacBook the measured drawable is 3024×1898 physical pixels (the notch-safe fullscreen content region) inside the built-in panel’s 3024×1964 bounds.
 
 The benchmark clock begins only after `SessionPhase::Connected`:
 
@@ -63,7 +65,7 @@ The runner prints, for each measured segment:
 - client RSS at the first sample, peak sample, and last sample;
 - min/median/max trial spread for p50 frame interval.
 
-Comparable records are appended to `bench-results/live_frame_profile.jsonl`, one object per trial and measured segment. Each object includes the git SHA, OS/machine, architecture, release profile, scene, segment, trial, binary, render distance, framebuffer, durations, RSS, percentiles, budget misses, and phase means.
+Comparable records are appended to `bench-results/live_frame_profile.jsonl`, one object per trial and measured segment. Each object includes the git SHA, OS/machine, architecture, release profile, scene, segment, trial, binary, render distance, parsed fullscreen framebuffer, durations, RSS, percentiles, budget misses, and phase means.
 
 The raw temporary CSV has this leading schema:
 
@@ -79,7 +81,7 @@ The CSV’s frame interval includes everything that delayed the next redraw, inc
 
 Change workload choreography in `crates/lodestone-shell/src/app/benchmark.rs`. Keep it a pure state machine: window, GPU, network, and filesystem operations belong in the caller. If segment boundaries or input change, update its explicit-`Instant` unit tests first.
 
-Change benchmark policy or live wiring in `crates/lodestone-shell/src/app.rs` and `app/redraw.rs`, `app/session.rs`, or `app/lifecycle.rs`. Ordinary play must continue through the option-driven branches. Run the focused policy tests and the version-free seam after edits:
+Change benchmark policy or live wiring in `crates/lodestone-shell/src/app.rs` and `app/redraw.rs`, `app/session.rs`, or `app/lifecycle.rs`. The macOS hardware selector depends on `winit::platform::macos::MonitorHandleExtMacOS` and the target-only `objc2-core-graphics` dependency; do not replace it with monitor-name matching. Ordinary play must continue through the option-driven branches. Run the focused policy tests and the version-free seam after edits:
 
 ```bash
 cargo test -p lodestone-shell --lib policy_ -- --nocapture
@@ -99,7 +101,7 @@ Change summary math, validation, child management, or output fields in `scripts/
 python3 scripts/test-client-frame-benchmark.py
 ```
 
-Do not weaken completion, physical-size, workload-label, or non-empty-segment validation to make a failed run recordable. A partial run is diagnostic evidence, not a comparable benchmark trial.
+Do not weaken completion, hardware-built-in fullscreen, physical-size parsing, workload-label, or non-empty-segment validation to make a failed run recordable. A partial run is diagnostic evidence, not a comparable benchmark trial.
 
 ## Configuration
 
@@ -123,4 +125,5 @@ Canonical server endpoints are terrain `127.0.0.1:25580` with RCON `:25581`, and
 - The Java 26.2 `server.jar` already used by `scripts/live-oracles/terrain.sh` and `creative.sh`.
 - Python 3 standard library only for ordinary runs.
 - `samply` on `PATH` only when `--samply` is requested.
+- On macOS, CoreGraphics through the target-only `objc2-core-graphics` crate for authoritative built-in-panel selection.
 - A native GPU/window session. GPU timestamp availability depends on the selected adapter’s `TIMESTAMP_QUERY` feature.
