@@ -11,9 +11,12 @@ into the `other => tracing::debug!(...)` catch-all and is silently dropped. It s
 per issue" section below is the live inventory — **read that rather than any count in this
 paragraph.**
 
-Not every type arrives over the network at all: a large group is spawned client-side from
-`Block.animateTick`, and those come from `Particles::ambient_tick` instead. A type can
-legitimately have both.
+Not every type arrives over the network at all: a large group is spawned client-side. Most
+nearby block effects come from `Block.animateTick` and therefore
+`Particles::ambient_tick`; the campfire's main plume is a different lifecycle entirely,
+`CampfireBlockEntity::particleTick`, and therefore
+`Particles::campfire_block_entity_tick`. A type can legitimately also have a generic packet
+dispatch path.
 
 ## What it is
 
@@ -310,11 +313,25 @@ client-predicted per-block-state emitter.
 * **`end_rod` needed no new behaviour after all.** It is a `SimpleAnimatedParticle` and the
   no-collision override is `has_physics = false`, which `move_by` already honours — the note above
   claiming it needed a new `Behaviour` shape was wrong.
-* **`Particles::ambient_tick`** is the client-predicted emitter: a bounded random scan of nearby
-  block states, at vanilla's own sample density, for torches, soul torches, nether portals, end
-  gateways, end rods and lit campfires. **None of these is on the wire** — vanilla spawns them from
+* **`Particles::ambient_tick`** is the client-predicted block-animation emitter: a bounded random
+  scan of nearby block states, at vanilla's own sample density, for torches, soul torches, nether
+  portals, end gateways and end rods. **None of these is on the wire** — vanilla spawns them from
   `Block.animateTick` — so no dispatch table however complete could have produced them. It rides
   the collision snapshot `Sim::tick_particles` already holds, so it costs no extra lock.
+* **Campfire smoke is not part of that scan in 26.2.** The main cosy/signal plume comes from
+  `CampfireBlockEntity::particleTick`: every loaded lit campfire gets one `nextFloat() < 0.11`
+  roll per client tick and a successful roll calls `CampfireBlock.makeParticles` two or three
+  times. `block_entities::campfire_smoke_sources` walks the decoded block-entity positions,
+  validates the current block state's `lit` and `signal_fire` properties, and
+  `Sim::tick_particles` feeds those sources to `Particles::campfire_block_entity_tick` at the
+  fixed 20 Hz simulation rate. Each particle starts within one third of the block centre on X/Z,
+  between zero and two blocks above its Y, and rises at `0.07`; cosy smoke lives 80–129 ticks and
+  signal smoke 280–329. The cosy/signal providers choose one of the twelve `big_smoke` sprites
+  independently for every particle and set alpha to `0.9`/`0.95`, respectively. Particle
+  positions continue to interpolate per render frame—the source roll and physics do not depend
+  on frame rate. `CampfireBlock::animateTick` now owns only the
+  crackle and occasional lava fleck, so keeping the plume there would both miss a campfire beyond
+  the random scan (the HUD scene is 14 blocks from the player) and duplicate any sampled one.
 * **`enchant` is wired** — see "The `CritParticle`, `SpellParticle` and
   `FlyTowardsPositionParticle` families" below. The bullet that stood here said it was blocked
   because "its motes travel toward a target the enchanting-table block entity supplies, a

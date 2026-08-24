@@ -617,6 +617,114 @@ fn flame_particles_are_textured_from_the_particle_sheet_not_the_block_atlas() {
     );
 }
 
+/// Campfire smoke uses the same stitched sheet as flame but the other half of
+/// the particle renderer: `Layer::Translucent`, submitted after translucent
+/// terrain with depth writes disabled. The flame gate above cannot observe a
+/// dropped or ineffective translucent draw because every flame instance lands
+/// in the opaque range.
+#[test]
+#[ignore = "requires a GPU adapter and a fetched vanilla client.jar + generated/reports/blocks.json"]
+fn campfire_smoke_reaches_pixels_through_the_translucent_particle_pass() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in but no adapter is available; do not treat this as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+
+    let root = pack_root();
+    let manager = open_jar(&root);
+    let blocks = block_atlas(&root, &manager);
+    let (sheet, report) = ParticleAtlas::build_reported(&manager).expect("stitch particle atlas");
+    assert!(
+        report.missing_textures.is_empty(),
+        "particle atlas is incomplete: {:?}",
+        report.missing_textures
+    );
+    let models = blocks.models().expect("block atlas has baked models");
+    let mut particles = Particles::new(Some(models)).with_particle_atlas(Some(&sheet));
+    for _ in 0..12 {
+        lodestone_particle::emit::campfire_smoke(
+            particles.engine_mut(),
+            PARTICLE_POS[0],
+            PARTICLE_POS[1],
+            PARTICLE_POS[2],
+            0.0,
+            0.07,
+            0.0,
+            true,
+        );
+    }
+
+    let camera = Camera {
+        position: glam::Vec3::new(EYE[0], EYE[1], EYE[2]),
+        yaw: 0.0,
+        pitch: 0.0,
+        aspect: W as f32 / H as f32,
+        ..Camera::default()
+    };
+    let frame = particles.extract(&camera, 0.0, &|_, _, _| {
+        Some(lodestone_particle::FULL_BRIGHT)
+    });
+    assert_eq!(frame.campfire_smoke_alive, 12);
+    assert_eq!(frame.unresolved, 0);
+    assert_eq!(frame.sheet_drawn, 12);
+    assert_eq!(frame.drawn, 12);
+
+    // The live campfire frame is mixed: its flame/spark particles occupy the
+    // opaque prefix and smoke occupies the translucent suffix. A smoke-only
+    // upload starts at byte offset zero and cannot catch an incorrect non-zero
+    // range offset.
+    let mut flame = Particles::new(Some(models)).with_particle_atlas(Some(&sheet));
+    lodestone_particle::emit::flame(
+        flame.engine_mut(),
+        PARTICLE_POS[0] - 0.25,
+        PARTICLE_POS[1],
+        PARTICLE_POS[2],
+        0.0,
+        0.0,
+        0.0,
+    );
+    let flame_frame = flame.extract(&camera, 0.0, &|_, _, _| {
+        Some(lodestone_particle::FULL_BRIGHT)
+    });
+    assert_eq!(flame_frame.drawn, 1);
+    let flame_instances = flame.instances().to_vec();
+    let mut mixed_instances = flame_instances.clone();
+    mixed_instances.extend_from_slice(particles.instances());
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let mut render = RenderState::new(device, queue, format, W, H, Some(&blocks));
+    render.install_particle_sheet_atlas(device, queue, sheet.atlas());
+    let (baseline, baseline_stats) = render_frame(
+        device,
+        queue,
+        &mut target,
+        &mut render,
+        &camera,
+        &flame_instances,
+    );
+    let (smoke, smoke_stats) = render_frame(
+        device,
+        queue,
+        &mut target,
+        &mut render,
+        &camera,
+        &mixed_instances,
+    );
+    assert_eq!(baseline_stats.particles_drawn, 1);
+    assert_eq!(smoke_stats.particles_drawn, 13);
+    assert_eq!(smoke_stats.particles_from_sheet, 13);
+
+    let changed = classify(&baseline, &smoke, &[]).drawn;
+    eprintln!("campfire smoke changed {changed}");
+    assert!(
+        changed.count > 500,
+        "12 submitted translucent campfire-smoke instances changed only {changed}; \
+         the translucent particle draw did not reach the framebuffer"
+    );
+}
+
 /// The instance colour every flame in this burst carries, asserted uniform.
 ///
 /// Read out of the uploaded bytes rather than assumed to be `[1, 1, 1]`:

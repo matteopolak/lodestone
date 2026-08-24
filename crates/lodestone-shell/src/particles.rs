@@ -176,6 +176,12 @@ pub struct ParticleFrame {
     /// has to be able to prove the sheet path was exercised at all —
     /// `drawn > 0` alone is satisfied by terrain debris.
     pub sheet_drawn: usize,
+    /// Live particles belonging specifically to the cosy/signal campfire plume.
+    ///
+    /// This is an anti-vacuity diagnostic for screenshot and live gates: a
+    /// generic `alive > 0` can be satisfied by an unrelated ambient block or a
+    /// server packet while the campfire block-entity lifecycle is still dead.
+    pub campfire_smoke_alive: usize,
 }
 
 /// The live particle simulation plus its per-frame extraction scratch.
@@ -1292,6 +1298,14 @@ impl Particles {
             drawn: self.instances.len(),
             unresolved,
             sheet_drawn,
+            campfire_smoke_alive: self
+                .engine
+                .particles()
+                .iter()
+                .filter(|particle| {
+                    particle.behaviour == lodestone_particle::Behaviour::CampfireSmoke
+                })
+                .count(),
         };
         // Whatever declines to draw a particle says why. A discarded particle
         // and one that never spawned look identical from outside, and the only
@@ -3983,8 +3997,9 @@ mod tests {
             particles.campfire_block_entity_tick(&[([2, 64, 18], signal)]);
 
             let plume = particles.engine.particles();
+            let plume_len = plume.len();
             assert!(
-                (2..=3).contains(&plume.len()),
+                (2..=3).contains(&plume_len),
                 "a successful 26.2 smoke roll emits two or three particles"
             );
             for particle in plume {
@@ -3998,6 +4013,10 @@ mod tests {
                 assert!((64.0..66.0).contains(&particle.y));
                 assert!(particle.yd >= 0.07 && particle.yd < 0.072);
             }
+            let frame = particles.extract(&Camera::default(), 0.0, &|_, _, _| {
+                Some(lodestone_particle::FULL_BRIGHT)
+            });
+            assert_eq!(frame.campfire_smoke_alive, plume_len);
         }
     }
 

@@ -38,3 +38,12 @@ fn lanterns_sit_in_backed_roofed_alcoves() {
         );
     }
 }
+
+#[test]
+fn campfire_uses_vanillas_visible_cosy_smoke_setup() {
+    assert!(has_command("@ticks 60"));
+    assert!(has_command("setblock 2 63 18 minecraft:stone_bricks"));
+    assert!(has_command(
+        "setblock 2 64 18 minecraft:campfire[lit=true,signal_fire=false,facing=south]"
+    ));
+}

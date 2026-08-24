@@ -2394,9 +2394,9 @@ pub fn flash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, colour: [f32; 
 mod tests {
     use super::{
         FULL_CUBE, Face, angry_villager, breaking_block_effect, bubble, crit, destroy_block_effect,
-        ash, drip, explosion_emitter, firework, flame, fly_towards_position, happy_villager,
-        heart, huge_explosion, lava, note, poof, smoke, splash, spore_blossom_air, sweep_attack,
-        totem_of_undying, white_smoke, witch,
+        ash, campfire_smoke, drip, explosion_emitter, firework, flame, fly_towards_position,
+        happy_villager, heart, huge_explosion, lava, note, poof, smoke, splash,
+        spore_blossom_air, sweep_attack, totem_of_undying, white_smoke, witch,
     };
     use crate::{Behaviour, DripKind, DripPhase, ParticleEngine, Sheet, SpriteSource};
     use lodestone_physics::{Aabb, CollisionView};
@@ -3501,6 +3501,36 @@ mod tests {
             "the glyph must be removed the tick `age` reaches `lifetime`"
         );
     }
+
+    #[test]
+    fn campfire_providers_pick_across_the_sprite_set_and_apply_their_alpha() {
+        let mut engine = ParticleEngine::seeded(4096);
+        for signal in [false, true] {
+            for _ in 0..12 {
+                campfire_smoke(&mut engine, 0.5, 64.5, 0.5, 0.0, 0.07, 0.0, signal);
+            }
+        }
+
+        let cosy = &engine.particles()[..12];
+        let signal = &engine.particles()[12..];
+        assert!(cosy.iter().all(|particle| (particle.alpha - 0.9).abs() < 1e-6));
+        assert!(signal.iter().all(|particle| (particle.alpha - 0.95).abs() < 1e-6));
+        let frames = engine
+            .particles()
+            .iter()
+            .map(|particle| match particle.sprite {
+                SpriteSource::Sheet {
+                    sheet: Sheet::BigSmoke,
+                    frame,
+                } => frame,
+                other => panic!("campfire smoke used the wrong sprite: {other:?}"),
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            frames.len() >= 6,
+            "SpriteSet.get(random) should vary the plume, got frames {frames:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3679,7 +3709,9 @@ pub fn portal(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: 
 ///
 /// `signal` picks between the two lifetimes, and they are far apart on purpose:
 /// `rand(50) + 80` cosy against `rand(50) + 280` signal, which is the whole
-/// reason a signal fire's plume reaches above the treeline.
+/// reason a signal fire's plume reaches above the treeline. Both providers use
+/// `SpriteSet.get(random)` once per particle rather than pinning the first
+/// `big_smoke` sprite; their alpha differs too (`0.9` cosy, `0.95` signal).
 pub fn campfire_smoke(
     engine: &mut ParticleEngine,
     x: f64,
@@ -3690,6 +3722,12 @@ pub fn campfire_smoke(
     za: f64,
     signal: bool,
 ) {
+    let frame = u16::try_from(
+        engine
+            .rng()
+            .next_i32_bound(i32::from(Sheet::BigSmoke.frame_count())),
+    )
+    .expect("the big-smoke sprite set has fewer than u16::MAX frames");
     let rng = engine.rng();
     let mut p = Particle::new(
         x,
@@ -3697,7 +3735,7 @@ pub fn campfire_smoke(
         z,
         SpriteSource::Sheet {
             sheet: Sheet::BigSmoke,
-            frame: 0,
+            frame,
         },
         rng,
     );
@@ -3709,6 +3747,7 @@ pub fn campfire_smoke(
     p.xd = xa;
     p.yd = ya + f64::from(rng_next(engine)) / 500.0;
     p.zd = za;
+    p.alpha = if signal { 0.95 } else { 0.9 };
     p.behaviour = Behaviour::CampfireSmoke;
     engine.add(p);
 }
