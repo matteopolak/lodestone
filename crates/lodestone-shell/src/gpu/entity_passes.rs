@@ -33,7 +33,7 @@ use lodestone_model::event::EquipmentSlot;
 use lodestone_render::{
     Camera, CameraUniform, EntityCameraUniform, InstanceTint, ItemStateContext,
     entity::{Arm, armour_layer_tint_with_dye, armour_layers, ground_transform, hand_transform},
-    plan_block_entities, plan_entities, upload_instances_tinted,
+    plan_block_entities, plan_entities, upload_instances_tinted_pooled,
 };
 
 use crate::entities::EntityDraw;
@@ -1124,7 +1124,16 @@ impl RenderState {
                 let parts = batch
                     .parts
                     .iter()
-                    .map(|p| upload_instances_tinted(device, p, &batch.lights, &tints))
+                    .map(|p| {
+                        upload_instances_tinted_pooled(
+                            &self.instance_buffers,
+                            device,
+                            queue,
+                            p,
+                            &batch.lights,
+                            &tints,
+                        )
+                    })
                     .collect();
                 EntityDrawBatch {
                     model: batch.model,
@@ -1146,7 +1155,16 @@ impl RenderState {
                 let parts = batch
                     .parts
                     .iter()
-                    .map(|part| upload_instances_tinted(device, part, &batch.lights, &tints))
+                    .map(|part| {
+                        upload_instances_tinted_pooled(
+                            &self.instance_buffers,
+                            device,
+                            queue,
+                            part,
+                            &batch.lights,
+                            &tints,
+                        )
+                    })
                     .collect();
                 EntityDrawBatch {
                     model: batch.model,
@@ -1209,6 +1227,7 @@ impl RenderState {
     pub(super) fn prepare_armour(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -1357,7 +1376,14 @@ impl RenderState {
                     .into_iter()
                     .filter_map(|p| {
                         let count = u32::try_from(p.transforms.len()).unwrap_or(u32::MAX);
-                        upload_instances_tinted(device, &p.transforms, &p.lights, &p.tints)
+                        upload_instances_tinted_pooled(
+                            &self.instance_buffers,
+                            device,
+                            queue,
+                            &p.transforms,
+                            &p.lights,
+                            &p.tints,
+                        )
                             .map(|buffer| (p.range, buffer, count))
                     })
                     .collect(),
@@ -1630,6 +1656,7 @@ impl RenderState {
     pub(super) fn prepare_orbs(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -1690,7 +1717,15 @@ impl RenderState {
             .filter(|(_, (transforms, ..))| !transforms.is_empty())
             .filter_map(|(icon, (transforms, lights, tints))| {
                 let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
-                upload_instances_tinted(device, &transforms, &lights, &tints).map(|buffer| {
+                upload_instances_tinted_pooled(
+                    &self.instance_buffers,
+                    device,
+                    queue,
+                    &transforms,
+                    &lights,
+                    &tints,
+                )
+                .map(|buffer| {
                     OrbBatch {
                         icon: u32::try_from(icon).unwrap_or(0),
                         buffer,
@@ -1722,6 +1757,7 @@ impl RenderState {
     pub(super) fn prepare_entity_sprites(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -1812,7 +1848,15 @@ impl RenderState {
                 // so there is no per-instance tint to carry — an empty slice
                 // leaves every instance at `EntityInstanceRaw`'s untinted
                 // default.
-                upload_instances_tinted(device, &transforms, &lights, &[]).map(|buffer| {
+                upload_instances_tinted_pooled(
+                    &self.instance_buffers,
+                    device,
+                    queue,
+                    &transforms,
+                    &lights,
+                    &[],
+                )
+                .map(|buffer| {
                     EntitySpriteBatch {
                         sprite,
                         buffer,
@@ -1998,6 +2042,7 @@ impl RenderState {
     pub(super) fn prepare_wool(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -2078,7 +2123,14 @@ impl RenderState {
             .into_iter()
             .filter_map(|p| {
                 let count = u32::try_from(p.transforms.len()).unwrap_or(u32::MAX);
-                upload_instances_tinted(device, &p.transforms, &p.lights, &p.tints)
+                upload_instances_tinted_pooled(
+                    &self.instance_buffers,
+                    device,
+                    queue,
+                    &p.transforms,
+                    &p.lights,
+                    &p.tints,
+                )
                     .map(|buffer| (p.range, buffer, count))
             })
             .collect()
@@ -2107,6 +2159,7 @@ impl RenderState {
     pub(super) fn prepare_cape(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -2183,8 +2236,15 @@ impl RenderState {
             .into_iter()
             .filter_map(|(url, transforms, lights, tints)| {
                 let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
-                upload_instances_tinted(device, &transforms, &lights, &tints)
-                    .map(|buffer| CapeDrawBatch { url, buffer, count })
+                upload_instances_tinted_pooled(
+                    &self.instance_buffers,
+                    device,
+                    queue,
+                    &transforms,
+                    &lights,
+                    &tints,
+                )
+                .map(|buffer| CapeDrawBatch { url, buffer, count })
             })
             .collect()
     }
@@ -2241,6 +2301,7 @@ impl RenderState {
     pub(super) fn prepare_elytra(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -2326,7 +2387,15 @@ impl RenderState {
             .into_iter()
             .filter_map(|(texture, range, transforms, lights, tints)| {
                 let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
-                upload_instances_tinted(device, &transforms, &lights, &tints).map(|buffer| {
+                upload_instances_tinted_pooled(
+                    &self.instance_buffers,
+                    device,
+                    queue,
+                    &transforms,
+                    &lights,
+                    &tints,
+                )
+                .map(|buffer| {
                     ElytraDrawBatch {
                         texture,
                         range,
@@ -2376,6 +2445,7 @@ impl RenderState {
     pub(super) fn prepare_paintings(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -2449,7 +2519,15 @@ impl RenderState {
             .into_iter()
             .filter_map(|(model, part, variant, transforms, lights, tints)| {
                 let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
-                upload_instances_tinted(device, &transforms, &lights, &tints).map(|buffer| {
+                upload_instances_tinted_pooled(
+                    &self.instance_buffers,
+                    device,
+                    queue,
+                    &transforms,
+                    &lights,
+                    &tints,
+                )
+                .map(|buffer| {
                     PaintingDrawBatch {
                         model,
                         part,
@@ -2916,8 +2994,10 @@ impl RenderState {
                 // would wash every dye toward white — vanilla is not
                 // colour-managed, and the shader multiplies in gamma too.
                 let rgb = lodestone_render::gamma_rgb_to_bytes(layer.color);
-                let Some(buffer) = upload_instances_tinted(
+                let Some(buffer) = upload_instances_tinted_pooled(
+                    &self.instance_buffers,
                     device,
+                    queue,
                     &[layer.transform],
                     &[u32::from(layer.light)],
                     &[InstanceTint::rgb(rgb)],
@@ -2965,7 +3045,16 @@ impl RenderState {
                 parts: batch
                     .parts
                     .iter()
-                    .map(|p| upload_instances_tinted(device, p, &batch.lights, &batch.tints))
+                    .map(|p| {
+                        upload_instances_tinted_pooled(
+                            &self.instance_buffers,
+                            device,
+                            queue,
+                            p,
+                            &batch.lights,
+                            &batch.tints,
+                        )
+                    })
                     .collect(),
             })
             .collect();

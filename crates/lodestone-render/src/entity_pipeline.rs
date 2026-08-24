@@ -77,6 +77,8 @@
 //! pixel, enough on its own to make a mob brighter than the brightest sunlit
 //! block face.
 
+use std::cell::RefCell;
+
 use wgpu::util::DeviceExt;
 
 use crate::block::{CameraUniform, DEPTH_FORMAT};
@@ -1003,6 +1005,85 @@ impl Default for InstanceTint {
     }
 }
 
+#[derive(Debug)]
+struct InstanceBufferSlot<T> {
+    handle: T,
+    capacity: u64,
+}
+
+#[derive(Debug)]
+struct InstanceBufferPoolState<T> {
+    cursor: usize,
+    slots: Vec<InstanceBufferSlot<T>>,
+}
+
+impl<T> Default for InstanceBufferPoolState<T> {
+    fn default() -> Self {
+        Self {
+            cursor: 0,
+            slots: Vec::new(),
+        }
+    }
+}
+
+impl<T: Clone> InstanceBufferPoolState<T> {
+    fn begin_frame(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn take(&mut self, required: u64, mut create: impl FnMut(u64) -> T) -> T {
+        debug_assert!(required > 0, "empty instance uploads return before taking a slot");
+        let index = self.cursor;
+        self.cursor += 1;
+        let capacity = required.checked_next_power_of_two().unwrap_or(required);
+
+        if index == self.slots.len() {
+            self.slots.push(InstanceBufferSlot {
+                handle: create(capacity),
+                capacity,
+            });
+        } else if self.slots[index].capacity < required {
+            self.slots[index] = InstanceBufferSlot {
+                handle: create(capacity),
+                capacity,
+            };
+        }
+        self.slots[index].handle.clone()
+    }
+}
+
+/// Frame-reused vertex buffers for dynamic entity and block-entity instances.
+///
+/// Call [`begin_frame`](Self::begin_frame) exactly once before preparing a
+/// frame. Uploads then consume distinct retained slots in call order. A slot is
+/// rewritten through the queue when it is large enough and replaced only when
+/// the new contents outgrow it, avoiding the per-model-part buffer allocation
+/// that otherwise dominates dense entity scenes.
+#[derive(Debug, Default)]
+pub struct InstanceBufferPool {
+    state: RefCell<InstanceBufferPoolState<wgpu::Buffer>>,
+}
+
+impl InstanceBufferPool {
+    /// Reset the upload cursor while retaining every allocated GPU buffer.
+    pub fn begin_frame(&self) {
+        self.state.borrow_mut().begin_frame();
+    }
+
+    fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue, contents: &[u8]) -> wgpu::Buffer {
+        let buffer = self.state.borrow_mut().take(contents.len() as u64, |capacity| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("lodestone-pooled-entity-instances"),
+                size: capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        queue.write_buffer(&buffer, 0, contents);
+        buffer
+    }
+}
+
 /// [`upload_instances`] with a per-instance gamma-space tint and hurt overlay.
 ///
 /// `tints` is indexed in lockstep with `transforms`; a short or missing entry
@@ -1020,6 +1101,38 @@ pub fn upload_instances_tinted(
     lights: &[u32],
     tints: &[InstanceTint],
 ) -> Option<wgpu::Buffer> {
+    let raw = tinted_instances(transforms, lights, tints)?;
+    Some(
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lodestone-entity-tinted-instances"),
+            contents: bytemuck::cast_slice(&raw),
+            usage: wgpu::BufferUsages::VERTEX,
+        }),
+    )
+}
+
+/// Pooled form of [`upload_instances_tinted`] for per-frame render paths.
+///
+/// The returned handle owns a distinct slot for this frame, while the pool
+/// retains the underlying allocation for the same ordinal upload next frame.
+#[must_use]
+pub fn upload_instances_tinted_pooled(
+    pool: &InstanceBufferPool,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    transforms: &[glam::Mat4],
+    lights: &[u32],
+    tints: &[InstanceTint],
+) -> Option<wgpu::Buffer> {
+    let raw = tinted_instances(transforms, lights, tints)?;
+    Some(pool.upload(device, queue, bytemuck::cast_slice(&raw)))
+}
+
+fn tinted_instances(
+    transforms: &[glam::Mat4],
+    lights: &[u32],
+    tints: &[InstanceTint],
+) -> Option<Vec<EntityInstanceRaw>> {
     if transforms.is_empty() {
         return None;
     }
@@ -1035,13 +1148,7 @@ pub fn upload_instances_tinted(
             }
         })
         .collect();
-    Some(
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("lodestone-entity-tinted-instances"),
-            contents: bytemuck::cast_slice(&raw),
-            usage: wgpu::BufferUsages::VERTEX,
-        }),
-    )
+    Some(raw)
 }
 
 /// Build a flame-instance buffer from a slice of billboard transforms and this
@@ -2047,6 +2154,36 @@ const SHADOW_WGSL: &str = include_str!("shaders/entity_shadow.wgsl");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instance_buffer_slots_reuse_handles_and_replace_only_undersized_slots() {
+        let mut pool = InstanceBufferPoolState::default();
+        let next_id = std::cell::Cell::new(0usize);
+        let mut create = |capacity| {
+            let id = next_id.get() + 1;
+            next_id.set(id);
+            (id, capacity)
+        };
+
+        let first_a = pool.take(76, &mut create);
+        let first_b = pool.take(152, &mut create);
+        assert_eq!(first_a.0, 1);
+        assert_eq!(first_b.0, 2);
+        assert_eq!(next_id.get(), 2);
+
+        pool.begin_frame();
+        let reused_a = pool.take(76, &mut create);
+        let reused_b = pool.take(76, &mut create);
+        assert_eq!((reused_a.0, reused_b.0), (1, 2));
+        assert_eq!(next_id.get(), 2, "a stable frame must allocate no new slots");
+
+        pool.begin_frame();
+        let grown_a = pool.take(first_a.1 + 1, &mut create);
+        let still_reused_b = pool.take(76, &mut create);
+        assert_eq!(grown_a.0, 3, "only the undersized slot is replaced");
+        assert_eq!(still_reused_b.0, 2, "later sufficient slots remain reusable");
+        assert_eq!(next_id.get(), 3);
+    }
 
     #[test]
     fn instance_raw_is_four_columns_plus_a_light_and_a_tint_word() {
