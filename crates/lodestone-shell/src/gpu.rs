@@ -22,7 +22,9 @@
 use std::collections::HashMap;
 
 use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
-use lodestone_render::{BlockPipeline, DepthBuffer, GpuAtlas, InstanceTint, fog::FogSettings};
+use lodestone_render::{
+    BlockPipeline, DepthBuffer, GpuAtlas, InstanceBufferPool, InstanceTint, fog::FogSettings,
+};
 
 use lodestone_model::event::EquipmentSlot;
 
@@ -330,6 +332,9 @@ pub struct RenderState {
     /// tint there, exactly as an unresolved id does.
     plugin_atlas_sprites: std::sync::Arc<HashMap<String, [f32; 4]>>,
     entities: EntityRenderer,
+    /// Retained slots for every tinted entity/block-entity instance upload in a
+    /// frame. The cursor resets in `render_inner`; the buffers do not.
+    instance_buffers: InstanceBufferPool,
     /// Render-frame counter driving the mob-fire billboard's texture
     /// animation — see `prepare_flame`'s doc for why this counts
     /// render frames rather than the real 20 Hz game tick.

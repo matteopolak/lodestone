@@ -37,7 +37,7 @@
 
 use lodestone_render::{
     AnimInput, Camera, CameraUniform, EntityCameraUniform, InstanceTint, SpawnerMobSpawn,
-    entity_model_matrix, plan_entities, spawner_display_outer_matrix, upload_instances_tinted,
+    entity_model_matrix, plan_entities, spawner_display_outer_matrix, upload_instances_tinted_pooled,
 };
 
 use super::{EntityDrawBatch, RenderState};
@@ -89,6 +89,7 @@ impl RenderState {
     pub(super) fn prepare_spawner_mobs(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         camera: &Camera,
         spawns: &[SpawnerMobSpawn],
     ) -> Vec<EntityDrawBatch> {
@@ -144,7 +145,16 @@ impl RenderState {
                 let parts = batch
                     .parts
                     .iter()
-                    .map(|p| upload_instances_tinted(device, p, &batch.lights, &tints))
+                    .map(|p| {
+                        upload_instances_tinted_pooled(
+                            &self.instance_buffers,
+                            device,
+                            queue,
+                            p,
+                            &batch.lights,
+                            &tints,
+                        )
+                    })
                     .collect();
                 EntityDrawBatch {
                     model: batch.model,

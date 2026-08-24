@@ -243,6 +243,7 @@ impl RenderState {
         // itself create or write a buffer) — see `WorldSubphase::PrepareBuffers`'s
         // own doc. A single `Instant::now()` local; nothing else here changes.
         let world_encode_t0 = crate::platform::Instant::now();
+        self.instance_buffers.begin_frame();
 
         // Cache this frame's camera block position for `upload_section`'s
         // near-distance fade skip — see `RenderState::last_camera_block_pos`'s
@@ -542,37 +543,37 @@ impl RenderState {
         let spawner_spawns = self.spawner_source.spawner_mobs(camera.position);
         entity_batches
             .visible
-            .extend(self.prepare_spawner_mobs(device, camera, &spawner_spawns));
+            .extend(self.prepare_spawner_mobs(device, queue, camera, &spawner_spawns));
 
         // Humanoid armour layers, over the same instances — resolved from the
         // same `entities` slice and the same resolver, so a helmet cannot be
         // posed off a head the body pass did not draw. Uploaded here for the
         // usual reason: no buffer creation mid-pass.
-        let armour_batches = self.prepare_armour(device, camera, entities, &mut stats);
+        let armour_batches = self.prepare_armour(device, queue, camera, entities, &mut stats);
 
         // The sheep wool layer, over the same instances, for the
         // same reason armour is: no buffer creation mid-pass, and never posed
         // off a pose the body pass did not also draw.
-        let wool_batches = self.prepare_wool(device, camera, entities, &mut stats);
+        let wool_batches = self.prepare_wool(device, queue, camera, entities, &mut stats);
 
         // Player capes, over the same instances, for the same reason
         // armour/wool are: no buffer creation mid-pass, and never posed off a
         // pose the body pass did not also draw. Grouped by cape URL rather
         // than by wearer part — see `RenderState::prepare_cape`'s doc.
-        let cape_batches = self.prepare_cape(device, camera, entities, &mut stats);
+        let cape_batches = self.prepare_cape(device, queue, camera, entities, &mut stats);
 
         // The elytra wings — the layer the cape pass suppresses itself for,
         // over the same instances and for the same reason as everything
         // above: no buffer creation mid-pass. See
         // `RenderState::prepare_elytra`'s doc, including why its pose is the
         // resting triple for every wearer until the animation state lands.
-        let elytra_batches = self.prepare_elytra(device, camera, entities, &mut stats);
+        let elytra_batches = self.prepare_elytra(device, queue, camera, entities, &mut stats);
 
         // Paintings, over the same entity slice and for the same reason as
         // everything above: no buffer creation mid-pass. Not part of the mob
         // batch — a painting has no rig at all, so `prepare_entities` never
         // sees one. See `RenderState::prepare_paintings`.
-        let painting_batches = self.prepare_paintings(device, camera, entities, &mut stats);
+        let painting_batches = self.prepare_paintings(device, queue, camera, entities, &mut stats);
 
         // The mob-fire billboard, over the same instances, for
         // the same reason armour/wool are: no buffer creation mid-pass.
@@ -587,13 +588,14 @@ impl RenderState {
         // same reason as everything above: no buffer creation mid-pass. An orb has
         // no cuboid rig, so `prepare_entities` above skips it entirely — this is
         // the only thing that puts an orb on screen.
-        let orb_batches = self.prepare_orbs(device, camera, entities, &mut stats);
+        let orb_batches = self.prepare_orbs(device, queue, camera, entities, &mut stats);
 
         // The camera-facing entity sprites — a dragon fireball and a fishing
         // bobber. Same reasoning as the orbs immediately above: neither has a
         // cuboid rig, so `prepare_entities` skips both and this is the only
         // thing that puts either on screen.
-        let sprite_batches = self.prepare_entity_sprites(device, camera, entities, &mut stats);
+        let sprite_batches =
+            self.prepare_entity_sprites(device, queue, camera, entities, &mut stats);
         // The fishing line back to whoever cast it. Uploaded here, before the
         // pass opens, for the reason everything in this block is: buffers
         // cannot be written mid-pass. Reads the same (possibly body-extended)

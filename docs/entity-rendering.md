@@ -13,6 +13,39 @@ and each has burned us once:
 
 ## How it works
 
+### Dynamic instance-buffer reuse
+
+Every visible model part needs a small `EntityInstanceRaw` vertex buffer containing
+its transform, packed light, tint, and hurt overlay. Dense scenes used to call
+`DeviceExt::create_buffer_init` once per part on every frame. A sampled showcase
+with mobs, paintings, signs, banners, heads, mapped item frames, and particles
+spent 10.5% of all stationary-frame samples in that upload helper; 78% of those
+samples were creating Metal buffers rather than preparing instance data.
+
+`RenderState::instance_buffers` is now an `InstanceBufferPool` shared by all
+world entity and block-entity preparation passes. `render_inner` calls
+`begin_frame` before the first upload. Each subsequent upload consumes one slot
+in stable call order: a sufficiently large slot is rewritten with
+`Queue::write_buffer`, while a missing or undersized slot is allocated at the
+next power-of-two capacity. The cursor resets each frame, but the slots remain.
+This keeps every draw's buffer distinct for the duration of the frame without
+repeating driver allocations once the visible workload has warmed up.
+
+The one-shot `upload_instances_tinted` remains for isolated renderers that do
+not own a frame-scoped pool. World paths should use
+`upload_instances_tinted_pooled` and pass the same pool and queue. If a new
+preparation pass is inserted, call it only after `begin_frame` and before the
+render pass opens; GPU buffers cannot be written while that render pass borrows
+them. Do not reset the cursor between subpasses, because that would let later
+uploads overwrite buffers still referenced by earlier draws.
+
+There are no runtime flags or capacity limits. Slot count tracks the peak number
+of non-empty uploads, and each slot retains its peak power-of-two byte capacity.
+Changing that retention policy belongs in `InstanceBufferPoolState::take`;
+changing the packed bytes belongs in `tinted_instances`. The state-only unit
+test verifies stable frames allocate nothing and growth replaces only the
+undersized ordinal slot.
+
 ### Type path → model name
 
 `canonical_model_name(type_path)` maps an entity type's registry path onto a

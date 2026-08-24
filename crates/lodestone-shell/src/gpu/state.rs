@@ -302,6 +302,7 @@ impl RenderState {
             plugin_billboards_source: PluginBillboardsSource::default(),
             plugin_atlas_sprites: std::sync::Arc::new(plugin_atlas_sprites),
             entities,
+            instance_buffers: lodestone_render::InstanceBufferPool::default(),
             flame_frame_counter: std::cell::Cell::new(0),
             section_fade_tick: std::cell::Cell::new(0),
             particles,
