@@ -9,7 +9,7 @@ impl ApplicationHandler for WindowApp {
         if self.window.is_some() {
             return;
         }
-        let attrs = window_attributes();
+        let attrs = window_attributes(&self.config);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -148,12 +148,16 @@ impl ApplicationHandler for WindowApp {
                 // `Minecraft.pauseIfInactive` calls `pauseGame` only when the
                 // option is on (`Minecraft.java`); the pointer release and the
                 // pacer's background throttle are a different mechanism (mouse
-                // capture, frame rate) and stay unconditional either way.
-                if self.nav.pause_on_lost_focus() {
+                // capture, frame rate). The opt-in benchmark keeps foreground
+                // pacing so an incidental focus notification cannot change the
+                // measured workload; ordinary play keeps the existing option.
+                if should_background_pace(&self.config) && self.nav.pause_on_lost_focus() {
                     self.ui.pause();
                 }
                 self.set_grab(false);
-                self.pacer.set_focused(false);
+                if should_background_pace(&self.config) {
+                    self.pacer.set_focused(false);
+                }
             }
             WindowEvent::Focused(true) => {
                 // Presentation resumes at full rate. The pointer is *not*
@@ -1502,6 +1506,16 @@ impl WindowApp {
         }
 
         let (w, h) = target.size();
+        if self.config.benchmark.is_some() {
+            tracing::info!(
+                target: "frame_benchmark",
+                framebuffer_width = w,
+                framebuffer_height = h,
+                render_distance = self.config.render_distance,
+                present_mode = ?wgpu::PresentMode::AutoNoVsync,
+                "benchmark window ready"
+            );
+        }
         let format = target.format();
         let mut render = RenderState::new(
             gpu.device(),
@@ -1931,7 +1945,7 @@ impl WindowApp {
 ///
 /// A free function so both targets build the identical attributes and only the
 /// browser-specific part is forked.
-fn window_attributes() -> winit::window::WindowAttributes {
+fn window_attributes(config: &Config) -> winit::window::WindowAttributes {
     let attrs = Window::default_attributes().with_title("Lodestone");
 
     // Native only: a concrete starting size for a freestanding OS window, which has no
@@ -1939,7 +1953,12 @@ fn window_attributes() -> winit::window::WindowAttributes {
     // `wasm32`** — see the browser arm below for why setting this there is actively
     // wrong rather than merely redundant.
     #[cfg(not(target_arch = "wasm32"))]
-    let attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
+    let attrs = match window_physical_size(config) {
+        Some((width, height)) => {
+            attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height))
+        }
+        None => attrs.with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0)),
+    };
 
     // Browser: bind winit to the page's own `<canvas id="lodestone">` instead of
     // letting it create one. Two reasons, and the second is the one that bites:

@@ -6,6 +6,42 @@
 
 use super::*;
 
+fn benchmark_config(workload: crate::config::BenchmarkWorkload) -> Config {
+    Config {
+        benchmark: Some(crate::config::BenchmarkConfig {
+            workload,
+            warmup: Duration::from_secs(20),
+            stationary: Duration::from_secs(30),
+            moving: Duration::from_secs(60),
+        }),
+        ..Config::default()
+    }
+}
+
+#[test]
+fn benchmark_policy_is_uncapped_unvsynced_and_uses_physical_1440p() {
+    let config = benchmark_config(crate::config::BenchmarkWorkload::Terrain);
+    assert_eq!(window_physical_size(&config), Some((2560, 1440)));
+    assert_eq!(benchmark_target_fps(&config, Some(120)), None);
+    assert_eq!(
+        benchmark_present_mode(&config, wgpu::PresentMode::Fifo),
+        wgpu::PresentMode::AutoNoVsync
+    );
+    assert!(!should_background_pace(&config));
+}
+
+#[test]
+fn ordinary_policy_remains_persisted_option_driven() {
+    let config = Config::default();
+    assert_eq!(window_physical_size(&config), None);
+    assert_eq!(benchmark_target_fps(&config, Some(120)), Some(120));
+    assert_eq!(
+        benchmark_present_mode(&config, wgpu::PresentMode::Fifo),
+        wgpu::PresentMode::Fifo
+    );
+    assert!(should_background_pace(&config));
+}
+
 /// Java's `String.hashCode()`, computed by hand from the well-known
 /// public algorithm — an oracle that lives outside this file, per
 /// `CLAUDE.md`'s evidence standard. `"hello"`: `h = 0`, then

@@ -28,6 +28,49 @@ impl WindowApp {
         // clamped to vanilla's ten-tick catch-up budget, so a long stall is
         // dropped rather than replayed in a burst.
         let frame_start = Instant::now();
+        let connected = self.sim.session_phase() == crate::sim::SessionPhase::Connected;
+        let benchmark_frame = self.benchmark.as_mut().map(|driver| {
+            let intent = driver.update(frame_start, connected);
+            (
+                intent,
+                driver.label(intent.segment),
+                driver.workload().name(),
+                driver.elapsed(frame_start).unwrap_or_default(),
+            )
+        });
+        if let Some((intent, label, workload, elapsed)) = benchmark_frame {
+            // Bind the label before `begin_frame`: the profiler snapshots it
+            // for the new pending row, whose interval becomes known and is
+            // written at the following call.
+            self.frame_profile.set_segment(Some(label));
+            if self.benchmark_segment != Some(intent.segment) {
+                let [x, y, z] = self.sim.stats.position;
+                tracing::info!(
+                    target: "frame_benchmark",
+                    workload,
+                    segment = label,
+                    elapsed_seconds = elapsed.as_secs_f64(),
+                    player_x = x,
+                    player_y = y,
+                    player_z = z,
+                    loaded_columns = self.sim.stats.live_columns,
+                    rss_bytes = crate::hud::process_rss_bytes(),
+                    "benchmark segment transition"
+                );
+                self.benchmark_segment = Some(intent.segment);
+                if intent.complete {
+                    tracing::info!(
+                        target: "frame_benchmark",
+                        workload,
+                        segment = label,
+                        "benchmark complete"
+                    );
+                    self.ui.request_quit();
+                }
+            }
+        } else {
+            self.frame_profile.set_segment(None);
+        }
         // Starts this frame's per-phase CPU timing (`app::frame_profile`) and
         // finalises whatever the *previous* call left pending — see that
         // module's doc for why finalisation lives here rather than in every
@@ -52,23 +95,45 @@ impl WindowApp {
         // sprint-window pushes into `InputState`, and the auto-jump gate in
         // the tick loop), so pushing them post-step would apply this frame's
         // option change one frame late.
-        self.sim
-            .set_mouse_invert(self.nav.invert_mouse_x(), self.nav.invert_mouse_y());
-        self.sim.set_sensitivity(self.nav.sensitivity());
-        self.sim.set_toggle_modes(
-            self.nav.toggle_sneak(),
-            self.nav.toggle_sprint(),
-            self.nav.toggle_attack(),
-            self.nav.toggle_use(),
-        );
-        self.sim
-            .set_sprint_window_ticks(self.nav.sprint_window_ticks());
-        self.sim.set_auto_jump(self.nav.auto_jump());
+        if self.benchmark.is_some() {
+            // The showcase orbit's raw-pixel integration is calibrated at
+            // vanilla's 0.5 sensitivity. Inversion/toggle/autojump options
+            // would change the choreography, so the opt-in benchmark owns
+            // these input semantics for its process lifetime.
+            self.sim.set_mouse_invert(false, false);
+            self.sim.set_sensitivity(0.5);
+            self.sim.set_toggle_modes(false, false, false, false);
+            self.sim.set_sprint_window_ticks(0);
+            self.sim.set_auto_jump(false);
+        } else {
+            self.sim
+                .set_mouse_invert(self.nav.invert_mouse_x(), self.nav.invert_mouse_y());
+            self.sim.set_sensitivity(self.nav.sensitivity());
+            self.sim.set_toggle_modes(
+                self.nav.toggle_sneak(),
+                self.nav.toggle_sprint(),
+                self.nav.toggle_attack(),
+                self.nav.toggle_use(),
+            );
+            self.sim
+                .set_sprint_window_ticks(self.nav.sprint_window_ticks());
+            self.sim.set_auto_jump(self.nav.auto_jump());
+        }
         // Render Distance, on vanilla's 600 ms delay rather than per frame —
         // `WindowApp::render_distance_apply_at`'s doc has the citation and the
         // reason. Before `step` like the pushes above, so the frame that commits
         // it also draws with it.
         self.tick_render_distance(frame_start);
+        if let Some((intent, _, _, _)) = benchmark_frame {
+            self.sim.input_mut(|input| {
+                input.set(Action::Forward, intent.forward);
+                input.set(Action::Sprint, intent.sprint);
+                input.set(Action::Jump, intent.jump);
+                if intent.mouse_dx != 0.0 {
+                    input.add_mouse(intent.mouse_dx, 0.0);
+                }
+            });
+        }
         self.frame_profile.mark(FramePhase::Setup, Instant::now());
         self.sim.step(dt);
         self.frame_profile.mark(FramePhase::SimTick, Instant::now());
@@ -2543,11 +2608,12 @@ impl WindowApp {
     /// `app::pacing::FramePacer::control_flow`'s doc for why the second call
     /// is what keeps a low cap from becoming a busy-wait.
     pub(super) fn current_target_fps(&self, now: Instant) -> Option<u32> {
-        crate::app::pacing::effective_target_fps(
+        let ordinary = crate::app::pacing::effective_target_fps(
             self.nav.options().framerate_limit,
             self.nav.options().inactivity_fps_limit,
             self.pacer.idle_secs(now),
-        )
+        );
+        benchmark_target_fps(&self.config, ordinary)
     }
 
     /// Vanilla's `options.vsync` (`Options.java`, default `true`).
@@ -2568,11 +2634,12 @@ impl WindowApp {
         let (Some(gpu), Some(target)) = (self.gpu.as_ref(), self.target.as_mut()) else {
             return;
         };
-        let mode = if self.nav.options().enable_vsync {
+        let ordinary = if self.nav.options().enable_vsync {
             target.default_present_mode()
         } else {
             wgpu::PresentMode::AutoNoVsync
         };
+        let mode = benchmark_present_mode(&self.config, ordinary);
         target.set_present_mode(gpu.device(), mode);
     }
 }
