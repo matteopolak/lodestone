@@ -54,13 +54,14 @@ Two different questions — which versions we can **join**, and which we can **h
 
 | Family | Protocol | Minecraft | Join | Host | Clientbound decoded | Serverbound encoded |
 |---|---|---|---|---|---|---|
-| `v47`  | 47  | 1.8.9  | yes | no  | 21/74   | 17/26 |
-| `v340` | 340 | 1.12.2 | yes | no  | 22/80   | 20/33 |
-| `v735` | 754 | 1.16.5 | yes | no  | 17/92   | 21/48 |
-| `v770` | 776 | 26.2   | yes | yes | **141/141** | 67/69 |
+| `v47`  | 47  | 1.8.9  | yes | no  | 59/74   | 21/26 |
+| `v340` | 340 | 1.12.2 | yes | no  | 62/80   | 24/33 |
+| `v735` | 754 | 1.16.5 | yes | no  | 54/92   | 25/48 |
+| `v770` | 776 | 26.2   | yes | yes | **141/141** | 68/69 |
 
-Hosting additionally needs the serverbound direction decoded: `v770` decodes **62/69** and
-connects **34/69** to real behaviour, with the remainder landing on an ignored arm.
+Hosting additionally needs the serverbound direction decoded: `v770` decodes **66/69** and
+connects **47/69** to real behaviour, with 19 decoded packets still landing only on an
+ignored arm.
 
 Counts are produced by `cargo xtask connectedness`, which walks each family's packet-id
 tables — run it rather than trusting this table, which is a snapshot. Note `v735` speaks

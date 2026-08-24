@@ -88,7 +88,10 @@
 //! # Configuration
 //!
 //! `LODESTONE_SCENES` (optional filter). The oracle's ports and password are
-//! the constants below, matching `scripts/live-oracles/creative.sh`.
+//! the constants below, matching `scripts/live-oracles/creative.sh`. The
+//! harness clears its in-process selected resource packs before it constructs
+//! `Sim`, so committed PNGs always use the built-in 26.2 pack without changing
+//! the player's persisted selection.
 //!
 //! # Dependencies
 //!
@@ -476,6 +479,11 @@ fn advance_to_tick(
 }
 
 fn live_config() -> Config {
+    // Documentation is evidence of the shipped default appearance, not of
+    // whichever local pack the developer last selected. This changes only the
+    // current capture process; unlike the Resource Packs screen it never saves
+    // the empty order back to `resource_packs.json`.
+    lodestone::resources::set_selected_packs(Vec::new());
     Config {
         mode: Mode::Window,
         host: HOST.into(),
@@ -485,6 +493,18 @@ fn live_config() -> Config {
         render_distance: RENDER_DISTANCE,
         ..Config::default()
     }
+}
+
+#[test]
+fn capture_configuration_uses_only_the_builtin_pack() {
+    lodestone::resources::set_selected_packs(vec!["file/Faithful-32x.zip".to_owned()]);
+
+    let _ = live_config();
+
+    assert!(
+        lodestone::resources::selected_packs().is_empty(),
+        "documentation captures must ignore the developer's persisted resource-pack selection"
+    );
 }
 
 #[test]

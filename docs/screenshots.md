@@ -296,6 +296,10 @@ style), and the tab list draws over the boss-bar title, which is vanilla's own o
 The harness pins the world spawn to `(0, -60, 0)`, force-loads a 64×64-block box around it,
 stops the day/night and weather cycles, sets the time to 2000 (late morning) and suppresses
 command feedback, so a re-run is reproducible rather than "whatever the world was doing".
+It also clears the capture process's in-memory selected-pack order before constructing `Sim`,
+so committed images always use Minecraft's built-in 26.2 resources rather than a developer's
+enabled Faithful, programmer-art or other local pack. This never writes `resource_packs.json`
+and therefore does not change the normal client's persisted selection.
 
 ## Dependencies
 
