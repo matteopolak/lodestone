@@ -222,7 +222,7 @@ def start_oracle(workload: str) -> dict:
     with RconClient(oracle["rcon_port"]) as rcon:
         rcon.command("defaultgamemode creative")
         rcon.command("difficulty peaceful")
-        rcon.command("gamerule doDaylightCycle false")
+        rcon.command("gamerule advance_time false")
         rcon.command("time set noon")
     return oracle
 

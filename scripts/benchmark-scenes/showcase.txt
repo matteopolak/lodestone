@@ -15,7 +15,7 @@ fill -32 63 -32 31 63 31 minecraft:smooth_stone
 fill -28 63 -28 27 63 27 minecraft:polished_deepslate
 fill -4 63 -4 4 63 4 minecraft:sea_lantern
 difficulty peaceful
-gamerule doDaylightCycle false
+gamerule advance_time false
 time set noon
 
 # Four exhibit walls, lit from both floor and wall fixtures.
