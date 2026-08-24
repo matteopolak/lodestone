@@ -1,0 +1,197 @@
+# Dense render-path showcase for scripts/client-frame-benchmark.py.
+#
+# Commands are ordinary Java 26.2 RCON commands, one per line. The scene is
+# centred on (0, 66, 0); the benchmark runner teleports the joined player there
+# and its moving segment performs one full camera orbit. Summoned objects carry
+# the lodestone_benchmark tag so reruns remove precisely their own entities.
+
+# Reset a 64 x 32 x 64 plot without exceeding Java's 32,768-block fill limit.
+kill @e[tag=lodestone_benchmark]
+fill -32 60 -32 -1 91 -1 minecraft:air
+fill 0 60 -32 31 91 -1 minecraft:air
+fill -32 60 0 -1 91 31 minecraft:air
+fill 0 60 0 31 91 31 minecraft:air
+fill -32 63 -32 31 63 31 minecraft:smooth_stone
+fill -28 63 -28 27 63 27 minecraft:polished_deepslate
+fill -4 63 -4 4 63 4 minecraft:sea_lantern
+difficulty peaceful
+gamerule doDaylightCycle false
+time set noon
+
+# Four exhibit walls, lit from both floor and wall fixtures.
+fill -28 64 24 27 76 24 minecraft:deepslate_bricks
+fill -28 64 -24 27 76 -24 minecraft:quartz_bricks
+fill -24 64 -23 -24 76 23 minecraft:dark_prismarine
+fill 24 64 -23 24 76 23 minecraft:stone_bricks
+fill -26 63 21 25 63 23 minecraft:sea_lantern
+fill -26 63 -23 25 63 -21 minecraft:sea_lantern
+fill -23 63 -21 -21 63 21 minecraft:sea_lantern
+fill 21 63 -21 23 63 21 minecraft:sea_lantern
+
+# 24 wall signs: two independently shaded glyph rows on the south wall.
+setblock -22 72 23 minecraft:oak_wall_sign[facing=north]{front_text:{has_glowing_text:1b,color:"white",messages:[{text:"CPU"},{text:"frame"},{text:"profile"},{text:"01"}]}}
+setblock -18 72 23 minecraft:spruce_wall_sign[facing=north]{front_text:{color:"yellow",messages:[{text:"terrain"},{text:"sections"},{text:"culled"},{text:"02"}]}}
+setblock -14 72 23 minecraft:birch_wall_sign[facing=north]{front_text:{color:"black",messages:[{text:"entities"},{text:"instances"},{text:"drawn"},{text:"03"}]}}
+setblock -10 72 23 minecraft:jungle_wall_sign[facing=north]{front_text:{color:"red",messages:[{text:"particles"},{text:"sorted"},{text:"sheets"},{text:"04"}]}}
+setblock -6 72 23 minecraft:acacia_wall_sign[facing=north]{front_text:{color:"blue",messages:[{text:"maps"},{text:"frames"},{text:"pixels"},{text:"05"}]}}
+setblock -2 72 23 minecraft:dark_oak_wall_sign[facing=north]{front_text:{color:"lime",messages:[{text:"banners"},{text:"patterns"},{text:"layers"},{text:"06"}]}}
+setblock 2 72 23 minecraft:mangrove_wall_sign[facing=north]{front_text:{color:"purple",messages:[{text:"heads"},{text:"skins"},{text:"models"},{text:"07"}]}}
+setblock 6 72 23 minecraft:cherry_wall_sign[facing=north]{front_text:{has_glowing_text:1b,color:"light_blue",messages:[{text:"signs"},{text:"front"},{text:"and back"},{text:"08"}]}}
+setblock 10 72 23 minecraft:bamboo_wall_sign[facing=north]{front_text:{color:"orange",messages:[{text:"displays"},{text:"text item"},{text:"block"},{text:"09"}]}}
+setblock 14 72 23 minecraft:crimson_wall_sign[facing=north]{front_text:{color:"white",messages:[{text:"chests"},{text:"shulkers"},{text:"beacon"},{text:"10"}]}}
+setblock 18 72 23 minecraft:warped_wall_sign[facing=north]{front_text:{color:"cyan",messages:[{text:"glass"},{text:"water"},{text:"blend"},{text:"11"}]}}
+setblock 22 72 23 minecraft:pale_oak_wall_sign[facing=north]{front_text:{has_glowing_text:1b,color:"pink",messages:[{text:"Lodestone"},{text:"Java 26.2"},{text:"RD 24"},{text:"12"}]}}
+setblock -22 69 23 minecraft:oak_wall_sign[facing=north]{front_text:{color:"white",messages:[{text:"stationary"},{text:"30 sec"},{text:"fixed view"},{text:"13"}]}}
+setblock -18 69 23 minecraft:spruce_wall_sign[facing=north]{front_text:{color:"yellow",messages:[{text:"moving"},{text:"60 sec"},{text:"one orbit"},{text:"14"}]}}
+setblock -14 69 23 minecraft:birch_wall_sign[facing=north]{front_text:{color:"black",messages:[{text:"median"},{text:"p95 p99"},{text:"budget"},{text:"15"}]}}
+setblock -10 69 23 minecraft:jungle_wall_sign[facing=north]{front_text:{color:"red",messages:[{text:"setup"},{text:"sim tick"},{text:"upload"},{text:"16"}]}}
+setblock -6 69 23 minecraft:acacia_wall_sign[facing=north]{front_text:{color:"blue",messages:[{text:"acquire"},{text:"prepare"},{text:"submit"},{text:"17"}]}}
+setblock -2 69 23 minecraft:dark_oak_wall_sign[facing=north]{front_text:{color:"lime",messages:[{text:"HUD UI"},{text:"present"},{text:"interval"},{text:"18"}]}}
+setblock 2 69 23 minecraft:mangrove_wall_sign[facing=north]{front_text:{color:"purple",messages:[{text:"warmup"},{text:"excluded"},{text:"settled"},{text:"19"}]}}
+setblock 6 69 23 minecraft:cherry_wall_sign[facing=north]{front_text:{color:"light_blue",messages:[{text:"repeatable"},{text:"three"},{text:"trials"},{text:"20"}]}}
+setblock 10 69 23 minecraft:bamboo_wall_sign[facing=north]{front_text:{color:"orange",messages:[{text:"CPU sample"},{text:"worst"},{text:"segment"},{text:"21"}]}}
+setblock 14 69 23 minecraft:crimson_wall_sign[facing=north]{front_text:{color:"white",messages:[{text:"culling"},{text:"caching"},{text:"batching"},{text:"22"}]}}
+setblock 18 69 23 minecraft:warped_wall_sign[facing=north]{front_text:{color:"cyan",messages:[{text:"allocations"},{text:"hot path"},{text:"counts"},{text:"23"}]}}
+setblock 22 69 23 minecraft:pale_oak_wall_sign[facing=north]{front_text:{has_glowing_text:1b,color:"pink",messages:[{text:"measure"},{text:"fix"},{text:"remeasure"},{text:"24"}]}}
+
+# 16 patterned wall banners on the west wall.
+setblock -23 65 -18 minecraft:red_wall_banner[facing=east]{patterns:[{pattern:"minecraft:stripe_bottom",color:"white"},{pattern:"minecraft:cross",color:"black"}]}
+setblock -23 65 -13 minecraft:blue_wall_banner[facing=east]{patterns:[{pattern:"minecraft:rhombus",color:"white"},{pattern:"minecraft:circle",color:"light_blue"}]}
+setblock -23 65 -8 minecraft:white_wall_banner[facing=east]{patterns:[{pattern:"minecraft:gradient_up",color:"purple"},{pattern:"minecraft:creeper",color:"lime"}]}
+setblock -23 65 -3 minecraft:green_wall_banner[facing=east]{patterns:[{pattern:"minecraft:half_horizontal",color:"lime"},{pattern:"minecraft:skull",color:"white"}]}
+setblock -23 65 2 minecraft:orange_wall_banner[facing=east]{patterns:[{pattern:"minecraft:diagonal_up_right",color:"magenta"},{pattern:"minecraft:flower",color:"yellow"}]}
+setblock -23 65 7 minecraft:black_wall_banner[facing=east]{patterns:[{pattern:"minecraft:mojang",color:"white"},{pattern:"minecraft:border",color:"red"}]}
+setblock -23 65 12 minecraft:purple_wall_banner[facing=east]{patterns:[{pattern:"minecraft:bricks",color:"magenta"},{pattern:"minecraft:border",color:"white"}]}
+setblock -23 65 17 minecraft:yellow_wall_banner[facing=east]{patterns:[{pattern:"minecraft:triangles_bottom",color:"red"},{pattern:"minecraft:stripe_top",color:"black"}]}
+setblock -23 70 -18 minecraft:cyan_wall_banner[facing=east]{patterns:[{pattern:"minecraft:straight_cross",color:"white"},{pattern:"minecraft:border",color:"blue"}]}
+setblock -23 70 -13 minecraft:lime_wall_banner[facing=east]{patterns:[{pattern:"minecraft:circle",color:"yellow"},{pattern:"minecraft:curly_border",color:"green"}]}
+setblock -23 70 -8 minecraft:pink_wall_banner[facing=east]{patterns:[{pattern:"minecraft:flower",color:"white"},{pattern:"minecraft:gradient",color:"magenta"}]}
+setblock -23 70 -3 minecraft:gray_wall_banner[facing=east]{patterns:[{pattern:"minecraft:skull",color:"black"},{pattern:"minecraft:border",color:"white"}]}
+setblock -23 70 2 minecraft:light_blue_wall_banner[facing=east]{patterns:[{pattern:"minecraft:globe",color:"white"},{pattern:"minecraft:stripe_middle",color:"blue"}]}
+setblock -23 70 7 minecraft:brown_wall_banner[facing=east]{patterns:[{pattern:"minecraft:piglin",color:"orange"},{pattern:"minecraft:border",color:"black"}]}
+setblock -23 70 12 minecraft:light_gray_wall_banner[facing=east]{patterns:[{pattern:"minecraft:flow",color:"cyan"},{pattern:"minecraft:bordure_indented",color:"blue"}]}
+setblock -23 70 17 minecraft:magenta_wall_banner[facing=east]{patterns:[{pattern:"minecraft:guster",color:"white"},{pattern:"minecraft:triangles_top",color:"purple"}]}
+
+# 16 item frames on the east wall, cycling four filled-map ids.
+summon item_frame 23.46875 65 -15 {Facing:4b,Fixed:1b,Invisible:0b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":0}}}
+summon item_frame 23.46875 65 -5 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":1}}}
+summon item_frame 23.46875 65 5 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":2}}}
+summon item_frame 23.46875 65 15 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":3}}}
+summon item_frame 23.46875 68 -15 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":1}}}
+summon item_frame 23.46875 68 -5 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":2}}}
+summon item_frame 23.46875 68 5 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":3}}}
+summon item_frame 23.46875 68 15 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":0}}}
+summon item_frame 23.46875 71 -15 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":2}}}
+summon item_frame 23.46875 71 -5 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":3}}}
+summon item_frame 23.46875 71 5 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":0}}}
+summon item_frame 23.46875 71 15 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":1}}}
+summon item_frame 23.46875 74 -15 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":3}}}
+summon item_frame 23.46875 74 -5 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":0}}}
+summon item_frame 23.46875 74 5 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":1}}}
+summon item_frame 23.46875 74 15 {Facing:4b,Fixed:1b,Tags:["lodestone_benchmark"],Item:{id:"minecraft:filled_map",count:1,components:{"minecraft:map_id":2}}}
+
+# 16 player heads on individual pedestals along the north exhibit.
+setblock -22 64 -18 minecraft:player_head[rotation=8]
+setblock -19 64 -18 minecraft:player_head[rotation=8]
+setblock -16 64 -18 minecraft:player_head[rotation=8]
+setblock -13 64 -18 minecraft:player_head[rotation=8]
+setblock -10 64 -18 minecraft:player_head[rotation=8]
+setblock -7 64 -18 minecraft:player_head[rotation=8]
+setblock -4 64 -18 minecraft:player_head[rotation=8]
+setblock -1 64 -18 minecraft:player_head[rotation=8]
+setblock 2 64 -18 minecraft:player_head[rotation=8]
+setblock 5 64 -18 minecraft:player_head[rotation=8]
+setblock 8 64 -18 minecraft:player_head[rotation=8]
+setblock 11 64 -18 minecraft:player_head[rotation=8]
+setblock 14 64 -18 minecraft:player_head[rotation=8]
+setblock 17 64 -18 minecraft:player_head[rotation=8]
+setblock 20 64 -18 minecraft:player_head[rotation=8]
+setblock 23 64 -18 minecraft:player_head[rotation=8]
+
+# Twelve tagged, equipped and differently rotated armour stands.
+summon armor_stand -16 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[20f,0f],equipment:{head:{id:"minecraft:diamond_helmet",count:1},chest:{id:"minecraft:diamond_chestplate",count:1},mainhand:{id:"minecraft:diamond_sword",count:1}}}
+summon armor_stand -13 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[45f,0f],equipment:{head:{id:"minecraft:netherite_helmet",count:1},chest:{id:"minecraft:netherite_chestplate",count:1},mainhand:{id:"minecraft:trident",count:1}}}
+summon armor_stand -10 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[70f,0f],equipment:{head:{id:"minecraft:golden_helmet",count:1},chest:{id:"minecraft:golden_chestplate",count:1},mainhand:{id:"minecraft:bow",count:1}}}
+summon armor_stand -7 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[95f,0f],equipment:{head:{id:"minecraft:carved_pumpkin",count:1},mainhand:{id:"minecraft:shield",count:1}}}
+summon armor_stand -4 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[120f,0f],equipment:{head:{id:"minecraft:turtle_helmet",count:1},chest:{id:"minecraft:chainmail_chestplate",count:1},mainhand:{id:"minecraft:crossbow",count:1}}}
+summon armor_stand -1 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[145f,0f],equipment:{head:{id:"minecraft:iron_helmet",count:1},chest:{id:"minecraft:iron_chestplate",count:1},mainhand:{id:"minecraft:iron_axe",count:1}}}
+summon armor_stand 2 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[170f,0f],equipment:{head:{id:"minecraft:leather_helmet",count:1},chest:{id:"minecraft:leather_chestplate",count:1},mainhand:{id:"minecraft:fishing_rod",count:1}}}
+summon armor_stand 5 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[195f,0f],equipment:{head:{id:"minecraft:chainmail_helmet",count:1},chest:{id:"minecraft:chainmail_chestplate",count:1},mainhand:{id:"minecraft:stone_sword",count:1}}}
+summon armor_stand 8 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[220f,0f],equipment:{head:{id:"minecraft:diamond_helmet",count:1},chest:{id:"minecraft:elytra",count:1},mainhand:{id:"minecraft:firework_rocket",count:1}}}
+summon armor_stand 11 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[245f,0f],equipment:{head:{id:"minecraft:player_head",count:1},mainhand:{id:"minecraft:mace",count:1}}}
+summon armor_stand 14 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[270f,0f],equipment:{head:{id:"minecraft:dragon_head",count:1},mainhand:{id:"minecraft:totem_of_undying",count:1}}}
+summon armor_stand 17 64 -12 {Tags:["lodestone_benchmark"],ShowArms:1b,NoBasePlate:1b,Rotation:[295f,0f],equipment:{head:{id:"minecraft:piglin_head",count:1},mainhand:{id:"minecraft:golden_sword",count:1}}}
+
+# 24 passive mobs plus several other entity model families.
+summon sheep -15 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:0b}
+summon sheep -12 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:1b}
+summon sheep -9 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:2b}
+summon sheep -6 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:3b}
+summon sheep -3 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:4b}
+summon sheep 0 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:5b}
+summon sheep 3 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:6b}
+summon sheep 6 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:7b}
+summon sheep 9 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:8b}
+summon sheep 12 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:9b}
+summon sheep 15 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:10b}
+summon sheep 18 64 -7 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:11b}
+summon sheep -15 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:12b}
+summon sheep -12 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:13b}
+summon sheep -9 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:14b}
+summon sheep -6 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:15b}
+summon sheep -3 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:0b}
+summon sheep 0 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:1b}
+summon sheep 3 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:2b}
+summon sheep 6 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:3b}
+summon sheep 9 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:4b}
+summon sheep 12 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:5b}
+summon sheep 15 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:6b}
+summon sheep 18 64 8 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Color:7b}
+summon cow -18 64 13 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b}
+summon pig -14 64 13 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b}
+summon wolf -10 64 13 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,CollarColor:11b}
+summon fox -6 64 13 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b,Type:"snow"}
+summon axolotl -2 65 13 {Tags:["lodestone_benchmark"],NoAI:1b,NoGravity:1b,PersistenceRequired:1b,Variant:2}
+summon allay 2 67 13 {Tags:["lodestone_benchmark"],NoAI:1b,NoGravity:1b,PersistenceRequired:1b}
+summon bee 6 67 13 {Tags:["lodestone_benchmark"],NoAI:1b,NoGravity:1b,PersistenceRequired:1b}
+summon goat 10 64 13 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b}
+summon camel 15 64 14 {Tags:["lodestone_benchmark"],NoAI:1b,PersistenceRequired:1b}
+
+# Display entities: glyphs, item-model transforms, and block-model transforms.
+summon text_display -12 68 18 {Tags:["lodestone_benchmark"],billboard:"center",line_width:300,background:1073741824,shadow:true,text:{text:"DENSE RENDER SHOWCASE",color:"gold",bold:true},transformation:{scale:[1.5f,1.5f,1.5f],translation:[0f,0f,0f],left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f]}}
+summon text_display 0 67 18 {Tags:["lodestone_benchmark"],billboard:"vertical",line_width:240,see_through:true,text:[{text:"signs heads banners maps\n",color:"aqua"},{text:"entities particles displays",color:"light_purple",italic:true}]}
+summon text_display 12 68 18 {Tags:["lodestone_benchmark"],billboard:"fixed",Rotation:[180f,0f],line_width:200,background:1610612736,text:{text:"1440p / RD24 / UNLIMITED",color:"white"}}
+summon item_display -8 67 -3 {Tags:["lodestone_benchmark"],item:{id:"minecraft:netherite_pickaxe",count:1},item_display:"gui",transformation:{scale:[1.5f,1.5f,1.5f],translation:[0f,0f,0f],left_rotation:[0f,0.3827f,0f,0.9239f],right_rotation:[0f,0f,0f,1f]}}
+summon item_display -4 67 -3 {Tags:["lodestone_benchmark"],item:{id:"minecraft:trident",count:1},item_display:"fixed",transformation:{scale:[1.5f,1.5f,1.5f],translation:[0f,0f,0f],left_rotation:[0.2f,0.3f,0.1f,0.92f],right_rotation:[0f,0f,0f,1f]}}
+summon item_display 0 67 -3 {Tags:["lodestone_benchmark"],item:{id:"minecraft:diamond_block",count:1},item_display:"ground",transformation:{scale:[1.5f,1.5f,1.5f],translation:[0f,0f,0f],left_rotation:[0f,0.707f,0f,0.707f],right_rotation:[0f,0f,0f,1f]}}
+summon block_display 5 65 -3 {Tags:["lodestone_benchmark"],block_state:{Name:"minecraft:sea_lantern"},transformation:{scale:[1.5f,1.5f,1.5f],translation:[0f,0f,0f],left_rotation:[0.19f,0.36f,0.08f,0.91f],right_rotation:[0f,0f,0f,1f]}}
+summon block_display 9 65 -3 {Tags:["lodestone_benchmark"],block_state:{Name:"minecraft:amethyst_block"},transformation:{scale:[1.5f,1.5f,1.5f],translation:[0f,0f,0f],left_rotation:[0.3f,0.1f,0.2f,0.92f],right_rotation:[0f,0f,0f,1f]}}
+
+# Block-entity and translucency cluster.
+setblock -18 64 19 minecraft:chest[facing=north,type=left]
+setblock -17 64 19 minecraft:chest[facing=north,type=right]
+setblock -15 64 19 minecraft:ender_chest[facing=north]
+setblock -13 64 19 minecraft:purple_shulker_box[facing=up]
+setblock -11 64 19 minecraft:light_blue_shulker_box[facing=south]
+setblock -9 64 19 minecraft:campfire[lit=true,facing=south]{Items:[{Slot:0b,id:"minecraft:porkchop",count:1},{Slot:1b,id:"minecraft:potato",count:1}],CookingTimes:[I;0,0,0,0],CookingTotalTimes:[I;6000,6000,0,0]}
+fill -3 63 17 3 63 23 minecraft:iron_block
+setblock 0 64 20 minecraft:beacon
+setblock 7 64 19 minecraft:decorated_pot[facing=south]{sherds:["minecraft:angler_pottery_sherd","minecraft:brewer_pottery_sherd","minecraft:danger_pottery_sherd","minecraft:explorer_pottery_sherd"]}
+setblock 10 64 19 minecraft:enchanting_table
+setblock 13 64 19 minecraft:conduit[waterlogged=false]
+fill -18 64 -22 -12 68 -22 minecraft:tinted_glass
+fill -10 64 -22 -4 68 -22 minecraft:blue_stained_glass
+fill -2 64 -22 4 68 -22 minecraft:ice
+fill 6 64 -22 12 68 -22 minecraft:water
+fill 14 64 -22 20 68 -22 minecraft:slime_block
+
+# Repeating command blocks below the floor keep multiple particle sheets live
+# throughout warmup and both measured segments.
+setblock -3 61 -3 minecraft:repeating_command_block[facing=up]{auto:1b,Command:"particle minecraft:flame -8 67 0 3 2 3 0.01 40 force @a"}
+setblock -1 61 -3 minecraft:repeating_command_block[facing=up]{auto:1b,Command:"particle minecraft:smoke 8 67 0 3 2 3 0.01 30 force @a"}
+setblock 1 61 -3 minecraft:repeating_command_block[facing=up]{auto:1b,Command:"particle minecraft:enchanted_hit 0 67 8 3 2 3 0.2 25 force @a"}
+setblock 3 61 -3 minecraft:repeating_command_block[facing=up]{auto:1b,Command:"particle minecraft:firework -0 67 -8 3 2 3 0.1 25 force @a"}
+
+gamemode creative @a
+effect clear @a
+tp @a 0 65 0 0 0
