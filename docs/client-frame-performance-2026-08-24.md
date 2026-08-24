@@ -2,32 +2,42 @@
 
 ## What it is
 
-This is a measured client-rendering investigation at a physical 2560×1440,
-render distance 24, release configuration. It covers ordinary Java terrain and
-a dense Java-hosted showcase containing signs, player heads, patterned banners,
-mapped item frames, equipped entities, particles, displays, and block entities.
+This is a measured client-rendering investigation at render distance 24 in a
+release configuration. It covers ordinary Java terrain and a dense Java-hosted
+showcase containing signs, player heads, patterned banners, mapped item frames,
+equipped entities, particles, displays, and block entities.
 
 The investigation identified the dominant presentation wait, profiled the
-largest actionable CPU hot path, replaced per-frame entity instance-buffer
-allocation with retained buffers, and repeated both workloads under the same
-configuration.
+largest actionable CPU hot path, first retained per-batch buffers, then replaced
+the remaining per-batch queue writes with one frame instance arena. The latest
+run also samples real GPU render-pass timestamps on the MacBook's internal
+fullscreen display.
 
 ## Configuration and method
 
 - Machine: Apple arm64, macOS 26.5.2, native Metal through wgpu.
-- Client: `target/release/lodestone`, physical framebuffer 2560×1440, render
-  distance 24, unlimited frame option, `PresentMode::AutoNoVsync`.
+- Client: `target/release/lodestone`, render distance 24, unlimited frame
+  option, `PresentMode::AutoNoVsync`.
 - Server: Java 26.2 oracle, server view distance 25.
 - Segments per trial: 20 seconds warmup, 30 seconds stationary, 60 seconds
   moving; three trials per workload.
-- Baseline: `964709489e9f54a1962d105f5e9f9f69162ffa18`.
-- Optimized: `8305a24f7c64974cba5b3ed3e4e3a3bdfd5fc501`.
+- Allocation baseline: `964709489e9f54a1962d105f5e9f9f69162ffa18`.
+- Retained per-batch pool: `8305a24f7c64974cba5b3ed3e4e3a3bdfd5fc501`.
+- Shared arena implementation: `7a3733f7`.
+- Latest measured benchmark policy: `0b9307fc`.
 - CPU samples: Samply, using the stationary showcase window for attribution.
 
 The tables report the median of the three per-trial values. Phase values are
 CPU wall time. They must not be relabelled as GPU duration, and phase means do
 not add to frame interval because surface acquisition can wait for the GPU,
 compositor, or presentation queue.
+
+The allocation-baseline and retained-pool trials used a 2560×1440 window. The
+arena follow-up uses hardware-selected borderless fullscreen on the MacBook's
+internal panel, whose notch-safe drawable is 3024×1898. Frame interval and
+swapchain-acquire numbers across those presentation modes are therefore not an
+A/B result. The explicitly instrumented CPU preparation phases are shown as a
+directional comparison, with this limitation stated rather than hidden.
 
 ## What was slow
 
@@ -61,24 +71,31 @@ The renderer allocated one Metal vertex buffer per visible model part, every
 frame. Its batching already reduced draw calls, but the instance buffer behind
 each remaining draw was treated as disposable.
 
-## Fix implemented
+## Fixes implemented
 
-`InstanceBufferPool` now retains ordinal buffer slots across frames. A frame
-resets only the slot cursor. Each entity or block-entity upload rewrites a
-sufficient slot through `Queue::write_buffer`, and replaces only a slot whose
-power-of-two capacity is too small. Existing batch keys, draw order, instance
-counts, culling, and shaders are unchanged.
+The first change introduced `InstanceBufferPool`, retaining ordinal destination
+buffers across frames. It removed per-frame destination-buffer creation but
+still issued one `Queue::write_buffer` per visible model part.
 
-The pool covers ordinary entity bodies, water masks, armour, wool, capes,
+The second change replaces that pool with `InstanceBufferArena`. Every tinted
+entity/block-entity producer appends `EntityInstanceRaw` bytes into one retained
+CPU vector and stores a byte range. After all producers finish, the renderer
+grows one retained GPU vertex buffer geometrically if needed and performs one
+non-empty `Queue::write_buffer`; draws bind slices of that shared buffer.
+Existing batch keys, draw order, instance counts, culling, and shaders are
+unchanged.
+
+The arena covers ordinary entity bodies, water-mask placement, armour, wool, capes,
 elytra, orbs, sprite entities, paintings, spawner previews, banners, heads, and
 other block-entity model parts. The legacy one-shot API remains available to
 isolated render paths that do not participate in a world frame.
 
-The GPU-independent lifecycle test proves a stable frame creates no new pool
-slots and that growth replaces only the undersized ordinal slot. See
+GPU-independent lifecycle tests prove contiguous aligned ranges, stable CPU/GPU
+capacity reuse, geometric growth, byte-for-byte record conversion, and rejection
+of append-after-upload or double-upload. See
 [`entity-rendering.md`](./entity-rendering.md) for ownership and extension
-details and the [implementation plan](./superpowers/plans/2026-08-24-reuse-entity-instance-buffers.md)
-for the original measured hypothesis.
+details, the [pool plan](./superpowers/plans/2026-08-24-reuse-entity-instance-buffers.md),
+and the [arena plan](./superpowers/plans/2026-08-24-entity-instance-arena.md).
 
 ## Before and after
 
@@ -105,6 +122,35 @@ over 16.67 ms or 33.3 ms. The optimized preparation and total-world values had
 only 0.006 ms and 0.015 ms stationary spread respectively, so the improvement
 is repeatable rather than a single warm-cache sample.
 
+### Shared-arena follow-up — internal fullscreen
+
+The arena was measured in three full showcase trials at 3024×1898 on the
+hardware built-in MacBook panel. The table compares its CPU phases to the pooled
+run because those are the code paths changed; frame/acquire values are reported
+separately because the presentation mode and drawable changed.
+
+| segment / metric | pooled window | shared arena fullscreen | directional change |
+|---|---:|---:|---:|
+| stationary `world.prepare_buffers` | 1.236 ms | 0.822 ms | **−33.5%** |
+| stationary `world.queue_submit` | 0.299 ms | 0.124 ms | **−58.5%** |
+| stationary `world_encode_submit` | 1.794 ms | 1.185 ms | **−33.9%** |
+| stationary active CPU phases (acquire excluded) | 2.504 ms | 1.917 ms | **−23.4%** |
+| moving `world.prepare_buffers` | 1.062 ms | 0.793 ms | **−25.3%** |
+| moving `world.queue_submit` | 0.252 ms | 0.127 ms | **−49.7%** |
+| moving `world_encode_submit` | 1.541 ms | 1.139 ms | **−26.1%** |
+| moving active CPU phases (acquire excluded) | 2.254 ms | 1.885 ms | **−16.4%** |
+
+Within the three fullscreen arena trials, stationary `world.prepare_buffers`
+spanned 0.804–0.831 ms and moving spanned 0.784–0.796 ms. The improvement is
+larger than either spread. The exact upload call count is now one non-empty
+arena write per frame by construction instead of one write per batch.
+
+The same fullscreen trials measured stationary frame p50 at 2.068–2.097 ms
+(median 2.069 ms) and moving at 2.035–2.114 ms (median 2.081 ms). Mean acquire
+was 1.65–1.97 ms stationary and 1.64–2.06 ms moving. Those figures describe the
+current internal-fullscreen presentation path; the large change from the old
+8.33 ms windowed cadence must not be attributed to the arena.
+
 ### Ordinary terrain — three-trial medians
 
 | segment / metric | baseline | pooled | change |
@@ -121,7 +167,7 @@ The first moving terrain trial in each arm included cold chunk streaming. The
 median retains that trial symmetrically; the two warm optimized runs stayed at
 1.12–1.17 ms total world time versus 1.19–1.25 ms in the warm baseline runs.
 
-### Post-change profile
+### Post-pool profile and post-arena measurements
 
 The optimized stationary profile contains 29,988 weighted samples. The pooled
 upload helper fell from 10.5% to 6.5% of samples and no longer descends into
@@ -134,9 +180,39 @@ destination-buffer churn and produced the measured 15–21% preparation/encoding
 gain, but it did not eliminate per-part staging allocations. This profile is the
 basis for the next step below.
 
-The post-change profile is
+The post-pool profile is
 `bench-results/profiles/showcase-20260824-034952.json.gz`. Profiles and raw
 JSONL/CSV results are local benchmark artifacts rather than committed source.
+
+The post-arena Samply capture is
+`bench-results/profiles/showcase-20260824-121716.json.gz`. It completed normally,
+but its saved Firefox-profile data requires Samply's local symbol server plus
+the hosted Firefox Profiler UI to resolve function names; that UI was not
+available under the app's browser security policy. No new stack percentage is
+claimed from the unsymbolicated file. The arena result instead rests on the
+row-correlated CPU phase instrument above, whose preparation improvement is
+larger than the full three-trial spread.
+
+### GPU pass timestamps
+
+One additional full internal-fullscreen showcase trial retained 109
+asynchronous wgpu timestamp snapshots:
+
+| GPU segment | median | p95 | interpretation |
+|---|---:|---:|---|
+| `world` | 0.83 ms | 1.09 ms | real block render pass: terrain, entities, block entities, particles, weather, outline and debug geometry |
+| `first_person` | 0.78 ms | 1.03 ms | real hand/held-item render pass |
+| `world_total` | 0.25 ms | 0.77 ms | diagnostic dummy-pass span; not a bound |
+| `hud_total` | 0.57 ms | 0.80 ms | diagnostic dummy-pass span; not a bound |
+
+The two real-pass readings are trustworthy whole-pass durations. They must not
+be added: Apple-silicon Metal can pipeline stages across passes, and wgpu does
+not expose `TIMESTAMP_QUERY_INSIDE_PASSES` or
+`TIMESTAMP_QUERY_INSIDE_ENCODERS` on this adapter. The aggregate spans use a
+private dummy attachment that does not order against the real attachments;
+their being smaller than enclosed passes is the known proof that they are hints,
+not measurements. A Metal/Xcode capture is still required for shader, tile,
+bandwidth, or draw-level attribution inside the 0.83 ms world pass.
 
 ## Improvement plan
 
@@ -148,19 +224,16 @@ JSONL/CSV results are local benchmark artifacts rather than committed source.
    the player-visible result. Success means we can tell a compositor/display
    ceiling from actual GPU saturation instead of calling all acquire time GPU
    rendering.
-2. **Replace per-part queue writes with a frame instance arena.** Pack all
-   `EntityInstanceRaw` data into one or a few growable, frame-rotated arenas,
-   upload each arena once, and carry byte ranges into draw batches. A wgpu
-   `StagingBelt` is an alternative only if its chunks are demonstrably recalled
-   and reused on this backend. Gate it with the same dense scene: the remaining
-   6.5% upload stack and `StagingBuffer::new` samples should collapse, while
-   pixels and instance counts stay unchanged.
-3. **Reuse CPU accumulation storage.** After the upload arena, profile again.
-   The optimized stationary stack next shows ordinary entity preparation at
+2. **Frame instance arena — completed.** All world-space tinted
+   `EntityInstanceRaw` batches now share one retained CPU/GPU arena and one
+   non-empty queue write. The dense scene improved preparation 25–34% and total
+   active CPU 16–23%, with every targeted Metal pixel gate unchanged.
+3. **Reuse CPU accumulation storage and cache static plans.** The post-pool
+   stationary stack next showed ordinary entity preparation at
    15.6% of `render_inner`, block-entity preparation at roughly 12%,
    `RawVec::reserve` at 1.5%, and animated-model resolution around 4%. Retain
    per-frame transform/light/tint vectors, cache static block-entity part plans,
-   and invalidate by block-entity content, light, or resource generation.
+   and invalidate by block-entity content, light, pose, or resource generation.
 4. **Reduce submission and draws only with counters.** Encoder finish and queue
    submit remain measurable, but batching changes should be driven by draw,
    pipeline-switch, and upload-byte counters per pass. Consider a shared arena
@@ -171,12 +244,12 @@ JSONL/CSV results are local benchmark artifacts rather than committed source.
    supported by this profile. Dense static block entities should instead be
    indexed by section, reject whole sections before preparing sign glyphs,
    banners, heads, and item frames, and cache map/sign meshes by content.
-6. **Measure the GPU before changing shaders or wgpu limits.** The existing
-   synthetic timestamp readings stalled and were internally inconsistent on
-   this Metal path. Add row-correlated timestamp queries or take an Xcode Metal
-   capture for the dense and terrain arms. Only then decide whether occlusion,
-   LOD, overdraw, bind-group layout, or pipeline options are the next GPU-side
-   constraint.
+6. **Capture inside the GPU world pass before changing shaders or wgpu limits.**
+   Real pass timestamps put the dense world pass at 0.83 ms median / 1.09 ms
+   p95 and first-person at 0.78 / 1.03 ms. Use an Xcode Metal capture for draw,
+   tile, shader, bandwidth, and attachment attribution; wgpu cannot subdivide a
+   pass on this Apple GPU. Only then decide whether occlusion, LOD, overdraw,
+   bind-group layout, or pipeline options are the next GPU-side constraint.
 
 ## How to reproduce or change it
 
@@ -192,13 +265,13 @@ python3 scripts/client-frame-benchmark.py --workload showcase --samply
 
 Change the fixture in `scripts/benchmark-scenes/showcase.txt`, benchmark motion
 in `crates/lodestone-shell/src/app/benchmark.rs`, phase boundaries in
-`crates/lodestone-shell/src/gpu/frame.rs`, and the retained-buffer policy in
+`crates/lodestone-shell/src/gpu/frame.rs`, and the arena policy in
 `crates/lodestone-render/src/entity_pipeline.rs`. Preserve the three-trial
 configuration and compare commits by their recorded SHA.
 
 ## Configuration
 
-There are no new runtime options for the instance-buffer pool. Benchmark flags,
+There are no runtime options for the instance arena. Benchmark flags,
 durations, paths, endpoints, and environment variables are documented in
 [`live-client-frame-benchmark.md`](./live-client-frame-benchmark.md).
 
@@ -207,4 +280,6 @@ durations, paths, endpoints, and environment variables are documented in
 The benchmark depends on Lodestone’s release client, wgpu/Metal, the Java 26.2
 oracle worlds, Apple’s container runtime, Python 3, and Samply for CPU profiles.
 The optimization itself depends only on `lodestone-render`, wgpu buffers and
-queue writes, and the shell’s existing frame-preparation order.
+queue writes, and the shell’s existing frame-preparation order. Hardware
+built-in display selection on macOS additionally uses CoreGraphics as documented
+in [`live-client-frame-benchmark.md`](./live-client-frame-benchmark.md).

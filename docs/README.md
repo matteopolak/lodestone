@@ -350,10 +350,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   how to read it, what it found, and how to extend it without reintroducing a defect
   it already caught.
 - [Client frame performance — 2026-08-24](./client-frame-performance-2026-08-24.md) —
-  This is a measured client-rendering investigation at a physical 2560×1440, render
-  distance 24, release configuration. It covers ordinary Java terrain and a dense
-  Java-hosted showcase containing signs, player heads, patterned banners, mapped item
-  frames, equipped entities, particles, displays, and block entities.
+  This is a measured client-rendering investigation at render distance 24 in a release
+  configuration. It covers ordinary Java terrain and a dense Java-hosted showcase
+  containing signs, player heads, patterned banners, mapped item frames, equipped
+  entities, particles, displays, and block entities.
 - [Client-side relight](./client-relight.md) — The client's own light engine: a
   block change queues a relight, and once a frame the client recomputes sky and block
   light in a bounded box around each change and re-meshes what moved. It is vanilla's
@@ -979,8 +979,8 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   apply itself (fire ignition, since `MobSim::world` is a frozen pathfinding snapshot,
   not the live world).
 - [Live client frame benchmark](./live-client-frame-benchmark.md) — The live client
-  frame benchmark measures Lodestone’s real windowed client while it is joined to a
-  Java 26.2 server. It records frame intervals and CPU phase timings for a
+  frame benchmark measures Lodestone’s real fullscreen client while it is joined to
+  a Java 26.2 server. It records frame intervals and CPU/GPU phase timings for a
   normal-terrain workload and a dense render showcase, then summarizes stationary and
   moving segments separately.
 - [Live mob simulation (issue #217)](./live-mob-sim.md) — The production wiring that

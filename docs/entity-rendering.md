@@ -13,7 +13,7 @@ and each has burned us once:
 
 ## How it works
 
-### Dynamic instance-buffer reuse
+### Frame instance upload arena
 
 Every visible model part needs a small `EntityInstanceRaw` vertex buffer containing
 its transform, packed light, tint, and hurt overlay. Dense scenes used to call
@@ -22,29 +22,42 @@ with mobs, paintings, signs, banners, heads, mapped item frames, and particles
 spent 10.5% of all stationary-frame samples in that upload helper; 78% of those
 samples were creating Metal buffers rather than preparing instance data.
 
-`RenderState::instance_buffers` is now an `InstanceBufferPool` shared by all
-world entity and block-entity preparation passes. `render_inner` calls
-`begin_frame` before the first upload. Each subsequent upload consumes one slot
-in stable call order: a sufficiently large slot is rewritten with
-`Queue::write_buffer`, while a missing or undersized slot is allocated at the
-next power-of-two capacity. The cursor resets each frame, but the slots remain.
-This keeps every draw's buffer distinct for the duration of the frame without
-repeating driver allocations once the visible workload has warmed up.
+The first fix retained one destination buffer per ordinal batch, removing
+`create_buffer_init` churn but leaving one `Queue::write_buffer` call—and one
+native wgpu staging allocation—for every model part. The follow-up replaces
+that pool with `RenderState::instance_arena`, one `InstanceBufferArena` shared
+by all world entity and block-entity preparation passes.
+
+`render_inner` calls `begin_frame` before the first producer. Each producer calls
+`stage_instances_tinted`, which converts transforms/light/tint directly into the
+arena's retained `Vec<u8>` and returns an aligned `Range<u64>`. Draw batches keep
+that range rather than their own `wgpu::Buffer`. After the final block-entity
+producer, `upload` grows the retained `VERTEX | COPY_DST` GPU buffer to a
+power-of-two capacity when necessary and performs exactly one non-empty
+`Queue::write_buffer`. Every draw then binds `shared_buffer.slice(range)`.
+Queue ordering makes the write visible before the later render submission.
 
 The one-shot `upload_instances_tinted` remains for isolated renderers that do
-not own a frame-scoped pool. World paths should use
-`upload_instances_tinted_pooled` and pass the same pool and queue. If a new
-preparation pass is inserted, call it only after `begin_frame` and before the
-render pass opens; GPU buffers cannot be written while that render pass borrows
-them. Do not reset the cursor between subpasses, because that would let later
-uploads overwrite buffers still referenced by earlier draws.
+not own a world frame. World paths must stage into the arena. If a new
+preparation pass is inserted, call it after `begin_frame` and before the single
+`upload`; appending after upload or uploading twice is a lifecycle error. Keep
+the returned range paired with its instance count, and retain the shared buffer
+until all world draws finish.
 
-There are no runtime flags or capacity limits. Slot count tracks the peak number
-of non-empty uploads, and each slot retains its peak power-of-two byte capacity.
-Changing that retention policy belongs in `InstanceBufferPoolState::take`;
-changing the packed bytes belongs in `tinted_instances`. The state-only unit
-test verifies stable frames allocate nothing and growth replaces only the
-undersized ordinal slot.
+There are no runtime flags or capacity limits. CPU capacity retains the peak
+staged byte count; GPU capacity retains the peak power-of-two size and never
+shrinks during the arena's lifetime. Changing retention or lifecycle belongs in
+`InstanceBufferArenaState`; changing record construction belongs in
+`tinted_instance`/`stage_instances_tinted`. Unit tests pin contiguous aligned
+ranges, byte-for-byte conversion, CPU/GPU reuse, geometric growth, and both
+invalid lifecycle transitions.
+
+This covers the standard tinted placement record for bodies, armour, wool,
+capes, elytra, paintings, orbs, sprites, spawner previews, banner layers,
+block-entity parts, and the placement instance used by entity water masks. It
+does not merge their geometry formats: flames, shadows, fishing lines, the
+water-mask mesh itself, first-person held-item paths, uniforms, and dynamic map
+textures keep their existing uploads.
 
 ### Type path → model name
 
