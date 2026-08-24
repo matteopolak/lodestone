@@ -9482,13 +9482,7 @@ fn run_captured_build(
     // rather than a substitute for it: this keeps the *log file* readable, and the
     // strip keeps the *matching* correct for any producer that colours anyway.
     //
-    // `NO_COLOR` is deliberately NOT set here, and that is a measured
-    // correction rather than an omission: `trunk` exposes a `--no-color` flag
-    // through clap with `env = "NO_COLOR"` and a `bool` value parser, so
-    // `NO_COLOR=1` makes it exit with `invalid value '1' for '--no-color'` —
-    // the generic env var breaks the very build it was meant to make legible.
-    // (Caught in one line by the reporter below, which is the point of it.)
-    command.env("CARGO_TERM_COLOR", "never");
+    configure_captured_build(command);
     let description = format!("{command:?}");
     let output = match command.output() {
         Ok(output) => output,
@@ -9517,6 +9511,14 @@ fn run_captured_build(
         output: combined,
         log_path,
     })
+}
+
+/// Makes captured builds independent of presentation variables inherited from
+/// the caller. Trunk maps `NO_COLOR` to a clap boolean, so the conventional
+/// `NO_COLOR=1` value aborts before the browser build begins.
+fn configure_captured_build(command: &mut Command) {
+    command.env_remove("NO_COLOR");
+    command.env("CARGO_TERM_COLOR", "never");
 }
 
 /// Writes `contents` to `target/wasm-check/<log_name>.log`, returning its path.
@@ -9719,6 +9721,27 @@ mod tests {
     use std::{collections::BTreeSet, ops::Deref, path::Path, process::Command};
 
     const REAL_REPORT: &str = ".cache/mc/26.2/generated/reports/packets.json";
+
+    #[test]
+    fn captured_builds_scrub_inherited_no_color_before_spawning() {
+        let mut command = Command::new("trunk");
+        command.env("NO_COLOR", "1");
+
+        configure_captured_build(&mut command);
+
+        let no_color = command
+            .get_envs()
+            .find(|(key, _)| *key == "NO_COLOR")
+            .expect("the command must explicitly remove NO_COLOR from its child environment");
+        assert!(no_color.1.is_none());
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "CARGO_TERM_COLOR")
+                .and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("never"))
+        );
+    }
 
     fn load_real_report() -> Result<Option<PacketReport>> {
         let path = Path::new(REAL_REPORT);

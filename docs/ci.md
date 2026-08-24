@@ -709,8 +709,10 @@ The fix is mechanical rather than a better regex, in both `xtask`'s port and
   console prints a summary **of that file**, naming the path;
 - the verdict is the process's **own exit status**, never a property of its output;
 - matching happens on **ANSI-stripped** text (CI sets `CARGO_TERM_COLOR=always`
-  globally, so a coloured `error:` does not start with `e`), and the child is also
-  asked for `NO_COLOR`;
+  globally, so a coloured `error:` does not start with `e`), while the child gets
+  `CARGO_TERM_COLOR=never` and explicitly removes inherited `NO_COLOR`. Trunk maps
+  that variable to a clap boolean, so the conventional `NO_COLOR=1` value aborts
+  before the browser build begins;
 - a matched line brings its **indented continuation lines** with it;
 - when **nothing** matches, the tail is printed **verbatim**. A filter that can
   yield an empty summary turns a failing build into a silent one, and output that

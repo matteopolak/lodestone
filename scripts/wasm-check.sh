@@ -638,11 +638,11 @@ echo
 if (( CONFINEMENT_ONLY == 0 )) && [[ -f "$ROOT/web/Cargo.toml" ]]; then
   printf '  %-34s ' "lodestone-web (trunk build)"
   web_log="$LOGDIR/lodestone-web-trunk.log"
-  # No NO_COLOR here, deliberately: `trunk` exposes `--no-color` through clap with
-  # `env = "NO_COLOR"` and a `bool` parser, so `NO_COLOR=1` makes trunk itself exit
-  # with `invalid value '1' for '--no-color'`. CARGO_TERM_COLOR covers the cargo it
-  # shells out to, and report_build_failure strips ANSI regardless.
-  if (cd "$ROOT/web" && CARGO_TERM_COLOR=never trunk build) > "$web_log" 2>&1; then
+  # Explicitly remove an inherited NO_COLOR: `trunk` exposes `--no-color` through
+  # clap with a bool parser, so the conventional `NO_COLOR=1` value aborts before
+  # the build starts. CARGO_TERM_COLOR covers the cargo it shells out to, and
+  # report_build_failure strips ANSI regardless.
+  if (cd "$ROOT/web" && env -u NO_COLOR CARGO_TERM_COLOR=never trunk build) > "$web_log" 2>&1; then
     echo "PASS"
   else
     echo "FAIL"
