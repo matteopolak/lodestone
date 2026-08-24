@@ -214,7 +214,7 @@ scene's own placement**, and each produced a picture that looks exactly like a r
 |---|---|---|
 | `conduit` | a huge translucent blue sheet over the whole stage | `minecraft:conduit`'s default state is `waterlogged=true`, so a bare `setblock` puts a real water source on the stage; the server floods it to a radius-6 diamond, and with the eye 0.125 blocks above that surface the water fills the frame. Vanilla does the same. Place it `waterlogged=false` |
 | `skeleton_skull` / `zombie_head` | a plain untextured cube | the camera was square on to `rotation=8`, which is the **back** of the head — segment 0 faces north (`-Z`). The back of a skeleton skull is uniform light grey and of a zombie head uniform green. At `rotation=0` both draw their faces, and so do the creeper, wither-skeleton and player heads |
-| the double chest | half a chest each way, "a hole on each side" | `type=left`/`type=right` is only half the placement — `ChestBlock.getConnectedDirection` pairs `LEFT` with `facing.getClockWise()`, so at `facing=south` the scene's `left` looked west and its `right` looked east and neither found a partner. Two orphans, each drawing the seam face it exists to hide |
+| the double chest | half a chest each way, "a hole on each side" | `type=left`/`type=right` is only half the placement — `ChestBlock.getConnectedDirection` pairs `LEFT` with `facing.getClockWise()`, so at `facing=south` the scene's `left` looked west and its `right` looked east and neither found a partner. Two orphans, each drawing the seam face it exists to hide. `05-hud` now puts `right` at `x=-1` and `left` at `x=0`, so both connected directions point inward |
 | `dragon_head` (and `piglin_head`) | draws nothing at all | **real**: `DragonHeadModel`/`PiglinHeadModel` are multi-part rigs unrelated to the shared 8×8×8 `SkullModel` box, and were unported. Now ported, and in the scene |
 
 Three things generalise:
@@ -226,6 +226,30 @@ Three things generalise:
 * **Half the reports were a subject photographed from behind.** A skull at `rotation=8`, a
   chest at `facing=south` with the camera on `-Z`: no face, no latch. Check which way the
   subject is pointing before believing the renderer dropped a texture.
+
+The same `05-hud` review found two different bugs with the same visual symptom—"the stage
+looks unfinished"—but different owners:
+
+* **A transparent light source cannot replace the only opaque layer of its wall.** The two
+  lantern commands originally overwrote stone at `z=22`, exposing sky through the lantern
+  models and making their emitted light impossible to read in daytime. The scene now places
+  each lantern one block forward at `z=21` inside a two-block-high, roofed stone-brick alcove
+  backed by the original wall. The shaded surfaces are both the sky-hole fix and the visual
+  proof that block light is reaching the frame. `hud_scene_fixture.rs` pins the four alcove
+  commands so a later composition edit cannot silently reopen the wall.
+* **The absent campfire plume was production code, not scene decoration.** `05-hud` places a
+  real lit campfire and never uses `/particle`; the client had attached its main smoke plume
+  to the nearby random `Block.animateTick` scan. The camera player stands 14 blocks away,
+  outside that scan's ±8 cube, so the scene could never receive smoke. In Minecraft 26.2 the
+  plume comes from `CampfireBlockEntity::particleTick`; the client now ticks loaded lit
+  campfire block entities at the fixed simulation rate. The scene uses ordinary cosy smoke and
+  a 60-tick warm-up: enough to establish a readable plume without sending signal-fire smoke
+  through the tab list. A visible plume in this image is therefore a lifecycle/wiring control
+  rather than a hand-authored screenshot effect. The capture harness also mirrors app bring-up
+  by uploading `Sim::particle_sheet_atlas()` into `RenderState`; before that fix the CPU UVs
+  resolved while the GPU sampled its transparent fallback. Its live gate now checks the exact
+  campfire source, campfire-specific survivors, a bound sheet texture, and a nonzero pixel diff
+  against an otherwise identical no-particle frame before it writes the PNG.
 
 ### Two scene descriptions that had stopped matching what they built
 

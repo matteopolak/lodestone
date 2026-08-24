@@ -566,6 +566,12 @@ fn capture_readme_screenshots() {
     let (mut w, mut h) = scenes[0].size;
     let mut target = HeadlessTarget::new(device, w, h, format);
     let mut render = RenderState::new(device, queue, format, w, h, sim.vanilla_atlas());
+    if let Some(sheet) = sim.particle_sheet_atlas() {
+        // Mirror `App::finish_bring_up`: the CPU-side UV table and the GPU
+        // texture must be the same stitch. Without this upload every sheet
+        // particle resolves successfully and samples the transparent fallback.
+        render.install_particle_sheet_atlas(device, queue, sheet.atlas());
+    }
     let mut hud = build_hud(device, queue, format, &target, &render);
 
     // Join the world before anything else: the sources below capture the
@@ -787,12 +793,61 @@ fn shoot(
     render.set_void_fog(sim.void_fog());
     render.update_animation(queue, sim.tick_count());
     let particles = sim.extract_particles(&camera);
-    let _ = particles;
-    render.prepare_particles(device, queue, &sim.particle_instances(), &camera);
-
+    if scene.name == "05-hud" {
+        let handle = sim
+            .net()
+            .expect("05-hud is a live scene")
+            .shared_handle();
+        let smoke_sources =
+            lodestone::block_entities::campfire_smoke_sources(&handle, camera.position);
+        assert!(
+            smoke_sources.contains(&([2, 64, 18], false)),
+            "05-hud's cosy campfire must be a live block-entity smoke source: {smoke_sources:?}"
+        );
+        assert!(
+            particles.campfire_smoke_alive > 0
+                && particles.drawn > 0
+                && particles.unresolved == 0,
+            "05-hud's real lit campfire must reach the particle renderer: {particles:?}"
+        );
+    }
     let entity_draws = sim.entity_draws();
+    let particle_instances = sim.particle_instances().to_vec();
+    let particle_control = if scene.name == "05-hud" {
+        render.prepare_particles(device, queue, &[], &camera);
+        let control_frame = target.acquire().expect("headless particle control acquire");
+        render.render(device, queue, control_frame.view(), &camera, None, &entity_draws);
+        Some(target.read_texels(device, queue))
+    } else {
+        None
+    };
+    render.prepare_particles(device, queue, &particle_instances, &camera);
     let frame = target.acquire().expect("headless acquire");
     let stats = render.render(device, queue, frame.view(), &camera, None, &entity_draws);
+
+    if let Some(control) = particle_control {
+        assert!(
+            stats.particle_sheet_atlas_bound,
+            "05-hud resolved sheet particles but the renderer still has its transparent fallback bound"
+        );
+        let with_particles = target.read_texels(device, queue);
+        let changed = control
+            .chunks_exact(4)
+            .zip(with_particles.chunks_exact(4))
+            .filter(|(a, b)| {
+                (0..3)
+                    .map(|channel| (i32::from(a[channel]) - i32::from(b[channel])).abs())
+                    .sum::<i32>()
+                    > 12
+            })
+            .count();
+        eprintln!("05-hud particle pixel control: {changed} pixels changed");
+        assert!(
+            changed > 0,
+            "05-hud submitted smoke instances but its world frame is byte-identical to \
+             the no-particle control"
+        );
+    }
 
     if scene.hud {
         let raw_view = frame.create_view(target.raw_view_format());
