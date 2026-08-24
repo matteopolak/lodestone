@@ -7,6 +7,7 @@ use super::*;
 impl WindowApp {
     pub(super) fn new(config: Config) -> Self {
         let sim = Sim::new(config.clone());
+        let benchmark = config.benchmark.map(BenchmarkDriver::new);
         // Matches the sky fog set at render bring-up, so the fog reconciliation's
         // first above-water frame is a no-op rather than a redundant upload.
         let applied_fog = Some(crate::sim::fog_for_render_distance(config.render_distance));
@@ -18,6 +19,8 @@ impl WindowApp {
         let persisted = crate::config::Options::load();
         Self {
             config,
+            benchmark,
+            benchmark_segment: None,
             sim,
             window: None,
             gpu: None,

@@ -97,6 +97,8 @@ mod weather;
 #[allow(unused_imports)]
 use advancements_screen::{advancements_panel_geometry, advancements_title};
 #[allow(unused_imports)]
+use benchmark::{BenchmarkDriver, BenchmarkSegment};
+#[allow(unused_imports)]
 pub(crate) use creative_screen::CreativeSearchEdit;
 #[allow(unused_imports)]
 use creative_screen::creative_panel_geometry;
@@ -176,6 +178,42 @@ pub fn run(config: Config) -> anyhow::Result<()> {
 /// never is.
 fn sky_fog(render_distance: u32) -> FogSettings {
     crate::sim::fog_for_render_distance(render_distance)
+}
+
+/// Canonical native framebuffer size for an opt-in live benchmark. Ordinary
+/// play returns `None` and keeps winit's existing logical-size policy.
+fn window_physical_size(config: &Config) -> Option<(u32, u32)> {
+    config
+        .benchmark
+        .map(|_| crate::config::BenchmarkConfig::PHYSICAL_SIZE)
+}
+
+/// Benchmark sessions must measure the client rather than a persisted frame
+/// limiter. Ordinary play returns its already-resolved target unchanged.
+fn benchmark_target_fps(config: &Config, ordinary: Option<u32>) -> Option<u32> {
+    if config.benchmark.is_some() {
+        None
+    } else {
+        ordinary
+    }
+}
+
+/// Benchmark sessions request wgpu's portable unthrottled present mode.
+/// Ordinary play remains driven by the persisted VSync option.
+fn benchmark_present_mode(
+    config: &Config,
+    ordinary: wgpu::PresentMode,
+) -> wgpu::PresentMode {
+    if config.benchmark.is_some() {
+        wgpu::PresentMode::AutoNoVsync
+    } else {
+        ordinary
+    }
+}
+
+/// Whether focus loss may put the pacer into its background schedule.
+fn should_background_pace(config: &Config) -> bool {
+    config.benchmark.is_none()
 }
 
 /// Maps a winit mouse button to the container-click gesture it drives.
@@ -493,6 +531,12 @@ const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
 struct WindowApp {
     config: Config,
+    /// Opt-in deterministic benchmark choreography. `None` is the ordinary
+    /// player-controlled path and pays no per-frame state-machine work.
+    benchmark: Option<BenchmarkDriver>,
+    /// Last segment announced to the benchmark log, for transition-only
+    /// markers rather than one line per frame.
+    benchmark_segment: Option<BenchmarkSegment>,
     sim: Sim,
     window: Option<Arc<Window>>,
     gpu: Option<GpuContext>,
