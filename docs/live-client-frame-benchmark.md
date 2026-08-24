@@ -47,6 +47,10 @@ python3 scripts/client-frame-benchmark.py --workload showcase --samply
 
 The profile is saved under `bench-results/profiles/`. `--samply` runs one full session and does not append its timing to the comparable JSONL history because sampling changes the workload.
 
+The RSS printed for a `--samply` run belongs to the Samply parent process, not
+the profiled client child, and is therefore not a client-memory measurement.
+Use the three ordinary trials for RSS comparisons.
+
 The runner must stay in the foreground. It uses `subprocess.Popen.poll()` only so it can sample the child’s RSS and enforce a failure deadline; it does not detach the benchmark or rely on a later wake-up. Client stdout and stderr go directly to a file rather than an unread pipe.
 
 ## Reading the results
