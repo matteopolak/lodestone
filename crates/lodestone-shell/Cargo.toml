@@ -234,6 +234,13 @@ arboard = { version = "3", default-features = false }
 # (the same crate `lodestone-auth`'s own chain runs on).
 reqwest = { workspace = true }
 
+# Benchmark windows must stay on the laptop panel even when macOS exposes all
+# attached displays under generic winit names. CoreGraphics' hardware flag is
+# the authoritative distinction; this dependency is target-local and only the
+# two display-query modules are enabled.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDirectDisplay", "CGDisplayConfiguration", "libc"] }
+
 # --- wasm32 target dependencies ---
 #
 # The browser build. `tokio` takes only the features it supports on

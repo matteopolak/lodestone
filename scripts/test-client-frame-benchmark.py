@@ -15,6 +15,16 @@ SPEC.loader.exec_module(MODULE)
 
 
 class SummaryTests(unittest.TestCase):
+    @staticmethod
+    def fullscreen_log(width=3024, height=1898):
+        return (
+            "selected hardware built-in display for fullscreen benchmark "
+            "native_id=Some(1)\n"
+            f"benchmark window ready framebuffer_width={width} "
+            f"framebuffer_height={height} fullscreen=true\n"
+            "benchmark complete"
+        )
+
     def test_percentiles_budget_misses_and_nonempty_phase_means(self):
         summary = MODULE.summarize_rows(
             [
@@ -56,15 +66,41 @@ class SummaryTests(unittest.TestCase):
             {"segment": "showcase.stationary", "frame_interval_ms": "10"},
             {"segment": "showcase.moving", "frame_interval_ms": "11"},
         ]
-        log = "benchmark window ready framebuffer_width=2560 framebuffer_height=1440\nbenchmark complete"
+        log = self.fullscreen_log()
         with self.assertRaisesRegex(ValueError, "workload metadata"):
             MODULE.validate_run(rows, log, "terrain")
 
     def test_incomplete_measured_segments_are_rejected(self):
         rows = [{"segment": "terrain.stationary", "frame_interval_ms": "10"}]
-        log = "benchmark window ready framebuffer_width=2560 framebuffer_height=1440\nbenchmark complete"
+        log = self.fullscreen_log()
         with self.assertRaisesRegex(ValueError, "moving segment"):
             MODULE.validate_run(rows, log, "terrain")
+
+    def test_hardware_builtin_fullscreen_framebuffer_is_parsed(self):
+        rows = [
+            {"segment": "terrain.stationary", "frame_interval_ms": "10"},
+            {"segment": "terrain.moving", "frame_interval_ms": "11"},
+        ]
+        self.assertEqual(
+            MODULE.validate_run(rows, self.fullscreen_log(), "terrain"),
+            (3024, 1898),
+        )
+
+    def test_external_or_nonfullscreen_window_is_rejected(self):
+        rows = [
+            {"segment": "terrain.stationary", "frame_interval_ms": "10"},
+            {"segment": "terrain.moving", "frame_interval_ms": "11"},
+        ]
+        external = (
+            "benchmark window ready framebuffer_width=2560 "
+            "framebuffer_height=1440 fullscreen=true\nbenchmark complete"
+        )
+        with self.assertRaisesRegex(ValueError, "hardware built-in"):
+            MODULE.validate_run(rows, external, "terrain")
+
+        windowed = self.fullscreen_log().replace("fullscreen=true", "fullscreen=false")
+        with self.assertRaisesRegex(ValueError, "fullscreen"):
+            MODULE.validate_run(rows, windowed, "terrain")
 
 
 if __name__ == "__main__":

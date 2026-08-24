@@ -31,22 +31,14 @@ fn benchmark_policy_is_uncapped_unvsynced_and_uses_physical_1440p() {
 }
 
 #[test]
-fn benchmark_window_prefers_the_builtin_monitor_when_an_external_is_connected() {
-    let monitors = [
-        (Some("LG UltraFine".to_string()), winit::dpi::PhysicalPosition::new(0, 0)),
-        (
-            Some("Built-in Retina Display".to_string()),
-            winit::dpi::PhysicalPosition::new(-3024, 0),
-        ),
-    ];
+fn benchmark_window_selects_only_the_hardware_builtin_monitor() {
+    let monitors = [(15_608_u32, false), (2_941_u32, true), (91_003_u32, false)];
 
+    assert_eq!(select_builtin_monitor(monitors), Some(2_941));
     assert_eq!(
-        builtin_monitor_origin(monitors),
-        Some(winit::dpi::PhysicalPosition::new(-3024, 0))
+        select_builtin_monitor([(15_608_u32, false), (91_003_u32, false)]),
+        None
     );
-    assert!(is_builtin_monitor_name("Color LCD"));
-    assert!(is_builtin_monitor_name("Liquid Retina XDR Display"));
-    assert!(!is_builtin_monitor_name("Studio Display"));
 }
 
 #[test]

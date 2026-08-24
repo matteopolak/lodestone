@@ -10,19 +10,30 @@ impl ApplicationHandler for WindowApp {
             return;
         }
         let mut attrs = window_attributes(&self.config);
-        if self.config.benchmark.is_some()
-            && let Some(origin) = builtin_monitor_origin(
-                event_loop
-                    .available_monitors()
-                    .map(|monitor| (monitor.name(), monitor.position())),
-            )
-        {
-            // Keep the title bar/menu-bar boundary away from the desktop edge
-            // so macOS can honour the requested *inner* framebuffer size.
-            attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
-                origin.x.saturating_add(32),
-                origin.y.saturating_add(32),
-            ));
+        if self.config.benchmark.is_some() {
+            let Some(monitor) = benchmark_builtin_monitor(event_loop) else {
+                eprintln!("benchmark requires a discoverable built-in laptop display");
+                event_loop.exit();
+                return;
+            };
+            tracing::info!(
+                target: "frame_benchmark",
+                native_id = ?monitor_native_id(&monitor),
+                name = ?monitor.name(),
+                position = ?monitor.position(),
+                size = ?monitor.size(),
+                "selected hardware built-in display for fullscreen benchmark"
+            );
+            attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(Some(monitor))));
+            #[cfg(target_os = "macos")]
+            {
+                use winit::platform::macos::WindowAttributesExtMacOS;
+
+                // Unlike ordinary borderless fullscreen, this also hides the
+                // menu bar and Dock instead of letting either overlay the
+                // laptop's fullscreen drawable.
+                attrs = attrs.with_borderless_game(true);
+            }
         }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -1525,6 +1536,7 @@ impl WindowApp {
                 target: "frame_benchmark",
                 framebuffer_width = w,
                 framebuffer_height = h,
+                fullscreen = window.fullscreen().is_some(),
                 monitor = ?window.current_monitor().and_then(|monitor| monitor.name()),
                 outer_position = ?window.outer_position().ok(),
                 render_distance = self.config.render_distance,
