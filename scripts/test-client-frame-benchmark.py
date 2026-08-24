@@ -57,6 +57,23 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(MODULE.nearest_rank([1.0, 2.0, 8.0, 9.0], 0.95), 9.0)
         self.assertEqual(MODULE.nearest_rank([1.0, 2.0, 8.0, 9.0], 0.50), 2.0)
 
+    def test_gpu_timestamp_samples_are_summarized_without_adding_passes(self):
+        log = "\n".join(
+            [
+                "gpu: world_total=<no reading yet>, world=<no reading yet>",
+                "gpu: world_total=0.10ms, world=0.40ms, first_person=0.20ms, hud_total=0.30ms",
+                "gpu: world_total=0.20ms, world=0.60ms, first_person=0.30ms, hud_total=0.40ms",
+                "gpu: world_total=0.30ms, world=0.80ms, first_person=0.40ms, hud_total=0.50ms",
+            ]
+        )
+
+        summary = MODULE.summarize_gpu_log(log)
+        self.assertEqual(summary["samples"], 3)
+        self.assertEqual(summary["world"]["median_ms"], 0.6)
+        self.assertEqual(summary["world"]["p95_ms"], 0.8)
+        self.assertEqual(summary["first_person"]["median_ms"], 0.3)
+        self.assertNotIn("combined", summary)
+
     def test_missing_complete_marker_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "completion marker"):
             MODULE.validate_run([], "log without marker", "terrain")

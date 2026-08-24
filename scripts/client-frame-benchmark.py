@@ -33,6 +33,12 @@ RCON_PASSWORD = "lodestone"
 RENDER_DISTANCE = 24
 SERVER_VIEW_DISTANCE = RENDER_DISTANCE + 1
 METADATA_COLUMNS = {"frame", "frame_interval_ms", "segment"}
+GPU_SAMPLE_RE = re.compile(
+    r"gpu: world_total=(?P<world_total>\d+(?:\.\d+)?)ms, "
+    r"world=(?P<world>\d+(?:\.\d+)?)ms, "
+    r"first_person=(?P<first_person>\d+(?:\.\d+)?)ms, "
+    r"hud_total=(?P<hud_total>\d+(?:\.\d+)?)ms"
+)
 
 ORACLES = {
     "terrain": {
@@ -98,6 +104,27 @@ def summarize_rows(rows: list[Mapping[str, str]]) -> dict:
         "over_33_3": sum(ms > 33.3 for ms in intervals),
         "phases_ms": phases,
     }
+
+
+def summarize_gpu_log(log_text: str) -> dict:
+    """Summarize asynchronous one-second GPU timestamp snapshots.
+
+    Pass values stay separate. In particular, the diagnostic total spans are
+    not added to the real-pass readings or presented as bounds.
+    """
+    samples = [
+        {name: float(value) for name, value in match.groupdict().items()}
+        for match in GPU_SAMPLE_RE.finditer(log_text)
+    ]
+    summary = {"samples": len(samples)}
+    for name in ("world_total", "world", "first_person", "hud_total"):
+        values = [sample[name] for sample in samples]
+        if values:
+            summary[name] = {
+                "median_ms": statistics.median(values),
+                "p95_ms": nearest_rank(values, 0.95),
+            }
+    return summary
 
 
 def validate_run(
@@ -458,6 +485,7 @@ def run_trial(
             "segments": segments,
             "rss_bytes": rss,
             "framebuffer": framebuffer,
+            "gpu_timestamp_ms": summarize_gpu_log(log_text),
             "log": log_text,
         }
 
@@ -492,6 +520,16 @@ def _print_trial(workload: str, result: dict) -> None:
             for name, value in sorted(summary["phases_ms"].items())
         )
         print(f"    phase means ms: {phase_line}")
+    gpu = result["gpu_timestamp_ms"]
+    if gpu["samples"]:
+        print(f"  GPU timestamp snapshots: n={gpu['samples']}")
+        for name in ("world", "first_person", "world_total", "hud_total"):
+            values = gpu[name]
+            qualifier = " (diagnostic span)" if name.endswith("_total") else ""
+            print(
+                f"    {name}{qualifier}: median/p95="
+                f"{values['median_ms']:.2f}/{values['p95_ms']:.2f} ms"
+            )
 
 
 def _append_records(
@@ -517,6 +555,7 @@ def _append_records(
             "moving": durations[2],
         },
         "rss_bytes": result["rss_bytes"],
+        "gpu_timestamp_ms": result["gpu_timestamp_ms"],
     }
     with RESULTS.open("a", encoding="utf-8") as handle:
         for suffix, summary in result["segments"].items():

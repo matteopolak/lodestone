@@ -62,6 +62,8 @@ The runner prints, for each measured segment:
 - frame count and p50/p95/p99 frame interval using observed nearest-rank percentiles;
 - counts over the 16.67 ms and 33.3 ms budgets;
 - means for every CPU phase/subphase that actually ran;
+- median/p95 of the once-per-second wgpu timestamp snapshots for `world`,
+  `first_person`, `world_total`, and `hud_total`;
 - client RSS at the first sample, peak sample, and last sample;
 - min/median/max trial spread for p50 frame interval.
 
@@ -75,7 +77,7 @@ frame,frame_interval_ms,segment,setup,sim_tick,mesh_upload,acquire,...
 
 It continues with the world encode and HUD subphase columns documented in `docs/frame-profiling.md`. A skipped phase is an empty cell, not `0.0000`.
 
-The CSV’s frame interval includes everything that delayed the next redraw, including CPU work, GPU/back-pressure visible at acquire or present, compositor scheduling, and OS noise. The phase columns are CPU wall-clock spans. Wgpu timestamp queries are useful live controls but are not currently emitted as row-correlated CSV columns; do not subtract CPU phase means from frame interval and label the remainder “GPU”. Use the counts beside timings, a Samply CPU profile, and—when the evidence points GPU-side—an Xcode/Metal capture or a purpose-built timestamp dump.
+The CSV’s frame interval includes everything that delayed the next redraw, including CPU work, GPU/back-pressure visible at acquire or present, compositor scheduling, and OS noise. The phase columns are CPU wall-clock spans. Wgpu timestamp queries are asynchronous snapshots of the last completed frame and are summarized per run rather than correlated to CSV rows. `world` and `first_person` time real render passes. The two `*_total` dummy-pass spans are explicitly labelled diagnostic because their private attachment does not establish ordering against the real passes. Do not add pass durations, subtract CPU phase means from frame interval and label the remainder “GPU”, or treat a diagnostic span as a bound. Use an Xcode/Metal capture when attribution inside a pass matters.
 
 ## How to change it
 
