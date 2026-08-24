@@ -9,7 +9,21 @@ impl ApplicationHandler for WindowApp {
         if self.window.is_some() {
             return;
         }
-        let attrs = window_attributes(&self.config);
+        let mut attrs = window_attributes(&self.config);
+        if self.config.benchmark.is_some()
+            && let Some(origin) = builtin_monitor_origin(
+                event_loop
+                    .available_monitors()
+                    .map(|monitor| (monitor.name(), monitor.position())),
+            )
+        {
+            // Keep the title bar/menu-bar boundary away from the desktop edge
+            // so macOS can honour the requested *inner* framebuffer size.
+            attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
+                origin.x.saturating_add(32),
+                origin.y.saturating_add(32),
+            ));
+        }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -1511,6 +1525,8 @@ impl WindowApp {
                 target: "frame_benchmark",
                 framebuffer_width = w,
                 framebuffer_height = h,
+                monitor = ?window.current_monitor().and_then(|monitor| monitor.name()),
+                outer_position = ?window.outer_position().ok(),
                 render_distance = self.config.render_distance,
                 present_mode = ?wgpu::PresentMode::AutoNoVsync,
                 "benchmark window ready"

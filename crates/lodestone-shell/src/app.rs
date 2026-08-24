@@ -188,6 +188,27 @@ fn window_physical_size(config: &Config) -> Option<(u32, u32)> {
         .map(|_| crate::config::BenchmarkConfig::PHYSICAL_SIZE)
 }
 
+/// Names macOS uses for the laptop panel across Intel and Apple-silicon Macs.
+/// External Apple displays deliberately do not match.
+fn is_builtin_monitor_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("built-in")
+        || name.contains("built in")
+        || name.contains("color lcd")
+        || name.contains("liquid retina")
+}
+
+/// Find the laptop panel's desktop origin without assuming it is the primary
+/// monitor. macOS remembers an application's last display, which can otherwise
+/// move a benchmark onto a smaller external panel and invalidate its framebuffer.
+fn builtin_monitor_origin(
+    monitors: impl IntoIterator<Item = (Option<String>, winit::dpi::PhysicalPosition<i32>)>,
+) -> Option<winit::dpi::PhysicalPosition<i32>> {
+    monitors.into_iter().find_map(|(name, origin)| {
+        name.as_deref().is_some_and(is_builtin_monitor_name).then_some(origin)
+    })
+}
+
 /// Benchmark sessions must measure the client rather than a persisted frame
 /// limiter. Ordinary play returns its already-resolved target unchanged.
 fn benchmark_target_fps(config: &Config, ordinary: Option<u32>) -> Option<u32> {
