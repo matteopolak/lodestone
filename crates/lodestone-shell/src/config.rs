@@ -2006,6 +2006,7 @@ impl Config {
                         }
                     });
                     cfg.mode = Mode::Window;
+                    cfg.connect_in_window = true;
                 }
                 "--benchmark-warmup" => {
                     benchmark_option_seen = true;
@@ -2216,6 +2217,10 @@ mod tests {
             "60",
         ]);
         assert_eq!(terrain.mode, Mode::Window);
+        assert!(
+            terrain.connect_in_window,
+            "a live benchmark must dial its configured Java oracle"
+        );
         assert_eq!(
             terrain.benchmark,
             Some(BenchmarkConfig {
