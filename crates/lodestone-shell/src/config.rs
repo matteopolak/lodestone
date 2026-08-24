@@ -1822,6 +1822,48 @@ pub enum Mode {
     Connect,
 }
 
+/// The live client workload selected by the opt-in frame benchmark driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchmarkWorkload {
+    /// Normal generated terrain, with a stationary segment followed by flight.
+    Terrain,
+    /// A dense Java-authored scene of specialized render paths.
+    Showcase,
+}
+
+impl BenchmarkWorkload {
+    /// Stable name written into frame-profile labels and result metadata.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Terrain => "terrain",
+            Self::Showcase => "showcase",
+        }
+    }
+}
+
+/// Durations and workload for one deterministic live frame benchmark session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BenchmarkConfig {
+    /// Which Java-backed scene the runner prepared.
+    pub workload: BenchmarkWorkload,
+    /// Joined-world settling time excluded from reported measurements.
+    pub warmup: Duration,
+    /// Fixed-view measurement duration.
+    pub stationary: Duration,
+    /// Terrain-flight or showcase-orbit measurement duration.
+    pub moving: Duration,
+}
+
+impl BenchmarkConfig {
+    /// Physical framebuffer requested for every canonical benchmark run.
+    pub const PHYSICAL_SIZE: (u32, u32) = (2560, 1440);
+
+    const DEFAULT_WARMUP: Duration = Duration::from_secs(20);
+    const DEFAULT_STATIONARY: Duration = Duration::from_secs(30);
+    const DEFAULT_MOVING: Duration = Duration::from_secs(60);
+}
+
 /// Parsed shell configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -1865,6 +1907,8 @@ pub struct Config {
     /// Whether argv actually named `--render-distance`/`--rd`. See
     /// [`Self::sensitivity_given`].
     pub render_distance_given: bool,
+    /// Opt-in deterministic live frame benchmark. `None` for ordinary play.
+    pub benchmark: Option<BenchmarkConfig>,
 }
 
 impl Default for Config {
@@ -1881,6 +1925,7 @@ impl Default for Config {
             sensitivity: DEFAULT_SENSITIVITY,
             sensitivity_given: false,
             render_distance_given: false,
+            benchmark: None,
         }
     }
 }
@@ -1894,11 +1939,17 @@ impl Config {
     /// Recognised flags:
     /// `--headless`, `--connect`, `--window`, `--host <h>`, `--port <p>`,
     /// `--protocol <n>`, `--render-distance <n>`, `--live` (connect while
-    /// windowed), `--seconds <n>`, `--sensitivity <f>`, `--help`/`-h`.
+    /// windowed), `--seconds <n>`, `--sensitivity <f>`, the benchmark options,
+    /// and `--help`/`-h`.
     #[must_use]
     pub fn from_args<I: IntoIterator<Item = String>>(args: I) -> CliOutcome {
         let mut cfg = Config::default();
         let mut it = args.into_iter();
+        let mut benchmark_workload = None;
+        let mut benchmark_option_seen = false;
+        let mut benchmark_warmup = BenchmarkConfig::DEFAULT_WARMUP;
+        let mut benchmark_stationary = BenchmarkConfig::DEFAULT_STATIONARY;
+        let mut benchmark_moving = BenchmarkConfig::DEFAULT_MOVING;
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "--help" | "-h" => return CliOutcome::Help(Self::usage()),
@@ -1940,10 +1991,77 @@ impl Config {
                         cfg.sensitivity_given = true;
                     }
                 }
+                "--benchmark" => {
+                    benchmark_option_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error("--benchmark requires terrain or showcase".into());
+                    };
+                    benchmark_workload = Some(match value.as_str() {
+                        "terrain" => BenchmarkWorkload::Terrain,
+                        "showcase" => BenchmarkWorkload::Showcase,
+                        _ => {
+                            return CliOutcome::Error(format!(
+                                "--benchmark requires terrain or showcase, got {value}"
+                            ));
+                        }
+                    });
+                    cfg.mode = Mode::Window;
+                }
+                "--benchmark-warmup" => {
+                    benchmark_option_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error("--benchmark-warmup requires a value in seconds".into());
+                    };
+                    let Ok(seconds) = value.parse::<u64>() else {
+                        return CliOutcome::Error(format!(
+                            "--benchmark-warmup requires a value in seconds, got {value}"
+                        ));
+                    };
+                    benchmark_warmup = Duration::from_secs(seconds);
+                }
+                "--benchmark-stationary" => {
+                    benchmark_option_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error(
+                            "--benchmark-stationary requires a value in seconds".into(),
+                        );
+                    };
+                    let Ok(seconds) = value.parse::<u64>() else {
+                        return CliOutcome::Error(format!(
+                            "--benchmark-stationary requires a value in seconds, got {value}"
+                        ));
+                    };
+                    benchmark_stationary = Duration::from_secs(seconds);
+                }
+                "--benchmark-moving" => {
+                    benchmark_option_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error("--benchmark-moving requires a value in seconds".into());
+                    };
+                    let Ok(seconds) = value.parse::<u64>() else {
+                        return CliOutcome::Error(format!(
+                            "--benchmark-moving requires a value in seconds, got {value}"
+                        ));
+                    };
+                    benchmark_moving = Duration::from_secs(seconds);
+                }
                 other => {
                     return CliOutcome::Error(format!("unrecognised argument: {other}"));
                 }
             }
+        }
+        if benchmark_option_seen {
+            let Some(workload) = benchmark_workload else {
+                return CliOutcome::Error(
+                    "benchmark duration options require --benchmark terrain or showcase".into(),
+                );
+            };
+            cfg.benchmark = Some(BenchmarkConfig {
+                workload,
+                warmup: benchmark_warmup,
+                stationary: benchmark_stationary,
+                moving: benchmark_moving,
+            });
         }
         CliOutcome::Run(cfg)
     }
@@ -2014,6 +2132,13 @@ RENDER / INPUT:
     --render-distance <N>    Render distance in chunks (default: 8); also --rd
     --sensitivity <F>        Mouse-look sensitivity, 0..1 (default: 0.5)
 
+LIVE FRAME BENCHMARK:
+    --benchmark <WORKLOAD>   terrain or showcase; forces a windowed run
+    --benchmark-warmup <N>  Joined-world warm-up seconds (default: 20)
+    --benchmark-stationary <N>
+                             Fixed-view measurement seconds (default: 30)
+    --benchmark-moving <N>  Flight/orbit measurement seconds (default: 60)
+
     -h, --help               Print this help and exit
 "
         .to_string()
@@ -2073,6 +2198,45 @@ mod tests {
         assert_eq!(c.mode, Mode::Connect);
         assert_eq!(c.connect_for.as_secs(), 3);
         assert!(c.connect_in_window);
+    }
+
+    #[test]
+    fn benchmark_flags_build_a_live_windowed_run_without_changing_defaults() {
+        let normal = parse(&[]);
+        assert_eq!(normal.benchmark, None);
+
+        let terrain = parse(&[
+            "--benchmark",
+            "terrain",
+            "--benchmark-warmup",
+            "20",
+            "--benchmark-stationary",
+            "30",
+            "--benchmark-moving",
+            "60",
+        ]);
+        assert_eq!(terrain.mode, Mode::Window);
+        assert_eq!(
+            terrain.benchmark,
+            Some(BenchmarkConfig {
+                workload: BenchmarkWorkload::Terrain,
+                warmup: Duration::from_secs(20),
+                stationary: Duration::from_secs(30),
+                moving: Duration::from_secs(60),
+            })
+        );
+    }
+
+    #[test]
+    fn benchmark_rejects_unknown_workloads_and_missing_durations() {
+        assert!(matches!(
+            Config::from_args(["--benchmark".into(), "castle".into()]),
+            CliOutcome::Error(message) if message.contains("terrain or showcase")
+        ));
+        assert!(matches!(
+            Config::from_args(["--benchmark-warmup".into()]),
+            CliOutcome::Error(message) if message.contains("requires a value")
+        ));
     }
 
     #[test]
