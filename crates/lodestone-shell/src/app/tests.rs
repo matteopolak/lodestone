@@ -31,6 +31,25 @@ fn benchmark_policy_is_uncapped_unvsynced_and_uses_physical_1440p() {
 }
 
 #[test]
+fn benchmark_window_prefers_the_builtin_monitor_when_an_external_is_connected() {
+    let monitors = [
+        (Some("LG UltraFine".to_string()), winit::dpi::PhysicalPosition::new(0, 0)),
+        (
+            Some("Built-in Retina Display".to_string()),
+            winit::dpi::PhysicalPosition::new(-3024, 0),
+        ),
+    ];
+
+    assert_eq!(
+        builtin_monitor_origin(monitors),
+        Some(winit::dpi::PhysicalPosition::new(-3024, 0))
+    );
+    assert!(is_builtin_monitor_name("Color LCD"));
+    assert!(is_builtin_monitor_name("Liquid Retina XDR Display"));
+    assert!(!is_builtin_monitor_name("Studio Display"));
+}
+
+#[test]
 fn ordinary_policy_remains_persisted_option_driven() {
     let config = Config::default();
     assert_eq!(window_physical_size(&config), None);
