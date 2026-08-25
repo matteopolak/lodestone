@@ -4,7 +4,7 @@
 
 The live client frame benchmark measures Lodestone’s real fullscreen client while it is joined to a Java 26.2 server. It records frame intervals and CPU/GPU phase timings for a normal-terrain workload and a dense render showcase, then summarizes stationary and moving segments separately.
 
-This is the reproducible workload used for client performance investigations. The synthetic `frame_profile` criterion bench remains an instrumentation control; it is not a substitute for these live measurements.
+This is the reproducible workload used for client performance investigations. The synthetic `frame_profile` criterion bench remains an instrumentation control; it is not a substitute for these live measurements. A third `megaworld` workload uses the official Hermitcraft Season 10 Java save to exercise dense, already-generated multiplayer chunks at scale.
 
 ## How it works
 
@@ -24,6 +24,21 @@ The benchmark clock begins only after `SessionPhase::Connected`:
 `LODESTONE_FRAME_PROFILE_DUMP` writes one CSV row per finalized frame. `frame_interval_ms` is start-to-start wall time, and `segment` is captured when the frame begins so a transition cannot relabel the previous frame. Empty phase cells mean the phase did not run; the summarizer never averages them as zero.
 
 The showcase is `scripts/benchmark-scenes/showcase.txt`. It resets its own 64×32×64 plot and includes 24 signs, 16 player heads, 16 patterned banners, 16 mapped item frames, 12 equipped armour stands, 24 sheep plus other mobs, text/item/block displays, block entities, translucent blocks, and repeating particle command blocks. Summoned entities carry the `lodestone_benchmark` tag so a rerun removes exactly its own entities.
+
+The megaworld is an untracked local cache, not repository data. Install it with
+the Python standard-library installer:
+
+```bash
+python3 scripts/install-client-benchmark-world.py
+```
+
+The installer streams the official `hermitcraft10.zip`, requires SHA-256
+`f05bee362a8a93757ae984acc51b24a43da1f5456ee044d6171b3c440c922ffb`, rejects
+ZIP traversal/symlink entries, validates one Java world root, and atomically
+publishes `.cache/mc/megaworld`. It copies the existing Java 26.2 server jar
+from `.cache/mc/creative`; it never changes the terrain or showcase worlds.
+The dedicated oracle is `scripts/live-oracles/megaworld.sh` on game port 25590
+and RCON port 25591.
 
 ## Running it
 
@@ -124,6 +139,8 @@ Canonical server endpoints are terrain `127.0.0.1:25580` with RCON `:25581`, and
 
 - A release Lodestone binary, normally `target/release/lodestone`.
 - Apple’s `container` runtime and the existing oracle worlds under `.cache/mc/terrain` and `.cache/mc/creative`.
+- About 3 GB of temporary disk space for the pinned 1.2 GB Hermitcraft archive
+  and its 1.3 GB extracted Java world when installing `megaworld`.
 - The Java 26.2 `server.jar` already used by `scripts/live-oracles/terrain.sh` and `creative.sh`.
 - Python 3 standard library only for ordinary runs.
 - `samply` on `PATH` only when `--samply` is requested.
