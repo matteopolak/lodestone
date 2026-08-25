@@ -27,8 +27,10 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use super::frame_profile::{FramePhase, HUD_SUBPHASE_COUNT, HudSubphase, PHASE_COUNT};
-use crate::gpu::gpu_timing::{WORLD_SUBPHASE_COUNT, WorldSubphase};
+use super::frame_profile::{
+    FramePhase, HUD_SUBPHASE_COUNT, HudSubphase, HudSubphaseCounts, PHASE_COUNT,
+};
+use crate::gpu::gpu_timing::{WORLD_SUBPHASE_COUNT, WorldSubphase, WorldSubphaseCounts};
 
 #[derive(Debug)]
 pub(crate) struct DumpWriter {
@@ -83,6 +85,10 @@ impl DumpWriter {
             header.push(',');
             header.push_str(subphase.name());
         }
+        header.push_str(
+            ",world.packed_sections_visited,world.model_sections_visited,hud.chat_lines,\
+             hud.debug_lines,hud.menu_overlays_drawn",
+        );
         if let Err(e) = writeln!(w, "{header}") {
             tracing::warn!(target: "frame_profile", "failed writing dump header: {e}");
             self.file = None;
@@ -104,6 +110,8 @@ impl DumpWriter {
         values: [Option<f32>; PHASE_COUNT],
         world_subphases: [Option<f32>; WORLD_SUBPHASE_COUNT],
         hud_subphases: [Option<f32>; HUD_SUBPHASE_COUNT],
+        world_counts: Option<WorldSubphaseCounts>,
+        hud_counts: Option<HudSubphaseCounts>,
     ) {
         let Some(w) = &mut self.file else { return };
         let mut line = frame.to_string();
@@ -119,6 +127,18 @@ impl DumpWriter {
             line.push(',');
             if let Some(ms) = v {
                 line.push_str(&format!("{ms:.4}"));
+            }
+        }
+        for value in [
+            world_counts.map(|counts| counts.packed_sections_visited),
+            world_counts.map(|counts| counts.model_sections_visited),
+            hud_counts.map(|counts| counts.chat_lines),
+            hud_counts.map(|counts| counts.debug_lines),
+            hud_counts.map(|counts| counts.menu_overlays_drawn),
+        ] {
+            line.push(',');
+            if let Some(value) = value {
+                line.push_str(&value.to_string());
             }
         }
         if let Err(e) = writeln!(w, "{line}") {

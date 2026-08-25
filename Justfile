@@ -360,6 +360,15 @@ bench-client-showcase:
 bench-client-smoke:
     python3 scripts/client-frame-benchmark.py --workload showcase --smoke
 
+# Hermitcraft S10 at RD24, once with F3 closed and once open. Install the
+# pinned world first with `python3 scripts/install-client-benchmark-world.py`.
+bench-client-megaworld:
+    python3 scripts/client-frame-benchmark.py --workload megaworld
+
+# One 2s/2s/3s run per F3 arm: setup/compatibility gate before full trials.
+bench-client-megaworld-smoke:
+    python3 scripts/client-frame-benchmark.py --workload megaworld --smoke
+
 # Live-oracle launchers — one recipe per canonical oracle. Each script
 # creates a fresh container and tears it down when it exits. See
 # docs/oracle-runtimes.md and CLAUDE.md for the spawn contracts.
@@ -368,6 +377,9 @@ oracle-creative:
 
 oracle-terrain:
     ./scripts/live-oracles/terrain.sh
+
+oracle-megaworld:
+    ./scripts/live-oracles/megaworld.sh
 
 oracle-survival:
     ./scripts/live-oracles/survival.sh

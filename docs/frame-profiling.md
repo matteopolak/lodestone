@@ -82,6 +82,14 @@ all in milliseconds, with an empty field for a phase (or sub-phase) that was
 skipped that frame — never a `0`, which would read as free rather than "did
 not run".
 
+Five integer workload columns follow the timing columns:
+`world.packed_sections_visited`, `world.model_sections_visited`,
+`hud.chat_lines`, `hud.debug_lines`, and `hud.menu_overlays_drawn`. They are
+captured on the same frame as the timings so a large-map traversal can compare
+cost per visited section and an F3-open arm can separate debug work from the
+underlying HUD. A frame that skipped its owning phase leaves the corresponding
+counts empty rather than inheriting the previous frame.
+
 That last property was **broken for as long as the dump existed** and is
 worth knowing about if you are reading an older capture: `finalise` built
 each row by reading the ring buffer back through an `f32 -> Option<f32>`

@@ -568,7 +568,23 @@ impl FrameProfiler {
                 } else {
                     [None; crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT]
                 };
-            dump.write_row(self.frame_count, interval_ms, segment, row, world_row, hud_row);
+            let world_counts = world_encode_ran_this_frame
+                .then_some(self.world_subphase_counts)
+                .flatten();
+            let hud_counts = row[FramePhase::HudUiEncodeSubmit.index()]
+                .is_some()
+                .then_some(self.hud_subphase_counts)
+                .flatten();
+            dump.write_row(
+                self.frame_count,
+                interval_ms,
+                segment,
+                row,
+                world_row,
+                hud_row,
+                world_counts,
+                hud_counts,
+            );
         }
     }
 
@@ -1016,6 +1032,54 @@ mod tests {
                 .expect("moving row")
                 .starts_with("2,17.0000,terrain.moving,")
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dump_pairs_world_and_hud_timings_with_per_frame_workload_counts() {
+        let path = std::env::temp_dir().join("lodestone-frame-profile-count-control.csv");
+        let _ = std::fs::remove_file(&path);
+        let _ = crate::gpu::gpu_timing::take_world_subphases();
+        {
+            let t0 = Instant::now();
+            let mut profiler = FrameProfiler::new(t0, Some(&path));
+            profiler.set_segment(Some("megaworld.stationary"));
+            profiler.begin_frame(t0);
+            crate::gpu::gpu_timing::record_world_subphase(
+                crate::gpu::gpu_timing::WorldSubphase::TerrainCullAndDraw,
+                1.25,
+            );
+            crate::gpu::gpu_timing::record_world_subphase_counts(
+                crate::gpu::gpu_timing::WorldSubphaseCounts {
+                    packed_sections_visited: 137,
+                    model_sections_visited: 911,
+                },
+            );
+            profiler.mark(FramePhase::WorldEncodeSubmit, t0 + Duration::from_millis(2));
+            profiler.mark_hud(HudSubphase::DebugGather, t0 + Duration::from_millis(3));
+            profiler.record_hud_counts(HudSubphaseCounts {
+                chat_lines: 17,
+                debug_lines: 29,
+                menu_overlays_drawn: 3,
+            });
+            profiler.mark(FramePhase::HudUiEncodeSubmit, t0 + Duration::from_millis(4));
+            profiler.begin_frame(t0 + Duration::from_millis(10));
+        }
+
+        let csv = std::fs::read_to_string(&path).expect("dump file must exist");
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().expect("header").split(',').collect();
+        let row: Vec<&str> = lines.next().expect("row").split(',').collect();
+        for (name, expected) in [
+            ("world.packed_sections_visited", "137"),
+            ("world.model_sections_visited", "911"),
+            ("hud.chat_lines", "17"),
+            ("hud.debug_lines", "29"),
+            ("hud.menu_overlays_drawn", "3"),
+        ] {
+            let column = header.iter().position(|column| *column == name).unwrap();
+            assert_eq!(row[column], expected, "wrong {name} in {csv}");
+        }
         let _ = std::fs::remove_file(path);
     }
 
