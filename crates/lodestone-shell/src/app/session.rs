@@ -8,6 +8,9 @@ impl WindowApp {
     pub(super) fn new(config: Config) -> Self {
         let sim = Sim::new(config.clone());
         let benchmark = config.benchmark.map(BenchmarkDriver::new);
+        let show_debug = config.benchmark.is_some_and(|benchmark| {
+            benchmark.debug_overlay == crate::config::BenchmarkDebugOverlay::Open
+        });
         // Matches the sky fog set at render bring-up, so the fog reconciliation's
         // first above-water frame is a no-op rather than a redundant upload.
         let applied_fog = Some(crate::sim::fog_for_render_distance(config.render_distance));
@@ -36,7 +39,7 @@ impl WindowApp {
             menu: None,
             favicons: crate::menu::render::FaviconCache::new(),
             cursor: (0.0, 0.0),
-            show_debug: false,
+            show_debug,
             debug_held: false,
             debug_chord_used: false,
             debug_hitboxes: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
