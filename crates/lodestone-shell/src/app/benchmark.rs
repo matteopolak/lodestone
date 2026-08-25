@@ -99,6 +99,15 @@ impl BenchmarkDriver {
             (BenchmarkWorkload::Showcase, BenchmarkSegment::Stationary) => "showcase.stationary",
             (BenchmarkWorkload::Showcase, BenchmarkSegment::Moving) => "showcase.moving",
             (BenchmarkWorkload::Showcase, BenchmarkSegment::Complete) => "showcase.complete",
+            (BenchmarkWorkload::Megaworld, BenchmarkSegment::WaitingForJoin) => {
+                "megaworld.waiting_for_join"
+            }
+            (BenchmarkWorkload::Megaworld, BenchmarkSegment::Warmup) => "megaworld.warmup",
+            (BenchmarkWorkload::Megaworld, BenchmarkSegment::Stationary) => {
+                "megaworld.stationary"
+            }
+            (BenchmarkWorkload::Megaworld, BenchmarkSegment::Moving) => "megaworld.moving",
+            (BenchmarkWorkload::Megaworld, BenchmarkSegment::Complete) => "megaworld.complete",
         }
     }
 
@@ -129,7 +138,10 @@ impl BenchmarkDriver {
 
         if elapsed < stationary_start {
             let mut intent = BenchmarkIntent::idle(BenchmarkSegment::Warmup);
-            if self.config.workload == BenchmarkWorkload::Terrain {
+            if matches!(
+                self.config.workload,
+                BenchmarkWorkload::Terrain | BenchmarkWorkload::Megaworld
+            ) {
                 // Two press edges, separated by releases, enable creative
                 // flight without relying on server commands or menu state.
                 let flight_edge = elapsed.as_millis();
@@ -146,7 +158,7 @@ impl BenchmarkDriver {
 
         let mut intent = BenchmarkIntent::idle(BenchmarkSegment::Moving);
         match self.config.workload {
-            BenchmarkWorkload::Terrain => {
+            BenchmarkWorkload::Terrain | BenchmarkWorkload::Megaworld => {
                 intent.forward = true;
                 intent.sprint = true;
             }
@@ -174,6 +186,7 @@ mod tests {
     fn fixture_config() -> BenchmarkConfig {
         BenchmarkConfig {
             workload: BenchmarkWorkload::Terrain,
+            debug_overlay: crate::config::BenchmarkDebugOverlay::Closed,
             warmup: Duration::from_secs(20),
             stationary: Duration::from_secs(30),
             moving: Duration::from_secs(60),
@@ -234,5 +247,17 @@ mod tests {
         assert!(!driver.update(t0 + Duration::from_millis(80), true).jump);
         assert!(driver.update(t0 + Duration::from_millis(160), true).jump);
         assert!(!driver.update(t0 + Duration::from_millis(240), true).jump);
+    }
+
+    #[test]
+    fn megaworld_uses_flight_and_stable_segment_labels() {
+        let t0 = Instant::now();
+        let mut cfg = fixture_config();
+        cfg.workload = BenchmarkWorkload::Megaworld;
+        let mut driver = BenchmarkDriver::new(cfg);
+        assert!(driver.update(t0, true).jump);
+        let moving = driver.update(t0 + Duration::from_secs(51), true);
+        assert!(moving.forward && moving.sprint);
+        assert_eq!(driver.label(moving.segment), "megaworld.moving");
     }
 }

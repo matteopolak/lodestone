@@ -1829,6 +1829,8 @@ pub enum BenchmarkWorkload {
     Terrain,
     /// A dense Java-authored scene of specialized render paths.
     Showcase,
+    /// A large late-season multiplayer save, with dense stationary and flight arms.
+    Megaworld,
 }
 
 impl BenchmarkWorkload {
@@ -1838,8 +1840,16 @@ impl BenchmarkWorkload {
         match self {
             Self::Terrain => "terrain",
             Self::Showcase => "showcase",
+            Self::Megaworld => "megaworld",
         }
     }
+}
+
+/// Whether a benchmark includes the F3 text overlay's measurable observer cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchmarkDebugOverlay {
+    Closed,
+    Open,
 }
 
 /// Durations and workload for one deterministic live frame benchmark session.
@@ -1847,6 +1857,8 @@ impl BenchmarkWorkload {
 pub struct BenchmarkConfig {
     /// Which Java-backed scene the runner prepared.
     pub workload: BenchmarkWorkload,
+    /// Explicit F3 state; result metadata must never infer this from timings.
+    pub debug_overlay: BenchmarkDebugOverlay,
     /// Joined-world settling time excluded from reported measurements.
     pub warmup: Duration,
     /// Fixed-view measurement duration.
@@ -1947,6 +1959,8 @@ impl Config {
         let mut it = args.into_iter();
         let mut benchmark_workload = None;
         let mut benchmark_option_seen = false;
+        let mut benchmark_debug_overlay_seen = false;
+        let mut benchmark_debug_overlay = BenchmarkDebugOverlay::Closed;
         let mut benchmark_warmup = BenchmarkConfig::DEFAULT_WARMUP;
         let mut benchmark_stationary = BenchmarkConfig::DEFAULT_STATIONARY;
         let mut benchmark_moving = BenchmarkConfig::DEFAULT_MOVING;
@@ -1994,14 +2008,17 @@ impl Config {
                 "--benchmark" => {
                     benchmark_option_seen = true;
                     let Some(value) = it.next() else {
-                        return CliOutcome::Error("--benchmark requires terrain or showcase".into());
+                        return CliOutcome::Error(
+                            "--benchmark requires terrain, showcase, or megaworld".into(),
+                        );
                     };
                     benchmark_workload = Some(match value.as_str() {
                         "terrain" => BenchmarkWorkload::Terrain,
                         "showcase" => BenchmarkWorkload::Showcase,
+                        "megaworld" => BenchmarkWorkload::Megaworld,
                         _ => {
                             return CliOutcome::Error(format!(
-                                "--benchmark requires terrain or showcase, got {value}"
+                                "--benchmark requires terrain, showcase, or megaworld, got {value}"
                             ));
                         }
                     });
@@ -2046,6 +2063,24 @@ impl Config {
                     };
                     benchmark_moving = Duration::from_secs(seconds);
                 }
+                "--benchmark-debug-overlay" => {
+                    benchmark_option_seen = true;
+                    benchmark_debug_overlay_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error(
+                            "--benchmark-debug-overlay requires open or closed".into(),
+                        );
+                    };
+                    benchmark_debug_overlay = match value.as_str() {
+                        "closed" => BenchmarkDebugOverlay::Closed,
+                        "open" => BenchmarkDebugOverlay::Open,
+                        _ => {
+                            return CliOutcome::Error(format!(
+                                "--benchmark-debug-overlay requires open or closed, got {value}"
+                            ));
+                        }
+                    };
+                }
                 other => {
                     return CliOutcome::Error(format!("unrecognised argument: {other}"));
                 }
@@ -2053,12 +2088,19 @@ impl Config {
         }
         if benchmark_option_seen {
             let Some(workload) = benchmark_workload else {
+                if benchmark_debug_overlay_seen {
+                    return CliOutcome::Error(
+                        "--benchmark-debug-overlay options require --benchmark".into(),
+                    );
+                }
                 return CliOutcome::Error(
-                    "benchmark duration options require --benchmark terrain or showcase".into(),
+                    "benchmark duration options require --benchmark terrain, showcase, or megaworld"
+                        .into(),
                 );
             };
             cfg.benchmark = Some(BenchmarkConfig {
                 workload,
+                debug_overlay: benchmark_debug_overlay,
                 warmup: benchmark_warmup,
                 stationary: benchmark_stationary,
                 moving: benchmark_moving,
@@ -2134,7 +2176,9 @@ RENDER / INPUT:
     --sensitivity <F>        Mouse-look sensitivity, 0..1 (default: 0.5)
 
 LIVE FRAME BENCHMARK:
-    --benchmark <WORKLOAD>   terrain or showcase; forces a windowed run
+    --benchmark <WORKLOAD>   terrain, showcase, or megaworld; forces a windowed run
+    --benchmark-debug-overlay <STATE>
+                             closed or open (default: closed)
     --benchmark-warmup <N>  Joined-world warm-up seconds (default: 20)
     --benchmark-stationary <N>
                              Fixed-view measurement seconds (default: 30)
@@ -2225,6 +2269,7 @@ mod tests {
             terrain.benchmark,
             Some(BenchmarkConfig {
                 workload: BenchmarkWorkload::Terrain,
+                debug_overlay: BenchmarkDebugOverlay::Closed,
                 warmup: Duration::from_secs(20),
                 stationary: Duration::from_secs(30),
                 moving: Duration::from_secs(60),
@@ -2236,11 +2281,55 @@ mod tests {
     fn benchmark_rejects_unknown_workloads_and_missing_durations() {
         assert!(matches!(
             Config::from_args(["--benchmark".into(), "castle".into()]),
-            CliOutcome::Error(message) if message.contains("terrain or showcase")
+            CliOutcome::Error(message) if message.contains("terrain, showcase, or megaworld")
         ));
         assert!(matches!(
             Config::from_args(["--benchmark-warmup".into()]),
             CliOutcome::Error(message) if message.contains("requires a value")
+        ));
+    }
+
+    #[test]
+    fn megaworld_and_explicit_debug_overlay_policy_parse() {
+        let open = parse(&[
+            "--benchmark",
+            "megaworld",
+            "--benchmark-debug-overlay",
+            "open",
+        ]);
+        let benchmark = open.benchmark.expect("benchmark config");
+        assert_eq!(benchmark.workload, BenchmarkWorkload::Megaworld);
+        assert_eq!(benchmark.debug_overlay, BenchmarkDebugOverlay::Open);
+
+        let closed = parse(&[
+            "--benchmark",
+            "megaworld",
+            "--benchmark-debug-overlay",
+            "closed",
+        ]);
+        assert_eq!(
+            closed.benchmark.expect("benchmark config").debug_overlay,
+            BenchmarkDebugOverlay::Closed
+        );
+    }
+
+    #[test]
+    fn debug_overlay_policy_requires_a_benchmark_and_a_known_value() {
+        assert!(matches!(
+            Config::from_args([
+                "--benchmark-debug-overlay".into(),
+                "open".into(),
+            ]),
+            CliOutcome::Error(message) if message.contains("require --benchmark")
+        ));
+        assert!(matches!(
+            Config::from_args([
+                "--benchmark".into(),
+                "megaworld".into(),
+                "--benchmark-debug-overlay".into(),
+                "sometimes".into(),
+            ]),
+            CliOutcome::Error(message) if message.contains("open or closed")
         ));
     }
 
