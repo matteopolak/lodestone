@@ -53,6 +53,58 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["over_33_3"], 1)
         self.assertEqual(summary["phases_ms"]["setup"], 2.0)
 
+    def test_workload_counts_are_not_mislabeled_as_milliseconds(self):
+        summary = MODULE.summarize_rows(
+            [
+                {
+                    "frame_interval_ms": "8.0",
+                    "segment": "megaworld.stationary",
+                    "world_encode_submit": "3.0",
+                    "world.model_sections_visited": "800",
+                    "hud.debug_lines": "29",
+                },
+                {
+                    "frame_interval_ms": "9.0",
+                    "segment": "megaworld.stationary",
+                    "world_encode_submit": "4.0",
+                    "world.model_sections_visited": "1000",
+                    "hud.debug_lines": "31",
+                },
+            ]
+        )
+
+        self.assertEqual(summary["phases_ms"]["world_encode_submit"], 3.5)
+        self.assertNotIn("world.model_sections_visited", summary["phases_ms"])
+        self.assertEqual(
+            summary["workload_counts"]["world.model_sections_visited"],
+            {"median": 900.0, "p95": 1000.0, "max": 1000.0},
+        )
+
+    def test_megaworld_uses_its_oracle_and_preserves_authored_spawn(self):
+        oracle = MODULE.ORACLES["megaworld"]
+        self.assertEqual(oracle["game_port"], 25590)
+        self.assertEqual(oracle["rcon_port"], 25591)
+        commands = MODULE.joined_player_commands("megaworld", "BenchUser")
+        self.assertIn("gamemode creative BenchUser", commands)
+        self.assertFalse(any(command.startswith("tp ") for command in commands))
+
+    def test_overlay_arms_default_to_both_only_for_megaworld(self):
+        self.assertEqual(MODULE.overlay_arms("megaworld", None), ["closed", "open"])
+        self.assertEqual(MODULE.overlay_arms("terrain", None), ["closed"])
+        self.assertEqual(MODULE.overlay_arms("megaworld", "open"), ["open"])
+        self.assertEqual(MODULE.overlay_arms("megaworld", "both"), ["closed", "open"])
+
+    def test_client_command_names_the_overlay_arm_explicitly(self):
+        command = MODULE._client_command(
+            pathlib.Path("/tmp/lodestone"),
+            "megaworld",
+            25590,
+            (2, 2, 3),
+            "open",
+        )
+        index = command.index("--benchmark-debug-overlay")
+        self.assertEqual(command[index + 1], "open")
+
     def test_nearest_rank_percentile_uses_the_observed_tail(self):
         self.assertEqual(MODULE.nearest_rank([1.0, 2.0, 8.0, 9.0], 0.95), 9.0)
         self.assertEqual(MODULE.nearest_rank([1.0, 2.0, 8.0, 9.0], 0.50), 2.0)

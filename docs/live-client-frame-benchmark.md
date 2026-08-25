@@ -54,7 +54,13 @@ The smoke run uses one showcase trial with 2 seconds warmup, 2 seconds stationar
 ```bash
 just bench-client-terrain
 just bench-client-showcase
+just bench-client-megaworld
 ```
+
+`bench-client-megaworld` runs matched `debug_overlay=closed` and `open` arms.
+Use `just bench-client-megaworld-smoke` for one 2/2/3-second setup gate per
+arm. Override the default pairing with `--debug-overlay closed` or
+`--debug-overlay open`; a Samply run requires one explicit arm.
 
 Record one non-comparable CPU sample after the ordinary trials identify the worse workload:
 
@@ -77,6 +83,8 @@ The runner prints, for each measured segment:
 - frame count and p50/p95/p99 frame interval using observed nearest-rank percentiles;
 - counts over the 16.67 ms and 33.3 ms budgets;
 - means for every CPU phase/subphase that actually ran;
+- median/p95/max per-frame counts for packed/model sections visited, HUD chat
+  lines, formatted debug lines, and menu overlays;
 - median/p95 of the once-per-second wgpu timestamp snapshots for `world`,
   `first_person`, `world_total`, and `hud_total`;
 - client RSS at the first sample, peak sample, and last sample;
@@ -90,7 +98,11 @@ The raw temporary CSV has this leading schema:
 frame,frame_interval_ms,segment,setup,sim_tick,mesh_upload,acquire,...
 ```
 
-It continues with the world encode and HUD subphase columns documented in `docs/frame-profiling.md`. A skipped phase is an empty cell, not `0.0000`.
+It continues with the world encode and HUD subphase columns documented in
+`docs/frame-profiling.md`, followed by five integer workload-count columns:
+`world.packed_sections_visited`, `world.model_sections_visited`,
+`hud.chat_lines`, `hud.debug_lines`, and `hud.menu_overlays_drawn`. A skipped
+phase or unavailable count is an empty cell, not `0.0000` or a fabricated zero.
 
 The CSV’s frame interval includes everything that delayed the next redraw, including CPU work, GPU/back-pressure visible at acquire or present, compositor scheduling, and OS noise. The phase columns are CPU wall-clock spans. Wgpu timestamp queries are asynchronous snapshots of the last completed frame and are summarized per run rather than correlated to CSV rows. `world` and `first_person` time real render passes. The two `*_total` dummy-pass spans are explicitly labelled diagnostic because their private attachment does not establish ordering against the real passes. Do not add pass durations, subtract CPU phase means from frame interval and label the remainder “GPU”, or treat a diagnostic span as a bound. Use an Xcode/Metal capture when attribution inside a pass matters.
 
@@ -125,15 +137,26 @@ Do not weaken completion, hardware-built-in fullscreen, physical-size parsing, w
 The client’s opt-in flags are:
 
 ```text
---benchmark terrain|showcase
+--benchmark terrain|showcase|megaworld
+--benchmark-debug-overlay closed|open
 --benchmark-warmup SECONDS
 --benchmark-stationary SECONDS
 --benchmark-moving SECONDS
 ```
 
-`--benchmark` forces a live windowed connection. Defaults are 20/30/60 seconds. The Python runner additionally accepts `--trials N` (default `3`), `--smoke`, `--samply`, and `--binary PATH`. `--smoke` forces one 2/2/3-second trial; `--samply` forces one sampled full trial.
+`--benchmark` forces a live fullscreen connection. Defaults are 20/30/60
+seconds; the Python megaworld arm uses a 45-second warmup before the same
+30/60-second measurements. The runner additionally accepts `--trials N`
+(default `3`), `--smoke`, `--samply`, `--debug-overlay closed|open|both`, and
+`--binary PATH`. `--smoke` forces one 2/2/3-second trial; `--samply` forces one
+sampled full trial.
 
-Canonical server endpoints are terrain `127.0.0.1:25580` with RCON `:25581`, and showcase `127.0.0.1:25570` with RCON `:25571`. Both use the local RCON password already defined by the oracle scripts. The client process receives a temporary `LODESTONE_DATA_DIR`, `LODESTONE_FRAME_PROFILE_DUMP`, and `RUST_LOG=frame_profile=info,frame_benchmark=info,warn`.
+Canonical server endpoints are terrain `127.0.0.1:25580` with RCON `:25581`,
+showcase `127.0.0.1:25570` with RCON `:25571`, and megaworld
+`127.0.0.1:25590` with RCON `:25591`. All use the local RCON password already
+defined by the oracle scripts. The client process receives a temporary
+`LODESTONE_DATA_DIR`, `LODESTONE_FRAME_PROFILE_DUMP`, and
+`RUST_LOG=frame_profile=info,frame_benchmark=info,warn`.
 
 ## Dependencies
 

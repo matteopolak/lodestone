@@ -33,6 +33,13 @@ RCON_PASSWORD = "lodestone"
 RENDER_DISTANCE = 24
 SERVER_VIEW_DISTANCE = RENDER_DISTANCE + 1
 METADATA_COLUMNS = {"frame", "frame_interval_ms", "segment"}
+COUNT_COLUMNS = {
+    "world.packed_sections_visited",
+    "world.model_sections_visited",
+    "hud.chat_lines",
+    "hud.debug_lines",
+    "hud.menu_overlays_drawn",
+}
 GPU_SAMPLE_RE = re.compile(
     r"gpu: world_total=(?P<world_total>\d+(?:\.\d+)?)ms, "
     r"world=(?P<world>\d+(?:\.\d+)?)ms, "
@@ -52,6 +59,12 @@ ORACLES = {
         "world": ROOT / ".cache" / "mc" / "creative",
         "game_port": 25570,
         "rcon_port": 25571,
+    },
+    "megaworld": {
+        "script": ROOT / "scripts" / "live-oracles" / "megaworld.sh",
+        "world": ROOT / ".cache" / "mc" / "megaworld",
+        "game_port": 25590,
+        "rcon_port": 25591,
     },
 }
 
@@ -86,7 +99,7 @@ def summarize_rows(rows: list[Mapping[str, str]]) -> dict:
             name
             for row in rows
             for name in row
-            if name not in METADATA_COLUMNS
+            if name not in METADATA_COLUMNS and name not in COUNT_COLUMNS
         }
     )
     phases = {}
@@ -94,6 +107,15 @@ def summarize_rows(rows: list[Mapping[str, str]]) -> dict:
         values = _numbers(rows, name)
         if values:
             phases[name] = statistics.fmean(values)
+    count_summary = {}
+    for name in sorted(COUNT_COLUMNS):
+        values = _numbers(rows, name)
+        if values:
+            count_summary[name] = {
+                "median": statistics.median(values),
+                "p95": nearest_rank(values, 0.95),
+                "max": max(values),
+            }
     return {
         "frames": len(rows),
         "p50_ms": nearest_rank(intervals, 0.50),
@@ -103,6 +125,7 @@ def summarize_rows(rows: list[Mapping[str, str]]) -> dict:
         "over_16_67": sum(ms > 16.67 for ms in intervals),
         "over_33_3": sum(ms > 33.3 for ms in intervals),
         "phases_ms": phases,
+        "workload_counts": count_summary,
     }
 
 
@@ -306,15 +329,20 @@ def prepare_showcase(rcon_port: int) -> None:
     print("showcase scene accepted by Java", flush=True)
 
 
-def configure_joined_player(workload: str, rcon_port: int, username: str) -> None:
+def joined_player_commands(workload: str, username: str) -> list[str]:
     commands = [
         f"gamemode creative {username}",
         f"effect clear {username}",
     ]
     if workload == "terrain":
         commands.append(f"tp {username} 0 140 0 0 10")
-    else:
+    elif workload == "showcase":
         commands.append(f"tp {username} 0 65 0 0 0")
+    return commands
+
+
+def configure_joined_player(workload: str, rcon_port: int, username: str) -> None:
+    commands = joined_player_commands(workload, username)
     with RconClient(rcon_port) as rcon:
         for command in commands:
             reply = rcon.command(command)
@@ -344,6 +372,7 @@ def _client_command(
     workload: str,
     game_port: int,
     durations: tuple[int, int, int],
+    debug_overlay: str,
 ) -> list[str]:
     warmup, stationary, moving = durations
     return [
@@ -356,6 +385,8 @@ def _client_command(
         str(stationary),
         "--benchmark-moving",
         str(moving),
+        "--benchmark-debug-overlay",
+        debug_overlay,
         "--host",
         "127.0.0.1",
         "--port",
@@ -378,6 +409,7 @@ def run_trial(
     binary: pathlib.Path,
     oracle: dict,
     durations: tuple[int, int, int],
+    debug_overlay: str,
     samply_artifact: pathlib.Path | None = None,
 ) -> dict:
     with tempfile.TemporaryDirectory(prefix=f"lodestone-{workload}-bench-") as temp_name:
@@ -392,7 +424,7 @@ def run_trial(
         )
 
         client = _client_command(
-            binary, workload, oracle["game_port"], durations
+            binary, workload, oracle["game_port"], durations, debug_overlay
         )
         if samply_artifact is not None:
             command = [
@@ -421,7 +453,8 @@ def run_trial(
         joined_configured = False
         timed_out = False
         print(
-            f"trial {trial}: {workload}, user={username}, durations={durations}",
+            f"trial {trial}: {workload}, debug_overlay={debug_overlay}, "
+            f"user={username}, durations={durations}",
             flush=True,
         )
         with log_path.open("w", encoding="utf-8") as log_handle:
@@ -482,6 +515,7 @@ def run_trial(
         return {
             "trial": trial,
             "username": username,
+            "debug_overlay": debug_overlay,
             "segments": segments,
             "rss_bytes": rss,
             "framebuffer": framebuffer,
@@ -503,7 +537,8 @@ def _git_sha() -> str:
 def _print_trial(workload: str, result: dict) -> None:
     rss = result["rss_bytes"]
     print(
-        f"trial {result['trial']} RSS MiB start/peak/end: "
+        f"trial {result['trial']} debug_overlay={result['debug_overlay']} "
+        f"RSS MiB start/peak/end: "
         f"{rss['start']/1048576:.1f}/{rss['peak']/1048576:.1f}/{rss['end']/1048576:.1f}"
     )
     for suffix, summary in result["segments"].items():
@@ -520,6 +555,13 @@ def _print_trial(workload: str, result: dict) -> None:
             for name, value in sorted(summary["phases_ms"].items())
         )
         print(f"    phase means ms: {phase_line}")
+        if summary["workload_counts"]:
+            count_line = " ".join(
+                f"{name}=median/p95/max "
+                f"{values['median']:.0f}/{values['p95']:.0f}/{values['max']:.0f}"
+                for name, values in sorted(summary["workload_counts"].items())
+            )
+            print(f"    workload counts: {count_line}")
     gpu = result["gpu_timestamp_ms"]
     if gpu["samples"]:
         print(f"  GPU timestamp snapshots: n={gpu['samples']}")
@@ -545,6 +587,7 @@ def _append_records(
         "arch": platform.machine(),
         "profile": "release",
         "scene": workload,
+        "debug_overlay": result["debug_overlay"],
         "trial": result["trial"],
         "binary": str(binary),
         "render_distance": RENDER_DISTANCE,
@@ -563,10 +606,10 @@ def _append_records(
             handle.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
 
 
-def _print_spread(workload: str, results: list[dict]) -> None:
+def _print_spread(workload: str, debug_overlay: str, results: list[dict]) -> None:
     if len(results) < 2:
         return
-    print("trial spread (p50 frame interval):")
+    print(f"trial spread (p50 frame interval, debug_overlay={debug_overlay}):")
     for suffix in ("stationary", "moving"):
         values = [result["segments"][suffix]["p50_ms"] for result in results]
         print(
@@ -581,6 +624,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--samply", action="store_true")
+    parser.add_argument("--debug-overlay", choices=("closed", "open", "both"))
     parser.add_argument(
         "--binary", type=pathlib.Path, default=ROOT / "target" / "release" / "lodestone"
     )
@@ -588,6 +632,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.trials < 1:
         parser.error("--trials must be at least 1")
     return args
+
+
+def overlay_arms(workload: str, requested: str | None) -> list[str]:
+    policy = requested or ("both" if workload == "megaworld" else "closed")
+    return ["closed", "open"] if policy == "both" else [policy]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -598,8 +647,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.samply and shutil.which("samply") is None:
         raise SystemExit("--samply requested but samply is not on PATH")
 
-    durations = (2, 2, 3) if args.smoke else (20, 30, 60)
+    durations = (2, 2, 3) if args.smoke else (
+        (45, 30, 60) if args.workload == "megaworld" else (20, 30, 60)
+    )
     trial_count = 1 if args.smoke or args.samply else args.trials
+    arms = overlay_arms(args.workload, args.debug_overlay)
+    if args.samply and len(arms) != 1:
+        raise SystemExit(
+            "--samply with megaworld requires --debug-overlay closed or open"
+        )
     oracle = start_oracle(args.workload)
     if args.workload == "showcase":
         prepare_showcase(oracle["rcon_port"])
@@ -609,23 +665,25 @@ def main(argv: list[str] | None = None) -> int:
         profiles = ROOT / "bench-results" / "profiles"
         profiles.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        profile_artifact = profiles / f"{args.workload}-{stamp}.json.gz"
+        profile_artifact = profiles / f"{args.workload}-{arms[0]}-{stamp}.json.gz"
 
-    results = []
-    for trial in range(1, trial_count + 1):
-        result = run_trial(
-            args.workload,
-            trial,
-            binary,
-            oracle,
-            durations,
-            samply_artifact=profile_artifact,
-        )
-        _print_trial(args.workload, result)
-        if not args.samply:
-            _append_records(args.workload, result, durations, binary)
-            results.append(result)
-    _print_spread(args.workload, results)
+    for debug_overlay in arms:
+        results = []
+        for trial in range(1, trial_count + 1):
+            result = run_trial(
+                args.workload,
+                trial,
+                binary,
+                oracle,
+                durations,
+                debug_overlay,
+                samply_artifact=profile_artifact,
+            )
+            _print_trial(args.workload, result)
+            if not args.samply:
+                _append_records(args.workload, result, durations, binary)
+                results.append(result)
+        _print_spread(args.workload, debug_overlay, results)
     if profile_artifact is not None:
         print(f"samply profile: {profile_artifact}")
     else:
