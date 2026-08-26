@@ -37,6 +37,7 @@ use wgpu::util::DeviceExt;
 
 use crate::block::DEPTH_FORMAT;
 use crate::crack::{CrackMesh, CrackVertex};
+use crate::model_pipeline::CAMERA_DEPTH_BIAS;
 use crate::texture::GpuAtlas;
 
 /// GPU-resident crack geometry: a vertex buffer, an index buffer and the index
@@ -219,11 +220,7 @@ impl CrackPipeline {
                 // depth is standard `[0,1]` (LessEqual, lower = nearer, see
                 // `camera.rs` and `DESIGN.md` §7), so "toward the camera" is the
                 // sign-flipped bias: constant=-10, slope=-1.0.
-                bias: wgpu::DepthBiasState {
-                    constant: -10,
-                    slope_scale: -1.0,
-                    clamp: 0.0,
-                },
+                bias: CAMERA_DEPTH_BIAS,
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,

@@ -170,8 +170,11 @@ frame drew long before its rotation did.
 
 ## What is deliberately not ported
 
-* **`submitWithZOffset`'s polygon offset**, and its `outlineColor` argument. The frame sits 1/32
-  of a block off the wall behind it, which is enough separation for a `[0, 1]` depth buffer.
+* **`submitWithZOffset`'s `outlineColor` argument.** Its depth offset is now carried by the
+  shared `ModelPipeline::for_surface` polygon-bias state: both the frame body and its map picture
+  use the same negative `(slope = -1, constant = -10)` offset toward the camera. This is a
+  depth-buffer-unit separation, so it remains effective at grazing angles without changing the
+  derived `FRAMED_MAP_LIFT` geometry.
 * **The `map=true` variant is selected from the held item's id**, not from a resolved `MapId`.
   Vanilla asks `entity.getFramedMapId(itemStack)` and falls back to the plain frame when the map
   data has not loaded; this client has no map-id decode (see `docs/filled-map-rendering.md`), so

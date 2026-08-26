@@ -50,7 +50,8 @@ the broadcast, so `publish_effect` (no exclusion) is right and
 | the `minecraft:consumable` component (duration, eat/drink, particle flag, sound) | `lodestone_game::consumable` |
 | the effect cadence | `lodestone_game::consumable::should_emit_consume_effects` |
 | local use clock, counting **up** | `lodestone_ecs::player::ItemUseTicks`, ticked by `tick_item_use` |
-| the four-way join that decides "a consume is happening" | `lodestone_shell::consume::ConsumeState::resolve` |
+| the press-edge use gate | `lodestone_shell::sim::actions::item_can_start_use` — includes `Player.canEat`'s full-hunger refusal |
+| the five-way join that decides "a consume is happening" | `lodestone_shell::consume::ConsumeState::resolve` |
 | the crumbs | `lodestone_shell::consume::emit_consume_particles` → `lodestone_particle::emit::spawn_item_particles` → `item_particle` |
 | item sprite for a crumb | `SpriteSource::Item(id)` → `Particles::sprite_rect` → `BlockModels::item_particle_uv` |
 | first-person pose | `Sim::consume_usage_time` → `RenderState::set_item_use_source` → `first_person_item_mesh_with_use` → `lodestone_render::entity::first_person_eat_matrix` |
@@ -80,10 +81,11 @@ seam between two individually-correct halves has nothing for a test to point at.
 it is one symbol both sides call.
 
 The **duration bound is not a tidiness check**: `use_item_live` arms `ItemUseTicks`
-on the press edge for *any* item — including a non-consumable, and including a
-consume the server refused (a full player's right-click on steak is vanilla's `FAIL`
-and starts nothing). Without the bound, holding the button after the bite lands
-animates and throws crumbs forever.
+on the press edge for *any* item that can enter vanilla's use state. A food that
+the server refuses at a full hunger bar is filtered at that same edge by
+`item_can_start_use`, so it never arms `UsingItem` or the movement slowdown;
+`ConsumeState::resolve` repeats the hunger check for the animation and particles.
+The duration bound then stops an accepted consume at the item's own end tick.
 
 ### The cadence, and why the count is the discriminating quantity
 

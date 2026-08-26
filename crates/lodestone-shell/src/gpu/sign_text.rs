@@ -147,8 +147,8 @@ use glam::Vec3;
 use lodestone_assets::font::RasterFont;
 use lodestone_model::text::{TextColor, TextSpan, TextStyle};
 use lodestone_render::{
-    DEPTH_FORMAT, SignKind, SignOrientation, SignSpawn, sign_outline_color, sign_side_color,
-    sign_text_transform,
+    CAMERA_DEPTH_BIAS, DEPTH_FORMAT, SignKind, SignOrientation, SignSpawn, sign_outline_color,
+    sign_side_color, sign_text_transform,
 };
 use lodestone_world::{SignSide, SignTextSpan};
 
@@ -344,11 +344,7 @@ fn build_pipeline(
             depth_write_enabled: Some(true),
             depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState {
-                constant: -10,
-                slope_scale: -1.0,
-                clamp: 0.0,
-            },
+            bias: CAMERA_DEPTH_BIAS,
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,

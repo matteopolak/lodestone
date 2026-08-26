@@ -83,6 +83,7 @@ use wgpu::util::DeviceExt;
 
 use crate::block::{CameraUniform, DEPTH_FORMAT};
 use crate::entity::EntityMesh;
+use crate::model_pipeline::CAMERA_DEPTH_BIAS;
 use crate::models::ModelVertex;
 
 /// A per-instance entity record for the instance vertex buffer: a column-major
@@ -1239,11 +1240,7 @@ pub fn upload_flame_instances(
 /// reason vanilla's own `ENTITY_SHADOW` carries no bias at all, and why a
 /// world-space lift cannot substitute for a ULP-denominated one are all in
 /// [`EntityPipeline::shadow_pipeline`]'s doc.
-pub const SHADOW_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
-    constant: -10,
-    slope_scale: -1.0,
-    clamp: 0.0,
-};
+pub const SHADOW_DEPTH_BIAS: wgpu::DepthBiasState = CAMERA_DEPTH_BIAS;
 
 /// One vertex of the entity ground-shadow decal — world-space position, the
 /// shadow-sprite UV, and this piece's own alpha (vanilla's per-piece
@@ -1412,7 +1409,15 @@ fn build_entity_pipeline(
             depth_write_enabled: Some(depth_write),
             depth_compare: Some(depth_compare),
             stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
+            // A living model's feet can share the terrain's top face exactly.
+            // Bias the entire opaque entity family in depth-buffer units so a
+            // chicken's toes (and every other contact plane) resolve stably
+            // without a per-species world-space lift.
+            bias: if depth_write {
+                CAMERA_DEPTH_BIAS
+            } else {
+                wgpu::DepthBiasState::default()
+            },
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,

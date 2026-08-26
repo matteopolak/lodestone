@@ -6112,6 +6112,32 @@ fn right_clicking_with_a_food_item_does_slow_movement() {
     );
 }
 
+/// A food use refused by the authoritative hunger gate must not arm the local
+/// use state. `ConsumeState::resolve` already rejects the animation/particles,
+/// but the press edge has its own movement-effect writer and used to arm it for
+/// every consumable before the server could refuse a full-bar bread use.
+#[test]
+fn right_clicking_food_at_a_full_hunger_bar_does_not_slow_movement() {
+    let mut sim = Sim::new(test_config());
+    let local = sim.local;
+    sim.write(|world| {
+        world
+            .get_mut::<Vitals>(local)
+            .expect("the local player has vitals")
+            .food = Some(lodestone_game::food::MAX_FOOD);
+    });
+    give_main_hand_item(&mut sim, "minecraft:bread");
+
+    sim.use_item_live();
+
+    assert!(!sim.read(|world| world.resource::<UsingItem>().0));
+    assert_eq!(
+        sim.read(|world| world.get::<ItemUseEffects>(local).and_then(|e| e.0)),
+        None,
+        "a full-bar bread use is refused and must not arm movement slowdown"
+    );
+}
+
 /// Vanilla's `getCurrentItemAttackStrengthDelay`/`getAttackStrengthScale`
 /// (`Player.java`): with no [`Attributes`] component at all (the
 /// pre-login default `attribute_value` falls back to — see

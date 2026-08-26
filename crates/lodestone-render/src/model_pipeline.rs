@@ -116,6 +116,22 @@ const ALPHA_CUTOUT_CUTOUT: f32 = 0.5;
 /// deletes outright.
 const ALPHA_CUTOUT_TRANSLUCENT: f32 = 0.1;
 
+/// Polygon offset that moves a coincident world-space primitive toward the
+/// camera in this renderer's ordinary `[0, 1]` depth convention.
+///
+/// Vanilla's depth convention is reversed, so its `(+1.0, +10)` polygon
+/// offset becomes this sign-flipped `(slope, constant)` pair.  Keep the
+/// magnitude in depth-buffer units rather than replacing it with a
+/// world-space epsilon: the latter stops working at grazing angles and changes
+/// meaning with camera distance.  Opaque overlays and geometry that shares a
+/// physical contact plane (text, item-frame bodies, entity feet, selection
+/// lines) use this same policy; translucent terrain deliberately does not.
+pub const CAMERA_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: -10,
+    slope_scale: -1.0,
+    clamp: 0.0,
+};
+
 impl ModelPipeline {
     /// Build the opaque (`Solid`) model pipeline targeting `color_format`.
     #[must_use]
@@ -145,6 +161,24 @@ impl ModelPipeline {
             true,
             true,
             Some(if translucent { ALPHA_CUTOUT_TRANSLUCENT } else { ALPHA_CUTOUT_CUTOUT }),
+            wgpu::DepthBiasState::default(),
+        )
+    }
+
+    /// Build the opaque/cutout pipeline for geometry that intentionally shares
+    /// a surface with previously submitted world geometry, such as an item
+    /// frame's block-model body and its map picture.
+    #[must_use]
+    pub fn for_surface(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+        Self::build(
+            device,
+            color_format,
+            MODEL_WGSL,
+            false,
+            true,
+            true,
+            Some(ALPHA_CUTOUT_CUTOUT),
+            CAMERA_DEPTH_BIAS,
         )
     }
 
@@ -164,7 +198,16 @@ impl ModelPipeline {
         // `None`: `fluid.wgsl` declares no `alpha_cutout` override (water is a
         // smooth alpha, not a mask, and it runs no discard at all), and wgpu
         // rejects a constant the module does not declare.
-        Self::build(device, color_format, FLUID_WGSL, true, false, false, None)
+        Self::build(
+            device,
+            color_format,
+            FLUID_WGSL,
+            true,
+            false,
+            false,
+            None,
+            wgpu::DepthBiasState::default(),
+        )
     }
 
     /// `cull_back_face` diverges from `translucent` on purpose — they used to
@@ -208,6 +251,7 @@ impl ModelPipeline {
         with_palette: bool,
         cull_back_face: bool,
         alpha_cutout: Option<f32>,
+        depth_bias: wgpu::DepthBiasState,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lodestone-model-shader"),
@@ -407,7 +451,7 @@ impl ModelPipeline {
                     wgpu::CompareFunction::LessEqual
                 }),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                bias: depth_bias,
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -1154,5 +1198,12 @@ mod tests {
         // 0.1F. Transcribed from the 26.2 source, not from each other.
         assert_eq!(ALPHA_CUTOUT_CUTOUT, 0.5);
         assert_eq!(ALPHA_CUTOUT_TRANSLUCENT, 0.1);
+    }
+
+    #[test]
+    fn camera_depth_bias_pulls_coplanar_world_geometry_toward_the_eye() {
+        assert_eq!(CAMERA_DEPTH_BIAS.constant, -10);
+        assert_eq!(CAMERA_DEPTH_BIAS.slope_scale, -1.0);
+        assert_eq!(CAMERA_DEPTH_BIAS.clamp, 0.0);
     }
 }

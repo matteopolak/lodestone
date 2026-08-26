@@ -253,7 +253,7 @@ pub use map_item::{
 };
 pub use model_arena::{ArenaMesh, ModelMeshArena};
 pub use model_pipeline::{
-    GpuModelMesh, ModelCameraUniform, ModelPipeline, ModelSharedCameraUniform,
+    CAMERA_DEPTH_BIAS, GpuModelMesh, ModelCameraUniform, ModelPipeline, ModelSharedCameraUniform,
     SECTION_FADE_ALREADY_VISIBLE, SECTION_FADE_DURATION_SECS, SectionOriginUniform,
     model_anim_buffer, model_camera_buffer, model_camera_buffer_with_fog, model_palette_buffer,
     model_shared_camera_buffer, model_shared_camera_buffer_with_fog, section_origin_buffer,

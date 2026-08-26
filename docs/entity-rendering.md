@@ -1231,6 +1231,16 @@ at 10.3 and `78 → 88` at 13.0, and is unchanged at 5.4 — pixels that were
 losing the depth comparison to the coplanar ground, in a fraction that grows
 with distance exactly as the table predicts.
 
+The same depth-buffer policy now applies to **depth-writing entity geometry**. A
+living model is positioned with its feet on the entity's reported `y`, and a chicken
+toe can therefore be exactly coplanar with the terrain top face. Moving the chicken
+model up by an epsilon would be a species-specific approximation and would fail at
+different camera distances. `build_entity_pipeline` instead gives every
+depth-writing entity variant the shared `CAMERA_DEPTH_BIAS`; depth-read-only passes
+remain unbiased, and translucent terrain remains on its separate no-depth-write
+pipeline. The bias is only a few ULPs, so it stabilizes physical contact without
+making an entity behind a real intervening surface visible.
+
 Note what was *not* observed, because it changes what a future reader should
 expect: across twelve headless configurations (distance, world-coordinate
 magnitude, far plane, grazing angle, sub-block feet offsets) the unbiased

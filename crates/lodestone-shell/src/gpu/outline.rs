@@ -1,6 +1,6 @@
 //! The mining-crack target descriptor and the block-outline wireframe pass.
 use lodestone_model::math::BlockPos;
-use lodestone_render::DEPTH_FORMAT;
+use lodestone_render::{CAMERA_DEPTH_BIAS, DEPTH_FORMAT};
 
 /// The block currently being mined, for the progressive crack overlay: its world
 /// position, vanilla state id (to resolve the block's real model geometry) and
@@ -237,7 +237,9 @@ const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 /// `PAD` in world space (see [`OutlineRenderer::prepare`]) because the outline
 /// and the terrain mesh do not share a vertex-generation path here and are not
 /// guaranteed bit-identical. `PAD` is small enough not to visibly separate the
-/// line from the surface and was not implicated in the dimness report.
+/// line from the surface. The shared camera-facing depth bias additionally
+/// resolves the remaining depth-buffer tie at oblique angles, where a fixed
+/// world-space pad alone is not stable.
 #[derive(Debug)]
 pub(super) struct OutlineRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -346,7 +348,7 @@ impl OutlineRenderer {
                 depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                bias: CAMERA_DEPTH_BIAS,
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,

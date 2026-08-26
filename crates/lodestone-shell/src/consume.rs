@@ -54,9 +54,10 @@
 //! and then bounds the result by the item's own `consume_ticks`, which is what
 //! makes the animation stop on its own once a use the gates above *did* allow
 //! finishes. That bound is load-bearing on its own axis: `Sim::use_item_live`
-//! arms `ItemUseTicks` on the **press edge for any item**, including a
-//! non-consumable. Without the bound, holding the button after a finished bite
-//! would animate and throw crumbs forever.
+//! arms `ItemUseTicks` on the **press edge for any item that can enter vanilla's
+//! use state**, including a non-consumable use that has no consume animation.
+//! Without the bound, holding the button after a finished bite would animate
+//! and throw crumbs forever.
 //!
 //! # How to change it, and the gotchas
 //!
@@ -257,7 +258,7 @@ mod tests {
         ConsumeState::resolve(using, ticks_used, item, None, false)
     }
 
-    /// The four-way join, arm by arm. Each row is a single missing conjunct, so a
+    /// The five-way join, arm by arm. Each row is a single missing conjunct, so a
     /// resolver that dropped one would pass the others and fail exactly here.
     #[test]
     fn a_consume_needs_all_four_conjuncts() {

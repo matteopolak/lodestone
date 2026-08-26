@@ -89,6 +89,22 @@ fn item_has_use_animation(id: &str) -> bool {
         || path.ends_with("_bundle")
 }
 
+/// Whether vanilla's `Item.use` can actually enter an item-use state for the
+/// held item and current player state. Food is the one use-animation family
+/// whose `use()` can return `FAIL`: `Player.canEat` refuses ordinary food when
+/// the hunger bar is full. Keep this gate beside `item_has_use_animation`, but
+/// feed it the same server-reported vitals used by the consume animation so
+/// the press edge cannot arm movement slowdown for a use the server will reject.
+#[must_use]
+fn item_can_start_use(id: &str, food_level: Option<i32>, invulnerable: bool) -> bool {
+    item_has_use_animation(id)
+        && lodestone_game::food::always_eat_for_food(id).is_none_or(|always_eat| {
+            food_level.is_none_or(|level| {
+                lodestone_game::food::can_eat(always_eat, level, invulnerable)
+            })
+        })
+}
+
 /// Strip an item id's namespace, so the two swing tables below can be written
 /// against bare paths the way [`item_has_use_animation`] already is.
 fn item_path(id: &str) -> &str {
@@ -1128,7 +1144,18 @@ impl Sim {
             .player_native(self.selected_slot())
             .filter(|stack| !stack.is_empty())
             .map(|stack| stack.item().to_string());
-        let uses_item = held.as_deref().is_some_and(item_has_use_animation);
+        let local = self.local;
+        let (food_level, invulnerable) = self.read(|w| {
+            let food_level = w.get::<Vitals>(local).and_then(|v| v.food);
+            let invulnerable = w
+                .get::<ServerGameMode>(local)
+                .and_then(|mode| mode.0)
+                .is_some_and(|mode| !crate::hud::can_hurt_player(Some(mode)));
+            (food_level, invulnerable)
+        });
+        let uses_item = held
+            .as_deref()
+            .is_some_and(|id| item_can_start_use(id, food_level, invulnerable));
         if uses_item {
             // Marks [`UsingItem`] so a later [`Self::end_use`] knows the
             // button was actually pressed — see that resource's own docs for
@@ -1155,7 +1182,6 @@ impl Sim {
             let use_effects = held
                 .as_deref()
                 .map_or(UseEffects::DEFAULT, UseEffects::for_item);
-            let local = self.local;
             self.write(|w| {
                 if let Some(mut effects) = w.get_mut::<ItemUseEffects>(local) {
                     effects.0 = Some(use_effects);
