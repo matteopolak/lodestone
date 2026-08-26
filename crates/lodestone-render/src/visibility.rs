@@ -222,9 +222,10 @@ pub fn compute_visibility_from(
 #[derive(Debug, Clone, Default)]
 pub struct VisibilityGraph {
     sections: HashMap<SectionCoord, SectionVisibility>,
-    /// Bumped on every insert and every real removal, so a consumer caching a
-    /// walk can tell "the camera has not moved and neither has the world" from
-    /// "the world changed under me". See [`generation`](Self::generation).
+    /// Bumped on every semantic visibility change and every real removal, so a
+    /// consumer caching a walk can tell "the camera has not moved and neither
+    /// has the world" from "the world changed under me". See
+    /// [`generation`](Self::generation).
     generation: u64,
     /// Inclusive section-grid row range covering every coord ever inserted.
     /// **Monotonically widened, never narrowed** — see [`y_extent`](Self::y_extent).
@@ -240,6 +241,9 @@ impl VisibilityGraph {
 
     /// Insert or replace a section's visibility.
     pub fn insert(&mut self, coord: SectionCoord, vis: SectionVisibility) {
+        if self.sections.get(&coord) == Some(&vis) {
+            return;
+        }
         self.sections.insert(coord, vis);
         self.generation = self.generation.wrapping_add(1);
         self.y_extent = Some(match self.y_extent {
@@ -759,6 +763,19 @@ mod tests {
         assert_eq!(g.generation(), g2);
         // Monotonic by design: still (-4, 19) after the removal.
         assert_eq!(g.y_extent(), Some((-4, 19)));
+    }
+
+    #[test]
+    fn identical_replacement_preserves_generation() {
+        let mut g = VisibilityGraph::new();
+        let coord = (3, 12, -4);
+        let visibility = SectionVisibility::all();
+        g.insert(coord, visibility);
+        let generation = g.generation();
+
+        g.insert(coord, visibility);
+
+        assert_eq!(g.generation(), generation);
     }
 
     #[test]
