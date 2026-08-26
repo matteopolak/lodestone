@@ -56,6 +56,14 @@ Glyph coverage is emitted as **quads on the HUD's existing colour stream**
 most 8 quads instead of 64, pixel-identically, since every texel in a run shares one
 colour.
 
+The first draw of a font/codepoint pair scans its raster into
+`CachedGlyphInk`: tint-independent horizontal runs containing source RGBA and
+logical bounds. Later draws reuse those runs, apply the current tint and pose,
+and may merge adjacent runs when tint collapses different source colours to the
+same output. The cache is per `VanillaFont`; custom-font run entries are also
+cleared with the custom-font generation cache, so a freed raster allocation
+cannot be mistaken for a later pack's font if its address is reused.
+
 No font atlas, no texture upload, no fifth bind group. This matters: the model
 shader is already at wgpu's 4-bind-group floor (see `CLAUDE.md`), and text is the
 one HUD element whose colour is per-draw rather than per-texel. A textured path
@@ -151,6 +159,16 @@ site in the renderer, and it passes `self.font`. `render()` delegates to it, so
 **every** HUD render path — `app.rs::WindowApp::redraw`, `gpu.rs`, `scoreboard.rs`, `tablist.rs` —
 gets vanilla text with no call-site change.
 
+F3 is a retained exception to the ordinary per-frame colour stream. Its text
+expands into a dedicated vertex buffer when opened, when framebuffer/GUI scale
+or the renderer's font revision changes, and otherwise at most once per 100 ms. Every frame
+still gathers current debug data and draws the resident buffer; only CPU glyph
+expansion and `Queue::write_buffer` are rate-limited. This preserves the live
+overlay while avoiding about two milliseconds of repeated CPU geometry work on
+the measured internal-display workload. See
+[`client-frame-performance-2026-08-25.md`](./client-frame-performance-2026-08-25.md)
+for the profile and three-trial comparison.
+
 Crucially, **measurement and drawing read the same field**. `Builder::text_width` /
 `Builder::legacy_width` pick the proportional or the fixed measure to match whatever
 `Builder::text` will actually draw with, so a centred or right-aligned string can
@@ -163,6 +181,17 @@ site was converted from the free `text_w` to `b.text_width`.
   jar, and `hud/item_icon.rs`'s pixel gates assert against the fixed-width fallback.
   `HudGeometry::build` stays jar-free and byte-deterministic on purpose; use
   `build_with_font` when you want vanilla text from pure geometry.
+- **Keep cached ink independent of caller state.** `CachedGlyphInk` may contain
+  raster-derived source colour, metrics, and row runs. It must not contain tint,
+  screen coordinates, GUI scale, italic pose, or shadow state. Those belong to
+  each draw. Add a cache-key field if a future raster provider can return
+  different pixels for the same font/codepoint pair.
+- **Keep F3 invalidation explicit.** A new input that changes debug geometry
+  independently of the 100 ms live-value refresh belongs in
+  `DebugGeometryStamp`. Visibility, framebuffer size, GUI scale, and the
+  renderer-owned font revision are immediate today. Preserve the dedicated debug buffer's position
+  before the ordinary colour buffer in the colour pass, because later HUD
+  elements historically overlaid F3 in the single stream.
 - **Bold, italic, underline, strikethrough and obfuscated draw real geometry**,
   in `VanillaFont::resolve_legacy`/`glyph_styled`/`draw_ink` — see
   [Styling](#styling) below. This used to be the module's one documented gap: the
