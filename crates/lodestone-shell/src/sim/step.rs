@@ -127,6 +127,11 @@ impl Sim {
         self.terrain_mut(TerrainMesh::drain_meshes)
     }
 
+    /// Consume relighting work completed during the current simulated frame.
+    pub(crate) fn take_relight_workload(&mut self) -> crate::mesher::RelightWorkload {
+        self.terrain_mut(TerrainMesh::take_relight_workload)
+    }
+
     /// Block until every scheduled mesh is ready (used by headless runs/tests).
     pub fn drain_all_meshes(&mut self) -> Vec<Meshed> {
         self.terrain_mut(TerrainMesh::drain_all_meshes)

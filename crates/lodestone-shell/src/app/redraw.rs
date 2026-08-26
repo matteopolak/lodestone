@@ -136,6 +136,8 @@ impl WindowApp {
         }
         self.frame_profile.mark(FramePhase::Setup, Instant::now());
         self.sim.step(dt);
+        self.frame_profile
+            .record_relight_workload(self.sim.take_relight_workload());
         self.frame_profile.mark(FramePhase::SimTick, Instant::now());
         if !step.render {
             // Unfocused (throttled to ~30 fps) or occluded: skip presenting

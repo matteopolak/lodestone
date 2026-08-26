@@ -62,6 +62,7 @@ class SummaryTests(unittest.TestCase):
                     "world_encode_submit": "3.0",
                     "world.model_sections_visited": "800",
                     "hud.debug_lines": "29",
+                    "light.relight_cells_visited": "2048",
                 },
                 {
                     "frame_interval_ms": "9.0",
@@ -69,15 +70,21 @@ class SummaryTests(unittest.TestCase):
                     "world_encode_submit": "4.0",
                     "world.model_sections_visited": "1000",
                     "hud.debug_lines": "31",
+                    "light.relight_cells_visited": "4096",
                 },
             ]
         )
 
         self.assertEqual(summary["phases_ms"]["world_encode_submit"], 3.5)
         self.assertNotIn("world.model_sections_visited", summary["phases_ms"])
+        self.assertNotIn("light.relight_cells_visited", summary["phases_ms"])
         self.assertEqual(
             summary["workload_counts"]["world.model_sections_visited"],
             {"median": 900.0, "p95": 1000.0, "max": 1000.0},
+        )
+        self.assertEqual(
+            summary["workload_counts"]["light.relight_cells_visited"],
+            {"median": 3072.0, "p95": 4096.0, "max": 4096.0},
         )
 
     def test_megaworld_uses_its_oracle_and_preserves_authored_spawn(self):

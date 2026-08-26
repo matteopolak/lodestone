@@ -127,10 +127,18 @@ frame,frame_interval_ms,segment,setup,sim_tick,mesh_upload,acquire,...
 ```
 
 It continues with the world encode and HUD subphase columns documented in
-`docs/frame-profiling.md`, followed by five integer workload-count columns:
+`docs/frame-profiling.md`, followed by five integer render-workload columns:
 `world.packed_sections_visited`, `world.model_sections_visited`,
-`hud.chat_lines`, `hud.debug_lines`, and `hud.menu_overlays_drawn`. A skipped
-phase or unavailable count is an empty cell, not `0.0000` or a fabricated zero.
+`hud.chat_lines`, `hud.debug_lines`, and `hud.menu_overlays_drawn`, then eight
+integer relight columns. `light.relight_input_blocks` and
+`light.relight_input_sections` count changed positions and coalesced sections
+whose jobs actually ran; `light.relight_cells_visited` and
+`light.relight_cells_changed` distinguish propagation work from changed light.
+`light.relight_dirty_sections`, `light.remesh_invalidations_enqueued`,
+`light.remesh_invalidations_coalesced`, and
+`light.remesh_sections_submitted` trace the result through the bounded remesh
+queue. Relight counters are `0` when no relight work ran; a skipped render phase
+or unavailable render count is an empty cell, not `0.0000` or a fabricated zero.
 
 The CSV’s frame interval includes everything that delayed the next redraw, including CPU work, GPU/back-pressure visible at acquire or present, compositor scheduling, and OS noise. The phase columns are CPU wall-clock spans. Wgpu timestamp queries are asynchronous snapshots of the last completed frame and are summarized per run rather than correlated to CSV rows. `world` and `first_person` time real render passes. The two `*_total` dummy-pass spans are explicitly labelled diagnostic because their private attachment does not establish ordering against the real passes. Do not add pass durations, subtract CPU phase means from frame interval and label the remainder “GPU”, or treat a diagnostic span as a bound. Use an Xcode/Metal capture when attribution inside a pass matters.
 

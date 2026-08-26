@@ -380,6 +380,9 @@ pub(crate) struct FrameProfiler {
     /// The last frame's [`HudSubphaseCounts`], alongside the timings above —
     /// not windowed, mirroring `world_subphase_counts`.
     hud_subphase_counts: Option<HudSubphaseCounts>,
+    /// Relighting work accumulated while simulating this frame. Unlike GPU
+    /// workload counts, zero is a real observation: no block update ran.
+    relight_workload: crate::mesher::RelightWorkload,
 }
 
 impl FrameProfiler {
@@ -407,6 +410,7 @@ impl FrameProfiler {
             hud_pending: [None; HUD_SUBPHASE_COUNT],
             hud_cursor: now,
             hud_subphase_counts: None,
+            relight_workload: crate::mesher::RelightWorkload::default(),
         }
     }
 
@@ -491,6 +495,11 @@ impl FrameProfiler {
     /// accumulating: `redraw` calls it once per frame with the whole set.
     pub(crate) fn record_hud_counts(&mut self, counts: HudSubphaseCounts) {
         self.hud_subphase_counts = Some(counts);
+    }
+
+    /// Record relighting work consumed from `Sim` for this frame.
+    pub(crate) fn record_relight_workload(&mut self, workload: crate::mesher::RelightWorkload) {
+        self.relight_workload = workload;
     }
 
     fn drain_world_subphases(&mut self) {
@@ -584,6 +593,7 @@ impl FrameProfiler {
                 hud_row,
                 world_counts,
                 hud_counts,
+                self.relight_workload,
             );
         }
     }
