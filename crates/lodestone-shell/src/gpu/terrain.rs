@@ -316,6 +316,10 @@ impl SectionOriginArena {
 #[derive(Debug)]
 pub(super) struct ModelRenderer {
     pub(super) pipeline: ModelPipeline,
+    /// Opaque/cutout model pipeline with a polygon offset toward the camera,
+    /// reserved for world surfaces which intentionally share a plane with an
+    /// already-drawn block (item-frame bodies and their map pictures).
+    pub(super) surface_pipeline: ModelPipeline,
     /// The translucent fluid pipeline (no cutout discard, water tint, alpha
     /// blend, depth-test on / depth-write off). Shares the model camera and
     /// atlas bind groups.

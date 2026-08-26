@@ -79,6 +79,16 @@ logical px on both axes) for a sheet glyph, half that for a unihex one — not
 one constant added before either pass began; see
 [Unihex glyphs](./unihex-font-glyphs.md).
 
+Text line origins are rounded to the nearest logical GUI pixel before either
+pass emits geometry. The font path uses solid coverage rectangles rather than
+filtered texture samples, so retaining a fractional origin lets an icon edge
+straddle framebuffer samples and shimmer as a tooltip or server-list MOTD
+moves. Only the origin is quantised: the pen still uses the exact provider
+advances, preserving wrapping, centring measurements, and inter-glyph layout;
+the origin is shared by the shadow and main passes so their relative offset is
+unchanged. The fixed 5×7 fallback has no special-font glyphs and keeps its
+existing path.
+
 `shadow_of` takes the quarter in **gamma space** (`ARGB.scaleRGB(color, 0.25F)` →
 `0xFF3F3F3F`, 63/255). The HUD's colour convention is sRGB 0..1 written verbatim
 (`hud::legacy_rgb` divides vanilla's hex codes by 255), so the quarter is taken

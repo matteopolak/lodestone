@@ -711,10 +711,10 @@ impl RenderState {
     ///   client has no map-id decode (see `Sim::map_source`), so any
     ///   `minecraft:filled_map` selects the wider border. The two disagree only
     ///   for a framed map whose data has never arrived.
-    /// * **`submitWithZOffset`'s polygon offset is not applied.** The frame sits
-    ///   1/32 of a block off the wall behind it, which is enough separation for a
-    ///   `[0,1]` depth buffer; the offset exists in vanilla for the same reason
-    ///   its `outlineColor` argument does, and neither is ported here.
+    /// * **`submitWithZOffset`'s polygon offset is carried by the surface
+    ///   pipeline.** `frame.rs` submits this combined mesh through
+    ///   `ModelPipeline::for_surface`, whose shared depth-buffer-unit bias pulls
+    ///   it toward the camera without perturbing the frame's derived geometry.
     fn merge_item_frames(
         &self,
         model: &ModelRenderer,

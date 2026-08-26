@@ -344,6 +344,7 @@ impl RenderState {
         // does just above — see `DebugLineRenderer`'s module doc for why this
         // pass stopped being a `LineList`.
         let debug_line_count = self.debug_lines.prepare(
+            device,
             queue,
             &view_proj,
             (self.depth.width, self.depth.height),
@@ -606,6 +607,7 @@ impl RenderState {
         let fishing_line_vertices = self.fishing_line_vertices(camera, entities);
         stats.fishing_line_segments = fishing_line_vertices.len() / 2;
         let fishing_line_count = self.fishing_line.prepare(
+            device,
             queue,
             &view_proj,
             (self.depth.width, self.depth.height),
@@ -1654,33 +1656,6 @@ impl RenderState {
                 // placed block is. Opaque and depth-writing, drawn alongside the
                 // mobs and before translucent water for the same reason they
                 // are (see the entity note above).
-                // Moving block models, immediately before the dropped items and
-                // through the same pipeline and the same four bind groups. A block
-                // model is not an item model, so this is a separate buffer and a
-                // separate draw call (see `prepare_moving_blocks`) — but it is the
-                // same *pipeline*: opaque, depth-writing, world-space positions,
-                // drawn before translucent water for the reason the mobs are.
-                //
-                // Positions are baked in world space, so this binds the shared
-                // arena's reserved zero slot exactly as the item draw below does.
-                if let Some(mesh) = &moving_block_mesh {
-                    pass.set_pipeline(&model.pipeline.pipeline);
-                    bind_terrain_camera(
-                        &mut pass,
-                        &model.cam_bind_group,
-                        model.origin_arena.zero_offset(),
-                        &mut terrain_cam_group_last,
-                        &mut stats,
-                    );
-                    pass.set_bind_group(1, &model.atlas_bind_group, &[]);
-                    pass.set_bind_group(2, &model.palette_bind_group, &[]);
-                    pass.set_bind_group(3, &model.anim_bind_group, &[]);
-                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-                    stats.draw_calls += 1;
-                }
-
                 if let Some(mesh) = &item_mesh {
                     pass.set_pipeline(&model.pipeline.pipeline);
                     // Dropped-item geometry bakes world positions into its own
@@ -1721,13 +1696,37 @@ impl RenderState {
                     }
                 }
 
-                // Filled maps hanging in item frames. Same pipeline
-                // and same three shared bind groups as the dropped items above,
+                // Item-frame bodies and their maps use the depth-biased surface
+                // pipeline. Both intentionally sit against a world surface, so
+                // the shared polygon offset resolves the remaining depth tie
+                // without changing either pose or any translucent pipeline.
+                // Same three shared bind groups as the dropped items above,
                 // with **group 1 swapped** to the map's own 128×128 texture — the
                 // model shader is at the 4-group floor, so a map texture has to
                 // replace the atlas rather than join it.
+                // `moving_block_mesh` also contains item-frame bodies. Its
+                // hand-authored world surfaces may meet terrain exactly, so it
+                // takes the same camera-facing depth bias as the frame/map pair.
+                if let Some(mesh) = &moving_block_mesh {
+                    pass.set_pipeline(&model.surface_pipeline.pipeline);
+                    bind_terrain_camera(
+                        &mut pass,
+                        &model.cam_bind_group,
+                        model.origin_arena.zero_offset(),
+                        &mut terrain_cam_group_last,
+                        &mut stats,
+                    );
+                    pass.set_bind_group(1, &model.atlas_bind_group, &[]);
+                    pass.set_bind_group(2, &model.palette_bind_group, &[]);
+                    pass.set_bind_group(3, &model.anim_bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    stats.draw_calls += 1;
+                }
+
                 if let Some((mesh, texture)) = &framed_maps {
-                    pass.set_pipeline(&model.pipeline.pipeline);
+                    pass.set_pipeline(&model.surface_pipeline.pipeline);
                     bind_terrain_camera(
                         &mut pass,
                         &model.cam_bind_group,

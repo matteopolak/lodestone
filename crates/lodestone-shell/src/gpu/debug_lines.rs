@@ -1,5 +1,7 @@
 //! The world-space debug-line pass (`docs/plugin-api.md`'s `ExtractSet::Debug`
 //! channel) and the polled source that feeds it.
+use std::cell::{Cell, RefCell};
+
 use lodestone_render::DEPTH_FORMAT;
 
 /// One coloured vertex of a world-space debug line segment — the render half
@@ -50,7 +52,8 @@ pub fn debug_line_vertices(lines: &[lodestone_ecs::player::DebugLine]) -> Vec<De
 /// Append the twelve edges of the axis-aligned box `(min, max)` in `color`.
 ///
 /// The one primitive both F3 sub-modes below are built from — a box is twelve
-/// segments, which at [`MAX_DEBUG_LINE_SEGMENTS`] leaves room for ~340 of them.
+/// segments. The GPU buffer grows when more entities enter the view, so the
+/// overlay does not depend on the order in which entities become visible.
 pub(crate) fn push_box(
     out: &mut Vec<DebugLineVertex>,
     min: [f32; 3],
@@ -166,8 +169,8 @@ pub fn entity_hitbox_vertices(draws: &[crate::entities::EntityDraw]) -> Vec<Debu
 /// there.
 ///
 /// Segment count is `4 + 4 * sections`, so a 24-section overworld column is 100
-/// segments — comfortably inside [`MAX_DEBUG_LINE_SEGMENTS`] alongside a screen
-/// of hitboxes.
+/// segments — comfortably inside the initial debug-line capacity alongside a
+/// screen of hitboxes.
 #[must_use]
 pub fn chunk_border_vertices(
     player: [f64; 3],
@@ -261,20 +264,16 @@ pub fn f3_overlay_vertices(
     out
 }
 
-/// Fixed capacity for the debug-line pass, in line segments (two
-/// [`DebugLineVertex`] inputs each — the wire shape callers still build). A
-/// debug overlay does not need to grow without bound the way
-/// [`crate::particles::ParticleRenderer`]'s instance count does — a few
-/// thousand segments is far more than one pathfinder's route — so this stays
-/// a **fixed** buffer, like [`OutlineRenderer`]'s, rather than the
-/// grow-and-reallocate pattern particles use. That choice is what lets
-/// [`DebugLineRenderer::prepare`] take `&self`: [`RenderState::render`] itself
-/// takes `&self` (it is called through a shared reference from the frame
-/// loop), so a `prepare` that needed to reallocate would need `&mut self` and
-/// a second, `app.rs`-level call before every frame — exactly the wiring this
-/// crate cannot add (see [`DebugLinesSource`]). Beyond this many segments,
-/// [`DebugLineRenderer::prepare`] truncates rather than growing.
+/// Compatibility name for neighboring GPU docs that describe the original
+/// fixed allocation. This is only the initial capacity now; the renderer grows
+/// beyond it on demand.
 pub(super) const MAX_DEBUG_LINE_SEGMENTS: usize = 4096;
+
+/// Initial capacity for the debug-line pass, in line segments (two
+/// [`DebugLineVertex`] inputs each — the wire shape callers still build). The
+/// retained buffer grows geometrically when a frame needs more; it never
+/// shrinks, so steady-state frames do not churn GPU allocations.
+pub(super) const INITIAL_DEBUG_LINE_SEGMENTS: usize = MAX_DEBUG_LINE_SEGMENTS;
 
 /// Vertices the GPU actually draws per input segment: two triangles forming a
 /// screen-space-thickened quad — see [`DebugLineRenderer`]'s module doc for
@@ -284,6 +283,37 @@ const VERTS_PER_SEGMENT: usize = 6;
 /// endpoint, for the vertex shader's screen-space direction), `side`
 /// (-1.0 / +1.0), `color.rgba`.
 const FLOATS_PER_RIBBON_VERT: usize = 3 + 3 + 1 + 4;
+
+/// Choose the next retained capacity without shrinking or growing one frame
+/// at a time. `max_segments` is derived from the device's buffer limit.
+fn grown_segment_capacity(current: usize, required: usize, max_segments: usize) -> usize {
+    let max_segments = max_segments.max(current);
+    let mut capacity = current.max(1).min(max_segments);
+    while capacity < required && capacity < max_segments {
+        capacity = capacity
+            .saturating_mul(2)
+            .max(capacity.saturating_add(1))
+            .min(max_segments);
+    }
+    capacity
+}
+
+#[cfg(test)]
+mod tests {
+    use super::grown_segment_capacity;
+
+    #[test]
+    fn capacity_grows_geometrically_and_never_shrinks() {
+        assert_eq!(grown_segment_capacity(4096, 4096, 32_768), 4096);
+        assert_eq!(grown_segment_capacity(4096, 4097, 32_768), 8192);
+        assert_eq!(grown_segment_capacity(8192, 5000, 32_768), 8192);
+    }
+
+    #[test]
+    fn capacity_stops_at_device_limit() {
+        assert_eq!(grown_segment_capacity(4096, 20_000, 10_000), 10_000);
+    }
+}
 
 /// Minimum on-screen width for F3 debug-line geometry (entity hitboxes, chunk
 /// borders, and any plugin's [`DebugLinesSource`] segments), in logical
@@ -319,19 +349,23 @@ pub(super) const VANILLA_LINE_WIDTH_PX: f32 = 2.5;
 /// A generalisation of [`OutlineRenderer`] immediately above: the same
 /// `view_proj` + viewport uniform, screen-space-ribbon vertex shader and
 /// triangle-list topology, but a per-vertex colour instead of a hardcoded
-/// black, and an arbitrary (fixed-capacity) segment count instead of one
+/// black, and an arbitrary segment count instead of one
 /// hardcoded unit cube. [`DebugLineRenderer::prepare`] does the ribbon
 /// expansion — one input [`DebugLineVertex`] pair becomes
 /// [`VERTS_PER_SEGMENT`] output vertices — so every caller of
 /// [`entity_hitbox_vertices`]/[`chunk_border_vertices`]/
 /// [`debug_line_vertices`] is unaffected by this module's own internal wire
-/// format.
+/// format. The vertex buffer is growable and retained between frames; this is
+/// why the renderer can still be used through `RenderState`'s shared `&self`
+/// render entry points.
 #[derive(Debug)]
 pub(super) struct DebugLineRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
-    vertices: wgpu::Buffer,
+    vertices: RefCell<wgpu::Buffer>,
+    capacity_segments: Cell<usize>,
+    warned_at_device_limit: Cell<bool>,
 }
 
 impl DebugLineRenderer {
@@ -381,7 +415,7 @@ impl DebugLineRenderer {
 
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lodestone-debug-lines-vertices"),
-            size: (MAX_DEBUG_LINE_SEGMENTS * VERTS_PER_SEGMENT * FLOATS_PER_RIBBON_VERT
+            size: (INITIAL_DEBUG_LINE_SEGMENTS * VERTS_PER_SEGMENT * FLOATS_PER_RIBBON_VERT
                 * std::mem::size_of::<f32>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -462,8 +496,46 @@ impl DebugLineRenderer {
             pipeline,
             bind_group,
             uniform,
-            vertices,
+            vertices: RefCell::new(vertices),
+            capacity_segments: Cell::new(INITIAL_DEBUG_LINE_SEGMENTS),
+            warned_at_device_limit: Cell::new(false),
         }
+    }
+
+    fn ensure_capacity(&self, device: &wgpu::Device, required_segments: usize) -> usize {
+        let current = self.capacity_segments.get();
+        if required_segments <= current {
+            return required_segments;
+        }
+
+        let bytes_per_segment = VERTS_PER_SEGMENT
+            .saturating_mul(FLOATS_PER_RIBBON_VERT)
+            .saturating_mul(std::mem::size_of::<f32>());
+        let max_segments = usize::try_from(device.limits().max_buffer_size)
+            .unwrap_or(usize::MAX)
+            / bytes_per_segment.max(1);
+        let new_capacity = grown_segment_capacity(current, required_segments, max_segments);
+        if new_capacity < required_segments && !self.warned_at_device_limit.replace(true) {
+            tracing::warn!(
+                target: "render",
+                requested_segments = required_segments,
+                retained_segments = new_capacity,
+                "debug-line overlay reached the device vertex-buffer limit"
+            );
+        }
+        if new_capacity == current {
+            return current;
+        }
+
+        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lodestone-debug-lines-vertices-grown"),
+            size: (new_capacity * bytes_per_segment) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *self.vertices.borrow_mut() = vertices;
+        self.capacity_segments.set(new_capacity);
+        new_capacity.min(required_segments)
     }
 
     /// Upload this frame's view-projection, the viewport/line-width uniform,
@@ -471,7 +543,8 @@ impl DebugLineRenderer {
     /// opens — buffers cannot be written mid-pass. `vertices` is the wire
     /// shape callers already build (flat, two [`DebugLineVertex`]s per
     /// segment); this expands each pair into [`VERTS_PER_SEGMENT`] on-screen
-    /// ribbon vertices, capped at [`MAX_DEBUG_LINE_SEGMENTS`] segments.
+    /// ribbon vertices. The retained GPU buffer grows geometrically as needed
+    /// and is bounded by the device's maximum vertex-buffer size.
     /// `viewport_px` is the render target's size in physical pixels and
     /// `min_width_px` the on-screen thickness floor, scaled by
     /// `Window.getAppropriateLineWidth`'s own `max(min, width / 1920 * min)`
@@ -494,10 +567,11 @@ impl DebugLineRenderer {
     /// Returns the vertex count actually written — pass it to
     /// [`draw`](Self::draw).
     ///
-    /// Takes `&self`, not `&mut self`: see [`MAX_DEBUG_LINE_SEGMENTS`]'s docs
-    /// for why a fixed buffer is what makes that possible.
+    /// Takes `&self`, not `&mut self`, because the render graph is shared; the
+    /// growable buffer is updated through interior mutability.
     pub(super) fn prepare(
         &self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         view_proj: &[[f32; 4]; 4],
         viewport_px: (u32, u32),
@@ -519,7 +593,7 @@ impl DebugLineRenderer {
         // Whole segments only — a dangling odd vertex (should never happen;
         // every producer in this module emits pairs) contributes nothing
         // rather than reading past the slice.
-        let segment_count = (vertices.len() / 2).min(MAX_DEBUG_LINE_SEGMENTS);
+        let segment_count = self.ensure_capacity(device, vertices.len() / 2);
         if segment_count == 0 {
             return 0;
         }
@@ -565,7 +639,11 @@ impl DebugLineRenderer {
                 out[v + 7..v + 11].copy_from_slice(&a.color);
             }
         }
-        queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&out));
+        queue.write_buffer(
+            &self.vertices.borrow(),
+            0,
+            bytemuck::cast_slice(&out),
+        );
         u32::try_from(segment_count * VERTS_PER_SEGMENT).unwrap_or(u32::MAX)
     }
 
@@ -577,7 +655,8 @@ impl DebugLineRenderer {
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        let vertices = self.vertices.borrow();
+        pass.set_vertex_buffer(0, vertices.slice(..));
         pass.draw(0..vertex_count, 0..1);
     }
 }

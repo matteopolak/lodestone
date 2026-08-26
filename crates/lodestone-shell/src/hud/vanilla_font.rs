@@ -902,7 +902,16 @@ impl VanillaFont {
         alpha: f32,
         shadow: bool,
     ) -> f32 {
-        let mut cursor = x;
+        // Text is made from solid, axis-aligned rectangles rather than a
+        // filtered texture. Keeping a fractional origin therefore lets a
+        // glyph's edge straddle two framebuffer samples; a tooltip or MOTD
+        // moving by a fraction of a GUI pixel can make the icon appear to
+        // shimmer. Quantise only the line origin here. The pen still advances
+        // using the exact provider metrics, so wrapping, centring and the
+        // spacing between ordinary glyphs remain unchanged.
+        let origin_x = pixel_snap(x);
+        let origin_y = pixel_snap(y);
+        let mut cursor = origin_x;
         // Only the main pass, never the shadow copy: the shadow's positions
         // are a fixed per-glyph offset from the main pass's own (see the
         // `off` below), so a second, offset-only line per glyph would only
@@ -910,7 +919,7 @@ impl VanillaFont {
         let tracing = !shadow && text_trace_matches(glyphs);
         if tracing {
             eprintln!(
-                "lodestone-shell: TEXT_TRACE begin glyphs={} x0={x:.3} y0={y:.3} scale={scale:.3}",
+                "lodestone-shell: TEXT_TRACE begin glyphs={} x0={origin_x:.3} y0={origin_y:.3} scale={scale:.3}",
                 glyphs.len()
             );
         }
@@ -930,9 +939,9 @@ impl VanillaFont {
             // correct when every glyph shared it.
             let (gx, gy) = if shadow {
                 let off = font.font().shadow_offset(g.ch as u32) * scale;
-                (cursor + off, y + off)
+                (cursor + off, origin_y + off)
             } else {
-                (cursor, y)
+                (cursor, origin_y)
             };
             let pen_before = cursor;
             cursor += self.glyph_styled(cs, g.ch, gx, gy, scale, c, g.style, position == 0, font);
@@ -943,10 +952,10 @@ impl VanillaFont {
         if tracing {
             eprintln!(
                 "lodestone-shell: TEXT_TRACE end total_width={:.3}",
-                cursor - x
+                cursor - origin_x
             );
         }
-        cursor - x
+        cursor - origin_x
     }
 
     /// One `LODESTONE_TEXT_TRACE` line for a single drawn glyph. `font`,
@@ -1203,6 +1212,16 @@ impl VanillaFont {
         let idx = (z as usize) % pool.len();
         self.cached_ink(&self.raster, pool[idx] as u32)
     }
+}
+
+/// Snap a text line's pixel-space origin to the nearest GUI pixel. Text is
+/// emitted as binary coverage rectangles, so a fractional line origin would
+/// make those rectangles cross sample boundaries and visibly shimmer while a
+/// moving tooltip/MOTD changes its position. Keeping this at the line origin
+/// (rather than rounding each pen advance) preserves the font's exact layout.
+#[inline]
+fn pixel_snap(value: f32) -> f32 {
+    value.round()
 }
 
 /// The logical advance that [`VanillaFont::glyph_styled`] and
@@ -1682,6 +1701,39 @@ mod tests {
             "drawing the same codepoint on a later frame must not rescan its texels"
         );
         assert_eq!(second, first, "caching must be geometry-transparent");
+    }
+
+    #[test]
+    fn text_origin_is_pixel_stable_across_subpixel_motion() {
+        let font = font_with_raster(bitmap_raster("A", 1, &[255, 255, 255, 255]));
+        let draw = |x: f32| {
+            let mut verts = Vec::new();
+            font.draw_plain(
+                &mut ColourStream {
+                    verts: &mut verts,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                "A",
+                x,
+                7.0,
+                1.0,
+                [1.0; 4],
+            );
+            verts
+        };
+
+        let first = draw(5.1);
+        let second = draw(5.4);
+        assert_eq!(
+            first, second,
+            "moving a text origin within one pixel must not move a binary glyph's geometry"
+        );
+        assert_ne!(
+            first,
+            draw(5.6),
+            "text must still advance to the next pixel once the origin crosses its midpoint"
+        );
     }
 
     #[test]

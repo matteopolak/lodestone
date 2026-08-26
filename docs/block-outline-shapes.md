@@ -239,17 +239,16 @@ issue.
 **Colour was already right.** Vanilla's real outline draws at alpha ≈ 0.4; this
 pass's shader was already at 0.6 — more opaque, not less. Left unchanged.
 
-**Depth setup was already right.** Vanilla's `LINES` pipeline
+**Depth setup needs one renderer-specific addition.** Vanilla's `LINES` pipeline
 (`RenderPipelines.java:565`, the one the hit outline actually uses — not the
 `LINES_DEPTH_BIAS` variant at `:572`) uses `DepthStencilState.DEFAULT`:
 `GREATER_THAN_OR_EQUAL`, **zero** bias. Per `CLAUDE.md`'s reversed-Z note, that is
-this engine's `LessEqual` at zero bias — exactly what `OutlineRenderer`'s pipeline
-already had. There was no sign-flipped bias to fix; vanilla avoids z-fighting by
-drawing the outline at the block's *exact* coincident boundary and relying on the
-inclusive compare, rather than an epsilon nudge. This pass instead inflates the box
-outward by `PAD = 0.002` world units in `OutlineRenderer::prepare`, because the
-outline and the terrain mesh here do not share a vertex-generation path and are not
-guaranteed bit-identical; `PAD` was measured not to be the source of the dimness.
+this engine's `LessEqual`. The screen-space ribbon and terrain mesh do not share a
+vertex-generation path, however, so the inclusive predicate still ties at oblique
+angles. `OutlineRenderer` keeps its `PAD = 0.002` world-space expansion and also
+uses the shared camera-facing polygon bias (`slope = -1`, `constant = -10`): it
+resolves a depth-buffer tie in ULPs rather than increasing `PAD` until the outline
+visibly detaches from the block.
 
 ### The fix: screen-space-thickened quads
 

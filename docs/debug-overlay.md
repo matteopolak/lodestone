@@ -416,9 +416,12 @@ Toggles are `Arc<AtomicBool>` because the source closure is
   box in the nether or a custom-height dimension. **The range is captured at
   install time**, so a dimension change needs the source reinstalled — call
   `install_session_render_sources` on a portal trip if that becomes visible.
-- **`MAX_DEBUG_LINE_SEGMENTS` is 4096** and a box is 12 segments, so hitboxes cap
-  out around 340 entities and truncate silently past that. A 24-section chunk
-  border is ~100 segments.
+- **The debug-line vertex buffer starts at 4096 segments** and grows
+  geometrically when F3+B sees more entities, retaining the larger allocation
+  for later frames. A box is 12 segments and a 24-section chunk border is ~100
+  segments; only an input larger than the device's maximum vertex-buffer size
+  can be truncated, and that case emits a render warning instead of failing
+  silently.
 - **An entity whose type path the census cannot resolve gets no box**, rather than
   a plausible default one. A wrong hitbox is worse than a missing one: the
   overlay's whole value is being believed.
@@ -626,5 +629,7 @@ are not implemented, so the entry set here is fixed.
 
 `lodestone_data::entity_dimensions` (hitbox sizes), `crate::net`
 (`entity_light_at`, `world_dimensions`), `crate::gpu::debug_lines` (the draw),
-`crate::entities::extracted_entity_draws` (the entity list),
+`crate::entities::extracted_entity_draws` (the entity list, sampled on every
+render frame so entities entering the tracked view are picked up without a
+second toggle),
 `crate::hud::vanilla_font` (the glyphs and their advances).
