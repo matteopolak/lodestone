@@ -1,10 +1,11 @@
-# Filled map item rendering — the wire and the fold are landed, the renderer is not
+# Filled map item rendering
 
 ## What it is
 
-This covers the filled map item's own visual: the generated
-per-map pixel texture, player/marker icons, and the border frame, whether
-held, in an item frame, or shown as a GUI icon.
+This covers the filled map item's own visual: the generated per-map pixel
+texture and border frame when held or displayed in an item frame. The wire,
+session fold, palette conversion, and these two render paths are live; marker
+icons and a retained per-map GPU texture cache remain follow-up work.
 
 > **Update: the blocker below is resolved, and the shell now reads the fold.**
 > `MAP_ITEM_DATA` (id 51) decodes into `ClientEvent::MapItemData`, `route` sends it
@@ -15,12 +16,10 @@ held, in an item frame, or shown as a GUI icon.
 > not a 128×128 frame. `MapStore::apply` blits the patch itself, so a reader calls
 > `MapState::color_at(x, y)` and never handles rectangles.
 >
-> `Sim::maps()` is the shell's read seam, and `Sim::map_debug()` is its only reader
-> today: an F3 line reporting the map count and the lowest-numbered map's explored
-> fraction. That is a **diagnostic**, the same shape `border_debug`/`spawn_debug`
-> have, and it exists so a live fold cannot be mistaken for one that never runs. It
-> is not the map's picture. What the picture needs is in "What is still missing"
-> below.
+> `Sim::maps()` is the shell's read seam. `Sim::map_source()` captures a cheap
+> copy-on-write `MapStore` snapshot for held and framed-map rendering;
+> `Sim::map_debug()` gathers the F3-only map count and explored fraction. The
+> diagnostic is skipped entirely while F3 is closed.
 >
 > The survey that follows is kept because its reasoning about *where* the renderer
 > belongs is unaffected; only its premise ("nothing decodes it") has changed.
@@ -111,31 +110,60 @@ compute it from yet — it correctly falls back to the tint's `default`, the
 same "untinted/default until real data exists" behaviour every other
 undecoded tint source in this codebase has today.
 
+## How it works today
+
+`MapStore` owns an `Arc<BTreeMap<i32, MapState>>`, and each map's 128×128
+palette grid is an `Arc<Vec<u8>>`. Cloning the store for a render source is
+therefore pointer-sized unless a later packet mutates it. `MapStore::apply`
+uses `Arc::make_mut`: an active render snapshot keeps its old values, while
+the live store copies only the map tree and pixel grid that are actually
+changed. The renderer carries that same pixel `Arc` to both consumers rather
+than allocating and copying 16 KiB per lookup.
+
+This is exact synchronous extraction, not speculative simulation. A frame sees
+one immutable store generation; incoming map packets update the next generation
+without invalidation bookkeeping or races.
+
 ## What is still missing
 
-Step 1 (the decode) is done. What remains is one coherent unit, and it is a
-**texture** job rather than a wiring one — which is why it was not bolted onto a
-session that had no budget to do it properly:
+The remaining rendering work is:
 
-1. **A colour palette lookup.** Vanilla's map colours are *indexed*: a
-   `MapColor` base id times four shade variants, packed as `index * 4 + shade`,
-   which is exactly the byte `MapState::colors` stores. The table is
-   `net/minecraft/world/level/material/MapColor.java` — an outside source, hand
-   expandable, and the right home is `lodestone-render` beside the drawing code
-   (`lodestone-game`'s `maps` module deliberately does **not** resolve to RGB, and
-   says so).
-2. **A per-map dynamic texture.** 128x128 `Rgba8UnormSrgb`, one per known map id,
-   uploaded when the store changes and cached by id. This is the part that makes
-   it a unit of its own: it needs a texture, a bind group over an existing layout,
-   and an invalidation signal — and `queue.write_buffer`/`write_texture` is ordered
-   against the *submit*, not the encoder, so two maps sharing one staging buffer
-   would both show the last one written.
-3. **The draws.** Held (first person, `ItemInHandRenderer.renderMap`), in an item
-   frame, and the `map_background` border quad plus the decoration sprites over
-   both. **Do not add a fifth bind group**: the model shader is already at wgpu's
-   4-group floor, so this goes through `EntityPipeline` (two groups) the way the
-   chest GUI icon does — see `docs/block-entity-renderers.md`'s "two consumers"
-   section for that precedent.
+1. **Retained per-map dynamic textures.** The current renderer converts and
+   uploads a 128×128 `Rgba8UnormSrgb` texture when a map is drawn. The CPU map
+   pixels are shared, but the GPU texture is not yet cached by map id and store
+   generation. Add an explicit generation counter before retaining textures;
+   pointer identity alone cannot distinguish in-place mutation after
+   `Arc::make_mut` obtains unique ownership.
+2. **Decoration and GUI draws.** The held and item-frame terrain draws are
+   implemented. Decoration sprites and the GUI's per-instance terrain preview
+   are still absent. Keep map geometry on `EntityPipeline`: the model shader is
+   already at wgpu's four-bind-group floor and cannot accept another texture
+   group.
+
+## How to change it
+
+Change packet folding and snapshot ownership in
+`crates/lodestone-game/src/maps.rs`. Keep the copy-on-write tests when adding
+fields: a snapshot must remain immutable after a packet updates the live store.
+The shell source contract is in `gpu/sources.rs`, its capture in
+`sim/render_sources.rs`, and texture creation/draws in `gpu/maps.rs`.
+
+Do not expose mutable pixel slices across the render seam. For a retained GPU
+cache, add a monotonic generation to `MapState`, increment it only when pixels
+change, and key the texture cache by `(map_id, generation)`.
+
+## Configuration
+
+There are no environment variables or player settings specific to maps. The
+ordinary render-distance and item/entity visibility rules determine whether an
+item-frame map is considered for drawing.
+
+## Dependencies
+
+- `lodestone-game` owns `MapStore` and applies `ClientEvent::MapItemData`.
+- `lodestone-shell` captures render sources and owns the wgpu textures/draws.
+- `lodestone-render` supplies the Minecraft map-palette conversion.
+- The v770 protocol adapter decodes the map item data packet.
 
 ### Two stale pointers, corrected
 

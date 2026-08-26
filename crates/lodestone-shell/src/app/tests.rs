@@ -5080,6 +5080,24 @@ fn rebinding_toggle_perspective_in_the_controls_screen_takes_effect_without_a_re
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn closed_f3_does_not_call_the_map_debug_gather() {
+    let calls = std::cell::Cell::new(0);
+    let hidden = super::redraw::map_debug_when_visible(false, || {
+        calls.set(calls.get() + 1);
+        Some((12, 0.5))
+    });
+    assert_eq!(hidden, None);
+    assert_eq!(calls.get(), 0);
+
+    let visible = super::redraw::map_debug_when_visible(true, || {
+        calls.set(calls.get() + 1);
+        Some((12, 0.5))
+    });
+    assert_eq!(visible, Some((12, 0.5)));
+    assert_eq!(calls.get(), 1);
+}
+
 /// The other half of the rebind class: the **F3 chords are rebindable in
 /// vanilla 26.2**, and this client used to hardcode them.
 ///

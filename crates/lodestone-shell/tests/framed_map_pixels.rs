@@ -240,13 +240,13 @@ fn a_filled_map_in_an_item_frame_reaches_pixels_on_every_wall() {
         .map(|yaw| shoot(&state, &camera_for(*yaw), std::slice::from_ref(&framed(*yaw))))
         .collect();
 
-    state.set_map_source(|_| Some(vec![0u8; 128 * 128]));
+    state.set_map_source(|_| Some(vec![0u8; 128 * 128].into()));
     let transparent: Vec<Shot> = YAWS
         .iter()
         .map(|yaw| shoot(&state, &camera_for(*yaw), std::slice::from_ref(&framed(*yaw))))
         .collect();
 
-    state.set_map_source(|_| Some(grass_grid()));
+    state.set_map_source(|_| Some(grass_grid().into()));
     let painted: Vec<Shot> = YAWS
         .iter()
         .map(|yaw| shoot(&state, &camera_for(*yaw), std::slice::from_ref(&framed(*yaw))))

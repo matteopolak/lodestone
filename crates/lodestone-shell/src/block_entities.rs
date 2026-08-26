@@ -114,7 +114,7 @@ use lodestone_render::{
     CopperGolemOxidation, CopperGolemPose, CopperGolemStatueSpawn,
     BlockEntityTexture, DecoratedPotSpawn, EndGatewaySpawn, EndPortalSpawn, LecternSpawn, SHELF_SLOTS,
     SHULKER_COLOURS, ShelfItemSpawn, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation,
-    SignSpawn, SkullOrientation, SkullSpawn, SkullType, VaultSpawn, average_beam_color,
+    SignSpawn, SkullOrientation, SkullSpawn, SkullType, SkyDefault, VaultSpawn, average_beam_color,
     beacon_beam_color, beam_radius_scale, conduit_active_rotation_value, conduit_advance,
     conduit_anim_time, conduit_animation_phase, conduit_frame_scan, entity::vault_spin_degrees,
     horizontal_facing_clockwise_yaw, horizontal_facing_yaw,
@@ -129,6 +129,47 @@ use crate::{
     net::{SharedHandle, entity_light_at},
 };
 
+#[cfg(test)]
+mod frame_snapshot_tests {
+    use super::*;
+
+    fn first_state(name: &str) -> u32 {
+        (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|&id| lodestone_data::block_states::block_name(id) == Some(name))
+            .unwrap_or_else(|| panic!("missing state for {name}"))
+    }
+
+    #[test]
+    fn one_frame_snapshot_feeds_multiple_state_driven_renderers_without_a_handle() {
+        let chest_pos = [1, 64, 2];
+        let bell_pos = [3, 64, 4];
+        let snapshot = BlockEntityFrameSnapshot {
+            candidates: vec![
+                BlockEntityFrameCandidate {
+                    pos: chest_pos,
+                    state_id: first_state("minecraft:chest"),
+                    light: 0xab,
+                },
+                BlockEntityFrameCandidate {
+                    pos: bell_pos,
+                    state_id: first_state("minecraft:bell"),
+                    light: 0xcd,
+                },
+            ],
+        };
+
+        let chests = chest_spawns_from_snapshot(&snapshot, &ChestLids::new(), 0.0);
+        let bells = bell_spawns_from_snapshot(&snapshot, &BellShakes::new(), 0.0);
+
+        assert_eq!(chests.len(), 1);
+        assert_eq!(chests[0].pos, chest_pos);
+        assert_eq!(chests[0].light, 0xab);
+        assert_eq!(bells.len(), 1);
+        assert_eq!(bells[0].pos, bell_pos);
+        assert_eq!(bells[0].light, 0xcd);
+    }
+}
+
 /// Vanilla's per-renderer cutoff: `BlockEntityRenderer.getViewDistance()`
 /// returns `64`, and `shouldRender` compares it against the distance from the
 /// camera to `Vec3.atCenterOf(blockPos)` — the block **centre**, not its corner.
@@ -138,6 +179,124 @@ use crate::{
 /// because the `atCenterOf` offset is the difference between a chest popping in
 /// at 64.0 and at 63.1.
 pub const VIEW_DISTANCE: f32 = 64.0;
+
+/// One state-driven block entity captured for a single rendered frame.
+///
+/// The block state and packed entity light are resolved while the chunk world
+/// is held under one read lock. The render-specific filters below can therefore
+/// share this record without rescanning every loaded chunk or reacquiring the
+/// world once per visible object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockEntityFrameCandidate {
+    pos: [i32; 3],
+    state_id: u32,
+    light: u8,
+}
+
+/// Camera-scoped immutable input shared by the state-driven block-entity
+/// renderers in one frame.
+///
+/// NBT-dependent families deliberately do not use this first slice: signs,
+/// heads, banners and item-bearing block entities still parse their typed NBT
+/// in their existing gathers. Keeping raw NBT out of this snapshot makes its
+/// hot-path records compact and avoids cloning arbitrary payload trees merely
+/// to save a chunk scan.
+#[derive(Debug, Default)]
+pub(crate) struct BlockEntityFrameSnapshot {
+    candidates: Vec<BlockEntityFrameCandidate>,
+}
+
+fn packed_light_in_chunk(
+    chunk: &lodestone_world::LoadedChunk,
+    block: [i32; 3],
+    dimensions: Option<lodestone_client::WorldDimensions>,
+    sky_default: SkyDefault,
+) -> u8 {
+    let Some(dimensions) = dimensions else {
+        return lodestone_render::ENTITY_FULLBRIGHT;
+    };
+    let section = (block[1] - dimensions.min_y).div_euclid(16);
+    if section < 0 || section >= dimensions.section_count() as i32 {
+        return lodestone_render::ENTITY_FULLBRIGHT;
+    }
+    let section = section as usize;
+    let x = block[0].rem_euclid(16) as usize;
+    let y = (block[1] - dimensions.min_y).rem_euclid(16) as usize;
+    let z = block[2].rem_euclid(16) as usize;
+    let sky = chunk
+        .light
+        .section_sky_light(section, x, y, z)
+        .unwrap_or(match sky_default {
+            SkyDefault::Full => 15,
+            SkyDefault::None => 0,
+        });
+    let block = chunk
+        .light
+        .section_block_light(section, x, y, z)
+        .unwrap_or(0);
+    (sky << 4) | block
+}
+
+/// Captures the state and light needed by every state-only block-entity
+/// renderer for this camera position.
+///
+/// This is the one place on the render path that calls `loaded_chunks()` and
+/// takes the chunk-world read lock for those renderers. The result has no world
+/// borrow and can safely live in all of the renderer-owned `'static` closures
+/// installed for the rest of the frame.
+#[must_use]
+pub(crate) fn block_entity_frame_snapshot(
+    handle: &SharedHandle,
+    eye: Vec3,
+) -> Option<BlockEntityFrameSnapshot> {
+    let client = handle.get()?;
+    let dimensions = client.world_dimensions();
+    let player = client.player();
+    let sky_default = crate::mesher::sky_default_for_dimension(
+        player.dimension.as_ref(),
+        player.dimension_type.as_ref(),
+    );
+    let chunks = client.loaded_chunks();
+    let store = client.chunk_world();
+    let world = store.read();
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for model_pos in chunks {
+        let pos = ChunkPos {
+            x: model_pos.x,
+            z: model_pos.z,
+        };
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for entity in &chunk.block_entities {
+            let block = [
+                pos.x * 16 + i32::from(entity.rel_x),
+                i32::from(entity.y),
+                pos.z * 16 + i32::from(entity.rel_z),
+            ];
+            let centre = Vec3::new(
+                block[0] as f32 + 0.5,
+                block[1] as f32 + 0.5,
+                block[2] as f32 + 0.5,
+            );
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            let state_id = chunk.column.get_block(
+                usize::from(entity.rel_x),
+                block[1],
+                usize::from(entity.rel_z),
+            );
+            candidates.push(BlockEntityFrameCandidate {
+                pos: block,
+                state_id,
+                light: packed_light_in_chunk(chunk, block, dimensions, sky_default),
+            });
+        }
+    }
+    Some(BlockEntityFrameSnapshot { candidates })
+}
 
 const STRUCTURE_BLOCK_VIEW_DISTANCE: f32 = 96.0;
 const STRUCTURE_BOX_COLOR: [f32; 4] = [0.9, 0.9, 0.9, 1.0];
@@ -1716,54 +1875,27 @@ pub fn chest_spawns(
     eye: Vec3,
     partial_tick: f32,
 ) -> Vec<ChestSpawn> {
-    let Some(client) = handle.get() else {
+    let Some(snapshot) = block_entity_frame_snapshot(handle, eye) else {
         return Vec::new();
     };
-    let store = client.chunk_world();
+    chest_spawns_from_snapshot(&snapshot, lids, partial_tick)
+}
+
+#[must_use]
+pub(crate) fn chest_spawns_from_snapshot(
+    snapshot: &BlockEntityFrameSnapshot,
+    lids: &ChestLids,
+    partial_tick: f32,
+) -> Vec<ChestSpawn> {
     let mut out = Vec::new();
-
-    // `loaded_chunks()` takes the world's read lock itself, so it is called
-    // *before* the guard below rather than inside it. `std::sync::RwLock` gives
-    // no re-entrancy guarantee — a nested read is allowed to deadlock once a
-    // writer is queued, which on this world happens every time a chunk packet
-    // lands. Taking it twice would produce a hang under load and never in a test.
-    let chunks = client.loaded_chunks();
-
-    // Then one read lock for the whole gather. The guard is dropped before the
-    // light-sampling loop below, for exactly the same reason:
-    // `entity_light_at` reaches for the same lock.
-    let candidates = {
-        let world = store.read();
-        // `loaded_chunks` speaks `lodestone_model::ChunkPos`; the world is keyed by
-        // `lodestone_world::ChunkPos`. Same two fields, distinct types.
-        chest_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
-            eye,
-        )
-    };
-
-    // Resolved once for the whole frame, from the `client` this function already
-    // holds, rather than per chest: `player()` clones a snapshot behind an ECS read
-    // lock, and the loop below runs once per visible chest. The point samplers on
-    // the render thread read a shared cell instead because they are `'static`
-    // closures with no per-frame value available — see `net::SkyDefaultCell`.
-    let sky_default = {
-        let player = client.player();
-        crate::mesher::sky_default_for_dimension(
-            player.dimension.as_ref(),
-            player.dimension_type.as_ref(),
-        )
-    };
-
-    for (block, state_id) in candidates {
-        // The light sample is the only thing here that needs the handle, which is
-        // why it is the only thing `chest_candidates`/`chest_spawn` do not cover.
-        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
-            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
-        if let Some(spawn) =
-            chest_spawn(block, state_id, lids.openness(block, partial_tick), light)
-        {
+    for candidate in &snapshot.candidates {
+        let block = candidate.pos;
+        if let Some(spawn) = chest_spawn(
+            block,
+            candidate.state_id,
+            lids.openness(block, partial_tick),
+            candidate.light,
+        ) {
             out.push(spawn);
         }
     }
@@ -2032,35 +2164,27 @@ pub fn bell_spawns(
     eye: Vec3,
     partial_tick: f32,
 ) -> Vec<BellSpawn> {
-    let Some(client) = handle.get() else {
+    let Some(snapshot) = block_entity_frame_snapshot(handle, eye) else {
         return Vec::new();
     };
-    let store = client.chunk_world();
+    bell_spawns_from_snapshot(&snapshot, shakes, partial_tick)
+}
 
-    let chunks = client.loaded_chunks();
-
-    let candidates = {
-        let world = store.read();
-        chest_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
-            eye,
-        )
-    };
-
-    let sky_default = {
-        let player = client.player();
-        crate::mesher::sky_default_for_dimension(
-            player.dimension.as_ref(),
-            player.dimension_type.as_ref(),
-        )
-    };
-
+#[must_use]
+pub(crate) fn bell_spawns_from_snapshot(
+    snapshot: &BlockEntityFrameSnapshot,
+    shakes: &BellShakes,
+    partial_tick: f32,
+) -> Vec<BellSpawn> {
     let mut out = Vec::new();
-    for (block, state_id) in candidates {
-        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
-            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
-        if let Some(spawn) = bell_spawn(block, state_id, light, shakes, partial_tick) {
+    for candidate in &snapshot.candidates {
+        if let Some(spawn) = bell_spawn(
+            candidate.pos,
+            candidate.state_id,
+            candidate.light,
+            shakes,
+            partial_tick,
+        ) {
             out.push(spawn);
         }
     }
@@ -2128,36 +2252,19 @@ pub fn shulker_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<Shulke
 /// [`skull_spawns`] and [`bell_spawns`] do.
 #[must_use]
 pub fn shulker_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<ShulkerSpawn> {
-    let Some(client) = handle.get() else {
+    let Some(snapshot) = block_entity_frame_snapshot(handle, eye) else {
         return Vec::new();
     };
-    let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
+    shulker_spawns_from_snapshot(&snapshot)
+}
 
-    // The guard is taken and dropped *inside* this block, before the light
-    // sampling below — the no-nested-read-lock rule every gather here follows.
-    let candidates = {
-        let world = store.read();
-        chest_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
-            eye,
-        )
-    };
-
-    let sky_default = {
-        let player = client.player();
-        crate::mesher::sky_default_for_dimension(
-            player.dimension.as_ref(),
-            player.dimension_type.as_ref(),
-        )
-    };
-
+#[must_use]
+pub(crate) fn shulker_spawns_from_snapshot(
+    snapshot: &BlockEntityFrameSnapshot,
+) -> Vec<ShulkerSpawn> {
     let mut out = Vec::new();
-    for (block, state_id) in candidates {
-        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
-            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
-        if let Some(spawn) = shulker_spawn(block, state_id, light) {
+    for candidate in &snapshot.candidates {
+        if let Some(spawn) = shulker_spawn(candidate.pos, candidate.state_id, candidate.light) {
             out.push(spawn);
         }
     }
@@ -2213,36 +2320,19 @@ pub fn lectern_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<Lecter
 /// [`skull_spawns`], [`bell_spawns`] and [`shulker_spawns`] do.
 #[must_use]
 pub fn lectern_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<LecternSpawn> {
-    let Some(client) = handle.get() else {
+    let Some(snapshot) = block_entity_frame_snapshot(handle, eye) else {
         return Vec::new();
     };
-    let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
+    lectern_spawns_from_snapshot(&snapshot)
+}
 
-    // The guard is taken and dropped inside this block, before the light
-    // sampling below — the no-nested-read-lock rule every gather here follows.
-    let candidates = {
-        let world = store.read();
-        chest_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
-            eye,
-        )
-    };
-
-    let sky_default = {
-        let player = client.player();
-        crate::mesher::sky_default_for_dimension(
-            player.dimension.as_ref(),
-            player.dimension_type.as_ref(),
-        )
-    };
-
+#[must_use]
+pub(crate) fn lectern_spawns_from_snapshot(
+    snapshot: &BlockEntityFrameSnapshot,
+) -> Vec<LecternSpawn> {
     let mut out = Vec::new();
-    for (block, state_id) in candidates {
-        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
-            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
-        if let Some(spawn) = lectern_spawn(block, state_id, light) {
+    for candidate in &snapshot.candidates {
+        if let Some(spawn) = lectern_spawn(candidate.pos, candidate.state_id, candidate.light) {
             out.push(spawn);
         }
     }
@@ -2335,44 +2425,32 @@ pub fn enchanting_table_spawns(
     eye: Vec3,
     partial_tick: f32,
 ) -> Vec<lodestone_render::EnchantingTableSpawn> {
-    let Some(client) = handle.get() else {
+    let Some(snapshot) = block_entity_frame_snapshot(handle, eye) else {
         return Vec::new();
     };
-    let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
+    enchanting_table_spawns_from_snapshot(&snapshot, books, partial_tick)
+}
 
-    let candidates = {
-        let world = store.read();
-        chest_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
-            eye,
-        )
-    };
-
-    let sky_default = {
-        let player = client.player();
-        crate::mesher::sky_default_for_dimension(
-            player.dimension.as_ref(),
-            player.dimension_type.as_ref(),
-        )
-    };
-
+#[must_use]
+pub(crate) fn enchanting_table_spawns_from_snapshot(
+    snapshot: &BlockEntityFrameSnapshot,
+    books: &EnchantingTableBooks,
+    partial_tick: f32,
+) -> Vec<lodestone_render::EnchantingTableSpawn> {
     let mut out = Vec::new();
-    for (block, state_id) in candidates {
-        if !is_enchanting_table(state_id) {
+    for candidate in &snapshot.candidates {
+        if !is_enchanting_table(candidate.state_id) {
             continue;
         }
+        let block = candidate.pos;
         let (y_rot, time, open, flip) = books.state(block, partial_tick).unwrap_or_default();
-        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
-            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
         out.push(lodestone_render::EnchantingTableSpawn {
             pos: block,
             y_rot,
             time,
             open,
             flip,
-            light,
+            light: candidate.light,
         });
     }
     out.sort_by_key(|s| s.pos);
@@ -3330,24 +3408,20 @@ fn is_conduit_frame_block(state_id: u32) -> bool {
 /// [`banner_candidates`]'s NBT-reading shape here.
 #[must_use]
 pub fn conduit_positions(handle: &SharedHandle, eye: Vec3) -> Vec<[i32; 3]> {
-    let Some(client) = handle.get() else {
+    let Some(snapshot) = block_entity_frame_snapshot(handle, eye) else {
         return Vec::new();
     };
-    let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
-    let candidates = {
-        let world = store.read();
-        chest_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
-            eye,
-        )
-    };
-    candidates
-        .into_iter()
-        .filter_map(|(pos, state_id)| {
-            (lodestone_data::block_states::block_name(state_id)? == "minecraft:conduit")
-                .then_some(pos)
+    conduit_positions_from_snapshot(&snapshot)
+}
+
+#[must_use]
+fn conduit_positions_from_snapshot(snapshot: &BlockEntityFrameSnapshot) -> Vec<[i32; 3]> {
+    snapshot
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            (lodestone_data::block_states::block_name(candidate.state_id)? == "minecraft:conduit")
+                .then_some(candidate.pos)
         })
         .collect()
 }
@@ -3499,22 +3573,26 @@ pub fn conduit_spawns(
     ticks: &ConduitTicks,
     partial_tick: f32,
 ) -> Vec<ConduitSpawn> {
-    let Some(client) = handle.get() else {
+    let Some(snapshot) = block_entity_frame_snapshot(handle, eye) else {
         return Vec::new();
     };
-    let sky_default = {
-        let player = client.player();
-        crate::mesher::sky_default_for_dimension(
-            player.dimension.as_ref(),
-            player.dimension_type.as_ref(),
-        )
-    };
+    conduit_spawns_from_snapshot(&snapshot, ticks, partial_tick)
+}
 
+#[must_use]
+pub(crate) fn conduit_spawns_from_snapshot(
+    snapshot: &BlockEntityFrameSnapshot,
+    ticks: &ConduitTicks,
+    partial_tick: f32,
+) -> Vec<ConduitSpawn> {
     let mut out = Vec::new();
-    for pos in conduit_positions(handle, eye) {
-        let light = entity_light_at(handle, pos[0], pos[1], pos[2], sky_default)
-            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
-        if let Some(spawn) = ticks.resolve(pos, partial_tick, light) {
+    for candidate in &snapshot.candidates {
+        if lodestone_data::block_states::block_name(candidate.state_id)
+            != Some("minecraft:conduit")
+        {
+            continue;
+        }
+        if let Some(spawn) = ticks.resolve(candidate.pos, partial_tick, candidate.light) {
             out.push(spawn);
         }
     }
@@ -6928,34 +7006,23 @@ pub fn copper_golem_statue_spawn(
 /// whole job.
 #[must_use]
 pub fn copper_golem_statue_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<CopperGolemStatueSpawn> {
-    let Some(client) = handle.get() else {
+    let Some(snapshot) = block_entity_frame_snapshot(handle, eye) else {
         return Vec::new();
     };
-    let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
+    copper_golem_statue_spawns_from_snapshot(&snapshot)
+}
 
-    let candidates = {
-        let world = store.read();
-        chest_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
-            eye,
-        )
-    };
-
-    let sky_default = {
-        let player = client.player();
-        crate::mesher::sky_default_for_dimension(
-            player.dimension.as_ref(),
-            player.dimension_type.as_ref(),
-        )
-    };
-
+#[must_use]
+pub(crate) fn copper_golem_statue_spawns_from_snapshot(
+    snapshot: &BlockEntityFrameSnapshot,
+) -> Vec<CopperGolemStatueSpawn> {
     let mut out = Vec::new();
-    for (block, state_id) in candidates {
-        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
-            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
-        if let Some(spawn) = copper_golem_statue_spawn(block, state_id, light) {
+    for candidate in &snapshot.candidates {
+        if let Some(spawn) = copper_golem_statue_spawn(
+            candidate.pos,
+            candidate.state_id,
+            candidate.light,
+        ) {
             out.push(spawn);
         }
     }

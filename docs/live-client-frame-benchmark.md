@@ -4,7 +4,12 @@
 
 The live client frame benchmark measures Lodestone’s real fullscreen client while it is joined to a Java 26.2 server. It records frame intervals and CPU/GPU phase timings for a normal-terrain workload and a dense render showcase, then summarizes stationary and moving segments separately.
 
-This is the reproducible workload used for client performance investigations. The synthetic `frame_profile` criterion bench remains an instrumentation control; it is not a substitute for these live measurements. A third `megaworld` workload uses the official Hermitcraft Season 10 Java save to exercise dense, already-generated multiplayer chunks at scale.
+This is the reproducible workload used for client performance investigations.
+The synthetic `frame_profile` criterion bench remains an instrumentation
+control; it is not a substitute for these live measurements. `megaworld` uses
+the official Hermitcraft Season 10 Java save to exercise a dense multiplayer
+spawn, while `lovelier` uses Stampy's Lovelier World from an open-air waypoint
+to keep substantially more authored terrain in view.
 
 ## How it works
 
@@ -16,9 +21,14 @@ On macOS the benchmark does not trust display names or primary-monitor status. W
 
 The benchmark clock begins only after `SessionPhase::Connected`:
 
-1. `warmup` settles the joined world. Terrain also enables creative flight.
+1. `warmup` settles the joined world. Flight-capable workloads emit their two
+   creative-flight press edges after one second, leaving time for the runner's
+   post-join gamemode and teleport commands to land.
 2. `stationary` holds a fixed view for 30 seconds by default.
-3. `moving` flies forward through terrain or makes one time-integrated 360-degree showcase orbit for 60 seconds by default.
+3. `moving` makes one cadence-independent 360-degree orbit for 60 seconds.
+   Terrain and large worlds also fly forward and climb for the first five
+   seconds. This is deliberately not a straight walk: a straight authored-world
+   path eventually measures collision against a wall instead of traversal.
 4. `complete` logs a completion marker and exits cleanly.
 
 `LODESTONE_FRAME_PROFILE_DUMP` writes one CSV row per finalized frame. `frame_interval_ms` is start-to-start wall time, and `segment` is captured when the frame begins so a transition cannot relabel the previous frame. Empty phase cells mean the phase did not run; the summarizer never averages them as zero.
@@ -40,6 +50,16 @@ from `.cache/mc/creative`; it never changes the terrain or showcase worlds.
 The dedicated oracle is `scripts/live-oracles/megaworld.sh` on game port 25590
 and RCON port 25591.
 
+The Lovelier workload is an untracked `.cache/mc/lovelier` server root. Its
+`world/` subdirectory is the extracted `Lovelier World Java.zip`; `server.jar`,
+`eula.txt`, and `server.properties` sit beside it. The imported archive used for
+the 2026-08-26 baseline had SHA-256
+`a8cc00c550490a8defd7e5e9a8625314871a71fa83f1754b95b3e1c2e6d4979f`.
+The 26.2 Java server converts the 2021 save on first launch. The oracle is
+`scripts/live-oracles/lovelier.sh` on game port 25600 and RCON port 25601; the
+runner teleports its unique player to `(0, 180, 0)` looking 35 degrees downward.
+The source ZIP is not retained in the repository cache after installation.
+
 ## Running it
 
 Build the client once, then run the short end-to-end gate:
@@ -55,12 +75,15 @@ The smoke run uses one showcase trial with 2 seconds warmup, 2 seconds stationar
 just bench-client-terrain
 just bench-client-showcase
 just bench-client-megaworld
+just bench-client-lovelier
 ```
 
 `bench-client-megaworld` runs matched `debug_overlay=closed` and `open` arms.
 Use `just bench-client-megaworld-smoke` for one 2/2/3-second setup gate per
 arm. Override the default pairing with `--debug-overlay closed` or
 `--debug-overlay open`; a Samply run requires one explicit arm.
+Use `just bench-client-lovelier-smoke` before a full Lovelier run, especially
+after the Java server has converted a freshly installed copy.
 
 Record one non-comparable CPU sample after the ordinary trials identify the worse workload:
 
@@ -68,7 +91,12 @@ Record one non-comparable CPU sample after the ordinary trials identify the wors
 python3 scripts/client-frame-benchmark.py --workload showcase --samply
 ```
 
-The profile is saved under `bench-results/profiles/`. `--samply` runs one full session and does not append its timing to the comparable JSONL history because sampling changes the workload.
+The profile is saved under `bench-results/profiles/`. The runner asks Samply to
+presymbolicate, producing both `NAME.json.gz` and `NAME.json.syms.json`; keep the
+pair together so `scripts/profile-cost-table.py NAME.json.gz` can attribute Rust
+symbols without opening the Firefox profiler. `--samply` runs one full session
+and does not append its timing to the comparable JSONL history because sampling
+changes the workload.
 
 The RSS printed for a `--samply` run belongs to the Samply parent process, not
 the profiled client child, and is therefore not a client-memory measurement.
@@ -137,7 +165,7 @@ Do not weaken completion, hardware-built-in fullscreen, physical-size parsing, w
 The client’s opt-in flags are:
 
 ```text
---benchmark terrain|showcase|megaworld
+--benchmark terrain|showcase|megaworld|lovelier
 --benchmark-debug-overlay closed|open
 --benchmark-warmup SECONDS
 --benchmark-stationary SECONDS
@@ -145,15 +173,16 @@ The client’s opt-in flags are:
 ```
 
 `--benchmark` forces a live fullscreen connection. Defaults are 20/30/60
-seconds; the Python megaworld arm uses a 45-second warmup before the same
+seconds; the Python megaworld and lovelier arms use a 45-second warmup before the same
 30/60-second measurements. The runner additionally accepts `--trials N`
 (default `3`), `--smoke`, `--samply`, `--debug-overlay closed|open|both`, and
 `--binary PATH`. `--smoke` forces one 2/2/3-second trial; `--samply` forces one
 sampled full trial.
 
 Canonical server endpoints are terrain `127.0.0.1:25580` with RCON `:25581`,
-showcase `127.0.0.1:25570` with RCON `:25571`, and megaworld
-`127.0.0.1:25590` with RCON `:25591`. All use the local RCON password already
+showcase `127.0.0.1:25570` with RCON `:25571`, megaworld
+`127.0.0.1:25590` with RCON `:25591`, and lovelier `127.0.0.1:25600` with
+RCON `:25601`. All use the local RCON password already
 defined by the oracle scripts. The client process receives a temporary
 `LODESTONE_DATA_DIR`, `LODESTONE_FRAME_PROFILE_DUMP`, and
 `RUST_LOG=frame_profile=info,frame_benchmark=info,warn`.
@@ -164,8 +193,12 @@ defined by the oracle scripts. The client process receives a temporary
 - Apple’s `container` runtime and the existing oracle worlds under `.cache/mc/terrain` and `.cache/mc/creative`.
 - About 3 GB of temporary disk space for the pinned 1.2 GB Hermitcraft archive
   and its 1.3 GB extracted Java world when installing `megaworld`.
+- About 320 MB for the extracted Lovelier server cache. Its 184 MB source ZIP
+  can be deleted after the marker, world data, and server jar are present.
 - The Java 26.2 `server.jar` already used by `scripts/live-oracles/terrain.sh` and `creative.sh`.
 - Python 3 standard library only for ordinary runs.
 - `samply` on `PATH` only when `--samply` is requested.
+- Samply's `--unstable-presymbolicate` support for the symbol sidecar consumed by
+  `scripts/profile-cost-table.py`.
 - On macOS, CoreGraphics through the target-only `objc2-core-graphics` crate for authoritative built-in-panel selection.
 - A native GPU/window session. GPU timestamp availability depends on the selected adapter’s `TIMESTAMP_QUERY` feature.

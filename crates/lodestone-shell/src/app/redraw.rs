@@ -652,6 +652,14 @@ impl WindowApp {
         let held_for_scoping = held.as_ref().map(|item| item.item.clone());
         render.set_main_hand_source(move || held.clone());
 
+        // One immutable camera-scoped state/light gather feeds every
+        // state-driven block-entity source below. NBT-driven sources retain
+        // their specialised gathers; they cannot use this compact record
+        // without cloning arbitrary NBT trees.
+        let block_entity_snapshot = self
+            .sim
+            .block_entity_frame_snapshot(render_camera.position);
+
         // Block entities — chests (issue #23). **This install is what makes a
         // chest visible at all**: a 26.2 chest has no block model (its
         // `block/chest.json` declares only a particle texture, zero elements), so
@@ -661,8 +669,11 @@ impl WindowApp {
         // the same reason: the closure captures this frame's partial tick and a
         // snapshot of the lid map, so a one-shot install at connect would draw
         // every lid frozen at the fraction of a tick we happened to join on.
-        if let Some(f) = self.sim.block_entity_source() {
-            render.set_block_entity_source(f);
+        if let Some(snapshot) = &block_entity_snapshot {
+            render.set_block_entity_source(
+                self.sim
+                    .block_entity_source_from_snapshot(std::sync::Arc::clone(snapshot)),
+            );
         }
 
         // Skulls and heads. Same per-frame install as the chests above, though for
@@ -679,8 +690,11 @@ impl WindowApp {
         // Copper golem statues. Same per-frame install and the same
         // hole-in-the-world failure mode as chests/skulls:
         // `copper_golem_statue.json` has no block model of its own.
-        if let Some(f) = self.sim.copper_golem_statue_source() {
-            render.set_copper_golem_statue_source(f);
+        if let Some(snapshot) = &block_entity_snapshot {
+            render.set_copper_golem_statue_source(
+                self.sim
+                    .copper_golem_statue_source_from_snapshot(std::sync::Arc::clone(snapshot)),
+            );
         }
 
         // Signs. Same per-frame install as chests and skulls above; see
@@ -739,16 +753,22 @@ impl WindowApp {
         // (`Sim::bell_source`) were all already landed; this call site was
         // the one remaining hop before a live client draws a bell at all
         // (`docs/block-entity-renderers.md`'s Bell section).
-        if let Some(f) = self.sim.bell_source() {
-            render.set_bell_source(f);
+        if let Some(snapshot) = &block_entity_snapshot {
+            render.set_bell_source(
+                self.sim
+                    .bell_source_from_snapshot(std::sync::Arc::clone(snapshot)),
+            );
         }
 
         // Shulker boxes. Same per-frame install as the four above, and the same
         // reason this call site matters as much as the geometry: a 26.2 shulker
         // box has **no block model**, so without it the terrain mesher leaves a
         // hole where every box is — the chest failure mode exactly.
-        if let Some(f) = self.sim.shulker_source() {
-            render.set_shulker_source(f);
+        if let Some(snapshot) = &block_entity_snapshot {
+            render.set_shulker_source(
+                self.sim
+                    .shulker_source_from_snapshot(std::sync::Arc::clone(snapshot)),
+            );
         }
 
         // Decorated pots. Same per-frame install and the same failure mode as
@@ -764,8 +784,11 @@ impl WindowApp {
         // documents: the closure this installs reads `Sim::conduit_ticks`,
         // advanced once per tick in `Sim::step`, so a stale install both
         // leaves a hole *and* freezes whichever conduits were already tracked.
-        if let Some(f) = self.sim.conduit_source() {
-            render.set_conduit_source(f);
+        if let Some(snapshot) = &block_entity_snapshot {
+            render.set_conduit_source(
+                self.sim
+                    .conduit_source_from_snapshot(std::sync::Arc::clone(snapshot)),
+            );
         }
 
         // Banners. The pattern compositing, the mask atlas, the flag mesh, the
@@ -781,8 +804,11 @@ impl WindowApp {
         // failure mode is a lectern that is never holding a book, which is
         // exactly what a missing install looks like from a screenshot. Hence the
         // call site lands with the geometry rather than after it.
-        if let Some(f) = self.sim.lectern_source() {
-            render.set_lectern_source(f);
+        if let Some(snapshot) = &block_entity_snapshot {
+            render.set_lectern_source(
+                self.sim
+                    .lectern_source_from_snapshot(std::sync::Arc::clone(snapshot)),
+            );
         }
 
         // Campfire cooking items. Installed beside the others but consumed by a
@@ -829,8 +855,11 @@ impl WindowApp {
         // animated values is on the wire — so a one-shot install draws every book
         // frozen at the tick the session joined on, with no missing packet to
         // blame it on.
-        if let Some(f) = self.sim.enchanting_table_source() {
-            render.set_enchanting_table_source(f);
+        if let Some(snapshot) = &block_entity_snapshot {
+            render.set_enchanting_table_source(
+                self.sim
+                    .enchanting_table_source_from_snapshot(std::sync::Arc::clone(snapshot)),
+            );
         }
 
         // Moving pistons. A third destination again: not `prepare_block_entities`
@@ -1782,7 +1811,7 @@ impl WindowApp {
         // Issue #184's `SessionMaps` fold reaching the screen. A diagnostic and
         // not the map's own picture — see `HudFrame::map_debug` for what is still
         // missing and why it is a texture job rather than a wiring one.
-        hud_frame.map_debug = self.sim.map_debug();
+        hud_frame.map_debug = map_debug_when_visible(self.show_debug, || self.sim.map_debug());
         // The recipe-unlock toast (issue #163). `None` on every real session
         // today, because the queue's only possible producer is the
         // `recipe_book_add` decode that does not exist yet — see the field's own
@@ -2651,6 +2680,13 @@ impl WindowApp {
 /// [`WindowApp::last_ping_request`]'s own doc for why F3 is the gate and one
 /// second is the interval.
 #[must_use]
+pub(super) fn map_debug_when_visible<T>(
+    show_debug: bool,
+    gather: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    show_debug.then(gather).flatten()
+}
+
 fn should_send_ping_request(show_debug: bool, last: Option<Instant>, now: Instant) -> bool {
     show_debug && last.is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_secs(1))
 }

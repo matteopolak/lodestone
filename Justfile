@@ -369,6 +369,13 @@ bench-client-megaworld:
 bench-client-megaworld-smoke:
     python3 scripts/client-frame-benchmark.py --workload megaworld --smoke
 
+# Stampy's Lovelier World from an open-air waypoint, with a climbing orbit.
+bench-client-lovelier:
+    python3 scripts/client-frame-benchmark.py --workload lovelier
+
+bench-client-lovelier-smoke:
+    python3 scripts/client-frame-benchmark.py --workload lovelier --smoke
+
 # Live-oracle launchers — one recipe per canonical oracle. Each script
 # creates a fresh container and tears it down when it exits. See
 # docs/oracle-runtimes.md and CLAUDE.md for the spawn contracts.
@@ -380,6 +387,9 @@ oracle-terrain:
 
 oracle-megaworld:
     ./scripts/live-oracles/megaworld.sh
+
+oracle-lovelier:
+    ./scripts/live-oracles/lovelier.sh
 
 oracle-survival:
     ./scripts/live-oracles/survival.sh

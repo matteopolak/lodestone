@@ -66,6 +66,12 @@ ORACLES = {
         "game_port": 25590,
         "rcon_port": 25591,
     },
+    "lovelier": {
+        "script": ROOT / "scripts" / "live-oracles" / "lovelier.sh",
+        "world": ROOT / ".cache" / "mc" / "lovelier",
+        "game_port": 25600,
+        "rcon_port": 25601,
+    },
 }
 
 
@@ -338,6 +344,8 @@ def joined_player_commands(workload: str, username: str) -> list[str]:
         commands.append(f"tp {username} 0 140 0 0 10")
     elif workload == "showcase":
         commands.append(f"tp {username} 0 65 0 0 0")
+    elif workload == "lovelier":
+        commands.append(f"tp {username} 0 180 0 0 35")
     return commands
 
 
@@ -398,6 +406,19 @@ def _client_command(
     ]
 
 
+def _samply_command(client: list[str], artifact: pathlib.Path) -> list[str]:
+    return [
+        "samply",
+        "record",
+        "--save-only",
+        "--unstable-presymbolicate",
+        "--output",
+        str(artifact),
+        "--",
+        *client,
+    ]
+
+
 def _unique_username(trial: int) -> str:
     suffix = int(time.time() * 1000) % 100_000
     return f"LdB{os.getpid():x}{trial}{suffix}"[:16]
@@ -427,15 +448,7 @@ def run_trial(
             binary, workload, oracle["game_port"], durations, debug_overlay
         )
         if samply_artifact is not None:
-            command = [
-                "samply",
-                "record",
-                "--save-only",
-                "--output",
-                str(samply_artifact),
-                "--",
-                *client,
-            ]
+            command = _samply_command(client, samply_artifact)
         else:
             command = client
         env = os.environ.copy()
@@ -648,7 +661,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--samply requested but samply is not on PATH")
 
     durations = (2, 2, 3) if args.smoke else (
-        (45, 30, 60) if args.workload == "megaworld" else (20, 30, 60)
+        (45, 30, 60) if args.workload in ("megaworld", "lovelier") else (20, 30, 60)
     )
     trial_count = 1 if args.smoke or args.samply else args.trials
     arms = overlay_arms(args.workload, args.debug_overlay)

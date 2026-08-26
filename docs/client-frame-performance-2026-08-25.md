@@ -41,6 +41,23 @@ hottest Lodestone leaves identified `VanillaFont::draw_ink`,
 `GlyphRaster::texel_rgba`, and `ColourStream::rect`: each visible F3 glyph was
 being scanned texel by texel and expanded into rectangles on every redraw.
 
+A later closed-F3 capture, recorded before the map snapshot change, is
+`bench-results/profiles/megaworld-closed-20260825-210124.json.gz` with its
+`.json.syms.json` sidecar. `threadCPUDelta`-weighted call paths attributed 14.0%
+of sampled client CPU to `Sim::maps`; about half fed the map render source and
+47.4% fed `Sim::map_debug` even though F3 was closed. `MapState::clone` alone
+accounted for 13.8%. This profile selected copy-on-write map snapshots as the
+first world-extraction optimization.
+
+The post-map capture is
+`bench-results/profiles/megaworld-closed-20260826-120939.json.gz`; it confirms
+`Sim::maps` fell from 14.0% to 0.01% and `MapState::clone` disappeared. It also
+made the next repeated-extraction cost visible: state-driven block-entity
+renderers independently walked the same block-entity records and called
+`entity_light_at` once per surviving object. The shared block-entity snapshot
+was measured with
+`bench-results/profiles/megaworld-closed-20260826-122258.json.gz`.
+
 ## Measurements
 
 ### F3 cost before the fix
@@ -91,6 +108,50 @@ runs did more world work. Baseline stationary `world.prepare_buffers` was
 2.321 ms; the final median was 2.857 ms. Even with 0.536 ms more preparation,
 frame p50 improved by 0.734 ms.
 
+### Map and block-entity snapshot results
+
+Copy-on-write map storage and the closed-F3 gather gate removed the profiled
+map-copy path: `Sim::maps` fell from 14.0% of sampled client CPU to 0.01%, and
+`MapState::clone` no longer appeared. Across matching ordinary stationary
+trials, `hud.frame_gather` fell from a 0.695 ms median to 0.020 ms (−97.1%).
+Frame p50 moved from 5.750 ms to 5.688 ms (−1.1%) because `sim_tick` and world
+preparation varied upward during the post-change trials.
+
+The next slice creates one camera-scoped `{position, state, light}` snapshot
+for chests, bells, shulker boxes, lecterns, enchanting tables, conduits, and
+copper golem statues. In matched Samply captures:
+
+| sampled CPU function | before shared snapshot | after | relative change |
+|---|---:|---:|---:|
+| `prepare_block_entities` | 6.97% | 4.19% | −39.9% |
+| `entity_light_at` | 3.59% | 2.33% | −35.1% |
+| replacement `block_entity_frame_snapshot` | — | 0.76% | one shared scan |
+
+The former per-type chest, bell, shulker, lectern, enchanting-table, conduit,
+and copper-statue gathers disappeared as standalone profile costs. This is a
+real targeted CPU reduction, but the ordinary whole-frame result is not a win:
+
+| stationary metric (three-trial median) | before | after | change |
+|---|---:|---:|---:|
+| frame p50 | 5.688 ms | 5.873 ms | +3.2% |
+| `world.prepare_buffers` | 3.012 ms | 2.980 ms | −1.1% |
+| `sim_tick` | 2.736 ms | 2.920 ms | +6.7% |
+
+All stationary trials visited exactly 2,168 model sections and zero packed
+sections. The after p50 spread was 5.183–5.959 ms, wider than the local render
+saving; unrelated simulation variance erased it. The conclusion is deliberately
+split: the profile validates the extraction change, while these ordinary trials
+do **not** establish an end-to-end frame-time improvement.
+
+The historical `megaworld.moving` rows in this document used a straight
+forward input. Live inspection on 2026-08-26 showed that it eventually walked
+into authored geometry and stayed in a corner, so those rows are valid only as
+the exact workload they recorded—not as sustained traversal measurements. The
+benchmark now delays creative-flight activation until after post-join server
+configuration and uses a five-second climbing, full-circle orbit. Stationary
+megaworld rows are unaffected. New moving rows must not be ratioed against the
+old straight-walk rows.
+
 ### Current CPU and GPU boundary
 
 With F3 fixed, the representative 2,168-section final trials are CPU-heavy in
@@ -138,13 +199,20 @@ even a small per-refresh builder cost becomes a frame-time cost again. Do not
 raise it without checking coordinates, FPS, and memory values remain useful to
 players.
 
-The next large-world investigation should not change culling or batching based
-only on this authored spawn. Add deterministic waypoints or a denser generated
-flight path that reproduces the reported 7–8 ms `world_encode_submit`, record
-model/packed sections, entity/model-part counts, draw counts, arena upload bytes,
-and pipeline switches, then profile `world.prepare_buffers`. Likely experiments,
-in evidence order, are retained scratch vectors, static block-entity/model-part
-plans, wider batch reuse, and only then spatial-model or culling changes.
+The next CPU targets are now `reachable_from_camera` (11.74% inclusive, 7.90%
+self) and `fold_entities` (11.51%) in the post-snapshot profile. First add
+workload counters for candidate sections/entities and a fixed camera waypoint,
+then cache the section-reachability result until the camera crosses a cell or
+the section occupancy/version changes. That is another exact invalidation-based
+snapshot, not speculative future simulation. Independently, split
+`fold_entities` into update-time reconciliation and a compact immutable draw
+snapshot so unchanged entity facts are not re-resolved on every redraw.
+
+The remaining block-entity work is a lower-priority extension: signs, heads,
+banners, pots, item-bearing entities, spawners, beacons, and portals still own
+specialised gathers. If they join the shared snapshot, store only typed decoded
+payloads for matching states; never copy raw NBT into every candidate. See
+[`block-entity-frame-snapshot.md`](./block-entity-frame-snapshot.md).
 
 For GPU attribution, capture one fixed waypoint in Xcode's Metal debugger and
 compare counters per encoder/pass. Use the existing wgpu timestamps as the
@@ -158,6 +226,7 @@ timing, so it is not a replacement for the three ordinary trials.
 - Benchmark render distance: 24 client / 25 server.
 - Benchmark debug arm: `--debug-overlay open|closed|both`.
 - Full run: `just bench-client-megaworld`.
+- Open large-build run: `just bench-client-lovelier`.
 - One-arm smoke: `python3 scripts/client-frame-benchmark.py --workload
   megaworld --debug-overlay open --smoke`.
 

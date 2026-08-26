@@ -132,6 +132,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   Four independent, pure, tick-driven state machines in
   `crates/lodestone-server/src/`, each a line-by-line port of the corresponding
   vanilla `BlockEntity`/`Block` class:
+- [Block-entity frame snapshot](./block-entity-frame-snapshot.md) — The block-entity
+  frame snapshot is one immutable, camera-scoped gather of block-entity positions,
+  block states, and packed entity light. It lets state-driven renderers share the same
+  world read instead of independently scanning loaded chunks and reacquiring the
+  chunk-world lock for every visible object's light.
 - [Block entity renderers](./block-entity-renderers.md) — The cuboid rigs vanilla's
   `BlockEntityRenderer`s draw for blocks whose block model **does not fully describe
   them**. Chest and skull are the total-absence case — their block models have zero
@@ -671,10 +676,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   again where it lands. It spans the server (decision, entity, physics), the wire (the
   `ADD_ENTITY` Object Data field) and the client (a reusable moving-block-model render
   seam).
-- [Filled map item rendering — the wire and the fold are landed, the renderer is not](./filled-map-item.md) —
-  This covers the filled map item's own visual: the generated per-map pixel texture,
-  player/marker icons, and the border frame, whether held, in an item frame, or shown
-  as a GUI icon.
+- [Filled map item rendering](./filled-map-item.md) — This covers the filled map
+  item's own visual: the generated per-map pixel texture and border frame when held or
+  displayed in an item frame. The wire, session fold, palette conversion, and these
+  two render paths are live; marker icons and a retained per-map GPU texture cache
+  remain follow-up work.
 - [Filled map rendering](./filled-map-rendering.md) — Drawing a
   `minecraft:filled_map`'s actual picture — the vanilla `MapColor` palette, a
   per-map 128×128 texture built from the colour bytes `SessionMaps` folds, and the
