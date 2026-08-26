@@ -1831,6 +1831,8 @@ pub enum BenchmarkWorkload {
     Showcase,
     /// A large late-season multiplayer save, with dense stationary and flight arms.
     Megaworld,
+    /// Stampy's Lovelier World, viewed from an open-air large-build waypoint.
+    Lovelier,
 }
 
 impl BenchmarkWorkload {
@@ -1841,6 +1843,7 @@ impl BenchmarkWorkload {
             Self::Terrain => "terrain",
             Self::Showcase => "showcase",
             Self::Megaworld => "megaworld",
+            Self::Lovelier => "lovelier",
         }
     }
 }
@@ -2009,16 +2012,17 @@ impl Config {
                     benchmark_option_seen = true;
                     let Some(value) = it.next() else {
                         return CliOutcome::Error(
-                            "--benchmark requires terrain, showcase, or megaworld".into(),
+                            "--benchmark requires terrain, showcase, megaworld, or lovelier".into(),
                         );
                     };
                     benchmark_workload = Some(match value.as_str() {
                         "terrain" => BenchmarkWorkload::Terrain,
                         "showcase" => BenchmarkWorkload::Showcase,
                         "megaworld" => BenchmarkWorkload::Megaworld,
+                        "lovelier" => BenchmarkWorkload::Lovelier,
                         _ => {
                             return CliOutcome::Error(format!(
-                                "--benchmark requires terrain, showcase, or megaworld, got {value}"
+                                "--benchmark requires terrain, showcase, megaworld, or lovelier, got {value}"
                             ));
                         }
                     });
@@ -2094,7 +2098,7 @@ impl Config {
                     );
                 }
                 return CliOutcome::Error(
-                    "benchmark duration options require --benchmark terrain, showcase, or megaworld"
+                    "benchmark duration options require --benchmark terrain, showcase, megaworld, or lovelier"
                         .into(),
                 );
             };
@@ -2176,7 +2180,7 @@ RENDER / INPUT:
     --sensitivity <F>        Mouse-look sensitivity, 0..1 (default: 0.5)
 
 LIVE FRAME BENCHMARK:
-    --benchmark <WORKLOAD>   terrain, showcase, or megaworld; forces a windowed run
+    --benchmark <WORKLOAD>   terrain, showcase, megaworld, or lovelier; forces a windowed run
     --benchmark-debug-overlay <STATE>
                              closed or open (default: closed)
     --benchmark-warmup <N>  Joined-world warm-up seconds (default: 20)
@@ -2281,7 +2285,7 @@ mod tests {
     fn benchmark_rejects_unknown_workloads_and_missing_durations() {
         assert!(matches!(
             Config::from_args(["--benchmark".into(), "castle".into()]),
-            CliOutcome::Error(message) if message.contains("terrain, showcase, or megaworld")
+            CliOutcome::Error(message) if message.contains("terrain, showcase, megaworld, or lovelier")
         ));
         assert!(matches!(
             Config::from_args(["--benchmark-warmup".into()]),
@@ -2310,6 +2314,15 @@ mod tests {
         assert_eq!(
             closed.benchmark.expect("benchmark config").debug_overlay,
             BenchmarkDebugOverlay::Closed
+        );
+    }
+
+    #[test]
+    fn lovelier_large_world_workload_parses() {
+        let parsed = parse(&["--benchmark", "lovelier"]);
+        assert_eq!(
+            parsed.benchmark.expect("benchmark config").workload,
+            BenchmarkWorkload::Lovelier
         );
     }
 

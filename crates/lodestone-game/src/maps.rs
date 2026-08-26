@@ -27,7 +27,7 @@
 //! presentation and belongs to the renderer. If you need a lookup, put it beside
 //! the drawing code.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use lodestone_model::event::{ClientEvent, MapDecoration, MapPatch};
 
@@ -43,7 +43,7 @@ pub struct MapState {
     pub locked: bool,
     /// `MAP_SIZE * MAP_SIZE` raw map-palette colour bytes, row-major. `0` is
     /// vanilla's transparent/unexplored entry.
-    pub colors: Vec<u8>,
+    pub colors: Arc<Vec<u8>>,
     /// Icons, in the order the server sent them.
     pub decorations: Vec<MapDecoration>,
 }
@@ -53,7 +53,7 @@ impl Default for MapState {
         Self {
             scale: 0,
             locked: false,
-            colors: vec![0; MAP_SIZE * MAP_SIZE],
+            colors: Arc::new(vec![0; MAP_SIZE * MAP_SIZE]),
             decorations: Vec::new(),
         }
     }
@@ -66,6 +66,7 @@ impl MapState {
     pub fn apply_patch(&mut self, patch: &MapPatch) {
         let width = usize::from(patch.width);
         let height = usize::from(patch.height);
+        let colors = Arc::make_mut(&mut self.colors);
         for row in 0..height {
             let y = usize::from(patch.start_y) + row;
             if y >= MAP_SIZE {
@@ -77,7 +78,7 @@ impl MapState {
                     break;
                 }
                 if let Some(color) = patch.colors.get(column + row * width) {
-                    self.colors[x + y * MAP_SIZE] = *color;
+                    colors[x + y * MAP_SIZE] = *color;
                 }
             }
         }
@@ -96,7 +97,7 @@ impl MapState {
 /// Every map the server has sent contents for, by map id.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MapStore {
-    maps: BTreeMap<i32, MapState>,
+    maps: Arc<BTreeMap<i32, MapState>>,
 }
 
 impl MapStore {
@@ -112,7 +113,7 @@ impl MapStore {
         else {
             return false;
         };
-        let state = self.maps.entry(*map_id).or_default();
+        let state = Arc::make_mut(&mut self.maps).entry(*map_id).or_default();
         state.scale = *scale;
         state.locked = *locked;
         if let Some(decorations) = decorations {
@@ -153,6 +154,7 @@ impl MapStore {
 mod tests {
     use super::*;
     use lodestone_model::ids::Identifier;
+    use std::sync::Arc;
 
     fn patch(start_x: u8, start_y: u8, width: u8, height: u8, fill: u8) -> MapPatch {
         MapPatch {
@@ -215,5 +217,35 @@ mod tests {
         );
         store.apply(&event(1, Some(Vec::new()), None));
         assert!(store.get(1).unwrap().decorations.is_empty());
+    }
+
+    #[test]
+    fn cloning_a_store_shares_unchanged_map_storage() {
+        let mut store = MapStore::default();
+        store.apply(&event(7, None, Some(patch(0, 0, 1, 1, 9))));
+        let snapshot = store.clone();
+
+        assert!(Arc::ptr_eq(&store.maps, &snapshot.maps));
+        assert!(Arc::ptr_eq(
+            &store.get(7).unwrap().colors,
+            &snapshot.get(7).unwrap().colors,
+        ));
+    }
+
+    #[test]
+    fn a_patch_copies_only_storage_observed_by_an_older_snapshot() {
+        let mut store = MapStore::default();
+        store.apply(&event(7, None, Some(patch(0, 0, 1, 1, 9))));
+        let snapshot = store.clone();
+
+        store.apply(&event(7, None, Some(patch(0, 0, 1, 1, 44))));
+
+        assert_eq!(snapshot.get(7).unwrap().color_at(0, 0), 9);
+        assert_eq!(store.get(7).unwrap().color_at(0, 0), 44);
+        assert!(!Arc::ptr_eq(&store.maps, &snapshot.maps));
+        assert!(!Arc::ptr_eq(
+            &store.get(7).unwrap().colors,
+            &snapshot.get(7).unwrap().colors,
+        ));
     }
 }

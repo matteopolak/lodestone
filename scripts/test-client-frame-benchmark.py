@@ -88,6 +88,14 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("gamemode creative BenchUser", commands)
         self.assertFalse(any(command.startswith("tp ") for command in commands))
 
+    def test_lovelier_uses_an_independent_oracle_and_open_air_waypoint(self):
+        oracle = MODULE.ORACLES["lovelier"]
+        self.assertEqual(oracle["game_port"], 25600)
+        self.assertEqual(oracle["rcon_port"], 25601)
+        commands = MODULE.joined_player_commands("lovelier", "BenchUser")
+        self.assertIn("gamemode creative BenchUser", commands)
+        self.assertIn("tp BenchUser 0 180 0 0 35", commands)
+
     def test_overlay_arms_default_to_both_only_for_megaworld(self):
         self.assertEqual(MODULE.overlay_arms("megaworld", None), ["closed", "open"])
         self.assertEqual(MODULE.overlay_arms("terrain", None), ["closed"])
@@ -104,6 +112,20 @@ class SummaryTests(unittest.TestCase):
         )
         index = command.index("--benchmark-debug-overlay")
         self.assertEqual(command[index + 1], "open")
+
+    def test_samply_command_requests_presymbolication(self):
+        artifact = pathlib.Path("/tmp/profile.json.gz")
+        command = MODULE._samply_command(
+            ["/tmp/lodestone", "--benchmark", "megaworld"], artifact
+        )
+        self.assertEqual(
+            command[:4],
+            ["samply", "record", "--save-only", "--unstable-presymbolicate"],
+        )
+        self.assertEqual(
+            command[-4:],
+            ["--", "/tmp/lodestone", "--benchmark", "megaworld"],
+        )
 
     def test_nearest_rank_percentile_uses_the_observed_tail(self):
         self.assertEqual(MODULE.nearest_rank([1.0, 2.0, 8.0, 9.0], 0.95), 9.0)

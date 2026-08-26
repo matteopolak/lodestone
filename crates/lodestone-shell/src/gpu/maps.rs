@@ -321,7 +321,7 @@ impl RenderState {
         note_map_drawn();
         Some((
             gpu,
-            map_texture_bind_group(device, queue, &model.pipeline, &colors),
+            map_texture_bind_group(device, queue, &model.pipeline, colors.as_slice()),
         ))
     }
 
@@ -397,7 +397,7 @@ impl RenderState {
         note_map_drawn();
         Some((
             gpu,
-            map_texture_bind_group(device, queue, &model.pipeline, &colors),
+            map_texture_bind_group(device, queue, &model.pipeline, colors.as_slice()),
         ))
     }
 }

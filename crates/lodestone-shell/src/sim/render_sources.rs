@@ -132,6 +132,86 @@ impl Sim {
     ///
     /// # Why this is not gated on `vanilla_atlas`
     ///
+    /// Captures the common state-and-light input for the state-driven block
+    /// entity renderers once for this camera position.
+    #[must_use]
+    pub(crate) fn block_entity_frame_snapshot(
+        &self,
+        eye: glam::Vec3,
+    ) -> Option<std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>> {
+        let handle = self.net.as_ref()?.shared_handle();
+        crate::block_entities::block_entity_frame_snapshot(&handle, eye).map(std::sync::Arc::new)
+    }
+
+    pub(crate) fn block_entity_source_from_snapshot(
+        &self,
+        snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
+    ) -> impl Fn(glam::Vec3) -> Vec<lodestone_render::ChestSpawn> + Send + Sync + 'static {
+        let lids = self.chest_lids.clone();
+        let partial_tick = self.clock().interp_alpha;
+        move |_eye| {
+            crate::block_entities::chest_spawns_from_snapshot(&snapshot, &lids, partial_tick)
+        }
+    }
+
+    pub(crate) fn copper_golem_statue_source_from_snapshot(
+        &self,
+        snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
+    ) -> impl Fn(glam::Vec3) -> Vec<lodestone_render::CopperGolemStatueSpawn> + Send + Sync + 'static {
+        move |_eye| crate::block_entities::copper_golem_statue_spawns_from_snapshot(&snapshot)
+    }
+
+    pub(crate) fn bell_source_from_snapshot(
+        &self,
+        snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
+    ) -> impl Fn(glam::Vec3) -> Vec<lodestone_render::BellSpawn> + Send + Sync + 'static {
+        let shakes = self.bell_shakes.clone();
+        let partial_tick = self.clock().interp_alpha;
+        move |_eye| {
+            crate::block_entities::bell_spawns_from_snapshot(&snapshot, &shakes, partial_tick)
+        }
+    }
+
+    pub(crate) fn shulker_source_from_snapshot(
+        &self,
+        snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
+    ) -> impl Fn(glam::Vec3) -> Vec<lodestone_render::ShulkerSpawn> + Send + Sync + 'static {
+        move |_eye| crate::block_entities::shulker_spawns_from_snapshot(&snapshot)
+    }
+
+    pub(crate) fn conduit_source_from_snapshot(
+        &self,
+        snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
+    ) -> impl Fn(glam::Vec3) -> Vec<lodestone_render::ConduitSpawn> + Send + Sync + 'static {
+        let ticks = self.conduit_ticks.clone();
+        let partial_tick = self.clock().interp_alpha;
+        move |_eye| {
+            crate::block_entities::conduit_spawns_from_snapshot(&snapshot, &ticks, partial_tick)
+        }
+    }
+
+    pub(crate) fn lectern_source_from_snapshot(
+        &self,
+        snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
+    ) -> impl Fn(glam::Vec3) -> Vec<lodestone_render::LecternSpawn> + Send + Sync + 'static {
+        move |_eye| crate::block_entities::lectern_spawns_from_snapshot(&snapshot)
+    }
+
+    pub(crate) fn enchanting_table_source_from_snapshot(
+        &self,
+        snapshot: std::sync::Arc<crate::block_entities::BlockEntityFrameSnapshot>,
+    ) -> impl Fn(glam::Vec3) -> Vec<lodestone_render::EnchantingTableSpawn> + Send + Sync + 'static {
+        let books = self.enchanting_table_books.clone();
+        let partial_tick = self.clock().interp_alpha;
+        move |_eye| {
+            crate::block_entities::enchanting_table_spawns_from_snapshot(
+                &snapshot,
+                &books,
+                partial_tick,
+            )
+        }
+    }
+
     /// [`Self::outline_shape_source`] is, because an outline is only meaningful
     /// against real block states. This is not, and the difference matters: the
     /// chest sheets are loaded by the *renderer* from its own jar lookup, so a
@@ -606,14 +686,14 @@ impl Sim {
     #[must_use]
     pub fn map_source(
         &self,
-    ) -> Option<impl Fn(Option<i32>) -> Option<Vec<u8>> + Send + Sync + 'static> {
+    ) -> Option<impl Fn(Option<i32>) -> Option<std::sync::Arc<Vec<u8>>> + Send + Sync + 'static> {
         // Off a live server the store is always empty, so a source would only
         // ever answer `None`; skip it as the block-entity sources do.
         self.net.as_ref()?;
         let store = self.maps();
         Some(move |id: Option<i32>| {
             let id = id.or_else(|| store.ids().next())?;
-            Some(store.get(id)?.colors.clone())
+            Some(std::sync::Arc::clone(&store.get(id)?.colors))
         })
     }
 

@@ -3,6 +3,8 @@
 //! the local player's third-person body, outline shapes, hand-swing progress
 //! and the main-hand item). See each type's doc for why the wire lives here
 //! rather than being threaded through [`RenderState::render`]'s signature.
+use std::sync::Arc;
+
 use glam::Vec3;
 
 use lodestone_assets::ResourceLocation;
@@ -1086,13 +1088,13 @@ impl std::fmt::Debug for SignSource {
 #[derive(Default)]
 pub struct MapSource(
     #[allow(clippy::type_complexity)]
-    pub(super)  Option<Box<dyn Fn(Option<i32>) -> Option<Vec<u8>> + Send + Sync>>,
+    pub(super) Option<Box<dyn Fn(Option<i32>) -> Option<Arc<Vec<u8>>> + Send + Sync>>,
 );
 
 impl MapSource {
     /// One map's raw 128×128 packed colour grid, or none when unset or unknown.
     #[must_use]
-    pub(super) fn picture(&self, id: Option<i32>) -> Option<Vec<u8>> {
+    pub(super) fn picture(&self, id: Option<i32>) -> Option<Arc<Vec<u8>>> {
         self.0.as_ref().and_then(|f| f(id))
     }
 
@@ -1427,5 +1429,23 @@ impl std::fmt::Debug for MovingPistonSource {
         f.debug_tuple("MovingPistonSource")
             .field(&if self.0.is_some() { "set" } else { "empty" })
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn map_source_reuses_shared_pixels_between_consumers() {
+        let pixels = Arc::new(vec![9; lodestone_game::maps::MAP_SIZE.pow(2)]);
+        let captured = Arc::clone(&pixels);
+        let source = MapSource(Some(Box::new(move |_| Some(Arc::clone(&captured)))));
+
+        let held = source.picture(None).expect("held map picture");
+        let framed = source.picture(None).expect("framed map picture");
+        assert!(Arc::ptr_eq(&held, &framed));
+        assert!(Arc::ptr_eq(&held, &pixels));
     }
 }

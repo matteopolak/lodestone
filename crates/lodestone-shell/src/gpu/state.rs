@@ -15,7 +15,7 @@
 //! Every `has_*` accessor next door exists for one reason, recorded once here
 //! rather than nine times below: a wrong *value* and a missing *wiring* look
 //! identical on screen, and only one of them is a bug in this module.
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{
@@ -1838,7 +1838,7 @@ impl RenderState {
     /// sent by then and would never fill in as the player explored.
     pub fn set_map_source(
         &mut self,
-        f: impl Fn(Option<i32>) -> Option<Vec<u8>> + Send + Sync + 'static,
+        f: impl Fn(Option<i32>) -> Option<Arc<Vec<u8>>> + Send + Sync + 'static,
     ) {
         self.map_source = MapSource(Some(Box::new(f)));
     }

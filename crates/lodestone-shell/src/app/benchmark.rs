@@ -108,6 +108,15 @@ impl BenchmarkDriver {
             }
             (BenchmarkWorkload::Megaworld, BenchmarkSegment::Moving) => "megaworld.moving",
             (BenchmarkWorkload::Megaworld, BenchmarkSegment::Complete) => "megaworld.complete",
+            (BenchmarkWorkload::Lovelier, BenchmarkSegment::WaitingForJoin) => {
+                "lovelier.waiting_for_join"
+            }
+            (BenchmarkWorkload::Lovelier, BenchmarkSegment::Warmup) => "lovelier.warmup",
+            (BenchmarkWorkload::Lovelier, BenchmarkSegment::Stationary) => {
+                "lovelier.stationary"
+            }
+            (BenchmarkWorkload::Lovelier, BenchmarkSegment::Moving) => "lovelier.moving",
+            (BenchmarkWorkload::Lovelier, BenchmarkSegment::Complete) => "lovelier.complete",
         }
     }
 
@@ -140,12 +149,17 @@ impl BenchmarkDriver {
             let mut intent = BenchmarkIntent::idle(BenchmarkSegment::Warmup);
             if matches!(
                 self.config.workload,
-                BenchmarkWorkload::Terrain | BenchmarkWorkload::Megaworld
+                BenchmarkWorkload::Terrain
+                    | BenchmarkWorkload::Megaworld
+                    | BenchmarkWorkload::Lovelier
             ) {
                 // Two press edges, separated by releases, enable creative
                 // flight without relying on server commands or menu state.
+                // Wait one second: the Python runner sees the warmup marker
+                // and applies post-join gamemode/teleport commands first.
                 let flight_edge = elapsed.as_millis();
-                intent.jump = flight_edge < 75 || (150..225).contains(&flight_edge);
+                intent.jump = (1_000..1_075).contains(&flight_edge)
+                    || (1_150..1_225).contains(&flight_edge);
             }
             return intent;
         }
@@ -158,22 +172,26 @@ impl BenchmarkDriver {
 
         let mut intent = BenchmarkIntent::idle(BenchmarkSegment::Moving);
         match self.config.workload {
-            BenchmarkWorkload::Terrain | BenchmarkWorkload::Megaworld => {
+            BenchmarkWorkload::Terrain
+            | BenchmarkWorkload::Megaworld
+            | BenchmarkWorkload::Lovelier => {
                 intent.forward = true;
                 intent.sprint = true;
+                // Climb clear of the authored spawn before settling into the
+                // orbit. A straight horizontal walk eventually becomes a wall
+                // benchmark in any real build.
+                intent.jump = elapsed.saturating_sub(moving_start) < Duration::from_secs(5);
             }
-            BenchmarkWorkload::Showcase => {
-                // At the canonical 0.5 sensitivity, 0.15 degrees/raw pixel.
-                // Integrate only the portion of this update overlapping the
-                // moving segment, making the total exactly one orbit even if
-                // redraw cadence changes.
-                let overlap_start = previous_elapsed.max(moving_start);
-                let overlap = elapsed.saturating_sub(overlap_start);
-                let moving_seconds = self.config.moving.as_secs_f32();
-                if moving_seconds > 0.0 {
-                    intent.mouse_dx = (360.0 / 0.15) * overlap.as_secs_f32() / moving_seconds;
-                }
-            }
+            BenchmarkWorkload::Showcase => {}
+        }
+        // At the canonical 0.5 sensitivity, 0.15 degrees/raw pixel. Integrate
+        // only the portion of this update overlapping the moving segment,
+        // making the total exactly one orbit even if redraw cadence changes.
+        let overlap_start = previous_elapsed.max(moving_start);
+        let overlap = elapsed.saturating_sub(overlap_start);
+        let moving_seconds = self.config.moving.as_secs_f32();
+        if moving_seconds > 0.0 {
+            intent.mouse_dx = (360.0 / 0.15) * overlap.as_secs_f32() / moving_seconds;
         }
         intent
     }
@@ -243,10 +261,11 @@ mod tests {
     fn terrain_warmup_emits_two_jump_press_edges_for_creative_flight() {
         let t0 = Instant::now();
         let mut driver = BenchmarkDriver::new(fixture_config());
-        assert!(driver.update(t0, true).jump);
-        assert!(!driver.update(t0 + Duration::from_millis(80), true).jump);
-        assert!(driver.update(t0 + Duration::from_millis(160), true).jump);
-        assert!(!driver.update(t0 + Duration::from_millis(240), true).jump);
+        assert!(!driver.update(t0, true).jump);
+        assert!(driver.update(t0 + Duration::from_millis(1_000), true).jump);
+        assert!(!driver.update(t0 + Duration::from_millis(1_080), true).jump);
+        assert!(driver.update(t0 + Duration::from_millis(1_160), true).jump);
+        assert!(!driver.update(t0 + Duration::from_millis(1_240), true).jump);
     }
 
     #[test]
@@ -255,9 +274,54 @@ mod tests {
         let mut cfg = fixture_config();
         cfg.workload = BenchmarkWorkload::Megaworld;
         let mut driver = BenchmarkDriver::new(cfg);
-        assert!(driver.update(t0, true).jump);
+        assert!(!driver.update(t0, true).jump);
         let moving = driver.update(t0 + Duration::from_secs(51), true);
         assert!(moving.forward && moving.sprint);
         assert_eq!(driver.label(moving.segment), "megaworld.moving");
+    }
+
+    #[test]
+    fn large_world_flight_edges_wait_for_post_join_server_configuration() {
+        let t0 = Instant::now();
+        let mut cfg = fixture_config();
+        cfg.workload = BenchmarkWorkload::Megaworld;
+        let mut driver = BenchmarkDriver::new(cfg);
+
+        assert!(!driver.update(t0, true).jump);
+        assert!(driver.update(t0 + Duration::from_millis(1_000), true).jump);
+        assert!(!driver.update(t0 + Duration::from_millis(1_080), true).jump);
+        assert!(driver.update(t0 + Duration::from_millis(1_160), true).jump);
+        assert!(!driver.update(t0 + Duration::from_millis(1_240), true).jump);
+    }
+
+    #[test]
+    fn large_world_movement_is_a_climbing_orbit_not_a_straight_walk() {
+        let t0 = Instant::now();
+        let mut cfg = fixture_config();
+        cfg.workload = BenchmarkWorkload::Megaworld;
+        let mut driver = BenchmarkDriver::new(cfg);
+        let _ = driver.update(t0, true);
+
+        let climbing = driver.update(t0 + Duration::from_secs(51), true);
+        assert!(climbing.forward && climbing.sprint && climbing.jump);
+        assert!(climbing.mouse_dx > 0.0);
+
+        let orbiting = driver.update(t0 + Duration::from_secs(56), true);
+        assert!(orbiting.forward && orbiting.sprint);
+        assert!(!orbiting.jump);
+        assert!(orbiting.mouse_dx > 0.0);
+    }
+
+    #[test]
+    fn lovelier_uses_the_large_world_choreography_and_its_own_labels() {
+        let t0 = Instant::now();
+        let mut cfg = fixture_config();
+        cfg.workload = BenchmarkWorkload::Lovelier;
+        let mut driver = BenchmarkDriver::new(cfg);
+        let _ = driver.update(t0, true);
+
+        let moving = driver.update(t0 + Duration::from_secs(51), true);
+        assert!(moving.forward && moving.mouse_dx > 0.0);
+        assert_eq!(driver.label(moving.segment), "lovelier.moving");
     }
 }
