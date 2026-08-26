@@ -268,6 +268,14 @@ pub struct VanillaFont {
     /// interior-mutable, and every glyph draw advances it exactly once, same
     /// as vanilla.
     obfuscation_rng: AtomicU64,
+    /// Source-colour scanline runs for glyphs already drawn by this font.
+    ///
+    /// The old path revisited every source texel for every glyph, twice per
+    /// draw (shadow + ink) and again on the next frame. F3 makes that scan one
+    /// of the hottest functions in the client. Runs are independent of scale,
+    /// position and tint, so one entry can serve every HUD surface while still
+    /// letting [`Self::draw_ink`] apply those per-draw values exactly.
+    ink_runs: Mutex<HashMap<InkRunCacheKey, Arc<CachedGlyphInk>>>,
     /// Custom fonts a `"font": "<ns>:<name>"` span can name, loaded lazily
     /// from the same resource-pack-aware manager the default font uses (see
     /// [`jar_manager`]) and cached — `None` for an id that failed to load, so
@@ -292,6 +300,73 @@ pub struct VanillaFont {
 struct CustomFontCache {
     generation: Option<u64>,
     entries: HashMap<FontId, Option<Arc<RasterFont>>>,
+}
+
+/// Identity of one raster font/codepoint pair in [`VanillaFont::ink_runs`].
+///
+/// `RasterFont` has no public asset id because a custom font can be an
+/// in-memory fixture or a pack override. Its address is stable for its
+/// lifetime: the default raster is owned by `VanillaFont`, and custom rasters
+/// are retained by [`CustomFontCache`]. A pack change replaces either owner,
+/// producing a different identity; the old run is harmless and disappears
+/// with this `VanillaFont` or its small cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct InkRunCacheKey {
+    raster: usize,
+    codepoint: u32,
+}
+
+/// One horizontal run of identical, non-transparent source texels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CachedInkRun {
+    ty: u32,
+    start: u32,
+    end: u32,
+    source: [f32; 4],
+}
+
+/// Tint-independent drawing data derived from one [`GlyphRaster`] walk.
+#[derive(Debug)]
+struct CachedGlyphInk {
+    texel_size: f32,
+    top: f32,
+    left: f32,
+    advance: f32,
+    runs: Vec<CachedInkRun>,
+}
+
+impl CachedGlyphInk {
+    fn from_raster(raster: &GlyphRaster<'_>) -> Self {
+        let mut runs = Vec::new();
+        for ty in 0..raster.cell_height() {
+            let mut tx = 0;
+            while tx < raster.cell_width() {
+                let source = raster.texel_rgba(tx, ty);
+                if source[3] == 0.0 {
+                    tx += 1;
+                    continue;
+                }
+                let start = tx;
+                tx += 1;
+                while tx < raster.cell_width() && raster.texel_rgba(tx, ty) == source {
+                    tx += 1;
+                }
+                runs.push(CachedInkRun {
+                    ty,
+                    start,
+                    end: tx,
+                    source,
+                });
+            }
+        }
+        Self {
+            texel_size: raster.texel_size(),
+            top: raster.top(),
+            left: raster.left(),
+            advance: raster.advance(),
+            runs,
+        }
+    }
 }
 
 /// Process-wide cache, **keyed on the pack generation**. The jar is ~37 MB and
@@ -416,6 +491,7 @@ impl VanillaFont {
                     raster,
                     obfuscation_pool,
                     obfuscation_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
+                    ink_runs: Mutex::new(HashMap::new()),
                     custom: Mutex::new(CustomFontCache::default()),
                 }))
             }
@@ -446,6 +522,7 @@ impl VanillaFont {
             raster,
             obfuscation_pool,
             obfuscation_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
+            ink_runs: Mutex::new(HashMap::new()),
             custom: Mutex::new(CustomFontCache::default()),
         })
     }
@@ -487,6 +564,12 @@ impl VanillaFont {
         if cache.generation != Some(generation) {
             cache.generation = Some(generation);
             cache.entries.clear();
+            // `InkRunCacheKey` uses a raster allocation's address. Dropping
+            // the old custom-font Arcs permits a later generation to reuse
+            // that address, so its derived pixels/metrics must disappear in
+            // the same invalidation step. Clearing the default-font runs too
+            // is conservative and happens only on a pack-generation change.
+            recover_poisoned_lock(self.ink_runs.lock()).clear();
         }
         if let Some(entry) = cache.entries.get(&id) {
             return entry.clone();
@@ -515,6 +598,29 @@ impl VanillaFont {
             return custom;
         }
         &self.raster
+    }
+
+    /// Return one glyph's tint-independent scanline runs, building them only
+    /// on the first draw. The lookup happens before [`RasterFont::raster`], so
+    /// cached TTF glyphs avoid both the texel scan and fontdue's rasterisation.
+    fn cached_ink(&self, font: &RasterFont, codepoint: u32) -> Option<Arc<CachedGlyphInk>> {
+        let key = InkRunCacheKey {
+            raster: font as *const RasterFont as usize,
+            codepoint,
+        };
+        if let Some(ink) = recover_poisoned_lock(self.ink_runs.lock()).get(&key) {
+            return Some(Arc::clone(ink));
+        }
+
+        let raster = font.raster(codepoint)?;
+        let built = Arc::new(CachedGlyphInk::from_raster(&raster));
+        let mut cache = recover_poisoned_lock(self.ink_runs.lock());
+        Some(Arc::clone(cache.entry(key).or_insert(built)))
+    }
+
+    #[cfg(test)]
+    fn ink_run_cache_len(&self) -> usize {
+        recover_poisoned_lock(self.ink_runs.lock()).len()
     }
 
     /// The advance of `ch` in **device** pixels at `scale`.
@@ -927,11 +1033,12 @@ impl VanillaFont {
         font: &RasterFont,
     ) -> f32 {
         let cp = ch as u32;
-        let base_r = font.raster(cp);
-        // Matches by reference (not `base_r` by value): `GlyphRaster` is not
-        // `Copy`, and `base_r` is matched again below to draw the glyph, so
-        // moving it here would make that second match a use-after-move.
-        let advance = glyph_advance(font, cp, base_r.as_ref(), false);
+        let base_ink = self.cached_ink(font, cp);
+        let advance = match &base_ink {
+            Some(ink) => ink.advance,
+            None if font.font().contains(cp) => font.advance(cp).unwrap_or(MISSING_ADVANCE),
+            None => MISSING_ADVANCE,
+        };
         // `GlyphInfo.getAdvance(boolean)`: `advance + boldOffset` when bold,
         // unchanged otherwise. Vanilla applies this to *every* glyph, drawable
         // or not — a bold space is wider too. The offset is **per glyph**, not a
@@ -939,7 +1046,7 @@ impl VanillaFont {
         // to 0.5F because a unihex glyph is drawn at oversample 2, so bold CJK
         // shifts one source texel rather than two.
         let bold_extra = font.font().bold_offset(cp);
-        let bold_advance = glyph_advance(font, cp, base_r.as_ref(), style.bold);
+        let bold_advance = advance + if style.bold { bold_extra } else { 0.0 };
 
         // Alpha-zero text must still advance its pen but must not leave empty
         // colour-stream geometry behind (including missing-glyph and effect
@@ -948,24 +1055,24 @@ impl VanillaFont {
             return bold_advance * scale;
         }
 
-        if let Some(base_r) = base_r {
+        if let Some(base_ink) = base_ink {
             // `§k` (and not a space, per `Font.getGlyph`'s `codepoint != 32`
             // guard, which space satisfies here by having no raster at all):
             // substitute a same-width-class glyph's pixels, but keep drawing
             // at `ch`'s own metrics.
-            let draw_r = if style.obfuscated {
-                self.obfuscated_raster(advance).unwrap_or(base_r)
+            let draw_ink = if style.obfuscated {
+                self.obfuscated_ink(advance).unwrap_or(base_ink)
             } else {
-                base_r
+                base_ink
             };
-            self.draw_ink(cs, &draw_r, x, y, scale, c, style.italic);
+            self.draw_ink(cs, &draw_ink, x, y, scale, c, style.italic);
             if style.bold {
                 // The second, offset pass that actually makes bold read as
                 // bold (`BakedSheetGlyph.renderChar`, `BakedSheetGlyph.java`)
                 // — not a font-weight variant, the same glyph redrawn shifted.
                 self.draw_ink(
                     cs,
-                    &draw_r,
+                    &draw_ink,
                     x + bold_extra * scale,
                     y,
                     scale,
@@ -1001,16 +1108,16 @@ impl VanillaFont {
         bold_advance * scale
     }
 
-    /// Emit one glyph raster's ink as merged horizontal runs, with the line's
-    /// top-left at `(x, y)`. An 8×8 cell is at most 8 quads instead of up to
-    /// 64, and the merged quad is pixel-identical because every texel in a
-    /// run shares one final colour. Bitmap providers can supply coloured or
-    /// partially transparent texels, so a run is split whenever source RGBA
-    /// modulation makes adjacent texels differ.
+    /// Emit one cached glyph's ink as merged horizontal runs, with the line's
+    /// top-left at `(x, y)`. [`CachedGlyphInk`] has already paid the source
+    /// texel scan; this loop only applies the current tint/pose and emits the
+    /// same rectangles as the old per-draw scan. Adjacent source-colour runs
+    /// are merged again when tint makes their final RGBA equal, preserving the
+    /// old geometry as well as the pixels.
     ///
     /// When `italic`, each row is sheared independently: `v` is that row's own
     /// logical-pixel offset from the line's top (matching what
-    /// [`GlyphRaster::top`] returns for the glyph's top edge), and the row
+    /// [`CachedGlyphInk::top`] records for the glyph's top edge), and the row
     /// shifts in `x` by `ITALIC_SHEAR - ITALIC_SHEAR_SLOPE * v`
     /// (`BakedSheetGlyph.shearTop`/`shearBottom`,
     /// `BakedSheetGlyph.java`, both `1.0F - 0.25F * v`). Vanilla shears
@@ -1022,57 +1129,59 @@ impl VanillaFont {
     fn draw_ink(
         &self,
         cs: &mut ColourStream<'_>,
-        r: &GlyphRaster<'_>,
+        ink: &CachedGlyphInk,
         x: f32,
         y: f32,
         scale: f32,
         c: [f32; 4],
         italic: bool,
     ) {
-        let texel = r.texel_size() * scale;
-        let top = y + r.top() * scale;
+        let texel = ink.texel_size * scale;
+        let top = y + ink.top * scale;
         // `GlyphBitmap.getLeft()` / `BakedSheetGlyph`'s `x0 = x + this.left`:
         // zero for a bitmap-sheet or unihex cell (neither overrides the
         // default), but a `ttf` glyph's outline is not generally flush with
         // its advance box, so it carries a real left bearing here.
-        let x = x + r.left() * scale;
-        for ty in 0..r.cell_height() {
-            let mut tx = 0;
-            while tx < r.cell_width() {
-                let Some(colour) = modulated_texel_rgba(r, tx, ty, c) else {
-                    tx += 1;
-                    continue;
-                };
-                let start = tx;
-                tx += 1;
-                while tx < r.cell_width()
-                    && modulated_texel_rgba(r, tx, ty, c) == Some(colour)
-                {
-                    tx += 1;
-                }
-                let shear = if italic {
-                    let v = r.top() + (ty as f32 + 0.5) * r.texel_size();
-                    (font_metrics::ITALIC_SHEAR - font_metrics::ITALIC_SHEAR_SLOPE * v) * scale
-                } else {
-                    0.0
-                };
-                cs.rect(
-                    x + shear + start as f32 * texel,
-                    top + ty as f32 * texel,
-                    (tx - start) as f32 * texel,
-                    texel,
-                    colour,
-                );
+        let x = x + ink.left * scale;
+        let mut i = 0;
+        while i < ink.runs.len() {
+            let run = ink.runs[i];
+            let Some(colour) = modulated_source_rgba(run.source, c) else {
+                i += 1;
+                continue;
+            };
+            let mut end = run.end;
+            i += 1;
+            while let Some(next) = ink.runs.get(i)
+                && next.ty == run.ty
+                && next.start == end
+                && modulated_source_rgba(next.source, c) == Some(colour)
+            {
+                end = next.end;
+                i += 1;
             }
+            let shear = if italic {
+                let v = ink.top + (run.ty as f32 + 0.5) * ink.texel_size;
+                (font_metrics::ITALIC_SHEAR - font_metrics::ITALIC_SHEAR_SLOPE * v) * scale
+            } else {
+                0.0
+            };
+            cs.rect(
+                x + shear + run.start as f32 * texel,
+                top + run.ty as f32 * texel,
+                (end - run.start) as f32 * texel,
+                texel,
+                colour,
+            );
         }
     }
 
-    /// Picks a `§k` replacement raster from [`obfuscation_pool`](VanillaFont::obfuscation_pool),
+    /// Picks a cached `§k` replacement from [`obfuscation_pool`](VanillaFont::obfuscation_pool),
     /// keyed by `ceil(original_advance)` — vanilla's own width class
     /// (`FontSet.java`, `Mth.ceil(glyph.info().getAdvance(false))`), and
     /// advances the free-running picker once. `None` only when this font has
     /// no drawable glyph at all of that exact rounded width.
-    fn obfuscated_raster(&self, original_advance: f32) -> Option<GlyphRaster<'_>> {
+    fn obfuscated_ink(&self, original_advance: f32) -> Option<Arc<CachedGlyphInk>> {
         let width = original_advance.ceil();
         if !(0.0..4096.0).contains(&width) {
             return None;
@@ -1092,7 +1201,7 @@ impl VanillaFont {
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^= z >> 31;
         let idx = (z as usize) % pool.len();
-        self.raster.raster(pool[idx] as u32)
+        self.cached_ink(&self.raster, pool[idx] as u32)
     }
 }
 
@@ -1161,13 +1270,7 @@ fn text_trace_matches(glyphs: &[ResolvedGlyph]) -> bool {
 /// colour has modulated its native source RGBA. Transparent source or pass
 /// alpha deliberately produces no quad at all rather than six transparent
 /// vertices in the HUD stream.
-fn modulated_texel_rgba(
-    raster: &GlyphRaster<'_>,
-    tx: u32,
-    ty: u32,
-    tint: [f32; 4],
-) -> Option<[f32; 4]> {
-    let source = raster.texel_rgba(tx, ty);
+fn modulated_source_rgba(source: [f32; 4], tint: [f32; 4]) -> Option<[f32; 4]> {
     let rgba = [
         source[0] * tint[0],
         source[1] * tint[1],
@@ -1505,6 +1608,7 @@ mod tests {
             obfuscation_pool: build_obfuscation_pool(&raster),
             raster,
             obfuscation_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
+            ink_runs: Mutex::new(HashMap::new()),
             custom: Mutex::new(CustomFontCache::default()),
         }
     }
@@ -1541,6 +1645,66 @@ mod tests {
         FontLoader::new(&manager)
             .load_raster(&id, &FontOptions::none())
             .expect("bitmap fixture font loads")
+    }
+
+    #[test]
+    fn repeated_glyph_draw_reuses_cached_ink_runs_without_changing_geometry() {
+        let raster = bitmap_raster("A", 2, &[255, 255, 255, 255, 255, 255, 255, 255]);
+        let font = font_with_raster(raster);
+        let draw = || {
+            let mut verts = Vec::new();
+            font.draw(
+                &mut ColourStream {
+                    verts: &mut verts,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                "A",
+                5.0,
+                7.0,
+                1.0,
+                [1.0; 4],
+            );
+            verts
+        };
+
+        assert_eq!(font.ink_run_cache_len(), 0);
+        let first = draw();
+        assert_eq!(
+            font.ink_run_cache_len(),
+            1,
+            "shadow and main passes for one codepoint must share one cached raster walk"
+        );
+        let second = draw();
+        assert_eq!(
+            font.ink_run_cache_len(),
+            1,
+            "drawing the same codepoint on a later frame must not rescan its texels"
+        );
+        assert_eq!(second, first, "caching must be geometry-transparent");
+    }
+
+    #[test]
+    fn custom_font_generation_change_invalidates_cached_ink_runs() {
+        let font = font_with_raster(bitmap_raster("A", 1, &[255, 255, 255, 255]));
+        let id = FontId::intern("test:generation-ink-cache");
+        let first = Arc::new(bitmap_raster("A", 1, &[255, 0, 0, 255]));
+        let first = font
+            .custom_raster_for_generation(id, 11, || Some(first))
+            .expect("first custom font");
+        assert!(font.cached_ink(&first, 'A' as u32).is_some());
+        assert_eq!(font.ink_run_cache_len(), 1);
+
+        let second = Arc::new(bitmap_raster("A", 1, &[0, 255, 0, 255]));
+        assert!(
+            font.custom_raster_for_generation(id, 12, || Some(second))
+                .is_some()
+        );
+        assert_eq!(
+            font.ink_run_cache_len(),
+            0,
+            "a new pack generation must not retain runs keyed by freed custom-font addresses"
+        );
     }
 
     fn span(text: &str, font: Option<FontId>) -> TextSpan {

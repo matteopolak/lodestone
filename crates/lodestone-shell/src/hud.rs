@@ -31,6 +31,7 @@ pub use vanilla_font::VanillaFont;
 pub use item_icon::ItemIcon as HotbarSlot;
 
 use std::sync::Arc;
+use std::time::Duration;
 use crate::platform::Instant;
 
 use lodestone_render::{
@@ -2424,6 +2425,7 @@ impl HudGeometry {
             None,
             None,
             HudAnim::NONE,
+            true,
         )
     }
 
@@ -2451,6 +2453,7 @@ impl HudGeometry {
             None,
             Some(font),
             HudAnim::NONE,
+            true,
         )
     }
 
@@ -2470,6 +2473,7 @@ impl HudGeometry {
             None,
             None,
             HudAnim::NONE,
+            true,
         )
     }
 
@@ -2484,6 +2488,7 @@ impl HudGeometry {
         models: Option<&BlockModels>,
         font: Option<&VanillaFont>,
         anim: HudAnim,
+        include_debug: bool,
     ) -> Self {
         // `width`/`height` are the **physical** framebuffer, straight from
         // `winit::inner_size()` — already DPI-scaled, exactly what
@@ -2534,81 +2539,8 @@ impl HudGeometry {
         // everything around it. `DebugScreenOverlay` draws at scale 1 with
         // `MARGIN_LEFT == MARGIN_RIGHT == MARGIN_TOP == 2` and a line height of
         // `9` — see [`DEBUG_MARGIN`] and [`DEBUG_LINE_H`].
-        let debug_scale = debug_overlay::DEBUG_SCALE;
-        let debug_margin = DEBUG_MARGIN;
-        let debug_line_h = DEBUG_LINE_H;
-        if frame.show_debug {
-            let mut left = frame.stats.left_lines();
-            let mut right = frame.stats.right_lines();
-            // The four conditional diagnostics live on the frame rather than on
-            // `DebugStats`, so they cannot be part of either column function.
-            // Each opens with a spacer so it reads as its own `addToGroup` block
-            // instead of running on from the group above, and each is worded in
-            // the overlay's `Key: value` style rather than the `k=v` shorthand
-            // they used to carry — the whole point of this pass is that one
-            // screen does not mix two conventions.
-            let mut left_group_open = false;
-            let mut right_group_open = false;
-            let open = |lines: &mut Vec<String>, opened: &mut bool| {
-                if !*opened {
-                    lines.push(String::new());
-                    *opened = true;
-                }
-            };
-            if let Some((recipes, tags)) = frame.recipe_stats {
-                open(&mut right, &mut right_group_open);
-                right.push(format!("Recipes: {recipes}, tags: {tags}"));
-            }
-            if let Some((dist, warn_at, strength)) = frame.border_debug {
-                open(&mut right, &mut right_group_open);
-                right.push(format!(
-                    "Border: {dist:.1} away, warns at {warn_at:.1} ({strength:.2})"
-                ));
-            }
-            if let Some((count, explored)) = frame.map_debug {
-                open(&mut right, &mut right_group_open);
-                right.push(format!(
-                    "Maps: {count}, {:.0}% explored",
-                    explored * 100.0
-                ));
-            }
-            if let Some(spawn) = frame.spawn_debug {
-                open(&mut left, &mut left_group_open);
-                left.push(format!("Spawn: {} {} {}", spawn.x, spawn.y, spawn.z));
-            }
-            // The frame-profile block flows on below the left column — see
-            // `DebugStats::profile_lines` for why it is left-aligned and no
-            // longer part of the right one. It carries its own leading spacer,
-            // so it reads as its own group rather than running on from the
-            // `Debug overlays:` line above it.
-            left.extend(frame.stats.profile_lines());
-            // Every row measured and broken to fit before it is placed. The
-            // measure is `measure_text` at the overlay's own scale, which is
-            // exactly what `Builder::text` advances by below — the same
-            // expression, not a restatement of it.
-            let rows = debug_overlay::layout_columns(
-                w,
-                debug_margin,
-                debug_line_h,
-                &left,
-                &right,
-                &|s: &str| measure_text(font, s, debug_scale),
-            );
-            // Vanilla fills a plate behind every non-empty line *before* drawing
-            // any text (`extractLines` does two passes for exactly this reason),
-            // so a later line's plate cannot cover an earlier line's glyphs.
-            for row in &rows {
-                b.rect_px(
-                    row.x - 1.0,
-                    row.y - 1.0,
-                    row.width + 2.0,
-                    debug_line_h,
-                    DEBUG_LINE_BG,
-                );
-            }
-            for row in &rows {
-                b.text(&row.text, row.x, row.y, debug_scale, DEBUG_LINE_INK);
-            }
+        if include_debug {
+            draw_debug_overlay(&mut b, frame);
         }
 
         // The F3+Shift profiler pie chart — independent of `frame.show_debug`
@@ -3783,6 +3715,90 @@ impl HudGeometry {
             model_verts: b.model_verts,
             special: b.special,
         }
+    }
+}
+
+/// Build only the F3 text/plate layer for the renderer's persistent buffer.
+/// The public [`HudGeometry`] constructors keep that layer inline for their
+/// pure geometry tests; the live renderer asks the main build to omit it and
+/// draws this separately so unchanged vertices do not need to be regenerated
+/// and uploaded on every presented frame.
+fn build_debug_vertices(
+    frame: &HudFrame<'_>,
+    width: u32,
+    height: u32,
+    gui_scale: u32,
+    font: Option<&VanillaFont>,
+) -> Vec<f32> {
+    let (w, h) = crate::menu::render::logical_canvas(gui_scale, width, height);
+    let mut b = Builder::new(w, h, None, None, None, font);
+    draw_debug_overlay(&mut b, frame);
+    b.verts
+}
+
+/// Emit the F3 overlay into whichever colour stream owns it: the inline pure
+/// geometry path or the live renderer's refreshable cache.
+fn draw_debug_overlay(b: &mut Builder<'_>, frame: &HudFrame<'_>) {
+    if !frame.show_debug {
+        return;
+    }
+    let debug_scale = debug_overlay::DEBUG_SCALE;
+    let debug_margin = DEBUG_MARGIN;
+    let debug_line_h = DEBUG_LINE_H;
+    let mut left = frame.stats.left_lines();
+    let mut right = frame.stats.right_lines();
+    // The four conditional diagnostics live on the frame rather than on
+    // `DebugStats`, so they cannot be part of either column function. Each
+    // opens with a spacer so it reads as its own `addToGroup` block.
+    let mut left_group_open = false;
+    let mut right_group_open = false;
+    let open = |lines: &mut Vec<String>, opened: &mut bool| {
+        if !*opened {
+            lines.push(String::new());
+            *opened = true;
+        }
+    };
+    if let Some((recipes, tags)) = frame.recipe_stats {
+        open(&mut right, &mut right_group_open);
+        right.push(format!("Recipes: {recipes}, tags: {tags}"));
+    }
+    if let Some((dist, warn_at, strength)) = frame.border_debug {
+        open(&mut right, &mut right_group_open);
+        right.push(format!(
+            "Border: {dist:.1} away, warns at {warn_at:.1} ({strength:.2})"
+        ));
+    }
+    if let Some((count, explored)) = frame.map_debug {
+        open(&mut right, &mut right_group_open);
+        right.push(format!("Maps: {count}, {:.0}% explored", explored * 100.0));
+    }
+    if let Some(spawn) = frame.spawn_debug {
+        open(&mut left, &mut left_group_open);
+        left.push(format!("Spawn: {} {} {}", spawn.x, spawn.y, spawn.z));
+    }
+    // The frame-profile block flows below the left column and carries its own
+    // leading spacer so it reads as a distinct group.
+    left.extend(frame.stats.profile_lines());
+    let rows = debug_overlay::layout_columns(
+        b.w,
+        debug_margin,
+        debug_line_h,
+        &left,
+        &right,
+        &|s: &str| measure_text(b.font, s, debug_scale),
+    );
+    // All plates precede all text, matching `DebugScreenOverlay.extractLines`.
+    for row in &rows {
+        b.rect_px(
+            row.x - 1.0,
+            row.y - 1.0,
+            row.width + 2.0,
+            debug_line_h,
+            DEBUG_LINE_BG,
+        );
+    }
+    for row in &rows {
+        b.text(&row.text, row.x, row.y, debug_scale, DEBUG_LINE_INK);
     }
 }
 
@@ -6253,6 +6269,51 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// F3 text is diagnostic rather than input feedback; refresh its large vertex
+/// stream at 10 Hz while drawing the resident buffer every frame. This keeps
+/// coordinates and timing readable without paying CPU raster/vertex expansion
+/// hundreds of times per second on an uncapped client.
+const DEBUG_GEOMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DebugGeometryStamp {
+    width: u32,
+    height: u32,
+    gui_scale: u32,
+    font_revision: u64,
+}
+
+#[derive(Debug, Default)]
+struct DebugGeometryRefresh {
+    was_visible: bool,
+    stamp: Option<DebugGeometryStamp>,
+    refreshed_at: Option<Instant>,
+}
+
+impl DebugGeometryRefresh {
+    fn should_refresh(
+        &mut self,
+        now: Instant,
+        visible: bool,
+        stamp: DebugGeometryStamp,
+    ) -> bool {
+        if !visible {
+            self.was_visible = false;
+            return false;
+        }
+        let due = self.refreshed_at.is_none_or(|last| {
+            now.saturating_duration_since(last) >= DEBUG_GEOMETRY_REFRESH_INTERVAL
+        });
+        let refresh = !self.was_visible || self.stamp != Some(stamp) || due;
+        self.was_visible = true;
+        if refresh {
+            self.stamp = Some(stamp);
+            self.refreshed_at = Some(now);
+        }
+        refresh
+    }
+}
+
 /// GPU renderer for the HUD: a simple coloured-quad pipeline plus a growable
 /// dynamic vertex buffer.
 #[derive(Debug)]
@@ -6273,6 +6334,12 @@ pub struct HudRenderer {
     flat_colour_format: wgpu::TextureFormat,
     buffer: wgpu::Buffer,
     capacity_floats: usize,
+    /// Persistent F3 colour stream. It is drawn every frame but rebuilt and
+    /// uploaded only when [`DebugGeometryRefresh`] requests a new snapshot.
+    debug_buffer: wgpu::Buffer,
+    debug_capacity_floats: usize,
+    debug_vertex_count: u32,
+    debug_refresh: DebugGeometryRefresh,
     gui: Option<GuiHud>,
     /// The flat item atlas and the 3-D block-item pass, shared verbatim with the
     /// container screen. Both halves start detached.
@@ -6296,6 +6363,10 @@ pub struct HudRenderer {
     /// against — the only thing that can tell a current font from a stale one,
     /// since the pack stack is process-wide state with no change notification.
     font_generation: u64,
+    /// Monotonic identity for the font attached to this renderer. A raw Arc
+    /// address can be reused after detach/re-attach; this revision makes an
+    /// immediate retained-F3 rebuild structural instead of allocator-dependent.
+    font_revision: u64,
     /// The wall-clock origin every vitals animation's tick index is measured
     /// from — see `hud/anim.rs`'s module doc for why a wall clock stands in
     /// for the real 20Hz game tick here. Fixed at construction so a fresh
@@ -6427,12 +6498,23 @@ impl HudRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let debug_capacity_floats = 4096;
+        let debug_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hud-debug-verts"),
+            size: (debug_capacity_floats * 4) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         Self {
             pipeline,
             flat_colour_format,
             buffer,
             capacity_floats,
+            debug_buffer,
+            debug_capacity_floats,
+            debug_vertex_count: 0,
+            debug_refresh: DebugGeometryRefresh::default(),
             gui: None,
             icons: IconRenderer::new(),
             font: VanillaFont::shared(),
@@ -6440,6 +6522,7 @@ impl HudRenderer {
             // so `refresh_font_for_pack_generation` can tell "still current"
             // from "a pack landed since".
             font_generation: crate::resources::pack_generation(),
+            font_revision: 0,
             anim_start: Instant::now(),
             heart_anim: anim::HeartAnim::new(),
             hotbar_pop: anim::HotbarPop::new(),
@@ -6506,6 +6589,7 @@ impl HudRenderer {
     /// default, so this is only needed to *replace* it.
     pub fn attach_font(&mut self, font: Arc<VanillaFont>) {
         self.font = Some(font);
+        self.font_revision = self.font_revision.wrapping_add(1);
         // Stamped as current, so the per-frame refresh below leaves a pinned
         // font alone until a pack change actually happens. A gate that pins one
         // pack does not bump the generation, so it keeps what it attached.
@@ -6529,7 +6613,9 @@ impl HudRenderer {
     /// per generation — which is why the symptom was "the pack's font applies in
     /// some places but not to chat".
     pub fn refresh_font_for_pack_generation(&mut self) {
-        vanilla_font::refresh_shared_font(&mut self.font, &mut self.font_generation);
+        if vanilla_font::refresh_shared_font(&mut self.font, &mut self.font_generation) {
+            self.font_revision = self.font_revision.wrapping_add(1);
+        }
     }
 
     /// Drop back to the fixed-advance debug font. The executed negative control
@@ -6537,6 +6623,7 @@ impl HudRenderer {
     /// claims to see vanilla advances must fail.
     pub fn detach_font(&mut self) {
         self.font = None;
+        self.font_revision = self.font_revision.wrapping_add(1);
     }
 
     /// The command-suggestion popup's rect for a frame of this size — what the
@@ -6876,6 +6963,33 @@ impl HudRenderer {
         // that runs on the renderer when one does.
         self.refresh_font_for_pack_generation();
         let font = self.font.clone();
+        let debug_stamp = DebugGeometryStamp {
+            width,
+            height,
+            gui_scale,
+            font_revision: self.font_revision,
+        };
+        if self
+            .debug_refresh
+            .should_refresh(Instant::now(), frame.show_debug, debug_stamp)
+        {
+            let debug = build_debug_vertices(frame, width, height, gui_scale, font.as_deref());
+            if debug.len() > self.debug_capacity_floats {
+                self.debug_capacity_floats = debug.len().next_power_of_two();
+                self.debug_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("hud-debug-verts"),
+                    size: (self.debug_capacity_floats * 4) as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            self.debug_vertex_count = (debug.len() / FLOATS_PER_VERTEX) as u32;
+            if !debug.is_empty() {
+                queue.write_buffer(&self.debug_buffer, 0, bytemuck::cast_slice(&debug));
+            }
+        } else if !frame.show_debug {
+            self.debug_vertex_count = 0;
+        }
         // The vitals-cluster animation phases for this frame — see
         // `hud/anim.rs`. `tick` is the one place a wall clock enters; every
         // state machine it feeds is otherwise a pure function of that integer.
@@ -6905,6 +7019,7 @@ impl HudRenderer {
             models.filter(|_| want_models),
             font.as_deref(),
             anim,
+            false,
         );
         // `geo.special` counts too. A hotbar holding nothing but a chest, with the
         // procedural frame suppressed, produces zero vertices in all four other
@@ -6915,6 +7030,7 @@ impl HudRenderer {
             && geo.item_verts.is_empty()
             && geo.model_verts.is_empty()
             && geo.special.is_empty()
+            && self.debug_vertex_count == 0
         {
             return;
         }
@@ -7020,7 +7136,7 @@ impl HudRenderer {
 
         // The colour stream (text, stack counts) last, so it lands on top of both
         // kinds of icon.
-        if colour_count > 0 {
+        if self.debug_vertex_count > 0 || colour_count > 0 {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hud-colour-pass"),
                 color_attachments: &[Some(item_icon::load_colour_attachment(raw_view))],
@@ -7030,8 +7146,14 @@ impl HudRenderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_vertex_buffer(0, self.buffer.slice(..));
-            pass.draw(0..colour_count, 0..1);
+            if self.debug_vertex_count > 0 {
+                pass.set_vertex_buffer(0, self.debug_buffer.slice(..));
+                pass.draw(0..self.debug_vertex_count, 0..1);
+            }
+            if colour_count > 0 {
+                pass.set_vertex_buffer(0, self.buffer.slice(..));
+                pass.draw(0..colour_count, 0..1);
+            }
         }
         queue.submit(std::iter::once(encoder.finish()));
     }
@@ -7345,6 +7467,60 @@ const HUD_GLINT_WGSL: &str = include_str!("shaders/hud_glint.wgsl");
 mod tests {
     use super::*;
     use lodestone_assets::ResourceLocation;
+
+    #[test]
+    fn debug_geometry_refresh_is_bounded_but_open_and_layout_changes_are_immediate() {
+        let t0 = Instant::now();
+        let stamp = DebugGeometryStamp {
+            width: 3024,
+            height: 1964,
+            gui_scale: 0,
+            font_revision: 7,
+        };
+        let mut refresh = DebugGeometryRefresh::default();
+
+        assert!(refresh.should_refresh(t0, true, stamp));
+        assert!(!refresh.should_refresh(
+            t0 + std::time::Duration::from_millis(99),
+            true,
+            stamp
+        ));
+        assert!(refresh.should_refresh(
+            t0 + std::time::Duration::from_millis(100),
+            true,
+            stamp
+        ));
+        assert!(!refresh.should_refresh(
+            t0 + std::time::Duration::from_millis(101),
+            false,
+            stamp
+        ));
+        assert!(
+            refresh.should_refresh(t0 + std::time::Duration::from_millis(102), true, stamp),
+            "reopening F3 must not show the last hidden snapshot"
+        );
+        assert!(refresh.should_refresh(
+            t0 + std::time::Duration::from_millis(103),
+            true,
+            DebugGeometryStamp { width: 1512, ..stamp }
+        ));
+    }
+
+    #[test]
+    fn cached_debug_layer_matches_the_inline_geometry_exactly() {
+        let stats = DebugStats::default();
+        let mut frame = HudFrame::new(&stats);
+        frame.crosshair = false;
+        let inline = HudGeometry::build(&frame, 1280, 720);
+        let cached = build_debug_vertices(
+            &frame,
+            1280,
+            720,
+            crate::config::AUTO_GUI_SCALE,
+            None,
+        );
+        assert_eq!(cached, inline.verts);
+    }
 
     #[test]
     fn rss_is_observable() {
