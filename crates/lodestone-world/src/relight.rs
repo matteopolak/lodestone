@@ -208,6 +208,9 @@ pub struct RelitJob {
 /// Counters rather than timings, deliberately — see the module docs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Relit {
+    /// Changed block positions in jobs that actually ran. Positions deferred,
+    /// dropped, or outside a loaded column are excluded.
+    pub input_blocks: usize,
     /// Coalesced jobs run: one per changed section, not one per changed block.
     pub jobs: usize,
     /// Cells recomputed, summed over jobs. The cost measure.
@@ -597,6 +600,7 @@ impl World {
                 continue;
             }
             spent += cells;
+            out.input_blocks += changes.len();
             out.jobs += 1;
             out.cells_visited += cells;
 

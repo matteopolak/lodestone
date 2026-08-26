@@ -31,6 +31,7 @@ use super::frame_profile::{
     FramePhase, HUD_SUBPHASE_COUNT, HudSubphase, HudSubphaseCounts, PHASE_COUNT,
 };
 use crate::gpu::gpu_timing::{WORLD_SUBPHASE_COUNT, WorldSubphase, WorldSubphaseCounts};
+use crate::mesher::RelightWorkload;
 
 #[derive(Debug)]
 pub(crate) struct DumpWriter {
@@ -87,7 +88,11 @@ impl DumpWriter {
         }
         header.push_str(
             ",world.packed_sections_visited,world.model_sections_visited,hud.chat_lines,\
-             hud.debug_lines,hud.menu_overlays_drawn",
+             hud.debug_lines,hud.menu_overlays_drawn,light.relight_input_blocks,\
+             light.relight_input_sections,light.relight_cells_visited,\
+             light.relight_cells_changed,light.relight_dirty_sections,\
+             light.remesh_invalidations_enqueued,light.remesh_invalidations_coalesced,\
+             light.remesh_sections_submitted",
         );
         if let Err(e) = writeln!(w, "{header}") {
             tracing::warn!(target: "frame_profile", "failed writing dump header: {e}");
@@ -112,6 +117,7 @@ impl DumpWriter {
         hud_subphases: [Option<f32>; HUD_SUBPHASE_COUNT],
         world_counts: Option<WorldSubphaseCounts>,
         hud_counts: Option<HudSubphaseCounts>,
+        relight_workload: RelightWorkload,
     ) {
         let Some(w) = &mut self.file else { return };
         let mut line = frame.to_string();
@@ -140,6 +146,19 @@ impl DumpWriter {
             if let Some(value) = value {
                 line.push_str(&value.to_string());
             }
+        }
+        for value in [
+            relight_workload.input_blocks,
+            relight_workload.input_sections,
+            relight_workload.cells_visited,
+            relight_workload.cells_changed,
+            relight_workload.dirty_sections,
+            relight_workload.remesh_invalidations_enqueued,
+            relight_workload.remesh_invalidations_coalesced,
+            relight_workload.remesh_sections_submitted,
+        ] {
+            line.push(',');
+            line.push_str(&value.to_string());
         }
         if let Err(e) = writeln!(w, "{line}") {
             tracing::warn!(target: "frame_profile", "failed writing dump row {frame}: {e}");

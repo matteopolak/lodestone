@@ -249,6 +249,21 @@ block/section workload counter before choosing between reducing propagation work
 and deferring redundant re-meshes. `fold_entities` remains a separate candidate
 only after that measurement.
 
+That counter pass is now installed. On the built-in 3024×1898 fullscreen
+Hermit workload, at most 77 changed blocks across 10 source sections caused
+366,529 propagation-cell visits and 34 dirty sections while stationary; the
+moving segment reached 355,076 visits from 98 blocks across 10 sections.
+Lovelier moving similarly reached 350,223 visits from 47 blocks across 10
+sections. Remesh-queue coalescing was zero in all of these peaks and submission
+stopped at the existing 24-section budget, so downstream queue deduplication is
+not the major opportunity. The matching profile is
+`bench-results/profiles/megaworld-closed-20260826-173208.json.gz` (plus its
+symbol sidecar): `relight_changed_blocks` was 6.95% inclusive, flood 4.30%, and
+propagation 3.81% inclusive / 3.78% self. The next implementation choice is
+therefore between spatially coalescing relight jobs and replacing the broad
+flood frontier with a more incremental frontier; no architecture change was
+made in this counter-only pass.
+
 The remaining block-entity work is a lower-priority extension: signs, heads,
 banners, pots, item-bearing entities, spawners, beacons, and portals still own
 specialised gathers. If they join the shared snapshot, store only typed decoded

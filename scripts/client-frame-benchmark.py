@@ -39,6 +39,14 @@ COUNT_COLUMNS = {
     "hud.chat_lines",
     "hud.debug_lines",
     "hud.menu_overlays_drawn",
+    "light.relight_input_blocks",
+    "light.relight_input_sections",
+    "light.relight_cells_visited",
+    "light.relight_cells_changed",
+    "light.relight_dirty_sections",
+    "light.remesh_invalidations_enqueued",
+    "light.remesh_invalidations_coalesced",
+    "light.remesh_sections_submitted",
 }
 GPU_SAMPLE_RE = re.compile(
     r"gpu: world_total=(?P<world_total>\d+(?:\.\d+)?)ms, "

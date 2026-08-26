@@ -2614,6 +2614,19 @@ impl Default for MeshPolicy {
     }
 }
 
+/// Per-frame relighting work reported to the live benchmark dump.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RelightWorkload {
+    pub input_blocks: usize,
+    pub input_sections: usize,
+    pub cells_visited: usize,
+    pub cells_changed: usize,
+    pub dirty_sections: usize,
+    pub remesh_invalidations_enqueued: usize,
+    pub remesh_invalidations_coalesced: usize,
+    pub remesh_sections_submitted: usize,
+}
+
 /// All terrain-meshing state, as one `Resource`.
 ///
 /// Stage 4 of `docs/bevy-migration.md` moves `Sim`'s `scheduler`,
@@ -2707,6 +2720,8 @@ pub struct TerrainMesh {
     /// [`lodestone_world::Relit::dirty_sections`] reports — converted to a
     /// [`SectionKey`] at drain time, when the store's extent is known.
     pub light_dirty_sections: BTreeSet<(i32, i32, i32)>,
+    /// Work completed by [`relight_changed_blocks`] since the app sampled it.
+    relight_workload: RelightWorkload,
     /// Sections whose geometry vanished (all-air after an edit, or a column that
     /// unloaded) and must be dropped from the GPU. Drained by the app each frame.
     pub pending_removals: Vec<SectionKey>,
@@ -2763,6 +2778,7 @@ impl TerrainMesh {
             forced_columns: BTreeSet::new(),
             departed: HashSet::new(),
             light_dirty_sections: BTreeSet::new(),
+            relight_workload: RelightWorkload::default(),
             pending_removals: Vec::new(),
             uploaded_sections: HashSet::new(),
             drops: 0,
@@ -2770,6 +2786,11 @@ impl TerrainMesh {
             policy: MeshPolicy::default(),
             biome_names: Arc::from([]),
         }
+    }
+
+    /// Consume relighting work completed since the previous frame sample.
+    pub(crate) fn take_relight_workload(&mut self) -> RelightWorkload {
+        std::mem::take(&mut self.relight_workload)
     }
 
     /// Route one section's snapshot outcome: submit it, drop its stale geometry,
@@ -3505,6 +3526,20 @@ pub fn relight_changed_blocks(
             );
         }
     }
+    let dirty_sections = relit.dirty_sections.len();
+    let remesh_invalidations_enqueued = relit
+        .dirty_sections
+        .iter()
+        .filter(|section| !terrain.light_dirty_sections.contains(section))
+        .count();
+    let workload = &mut terrain.relight_workload;
+    workload.input_blocks += relit.input_blocks;
+    workload.input_sections += relit.jobs;
+    workload.cells_visited += relit.cells_visited;
+    workload.cells_changed += relit.cells_changed;
+    workload.dirty_sections += dirty_sections;
+    workload.remesh_invalidations_enqueued += remesh_invalidations_enqueued;
+    workload.remesh_invalidations_coalesced += dirty_sections - remesh_invalidations_enqueued;
     terrain.light_dirty_sections.extend(relit.dirty_sections);
 
     if terrain.light_dirty_sections.is_empty() {
@@ -3550,6 +3585,7 @@ pub fn relight_changed_blocks(
         }
         terrain.mesh_section(&store, key, extent.section_count);
     }
+    terrain.relight_workload.remesh_sections_submitted += meshed;
     if bridged > 0 {
         tracing::debug!(
             target: "light",
