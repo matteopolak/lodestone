@@ -152,6 +152,41 @@ configuration and uses a five-second climbing, full-circle orbit. Stationary
 megaworld rows are unaffected. New moving rows must not be ratioed against the
 old straight-walk rows.
 
+### Reachability-cache correction
+
+The next fresh closed-F3 profile at `097a03d8` put
+`reachable_from_camera` at 7.29% self CPU, far above the next Lodestone leaves
+(`extract_entity_draws` and `fold_entities` at 1.55% each). The camera cache
+already keyed a walk by the 8-block camera cell and visibility-graph generation,
+but every section upload replaced its graph entry and bumped that generation,
+including replacements with exactly the same connectivity. Ongoing remeshing
+therefore caused a full bounded breadth-first walk again even while the camera
+was stationary.
+
+`VisibilityGraph::insert` now preserves its generation when a replacement is
+identical. A focused unit test proves that an equal replacement is a cache hit;
+a changed connectivity or a real removal still invalidates the walk. The
+post-change full runs used the same Hermitcraft closed-F3 workload, built-in
+laptop fullscreen selection, and 3024×1898 framebuffer. Stationary work stayed
+at 2,168 model sections and zero packed sections.
+
+| metric | before | after | change |
+|---|---:|---:|---:|
+| stationary frame p50 | 8.252 ms | 4.595 ms | **−44.3%** |
+| moving frame p50 | 5.130 ms | 3.866 ms | **−24.6%** |
+| stationary `world.prepare_buffers` | 3.295 ms | 1.572 ms | **−52.3%** |
+| `reachable_from_camera` sampled self CPU | 7.29% | 1.06% | **−85.5%** |
+
+The before artifacts are
+`bench-results/profiles/megaworld-closed-20260826-170044.json.gz` and its
+`.json.syms.json` sidecar; the after pair is
+`bench-results/profiles/megaworld-closed-20260826-171038.json.gz`. Samply
+samples are diagnostic rather than timing measurements, but their disappearance
+matches the fixed-workload frame-time result. The post-change profile's leading
+Lodestone leaf is now `relight::propagate` (4.95% self), followed by
+`relight_changed_blocks` (1.84%); do not optimize the remaining
+`reachable_from_camera` 1.06% in isolation.
+
 ### Current CPU and GPU boundary
 
 With F3 fixed, the representative 2,168-section final trials are CPU-heavy in
@@ -199,14 +234,20 @@ even a small per-refresh builder cost becomes a frame-time cost again. Do not
 raise it without checking coordinates, FPS, and memory values remain useful to
 players.
 
-The next CPU targets are now `reachable_from_camera` (11.74% inclusive, 7.90%
-self) and `fold_entities` (11.51%) in the post-snapshot profile. First add
-workload counters for candidate sections/entities and a fixed camera waypoint,
-then cache the section-reachability result until the camera crosses a cell or
-the section occupancy/version changes. That is another exact invalidation-based
-snapshot, not speculative future simulation. Independently, split
-`fold_entities` into update-time reconciliation and a compact immutable draw
-snapshot so unchanged entity facts are not re-resolved on every redraw.
+Section-reachability caching is split across
+`crates/lodestone-shell/src/gpu/occlusion.rs` (camera-cell and graph-generation
+key) and `crates/lodestone-render/src/visibility.rs` (semantic graph generation).
+Keep the latter invalidation precise: a new or changed connectivity entry and a
+real removal must bump it; an identical mesh re-upload must not. Widening this
+to a time-based refresh would reintroduce the cost and has no rendering-fidelity
+justification.
+
+The next large CPU investigation should start with relighting, not the remaining
+reachability cost. The fresh post-change profile ranks `relight::propagate` at
+4.95% self and `relight_changed_blocks` at 1.84%; establish a stable changed-
+block/section workload counter before choosing between reducing propagation work
+and deferring redundant re-meshes. `fold_entities` remains a separate candidate
+only after that measurement.
 
 The remaining block-entity work is a lower-priority extension: signs, heads,
 banners, pots, item-bearing entities, spawners, beacons, and portals still own
