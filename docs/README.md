@@ -354,6 +354,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   configuration. It covers ordinary Java terrain and a dense Java-hosted showcase
   containing signs, player heads, patterned banners, mapped item frames, equipped
   entities, particles, displays, and block entities.
+- [Client frame performance — 2026-08-25](./client-frame-performance-2026-08-25.md) —
+  This is the large-world follow-up to the 2026-08-24 client rendering study. It
+  measures the release client in fullscreen on the MacBook's built-in display while
+  joined to the official Hermitcraft Season 10 Java world, compares F3 closed and
+  open, attributes the open-overlay cost with CPU sampling, and records the result of
+  caching HUD glyph geometry.
 - [Client-side relight](./client-relight.md) — The client's own light engine: a
   block change queues a relight, and once a frame the client recomputes sky and block
   light in a bounded box around each change and re-meshes what moved. It is vanilla's
