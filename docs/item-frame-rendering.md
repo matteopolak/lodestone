@@ -170,11 +170,13 @@ frame drew long before its rotation did.
 
 ## What is deliberately not ported
 
-* **`submitWithZOffset`'s `outlineColor` argument.** Its depth offset is now carried by the
-  shared `ModelPipeline::for_surface` polygon-bias state: both the frame body and its map picture
-  use the same negative `(slope = -1, constant = -10)` offset toward the camera. This is a
-  depth-buffer-unit separation, so it remains effective at grazing angles without changing the
-  derived `FRAMED_MAP_LIFT` geometry.
+* **`submitWithZOffset`'s `outlineColor` argument.** The frame body and moving block overlays use
+  `ModelPipeline::for_surface`'s negative `(slope = -1, constant = -10)` offset toward the camera.
+  A framed map uses `ModelPipeline::for_map_surface`, which applies a relative second step
+  `(slope = -2, constant = -20)` so its picture wins over the frame's front texture rather than
+  z-fighting with it. Both are depth-buffer-unit separations, so they remain effective at grazing
+  angles without changing the derived `FRAMED_MAP_LIFT` geometry or the global
+  `CAMERA_DEPTH_BIAS`.
 * **The `map=true` variant is selected from the held item's id**, not from a resolved `MapId`.
   Vanilla asks `entity.getFramedMapId(itemStack)` and falls back to the plain frame when map data
   has not loaded. This client still selects the wider border for any `minecraft:filled_map`, but
