@@ -47,7 +47,7 @@
 //! ```
 
 use lodestone::entities::EntityDraw;
-use lodestone::gpu::RenderState;
+use lodestone::gpu::{MapPicture, RenderState};
 use lodestone::resources::BlockResources;
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{AnimInput, Camera, GpuContext, HeadlessTarget, RenderTarget};
@@ -57,6 +57,7 @@ const H: u32 = 240;
 
 const ITEM: &str = "minecraft:filled_map";
 const SUBJECT_ID: i32 = 9201;
+const TEST_MAP_ID: i32 = 17;
 
 /// Where the frame entity sits. `ItemFrame.createBoundingBox` puts that behind
 /// the centre of the block it hangs in; the render chain steps `0.46875` forward
@@ -240,13 +241,27 @@ fn a_filled_map_in_an_item_frame_reaches_pixels_on_every_wall() {
         .map(|yaw| shoot(&state, &camera_for(*yaw), std::slice::from_ref(&framed(*yaw))))
         .collect();
 
-    state.set_map_source(|_, _| Some(vec![0u8; 128 * 128].into()));
+    let transparent_pixels = std::sync::Arc::new(vec![0u8; 128 * 128]);
+    state.set_map_source(move |_, _| {
+        Some(MapPicture::new(
+            TEST_MAP_ID,
+            0,
+            std::sync::Arc::clone(&transparent_pixels),
+        ))
+    });
     let transparent: Vec<Shot> = YAWS
         .iter()
         .map(|yaw| shoot(&state, &camera_for(*yaw), std::slice::from_ref(&framed(*yaw))))
         .collect();
 
-    state.set_map_source(|_, _| Some(grass_grid().into()));
+    let painted_pixels = std::sync::Arc::new(grass_grid());
+    state.set_map_source(move |_, _| {
+        Some(MapPicture::new(
+            TEST_MAP_ID,
+            1,
+            std::sync::Arc::clone(&painted_pixels),
+        ))
+    });
     let painted: Vec<Shot> = YAWS
         .iter()
         .map(|yaw| shoot(&state, &camera_for(*yaw), std::slice::from_ref(&framed(*yaw))))

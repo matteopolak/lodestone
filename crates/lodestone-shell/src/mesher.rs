@@ -1145,7 +1145,12 @@ impl ModelSectionView for SnapshotModelView<'_> {
     /// Mirrors `quads_at`'s lookup: same state id, same `BlockModels`.
     fn is_translucent_at(&self, x: usize, y: usize, z: usize) -> bool {
         let id = self.snapshot.at(0, 0, 0).get_block(x, y, z);
-        self.models.layer(id) == lodestone_render::RenderLayer::Translucent
+        // A cauldron's inset liquid uses a partially-alpha sprite, but its
+        // opaque rim/body must still write depth before that liquid is shaded.
+        // Routing the whole model through the blended pass makes the water draw
+        // through the body. See `BlockModels::is_cauldron`.
+        !self.models.is_cauldron(id)
+            && self.models.layer(id) == lodestone_render::RenderLayer::Translucent
     }
 
     /// Vanilla's ambient-occlusion occluder test, `getShadeBrightness == 0.2F`

@@ -469,6 +469,16 @@ const FLUID_OVERLAY_LEAVES_BLOCKS: &[&str] = &[
     "flowering_azalea_leaves",
 ];
 
+/// Cauldron models contain an opaque rim/body and an inset liquid sprite. The
+/// liquid's partial alpha is not enough reason to move the whole model to the
+/// blended pass: doing so disables depth writes for the body and lets the
+/// liquid draw through the cauldron. Vanilla keeps these block models on its
+/// depth-writing cutout path.
+#[must_use]
+pub(crate) fn is_cauldron_block(block_path: &str) -> bool {
+    matches!(block_path, "cauldron" | "water_cauldron" | "lava_cauldron")
+}
+
 /// Whether a fluid touching this block (by `block_path`) should use the
 /// `water_overlay` material instead of `*_flow`. See
 /// [`FLUID_OVERLAY_HALF_TRANSPARENT_BLOCKS`].
@@ -628,6 +638,10 @@ pub struct StateModel {
     /// because that test compares the *exact* `Block` instance, not "is
     /// translucent" — see [`BlockModels::skips_rendering_against`].
     pub half_transparent_class: Option<&'static str>,
+    /// Whether this model is a cauldron body with an inset liquid sprite. These
+    /// models stay on the depth-writing path even when the liquid sprite has
+    /// partial alpha; see [`is_cauldron_block`].
+    pub is_cauldron: bool,
 }
 
 impl StateModel {
@@ -644,6 +658,7 @@ impl StateModel {
             ambient_occlusion: true,
             is_leaves: false,
             half_transparent_class: None,
+            is_cauldron: false,
         }
     }
 }
@@ -1915,6 +1930,7 @@ impl BlockModels {
                             .copied()
                             .find(|&path| path == r.block.path())
                     });
+                    let is_cauldron = resolved.is_some_and(|r| is_cauldron_block(r.block.path()));
                     StateModel {
                         quads,
                         occludes: face_occludes.iter().all(|o| *o),
@@ -1925,6 +1941,7 @@ impl BlockModels {
                         ambient_occlusion,
                         is_leaves,
                         half_transparent_class,
+                        is_cauldron,
                     }
                 }
                 _ => StateModel::empty(),
@@ -2491,6 +2508,15 @@ impl BlockModels {
         self.state(state_id).layer
     }
 
+    /// Whether this state's model is a cauldron body with an inset liquid
+    /// sprite. Cauldron models must remain depth-writing even when their
+    /// liquid texture is partially alpha, otherwise the liquid is drawn
+    /// through the body on the translucent pass.
+    #[must_use]
+    pub fn is_cauldron(&self, state_id: u32) -> bool {
+        self.state(state_id).is_cauldron
+    }
+
     /// Normalised atlas UVs `[u0, v0, u1, v1]` of the `destroy_stage_<stage>`
     /// crack-overlay sprite, for the mining crack pass to re-texture a block's
     /// model geometry. `stage` is the vanilla destroy stage `0..=9` (the value
@@ -2892,6 +2918,14 @@ mod tests {
         let quads = vec![quad_with_sprite(99)];
         assert_eq!(block_layer(&sprite_layers, &quads), RenderLayer::Solid);
         assert_eq!(face_occlusion(&sprite_layers, &quads), [false; 6]);
+    }
+
+    #[test]
+    fn cauldron_models_stay_on_the_depth_writing_path() {
+        assert!(is_cauldron_block("cauldron"));
+        assert!(is_cauldron_block("water_cauldron"));
+        assert!(is_cauldron_block("lava_cauldron"));
+        assert!(!is_cauldron_block("stained_glass"));
     }
 
     #[test]

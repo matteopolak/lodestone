@@ -191,6 +191,18 @@ candidate the jar contains; a model with no hit falls back to
 single flat colour means its sheet was not found; a mob rendering as the wrong
 mob means resolution picked the wrong entry.** They are different bugs.
 
+### Diagnosing a hitbox with no body
+
+F3+B obtains hitboxes from entity state independently of GPU model draws. When
+an entity type has no ordinary baked rig, `gpu/entity_passes.rs` skips that body
+so specialised passes can render items, displays, paintings, sprites and moving
+blocks. The `entity=debug` diagnostic filters those known dedicated-renderer
+types (including thrown-item billboards and invisible marker/interaction
+entities), then emits one record per remaining missing type with both the
+registry type and resolved model path. Enable it with `RUST_LOG=entity=debug`
+while reproducing a multiplayer scene; any record now identifies a bounded
+mapping/corpus gap rather than an expected dispatch split.
+
 ### Variant → texture (a wolf's breed, a pig's climate)
 
 `entity_texture_candidates` answers "which sheet does this *model* have", which is

@@ -751,13 +751,7 @@ struct WindowApp {
     /// When the left button last pressed on the container screen, for
     /// [`DOUBLE_CLICK_WINDOW`]-based double-click detection.
     last_menu_click: Option<Instant>,
-    last_log: Instant,
     /// Per-phase CPU frame timing — see `app::frame_profile`'s module doc.
-    /// `Setup`'s clock and this struct's own `last_log` are deliberately
-    /// separate instruments: `last_log`'s one-second gate already drives the
-    /// stdout `one_line()` print, and reusing it here would make the frame
-    /// profiler's own tracing line silently inherit whatever cadence that
-    /// print happens to use rather than one this module owns.
     frame_profile: FrameProfiler,
     /// The fog settings last uploaded to the renderer, so submerged fog is
     /// re-uploaded only when it actually changes (the player crossing a

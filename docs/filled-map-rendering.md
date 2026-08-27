@@ -37,13 +37,19 @@ texture would validate on this Mac (which reports 8) and crash at startup on any
 Groups 0, 2 and 3 are the frame's existing shared bind groups, so a map draw adds exactly one texture,
 one bind group and one draw call.
 
-### The texture is rebuilt per frame on purpose
+### Retained textures and meshes
 
-`map_texture_bind_group` creates a texture, uploads it and builds a bind group every frame a map is
-visible. A cache keyed by map id would need `&mut self` (the whole render path is `&self`) *and* would
-miss most frames anyway: the server streams a fresh column patch as the holder walks, so a walking
-player's map changes on most ticks. At 64 KB and one or two visible maps that is not worth the
-invalidation bug. `mip_level_count` is 1 and the sampler is `Nearest`, matching vanilla's
+`MapState::color_revision` advances only when a colour patch changes that map's pixels. `MapSource`
+propagates `(map_id, color_revision, Arc<colors>)`, so `MapRenderCache` can retain the converted RGBA
+texture, upload and bind group by that exact identity without hashing 16 KiB every frame. A new revision
+releases only the superseded texture for that map; unrelated maps stay resident. The cache belongs to
+`RenderState`, so recreating a device/session or target format cannot reuse stale wgpu handles.
+
+The held quad is retained for an unchanged equip height. Framed batches retain the last exact visible
+sequence of frame id, map id, pose bits, rotation and sampled light. A map-pixel update therefore
+rebinds only its texture; appearing, disappearing, moving, rotating or relighting a frame rebuilds the
+affected batch. `RenderState::map_cache_counters` exposes conversion, upload/bind-group and mesh-build
+counts for a live profile. `mip_level_count` is 1 and the sampler is `Nearest`, matching vanilla's
 `DynamicTexture` — linear filtering smears terrain edges that are one pixel wide by design.
 
 ### The two draw sites
@@ -58,9 +64,9 @@ invalidation bug. `mip_level_count` is 1 and the sampler is `Nearest`, matching 
   `item_frame`/`glow_item_frame` carrying a `filled_map` and concatenates one quad each into a single
   world-space mesh. The frame's own border and back plate are drawn separately, as a *block model*
   posed by hand — see `docs/item-frame-rendering.md`, which also explains why `FRAMED_MAP_LIFT` has to
-  clear that back plate. The map draw uses `ModelPipeline::for_map_surface`, a second relative
-  polygon-bias step beyond the frame body's `for_surface` step, so the picture is unambiguously in
-  front of the frame's front texture without a world-space lift.
+  clear that back plate. The picture's plane has an explicit 1/64-block separation in the frame's own
+  outward-normal direction from `template_item_frame_map`'s room-facing plate; polygon bias remains a
+  complement, not the correctness mechanism.
 
 ### `framed_map_pose` is built from the frame's own facing, and this was wrong twice
 

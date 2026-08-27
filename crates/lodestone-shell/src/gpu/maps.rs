@@ -10,14 +10,13 @@
 //! for a map texture would validate on an 8-group adapter and crash at startup on
 //! a 4-group one.
 //!
-//! # Why the texture is rebuilt rather than cached
+//! # Retained map resources
 //!
-//! [`map_texture_bind_group`] creates a texture, uploads it and builds a bind group
-//! every frame a map is on screen. A cache keyed by map id would need `&mut self`
-//! (the whole render path is `&self`) *and* would miss almost every frame anyway:
-//! the server streams a fresh column patch as the holder walks, so a walking
-//! player's map changes on most ticks. At 64 KB and one or two visible maps this is
-//! not worth the invalidation bug.
+//! [`MapPicture`](super::MapPicture) carries the stable saved-map id and the
+//! `MapState` colour revision alongside its shared pixels. [`MapRenderCache`]
+//! retains each texture/upload/bind group under that exact pair and retains the
+//! latest held/framed mesh signatures, all behind a `RefCell` because the render
+//! path itself takes `&self`. A new render state owns a new device/session cache.
 //!
 //! # What is not drawn
 //!
@@ -26,7 +25,7 @@
 //! asset layer does not stitch. `SessionMaps` carries the decorations already, so
 //! this is an asset job rather than a wiring one.
 
-use std::sync::Arc;
+use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 use glam::{Mat4, Vec3};
 use lodestone_render::map_item::{MAP_SIZE, map_quad_mesh, map_texture_rgba};
@@ -35,7 +34,233 @@ use lodestone_render::{ENTITY_FULLBRIGHT, GpuModelMesh, ModelMesh, ModelPipeline
 
 use crate::entities::EntityDraw;
 
-use super::RenderState;
+use super::{MapPicture, RenderState};
+
+/// GPU resources that stay valid for this [`RenderState`] and are shared by a
+/// held or framed map draw.
+pub(super) type PreparedMap = (Arc<GpuModelMesh>, Arc<wgpu::BindGroup>);
+
+/// Cumulative retained-map work for this render state. A stationary second
+/// frame should leave every field unchanged; a map patch changes only the three
+/// texture fields, while a moved/rotated/relit item frame changes only the
+/// framed-mesh fields.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MapCacheCounters {
+    /// Calls to [`map_texture_rgba`].
+    pub texture_conversions: u64,
+    /// `queue.write_texture` submissions for map pixels.
+    pub texture_uploads: u64,
+    /// Map texture/sampler bind groups constructed.
+    pub texture_bind_groups: u64,
+    /// Held-map mesh builds and GPU uploads.
+    pub held_mesh_builds: u64,
+    /// Framed-map batch mesh builds and GPU uploads.
+    pub framed_mesh_builds: u64,
+}
+
+/// A map texture's exact content identity. The id scopes the revision: two
+/// unrelated maps naturally both start at revision zero.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct MapTextureKey {
+    map_id: i32,
+    color_revision: u64,
+}
+
+impl MapTextureKey {
+    const fn new(map_id: i32, color_revision: u64) -> Self {
+        Self {
+            map_id,
+            color_revision,
+        }
+    }
+
+    const fn from_picture(picture: &MapPicture) -> Self {
+        Self::new(picture.map_id, picture.color_revision)
+    }
+}
+
+/// Every value that can change a framed map's vertex data. Floats are compared
+/// by representation: interpolated entity poses that differ by even one bit
+/// need a fresh mesh, while an unchanged second frame is exactly reusable.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct FramedMapInput {
+    entity_id: i32,
+    map_id: i32,
+    feet: [u32; 3],
+    yaw: u32,
+    pitch: u32,
+    rotation: u8,
+    light: u8,
+}
+
+impl FramedMapInput {
+    fn new(
+        entity_id: i32,
+        map_id: i32,
+        feet: [f32; 3],
+        yaw: f32,
+        pitch: f32,
+        rotation: u8,
+        light: u8,
+    ) -> Self {
+        Self {
+            entity_id,
+            map_id,
+            feet: feet.map(f32::to_bits),
+            yaw: yaw.to_bits(),
+            pitch: pitch.to_bits(),
+            rotation,
+            light,
+        }
+    }
+
+    fn pose(&self) -> Mat4 {
+        framed_map_pose(
+            Vec3::from_array(self.feet.map(f32::from_bits)),
+            f32::from_bits(self.yaw),
+            f32::from_bits(self.pitch),
+            self.rotation,
+        )
+    }
+}
+
+/// The exact visible framed-map input sequence for one prepared world frame.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct FramedMapsKey(Vec<FramedMapInput>);
+
+impl FramedMapsKey {
+    const fn new(inputs: Vec<FramedMapInput>) -> Self {
+        Self(inputs)
+    }
+}
+
+/// A retained value for a key that may have many simultaneously visible maps.
+struct RetainedMapEntries<K, V> {
+    entries: HashMap<K, Arc<V>>,
+}
+
+impl<K, V> Default for RetainedMapEntries<K, V> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Eq + Hash + Clone, V> RetainedMapEntries<K, V> {
+    fn contains_key(&self, key: &K) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    fn get_or_insert_with(&mut self, key: K, build: impl FnOnce() -> V) -> Arc<V> {
+        if let Some(value) = self.entries.get(&key) {
+            return Arc::clone(value);
+        }
+        let value = Arc::new(build());
+        self.entries.insert(key, Arc::clone(&value));
+        value
+    }
+
+    fn retain(&mut self, keep: impl FnMut(&K, &mut Arc<V>) -> bool) {
+        self.entries.retain(keep);
+    }
+}
+
+/// A retained value for the complete visible framed-map batch. Keeping only the
+/// latest signature bounds mesh VRAM while covering the stationary case that
+/// dominated the live profile.
+struct RetainedLast<K, V> {
+    entry: Option<(K, Arc<V>)>,
+}
+
+impl<K, V> Default for RetainedLast<K, V> {
+    fn default() -> Self {
+        Self { entry: None }
+    }
+}
+
+impl<K: PartialEq, V> RetainedLast<K, V> {
+    fn matches(&self, key: &K) -> bool {
+        self.entry.as_ref().is_some_and(|(previous, _)| previous == key)
+    }
+
+    fn get_or_insert_with(&mut self, key: K, build: impl FnOnce() -> V) -> Arc<V> {
+        if let Some((previous, value)) = &self.entry
+            && previous == &key
+        {
+            return Arc::clone(value);
+        }
+        let value = Arc::new(build());
+        self.entry = Some((key, Arc::clone(&value)));
+        value
+    }
+}
+
+struct CachedFramedBatch {
+    map_id: i32,
+    mesh: Arc<GpuModelMesh>,
+}
+
+/// Per-device retained map resources. This is intentionally owned by
+/// [`RenderState`]: a device or colour-format/session rebuild creates a new
+/// state and therefore cannot reuse stale wgpu handles.
+pub(super) struct MapRenderCache {
+    textures: RetainedMapEntries<MapTextureKey, wgpu::BindGroup>,
+    held_mesh: RetainedLast<u32, GpuModelMesh>,
+    framed_batches: RetainedLast<FramedMapsKey, Vec<CachedFramedBatch>>,
+    counters: MapCacheCounters,
+}
+
+impl Default for MapRenderCache {
+    fn default() -> Self {
+        Self {
+            textures: RetainedMapEntries::default(),
+            held_mesh: RetainedLast::default(),
+            framed_batches: RetainedLast::default(),
+            counters: MapCacheCounters::default(),
+        }
+    }
+}
+
+impl std::fmt::Debug for MapRenderCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MapRenderCache")
+            .field("textures", &self.textures.entries.len())
+            .field("held_mesh", &self.held_mesh.entry.is_some())
+            .field("framed_batches", &self.framed_batches.entry.is_some())
+            .finish()
+    }
+}
+
+impl MapRenderCache {
+    fn texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &ModelPipeline,
+        picture: &MapPicture,
+    ) -> Arc<wgpu::BindGroup> {
+        let key = MapTextureKey::from_picture(picture);
+        // One retained revision per map id. A patch invalidates only its own
+        // texture while releasing the superseded GPU allocation promptly.
+        if !self.textures.contains_key(&key) {
+            // The steady state takes the `contains_key` fast path. Only a new
+            // revision walks the cache to drop this map's superseded texture.
+            self.textures
+                .retain(|cached, _| cached.map_id != key.map_id || cached == &key);
+            self.counters.texture_conversions += 1;
+            self.counters.texture_uploads += 1;
+            self.counters.texture_bind_groups += 1;
+        }
+        self.textures.get_or_insert_with(key, || {
+            map_texture_bind_group(device, queue, pipeline, picture.colors.as_slice())
+        })
+    }
+
+    pub(super) const fn counters(&self) -> MapCacheCounters {
+        self.counters
+    }
+}
 
 /// The item id whose picture this module draws.
 pub const FILLED_MAP_ITEM: &str = "filled_map";
@@ -59,16 +284,20 @@ const FRAMED_MAP_SCALE: f32 = 1.0;
 /// How far in front of the frame's own plane the picture sits, along the frame's
 /// real facing.
 ///
-/// **Derived, not tuned.** `ItemFrameRenderer.submit`'s map branch translates
-/// `0.4375` forward, then `-1.0` at the `0.0078125` map scale — a further
-/// `-0.0078125` — putting the picture at local `z = 0.4296875` inside a frame
-/// whose own space starts `0.46875` in front of the entity
-/// (`ITEM_FRAME_WALL_STEP`). The picture therefore sits `0.46875 - 0.4296875`
-/// from the entity's own position, which is also 1/128 of a block *in front of*
-/// the `item_frame_map` model's back plate at local `0.4375`. The previous
-/// hand-picked `0.03` was 1/1000 of a block behind that plate, which was
-/// invisible only for as long as nothing drew the plate.
-const FRAMED_MAP_LIFT: f32 = 0.46875 - 0.429_687_5;
+/// The room-facing plane of `template_item_frame_map`: its first element begins
+/// at local `z = 15.001 / 16`, and the frame body starts half a block behind
+/// `item_frame_space`. Measured outward from the entity position.
+const ITEM_FRAME_MAP_FRONT_LIFT: f32 = 0.46875 - (15.001 / 16.0 - 0.5);
+
+/// Explicit geometric separation between the frame's room-facing map plate and
+/// the map picture. The previous relative depth bias still flickered on live
+/// frames; this is a real 1/64-block displacement along the frame normal, small
+/// enough to remain visually flush but large enough not to collapse at grazing
+/// angles.
+const FRAMED_MAP_FRONT_SEPARATION: f32 = 1.0 / 64.0;
+
+/// The picture's distance from the item-frame entity along its outward normal.
+const FRAMED_MAP_LIFT: f32 = ITEM_FRAME_MAP_FRONT_LIFT + FRAMED_MAP_FRONT_SEPARATION;
 
 /// Vanilla's `renderMap` scale (`ItemInHandRenderer.renderMap`: `scale(0.38f)`
 /// around a `[-0.5, -0.5]`-centred unit quad).
@@ -239,8 +468,6 @@ pub(super) enum MapSkip {
     /// view — and never clearing means the packet is not arriving or not
     /// folding.
     NoContents,
-    /// The quad meshed but its vertex/index buffers could not be uploaded.
-    NoUpload,
 }
 
 impl MapSkip {
@@ -249,7 +476,6 @@ impl MapSkip {
             Self::NoModels => "no baked model set",
             Self::NoSource => "no map source installed for this frame",
             Self::NoContents => "no MAP_ITEM_DATA has arrived for this map yet",
-            Self::NoUpload => "the map quad could not be uploaded",
         }
     }
 }
@@ -297,7 +523,7 @@ impl RenderState {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         inverse_arm_height: f32,
-    ) -> Option<(GpuModelMesh, wgpu::BindGroup)> {
+    ) -> Option<PreparedMap> {
         let (item, _) = self.equip.visible()?;
         if item.path() != FILLED_MAP_ITEM {
             // Not a decline: the hand is holding something else, which is not a
@@ -311,20 +537,25 @@ impl RenderState {
         if !self.map_source.is_installed() {
             return note_map_skip(SITE, MapSkip::NoSource, None);
         }
-        let Some(colors) = self.map_source.picture(None, None) else {
+        let Some(picture) = self.map_source.picture(None, None) else {
             return note_map_skip(SITE, MapSkip::NoContents, None);
         };
         // Full bright, as the GUI item path nails every vertex: the map is drawn
         // in its own camera-space pass with no world position to sample.
-        let mesh = map_quad_mesh(held_map_pose(inverse_arm_height), ENTITY_FULLBRIGHT);
-        let Some(gpu) = GpuModelMesh::upload(device, &mesh) else {
-            return note_map_skip(SITE, MapSkip::NoUpload, None);
-        };
+        let mut cache = self.map_cache.borrow_mut();
+        if !cache.held_mesh.matches(&inverse_arm_height.to_bits()) {
+            cache.counters.held_mesh_builds += 1;
+        }
+        let gpu = cache.held_mesh.get_or_insert_with(inverse_arm_height.to_bits(), || {
+            let mesh = map_quad_mesh(held_map_pose(inverse_arm_height), ENTITY_FULLBRIGHT);
+            // A map quad is structurally non-empty. Keeping this assertion beside
+            // the retained build avoids an `Option` cache entry whose only valid
+            // state would permanently re-run a failed upload every frame.
+            GpuModelMesh::upload(device, &mesh).expect("a map quad has six indices")
+        });
+        let texture = cache.texture(device, queue, &model.pipeline, &picture);
         note_map_drawn();
-        Some((
-            gpu,
-            map_texture_bind_group(device, queue, &model.pipeline, colors.as_slice()),
-        ))
+        Some((gpu, texture))
     }
 
     /// Every filled map hanging in an item frame this frame, grouped into
@@ -350,7 +581,7 @@ impl RenderState {
         queue: &wgpu::Queue,
         camera: &lodestone_render::Camera,
         entities: &[EntityDraw],
-    ) -> Vec<(GpuModelMesh, wgpu::BindGroup)> {
+    ) -> Vec<PreparedMap> {
         const SITE: &str = "item frame";
         let frustum = camera.frustum();
         let wanted = entities.iter().any(|draw| {
@@ -374,11 +605,11 @@ impl RenderState {
             return Vec::new();
         }
         // A frame's item type decides the full-size frame body, but only this
-        // lookup proves that its corresponding MAP_ITEM_DATA has arrived. Keep
-        // separate meshes for distinct `Arc`s: each needs a different texture
-        // bind group, and concatenating their vertices would sample all of them
-        // through whichever texture happened to be bound last.
-        let mut batches: Vec<(Arc<Vec<u8>>, ModelMesh)> = Vec::new();
+        // lookup proves that its corresponding MAP_ITEM_DATA has arrived. Group
+        // by stable map id, not `Arc` allocation identity: a map patch swaps the
+        // copy-on-write pixels but does not require frame geometry to rebuild.
+        let mut inputs = Vec::new();
+        let mut pictures = HashMap::new();
         for draw in entities {
             if !ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref())
                 || draw.item.as_ref().is_none_or(|id| id.path() != FILLED_MAP_ITEM)
@@ -386,33 +617,62 @@ impl RenderState {
             {
                 continue;
             }
-            let Some(colors) = self.map_source.picture(None, Some(draw.id)) else {
+            let Some(picture) = self.map_source.picture(None, Some(draw.id)) else {
                 let _ = note_map_skip::<()>(SITE, MapSkip::NoContents, Some(draw.id));
                 continue;
             };
-            let mesh = map_quad_mesh(
-                framed_map_pose(draw.feet, draw.yaw, draw.pitch, draw.item_frame_rotation),
+            let input = FramedMapInput::new(
+                draw.id,
+                picture.map_id,
+                draw.feet.to_array(),
+                draw.yaw,
+                draw.pitch,
+                draw.item_frame_rotation,
                 self.entity_light.sample(draw.feet),
             );
-            if let Some((_, batch)) = batches
-                .iter_mut()
-                .find(|(picture, _)| Arc::ptr_eq(picture, &colors))
-            {
-                batch.merge(&mesh);
-            } else {
-                batches.push((colors, mesh));
-            }
+            pictures.entry(picture.map_id).or_insert(picture);
+            inputs.push(input);
         }
+        let key = FramedMapsKey::new(inputs);
+        let batch_inputs = key.0.clone();
+        let mut cache = self.map_cache.borrow_mut();
+        if !cache.framed_batches.matches(&key) {
+            cache.counters.framed_mesh_builds += 1;
+        }
+        let batches = cache.framed_batches.get_or_insert_with(key, || {
+            let mut merged: Vec<(i32, ModelMesh)> = Vec::new();
+            for input in &batch_inputs {
+                let mesh = map_quad_mesh(input.pose(), input.light);
+                if let Some((_, batch)) = merged
+                    .iter_mut()
+                    .find(|(map_id, _)| *map_id == input.map_id)
+                {
+                    batch.merge(&mesh);
+                } else {
+                    merged.push((input.map_id, mesh));
+                }
+            }
+            merged
+                .into_iter()
+                .map(|(map_id, mesh)| CachedFramedBatch {
+                    map_id,
+                    mesh: Arc::new(
+                        GpuModelMesh::upload(device, &mesh)
+                            .expect("a framed map batch has at least one quad"),
+                    ),
+                })
+                .collect()
+        });
         let mut prepared = Vec::with_capacity(batches.len());
-        for (colors, mesh) in batches {
-            let Some(gpu) = GpuModelMesh::upload(device, &mesh) else {
-                let _ = note_map_skip::<()>(SITE, MapSkip::NoUpload, None);
+        for batch in batches.iter() {
+            let Some(picture) = pictures.get(&batch.map_id) else {
+                // The cache key and picture collection are built together, so
+                // this is defensive rather than a normal decline.
+                let _ = note_map_skip::<()>(SITE, MapSkip::NoContents, Some(batch.map_id));
                 continue;
             };
-            prepared.push((
-                gpu,
-                map_texture_bind_group(device, queue, &model.pipeline, colors.as_slice()),
-            ));
+            let texture = cache.texture(device, queue, &model.pipeline, picture);
+            prepared.push((Arc::clone(&batch.mesh), texture));
         }
         if !prepared.is_empty() {
             note_map_drawn();
@@ -424,6 +684,65 @@ impl RenderState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_entry_skips_the_second_build_and_rebuilds_for_new_content() {
+        let mut cache = RetainedMapEntries::<MapTextureKey, usize>::default();
+        let first = MapTextureKey::new(17, 3);
+        let changed = MapTextureKey::new(17, 4);
+        let mut builds = 0;
+
+        let first_value = cache.get_or_insert_with(first, || {
+            builds += 1;
+            builds
+        });
+        let unchanged_value = cache.get_or_insert_with(first, || {
+            builds += 1;
+            builds
+        });
+        assert_eq!(
+            builds, 1,
+            "an unchanged map must skip conversion, upload and bind-group build"
+        );
+        assert!(Arc::ptr_eq(&first_value, &unchanged_value));
+
+        let changed_value = cache.get_or_insert_with(changed, || {
+            builds += 1;
+            builds
+        });
+        assert_eq!(builds, 2, "a changed map revision must rebuild its GPU entry");
+        assert_ne!(*first_value, *changed_value);
+    }
+
+    #[test]
+    fn retained_last_batch_reuses_an_unchanged_frame_and_rebuilds_on_pose_or_light_change() {
+        let stable = FramedMapInput::new(9, 17, [4.0, 65.0, -9.0], 0.0, 0.0, 0, 0xF0);
+        let moved = FramedMapInput::new(9, 17, [5.0, 65.0, -9.0], 0.0, 0.0, 0, 0xF0);
+        let relit = FramedMapInput::new(9, 17, [5.0, 65.0, -9.0], 0.0, 0.0, 0, 0xE0);
+        let mut cache = RetainedLast::<FramedMapsKey, usize>::default();
+        let mut builds = 0;
+
+        let first = cache.get_or_insert_with(FramedMapsKey::new(vec![stable.clone()]), || {
+            builds += 1;
+            builds
+        });
+        let unchanged = cache.get_or_insert_with(FramedMapsKey::new(vec![stable]), || {
+            builds += 1;
+            builds
+        });
+        assert_eq!(builds, 1, "an unchanged frame must skip mesh build and upload");
+        assert!(Arc::ptr_eq(&first, &unchanged));
+
+        cache.get_or_insert_with(FramedMapsKey::new(vec![moved]), || {
+            builds += 1;
+            builds
+        });
+        cache.get_or_insert_with(FramedMapsKey::new(vec![relit]), || {
+            builds += 1;
+            builds
+        });
+        assert_eq!(builds, 3, "pose and light mutations must each invalidate the batch");
+    }
 
     /// A framed map faces the way its frame does, stands off the wall along that
     /// same axis, and **points its front face out of the wall**.
@@ -467,16 +786,31 @@ mod tests {
             east.x
         );
 
-        // And the magnitude: the picture has to clear the `item_frame_map` body's
-        // own back plate, which `item_frame_body_matrix` puts at local `0.4375`
-        // — i.e. `0.46875 - 0.4375 = 0.03125` from the entity. A lift shorter
-        // than that is *behind* the plate and draws nothing at all, which is what
-        // the previous hand-picked `0.03` would now do.
-        assert!(
-            FRAMED_MAP_LIFT > 0.031_25,
-            "the picture must clear the frame's back plate at 0.03125, got \
-             {FRAMED_MAP_LIFT}"
-        );
+        // The map's plane must have a real, fixed positive gap ahead of the
+        // actual `template_item_frame_map` room-facing plane — not merely a
+        // relative pipeline bias. Check every orientation below because a
+        // world-z-only displacement can pass this at south and fail on the
+        // east/west walls (or ceilings).
+        for (yaw, pitch) in [
+            (0.0f32, 0.0f32),
+            (90.0, 0.0),
+            (180.0, 0.0),
+            (270.0, 0.0),
+            (0.0, -90.0),
+            (0.0, 90.0),
+        ] {
+            let feet = Vec3::new(4.0, 65.0, -9.0);
+            let facing = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
+            let plate = lodestone_render::entity::item_frame_body_matrix(feet, yaw, pitch)
+                .transform_point3(Vec3::new(0.5, 0.5, 15.001 / 16.0));
+            let picture = framed_map_pose(feet, yaw, pitch, 0).transform_point3(Vec3::ZERO);
+            let separation = (picture - plate).dot(facing);
+            assert!(
+                (separation - FRAMED_MAP_FRONT_SEPARATION).abs() < 1.0e-5,
+                "yaw {yaw}, pitch {pitch}: map plane must be {FRAMED_MAP_FRONT_SEPARATION} \
+                 ahead of the frame map plate, got {separation}"
+            );
+        }
 
         // --- the orientation, at every horizontal facing and both vertical ones
         //

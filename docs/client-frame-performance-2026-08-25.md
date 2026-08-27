@@ -187,6 +187,35 @@ Lodestone leaf is now `relight::propagate` (4.95% self), followed by
 `relight_changed_blocks` (1.84%); do not optimize the remaining
 `reachable_from_camera` 1.06% in isolation.
 
+### Retained map and sign rendering
+
+A later stationary profile on `mcsl.democracycraft.net` exposed a different
+content-driven bottleneck: `map_texture_bind_group` was 26.77% inclusive,
+`map_texture_rgba` was 12.63% self, and `sign_text::push_side_layers` was 8.67%
+inclusive / 4.90% self. Unchanged map pixels were converted, uploaded, and
+bound again every frame; unchanged sign text was lowered back into world-space
+vertices every frame.
+
+Map pictures now carry a stable map id and colour revision into a retained GPU
+cache. Texture conversion/upload/bind-group work reruns only when that map's
+pixels change, while framed meshes reuse an exact entity/pose/rotation/light
+key. Sign geometry uses a bounded semantic cache keyed by the complete sign
+spawn, resolved tint, and the camera-dependent glow-outline visibility decision.
+Both paths also use real surface-normal plane separation because repeated
+polygon-bias-only fixes still flickered on Metal.
+
+The post-cache profile is
+`bench-results/profiles/democracycraft-after-cache-20260827-031000.json.gz`
+with its symbol sidecar; its frame rows are in
+`bench-results/live/democracycraft-after-cache-20260827-031000.csv`. The former
+map conversion/bind-group and sign lowering symbols are absent from the current
+top 250 sampled symbols. `world_encode_submit` measured 4.522 ms median / 5.362
+ms p95 and `world.prepare_buffers` 3.911 / 4.669 ms. Do not ratio those times
+against the earlier 13.808 / 15.120 ms DemocracyCraft result: both runs loaded
+117 columns, but the server placed the player in a different scene (468 versus
+632 model sections visited). The hotspot disappearance is valid; a strict
+whole-frame speedup is not established by these two unequal scenes.
+
 ### Current CPU and GPU boundary
 
 With F3 fixed, the representative 2,168-section final trials are CPU-heavy in

@@ -47,6 +47,61 @@ use super::{
     humanoid_armour_slot,
 };
 
+/// Record an entity type whose ordinary body dispatch had no baked model.
+///
+/// F3+B draws hitboxes independently of the model pass, so this is the useful
+/// diagnostic for the otherwise confusing "hitbox but no entity" symptom. The
+/// body pass deliberately skips types owned by specialised passes (items,
+/// displays, frames, sprites, paintings and moving blocks); those are filtered
+/// before this branch, while an unexpected mob type identifies a concrete
+/// model/mapping gap for the next renderer addition.
+fn ordinary_model_dispatch_is_unhandled(type_path: &str) -> bool {
+    match type_path {
+        // Dedicated item/display/block passes. These all intentionally decline
+        // the ordinary entity-model resolver, so reporting them would turn a
+        // healthy dispatch split into a false positive.
+        "item"
+        | "item_frame"
+        | "glow_item_frame"
+        | "text_display"
+        | "item_display"
+        | "block_display"
+        | "experience_orb"
+        | "painting"
+        | "falling_block"
+        | "tnt"
+        | "firework_rocket"
+        | "ominous_item_spawner"
+        | "interaction"
+        | "marker" => false,
+        // Thrown-item billboards and the two camera-facing entity sprites have
+        // their own geometry paths rather than a cuboid body model.
+        path if lodestone_render::entity::thrown_item_for(path).is_some() => false,
+        path if lodestone_render::entity_sprite::entity_sprite_index_for(path).is_some() => false,
+        _ => true,
+    }
+}
+
+fn note_missing_entity_model(type_path: &str, model_path: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut seen = match seen.lock() {
+        Ok(seen) => seen,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if ordinary_model_dispatch_is_unhandled(type_path) && seen.insert(type_path.to_owned()) {
+        tracing::debug!(
+            target: "entity",
+            entity_type = type_path,
+            model = model_path,
+            "entity has a hitbox but no ordinary body model; it may be handled by a specialised pass or need a model mapping"
+        );
+    }
+}
+
 /// One entity's own hitbox width in blocks — its type's base width times its age
 /// scale — or `None` for a type with no `entity_dimensions` entry.
 ///
@@ -994,6 +1049,7 @@ impl RenderState {
                 e.creeper_swelling,
                 e.death_time,
             ) else {
+                note_missing_entity_model(e.type_path.as_ref(), e.model_type_path());
                 continue;
             };
             // Issue #573: the swim body-pitch rotation. Gated on `type_path`,
@@ -3063,6 +3119,34 @@ mod tests {
                  rows are unreachable: {out_of_order:?}"
             );
         }
+    }
+
+    #[test]
+    fn specialised_entity_types_do_not_pollute_missing_body_diagnostics() {
+        for specialised in [
+            "item",
+            "item_frame",
+            "glow_item_frame",
+            "text_display",
+            "item_display",
+            "block_display",
+            "experience_orb",
+            "painting",
+            "falling_block",
+            "tnt",
+            "snowball",
+            "dragon_fireball",
+            "fishing_bobber",
+            "firework_rocket",
+            "ominous_item_spawner",
+        ] {
+            assert!(
+                !ordinary_model_dispatch_is_unhandled(specialised),
+                "{specialised} has a dedicated renderer and must not be reported"
+            );
+        }
+        assert!(ordinary_model_dispatch_is_unhandled("zombie"));
+        assert!(ordinary_model_dispatch_is_unhandled("unknown_server_entity"));
     }
 
     /// **The discriminating rows, not a smoke test.** Each pair below was

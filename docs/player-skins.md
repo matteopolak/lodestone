@@ -372,8 +372,8 @@ Getting the decoded sheet to a bind group forks, and the fork is the interesting
 part:
 
 * the world and hand surfaces share `EntityRenderer::player_skins`, filled by
-  `RenderState::install_pending_player_skins` **draining** `remote_skins::READY`
-  once per frame;
+  `RenderState::install_pending_player_skins` by draining `remote_skins::READY`
+  once per frame and, when needed, rehydrating from the retained cache;
 * the GUI icon pass owns everything it draws with (`SpecialIcons`' own doc says
   why), so it needs its own bind group — and it cannot drain, because a drain has
   exactly one consumer and a second `drain_ready()` would *steal* the world's
@@ -385,6 +385,12 @@ binding for, on every frame that draws one. Pulling is also what removes the
 ordering problem: a record built on the frame the fetch *starts* resolves on
 whichever later frame it lands, with no "the drain has to arrive on the right
 frame" hazard to get wrong.
+
+The world/hand pass uses the same retained store as a recovery path. This matters
+when a renderer is rebuilt after `READY` was already drained: it enumerates
+`remote_skins::cached_sheets()` and uploads only URLs absent from its bind-group
+cache. The steady state performs no GPU uploads, and a rebuild does not refetch
+or decode a skin that is already resident in memory.
 
 ### Nothing declines silently, because a plain head is a head
 

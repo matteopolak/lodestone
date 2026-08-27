@@ -787,14 +787,21 @@ standoff is worth:
 
 Two exactly parallel planes one ULP apart is the textbook recipe for the reported symptom, because a
 parallel pair flips *whole* rather than speckling — which is why this had to be measured rather than
-argued. It was then **excluded**: rendered over a real meshed board at all seven distances and across
-sub-block camera displacements, the ink holds at a constant 657 px. The board's model pipeline already
-uses `CAMERA_DEPTH_BIAS` (`constant: -10`), so sign glyphs take a **second** matching step
-(`constant: -20`, `slope: -2`) past that base policy. Read the table as *the relative offset is
-load-bearing*: the `0.005`-block standoff is not headroom, and giving glyphs only the board's shared
-bias makes them tie at range again. (Under vanilla's reversed-Z the same standoff would stay
-comfortable at every one of those ranges; this is the `[0,1]`-forward-depth cost `CLAUDE.md`'s
-rendering constraints record.)
+argued. That conclusion did not hold on the Metal path: both text layers still supplied local `z = 0`
+vertices, so pipeline depth bias was attempting to order coplanar transparent triangles after
+rasterisation. `gpu/sign_text.rs` now makes the order geometric as well as pipeline-relative:
+**board → outline → ink**, with a `1/256`-block board clearance and `1/2048`-block layer steps along
+the sign's own surface normal. The front and back transforms already point their local `+Z` toward
+their respective board faces, so this remains correct at every rotation and does not use a
+camera-space nudge that would float at grazing angles. The original `CAMERA_DEPTH_BIAS` / doubled
+glyph bias remains a secondary long-range safeguard.
+
+The same module keeps a bounded per-position cache of completed world-space sign layers. It compares
+the complete `SignSpawn` (text and styling, glow, kind, orientation and sampled light), both resolved
+world-light tints, and the camera-dependent outline-visible booleans. Thus moving around within either
+side of the 16-block outline boundary is a hit; crossing it rebuilds exactly the affected geometry.
+The cache removes the repeated styled-ink layout, normal transform and per-rect vector allocation from
+stationary frames while preserving the existing nearest-first budget and draw ordering.
 
 **The actual defect was the sign-text pass's fixed vertex buffer.** `MAX_SIGN_TEXT_VERTICES` was
 40,000, and the ink walk emits one quad per *horizontal run of ink texels per glyph row* — not one
@@ -827,7 +834,9 @@ The fix is three parts, all inside `gpu/sign_text.rs` because `prepare` takes `&
 Gates: `gpu/sign_text.rs`'s own `the_vertex_budget_holds_a_real_rooms_worth_of_signs` (a magnitude
 prediction — it evaluates the population against *both* the old 40,000 and the current capacity, and
 was observed failing at 40,000) and `the_budget_is_spent_nearest_first_and_skips_signs_behind_the_eye`;
-`tests/sign_text_distance_stability_pixels.rs` for the depth arm.
+`glowing_sign_uses_three_distinct_planes_along_its_surface_normal` for the depth arm, and
+`semantic_geometry_cache_reuses_only_an_identical_visible_sign` for the stationary-frame cache and its
+text/style/glow/kind/orientation/light/range invalidation.
 
 Two things the same investigation turned up that are worth carrying:
 

@@ -464,7 +464,7 @@ pub(super) enum FirstPersonHand<'a> {
     /// pipeline as [`Self::Item`], with group 1 swapped from the block atlas to the
     /// map's own 128×128 texture. The bind group travels with the mesh because the
     /// two are meaningless apart — see `super::maps`.
-    Map(GpuModelMesh, wgpu::BindGroup),
+    Map(std::sync::Arc<GpuModelMesh>, std::sync::Arc<wgpu::BindGroup>),
     /// A held **block-entity rig** — a chest, a shulker box, a skull/head: an item
     /// whose definition resolves to a `minecraft:special` node and whose geometry is
     /// therefore a block-entity renderer rather than any baked model.
@@ -1553,7 +1553,7 @@ impl RenderState {
                         &model.hand_cam_bind_group,
                         &[model.origin_arena.zero_offset()],
                     );
-                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_bind_group(1, &**texture, &[]);
                     pass.set_bind_group(2, &model.palette_bind_group, &[]);
                     pass.set_bind_group(3, &model.anim_bind_group, &[]);
                     pass.set_vertex_buffer(0, mesh.vertices.slice(..));

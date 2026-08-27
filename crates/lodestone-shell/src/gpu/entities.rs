@@ -263,6 +263,10 @@ pub(super) struct EntityRenderer {
     /// flight and themselves afterwards. Empty against every offline-mode server,
     /// which sends no `textures` property at all — see `crate::remote_skins`.
     pub(super) player_skins: HashMap<String, wgpu::BindGroup>,
+    /// Last retained-skin generation incorporated into `player_skins`. This
+    /// keeps cache recovery to one atomic load per frame and avoids cloning the
+    /// retained URL map in the steady state.
+    player_skins_epoch: u64,
     /// Variant mob sheets — one bind group per corpus **reference**
     /// (`entity/wolf/wolf_ashen`), from
     /// [`crate::resources::load_entity_variant_textures`].
@@ -647,6 +651,7 @@ impl EntityRenderer {
             // Nothing until a skin is fetched; see `player_skins`' doc for why a
             // miss falls back rather than failing.
             player_skins: HashMap::new(),
+            player_skins_epoch: 0,
             variant_textures,
         }
     }
@@ -654,16 +659,24 @@ impl EntityRenderer {
     /// Turn every sheet `crate::remote_skins` has finished fetching into a
     /// texture bind group, keyed by its URL.
     ///
-    /// Called once per frame from `app::redraw`. Drains rather than polls, so a
-    /// sheet is uploaded exactly once and the per-frame cost is zero on all but
-    /// the handful of frames after a fetch lands.
+    /// Called once per frame from `app::redraw`. Drains the fast hand-off and
+    /// polls the retained cache only to recover URLs missing from this
+    /// renderer, so a sheet is uploaded exactly once and the per-frame cost is
+    /// zero on the normal steady state.
     pub(super) fn install_pending_player_skins(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) {
         let ready = crate::remote_skins::drain_ready();
-        if ready.is_empty() {
+        let epoch = crate::remote_skins::sheets_epoch();
+        let cached = if self.player_skins_epoch != epoch {
+            self.player_skins_epoch = epoch;
+            crate::remote_skins::cached_sheets()
+        } else {
+            Vec::new()
+        };
+        if ready.is_empty() && cached.is_empty() {
             return;
         }
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -673,6 +686,23 @@ impl EntityRenderer {
             ..Default::default()
         });
         for (url, image) in ready {
+            if self.player_skins.contains_key(&url) {
+                continue;
+            }
+            let view = entity_texture_from_image(device, queue, &image);
+            let bg = self.pipeline.texture_bind_group(device, &view, &sampler);
+            self.player_skins.insert(url, bg);
+        }
+        // `READY` is the cheap first hand-off, but it is intentionally
+        // one-shot. A renderer can be recreated after that queue was drained;
+        // `SHEETS` retains the decoded image precisely so this cache can
+        // rehydrate without another request or PNG decode. The contains check
+        // keeps the normal steady state at zero uploads despite inspecting the
+        // small retained set once per frame.
+        for (url, image) in cached {
+            if self.player_skins.contains_key(&url) {
+                continue;
+            }
             let view = entity_texture_from_image(device, queue, &image);
             let bg = self.pipeline.texture_bind_group(device, &view, &sampler);
             self.player_skins.insert(url, bg);

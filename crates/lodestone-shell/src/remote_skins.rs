@@ -81,6 +81,7 @@
 //! * `lodestone-game` — `tablist::GameProfile::skin_texture`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lodestone_assets::{Image, PlayerModelType};
@@ -244,6 +245,11 @@ static READY: Mutex<Vec<(String, Image)>> = Mutex::new(Vec::new());
 ///
 /// `Arc<Image>` so two readers share one 16 KB decode rather than copying it.
 static SHEETS: Mutex<Option<HashMap<String, Arc<Image>>>> = Mutex::new(None);
+
+/// Monotonic generation for [`SHEETS`]. Consumers use this cheap atomic check
+/// to avoid cloning the retained map on every frame; a newly-created renderer
+/// or one that missed a publication enumerates the cache once for its epoch.
+static SHEETS_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// Test-only record of every URL [`request`] routed to a fetch, in place of the
 /// fetch itself.
@@ -472,6 +478,7 @@ pub fn publish(url: String, image: Image) {
     with_map(&SHEETS, |map| {
         map.insert(url.clone(), shared);
     });
+    SHEETS_EPOCH.fetch_add(1, Ordering::Release);
     match READY.lock() {
         Ok(mut ready) => ready.push((url, image)),
         Err(poisoned) => poisoned.into_inner().push((url, image)),
@@ -486,6 +493,29 @@ pub fn publish(url: String, image: Image) {
 #[must_use]
 pub fn sheet(url: &str) -> Option<Arc<Image>> {
     with_map(&SHEETS, |map| map.get(url).cloned())
+}
+
+/// Every decoded sheet retained for the lifetime of this process.
+///
+/// The GUI pass pulls individual URLs with [`sheet`], while a world renderer
+/// normally receives the one-shot [`drain_ready`] hand-off. A renderer can be
+/// recreated after that hand-off (for example while changing display state),
+/// so it also needs a way to rehydrate its bind-group cache without fetching or
+/// decoding the skin again. The returned `Arc`s keep this recovery path free of
+/// image copies; callers still decide which URLs they have already uploaded.
+#[must_use]
+pub fn cached_sheets() -> Vec<(String, Arc<Image>)> {
+    with_map(&SHEETS, |map| {
+        map.iter()
+            .map(|(url, image)| (url.clone(), Arc::clone(image)))
+            .collect()
+    })
+}
+
+/// The retained-sheet generation, for consumers that cache their own uploads.
+#[must_use]
+pub fn sheets_epoch() -> u64 {
+    SHEETS_EPOCH.load(Ordering::Acquire)
 }
 
 /// Take every sheet that has landed since the last call, for the renderer to
@@ -545,7 +575,7 @@ fn spawn_fetch(url: String) {
                 };
                 match Image::decode_png(&png) {
                     Ok(image) => {
-                        tracing::info!(
+                        tracing::debug!(
                             target: "assets",
                             bytes = png.len(),
                             "fetched a remote player's skin"
@@ -846,5 +876,30 @@ mod tests {
             "control: an unpublished url must miss, or the hit above says \
              nothing about the key"
         );
+    }
+
+    /// A renderer rebuilt after the world pass drained [`READY`] must still be
+    /// able to discover the decoded image. This is the lifecycle regression
+    /// for player heads: losing the bind group must not turn a retained skin
+    /// into a blank/default head or start another network request.
+    #[test]
+    fn cached_sheets_rehydrates_a_renderer_after_ready_is_drained() {
+        let url = "https://textures.minecraft.net/texture/rehydrate-after-drain";
+        assert!(
+            cached_sheets().iter().all(|(known, _)| known != url),
+            "sanity: this test URL must not already be retained"
+        );
+        let before = sheets_epoch();
+        publish(url.to_owned(), sheet_image(64, 64));
+        assert!(sheets_epoch() > before, "publishing a sheet advances its generation");
+        let ready = drain_ready();
+        assert!(ready.iter().any(|(known, _)| known == url));
+
+        let retained = cached_sheets()
+            .into_iter()
+            .find(|(known, _)| known == url)
+            .map(|(_, image)| image)
+            .expect("a rebuilt renderer must see the retained decoded sheet");
+        assert_eq!((retained.width, retained.height), (64, 64));
     }
 }

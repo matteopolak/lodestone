@@ -277,6 +277,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   ([`plans/multi-version-protocol.md`](./plans/multi-version-protocol.md)) so that the
   four pre-1.13 families do not each carry a private copy of a 9,000-line generated
   table.
+- [Cauldron rendering](./cauldron-rendering.md) — Cauldron block models combine an
+  opaque body and rim with an inset liquid surface. They remain on Lodestone's
+  depth-writing model path so the liquid cannot blend through the cauldron body.
 - [Chat input editing](./chat-input-editing.md) — Ordinary text editing in the chat
   prompt: a caret you can move, a selection, copy/cut/paste, word-wise motion and
   deletion, and Home/End. The line is `crate::chat::ChatInput`, and since it became an

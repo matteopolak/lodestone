@@ -3,8 +3,8 @@
 //! The overlay is the shell's instrument panel — position, facing, FPS, frame
 //! time, chunk/section/quad counts, VRAM and process memory — so it is the first
 //! thing that reveals whether the pipeline is actually fast and the first thing
-//! that shows a regression. The same [`DebugStats`] is also printed to stdout on
-//! a timer, so headless and windowed runs both produce evidence.
+//! that shows a regression. The same [`DebugStats`] is printed by the explicit
+//! headless evidence runner; ordinary windowed play stays quiet.
 //!
 //! Rendering has two streams. Text, the crosshair, and overlay chrome are
 //! emitted as solid-colour quads in one dynamic vertex buffer (positions in NDC,

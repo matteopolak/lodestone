@@ -2594,17 +2594,12 @@ impl WindowApp {
         frame.present(queue);
         self.frame_profile.mark(FramePhase::Present, Instant::now());
 
-        if self.last_log.elapsed() >= Duration::from_secs(1) {
-            self.last_log = Instant::now();
-            println!("{}", self.sim.stats.one_line());
-        }
         // The frame-profile tracing line — see `docs/frame-profiling.md` for
-        // how to read it. On its own once-a-second cadence, not `last_log`'s
-        // (see that field's doc), and gated with `enabled!` so a session with
+        // how to read it. It is gated with `enabled!` so a session with
         // no interest in this target pays no `summary()`/percentile-sort cost
         // for a line nothing will read.
         if self.frame_profile.report_due(Instant::now(), Duration::from_secs(1))
-            && tracing::enabled!(target: "frame_profile", tracing::Level::INFO)
+            && tracing::enabled!(target: "frame_profile", tracing::Level::DEBUG)
         {
             // `render` (not `self.render`): see the identical note above,
             // near `self.sim.stats.frame_profile`'s own assignment — the
@@ -2625,7 +2620,7 @@ impl WindowApp {
             } else {
                 "unavailable (device lacks Features::TIMESTAMP_QUERY)".to_string()
             };
-            tracing::info!(
+            tracing::debug!(
                 target: "frame_profile",
                 "cpu: {} | gpu: {gpu_line}",
                 self.frame_profile

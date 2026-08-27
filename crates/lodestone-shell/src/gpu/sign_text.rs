@@ -33,7 +33,7 @@
 //! [`styled_spans`] fills it in only for runs whose own
 //! [`lodestone_world::SignTextSpan::color`] is `None`.
 //!
-//! # Depth: vanilla's `TEXT_POLYGON_OFFSET` pipeline, ported
+//! # Depth: geometric planes first, vanilla's `TEXT_POLYGON_OFFSET` second
 //!
 //! `AbstractSignRenderer.submitSignText` submits with
 //! `Font.DisplayMode.POLYGON_OFFSET`, which resolves to
@@ -53,9 +53,13 @@
 //! (`CLAUDE.md`'s rendering constraints), so `GREATER_THAN_OR_EQUAL` flips to
 //! [`wgpu::CompareFunction::LessEqual`] and the bias flips sign —
 //! `constant: -10, slope_scale: -1.0`, identical to `crack_pipeline.rs`'s
-//! port of the same two Java constants, pulling the text quads toward the
-//! camera just enough to win the depth test against the coplanar board
-//! without z-fighting.
+//! port of the same two Java constants. That bias remains useful at long
+//! range, but it is no longer the only separation: Metal quantises it after
+//! rasterisation and cannot make two transparent layers that share vertices
+//! into a stable order. The outline and ink are emitted on distinct planes,
+//! each offset **along the sign surface normal**, with the whole text surface
+//! just above the board. This works for front/back and every yaw without a
+//! camera-space nudge that would visibly float at grazing angles.
 //!
 //! # Colour space: this pass draws into a raw (non-sRGB) view
 //!
@@ -104,12 +108,12 @@
 //!
 //! Vanilla submits the outline through `DisplayMode.NORMAL` and the glyphs
 //! through `POLYGON_OFFSET`, i.e. the outline is *not* pulled toward the
-//! camera and the glyphs are. This engine's opaque model pass has already
-//! moved the sign board one camera-facing depth step, so the equivalent local
-//! policy is a base-step outline and a second-step glyph pass. Two contiguous
-//! vertex ranges receive those two pipelines. Submission order alone cannot
-//! replace the separate depth policy because both layers otherwise compete at
-//! the sign face.
+//! camera and the glyphs are. Lodestone retains those two pipelines, but its
+//! terrain board already applies its own bias and this client runs through
+//! Metal too. So the two contiguous ranges are also made geometrically
+//! distinct: board → outline → ink, in surface-normal order. Submission order
+//! and polygon bias now reinforce that ordering rather than attempting to
+//! create it from coincident triangles.
 //!
 //! # Light: the branch that makes `has_glowing_text` mean anything
 //!
@@ -144,7 +148,11 @@
 //! `net::entity_light_at` all along — the producer was live and only the
 //! consumer discarded it.
 
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use glam::Vec3;
 use lodestone_assets::font::RasterFont;
@@ -164,6 +172,150 @@ use lodestone_world::{SignSide, SignTextSpan};
 struct SignTextVertex {
     position: [f32; 3],
     color: [f32; 4],
+}
+
+/// One sign's finished, world-space text layers.  The buffers are immutable
+/// between a block-entity update, a light change, or an outline-range
+/// crossing, so retaining them avoids both the styled ink walk and the
+/// per-rectangle transform on stationary frames.
+#[derive(Debug, Default)]
+struct SignGeometry {
+    outlines: Vec<SignTextVertex>,
+    glyphs: Vec<SignTextVertex>,
+}
+
+/// The camera-dependent part of one side's otherwise semantic geometry.
+/// The outline only changes when its 16-block visibility boolean changes;
+/// keeping distance itself out of the state preserves cache hits while the
+/// player moves within either side of that boundary.
+#[derive(Clone, Copy, Debug)]
+struct SideLayerState {
+    tint: [f32; 3],
+    has_outline: bool,
+}
+
+impl SideLayerState {
+    fn new(
+        side: &SignSide,
+        distance_squared: f32,
+        light: super::nametag::WorldTextLight,
+        sampled_light: u8,
+    ) -> Self {
+        Self {
+            tint: light.tint(if side.glowing {
+                super::nametag::TEXT_FULL_BRIGHT
+            } else {
+                sampled_light
+            }),
+            has_outline: sign_outline_color(side, distance_squared).is_some(),
+        }
+    }
+
+    fn matches(self, other: Self) -> bool {
+        self.has_outline == other.has_outline
+            && self
+                .tint
+                .iter()
+                .zip(other.tint)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+    }
+}
+
+/// One retained entry, keyed by block position and validated against the full
+/// semantic spawn rather than a lossy fingerprint.  This makes every text,
+/// style, glow, kind, orientation and sampled-light change a definite miss.
+#[derive(Debug)]
+struct CachedSignGeometry {
+    spawn: SignSpawn,
+    front: SideLayerState,
+    back: SideLayerState,
+    geometry: Arc<SignGeometry>,
+}
+
+impl CachedSignGeometry {
+    fn matches(&self, spawn: &SignSpawn, front: SideLayerState, back: SideLayerState) -> bool {
+        self.spawn == *spawn && self.front.matches(front) && self.back.matches(back)
+    }
+}
+
+/// Bounded per-position cache of sign layer vertices.  A position may hold
+/// only one live sign, so replacing that entry on a semantic change needs no
+/// tombstone or global scan.
+#[derive(Debug, Default)]
+struct SignGeometryCache {
+    entries: Mutex<HashMap<[i32; 3], CachedSignGeometry>>,
+}
+
+impl SignGeometryCache {
+    const MAX_ENTRIES: usize = 512;
+
+    fn get_or_build(
+        &self,
+        raster: &RasterFont,
+        ink: &super::nametag::StyledInkLayoutCache,
+        spawn: &SignSpawn,
+        distance_squared: f32,
+        light: super::nametag::WorldTextLight,
+    ) -> Arc<SignGeometry> {
+        let front = SideLayerState::new(&spawn.front, distance_squared, light, spawn.light);
+        let back = SideLayerState::new(&spawn.back, distance_squared, light, spawn.light);
+        {
+            let entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(entry) = entries
+                .get(&spawn.pos)
+                .filter(|entry| entry.matches(spawn, front, back))
+            {
+                return Arc::clone(&entry.geometry);
+            }
+        }
+
+        let mut geometry = SignGeometry::default();
+        push_side_layers_with_state(
+            raster,
+            ink,
+            &spawn.front,
+            spawn.pos,
+            spawn.kind,
+            spawn.orientation,
+            true,
+            front,
+            &mut geometry.outlines,
+            &mut geometry.glyphs,
+        );
+        push_side_layers_with_state(
+            raster,
+            ink,
+            &spawn.back,
+            spawn.pos,
+            spawn.kind,
+            spawn.orientation,
+            false,
+            back,
+            &mut geometry.outlines,
+            &mut geometry.glyphs,
+        );
+        let geometry = Arc::new(geometry);
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries.len() >= Self::MAX_ENTRIES && !entries.contains_key(&spawn.pos) {
+            entries.clear();
+        }
+        entries.insert(
+            spawn.pos,
+            CachedSignGeometry {
+                spawn: spawn.clone(),
+                front,
+                back,
+                geometry: Arc::clone(&geometry),
+            },
+        );
+        geometry
+    }
 }
 
 /// Fixed vertex capacity, same fixed-buffer idiom as
@@ -208,14 +360,22 @@ const SIGN_OUTLINE_DEPTH_BIAS: wgpu::DepthBiasState = CAMERA_DEPTH_BIAS;
 /// A second camera-facing depth step for the glyph ink.
 ///
 /// `CAMERA_DEPTH_BIAS` is deliberately shared by all opaque models to keep
-/// contact planes stable. A sign glyph using that same state only ties with
-/// its board again; it needs the next ULP-denominated step, not a larger
-/// global bias or a world-space nudge.
+/// contact planes stable. The glyph keeps the next ULP-denominated step as a
+/// second guard after its explicit surface-normal separation; it must not
+/// widen the global bias used by unrelated world geometry.
 const SIGN_GLYPH_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
     constant: 2 * CAMERA_DEPTH_BIAS.constant,
     slope_scale: 2.0 * CAMERA_DEPTH_BIAS.slope_scale,
     clamp: CAMERA_DEPTH_BIAS.clamp,
 };
+
+/// World-space clearance from the model's front face. This is physical
+/// separation along the board normal, small enough to stay visually flush at
+/// grazing angles but much larger than a depth-buffer ULP.
+const SIGN_FACE_CLEARANCE: f32 = 1.0 / 256.0;
+
+/// The outline-to-ink separation, also along the board normal.
+const SIGN_TEXT_LAYER_CLEARANCE: f32 = 1.0 / 2048.0;
 
 /// Draws world-space sign text — see the module doc for the depth pipeline
 /// and why this is not a billboard.
@@ -241,6 +401,9 @@ pub(super) struct SignTextRenderer {
     /// per frame either. Shares [`super::nametag::StyledInkLayoutCache`] for
     /// the same reason this file already shares `layout_styled_ink_runs`.
     ink: super::nametag::StyledInkLayoutCache,
+    /// Finished world-space layers for signs whose semantic state has not
+    /// changed since the preceding frame.
+    geometry: SignGeometryCache,
     /// Prefix length in `vertices` belonging to [`Self::outline_pipeline`].
     outline_count: Cell<u32>,
 }
@@ -301,6 +464,7 @@ impl SignTextRenderer {
             vertices,
             font: super::nametag::load_font(),
             ink: super::nametag::StyledInkLayoutCache::default(),
+            geometry: SignGeometryCache::default(),
             outline_count: Cell::new(0),
         }
     }
@@ -456,34 +620,11 @@ impl SignTextRenderer {
                 spawn.pos[2] as f32 + 0.5,
             );
             let distance_squared = (centre - eye).length_squared();
-            push_side_layers(
-                raster,
-                &self.ink,
-                &spawn.front,
-                spawn.pos,
-                spawn.kind,
-                spawn.orientation,
-                true,
-                distance_squared,
-                light,
-                spawn.light,
-                &mut outlines,
-                &mut glyphs,
-            );
-            push_side_layers(
-                raster,
-                &self.ink,
-                &spawn.back,
-                spawn.pos,
-                spawn.kind,
-                spawn.orientation,
-                false,
-                distance_squared,
-                light,
-                spawn.light,
-                &mut outlines,
-                &mut glyphs,
-            );
+            let geometry = self
+                .geometry
+                .get_or_build(raster, &self.ink, spawn, distance_squared, light);
+            outlines.extend_from_slice(&geometry.outlines);
+            glyphs.extend_from_slice(&geometry.glyphs);
             if outlines.len() + glyphs.len() > MAX_SIGN_TEXT_VERTICES {
                 // Sorted nearest-first, so everything left is farther than
                 // this one: stop rather than keep probing for a smaller sign
@@ -691,19 +832,42 @@ fn push_side_layers(
     outlines: &mut Vec<SignTextVertex>,
     glyphs: &mut Vec<SignTextVertex>,
 ) {
+    let state = SideLayerState::new(side, distance_squared, light, sampled_light);
+    push_side_layers_with_state(
+        raster,
+        ink,
+        side,
+        pos,
+        kind,
+        orientation,
+        is_front,
+        state,
+        outlines,
+        glyphs,
+    );
+}
+
+/// Lowers one side using already-resolved per-frame state. This is the cache
+/// boundary: `SideLayerState` contains the exact light tint and the only
+/// camera-dependent geometry decision (outline visible or not).
+#[allow(clippy::too_many_arguments)]
+fn push_side_layers_with_state(
+    raster: &RasterFont,
+    ink: &super::nametag::StyledInkLayoutCache,
+    side: &SignSide,
+    pos: [i32; 3],
+    kind: SignKind,
+    orientation: SignOrientation,
+    is_front: bool,
+    state: SideLayerState,
+    outlines: &mut Vec<SignTextVertex>,
+    glyphs: &mut Vec<SignTextVertex>,
+) {
     if side.lines.iter().all(Vec::is_empty) {
         return;
     }
-    // `AbstractSignRenderer.submitSignText`'s third glow-gated quantity —
-    // see the module doc. Per side, because `hasGlowingText` is.
-    let tint = light.tint(if side.glowing {
-        super::nametag::TEXT_FULL_BRIGHT
-    } else {
-        sampled_light
-    });
     let matrix = sign_text_transform(pos, kind, orientation, is_front);
     let default_rgb = default_run_color(side);
-    let outline = sign_outline_color(side, distance_squared);
     let max_width = kind.max_text_line_width();
     // `AbstractSignRenderer.submitSignText`: `signMidpoint = 4 *
     // textLineHeight / 2`, i.e. two full lines — line `i`'s top sits at
@@ -716,25 +880,38 @@ fn push_side_layers(
                 rect_y: f32,
                 w: f32,
                 h: f32,
+                normal_depth: f32,
                 color: [f32; 4]| {
         // The lightmap texel, folded in here rather than at either caller so
         // the outline and the glyphs cannot end up on different arms of the
         // glow branch — vanilla gives both the one `lightVal`.
-        let color = super::nametag::tinted(color, tint);
+        let color = super::nametag::tinted(color, state.tint);
         // Fed **unflipped** into the placement matrix: its own `-Y`
         // scale carries the pixel-space-down to world-space-up flip —
         // see `lodestone_render::sign`'s module doc.
         let tl = matrix
-            .transform_point3(Vec3::new(rect_x, rect_y, 0.0))
+            .transform_point3(Vec3::new(rect_x, rect_y, normal_depth / kind.render_scale()))
             .to_array();
         let tr = matrix
-            .transform_point3(Vec3::new(rect_x + w, rect_y, 0.0))
+            .transform_point3(Vec3::new(
+                rect_x + w,
+                rect_y,
+                normal_depth / kind.render_scale(),
+            ))
             .to_array();
         let bl = matrix
-            .transform_point3(Vec3::new(rect_x, rect_y + h, 0.0))
+            .transform_point3(Vec3::new(
+                rect_x,
+                rect_y + h,
+                normal_depth / kind.render_scale(),
+            ))
             .to_array();
         let br = matrix
-            .transform_point3(Vec3::new(rect_x + w, rect_y + h, 0.0))
+            .transform_point3(Vec3::new(
+                rect_x + w,
+                rect_y + h,
+                normal_depth / kind.render_scale(),
+            ))
             .to_array();
         out.extend([
             SignTextVertex { position: tl, color },
@@ -768,7 +945,9 @@ fn push_side_layers(
         // `prepareText` for exactly this reason: glyph ink must be submitted
         // after all outlines, not interleaved with them. The two ranges then
         // receive vanilla's distinct normal/polygon-offset depth policies.
-        if let Some(outline_color) = outline {
+        if state.has_outline {
+            let outline_color = sign_outline_color(side, 0.0)
+                .expect("an outlined side must retain its deterministic outline colour");
             for rect in rects.iter().filter(|r| r.outline_grow > 0.0) {
                 let g = rect.outline_grow;
                 quad(
@@ -777,12 +956,21 @@ fn push_side_layers(
                     rect.y + y_off - g,
                     rect.w + 2.0 * g,
                     rect.h + 2.0 * g,
+                    SIGN_FACE_CLEARANCE + SIGN_TEXT_LAYER_CLEARANCE,
                     outline_color,
                 );
             }
         }
         for rect in rects {
-            quad(glyphs, rect.x + x1, rect.y + y_off, rect.w, rect.h, rect.color);
+            quad(
+                glyphs,
+                rect.x + x1,
+                rect.y + y_off,
+                rect.w,
+                rect.h,
+                SIGN_FACE_CLEARANCE + 2.0 * SIGN_TEXT_LAYER_CLEARANCE,
+                rect.color,
+            );
         }
     }
 }
@@ -879,6 +1067,114 @@ mod tests {
         assert!(!glyphs.is_empty(), "the polygon-offset glyph ink remains a separate layer");
         assert_eq!(outlines.len() % 6, 0);
         assert_eq!(glyphs.len() % 6, 0);
+    }
+
+    /// The board and text may share a material pass, but they must not share
+    /// a geometric plane: Metal's depth-bias quantisation is deliberately not
+    /// the sole thing keeping a face-on sign readable.  The outline sits just
+    /// beyond the board along the sign's own outward normal, and the ink has
+    /// one further plane beyond that.  Checking the signed normal projection
+    /// covers both front/back and every yaw without mistaking a camera-space
+    /// nudge for a real separation.
+    #[test]
+    fn glowing_sign_uses_three_distinct_planes_along_its_surface_normal() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let mut spawn = sign_with_front_text("Glow");
+        spawn.front.glowing = true;
+        spawn.back = spawn.front.clone();
+        for (is_front, side) in [(true, &spawn.front), (false, &spawn.back)] {
+            let mut outlines = Vec::new();
+            let mut glyphs = Vec::new();
+            push_side_layers(
+                &raster,
+                &ink,
+                side,
+                spawn.pos,
+                spawn.kind,
+                spawn.orientation,
+                is_front,
+                0.0,
+                super::super::nametag::WorldTextLight::overworld_noon(),
+                spawn.light,
+                &mut outlines,
+                &mut glyphs,
+            );
+            let matrix = sign_text_transform(spawn.pos, spawn.kind, spawn.orientation, is_front);
+            let normal = matrix.transform_vector3(Vec3::Z).normalize();
+            let plane = |vertices: &[SignTextVertex]| {
+                vertices
+                    .iter()
+                    .map(|vertex| Vec3::from(vertex.position).dot(normal))
+                    .fold(f32::NEG_INFINITY, f32::max)
+            };
+            let board_plane = matrix.transform_point3(Vec3::ZERO).dot(normal);
+            assert!(
+                plane(&outlines) > board_plane,
+                "outline must be geometrically in front of the board, not merely depth-biased"
+            );
+            assert!(
+                plane(&glyphs) > plane(&outlines),
+                "glyph ink must have its own plane in front of the glow outline"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_geometry_cache_reuses_only_an_identical_visible_sign() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let cache = SignGeometryCache::default();
+        let light = super::super::nametag::WorldTextLight::overworld_noon();
+        let get = |spawn: &SignSpawn, distance_squared| {
+            cache.get_or_build(&raster, &ink, spawn, distance_squared, light)
+        };
+
+        let mut spawn = sign_with_front_text("cached");
+        spawn.back.lines[0] = vec![plain_span("dark")];
+        let first = get(&spawn, 0.0);
+        let second = get(&spawn, 0.0);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the second unchanged frame must reuse its finished vertices"
+        );
+
+        spawn.front.lines[0][0].text.push('!');
+        let edited = get(&spawn, 0.0);
+        assert!(!Arc::ptr_eq(&second, &edited), "a text edit must rebuild");
+        spawn.front.lines[0][0].bold = true;
+        let styled = get(&spawn, 0.0);
+        assert!(!Arc::ptr_eq(&edited, &styled), "a style change must rebuild");
+        // Black glowing text is outlined at every range, so use a coloured
+        // side to make the 16-block visibility arm discriminating below.
+        spawn.front.color = SignDyeColor::Red;
+        spawn.front.glowing = true;
+        let glowing = get(&spawn, 0.0);
+        assert!(!Arc::ptr_eq(&styled, &glowing), "a glow change must rebuild");
+        spawn.kind = SignKind::Hanging;
+        let hanging = get(&spawn, 0.0);
+        assert!(!Arc::ptr_eq(&glowing, &hanging), "a kind change must rebuild");
+        spawn.orientation = SignOrientation::Ground { rotation_segment: 1 };
+        let rotated = get(&spawn, 0.0);
+        assert!(!Arc::ptr_eq(&hanging, &rotated), "an orientation change must rebuild");
+        spawn.light = 0;
+        let dark = get(&spawn, 0.0);
+        assert!(!Arc::ptr_eq(&rotated, &dark), "a sampled-light change must rebuild");
+
+        let out_of_outline_range = get(&spawn, 17.0 * 17.0);
+        assert!(
+            !Arc::ptr_eq(&dark, &out_of_outline_range),
+            "crossing the 16-block outline boundary must rebuild"
+        );
+        let still_out_of_range = get(&spawn, 18.0 * 18.0);
+        assert!(
+            Arc::ptr_eq(&out_of_outline_range, &still_out_of_range),
+            "camera motion within one visibility region must remain a cache hit"
+        );
     }
 
     #[test]
