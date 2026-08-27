@@ -614,11 +614,11 @@ pub(super) fn emit_tooltip(
     canvas: (f32, f32),
     bundle_selection: Option<super::bundle::BundleSelection>,
 ) {
-    let Some([cx, cy]) = cursor else { return };
+    let Some(_) = cursor else { return };
     if menu.carried().is_some() {
         return;
     }
-    let Some(font) = b.font else { return };
+    let Some(_) = b.font else { return };
     let Some(index) = hovered else { return };
     let Some(stack) = menu.slot_item(index) else {
         return;
@@ -710,16 +710,7 @@ pub(super) fn emit_tooltip_for_stack(
     // -12)` from the cursor, then flip left of the cursor if it would overflow the
     // right edge (floored at 4, never off the left), then lift it so the *padded*
     // height fits.
-    let (sw, sh) = canvas;
-    let mut tx = cx + MOUSE_OFFSET;
-    let mut ty = cy - MOUSE_OFFSET;
-    if tx + text_w > sw {
-        tx = (tx - 24.0 - text_w).max(4.0);
-    }
-    let padded_h = text_h + PADDING;
-    if ty + padded_h > sh {
-        ty = sh - padded_h;
-    }
+    let (tx, ty) = tooltip_content_origin(cx, cy, text_w, text_h, canvas);
 
     // The background: vanilla's five fills for the body (which together are one
     // rect grown 1 px on each axis into the border ring) and four for the border.
@@ -769,6 +760,30 @@ pub(super) fn emit_tooltip_for_stack(
             }
         }
     }
+}
+
+/// Position the tooltip's content origin and quantise it together with the
+/// background. `VanillaFont` keeps glyph origins on whole GUI pixels to avoid
+/// binary-coverage shimmer; applying that same origin to the box prevents the
+/// box from sliding under text that is still on the previous raster pixel.
+fn tooltip_content_origin(
+    cx: f32,
+    cy: f32,
+    text_w: f32,
+    text_h: f32,
+    canvas: (f32, f32),
+) -> (f32, f32) {
+    let (sw, sh) = canvas;
+    let mut tx = cx + MOUSE_OFFSET;
+    let mut ty = cy - MOUSE_OFFSET;
+    if tx + text_w > sw {
+        tx = (tx - 24.0 - text_w).max(4.0);
+    }
+    let padded_h = text_h + PADDING;
+    if ty + padded_h > sh {
+        ty = sh - padded_h;
+    }
+    (tx.round(), ty.round())
 }
 
 /// How many rows [`draw_bundle_image`]'s grid needs — `Mth.positiveCeilDiv
@@ -1004,6 +1019,12 @@ fn draw_bundle_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_tooltip_text_origin_is_the_same_pixel_origin_as_its_box() {
+        let (tx, ty) = tooltip_content_origin(100.25, 80.25, 40.0, 9.0, (400.0, 300.0));
+        assert_eq!((tx, ty), (112.0, 68.0));
+    }
 
     /// Authored lore belongs directly below the title. Vanilla supplies a
     /// dark-purple italic parent style, while explicit formatting on the

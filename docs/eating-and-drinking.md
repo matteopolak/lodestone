@@ -86,6 +86,11 @@ the server refuses at a full hunger bar is filtered at that same edge by
 `item_can_start_use`, so it never arms `UsingItem` or the movement slowdown;
 `ConsumeState::resolve` repeats the hunger check for the animation and particles.
 The duration bound then stops an accepted consume at the item's own end tick.
+`Sim::restart_completed_consumable_if_held` clears that completed local state and
+re-enters `use_item_live` on the same 20 Hz tick if the button is still down. The
+restart therefore repeats `item_can_start_use` rather than preserving slowdown by
+habit: a full-bar food use remains refused, while a still-edible stack starts its
+next bite without another OS press event.
 
 ### The cadence, and why the count is the discriminating quantity
 
@@ -225,12 +230,6 @@ direction.
   described in [arm poses](./item-use-arm-poses.md) — though `ArmPose::Item` is itself
   the first one-handed pose here and poses only the holding arm, so that groundwork is
   now laid.
-- **Holding the button does not start a *second* bite.** Vanilla's `Minecraft.tick`
-  re-calls `startUseItem` while `keyUse.isDown()` once `rightClickDelay` expires, so
-  keeping the button down eats stack after stack. Here `use_item()` is a press-edge
-  action only, so after the first bite lands the pose correctly returns to rest and
-  nothing restarts. That is an input-layer gap (`app::lifecycle`'s
-  `InputAction::Use` arm plus a `rightClickDelay` counter), not an animation one.
 - **The off hand is not modelled.** `ItemUseTicks` and `UsingItem` are hand-free
   scalars and the shell's first-person path draws the main hand only, so drinking from
   the off hand animates the main-hand item. Fixing it means putting a hand on the use

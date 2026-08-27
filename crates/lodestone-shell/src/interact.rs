@@ -179,8 +179,10 @@ pub struct Attacking(pub bool);
 /// which this client has no local simulation of — there is no item registry
 /// here that can say "yes, that bow just started a held use." So this is an
 /// **input-state** mirror instead: true from [`crate::sim::Sim::use_item`]'s
-/// live press until its release counterpart's release, a superset of
-/// vanilla's real gate rather than an exact match.
+/// live press until either its release counterpart or a client-known consumable
+/// completion. A held consumable completion immediately re-enters the same use
+/// path for the next bite, so this is a superset of vanilla's real gate rather
+/// than an exact match.
 ///
 /// That gap is inert, not a wrong state transition: `LivingEntity
 /// .releaseUsingItem` (`.cache/mc/26.2/src/…/LivingEntity.java`)
@@ -1240,4 +1242,3 @@ impl Plugin for InteractPlugin {
         );
     }
 }
-

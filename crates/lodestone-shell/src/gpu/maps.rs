@@ -26,6 +26,8 @@
 //! asset layer does not stitch. `SessionMaps` carries the decorations already, so
 //! this is an asset job rather than a wiring one.
 
+use std::sync::Arc;
+
 use glam::{Mat4, Vec3};
 use lodestone_render::map_item::{MAP_SIZE, map_quad_mesh, map_texture_rgba};
 use lodestone_render::texture::GpuAtlas;
@@ -309,7 +311,7 @@ impl RenderState {
         if !self.map_source.is_installed() {
             return note_map_skip(SITE, MapSkip::NoSource, None);
         }
-        let Some(colors) = self.map_source.picture(None) else {
+        let Some(colors) = self.map_source.picture(None, None) else {
             return note_map_skip(SITE, MapSkip::NoContents, None);
         };
         // Full bright, as the GUI item path nails every vertex: the map is drawn
@@ -325,80 +327,97 @@ impl RenderState {
         ))
     }
 
-    /// Every filled map hanging in an item frame this frame, as one world-space
-    /// mesh plus the texture it samples.
+    /// Every filled map hanging in an item frame this frame, grouped into
+    /// world-space meshes by the texture each map samples.
     ///
-    /// One mesh rather than one per frame-entity: `EntityDraw` carries only the
-    /// item's id and not its `minecraft:map_id` (which v770 *does* decode — see
-    /// `Sim::map_source` for where it is dropped), so every framed map on screen
-    /// resolves to the same picture and they share a bind group and concatenate
-    /// into a single draw. When a draw carries an id this becomes a group-by-id
-    /// and returns one pair per distinct map.
+    /// The live source resolves a frame's retained `minecraft:map_id` from its
+    /// entity id. Frames with the same map share one texture and draw, while
+    /// distinct maps remain separate batches so one map's transparent pixels
+    /// cannot hide another's actual contents.
     ///
     /// # Every decline is logged
     ///
     /// A frame holding a map whose contents have not arrived is pixel-identical
-    /// to a frame holding nothing, so each early return below names its reason
-    /// through [`note_map_skip`] rather than returning a bare `None`. The
-    /// commonest one on this client is [`MapSkip::NoContents`]: the integrated
-    /// `lodestone-server` has no map saved data and no `MAP_ITEM_DATA` producer
-    /// at all, so a singleplayer framed map can never fill in, and the log line
-    /// is the only thing that distinguishes that from a rendering fault.
+    /// to a frame holding nothing, so each decline names its reason through
+    /// [`note_map_skip`]. The commonest one on this client is
+    /// [`MapSkip::NoContents`]: the integrated `lodestone-server` has no map
+    /// saved data and no `MAP_ITEM_DATA` producer at all, so a singleplayer
+    /// framed map can never fill in. A missing picture does not abort batches
+    /// for other frames that do have their data.
     pub(super) fn prepare_framed_maps(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera: &lodestone_render::Camera,
         entities: &[EntityDraw],
-    ) -> Option<(GpuModelMesh, wgpu::BindGroup)> {
+    ) -> Vec<(GpuModelMesh, wgpu::BindGroup)> {
         const SITE: &str = "item frame";
         let frustum = camera.frustum();
-        let mut combined = ModelMesh::default();
-        let mut wanted = false;
-        for draw in entities {
-            if !ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref()) {
-                continue;
-            }
-            if draw.item.as_ref().is_none_or(|id| id.path() != FILLED_MAP_ITEM) {
-                continue;
-            }
-            // A framed map is a block across, so a one-block box around the
-            // hanging point covers it however the frame is turned.
-            if !frustum.intersects_aabb(draw.feet - Vec3::splat(1.0), draw.feet + Vec3::splat(1.0)) {
-                continue;
-            }
-            // Set *before* the mesh is built, so the diagnostics below fire for a
-            // frame that is on screen and holding a map even when nothing could
-            // be drawn for it. A counter taken after the fact cannot tell "no
-            // framed maps in view" from "four of them and no picture".
-            wanted = true;
-            combined.merge(&map_quad_mesh(
-                framed_map_pose(draw.feet, draw.yaw, draw.pitch, draw.item_frame_rotation),
-                self.entity_light.sample(draw.feet),
-            ));
-        }
+        let wanted = entities.iter().any(|draw| {
+            ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref())
+                && draw.item.as_ref().is_some_and(|id| id.path() == FILLED_MAP_ITEM)
+                // A framed map is a block across, so a one-block box around the
+                // hanging point covers it however the frame is turned.
+                && frustum.intersects_aabb(draw.feet - Vec3::splat(1.0), draw.feet + Vec3::splat(1.0))
+        });
         if !wanted {
             // No framed map is in view. Not a decline, and deliberately silent:
             // this is every frame of ordinary play.
-            return None;
+            return Vec::new();
         }
         let Some(model) = self.model.as_ref() else {
-            return note_map_skip(SITE, MapSkip::NoModels, None);
+            let _ = note_map_skip::<()>(SITE, MapSkip::NoModels, None);
+            return Vec::new();
         };
         if !self.map_source.is_installed() {
-            return note_map_skip(SITE, MapSkip::NoSource, None);
+            let _ = note_map_skip::<()>(SITE, MapSkip::NoSource, None);
+            return Vec::new();
         }
-        let Some(colors) = self.map_source.picture(None) else {
-            return note_map_skip(SITE, MapSkip::NoContents, None);
-        };
-        let Some(gpu) = GpuModelMesh::upload(device, &combined) else {
-            return note_map_skip(SITE, MapSkip::NoUpload, None);
-        };
-        note_map_drawn();
-        Some((
-            gpu,
-            map_texture_bind_group(device, queue, &model.pipeline, colors.as_slice()),
-        ))
+        // A frame's item type decides the full-size frame body, but only this
+        // lookup proves that its corresponding MAP_ITEM_DATA has arrived. Keep
+        // separate meshes for distinct `Arc`s: each needs a different texture
+        // bind group, and concatenating their vertices would sample all of them
+        // through whichever texture happened to be bound last.
+        let mut batches: Vec<(Arc<Vec<u8>>, ModelMesh)> = Vec::new();
+        for draw in entities {
+            if !ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref())
+                || draw.item.as_ref().is_none_or(|id| id.path() != FILLED_MAP_ITEM)
+                || !frustum.intersects_aabb(draw.feet - Vec3::splat(1.0), draw.feet + Vec3::splat(1.0))
+            {
+                continue;
+            }
+            let Some(colors) = self.map_source.picture(None, Some(draw.id)) else {
+                let _ = note_map_skip::<()>(SITE, MapSkip::NoContents, Some(draw.id));
+                continue;
+            };
+            let mesh = map_quad_mesh(
+                framed_map_pose(draw.feet, draw.yaw, draw.pitch, draw.item_frame_rotation),
+                self.entity_light.sample(draw.feet),
+            );
+            if let Some((_, batch)) = batches
+                .iter_mut()
+                .find(|(picture, _)| Arc::ptr_eq(picture, &colors))
+            {
+                batch.merge(&mesh);
+            } else {
+                batches.push((colors, mesh));
+            }
+        }
+        let mut prepared = Vec::with_capacity(batches.len());
+        for (colors, mesh) in batches {
+            let Some(gpu) = GpuModelMesh::upload(device, &mesh) else {
+                let _ = note_map_skip::<()>(SITE, MapSkip::NoUpload, None);
+                continue;
+            };
+            prepared.push((
+                gpu,
+                map_texture_bind_group(device, queue, &model.pipeline, colors.as_slice()),
+            ));
+        }
+        if !prepared.is_empty() {
+            note_map_drawn();
+        }
+        prepared
     }
 }
 

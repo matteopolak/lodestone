@@ -245,10 +245,11 @@ pass's shader was already at 0.6 — more opaque, not less. Left unchanged.
 `GREATER_THAN_OR_EQUAL`, **zero** bias. Per `CLAUDE.md`'s reversed-Z note, that is
 this engine's `LessEqual`. The screen-space ribbon and terrain mesh do not share a
 vertex-generation path, however, so the inclusive predicate still ties at oblique
-angles. `OutlineRenderer` keeps its `PAD = 0.002` world-space expansion and also
-uses the shared camera-facing polygon bias (`slope = -1`, `constant = -10`): it
-resolves a depth-buffer tie in ULPs rather than increasing `PAD` until the outline
-visibly detaches from the block.
+angles. `OutlineRenderer` keeps the selected shape's exact world boundary and uses
+the shared camera-facing polygon bias (`slope = -1`, `constant = -10`) to resolve
+that tie in ULPs. A `PAD = 0.002` world-space expansion was removed: its projection
+changes as an oblique camera moves, so a constant-pixel ribbon appeared to breathe
+even though its shader width was stable.
 
 ### The fix: screen-space-thickened quads
 

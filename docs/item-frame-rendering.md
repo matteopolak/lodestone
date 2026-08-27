@@ -176,10 +176,10 @@ frame drew long before its rotation did.
   depth-buffer-unit separation, so it remains effective at grazing angles without changing the
   derived `FRAMED_MAP_LIFT` geometry.
 * **The `map=true` variant is selected from the held item's id**, not from a resolved `MapId`.
-  Vanilla asks `entity.getFramedMapId(itemStack)` and falls back to the plain frame when the map
-  data has not loaded; this client has no map-id decode (see `docs/filled-map-rendering.md`), so
-  any `minecraft:filled_map` selects the wider border. The two disagree only for a framed map
-  whose data has never arrived.
+  Vanilla asks `entity.getFramedMapId(itemStack)` and falls back to the plain frame when map data
+  has not loaded. This client still selects the wider border for any `minecraft:filled_map`, but
+  now retains that stack's decoded `map_id` separately for the map-texture pass; an unavailable
+  `MAP_ITEM_DATA` payload skips only the picture, not the body.
 * **No tint rewrite on the body's quads.** Neither `#wood` (`block/birch_planks`) nor `#back`
   (`block/item_frame`, `block/glow_item_frame`) carries a `tintindex`, so there is no raw index
   for the state loop's palette pass to translate. A resource pack that added one would draw

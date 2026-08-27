@@ -104,11 +104,12 @@
 //!
 //! Vanilla submits the outline through `DisplayMode.NORMAL` and the glyphs
 //! through `POLYGON_OFFSET`, i.e. the outline is *not* pulled toward the
-//! camera and the glyphs are. This pass has one pipeline, so both get the
-//! offset and the separation comes from submission order instead (outline
-//! first, glyphs second, `LessEqual` depth). That is a real difference and it
-//! is safe for the reason vanilla's own arrangement is: the two sets are
-//! coplanar, and the glyphs must win.
+//! camera and the glyphs are. This engine's opaque model pass has already
+//! moved the sign board one camera-facing depth step, so the equivalent local
+//! policy is a base-step outline and a second-step glyph pass. Two contiguous
+//! vertex ranges receive those two pipelines. Submission order alone cannot
+//! replace the separate depth policy because both layers otherwise compete at
+//! the sign face.
 //!
 //! # Light: the branch that makes `has_glowing_text` mean anything
 //!
@@ -142,6 +143,8 @@
 //! `block_entities::sign_spawns` has been resolving through
 //! `net::entity_light_at` all along — the producer was live and only the
 //! consumer discarded it.
+
+use std::cell::Cell;
 
 use glam::Vec3;
 use lodestone_assets::font::RasterFont;
@@ -197,11 +200,32 @@ const MAX_SIGN_TEXT_VERTICES: usize = 262_144;
 /// projects to nothing anyway.
 const BEHIND_EYE_SLACK: f32 = 1.0;
 
+/// The board's opaque model pipeline already takes this one camera-facing
+/// depth step. It is therefore the sign-outline equivalent of vanilla's
+/// normal-display mode, relative to the board it sits above.
+const SIGN_OUTLINE_DEPTH_BIAS: wgpu::DepthBiasState = CAMERA_DEPTH_BIAS;
+
+/// A second camera-facing depth step for the glyph ink.
+///
+/// `CAMERA_DEPTH_BIAS` is deliberately shared by all opaque models to keep
+/// contact planes stable. A sign glyph using that same state only ties with
+/// its board again; it needs the next ULP-denominated step, not a larger
+/// global bias or a world-space nudge.
+const SIGN_GLYPH_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: 2 * CAMERA_DEPTH_BIAS.constant,
+    slope_scale: 2.0 * CAMERA_DEPTH_BIAS.slope_scale,
+    clamp: CAMERA_DEPTH_BIAS.clamp,
+};
+
 /// Draws world-space sign text — see the module doc for the depth pipeline
 /// and why this is not a billboard.
 #[derive(Debug)]
 pub(super) struct SignTextRenderer {
     pipeline: wgpu::RenderPipeline,
+    /// Glowing text's base-depth outline. The board already uses the shared
+    /// first camera-facing step, so the outline must use that same base policy;
+    /// only the ink gets a second step in front of it.
+    outline_pipeline: wgpu::RenderPipeline,
     /// Kept for [`SignTextRenderer::set_color_format`] — see
     /// [`super::nametag::NameTagRenderer::bind_layout`] for why the layout
     /// object is retained rather than rebuilt from its descriptor.
@@ -217,6 +241,8 @@ pub(super) struct SignTextRenderer {
     /// per frame either. Shares [`super::nametag::StyledInkLayoutCache`] for
     /// the same reason this file already shares `layout_styled_ink_runs`.
     ink: super::nametag::StyledInkLayoutCache,
+    /// Prefix length in `vertices` belonging to [`Self::outline_pipeline`].
+    outline_count: Cell<u32>,
 }
 
 impl SignTextRenderer {
@@ -258,16 +284,24 @@ impl SignTextRenderer {
             mapped_at_creation: false,
         });
 
-        let pipeline = build_pipeline(device, &bind_layout, color_format);
+        let pipeline = build_pipeline(device, &bind_layout, color_format, SIGN_GLYPH_DEPTH_BIAS);
+        let outline_pipeline = build_pipeline(
+            device,
+            &bind_layout,
+            color_format,
+            SIGN_OUTLINE_DEPTH_BIAS,
+        );
 
         Self {
             pipeline,
+            outline_pipeline,
             bind_layout,
             bind_group,
             uniform,
             vertices,
             font: super::nametag::load_font(),
             ink: super::nametag::StyledInkLayoutCache::default(),
+            outline_count: Cell::new(0),
         }
     }
 
@@ -280,7 +314,18 @@ impl SignTextRenderer {
         device: &wgpu::Device,
         color_format: wgpu::TextureFormat,
     ) {
-        self.pipeline = build_pipeline(device, &self.bind_layout, color_format);
+        self.pipeline = build_pipeline(
+            device,
+            &self.bind_layout,
+            color_format,
+            SIGN_GLYPH_DEPTH_BIAS,
+        );
+        self.outline_pipeline = build_pipeline(
+            device,
+            &self.bind_layout,
+            color_format,
+            SIGN_OUTLINE_DEPTH_BIAS,
+        );
     }
 }
 
@@ -292,6 +337,7 @@ fn build_pipeline(
     device: &wgpu::Device,
     bind_layout: &wgpu::BindGroupLayout,
     color_format: wgpu::TextureFormat,
+    bias: wgpu::DepthBiasState,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("lodestone-sign-text-shader"),
@@ -344,7 +390,7 @@ fn build_pipeline(
             depth_write_enabled: Some(true),
             depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: wgpu::StencilState::default(),
-            bias: CAMERA_DEPTH_BIAS,
+            bias,
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
@@ -397,10 +443,11 @@ impl SignTextRenderer {
         };
 
         let ordered = order_by_forward_distance(view_proj, signs);
-        let mut vertices = Vec::new();
+        let mut outlines = Vec::new();
+        let mut glyphs = Vec::new();
         let mut drawn = 0usize;
         for spawn in &ordered {
-            let committed = vertices.len();
+            let committed = (outlines.len(), glyphs.len());
             // `isOutlineVisible` measures to the block's **centre**
             // (`Vec3.atCenterOf`), not to its corner or to the text plane.
             let centre = Vec3::new(
@@ -409,7 +456,7 @@ impl SignTextRenderer {
                 spawn.pos[2] as f32 + 0.5,
             );
             let distance_squared = (centre - eye).length_squared();
-            push_side_quads(
+            push_side_layers(
                 raster,
                 &self.ink,
                 &spawn.front,
@@ -420,9 +467,10 @@ impl SignTextRenderer {
                 distance_squared,
                 light,
                 spawn.light,
-                &mut vertices,
+                &mut outlines,
+                &mut glyphs,
             );
-            push_side_quads(
+            push_side_layers(
                 raster,
                 &self.ink,
                 &spawn.back,
@@ -433,14 +481,16 @@ impl SignTextRenderer {
                 distance_squared,
                 light,
                 spawn.light,
-                &mut vertices,
+                &mut outlines,
+                &mut glyphs,
             );
-            if vertices.len() > MAX_SIGN_TEXT_VERTICES {
+            if outlines.len() + glyphs.len() > MAX_SIGN_TEXT_VERTICES {
                 // Sorted nearest-first, so everything left is farther than
                 // this one: stop rather than keep probing for a smaller sign
                 // that happens to fit, which would make the drawn set depend
                 // on text length as well as distance.
-                vertices.truncate(committed);
+                outlines.truncate(committed.0);
+                glyphs.truncate(committed.1);
                 break;
             }
             drawn += 1;
@@ -449,13 +499,16 @@ impl SignTextRenderer {
             signs.len(),
             ordered.len(),
             drawn,
-            vertices.len(),
+            outlines.len() + glyphs.len(),
             MAX_SIGN_TEXT_VERTICES,
         );
-        if !vertices.is_empty() {
-            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices));
+        self.outline_count
+            .set(u32::try_from(outlines.len()).unwrap_or(u32::MAX));
+        outlines.append(&mut glyphs);
+        if !outlines.is_empty() {
+            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&outlines));
         }
-        vertices.len() as u32
+        outlines.len() as u32
     }
 
     /// Records the draw (no-op with zero vertices, including the no-jar
@@ -465,10 +518,17 @@ impl SignTextRenderer {
         if count == 0 {
             return;
         }
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
-        pass.draw(0..count, 0..1);
+        let outline_count = self.outline_count.get().min(count);
+        if outline_count > 0 {
+            pass.set_pipeline(&self.outline_pipeline);
+            pass.draw(0..outline_count, 0..1);
+        }
+        if outline_count < count {
+            pass.set_pipeline(&self.pipeline);
+            pass.draw(outline_count..count, 0..1);
+        }
     }
 }
 
@@ -582,6 +642,7 @@ fn split_first_line(
 /// `distance_squared` is from the camera to the sign block's centre, and is
 /// used for exactly one thing: [`sign_outline_color`]'s 16-block gate.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn push_side_quads(
     raster: &RasterFont,
     ink: &super::nametag::StyledInkLayoutCache,
@@ -594,6 +655,41 @@ fn push_side_quads(
     light: super::nametag::WorldTextLight,
     sampled_light: u8,
     out: &mut Vec<SignTextVertex>,
+) {
+    let mut outlines = Vec::new();
+    let mut glyphs = Vec::new();
+    push_side_layers(
+        raster,
+        ink,
+        side,
+        pos,
+        kind,
+        orientation,
+        is_front,
+        distance_squared,
+        light,
+        sampled_light,
+        &mut outlines,
+        &mut glyphs,
+    );
+    out.append(&mut outlines);
+    out.append(&mut glyphs);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_side_layers(
+    raster: &RasterFont,
+    ink: &super::nametag::StyledInkLayoutCache,
+    side: &SignSide,
+    pos: [i32; 3],
+    kind: SignKind,
+    orientation: SignOrientation,
+    is_front: bool,
+    distance_squared: f32,
+    light: super::nametag::WorldTextLight,
+    sampled_light: u8,
+    outlines: &mut Vec<SignTextVertex>,
+    glyphs: &mut Vec<SignTextVertex>,
 ) {
     if side.lines.iter().all(Vec::is_empty) {
         return;
@@ -615,7 +711,12 @@ fn push_side_quads(
     // entity's**, not a constant: a hanging sign overrides it to 9.
     let line_height = kind.text_line_height();
     let sign_midpoint = 2.0 * line_height;
-    let mut quad = |rect_x: f32, rect_y: f32, w: f32, h: f32, color: [f32; 4]| {
+    let quad = |out: &mut Vec<SignTextVertex>,
+                rect_x: f32,
+                rect_y: f32,
+                w: f32,
+                h: f32,
+                color: [f32; 4]| {
         // The lightmap texel, folded in here rather than at either caller so
         // the outline and the glyphs cannot end up on different arms of the
         // glow branch — vanilla gives both the one `lightVal`.
@@ -662,15 +763,16 @@ fn push_side_quads(
         // bold line still centres correctly against its own (wider) width.
         let x1 = -total_width / 2.0;
         let y_off = i as f32 * line_height - sign_midpoint;
-        // The outline first, the whole line's worth of it, then the glyphs —
-        // `TextFeatureRenderer.buildGroup` visits `prepare8xTextOutline`'s
-        // output before `prepareText`'s for exactly this reason, so a
-        // neighbouring glyph's outline cannot paint over this glyph. Depth is
-        // `LessEqual` and both sets are coplanar, so the later draw wins.
+        // Keep every outline in the first range and every glyph in the second.
+        // `TextFeatureRenderer.buildGroup` visits `prepare8xTextOutline` before
+        // `prepareText` for exactly this reason: glyph ink must be submitted
+        // after all outlines, not interleaved with them. The two ranges then
+        // receive vanilla's distinct normal/polygon-offset depth policies.
         if let Some(outline_color) = outline {
             for rect in rects.iter().filter(|r| r.outline_grow > 0.0) {
                 let g = rect.outline_grow;
                 quad(
+                    outlines,
                     rect.x + x1 - g,
                     rect.y + y_off - g,
                     rect.w + 2.0 * g,
@@ -680,7 +782,7 @@ fn push_side_quads(
             }
         }
         for rect in rects {
-            quad(rect.x + x1, rect.y + y_off, rect.w, rect.h, rect.color);
+            quad(glyphs, rect.x + x1, rect.y + y_off, rect.w, rect.h, rect.color);
         }
     }
 }
@@ -747,6 +849,44 @@ mod tests {
             &mut out,
         );
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn glowing_sign_layers_submit_outline_before_offset_ink() {
+        let Some(raster) = super::super::nametag::load_font() else {
+            return;
+        };
+        let ink = super::super::nametag::StyledInkLayoutCache::default();
+        let mut spawn = sign_with_front_text("Glow");
+        spawn.front.glowing = true;
+        let mut outlines = Vec::new();
+        let mut glyphs = Vec::new();
+        push_side_layers(
+            &raster,
+            &ink,
+            &spawn.front,
+            spawn.pos,
+            spawn.kind,
+            spawn.orientation,
+            true,
+            0.0,
+            super::super::nametag::WorldTextLight::overworld_noon(),
+            spawn.light,
+            &mut outlines,
+            &mut glyphs,
+        );
+        assert!(!outlines.is_empty(), "a nearby glowing side needs a normal-depth outline");
+        assert!(!glyphs.is_empty(), "the polygon-offset glyph ink remains a separate layer");
+        assert_eq!(outlines.len() % 6, 0);
+        assert_eq!(glyphs.len() % 6, 0);
+    }
+
+    #[test]
+    fn sign_ink_takes_a_second_depth_step_past_the_biased_board_and_outline() {
+        assert_eq!(SIGN_OUTLINE_DEPTH_BIAS, CAMERA_DEPTH_BIAS);
+        assert_eq!(SIGN_GLYPH_DEPTH_BIAS.constant, -20);
+        assert_eq!(SIGN_GLYPH_DEPTH_BIAS.slope_scale, -2.0);
+        assert_eq!(SIGN_GLYPH_DEPTH_BIAS.clamp, 0.0);
     }
 
     /// The positive control: real text on the front side contributes ink,

@@ -1077,25 +1077,24 @@ impl std::fmt::Debug for SignSource {
 
 /// Where this frame's filled-map pictures come from.
 ///
-/// Unlike the block-entity sources this takes a **map id** rather than an eye
-/// position, because a map is keyed by id and not by where it is: the same map
-/// can be in a hand and in three item frames at once. `None` asks for the
-/// lowest-numbered known map — see `Sim::map_source` for why that fallback exists
-/// and what removes it.
+/// Unlike the block-entity sources this takes a map id and, for an item frame,
+/// its entity id. A map is keyed by id rather than position, while the entity id
+/// is the narrow bridge that lets the live source recover the `map_id` data
+/// component that ordinary item rendering deliberately does not carry.
 ///
 /// Unset yields no picture and nothing draws, which is the behaviour before maps
 /// rendered at all.
 #[derive(Default)]
 pub struct MapSource(
     #[allow(clippy::type_complexity)]
-    pub(super) Option<Box<dyn Fn(Option<i32>) -> Option<Arc<Vec<u8>>> + Send + Sync>>,
+    pub(super) Option<Box<dyn Fn(Option<i32>, Option<i32>) -> Option<Arc<Vec<u8>>> + Send + Sync>>,
 );
 
 impl MapSource {
     /// One map's raw 128×128 packed colour grid, or none when unset or unknown.
     #[must_use]
-    pub(super) fn picture(&self, id: Option<i32>) -> Option<Arc<Vec<u8>>> {
-        self.0.as_ref().and_then(|f| f(id))
+    pub(super) fn picture(&self, id: Option<i32>, frame_entity: Option<i32>) -> Option<Arc<Vec<u8>>> {
+        self.0.as_ref().and_then(|f| f(id, frame_entity))
     }
 
     /// Whether a closure has been installed at all.
@@ -1441,10 +1440,10 @@ mod tests {
     fn map_source_reuses_shared_pixels_between_consumers() {
         let pixels = Arc::new(vec![9; lodestone_game::maps::MAP_SIZE.pow(2)]);
         let captured = Arc::clone(&pixels);
-        let source = MapSource(Some(Box::new(move |_| Some(Arc::clone(&captured)))));
+        let source = MapSource(Some(Box::new(move |_, _| Some(Arc::clone(&captured)))));
 
-        let held = source.picture(None).expect("held map picture");
-        let framed = source.picture(None).expect("framed map picture");
+        let held = source.picture(None, None).expect("held map picture");
+        let framed = source.picture(None, Some(9)).expect("framed map picture");
         assert!(Arc::ptr_eq(&held, &framed));
         assert!(Arc::ptr_eq(&held, &pixels));
     }

@@ -414,6 +414,9 @@ struct EntityFacts {
     /// [`Self::item_potion_color`] — the same additive pattern
     /// [`Self::equipment_dye`] uses for equipment.
     item: Reported<ResourceLocation>,
+    /// `minecraft:map_id` from that same stack. Kept out of `EntityDraw`
+    /// because only the framed-map texture lookup consumes it.
+    item_map_id: Option<i32>,
     /// The entity's last-reported velocity in blocks per tick
     /// (`set_entity_motion`/`add_entity`), when the server has ever sent one.
     ///
@@ -1579,6 +1582,20 @@ struct TrackedStack {
     dyed_color: Option<u32>,
     /// Mirrors [`EntityFacts::item_potion_color`].
     potion_color: Option<u32>,
+}
+
+/// The saved-map id carried by an entity's current `filled_map` stack.
+///
+/// This stays beside [`ItemStacks`] rather than widening [`EntityDraw`]: most
+/// entity consumers only need an item id, while a framed map must retain its
+/// data-component id to select the matching `MAP_ITEM_DATA` picture.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct EntityMapIds(HashMap<i32, i32>);
+
+/// A snapshot of every entity whose current stack carries `minecraft:map_id`.
+#[must_use]
+pub fn entity_map_ids(world: &World) -> HashMap<i32, i32> {
+    world.resource::<EntityMapIds>().0.clone()
 }
 
 /// Which item (and how many) each dropped-item entity is carrying, keyed by
@@ -3313,6 +3330,10 @@ fn resolve_entity_facts(
         Reported::Reported(Some(stack)) => stack.components.potion_color,
         _ => None,
     };
+    let item_map_id = match &display_item {
+        Reported::Reported(Some(stack)) => stack.components.map_id,
+        _ => None,
+    };
     // A failed conversion must collapse to `Unreported` ("nothing reported"),
     // never to `Reported(None)`, which downstream reads as the server
     // clearing the stack.
@@ -3460,6 +3481,7 @@ fn resolve_entity_facts(
         pitch: rotation.pitch,
         scale,
         item,
+        item_map_id,
         velocity: entity.get::<Velocity>().map(|v| to_glam_vec3(v.0)),
         on_ground: entity.get::<OnGround>().is_some_and(|grounded| grounded.0),
         equipment,
@@ -3667,6 +3689,7 @@ pub fn fold_entities(world: &mut World) {
                 .is_some_and(|kind| kind.0.as_ref() != facts.type_path)
         {
             world.resource_mut::<ItemStacks>().0.remove(&facts.id);
+            world.resource_mut::<EntityMapIds>().0.remove(&facts.id);
         }
 
         // Fold the reported identity first, so a drop is never drawn for a frame
@@ -3685,9 +3708,18 @@ pub fn fold_entities(world: &mut World) {
                         potion_color: facts.item_potion_color,
                     },
                 );
+                match facts.item_map_id {
+                    Some(map_id) => {
+                        world.resource_mut::<EntityMapIds>().0.insert(facts.id, map_id);
+                    }
+                    None => {
+                        world.resource_mut::<EntityMapIds>().0.remove(&facts.id);
+                    }
+                }
             }
             Reported::Reported(None) => {
                 world.resource_mut::<ItemStacks>().0.remove(&facts.id);
+                world.resource_mut::<EntityMapIds>().0.remove(&facts.id);
             }
             Reported::Unreported => {}
         }
@@ -3713,6 +3745,10 @@ pub fn fold_entities(world: &mut World) {
     }
     world
         .resource_mut::<ItemStacks>()
+        .0
+        .retain(|id, _| seen.contains(id));
+    world
+        .resource_mut::<EntityMapIds>()
         .0
         .retain(|id, _| seen.contains(id));
 }
@@ -3939,6 +3975,7 @@ impl Plugin for EntityInterpPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FrameDelta>();
         app.init_resource::<ItemStacks>();
+        app.init_resource::<EntityMapIds>();
         app.init_resource::<TrackIndex>();
         app.init_resource::<ExtractedDraws>();
         // Issue #365. Written by `begin_item_pickup` from `Sim::poll_net`, aged by
@@ -4007,6 +4044,7 @@ pub fn reset_entity_tracks(world: &mut World) {
     }
     world.resource_mut::<TrackIndex>().0.clear();
     world.resource_mut::<ItemStacks>().0.clear();
+    world.resource_mut::<EntityMapIds>().0.clear();
     world.resource_mut::<ExtractedDraws>().0.clear();
     // A pickup in flight when the session ends has no collector to fly to any
     // more, and its start point is in a world we are leaving.
@@ -4596,6 +4634,27 @@ mod tests {
             &lodestone_game::tablist::TabList::new(),
         );
         assert!(bare.equipment.is_empty());
+    }
+
+    #[test]
+    fn resolve_entity_facts_retains_a_filled_maps_saved_id() {
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        let mut map = lodestone_model::ItemStack::new(
+            "minecraft:filled_map".parse().expect("valid map item key"),
+            1,
+        );
+        map.components.map_id = Some(47);
+        world
+            .entity_mut(entity)
+            .insert(DisplayItem(Some(map)));
+
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(
+            facts.item_map_id,
+            Some(47),
+            "the framed-map renderer must retain the id that selects MAP_ITEM_DATA"
+        );
     }
 
     /// The last hop of `docs/armour-rendering.md`'s dye chain. The old

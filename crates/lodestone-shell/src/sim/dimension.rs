@@ -377,6 +377,19 @@ impl Sim {
         self.status = "changed dimension".into();
     }
 
+    /// Drop HUD state owned by the server we are leaving during a transfer or
+    /// reconnect. A portal respawn is intentionally different: it stays on the
+    /// same server and its boss bars remain valid, while a second `LOGIN` or a
+    /// newly attached connection starts a new server session.
+    pub(crate) fn reset_for_server_transfer(&mut self) {
+        let local = self.local;
+        self.write(|w| {
+            if let Some(mut bars) = w.get_mut::<lodestone_ecs::session::SessionBossBars>(local) {
+                bars.0 = lodestone_game::bossbar::BossBarSet::default();
+            }
+        });
+    }
+
     /// The reset [`Sim::end_session`] needs from this cluster, so the two paths
     /// cannot drift apart on the fields this module owns.
     pub(crate) fn reset_dimension_state(&mut self) {
@@ -480,6 +493,31 @@ mod tests {
             "the edge must be consumed — a Nether death is not a second trip"
         );
         assert_eq!(indexed_count(&sim), 1);
+    }
+
+    #[test]
+    fn a_server_transfer_clears_boss_bars_without_treating_portal_travel_as_transfer() {
+        use lodestone_ecs::session::SessionBossBars;
+        use lodestone_game::bossbar::BossBar;
+        use lodestone_model::Text;
+        use uuid::Uuid;
+
+        let mut sim = Sim::with_demo_world(headless_config());
+        let local = sim.local;
+        sim.write(|w| {
+            w.get_mut::<SessionBossBars>(local)
+                .expect("session entity has boss bars")
+                .0
+                .add(Uuid::from_u128(1), BossBar::new(Text::literal("Old server")));
+        });
+        assert_eq!(sim.boss_bars().len(), 1);
+
+        sim.reset_for_server_transfer();
+
+        assert!(
+            sim.boss_bars().is_empty(),
+            "a second LOGIN/reconnect starts with no bars from the previous server"
+        );
     }
 
     /// The other half of "a dimension change is not a respawn": the reset must not

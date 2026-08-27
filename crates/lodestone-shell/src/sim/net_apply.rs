@@ -109,6 +109,7 @@ impl Sim {
                             "xfer: second LOGIN while connected -- dropping the \
                              previous backend's meshes and entity tracks"
                         );
+                        self.reset_for_server_transfer();
                         self.reset_for_dimension_change();
                     }
                     // The id is *not* recorded here. `ClientEvent::Login` folds it
@@ -736,6 +737,7 @@ impl Sim {
                     // puts its screen title in a separate widget above the
                     // reason rather than gluing it on.
                     let reason = self.resolve_text(&reason);
+                    self.reset_for_server_transfer();
                     self.status = format!("disconnected: {}", reason.to_plain_string());
                     self.set_phase(SessionPhase::Ended(Box::new(SessionEnd::disconnected(
                         reason,
@@ -749,6 +751,7 @@ impl Sim {
                     // then reported the generic end-of-stream reason instead —
                     // the failure mode where a join error reached no log at all.
                     tracing::error!(error = %e, "session failed");
+                    self.reset_for_server_transfer();
                     self.status = format!("net error: {e}");
                     self.set_phase(SessionPhase::Ended(Box::new(SessionEnd::failed(
                         Text::literal(e),

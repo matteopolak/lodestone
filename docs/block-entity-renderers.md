@@ -711,9 +711,12 @@ ink walk emits is a rectangle — so the covered region is identical at 1× the 
 `StyledRect::outline_grow` carries the per-glyph offset (0.5 for a unihex glyph) and is `0.0` on
 underline/strikethrough bars, which is `outlineOutput.discardEffects()`.
 
-One real difference: vanilla submits the outline through `DisplayMode.NORMAL` and the glyphs through
-`POLYGON_OFFSET`. This pass has one pipeline, so both carry the offset and the separation comes from
-submission order instead (outline first, glyphs second, `LessEqual` depth).
+Vanilla submits the outline through `DisplayMode.NORMAL` and the glyphs through `POLYGON_OFFSET`.
+The pass now has two contiguous vertex ranges and two pipelines. Lodestone's opaque model pipeline
+has already applied one shared camera-facing depth step to the sign board, so the outline takes that
+same *base* step and glyph ink takes a second one. This preserves vanilla's relative ordering in this
+engine: using the board's single shared bias for glyphs leaves ordinary text one ULP from the face at
+range, while making outline and glyph share a second step leaves glowing text competing with itself.
 
 ### Line width is per **kind**, and it truncates rather than wrapping
 
@@ -785,11 +788,11 @@ standoff is worth:
 Two exactly parallel planes one ULP apart is the textbook recipe for the reported symptom, because a
 parallel pair flips *whole* rather than speckling — which is why this had to be measured rather than
 argued. It was then **excluded**: rendered over a real meshed board at all seven distances and across
-sub-block camera displacements, the ink holds at a constant 657 px.
-`TEXT_POLYGON_OFFSET`'s `constant: -10` — ten ULPs at the fragment's own exponent — really does carry
-the ordering the geometry stopped carrying. Read the table as *the offset is load-bearing*: the
-`0.005`-block standoff is not headroom, and anything that removes or shrinks the bias breaks signs at
-range and nowhere near the camera. (Under vanilla's reversed-Z the same standoff would stay
+sub-block camera displacements, the ink holds at a constant 657 px. The board's model pipeline already
+uses `CAMERA_DEPTH_BIAS` (`constant: -10`), so sign glyphs take a **second** matching step
+(`constant: -20`, `slope: -2`) past that base policy. Read the table as *the relative offset is
+load-bearing*: the `0.005`-block standoff is not headroom, and giving glyphs only the board's shared
+bias makes them tie at range again. (Under vanilla's reversed-Z the same standoff would stay
 comfortable at every one of those ranges; this is the `[0,1]`-forward-depth cost `CLAUDE.md`'s
 rendering constraints record.)
 

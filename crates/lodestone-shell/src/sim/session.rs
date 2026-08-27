@@ -110,6 +110,14 @@ impl Sim {
     // `mut` is used only by the `#[cfg(test)]` `bind_session` below.
     #[cfg_attr(not(test), allow(unused_mut))]
     pub fn attach_net(&mut self, mut net: NetClient) {
+        // Stop any previous connection before clearing its state. Dropping
+        // joins the network thread, so no late boss-bar packet can be queued
+        // after this boundary and repopulate the freshly-cleared component.
+        self.net = None;
+        // A reconnect is a new server session even when the caller did not
+        // first visit the title screen. Clear server-authored HUD state before
+        // the new connection can publish its first packets.
+        self.reset_for_server_transfer();
         // The `World`-sharing half of §4.1(c) for a test double, which has no
         // `ClientBuilder` to hand the handle to. Production goes through
         // [`Self::connect`], where the real client adopts it at build time.

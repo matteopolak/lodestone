@@ -32,6 +32,16 @@ if the tick shape is new, an `emit::` function transcribed from the matching
 
 ## How it works
 
+### World-space particles use the rendered camera
+
+`WindowApp::redraw` computes a first-person eye for interaction and audio, then a
+possibly pulled-back `render_camera` for third person. Particle extraction (frustum
+culling/light resolution) and `RenderState::prepare_particles` must both receive
+the latter. Passing the first-person eye projects and culls a campfire plume as if
+the view had not left the player's head, producing smoke that appears camera-attached
+in third person. Keep screen-space effects separate; this rule is for world-space
+particle billboards.
+
 ### The dispatch is reachable independently of any specific gameplay trigger
 
 `spawn_one` is reached from exactly one place: `Particles::spawn_particles`, which is called

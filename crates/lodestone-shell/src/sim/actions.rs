@@ -821,6 +821,54 @@ impl Sim {
         }
     }
 
+    /// End a completed consumable's local use state and, while the physical use
+    /// button is still held, begin its next use. This is the fixed-tick half of
+    /// vanilla's held-key polling: the OS only reports the original press edge,
+    /// but `Minecraft.handleKeybinds` starts another use once the previous one
+    /// has completed.
+    ///
+    /// Only consumables have a client-known completion duration. Bows, shields
+    /// and other release-driven uses remain active until [`Self::end_use_live`]
+    /// receives the actual release edge, so this cannot turn a held bow into a
+    /// stream of generic use packets.
+    pub(crate) fn restart_completed_consumable_if_held(&mut self) {
+        let Some(held) = self
+            .player_menu()
+            .player_native(self.selected_slot())
+            .filter(|stack| !stack.is_empty())
+            .map(|stack| stack.item().to_string())
+        else {
+            return;
+        };
+        let Some(consumable) = lodestone_game::consumable::consumable_for_item(&held) else {
+            return;
+        };
+        let local = self.local;
+        let completed = self.write(|world| {
+            let using = world.resource::<UsingItem>().0;
+            let complete = world
+                .resource::<ItemUseTicks>()
+                .0
+                .is_some_and(|ticks| ticks >= consumable.consume_ticks);
+            if !(using && complete) {
+                return false;
+            }
+            world.resource_mut::<UsingItem>().0 = false;
+            world.resource_mut::<ItemUseTicks>().0 = None;
+            if let Some(mut effects) = world.get_mut::<ItemUseEffects>(local) {
+                effects.0 = None;
+            }
+            true
+        });
+        if completed {
+            // Re-run the original press path, including its food/fullness gate.
+            // A bite that makes the player full therefore clears slowdown here
+            // and an attempted restart stays inert once authoritative vitals
+            // have arrived.
+            self.use_item_live();
+        }
+    }
+
     /// The live half of [`Self::end_use`], split out the same way
     /// [`Self::begin_attack_live`] is — reachable directly from a test with no
     /// `vanilla_atlas`, since the swing/send logic itself needs no GPU asset.

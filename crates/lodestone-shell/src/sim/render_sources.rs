@@ -662,37 +662,38 @@ impl Sim {
     /// This frame's filled-map picture, for
     /// [`RenderState::set_map_source`](crate::gpu::RenderState::set_map_source).
     ///
-    /// Takes an optional map id and yields that map's raw 128×128 packed colour
-    /// grid, cloned out of [`SessionMaps`](lodestone_ecs::session::SessionMaps).
+    /// Takes an optional explicit map id plus an optional item-frame entity id
+    /// and yields that map's raw 128×128 packed colour grid, cloned out of
+    /// [`SessionMaps`](lodestone_ecs::session::SessionMaps).
     ///
     /// # Why the id is optional, and what to change when it stops being
     ///
     /// `minecraft:map_id` **is** decoded — v770's component-patch reader fills
-    /// `ItemComponents::map_id` from the VarInt `MapId` — but it is dropped
-    /// before it reaches a draw site. `extract_entity_draws` converts a frame's
-    /// `DisplayItem` stack down to a bare `ResourceLocation` for
-    /// `EntityDraw::item`, and `HeldItemEquip` carries the same narrowed id for
-    /// the hand, so neither caller has an id to pass. (An earlier version of this
-    /// doc said the component was undecoded and truncated the packet; that was
-    /// true when it was written and is not now — the decode landed with
-    /// `minecraft:trim`.)
+    /// `ItemComponents::map_id` from the VarInt `MapId`. `EntityDraw` still
+    /// intentionally carries only a bare item id, but entity extraction retains
+    /// the map id beside it in `EntityMapIds`; an item-frame caller supplies its
+    /// entity id so this closure can recover the exact map. The held-item path
+    /// remains id-less, because `HeldItemEquip` still narrows its stack.
     ///
-    /// So `None` means "the lowest-numbered map the server has sent" — exactly
-    /// right in the overwhelmingly common one-map case, and the wrong picture
-    /// when two different maps are visible at once. Closing it is a change to
-    /// `EntityDraw`/`HeldItemEquip` (carry the id beside the item), not to this
-    /// function: the moment a caller has one it passes `Some(id)` and this needs
-    /// no change at all.
+    /// With neither id available, `None` still means "the lowest-numbered map
+    /// the server has sent". That is an intentional compatibility fallback for
+    /// the held-item path, not the framed-map path: the latter groups its quads
+    /// by the resolved picture and binds each distinct map texture separately.
     #[must_use]
     pub fn map_source(
         &self,
-    ) -> Option<impl Fn(Option<i32>) -> Option<std::sync::Arc<Vec<u8>>> + Send + Sync + 'static> {
+    ) -> Option<
+        impl Fn(Option<i32>, Option<i32>) -> Option<std::sync::Arc<Vec<u8>>> + Send + Sync + 'static,
+    > {
         // Off a live server the store is always empty, so a source would only
         // ever answer `None`; skip it as the block-entity sources do.
         self.net.as_ref()?;
         let store = self.maps();
-        Some(move |id: Option<i32>| {
-            let id = id.or_else(|| store.ids().next())?;
+        let frame_ids = self.read(crate::entities::entity_map_ids);
+        Some(move |id: Option<i32>, frame_entity: Option<i32>| {
+            let id = id
+                .or_else(|| frame_entity.and_then(|entity| frame_ids.get(&entity).copied()))
+                .or_else(|| store.ids().next())?;
             Some(std::sync::Arc::clone(&store.get(id)?.colors))
         })
     }

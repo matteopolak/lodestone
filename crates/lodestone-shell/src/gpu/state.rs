@@ -1840,7 +1840,7 @@ impl RenderState {
     /// sent by then and would never fill in as the player explored.
     pub fn set_map_source(
         &mut self,
-        f: impl Fn(Option<i32>) -> Option<Arc<Vec<u8>>> + Send + Sync + 'static,
+        f: impl Fn(Option<i32>, Option<i32>) -> Option<Arc<Vec<u8>>> + Send + Sync + 'static,
     ) {
         self.map_source = MapSource(Some(Box::new(f)));
     }

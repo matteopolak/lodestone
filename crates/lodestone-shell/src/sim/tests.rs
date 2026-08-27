@@ -6138,6 +6138,38 @@ fn right_clicking_food_at_a_full_hunger_bar_does_not_slow_movement() {
     );
 }
 
+/// Holding `key.use` through a completed food use must begin the next use,
+/// matching `Minecraft.handleKeybinds` polling the held key rather than only
+/// reacting to the original OS press edge.  The loopback action stream is the
+/// client/server seam: a second `UseItem` is what lets the authoritative server
+/// start the second bite.
+#[test]
+fn holding_use_restarts_food_after_its_consume_duration() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:bread");
+
+    // `Mode::Headless` has no stitched vanilla atlas, so `Sim::use_item`
+    // intentionally takes the demo-world placement path. Exercise the live
+    // press transition directly, as the nearby outbound-use seam tests do.
+    sim.use_item_live();
+    for _ in 0..32 {
+        sim.step(1.0 / 20.0);
+    }
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    let uses = sent
+        .iter()
+        .filter(|action| matches!(action, ClientAction::UseItem { hand: Hand::Main, .. }))
+        .count();
+    assert_eq!(
+        uses, 2,
+        "holding use through bread's 32-tick duration must send a fresh UseItem, got {sent:?}"
+    );
+}
+
 /// Vanilla's `getCurrentItemAttackStrengthDelay`/`getAttackStrengthScale`
 /// (`Player.java`): with no [`Attributes`] component at all (the
 /// pre-login default `attribute_value` falls back to — see

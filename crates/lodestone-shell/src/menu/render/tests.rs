@@ -11,7 +11,7 @@ use super::*;
 use super::account_screen::{ACCOUNTS_BUTTON_W, ACCOUNTS_FOOTER_SPACING, ACCOUNTS_HEAD_ICON, AccountsBlock, accounts_block, accounts_button_slot, accounts_failed_frame, accounts_idle_frame};
 use super::draw::{
     Quads, TOOLTIP_BG, TOOLTIP_LINE_H, TOOLTIP_MOUSE_OFFSET, TOOLTIP_PAD, restyle_wrapped,
-    wrap_bounded, wrap_measured,
+    tooltip_content_origin, wrap_bounded, wrap_measured,
 };
 use super::renderer::{FLOATS_PER_VERTEX, SPRITE_FLOATS_PER_VERTEX};
 use super::screens::credits_frame;
@@ -25,6 +25,14 @@ use crate::menu::{Screen, SessionKind, UiState};
 
 /// Vertex stride in the emitted buffer.
 const STRIDE: usize = FLOATS_PER_VERTEX;
+
+#[test]
+fn a_server_list_tooltip_snaps_its_box_to_the_same_origin_as_its_text() {
+    assert_eq!(
+        tooltip_content_origin((100.25, 80.25), 40.0, 9.0, 400.0, 300.0),
+        (112.0, 68.0)
+    );
+}
 
 /// A nav with a temporary (never-loaded) list path, so no test reads the
 /// developer's real `servers.json`.

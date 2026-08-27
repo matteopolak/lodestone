@@ -106,6 +106,16 @@ Sim::boss_bars()    → NetClient::boss_bars()  → ClientHandle::boss_bars()  �
 `NetUpdate::TabListEvent` and `NetUpdate::ScoreboardEvent` are deleted along with
 their `forward()` arms, so those events no longer even cross the channel.
 
+### Server boundaries reset server-authored HUD state
+
+`SessionBossBars` belongs to one server connection. `Sim::reset_for_server_transfer`
+replaces its `BossBarSet` when a new `NetClient` is attached and when a connected
+client receives a second `LOGIN` from a transfer-capable proxy. The dimension
+respawn path deliberately does not call it: portal travel stays on the same
+server, so its bars remain valid. If another server-authored overlay is added,
+clear it at the same two server-session boundaries rather than in the ordinary
+`Respawned`/dimension reset.
+
 ## What was deleted, field by field
 
 **`crates/lodestone-client/src/scoreboard.rs` — the whole file (388 lines).**
