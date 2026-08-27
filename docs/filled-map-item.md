@@ -122,7 +122,14 @@ than allocating and copying 16 KiB per lookup.
 
 This is exact synchronous extraction, not speculative simulation. A frame sees
 one immutable store generation; incoming map packets update the next generation
-without invalidation bookkeeping or races.
+without invalidation bookkeeping or races. For an item frame, entity extraction
+retains its stack's `minecraft:map_id` beside the deliberately narrow
+`EntityDraw::item` value. `Sim::map_source()` receives the frame entity id,
+recovers that saved-map id, and `prepare_framed_maps` groups visible quads by the
+resulting pixel `Arc`. Each group gets its own texture bind group, so two frames
+with different maps cannot sample whichever map happened to be prepared first.
+If a server has not sent `MAP_ITEM_DATA` for one frame's id yet, only that frame
+is skipped; its full-size item-frame body is still expected to be visible.
 
 ## What is still missing
 
@@ -145,8 +152,9 @@ The remaining rendering work is:
 Change packet folding and snapshot ownership in
 `crates/lodestone-game/src/maps.rs`. Keep the copy-on-write tests when adding
 fields: a snapshot must remain immutable after a packet updates the live store.
-The shell source contract is in `gpu/sources.rs`, its capture in
-`sim/render_sources.rs`, and texture creation/draws in `gpu/maps.rs`.
+The shell source contract is in `gpu/sources.rs`, entity-side map-id retention
+is in `entities.rs`, its capture is in `sim/render_sources.rs`, and texture
+creation/grouped draws are in `gpu/maps.rs`.
 
 Do not expose mutable pixel slices across the render seam. For a retained GPU
 cache, add a monotonic generation to `MapState`, increment it only when pixels

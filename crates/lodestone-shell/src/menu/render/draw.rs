@@ -1042,15 +1042,7 @@ fn draw_tooltip(b: &mut Quads<'_>, lines: &[String], at: (f32, f32), width: f32,
     } else {
         TOOLTIP_LINE_H * lines.len() as f32
     };
-    let mut rx = at.0 + TOOLTIP_MOUSE_OFFSET;
-    let mut ry = at.1 - TOOLTIP_MOUSE_OFFSET;
-    if rx + w > width {
-        rx = (rx - 2.0 * TOOLTIP_MOUSE_OFFSET - w).max(4.0);
-    }
-    let padded = h + TOOLTIP_PAD;
-    if ry + padded > height {
-        ry = height - padded;
-    }
+    let (rx, ry) = tooltip_content_origin(at, w, h, width, height);
     // The fill.
     b.rect(
         rx - TOOLTIP_PAD,
@@ -1074,6 +1066,28 @@ fn draw_tooltip(b: &mut Quads<'_>, lines: &[String], at: (f32, f32), width: f32,
         };
         b.text(line, rx, ly, 1.0, LABEL);
     }
+}
+
+/// Position the tooltip content and quantise it together with its background.
+/// The proportional font deliberately snaps each line origin to a GUI pixel;
+/// snapping this shared origin keeps the box and its text moving as one unit.
+pub(super) fn tooltip_content_origin(
+    at: (f32, f32),
+    content_w: f32,
+    content_h: f32,
+    width: f32,
+    height: f32,
+) -> (f32, f32) {
+    let mut rx = at.0 + TOOLTIP_MOUSE_OFFSET;
+    let mut ry = at.1 - TOOLTIP_MOUSE_OFFSET;
+    if rx + content_w > width {
+        rx = (rx - 2.0 * TOOLTIP_MOUSE_OFFSET - content_w).max(4.0);
+    }
+    let padded = content_h + TOOLTIP_PAD;
+    if ry + padded > height {
+        ry = height - padded;
+    }
+    (rx.round(), ry.round())
 }
 
 /// Greedy whitespace wrap of `s` to at most `max_lines` lines of `max_px`, in
@@ -2530,4 +2544,3 @@ impl Quads<'_> {
         }
     }
 }
-

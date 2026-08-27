@@ -570,6 +570,11 @@ impl Sim {
                 w.insert_resource(glider);
                 w.run_schedule(GameTick);
             });
+            // The completion becomes visible when `tick_item_use` advances the
+            // fixed-tick clock. Re-enter the existing live use path outside the
+            // ECS guard, so holding food starts the next bite without another OS
+            // press event and retains the established direct-send ordering.
+            self.restart_completed_consumable_if_held();
             // Drive the local player's own walk/head-look clock off the
             // post-physics position, exactly like a tracked network entity's
             // `EntityPose::tick` — see `Self::body_pose`'s doc for why this

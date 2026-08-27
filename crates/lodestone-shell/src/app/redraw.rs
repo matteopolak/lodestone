@@ -1087,8 +1087,17 @@ impl WindowApp {
         render.install_pending_player_skins(device, queue);
         // Extraction lives in `Sim` because resolving each particle's light
         // needs the world; doing it here would hand out two borrows of `Sim`.
-        let particle_frame = self.sim.extract_particles(&camera);
-        render.prepare_particles(device, queue, &self.sim.particle_instances(), &camera);
+        // Particles are world-space billboards, so both their extraction
+        // culling and their camera uniform must use the camera that renders
+        // the frame. Passing the first-person eye here left a third-person
+        // smoke plume projected as though it were still attached to the eye.
+        let particle_frame = self.sim.extract_particles(&render_camera);
+        render.prepare_particles(
+            device,
+            queue,
+            &self.sim.particle_instances(),
+            &render_camera,
+        );
         let tick = self.sim.tick_count();
         render.update_animation(queue, tick);
 

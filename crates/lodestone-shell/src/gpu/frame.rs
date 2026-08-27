@@ -1725,7 +1725,7 @@ impl RenderState {
                     stats.draw_calls += 1;
                 }
 
-                if let Some((mesh, texture)) = &framed_maps {
+                for (mesh, texture) in &framed_maps {
                     pass.set_pipeline(&model.surface_pipeline.pipeline);
                     bind_terrain_camera(
                         &mut pass,

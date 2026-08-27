@@ -9,6 +9,13 @@ slot contents, and (for menus that have one) a crafting grid and result slot.
 It is a *projection only*. Slot state is folded by `lodestone-game`; this module
 turns a `Menu` into rectangles and vertex streams and never mutates anything.
 
+Tooltip text and its background share one rounded content origin. The vanilla
+font snaps glyph line origins to GUI pixels to keep binary glyph coverage stable;
+`container::tooltip` and the multiplayer-list tooltip apply that same snap after
+edge clamping so a cursor moving by a fraction of a pixel cannot slide the box
+under text that is still on the previous raster pixel. Keep this coupling when
+adding another tooltip producer.
+
 Item icons come from the shared pass documented in
 [`gui-item-icons.md`](gui-item-icons.md) — the same code, atlases and tint
 palette the hotbar uses. Read that for anything about the icons themselves.

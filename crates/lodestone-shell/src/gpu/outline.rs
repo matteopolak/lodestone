@@ -231,15 +231,12 @@ const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 /// vanilla's `GREATER_THAN_OR_EQUAL` under reversed-Z is this engine's
 /// `LessEqual` under `[0,1]` depth, which is exactly what this pipeline
 /// already had, at zero bias — so there was no sign-flipped bias to fix.
-/// Vanilla avoids z-fighting by drawing the outline at the block's *exact*
-/// coincident boundary and relying on the inclusive `>=`/`<=` compare, rather
-/// than an epsilon nudge; this pass instead inflates the box outward by
-/// `PAD` in world space (see [`OutlineRenderer::prepare`]) because the outline
-/// and the terrain mesh do not share a vertex-generation path here and are not
-/// guaranteed bit-identical. `PAD` is small enough not to visibly separate the
-/// line from the surface. The shared camera-facing depth bias additionally
-/// resolves the remaining depth-buffer tie at oblique angles, where a fixed
-/// world-space pad alone is not stable.
+/// The box stays on the selected shape's *exact* boundary. The earlier
+/// world-space expansion made the screen-space ribbon appear to breathe as an
+/// oblique camera moved: its projected separation changed with the view even
+/// though the ribbon width was constant. The inclusive compare plus the
+/// camera-facing depth bias resolves the depth tie without moving the line in
+/// world space.
 #[derive(Debug)]
 pub(super) struct OutlineRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -363,9 +360,8 @@ impl OutlineRenderer {
         }
     }
 
-    /// Upload the view-projection, viewport/line-width uniform, and the box
-    /// vertices for `block` (slightly expanded so the lines sit just outside
-    /// the block faces). Must be called before the render pass begins —
+    /// Upload the view-projection, viewport/line-width uniform, and the exact
+    /// outline-shape vertices for `block`. Must be called before the render pass begins —
     /// buffers can't be written mid-pass. `outline` is the block's real
     /// outline shape in world space, from [`LiveCollision::outline_boxes_at`].
     /// Pass an empty slice to fall back to a unit cube — correct for the demo
@@ -405,17 +401,16 @@ impl OutlineRenderer {
         ];
         queue.write_buffer(&self.uniform, 64, bytemuck::bytes_of(&viewport_uniform));
 
-        const PAD: f32 = 0.002;
         let (mut lo, mut hi) = (
             [
-                block[0] as f32 - PAD,
-                block[1] as f32 - PAD,
-                block[2] as f32 - PAD,
+                block[0] as f32,
+                block[1] as f32,
+                block[2] as f32,
             ],
             [
-                block[0] as f32 + 1.0 + PAD,
-                block[1] as f32 + 1.0 + PAD,
-                block[2] as f32 + 1.0 + PAD,
+                block[0] as f32 + 1.0,
+                block[1] as f32 + 1.0,
+                block[2] as f32 + 1.0,
             ],
         );
         if let Some((first, rest)) = outline.split_first() {
@@ -429,14 +424,14 @@ impl OutlineRenderer {
                 b.max_z = b.max_z.max(o.max_z);
             }
             lo = [
-                b.min_x as f32 - PAD,
-                b.min_y as f32 - PAD,
-                b.min_z as f32 - PAD,
+                b.min_x as f32,
+                b.min_y as f32,
+                b.min_z as f32,
             ];
             hi = [
-                b.max_x as f32 + PAD,
-                b.max_y as f32 + PAD,
-                b.max_z as f32 + PAD,
+                b.max_x as f32,
+                b.max_y as f32,
+                b.max_z as f32,
             ];
         }
         // Corner index bit layout: x = bit0, y = bit1, z = bit2.
