@@ -335,11 +335,8 @@ pub(crate) struct FrameProfiler {
     /// dump's row index.
     frame_count: u64,
     dump: Option<super::frame_profile_dump::DumpWriter>,
-    /// Last time [`Self::report_due`] fired — a clock this struct owns
-    /// rather than reusing `WindowApp::last_log`'s, so the periodic
-    /// `tracing` line has its own cadence instead of silently inheriting
-    /// whatever `last_log`'s stdout print happens to use; see that field's
-    /// doc in `app.rs`.
+    /// Last time [`Self::report_due`] fired. The tracing report owns its own
+    /// cadence so it remains independent of the explicit headless summary.
     last_report: Instant,
     /// Rolling windows for `world_encode_submit`'s own internal breakdown —
     /// see `gpu::gpu_timing::WorldSubphase`'s doc for what each covers and

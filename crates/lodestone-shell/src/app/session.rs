@@ -65,7 +65,6 @@ impl WindowApp {
             modifiers: winit::keyboard::ModifiersState::empty(),
             scroll_accum: 0.0,
             last_menu_click: None,
-            last_log: Instant::now(),
             // `LODESTONE_FRAME_PROFILE_DUMP`, named in `docs/frame-profiling.md`
             // — unset (the ordinary case) means no dump file, not an error.
             // `frame_profile::DumpWriter::open` is what logs a warning (once,

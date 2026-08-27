@@ -367,7 +367,7 @@ impl Sim {
                     // render `§` codes, so logging the legacy-flattened string prints
                     // mojibake for any coloured line — the code points survive, just
                     // uninterpreted, into the log file.
-                    tracing::info!(target: "chat", "{}", text.to_plain_string());
+                    tracing::debug!(target: "chat", "{}", text.to_plain_string());
                     // Stamped with the driver's own clock, which is why the log and
                     // the clock had to move to the ECS together (Stage 3 deferred
                     // both for exactly this reason). `local` is the session entity,

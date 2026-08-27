@@ -683,7 +683,7 @@ impl Sim {
     pub fn map_source(
         &self,
     ) -> Option<
-        impl Fn(Option<i32>, Option<i32>) -> Option<std::sync::Arc<Vec<u8>>> + Send + Sync + 'static,
+        impl Fn(Option<i32>, Option<i32>) -> Option<crate::gpu::MapPicture> + Send + Sync + 'static,
     > {
         // Off a live server the store is always empty, so a source would only
         // ever answer `None`; skip it as the block-entity sources do.
@@ -694,7 +694,12 @@ impl Sim {
             let id = id
                 .or_else(|| frame_entity.and_then(|entity| frame_ids.get(&entity).copied()))
                 .or_else(|| store.ids().next())?;
-            Some(std::sync::Arc::clone(&store.get(id)?.colors))
+            let map = store.get(id)?;
+            Some(crate::gpu::MapPicture::new(
+                id,
+                map.color_revision,
+                std::sync::Arc::clone(&map.colors),
+            ))
         })
     }
 

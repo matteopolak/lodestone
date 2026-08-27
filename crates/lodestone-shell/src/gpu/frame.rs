@@ -1734,7 +1734,7 @@ impl RenderState {
                         &mut terrain_cam_group_last,
                         &mut stats,
                     );
-                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_bind_group(1, &**texture, &[]);
                     pass.set_bind_group(2, &model.palette_bind_group, &[]);
                     pass.set_bind_group(3, &model.anim_bind_group, &[]);
                     pass.set_vertex_buffer(0, mesh.vertices.slice(..));

@@ -84,13 +84,14 @@ pub use occlusion::TerrainOcclusion;
 pub use plugin_billboards::{PluginBillboardInstance, plugin_billboard_vertices};
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
+pub use maps::MapCacheCounters;
 pub use sources::{
     AmbientLightSource, BannerSource, BeaconSource, BellSource, BlockEntitySource, BrushableSource,
     CampfireSource,
     ConduitSource, CopperGolemStatueSource, DecoratedPotSource, EnchantingTableSource,
     EndGatewayBeamSource, EndGatewaySource, EndPortalSource,
     EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
-    MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShadowGroundSource,
+    MainHandSource, MapPicture, MapSource, MovingPistonSource, OutlineShapeSource, ShadowGroundSource,
     ShelfSource, ShulkerSource,
     SignSource, SkullSource, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource,
     ThirdPersonBodyState, VaultSource,
@@ -641,6 +642,10 @@ pub struct RenderState {
     /// model rather than showing a blank map, because the map branch declines
     /// before it builds any geometry.
     map_source: MapSource,
+    /// Retained per-device map textures and the most recent held/framed map
+    /// meshes. [`maps::MapRenderCache`] owns the exact revision and pose
+    /// invalidation rules.
+    map_cache: std::cell::RefCell<maps::MapRenderCache>,
     /// World-space sign text. Always constructed, like
     /// [`Self::nametag`]: it loads its own jar-sourced font and fail-opens to
     /// drawing nothing. A sign's *board* is a real block model (unlike chest

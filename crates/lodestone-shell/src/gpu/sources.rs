@@ -1075,6 +1075,35 @@ impl std::fmt::Debug for SignSource {
     }
 }
 
+/// One map picture plus the identity of the exact colour grid it carries.
+///
+/// `map_id` is stable for the saved map, while `color_revision` changes only
+/// when that map's pixels change. Their pair lets the renderer retain a GPU
+/// texture without hashing its 16 KiB colour grid on every frame.
+#[derive(Clone, Debug)]
+pub struct MapPicture {
+    /// The server's stable saved-map id.
+    pub map_id: i32,
+    /// The changed-on-pixel-write identity from
+    /// [`lodestone_game::maps::MapState::color_revision`].
+    pub color_revision: u64,
+    /// Raw 128×128 map-palette bytes shared with the session snapshot.
+    pub colors: Arc<Vec<u8>>,
+}
+
+impl MapPicture {
+    /// Pair `colors` with the stable id and current colour revision supplied by
+    /// the session map store.
+    #[must_use]
+    pub fn new(map_id: i32, color_revision: u64, colors: Arc<Vec<u8>>) -> Self {
+        Self {
+            map_id,
+            color_revision,
+            colors,
+        }
+    }
+}
+
 /// Where this frame's filled-map pictures come from.
 ///
 /// Unlike the block-entity sources this takes a map id and, for an item frame,
@@ -1087,13 +1116,13 @@ impl std::fmt::Debug for SignSource {
 #[derive(Default)]
 pub struct MapSource(
     #[allow(clippy::type_complexity)]
-    pub(super) Option<Box<dyn Fn(Option<i32>, Option<i32>) -> Option<Arc<Vec<u8>>> + Send + Sync>>,
+    pub(super) Option<Box<dyn Fn(Option<i32>, Option<i32>) -> Option<MapPicture> + Send + Sync>>,
 );
 
 impl MapSource {
-    /// One map's raw 128×128 packed colour grid, or none when unset or unknown.
+    /// One map's pixels and content identity, or none when unset or unknown.
     #[must_use]
-    pub(super) fn picture(&self, id: Option<i32>, frame_entity: Option<i32>) -> Option<Arc<Vec<u8>>> {
+    pub(super) fn picture(&self, id: Option<i32>, frame_entity: Option<i32>) -> Option<MapPicture> {
         self.0.as_ref().and_then(|f| f(id, frame_entity))
     }
 
@@ -1437,14 +1466,20 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn map_source_reuses_shared_pixels_between_consumers() {
+    fn map_source_carries_stable_map_identity_and_revision() {
         let pixels = Arc::new(vec![9; lodestone_game::maps::MAP_SIZE.pow(2)]);
         let captured = Arc::clone(&pixels);
-        let source = MapSource(Some(Box::new(move |_, _| Some(Arc::clone(&captured)))));
+        let source = MapSource(Some(Box::new(move |_, _| {
+            Some(MapPicture::new(17, 3, Arc::clone(&captured)))
+        })));
 
         let held = source.picture(None, None).expect("held map picture");
         let framed = source.picture(None, Some(9)).expect("framed map picture");
-        assert!(Arc::ptr_eq(&held, &framed));
-        assert!(Arc::ptr_eq(&held, &pixels));
+        assert_eq!(held.map_id, 17);
+        assert_eq!(held.color_revision, 3);
+        assert_eq!(held.map_id, framed.map_id);
+        assert_eq!(held.color_revision, framed.color_revision);
+        assert!(Arc::ptr_eq(&held.colors, &framed.colors));
+        assert!(Arc::ptr_eq(&held.colors, &pixels));
     }
 }

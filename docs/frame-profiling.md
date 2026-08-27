@@ -664,6 +664,11 @@ a suspiciously small number.
   overlay is open (building the summary sorts each phase's ring buffer,
   which is wasted work for a screen nobody is looking at).
 
+The one-line `DebugStats` summary is intentionally not emitted by the ordinary
+windowed frame loop. It remains part of the explicit `--headless` evidence
+runner, while interactive output is reserved for opt-in `tracing` reports and
+the in-game overlay.
+
 ## Dependencies
 
 - `wgpu`'s `TIMESTAMP_QUERY` feature (native only where the adapter

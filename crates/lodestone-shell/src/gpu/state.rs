@@ -15,7 +15,7 @@
 //! Every `has_*` accessor next door exists for one reason, recorded once here
 //! rather than nine times below: a wrong *value* and a missing *wiring* look
 //! identical on screen, and only one of them is a bug in this module.
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{
@@ -378,6 +378,7 @@ impl RenderState {
             conduit_source: ConduitSource::default(),
             // Likewise `set_map_source` (issue #184).
             map_source: MapSource::default(),
+            map_cache: std::cell::RefCell::default(),
             // Likewise `set_banner_source`.
             banner_source: BannerSource::default(),
             // Likewise `set_lectern_source`.
@@ -1842,9 +1843,17 @@ impl RenderState {
     /// sent by then and would never fill in as the player explored.
     pub fn set_map_source(
         &mut self,
-        f: impl Fn(Option<i32>, Option<i32>) -> Option<Arc<Vec<u8>>> + Send + Sync + 'static,
+        f: impl Fn(Option<i32>, Option<i32>) -> Option<super::MapPicture> + Send + Sync + 'static,
     ) {
         self.map_source = MapSource(Some(Box::new(f)));
+    }
+
+    /// Cumulative map-cache work for this device/session. This is a profiling
+    /// counter, not a draw count: an unchanged second frame must leave it
+    /// untouched.
+    #[must_use]
+    pub fn map_cache_counters(&self) -> super::MapCacheCounters {
+        self.map_cache.borrow().counters()
     }
 
     /// Install the source for this frame's sign text — same shape as

@@ -44,6 +44,11 @@ pub struct MapState {
     /// `MAP_SIZE * MAP_SIZE` raw map-palette colour bytes, row-major. `0` is
     /// vanilla's transparent/unexplored entry.
     pub colors: Arc<Vec<u8>>,
+    /// Monotonically increasing identity of the colour grid. Renderers use this
+    /// with the stable map id to retain a GPU texture without hashing 16 KiB of
+    /// pixels every frame. Decoration-only packets deliberately do not change
+    /// it because this client does not render map decorations yet.
+    pub color_revision: u64,
     /// Icons, in the order the server sent them.
     pub decorations: Vec<MapDecoration>,
 }
@@ -54,6 +59,7 @@ impl Default for MapState {
             scale: 0,
             locked: false,
             colors: Arc::new(vec![0; MAP_SIZE * MAP_SIZE]),
+            color_revision: 0,
             decorations: Vec::new(),
         }
     }
@@ -67,6 +73,7 @@ impl MapState {
         let width = usize::from(patch.width);
         let height = usize::from(patch.height);
         let colors = Arc::make_mut(&mut self.colors);
+        let mut changed = false;
         for row in 0..height {
             let y = usize::from(patch.start_y) + row;
             if y >= MAP_SIZE {
@@ -78,9 +85,14 @@ impl MapState {
                     break;
                 }
                 if let Some(color) = patch.colors.get(column + row * width) {
-                    colors[x + y * MAP_SIZE] = *color;
+                    let pixel = &mut colors[x + y * MAP_SIZE];
+                    changed |= *pixel != *color;
+                    *pixel = *color;
                 }
             }
+        }
+        if changed {
+            self.color_revision = self.color_revision.saturating_add(1);
         }
     }
 
@@ -247,5 +259,40 @@ mod tests {
             &store.get(7).unwrap().colors,
             &snapshot.get(7).unwrap().colors,
         ));
+    }
+
+    #[test]
+    fn color_revision_changes_only_when_map_pixels_are_patched() {
+        let mut store = MapStore::default();
+        store.apply(&event(7, None, None));
+        let initial = store.get(7).expect("map state exists").color_revision;
+
+        store.apply(&event(7, Some(Vec::new()), None));
+        assert_eq!(
+            store.get(7).expect("map state exists").color_revision,
+            initial,
+            "decoration-only packets do not change the texture"
+        );
+
+        store.apply(&event(7, None, Some(patch(0, 0, 1, 1, 44))));
+        assert_eq!(
+            store.get(7).expect("map state exists").color_revision,
+            initial + 1,
+            "a map-pixel patch invalidates just this map texture"
+        );
+
+        store.apply(&event(7, None, Some(patch(0, 0, 1, 1, 44))));
+        assert_eq!(
+            store.get(7).expect("map state exists").color_revision,
+            initial + 1,
+            "a repeated patch with identical pixels preserves the retained texture"
+        );
+
+        store.apply(&event(8, None, Some(patch(0, 0, 1, 1, 3))));
+        assert_eq!(
+            store.get(7).expect("original map exists").color_revision,
+            initial + 1,
+            "a different map's patch cannot invalidate this map"
+        );
     }
 }
