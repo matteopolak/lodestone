@@ -1696,17 +1696,10 @@ impl RenderState {
                     }
                 }
 
-                // Item-frame bodies and their maps use the depth-biased surface
-                // pipeline. Both intentionally sit against a world surface, so
-                // the shared polygon offset resolves the remaining depth tie
-                // without changing either pose or any translucent pipeline.
-                // Same three shared bind groups as the dropped items above,
-                // with **group 1 swapped** to the map's own 128×128 texture — the
-                // model shader is at the 4-group floor, so a map texture has to
-                // replace the atlas rather than join it.
-                // `moving_block_mesh` also contains item-frame bodies. Its
-                // hand-authored world surfaces may meet terrain exactly, so it
-                // takes the same camera-facing depth bias as the frame/map pair.
+                // Item-frame bodies and moving blocks use the ordinary
+                // depth-biased surface pipeline. Their hand-authored world
+                // surfaces may meet terrain exactly, so they take one
+                // camera-facing depth step.
                 if let Some(mesh) = &moving_block_mesh {
                     pass.set_pipeline(&model.surface_pipeline.pipeline);
                     bind_terrain_camera(
@@ -1726,7 +1719,14 @@ impl RenderState {
                 }
 
                 for (mesh, texture) in &framed_maps {
-                    pass.set_pipeline(&model.surface_pipeline.pipeline);
+                    // The map picture is a second layer over the frame's front
+                    // texture. Give it a relative second bias step so the two
+                    // opaque surfaces cannot tie at raster precision; do not
+                    // move either mesh or change the shared world-surface bias.
+                    // Group 1 is swapped to the map's own 128×128 texture — the
+                    // model shader is at the 4-group floor, so it replaces the
+                    // atlas rather than joining it.
+                    pass.set_pipeline(&model.map_surface_pipeline.pipeline);
                     bind_terrain_camera(
                         &mut pass,
                         &model.cam_bind_group,

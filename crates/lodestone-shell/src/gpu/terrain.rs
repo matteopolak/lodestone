@@ -318,8 +318,12 @@ pub(super) struct ModelRenderer {
     pub(super) pipeline: ModelPipeline,
     /// Opaque/cutout model pipeline with a polygon offset toward the camera,
     /// reserved for world surfaces which intentionally share a plane with an
-    /// already-drawn block (item-frame bodies and their map pictures).
+    /// already-drawn block (item-frame bodies and moving block overlays).
     pub(super) surface_pipeline: ModelPipeline,
+    /// Opaque/cutout model pipeline for filled-map pictures in item frames.
+    /// Its relative second depth step puts the picture in front of the frame's
+    /// front texture while leaving the shared surface bias unchanged elsewhere.
+    pub(super) map_surface_pipeline: ModelPipeline,
     /// The translucent fluid pipeline (no cutout discard, water tint, alpha
     /// blend, depth-test on / depth-write off). Shares the model camera and
     /// atlas bind groups.

@@ -132,6 +132,17 @@ pub const CAMERA_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
     clamp: 0.0,
 };
 
+/// A second [`CAMERA_DEPTH_BIAS`] step toward the camera for a texture that
+/// must win over the surface immediately behind it, such as a filled-map
+/// picture over an item frame's front texture. Keeping this relative to the
+/// shared step makes the ordering explicit without changing the global bias
+/// used by ordinary world surfaces.
+pub const MAP_SURFACE_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: CAMERA_DEPTH_BIAS.constant * 2,
+    slope_scale: CAMERA_DEPTH_BIAS.slope_scale * 2.0,
+    clamp: CAMERA_DEPTH_BIAS.clamp,
+};
+
 impl ModelPipeline {
     /// Build the opaque (`Solid`) model pipeline targeting `color_format`.
     #[must_use]
@@ -167,7 +178,8 @@ impl ModelPipeline {
 
     /// Build the opaque/cutout pipeline for geometry that intentionally shares
     /// a surface with previously submitted world geometry, such as an item
-    /// frame's block-model body and its map picture.
+    /// frame's block-model body or a moving block overlay. Layered pictures
+    /// that must win over this surface use [`Self::for_map_surface`].
     #[must_use]
     pub fn for_surface(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
         Self::build(
@@ -179,6 +191,24 @@ impl ModelPipeline {
             true,
             Some(ALPHA_CUTOUT_CUTOUT),
             CAMERA_DEPTH_BIAS,
+        )
+    }
+
+    /// Build the opaque/cutout pipeline for a map picture layered over an
+    /// item-frame surface. It is one depth-bias step farther toward the eye
+    /// than [`Self::for_surface`], so the picture wins against the frame's
+    /// front texture without moving either mesh in world space.
+    #[must_use]
+    pub fn for_map_surface(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+        Self::build(
+            device,
+            color_format,
+            MODEL_WGSL,
+            false,
+            true,
+            true,
+            Some(ALPHA_CUTOUT_CUTOUT),
+            MAP_SURFACE_DEPTH_BIAS,
         )
     }
 
@@ -1205,5 +1235,18 @@ mod tests {
         assert_eq!(CAMERA_DEPTH_BIAS.constant, -10);
         assert_eq!(CAMERA_DEPTH_BIAS.slope_scale, -1.0);
         assert_eq!(CAMERA_DEPTH_BIAS.clamp, 0.0);
+    }
+
+    #[test]
+    fn map_surface_depth_bias_is_a_second_surface_step() {
+        assert_eq!(
+            MAP_SURFACE_DEPTH_BIAS.constant,
+            CAMERA_DEPTH_BIAS.constant * 2
+        );
+        assert_eq!(
+            MAP_SURFACE_DEPTH_BIAS.slope_scale,
+            CAMERA_DEPTH_BIAS.slope_scale * 2.0
+        );
+        assert_eq!(MAP_SURFACE_DEPTH_BIAS.clamp, CAMERA_DEPTH_BIAS.clamp);
     }
 }

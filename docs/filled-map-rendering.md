@@ -58,7 +58,9 @@ invalidation bug. `mip_level_count` is 1 and the sampler is `Nearest`, matching 
   `item_frame`/`glow_item_frame` carrying a `filled_map` and concatenates one quad each into a single
   world-space mesh. The frame's own border and back plate are drawn separately, as a *block model*
   posed by hand — see `docs/item-frame-rendering.md`, which also explains why `FRAMED_MAP_LIFT` has to
-  clear that back plate.
+  clear that back plate. The map draw uses `ModelPipeline::for_map_surface`, a second relative
+  polygon-bias step beyond the frame body's `for_surface` step, so the picture is unambiguously in
+  front of the frame's front texture without a world-space lift.
 
 ### `framed_map_pose` is built from the frame's own facing, and this was wrong twice
 

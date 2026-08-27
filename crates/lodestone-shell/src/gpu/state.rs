@@ -154,6 +154,7 @@ impl RenderState {
         let model = vanilla.and_then(BlockAtlas::models).map(|models| {
             let pipeline = ModelPipeline::new(device, color_format);
             let surface_pipeline = ModelPipeline::for_surface(device, color_format);
+            let map_surface_pipeline = ModelPipeline::for_map_surface(device, color_format);
             let water_pipeline = ModelPipeline::for_fluid(device, color_format);
             // Translucent **block** geometry (stained glass, ice, the nether
             // portal swirl): the same MODEL_WGSL shader and palette as
@@ -232,6 +233,7 @@ impl RenderState {
             ModelRenderer {
                 pipeline,
                 surface_pipeline,
+                map_surface_pipeline,
                 water_pipeline,
                 translucent_pipeline,
                 atlas,
