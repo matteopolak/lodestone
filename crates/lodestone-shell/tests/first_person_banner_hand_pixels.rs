@@ -164,6 +164,7 @@ fn a_held_banner_draws_its_own_dye_colour_not_nothing() {
             Some(MainHandItem {
                 item: item.clone(),
                 foil: false,
+                custom_model_data: None,
                 dyed_color: None,
                 potion_color: None,
                 banner_patterns: Vec::new(),
@@ -331,6 +332,7 @@ fn a_held_banner_draws_its_own_loom_pattern_not_just_its_base_colour() {
             Some(MainHandItem {
                 item: item.clone(),
                 foil: false,
+                custom_model_data: None,
                 dyed_color: None,
                 potion_color: None,
                 banner_patterns: patterns.clone(),

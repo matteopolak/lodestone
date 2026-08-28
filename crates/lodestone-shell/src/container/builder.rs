@@ -36,6 +36,7 @@ fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<HotbarSlot> {
         // enchanted item in a chest, furnace or recipe panel must glint exactly
         // like the one in the hotbar.
         enchanted: item_icon::stack_has_foil(stack),
+        custom_model_data: stack.custom_model_data(),
         // The live tint components: without these, `sprite_layer_tint` resolved
         // every icon against `ItemTintContext::default()` regardless of the real
         // stack, so a dyed leather chestplate or a mixed potion drew the

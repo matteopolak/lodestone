@@ -528,6 +528,45 @@ pub fn pack_generation() -> u64 {
 /// cannot remove a newer push it raced with — see [`clear_server_pack`].
 static SERVER_PACK: std::sync::RwLock<Option<(Uuid, Vec<u8>)>> = std::sync::RwLock::new(None);
 
+/// Presentation data for the active in-memory server pack. This is deliberately
+/// separate from [`DiscoveredPack`]: it has no filesystem path and must never
+/// enter the persisted player-selection list.
+#[derive(Debug, Clone)]
+pub struct ServerPackInfo {
+    /// Session-local identity, never persisted in the player pack order.
+    pub id: String,
+    /// Stable source label for the selection screen.
+    pub title: String,
+    /// The pack's own `pack.mcmeta` description, flattened for the menu row.
+    pub description: String,
+    /// Decoded `pack.png`, if the server pack supplied one.
+    pub icon: Option<lodestone_assets::Image>,
+}
+
+/// The active server pack's Resource Packs screen entry, if any.
+#[must_use]
+pub fn server_pack_info() -> Option<ServerPackInfo> {
+    let guard = SERVER_PACK.read().ok()?;
+    let (id, bytes) = guard.as_ref()?;
+    let source = ZipSource::from_bytes(bytes.clone()).ok()?;
+    let description = source
+        .read("pack.mcmeta")
+        .and_then(|raw| lodestone_assets::PackMeta::parse(&raw).ok())
+        .map_or_else(
+            || "Resources supplied by this server".to_string(),
+            |meta| meta.description.plain_text(),
+        );
+    let icon = source
+        .read("pack.png")
+        .and_then(|raw| lodestone_assets::Image::decode_png(&raw).ok());
+    Some(ServerPackInfo {
+        id: format!("server/{id}"),
+        title: "Server resource pack".to_string(),
+        description,
+        icon,
+    })
+}
+
 /// Installs (or replaces) the live server pack, after checking it actually
 /// opens as one. A corrupt or truncated download must not silently blank
 /// the block atlas on the next reload — the same fail-closed discipline

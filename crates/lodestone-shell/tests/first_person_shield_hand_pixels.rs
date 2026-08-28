@@ -233,9 +233,10 @@ fn a_held_shield_shows_its_back_so_every_dye_renders_identically() {
         let base_color = base_color.map(str::to_string);
         state.set_main_hand_source(move || {
             Some(MainHandItem {
-                item: item.clone(),
-                foil: false,
-                dyed_color: None,
+            item: item.clone(),
+            foil: false,
+            custom_model_data: None,
+            dyed_color: None,
                 potion_color: None,
                 banner_patterns: Vec::new(),
                 base_color: base_color.clone(),

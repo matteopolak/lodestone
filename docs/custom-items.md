@@ -98,14 +98,11 @@ Controls, run and observed:
   (see the `has_unmodeled` gap in [`item-component-access.md`](./item-component-access.md))
   or an explicit passthrough field. The test is written so that closing it **fails loudly**
   rather than silently changing meaning.
-- **`custom_model_data` is not decoded from the wire either**, for the same reason: no field
-  on the model's component struct. So the selector is writable and readable within
-  `lodestone-game`, and a server-sent one is invisible. The v770 decode plus a model field
-  is a separate, brokerable change (`crates/protocol/v770` is not this work's to touch).
-- **The render-side model substitution hook is not built.** Issue #147's scope item (2) says
-  it should coordinate with the client-side custom-draw-buffer issue
-  ([#161](https://github.com/matteopolak/lodestone/issues/161)) "rather than inventing a
-  second rendering path", and that is the right call — `lodestone-assets`' `item_tint.rs`
-  already resolves `custom_model_data` to the JSON default with
-  `TintProvenance::Unmodeled`, so the asset side has a seam waiting for a live value. Today a
-  custom item can change its **name** on screen but not its **model**.
+- **Server `custom_model_data` is a modern component, not the old `CustomModelData` NBT
+  integer.** Protocol 776 writes four count-prefixed lists (floats, flags, strings, colours).
+  Lodestone preserves the numeric float bits on the model stack and routes integral index-zero
+  values through the game stack's selector API. `ItemStateContext` feeds that value to a
+  `minecraft:range_dispatch`, so a metadata-bearing diamond sword can resolve a gun model while
+  a plain diamond sword stays on the fallback. HUD/container icons and the first-person hand use
+  that live context. Non-integral numeric selectors and flag/string/colour `select` predicates
+  are not yet represented by the game stack bridge.

@@ -289,9 +289,9 @@ pub const CROSSBOW_CHARGE_TICKS: f32 = 25.0;
 /// Deliberately **unsourced**, each because the datum genuinely is not decoded:
 /// `trim_material`, `bundle/has_selected_item`, `block_state`, `local_time`,
 /// `compass`, `has_component`, `use_cycle`, `time`, `context_dimension`,
-/// `charge_type`, `broken`, `fishing_rod/cast`, `damage`, `count`, `cooldown`,
-/// `custom_model_data`. Most need per-stack components (`ItemComponents` has no
-/// field for them, and an unmodelled component halts the patch decode); `time`
+/// `charge_type`, `broken`, `fishing_rod/cast`, `damage`, `count`, `cooldown`.
+/// Most need per-stack components; `custom_model_data` is the exception and is
+/// sourced below. `time`
 /// and `local_time` need a level clock this type is not given.
 ///
 /// # `use_duration` counts UP, `use_cycle` counts DOWN — do not unify them
@@ -324,6 +324,10 @@ pub struct ItemStateContext {
     /// from 0. Meaningless while `!using`, and read as `0` there, matching
     /// vanilla's `getUseItem() != itemStack` early return.
     pub use_ticks: u32,
+    /// `minecraft:custom_model_data` numeric selector at index zero. The
+    /// network component is a list; vanilla's range property reads this first
+    /// element and defaults to zero when it is absent.
+    pub custom_model_data: f32,
 }
 
 impl ItemStateContext {
@@ -335,6 +339,7 @@ impl ItemStateContext {
             display,
             using: false,
             use_ticks: 0,
+            custom_model_data: 0.0,
         }
     }
 
@@ -353,6 +358,13 @@ impl ItemStateContext {
     pub const fn with_use(mut self, using: bool, use_ticks: u32) -> Self {
         self.using = using;
         self.use_ticks = use_ticks;
+        self
+    }
+
+    /// Adds the stack's `minecraft:custom_model_data` index-zero number.
+    #[must_use]
+    pub const fn with_custom_model_data(mut self, value: f32) -> Self {
+        self.custom_model_data = value;
         self
     }
 }
@@ -374,6 +386,12 @@ impl ItemPropertyContext for ItemStateContext {
     }
 
     fn range(&self, property: &str) -> f32 {
+        // `CustomModelData` is a property of the stack, not of an active use.
+        // Check it before the use-state gate below: a gun in an inventory or a
+        // resting hand must select its model just as it does while being used.
+        if property == "minecraft:custom_model_data" {
+            return self.custom_model_data;
+        }
         if !self.using {
             // Both sourced ranges are gated on `getUseItem() == itemStack` in
             // vanilla and return `0.0F` otherwise. Gating here rather than at each
@@ -896,6 +914,47 @@ mod tests {
         for ticks in [18, 19, 20, 72_000] {
             assert_eq!(drawing(ticks), "minecraft:item/bow_pulling_2", "at {ticks} ticks");
         }
+    }
+
+    /// A server custom item can retain the base item id (a diamond sword here)
+    /// and differ only by `minecraft:custom_model_data`. The numeric property is
+    /// deliberately checked while the item is *not* in use: otherwise a hand
+    /// test would pass while GUI and resting-hand guns still resolved to the
+    /// ordinary sword.
+    #[test]
+    fn custom_model_data_range_dispatch_distinguishes_a_gun_from_a_plain_sword() {
+        let definition = lodestone_assets::ItemModel::parse(
+            br#"{
+              "model": {
+                "type": "minecraft:range_dispatch",
+                "property": "minecraft:custom_model_data",
+                "entries": [{
+                  "threshold": 4545,
+                  "model": { "type": "minecraft:model", "model": "democracycraft:item/gun" }
+                }],
+                "fallback": { "type": "minecraft:model", "model": "minecraft:item/diamond_sword" }
+              }
+            }"#,
+        )
+        .expect("parse item definition");
+        let resolved = |data| match definition.resolve(&data).as_slice() {
+            [lodestone_assets::ItemModelOutput::Model { model, .. }] => model.to_string(),
+            other => panic!("expected exactly one model output, got {other:?}"),
+        };
+
+        assert_eq!(
+            resolved(ItemStateContext::new(DisplaySlot::Gui)),
+            "minecraft:item/diamond_sword",
+            "a plain diamond sword must keep the fallback model"
+        );
+        assert_eq!(
+            resolved(
+                ItemStateContext::new(DisplaySlot::FirstPersonRightHand)
+                    .with_custom_model_data(4545.0),
+            ),
+            "democracycraft:item/gun",
+            "the metadata-carrying diamond sword must select the gun model"
+        );
     }
 
     /// The inversion trap, as a control: had `use_duration` been fed

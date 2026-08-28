@@ -90,6 +90,7 @@ struct FramedMapInput {
     yaw: u32,
     pitch: u32,
     rotation: u8,
+    invisible: bool,
     light: u8,
 }
 
@@ -101,6 +102,7 @@ impl FramedMapInput {
         yaw: f32,
         pitch: f32,
         rotation: u8,
+        invisible: bool,
         light: u8,
     ) -> Self {
         Self {
@@ -110,6 +112,7 @@ impl FramedMapInput {
             yaw: yaw.to_bits(),
             pitch: pitch.to_bits(),
             rotation,
+            invisible,
             light,
         }
     }
@@ -120,6 +123,7 @@ impl FramedMapInput {
             f32::from_bits(self.yaw),
             f32::from_bits(self.pitch),
             self.rotation,
+            self.invisible,
         )
     }
 }
@@ -437,10 +441,16 @@ fn held_map_pose(inverse_arm_height: f32) -> Mat4 {
 /// `(rotation % 4) · 90°`. A map only ever hangs at a right angle, and the odd
 /// half-steps fold onto the even ones rather than tilting the picture.
 #[must_use]
-fn framed_map_pose(feet: Vec3, yaw: f32, pitch: f32, rotation: u8) -> Mat4 {
+fn framed_map_pose(feet: Vec3, yaw: f32, pitch: f32, rotation: u8, invisible: bool) -> Mat4 {
     let step = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
     let quarter_turns = f32::from(rotation % 4) * 90.0;
-    Mat4::from_translation(feet + step * FRAMED_MAP_LIFT)
+    // `ItemFrameRenderer` moves visible contents to local z=.4375 and
+    // invisible-frame contents to z=.5. Local +z points into the wall after
+    // the frame transform, so the latter is one sixteenth *less* far outward.
+    // Keep our fixed front separation from the frame plate on top of that
+    // vanilla distinction rather than treating invisibility as material-only.
+    let lift = FRAMED_MAP_LIFT - if invisible { 1.0 / 16.0 } else { 0.0 };
+    Mat4::from_translation(feet + step * lift)
         * lodestone_render::entity::item_frame_facing(yaw, pitch)
         * Mat4::from_rotation_z(quarter_turns.to_radians())
         * Mat4::from_rotation_y(std::f32::consts::PI)
@@ -628,6 +638,7 @@ impl RenderState {
                 draw.yaw,
                 draw.pitch,
                 draw.item_frame_rotation,
+                draw.invisible,
                 self.entity_light.sample(draw.feet),
             );
             pictures.entry(picture.map_id).or_insert(picture);
@@ -716,9 +727,9 @@ mod tests {
 
     #[test]
     fn retained_last_batch_reuses_an_unchanged_frame_and_rebuilds_on_pose_or_light_change() {
-        let stable = FramedMapInput::new(9, 17, [4.0, 65.0, -9.0], 0.0, 0.0, 0, 0xF0);
-        let moved = FramedMapInput::new(9, 17, [5.0, 65.0, -9.0], 0.0, 0.0, 0, 0xF0);
-        let relit = FramedMapInput::new(9, 17, [5.0, 65.0, -9.0], 0.0, 0.0, 0, 0xE0);
+        let stable = FramedMapInput::new(9, 17, [4.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xF0);
+        let moved = FramedMapInput::new(9, 17, [5.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xF0);
+        let relit = FramedMapInput::new(9, 17, [5.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xE0);
         let mut cache = RetainedLast::<FramedMapsKey, usize>::default();
         let mut builds = 0;
 
@@ -744,6 +755,37 @@ mod tests {
         assert_eq!(builds, 3, "pose and light mutations must each invalidate the batch");
     }
 
+    /// Invisible frames have a different vanilla map-content lift (`.5` rather
+    /// than `.4375` in frame-local z). It is geometry, so it belongs in the
+    /// retained mesh key; otherwise a visibility metadata update reuses the
+    /// visible frame's stale vertices until some unrelated movement rebuilds.
+    #[test]
+    fn invisible_framed_map_has_its_own_lift_and_cache_key() {
+        let visible = FramedMapInput::new(9, 17, [4.0, 65.0, -9.0], 90.0, 0.0, 0, false, 0xF0);
+        let invisible = FramedMapInput::new(9, 17, [4.0, 65.0, -9.0], 90.0, 0.0, 0, true, 0xF0);
+        assert_ne!(visible, invisible, "invisibility changes framed-map vertex positions");
+
+        let facing = lodestone_render::entity::item_frame_facing_step(90.0, 0.0);
+        let visible_centre = visible.pose().transform_point3(Vec3::ZERO);
+        let invisible_centre = invisible.pose().transform_point3(Vec3::ZERO);
+        assert!(
+            ((invisible_centre - visible_centre).dot(facing) + 1.0 / 16.0).abs() < 1.0e-5,
+            "the invisible map must move one sixteenth toward its wall, not along world z"
+        );
+
+        let mut cache = RetainedLast::<FramedMapsKey, usize>::default();
+        let mut builds = 0;
+        cache.get_or_insert_with(FramedMapsKey::new(vec![visible]), || {
+            builds += 1;
+            builds
+        });
+        cache.get_or_insert_with(FramedMapsKey::new(vec![invisible]), || {
+            builds += 1;
+            builds
+        });
+        assert_eq!(builds, 2, "a visibility change must not reuse the old lifted quad");
+    }
+
     /// A framed map faces the way its frame does, stands off the wall along that
     /// same axis, and **points its front face out of the wall**.
     ///
@@ -756,20 +798,20 @@ mod tests {
     /// around — so an orientation assertion at 0 and 180 alone proves nothing.
     #[test]
     fn a_framed_map_lifts_along_its_own_facing_and_faces_out_of_the_wall() {
-        let pose = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 0.0, 0.0, 0);
+        let pose = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 0.0, 0.0, 0, false);
         let centre = pose.transform_point3(Vec3::ZERO);
         assert!((centre.x - 4.0).abs() < 1.0e-5);
         assert!((centre.y - 65.0).abs() < 1.0e-5);
         assert!((centre.z - (-9.0 + FRAMED_MAP_LIFT)).abs() < 1.0e-5);
 
         // Yaw 180 faces north, so the same lift must move the other way.
-        let north = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 180.0, 0.0, 0)
+        let north = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 180.0, 0.0, 0, false)
             .transform_point3(Vec3::ZERO);
         assert!(north.z < -9.0, "a north-facing frame lifts toward -z");
 
         // Yaw 90 and 270 are the discriminating inputs. Yaw 90 is west, so the
         // picture must move to `-x`.
-        let west = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 90.0, 0.0, 0)
+        let west = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 90.0, 0.0, 0, false)
             .transform_point3(Vec3::ZERO);
         assert!(
             (west.x - (4.0 - FRAMED_MAP_LIFT)).abs() < 1.0e-5,
@@ -778,7 +820,7 @@ mod tests {
             west.x,
             4.0 + FRAMED_MAP_LIFT
         );
-        let east = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 270.0, 0.0, 0)
+        let east = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 270.0, 0.0, 0, false)
             .transform_point3(Vec3::ZERO);
         assert!(
             (east.x - (4.0 + FRAMED_MAP_LIFT)).abs() < 1.0e-5,
@@ -803,7 +845,7 @@ mod tests {
             let facing = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
             let plate = lodestone_render::entity::item_frame_body_matrix(feet, yaw, pitch)
                 .transform_point3(Vec3::new(0.5, 0.5, 15.001 / 16.0));
-            let picture = framed_map_pose(feet, yaw, pitch, 0).transform_point3(Vec3::ZERO);
+            let picture = framed_map_pose(feet, yaw, pitch, 0, false).transform_point3(Vec3::ZERO);
             let separation = (picture - plate).dot(facing);
             assert!(
                 (separation - FRAMED_MAP_FRONT_SEPARATION).abs() < 1.0e-5,
@@ -827,7 +869,7 @@ mod tests {
             (0.0, 90.0),
         ] {
             let facing = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
-            let normal = framed_map_pose(Vec3::ZERO, yaw, pitch, 0)
+            let normal = framed_map_pose(Vec3::ZERO, yaw, pitch, 0, false)
                 .transform_vector3(Vec3::Z)
                 .normalize();
             let dot = normal.dot(facing);
@@ -854,7 +896,7 @@ mod tests {
         // separate: rotation 1 must move the picture's own `+x` corner, and
         // rotation 4 must land back on rotation 0.
         let up = |rotation: u8| {
-            framed_map_pose(Vec3::ZERO, 180.0, 0.0, rotation).transform_vector3(Vec3::Y)
+            framed_map_pose(Vec3::ZERO, 180.0, 0.0, rotation, false).transform_vector3(Vec3::Y)
         };
         assert!(
             up(0).dot(up(1)).abs() < 1.0e-5,

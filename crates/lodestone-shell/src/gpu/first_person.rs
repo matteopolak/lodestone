@@ -91,6 +91,9 @@ pub(super) struct HeldItemEquip {
     /// *drawn* item — a swap that raises an enchanted sword glints the sword the
     /// moment it appears, not the stack the player selected two ticks ago.
     visible: Option<(ResourceLocation, bool)>,
+    /// The drawn stack's model selector, carried beside the id across the
+    /// equip animation so a swap cannot briefly resolve the ordinary sword.
+    visible_custom_model_data: Option<i32>,
     /// [`Self::visible`]'s stack's `minecraft:dyed_color`, tracked alongside it
     /// rather than folded into the tuple — deliberately **not** part of the
     /// swap-trigger comparison in [`Self::step`], the same reason `foil` *is*
@@ -154,6 +157,7 @@ impl Default for HeldItemEquip {
     fn default() -> Self {
         Self {
             visible: None,
+            visible_custom_model_data: None,
             visible_dyed_color: None,
             visible_potion_color: None,
             visible_banner_patterns: Vec::new(),
@@ -197,6 +201,7 @@ impl HeldItemEquip {
     /// instead.
     fn adopt(&mut self, expected: Option<&MainHandItem>) {
         self.visible = expected.map(|item| (item.item.clone(), item.foil));
+        self.visible_custom_model_data = expected.and_then(|item| item.custom_model_data);
         self.visible_dyed_color = expected.and_then(|item| item.dyed_color);
         self.visible_potion_color = expected.and_then(|item| item.potion_color);
         self.visible_banner_patterns = expected.map_or_else(Vec::new, |item| item.banner_patterns.clone());
@@ -310,6 +315,10 @@ impl HeldItemEquip {
     /// draws the bare arm.
     pub(super) fn visible(&self) -> Option<&(ResourceLocation, bool)> {
         self.visible.as_ref()
+    }
+
+    pub(super) fn visible_custom_model_data(&self) -> Option<i32> {
+        self.visible_custom_model_data
     }
 
     /// [`Self::visible`]'s dye/potion pair, for
@@ -710,7 +719,8 @@ impl RenderState {
             return Some(FirstPersonHand::Map(mesh, texture));
         }
 
-        let hand_ctx = ItemStateContext::new(ARM.display_slot(true));
+        let hand_ctx = ItemStateContext::new(ARM.display_slot(true))
+            .with_custom_model_data(self.equip.visible_custom_model_data().unwrap_or(0) as f32);
         if let Some((item, foil)) = self.equip.visible()
             && let Some(model) = self.model.as_ref()
             && let Some(geometry) = model.items.get(item).and_then(|v| v.resolve(&hand_ctx))
@@ -1692,6 +1702,7 @@ mod tests {
         MainHandItem {
             item: pair.0.clone(),
             foil: pair.1,
+            custom_model_data: None,
             dyed_color: None,
             potion_color: None,
             banner_patterns: Vec::new(),

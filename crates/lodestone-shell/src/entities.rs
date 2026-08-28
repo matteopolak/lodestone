@@ -3397,12 +3397,14 @@ fn resolve_entity_facts(
         })
         .collect();
 
-    // Nametag resolution (issue #100). Two entirely different rules, per the
-    // real 26.2 client — see the historical `net::entity_snapshot` doc this
-    // was ported from for the exact vanilla predicates (jar file:line):
-    // a player's tag is always its tab-list display name, unconditionally;
-    // every other entity's tag is its custom name, gated on
-    // `CUSTOM_NAME_VISIBLE`.
+    // Nametag resolution (issue #100). The source of a player tag is its
+    // tab-list display name; every other entity uses its custom name gated on
+    // `CUSTOM_NAME_VISIBLE`. Both still pass through the renderer's base
+    // visibility predicate: `LivingEntityRenderer.shouldShowName` suppresses
+    // an invisible player/helper entity. Armour stands are the deliberate
+    // exception: `ArmorStandRenderer.shouldShowName` only checks
+    // `isCustomNameVisible`, which is how invisible hologram stands retain
+    // their text.
     let is_player = type_key.path() == "player";
     let uuid = entity.get::<EntityUuid>().map(|uuid| uuid.0);
     let flags = entity.get::<EntityFlags>().map(|f| f.0);
@@ -3415,7 +3417,11 @@ fn resolve_entity_facts(
     // carry colour/bold/italic/underline/strikethrough now (the fix this
     // block exists for: nametags used to lose all of that at this exact
     // resolution point via `to_plain_string`/`plain_text_from_nbt_component`).
-    let name_tag: Option<Text> = if is_player {
+    let name_tag: Option<Text> = if flags.is_some_and(|bits| bits & 0x20 != 0)
+        && type_key.path() != "armor_stand"
+    {
+        None
+    } else if is_player {
         uuid.and_then(|id| match tab_list.get(&id) {
             Some(entry) => {
                 let styled = entry.effective_name();
@@ -4339,7 +4345,7 @@ mod tests {
     use super::*;
     use lodestone_ecs::entity::{
         CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, Equipment, EntityKind,
-        EntityUuid, HeadYaw, OnGround, Position, Rotation, Variant, Velocity,
+        EntityFlags, EntityUuid, HeadYaw, OnGround, Position, Rotation, Variant, Velocity,
     };
 
     /// Test-only ingest builder replacing the deleted `EntitySnapshot` (issue
@@ -5142,9 +5148,9 @@ mod tests {
             }
         }
 
-        /// A player's tag is always its tab-list display name —
-        /// `Player.shouldShowName()` returns `true` unconditionally
-        /// (`Player.java`), never gated on any metadata flag.
+        /// A visible player's tag comes from its tab-list display name. The
+        /// player-specific source is unconditional, but the shared renderer
+        /// visibility gate still suppresses an invisible helper player.
         #[test]
         fn a_player_entitys_tag_is_its_tab_list_display_name() {
             let id = Uuid::from_u128(1);
@@ -5159,7 +5165,29 @@ mod tests {
             assert_eq!(
                 facts.name_tag.map(|t| t.text.to_plain_string()),
                 Some("Steve".to_string()),
-                "a player entity must show its tab-list name unconditionally"
+                "a visible player entity must show its tab-list name"
+            );
+        }
+
+        /// The server-side NPC helper reported on DemocracyCraft is an
+        /// invisible player-type entity with an otherwise ordinary tab-list
+        /// profile. This is deliberately a metadata rule rather than a server
+        /// name heuristic: vanilla's `LivingEntityRenderer` hides every
+        /// invisible player name, whatever its profile says.
+        #[test]
+        fn an_invisible_player_has_no_tab_list_name_tag() {
+            let id = Uuid::from_u128(4_545);
+            let mut tabs = lodestone_game::tablist::TabList::new();
+            tabs.insert(lodestone_game::tablist::PlayerListEntry::new(
+                lodestone_game::tablist::GameProfile::new(id, "Helper"),
+            ));
+            let mut world = World::new();
+            let entity = bare_player_entity(&mut world, id);
+            world.entity_mut(entity).insert(EntityFlags(0x20));
+            assert_eq!(
+                facts_for(&world, entity, &tabs).name_tag,
+                None,
+                "the shared invisible flag, not the profile name, suppresses a helper player tag"
             );
         }
 
@@ -5242,6 +5270,28 @@ mod tests {
             ));
             let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
             assert_eq!(facts.name_tag.map(|t| t.text.to_plain_string()), Some("Babe".to_string()));
+        }
+
+        /// Invisible armour stands are vanilla's hologram exception: unlike a
+        /// living player/mob, their renderer checks only custom-name-visible.
+        /// Keeping this control beside the invisible-player test prevents a
+        /// generic hide-everything implementation from erasing holograms.
+        #[test]
+        fn an_invisible_named_armor_stand_keeps_its_hologram_tag() {
+            let mut world = World::new();
+            let entity = bare_entity(&mut world);
+            world.entity_mut(entity).insert((
+                EntityKind("minecraft:armor_stand".parse().expect("valid type key")),
+                CustomName(Some(Text::literal("Welcome"))),
+                CustomNameVisible(true),
+                EntityFlags(0x20),
+            ));
+            assert_eq!(
+                facts_for(&world, entity, &lodestone_game::tablist::TabList::new())
+                    .name_tag
+                    .map(|tag| tag.text.to_plain_string()),
+                Some("Welcome".to_owned())
+            );
         }
 
         /// The gate the base `Entity.shouldShowName()` predicate is: a

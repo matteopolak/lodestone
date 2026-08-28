@@ -762,6 +762,7 @@ fn shoot(
         .map(|record| lodestone::gpu::MainHandItem {
             item: record.item.clone(),
             foil: record.enchanted,
+            custom_model_data: record.custom_model_data,
             dyed_color: record.dyed_color,
             potion_color: record.potion_color,
             banner_patterns: record.banner_patterns.clone(),
@@ -1044,6 +1045,7 @@ fn hotbar_records(sim: &Sim) -> Vec<Option<HotbarSlot>> {
                     damage,
                     max_damage,
                     enchanted: false,
+                    custom_model_data: st.custom_model_data(),
                     dyed_color: st.dyed_color(),
                     potion_color: st.potion_color(),
                     banner_patterns: st.banner_patterns().to_vec(),

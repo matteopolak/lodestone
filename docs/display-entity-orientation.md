@@ -62,6 +62,14 @@ already have in hand (entity rotation off a spawn/rotate packet, camera
 yaw/pitch, the synced transformation fields), which is what makes it fully
 unit-testable with no device at all.
 
+On protocol 776 the transform slots are `translation=11`, `scale=12`,
+`right_rotation=13`, `left_rotation=14`. The order is easy to reverse because
+`Transformation.compose` applies left rotation before scale and right rotation
+after it, but the metadata declaration order is still right then left. The
+decoder has a literal-index regression for that pair; a swap can leave a valid
+text payload in ECS while rotating/scaling its rendered panel away from the
+expected geometry.
+
 ### The four billboard modes
 
 `Display.BillboardConstraints` answers one question differently per mode:

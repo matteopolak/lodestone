@@ -146,10 +146,20 @@ pub struct PackRow {
     pub icon: Option<FaviconMosaic>,
     /// Whether this is the built-in pack — see the module docs.
     pub builtin: bool,
+    /// Whether the entry is force-enabled and cannot be moved or removed.
+    pub locked: bool,
 }
 
 /// The built-in pack's id. Never persisted and never a transfer target.
 pub const BUILTIN_ID: &str = "vanilla";
+
+fn server_pack_row() -> Option<PackRow> {
+    let info = crate::resources::server_pack_info()?;
+    let icon = info.icon.as_ref().and_then(|img| {
+        super::render::head_mosaic(&img.rgba, img.width as usize, img.height as usize)
+    });
+    Some(PackRow::server(&info.id, &info.title, &info.description, icon))
+}
 
 impl PackRow {
     /// The built-in pack's row: `pack.nameAndSource` over
@@ -162,6 +172,20 @@ impl PackRow {
             description: "The default look and feel of Minecraft".to_string(),
             icon: None,
             builtin: true,
+            locked: true,
+        }
+    }
+
+    /// An active server-supplied pack, fixed above local packs for this session.
+    #[must_use]
+    pub fn server(id: &str, title: &str, description: &str, icon: Option<FaviconMosaic>) -> Self {
+        Self {
+            id: id.to_string(),
+            title: title.to_string(),
+            description: description.to_string(),
+            icon,
+            builtin: false,
+            locked: true,
         }
     }
 
@@ -416,7 +440,7 @@ impl PacksNav {
     pub fn reset(&mut self) {
         let discovered = discover();
         let order = crate::resources::selected_packs();
-        *self = Self::rebuild(discovered, &order);
+        *self = Self::rebuild_with_server_pack(discovered, &order, server_pack_row());
     }
 
     /// Rescans the packs folder **without** discarding the screen's own
@@ -474,7 +498,7 @@ impl PacksNav {
         let cursor = self.cursor;
         let scroll_available = self.scroll_available;
         let scroll_selected = self.scroll_selected;
-        *self = Self::rebuild(discovered, &order);
+        *self = Self::rebuild_with_server_pack(discovered, &order, server_pack_row());
         let control_count = self.controls().len();
         self.cursor = cursor.min(control_count.saturating_sub(1));
         self.scroll_available = scroll_available;
@@ -485,6 +509,17 @@ impl PacksNav {
     /// first). The pure half of [`Self::reset`], and what tests drive.
     #[must_use]
     pub fn rebuild(discovered: Vec<crate::resources::DiscoveredPack>, order: &[String]) -> Self {
+        Self::rebuild_with_server_pack(discovered, order, None)
+    }
+
+    /// Builds both columns with an already-active server pack injected as the
+    /// fixed top row of Selected.
+    #[must_use]
+    pub fn rebuild_with_server_pack(
+        discovered: Vec<crate::resources::DiscoveredPack>,
+        order: &[String],
+        server: Option<PackRow>,
+    ) -> Self {
         let rows: Vec<PackRow> = discovered
             .into_iter()
             .map(|p| PackRow {
@@ -502,6 +537,7 @@ impl PacksNav {
                 title: p.title,
                 description: p.description,
                 builtin: false,
+                locked: false,
             })
             .collect();
 
@@ -517,6 +553,9 @@ impl PacksNav {
             .into_iter()
             .filter(|r| !selected.iter().any(|s| s.id == r.id))
             .collect();
+        if let Some(server) = server {
+            selected.insert(0, server);
+        }
         // The built-in pack is appended, never selected — see the module docs.
         selected.push(PackRow::builtin());
 
@@ -549,7 +588,7 @@ impl PacksNav {
     pub fn selected_ids(&self) -> Vec<String> {
         self.selected
             .iter()
-            .filter(|r| !r.builtin)
+            .filter(|r| !r.locked)
             .map(|r| r.id.clone())
             .collect()
     }
@@ -649,7 +688,7 @@ impl PacksNav {
                 list: PackList::Selected,
                 row,
             });
-            if !entry.builtin {
+            if !entry.locked {
                 out.push(PacksControl::Move { row, up: true });
                 out.push(PacksControl::Move { row, up: false });
             }
@@ -672,14 +711,14 @@ impl PacksNav {
             },
             PacksControl::Move { row, up } => {
                 let row = usize::from(row);
-                if self.selected.get(row).is_none_or(|r| r.builtin) {
+                if self.selected.get(row).is_none_or(|r| r.locked) {
                     return false;
                 }
                 if up {
                     row > 0
                 } else {
                     // The row below must exist and not be the built-in one.
-                    self.selected.get(row + 1).is_some_and(|r| !r.builtin)
+                    self.selected.get(row + 1).is_some_and(|r| !r.locked)
                 }
             }
             // Now genuinely wired — see `open_pack_folder`.
@@ -804,7 +843,7 @@ impl PacksNav {
             }
             PackList::Selected => {
                 // The built-in row is the one Selected entry that cannot move.
-                if self.selected.get(row).is_none_or(|r| r.builtin) {
+                if self.selected.get(row).is_none_or(|r| r.locked) {
                     return;
                 }
                 let pack = self.selected.remove(row);
@@ -824,7 +863,7 @@ impl PacksNav {
             Some(row + 1)
         };
         let Some(other) = other else { return };
-        if other >= self.selected.len() || self.selected[other].builtin {
+        if other >= self.selected.len() || self.selected[other].locked {
             return;
         }
         self.selected.swap(row, other);
@@ -1560,6 +1599,47 @@ mod tests {
             after_click,
             "a refresh must keep the screen's own current selection order, \
              not revert to whatever `rebuild` originally constructed it with"
+        );
+    }
+    #[test]
+    fn an_installed_server_pack_is_selected_locked_and_above_local_packs() {
+        let server = PackRow::server("server/1234", "DemocracyCraft", "Server resources", None);
+        let mut nav = PacksNav::rebuild_with_server_pack(
+            two_packs(),
+            &["file/alpha".to_string()],
+            Some(server),
+        );
+
+        assert_eq!(nav.selected()[0].id, "server/1234");
+        assert!(nav.selected()[0].locked, "server pack must be force-enabled");
+        assert_eq!(nav.selected()[1].id, "file/alpha");
+        assert_eq!(nav.selected_ids(), vec!["file/alpha".to_string()]);
+
+        let server_control = nav
+            .controls()
+            .iter()
+            .position(|control| {
+                matches!(
+                    control,
+                    PacksControl::Entry {
+                        list: PackList::Selected,
+                        row: 0
+                    }
+                )
+            })
+            .expect("server entry must be visible");
+        assert_eq!(nav.click_row(server_control), PacksOutcome::None);
+        assert_eq!(
+            nav.selected()[0].id,
+            "server/1234",
+            "a locked server row cannot be disabled"
+        );
+        assert!(
+            !nav
+                .controls()
+                .iter()
+                .any(|control| matches!(control, PacksControl::Move { row: 0, .. })),
+            "a locked server row has no reorder controls"
         );
     }
 }

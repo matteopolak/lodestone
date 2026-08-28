@@ -19,6 +19,22 @@ pub struct DebugLineVertex {
     pub color: [f32; 4],
 }
 
+/// The metadata-only part of an [`EntityDraw`] that F3+B needs in addition to
+/// its interpolated render transform.
+///
+/// `EntityDraw` deliberately stays a render-facing POD; duplicating this state
+/// onto every ordinary draw just for a debug overlay would make pose and
+/// attribute-scale two more values that can drift from ingest. The app builds
+/// this small, F3+B-only side table from the authoritative ingest entity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct EntityHitboxState {
+    pub(crate) id: i32,
+    pub(crate) pose: lodestone_model::EntityPose,
+    /// The resolved `minecraft:scale` attribute, excluding the draw's existing
+    /// baby/small-model scale.
+    pub(crate) attribute_scale: f32,
+}
+
 /// Lower a plugin's world-space debug segments
 /// (`lodestone_ecs::player::DebugLine`) into the vertex pairs
 /// [`DebugLineRenderer`] draws. The one piece of glue between the ECS
@@ -103,6 +119,17 @@ pub(crate) fn push_box(
 /// ray); this draws the hitbox white and the ray cyan for the same reason.
 #[must_use]
 pub fn entity_hitbox_vertices(draws: &[crate::entities::EntityDraw]) -> Vec<DebugLineVertex> {
+    entity_hitbox_vertices_with_states(draws, &[])
+}
+
+/// [`entity_hitbox_vertices`] with the live metadata needed for a pose-scaled
+/// player box. The no-state sibling remains for narrow render tests; production
+/// F3+B always calls this form.
+#[must_use]
+pub(crate) fn entity_hitbox_vertices_with_states(
+    draws: &[crate::entities::EntityDraw],
+    states: &[EntityHitboxState],
+) -> Vec<DebugLineVertex> {
     const HITBOX: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
     const EYE_RAY: [f32; 4] = [0.0, 1.0, 1.0, 1.0];
     /// How far the look ray extends, in blocks — vanilla's
@@ -111,6 +138,12 @@ pub fn entity_hitbox_vertices(draws: &[crate::entities::EntityDraw]) -> Vec<Debu
 
     let mut out = Vec::new();
     for draw in draws {
+        // `EntityHitboxDebugRenderer` has this as its outermost entity gate.
+        // Hidden helper players must not leave a second F3+B box after their
+        // renderer and nametag have been suppressed.
+        if draw.invisible {
+            continue;
+        }
         let Some(dims) = lodestone_data::entity_types::entity_type_id_parts(
             "minecraft",
             &draw.type_path,
@@ -119,8 +152,25 @@ pub fn entity_hitbox_vertices(draws: &[crate::entities::EntityDraw]) -> Vec<Debu
         else {
             continue;
         };
-        let half = dims.width * draw.scale * 0.5;
-        let height = dims.height * draw.scale;
+        let state = states.iter().find(|state| state.id == draw.id);
+        let attribute_scale = state
+            .map(|state| state.attribute_scale)
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
+            .unwrap_or(1.0);
+        let effective_scale = draw.scale * attribute_scale;
+        let (width, height, eye_height) = if draw.type_path.as_ref() == "player" {
+            player_hitbox_metrics(
+                state.map_or(lodestone_model::EntityPose::Standing, |state| state.pose),
+                effective_scale,
+            )
+        } else {
+            (
+                dims.width * effective_scale,
+                dims.height * effective_scale,
+                dims.height * effective_scale * 0.85,
+            )
+        };
+        let half = width * 0.5;
         if half <= 0.0 || height <= 0.0 {
             continue;
         }
@@ -132,10 +182,12 @@ pub fn entity_hitbox_vertices(draws: &[crate::entities::EntityDraw]) -> Vec<Debu
             HITBOX,
         );
 
-        // The look ray, from eye height along the head's yaw/pitch. Minecraft's
-        // yaw is measured from +Z and increases clockwise, which is the same
-        // convention `DebugStats::facing` documents.
-        let eye_y = f.y + height * 0.85;
+        // The look ray starts at `Entity.getEyeHeight()`, not a fraction of the
+        // bounding-box height. Player poses explicitly override it: standing is
+        // 1.62 rather than 1.53, crouching is 1.27, and the three prone poses
+        // are 0.4. Minecraft's yaw is measured from +Z and increases clockwise,
+        // which is the same convention `DebugStats::facing` documents.
+        let eye_y = f.y + eye_height;
         let (yaw, pitch) = (draw.head_yaw.to_radians(), draw.pitch.to_radians());
         let dir = glam::Vec3::new(
             -yaw.sin() * pitch.cos(),
@@ -156,6 +208,26 @@ pub fn entity_hitbox_vertices(draws: &[crate::entities::EntityDraw]) -> Vec<Debu
         });
     }
     out
+}
+
+/// `Avatar.POSES` / `LivingEntity.getDimensions`: the player-specific box and
+/// eye-height pair for F3+B. `SLEEPING` and `DYING` are fixed dimensions, so
+/// unlike every scalable pose they deliberately do not consume
+/// `minecraft:scale`.
+fn player_hitbox_metrics(pose: lodestone_model::EntityPose, scale: f32) -> (f32, f32, f32) {
+    match pose {
+        lodestone_model::EntityPose::Crouching => (0.6 * scale, 1.5 * scale, 1.27 * scale),
+        lodestone_model::EntityPose::Swimming
+        | lodestone_model::EntityPose::FallFlying
+        | lodestone_model::EntityPose::SpinAttack => (0.6 * scale, 0.6 * scale, 0.4 * scale),
+        lodestone_model::EntityPose::Sleeping => (0.2, 0.2, 0.2),
+        lodestone_model::EntityPose::Dying => (0.2, 0.2, 1.62),
+        lodestone_model::EntityPose::Standing
+        | lodestone_model::EntityPose::LongJumping
+        | lodestone_model::EntityPose::Sitting
+        | lodestone_model::EntityPose::Other(_) => (0.6 * scale, 1.8 * scale, 1.62 * scale),
+        _ => (0.6 * scale, 1.8 * scale, 1.62 * scale),
+    }
 }
 
 /// F3+G: the borders of the chunk the player is standing in.
@@ -254,9 +326,34 @@ pub fn f3_overlay_vertices(
     hitboxes: bool,
     chunk_borders: bool,
 ) -> Vec<DebugLineVertex> {
+    f3_overlay_vertices_with_states(
+        draws,
+        &[],
+        player,
+        min_y,
+        height,
+        hitboxes,
+        chunk_borders,
+    )
+}
+
+/// [`f3_overlay_vertices`] with the authoritative per-entity pose and scale
+/// snapshots. Kept separate so narrow render tests can continue to exercise
+/// the flag routing without manufacturing an ECS world; the live app calls
+/// this form whenever F3+B is enabled.
+#[must_use]
+pub(crate) fn f3_overlay_vertices_with_states(
+    draws: &[crate::entities::EntityDraw],
+    states: &[EntityHitboxState],
+    player: [f64; 3],
+    min_y: i32,
+    height: u32,
+    hitboxes: bool,
+    chunk_borders: bool,
+) -> Vec<DebugLineVertex> {
     let mut out = Vec::new();
     if hitboxes {
-        out.extend(entity_hitbox_vertices(draws));
+        out.extend(entity_hitbox_vertices_with_states(draws, states));
     }
     if chunk_borders {
         out.extend(chunk_border_vertices(player, min_y, height));
@@ -300,7 +397,7 @@ fn grown_segment_capacity(current: usize, required: usize, max_segments: usize) 
 
 #[cfg(test)]
 mod tests {
-    use super::grown_segment_capacity;
+    use super::{grown_segment_capacity, player_hitbox_metrics};
 
     #[test]
     fn capacity_grows_geometrically_and_never_shrinks() {
@@ -312,6 +409,17 @@ mod tests {
     #[test]
     fn capacity_stops_at_device_limit() {
         assert_eq!(grown_segment_capacity(4096, 20_000, 10_000), 10_000);
+    }
+
+    #[test]
+    fn player_pose_boxes_and_eyes_are_the_avatar_records_not_height_fractions() {
+        use lodestone_model::EntityPose;
+
+        assert_eq!(player_hitbox_metrics(EntityPose::Standing, 1.0), (0.6, 1.8, 1.62));
+        assert_eq!(player_hitbox_metrics(EntityPose::Crouching, 1.0), (0.6, 1.5, 1.27));
+        assert_eq!(player_hitbox_metrics(EntityPose::Swimming, 2.0), (1.2, 1.2, 0.8));
+        assert_eq!(player_hitbox_metrics(EntityPose::Sleeping, 2.0), (0.2, 0.2, 0.2));
+        assert_eq!(player_hitbox_metrics(EntityPose::Dying, 2.0), (0.2, 0.2, 1.62));
     }
 }
 

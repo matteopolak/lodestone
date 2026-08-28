@@ -268,6 +268,7 @@ fn a_block_item_in_the_hotbar_reaches_pixels() {
         damage: None,
         max_damage: None,
         enchanted: false,
+        custom_model_data: None,
         dyed_color: None,
         potion_color: None,
         banner_patterns: Vec::new(),

@@ -203,6 +203,16 @@ registry type and resolved model path. Enable it with `RUST_LOG=entity=debug`
 while reproducing a multiplayer scene; any record now identifies a bounded
 mapping/corpus gap rather than an expected dispatch split.
 
+The overlay follows the same generic visibility and pose rules as vanilla's
+`EntityHitboxDebugRenderer`: an entity with the shared invisible flag has no
+F3+B box, and player boxes/eye rays come from `Avatar`'s pose table rather than
+a fraction of its standing height. The live F3+B path reads `Pose` and the
+resolved `minecraft:scale` attribute into a small debug-only side table; normal
+render `EntityDraw`s stay free of overlay-only fields. This matters for server
+NPC helpers: an invisible helper player is neither a second hitbox nor a
+second nametag, while an invisible named armour stand remains a valid vanilla
+hologram because its renderer deliberately retains custom-name-visible text.
+
 ### Variant → texture (a wolf's breed, a pig's climate)
 
 `entity_texture_candidates` answers "which sheet does this *model* have", which is

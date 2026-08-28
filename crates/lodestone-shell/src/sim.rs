@@ -852,6 +852,10 @@ pub struct Sim {
     /// both `sim` and `menu` and does the conversion into
     /// `crate::menu::sign_edit::SignEditOpen`.
     pending_sign_edit: Option<PendingSignEdit>,
+    /// A one-shot server request to open the book in the named hand
+    /// (`NetUpdate::BookOpened`). The app takes this during its per-frame UI
+    /// reconciliation after the matching inventory contents have been folded.
+    pending_book_open: Option<bool>,
 }
 
 /// [`Sim::pending_sign_edit`]'s payload — see that field's own doc.

@@ -614,6 +614,9 @@ pub struct MainHandItem {
     pub item: lodestone_assets::ResourceLocation,
     /// Whether the stack is enchanted — the glint second-pass gate.
     pub foil: bool,
+    /// Index-zero `minecraft:custom_model_data` selector for the held item's
+    /// live item-definition resolution.
+    pub custom_model_data: Option<i32>,
     /// The stack's `minecraft:dyed_color`, straight off
     /// `lodestone_game::item::ItemStack::dyed_color`. `None` for an undyed
     /// stack or any non-dyeable item.

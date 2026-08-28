@@ -46,11 +46,17 @@ releases only the superseded texture for that map; unrelated maps stay resident.
 `RenderState`, so recreating a device/session or target format cannot reuse stale wgpu handles.
 
 The held quad is retained for an unchanged equip height. Framed batches retain the last exact visible
-sequence of frame id, map id, pose bits, rotation and sampled light. A map-pixel update therefore
+sequence of frame id, map id, pose bits, rotation, invisibility and sampled light. A map-pixel update therefore
 rebinds only its texture; appearing, disappearing, moving, rotating or relighting a frame rebuilds the
 affected batch. `RenderState::map_cache_counters` exposes conversion, upload/bind-group and mesh-build
 counts for a live profile. `mip_level_count` is 1 and the sampler is `Nearest`, matching vanilla's
 `DynamicTexture` — linear filtering smears terrain edges that are one pixel wide by design.
+
+`ItemFrameRenderer` places visible map contents at local `z=.4375` but invisible-frame contents at
+`.5`; after the frame transform the latter is `1/16` block closer to the wall. `framed_map_pose` keeps
+the existing room-facing separation from the frame plate and applies that difference along the actual
+frame normal, not world Z. Therefore invisibility is vertex data and an exact mesh-cache key member,
+not merely a material choice.
 
 ### The two draw sites
 

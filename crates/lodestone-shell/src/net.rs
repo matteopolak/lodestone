@@ -886,6 +886,16 @@ pub enum NetUpdate {
         /// Whether the front (vs. back) face is being edited.
         is_front_text: bool,
     },
+    /// The server requested that the book in one of the player's hands opens
+    /// (`ClientboundOpenBookPacket`, decoded as [`ClientEvent::BookOpened`]).
+    ///
+    /// This remains a hand selector rather than carrying book contents: the
+    /// matching inventory update is the authoritative source of the item's
+    /// components, and `Sim` owns the hand-to-book projection.
+    BookOpened {
+        /// `true` for the main hand and `false` for the off hand.
+        main_hand: bool,
+    },
     /// The server reported a block being destroyed at `pos`, carrying the state
     /// id it had **before** breaking.
     ///
@@ -4769,6 +4779,9 @@ fn forward(
         ClientEvent::SignEditorOpened { pos, is_front_text } => {
             NetUpdate::SignEditorOpened { pos, is_front_text }
         }
+        // `OPEN_BOOK` was decoded by v770 but had no consumer after the
+        // adapter, so server-authorised book opens were silently dropped.
+        ClientEvent::BookOpened { main_hand } => NetUpdate::BookOpened { main_hand },
         // The item-pickup fly-to-collector animation (issue #365), forwarded
         // **raw** for the same reason `TitleEvent` is: the one consumer is a
         // `lodestone-game` fold that already takes a `&ClientEvent`
@@ -5455,6 +5468,27 @@ mod tests {
         match rx.try_recv().expect("WinGame must cross the NetUpdate channel") {
             NetUpdate::WinGame => {}
             other => panic!("expected NetUpdate::WinGame, got {other:?}"),
+        }
+    }
+
+    /// `OPEN_BOOK` is server-authoritative and names a hand; losing that bool
+    /// makes an off-hand book open the unrelated main-hand stack.
+    #[test]
+    fn forward_preserves_the_open_book_hand() {
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::BookOpened { main_hand: false },
+        )
+        .expect("opening a book does not end the session");
+
+        match rx.try_recv().expect("OPEN_BOOK must reach the shell") {
+            NetUpdate::BookOpened { main_hand } => assert!(!main_hand),
+            other => panic!("expected BookOpened, got {other:?}"),
         }
     }
 

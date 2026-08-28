@@ -235,6 +235,35 @@ impl WindowApp {
                 },
             );
         }
+        // `OPEN_BOOK` is the server-side counterpart to the local `try_use`
+        // book fork. The packet selects one hand, which is important when both
+        // hands have books; it does not carry contents, so resolve the already
+        // synchronised stack only after taking that selector.
+        if self.ui.screen() == crate::menu::Screen::Playing
+            && let Some(main_hand) = self.sim.take_pending_book_open()
+        {
+            if let Some(open) = self.sim.writable_book_in_hand_at(main_hand) {
+                self.sim.input_mut(InputState::release_all);
+                self.nav.open_book_edit(&mut self.ui, open);
+                self.tab_held = false;
+                self.set_grab(false);
+            } else if let Some(open) = self.sim.written_book_in_hand_at(main_hand) {
+                self.sim.input_mut(InputState::release_all);
+                self.nav.open_book_view(&mut self.ui, open);
+                self.tab_held = false;
+                self.set_grab(false);
+            }
+        }
+        // A lectern is a one-slot server menu, but its screen is a book reader
+        // rather than a generic container. Open it before `redraw` reaches its
+        // usual `open_menu() -> Screen::Container` fallback, and leave page
+        // turns to `BookViewState`'s menu-button actions.
+        if self.ui.screen() == crate::menu::Screen::Playing
+            && let Some((window_id, book, page)) = self.sim.lectern_book_view()
+        {
+            self.nav
+                .open_lectern_book_view(&mut self.ui, window_id, book, page);
+        }
         // Issue #535's scope 2: the pause menu stops offering Open to LAN
         // once there is nothing left for it to do. `Sim::is_lan_published`
         // is the ground truth (set from the real `NetUpdate::LanOpened`, not
@@ -638,6 +667,40 @@ impl WindowApp {
                 } else {
                     Vec::new()
                 };
+                // `EntityDraw` intentionally contains only ordinary render
+                // state. F3+B additionally needs the authoritative pose and
+                // resolved `minecraft:scale` attribute, so build its tiny
+                // side table only while that overlay is enabled rather than
+                // duplicating two ingest fields onto every draw every frame.
+                let hitbox_states = if hitboxes_on {
+                    let scale_key = lodestone_model::Identifier::new("minecraft", "scale")
+                        .expect("minecraft:scale is a valid identifier");
+                    let index = world.resource::<lodestone_ecs::entity::EntityIndex>();
+                    draws
+                        .iter()
+                        .filter_map(|draw| {
+                            let entity = index.get(draw.id)?;
+                            let pose = world
+                                .get::<lodestone_ecs::entity::Pose>(entity)
+                                .map_or(lodestone_model::EntityPose::Standing, |pose| pose.0);
+                            let attribute_scale = world
+                                .get::<lodestone_ecs::entity::Attributes>(entity)
+                                .map_or(1.0, |attributes| {
+                                    lodestone_entity::attribute::attribute_value(
+                                        &attributes.0,
+                                        &scale_key,
+                                    ) as f32
+                                });
+                            Some(crate::gpu::EntityHitboxState {
+                                id: draw.id,
+                                pose,
+                                attribute_scale,
+                            })
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let player = if borders_on {
                     world
                         .get::<lodestone_ecs::player::PhysicsState>(local)
@@ -647,8 +710,9 @@ impl WindowApp {
                 } else {
                     [0.0, 0.0, 0.0]
                 };
-                out.extend(crate::gpu::f3_overlay_vertices(
+                out.extend(crate::gpu::f3_overlay_vertices_with_states(
                     &draws,
+                    &hitbox_states,
                     player,
                     min_y,
                     height,

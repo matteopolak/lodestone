@@ -138,11 +138,11 @@ the item's default appearance, which is what shipped before this existed.
 | `minecraft:using_item` | `ItemUse::using`, narrowed by hand | `isUsingItem() && getUseItem() == stack` |
 | `minecraft:use_duration` | `ItemUse::ticks` **directly** | `stack.getUseDuration() - remaining` |
 | `minecraft:crossbow/pull` | `ItemUse::ticks / CROSSBOW_CHARGE_TICKS` | `useDuration / getChargeDuration` |
+| `minecraft:custom_model_data` | index zero of the decoded `CustomModelData` float list | `CustomModelData#getFloat(0, 0)` |
 
 **Unsourced, and why:** `trim_material`, `bundle/has_selected_item`, `block_state`,
 `has_component`, `charge_type`, `broken`, `fishing_rod/cast`, `damage`, `count`, `cooldown`,
-`custom_model_data` all need per-stack components that `lodestone_model::ItemComponents` has no
-field for (and an unmodelled component halts the patch decode). `time`, `local_time`,
+all need per-stack components that this context does not receive. `time`, `local_time`,
 `context_dimension` and `compass` need a level clock or dimension this type is not given.
 `use_cycle` needs per-item `getUseDuration` — see below.
 

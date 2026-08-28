@@ -5134,7 +5134,10 @@ fn a_signed_book_in_hand_is_reported_with_its_own_metadata_and_pages() {
             title: "Wandering Notes".to_owned(),
             author: "Steve".to_owned(),
             generation: 2,
-            pages: vec!["First page".to_owned(), "Second page".to_owned()],
+            pages: vec![
+                lodestone_model::Text::literal("First page"),
+                lodestone_model::Text::literal("Second page"),
+            ],
         }
     );
 }
@@ -5169,6 +5172,106 @@ fn the_two_book_screens_do_not_claim_each_others_item() {
     }
 
     assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// A server `OPEN_BOOK` packet names the hand it intends to display. This
+/// keeps that selector through the relay and verifies the projection does not
+/// silently choose the main hand when an off-hand book was requested.
+#[test]
+fn server_open_book_keeps_its_offhand_selector() {
+    use crate::net::NetUpdate;
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:stick");
+
+    let local = sim.local;
+    let mut offhand_book = lodestone_model::ItemStack::new(
+        "minecraft:written_book".parse().expect("valid item id"),
+        1,
+    );
+    offhand_book.components.written_book_content = Some(lodestone_model::WrittenBookContent {
+        title: "Offhand notes".to_owned(),
+        author: "Alex".to_owned(),
+        generation: 0,
+        pages: vec![lodestone_model::Text::literal("the requested book")],
+        resolved: true,
+    });
+    sim.write(|w| {
+        w.get_mut::<lodestone_ecs::SessionMenus>(local)
+            .expect("local player has menus")
+            .0
+            .apply(&lodestone_model::ClientEvent::InventorySlotChanged {
+                slot: lodestone_game::menu::OFFHAND_NATIVE as i32,
+                item: Some(offhand_book),
+            });
+    });
+
+    feed.send(NetUpdate::BookOpened { main_hand: false })
+        .expect("loopback is connected");
+    sim.poll_net();
+
+    assert_eq!(sim.take_pending_book_open(), Some(false));
+    assert!(sim.written_book_in_hand_at(true).is_none());
+    assert_eq!(
+        sim.written_book_in_hand_at(false)
+            .expect("off-hand book must be selected")
+            .title,
+        "Offhand notes"
+    );
+}
+
+/// A lectern carries just its display-book slot, not the usual 36 appended
+/// player slots. Its page lives in menu property zero and is the exact button
+/// index returned to the UI.
+#[test]
+fn lectern_book_view_reads_slot_zero_and_container_page_data() {
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    let mut book = lodestone_model::ItemStack::new(
+        "minecraft:written_book".parse().expect("valid item id"),
+        1,
+    );
+    book.components.written_book_content = Some(lodestone_model::WrittenBookContent {
+        title: "Lectern manual".to_owned(),
+        author: "Librarian".to_owned(),
+        generation: 1,
+        pages: vec![
+            lodestone_model::Text::literal("first"),
+            lodestone_model::Text::literal("second"),
+        ],
+        resolved: true,
+    });
+    let local = sim.local;
+    sim.write(|w| {
+        let mut menus = w
+            .get_mut::<lodestone_ecs::SessionMenus>(local)
+            .expect("local player has menus");
+        menus.0.apply(&lodestone_model::ClientEvent::ScreenOpened {
+            window_id: 12,
+            menu_type: "minecraft:lectern".parse().expect("valid menu id"),
+            title: lodestone_model::Text::literal("Lectern"),
+        });
+        menus.0.apply(&lodestone_model::ClientEvent::ContainerContent {
+            window_id: 12,
+            state_id: 4,
+            items: vec![Some(book)],
+            carried_item: None,
+        });
+        menus.0.apply(&lodestone_model::ClientEvent::ContainerData {
+            window_id: 12,
+            property: 0,
+            value: 1,
+        });
+    });
+
+    let (window_id, open, page) = sim.lectern_book_view().expect("lectern book opens");
+    assert_eq!(window_id, 12);
+    assert_eq!(page, 1);
+    assert_eq!(open.title, "Lectern manual");
+    assert_eq!(open.pages[1], lodestone_model::Text::literal("second"));
 }
 
 /// Same idiom as [`give_main_hand_item`], carrying a real `minecraft:
