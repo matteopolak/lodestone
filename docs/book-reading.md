@@ -45,16 +45,35 @@ shared with the screen, so the two cannot disagree.
 
 `crates/lodestone-shell/src/menu/book_view.rs` — `BookViewState`, `Screen::BookView`, and
 `render::book_view_frame`. `crate::sim::session`'s `Sim::written_book_in_hand` is the
-producer: `WindowApp::try_use` (`crates/lodestone-shell/src/app/menus.rs`) forks on it
+local-use producer: `WindowApp::try_use` (`crates/lodestone-shell/src/app/menus.rs`) forks on it
 immediately after its existing `writable_book_in_hand` fork, and opens the screen
 client-side. `WrittenBookItem.use` returns `InteractionResult.SUCCESS` after
 `player.openItemGui(...)`, so vanilla never reaches the generic use for a book either — the
 fork returns rather than falling through, which is why the swing decision in
 `sim/actions.rs` is not consulted here even though `written_book` is in its table.
 
-The screen has **no wire traffic at all**, which is the one structural difference from the
-editor: Done and Escape are the same thing, and `MenuNav::activate_book_view_row` returns
-`MenuAction::None` for every row.
+The server-directed path is separate: v770 decodes `ClientboundOpenBookPacket` to
+`ClientEvent::BookOpened`; `net::forward` carries its hand selector to `Sim`, and
+`WindowApp::drive_ui_from_session` resolves that exact already-synchronised hand. This handles
+both signed books and writable books: a writable book opens the existing editor, while a signed
+book opens this reader. It intentionally does not fall back to the other hand, because a server
+may select an off-hand book while the main hand contains another stack.
+
+Pages remain `lodestone_model::Text` all the way through `BookViewOpen` and `BookViewState`.
+The renderer splits the resolved spans at wrapped-line boundaries, so authored text colour is
+retained instead of being flattened before rendering. Click and hover metadata stays on the text
+but is not interactive; font-weight, italic and other non-colour span styles have no menu-label
+renderer yet.
+
+### Lecterns
+
+`minecraft:lectern` is not a generic one-row chest. Its content packet contains only the book
+slot (slot `0`), while property `0` is the current zero-based page. `Menus::ensure_open` keeps
+that one slot intact; `Sim::lectern_book_view` projects the book and page into the same reader
+state. The overlay records the server menu id: previous/next send
+`ClientAction::ContainerButtonClick` with the new zero-based page, and Done/Escape send
+`ClientAction::ContainerClose` through `Sim::close_open_menu`. The server remains authoritative
+and a subsequent container-data packet corrects the optimistic page.
 
 Page geometry and word-wrapping are *borrowed* from `book_edit`
 (`PAGE_WRAP_CHARS`, `PAGE_LINE_LIMIT`, and `text_area::TextArea` itself, driven read-only)
@@ -79,9 +98,8 @@ wrap implementation would be free to disagree with the editor's about where a li
 Each of these is a real gap, not a decision that the data is absent:
 
 - **Page click and hover events.** Vanilla's pages are full chat components and a
-  `ClickEvent` can run a command or open a URL. `BookViewOpen::from_pages` flattens each
-  `lodestone_model::Text` to plain text on the way in, so such a book reads correctly and
-  is inert. The data is on the wire and in the model; only the screen drops it.
+  `ClickEvent` can run a command or open a URL. Lodestone retains those components and their
+  spans while rendering, but the menu overlay has no interaction dispatcher, so pages are inert.
 - **`textures/gui/book.png`.** The page draws as plain labels over the standard dimmed
   backdrop, not over the parchment sprite — the same simplification `book_edit` already
   makes, for the same reason (the menu overlay stream has no atlas). Consequently the page
@@ -90,9 +108,8 @@ Each of these is a real gap, not a decision that the data is absent:
 - **Page Up / Page Down.** `BookViewScreen.keyPressed` binds GLFW `266`/`267` to the two
   page buttons. `menu::nav::MenuKey` has no variant for either, so the arrow keys stand in;
   wiring the real pair is a keyboard-layer change.
-- **A lectern's book.** Vanilla's `LecternScreen` extends `BookViewScreen` with a Take Book
-  button and a `ServerboundContainerButtonClickPacket` for page turns. Nothing here opens
-  a lectern.
+- **Taking a lectern book.** Page navigation and close semantics are implemented, but the
+  `LecternScreen` Take Book control is not yet exposed by the overlay.
 
 ## Configuration
 
@@ -100,6 +117,7 @@ None. No feature gate, no env var — the screen and the tooltip lines are uncon
 
 ## Dependencies
 
-`lodestone-model`'s `WrittenBookContent`, `lodestone-game`'s `ItemStack`/`Menus` fold,
-`crate::menu::text_area::TextArea`, and `crates/protocol/v770`'s
-`read_written_book_content` for the decode. Nothing outbound.
+`lodestone-model`'s `WrittenBookContent` and `Text`, `lodestone-game`'s `ItemStack`/`Menus`
+fold, `crate::menu::text_area::TextArea`, and v770's `OPEN_BOOK` plus
+`read_written_book_content` decode. Lecterns also rely on the protocol family's
+`ContainerButtonClick` and `ContainerClose` action encoders.

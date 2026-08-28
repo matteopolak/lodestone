@@ -538,6 +538,7 @@ mod tests {
             damage: None,
             max_damage: None,
             enchanted: false,
+            custom_model_data: None,
             dyed_color: None,
             potion_color: None,
             banner_patterns: Vec::new(),

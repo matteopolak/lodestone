@@ -92,7 +92,7 @@ use lodestone_assets::{
 use lodestone_render::{
     BlockEntityModelSet, BlockModels, CameraUniform, EntityCameraUniform, EntityPipeline, GpuAtlas,
     GpuEntityModel, GuiSpriteQuad, ModelPipeline, ModelVertex, RenderLayer, block_entity_texture_stems,
-    entity_camera_buffer, fog::FogUniform, gui_item_pose, gui_ortho, mesh_item_quads,
+    entity_camera_buffer, fog::FogUniform, gui_item_pose, gui_ortho, mesh_item_quads, ItemStateContext,
     model_shared_camera_buffer, section_origin_buffer, update_model_shared_camera_buffer,
     upload_instances_tinted,
 };
@@ -124,6 +124,9 @@ pub struct ItemIcon {
     /// [`stack_has_foil`] rather than by hand — it was hardcoded `false` at every
     /// producer until that fix, which is why nothing glinted.
     pub enchanted: bool,
+    /// Index-zero `minecraft:custom_model_data` selector for per-stack item
+    /// model resolution. `None` is vanilla's absent-component zero.
+    pub custom_model_data: Option<i32>,
     /// The stack's `minecraft:dyed_color`, straight off
     /// `lodestone_game::item::ItemStack::dyed_color`. `None` for an undyed
     /// stack (or any non-dyeable item) — fed into [`sprite_layer_tint`]'s
@@ -474,7 +477,11 @@ pub(crate) fn draw_item_icon_counted(
 ) {
     let (vw, vh) = view;
     let scale = size / 16.0;
-    if let Some(atlas) = assets.items
+    let custom_model_drawn = slot.custom_model_data.is_some_and(|value| {
+        push_item_model_variant(sink.model, assets.models, &slot.item, value as f32, x, y, size)
+    });
+    if !custom_model_drawn
+        && let Some(atlas) = assets.items
         && let Some(icon) = atlas.icon(&slot.item)
     {
         for part in &icon.parts {
@@ -802,6 +809,34 @@ fn push_item_model(
     let pose = gui_item_pose([x, y, size, size], &geometry.transform);
     let mesh = mesh_item_quads(&geometry.quads, pose, geometry.gui_light);
     out.extend(mesh.indices.iter().map(|&i| mesh.vertices[i as usize]));
+}
+
+/// Dynamic counterpart to [`push_item_model`] for a stack whose custom model
+/// data selects a non-default branch. Generated sprite variants are baked into
+/// `BlockModels` too, so this covers both a pack's 3-D gun and a flat override.
+fn push_item_model_variant(
+    out: &mut Vec<ModelVertex>,
+    models: Option<&BlockModels>,
+    item: &ResourceLocation,
+    custom_model_data: f32,
+    x: f32,
+    y: f32,
+    size: f32,
+) -> bool {
+    let Some(geometry) = models
+        .and_then(|models| models.item_forms(item))
+        .and_then(|forms| {
+            forms.resolve(
+                &ItemStateContext::new(DisplaySlot::Gui).with_custom_model_data(custom_model_data),
+            )
+        })
+    else {
+        return false;
+    };
+    let pose = gui_item_pose([x, y, size, size], &geometry.transform);
+    let mesh = mesh_item_quads(&geometry.quads, pose, geometry.gui_light);
+    out.extend(mesh.indices.iter().map(|&i| mesh.vertices[i as usize]));
+    true
 }
 
 /// Record one [`IconPart::Special`] slot for the block-entity icon pass.
@@ -3276,6 +3311,7 @@ mod pop_tests {
             damage: None,
             max_damage: None,
             enchanted: false,
+            custom_model_data: None,
             dyed_color: None,
             potion_color: None,
             banner_patterns: Vec::new(),
@@ -3583,6 +3619,7 @@ mod tint_wiring_tests {
             damage: None,
             max_damage: None,
             enchanted: false,
+            custom_model_data: None,
             dyed_color,
             potion_color,
             banner_patterns: Vec::new(),

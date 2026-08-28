@@ -248,6 +248,7 @@ fn the_first_person_held_item_dims_with_the_world_at_night() {
         Some(lodestone::gpu::MainHandItem {
             item: item.clone(),
             foil: false,
+            custom_model_data: None,
             dyed_color: None,
             potion_color: None,
             banner_patterns: Vec::new(),

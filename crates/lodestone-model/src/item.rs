@@ -58,6 +58,10 @@ impl ItemStack {
 /// see each field's docs for why guessing is the trap.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ItemComponents {
+    /// `minecraft:custom_model_data`'s numeric selector list, stored as raw
+    /// IEEE-754 bits so this version-free, equality-bearing model never has to
+    /// pretend `f32` is `Eq`. Item-model `range_dispatch` reads index zero.
+    pub custom_model_data: Vec<u32>,
     /// A player- or server-assigned display name overriding the item's default.
     pub custom_name: Option<Text>,
     /// `minecraft:lore`'s authored tooltip lines, in wire order.

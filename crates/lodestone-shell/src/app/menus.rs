@@ -307,6 +307,19 @@ impl WindowApp {
                     net.send_action(submit.into_action());
                 }
             }
+            MenuAction::ContainerButtonClick { window_id, button_id } => {
+                // The reader already advanced optimistically. The lectern
+                // menu validates the requested page and corrects us through
+                // its next container-data update if the book changed.
+                self.sim.send_container_button_click(window_id, button_id);
+            }
+            MenuAction::CloseContainer { window_id } => {
+                // Do not close a replacement menu if the server swapped the
+                // lectern out between the click and this app-side action.
+                if self.sim.open_menu().is_some_and(|open| open.window_id == window_id) {
+                    self.sim.close_open_menu();
+                }
+            }
             // The pause menu's Open to LAN (issue #535). Native only: there is no
             // TCP listener to bind in a browser, which is the same reason
             // `Origin::Integrated`'s `lan_port` is `cfg`'d out there.

@@ -1562,9 +1562,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   **Selected** on the right is the priority order, highest first. Clicking a row moves
   it between the columns, per-row buttons reorder it, and leaving the screen feeds the
   order into `ResourceManager`'s pack stack — which a live world session now picks
-  up within a frame or two, not just on the next atlas/model build. See "How to change
-  it" below for `resources::pack_generation` and `Sim::reload_resource_pack_atlas`,
-  the live-reload chain.
+  up within a frame or two, not just on the next atlas/model build. An accepted server
+  pack is also shown in Selected, above every local row. It is force-enabled for the
+  lifetime of that push: it has no transfer or reorder controls and is deliberately
+  excluded from the persisted local order. See "How to change it" below for
+  `resources::pack_generation` and `Sim::reload_resource_pack_atlas`, the live-reload
+  chain.
 - [Server resource packs](./resource-packs.md) — The end-to-end flow for a
   server-pushed resource pack: the accept/decline prompt
   (`Screen::ResourcePackPrompt`), the per-server policy that can skip it

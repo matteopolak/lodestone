@@ -479,6 +479,7 @@ impl Sim {
             fov_y_degrees: crate::camera_rig::FOV_Y_DEGREES,
             pickups: lodestone_game::mining::PickupFeed::new(),
             pending_sign_edit: None,
+            pending_book_open: None,
         };
         sim.refresh_mesh_policy();
         sim

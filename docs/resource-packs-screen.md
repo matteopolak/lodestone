@@ -10,6 +10,9 @@ archives — with its `pack.mcmeta` description and `pack.png` thumbnail;
 moves it between the columns, per-row buttons reorder it, and leaving the screen
 feeds the order into `ResourceManager`'s pack stack — which a live world session
 now picks up within a frame or two, not just on the next atlas/model build.
+An accepted server pack is also shown in Selected, above every local row. It is
+force-enabled for the lifetime of that push: it has no transfer or reorder controls
+and is deliberately excluded from the persisted local order.
 See "How to change it" below for `resources::pack_generation` and
 `Sim::reload_resource_pack_atlas`, the live-reload chain.
 
@@ -27,7 +30,8 @@ one source.
 menu/packs.rs      PacksNav: two columns, cursor, per-column scroll, transfer,
                    reorder, commit
 resources.rs       resource_packs_dir(), scan_resource_packs{,_in}(),
-                   selected_packs()/set_selected_packs(), open_pack_stack()
+                   selected_packs()/set_selected_packs(), server_pack_info(),
+                   open_pack_stack()
 config.rs          SelectedPacks — the persisted order (resource_packs.json)
 lodestone-assets   ResourceManager::from_priority_order — the one reversal
 ```
@@ -40,6 +44,9 @@ lodestone-assets   ResourceManager::from_priority_order — the one reversal
   top of `client.jar` — and **every** `load_*` in that module goes through it, so
   a pack overriding GUI sprites, item art, the sky, the container panels or the
   block textures is picked up by whichever loader owns that art.
+  `server_pack_info` reads presentation-only `pack.mcmeta`/`pack.png` from the
+  already-validated in-memory server zip; it never gives that transient source a
+  filesystem path or a persisted selection id.
 - **`crates/lodestone-shell/src/menu/packs.rs`** holds `PackRow`, `PacksControl`,
   `PacksNav` (both columns, the cursor, a scroll offset per column) and `commit`.
 - **`menu/options.rs`** — `SettingsPage::ResourcePacks`, the `SettingsNav`
@@ -136,11 +143,13 @@ than a hand-written `.rev()`.
 
 ## How to change it
 
-- **The built-in pack is pinned by construction, not by a flag.** `PacksNav::rebuild`
+- **The built-in pack and an active server pack are pinned by construction.** `PacksNav::rebuild`
   appends `PackRow::builtin()` after the user's rows and `controls()` gives it no
   move buttons; `selected_ids()` filters it out, so `SelectedPacks` cannot
-  persist it and nothing can deselect it. Do not add an `enabled` flag for it —
-  that would make the invariant representable-but-false.
+  persist it and nothing can deselect it. `rebuild_with_server_pack` similarly
+  inserts the server row at index zero and treats both rows as `locked`; do not
+  add an `enabled` flag for either — that would make the invariant
+  representable-but-false.
 - **The scan is `PacksNav::reset`'s job**, called on entering the page. There is
   no real filesystem watcher (see "What is deliberately not built" below for
   the cheap interim that exists instead), and it only ever runs while this page

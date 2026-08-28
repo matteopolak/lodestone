@@ -173,6 +173,29 @@ fn decodes_modeled_components() {
     assert!(!item.components.has_unmodeled);
 }
 
+/// `CustomModelData.STREAM_CODEC` starts with its numeric float list. A current
+/// server pack's `minecraft:range_dispatch` reads index zero of that list, so a
+/// metadata-tagged diamond sword must preserve the number rather than merely
+/// consume the component for wire alignment.
+#[test]
+fn custom_model_data_preserves_the_first_float_for_item_model_selection() {
+    let mut patch = Writer::default();
+    patch.var_i32(1); // one added component
+    patch.var_i32(0); // no removals
+    patch.var_i32(component_id("minecraft:custom_model_data"));
+    patch.var_i32(1); // one numeric selector
+    patch.f32(4545.0);
+    patch.var_i32(0); // flags
+    patch.var_i32(0); // strings
+    patch.var_i32(0); // colours
+
+    let payload = set_slot_with_patch("minecraft:diamond_sword", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert_eq!(item.components.custom_model_data, vec![4545.0_f32.to_bits()]);
+    assert!(!item.components.has_unmodeled);
+}
+
 /// Lore is a list of full chat-component trees, not a list of flattened
 /// strings. In particular a child can override both the line's inherited
 /// formatting and its colour with an RGB value that has no legacy-code form.

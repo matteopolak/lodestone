@@ -1159,7 +1159,9 @@ fn read_component_patch(
                 read_enchantments(reader)?;
             }
 
-            Some("minecraft:custom_model_data") => read_custom_model_data(reader)?,
+            Some("minecraft:custom_model_data") => {
+                components.custom_model_data = read_custom_model_data(reader)?;
+            }
             Some("minecraft:tooltip_display") => read_tooltip_display(reader)?,
             Some("minecraft:attribute_modifiers") => read_attribute_modifiers(reader)?,
 
@@ -1914,10 +1916,11 @@ fn read_network_nbt_bytes(reader: &mut Reader<'_>) -> Result<Vec<u8>, AdapterErr
 /// big-endian, not VarInts — which is the one width in this component that a
 /// VarInt-by-default reader gets wrong, and getting it wrong misaligns the whole
 /// rest of the packet instead of merely losing a colour.
-fn read_custom_model_data(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+fn read_custom_model_data(reader: &mut Reader<'_>) -> Result<Vec<u32>, AdapterError> {
     let floats = read_count(reader, "custom_model_data float")?;
+    let mut numeric = Vec::with_capacity(floats);
     for _ in 0..floats {
-        reader.f32().map_err(dec_err)?;
+        numeric.push(reader.f32().map_err(dec_err)?.to_bits());
     }
     let flags = read_count(reader, "custom_model_data flag")?;
     for _ in 0..flags {
@@ -1931,7 +1934,7 @@ fn read_custom_model_data(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
     for _ in 0..colors {
         reader.i32().map_err(dec_err)?;
     }
-    Ok(())
+    Ok(numeric)
 }
 
 /// Consumes a `minecraft:tooltip_display` payload (`TooltipDisplay.STREAM_CODEC`).

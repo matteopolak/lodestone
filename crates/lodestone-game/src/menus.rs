@@ -541,7 +541,6 @@ impl Menus {
             // A different window replacing this one (or an open with no close):
             // the outgoing menu is holding the one player inventory.
             self.reclaim_inventory();
-            let container_size = content_len.saturating_sub(PLAYER_INVENTORY_PORTION);
             let (menu_type, title) = match self.pending.take() {
                 Some(p) if p.window_id == window_id => (Some(p.menu_type), Some(p.title)),
                 other => {
@@ -551,6 +550,18 @@ impl Menus {
                     self.pending = other;
                     (None, None)
                 }
+            };
+            // `LecternMenu` exposes only its single displayed-book slot. It
+            // does not append the normal 36 player-inventory slots to its
+            // content packet, despite borrowing the player's inventory for
+            // interaction. Keep that one slot in the model so the shell can
+            // open the book reader rather than drawing a zero-slot chest.
+            let container_size = if menu_type.as_ref().is_some_and(|key| {
+                key.namespace() == "minecraft" && key.path() == "lectern"
+            }) {
+                content_len
+            } else {
+                content_len.saturating_sub(PLAYER_INVENTORY_PORTION)
             };
             let menu = build_menu(menu_type.as_ref(), container_size);
             self.opened = Some(OpenMenu {
@@ -886,6 +897,32 @@ mod tests {
             Some(&game_stack("minecraft:stone", 32))
         );
         assert_eq!(menus.player().slot_item(0), None);
+    }
+
+    /// A lectern has exactly one menu slot: the displayed book. Unlike every
+    /// ordinary container it does **not** append the player's 36 inventory
+    /// slots to `container_set_content`, so treating `items.len() - 36` as its
+    /// container size turns it into a zero-slot generic chest and loses the
+    /// book before the shell can open its reader.
+    #[test]
+    fn lectern_content_keeps_its_book_in_menu_slot_zero() {
+        let mut menus = Menus::new();
+        let book = stack("minecraft:written_book", 1);
+        assert!(menus.apply(&ClientEvent::ScreenOpened {
+            window_id: 7,
+            menu_type: key("minecraft:lectern"),
+            title: Text::literal("Lectern"),
+        }));
+        assert!(menus.apply(&ClientEvent::ContainerContent {
+            window_id: 7,
+            state_id: 0,
+            items: vec![Some(book.clone())],
+            carried_item: None,
+        }));
+
+        let opened = menus.opened().expect("lectern must open from its content");
+        assert_eq!(opened.slot_item(0), Some(&GameItemStack::from(&book)));
+        assert_eq!(opened.slot_count(), 37, "one lectern slot plus player inventory");
     }
 
     #[test]

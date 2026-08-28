@@ -198,6 +198,15 @@ instead is a trap: that field is `@Deprecated` and is what `bucket_entity_data` 
 `custom_data`. Reading the family as a bare *compound* is also wrong — `recipes` encodes to a
 list tag and the `Unit`-valued members to an empty compound.
 
+### `custom_model_data` is four lists, not a legacy NBT integer
+
+`CustomModelData.STREAM_CODEC` writes four separately VarInt-counted collections in this exact
+order: `float`, `bool`, UTF-8 string and fixed-width `INT` colour. The numeric list is retained
+as raw IEEE-754 bits in `lodestone_model::ItemComponents`, preserving `Eq` without pretending an
+`f32` is comparable. Item `range_dispatch` reads index zero (zero when absent), which is the
+server-pack custom-item path; the other three lists are consumed so the packet remains aligned but
+are not yet surfaced to `select` predicates. Never decode the colour entries as VarInts.
+
 ### Deferred
 
 | component | cost |

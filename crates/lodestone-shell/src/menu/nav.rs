@@ -258,6 +258,21 @@ pub enum MenuAction {
     /// [`lodestone_model::ClientAction`] directly for the identical
     /// `Eq`-derive reason [`MenuAction::SetCommandBlock`]'s own doc gives.
     EditBook(book_edit::BookEditSubmit),
+    /// Tell a server-owned lectern to show `button_id` as its selected page.
+    /// The action only comes from a successful turn in [`Screen::BookView`],
+    /// never from a hand-held book.
+    ContainerButtonClick {
+        /// The lectern's open container id.
+        window_id: i32,
+        /// The new zero-based page index.
+        button_id: i32,
+    },
+    /// Close the server-owned lectern after Done or Escape. Hand-held books
+    /// never produce this action because they have no container to close.
+    CloseContainer {
+        /// The open lectern container id this close applies to.
+        window_id: i32,
+    },
     /// The pause menu's **Open to LAN** was activated (issue #535): the app must
     /// republish the world it is in on a TCP port so other machines can join.
     ///
@@ -2629,6 +2644,22 @@ impl MenuNav {
         }
     }
 
+    /// Opens the server-owned lectern reader. Its page is supplied by the
+    /// lectern menu's first data property; page turns therefore return
+    /// [`MenuAction::ContainerButtonClick`] rather than being purely local.
+    pub fn open_lectern_book_view(
+        &mut self,
+        ui: &mut UiState,
+        window_id: i32,
+        open: book_view::BookViewOpen,
+        page: i32,
+    ) {
+        if ui.screen() == Screen::Playing {
+            self.book_view = Some(book_view::BookViewState::lectern(open, window_id, page));
+            ui.open_book_view();
+        }
+    }
+
     /// Closes the signed-book reading screen. Unlike
     /// [`Self::close_book_edit`] there is nothing for a caller to take
     /// first: no exit from this screen sends anything.
@@ -3967,9 +3998,10 @@ impl MenuNav {
         }
     }
 
-    /// Keys on the signed-book reading screen. Escape and Done are the same
-    /// thing here (nothing is ever sent), and Up/Down turn the page. Every
-    /// other key is inert: there is no field on this screen to type into.
+    /// Keys on the signed-book reading screen. Escape and Done close it;
+    /// when it belongs to a lectern the close is also sent to the server.
+    /// Up/Down turn the page. Every other key is inert: there is no field on
+    /// this screen to type into.
     ///
     /// **Up/Down are an approximation, and the divergence is named rather
     /// than hidden**: `BookViewScreen.keyPressed` binds GLFW `266`/`267` —
@@ -3985,18 +4017,31 @@ impl MenuNav {
     fn key_book_view(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Escape => {
+                let window_id = self.book_view.as_ref().and_then(book_view::BookViewState::lectern_window_id);
                 self.close_book_view(ui);
-                MenuAction::None
+                window_id.map_or(MenuAction::None, |window_id| MenuAction::CloseContainer { window_id })
             }
             MenuKey::Up => {
                 if let Some(state) = self.book_view.as_mut() {
+                    if !state.can_page_back() {
+                        return MenuAction::None;
+                    }
                     state.page_back();
+                    return state.lectern_page_action().map_or(MenuAction::None, |(window_id, button_id)| {
+                        MenuAction::ContainerButtonClick { window_id, button_id }
+                    });
                 }
                 MenuAction::None
             }
             MenuKey::Down => {
                 if let Some(state) = self.book_view.as_mut() {
+                    if !state.can_page_forward() {
+                        return MenuAction::None;
+                    }
                     state.page_forward();
+                    return state.lectern_page_action().map_or(MenuAction::None, |(window_id, button_id)| {
+                        MenuAction::ContainerButtonClick { window_id, button_id }
+                    });
                 }
                 MenuAction::None
             }
@@ -4017,9 +4062,23 @@ impl MenuNav {
             return MenuAction::None;
         };
         match row {
-            book_view::page_row::PREVIOUS => state.page_back(),
-            book_view::page_row::NEXT => state.page_forward(),
-            book_view::page_row::DONE => self.close_book_view(ui),
+            book_view::page_row::PREVIOUS if state.can_page_back() => {
+                state.page_back();
+                return state.lectern_page_action().map_or(MenuAction::None, |(window_id, button_id)| {
+                    MenuAction::ContainerButtonClick { window_id, button_id }
+                });
+            }
+            book_view::page_row::NEXT if state.can_page_forward() => {
+                state.page_forward();
+                return state.lectern_page_action().map_or(MenuAction::None, |(window_id, button_id)| {
+                    MenuAction::ContainerButtonClick { window_id, button_id }
+                });
+            }
+            book_view::page_row::DONE => {
+                let window_id = state.lectern_window_id();
+                self.close_book_view(ui);
+                return window_id.map_or(MenuAction::None, |window_id| MenuAction::CloseContainer { window_id });
+            }
             _ => {}
         }
         MenuAction::None

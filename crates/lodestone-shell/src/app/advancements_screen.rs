@@ -266,6 +266,7 @@ pub(super) fn advancement_toast_view(
                 damage: None,
                 max_damage: None,
                 enchanted: false,
+                custom_model_data: None,
                 // An advancement's icon is a bare item id, never a real stack —
                 // no dye/potion/pattern component exists to read here.
                 dyed_color: None,

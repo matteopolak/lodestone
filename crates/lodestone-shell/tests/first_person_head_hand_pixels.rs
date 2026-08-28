@@ -111,6 +111,7 @@ fn a_held_player_head_reaches_pixels_and_a_held_chest_still_does_too() {
             Some(MainHandItem {
                 item: item.clone(),
                 foil: false,
+                custom_model_data: None,
                 dyed_color: None,
                 potion_color: None,
                 banner_patterns: Vec::new(),
@@ -234,6 +235,7 @@ fn a_held_custom_head_draws_its_own_skin_rather_than_the_default_sheet() {
             Some(MainHandItem {
                 item: item.clone(),
                 foil: false,
+                custom_model_data: None,
                 dyed_color: None,
                 potion_color: None,
                 banner_patterns: Vec::new(),

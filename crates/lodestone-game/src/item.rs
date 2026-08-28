@@ -1020,6 +1020,23 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Int(i64::from(damage)));
         }
 
+        // 26.2 carries CustomModelData as a float list. This crate's existing
+        // custom-item API is integral, so preserve integral index-zero selectors
+        // through that stable API rather than adding a non-Eq float to
+        // ComponentValue. The model still retains every raw numeric value.
+        if let Some(bits) = stack.components.custom_model_data.first()
+            && let value = f32::from_bits(*bits)
+            && value.is_finite()
+            && value.fract() == 0.0
+            && value >= i32::MIN as f32
+            && value <= i32::MAX as f32
+        {
+            components.insert(
+                CUSTOM_MODEL_DATA_COMPONENT.parse().expect("literal component id"),
+                ComponentValue::Int(i64::from(value as i32)),
+            );
+        }
+
         if !stack.components.enchantments.is_empty()
             && let Ok(key) = ENCHANTMENTS_COMPONENT.parse()
         {
@@ -1245,6 +1262,10 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             custom_name: stack.custom_name().cloned(),
             lore: stack.lore().to_vec(),
             damage: stack.damage().and_then(|d| u32::try_from(d).ok()),
+            custom_model_data: stack
+                .custom_model_data()
+                .map(|value| vec![(value as f32).to_bits()])
+                .unwrap_or_default(),
             enchantments: stack.enchantments().to_vec(),
             dyed_color: stack.dyed_color(),
             potion_color: stack.potion_color(),
@@ -1604,6 +1625,31 @@ mod tests {
         );
     }
 
+    /// Protocol 776 sends this component as a float list, even when a server
+    /// pack's `range_dispatch` threshold is an integer. Preserve that index-zero
+    /// selector through the version seam so rendering can distinguish a gun
+    /// diamond sword from the ordinary fallback sword.
+    #[test]
+    fn integral_custom_model_data_reaches_the_game_stack_selector() {
+        let model = lodestone_model::ItemStack {
+            item: id("minecraft:diamond_sword"),
+            count: 1,
+            components: ModelItemComponents {
+                custom_model_data: vec![4545.0_f32.to_bits()],
+                ..ModelItemComponents::default()
+            },
+        };
+        let converted = ItemStack::from(&model);
+        assert_eq!(converted.custom_model_data(), Some(4545));
+        assert_eq!(
+            lodestone_model::ItemStack::from(&converted)
+                .components
+                .custom_model_data,
+            vec![4545.0_f32.to_bits()],
+            "the selector must survive the game-model bridge"
+        );
+    }
+
     /// Lore crosses the version seam as an ordered list of styled text trees;
     /// converting a decoded stack must neither flatten nor discard it.
     #[test]
@@ -1768,6 +1814,7 @@ mod tests {
             item: id("minecraft:diamond_pickaxe"),
             count: 3,
             components: ModelItemComponents {
+                custom_model_data: vec![4545.0_f32.to_bits()],
                 custom_name: Some(Text::literal("Excalibur")),
                 lore: vec![Text::literal("Forged beneath the old mountain")],
                 damage: Some(37),

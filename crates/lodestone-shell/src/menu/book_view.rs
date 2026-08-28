@@ -5,11 +5,11 @@
 //!
 //! ## What it is
 //!
-//! Right-clicking a `minecraft:written_book` opens this. It is entirely
-//! client-local — `WrittenBookItem.use` calls `player.openItemGui(...)` and
-//! nothing on this screen ever sends a packet, unlike the editable book's
-//! `EditBook`. That is the same fork shape [`super::book_edit`] already has
-//! in `WindowApp::try_use`, one branch further along.
+//! Right-clicking a `minecraft:written_book` opens this. A hand-held book is
+//! client-local — `WrittenBookItem.use` calls `player.openItemGui(...)` —
+//! while the lectern form of this screen sends server container actions for
+//! page turns and close. That is the same fork shape [`super::book_edit`]
+//! already has in `WindowApp::try_use`, one branch further along.
 //!
 //! ## Why the wrapping and the page geometry are borrowed, not re-derived
 //!
@@ -40,19 +40,18 @@
 //!   colour rather than `BookViewScreen`'s `PAGE_TEXT_STYLE` black, which is
 //!   only legible against that sprite.
 //! - **No click/hover events on page text.** Vanilla's pages are full chat
-//!   components and a `ClickEvent` on one runs a command or opens a link.
-//!   Pages are flattened to plain text here ([`BookViewOpen::from_pages`]),
-//!   so a book carrying such a component reads correctly and is inert. This
-//!   is a real gap, not a decision that the data does not exist: the pages
-//!   arrive as [`lodestone_model::Text`] and are flattened on the way in.
+//!   components and a `ClickEvent` can run a command or open a link. The
+//!   screen retains each [`lodestone_model::Text`] page and its styled runs,
+//!   but remains inert because this menu overlay has no text hit-testing.
 //!
 //! ## Dependencies
 //!
 //! [`super::text_area::TextArea`] for wrapping, [`super::book_edit`] for the
-//! shared page geometry. Nothing outbound — this screen has no wire traffic
-//! at all.
+//! shared page geometry. Hand-held books have no wire traffic; the lectern
+//! form reports `ContainerButtonClick` and `ContainerClose` through the menu
+//! action boundary.
 
-use lodestone_model::Text;
+use lodestone_model::{Text, text::TextSpan};
 
 use super::book_edit::{PAGE_LINE_LIMIT, PAGE_WRAP_CHARS};
 use super::text_area::TextArea;
@@ -70,7 +69,7 @@ pub mod page_row {
 }
 
 /// What opening this screen needs: a signed book's already-resolved
-/// metadata and its pages as plain text.
+/// metadata and its full authored text pages.
 ///
 /// Built by `Sim::written_book_in_hand` from the stack's own
 /// `minecraft:written_book_content`, so a book that carries no such
@@ -85,23 +84,20 @@ pub struct BookViewOpen {
     pub author: String,
     /// `WrittenBookContent.generation`, `0..=3`.
     pub generation: u8,
-    /// The pages, in order, flattened to plain text.
-    pub pages: Vec<String>,
+    /// The pages, in order, with authored style retained for the reader.
+    pub pages: Vec<Text>,
 }
 
 impl BookViewOpen {
-    /// Flattens a decoded book's [`Text`] pages to the plain strings this
-    /// screen draws — see the module doc on the click/hover gap this loses.
-    ///
     /// An empty page list becomes one empty page, matching
     /// `BookViewScreen`'s own `Math.max(this.getNumPages(), 1)` in the page
     /// indicator: a book with no pages still shows "Page 1 of 1" rather than
     /// "Page 1 of 0".
     #[must_use]
     pub fn from_pages(title: String, author: String, generation: u8, pages: &[Text]) -> Self {
-        let mut pages: Vec<String> = pages.iter().map(Text::to_plain_string).collect();
+        let mut pages = pages.to_vec();
         if pages.is_empty() {
-            pages.push(String::new());
+            pages.push(Text::literal(""));
         }
         Self {
             title,
@@ -122,9 +118,9 @@ pub struct BookViewState {
     pub author: String,
     /// See [`BookViewOpen::generation`].
     pub generation: u8,
-    /// Every page's plain text, in order. Never empty — see
+    /// Every authored page, in order. Never empty — see
     /// [`BookViewOpen::from_pages`].
-    pages: Vec<String>,
+    pages: Vec<Text>,
     /// `BookViewScreen.currentPage`, always a valid index into
     /// [`Self::pages`].
     current_page: usize,
@@ -132,6 +128,10 @@ pub struct BookViewState {
     /// [`TextArea::handle_key`] or [`TextArea::handle_char`], and the widget
     /// is here purely so the wrap matches the editor's exactly (module doc).
     page: TextArea,
+    /// The open server container when this is a lectern reader. Hand-held
+    /// books are purely local, but lectern page changes are menu button
+    /// actions owned by the server.
+    lectern_window_id: Option<i32>,
     /// The row currently hovered, for the generic row-highlight draw — the
     /// same "no keyboard row cursor" shape
     /// [`super::book_edit::BookEditState::hovered`] documents.
@@ -144,7 +144,7 @@ impl BookViewState {
     pub fn new(open: BookViewOpen) -> Self {
         let mut pages = open.pages;
         if pages.is_empty() {
-            pages.push(String::new());
+            pages.push(Text::literal(""));
         }
         // `with_line_limit` is deliberately **not** set: the limit exists to
         // stop an *editor* growing a page past what the parchment can show,
@@ -154,7 +154,7 @@ impl BookViewState {
         // `visible_lines`'s, at the draw side, exactly as vanilla's
         // `Math.min(128 / 9, cachedPageComponents.size())` is.
         let mut page = TextArea::new(PAGE_WRAP_CHARS);
-        page.set_value(&pages[0], true);
+        page.set_value(&pages[0].to_plain_string(), true);
         Self {
             title: open.title,
             author: open.author,
@@ -162,8 +162,39 @@ impl BookViewState {
             pages,
             current_page: 0,
             page,
+            lectern_window_id: None,
             hovered: None,
         }
+    }
+
+    /// Builds the lectern form of the reader. `LecternMenu` stores the page as
+    /// a zero-based container-data value, so clamp malformed/out-of-range
+    /// values to the book's actual page range before drawing it.
+    #[must_use]
+    pub fn lectern(open: BookViewOpen, window_id: i32, page: i32) -> Self {
+        let mut state = Self::new(open);
+        state.lectern_window_id = Some(window_id);
+        state.current_page = usize::try_from(page)
+            .unwrap_or(0)
+            .min(state.pages.len().saturating_sub(1));
+        state.reload_page();
+        state
+    }
+
+    /// The server window that owns page changes, if this reader came from a
+    /// lectern rather than an item in either hand.
+    #[must_use]
+    pub fn lectern_window_id(&self) -> Option<i32> {
+        self.lectern_window_id
+    }
+
+    /// The packet payload for the current page after a successful page turn.
+    /// Vanilla's `LecternScreen.sendPageToServer` sends this new zero-based
+    /// index as `ServerboundContainerButtonClickPacket.buttonId`.
+    #[must_use]
+    pub fn lectern_page_action(&self) -> Option<(i32, i32)> {
+        let window_id = self.lectern_window_id?;
+        Some((window_id, i32::try_from(self.current_page).unwrap_or(i32::MAX)))
     }
 
     /// The 1-based page indicator vanilla's `book.pageIndicator` shows —
@@ -205,8 +236,8 @@ impl BookViewState {
     }
 
     fn reload_page(&mut self) {
-        let text = self.pages[self.current_page].clone();
-        self.page.set_value(&text, true);
+        self.page
+            .set_value(&self.pages[self.current_page].to_plain_string(), true);
     }
 
     /// The current page's wrapped lines, capped at what the page can show —
@@ -221,6 +252,54 @@ impl BookViewState {
             .map(|line| value.chars().skip(line.begin).take(line.len()).collect())
             .collect()
     }
+
+    /// The current page split into the same visible wrapped lines as
+    /// [`Self::visible_lines`], while retaining each fully inherited authored
+    /// [`TextSpan`] style. The `TextArea` owns wrapping; this method only
+    /// intersects its character ranges with the model's already-resolved
+    /// spans, so presentation cannot silently change line breaks.
+    #[must_use]
+    pub fn visible_styled_lines(&self) -> Vec<Vec<TextSpan>> {
+        let value = self.page.value();
+        let spans = self.pages[self.current_page].to_spans();
+        self.page
+            .lines()
+            .iter()
+            .take(PAGE_LINE_LIMIT)
+            .map(|line| styled_range(&spans, line.begin, line.begin + line.len()))
+            .filter(|line| !line.is_empty() || !value.is_empty())
+            .collect()
+    }
+}
+
+/// Intersects an authored span sequence with a `[begin, end)` character range
+/// from [`TextArea`]. The text model and `TextArea` both index Unicode scalar
+/// values through `.chars()`, so this deliberately does not use byte offsets.
+fn styled_range(spans: &[TextSpan], begin: usize, end: usize) -> Vec<TextSpan> {
+    let mut offset = 0;
+    let mut out = Vec::new();
+    for span in spans {
+        let len = span.text.chars().count();
+        let span_end = offset + len;
+        let start = begin.max(offset);
+        let stop = end.min(span_end);
+        if start < stop {
+            out.push(TextSpan {
+                text: span
+                    .text
+                    .chars()
+                    .skip(start - offset)
+                    .take(stop - start)
+                    .collect(),
+                style: span.style,
+            });
+        }
+        offset = span_end;
+        if offset >= end {
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -233,7 +312,7 @@ mod tests {
             title: "Wandering Notes".to_owned(),
             author: "Steve".to_owned(),
             generation: 2,
-            pages: vec!["one".to_owned(), "two".to_owned(), "three".to_owned()],
+            pages: vec![Text::literal("one"), Text::literal("two"), Text::literal("three")],
         })
     }
 
@@ -277,6 +356,25 @@ mod tests {
         assert_eq!(state.visible_lines(), vec!["one".to_owned()]);
     }
 
+    /// The reader must retain the authored component style instead of
+    /// flattening a coloured page into an unstyled `String` before rendering.
+    #[test]
+    fn visible_page_runs_keep_the_authored_text_style() {
+        let mut page = Text::literal("ruby");
+        page.style.color = Some(lodestone_model::TextColor::Red);
+        let state = BookViewState::new(BookViewOpen::from_pages(
+            "T".to_owned(),
+            "A".to_owned(),
+            0,
+            &[page],
+        ));
+
+        let runs = state.visible_styled_lines();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0][0].text, "ruby");
+        assert_eq!(runs[0][0].style.color, Some(lodestone_model::TextColor::Red));
+    }
+
     /// An over-long page shows its first `PAGE_LINE_LIMIT` wrapped lines and
     /// is not refused — vanilla's `Math.min(TEXT_HEIGHT / 9, size())`.
     ///
@@ -292,7 +390,7 @@ mod tests {
             title: String::new(),
             author: String::new(),
             generation: 0,
-            pages: vec![long],
+            pages: vec![Text::literal(long)],
         });
         assert_eq!(
             state.visible_lines().len(),
@@ -335,7 +433,7 @@ mod tests {
                 title: "Wandering Notes".to_owned(),
                 author: "Steve".to_owned(),
                 generation: 2,
-                pages: vec!["one".to_owned(), "two".to_owned()],
+                pages: vec![Text::literal("one"), Text::literal("two")],
             },
         );
         assert_eq!(ui.screen(), Screen::BookView);
@@ -374,7 +472,7 @@ mod tests {
                 title: "T".to_owned(),
                 author: "A".to_owned(),
                 generation: 0,
-                pages: vec!["p".to_owned()],
+                pages: vec![Text::literal("p")],
             },
         );
 
@@ -388,5 +486,41 @@ mod tests {
             nav.book_view().is_none(),
             "the closed screen must drop its state, or the next open is stale"
         );
+    }
+
+    /// A lectern reuses the reader's visible pages, but the server owns its
+    /// selected page. Turning one must send `container_button_click` with the
+    /// new zero-based page, while Done closes the open lectern container.
+    #[test]
+    fn lectern_page_turns_report_the_new_page_to_its_open_menu() {
+        let mut ui = UiState::new();
+        let mut nav = MenuNav::new();
+        ui.enter_dev_world();
+        nav.open_lectern_book_view(
+            &mut ui,
+            12,
+            BookViewOpen::from_pages(
+                "Library".to_owned(),
+                "Librarian".to_owned(),
+                0,
+                &[Text::literal("first"), Text::literal("second")],
+            ),
+            0,
+        );
+
+        assert_eq!(
+            nav.click(&mut ui, page_row::NEXT),
+            crate::menu::nav::MenuAction::ContainerButtonClick {
+                window_id: 12,
+                button_id: 1,
+            }
+        );
+        assert_eq!(nav.book_view().unwrap().page_indicator(), (2, 2));
+        assert_eq!(
+            nav.click(&mut ui, page_row::DONE),
+            crate::menu::nav::MenuAction::CloseContainer { window_id: 12 }
+        );
+        assert_eq!(ui.screen(), Screen::Playing);
+        assert!(nav.book_view().is_none());
     }
 }

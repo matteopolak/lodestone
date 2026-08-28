@@ -238,6 +238,14 @@ impl Sim {
                         lines,
                     });
                 }
+                NetUpdate::BookOpened { main_hand } => {
+                    // The inventory is already folded by the client's shared
+                    // state. Keep only the requested hand here; `app::session`
+                    // projects the current stack into its book UI on the next
+                    // frame, so an updated book component is never duplicated
+                    // in this transient signal.
+                    self.pending_book_open = Some(main_hand);
+                }
                 NetUpdate::ItemPickup(event) => {
                     // That fix. Accumulated, not acted on here: the drain at the
                     // end of this function needs a `&mut World` guard and there is

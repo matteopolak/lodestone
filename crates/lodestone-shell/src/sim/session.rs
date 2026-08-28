@@ -578,6 +578,13 @@ impl Sim {
         self.pending_sign_edit.take()
     }
 
+    /// Takes the hand named by a pending server `OPEN_BOOK` request. This is a
+    /// one-shot event, not a latched screen state: a later packet deliberately
+    /// replaces an earlier unconsumed request, just like a sign-editor reopen.
+    pub fn take_pending_book_open(&mut self) -> Option<bool> {
+        self.pending_book_open.take()
+    }
+
     /// Whether `NetUpdate::LanOpened` has arrived this session (issue #535's
     /// scope 2) — the ground truth `app::session::drive_ui_from_session`
     /// reconciles into `MenuNav::set_lan_published`, the same shape
@@ -1182,6 +1189,41 @@ impl Sim {
         })
     }
 
+    /// The book and selected page of the currently open lectern, if the
+    /// server supplied a signed book in its sole menu slot. `LecternMenu`
+    /// exposes that book without the ordinary 36 appended inventory slots;
+    /// `lodestone_game::menus::Menus` preserves the slot before this reader
+    /// projects it into the normal book-view state.
+    #[must_use]
+    pub fn lectern_book_view(
+        &self,
+    ) -> Option<(i32, crate::menu::book_view::BookViewOpen, i32)> {
+        let open = self.open_menu()?;
+        if open.menu_type.namespace() != "minecraft" || open.menu_type.path() != "lectern" {
+            return None;
+        }
+        let stack = open.menu.slot_item(0)?;
+        if stack.item().to_string() != "minecraft:written_book" {
+            return None;
+        }
+        let content = stack.written_book_content()?;
+        let page = open
+            .data
+            .iter()
+            .find(|(property, _)| *property == 0)
+            .map_or(0, |(_, value)| *value);
+        Some((
+            open.window_id,
+            crate::menu::book_view::BookViewOpen::from_pages(
+                content.title.clone(),
+                content.author.clone(),
+                content.generation,
+                &content.pages,
+            ),
+            page,
+        ))
+    }
+
     /// The open merchant's trade list, if any server has sent one this
     /// session — [`lodestone_ecs::SessionTrades`], the same
     /// `MerchantOffersReceived -> TradeOffers` fold every other session
@@ -1399,20 +1441,30 @@ impl Sim {
     /// `crate::menu::book_edit`'s module doc.
     #[must_use]
     pub fn writable_book_in_hand(&self) -> Option<crate::menu::book_edit::BookEditOpen> {
+        self.writable_book_in_hand_at(true)
+            .or_else(|| self.writable_book_in_hand_at(false))
+    }
+
+    /// The writable book in exactly the hand named by a server `OPEN_BOOK`
+    /// packet. Unlike [`Self::writable_book_in_hand`], this must not fall back
+    /// across hands: a server can intentionally open the off-hand book while
+    /// the main hand holds another item.
+    #[must_use]
+    pub fn writable_book_in_hand_at(
+        &self,
+        main_hand: bool,
+    ) -> Option<crate::menu::book_edit::BookEditOpen> {
         const WRITABLE_BOOK: &str = "minecraft:writable_book";
         let menu = self.player_menu();
-        let main_slot = self.selected_slot();
-        let (slot, stack) = match menu.player_native(main_slot) {
-            Some(stack) if stack.item().to_string() == WRITABLE_BOOK => {
-                (i32::try_from(main_slot).unwrap_or(0), stack)
-            }
-            _ => match menu.player_native(lodestone_game::menu::OFFHAND_NATIVE) {
-                Some(stack) if stack.item().to_string() == WRITABLE_BOOK => {
-                    (i32::try_from(lodestone_game::menu::OFFHAND_NATIVE).unwrap_or(40), stack)
-                }
-                _ => return None,
-            },
+        let native_slot = if main_hand {
+            self.selected_slot()
+        } else {
+            lodestone_game::menu::OFFHAND_NATIVE
         };
+        let stack = menu.player_native(native_slot)?;
+        if stack.item().to_string() != WRITABLE_BOOK {
+            return None;
+        }
         let pages = stack
             .writable_book_content()
             .map(<[String]>::to_vec)
@@ -1421,7 +1473,11 @@ impl Sim {
             .local_uuid()
             .and_then(|id| self.tab_list().get(&id).map(|entry| entry.profile.name.clone()))
             .unwrap_or_default();
-        Some(crate::menu::book_edit::BookEditOpen { slot, pages, author })
+        Some(crate::menu::book_edit::BookEditOpen {
+            slot: i32::try_from(native_slot).unwrap_or(0),
+            pages,
+            author,
+        })
     }
 
     /// The currently held `minecraft:written_book`'s reading-screen seed,
@@ -1447,13 +1503,29 @@ impl Sim {
     /// nothing.
     #[must_use]
     pub fn written_book_in_hand(&self) -> Option<crate::menu::book_view::BookViewOpen> {
+        self.written_book_in_hand_at(true)
+            .or_else(|| self.written_book_in_hand_at(false))
+    }
+
+    /// The signed book in exactly the hand named by a server `OPEN_BOOK`
+    /// packet. This keeps the packet's hand selector authoritative when both
+    /// hands contain books.
+    #[must_use]
+    pub fn written_book_in_hand_at(
+        &self,
+        main_hand: bool,
+    ) -> Option<crate::menu::book_view::BookViewOpen> {
         const WRITTEN_BOOK: &str = "minecraft:written_book";
         let menu = self.player_menu();
-        fn signed(stack: Option<&lodestone_game::item::ItemStack>) -> Option<&lodestone_game::item::ItemStack> {
-            stack.filter(|stack| stack.item().to_string() == WRITTEN_BOOK)
+        let native_slot = if main_hand {
+            self.selected_slot()
+        } else {
+            lodestone_game::menu::OFFHAND_NATIVE
+        };
+        let stack = menu.player_native(native_slot)?;
+        if stack.item().to_string() != WRITTEN_BOOK {
+            return None;
         }
-        let stack = signed(menu.player_native(self.selected_slot()))
-            .or_else(|| signed(menu.player_native(lodestone_game::menu::OFFHAND_NATIVE)))?;
         let content = stack.written_book_content()?;
         Some(crate::menu::book_view::BookViewOpen::from_pages(
             content.title.clone(),

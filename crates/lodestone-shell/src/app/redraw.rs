@@ -583,6 +583,7 @@ impl WindowApp {
                         damage,
                         max_damage,
                         enchanted: crate::hud::item_icon::stack_has_foil(st),
+                        custom_model_data: st.custom_model_data(),
                         // Mirrors `container::builder::icon_record` — without these
                         // a dyed leather item or a mixed potion held in the hotbar
                         // drew its definition's plain default instead of the real
@@ -625,6 +626,7 @@ impl WindowApp {
             .map(|record| crate::gpu::MainHandItem {
                 item: record.item.clone(),
                 foil: record.enchanted,
+                custom_model_data: record.custom_model_data,
                 // Mirrors `container::builder::icon_record` and the `HotbarSlot`
                 // built above — without these the first-person hand drew a dyed
                 // leather item's or a mixed potion's plain default colour even

@@ -347,14 +347,14 @@ const IDX_DISPLAY_TRANSLATION: u8 = 11;
 /// `Display.DATA_SCALE_ID`, index 12 — a `VECTOR3`, self-identifying for the
 /// same reason as [`IDX_DISPLAY_TRANSLATION`].
 const IDX_DISPLAY_SCALE: u8 = 12;
-/// `Display.DATA_LEFT_ROTATION_ID`, index 13 — a `QUATERNION`,
+/// `Display.DATA_RIGHT_ROTATION_ID`, index 13 — a `QUATERNION`,
 /// self-identifying: no other claimant at index 13 uses that serializer.
-/// Applied **before** scale (`Transformation.compose`).
-const IDX_DISPLAY_LEFT_ROTATION: u8 = 13;
-/// `Display.DATA_RIGHT_ROTATION_ID`, index 14 — a `QUATERNION`,
-/// self-identifying for the same reason as [`IDX_DISPLAY_LEFT_ROTATION`].
-/// Applied **after** scale.
-const IDX_DISPLAY_RIGHT_ROTATION: u8 = 14;
+/// Applied **after** scale (`Transformation.compose`).
+const IDX_DISPLAY_RIGHT_ROTATION: u8 = 13;
+/// `Display.DATA_LEFT_ROTATION_ID`, index 14 — a `QUATERNION`,
+/// self-identifying for the same reason as [`IDX_DISPLAY_RIGHT_ROTATION`].
+/// Applied **before** scale.
+const IDX_DISPLAY_LEFT_ROTATION: u8 = 14;
 /// `Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`, index 15 — a `BYTE`.
 ///
 /// **This index is ambiguous and does need a class guard**, unlike the four
@@ -1543,6 +1543,37 @@ mod tests {
         let mut w = Writer::default();
         w.var_i32(value);
         w.into_vec()
+    }
+
+    /// `Display.defineSynchedData` assigns the right quaternion before the
+    /// left one (indices 13 then 14). Keep the indices literal here rather
+    /// than routing through the constants under test: a swapped pair would
+    /// otherwise make producer and assertion agree while every transformed
+    /// `text_display` rotates its panel away from its glyphs.
+    #[test]
+    fn display_quaternion_indices_follow_vanillas_right_then_left_order() {
+        let right = [0.1f32, 0.2, 0.3, 0.4];
+        let left = [0.5f32, 0.6, 0.7, 0.8];
+        let mut bytes = Vec::new();
+        bytes.push(13); // Display.DATA_RIGHT_ROTATION_ID
+        bytes.extend(varint(SER_QUATERNION));
+        for component in right {
+            bytes.extend(component.to_be_bytes());
+        }
+        bytes.push(14); // Display.DATA_LEFT_ROTATION_ID
+        bytes.extend(varint(SER_QUATERNION));
+        for component in left {
+            bytes.extend(component.to_be_bytes());
+        }
+        bytes.push(EOF_MARKER);
+
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, not_living())
+            .expect("display quaternions decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.display_right_rotation, Some(Quat::new(right[0], right[1], right[2], right[3])));
+        assert_eq!(md.display_left_rotation, Some(Quat::new(left[0], left[1], left[2], left[3])));
     }
 
     /// A hand-built metadata stream for a named, baby, on-fire pig: exercises the

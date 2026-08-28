@@ -700,9 +700,9 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
 /// Sign button, no caret, and `>` is disabled on the last page rather than
 /// appending one, because a signed book is immutable.
 ///
-/// Row indices match [`book_view::page_row`]. The page text is one
-/// [`MenuLabel`] per wrapped line, informational only and outside `rows`'
-/// click system, exactly as [`book_edit_frame`]'s is.
+/// Row indices match [`book_view::page_row`]. The page text is emitted as
+/// authored styled runs, informational only and outside `rows`' click system,
+/// exactly as [`book_edit_frame`]'s is.
 pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
     const PAGE_DX: f32 = -100.0;
     const PAGE_Y: f32 = 40.0;
@@ -726,16 +726,24 @@ pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
         colour: LABEL,
         scale: 1.0,
     }];
-    for (i, line) in state.visible_lines().into_iter().enumerate() {
-        labels.push(MenuLabel {
-            text: line,
-            origin: Origin::ScreenTop,
-            dx: PAGE_DX,
-            dy: PAGE_Y + i as f32 * PAGE_LINE_H,
-            align: Align::Left,
-            colour: LABEL,
-            scale: 1.0,
-        });
+    for (i, line) in state.visible_styled_lines().into_iter().enumerate() {
+        let mut dx = PAGE_DX;
+        for span in line {
+            let width = span.text.chars().count() as f32 * 6.0;
+            labels.push(MenuLabel {
+                text: span.text,
+                origin: Origin::ScreenTop,
+                dx,
+                dy: PAGE_Y + i as f32 * PAGE_LINE_H,
+                align: Align::Left,
+                colour: span
+                    .style
+                    .color
+                    .map_or(LABEL, |colour| rgb_text_colour(colour.rgb())),
+                scale: 1.0,
+            });
+            dx += width;
+        }
     }
     labels.push(MenuLabel {
         text: format!("Page {current} of {total}"),
@@ -797,6 +805,18 @@ pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
         labels,
         ..Default::default()
     }
+}
+
+/// Converts model text colour bytes to the menu renderer's 0..1 RGBA form.
+/// The book reader uses this at the last possible boundary so `TextSpan`
+/// inheritance and legacy-format expansion remain owned by `lodestone-model`.
+fn rgb_text_colour(rgb: u32) -> [f32; 4] {
+    [
+        ((rgb >> 16) & 0xff) as f32 / 255.0,
+        ((rgb >> 8) & 0xff) as f32 / 255.0,
+        (rgb & 0xff) as f32 / 255.0,
+        1.0,
+    ]
 }
 
 /// Builds the Spectator Menu's overlay frame (issue #613's
@@ -1290,4 +1310,3 @@ pub(super) fn credits_frame() -> MenuFrame<'static> {
         ..Default::default()
     }
 }
-
