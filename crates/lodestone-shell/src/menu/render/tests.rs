@@ -4689,6 +4689,121 @@ fn the_pause_overlays_backdrop_is_vanillas_measured_black_at_alpha_64() {
     assert_eq!(&v[2..6], &[0.0, 0.0, 0.0, 64.0 / 255.0]);
 }
 
+/// BookViewScreen and BookEditScreen blit the loose `gui/book.png` sheet,
+/// rather than composing a panel from `gui/sprites/**`. Keep that source in
+/// the menu atlas extras so the active resource-pack stack supplies the art.
+#[test]
+fn book_gui_texture_is_a_menu_atlas_extra() {
+    assert!(
+        crate::resources::MENU_TEXTURES.iter().any(|(id, path)| {
+            *id == "book/background" && *path == "assets/minecraft/textures/gui/book.png"
+        }),
+        "the book GUI is a raw texture outside gui/sprites and must be loaded as a menu extra"
+    );
+}
+
+/// The raw book sheet is 256×256 but the vanilla screens sample only its
+/// top-left 192×192 window. A whole-sheet blit stretches transparent padding
+/// into the page and is visibly unlike the server pack's supplied art.
+#[test]
+fn book_frames_sample_the_vanilla_192_pixel_region_of_the_pack_texture() {
+    use lodestone_assets::{MemorySource, ResourceSource};
+
+    let mut source = MemorySource::default();
+    source.insert(
+        crate::resources::BOOK_GUI_TEXTURE.1,
+        solid_rgba_png(256, 256, [120, 80, 40, 255]),
+    );
+    // `GuiAtlas` is intentionally not an extras-only stitch: one ordinary GUI
+    // sprite establishes the atlas's normal source set, while the book sheet
+    // exercises the loose-extra path this test is about.
+    source.insert(
+        "assets/minecraft/textures/gui/sprites/icon/language.png",
+        solid_rgba_png(15, 15, [0, 0, 0, 255]),
+    );
+    let manager = lodestone_assets::ResourceManager::new(vec![Box::new(source) as Box<dyn ResourceSource>]);
+    let atlas = GuiAtlas::build_with_extras(&manager, &[crate::resources::BOOK_GUI_TEXTURE])
+        .expect("the synthetic loose book sheet stitches");
+    let state = crate::menu::book_view::BookViewState::new(
+        crate::menu::book_view::BookViewOpen::from_pages(
+            "Notes".to_string(),
+            "Steve".to_string(),
+            0,
+            &[lodestone_model::text::Text::literal("page")],
+        ),
+    );
+    let drawn = build(&book_view_frame(&state), Some(&atlas), None, V_W, V_H);
+    let (min, max) = loose_uv_bounds(&atlas, "book/background");
+    let book = ((V_W * 0.5).floor() - 96.0, 2.0, 192.0, 192.0);
+    let uvs = uvs_in_dest(&drawn.sprite, V_W, V_H, book);
+
+    assert_eq!(uvs.len(), 6, "one unsliced book-background quad lands at its screen rect");
+    let expected_max = [min[0] + (max[0] - min[0]) * 0.75, min[1] + (max[1] - min[1]) * 0.75];
+    for &[u, v] in &uvs {
+        assert!(u >= min[0] - 1e-6 && u <= expected_max[0] + 1e-6, "u={u} samples outside the 192/256 book window");
+        assert!(v >= min[1] - 1e-6 && v <= expected_max[1] + 1e-6, "v={v} samples outside the 192/256 book window");
+    }
+    assert!(
+        uvs.iter().any(|[u, v]| (*u - expected_max[0]).abs() < 1e-6 && (*v - expected_max[1]).abs() < 1e-6),
+        "the sampled region reaches the exact 192/256 source edge rather than shrinking the book"
+    );
+}
+
+/// Book screens pass `false` for Minecraft's per-call text-shadow flag.  The
+/// frame-level marker must cover every route through `Quads::text`, including
+/// page labels, the indicator, editable text, and ordinary button captions;
+/// a red probe makes the omitted shadow distinguishable from black book ink.
+#[test]
+fn book_frame_text_is_plain_while_other_menu_text_keeps_its_shadow() {
+    use lodestone_assets::{MemorySource, ResourceManager, ResourceSource};
+
+    let mut source = MemorySource::new("book-plain-text-font");
+    source.insert(
+        "assets/minecraft/textures/font/t.png",
+        solid_rgba_png(1, 1, [255, 255, 255, 255]),
+    );
+    source.insert(
+        "assets/minecraft/font/default.json",
+        br#"{"providers":[{"type":"bitmap","file":"minecraft:font/t.png","ascent":1,"height":1,"chars":["A"]}]}"#.to_vec(),
+    );
+    let manager = ResourceManager::new(vec![Box::new(source) as Box<dyn ResourceSource>]);
+    let font = crate::hud::VanillaFont::from_manager(&manager).expect("synthetic font loads");
+    let ink = [0.8, 0.4, 0.2, 1.0];
+    let shadow = crate::hud::vanilla_font::shadow_of(ink);
+    let frame = |book_background| MenuFrame {
+        vanilla: true,
+        book_background,
+        labels: vec![MenuLabel {
+            text: "A".to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: 0.0,
+            align: Align::Left,
+            colour: ink,
+            scale: 1.0,
+        }],
+        ..Default::default()
+    };
+    let has_colour = |geometry: &MenuGeometry, colour: [f32; 4]| {
+        geometry.colour.chunks_exact(STRIDE).any(|vertex| {
+            (2..6).all(|index| (vertex[index] - colour[index - 2]).abs() < 1e-5)
+        })
+    };
+
+    let book = build(&frame(true), None, Some(&font), V_W, V_H);
+    assert!(has_colour(&book, ink), "control: the book label's main ink drew");
+    assert!(
+        !has_colour(&book, shadow),
+        "book text must not emit the normal offset shadow pass"
+    );
+
+    let ordinary = build(&frame(false), None, Some(&font), V_W, V_H);
+    assert!(
+        has_colour(&ordinary, shadow),
+        "control: non-book menus keep their normal shadow pass"
+    );
+}
+
 #[test]
 #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
 fn every_sprite_id_the_vanilla_screens_name_exists_in_the_real_pack() {

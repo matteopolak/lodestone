@@ -228,6 +228,38 @@ pub fn compose_special_node_transform(outer: Mat4, transformation: &[ItemNodeTra
         .fold(outer, |acc, t| acc * node_transform_matrix(t))
 }
 
+/// Composes an item-definition `minecraft:special` form into its outer pose.
+///
+/// This recovers the canonical item-definition wrapper when a pack selects the
+/// raw `minecraft:head` renderer but supplies no node transformation. The 26.2
+/// `SkullSpecialRenderer` submits the Y-down skull mesh without a local pose;
+/// vanilla's `items/*_head.json` definitions supply
+/// `T(+0.5, 0, +0.5) * Rx(180°)`. A pack that replaces `player_head.json` with
+/// an empty generic-head node otherwise loses both terms.
+///
+/// The fallback is right-multiplied after the complete node chain, yielding
+/// `outer * node[0] * … * fallback`. Therefore it acts in model space before a
+/// GUI pose, first-person hand pose, or world/third-person placement, rather
+/// than drifting along those surfaces' axes. It applies only to an *empty*
+/// generic-head chain: all parsed transforms, including legacy
+/// `minecraft:player_head` and ordinary vanilla `minecraft:head` definitions,
+/// remain authoritative and cannot be doubled.
+#[must_use]
+pub fn compose_special_item_transform(
+    outer: Mat4,
+    kind: &str,
+    transformation: &[ItemNodeTransform],
+) -> Mat4 {
+    let placement = compose_special_node_transform(outer, transformation);
+    if kind == "minecraft:head" && transformation.is_empty() {
+        placement
+            * Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+            * Mat4::from_scale(Vec3::new(1.0, -1.0, -1.0))
+    } else {
+        placement
+    }
+}
+
 /// The **GUI pixel space → clip space** projection for a `width_px × height_px`
 /// render target.
 ///
@@ -426,6 +458,65 @@ mod tests {
             rotation: [30.0, 225.0, 0.0],
             translation: [0.0, 0.0, 0.0],
             scale: [0.625, 0.625, 0.625],
+        }
+    }
+
+    #[test]
+    fn unwrapped_generic_head_reinstates_the_canonical_wrapper_in_gui_and_third_person() {
+        // 26.2's SkullSpecialRenderer submits the raw Y-down skull box. The
+        // canonical items/*_head.json definitions supply the missing local
+        // wrapper T(.5, 0, .5) * Rx(180°). This server pack retargets a player
+        // head to `minecraft:head` but leaves that node empty, so the complete
+        // wrapper — not a translation-only nudge — has to be restored under
+        // the GUI and held-item placements.
+        let template_skull_third_person = DisplayTransform {
+            rotation: [45.0, 45.0, 0.0],
+            translation: [0.0, 3.0, 0.0],
+            scale: [0.5, 0.5, 0.5],
+        };
+        let poses = [
+            gui_item_pose([40.0, 20.0, 16.0, 16.0], &vanilla_block_gui()),
+            crate::entity::held_item_matrix(
+                Mat4::IDENTITY,
+                crate::entity::Arm::Right,
+                false,
+                &template_skull_third_person,
+            ),
+        ];
+        let legacy_wrapper = [ItemNodeTransform {
+            translation: [0.5, 0.0, 0.5],
+            left_rotation: [1.0, 0.0, 0.0, 0.0],
+            ..ItemNodeTransform::default()
+        }];
+        let canonical_wrapper = node_transform_matrix(&legacy_wrapper[0]);
+
+        for outer in poses {
+            assert_eq!(
+                compose_special_item_transform(outer, "minecraft:head", &[]),
+                outer * canonical_wrapper,
+                "an empty generic-head node needs the complete standard item wrapper"
+            );
+            assert_eq!(
+                compose_special_item_transform(
+                    outer,
+                    "minecraft:player_head",
+                    &legacy_wrapper,
+                ),
+                outer * canonical_wrapper,
+                "legacy player head's wrapper is already its one centre correction"
+            );
+            assert_eq!(
+                compose_special_item_transform(outer, "minecraft:head", &legacy_wrapper),
+                outer * canonical_wrapper,
+                "a parsed generic-head wrapper must remain authoritative rather than double"
+            );
+            let raw_y = outer.transform_vector3(Vec3::Y);
+            let wrapped_y = compose_special_item_transform(outer, "minecraft:head", &[])
+                .transform_vector3(Vec3::Y);
+            assert!(
+                raw_y.dot(wrapped_y) < 0.0,
+                "Rx(180°) must reverse the raw skull's Y-down landmark rather than leave Steve upside-down"
+            );
         }
     }
 

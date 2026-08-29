@@ -18,7 +18,11 @@ use super::CELL;
 /// `app.rs` builds for the hotbar. `None` when the item id does not parse as a
 /// [`ResourceLocation`], which no vanilla id does.
 fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<HotbarSlot> {
-    let item = ResourceLocation::parse(&stack.item().to_string()).ok()?;
+    // `minecraft:item_model` replaces only the client-side definition lookup.
+    // Keep the base item in the game stack for gameplay, but hand every icon
+    // surface the pack definition that actually supplies its model and sprites.
+    let item = stack.item_model().unwrap_or_else(|| stack.item().clone());
+    let item = ResourceLocation::parse(&item.to_string()).ok()?;
     let damage = stack
         .components()
         .get_int(lodestone_game::item::DAMAGE_COMPONENT)
@@ -348,6 +352,22 @@ mod tests {
         let stick = ItemStack::new("minecraft:stick".parse().expect("static id parses"), 1);
         let record = icon_record(&stick).expect("stick is a valid ResourceLocation");
         assert!(!record.enchanted, "a plain stick must not set enchanted");
+    }
+
+    /// A modern server can keep the gameplay item as a diamond sword while
+    /// directing its visual lookup to a pack-owned gun definition.
+    #[test]
+    fn icon_record_uses_the_stack_item_model_for_render_lookup() {
+        use lodestone_game::item::ItemStack;
+
+        let mut sword = ItemStack::new(
+            "minecraft:diamond_sword".parse().expect("static id parses"),
+            1,
+        );
+        sword.set_item_model(Some("server:gun".parse().expect("static id parses")));
+
+        let record = icon_record(&sword).expect("diamond_sword is a valid ResourceLocation");
+        assert_eq!(record.item.to_string(), "server:gun");
     }
 
     /// The **producer** half of the custom-head fix, which no pixel gate can

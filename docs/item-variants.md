@@ -2,7 +2,8 @@
 
 ## What it is
 
-An item's appearance in 26.2 is not one model. `assets/minecraft/items/<id>.json` is a
+An item's appearance in 26.2 is not one model. A stack's `minecraft:item_model` can select
+`assets/<namespace>/items/<path>.json` independently of its gameplay id; that definition is a
 **selector tree** (`condition` / `select` / `range_dispatch` / `composite`) whose leaves name
 concrete models, and which leaf wins depends on where the item is being drawn and on live stack
 state. A bow is `item/bow` at rest and `item/bow_pulling_0`, `_1` or `_2` as it is drawn; a
@@ -41,6 +42,22 @@ Two visible consequences:
   reports it.
 
 ## How it works
+
+### 0. Definition identity comes from `minecraft:item_model`
+
+In 26.2, a stack's `minecraft:item_model` component can replace the item-definition
+identifier used for rendering without changing its gameplay item id. The v770 decoder
+preserves that identifier in `ItemComponents`; the game stack carries it as a string
+component; and hotbar and container records use it when looking up
+`assets/<namespace>/items/<path>.json`. A stack without the component still uses its
+base item id. When adding a visual producer, use the stack's effective definition id
+rather than flattening it to `stack.item()` before model lookup.
+
+This applies to both equipment producers: tracked entities narrow server equipment in
+`entities::resolve_entity_facts`, while the local third-person avatar builds its
+synthetic equipment in `sim/camera.rs`. Both must choose `item_model` before their
+stack becomes a `ResourceLocation`, or GUI and first-person can show a pack model
+while the in-world hand still shows the vanilla gameplay item.
 
 ### 1. Discovery, before the atlas is stitched
 

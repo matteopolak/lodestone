@@ -723,58 +723,61 @@ impl RenderState {
             .with_custom_model_data(self.equip.visible_custom_model_data().unwrap_or(0) as f32);
         if let Some((item, foil)) = self.equip.visible()
             && let Some(model) = self.model.as_ref()
-            && let Some(geometry) = model.items.get(item).and_then(|v| v.resolve(&hand_ctx))
+            && let Some(forms) = model.items.get(item)
         {
-            // `true`: the *first-person* hand slot. `false` here reads
-            // `thirdperson_righthand`, a different rotation and scale, and puts
-            // the item at a plausible-but-wrong angle rather than off screen.
-            //
-            // `geometry.display` is now the **resolved variant's** map, so this
-            // reads `item/spyglass_in_hand`'s own transforms — which declare no
-            // `firstperson_righthand` at all, i.e. vanilla poses it with the
-            // identity, not with `item/generated`'s `[0, -90, 25]` / 0.68.
-            let transform = hand_transform(&geometry.display, ARM, true);
-            // An in-progress eat or drink replaces the whole pose — vanilla's
-            // `player.isUsingItem()` branch never reaches `swingArm`, so the swing
-            // value below is genuinely unused while consuming rather than being
-            // added on top. `None` is the ordinary held-item pose.
-            let mut mesh = first_person_item_mesh_with_use(
-                &geometry.quads,
-                geometry.gui_light,
-                ARM,
-                self.hand_swing.value(),
-                inverse_arm_height,
-                &transform,
-                u8::try_from(self.hand_light(camera)).unwrap_or(u8::MAX),
-                self.item_use.sample(),
-            );
-            // The held item's real dye/potion tint — a no-op unless this item is
-            // a dyed leather piece or a mixed potion (`ItemGeometry::live_tints`
-            // is empty for everything else), which until this existed drew the
-            // item definition's plain default in the hand even though the exact
-            // same stack's GUI slot showed the real colour.
-            let (dyed_color, potion_color) = self.equip.visible_tint();
-            let live_components = lodestone_model::item::ItemComponents {
-                dyed_color,
-                potion_color,
-                ..Default::default()
-            };
-            lodestone_render::stamp_live_item_tint(
-                &mut mesh,
-                &geometry.quads,
-                &geometry.live_tints,
-                &live_components,
-            );
-            if let Some(gpu) = GpuModelMesh::upload(device, &mesh) {
-                // An enchanted held item gets the glint second pass. The uniform
-                // is written now (this is the `&self` + queue point in the frame)
-                // and consumed by the draw later in the same frame: one buffer,
-                // rewritten per glint draw. No pass installed (jar-less) is a
-                // no-op and the item still draws unglinted.
-                if *foil {
-                    self.write_glint_uniform(queue, view_proj);
+            log_diamond_sword_model_resolution(item, &hand_ctx, forms);
+            if let Some(geometry) = forms.resolve(&hand_ctx) {
+                // `true`: the *first-person* hand slot. `false` here reads
+                // `thirdperson_righthand`, a different rotation and scale, and puts
+                // the item at a plausible-but-wrong angle rather than off screen.
+                //
+                // `geometry.display` is now the **resolved variant's** map, so this
+                // reads `item/spyglass_in_hand`'s own transforms — which declare no
+                // `firstperson_righthand` at all, i.e. vanilla poses it with the
+                // identity, not with `item/generated`'s `[0, -90, 25]` / 0.68.
+                let transform = hand_transform(&geometry.display, ARM, true);
+                // An in-progress eat or drink replaces the whole pose — vanilla's
+                // `player.isUsingItem()` branch never reaches `swingArm`, so the swing
+                // value below is genuinely unused while consuming rather than being
+                // added on top. `None` is the ordinary held-item pose.
+                let mut mesh = first_person_item_mesh_with_use(
+                    &geometry.quads,
+                    geometry.gui_light,
+                    ARM,
+                    self.hand_swing.value(),
+                    inverse_arm_height,
+                    &transform,
+                    u8::try_from(self.hand_light(camera)).unwrap_or(u8::MAX),
+                    self.item_use.sample(),
+                );
+                // The held item's real dye/potion tint — a no-op unless this item is
+                // a dyed leather piece or a mixed potion (`ItemGeometry::live_tints`
+                // is empty for everything else), which until this existed drew the
+                // item definition's plain default in the hand even though the exact
+                // same stack's GUI slot showed the real colour.
+                let (dyed_color, potion_color) = self.equip.visible_tint();
+                let live_components = lodestone_model::item::ItemComponents {
+                    dyed_color,
+                    potion_color,
+                    ..Default::default()
+                };
+                lodestone_render::stamp_live_item_tint(
+                    &mut mesh,
+                    &geometry.quads,
+                    &geometry.live_tints,
+                    &live_components,
+                );
+                if let Some(gpu) = GpuModelMesh::upload(device, &mesh) {
+                    // An enchanted held item gets the glint second pass. The uniform
+                    // is written now (this is the `&self` + queue point in the frame)
+                    // and consumed by the draw later in the same frame: one buffer,
+                    // rewritten per glint draw. No pass installed (jar-less) is a
+                    // no-op and the item still draws unglinted.
+                    if *foil {
+                        self.write_glint_uniform(queue, view_proj);
+                    }
+                    return Some(FirstPersonHand::Item(gpu, *foil));
                 }
-                return Some(FirstPersonHand::Item(gpu, *foil));
             }
         }
 
@@ -931,11 +934,14 @@ impl RenderState {
         );
         // The item definition's whole root-to-`special` `"transformation"` chain
         // composes *underneath* the display-context pose just built, exactly as
-        // `bake` threads it down — see `compose_special_node_transform`'s doc
+        // `bake` threads it down — see `compose_special_item_transform`'s doc
         // for the derivation and for why an ancestor node's entry counts (a
         // shield's `scale [1, -1, -1]` is one).
-        let placement =
-            lodestone_render::compose_special_node_transform(placement, &form.transformation);
+        let placement = lodestone_render::compose_special_item_transform(
+            placement,
+            &form.kind,
+            &form.transformation,
+        );
         let light = self.hand_light(camera);
 
         // The banner rig is two meshes sharing this same placement — see
@@ -1124,7 +1130,7 @@ impl RenderState {
         // `trident.json` declares it on the enclosing `minecraft:condition`
         // node rather than on either `special` node underneath — the same
         // inherited-`transformation` shape the shield's own flip has, already
-        // composed by `compose_special_node_transform` above. Re-applying it
+        // composed by `compose_special_item_transform` above. Re-applying it
         // here would square the flip and land the trident upright but mirrored.
         if form.kind == "minecraft:trident"
             && let Some(entry) = lodestone_render::trident_item_rig(item.path())
@@ -1682,6 +1688,49 @@ impl RenderState {
             }
         }
     }
+}
+
+/// Reports the first-person selector result once for each pack generation and
+/// custom-model-data value. This is a diagnostic-only seam: it records the
+/// decoded component, the live context, the selected output and whether a
+/// missing selected model forced `ItemVariants` back to its GUI form.
+fn log_diamond_sword_model_resolution(
+    item: &ResourceLocation,
+    context: &ItemStateContext,
+    forms: &lodestone_render::ItemVariants,
+) {
+    if item.namespace() != "minecraft"
+        || item.path() != "diamond_sword"
+        || !tracing::enabled!(target: "pack_trace", tracing::Level::DEBUG)
+    {
+        return;
+    }
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<(u64, i32)>>> = std::sync::OnceLock::new();
+    let generation = crate::resources::pack_generation();
+    let data = context.custom_model_data as i32;
+    let Ok(mut last) = LAST.get_or_init(|| std::sync::Mutex::new(None)).lock() else {
+        return;
+    };
+    if *last == Some((generation, data)) {
+        return;
+    }
+    *last = Some((generation, data));
+
+    let outputs = forms.definition().resolve(context);
+    let chosen_model_is_baked = outputs.iter().any(|output| {
+        matches!(output, lodestone_assets::ItemModelOutput::Model { model, .. } if forms.variant(model).is_some())
+    });
+    tracing::debug!(
+        target: "pack_trace",
+        surface = "first_person",
+        item = %item,
+        custom_model_data = context.custom_model_data,
+        ?context,
+        ?outputs,
+        chosen_model_is_baked,
+        resolved_geometry = forms.resolve(context).is_some(),
+        "diamond-sword item-model selector evaluated"
+    );
 }
 
 #[cfg(test)]

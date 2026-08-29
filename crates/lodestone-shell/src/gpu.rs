@@ -60,6 +60,7 @@ mod moving_blocks;
 mod nametag;
 mod occlusion;
 mod outline;
+mod pack_trace;
 mod plugin_billboards;
 mod screen_effects;
 mod sections;

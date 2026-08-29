@@ -112,6 +112,7 @@ fn mesh_display_item_quads(
 }
 
 use super::entity_passes::{entity_light, framed_content_light, item_frame_light};
+use super::pack_trace::{should_trace_candidate, unit_quad_normal, unit_quad_plane};
 use super::terrain::ModelRenderer;
 use super::{RenderState, RenderStats};
 
@@ -318,7 +319,7 @@ impl RenderState {
         // item; a chest or a skull is `minecraft:special` and goes through the
         // block-entity rig in `entity_passes.rs` instead, exactly as it does when
         // dropped or held.
-        self.merge_framed_items(model, entities, &frustum, &mut combined, &mut foil, stats);
+        self.merge_framed_items(model, camera, entities, &frustum, &mut combined, &mut foil, stats);
         // `item_display` entities. Unlike every producer above, these come from
         // neither the `EntityDraw` slice nor a block-entity source: they are
         // `Display`-family entities extracted by `crate::display_entities` into
@@ -367,6 +368,7 @@ impl RenderState {
     fn merge_framed_items(
         &self,
         model: &ModelRenderer,
+        camera: &Camera,
         entities: &[EntityDraw],
         frustum: &lodestone_render::Frustum,
         combined: &mut ModelMesh,
@@ -401,10 +403,43 @@ impl RenderState {
                 item_frame_light(&self.entity_light, draw, glow),
                 glow,
             );
+            let item_transform = geometry.display.get(DisplaySlot::Fixed);
+            let pose = lodestone_render::framed_item_matrix(
+                draw.feet,
+                draw.yaw,
+                draw.pitch,
+                draw.item_frame_rotation,
+                draw.invisible,
+                &item_transform,
+            );
+            if should_trace_candidate("framed_item", draw.id, draw.feet, camera.position) {
+                let facing = lodestone_render::entity::item_frame_facing(draw.yaw, draw.pitch)
+                    .transform_vector3(glam::Vec3::NEG_Z)
+                    .to_array();
+                tracing::debug!(
+                    target: "pack_trace",
+                    surface = "framed_item",
+                    entity_id = draw.id,
+                    protocol_type = %draw.type_path,
+                    world_pos = ?draw.feet.to_array(),
+                    yaw = draw.yaw,
+                    pitch = draw.pitch,
+                    invisible = draw.invisible,
+                    attachment_facing = ?facing,
+                    frame_rotation = draw.item_frame_rotation,
+                    held_item = %item,
+                    item_model = ?draw.item_model.as_ref().map(ToString::to_string),
+                    selected_display_transform = ?item_transform,
+                    final_transform = ?pose.to_cols_array_2d(),
+                    quad_plane = ?unit_quad_plane(pose),
+                    quad_normal = ?unit_quad_normal(pose),
+                    "nearby render candidate reached framed-item draw"
+                );
+            }
             let mut mesh = framed_item_mesh(
                 &geometry.quads,
                 geometry.gui_light,
-                &geometry.display.get(DisplaySlot::Fixed),
+                &item_transform,
                 draw.feet,
                 draw.yaw,
                 draw.pitch,
@@ -514,6 +549,30 @@ impl RenderState {
             let (min, max) = crate::display_entities::placement_bounds(&pose);
             if !frustum.intersects_aabb(min, max) {
                 continue;
+            }
+            if should_trace_candidate("item_display", draw.id, draw.position, camera.position) {
+                tracing::debug!(
+                    target: "pack_trace",
+                    surface = "item_display",
+                    entity_id = draw.id,
+                    protocol_type = draw.type_path,
+                    world_pos = ?draw.position.to_array(),
+                    yaw = draw.entity_yaw,
+                    pitch = draw.entity_pitch,
+                    invisibility_metadata = "not applicable to Display entities",
+                    billboard = ?draw.billboard,
+                    display_transform = ?draw.transform,
+                    item_display_context = draw.item_display_context,
+                    raw_item = %item.item,
+                    item_model = ?item.components.item_model.as_ref().map(ToString::to_string),
+                    map_id = ?item.components.map_id,
+                    resolved_item_definition = %id,
+                    selected_display_transform = ?item_transform,
+                    final_transform = ?pose.to_cols_array_2d(),
+                    quad_plane = ?unit_quad_plane(pose),
+                    quad_normal = ?unit_quad_normal(pose),
+                    "nearby render candidate reached item-display draw"
+                );
             }
             let light = draw
                 .override_light()

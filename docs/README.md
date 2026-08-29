@@ -912,12 +912,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   different bits, on two different bytes, and which one applies depends on what kind
   of entity it is**:
 - [Item variants: one item, several baked geometries](./item-variants.md) — An
-  item's appearance in 26.2 is not one model. `assets/minecraft/items/<id>.json` is a
-  **selector tree** (`condition` / `select` / `range_dispatch` / `composite`) whose
-  leaves name concrete models, and which leaf wins depends on where the item is being
-  drawn and on live stack state. A bow is `item/bow` at rest and `item/bow_pulling_0`,
-  `_1` or `_2` as it is drawn; a spyglass is the flat `item/spyglass` sprite in an
-  inventory slot and `item/spyglass_in_hand`'s 3-D tube in the hand.
+  item's appearance in 26.2 is not one model. A stack's `minecraft:item_model` can
+  select `assets/<namespace>/items/<path>.json` independently of its gameplay id; that
+  definition is a **selector tree** (`condition` / `select` / `range_dispatch` /
+  `composite`) whose leaves name concrete models, and which leaf wins depends on where
+  the item is being drawn and on live stack state. A bow is `item/bow` at rest and
+  `item/bow_pulling_0`, `_1` or `_2` as it is drawn; a spyglass is the flat
+  `item/spyglass` sprite in an inventory slot and `item/spyglass_in_hand`'s 3-D tube
+  in the hand.
 - [`java.util.Random` (`lodestone-javarandom`)](./java-random.md) — The workspace's
   one implementation of `java.util.Random` — a 48-bit truncated linear congruential
   generator, bit-exact against the Java specification. Every vanilla system that needs
@@ -1350,8 +1352,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   JSON → a URL plus a **wide/slim rig declaration** — the host-restricted fetch
   that turns it into a sheet, and the render halves that draw it on the inventory
   avatar, on other players' bodies in the world, and — rig **and** texture — on
-  the local player's own third-person body and first-person arm. What is left is capes
-  and the Yggdrasil signature, named under [What is missing](#what-is-missing).
+  the local player's own third-person body and first-person arm. Resource-pack reload
+  also rebinds the vanilla default head sheet when an overlay omits it. What is left
+  is capes and the Yggdrasil signature, named under [What is
+  missing](#what-is-missing).
 - [The plugin API](./plugin-api.md) — The surface a third-party bevy plugin uses to
   do everything native Lodestone code can do — read world/entity/player state, write
   intent, order systems against internal ones, and observe events — specified

@@ -65,6 +65,18 @@ retained instead of being flattened before rendering. Click and hover metadata s
 but is not interactive; font-weight, italic and other non-colour span styles have no menu-label
 renderer yet.
 
+All three book layouts — signed reader, writable editor, and its signing form — draw the same
+vanilla `textures/gui/book.png` sheet. It is a loose 256×256 texture rather than a GUI sprite, so
+`resources::BOOK_GUI_TEXTURE` registers it as an extra on the **menu** atlas. The atlas rebuilds
+on every resource-pack generation, including server-pack installation, and the draw samples the
+same top-left 192×192 window that `BookViewScreen`, `BookEditScreen`, and `BookSignScreen` blit.
+The reader’s page controls use vanilla’s 23×13 `widget/page_*` sprites at the source-derived
+positions, and both book screens use those same row rectangles for rendering, hover, and clicks.
+Book frames also select vanilla’s shadowless text overload for every string they emit: reader and
+lectern page text, page indicator, editor page/title/author text, and their widgets. This is a
+frame-local rendering rule (`MenuFrame::book_background`); ordinary menu and HUD text retain their
+normal drop shadows.
+
 ### Lecterns
 
 `minecraft:lectern` is not a generic one-row chest. Its content packet contains only the book
@@ -92,6 +104,13 @@ wrap implementation would be free to disagree with the editor's about where a li
 - **`Screen::BookView` is an overlay, not a full screen**, so `menu::render::frame_for` has
   no arm for it. A new overlay screen that forgets the draw call opens, hit-tests
   correctly, and renders nothing.
+- **Keep `BOOK_GUI_TEXTURE` in `MENU_TEXTURES`** when changing the book art. It is deliberately
+  not added to the HUD atlas: this renderer owns the texture binding and active-pack reload already
+  rebuilds its menu atlas. `MenuFrame::book_background` plus `draw::sprite_region` owns the
+  192/256 source crop; drawing the whole 256×256 sheet stretches transparent padding into the
+  visible page. The same marker intentionally selects `VanillaFont::draw_plain`; do not change
+  the global `Quads::text` default or book page/title text will regain a shadow (or unrelated
+  screens will lose theirs).
 
 ## What is not ported
 
@@ -100,11 +119,6 @@ Each of these is a real gap, not a decision that the data is absent:
 - **Page click and hover events.** Vanilla's pages are full chat components and a
   `ClickEvent` can run a command or open a URL. Lodestone retains those components and their
   spans while rendering, but the menu overlay has no interaction dispatcher, so pages are inert.
-- **`textures/gui/book.png`.** The page draws as plain labels over the standard dimmed
-  backdrop, not over the parchment sprite — the same simplification `book_edit` already
-  makes, for the same reason (the menu overlay stream has no atlas). Consequently the page
-  text is the menu's ordinary light colour, not `BookViewScreen`'s `PAGE_TEXT_STYLE` black,
-  which is only legible against that sprite.
 - **Page Up / Page Down.** `BookViewScreen.keyPressed` binds GLFW `266`/`267` to the two
   page buttons. `menu::nav::MenuKey` has no variant for either, so the arrow keys stand in;
   wiring the real pair is a keyboard-layer change.

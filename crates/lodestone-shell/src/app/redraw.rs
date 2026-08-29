@@ -280,6 +280,14 @@ impl WindowApp {
         let icon_pack_generation = crate::resources::pack_generation();
         if icon_pack_generation != self.last_icon_pack_generation {
             self.last_icon_pack_generation = icon_pack_generation;
+            if let Some(gpu) = self.gpu.as_ref()
+                && let Some(render) = self.render.as_mut()
+            {
+                // The world block-entity pass owns the Steve sheet a failed
+                // custom-head skin fetch falls back to. Rebind it here rather
+                // than leaving the owner on the pack state from startup.
+                render.reload_block_entity_textures(gpu.device(), gpu.queue());
+            }
             let format = self.target.as_ref().map(lodestone_render::SurfaceTarget::format);
             if let Some(format) = format {
                 if let Some(gpu) = self.gpu.as_ref()
@@ -568,7 +576,10 @@ impl WindowApp {
         let hotbar_records: Vec<Option<HotbarSlot>> = (0..9)
             .map(|i| {
                 player_menu.player_native(i).and_then(|st| {
-                    let item = ResourceLocation::parse(&st.item().to_string()).ok()?;
+                    // Modern servers can retain a vanilla gameplay item id while
+                    // replacing only its client-side item-definition lookup.
+                    let item = st.item_model().unwrap_or_else(|| st.item().clone());
+                    let item = ResourceLocation::parse(&item.to_string()).ok()?;
                     let damage = st
                         .components()
                         .get_int(lodestone_game::item::DAMAGE_COMPONENT)

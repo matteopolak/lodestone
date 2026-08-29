@@ -173,6 +173,50 @@ impl BlockResources {
         // `BlockModels::build_with_mip_levels`.
         let models = BlockModels::build_with_mip_levels(&manager, &registry, mipmap_levels())
             .map_err(|e| format!("build models from the vanilla pack: {e}"))?;
+        if tracing::enabled!(target: "pack_trace", tracing::Level::DEBUG) {
+            let player_head = "minecraft:player_head"
+                .parse::<lodestone_assets::ResourceLocation>()
+                .expect("static player-head item id parses");
+            let forms = models.item_forms(&player_head);
+            let outputs = forms.map(|forms| {
+                forms
+                    .definition()
+                    .resolve(&lodestone_assets::GuiItemContext)
+            });
+            let first_person_outputs = forms.map(|forms| {
+                forms.definition().resolve(&lodestone_render::ItemStateContext::new(
+                    lodestone_assets::DisplaySlot::FirstPersonRightHand,
+                ))
+            });
+            let third_person_outputs = forms.map(|forms| {
+                forms.definition().resolve(&lodestone_render::ItemStateContext::new(
+                    lodestone_assets::DisplaySlot::ThirdPersonRightHand,
+                ))
+            });
+            let special_forms: Vec<_> = forms
+                .into_iter()
+                .flat_map(|forms| forms.special_forms())
+                .map(|(base, form)| {
+                    (
+                        base.to_string(),
+                        form.kind.clone(),
+                        form.transformation.clone(),
+                        form.display.get(lodestone_assets::DisplaySlot::Gui),
+                        form.display.get(lodestone_assets::DisplaySlot::FirstPersonRightHand),
+                        form.display.get(lodestone_assets::DisplaySlot::ThirdPersonRightHand),
+                    )
+                })
+                .collect();
+            tracing::debug!(
+                target: "pack_trace",
+                definition_present = forms.is_some(),
+                ?outputs,
+                ?first_person_outputs,
+                ?third_person_outputs,
+                ?special_forms,
+                "player-head definition parsed after the current resource-pack stack rebuilt"
+            );
+        }
         tracing::info!(
             target: "assets",
             state_count = models.state_count(),
@@ -582,15 +626,43 @@ pub fn server_pack_info() -> Option<ServerPackInfo> {
 /// first.
 #[must_use]
 pub fn set_server_pack(id: Uuid, bytes: Vec<u8>) -> bool {
-    if let Err(e) = ZipSource::from_bytes(bytes.clone()) {
-        tracing::warn!(target: "assets", "server resource pack {id} did not open: {e}");
-        return false;
-    }
+    let source = match ZipSource::from_bytes(bytes.clone()) {
+        Ok(source) => source,
+        Err(e) => {
+            tracing::warn!(target: "assets", "server resource pack {id} did not open: {e}");
+            return false;
+        }
+    };
+    log_server_pack_render_inputs(id, &source, bytes.len());
     if let Ok(mut guard) = SERVER_PACK.write() {
         *guard = Some((id, bytes));
     }
     PACK_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     true
+}
+
+/// Records the few server-pack entries that decide the two most failure-prone
+/// item render paths. Kept behind `RUST_LOG=pack_trace=debug`: this is a
+/// diagnostic snapshot at pack installation, not a normal asset-load log.
+fn log_server_pack_render_inputs(id: Uuid, source: &ZipSource, bytes: usize) {
+    if !tracing::enabled!(target: "pack_trace", tracing::Level::DEBUG) {
+        return;
+    }
+    const DIAMOND_SWORD_DEFINITION: &str = "assets/minecraft/items/diamond_sword.json";
+    const DIAMOND_SWORD_LEGACY_MODEL: &str = "assets/minecraft/models/item/diamond_sword.json";
+    const PLAYER_HEAD_DEFINITION: &str = "assets/minecraft/items/player_head.json";
+    const PLAYER_HEAD_SHEET: &str = "assets/minecraft/textures/entity/player/wide/steve.png";
+    tracing::debug!(
+        target: "pack_trace",
+        %id,
+        bytes,
+        entries = source.list("assets/").len(),
+        diamond_sword_definition = source.read(DIAMOND_SWORD_DEFINITION).is_some(),
+        diamond_sword_legacy_model = source.read(DIAMOND_SWORD_LEGACY_MODEL).is_some(),
+        player_head_definition = source.read(PLAYER_HEAD_DEFINITION).is_some(),
+        player_head_sheet = source.read(PLAYER_HEAD_SHEET).is_some(),
+        "server pack render inputs scanned; items/<id>.json is the active item-definition format"
+    );
 }
 
 /// Withdraws the live server pack — `ClientboundResourcePackPopPacket`.
@@ -980,15 +1052,47 @@ pub fn load_block_entity_textures()
 
     for stem in lodestone_render::block_entity_texture_stems() {
         let path = format!("assets/minecraft/textures/{stem}.png");
+        let player_head_sheet = stem == "entity/player/wide/steve";
+        let server_override = player_head_sheet
+            && server_pack_source().is_some_and(|source| source.read(&path).is_some());
         let Some(png) = manager.read(&path) else {
             tracing::warn!(target: "assets", "missing block-entity sheet {path}");
+            if player_head_sheet {
+                tracing::debug!(
+                    target: "pack_trace",
+                    %path,
+                    server_override,
+                    "player-head fallback sheet is absent from the merged resource-pack stack"
+                );
+            }
             continue;
         };
         match Image::decode_png(&png) {
             Ok(img) => {
+                if player_head_sheet {
+                    tracing::debug!(
+                        target: "pack_trace",
+                        %path,
+                        server_override,
+                        width = img.width,
+                        height = img.height,
+                        "player-head fallback sheet decoded from the merged resource-pack stack"
+                    );
+                }
                 out.insert(stem, img);
             }
-            Err(e) => tracing::warn!(target: "assets", "decode {path}: {e}"),
+            Err(e) => {
+                tracing::warn!(target: "assets", "decode {path}: {e}");
+                if player_head_sheet {
+                    tracing::debug!(
+                        target: "pack_trace",
+                        %path,
+                        server_override,
+                        error = %e,
+                        "player-head fallback sheet failed to decode; the player-head renderer has no usable default sheet"
+                    );
+                }
+            }
         }
     }
     tracing::info!(
@@ -1320,8 +1424,18 @@ pub const UNKNOWN_PACK_TEXTURE: (&str, &str) = (
     "assets/minecraft/textures/misc/unknown_pack.png",
 );
 
+/// The shared book screen sheet — `BookViewScreen.BOOK_LOCATION`, also used by
+/// `BookEditScreen` and `BookSignScreen`. It is a loose `256×256` texture;
+/// each screen blits its top-left `192×192` logical region, so this cannot be
+/// discovered by the `gui/sprites/**` atlas walk.
+pub const BOOK_GUI_TEXTURE: (&str, &str) = (
+    "book/background",
+    "assets/minecraft/textures/gui/book.png",
+);
+
 /// Every loose texture the **menu** atlas carries: [`TITLE_TEXTURES`] plus
-/// [`UNKNOWN_SERVER_TEXTURE`] and [`UNKNOWN_PACK_TEXTURE`].
+/// [`UNKNOWN_SERVER_TEXTURE`], [`UNKNOWN_PACK_TEXTURE`] and
+/// [`BOOK_GUI_TEXTURE`].
 ///
 /// A superset rather than an addition to [`TITLE_TEXTURES`], because that
 /// constant means "what `LogoRenderer` blits by path" and the two list fallback
@@ -1333,6 +1447,7 @@ pub const MENU_TEXTURES: &[(&str, &str)] = &[
     TITLE_TEXTURES[1],
     UNKNOWN_SERVER_TEXTURE,
     UNKNOWN_PACK_TEXTURE,
+    BOOK_GUI_TEXTURE,
 ];
 
 const _: () = assert!(

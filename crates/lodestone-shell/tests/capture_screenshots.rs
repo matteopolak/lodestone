@@ -793,6 +793,7 @@ fn shoot(
                 swim_amount: 0.0,
                 slim: false,
                 equipment: Vec::new(),
+                equipment_skin: Vec::new(),
             })
         });
     }

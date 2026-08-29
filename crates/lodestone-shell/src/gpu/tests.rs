@@ -410,6 +410,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         id: 7,
         type_path: std::sync::Arc::from("zombie"),
         item: None,
+        item_model: None,
         equipment: vec![
             (
                 EquipmentSlot::Head,
@@ -438,6 +439,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         // an absent dye is `armour_layer_tint_with_dye`'s own "undyed"
         // case (`docs/armour-rendering.md`).
         equipment_dye: Vec::new(),
+        equipment_skin: Vec::new(),
             equipment_trim: Vec::new(),
         feet: Vec3::new(4.0, 70.0, -2.0),
         yaw: 41.0,
@@ -594,6 +596,7 @@ fn the_local_bodys_own_skin_reaches_both_draw_channels() {
         swim_amount: 0.0,
         slim: skin.model.is_slim(),
         equipment: Vec::new(),
+        equipment_skin: Vec::new(),
     };
     let draw = state.into_draw();
     assert_eq!(
@@ -649,6 +652,7 @@ fn third_person_body_state_resolves_through_the_real_corpus() {
             swim_amount: 0.42,
             slim,
             equipment: Vec::new(),
+            equipment_skin: Vec::new(),
         };
         let expected_model = if slim { "player_slim" } else { "player_wide" };
         let draw = state.clone().into_draw();

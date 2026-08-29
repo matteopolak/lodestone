@@ -124,6 +124,14 @@ pub struct MenuRow {
     /// (`SpriteIconButton.java`). `label` is still carried (it is the
     /// tooltip/narration text in vanilla) but not drawn.
     pub icon: Option<&'static str>,
+    /// A book reader/editor page-turn control, drawn as vanilla's bare
+    /// `widget/page_*` sprite instead of as a rectangular menu button.
+    ///
+    /// The book sheet already supplies the visual surface behind these 23×13
+    /// controls; giving them the ordinary `widget/button*` background both
+    /// looks wrong and expands the visual affordance beyond the hit box vanilla
+    /// exposes.
+    pub book_page: Option<BookPageButton>,
     /// Set on a [`super::Screen::ServerList`] row: everything an
     /// `OnlineServerEntry` draws that a button row has no field for.
     ///
@@ -221,6 +229,17 @@ pub struct MenuRow {
     /// live (it is not [`MenuFrame::selected`]; see [`TabEntryView::selected`]'s
     /// own doc).
     pub tab: Option<TabEntryView>,
+}
+
+/// Which of vanilla's two [`PageButton`](BookPageButton) sprites a book row
+/// draws. Kept on the row because both drawing and hit-testing already consume
+/// the same row geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookPageButton {
+    /// `widget/page_backward` (or its highlighted counterpart).
+    Backward,
+    /// `widget/page_forward` (or its highlighted counterpart).
+    Forward,
 }
 
 impl MenuRow {
@@ -735,6 +754,10 @@ pub struct MenuFrame<'a> {
     /// the title screen only. A no-op without a GUI atlas carrying those loose
     /// textures (see [`crate::resources::TITLE_TEXTURES`]).
     pub logo: bool,
+    /// Blit `BookViewScreen.BOOK_LOCATION`'s top-left 192×192 region behind
+    /// this frame. The texture is supplied by the menu atlas, rebuilt from the
+    /// active resource-pack stack whenever its generation advances.
+    pub book_background: bool,
     /// Free-standing strings at vanilla-derived positions: the pause screen's
     /// "Game Menu" heading, the title screen's version string and copyright
     /// line.
@@ -1012,4 +1035,3 @@ pub fn owns_frame(screen: super::Screen) -> bool {
             | Screen::Confirm
     )
 }
-

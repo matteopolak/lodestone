@@ -819,8 +819,10 @@ Past the cap `prepare` did `vertices.len().min(MAX)`, which
 The fix is three parts, all inside `gpu/sign_text.rs` because `prepare` takes `&self` from
 `RenderState::render` (also `&self`, with no device in scope) and so cannot reallocate:
 
-1. **Capacity 262,144** — 7.34 MB at 28 bytes a vertex, against ~67 MB of terrain mesh at render
-   distance 8. Buys 34 fully-written signs or ~188 ordinary ones in front of the camera.
+1. **Capacity 524,288** — 14.68 MB at 28 bytes a vertex, against ~67 MB of terrain mesh at render
+   distance 8. Buys 68 fully-written signs or ~376 ordinary ones in front of the camera. This is a
+   deliberately near-term capacity increase based on the observed 261,774/262,144-vertex scene,
+   not a claim that vanilla imposes this fixed limit.
 2. **Spend it nearest-first, and skip what is behind the eye.** `order_by_forward_distance` sorts on
    `clip.w`, which for a perspective projection is exactly `-z_view`, so it needs no camera basis and
    no eye position — the view-projection the pass already receives carries both. Signs more than one
@@ -828,8 +830,9 @@ The fix is three parts, all inside `gpu/sign_text.rs` because `prepare` takes `&
    caller's position sort is untouched; the reorder is local to the upload.
 3. **Truncate whole signs and say so.** `sign_diagnostics::report_draw_budget` warns — *not* behind
    `RUST_LOG=signs=debug`, because a dropped sign is a visible defect rather than an investigation
-   aid — latched on the drop count so a steadily-overflowing scene says it once rather than sixty
-   times a second, and says so again when it recovers.
+   aid — latched for the sign renderer's lifetime. Camera movement can change the exact drop count
+   or briefly recover and re-exhaust the pass without producing another WARN; those later transitions
+   are debug-only, and a new renderer/resource epoch gets one fresh warning if it overflows again.
 
 Gates: `gpu/sign_text.rs`'s own `the_vertex_budget_holds_a_real_rooms_worth_of_signs` (a magnitude
 prediction — it evaluates the population against *both* the old 40,000 and the current capacity, and

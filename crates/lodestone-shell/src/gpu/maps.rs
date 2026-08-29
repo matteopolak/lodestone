@@ -34,6 +34,7 @@ use lodestone_render::{ENTITY_FULLBRIGHT, GpuModelMesh, ModelMesh, ModelPipeline
 
 use crate::entities::EntityDraw;
 
+use super::pack_trace::{should_trace_candidate, unit_quad_normal, unit_quad_plane};
 use super::{MapPicture, RenderState};
 
 /// GPU resources that stay valid for this [`RenderState`] and are shared by a
@@ -282,26 +283,10 @@ pub const ITEM_FRAME_TYPES: [&str; 2] = ["item_frame", "glow_item_frame"];
 /// and the full-bright light its contents draw at.
 pub const GLOW_ITEM_FRAME_TYPE_PATH: &str = "glow_item_frame";
 
-/// A map's picture is drawn one block across, matching the item frame it hangs in.
-const FRAMED_MAP_SCALE: f32 = 1.0;
-
-/// How far in front of the frame's own plane the picture sits, along the frame's
-/// real facing.
-///
-/// The room-facing plane of `template_item_frame_map`: its first element begins
-/// at local `z = 15.001 / 16`, and the frame body starts half a block behind
-/// `item_frame_space`. Measured outward from the entity position.
-const ITEM_FRAME_MAP_FRONT_LIFT: f32 = 0.46875 - (15.001 / 16.0 - 0.5);
-
-/// Explicit geometric separation between the frame's room-facing map plate and
-/// the map picture. The previous relative depth bias still flickered on live
-/// frames; this is a real 1/64-block displacement along the frame normal, small
-/// enough to remain visually flush but large enough not to collapse at grazing
-/// angles.
-const FRAMED_MAP_FRONT_SEPARATION: f32 = 1.0 / 64.0;
-
-/// The picture's distance from the item-frame entity along its outward normal.
-const FRAMED_MAP_LIFT: f32 = ITEM_FRAME_MAP_FRONT_LIFT + FRAMED_MAP_FRONT_SEPARATION;
+/// `ItemFrameRenderer` scales map coordinates by `1 / 128`; its final
+/// `translate(0, 0, -1)` and `MapRenderer`'s `MAP_Z_OFFSET (-.01)` therefore
+/// put the image plane `1.01 / 128` in front of the content origin.
+const MAP_RENDERER_DEPTH: f32 = 1.01 / 128.0;
 
 /// Vanilla's `renderMap` scale (`ItemInHandRenderer.renderMap`: `scale(0.38f)`
 /// around a `[-0.5, -0.5]`-centred unit quad).
@@ -398,7 +383,7 @@ fn held_map_pose(inverse_arm_height: f32) -> Mat4 {
 /// frame's real `Direction`.
 ///
 /// ```text
-/// T(feet + dir · FRAMED_MAP_LIFT) · item_frame_facing(yaw, pitch) · Rz(rot · 90°) · Ry(180°) · S
+/// item_frame_space(feet, yaw, pitch) · T(0, 0, content_lift) · Rz(rot · 90°) · Ry(180°) · T(0, 0, MAP_RENDERER_DEPTH)
 /// ```
 ///
 /// # The orientation is the frame's own, not `Ry(yaw)`
@@ -442,19 +427,21 @@ fn held_map_pose(inverse_arm_height: f32) -> Mat4 {
 /// half-steps fold onto the even ones rather than tilting the picture.
 #[must_use]
 fn framed_map_pose(feet: Vec3, yaw: f32, pitch: f32, rotation: u8, invisible: bool) -> Mat4 {
-    let step = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
     let quarter_turns = f32::from(rotation % 4) * 90.0;
-    // `ItemFrameRenderer` moves visible contents to local z=.4375 and
-    // invisible-frame contents to z=.5. Local +z points into the wall after
-    // the frame transform, so the latter is one sixteenth *less* far outward.
-    // Keep our fixed front separation from the frame plate on top of that
-    // vanilla distinction rather than treating invisibility as material-only.
-    let lift = FRAMED_MAP_LIFT - if invisible { 1.0 / 16.0 } else { 0.0 };
-    Mat4::from_translation(feet + step * lift)
-        * lodestone_render::entity::item_frame_facing(yaw, pitch)
+    // This is ItemFrameRenderer's content branch. `map_quad_mesh` has already
+    // absorbed Java's 1/128 XY scale and (-64, -64) centring translation. The
+    // final positive local depth is intentional: our Ry(180) compatibility
+    // turn flips it to Java's negative map depth while preserving the front
+    // face that this pipeline culls against.
+    lodestone_render::entity::item_frame_space(feet, yaw, pitch)
+        * Mat4::from_translation(Vec3::new(
+            0.0,
+            0.0,
+            lodestone_render::entity::item_frame_content_lift(invisible),
+        ))
         * Mat4::from_rotation_z(quarter_turns.to_radians())
         * Mat4::from_rotation_y(std::f32::consts::PI)
-        * Mat4::from_scale(Vec3::splat(FRAMED_MAP_SCALE))
+        * Mat4::from_translation(Vec3::new(0.0, 0.0, MAP_RENDERER_DEPTH))
 }
 
 /// Why a framed or held map declined to draw, for the one-shot diagnostic below.
@@ -641,6 +628,39 @@ impl RenderState {
                 draw.invisible,
                 self.entity_light.sample(draw.feet),
             );
+            if should_trace_candidate("framed_map", draw.id, draw.feet, camera.position) {
+                // `map_quad_mesh` is centred at local `(-.5, -.5, 0)` rather
+                // than corner-origin. Move the diagnostic unit square into
+                // that same local range before reporting its final plane.
+                let pose = input.pose();
+                // `map_quad_mesh` is centred in X/Y already and lies at local
+                // z=0. `unit_quad_plane` expects a 0..1 quad, so adapt only
+                // that XY origin; translating z would invent a half-block
+                // depth that the mesh never renders.
+                let map_plane = pose * Mat4::from_translation(Vec3::new(-0.5, -0.5, 0.0));
+                let facing = lodestone_render::entity::item_frame_facing(draw.yaw, draw.pitch)
+                    .transform_vector3(Vec3::NEG_Z)
+                    .to_array();
+                tracing::debug!(
+                    target: "pack_trace",
+                    surface = "framed_map",
+                    entity_id = draw.id,
+                    protocol_type = %draw.type_path,
+                    world_pos = ?draw.feet.to_array(),
+                    yaw = draw.yaw,
+                    pitch = draw.pitch,
+                    invisible = draw.invisible,
+                    attachment_facing = ?facing,
+                    frame_rotation = draw.item_frame_rotation,
+                    held_item = ?draw.item.as_ref().map(ToString::to_string),
+                    item_model = ?draw.item_model.as_ref().map(ToString::to_string),
+                    map_id = picture.map_id,
+                    final_transform = ?pose.to_cols_array_2d(),
+                    quad_plane = ?unit_quad_plane(map_plane),
+                    quad_normal = ?unit_quad_normal(pose),
+                    "nearby render candidate reached framed-map draw"
+                );
+            }
             pictures.entry(picture.map_id).or_insert(picture);
             inputs.push(input);
         }
@@ -695,6 +715,62 @@ impl RenderState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ItemFrameRenderer.submit` enters frame-local space, moves contents by
+    /// `.4375`/`.5`, then its map branch's `scale(1/128)` carries the
+    /// `translate(0, 0, -1)` plus `MapRenderer.MAP_Z_OFFSET (-.01)`. The map
+    /// mesh here is already centred and unit-sized, so this asserts that same
+    /// depth at its local origin for every wall orientation.
+    #[test]
+    fn framed_map_plane_matches_the_26_2_frame_local_content_chain() {
+        let anchor = Vec3::new(4.0, 65.0, -9.0);
+        let block_centre = anchor + Vec3::splat(0.5);
+        let map_depth = 1.01 / 128.0;
+        for (yaw, pitch) in [
+            (0.0f32, 0.0f32),
+            (90.0, 0.0),
+            (180.0, 0.0),
+            (270.0, 0.0),
+            (0.0, -90.0),
+            (0.0, 90.0),
+        ] {
+            let facing = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
+            for (invisible, content_lift) in [(false, 0.4375), (true, 0.5)] {
+                let actual = framed_map_pose(anchor, yaw, pitch, 0, invisible)
+                    .transform_point3(Vec3::ZERO);
+                let expected = block_centre + facing * (map_depth - content_lift);
+                assert!(
+                    (actual - expected).length() < 1.0e-5,
+                    "yaw {yaw}, pitch {pitch}, invisible {invisible}: map centre {actual:?}, expected {expected:?}"
+                );
+            }
+        }
+    }
+
+    /// Item-frame spawn packets carry the integer attachment block position.
+    /// With vanilla's invisible `.5` content lift, the map plane reaches that
+    /// block's wall face, then `MapRenderer` moves it outward by `1.01 / 128`.
+    #[test]
+    fn invisible_framed_map_sits_just_outside_the_packet_anchors_wall() {
+        let anchor = Vec3::new(4.0, 65.0, -9.0);
+        for (yaw, pitch) in [
+            (0.0f32, 0.0f32),
+            (90.0, 0.0),
+            (180.0, 0.0),
+            (270.0, 0.0),
+            (0.0, -90.0),
+            (0.0, 90.0),
+        ] {
+            let facing = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
+            let actual = framed_map_pose(anchor, yaw, pitch, 0, true)
+                .transform_point3(Vec3::ZERO);
+            let expected = anchor + Vec3::splat(0.5) + facing * (-0.5 + MAP_RENDERER_DEPTH);
+            assert!(
+                (actual - expected).length() < 1.0e-5,
+                "yaw {yaw}, pitch {pitch}: invisible map must be just outside wall {expected}, got {actual}"
+            );
+        }
+    }
 
     #[test]
     fn retained_entry_skips_the_second_build_and_rebuilds_for_new_content() {
@@ -798,41 +874,44 @@ mod tests {
     /// around — so an orientation assertion at 0 and 180 alone proves nothing.
     #[test]
     fn a_framed_map_lifts_along_its_own_facing_and_faces_out_of_the_wall() {
-        let pose = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 0.0, 0.0, 0, false);
+        let visible_lift = 0.4375 - MAP_RENDERER_DEPTH;
+        let anchor = Vec3::new(4.0, 65.0, -9.0);
+        let block_centre = anchor + Vec3::splat(0.5);
+        let pose = framed_map_pose(anchor, 0.0, 0.0, 0, false);
         let centre = pose.transform_point3(Vec3::ZERO);
-        assert!((centre.x - 4.0).abs() < 1.0e-5);
-        assert!((centre.y - 65.0).abs() < 1.0e-5);
-        assert!((centre.z - (-9.0 + FRAMED_MAP_LIFT)).abs() < 1.0e-5);
+        assert!((centre.x - block_centre.x).abs() < 1.0e-5);
+        assert!((centre.y - block_centre.y).abs() < 1.0e-5);
+        assert!((centre.z - (block_centre.z - visible_lift)).abs() < 1.0e-5);
 
         // Yaw 180 faces north, so the same lift must move the other way.
-        let north = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 180.0, 0.0, 0, false)
+        let north = framed_map_pose(anchor, 180.0, 0.0, 0, false)
             .transform_point3(Vec3::ZERO);
-        assert!(north.z < -9.0, "a north-facing frame lifts toward -z");
+        assert!(north.z > block_centre.z, "a north-facing frame lifts toward +z");
 
         // Yaw 90 and 270 are the discriminating inputs. Yaw 90 is west, so the
         // picture must move to `-x`.
-        let west = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 90.0, 0.0, 0, false)
+        let west = framed_map_pose(anchor, 90.0, 0.0, 0, false)
             .transform_point3(Vec3::ZERO);
         assert!(
-            (west.x - (4.0 - FRAMED_MAP_LIFT)).abs() < 1.0e-5,
-            "yaw 90 is west, so the picture lifts to -x; got x={} (a bare Ry(yaw) \
+            (west.x - (block_centre.x + visible_lift)).abs() < 1.0e-5,
+            "yaw 90 is west, so the picture lifts to +x; got x={} (a bare Ry(yaw) \
              would give {})",
             west.x,
-            4.0 + FRAMED_MAP_LIFT
+            block_centre.x - visible_lift
         );
-        let east = framed_map_pose(Vec3::new(4.0, 65.0, -9.0), 270.0, 0.0, 0, false)
+        let east = framed_map_pose(anchor, 270.0, 0.0, 0, false)
             .transform_point3(Vec3::ZERO);
         assert!(
-            (east.x - (4.0 + FRAMED_MAP_LIFT)).abs() < 1.0e-5,
-            "yaw 270 is east, so the picture lifts to +x; got x={}",
+            (east.x - (block_centre.x - visible_lift)).abs() < 1.0e-5,
+            "yaw 270 is east, so the picture lifts to -x; got x={}",
             east.x
         );
 
-        // The map's plane must have a real, fixed positive gap ahead of the
-        // actual `template_item_frame_map` room-facing plane — not merely a
-        // relative pipeline bias. Check every orientation below because a
-        // world-z-only displacement can pass this at south and fail on the
-        // east/west walls (or ceilings).
+        // The map's plane must sit ahead of `template_item_frame_map`'s
+        // room-facing plate at every orientation. The source-derived depth is
+        // MapRenderer's 1.01/128 plane bias plus the model's 0.001/16 gap
+        // between its local 15.001/16 plate (minus the body's half-block
+        // origin) and vanilla's .4375 content origin.
         for (yaw, pitch) in [
             (0.0f32, 0.0f32),
             (90.0, 0.0),
@@ -841,15 +920,16 @@ mod tests {
             (0.0, -90.0),
             (0.0, 90.0),
         ] {
-            let feet = Vec3::new(4.0, 65.0, -9.0);
+            let feet = anchor;
             let facing = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
             let plate = lodestone_render::entity::item_frame_body_matrix(feet, yaw, pitch)
                 .transform_point3(Vec3::new(0.5, 0.5, 15.001 / 16.0));
             let picture = framed_map_pose(feet, yaw, pitch, 0, false).transform_point3(Vec3::ZERO);
             let separation = (picture - plate).dot(facing);
+            let expected_separation = MAP_RENDERER_DEPTH + (15.001 / 16.0 - 0.5 - 0.4375);
             assert!(
-                (separation - FRAMED_MAP_FRONT_SEPARATION).abs() < 1.0e-5,
-                "yaw {yaw}, pitch {pitch}: map plane must be {FRAMED_MAP_FRONT_SEPARATION} \
+                (separation - expected_separation).abs() < 1.0e-5,
+                "yaw {yaw}, pitch {pitch}: map plane must be {expected_separation} \
                  ahead of the frame map plate, got {separation}"
             );
         }

@@ -220,8 +220,7 @@ fn warn_a_head_profile_declares_no_usable_skin() {
 /// profile. A profile that carries a `textures` property we cannot use is *not*
 /// normal and says so — see [`warn_a_head_profile_declares_no_usable_skin`].
 #[must_use]
-pub(crate) fn stack_skin_url(stack: &lodestone_game::item::ItemStack) -> Option<Arc<str>> {
-    let profile = stack.profile()?;
+pub(crate) fn profile_skin_url(profile: &lodestone_model::ItemProfile) -> Option<Arc<str>> {
     let value = profile
         .properties
         .iter()
@@ -234,6 +233,24 @@ pub(crate) fn stack_skin_url(stack: &lodestone_game::item::ItemStack) -> Option<
     // Idempotent per URL; see this function's doc.
     crate::remote_skins::request(&skin.url);
     Some(Arc::<str>::from(skin.url))
+}
+
+/// [`profile_skin_url`] for a game-facing stack.
+///
+/// This narrow wrapper keeps every consumer that already has a full game stack
+/// on the same profile decoder and request path as producers that still hold
+/// the model-layer stack decoded directly from `SET_EQUIPMENT`.
+#[must_use]
+pub(crate) fn stack_skin_url(stack: &lodestone_game::item::ItemStack) -> Option<Arc<str>> {
+    // Match PlayerHeadSpecialRenderer.extractArgument: `PROFILE` is read by
+    // the player-head item renderer, not by every arbitrary stack that happens
+    // to carry that data component. The item-model component may replace only
+    // the client definition lookup; the underlying player-head item remains
+    // the semantic owner of the profile.
+    if stack.item().namespace() != "minecraft" || stack.item().path() != "player_head" {
+        return None;
+    }
+    profile_skin_url(&stack.profile()?)
 }
 
 /// `ItemStack.hasFoil()` for a shell-side [`lodestone_game::item::ItemStack`],
@@ -823,20 +840,63 @@ fn push_item_model_variant(
     y: f32,
     size: f32,
 ) -> bool {
-    let Some(geometry) = models
-        .and_then(|models| models.item_forms(item))
-        .and_then(|forms| {
-            forms.resolve(
-                &ItemStateContext::new(DisplaySlot::Gui).with_custom_model_data(custom_model_data),
-            )
-        })
-    else {
+    let Some(forms) = models.and_then(|models| models.item_forms(item)) else {
+        return false;
+    };
+    let context = ItemStateContext::new(DisplaySlot::Gui).with_custom_model_data(custom_model_data);
+    log_diamond_sword_model_resolution("gui", item, custom_model_data, &context, forms);
+    let Some(geometry) = forms.resolve(&context) else {
         return false;
     };
     let pose = gui_item_pose([x, y, size, size], &geometry.transform);
     let mesh = mesh_item_quads(&geometry.quads, pose, geometry.gui_light);
     out.extend(mesh.indices.iter().map(|&i| mesh.vertices[i as usize]));
     true
+}
+
+/// Reports one GUI resolution for each `(pack generation, custom-model-data)`
+/// pair. The target is deliberately opt-in: `RUST_LOG=pack_trace=debug` turns
+/// a visible vanilla sword into its component/selector/model evidence without
+/// writing one line per frame.
+fn log_diamond_sword_model_resolution(
+    surface: &'static str,
+    item: &ResourceLocation,
+    custom_model_data: f32,
+    context: &ItemStateContext,
+    forms: &lodestone_render::ItemVariants,
+) {
+    if item.namespace() != "minecraft"
+        || item.path() != "diamond_sword"
+        || !tracing::enabled!(target: "pack_trace", tracing::Level::DEBUG)
+    {
+        return;
+    }
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<(u64, i32)>>> = std::sync::OnceLock::new();
+    let generation = crate::resources::pack_generation();
+    let data = custom_model_data as i32;
+    let Ok(mut last) = LAST.get_or_init(|| std::sync::Mutex::new(None)).lock() else {
+        return;
+    };
+    if *last == Some((generation, data)) {
+        return;
+    }
+    *last = Some((generation, data));
+
+    let outputs = forms.definition().resolve(context);
+    let chosen_model_is_baked = outputs.iter().any(|output| {
+        matches!(output, lodestone_assets::ItemModelOutput::Model { model, .. } if forms.variant(model).is_some())
+    });
+    tracing::debug!(
+        target: "pack_trace",
+        surface,
+        item = %item,
+        custom_model_data,
+        ?context,
+        ?outputs,
+        chosen_model_is_baked,
+        resolved_geometry = forms.resolve(context).is_some(),
+        "diamond-sword item-model selector evaluated"
+    );
 }
 
 /// Record one [`IconPart::Special`] slot for the block-entity icon pass.
@@ -863,7 +923,7 @@ fn push_item_model_variant(
 /// `node_transform` is the item definition's whole root-to-`special`
 /// `"transformation"` chain, outermost first, and is folded *underneath*
 /// `transform`'s `display.gui` pose via
-/// [`lodestone_render::compose_special_node_transform`] — see that
+/// [`lodestone_render::compose_special_item_transform`] — see that
 /// function's doc for why it is a right-, not left-, multiply, and for why an
 /// ancestor node's entry counts.
 ///
@@ -890,7 +950,7 @@ fn push_special_icon(
     size: f32,
 ) {
     let outer = gui_item_pose([x, y, size, size], transform);
-    let placement = lodestone_render::compose_special_node_transform(outer, node_transform);
+    let placement = lodestone_render::compose_special_item_transform(outer, kind, node_transform);
 
     // The banner rig is two meshes sharing one placement — see
     // `lodestone_render::banner_item_rig`'s doc — so it is pushed as two

@@ -513,12 +513,17 @@ fn parse_node_body(
         }
         "special" => {
             let base = ResourceLocation::parse(required_str(obj, "base")?.as_str())?;
-            let kind = obj
+            // `model.type` names the special renderer as a resource location.
+            // Server packs commonly omit its default namespace (`"head"`), but
+            // every special-item consumer dispatches on the canonical id.
+            let kind = ResourceLocation::parse(
+                obj
                 .get("model")
                 .and_then(|m| m.get("type"))
                 .and_then(Value::as_str)
-                .ok_or_else(|| ItemModelError::BadField("special missing model.type".into()))?
-                .to_string();
+                .ok_or_else(|| ItemModelError::BadField("special missing model.type".into()))?,
+            )?
+            .to_string();
             // This node's own field only; `parse_node` prepends every ancestor's
             // below, which is what makes the stored value a chain.
             let transformation = obj
