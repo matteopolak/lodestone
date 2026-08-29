@@ -39,6 +39,7 @@ use lodestone_render::{
 use crate::entities::EntityDraw;
 
 use super::block_entities::{BannerLayerDrawBatch, BlockEntityDrawBatch};
+use super::pack_trace::{should_trace_candidate, unit_quad_normal, unit_quad_plane};
 use super::terrain::ModelRenderer;
 use super::{
     ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, CapeDrawBatch, ElytraDrawBatch,
@@ -46,6 +47,28 @@ use super::{
     PreparedEntityBatches, RenderState, RenderStats, ShadowBatch, WoolPartAccum,
     humanoid_armour_slot,
 };
+
+/// Select the texture for one third-person held special item.
+///
+/// A special rig normally owns a static sheet, but a player-head stack's
+/// `minecraft:profile` replaces only that sheet. The producer emits this
+/// channel only for the underlying `minecraft:player_head` item, matching
+/// 26.2's `PlayerHeadSpecialRenderer.extractArgument`; its `item_model`
+/// component may retarget the definition but does not change the profile's
+/// owner. The URL remains slot-scoped because an entity can hold two distinct
+/// custom heads.
+fn held_special_texture(
+    draw: &EntityDraw,
+    slot: EquipmentSlot,
+    fallback: lodestone_render::BlockEntityTexture,
+) -> lodestone_render::BlockEntityTexture {
+    if let Some((_, url)) = draw.equipment_skin.iter().find(|(candidate, _)| *candidate == slot)
+    {
+        lodestone_render::BlockEntityTexture::PlayerSkin(Arc::clone(url))
+    } else {
+        fallback
+    }
+}
 
 /// Record an entity type whose ordinary body dispatch had no baked model.
 ///
@@ -2676,7 +2699,7 @@ impl RenderState {
                     item_frame_light(&self.entity_light, draw, glow),
                     glow,
                 );
-                if let Some(instance) = self.framed_special_item(model, draw, framed) {
+                if let Some(instance) = self.framed_special_item(model, draw, framed, camera) {
                     out.push(instance);
                     stats.special_item_frames_drawn += 1;
                 }
@@ -2694,7 +2717,7 @@ impl RenderState {
                     (EquipmentSlot::MainHand, true) | (EquipmentSlot::OffHand, false) => Arm::Left,
                     _ => continue,
                 };
-                if let Some(instance) = self.held_special_item(model, draw, arm, id, light) {
+                if let Some(instance) = self.held_special_item(model, draw, *slot, arm, id, light) {
                     out.push(instance);
                     stats.special_item_hands_drawn += 1;
                 }
@@ -2771,6 +2794,7 @@ impl RenderState {
         &self,
         model: &ModelRenderer,
         draw: &EntityDraw,
+        slot: EquipmentSlot,
         arm: Arm,
         item: &lodestone_assets::ResourceLocation,
         light: u8,
@@ -2797,9 +2821,12 @@ impl RenderState {
         let transform = hand_transform(&form.display, arm, false);
         let placement =
             lodestone_render::entity::held_item_matrix(arm_transform, arm, baby, &transform);
-        self.block_entities
+        let mut special = self
+            .block_entities
             .models
-            .resolve_special_item(&form.kind, item.path(), placement, &form.transformation, light)
+            .resolve_special_item(&form.kind, item.path(), placement, &form.transformation, light)?;
+        special.texture = held_special_texture(draw, slot, special.texture);
+        Some(special)
     }
 
     /// A `minecraft:special` item hanging in an item frame.
@@ -2818,6 +2845,7 @@ impl RenderState {
         model: &ModelRenderer,
         draw: &EntityDraw,
         light: u8,
+        camera: &Camera,
     ) -> Option<lodestone_render::BlockEntityInstance> {
         let item = draw.item.as_ref()?;
         let ctx = ItemStateContext::new(DisplaySlot::Fixed);
@@ -2830,6 +2858,31 @@ impl RenderState {
             draw.invisible,
             &form.display.get(DisplaySlot::Fixed),
         );
+        if should_trace_candidate("framed_special_item", draw.id, draw.feet, camera.position) {
+            let facing = lodestone_render::entity::item_frame_facing(draw.yaw, draw.pitch)
+                .transform_vector3(glam::Vec3::NEG_Z)
+                .to_array();
+            tracing::debug!(
+                target: "pack_trace",
+                surface = "framed_special_item",
+                entity_id = draw.id,
+                protocol_type = %draw.type_path,
+                world_pos = ?draw.feet.to_array(),
+                yaw = draw.yaw,
+                pitch = draw.pitch,
+                invisible = draw.invisible,
+                attachment_facing = ?facing,
+                frame_rotation = draw.item_frame_rotation,
+                held_item = %item,
+                item_model = ?draw.item_model.as_ref().map(ToString::to_string),
+                special_kind = %form.kind,
+                selected_display_transform = ?form.display.get(DisplaySlot::Fixed),
+                final_transform = ?placement.to_cols_array_2d(),
+                rig_origin_plane = ?unit_quad_plane(placement),
+                rig_origin_normal = ?unit_quad_normal(placement),
+                "nearby render candidate reached framed-special-item draw"
+            );
+        }
         self.block_entities
             .models
             .resolve_special_item(&form.kind, item.path(), placement, &form.transformation, light)
@@ -3255,9 +3308,11 @@ mod tests {
             id: 1,
             type_path: Arc::from(type_path),
             item: None,
+            item_model: None,
             main_arm_left: false,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
+            equipment_skin: Vec::new(),
             equipment_trim: Vec::new(),
             wool: None,
             block_state: None,
@@ -3290,6 +3345,24 @@ mod tests {
             firework: None,
             projectile_owner: None,
         }
+    }
+
+    #[test]
+    fn held_player_head_special_draw_uses_its_slots_profile_skin() {
+        let url: Arc<str> = Arc::from("https://example.invalid/custom-head.png");
+        let mut draw = subject("player_wide", 64.0, 1.0, false);
+        draw.equipment_skin.push((EquipmentSlot::MainHand, Arc::clone(&url)));
+
+        let texture = held_special_texture(
+            &draw,
+            EquipmentSlot::MainHand,
+            lodestone_render::BlockEntityTexture::Static("entity/player/wide/steve"),
+        );
+        assert_eq!(
+            texture,
+            lodestone_render::BlockEntityTexture::PlayerSkin(url),
+            "the held special-item boundary must replace a player head's static Steve sheet"
+        );
     }
 
     /// The eye heights are the jar's, not a formula, and the table is searchable.

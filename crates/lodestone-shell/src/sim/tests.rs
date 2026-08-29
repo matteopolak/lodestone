@@ -6719,6 +6719,94 @@ fn the_third_person_body_swings_off_the_same_clock_as_the_arm() {
     );
 }
 
+/// The local self-avatar is a synthetic draw rather than a tracked entity, so
+/// its held stack must preserve the modern client-only `minecraft:item_model`
+/// component while it is narrowed to the renderer's visual id.
+#[test]
+fn third_person_body_uses_the_selected_stack_item_model_for_its_main_hand() {
+    let mut sim = Sim::new(test_config());
+    sim.cycle_camera_type();
+    let mut stack = lodestone_model::ItemStack::new(
+        "minecraft:diamond_sword".parse().expect("valid gameplay item id"),
+        1,
+    );
+    stack.components.item_model = Some("server:gun".parse().expect("valid visual item id"));
+    let local = sim.local;
+    sim.write(|world| {
+        world
+            .get_mut::<lodestone_ecs::SessionMenus>(local)
+            .expect("local player has menus")
+            .0
+            .apply(&lodestone_model::ClientEvent::InventorySlotChanged {
+                slot: 0,
+                item: Some(stack),
+            });
+    });
+
+    let body = sim
+        .third_person_body_state()
+        .expect("third-person body is enabled");
+    assert_eq!(
+        body.equipment
+            .iter()
+            .find(|(slot, _)| *slot == EquipmentSlot::MainHand)
+            .map(|(_, id)| id.to_string())
+            .as_deref(),
+        Some("server:gun"),
+        "the local avatar's hand resolves the item definition, not its vanilla gameplay id"
+    );
+}
+
+/// The local avatar becomes a synthetic [`EntityDraw`](crate::entities::EntityDraw)
+/// only after this state is made. Its held player head must therefore retain the
+/// profile URL beside the visual item id; otherwise the third-person special-item
+/// pass can only bind its static Steve fallback.
+#[test]
+fn third_person_body_retains_the_selected_heads_profile_skin_for_its_main_hand() {
+    const URL: &str = "https://example.invalid/custom-head.png";
+    const TEXTURES: &str =
+        "eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHBzOi8vZXhhbXBsZS5pbnZhbGlkL2N1c3RvbS1oZWFkLnBuZyJ9fX0=";
+
+    let mut sim = Sim::new(test_config());
+    sim.cycle_camera_type();
+    let mut stack = lodestone_model::ItemStack::new(
+        "minecraft:player_head".parse().expect("valid player-head item id"),
+        1,
+    );
+    stack.components.profile = Some(lodestone_model::ItemProfile {
+        name: Some("custom head".to_owned()),
+        id: None,
+        properties: vec![lodestone_model::ProfileProperty {
+            name: "textures".to_owned(),
+            value: TEXTURES.to_owned(),
+            signature: None,
+        }],
+    });
+    let local = sim.local;
+    sim.write(|world| {
+        world
+            .get_mut::<lodestone_ecs::SessionMenus>(local)
+            .expect("local player has menus")
+            .0
+            .apply(&lodestone_model::ClientEvent::InventorySlotChanged {
+                slot: 0,
+                item: Some(stack),
+            });
+    });
+
+    let body = sim
+        .third_person_body_state()
+        .expect("third-person body is enabled");
+    assert_eq!(
+        body.equipment_skin
+            .iter()
+            .find(|(slot, _)| *slot == EquipmentSlot::MainHand)
+            .map(|(_, skin)| skin.as_ref()),
+        Some(URL),
+        "the synthetic local-avatar draw must retain the held head's profile URL"
+    );
+}
+
 /// The discriminating gate for "the in-world player always draws the wide
 /// (Steve) rig": a slim-declaring skin and a wide-declaring one must produce
 /// two *different* `ThirdPersonBodyState::slim` values. A gate that only

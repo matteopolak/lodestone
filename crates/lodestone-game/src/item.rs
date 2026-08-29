@@ -155,6 +155,12 @@ pub const BASE_COLOR_COMPONENT: &str = "minecraft:base_color";
 /// first `floats`/`flags`/`strings`/`colors` entry vanilla's record holds is
 /// modelled, because that is the field resource packs actually select on.
 pub const CUSTOM_MODEL_DATA_COMPONENT: &str = "minecraft:custom_model_data";
+/// Well-known component identifier for `minecraft:item_model`.
+///
+/// This is a client-side item-definition override: a stack can remain a
+/// `minecraft:diamond_sword` for gameplay while its visuals come from the
+/// resource-pack definition named here.
+pub const ITEM_MODEL_COMPONENT: &str = "minecraft:item_model";
 /// The component a plugin's *own* item identity lives under (issue #147).
 ///
 /// **Deliberately in the `lodestone:` namespace, not `minecraft:`.** It is not a
@@ -925,6 +931,24 @@ impl ItemStack {
         );
     }
 
+    /// The per-stack item-definition id, if this stack overrides its base
+    /// item's `assets/<namespace>/items/<path>.json` lookup.
+    #[must_use]
+    pub fn item_model(&self) -> Option<Identifier> {
+        match self.components.get_str(ITEM_MODEL_COMPONENT) {
+            Some(ComponentValue::Str(raw)) => raw.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Sets or clears the per-stack client-side item-definition id.
+    pub fn set_item_model(&mut self, value: Option<Identifier>) {
+        self.write_component(
+            ITEM_MODEL_COMPONENT,
+            value.map(|id| ComponentValue::Str(id.to_string())),
+        );
+    }
+
     /// The plugin-defined item identity this stack carries, if any — the
     /// `lodestone:item_id` tag (issue #147).
     ///
@@ -1001,6 +1025,12 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
     /// carries no representation here.
     fn from(stack: &lodestone_model::ItemStack) -> Self {
         let mut components = ItemComponents::new();
+
+        if let Some(item_model) = &stack.components.item_model
+            && let Ok(key) = ITEM_MODEL_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Str(item_model.to_string()));
+        }
 
         if let Some(name) = &stack.components.custom_name
             && let Ok(key) = CUSTOM_NAME_COMPONENT.parse()
@@ -1259,6 +1289,7 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
     ///   consumer must not treat their presence here as "the wire said so".
     fn from(stack: &ItemStack) -> Self {
         let components = lodestone_model::ItemComponents {
+            item_model: stack.item_model(),
             custom_name: stack.custom_name().cloned(),
             lore: stack.lore().to_vec(),
             damage: stack.damage().and_then(|d| u32::try_from(d).ok()),
@@ -1650,6 +1681,26 @@ mod tests {
         );
     }
 
+    /// `minecraft:item_model` changes the client-side definition lookup while
+    /// leaving the base item id intact for gameplay.
+    #[test]
+    fn item_model_reaches_the_game_component_map() {
+        let model = lodestone_model::ItemStack {
+            item: id("minecraft:diamond_sword"),
+            count: 1,
+            components: ModelItemComponents {
+                item_model: Some(id("server:gun")),
+                ..ModelItemComponents::default()
+            },
+        };
+
+        let converted = ItemStack::from(&model);
+        assert_eq!(
+            converted.components().get_str("minecraft:item_model"),
+            Some(&ComponentValue::Str("server:gun".to_owned()))
+        );
+    }
+
     /// Lore crosses the version seam as an ordered list of styled text trees;
     /// converting a decoded stack must neither flatten nor discard it.
     #[test]
@@ -1814,6 +1865,7 @@ mod tests {
             item: id("minecraft:diamond_pickaxe"),
             count: 3,
             components: ModelItemComponents {
+                item_model: Some(id("server:gun")),
                 custom_model_data: vec![4545.0_f32.to_bits()],
                 custom_name: Some(Text::literal("Excalibur")),
                 lore: vec![Text::literal("Forged beneath the old mountain")],

@@ -107,8 +107,8 @@ pub use draw::{MenuGeometry, SpriteCut, build, geometry};
 pub use favicon::{FaviconMosaic, default_head_icon, favicon_mosaic, head_mosaic};
 pub use frame::{
     AccountEntryView, Align, Arrow, CHUNK_CELL_EMPTY, CHUNK_CELL_FULL, CHUNK_CELL_SIZE,
-    ChunkGridView, FaviconCache, MenuBackdrop, MenuFrame, MenuLabel, MenuNotice, MenuProgress,
-    MenuRow, PROGRESS_BAR_BG, PROGRESS_BAR_FG, PROGRESS_BAR_H, PROGRESS_BAR_W, PackEntryView,
+    BookPageButton, ChunkGridView, FaviconCache, MenuBackdrop, MenuFrame, MenuLabel, MenuNotice,
+    MenuProgress, MenuRow, PROGRESS_BAR_BG, PROGRESS_BAR_FG, PROGRESS_BAR_H, PROGRESS_BAR_W, PackEntryView,
     ServerEntryView, TabEntryView, WorldEntryView, chunk_cell_colour, chunk_cell_origin,
     notice_rect, owns_frame,
 };

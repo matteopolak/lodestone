@@ -3637,17 +3637,6 @@ pub fn special_item_hover_lift(local_min: Vec3, local_max: Vec3, ground: &Displa
 // and its water patch share one: two matrices that must agree can only be
 // guaranteed to agree by being the same matrix.
 
-/// `ItemFrame.createBoundingBox`'s `shiftToBlockWall` — how far the entity's own
-/// position sits *behind* the centre of the block it hangs in
-/// (`Vec3.atCenterOf(pos).relative(direction, -0.46875)`), and therefore how far
-/// [`item_frame_space`] steps forward again to recover that centre.
-///
-/// The two are the same number in vanilla and are written once here for that
-/// reason: `ItemFrameRenderer.submit`'s own `poseStack.translate(direction.step *
-/// 0.46875)` exists purely to undo the entity's offset, so a mismatch would put
-/// every frame off its wall by the difference with nothing else looking wrong.
-const ITEM_FRAME_WALL_STEP: f32 = 0.46875;
-
 /// `poseStack.translate(0.0F, 0.0F, 0.4375F)` — how far in front of the frame's
 /// own plane a *visible* frame's contents sit.
 const ITEM_FRAME_CONTENT_LIFT: f32 = 0.4375;
@@ -3713,24 +3702,25 @@ pub fn item_frame_facing_step(yaw_deg: f32, pitch_deg: f32) -> Vec3 {
     item_frame_facing(yaw_deg, pitch_deg).transform_vector3(Vec3::NEG_Z)
 }
 
-/// The frame's own space: origin at the **centre of the block it hangs in**, `+z`
-/// into the wall behind it, in the `(feet, yaw, pitch)` terms the shell has for a
-/// `HangingEntity`.
+/// The frame's own space: origin at the **centre of its attachment block**, `+z`
+/// into the wall behind it, in the `(packet_anchor, yaw, pitch)` terms the shell
+/// has for a `HangingEntity`.
 ///
 /// ```text
-/// T(feet + dir · 0.46875) · Rx(pitch) · Ry(180 - yaw)
+/// T(floor(packet_anchor) + (0.5, 0.5, 0.5)) · Rx(pitch) · Ry(180 - yaw)
 /// ```
 ///
 /// Everything `ItemFrameRenderer.submit` draws is posed relative to this: the
 /// body at `T(-0.5, -0.5, -0.5)` (block models are corner-origin), the contents
-/// at `T(0, 0, 0.4375)`. The dispatcher's `getRenderOffset` and the renderer's own
-/// `translate(-renderOffset)` cancel exactly and are therefore absent here rather
-/// than ported as a pair.
+/// at `T(0, 0, 0.4375)`. `ItemFrame.getAddEntityPacket` sends `getPos()` — the
+/// integer attachment `BlockPos` — rather than the entity centre created by
+/// `recalculateBoundingBox`. The dispatcher offset and the renderer's matching
+/// negative offset cancel, then the renderer's `direction * .46875` cancels the
+/// entity-centre displacement, leaving exactly this block centre.
 #[must_use]
-pub fn item_frame_space(feet: Vec3, yaw_deg: f32, pitch_deg: f32) -> Mat4 {
-    let facing = item_frame_facing(yaw_deg, pitch_deg);
-    let step = facing.transform_vector3(Vec3::NEG_Z) * ITEM_FRAME_WALL_STEP;
-    Mat4::from_translation(feet + step) * facing
+pub fn item_frame_space(packet_anchor: Vec3, yaw_deg: f32, pitch_deg: f32) -> Mat4 {
+    Mat4::from_translation(packet_anchor.floor() + Vec3::splat(0.5))
+        * item_frame_facing(yaw_deg, pitch_deg)
 }
 
 /// The world placement for the frame **body** — the wooden border and back
@@ -3741,8 +3731,8 @@ pub fn item_frame_space(feet: Vec3, yaw_deg: f32, pitch_deg: f32) -> Mat4 {
 /// corner-origin convention, not a centring fudge — the same pair
 /// `falling_block_pose` applies for the same reason.
 #[must_use]
-pub fn item_frame_body_matrix(feet: Vec3, yaw_deg: f32, pitch_deg: f32) -> Mat4 {
-    item_frame_space(feet, yaw_deg, pitch_deg) * Mat4::from_translation(Vec3::splat(-0.5))
+pub fn item_frame_body_matrix(packet_anchor: Vec3, yaw_deg: f32, pitch_deg: f32) -> Mat4 {
+    item_frame_space(packet_anchor, yaw_deg, pitch_deg) * Mat4::from_translation(Vec3::splat(-0.5))
 }
 
 /// How far in front of the frame's plane its contents sit, `invisible` selecting
@@ -3768,22 +3758,20 @@ pub fn item_frame_content_lift(invisible: bool) -> f32 {
 /// # The sign trap
 ///
 /// The lift is along the frame's own local `+z`, which after
-/// [`item_frame_facing`] points **into** the wall — so the contents end up
-/// `0.46875 - 0.4375 = 0.03125` blocks in front of the entity's position, not
-/// nearly a block out from it. Getting that sign wrong (or dropping the
-/// `180 - yaw`, which has the same effect) floats the item a full block off the
-/// wall in front of the frame, where it reads as an unrelated placement bug
-/// rather than as a rotation one.
+/// [`item_frame_facing`] points **into** the wall. From the packet's attachment
+/// block centre, visible contents therefore land `0.4375` toward its wall face;
+/// equivalently, they are `1/16` outside that face. Getting that sign wrong (or
+/// dropping `180 - yaw`) sends contents through the attachment block instead.
 #[must_use]
 pub fn framed_item_matrix(
-    feet: Vec3,
+    packet_anchor: Vec3,
     yaw_deg: f32,
     pitch_deg: f32,
     rotation: u8,
     invisible: bool,
     fixed: &DisplayTransform,
 ) -> Mat4 {
-    item_frame_space(feet, yaw_deg, pitch_deg)
+    item_frame_space(packet_anchor, yaw_deg, pitch_deg)
         * Mat4::from_translation(Vec3::new(0.0, 0.0, item_frame_content_lift(invisible)))
         * Mat4::from_rotation_z(
             (f32::from(rotation % 8) * FRAMED_ITEM_ROTATION_STEP_DEG).to_radians(),
@@ -3812,14 +3800,14 @@ pub fn framed_item_mesh(
     quads: &[BakedQuad],
     gui_light: GuiLight,
     fixed: &DisplayTransform,
-    feet: Vec3,
+    packet_anchor: Vec3,
     yaw_deg: f32,
     pitch_deg: f32,
     rotation: u8,
     invisible: bool,
     light: u8,
 ) -> ModelMesh {
-    let pose = framed_item_matrix(feet, yaw_deg, pitch_deg, rotation, invisible, fixed);
+    let pose = framed_item_matrix(packet_anchor, yaw_deg, pitch_deg, rotation, invisible, fixed);
     mesh_item_quads_with_light(quads, pose, gui_light, light)
 }
 
@@ -6037,9 +6025,9 @@ mod tests {
         );
     }
 
-    /// A framed item sits just in front of the frame's plane, on the side the
-    /// frame faces, and is drawn at vanilla's `0.5` rather than the framed
-    /// *map*'s full block.
+    /// A framed item sits just outside the attachment block's wall face, on the
+    /// side the frame faces, and is drawn at vanilla's `0.5` rather than the
+    /// framed *map*'s full block.
     ///
     /// # The magnitudes, not the signs
     ///
@@ -6048,10 +6036,10 @@ mod tests {
     /// item somewhere in `+z`. The two disagree about *how far*, and that is the
     /// whole bug:
     ///
-    /// | reading | offset from the entity |
+    /// | reading | offset from the attachment block centre |
     /// |---|---|
-    /// | lift along the frame's own `+z`, which points **into** the wall | `0.46875 - 0.4375 = 0.03125` — correct |
-    /// | lift along the facing, i.e. the two translates added | `0.46875 + 0.4375 = 0.90625` — a full block out in front |
+    /// | lift along the frame's own `+z`, which points **into** the wall | `-0.4375 · facing` — correct |
+    /// | lift along the facing, i.e. the signs added | `+0.4375 · facing` — through the block |
     ///
     /// So each arm predicts the correct value *and* names the wrong one, per
     /// `CLAUDE.md`'s magnitude rule.
@@ -6064,7 +6052,8 @@ mod tests {
     fn a_framed_item_sits_just_in_front_of_its_frame_and_is_drawn_half_size() {
         use lodestone_assets::DisplayTransform;
         let identity = DisplayTransform::default();
-        let feet = Vec3::new(4.0, 65.0, -9.0);
+        let anchor = Vec3::new(4.0, 65.0, -9.0);
+        let block_centre = anchor + Vec3::splat(0.5);
         // A block-entity rig lives in the block's own `[0,1]³` corner-origin space
         // (see `block_entity_placement_matrix`'s pivot of `(0.5, 0, 0.5)`), and
         // `display_matrix`'s trailing `translate(-0.5, -0.5, -0.5)` centres exactly
@@ -6072,41 +6061,34 @@ mod tests {
         // **centre**, not its corner — probing `Vec3::ZERO` measures a corner and
         // reports a spurious offset along every axis the rotation touches.
         let centre_of = |m: Mat4| m.transform_point3(Vec3::splat(0.5));
-        /// `0.46875 - 0.4375`: the step off the wall, less the step back toward it.
-        const CORRECT: f32 = 0.031_25;
-        /// The two translates added instead of subtracted.
-        const WRONG: f32 = 0.906_25;
+        const CONTENT_LIFT: f32 = 0.4375;
 
         // Yaw 0 is south (`+z`) in vanilla.
-        let pose = framed_item_matrix(feet, 0.0, 0.0, 0, false, &identity);
+        let pose = framed_item_matrix(anchor, 0.0, 0.0, 0, false, &identity);
         let centre = centre_of(pose);
+        let south_expected = block_centre - Vec3::new(0.0, 0.0, CONTENT_LIFT);
         assert!(
-            (centre.z - (-9.0 + CORRECT)).abs() < 1.0e-5,
-            "a south-facing frame's item sits {CORRECT} in front of the entity, \
-             not {WRONG}; got z={} (entity z=-9.0)",
-            centre.z
+            (centre - south_expected).length() < 1.0e-5,
+            "a south-facing frame's item must sit at {south_expected}, got {centre}"
         );
-        let north = centre_of(framed_item_matrix(feet, 180.0, 0.0, 0, false, &identity));
+        let north = centre_of(framed_item_matrix(anchor, 180.0, 0.0, 0, false, &identity));
         assert!(
-            (north.z - (-9.0 - CORRECT)).abs() < 1.0e-5,
-            "a north-facing frame's item mirrors it, got z={}",
-            north.z
+            (north - (block_centre + Vec3::new(0.0, 0.0, CONTENT_LIFT))).length() < 1.0e-5,
+            "a north-facing frame's item must mirror about the attachment block centre, got {north}"
         );
         // West and east are the arms that separate the frame's real `Direction`
         // from a bare `Ry(yaw)`: those two agree at yaw 0 and 180 and disagree in
         // sign at 90 and 270, so a corpus that only ever probes a north/south wall
         // cannot see the difference at all.
-        let west = centre_of(framed_item_matrix(feet, 90.0, 0.0, 0, false, &identity));
+        let west = centre_of(framed_item_matrix(anchor, 90.0, 0.0, 0, false, &identity));
         assert!(
-            (west.x - (4.0 - CORRECT)).abs() < 1.0e-5,
-            "yaw 90 is west, so the item moves to -x; got x={}",
-            west.x
+            (west - (block_centre + Vec3::new(CONTENT_LIFT, 0.0, 0.0))).length() < 1.0e-5,
+            "yaw 90 is west, so the item must move to +x from the attachment centre; got {west}"
         );
-        let east = centre_of(framed_item_matrix(feet, 270.0, 0.0, 0, false, &identity));
+        let east = centre_of(framed_item_matrix(anchor, 270.0, 0.0, 0, false, &identity));
         assert!(
-            (east.x - (4.0 + CORRECT)).abs() < 1.0e-5,
-            "yaw 270 is east, so the item moves to +x; got x={}",
-            east.x
+            (east - (block_centre - Vec3::new(CONTENT_LIFT, 0.0, 0.0))).length() < 1.0e-5,
+            "yaw 270 is east, so the item must move to -x from the attachment centre; got {east}"
         );
 
         // The scale: the rig's full `[0,1]` width must come out half a block.
@@ -6127,20 +6109,18 @@ mod tests {
         // `Direction.DOWN`'s step is `-1`. So a pitch-90 frame faces down and its
         // item hangs *below* the entity. Reading it the other way round is the
         // mistake this arm exists to name, and it is invisible on a wall frame.
-        let ceiling = centre_of(framed_item_matrix(feet, 0.0, 90.0, 0, false, &identity));
+        let ceiling = centre_of(framed_item_matrix(anchor, 0.0, 90.0, 0, false, &identity));
         assert!(
-            (ceiling.y - (65.0 - CORRECT)).abs() < 1.0e-5,
-            "a pitch-90 frame faces DOWN, so its item sits below the entity; got y={}",
-            ceiling.y
+            (ceiling - (block_centre + Vec3::new(0.0, CONTENT_LIFT, 0.0))).length() < 1.0e-5,
+            "a pitch-90 frame faces DOWN, so its item must sit above the attachment centre; got {ceiling}"
         );
-        let floor = centre_of(framed_item_matrix(feet, 0.0, -90.0, 0, false, &identity));
+        let floor = centre_of(framed_item_matrix(anchor, 0.0, -90.0, 0, false, &identity));
         assert!(
-            (floor.y - (65.0 + CORRECT)).abs() < 1.0e-5,
-            "a pitch -90 frame faces UP, so its item sits above the entity; got y={}",
-            floor.y
+            (floor - (block_centre - Vec3::new(0.0, CONTENT_LIFT, 0.0))).length() < 1.0e-5,
+            "a pitch -90 frame faces UP, so its item must sit below the attachment centre; got {floor}"
         );
         assert!(
-            (ceiling.z - (-9.0)).abs() < 1.0e-4,
+            (ceiling.z - block_centre.z).abs() < 1.0e-4,
             "a pitched frame must not also move along z, got z={}",
             ceiling.z
         );
@@ -6157,11 +6137,10 @@ mod tests {
     /// distance and hides the item behind its own backing.
     #[test]
     fn the_item_frame_body_puts_its_back_plate_against_the_wall() {
-        // A south-facing frame in the block whose centre is (4.5, 65.5, -8.5): the
-        // entity therefore sits 0.46875 back along +z from that centre.
-        let centre = Vec3::new(4.5, 65.5, -8.5);
-        let feet = centre - Vec3::new(0.0, 0.0, ITEM_FRAME_WALL_STEP);
-        let pose = item_frame_body_matrix(feet, 0.0, 0.0);
+        // The actual spawn packet carries this attachment block position.
+        let anchor = Vec3::new(4.0, 65.0, -9.0);
+        let centre = anchor + Vec3::splat(0.5);
+        let pose = item_frame_body_matrix(anchor, 0.0, 0.0);
 
         // Local (0.5, 0.5, 1.0) is the middle of the back plate's outer face.
         let back = pose.transform_point3(Vec3::new(0.5, 0.5, 1.0));
@@ -6188,6 +6167,53 @@ mod tests {
             "the frame body draws at 1:1, got {}",
             (right - left).length()
         );
+    }
+
+    /// An item frame's add-entity packet carries its attachment `BlockPos`, not
+    /// its offset entity centre. The renderer therefore begins at that block's
+    /// centre after its dispatch/render-offset pair cancels.
+    #[test]
+    fn item_frame_space_centres_the_integer_packet_anchor() {
+        let anchor = Vec3::new(4.0, 65.0, -9.0);
+        let expected = anchor + Vec3::splat(0.5);
+        for (yaw, pitch) in [
+            (0.0_f32, 0.0_f32),
+            (90.0, 0.0),
+            (180.0, 0.0),
+            (270.0, 0.0),
+            (0.0, -90.0),
+            (0.0, 90.0),
+        ] {
+            let origin = item_frame_space(anchor, yaw, pitch).transform_point3(Vec3::ZERO);
+            assert!(
+                (origin - expected).length() < 1.0e-5,
+                "yaw {yaw}, pitch {pitch}: packet anchor {anchor} must centre frame space at {expected}, got {origin}"
+            );
+        }
+    }
+
+    /// The back of the one-block frame body is flush with the attachment block's
+    /// wall face for every possible `Direction`.
+    #[test]
+    fn item_frame_body_back_plate_lands_on_the_packet_anchors_wall_face() {
+        let anchor = Vec3::new(4.0, 65.0, -9.0);
+        for (yaw, pitch) in [
+            (0.0_f32, 0.0_f32),
+            (90.0, 0.0),
+            (180.0, 0.0),
+            (270.0, 0.0),
+            (0.0, -90.0),
+            (0.0, 90.0),
+        ] {
+            let facing = item_frame_facing_step(yaw, pitch);
+            let back = item_frame_body_matrix(anchor, yaw, pitch)
+                .transform_point3(Vec3::new(0.5, 0.5, 1.0));
+            let expected = anchor + Vec3::splat(0.5) - facing * 0.5;
+            assert!(
+                (back - expected).length() < 1.0e-5,
+                "yaw {yaw}, pitch {pitch}: body back must lie on attachment wall {expected}, got {back}"
+            );
+        }
     }
 
     /// [`item_frame_facing_step`] is the frame's real `Direction`, and the four
@@ -6271,8 +6297,8 @@ mod tests {
     fn an_invisible_frame_lifts_its_contents_the_extra_sixteenth() {
         assert!((item_frame_content_lift(false) - 0.4375).abs() < 1.0e-6);
         assert!((item_frame_content_lift(true) - 0.5).abs() < 1.0e-6);
-        // The consequence in world space: an invisible frame's item sits *at* the
-        // entity's own position (0.46875 - 0.5 is 1/32 behind it), not in front.
+        // The consequence in world space: an invisible frame's item reaches the
+        // attachment block wall; the visible item stays one sixteenth outside it.
         use lodestone_assets::DisplayTransform;
         let identity = DisplayTransform::default();
         let feet = Vec3::new(4.0, 65.0, -9.0);

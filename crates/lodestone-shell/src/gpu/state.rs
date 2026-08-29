@@ -1334,6 +1334,13 @@ impl RenderState {
         );
     }
 
+    /// Rebind static block-entity sheets after a resource-pack generation bump.
+    /// This is separate from [`Self::reload_block_atlas`] because player-head
+    /// fallback sheets are not part of the block atlas.
+    pub fn reload_block_entity_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.block_entities.reload_textures(device, queue);
+    }
+
     /// Whether the stitched particle sheet is uploaded and bound. Same reason
     /// as [`has_sky`](Self::has_sky), with more teeth: with this `false` every
     /// flame, smoke and crit particle resolves, uploads, submits a draw — and

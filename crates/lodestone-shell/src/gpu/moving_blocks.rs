@@ -77,6 +77,7 @@ use crate::entities::EntityDraw;
 
 use super::entity_passes::item_frame_light;
 use super::maps::GLOW_ITEM_FRAME_TYPE_PATH;
+use super::pack_trace::{should_trace_candidate, unit_quad_normal, unit_quad_plane};
 use super::terrain::ModelRenderer;
 use super::{RenderState, RenderStats};
 
@@ -332,7 +333,7 @@ impl RenderState {
         // item frame's body is a block model reached through
         // `BlockStateDefinitions.getItemFrameFakeState`, not through the block
         // registry. See `merge_item_frames`.
-        self.merge_item_frames(model, entities, &frustum, &mut combined, stats);
+        self.merge_item_frames(model, camera, entities, &frustum, &mut combined, stats);
         // A sixth producer of the same shape, and the first whose requests come
         // from neither an `EntityDraw` slice nor a block-entity source: a
         // `block_display` is a `Display`-family entity, extracted by
@@ -718,6 +719,7 @@ impl RenderState {
     fn merge_item_frames(
         &self,
         model: &ModelRenderer,
+        camera: &Camera,
         entities: &[EntityDraw],
         frustum: &Frustum,
         combined: &mut ModelMesh,
@@ -753,9 +755,36 @@ impl RenderState {
             if quads.is_empty() {
                 continue;
             }
+            let transform = lodestone_render::entity::item_frame_body_matrix(
+                draw.feet, draw.yaw, draw.pitch,
+            );
+            if should_trace_candidate("item_frame_body", draw.id, draw.feet, camera.position) {
+                let facing = lodestone_render::entity::item_frame_facing(draw.yaw, draw.pitch)
+                    .transform_vector3(glam::Vec3::NEG_Z)
+                    .to_array();
+                tracing::debug!(
+                    target: "pack_trace",
+                    surface = "item_frame_body",
+                    entity_id = draw.id,
+                    protocol_type = %draw.type_path,
+                    world_pos = ?draw.feet.to_array(),
+                    yaw = draw.yaw,
+                    pitch = draw.pitch,
+                    invisible = draw.invisible,
+                    attachment_facing = ?facing,
+                    frame_rotation = draw.item_frame_rotation,
+                    held_item = ?draw.item.as_ref().map(ToString::to_string),
+                    item_model = ?draw.item_model.as_ref().map(ToString::to_string),
+                    map_item = map,
+                    final_transform = ?transform.to_cols_array_2d(),
+                    quad_plane = ?unit_quad_plane(transform),
+                    quad_normal = ?unit_quad_normal(transform),
+                    "nearby render candidate reached item-frame body draw"
+                );
+            }
             combined.merge(&mesh_moving_block_quads(
                 quads,
-                lodestone_render::entity::item_frame_body_matrix(draw.feet, draw.yaw, draw.pitch),
+                transform,
                 item_frame_light(&self.entity_light, draw, glow),
             ));
             stats.item_frame_bodies_drawn += 1;
@@ -835,6 +864,25 @@ impl RenderState {
             let (min, max) = placement_bounds(&transform);
             if !frustum.intersects_aabb(min, max) {
                 continue;
+            }
+            if should_trace_candidate("block_display", draw.id, draw.position, camera.position) {
+                tracing::debug!(
+                    target: "pack_trace",
+                    surface = "block_display",
+                    entity_id = draw.id,
+                    protocol_type = draw.type_path,
+                    world_pos = ?draw.position.to_array(),
+                    yaw = draw.entity_yaw,
+                    pitch = draw.entity_pitch,
+                    invisibility_metadata = "not applicable to Display entities",
+                    billboard = ?draw.billboard,
+                    display_transform = ?draw.transform,
+                    block_state = state_id,
+                    final_transform = ?transform.to_cols_array_2d(),
+                    quad_plane = ?unit_quad_plane(transform),
+                    quad_normal = ?unit_quad_normal(transform),
+                    "nearby render candidate reached block-display draw"
+                );
             }
             // `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` take the
             // brightness override's own nibbles *instead of* the sampled

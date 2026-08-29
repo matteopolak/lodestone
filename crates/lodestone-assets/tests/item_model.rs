@@ -180,6 +180,33 @@ fn special_node_surfaces_renderer_kind_and_base() {
     );
 }
 
+/// Special renderer kinds are resource locations just like their base models.
+/// A server-pack definition is permitted to omit the default `minecraft`
+/// namespace, and downstream special-item routes intentionally match the
+/// canonical spelling.
+#[test]
+fn special_node_defaults_an_unqualified_renderer_kind_to_minecraft() {
+    let json = br#"{"model":{"type":"minecraft:special",
+        "base":"minecraft:item/template_skull",
+        "model":{"type":"head"}}}"#;
+    let model = ItemModel::parse(json).expect("unqualified special kind parses");
+
+    assert_eq!(
+        model.special_renderers(),
+        vec![(&loc("minecraft:item/template_skull"), "minecraft:head")],
+        "a bare special model.type is the default-namespaced renderer id"
+    );
+    let context = Ctx::default();
+    assert_eq!(
+        model.resolve(&context),
+        vec![ItemModelOutput::Special {
+            base: &loc("minecraft:item/template_skull"),
+            kind: "minecraft:head",
+            transformation: &[],
+        }]
+    );
+}
+
 /// The skull family's real gap: a `special` node's own `"transformation"`
 /// field (issue's own JSON, `assets/minecraft/items/skeleton_skull.json`) is
 /// parsed rather than silently dropped.

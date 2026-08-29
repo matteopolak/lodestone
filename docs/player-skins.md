@@ -6,8 +6,9 @@ The `textures` profile property — base64 → JSON → a URL plus a **wide/slim
 declaration** — the host-restricted fetch that turns it into a sheet, and the
 render halves that draw it on the inventory avatar, on other players' bodies in
 the world, and — rig **and** texture — on the local player's own third-person
-body and first-person arm. What is left is capes and the Yggdrasil signature,
-named under [What is missing](#what-is-missing).
+body and first-person arm. Resource-pack reload also rebinds the vanilla default
+head sheet when an overlay omits it. What is left is capes and the Yggdrasil
+signature, named under [What is missing](#what-is-missing).
 
 ## How it works
 
@@ -333,11 +334,11 @@ perform a real HTTP GET as a side effect of `cargo test` — a defect class no
 health check in this repo can see. See `DESIGN.md` on the unit test that was
 opening a browser on every `cargo test -p lodestone-shell`.
 
-## Custom heads: the same skin at three surfaces
+## Custom heads: the same skin at four surfaces
 
 A `minecraft:player_head` carrying a `minecraft:profile` with a `textures`
 property is a **custom head** — the decorative kind a server places, whose whole
-appearance is that one property. It reaches three different draw sites, each with
+appearance is that one property. It reaches four different draw sites, each with
 its own resolver and its own bind-group cache:
 
 | surface | producer | draw site | texture cache |
@@ -346,11 +347,53 @@ its own resolver and its own bind-group cache:
 | an inventory / hotbar slot | `container::builder::icon_record`, `app::redraw`'s hotbar fold | `hud/item_icon.rs`'s `SpecialIcons` | `SpecialIcons::player_skins` |
 | the first-person hand | `app::redraw`'s `held` (a clone of the hotbar record) | `RenderState::build_special_hand_draw` | `EntityRenderer::player_skins` |
 
-All three end in the same substitution: `special_item_rig`/`skull_spawn` resolves
+The `model.type` nested in an item-definition `special` node is itself a resource
+location. `lodestone_assets::item_model` canonicalizes an omitted namespace, so a
+pack's bare `"head"` becomes `minecraft:head` before GUI, hand, and world-special
+routes dispatch it. Keep that normalization at the parser boundary; adding aliases to
+individual draw sites would let those surfaces disagree after a pack reload.
+
+`minecraft:head` and `minecraft:player_head` both submit the raw, Y-down skull
+mesh. Vanilla item definitions—not the special renderers—supply the canonical
+wrapper `translation: [0.5, 0, 0.5]` plus a 180° X rotation. When this server
+pack retargets a player head to an empty generic `minecraft:head` node, shared
+special-item composition restores that complete wrapper once, after authored
+node transforms and before GUI, hand, or world placement. A non-empty parsed
+chain remains authoritative, preventing vanilla generic heads and legacy player
+heads from being wrapped twice. This is head-only; do not infer corrections for
+other custom special kinds.
+
+Every special-item surface ends in the same substitution: `special_item_rig`/`skull_spawn` resolves
 the head to `skull_texture_stem(SkullType::Player)` — the default sheet, which is
 the right answer for a *plain* head — and the caller replaces that stem with a
 `BlockEntityTexture::PlayerSkin(Arc<str>)` when the stack declares one. The enum
 is the shared batch key, not three parallel spellings of one identity.
+
+The fourth surface is a third-person held stack. It is deliberately a separate
+route from the first-person hand: the local avatar is a synthetic draw while a
+remote player starts in the tracked `SET_EQUIPMENT` entity. Both preserve the
+same profile URL beside their intentionally narrow `(EquipmentSlot,
+ResourceLocation)` visual-id list:
+
+```text
+local player menu ItemStack
+  -> ThirdPersonBodyState::equipment_skin -> EntityDraw::equipment_skin
+tracked SET_EQUIPMENT ItemStack
+  -> EntityFacts::equipment_skin -> RenderEquipmentSkin -> EntityDraw::equipment_skin
+both
+  -> RenderState::held_special_item -> BlockEntityTexture::PlayerSkin
+```
+
+This follows 26.2's `PlayerHeadSpecialRenderer.extractArgument`: it reads
+`DataComponents.PROFILE` from an underlying `minecraft:player_head` stack and
+asks the player-skin cache for the render argument. `minecraft:item_model` may
+select a different client item definition, but it does not change which stack
+owns `PROFILE`. Lodestone therefore creates this side channel only for that
+underlying item, starts the same deduplicated remote fetch, and applies the URL
+at the held special-item draw boundary. That boundary does not branch on a
+server-pack special-model name: this is data-component propagation, so a pack
+that resolves the player head through its generic `minecraft:head` renderer
+still receives the profile-selected sheet.
 
 **The world surface landed first and that is exactly what hid the other two.**
 The same head was correct once placed and plain in a slot and in your hand, which
@@ -406,6 +449,17 @@ evidence is the wrong face. Every decline therefore logs:
 
 The draw still falls back to the default sheet in all three cases — the fallback
 is right, the *silence* was the defect.
+
+### Pack reload keeps the default-head fallback bound
+
+`BlockEntityRenderer` owns the default player-head sheet as a static GPU binding.
+When a resource-pack generation changes, `RenderState` reloads those bindings from
+the merged resource manager as well as rebuilding the GUI and item atlases. A server
+pack may define `items/player_head.json` without supplying a player sheet; normal
+pack precedence then resolves the vanilla lower-priority sheet. If a custom-head skin
+fetch fails, the already rebound default sheet remains drawable instead of becoming a
+blank head. Extend this reload path whenever another static block-entity texture is
+made pack-resolved.
 
 ## Landed since this doc first said otherwise
 

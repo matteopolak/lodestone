@@ -189,6 +189,11 @@ pub fn build(
     let mut b = Quads::new(width, height);
     b.atlas = atlas;
     b.font = font;
+    // Vanilla's book screens pass `false` for the text-shadow argument on
+    // every draw in the screen, including page/title/indicator text and the
+    // editable and button widgets. The frame marker keeps that exception
+    // local to the book overlay instead of changing menu text globally.
+    b.plain_text = frame.book_background;
     // `Panorama` answers `false` here and takes `BG`: that quad is the
     // no-panorama fallback, and when the panorama really draws the renderer
     // skips these vertices altogether (see `MenuGeometry::backdrop_floats`).
@@ -224,6 +229,22 @@ pub fn build(
             EDITION_Y,
             EDITION_W,
             EDITION_H,
+            LABEL,
+        );
+    }
+
+    if frame.book_background {
+        // `BookViewScreen`/`BookEditScreen` blit the 192×192 top-left window
+        // from `textures/gui/book.png`'s 256×256 logical sheet. The sheet is a
+        // loose menu-atlas extra, so this resolves from the active pack stack
+        // instead of being a procedural rectangle or a jar-pinned texture.
+        b.sprite_region(
+            "book/background",
+            (width * 0.5).floor() - 96.0,
+            2.0,
+            192.0,
+            192.0,
+            [0.0, 0.0, 192.0 / 256.0, 192.0 / 256.0],
             LABEL,
         );
     }
@@ -1680,6 +1701,32 @@ fn draw_widget(
         return;
     }
 
+    if let Some(page) = row.book_page {
+        // `BookViewScreen.updateButtonVisibility` hides an unavailable turn
+        // arrow outright; unlike ordinary buttons, a disabled page arrow is
+        // not drawn as a grey control.
+        if !row.enabled {
+            return;
+        }
+        let highlighted = widget.is_hovered_or_focused();
+        let sprite = match (page, highlighted) {
+            (BookPageButton::Backward, false) => "widget/page_backward",
+            (BookPageButton::Backward, true) => "widget/page_backward_highlighted",
+            (BookPageButton::Forward, false) => "widget/page_forward",
+            (BookPageButton::Forward, true) => "widget/page_forward_highlighted",
+        };
+        if b.has_sprite(sprite) {
+            b.sprite(sprite, x, y, w, h, LABEL);
+        } else {
+            // Jar-less runs still need a legible, correctly-sized control even
+            // though no page-arrow art is available to sample.
+            let colour = widget.message_colour();
+            let tw = b.text_width(&row.label, 1.0);
+            b.text(&row.label, (x + (w - tw) * 0.5).floor(), y + 3.0, 1.0, colour);
+        }
+        return;
+    }
+
     // `WidgetSprites::get(active, hoveredOrFocused)` (`WidgetSprites.java`)
     // with `AbstractButton`'s three-argument sprite set: disabled wins over
     // hovered, which is why a greyed-out button under the cursor still looks
@@ -2095,6 +2142,8 @@ pub(super) struct Quads<'a> {
     sprites: Vec<f32>,
     atlas: Option<&'a GuiAtlas>,
     font: Option<&'a VanillaFont>,
+    /// Whether this frame's text uses vanilla's no-shadow draw overload.
+    plain_text: bool,
     /// The active clip rect in **logical pixels** as `(x0, y0, x1, y1)`, or
     /// `None` for unclipped. See [`Quads::with_clip`].
     clip: Option<(f32, f32, f32, f32)>,
@@ -2118,6 +2167,7 @@ impl Quads<'_> {
             sprites: Vec::new(),
             atlas: None,
             font: None,
+            plain_text: false,
             clip: None,
             text_scratch: Vec::new(),
             cuts: Vec::new(),
@@ -2290,6 +2340,51 @@ impl Quads<'_> {
         }
     }
 
+    /// As [`Self::sprite`], but samples a fractional `(u0, v0, u1, v1)` region
+    /// of a raw sheet. `GuiAtlas::geometry` has no arbitrary source-window
+    /// primitive because ordinary GUI sprites consume their complete declared
+    /// image; `gui/book.png` is one of vanilla's few callers that does not.
+    fn sprite_region(
+        &mut self,
+        id: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        region: [f32; 4],
+        c: [f32; 4],
+    ) {
+        let quads: Vec<GuiSpriteQuad> = match self.atlas {
+            Some(a) => a.geometry(id, x, y, w, h),
+            None => return,
+        };
+        let colour_floats = self.verts.len();
+        if self
+            .cuts
+            .last()
+            .is_none_or(|cut| cut.colour_floats != colour_floats)
+        {
+            self.cuts.push(SpriteCut {
+                colour_floats,
+                sprite_start: self.sprites.len(),
+                sprite_end: self.sprites.len(),
+            });
+        }
+        for mut q in quads {
+            let [u0, v0] = q.uv_min;
+            let [u1, v1] = q.uv_max;
+            let (du, dv) = (u1 - u0, v1 - v0);
+            q.uv_min = [u0 + du * region[0], v0 + dv * region[1]];
+            q.uv_max = [u0 + du * region[2], v0 + dv * region[3]];
+            if let Some(q) = self.crop_sprite_quad(q) {
+                push_sprite_quad(&mut self.sprites, self.w, self.h, q, c);
+            }
+        }
+        if let Some(cut) = self.cuts.last_mut() {
+            cut.sprite_end = self.sprites.len();
+        }
+    }
+
     /// Crop one sprite quad's destination **and** its UVs to the active clip, so
     /// the texture is cut rather than squashed. See [`Quads::with_clip`].
     fn crop_sprite_quad(&self, q: GuiSpriteQuad) -> Option<GuiSpriteQuad> {
@@ -2400,18 +2495,16 @@ impl Quads<'_> {
         if let Some(f) = self.font {
             let (w, h) = (self.w, self.h);
             if self.clip.is_none() {
-                f.draw(
-                    &mut ColourStream {
-                        verts: &mut self.verts,
-                        w,
-                        h,
-                    },
-                    s,
-                    x,
-                    y,
-                    scale,
-                    c,
-                );
+                let mut stream = ColourStream {
+                    verts: &mut self.verts,
+                    w,
+                    h,
+                };
+                if self.plain_text {
+                    f.draw_plain(&mut stream, s, x, y, scale, c);
+                } else {
+                    f.draw(&mut stream, s, x, y, scale, c);
+                }
                 return;
             }
             // Clipped: draw into scratch, then cut the emitted quads in NDC.
@@ -2425,18 +2518,16 @@ impl Quads<'_> {
             // vertices reconstructs the rect losslessly.
             let mut scratch = core::mem::take(&mut self.text_scratch);
             scratch.clear();
-            f.draw(
-                &mut ColourStream {
-                    verts: &mut scratch,
-                    w,
-                    h,
-                },
-                s,
-                x,
-                y,
-                scale,
-                c,
-            );
+            let mut stream = ColourStream {
+                verts: &mut scratch,
+                w,
+                h,
+            };
+            if self.plain_text {
+                f.draw_plain(&mut stream, s, x, y, scale, c);
+            } else {
+                f.draw(&mut stream, s, x, y, scale, c);
+            }
             self.append_clipped_ndc_quads(&scratch);
             self.text_scratch = scratch;
             return;

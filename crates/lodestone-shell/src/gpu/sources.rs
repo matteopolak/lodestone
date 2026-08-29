@@ -282,6 +282,12 @@ pub struct ThirdPersonBodyState {
     /// armour slots (head/chest/legs/feet), the same as any other entity's
     /// `EntityDraw::equipment`.
     pub equipment: Vec<(EquipmentSlot, ResourceLocation)>,
+    /// Per-slot custom player-head skin URL, paired with [`Self::equipment`]
+    /// rather than folded into its tuple for the same reason the tracked-entity
+    /// path keeps dye and trim additive: most item consumers need only the
+    /// visual item id, while the special-head renderer additionally needs the
+    /// stack's `minecraft:profile` texture.
+    pub equipment_skin: Vec<(EquipmentSlot, std::sync::Arc<str>)>,
 }
 
 /// A reserved id for [`ThirdPersonBodyState::into_draw`]'s synthetic
@@ -317,7 +323,9 @@ impl ThirdPersonBodyState {
             id: LOCAL_PLAYER_DRAW_ID,
             type_path: std::sync::Arc::from(player_model_name(self.slim)),
             item: None,
+            item_model: None,
             equipment: self.equipment,
+            equipment_skin: self.equipment_skin,
             // The local player's own dye colours are not plumbed to
             // `ThirdPersonBodyState` yet — a separate gap from the network
             // path's, since this body's armour comes from the player's own

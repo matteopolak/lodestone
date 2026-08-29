@@ -6277,6 +6277,10 @@ pub fn routes_menu_input(ui: &UiState) -> bool {
         // hover, click and type into. Without this arm the screen would open
         // and never receive a single keystroke or click.
         || ui.is_book_edit_open()
+        // The signed-book reader is its own overlay screen, but shares the
+        // editor's row hit-test path. Without this arm arrow and Done clicks
+        // fall through to gameplay before the book frame can receive them.
+        || ui.is_book_view_open()
         // Issue #167. Advancements is not `owns_frame` (it is an overlay drawn
         // through `ContainerRenderer`), but Escape has to close it, and the
         // `_` arm of `MenuNav::key` routes exactly that through
@@ -10912,6 +10916,25 @@ mod tests {
                     },
                 );
             }),
+            // The signed-book reader is the editable book screen's sibling,
+            // but it still owns mouse input while rendering over the world.
+            // Keep it explicit: omitting it from `routes_menu_input` makes
+            // every arrow and Done click fall through to gameplay.
+            ("BookView", |ui, nav| {
+                ui.enter_dev_world();
+                nav.open_book_view(
+                    ui,
+                    book_view::BookViewOpen::from_pages(
+                        "Notes".to_string(),
+                        "Steve".to_string(),
+                        0,
+                        &[
+                            lodestone_model::text::Text::literal("first"),
+                            lodestone_model::text::Text::literal("second"),
+                        ],
+                    ),
+                );
+            }),
             // The sixth overlay screen — the frame is built from
             // `MenuNav::resource_pack_prompt`, so this drives
             // `show_resource_pack_prompt` rather than a bare
@@ -10954,6 +10977,77 @@ mod tests {
                  has no frame for it, so every click is dropped before it reaches a row"
             );
         }
+    }
+
+    /// The three book controls are overlays, so their mouse path is only live
+    /// if both the routing predicate and the screen-specific hover state agree.
+    /// A signed book has no editable field to mask either omission: hovering a
+    /// page arrow must light that arrow, and clicking it must turn the page.
+    #[test]
+    fn book_reader_buttons_route_hover_and_click_through_the_overlay_frame() {
+        let (mut nav, _) = nav("book-reader-mouse");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        nav.open_book_view(
+            &mut ui,
+            book_view::BookViewOpen::from_pages(
+                "Notes".to_string(),
+                "Steve".to_string(),
+                0,
+                &[
+                    lodestone_model::text::Text::literal("first"),
+                    lodestone_model::text::Text::literal("second"),
+                ],
+            ),
+        );
+
+        assert!(routes_menu_input(&ui), "the reader owns overlay mouse input");
+        nav.hover(&ui, book_view::page_row::NEXT);
+        assert_eq!(
+            book_edit_overlay_frame(&ui, &nav).map(|frame| frame.hovered),
+            Some(Some(book_view::page_row::NEXT)),
+            "hovering the next-page rect reaches the frame the renderer draws"
+        );
+        assert_eq!(
+            nav.click(&mut ui, book_view::page_row::NEXT),
+            MenuAction::None,
+            "a hand-held book page turn is local"
+        );
+        assert_eq!(nav.book_view().unwrap().page_indicator(), (2, 2));
+
+        nav.hover(&ui, book_view::page_row::DONE);
+        assert_eq!(
+            book_edit_overlay_frame(&ui, &nav).map(|frame| frame.hovered),
+            Some(Some(book_view::page_row::DONE)),
+            "Done also renders a hover state"
+        );
+        assert_eq!(nav.click(&mut ui, book_view::page_row::DONE), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Playing, "Done closes the reader");
+    }
+
+    /// The writable-book editor shares the reader's arrows and Done geometry,
+    /// but keeps a distinct state object. Keep its hover path covered too so a
+    /// future reader-only fix cannot strand the editable book's controls.
+    #[test]
+    fn writable_book_buttons_record_hover() {
+        let (mut nav, _) = nav("book-editor-hover");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        nav.open_book_edit(
+            &mut ui,
+            book_edit::BookEditOpen {
+                slot: 0,
+                pages: vec![String::new()],
+                author: "Steve".to_string(),
+            },
+        );
+
+        nav.hover(&ui, book_edit::page_row::DONE);
+        assert_eq!(
+            book_edit_overlay_frame(&ui, &nav).map(|frame| frame.hovered),
+            Some(Some(book_edit::page_row::DONE)),
+            "Done in the editable-book frame is hovered"
+        );
     }
 
     /// **The control for the gate above, run and observed.**

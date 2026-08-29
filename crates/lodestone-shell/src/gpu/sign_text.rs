@@ -335,14 +335,14 @@ impl SignGeometryCache {
 /// so as the player moved and the in-range set changed, whole signs blinked
 /// completely in and out with nothing logged anywhere.
 ///
-/// 262,144 is 7.34 MB at 28 bytes a vertex — against ~67 MB of terrain mesh
-/// at render distance 8, a real but proportionate cost — and buys 34
-/// fully-written signs or ~188 ordinary ones **in front of the camera**
+/// 524,288 is 14.68 MB at 28 bytes a vertex — against ~67 MB of terrain mesh
+/// at render distance 8, a real but proportionate cost — and buys 68
+/// fully-written signs or ~376 ordinary ones **in front of the camera**
 /// within the 64-block gather. It is still a budget rather than a guarantee,
-/// which is why [`prepare`](SignTextRenderer::prepare) now spends it
-/// nearest-first and says out loud when it binds instead of dropping in
-/// silence.
-const MAX_SIGN_TEXT_VERTICES: usize = 262_144;
+/// which is why [`prepare`](SignTextRenderer::prepare) spends it
+/// nearest-first and reports the first overflow for this renderer instead of
+/// logging every frame.
+const MAX_SIGN_TEXT_VERTICES: usize = 524_288;
 
 /// How far behind the eye plane a sign's centre may sit and still be built.
 /// A sign is under a block across, so one block of slack keeps a board the
@@ -404,6 +404,9 @@ pub(super) struct SignTextRenderer {
     /// Finished world-space layers for signs whose semantic state has not
     /// changed since the preceding frame.
     geometry: SignGeometryCache,
+    /// One warning for the renderer lifetime; camera movement may briefly
+    /// recover and re-exhaust the budget without making another WARN useful.
+    budget_warning: crate::sign_diagnostics::BudgetWarningState,
     /// Prefix length in `vertices` belonging to [`Self::outline_pipeline`].
     outline_count: Cell<u32>,
 }
@@ -465,6 +468,7 @@ impl SignTextRenderer {
             font: super::nametag::load_font(),
             ink: super::nametag::StyledInkLayoutCache::default(),
             geometry: SignGeometryCache::default(),
+            budget_warning: crate::sign_diagnostics::BudgetWarningState::default(),
             outline_count: Cell::new(0),
         }
     }
@@ -637,6 +641,7 @@ impl SignTextRenderer {
             drawn += 1;
         }
         crate::sign_diagnostics::report_draw_budget(
+            &self.budget_warning,
             signs.len(),
             ordered.len(),
             drawn,

@@ -58,6 +58,10 @@ impl ItemStack {
 /// see each field's docs for why guessing is the trap.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ItemComponents {
+    /// `minecraft:item_model`'s item-definition id. When present, this replaces
+    /// the stack's base item id for client-side `assets/<namespace>/items/*.json`
+    /// lookup; it does not change the item used for gameplay.
+    pub item_model: Option<ResourceKey>,
     /// `minecraft:custom_model_data`'s numeric selector list, stored as raw
     /// IEEE-754 bits so this version-free, equality-bearing model never has to
     /// pretend `f32` is `Eq`. Item-model `range_dispatch` reads index zero.

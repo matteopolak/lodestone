@@ -286,6 +286,37 @@ impl BlockEntityRenderer {
     pub(super) fn sheet_count(&self) -> usize {
         self.textures.len()
     }
+
+    /// Rebuild the static block-entity sheets against the current resource-pack
+    /// stack. Player-head remote-skin failures intentionally fall back through
+    /// this map to vanilla Steve, so leaving it on a pre-reload pack can turn a
+    /// recoverable 404 into a blank head.
+    pub(super) fn reload_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("lodestone-block-entity-sampler-reload"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let real = crate::resources::load_block_entity_textures();
+        let mut textures = HashMap::new();
+        for stem in block_entity_texture_stems() {
+            let Some(img) = real.get(stem) else {
+                continue;
+            };
+            let cropped;
+            let img = if stem == CONDUIT_WIND_TEXTURE_STEM || stem == CONDUIT_WIND_VERTICAL_TEXTURE_STEM
+            {
+                cropped = img.first_animation_frame(32);
+                &cropped
+            } else {
+                img
+            };
+            let view = super::entities::entity_texture_from_image(device, queue, img);
+            textures.insert(stem, self.pipeline.texture_bind_group(device, &view, &sampler));
+        }
+        self.textures = textures;
+    }
 }
 
 /// One uploaded batch, ready to draw: the model to bind, the sheet to bind, one

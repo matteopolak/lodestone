@@ -658,8 +658,10 @@ fn entity_hitbox_and_chunk_border_vertices_draw_visible_pixels() {
         type_path: std::sync::Arc::from("zombie"),
         variant_sheet: None,
         item: None,
+        item_model: None,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),
+        equipment_skin: Vec::new(),
         equipment_trim: Vec::new(),
         wool: None,
         block_state: None,
@@ -1134,6 +1136,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             id: 1,
             type_path: std::sync::Arc::from("pig"),
             item: None,
+            item_model: None,
             feet: pig_feet,
             yaw: 0.0,
             head_yaw: 0.0,
@@ -1143,6 +1146,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             equipment: Vec::new(),
             // No equipment above, so nothing here could carry a dye.
             equipment_dye: Vec::new(),
+            equipment_skin: Vec::new(),
             equipment_trim: Vec::new(),
             wool: None,
             block_state: None,
@@ -1183,6 +1187,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             id: 2,
             type_path: std::sync::Arc::from("pig"),
             item: None,
+            item_model: None,
             main_arm_left: false,
             feet: glam::Vec3::new(0.0, 0.0, -12.0),
             yaw: 0.0,
@@ -1193,6 +1198,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             equipment: Vec::new(),
             // No equipment above, so nothing here could carry a dye.
             equipment_dye: Vec::new(),
+            equipment_skin: Vec::new(),
             equipment_trim: Vec::new(),
             wool: None,
             block_state: None,
@@ -1384,6 +1390,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         id: 1,
         type_path: std::sync::Arc::from("zombie"),
         item: None,
+        item_model: None,
         main_arm_left: false,
         feet: glam::Vec3::new(0.0, 0.0, 3.0),
         yaw: 0.0,
@@ -1394,6 +1401,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         equipment: Vec::new(),
         // No equipment above, so nothing here could carry a dye.
         equipment_dye: Vec::new(),
+        equipment_skin: Vec::new(),
             equipment_trim: Vec::new(),
         wool: None,
         block_state: None,
@@ -1966,6 +1974,7 @@ fn orb_draw(value: i32) -> EntityDraw {
         id: 1,
         type_path: std::sync::Arc::from(crate::entities::EXPERIENCE_ORB_TYPE_PATH),
         item: None,
+        item_model: None,
         // Above the eye and dead ahead of a yaw-0 camera, so the sprite lands in
         // the upper middle of the frame — clear of the first-person arm, which is
         // drawn unconditionally into the bottom right.
@@ -1977,6 +1986,7 @@ fn orb_draw(value: i32) -> EntityDraw {
         anim: lodestone_render::AnimInput::REST,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),
+        equipment_skin: Vec::new(),
         equipment_trim: Vec::new(),
         wool: None,
         block_state: None,

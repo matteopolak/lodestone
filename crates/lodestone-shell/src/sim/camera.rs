@@ -763,18 +763,26 @@ impl Sim {
         const OFFHAND_NATIVE_INDEX: usize = 40;
         let menu = self.player_menu();
         let mut equipment = Vec::new();
-        if let Some(loc) = menu
-            .player_native(self.selected_slot())
-            .and_then(|st| ResourceLocation::parse(&st.item().to_string()).ok())
-        {
-            equipment.push((EquipmentSlot::MainHand, loc));
-        }
-        if let Some(loc) = menu
-            .player_native(OFFHAND_NATIVE_INDEX)
-            .and_then(|st| ResourceLocation::parse(&st.item().to_string()).ok())
-        {
-            equipment.push((EquipmentSlot::OffHand, loc));
-        }
+        let mut equipment_skin = Vec::new();
+        let mut add_equipment = |native: usize, slot: EquipmentSlot, use_item_model: bool| {
+            let Some(stack) = menu.player_native(native) else {
+                return;
+            };
+            let visual = if use_item_model {
+                stack.item_model().unwrap_or_else(|| stack.item().clone())
+            } else {
+                stack.item().clone()
+            };
+            let Ok(id) = ResourceLocation::parse(&visual.to_string()) else {
+                return;
+            };
+            equipment.push((slot, id));
+            if let Some(skin) = crate::hud::item_icon::stack_skin_url(stack) {
+                equipment_skin.push((slot, skin));
+            }
+        };
+        add_equipment(self.selected_slot(), EquipmentSlot::MainHand, true);
+        add_equipment(OFFHAND_NATIVE_INDEX, EquipmentSlot::OffHand, false);
         // Native player-inventory indices of the four armour slots
         // (`lodestone_game::menu::Menu::player`'s own table: menu slots
         // `5..=8` are head/chest/legs/feet at native indices `39/38/37/36` —
@@ -785,13 +793,8 @@ impl Sim {
             (37, EquipmentSlot::Legs),
             (36, EquipmentSlot::Feet),
         ];
-        for (native, eq) in ARMOUR_NATIVE_SLOTS {
-            if let Some(loc) = menu
-                .player_native(native)
-                .and_then(|st| ResourceLocation::parse(&st.item().to_string()).ok())
-            {
-                equipment.push((eq, loc));
-            }
+        for (native, slot) in ARMOUR_NATIVE_SLOTS {
+            add_equipment(native, slot, false);
         }
         Some(ThirdPersonBodyState {
             feet,
@@ -831,6 +834,7 @@ impl Sim {
                 .is_slim(),
             player_skin,
             equipment,
+            equipment_skin,
         })
     }
 

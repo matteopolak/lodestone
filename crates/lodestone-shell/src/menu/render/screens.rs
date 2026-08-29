@@ -510,11 +510,11 @@ pub fn sign_edit_frame(state: &sign_edit::SignEditState) -> MenuFrame<'static> {
 /// signing — two disjoint tables sharing one `rows` vec, the same shape
 /// `Screen::Settings`'s per-page row tables already use.
 pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
-    const PAGE_DX: f32 = -100.0;
-    const PAGE_Y: f32 = 40.0;
+    const PAGE_DX: f32 = -60.0;
+    const PAGE_Y: f32 = 30.0;
     const PAGE_LINE_H: f32 = 9.0;
-
-    let dim = widget::argb_to_rgba(widget::INACTIVE_MESSAGE_ARGB);
+    const BOOK_TEXT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+    const BOOK_AUTHOR: [f32; 4] = [85.0 / 255.0, 85.0 / 255.0, 85.0 / 255.0, 1.0];
 
     if state.signing {
         let labels = vec![
@@ -522,18 +522,18 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
                 text: "Enter a Book Title:".to_string(),
                 origin: Origin::ScreenTop,
                 dx: 0.0,
-                dy: PAGE_Y - 20.0,
+                dy: 34.0,
                 align: Align::Centre,
-                colour: LABEL,
+                colour: BOOK_TEXT,
                 scale: 1.0,
             },
             MenuLabel {
                 text: state.author_line(),
                 origin: Origin::ScreenTop,
                 dx: 0.0,
-                dy: PAGE_Y + 10.0,
+                dy: 60.0,
                 align: Align::Centre,
-                colour: dim,
+                colour: BOOK_AUTHOR,
                 scale: 1.0,
             },
         ];
@@ -543,8 +543,8 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
                 edit: Some(state.title.clone()),
                 slot: Some(Slot {
                     origin: Origin::ScreenTop,
-                    dx: -57.0,
-                    dy: PAGE_Y,
+                    dx: -60.0,
+                    dy: 50.0,
                     w: 114.0,
                     h: 20.0,
                 }),
@@ -582,21 +582,14 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
             hovered: state.hovered,
             backdrop: MenuBackdrop::Dim,
             vanilla: true,
+            book_background: true,
             labels,
             ..Default::default()
         };
     }
 
     let (current, total) = state.page_indicator();
-    let mut labels = vec![MenuLabel {
-        text: "Book and Quill".to_string(),
-        origin: Origin::ScreenTop,
-        dx: 0.0,
-        dy: 20.0,
-        align: Align::Centre,
-        colour: LABEL,
-        scale: 1.0,
-    }];
+    let mut labels = Vec::new();
     for (i, line) in state.page.lines().iter().enumerate() {
         let text: String = state
             .page
@@ -611,32 +604,33 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
             dx: PAGE_DX,
             dy: PAGE_Y + i as f32 * PAGE_LINE_H,
             align: Align::Left,
-            colour: LABEL,
+            colour: BOOK_TEXT,
             scale: 1.0,
         });
     }
     labels.push(MenuLabel {
         text: format!("Page {current} of {total}"),
         origin: Origin::ScreenTop,
-        dx: 100.0,
-        dy: PAGE_Y + book_edit::PAGE_LINE_LIMIT as f32 * PAGE_LINE_H + 8.0,
+        dx: 52.0,
+        dy: 18.0,
         align: Align::Right,
-        colour: dim,
+        colour: BOOK_TEXT,
         scale: 1.0,
     });
 
-    let footer_y = PAGE_Y + book_edit::PAGE_LINE_LIMIT as f32 * PAGE_LINE_H + 20.0;
+    let footer_y = 159.0;
     let rows = vec![
         MenuRow {
             label: "<".to_string(),
             enabled: current > 1,
             slot: Some(Slot {
                 origin: Origin::ScreenTop,
-                dx: -43.0,
+                dx: -53.0,
                 dy: footer_y,
-                w: 20.0,
-                h: 20.0,
+                w: 23.0,
+                h: 13.0,
             }),
+            book_page: Some(BookPageButton::Backward),
             ..Default::default()
         },
         MenuRow {
@@ -644,11 +638,12 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
             enabled: true,
             slot: Some(Slot {
                 origin: Origin::ScreenTop,
-                dx: 23.0,
+                dx: 20.0,
                 dy: footer_y,
-                w: 20.0,
-                h: 20.0,
+                w: 23.0,
+                h: 13.0,
             }),
+            book_page: Some(BookPageButton::Forward),
             ..Default::default()
         },
         MenuRow {
@@ -657,7 +652,7 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
             slot: Some(Slot {
                 origin: Origin::ScreenTop,
                 dx: -100.0,
-                dy: footer_y + 28.0,
+                dy: 196.0,
                 w: 98.0,
                 h: 20.0,
             }),
@@ -669,7 +664,7 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
             slot: Some(Slot {
                 origin: Origin::ScreenTop,
                 dx: 2.0,
-                dy: footer_y + 28.0,
+                dy: 196.0,
                 w: 98.0,
                 h: 20.0,
             }),
@@ -684,6 +679,7 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
         hovered: state.hovered,
         backdrop: MenuBackdrop::Dim,
         vanilla: true,
+        book_background: true,
         labels,
         ..Default::default()
     }
@@ -704,28 +700,14 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
 /// authored styled runs, informational only and outside `rows`' click system,
 /// exactly as [`book_edit_frame`]'s is.
 pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
-    const PAGE_DX: f32 = -100.0;
-    const PAGE_Y: f32 = 40.0;
+    const PAGE_DX: f32 = -60.0;
+    const PAGE_Y: f32 = 32.0;
     const PAGE_LINE_H: f32 = 9.0;
+    const BOOK_TEXT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
-    let dim = widget::argb_to_rgba(widget::INACTIVE_MESSAGE_ARGB);
     let (current, total) = state.page_indicator();
 
-    // The book's own title, not the item's -- `ItemStack.getCustomName()`
-    // falls back to `written_book_content.title`, so this is the same string
-    // the tooltip and the held-item highlight show. Vanilla's own
-    // `BookViewScreen` has no header at all (see `book_view`'s module doc);
-    // this one line stands in for the window title every other overlay in
-    // this shell draws, so the screen is not anonymous.
-    let mut labels = vec![MenuLabel {
-        text: state.title.clone(),
-        origin: Origin::ScreenTop,
-        dx: 0.0,
-        dy: 20.0,
-        align: Align::Centre,
-        colour: LABEL,
-        scale: 1.0,
-    }];
+    let mut labels = Vec::new();
     for (i, line) in state.visible_styled_lines().into_iter().enumerate() {
         let mut dx = PAGE_DX;
         for span in line {
@@ -739,7 +721,7 @@ pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
                 colour: span
                     .style
                     .color
-                    .map_or(LABEL, |colour| rgb_text_colour(colour.rgb())),
+                    .map_or(BOOK_TEXT, |colour| rgb_text_colour(colour.rgb())),
                 scale: 1.0,
             });
             dx += width;
@@ -748,25 +730,26 @@ pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
     labels.push(MenuLabel {
         text: format!("Page {current} of {total}"),
         origin: Origin::ScreenTop,
-        dx: 100.0,
-        dy: PAGE_Y + book_edit::PAGE_LINE_LIMIT as f32 * PAGE_LINE_H + 8.0,
+        dx: 52.0,
+        dy: 18.0,
         align: Align::Right,
-        colour: dim,
+        colour: BOOK_TEXT,
         scale: 1.0,
     });
 
-    let footer_y = PAGE_Y + book_edit::PAGE_LINE_LIMIT as f32 * PAGE_LINE_H + 20.0;
+    let footer_y = 159.0;
     let rows = vec![
         MenuRow {
             label: "<".to_string(),
             enabled: state.can_page_back(),
             slot: Some(Slot {
                 origin: Origin::ScreenTop,
-                dx: -43.0,
+                dx: -53.0,
                 dy: footer_y,
-                w: 20.0,
-                h: 20.0,
+                w: 23.0,
+                h: 13.0,
             }),
+            book_page: Some(BookPageButton::Backward),
             ..Default::default()
         },
         MenuRow {
@@ -774,11 +757,12 @@ pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
             enabled: state.can_page_forward(),
             slot: Some(Slot {
                 origin: Origin::ScreenTop,
-                dx: 23.0,
+                dx: 20.0,
                 dy: footer_y,
-                w: 20.0,
-                h: 20.0,
+                w: 23.0,
+                h: 13.0,
             }),
+            book_page: Some(BookPageButton::Forward),
             ..Default::default()
         },
         MenuRow {
@@ -787,7 +771,7 @@ pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
             slot: Some(Slot {
                 origin: Origin::ScreenTop,
                 dx: -100.0,
-                dy: footer_y + 28.0,
+                dy: 196.0,
                 w: 200.0,
                 h: 20.0,
             }),
@@ -802,6 +786,7 @@ pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
         hovered: state.hovered,
         backdrop: MenuBackdrop::Dim,
         vanilla: true,
+        book_background: true,
         labels,
         ..Default::default()
     }

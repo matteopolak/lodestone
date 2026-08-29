@@ -417,6 +417,10 @@ struct EntityFacts {
     /// `minecraft:map_id` from that same stack. Kept out of `EntityDraw`
     /// because only the framed-map texture lookup consumes it.
     item_map_id: Option<i32>,
+    /// The optional `minecraft:item_model` component from the same stack.
+    /// It changes only the client definition selected for rendering, never the
+    /// stack's gameplay item id.
+    item_model: Option<ResourceLocation>,
     /// The entity's last-reported velocity in blocks per tick
     /// (`set_entity_motion`/`add_entity`), when the server has ever sent one.
     ///
@@ -466,6 +470,12 @@ struct EntityFacts {
     /// from "reported, and it was zero" the way [`Self::equipment`] does for
     /// item identity.
     equipment_dye: Vec<(EquipmentSlot, u32)>,
+    /// Per-slot texture URL from an equipped custom player head's
+    /// `minecraft:profile`. Kept beside [`Self::equipment_dye`] rather than in
+    /// [`Self::equipment`] because the ordinary item and armour paths need
+    /// only an id, while the third-person special-head path additionally needs
+    /// this one profile-derived texture selection.
+    equipment_skin: Vec<(EquipmentSlot, Arc<str>)>,
     /// Per-slot `minecraft:trim` (issue #17), narrowed exactly as
     /// [`Self::equipment_dye`] is and additive for the same reason.
     ///
@@ -660,6 +670,10 @@ pub struct EntityDraw {
     /// narrowing bought nothing and cost every framed item, every framed map
     /// and every projectile's live tint.
     pub item: Option<ResourceLocation>,
+    /// The source stack's optional `minecraft:item_model` component. This is
+    /// retained for final render-candidate diagnostics without changing the
+    /// base-item routing semantics of entity renderers.
+    pub item_model: Option<ResourceLocation>,
     /// What this entity is holding/wearing, narrowed to the slots that actually
     /// have something in them: an entry here means "there is an item in this
     /// slot", so the renderer needs no second `Option` check.
@@ -679,6 +693,11 @@ pub struct EntityDraw {
     /// narrows [`EntityFacts::equipment`] — see that field's doc for why
     /// this is additive rather than folded into `equipment`'s own tuple.
     pub equipment_dye: Vec<(EquipmentSlot, u32)>,
+    /// Per-slot custom player-head texture URL, narrowed from
+    /// [`EntityFacts::equipment_skin`] alongside [`Self::equipment`]. The
+    /// special-item renderer consumes this only for player-head rigs; absent
+    /// means retain that rig's static default (Steve) texture.
+    pub equipment_skin: Vec<(EquipmentSlot, Arc<str>)>,
     /// Per-slot `minecraft:trim` (issue #17), mirroring
     /// [`EntityFacts::equipment_trim`] and narrowed exactly as
     /// [`Self::equipment_dye`] is.
@@ -1503,6 +1522,13 @@ pub struct RenderEquipment(pub Vec<(EquipmentSlot, ResourceLocation)>);
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct RenderEquipmentDye(pub Vec<(EquipmentSlot, u32)>);
 
+/// Per-slot custom player-head texture URLs, narrowed from
+/// [`EntityFacts::equipment_skin`]. This remains a sibling of
+/// [`RenderEquipment`] because profiles belong to only one special-item
+/// consumer, not to the common item-id path.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenderEquipmentSkin(pub Vec<(EquipmentSlot, Arc<str>)>);
+
 /// Per-slot `minecraft:trim`, narrowed from [`EntityFacts::equipment_trim`] — a
 /// third component beside [`RenderEquipment`] and [`RenderEquipmentDye`] for
 /// their reason, and because a piece can be dyed and trimmed at once (issue #17).
@@ -1573,6 +1599,8 @@ pub struct ItemCollision(pub PlayerCollision);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrackedStack {
     id: ResourceLocation,
+    /// The optional client-side item definition selected by `minecraft:item_model`.
+    item_model: Option<ResourceLocation>,
     count: u32,
     /// Whether the stack is enchanted, so the drop draws the glint second pass.
     foil: bool,
@@ -1856,12 +1884,14 @@ pub fn extract_pickup_draws(
             id: pickup.item_entity_id,
             type_path: Arc::from(ITEM_ENTITY_TYPE_PATH),
             item: Some(pickup.item.clone()),
+            item_model: None,
             count: pickup.count,
             foil: pickup.foil,
             item_dyed_color: pickup.dyed_color,
             item_potion_color: pickup.potion_color,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
+            equipment_skin: Vec::new(),
             equipment_trim: Vec::new(),
             wool: None,
             // A pickup animation is always a dropped item, never a falling block
@@ -2619,7 +2649,7 @@ pub fn extract_entity_draws(
         &InterpClock,
         &WalkAnim,
         &RenderEquipment,
-        &RenderEquipmentDye,
+        (&RenderEquipmentDye, &RenderEquipmentSkin),
         &RenderEquipmentTrim,
         &RenderWool,
         &RenderNameTag,
@@ -2660,7 +2690,7 @@ pub fn extract_entity_draws(
         clock,
         walk,
         equipment,
-        equipment_dye,
+        (equipment_dye, equipment_skin),
         equipment_trim,
         wool,
         name_tag,
@@ -2973,12 +3003,14 @@ pub fn extract_entity_draws(
             type_path: Arc::clone(&kind.0),
             variant_sheet,
             item: stack.map(|s| s.id.clone()),
+            item_model: stack.and_then(|s| s.item_model.clone()),
             count: stack.map_or(1, |s| s.count),
             foil: stack.is_some_and(|s| s.foil),
             item_dyed_color: stack.and_then(|s| s.dyed_color),
             item_potion_color: stack.and_then(|s| s.potion_color),
             equipment: equipment.0.clone(),
             equipment_dye: equipment_dye.0.clone(),
+            equipment_skin: equipment_skin.0.clone(),
             equipment_trim: equipment_trim.0.clone(),
             wool: wool.0,
             block_state,
@@ -3334,6 +3366,14 @@ fn resolve_entity_facts(
         Reported::Reported(Some(stack)) => stack.components.map_id,
         _ => None,
     };
+    let item_model = match &display_item {
+        Reported::Reported(Some(stack)) => stack
+            .components
+            .item_model
+            .as_ref()
+            .and_then(|model| ResourceLocation::new(model.namespace(), model.path()).ok()),
+        _ => None,
+    };
     // A failed conversion must collapse to `Unreported` ("nothing reported"),
     // never to `Reported(None)`, which downstream reads as the server
     // clearing the stack.
@@ -3367,9 +3407,16 @@ fn resolve_entity_facts(
         .iter()
         .filter_map(|eq| match &eq.item {
             None => Some((eq.slot, None)),
-            Some(stack) => ResourceLocation::new(stack.item.namespace(), stack.item.path())
-                .ok()
-                .map(|id| (eq.slot, Some(id))),
+            Some(stack) => {
+                // `minecraft:item_model` changes only the client-side item
+                // definition. Equipment reaches the third-person renderer as
+                // this intentionally narrow id, so select it before the stack
+                // is flattened rather than losing a pack-provided gun here.
+                let visual = stack.components.item_model.as_ref().unwrap_or(&stack.item);
+                ResourceLocation::new(visual.namespace(), visual.path())
+                    .ok()
+                    .map(|id| (eq.slot, Some(id)))
+            }
         })
         .collect();
     // Narrowed the same way `equipment` is: a slot only carries a dye if its
@@ -3382,6 +3429,29 @@ fn resolve_entity_facts(
             let stack = eq.item.as_ref()?;
             ResourceLocation::new(stack.item.namespace(), stack.item.path()).ok()?;
             Some((eq.slot, stack.components.dyed_color?))
+        })
+        .collect();
+    // `minecraft:profile` is meaningful to the player-head special renderer,
+    // not to ordinary item geometry. Keep it as a per-slot side channel, just
+    // like dye: the visual item id above remains compact for every consumer
+    // that cannot use a skin URL, while this preserves the profile until the
+    // one draw boundary that can. Validate the same *visual* id as `equipment`
+    // so a malformed definition cannot leave a skin describing an item that
+    // never reaches the renderer.
+    let equipment_skin = raw_equipment
+        .iter()
+        .filter_map(|eq| {
+            let stack = eq.item.as_ref()?;
+            // PlayerHeadSpecialRenderer.extractArgument reads PROFILE from a
+            // player-head stack. `item_model` can retarget its definition but
+            // never changes that gameplay/component owner.
+            if stack.item.namespace() != VANILLA || stack.item.path() != "player_head" {
+                return None;
+            }
+            let visual = stack.components.item_model.as_ref().unwrap_or(&stack.item);
+            ResourceLocation::new(visual.namespace(), visual.path()).ok()?;
+            let profile = stack.components.profile.as_ref()?;
+            Some((eq.slot, crate::hud::item_icon::profile_skin_url(profile)?))
         })
         .collect();
     // `minecraft:trim`, narrowed identically (issue #17). Kept out of
@@ -3488,10 +3558,12 @@ fn resolve_entity_facts(
         scale,
         item,
         item_map_id,
+        item_model,
         velocity: entity.get::<Velocity>().map(|v| to_glam_vec3(v.0)),
         on_ground: entity.get::<OnGround>().is_some_and(|grounded| grounded.0),
         equipment,
         equipment_dye,
+        equipment_skin,
         equipment_trim,
         variant: entity.get::<Variant>().map(|variant| variant.0.clone()),
         count,
@@ -3708,6 +3780,7 @@ pub fn fold_entities(world: &mut World) {
                     facts.id,
                     TrackedStack {
                         id: item.clone(),
+                        item_model: facts.item_model.clone(),
                         count: facts.count,
                         foil: facts.foil,
                         dyed_color: facts.item_dyed_color,
@@ -3792,7 +3865,10 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
             last_feet: snap.feet,
         },
         RenderEquipment(occupied_equipment(&snap.equipment)),
-        RenderEquipmentDye(snap.equipment_dye.clone()),
+        (
+            RenderEquipmentDye(snap.equipment_dye.clone()),
+            RenderEquipmentSkin(snap.equipment_skin.clone()),
+        ),
         RenderEquipmentTrim(snap.equipment_trim.clone()),
         RenderWool(sheep_wool(&snap.type_path, snap.variant.as_ref())),
         RenderNameTag(snap.name_tag.clone()),
@@ -3849,6 +3925,9 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     }
     if let Some(mut dye) = entity.get_mut::<RenderEquipmentDye>() {
         dye.0.clone_from(&snap.equipment_dye);
+    }
+    if let Some(mut skin) = entity.get_mut::<RenderEquipmentSkin>() {
+        skin.0.clone_from(&snap.equipment_skin);
     }
     // Same reasoning: a smithing table can trim a piece a player is already
     // wearing, which does not move them.
@@ -4177,6 +4256,7 @@ impl EntityInterpolator {
             entity_id,
             TrackedStack {
                 id: item,
+                item_model: None,
                 count,
                 foil: false,
                 dyed_color: None,
@@ -4643,6 +4723,135 @@ mod tests {
     }
 
     #[test]
+    fn resolve_entity_facts_uses_equipment_item_model_for_visual_lookup() {
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        let mut sword = lodestone_model::ItemStack::new(
+            "minecraft:diamond_sword".parse().expect("valid item key"),
+            1,
+        );
+        sword.components.item_model = Some("server:gun".parse().expect("valid item model"));
+        world.entity_mut(entity).insert(Equipment(vec![lodestone_model::EntityEquipment {
+            slot: EquipmentSlot::MainHand,
+            item: Some(sword),
+        }]));
+
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        let main = facts
+            .equipment
+            .iter()
+            .find(|(slot, _)| *slot == EquipmentSlot::MainHand)
+            .expect("main hand survived");
+        assert_eq!(
+            main.1.as_ref().map(ToString::to_string).as_deref(),
+            Some("server:gun"),
+            "the visual item definition, not the gameplay sword id, reaches the third-person hand"
+        );
+    }
+
+    /// `SET_EQUIPMENT` begins with a model-layer stack, so the profile must be
+    /// narrowed beside (not inside) its visual item id before the tracked
+    /// third-person draw is built. The custom `item_model` control proves the
+    /// profile follows the underlying player-head stack even when a pack
+    /// replaces its item-definition id.
+    #[test]
+    fn resolve_entity_facts_retains_an_equipped_player_heads_profile_skin() {
+        const URL: &str = "https://example.invalid/custom-head.png";
+        const TEXTURES: &str =
+            "eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHBzOi8vZXhhbXBsZS5pbnZhbGlkL2N1c3RvbS1oZWFkLnBuZyJ9fX0=";
+
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        let mut head = lodestone_model::ItemStack::new(
+            "minecraft:player_head".parse().expect("valid gameplay player-head id"),
+            1,
+        );
+        head.components.item_model = Some("server:custom_head".parse().expect("valid visual id"));
+        head.components.profile = Some(lodestone_model::ItemProfile {
+            name: Some("custom head".to_owned()),
+            id: None,
+            properties: vec![lodestone_model::ProfileProperty {
+                name: "textures".to_owned(),
+                value: TEXTURES.to_owned(),
+                signature: None,
+            }],
+        });
+        world.entity_mut(entity).insert(Equipment(vec![lodestone_model::EntityEquipment {
+            slot: EquipmentSlot::MainHand,
+            item: Some(head),
+        }]));
+
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(
+            facts.equipment_skin,
+            vec![(EquipmentSlot::MainHand, Arc::<str>::from(URL))],
+            "the tracked third-person path must retain the profile URL alongside its visual item id"
+        );
+        assert_eq!(
+            facts
+                .equipment
+                .iter()
+                .find(|(slot, _)| *slot == EquipmentSlot::MainHand)
+                .and_then(|(_, item)| item.as_ref())
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("server:custom_head"),
+            "retaining the profile must not replace the effective item-model lookup"
+        );
+    }
+
+    /// A tracked entity must carry the profile all the way through its render
+    /// component and extraction, not merely into the fold's private facts.
+    #[test]
+    fn tracked_equipped_head_profile_reaches_the_actual_entity_draw() {
+        const URL: &str = "https://example.invalid/custom-head.png";
+        const TEXTURES: &str =
+            "eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHBzOi8vZXhhbXBsZS5pbnZhbGlkL2N1c3RvbS1oZWFkLnBuZyJ9fX0=";
+
+        let mut interpolator = EntityInterpolator::new();
+        let mut input = snap(41, Vec3::ZERO, 0.0);
+        input.type_path = "player".to_owned();
+        input.apply(interpolator.world_mut());
+        let ingest = interpolator
+            .world()
+            .resource::<EntityIndex>()
+            .get(41)
+            .expect("input registered its entity id");
+        let mut head = lodestone_model::ItemStack::new(
+            "minecraft:player_head".parse().expect("valid player-head item id"),
+            1,
+        );
+        head.components.profile = Some(lodestone_model::ItemProfile {
+            name: Some("custom head".to_owned()),
+            id: None,
+            properties: vec![lodestone_model::ProfileProperty {
+                name: "textures".to_owned(),
+                value: TEXTURES.to_owned(),
+                signature: None,
+            }],
+        });
+        interpolator
+            .world_mut()
+            .entity_mut(ingest)
+            .insert(Equipment(vec![lodestone_model::EntityEquipment {
+                slot: EquipmentSlot::MainHand,
+                item: Some(head),
+            }]));
+        interpolator.update(0.0);
+
+        let draw = interpolator
+            .draws()
+            .into_iter()
+            .find(|draw| draw.id == 41)
+            .expect("the tracked entity was extracted");
+        assert_eq!(
+            draw.equipment_skin,
+            vec![(EquipmentSlot::MainHand, Arc::<str>::from(URL))],
+            "the third-person special-item draw must retain its held head profile URL"
+        );
+    }
+
+    #[test]
     fn resolve_entity_facts_retains_a_filled_maps_saved_id() {
         let mut world = World::new();
         let entity = bare_entity(&mut world);
@@ -4651,6 +4860,7 @@ mod tests {
             1,
         );
         map.components.map_id = Some(47);
+        map.components.item_model = Some("democracycraft:image_billboard".parse().expect("valid item model"));
         world
             .entity_mut(entity)
             .insert(DisplayItem(Some(map)));
@@ -4660,6 +4870,11 @@ mod tests {
             facts.item_map_id,
             Some(47),
             "the framed-map renderer must retain the id that selects MAP_ITEM_DATA"
+        );
+        assert_eq!(
+            facts.item_model,
+            Some("democracycraft:image_billboard".parse().expect("valid item model")),
+            "the final nearby-frame trace must distinguish an absent item_model component from a pose error"
         );
     }
 
@@ -5112,8 +5327,10 @@ mod tests {
                 type_path: std::sync::Arc::from("player"),
                 variant_sheet: None,
                 item: None,
+                item_model: None,
                 equipment: Vec::new(),
                 equipment_dye: Vec::new(),
+                equipment_skin: Vec::new(),
                 equipment_trim: Vec::new(),
                 wool: None,
                 block_state: None,

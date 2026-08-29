@@ -2385,7 +2385,7 @@ impl BlockEntityModelSet {
     /// definition's whole root-to-`special` `"transformation"` chain, outermost
     /// first (`SpecialItemForm::transformation`) — folded *underneath*
     /// `placement`, same as every other consumer; see
-    /// [`crate::compose_special_node_transform`]'s doc for the derivation.
+    /// [`crate::compose_special_item_transform`]'s doc for the derivation.
     /// Returns `None` when the `kind` has no ported rig (six of the ten do not)
     /// or the rig is not in the corpus.
     ///
@@ -2416,7 +2416,7 @@ impl BlockEntityModelSet {
     ) -> Option<BlockEntityInstance> {
         let (model, texture) = special_item_rig(kind, item_path)?;
         let mesh = self.get(model)?;
-        let placement = crate::compose_special_node_transform(placement, transformation);
+        let placement = crate::compose_special_item_transform(placement, kind, transformation);
         let part_transforms = mesh.part_transforms(placement, &[]);
         let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
         Some(BlockEntityInstance {
@@ -3960,31 +3960,15 @@ pub struct BannerItemRig {
     pub flag: (&'static str, &'static str),
 }
 
-// A skull item's own placement, deliberately, is **not** the world skull
-// functions' `scale(-1, -1, 1)`. An earlier version of this file added exactly
-// that flip here, reasoning from `skull_ground_placement_matrix`'s own doc
-// (`SkullModel`'s head box is authored Y-down) without first checking the real
-// *item*-context renderer. It was wrong, caught before landing by reading
-// `SkullSpecialRenderer.submit`/`PlayerHeadSpecialRenderer.submit`
-// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/special/`): both
-// call `SkullBlockRenderer.submitSkull` directly, with **no** placement
-// transformation at all — the ground/wall flip is applied only by
-// `SkullBlockRenderer.submit`, the *block-entity* path, via
-// `poseStack.mulPose(state.transformation)` before it ever reaches
-// `submitSkull`. So the item path really does draw the raw Y-down
-// `SkullModel` cube (`addBox(-4, -8, -4, 8, 8, 8)`, matching this crate's own
-// baked `SKULL_HUMANOID`/`SKULL_MOB` AABB exactly) through nothing but the
-// ordinary `ItemTransform.apply` chain every other special rig uses.
-//
-// The GUI icon and held player head *do* still measure off-centre against a
-// naive full-cell prediction, and that has a real cause, just not this one:
-// `assets/minecraft/items/player_head.json` puts a **second** transformation —
-// `translation: [0.5, 0.0, 0.5]` plus a 180°-about-X `left_rotation` — on the
-// `minecraft:special` model *node itself*
-// (`SpecialModelWrapper.Unbaked.bake`: `Transformation.compose(displayTransform,
-// this.transformation)`). That gap is closed: `ItemModelNode::Special` carries
-// the whole root-to-node `"transformation"` chain and every consumer folds it
-// through `compose_special_node_transform`.
+// A skull special renderer submits the raw Y-down `SkullModel` cube
+// (`addBox(-4, -8, -4, 8, 8, 8)`, matching this crate's
+// `SKULL_HUMANOID`/`SKULL_MOB` AABB). It does not supply a pose itself: 26.2's
+// `items/player_head.json` and every ordinary `items/*_head.json` instead put
+// `T(0.5, 0, 0.5) * Rx(180°)` on the `minecraft:special` model node. The parser
+// retains that whole root-to-node chain and every consumer folds it through
+// `compose_special_item_transform`. If a server pack retargets player heads to
+// a bare `minecraft:head` special with an empty chain, that shared compositor
+// restores this exact canonical wrapper once; parsed chains remain untouched.
 
 /// The texture identity a block-entity draw carries through batching.
 ///

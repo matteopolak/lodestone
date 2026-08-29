@@ -121,9 +121,11 @@ fn painting_draw(id: i32, variant: Option<&'static str>, centre: glam::Vec3) -> 
         id,
         type_path: std::sync::Arc::from("painting"),
         item: None,
+        item_model: None,
         main_arm_left: false,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),
+        equipment_skin: Vec::new(),
         equipment_trim: Vec::new(),
         // A painting's wire position is the slab's **centre**, not a mob's
         // feet — `Painting.calculateBoundingBox` places it there.

@@ -71,8 +71,8 @@
 //!
 //! [`report_draw_budget`] is the one thing here that is **not** opt-in: the
 //! sign-text pass dropping signs it was handed is a visible defect rather than
-//! an investigation aid, so it warns unconditionally, latched on the drop
-//! count.
+//! an investigation aid, so it emits one unconditional warning per renderer
+//! lifetime. Later recovery/re-entry transitions are debug-only.
 //!
 //! # Configuration
 //!
@@ -92,7 +92,7 @@
 //! — reused rather than re-derived, so a divergence between this instrument
 //! and the real gather is impossible by construction.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use glam::Vec3;
 use lodestone_core::Nbt;
@@ -475,13 +475,45 @@ fn write_nbt(nbt: &Nbt, out: &mut String) {
     }
 }
 
-/// The last drop count [`report_draw_budget`] reported, so a binding budget
-/// is announced when it *changes* rather than every frame. `usize::MAX` is
-/// "nothing reported yet", which no real count can collide with.
-static LAST_DROPPED: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Per-renderer state for the sign-text budget warning. The renderer owns
+/// this rather than using process-global state so a newly-created renderer
+/// (and therefore a new world/render resource epoch) gets one fresh report.
+#[derive(Debug, Default)]
+pub(crate) struct BudgetWarningState {
+    exhausted: AtomicBool,
+    warned: AtomicBool,
+}
 
-/// Says, once per change, that the sign-text pass could not draw every sign
-/// the gather handed it.
+/// The only transitions worth logging. In particular, a changed non-zero
+/// drop count is not a transition: camera movement can change which signs fit
+/// while the pass remains continuously exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BudgetEvent {
+    Exhausted,
+    Reentered,
+    Recovered,
+}
+
+fn budget_event(state: &BudgetWarningState, dropped: usize) -> Option<BudgetEvent> {
+    if dropped == 0 {
+        return state
+            .exhausted
+            .swap(false, Ordering::Relaxed)
+            .then_some(BudgetEvent::Recovered);
+    }
+
+    if state.exhausted.swap(true, Ordering::Relaxed) {
+        return None;
+    }
+    if state.warned.swap(true, Ordering::Relaxed) {
+        Some(BudgetEvent::Reentered)
+    } else {
+        Some(BudgetEvent::Exhausted)
+    }
+}
+
+/// Says, once per renderer lifetime, that the sign-text pass could not draw
+/// every sign the gather handed it.
 ///
 /// This exists because the pass used to drop the tail of its list in
 /// complete silence — no log, no counter, no red test — which is the failure
@@ -489,14 +521,16 @@ static LAST_DROPPED: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// which presents to a player as whole boards blinking in and out as they
 /// move. Unlike the rest of this module it is **not** gated behind
 /// `RUST_LOG=signs=debug`: a dropped sign is a visible defect rather than an
-/// investigation aid, so it warns unconditionally. It is latched on the drop
-/// count, so a scene that steadily overflows says so once, not sixty times a
-/// second, and a scene that recovers says that too.
+/// investigation aid, so it warns unconditionally. It warns only on the
+/// first overflow seen by this renderer. Camera movement can briefly recover
+/// and re-exhaust the pass, so those later transitions are debug-only; a
+/// newly-created renderer gets a fresh lifetime latch.
 ///
 /// * `gathered` — what `block_entities::sign_spawns` returned.
 /// * `in_front` — how many of those were not discarded as behind the eye.
 /// * `drawn` — how many actually reached the vertex buffer.
 pub(crate) fn report_draw_budget(
+    state: &BudgetWarningState,
     gathered: usize,
     in_front: usize,
     drawn: usize,
@@ -504,20 +538,21 @@ pub(crate) fn report_draw_budget(
     capacity: usize,
 ) {
     let dropped = in_front.saturating_sub(drawn);
-    if LAST_DROPPED.swap(dropped, Ordering::Relaxed) == dropped {
-        return;
-    }
-    if dropped == 0 {
-        tracing::debug!(
+    match budget_event(state, dropped) {
+        Some(BudgetEvent::Recovered) => tracing::debug!(
             target: TARGET,
             "sign-text budget no longer binding: {drawn} of {gathered} gathered sign(s)              drawn, {vertices}/{capacity} vertices"
-        );
-        return;
+        ),
+        Some(BudgetEvent::Exhausted) => tracing::warn!(
+            target: TARGET,
+            "sign-text budget exhausted: {dropped} of {in_front} in-front sign(s) drew NO text          ({gathered} gathered, {vertices}/{capacity} vertices). The farthest signs are          dropped first; they will blink back as you approach. Raise          MAX_SIGN_TEXT_VERTICES in gpu/sign_text.rs."
+        ),
+        Some(BudgetEvent::Reentered) => tracing::debug!(
+            target: TARGET,
+            "sign-text budget exhausted again: {dropped} in-front sign(s) drew NO text; warning already emitted for this renderer"
+        ),
+        None => {}
     }
-    tracing::warn!(
-        target: TARGET,
-        "sign-text budget exhausted: {dropped} of {in_front} in-front sign(s) drew NO text          ({gathered} gathered, {vertices}/{capacity} vertices). The farthest signs are          dropped first; they will blink back as you approach. Raise          MAX_SIGN_TEXT_VERTICES in gpu/sign_text.rs."
-    );
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -846,6 +881,54 @@ mod tests {
     fn report_is_silent_when_the_signs_target_is_off() {
         let out = captured("signs=off");
         assert!(out.is_empty(), "expected silence, got: {out:?}");
+    }
+
+    /// Camera movement can change the exact number of signs that fit without
+    /// actually recovering the pass. That churn must not turn one persistent
+    /// overflow into a warning every frame.
+    #[test]
+    fn budget_warning_latches_until_the_pass_recovers() {
+        let state = BudgetWarningState::default();
+
+        assert_eq!(budget_event(&state, 24), Some(BudgetEvent::Exhausted));
+        assert_eq!(budget_event(&state, 25), None);
+        assert_eq!(budget_event(&state, 24), None);
+        assert_eq!(budget_event(&state, 0), Some(BudgetEvent::Recovered));
+        assert_eq!(budget_event(&state, 1), Some(BudgetEvent::Reentered));
+        assert_eq!(budget_event(&state, 2), None);
+        assert_eq!(budget_event(&state, 0), Some(BudgetEvent::Recovered));
+        assert_eq!(budget_event(&state, 3), Some(BudgetEvent::Reentered));
+    }
+
+    /// The user-facing warning must remain one WARN even when the camera
+    /// oscillates across the budget boundary several times.
+    #[test]
+    fn budget_warning_emits_only_one_warn_per_renderer() {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_env_filter(tracing_subscriber::EnvFilter::new("signs=debug"))
+            .finish();
+        let state = BudgetWarningState::default();
+
+        tracing::subscriber::with_default(subscriber, || {
+            report_draw_budget(&state, 191, 191, 167, 524_000, 524_288);
+            report_draw_budget(&state, 191, 191, 191, 524_288, 524_288);
+            report_draw_budget(&state, 191, 191, 166, 524_100, 524_288);
+            report_draw_budget(&state, 191, 191, 191, 524_288, 524_288);
+            report_draw_budget(&state, 191, 191, 165, 524_200, 524_288);
+        });
+
+        let out = capture.text();
+        assert_eq!(
+            out.matches("sign-text budget exhausted:").count(),
+            1,
+            "alternating overflow/recovery must not repeat WARN: {out:?}"
+        );
+        assert!(
+            out.contains("warning already emitted for this renderer"),
+            "re-entry should remain diagnosable at debug level: {out:?}"
+        );
     }
 
     /// The bound is on the *rendering*, not on the input, so a shulker box's

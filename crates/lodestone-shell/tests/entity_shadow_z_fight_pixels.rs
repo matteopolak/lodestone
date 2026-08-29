@@ -158,6 +158,7 @@ fn suppress_first_person_arm(state: &mut RenderState) {
             swim_amount: 0.0,
             slim: false,
             equipment: Vec::new(),
+            equipment_skin: Vec::new(),
         })
     });
 }
@@ -263,9 +264,11 @@ fn subject_at(distance: f32) -> EntityDraw {
         id: 1,
         type_path: std::sync::Arc::from("zombie"),
         item: None,
+        item_model: None,
         main_arm_left: false,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),
+        equipment_skin: Vec::new(),
         equipment_trim: Vec::new(),
         feet: glam::Vec3::new(0.5, SURFACE_Y as f32, 0.5 + distance),
         yaw: 0.0,

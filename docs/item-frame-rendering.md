@@ -32,12 +32,12 @@ stored as a fixed four-entry table (`BlockModels::item_frame_quads`, keyed by
 `block_models::item_frame_slot(glow, map)`), snapshotted into `CrackResolver::from_models`
 alongside the per-state quads so they survive `BlockModels` being dropped.
 
-### The pose chain, and the two derivations that cancel
+### The pose chain, packet anchor, and the two derivations that cancel
 
 Everything is posed relative to `lodestone_render::entity::item_frame_space`:
 
 ```text
-T(feet + dir · 0.46875) · Rx(pitch) · Ry(180 − yaw)
+T(floor(packet_anchor) + (0.5, 0.5, 0.5)) · Rx(pitch) · Ry(180 − yaw)
 ```
 
 Its origin is the **centre of the block the frame hangs in**, and its `+z` points *into* the wall
@@ -45,11 +45,13 @@ behind the frame.
 
 Two things about that expression are easy to get wrong and invisible when you do.
 
-**`dir · 0.46875`.** `ItemFrame.createBoundingBox` puts the entity's own position
-`0.46875` *behind* the block centre (`Vec3.atCenterOf(pos).relative(direction, -0.46875)`), and
-`ItemFrameRenderer.submit`'s `translate(direction.step * 0.46875)` exists purely to undo that.
-The dispatcher's `getRenderOffset`/`translate(-renderOffset)` pair also cancels exactly and is
-therefore absent here rather than ported as two steps.
+**The integer packet anchor.** `ItemFrame.getAddEntityPacket` sends `getPos()`, the attachment
+`BlockPos`, rather than its offset entity centre. The client floors that packet position in
+`BlockAttachedEntity.setPos`, then its bounding-box calculation creates the centre
+`Vec3.atCenterOf(pos).relative(direction, -0.46875)`. The dispatcher’s
+`getRenderOffset`/`translate(-renderOffset)` pair cancels; `ItemFrameRenderer.submit` then adds
+`direction · 0.46875`, cancelling that centre displacement too. Its actual frame origin is thus
+the attachment block centre, not the packet's integer corner and not the entity centre.
 
 **`180 − yaw`.** The renderer derives its angles from the frame's `Direction`, which is not on
 the wire. `ItemFrame.setDirection` derives the entity's `yRot`/`xRot` from that same `Direction`,
@@ -84,9 +86,9 @@ that reason, and its own gate could not see it.
 
 The contents sit at `T(0, 0, lift)` inside frame space, `lift` being `0.4375` for a visible frame
 and `0.5` for an invisible one (vanilla's two `translate` calls). Because frame space's `+z`
-points into the wall, that puts a framed item `0.46875 − 0.4375 = 0.03125` blocks in front of the
-entity's own position — **not** the `0.90625` you get by adding the two translates, which floats
-the item a full block out in front of the frame where it reads as an unrelated placement bug.
+points into the wall, visible contents are `1/16` outside the attachment block's wall face;
+invisible contents reach that face. Adding instead of subtracting the frame-local direction sends
+contents through the attachment block, a placement error that can look unrelated to rotation.
 
 Then `Rz(rotation · 45°)`, then `scale(0.5)`, then the item's own `display.fixed`.
 `ItemDisplayContext.FIXED` is the context `extractRenderState` resolves in — the single easiest
@@ -104,9 +106,9 @@ lays a framed sword flat.
 * `framed_content_light` — the contents. A glow frame substitutes `15728880` (sky 15, block 15)
   outright, so what it holds is at full brightness while its own body is only dim-but-visible.
 
-The probe is the entity's own position rather than an eye-height offset: an item frame's eye
-height is `0.0`, and `createBoundingBox`'s `−0.46875` leaves the entity inside the air cell it
-hangs in rather than in the wall.
+The light probe still uses the entity's own position rather than an eye-height offset: an item
+frame's eye height is `0.0`, and `createBoundingBox`'s `−0.46875` leaves it inside the air cell it
+hangs in rather than in the wall. Geometry instead begins from the add packet's attachment anchor.
 
 ### The rotation, end to end
 
@@ -143,10 +145,14 @@ frame drew long before its rotation did.
   absent case a consumer would draw differently.
 * **A framed map is an either/or with the item branch**, in vanilla (`state.mapId != null`
   returns before the item branch) and here (`merge_framed_items` skips `filled_map`).
-* **`FRAMED_MAP_LIFT` is derived, not tuned.** `0.46875 − 0.4296875`, where `0.4296875` is the map
-  plane's own local `z` (`translate(0, 0, 0.4375)` then `translate(0, 0, −1)` at the `0.0078125`
-  map scale). The previous hand-picked `0.03` was 1/1000 of a block *behind* the `item_frame_map`
-  model's back plate — harmless for exactly as long as nothing drew that plate.
+* **A framed map uses vanilla's content branch, not a world-space lift.** After
+  `item_frame_space`, `ItemFrameRenderer` translates contents by `.4375` (visible) or `.5`
+  (invisible), rotates the map in 90° steps, and scales by `1/128`. Its final local `z = -1`
+  and `MapRenderer.MAP_Z_OFFSET = -.01` make the image plane `1.01 / 128` from that content
+  origin. `map_quad_mesh` already absorbs the scale and `(-64, -64)` centring offsets, so
+  `framed_map_pose` retains precisely that depth in frame-local space. Its `Ry(180)` turns the
+  client mesh's opposite V convention into vanilla's image orientation while also facing the
+  cullable quad toward the room; it consequently applies the depth with the opposite local sign.
 * **Three of the four producers above read `EntityDraw::item`, and for their whole existence that
   field was `None` for an item frame.** `extract_entity_draws` narrowed the recorded stack with
   `(kind.0.as_ref() == ITEM_ENTITY_TYPE_PATH).then(..)`, so `merge_framed_items`,
@@ -173,9 +179,10 @@ frame drew long before its rotation did.
 * **`submitWithZOffset`'s `outlineColor` argument.** The frame body and moving block overlays use
   `ModelPipeline::for_surface`'s negative `(slope = -1, constant = -10)` offset toward the camera.
   The map pipeline retains its relative bias, but it is not relied upon to break a coplanar tie: the
-  map mesh is physically 1/64 block ahead of `template_item_frame_map`'s room-facing plane along the
-  frame's own normal. `gpu/maps.rs` tests that plane order for all four wall facings and both vertical
-  orientations, so the separation is not accidentally reduced to world-z movement.
+  physical map plane gets vanilla's `1.01 / 128` `MapRenderer` depth, plus the template's own
+  `0.001 / 16` difference between its plate and the `.4375` content origin. `gpu/maps.rs` checks
+  that source-derived order for all four wall facings and both vertical orientations, so it cannot
+  accidentally become a world-z movement.
 * **The `map=true` variant is selected from the held item's id**, not from a resolved `MapId`.
   Vanilla asks `entity.getFramedMapId(itemStack)` and falls back to the plain frame when map data
   has not loaded. This client still selects the wider border for any `minecraft:filled_map`, but
@@ -190,9 +197,17 @@ frame drew long before its rotation did.
 
 ## Configuration
 
-None. The geometry comes from the loaded resource pack's `blockstates/item_frame.json` and
+The geometry comes from the loaded resource pack's `blockstates/item_frame.json` and
 `blockstates/glow_item_frame.json`; a pack that ships neither makes
 `CrackResolver::item_frame_quads` empty, which every producer treats as "draw nothing".
+
+For a live placement investigation, set `RUST_LOG=pack_trace=debug` before launching. The
+renderer logs each nearby (within five blocks of the local camera) `(surface, entity id)` once:
+frame body, framed ordinary/special item, or framed map. Each line begins `nearby render
+candidate reached …` and records the raw/effective item identity, `item_model`, map id when
+applicable, attachment-facing metadata, and the final transform plus plane landmarks. The sibling
+`item_display` and `block_display` producers emit the same target with their billboard and synced
+display transform. The trace is diagnostic-only; it deliberately does not change placement.
 
 ## Dependencies
 

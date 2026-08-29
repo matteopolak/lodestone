@@ -1120,9 +1120,13 @@ fn read_component_patch(
 
             // `Identifier.STREAM_CODEC` is `ByteBufCodecs.STRING_UTF8.map(...)`:
             // one length-prefixed string, capped at 32767.
-            Some(
-                "minecraft:item_model" | "minecraft:tooltip_style" | "minecraft:note_block_sound",
-            ) => {
+            Some("minecraft:item_model") => {
+                let raw = reader.string(32767).map_err(dec_err)?;
+                components.item_model = Some(raw.parse().map_err(|error| {
+                    AdapterError::Decode(format!("invalid minecraft:item_model identifier {raw:?}: {error}"))
+                })?);
+            }
+            Some("minecraft:tooltip_style" | "minecraft:note_block_sound") => {
                 reader.string(32767).map_err(dec_err)?;
             }
 

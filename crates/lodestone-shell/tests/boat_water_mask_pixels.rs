@@ -411,6 +411,7 @@ fn suppress_first_person_arm(state: &mut RenderState) {
             swim_amount: 0.0,
             slim: false,
             equipment: Vec::new(),
+            equipment_skin: Vec::new(),
         })
     });
 }
@@ -462,9 +463,11 @@ fn boat_draw(type_path: &str) -> EntityDraw {
         id: 1,
         type_path: Arc::from(type_path),
         item: None,
+        item_model: None,
         main_arm_left: false,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),
+        equipment_skin: Vec::new(),
         equipment_trim: Vec::new(),
         feet: glam::Vec3::new(BOAT_FEET_X, BOAT_FEET_Y, BOAT_FEET_Z),
         yaw: BOAT_YAW,

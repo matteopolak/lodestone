@@ -196,6 +196,29 @@ fn custom_model_data_preserves_the_first_float_for_item_model_selection() {
     assert!(!item.components.has_unmodeled);
 }
 
+/// `minecraft:item_model` is the modern per-stack item-definition override.
+/// Servers commonly use it to point a vanilla diamond sword at a pack-owned
+/// gun definition, so consuming the identifier without retaining it makes the
+/// renderer look up an absent `items/diamond_sword.json` instead.
+#[test]
+fn item_model_preserves_the_per_stack_definition_id() {
+    let mut patch = Writer::default();
+    patch.var_i32(1); // one added component
+    patch.var_i32(0); // no removals
+    patch.var_i32(component_id("minecraft:item_model"));
+    patch.string("server:gun");
+
+    let payload = set_slot_with_patch("minecraft:diamond_sword", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert_eq!(
+        item.components.item_model.as_ref().map(ToString::to_string),
+        Some("server:gun".to_owned()),
+        "the item definition must follow the stack component, not the base item id"
+    );
+    assert!(!item.components.has_unmodeled);
+}
+
 /// Lore is a list of full chat-component trees, not a list of flattened
 /// strings. In particular a child can override both the line's inherited
 /// formatting and its colour with an RGB value that has no legacy-code form.
