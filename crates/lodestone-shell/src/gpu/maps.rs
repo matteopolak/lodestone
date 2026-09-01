@@ -946,6 +946,36 @@ fn held_map_pose(inverse_arm_height: f32) -> Mat4 {
     ) * Mat4::from_scale(Vec3::splat(HELD_MAP_SCALE))
 }
 
+/// The block-light level a **glow** frame lights its map picture at.
+///
+/// A glow frame lights what it holds itself instead of reading the world, and
+/// the map branch is deliberately a shade below the ordinary item branch: the
+/// 26.2 renderer subtracts a fixed 30 from the packed full-bright value for a
+/// map, and the packed block channel counts a level as 16, so 30 is just under
+/// two levels. Sky stays full. See `docs/filled-map-rendering.md`.
+const GLOW_FRAME_MAP_BLOCK_LIGHT: u8 = 13;
+
+/// The packed sky/block light a framed map picture is drawn at.
+///
+/// `frame_light` is the frame's **own** light — for a glow frame that is the
+/// sampled world value raised to its block-light floor, which is a different
+/// number again, so this cannot be folded into one function with it.
+///
+/// This existed as a hole rather than as a wrong number: the two helpers this
+/// mirrors were written for the framed-*item* path and the map path sampled the
+/// world directly, so a glow-framed map in an unlit room drew black while the
+/// item beside it drew bright. The type doc for the glow frame's registry path
+/// already described the wiring, which is exactly why nobody counted its
+/// callers.
+#[must_use]
+const fn framed_map_light(frame_light: u8, glow: bool) -> u8 {
+    if glow {
+        lodestone_render::ENTITY_FULLBRIGHT | GLOW_FRAME_MAP_BLOCK_LIGHT
+    } else {
+        frame_light
+    }
+}
+
 /// The world pose for a map hanging in an item frame at `feet`, facing along the
 /// frame's real `Direction`.
 ///
@@ -978,9 +1008,12 @@ fn held_map_pose(inverse_arm_height: f32) -> Mat4 {
 ///
 /// `item_frame_facing` maps frame-local `-z` to the direction the frame looks,
 /// so the picture's own `+z` front must be turned to meet it. Vanilla spells the
-/// same turn `Axis.ZP.rotationDegrees(180)` because it draws through a no-cull
-/// render type and only needs the *image* the right way round; it also lays its
-/// quad out with `v` growing **up** where [`map_quad_mesh`] grows it down. Those
+/// same turn about `z` rather than about `y`, and lays its quad out with `v`
+/// growing **up** where [`map_quad_mesh`] grows it down — the two differences
+/// cancel, and only the `y` turn also puts the winding the right way round for
+/// a culled pipeline. (Vanilla's own text render state culls back faces too, so
+/// the difference is which vertex order each of us emits, not whether either
+/// side culls; an earlier version of this comment said vanilla did not.) Those
 /// two differences compose: on the `z == 0` plane every vertex of this quad
 /// lands, `Rz(180) · diag(1, -1, 1)` and `Ry(180)` are the same map, and only
 /// `Ry(180)` also turns the face outward. Substituting `Rz(180)` here draws the
@@ -1252,7 +1285,14 @@ impl RenderState {
                 draw.pitch,
                 draw.item_frame_rotation,
                 draw.invisible,
-                self.entity_light.sample(draw.feet),
+                framed_map_light(
+                    super::entity_passes::item_frame_light(
+                        &self.entity_light,
+                        draw,
+                        draw.type_path.as_ref() == GLOW_ITEM_FRAME_TYPE_PATH,
+                    ),
+                    draw.type_path.as_ref() == GLOW_ITEM_FRAME_TYPE_PATH,
+                ),
             );
             if should_trace_candidate("framed_map", draw.id, draw.feet, camera.position) {
                 // `map_quad_mesh` is centred at local `(-.5, -.5, 0)` rather
@@ -1555,6 +1595,32 @@ mod tests {
     /// `translate(0, 0, -1)` plus `MapRenderer.MAP_Z_OFFSET (-.01)`. The map
     /// mesh here is already centred and unit-sized, so this asserts that same
     /// depth at its local origin for every wall orientation.
+    #[test]
+    /// A glow frame lights its map itself; a plain one passes the frame's own
+    /// sampled light straight through. The two must differ, and the glow value
+    /// must be a shade under a fully-bright framed *item*, which is the
+    /// distinction the 26.2 renderer draws between its two content branches.
+    #[test]
+    fn only_a_glow_frame_lights_its_own_map() {
+        let dark = 0x00;
+        let dim = 0x37;
+        assert_eq!(framed_map_light(dark, false), dark);
+        assert_eq!(framed_map_light(dim, false), dim);
+        let glow = framed_map_light(dark, true);
+        assert_eq!(glow >> 4, 15, "a glow frame's map is at full sky light");
+        assert_eq!(glow & 0x0F, GLOW_FRAME_MAP_BLOCK_LIGHT);
+        assert!(
+            glow & 0x0F < 15,
+            "the map branch sits below the item branch's full block light, \
+             got {glow:#04x}"
+        );
+        assert_eq!(
+            framed_map_light(0xFF, true),
+            glow,
+            "a glow frame ignores the sampled value entirely"
+        );
+    }
+
     #[test]
     fn framed_map_plane_matches_the_26_2_frame_local_content_chain() {
         let anchor = Vec3::new(4.0, 65.0, -9.0);
