@@ -572,3 +572,484 @@ fn invisible_framed_map_at_large_coordinates_survives_fixed_pose_fov_changes() {
         failures.join("\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// The wall arm
+// ---------------------------------------------------------------------------
+//
+// Every arm above renders against an **empty world**: no attachment wall, no
+// terrain, nothing in the depth buffer at all. A framed map's whole physical
+// separation from the surface behind it is `1.01 / 128` of a block — 7.9 mm —
+// so a fixture with nothing behind the quad cannot observe the one contest the
+// live defect is about. This is the shared-fixture blind spot `CLAUDE.md`
+// describes: no gate here is badly written, the corpus simply never puts the
+// subject in the state the feature exists for.
+//
+// `world_text_over_geometry_pixels.rs` found the same gap for sign text and is
+// the template for this arm.
+//
+// Two fixture origins, because the live report is from a server whose build is
+// thousands of blocks from the origin and every gate here sits at `(0, 0)`:
+// `map_quad_mesh` bakes **absolute** world positions into `f32` vertices while
+// terrain reaches the same shader through a section-relative origin, so the two
+// only share a quantisation grid near zero.
+
+use lodestone::mesher::{
+    SectionGeometry, SectionKey, mesh_snapshot_models, snapshot_section, snapshot_visibility,
+};
+use lodestone_render::ModelMesh;
+use lodestone_world::{
+    ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World,
+};
+
+/// Vertical extent of the fixture world, in sections from `y = 0`.
+const WALL_SECTION_COUNT: usize = 8;
+const WALL_MIN_Y: i32 = 0;
+/// Solid ground below the frame, so a downward-looking camera sees terrain
+/// rather than sky and a lost map cannot be confused with a clipped one.
+const WALL_GROUND_Y: i32 = 64;
+
+/// A game tick past `SECTION_FADE_DURATION_SECS`. A section uploaded before any
+/// `update_animation` resolves `section_visibility == 0` and renders as flat fog
+/// colour, which leaves its depth intact but makes every colour claim vacuous.
+const WALL_FADED_IN_TICK: u64 = 40;
+
+/// The **air** block an item frame hangs in, for each fixture origin. The
+/// second is the DemocracyCraft build the live trace was captured in, to the
+/// nearest block — the axis every existing gate holds at zero.
+const WALL_ORIGINS: [(&str, [i32; 3]); 2] = [
+    ("near origin", [0, 66, 0]),
+    ("live coordinates", [1970, 73, 3811]),
+];
+
+fn wall_state_id(state: &str) -> u32 {
+    lodestone_data::block_states::state_id(state)
+        .unwrap_or_else(|| panic!("{state} is not in the 26.2 block-state table"))
+}
+
+/// Ground, plus — when `with_wall` — the stone the frame is attached to.
+///
+/// The frame's yaw is `0`, so `item_frame_facing_step` is `+z` and the
+/// attachment block is the one at `-z` from `block`. An invisible frame's map
+/// plane lands `1.01 / 128` outside that block's face; a visible one lands the
+/// same distance in front of its own body's front plate, which is itself `1/16`
+/// clear of the wall.
+fn wall_world(block: [i32; 3], with_wall: bool, sky_light: u8) -> World {
+    let air = wall_state_id("minecraft:air");
+    let stone = wall_state_id("minecraft:stone");
+    let (cx0, cz0) = (block[0] >> 4, block[2] >> 4);
+    let mut world = World::new();
+    for cx in cx0 - 1..=cx0 + 1 {
+        for cz in cz0 - 1..=cz0 + 1 {
+            let column = ChunkColumn::new(
+                WALL_MIN_Y,
+                WALL_SECTION_COUNT,
+                PaletteKind::block_states(),
+                PaletteKind::biomes(),
+                air,
+                0,
+            );
+            let mut light = ColumnLight::new(WALL_SECTION_COUNT);
+            for i in 0..light.light_section_count() {
+                *light.sky_mut(i) = lodestone_world::LightData::Uniform(sky_light);
+                *light.block_mut(i) = lodestone_world::LightData::Uniform(0);
+            }
+            world.load(
+                ChunkPos::new(cx, cz),
+                LoadedChunk::new(column, light, Heightmaps::new(), Vec::new()),
+            );
+        }
+    }
+    let (x0, z0) = (cx0 * 16, cz0 * 16);
+    let ground = world.fill_region(
+        [x0 - 16, WALL_MIN_Y, z0 - 16],
+        [x0 + 31, WALL_GROUND_Y, z0 + 31],
+        stone,
+    );
+    assert!(ground > 0, "fixture: the ground must actually write blocks");
+    if with_wall {
+        let z = block[2] - 1;
+        let filled = world.fill_region(
+            [block[0] - 8, WALL_GROUND_Y + 1, z],
+            [block[0] + 7, WALL_GROUND_Y + 12, z],
+            stone,
+        );
+        assert!(filled > 0, "fixture: the attachment wall must write blocks");
+    }
+    world
+}
+
+fn wall_upload(
+    world: &World,
+    block: [i32; 3],
+    models: &lodestone_render::BlockModels,
+    state: &mut RenderState,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) {
+    let (cx0, cz0) = (block[0] >> 4, block[2] >> 4);
+    let mut uploaded = 0usize;
+    for cx in cx0 - 1..=cx0 + 1 {
+        for cz in cz0 - 1..=cz0 + 1 {
+            for si in 0..WALL_SECTION_COUNT {
+                let key = SectionKey { cx, cz, si, min_y: WALL_MIN_Y };
+                let Some(snap) = snapshot_section(world, key) else {
+                    continue;
+                };
+                let opaque = mesh_snapshot_models(&snap, models, false);
+                let visibility = snapshot_visibility(&snap, models);
+                state.upload_section(
+                    device,
+                    queue,
+                    key,
+                    &SectionGeometry::Model {
+                        opaque,
+                        water: ModelMesh::default(),
+                        translucent_blocks: ModelMesh::default(),
+                        visibility,
+                    },
+                );
+                uploaded += 1;
+            }
+        }
+    }
+    assert!(uploaded > 0, "fixture: some sections must have uploaded");
+    state.update_animation(queue, WALL_FADED_IN_TICK);
+}
+
+/// A camera `distance` blocks from the frame's attachment-block centre, turned
+/// `degrees` around the wall's own up axis away from the frame normal.
+///
+/// Obliquity is an **angle**, not a sideways offset in blocks: the live defect
+/// is reported as view-dependent, and only an angle means the same entry
+/// describes the same view at every range. The eye is lifted a fixed tenth of
+/// the distance so the sweep is never exactly in the frame's own plane.
+fn wall_camera(block: [i32; 3], distance: f32, degrees: f32) -> Camera {
+    let outward = lodestone_render::entity::item_frame_facing_step(0.0, 0.0);
+    let right = outward.cross(glam::Vec3::Y).normalize();
+    let target = glam::Vec3::new(
+        block[0] as f32 + 0.5,
+        block[1] as f32 + 0.5,
+        block[2] as f32 + 0.5,
+    );
+    let radians = degrees.to_radians();
+    let offset = (outward * radians.cos() + right * radians.sin() + glam::Vec3::Y * 0.1)
+        .normalize()
+        * distance;
+    let position = target + offset;
+    let direction = (target - position).normalize();
+    Camera {
+        position,
+        yaw: (-direction.x).atan2(direction.z).to_degrees(),
+        pitch: (-direction.y).asin().to_degrees(),
+        // The live capture's own field of view, not this file's 60: a wider
+        // lens both shrinks the subject and changes the projected depth slope
+        // the polygon offset is measured against.
+        fov_y_degrees: 110.0,
+        aspect: W as f32 / H as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(12, 0),
+    }
+}
+
+/// `(name, distance in blocks, degrees off the frame normal)`. The obliquities
+/// go to `85°` because the live trace's own screen-centre frames sat around
+/// `78°` off normal, where the map's `7.9 mm` normal separation collapses to
+/// under `2 mm` measured along the view direction.
+const WALL_VIEWS: [(&str, f32, f32); 9] = [
+    ("2m head-on", 2.0, 0.0),
+    ("2m 45deg", 2.0, 45.0),
+    ("2m 75deg", 2.0, 75.0),
+    ("2m 85deg", 2.0, 85.0),
+    ("8m head-on", 8.0, 0.0),
+    ("8m 45deg", 8.0, 45.0),
+    ("8m 75deg", 8.0, 75.0),
+    ("24m head-on", 24.0, 0.0),
+    ("24m 45deg", 24.0, 45.0),
+];
+
+/// Pixel gate: a framed map must survive the depth test **against the wall it
+/// hangs on and against its own frame body**, at every obliquity and range, at
+/// the origin and at real server coordinates.
+///
+/// The measurement is per configuration: ink is the pixel count where a painted
+/// map differs from the very same scene rendered before any `MapSource` was
+/// installed. The wall-free world is the positive control — the same scene with
+/// the attachment block removed, so its ink is what the map draws when nothing
+/// can contest it, and the walled ink must match.
+///
+/// Both frame kinds are measured because they contest different surfaces: a
+/// visible `item_frame`'s map sits `1.01 / 128` in front of its own body's
+/// front plate, while an invisible `glow_item_frame` has no body at all and its
+/// map sits the same distance outside the attachment block's face.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_framed_map_survives_the_depth_test_against_its_attachment_wall() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models = atlas.models().expect("vanilla atlas must carry baked models");
+    let item: ResourceLocation = ITEM.parse().expect("valid item id");
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+
+    let kinds: [(&str, &str, bool); 2] = [
+        ("visible item_frame", "item_frame", false),
+        ("invisible glow_item_frame", "glow_item_frame", true),
+    ];
+
+    // One `RenderState` per (origin, world): a `MapSource` cannot be withdrawn
+    // once installed, so every no-map reference shot has to be taken before the
+    // source goes in.
+    let mut ink_for = |block: [i32; 3], with_wall: bool| -> Vec<usize> {
+        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        state.set_third_person_body_source(|| {
+            Some(lodestone::gpu::ThirdPersonBodyState {
+                player_skin: None,
+                feet: glam::Vec3::new(0.0, -10_000.0, 0.0),
+                body_yaw_deg: 0.0,
+                anim: AnimInput::default(),
+                scale: 1.0,
+                swim_amount: 0.0,
+                slim: false,
+                equipment: Vec::new(),
+                equipment_skin: Vec::new(),
+            })
+        });
+        wall_upload(
+            &wall_world(block, with_wall, 15),
+            block,
+            models,
+            &mut state,
+            device,
+            queue,
+        );
+
+        let frame_draw = |type_path: &str, invisible: bool| {
+            let mut draw = blank_draw(SUBJECT_ID, type_path, 0.0);
+            // The wire carries a hanging entity's own position, which
+            // `ItemFrame.createBoundingBox` puts `0.46875` back along its
+            // facing from the attachment block's centre. Feed the renderer that
+            // rather than the block, so the `floor()` in `item_frame_space` is
+            // exercised the way production exercises it.
+            draw.feet = glam::Vec3::new(
+                block[0] as f32 + 0.5,
+                block[1] as f32 + 0.5,
+                block[2] as f32 + 0.5,
+            ) - lodestone_render::entity::item_frame_facing_step(0.0, 0.0) * 0.46875;
+            draw.item = Some(item.clone());
+            draw.invisible = invisible;
+            draw
+        };
+
+        let mut shoot = |state: &RenderState, cam: &Camera, draw: &EntityDraw| -> Vec<u8> {
+            let frame = target.acquire().expect("headless acquire");
+            state.render(device, queue, frame.view(), cam, None, std::slice::from_ref(draw));
+            target.read_texels(device, queue)
+        };
+
+        let mut references = Vec::new();
+        for (_, type_path, invisible) in kinds {
+            let draw = frame_draw(type_path, invisible);
+            for (_, distance, degrees) in WALL_VIEWS {
+                references.push(shoot(&state, &wall_camera(block, distance, degrees), &draw));
+            }
+        }
+
+        let painted = std::sync::Arc::new(grass_grid());
+        state.set_map_source(move |_, _| {
+            Some(MapPicture::new(
+                TEST_MAP_ID,
+                1,
+                std::sync::Arc::clone(&painted),
+            ))
+        });
+
+        let mut ink = Vec::new();
+        let mut index = 0usize;
+        for (_, type_path, invisible) in kinds {
+            let draw = frame_draw(type_path, invisible);
+            for (_, distance, degrees) in WALL_VIEWS {
+                let shot = shoot(&state, &wall_camera(block, distance, degrees), &draw);
+                ink.push(diff(&shot, &references[index]).count);
+                index += 1;
+            }
+        }
+        ink
+    };
+
+    eprintln!("=== framed map vs attachment wall ===");
+    let mut failures: Vec<String> = Vec::new();
+    for (origin, block) in WALL_ORIGINS {
+        let free = ink_for(block, false);
+        let walled = ink_for(block, true);
+        let mut index = 0usize;
+        for (kind, _, _) in kinds {
+            for (view, ..) in WALL_VIEWS {
+                let (no_wall, wall) = (free[index], walled[index]);
+                eprintln!(
+                    "{origin:<17} {kind:<26} {view:<11} no-wall {no_wall:>6} px   walled {wall:>6} px"
+                );
+                if no_wall == 0 {
+                    failures.push(format!(
+                        "{origin} / {kind} / {view}: the wall-free control drew no map at \
+                         all, so the walled measurement beside it is vacuous"
+                    ));
+                } else if wall * 20 < no_wall * 19 {
+                    failures.push(format!(
+                        "{origin} / {kind} / {view}: the map lost {} of {no_wall} px to the \
+                         geometry behind it ({wall} px survived)",
+                        no_wall - wall
+                    ));
+                }
+                index += 1;
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Pixel gate: a **glow** item frame lights its own map, a plain one does not.
+///
+/// This is the wiring half of `gpu/maps.rs`'s `framed_map_light`. That helper
+/// has a unit test of its own, which proves the arithmetic and nothing about
+/// whether the framed-map producer calls it — the exact island shape this
+/// subsystem has already shipped once, where the frame's registry-path doc
+/// described a full-bright content light that only the framed-*item* path
+/// implemented.
+///
+/// The scene is deliberately unlit (`sky = 0`, `block = 0`) with the map hung
+/// on a real stone wall, because that is the only input where the two branches
+/// differ: under sky 15 both draw the same bright picture and the gate is
+/// vacuous. The plain frame is therefore not a decoration — it is the negative
+/// control, and reverting the producer to the sampled light makes the two
+/// arms equal, which is what this assertion measures.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn only_a_glow_framed_map_lights_itself_in_an_unlit_room() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models = atlas.models().expect("vanilla atlas must carry baked models");
+    let item: ResourceLocation = ITEM.parse().expect("valid item id");
+    let block = WALL_ORIGINS[0].1;
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    state.set_third_person_body_source(|| {
+        Some(lodestone::gpu::ThirdPersonBodyState {
+            player_skin: None,
+            feet: glam::Vec3::new(0.0, -10_000.0, 0.0),
+            body_yaw_deg: 0.0,
+            anim: AnimInput::default(),
+            scale: 1.0,
+            swim_amount: 0.0,
+            slim: false,
+            equipment: Vec::new(),
+            equipment_skin: Vec::new(),
+        })
+    });
+    // Without this the renderer's entity light source is unset, and an unset
+    // source answers full bright everywhere — under which both arms below draw
+    // the same bright picture and the gate measures nothing. That is the
+    // fixture's own vacuity trap and it fired on the first run.
+    state.set_entity_light_source(|_| Some(0x00));
+    wall_upload(
+        &wall_world(block, true, 0),
+        block,
+        models,
+        &mut state,
+        device,
+        queue,
+    );
+    let painted = std::sync::Arc::new(grass_grid());
+    state.set_map_source(move |_, _| {
+        Some(MapPicture::new(
+            TEST_MAP_ID,
+            1,
+            std::sync::Arc::clone(&painted),
+        ))
+    });
+
+    let camera = wall_camera(block, 2.0, 0.0);
+    // A patch well inside the map's own silhouette. At two blocks under this
+    // fixture's 110-degree lens the picture is ~34 px across, so a 12 px box on
+    // the frame's projected centre cannot reach the wall behind it.
+    let centre = glam::Vec3::new(
+        block[0] as f32 + 0.5,
+        block[1] as f32 + 0.5,
+        block[2] as f32 + 0.5,
+    );
+    let clip = camera.view_projection() * centre.extend(1.0);
+    assert!(clip.w > 0.0, "fixture: the frame must be in front of the camera");
+    let cx = ((clip.x / clip.w * 0.5 + 0.5) * W as f32) as i32;
+    let cy = ((1.0 - (clip.y / clip.w * 0.5 + 0.5)) * H as f32) as i32;
+
+    let mut mean_for = |type_path: &str| -> f64 {
+        let mut draw = blank_draw(SUBJECT_ID, type_path, 0.0);
+        draw.feet = centre
+            - lodestone_render::entity::item_frame_facing_step(0.0, 0.0) * 0.46875;
+        draw.item = Some(item.clone());
+        let frame = target.acquire().expect("headless acquire");
+        let stats = state.render(
+            device,
+            queue,
+            frame.view(),
+            &camera,
+            None,
+            std::slice::from_ref(&draw),
+        );
+        assert!(
+            stats.filled_maps_drawn > 0,
+            "{type_path}: the map must reach the draw before its brightness means anything"
+        );
+        let px = target.read_texels(device, queue);
+        let mut total = 0f64;
+        let mut count = 0usize;
+        for y in cy - 6..cy + 6 {
+            for x in cx - 6..cx + 6 {
+                let i = (y as usize * W as usize + x as usize) * 4;
+                total += f64::from(px[i]) + f64::from(px[i + 1]) + f64::from(px[i + 2]);
+                count += 3;
+            }
+        }
+        total / count as f64
+    };
+
+    let plain = mean_for("item_frame");
+    let glow = mean_for("glow_item_frame");
+    eprintln!("=== unlit framed map brightness ===");
+    eprintln!("plain item_frame      mean channel {plain:.1}");
+    eprintln!("glow_item_frame       mean channel {glow:.1}");
+    assert!(
+        glow > plain * 2.0,
+        "a glow frame must light its own map: glow {glow:.1} against plain {plain:.1} \
+         (equal means the producer is sampling world light for both)"
+    );
+}

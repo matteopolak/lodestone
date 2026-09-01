@@ -120,15 +120,69 @@ lands. A centre passes under either reading of the orientation, so half the fix 
 half was invisible. When a coincidence is what hid a bug, check every quantity that shares it, not the
 one you were looking at.
 
-`Ry(180°)` is not a transcription of vanilla's `Axis.ZP.rotationDegrees(180)`. Vanilla draws the map
-through a no-cull render type and lays its quad out with `v` growing **up**, where `map_quad_mesh`
-grows it down; on the `z == 0` plane every vertex of this quad lands, `Rz(180) · diag(1, -1, 1)` and
-`Ry(180)` are the same map, and only `Ry(180)` also turns the face outward. Substituting `Rz(180)`
-draws the picture upside-down *and* back-to-front.
+`Ry(180°)` is not a transcription of vanilla's `Axis.ZP.rotationDegrees(180)`. Vanilla lays its quad
+out with `v` growing **up**, where `map_quad_mesh` grows it down; on the `z == 0` plane every vertex of
+this quad lands, `Rz(180) · diag(1, -1, 1)` and `Ry(180)` are the same map, and only `Ry(180)` also
+turns the face outward. Substituting `Rz(180)` draws the picture upside-down *and* back-to-front.
+
+**Vanilla's map render type culls back faces.** An earlier version of this section said it did not, and
+that claim was carried forward into a live-defect hypothesis. `MapRenderer.render` submits through
+`RenderTypes.text(texture)`, whose `RenderPipelines.TEXT` builds on a snippet that never calls
+`withCull`, and `RenderPipeline.Builder.build` defaults to `this.cull.orElse(true)`. Its depth state is
+the shared `DepthStencilState.DEFAULT` — `GREATER_THAN_OR_EQUAL` (our `LessEqual` under forward depth),
+depth writes on, **no polygon offset** — and its colour target blends `BlendFunction.TRANSLUCENT` with
+no alpha test, where Lodestone's variant is opaque with a `0.5` cutout. That last difference is inert
+for a map: every `MapColor` is either fully opaque or `NONE`'s alpha `0`.
 
 The in-plane turn is `(rotation % 4) · 90°`, not `rotation · 45°`: `ItemFrameRenderer`'s map branch is
 `rotation % 4 * 2` eighths, so a map only ever hangs at a right angle and the odd half-steps fold onto
 the even ones. An ordinary framed item does use all eight.
+
+### A glow frame lights its own map
+
+`ItemFrameRenderer.getLightCoords` substitutes a near-full-bright packed value for a *glow* frame's
+contents instead of the sampled world light, and the map branch and the item branch pass **different**
+constants: `15728880` for an item (sky 15, block 15) and `15728850` for a map — the latter being
+`ItemFrameRenderer.BRIGHT_MAP_LIGHT_ADJUSTMENT` (30) below the first, which is just under two levels of
+the packed block channel. The frame's own body takes a third number again, a block-light *floor* of
+`GLOW_FRAME_BRIGHTNESS` (5) over the sampled value.
+
+Lodestone spells those as `gpu/entity_passes.rs`'s `item_frame_light` (the body),
+`framed_content_light` (a framed item) and `gpu/maps.rs`'s `framed_map_light` (a framed map, sky 15 /
+block 13). The map one was missing for as long as framed maps have existed: `prepare_framed_maps`
+sampled the world directly, so a glow-framed map in an unlit room drew black while an ordinary item in
+the frame beside it drew bright. The two helpers it needed were already written and correct — the
+producer simply never called them, and `GLOW_ITEM_FRAME_TYPE_PATH`'s own doc comment already described
+the wiring, which is exactly why nobody counted its callers.
+
+`tests/framed_map_pixels.rs`'s `only_a_glow_framed_map_lights_itself_in_an_unlit_room` is the wiring
+gate; the unit test beside `framed_map_light` proves only the arithmetic. It renders both frame kinds
+in a `sky = 0`, `block = 0` world against a real stone wall and measures the mean channel inside the
+picture: glow **120.3** against plain **11.7**. Under the producer's previous expression both arms
+measured 11.7. Note the fixture's own trap, which fired on the first run: `RenderState`'s entity light
+source is unset by default and an unset source answers **full bright everywhere**, so without
+`set_entity_light_source` both arms measured 120.3 and the gate proved nothing.
+
+### The map's depth contest against its wall is *not* the live item-frame defect
+
+`tests/framed_map_pixels.rs`'s `a_framed_map_survives_the_depth_test_against_its_attachment_wall` was
+written to reproduce a live report of framed maps z-fighting on a visible frame and vanishing on an
+invisible one. It does not reproduce, and that is the finding.
+
+Every other arm in that file — and every sign, text and block-entity pixel gate in the suite — renders
+against an **empty world**. A framed map's whole physical separation from the surface behind it is
+`1.01 / 128` of a block (7.9 mm), so a fixture with nothing in the depth buffer cannot observe the one
+contest the report is about. This arm builds a real stone attachment wall, hangs the frame on it, and
+measures the picture's ink against the identical scene with the wall block removed. Measured, 36
+configurations, **every one byte-identical between the walled and wall-free worlds**: both frame kinds,
+at the origin and at the reporting server's own coordinates (`1970, 73, 3811`), at 2/8/24 blocks, at
+0°/45°/75°/85° off the frame normal, FOV 110. Head-on at 2 blocks the picture measures 1,168 px against
+a projected size of ~1,136 px, so the frame's own border eats nothing either.
+
+So neither the attachment wall nor the frame's front plate removes a single pixel at any tested view,
+and the remaining live suspects are elsewhere: something the fixture still holds fixed (one frame
+rather than 61; no fluids, particles or translucent geometry in the scene), or the report is not a
+depth fight at all. Do not spend another depth-bias constant on it without a fixture that fails first.
 
 ## How to change it, and the gotchas
 
