@@ -1758,6 +1758,13 @@ impl WindowApp {
         hud_frame.chat_wrap = Some(&self.chat_wrap);
         hud_frame.chat_input = chat_open.then(|| self.chat_input.as_str());
         hud_frame.chat_selection = chat_open.then(|| self.chat_input.selection()).flatten();
+        // Without this line the caret indicator is an island in the other
+        // direction: `ChatInput` moves its insertion point on Left/Right/Home/
+        // End and every one of its own tests passes, while the drawn indicator
+        // is placed from the width of the *whole* line and so never moves. The
+        // draw also picks the underscore-vs-bar shape from this, so an unset
+        // field would keep both halves of that bug.
+        hud_frame.chat_cursor = chat_open.then(|| self.chat_input.cursor_position());
         // Vanilla blinks the text cursor on a 300 ms half-period:
         // `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS == 300` and
         // `isCursorVisible(ms) == (ms / 300) % 2 == 0`
