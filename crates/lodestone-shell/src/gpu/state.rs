@@ -155,12 +155,22 @@ impl RenderState {
             let pipeline = ModelPipeline::new(device, color_format);
             let surface_pipeline = ModelPipeline::for_surface(device, color_format);
             let map_surface_pipeline = ModelPipeline::for_map_surface(device, color_format);
-            let map_surface_no_cull_pipeline =
-                ModelPipeline::for_map_surface_no_cull(device, color_format);
+            // The three diagnostic variants below are only ever selected by a
+            // `LODESTONE_MAP_*` switch. Which depth decisions the "no depth"
+            // ones actually drop is resolved from the environment, so a run can
+            // remove the comparison, the write or the polygon offset on its own
+            // rather than all three together.
+            let map_depth = super::maps::map_diagnostic_switches().depth;
+            let map_surface_no_cull_pipeline = ModelPipeline::for_map_surface_diagnostic(
+                device,
+                color_format,
+                false,
+                lodestone_render::model_pipeline::MapDepthDiagnostic::PRODUCTION,
+            );
             let map_surface_no_depth_pipeline =
-                ModelPipeline::for_map_surface_no_depth(device, color_format);
+                ModelPipeline::for_map_surface_diagnostic(device, color_format, true, map_depth);
             let map_surface_no_cull_no_depth_pipeline =
-                ModelPipeline::for_map_surface_no_cull_no_depth(device, color_format);
+                ModelPipeline::for_map_surface_diagnostic(device, color_format, false, map_depth);
             let water_pipeline = ModelPipeline::for_fluid(device, color_format);
             // Translucent **block** geometry (stained glass, ice, the nether
             // portal swirl): the same MODEL_WGSL shader and palette as

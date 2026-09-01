@@ -527,21 +527,78 @@ const MAX_SIGN_TEXT_VERTICES: usize = 1_048_576;
 /// projects to nothing anyway.
 const BEHIND_EYE_SLACK: f32 = 1.0;
 
-/// `Font.DisplayMode.NORMAL`, relative to Lodestone's terrain board.
+/// The glowing outline's depth state — vanilla's `Font.DisplayMode.NORMAL` half
+/// of an outlined text submission.
 ///
-/// Vanilla's sign model uses its default depth state, while this renderer's
-/// terrain board already carries [`CAMERA_DEPTH_BIAS`].  Retaining that
-/// baseline keeps the outline one render-state step behind the polygon-offset
-/// ink without placing it behind the board at long range.
+/// **The reason previously written here was false and is worth recording,
+/// because it is exactly the shape that gets quoted forward.** It said "this
+/// renderer's terrain board already carries `CAMERA_DEPTH_BIAS`", so the outline
+/// needed the same value merely to reach parity with the board. It does not: a
+/// sign board is ordinary terrain, and both terrain pipelines are built with
+/// `wgpu::DepthBiasState::default()` — a plain zero. Checked in the tree, not
+/// inferred.
+///
+/// So the real relationship is the *opposite* of what the old comment implied.
+/// Vanilla's outline pass carries **no polygon offset at all** (its pipeline
+/// takes the default depth-stencil state), against a board that also has none;
+/// ours carries a full step against a board that has none, which is one step
+/// *more* separation than vanilla gives it, not a step of catching up. That is
+/// harmless on its own — the offset only ever moves a fragment toward the eye —
+/// but it means nothing here is starved of clearance, and a live glow-text
+/// artefact is not explained by this constant being too small.
+///
+/// See `docs/coplanar-overlay-depth.md` for the vanilla pipelines this pair is
+/// ported from, and for what each half of a polygon offset is measured to be
+/// worth on this renderer's forward depth buffer.
 const SIGN_OUTLINE_DEPTH_BIAS: wgpu::DepthBiasState = CAMERA_DEPTH_BIAS;
 
-/// Vanilla `RenderPipelines.TEXT_POLYGON_OFFSET`, sign-flipped for this
-/// project's forward `[0,1]` depth buffer.
+/// The ordinary ink's depth state — vanilla's `Font.DisplayMode.POLYGON_OFFSET`
+/// half, whose pipeline declares a scale factor of `1` and a constant of `10`.
+///
+/// Twice [`CAMERA_DEPTH_BIAS`] rather than exactly one step, because vanilla
+/// spends that offset in a reversed-Z buffer whose relative precision barely
+/// moves with distance and ours does not. The doubling is this renderer's
+/// compensation and is confirmed working on plain sign text; it is *not* a
+/// transcription of vanilla's numbers, which are one step.
 const SIGN_GLYPH_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
     constant: 2 * CAMERA_DEPTH_BIAS.constant,
     slope_scale: 2.0 * CAMERA_DEPTH_BIAS.slope_scale,
     clamp: CAMERA_DEPTH_BIAS.clamp,
 };
+
+/// Opt-in live switch: draw the glowing outline with the **ink's** depth state
+/// instead of its own.
+///
+/// The outline and the ink are emitted on one world plane, so their entire
+/// separation from each other — and the whole difference between how each one
+/// meets the board — is this one bias. Nothing in the geometry can be varied to
+/// test that, and no hermetic gate reaches it, so it is an environment switch
+/// the owner can flip while looking at the sign that misbehaves.
+///
+/// Unset is the shipped path. Set, the outline moves one step further toward
+/// the eye and lands exactly where the ink lands, which is the arm that
+/// distinguishes "the outline has too little separation from the board" from
+/// "the outline is fighting something other than the board".
+#[cfg(not(target_arch = "wasm32"))]
+fn outline_depth_bias() -> wgpu::DepthBiasState {
+    let on = |name: &str| {
+        std::env::var(name).is_ok_and(|entry| !entry.is_empty() && entry != "0")
+    };
+    if on("LODESTONE_SIGN_OUTLINE_MATCH_GLYPH_DEPTH") {
+        SIGN_GLYPH_DEPTH_BIAS
+    } else if on("LODESTONE_SIGN_OUTLINE_VANILLA_DEPTH") {
+        // The other bracket: vanilla's own value for this pass, which is none.
+        wgpu::DepthBiasState { constant: 0, slope_scale: 0.0, clamp: 0.0 }
+    } else {
+        SIGN_OUTLINE_DEPTH_BIAS
+    }
+}
+
+/// Web builds have no process environment, so they always take the shipped path.
+#[cfg(target_arch = "wasm32")]
+fn outline_depth_bias() -> wgpu::DepthBiasState {
+    SIGN_OUTLINE_DEPTH_BIAS
+}
 
 /// World-space clearance from the model's front face. This is physical
 /// separation along the board normal, small enough to stay visually flush at
@@ -639,7 +696,7 @@ impl SignTextRenderer {
             &bind_layout,
             color_format,
             "lodestone-sign-text-outline-pipeline",
-            SIGN_OUTLINE_DEPTH_BIAS,
+            outline_depth_bias(),
         );
         let glyph_pipeline = build_pipeline(
             device,
@@ -692,7 +749,7 @@ impl SignTextRenderer {
             &self.bind_layout,
             color_format,
             "lodestone-sign-text-outline-pipeline",
-            SIGN_OUTLINE_DEPTH_BIAS,
+            outline_depth_bias(),
         );
         self.glyph_pipeline = build_pipeline(
             device,
@@ -1609,13 +1666,26 @@ mod tests {
 
     #[test]
     fn glowing_sign_outline_uses_normal_depth_before_polygon_offset_ink() {
-        // Vanilla's TextFeatureRenderer changes DisplayMode between the two
-        // visits: NORMAL for the eight-copy outline, then POLYGON_OFFSET for
-        // the base glyph. Vanilla's sign board has default depth, whereas
-        // Lodestone's terrain board already has CAMERA_DEPTH_BIAS. The normal
-        // outline must inherit that *board-relative* baseline or the board
-        // wins its depth test and the glow fights the sign texture.
+        // Vanilla renders an outlined string in two visits at two display
+        // modes: the eight-copy outline at NORMAL, then the base glyph at
+        // POLYGON_OFFSET. Only the second pipeline declares a polygon offset;
+        // the first takes the default depth-stencil state. The structure this
+        // asserts is that relationship — the outline is one step behind the ink
+        // and both are ahead of the board.
+        //
+        // This test's rationale used to say the outline needed CAMERA_DEPTH_BIAS
+        // to reach parity with a terrain board that "already has" it. That was
+        // false: both terrain pipelines build with wgpu's default zero bias, so
+        // the outline is a step ahead of the board rather than level with it.
+        // The assertions below were right; only the reason was wrong, which is
+        // why nothing ever failed.
         assert_eq!(SIGN_OUTLINE_DEPTH_BIAS, CAMERA_DEPTH_BIAS);
+        assert!(
+            SIGN_GLYPH_DEPTH_BIAS.constant < SIGN_OUTLINE_DEPTH_BIAS.constant,
+            "the polygon-offset ink must sit nearer the eye than the outline it \
+             is drawn over; both are on one world plane, so this bias is the \
+             only thing that orders them"
+        );
         assert_eq!(SIGN_GLYPH_DEPTH_BIAS.constant, 2 * CAMERA_DEPTH_BIAS.constant);
         assert_eq!(SIGN_GLYPH_DEPTH_BIAS.slope_scale, 2.0 * CAMERA_DEPTH_BIAS.slope_scale);
         assert_eq!(SIGN_GLYPH_DEPTH_BIAS.clamp, 0.0);

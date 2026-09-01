@@ -447,6 +447,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   protocol family with zero shell callers before this — the same outbound-island
   shape `ClientAction::SetFlying`/`SetBeaconEffects` were caught in — and these
   three modules are its producers.
+- [Coplanar overlay depth](./coplanar-overlay-depth.md) — Several subsystems draw a
+  thin quad a small **world-space** distance in front of another surface and rely on
+  the depth test to keep it there: a filled map's picture over an item frame or its
+  attachment wall, a sign's glyph ink and its glowing outline over the sign board, an
+  item-frame body over the wall it hangs on. This document is the measurement of how
+  much depth separation those overlays actually have in this renderer, and what the
+  polygon offsets attached to them really contribute on the device we ship on. The
+  instrument is `crates/lodestone-render/tests/coplanar_overlay_depth_survey.rs`.
 - [Crafting](./crafting.md) — The version-free crafting stack in `lodestone-game`:
   the recipe data model and matching rules (`recipe.rs`), a loader for Mojang's own
   datapack JSON (`recipe_json.rs`), and the crafting-table menu layout that `menus.rs`

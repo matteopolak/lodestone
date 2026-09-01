@@ -31,6 +31,7 @@ use std::{collections::HashMap, hash::Hash, sync::Arc};
 use glam::{Mat4, Vec3};
 use lodestone_render::map_item::{MAP_SIZE, map_quad_mesh, map_texture_rgba};
 use lodestone_render::texture::GpuAtlas;
+use lodestone_render::model_pipeline::MapDepthDiagnostic;
 use lodestone_render::{ENTITY_FULLBRIGHT, GpuModelMesh, ModelMesh, ModelPipeline};
 
 use crate::entities::EntityDraw;
@@ -289,18 +290,49 @@ pub const GLOW_ITEM_FRAME_TYPE_PATH: &str = "glow_item_frame";
 /// These are deliberately diagnostics, not graphics settings: every false
 /// default preserves the production path, while a live report can identify the
 /// first boundary whose removal restores the picture.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MapDiagnosticSwitches {
     pub(super) disable_frustum_cull: bool,
     pub(super) disable_backface_cull: bool,
-    pub(super) disable_depth: bool,
+    /// Which of the three depth decisions the map pipeline still makes.
+    ///
+    /// `LODESTONE_MAP_DISABLE_DEPTH` turns off all three at once, which is what
+    /// it has always meant — but a run under it cannot say *which* one mattered,
+    /// because the comparison, the write and the polygon offset all vanish
+    /// together. The three narrower switches each remove exactly one, so three
+    /// runs separate what one run conflates.
+    pub(super) depth: MapDepthDiagnostic,
+}
+
+impl Default for MapDiagnosticSwitches {
+    fn default() -> Self {
+        Self {
+            disable_frustum_cull: false,
+            disable_backface_cull: false,
+            depth: MapDepthDiagnostic::PRODUCTION,
+        }
+    }
+}
+
+impl MapDiagnosticSwitches {
+    /// Whether the map pipeline departs from the production depth state at all.
+    /// Retained under the old name because the draw-site pipeline selection asks
+    /// exactly this question and does not care which axis moved.
+    pub(super) const fn disable_depth(self) -> bool {
+        self.depth.is_diagnostic()
+    }
 }
 
 fn map_diagnostic_switches_from(enabled: impl Fn(&str) -> bool) -> MapDiagnosticSwitches {
+    let all_off = enabled("LODESTONE_MAP_DISABLE_DEPTH");
     MapDiagnosticSwitches {
         disable_frustum_cull: enabled("LODESTONE_MAP_DISABLE_FRUSTUM_CULL"),
         disable_backface_cull: enabled("LODESTONE_MAP_DISABLE_BACKFACE_CULL"),
-        disable_depth: enabled("LODESTONE_MAP_DISABLE_DEPTH"),
+        depth: MapDepthDiagnostic {
+            compare: !all_off && !enabled("LODESTONE_MAP_DISABLE_DEPTH_TEST"),
+            write: !all_off && !enabled("LODESTONE_MAP_DISABLE_DEPTH_WRITE"),
+            bias: !all_off && !enabled("LODESTONE_MAP_DISABLE_DEPTH_BIAS"),
+        },
     }
 }
 
@@ -1399,7 +1431,55 @@ mod tests {
 
         assert!(switches.disable_frustum_cull);
         assert!(switches.disable_backface_cull);
-        assert!(switches.disable_depth);
+        assert!(switches.disable_depth());
+        assert_eq!(switches.depth, MapDepthDiagnostic::ALL_OFF);
+    }
+
+    /// Nothing set is the production path on every axis. This is the arm that
+    /// makes the three below mean something: without it they only show that
+    /// *some* switch moves *some* field.
+    #[test]
+    fn no_map_switch_leaves_every_depth_decision_in_place() {
+        let switches = map_diagnostic_switches_from(|_| false);
+        assert_eq!(switches.depth, MapDepthDiagnostic::PRODUCTION);
+        assert!(!switches.disable_depth());
+        assert!(!switches.disable_frustum_cull);
+        assert!(!switches.disable_backface_cull);
+    }
+
+    /// Each narrow switch removes **exactly one** depth decision.
+    ///
+    /// The whole point of splitting `LODESTONE_MAP_DISABLE_DEPTH` is that a live
+    /// run under it changed three things at once, so it settled nothing. These
+    /// assert the separation itself: for each switch, the named axis is off and
+    /// the other two are still on. A regression that re-coupled any pair would
+    /// leave the switches individually "working" and collectively useless, and
+    /// only the *other two* assertions in each arm can see that.
+    #[test]
+    fn each_narrow_depth_switch_removes_exactly_one_decision() {
+        let only = |target: &'static str| {
+            map_diagnostic_switches_from(move |name| name == target).depth
+        };
+
+        let test = only("LODESTONE_MAP_DISABLE_DEPTH_TEST");
+        assert!(!test.compare, "the test switch must drop the comparison");
+        assert!(test.write, "the test switch must keep the depth write");
+        assert!(test.bias, "the test switch must keep the polygon offset");
+
+        let write = only("LODESTONE_MAP_DISABLE_DEPTH_WRITE");
+        assert!(write.compare);
+        assert!(!write.write, "the write switch must drop the depth write");
+        assert!(write.bias);
+
+        let bias = only("LODESTONE_MAP_DISABLE_DEPTH_BIAS");
+        assert!(bias.compare);
+        assert!(bias.write);
+        assert!(!bias.bias, "the bias switch must drop the polygon offset");
+
+        // And all three are genuinely distinct configurations.
+        assert_ne!(test, write);
+        assert_ne!(write, bias);
+        assert_ne!(test, bias);
     }
 
     #[test]
