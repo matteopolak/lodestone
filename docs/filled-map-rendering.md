@@ -272,6 +272,8 @@ write and the polygon offset together, so a live run under it settled nothing:
 | `LODESTONE_MAP_DISABLE_DEPTH_WRITE=1` | only the depth write | the quad wins its own test and is then overdrawn by something that lost to the depth *it* wrote |
 | `LODESTONE_MAP_DISABLE_DEPTH_BIAS=1` | only `MAP_SURFACE_DEPTH_BIAS` | the polygon offset is displacing the picture. Note the measured prediction is that this arm makes the defect **worse or unchanged**: the bias only ever moves a fragment toward the eye, and an over-large one clamps rather than discarding (`docs/coplanar-overlay-depth.md`). If it *fixes* anything, that measurement is wrong |
 
+| `LODESTONE_MAP_LIFT_PROBE=<blocks>` | nothing — it *adds* outward clearance to the picture's pose | this is a ruler rather than a switch: the smallest value that restores the picture **is** the deficit. Under `0.008` means the surfaces are effectively tied; `0.0625` means the content lift is the wrong one of vanilla's two; `0.5` means the picture is on the wrong side of its attachment block; never coming back means it is not a world-space deficit at all |
+
 Combine switches only after testing them singly. The trace already names the earlier boundaries:
 `candidates=0` means the input `EntityDraw` slice contains no filled-map frame before any renderer cull;
 `candidates>0` with no `selected` only means no frame was close enough to the observer's tracking region
@@ -280,6 +282,84 @@ Combine switches only after testing them singly. The trace already names the ear
 in the GPU branch. Chests, signs and other true block entities are not `EntityDraw`s and do not use this
 map diagnostic or its cull path; an absent block entity therefore needs a separate producer/packet
 investigation.
+
+### The invisible frame's whole margin over the wall is a polygon offset, and the slope half of it is zero head-on
+
+The live report this section is written from is a wall-sized board of `filled_map`s in **invisible**
+item frames, cut off along a straight, screen-parallel line: the cut moves with camera *yaw*, does not
+move when the camera walks, and covers **more** of the screen at FOV 70 than at FOV 110. Three live
+switch runs bound it before any fixture existed. `LODESTONE_MAP_DISABLE_DEPTH_TEST=1` removes the
+defect outright. `LODESTONE_MAP_DISABLE_DEPTH_WRITE=1` changes nothing, so the tiles are not occluding
+each other. `LODESTONE_MAP_DISABLE_DEPTH_BIAS=1` makes it **worse** — the whole board goes.
+
+So the picture is losing a depth comparison against the wall, and `MAP_SURFACE_DEPTH_BIAS` is the only
+thing keeping any of it. That is a load-bearing role the polygon offset was never meant to have: an
+invisible frame's picture stands `1.01 / 128` of a block — **7.9 mm** — outside its attachment block's
+face, and that clearance is supposed to be the separation, with the offset as a tiebreak on top.
+
+`tests/framed_map_pixels.rs`'s `a_board_of_framed_maps_survives_the_depth_test_while_the_camera_turns`
+is the fixture that axis needed. Every other gate in that file renders **one** frame from a
+**translating** camera; this one hangs 35 x 19 invisible framed maps on one stone wall at the live
+server's own coordinates and turns the eye **in place**, at FOV 70 and 110, from 12 m to 96 m. It
+measures the board's ink against the identical scene with the attachment wall deleted, so the wall-free
+arm is the positive control and a configuration whose control is zero is reported as vacuous rather
+than as a pass.
+
+**At the shipped pose it passes everywhere**, 20 configurations, walled and wall-free byte-identical,
+at 320x240 and again at 2560x1440. Resolution is on that list deliberately: the offset's slope term is
+a depth gradient *per pixel*, so a 2560-wide framebuffer gives the picture roughly an eighth of the
+slope rescue a 320-wide one does, and a fixture pinned to 320x240 is measuring a more forgiving device
+than the report came from. It did not matter — the shipped pose has margin to spare either way.
+
+The neuter is where the numbers are, and it reproduces the live symptom **exactly**. Flipping
+`MAP_RENDERER_DEPTH`'s sign so the picture sits 7.9 mm *behind* the wall instead of in front of it:
+
+| | 12 m turn 0 | 12 m turn 5-30 | 32 m any turn | 64-96 m |
+| --- | --- | --- | --- | --- |
+| offset on | **all ink lost** | intact | intact | intact |
+| offset off | all ink lost | **all ink lost** | **all ink lost** | **all ink lost** |
+| offset on, `LODESTONE_MAP_LIFT_PROBE=0.02` | intact | intact | intact | intact |
+
+Read the first row against the report. A wall seen head-on has a window-space depth gradient of
+**zero**, so the slope-scaled half of the offset contributes nothing there and only its `-20`
+constant is left; turn the camera and the gradient — and the rescue — grows without bound. The
+deficit it is fighting scales as `1 / distance^2`, so 12 m is the hard case and 96 m is easy. That
+single mechanism produces every property the owner described: the surviving region is bounded by the
+locus where obliquity stops being enough, which for a plane under perspective is a **straight line**;
+that locus sits where the wall is most nearly head-on, which is at screen angle equal to the camera's
+own turn, so it **follows the look direction**; the obliquity at a given screen angle depends on the
+camera's orientation and not its position, so it is **invariant to walking**; and the gradient scales
+with `tan(fov / 2)`, so a narrower lens has *less* rescue and loses **more** — FOV 70 worse than FOV
+110, which is the observation that made no sense under a culling model.
+
+The second row is the control that proves the switch reaches the pipeline rather than being swallowed,
+and it reproduces the live `LODESTONE_MAP_DISABLE_DEPTH_BIAS=1` run (whole board gone) exactly. The
+third proves `LODESTONE_MAP_LIFT_PROBE` moves the picture in the direction it claims to; the unit test
+beside `framed_map_pose_with_extra_lift` proves the same sign at all six facings, because a ruler that
+reads backwards is worse than no ruler — every value would make the defect worse and read as "the
+deficit is larger than anything I tried".
+
+**What is not established is why the live picture is behind the wall at all.** The pose is confirmed
+against the 26.2 jar rather than against this document: `ItemFrameRenderer.submit`'s
+`Axis.YP.rotationDegrees(180 - direction.toYRot())` sends frame-local `+z` **into** the wall, the
+invisible branch's `translate(0, 0, 0.5)` therefore lands the content plane exactly on the attachment
+block's face, and `translate(0, 0, -1)` plus `MapRenderer`'s own `-0.01` vertex `z` — both after
+`scale(1/128)` — pull it `1.01 / 128` back out toward the room. `ItemFrame.getAddEntityPacket` sends
+`getPos()`, the integer `BlockPos`, so the `floor()` in `item_frame_space` recovers the right block at
+every facing. All of that agrees with what this client does. The hermetic board therefore has the
+margin the live one appears not to have, and the difference is in the live *scene*, not in the pose or
+the pipeline as this fixture exercises them.
+
+`LODESTONE_MAP_LIFT_PROBE` is what closes that gap without guessing: it turns "the board is cut off"
+into a number of blocks, and the table in the switch list above names a different mechanism for each
+magnitude. The gather trace now also carries `centre_depth_ulp_margin` — the signed separation, in
+representable `Depth32Float` values, between the picture's centre and the surface behind it, positive
+when the picture is ahead. Compare it against the offset's `-20` constant: a margin at or below `-20`
+while the picture is missing means it is losing on geometry, and a comfortably positive margin means
+the pose is right and something else owns those pixels. `map_in_front_mask` cannot answer this — it
+reports only which side each corner fell on, and its corner *pairing* is unreliable because the pose's
+`Ry(180)` reverses the picture's x order relative to the comparison quad. Index 0 is both surfaces'
+centre, so it is paired correctly at any turn, which is why the margin is measured there.
 
 ## Dependencies
 

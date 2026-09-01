@@ -375,6 +375,50 @@ fn framed_map_in_frustum(
 /// put the image plane `1.01 / 128` in front of the content origin.
 const MAP_RENDERER_DEPTH: f32 = 1.01 / 128.0;
 
+/// Extra outward clearance for a framed map's picture, in blocks, read once
+/// from `LODESTONE_MAP_LIFT_PROBE` at process start. `0.0` — the default and
+/// the only value any non-diagnostic run ever uses — leaves the pose exactly
+/// where `ItemFrameRenderer`/`MapRenderer` put it.
+///
+/// # This is a ruler, not a setting
+///
+/// An invisible frame's picture stands `MAP_RENDERER_DEPTH` — 7.9 mm — outside
+/// its attachment block's face, and that is all the world-space separation it
+/// has from the wall. A live report of the picture *losing* to that wall is a
+/// claim that the separation has the wrong sign or the wrong magnitude, and the
+/// only way to tell which is to measure it: raise the clearance until the
+/// picture comes back, and the value that works **is** the deficit.
+///
+/// The magnitudes are pre-committed, because each one names a different
+/// mechanism and a probe without them is a tuning knob:
+///
+/// | smallest value that restores the picture | what it means |
+/// | --- | --- |
+/// | it never comes back | not a world-space deficit at all — look at the pipeline or at what else writes depth there |
+/// | under `0.008` (i.e. under `MAP_RENDERER_DEPTH` itself) | the surfaces are effectively tied; the separation is reaching the buffer but is too small to survive rounding |
+/// | around `0.0625` (`1/16`) | the *content lift* is wrong — that is exactly the gap between vanilla's visible `0.4375` and invisible `0.5` |
+/// | around `0.5` | the picture is on the wrong side of its attachment block |
+///
+/// Native-only and read once, like every other `LODESTONE_MAP_*` switch: the
+/// browser build has no process environment and always takes `0.0`.
+fn map_lift_probe() -> f32 {
+    static PROBE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::env::var("LODESTONE_MAP_LIFT_PROBE")
+                .ok()
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.0)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            0.0
+        }
+    })
+}
+
 /// The source-resolution result for one visible framed-map candidate. This is
 /// deliberately narrower than [`MapSkip`]: the live trace needs to distinguish
 /// a frame that never reached a source lookup from one whose individual map
@@ -483,7 +527,46 @@ struct FramedMapProjectionPoint {
 #[derive(Clone, Copy, Debug)]
 struct FramedMapProjectionSnapshot {
     comparison_surface: &'static str,
+    /// How many representable `Depth32Float` values separate the picture's
+    /// **centre** from the surface behind it, positive when the picture is
+    /// ahead. This is the number the live report turns on, and it is the one
+    /// quantity `map_in_front_mask` cannot supply: that mask says only which
+    /// side of the comparison each corner fell on, and its corner *pairing* is
+    /// unreliable because the pose's `Ry(180)` reverses the picture's x order
+    /// relative to the comparison quad. Index `0` is the centre of both, so it
+    /// is paired correctly whatever the turn is.
+    ///
+    /// Read it against `docs/coplanar-overlay-depth.md`: the picture's own
+    /// polygon offset is worth `-20` values plus an unbounded slope term, so a
+    /// margin of `-20` or worse at the centre means the picture is losing on
+    /// geometry rather than on rounding. A margin comfortably above zero while
+    /// the picture is visibly missing means the world pose is fine and
+    /// something else owns those pixels.
+    centre_depth_ulp_margin: f32,
     points: [FramedMapProjectionPoint; 5],
+}
+
+/// The gap from `value` to the next representable `f32` above it — the unit
+/// [`FramedMapProjectionSnapshot::centre_depth_ulp_margin`] counts in.
+fn depth_ulp(value: f32) -> f32 {
+    let next = f32::from_bits(value.to_bits().wrapping_add(1));
+    let step = next - value;
+    if step.is_finite() && step > 0.0 { step } else { f32::EPSILON }
+}
+
+/// Signed separation of two window-space depths in representable values,
+/// positive when `map_clip` is nearer the eye than `comparison_clip`.
+///
+/// Both are `[0, 1]` forward depths, so "nearer" is "smaller" — the opposite of
+/// vanilla's reversed-Z convention, which is why this returns
+/// `comparison - map` rather than the other way round.
+fn depth_ulp_margin(map_clip: [f32; 4], comparison_clip: [f32; 4]) -> f32 {
+    if map_clip[3] <= 0.0 || comparison_clip[3] <= 0.0 {
+        return f32::NAN;
+    }
+    let map_depth = map_clip[2] / map_clip[3];
+    let comparison_depth = comparison_clip[2] / comparison_clip[3];
+    (comparison_depth - map_depth) / depth_ulp(comparison_depth)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -762,6 +845,10 @@ fn framed_map_projection(
             } else {
                 "frame_plate"
             },
+            centre_depth_ulp_margin: depth_ulp_margin(
+                points[0].map_clip,
+                points[0].comparison_clip,
+            ),
             points,
         },
     )
@@ -1059,6 +1146,25 @@ const fn framed_map_light(frame_light: u8, glow: bool) -> u8 {
 /// half-steps fold onto the even ones rather than tilting the picture.
 #[must_use]
 fn framed_map_pose(feet: Vec3, yaw: f32, pitch: f32, rotation: u8, invisible: bool) -> Mat4 {
+    framed_map_pose_with_extra_lift(feet, yaw, pitch, rotation, invisible, map_lift_probe())
+}
+
+/// [`framed_map_pose`] with the live [`map_lift_probe`] supplied explicitly, so
+/// the probe's **sign** is assertable without a process-wide environment read.
+///
+/// The sign is the whole risk here: this file has already shipped one pose whose
+/// lift went into the wall instead of out of it, and a probe that measures the
+/// deficit by making it worse would read as "the deficit is larger than any value
+/// I tried".
+#[must_use]
+fn framed_map_pose_with_extra_lift(
+    feet: Vec3,
+    yaw: f32,
+    pitch: f32,
+    rotation: u8,
+    invisible: bool,
+    extra_lift: f32,
+) -> Mat4 {
     let quarter_turns = f32::from(rotation % 4) * 90.0;
     // This is ItemFrameRenderer's content branch. `map_quad_mesh` has already
     // absorbed Java's 1/128 XY scale and (-64, -64) centring translation. The
@@ -1073,7 +1179,10 @@ fn framed_map_pose(feet: Vec3, yaw: f32, pitch: f32, rotation: u8, invisible: bo
         ))
         * Mat4::from_rotation_z(quarter_turns.to_radians())
         * Mat4::from_rotation_y(std::f32::consts::PI)
-        * Mat4::from_translation(Vec3::new(0.0, 0.0, MAP_RENDERER_DEPTH))
+        // `Ry(180)` has already turned local `+z` outward, so a larger value
+        // here moves the picture further from the wall. `map_lift_probe()` is
+        // `0.0` in every run that is not a live measurement.
+        * Mat4::from_translation(Vec3::new(0.0, 0.0, MAP_RENDERER_DEPTH + extra_lift))
 }
 
 /// Why a framed or held map declined to draw, for the one-shot diagnostic below.
@@ -1750,6 +1859,73 @@ mod tests {
                 "yaw {yaw}, pitch {pitch}: invisible map must be just outside wall {expected}, got {actual}"
             );
         }
+    }
+
+    /// The live clearance probe must move the picture **out of** the wall.
+    ///
+    /// It is a ruler for a live report, and a ruler that reads backwards is
+    /// worse than none: an inward probe would make every value make the defect
+    /// worse, which reads as "the deficit is larger than anything I tried"
+    /// rather than as a broken instrument. Measured at all six facings, because
+    /// the outward direction is `item_frame_facing_step` and not any fixed axis
+    /// — the same coincidence at yaw 0/180 that once hid a whole pose bug.
+    #[test]
+    fn the_live_lift_probe_moves_the_picture_away_from_the_wall() {
+        let anchor = Vec3::new(4.0, 65.0, -9.0);
+        let extra = 0.25f32;
+        let mut wrong: Vec<String> = Vec::new();
+        for (yaw, pitch) in [
+            (0.0f32, 0.0f32),
+            (90.0, 0.0),
+            (180.0, 0.0),
+            (270.0, 0.0),
+            (0.0, -90.0),
+            (0.0, 90.0),
+        ] {
+            let facing = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
+            let base = framed_map_pose_with_extra_lift(anchor, yaw, pitch, 0, true, 0.0)
+                .transform_point3(Vec3::ZERO);
+            let probed = framed_map_pose_with_extra_lift(anchor, yaw, pitch, 0, true, extra)
+                .transform_point3(Vec3::ZERO);
+            let moved = (probed - base).dot(facing);
+            if (moved - extra).abs() > 1.0e-5 {
+                wrong.push(format!(
+                    "yaw {yaw}, pitch {pitch}: probe moved the picture {moved} along its own \
+                     facing, wanted {extra}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The trace's depth margin is positive when the picture is **nearer the
+    /// eye**, which in this renderer's forward `[0, 1]` depth means a *smaller*
+    /// depth value — the opposite of the reversed-Z convention every ported
+    /// vanilla depth comparison in this tree has to be flipped out of.
+    #[test]
+    fn the_traced_depth_margin_is_positive_when_the_picture_is_in_front() {
+        // Same `w`, so the two depths are the two `z` values directly.
+        let ahead = depth_ulp_margin([0.0, 0.0, 0.90, 1.0], [0.0, 0.0, 0.95, 1.0]);
+        let behind = depth_ulp_margin([0.0, 0.0, 0.95, 1.0], [0.0, 0.0, 0.90, 1.0]);
+        assert!(ahead > 0.0, "a nearer picture must read positive, got {ahead}");
+        assert!(behind < 0.0, "a farther picture must read negative, got {behind}");
+        assert!(
+            (ahead + behind).abs() < ahead.abs() * 0.01,
+            "the two directions must be equal and opposite: {ahead} against {behind}"
+        );
+        // A margin of one representable step is exactly 1.0, which is what makes
+        // the number comparable against the `-20` polygon-offset constant.
+        let one_step = 0.95f32;
+        let next = f32::from_bits(one_step.to_bits() + 1);
+        let single = depth_ulp_margin([0.0, 0.0, one_step, 1.0], [0.0, 0.0, next, 1.0]);
+        assert!(
+            (single - 1.0).abs() < 1.0e-3,
+            "one representable step must read as 1 ULP, got {single}"
+        );
+        assert!(
+            depth_ulp_margin([0.0, 0.0, 0.5, -1.0], [0.0, 0.0, 0.5, 1.0]).is_nan(),
+            "a point behind the eye has no meaningful margin"
+        );
     }
 
     #[test]
