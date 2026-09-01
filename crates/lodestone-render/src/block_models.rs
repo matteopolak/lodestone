@@ -1755,6 +1755,14 @@ pub struct BlockModels {
     /// the side face's back copy. Parallel to `models`. See
     /// [`is_fluid_overlay_neighbor`].
     fluid_overlay: Vec<bool>,
+    /// Every atlas sprite's own render layer, indexed exactly as
+    /// [`Atlas::sprites`] is — which is the index a baked quad's
+    /// [`BakedQuad::sprite`](lodestone_assets::bake::BakedQuad::sprite) field
+    /// carries. This is the table vanilla's per-quad `ChunkSectionLayer`
+    /// bucketing needs; see [`Self::sprite_layer`]. Kept rather than dropped
+    /// after the per-state roll-up because the mesher asks the same question
+    /// once per quad per section rebuild.
+    sprite_layers: Vec<RenderLayer>,
     /// Resolved still/flow UVs for water and lava, from the stitched atlas.
     water_sprites: FluidSprites,
     lava_sprites: FluidSprites,
@@ -2180,6 +2188,7 @@ impl BlockModels {
             empty: StateModel::empty(),
             fluids,
             fluid_overlay,
+            sprite_layers,
             water_sprites,
             lava_sprites,
             tint_palette: palette.colors().to_vec(),
@@ -2502,10 +2511,53 @@ impl BlockModels {
             .count()
     }
 
-    /// The render layer of a state's geometry.
+    /// The render layer of a state's geometry: the **most transparent** layer
+    /// across all its quads.
+    ///
+    /// This is a per-*block* answer and it is the right one for the questions
+    /// that are per-block in vanilla too — occlusion (`canOcclude`), the packed
+    /// fast path, the fluid mesher's shoreline test. It is the **wrong** answer
+    /// for "which pass does this quad draw in", which vanilla decides per quad
+    /// from that quad's own sprite; use [`Self::sprite_layer`] for that.
     #[must_use]
     pub fn layer(&self, state_id: u32) -> RenderLayer {
         self.state(state_id).layer
+    }
+
+    /// The render layer of one atlas sprite, by its index into
+    /// [`Atlas::sprites`] — i.e. by a baked quad's own
+    /// [`BakedQuad::sprite`](lodestone_assets::bake::BakedQuad::sprite) field.
+    ///
+    /// This is the **per-quad** layer, and it is what decides which pass a quad
+    /// draws in. Vanilla's `SectionCompiler` buckets each quad on
+    /// `quad.materialInfo().layer()`, which `ChunkSectionLayer.byTransparency`
+    /// derives from the transparency of that quad's *own* sprite — not from a
+    /// per-block-state roll-up. The two disagree on any model that mixes an
+    /// opaque sprite with a cutout or translucent one in a single state:
+    /// `grass_block` is the canonical case, whose fully opaque top, bottom and
+    /// side faces inherit `Cutout` from the four coplanar
+    /// `grass_block_side_overlay` decals under [`Self::layer`]'s rule and are
+    /// then alpha-tested by a discard vanilla never applies to them.
+    ///
+    /// `None` for an index past the atlas's sprite list — a quad baked with no
+    /// atlas index to record (the fluid path, which never reaches this) — so a
+    /// caller can distinguish "not classified" from a real `Solid`.
+    ///
+    /// # Remaining divergence
+    ///
+    /// Vanilla scopes the scan to the quad's own UV window inside the sprite
+    /// (`SpriteContents.computeTransparency(u0, v0, u1, v1)`), short-circuiting
+    /// to the whole-sprite answer when the sprite is opaque or the window
+    /// covers it entirely — which is the overwhelming majority of quads. This
+    /// answers the whole-sprite question only, so a quad sampling an opaque
+    /// sub-rect of a cutout sprite is classified `Cutout` here and `Solid`
+    /// there. The scan is also over the sprite's **first animation frame**;
+    /// vanilla unions every unique frame. Measured against the 26.2 jar, zero
+    /// of the 1,269 block sprites classify differently from their first frame
+    /// than from the whole strip, so that half is currently inert.
+    #[must_use]
+    pub fn sprite_layer(&self, sprite: u32) -> Option<RenderLayer> {
+        self.sprite_layers.get(sprite as usize).copied()
     }
 
     /// Whether this state's model is a cauldron body with an inset liquid

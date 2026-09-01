@@ -668,28 +668,47 @@ pub trait ModelSectionView {
         false
     }
 
-    /// Whether the block at section-local `(x, y, z)` is on the
-    /// [`RenderLayer::Translucent`](crate::translucency::RenderLayer::Translucent)
-    /// pass — a genuinely partial-alpha block (stained glass, ice, the nether
-    /// portal swirl) whose quads [`mesh_models`] routes to a **second** mesh
-    /// drawn with real alpha blending and back-to-front order, instead of
-    /// folding them into the opaque/cutout mesh the single-alpha-test shader
-    /// draws. Owner report: "the nether portal swirly block is missing is
-    /// opaque when it isnt supposed to be" — `BlockModels` already classified
-    /// nether_portal's sprite as `Translucent` correctly (every texel of the
-    /// real `block/nether_portal.png` has partial alpha), but nothing read
-    /// that classification when routing quads into a mesh, so every block
-    /// (`Solid`, `Cutout` and `Translucent` alike) landed in the one bucket
-    /// the opaque pipeline draws with cutout-discard and no blending.
+    /// The [`RenderLayer`](crate::translucency::RenderLayer) of one quad of the
+    /// block at section-local `(x, y, z)` — vanilla's per-**quad** render-layer
+    /// bucketing, and the thing that decides both which mesh the quad lands in
+    /// and whether the fragment shader's cutout discard runs on it.
     ///
-    /// Defaults to `false` — everything stays on the opaque/cutout mesh — so
-    /// an existing [`ModelSectionView`] implementation (a test fixture, the
-    /// GUI item baker) keeps its previous behaviour exactly; only a view
-    /// backed by a real [`BlockModels`](crate::BlockModels) registry
-    /// (`SnapshotModelView` in `lodestone-shell`) overrides it.
-    fn is_translucent_at(&self, x: usize, y: usize, z: usize) -> bool {
-        let _ = (x, y, z);
-        false
+    /// `SectionCompiler` sends every quad to `quad.materialInfo().layer()`,
+    /// which `ChunkSectionLayer.byTransparency` derives from the transparency
+    /// of that quad's *own* sprite. So a block state that mixes sprites is
+    /// split across passes: `grass_block`'s six opaque cube faces draw through
+    /// `SOLID_TERRAIN` — which defines no `ALPHA_CUTOUT` and therefore runs
+    /// **no alpha test at all** — while its four coplanar
+    /// `grass_block_side_overlay` decals draw through `CUTOUT_TERRAIN` at
+    /// `0.5`. A per-block-state layer cannot express that: rolling the state up
+    /// to "the most transparent layer across its faces" alpha-tests the opaque
+    /// faces too, and under minification the mip chain can pull a filtered
+    /// alpha below the threshold at a sprite edge, discarding a fragment
+    /// vanilla paints opaque.
+    ///
+    /// Returning [`Solid`](crate::translucency::RenderLayer::Solid) is what
+    /// sets [`ModelVertex::cutout_bypass`] on the emitted vertices, which is
+    /// this renderer's stand-in for vanilla's separate `SOLID_TERRAIN`
+    /// pipeline (see that field's doc for why the bypass is per-vertex and not
+    /// a second pipeline). Returning
+    /// [`Translucent`](crate::translucency::RenderLayer::Translucent) routes
+    /// the quad into [`mesh_models_layers`]'s **second** mesh, which is drawn
+    /// with real alpha blending and back-to-front order — a genuinely
+    /// partial-alpha sprite (stained glass, ice, the nether-portal swirl).
+    ///
+    /// Defaults to `None`, meaning "this view cannot classify quads": every
+    /// quad then lands in the first mesh with the ordinary cutout discard, the
+    /// behaviour every [`ModelSectionView`] had before per-quad layers existed.
+    /// Only a view backed by a real [`BlockModels`](crate::BlockModels)
+    /// registry (`SnapshotModelView` in `lodestone-shell`) answers it, through
+    /// [`BlockModels::sprite_layer`](crate::BlockModels::sprite_layer) on the
+    /// quad's own [`BakedQuad::sprite`] index.
+    ///
+    /// [`ModelVertex::cutout_bypass`]: ModelVertex::cutout_bypass
+    /// [`BakedQuad::sprite`]: lodestone_assets::bake::BakedQuad::sprite
+    fn quad_layer(&self, x: usize, y: usize, z: usize, quad: &BakedQuad) -> Option<RenderLayer> {
+        let _ = (x, y, z, quad);
+        None
     }
 
     /// The **real**, position-resolved colour for a biome-dependent quad at
@@ -878,20 +897,24 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
     mesh
 }
 
-/// Like [`mesh_models`], but keeps a block on the
+/// Like [`mesh_models`], but keeps every quad on the
 /// [`RenderLayer::Translucent`](crate::translucency::RenderLayer::Translucent)
-/// pass ([`ModelSectionView::is_translucent_at`]) in a **second** mesh instead
-/// of folding it into the first.
+/// pass ([`ModelSectionView::quad_layer`]) in a **second** mesh instead of
+/// folding it into the first.
 ///
 /// The split exists because the two meshes are drawn through different
 /// pipelines: the first (`Solid` + `Cutout`) is depth-written and uses a
 /// single alpha-test/discard shader; the second needs real alpha blending,
 /// no depth write and back-to-front ordering — see
-/// `lodestone-shell`'s `gpu/frame.rs` translucent-block draw pass. Splitting
-/// at **block** granularity (not per-quad) matches how the layer itself is
-/// derived ([`crate::block_models::BlockModels::layer`] is one value per
-/// state) and how vanilla assigns exactly one `ChunkSectionLayer` per block's
-/// baked material.
+/// `lodestone-shell`'s `gpu/frame.rs` translucent-block draw pass.
+///
+/// The split is per **quad**, matching vanilla: `SectionCompiler` opens one
+/// buffer per `ChunkSectionLayer` and picks the buffer from
+/// `quad.materialInfo().layer()`, so a single block state's geometry can and
+/// does land in more than one of them. A water cauldron is the clearest case —
+/// its opaque body writes depth on the solid pass and its partial-alpha liquid
+/// blends on the translucent one, which is precisely what a per-block-state
+/// routing could not express.
 #[must_use]
 pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh) {
     let mut mesh = ModelMesh::default();
@@ -904,11 +927,6 @@ pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh)
                 if quads.is_empty() {
                     continue;
                 }
-                let target: &mut ModelMesh = if view.is_translucent_at(x, y, z) {
-                    &mut translucent_mesh
-                } else {
-                    &mut mesh
-                };
                 // Per *block*, matching vanilla: `tesselateBlock` picks AO or
                 // flat once per block (`parts.getFirst().useAmbientOcclusion()`),
                 // not per quad, so every quad of a `"ambientocclusion": false`
@@ -999,13 +1017,36 @@ pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh)
                     };
                     let tint = quad.tint_index.map_or(255u8, |t| t as u8);
                     let tint_rgb_override = view.biome_tint_at(x, y, z, tint);
+                    // Vanilla's per-quad `ChunkSectionLayer` bucketing
+                    // (`SectionCompiler`'s `quadOutput` reads
+                    // `quad.materialInfo().layer()`), resolved once here and
+                    // used for both halves of what that layer decides: which
+                    // mesh the quad lands in, and whether the alpha test runs.
+                    //
+                    // A `Solid` quad bypasses the cutout discard because
+                    // vanilla's `SOLID_TERRAIN` pipeline defines no
+                    // `ALPHA_CUTOUT` and so runs no test at all — the block's
+                    // *other* faces being cutout does not change that. This is
+                    // what keeps a `grass_block`'s opaque top out of an alpha
+                    // test whose mip-filtered result can dip below the
+                    // threshold at a sprite edge under minification.
+                    //
+                    // `None` (a view that cannot classify quads: every test
+                    // fixture, the GUI item baker) keeps the pre-per-quad
+                    // behaviour — one mesh, discard on.
+                    let quad_layer = view.quad_layer(x, y, z, quad);
+                    let target: &mut ModelMesh = if quad_layer == Some(RenderLayer::Translucent) {
+                        &mut translucent_mesh
+                    } else {
+                        &mut mesh
+                    };
                     emit_baked_quad(
                         target,
                         quad,
                         [x as f32, y as f32, z as f32],
                         corners,
                         tint_rgb_override,
-                        force_opaque,
+                        force_opaque || quad_layer == Some(RenderLayer::Solid),
                     );
                 }
             }
@@ -1047,6 +1088,14 @@ fn face_shade(quad: &BakedQuad) -> f32 {
 /// frame-shared palette at `quad.tint_index` as before — see
 /// [`ModelVertex::tint_rgb_override`]'s doc for why these are two different
 /// mechanisms rather than one.
+///
+/// `force_opaque` stamps [`ModelVertex::cutout_bypass`] on all four vertices,
+/// i.e. "this quad draws through a pass that runs no alpha test". Two
+/// independent things ask for it and both are vanilla: the FAST-leaves preset,
+/// which routes a whole leaf block to `SOLID_TERRAIN`
+/// (`ModelBlockRenderer.forceOpaque`), and a quad whose own sprite is
+/// [`RenderLayer::Solid`], which lands on `SOLID_TERRAIN` for the ordinary
+/// reason that its material says so.
 fn emit_baked_quad(
     mesh: &mut ModelMesh,
     quad: &BakedQuad,
@@ -1742,10 +1791,11 @@ mod tests {
     }
 
     /// A block at `(8, 8, 8)` returning `quads_a`, and one at `(9, 8, 8)`
-    /// returning `quads_b`, with `(9, 8, 8)`'s [`is_translucent_at`] answer
-    /// fixed by `b_translucent`.
+    /// returning `quads_b`, with `(9, 8, 8)`'s [`quad_layer`] answer fixed by
+    /// `b_translucent` and `(8, 8, 8)`'s left at `Cutout` so the two blocks
+    /// differ only in the property under test.
     ///
-    /// [`is_translucent_at`]: ModelSectionView::is_translucent_at
+    /// [`quad_layer`]: ModelSectionView::quad_layer
     struct TwoBlocks {
         quads_a: Vec<BakedQuad>,
         quads_b: Vec<BakedQuad>,
@@ -1762,14 +1812,24 @@ mod tests {
         fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
             false
         }
-        fn is_translucent_at(&self, x: usize, y: usize, z: usize) -> bool {
-            (x, y, z) == (9, 8, 8) && self.b_translucent
+        fn quad_layer(
+            &self,
+            x: usize,
+            y: usize,
+            z: usize,
+            _quad: &BakedQuad,
+        ) -> Option<RenderLayer> {
+            if (x, y, z) == (9, 8, 8) && self.b_translucent {
+                Some(RenderLayer::Translucent)
+            } else {
+                Some(RenderLayer::Cutout)
+            }
         }
     }
 
     /// The regression gate for the portal-opacity fix: `mesh_models_layers`
-    /// must keep a [`ModelSectionView::is_translucent_at`] block's quads out
-    /// of the first (opaque/cutout) mesh and put them in the second, while an
+    /// must keep a [`ModelSectionView::quad_layer`]-`Translucent` quad out
+    /// of the first (opaque/cutout) mesh and put it in the second, while an
     /// ordinary block's quads stay in the first — and `mesh_models` (the
     /// merged form existing callers use) must still carry both blocks'
     /// geometry either way, so this split cannot silently drop a quad.
@@ -1794,8 +1854,7 @@ mod tests {
 
         // Control: with both blocks non-translucent, every quad stays in the
         // first mesh and the second is empty — proving the split is driven by
-        // `is_translucent_at`, not by something incidental to having two
-        // blocks.
+        // `quad_layer`, not by something incidental to having two blocks.
         let both_opaque_view = TwoBlocks {
             quads_a: vec![cube_face(Direction::Up, None)],
             quads_b: vec![cube_face(Direction::Up, None)],

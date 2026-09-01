@@ -63,9 +63,42 @@
 //! by 2% (0.401 to 0.399, i.e. nothing). Only the supersampling arm does real
 //! work there, which is why `model.wgsl` takes it unconditionally rather than
 //! reproducing vanilla's default. And **band 4 stays materially
-//! under-painted under every sampler** (0.62 to 0.66); nothing here explains
-//! that, and it is left as a measured, open residual rather than absorbed
-//! into a budget that hides it.
+//! under-painted under every sampler** (0.62 to 0.66); nothing in that round
+//! explained it, and it was left as a measured, open residual.
+//!
+//! # What closed most of that residual: the atlas's own level 0
+//!
+//! `AtlasBuilder` used to blit the **raw** decoded PNG at level 0 while every
+//! level below it came from the *prepared* base (`solidify`, or
+//! `fill_empty_with_dark`). Vanilla has one image: `MipmapGenerator.
+//! generateMipLevels` solidifies `currentMips[0]` in place and that same
+//! `NativeImage` is what gets uploaded at level 0. The preparation never
+//! touches alpha, so no cutout decision moved — but `block/leaf_litter.png`'s
+//! 139 transparent texels are pure **black** against opaque texels at 125-167
+//! grey, and the model sampler is `min_filter: Linear`/`mipmap_filter:
+//! Linear`. So every bilinear tap on a *surviving* fragment beside a hole
+//! dragged it toward black, and the plate went dark and mottled exactly where
+//! it started to minify.
+//!
+//! Measured on this gate, same fixture, same cameras, both arms run here:
+//!
+//! | band | raw level 0 (1x / 4x / ratio) | prepared level 0 (1x / 4x / ratio) |
+//! |---|---|---|
+//! | 3 | 1697.2 / 2179.2 / 0.779 | 1732.6 / 2856.0 / **0.607** |
+//! | 4 | 2102.8 / 3396.8 / 0.619 | 2973.4 / 3414.9 / **0.871** |
+//! | 5 | 3158.0 / 3349.1 / 0.943 | 3355.0 / 3349.1 / **1.002** |
+//! | 6 | 3378.0 / 3521.4 / 0.959 | 3378.0 / 3521.4 / 0.959 |
+//! | 7 | 3256.0 / 3161.9 / 1.030 | 3256.0 / 3161.9 / 1.030 |
+//!
+//! Painted area rose in **every** minified band, and band 4's unexplained
+//! residual is largely gone. Band 3's *ratio* fell while its painted area
+//! rose, because the 4x reference is itself a render through this renderer and
+//! gained 31% — the most minified band is where the reference has the most to
+//! gain. Bands 6 and 7 are magnified and did not move a single pixel, which is
+//! what localises the change to minification rather than to the fixture.
+//!
+//! What is left of the residual is band 3's 0.607 against a 4x reference, and
+//! it is still open.
 //!
 //! # Scope, stated plainly
 //!
@@ -629,8 +662,14 @@ fn distant_leaf_litter_paints_what_a_supersampled_reference_says_it_should() {
 /// The share of a 4x-supersampled render's painted area a 1x band has to
 /// reach. Placed between the two hypotheses rather than fitted to either: the
 /// plain-`textureSample` build measured **0.401** in the most minified band
-/// and `sample_rgss` measures **0.779** there, with the worst remaining band
-/// (4, and unexplained — see this file's table) at **0.619**.
+/// against `sample_rgss`'s **0.779**, which is where this floor was set.
+///
+/// Preparing the atlas's own level 0 (see this file's second table) then moved
+/// band 3 to **0.607** and band 4 from 0.619 to **0.871**. Band 3's painted
+/// area went *up*; its ratio went down because the 4x reference gained more.
+/// The floor is deliberately **not** re-fitted to that: 0.55 still separates
+/// the sampler hypotheses it was derived from, and moving it to track the
+/// latest measurement is how a threshold stops being able to fail.
 const COVERAGE_FLOOR: f64 = 0.55;
 
 /// Mean second-difference in a band's painted area, as a fraction of that

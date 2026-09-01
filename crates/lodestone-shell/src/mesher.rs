@@ -1137,20 +1137,45 @@ impl ModelSectionView for SnapshotModelView<'_> {
         self.models.is_leaves(id)
     }
 
-    /// Owner report: "the nether portal swirly block is missing is opaque when
-    /// it isnt supposed to be". `BlockModels::layer` already classifies
-    /// nether_portal (and stained glass, ice, …) as
-    /// `RenderLayer::Translucent` from the real texture's alpha — the gap was
-    /// that nothing read the classification when routing quads into a mesh.
+    /// Vanilla's per-**quad** render layer: `SectionCompiler` buckets every
+    /// quad on `quad.materialInfo().layer()`, derived from the transparency of
+    /// that quad's own sprite. `BakedQuad::sprite` is an index into the same
+    /// atlas sprite list `BlockModels::sprite_layer` is keyed on, so this is a
+    /// single array read — no UV geometry, no per-state roll-up.
+    ///
+    /// Two owner reports meet here. "The nether portal swirly block is opaque
+    /// when it isn't supposed to be" was the routing half: the classification
+    /// existed and nothing read it when choosing a mesh. The pinprick half is
+    /// what the per-*state* roll-up cost — a state whose model mixes an opaque
+    /// sprite with a cutout one took `Cutout` for every face, so faces vanilla
+    /// draws through a pipeline with no alpha test at all were alpha-tested
+    /// here, and a mip-filtered alpha at a sprite edge can dip under the
+    /// threshold and discard.
+    ///
     /// Mirrors `quads_at`'s lookup: same state id, same `BlockModels`.
-    fn is_translucent_at(&self, x: usize, y: usize, z: usize) -> bool {
+    fn quad_layer(
+        &self,
+        x: usize,
+        y: usize,
+        z: usize,
+        quad: &BakedQuad,
+    ) -> Option<lodestone_render::RenderLayer> {
+        let layer = self.models.sprite_layer(quad.sprite)?;
+        if layer != lodestone_render::RenderLayer::Translucent {
+            return Some(layer);
+        }
+        // A cauldron's inset liquid uses a partially-alpha sprite, but the
+        // whole cauldron model is one depth-writing unit here: its liquid quad
+        // sits *inside* the body rather than in front of it, so blending it
+        // without the body's own depth already laid down draws the water
+        // through the walls. Demote it to `Cutout` — the alpha-tested opaque
+        // pass — which is what this block did before per-quad routing existed.
+        // See `BlockModels::is_cauldron`.
         let id = self.snapshot.at(0, 0, 0).get_block(x, y, z);
-        // A cauldron's inset liquid uses a partially-alpha sprite, but its
-        // opaque rim/body must still write depth before that liquid is shaded.
-        // Routing the whole model through the blended pass makes the water draw
-        // through the body. See `BlockModels::is_cauldron`.
-        !self.models.is_cauldron(id)
-            && self.models.layer(id) == lodestone_render::RenderLayer::Translucent
+        if self.models.is_cauldron(id) {
+            return Some(lodestone_render::RenderLayer::Cutout);
+        }
+        Some(layer)
     }
 
     /// Vanilla's ambient-occlusion occluder test, `getShadeBrightness == 0.2F`
