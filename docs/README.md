@@ -688,9 +688,6 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `minecraft:filled_map`'s actual picture — the vanilla `MapColor` palette, a
   per-map 128×128 texture built from the colour bytes `SessionMaps` folds, and the
   quads that show it in the hand and in an item frame.
-- [Rendering handoff: first-person bow and framed maps (2026-09-01)](./rendering-handoff-bow-and-maps-2026-09-01.md)
-  — Confirmed results, eliminated branches, Java reference transforms, and the next
-  live discriminators for the remaining bow-disappearance and framed-map defects.
 - [Fire spread and burnout](./fire-spread.md) — Fire behaving like fire on the
   integrated server: a port of 26.2's `FireBlock` into
   `crates/lodestone-server/src/fire.rs`, driven by the block scheduled-tick queue, so
@@ -1561,6 +1558,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `lodestone_data::entity_type::EntityType` are Stage 1, landed the same way. This
   document records the decision, what was rejected, what was measured, and the order
   the remaining registries should follow.
+- [Rendering handoff: first-person bow and framed maps](./rendering-handoff-bow-and-maps-2026-09-01.md) —
+  This is the 2026-09-01 handoff for two live rendering defects that remain after
+  commit `62c3d425`: a bow that disappears while charging in first person, and filled
+  maps that still z-fight or disappear on the DemocracyCraft server. Sign text is now
+  confirmed fixed and should not be changed as part of this work.
 - [Resource Packs screen](./resource-packs-screen.md) —
   `SettingsPage::ResourcePacks` (issue #415): vanilla's `PackSelectionScreen`, two
   transferable columns over a real pack repository. **Available** on the left lists
