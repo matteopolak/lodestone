@@ -325,6 +325,21 @@ const METADATA_IDX_BOAT_PADDLE_LEFT: u8 = 11;
 /// see [`METADATA_IDX_BOAT_PADDLE_LEFT`].
 const METADATA_IDX_BOAT_PADDLE_RIGHT: u8 = 12;
 
+/// `VehicleEntity.DATA_ID_HURT`/`DATA_ID_HURTDIR`/`DATA_ID_DAMAGE` — indices 8,
+/// 9 and 10, serializers `INT` (1), `INT` (1) and `FLOAT` (3). Read off the jar
+/// dump (`tests/support/entity_data_index_jvm.txt`), which lists five `INT`
+/// claimants at index 8 and two at index 9, none of them a `LivingEntity`; see
+/// `MetadataField::VehicleHurt`'s own doc for why the producer alone
+/// disambiguates them. Index 10's `FLOAT` has this as its only claimant.
+const METADATA_IDX_VEHICLE_HURT_TIME: u8 = 8;
+/// See [`METADATA_IDX_VEHICLE_HURT_TIME`].
+const METADATA_IDX_VEHICLE_HURT_DIR: u8 = 9;
+/// See [`METADATA_IDX_VEHICLE_HURT_TIME`].
+const METADATA_IDX_VEHICLE_DAMAGE: u8 = 10;
+/// `EntityDataSerializers.FLOAT`'s registration id, restated here for
+/// [`METADATA_IDX_AIR_SUPPLY`]'s stated reason.
+const METADATA_SER_FLOAT: i32 = 3;
+
 /// `EnderDragon.DATA_PHASE` — index 16, serializer `INT` (1). Off the jar
 /// dump (`tests/support/entity_data_index_jvm.txt`: `16 EnderDragon.DATA_PHASE
 /// 1 INT`), one of six `INT` claimants at index 16 alongside
@@ -5243,6 +5258,23 @@ impl ServerProtocol for V770ServerProtocol {
                     w.u8(METADATA_IDX_BOAT_PADDLE_RIGHT);
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*right);
+                }
+                MetadataField::VehicleHurt { time, dir, damage } => {
+                    // `VehicleEntity`'s hurt triple -- indices 8/9/10, the same
+                    // several-fields-one-arm shape `BoatPaddles` above uses.
+                    // Only `MobSim::snapshots`' vehicle loop ever builds this
+                    // variant; see `MetadataField::VehicleHurt`'s own doc for
+                    // the index-8 and index-9 claimants it never collides with
+                    // in practice.
+                    w.u8(METADATA_IDX_VEHICLE_HURT_TIME);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(*time);
+                    w.u8(METADATA_IDX_VEHICLE_HURT_DIR);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(*dir);
+                    w.u8(METADATA_IDX_VEHICLE_DAMAGE);
+                    w.var_i32(METADATA_SER_FLOAT);
+                    w.f32(*damage);
                 }
                 MetadataField::DragonPhase(phase) => {
                     // `EnderDragon.DATA_PHASE` — index 16; only

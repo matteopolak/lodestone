@@ -391,6 +391,20 @@ clock, and `Entity.baseTick`'s fire/portal/freezing pass.
 - **Changing a boat clause:** `lodestone_physics::vehicle`, and the gates in
   `crates/lodestone-physics/tests/vehicle.rs` predict each value from the vanilla literals rather
   than from the code, so a wrong constant fails with both hypotheses printed.
+- **Adding another `VehicleEntity` field to the wire:** four files, in this order —
+  `lodestone_server::protocol::MetadataField` (the variant), v770's `server_protocol` (the encoder
+  arm and its index/serializer constants), v770's `packets::metadata` (the index constant, the
+  decode arm and its `MetadataClass::Vehicle` guard) and
+  `lodestone_model::EntityMetadataUpdate` (the field plus its `is_empty` clause). Then the fold in
+  `lodestone_ecs::ingest::apply_entity_metadata`. Every index in this family collides with
+  something at the same index under the same serializer, so read
+  `crates/protocol/v770/tests/support/entity_data_index_jvm.txt` rather than counting — index 8's
+  `INT` alone has five claimants and none of them is a `LivingEntity`, so neither census column
+  separates them.
+- **`AbstractBoat.DATA_ID_BUBBLE_TIME` is the one vehicle field still unwired.** Nothing in this
+  workspace tracks a bubble-column timer, so `AbstractBoatRenderer`'s second rotation (the
+  `bubbleAngle` tilt, applied right after the hurt roll) has no value to read. That is an absence,
+  not an approximation.
 - **Wiring the saddle flag, rear-up state, honey jump factor or Jump Boost:** all four are already
   parameters of the functions that need them (`ridden_input`'s `standing`, `horse_jump_impulse`'s
   `block_jump_factor`/`jump_boost_power`, and the gate in `charge_riding_jump`). Each is a call-site
@@ -398,6 +412,42 @@ clock, and `Entity.baseTick`'s fire/portal/freezing pass.
 
 ### Gotchas
 
+- **`CollisionView::collision_boxes` returns world-space boxes, and offsetting them again silently
+  disables `ON_LAND`.** `AbstractBoat.getGroundFriction` intersects each candidate shape with a
+  1 mm slab under the hull; the port re-added the block's own `(x, y, z)` to boxes that already
+  carried it, so at ordinary heights every candidate landed at roughly twice its `y` and nothing
+  ever touched the probe. The count stayed `0`, the mean `friction / count` came back `NaN`,
+  `friction > 0.0F` was false, and every boat on land classified `IN_AIR` — whose `invFriction` of
+  `0.9` is **the same number `IN_WATER` uses**, so a beached boat behaved exactly as if it were
+  afloat. Two things made it survive: the double offset is the identity at `y == 0`, and the whole
+  vehicle test corpus used views with no collision boxes at all (`Ocean` and `Void`), so `ON_LAND`
+  was unreachable by construction. `Ground` in `crates/lodestone-physics/tests/vehicle.rs` is the
+  fixture that closes it, and its own doc names both hypotheses.
+- **A punched boat's rocking is four links long and the middle two did not exist.**
+  `VehicleEntity`'s `DATA_ID_HURT`/`DATA_ID_HURTDIR`/`DATA_ID_DAMAGE` (indices 8, 9, 10) drive
+  `AbstractBoatRenderer.submit`'s `mulPose(XP, sin(hurt) * hurt * damage / 10 * hurtDir)`.
+  Server-side, `MobSim::attack_from_player` reads `self.mobs` and a vehicle lives in
+  `self.vehicles`, so a punch found nothing and wrote nothing — `MobSim::attack_vehicle` is the
+  branch that fixes it, beside the wither/dragon/crystal branches that exist for the identical
+  reason. Client-side the triple had no decode arm and no component. The chain now is
+  `attack_vehicle` → `MetadataField::VehicleHurt` → v770's encoder → `MetadataClass::Vehicle`'s
+  three decode arms → `lodestone_ecs::entity::VehicleHurt` → `AnimInput::boat_hurt` →
+  `apply_boat_rock`.
+- **`hurtDir`'s registered default is `1`, not `0`, and it multiplies the whole roll.** A consumer
+  that defaults it to zero draws a perfectly still boat with every other link working, which is
+  indistinguishable from the animation being absent. `BoatHurt::REST` and
+  `lodestone_ecs::entity::VehicleHurt::default` both carry the `1` for that reason, and the gate in
+  `entity_anim` asserts the zero case explicitly.
+- **The roll is inserted between the yaw rotate and the `scale(-1, -1, 1)` flip, not after it.**
+  `apply_boat_rock` therefore conjugates by `A · Rx(roll) · A⁻¹` with
+  `A = T(feet) · T(0, bob, 0) · Ry(180 − yaw)` rather than post-multiplying, the same seam
+  `apply_swim_rotation` uses one placement over. Applying it after the flip is the same angle with
+  the wrong sign — the hull tips towards the hit rather than away from it.
+- **The minecart uses the identical formula about the identical axis** (`Axis.XP`, not the `ZP` a
+  quick read of `AbstractMinecartRenderer` suggests), at the same point in its pose stack, so
+  `apply_boat_rock` is gated on the *placement* rather than on a boat type path. Every other rig
+  routed through `non_living_vehicle_placement` — the leash knot, the wither skull, the two
+  projectiles — carries `BoatHurt::REST` and takes the exact-zero early return.
 - **The `else if` in the `Riding` fold is load-bearing.** `SET_PASSENGERS` is broadcast for every
   vehicle in view distance, so "our id is not in this list" only means "we dismounted" when the
   list belongs to the vehicle we are in. Assigning `None` unconditionally ejects the player from a

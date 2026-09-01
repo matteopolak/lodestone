@@ -273,6 +273,89 @@ fn apply_swim_rotation(
     instance.aabb_max = feet + glam::Vec3::splat(radius);
 }
 
+/// `AbstractBoatRenderer.submit`'s hull roll — the rocking a punched boat does
+/// — applied on top of whatever
+/// [`lodestone_render::non_living_vehicle_matrix`] already placed. A no-op
+/// while the hurt clock is not running, which is every boat in the world almost
+/// all of the time.
+///
+/// # Why this is here and not in the placement
+///
+/// Every other input to the boat's placement is a fact about *where* the entity
+/// is; this one is a fact about what just happened to it, and it arrives on the
+/// animation record rather than on the draw record. Applying it here is the same
+/// seam [`apply_swim_rotation`] uses for the player's prone rotation, one
+/// placement over.
+///
+/// # Composed by conjugation, not by re-deriving the placement
+///
+/// `non_living_vehicle_matrix` documents its own product as
+/// `T(feet) · T(0, bob, 0) · Ry(180 − yaw) · S(−s, −s, s) · Ry(extra)`, and
+/// vanilla inserts the roll **between** the yaw term and the flip
+/// (`AbstractBoatRenderer.submit` does `translate`, `mulPose(YP, 180 − yRot)`,
+/// then the hurt `mulPose(XP, …)`, and only then `scale(-1, -1, 1)` and the
+/// trailing `mulPose(YP, 90)`). So with `A = T(feet) · T(0, bob, 0) ·
+/// Ry(180 − yaw)`, left-multiplying every baked matrix by `A · Rx(roll) · A⁻¹`
+/// reproduces `A · Rx(roll) · S · Ry(extra)` exactly, without decomposing the
+/// baked matrices back into their factors. `A` is rebuilt here from the same
+/// `feet`/`yaw`/`bob` the resolver was called with, so it is bit-identical to
+/// the `A` already folded into `instance`.
+///
+/// Inserting the roll *after* the flip instead would rotate about the model's
+/// own X axis in the flipped frame — the same angle with the wrong sign, which
+/// tips the hull the way the hit came *from*.
+///
+/// # What is not ported
+///
+/// The bubble-column tilt (`state.bubbleAngle`) that vanilla applies right after
+/// this one. `AbstractBoat.DATA_ID_BUBBLE_TIME` is not streamed by this
+/// workspace's server and not decoded by its client, so there is no value to
+/// apply — an absence, not an approximation.
+fn apply_boat_rock(
+    instance: &mut lodestone_render::EntityInstance,
+    feet: glam::Vec3,
+    yaw_deg: f32,
+    vertical_offset: f32,
+    hurt: lodestone_render::entity_anim::BoatHurt,
+) {
+    let roll_deg = lodestone_render::entity_anim::boat_hurt_roll_degrees(hurt);
+    if roll_deg == 0.0 {
+        return;
+    }
+    let pivot = feet + glam::Vec3::new(0.0, vertical_offset, 0.0);
+    let a = glam::Mat4::from_translation(pivot)
+        * glam::Mat4::from_rotation_y((180.0 - yaw_deg).to_radians());
+    let extra = a * glam::Mat4::from_rotation_x(roll_deg.to_radians()) * a.inverse();
+
+    instance.transform = extra * instance.transform;
+    for part in &mut instance.part_transforms {
+        *part = extra * *part;
+    }
+    for hand in &mut instance.hand_transforms {
+        if let Some(h) = hand {
+            *h = extra * *h;
+        }
+    }
+    // Conservative AABB widen, exactly as `apply_swim_rotation` does: the
+    // rotation is about `pivot`, so a sphere of the old maximum corner distance
+    // from it bounds the result. It can only widen the box, never wrongly cull.
+    let radius = [
+        glam::Vec3::new(instance.aabb_min.x, instance.aabb_min.y, instance.aabb_min.z),
+        glam::Vec3::new(instance.aabb_min.x, instance.aabb_min.y, instance.aabb_max.z),
+        glam::Vec3::new(instance.aabb_min.x, instance.aabb_max.y, instance.aabb_min.z),
+        glam::Vec3::new(instance.aabb_min.x, instance.aabb_max.y, instance.aabb_max.z),
+        glam::Vec3::new(instance.aabb_max.x, instance.aabb_min.y, instance.aabb_min.z),
+        glam::Vec3::new(instance.aabb_max.x, instance.aabb_min.y, instance.aabb_max.z),
+        glam::Vec3::new(instance.aabb_max.x, instance.aabb_max.y, instance.aabb_min.z),
+        instance.aabb_max,
+    ]
+    .into_iter()
+    .map(|corner| (corner - pivot).length())
+    .fold(0.0f32, f32::max);
+    instance.aabb_min = pivot - glam::Vec3::splat(radius);
+    instance.aabb_max = pivot + glam::Vec3::splat(radius);
+}
+
 /// Hides an armour stand's arms and/or base plate, per its
 /// `ArmorStand.DATA_CLIENT_FLAGS` byte — issue #643's remaining half, once
 /// the byte itself reaches `EntityDraw::armor_stand`.
@@ -1113,6 +1196,19 @@ impl RenderState {
             if e.type_path.as_ref() == "player" {
                 apply_swim_rotation(&mut instance, e.feet, e.yaw, e.death_time, e.pitch, e.swim_amount);
             }
+            // `AbstractBoatRenderer.submit`'s hull roll — and
+            // `AbstractMinecartRenderer.submit`'s, which is the identical
+            // formula about the identical axis at the identical point in the
+            // pose stack. Gated on the *placement* rather than on the type
+            // path, because that is what decides the matrix this conjugates
+            // against; every other rig routed through that placement (the
+            // leash knot, the wither skull, the two projectiles) carries
+            // `BoatHurt::REST` and takes the exact-zero early return.
+            if let Some((vertical_offset, _)) =
+                lodestone_render::non_living_vehicle_placement(instance.model)
+            {
+                apply_boat_rock(&mut instance, e.feet, e.yaw, vertical_offset, e.anim.boat_hurt);
+            }
             // `ArmorStandModel.setupAnim`'s `leftArm.visible = state.showArms`
             // and `basePlate.visible = state.showBasePlate`. See
             // `hide_armor_stand_parts`'s own doc for why a matrix, not a flag,
@@ -1174,7 +1270,27 @@ impl RenderState {
                         0.0,
                         0.0,
                     )
-                    .map(|patch| patch.with_light(entity_light(&self.entity_light, e)))
+                    .map(|mut patch| {
+                        // The mask has to rock with the hull it masks: vanilla
+                        // submits it from inside the *same* `pushPose` block, after
+                        // the hurt rotation, so a patch left level would slide out
+                        // from under a tipped boat and let water back through
+                        // exactly while the boat is moving most.
+                        // The bob is read back off the patch's *own* placement
+                        // rather than restated, so the two can never drift apart.
+                        if let Some((vertical_offset, _)) =
+                            lodestone_render::non_living_vehicle_placement(patch.model)
+                        {
+                            apply_boat_rock(
+                                &mut patch,
+                                e.feet,
+                                e.yaw,
+                                vertical_offset,
+                                e.anim.boat_hurt,
+                            );
+                        }
+                        patch.with_light(entity_light(&self.entity_light, e))
+                    })
             } else {
                 None
             };
