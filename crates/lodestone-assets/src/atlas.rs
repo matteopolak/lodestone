@@ -47,7 +47,7 @@
 use crate::error::AtlasError;
 use crate::location::ResourceLocation;
 use crate::manager::ResourceManager;
-use crate::mipmap::{MipStrategy, generate_mip_levels, max_mip_level};
+use crate::mipmap::{generate_mip_levels, max_mip_level};
 use crate::texture::{AnimationFrame, Image, TextureMeta};
 use std::collections::HashMap;
 
@@ -815,11 +815,30 @@ impl AtlasBuilder {
             let chains: Vec<Vec<Image>> = placements
                 .iter()
                 .map(|&(i, _, _)| {
+                    // The strategy and the cutoff bias are per *sprite*, off its
+                    // own `*.png.mcmeta` `texture` section — vanilla's
+                    // `SpriteContents` reads both out of `TextureMetadataSection`
+                    // and hands them to `MipmapGenerator.generateMipLevels`.
+                    // Passing `Auto`/`0.0` unconditionally (which this did) is
+                    // right for the majority and wrong for 45 of 26.2's block
+                    // sprites: every leaves texture asks for `dark_cutout`, 27
+                    // flower and amethyst sprites for `strict_cutout` (a 0.3
+                    // coverage reference, not 0.5), glass and the redstone-dust
+                    // sprites for plain `mean`, and cactus/kelp/tripwire carry a
+                    // 0.1 bias. Those are exactly the sprites whose alpha the
+                    // terrain shader thresholds, so the wrong downsample shows
+                    // up as texels winking in and out under minification.
+                    let tex = staged[i]
+                        .input
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.texture)
+                        .unwrap_or_default();
                     generate_mip_levels(
                         &staged[i].input.image,
                         effective_levels,
-                        MipStrategy::Auto,
-                        0.0,
+                        tex.mipmap_strategy,
+                        tex.alpha_cutoff_bias,
                     )
                 })
                 .collect();

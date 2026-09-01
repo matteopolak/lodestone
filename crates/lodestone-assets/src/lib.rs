@@ -163,7 +163,7 @@ pub use sky::{CelestialAtlas, MOON_PHASE_NAMES, SUN_SPRITE_PATH, load_cloud_text
 #[cfg(not(target_arch = "wasm32"))]
 pub use source::DirectorySource;
 pub use source::{MemorySource, ResourceSource, ZipSource};
-pub use texture::{AnimationFrame, AnimationMeta, Image, TextureMeta};
+pub use texture::{AnimationFrame, AnimationMeta, Image, TextureMeta, TextureSection};
 pub use trim::{
     ARMOR_TRIMS_ATLAS_PATH, TRIM_MATERIALS, TRIM_PATTERNS, TrimAtlas, TrimAtlasReport,
     TrimMaterial, TrimPattern, trim_material, trim_pattern,
