@@ -176,9 +176,11 @@ an outside source rather than by running a gate:
   including the rotated-grid offsets, the `smoothstep(minPixelSize,
   minPixelSize * 2, maxTexelSize)` cross-fade, and the **geometric-mean**
   `effectiveDerivative` LOD (`sqrt(min * max)`) — which is vanilla's own, not
-  an invention of ours. The only deliberate divergence is that we take
-  `sampleRGSS` unconditionally where vanilla's shipped `textureFiltering`
-  default selects `sampleNearest`.
+  an invention of ours. This once recorded, as the only deliberate
+  divergence, that we took `sampleRGSS` unconditionally where vanilla's shipped
+  `textureFiltering` default selects `sampleNearest`; that divergence is now a
+  switch with vanilla's default — see *The terrain sampler shipped vanilla's
+  RGSS mode, not vanilla's default* below.
 * **Adjacent full cubes share bit-identical edges.** Positions are `f32`,
   never quantised, on an exact multiple of `1/16`; the section origin is an
   exact multiple of `16`; `world = position + section_origin` is exact for
@@ -348,6 +350,136 @@ atlas in the tree (GUI, items, particles) is byte-identical.
 `atlas_mips.rs`'s `atlas_level_zero_carries_the_solidified_base_the_mip_chain_
 was_built_from` is the gate, with a no-mips control and a neuter that lands on
 the raw value.
+
+## The terrain sampler shipped vanilla's *RGSS* mode, not vanilla's default
+
+This is the answer to a **second** owner report, filed alongside the pinpricks
+and distinct from them: *"when I look at a platform or whatever that's a bit far
+away I can see a divider between each block, which disappears as I get close —
+cave walls, stone floors, grass. It shows lines between each block when it
+should be showing an unbroken surface."*
+
+### What vanilla actually does, read out of the jar
+
+Four facts, each read from the 26.2 decompile rather than inherited:
+
+| question | vanilla | ours (before) |
+|---|---|---|
+| terrain sampler | `LevelRenderer` builds `chunkLayerSampler` as `CLAMP_TO_EDGE`, min `LINEAR`, mag `LINEAR`, `maxAnisotropy` (1 unless `ANISOTROPIC`), no LOD clamp | `GpuAtlas`: clamp, min `Linear`, mipmap `Linear`, **mag `Nearest`**, anisotropy 1 |
+| atlas gutter | `Stitcher`'s `padding = 1 << mipLevel << clamp(anisotropyBit - 1, 0, 4)` | `AtlasBuilder::with_padding(1 << mip_levels)` — equal while anisotropy is 1 |
+| what fills the gutter | `TextureAtlas.uploadInitialContents` draws a quad over the **padded** rect and `animate_sprite.vsh` pushes the sprite UV outward by `padding/width`, sampling the per-sprite scratch texture `CLAMP_TO_EDGE` — an edge extrude, at **every** mip level | `extrude_border`, at every level, `pad >> level` wide |
+| the sprite's own UV | `u0 = (x + padding) / atlasWidth` | identical |
+| shipped filtering method | `Options`' `textureFiltering` defaults to `TextureFilteringMethod.NONE`, and `OptionsRenderState` initialises its field to it; `GameRenderer` sets `UseRgss` only for `RGSS` | **`sample_rgss`, unconditionally** |
+
+So the predecessor's claim that the gutter is reserved and re-extruded at every
+level is **correct**, re-verified here against `Stitcher`,
+`TextureAtlasSprite.uploadSpriteUbo` and `animate_sprite.vsh` rather than
+inherited. The real block atlas built from the 26.2 jar is 2048×2048, 929
+sprites, 5 mip levels, **no** mip cap (`mip_cap == None`, so no sprite reduced
+the depth), `stone` at (64, 1376) with a 16-texel gutter on every side.
+
+Two things were checked and found innocent while looking:
+
+* **A tiled surface's boundary is not a special discontinuity.** Bilinear
+  filtering across a repeated sprite holds the edge texel flat for half a texel
+  on each side of a block boundary and then steps, where a true wrap would ramp.
+  Simulated against the real atlas's real mip chain, over `stone`, the step at
+  the boundary is **≤ 2/255** and at most 1.7× the largest interior step — and
+  vanilla has the identical arrangement, so it is not a divergence either.
+  Measured again on a rendered head-on stone wall at 8/12/16/24/32/48/64
+  blocks: the phase-averaged column profile is flat to ±3%, with no systematic
+  peak or dip at the boundary phase.
+* **No per-block darkening on a flat floor.** A contrast-stretched render of a
+  uniform stone floor shows no grid at any range.
+
+### The divergence that does show, and where
+
+`sample_rgss` picks its mip level from the **geometric mean** of the two
+derivative lengths (`sqrt(min * max)`) — vanilla's own arithmetic, transcribed
+correctly. That is an *anisotropy-aware* level: on a surface seen at a grazing
+angle it lands up to half the log2 anisotropy ratio sharper than the isotropic
+level the hardware would pick. Nothing in this renderer takes the extra taps
+that would make that level correct — the atlas sampler's `anisotropy_clamp` is
+1 — so the surplus detail is **undersampled rather than resolved**, and a
+block-periodic texture aliases into block-periodic structure. `sample_nearest`,
+by contrast, hands the *original* derivatives to `textureSampleGrad`, so it gets
+the hardware's isotropic level and a distant grazing surface resolves toward a
+smooth one.
+
+Measured on a hermetic stone floor at 6° of pitch, 1024×768, as the standard
+deviation of ground luminance per 8-row band (a band is a distance band):
+
+| distance | `sample_rgss` (shipped) | `sample_nearest` (now default) | peak per-pixel Δ |
+|---|---|---|---|
+| 29.6 blocks | 1.83 | **0.31** | 3.7 |
+| 23.4 | 2.04 | **0.70** | 5.7 |
+| 19.3 | 3.19 | **1.09** | 9.7 |
+| 16.4 | 4.15 | **1.60** | 11.7 |
+| 14.3 | 6.24 | **1.94** | 14.7 |
+| 12.6 | 6.42 | **2.03** | 17.3 |
+| 11.3 | 7.75 | **2.94** | 19.3 |
+| 10.3 | 7.33 | **3.19** | 18.3 |
+| 9.4 | 5.51 | 4.17 | 11.7 |
+| 8.0 | 5.62 | 5.42 | 3.0 |
+| ≤ 7.4 | — | — | **0.0** |
+
+The last row is what localises the change: every band nearer than ~7.4 blocks is
+**byte-identical**, so this moved minification only — which is the report's own
+*"disappears as I get close"*, and is what a fix for it has to look like.
+
+### The fix, and what it costs
+
+`model.wgsl` now declares `override use_rgss: f32 = 0.0;` and branches on it,
+exactly as `terrain.fsh`'s `main` branches on the `UseRgss` uniform.
+`ModelPipeline` binds it beside `alpha_cutout` (both live in `model.wgsl` and
+neither in `fluid.wgsl`, so one `is_some()` gates both), from
+`TextureFiltering::selected()` — read once per process from
+`LODESTONE_TEXTURE_FILTERING`:
+
+```text
+LODESTONE_TEXTURE_FILTERING=rgss cargo run --release -p lodestone-shell --bin lodestone
+```
+
+`none` (or anything unrecognised, or the variable unset) is vanilla's default and
+now ours. `rgss` reproduces the previous shipped image **byte-identically** —
+verified, not asserted: the same fixture rendered under the env var compares
+equal to the pre-change frame, which is also what proves the constant reaches
+pixels rather than being an island.
+
+**The cost is real and is the reason this is a switch rather than a deletion.**
+The RGSS arm was landed to fix a different owner report — leaf litter winking in
+and out under minification — and it does: on that gate's most minified band it
+measured 0.779 of the supersampled reference against `sample_nearest`'s 0.399.
+Taking vanilla's default back gives that regression back too, at vanilla's own
+severity. Vanilla's answer to wanting both is its **third** value,
+`ANISOTROPIC`, which is not implemented here: it needs `anisotropy_clamp > 1` on
+the sampler and, as `Stitcher` does, an atlas gutter that grows with the
+anisotropy bit (`1 << mipLevel << clamp(anisotropyBit - 1, 0, 4)` — 32 texels at
+vanilla's default `maxAnisotropyBit` of 2, twice ours). That is the next piece of
+work here, and it is the one that would let a cutout surface keep RGSS-grade
+stability without an opaque one paying for it.
+
+### What this does *not* explain
+
+**The sky pinpricks are a separate report and remain open.** Nothing above
+involves the alpha test, and the section above already measured that no ordinary
+building block has a non-opaque texel to discard; this change alters *which mip
+level an opaque texel is read from*, which cannot produce a background-coloured
+fragment. The two reports arrived together and share a regime (distance,
+grazing angles) but not, on this evidence, a mechanism.
+
+### Still divergent, deliberately not changed here
+
+`GpuAtlas`'s sampler uses `mag_filter: Nearest` where vanilla's chunk-layer
+sampler uses `LINEAR`. It matters only under **magnification**, which is the one
+regime both reports say is fine, and it is not free to change: `GpuAtlas` is the
+shared upload path for the GUI, item, container and icon atlases too, where
+`Nearest` magnification is correct (vanilla's `TextureAtlas` keeps its own
+sampler at `getClampToEdge(FilterMode.NEAREST)`), so a terrain-only variant has
+to be threaded through four call sites first. It is worth doing, because with
+`use_rgss = 0` the whole of vanilla's `NONE` mode is `snap_uv`, and `snap_uv`'s
+sub-texel rescale is a **no-op** against a `Nearest` sampler — the one-pixel
+anti-aliased ramp at each texel edge that vanilla gets, we do not.
 
 ## One divergence left, deliberately unfixed
 
