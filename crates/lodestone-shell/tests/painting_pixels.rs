@@ -122,6 +122,7 @@ fn painting_draw(id: i32, variant: Option<&'static str>, centre: glam::Vec3) -> 
         type_path: std::sync::Arc::from("painting"),
         item: None,
         item_model: None,
+        item_skin: None,
         main_arm_left: false,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),

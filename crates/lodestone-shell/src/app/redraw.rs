@@ -302,6 +302,17 @@ impl WindowApp {
                 {
                     menu.attach_gui(gpu.device(), gpu.queue(), gui);
                 }
+                // Container sheets are loose `textures/gui/container/**` art,
+                // not entries in either GUI-sprite atlas. Rebuild their separate
+                // owner on the same generation edge as the menu atlas so a
+                // server pack's custom container screen is not stranded at the
+                // startup version while its buttons already change.
+                if let Some(gpu) = self.gpu.as_ref()
+                    && let Some(container) = self.container.as_mut()
+                    && let Some(background) = crate::resources::load_container_background()
+                {
+                    container.attach_background(gpu.device(), gpu.queue(), format, background);
+                }
                 // The flat item sprites are their own stitch with their own
                 // owner, exactly like the two GUI atlases above — so a pack's
                 // `textures/item/*.png` never reached a slot without this.
@@ -552,8 +563,8 @@ impl WindowApp {
         // nothing looks broken: the pass still runs and the food still draws in the
         // hand, just without moving. That is the island shape, which is why this is
         // wired in the same change as the transform rather than left for a follow-up.
-        let eating = self.sim.consume_usage_time();
-        render.set_item_use_source(move || eating);
+        let item_use = self.sim.item_use_render_state();
+        render.set_item_use_source(move || item_use);
 
         // The hand needs its own copy of the view bob: vanilla applies `bobView`
         // a *second* time to a fresh pose stack seeded with the unbobbed
@@ -1696,6 +1707,7 @@ impl WindowApp {
                     chat_display_opts,
                     chat_open,
                     &entries,
+                    self.chat_input.scroll().scrolled(),
                     self.cursor,
                 )
             })
@@ -1745,6 +1757,7 @@ impl WindowApp {
         // persisted cache of its own yet.
         hud_frame.chat_wrap = Some(&self.chat_wrap);
         hud_frame.chat_input = chat_open.then(|| self.chat_input.as_str());
+        hud_frame.chat_selection = chat_open.then(|| self.chat_input.selection()).flatten();
         // Vanilla blinks the text cursor on a 300 ms half-period:
         // `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS == 300` and
         // `isCursorVisible(ms) == (ms / 300) % 2 == 0`

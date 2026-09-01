@@ -23,6 +23,11 @@ use lodestone_render::{
 #[derive(Debug)]
 pub(super) struct EntityRenderer {
     pub(super) pipeline: EntityPipeline,
+    /// `PlayerModel`'s own `ENTITY_TRANSLUCENT` equivalent.  Player skins are
+    /// the one ordinary-body texture family whose partially-alpha outer-layer
+    /// texels must blend at the 26.2 `0.1` cutout threshold; mobs continue to
+    /// use [`Self::pipeline`]'s opaque cutout contract.
+    pub(super) player_skin_pipeline: wgpu::RenderPipeline,
     pub(super) models: EntityModelSet,
     pub(super) gpu_models: HashMap<&'static str, GpuEntityModel>,
     pub(super) textures: HashMap<&'static str, wgpu::BindGroup>,
@@ -293,6 +298,7 @@ impl EntityRenderer {
         color_format: wgpu::TextureFormat,
     ) -> Self {
         let pipeline = EntityPipeline::new(device, color_format);
+        let player_skin_pipeline = pipeline.player_skin_pipeline(device, color_format);
         let models = EntityModelSet::load();
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -614,6 +620,7 @@ impl EntityRenderer {
 
         Self {
             pipeline,
+            player_skin_pipeline,
             models,
             gpu_models,
             textures,

@@ -70,6 +70,7 @@ mod spawner_mobs;
 mod state;
 mod stats;
 mod terrain;
+mod terrain_cull_diagnostics;
 mod world_items;
 #[cfg(test)]
 mod pixel_gates;
@@ -92,7 +93,7 @@ pub use sources::{
     CampfireSource,
     ConduitSource, CopperGolemStatueSource, DecoratedPotSource, EnchantingTableSource,
     EndGatewayBeamSource, EndGatewaySource, EndPortalSource,
-    EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
+    EntityLightSource, HandSwingSource, ItemUseSource, ItemUseState, LecternSource, MainHandItem,
     MainHandSource, MapPicture, MapSource, MovingPistonSource, OutlineShapeSource, ShadowGroundSource,
     ShelfSource, ShulkerSource,
     SignSource, SkullSource, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource,
@@ -393,6 +394,9 @@ pub struct RenderState {
     /// section submits a draw at every heading, which is the pre-fix behaviour
     /// and the A/B arm the instruction harness measures against.
     terrain_culling: bool,
+    /// Opt-in edge latch for live terrain/sign cull evidence. It is kept on
+    /// the renderer because `render_inner` only has `&self`.
+    terrain_cull_diagnostics: std::cell::RefCell<terrain_cull_diagnostics::Probe>,
     /// The section occlusion graph (U3): one [`SectionVisibility`] per section
     /// the mesher has produced, maintained by `upload_section`/`remove_section`.
     ///

@@ -86,6 +86,7 @@ fn draw_at(id: i32, type_path: &str, at: glam::Vec3) -> EntityDraw {
         type_path: std::sync::Arc::from(type_path),
         item: None,
         item_model: None,
+        item_skin: None,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),
         equipment_skin: Vec::new(),

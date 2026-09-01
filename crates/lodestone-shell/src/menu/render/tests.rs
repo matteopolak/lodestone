@@ -4689,6 +4689,64 @@ fn the_pause_overlays_backdrop_is_vanillas_measured_black_at_alpha_64() {
     assert_eq!(&v[2..6], &[0.0, 0.0, 0.0, 64.0 / 255.0]);
 }
 
+/// Vanilla draws `inworld_menu_background.png` as a tiled raw texture, not as
+/// a colour constant. The vanilla file happens to be uniform black at alpha
+/// 64, which made the old fallback look correct while silently discarding a
+/// server pack's screen art.
+#[test]
+fn a_pack_menu_background_tiles_over_the_pause_screen() {
+    use lodestone_assets::{MemorySource, ResourceManager, ResourceSource};
+
+    assert!(
+        crate::resources::MENU_TEXTURES
+            .iter()
+            .any(|entry| *entry == crate::resources::INWORLD_MENU_BACKGROUND_TEXTURE),
+        "the production menu atlas must carry the raw in-world background, not \
+         merely a synthetic test atlas"
+    );
+    let mut source = MemorySource::default();
+    source.insert(
+        crate::resources::INWORLD_MENU_BACKGROUND_TEXTURE.1,
+        solid_rgba_png(16, 16, [31, 127, 223, 255]),
+    );
+    // `GuiAtlas` is not extras-only: one ordinary sprite establishes the
+    // normal source walk while the raw texture exercises the screen-background
+    // path this gate is about.
+    source.insert(
+        "assets/minecraft/textures/gui/sprites/icon/language.png",
+        solid_rgba_png(15, 15, [0, 0, 0, 255]),
+    );
+    let manager = ResourceManager::new(vec![Box::new(source) as Box<dyn ResourceSource>]);
+    let atlas = GuiAtlas::build_with_extras(
+        &manager,
+        &[crate::resources::INWORLD_MENU_BACKGROUND_TEXTURE],
+    )
+    .expect("the synthetic pack background stitches");
+
+    let frame = MenuFrame {
+        backdrop: MenuBackdrop::Dim,
+        ..Default::default()
+    };
+    let drawn = build(&frame, Some(&atlas), None, 64.0, 32.0);
+    let (min, max) = loose_uv_bounds(&atlas, crate::resources::INWORLD_MENU_BACKGROUND_TEXTURE.0);
+
+    assert!(
+        any_quad_centre_in(&drawn.sprite, min, max),
+        "the packed in-world menu background never reaches the pause screen; \
+         it fell back to the hard-coded overlay colour instead"
+    );
+    assert_eq!(
+        drawn.sprite.len(),
+        SPRITE_FLOATS_PER_VERTEX * 6 * 2,
+        "a 64x32 screen is exactly two vanilla 32x32 menu-background tiles"
+    );
+    assert!(
+        drawn.colour.is_empty(),
+        "a supplied background texture replaces, rather than double-darkens \
+         with, the black-alpha fallback"
+    );
+}
+
 /// BookViewScreen and BookEditScreen blit the loose `gui/book.png` sheet,
 /// rather than composing a panel from `gui/sprites/**`. Keep that source in
 /// the menu atlas extras so the active resource-pack stack supplies the art.

@@ -324,6 +324,7 @@ impl ThirdPersonBodyState {
             type_path: std::sync::Arc::from(player_model_name(self.slim)),
             item: None,
             item_model: None,
+            item_skin: None,
             equipment: self.equipment,
             equipment_skin: self.equipment_skin,
             // The local player's own dye colours are not plumbed to
@@ -560,9 +561,10 @@ impl std::fmt::Debug for HandSwingSource {
     }
 }
 
-/// This frame's in-progress eat or drink, for
-/// `ItemInHandRenderer.applyEatTransform` — `(currUsageTime, useDuration)`, already
-/// interpolated with the frame's partial tick.
+/// This frame's local item-use state. The `using`/`ticks` pair selects live item
+/// variants such as the three bow-pulling models; `eat` drives
+/// `ItemInHandRenderer.applyEatTransform` and is already interpolated with the
+/// frame's partial tick.
 ///
 /// # Why the *interpolated* usage time and not `(ticks, partial)`
 ///
@@ -574,27 +576,44 @@ impl std::fmt::Debug for HandSwingSource {
 /// fields would let the phase and the fraction be assembled differently and be one
 /// tick apart, which shows up as a bob that never quite reaches its peak.
 ///
-/// Like every other source here it must be re-installed **every frame**, because it
-/// carries a partial-tick interpolation. Unset — the default, the demo, every
-/// headless test — is `None`, which is the plain held-item pose: exactly the
-/// behaviour before eating animated.
+/// Like every other source here it must be re-installed **every frame**, because
+/// `eat` carries a partial-tick interpolation. Unset — the default, the demo,
+/// every headless test — is the plain held-item pose.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ItemUseState {
+    /// Whether the local player is currently holding the use button.
+    pub using: bool,
+    /// Remaining use ticks, used by item-definition variant predicates.
+    pub ticks: u32,
+    /// The interpolated consume animation, when the held item is consumable.
+    pub eat: Option<(f32, u32)>,
+}
+
 #[derive(Default)]
-pub struct ItemUseSource(pub(super) Option<Box<dyn Fn() -> Option<(f32, u32)> + Send + Sync>>);
+pub struct ItemUseSource(pub(super) Option<Box<dyn Fn() -> ItemUseState + Send + Sync>>);
 
 impl ItemUseSource {
-    /// This frame's `(currUsageTime, useDuration)`, or `None` when nothing is being
-    /// consumed.
+    /// This frame's local item-use state.
     ///
     /// A non-finite usage time is mapped to `None` rather than clamped: unlike a
     /// swing, there is no sensible "moment of an eat" to fall back to, and a NaN
     /// reaching `Math.pow` produces a NaN matrix and an item that vanishes. A zero
     /// duration is refused for the same reason — it is the divisor.
     #[must_use]
-    pub(super) fn sample(&self) -> Option<(f32, u32)> {
-        match self.0.as_ref().and_then(|f| f()) {
-            Some((usage, duration)) if usage.is_finite() && duration > 0 => Some((usage, duration)),
-            _ => None,
+    pub(super) fn sample(&self) -> ItemUseState {
+        let mut state = self
+            .0
+            .as_ref()
+            .map_or_else(ItemUseState::default, |f| f());
+        if !state.using {
+            state.ticks = 0;
+            state.eat = None;
+        } else if let Some((usage, duration)) = state.eat
+            && (!usage.is_finite() || duration == 0)
+        {
+            state.eat = None;
         }
+        state
     }
 }
 
@@ -1475,6 +1494,19 @@ impl std::fmt::Debug for MovingPistonSource {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn item_use_source_carries_bow_state_and_eat_transform_separately() {
+        let source = ItemUseSource(Some(Box::new(|| ItemUseState {
+            using: true,
+            ticks: 10,
+            eat: None,
+        })));
+        let state = source.sample();
+        assert!(state.using);
+        assert_eq!(state.ticks, 10);
+        assert_eq!(state.eat, None);
+    }
 
     #[test]
     fn map_source_carries_stable_map_identity_and_revision() {

@@ -135,22 +135,29 @@ only place it could be correct.
   doc for why the modifiers cannot be abstracted away here as they are for
   every other menu key, and `app::input::menu_text_editing` for the gates.
 
-### Open: the drawn caret does not follow the model caret
+### Selection highlighting and the remaining caret limitation
 
 `hud.rs` draws the caret as a trailing `_` appended after the whole line, and
 `HudFrame` carries no caret position — `chat_input: Option<&str>` and
 `chat_caret_visible: bool` are the whole of what it gets. So the caret *moves*
 correctly and *draws* at the end of the line regardless.
 
-The patch is additive and small, and is deliberately not made here because
-`hud.rs` and `app/redraw.rs` were owned by another agent at the time:
+`HudFrame` now carries `chat_selection`, populated from `ChatInput::selection`
+while the chat screen is open. The HUD converts the ordered character range to
+prefix widths through the same `Builder::text_width` call used for glyphs, then
+draws the blue selection rectangle after the input strip and before those
+glyphs. Its endpoints are clamped to both the string and the input strip, so an
+empty or stale range, or a line extending past the visible chat plate, cannot
+emit an invalid or off-strip fill. This follows
+`EditBox.extractWidgetRenderState`'s draw order. The colour stream has no
+vanilla-equivalent glyph-inversion pipeline, so the rectangle remains behind
+the white glyphs.
 
-1. `HudFrame` gains `chat_caret: usize` (a `char` index) and
-   `chat_selection: Option<(usize, usize)>`, defaulting to `0`/`None` in the
-   `Default` impl beside `chat_input: None`.
-2. `app/redraw.rs`'s `HudFrame` construction fills them from
-   `ChatInput::cursor_position` and `ChatInput::selection`, which exist for
-   this.
+The caret issue remains separate:
+
+1. `HudFrame` needs `chat_caret: usize` (a `char` index), defaulting to `0`
+   beside `chat_input: None`.
+2. `app/redraw.rs` needs to fill it from `ChatInput::cursor_position`.
 3. In the chat-input draw block, `cursor_x` becomes the width of the line **up
    to the caret** rather than of the whole line — `b.text_width(&input[..caret_byte],
    chat_pose_scale)` — and the caret is drawn there. The `_` glyph should become
@@ -158,9 +165,7 @@ The patch is additive and small, and is deliberately not made here because
    glyph after it reads as a typo; vanilla's own caret is a rectangle
    (`TextCursorUtils`) and only degenerates to the appended `_` in the
    cursor-at-end case this shell had.
-4. A selection draws as an inverted rect between the two offsets —
-   `EditBox::draw_state`'s `highlight` field is the existing shape to copy.
-5. The suggestion ghost's `!insert` gate becomes real: vanilla's
+4. The suggestion ghost's `!insert` gate becomes real: vanilla's
    `insert = cursorPos < value.length() || value.length() >= maxLength`, and the
    first disjunct now actually happens.
 

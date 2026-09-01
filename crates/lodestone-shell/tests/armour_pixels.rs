@@ -172,8 +172,11 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         id: 1,
         type_path: std::sync::Arc::from("zombie"),
         item: None,
+        item_model: None,
+        item_skin: None,
         main_arm_left: false,
         equipment: armour_equipment,
+        equipment_skin: Vec::new(),
         equipment_dye: Vec::new(),
         equipment_trim: Vec::new(),
         feet,
@@ -345,4 +348,3 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
          if this is near zero the whole entity path is broken, not just armour"
     );
 }
-

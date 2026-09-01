@@ -168,8 +168,11 @@ has already rebuilt the classifier, the `BlockAtlas` and its `BlockModels` and
 re-meshed every loaded column by the time it returns the new atlas; the redraw
 block then catches up every GPU surface that is a **separate stitch with its own
 owner** — `RenderState::reload_block_atlas` for the terrain/model atlas, the HUD's
-and menu's GUI atlases, the flat `ItemAtlas` plus its glint sheet, and the 3-D
-block-item pass on both `HudRenderer` and `ContainerRenderer`.
+and menu's GUI atlases, the flat `ItemAtlas` plus its glint sheet, the container
+screen's separate loose-panel atlas (`textures/gui/container/**`), and the 3-D
+block-item pass on both `HudRenderer` and `ContainerRenderer`. The panel atlas is
+not a `gui/sprites/**` entry: reattaching the menu atlas alone changes buttons but
+leaves a server's custom chest/inventory screen on the startup pack.
 
 That last one is the one to be careful with, and it is why the list has to be kept
 complete rather than trimmed. The GUI item-model pass does not *own* its atlas: it

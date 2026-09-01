@@ -8,19 +8,13 @@
 //! completed sign-in carries a texture URL and a rig declaration; this module
 //! turns those into a decoded 64×64 sheet in two places at once:
 //!
-//! 1. **the cache** — `<data_dir>/skin.png` plus `<data_dir>/skin.model`, the
-//!    exact pair `container::player_preview::local_skin_override` already reads
-//!    at startup, so every *later* launch draws it with no code involved;
-//! 2. **the pending slot** — [`publish`]/[`take_pending`], drained by
-//!    `ContainerRenderer::render_geometry_scaled`, so **this** session's
-//!    inventory avatar changes without a restart.
-//!
-//! Writing only the cache would have been the smaller change and it would have
-//! been an island in the shape this repo keeps hitting: sign-in lives in the
-//! main menu, and the inventory is opened later in the same run, so the whole
-//! visible effect of the fetch would have been deferred to the next launch.
-//! `PlayerPreview` is built once, during `app::lifecycle`'s resume, and never
-//! re-reads the cache.
+//! 1. **the disk cache** — `<data_dir>/skin.png`, `skin.model`, and
+//!    `skin.uuid`; the UUID marker is mandatory because the first two files are
+//!    process-global and otherwise identify whichever account signed in last;
+//! 2. **the retained decoded cache** — [`publish`] stores the sheet under an
+//!    account-scoped synthetic key in `remote_skins`, which the world, arm and
+//!    inventory preview all pull from. A renderer rebuilt after a resource-pack
+//!    reload therefore rehydrates instead of consuming a one-shot event.
 //!
 //! ## How it works
 //!
@@ -30,10 +24,11 @@
 //!   -> fetch_own_skin(&client, &profile)
 //!        -> lodestone_auth::texture::fetch_texture        -- TextureUrlChecker, then GET
 //!        -> Image::decode_png
-//!        -> write <data_dir>/skin.png + skin.model        -- the startup path
-//!        -> publish(model, image)                         -- this session's path
-//! ContainerRenderer::render_geometry_scaled
-//!   -> take_pending() -> set_player_skin(..)
+//!        -> write skin.png + skin.model + skin.uuid       -- later launches
+//!        -> publish(profile.id, model, image)             -- this session
+//! Sim::local_player_skin(profile id)
+//!   -> account-scoped local key -> remote_skins::set_local(profile id, skin)
+//! ContainerRenderer -> PlayerPreview::maybe_skin_for_uuid(profile id)
 //! ```
 //!
 //! Every failure is a `warn!` and a `false`, never an error the sign-in inherits:
@@ -53,51 +48,56 @@
 //! profile says `CLASSIC`/`SLIM`; a `textures` property says `default`/`slim`.
 //! `SkinVariant::legacy_services_id` bridges the two so
 //! `PlayerModelType::by_legacy_services_name` stays the single decision, and
-//! `skin.model` on disk is written in the *property* vocabulary — the one
-//! `local_skin_override` reads. Writing `CLASSIC` there would silently resolve
+//! `skin.model` on disk is written in the *property* vocabulary. Writing
+//! `CLASSIC` there would silently resolve
 //! wide-by-fallback and look right for every Steve and wrong for every Alex.
 //!
-//! **The pending slot is a slot, not a queue.** A second fetch replaces an
-//! undrained first one, which is what you want: only the newest skin matters.
-//! It is drained on the next container frame, so a fetch that completes while no
-//! container is open is applied the moment one opens.
+//! **A skin without a matching UUID marker is not a local profile skin.** Old
+//! unmarked cache files are deliberately ignored. Guessing their owner is what
+//! showed a different account from the switcher in the inventory preview.
 //!
 //! ## Dependencies
 //!
 //! * `lodestone-auth` — `texture::fetch_texture` (the allow list and the GET),
 //!   `Profile`/`ProfileSkin`/`SkinVariant`, `paths::data_dir`.
 //! * `lodestone-assets` — `Image::decode_png`, `PlayerModelType`.
-//! * `crate::container::ContainerRenderer::set_player_skin` — the draw seam.
+//! * `crate::remote_skins` — retained decoded sheets and the active local handoff.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use lodestone_assets::{Image, PlayerModelType};
 
-/// The most recently fetched skin, waiting for a container frame to bind it.
-///
-/// A `Mutex<Option<..>>` rather than a channel because the consumer
-/// (`render_geometry_scaled`) is on the render thread and the producer is a
-/// short-lived worker: there is no back-pressure to model, and a stale entry is
-/// simply overwritten. Poisoning is ignored — a panicking producer must not stop
-/// the renderer from drawing.
-static PENDING: Mutex<Option<(PlayerModelType, Image)>> = Mutex::new(None);
-
-/// The last model [`publish`] handed out, kept **in addition to** [`PENDING`]
-/// and never drained — [`PENDING`] is a one-shot slot the inventory avatar
-/// consumes, so a rig this session already fetched would otherwise be
-/// unreadable to any other consumer the moment a container first opens. See
-/// [`current_model`], the reader this exists for.
-static CURRENT: Mutex<Option<PlayerModelType>> = Mutex::new(None);
+/// The last model [`publish`] handed out, keyed by the profile UUID that owns
+/// it. The decoded sheet itself is retained by `remote_skins` under the same
+/// account-scoped synthetic key.
+static CURRENT: Mutex<Option<HashMap<uuid::Uuid, PlayerModelType>>> = Mutex::new(None);
 
 /// Whether the on-disk `<data_dir>/skin.png` has been offered to
 /// [`crate::remote_skins`] yet, so the read is attempted **once** rather than
 /// on every frame that asks.
 ///
-/// A `OnceLock<bool>` rather than a bare flag because the answer is also the
-/// result: `false` means "there is no usable cached sheet", and re-reading a
-/// missing or corrupt file every frame is exactly the retry loop
-/// `remote_skins::request`'s three-state memo exists to avoid.
-static CACHED_SHEET_OFFERED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+/// Keyed by UUID rather than a single once flag: changing accounts must perform
+/// a distinct ownership check, while a miss for one account should still be
+/// remembered rather than rereading the same files every frame.
+static CACHED_SHEET_OFFERED: Mutex<Option<HashMap<uuid::Uuid, bool>>> = Mutex::new(None);
+
+fn with_map<K, V, R>(
+    slot: &Mutex<Option<HashMap<K, V>>>,
+    f: impl FnOnce(&mut HashMap<K, V>) -> R,
+) -> R {
+    let mut guard = match slot.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    f(guard.get_or_insert_with(HashMap::new))
+}
+
+/// Non-URL key used by the shared decoded-sheet cache for one local profile.
+#[must_use]
+fn local_profile_key(id: uuid::Uuid) -> String {
+    format!("{}{}", crate::remote_skins::LOCAL_PROFILE_SKIN_KEY_PREFIX, id.simple())
+}
 
 /// The [`crate::remote_skins`] cache key our own profile skin is available
 /// under, or `None` if we have none.
@@ -125,12 +125,14 @@ static CACHED_SHEET_OFFERED: std::sync::OnceLock<bool> = std::sync::OnceLock::ne
 /// [`CACHED_SHEET_OFFERED`] so a per-frame caller does not re-read a missing
 /// file forever.
 #[must_use]
-pub(crate) fn local_profile_sheet_key() -> Option<&'static str> {
-    let key = crate::remote_skins::LOCAL_PROFILE_SKIN_KEY;
-    if crate::remote_skins::sheet(key).is_some() {
+pub(crate) fn local_profile_sheet_key(id: uuid::Uuid) -> Option<String> {
+    let key = local_profile_key(id);
+    if crate::remote_skins::sheet(&key).is_some() {
         return Some(key);
     }
-    let offered = *CACHED_SHEET_OFFERED.get_or_init(read_cached_sheet);
+    let offered = with_map(&CACHED_SHEET_OFFERED, |map| {
+        *map.entry(id).or_insert_with(|| read_cached_sheet(id, &key))
+    });
     offered.then_some(key)
 }
 
@@ -149,13 +151,17 @@ pub(crate) fn local_profile_sheet_key() -> Option<&'static str> {
 /// makes the test build reach *only* the published-sheet path, so the gate can
 /// fail.
 #[cfg(not(test))]
-fn read_cached_sheet() -> bool {
+fn read_cached_sheet(id: uuid::Uuid, key: &str) -> bool {
     {
-        let key = crate::remote_skins::LOCAL_PROFILE_SKIN_KEY;
         let dir = lodestone_auth::paths::data_dir();
-        // `Err(Unsupported)` in a browser rather than a trap — the same
-        // degradation `container::player_preview::local_skin_override` already
-        // takes for the identical read.
+        let Ok(owner) = std::fs::read_to_string(dir.join("skin.uuid")) else {
+            return false;
+        };
+        if owner.trim() != id.to_string() {
+            return false;
+        }
+        // `Err(Unsupported)` in a browser rather than a trap; the cache simply
+        // degrades to the UUID-derived identity there.
         let Ok(png) = std::fs::read(dir.join("skin.png")) else {
             tracing::debug!(
                 target: "assets",
@@ -169,6 +175,13 @@ fn read_cached_sheet() -> bool {
                     target: "assets",
                     "publishing the cached profile skin for our own body and arm"
                 );
+                let declared = std::fs::read_to_string(dir.join("skin.model")).ok();
+                let model = PlayerModelType::by_legacy_services_name(
+                    declared.as_deref().map(str::trim),
+                );
+                with_map(&CURRENT, |map| {
+                    map.insert(id, model);
+                });
                 crate::remote_skins::publish(key.to_owned(), img);
                 true
             }
@@ -185,68 +198,37 @@ fn read_cached_sheet() -> bool {
 /// production path a gate actually wants to exercise. See the native version's
 /// doc for what this prevents.
 #[cfg(test)]
-fn read_cached_sheet() -> bool {
+fn read_cached_sheet(_id: uuid::Uuid, _key: &str) -> bool {
     false
 }
 
 /// Hand a decoded sheet to the renderer. Replaces any undrained earlier one.
-pub(crate) fn publish(model: PlayerModelType, image: Image) {
-    match CURRENT.lock() {
-        Ok(mut slot) => *slot = Some(model),
-        Err(poisoned) => *poisoned.into_inner() = Some(model),
-    }
+pub(crate) fn publish(id: uuid::Uuid, model: PlayerModelType, image: Image) {
+    with_map(&CURRENT, |map| {
+        map.insert(id, model);
+    });
     // The world body and the first-person arm bind from `remote_skins`'
-    // URL-keyed cache, not from `PENDING` — see `local_profile_sheet_key`. This
-    // is the *fetch* half of that; the disk half is the read it guards. Mirrored
-    // rather than moved: `PENDING` is a one-shot slot with exactly one consumer
-    // (the inventory avatar), and a second drain would steal from it.
+    // URL-keyed cache — see `local_profile_sheet_key`. This is the fetch half;
+    // the disk half is the read it guards. The inventory preview and world
+    // renderer both pull from this retained store, so a resource-pack rebuild
+    // cannot consume or lose the only copy.
     crate::remote_skins::publish(
-        crate::remote_skins::LOCAL_PROFILE_SKIN_KEY.to_owned(),
-        image.clone(),
+        local_profile_key(id),
+        image,
     );
-    match PENDING.lock() {
-        Ok(mut slot) => *slot = Some((model, image)),
-        Err(poisoned) => *poisoned.into_inner() = Some((model, image)),
-    }
-}
-
-/// Take the pending skin, if any. Called once per container frame from
-/// `ContainerRenderer::render_geometry_scaled`; `None` on all but the one frame
-/// after a fetch lands.
-pub(crate) fn take_pending() -> Option<(PlayerModelType, Image)> {
-    match PENDING.lock() {
-        Ok(mut slot) => slot.take(),
-        Err(poisoned) => poisoned.into_inner().take(),
-    }
 }
 
 /// The local player's currently-known skin rig, for a consumer that is not
 /// the inventory avatar — namely `sim/camera.rs::third_person_body_state`,
-/// which needs the same rig every frame rather than a one-shot value that
-/// [`take_pending`] has usually already consumed.
-///
-/// Prefers this session's freshest fetch ([`CURRENT`]), then falls back to
-/// the on-disk marker `write_cache`/`container::player_preview::local_skin_override`
-/// already share — so a rig fetched in an *earlier* session is honoured
-/// before this session's own sign-in (or a signed-out launch) has published
-/// anything. [`PlayerModelType::Wide`] is the last resort, matching
-/// `by_legacy_services_name`'s own default for an absent marker.
+/// which needs the same account-scoped rig every frame rather than a one-shot
+/// value. `None` means that account has not published or loaded a real skin;
+/// callers then use the UUID-derived default.
 #[must_use]
-pub(crate) fn current_model() -> PlayerModelType {
-    let cached = match CURRENT.lock() {
-        Ok(slot) => *slot,
-        Err(poisoned) => *poisoned.into_inner(),
-    };
-    if let Some(model) = cached {
-        return model;
-    }
-    let dir = lodestone_auth::paths::data_dir();
-    let declared = std::fs::read_to_string(dir.join("skin.model")).ok();
-    PlayerModelType::by_legacy_services_name(declared.as_deref().map(str::trim))
+pub(crate) fn current_model(id: uuid::Uuid) -> Option<PlayerModelType> {
+    with_map(&CURRENT, |map| map.get(&id).copied())
 }
 
-/// Write the fetched sheet into the same cache `local_skin_override` reads, so
-/// the next launch draws it without any of this running again.
+/// Write the fetched sheet and its owner UUID into the launch cache.
 ///
 /// Best-effort: a read-only data directory costs the *cache*, not this session's
 /// avatar, because [`publish`] has already happened by then.
@@ -255,7 +237,7 @@ pub(crate) fn current_model() -> PlayerModelType {
 /// return `Err(Unsupported)` there), and it has nothing to cache until the fetch
 /// path above it exists.
 #[cfg(not(target_arch = "wasm32"))]
-fn write_cache(model: PlayerModelType, png: &[u8]) {
+fn write_cache(id: uuid::Uuid, model: PlayerModelType, png: &[u8]) {
     let dir = lodestone_auth::paths::data_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(target: "assets", "could not create {}: {e}", dir.display());
@@ -265,8 +247,12 @@ fn write_cache(model: PlayerModelType, png: &[u8]) {
         tracing::warn!(target: "assets", "could not cache skin.png: {e}");
         return;
     }
+    if let Err(e) = std::fs::write(dir.join("skin.uuid"), id.to_string()) {
+        tracing::warn!(target: "assets", "could not cache skin.uuid: {e}");
+        return;
+    }
     // The **legacy services** spelling (`default`/`slim`), because that is what
-    // `local_skin_override` parses. See this module's gotchas.
+    // the cache reader parses. See this module's gotchas.
     let marker = model.legacy_services_id();
     if let Err(e) = std::fs::write(dir.join("skin.model"), marker) {
         tracing::warn!(target: "assets", "could not cache skin.model: {e}");
@@ -323,8 +309,8 @@ pub(crate) async fn fetch_own_skin(
         bytes = png.len(),
         "fetched the profile skin"
     );
-    write_cache(model, &png);
-    publish(model, image);
+    write_cache(profile.id, model, &png);
+    publish(profile.id, model, image);
     true
 }
 
@@ -334,12 +320,12 @@ mod tests {
 
     /// Serialises every test that touches this module's statics.
     ///
-    /// [`PENDING`] and [`CURRENT`] are process-wide, libtest runs a binary's
+    /// [`CURRENT`] is process-wide, libtest runs a binary's
     /// tests on several threads, and each of the tests below asserts on a value
     /// it just published — so without this they race, and the failure looks
     /// like a bug in `publish` rather than in the harness.
     ///
-    /// It guards [`PENDING`] and [`CURRENT`] only. [`publish`] also mirrors into
+    /// It guards [`CURRENT`] only. [`publish`] also mirrors into
     /// `remote_skins`' ready queue, and that queue is deliberately **not**
     /// covered here: its own gates assert per URL rather than on queue length,
     /// so they tolerate any concurrent publisher instead of requiring every one
@@ -359,23 +345,6 @@ mod tests {
             height: h,
             rgba: vec![0u8; (w * h * 4) as usize],
         }
-    }
-
-    /// The slot's whole contract: what goes in comes out once, and the *newest*
-    /// wins. `take_pending` returning `None` afterwards is what keeps the
-    /// renderer from re-binding the same texture on every frame.
-    #[test]
-    fn the_pending_slot_yields_the_newest_skin_exactly_once() {
-        let _serial = serial();
-        // Drain anything a concurrently-running test in this binary left behind.
-        let _ = take_pending();
-
-        publish(PlayerModelType::Wide, sheet(64, 64));
-        publish(PlayerModelType::Slim, sheet(64, 64));
-        let (model, img) = take_pending().expect("a published skin must be takeable");
-        assert_eq!(model, PlayerModelType::Slim, "the newest publish must win");
-        assert_eq!((img.width, img.height), (64, 64));
-        assert!(take_pending().is_none(), "the slot must not yield twice");
     }
 
     /// The vocabulary bridge, asserted as a pair so a swapped mapping cannot
@@ -407,27 +376,23 @@ mod tests {
     /// `third_person_body_state` used to hardcode `slim: false`): a wide
     /// publish and a slim publish must read back as two *different* models
     /// through [`current_model`], not merely "a model was returned". Also
-    /// covers `publish`'s own contract that [`CURRENT`] — unlike [`PENDING`]
-    /// — is never drained, so a container opening and taking the pending
-    /// sheet must not blind a later `current_model()` read.
+    /// covers `publish`'s own contract that [`CURRENT`] is retained.
     #[test]
-    fn current_model_distinguishes_wide_from_slim_and_survives_a_pending_drain() {
+    fn current_model_distinguishes_wide_from_slim_and_remains_retained() {
         let _serial = serial();
-        publish(PlayerModelType::Wide, sheet(64, 64));
-        assert_eq!(current_model(), PlayerModelType::Wide);
-        publish(PlayerModelType::Slim, sheet(64, 64));
+        let id = uuid::Uuid::from_u128(2);
+        publish(id, PlayerModelType::Wide, sheet(64, 64));
+        assert_eq!(current_model(id), Some(PlayerModelType::Wide));
+        publish(id, PlayerModelType::Slim, sheet(64, 64));
         assert_eq!(
-            current_model(),
-            PlayerModelType::Slim,
+            current_model(id),
+            Some(PlayerModelType::Slim),
             "a slim publish must read back as slim, not the wide default"
         );
-        // Draining `PENDING` (what the inventory-avatar draw does every
-        // container frame) must not reset `current_model`'s answer.
-        let _ = take_pending();
         assert_eq!(
-            current_model(),
-            PlayerModelType::Slim,
-            "current_model must survive a PENDING drain"
+            current_model(id),
+            Some(PlayerModelType::Slim),
+            "current_model must retain the account-scoped answer"
         );
     }
 
@@ -455,27 +420,48 @@ mod tests {
     #[test]
     fn the_cached_profile_sheet_is_reachable_by_key_and_never_fetched() {
         let _serial = serial();
-        let key = crate::remote_skins::LOCAL_PROFILE_SKIN_KEY;
+        let id = uuid::Uuid::from_u128(3);
+        let key = local_profile_key(id);
         // Through `publish`, the production path -- not by calling
         // `remote_skins::publish` directly, which would prove only that the
         // cache works and nothing about this module mirroring into it.
-        publish(PlayerModelType::Slim, sheet(64, 64));
+        publish(id, PlayerModelType::Slim, sheet(64, 64));
 
         assert_eq!(
-            local_profile_sheet_key(),
-            Some(key),
+            local_profile_sheet_key(id),
+            Some(key.clone()),
             "a published profile skin must be reachable under the shared key, or \
              our own body has nothing to bind and falls to the identity sheet"
         );
         assert!(
-            crate::remote_skins::sheet(key).is_some(),
+            crate::remote_skins::sheet(&key).is_some(),
             "the key must resolve in the same cache `player_skins` is filled from"
         );
 
     }
 
-    /// `write_cache` must produce exactly the pair `local_skin_override` reads,
-    /// with the marker in the property vocabulary. Uses `LODESTONE_DATA_DIR`?
+    /// Two accounts in one process must occupy distinct cache identities. This
+    /// is the regression for an inventory avatar that showed another account
+    /// from the account switcher after a resource-pack rebuild.
+    #[test]
+    fn local_profile_sheets_are_keyed_by_account_uuid() {
+        let _serial = serial();
+        let alice = uuid::Uuid::from_u128(0xA11CE);
+        let bob = uuid::Uuid::from_u128(0xB0B);
+        publish(alice, PlayerModelType::Slim, sheet(64, 64));
+        publish(bob, PlayerModelType::Wide, sheet(64, 64));
+
+        let alice_key = local_profile_sheet_key(alice).expect("Alice's sheet");
+        let bob_key = local_profile_sheet_key(bob).expect("Bob's sheet");
+        assert_ne!(alice_key, bob_key);
+        assert_eq!(current_model(alice), Some(PlayerModelType::Slim));
+        assert_eq!(current_model(bob), Some(PlayerModelType::Wide));
+        assert!(crate::remote_skins::sheet(&alice_key).is_some());
+        assert!(crate::remote_skins::sheet(&bob_key).is_some());
+    }
+
+    /// `write_cache` must produce a model marker the cache reader understands,
+    /// in the property vocabulary. Uses `LODESTONE_DATA_DIR`?
     /// No — `set_var` is `unsafe` under this workspace's lint, so this asserts
     /// the *filenames and marker content* through the same accessors instead,
     /// which is the part that can silently disagree.
@@ -487,7 +473,7 @@ mod tests {
                 PlayerModelType::by_legacy_services_name(Some(marker)),
                 model,
                 "the marker `write_cache` writes must round-trip through the \
-                 parse `local_skin_override` uses"
+                 cache-reader parse"
             );
         }
     }

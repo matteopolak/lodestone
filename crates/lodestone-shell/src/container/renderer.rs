@@ -166,11 +166,8 @@ impl ContainerRenderer {
     /// Bind a real skin to the inventory avatar: a declared rig, and optionally
     /// the sheet to draw it with (`None` uses the pack's own sheet for that rig).
     ///
-    /// **This is the seam that fix's fetch half lands against.** Nothing in this
-    /// workspace fetches a skin yet — see `player_preview.rs`'s
-    /// `local_skin_override`, which is what keeps the slim rig reachable in the
-    /// meantime — so today's callers are that override and this method's own
-    /// gates. Returns `false` when the avatar is not attached at all, or when the
+    /// This is the GPU seam used by the account-scoped fetch and preview
+    /// resolver. Returns `false` when the avatar is not attached at all, or when the
     /// rig or sheet cannot be resolved; never leaves a half-applied state.
     pub fn set_player_skin(
         &mut self,
@@ -690,33 +687,15 @@ impl ContainerRenderer {
         height: u32,
         between_strata: impl FnOnce(),
     ) {
-        // A skin fetched after startup lands here, not at
-        // construction: `PlayerPreview` is built once during `app::lifecycle`'s
-        // resume and never re-reads the cache, while sign-in happens later in the
-        // same run. Draining on the frame is what makes the fetch reach pixels
-        // without a restart — see `crate::skin_fetch`. Cheap: one uncontended
-        // `Mutex::lock` per container frame, `None` on all but one of them.
-        if let Some((model, sheet)) = crate::skin_fetch::take_pending() {
-            let applied = self.set_player_skin(device, queue, model, Some(&sheet));
-            tracing::info!(
-                target: "assets",
-                model = model.serialized_name(),
-                applied,
-                "bound the fetched skin to the inventory avatar"
-            );
-        }
-        // Issue #646: the uuid-derived default, the same per-frame-drain
-        // shape as the fetched skin above and for the identical reason — the
-        // local player's uuid is not known at `attach_player_preview` time,
-        // only once a session exists. `maybe_default_from_uuid` is itself
-        // idempotent (applies once, never overwrites a local override or a
-        // later real fetch), so this is a cheap no-op on every frame after
-        // the first with a uuid.
+        // The preview is built before login, so resolve its skin from the live
+        // account UUID here. The retained cache makes this idempotent across
+        // frames and lets a renderer rebuilt by a pack reload rehydrate the
+        // active account's sheet without consuming a one-shot event.
         if let (Some(uuid), Some(preview)) = (
             geo.player_avatar.and_then(|avatar| avatar.uuid),
             self.player_preview.as_mut(),
         ) {
-            preview.maybe_default_from_uuid(device, queue, uuid);
+            preview.maybe_skin_for_uuid(device, queue, uuid);
         }
         // `geo.special` counts too — see the same guard in
         // `HudRenderer::render_with_item_models`. A frame whose only content is a

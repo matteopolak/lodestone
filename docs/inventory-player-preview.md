@@ -157,18 +157,12 @@ again immediately afterwards, so nothing downstream inherits this pass's depth.
 
 **Not yet handled**, each deliberately:
 
-* ~~**Real skins.**~~ **Landed, minus the fetch** — see
-  [`player-skins.md`](player-skins.md). The rig is now a runtime
-  `PlayerModelType` settable through `ContainerRenderer::set_player_skin`, and
-  both rigs are reachable; `<data_dir>/skin.png` + `<data_dir>/skin.model` is the
-  local producer that keeps the slim path from being dead code. What is still
-  missing is the *fetch*: the `textures` property is discarded in
-  `v770`'s `read_add_player`, `PlayerListEntry` has no properties carrier, and
-  `lodestone-auth`'s `fetch_profile` drops the profile's `skins` array — all three
-  named in that doc. Making the slim rig reachable also found a real bug in it
-  (the right arm's cube origin does not move with the width), also recorded
-  there. **The line this bullet used to call "the one line that changes" was
-  `const SLIM: bool = false`; it is gone.**
+* ~~**Real skins.**~~ **Landed** — see [`player-skins.md`](player-skins.md).
+  The preview resolves the same UUID-scoped `RemoteSkin` as the world body and
+  first-person arm. Its binding identity is `(profile UUID, source)`, so account
+  switches and resource-pack renderer rebuilds both rebind correctly. A cached
+  `skin.png` is accepted only with a matching `skin.uuid`; it can no longer make
+  another account from the switcher appear in this preview.
 * ~~**Live pose — now fed, partially.**~~ **Fed whole.**
   `ContainerFrame::with_avatar_pose` → `PlayerAvatar::pose` → `gui_entity_anim`'s
   `base`, produced in `app/redraw.rs` from **`Sim::local_body_anim()`** — the walk

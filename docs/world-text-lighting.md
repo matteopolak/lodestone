@@ -80,6 +80,13 @@ Checked one renderer at a time rather than made uniform:
 | `text_display`, depth-tested ranges | `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` — the **brightness override**'s nibbles if set, else the sample | `DisplayDraw::override_light()` else `EntityLightSource::sample` |
 | `text_display`, see-through range | *(shader samples nothing)* | no tint |
 
+This light byte is applied after the glyph's own vertex colour. In particular,
+`text_display` uses the component's pack-aware font selection and multiplies a
+bitmap glyph's native RGBA by the component colour before this pass samples
+light. Treating every non-transparent bitmap texel as opaque white would make
+pack icons and antialiased text look missing or incorrectly dark even under
+full daylight; it is a font-source error, not a different light override.
+
 Note the full-bright byte is `0xFF` and **not**
 `lodestone_render::ENTITY_FULLBRIGHT`, which is `0xF0` — sky 15, block 0. The
 sky half is scaled by the clock's `SKY_LIGHT_FACTOR`, so a glowing sign carrying

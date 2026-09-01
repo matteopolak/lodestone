@@ -27,12 +27,20 @@ every terrain contour on the map.
 Id `0` is `MapColor.NONE`, whose `calculateARGBColor` short-circuits to literally `0` — alpha zero, so
 an unexplored map is a *hole* rather than a black square.
 
-### No map pipeline, no map shader, no fifth bind group
+### One depth variant, no map shader, no fifth bind group
 
-The map quad draws through the ordinary `ModelPipeline` with **group 1 swapped** from the stitched
-block atlas to the map's own texture. That is not a shortcut: the model shader already spends all four
+The map quad draws through `ModelPipeline::for_map_surface`, a depth-state variant of the ordinary
+model pipeline, with **group 1 swapped** from the stitched block atlas to the map's own texture. It
+does not add a shader or bind-group layout: the model shader already spends all four
 of wgpu's guaranteed `max_bind_groups` (camera / atlas / palette / anim), so a fifth group for a map
 texture would validate on this Mac (which reports 8) and crash at startup on any 4-group adapter.
+
+Vanilla supplies physical `1.01 / 128` separation and orders the frame body through
+`VIEW_OFFSET_Z_LAYERING_FORWARD`. Lodestone preserves the physical separation but expresses the
+ordering as two raster-depth variants under one shared view-projection: one step for the frame body,
+two for the map. Applying a second scaled camera matrix to the body made the two surfaces round
+independently at large world coordinates; the trace showed their projected order reverse with camera
+and FOV changes. The raster layers are the forward-depth backend equivalent, not world-space nudges.
 
 Groups 0, 2 and 3 are the frame's existing shared bind groups, so a map draw adds exactly one texture,
 one bind group and one draw call.
@@ -71,8 +79,20 @@ not merely a material choice.
   world-space mesh. The frame's own border and back plate are drawn separately, as a *block model*
   posed by hand — see `docs/item-frame-rendering.md`, which also explains why `FRAMED_MAP_LIFT` has to
   clear that back plate. The picture's plane has an explicit 1/64-block separation in the frame's own
-  outward-normal direction from `template_item_frame_map`'s room-facing plate; polygon bias remains a
-  complement, not the correctness mechanism.
+  outward-normal direction from `template_item_frame_map`'s room-facing plate. The frame body and map
+  share one view-projection and receive the ordered raster-depth steps described above (see
+  `docs/item-frame-rendering.md`).
+  The CPU broad phase uses vanilla's wall-offset, direction-shaped item-frame AABB plus
+  `EntityRenderer.shouldRender`'s `0.5` inflation. A symmetric box around the packet anchor is not
+  equivalent: the anchor is an attachment-block corner rather than the entity centre, and its
+  missing room-facing edge made the whole map disappear at grazing camera angles.
+
+  `tests/framed_map_pixels.rs` also pins an invisible frame at the live server's
+  large world coordinates and renders one fixed, near-edge camera pose at FOV
+  `30`, `64` and `110`. It compares each picture against the same invisible
+  frame with no map rather than trusting a submitted counter. The Metal control
+  produced 13,972, 3,366 and 648 picture pixels respectively, proving that FOV
+  alone does not drop a room-facing quad through clip, winding or depth state.
 
 ### `framed_map_pose` is built from the frame's own facing, and this was wrong twice
 
@@ -162,8 +182,24 @@ the map-decorations atlas is not stitched — rather than a wiring one.
 
 ## Configuration
 
-None. No env vars, no flags. The palette is a `const` table; the sample density and pose constants are
-`const` in `gpu/maps.rs`.
+The palette is a `const` table; the sample density and pose constants are `const` in `gpu/maps.rs`.
+
+For a live item-frame disappearance report, launch with `RUST_LOG=maps=debug`. To retain the edge
+trace after terminal output is truncated, set `LODESTONE_MAP_DIAG_FILE=/absolute/path/map.log`; the
+file is truncated at startup and flushed after every transition, and does not require `RUST_LOG`. Set
+`LODESTONE_MAP_TRACE_ENTITY=<entity-id>` to follow one known frame; otherwise the observer follows the
+framed map whose projected centre is closest to the crosshair (within 64 blocks and a small screen-edge
+margin). A score margin keeps that choice stable when two maps nearly cross. `prepare_framed_maps` emits one
+line only when that entity changes candidate/cull/source/submit state, including one absence edge, and the
+opaque pass emits one when its submitted/drawn state changes. Camera position, orientation, FOV and aspect are
+context fields, not raw parts of either change key, so ordinary movement cannot produce per-frame output. The gather
+line includes the tracked entity id/type, pose yaw/pitch and rotation, item/map id, invisibility,
+per-frame source resolution, quad normal and whether its one-block broad-phase bounds intersect the
+frustum. It also records the map and comparison surface's eye/clip coordinates at the centre and four
+corners, plus categorical clip/depth-order and projected-winding states. Visible frames compare against their rendered plate;
+invisible image billboards compare against the attachment wall plane. These fields distinguish an
+unresolved upstream `MAP_ITEM_DATA`, a normal frustum-edge cull, a submitted-versus-drawn mismatch and a
+depth-order change without modifying culling, depth state or map placement.
 
 ## Dependencies
 

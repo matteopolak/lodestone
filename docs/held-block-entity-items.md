@@ -157,7 +157,7 @@ than the fix.
 
 ### Adding a surface
 
-All five of vanilla's surfaces are now wired:
+All six relevant vanilla surfaces are now wired:
 
 | surface | where | pose |
 |---|---|---|
@@ -165,6 +165,7 @@ All five of vanilla's surfaces are now wired:
 | inventory / hotbar slot | `hud/item_icon.rs`'s `SpecialIcons` | `gui_item_pose` |
 | dropped stack in the world | `entity_passes.rs`'s `dropped_special_item` | `dropped_item_matrix` + `special_item_hover_lift` |
 | another entity's hand | `entity_passes.rs`'s `held_special_item` | `held_item_matrix` off the holder's arm |
+| another entity's head (`minecraft:player_head`) | `entity_passes.rs`'s `worn_player_head_special_item` | animated `head` part transform × `1.1875` raw-skull scale |
 | item frame | `entity_passes.rs`'s `framed_special_item` | `framed_item_matrix` (one of four framed-item producers — see `docs/item-frame-rendering.md`) |
 
 The three world surfaces share one shape, and the shared part is a function rather
@@ -175,6 +176,15 @@ maps `kind` + item path to `(rig, sheet)`, and
 `(model, sheet)` alongside the *placed* block entities and coalesce with them for
 free — a dropped chest and a placed chest are the same mesh and the same sheet, so
 one draw covers both.
+
+Player heads are the one data-bearing exception. Vanilla's
+`PlayerHeadSpecialRenderer` reads `minecraft:profile` to select a player skin
+but leaves the skull geometry alone. A dropped head therefore carries only its
+decoded skin URL beside the narrowed item id; a worn head reuses the head-slot
+profile URL already carried by equipment. Both use Steve while that URL has not
+been installed by `remote_skins`. The worn path deliberately bypasses item
+display transforms: 26.2's `CustomHeadLayer` calls `HeadedModel.translateToHead`
+and scales the raw skull by `1.1875`.
 
 `prepare_block_entities` therefore takes the `entities` slice now. Its
 seven-source emptiness condition **grew an eighth term**: without it, a chest lying

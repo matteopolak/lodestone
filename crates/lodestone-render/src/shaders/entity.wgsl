@@ -268,6 +268,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return shade_entity(in, tex_col);
 }
 
+// `PlayerModel` selects 26.2's `RenderTypes::entityTranslucent`, not the
+// ordinary opaque/cutout living-model type.  Its pipeline cuts only alpha below
+// `ALPHA_CUTOUT = 0.1` and blends the surviving colour, preserving the
+// deliberately partially-alpha pixels player skins may use in the second layer.
+// The render-pipeline state supplies blending; this entry point is only the
+// source-specific cutout half of that contract.
+@fragment
+fn fs_main_player_skin(in: VsOut) -> @location(0) vec4<f32> {
+    let tex_col = textureSample(tex, smp, in.uv);
+    if (tex_col.a < 0.1) {
+        discard;
+    }
+    return shade_entity(in, tex_col);
+}
+
 // `EntityPipeline::banner_layer_pipeline`'s fragment entry point (issue #174
 // step C). Vanilla's `RenderPipelines.BANNER_PATTERN` draws its mask layers
 // translucent, depth-write-off, with **no alpha cutout at all** — a banner

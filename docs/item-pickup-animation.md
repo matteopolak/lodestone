@@ -108,6 +108,14 @@ nothing and draws nothing, silently.
 It captures the item's **drawn** (interpolated) position, not its last reported one,
 because that is the quantity `extractEntity(from, 1.0F)` gives vanilla.
 
+The snapshot retains the selected item definition as well as each extra visual
+payload. `begin_item_pickup` freezes `TrackedStack::render_definition`, so a
+stack's `minecraft:item_model` keeps its pack-provided geometry throughout the
+flight. It separately copies the resolved player-head profile-skin URL and
+`extract_pickup_draws` restores that in `EntityDraw`; the URL remains skin-only,
+while the selected definition is generic item-model routing. Omitting the URL
+would reach the special renderer's vanilla Steve fallback.
+
 ### The collector's position is resolved every frame
 
 `ItemPickupParticle.updatePosition()` re-reads the target every tick, so a pickup
@@ -186,6 +194,12 @@ ordering are exercised rather than the functions called by hand:
   `dt == 0.0` deliberately so `interp_alpha` is exactly `0.0` and the expected value
   is arithmetic rather than a range — a `0.016` there leaves `alpha == 0.32` and
   moves the answer to `0.19`.
+- `a_pickup_draw_retains_a_player_heads_profile_skin` — starts with a textured
+  player head whose ground `EntityDraw` resolves its profile URL, removes that
+  item, and requires the sole in-flight draw to retain the same URL.
+- `a_pickup_draw_retains_its_stacks_item_model_definition` — a gameplay diamond
+  sword whose `minecraft:item_model` selects `server:gun` must keep that selected
+  definition after its ground entity is removed.
 - `without_a_pickup_event_the_collected_item_simply_disappears` — the **executed
   negative control**: the identical two polls with no `begin_item_pickup` leave no
   item draw at all, so the positive gate cannot be satisfied by a track that merely

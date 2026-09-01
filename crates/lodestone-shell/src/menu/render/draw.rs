@@ -194,6 +194,7 @@ pub fn build(
     // editable and button widgets. The frame marker keeps that exception
     // local to the book overlay instead of changing menu text globally.
     b.plain_text = frame.book_background;
+    let screen_background = screen_background_sprite(frame).filter(|id| b.has_sprite(id));
     // `Panorama` answers `false` here and takes `BG`: that quad is the
     // no-panorama fallback, and when the panorama really draws the renderer
     // skips these vertices altogether (see `MenuGeometry::backdrop_floats`).
@@ -209,15 +210,19 @@ pub fn build(
             DEATH_GRADIENT_TOP,
             DEATH_GRADIENT_BOTTOM,
         );
-    } else {
-        let backdrop = if frame.backdrop.is_translucent() {
-            OVERLAY_BG
-        } else {
-            BG
-        };
+    } else if frame.backdrop != MenuBackdrop::Dim || screen_background.is_none() {
+        let backdrop = if frame.backdrop.is_translucent() { OVERLAY_BG } else { BG };
         b.rect(0.0, 0.0, width, height, backdrop);
     }
     let backdrop_floats = b.verts.len();
+
+    // `Screen.extractMenuBackgroundTexture` tiles a raw texture in 32 logical
+    // pixel squares. A single stretched atlas sprite would make a pack's
+    // patterned screen art look unlike vanilla; individual quads also keep the
+    // atlas sampler inside this sprite rather than repeating into a neighbour.
+    if let Some(id) = screen_background {
+        tile_screen_background(&mut b, id, width, height);
+    }
 
     if frame.logo {
         // Vanilla's `LogoRenderer`: the wordmark centred at y=30, the edition
@@ -832,6 +837,43 @@ pub fn build(
         backdrop_floats,
         sprite: b.sprites,
         sprite_cuts: b.cuts,
+    }
+}
+
+/// The raw screen-background texture vanilla selects for this frame, if the
+/// screen uses one. `TitleScreen.extractBackground` is empty, and the death
+/// screen supplies its own gradient, so neither gets this base `Screen` art.
+pub(super) fn screen_background_sprite(frame: &MenuFrame<'_>) -> Option<&'static str> {
+    if frame.logo || frame.backdrop == MenuBackdrop::DeathGradient {
+        return None;
+    }
+    match frame.backdrop {
+        MenuBackdrop::Dim => Some(crate::resources::INWORLD_MENU_BACKGROUND_TEXTURE.0),
+        MenuBackdrop::Panorama | MenuBackdrop::Opaque => {
+            Some(crate::resources::MENU_BACKGROUND_TEXTURE.0)
+        }
+        MenuBackdrop::DeathGradient => None,
+    }
+}
+
+/// Vanilla passes a declared `32 x 32` texture size to
+/// `Screen.extractMenuBackgroundTexture`, even though the bundled texture is
+/// currently 16 x 16. The declaration fixes the logical tiling period; a
+/// higher-resolution pack still occupies this same 32-pixel tile.
+fn tile_screen_background(b: &mut Quads<'_>, id: &str, width: f32, height: f32) {
+    const TILE: f32 = 32.0;
+    let mut y = 0.0;
+    while y < height {
+        let mut x = 0.0;
+        while x < width {
+            // Keep the final tile at its full destination size. The render
+            // target clips the part beyond the screen while preserving the
+            // source interpolation; shrinking the destination would squash a
+            // patterned pack texture in the final partial tile.
+            b.sprite(id, x, y, TILE, TILE, LABEL);
+            x += TILE;
+        }
+        y += TILE;
     }
 }
 

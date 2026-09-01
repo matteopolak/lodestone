@@ -181,10 +181,12 @@ static LAST_KNOWN: Mutex<Option<HashMap<uuid::Uuid, RemoteSkin>>> = Mutex::new(N
 /// [`remember_name`]/[`last_known_name`].
 static NAME_LAST_KNOWN: Mutex<Option<HashMap<uuid::Uuid, String>>> = Mutex::new(None);
 
-/// **Our own** skin, as `Sim::local_player_skin` last resolved it.
+/// **Our own** skin, paired with the profile UUID
+/// `Sim::local_player_skin` resolved it for.
 ///
-/// The one slot in this module that is not keyed by anything, because there is
-/// exactly one local player. It exists for a single consumer that cannot reach
+/// The slot retains one current local player but carries its UUID, so a
+/// renderer resolving a newly selected account cannot consume the prior
+/// account's value. It exists for a consumer that cannot reach
 /// the value any other way: the **first-person arm**
 /// (`RenderState::prepare_first_person_hand`).
 ///
@@ -197,16 +199,16 @@ static NAME_LAST_KNOWN: Mutex<Option<HashMap<uuid::Uuid, String>>> = Mutex::new(
 /// A `Mutex<Option<..>>` and not a channel for [`LAST_KNOWN`]'s reasons: the
 /// producer overwrites, the consumer never drains, and poisoning is ignored
 /// because a panicking producer must not stop the renderer from drawing.
-static LOCAL: Mutex<Option<RemoteSkin>> = Mutex::new(None);
+static LOCAL: Mutex<Option<(uuid::Uuid, RemoteSkin)>> = Mutex::new(None);
 
 /// Publish the local player's resolved skin for the first-person arm to read.
 /// Called every frame by `Sim::local_player_skin`; the newest wins.
-pub fn set_local(skin: &RemoteSkin) {
+pub fn set_local(id: uuid::Uuid, skin: &RemoteSkin) {
     let mut guard = match LOCAL.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    *guard = Some(skin.clone());
+    *guard = Some((id, skin.clone()));
 }
 
 /// The local player's skin, or `None` before the first resolution (pre-login,
@@ -214,9 +216,34 @@ pub fn set_local(skin: &RemoteSkin) {
 #[must_use]
 pub fn local() -> Option<RemoteSkin> {
     match LOCAL.lock() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
+        Ok(guard) => guard.as_ref().map(|(_, skin)| skin.clone()),
+        Err(poisoned) => poisoned
+            .into_inner()
+            .as_ref()
+            .map(|(_, skin)| skin.clone()),
     }
+}
+
+/// The local skin only when it belongs to `id`.
+///
+/// The inventory preview knows the UUID of the live session. Requiring that
+/// UUID here prevents the process-global hand-off from showing the previously
+/// selected account during the first frames of a new join.
+#[must_use]
+pub fn local_for(id: uuid::Uuid) -> Option<RemoteSkin> {
+    match LOCAL.lock() {
+        Ok(guard) => local_for_slot(&guard, id),
+        Err(poisoned) => local_for_slot(&poisoned.into_inner(), id),
+    }
+}
+
+fn local_for_slot(
+    slot: &Option<(uuid::Uuid, RemoteSkin)>,
+    id: uuid::Uuid,
+) -> Option<RemoteSkin> {
+    slot.as_ref()
+        .filter(|(owner, _)| *owner == id)
+        .map(|(_, skin)| skin.clone())
 }
 
 /// Every URL we have started, finished or given up on.
@@ -389,7 +416,7 @@ pub fn last_known_name(id: &uuid::Uuid) -> Option<String> {
 /// renderer's `player_skins` bind groups) are how a sheet reaches a draw, and
 /// our own cached skin has to enter them somehow. Everything downstream treats
 /// it as an ordinary entry.
-pub const LOCAL_PROFILE_SKIN_KEY: &str = "lodestone-local-profile-skin";
+pub const LOCAL_PROFILE_SKIN_KEY_PREFIX: &str = "lodestone-local-profile-skin:";
 
 /// Start fetching `url` unless it has already been started, finished or failed.
 ///
@@ -406,7 +433,7 @@ pub const LOCAL_PROFILE_SKIN_KEY: &str = "lodestone-local-profile-skin";
 /// with no declared skin, which after this change is the common case rather
 /// than the rare one.
 pub fn request(url: &str) {
-    if url.is_empty() || url == LOCAL_PROFILE_SKIN_KEY {
+    if url.is_empty() || url.starts_with(LOCAL_PROFILE_SKIN_KEY_PREFIX) {
         // The local-profile key names no host and its sheet is published
         // directly, so there is nothing to fetch. Refused here rather than
         // relying on every caller to remember, the same way the empty
@@ -676,6 +703,25 @@ mod tests {
             signature: None,
         });
         profile
+    }
+
+    #[test]
+    fn local_skin_handoff_is_scoped_to_the_active_account_uuid() {
+        let alice = uuid::Uuid::from_u128(0xA11CE);
+        let bob = uuid::Uuid::from_u128(0xB0B);
+        let skin = RemoteSkin {
+            url: "https://textures.minecraft.net/texture/alice".to_owned(),
+            model: PlayerModelType::Slim,
+            cape: None,
+            default_sheet: "entity/player/slim/ari",
+        };
+        let slot = Some((alice, skin.clone()));
+        assert_eq!(local_for_slot(&slot, alice), Some(skin));
+        assert_eq!(
+            local_for_slot(&slot, bob),
+            None,
+            "a preview for Bob must not consume Alice's process-local handoff"
+        );
     }
 
     /// Base64 of a payload, built the way a real `textures` property is.

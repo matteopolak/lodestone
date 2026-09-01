@@ -659,6 +659,7 @@ fn entity_hitbox_and_chunk_border_vertices_draw_visible_pixels() {
         variant_sheet: None,
         item: None,
         item_model: None,
+        item_skin: None,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),
         equipment_skin: Vec::new(),
@@ -1137,6 +1138,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             type_path: std::sync::Arc::from("pig"),
             item: None,
             item_model: None,
+            item_skin: None,
             feet: pig_feet,
             yaw: 0.0,
             head_yaw: 0.0,
@@ -1188,6 +1190,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             type_path: std::sync::Arc::from("pig"),
             item: None,
             item_model: None,
+            item_skin: None,
             main_arm_left: false,
             feet: glam::Vec3::new(0.0, 0.0, -12.0),
             yaw: 0.0,
@@ -1391,6 +1394,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         type_path: std::sync::Arc::from("zombie"),
         item: None,
         item_model: None,
+        item_skin: None,
         main_arm_left: false,
         feet: glam::Vec3::new(0.0, 0.0, 3.0),
         yaw: 0.0,
@@ -1975,6 +1979,7 @@ fn orb_draw(value: i32) -> EntityDraw {
         type_path: std::sync::Arc::from(crate::entities::EXPERIENCE_ORB_TYPE_PATH),
         item: None,
         item_model: None,
+        item_skin: None,
         // Above the eye and dead ahead of a yaw-0 camera, so the sprite lands in
         // the upper middle of the frame — clear of the first-person arm, which is
         // drawn unconditionally into the bottom right.

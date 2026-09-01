@@ -45,7 +45,7 @@ use super::{
     CopperGolemStatueSource, ShelfSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, DisplayTextRenderer, EntityLightSource,
-    EntityRenderer, HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource,
+    EntityRenderer, HandSwingSource, ItemUseSource, ItemUseState, LecternSource, MainHandSource, MapSource,
     MovingPistonSource,
     NameTagRenderer, OutlineRenderer, OutlineShapeSource,
     PluginBillboardInstance, PluginBillboardRenderer, PluginBillboardsSource,
@@ -459,6 +459,9 @@ impl RenderState {
             // On by default: an off-by-default cull is an island, and this repo
             // has nine of those.
             terrain_culling: true,
+            terrain_cull_diagnostics: std::cell::RefCell::new(
+                super::terrain_cull_diagnostics::Probe::from_environment(),
+            ),
             vis_graph: lodestone_render::VisibilityGraph::new(),
             occlusion: std::cell::RefCell::default(),
             last_camera_block_pos: std::cell::Cell::new(None),
@@ -1429,8 +1432,9 @@ impl RenderState {
         self.hand_swing = HandSwingSource(Some(Box::new(f)));
     }
 
-    /// Install the source for an in-progress eat or drink (see [`ItemUseSource`]),
-    /// which is what makes the held item dip and jitter toward the mouth.
+    /// Install the source for local item use (see [`ItemUseSource`]), which selects
+    /// live item variants such as bow-pulling models and makes consumables dip and
+    /// jitter toward the mouth.
     ///
     /// Until installed, a held food is posed exactly like any other item and eating
     /// has no first-person animation at all — the pass still runs and the item still
@@ -1438,10 +1442,9 @@ impl RenderState {
     /// rather than like a failure. That is the island shape, so this is the second
     /// half of the work and not an optional extra.
     ///
-    /// `f` returns `(currUsageTime, useDuration)`: vanilla's
-    /// `getUseItemRemainingTicks() - frameInterp + 1.0F` — build it with
-    /// [`lodestone_render::entity::eat_usage_time`] rather than by hand — and the
-    /// item's `Consumable.consumeTicks()`. `None` means nothing is being consumed.
+    /// `f` returns [`ItemUseState`]. Its `using`/`ticks` pair is the live item-use
+    /// state; its `eat` field is vanilla's `getUseItemRemainingTicks() -
+    /// frameInterp + 1.0F` paired with the item's `Consumable.consumeTicks()`.
     ///
     /// **Re-install it every frame**, for the same reason
     /// [`set_hand_swing_source`](Self::set_hand_swing_source) says to: the value
@@ -1449,13 +1452,13 @@ impl RenderState {
     ///
     /// ```no_run
     /// # fn wire(render: &mut lodestone::gpu::RenderState, sim: &lodestone::sim::Sim) {
-    /// let eating = sim.consume_usage_time();
-    /// render.set_item_use_source(move || eating);
+    /// let item_use = sim.item_use_render_state();
+    /// render.set_item_use_source(move || item_use);
     /// # }
     /// ```
     pub fn set_item_use_source(
         &mut self,
-        f: impl Fn() -> Option<(f32, u32)> + Send + Sync + 'static,
+        f: impl Fn() -> ItemUseState + Send + Sync + 'static,
     ) {
         self.item_use = ItemUseSource(Some(Box::new(f)));
     }

@@ -35,7 +35,8 @@ record of that move):
   right below it (`crate::tablist`), matched by the entity's `EntityUuid`
   component. Scoreboard team colouring/prefixes are genuinely part of
   vanilla's `getDisplayName()` for a player and are **out of scope here** —
-  this is the plain tab-list name.
+  this is the plain tab-list name; team visibility is applied separately
+  below.
   - **The lookup survives a missing tab-list entry once resolved.** A
     player-type NPC spawned by a server plugin is almost always a fake
     player entity whose profile carries no `CustomName` at all, and whose
@@ -63,6 +64,15 @@ folded/updated in `entities.rs::spawn_track`/`update_track` exactly like
 `RenderEquipment`/`RenderWool`) → `EntityDraw::name_tag`, the same
 extract-to-plain-POD boundary every other render-side entity field crosses
 (`docs/bevy-migration.md` §4.4).
+
+Before either tag reaches that common output, the client applies the target
+team's `name_tag_visibility` rule from the folded `SessionScoreboard`. The
+target is looked up by its profile name for player entities (or UUID string
+for other entities); the viewer is the local connection profile. `Never`
+suppresses a helper's tab-list name, while the two team-relative modes and
+`see_friendly_invisibles` follow `LivingEntityRenderer.shouldShowName`.
+Invisible armour stands remain the vanilla hologram exception: their renderer
+uses only `isCustomNameVisible()`.
 
 `see_through` is `Entity.isDiscrete()` (`isShiftKeyDown()`, bit `0x02` of the
 shared flags byte, `Entity.setSharedFlag`/`Entity.isDiscrete`) — sneaking suppresses the

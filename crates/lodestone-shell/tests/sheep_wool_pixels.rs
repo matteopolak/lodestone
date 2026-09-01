@@ -117,6 +117,7 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
         type_path: std::sync::Arc::from("sheep"),
         item: None,
         item_model: None,
+        item_skin: None,
         main_arm_left: false,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),

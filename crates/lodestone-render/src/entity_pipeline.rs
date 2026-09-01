@@ -1572,6 +1572,39 @@ impl EntityPipeline {
         )
     }
 
+    /// The player body's `PlayerModel` render type.
+    ///
+    /// Unlike ordinary living models, 26.2 constructs `PlayerModel` with
+    /// `RenderTypes::entityTranslucent`.  This preserves partially-alpha skin
+    /// pixels in the outer layer (and lets their alpha blend over the base skin)
+    /// while retaining the ordinary entity depth-write state.  It is deliberately
+    /// separate from [`Self::armour_pipeline`]: armour selects
+    /// `ARMOR_CUTOUT_NO_CULL`, so changing its cutout contract along with a skin
+    /// would incorrectly make texture holes opaque.
+    #[must_use]
+    pub fn player_skin_pipeline(
+        &self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let contract = player_skin_pipeline_contract();
+        debug_assert!(contract.blends);
+        build_entity_pipeline(
+            device,
+            color_format,
+            &self.camera_layout,
+            &self.texture_layout,
+            "lodestone-entity-player-skin",
+            contract.depth_compare,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            contract.depth_writes,
+            "vs_main",
+            "fs_main_player_skin",
+            EntityInstanceRaw::instance_layout(),
+            wgpu::ColorWrites::ALL,
+        )
+    }
+
     /// A third render pipeline over this pipeline's own bind-group layouts,
     /// for banner mask layers (issue #174 step B).
     ///
@@ -2204,9 +2237,50 @@ pub fn entity_camera_buffer(
 const ENTITY_WGSL: &str = include_str!("shaders/entity.wgsl");
 const SHADOW_WGSL: &str = include_str!("shaders/entity_shadow.wgsl");
 
+/// The part of 26.2's `RenderPipelines.ENTITY_TRANSLUCENT` contract selected by
+/// `PlayerModel`.  It intentionally keeps the normal living-entity depth state:
+/// translucency changes colour composition and the cutout threshold, not which
+/// surface owns depth.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlayerSkinPipelineContract {
+    alpha_cutout: f32,
+    blends: bool,
+    depth_writes: bool,
+    depth_compare: wgpu::CompareFunction,
+}
+
+const fn player_skin_pipeline_contract() -> PlayerSkinPipelineContract {
+    PlayerSkinPipelineContract {
+        // `RenderPipelines.ENTITY_TRANSLUCENT` defines `ALPHA_CUTOUT = 0.1F`.
+        alpha_cutout: 0.1,
+        blends: true,
+        // `ENTITY_TRANSLUCENT` inherits ENTITY_SNIPPET's DEFAULT depth state.
+        depth_writes: true,
+        depth_compare: wgpu::CompareFunction::LessEqual,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `PlayerModel` opts into `RenderTypes::entityTranslucent`, rather than
+    /// inheriting a living mob's opaque/cutout model type.  The distinction is
+    /// load-bearing for partially-alpha second-skin texels: the 26.2 pipeline
+    /// blends them and only cuts out alpha below 0.1.
+    #[test]
+    fn player_skin_pipeline_matches_vanillas_translucent_cutout_contract() {
+        let contract = player_skin_pipeline_contract();
+        assert_eq!(contract.alpha_cutout, 0.1);
+        assert!(contract.blends);
+        assert!(contract.depth_writes);
+        assert_eq!(contract.depth_compare, wgpu::CompareFunction::LessEqual);
+        assert!(
+            ENTITY_WGSL.contains("fn fs_main_player_skin")
+                && ENTITY_WGSL.contains("if (tex_col.a < 0.1)"),
+            "the player pipeline contract must select the shader entry point's same 0.1 cutout"
+        );
+    }
 
     #[test]
     fn instance_buffer_arena_appends_contiguous_aligned_ranges() {

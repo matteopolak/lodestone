@@ -25,6 +25,13 @@ consulted by all three loops, so water and terrain physically cannot disagree ab
 | `Occlusion` | membership of an installed reachable set | the occlusion graph's camera walk — see below |
 | `Visible` | — | draw it |
 
+This table governs terrain sections only. Entity-like world producers use the same frustum planes,
+but each must supply a conservative AABB derived from its real geometry or vanilla entity bounds.
+A false `Frustum` verdict there is not by itself evidence that plane extraction is wrong: item
+frames, for example, are offset from their packet attachment anchor and vanilla inflates their thin,
+direction-shaped AABB by `0.5`. The shared `item_frame_culling_aabb` helper keeps the map, frame-body,
+ordinary-item, and special-item producers from inventing four different proxies.
+
 `within_view_distance` is a **rounded circle with a one-chunk buffer**, `max(0,|d|-1)² summed < rd²`,
 not the streamed square. It is heading-independent and removes 29% / 25% / 23% of the streamed square
 at rd 8 / 16 / 32 (257 of 361, 921 of 1225, 3461 of 4489 columns — the unit test asserts those exact
@@ -175,6 +182,11 @@ warning, `block == u32::MAX` so it sorts last) rather than becoming a hole in th
   `Shadow` counts without culling; `Off` is frustum ∩ distance. `render_distance_chunks == 0` and
   `terrain_culling == false` both suppress the walk entirely, so the `smartCull`-off arm really is the
   pre-cull frame rather than the pre-cull frame plus a walk nobody reads.
+* `RUST_LOG=terrain_cull=debug` — opt in to the live, edge-triggered cull probe. It reports camera
+  position/yaw/pitch, a 3×3 section neighbourhood (defaulting to the camera section), aggregate terrain
+  cull counts, and sign gathered/in-front/drawn/vertex-budget counts on a meaningful change only. Set
+  `LODESTONE_TERRAIN_CULL_PROBE_SECTION=x,y,z` to keep the sample on the affected section while moving
+  the camera. This complements `RUST_LOG=signs=debug`, which inspects the world-record-to-sign-spawn path.
 
 ## Dependencies
 

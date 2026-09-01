@@ -387,12 +387,10 @@ impl RenderState {
             if item.path() == super::maps::FILLED_MAP_ITEM {
                 continue;
             }
-            // A framed item is half a block across at most, centred within one
-            // block of the entity however the frame is turned.
-            if !frustum.intersects_aabb(
-                draw.feet - glam::Vec3::splat(1.0),
-                draw.feet + glam::Vec3::splat(1.0),
-            ) {
+            let (cull_min, cull_max) = lodestone_render::entity::item_frame_culling_aabb(
+                draw.feet, draw.yaw, draw.pitch, false,
+            );
+            if !frustum.intersects_aabb(cull_min, cull_max) {
                 continue;
             }
             let Some(geometry) = model.items.get(item).and_then(|v| v.resolve(&ctx)) else {

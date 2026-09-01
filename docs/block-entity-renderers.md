@@ -703,7 +703,7 @@ lightmap at all, so *every* sign already draws full-bright; glowing text is legi
 for the reason vanilla's is, but by accident. Closing the `lightCoords` gap below is what will make
 the branch load-bearing.
 
-`gpu/sign_text.rs` builds the outline as **one grown quad per ink run** rather than eight offset
+`gpu/sign_text.rs` starts the outline as **one grown rectangle per ink run** rather than eight offset
 copies of the whole string. `Font.prepare8xTextOutline` draws the string at every `(dx, dy)` in
 `{-1,0,1}²` except `(0,0)`, displaced by `GlyphInfo.getShadowOffset()`; the union of a *rectangle*
 over that neighbourhood is exactly that rectangle grown by one offset on each side, and every rect the
@@ -711,12 +711,25 @@ ink walk emits is a rectangle — so the covered region is identical at 1× the 
 `StyledRect::outline_grow` carries the per-glyph offset (0.5 for a unihex glyph) and is `0.0` on
 underline/strikethrough bars, which is `outlineOutput.discardEffects()`.
 
+Vanilla's copies are alpha-masked glyph textures, whereas Lodestone's ink runs are opaque rectangles.
+Keeping each whole grown rectangle would therefore put opaque outline and ink fragments on the same
+plane. A live draw probe ruled out the other plausible causes on the offending sign: it was gathered
+once, had no back-side text, and submitted distinct outline/glyph ranges in the intended order, while
+all 2,430 outline vertices had corresponding opaque ink geometry. Micro-offset and polygon-bias-only
+fixes had both already failed live. The builder now subtracts the union of the regular ink mask from
+each grown outline rectangle before emitting quads. Those are exactly the pixels the later ink replaces,
+so final coverage matches vanilla while outline and ink have no shared fragments to depth-fight. A
+horizontal band sweep unions both masks before subtraction and vertically coalesces identical spans;
+this avoids multiplying vertices by independently fragmenting every grown source rectangle.
+
 Vanilla submits the outline through `DisplayMode.NORMAL` and the glyphs through `POLYGON_OFFSET`.
-The pass now has two contiguous vertex ranges and two pipelines. Lodestone's opaque model pipeline
-has already applied one shared camera-facing depth step to the sign board, so the outline takes that
-same *base* step and glyph ink takes a second one. This preserves vanilla's relative ordering in this
-engine: using the board's single shared bias for glyphs leaves ordinary text one ULP from the face at
-range, while making outline and glyph share a second step leaves glowing text competing with itself.
+Lodestone preserves that render-type boundary as well as the order: one contiguous outline range is
+drawn first with normal depth (no polygon bias), then the glyph range is drawn with vanilla's
+`TEXT_POLYGON_OFFSET` semantics (the current forward-depth adaptation is `-20` constant, `-2` slope).
+Both ranges remain on
+the same physical board-clearance plane. The outline-minus-ink composition means those ranges no longer
+overlap each other; the polygon offset remains the vanilla render-type contract and helps keep the text
+in front of its board without introducing a world-space layer gap that can quantise away at range.
 
 ### Line width is per **kind**, and it truncates rather than wrapping
 
@@ -785,16 +798,12 @@ standoff is worth:
 |---|---|---|---|---|---|---|---|
 | ULPs of separation | 262 | 65 | 15 | 7 | 5 | **1** | **1** |
 
-Two exactly parallel planes one ULP apart is the textbook recipe for the reported symptom, because a
-parallel pair flips *whole* rather than speckling — which is why this had to be measured rather than
-argued. That conclusion did not hold on the Metal path: both text layers still supplied local `z = 0`
-vertices, so pipeline depth bias was attempting to order coplanar transparent triangles after
-rasterisation. `gpu/sign_text.rs` now makes the order geometric as well as pipeline-relative:
-**board → outline → ink**, with a `1/256`-block board clearance and `1/2048`-block layer steps along
-the sign's own surface normal. The front and back transforms already point their local `+Z` toward
-their respective board faces, so this remains correct at every rotation and does not use a
-camera-space nudge that would float at grazing angles. The original `CAMERA_DEPTH_BIAS` / doubled
-glyph bias remains a secondary long-range safeguard.
+The board/text separation is still physical: `gpu/sign_text.rs` puts the entire text surface
+the existing `1/256 + 2/2048` blocks along the sign normal in front of the board. The glow outline
+and regular glyph get no additional *geometric* separation: their final masks are disjoint after the
+outline builder subtracts the regular ink coverage. The outline still uses normal depth and the later
+glyph draw still uses vanilla's polygon-offset render type, but correctness no longer depends on that
+bias resolving two opaque coplanar fragments.
 
 The same module keeps a bounded per-position cache of completed world-space sign layers. It compares
 the complete `SignSpawn` (text and styling, glow, kind, orientation and sampled light), both resolved
@@ -802,6 +811,14 @@ world-light tints, and the camera-dependent outline-visible booleans. Thus movin
 side of the 16-block outline boundary is a hit; crossing it rebuilds exactly the affected geometry.
 The cache removes the repeated styled-ink layout, normal transform and per-rect vector allocation from
 stationary frames while preserving the existing nearest-first budget and draw ordering.
+
+For live depth/duplication investigations, `RUST_LOG=signs=debug` selects the centred submitted
+glowing side and emits only when its structural draw state changes. Setting
+`LODESTONE_SIGN_DIAG_FILE=/path/to/sign-probe.log` additionally persists that one transition line to
+a dedicated native file after the real draw calls. The line records duplicate gather count, cache
+identity, front/back glow and span counts, per-side outline/glyph vertices, exact submitted ranges,
+pipeline biases, culling state and plane/depth values; the file avoids losing the evidence when the
+normal application stream is truncated. Neither variable changes rendering.
 
 **The actual defect was the sign-text pass's fixed vertex buffer.** `MAX_SIGN_TEXT_VERTICES` was
 40,000, and the ink walk emits one quad per *horizontal run of ink texels per glyph row* — not one
@@ -819,26 +836,33 @@ Past the cap `prepare` did `vertices.len().min(MAX)`, which
 The fix is three parts, all inside `gpu/sign_text.rs` because `prepare` takes `&self` from
 `RenderState::render` (also `&self`, with no device in scope) and so cannot reallocate:
 
-1. **Capacity 524,288** — 14.68 MB at 28 bytes a vertex, against ~67 MB of terrain mesh at render
-   distance 8. Buys 68 fully-written signs or ~376 ordinary ones in front of the camera. This is a
-   deliberately near-term capacity increase based on the observed 261,774/262,144-vertex scene,
-   not a claim that vanilla imposes this fixed limit.
+1. **Capacity 1,048,576** — 29.36 MB at 28 bytes a vertex, against ~67 MB of terrain mesh at render
+   distance 8. Buys 136 fully-written signs or ~752 ordinary ones in front of the camera. This is a
+   deliberately near-term capacity increase: a later live scene reached 522,912/524,288 vertices
+   while dropping 96 in-front signs, so the prior doubled budget was still observably binding. It
+   is not a claim that vanilla imposes this fixed limit.
 2. **Spend it nearest-first, and skip what is behind the eye.** `order_by_forward_distance` sorts on
    `clip.w`, which for a perspective projection is exactly `-z_view`, so it needs no camera basis and
    no eye position — the view-projection the pass already receives carries both. Signs more than one
    block behind the eye plane project to nothing and were eating roughly half the budget. The
    caller's position sort is untouched; the reorder is local to the upload.
-3. **Truncate whole signs and say so.** `sign_diagnostics::report_draw_budget` warns — *not* behind
-   `RUST_LOG=signs=debug`, because a dropped sign is a visible defect rather than an investigation
-   aid — latched for the sign renderer's lifetime. Camera movement can change the exact drop count
-   or briefly recover and re-exhaust the pass without producing another WARN; those later transitions
-   are debug-only, and a new renderer/resource epoch gets one fresh warning if it overflows again.
+3. **Truncate whole signs and say so when diagnosing.** `sign_diagnostics::report_draw_budget` emits
+   on the `signs=debug` target and latches transitions for the sign renderer's lifetime. It was once
+   an unconditional warning, but a dense real server can bind the finite budget on every renderer
+   epoch; that made a known capacity condition noisy during ordinary play. Camera movement can still
+   report recovery/re-entry when the targeted diagnostic is enabled.
 
 Gates: `gpu/sign_text.rs`'s own `the_vertex_budget_holds_a_real_rooms_worth_of_signs` (a magnitude
 prediction — it evaluates the population against *both* the old 40,000 and the current capacity, and
 was observed failing at 40,000) and `the_budget_is_spent_nearest_first_and_skips_signs_behind_the_eye`;
-`glowing_sign_uses_three_distinct_planes_along_its_surface_normal` for the depth arm, and
-`semantic_geometry_cache_reuses_only_an_identical_visible_sign` for the stationary-frame cache and its
+`glowing_sign_composites_outline_and_ink_on_one_surface_at_every_orientation` for the common physical
+plane plus `glowing_sign_outline_uses_normal_depth_before_polygon_offset_ink` for the two-pass depth
+arm. The first gate also transforms every emitted quad back into sign-local coordinates and asserts
+that no outline rectangle has positive-area overlap with any ink rectangle, for both faces and several
+standing/wall rotations. The outline is unbiased and the ink retains its forward-depth polygon offset;
+the mask-subtraction gate, rather than a bias magnitude assertion alone, protects the live failure.
+`semantic_geometry_cache_reuses_only_an_identical_visible_sign` covers the
+stationary-frame cache and its
 text/style/glow/kind/orientation/light/range invalidation.
 
 Two things the same investigation turned up that are worth carrying:

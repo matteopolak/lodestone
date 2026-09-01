@@ -91,6 +91,7 @@ fn blank_draw(id: i32, type_path: &str) -> EntityDraw {
         type_path: std::sync::Arc::from(type_path),
         item: None,
         item_model: None,
+        item_skin: None,
         main_arm_left: false,
         feet: SUBJECT_POS,
         yaw: SUBJECT_YAW,

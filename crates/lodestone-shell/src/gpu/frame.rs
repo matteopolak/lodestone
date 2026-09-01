@@ -279,11 +279,11 @@ impl RenderState {
         // `projectionMatrix.mul(bobStack)` **first** and applies the spin after,
         // so the bob sits to the left of the warp. Reversing them would put the
         // spin's skew on the unbobbed axis — subtly wrong rather than obviously.
-        let view_proj = camera
-            .view_projection_eye_space(
-                self.eye_bob() * lodestone_render::nausea_portal_warp(warp_intensity, warp_angle_degrees),
-            )
-            .to_cols_array_2d();
+        let world_eye = self.eye_bob()
+            * lodestone_render::nausea_portal_warp(warp_intensity, warp_angle_degrees);
+        let map_eye = world_eye * camera.view_matrix();
+        let map_view_projection = camera.projection_matrix() * map_eye;
+        let view_proj = map_view_projection.to_cols_array_2d();
 
         // This frame's fog **and** its `sky_darken` lane, hoisted above both
         // terrain paths so they physically cannot disagree. It used
@@ -456,8 +456,9 @@ impl RenderState {
         // batch step of its own (see `gpu/sign_text.rs`'s module doc for why
         // this is not a billboard and needs no camera basis).
         let signs = self.sign_source.signs(camera.position);
-        let sign_text_count =
+        let sign_prepare =
             self.sign_text.prepare(queue, &view_proj, camera.position, &signs, world_text_light);
+        let sign_text_count = sign_prepare.vertices;
         stats.sign_text_vertices = sign_text_count;
 
         // `text_display` glyphs and background panels, same "upload before
@@ -647,11 +648,20 @@ impl RenderState {
         // seam has a second intended producer (piston heads) that has nothing to do
         // with items. Prepared here for the reason everything here is: buffers
         // cannot be created mid-pass.
-        let moving_block_mesh = self.prepare_moving_blocks(device, camera, entities, &mut stats);
+        let moving_block_meshes = self.prepare_moving_blocks(device, camera, entities, &mut stats);
         // Maps in item frames. Built here rather than inside the pass
         // for the reason above — it creates a texture and a bind group — and kept
         // separate from `item_mesh` because it draws with a different group 1.
-        let framed_maps = self.prepare_framed_maps(device, queue, camera, entities);
+        let framed_maps = self.prepare_framed_maps(
+            device,
+            queue,
+            camera,
+            entities,
+            map_eye,
+            map_view_projection,
+            map_eye,
+            map_view_projection,
+        );
         // The world glint's group 0, written here (the `&self` + queue point of the
         // frame) and consumed inside the pass below. Item geometry bakes world
         // positions into its vertices, so the matrix is the plain camera one — the
@@ -1056,9 +1066,20 @@ impl RenderState {
             // shader is a separate fix and does not achieve this on its own:
             // fog tints a mob by distance, it does not put water in front of it.
             if !entity_batches.visible.is_empty() {
-                pass.set_pipeline(&self.entities.pipeline.pipeline);
-                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
                 for batch in &entity_batches.visible {
+                    // `PlayerModel` is constructed with
+                    // `RenderTypes::entityTranslucent` in 26.2.  Its skin's
+                    // partially-alpha outer layer therefore blends with the
+                    // `0.1` cutout threshold, while ordinary mob sheets stay
+                    // on the opaque/cutout pipeline.  Both pipelines share
+                    // these exact bind-group layouts and the same
+                    // `LessEqual`/depth-write state.
+                    if matches!(batch.model, "player_wide" | "player_slim") {
+                        pass.set_pipeline(&self.entities.player_skin_pipeline);
+                    } else {
+                        pass.set_pipeline(&self.entities.pipeline.pipeline);
+                    }
+                    pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
                     let Some(model) = self.entities.gpu_models.get(batch.model) else {
                         continue;
                     };
@@ -1696,11 +1717,34 @@ impl RenderState {
                     }
                 }
 
-                // Item-frame bodies and moving blocks use the ordinary
-                // depth-biased surface pipeline. Their hand-authored world
-                // surfaces may meet terrain exactly, so they take one
-                // camera-facing depth step.
-                if let Some(mesh) = &moving_block_mesh {
+                // Generic moving blocks retain the ordinary model camera and
+                // depth state. Item-frame bodies are emitted separately below:
+                // vanilla gives only that draw `entitySolidZOffsetForward`.
+                if let Some(mesh) = moving_block_meshes
+                    .as_ref()
+                    .and_then(|meshes| meshes.ordinary.as_ref())
+                {
+                    pass.set_pipeline(&model.pipeline.pipeline);
+                    bind_terrain_camera(
+                        &mut pass,
+                        &model.cam_bind_group,
+                        model.origin_arena.zero_offset(),
+                        &mut terrain_cam_group_last,
+                        &mut stats,
+                    );
+                    pass.set_bind_group(1, &model.atlas_bind_group, &[]);
+                    pass.set_bind_group(2, &model.palette_bind_group, &[]);
+                    pass.set_bind_group(3, &model.anim_bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    stats.draw_calls += 1;
+                }
+
+                if let Some(mesh) = moving_block_meshes
+                    .as_ref()
+                    .and_then(|meshes| meshes.item_frames.as_ref())
+                {
                     pass.set_pipeline(&model.surface_pipeline.pipeline);
                     bind_terrain_camera(
                         &mut pass,
@@ -1718,14 +1762,18 @@ impl RenderState {
                     stats.draw_calls += 1;
                 }
 
+                let framed_map_instances_submitted = framed_maps
+                    .iter()
+                    .map(|(mesh, _)| mesh.index_count as usize / 6)
+                    .sum();
+                let framed_map_instances_before = stats.filled_maps_drawn;
                 for (mesh, texture) in &framed_maps {
-                    // The map picture is a second layer over the frame's front
-                    // texture. Give it a relative second bias step so the two
-                    // opaque surfaces cannot tie at raster precision; do not
-                    // move either mesh or change the shared world-surface bias.
-                    // Group 1 is swapped to the map's own 128×128 texture — the
-                    // model shader is at the 4-group floor, so it replaces the
-                    // atlas rather than joining it.
+                    // Keep vanilla's physical `1.01 / 128` separation and add
+                    // the equivalent finite-precision ordering for Lodestone's
+                    // forward-depth wgpu projection. Without this dedicated
+                    // second raster step. Without it a visible frame flickers against its front plate,
+                    // while an invisible frame can lose the whole parallel
+                    // quad against its attachment wall.
                     pass.set_pipeline(&model.map_surface_pipeline.pipeline);
                     bind_terrain_camera(
                         &mut pass,
@@ -1743,6 +1791,12 @@ impl RenderState {
                     stats.draw_calls += 1;
                     stats.filled_maps_drawn += mesh.index_count as usize / 6;
                 }
+                super::maps::note_framed_map_draw(
+                    camera,
+                    framed_map_instances_submitted,
+                    framed_maps.len(),
+                    stats.filled_maps_drawn - framed_map_instances_before,
+                );
 
                 // Mining-crack overlays, drawn after the opaque terrain they sit
                 // on (so the block face is already in the depth buffer) and
@@ -2198,6 +2252,9 @@ impl RenderState {
         // `RenderState::resident_mesh_bytes`.
         stats.vram_bytes = self.resident_mesh_bytes();
         stats.vram_reserved_bytes = self.reserved_mesh_bytes();
+        self.terrain_cull_diagnostics
+            .borrow_mut()
+            .report(camera, &terrain_cull, stats, sign_prepare);
         stats
     }
 }

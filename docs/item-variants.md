@@ -128,18 +128,16 @@ not for the arm pose: vanilla's `using_item` is
 `owner.isUsingItem() && owner.getUseItem() == itemStack`, so the flag must be compared against
 the arm being drawn or a skeleton drawing a bow would bend its off-hand item too.
 
-**The local player is the one remaining gap.** `ItemUse` is an *ingest* component and the local
-player has no ingest entity (`apply_local_player_login` gives it no `EntityKind`/`Position`), so
-our own bow still draws slack while every remote player's and every mob's does not. Closing it
-needs a session-level fold shaped exactly like `Vitals`:
+The local player reaches the same resolver through `Sim::item_use_render_state` and the polled
+`RenderState::set_item_use_source` seam. `ItemUseState` deliberately keeps `using`/elapsed `ticks`
+separate from the optional consume transform: bows and crossbows need variant state while having no
+eat animation. `prepare_first_person_hand` feeds those two fields into `ItemStateContext::with_use`,
+so holding use selects `bow_pulling_0/1/2` at the same crossings as remote players and mobs.
 
-1. a session component carrying `using` / `off_hand` / `ticks`, folded in
-   `session::handles_event` — **not** `ingest::handles_event`; per-entity state is `ingest`,
-   local-player scalars are `session`, and an arm added to the wrong one compiles, unit-tests
-   green and never runs;
-2. a `PlayerSnapshot` field for it in `sim.rs`;
-3. a `RenderState` source setter, read in `prepare_first_person_hand` where `hand_ctx` is
-   currently built with `using: false`.
+This is session state rather than ingest state: the local player has no ingest entity
+(`apply_local_player_login` gives it no `EntityKind`/`Position`). If another local-only use property
+is added, extend `ItemUseState` and `Sim::item_use_render_state`; do not add it only to the per-entity
+`ItemUse` path or it will work for every player except the owner.
 
 ## Properties: what is sourced and what is not
 
@@ -197,6 +195,9 @@ green says nothing about whether a drawn bow resolves.
   **baked**, that they sample **different atlas rects** (four aliases of one sprite would satisfy
   a quad-count assertion), and that the in-hand spyglass differs from the slot form in both
   geometry and `firstperson_righthand` transform.
+- `gpu::sources::tests::item_use_source_carries_bow_state_and_eat_transform_separately` and the
+  first-person resolver tests pin the local source boundary: a bow can be using with no consume
+  transform, and elapsed ticks reach the item-definition variant resolver unchanged.
 
 **Bow crossings, predicted from Mojang's numbers and then measured.** `items/bow.json` carries
 `scale: 0.05` with thresholds `0.65` and `0.9`, so the crossings are at `0.65 / 0.05 = 13` and

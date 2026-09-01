@@ -82,7 +82,7 @@ flattest real face reads **3.7**.
 The 25 MB of stacked RGBA this implies is held only until the upload; see
 `PanoramaFaces::rgba`.
 
-### The background textures, which really are flat
+### The background textures: flat in vanilla, but still pack assets
 
 Decoded from `client.jar`, and unaffected by the above — none of these names
 appears in the asset index:
@@ -94,11 +94,17 @@ appears in the asset index:
 | `gui/{header,footer}_separator.png` | 32×2 | two colours: black α191, white α51 |
 | `gui/inworld_{header,footer}_separator.png` | 32×2 | identical to the non-inworld pair |
 
-So: **there is no dirt texture to reproduce.** `menu_background.png` is flat, so
-vanilla's tiled 32 px blit is a 25 %-black wash and one quad is pixel-identical to
-tiling. The `inworld_` variant being byte-identical means the
-`minecraft.level == null` fork at `Screen.java:418` is, in 26.2, a distinction
-without a difference — do not spend effort on it.
+Vanilla's copies are flat, so the old one-quad 25 %-black approximation produced
+the right bundled pixels. It was nevertheless the wrong resource boundary: a
+server pack can replace either raw file with patterned or coloured art. The menu
+atlas now carries them as `menu/background` and `menu/inworld_background`, and
+`draw::tile_screen_background` emits vanilla's declared 32×32 logical tiles. The
+two variants remain separate even though vanilla makes them byte-identical: the
+`minecraft.level == null` fork at `Screen.java:405` is a real pack override seam.
+
+When an atlas is unavailable, the renderer keeps the flat colour fallback. When
+the texture is present over a panorama, it replaces the panorama shader's old
+black wash rather than being composited on top of it, preventing double-darkening.
 
 ### `panorama_overlay.png` is inert, and this time it is the real file
 

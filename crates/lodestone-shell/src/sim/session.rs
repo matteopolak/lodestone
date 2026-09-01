@@ -1581,6 +1581,27 @@ impl Sim {
         ))
     }
 
+    /// The local player's complete item-use state for first-person model
+    /// resolution and animation. `UsingItem`/`ItemUseTicks` are the same tick
+    /// resources the action path updates; the consume sub-state remains separate
+    /// because only edible/drinkable items use the eat transform.
+    #[must_use]
+    pub fn item_use_render_state(&self) -> crate::gpu::ItemUseState {
+        let (using, ticks) = self.read(|w| {
+            (
+                w.resource::<crate::interact::UsingItem>().0,
+                w.resource::<lodestone_ecs::player::ItemUseTicks>()
+                    .0
+                    .unwrap_or(0),
+            )
+        });
+        crate::gpu::ItemUseState {
+            using,
+            ticks,
+            eat: self.consume_usage_time(),
+        }
+    }
+
     /// Select hotbar slot `slot` (`0..9`); out-of-range values are ignored. When
     /// the selection actually changes, echoes it to the server via
     /// [`ClientAction::SetCarriedItem`] so the held item stays in sync. No-op

@@ -69,16 +69,16 @@
 //! `block_entities::VIEW_DISTANCE`, since the question is always about a sign
 //! the owner is standing in front of.
 //!
-//! [`report_draw_budget`] is the one thing here that is **not** opt-in: the
-//! sign-text pass dropping signs it was handed is a visible defect rather than
-//! an investigation aid, so it emits one unconditional warning per renderer
-//! lifetime. Later recovery/re-entry transitions are debug-only.
+//! [`report_draw_budget`] uses the same opt-in `signs=debug` target. A dense
+//! server can legitimately bind the finite buffer on every renderer epoch, so
+//! this is diagnostic state rather than an unconditional warning. Its
+//! recovery/re-entry transitions remain latched.
 //!
 //! # Configuration
 //!
 //! * `RUST_LOG=signs=debug` — turn the per-sign scan on. Nothing is scanned or
 //!   logged by [`report`] otherwise; its whole body is behind one
-//!   `tracing::enabled!` check. [`report_draw_budget`] is unaffected.
+//!   `tracing::enabled!` check. Budget transitions use this target too.
 //! * `LODESTONE_SIGN_DIAG_RADIUS` — scan radius in blocks, default
 //!   [`DEFAULT_SCAN_RADIUS`].
 //! * `LODESTONE_SIGN_DIAG_INTERVAL` — report once every this many calls
@@ -475,7 +475,7 @@ fn write_nbt(nbt: &Nbt, out: &mut String) {
     }
 }
 
-/// Per-renderer state for the sign-text budget warning. The renderer owns
+/// Per-renderer state for the sign-text budget diagnostic. The renderer owns
 /// this rather than using process-global state so a newly-created renderer
 /// (and therefore a new world/render resource epoch) gets one fresh report.
 #[derive(Debug, Default)]
@@ -512,19 +512,16 @@ fn budget_event(state: &BudgetWarningState, dropped: usize) -> Option<BudgetEven
     }
 }
 
-/// Says, once per renderer lifetime, that the sign-text pass could not draw
+/// Says at debug level that the sign-text pass could not draw
 /// every sign the gather handed it.
 ///
 /// This exists because the pass used to drop the tail of its list in
 /// complete silence — no log, no counter, no red test — which is the failure
 /// mode `CLAUDE.md`'s "nothing may be silently skipped" rule is about, and
 /// which presents to a player as whole boards blinking in and out as they
-/// move. Unlike the rest of this module it is **not** gated behind
-/// `RUST_LOG=signs=debug`: a dropped sign is a visible defect rather than an
-/// investigation aid, so it warns unconditionally. It warns only on the
-/// first overflow seen by this renderer. Camera movement can briefly recover
-/// and re-exhaust the pass, so those later transitions are debug-only; a
-/// newly-created renderer gets a fresh lifetime latch.
+/// move. The report is gated behind `RUST_LOG=signs=debug` and emits only on
+/// transitions. Camera movement can briefly recover and re-exhaust the pass;
+/// a newly-created renderer gets a fresh lifetime latch.
 ///
 /// * `gathered` — what `block_entities::sign_spawns` returned.
 /// * `in_front` — how many of those were not discarded as behind the eye.
@@ -543,13 +540,13 @@ pub(crate) fn report_draw_budget(
             target: TARGET,
             "sign-text budget no longer binding: {drawn} of {gathered} gathered sign(s)              drawn, {vertices}/{capacity} vertices"
         ),
-        Some(BudgetEvent::Exhausted) => tracing::warn!(
+        Some(BudgetEvent::Exhausted) => tracing::debug!(
             target: TARGET,
-            "sign-text budget exhausted: {dropped} of {in_front} in-front sign(s) drew NO text          ({gathered} gathered, {vertices}/{capacity} vertices). The farthest signs are          dropped first; they will blink back as you approach. Raise          MAX_SIGN_TEXT_VERTICES in gpu/sign_text.rs."
+            "sign-text budget exhausted: {dropped} of {in_front} in-front sign(s) drew NO text ({gathered} gathered, {vertices}/{capacity} vertices); farthest signs dropped first"
         ),
         Some(BudgetEvent::Reentered) => tracing::debug!(
             target: TARGET,
-            "sign-text budget exhausted again: {dropped} in-front sign(s) drew NO text; warning already emitted for this renderer"
+            "sign-text budget exhausted again: {dropped} in-front sign(s) drew NO text; initial report already emitted for this renderer"
         ),
         None => {}
     }
@@ -900,10 +897,10 @@ mod tests {
         assert_eq!(budget_event(&state, 3), Some(BudgetEvent::Reentered));
     }
 
-    /// The user-facing warning must remain one WARN even when the camera
+    /// The initial debug report must remain one line even when the camera
     /// oscillates across the budget boundary several times.
     #[test]
-    fn budget_warning_emits_only_one_warn_per_renderer() {
+    fn budget_diagnostic_emits_only_one_initial_report_per_renderer() {
         let capture = Capture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())
@@ -923,10 +920,10 @@ mod tests {
         assert_eq!(
             out.matches("sign-text budget exhausted:").count(),
             1,
-            "alternating overflow/recovery must not repeat WARN: {out:?}"
+            "alternating overflow/recovery must not repeat the initial report: {out:?}"
         );
         assert!(
-            out.contains("warning already emitted for this renderer"),
+            out.contains("initial report already emitted for this renderer"),
             "re-entry should remain diagnosable at debug level: {out:?}"
         );
     }

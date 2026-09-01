@@ -430,9 +430,6 @@ pub(super) struct DisplayTextRenderer {
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     vertices: wgpu::Buffer,
-    /// `None` off a jar-less run — same fail-open contract as
-    /// [`super::nametag::NameTagRenderer::font`].
-    font: Option<RasterFont>,
     /// Styled ink-run layouts, persisted across frames for the same reason
     /// `gpu/sign_text.rs::SignTextRenderer::ink` is. `Styled` (not
     /// `gpu/nametag.rs::InkLayoutCache`) so a coloured/bold/italic/underlined/
@@ -490,7 +487,6 @@ impl DisplayTextRenderer {
             bind_group,
             uniform,
             vertices,
-            font: super::nametag::load_font(),
             ink: super::nametag::StyledInkLayoutCache::default(),
         }
     }
@@ -662,12 +658,23 @@ impl DisplayTextRenderer {
         light_source: &super::EntityLightSource,
     ) -> DisplayTextRanges {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
-        let Some(raster) = &self.font else {
+        // `VanillaFont::shared` is generation-keyed, unlike the former
+        // jar-only `RasterFont` snapshot. This is what makes a server pack's
+        // icon/nameplate fonts appear after it has been accepted and reloaded.
+        let Some(world_font) = crate::hud::vanilla_font::VanillaFont::shared() else {
             return DisplayTextRanges::default();
         };
 
         let Partitioned { backgrounds, shadows, glyphs, see_through } =
-            partition_display_text(raster, &self.ink, draws, camera, light, light_source);
+            partition_display_text(
+                world_font.default_raster(),
+                Some(&world_font),
+                &self.ink,
+                draws,
+                camera,
+                light,
+                light_source,
+            );
         // Panels first, then glyphs, so the two ranges are contiguous. The
         // cap is applied to the panels first and to whatever room is left
         // for the glyphs, which is the right way round: a truncated panel
@@ -808,6 +815,7 @@ fn display_light(source: &super::EntityLightSource, draw: &DisplayDraw) -> u8 {
 
 fn partition_display_text(
     raster: &RasterFont,
+    world_font: Option<&crate::hud::vanilla_font::VanillaFont>,
     ink: &super::nametag::StyledInkLayoutCache,
     draws: &[DisplayDraw],
     camera: &Camera,
@@ -835,6 +843,7 @@ fn partition_display_text(
         let mut line_ink = Vec::new();
         push_text_display_quads(
             raster,
+            world_font,
             ink,
             draw,
             text,
@@ -916,6 +925,7 @@ fn split_spans_into_lines(spans: &[TextSpan]) -> Vec<Vec<TextSpan>> {
 #[allow(clippy::too_many_arguments)]
 fn push_text_display_quads(
     raster: &RasterFont,
+    world_font: Option<&crate::hud::vanilla_font::VanillaFont>,
     ink: &super::nametag::StyledInkLayoutCache,
     draw: &DisplayDraw,
     text: &Text,
@@ -941,7 +951,28 @@ fn push_text_display_quads(
     // `super::nametag::layout_styled_ink_runs`'s plain width) so a bold run's real,
     // wider advance is what centring measures — see the module doc for the
     // alignment defect an unstyled width caused.
-    let layouts: Vec<_> = lines.iter().map(|spans| ink.layout(raster, spans)).collect();
+    let layouts: Vec<_> = lines
+        .iter()
+        .map(|spans| {
+            let Some(world_font) = world_font else {
+                return ink.layout(raster, spans);
+            };
+            ink.layout_resolved(
+                crate::resources::pack_generation(),
+                spans,
+                |codepoint, requested| {
+                    let custom = requested.and_then(|id| world_font.custom_raster_for_world_text(id));
+                    if let Some(custom) = custom
+                        && custom.font().contains(codepoint)
+                    {
+                        super::nametag::ResolvedRaster::Shared(custom)
+                    } else {
+                        super::nametag::ResolvedRaster::Borrowed(raster)
+                    }
+                },
+            )
+        })
+        .collect();
     let total_width = layouts.iter().map(|l| l.1).fold(0.0_f32, f32::max);
     let total_height = (lines.len() as f32).mul_add(TEXT_LINE_HEIGHT, -1.0);
     if total_width <= 0.0 {
@@ -1138,6 +1169,7 @@ mod tests {
         let mut glyphs = Vec::new();
         push_text_display_quads(
             raster,
+            None,
             ink,
             draw,
             text,
@@ -1273,6 +1305,7 @@ mod tests {
         tested.text_style_flags = FLAG_SHADOW;
         let one = partition_display_text(
             &raster,
+            None,
             &ink,
             &[tested.clone()],
             &camera,
@@ -1295,6 +1328,7 @@ mod tests {
         through.text_style_flags |= FLAG_SEE_THROUGH;
         let two = partition_display_text(
             &raster,
+            None,
             &ink,
             &[through],
             &camera,
@@ -1580,6 +1614,7 @@ mod tests {
             let (mut panel, mut shadows, mut glyphs) = (Vec::new(), Vec::new(), Vec::new());
             push_text_display_quads(
                 &raster,
+                None,
                 &ink,
                 draw,
                 &text,
@@ -1725,6 +1760,7 @@ mod tests {
     ) -> Partitioned {
         partition_display_text(
             raster,
+            None,
             &super::super::nametag::StyledInkLayoutCache::default(),
             &[draw.clone()],
             &Camera::default(),

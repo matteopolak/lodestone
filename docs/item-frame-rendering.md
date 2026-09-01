@@ -84,6 +84,13 @@ that reason, and its own gate could not see it.
 | a `minecraft:special` item | `gpu/entity_passes.rs`'s `framed_special_item` | `framed_item_matrix` |
 | a filled map | `gpu/maps.rs`'s `prepare_framed_maps` | `framed_map_pose` |
 
+All four producers also share `item_frame_culling_aabb`. It reproduces
+`ItemFrame.createBoundingBox`: centre at the attachment-block centre minus
+`Direction * 0.46875`, a `1/16` wall-normal thickness, a one-block in-plane square for maps (`3/4`
+otherwise), then vanilla renderer inflation by `0.5`. This is intentionally not `feet ± 1`;
+`feet` is the packet attachment anchor, and that shortcut omits part of the real inflated box on
+the room-facing side.
+
 The contents sit at `T(0, 0, lift)` inside frame space, `lift` being `0.4375` for a visible frame
 and `0.5` for an invisible one (vanilla's two `translate` calls). Because frame space's `+z`
 points into the wall, visible contents are `1/16` outside the attachment block's wall face;
@@ -167,22 +174,26 @@ frame drew long before its rotation did.
   below cannot ask, because each builds its own `EntityDraw` with `item: Some(..)` by hand.
   `tests/live_framed_item_wire.rs` is the one that can: it goes through `Sim::entity_draws`, the
   accessor `app/redraw.rs` calls, against a frame a real server placed.
-* **Two pixel gates cover this**, and neither can be replaced by a counter:
-  `tests/item_frame_pixels.rs` (the body, an ordinary item, the invisible split, the glow variant)
-  and `tests/special_item_world_pixels.rs` (a framed shield). Note the comparison both need: a
+* **Three pixel gates cover this**, and neither can be replaced by a counter:
+  `tests/item_frame_pixels.rs` (the body, an ordinary item, the invisible split, the glow variant),
+  `tests/framed_map_pixels.rs` (the mapped frame on all four walls plus room-facing oblique views
+  through 72°), and `tests/special_item_world_pixels.rs` (a framed shield). The oblique map arm
+  compares an opaque picture to the identical empty frame, so a whole-quad cull/depth disappearance
+  cannot hide behind the body's still-visible border. Note the comparison both need: a
   frame body **fills its own silhouette**, so "differs from the empty scene" is the same number
   for a frame holding a shield and a frame holding nothing (measured: 6320 both). The contents can
   only be seen by diffing against the *empty frame*.
 
 ## What is deliberately not ported
 
-* **`submitWithZOffset`'s `outlineColor` argument.** The frame body and moving block overlays use
-  `ModelPipeline::for_surface`'s negative `(slope = -1, constant = -10)` offset toward the camera.
-  The map pipeline retains its relative bias, but it is not relied upon to break a coplanar tie: the
-  physical map plane gets vanilla's `1.01 / 128` `MapRenderer` depth, plus the template's own
-  `0.001 / 16` difference between its plate and the `.4375` content origin. `gpu/maps.rs` checks
-  that source-derived order for all four wall facings and both vertical orientations, so it cannot
-  accidentally become a world-z movement.
+* **`submitWithZOffset` is a layering instruction, not permission for two independently rounded
+  camera matrices.** 26.2 routes the frame body alone through `entitySolidZOffsetForward` and scales
+  its model-view matrix by `1 + 1/4096`. A literal second matrix under Lodestone's forward-depth
+  projection lost precision at large world coordinates: live traces showed the frame/map depth order
+  reverse as the view and FOV changed. Lodestone therefore expresses the same ordering with one
+  raster-depth step for the body and two for the map, both under the identical view-projection. The
+  map still retains vanilla's physical `1.01 / 128` `MapRenderer` separation; neither layer nudges
+  geometry in world space.
 * **The `map=true` variant is selected from the held item's id**, not from a resolved `MapId`.
   Vanilla asks `entity.getFramedMapId(itemStack)` and falls back to the plain frame when map data
   has not loaded. This client still selects the wider border for any `minecraft:filled_map`, but

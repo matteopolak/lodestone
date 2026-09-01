@@ -1935,6 +1935,10 @@ impl MenuNav {
         &self.server_links
     }
 
+    pub fn server_links_mut(&mut self) -> &mut crate::menu::server_links::ServerLinksNav {
+        &mut self.server_links
+    }
+
     /// The Statistics screen's own state (issue #188).
     #[must_use]
     /// The Advancements screen's own tab/scroll state (issue #167), for the draw
@@ -5667,7 +5671,12 @@ impl MenuNav {
         match outcome {
             ServerLinksOutcome::Handled => MenuAction::None,
             ServerLinksOutcome::Close => {
-                ui.close_server_links();
+                if self.server_links.returns_to_chat() {
+                    self.server_links.reset();
+                    ui.close_server_links_to_chat();
+                } else {
+                    ui.close_server_links();
+                }
                 MenuAction::None
             }
             // Vanilla's `ConfirmLinkScreen` always returns to the screen it
@@ -5676,8 +5685,13 @@ impl MenuNav {
             // not just the confirmation sub-view.
             ServerLinksOutcome::OpenUrl(url) => {
                 crate::menu::accounts::open_in_browser(&url);
+                let returns_to_chat = self.server_links.returns_to_chat();
                 self.server_links.reset();
-                ui.close_server_links();
+                if returns_to_chat {
+                    ui.close_server_links_to_chat();
+                } else {
+                    ui.close_server_links();
+                }
                 MenuAction::None
             }
         }
