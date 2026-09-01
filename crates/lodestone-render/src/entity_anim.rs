@@ -427,6 +427,76 @@ impl AnimFamily {
     }
 }
 
+/// A `VehicleEntity`'s rocking state, interpolated for this frame — vanilla's
+/// `BoatRenderState.hurtTime`/`hurtDir`/`damageTime`.
+///
+/// Lives on [`AnimInput`] rather than on the draw record for the same reason
+/// every other render-state scalar here does: it is per-entity, per-frame state
+/// the renderer reads, and it is the one struct already threaded from the
+/// extract step to every placement.
+///
+/// It affects the **placement**, not the skeleton pose — [`Skeleton::pose`]
+/// ignores it entirely. The consumer is the boat placement in
+/// `lodestone_shell::gpu::entity_passes`, which conjugates the roll into the
+/// already-baked matrices.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoatHurt {
+    /// `getHurtTime() - partialTicks` — counts down from `10`. Zero or below is
+    /// "not hurt", and the boat draws level.
+    pub time: f32,
+    /// `getHurtDir()` — `+1` or `-1`. It **multiplies** the whole roll, so a
+    /// `0.0` here silences the animation completely; vanilla's registered
+    /// default is `1`, which is why [`Self::REST`] uses that and not zero.
+    pub dir: f32,
+    /// `max(getDamage() - partialTicks, 0)` — accumulated damage x 10, the
+    /// amplitude of the roll.
+    pub damage: f32,
+}
+
+impl BoatHurt {
+    /// A vehicle that has never been hit: no clock, no damage, and vanilla's own
+    /// registered `+1` direction.
+    pub const REST: BoatHurt = BoatHurt {
+        time: 0.0,
+        dir: 1.0,
+        damage: 0.0,
+    };
+}
+
+impl Default for BoatHurt {
+    fn default() -> Self {
+        Self::REST
+    }
+}
+
+/// `AbstractBoatRenderer.submit`'s hull roll, in degrees:
+/// `sin(hurtTime) * hurtTime * damageTime / 10 * hurtDir`, about the model's
+/// local X axis, and exactly `0.0` while the hurt clock is not running.
+///
+/// Three things about the formula are easy to get wrong and each is visible:
+///
+/// * **`sin` takes the hurt clock in radians, not degrees.** Vanilla passes
+///   `Mth.sin(hurt)` with `hurt` in ticks, so the boat swings through rather
+///   more than one full period over the ten ticks — that oscillation *is* the
+///   animation. Converting to degrees first gives a monotonic lean that never
+///   comes back.
+/// * **The `hurtTime` factor appears twice**, once inside the sine and once as a
+///   linear multiplier, so the swing decays as the clock runs out instead of
+///   ending abruptly.
+/// * **`hurtDir` multiplies the result**, so an unreported direction of `0`
+///   silences the whole thing. See [`BoatHurt::dir`].
+///
+/// `Mth.sin` is vanilla's quantised lookup table rather than the library sine;
+/// this uses [`lodestone_physics::mth::sin`] for that reason, since the
+/// difference is real at the poles and this argument sweeps a whole period.
+#[must_use]
+pub fn boat_hurt_roll_degrees(hurt: BoatHurt) -> f32 {
+    if hurt.time <= 0.0 {
+        return 0.0;
+    }
+    lodestone_physics::mth::sin(f64::from(hurt.time)) * hurt.time * hurt.damage / 10.0 * hurt.dir
+}
+
 /// The per-entity animation state a [`Skeleton`] poses from, already
 /// interpolated for the frame.
 ///
@@ -561,6 +631,10 @@ pub struct AnimInput {
     /// this crate does take the skip, where the discarded terms provably have no
     /// such residue.
     pub armor_stand_pose: Option<lodestone_model::ArmorStandPose>,
+    /// A vehicle's rocking state (`VehicleEntity`'s hurt triple), [`BoatHurt::REST`]
+    /// for every entity that is not a boat, raft or minecart. Read by the boat
+    /// placement, never by [`Skeleton::pose`] — see [`BoatHurt`].
+    pub boat_hurt: BoatHurt,
 }
 
 impl AnimInput {
@@ -579,6 +653,7 @@ impl AnimInput {
         is_passenger: false,
         swim_amount: 0.0,
         armor_stand_pose: None,
+        boat_hurt: BoatHurt::REST,
     };
 }
 
@@ -1733,6 +1808,67 @@ fn affine_to_mat4(a: &Affine) -> Mat4 {
 
 #[cfg(test)]
 mod tests {
+    use super::{BoatHurt, boat_hurt_roll_degrees};
+
+    /// The hull roll must land on `sin(t) * t * damage / 10 * dir` with `t` in
+    /// **radians**, and must be exactly zero when the clock is not running.
+    ///
+    /// The discriminating input is `t = 7.0`: `sin(7 rad)` is `+0.657` while
+    /// `sin(7°)` is `+0.122`, so the two readings are a factor of five apart and
+    /// — more importantly — the radian reading has already crossed zero and come
+    /// back, which is the oscillation the animation *is*. At a small `t` the two
+    /// hypotheses agree to within a few percent, so a fixture at `t = 1` would
+    /// measure nothing.
+    ///
+    /// Both expected values are computed here from the vanilla formula, not by
+    /// calling the function twice.
+    #[test]
+    fn the_boat_roll_uses_radians_and_stops_when_the_clock_does() {
+        let hurt = BoatHurt {
+            time: 7.0,
+            dir: -1.0,
+            damage: 23.5,
+        };
+        let radians = 7.0_f32.sin() * 7.0 * 23.5 / 10.0 * -1.0;
+        let degrees = 7.0_f32.to_radians().sin() * 7.0 * 23.5 / 10.0 * -1.0;
+        let got = boat_hurt_roll_degrees(hurt);
+        assert!(
+            (got - radians).abs() < 1e-3,
+            "expected {radians} (radians), got {got}; the degrees reading would \
+             give {degrees}"
+        );
+        assert!(
+            (radians - degrees).abs() > 1.0,
+            "the two readings must be distinguishable at this input, or the gate \
+             cannot fail: {radians} vs {degrees}"
+        );
+
+        // The sign is carried by `hurtDir` alone: the same hit the other way
+        // round is the exact negation, which is what makes consecutive punches
+        // rock the hull alternately.
+        let flipped = boat_hurt_roll_degrees(BoatHurt { dir: 1.0, ..hurt });
+        assert!((flipped + got).abs() < 1e-4, "hurtDir must negate the whole roll");
+
+        // Not hurt: exactly zero, so the placement's early return is reachable.
+        assert_eq!(boat_hurt_roll_degrees(BoatHurt::REST), 0.0);
+        assert_eq!(
+            boat_hurt_roll_degrees(BoatHurt {
+                time: 0.0,
+                ..hurt
+            }),
+            0.0
+        );
+
+        // And the trap the type's own doc names: a zero direction silences the
+        // whole animation, which is why `REST` carries vanilla's registered `1`.
+        assert_eq!(BoatHurt::REST.dir, 1.0);
+        assert_eq!(
+            boat_hurt_roll_degrees(BoatHurt { dir: 0.0, ..hurt }),
+            0.0,
+            "a zero hurtDir multiplies the roll away -- the reason the default is 1"
+        );
+    }
+
     use super::*;
     use glam::Vec3;
     use lodestone_assets::entity::bake_entity_parts;

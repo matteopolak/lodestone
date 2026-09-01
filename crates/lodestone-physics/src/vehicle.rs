@@ -342,11 +342,15 @@ fn boat_ground_friction(view: &dyn CollisionView, bb: Aabb) -> f32 {
                 }
                 shapes.clear();
                 view.collision_boxes(x, y, z, &mut shapes);
-                let touches = shapes.iter().any(|shape| {
-                    shape
-                        .moved(f64::from(x), f64::from(y), f64::from(z))
-                        .intersects(&probe)
-                });
+                // `CollisionView::collision_boxes` already returns **world-space**
+                // boxes -- the block-local shape plus its own `(x, y, z)` offset --
+                // so nothing may be added here. Offsetting a second time pushed
+                // every candidate to roughly twice its height, where it can never
+                // meet a 1 mm probe under the hull: the count stayed 0, the mean
+                // came back `NaN`, `friction > 0.0` was false, and every beached
+                // boat was classified `IN_AIR`, whose `invFriction` of 0.9 is the
+                // same number water uses. It is only harmless at `y == 0`.
+                let touches = shapes.iter().any(|shape| shape.intersects(&probe));
                 if touches {
                     friction += view.friction(x, y, z);
                     count += 1;

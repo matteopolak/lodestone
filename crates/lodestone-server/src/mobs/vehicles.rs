@@ -12,6 +12,17 @@ use uuid::Uuid;
 
 use super::{MobSim, TrackedVehicle, block_state_id};
 
+/// `VehicleEntity.hurtServer`'s `setHurtTime(10)` — how long the hull rocks
+/// after a hit, in ticks. The client's roll formula reads the same counter
+/// *twice* (inside its sine and as a linear falloff), so this number sets both
+/// the duration and the number of swings.
+const VEHICLE_HURT_TICKS: i32 = 10;
+
+/// `VehicleEntity.hurtServer`'s destruction threshold on accumulated damage.
+/// Used here as a **clamp** rather than as a trigger — see
+/// [`MobSim::attack_vehicle`] for why this crate does not destroy the vehicle.
+const VEHICLE_DESTROY_DAMAGE: f32 = 40.0;
+
 impl<'w> MobSim<'w> {
     /// Creates one `AbstractBoat` at `position` facing `yaw` and returns its
     /// network entity id — `level.addFreshEntity(boat)`.
@@ -40,9 +51,57 @@ impl<'w> MobSim<'w> {
                 rider: None,
                 paddle_left: false,
                 paddle_right: false,
+                // `VehicleEntity.defineSynchedData`'s registered defaults, and
+                // the `1` is the one that matters -- see `TrackedVehicle::hurt_dir`.
+                hurt_time: 0,
+                hurt_dir: 1,
+                damage: 0.0,
             },
         );
         id
+    }
+
+    /// `VehicleEntity.hurtServer` — the whole of what a punch does to a boat,
+    /// raft or minecart: flip the rock direction, restart the ten-tick clock and
+    /// add the damage that scales the rock's amplitude.
+    ///
+    /// Called from [`MobSim::attack_from_player`], which routes here before its
+    /// generic mob pipeline because a vehicle lives in its own map and has no
+    /// health, armour, knockback or gossip for that pipeline to touch. The
+    /// returned [`AttackOutcome`] reports zero health and no kill: nothing
+    /// downstream reads a vehicle's health, and reporting a kill would have the
+    /// caller announce a death for an entity that is still afloat.
+    ///
+    /// # Two clauses of vanilla's method are deliberately not here
+    ///
+    /// `hurtServer` destroys the vehicle once accumulated damage passes `40.0`
+    /// (or immediately, for a creative-mode attacker) and drops its item. This
+    /// crate has no boat-item drop path reachable from the mob sim, so
+    /// destroying here would delete a player's boat with nothing to pick up.
+    /// The damage is **clamped** at that same `40.0` instead: the rock amplitude
+    /// stops growing exactly where vanilla's does, and the boat survives. That is
+    /// a known gap, not an approximation of destruction.
+    ///
+    /// `isInvulnerableToBase` is likewise not consulted — nothing in this crate
+    /// marks a vehicle invulnerable.
+    pub(super) fn attack_vehicle(&mut self, target_id: i32, raw_damage: f32) -> Option<super::AttackOutcome> {
+        let vehicle = self.vehicles.get_mut(&target_id)?;
+        // `setHurtDir(-getHurtDir())` first, then `setHurtTime(10)`. The negation
+        // is what makes a second punch tip the hull the *other* way; dropping it
+        // leaves every hit rocking the same direction, which reads as a stutter
+        // rather than as a swing.
+        vehicle.hurt_dir = -vehicle.hurt_dir;
+        vehicle.hurt_time = VEHICLE_HURT_TICKS;
+        // `setDamage(getDamage() + damage * 10.0F)`. The x10 is vanilla's, and it
+        // is why a one-heart punch produces a visible rock at all: the renderer
+        // divides by ten again.
+        vehicle.damage = (vehicle.damage + raw_damage * 10.0).min(VEHICLE_DESTROY_DAMAGE);
+        Some(super::AttackOutcome {
+            health: 0.0,
+            killed: false,
+            damage_dealt: raw_damage,
+            velocity: Vec3::new(0.0, 0.0, 0.0),
+        })
     }
 
     /// The entity type of a tracked vehicle, if `id` is one.
@@ -279,6 +338,17 @@ impl<'w> MobSim<'w> {
             let Some(vehicle) = self.vehicles.get_mut(&id) else {
                 continue;
             };
+            // `AbstractBoat.tick`'s first two clauses, and they run **before** the
+            // ridden-boat bail below rather than after it: a rider's client owns
+            // the boat's *motion*, not its damage state, so a boat punched while
+            // someone is aboard must still count its rock down or it stays tipped
+            // over for as long as that player keeps sitting in it.
+            if vehicle.hurt_time > 0 {
+                vehicle.hurt_time -= 1;
+            }
+            if vehicle.damage > 0.0 {
+                vehicle.damage -= 1.0;
+            }
             if vehicle.rider.is_some() {
                 continue;
             }
@@ -645,6 +715,102 @@ mod vehicle_tests {
                  gravity step in five ticks, fell {fall}"
             ));
         }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// **Punching a boat writes `VehicleEntity`'s hurt triple, it reaches the
+    /// streamed snapshot, and the tick counts it back down.**
+    ///
+    /// This is the wiring proof for the whole rocking animation, and the arm
+    /// that would have failed before this branch: `attack_from_player`'s generic
+    /// pipeline reads `self.mobs`, a vehicle lives in `self.vehicles`, so a
+    /// punch on a boat found nothing, returned `None`, and wrote no state at all
+    /// — the client's renderer had nothing to read however correct it was.
+    ///
+    /// The damage is `2.5`, not a whole number, so the `x10` cannot be confused
+    /// with the raw damage and the `-1.0` per-tick decay cannot be confused with
+    /// a reset to zero.
+    #[test]
+    fn punching_a_boat_writes_the_hurt_triple_and_the_tick_decays_it() {
+        let world = world();
+        let mut sim = MobSim::new(&world);
+        let boat = sim.spawn_vehicle(
+            "minecraft:oak_boat".parse().expect("a valid key"),
+            Vec3::new(8.5, 63.4, 8.5),
+            0.0,
+        );
+
+        let mut wrong = Vec::new();
+        let hurt_of = |sim: &MobSim<'_>, id: i32| {
+            sim.snapshots()
+                .into_iter()
+                .find(|s| s.id == id)
+                .and_then(|s| {
+                    s.metadata.into_iter().find_map(|f| match f {
+                        crate::protocol::MetadataField::VehicleHurt { time, dir, damage } => {
+                            Some((time, dir, damage))
+                        }
+                        _ => None,
+                    })
+                })
+        };
+
+        // `defineSynchedData`'s own defaults reach the wire, and the direction's
+        // is `1` rather than `0` -- the client multiplies the roll by it.
+        match hurt_of(&sim, boat) {
+            Some((0, 1, d)) if d == 0.0 => {}
+            other => wrong.push(format!("resting triple was {other:?}, expected (0, 1, 0.0)")),
+        }
+
+        sim.attack_from_player(
+            boat,
+            None,
+            Vec3::new(8.5, 63.4, 6.0),
+            2.5,
+            crate::mobs::DamageFlags::default(),
+            0.0,
+        )
+        .map_or_else(
+            || Some("attacking a boat must report an outcome".to_owned()),
+            |outcome| {
+                outcome
+                    .killed
+                    .then(|| "a punched boat must not be reported killed".to_owned())
+            },
+        )
+        .map(|complaint| wrong.push(complaint));
+
+        // `setHurtDir(-getHurtDir())`, `setHurtTime(10)`,
+        // `setDamage(getDamage() + damage * 10)`.
+        match hurt_of(&sim, boat) {
+            Some((10, -1, d)) if (d - 25.0).abs() < f32::EPSILON => {}
+            other => wrong.push(format!("after one hit the triple was {other:?}, expected (10, -1, 25.0)")),
+        }
+
+        // One tick of `AbstractBoat.tick`: the clock and the damage each fall by
+        // one. A reset to zero, or a decay of only one of the two, both leave a
+        // visibly wrong animation and both look like "it decays" from here.
+        sim.tick_vehicles(&|_, _, _| "minecraft:air".to_owned());
+        match hurt_of(&sim, boat) {
+            Some((9, -1, d)) if (d - 24.0).abs() < f32::EPSILON => {}
+            other => wrong.push(format!("after one tick the triple was {other:?}, expected (9, -1, 24.0)")),
+        }
+
+        // A second hit flips the direction back, which is what makes consecutive
+        // punches rock the hull alternately rather than stutter one way.
+        sim.attack_from_player(
+            boat,
+            None,
+            Vec3::new(8.5, 63.4, 6.0),
+            1.0,
+            crate::mobs::DamageFlags::default(),
+            0.0,
+        );
+        match hurt_of(&sim, boat) {
+            Some((10, 1, d)) if (d - 34.0).abs() < f32::EPSILON => {}
+            other => wrong.push(format!("after the second hit the triple was {other:?}, expected (10, 1, 34.0)")),
+        }
+
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 

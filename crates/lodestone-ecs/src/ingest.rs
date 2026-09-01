@@ -57,7 +57,8 @@ use crate::entity::{
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
     FireworkFlags, PaintingVariant,
     MobState, OnGround,
-    Passengers, Pose, Position, ProjectileOwner, Rotation, Tamed, Variant, Vehicle, Velocity,
+    Passengers, Pose, Position, ProjectileOwner, Rotation, Tamed, Variant, Vehicle, VehicleHurt,
+    Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -930,6 +931,38 @@ pub fn apply_entity_metadata(
         // the wrong router compiles, its unit test passes, and it never runs.
         if let Some(rotation) = metadata.item_frame_rotation {
             entity.insert(ItemFrameRotation(rotation));
+        }
+        // A vehicle's rocking triple (`VehicleEntity.DATA_ID_HURT`/
+        // `DATA_ID_HURTDIR`/`DATA_ID_DAMAGE`). Merged rather than replaced, for
+        // the same reason the firework flags below are: they arrive as separate
+        // metadata entries and a packet mentions only what changed. The hurt
+        // clock counts down every tick while the direction usually stays put, so
+        // a replace would clear the direction ten times per hit and leave the
+        // hull upright.
+        //
+        // Per-*entity* state, so this router and not `crate::session` -- the
+        // fork that has cost work twice; a boat is never the local player.
+        if metadata.vehicle_hurt_time.is_some()
+            || metadata.vehicle_hurt_dir.is_some()
+            || metadata.vehicle_damage.is_some()
+        {
+            let time = metadata.vehicle_hurt_time;
+            let dir = metadata.vehicle_hurt_dir;
+            let damage = metadata.vehicle_damage;
+            entity
+                .entry::<VehicleHurt>()
+                .or_default()
+                .and_modify(move |mut hurt| {
+                    if let Some(time) = time {
+                        hurt.time = time;
+                    }
+                    if let Some(dir) = dir {
+                        hurt.dir = dir;
+                    }
+                    if let Some(damage) = damage {
+                        hurt.damage = damage;
+                    }
+                });
         }
         // Which painting is hung (`Painting.DATA_PAINTING_VARIANT_ID`).
         // Per-entity state, so this router and not `crate::session`. Cloned

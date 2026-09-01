@@ -481,6 +481,32 @@ pub enum MetadataField {
         /// Index 12.
         right: bool,
     },
+    /// `VehicleEntity.DATA_ID_HURT`/`DATA_ID_HURTDIR`/`DATA_ID_DAMAGE` — the
+    /// rocking triple every boat, raft and minecart carries. Together they are
+    /// the whole of the animation a punched hull plays: the client rolls the
+    /// model by `sin(time) * time * damage / 10 * dir` about its own X axis.
+    ///
+    /// **Indices 8, 9 and 10.** Index 8's `INT` has five claimants in the
+    /// committed jar dump (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`)
+    /// — an experience orb's value, a primed TNT's fuse, a fishing hook's hooked
+    /// entity and a display entity's interpolation delay alongside this one —
+    /// and index 9's has two. None of them is a `LivingEntity`, so no census
+    /// column separates them and the guard is the same one
+    /// [`BoatPaddles`](Self::BoatPaddles) states: the *producer*'s own species
+    /// knowledge. Only [`crate::mobs::MobSim::snapshots`]'s vehicle loop ever
+    /// builds this variant, and every entry in that loop is a boat.
+    ///
+    /// `dir`'s resting value is **`1`**, not `0` — `VehicleEntity
+    /// .defineSynchedData`'s registered default — and it multiplies the whole
+    /// roll, so a `0` here draws a still boat rather than an unhurt one.
+    VehicleHurt {
+        /// Index 8: ticks remaining, `10` at the moment of the hit.
+        time: i32,
+        /// Index 9: `+1` or `-1`.
+        dir: i32,
+        /// Index 10: accumulated damage x 10.
+        damage: f32,
+    },
     /// `EnderDragon.DATA_PHASE` — the dragon's current
     /// `crate::dragon::phase::Phase` id (`Phase::id`), the wire twin of the
     /// state [`crate::mobs::MobSim::tick_dragons`] already drives for real.

@@ -59,6 +59,45 @@ impl CollisionView for Void {
     fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<Aabb>) {}
 }
 
+/// Solid ground everywhere below `surface_y`, no fluid at all, and every block
+/// reporting vanilla's ordinary `Block.getFriction` of `0.6`.
+///
+/// This is the world a beached boat is in, and until this gate existed the whole
+/// vehicle corpus had **no** view with a collision box in it: `Ocean` and `Void`
+/// both return no boxes, so `getGroundFriction` divided by a zero count in every
+/// existing test and `ON_LAND` was unreachable by construction.
+#[derive(Debug)]
+struct Ground {
+    surface_y: i32,
+}
+
+/// `Block.getFriction`'s default, which every block but ice, packed ice, blue
+/// ice and slime reports.
+const DEFAULT_BLOCK_FRICTION: f32 = 0.6;
+
+impl CollisionView for Ground {
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+        if y < self.surface_y {
+            // **World-space**, as `CollisionView::collision_boxes` requires: the
+            // block-local unit cube already offset by its own coordinates. A view
+            // that returned block-local boxes here would make this gate agree with
+            // a consumer that offsets a second time, which is precisely the defect
+            // it exists to catch.
+            out.push(Aabb::new(
+                f64::from(x),
+                f64::from(y),
+                f64::from(z),
+                f64::from(x) + 1.0,
+                f64::from(y) + 1.0,
+                f64::from(z) + 1.0,
+            ));
+        }
+    }
+    fn friction(&self, _x: i32, _y: i32, _z: i32) -> f32 {
+        DEFAULT_BLOCK_FRICTION
+    }
+}
+
 fn boat_dims() -> EntityDimensions {
     // The step height passed in is overwritten inside `tick_boat` with
     // `BOAT_STEP_HEIGHT`; anything here would do.
@@ -651,5 +690,132 @@ fn a_boat_falling_into_water_snaps_to_the_surface_and_stops_descending() {
     assert!(
         state.last_yd.abs() < 1e-9,
         "…and lastYd with it, or the next getWaterLevelAbove scans a widened range"
+    );
+}
+
+
+/// A boat sitting on ordinary ground must classify `ON_LAND` and take that
+/// block's friction as its drag — the thing that makes a beached boat crawl.
+///
+/// # The two hypotheses, and why they are far apart
+///
+/// `floatBoat`'s `invFriction` is `landFriction` on `ON_LAND` and `0.9F` on
+/// `IN_AIR` — and `IN_AIR`'s `0.9` is the *same number* `IN_WATER` uses, so a
+/// classification that falls through to `IN_AIR` produces a boat that behaves
+/// exactly as if it were afloat. That is the owner-reported symptom ("riding a
+/// boat on land keeps it super fast, as if I'm in the water") and it is not a
+/// tuning difference: over five ticks of forward input the two recurrences,
+/// `v <- v * 0.6 + 0.04` and `v <- v * 0.9 + 0.04`, separate by a factor of
+/// about 1.7, and the terminal speeds by a factor of four.
+///
+/// The cause was a double block offset in `getGroundFriction`'s probe: the boxes
+/// `CollisionView::collision_boxes` yields are already world-space, and offsetting
+/// them again by `(x, y, z)` put every candidate at roughly twice its height,
+/// where nothing can meet a 1 mm slab under the hull. The touch count stayed `0`,
+/// the mean came back `NaN`, `friction > 0.0` was false, and every boat on land
+/// was `IN_AIR`. It is only invisible at `y == 0`, where the second offset is the
+/// identity — so a fixture at the origin cannot see it either.
+#[test]
+fn a_boat_on_ground_classifies_on_land_and_drags_with_that_blocks_friction() {
+    let view = Ground { surface_y: 64 };
+    let profile = PhysicsProfile::mc_1_21();
+    let mut motion = EntityMotion::at(Vec3d::new(0.5, 64.0, 0.5));
+    let mut state = BoatState::default();
+    let mut yaw = 0.0_f32;
+    let input = BoatInput {
+        up: true,
+        ..BoatInput::default()
+    };
+
+    // Both recurrences derived here from the vanilla constants, not from the code
+    // under test: `floatBoat` drags first and `controlBoat` adds the impulse
+    // after, so `v <- v * invFriction + accel` under either classification.
+    let accel = forward_accel();
+    let mut on_land = 0.0_f64;
+    let mut in_air = 0.0_f64;
+    for _ in 0..5 {
+        on_land = on_land * f64::from(DEFAULT_BLOCK_FRICTION) + accel;
+        in_air = in_air * water_inv_friction() + accel;
+    }
+
+    for tick in 0..5 {
+        tick_boat(
+            &mut motion,
+            &mut state,
+            &mut yaw,
+            input,
+            boat_dims(),
+            &view,
+            &profile,
+        );
+        assert_eq!(
+            state.status,
+            Some(BoatStatus::OnLand),
+            "tick {tick}: a boat resting on solid ground must classify ON_LAND; it \
+             classified {:?}, and IN_AIR's own invFriction is water's 0.9",
+            state.status
+        );
+        // Read **after** the tick, so this is the post-halving value:
+        // `getStatus` latches `landFriction = getGroundFriction()` and
+        // `floatBoat` then uses it and halves it, because a player is aboard.
+        // The halving is not cumulative across ticks -- the next `getStatus`
+        // re-latches the block's own `0.6` -- so the *drag* is `0.6` every tick
+        // and only this residue is halved. Asserting `0.6` here would be
+        // asserting the wrong side of that order.
+        assert!(
+            (state.land_friction - DEFAULT_BLOCK_FRICTION / 2.0).abs() < 1e-6,
+            "tick {tick}: landFriction must latch the block's own 0.6 and then \
+             halve for the player aboard, got {}",
+            state.land_friction
+        );
+    }
+
+    // 0.0954... on land against 0.163804 in air/water -- the wrong hypothesis is
+    // 1.7x the right one here, and four times it at terminal speed.
+    // `1e-6`, not the water gate's `1e-12`, and the difference is real rather
+    // than slack: water's `invFriction` is the literal `0.9F`, while land's is an
+    // `f32` **mean** -- `getGroundFriction` sums `0.6F` over however many cells
+    // the hull touches and divides by an `int` count -- so its exact value
+    // depends on the summation order and lands about `1e-7` off a clean `0.6`.
+    // The two hypotheses here are `0.07` apart, so this tolerance is still five
+    // orders of magnitude short of being able to confuse them.
+    assert!(
+        (motion.velocity.z - on_land).abs() < 1e-6,
+        "five ticks of forward input on land gave vz = {}, expected {on_land} \
+         (an IN_AIR misclassification would give {in_air})",
+        motion.velocity.z
+    );
+    assert!(
+        (on_land - in_air).abs() > 0.05,
+        "the two classifications must be distinguishable at this tick count, or \
+         this gate cannot fail: {on_land} vs {in_air}"
+    );
+}
+
+/// The same boat with **nothing** under it must still classify `IN_AIR` — the
+/// negative control for the gate above, and the arm that proves `ON_LAND` is
+/// being chosen by the ground probe rather than returned unconditionally.
+#[test]
+fn a_boat_over_a_void_still_classifies_in_air() {
+    let view = Void;
+    let profile = PhysicsProfile::mc_1_21();
+    let mut motion = EntityMotion::at(Vec3d::new(0.5, 64.0, 0.5));
+    let mut state = BoatState::default();
+    let mut yaw = 0.0_f32;
+
+    tick_boat(
+        &mut motion,
+        &mut state,
+        &mut yaw,
+        BoatInput::default(),
+        boat_dims(),
+        &view,
+        &profile,
+    );
+
+    assert_eq!(
+        state.status,
+        Some(BoatStatus::InAir),
+        "an empty probe divides by a zero count, and NaN fails `friction > 0.0`"
     );
 }

@@ -2223,6 +2223,7 @@ fn render_anim(
     is_passenger: bool,
     swim_amount: f32,
     armor_stand_pose: Option<lodestone_model::ArmorStandPose>,
+    boat_hurt: lodestone_render::entity_anim::BoatHurt,
 ) -> AnimInput {
     let body = render_yaw(from, to, clock);
     let head = clamp_head_to_body(body, render_head_yaw(from, to, clock), MAX_HEAD_YAW);
@@ -2240,6 +2241,7 @@ fn render_anim(
         is_passenger,
         swim_amount,
         armor_stand_pose,
+        boat_hurt,
     }
 }
 
@@ -2666,7 +2668,7 @@ pub fn extract_entity_draws(
     // stand overwrites the humanoid walk cycle in vanilla, posed or not, so a
     // missing component resolves to `ArmorStandPose::VANILLA_DEFAULT` rather
     // than to "no pose". See `ARMOR_STAND_TYPE_PATH`.
-    (tameds, vehicles, armor_stands, item_frame_rotations, armor_stand_poses, painting_variants, firework_flags, projectile_owners): (
+    (tameds, vehicles, armor_stands, item_frame_rotations, armor_stand_poses, painting_variants, firework_flags, projectile_owners, vehicle_hurts): (
         Query<&lodestone_ecs::entity::Tamed>,
         Query<&lodestone_ecs::entity::Vehicle>,
         Query<&lodestone_ecs::entity::ArmorStandFlags>,
@@ -2686,6 +2688,11 @@ pub fn extract_entity_draws(
         // reads under a different type's interpretation), bridged the same way
         // and nested here for the same `SystemParam`-arity reason.
         Query<&lodestone_ecs::entity::ProjectileOwner>,
+        // `VehicleHurt` lives on the ingest entity too
+        // (`lodestone_ecs::ingest::apply_entity_metadata` merges
+        // `VehicleEntity`'s hurt/hurt-dir/damage triple into it), bridged the
+        // same way and nested here for the same `SystemParam`-arity reason.
+        Query<&lodestone_ecs::entity::VehicleHurt>,
     ),
     tracks: Query<(
         &MinecraftEntityId,
@@ -2981,6 +2988,27 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| item_frame_rotations.get(entity).ok())
             .map_or(0, |rotation| rotation.0);
+        // A vehicle's rocking state, bridged off the ingest entity the same way.
+        // `BoatHurt::REST` — not a zeroed struct — for everything that has never
+        // reported one: the direction's identity is `1`, and a `0` there would
+        // multiply the whole roll away, which is a still boat rather than a
+        // missing one.
+        //
+        // Interpolated here rather than at the draw site, because vanilla's
+        // `AbstractBoatRenderer.extractRenderState` subtracts the partial tick
+        // from *both* the clock and the damage (the damage clamped at zero, the
+        // clock deliberately not — a negative clock is the renderer's own "not
+        // hurt" test).
+        let boat_hurt = index
+            .get(id.0)
+            .and_then(|entity| vehicle_hurts.get(entity).ok())
+            .map_or(lodestone_render::entity_anim::BoatHurt::REST, |hurt| {
+                lodestone_render::entity_anim::BoatHurt {
+                    time: hurt.time as f32 - partial_tick,
+                    dir: hurt.dir as f32,
+                    damage: (hurt.damage - partial_tick).max(0.0),
+                }
+            });
         // Which painting is hung, bridged off the ingest entity the same way,
         // and narrowed to a static table name here rather than at the draw
         // site: an unrecognised data-pack variant becomes `None` at this
@@ -3093,6 +3121,7 @@ pub fn extract_entity_draws(
                 is_passenger,
                 swim_amount,
                 armor_stand_pose,
+                boat_hurt,
             ),
             name_tag: name_tag.0.clone(),
             hurt,

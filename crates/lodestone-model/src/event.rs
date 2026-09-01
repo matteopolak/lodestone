@@ -693,6 +693,39 @@ pub struct EntityMetadataUpdate {
     /// treats as vanilla's own default of `0` — an upright item — never as a
     /// cleared value.
     pub item_frame_rotation: Option<u8>,
+    /// `VehicleEntity.DATA_ID_HURT` — the boat/minecart hurt clock, set to
+    /// `10` by `hurtServer` and counted down one per tick by the vehicle's own
+    /// tick. `0` is "not hurt".
+    ///
+    /// # Why this can be absent on a packet that carried the int
+    ///
+    /// Index 8's `INT` has five claimants in the jar dump — an experience
+    /// orb's value, a primed TNT's fuse, a fishing hook's hooked entity and a
+    /// display entity's interpolation delay alongside this — and no census
+    /// column separates them (none of the five is living). An adapter raises
+    /// this only for an entity it already knows is a `VehicleEntity`. `None`
+    /// therefore means "not known to be a vehicle's hurt clock", never a
+    /// cleared value.
+    pub vehicle_hurt_time: Option<i32>,
+    /// `VehicleEntity.DATA_ID_HURTDIR` — which way the hull rocks, `+1` or
+    /// `-1`; `hurtServer` negates it on every hit so consecutive punches tip
+    /// the boat alternately. Its `defineSynchedData` default is `1`, not `0`.
+    ///
+    /// # Why this can be absent on a packet that carried the int
+    ///
+    /// Index 9's `INT` is also `Display`'s transformation-interpolation
+    /// duration, so this is class-gated for the same reason
+    /// [`vehicle_hurt_time`](Self::vehicle_hurt_time) is.
+    pub vehicle_hurt_dir: Option<i32>,
+    /// `VehicleEntity.DATA_ID_DAMAGE` — accumulated damage × 10, decayed by
+    /// `1.0` per tick. It scales the rock amplitude, so a heavier hit tips the
+    /// hull further; vanilla destroys the vehicle past `40.0`.
+    ///
+    /// Index 10's `FLOAT` has this as its only claimant in the jar dump, so
+    /// the serializer alone identifies it — but it is class-gated anyway,
+    /// beside its two siblings, because the three are one feature and a future
+    /// jar could add a second `FLOAT` there.
+    pub vehicle_damage: Option<f32>,
     /// `Display.BillboardConstraints.getId()` (`Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`),
     /// raw wire ordinal (`0`=fixed, `1`=vertical, `2`=horizontal, `3`=center),
     /// when present and the entity is known to be one of the three `Display`
@@ -845,6 +878,9 @@ impl EntityMetadataUpdate {
             && self.firework_attached.is_none()
             && self.firework_shot_at_angle.is_none()
             && self.item_frame_rotation.is_none()
+            && self.vehicle_hurt_time.is_none()
+            && self.vehicle_hurt_dir.is_none()
+            && self.vehicle_damage.is_none()
             && self.display_billboard.is_none()
             && self.display_translation.is_none()
             && self.display_scale.is_none()

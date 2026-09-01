@@ -317,6 +317,37 @@ const IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
 /// spawn and move packet.
 const IDX_ITEM_FRAME_ROTATION: u8 = 10;
 
+/// `VehicleEntity.DATA_ID_HURT`, index 8 — the hurt clock every boat, raft and
+/// minecart carries. `hurtServer` sets it to `10` and the vehicle's own tick
+/// counts it back down, so it arrives as ten separate metadata packets per hit.
+///
+/// **Index 8, five `INT` claimants** in the committed jar dump
+/// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
+/// `ExperienceOrb.DATA_VALUE`, `PrimedTnt.DATA_FUSE_ID`,
+/// `FishingHook.DATA_HOOKED_ENTITY`, `Display`'s interpolation start delta and
+/// this. None of the five is a `LivingEntity`, so neither the `living` nor the
+/// `mob` census column separates them and only [`MetadataClass::Vehicle`] can.
+const IDX_VEHICLE_HURT_TIME: u8 = 8;
+/// `VehicleEntity.DATA_ID_HURTDIR`, index 9 — `+1`/`-1`, negated on every hit
+/// so consecutive punches rock the hull the opposite way. Its
+/// `defineSynchedData` default is `1`, **not** `0`, which matters: a consumer
+/// that treats an unreported direction as `0` multiplies the whole rock angle
+/// by zero and draws nothing.
+///
+/// **Index 9, two `INT` claimants** in the jar dump: this and
+/// `Display.DATA_TRANSFORMATION_INTERPOLATION_DURATION_ID`. Guarded on
+/// [`MetadataClass::Vehicle`] for the same reason as its sibling above.
+const IDX_VEHICLE_HURT_DIR: u8 = 9;
+/// `VehicleEntity.DATA_ID_DAMAGE`, index 10 — accumulated damage × 10, decayed
+/// by `1.0` per tick, and the amplitude of the rock.
+///
+/// **Index 10's only `FLOAT` claimant** in the jar dump, so the serializer
+/// alone already identifies it. Guarded on [`MetadataClass::Vehicle`] anyway,
+/// beside its two siblings: the three are one feature with one producer, and a
+/// guard that is presently redundant costs nothing where an unguarded arm would
+/// have to be re-audited the next time a `FLOAT` lands at this index.
+const IDX_VEHICLE_DAMAGE: u8 = 10;
+
 /// `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET`, index 9 — an
 /// `OPTIONAL_UNSIGNED_INT`.
 ///
@@ -515,6 +546,17 @@ pub enum MetadataClass {
     /// self-identifying by `ITEM_STACK`, and index 9's `OPTIONAL_UNSIGNED_INT`
     /// has exactly one claimant *at that index* in the dump.
     FireworkRocket,
+    /// Any vanilla `VehicleEntity` — every boat, chest boat, raft, chest raft
+    /// and minecart. Gates the hurt/hurt-dir/damage triple at indices 8/9/10,
+    /// which is what makes a punched boat rock.
+    ///
+    /// A *family* rather than one type, like [`Horse`](Self::Horse): the three
+    /// fields are declared on `VehicleEntity` itself, so every subclass carries
+    /// them at the same indices, and gating on `oak_boat` alone would leave the
+    /// other nineteen boat types and all seven minecarts stranded. The suffix
+    /// rules in [`metadata_class`] are what enumerate the family — the entity
+    /// registry has no "is a vehicle" column to ask.
+    Vehicle,
 }
 
 /// Classifies a resolved entity-type identifier into the [`MetadataClass`] whose
@@ -543,8 +585,24 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         "minecraft:block_display" => Some(MetadataClass::BlockDisplay),
         "minecraft:item_frame" | "minecraft:glow_item_frame" => Some(MetadataClass::ItemFrame),
         "minecraft:firework_rocket" => Some(MetadataClass::FireworkRocket),
+        // Every `VehicleEntity` subclass, by suffix rather than by name. The
+        // twenty boat types are nine wood species x (boat, chest boat) plus
+        // `bamboo_raft`/`bamboo_chest_raft`, and the seven minecarts all end in
+        // `minecart` -- so three suffixes cover the family where twenty-seven
+        // literals would be a list nobody updates. Note the rafts carry no
+        // `_boat` suffix at all, the same trap `lodestone_render`'s
+        // `boat_model_name` records from the model side.
+        other if is_vehicle_type(other) => Some(MetadataClass::Vehicle),
         _ => None,
     }
+}
+
+/// Whether `entity_type` is a vanilla `VehicleEntity` subclass — see
+/// [`MetadataClass::Vehicle`].
+fn is_vehicle_type(entity_type: &str) -> bool {
+    entity_type.ends_with("_boat")
+        || entity_type.ends_with("_raft")
+        || entity_type.ends_with("minecart")
 }
 
 /// Whether `class` is one of the three `Display` subtypes — the gate for the
@@ -1164,6 +1222,19 @@ pub fn read_entity_metadata(
             // negative or out-of-range int is a datapack, not a rotation.
             (IDX_ITEM_FRAME_ROTATION, Value::Int(v)) if class == Some(MetadataClass::ItemFrame) => {
                 md.item_frame_rotation = Some((v.rem_euclid(8)) as u8);
+            }
+            // `VehicleEntity`'s hurt triple -- the whole of what makes a punched
+            // boat rock. All three are class-gated; see [`IDX_VEHICLE_HURT_TIME`]
+            // for the five-claimant collision at index 8 that no census column
+            // can separate.
+            (IDX_VEHICLE_HURT_TIME, Value::Int(v)) if class == Some(MetadataClass::Vehicle) => {
+                md.vehicle_hurt_time = Some(v);
+            }
+            (IDX_VEHICLE_HURT_DIR, Value::Int(v)) if class == Some(MetadataClass::Vehicle) => {
+                md.vehicle_hurt_dir = Some(v);
+            }
+            (IDX_VEHICLE_DAMAGE, Value::Float(v)) if class == Some(MetadataClass::Vehicle) => {
+                md.vehicle_damage = Some(v);
             }
             // Whether a firework rocket is riding a gliding player. Only
             // presence matters downstream — vanilla suppresses the draw
@@ -3148,6 +3219,101 @@ mod tests {
     /// A tracked entity that is a firework rocket — neither living nor a mob,
     /// which is exactly why the class is the only thing that can gate index
     /// 10's `BOOLEAN` for it.
+    fn a_boat() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::Vehicle),
+            living: false,
+            mob: false,
+        }
+    }
+
+    /// `VehicleEntity`'s hurt triple decodes only for a vehicle — and the
+    /// control is the point, because index 8's `INT` is an experience orb's XP
+    /// value under a different class and index 9's is a display entity's
+    /// interpolation duration.
+    ///
+    /// The three values are chosen **pairwise distinct and not
+    /// interchangeable**: `time = 7`, `dir = -1`, `damage = 23.5`. Two adjacent
+    /// same-typed `INT`s (indices 8 and 9) transpose without a trace through any
+    /// round trip through our own encoder, so `7` and `-1` differ in magnitude
+    /// *and* sign, and the `FLOAT` is not a whole number so it cannot be
+    /// mistaken for either.
+    #[test]
+    fn the_vehicle_hurt_triple_decodes_only_for_a_vehicle() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_VEHICLE_HURT_TIME);
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(7));
+        bytes.push(IDX_VEHICLE_HURT_DIR);
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(-1));
+        bytes.push(IDX_VEHICLE_DAMAGE);
+        bytes.extend(varint(SER_FLOAT));
+        bytes.extend(23.5f32.to_be_bytes());
+        bytes.push(EOF_MARKER);
+
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_boat())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.vehicle_hurt_time, Some(7));
+        assert_eq!(md.vehicle_hurt_dir, Some(-1));
+        assert_eq!(md.vehicle_damage, Some(23.5));
+        // And none of the three landed in a same-index claimant's field.
+        assert_eq!(md.experience_orb_value, None);
+        assert_eq!(md.item_frame_rotation, None);
+
+        // The control: the identical bytes for an orb must consume all three
+        // for alignment, surface the orb's own index-8 value, and surface
+        // **nothing** for the vehicle triple.
+        let mut reader = Reader::new(&bytes);
+        let control = read_entity_metadata(&mut reader, an_orb())
+            .expect("a non-vehicle must still decode, not error")
+            .metadata;
+        reader
+            .ensure_empty()
+            .expect("every value must be consumed for alignment even when not surfaced");
+        assert_eq!(control.vehicle_hurt_time, None);
+        assert_eq!(control.vehicle_hurt_dir, None);
+        assert_eq!(control.vehicle_damage, None);
+        assert_eq!(
+            control.experience_orb_value,
+            Some(7),
+            "index 8's INT is the orb's own field under that class -- if this is \
+             None the guard has stopped separating the two claimants rather than \
+             merely gating the new one"
+        );
+    }
+
+    /// Every `VehicleEntity` subclass has to reach [`MetadataClass::Vehicle`],
+    /// not just the one boat someone tested with. The rafts are the trap: they
+    /// carry no `_boat` suffix at all.
+    #[test]
+    fn every_vehicle_family_member_classifies_as_a_vehicle() {
+        for name in [
+            "minecraft:oak_boat",
+            "minecraft:oak_chest_boat",
+            "minecraft:bamboo_raft",
+            "minecraft:bamboo_chest_raft",
+            "minecraft:minecart",
+            "minecraft:chest_minecart",
+            "minecraft:furnace_minecart",
+            "minecraft:hopper_minecart",
+        ] {
+            assert_eq!(
+                metadata_class(name),
+                Some(MetadataClass::Vehicle),
+                "{name} must classify as a vehicle"
+            );
+        }
+        // The suffix rules must not swallow anything else. `minecraft:boat` is
+        // not a real 26.2 entity type and `oat` is not a suffix match, but a
+        // careless `contains` would take both.
+        assert_eq!(metadata_class("minecraft:goat"), None);
+        assert_eq!(metadata_class("minecraft:cow"), None);
+    }
+
     fn a_firework() -> TrackedEntity {
         TrackedEntity {
             class: Some(MetadataClass::FireworkRocket),

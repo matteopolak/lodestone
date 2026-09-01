@@ -596,6 +596,40 @@ pub struct ExperienceOrbValue(pub i32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemFrameRotation(pub u8);
 
+/// A `VehicleEntity`'s rocking state — the hurt clock, its sign and the
+/// accumulated damage that scales it. Every boat, raft, chest boat and minecart
+/// carries these three (`VehicleEntity.DATA_ID_HURT`/`DATA_ID_HURTDIR`/
+/// `DATA_ID_DAMAGE`), and together they are the whole of what tips a punched
+/// hull over and lets it swing back.
+///
+/// **Merged, never replaced.** The three arrive as separate metadata entries and
+/// a packet mentions only what changed — the hurt clock ticks down every tick
+/// while the direction usually does not move at all — so folding a
+/// freshly-defaulted value for one would clear the others. Same rule as
+/// [`FireworkFlags`].
+///
+/// The direction's default is `1`, not `0`: that is `VehicleEntity
+/// .defineSynchedData`'s own registered default, and it is load-bearing, because
+/// the rock angle is *multiplied* by it. A `0` here would multiply the whole
+/// rotation away and draw a perfectly still boat while every other link worked.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct VehicleHurt {
+    /// `getHurtTime()` — ticks remaining, `10` at the moment of the hit.
+    pub time: i32,
+    /// `getHurtDir()` — `+1` or `-1`, negated by the server on every hit.
+    pub dir: i32,
+    /// `getDamage()` — accumulated damage x 10, decayed by `1.0` per tick.
+    pub damage: f32,
+}
+
+impl Default for VehicleHurt {
+    fn default() -> Self {
+        // `VehicleEntity.defineSynchedData`: `(0, 1, 0.0F)`. The `1` is the
+        // direction's real registered default -- see the type's own doc.
+        Self { time: 0, dir: 1, damage: 0.0 }
+    }
+}
+
 /// A firework rocket's two draw-relevant flags, merged from whichever of them
 /// a metadata packet mentioned.
 ///

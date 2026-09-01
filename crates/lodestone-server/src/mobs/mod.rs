@@ -3635,6 +3635,17 @@ struct TrackedVehicle {
     /// for the wire-index collision this stands clear of.
     paddle_left: bool,
     paddle_right: bool,
+    /// `VehicleEntity.DATA_ID_HURT` — ticks remaining on the rocking animation,
+    /// set to `10` by a hit and counted down one per tick.
+    hurt_time: i32,
+    /// `VehicleEntity.DATA_ID_HURTDIR` — which way the hull tips. Negated on
+    /// every hit, so consecutive punches rock it alternately, and its registered
+    /// default is **`1`**, not `0`: the client multiplies the whole rock angle by
+    /// it, so a zero here draws a perfectly still boat.
+    hurt_dir: i32,
+    /// `VehicleEntity.DATA_ID_DAMAGE` — accumulated damage x 10, decayed by
+    /// `1.0` per tick. It is the amplitude of the rock.
+    damage: f32,
 }
 
 /// One live `PrimedTnt` — wire identity, motion and the fuse countdown.
@@ -8043,6 +8054,16 @@ impl<'w> MobSim<'w> {
         // `destroy_end_crystal`, so the crystal could not be destroyed at
         // all — removing the entire "break the crystals to stop the heal"
         // strategy the dragon fight is built around.
+        // A boat, raft or minecart lives in `self.vehicles`, not `self.mobs` --
+        // the same reason the wither, dragon and crystal branches around this one
+        // exist. `VehicleEntity.hurtServer` shares nothing with a mob's damage
+        // pipeline: no health, no armour, no knockback, no gossip. Before this
+        // branch a punch on a boat reached `self.attack`, found nothing in
+        // `self.mobs`, and returned `None` -- so the hurt/hurt-dir/damage triple
+        // the client's rocking animation reads was never written by anything.
+        if self.vehicles.contains_key(&target_id) {
+            return self.attack_vehicle(target_id, raw_damage);
+        }
         if self.crystals.contains_key(&target_id) {
             self.destroy_end_crystal(target_id)?;
             return Some(AttackOutcome {
@@ -9618,10 +9639,22 @@ impl<'w> MobSim<'w> {
                 // a real `false, false` rather than as an absent field.
                 // `DATA_ID_BUBBLE_TIME` stays unsent: nothing in this crate's
                 // boat physics tracks a bubble-column timer.
-                metadata: vec![crate::protocol::MetadataField::BoatPaddles {
-                    left: vehicle.paddle_left,
-                    right: vehicle.paddle_right,
-                }],
+                metadata: vec![
+                    crate::protocol::MetadataField::BoatPaddles {
+                        left: vehicle.paddle_left,
+                        right: vehicle.paddle_right,
+                    },
+                    // `VehicleEntity`'s hurt triple. Always included, at its
+                    // resting `(0, 1, 0.0)` as well, for `BoatPaddles`' own
+                    // stated reason: the *end* of a rock has to reach a diffing
+                    // consumer as a real zero rather than as an absent field, or
+                    // the hull stays tipped over for as long as the boat exists.
+                    crate::protocol::MetadataField::VehicleHurt {
+                        time: vehicle.hurt_time,
+                        dir: vehicle.hurt_dir,
+                        damage: vehicle.damage,
+                    },
+                ],
                 // `AbstractBoat` does not override `getAddEntityPacket`.
                 object_data: 0,
                 // A boat is never a `Leashable`.
