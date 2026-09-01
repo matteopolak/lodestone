@@ -1053,3 +1053,359 @@ fn only_a_glow_framed_map_lights_itself_in_an_unlit_room() {
          (equal means the producer is sampling world light for both)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The map *board*: many invisible framed maps on one wall, seen from a camera
+// that turns in place.
+// ---------------------------------------------------------------------------
+
+/// The live report this arm exists for is a wall-sized grid of `filled_map`s in
+/// invisible item frames that is **cut off along a straight, screen-parallel
+/// line**, with the line moving as the camera turns and *not* moving as the
+/// camera walks. Three live switch runs bound the mechanism before this fixture
+/// was written: `LODESTONE_MAP_DISABLE_DEPTH_TEST=1` removes the defect
+/// entirely, `LODESTONE_MAP_DISABLE_DEPTH_WRITE=1` changes nothing (so the
+/// tiles are not occluding each other), and `LODESTONE_MAP_DISABLE_DEPTH_BIAS=1`
+/// makes it *worse* — the whole board goes. So the picture is losing a depth
+/// comparison against the wall behind it, and the polygon offset is the only
+/// thing keeping any of it.
+///
+/// Every other gate in this file renders **one** frame from a **translating**
+/// camera. Those are the two axes the report is about, so this one holds the
+/// eye still and turns it, over a board wide enough to run past the screen edge
+/// at the narrow field of view and not at the wide one.
+const BOARD_HALF_COLUMNS: i32 = 17;
+const BOARD_HALF_ROWS: i32 = 9;
+/// The frames' own air blocks: the DemocracyCraft build's coordinates, lifted
+/// clear of `WALL_GROUND_Y` so the board is not half buried in the floor.
+const BOARD_BLOCK: [i32; 3] = [1970, 76, 3811];
+
+/// The board gate renders at its **own** framebuffer size, read from
+/// `LODESTONE_BOARD_GATE_SIZE=<width>x<height>` and defaulting to this file's
+/// `W`/`H`.
+///
+/// Resolution is not cosmetic here. The map's only guaranteed margin over the
+/// wall is a polygon offset whose slope term is `slope_scale * m`, where `m` is
+/// the depth gradient **per pixel**; doubling the framebuffer width halves `m`
+/// and so halves that half of the rescue. Every other gate in this file renders
+/// at 320x240, which gives the map roughly eight times the slope rescue a
+/// 2560-wide display gives it — so a fixture pinned to 320x240 is measuring a
+/// more forgiving device than the one the report came from.
+fn board_size() -> (u32, u32) {
+    std::env::var("LODESTONE_BOARD_GATE_SIZE")
+        .ok()
+        .and_then(|spec| {
+            let (w, h) = spec.split_once('x')?;
+            Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+        })
+        .unwrap_or((W, H))
+}
+
+/// Ground, plus — when `with_wall` — the whole slab of stone the board hangs
+/// on, one block behind the frames' own air column.
+fn board_world(with_wall: bool) -> World {
+    let air = wall_state_id("minecraft:air");
+    let stone = wall_state_id("minecraft:stone");
+    let (cx0, cz0) = (BOARD_BLOCK[0] >> 4, BOARD_BLOCK[2] >> 4);
+    let mut world = World::new();
+    for cx in cx0 - 1..=cx0 + 1 {
+        for cz in cz0 - 1..=cz0 + 1 {
+            let column = ChunkColumn::new(
+                WALL_MIN_Y,
+                WALL_SECTION_COUNT,
+                PaletteKind::block_states(),
+                PaletteKind::biomes(),
+                air,
+                0,
+            );
+            let mut light = ColumnLight::new(WALL_SECTION_COUNT);
+            for i in 0..light.light_section_count() {
+                *light.sky_mut(i) = lodestone_world::LightData::Uniform(15);
+                *light.block_mut(i) = lodestone_world::LightData::Uniform(0);
+            }
+            world.load(
+                ChunkPos::new(cx, cz),
+                LoadedChunk::new(column, light, Heightmaps::new(), Vec::new()),
+            );
+        }
+    }
+    let (x0, z0) = (cx0 * 16, cz0 * 16);
+    let ground = world.fill_region(
+        [x0 - 16, WALL_MIN_Y, z0 - 16],
+        [x0 + 31, WALL_GROUND_Y, z0 + 31],
+        stone,
+    );
+    assert!(ground > 0, "fixture: the ground must actually write blocks");
+    if with_wall {
+        let filled = world.fill_region(
+            [
+                BOARD_BLOCK[0] - BOARD_HALF_COLUMNS - 1,
+                BOARD_BLOCK[1] - BOARD_HALF_ROWS - 1,
+                BOARD_BLOCK[2] - 1,
+            ],
+            [
+                BOARD_BLOCK[0] + BOARD_HALF_COLUMNS + 1,
+                BOARD_BLOCK[1] + BOARD_HALF_ROWS + 1,
+                BOARD_BLOCK[2] - 1,
+            ],
+            stone,
+        );
+        assert!(filled > 0, "fixture: the board's wall must write blocks");
+    }
+    world
+}
+
+/// One invisible framed map per cell of the board, all facing `+z`.
+///
+/// The wire position is the hanging entity's own centre — `ItemFrame
+/// .createBoundingBox` puts that `0.46875` back along the facing from the
+/// attachment block centre — so the renderer's `floor()` is exercised the way
+/// production exercises it, on every one of them.
+fn board_draws(item: &ResourceLocation) -> Vec<EntityDraw> {
+    let facing = lodestone_render::entity::item_frame_facing_step(0.0, 0.0);
+    let mut draws = Vec::new();
+    let mut id = SUBJECT_ID;
+    for dy in -BOARD_HALF_ROWS..=BOARD_HALF_ROWS {
+        for dx in -BOARD_HALF_COLUMNS..=BOARD_HALF_COLUMNS {
+            let mut draw = blank_draw(id, "item_frame", 0.0);
+            draw.feet = glam::Vec3::new(
+                (BOARD_BLOCK[0] + dx) as f32 + 0.5,
+                (BOARD_BLOCK[1] + dy) as f32 + 0.5,
+                BOARD_BLOCK[2] as f32 + 0.5,
+            ) - facing * 0.46875;
+            draw.item = Some(item.clone());
+            draw.invisible = true;
+            draws.push(draw);
+            id += 1;
+        }
+    }
+    draws
+}
+
+/// An eye a fixed `distance` out from the board's centre, **turned** `turn`
+/// degrees in place rather than moved sideways.
+///
+/// Turning in place is the whole point: the live report says translation does
+/// nothing and rotation does everything, and a camera that orbits (which is what
+/// `wall_camera` does) confounds the two.
+fn board_camera(distance: f32, turn: f32, fov: f32, aspect: f32) -> Camera {
+    let centre = glam::Vec3::new(
+        BOARD_BLOCK[0] as f32 + 0.5,
+        BOARD_BLOCK[1] as f32 + 0.5,
+        BOARD_BLOCK[2] as f32 + 0.5,
+    );
+    let outward = lodestone_render::entity::item_frame_facing_step(0.0, 0.0);
+    Camera {
+        position: centre + outward * distance,
+        // Facing `+z` means the room is at `+z` and the eye looks back along
+        // `-z`, which is camera yaw 180 in this client's vanilla-derived
+        // convention. `turn` is added to it, so the eye pivots about itself.
+        yaw: 180.0 + turn,
+        pitch: 0.0,
+        fov_y_degrees: fov,
+        aspect,
+        near: 0.05,
+        far: Camera::far_for_render_distance(12, 0),
+    }
+}
+
+/// `(name, distance, turn degrees, fov)`.
+///
+/// The distance axis runs well past every other gate in this file (which stops
+/// at 24 m) because the map's world clearance from the wall buys a number of
+/// representable depth values that falls as `1 / distance^2`: 1661 ULP at 2 m
+/// against 1 ULP at 64 m, per `docs/coplanar-overlay-depth.md`. The turn axis
+/// stays small on purpose — a wall seen head-on has a window-space depth
+/// gradient of zero, so the slope-scaled half of the polygon offset contributes
+/// **nothing** there, and a `0`-degree row is the worst case rather than the
+/// easiest one.
+const BOARD_VIEWS: [(&str, f32, f32, f32); 20] = [
+    ("12m turn 0 fov 70", 12.0, 0.0, 70.0),
+    ("12m turn 0 fov 110", 12.0, 0.0, 110.0),
+    ("12m turn 5 fov 70", 12.0, 5.0, 70.0),
+    ("12m turn 15 fov 70", 12.0, 15.0, 70.0),
+    ("12m turn 15 fov 110", 12.0, 15.0, 110.0),
+    ("12m turn 30 fov 70", 12.0, 30.0, 70.0),
+    ("12m turn 30 fov 110", 12.0, 30.0, 110.0),
+    ("32m turn 0 fov 70", 32.0, 0.0, 70.0),
+    ("32m turn 0 fov 110", 32.0, 0.0, 110.0),
+    ("32m turn 5 fov 70", 32.0, 5.0, 70.0),
+    ("32m turn 15 fov 70", 32.0, 15.0, 70.0),
+    ("32m turn 15 fov 110", 32.0, 15.0, 110.0),
+    ("32m turn 30 fov 70", 32.0, 30.0, 70.0),
+    ("32m turn 30 fov 110", 32.0, 30.0, 110.0),
+    ("64m turn 0 fov 70", 64.0, 0.0, 70.0),
+    ("64m turn 0 fov 110", 64.0, 0.0, 110.0),
+    ("64m turn 5 fov 70", 64.0, 5.0, 70.0),
+    ("64m turn 15 fov 70", 64.0, 15.0, 70.0),
+    ("96m turn 0 fov 70", 96.0, 0.0, 70.0),
+    ("96m turn 0 fov 110", 96.0, 0.0, 110.0),
+];
+
+/// Which pixels a painted board covers that the very same scene without a map
+/// source does not.
+fn ink_mask(subject: &[u8], reference: &[u8]) -> Vec<bool> {
+    subject
+        .chunks_exact(4)
+        .zip(reference.chunks_exact(4))
+        .map(|(a, b)| {
+            let d = (i32::from(a[0]) - i32::from(b[0])).abs()
+                + (i32::from(a[1]) - i32::from(b[1])).abs()
+                + (i32::from(a[2]) - i32::from(b[2])).abs();
+            d > 8
+        })
+        .collect()
+}
+
+fn mask_count(mask: &[bool]) -> usize {
+    mask.iter().filter(|set| **set).count()
+}
+
+/// `(min_x, min_y, max_x, max_y)` of a mask, or `None` when it is empty.
+///
+/// Printed on every failure: a lost region that is a straight-edged band has a
+/// box flush against one screen edge, and a scattered z-fight does not. A
+/// verdict about *where* is the only thing that separates the two.
+fn mask_box(mask: &[bool], width: u32) -> Option<(u32, u32, u32, u32)> {
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    let mut any = false;
+    for (i, set) in mask.iter().enumerate() {
+        if !set {
+            continue;
+        }
+        any = true;
+        let (x, y) = ((i as u32) % width, (i as u32) / width);
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    any.then_some((min_x, min_y, max_x, max_y))
+}
+
+/// Pixel gate: a **board** of invisible framed maps must not lose pixels to the
+/// wall it hangs on, at any field of view, with the camera turning in place.
+///
+/// The measurement per configuration is the board's own ink — the pixels a
+/// painted board covers that the identical scene with no map source does not —
+/// taken twice: once with the attachment wall present and once with it removed.
+/// The wall-free arm is the positive control, so a configuration whose control
+/// is zero is reported as vacuous rather than as a pass.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_board_of_framed_maps_survives_the_depth_test_while_the_camera_turns() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models = atlas.models().expect("vanilla atlas must carry baked models");
+    let item: ResourceLocation = ITEM.parse().expect("valid item id");
+    let draws = board_draws(&item);
+
+    let (bw, bh) = board_size();
+    let aspect = bw as f32 / bh as f32;
+    eprintln!("board gate framebuffer: {bw}x{bh}");
+    let mut target = HeadlessTarget::new(device, bw, bh, format);
+
+    let mut masks_for = |with_wall: bool| -> Vec<Vec<bool>> {
+        let mut state = RenderState::new(device, queue, format, bw, bh, Some(atlas.as_ref()));
+        state.set_third_person_body_source(|| {
+            Some(lodestone::gpu::ThirdPersonBodyState {
+                player_skin: None,
+                feet: glam::Vec3::new(0.0, -10_000.0, 0.0),
+                body_yaw_deg: 0.0,
+                anim: AnimInput::default(),
+                scale: 1.0,
+                swim_amount: 0.0,
+                slim: false,
+                equipment: Vec::new(),
+                equipment_skin: Vec::new(),
+            })
+        });
+        wall_upload(
+            &board_world(with_wall),
+            BOARD_BLOCK,
+            models,
+            &mut state,
+            device,
+            queue,
+        );
+
+        let mut shoot = |state: &RenderState, cam: &Camera| -> Vec<u8> {
+            let frame = target.acquire().expect("headless acquire");
+            state.render(device, queue, frame.view(), cam, None, &draws);
+            target.read_texels(device, queue)
+        };
+
+        let references: Vec<Vec<u8>> = BOARD_VIEWS
+            .iter()
+            .map(|(_, distance, turn, fov)| {
+                shoot(&state, &board_camera(*distance, *turn, *fov, aspect))
+            })
+            .collect();
+
+        let painted = std::sync::Arc::new(grass_grid());
+        state.set_map_source(move |_, _| {
+            Some(MapPicture::new(
+                TEST_MAP_ID,
+                1,
+                std::sync::Arc::clone(&painted),
+            ))
+        });
+
+        BOARD_VIEWS
+            .iter()
+            .enumerate()
+            .map(|(index, (_, distance, turn, fov))| {
+                let shot = shoot(&state, &board_camera(*distance, *turn, *fov, aspect));
+                ink_mask(&shot, &references[index])
+            })
+            .collect()
+    };
+
+    let free = masks_for(false);
+    let walled = masks_for(true);
+
+    eprintln!("=== map board vs its attachment wall, camera turning in place ===");
+    let mut failures: Vec<String> = Vec::new();
+    for (index, (view, ..)) in BOARD_VIEWS.iter().enumerate() {
+        let no_wall = mask_count(&free[index]);
+        let with_wall = mask_count(&walled[index]);
+        let lost: Vec<bool> = free[index]
+            .iter()
+            .zip(walled[index].iter())
+            .map(|(f, w)| *f && !*w)
+            .collect();
+        let lost_count = mask_count(&lost);
+        eprintln!(
+            "{view:<20} no-wall {no_wall:>6} px   walled {with_wall:>6} px   lost {lost_count:>6} px   \
+             box {:?}",
+            mask_box(&lost, bw)
+        );
+        if no_wall == 0 {
+            failures.push(format!(
+                "{view}: the wall-free control drew no board at all, so the walled \
+                 measurement beside it is vacuous"
+            ));
+        } else if lost_count * 100 > no_wall * 2 {
+            failures.push(format!(
+                "{view}: the board lost {lost_count} of {no_wall} px to the wall behind \
+                 it, in {:?} (x0, y0, x1, y1)",
+                mask_box(&lost, bw)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
