@@ -181,12 +181,40 @@ any shader math.
   two-handed), trident, and brush animations. `FirstPersonItemUse::Bow` selects
   `first_person_bow_matrix` whenever the visible local main-hand item is
   `minecraft:bow` and `ItemUseState::using` is true. It follows 26.2's
-  `ItemInHandRenderer` BOW case: aim translate/rotation, the nonlinear
-  `(t² + 2t) / 3` power curve capped at `1`, its small post-0.1 charge shake,
-  forward translation, z-stretch, then the final mirrored 45° yaw. The same elapsed
-  tick counter already used to choose `bow_pulling_0..2` drives the pose, so the
-  geometry and its charge transform cannot disagree. A bow at rest still uses the
-  ordinary held-item chain.
+  `ItemInHandRenderer` BOW case: the generic arm transform, then aim
+  translate/rotation, the nonlinear `(t² + 2t) / 3` power curve capped at `1`, its
+  small post-0.1 charge shake, forward translation, z-stretch, then the final
+  mirrored 45° yaw. The same elapsed tick counter already used to choose
+  `bow_pulling_0..2` drives the pose, so the geometry and its charge transform
+  cannot disagree. A bow at rest still uses the ordinary held-item chain.
+
+  **The generic arm transform comes first, and leaving it out hides the bow
+  entirely.** `submitArmWithItem` applies `applyItemArmTransform` *before* the
+  use-animation switch for every animation whose `hasCustomArmTransform()` is
+  false, and `ItemUseAnimation.BOW`'s is false — only `EAT`, `DRINK` and `SPEAR`
+  opt out, and `EAT`/`DRINK` then re-apply it themselves after their own
+  transform, which is why `first_person_eat_chain` composes it *last* and
+  `first_person_bow_chain` composes it *first*. The shipped chain started at the
+  BOW-specific translation and so dropped `z = -0.72`, putting the item on or
+  behind the near plane: the bow disappeared the instant the use began, which
+  reads as a use-state bug rather than a pose bug and is why it was looked for in
+  the wrong layer. The chain now also takes `inverse_arm_height`, so a bow
+  charged mid-swap dips with everything else.
+
+  **The charge shake follows the rotations.** Vanilla's `translate(0, shake, 0)`
+  sits after the three `mulPose` calls, so it displaces along the *rotated* local
+  Y. Folding it into the leading translation's `y` — tempting, since that is the
+  only non-zero component — tilts the wobble into the wrong plane; measured, the
+  two placements put the composed matrix `8.05e-4` apart at full charge.
+  `Mth.sin` and not `f32::sin`, per the repo rule on vanilla's quantized
+  trigonometry table.
+
+  The gate for all of this is `charged_bow_pose_matches_vanillas_item_in_hand_transform`.
+  Its predecessor restated the implementation's own chain as its expected matrix,
+  so it agreed by construction and stayed green for as long as the bow was
+  invisible in live play; it now states both wrong hypotheses above as named
+  matrices the measurement must land away from, and both were observed to fail
+  under a neuter of the corresponding production line.
 
   **"needs use-item state the shell does not track" is no longer true** — that was
   the state before issue #57. The using-item bit is decoded and folded all the way to

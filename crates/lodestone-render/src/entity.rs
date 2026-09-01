@@ -4894,20 +4894,59 @@ pub fn first_person_bow_power(held_ticks: f32) -> f32 {
 
 /// `ItemInHandRenderer`'s `ItemUseAnimation.BOW` transform, before the item's
 /// own `firstperson_?hand` display transform.
+///
+/// ```text
+/// T(i·0.56, -0.52 + h·-0.6, -0.72)          -- applyItemArmTransform
+///   · T(i·-0.2785682, 0.18344387, 0.15731531)
+///   · Rx(-13.935) · Ry(i·35.3) · Rz(i·-9.785)
+///   · T(0, shake, 0) · T(0, 0, power·0.04)
+///   · S(1, 1, 1 + power·0.2) · Ry(i·-45)
+/// ```
+///
+/// # The leading arm transform is not optional, and omitting it hides the bow
+///
+/// `submitArmWithItem` applies `applyItemArmTransform` **before** entering the
+/// use-animation switch for every animation whose `hasCustomArmTransform()` is
+/// false, and `BOW`'s is false — only `EAT`, `DRINK` and `SPEAR` opt out, and the
+/// first two then re-apply it themselves *after* their own transform (which is
+/// why [`first_person_eat_chain`] composes it last and this one composes it
+/// first). Starting the chain at the BOW-specific translation therefore drops
+/// `z = -0.72` and the item sits on, or behind, the near plane: the bow vanishes
+/// the instant the use begins rather than being drawn in the wrong place, which
+/// is what makes the omission read as a use-state bug.
+///
+/// `inverse_arm_height` is vanilla's `inverseArmHeight`, the same equip/swap dip
+/// [`first_person_item_chain`] takes; a charging bow still dips while swapping.
+///
+/// # The shake follows the rotations
+///
+/// Vanilla's `poseStack.translate(0, shake · 0.004, 0)` sits *after* the three
+/// `mulPose` calls, so it displaces the bow along the **rotated** local Y, not
+/// along camera-space Y. Folding it into the leading translation's `y` — the
+/// arithmetically tempting simplification, since it is the only non-zero
+/// component — tilts the wobble into the wrong plane. `Mth.sin` rather than
+/// `f32::sin`: vanilla's is a quantized lookup table and this repo's ported
+/// trigonometry goes through `lodestone_physics::mth` for that reason.
 #[must_use]
-pub fn first_person_bow_chain(arm: Arm, held_ticks: f32) -> Mat4 {
+pub fn first_person_bow_chain(arm: Arm, held_ticks: f32, inverse_arm_height: f32) -> Mat4 {
     let i = arm.invert();
+    let [ox, oy, oz] = FIRST_PERSON_ITEM_OFFSET;
     let held_ticks = held_ticks.max(0.0);
     let power = first_person_bow_power(held_ticks);
     let shake = if power > 0.1 {
-        ((held_ticks - 0.1) * 1.3).sin() * (power - 0.1) * 0.004
+        lodestone_physics::mth::sin(f64::from((held_ticks - 0.1) * 1.3)) * (power - 0.1) * 0.004
     } else {
         0.0
     };
-    Mat4::from_translation(Vec3::new(i * -0.278_568_2, 0.183_443_87 + shake, 0.157_315_31))
+    Mat4::from_translation(Vec3::new(
+        i * ox,
+        oy + inverse_arm_height * FIRST_PERSON_ITEM_EQUIP_DIP,
+        oz,
+    )) * Mat4::from_translation(Vec3::new(i * -0.278_568_2, 0.183_443_87, 0.157_315_31))
         * Mat4::from_rotation_x((-13.935f32).to_radians())
         * Mat4::from_rotation_y((i * 35.3).to_radians())
         * Mat4::from_rotation_z((i * -9.785).to_radians())
+        * Mat4::from_translation(Vec3::new(0.0, shake, 0.0))
         * Mat4::from_translation(Vec3::new(0.0, 0.0, power * 0.04))
         * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0 + power * 0.2))
         * Mat4::from_rotation_y((i * -45.0).to_radians())
@@ -4916,8 +4955,14 @@ pub fn first_person_bow_chain(arm: Arm, held_ticks: f32) -> Mat4 {
 /// [`first_person_bow_chain`] followed by the item's own
 /// `firstperson_?hand` display transform.
 #[must_use]
-pub fn first_person_bow_matrix(arm: Arm, held_ticks: f32, transform: &DisplayTransform) -> Mat4 {
-    first_person_bow_chain(arm, held_ticks) * display_matrix_for_hand(transform, arm.is_left())
+pub fn first_person_bow_matrix(
+    arm: Arm,
+    held_ticks: f32,
+    inverse_arm_height: f32,
+    transform: &DisplayTransform,
+) -> Mat4 {
+    first_person_bow_chain(arm, held_ticks, inverse_arm_height)
+        * display_matrix_for_hand(transform, arm.is_left())
 }
 
 /// Mesh the item in the first-person hand into a camera-space [`ModelMesh`], to be
@@ -4950,7 +4995,7 @@ pub fn first_person_item_mesh_with_use(
             transform,
         ),
         Some(FirstPersonItemUse::Bow { held_ticks }) => {
-            first_person_bow_matrix(arm, held_ticks, transform)
+            first_person_bow_matrix(arm, held_ticks, inverse_arm_height, transform)
         }
         None => first_person_item_matrix(arm, attack_anim, inverse_arm_height, transform),
     };
@@ -7981,36 +8026,135 @@ mod tests {
     /// A drawn bow does not merely select `bow_pulling_2` geometry.  Vanilla's
     /// `ItemInHandRenderer` replaces the ordinary held-item chain with this
     /// BOW transform while the use button is down.
+    ///
+    /// # Why this gate is written against two *wrong* hypotheses as well
+    ///
+    /// The version this replaced restated the implementation's own chain as its
+    /// expected matrix, so it agreed with the code by construction and stayed
+    /// green for as long as the bow was invisible in live play. Both real
+    /// divergences it could not see are asserted here as named alternatives that
+    /// the measurement must land *away* from:
+    ///
+    /// * **no leading `applyItemArmTransform`** — the chain starting at the
+    ///   BOW-specific translation, which is what shipped;
+    /// * **the shake folded into the leading translation's `y`** — displacing
+    ///   along camera-space Y instead of the rotated local Y.
+    ///
+    /// `inverse_arm_height` is deliberately `0.35` rather than `0.0`: at zero the
+    /// dip term vanishes and the correct chain coincides with one that never
+    /// threaded the equip height through at all, so zero cannot discriminate.
+    /// `held_ticks` is `20.0` (full charge, `power == 1.0`) because the shake is
+    /// largest there and a zero shake would collapse the second hypothesis into
+    /// the first.
     #[test]
     fn charged_bow_pose_matches_vanillas_item_in_hand_transform() {
         let arm = Arm::Right;
         let i = arm.invert();
         let held_ticks = 20.0f32;
+        let inverse_arm_height = 0.35f32;
         let power = 1.0f32;
-        let shake = ((held_ticks - 0.1) * 1.3).sin() * (power - 0.1) * 0.004;
-        let expected = Mat4::from_translation(Vec3::new(
-            i * -0.278_568_2,
-            0.183_443_87 + shake,
-            0.157_315_31,
-        ))
+        assert_eq!(
+            first_person_bow_power(held_ticks),
+            power,
+            "full bow charge is 20 elapsed ticks"
+        );
+        let shake = lodestone_physics::mth::sin(f64::from((held_ticks - 0.1) * 1.3))
+            * (power - 0.1)
+            * 0.004;
+        assert!(
+            shake.abs() > 1e-4,
+            "the fixture must charge far enough for a shake to exist, got {shake}"
+        );
+
+        // `submitArmWithItem` applies `applyItemArmTransform` before the switch
+        // for every animation whose `hasCustomArmTransform()` is false, and
+        // `ItemUseAnimation.BOW`'s is false.
+        let arm_transform =
+            Mat4::from_translation(Vec3::new(i * 0.56, -0.52 + inverse_arm_height * -0.6, -0.72));
+        // Everything from `case BOW:` onward, in source order.
+        let bow_case = Mat4::from_translation(Vec3::new(i * -0.278_568_2, 0.183_443_87, 0.157_315_31))
+            * Mat4::from_rotation_x((-13.935f32).to_radians())
+            * Mat4::from_rotation_y((i * 35.3).to_radians())
+            * Mat4::from_rotation_z((i * -9.785).to_radians())
+            * Mat4::from_translation(Vec3::new(0.0, shake, 0.0))
+            * Mat4::from_translation(Vec3::new(0.0, 0.0, power * 0.04))
+            * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0 + power * 0.2))
+            * Mat4::from_rotation_y((i * -45.0).to_radians());
+        // `ItemTransform.NO_TRANSFORM` still centres the model cube.
+        let centre = Mat4::from_translation(Vec3::splat(-0.5));
+
+        let expected = arm_transform * bow_case * centre;
+        let without_arm_transform = bow_case * centre;
+        let shake_in_leading_translation = arm_transform
+            * Mat4::from_translation(Vec3::new(
+                i * -0.278_568_2,
+                0.183_443_87 + shake,
+                0.157_315_31,
+            ))
             * Mat4::from_rotation_x((-13.935f32).to_radians())
             * Mat4::from_rotation_y((i * 35.3).to_radians())
             * Mat4::from_rotation_z((i * -9.785).to_radians())
             * Mat4::from_translation(Vec3::new(0.0, 0.0, power * 0.04))
             * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0 + power * 0.2))
             * Mat4::from_rotation_y((i * -45.0).to_radians())
-            // `ItemTransform.NO_TRANSFORM` still centres the model cube.
-            * Mat4::from_translation(Vec3::splat(-0.5));
-        let actual = first_person_bow_matrix(arm, held_ticks, &DisplayTransform::default());
-        let delta = (expected - actual)
-            .to_cols_array()
-            .iter()
-            .fold(0.0f32, |max, value| max.max(value.abs()));
+            * centre;
+
+        let actual = first_person_bow_matrix(
+            arm,
+            held_ticks,
+            inverse_arm_height,
+            &DisplayTransform::default(),
+        );
+        let spread = |a: Mat4, b: Mat4| {
+            (a - b)
+                .to_cols_array()
+                .iter()
+                .fold(0.0f32, |max, value| max.max(value.abs()))
+        };
+
+        let delta = spread(expected, actual);
         assert!(
             delta < 1e-5,
             "a charging bow must use ItemInHandRenderer's BOW pose, drifted by {delta}"
         );
-        assert_eq!(held_ticks, 20.0, "full bow charge is 20 elapsed ticks");
+        // Both alternatives are stated as distances rather than as a bare
+        // "differs", so a chain that drifted toward either one fails with the
+        // number rather than silently satisfying an inequality.
+        let missing_arm = spread(without_arm_transform, actual);
+        assert!(
+            missing_arm > 0.5,
+            "omitting applyItemArmTransform must move the pose by the arm offset, \
+             but the two chains sit {missing_arm} apart"
+        );
+        let misplaced_shake = spread(shake_in_leading_translation, actual);
+        assert!(
+            misplaced_shake > 1e-4,
+            "the shake belongs after the rotations, but both placements agree to \
+             {misplaced_shake}"
+        );
+    }
+
+    /// The equip dip must actually reach the bow pose.
+    ///
+    /// The gate above pins one `inverse_arm_height`; this one pins the *response*,
+    /// because a chain that accepted the parameter and dropped it would still
+    /// satisfy a single-point comparison written against the same value. Vanilla's
+    /// coefficient is `-0.6` per unit, applied to `y` before any rotation, so a
+    /// full swap lowers the whole chain by exactly that.
+    #[test]
+    fn bow_pose_dips_with_the_equip_height() {
+        let rested = first_person_bow_chain(Arm::Right, 20.0, 0.0);
+        let swapping = first_person_bow_chain(Arm::Right, 20.0, 1.0);
+        let drop = swapping.w_axis - rested.w_axis;
+        assert!(
+            (drop.y - FIRST_PERSON_ITEM_EQUIP_DIP).abs() < 1e-6,
+            "a full swap must lower the bow by {FIRST_PERSON_ITEM_EQUIP_DIP}, got {}",
+            drop.y
+        );
+        assert!(
+            drop.x.abs() < 1e-6 && drop.z.abs() < 1e-6,
+            "the dip is vertical only, got {drop:?}"
+        );
     }
 
     /// The five swing scalars against hand-evaluated vanilla values.
