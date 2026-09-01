@@ -310,3 +310,88 @@ fn a_sprites_mcmeta_mipmap_strategy_selects_its_downsample() {
          of the sprite's own metadata: {unwired:?}"
     );
 }
+
+/// A sprite with a transparent hole, in a checkerboard so the hole's *nearest
+/// opaque neighbour* is unambiguous: the hole texel at `(1, 1)` is surrounded
+/// on all four sides by one colour and diagonally by another, and `solidify`'s
+/// four-neighbour BFS therefore has exactly one answer.
+fn holed(color: [u8; 4], hole_rgb: [u8; 3]) -> Image {
+    let mut img = solid(16, 16, color);
+    let i = ((1 * 16 + 1) * 4) as usize;
+    img.rgba[i] = hole_rgb[0];
+    img.rgba[i + 1] = hole_rgb[1];
+    img.rgba[i + 2] = hole_rgb[2];
+    img.rgba[i + 3] = 0;
+    img
+}
+
+fn texel_at(rgba: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+    let i = ((y * width + x) * 4) as usize;
+    [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+}
+
+/// Atlas **level 0** must carry the *prepared* base — the same image level 1
+/// was downsampled from — not the raw decoded PNG.
+///
+/// Vanilla's `MipmapGenerator.generateMipLevels` runs `TextureUtil.solidify`
+/// on `currentMips[0]` **in place** and then sets `result[0] = currentMips[0]`,
+/// and that same `NativeImage` is what `SpriteContents.uploadFirstFrame`
+/// uploads at level 0. This builder used to blit the raw image at level 0 while
+/// levels 1..n came from the solidified copy, so level 0 was the one level in
+/// the chain that disagreed with its own successor.
+///
+/// The preparation never touches alpha, so no cutout decision moves. What moves
+/// is the RGB a *bilinear* tap picks up beside a cutout edge — the model
+/// sampler is `min_filter: Linear`/`mipmap_filter: Linear`, so at any LOD
+/// between 0 and 1 a tap straddling the edge blends the transparent
+/// neighbour's RGB in, and raw that is transparent **black**.
+///
+/// Both hypotheses are computed from outside: the raw image writes
+/// `[9, 9, 9, 0]` into the hole (the value `holed` put there), the prepared one
+/// writes `[10, 20, 30, 0]` (the surrounding opaque colour, alpha still `0`).
+#[test]
+fn atlas_level_zero_carries_the_solidified_base_the_mip_chain_was_built_from() {
+    let opaque = [10u8, 20, 30, 255];
+    let raw_hole = [9u8, 9, 9];
+
+    let mut b = AtlasBuilder::new().with_mip_levels(2);
+    b.add_texture(loc("minecraft:block/holed"), holed(opaque, raw_hole), None);
+    let atlas = b.build().unwrap();
+    let sprite = atlas.sprite(&loc("minecraft:block/holed")).unwrap();
+    let hole = texel_at(&atlas.rgba, atlas.width, sprite.x + 1, sprite.y + 1);
+    assert_eq!(
+        hole,
+        [opaque[0], opaque[1], opaque[2], 0],
+        "with mips requested, level 0 must be the solidified base: the hole's RGB is its \
+         nearest opaque neighbour and its alpha is still 0. The raw base would give \
+         {:?}",
+        [raw_hole[0], raw_hole[1], raw_hole[2], 0]
+    );
+
+    // Control: no mips requested means no chain, so nothing prepares the base
+    // and level 0 stays byte-for-byte the decoded PNG. This is what keeps every
+    // non-mipped atlas in the tree (GUI, items, particles) unchanged, and it is
+    // what proves the assertion above is measuring the preparation rather than
+    // something the builder does to every sprite regardless.
+    let mut b2 = AtlasBuilder::new();
+    b2.add_texture(loc("minecraft:block/holed"), holed(opaque, raw_hole), None);
+    let flat = b2.build().unwrap();
+    let sprite2 = flat.sprite(&loc("minecraft:block/holed")).unwrap();
+    assert_eq!(
+        texel_at(&flat.rgba, flat.width, sprite2.x + 1, sprite2.y + 1),
+        [raw_hole[0], raw_hole[1], raw_hole[2], 0],
+        "an atlas with no mip levels must still blit the raw image at level 0"
+    );
+
+    // And level 1 must be the downsample of the *same* prepared base, so level
+    // 0 and level 1 now agree about what sits under the hole. Level 1's texel
+    // (0, 0) averages the 2x2 quad containing the hole; with the hole
+    // solidified every one of the four carries `opaque`'s RGB.
+    let l1 = atlas.mip(1).unwrap();
+    let t = texel_at(l1.rgba, l1.width, sprite.x >> 1, sprite.y >> 1);
+    assert_eq!(
+        [t[0], t[1], t[2]],
+        [opaque[0], opaque[1], opaque[2]],
+        "level 1 must average the solidified base, not a black hole"
+    );
+}

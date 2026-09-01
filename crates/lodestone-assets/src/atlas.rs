@@ -725,20 +725,78 @@ impl AtlasBuilder {
         }
         let height = next_pow2(cursor_y + shelf_height).max(gran);
 
+        // One mip chain per placed sprite, in **placement** order, each built by
+        // vanilla's `MipmapGenerator.generateMipLevels`. Hoisted above the
+        // level-0 blit because level 0 is `chain[0]` — the *prepared* base
+        // (solidified, or dark-filled for a `dark_cutout` sprite) — and not the
+        // raw decoded PNG. Vanilla gets that for free by mutating the sprite's
+        // own `NativeImage` in place; this CPU path has to keep the prepared
+        // copy and use it for both the base level and the downsample.
+        //
+        // `None` when no mips were requested, which leaves those atlases (GUI,
+        // items, particles: every `AtlasBuilder` without `with_mip_levels`)
+        // byte-identical to before.
+        //
+        // The strategy and the cutoff bias are per *sprite*, off its own
+        // `*.png.mcmeta` `texture` section — vanilla's `SpriteContents` reads
+        // both out of `TextureMetadataSection` and hands them to
+        // `generateMipLevels`. Passing `Auto`/`0.0` unconditionally (which this
+        // once did) is right for the majority and wrong for 45 of 26.2's block
+        // sprites: every leaves texture asks for `dark_cutout`, 27 flower and
+        // amethyst sprites for `strict_cutout` (a 0.3 coverage reference, not
+        // 0.5), glass and the redstone-dust sprites for plain `mean`, and
+        // cactus/kelp/tripwire carry a 0.1 bias. Those are exactly the sprites
+        // whose alpha the terrain shader thresholds, so the wrong downsample
+        // shows up as texels winking in and out under minification.
+        let chains: Option<Vec<Vec<Image>>> = (effective_levels > 0).then(|| {
+            placements
+                .iter()
+                .map(|&(i, _, _)| {
+                    let tex = staged[i]
+                        .input
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.texture)
+                        .unwrap_or_default();
+                    generate_mip_levels(
+                        &staged[i].input.image,
+                        effective_levels,
+                        tex.mipmap_strategy,
+                        tex.alpha_cutoff_bias,
+                    )
+                })
+                .collect()
+        });
+
         // Blit into the backing buffer. The sprite pixels land at `+pad`, and the
         // surrounding gutter is filled by extruding the sprite's edge pixels.
         let mut rgba = vec![0u8; (width as usize) * (height as usize) * 4];
-        for &(i, x, y) in &placements {
-            blit(&mut rgba, width, &staged[i].input.image, x + pad, y + pad);
+        for (p, &(i, x, y)) in placements.iter().enumerate() {
+            // Vanilla's `MipmapGenerator.generateMipLevels` mutates
+            // `currentMips[0]` **in place** (`TextureUtil.solidify` /
+            // `fillEmptyAreasWithDarkColor`) and then sets `result[0] =
+            // currentMips[0]`, and `currentMips[0]` *is* the `NativeImage`
+            // `SpriteContents.uploadFirstFrame` later uploads at level 0. So
+            // vanilla's level 0 carries the prepared base, not the raw PNG, and
+            // the chain's own level 1 was downsampled from that same prepared
+            // image. Blitting the raw image here instead made level 0 the one
+            // level in the chain that disagreed with its own successor.
+            //
+            // The preparation never touches alpha — both passes rewrite only the
+            // RGB of texels whose alpha is already `0` — so this changes no
+            // cutout decision at any level. What it changes is what a *bilinear*
+            // tap picks up next to a cutout edge: the sampler is `min_filter:
+            // Linear` with `mipmap_filter: Linear`, so at any LOD between 0 and
+            // 1 a tap straddling the edge blends the neighbouring transparent
+            // texel's RGB in. Raw, that texel is the buffer's zero-init
+            // transparent **black**, so every cutout sprite grew a dark fringe as
+            // soon as it started to minify; solidified, it is the nearest opaque
+            // colour and the blend is a no-op. This is the same reasoning the
+            // per-level gutter extrusion below already applies one level deeper.
+            let base = chains.as_ref().map_or(&staged[i].input.image, |c| &c[p][0]);
+            blit(&mut rgba, width, base, x + pad, y + pad);
             if pad > 0 {
-                extrude_border(
-                    &mut rgba,
-                    width,
-                    &staged[i].input.image,
-                    x + pad,
-                    y + pad,
-                    pad,
-                );
+                extrude_border(&mut rgba, width, base, x + pad, y + pad, pad);
             }
         }
 
@@ -811,37 +869,7 @@ impl AtlasBuilder {
         // texture with `CLAMP_TO_EDGE`, which extrudes automatically at every
         // level (`TextureAtlas.uploadInitialContents`); this CPU path has to
         // extrude explicitly instead.
-        let mips = if effective_levels > 0 {
-            let chains: Vec<Vec<Image>> = placements
-                .iter()
-                .map(|&(i, _, _)| {
-                    // The strategy and the cutoff bias are per *sprite*, off its
-                    // own `*.png.mcmeta` `texture` section — vanilla's
-                    // `SpriteContents` reads both out of `TextureMetadataSection`
-                    // and hands them to `MipmapGenerator.generateMipLevels`.
-                    // Passing `Auto`/`0.0` unconditionally (which this did) is
-                    // right for the majority and wrong for 45 of 26.2's block
-                    // sprites: every leaves texture asks for `dark_cutout`, 27
-                    // flower and amethyst sprites for `strict_cutout` (a 0.3
-                    // coverage reference, not 0.5), glass and the redstone-dust
-                    // sprites for plain `mean`, and cactus/kelp/tripwire carry a
-                    // 0.1 bias. Those are exactly the sprites whose alpha the
-                    // terrain shader thresholds, so the wrong downsample shows
-                    // up as texels winking in and out under minification.
-                    let tex = staged[i]
-                        .input
-                        .meta
-                        .as_ref()
-                        .and_then(|m| m.texture)
-                        .unwrap_or_default();
-                    generate_mip_levels(
-                        &staged[i].input.image,
-                        effective_levels,
-                        tex.mipmap_strategy,
-                        tex.alpha_cutoff_bias,
-                    )
-                })
-                .collect();
+        let mips = if let Some(chains) = chains.as_ref() {
             let mut levels = Vec::with_capacity(effective_levels as usize);
             for level in 1..=effective_levels {
                 let lw = width >> level;

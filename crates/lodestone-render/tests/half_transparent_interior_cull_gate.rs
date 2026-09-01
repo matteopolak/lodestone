@@ -29,7 +29,7 @@
 //! own `mesh_models_layers_routes_translucent_blocks_to_the_second_mesh`).
 
 use lodestone_assets::{BakedQuad, Direction};
-use lodestone_render::{ModelSectionView, face_of_direction, mesh_models_layers};
+use lodestone_render::{ModelSectionView, RenderLayer, face_of_direction, mesh_models_layers};
 
 /// A degenerate (single-point) quad, exactly as `models.rs`'s own `cube_face`
 /// test helper builds it: the in-plane shape is irrelevant to face culling,
@@ -107,8 +107,16 @@ impl ModelSectionView for HalfTransparentRow {
         false
     }
 
-    fn is_translucent_at(&self, x: usize, y: usize, z: usize) -> bool {
-        class_at(x as i32, y as i32, z as i32).is_some()
+    fn quad_layer(
+        &self,
+        x: usize,
+        y: usize,
+        z: usize,
+        _quad: &BakedQuad,
+    ) -> Option<RenderLayer> {
+        class_at(x as i32, y as i32, z as i32)
+            .map(|_| RenderLayer::Translucent)
+            .or(Some(RenderLayer::Solid))
     }
 
     fn skips_rendering_against(&self, x: i32, y: i32, z: i32, nx: i32, ny: i32, nz: i32) -> bool {
@@ -137,8 +145,16 @@ impl ModelSectionView for NeuteredRow {
     fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
         false
     }
-    fn is_translucent_at(&self, x: usize, y: usize, z: usize) -> bool {
-        class_at(x as i32, y as i32, z as i32).is_some()
+    fn quad_layer(
+        &self,
+        x: usize,
+        y: usize,
+        z: usize,
+        _quad: &BakedQuad,
+    ) -> Option<RenderLayer> {
+        class_at(x as i32, y as i32, z as i32)
+            .map(|_| RenderLayer::Translucent)
+            .or(Some(RenderLayer::Solid))
     }
     // No override: inherits the trait default (`false`), reproducing exactly
     // what every implementor answered before this fix existed.
@@ -234,8 +250,16 @@ fn distinct_half_transparent_siblings_do_not_skip_against_each_other() {
         fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
             false
         }
-        fn is_translucent_at(&self, x: usize, y: usize, z: usize) -> bool {
-            sibling_class_at(x as i32, y as i32, z as i32).is_some()
+        fn quad_layer(
+            &self,
+            x: usize,
+            y: usize,
+            z: usize,
+            _quad: &BakedQuad,
+        ) -> Option<RenderLayer> {
+            sibling_class_at(x as i32, y as i32, z as i32)
+                .map(|_| RenderLayer::Translucent)
+                .or(Some(RenderLayer::Solid))
         }
         fn skips_rendering_against(
             &self,

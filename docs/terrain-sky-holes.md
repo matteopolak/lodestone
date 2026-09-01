@@ -24,9 +24,11 @@ them is the world, the range, and what "not the renderer" means.
 | `far_grazing_ceiling_floor_holes` | floor + ceiling | 24 chunks, pitch to 1° | clean |
 | `near_grazing_face_coverage_pixels` | floor + a wall + floating blocks | **20 blocks, eye level, 82°** | clean |
 | `translucent_alpha_cutout_pixels` | a stained-glass wall and a stone control | 20 blocks | **found a defect** |
+| `per_quad_render_layer` | one `grass_block`, one `stone`, one stained glass | meshing only | **found a defect** |
 
-All five are `#[ignore]`d, need a GPU adapter and the vanilla `client.jar`, and
-fail closed rather than skipping.
+All six are `#[ignore]`d and fail closed rather than skipping. All need the
+vanilla `client.jar`; the five pixel gates additionally need a GPU adapter,
+while `per_quad_render_layer` stops at the mesh and does not.
 
 ### The three far gates
 
@@ -117,10 +119,13 @@ What it does **not** cover, in the order worth trying next:
    render of the same camera at 15 / 20 / 25 / 30 / 35 blocks — indistinguishable
    from a `stone` control in the same fixture (0.996 / 0.999 / 1.010 / 1.035 /
    0.993). What is *not* covered is minification proper:
-   `cutout_minification_flicker_pixels` measures a painted ratio of **0.62–0.66**
-   in its second-most-minified band on a ground plate, and records it as an open
-   residual. That is the only number in this repo close to the report's
-   "only 60%", but the measurement above says it does not reach 20 blocks.
+   `cutout_minification_flicker_pixels` measured a painted ratio of **0.62–0.66**
+   in its second-most-minified band on a ground plate and recorded it as an open
+   residual. Most of that is now explained and closed — see *Atlas level 0
+   carried the raw PNG* below, which moves that band to **0.871** — and what is
+   left is the most-minified band at 0.607 against a 4x reference. That was the
+   only number in this repo close to the report's "only 60%", and the
+   measurement above says it does not reach 20 blocks either way.
 2. **Non-cube models** — stairs, slabs, walls. The oracle above assumes a hit
    cell is a full cube, so extending it means teaching it the bake.
 3. **World coordinates far from the origin.** Every gate here, and every other
@@ -232,21 +237,117 @@ tolerable, against the real jar. It is the thing that would bite first if
 either of them changed — and a server resource pack is enough to change the
 first one.
 
-There is a second half to that divergence, and it is the durable fix if this
-ever needs one. Vanilla's layer is **per quad**, not per block:
-`SectionCompiler` buckets on `quad.materialInfo().layer()`, which
-`ChunkSectionLayer.byTransparency` derives from that quad's own sprite. Ours is
-one `RenderLayer` per block state, documented in `block_models.rs` as *"the most
-transparent layer across its faces"* — so a `grass_block`'s fully opaque top and
-bottom quads inherit `Cutout` from `grass_block_side_overlay` and get an alpha
-test vanilla never applies to them. `ModelVertex::cutout_bypass` already exists
-and already skips the discard (it carries vanilla's FAST leaves today), and
-`BakedQuad` already carries a sprite index, so reproducing vanilla's split is a
-matter of stamping that byte per quad from the quad's own sprite layer rather
-than adding a pipeline or a mesh. It was deliberately **not** done here: with
-vanilla assets it is provably a no-op (see the histogram above), and it touches
-`models.rs`/`block_models.rs`/`mesher.rs`, which is not a change to make on a
-hypothesis.
+## The render layer is per quad — landed
+
+Vanilla's layer is **per quad**, not per block. `SectionCompiler`'s quad output
+reads `quad.materialInfo().layer()`, which `ChunkSectionLayer.byTransparency`
+derives from that quad's own sprite transparency. Ours was one `RenderLayer`
+per block state — *"the most transparent layer across its faces"* — so a
+`grass_block`'s six fully opaque cube faces inherited `Cutout` from the four
+coplanar `grass_block_side_overlay` decals and got an alpha test vanilla never
+applies to them.
+
+That is now ported. `ModelSectionView::quad_layer` replaces the old per-block
+`is_translucent_at`; `SnapshotModelView` answers it with
+`BlockModels::sprite_layer(quad.sprite)`, a direct index into the same
+per-sprite table `block_layer` was already rolling up. `mesh_models_layers`
+uses the answer for both halves of what the layer decides: a `Translucent` quad
+goes to the blended second mesh, and a `Solid` quad carries
+`ModelVertex::cutout_bypass` — this renderer's stand-in for vanilla's
+`SOLID_TERRAIN` pipeline, which defines no `ALPHA_CUTOUT` and runs no test at
+all.
+
+`per_quad_render_layer.rs` measures it through the production call
+(`mesh_snapshot_models_layers`, i.e. the real `SnapshotModelView`), over a real
+`BlockModels` baked from `client.jar`. Predicted from the jar rather than from
+the code: `grass_block[snowy=false]` bakes ten quads, six sampling all-255
+sprites and four sampling the 211-clear-texel overlay, so **(24 bypassed, 16
+tested, 0 translucent)** vertices. Per-block-state predicts **(0, 40, 0)**. The
+measurement lands on the first; the neuter — `quad_layer` forced to `None` —
+lands on the second, exactly.
+
+Two further things this fixed, both of which the per-block-state routing could
+not express. A water cauldron's opaque body now writes depth on the solid pass
+while its partial-alpha liquid blends on the translucent one, which is what
+`BlockModels::is_cauldron`'s whole-block veto existed to approximate (the veto
+survives, demoting only the liquid quad, so that block's behaviour is unchanged
+pending its own gate). And `BlockModels::layer` is now used only for the
+questions vanilla also answers per block — occlusion, the packed fast path, the
+fluid shoreline test.
+
+**On vanilla assets this is parity, not a fix for the pinprick report.** No
+ordinary building block has a non-opaque sprite (see the histogram above), so
+the discard could not have fired on a stone or andesite road either way. It
+becomes load-bearing the moment a **resource pack** replaces a texture with one
+carrying transparent texels, or ships a model that mixes an opaque sprite with
+a cutout one in one state — which is exactly the condition the report's server
+is under and none of the gates here reproduce.
+
+### Remaining divergence, measured
+
+Vanilla scopes the transparency scan to the quad's own UV window inside the
+sprite (`SpriteContents.computeTransparency(u0, v0, u1, v1)`), short-circuiting
+to the whole-sprite answer when the sprite is opaque or the window covers it
+entirely — the overwhelming majority of quads. `sprite_layer` answers the
+whole-sprite question only, so a quad sampling an opaque sub-rect of a cutout
+sprite is `Cutout` here and `Solid` there.
+
+Vanilla also unions the scan over every unique animation frame where ours reads
+the first. Measured against the 26.2 jar: of 1,269 `textures/block/*.png`,
+**zero** classify differently from their first frame than from the whole strip,
+so that half is inert on vanilla assets. (That scan also puts the whole-image
+split at 695 `Solid` / 517 `Cutout` / 57 `Translucent`, which does not agree
+with the 911/309/49 recorded above; the two were taken by different scanners
+and the disagreement is unresolved. The individual sprites this page names —
+`stone`, `andesite`, `grass_block_top`, `grass_block_side`, `dirt`,
+`cobblestone`, `gravel` all-255; `grass_block_side_overlay` at 0×211/255×45;
+`white_stained_glass` at 102/155/163 — were re-checked one by one and all
+hold.)
+
+## Atlas level 0 carried the raw PNG, and that was the leaf-litter residual
+
+`AtlasBuilder` blitted the **raw** decoded image at level 0 while every mip
+level below it came from the *prepared* base (`solidify` for a cutout sprite,
+`fill_empty_with_dark` for a `dark_cutout` one). Vanilla has one image:
+`MipmapGenerator.generateMipLevels` runs `TextureUtil.solidify` on
+`currentMips[0]` **in place** and then sets `result[0] = currentMips[0]`, and
+that same `NativeImage` is what `SpriteContents.uploadFirstFrame` uploads at
+level 0. So level 0 was the one level in our chain that disagreed with its own
+successor.
+
+The preparation never touches alpha — both passes rewrite only the RGB of
+texels whose alpha is already `0` — so no cutout decision moved. What moved is
+what a **bilinear** tap picks up beside a cutout edge: the model sampler is
+`min_filter: Linear` with `mipmap_filter: Linear`, so at any LOD between 0 and
+1 a tap straddling the edge blends the transparent neighbour's RGB in.
+`block/leaf_litter.png`'s 139 transparent texels are pure **black** against
+opaque texels at 125-167 grey, so every surviving fragment beside a hole was
+dragged toward black as soon as the plate started to minify.
+
+That is the residual `cutout_minification_flicker_pixels` had recorded as open
+and unexplained. Both arms were run on this change, same fixture, same cameras:
+
+| band | raw level 0 (1x / 4x / ratio) | prepared level 0 (1x / 4x / ratio) |
+|---|---|---|
+| 3 (most minified) | 1697.2 / 2179.2 / 0.779 | 1732.6 / 2856.0 / **0.607** |
+| 4 | 2102.8 / 3396.8 / 0.619 | 2973.4 / 3414.9 / **0.871** |
+| 5 | 3158.0 / 3349.1 / 0.943 | 3355.0 / 3349.1 / **1.002** |
+| 6 (magnified) | 3378.0 / 3521.4 / 0.959 | 3378.0 / 3521.4 / 0.959 |
+| 7 (nearest) | 3256.0 / 3161.9 / 1.030 | 3256.0 / 3161.9 / 1.030 |
+
+Painted area rose in every minified band and bands 6 and 7 did not move a
+single pixel, which localises the change to minification rather than to the
+fixture. Band 3's *ratio* fell while its painted area rose, because the 4x
+reference is itself a render through this renderer and gained 31%. The
+per-quad layer change contributes **exactly zero** to this fixture — measured
+by running it alone, byte-identical — because `leaf_litter` is a single-sprite
+cutout block; the two changes were disentangled rather than credited together.
+
+The change is scoped to atlases that actually request mips, so every non-mipped
+atlas in the tree (GUI, items, particles) is byte-identical.
+`atlas_mips.rs`'s `atlas_level_zero_carries_the_solidified_base_the_mip_chain_
+was_built_from` is the gate, with a no-mips control and a neuter that lands on
+the raw value.
 
 ## One divergence left, deliberately unfixed
 
@@ -284,7 +385,11 @@ than changed alongside an unrelated fix.
 ## Dependencies
 
 * `lodestone-render` — `cull.rs` (`within_view_distance`), `model_pipeline.rs`,
-  `block_models.rs`, `shaders/model.wgsl`.
+  `block_models.rs` (`BlockModels::sprite_layer`), `models.rs`
+  (`ModelSectionView::quad_layer`, `mesh_models_layers`), `shaders/model.wgsl`.
+* `lodestone-assets` — `atlas.rs` (`AtlasBuilder::build`'s level-0 blit) and
+  `mipmap.rs` (`generate_mip_levels`, `solidify`, `fill_empty_with_dark`).
 * `lodestone-shell` — `mesher.rs` (`snapshot_section`, `mesh_snapshot_models`,
-  `snapshot_visibility`) and `gpu` (`RenderState::upload_section`, `render`).
+  `SnapshotModelView::quad_layer`, `snapshot_visibility`) and `gpu`
+  (`RenderState::upload_section`, `render`).
 * `lodestone-world` — `World::block_state_at`, which the oracle reads directly.
