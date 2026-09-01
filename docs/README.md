@@ -688,6 +688,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `minecraft:filled_map`'s actual picture — the vanilla `MapColor` palette, a
   per-map 128×128 texture built from the colour bytes `SessionMaps` folds, and the
   quads that show it in the hand and in an item frame.
+- [Rendering handoff: first-person bow and framed maps (2026-09-01)](./rendering-handoff-bow-and-maps-2026-09-01.md)
+  — Confirmed results, eliminated branches, Java reference transforms, and the next
+  live discriminators for the remaining bow-disappearance and framed-map defects.
 - [Fire spread and burnout](./fire-spread.md) — Fire behaving like fire on the
   integrated server: a port of 26.2's `FireBlock` into
   `crates/lodestone-server/src/fire.rs`, driven by the block scheduled-tick queue, so
