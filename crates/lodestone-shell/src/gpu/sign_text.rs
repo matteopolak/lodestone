@@ -527,12 +527,13 @@ const MAX_SIGN_TEXT_VERTICES: usize = 1_048_576;
 /// projects to nothing anyway.
 const BEHIND_EYE_SLACK: f32 = 1.0;
 
-/// `Font.DisplayMode.NORMAL`, used for a glowing sign's outline.
-const SIGN_OUTLINE_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
-    constant: 0,
-    slope_scale: 0.0,
-    clamp: 0.0,
-};
+/// `Font.DisplayMode.NORMAL`, relative to Lodestone's terrain board.
+///
+/// Vanilla's sign model uses its default depth state, while this renderer's
+/// terrain board already carries [`CAMERA_DEPTH_BIAS`].  Retaining that
+/// baseline keeps the outline one render-state step behind the polygon-offset
+/// ink without placing it behind the board at long range.
+const SIGN_OUTLINE_DEPTH_BIAS: wgpu::DepthBiasState = CAMERA_DEPTH_BIAS;
 
 /// Vanilla `RenderPipelines.TEXT_POLYGON_OFFSET`, sign-flipped for this
 /// project's forward `[0,1]` depth buffer.
@@ -1610,9 +1611,11 @@ mod tests {
     fn glowing_sign_outline_uses_normal_depth_before_polygon_offset_ink() {
         // Vanilla's TextFeatureRenderer changes DisplayMode between the two
         // visits: NORMAL for the eight-copy outline, then POLYGON_OFFSET for
-        // the base glyph. A single biased range is not equivalent because it
-        // asks equal-depth overlapping primitives to establish the colour.
-        assert_eq!(SIGN_OUTLINE_DEPTH_BIAS, wgpu::DepthBiasState::default());
+        // the base glyph. Vanilla's sign board has default depth, whereas
+        // Lodestone's terrain board already has CAMERA_DEPTH_BIAS. The normal
+        // outline must inherit that *board-relative* baseline or the board
+        // wins its depth test and the glow fights the sign texture.
+        assert_eq!(SIGN_OUTLINE_DEPTH_BIAS, CAMERA_DEPTH_BIAS);
         assert_eq!(SIGN_GLYPH_DEPTH_BIAS.constant, 2 * CAMERA_DEPTH_BIAS.constant);
         assert_eq!(SIGN_GLYPH_DEPTH_BIAS.slope_scale, 2.0 * CAMERA_DEPTH_BIAS.slope_scale);
         assert_eq!(SIGN_GLYPH_DEPTH_BIAS.clamp, 0.0);

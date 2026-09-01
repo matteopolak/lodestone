@@ -323,6 +323,15 @@ pub(super) struct ModelRenderer {
     /// forward-depth projection needs this relative raster-depth step to keep
     /// the picture above the frame or attachment wall at finite precision.
     pub(super) map_surface_pipeline: ModelPipeline,
+    /// Map-only diagnostic: identical bindings and shader, but no back-face
+    /// rejection. Selected only by `LODESTONE_MAP_DISABLE_BACKFACE_CULL`.
+    pub(super) map_surface_no_cull_pipeline: ModelPipeline,
+    /// Map-only diagnostic: identical bindings and shader, but no depth test
+    /// or write. Selected only by `LODESTONE_MAP_DISABLE_DEPTH`.
+    pub(super) map_surface_no_depth_pipeline: ModelPipeline,
+    /// Combined map diagnostic for both GPU switches. Never selected by the
+    /// normal renderer.
+    pub(super) map_surface_no_cull_no_depth_pipeline: ModelPipeline,
     /// The translucent fluid pipeline (no cutout discard, water tint, alpha
     /// blend, depth-test on / depth-write off). Shares the model camera and
     /// atlas bind groups.
