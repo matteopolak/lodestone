@@ -712,7 +712,8 @@ fn third_person_body_state_resolves_through_the_real_corpus() {
 fn framed_map_draw_uses_the_dedicated_depth_layer() {
     let frame_source = include_str!("frame.rs");
     assert!(
-        frame_source.contains("pass.set_pipeline(&model.map_surface_pipeline.pipeline);"),
+        frame_source.contains("(false, false) => &model.map_surface_pipeline")
+            && frame_source.contains("pass.set_pipeline(&map_pipeline.pipeline);"),
         "framed maps must use their dedicated depth layer instead of the ordinary model pipeline"
     );
 }

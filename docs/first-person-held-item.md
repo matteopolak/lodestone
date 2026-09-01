@@ -176,11 +176,17 @@ any shader math.
   pass's branches read it. `swapAnimationScale(item)` is still the vanilla default
   `1.0` for every item: the per-item-model override needs item-model definitions
   the item pipeline does not read.
-- **The special-cased poses are all absent here**: bow and crossbow while drawing,
-  shield, spyglass, map (one- and two-handed), trident, and the eating/drinking and
-  brush animations. Each is its own branch in `submitArmWithItem`. An item in one of
-  those categories draws through the generic chain, which is the resting pose —
-  wrong while in use, correct while merely held.
+- **Bow draw and eating/drinking are implemented; the other special-cased poses
+  remain absent**: crossbow while drawing, shield, spyglass, map (one- and
+  two-handed), trident, and brush animations. `FirstPersonItemUse::Bow` selects
+  `first_person_bow_matrix` whenever the visible local main-hand item is
+  `minecraft:bow` and `ItemUseState::using` is true. It follows 26.2's
+  `ItemInHandRenderer` BOW case: aim translate/rotation, the nonlinear
+  `(t² + 2t) / 3` power curve capped at `1`, its small post-0.1 charge shake,
+  forward translation, z-stretch, then the final mirrored 45° yaw. The same elapsed
+  tick counter already used to choose `bow_pulling_0..2` drives the pose, so the
+  geometry and its charge transform cannot disagree. A bow at rest still uses the
+  ordinary held-item chain.
 
   **"needs use-item state the shell does not track" is no longer true** — that was
   the state before issue #57. The using-item bit is decoded and folded all the way to

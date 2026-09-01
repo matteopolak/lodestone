@@ -1767,14 +1767,24 @@ impl RenderState {
                     .map(|(mesh, _)| mesh.index_count as usize / 6)
                     .sum();
                 let framed_map_instances_before = stats.filled_maps_drawn;
+                let map_diagnostic_switches = super::maps::map_diagnostic_switches();
+                let map_pipeline = match (
+                    map_diagnostic_switches.disable_backface_cull,
+                    map_diagnostic_switches.disable_depth,
+                ) {
+                    (false, false) => &model.map_surface_pipeline,
+                    (true, false) => &model.map_surface_no_cull_pipeline,
+                    (false, true) => &model.map_surface_no_depth_pipeline,
+                    (true, true) => &model.map_surface_no_cull_no_depth_pipeline,
+                };
                 for (mesh, texture) in &framed_maps {
                     // Keep vanilla's physical `1.01 / 128` separation and add
                     // the equivalent finite-precision ordering for Lodestone's
                     // forward-depth wgpu projection. Without this dedicated
-                    // second raster step. Without it a visible frame flickers against its front plate,
-                    // while an invisible frame can lose the whole parallel
-                    // quad against its attachment wall.
-                    pass.set_pipeline(&model.map_surface_pipeline.pipeline);
+                    // second raster step a visible frame flickers against its
+                    // front plate, while an invisible frame can lose the whole
+                    // parallel quad against its attachment wall.
+                    pass.set_pipeline(&map_pipeline.pipeline);
                     bind_terrain_camera(
                         &mut pass,
                         &model.cam_bind_group,

@@ -801,9 +801,11 @@ standoff is worth:
 The board/text separation is still physical: `gpu/sign_text.rs` puts the entire text surface
 the existing `1/256 + 2/2048` blocks along the sign normal in front of the board. The glow outline
 and regular glyph get no additional *geometric* separation: their final masks are disjoint after the
-outline builder subtracts the regular ink coverage. The outline still uses normal depth and the later
-glyph draw still uses vanilla's polygon-offset render type, but correctness no longer depends on that
-bias resolving two opaque coplanar fragments.
+outline builder subtracts the regular ink coverage. The outline retains vanilla's **normal-relative**
+depth step, but Lodestone's terrain board already has `CAMERA_DEPTH_BIAS`; it therefore uses that same
+baseline rather than literal zero bias. The later glyph draw takes the second, polygon-offset step.
+This preserves vanilla's outline → ink ordering without letting the terrain board win the outline depth
+test at range, and correctness no longer depends on bias resolving two opaque coplanar fragments.
 
 The same module keeps a bounded per-position cache of completed world-space sign layers. It compares
 the complete `SignSpawn` (text and styling, glow, kind, orientation and sampled light), both resolved

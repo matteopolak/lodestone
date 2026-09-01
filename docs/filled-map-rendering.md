@@ -38,9 +38,12 @@ texture would validate on this Mac (which reports 8) and crash at startup on any
 Vanilla supplies physical `1.01 / 128` separation and orders the frame body through
 `VIEW_OFFSET_Z_LAYERING_FORWARD`. Lodestone preserves the physical separation but expresses the
 ordering as two raster-depth variants under one shared view-projection: one step for the frame body,
-two for the map. Applying a second scaled camera matrix to the body made the two surfaces round
-independently at large world coordinates; the trace showed their projected order reverse with camera
-and FOV changes. The raster layers are the forward-depth backend equivalent, not world-space nudges.
+two constant steps for the map. Both variants carry the same slope term: only the relative constant
+may differ, because a doubled map slope term makes its separation grow with projected slope and creates
+a curved/triangular floating edge at grazing angles. Applying a second scaled camera matrix to the body
+made the two surfaces round independently at large world coordinates; the trace showed their projected
+order reverse with camera and FOV changes. The raster layers are the forward-depth backend equivalent,
+not world-space nudges.
 
 Groups 0, 2 and 3 are the frame's existing shared bind groups, so a map draw adds exactly one texture,
 one bind group and one draw call.
@@ -200,6 +203,24 @@ corners, plus categorical clip/depth-order and projected-winding states. Visible
 invisible image billboards compare against the attachment wall plane. These fields distinguish an
 unresolved upstream `MAP_ITEM_DATA`, a normal frustum-edge cull, a submitted-versus-drawn mismatch and a
 depth-order change without modifying culling, depth state or map placement.
+
+Three native-only, process-start switches can then eliminate one branch at a time; any non-empty value
+other than `0` enables its switch. They never change the default renderer and do not exist on wasm:
+
+| switch | removes | interpretation when the map returns |
+| --- | --- | --- |
+| `LODESTONE_MAP_DISABLE_FRUSTUM_CULL=1` | only `prepare_framed_maps`' CPU item-frame frustum test | the frame reached `EntityDraw`, but the map's wall-offset AABB is the offending boundary |
+| `LODESTONE_MAP_DISABLE_BACKFACE_CULL=1` | only the map pipeline's back-face cull | the quad was prepared but its projected winding/facing is wrong; this does not affect the frame body |
+| `LODESTONE_MAP_DISABLE_DEPTH=1` | only the map pipeline's depth test and write | the quad was prepared and rasterized, but lost against the frame/wall/depth buffer; it will deliberately paint through world geometry while enabled |
+
+Combine switches only after testing them singly. The trace already names the earlier boundaries:
+`candidates=0` means the input `EntityDraw` slice contains no filled-map frame before any renderer cull;
+`candidates>0` with no `selected` only means no frame was close enough to the observer's tracking region
+(set `LODESTONE_MAP_TRACE_ENTITY` for an exact frame); `selected` with `source=Unresolved` is a missing
+`MAP_ITEM_DATA`; `in_frustum=false` is CPU culling; and `submitted=true` followed by no visible pixels is
+in the GPU branch. Chests, signs and other true block entities are not `EntityDraw`s and do not use this
+map diagnostic or its cull path; an absent block entity therefore needs a separate producer/packet
+investigation.
 
 ## Dependencies
 

@@ -8,7 +8,7 @@ use lodestone_data::entity_type::EntityType;
 use lodestone_render::{
     Camera, CameraUniform, EntityCameraUniform, GpuEntityModel, GpuModelMesh, ItemStateContext,
     entity::{
-        Arm, first_person_arm_parts, first_person_arm_pose_with_equip,
+        Arm, FirstPersonItemUse, first_person_arm_parts, first_person_arm_pose_with_equip,
         first_person_item_mesh_with_use, hand_projection, hand_transform, model_for_type,
     },
     fog::FogUniform,
@@ -737,10 +737,27 @@ impl RenderState {
                 // `firstperson_righthand` at all, i.e. vanilla poses it with the
                 // identity, not with `item/generated`'s `[0, -90, 25]` / 0.68.
                 let transform = hand_transform(&geometry.display, ARM, true);
-                // An in-progress eat or drink replaces the whole pose — vanilla's
-                // `player.isUsingItem()` branch never reaches `swingArm`, so the swing
-                // value below is genuinely unused while consuming rather than being
-                // added on top. `None` is the ordinary held-item pose.
+                // A use animation replaces the whole resting pose — vanilla's
+                // `player.isUsingItem()` branch never reaches `swingArm`.  The
+                // recent item-state work selected the bow-pulling geometry, but a
+                // bow also has a distinct ItemInHandRenderer BOW transform; without
+                // this branch the curved bow looks charged while sitting in the
+                // ordinary bottom-right held-item pose.
+                let item_use = if use_state.using
+                    && item.namespace() == "minecraft"
+                    && item.path() == "bow"
+                {
+                    Some(FirstPersonItemUse::Bow {
+                        held_ticks: use_state.ticks as f32,
+                    })
+                } else {
+                    use_state.eat.map(|(curr_usage_time, use_duration)| {
+                        FirstPersonItemUse::Eat {
+                            curr_usage_time,
+                            use_duration,
+                        }
+                    })
+                };
                 let mut mesh = first_person_item_mesh_with_use(
                     &geometry.quads,
                     geometry.gui_light,
@@ -749,7 +766,7 @@ impl RenderState {
                     inverse_arm_height,
                     &transform,
                     u8::try_from(self.hand_light(camera)).unwrap_or(u8::MAX),
-                    use_state.eat,
+                    item_use,
                 );
                 // The held item's real dye/potion tint — a no-op unless this item is
                 // a dyed leather piece or a mixed potion (`ItemGeometry::live_tints`

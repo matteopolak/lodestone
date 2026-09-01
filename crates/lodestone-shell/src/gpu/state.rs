@@ -155,6 +155,12 @@ impl RenderState {
             let pipeline = ModelPipeline::new(device, color_format);
             let surface_pipeline = ModelPipeline::for_surface(device, color_format);
             let map_surface_pipeline = ModelPipeline::for_map_surface(device, color_format);
+            let map_surface_no_cull_pipeline =
+                ModelPipeline::for_map_surface_no_cull(device, color_format);
+            let map_surface_no_depth_pipeline =
+                ModelPipeline::for_map_surface_no_depth(device, color_format);
+            let map_surface_no_cull_no_depth_pipeline =
+                ModelPipeline::for_map_surface_no_cull_no_depth(device, color_format);
             let water_pipeline = ModelPipeline::for_fluid(device, color_format);
             // Translucent **block** geometry (stained glass, ice, the nether
             // portal swirl): the same MODEL_WGSL shader and palette as
@@ -234,6 +240,9 @@ impl RenderState {
                 pipeline,
                 surface_pipeline,
                 map_surface_pipeline,
+                map_surface_no_cull_pipeline,
+                map_surface_no_depth_pipeline,
+                map_surface_no_cull_no_depth_pipeline,
                 water_pipeline,
                 translucent_pipeline,
                 atlas,

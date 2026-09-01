@@ -132,14 +132,15 @@ pub const CAMERA_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
     clamp: 0.0,
 };
 
-/// A second [`CAMERA_DEPTH_BIAS`] step toward the camera for a texture that
-/// must win over the surface immediately behind it, such as a filled-map
-/// picture over an item frame's front texture. Keeping this relative to the
-/// shared step makes the ordering explicit without changing the global bias
-/// used by ordinary world surfaces.
+/// A second constant [`CAMERA_DEPTH_BIAS`] step toward the camera for a texture
+/// that must win over the surface immediately behind it, such as a filled-map
+/// picture over an item frame's front texture. Its slope term stays identical
+/// to the frame body's: multiplying it would make the *relative* ordering vary
+/// with projected slope, which shows as a curved/triangular floating edge at
+/// grazing angles.
 pub const MAP_SURFACE_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
     constant: CAMERA_DEPTH_BIAS.constant * 2,
-    slope_scale: CAMERA_DEPTH_BIAS.slope_scale * 2.0,
+    slope_scale: CAMERA_DEPTH_BIAS.slope_scale,
     clamp: CAMERA_DEPTH_BIAS.clamp,
 };
 
@@ -200,16 +201,56 @@ impl ModelPipeline {
     /// front texture without moving either mesh in world space.
     #[must_use]
     pub fn for_map_surface(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        Self::build(
+        Self::for_map_surface_diagnostic(device, color_format, true, true)
+    }
+
+    /// Build a map-surface variant for a narrowly scoped live diagnostic.
+    ///
+    /// The caller selects this only when one of Lodestone's `LODESTONE_MAP_*`
+    /// switches is set. It exists to eliminate a single GPU boundary from a
+    /// report; normal item-frame maps always use [`Self::for_map_surface`].
+    #[must_use]
+    pub fn for_map_surface_diagnostic(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        cull_back_face: bool,
+        use_depth: bool,
+    ) -> Self {
+        Self::build_with_depth(
             device,
             color_format,
             MODEL_WGSL,
             false,
             true,
-            true,
+            cull_back_face,
             Some(ALPHA_CUTOUT_CUTOUT),
             MAP_SURFACE_DEPTH_BIAS,
+            use_depth,
         )
+    }
+
+    /// Build a map-surface pipeline with the normal depth state and a
+    /// back-face culling diagnostic selected by [`Self::for_map_surface_diagnostic`].
+    #[must_use]
+    pub fn for_map_surface_no_cull(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+        Self::for_map_surface_diagnostic(device, color_format, false, true)
+    }
+
+    /// Build a map-surface pipeline that neither tests nor writes depth, for
+    /// diagnosis only. It is intentionally never used by default because it
+    /// paints through the frame and intervening world geometry.
+    #[must_use]
+    pub fn for_map_surface_no_depth(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+        Self::for_map_surface_diagnostic(device, color_format, true, false)
+    }
+
+    /// Build the combined no-cull/no-depth map diagnostic variant.
+    #[must_use]
+    pub fn for_map_surface_no_cull_no_depth(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) -> Self {
+        Self::for_map_surface_diagnostic(device, color_format, false, false)
     }
 
     /// Build the translucent **fluid** pipeline: like a `Translucent` model
@@ -282,6 +323,31 @@ impl ModelPipeline {
         cull_back_face: bool,
         alpha_cutout: Option<f32>,
         depth_bias: wgpu::DepthBiasState,
+    ) -> Self {
+        Self::build_with_depth(
+            device,
+            color_format,
+            shader_src,
+            translucent,
+            with_palette,
+            cull_back_face,
+            alpha_cutout,
+            depth_bias,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_with_depth(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        shader_src: &str,
+        translucent: bool,
+        with_palette: bool,
+        cull_back_face: bool,
+        alpha_cutout: Option<f32>,
+        depth_bias: wgpu::DepthBiasState,
+        use_depth: bool,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lodestone-model-shader"),
@@ -448,7 +514,7 @@ impl ModelPipeline {
                 },
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
+            depth_stencil: use_depth.then_some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(!translucent),
                 // Vanilla's terrain pipelines all inherit
@@ -1238,14 +1304,16 @@ mod tests {
     }
 
     #[test]
-    fn map_surface_depth_bias_is_a_second_surface_step() {
+    fn map_surface_depth_bias_adds_a_constant_step_without_changing_slope() {
         assert_eq!(
             MAP_SURFACE_DEPTH_BIAS.constant,
             CAMERA_DEPTH_BIAS.constant * 2
         );
         assert_eq!(
             MAP_SURFACE_DEPTH_BIAS.slope_scale,
-            CAMERA_DEPTH_BIAS.slope_scale * 2.0
+            CAMERA_DEPTH_BIAS.slope_scale,
+            "the frame plate and its parallel map must receive the same grazing-angle term; \
+             only their relative constant depth step may differ"
         );
         assert_eq!(MAP_SURFACE_DEPTH_BIAS.clamp, CAMERA_DEPTH_BIAS.clamp);
     }

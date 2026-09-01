@@ -4861,17 +4861,72 @@ pub fn first_person_eat_matrix(
         * display_matrix_for_hand(transform, arm.is_left())
 }
 
+/// The first-person item-use pose selected by
+/// `ItemInHandRenderer.submitArmWithItem` after it has resolved the item's
+/// geometry.
+///
+/// `Bow` deliberately carries elapsed use ticks, not a precomputed power: the
+/// same clock drives the pulling-model thresholds and vanilla's nonlinear draw
+/// power, while keeping that conversion in the pose owner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FirstPersonItemUse {
+    /// `ItemUseAnimation.EAT` / `DRINK`'s custom arm transform.
+    Eat {
+        /// Vanilla's interpolated elapsed use time.
+        curr_usage_time: f32,
+        /// The item's configured use duration.
+        use_duration: u32,
+    },
+    /// `ItemUseAnimation.BOW`'s aimed, charging transform.
+    Bow {
+        /// Ticks elapsed since the bow use began.
+        held_ticks: f32,
+    },
+}
+
+/// `BowItem.getPowerForTime`: the nonlinear charge fraction shared by its
+/// launch velocity and `ItemInHandRenderer`'s first-person pose.
+#[must_use]
+pub fn first_person_bow_power(held_ticks: f32) -> f32 {
+    let charge = (held_ticks / 20.0).max(0.0);
+    ((charge * charge + charge * 2.0) / 3.0).min(1.0)
+}
+
+/// `ItemInHandRenderer`'s `ItemUseAnimation.BOW` transform, before the item's
+/// own `firstperson_?hand` display transform.
+#[must_use]
+pub fn first_person_bow_chain(arm: Arm, held_ticks: f32) -> Mat4 {
+    let i = arm.invert();
+    let held_ticks = held_ticks.max(0.0);
+    let power = first_person_bow_power(held_ticks);
+    let shake = if power > 0.1 {
+        ((held_ticks - 0.1) * 1.3).sin() * (power - 0.1) * 0.004
+    } else {
+        0.0
+    };
+    Mat4::from_translation(Vec3::new(i * -0.278_568_2, 0.183_443_87 + shake, 0.157_315_31))
+        * Mat4::from_rotation_x((-13.935f32).to_radians())
+        * Mat4::from_rotation_y((i * 35.3).to_radians())
+        * Mat4::from_rotation_z((i * -9.785).to_radians())
+        * Mat4::from_translation(Vec3::new(0.0, 0.0, power * 0.04))
+        * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0 + power * 0.2))
+        * Mat4::from_rotation_y((i * -45.0).to_radians())
+}
+
+/// [`first_person_bow_chain`] followed by the item's own
+/// `firstperson_?hand` display transform.
+#[must_use]
+pub fn first_person_bow_matrix(arm: Arm, held_ticks: f32, transform: &DisplayTransform) -> Mat4 {
+    first_person_bow_chain(arm, held_ticks) * display_matrix_for_hand(transform, arm.is_left())
+}
+
 /// Mesh the item in the first-person hand into a camera-space [`ModelMesh`], to be
 /// drawn through the ordinary [`ModelPipeline`](crate::ModelPipeline) with
 /// [`hand_projection`] alone as the camera uniform (the same uniform the bare arm
 /// uses, and for the same reason: the pose is already camera-space).
 ///
-/// `eating` selects the pose: `Some((curr_usage_time, use_duration))` runs
-/// [`first_person_eat_matrix`] and `None` runs [`first_person_item_matrix`]. It is a
-/// parameter rather than a separate function so the two cannot diverge in the
-/// lighting or quad-meshing they apply, and so a caller that forgets to plumb the
-/// use state gets the old behaviour rather than a compile-time choice it can make
-/// wrongly in two places.
+/// `item_use` selects the pose. It is a parameter rather than separate mesh
+/// functions so the use cases cannot diverge in lighting or quad-meshing.
 #[must_use]
 pub fn first_person_item_mesh_with_use(
     quads: &[BakedQuad],
@@ -4881,16 +4936,22 @@ pub fn first_person_item_mesh_with_use(
     inverse_arm_height: f32,
     transform: &DisplayTransform,
     light: u8,
-    eating: Option<(f32, u32)>,
+    item_use: Option<FirstPersonItemUse>,
 ) -> ModelMesh {
-    let pose = match eating {
-        Some((curr_usage_time, use_duration)) => first_person_eat_matrix(
+    let pose = match item_use {
+        Some(FirstPersonItemUse::Eat {
+            curr_usage_time,
+            use_duration,
+        }) => first_person_eat_matrix(
             arm,
             curr_usage_time,
             use_duration,
             inverse_arm_height,
             transform,
         ),
+        Some(FirstPersonItemUse::Bow { held_ticks }) => {
+            first_person_bow_matrix(arm, held_ticks, transform)
+        }
         None => first_person_item_matrix(arm, attack_anim, inverse_arm_height, transform),
     };
     mesh_item_quads_with_light(quads, pose, gui_light, light)
@@ -7915,6 +7976,41 @@ mod tests {
         .iter()
         .fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(moved > 0.05, "the swing must move the chain, moved by {moved}");
+    }
+
+    /// A drawn bow does not merely select `bow_pulling_2` geometry.  Vanilla's
+    /// `ItemInHandRenderer` replaces the ordinary held-item chain with this
+    /// BOW transform while the use button is down.
+    #[test]
+    fn charged_bow_pose_matches_vanillas_item_in_hand_transform() {
+        let arm = Arm::Right;
+        let i = arm.invert();
+        let held_ticks = 20.0f32;
+        let power = 1.0f32;
+        let shake = ((held_ticks - 0.1) * 1.3).sin() * (power - 0.1) * 0.004;
+        let expected = Mat4::from_translation(Vec3::new(
+            i * -0.278_568_2,
+            0.183_443_87 + shake,
+            0.157_315_31,
+        ))
+            * Mat4::from_rotation_x((-13.935f32).to_radians())
+            * Mat4::from_rotation_y((i * 35.3).to_radians())
+            * Mat4::from_rotation_z((i * -9.785).to_radians())
+            * Mat4::from_translation(Vec3::new(0.0, 0.0, power * 0.04))
+            * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0 + power * 0.2))
+            * Mat4::from_rotation_y((i * -45.0).to_radians())
+            // `ItemTransform.NO_TRANSFORM` still centres the model cube.
+            * Mat4::from_translation(Vec3::splat(-0.5));
+        let actual = first_person_bow_matrix(arm, held_ticks, &DisplayTransform::default());
+        let delta = (expected - actual)
+            .to_cols_array()
+            .iter()
+            .fold(0.0f32, |max, value| max.max(value.abs()));
+        assert!(
+            delta < 1e-5,
+            "a charging bow must use ItemInHandRenderer's BOW pose, drifted by {delta}"
+        );
+        assert_eq!(held_ticks, 20.0, "full bow charge is 20 elapsed ticks");
     }
 
     /// The five swing scalars against hand-evaluated vanilla values.

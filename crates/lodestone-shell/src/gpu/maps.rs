@@ -284,6 +284,45 @@ pub const ITEM_FRAME_TYPES: [&str; 2] = ["item_frame", "glow_item_frame"];
 /// and the full-bright light its contents draw at.
 pub const GLOW_ITEM_FRAME_TYPE_PATH: &str = "glow_item_frame";
 
+/// Opt-in live switches that remove one map-rendering decision at a time.
+///
+/// These are deliberately diagnostics, not graphics settings: every false
+/// default preserves the production path, while a live report can identify the
+/// first boundary whose removal restores the picture.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct MapDiagnosticSwitches {
+    pub(super) disable_frustum_cull: bool,
+    pub(super) disable_backface_cull: bool,
+    pub(super) disable_depth: bool,
+}
+
+fn map_diagnostic_switches_from(enabled: impl Fn(&str) -> bool) -> MapDiagnosticSwitches {
+    MapDiagnosticSwitches {
+        disable_frustum_cull: enabled("LODESTONE_MAP_DISABLE_FRUSTUM_CULL"),
+        disable_backface_cull: enabled("LODESTONE_MAP_DISABLE_BACKFACE_CULL"),
+        disable_depth: enabled("LODESTONE_MAP_DISABLE_DEPTH"),
+    }
+}
+
+/// Read the process-wide live diagnostic configuration once, before the first
+/// map pipeline is selected. Web builds have no process environment, so they
+/// always retain the ordinary renderer.
+pub(super) fn map_diagnostic_switches() -> MapDiagnosticSwitches {
+    static SWITCHES: std::sync::OnceLock<MapDiagnosticSwitches> = std::sync::OnceLock::new();
+    *SWITCHES.get_or_init(|| {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            map_diagnostic_switches_from(|name| {
+                std::env::var(name).is_ok_and(|entry| !entry.is_empty() && entry != "0")
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            MapDiagnosticSwitches::default()
+        }
+    })
+}
+
 /// The map's gather broad phase, using the same wall-offset entity bounds and
 /// half-block renderer inflation as vanilla rather than centring an invented
 /// envelope on the packet attachment anchor.
@@ -373,6 +412,8 @@ impl FramedMapDiagnosticFrame {
 struct FramedMapGatherDiagnostic {
     model_ready: bool,
     map_source_installed: bool,
+    /// Filled-map item-frame entities observed before any renderer culling.
+    candidate_count: usize,
     /// The configured or once-latched entity remains named even while absent.
     tracked_entity_id: Option<i32>,
     /// The single tracked frame, when it is still in the entity snapshot.
@@ -466,6 +507,7 @@ impl MapLiveDiagnostics {
         if self.gather.as_ref().is_some_and(|previous| {
             previous.model_ready == next.model_ready
                 && previous.map_source_installed == next.map_source_installed
+                && previous.candidate_count == next.candidate_count
                 && previous.tracked_entity_id == next.tracked_entity_id
                 && previous.selected == next.selected
                 && previous.selected_in_frustum == next.selected_in_frustum
@@ -706,9 +748,10 @@ fn note_framed_map_gather(
     if !state.gather_changed(&diagnostic) {
         return;
     }
+    let switches = map_diagnostic_switches();
     persist_map_diagnostic(&format!(
-        "gather camera={:?} yaw={} pitch={} fov={} aspect={} model={} source_installed={} tracked={:?} \
-         in_frustum={} submitted={} instances={} batches={} projection_state={:?} \
+        "gather camera={:?} yaw={} pitch={} fov={} aspect={} model={} source_installed={} candidates={} tracked={:?} \
+         switches={switches:?} in_frustum={} submitted={} instances={} batches={} projection_state={:?} \
          projection={:?} selected={:?}",
         camera.position.to_array(),
         camera.yaw,
@@ -717,6 +760,7 @@ fn note_framed_map_gather(
         camera.aspect,
         diagnostic.model_ready,
         diagnostic.map_source_installed,
+        diagnostic.candidate_count,
         diagnostic.tracked_entity_id,
         diagnostic.selected_in_frustum,
         diagnostic.selected_submitted,
@@ -735,6 +779,8 @@ fn note_framed_map_gather(
         camera_aspect = camera.aspect,
         model_ready = diagnostic.model_ready,
         map_source_installed = diagnostic.map_source_installed,
+        candidate_count = diagnostic.candidate_count,
+        switches = ?switches,
         tracked_entity_id = diagnostic.tracked_entity_id,
         selected_in_frustum = diagnostic.selected_in_frustum,
         selected_submitted = diagnostic.selected_submitted,
@@ -1106,6 +1152,7 @@ impl RenderState {
     ) -> Vec<PreparedMap> {
         const SITE: &str = "item frame";
         let frustum = camera.frustum();
+        let diagnostic_switches = map_diagnostic_switches();
         let candidates: Vec<_> = entities
             .iter()
             .filter(|draw| {
@@ -1117,7 +1164,8 @@ impl RenderState {
         // separate from the diagnostic selection below so a true frustum-edge
         // transition names the candidate that was culled.
         let in_frustum = |draw: &EntityDraw| {
-            framed_map_in_frustum(&frustum, draw.feet, draw.yaw, draw.pitch)
+            diagnostic_switches.disable_frustum_cull
+                || framed_map_in_frustum(&frustum, draw.feet, draw.yaw, draw.pitch)
         };
         let track_candidates = candidates
             .iter()
@@ -1142,6 +1190,7 @@ impl RenderState {
         let mut diagnostic = FramedMapGatherDiagnostic {
             model_ready: self.model.is_some(),
             map_source_installed: self.map_source.is_installed(),
+            candidate_count: candidates.len(),
             tracked_entity_id,
             selected: selected.map(|draw| FramedMapDiagnosticFrame::from_draw(draw)),
             selected_in_frustum: selected.is_some_and(in_frustum),
@@ -1299,6 +1348,28 @@ impl RenderState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn map_diagnostic_switches_only_enable_the_named_branches() {
+        let switches = map_diagnostic_switches_from(|name| match name {
+            "LODESTONE_MAP_DISABLE_FRUSTUM_CULL" => true,
+            "LODESTONE_MAP_DISABLE_BACKFACE_CULL" => true,
+            "LODESTONE_MAP_DISABLE_DEPTH" => true,
+            _ => false,
+        });
+
+        assert!(switches.disable_frustum_cull);
+        assert!(switches.disable_backface_cull);
+        assert!(switches.disable_depth);
+    }
+
+    #[test]
+    fn empty_map_diagnostic_switches_keep_normal_rendering() {
+        assert_eq!(
+            map_diagnostic_switches_from(|_| false),
+            MapDiagnosticSwitches::default()
+        );
+    }
+
     /// The supplied live trace was not the reported in-view disappearance: all
     /// four frames are about 51 blocks away and cross the horizontal frustum
     /// edge during this 9.3° turn. Pin the actual coordinates so a later cull
@@ -1372,6 +1443,7 @@ mod tests {
         let visible = FramedMapGatherDiagnostic {
             model_ready: true,
             map_source_installed: true,
+            candidate_count: 1,
             tracked_entity_id: Some(42),
             selected: Some(frame),
             selected_in_frustum: true,
@@ -1384,6 +1456,7 @@ mod tests {
         let disappeared = FramedMapGatherDiagnostic {
             model_ready: true,
             map_source_installed: true,
+            candidate_count: 1,
             tracked_entity_id: Some(42),
             selected: visible.selected.clone(),
             selected_in_frustum: false,
