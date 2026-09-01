@@ -1770,7 +1770,7 @@ impl RenderState {
                 let map_diagnostic_switches = super::maps::map_diagnostic_switches();
                 let map_pipeline = match (
                     map_diagnostic_switches.disable_backface_cull,
-                    map_diagnostic_switches.disable_depth,
+                    map_diagnostic_switches.disable_depth(),
                 ) {
                     (false, false) => &model.map_surface_pipeline,
                     (true, false) => &model.map_surface_no_cull_pipeline,

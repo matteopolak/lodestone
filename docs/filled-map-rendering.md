@@ -258,14 +258,19 @@ invisible image billboards compare against the attachment wall plane. These fiel
 unresolved upstream `MAP_ITEM_DATA`, a normal frustum-edge cull, a submitted-versus-drawn mismatch and a
 depth-order change without modifying culling, depth state or map placement.
 
-Three native-only, process-start switches can then eliminate one branch at a time; any non-empty value
-other than `0` enables its switch. They never change the default renderer and do not exist on wasm:
+Six native-only, process-start switches can then eliminate one branch at a time; any non-empty value
+other than `0` enables its switch. They never change the default renderer and do not exist on wasm.
+The three depth axes are separate on purpose — a single combined switch changed the comparison, the
+write and the polygon offset together, so a live run under it settled nothing:
 
 | switch | removes | interpretation when the map returns |
 | --- | --- | --- |
 | `LODESTONE_MAP_DISABLE_FRUSTUM_CULL=1` | only `prepare_framed_maps`' CPU item-frame frustum test | the frame reached `EntityDraw`, but the map's wall-offset AABB is the offending boundary |
 | `LODESTONE_MAP_DISABLE_BACKFACE_CULL=1` | only the map pipeline's back-face cull | the quad was prepared but its projected winding/facing is wrong; this does not affect the frame body |
-| `LODESTONE_MAP_DISABLE_DEPTH=1` | only the map pipeline's depth test and write | the quad was prepared and rasterized, but lost against the frame/wall/depth buffer; it will deliberately paint through world geometry while enabled |
+| `LODESTONE_MAP_DISABLE_DEPTH=1` | the map pipeline's depth test, its depth write **and** its polygon offset | the quad was prepared and rasterized but was displaced by one of those three; it will deliberately paint through world geometry while enabled. **This arm cannot say which** — use the three below |
+| `LODESTONE_MAP_DISABLE_DEPTH_TEST=1` | only the comparison (`Always` in place of `LessEqual`) | the quad genuinely loses a depth comparison against something already in the buffer |
+| `LODESTONE_MAP_DISABLE_DEPTH_WRITE=1` | only the depth write | the quad wins its own test and is then overdrawn by something that lost to the depth *it* wrote |
+| `LODESTONE_MAP_DISABLE_DEPTH_BIAS=1` | only `MAP_SURFACE_DEPTH_BIAS` | the polygon offset is displacing the picture. Note the measured prediction is that this arm makes the defect **worse or unchanged**: the bias only ever moves a fragment toward the eye, and an over-large one clamps rather than discarding (`docs/coplanar-overlay-depth.md`). If it *fixes* anything, that measurement is wrong |
 
 Combine switches only after testing them singly. The trace already names the earlier boundaries:
 `candidates=0` means the input `EntityDraw` slice contains no filled-map frame before any renderer cull;

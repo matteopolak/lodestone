@@ -144,6 +144,46 @@ pub const MAP_SURFACE_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
     clamp: CAMERA_DEPTH_BIAS.clamp,
 };
 
+/// The three **independent** things "depth" means for a map-surface pipeline,
+/// so a live diagnostic can remove exactly one of them.
+///
+/// A single `disable_depth` flag conflated all three, and a live run with it set
+/// therefore could not distinguish "the picture loses its depth comparison" from
+/// "the picture's own polygon offset is what displaces it" — two mechanisms with
+/// opposite fixes. Each field is `true` in production; setting one to `false`
+/// removes one decision and nothing else.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MapDepthDiagnostic {
+    /// Keep the depth **comparison**. `false` substitutes
+    /// `CompareFunction::Always`, so the picture paints regardless of what is
+    /// already in the buffer — including through walls.
+    pub compare: bool,
+    /// Keep the depth **write**. `false` leaves the buffer untouched, so the
+    /// picture cannot occlude anything drawn after it.
+    pub write: bool,
+    /// Keep the **polygon offset** ([`MAP_SURFACE_DEPTH_BIAS`]). `false`
+    /// substitutes a zero bias, leaving only the picture's world-space
+    /// clearance to separate it from the surface behind.
+    pub bias: bool,
+}
+
+impl MapDepthDiagnostic {
+    /// Everything on — what every non-diagnostic caller builds.
+    pub const PRODUCTION: Self = Self { compare: true, write: true, bias: true };
+
+    /// All three off. The historical meaning of `LODESTONE_MAP_DISABLE_DEPTH`,
+    /// retained as a named constant precisely because it is the *ambiguous* arm:
+    /// a run that fixes the picture under this says only that one of the three
+    /// was responsible.
+    pub const ALL_OFF: Self = Self { compare: false, write: false, bias: false };
+
+    /// Whether this differs from [`Self::PRODUCTION`] at all.
+    #[must_use]
+    pub const fn is_diagnostic(self) -> bool {
+        !(self.compare && self.write && self.bias)
+    }
+}
+
 impl ModelPipeline {
     /// Build the opaque (`Solid`) model pipeline targeting `color_format`.
     #[must_use]
@@ -201,20 +241,28 @@ impl ModelPipeline {
     /// front texture without moving either mesh in world space.
     #[must_use]
     pub fn for_map_surface(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        Self::for_map_surface_diagnostic(device, color_format, true, true)
+        Self::for_map_surface_diagnostic(
+            device,
+            color_format,
+            true,
+            MapDepthDiagnostic::PRODUCTION,
+        )
     }
 
     /// Build a map-surface variant for a narrowly scoped live diagnostic.
     ///
     /// The caller selects this only when one of Lodestone's `LODESTONE_MAP_*`
-    /// switches is set. It exists to eliminate a single GPU boundary from a
-    /// report; normal item-frame maps always use [`Self::for_map_surface`].
+    /// switches is set. It exists to eliminate a single rendering decision from
+    /// a report; normal item-frame maps always use [`Self::for_map_surface`].
+    ///
+    /// `depth` carries the three depth decisions **separately** — see
+    /// [`MapDepthDiagnostic`] for why one combined flag was not enough.
     #[must_use]
     pub fn for_map_surface_diagnostic(
         device: &wgpu::Device,
         color_format: wgpu::TextureFormat,
         cull_back_face: bool,
-        use_depth: bool,
+        depth: MapDepthDiagnostic,
     ) -> Self {
         Self::build_with_depth(
             device,
@@ -225,40 +273,8 @@ impl ModelPipeline {
             cull_back_face,
             Some(ALPHA_CUTOUT_CUTOUT),
             MAP_SURFACE_DEPTH_BIAS,
-            use_depth,
+            depth,
         )
-    }
-
-    /// Build a map-surface pipeline with the normal depth state and a
-    /// back-face culling diagnostic selected by [`Self::for_map_surface_diagnostic`].
-    #[must_use]
-    pub fn for_map_surface_no_cull(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        Self::for_map_surface_diagnostic(device, color_format, false, true)
-    }
-
-    /// Build a map-surface pipeline that neither tests nor writes depth, for
-    /// diagnosis only. It is intentionally never used by default because it
-    /// paints through the frame and intervening world geometry.
-    ///
-    /// "No depth" is `CompareFunction::Always` with the write disabled, **not**
-    /// a `None` depth-stencil state: the pipeline's depth-stencil state has to
-    /// agree with the render pass's attachment, so a `None` here is a wgpu
-    /// validation failure rather than a pipeline that skips the test. This
-    /// switch was unrunnable for as long as it was written the other way — it
-    /// panicked on the first frame that submitted a map, which is why the
-    /// experiment it exists for had never actually been performed.
-    #[must_use]
-    pub fn for_map_surface_no_depth(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        Self::for_map_surface_diagnostic(device, color_format, true, false)
-    }
-
-    /// Build the combined no-cull/no-depth map diagnostic variant.
-    #[must_use]
-    pub fn for_map_surface_no_cull_no_depth(
-        device: &wgpu::Device,
-        color_format: wgpu::TextureFormat,
-    ) -> Self {
-        Self::for_map_surface_diagnostic(device, color_format, false, false)
     }
 
     /// Build the translucent **fluid** pipeline: like a `Translucent` model
@@ -341,7 +357,7 @@ impl ModelPipeline {
             cull_back_face,
             alpha_cutout,
             depth_bias,
-            true,
+            MapDepthDiagnostic::PRODUCTION,
         )
     }
 
@@ -355,7 +371,7 @@ impl ModelPipeline {
         cull_back_face: bool,
         alpha_cutout: Option<f32>,
         depth_bias: wgpu::DepthBiasState,
-        use_depth: bool,
+        depth: MapDepthDiagnostic,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lodestone-model-shader"),
@@ -522,7 +538,7 @@ impl ModelPipeline {
                 },
                 ..Default::default()
             },
-            // `Some(..)` unconditionally, even for the `use_depth == false`
+            // `Some(..)` unconditionally, even for a fully-disabled depth
             // diagnostic. A pipeline's depth-stencil state must *match the
             // render pass's attachment*, not describe what the pipeline wants
             // to do with it: emitting `None` against a pass that owns a
@@ -532,7 +548,7 @@ impl ModelPipeline {
             // switch is named for and the only form the pass will accept.
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(use_depth && !translucent),
+                depth_write_enabled: Some(depth.write && !translucent),
                 // Vanilla's terrain pipelines all inherit
                 // `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, true)`
                 // (26.2 `RenderPipelines.TERRAIN_SNIPPET` →
@@ -557,21 +573,16 @@ impl ModelPipeline {
                 // double-darkening a water surface — an artefact vanilla's depth
                 // write suppresses. Restore `LessEqual` here if translucent depth
                 // writes are ever restored too.
-                depth_compare: Some(match (use_depth, translucent) {
+                depth_compare: Some(match (depth.compare, translucent) {
                     (false, _) => wgpu::CompareFunction::Always,
                     (true, true) => wgpu::CompareFunction::Less,
                     (true, false) => wgpu::CompareFunction::LessEqual,
                 }),
                 stencil: wgpu::StencilState::default(),
-                bias: if use_depth {
-                    depth_bias
-                } else {
-                    // A bias on an `Always` compare is dead weight that would
-                    // still perturb the written depth if the write were ever
-                    // re-enabled; keep the diagnostic arm free of it so the
-                    // only variable it changes is the test itself.
-                    wgpu::DepthBiasState::default()
-                },
+                // The bias is its **own** axis. It used to be dropped whenever
+                // the depth test was relaxed, which made a single live run
+                // change three things at once and therefore settle nothing.
+                bias: if depth.bias { depth_bias } else { wgpu::DepthBiasState::default() },
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
