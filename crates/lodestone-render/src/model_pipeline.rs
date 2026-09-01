@@ -239,6 +239,14 @@ impl ModelPipeline {
     /// Build a map-surface pipeline that neither tests nor writes depth, for
     /// diagnosis only. It is intentionally never used by default because it
     /// paints through the frame and intervening world geometry.
+    ///
+    /// "No depth" is `CompareFunction::Always` with the write disabled, **not**
+    /// a `None` depth-stencil state: the pipeline's depth-stencil state has to
+    /// agree with the render pass's attachment, so a `None` here is a wgpu
+    /// validation failure rather than a pipeline that skips the test. This
+    /// switch was unrunnable for as long as it was written the other way — it
+    /// panicked on the first frame that submitted a map, which is why the
+    /// experiment it exists for had never actually been performed.
     #[must_use]
     pub fn for_map_surface_no_depth(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
         Self::for_map_surface_diagnostic(device, color_format, true, false)
@@ -514,9 +522,17 @@ impl ModelPipeline {
                 },
                 ..Default::default()
             },
-            depth_stencil: use_depth.then_some(wgpu::DepthStencilState {
+            // `Some(..)` unconditionally, even for the `use_depth == false`
+            // diagnostic. A pipeline's depth-stencil state must *match the
+            // render pass's attachment*, not describe what the pipeline wants
+            // to do with it: emitting `None` against a pass that owns a
+            // `Depth32Float` attachment is a wgpu validation error, not a
+            // pipeline that skips the test. "Disable depth" is therefore
+            // expressed as `Always` + no write, which is the behaviour the
+            // switch is named for and the only form the pass will accept.
+            depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(!translucent),
+                depth_write_enabled: Some(use_depth && !translucent),
                 // Vanilla's terrain pipelines all inherit
                 // `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, true)`
                 // (26.2 `RenderPipelines.TERRAIN_SNIPPET` →
@@ -541,13 +557,21 @@ impl ModelPipeline {
                 // double-darkening a water surface — an artefact vanilla's depth
                 // write suppresses. Restore `LessEqual` here if translucent depth
                 // writes are ever restored too.
-                depth_compare: Some(if translucent {
-                    wgpu::CompareFunction::Less
-                } else {
-                    wgpu::CompareFunction::LessEqual
+                depth_compare: Some(match (use_depth, translucent) {
+                    (false, _) => wgpu::CompareFunction::Always,
+                    (true, true) => wgpu::CompareFunction::Less,
+                    (true, false) => wgpu::CompareFunction::LessEqual,
                 }),
                 stencil: wgpu::StencilState::default(),
-                bias: depth_bias,
+                bias: if use_depth {
+                    depth_bias
+                } else {
+                    // A bias on an `Always` compare is dead weight that would
+                    // still perturb the written depth if the write were ever
+                    // re-enabled; keep the diagnostic arm free of it so the
+                    // only variable it changes is the test itself.
+                    wgpu::DepthBiasState::default()
+                },
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
