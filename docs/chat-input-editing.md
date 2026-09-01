@@ -135,12 +135,7 @@ only place it could be correct.
   doc for why the modifiers cannot be abstracted away here as they are for
   every other menu key, and `app::input::menu_text_editing` for the gates.
 
-### Selection highlighting and the remaining caret limitation
-
-`hud.rs` draws the caret as a trailing `_` appended after the whole line, and
-`HudFrame` carries no caret position — `chat_input: Option<&str>` and
-`chat_caret_visible: bool` are the whole of what it gets. So the caret *moves*
-correctly and *draws* at the end of the line regardless.
+### Selection highlighting and the caret draw
 
 `HudFrame` now carries `chat_selection`, populated from `ChatInput::selection`
 while the chat screen is open. The HUD converts the ordered character range to
@@ -153,21 +148,47 @@ emit an invalid or off-strip fill. This follows
 vanilla-equivalent glyph-inversion pipeline, so the rectangle remains behind
 the white glyphs.
 
-The caret issue remains separate:
+#### The caret follows the cursor, and switches shape
 
-1. `HudFrame` needs `chat_caret: usize` (a `char` index), defaulting to `0`
-   beside `chat_input: None`.
-2. `app/redraw.rs` needs to fill it from `ChatInput::cursor_position`.
-3. In the chat-input draw block, `cursor_x` becomes the width of the line **up
-   to the caret** rather than of the whole line — `b.text_width(&input[..caret_byte],
-   chat_pose_scale)` — and the caret is drawn there. The `_` glyph should become
-   a filled rect once it can sit mid-line, since an underscore overlapping the
-   glyph after it reads as a typo; vanilla's own caret is a rectangle
-   (`TextCursorUtils`) and only degenerates to the appended `_` in the
-   cursor-at-end case this shell had.
-4. The suggestion ghost's `!insert` gate becomes real: vanilla's
-   `insert = cursorPos < value.length() || value.length() >= maxLength`, and the
-   first disjunct now actually happens.
+The caret used to be drawn as a trailing `_` at the width of the **whole** line,
+with `HudFrame` carrying no cursor position at all — so Left/Right really did
+move the insertion point while the indicator stayed pinned to the end. That was
+two defects wearing one symptom, and both are fixed:
+
+- `HudFrame::chat_cursor: Option<usize>` carries the caret as a `char` index,
+  filled from `ChatInput::cursor_position` in `app::redraw`. `None` means "at the
+  end", which is what every caller predating a movable caret meant and what
+  `HudFrame::new` defaults to, so no existing frame changed.
+- `cursor_x` is now vanilla's `cursorX`: `textX + width(text before the caret) + 1`,
+  then one pixel back when `insert` holds. `EditBox.extractWidgetRenderState`
+  reserves that pixel only when the visible slice is non-empty, so an empty line
+  keeps its caret at the text origin. There is no `displayPos` term because the
+  chat box is sized so the whole 256-character budget fits (see
+  `ChatInput::new_box`), which pins it at `0`.
+- The shape is chosen by vanilla's `insert = cursorPos < value.length() ||
+  value.length() >= maxLength`. Both disjuncts are live now; the first used to be
+  treated as permanently false. `insert` draws
+  `TextCursorUtils.extractInsertCursor`'s bar — one pixel wide, spanning the glyph
+  row plus a pixel either side, `fill(x, y - 1, x + 1, y + lineHeight, colour)`
+  with `lineHeight` being the glyph height plus one. Otherwise it draws
+  `extractAppendCursor`'s literal `_` character as text, which is why the caret at
+  the end of a line still looks the way it always did.
+- The suggestion ghost's `!insert` gate is therefore real rather than a
+  constant-folded `true`, and the ghost still sits at `cursorX - 1`, drawn before
+  the caret so the caret composites on top.
+
+`hud::tests::chat_caret_follows_the_cursor_and_becomes_a_bar_mid_string` gates
+both halves. Its fixture is `"abcd"` with the caret at 2 — deliberately neither
+position 0 nor the end, the two inputs where the correct and the buggy answers
+coincide — and each assertion carries the value the old code would have produced
+alongside the right one. Neutering the two halves separately makes it fail on the
+shape and on the x independently.
+
+Everything else editable in this shell (search boxes, the anvil rename field, the
+world-creation name fields, server addresses, the command block, sign and book
+editors) goes through `menu::edit_box::EditBox` and `menu::render::draw`'s
+`draw_edit_box`, which already carried the full rule. Only the chat HUD
+hand-rolled its caret, and only it was wrong.
 
 ## Configuration
 

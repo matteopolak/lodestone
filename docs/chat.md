@@ -17,16 +17,21 @@ module docs cover composing an outbound line) or the log itself
 
 `HudFrame::chat_input` carries the in-progress line, `Some` only while the
 chat box is open. The draw (`hud.rs`, just after the `chat_open` local) emits
-a translucent background strip sized to the chat box, then the typed text
-with a trailing `_` standing in for vanilla's append-caret
-(`TextCursorUtils.extractAppendCursor`, vanilla's "cursor at end" case). There
-is **no leading `>`** — vanilla's `ChatScreen`/`EditBox` never draws one.
+a translucent background strip sized to the chat box, then the typed text and a
+caret. There is **no leading `>`** — vanilla's `ChatScreen`/`EditBox` never
+draws one.
 
-**The append-caret is now a rendering gap, not a description of the model.**
-`ChatInput` is an `EditBox` and its caret really does move — Left/Right,
-Home/End, word skip, a selection — but `HudFrame` carries no caret position, so
-this draw still puts the `_` after the whole line whatever the caret is doing.
-`docs/chat-input-editing.md`'s "Open" section carries the patch.
+**The caret has two shapes, and which one you get is vanilla's `insert`
+predicate**: `cursorPos < value.length() || value.length() >= maxLength`. When it
+holds, the caret is `TextCursorUtils.extractInsertCursor`'s one-pixel bar
+spanning the glyph row plus a pixel either side; otherwise it is
+`extractAppendCursor`'s literal `_` character, drawn as text. `HudFrame` carries
+the caret's `char` index as `chat_cursor`, filled from `ChatInput::cursor_position`,
+and its x is vanilla's `cursorX` — the width of the text **before** the caret,
+plus the one pixel `extractWidgetRenderState` reserves after a non-empty visible
+slice, minus that pixel again in insert mode. `docs/chat-input-editing.md` carries
+the full account, including the two defects this replaced (an x measured from the
+whole line, and an unconditional `_`).
 
 The caret blinks at vanilla's real rate: `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS`
 is `300`, and `isCursorVisible(millis) == (millis / 300) % 2 == 0`
@@ -42,25 +47,24 @@ module owning a clock, matching how every other transient render flag reaches
 autocomplete candidate — `EditBox.extractRenderState`'s own `suggestion`
 field. Three things port from that method, in the order that matters:
 
-1. **Position is `cursorX - 1`, where `cursorX = font.width(value)` — the
-   typed text alone.** The caret contributes no advance of its own in
-   vanilla, because there it is a separately blinking overlay rectangle, not
-   part of the measured string. This shell's caret *is* part of the drawn
-   string (a literal appended `_`, see above), which makes it tempting to
-   measure the pen against `{input}_` — that was a real, shipped bug: it
-   landed the ghost one whole underscore-width too far right, permanently
+1. **Position is `cursorX - 1`, where `cursorX` is measured from the text
+   before the caret alone.** The caret contributes no advance of its own in
+   vanilla, because there it is a separately blinking overlay, not part of the
+   measured string. This shell's append caret *is* a drawn `_` glyph, which makes
+   it tempting to measure the pen against `{input}_` — that was a real, shipped
+   bug: it landed the ghost one whole underscore-width too far right, permanently
    (stable across the blink, but at the wrong x either way).
 2. **Draw order is text → suggestion → cursor**, so the caret composites on
    top of the suggestion's leading glyph rather than the other way round.
    Drawing `{input}{caret}` as one string before the suggestion gets this
    backwards.
 3. **Gated on `!insert`**, where vanilla's `insert = cursorPos <
-   value.length() || value.length() >= maxLength`. Only the second disjunct is
-   implemented here — `ChatInput` caps a line at `MAX_CHAT_LENGTH`, so a full
-   line suppresses the suggestion. The **first** used to be unreachable,
-   because the line had no caret to put anywhere but the end; it is reachable
-   now and is not yet wired, which is the same rendering gap the caret has —
-   see `docs/chat-input-editing.md`.
+   value.length() || value.length() >= maxLength`. **Both** disjuncts are live:
+   `ChatInput` caps a line at `MAX_CHAT_LENGTH`, so a full line suppresses the
+   suggestion, and a caret moved off the end of the line does too. The first used
+   to be treated as permanently false on the grounds that the line had no caret to
+   put anywhere but the end — a claim that stopped being true when `ChatInput`
+   became an `EditBox`, and went on being coded to for a while afterwards.
 
 The colour is vanilla's literal `0x808080` (`SUGGESTION_GHOST`); the draw
 itself takes no font-shadow parameter here (`Builder::text`'s fixed-advance

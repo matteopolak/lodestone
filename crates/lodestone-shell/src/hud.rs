@@ -1460,8 +1460,23 @@ pub struct HudFrame<'a> {
     /// ordered by [`crate::chat::ChatInput::selection`] and clipped again by
     /// the renderer to its text and input-strip bounds.
     pub chat_selection: Option<(usize, usize)>,
-    /// Whether the input line's blinking append-caret is in its "on" phase
-    /// this frame; only meaningful while `chat_input` is `Some`. Vanilla
+    /// The caret's position in [`Self::chat_input`], as a **`char`** index —
+    /// vanilla's `EditBox.cursorPos`. `None` means "at the end of the line",
+    /// which is what every caller that predates a movable caret meant and what
+    /// [`HudFrame::new`] defaults to.
+    ///
+    /// This exists because the draw needs it and had no way to ask: the caret
+    /// used to be placed at `text_width(whole line)` and drawn as an `_`
+    /// unconditionally, so `ChatInput`'s Left/Right really did move the
+    /// insertion point while the indicator stayed pinned to the end. Both
+    /// halves of vanilla's rule — where the caret sits, and whether it is the
+    /// 1 px insert bar or the appended underscore
+    /// (`TextCursorUtils.extractInsertCursor` vs `extractAppendCursor`) — read
+    /// this one field.
+    pub chat_cursor: Option<usize>,
+    /// Whether the input line's blinking caret is in its "on" phase this
+    /// frame; only meaningful while `chat_input` is `Some`. Which *shape* it
+    /// blinks in is [`Self::chat_cursor`]'s business, not this flag's. Vanilla
     /// blinks it every 300ms (`TextCursorUtils.CURSOR_BLINK_INTERVAL_MS`,
     /// `.cache/mc/26.2/client-src/net/minecraft/client/gui/components/TextCursorUtils.java`,
     /// `isCursorVisible(millis) == (millis / 300) % 2 == 0`) — the caller
@@ -1766,6 +1781,7 @@ impl<'a> HudFrame<'a> {
             sound_subtitles: &[],
             chat_input: None,
             chat_selection: None,
+            chat_cursor: None,
             chat_caret_visible: true,
             chat_suggestion_ghost: None,
             chat_suggestions: None,
@@ -2672,17 +2688,19 @@ impl HudGeometry {
                 }
             }
             // No leading `>` — vanilla's `ChatScreen`/`EditBox` draws no
-            // prompt glyph at all, just the typed text and a caret. A
-            // trailing underscore stands in for vanilla's append-caret
-            // (`TextCursorUtils.extractAppendCursor`,
-            // `TextCursorUtils.java`, drawn because the shell's
-            // `ChatInput` only ever edits at the end of the line, vanilla's
-            // "cursor at end" case); `chat_caret_visible` blinks it at
-            // vanilla's real 300ms rate (see [`HudFrame::chat_caret_visible`]).
+            // prompt glyph at all, just the typed text and a caret.
             // The typed line itself is always plain (input filters `§`), so a
             // flat, non-legacy draw is right, and at **full** opacity — vanilla
             // never multiplies the input `EditBox`'s own text by `chatOpacity`,
             // which only governs the scrollback below.
+            //
+            // Vanilla splits this into two draws — the text before the caret at
+            // `textX`, then the text after it at `drawX` — but `drawX` is
+            // `textX + width(before) + 1`, and the insert case immediately takes
+            // that pixel back (`drawX--`), so the two halves land exactly where a
+            // single draw of the whole string puts them. The split only *moves*
+            // glyphs in the append case, where the second half is empty. One draw
+            // is therefore faithful, not an approximation.
             b.text(input, chat_inset, input_y, chat_pose_scale, [1.0, 1.0, 1.0, 1.0]);
             // The highlighted suggestion, previewed in grey **behind** the
             // caret — `EditBox.extractRenderState`'s
@@ -2724,28 +2742,51 @@ impl HudGeometry {
             //    drew `{input}{caret}` as one string, then the ghost after —
             //    on top of the caret, backwards from vanilla either way.
             //
-            // `!insert` gate: vanilla's `insert = cursorPos < value.length() ||
-            // value.length() >= maxLength`. This shell's `ChatInput` only ever
-            // edits at the end of the line (see the caret comment above), so
-            // the first disjunct is always false here; the second is real —
-            // `ChatInput::push_char` caps a line at 256 — so the suggestion is
-            // suppressed once the line is full, matching vanilla rather than
-            // overlapping the last few glyphs.
+            // `insert` is vanilla's `insert = cursorPos < value.length() ||
+            // value.length() >= maxLength`. **Both** disjuncts are live here.
+            // The first used to be treated as permanently false, on the (then
+            // true, since stale) grounds that `ChatInput` only edited at the end
+            // of the line; it grew Left/Right/Home/End caret motion, and this
+            // draw never learned, which is why the indicator stayed pinned to
+            // the end of the line while the insertion point moved. The second is
+            // the `ChatInput`'s own 256-`char` cap
+            // ([`crate::chat::MAX_CHAT_LENGTH`]), which also suppresses the
+            // suggestion ghost once the line is full, matching vanilla rather
+            // than overlapping the last few glyphs.
+            //
+            // `cursor_x` is vanilla's `cursorX`, which is `drawX` *after* the
+            // first half of the text has been drawn: `drawX = textX`, then
+            // `drawX += font.width(half) + 1` where `half` is the text **before
+            // the caret** — not the whole value, which is the second half of the
+            // same bug. Then `if (insert) { cursorX--; }`.
             //
             // The `+ 1` gap is conditional in vanilla, not unconditional:
             // `drawX += font.width(charSequence) + 1;` sits *inside*
             // `if (!displayed.isEmpty())` (`EditBox.extractWidgetRenderState`),
-            // so an empty line reserves no pixel at all and `cursorX` stays at
-            // the text origin — `text_width("")` is already `0.0`, but adding
-            // `chat_pose_scale` unconditionally would still reserve a pixel
-            // vanilla does not for that one case, so the `is_empty` guard
+            // and the guard is on the whole visible slice rather than on the
+            // half — so an empty line reserves no pixel at all and `cursorX`
+            // stays at the text origin, while a caret at position 0 of a
+            // *non*-empty line reserves the pixel and then hands it straight
+            // back through `insert`. `text_width("")` is already `0.0`, but
+            // adding `chat_pose_scale` unconditionally would still reserve a
+            // pixel vanilla does not for the empty case, so the `is_empty` guard
             // matters even though the width term alone would not have.
-            let full = input.chars().count() >= 256;
+            //
+            // The chat input has no horizontal scroll of its own — vanilla's
+            // `displayPos` is always 0 here, because the box is sized so the
+            // whole 256-`char` budget fits (see [`crate::chat::ChatInput`]'s own
+            // note on that) — so `before` is the real prefix rather than a
+            // window into one, and no `relCursorPos` clamp is needed.
+            let char_len = input.chars().count();
+            let cursor_chars = frame.chat_cursor.unwrap_or(char_len).min(char_len);
+            let before: String = input.chars().take(cursor_chars).collect();
+            let full = char_len >= crate::chat::MAX_CHAT_LENGTH;
+            let insert = cursor_chars < char_len || full;
             let cursor_x = if input.is_empty() {
                 chat_inset
             } else {
-                chat_inset + b.text_width(input, chat_pose_scale) + chat_pose_scale
-            };
+                chat_inset + b.text_width(&before, chat_pose_scale) + chat_pose_scale
+            } - if insert { chat_pose_scale } else { 0.0 };
             if !full && let Some(ghost) = frame.chat_suggestion_ghost {
                 b.text(
                     ghost,
@@ -2757,17 +2798,40 @@ impl HudGeometry {
             }
             // The caret, drawn **last** so it composites on top of both the
             // typed text and any ghost suggestion — the literal fix for the
-            // draw-order bug above. A trailing underscore stands in for
-            // vanilla's append-caret
-            // (`TextCursorUtils.extractAppendCursor`,
-            // `TextCursorUtils.java`); `chat_caret_visible` blinks it at
-            // vanilla's real 300ms rate (see [`HudFrame::chat_caret_visible`]).
-            // Drawn at `cursor_x` itself (vanilla's plain `cursorX`, the append
-            // form) — one pixel right of the ghost's `cursor_x - chat_pose_scale`,
-            // which is vanilla's own one-pixel gap between the two, not a
-            // restated offset.
+            // draw-order bug above. `chat_caret_visible` blinks it at vanilla's
+            // real 300ms rate (see [`HudFrame::chat_caret_visible`]).
+            //
+            // Two shapes, chosen by `insert`, exactly as
+            // `EditBox.extractWidgetRenderState`'s final block chooses between
+            // `TextCursorUtils.extractInsertCursor` and `extractAppendCursor`:
+            //
+            // - **append** (`_`): the literal underscore *character*, drawn as
+            //   text at `cursorX`, so it sits under the trailing edge of the
+            //   line. One pixel right of the ghost's
+            //   `cursor_x - chat_pose_scale`, which is vanilla's own one-pixel
+            //   gap between the two, not a restated offset.
+            // - **insert** (`|`): a 1 px-wide filled bar spanning the line, from
+            //   one pixel above the glyph box to one pixel below it —
+            //   `fill(x, y - 1, x + 1, y + lineHeight, color)` with
+            //   `lineHeight == 9 + 1` against 9-tall vanilla glyphs, i.e. the
+            //   glyph height plus two. Reproduced here against this font's own
+            //   `glyph_h` so the bar keeps matching the text it sits between
+            //   rather than inheriting vanilla's glyph metric.
+            //
+            // Both scale with `chat_pose_scale`, which is this surface's
+            // stand-in for one vanilla pixel.
             if frame.chat_caret_visible {
-                b.text("_", cursor_x, input_y, chat_pose_scale, [1.0, 1.0, 1.0, 1.0]);
+                if insert {
+                    b.rect_px(
+                        cursor_x,
+                        input_y - chat_pose_scale,
+                        chat_pose_scale,
+                        (glyph_h + 2.0) * chat_pose_scale,
+                        [1.0, 1.0, 1.0, 1.0],
+                    );
+                } else {
+                    b.text("_", cursor_x, input_y, chat_pose_scale, [1.0, 1.0, 1.0, 1.0]);
+                }
             }
         }
         // The scrollback stacks upward from here — vanilla's own `chatBottom`
@@ -8639,6 +8703,130 @@ mod tests {
             caret_on.vertex_count(),
             caret_off.vertex_count() + 30,
             "chat_caret_visible must toggle exactly one `_` glyph (5 lit pixels)"
+        );
+    }
+
+    /// Owner report: "the actual insertion point moves with Left/Right but the
+    /// flashing underscore stays at the end." Two separate defects behind one
+    /// symptom, and this gate has to see both — the caret's **x** was measured
+    /// from the width of the whole line rather than of the text before the
+    /// caret, and its **shape** was the appended `_` unconditionally where
+    /// vanilla switches to a 1 px insert bar the moment the caret is not at the
+    /// end (`EditBox.extractWidgetRenderState`'s `insert` predicate choosing
+    /// between `TextCursorUtils.extractInsertCursor` and `extractAppendCursor`).
+    ///
+    /// The input and cursor are chosen so the two hypotheses disagree on both
+    /// axes: `"abcd"` with the caret at 2 is neither position 0 (where an empty
+    /// line's append and insert x coincide) nor the end (where the *whole*
+    /// bug is invisible, since "width of the line" and "width of the text
+    /// before the caret" are the same number). Each assertion below therefore
+    /// carries the value the buggy code would have produced as well as the
+    /// right one, so it fails rather than merely being satisfiable.
+    #[test]
+    fn chat_caret_follows_the_cursor_and_becomes_a_bar_mid_string() {
+        let stats = DebugStats::default();
+        let (w, h) = (640u32, 480u32);
+        let input = "abcd";
+        let pose = chat_pose_scale(ChatDisplayOptions::default());
+
+        let build = |cursor: Option<usize>, caret: bool| {
+            HudGeometry::build(
+                &HudFrame {
+                    crosshair: false,
+                    show_debug: false,
+                    chat_input: Some(input),
+                    chat_cursor: cursor,
+                    chat_caret_visible: caret,
+                    ..HudFrame::new(&stats)
+                },
+                w,
+                h,
+            )
+        };
+
+        // The caret is drawn last, and the text and background before it are
+        // identical across all three builds, so everything past the caret-off
+        // build's vertex count *is* the caret. Nothing else in this frame draws
+        // after the input row — the sibling gate above pins that by asserting an
+        // empty input with the caret off emits exactly its 6 background
+        // vertices.
+        let off = build(Some(2), false);
+        let mid = build(Some(2), true);
+        let end = build(None, true);
+
+        // Shape, as a count rather than an eyeball. `_`'s bitmap lights 5 pixels
+        // (5 quads, 30 vertices); the insert bar is a single rect (1 quad, 6).
+        // These are the two hypotheses, and they cannot coincide.
+        assert_eq!(
+            mid.verts.len(),
+            off.verts.len() + 6 * FLOATS_PER_VERTEX,
+            "a caret inside the line must be the 1 px insert bar (one quad), not \
+             the 5-quad `_` glyph"
+        );
+        assert_eq!(
+            end.verts.len(),
+            off.verts.len() + 30 * FLOATS_PER_VERTEX,
+            "a caret at the end of the line must still be the appended `_`"
+        );
+
+        let (logical_w, logical_h) =
+            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
+        let to_px_x = |ndc_x: f32| (ndc_x + 1.0) * 0.5 * logical_w;
+        let to_px_y = |ndc_y: f32| (1.0 - ndc_y) * 0.5 * logical_h;
+        let caret_box = |g: &HudGeometry| {
+            g.verts[off.verts.len()..].chunks(FLOATS_PER_VERTEX).fold(
+                (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY),
+                |(min_x, max_x, min_y, max_y), v| {
+                    let (x, y) = (to_px_x(v[0]), to_px_y(v[1]));
+                    (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
+                },
+            )
+        };
+
+        // Position. `cursorX = textX + width(before) + 1`, then `cursorX--` in
+        // insert mode, so the bar's left edge is `textX + width("ab")` exactly.
+        // The old code's answer — `textX + width("abcd") + 1`, the append form
+        // measured against the whole line — is the `wrong` value below, and the
+        // assertion has to land on one of them.
+        let inset = CHAT_TEXT_INSET * pose;
+        let (mid_left, ..) = caret_box(&mid);
+        let right = inset + measure_text(None, "ab", pose);
+        let wrong = inset + measure_text(None, input, pose) + pose;
+        assert!(
+            (wrong - right) > 1.0,
+            "the fixture must separate the two hypotheses: correct {right}, buggy \
+             {wrong}"
+        );
+        assert!(
+            (mid_left - right).abs() < 0.01,
+            "the insert bar sits after the text before the caret ({right}), not at \
+             the end of the line ({wrong}); measured {mid_left}"
+        );
+
+        // And the append arm still lands where it always did, so the fix moved
+        // the mid-string caret rather than shifting every caret left.
+        let (end_left, ..) = caret_box(&end);
+        assert!(
+            (end_left - wrong).abs() < 0.01,
+            "the appended `_` keeps vanilla's `textX + width(value) + 1`; expected \
+             {wrong}, measured {end_left}"
+        );
+
+        // The bar's rect: vanilla's `fill(x, y - 1, x + 1, y + lineHeight, …)`
+        // spans one pixel above the glyph box to one below it, and is one pixel
+        // wide. Both in this surface's scaled pixels.
+        let (bar_l, bar_r, bar_t, bar_b) = caret_box(&mid);
+        let top = chat_input_top(logical_h, pose);
+        assert!(
+            (bar_r - bar_l - pose).abs() < 0.01,
+            "the insert bar is one (scaled) pixel wide, measured {}",
+            bar_r - bar_l
+        );
+        assert!(
+            (bar_t - (top - pose)).abs() < 0.01
+                && (bar_b - (top + (font::GLYPH_H as f32 + 1.0) * pose)).abs() < 0.01,
+            "the insert bar spans the glyph row plus one pixel either side; got \
+             {bar_t}..{bar_b} against a glyph row starting at {top}"
         );
     }
 
