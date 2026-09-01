@@ -609,6 +609,63 @@ const SIGN_FACE_CLEARANCE: f32 = 1.0 / 256.0;
 /// composition change does not weaken plain text's board separation.
 const SIGN_TEXT_SURFACE_CLEARANCE: f32 = SIGN_FACE_CLEARANCE + 2.0 / 2048.0;
 
+/// Extra clearance for the whole sign-text plane, in blocks, read once from
+/// `LODESTONE_SIGN_TEXT_LIFT_PROBE` at process start. `0.0` is the default and
+/// the only value a non-diagnostic run ever takes.
+///
+/// # Why this is the discriminating switch and the two bias switches are not
+///
+/// The glowing outline and the ordinary ink are emitted at the **same**
+/// clearance — [`push_side_layers_with_state`] passes this one value to both —
+/// so their geometric separation from each other is exactly zero and their whole
+/// ordering is [`SIGN_OUTLINE_DEPTH_BIAS`] against [`SIGN_GLYPH_DEPTH_BIAS`].
+/// They also cannot overlap: [`outline_mask_minus_ink`] emits the dilated mask
+/// **minus** the ink rects, so no outline fragment is ever behind an ink
+/// fragment in the first place. The only surface either of them contests is the
+/// sign board, which is ordinary terrain and carries no polygon offset at all.
+///
+/// That leaves one real difference between the arm that works and the arm that
+/// is reported broken. Plain ink takes `(-20, -2.0)`; the glowing outline takes
+/// `(-10, -1.0)` — **exactly half the offset, on the same plane, against the
+/// same board.** Both bias switches move the outline relative to the ink, which
+/// is a relationship no artefact can be about; this one moves outline and ink
+/// **together**, leaving their ordering untouched, so it asks the only question
+/// that separates "the text plane is too close to the board" from "the outline
+/// is fighting something other than the board".
+///
+/// It is a ruler, not a setting: the smallest value that clears the artefact is
+/// the deficit, exactly as `LODESTONE_MAP_LIFT_PROBE` is for a framed map.
+/// `SIGN_TEXT_SURFACE_CLEARANCE` is `1/256 + 2/2048` — 4.9 mm, *less* than the
+/// 7.9 mm a framed map has — so a probe that has to exceed that is saying the
+/// clearance is not what orders these surfaces at all.
+fn sign_text_lift_probe() -> f32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static PROBE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+        *PROBE.get_or_init(|| {
+            std::env::var("LODESTONE_SIGN_TEXT_LIFT_PROBE")
+                .ok()
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.0)
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        0.0
+    }
+}
+
+/// The plane every sign-text quad — outline and ink alike — is emitted on.
+///
+/// One function rather than two call sites reading a constant, because the
+/// property the probe relies on is that outline and ink move **together**: a
+/// probe applied to one of them would be testing their relative ordering, which
+/// is the thing the two bias switches already vary.
+fn sign_text_surface_clearance() -> f32 {
+    SIGN_TEXT_SURFACE_CLEARANCE + sign_text_lift_probe()
+}
+
 /// Draws world-space sign text — see the module doc for the depth pipeline
 /// and why this is not a billboard.
 #[derive(Debug)]
@@ -1407,7 +1464,7 @@ fn push_side_layers_with_state(
                     piece.y0,
                     piece.x1 - piece.x0,
                     piece.y1 - piece.y0,
-                    SIGN_TEXT_SURFACE_CLEARANCE,
+                    sign_text_surface_clearance(),
                     outline_color,
                 );
             }
@@ -1419,7 +1476,7 @@ fn push_side_layers_with_state(
                 rect.y + y_off,
                 rect.w,
                 rect.h,
-                SIGN_TEXT_SURFACE_CLEARANCE,
+                sign_text_surface_clearance(),
                 rect.color,
             );
         }
@@ -1690,6 +1747,40 @@ mod tests {
         assert_eq!(SIGN_GLYPH_DEPTH_BIAS.slope_scale, 2.0 * CAMERA_DEPTH_BIAS.slope_scale);
         assert_eq!(SIGN_GLYPH_DEPTH_BIAS.clamp, 0.0);
         assert_eq!(SIGN_TEXT_SURFACE_CLEARANCE, 1.0 / 256.0 + 2.0 / 2048.0);
+    }
+
+    /// The glowing outline carries **exactly half** the ink's polygon offset,
+    /// on the same plane, against a board that carries none.
+    ///
+    /// This is the whole difference between the arm that is confirmed working
+    /// live (plain sign text) and the arm that is reported still fighting (the
+    /// glow outline), and it is the reason the recommended live run is a lift on
+    /// the shared plane rather than either of the two bias switches: those move
+    /// the outline *relative to the ink*, and `outline_mask_minus_ink` already
+    /// guarantees no outline fragment ever lands on an ink fragment, so that
+    /// relationship cannot be what an artefact is about.
+    #[test]
+    fn the_glow_outline_carries_half_the_inks_offset_on_the_inks_own_plane() {
+        assert_eq!(
+            SIGN_GLYPH_DEPTH_BIAS.constant,
+            2 * SIGN_OUTLINE_DEPTH_BIAS.constant,
+            "the ink's constant offset must be twice the outline's"
+        );
+        assert!(
+            (SIGN_GLYPH_DEPTH_BIAS.slope_scale - 2.0 * SIGN_OUTLINE_DEPTH_BIAS.slope_scale).abs()
+                < 1.0e-6,
+            "the ink's slope offset must be twice the outline's"
+        );
+        // Both halves are negative — toward the eye — so "half" is genuinely
+        // less separation from the board and not merely a different sign.
+        assert!(SIGN_OUTLINE_DEPTH_BIAS.constant < 0);
+        assert!(SIGN_OUTLINE_DEPTH_BIAS.slope_scale < 0.0);
+        // The probe is inert unless a live run asks for it, and when it is
+        // inert the plane is exactly the shipped constant.
+        assert_eq!(
+            sign_text_surface_clearance(),
+            SIGN_TEXT_SURFACE_CLEARANCE + sign_text_lift_probe()
+        );
     }
 
     /// The positive control: real text on the front side contributes ink,

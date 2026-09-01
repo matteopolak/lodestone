@@ -121,10 +121,43 @@ changes the default renderer and none exists on wasm.
 | `LODESTONE_MAP_DISABLE_DEPTH_BIAS=1` | only `MAP_SURFACE_DEPTH_BIAS` |
 | `LODESTONE_SIGN_OUTLINE_MATCH_GLYPH_DEPTH=1` | the glowing outline's own bias, giving it the ink's instead |
 | `LODESTONE_SIGN_OUTLINE_VANILLA_DEPTH=1` | the glowing outline's bias entirely, which is vanilla's own value for that pass |
+| `LODESTONE_SIGN_TEXT_LIFT_PROBE=<blocks>` | nothing — it *adds* world clearance to the plane **both** the outline and the ink sit on, leaving their ordering untouched |
 
 The first row is the reason the next three exist. A live run under it changed three things
 simultaneously, so a run that fixed the picture could not say **which** of the three was responsible —
 and the three have different fixes. Run the narrow ones singly.
+
+### The glowing sign outline is the same fragile arrangement as a framed map
+
+The live report is that plain sign text is fixed and confirmed good while the **glow** variant's outline
+still fights the board at some angles, independently of every `LODESTONE_MAP_*` flag. Reading the emit path
+rather than the symptom localises it without a run:
+
+* `push_side_layers_with_state` passes **one** clearance to both layers, so the outline and the ink are on
+  the same world plane and their geometric separation from each other is exactly zero at every distance and
+  angle.
+* `outline_mask_minus_ink` emits the dilated mask **minus** the ink rects, so the two are disjoint in the
+  layout and no outline fragment is ever behind an ink fragment. **The outline and the ink cannot fight each
+  other at all**; the only surface either contests is the sign board, which is ordinary terrain and carries
+  `DepthBiasState::default()`.
+* That plane is `1/256 + 2/2048` — **4.9 mm**, *less* than the 7.9 mm a framed map has.
+* Plain ink takes `(-20, -2.0)`. The glowing outline takes `(-10, -1.0)`.
+
+So the difference between the arm that works and the arm that is reported broken is **exactly half the
+polygon offset, on the same plane, against the same board** — and half of a slope term that is already zero
+head-on, which is the shape the framed-map board turned out to have. At 4.9 mm the clearance is worth
+`4096 / d^2` representable depth values, so past about 20 blocks the outline is carried by its `-10`
+constant alone.
+
+Because outline and ink are disjoint, **both existing switches vary a relationship no artefact can be
+about.** `LODESTONE_SIGN_TEXT_LIFT_PROBE` is the one that does not: it moves outline and ink together, so it
+separates "the text plane is too close to the board" from "the outline is fighting something other than the
+board". Run it first, and read the smallest value that clears the artefact as the deficit — a value that has
+to exceed 4.9 mm is saying the clearance is not what orders these surfaces at all. The two bias switches
+stay useful afterwards as brackets: `MATCH_GLYPH` gives the outline the ink's full offset (if that fixes it
+while the lift does not, the outline needed offset rather than clearance, and the disjointness argument
+above is wrong somewhere), and `VANILLA_DEPTH` removes the offset entirely and must make it **strictly
+worse** — an improvement there would retire this whole model.
 
 ## Configuration
 
