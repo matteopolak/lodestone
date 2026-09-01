@@ -272,7 +272,7 @@ write and the polygon offset together, so a live run under it settled nothing:
 | `LODESTONE_MAP_DISABLE_DEPTH_WRITE=1` | only the depth write | the quad wins its own test and is then overdrawn by something that lost to the depth *it* wrote |
 | `LODESTONE_MAP_DISABLE_DEPTH_BIAS=1` | only `MAP_SURFACE_DEPTH_BIAS` | the polygon offset is displacing the picture. Note the measured prediction is that this arm makes the defect **worse or unchanged**: the bias only ever moves a fragment toward the eye, and an over-large one clamps rather than discarding (`docs/coplanar-overlay-depth.md`). If it *fixes* anything, that measurement is wrong |
 
-| `LODESTONE_MAP_LIFT_PROBE=<blocks>` | nothing — it *adds* outward clearance to the picture's pose | this is a ruler rather than a switch: the smallest value that restores the picture **is** the deficit. Under `0.008` means the surfaces are effectively tied; `0.0625` means the content lift is the wrong one of vanilla's two; `0.5` means the picture is on the wrong side of its attachment block; never coming back means it is not a world-space deficit at all |
+| `LODESTONE_MAP_LIFT_PROBE=<blocks>` | nothing — it *adds* outward clearance to the picture's pose | this is a ruler rather than a switch: the **smallest** value that restores the picture is the deficit, so one value that works is an upper bound and nothing more. Under `0.008` means the surfaces are effectively tied; `0.0625` means the content lift is the wrong one of vanilla's two; `0.5` means the picture is on the wrong side of its attachment block; never coming back means it is not a world-space deficit at all |
 
 Combine switches only after testing them singly. The trace already names the earlier boundaries:
 `candidates=0` means the input `EntityDraw` slice contains no filled-map frame before any renderer cull;
@@ -360,6 +360,43 @@ the pose is right and something else owns those pixels. `map_in_front_mask` cann
 reports only which side each corner fell on, and its corner *pairing* is unreliable because the pose's
 `Ry(180)` reverses the picture's x order relative to the comparison quad. Index 0 is both surfaces'
 centre, so it is paired correctly at any turn, which is why the margin is measured there.
+
+### What the live probe run established, and what it did not
+
+`LODESTONE_MAP_LIFT_PROBE=0.02` clears **both** live defects at the reporting location: the invisible-frame
+board is whole and the visible frame's picture stops z-fighting. That is an **upper** bound on the deficit
+and only that. The switch's own rule is that the *smallest* value that works is the measurement, and one
+value is not a bracket — a deficit of 0.001 and a deficit of 0.019 both produce a working 0.02.
+
+The arithmetic says how small it could be. Head-on, the slope half of the polygon offset is zero, so the
+picture's entire margin is the `-20` constant, which is worth `20 * 5.96e-8` of depth; converted back to
+world units at eye distance `d` that is `2.4e-5 * d^2` blocks. So a deficit of only **0.0034** blocks is
+enough to lose at 12 m, **0.0095** at 20 m, and **0.0137** at 24 m. Every one of those is under the
+`1.01 / 128` clearance itself, so "0.02 worked" does not rule out a sub-clearance, precision-shaped
+deficit, and it does not imply the lift is inverted.
+
+**The lift is not inverted.** `the_picture_stands_in_front_of_its_wall_at_every_facing_of_the_direction_table`
+measures the shipped pose's signed clearance from the attachment block's face at all six facings, at this
+build's own block, against a **hand-written `Direction` table** rather than against
+`item_frame_facing_step` — which is the function the pose itself is built from, so every other gate in this
+subsystem shares its convention and would invert with it. The helper agrees with the table at all six, and
+the clearance is positive everywhere: `+0.0078125` south/north, `+0.0079346` west/east, `+0.0078888`
+up/down, against vanilla's `1.01 / 128 = 0.0078906`.
+
+Two things that measurement is worth keeping for. **The spread is f32 quantization, not error**: at
+`x/z ~ 3811` a single-precision position is representable only every `2^-12` of a block, so the picture's
+whole 7.9 mm separation from its wall is **32.3 representable steps** wide at this build's coordinates and
+cannot be expressed more finely than 0.24 mm. A fixed `1e-5` tolerance fails here and passes at the origin,
+which is why the gate derives its tolerance from the coordinate magnitude and prints the quantum.
+
+And **the first version of that gate was vacuous in a way worth naming**, because it is the closed loop this
+file already warns about, one axis over. It took care to source the *facing* from outside the code under
+test and then wrote the *magnitude* as `MAP_RENDERER_DEPTH` — the very constant in question. Its neuter
+flipped that constant's sign, the expectation flipped with it, and the gate reported `ok` while printing six
+negative clearances: the picture buried in its wall, certified correct. The expectation is now vanilla's own
+`1.01 / 128` written as a literal, and the sign is asserted as a **separate** claim from the magnitude,
+because a correctly-sized clearance pointing the wrong way satisfies a magnitude check whose expectation is
+allowed to move. Under the same neuter it now fails, naming all six facings.
 
 ## Dependencies
 

@@ -1861,6 +1861,136 @@ mod tests {
         }
     }
 
+    /// The picture's signed clearance from the face of the block it hangs on,
+    /// at all six facings, against a **hand-written `Direction` table** rather
+    /// than against [`lodestone_render::entity::item_frame_facing_step`].
+    ///
+    /// # Why the table, when a helper already answers this
+    ///
+    /// Every other pose gate in this file — and the board gate in
+    /// `tests/framed_map_pixels.rs` — takes its outward direction from
+    /// `item_frame_facing_step`, which is the same function
+    /// [`framed_map_pose`] builds the pose out of. That is `decode(encode(x))
+    /// == x`: if the facing were inverted, the pose and the expectation would
+    /// invert together and every one of those gates would still pass, while the
+    /// picture sat on the wrong side of its wall. The expectation here comes
+    /// from `Direction`'s own definition instead — `get2DDataValue` orders
+    /// south, west, north, east, and `ItemFrame.setDirection` writes
+    /// `2D * 90` into the entity's `yRot` with `xRot` zero, or `yRot` zero and
+    /// `xRot = -90 * axisDirection.getStep()` for the two vertical ones — so
+    /// the two sources share no code.
+    ///
+    /// # What the number means
+    ///
+    /// A hanging entity's attachment block is the one it *occupies*; the wall is
+    /// the neighbour at `-direction`, so the surface the picture contests is the
+    /// plane `0.5` back along the facing from the block centre. An invisible
+    /// frame's content lift lands exactly on that plane and `MapRenderer`'s own
+    /// `-1.01` (after `scale(1/128)`) pulls it back out, so the clearance must be
+    /// `+MAP_RENDERER_DEPTH` — **positive, meaning toward the room**. This is the
+    /// quantity a live report of the picture losing to its wall is a claim
+    /// about, and it is printed rather than only asserted so a run reads as a
+    /// measurement.
+    #[test]
+    fn the_picture_stands_in_front_of_its_wall_at_every_facing_of_the_direction_table() {
+        // (yaw, pitch, Direction, its step vector) — transcribed from
+        // `Direction`'s own ordering, not from any helper in this workspace.
+        let table: [(f32, f32, &str, Vec3); 6] = [
+            (0.0, 0.0, "SOUTH", Vec3::new(0.0, 0.0, 1.0)),
+            (90.0, 0.0, "WEST", Vec3::new(-1.0, 0.0, 0.0)),
+            (180.0, 0.0, "NORTH", Vec3::new(0.0, 0.0, -1.0)),
+            (270.0, 0.0, "EAST", Vec3::new(1.0, 0.0, 0.0)),
+            (0.0, -90.0, "UP", Vec3::new(0.0, 1.0, 0.0)),
+            (0.0, 90.0, "DOWN", Vec3::new(0.0, -1.0, 0.0)),
+        ];
+        // The live server's own block, so the measurement is taken where the
+        // report is and not at an origin whose small magnitudes round
+        // differently.
+        let block = Vec3::new(1970.0, 76.0, 3811.0);
+        let block_centre = block + Vec3::splat(0.5);
+        // The tolerance is **derived from the coordinates**, not picked. At
+        // `x/z ~ 3811` a single-precision position is representable only every
+        // `2^-12` of a block — 0.24 mm — so a 7.9 mm clearance carries about 3%
+        // of quantization before anything is wrong, and a fixed `1e-5` epsilon
+        // fails here while passing at the origin. That quantum is a measurement
+        // in its own right: it is what the picture's whole separation from the
+        // wall is spelled in at this build's coordinates.
+        let quantum = {
+            let magnitude = block_centre.x.abs().max(block_centre.z.abs());
+            f32::from_bits(magnitude.to_bits() + 1) - magnitude
+        };
+        let tolerance = 2.0 * quantum;
+        eprintln!(
+            "world coordinate quantum at {:?}: {quantum:.9} blocks; \
+             MAP_RENDERER_DEPTH is {MAP_RENDERER_DEPTH:.9}, i.e. {:.1} representable steps",
+            block_centre.to_array(),
+            MAP_RENDERER_DEPTH / quantum
+        );
+        // Collected, not asserted in the loop: an `assert!` inside it proves one
+        // facing and leaves the other five as an argument.
+        let mut wrong: Vec<String> = Vec::new();
+        for (yaw, pitch, name, step) in table {
+            // What the renderer's own helper thinks the facing is. Reported
+            // beside the clearance so a disagreement names itself rather than
+            // showing up only as a sign.
+            let helper = lodestone_render::entity::item_frame_facing_step(yaw, pitch);
+            // The wall's room-facing plane, from the table alone.
+            let wall_face = block_centre - step * 0.5;
+            // The expectation is a **literal**, not `MAP_RENDERER_DEPTH`. Writing
+            // the constant here reads as rigour and is a closed loop: flipping
+            // its sign flips the expectation with it, so the gate passes with
+            // the picture buried in the wall. Measured — the first version of
+            // this test did exactly that, and its neuter printed six negative
+            // clearances and still reported `ok`. The number below is vanilla's
+            // own chain instead: `translate(0, 0, -1)` after `scale(1/128)`,
+            // plus `MapRenderer`'s `-0.01` vertex z at that same scale, along a
+            // frame-local `+z` that `Axis.YP.rotationDegrees(180 - toYRot)`
+            // points into the wall.
+            let vanilla_map_plane = 1.01 / 128.0;
+            for (kind, invisible, expected) in [
+                ("invisible", true, vanilla_map_plane),
+                // A visible frame's picture stands its own body's front plate
+                // clear of the wall as well: vanilla's `0.4375` content lift is
+                // `1/16` short of the face, and `MapRenderer` adds its own step.
+                ("visible", false, vanilla_map_plane + 1.0 / 16.0),
+            ] {
+                let picture = framed_map_pose_with_extra_lift(block, yaw, pitch, 0, invisible, 0.0)
+                    .transform_point3(Vec3::ZERO);
+                let clearance = (picture - wall_face).dot(step);
+                eprintln!(
+                    "{name:<5} {kind:<9} helper_facing {:?} clearance {clearance:+.7} blocks \
+                     (want {expected:+.7})",
+                    helper.to_array()
+                );
+                if (helper - step).length() > 1.0e-5 {
+                    wrong.push(format!(
+                        "{name}: item_frame_facing_step gave {:?}, the Direction table says {:?}",
+                        helper.to_array(),
+                        step.to_array()
+                    ));
+                }
+                // Two separate claims, because the magnitude check alone is
+                // satisfied by a correctly-sized clearance pointing the wrong
+                // way once the expectation is allowed to move with it.
+                if clearance <= 0.0 {
+                    wrong.push(format!(
+                        "{name} {kind}: the picture is {} blocks INSIDE its wall — the lift is \
+                         pointing the wrong way",
+                        -clearance
+                    ));
+                }
+                if (clearance - expected).abs() > tolerance {
+                    wrong.push(format!(
+                        "{name} {kind}: the picture stands {clearance} blocks off its wall face, \
+                         wanted {expected} (tolerance {tolerance}, one coordinate quantum is \
+                         {quantum})"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// The live clearance probe must move the picture **out of** the wall.
     ///
     /// It is a ruler for a live report, and a ruler that reads backwards is
