@@ -96,8 +96,11 @@ fn rocket(id: i32, type_path: &str, flags: Option<FireworkFlags>, at: glam::Vec3
         // item field was never marked dirty genuinely draws as, so this is the
         // *common* case rather than a degraded one.
         item: None,
+        item_model: None,
+        item_skin: None,
         main_arm_left: false,
         equipment: Vec::new(),
+        equipment_skin: Vec::new(),
         equipment_dye: Vec::new(),
         equipment_trim: Vec::new(),
         feet: at,

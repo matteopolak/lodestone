@@ -339,14 +339,10 @@ frame.
 filtering) needs a per-line message-source tag that
 `lodestone_game::chat::ChatLog::recent` currently flattens away before it
 reaches the HUD; `chatDelay` is a message-arrival rate limit, not a render
-concern. `chatLinks`/`chatLinksPrompt` no longer belong on this list —
-click detection landed (see "Interactivity" below) — but the *option itself*
-still has no reader: this shell has no confirmation-screen state to gate an
-`open_url` click on yet, so the option that would toggle "ask before opening"
-has nothing to control. Landing an option field with no reader is the exact
-defect `CLAUDE.md` calls the dominant one here, so this one stays out until
-that screen exists — see `crate::hud::ChatDisplayOptions`'s own doc comment
-for the same note in code.
+concern. `chatLinks`/`chatLinksPrompt` also remain unpersisted, but for a
+different reason: every server-supplied `open_url` now always takes the
+untrusted confirmation path, so there is no silent-open mode for an option to
+select yet.
 
 ### Interactivity: `click_event`/`hover_event`
 
@@ -386,41 +382,35 @@ places:
 `HudRenderer::chat_interaction_at` (the renderer-side wrapper that supplies
 the attached font's measure closure, the same relationship
 `HudRenderer::suggestion_layout` has to the free `suggestion_layout`) walk
-the visible scrollback newest-first with the *exact* free functions the draw
+the visible scrollback's current `ChatScroll::scrolled` window newest-first,
+with the *exact* free functions the draw
 itself calls — `chat_width_px`/`chat_height_px`/`chat_pose_scale`/
 `chat_line_h`/`chat_bottom` — so a resize or an options edit cannot leave a
-hit-test aiming at stale pixels. `wrap_interactive_with` is
+hit-test aiming at either stale pixels or the hidden live-bottom page.
+`wrap_interactive_with` is
 `wrap_spans_with`'s sibling, extended to carry each character's `click`/
 `hover` through the same word-break algorithm; `interactive_span_at` walks
 one already-wrapped row measuring each character's own run style, exactly
 the way the draw's glyph advance would.
 
-**Click dispatch is real and reaches the wire, but the safety story is
-deliberately incomplete.** `WindowApp::dispatch_click_action`
+**Click dispatch is real and reaches the wire.** `WindowApp::dispatch_click_action`
 (`app/menus.rs`), wired into the existing chat-open `MouseInput` handler in
 `app/lifecycle.rs` (behind the suggestion popup, which still gets first
 refusal): `run_command` sends through `Sim::send_chat` exactly as if it had
 been typed and Enter pressed; `suggest_command` fills `ChatInput` without
 sending; `copy_to_clipboard` goes through the now test-safe
-`crate::menu::accounts::copy_to_clipboard`. `open_url`/`open_file` do
-**not** call `crate::menu::accounts::open_in_browser` — vanilla itself
-gates `open_url` behind `ConfirmLinkScreen` precisely because a chat message
-is server-supplied, untrusted content, and this shell has no such screen
-wired to chat yet. Rather than silently drop the click or open with no
-confirmation at all, the destination is surfaced as a client-authored chat
-line (`Sim::push_local_chat`) showing it in full, so the player can act on
-it deliberately. **The natural follow-up is wiring `crate::menu::confirm`'s
-existing `ConfirmScreen` machinery — already used for world deletion and the
-resource-pack prompt — to this click instead of the chat line**, at which
-point the `chatLinksPrompt` option above finally has something to gate.
+`crate::menu::accounts::copy_to_clipboard`. `open_url` enters the existing
+untrusted-link confirmation overlay and opens the browser only after Yes;
+No/Escape restore Chat. `open_file` stays unsupported and is surfaced as a
+local line rather than touching the filesystem.
 
-**Hover has no consumer yet.** `chat_interaction_at` finds a `hover_event`
-under the cursor the same way it finds a `click_event`, and
-`WindowApp::chat_interaction` returns it, but nothing renders a tooltip box
-from it — that is the one link in this chain that stops one hop short of
-pixels. `show_item`/`show_entity` are modelled by the wire/tree layer only
-as their raw payload text (`lodestone_model::text::HoverEvent`'s own doc);
-only `show_text` has anything a tooltip box could draw verbatim today.
+**Hover reaches the tooltip layer.** While chat is open, `app/redraw.rs`
+queries the same hit-test used for clicks and supplies the hovered event's
+span-preserving `Text` value to `HudFrame::chat_hover_tooltip`. The HUD draws
+it last, like vanilla's deferred tooltip layer. `show_text`, `show_item`, and
+`show_entity` therefore all present the model's faithfully retained text
+payload; item/entity-specific widget rendering remains outside this raw-text
+model boundary.
 
 ## How to change it
 

@@ -111,6 +111,8 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         id: DROP_ID,
         type_path: std::sync::Arc::from(ITEM_ENTITY_TYPE_PATH),
         item,
+        item_model: None,
+        item_skin: None,
         main_arm_left: false,
         feet: DROP_POS,
         yaw: 0.0,
@@ -124,6 +126,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         // A dropped item entity carries no equipment; this gate is about the
         // item's own ground pose, not a held-item layer.
         equipment: Vec::new(),
+        equipment_skin: Vec::new(),
         equipment_dye: Vec::new(),
         equipment_trim: Vec::new(),
         // Not a sheep, and a single-item stack: `count` above 1 asks for
@@ -476,6 +479,8 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         type_path: std::sync::Arc::from(type_path),
         // Exactly what `extract_entity_draws` produces for a non-`item` entity.
         item: None,
+        item_model: None,
+        item_skin: None,
         main_arm_left: false,
         feet: DROP_POS,
         yaw: 0.0,
@@ -484,6 +489,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         scale: 1.0,
         anim: AnimInput::REST,
         equipment: Vec::new(),
+        equipment_skin: Vec::new(),
         equipment_dye: Vec::new(),
         equipment_trim: Vec::new(),
         wool: None,

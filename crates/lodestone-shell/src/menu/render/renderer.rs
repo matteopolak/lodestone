@@ -456,7 +456,18 @@ impl MenuRenderer {
         // one screen whose `extractBackground` override is empty — so it is the one
         // screen with no wash, which is why the distinction lives here and not in
         // `MenuBackdrop`.
-        let panorama_dim = panorama::dim_for_screen(frame.logo);
+        // A textured raw menu background is emitted by `draw::build` after the
+        // panorama. Its vanilla pixels are the same 25 %-black wash the old
+        // panorama shader applied, but a server pack may replace them with real
+        // art; keep the shader wash only as the atlas-less fallback or it would
+        // darken vanilla twice and tint a pack texture underneath a second wash.
+        let textured_background = super::draw::screen_background_sprite(frame)
+            .is_some_and(|id| self.sprites.as_ref().is_some_and(|sprites| sprites.atlas.contains(id)));
+        let panorama_dim = if textured_background {
+            0.0
+        } else {
+            panorama::dim_for_screen(frame.logo)
+        };
         // Before the font is read below: a pack change made on the Resource
         // Packs screen has to reach the very next frame, and this screen is
         // drawn over that one.
@@ -605,4 +616,3 @@ impl MenuRenderer {
         queue.submit(std::iter::once(encoder.finish()));
     }
 }
-

@@ -265,6 +265,7 @@ fn subject_at(distance: f32) -> EntityDraw {
         type_path: std::sync::Arc::from("zombie"),
         item: None,
         item_model: None,
+        item_skin: None,
         main_arm_left: false,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),

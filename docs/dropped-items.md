@@ -89,14 +89,26 @@ sample from `RenderState`'s `EntityLightSource` — the same source the mobs use
   `set_item_stack` remains public: `update` calls it from the snapshot, and it
   is still the direct seam for a caller that learns an identity another way.
 
+- **`minecraft:item_model` selects the render definition for a drop.**
+  `resolve_entity_facts` carries the optional selector through `TrackedStack`;
+  `TrackedStack::render_definition` chooses it over the gameplay id only when
+  `extract_entity_draws` emits a `minecraft:item` draw. The base id remains in
+  the tracked stack, so stack-owned facts such as a player head's profile are
+  still derived from the actual gameplay item. This is the same client
+  definition choice that the inventory and held-item paths make, not a
+  server-specific item-name rule.
+
 - **`EntitySnapshot::item` is a `ResourceLocation`, not an `ItemStack`.**
   `EntitySnapshot` deliberately depends on neither `lodestone-client` nor
   `lodestone-model` — that is what makes `entities.rs` testable with no server
   and no GPU — so `net::entity_snapshot` is the single place that knows both
-  types and converts. `count` and `components` are dropped there; see the two
-  bullets below for what that costs. Widening `EntitySnapshot` with a plain
-  `u32` count needs no model dependency and is the intended way to restore the
-  visible half.
+  types and converts. `count` and almost all components are dropped there; a
+  `minecraft:player_head`'s `minecraft:profile` is the deliberate visual
+  exception. `resolve_entity_facts` decodes its skin URL beside the compact id,
+  starts the shared remote-skin request, and keeps that URL through
+  `TrackedStack` to `EntityDraw` for the special-head renderer. Widening
+  `EntitySnapshot` with a plain `u32` count needs no model dependency and is
+  the intended way to restore the visible half.
 
 - **`display.ground` *is* reachable now — this section said the opposite for a
   while, and that stale note was cited as fact.** `ItemGeometry::display` carries
@@ -186,9 +198,10 @@ sample from `RenderState`'s `EntityLightSource` — the same source the mobs use
 - **Pickup animation — landed** (issue #365), see
   [item-pickup-animation.md](./item-pickup-animation.md). The flight reuses this
   page's draw path exactly: it emits an ordinary `EntityDraw` with
-  `type_path == "item"`, so `prepare_item_geometry` needed no change. This bullet
-  used to read "nothing in the shell consumes that feed, so a collected item
-  vanishes"; the missing hop was one arm in `net.rs`'s `forward`.
+  `type_path == "item"` and freezes the selected render definition, so
+  `prepare_item_geometry` resolves the same pack model during the flight. This
+  bullet used to read "nothing in the shell consumes that feed, so a collected
+  item vanishes"; the missing hop was one arm in `net.rs`'s `forward`.
 
 ## Configuration
 
@@ -226,6 +239,11 @@ None. Every number is a vanilla constant in `lodestone-render/src/entity.rs`:
   position and the two items are summoned at different coordinates, so a
   "differing pixels > 0" assertion there would be a *world*-species vacuous test —
   pointed at a scene that structurally cannot contain its subject.
+- `entities::tests::a_dropped_draw_uses_its_stacks_item_model_definition` and
+  `a_pickup_draw_retains_its_stacks_item_model_definition` — a gameplay
+  `minecraft:diamond_sword` with `minecraft:item_model = server:gun` must reach
+  both ground and in-flight `EntityDraw`s as the selected `server:gun`
+  definition.
 
 - `lodestone-render/tests/sprite_drop_pixels.rs` — the pixel evidence for the
   extruded slab specifically: a silhouette inside the item's own projected box,

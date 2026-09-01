@@ -512,6 +512,7 @@ fn freeze_confusion_and_portal_survive_third_person_unlike_the_others() {
             swim_amount: 0.0,
             slim: false,
             equipment: Vec::new(),
+            equipment_skin: Vec::new(),
         })
     });
     let frame = target.acquire().expect("acquire");

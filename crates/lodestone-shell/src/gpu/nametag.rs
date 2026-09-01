@@ -179,11 +179,12 @@
 //! module duplicates it from `crate::resources` — see that module's doc.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use glam::Vec3;
 use lodestone_assets::font::{FontLoader, FontOptions, GlyphRaster, MISSING_ADVANCE, RasterFont, metrics};
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
-use lodestone_model::text::{Text, TextColor, TextSpan};
+use lodestone_model::text::{FontId, Text, TextColor, TextSpan};
 use lodestone_render::entity::camera_orientation;
 use lodestone_render::{Camera, DEPTH_FORMAT};
 
@@ -370,6 +371,23 @@ pub(super) struct StyledRect {
     pub(super) outline_grow: f32,
 }
 
+/// The raster selected for one component glyph. A borrowed default font keeps
+/// the ordinary no-pack path allocation-free; a shared value keeps a lazily
+/// loaded resource-pack font alive for the whole glyph walk.
+pub(super) enum ResolvedRaster<'a> {
+    Borrowed(&'a RasterFont),
+    Shared(Arc<RasterFont>),
+}
+
+impl AsRef<RasterFont> for ResolvedRaster<'_> {
+    fn as_ref(&self) -> &RasterFont {
+        match self {
+            Self::Borrowed(raster) => raster,
+            Self::Shared(raster) => raster,
+        }
+    }
+}
+
 /// One string's finished *styled* ink-run layout — the spanned sibling of
 /// the cache below.
 pub(super) type StyledInkLayout = std::sync::Arc<(Vec<StyledRect>, f32)>;
@@ -384,6 +402,7 @@ pub(super) type StyledInkLayout = std::sync::Arc<(Vec<StyledRect>, f32)>;
 #[derive(Debug, Default)]
 pub(super) struct StyledInkLayoutCache {
     inner: std::sync::Mutex<std::collections::HashMap<Vec<TextSpan>, StyledInkLayout>>,
+    resolved: std::sync::Mutex<std::collections::HashMap<(u64, Vec<TextSpan>), StyledInkLayout>>,
 }
 
 impl StyledInkLayoutCache {
@@ -406,6 +425,35 @@ impl StyledInkLayoutCache {
         }
         let layout: StyledInkLayout = std::sync::Arc::new(layout_styled_ink_runs(raster, spans));
         map.insert(spans.to_vec(), std::sync::Arc::clone(&layout));
+        layout
+    }
+
+    /// The resource-pack-aware form of [`Self::layout`]. A selected font can
+    /// change on a pack reload even when the component text is unchanged, so
+    /// the generation is part of this cache's identity rather than a global
+    /// clear that could race a frame still using the prior font snapshot.
+    pub(super) fn layout_resolved<'a, F>(
+        &self,
+        generation: u64,
+        spans: &[TextSpan],
+        select: F,
+    ) -> StyledInkLayout
+    where
+        F: FnMut(u32, Option<FontId>) -> ResolvedRaster<'a>,
+    {
+        let mut map = self
+            .resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (generation, spans.to_vec());
+        if let Some(hit) = map.get(&key) {
+            return std::sync::Arc::clone(hit);
+        }
+        if map.len() >= Self::MAX_ENTRIES {
+            map.clear();
+        }
+        let layout: StyledInkLayout = std::sync::Arc::new(layout_styled_ink_runs_resolved(spans, select));
+        map.insert(key, std::sync::Arc::clone(&layout));
         layout
     }
 }
@@ -504,6 +552,19 @@ pub(super) fn styled_advance_width(raster: &RasterFont, spans: &[TextSpan]) -> f
 }
 
 pub(super) fn layout_styled_ink_runs(raster: &RasterFont, spans: &[TextSpan]) -> (Vec<StyledRect>, f32) {
+    layout_styled_ink_runs_resolved(spans, |_, _| ResolvedRaster::Borrowed(raster))
+}
+
+/// [`layout_styled_ink_runs`] with vanilla's per-span font selection supplied
+/// by the caller. A selected font wins only for codepoints it actually covers;
+/// callers return the default raster for the ordinary fallback case.
+pub(super) fn layout_styled_ink_runs_resolved<'a, F>(
+    spans: &[TextSpan],
+    mut select: F,
+) -> (Vec<StyledRect>, f32)
+where
+    F: FnMut(u32, Option<FontId>) -> ResolvedRaster<'a>,
+{
     const BASE_RGB: [f32; 3] = [1.0, 1.0, 1.0];
 
     let mut cursor = 0.0f32;
@@ -519,6 +580,8 @@ pub(super) fn layout_styled_ink_runs(raster: &RasterFont, spans: &[TextSpan]) ->
 
         for ch in span.text.chars() {
             let cp = ch as u32;
+            let selected = select(cp, span.style.font);
+            let raster = selected.as_ref();
             let x0 = cursor;
             let glyph_raster = raster.raster(cp);
             let base_advance = glyph_raster
@@ -544,7 +607,11 @@ pub(super) fn layout_styled_ink_runs(raster: &RasterFont, spans: &[TextSpan]) ->
                             continue;
                         }
                         let run_start = tx;
-                        while tx < r.cell_width() && r.is_ink(tx, ty) {
+                        let source = r.texel_rgba(tx, ty);
+                        while tx < r.cell_width()
+                            && r.texel_rgba(tx, ty) == source
+                            && source[3] != 0.0
+                        {
                             tx += 1;
                         }
                         let shear = if italic {
@@ -553,6 +620,12 @@ pub(super) fn layout_styled_ink_runs(raster: &RasterFont, spans: &[TextSpan]) ->
                         } else {
                             0.0
                         };
+                        let color = [
+                            color[0] * source[0],
+                            color[1] * source[1],
+                            color[2] * source[2],
+                            color[3] * source[3],
+                        ];
                         let rx = x0 + left + shear + run_start as f32 * texel;
                         let ry = top + ty as f32 * texel;
                         let rw = (tx - run_start) as f32 * texel;
@@ -1260,6 +1333,7 @@ mod tests {
             type_path: std::sync::Arc::from("pig"),
             item: None,
             item_model: None,
+            item_skin: None,
             main_arm_left: false,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
@@ -1351,6 +1425,7 @@ mod tests {
             type_path: std::sync::Arc::from("pig"),
             item: None,
             item_model: None,
+            item_skin: None,
             main_arm_left: false,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
@@ -1466,6 +1541,7 @@ mod tests {
             type_path: std::sync::Arc::from("pig"),
             item: None,
             item_model: None,
+            item_skin: None,
             main_arm_left: false,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
@@ -1749,6 +1825,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolved_layout_uses_a_pack_glyph_and_modulates_its_native_rgba() {
+        let default = scaled_raster("AB", 1, 1, &[255, 255, 255, 255, 255, 255, 255, 255]);
+        // The pack glyph has two adjacent, differently coloured/translucent
+        // texels. A uniform component tint or one scanline run cannot produce
+        // this result.
+        let pack = scaled_raster(
+            "A",
+            2,
+            1,
+            &[
+                128, 64, 32, 128, 32, 128, 255, 64, // distinct adjacent ink texels
+                0, 0, 0, 0, 0, 0, 0, 0, // transparent second row
+            ],
+        );
+        let font = lodestone_model::text::FontId::intern("nameplates:default");
+        let spans = vec![TextSpan {
+            text: "AB".to_owned(),
+            style: lodestone_model::text::TextStyle {
+                color: Some(TextColor::Rgb(0x0000_ff)),
+                font: Some(font),
+                ..Default::default()
+            },
+        }];
+
+        let (rects, _) = layout_styled_ink_runs_resolved(&spans, |codepoint, requested| {
+            if requested == Some(font) && codepoint == 'A' as u32 {
+                ResolvedRaster::Borrowed(&pack)
+            } else {
+                ResolvedRaster::Borrowed(&default)
+            }
+        });
+
+        assert_eq!(rects.len(), 3, "the pack glyph's adjacent multicolour texels must not merge");
+        assert_eq!(rects[0].color, [0.0, 0.0, 32.0 / 255.0, 128.0 / 255.0]);
+        assert_eq!(rects[1].color, [0.0, 0.0, 1.0, 64.0 / 255.0]);
+        assert_eq!(rects[2].color, [0.0, 0.0, 1.0, 1.0], "a codepoint absent from the selected pack font must fall back to default");
+    }
+
     /// **The bold control**, same fixture: a bold run must draw its ink
     /// *twice* (`BakedSheetGlyph.renderChar`'s second, offset pass — see
     /// [`layout_styled_ink_runs`]'s doc) and must measure a wider advance
@@ -1808,6 +1923,7 @@ mod tests {
             type_path: std::sync::Arc::from("pig"),
             item: None,
             item_model: None,
+            item_skin: None,
             main_arm_left: false,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
@@ -1963,6 +2079,7 @@ mod tests {
             type_path: std::sync::Arc::from("pig"),
             item: None,
             item_model: None,
+            item_skin: None,
             main_arm_left: false,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
@@ -2052,6 +2169,7 @@ mod tests {
             type_path: std::sync::Arc::from("pig"),
             item: None,
             item_model: None,
+            item_skin: None,
             main_arm_left: false,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),

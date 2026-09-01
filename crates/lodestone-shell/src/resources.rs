@@ -1433,9 +1433,26 @@ pub const BOOK_GUI_TEXTURE: (&str, &str) = (
     "assets/minecraft/textures/gui/book.png",
 );
 
+/// `Screen.MENU_BACKGROUND`, the tiled raw texture behind every ordinary
+/// out-of-world screen except the title screen itself. Vanilla's bundled file
+/// is uniform black at alpha 64, but it is still a resource-pack override point
+/// rather than a colour constant.
+pub const MENU_BACKGROUND_TEXTURE: (&str, &str) = (
+    "menu/background",
+    "assets/minecraft/textures/gui/menu_background.png",
+);
+
+/// `Screen.INWORLD_MENU_BACKGROUND`, the raw tiled texture behind pause-style
+/// screens. It is byte-identical to [`MENU_BACKGROUND_TEXTURE`] in vanilla
+/// 26.2, but server packs may supply distinct in-world screen art.
+pub const INWORLD_MENU_BACKGROUND_TEXTURE: (&str, &str) = (
+    "menu/inworld_background",
+    "assets/minecraft/textures/gui/inworld_menu_background.png",
+);
+
 /// Every loose texture the **menu** atlas carries: [`TITLE_TEXTURES`] plus
 /// [`UNKNOWN_SERVER_TEXTURE`], [`UNKNOWN_PACK_TEXTURE`] and
-/// [`BOOK_GUI_TEXTURE`].
+/// [`BOOK_GUI_TEXTURE`], and the two raw full-screen backgrounds.
 ///
 /// A superset rather than an addition to [`TITLE_TEXTURES`], because that
 /// constant means "what `LogoRenderer` blits by path" and the two list fallback
@@ -1448,6 +1465,8 @@ pub const MENU_TEXTURES: &[(&str, &str)] = &[
     UNKNOWN_SERVER_TEXTURE,
     UNKNOWN_PACK_TEXTURE,
     BOOK_GUI_TEXTURE,
+    MENU_BACKGROUND_TEXTURE,
+    INWORLD_MENU_BACKGROUND_TEXTURE,
 ];
 
 const _: () = assert!(

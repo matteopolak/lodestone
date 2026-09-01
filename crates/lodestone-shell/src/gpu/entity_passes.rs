@@ -70,6 +70,38 @@ fn held_special_texture(
     }
 }
 
+/// Select a dropped special item's texture.
+///
+/// Only a player head has a dynamic sheet. Its profile crossed the
+/// `DisplayItem` → [`EntityDraw`] boundary separately from the compact item
+/// id, exactly as an equipped head does for [`held_special_texture`].
+fn dropped_special_texture(
+    draw: &EntityDraw,
+    fallback: lodestone_render::BlockEntityTexture,
+) -> lodestone_render::BlockEntityTexture {
+    draw.item_skin
+        .as_ref()
+        .map_or(fallback, |url| lodestone_render::BlockEntityTexture::PlayerSkin(Arc::clone(url)))
+}
+
+/// Vanilla's `CustomHeadLayer` scale for a raw humanoid skull.
+const WORN_PLAYER_HEAD_SCALE: f32 = 1.1875;
+
+/// The only head-slot item rendered by the special-item layer in this client.
+fn worn_player_head_item(draw: &EntityDraw) -> Option<&lodestone_assets::ResourceLocation> {
+    draw.equipment.iter().find_map(|(slot, item)| {
+        (*slot == EquipmentSlot::Head
+            && item.namespace() == "minecraft"
+            && item.path() == "player_head")
+            .then_some(item)
+    })
+}
+
+/// Apply `CustomHeadLayer`'s raw-skull scale after the animated head pose.
+fn worn_player_head_placement(head_transform: glam::Mat4) -> glam::Mat4 {
+    head_transform * glam::Mat4::from_scale(glam::Vec3::splat(WORN_PLAYER_HEAD_SCALE))
+}
+
 /// Record an entity type whose ordinary body dispatch had no baked model.
 ///
 /// F3+B draws hitboxes independently of the model pass, so this is the useful
@@ -2670,13 +2702,25 @@ impl RenderState {
         let mut out = Vec::new();
 
         for draw in entities {
-            // Cull on the entity before any pose work, with two blocks of slack —
-            // covers a tall holder plus the item's own reach, exactly as
-            // `merge_held_items` does for the baked case.
-            if !frustum.intersects_aabb(
-                draw.feet - glam::Vec3::new(1.0, 0.5, 1.0),
-                draw.feet + glam::Vec3::new(1.0, 2.5, 1.0),
-            ) {
+            let is_item_frame = super::maps::ITEM_FRAME_TYPES
+                .contains(&draw.type_path.as_ref());
+            let visible = if is_item_frame {
+                let has_map = draw.item.as_ref().is_some_and(|item| {
+                    item.path() == super::maps::FILLED_MAP_ITEM
+                });
+                let (min, max) = lodestone_render::entity::item_frame_culling_aabb(
+                    draw.feet, draw.yaw, draw.pitch, has_map,
+                );
+                frustum.intersects_aabb(min, max)
+            } else {
+                // Covers a tall holder plus the item's own reach, exactly as
+                // `merge_held_items` does for the baked case.
+                frustum.intersects_aabb(
+                    draw.feet - glam::Vec3::new(1.0, 0.5, 1.0),
+                    draw.feet + glam::Vec3::new(1.0, 2.5, 1.0),
+                )
+            };
+            if !visible {
                 continue;
             }
             let light = entity_light(&self.entity_light, draw);
@@ -2689,7 +2733,7 @@ impl RenderState {
                 // A dropped item carries no equipment; skip the hand scan.
                 continue;
             }
-            if super::maps::ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref()) {
+            if is_item_frame {
                 // Not `light`: a frame's own probe is its position rather than an
                 // eye height, and a glow frame lights what it holds *fully* —
                 // `getLightCoords(state.isGlowFrame, 15728880, ..)`. See
@@ -2704,6 +2748,9 @@ impl RenderState {
                     stats.special_item_frames_drawn += 1;
                 }
                 continue;
+            }
+            if let Some(instance) = self.worn_player_head_special_item(draw, light) {
+                out.push(instance);
             }
             for (slot, id) in &draw.equipment {
                 // `Mob.getMainArm()` is `RIGHT` for every mob **except a
@@ -2772,9 +2819,47 @@ impl RenderState {
             &ground,
             lift,
         );
-        self.block_entities
+        let mut special = self.block_entities
             .models
-            .resolve_special_item(&form.kind, item.path(), placement, &form.transformation, light)
+            .resolve_special_item(&form.kind, item.path(), placement, &form.transformation, light)?;
+        special.texture = dropped_special_texture(draw, special.texture);
+        Some(special)
+    }
+
+    /// Player-head equipment in the `Head` slot, following 26.2's
+    /// `CustomHeadLayer` rather than the hand item's display transform.
+    ///
+    /// The vanilla layer routes a worn skull through `wornHeadType`, poses it
+    /// from `HeadedModel.translateToHead`, then scales the raw skull model by
+    /// `1.1875`. A player head's profile selects only the render sheet; it does
+    /// not alter the skull model or placement. Other head-slot items are left to
+    /// their existing renderers outside this narrowly scoped player-head path.
+    fn worn_player_head_special_item(
+        &self,
+        draw: &EntityDraw,
+        light: u8,
+    ) -> Option<lodestone_render::BlockEntityInstance> {
+        let item = worn_player_head_item(draw)?;
+        let wearer = self.entities.models.resolve(
+            draw.model_type_path(),
+            draw.feet,
+            draw.yaw,
+            draw.scale,
+            &draw.anim,
+        )?;
+        let mesh = self.entities.models.get(wearer.model)?;
+        let head = mesh.skeleton.index_of("head")?;
+        let head_transform = *wearer.part_transforms.get(head)?;
+        let placement = worn_player_head_placement(head_transform);
+        let mut special = self.block_entities.models.resolve_special_item(
+            "minecraft:player_head",
+            item.path(),
+            placement,
+            &[],
+            light,
+        )?;
+        special.texture = held_special_texture(draw, EquipmentSlot::Head, special.texture);
+        Some(special)
     }
 
     /// A `minecraft:special` item in another entity's hand, posed off that
@@ -3309,6 +3394,7 @@ mod tests {
             type_path: Arc::from(type_path),
             item: None,
             item_model: None,
+            item_skin: None,
             main_arm_left: false,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
@@ -3362,6 +3448,50 @@ mod tests {
             texture,
             lodestone_render::BlockEntityTexture::PlayerSkin(url),
             "the held special-item boundary must replace a player head's static Steve sheet"
+        );
+    }
+
+    #[test]
+    fn worn_player_head_is_head_slot_only_and_uses_custom_head_layer_scale() {
+        let mut draw = subject("player_wide", 64.0, 1.0, false);
+        let player_head = "minecraft:player_head"
+            .parse()
+            .expect("valid player-head item id");
+        draw.equipment.push((EquipmentSlot::Head, player_head));
+
+        assert!(
+            worn_player_head_item(&draw).is_some(),
+            "a player head in the head slot must enter the worn-head special pass"
+        );
+        let pose = glam::Mat4::from_translation(glam::Vec3::new(3.0, 5.0, 7.0));
+        assert_eq!(
+            worn_player_head_placement(pose),
+            pose * glam::Mat4::from_scale(glam::Vec3::splat(1.1875)),
+            "CustomHeadLayer scales the raw skull after translateToHead"
+        );
+
+        let mut hand_only = draw.clone();
+        hand_only.equipment[0].0 = EquipmentSlot::MainHand;
+        assert!(
+            worn_player_head_item(&hand_only).is_none(),
+            "a hand head belongs to held_special_item, not the worn-head layer"
+        );
+    }
+
+    #[test]
+    fn dropped_player_head_special_draw_uses_the_stacks_profile_skin() {
+        let url: Arc<str> = Arc::from("https://example.invalid/dropped-custom-head.png");
+        let mut draw = subject("item", 64.0, 1.0, false);
+        draw.item_skin = Some(Arc::clone(&url));
+
+        let texture = dropped_special_texture(
+            &draw,
+            lodestone_render::BlockEntityTexture::Static("entity/player/wide/steve"),
+        );
+        assert_eq!(
+            texture,
+            lodestone_render::BlockEntityTexture::PlayerSkin(url),
+            "the dropped special-item boundary must replace a player head's static Steve sheet"
         );
     }
 

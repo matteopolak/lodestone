@@ -81,6 +81,16 @@ use super::pack_trace::{should_trace_candidate, unit_quad_normal, unit_quad_plan
 use super::terrain::ModelRenderer;
 use super::{RenderState, RenderStats};
 
+/// The two depth domains emitted by [`RenderState::prepare_moving_blocks`].
+///
+/// An item-frame body is intentionally separate: vanilla submits it through
+/// `entitySolidZOffsetForward`, whose model-view scale cannot apply to falling
+/// blocks, TNT, piston heads, minecart contents, or block displays.
+pub(super) struct MovingBlockMeshes {
+    pub(super) ordinary: Option<GpuModelMesh>,
+    pub(super) item_frames: Option<GpuModelMesh>,
+}
+
 /// `EntityTypes.FALLING_BLOCK`'s registry path, as
 /// [`EntityDraw::type_path`] carries it (bare path, no namespace).
 pub(super) const FALLING_BLOCK_TYPE_PATH: &str = "falling_block";
@@ -293,28 +303,27 @@ pub(super) struct MovingBlock {
 }
 
 impl RenderState {
-    /// Mesh this frame's moving block models into one world-space
-    /// [`GpuModelMesh`].
+    /// Mesh this frame's moving block models into their world-space draw domains.
     ///
     /// Returns `None` — and draws nothing — when there is no vanilla model pass, or
     /// when nothing on screen resolves to block geometry. Both are ordinary states,
     /// not errors: the demo palette has no `BlockModels` at all, and a frame with no
     /// falling block and no moving piston is the common case.
     ///
-    /// No camera write: this draws through `model.cam_bind_group`, the same shared
-    /// view-projection + fog buffer every terrain section uses, written once per
-    /// frame at the top of the frame body. Baking world positions into the vertices
-    /// is what makes that possible.
+/// Both domains use `model.cam_bind_group`; item-frame bodies draw through the
+/// first raster-depth layer while ordinary moving blocks use the unbiased model
+/// pipeline. Their world positions are baked into vertices in both cases.
     pub(super) fn prepare_moving_blocks(
         &self,
         device: &wgpu::Device,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
-    ) -> Option<GpuModelMesh> {
+    ) -> Option<MovingBlockMeshes> {
         let model = self.model.as_ref()?;
         let frustum = camera.frustum();
         let mut combined = ModelMesh::default();
+        let mut item_frames = ModelMesh::default();
         self.merge_falling_blocks(model, entities, &frustum, &mut combined, stats);
         // A third producer of the same shape as the falling block: no rig, a
         // block model posed by hand. See `merge_primed_tnt`'s own doc for why
@@ -329,11 +338,10 @@ impl RenderState {
         // shares the item one — the placement is in the vertices, so there is
         // nothing to batch on.
         self.merge_piston_heads(model, camera.position, &frustum, &mut combined, stats);
-        // A fifth producer of the same shape, and the one with no state id: an
-        // item frame's body is a block model reached through
+        // An item-frame body is a block model reached through
         // `BlockStateDefinitions.getItemFrameFakeState`, not through the block
-        // registry. See `merge_item_frames`.
-        self.merge_item_frames(model, camera, entities, &frustum, &mut combined, stats);
+        // registry. It alone needs the first item-frame raster-depth layer.
+        self.merge_item_frames(model, camera, entities, &frustum, &mut item_frames, stats);
         // A sixth producer of the same shape, and the first whose requests come
         // from neither an `EntityDraw` slice nor a block-entity source: a
         // `block_display` is a `Display`-family entity, extracted by
@@ -341,11 +349,16 @@ impl RenderState {
         // `merge_block_displays` for why its pose is the only arbitrary one on
         // this seam.
         self.merge_block_displays(model, camera, &frustum, &mut combined, stats);
-        if combined.quad_count() == 0 {
+        let ordinary_quads = combined.quad_count();
+        let item_frame_quads = item_frames.quad_count();
+        if ordinary_quads + item_frame_quads == 0 {
             return None;
         }
-        stats.total_quads += combined.quad_count();
-        GpuModelMesh::upload(device, &combined)
+        stats.total_quads += ordinary_quads + item_frame_quads;
+        Some(MovingBlockMeshes {
+            ordinary: GpuModelMesh::upload(device, &combined),
+            item_frames: GpuModelMesh::upload(device, &item_frames),
+        })
     }
 
     /// Merge every falling block on screen — vanilla's `FallingBlockRenderer`,
@@ -712,10 +725,11 @@ impl RenderState {
     ///   client has no map-id decode (see `Sim::map_source`), so any
     ///   `minecraft:filled_map` selects the wider border. The two disagree only
     ///   for a framed map whose data has never arrived.
-    /// * **`submitWithZOffset`'s polygon offset is carried by the surface
-    ///   pipeline.** `frame.rs` submits this combined mesh through
-    ///   `ModelPipeline::for_surface`, whose shared depth-buffer-unit bias pulls
-    ///   it toward the camera without perturbing the frame's derived geometry.
+    /// * **`submitWithZOffset` is an ordering instruction.** The frame body is
+    ///   uploaded separately so `frame.rs` can select its first raster-depth
+    ///   layer without affecting unrelated moving blocks. Using a separately
+    ///   rounded scaled camera matrix made the order FOV-dependent at large
+    ///   world coordinates.
     fn merge_item_frames(
         &self,
         model: &ModelRenderer,
@@ -737,20 +751,17 @@ impl RenderState {
             if draw.invisible {
                 continue;
             }
-            // A frame is at most a block across however it is turned, and its
-            // entity position sits 0.46875 behind the cell it hangs in — so one
-            // block of slack around the entity covers the whole body.
-            if !frustum.intersects_aabb(
-                draw.feet - glam::Vec3::splat(1.0),
-                draw.feet + glam::Vec3::splat(1.0),
-            ) {
-                continue;
-            }
             let glow = type_path == GLOW_ITEM_FRAME_TYPE_PATH;
             let map = draw
                 .item
                 .as_ref()
                 .is_some_and(|id| id.path() == super::maps::FILLED_MAP_ITEM);
+            let (cull_min, cull_max) = lodestone_render::entity::item_frame_culling_aabb(
+                draw.feet, draw.yaw, draw.pitch, map,
+            );
+            if !frustum.intersects_aabb(cull_min, cull_max) {
+                continue;
+            }
             let quads = model.crack_resolver.item_frame_quads(glow, map);
             if quads.is_empty() {
                 continue;

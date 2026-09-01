@@ -1,11 +1,12 @@
 //! Filled-map drawing: the per-map 128×128 texture and the quads that sample it.
 //!
-//! # No map pipeline and no map shader
+//! # One depth variant and no map shader
 //!
 //! A map's picture is one textured quad, and the *model* pipeline already draws
 //! textured quads with absolute baked UVs from a texture at group 1. So a map
-//! draw is an ordinary model draw with **group 1 swapped** from the stitched block
-//! atlas to the map's own texture. That is not a shortcut — the model shader is at
+//! draw uses the model pipeline's map-surface depth variant with **group 1 swapped**
+//! from the stitched block atlas to the map's own texture. That is not a separate
+//! shader — the model shader is at
 //! wgpu's 4-bind-group floor (camera / atlas / palette / anim), so a fifth group
 //! for a map texture would validate on an 8-group adapter and crash at startup on
 //! a 4-group one.
@@ -283,10 +284,530 @@ pub const ITEM_FRAME_TYPES: [&str; 2] = ["item_frame", "glow_item_frame"];
 /// and the full-bright light its contents draw at.
 pub const GLOW_ITEM_FRAME_TYPE_PATH: &str = "glow_item_frame";
 
+/// The map's gather broad phase, using the same wall-offset entity bounds and
+/// half-block renderer inflation as vanilla rather than centring an invented
+/// envelope on the packet attachment anchor.
+fn framed_map_in_frustum(
+    frustum: &lodestone_render::Frustum,
+    feet: Vec3,
+    yaw: f32,
+    pitch: f32,
+) -> bool {
+    let (min, max) = lodestone_render::entity::item_frame_culling_aabb(
+        feet, yaw, pitch, true,
+    );
+    frustum.intersects_aabb(min, max)
+}
+
 /// `ItemFrameRenderer` scales map coordinates by `1 / 128`; its final
 /// `translate(0, 0, -1)` and `MapRenderer`'s `MAP_Z_OFFSET (-.01)` therefore
 /// put the image plane `1.01 / 128` in front of the content origin.
 const MAP_RENDERER_DEPTH: f32 = 1.01 / 128.0;
+
+/// The source-resolution result for one visible framed-map candidate. This is
+/// deliberately narrower than [`MapSkip`]: the live trace needs to distinguish
+/// a frame that never reached a source lookup from one whose individual map
+/// data has not arrived yet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FramedMapSource {
+    /// No lookup occurred because an earlier gather prerequisite was absent.
+    NotQueried,
+    /// This frame installed no map source at all.
+    Unavailable,
+    /// The source was installed but had no picture for this entity yet.
+    Unresolved,
+    /// The source supplied the picture, including its stable map id.
+    Resolved,
+}
+
+/// One framed map in the edge-triggered live diagnostic. The float fields use
+/// bits so an actual pose change is observable, while camera motion alone is
+/// not allowed to turn this into a per-frame log.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FramedMapDiagnosticFrame {
+    entity_id: i32,
+    entity_type: String,
+    feet: [u32; 3],
+    yaw: u32,
+    pitch: u32,
+    rotation: u8,
+    invisible: bool,
+    item: Option<String>,
+    map_id: Option<i32>,
+    source: FramedMapSource,
+    quad_normal: [u32; 3],
+}
+
+impl FramedMapDiagnosticFrame {
+    fn from_draw(draw: &EntityDraw) -> Self {
+        let pose = framed_map_pose(
+            draw.feet,
+            draw.yaw,
+            draw.pitch,
+            draw.item_frame_rotation,
+            draw.invisible,
+        );
+        let normal = unit_quad_normal(pose);
+        Self {
+            entity_id: draw.id,
+            entity_type: draw.type_path.to_string(),
+            feet: draw.feet.to_array().map(f32::to_bits),
+            yaw: draw.yaw.to_bits(),
+            pitch: draw.pitch.to_bits(),
+            rotation: draw.item_frame_rotation,
+            invisible: draw.invisible,
+            item: draw.item.as_ref().map(ToString::to_string),
+            map_id: None,
+            source: FramedMapSource::NotQueried,
+            quad_normal: normal.map(f32::to_bits),
+        }
+    }
+}
+
+/// Gather state compared between frames. Camera values stay outside this key:
+/// they are logged with an edge, but walking must never emit a line every
+/// frame. The stable world-space normal is enough to diagnose a cull-facing
+/// mismatch from that camera snapshot without making every hemisphere crossing
+/// a new diagnostic event.
+#[derive(Clone, Debug)]
+struct FramedMapGatherDiagnostic {
+    model_ready: bool,
+    map_source_installed: bool,
+    /// The configured or once-latched entity remains named even while absent.
+    tracked_entity_id: Option<i32>,
+    /// The single tracked frame, when it is still in the entity snapshot.
+    selected: Option<FramedMapDiagnosticFrame>,
+    selected_in_frustum: bool,
+    selected_submitted: bool,
+    projection_state: Option<FramedMapProjectionState>,
+    projection: Option<FramedMapProjectionSnapshot>,
+    submitted_instances: usize,
+    submitted_batches: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FramedMapTrackCandidate {
+    entity_id: i32,
+    score: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FramedMapProjectionState {
+    centre_in_clip: bool,
+    corner_clip_mask: u8,
+    map_in_front_mask: u8,
+    projected_winding_positive: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FramedMapProjectionPoint {
+    map_eye_z: f32,
+    comparison_eye_z: f32,
+    map_clip: [f32; 4],
+    comparison_clip: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FramedMapProjectionSnapshot {
+    comparison_surface: &'static str,
+    points: [FramedMapProjectionPoint; 5],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FramedMapDrawDiagnostic {
+    tracked_entity_id: Option<i32>,
+    tracked_submitted: bool,
+    tracked_drawn: bool,
+    submitted_instances: usize,
+    submitted_batches: usize,
+    drawn_instances: usize,
+}
+
+/// Per-process diagnostic latch. It deliberately has no renderer or GPU state:
+/// this is an opt-in observer of existing gather/draw boundaries, not another
+/// rendering path. The two independent keys make a gather-with-data/draw-zero
+/// transition observable even when source resolution did not change.
+#[derive(Default)]
+struct MapLiveDiagnostics {
+    tracked_entity_id: Option<i32>,
+    gather: Option<FramedMapGatherDiagnostic>,
+    draw: Option<FramedMapDrawDiagnostic>,
+}
+
+impl MapLiveDiagnostics {
+    fn track_entity(
+        &mut self,
+        configured: Option<i32>,
+        candidates: &[FramedMapTrackCandidate],
+    ) -> Option<i32> {
+        if let Some(configured) = configured {
+            self.tracked_entity_id = Some(configured);
+            return self.tracked_entity_id;
+        }
+        let best = candidates
+            .iter()
+            .min_by(|left, right| left.score.total_cmp(&right.score));
+        let retained = self.tracked_entity_id.and_then(|id| {
+            candidates.iter().find(|candidate| candidate.entity_id == id)
+        });
+        // NDC-square score. Keep the current subject through tiny crossings,
+        // but switch when another map is materially closer to the crosshair.
+        self.tracked_entity_id = match (retained, best) {
+            (Some(current), Some(best)) if current.score <= best.score + 0.04 => {
+                Some(current.entity_id)
+            }
+            (_, Some(best)) => Some(best.entity_id),
+            _ => None,
+        };
+        self.tracked_entity_id
+    }
+
+    fn gather_changed(&mut self, next: &FramedMapGatherDiagnostic) -> bool {
+        if self.gather.as_ref().is_some_and(|previous| {
+            previous.model_ready == next.model_ready
+                && previous.map_source_installed == next.map_source_installed
+                && previous.tracked_entity_id == next.tracked_entity_id
+                && previous.selected == next.selected
+                && previous.selected_in_frustum == next.selected_in_frustum
+                && previous.selected_submitted == next.selected_submitted
+                && previous.projection_state == next.projection_state
+        }) {
+            return false;
+        }
+        self.gather = Some(next.clone());
+        true
+    }
+
+    fn draw_changed(&mut self, next: FramedMapDrawDiagnostic) -> bool {
+        if self.draw.is_some_and(|previous| {
+            previous.tracked_entity_id == next.tracked_entity_id
+                && previous.tracked_submitted == next.tracked_submitted
+                && previous.tracked_drawn == next.tracked_drawn
+        }) {
+            return false;
+        }
+        self.draw = Some(next);
+        true
+    }
+}
+
+fn configured_map_trace_entity() -> Option<i32> {
+    static ENTITY: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+    *ENTITY.get_or_init(|| {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::env::var("LODESTONE_MAP_TRACE_ENTITY")
+                .ok()
+                .and_then(|value| value.parse().ok())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+    })
+}
+
+fn map_live_diagnostics() -> &'static std::sync::Mutex<MapLiveDiagnostics> {
+    static DIAGNOSTICS: std::sync::OnceLock<std::sync::Mutex<MapLiveDiagnostics>> =
+        std::sync::OnceLock::new();
+    DIAGNOSTICS.get_or_init(|| std::sync::Mutex::new(MapLiveDiagnostics::default()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn map_diagnostic_file() -> Option<&'static std::sync::Mutex<std::fs::File>> {
+    static FILE: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+        std::sync::OnceLock::new();
+    FILE.get_or_init(|| {
+        std::env::var_os("LODESTONE_MAP_DIAG_FILE").and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(path)
+                .ok()
+                .map(std::sync::Mutex::new)
+        })
+    })
+    .as_ref()
+}
+
+fn map_diagnostics_enabled() -> bool {
+    tracing::enabled!(target: "maps", tracing::Level::DEBUG)
+        || {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                map_diagnostic_file().is_some()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                false
+            }
+        }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn persist_map_diagnostic(line: &str) {
+    use std::io::Write as _;
+
+    let Some(file) = map_diagnostic_file() else {
+        return;
+    };
+    let Ok(mut file) = file.lock() else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
+    let _ = file.flush();
+}
+
+#[cfg(target_arch = "wasm32")]
+fn persist_map_diagnostic(_line: &str) {}
+
+fn tracked_map_entity(candidates: &[FramedMapTrackCandidate]) -> Option<i32> {
+    let Ok(mut state) = map_live_diagnostics().lock() else {
+        return configured_map_trace_entity().or_else(|| candidates.first().map(|entry| entry.entity_id));
+    };
+    state.track_entity(configured_map_trace_entity(), candidates)
+}
+
+fn clip_point(matrix: Mat4, point: Vec3) -> [f32; 4] {
+    (matrix * point.extend(1.0)).to_array()
+}
+
+fn clip_contains(clip: [f32; 4]) -> bool {
+    let [x, y, z, w] = clip;
+    w > 0.0 && x.abs() <= w && y.abs() <= w && z >= 0.0 && z <= w
+}
+
+fn framed_map_track_candidate(
+    draw: &EntityDraw,
+    camera_position: Vec3,
+    map_view_projection: Mat4,
+) -> Option<FramedMapTrackCandidate> {
+    if draw.feet.distance_squared(camera_position) > 64.0 * 64.0 {
+        return None;
+    }
+    let centre = framed_map_pose(
+        draw.feet,
+        draw.yaw,
+        draw.pitch,
+        draw.item_frame_rotation,
+        draw.invisible,
+    )
+    .transform_point3(Vec3::ZERO);
+    let [x, y, _, w] = clip_point(map_view_projection, centre);
+    if w <= 0.0 {
+        return None;
+    }
+    let ndc = Vec3::new(x / w, y / w, 0.0);
+    if ndc.x.abs() > 1.25 || ndc.y.abs() > 1.25 {
+        return None;
+    }
+    Some(FramedMapTrackCandidate {
+        entity_id: draw.id,
+        score: ndc.x * ndc.x + ndc.y * ndc.y,
+    })
+}
+
+fn framed_map_projection(
+    draw: &EntityDraw,
+    map_eye: Mat4,
+    map_view_projection: Mat4,
+    frame_eye: Mat4,
+    frame_view_projection: Mat4,
+) -> (FramedMapProjectionState, FramedMapProjectionSnapshot) {
+    let pose = framed_map_pose(
+        draw.feet,
+        draw.yaw,
+        draw.pitch,
+        draw.item_frame_rotation,
+        draw.invisible,
+    );
+    let body = lodestone_render::entity::item_frame_body_matrix(draw.feet, draw.yaw, draw.pitch);
+    let locals = [
+        Vec3::ZERO,
+        Vec3::new(-0.5, -0.5, 0.0),
+        Vec3::new(0.5, -0.5, 0.0),
+        Vec3::new(0.5, 0.5, 0.0),
+        Vec3::new(-0.5, 0.5, 0.0),
+    ];
+    let mut corner_clip_mask = 0u8;
+    let mut map_in_front_mask = 0u8;
+    let points = locals.map(|local| {
+        let map_world = pose.transform_point3(local);
+        let comparison_world = body.transform_point3(Vec3::new(
+            local.x + 0.5,
+            local.y + 0.5,
+            if draw.invisible { 1.0 } else { 15.001 / 16.0 },
+        ));
+        let map_clip = clip_point(map_view_projection, map_world);
+        let (comparison_eye, comparison_clip) = if draw.invisible {
+            (map_eye, clip_point(map_view_projection, comparison_world))
+        } else {
+            (frame_eye, clip_point(frame_view_projection, comparison_world))
+        };
+        FramedMapProjectionPoint {
+            map_eye_z: map_eye.transform_point3(map_world).z,
+            comparison_eye_z: comparison_eye.transform_point3(comparison_world).z,
+            map_clip,
+            comparison_clip,
+        }
+    });
+    for (index, point) in points.iter().enumerate() {
+        if index != 0 && clip_contains(point.map_clip) {
+            corner_clip_mask |= 1 << (index - 1);
+        }
+        let map_depth = point.map_clip[2] / point.map_clip[3];
+        let comparison_depth = point.comparison_clip[2] / point.comparison_clip[3];
+        if map_depth < comparison_depth {
+            map_in_front_mask |= 1 << index;
+        }
+    }
+    let ndc_xy = |point: &FramedMapProjectionPoint| {
+        Vec3::new(
+            point.map_clip[0] / point.map_clip[3],
+            point.map_clip[1] / point.map_clip[3],
+            0.0,
+        )
+    };
+    let a = ndc_xy(&points[1]);
+    let b = ndc_xy(&points[2]);
+    let c = ndc_xy(&points[3]);
+    let projected_winding_positive = (b.x - a.x) * (c.y - a.y)
+        - (b.y - a.y) * (c.x - a.x)
+        > 0.0;
+    (
+        FramedMapProjectionState {
+            centre_in_clip: clip_contains(points[0].map_clip),
+            corner_clip_mask,
+            map_in_front_mask,
+            projected_winding_positive,
+        },
+        FramedMapProjectionSnapshot {
+            comparison_surface: if draw.invisible {
+                "attachment_wall"
+            } else {
+                "frame_plate"
+            },
+            points,
+        },
+    )
+}
+
+fn note_framed_map_gather(
+    camera: &lodestone_render::Camera,
+    diagnostic: FramedMapGatherDiagnostic,
+) {
+    if !map_diagnostics_enabled() {
+        return;
+    }
+    let Ok(mut state) = map_live_diagnostics().lock() else {
+        return;
+    };
+    if !state.gather_changed(&diagnostic) {
+        return;
+    }
+    persist_map_diagnostic(&format!(
+        "gather camera={:?} yaw={} pitch={} fov={} aspect={} model={} source_installed={} tracked={:?} \
+         in_frustum={} submitted={} instances={} batches={} projection_state={:?} \
+         projection={:?} selected={:?}",
+        camera.position.to_array(),
+        camera.yaw,
+        camera.pitch,
+        camera.fov_y_degrees,
+        camera.aspect,
+        diagnostic.model_ready,
+        diagnostic.map_source_installed,
+        diagnostic.tracked_entity_id,
+        diagnostic.selected_in_frustum,
+        diagnostic.selected_submitted,
+        diagnostic.submitted_instances,
+        diagnostic.submitted_batches,
+        diagnostic.projection_state,
+        diagnostic.projection,
+        diagnostic.selected,
+    ));
+    tracing::debug!(
+        target: "maps",
+        camera_position = ?camera.position.to_array(),
+        camera_yaw = camera.yaw,
+        camera_pitch = camera.pitch,
+        camera_fov = camera.fov_y_degrees,
+        camera_aspect = camera.aspect,
+        model_ready = diagnostic.model_ready,
+        map_source_installed = diagnostic.map_source_installed,
+        tracked_entity_id = diagnostic.tracked_entity_id,
+        selected_in_frustum = diagnostic.selected_in_frustum,
+        selected_submitted = diagnostic.selected_submitted,
+        projection_state = ?diagnostic.projection_state,
+        projection = ?diagnostic.projection,
+        submitted_instances = diagnostic.submitted_instances,
+        submitted_batches = diagnostic.submitted_batches,
+        selected = ?diagnostic.selected,
+        "framed-map gather changed"
+    );
+}
+
+pub(super) fn note_framed_map_draw(
+    camera: &lodestone_render::Camera,
+    submitted_instances: usize,
+    submitted_batches: usize,
+    drawn_instances: usize,
+) {
+    if !map_diagnostics_enabled() {
+        return;
+    }
+    let Ok(mut state) = map_live_diagnostics().lock() else {
+        return;
+    };
+    let (tracked_entity_id, tracked_submitted) = state
+        .gather
+        .as_ref()
+        .map_or((state.tracked_entity_id, false), |gather| {
+            (gather.tracked_entity_id, gather.selected_submitted)
+        });
+    // The opaque pass issues every prepared map draw without a conditional in
+    // between. If the complete submitted count was drawn, the tracked member
+    // was drawn too; otherwise this edge records the boundary failure.
+    let tracked_drawn = tracked_submitted
+        && submitted_instances != 0
+        && drawn_instances == submitted_instances;
+    let diagnostic = FramedMapDrawDiagnostic {
+        tracked_entity_id,
+        tracked_submitted,
+        tracked_drawn,
+        submitted_instances,
+        submitted_batches,
+        drawn_instances,
+    };
+    if !state.draw_changed(diagnostic) {
+        return;
+    }
+    persist_map_diagnostic(&format!(
+        "draw camera={:?} yaw={} pitch={} fov={} aspect={} tracked={tracked_entity_id:?} \
+         submitted={tracked_submitted} drawn={tracked_drawn} instances={submitted_instances} \
+         batches={submitted_batches} drawn_instances={drawn_instances}",
+        camera.position.to_array(),
+        camera.yaw,
+        camera.pitch,
+        camera.fov_y_degrees,
+        camera.aspect,
+    ));
+    tracing::debug!(
+        target: "maps",
+        camera_position = ?camera.position.to_array(),
+        camera_yaw = camera.yaw,
+        camera_pitch = camera.pitch,
+        camera_fov = camera.fov_y_degrees,
+        camera_aspect = camera.aspect,
+        tracked_entity_id,
+        tracked_submitted,
+        tracked_drawn,
+        submitted_instances,
+        submitted_batches,
+        drawn_instances,
+        "framed-map draw changed"
+    );
+}
 
 /// Vanilla's `renderMap` scale (`ItemInHandRenderer.renderMap`: `scale(0.38f)`
 /// around a `[-0.5, -0.5]`-centred unit quad).
@@ -578,26 +1099,79 @@ impl RenderState {
         queue: &wgpu::Queue,
         camera: &lodestone_render::Camera,
         entities: &[EntityDraw],
+        map_eye: Mat4,
+        map_view_projection: Mat4,
+        frame_eye: Mat4,
+        frame_view_projection: Mat4,
     ) -> Vec<PreparedMap> {
         const SITE: &str = "item frame";
         let frustum = camera.frustum();
-        let wanted = entities.iter().any(|draw| {
-            ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref())
-                && draw.item.as_ref().is_some_and(|id| id.path() == FILLED_MAP_ITEM)
-                // A framed map is a block across, so a one-block box around the
-                // hanging point covers it however the frame is turned.
-                && frustum.intersects_aabb(draw.feet - Vec3::splat(1.0), draw.feet + Vec3::splat(1.0))
+        let candidates: Vec<_> = entities
+            .iter()
+            .filter(|draw| {
+                ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref())
+                    && draw.item.as_ref().is_some_and(|id| id.path() == FILLED_MAP_ITEM)
+            })
+            .collect();
+        // This is vanilla `EntityRenderer.shouldRender`'s broad phase. Keep it
+        // separate from the diagnostic selection below so a true frustum-edge
+        // transition names the candidate that was culled.
+        let in_frustum = |draw: &EntityDraw| {
+            framed_map_in_frustum(&frustum, draw.feet, draw.yaw, draw.pitch)
+        };
+        let track_candidates = candidates
+            .iter()
+            .filter_map(|draw| {
+                framed_map_track_candidate(draw, camera.position, map_view_projection)
+            })
+            .collect::<Vec<_>>();
+        let tracked_entity_id = tracked_map_entity(&track_candidates);
+        let selected = candidates
+            .iter()
+            .copied()
+            .find(|draw| Some(draw.id) == tracked_entity_id);
+        let projection = selected.map(|draw| {
+            framed_map_projection(
+                draw,
+                map_eye,
+                map_view_projection,
+                frame_eye,
+                frame_view_projection,
+            )
         });
-        if !wanted {
-            // No framed map is in view. Not a decline, and deliberately silent:
-            // this is every frame of ordinary play.
+        let mut diagnostic = FramedMapGatherDiagnostic {
+            model_ready: self.model.is_some(),
+            map_source_installed: self.map_source.is_installed(),
+            tracked_entity_id,
+            selected: selected.map(|draw| FramedMapDiagnosticFrame::from_draw(draw)),
+            selected_in_frustum: selected.is_some_and(in_frustum),
+            selected_submitted: false,
+            projection_state: projection.map(|value| value.0),
+            projection: projection.map(|value| value.1),
+            submitted_instances: 0,
+            submitted_batches: 0,
+        };
+        let wanted: Vec<_> = candidates
+            .into_iter()
+            .filter(|draw| in_frustum(draw))
+            .collect();
+        if wanted.is_empty() {
+            // Ordinary empty frames remain silent after their first edge. The
+            // diagnostic does record a transition from a visible candidate, so
+            // a live repro can distinguish gather disappearance from culling.
+            note_framed_map_gather(camera, diagnostic);
             return Vec::new();
         }
         let Some(model) = self.model.as_ref() else {
+            note_framed_map_gather(camera, diagnostic);
             let _ = note_map_skip::<()>(SITE, MapSkip::NoModels, None);
             return Vec::new();
         };
         if !self.map_source.is_installed() {
+            if let Some(frame) = &mut diagnostic.selected {
+                frame.source = FramedMapSource::Unavailable;
+            }
+            note_framed_map_gather(camera, diagnostic);
             let _ = note_map_skip::<()>(SITE, MapSkip::NoSource, None);
             return Vec::new();
         }
@@ -607,17 +1181,20 @@ impl RenderState {
         // copy-on-write pixels but does not require frame geometry to rebuild.
         let mut inputs = Vec::new();
         let mut pictures = HashMap::new();
-        for draw in entities {
-            if !ITEM_FRAME_TYPES.contains(&draw.type_path.as_ref())
-                || draw.item.as_ref().is_none_or(|id| id.path() != FILLED_MAP_ITEM)
-                || !frustum.intersects_aabb(draw.feet - Vec3::splat(1.0), draw.feet + Vec3::splat(1.0))
-            {
-                continue;
-            }
+        for draw in &wanted {
             let Some(picture) = self.map_source.picture(None, Some(draw.id)) else {
+                if diagnostic.selected.as_ref().is_some_and(|frame| frame.entity_id == draw.id) {
+                    diagnostic.selected.as_mut().expect("checked selected frame").source =
+                        FramedMapSource::Unresolved;
+                }
                 let _ = note_map_skip::<()>(SITE, MapSkip::NoContents, Some(draw.id));
                 continue;
             };
+            if diagnostic.selected.as_ref().is_some_and(|frame| frame.entity_id == draw.id) {
+                let frame = diagnostic.selected.as_mut().expect("checked selected frame");
+                frame.map_id = Some(picture.map_id);
+                frame.source = FramedMapSource::Resolved;
+            }
             let input = FramedMapInput::new(
                 draw.id,
                 picture.map_id,
@@ -664,6 +1241,10 @@ impl RenderState {
             pictures.entry(picture.map_id).or_insert(picture);
             inputs.push(input);
         }
+        diagnostic.submitted_instances = inputs.len();
+        diagnostic.selected_submitted = tracked_entity_id.is_some_and(|tracked| {
+            inputs.iter().any(|input| input.entity_id == tracked)
+        });
         let key = FramedMapsKey::new(inputs);
         let batch_inputs = key.0.clone();
         let mut cache = self.map_cache.borrow_mut();
@@ -694,6 +1275,7 @@ impl RenderState {
                 })
                 .collect()
         });
+        diagnostic.submitted_batches = batches.len();
         let mut prepared = Vec::with_capacity(batches.len());
         for batch in batches.iter() {
             let Some(picture) = pictures.get(&batch.map_id) else {
@@ -708,6 +1290,7 @@ impl RenderState {
         if !prepared.is_empty() {
             note_map_drawn();
         }
+        note_framed_map_gather(camera, diagnostic);
         prepared
     }
 }
@@ -715,6 +1298,184 @@ impl RenderState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The supplied live trace was not the reported in-view disappearance: all
+    /// four frames are about 51 blocks away and cross the horizontal frustum
+    /// edge during this 9.3° turn. Pin the actual coordinates so a later cull
+    /// change cannot misclassify this ordinary transition as a map depth bug.
+    #[test]
+    fn traced_four_map_transition_is_a_frustum_edge_not_a_gpu_drop() {
+        let position = Vec3::new(2039.1737, 88.62, 3743.3477);
+        let feet = [
+            Vec3::new(2025.0, 89.0, 3792.0),
+            Vec3::new(2025.0, 89.0, 3791.0),
+            Vec3::new(2025.0, 88.0, 3791.0),
+            Vec3::new(2025.0, 88.0, 3792.0),
+        ];
+        // A 100° vertical FOV is within the live options range and brackets the
+        // trace: it includes the group at -44.25° but not after -53.55°.
+        let camera = |yaw, pitch| lodestone_render::Camera {
+            position,
+            yaw,
+            pitch,
+            fov_y_degrees: 100.0,
+            aspect: 16.0 / 9.0,
+            near: 0.05,
+            far: 512.0,
+        };
+        let before = camera(-44.250_305, 33.300_018).frustum();
+        let after = camera(-53.550_308, 32.250_019).frustum();
+        assert!(
+            feet.iter().all(|&point| framed_map_in_frustum(&before, point, 0.0, 0.0)),
+            "trace precondition: all four maps must reach CPU gather before the turn"
+        );
+        assert!(
+            feet.iter().all(|&point| !framed_map_in_frustum(&after, point, 0.0, 0.0)),
+            "the turned trace must be culled before any GPU map draw is submitted"
+        );
+    }
+
+    #[test]
+    fn nearby_invisible_frame_from_live_trace_survives_the_tiny_camera_turn() {
+        let frame = Vec3::new(1965.0, 73.0, 3806.0);
+        let camera = lodestone_render::Camera {
+            position: Vec3::new(1963.2434, 72.62, 3808.2954),
+            yaw: -42.600_28,
+            pitch: 8.100_004,
+            fov_y_degrees: 110.0,
+            aspect: 2.0,
+            near: 0.05,
+            far: 512.0,
+        };
+
+        assert!(
+            framed_map_in_frustum(&camera.frustum(), frame, 90.0, 0.0),
+            "the live frame remains partly visible after this turn; culling its whole map is wrong"
+        );
+    }
+
+    #[test]
+    fn framed_map_live_diagnostic_is_edge_triggered_for_appearance_and_disappearance() {
+        let frame = FramedMapDiagnosticFrame {
+            entity_id: 42,
+            entity_type: "item_frame".to_owned(),
+            feet: [0, 0, 0],
+            yaw: 0,
+            pitch: 0,
+            rotation: 0,
+            invisible: false,
+            item: Some("minecraft:filled_map".to_owned()),
+            map_id: Some(7),
+            source: FramedMapSource::Resolved,
+            quad_normal: [0, 0, 0],
+        };
+        let visible = FramedMapGatherDiagnostic {
+            model_ready: true,
+            map_source_installed: true,
+            tracked_entity_id: Some(42),
+            selected: Some(frame),
+            selected_in_frustum: true,
+            selected_submitted: true,
+            projection_state: None,
+            projection: None,
+            submitted_instances: 1,
+            submitted_batches: 1,
+        };
+        let disappeared = FramedMapGatherDiagnostic {
+            model_ready: true,
+            map_source_installed: true,
+            tracked_entity_id: Some(42),
+            selected: visible.selected.clone(),
+            selected_in_frustum: false,
+            selected_submitted: false,
+            projection_state: None,
+            projection: None,
+            submitted_instances: 0,
+            submitted_batches: 0,
+        };
+        let mut diagnostics = MapLiveDiagnostics::default();
+
+        assert!(diagnostics.gather_changed(&visible));
+        assert!(
+            !diagnostics.gather_changed(&visible),
+            "the unchanged gather state must not log every frame"
+        );
+        let mut unrelated_counts_changed = visible.clone();
+        unrelated_counts_changed.submitted_instances = 191;
+        unrelated_counts_changed.submitted_batches = 24;
+        assert!(
+            !diagnostics.gather_changed(&unrelated_counts_changed),
+            "other maps entering the frustum must not retrigger the tracked-map observer"
+        );
+        assert!(
+            diagnostics.gather_changed(&disappeared),
+            "a visible candidate leaving gather must emit a disappearance edge"
+        );
+        assert!(diagnostics.draw_changed(FramedMapDrawDiagnostic {
+            tracked_entity_id: Some(42),
+            tracked_submitted: true,
+            tracked_drawn: true,
+            submitted_instances: 1,
+            submitted_batches: 1,
+            drawn_instances: 1,
+        }));
+        assert!(
+            !diagnostics.draw_changed(FramedMapDrawDiagnostic {
+                tracked_entity_id: Some(42),
+                tracked_submitted: true,
+                tracked_drawn: true,
+                submitted_instances: 191,
+                submitted_batches: 24,
+                drawn_instances: 191,
+            }),
+            "other map batches must not retrigger an unchanged tracked draw"
+        );
+        assert!(
+            diagnostics.draw_changed(FramedMapDrawDiagnostic {
+                tracked_entity_id: Some(42),
+                tracked_submitted: true,
+                tracked_drawn: false,
+                submitted_instances: 1,
+                submitted_batches: 1,
+                drawn_instances: 0,
+            }),
+            "a submitted-but-not-drawn transition must be observable"
+        );
+    }
+
+    #[test]
+    fn framed_map_live_diagnostic_tracks_screen_centre_with_hysteresis() {
+        let mut diagnostics = MapLiveDiagnostics::default();
+        let candidates = |pairs: &[(i32, f32)]| {
+            pairs
+                .iter()
+                .map(|&(entity_id, score)| FramedMapTrackCandidate { entity_id, score })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            diagnostics.track_entity(None, &candidates(&[(49812, 0.10), (49815, 0.30)])),
+            Some(49812)
+        );
+        assert_eq!(
+            diagnostics.track_entity(None, &candidates(&[(49812, 0.15), (49815, 0.14)])),
+            Some(49812),
+            "a tiny centre-score change must not make the observer flicker"
+        );
+        assert_eq!(
+            diagnostics.track_entity(None, &candidates(&[(49812, 0.30), (49815, 0.01)])),
+            Some(49815),
+            "a decisively more central frame must become the repro subject"
+        );
+        assert_eq!(diagnostics.track_entity(None, &[]), None);
+
+        let mut configured = MapLiveDiagnostics::default();
+        assert_eq!(
+            configured.track_entity(Some(49813), &candidates(&[(49812, 0.0)])),
+            Some(49813),
+            "LODESTONE_MAP_TRACE_ENTITY must win over nearest selection"
+        );
+    }
 
     /// `ItemFrameRenderer.submit` enters frame-local space, moves contents by
     /// `.4375`/`.5`, then its map branch's `scale(1/128)` carries the

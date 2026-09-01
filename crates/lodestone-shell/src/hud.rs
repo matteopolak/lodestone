@@ -1456,6 +1456,10 @@ pub struct HudFrame<'a> {
     pub sound_subtitles: &'a [crate::audio::subtitles::SubtitleCaption],
     /// The in-progress chat input line, `Some` only while the chat box is open.
     pub chat_input: Option<&'a str>,
+    /// The selected character range in [`Self::chat_input`], if any. It is
+    /// ordered by [`crate::chat::ChatInput::selection`] and clipped again by
+    /// the renderer to its text and input-strip bounds.
+    pub chat_selection: Option<(usize, usize)>,
     /// Whether the input line's blinking append-caret is in its "on" phase
     /// this frame; only meaningful while `chat_input` is `Some`. Vanilla
     /// blinks it every 300ms (`TextCursorUtils.CURSOR_BLINK_INTERVAL_MS`,
@@ -1761,6 +1765,7 @@ impl<'a> HudFrame<'a> {
             chat_trust: &[],
             sound_subtitles: &[],
             chat_input: None,
+            chat_selection: None,
             chat_caret_visible: true,
             chat_suggestion_ghost: None,
             chat_suggestions: None,
@@ -2165,6 +2170,10 @@ const SUGGESTION_TEXT_UNSELECTED: [f32; 4] = [170.0 / 255.0, 170.0 / 255.0, 170.
 /// `EditBox.extractRenderState`'s ghost-suffix colour — `-8355712` ==
 /// `0xFF808080`, drawn at `cursorX - 1`.
 const SUGGESTION_GHOST: [f32; 4] = [0.5019608, 0.5019608, 0.5019608, 1.0];
+/// `GuiGraphicsExtractor.textHighlight`'s opaque blue selection pass. Vanilla
+/// also inverts its glyphs through a dedicated GUI pipeline; the colour stream
+/// has no equivalent pipeline, so this pass remains behind the white glyphs.
+const CHAT_SELECTION: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 /// Pixel width of `s` at `scale`, in whichever font is attached — the real
 /// vanilla proportional advances when there is one, the fixed 5×7 debug advance
@@ -2633,6 +2642,35 @@ impl HudGeometry {
                 glyph_h * chat_pose_scale + 2.0 * INPUT_STRIP_PAD * chat_pose_scale,
                 [0.0, 0.0, 0.0, chat_bg_opacity],
             );
+            // `EditBox.extractWidgetRenderState` paints a selection after the
+            // background and before its glyphs. The input owns the same
+            // character-index range; convert it with the exact text-width
+            // function the following glyph draw uses. Clamp the endpoints to
+            // both the input and its plate so an empty/stale range or a long
+            // line cannot emit an invalid or off-strip fill.
+            if let Some((from, to)) = frame.chat_selection {
+                let char_len = input.chars().count();
+                let from = from.min(char_len);
+                let to = to.min(char_len);
+                if from != to {
+                    let left_text = input.chars().take(from).collect::<String>();
+                    let right_text = input.chars().take(to).collect::<String>();
+                    let left = (chat_inset + b.text_width(&left_text, chat_pose_scale))
+                        .clamp(chat_inset, chat_plate_w);
+                    let right = (chat_inset + b.text_width(&right_text, chat_pose_scale))
+                        .clamp(chat_inset, chat_plate_w);
+                    let (left, right) = if left <= right { (left, right) } else { (right, left) };
+                    if right > left {
+                        b.rect_px(
+                            left,
+                            input_y,
+                            right - left,
+                            glyph_h * chat_pose_scale,
+                            CHAT_SELECTION,
+                        );
+                    }
+                }
+            }
             // No leading `>` — vanilla's `ChatScreen`/`EditBox` draws no
             // prompt glyph at all, just the typed text and a caret. A
             // trailing underscore stands in for vanilla's append-caret
@@ -5508,6 +5546,24 @@ pub fn chat_interaction_at(
     x: f32,
     y: f32,
 ) -> Option<lodestone_game::text::InteractiveSpan> {
+    chat_interaction_at_scrolled(entries, canvas_w, canvas_h, opts, chat_open, 0, measure, x, y)
+}
+
+/// [`chat_interaction_at`] with the open chat screen's entry-based scroll
+/// offset. `scrolled` is `ChatComponent.chatScrollbarPos`: entries at the live
+/// bottom that are outside the rendered window must not be hit-testable.
+#[must_use]
+pub fn chat_interaction_at_scrolled(
+    entries: &[(Vec<lodestone_game::text::InteractiveSpan>, f32)],
+    canvas_w: f32,
+    canvas_h: f32,
+    opts: ChatDisplayOptions,
+    chat_open: bool,
+    scrolled: usize,
+    measure: impl Fn(&[TextSpan]) -> f32,
+    x: f32,
+    y: f32,
+) -> Option<lodestone_game::text::InteractiveSpan> {
     // `margin` is the *vertical* top clip only, matching the draw's own
     // `if y < margin` break. The horizontal origin is the chat column's own
     // inset — a different quantity, and sharing one name for both is how the
@@ -5521,6 +5577,9 @@ pub fn chat_interaction_at(
     let box_h = chat_height_px(height_pct.clamp(0.0, 1.0));
     let bottom = chat_bottom(canvas_h, pose_scale);
     let max_visual_rows = (box_h / line_h).floor().max(1.0) as usize;
+    let window_end = entries.len().saturating_sub(scrolled);
+    let window_start = window_end.saturating_sub(max_visual_rows);
+    let entries = &entries[window_start..window_end];
 
     // The text column runs from `inset` to `inset + box_w`; the old bound
     // stopped at `box_w`, so the last `inset` pixels of every wrapped line were
@@ -5605,7 +5664,10 @@ impl ChatWrapCacheSpans {
 
 #[cfg(test)]
 mod chat_interaction_tests {
-    use super::{TextSpan, TextStyle, chat_interaction_at, interactive_span_at, wrap_interactive_with};
+    use super::{
+        TextSpan, TextStyle, chat_interaction_at, chat_interaction_at_scrolled,
+        interactive_span_at, wrap_interactive_with,
+    };
     use lodestone_game::text::InteractiveSpan;
     use lodestone_model::text::{ClickAction, ClickEvent, HoverAction, HoverEvent};
 
@@ -5747,6 +5809,74 @@ mod chat_interaction_tests {
             &entries, canvas_w, canvas_h, o, true, measure, canvas_w + 50.0, newest_row_y,
         );
         assert!(outside.is_none(), "a point outside the chat box must never hit");
+    }
+
+    /// The visible-hit half of chat command execution. The companion
+    /// `app::tests::chat_click_dispatch::run_command_reaches_the_wire_as_a_real_command`
+    /// consumes this exact event through the real outbound seam.
+    #[test]
+    fn a_visible_run_command_span_is_returned_for_dispatch() {
+        let mut command = plain("run help");
+        command.click = Some(ClickEvent {
+            action: ClickAction::RunCommand,
+            value: "/help".to_string(),
+        });
+        let canvas_w = 400.0;
+        let canvas_h = 200.0;
+        let o = opts();
+        let pose = super::chat_pose_scale(o);
+        let hit = chat_interaction_at(
+            &[(vec![command], 0.0)],
+            canvas_w,
+            canvas_h,
+            o,
+            true,
+            measure,
+            super::CHAT_TEXT_INSET * pose + 1.0,
+            super::chat_bottom(canvas_h, pose) - super::chat_line_h(o, pose) / 2.0,
+        );
+        assert_eq!(
+            hit.and_then(|span| span.click),
+            Some(ClickEvent { action: ClickAction::RunCommand, value: "/help".to_string() })
+        );
+    }
+
+    /// The chat draw windows the oldest-first feed before it lays out rows.
+    /// A scrollback hit-test must inspect that same window, rather than always
+    /// treating the newest page as visible.
+    #[test]
+    fn chat_interaction_at_scrolled_hits_the_visible_older_page() {
+        let canvas_w = 400.0;
+        let canvas_h = 400.0;
+        let o = opts();
+        let pose_scale = super::chat_pose_scale(o);
+        let line_h = super::chat_line_h(o, pose_scale);
+        let bottom = super::chat_bottom(canvas_h, pose_scale);
+        let rows = super::chat_lines_per_page(o, pose_scale, true);
+        let mut entries: Vec<_> = (0..=rows)
+            .map(|i| (vec![plain(&format!("line {i}"))], 0.0))
+            .collect();
+        entries[0] = (vec![clickable("older-link", "https://example.invalid/older")], 0.0);
+
+        // With one entry scrolled off the live bottom, entry 0 is the
+        // top-most visible row and entry `rows` is not drawn at all.
+        let older_row_y = bottom - rows as f32 * line_h;
+        let hit = chat_interaction_at_scrolled(
+            &entries,
+            canvas_w,
+            canvas_h,
+            o,
+            true,
+            1,
+            measure,
+            super::CHAT_TEXT_INSET * pose_scale + 1.0,
+            older_row_y,
+        );
+        assert_eq!(
+            hit.and_then(|span| span.click).map(|click| click.value),
+            Some("https://example.invalid/older".to_string()),
+            "the event must come from the scrolled page actually on screen"
+        );
     }
 
     /// The hover half of the same shape, and the negative control that makes
@@ -6678,6 +6808,7 @@ impl HudRenderer {
         opts: ChatDisplayOptions,
         chat_open: bool,
         entries: &[(Vec<lodestone_game::text::InteractiveSpan>, f32)],
+        scrolled: usize,
         cursor: (f32, f32),
     ) -> Option<lodestone_game::text::InteractiveSpan> {
         let (cw, ch) =
@@ -6689,7 +6820,7 @@ impl HudRenderer {
             let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
             measure_text(font, &joined, pose)
         };
-        chat_interaction_at(entries, cw, ch, opts, chat_open, measure, cx, cy)
+        chat_interaction_at_scrolled(entries, cw, ch, opts, chat_open, scrolled, measure, cx, cy)
     }
 
     /// A physical-pixel cursor position in the logical-canvas pixels
@@ -8390,6 +8521,76 @@ mod tests {
         };
         let with_chat = HudGeometry::build(&frame, 640, 480).vertex_count();
         assert!(with_chat > base, "chat log + input line must add geometry");
+    }
+
+    /// A chat selection is modelled in character positions, but its rectangle
+    /// must follow the exact rendered glyph advances (including UTF-8 input),
+    /// land behind the glyphs, and stay inside the input strip.
+    #[test]
+    fn chat_input_selection_draws_a_clipped_glyph_aligned_rect() {
+        let stats = DebugStats::default();
+        let (w, h) = (640u32, 480u32);
+        let input = "aébc";
+        let base = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat_input: Some(input),
+                chat_caret_visible: false,
+                ..HudFrame::new(&stats)
+            },
+            w,
+            h,
+        );
+        let selected = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat_input: Some(input),
+                chat_selection: Some((1, 3)),
+                chat_caret_visible: false,
+                ..HudFrame::new(&stats)
+            },
+            w,
+            h,
+        );
+
+        let (logical_w, logical_h) =
+            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
+        let to_px_x = |ndc_x: f32| (ndc_x + 1.0) * 0.5 * logical_w;
+        let to_px_y = |ndc_y: f32| (1.0 - ndc_y) * 0.5 * logical_h;
+
+        let selection = selected
+            .verts
+            .chunks(FLOATS_PER_VERTEX)
+            .filter(|vertex| vertex[2..6] == [0.0, 0.0, 1.0, 1.0])
+            .map(|vertex| (to_px_x(vertex[0]), to_px_y(vertex[1])))
+            .collect::<Vec<_>>();
+        assert!(
+            !selection.is_empty(),
+            "the selected character range must add a blue selection rectangle"
+        );
+
+        let (min_x, max_x, min_y, max_y) = selection.iter().fold(
+            (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY),
+            |(min_x, max_x, min_y, max_y), &(x, y)| {
+                (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
+            },
+        );
+        let pose = chat_pose_scale(ChatDisplayOptions::default());
+        let left = CHAT_TEXT_INSET * pose + measure_text(None, "a", pose);
+        let right = CHAT_TEXT_INSET * pose + measure_text(None, "aéb", pose);
+        assert!((min_x - left).abs() < 0.01, "selection begins at its first glyph");
+        assert!((max_x - right).abs() < 0.01, "selection ends at its last glyph");
+        assert!(
+            min_y >= chat_input_top(logical_h, pose) - 0.01
+                && max_y <= chat_input_top(logical_h, pose) + font::GLYPH_H as f32 * pose + 0.01,
+            "selection stays in the input glyph row"
+        );
+        assert!(
+            selected.vertex_count() > base.vertex_count(),
+            "the selection must be a render-model addition, not editor-only state"
+        );
     }
 
     /// Regression gate for the player report's third defect: `hud.rs` used to

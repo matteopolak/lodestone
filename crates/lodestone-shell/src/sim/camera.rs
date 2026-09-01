@@ -705,13 +705,15 @@ impl Sim {
             // inventory avatar drew the owner's real skin and the body beside
             // it drew a uuid-hash identity, for the same person, in the same
             // frame.
-            match crate::skin_fetch::local_profile_sheet_key() {
+            match crate::skin_fetch::local_profile_sheet_key(id) {
                 Some(key) => {
                     key.clone_into(&mut skin.url);
                     // The rig has to move with the sheet or the arms sit a
                     // texel out, and `skin_fetch` owns the rig that sheet was
                     // authored for.
-                    skin.model = crate::skin_fetch::current_model();
+                    if let Some(model) = crate::skin_fetch::current_model(id) {
+                        skin.model = model;
+                    }
                 }
                 None => {
                     // Logged because "drew a default" and "declined to
@@ -729,7 +731,7 @@ impl Sim {
         } else {
             crate::remote_skins::request(&skin.url);
         }
-        crate::remote_skins::set_local(&skin);
+        crate::remote_skins::set_local(id, &skin);
         Some(skin)
     }
 
@@ -830,7 +832,7 @@ impl Sim {
             // own body could be the right shape and still the wrong skin.
             slim: player_skin
                 .as_ref()
-                .map_or_else(|| crate::skin_fetch::current_model(), |skin| skin.model)
+                .map_or(lodestone_assets::PlayerModelType::Wide, |skin| skin.model)
                 .is_slim(),
             player_skin,
             equipment,

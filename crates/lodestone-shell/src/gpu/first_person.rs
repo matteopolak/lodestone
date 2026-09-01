@@ -703,10 +703,9 @@ impl RenderState {
         // `item/generated`'s `firstperson_righthand` rather than the in-hand
         // model's, because `ItemIcon::display` is the first drawable part's map.
         //
-        // `using` is `false`: the local player's using-item state has no fold on
-        // this side yet (see `docs/item-variants.md` — it needs a `Vitals`-shaped
-        // session component and a `PlayerSnapshot` line in `sim.rs`), so *our own*
-        // bow still draws slack while a remote player's and a mob's do not.
+        // Resolve the held model with the local player's use state. Bow pulling is
+        // represented by item-definition variants, so omitting this state leaves
+        // the bow permanently slack even while the server is charging it.
         // `ARM.display_slot(true)` — the same expression `hand_transform` below
         // reads the pose from, so the resolved variant and its transform cannot
         // disagree about which slot this pass is.
@@ -719,7 +718,9 @@ impl RenderState {
             return Some(FirstPersonHand::Map(mesh, texture));
         }
 
+        let use_state = self.item_use.sample();
         let hand_ctx = ItemStateContext::new(ARM.display_slot(true))
+            .with_use(use_state.using, use_state.ticks)
             .with_custom_model_data(self.equip.visible_custom_model_data().unwrap_or(0) as f32);
         if let Some((item, foil)) = self.equip.visible()
             && let Some(model) = self.model.as_ref()
@@ -748,7 +749,7 @@ impl RenderState {
                     inverse_arm_height,
                     &transform,
                     u8::try_from(self.hand_light(camera)).unwrap_or(u8::MAX),
-                    self.item_use.sample(),
+                    use_state.eat,
                 );
                 // The held item's real dye/potion tint — a no-op unless this item is
                 // a dyed leather piece or a mixed potion (`ItemGeometry::live_tints`

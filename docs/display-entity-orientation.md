@@ -142,6 +142,17 @@ Two things specific to this pass:
   why this pass no longer bridges through one. `text_glyph_color`'s white is
   only the *fallback* `Font.java::getTextColor` uses when a span's own
   colour is unset, not an unconditional hardcode.
+- **A span's `font` is a font selection, not decoration.** `text_display`
+  resolves it through the same pack-aware `VanillaFont` cache as the HUD.
+  For every codepoint, a selected font wins only when it covers that
+  codepoint; otherwise the active pack's `minecraft:default` raster supplies
+  vanilla's fallback. The resolved ink layout is cached by the component spans
+  and `resources::pack_generation`, so a resource-pack reload replaces both
+  default and named-font glyphs without making unchanged displays raster-walk
+  every frame. Bitmap glyph rectangles retain their source RGBA and multiply
+  it by the component colour: a pack icon's native colour or alpha cannot be
+  flattened to white/opaque, and adjacent texels are merged only when their
+  complete RGBA values match.
 
 ## How to change it
 

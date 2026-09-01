@@ -774,6 +774,7 @@ impl WindowApp {
             chat_opts,
             self.ui.is_chat_open(),
             &entries,
+            self.chat_input.scroll().scrolled(),
             self.cursor,
         );
         hit.filter(|s| s.click.is_some() || s.hover.is_some())
@@ -789,15 +790,9 @@ impl WindowApp {
     /// touches nothing but the OS clipboard). `open_url`/`open_file` are the
     /// opposite: vanilla itself gates `open_url` behind a confirmation
     /// screen (`ConfirmLinkScreen`) precisely because a chat message is
-    /// server-supplied, untrusted content, and this shell has no such screen
-    /// wired to chat yet. Rather than either silently drop the click or open
-    /// the link with **no** confirmation at all, the destination is surfaced
-    /// as a client-authored chat line showing it in full
-    /// ([`crate::sim::session::Sim::push_local_chat`]) so the player can act
-    /// on it deliberately — strictly safer than either alternative. The
-    /// natural follow-up is wiring `crate::menu::confirm`'s existing
-    /// `ConfirmScreen` machinery (already used for world deletion and the
-    /// resource-pack prompt) to this click instead of the chat line.
+    /// server-supplied, untrusted content, so `open_url` enters the existing
+    /// confirmation overlay and opens only after an explicit Yes. `open_file`
+    /// remains unsupported and never receives an OS handoff.
     pub(super) fn dispatch_chat_click_under_cursor(&mut self) -> bool {
         let Some(click) = self.chat_interaction().and_then(|hit| hit.click) else {
             return false;
@@ -826,7 +821,11 @@ impl WindowApp {
                 #[cfg(not(target_arch = "wasm32"))]
                 crate::menu::accounts::copy_to_clipboard(&click.value);
             }
-            ClickAction::OpenUrl | ClickAction::OpenFile => {
+            ClickAction::OpenUrl => {
+                self.nav.server_links_mut().confirm_chat_url(click.value.clone());
+                self.ui.open_server_links_from_chat();
+            }
+            ClickAction::OpenFile => {
                 self.sim.push_local_chat(format!(
                     "Link received (not opened automatically): {}",
                     click.value

@@ -107,7 +107,7 @@ along `Y` with its tip at negative `Y`; `Axis.ZP.rotationDegrees(xRot + 90)`
 matrix serves both, and the whole difference between the two renderers is that
 number.
 
-### 3. Where yaw and pitch come from — and why no velocity plumbing was needed
+### 3. Where yaw, pitch and between-packet motion come from
 
 Vanilla derives a projectile's `yRot`/`xRot` from `atan2` on its own velocity:
 
@@ -119,17 +119,18 @@ setXRot(lerpRotation(getXRot(), xRot));          // Mth.lerp(0.2, …), not assi
 setYRot(lerpRotation(getYRot(), yRot));
 ```
 
-The important part is that **the server does this too**, and then broadcasts the
-result as ordinary entity rotation (`ClientboundAddEntityPacket`,
-`ClientboundMoveEntityPacket`). So `EntityDraw::yaw`/`EntityDraw::pitch` — already
-decoded, already interpolated by `entities.rs` — *are* the velocity-derived angles.
-The single production change is one call site:
-`RenderState::prepare_entities` in `lodestone-shell/src/gpu.rs` uses
-`resolve_posed(…, e.pitch, …)` instead of `resolve(…)`.
+The server broadcasts velocity-derived rotation in ordinary spawn/move packets, and those reports
+remain the reconciliation authority. They are not frequent enough to animate flight by themselves,
+however. `entities.rs` therefore attaches `ProjectilePhysics` to arrow-family entities, initialises
+the existing `lodestone_entity::projectile::Projectile::arrow` simulation from the wire position and
+velocity, and advances it in the client `GameTick` schedule. Each tick updates the same
+`TransformFrom`/`TransformTo` interpolation pair the renderer already consumes, including locally
+derived yaw and pitch. A later server report replaces the local state, so this is prediction between
+authoritative snapshots rather than a second server simulation.
 
-#380's text and the earlier investigation note both said the orientation "needs a
-velocity the draw record does not carry". True premise, wrong conclusion — see
-`thrown_item_for`'s doc comment in `entity.rs`, which now records the correction.
+To extend the animated family, update `is_ballistic_projectile` and choose the matching vanilla
+`Projectile` profile; do not treat thrown-item billboards as arrows merely because both have a
+velocity. Their drag, gravity, collision and renderer orientation differ.
 
 **Note the convention clash, because it is real.** A projectile's `yRot` is *not* a
 mob's body yaw: `Projectile.shoot` sets `yRot = atan2(mx, mz)`, so an arrow fired by
@@ -182,11 +183,15 @@ but exact confirmation of `lerpRotation`'s `Mth.lerp(0.2, …)`.
 
 Two divergences from vanilla that follow from using the server's rotation:
 
-* Rotation is quantised to `360/256 ≈ 1.4°` on the wire, and only sent when the
-  packed byte changes. Vanilla's client recomputes locally between packets.
-* `lerpRotation`'s 20 %-per-tick easing happens **on the server**; our own
-  interpolation between reports is `entities.rs`'s position/rotation ease, not a
-  second copy of vanilla's.
+* Rotation is quantised to `360/256 ≈ 1.4°` on the wire. Between reports the local projectile tick
+  recomputes its angles from velocity, as vanilla's client does; the next server report reconciles it.
+  `ProjectilePhysics` keeps the last authoritative position, velocity, and grounded state separately
+  from the locally integrated values. This distinction is load-bearing: the ingest entity retains its
+  last wire rotation between packets, and treating that stale rotation as a new correction rewinds the
+  projectile to the old server position every frame.
+* `lerpRotation`'s 20 %-per-tick easing happens **on the server**. Lodestone derives the predicted
+  angle directly from its predicted velocity, then uses the normal render interpolation between
+  client ticks.
 
 ## How to change it
 

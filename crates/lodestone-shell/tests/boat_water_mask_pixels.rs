@@ -464,6 +464,7 @@ fn boat_draw(type_path: &str) -> EntityDraw {
         type_path: Arc::from(type_path),
         item: None,
         item_model: None,
+        item_skin: None,
         main_arm_left: false,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),

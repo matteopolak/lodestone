@@ -44,6 +44,23 @@ through the *exact* resolve → cull → pose → upload path
 (`RenderState::merge_held_items`) every other humanoid already uses — not a
 second copy of either.
 
+### Player skins are translucent model data, not ordinary mob cutouts
+
+26.2 constructs `PlayerModel` with `RenderTypes::entityTranslucent`; it does
+not inherit the opaque/cutout render type that most living models use.
+`EntityRenderer` therefore routes only the `player_wide` and `player_slim`
+body batches through `EntityPipeline::player_skin_pipeline`. That pipeline
+keeps the standard entity depth state (`LessEqual` in Lodestone's depth space,
+with depth writes) but follows `ENTITY_TRANSLUCENT`'s blend state and `0.1`
+alpha cutout. This preserves a skin's partially-alpha outer-layer texels
+without changing armor's `ARMOR_CUTOUT_NO_CULL` contract.
+
+The two small openings at the top of the vanilla diamond chestplate are not a
+depth error: `textures/entity/equipment/humanoid/diamond.png` deliberately has
+zero-alpha texels in its body-front UV rectangle (`20..28 × 20..32`). The skin
+or jacket behind those holes is supposed to remain visible. Do not close them
+with a mask or an armor offset; that would be a non-vanilla visual patch.
+
 ### Where it's spliced in: `render_inner`
 
 `RenderState::render` polls `self.third_person_body.sample()`

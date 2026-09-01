@@ -411,6 +411,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         type_path: std::sync::Arc::from("zombie"),
         item: None,
         item_model: None,
+        item_skin: None,
         equipment: vec![
             (
                 EquipmentSlot::Head,
@@ -700,4 +701,35 @@ fn third_person_body_state_resolves_through_the_real_corpus() {
             );
         }
     }
+}
+
+/// Framed maps are a layered world surface, not an ordinary opaque model.
+///
+/// Keep this wiring assertion outside `frame.rs`: if the draw silently falls
+/// back to `model.pipeline`, a test embedded in that same source file could
+/// match its own assertion text and pass vacuously.
+#[test]
+fn framed_map_draw_uses_the_dedicated_depth_layer() {
+    let frame_source = include_str!("frame.rs");
+    assert!(
+        frame_source.contains("pass.set_pipeline(&model.map_surface_pipeline.pipeline);"),
+        "framed maps must use their dedicated depth layer instead of the ordinary model pipeline"
+    );
+}
+
+/// The frame body and its picture must be compared under one identically
+/// rounded view-projection. A separate scaled camera matrix loses their tiny
+/// physical separation to cancellation at large world coordinates; the two
+/// raster-depth variants express vanilla's ordering without that divergence.
+#[test]
+fn framed_map_layers_share_one_view_projection() {
+    let frame_source = include_str!("frame.rs");
+    assert!(
+        frame_source.contains("pass.set_pipeline(&model.surface_pipeline.pipeline);"),
+        "the frame body must take the first raster-depth layer"
+    );
+    assert!(
+        !frame_source.contains("model.item_frame_cam_bind_group"),
+        "a separately rounded item-frame camera matrix reintroduces FOV-dependent depth reversal"
+    );
 }

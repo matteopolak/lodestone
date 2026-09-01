@@ -294,14 +294,10 @@ mod chat_click_dispatch {
         );
     }
 
-    /// `open_url` must **never** call the OS browser handoff on its own —
-    /// this shell has no confirmation screen wired to chat yet, so the
-    /// safe behaviour is "surface it, do not act on it automatically",
-    /// which this proves two ways: the OS-handoff recorder stays empty, and
-    /// the destination is pushed as a client-authored chat line the player
-    /// can read and act on themselves.
+    /// `open_url` must never call the OS browser handoff before its untrusted
+    /// link confirmation is explicitly accepted.
     #[test]
-    fn open_url_never_opens_the_browser_and_surfaces_the_link_instead() {
+    fn open_url_never_opens_the_browser_before_confirmation() {
         let (mut app, _actions) = headless_app_with_loopback();
         let _ = crate::menu::accounts::test_browser_opens::taken();
         app.dispatch_click_action(&ClickEvent {
@@ -312,13 +308,7 @@ mod chat_click_dispatch {
             crate::menu::accounts::test_browser_opens::taken().is_empty(),
             "open_url must not open a browser without the player confirming"
         );
-        let recent = app.sim.recent_chat(1);
-        assert_eq!(recent.len(), 1, "the link must be surfaced somewhere the player can see it");
-        assert!(
-            recent[0].0.contains("https://example.invalid/probe"),
-            "the surfaced line must show the destination in full: {:?}",
-            recent[0].0
-        );
+        assert!(app.nav.server_links().returns_to_chat());
     }
 
     /// `open_file` gets the identical treatment as `open_url` above — same

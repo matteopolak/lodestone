@@ -87,21 +87,23 @@ that is exactly the failure a "just replace the texture" API invites.
 `set_skin` returns `false` and changes nothing rather than leaving a slim mesh
 with a wide sheet.
 
-### The local override, which is what keeps the slim rig from being dead code
+### The local cache is account-owned
 
-`player_preview.rs::local_skin_override` reads `<data_dir>/skin.png`, with an
-optional sibling `<data_dir>/skin.model` naming the rig. `data_dir()` is
-`lodestone_auth::paths::data_dir()` — the same directory as `servers.json` and
-`profiles.json` (`LODESTONE_DATA_DIR` overrides it).
+The cache is `<data_dir>/skin.png`, `<data_dir>/skin.model`, plus the mandatory
+`<data_dir>/skin.uuid` owner marker. `data_dir()` is
+`lodestone_auth::paths::data_dir()` (`LODESTONE_DATA_DIR` overrides it).
 
 The marker file holds a **legacy services id** (`slim` or `default`), parsed by
 the very same `PlayerModelType::by_legacy_services_name` the network path will
 use — not a second bespoke parse that could disagree. Absent, unreadable or
 unrecognised is wide, exactly as an absent `metadata.model` is.
 
-This exists for one reason: without a producer, the slim rig and `set_skin`
-would both be unreachable, which is this repo's dominant defect class. It is
-also the natural cache location for the fetch to write into.
+The inventory preview does not read those process-global files during GPU
+construction. It has no session UUID at that point, and doing so used to show
+the skin of a different account from the account switcher. Once a live UUID is
+known, `Sim::local_player_skin` accepts the disk entry only when `skin.uuid`
+matches, publishes it under an account-scoped synthetic key, and all three local
+views use that same resolved skin. Unmarked legacy cache files are ignored.
 
 ### The bug this found
 
@@ -137,10 +139,10 @@ menu::accounts worker (device-code and loopback, both)
   -> skin_fetch::fetch_own_skin
        -> lodestone_auth::texture::fetch_texture    -- TextureUrlChecker, then GET
        -> Image::decode_png
-       -> <data_dir>/skin.png + skin.model          -- the *next* launch's path
-       -> skin_fetch::publish                       -- *this* session's path
-ContainerRenderer::render_geometry_scaled
-  -> skin_fetch::take_pending -> set_player_skin
+       -> skin.png + skin.model + skin.uuid         -- later launches
+       -> skin_fetch::publish(profile.id, ...)      -- this session
+Sim::local_player_skin -> remote_skins::set_local(profile.id, skin)
+ContainerRenderer -> PlayerPreview::maybe_skin_for_uuid(profile.id)
 ```
 
 ### The host restriction is the security-relevant part
@@ -199,17 +201,17 @@ obvious `serialized_name()` produces `"wide"`, which the parse does not recognis
 — and since its fallback *is* wide, a Steve round-trips correctly and only an
 Alex is wrong.
 
-### Why it lands on the frame and not at construction
+### Why it resolves on the frame and not at construction
 
 `PlayerPreview` is built **once**, during `app::lifecycle`'s resume, and never
 re-reads the cache. Sign-in happens in the main menu and the inventory is opened
 later in the same run, so writing only the cache would have deferred the entire
 visible effect of the fetch to the next launch — an island in all but name.
-`ContainerRenderer::render_geometry_scaled` therefore drains
-`skin_fetch::take_pending()` at the top of every container frame: one uncontended
-`Mutex::lock`, `None` on all but the one frame after a fetch lands. The slot is a
-slot rather than a queue on purpose — a second fetch replaces an undrained first,
-because only the newest skin matters.
+`ContainerRenderer::render_geometry_scaled` therefore asks the retained local
+skin handoff for the frame's live UUID. The preview remembers `(UUID, source)`
+and uploads only when either changes. A newly-created renderer has no remembered
+binding, so a resource-pack reload rehydrates the same active account without a
+network retry.
 
 Every failure inside the fetch is a `warn!` and a `false`, including the refused
 host: a dead texture CDN must not fail an otherwise-successful login.

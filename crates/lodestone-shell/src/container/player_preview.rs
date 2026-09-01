@@ -90,8 +90,7 @@ const PLAYER_BB_HEIGHT: f32 = 1.8;
 /// skins land, this is the one line that changes".** It has changed: the model
 /// is now a runtime [`PlayerModelType`], settable through
 /// [`PlayerPreview::set_skin`], and both rigs are reachable. What is still
-/// missing is only the *fetch* — see this module's `local_skin_override` and
-/// `docs/player-skins.md`.
+/// fetch and account-scoped handoff are documented in `docs/player-skins.md`.
 const DEFAULT_MODEL: PlayerModelType = PlayerModelType::Wide;
 
 /// `leftPos + 73`, `topPos + 6` — the creative inventory tab's avatar recess origin.
@@ -101,43 +100,6 @@ const CREATIVE_RECT_OFFSET: [f32; 2] = [73.0, 6.0];
 const CREATIVE_RECT_SIZE: [f32; 2] = [32.0, 43.0];
 /// The creative call's `scale` argument, against `InventoryScreen`'s 30.
 const CREATIVE_SIZE: f32 = 20.0;
-
-/// The interim local skin: `<data_dir>/skin.png`, with an optional sibling
-/// `<data_dir>/skin.model` naming the rig.
-///
-/// This exists so the model switch is not an island. Nothing in this workspace
-/// fetches a skin yet (`lodestone-auth`'s `fetch_profile` reads only `id` and
-/// `name` off `api.minecraftservices.com/minecraft/profile`, discarding its
-/// `skins` array, and `v770`'s `read_add_player` discards the `textures`
-/// property outright — both outside this cluster), so without a local source
-/// `set_skin` would have zero callers and the slim rig would be unreachable
-/// dead code, which is the dominant defect class in this repo.
-///
-/// The marker file holds a **legacy services id** — `slim` or `default`, the
-/// spelling that appears in a real `textures` payload — and is parsed by the
-/// very same [`PlayerModelType::by_legacy_services_name`] the network path will
-/// use, rather than a second bespoke parse that could disagree with it. An
-/// absent, unreadable or unrecognised marker is wide, exactly as an absent
-/// `metadata.model` is.
-fn local_skin_override() -> Option<(PlayerModelType, lodestone_assets::Image)> {
-    let dir = lodestone_auth::paths::data_dir();
-    let png = std::fs::read(dir.join("skin.png")).ok()?;
-    let img = match lodestone_assets::Image::decode_png(&png) {
-        Ok(img) => img,
-        Err(e) => {
-            tracing::warn!(target: "assets", "local skin.png did not decode: {e}");
-            return None;
-        }
-    };
-    let declared = std::fs::read_to_string(dir.join("skin.model")).ok();
-    let model = PlayerModelType::by_legacy_services_name(declared.as_deref().map(str::trim));
-    tracing::info!(
-        target: "assets",
-        model = model.serialized_name(),
-        "using the local skin override for the inventory avatar"
-    );
-    Some((model, img))
-}
 
 /// The avatar's rect and the cursor that aims it, in **logical GUI pixels** —
 /// what [`super::geometry::ContainerGeometry`] hands the draw.
@@ -184,7 +146,7 @@ pub struct PlayerAvatar {
     /// The local player's own uuid, carried through from
     /// [`super::frame::ContainerFrame::avatar_uuid`] — `None` for every
     /// caller with no live session (every hermetic gate, and a frame built
-    /// before login). See [`PlayerPreview::maybe_default_from_uuid`], the
+    /// before login). See [`PlayerPreview::maybe_skin_for_uuid`], the
     /// consumer.
     pub uuid: Option<uuid::Uuid>,
 }
@@ -292,20 +254,13 @@ pub(super) struct PlayerPreview {
     /// share this with the world entity pass.
     cam_buffer: wgpu::Buffer,
     cam_bind_group: wgpu::BindGroup,
-    /// Whether [`Self::new`] bound a **local** override (`skin.png`/
-    /// `skin.model` in the data dir) rather than the hardcoded
-    /// [`DEFAULT_MODEL`] fallback. `true` here means
-    /// [`maybe_default_from_uuid`](Self::maybe_default_from_uuid) must never
-    /// overwrite it — a user-supplied override outranks a uuid-derived
-    /// guess, the same precedence [`new`] itself already gives it.
+    /// Kept for the public diagnostic gate. Process-global `skin.png` no longer
+    /// has authority to claim an account, so this is always false.
     used_local_override: bool,
-    /// Whether [`maybe_default_from_uuid`](Self::maybe_default_from_uuid) has
-    /// already resolved and bound the uuid-derived default once. Set the
-    /// first time a uuid becomes available and never cleared, so a later
-    /// real fetch (`skin_fetch::take_pending`, drained in
-    /// `ContainerRenderer::render_geometry_scaled_between_strata`) is not
-    /// clobbered back to the uuid guess on a subsequent frame.
-    default_from_uuid_applied: bool,
+    /// `(account UUID, source key)` currently bound. The account is part of
+    /// the identity: a renderer survives server/account changes, and a source
+    /// key alone can otherwise retain the previous account's pixels.
+    applied_skin: Option<(uuid::Uuid, String)>,
 }
 
 impl PlayerPreview {
@@ -316,17 +271,11 @@ impl PlayerPreview {
         queue: &wgpu::Queue,
         color_format: wgpu::TextureFormat,
     ) -> Option<Self> {
-        // A local skin override, if the user has dropped one in the data
-        // directory; otherwise the pack's own sheet for the default rig —
-        // `DEFAULT_MODEL` here is a bootstrap value only, overwritten the
-        // first time `maybe_default_from_uuid` runs with a real uuid (see
-        // that method and `used_local_override` below). A local override, by
-        // contrast, is a user's explicit choice and must never be overridden
-        // by a guess.
-        let (skin_model, supplied, used_local_override) = match local_skin_override() {
-            Some((m, img)) => (m, Some(img), true),
-            None => (DEFAULT_MODEL, None, false),
-        };
+        // Construction happens before a session exists, so only the pack
+        // bootstrap is safe here. The active account's skin is applied later
+        // by `maybe_skin_for_uuid`; the old process-global `skin.png` had no
+        // owner and could therefore draw a different account.
+        let skin_model = DEFAULT_MODEL;
         let model = lodestone_render::entity::player_model_name(skin_model.is_slim());
         let models = EntityModelSet::load();
         let mesh = models.get(model)?.clone();
@@ -336,10 +285,7 @@ impl PlayerPreview {
         // resolves through — not a hardcoded path, so a pack that ships only the
         // legacy name still finds it. A supplied sheet wins; a jar-less run with
         // no supplied sheet is the `None` that leaves the recess empty.
-        let img = match supplied {
-            Some(img) => img,
-            None => load_skin(model)?,
-        };
+        let img = load_skin(model)?;
 
         let pipeline = EntityPipeline::new(device, color_format);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -379,8 +325,8 @@ impl PlayerPreview {
             sampler,
             cam_buffer,
             cam_bind_group,
-            used_local_override,
-            default_from_uuid_applied: false,
+            used_local_override: false,
+            applied_skin: None,
         })
     }
 
@@ -390,9 +336,8 @@ impl PlayerPreview {
         self.skin_model
     }
 
-    /// Resolve and bind the **uuid-derived default** — issue #646's fix —
-    /// the *first* time a real uuid reaches this pass, unless a local
-    /// override already claimed the avatar at construction.
+    /// Resolve and bind the active account's retained skin, or its exact
+    /// UUID-derived default while the real sheet is unavailable.
     ///
     /// # Why this exists rather than resolving the default at [`new`]
     ///
@@ -401,9 +346,8 @@ impl PlayerPreview {
     /// bootstrap guess. This is the seam that corrects it once one is known,
     /// called every container frame from
     /// `ContainerRenderer::render_geometry_scaled_between_strata` (the same
-    /// per-frame drain `skin_fetch::take_pending` already uses for a real
-    /// fetched skin, for the identical reason: the avatar is built long
-    /// before the fact it needs is available).
+    /// frame. The `(uuid, source)` identity below keeps that call cheap while
+    /// still rebinding after an account change or renderer rebuild.
     ///
     /// # One resolver, keyed on one uuid
     ///
@@ -415,36 +359,60 @@ impl PlayerPreview {
     /// explicitly (the original report was exactly this: Alex in the
     /// inventory, Steve in the world, for the *same* player).
     ///
-    /// No-op once [`Self::default_from_uuid_applied`] is set (idempotent
-    /// across frames) or when [`Self::used_local_override`] is `true` (a
-    /// user's explicit `skin.png`/`skin.model` outranks a guess). Silently
-    /// leaves the bootstrap default in place if the resolved rig's sheet
-    /// cannot be loaded — the same fail-open [`set_skin`](Self::set_skin)
-    /// already takes for a rig switch.
-    pub(super) fn maybe_default_from_uuid(
+    /// A cached sheet is accepted only when it belongs to this UUID. An old
+    /// unowned `skin.png` therefore cannot leak another switcher account into
+    /// the preview. Missing assets fail open to the existing bootstrap skin.
+    pub(super) fn maybe_skin_for_uuid(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         uuid: uuid::Uuid,
     ) {
-        let Some(model) =
-            uuid_default_model(self.used_local_override, self.default_from_uuid_applied, uuid)
-        else {
-            return;
+        let local = crate::remote_skins::local_for(uuid);
+        let resolved = local.as_ref().and_then(|skin| {
+            (!skin.url.is_empty())
+                .then(|| crate::remote_skins::sheet(&skin.url))
+                .flatten()
+                .map(|sheet| {
+                    (
+                        format!("remote:{}", skin.url),
+                        skin.model,
+                        (*sheet).clone(),
+                    )
+                })
+        });
+        let (source, model, image) = match resolved {
+            Some(resolved) => resolved,
+            None => {
+                let (reference, model) = local.as_ref().map_or_else(
+                    || {
+                        let (hi, lo) = uuid.as_u64_pair();
+                        let skin = lodestone_assets::skin::default_skin_for_uuid(
+                            hi as i64, lo as i64,
+                        );
+                        (skin.texture, skin.model)
+                    },
+                    |skin| (skin.default_sheet, skin.model),
+                );
+                let Some(image) = load_skin_reference(reference) else {
+                    return;
+                };
+                (format!("default:{reference}"), model, image)
+            }
         };
-        self.default_from_uuid_applied = true;
-        self.set_skin(device, queue, model, None);
+        if preview_skin_is_current(self.applied_skin.as_ref(), uuid, &source) {
+            return;
+        }
+        if self.set_skin(device, queue, model, Some(&image)) {
+            self.applied_skin = Some((uuid, source));
+        }
     }
 
-    /// Whether [`Self::new`] bound a local `skin.png`/`skin.model` override
-    /// rather than the bootstrap [`DEFAULT_MODEL`] — exposed (through
-    /// [`super::ContainerRenderer::player_preview_used_local_override`]) so a
-    /// gate can tell the two apart rather than assuming a clean environment.
-    /// The real data directory is process-global and not test-overridable
-    /// from inside a test binary (`std::env::set_var` is `unsafe` under this
-    /// workspace's edition and process-global besides), so a machine with a
-    /// real local skin on disk is a legitimate state a gate must account for,
-    /// not an error.
+    /// Compatibility diagnostic exposed through
+    /// [`super::ContainerRenderer::player_preview_used_local_override`] for
+    /// existing GPU gates. It is always false now: construction no longer
+    /// binds an unowned process-global override; UUID-scoped skin resolution
+    /// happens in [`Self::maybe_skin_for_uuid`].
     #[must_use]
     pub(super) fn used_local_override(&self) -> bool {
         self.used_local_override
@@ -600,6 +568,14 @@ impl PlayerPreview {
     }
 }
 
+fn preview_skin_is_current(
+    applied: Option<&(uuid::Uuid, String)>,
+    uuid: uuid::Uuid,
+    source: &str,
+) -> bool {
+    applied.is_some_and(|(owner, current)| *owner == uuid && current == source)
+}
+
 impl PlayerAvatar {
     /// The same avatar posed over a live [`AnimInput`] — see
     /// [`PlayerAvatar::pose`]. Builder-style so every existing caller keeps
@@ -657,25 +633,24 @@ fn avatar_part_matrices(
         .collect()
 }
 
-/// The pure decision behind [`PlayerPreview::maybe_default_from_uuid`],
+/// Test-only model of the UUID-default decision in
+/// [`PlayerPreview::maybe_skin_for_uuid`],
 /// extracted so it is testable without a GPU device, a vanilla jar, or the
-/// real filesystem `local_skin_override` reads — none of which this decision
-/// itself depends on.
+/// real skin cache — none of which this decision itself depends on.
 ///
-/// `None` means "leave the currently bound skin alone" (a local override
-/// outranks a guess, or the uuid default was already applied once and must
-/// not flip-flop across frames); `Some(model)` is the rig
+/// `None` means the same source is already applied; `Some(model)` is the rig
 /// `lodestone_assets::skin::default_skin_for_uuid` resolves for `uuid` — the
 /// **same** function `entities.rs::default_remote_skin` calls for the
 /// world-side default of every other player, so this call site and that one
 /// cannot disagree for the same uuid.
 #[must_use]
+#[cfg(test)]
 fn uuid_default_model(
-    used_local_override: bool,
+    _used_local_override: bool,
     already_applied: bool,
     uuid: uuid::Uuid,
 ) -> Option<PlayerModelType> {
-    if used_local_override || already_applied {
+    if already_applied {
         return None;
     }
     let (hi, lo) = uuid.as_u64_pair();
@@ -723,6 +698,16 @@ fn load_skin(model: &str) -> Option<lodestone_assets::Image> {
     }
     tracing::warn!(target: "assets", model, "no player skin sheet for the inventory avatar");
     None
+}
+
+/// Resolve one of `DefaultPlayerSkin`'s exact sheet references through the
+/// active pack stack. Unlike `load_skin`, this preserves the UUID-selected
+/// identity (`ari`, `efe`, …) instead of collapsing it to generic Steve/Alex.
+fn load_skin_reference(reference: &str) -> Option<lodestone_assets::Image> {
+    let manager = crate::resources::open_vanilla_pack_stack()?;
+    let path = format!("assets/minecraft/textures/{reference}.png");
+    let png = manager.read(&path)?;
+    lodestone_assets::Image::decode_png(&png).ok()
 }
 
 #[cfg(test)]
@@ -808,7 +793,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// `uuid_default_model` is the whole decision behind
-    /// `maybe_default_from_uuid`, pure and GPU/filesystem-free, so this gate
+    /// `maybe_skin_for_uuid`'s fallback, pure and GPU/filesystem-free, so this gate
     /// needs neither a device nor a vanilla jar nor a clean data directory.
     ///
     /// **Two discriminating uuids, not one** — hand-verified against
@@ -835,14 +820,19 @@ mod tests {
             "(9, 0) uuid, no override, not yet applied -> Wide"
         );
 
-        // Both gates a real caller must respect: a local override always
-        // wins, and the resolution only ever fires once.
+        // A process-global cached override has no account identity attached to
+        // it, so it must never outrank the active account's UUID. With two
+        // accounts this was exactly how the inventory preview drew whichever
+        // account had signed in most recently while the world drew the active
+        // one.
         assert_eq!(
             uuid_default_model(true, false, slim_uuid),
-            None,
-            "a local override must block the uuid default, even for a uuid \
-             that would otherwise resolve"
+            Some(PlayerModelType::Slim),
+            "an unowned process-global override must not replace the active \
+             account's uuid-derived identity"
         );
+        // The one remaining gate a real caller must respect: resolution only
+        // fires once, so a later fetched sheet is not clobbered by the guess.
         assert_eq!(
             uuid_default_model(false, true, slim_uuid),
             None,
@@ -871,6 +861,27 @@ mod tests {
                 "uuid_default_model disagreed with default_skin_for_uuid for hi={hi:#x} lo={lo:#x}"
             );
         }
+    }
+
+    /// The renderer object is retained across account changes and recreated on
+    /// a resource-pack reload. Both transitions must rebind: the same texture
+    /// URL is not sufficient identity when the owner changed, and a fresh
+    /// renderer has no GPU binding even when the source string is unchanged.
+    #[test]
+    fn preview_binding_identity_includes_account_and_rebinds_after_reload() {
+        let alice = uuid::Uuid::from_u128(0xA11CE);
+        let bob = uuid::Uuid::from_u128(0xB0B);
+        let source = "remote:https://textures.minecraft.net/texture/shared";
+        let applied = (alice, source.to_owned());
+        assert!(preview_skin_is_current(Some(&applied), alice, source));
+        assert!(
+            !preview_skin_is_current(Some(&applied), bob, source),
+            "switching accounts must rebind even when two profiles share a texture URL"
+        );
+        assert!(
+            !preview_skin_is_current(None, alice, source),
+            "a renderer rebuilt for a pack reload has no bind group and must rehydrate"
+        );
     }
 
     // -----------------------------------------------------------------------

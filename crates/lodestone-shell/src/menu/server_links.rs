@@ -206,6 +206,7 @@ pub struct ServerLinksNav {
     links: Vec<ServerLink>,
     view: LinksView,
     hovered: Option<usize>,
+    chat_link: bool,
 }
 
 impl ServerLinksNav {
@@ -215,6 +216,22 @@ impl ServerLinksNav {
     pub fn reset(&mut self) {
         self.view = LinksView::default();
         self.hovered = None;
+        self.chat_link = false;
+    }
+
+    /// Opens vanilla's untrusted-link confirmation directly for a chat URL.
+    pub fn confirm_chat_url(&mut self, url: String) {
+        self.view = LinksView::Confirm(ServerLink {
+            kind: ServerLinkKind::Custom(lodestone_model::Text::literal("Open link")),
+            url,
+        });
+        self.hovered = None;
+        self.chat_link = true;
+    }
+
+    #[must_use]
+    pub fn returns_to_chat(&self) -> bool {
+        self.chat_link
     }
 
     /// Replaces the live link list. See the struct doc for who calls this.
@@ -273,6 +290,9 @@ impl ServerLinksNav {
             LinksView::Confirm(link) => match row {
                 YES_ROW => ServerLinksOutcome::OpenUrl(link.url.clone()),
                 NO_ROW => {
+                    if self.chat_link {
+                        return ServerLinksOutcome::Close;
+                    }
                     self.view = LinksView::List;
                     self.hovered = None;
                     ServerLinksOutcome::Handled
@@ -291,6 +311,9 @@ impl ServerLinksNav {
         match &self.view {
             LinksView::List => ServerLinksOutcome::Close,
             LinksView::Confirm(_) => {
+                if self.chat_link {
+                    return ServerLinksOutcome::Close;
+                }
                 self.view = LinksView::List;
                 self.hovered = None;
                 ServerLinksOutcome::Handled
@@ -532,6 +555,28 @@ mod tests {
         ]);
         assert_eq!(nav.click_row(1), ServerLinksOutcome::Handled);
         assert_eq!(nav.view(), &LinksView::Confirm(link(0, "https://example.invalid/bugs")));
+    }
+
+    #[test]
+    fn a_chat_url_enters_confirmation_and_no_or_escape_close_it() {
+        let mut nav = ServerLinksNav::default();
+        nav.confirm_chat_url("https://example.invalid/chat".to_string());
+        assert!(nav.returns_to_chat());
+        assert!(matches!(nav.view(), LinksView::Confirm(link) if link.url == "https://example.invalid/chat"));
+        assert_eq!(nav.click_row(NO_ROW), ServerLinksOutcome::Close);
+
+        nav.confirm_chat_url("https://example.invalid/escape".to_string());
+        assert_eq!(nav.escape(), ServerLinksOutcome::Close);
+    }
+
+    #[test]
+    fn confirming_a_chat_url_yields_only_that_url() {
+        let mut nav = ServerLinksNav::default();
+        nav.confirm_chat_url("https://example.invalid/confirmed".to_string());
+        assert_eq!(
+            nav.click_row(YES_ROW),
+            ServerLinksOutcome::OpenUrl("https://example.invalid/confirmed".to_string())
+        );
     }
 
     #[test]

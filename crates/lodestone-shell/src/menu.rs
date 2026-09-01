@@ -1082,6 +1082,19 @@ impl UiState {
         }
     }
 
+    /// Opens the existing link confirmation over Chat, preserving its return screen.
+    pub fn open_server_links_from_chat(&mut self) {
+        if self.screen == Screen::Chat {
+            self.screen = Screen::ServerLinks;
+        }
+    }
+
+    pub fn close_server_links_to_chat(&mut self) {
+        if self.screen == Screen::ServerLinks {
+            self.screen = Screen::Chat;
+        }
+    }
+
     /// Back to the pause menu from Server Links.
     pub fn close_server_links(&mut self) {
         if self.screen == Screen::ServerLinks {

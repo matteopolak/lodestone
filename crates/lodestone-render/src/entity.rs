@@ -3723,6 +3723,39 @@ pub fn item_frame_space(packet_anchor: Vec3, yaw_deg: f32, pitch_deg: f32) -> Ma
         * item_frame_facing(yaw_deg, pitch_deg)
 }
 
+/// Vanilla's item-frame entity bounds after `EntityRenderer.shouldRender`
+/// inflates them by half a block, returned as `(min, max)`.
+///
+/// The entity is not centred on its packet attachment anchor: `ItemFrame`
+/// moves its bounding-box centre `0.46875` blocks away from the attachment
+/// block centre, gives the wall-normal axis a thickness of `1/16`, and uses a
+/// one-block square when it holds a map (`3/4` otherwise). The renderer then
+/// inflates that exact box by `0.5`. A symmetric box around the packet anchor
+/// misses the inflated room-facing edge and can cull visible contents at a
+/// grazing camera angle.
+#[must_use]
+pub fn item_frame_culling_aabb(
+    packet_anchor: Vec3,
+    yaw_deg: f32,
+    pitch_deg: f32,
+    has_map: bool,
+) -> (Vec3, Vec3) {
+    let facing = item_frame_facing_step(yaw_deg, pitch_deg);
+    let centre = packet_anchor.floor() + Vec3::splat(0.5) - facing * 0.46875;
+    let face_size = if has_map { 1.0 } else { 0.75 };
+    let thin = 0.0625;
+    let axis = facing.abs();
+    let size = if axis.x >= axis.y && axis.x >= axis.z {
+        Vec3::new(thin, face_size, face_size)
+    } else if axis.y >= axis.z {
+        Vec3::new(face_size, thin, face_size)
+    } else {
+        Vec3::new(face_size, face_size, thin)
+    };
+    let half = size * 0.5 + Vec3::splat(0.5);
+    (centre - half, centre + half)
+}
+
 /// The world placement for the frame **body** — the wooden border and back
 /// plate — as a transform over block-local `0.0..=1.0` model quads.
 ///
@@ -6214,6 +6247,18 @@ mod tests {
                 "yaw {yaw}, pitch {pitch}: body back must lie on attachment wall {expected}, got {back}"
             );
         }
+    }
+
+    #[test]
+    fn item_frame_culling_box_matches_wall_offset_dimensions_and_renderer_inflate() {
+        let anchor = Vec3::new(1965.0, 73.0, 3806.0);
+        let (map_min, map_max) = item_frame_culling_aabb(anchor, 90.0, 0.0, true);
+        assert!((map_min - Vec3::new(1965.4375, 72.5, 3805.5)).length() < 1.0e-5);
+        assert!((map_max - Vec3::new(1966.5, 74.5, 3807.5)).length() < 1.0e-5);
+
+        let (plain_min, plain_max) = item_frame_culling_aabb(anchor, 90.0, 0.0, false);
+        assert!((plain_min - Vec3::new(1965.4375, 72.625, 3805.625)).length() < 1.0e-5);
+        assert!((plain_max - Vec3::new(1966.5, 74.375, 3807.375)).length() < 1.0e-5);
     }
 
     /// [`item_frame_facing_step`] is the frame's real `Direction`, and the four

@@ -542,6 +542,21 @@ impl VanillaFont {
         })
     }
 
+    /// The active default raster for a world-text surface. The shared font is
+    /// keyed by `resources::pack_generation`, so asking [`Self::shared`] each
+    /// frame makes a server-pack reload replace this answer rather than leaving
+    /// a jar-only snapshot alive.
+    pub(crate) fn default_raster(&self) -> &RasterFont {
+        &self.raster
+    }
+
+    /// Resolve one non-default component font from the active pack stack.
+    /// World-space text uses the same lazy, generation-invalidated cache as the
+    /// HUD; the caller still performs vanilla's per-codepoint coverage fallback.
+    pub(crate) fn custom_raster_for_world_text(&self, id: FontId) -> Option<Arc<RasterFont>> {
+        self.custom_raster(id)
+    }
+
     /// Resolves one custom font against `generation`'s pack stack.
     ///
     /// Kept separate from [`Self::custom_raster`] so the cache policy has a

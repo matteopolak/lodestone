@@ -100,6 +100,7 @@ fn suppress_first_person_arm(state: &mut RenderState) {
             swim_amount: 0.0,
             slim: false,
             equipment: Vec::new(),
+            equipment_skin: Vec::new(),
         })
     });
 }

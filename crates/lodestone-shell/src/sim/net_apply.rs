@@ -47,7 +47,14 @@ impl Sim {
     /// inside its own write guard — there is no separate snapshot read to
     /// resolve ahead of it any more, so this is a single `self.write` call.
     pub(crate) fn fold_entities(&mut self) {
-        self.write(crate::entities::fold_entities);
+        let local_name = self.local_uuid().and_then(|uuid| {
+            self.tab_list()
+                .get(&uuid)
+                .map(|entry| entry.profile.name.clone())
+        });
+        self.write(|world| {
+            crate::entities::fold_entities_for_local(world, local_name.as_deref());
+        });
     }
 
     pub(crate) fn poll_net(&mut self) {

@@ -199,11 +199,14 @@ fn a_mob_wearing_an_elytra_draws_wings_the_same_mob_bare_does_not() {
         // gate off the remote-skin fetch path entirely.
         type_path: std::sync::Arc::from("zombie"),
         item: None,
+        item_model: None,
+        item_skin: None,
         main_arm_left: false,
         equipment: vec![(
             EquipmentSlot::Chest,
             ResourceLocation::parse("minecraft:elytra").unwrap(),
         )],
+        equipment_skin: Vec::new(),
         equipment_dye: Vec::new(),
         equipment_trim: Vec::new(),
         feet,

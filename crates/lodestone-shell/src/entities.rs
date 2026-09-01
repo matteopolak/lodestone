@@ -149,6 +149,7 @@ use lodestone_ecs::player::{
 use lodestone_ecs::vehicle::{ControlledVehicle, VehicleRenderPose};
 use lodestone_ecs::{CorePlugin, Extract, ExtractSet, FrameSet, GameTick, TickSet, Update};
 use lodestone_entity::item_entity::{ITEM_AIR_DRAG, ITEM_GRAVITY, ItemMotion};
+use lodestone_entity::projectile::Projectile;
 use lodestone_entity::pose::{
     ADULT_LIMB_SCALE, BABY_LIMB_SCALE, LIMB_SWING_SMOOTHING, MAX_HEAD_YAW, WalkAnimation,
     clamp_head_to_body, walk_target_speed,
@@ -421,6 +422,9 @@ struct EntityFacts {
     /// It changes only the client definition selected for rendering, never the
     /// stack's gameplay item id.
     item_model: Option<ResourceLocation>,
+    /// The custom skin declared by a dropped player head's `minecraft:profile`.
+    /// Kept separate because only the special-head renderer needs it.
+    item_skin: Option<Arc<str>>,
     /// The entity's last-reported velocity in blocks per tick
     /// (`set_entity_motion`/`add_entity`), when the server has ever sent one.
     ///
@@ -611,6 +615,13 @@ fn sheep_wool(type_path: &str, variant: Option<&EntityVariant>) -> Option<SheepW
 /// path and draws them through the model pipeline instead.
 pub const ITEM_ENTITY_TYPE_PATH: &str = "item";
 
+/// Projectile entity paths whose vanilla client state is integrated locally.
+/// Their server entity types use a 20-tick update interval, so a normal network
+/// interpolation window would leave them frozen between corrections.
+fn is_ballistic_projectile(path: &str) -> bool {
+    matches!(path, "arrow" | "spectral_arrow" | "trident")
+}
+
 /// The entity-type path an **experience orb** reports (`minecraft:experience_orb`).
 ///
 /// Like [`ITEM_ENTITY_TYPE_PATH`], it has no
@@ -674,6 +685,9 @@ pub struct EntityDraw {
     /// retained for final render-candidate diagnostics without changing the
     /// base-item routing semantics of entity renderers.
     pub item_model: Option<ResourceLocation>,
+    /// The custom skin URL from a player head's `minecraft:profile`.
+    /// `None` remains the vanilla default Steve skull.
+    pub item_skin: Option<Arc<str>>,
     /// What this entity is holding/wearing, narrowed to the slots that actually
     /// have something in them: an entry here means "there is an item in this
     /// slot", so the renderer needs no second `Option` check.
@@ -1235,6 +1249,24 @@ pub struct ItemPhysics {
     pub grounded: bool,
 }
 
+/// Client-side ballistic state for arrows, spectral arrows, and tridents.
+/// Vanilla sends these entities at a 20-tick update interval, so simulating the
+/// same `AbstractArrow.tick` locally is required for motion between corrections.
+/// The absence of this component keeps every other entity on network interpolation.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ProjectilePhysics {
+    /// The locally simulated position and velocity.
+    pub sim: Projectile,
+    /// The most recently reported authoritative position.
+    pub last_reported: Vec3,
+    /// The most recently reported authoritative velocity. Kept separately
+    /// from `sim.velocity`, which gravity and drag change every client tick,
+    /// so a stale ingest snapshot cannot masquerade as a new correction.
+    pub last_reported_velocity: Option<Vec3>,
+    /// Whether the last server report says the projectile has landed.
+    pub grounded: bool,
+}
+
 /// Vanilla's `Creeper.DEFAULT_MAX_SWELL` (`Creeper.java`): the tick count a
 /// fuse counts up to before [`tick_creeper_fuse`] treats it as fully swollen.
 /// A creeper's real `maxSwell` can differ (the `Fuse` NBT tag), but that value
@@ -1601,6 +1633,8 @@ struct TrackedStack {
     id: ResourceLocation,
     /// The optional client-side item definition selected by `minecraft:item_model`.
     item_model: Option<ResourceLocation>,
+    /// The custom skin URL from a player head's `minecraft:profile`.
+    skin: Option<Arc<str>>,
     count: u32,
     /// Whether the stack is enchanted, so the drop draws the glint second pass.
     foil: bool,
@@ -1610,6 +1644,14 @@ struct TrackedStack {
     dyed_color: Option<u32>,
     /// Mirrors [`EntityFacts::item_potion_color`].
     potion_color: Option<u32>,
+}
+
+impl TrackedStack {
+    /// The client item-definition id that `ItemModelResolver` selects for this
+    /// stack. The base id remains stored for gameplay-component ownership.
+    fn render_definition(&self) -> &ResourceLocation {
+        self.item_model.as_ref().unwrap_or(&self.id)
+    }
 }
 
 /// The saved-map id carried by an entity's current `filled_map` stack.
@@ -1707,6 +1749,9 @@ pub struct PickupAnimation {
     pub item_entity_id: i32,
     /// Which item model to draw.
     pub item: ResourceLocation,
+    /// The player-head profile skin selected when this render-state snapshot was
+    /// captured. `None` keeps the special renderer's vanilla Steve fallback.
+    pub item_skin: Option<Arc<str>>,
     /// The collected stack size, carried for parity with [`EntityDraw::count`].
     pub count: u32,
     /// Whether the collected stack was enchanted, so the flying copy glints too.
@@ -1823,7 +1868,8 @@ pub fn begin_item_pickup(world: &mut World, item_entity_id: i32, collector_id: i
         .0
         .push(PickupAnimation {
             item_entity_id,
-            item: stack.id,
+            item: stack.render_definition().clone(),
+            item_skin: stack.skin,
             count: stack.count,
             foil: stack.foil,
             dyed_color: stack.dyed_color,
@@ -1885,6 +1931,7 @@ pub fn extract_pickup_draws(
             type_path: Arc::from(ITEM_ENTITY_TYPE_PATH),
             item: Some(pickup.item.clone()),
             item_model: None,
+            item_skin: pickup.item_skin.clone(),
             count: pickup.count,
             foil: pickup.foil,
             item_dyed_color: pickup.dyed_color,
@@ -3002,8 +3049,18 @@ pub fn extract_entity_draws(
             id: id.0,
             type_path: Arc::clone(&kind.0),
             variant_sheet,
-            item: stack.map(|s| s.id.clone()),
+            // Only item entities use the selected definition on this scoped
+            // world-item path. Frames and projectile stacks retain their base
+            // ids until their own component-complete render-state work lands.
+            item: stack.map(|s| {
+                if kind.0.as_ref() == ITEM_ENTITY_TYPE_PATH {
+                    s.render_definition().clone()
+                } else {
+                    s.id.clone()
+                }
+            }),
             item_model: stack.and_then(|s| s.item_model.clone()),
+            item_skin: stack.and_then(|s| s.skin.clone()),
             count: stack.map_or(1, |s| s.count),
             foil: stack.is_some_and(|s| s.foil),
             item_dyed_color: stack.and_then(|s| s.dyed_color),
@@ -3114,6 +3171,49 @@ pub fn tick_item_physics(
     });
 }
 
+/// `AbstractArrow.tick` recomputes its entity rotations from the current delta
+/// movement every tick. These are projectile angles (`atan2(x, z)` and positive
+/// pitch while rising), not the player's camera yaw/pitch convention.
+fn projectile_angles(velocity: lodestone_model::Vec3) -> (f32, f32) {
+    let horizontal = velocity.x.hypot(velocity.z);
+    (
+        velocity.x.atan2(velocity.z).to_degrees() as f32,
+        velocity.y.atan2(horizontal).to_degrees() as f32,
+    )
+}
+
+/// `GameTick` / `TickSet::Physics`: one vanilla `AbstractArrow.tick` step for
+/// each tracked arrow, spectral arrow, or trident. Their network update interval
+/// is twenty ticks, so this keeps the render pose moving between corrections.
+pub fn tick_projectile_physics(
+    mut projectiles: Query<(
+        &mut ProjectilePhysics,
+        &mut InterpFrom,
+        &mut InterpTo,
+        &mut InterpClock,
+    )>,
+) {
+    for (mut physics, mut from, mut to, mut clock) in &mut projectiles {
+        if physics.grounded {
+            continue;
+        }
+        physics.sim.tick();
+        let simulated = to_glam_vec3(physics.sim.position);
+        let (yaw, pitch) = projectile_angles(physics.sim.velocity);
+
+        let drawn = render_feet(&from, &to, &clock);
+        from.feet = drawn;
+        from.yaw = render_yaw(&from, &to, &clock);
+        from.head_yaw = render_head_yaw(&from, &to, &clock);
+        from.pitch = render_pitch(&from, &to, &clock);
+        to.feet = simulated;
+        to.yaw = yaw;
+        to.head_yaw = yaw;
+        to.pitch = pitch;
+        clock.t = 0.0;
+    }
+}
+
 /// Seeds a fresh [`ItemPhysics`] from an item entity's first-seen (or freshly
 /// re-anchored) snapshot. A missing velocity seeds zero — gravity still applies
 /// to it, it just has nothing to arc with, which is exactly the discriminating
@@ -3127,6 +3227,19 @@ fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
     ItemPhysics {
         sim,
         last_reported: snap.feet,
+        grounded: snap.on_ground,
+    }
+}
+
+/// Seeds the local arrow-family simulation from the first authoritative report.
+fn new_projectile_physics(snap: &EntityFacts) -> ProjectilePhysics {
+    ProjectilePhysics {
+        sim: Projectile::arrow(
+            to_model_vec3(snap.feet),
+            snap.velocity.map(to_model_vec3).unwrap_or_default(),
+        ),
+        last_reported: snap.feet,
+        last_reported_velocity: snap.velocity,
         grounded: snap.on_ground,
     }
 }
@@ -3281,10 +3394,41 @@ fn is_blank_name_tag(name: &str) -> bool {
     name.is_empty() || name == "<empty>"
 }
 
+/// The `LivingEntityRenderer.shouldShowName` team gate from the 26.2 client.
+///
+/// `target_team` is the team that owns the tag; `local_team` is the viewer's.
+/// `invisible` is the shared entity-flags bit. Armour stands intentionally do
+/// not call this: their renderer overrides the predicate for holograms.
+fn team_allows_name_tag(
+    target_team: Option<&lodestone_game::scoreboard::Team>,
+    local_team: Option<&lodestone_game::scoreboard::Team>,
+    invisible: bool,
+) -> bool {
+    use lodestone_game::scoreboard::Visibility;
+
+    let allied = target_team.zip(local_team).is_some_and(|(target, local)| {
+        target.name == local.name
+    });
+    let visible_to_local = !invisible
+        || target_team.is_some_and(|team| allied && team.see_friendly_invisibles);
+    match target_team.map(|team| team.name_tag_visibility) {
+        Some(Visibility::Never) => false,
+        Some(Visibility::HideForOtherTeams) => {
+            local_team.map_or(visible_to_local, |_| allied && visible_to_local)
+        }
+        Some(Visibility::HideForOwnTeam) => {
+            local_team.map_or(visible_to_local, |_| !allied && visible_to_local)
+        }
+        Some(Visibility::Always) | None => visible_to_local,
+    }
+}
+
 fn resolve_entity_facts(
     id: i32,
     entity: bevy_ecs::world::EntityRef<'_>,
     tab_list: &lodestone_game::tablist::TabList,
+    scoreboard: Option<&lodestone_game::scoreboard::Scoreboard>,
+    local_player_name: Option<&str>,
 ) -> Option<EntityFacts> {
     use lodestone_ecs::entity::{
         Baby, CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, EntityFlags,
@@ -3372,6 +3516,21 @@ fn resolve_entity_facts(
             .item_model
             .as_ref()
             .and_then(|model| ResourceLocation::new(model.namespace(), model.path()).ok()),
+        _ => None,
+    };
+    // `PlayerHeadSpecialRenderer.extractArgument` reads PROFILE from the
+    // gameplay player-head stack, before the stack is narrowed to its item id.
+    // Preserve that one extra visual fact beside the id for the drop renderer.
+    let item_skin = match &display_item {
+        Reported::Reported(Some(stack))
+            if stack.item.namespace() == VANILLA && stack.item.path() == "player_head" =>
+        {
+            stack
+                .components
+                .profile
+                .as_ref()
+                .and_then(crate::hud::item_icon::profile_skin_url)
+        }
         _ => None,
     };
     // A failed conversion must collapse to `Unreported` ("nothing reported"),
@@ -3482,14 +3641,26 @@ fn resolve_entity_facts(
         .get::<CustomName>()
         .map_or(Reported::Unreported, |name| Reported::Reported(name.0.clone()));
     let custom_name_visible = entity.get::<CustomNameVisible>().map(|visible| visible.0);
+    // `Player.getScoreboardName()` is the profile name, not the display name
+    // used for the tag. Other entities use their UUID string. This is the same
+    // holder mapping the collision team gate uses in `sim/collide.rs`.
+    let scoreboard_holder = if is_player {
+        uuid.and_then(|id| tab_list.get(&id).map(|entry| entry.profile.name.clone()))
+    } else {
+        uuid.map(|id| id.to_string())
+    };
+    let target_team = scoreboard_holder
+        .as_deref()
+        .and_then(|holder| scoreboard.and_then(|board| board.team_of(holder)));
+    let local_team = local_player_name.and_then(|holder| scoreboard.and_then(|board| board.team_of(holder)));
+    let name_tag_visible = type_key.path() == "armor_stand"
+        || team_allows_name_tag(target_team, local_team, flags.is_some_and(|bits| bits & 0x20 != 0));
     // Resolved as a styled `Text`, not a flattened plain string — a player's
     // tab-list `effective_name()` and a mob's `custom_name` metadata both
     // carry colour/bold/italic/underline/strikethrough now (the fix this
     // block exists for: nametags used to lose all of that at this exact
     // resolution point via `to_plain_string`/`plain_text_from_nbt_component`).
-    let name_tag: Option<Text> = if flags.is_some_and(|bits| bits & 0x20 != 0)
-        && type_key.path() != "armor_stand"
-    {
+    let name_tag: Option<Text> = if !name_tag_visible {
         None
     } else if is_player {
         uuid.and_then(|id| match tab_list.get(&id) {
@@ -3559,6 +3730,7 @@ fn resolve_entity_facts(
         item,
         item_map_id,
         item_model,
+        item_skin,
         velocity: entity.get::<Velocity>().map(|v| to_glam_vec3(v.0)),
         on_ground: entity.get::<OnGround>().is_some_and(|grounded| grounded.0),
         equipment,
@@ -3723,11 +3895,21 @@ fn default_remote_skin(uuid: uuid::Uuid) -> crate::remote_skins::RemoteSkin {
 /// time someone adds one of those components to the local player for an
 /// unrelated reason).
 pub fn fold_entities(world: &mut World) {
+    fold_entities_for_local(world, None);
+}
+
+/// Folds tracked entities for a viewer whose scoreboard holder is
+/// `local_player_name`. The live [`crate::sim::Sim`] supplies that profile
+/// name; harnesses with no session retain the ordinary no-team behaviour.
+pub(crate) fn fold_entities_for_local(world: &mut World, local_player_name: Option<&str>) {
     let tab_list = world
-        .query_filtered::<&lodestone_ecs::SessionTabList, With<LocalPlayer>>()
+        .query_filtered::<
+            (&lodestone_ecs::SessionTabList, &lodestone_ecs::SessionScoreboard),
+            With<LocalPlayer>,
+        >()
         .iter(world)
         .next()
-        .map(|list| list.0.clone())
+        .map(|(list, scoreboard)| (list.0.clone(), scoreboard.0.clone()))
         .unwrap_or_default();
 
     let tracked: Vec<(i32, Entity)> = world.resource::<EntityIndex>().iter().collect();
@@ -3740,7 +3922,13 @@ pub fn fold_entities(world: &mut World) {
         if entity_ref.contains::<LocalPlayer>() {
             continue;
         }
-        let Some(facts) = resolve_entity_facts(id, entity_ref, &tab_list) else {
+        let Some(facts) = resolve_entity_facts(
+            id,
+            entity_ref,
+            &tab_list.0,
+            Some(&tab_list.1),
+            local_player_name,
+        ) else {
             continue;
         };
         seen.insert(id);
@@ -3781,6 +3969,7 @@ pub fn fold_entities(world: &mut World) {
                     TrackedStack {
                         id: item.clone(),
                         item_model: facts.item_model.clone(),
+                        skin: facts.item_skin.clone(),
                         count: facts.count,
                         foil: facts.foil,
                         dyed_color: facts.item_dyed_color,
@@ -3837,6 +4026,7 @@ pub fn fold_entities(world: &mut World) {
 /// nowhere.
 fn spawn_track(world: &mut World, snap: &EntityFacts) {
     let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
+    let is_projectile = is_ballistic_projectile(&snap.type_path);
     let is_creeper = snap.type_path == "creeper";
     let window = INTERP_WINDOW;
     let mut entity = world.spawn((
@@ -3879,6 +4069,9 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
     if is_item {
         entity.insert(new_item_physics(snap));
     }
+    if is_projectile {
+        entity.insert(new_projectile_physics(snap));
+    }
     if is_creeper {
         entity.insert(CreeperFuse {
             swell_dir: snap.creeper_swell_dir.unwrap_or(CreeperFuse::IDLE.swell_dir),
@@ -3901,6 +4094,7 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
         return;
     };
     let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
+    let is_projectile = is_ballistic_projectile(&snap.type_path);
 
     if let Some(mut kind) = entity.get_mut::<RenderKind>() {
         // `Arc<str>` has no `clone_from`-style in-place reuse the way `String`
@@ -3973,6 +4167,16 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
         return;
     };
     let physics = entity.get::<ItemPhysics>().copied();
+    let projectile_physics = entity.get::<ProjectilePhysics>().copied();
+    let projectile_corrected = projectile_physics.is_some_and(|physics| {
+        (snap.feet - physics.last_reported).length() > POS_EPS
+            || snap.on_ground != physics.grounded
+            || snap.velocity.is_some_and(|velocity| {
+                physics
+                    .last_reported_velocity
+                    .is_none_or(|reported| (velocity - reported).length() > POS_EPS)
+            })
+    });
 
     // A dropped item's own simulation moves `InterpTo` every real tick (see
     // `tick_item_physics`), so comparing against it here would read as "moved"
@@ -3980,14 +4184,22 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     // last poll. Compare against the last *authoritative* report instead —
     // `InterpTo` only for every other entity type, which the physics step never
     // touches.
-    let moved = match &physics {
-        Some(physics) => (snap.feet - physics.last_reported).length() > POS_EPS,
-        None => (snap.feet - to.feet).length() > POS_EPS,
+    let moved = match (&physics, &projectile_physics) {
+        (Some(physics), _) => (snap.feet - physics.last_reported).length() > POS_EPS,
+        (_, Some(physics)) => (snap.feet - physics.last_reported).length() > POS_EPS,
+        (None, None) => (snap.feet - to.feet).length() > POS_EPS,
     };
-    let turned = angle_diff(snap.yaw, to.yaw).abs() > YAW_EPS;
-    let head_turned = angle_diff(snap.head_yaw, to.head_yaw).abs() > YAW_EPS;
-    let pitched = (snap.pitch - to.pitch).abs() > YAW_EPS;
-    if !(moved || turned || head_turned || pitched) {
+    // Arrow rotations are derived locally from their simulated velocity. The
+    // ingest entity retains the last wire rotation between packets, so treating
+    // that stale value as a fresh turn would rewind both the rotation and the
+    // ballistic state every frame. A changed velocity/position/ground state is
+    // the authoritative event for an arrow-family entity.
+    let accept_reported_rotation = !is_projectile || projectile_corrected;
+    let turned = accept_reported_rotation && angle_diff(snap.yaw, to.yaw).abs() > YAW_EPS;
+    let head_turned =
+        accept_reported_rotation && angle_diff(snap.head_yaw, to.head_yaw).abs() > YAW_EPS;
+    let pitched = accept_reported_rotation && (snap.pitch - to.pitch).abs() > YAW_EPS;
+    if !(moved || turned || head_turned || pitched || projectile_corrected) {
         return;
     }
 
@@ -4012,27 +4224,47 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
         clock.window = window;
     }
 
-    if !is_item {
-        return;
-    }
-    match physics {
-        Some(mut physics) => {
-            physics.last_reported = snap.feet;
-            physics.grounded = snap.on_ground;
-            // Correct the simulation to the authoritative truth rather than
-            // fight it — this is the "rare server correction" vanilla's own
-            // local simulation also just snaps onto.
-            physics.sim.position = to_model_vec3(snap.feet);
-            if let Some(v) = snap.velocity {
-                physics.sim.velocity = to_model_vec3(v);
+    if is_item {
+        match physics {
+            Some(mut physics) => {
+                physics.last_reported = snap.feet;
+                physics.grounded = snap.on_ground;
+                // Correct the simulation to the authoritative truth rather than
+                // fight it — this is the "rare server correction" vanilla's own
+                // local simulation also just snaps onto.
+                physics.sim.position = to_model_vec3(snap.feet);
+                if let Some(v) = snap.velocity {
+                    physics.sim.velocity = to_model_vec3(v);
+                }
+                physics.sim.on_ground = snap.on_ground;
+                if let Some(mut current) = entity.get_mut::<ItemPhysics>() {
+                    *current = physics;
+                }
             }
-            physics.sim.on_ground = snap.on_ground;
-            if let Some(mut current) = entity.get_mut::<ItemPhysics>() {
-                *current = physics;
+            None => {
+                entity.insert(new_item_physics(snap));
             }
         }
-        None => {
-            entity.insert(new_item_physics(snap));
+    }
+    if is_projectile && projectile_corrected {
+        match projectile_physics {
+            Some(mut physics) => {
+                physics.last_reported = snap.feet;
+                if snap.velocity.is_some() {
+                    physics.last_reported_velocity = snap.velocity;
+                }
+                physics.grounded = snap.on_ground;
+                physics.sim.position = to_model_vec3(snap.feet);
+                if let Some(v) = snap.velocity {
+                    physics.sim.velocity = to_model_vec3(v);
+                }
+                if let Some(mut current) = entity.get_mut::<ProjectilePhysics>() {
+                    *current = physics;
+                }
+            }
+            None => {
+                entity.insert(new_projectile_physics(snap));
+            }
         }
     }
 }
@@ -4085,6 +4317,12 @@ impl Plugin for EntityInterpPlugin {
         app.add_systems(
             GameTick,
             tick_item_physics
+                .in_set(TickSet::Physics)
+                .before(tick_walk_animation),
+        );
+        app.add_systems(
+            GameTick,
+            tick_projectile_physics
                 .in_set(TickSet::Physics)
                 .before(tick_walk_animation),
         );
@@ -4257,6 +4495,7 @@ impl EntityInterpolator {
             TrackedStack {
                 id: item,
                 item_model: None,
+                skin: None,
                 count,
                 foil: false,
                 dyed_color: None,
@@ -4580,7 +4819,7 @@ mod tests {
         entity: Entity,
         tab_list: &lodestone_game::tablist::TabList,
     ) -> EntityFacts {
-        resolve_entity_facts(9, world.entity(entity), tab_list)
+        resolve_entity_facts(9, world.entity(entity), tab_list, None, None)
             .expect("bare_entity always carries the four required components")
     }
 
@@ -5045,6 +5284,48 @@ mod tests {
         assert_eq!(bare.count, 1);
     }
 
+    /// A dropped player head goes through `DisplayItem`, not `SET_EQUIPMENT`.
+    /// Its `minecraft:profile` must retain the same skin URL a placed, held,
+    /// or GUI player head resolves; otherwise the drop has only the static
+    /// Steve sheet available when the special-item pass reaches it.
+    #[test]
+    fn resolve_entity_facts_retains_a_dropped_player_heads_profile_skin() {
+        const URL: &str = "https://example.invalid/dropped-custom-head.png";
+        const TEXTURES: &str =
+            "eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHBzOi8vZXhhbXBsZS5pbnZhbGlkL2Ryb3BwZWQtY3VzdG9tLWhlYWQucG5nIn19fQ==";
+
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        let mut head = lodestone_model::ItemStack::new(
+            "minecraft:player_head".parse().expect("valid player-head item id"),
+            1,
+        );
+        head.components.profile = Some(lodestone_model::ItemProfile {
+            name: Some("dropped custom head".to_owned()),
+            id: None,
+            properties: vec![lodestone_model::ProfileProperty {
+                name: "textures".to_owned(),
+                value: TEXTURES.to_owned(),
+                signature: None,
+            }],
+        });
+        world.entity_mut(entity).insert(DisplayItem(Some(head)));
+
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert!(
+            matches!(
+                facts.item,
+                Reported::Reported(Some(ref item)) if item.to_string() == "minecraft:player_head"
+            ),
+            "control: the profile-bearing stack must reach the dropped-item boundary"
+        );
+        assert_eq!(
+            facts.item_skin.as_deref(),
+            Some(URL),
+            "the profile URL must survive beside the narrowed dropped-item id"
+        );
+    }
+
     /// Issue #100's two nametag rules, each pinned directly against
     /// [`resolve_entity_facts`]'s real boundary rather than against the
     /// render path — the render-level pixel gate (`tests/nametag_pixels.rs`)
@@ -5056,6 +5337,35 @@ mod tests {
         use uuid::Uuid;
 
         use super::*;
+
+        /// `LivingEntityRenderer.shouldShowName` honours the target team's
+        /// `NEVER` rule even when the entity itself is otherwise visible. A
+        /// player-type NPC helper can use that protocol state to suppress its
+        /// profile name without relying on a plugin-specific name prefix.
+        #[test]
+        fn a_never_visibility_team_hides_its_players_name_tag() {
+            let mut team = lodestone_game::scoreboard::Team::new("npc-helper");
+            team.name_tag_visibility = lodestone_game::scoreboard::Visibility::Never;
+
+            assert!(
+                !team_allows_name_tag(Some(&team), None, false),
+                "a target on a NEVER team must not expose its profile name"
+            );
+        }
+
+        /// Vanilla's `myTeam == null` arms retain the normal invisibility
+        /// gate; they do not make a hidden target visible merely because the
+        /// viewer belongs to no team.
+        #[test]
+        fn a_hidden_other_team_member_stays_hidden_when_the_viewer_has_no_team() {
+            let mut team = lodestone_game::scoreboard::Team::new("npc-helper");
+            team.name_tag_visibility = lodestone_game::scoreboard::Visibility::HideForOtherTeams;
+
+            assert!(
+                !team_allows_name_tag(Some(&team), None, true),
+                "the null-viewer-team arm must return vanilla visibility, including invisibility"
+            );
+        }
 
         fn bare_player_entity(world: &mut World, uuid: Uuid) -> Entity {
             let entity = bare_entity(world);
@@ -5328,6 +5638,7 @@ mod tests {
                 variant_sheet: None,
                 item: None,
                 item_model: None,
+                item_skin: None,
                 equipment: Vec::new(),
                 equipment_dye: Vec::new(),
                 equipment_skin: Vec::new(),
@@ -7331,6 +7642,65 @@ mod tests {
         }
     }
 
+    fn projectile_snap(id: i32, type_path: &str, feet: Vec3, velocity: Vec3) -> IngestSnap {
+        IngestSnap {
+            id,
+            type_path: type_path.into(),
+            feet,
+            yaw: 0.0,
+            head_yaw: 0.0,
+            pitch: 0.0,
+            item: Reported::Unreported,
+            count: 1,
+            velocity: Some(velocity),
+            on_ground: false,
+            equipment: Vec::new(),
+            variant: None,
+            creeper_swell_dir: None,
+            experience_orb_value: None,
+        }
+    }
+
+    #[test]
+    fn an_arrow_advances_from_its_reported_velocity_between_server_updates() {
+        let mut interp = EntityInterpolator::new();
+        let snap = projectile_snap(17, "arrow", Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0));
+        snap.apply(interp.world_mut());
+        interp.update(0.0);
+        let tracked = interp.world().resource::<TrackIndex>().0[&17];
+        assert!(
+            interp.world().entity(tracked).contains::<ProjectilePhysics>(),
+            "an arrow track must own client-side ballistic state"
+        );
+
+        // Vanilla's arrow entity is updated by the server only every 20 ticks;
+        // the client must run AbstractArrow.tick locally in the gap. Sample
+        // after several fixed ticks rather than exactly at the first tick
+        // boundary: that boundary deliberately starts interpolation from the
+        // previous pose, so it is not itself a visible-frame sample.
+        for _ in 0..4 {
+            interp.update(0.05);
+        }
+        assert!(
+            interp
+                .world()
+                .entity(tracked)
+                .get::<ProjectilePhysics>()
+                .expect("projectile physics")
+                .sim
+                .position
+                .x
+                > 0.9,
+            "the fixed-tick simulation itself did not advance"
+        );
+        let draw = interp
+            .draws()
+            .into_iter()
+            .find(|draw| draw.id == 17)
+            .expect("arrow draw");
+        assert!(draw.feet.x > 0.9, "arrow stayed frozen at {:?}", draw.feet);
+    }
+
     fn stone() -> ResourceLocation {
         "minecraft:stone".parse().expect("valid item id")
     }
@@ -7898,6 +8268,137 @@ mod tests {
              overshooting it; y is {}",
             target.y,
             draw.feet.y
+        );
+    }
+
+    /// `minecraft:item_model` selects a client definition without changing the
+    /// gameplay stack id. A drop has to hand the selected definition to the
+    /// world item renderer just as the inventory and third-person hand do.
+    #[test]
+    fn a_dropped_draw_uses_its_stacks_item_model_definition() {
+        const ITEM: i32 = 1;
+        let mut interp = EntityInterpolator::new();
+        (item_snap(ITEM, Vec3::ZERO)).apply(interp.world_mut());
+        let ingest = interp
+            .world()
+            .resource::<EntityIndex>()
+            .get(ITEM)
+            .expect("the item snapshot registered its ingest entity");
+        let mut sword = lodestone_model::ItemStack::new(
+            "minecraft:diamond_sword".parse().expect("valid gameplay item id"),
+            1,
+        );
+        sword.components.item_model = Some("server:gun".parse().expect("valid visual item id"));
+        interp.world_mut().entity_mut(ingest).insert(DisplayItem(Some(sword)));
+
+        interp.update(0.0);
+        let drop = interp
+            .draws()
+            .into_iter()
+            .find(|draw| draw.type_path.as_ref() == ITEM_ENTITY_TYPE_PATH)
+            .expect("the dropped item emitted its draw");
+        assert_eq!(
+            drop.item.as_ref().map(ToString::to_string).as_deref(),
+            Some("server:gun"),
+            "the world renderer must receive the stack's selected item definition, not diamond_sword"
+        );
+    }
+
+    /// Pickup particles own the item entity's already-resolved render state.
+    /// The selected `minecraft:item_model` definition must therefore survive
+    /// after the ground entity is removed, rather than reverting to its gameplay
+    /// item id for the three-tick flight.
+    #[test]
+    fn a_pickup_draw_retains_its_stacks_item_model_definition() {
+        const COLLECTOR: i32 = 2;
+        const ITEM: i32 = 1;
+        let mut interp = EntityInterpolator::new();
+        (item_snap(ITEM, Vec3::ZERO)).apply(interp.world_mut());
+        (snap(COLLECTOR, Vec3::X, 0.0)).apply(interp.world_mut());
+        let ingest = interp
+            .world()
+            .resource::<EntityIndex>()
+            .get(ITEM)
+            .expect("the item snapshot registered its ingest entity");
+        let mut sword = lodestone_model::ItemStack::new(
+            "minecraft:diamond_sword".parse().expect("valid gameplay item id"),
+            1,
+        );
+        sword.components.item_model = Some("server:gun".parse().expect("valid visual item id"));
+        interp.world_mut().entity_mut(ingest).insert(DisplayItem(Some(sword)));
+
+        interp.update(0.0);
+        assert!(begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR));
+        forget(interp.world_mut(), ITEM);
+        (snap(COLLECTOR, Vec3::X, 0.0)).apply(interp.world_mut());
+        interp.update(TICK);
+
+        let pickup = interp
+            .draws()
+            .into_iter()
+            .find(|draw| draw.type_path.as_ref() == ITEM_ENTITY_TYPE_PATH)
+            .expect("the pickup animation emitted its item draw");
+        assert_eq!(
+            pickup.item.as_ref().map(ToString::to_string).as_deref(),
+            Some("server:gun"),
+            "the pickup renderer must retain the ground item's selected definition"
+        );
+    }
+
+    /// Vanilla's pickup particle owns the extracted item render state, not a
+    /// fresh item id. A player head's profile-selected skin must therefore be
+    /// copied along with the ordinary item fields when the ground entity dies.
+    #[test]
+    fn a_pickup_draw_retains_a_player_heads_profile_skin() {
+        const COLLECTOR: i32 = 2;
+        const ITEM: i32 = 1;
+        const URL: &str = "https://example.invalid/pickup-custom-head.png";
+        const TEXTURES: &str =
+            "eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHBzOi8vZXhhbXBsZS5pbnZhbGlkL3BpY2t1cC1jdXN0b20taGVhZC5wbmcifX19";
+
+        let mut interp = EntityInterpolator::new();
+        (item_snap(ITEM, Vec3::ZERO)).apply(interp.world_mut());
+        (snap(COLLECTOR, Vec3::X, 0.0)).apply(interp.world_mut());
+        let ingest = interp
+            .world()
+            .resource::<EntityIndex>()
+            .get(ITEM)
+            .expect("the item snapshot registered its ingest entity");
+        let mut head = lodestone_model::ItemStack::new(
+            "minecraft:player_head".parse().expect("valid player-head item id"),
+            1,
+        );
+        head.components.profile = Some(lodestone_model::ItemProfile {
+            name: Some("pickup custom head".to_owned()),
+            id: None,
+            properties: vec![lodestone_model::ProfileProperty {
+                name: "textures".to_owned(),
+                value: TEXTURES.to_owned(),
+                signature: None,
+            }],
+        });
+        interp.world_mut().entity_mut(ingest).insert(DisplayItem(Some(head)));
+        interp.update(0.0);
+        assert_eq!(
+            interp.draws()[0].item_skin.as_deref(),
+            Some(URL),
+            "control: the ground item must already have its profile skin"
+        );
+        assert!(begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR));
+
+        forget(interp.world_mut(), ITEM);
+        (snap(COLLECTOR, Vec3::X, 0.0)).apply(interp.world_mut());
+        interp.update(TICK);
+
+        let flying = interp
+            .draws()
+            .into_iter()
+            .find(|draw| draw.type_path.as_ref() == ITEM_ENTITY_TYPE_PATH)
+            .expect("the pickup animation emitted its item draw");
+        assert_eq!(
+            flying.item_skin.as_deref(),
+            Some(URL),
+            "the pickup animation must preserve the ground item's profile skin"
         );
     }
 

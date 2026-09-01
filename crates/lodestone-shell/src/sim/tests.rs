@@ -6807,14 +6807,11 @@ fn third_person_body_retains_the_selected_heads_profile_skin_for_its_main_hand()
     );
 }
 
-/// The discriminating gate for "the in-world player always draws the wide
-/// (Steve) rig": a slim-declaring skin and a wide-declaring one must produce
-/// two *different* `ThirdPersonBodyState::slim` values. A gate that only
-/// checks "some rig was chosen" cannot see the bug this guards, because
-/// `player_wide` was always the rig chosen — `slim` was hardcoded `false`
-/// regardless of the fetched skin.
+/// A cached profile skin belongs to its UUID. A sessionless preview has no
+/// active UUID and must not consume whichever account happened to publish
+/// most recently — that was the cross-account skin flash on join.
 #[test]
-fn the_third_person_body_rig_follows_the_fetched_skin_model() {
+fn a_sessionless_body_does_not_consume_another_accounts_cached_model() {
     fn sheet() -> lodestone_assets::Image {
         lodestone_assets::Image {
             width: 64,
@@ -6825,20 +6822,17 @@ fn the_third_person_body_rig_follows_the_fetched_skin_model() {
 
     let mut sim = Sim::new(test_config());
     sim.cycle_camera_type();
+    assert!(sim.local_uuid().is_none(), "control: this sim has no account identity");
+    let foreign = uuid::Uuid::from_u128(0xF0_12_E1_6E);
 
-    crate::skin_fetch::publish(lodestone_assets::PlayerModelType::Slim, sheet());
-    let slim = sim
+    crate::skin_fetch::publish(foreign, lodestone_assets::PlayerModelType::Slim, sheet());
+    let body = sim
         .third_person_body_state()
-        .expect("third person is on")
-        .slim;
-    assert!(slim, "a slim-declaring profile must draw the slim rig");
-
-    crate::skin_fetch::publish(lodestone_assets::PlayerModelType::Wide, sheet());
-    let wide = sim
-        .third_person_body_state()
-        .expect("third person is on")
-        .slim;
-    assert!(!wide, "a wide-declaring profile must draw the wide rig");
+        .expect("third person is on");
+    assert!(
+        !body.slim,
+        "a profile cache with no matching live UUID must not select its slim rig"
+    );
 }
 
 #[test]
