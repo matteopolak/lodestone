@@ -161,6 +161,148 @@ pub struct RayTarget(pub Option<RayHit>);
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct EntityRayTarget(pub Option<i32>);
 
+/// The **non-living** entity type paths vanilla's pick ray accepts, sorted so
+/// the lookup can binary-search. Companion to [`entity_type_can_be_picked`],
+/// which reads the living half out of the generated entity census instead.
+///
+/// Every entry is one of the eight non-living override families named in that
+/// function's doc — twenty boats/rafts, seven minecarts, four block-attached
+/// decorations, and one each of the five singleton families. The three
+/// redirectable projectiles are *not* here: they are resolved by tag in
+/// [`entity_type_can_be_picked`], next to the citation for why.
+const NON_LIVING_PICKABLE_PATHS: &[&str] = &[
+    "acacia_boat",
+    "acacia_chest_boat",
+    "bamboo_chest_raft",
+    "bamboo_raft",
+    "birch_boat",
+    "birch_chest_boat",
+    "cherry_boat",
+    "cherry_chest_boat",
+    "chest_minecart",
+    "command_block_minecart",
+    "dark_oak_boat",
+    "dark_oak_chest_boat",
+    "end_crystal",
+    "falling_block",
+    "furnace_minecart",
+    "glow_item_frame",
+    "hopper_minecart",
+    "interaction",
+    "item_frame",
+    "jungle_boat",
+    "jungle_chest_boat",
+    "leash_knot",
+    "mangrove_boat",
+    "mangrove_chest_boat",
+    "minecart",
+    "oak_boat",
+    "oak_chest_boat",
+    "painting",
+    "pale_oak_boat",
+    "pale_oak_chest_boat",
+    "shulker_bullet",
+    "spawner_minecart",
+    "spruce_boat",
+    "spruce_chest_boat",
+    "tnt",
+    "tnt_minecart",
+];
+
+/// The three `minecraft:redirectable_projectile` members — vanilla's
+/// `Projectile.isPickable()` is exactly `is(EntityTypeTags.REDIRECTABLE_PROJECTILE)`,
+/// and the tag's data file lists these three and nothing else. Kept apart from
+/// [`NON_LIVING_PICKABLE_PATHS`] so the two different vanilla mechanisms stay
+/// visibly different: one is a class override, this one is a datapack tag.
+const REDIRECTABLE_PROJECTILE_PATHS: &[&str] = &["breeze_wind_charge", "fireball", "wind_charge"];
+
+/// Vanilla's `EntitySelector.CAN_BE_PICKED` — the predicate every entity
+/// candidate must pass before the view ray may resolve to it.
+///
+/// # Why this exists: without it the server kicks us
+///
+/// `Entity.isPickable()` is **`false`** by default, and `ItemEntity` and
+/// `ExperienceOrb` do not override it — so vanilla's ray never resolves to a
+/// dropped item or an orb, and vanilla therefore never sends an attack naming
+/// one. The server treats that as a protocol violation rather than a no-op:
+/// `ServerGamePacketListenerImpl.handleAttack` disconnects with
+/// `multiplayer.disconnect.invalid_entity_attacked` ("Attempting to attack an
+/// invalid entity") whenever the named target is an `ItemEntity`, an
+/// `ExperienceOrb`, the player themselves, or a non-attackable `AbstractArrow`.
+///
+/// That is the whole reported bug: killing a mob spawns its drops and its
+/// experience orbs inside the hitbox the mob just vacated, so the very next
+/// left-click resolved to a drop and got the session kicked. Note what it is
+/// **not** — a *removed* entity id is harmless, because `handleAttack` looks the
+/// id up first and does nothing at all when it misses. The defect is picking a
+/// live entity vanilla would never have picked, not picking a dead one.
+///
+/// # The reduction, and where each arm comes from
+///
+/// Derived by walking each of the 26.2 entity types' implementation classes (the
+/// `impl` column of `lodestone-data`'s committed entity census dump) up to the
+/// nearest class declaring `isPickable()`. Ten declaring classes cover all 159
+/// types:
+///
+/// * `LivingEntity` (`!isRemoved()`), 90 types — every mob, plus `Player` and
+///   `ArmorStand`, which narrow it further (see below). Read here out of the
+///   census's own `is_living` column rather than re-listed.
+/// * `AbstractBoat`, `AbstractMinecart`, `FallingBlockEntity`, `PrimedTnt`
+///   (all `!isRemoved()`); `BlockAttachedEntity`, `EndCrystal`, `Interaction`,
+///   `ShulkerBullet` (all `true`) — the 36 entries of
+///   [`NON_LIVING_PICKABLE_PATHS`].
+/// * `Projectile` — `is(EntityTypeTags.REDIRECTABLE_PROJECTILE)`, i.e.
+///   [`REDIRECTABLE_PROJECTILE_PATHS`]. This is why arrows are excluded:
+///   `AbstractArrow.isPickable()` is `super.isPickable() && !isInGround()`, and
+///   its `super` is that tag test, which no arrow type is a member of — so
+///   `arrow`, `spectral_arrow` and `trident` are **never** pickable and need no
+///   in-ground state to decide it.
+/// * `EnderDragon` — overrides to `false`; only its `EnderDragonPart`s are
+///   pickable, and this client does not model parts.
+/// * `Entity` — the `false` default: `item`, `experience_orb`,
+///   `area_effect_cloud`, `evoker_fangs`, `eye_of_ender`, `lightning_bolt`,
+///   `marker`, `ominous_item_spawner` and the three `Display` variants.
+///
+/// See `docs/entity-picking.md` for the citations behind each family.
+///
+/// # Per-instance refinements deliberately not applied
+///
+/// `Player.isPickable()` also requires `!isSpectator()` and
+/// `ArmorStand.isPickable()` also requires `!isMarker()`. Both are entity
+/// *state* this client does not track for remote entities, and neither is in
+/// the server's rejection list — attacking a spectator or a marker stand is a
+/// silent no-op server-side, not a kick — so they are reported as pickable
+/// rather than approximated. Same reasoning as `EntityFacts::pushes_players`
+/// exposing a type-level maximum and leaving state gates to the consumer.
+///
+/// # Default-deny, and why that costs nothing
+///
+/// A non-`minecraft` namespace, or a path this census has never seen, returns
+/// `false` — matching vanilla's own `Entity.isPickable()` default. That is not
+/// a new restriction: the pick loop already drops any entity
+/// `VersionData::entity_facts` cannot size, and that table is the same 26.2
+/// census, so an unknown type was unpickable before this predicate existed.
+#[must_use]
+pub fn entity_type_can_be_picked(kind: &lodestone_model::ResourceKey) -> bool {
+    if kind.namespace() != "minecraft" {
+        return false;
+    }
+    let path = kind.path();
+    // Checked ahead of the living column: the dragon *is* a `LivingEntity` and
+    // overrides `isPickable()` back to `false`.
+    if path == "ender_dragon" {
+        return false;
+    }
+    if lodestone_data::entity_types::entity_type_id_parts("minecraft", path)
+        .and_then(lodestone_data::entity_census::is_living)
+        == Some(true)
+    {
+        return true;
+    }
+    NON_LIVING_PICKABLE_PATHS.binary_search(&path).is_ok()
+        || REDIRECTABLE_PROJECTILE_PATHS.binary_search(&path).is_ok()
+}
+
 /// Whether the attack (left) button is currently held.
 ///
 /// Drives the live hold-to-mine loop. A demo-world break is a one-shot on press

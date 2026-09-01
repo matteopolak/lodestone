@@ -6625,6 +6625,153 @@ fn update_entity_target_ignores_an_entity_beyond_entity_reach() {
     );
 }
 
+/// Spawn one entity of `entity_type` two blocks in front of the player and
+/// return what [`Sim::update_entity_target`] resolves the view ray to.
+///
+/// The ray is the same one the two tests above use — horizontal, `+x`, from
+/// just above the player's feet — so an item's 0.25-block box and a pig's
+/// 0.9-block one are both crossed, and the only thing that can differ between
+/// two calls is the entity type. That is the point: this helper exists so the
+/// exclusion test below can be run with a *pickable* type as its control and
+/// have nothing else move.
+fn ray_target_for_type(entity_type: &str, entity_id: i32) -> Option<i32> {
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    let feet = sim.player().position;
+    ingest(
+        &mut sim,
+        lodestone_client::ClientEvent::EntitySpawned {
+            entity_id,
+            uuid: None,
+            entity_type: entity_type.parse().expect("valid entity type key"),
+            pos: lodestone_model::Vec3::new(feet.x + 2.0, feet.y, feet.z),
+            rotation: Rotation::new(0.0, 0.0),
+            velocity: None,
+        },
+    );
+    let origin = [feet.x, feet.y + 0.1, feet.z];
+    let dir = [1.0, 0.0, 0.0];
+    sim.update_entity_target(origin, dir, None);
+    sim.entity_target()
+}
+
+/// The owner's live kick, at the layer that caused it: the view ray must not
+/// resolve to a dropped item or an experience orb.
+///
+/// Killing a mob spawns its drops and its orbs inside the hitbox the mob just
+/// vacated, so before this fix the next left-click picked one of them and sent
+/// an attack naming it. `ServerGamePacketListenerImpl.handleAttack` treats an
+/// `ItemEntity` or `ExperienceOrb` target as a protocol violation and
+/// disconnects with `multiplayer.disconnect.invalid_entity_attacked` — the
+/// reported "Attempting to attack an invalid entity". Vanilla never sends it
+/// because `Entity.isPickable()` is `false` and neither class overrides it.
+///
+/// The pig arm is the control and it is load-bearing: it proves this ray does
+/// cross a box at that position, so a `None` from the other two arms is the
+/// type predicate doing its job rather than a mis-aimed fixture. Both arms are
+/// collected before asserting, so a failure reports every type rather than
+/// stopping at the first.
+#[test]
+fn the_view_ray_never_picks_a_dropped_item_or_an_experience_orb() {
+    assert_eq!(
+        ray_target_for_type("minecraft:pig", 51),
+        Some(51),
+        "control: a pig at this exact position must be targetable, or the two \
+         exclusions below prove nothing"
+    );
+
+    let picked: Vec<&str> = ["minecraft:item", "minecraft:experience_orb"]
+        .into_iter()
+        .filter(|kind| ray_target_for_type(kind, 52).is_some())
+        .collect();
+    assert!(
+        picked.is_empty(),
+        "these types must never be picked — the server kicks the session for \
+         attacking one: {picked:?}"
+    );
+}
+
+/// [`entity_type_can_be_picked`] against the whole 26.2 entity-type census,
+/// rather than against the handful of names the bug happened to involve.
+///
+/// The count is the drift guard. The predicate is a reduction over ten vanilla
+/// `isPickable()` declaring classes, and a version bump that adds an entity type
+/// lands it in exactly one of two buckets — the census's `is_living` column, or
+/// this module's explicit non-living lists. A new *living* type moves this total
+/// and the test names it; a new non-living one does not move it and stays
+/// unpickable, which is vanilla's own default and cannot cause a kick.
+///
+/// The named rows are the ones that decide something the count cannot: two the
+/// server kicks for, three arrow types whose exclusion comes from a tag rather
+/// than from their own override, and a dragon that is living and still not
+/// pickable.
+#[test]
+fn the_pick_predicate_matches_the_vanilla_entity_census() {
+    use crate::interact::entity_type_can_be_picked;
+
+    let key = |name: &str| -> lodestone_model::ResourceKey {
+        name.parse().expect("valid entity type key")
+    };
+
+    let mut wrong = Vec::new();
+    for (name, expected) in [
+        // Rejected by `handleAttack` — these two are the reported kick.
+        ("minecraft:item", false),
+        ("minecraft:experience_orb", false),
+        // `AbstractArrow.isPickable()` is `super.isPickable() && !isInGround()`,
+        // and that `super` is `Projectile`'s `redirectable_projectile` tag test,
+        // which no arrow type is in. So arrows are never pickable at all.
+        ("minecraft:arrow", false),
+        ("minecraft:spectral_arrow", false),
+        ("minecraft:trident", false),
+        // Non-redirectable projectiles fall to the same tag test.
+        ("minecraft:snowball", false),
+        ("minecraft:egg", false),
+        // The three tag members that *are* redirectable.
+        ("minecraft:fireball", true),
+        ("minecraft:wind_charge", true),
+        ("minecraft:breeze_wind_charge", true),
+        // Living, plus the one living type that overrides back to `false`.
+        ("minecraft:pig", true),
+        ("minecraft:zombie", true),
+        ("minecraft:player", true),
+        ("minecraft:armor_stand", true),
+        ("minecraft:ender_dragon", false),
+        // One from each non-living pickable family.
+        ("minecraft:oak_boat", true),
+        ("minecraft:bamboo_raft", true),
+        ("minecraft:hopper_minecart", true),
+        ("minecraft:painting", true),
+        ("minecraft:item_frame", true),
+        ("minecraft:end_crystal", true),
+        ("minecraft:interaction", true),
+        ("minecraft:falling_block", true),
+        ("minecraft:tnt", true),
+        ("minecraft:shulker_bullet", true),
+        // The `Entity` default, and a namespace the census cannot speak for.
+        ("minecraft:area_effect_cloud", false),
+        ("minecraft:text_display", false),
+        ("minecraft:marker", false),
+        ("someplugin:custom_mob", false),
+    ] {
+        if entity_type_can_be_picked(&key(name)) != expected {
+            wrong.push(name);
+        }
+    }
+    assert!(wrong.is_empty(), "misclassified entity types: {wrong:?}");
+
+    let pickable = (0..lodestone_data::entity_types::TYPE_COUNT)
+        .filter_map(|id| lodestone_data::entity_types::entity_type_name(id as i32))
+        .filter(|name| entity_type_can_be_picked(&key(name)))
+        .count();
+    assert_eq!(
+        pickable, 131,
+        "the 26.2 census has 131 pickable entity types of {}; a change here \
+         means a type moved between the living column and the explicit lists",
+        lodestone_data::entity_types::TYPE_COUNT
+    );
+}
+
 /// Issue #12's knockback half: a `ClientboundSetEntityMotionPacket`
 /// (`ClientEvent::EntityVelocity`) naming the local player's own server
 /// entity id must overwrite `PlayerState.velocity` outright — vanilla's

@@ -603,6 +603,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   the floor. The data was fully decoded and simply never read past that boundary —
   the exact "island" shape this repo's other entity-metadata fixes (velocity,
   equipment, variant) already had.
+- [Entity picking](./entity-picking.md) — The client's view-ray resolution of *which
+  entity, if any, the crosshair is on* — vanilla's `EntitySelector.CAN_BE_PICKED`
+  predicate plus the ray-versus-hitbox search that consumes it. It decides what a
+  left-click attacks, what a right-click interacts with, and what middle-click picks,
+  so getting the candidate set wrong is directly visible as a wrong attack target —
+  and, against a real server, as a disconnect.
 - [Entity-versus-entity interaction](./entity-push.md) — The two things that happen
   when two entities occupy the same space, ported into `lodestone-physics` as
   [`push.rs`](../crates/lodestone-physics/src/push.rs):

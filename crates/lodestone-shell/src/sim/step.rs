@@ -874,7 +874,11 @@ impl Sim {
     /// Candidates come from the same `(Position, EntityKind)` query
     /// [`Self::tick_nearby_entities`] uses for pushers, resolved to a hitbox
     /// through the identical [`VersionData::entity_facts`] seam — an unknown
-    /// type is excluded, never approximated. The local player is never a
+    /// type is excluded, never approximated. They are additionally filtered by
+    /// [`crate::interact::entity_type_can_be_picked`], vanilla's
+    /// `EntitySelector.CAN_BE_PICKED`: without it the ray happily resolves to a
+    /// dropped item or an experience orb, and the resulting attack packet gets
+    /// the session disconnected by the real server. The local player is never a
     /// candidate: `apply_entity_spawn`/`apply_local_player_login`
     /// (`lodestone_ecs::ingest`) never give the local player's own `Entity` a
     /// `Position`/`EntityKind` component, so the query structurally cannot
@@ -901,6 +905,15 @@ impl Sim {
                         || (feet.y - origin[1]).abs() > margin
                         || (feet.z - origin[2]).abs() > margin
                     {
+                        return None;
+                    }
+                    // Vanilla's `EntitySelector.CAN_BE_PICKED`, the predicate
+                    // its own entity ray is given. Without it the ray resolves
+                    // to dropped items and experience orbs, and the attack that
+                    // follows gets the session disconnected — see
+                    // `crate::interact::entity_type_can_be_picked` for the
+                    // kick, the citations and the eight override families.
+                    if !crate::interact::entity_type_can_be_picked(&kind.0) {
                         return None;
                     }
                     let facts = version.entity_facts(&kind.0)?;
