@@ -6,6 +6,7 @@
 //! byte limit to resist decompression bombs.
 
 use crate::error::TextureError;
+use crate::mipmap::MipStrategy;
 use serde_json::Value;
 
 /// A decoded, RGBA8, row-major image.
@@ -137,18 +138,63 @@ fn expand(buf: &[u8], pixels: usize, channels: usize, f: impl Fn(&[u8], &mut Vec
     out
 }
 
+/// The `texture` section of a `*.png.mcmeta`, mirroring vanilla's
+/// `TextureMetadataSection` record.
+///
+/// The two fields that matter to the block atlas are
+/// [`mipmap_strategy`](Self::mipmap_strategy) and
+/// [`alpha_cutoff_bias`](Self::alpha_cutoff_bias): both are inputs to vanilla's
+/// per-sprite mip generation, and leaving them at their defaults renders 45 of
+/// the 26.2 block sprites through the wrong downsample. Every leaves texture
+/// asks for `dark_cutout`, 27 flower/amethyst sprites ask for `strict_cutout`
+/// (a `0.3` alpha-coverage reference rather than `0.5`), glass and the four
+/// redstone-dust sprites ask for plain `mean`, and cactus, kelp and tripwire
+/// carry a `0.1` cutoff bias. See [`crate::mipmap`] for what each does.
+///
+/// `blur` and `clamp` are parsed for completeness — they select the GPU
+/// sampler in vanilla and this crate is GPU-free, so nothing here consumes
+/// them yet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextureSection {
+    /// Vanilla's `blur`: sample this texture with a linear filter.
+    pub blur: bool,
+    /// Vanilla's `clamp`: clamp rather than repeat at the texture's edge.
+    pub clamp: bool,
+    /// How the mip chain is downsampled. Vanilla's default is
+    /// [`MipStrategy::Auto`].
+    pub mipmap_strategy: MipStrategy,
+    /// Added to every texel's alpha after the coverage rescale, on top of
+    /// vanilla's unconditional `0.025`. Default `0.0`.
+    pub alpha_cutoff_bias: f32,
+}
+
+impl Default for TextureSection {
+    fn default() -> Self {
+        Self {
+            blur: false,
+            clamp: false,
+            mipmap_strategy: MipStrategy::Auto,
+            alpha_cutoff_bias: 0.0,
+        }
+    }
+}
+
 /// Parsed `*.png.mcmeta` texture metadata.
 ///
-/// Only the parts relevant to the block atlas are modelled explicitly (the
-/// `animation` section). Other vanilla sections — `texture`, `gui`, `villager` —
-/// are recognised and their presence recorded, but they are not otherwise
-/// interpreted here.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// The `animation` and `texture` sections are modelled explicitly. Other
+/// vanilla sections — `gui`, `villager` — are recognised and their presence
+/// recorded, but they are not otherwise interpreted here.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextureMeta {
     /// The animation section, if present.
     pub animation: Option<AnimationMeta>,
-    /// Names of other top-level sections that were present but not interpreted
-    /// (for example `gui`, `villager`, `texture`), sorted and de-duplicated.
+    /// The `texture` section, if present. Its contents are interpreted — see
+    /// [`TextureSection`].
+    pub texture: Option<TextureSection>,
+    /// Names of every top-level section other than `animation` that was
+    /// present, sorted and de-duplicated. This records *presence*, not lack of
+    /// interpretation: `texture` appears here as well as in
+    /// [`Self::texture`].
     pub other_sections: Vec<String>,
 }
 
@@ -177,6 +223,10 @@ impl TextureMeta {
             Some(a) => Some(AnimationMeta::from_value(a)?),
             None => None,
         };
+        let texture = match obj.get("texture") {
+            Some(t) => Some(TextureSection::from_value(t)?),
+            None => None,
+        };
         let mut other_sections: Vec<String> = obj
             .keys()
             .filter(|k| k.as_str() != "animation")
@@ -186,7 +236,64 @@ impl TextureMeta {
         other_sections.dedup();
         Ok(Self {
             animation,
+            texture,
             other_sections,
+        })
+    }
+}
+
+impl TextureSection {
+    /// Parses the `texture` object, mirroring `TextureMetadataSection`'s codec:
+    /// every field optional, `blur`/`clamp` defaulting to `false`,
+    /// `mipmap_strategy` to `auto` and `alpha_cutoff_bias` to `0.0`.
+    ///
+    /// An unrecognised `mipmap_strategy` string is an error rather than a
+    /// silent fallback, because vanilla's `StringRepresentable` codec rejects
+    /// it too — and a silent fallback would render the sprite through a
+    /// different downsample with nothing to say so.
+    fn from_value(value: &Value) -> Result<Self, TextureError> {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| TextureError::MetaMalformed("\"texture\" is not an object".into()))?;
+        let flag = |key: &str| -> Result<bool, TextureError> {
+            match obj.get(key) {
+                None => Ok(false),
+                Some(v) => v
+                    .as_bool()
+                    .ok_or_else(|| TextureError::MetaMalformed(format!("invalid \"{key}\""))),
+            }
+        };
+        let mipmap_strategy = match obj.get("mipmap_strategy") {
+            None => MipStrategy::Auto,
+            Some(v) => {
+                let name = v.as_str().ok_or_else(|| {
+                    TextureError::MetaMalformed("invalid \"mipmap_strategy\"".into())
+                })?;
+                match name {
+                    "auto" => MipStrategy::Auto,
+                    "mean" => MipStrategy::Mean,
+                    "cutout" => MipStrategy::Cutout,
+                    "strict_cutout" => MipStrategy::StrictCutout,
+                    "dark_cutout" => MipStrategy::DarkCutout,
+                    other => {
+                        return Err(TextureError::MetaMalformed(format!(
+                            "unknown \"mipmap_strategy\" {other:?}"
+                        )));
+                    }
+                }
+            }
+        };
+        let alpha_cutoff_bias = match obj.get("alpha_cutoff_bias") {
+            None => 0.0,
+            Some(v) => v.as_f64().ok_or_else(|| {
+                TextureError::MetaMalformed("invalid \"alpha_cutoff_bias\"".into())
+            })? as f32,
+        };
+        Ok(Self {
+            blur: flag("blur")?,
+            clamp: flag("clamp")?,
+            mipmap_strategy,
+            alpha_cutoff_bias,
         })
     }
 }

@@ -111,9 +111,48 @@ levels 0–3. Both halves of that are wrong.
 five-iteration bisection on alpha scale, the `+ 0.025` bias added to every
 texel after it, `solidify` before the base coverage is taken, the linear-light
 `meanLinear` downsample, and the `width - 1` by `height - 1` sweep. Every
-cutout sprite in the block atlas goes through it — `AtlasBuilder` passes
-`MipStrategy::Auto`, which resolves to `Cutout` for anything with a fully
-transparent texel.
+cutout sprite in the block atlas goes through it.
+
+**But for a long time it went through it under the wrong strategy.** Vanilla
+picks the downsample per *sprite*, from that sprite's own `*.png.mcmeta`
+`texture` section: `SpriteContents` reads `TextureMetadataSection`'s
+`mipmap_strategy` and `alpha_cutoff_bias` and hands both to
+`MipmapGenerator.generateMipLevels`. `TextureMeta` did not parse that section
+at all (it only recorded `"texture"` as a present-but-uninterpreted key), and
+`AtlasBuilder::build` passed `MipStrategy::Auto` and a `0.0` bias
+unconditionally — so `MipStrategy::StrictCutout`, `DarkCutout` and an explicit
+`Mean` were implemented, tested, and had **no producer anywhere**.
+
+Counted straight out of the 26.2 jar's own 102 block-texture `.mcmeta` files,
+that was the wrong strategy for **45 sprites**:
+
+| `mipmap_strategy` | count | sprites |
+|---|---|---|
+| `strict_cutout` | 27 | every small flower, the amethyst buds and cluster, both mushrooms, both fungi, `nether_sprouts`, `sweet_berry_bush_stage0` |
+| `dark_cutout` | 13 | every `*_leaves`, plus `mangrove_roots_top`/`_side` |
+| `mean` | 5 | `glass`, `redstone_dust_dot`/`_line0`/`_line1`/`_overlay` |
+| `alpha_cutoff_bias: 0.1` | 5 | `cactus_side`, `cactus_top`, `kelp`, `kelp_plant`, `tripwire` |
+
+The difference is not cosmetic for exactly the reason the rest of this page is
+about: `strict_cutout` preserves coverage against a **0.3** alpha reference
+rather than `0.5`, `dark_cutout` fills the transparent areas with a darkened
+colour and blends only non-transparent texels, `mean` does neither, and the
+bias is added to every texel after the rescale. All four change the alpha the
+terrain shader then thresholds at `0.5`, so the wrong one shows up as texels
+winking in and out under minification — the family this page exists for.
+
+Both are now parsed (`TextureMeta::texture`, `TextureSection`) and threaded
+per sprite through `AtlasBuilder::build`. `atlas_mips.rs`'s
+`a_sprites_mcmeta_mipmap_strategy_selects_its_downsample` is the wiring gate,
+and it is a wiring gate rather than an algorithm one on purpose: it asserts
+each of the four inputs changes the produced chain, collecting the failures
+rather than asserting inside its loop, and under a neuter that restores the
+hardcoded `Auto`/`0.0` it reports **all four** as unwired.
+
+Note `leaf_litter.png` itself carries no `.mcmeta`, so it is `auto` in vanilla
+too and this changes nothing for it. The measured residuals below are
+unaffected; what changes is the rest of the cutout family the owner's report
+names by example.
 
 The drifting numbers are the *estimator*, not the data. `alphaTestCoverage`
 bilinearly supersamples each 2×2 quad, so at level 3 (a 2×2 image) it has
@@ -135,11 +174,11 @@ the empty sweep — vanilla reaches the same `bestAlphaScale = 1.0` there via a
 
 One real defect did come out of re-reading that port: `darkened_alpha_blend`
 transcribed vanilla's `ARGB.color(a, r, g, b)` argument order literally and so
-rotated every channel by one, painting alpha into blue. It is fixed. Nothing
-selects `MipStrategy::DarkCutout` today (texture `.mcmeta` carries the
-strategy in vanilla and our `TextureMeta` does not parse it yet), so it never
-reached a pixel — but the same reading is what the strategy will get when it
-is wired.
+rotated every channel by one, painting alpha into blue. It is fixed — and it
+was fixed while nothing selected `MipStrategy::DarkCutout`, so it never reached
+a pixel until the `.mcmeta` `texture` section above was wired. Every `*_leaves`
+sprite now takes that path, which means `darkened_alpha_blend` is live code for
+the first time and its correctness is load-bearing rather than latent.
 
 ### Sampling was the mechanism, and vanilla's *default* sampler is not the fix
 
@@ -263,6 +302,13 @@ to fire in 3 of 3 configurations.
 
 * `mipmapLevels` (`Options`, consumed by `resources::mipmap_levels`) rebuilds
   the block atlas at a new mip depth through the `PACK_GENERATION` reload.
+* A sprite's own `*.png.mcmeta` `texture` section (`mipmap_strategy`,
+  `alpha_cutoff_bias`) selects how its mip chain is built — parsed by
+  `TextureMeta` into `TextureSection` and consumed per sprite by
+  `AtlasBuilder::build`. A resource pack can therefore change a sprite's
+  downsample without changing a pixel of its base texture, and an
+  unrecognised `mipmap_strategy` fails the whole `.mcmeta` exactly as vanilla's
+  codec does.
 * `biomeBlendRadius` reaches the mesher as `mesh_snapshot_models_at`'s
   `blend_radius` and decides the plate's tint, not its geometry.
 

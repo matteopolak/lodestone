@@ -296,3 +296,34 @@ fn first_animation_frame_is_a_no_op_when_frame_height_covers_the_whole_image() {
     assert_eq!(img.first_animation_frame(9), img);
     assert_eq!(img.first_animation_frame(0), img);
 }
+
+#[test]
+fn texture_section_is_parsed() {
+    use lodestone_assets::MipStrategy;
+
+    let meta =
+        TextureMeta::parse(br#"{"texture":{"mipmap_strategy":"dark_cutout","blur":true}}"#).unwrap();
+    let tex = meta.texture.expect("texture section present");
+    assert_eq!(tex.mipmap_strategy, MipStrategy::DarkCutout);
+    assert!(tex.blur);
+    assert!(!tex.clamp);
+    assert_eq!(tex.alpha_cutoff_bias, 0.0);
+
+    let meta = TextureMeta::parse(br#"{"texture":{"alpha_cutoff_bias":0.1}}"#).unwrap();
+    let tex = meta.texture.expect("texture section present");
+    // Every field is optional and defaults exactly as vanilla's codec does.
+    assert_eq!(tex.mipmap_strategy, MipStrategy::Auto);
+    assert!((tex.alpha_cutoff_bias - 0.1).abs() < 1e-6);
+
+    // No `texture` section at all leaves the field `None` rather than a default.
+    assert!(
+        TextureMeta::parse(br#"{"animation":{"frametime":2}}"#)
+            .unwrap()
+            .texture
+            .is_none()
+    );
+
+    // An unrecognised strategy is rejected, matching vanilla's
+    // StringRepresentable codec, rather than silently downsampling some other way.
+    assert!(TextureMeta::parse(br#"{"texture":{"mipmap_strategy":"nearest"}}"#).is_err());
+}

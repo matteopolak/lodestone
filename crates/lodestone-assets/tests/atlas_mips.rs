@@ -210,3 +210,103 @@ fn mip_pyramid_is_deterministic() {
         assert_eq!(a.mip(level).unwrap().rgba, c.mip(level).unwrap().rgba);
     }
 }
+
+/// The `*.png.mcmeta` `texture` section reaches per-sprite mip generation.
+///
+/// This is a wiring gate, not an algorithm one: `mipmap.rs` has implemented all
+/// five of vanilla's strategies since it was written, and for a long time
+/// nothing selected any of them — `AtlasBuilder::build` passed `MipStrategy::Auto`
+/// and a `0.0` bias unconditionally, so `StrictCutout`, `DarkCutout` and an
+/// explicit `Mean` had no producer at all. In the real 26.2 jar 45 block sprites
+/// ask for one of those (every leaves texture wants `dark_cutout`, 27 flower and
+/// amethyst sprites want `strict_cutout`, glass and the redstone-dust sprites
+/// want `mean`, and cactus/kelp/tripwire carry a `0.1` cutoff bias), and those are
+/// exactly the sprites whose alpha the terrain shader thresholds.
+///
+/// The subject is a half-opaque, half-fully-transparent sprite — an image on
+/// which the strategies genuinely disagree — and the assertions are *pairwise
+/// difference* against the no-mcmeta build, plus a same-build control proving
+/// the comparison is not simply reporting that every atlas differs.
+#[test]
+fn a_sprites_mcmeta_mipmap_strategy_selects_its_downsample() {
+    use lodestone_assets::TextureMeta;
+
+    // Left half opaque red, right half fully transparent: `solidify` (Cutout),
+    // `fill_empty_with_dark` (DarkCutout) and a plain linear mean all produce
+    // different bytes here, and a 0.3-vs-0.5 coverage reference lands the
+    // alpha rescale differently again.
+    fn half_cutout() -> Image {
+        let mut rgba = Vec::with_capacity(16 * 16 * 4);
+        for _ in 0..16 {
+            for x in 0..16 {
+                if x < 8 {
+                    rgba.extend_from_slice(&[220, 40, 40, 255]);
+                } else {
+                    rgba.extend_from_slice(&[0, 0, 0, 0]);
+                }
+            }
+        }
+        Image {
+            width: 16,
+            height: 16,
+            rgba,
+        }
+    }
+
+    fn level1(meta: Option<TextureMeta>) -> Vec<u8> {
+        let mut b = AtlasBuilder::new().with_mip_levels(4).with_padding(16);
+        b.add_texture(loc("minecraft:block/subject"), half_cutout(), meta);
+        let atlas = b.build().unwrap();
+        atlas.mip(1).unwrap().rgba.to_vec()
+    }
+
+    fn meta(json: &str) -> Option<TextureMeta> {
+        Some(TextureMeta::parse(json.as_bytes()).expect("mcmeta parses"))
+    }
+
+    let default = level1(None);
+
+    // The control: a second build with no mcmeta must be byte-identical, so a
+    // difference below is the strategy and not build nondeterminism.
+    assert_eq!(
+        default,
+        level1(None),
+        "two no-mcmeta builds of the same sprite must be byte-identical"
+    );
+    // ... and an explicit `auto` must agree with no mcmeta at all, which is
+    // what makes `auto` the right default rather than merely the current one.
+    assert_eq!(
+        default,
+        level1(meta(r#"{"texture":{"mipmap_strategy":"auto"}}"#)),
+        "an explicit \"auto\" must produce exactly the no-mcmeta chain"
+    );
+
+    // Collect rather than assert inside the loop: an `assert_ne!` in the body
+    // aborts on the first unwired arm, so a neuter would only ever demonstrate
+    // one of them and the rest would stay arguments instead of observations.
+    // The bias gets its own row because it is a separate argument on the same
+    // call — a strategy can be threaded through while the bias stays hardcoded.
+    let mut unwired: Vec<&str> = Vec::new();
+    for (label, json) in [
+        ("mean", r#"{"texture":{"mipmap_strategy":"mean"}}"#),
+        (
+            "strict_cutout",
+            r#"{"texture":{"mipmap_strategy":"strict_cutout"}}"#,
+        ),
+        (
+            "dark_cutout",
+            r#"{"texture":{"mipmap_strategy":"dark_cutout"}}"#,
+        ),
+        ("alpha_cutoff_bias", r#"{"texture":{"alpha_cutoff_bias":0.1}}"#),
+    ] {
+        if level1(meta(json)) == default {
+            unwired.push(label);
+        }
+    }
+    assert!(
+        unwired.is_empty(),
+        "these mcmeta inputs never reached mip generation (byte-identical to the no-mcmeta \
+         chain), which means AtlasBuilder is still passing MipStrategy::Auto / 0.0 regardless \
+         of the sprite's own metadata: {unwired:?}"
+    );
+}

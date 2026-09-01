@@ -132,6 +132,64 @@ What it does **not** cover, in the order worth trying next:
    the section fade during real streaming. Every gate builds its `RenderState`
    once and renders one frame.
 
+## The opaque discard cannot fire on a vanilla opaque sprite — measured, not argued
+
+The safety argument below (*"a solid sprite's filtered alpha cannot reach the
+threshold from any direction"*) is a claim about **data**, so it is checkable
+against the data rather than reasoned about. Every `assets/minecraft/textures/
+block/*.png` in the 26.2 jar — 1,269 sprites — was decoded and its alpha
+histogram taken:
+
+| class | count | consequence |
+|---|---|---|
+| any texel `0 < a < 255` | 49 | `RenderLayer::Translucent` — glass, ice, water, the crack stages, `nether_portal`, `slime_block`, `honey_block_top`, `tripwire` |
+| else any texel `a == 0` | 309 | `RenderLayer::Cutout` — plants, bars, doors, saplings, `dirt_path_side`, `glass_pane_top` |
+| every texel `a == 255` | 911 | `RenderLayer::Solid` |
+
+**No ordinary building block is in either of the first two rows.** `stone`,
+`andesite`, `polished_andesite`, `smooth_stone`, `stone_bricks`, `cobblestone`,
+`gravel` and the rest are all-255, at every texel. Combined with
+`AtlasBuilder`'s gutter — `1 << mip_levels` texels wide, re-extruded from the
+sprite's own edge at *every* level, so at the deepest level a 16×16 sprite is
+one texel with one texel of its own colour on each side and a bilinear tap can
+reach 0.5 texels — an opaque road surface's sampled alpha is `1.0` on every
+path `model.wgsl` can take, at every mip level, from any direction. The
+discard structurally cannot fire on it.
+
+So for a report of *sky pinpricks on an ordinary stone or andesite surface*,
+the cutout discard is excluded, and so is atlas gutter bleed. The one thing
+that reopens it is a **server resource pack**: a replaced texture with stray
+transparent texels is reclassified by `RenderLayer::from_sprite_alpha` and then
+genuinely is alpha-tested. That is worth asking about before re-opening this
+line of enquiry, because none of the gates above load a pack.
+
+Two other candidates for the same report were closed the same way, by reading
+an outside source rather than by running a gate:
+
+* **The sampling port is byte-faithful.** `model.wgsl`'s `sample_nearest` and
+  `sample_rgss` were diffed clause by clause against `terrain.fsh` in the jar,
+  including the rotated-grid offsets, the `smoothstep(minPixelSize,
+  minPixelSize * 2, maxTexelSize)` cross-fade, and the **geometric-mean**
+  `effectiveDerivative` LOD (`sqrt(min * max)`) — which is vanilla's own, not
+  an invention of ours. The only deliberate divergence is that we take
+  `sampleRGSS` unconditionally where vanilla's shipped `textureFiltering`
+  default selects `sampleNearest`.
+* **Adjacent full cubes share bit-identical edges.** Positions are `f32`,
+  never quantised, on an exact multiple of `1/16`; the section origin is an
+  exact multiple of `16`; `world = position + section_origin` is exact for
+  every coordinate a player reaches below ~524,288 blocks; and two quads
+  meeting at a block boundary therefore feed identical operands to identical
+  arithmetic and produce identical clip coordinates. There is no greedy merge,
+  no T-junction handling and no positional inset on the live path, so there is
+  no mechanism for a rasterisation crack between two full cubes.
+
+What that leaves of the report is the list at the end of the previous section,
+with one item promoted: **every gate in this corpus builds a world out of a
+single block type**, and the owner's report says the artefact *"can get pretty
+egregious when the blocks aren't all the same"*. A mixed-block world is the
+discriminating fixture nothing here has, in the same way chunk `(0, 0)` is the
+shared spawn point nothing here varies.
+
 ## The alpha test is per pipeline, and we had one value for all three
 
 Found by clause-diffing `terrain.fsh` against `model.wgsl` rather than by any
@@ -168,13 +226,27 @@ unaided (65 of 256 texels clear `0.5`, i.e. 0.254; the mip chain accounts for
 the rest by averaging `102` in with its neighbours at deeper levels).
 
 The **solid** row stays as vanilla is not: our opaque pass carries solid and
-cutout geometry in one mesh, so it must take the stricter of the two. That is
-harmless rather than merely tolerable — `RenderLayer::from_sprite_alpha` calls a
-sprite `Solid` only when every texel's alpha is exactly 255, and `AtlasBuilder`
-re-extrudes each sprite's gutter from its own edge pixels at **every** mip
-level, so a solid sprite's filtered alpha cannot reach the threshold from any
-direction. It is the thing that would bite first if either of those two facts
-changed.
+cutout geometry in one mesh, so it must take the stricter of the two. The
+section above measures the two facts that make that harmless rather than merely
+tolerable, against the real jar. It is the thing that would bite first if
+either of them changed — and a server resource pack is enough to change the
+first one.
+
+There is a second half to that divergence, and it is the durable fix if this
+ever needs one. Vanilla's layer is **per quad**, not per block:
+`SectionCompiler` buckets on `quad.materialInfo().layer()`, which
+`ChunkSectionLayer.byTransparency` derives from that quad's own sprite. Ours is
+one `RenderLayer` per block state, documented in `block_models.rs` as *"the most
+transparent layer across its faces"* — so a `grass_block`'s fully opaque top and
+bottom quads inherit `Cutout` from `grass_block_side_overlay` and get an alpha
+test vanilla never applies to them. `ModelVertex::cutout_bypass` already exists
+and already skips the discard (it carries vanilla's FAST leaves today), and
+`BakedQuad` already carries a sprite index, so reproducing vanilla's split is a
+matter of stamping that byte per quad from the quad's own sprite layer rather
+than adding a pipeline or a mesh. It was deliberately **not** done here: with
+vanilla assets it is provably a no-op (see the histogram above), and it touches
+`models.rs`/`block_models.rs`/`mesher.rs`, which is not a change to make on a
+hypothesis.
 
 ## One divergence left, deliberately unfixed
 

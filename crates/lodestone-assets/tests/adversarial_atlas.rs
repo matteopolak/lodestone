@@ -55,6 +55,7 @@ fn anim(frames: Vec<AnimationFrame>, frametime: u32, interp: bool) -> TextureMet
             frame_height: None,
             frames,
         }),
+        texture: None,
         other_sections: vec![],
     }
 }
