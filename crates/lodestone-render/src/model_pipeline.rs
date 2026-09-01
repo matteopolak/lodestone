@@ -116,6 +116,69 @@ const ALPHA_CUTOUT_CUTOUT: f32 = 0.5;
 /// deletes outright.
 const ALPHA_CUTOUT_TRANSLUCENT: f32 = 0.1;
 
+/// The name of `model.wgsl`'s pipeline-overridable sampling-path selector,
+/// vanilla's `UseRgss`. `the_model_shader_declares_the_use_rgss_override_this_
+/// file_binds` keeps this from drifting away from the shader.
+const USE_RGSS_OVERRIDE: &str = "use_rgss";
+
+/// Which of `terrain.fsh`'s sampling paths the terrain pipelines take, i.e.
+/// vanilla's `TextureFilteringMethod` reduced to the part this renderer
+/// implements.
+///
+/// Vanilla's shipped default is `NONE`, and so is this one. It used to be
+/// `RGSS` unconditionally, which is a real divergence and a visible one: see
+/// `model.wgsl`'s `use_rgss` comment for the measurement on a grazing stone
+/// floor. `ANISOTROPIC` is vanilla's third value and is **not** implemented
+/// here — it needs a sampler with `anisotropy_clamp > 1` and, as vanilla's own
+/// `Stitcher` does, an atlas gutter that grows with the anisotropy bit, so it
+/// is a separate change rather than a third arm of this one.
+///
+/// Read once per process from `LODESTONE_TEXTURE_FILTERING` (`none` / `rgss`),
+/// because a pipeline constant is bound at pipeline creation and nothing here
+/// rebuilds pipelines when a video setting changes. Anything unrecognised is
+/// the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextureFiltering {
+    /// `TextureFilteringMethod.NONE` — `sample_nearest` only. Vanilla's default.
+    #[default]
+    None,
+    /// `TextureFilteringMethod.RGSS` — `sample_rgss`.
+    Rgss,
+}
+
+impl TextureFiltering {
+    /// The value `model.wgsl`'s `use_rgss` override is bound to.
+    #[must_use]
+    pub const fn use_rgss(self) -> f32 {
+        match self {
+            Self::None => 0.0,
+            Self::Rgss => 1.0,
+        }
+    }
+
+    /// Parse the `LODESTONE_TEXTURE_FILTERING` spelling. Unrecognised input is
+    /// the default rather than an error: this is a diagnostic switch, and a
+    /// typo must not stop the game starting.
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "rgss" => Self::Rgss,
+            _ => Self::None,
+        }
+    }
+
+    /// The process-wide selection, read from the environment on first use.
+    #[must_use]
+    pub fn selected() -> Self {
+        static SELECTED: std::sync::OnceLock<TextureFiltering> = std::sync::OnceLock::new();
+        *SELECTED.get_or_init(|| {
+            std::env::var("LODESTONE_TEXTURE_FILTERING")
+                .ok()
+                .map_or(Self::default(), |v| Self::parse(&v))
+        })
+    }
+}
+
 /// Polygon offset that moves a coincident world-space primitive toward the
 /// camera in this renderer's ordinary `[0, 1]` depth convention.
 ///
@@ -495,8 +558,20 @@ impl ModelPipeline {
         // A slice rather than an `Option` at the use site: an empty slice is
         // exactly "leave every override at its declared default", which is what
         // a shader with no override wants.
+        // Both overrides live in `model.wgsl` and neither in `fluid.wgsl`, so
+        // one `is_some()` gates both: wgpu rejects a constant the module does
+        // not declare, and `alpha_cutout` being `Some` *is* "this is the model
+        // shader" at every call site.
         let constants: Vec<(&str, f64)> = alpha_cutout
-            .map(|v| vec![(ALPHA_CUTOUT_OVERRIDE, f64::from(v))])
+            .map(|v| {
+                vec![
+                    (ALPHA_CUTOUT_OVERRIDE, f64::from(v)),
+                    (
+                        USE_RGSS_OVERRIDE,
+                        f64::from(TextureFiltering::selected().use_rgss()),
+                    ),
+                ]
+            })
             .unwrap_or_default();
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1329,6 +1404,41 @@ mod tests {
         // 0.1F. Transcribed from the 26.2 source, not from each other.
         assert_eq!(ALPHA_CUTOUT_CUTOUT, 0.5);
         assert_eq!(ALPHA_CUTOUT_TRANSLUCENT, 0.1);
+    }
+
+    /// The same drift guard for the sampling-path selector, plus the two facts
+    /// that make the default vanilla's: the shader's declared default and this
+    /// file's enum default must both be `NONE`, because `Options`'
+    /// `textureFiltering` ships `TextureFilteringMethod.NONE` and
+    /// `OptionsRenderState` initialises its field to it.
+    #[test]
+    fn the_model_shader_declares_the_use_rgss_override_this_file_binds() {
+        let src = MODEL_WGSL;
+        assert!(
+            src.contains(&format!("override {USE_RGSS_OVERRIDE}: f32 = 0.0;")),
+            "model.wgsl must declare `override {USE_RGSS_OVERRIDE}: f32 = 0.0;` — the name is what              `build` binds by string and the `0.0` default is vanilla's shipped              `TextureFilteringMethod.NONE`"
+        );
+        assert!(
+            src.contains(&format!("if ({USE_RGSS_OVERRIDE} > 0.5)")),
+            "model.wgsl's sampling path must branch on `{USE_RGSS_OVERRIDE}` — taking one arm              unconditionally is the divergence this override exists to remove"
+        );
+        assert_eq!(TextureFiltering::default(), TextureFiltering::None);
+        assert_eq!(TextureFiltering::None.use_rgss(), 0.0);
+        assert_eq!(TextureFiltering::Rgss.use_rgss(), 1.0);
+    }
+
+    /// The env spelling, including the deliberate "a typo is the default, not a
+    /// panic" behaviour. `selected()` itself is not exercised: it caches in a
+    /// `OnceLock` and reads a process-wide variable, so a test that called it
+    /// would decide the value for every other test in this binary.
+    #[test]
+    fn texture_filtering_parses_the_env_spelling_and_defaults_on_anything_else() {
+        assert_eq!(TextureFiltering::parse("rgss"), TextureFiltering::Rgss);
+        assert_eq!(TextureFiltering::parse("  RGSS "), TextureFiltering::Rgss);
+        assert_eq!(TextureFiltering::parse("none"), TextureFiltering::None);
+        assert_eq!(TextureFiltering::parse("anisotropic"), TextureFiltering::None);
+        assert_eq!(TextureFiltering::parse("banana"), TextureFiltering::None);
+        assert_eq!(TextureFiltering::parse(""), TextureFiltering::None);
     }
 
     #[test]

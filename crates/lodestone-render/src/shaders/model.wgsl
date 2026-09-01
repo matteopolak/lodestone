@@ -225,6 +225,33 @@ struct AnimSlots {
 // any direction.
 override alpha_cutout: f32 = 0.5;
 
+// Which of `terrain.fsh`'s two sampling paths this pipeline takes, as vanilla's
+// `UseRgss` uniform: `0` is `TextureFilteringMethod.NONE` (`sample_nearest`),
+// non-zero is `RGSS` (`sample_rgss`). Vanilla's shipped default is `NONE` --
+// `Options`' `textureFiltering` instance declares it, and `OptionsRenderState`
+// initialises the field to it -- and so is this shader's.
+//
+// It is an override rather than a uniform because nothing else in this
+// renderer needs it per draw, and a pipeline constant costs no bind group; the
+// selection is read once, at pipeline creation. `LODESTONE_TEXTURE_FILTERING`
+// in `lodestone_render::model_pipeline` is what binds it.
+//
+// This shader used to take `sample_rgss` unconditionally. That is *vanilla's
+// RGSS mode*, not vanilla's default, and the two differ most where it is most
+// visible: `sample_rgss` picks its level from the **geometric mean** of the two
+// derivative lengths while `sample_nearest`'s `textureSampleGrad` gets the
+// hardware's isotropic level, so on a surface seen at a grazing angle -- a
+// floor, a wall running away from the eye -- the RGSS path lands up to half the
+// log2 anisotropy ratio *sharper* than the footprint supports. Nothing in this
+// renderer takes the extra taps that would make that level correct (the atlas
+// sampler's anisotropy is 1), so the surplus detail is undersampled rather than
+// resolved, and a block-periodic texture aliases into block-periodic structure.
+// Measured on a stone floor at 6 degrees of pitch, per-row standard deviation of
+// ground luminance against the same frame rendered with the isotropic level:
+// 1.9/0.25 at 28 blocks, 4.9/1.6 at 16, 7.8/2.8 at 11, converging by 7 blocks;
+// peak per-pixel difference 19/255. See `docs/terrain-sky-holes.md`.
+override use_rgss: f32 = 0.0;
+
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> origin: Origin;
 @group(1) @binding(0) var atlas_tex: texture_2d<f32>;
@@ -321,21 +348,22 @@ fn snap_uv(uv: vec2<f32>, pixel_size: vec2<f32>, texel_screen_size: vec2<f32>) -
 }
 
 // Vanilla `terrain.fsh`'s `sampleRGSS` -- rotated-grid supersampling, the
-// `TextureFilteringMethod.RGSS` branch, and **this shader's only sampling
-// path**. Vanilla ships `NONE` (plain `sample_nearest`) as its default and
-// offers this one as a video setting; we take it unconditionally because it is
-// what actually fixes the reported artefact and there is no live setting to
-// hang it off yet. Measured on a leaf-litter ground plate at a grazing angle,
+// `TextureFilteringMethod.RGSS` branch, selected by the `use_rgss` override
+// above. Vanilla ships `NONE` (plain `sample_nearest`) as its default and
+// offers this one as a video setting; so do we, and the default matches.
+// This arm is worth keeping switchable rather than deleting: measured on a
+// leaf-litter ground plate at a grazing angle,
 // as the fraction of the area a 4x-supersampled render of the same camera
 // says the plate should paint in the most minified band (see
 // `lodestone-shell`'s `cutout_minification_flicker_pixels`):
 //
 //     plain textureSample  0.401     sample_nearest  0.399     sample_rgss  0.779
 //
-// So the vanilla-parity default would have been no improvement at all. If a
-// `textureFiltering` option is ever wired, this is the function it selects and
-// `sample_nearest` is the `NONE` arm; the two already compose exactly as
-// vanilla composes them.
+// So on that fixture the vanilla-parity default is no improvement at all, and
+// this arm is a real gain for a *cutout* surface under minification. It costs
+// the opposite on an opaque one -- see `use_rgss`'s own comment for the
+// measurement -- which is exactly why vanilla makes it a choice rather than a
+// behaviour, and why the switch is the fix rather than either arm.
 //
 // Four sub-texel taps on a rotated grid,
 // taken at two adjacent mip levels and blended, then cross-faded with
@@ -481,7 +509,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // LOD, so they are legal inside the branch -- and they are taken at the
     // *snapped* coordinate, because the frame offsets are whole numbers of
     // texels and so preserve the lattice `sample_nearest` locked onto.
-    var tex = sample_rgss(in.uv, pixel_size, du, dv, texel_screen_size);
+    // Vanilla `terrain.fsh`'s `main`: `UseRgss == 1 ? sampleRGSS(..) :
+    // sampleNearest(..)`. `use_rgss` is a pipeline constant, so this branch is
+    // uniform control flow, and both arms state their own level or gradient --
+    // `du`/`dv` were taken above, in uniform control flow -- so neither needs an
+    // implicit derivative.
+    var tex: vec4<f32>;
+    if (use_rgss > 0.5) {
+        tex = sample_rgss(in.uv, pixel_size, du, dv, texel_screen_size);
+    } else {
+        tex = sample_nearest(in.uv, pixel_size, du, dv, texel_screen_size);
+    }
     if (in.anim_idx != 0u) {
         let slot = anim.slots[in.anim_idx];
         let snapped = snap_uv(in.uv, pixel_size, texel_screen_size);
