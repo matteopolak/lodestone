@@ -30,8 +30,7 @@ use lodestone_model::{Identifier, RecipeBookType, RecipeBookTypeSettings};
 
 use crate::item::ItemStack;
 
-/// Vanilla's `RecipeBookCategories` grouping
-/// (`RecipeBookCategories.java:7-19`), captured from each recipe JSON's own
+/// Vanilla's own recipe-book-categories grouping, captured from each recipe JSON's own
 /// `"category"` field (present on 694 of 1585 recipes in 26.2's datapack;
 /// [`recipe_json`](crate::recipe_json) parses it, see
 /// [`RecipeBook::insert_with_category`]).
@@ -79,7 +78,7 @@ impl RecipeCategory {
 }
 
 /// The recipe-book tabs vanilla shows for `book_type`, in declaration order —
-/// `RecipeBookCategories.java:7-19`, which is **not** alphabetical (the
+/// vanilla's own declaration order, which is **not** alphabetical (the
 /// rejected hypothesis: `[Blocks, Equipment, Misc, Redstone]`; the real order
 /// interleaves `Redstone` before `Equipment`). A tab only actually appears if
 /// at least one loaded recipe has that category (see
@@ -132,7 +131,7 @@ impl Ingredient {
 ///
 /// # Why the memo is an `RwLock` and not a `RefCell`
 ///
-/// It was a `RefCell` until issue #148. A `RefCell` is `!Sync`, and `Sync`
+/// It was previously a `RefCell`. A `RefCell` is `!Sync`, and `Sync`
 /// propagates: [`TagResolver`] is a field of [`RecipeBook`], so the whole recipe
 /// corpus was `!Sync` and therefore **could not be a `bevy_ecs` `Resource` at
 /// all**. That is what confined the corpus to a private `Option<RecipeBook>`
@@ -979,7 +978,7 @@ impl RecipeBook {
         Some(&self.recipes[at].1)
     }
 
-    // -- Recipe-book browsing (issue #163) -----------------------------
+    // -- Recipe-book browsing -----------------------------
 
     /// As [`insert`](Self::insert), but also records an explicit
     /// [`RecipeCategory`] for the id, overriding whatever
@@ -1008,7 +1007,8 @@ impl RecipeBook {
     ///
     /// Results come back in the corpus's own id order (`recipes` is kept
     /// id-sorted — see the type docs' "Ordering"), **not** vanilla's real
-    /// fuzzy tooltip/name search tree (`ClientPacketListener.searchTrees()`),
+    /// fuzzy tooltip/name search tree (vanilla's own client-side search-tree
+    /// step),
     /// which needs the resolved item display name and tooltip text this
     /// crate does not have. This is a deliberate, documented simplification:
     /// substring-on-id, not word-fuzzy-on-display-name.
@@ -1037,8 +1037,8 @@ impl RecipeBook {
     }
 
     /// The subset of [`tabs_for`] that actually has at least one loaded
-    /// recipe for `book_type` — vanilla's `RecipeBookTabButton::updateVisibility`
-    /// (`RecipeBookTabButton.java:88-100`): a tab with zero matching recipes
+    /// recipe for `book_type` — vanilla's own tab-visibility update step:
+    /// a tab with zero matching recipes
     /// never renders at all, rather than rendering empty.
     #[must_use]
     pub fn visible_tabs(&self, book_type: RecipeBookType) -> Vec<RecipeCategory> {
@@ -1053,7 +1053,7 @@ impl RecipeBook {
             .collect()
     }
 
-    // -- Runtime registration (issue #148) -----------------------------
+    // -- Runtime registration -----------------------------
 
     /// Registers a plugin's recipe, the `Bukkit.addRecipe` analogue.
     ///
@@ -1233,7 +1233,7 @@ impl std::fmt::Display for RecipeRegisterError {
 
 impl std::error::Error for RecipeRegisterError {}
 
-/// One step of an auto-fill plan (issue #163, "click recipe to auto-fill"):
+/// One step of an auto-fill plan ("click recipe to auto-fill"):
 /// move one item from inventory slot `source_slot` into grid cell `cell`.
 ///
 /// `cell` is a **0-based, row-major index into the placement grid**
@@ -1295,16 +1295,15 @@ pub fn plan_auto_fill(
 }
 
 /// Tracks which recipes the server has told this client are unlocked
-/// (issue #163, "recipe-unlock tracking"), plus which of those are still
+/// ("recipe-unlock tracking"), plus which of those are still
 /// "new" (unseen — vanilla's highlight squeeze animation and toast).
 ///
-/// **Nothing populates this yet.** The server signal is vanilla's
-/// `recipe_book_add`/`recipe_book_remove` packets (`RecipeBookAddPacket`/
-/// `RecipeBookRemovePacket`), and `crates/protocol/v770/src/adapter.rs`
+/// **Nothing populates this yet.** The server signal is vanilla's own
+/// `recipe_book_add`/`recipe_book_remove` packets, and `crates/protocol/v770/src/adapter.rs`
 /// decodes neither — confirmed by grepping the packet-id constants
 /// (`RECIPE_BOOK_ADD`/`RECIPE_BOOK_REMOVE`) against `adapter.rs`, zero hits —
 /// nor is there a `ClientEvent` variant for them in `lodestone-model` to
-/// decode *into*. Both are outside this issue's owned files (`crates/
+/// decode *into*. Both are outside this change's owned files (`crates/
 /// protocol/**` is off-limits to this change; see `docs/crafting.md`).
 ///
 /// Until that lands, [`is_unlocked`](Self::is_unlocked) reports every recipe
@@ -1318,8 +1317,8 @@ pub struct RecipeUnlockState {
     /// Recipes the server has explicitly unlocked, once real data arrives.
     /// Empty on every session today — see the type doc.
     known: HashSet<Identifier>,
-    /// Unlocked recipes not yet shown to the player (`recipeShown`,
-    /// `RecipeBookComponent.java:533-535`) — drives the toast and the tab
+    /// Unlocked recipes not yet shown to the player (vanilla's own
+    /// `recipeShown` field) — drives the toast and the tab
     /// squeeze-highlight animation.
     new: HashSet<Identifier>,
     /// Whether [`unlock`](Self::unlock) or [`remove`](Self::remove) has ever
@@ -1387,18 +1386,18 @@ impl RecipeUnlockState {
     }
 }
 
-/// Vanilla's recipe-unlock toast timing (`RecipeToast.java`): one toast that
+/// Vanilla's own recipe-unlock toast timing: one toast that
 /// **merges** every recipe unlocked within its display window, cycling
 /// through them, rather than stacking N separate toasts.
 ///
-/// `DISPLAY_TIME = 5000L` milliseconds (`RecipeToast.java:17`) is **100
+/// Vanilla's own display-time constant, `5000` milliseconds, is **100
 /// ticks** at the server's fixed 50ms/tick — not a round number of ticks by
 /// coincidence, exactly like every other vanilla UI timing keyed off
-/// `System.currentTimeMillis()` rather than tick count.
+/// wall-clock time rather than tick count.
 pub const RECIPE_TOAST_DISPLAY_MS: u64 = 5000;
-/// Vanilla's toast width in GUI pixels (`Toast.DEFAULT_WIDTH`, `Toast.java:14`).
+/// Vanilla's own toast width in GUI pixels.
 pub const RECIPE_TOAST_WIDTH: u32 = 160;
-/// Vanilla's toast height in GUI pixels (`Toast.SLOT_HEIGHT`, `Toast.java:15`).
+/// Vanilla's own toast height in GUI pixels.
 pub const RECIPE_TOAST_HEIGHT: u32 = 32;
 
 /// A pending recipe-unlock toast: which recipes to show and when the current
@@ -1411,7 +1410,7 @@ pub const RECIPE_TOAST_HEIGHT: u32 = 32;
 #[derive(Debug, Default, Clone)]
 pub struct RecipeToastQueue {
     /// `(crafting-station item, unlocked item)` pairs — mirrors
-    /// `RecipeToast.Entry` (`RecipeToast.java:85-86`); the station item is
+    /// vanilla's own toast-entry pair; the station item is
     /// the small corner icon (a crafting table, furnace, etc.).
     entries: Vec<(Identifier, Identifier)>,
     /// Milliseconds timestamp (caller's clock) the display window last reset.
@@ -1426,8 +1425,8 @@ impl RecipeToastQueue {
     }
 
     /// Adds an unlocked recipe and resets the display window — vanilla's
-    /// `RecipeToast.addItem` setting `changed = true`
-    /// (`RecipeToast.java:67-70`), which `update` reads back into
+    /// own toast add-item step setting `changed = true`, which its own
+    /// update step reads back into
     /// `lastChanged` on the *next* frame. Modelled here as an immediate
     /// reset since this queue has no separate "changed" flag to defer
     /// through.
@@ -1437,16 +1436,15 @@ impl RecipeToastQueue {
     }
 
     /// Whether the toast should currently be visible: non-empty and still
-    /// within [`RECIPE_TOAST_DISPLAY_MS`] of the last reset
-    /// (`RecipeToast.java:44-46`).
+    /// within [`RECIPE_TOAST_DISPLAY_MS`] of the last reset.
     #[must_use]
     pub fn visible(&self, now_ms: u64) -> bool {
         !self.entries.is_empty() && now_ms.saturating_sub(self.last_changed_ms) < RECIPE_TOAST_DISPLAY_MS
     }
 
     /// Which entry should be showing right now, cycling through every pending
-    /// unlock over the display window — `RecipeToast.java:49-51`'s
-    /// `displayedRecipeIndex` formula, with the notification-time multiplier
+    /// unlock over the display window — vanilla's own displayed-recipe-index
+    /// formula, with the notification-time multiplier
     /// fixed at `1.0` (this client has no accessibility "toast display time"
     /// option to read).
     #[must_use]
@@ -1900,7 +1898,7 @@ mod tests {
         assert_eq!(book.match_grid_entry(&g), None);
     }
 
-    // -- Recipe-book browsing (issue #163) -----------------------------
+    // -- Recipe-book browsing -----------------------------
 
     /// A small crafting-book corpus, deliberately with a **non-alphabetical**
     /// id order relative to the result item name, so a search-order test can
@@ -2028,8 +2026,7 @@ mod tests {
         assert_eq!(book.browse(RecipeBookType::Crafting, None, "").len(), 3);
     }
 
-    /// `tabs_for` is vanilla's own declaration order
-    /// (`RecipeBookCategories.java:7-19`), not alphabetical. Pinning the
+    /// `tabs_for` is vanilla's own declaration order, not alphabetical. Pinning the
     /// asymmetric cases explicitly: `BlastFurnace` has no `Food` tab and
     /// `Smoker` has only `Food`.
     #[test]
@@ -2077,7 +2074,7 @@ mod tests {
         assert_eq!(RecipeCategory::from_json_str("nonsense"), RecipeCategory::Misc);
     }
 
-    // -- Auto-fill planning (issue #163, "click recipe to auto-fill") --
+    // -- Auto-fill planning ("click recipe to auto-fill") --
 
     #[test]
     fn shaped_placement_is_top_left_unmirrored() {
@@ -2208,7 +2205,7 @@ mod tests {
         assert_eq!(plan_auto_fill(&two_sticks, 1, 2, &inventory, &tags), None);
     }
 
-    // -- RecipeUnlockState (issue #163, "recipe-unlock tracking") -------
+    // -- RecipeUnlockState ("recipe-unlock tracking") -------
 
     #[test]
     fn unlock_state_degrades_to_everything_unlocked_with_no_data() {
@@ -2246,7 +2243,7 @@ mod tests {
         assert!(!state.is_unlocked(&id("minecraft:torch")));
     }
 
-    // -- RecipeToastQueue (issue #163, "unlock toast notification") -----
+    // -- RecipeToastQueue ("unlock toast notification") -----
 
     #[test]
     fn toast_queue_hidden_when_empty() {
@@ -2255,7 +2252,7 @@ mod tests {
         assert_eq!(queue.displayed_entry(0), None);
     }
 
-    /// `RECIPE_TOAST_DISPLAY_MS` is vanilla's `5000` (`RecipeToast.java:17`).
+    /// `RECIPE_TOAST_DISPLAY_MS` is vanilla's own `5000`.
     /// Visible strictly before the 5000ms mark, hidden at and after it.
     #[test]
     fn toast_queue_visible_window_is_exactly_5000ms() {
@@ -2267,7 +2264,8 @@ mod tests {
     }
 
     /// Two entries over the 5000ms window cycle at the 2500ms midpoint —
-    /// `RecipeToast.java:49-51`'s formula with `manager.getNotificationDisplayTimeMultiplier() == 1.0`.
+    /// vanilla's own displayed-recipe-index formula with the
+    /// notification-display-time multiplier fixed at `1.0`.
     #[test]
     fn toast_queue_cycles_entries_at_the_predicted_midpoint() {
         let mut queue = RecipeToastQueue::new();
