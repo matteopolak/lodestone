@@ -1,21 +1,20 @@
-//! `/function <name>` and `/reload` (issue #48's remainder) —
-//! `FunctionCommand`/`ReloadCommand`, restated against a real datapack
+//! `/function <name>` and `/reload` — the real function/reload commands,
+//! restated against a real datapack
 //! directory scan ([`super::function_store`]) rather than the unit-tested,
-//! never-dispatched parser this issue used to leave the feature at.
+//! never-dispatched parser this used to leave the feature at.
 //!
 //! # `/function`'s two forms, and the one real asymmetry between them
 //!
 //! `/function <name>` (a single function) and `/function #<tag>` (every
 //! function a tag names) share one executor, keyed on
 //! [`lodestone_command_mc::FunctionRef`]. They differ in exactly one way,
-//! matching vanilla: **an unknown single function is a hard refusal**
-//! (`FunctionArgument.ERROR_UNKNOWN_FUNCTION`), while **an unknown tag is not
-//! an error at all** — vanilla's own `getTag` answers `List.of()` for a tag
-//! no loaded datapack declares, so `/function #foo:nothing` reports "Ran 0
-//! functions" rather than refusing. [`super::function_store::FunctionHandle`]
-//! mirrors that split: [`super::function_store::FunctionHandle::function`]
-//! returns `Option`, [`super::function_store::FunctionHandle::tag`] never
-//! does.
+//! matching the real rule: **an unknown single function is a hard refusal**,
+//! while **an unknown tag is not an error at all** — the real rule answers
+//! an empty list for a tag no loaded datapack declares, so `/function
+//! #foo:nothing` reports "Ran 0 functions" rather than refusing.
+//! [`super::function_store::FunctionHandle`] mirrors that split:
+//! [`super::function_store::FunctionHandle::function`] returns `Option`,
+//! [`super::function_store::FunctionHandle::tag`] never does.
 //!
 //! # A function body runs through the real dispatcher, one line per line
 //!
@@ -23,21 +22,21 @@
 //! same tree this file's own executors sit on, built-ins first and the
 //! host's contextual dispatch on a miss, exactly `/execute … run`'s own
 //! fallback. A line's own failure does **not** stop the rest of the
-//! function: vanilla's `NewCommandFunctionManager` dispatches every command
+//! function: the real function manager dispatches every command
 //! in a function independently, catching and logging each one's own
-//! `CommandSyntaxException` rather than aborting the function — restated
+//! syntax error rather than aborting the function — restated
 //! here as "count successes, keep going regardless of a line's own result".
 //!
-//! # The recursion guard, and why vanilla's own limit does not apply here
+//! # The recursion guard, and why the real limit does not apply here
 //!
 //! A function that calls itself (directly, or through a tag cycle) recurses
 //! through this file's own Rust call stack — `run_command` re-enters
 //! [`super::ServerCommands::run`], which re-enters this executor — unlike
-//! vanilla, whose function execution is an explicit queue bounded by the
+//! the real rule, whose function execution is an explicit queue bounded by the
 //! `maxCommandChainLength` gamerule (65536 by default) rather than by a
 //! native call stack. Reusing that number here would overflow an ordinary
 //! thread's stack long before it fired, so [`MAX_FUNCTION_DEPTH`] is a much
-//! smaller, purely defensive bound with no vanilla counterpart, chosen only
+//! smaller, purely defensive bound with no real counterpart, chosen only
 //! to turn a runaway recursive datapack function into a clean refusal
 //! instead of a crash.
 //!
@@ -56,12 +55,12 @@ use lodestone_command_mc::FunctionRef;
 
 use super::registrar::{CommandResult, Ctx, Registrar};
 
-/// `Commands.LEVEL_GAMEMASTERS` — vanilla's own level for both
-/// `FunctionCommand` and `ReloadCommand`.
+/// The game-masters permission level — the real level for both `/function`
+/// and `/reload`.
 const FUNCTION_LEVEL: u8 = 2;
 
 /// A purely defensive bound on nested `/function` calls — see this module's
-/// doc for why vanilla's own `maxCommandChainLength` does not transfer here.
+/// doc for why the real `maxCommandChainLength` does not transfer here.
 const MAX_FUNCTION_DEPTH: u32 = 256;
 
 thread_local! {
@@ -100,8 +99,8 @@ pub(super) fn register(registrar: &mut Registrar) {
     registrar.exec(name_node, move |ctx| {
         let reference = ctx.get(name_key).clone();
         let result = run_function_ref(ctx, &reference);
-        // `FunctionCommand.run`'s own `sendSuccess` line — added at this one
-        // outer call only, not inside the recursive helper, so a function
+        // The real run-function rule's own success-feedback line — added at
+        // this one outer call only, not inside the recursive helper, so a function
         // that itself calls `/function` another does not get one summary
         // per nesting level.
         if let Ok(count) = result {
