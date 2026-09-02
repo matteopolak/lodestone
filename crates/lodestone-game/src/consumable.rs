@@ -39,18 +39,17 @@
 //! Adding an item is one row in [`CONSUMABLES`], which is sorted by id and looked
 //! up by binary search — keep it sorted. Only two items in 26.2 override
 //! `consumeSeconds` and only one overrides `sound`, so a new row is almost always
-//! a `defaultFood()` or `defaultDrink()` clone; `Consumables.defaultFood()` and
-//! `defaultDrink()` are the two shapes and [`EAT_SOUND`]/[`DRINK_SOUND`] their
+//! a default-food or default-drink clone; vanilla's own default-food and
+//! default-drink builders are the two shapes and [`EAT_SOUND`]/[`DRINK_SOUND`] their
 //! sounds.
 //!
-//! The gotcha is `Consumable.Builder::soundAfterConsume`, which is **not** a
-//! `sound` override — it lowers to `onConsume(new PlaySoundConsumeEffect(…))`. An
+//! The gotcha is vanilla's own sound-after-consume builder step, which is **not** a
+//! `sound` override — it lowers to a separate play-sound completion effect. An
 //! ominous bottle's `item.ominous_bottle.dispose` is a completion effect and its
 //! `sound` field is still `entity.generic.drink`; transcribing it into the `sound`
 //! column would make the bottle play its disposal noise six times while drinking.
 
-/// Which of vanilla's two consume animations an item uses
-/// (`ItemUseAnimation.EAT` / `DRINK`).
+/// Which of vanilla's two consume animations an item uses.
 ///
 /// No `Consumable` in 26.2 uses any other `ItemUseAnimation` value, so this is a
 /// two-variant enum rather than the full ten-variant one — the other eight are
@@ -58,9 +57,9 @@
 /// consume animations at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsumeAnimation {
-    /// `ItemUseAnimation.EAT`.
+    /// Vanilla's own eat animation.
     Eat,
-    /// `ItemUseAnimation.DRINK`.
+    /// Vanilla's own drink animation.
     Drink,
 }
 
@@ -68,31 +67,33 @@ pub enum ConsumeAnimation {
 /// animation, the particles and the sound need.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Consumable {
-    /// `Consumable.consumeTicks()` — `(int)(consumeSeconds * 20.0F)`.
+    /// Vanilla's own consume-ticks getter — `(int)(consumeSeconds * 20.0F)`.
     ///
     /// This is also the item's `getUseDuration`, i.e. what
-    /// `LivingEntity.useItemRemaining` counts down from, so it is the divisor in
+    /// vanilla's own use-item-remaining field counts down from, so it is the divisor in
     /// every consume animation expression.
     pub consume_ticks: u32,
-    /// `Consumable.animation()`.
+    /// Vanilla's own animation getter.
     pub animation: ConsumeAnimation,
-    /// `Consumable.hasConsumeParticles()`. **False for every drink**, which is why
+    /// Vanilla's own has-consume-particles getter. **False for every drink**, which is why
     /// a potion produces no crumbs and a carrot does.
     pub has_consume_particles: bool,
-    /// `Consumable.sound()`, as a `minecraft:sound_event` registry id.
+    /// Vanilla's own sound getter, as a `minecraft:sound_event` registry id.
     pub sound: &'static str,
 }
 
-/// `Consumables.defaultFood()`'s sound — `SoundEvents.GENERIC_EAT`.
+/// Vanilla's own default-food sound.
 pub const EAT_SOUND: &str = "minecraft:entity.generic.eat";
-/// `Consumables.defaultDrink()`'s sound — `SoundEvents.GENERIC_DRINK`.
+/// Vanilla's own default-drink sound.
 pub const DRINK_SOUND: &str = "minecraft:entity.generic.drink";
-/// `Consumables.HONEY_BOTTLE`'s sound — `SoundEvents.HONEY_DRINK`. The only item
+/// Vanilla's own honey-bottle sound. The only item
 /// in 26.2 that overrides the `sound` field at all.
 pub const HONEY_DRINK_SOUND: &str = "minecraft:item.honey_bottle.drink";
 
-/// `SoundEvents.PLAYER_BURP` — the extra sound `FoodProperties.onConsume` plays
-/// once a **player** finishes a food, at volume `0.5F` on `SoundSource.PLAYERS`.
+/// Vanilla's own player-burp sound — the extra sound its food-consume
+/// completion step plays
+/// once a **player** finishes a food, at volume `0.5F` on the player sound
+/// source.
 ///
 /// Player-only and food-only: it comes from the `minecraft:food` component's
 /// `ConsumableListener`, so a mob eating, or anyone drinking a potion, does not
@@ -129,14 +130,10 @@ pub fn consumable_for_item(item: &str) -> Option<Consumable> {
         .map(|index| CONSUMABLES[index].1)
 }
 
-/// `Consumable.shouldEmitParticlesAndSounds(useItemRemainingTicks)`, verbatim:
-///
-/// ```java
-/// int itemUsedForTicks = this.consumeTicks() - useItemRemainingTicks;
-/// int waitTicksBeforeUseEffects = (int)(this.consumeTicks() * 0.21875F);
-/// boolean isValidTime = itemUsedForTicks > waitTicksBeforeUseEffects;
-/// return isValidTime && useItemRemainingTicks % 4 == 0;
-/// ```
+/// Vanilla's own should-emit-particles-and-sounds step: how far into the use
+/// the item is (consume ticks minus remaining ticks) must exceed a fixed
+/// fraction of the total duration, **and** the remaining-ticks count must be
+/// a multiple of the emit interval.
 ///
 /// # Both conjuncts, and why one of them is easy to lose
 ///
@@ -151,8 +148,8 @@ pub fn consumable_for_item(item: &str) -> Option<Consumable> {
 /// 8 and 4 — **six**, not eight, because `remaining` 32 and 28 are inside the
 /// wait. The wrong-hypothesis counts are 8 (modulo only) and 24 (fraction only).
 ///
-/// `remaining_ticks` is vanilla's `getUseItemRemainingTicks()`, i.e. the value
-/// `updateUsingItem` passes to `onUseTick` **before** decrementing, so a use runs
+/// `remaining_ticks` is vanilla's own use-item-remaining-ticks getter, i.e. the value
+/// vanilla's own using-item update step passes to its own tick handler **before** decrementing, so a use runs
 /// through `consume_ticks, consume_ticks - 1, …, 1`. Derive it with
 /// [`remaining_ticks`] if you are holding an upward-counting tick total instead.
 #[must_use]
@@ -168,8 +165,8 @@ pub fn should_emit_consume_effects(consume_ticks: u32, remaining_ticks: u32) -> 
     used > wait && remaining_ticks % CONSUME_EFFECTS_INTERVAL == 0
 }
 
-/// `getUseItemRemainingTicks()` from an upward-counting tick total —
-/// the inverse of `LivingEntity.getTicksUsingItem()`, which is
+/// Vanilla's own use-item-remaining-ticks getter, computed from an upward-counting tick total —
+/// the inverse of vanilla's own ticks-using-item getter, which is
 /// `getUseDuration() - getUseItemRemainingTicks()`.
 ///
 /// This client counts **up** (`lodestone_ecs::player::ItemUseTicks`) because
@@ -185,7 +182,7 @@ pub fn remaining_ticks(consume_ticks: u32, ticks_used: u32) -> u32 {
     consume_ticks.saturating_sub(ticks_used)
 }
 
-/// `Consumables.defaultFood()` — the 39-of-43 case.
+/// Vanilla's own default-food shape — the 39-of-43 case.
 const fn food(consume_ticks: u32) -> Consumable {
     Consumable {
         consume_ticks,
@@ -195,7 +192,7 @@ const fn food(consume_ticks: u32) -> Consumable {
     }
 }
 
-/// `Consumables.defaultDrink()` — note `hasConsumeParticles(false)`, which is the
+/// Vanilla's own default-drink shape — note `hasConsumeParticles(false)`, which is the
 /// whole reason a potion throws no crumbs.
 const fn drink(consume_ticks: u32, sound: &'static str) -> Consumable {
     Consumable {
@@ -211,11 +208,12 @@ const fn drink(consume_ticks: u32, sound: &'static str) -> Consumable {
 ///
 /// # Provenance
 ///
-/// A three-way join over the 26.2 decompile: `Items.java`'s 40 `.food(…)` calls
-/// plus the three direct `.component(DataComponents.CONSUMABLE, …)` registrations
-/// (milk bucket, potion, ominous bottle), `Item.Properties::food`'s one-argument
-/// overload (which implicitly attaches `Consumables.DEFAULT_FOOD`), and
-/// `Consumables.java`'s named builders.
+/// A three-way join over the 26.2 decompile: vanilla's own item-registration
+/// table's 40 `.food(…)` calls
+/// plus the three direct component registrations
+/// (milk bucket, potion, ominous bottle), vanilla's own one-argument
+/// food-property overload (which implicitly attaches the default food shape), and
+/// vanilla's own named consumable builders.
 ///
 /// # Two adjacent traps, both checked
 ///
