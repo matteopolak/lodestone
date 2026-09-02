@@ -18,7 +18,7 @@
 //!
 //! 1. **The legacy name/properties** come from `tests/support/
 //!    flattening_1_13_2_jvm.txt`, a reflective dump of the real 1.13.2 server
-//!    jar's own `DataFixerUpper`. This file re-reads that dump text directly
+//!    jar's own world-upgrade flattening step. This file re-reads that dump text directly
 //!    (not our generated table) and asserts the expectation against it, so a
 //!    regeneration that silently changed a slot fails here too.
 //! 2. **The canonical 26.2 state id** is a hardcoded literal, checked against

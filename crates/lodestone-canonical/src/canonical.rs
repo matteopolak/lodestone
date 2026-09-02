@@ -16,7 +16,7 @@
 //! `docs/protocol-340-flattening-table.md` — is that vanilla's own table is
 //! only its **first** flattening step: a few names/property keys are the
 //! intermediate 18w-snapshot spelling, renamed by later, unrelated fixes
-//! chained further down `DataFixerUpper`, and 26.2 itself has continued
+//! chained further down vanilla's own world-upgrade pipeline, and 26.2 itself has continued
 //! renaming and adding properties (`waterlogged`) since 1.13.2. So this
 //! module does two separate things:
 //!
@@ -82,7 +82,7 @@ pub enum CanonicalBlockState {
     /// own flattening table never assigned this pair a target.
     NoTableEntry,
     /// [`LegacyBlockState::RequiresAdditionalContext`] passed through
-    /// unchanged: identity needs TileEntity/neighbour data this table cannot
+    /// unchanged: identity needs block-entity/neighbour data this table cannot
     /// carry (flower pots, skulls, double-plant upper halves).
     RequiresAdditionalContext,
     /// [`LegacyBlockState::OutOfBounds`] passed through unchanged: the one
@@ -365,7 +365,7 @@ fn bridge_properties(
         }
 
         // Pre-1.13 note blocks carry no instrument/note/powered in
-        // `id:meta` at all — those were (and still are) TileEntity/circuit
+        // `id:meta` at all — those were (and still are) block-entity/circuit
         // state, not identity. Unlike flower pots/skulls this is *not*
         // flagged `RequiresAdditionalContext` by the flattening table
         // because block *identity* is never ambiguous (id 25 is always
@@ -450,7 +450,7 @@ pub struct FallbackTally {
     /// Blocks substituted because vanilla's own flattening table never
     /// assigned this `(old_block_id, meta)` pair a target.
     pub no_table_entry: u32,
-    /// Blocks substituted because identity needs TileEntity/neighbour data
+    /// Blocks substituted because identity needs block-entity/neighbour data
     /// this crate does not decode (flower pots, skulls, double-plant upper
     /// halves — see the consuming family's chunk module, e.g.
     /// `lodestone_v340::packets::chunk`, for why block entities are consumed

@@ -11,12 +11,11 @@ import com.mojang.datafixers.Dynamic;
  * Authoritative {@code id:meta} (pre-Flattening, protocol 340 / Minecraft
  * 1.12.2) &rarr; modern block-state extractor. Unlike every other oracle in
  * this repository, this one does <em>not</em> boot a server and walk a live
- * registry ({@code SharedConstants.tryDetectVersion(); Bootstrap.bootStrap();}
- * does not apply here) — the 1.12.2/1.13.2 jars have no such bootstrap to
- * call, and the mapping this program reads is not a registry at all, it is a
- * single {@code static} initializer inside one class of the 1.13.2 server
- * jar's {@code DataFixerUpper} (Mojang's own world-upgrade machinery: the
- * exact conversion vanilla itself runs on old worlds).
+ * registry (there is no server-bootstrap call at all here) — the 1.12.2/1.13.2
+ * jars have no such bootstrap to call, and the mapping this program reads is
+ * not a registry at all, it is a single {@code static} initializer inside one
+ * class of the 1.13.2 server jar's own world-upgrade machinery (the exact
+ * conversion vanilla itself runs on old worlds).
  *
  * <h2>Why the class is referenced by the single letter {@code "yp"}</h2>
  *
@@ -62,7 +61,7 @@ import com.mojang.datafixers.Dynamic;
  * <em>identity</em> (which post-Flattening block family an old id:meta names)
  * reliably, but a handful of resolved names/property keys are the
  * <strong>intermediate</strong> 18w-snapshot-era spelling used inside this one
- * {@code DataFixerUpper} schema step, not always 1.13.2's final release
+ * world-upgrade schema step, not always 1.13.2's final release
  * spelling — e.g. this table resolves leaves to properties
  * {@code decayable}/{@code check_decay} (confirmed live: {@code "persistent"}
  * and {@code "distance"}, 1.13.2's actual final leaf-property names, do not
@@ -71,14 +70,14 @@ import com.mojang.datafixers.Dynamic;
  * {@code oak_bark}/{@code spruce_bark}/...) are pre-rename spellings later
  * superseded by {@code spawner}, {@code melon}, {@code nether_portal},
  * {@code oak_wood}/{@code spruce_wood}/... — separate, unrelated rename fixes
- * chained later in the same {@code DataFixerUpper} pipeline that this program
+ * chained later in the same world-upgrade pipeline that this program
  * does not chase down (out of scope for this task; see the doc's "What
  * wiring `v340` would need" section).
  *
  * <p>It is also, by vanilla's own design, unable to resolve some blocks at
  * all from id:meta alone — flower pots (contents live in the pot's
- * TileEntity, not the block's own metadata), skulls (type/rotation likewise
- * TileEntity-only; several skull metas resolve to the literal Mojang
+ * block entity, not the block's own metadata), skulls (type/rotation likewise
+ * block-entity-only; several skull metas resolve to the literal Mojang
  * placeholder string {@code "%%FILTER_ME%%"} in this table, preserved as-is
  * rather than translated to something that looks like a real block name),
  * and the upper half of double plants (species is read from the paired lower
