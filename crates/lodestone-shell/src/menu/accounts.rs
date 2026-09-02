@@ -828,8 +828,8 @@ impl AccountsNav {
                 if st.focus < list_len {
                     let logical = st.focus;
                     // A click **does** select — `AbstractSelectionList.mouseClicked`
-                    // ends in `setSelected` (`ObjectSelectionList.java` plus
-                    // `AbstractSelectionList.java`). Only *hover* does not.
+                    // ends in `setSelected` (vanilla's own object-selection list plus
+                    // its own abstract selection-list base). Only *hover* does not.
                     //
                     // `highlighted` has to move with it, or the hover fix opens a
                     // new gap in the other direction: a click reached here through
