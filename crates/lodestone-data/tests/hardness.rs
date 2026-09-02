@@ -7,10 +7,10 @@
 //! # Data provenance
 //!
 //! `tests/support/hardness_jvm.txt` is an authoritative dump produced by
-//! booting the real 26.2 server and reading `BlockState.getDestroySpeed(null,
-//! BlockPos.ZERO)` and `BlockState.requiresCorrectToolForDrops()` for every one
+//! booting the real 26.2 server and reading vanilla's own "get destroy speed"
+//! and "requires correct tool for drops" accessors for every one
 //! of the 32,366 registered states (`HardnessOracle.java`, walking
-//! `Block.BLOCK_STATE_REGISTRY`). `blocks.json` has no `destroySpeed` field at
+//! vanilla's own block-state registry). `blocks.json` has no destroy-speed field at
 //! all (it is block *properties* only) and `vendor/minecraft-data` was measured
 //! stale/incomplete for 26.2 on the neighbouring collision-shape table (see
 //! `src/collision_shapes.rs` module docs), so as with collision shapes and
@@ -63,7 +63,7 @@ fn committed_path() -> PathBuf {
 const DUMP: &str = include_str!("support/hardness_jvm.txt");
 
 /// One authoritative row: global state id, block name, the raw f32 bits of
-/// `destroySpeed`, and `requiresCorrectToolForDrops`.
+/// destroy speed, and requires-correct-tool-for-drops.
 struct Row {
     id: usize,
     name: String,
