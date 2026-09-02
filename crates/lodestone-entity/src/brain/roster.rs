@@ -10,10 +10,11 @@
 //! about those: five have been wrong recently in this repo, the worst a tag set
 //! 1-of-4 correct *with a false positive*. So this list is not merely asserted —
 //! `tests/brain_census.rs` re-derives it from the decompiled 26.2 sources
-//! (every `world/entity/**.java` declaring `brainProvider`/`makeBrain`, joined to
-//! its `EntityType.register` id) and fails on any drift in **either** direction,
-//! with `LODESTONE_REGEN=1` to refresh. The gate is `#[ignore]`d because it needs
-//! `.cache/mc/26.2/src`, which is not repo state.
+//! (every entity source declaring a brain provider or brain-construction
+//! method, joined to its own registered entity-type id) and fails on any
+//! drift in **either** direction, with `LODESTONE_REGEN=1` to refresh. The
+//! gate is `#[ignore]`d because it needs `.cache/mc/26.2/src`, which is not
+//! repo state.
 //!
 //! A name missing from this list is not a cosmetic defect: it is a species that
 //! silently gets [`FALLBACK`](crate::ai::roster::FALLBACK) stroll-and-look goals
@@ -24,13 +25,13 @@
 //!
 //! **This doc used to say every brain species gets the identical generic
 //! CORE+IDLE [`scaffold`], full stop.** That is no longer true: six species —
-//! goat, camel, armadillo, frog, sniffer, allay, the `AnimalPanic`-family
+//! goat, camel, armadillo, frog, sniffer, allay, the panic-behaviour-family
 //! half of the passive-roster brain species — now also flee a recent
-//! attacker via [`scaffold_with_panic`], each at its own jar-cited speed
+//! attacker via [`scaffold_with_panic`], each at its own vanilla-cited speed
 //! multiplier, and the warden now has [`warden_brain`]'s `FIGHT` activity
 //! (a chase toward whatever it is angry at, layered on top of the separate
-//! `lodestone_server::mobs::warden` anger/vibration machinery — issue #459's
-//! step 3, closing that module's own disclosed "no pursuit" gap). The sniffer
+//! `lodestone_server::mobs::warden` anger/vibration machinery, closing that
+//! module's own disclosed "no pursuit" gap). The sniffer
 //! now has [`sniffer_brain`]'s `SNIFF` activity too — walking toward a
 //! host-found dig position, layered on top of the separate
 //! `lodestone_server::mobs::sniffer` seek/dig/rise/egg-drop state machine.
@@ -165,8 +166,8 @@ pub fn scaffold(stroll_speed: f32, look_distance: f32) -> Brain {
     brain
 }
 
-/// [`scaffold`] plus a [`Panic`] behaviour in `CORE` — `AnimalPanic`'s own
-/// composition, ported for the six brain species that register it (goat,
+/// [`scaffold`] plus a [`Panic`] behaviour in `CORE` — vanilla's own panic
+/// behaviour composition, ported for the six brain species that register it (goat,
 /// camel, armadillo, frog, sniffer, allay; axolotl is deliberately absent —
 /// vanilla gives it play-dead-on-low-health instead, a different mechanism
 /// this does not build).
@@ -194,28 +195,26 @@ pub fn scaffold_with_panic(stroll_speed: f32, look_distance: f32, panic_speed_mu
     brain
 }
 
-/// `Villager`'s own panic: an **Activity-swap** shaped differently from the
+/// A villager's own panic: an **Activity-swap** shaped differently from the
 /// six [`PANIC_SPEED_MULTIPLIER`] species' in-place [`Panic`] behaviour.
 ///
-/// Vanilla's `VillagerPanicTrigger` is an imperative `Behavior` that reaches
-/// into its own entity's `Brain` and calls `setActiveActivityIfPossible
-/// (Activity.PANIC)` directly — a seam this crate's [`Behavior`] trait
-/// deliberately does not expose (see [`Brain::add_activity_any_of`]'s own doc).
-/// The declarative equivalent, wired through the same
-/// `set_active_activity_to_first_valid` candidate list every other brain
-/// species' `updateActivity` already uses: offer `PANIC` **before** `IDLE`,
-/// gated on "hurt OR a hostile is nearby"
-/// (`VillagerPanicTrigger.isHurt`/`hasHostile`) via [`Brain::add_activity_any_of`].
+/// Vanilla's own villager-panic trigger is an imperative behaviour that reaches
+/// into its own entity's brain and swaps it to the panic activity directly
+/// — a seam this crate's [`Behavior`] trait deliberately does not expose (see
+/// [`Brain::add_activity_any_of`]'s own doc). The declarative equivalent, wired
+/// through the same first-valid-activity candidate list every other brain
+/// species' activity update already uses: offer `PANIC` **before** `IDLE`,
+/// gated on "hurt OR a hostile is nearby" via
+/// [`Brain::add_activity_any_of`].
 ///
-/// **What is ported and what is not**, against
-/// `VillagerGoalPackages.getPanicPackage`: the flee-and-look shape is real
-/// (reusing [`Panic`], the same `AnimalPanic`-style fleeing this repo already
-/// has, rather than porting `SetWalkTargetAwayFrom`'s *directed* flee — a
-/// villager here flees to a random nearby spot instead of one chosen to
-/// increase distance from the threat specifically) and
-/// `VillagerCalmDown`/village-bound stroll are not ported (this repo has no
-/// village-bounds concept). **`VillagerPanicTrigger.tick`'s
-/// `spawnGolemIfNeeded` (golem-summon-on-hurt) is landed, but not here** —
+/// **What is ported and what is not**, against vanilla's own villager panic
+/// goal package: the flee-and-look shape is real (reusing [`Panic`], the same
+/// panic-style fleeing this repo already has, rather than porting vanilla's
+/// *directed* flee-away behaviour — a villager here flees to a random nearby
+/// spot instead of one chosen to increase distance from the threat
+/// specifically) and the calm-down/village-bound stroll behaviour is not
+/// ported (this repo has no village-bounds concept). **Vanilla's own
+/// golem-summon-on-hurt behaviour is landed, but not here** —
 /// this doc used to say it was a separate, unbuilt unit, and that went stale
 /// the moment it shipped: `MobSim::tick_golem_summon`
 /// (`lodestone_server::mobs`) recomputes "is this villager hurt or does it
@@ -224,19 +223,17 @@ pub fn scaffold_with_panic(stroll_speed: f32, look_distance: f32, panic_speed_mu
 /// other villagers' own state (the agreement count) and the power to create
 /// a new entity — see that function's own doc for why it lives on the host
 /// rather than as a `Brain` behaviour, and its three disclosed cuts from the
-/// jar original.
-/// `Villager.SPEED_MODIFIER` — the one figure every non-panic villager
-/// package (`WORK`, `REST`, `MEET`, `IDLE`) is built with
-/// (`ActivityData.create(Activity.WORK, VillagerGoalPackages.getWorkPackage(profession, 0.5F), …)`
-/// and its three siblings, all literal `0.5F`).
+/// vanilla original.
+/// Vanilla's own villager speed modifier — the one figure every non-panic
+/// villager goal package (work, rest, meet, idle) is built with, all literal
+/// `0.5F`.
 pub const VILLAGER_SPEED_MODIFIER: f32 = 0.5;
 
-/// `data/minecraft/timeline/villager_schedule.json`'s
-/// `minecraft:gameplay/villager_activity` track (the non-baby schedule;
-/// `baby_villager_activity`'s `PLAY`/`REST` pairing is not ported — this
-/// crate has no separate baby-villager brain). Read directly off the shipped
-/// JSON, not transcribed from a Java constant, since 26.2 moved the vanilla
-/// schedule tables into data.
+/// Vanilla's own villager-activity schedule data (the non-baby schedule; the
+/// baby-villager play/rest pairing is not ported — this crate has no separate
+/// baby-villager brain). Read directly off the shipped datapack JSON, not
+/// transcribed from a Java constant, since 26.2 moved the vanilla schedule
+/// tables into data.
 const VILLAGER_SCHEDULE: &[(i32, Activity)] = &[
     (10, Activity::IDLE),
     (2000, Activity::WORK),
@@ -246,38 +243,36 @@ const VILLAGER_SCHEDULE: &[(i32, Activity)] = &[
 ];
 
 /// A villager's brain: the [`scaffold`] plus a real WORK/MEET/REST/IDLE
-/// day schedule (issue #231's remaining half — professions/POI claiming
-/// itself is `crate::mobs::villager` in the server crate, out of this
-/// crate's scope) and the villager's own Activity-swap panic.
+/// day schedule (professions/POI claiming itself is `crate::mobs::villager`
+/// in the server crate, out of this crate's scope) and the villager's own
+/// Activity-swap panic.
 ///
-/// # What WORK/MEET/REST actually do, against `VillagerGoalPackages`
+/// # What WORK/MEET/REST actually do, against vanilla's own villager goal packages
 ///
 /// Each is a single [`WalkToPoi`] behaviour reading the position a host
 /// claimed into [`MemoryModuleType::JOB_SITE`]/`HOME`/`MEETING_POINT`
 /// (fed every tick by [`VillagerPoiSensor`], since this crate's `BrainMob`
 /// seam has no live claim-ledger reference for a behaviour to call back
-/// into, unlike vanilla's `AcquirePoi`/`YieldJobSite` which write the
+/// into, unlike vanilla's own claim/yield behaviours which write the
 /// memory themselves) — same close-enough distances as vanilla's own
-/// `SetWalkTargetFromBlockMemory` calls (`9`/`1`/`6` blocks). **Not ported**:
-/// `WorkAtPoi`/`WorkAtComposter` (the actual profession-specific work
-/// animation/particle), `ShowTradesToPlayer`/`SetLookAndInteract`
-/// (villager-initiated trade UI), `SleepInBed` (the sleep pose and bed
-/// occupancy flag), `SocializeAtBell`/`StrollAroundPoi` (wandering near the
-/// claim rather than beelining to its exact centre), and `GiveGiftToHero`.
-/// A villager under this port reaches its claimed workstation, bed or bell
-/// and stands there — the day/night activity switch and the walk are real;
-/// what a villager *does* once arrived is not.
+/// walk-to-block-memory calls (`9`/`1`/`6` blocks). **Not ported**: the
+/// actual profession-specific work animation/particle, villager-initiated
+/// trade UI, the sleep pose and bed occupancy flag, wandering near the
+/// claim rather than beelining to its exact centre, and gift-giving to a
+/// hero. A villager under this port reaches its claimed workstation, bed or
+/// bell and stands there — the day/night activity switch and the walk are
+/// real; what a villager *does* once arrived is not.
 ///
 /// **`WORK` requires [`MemoryModuleType::JOB_SITE`] present and `MEET`
 /// requires [`MemoryModuleType::MEETING_POINT`] present**, exactly
-/// `Villager.java`'s own `ImmutableSet.of(Pair.of(…, VALUE_PRESENT))` —
-/// an unemployed villager or one that never claimed a bell simply never
-/// becomes eligible for that activity and the schedule falls back to
-/// `IDLE` instead (`Brain::set_active_activity_if_possible`'s own
-/// fallback). `REST` carries no such requirement in vanilla either (a
-/// homeless villager still "rests", just with nowhere to walk to — see
-/// `getRestPackage`'s own `RunOne` fallback for `HOME` absent, not ported
-/// here), so it is registered with an empty condition list.
+/// vanilla's own presence requirement for those packages — an unemployed
+/// villager or one that never claimed a bell simply never becomes eligible
+/// for that activity and the schedule falls back to `IDLE` instead
+/// (`Brain::set_active_activity_if_possible`'s own fallback). `REST` carries
+/// no such requirement in vanilla either (a homeless villager still "rests",
+/// just with nowhere to walk to — see vanilla's own rest-package fallback
+/// for a missing home, not ported here), so it is registered with an empty
+/// condition list.
 ///
 /// See [`brain_for`]'s own doc for why [`Activity::PANIC`] is a
 /// candidate-list swap rather than part of this schedule.
@@ -287,10 +282,9 @@ pub fn villager_brain() -> Brain {
     brain.add_sensor(Box::new(HurtBySensor));
     brain.add_sensor(Box::new(NearestHostileSensor));
     brain.add_sensor(Box::new(VillagerPoiSensor));
-    // `AnimalPanic(0.5F)` is `VillagerGoalPackages.getPanicPackage`'s own
-    // `speedModifier` argument passed from `Villager.java:164`
-    // (`getPanicPackage(0.5F)`), distinct from every `PANIC_SPEED_MULTIPLIER`
-    // row below (none of which is a villager).
+    // The 0.5 here is vanilla's own villager panic-package speed modifier,
+    // distinct from every `PANIC_SPEED_MULTIPLIER` row below (none of which
+    // is a villager).
     brain.add_activity_any_of(
         Activity::PANIC,
         vec![(-1, leaf(Panic::new(0.5)))],
@@ -339,24 +333,24 @@ pub fn villager_brain() -> Brain {
     brain
 }
 
-/// A goat's brain: [`scaffold_with_panic`] (`AnimalPanic(2.0F)`, `GoatAi`'s
-/// own figure — see [`PANIC_SPEED_MULTIPLIER`]'s `"goat"` row) plus the
-/// ram-attack pair (issue #230's genuine ask; the long jump is a separate,
+/// A goat's brain: [`scaffold_with_panic`] (vanilla's own panic speed of
+/// `2.0` — see [`PANIC_SPEED_MULTIPLIER`]'s `"goat"` row) plus the
+/// ram-attack pair (the long jump is a separate,
 /// arc-shaped unit not built here — see
 /// [`super::behaviors::PrepareRam`]/[`super::behaviors::RamTarget`]'s own
 /// docs for exactly what each does and does not port).
 ///
 /// # Why `RAM`'s eligibility condition adds a memory vanilla's own table does not require
 ///
-/// `GoatAi.initRamActivity`'s own `ImmutableSet` requires only
-/// `RAM_COOLDOWN_TICKS` absent (plus `TEMPTING_PLAYER`/`BREED_TARGET` absent,
-/// neither of which this crate models). Requiring only that would make `RAM`
+/// Vanilla's own ram-activity requirement set requires only the ram cooldown
+/// absent (plus a tempting-player/breed-target absence, neither of which this
+/// crate models). Requiring only that would make `RAM`
 /// "eligible" — and therefore active, since it precedes `IDLE` in
 /// [`brain_for`]'s candidate list — even with nothing nearby to ram, which
 /// would suppress `IDLE`'s stroll/look behaviours for the whole
 /// [`PrepareRam`](super::behaviors::PrepareRam) timeout (160 ticks) every
 /// time the cooldown lapses with no target around. That is a genuine vanilla
-/// quirk (`PrepareRamNearestTarget`'s own fail path sets a short cooldown and
+/// quirk (vanilla's own ram-target-preparation fail path sets a short cooldown and
 /// retries), not a bug this port needs to reproduce: requiring
 /// `NEAREST_VISIBLE_LIVING_ENTITIES` present too keeps a goat with nothing
 /// nearby idling normally instead of periodically freezing.
@@ -367,8 +361,8 @@ pub fn goat_brain() -> Brain {
     brain.add_activity(
         Activity::RAM,
         vec![
-            // `GoatAi.initRamActivity`'s own priorities: `RamTarget` at 0,
-            // `PrepareRamNearestTarget` at 1.
+            // Vanilla's own ram-activity priorities: the ram charge at 0,
+            // ram preparation at 1.
             (0, leaf(RamTarget::new(3.0, 600, 6000))),
             (1, leaf(PrepareRam::new(4.0, 7.0, 1.25, 20, 600, 6000))),
         ],
@@ -384,17 +378,16 @@ pub fn goat_brain() -> Brain {
     brain
 }
 
-/// A frog's brain: [`scaffold_with_panic`] (`AnimalPanic(2.0F)`, `FrogAi`'s
-/// own figure — see [`PANIC_SPEED_MULTIPLIER`]'s `"frog"` row) plus the
-/// tongue attack (issue #230's genuine ask for this species — see
-/// [`super::behaviors::ShootTongue`]'s own doc for exactly what is and is
-/// not ported).
+/// A frog's brain: [`scaffold_with_panic`] (vanilla's own panic speed of
+/// `2.0` — see [`PANIC_SPEED_MULTIPLIER`]'s `"frog"` row) plus the
+/// tongue attack (see [`super::behaviors::ShootTongue`]'s own doc for
+/// exactly what is and is not ported).
 ///
 /// # Re-verified inherited blocker: "frog tongue is blocked on there being
 /// no slime simulation"
 ///
-/// **False.** `Frog.canEat` (`Frog.java`) gates eligible prey on
-/// `EntityTypeTags.FROG_FOOD` (`minecraft:slime`/`minecraft:magma_cube`)
+/// **False.** Vanilla's own frog-can-eat check gates eligible prey on
+/// a food-tagged entity type (slime, magma cube)
 /// plus a size-1 check, both plain entity-type/attribute questions — nothing
 /// about the tongue attack itself needs a slime's own jump-and-split AI to
 /// exist, only that a slime or magma cube entity can be spawned and hurt,
@@ -417,7 +410,7 @@ pub fn frog_brain() -> Brain {
     brain.add_sensor(Box::new(NearestAttackableFoodSensor));
     brain.add_activity(
         Activity::TONGUE,
-        // `FrogAi.initTongueActivity`'s own priority 0.
+        // Vanilla's own tongue-activity priority: 0.
         vec![(0, leaf(ShootTongue::new(2.0)))],
         vec![(
             MemoryModuleType::NEAREST_ATTACKABLE_FOOD,
@@ -428,38 +421,36 @@ pub fn frog_brain() -> Brain {
     brain
 }
 
-/// The two species vanilla's `EntityTypeTags.FROG_FOOD` names
-/// (`data/minecraft/tags/entity_type/frog_food.json`: `minecraft:slime`,
-/// `minecraft:magma_cube`) — the host-side species filter behind
-/// [`NearestAttackableFoodSensor`]'s "eligible prey" answer, consulted by
-/// `lodestone_server::mobs::MobSim::feed_perception` rather than by this
-/// crate (which has no live mob census to search).
+/// The two species vanilla's own frog-food entity-type tag names
+/// (`minecraft:slime`, `minecraft:magma_cube`) — the host-side species
+/// filter behind [`NearestAttackableFoodSensor`]'s "eligible prey" answer,
+/// consulted by `lodestone_server::mobs::MobSim::feed_perception` rather
+/// than by this crate (which has no live mob census to search).
 ///
-/// **Disclosed narrowing**: `Frog.canEat` additionally requires
-/// `AbstractCubeMob.getSize() == 1` (the smallest slime/magma-cube size) —
-/// this crate's mob census carries no slime-size attribute at the seam
-/// `feed_perception` reads from, so every slime/magma cube regardless of
-/// size counts as eligible prey here.
+/// **Disclosed narrowing**: vanilla's own frog-can-eat check additionally
+/// requires the smallest slime/magma-cube size — this crate's mob census
+/// carries no slime-size attribute at the seam `feed_perception` reads from,
+/// so every slime/magma cube regardless of size counts as eligible prey here.
 pub const FROG_FOOD_SPECIES: &[&str] = &["slime", "magma_cube"];
 
-/// `GoAndGiveItemsToTarget`'s own `speedModifier` (`2.25F`) — the fly speed
+/// Vanilla's own fly speed for the item-delivery behaviour — the speed
 /// an allay carrying picked-up items uses toward its delivery target.
 const ALLAY_DELIVER_SPEED: f32 = 2.25;
 
-/// Not a vanilla constant — `GoAndGiveItemsToTarget` throws from wherever it
-/// currently stands once close enough to *start* (its own `range()` reads
-/// `TOO_FAR_FROM_TARGET`/`CLOSE_ENOUGH_TO_TARGET`, a two-threshold hover
-/// band this crate's plain [`WalkToPoi`] cannot reproduce). Chosen as a
+/// Not a vanilla constant — vanilla's own item-delivery behaviour throws
+/// from wherever it currently stands once close enough to *start* (its own
+/// range check reads a too-far/close-enough threshold pair, a two-threshold
+/// hover band this crate's plain [`WalkToPoi`] cannot reproduce). Chosen as a
 /// single stop distance between the two real jar figures (4 and 16), close
 /// enough that a delivery reads as "landed near the target" without
 /// requiring bounding-box-exact arrival [`WalkToPoi`] has no way to test.
 const ALLAY_DELIVER_CLOSE_ENOUGH: i32 = 2;
 
-/// An allay's brain: [`scaffold_with_panic`] (`AnimalPanic(2.5F)`, `AllayAi`'s
-/// own figure — see [`PANIC_SPEED_MULTIPLIER`]'s `"allay"` row) plus flying a
-/// carried item to its delivery target (issue #230's genuine ask for this
-/// species — the note-block-hearing, inventory and delivery-eligibility
-/// machinery all live host-side, in `lodestone_server::mobs::MobSim`, since
+/// An allay's brain: [`scaffold_with_panic`] (vanilla's own panic speed of
+/// `2.5` — see [`PANIC_SPEED_MULTIPLIER`]'s `"allay"` row) plus flying a
+/// carried item to its delivery target (the note-block-hearing, inventory and
+/// delivery-eligibility machinery all live host-side, in
+/// `lodestone_server::mobs::MobSim`, since
 /// none of it is expressible through this crate's `BrainMob` seam; see that
 /// module's own allay doc for the item-pickup/vibration/duplication half).
 ///
@@ -493,39 +484,37 @@ pub fn allay_brain() -> Brain {
     brain
 }
 
-/// `Sniffing.stop`'s own `WalkTarget(position, 1.25F, 0)` — the walk speed
-/// and (exact-arrival) stop distance vanilla writes once a sniff finishes
-/// and a dig position has been found.
+/// Vanilla's own walk speed and (exact-arrival) stop distance once a sniff
+/// finishes and a dig position has been found.
 const SNIFFER_SEARCH_SPEED: f32 = 1.25;
 
-/// A sniffer's brain: [`scaffold_with_panic`] (`AnimalPanic(2.0F)`,
-/// `SnifferAi`'s own figure — see [`PANIC_SPEED_MULTIPLIER`]'s `"sniffer"`
-/// row) plus walking toward a host-found dig position — issue #230's
-/// remaining gap for this species.
+/// A sniffer's brain: [`scaffold_with_panic`] (vanilla's own panic speed of
+/// `2.0` — see [`PANIC_SPEED_MULTIPLIER`]'s `"sniffer"` row) plus walking
+/// toward a host-found dig position.
 ///
 /// # What this is, and what it deliberately is not
 ///
-/// Real `SnifferAi` is a seven-state machine (`IDLING`/`FEELING_HAPPY`/
-/// `SCENTING`/`SNIFFING`/`SEARCHING`/`DIGGING`/`RISING`) spread across three
-/// activities (`CORE`/`SNIFF`/`DIG`), with the sniff-then-dig timing, the
-/// diggable-block search, the loot roll and the explored-position memory all
-/// living in `Sniffer`/`SnifferAi` themselves. This crate's Brain seam has no
-/// world/block read at all (the same gap [`warden_brain`]'s own doc names),
-/// so every one of those pieces is host-side —
-/// `lodestone_server::mobs::sniffer::MobSim::tick_sniffers` runs the whole
-/// `IDLING → SNIFFING → SEARCHING → DIGGING → RISING` timer and the block-tag
-/// search, and feeds this brain only the walking half: a candidate position
-/// through [`BrainMob::sniffer_dig_target`], present only during the host's
-/// own `SEARCHING` phase. This behaviour's whole job — the same "narrow but
-/// honest" shape [`warden_brain`]'s `FIGHT`/[`piglin_brain`]'s `AVOID` already
-/// are against their own fuller jar originals — is walking there; the host
-/// detects arrival by comparing its own position against the target it
-/// handed out, not by reading anything back out of this `Brain`.
+/// Vanilla's own sniffer AI is a seven-state machine (idling, feeling happy,
+/// scenting, sniffing, searching, digging, rising) spread across three
+/// activities, with the sniff-then-dig timing, the diggable-block search, the
+/// loot roll and the explored-position memory all living in vanilla's own
+/// sniffer AI. This crate's Brain seam has no world/block read at all (the
+/// same gap [`warden_brain`]'s own doc names), so every one of those pieces
+/// is host-side — `lodestone_server::mobs::sniffer::MobSim::tick_sniffers`
+/// runs the whole idling-sniffing-searching-digging-rising timer and the
+/// block-tag search, and feeds this brain only the walking half: a candidate
+/// position through [`BrainMob::sniffer_dig_target`], present only during
+/// the host's own searching phase. This behaviour's whole job — the same
+/// "narrow but honest" shape [`warden_brain`]'s `FIGHT`/[`piglin_brain`]'s
+/// `AVOID` already are against their own fuller vanilla originals — is
+/// walking there; the host detects arrival by comparing its own position
+/// against the target it handed out, not by reading anything back out of
+/// this `Brain`.
 ///
-/// **Disclosed narrowing**: `FEELING_HAPPY`/`SCENTING` (both purely cosmetic
-/// animation states with no gameplay effect) are not ported at all — see
-/// `lodestone_server::mobs::sniffer`'s own module doc for the full list of
-/// cuts against `SnifferAi`.
+/// **Disclosed narrowing**: the feeling-happy/scenting states (both purely
+/// cosmetic animation states with no gameplay effect) are not ported at all
+/// — see `lodestone_server::mobs::sniffer`'s own module doc for the full
+/// list of cuts against vanilla's own sniffer AI.
 ///
 /// # Dependencies
 ///
@@ -568,7 +557,7 @@ pub fn sniffer_brain() -> Brain {
 const WARDEN_PURSUIT_CLOSE_ENOUGH: i32 = 2;
 
 /// A warden's brain: the [`scaffold`] plus a real chase toward whatever it
-/// is angry at (issue #459's disclosed "no pursuit" gap, closed).
+/// is angry at (a previously disclosed "no pursuit" gap, closed).
 ///
 /// # Why this exists, and what it deliberately is not
 ///
@@ -578,14 +567,14 @@ const WARDEN_PURSUIT_CLOSE_ENOUGH: i32 = 2;
 /// toward it. That module's own doc names the fix as "a Brain
 /// melee-pursuit behaviour, which needs building from scratch"; this is it.
 ///
-/// **Not vanilla's own architecture.** `Warden.java` has no `GoalSelector`
-/// and its real pursuit lives in `WardenAi`'s `FIGHT` package
-/// (`StartAttacking`, `MeleeAttack`, and the sonic-boom escalation this
-/// crate does not build) — a `RunOne`/`Swim`/`SetWalkTargetFromAttackTarget`
-/// stack this crate has no equivalent of. `FIGHT` here is a single
+/// **Not vanilla's own architecture.** Vanilla's own warden has no
+/// goal-selector at all and its real pursuit lives in a fight goal package
+/// (a start-attacking step, a melee-attack step, and the sonic-boom
+/// escalation this crate does not build) — a stack this crate has no
+/// equivalent of. `FIGHT` here is a single
 /// [`WalkToPoi`] reading a host-fed position, the same "narrow but honest"
-/// shape [`piglin_brain`]'s single `avoidZombified` slice already is against
-/// the rest of `PiglinAi`. The actual melee *hit* still happens entirely
+/// shape [`piglin_brain`]'s single avoid-zombified slice already is against
+/// the rest of vanilla's own piglin AI. The actual melee *hit* still happens entirely
 /// outside this brain, in `MobSim::resolve_warden_anger` — this behaviour
 /// only ever walks; it never calls [`BrainMob::attack`](super::mob::BrainMob::attack),
 /// so there is exactly one hit-resolution path, not two racing ones.
@@ -619,20 +608,19 @@ pub fn warden_brain() -> Brain {
     brain
 }
 
-/// `PiglinAi.avoidZombified`'s own duration range —
-/// `TimeUtil.rangeOfSeconds(5, 7)` = 100–140 ticks.
+/// Vanilla's own avoid-zombified duration range — 100–140 ticks.
 const AVOID_ZOMBIFIED_DURATION: (i64, i64) = (100, 140);
 
-/// A piglin's brain: the [`scaffold`] plus the one slice of `PiglinAi` this
-/// crate has machinery for — an adult piglin flees a nearby visible
-/// zombified piglin (`PiglinAi.avoidZombified`/`initRetreatActivity`).
+/// A piglin's brain: the [`scaffold`] plus the one slice of vanilla's own
+/// piglin AI this crate has machinery for — an adult piglin flees a nearby
+/// visible zombified piglin.
 ///
 /// # What this is, and what it deliberately is not
 ///
-/// Real vanilla `PiglinAi` also barters (`ADMIRE_ITEM`), hunts hoglins and
-/// fights players not wearing gold armour (`FIGHT`, beyond a generic attack
-/// target), celebrates a kill (`CELEBRATE`) and lets a baby ride a hoglin
-/// (`RIDE`) — all fed by `PiglinSpecificSensor`, a single sensor producing
+/// Vanilla's own piglin AI also barters, hunts hoglins and
+/// fights players not wearing gold armour (beyond a generic attack
+/// target), celebrates a kill and lets a baby ride a hoglin
+/// — all fed by a single piglin-specific sensor producing
 /// nine memory values (a repellent-block search, wanted-item detection,
 /// gold-armour detection, a live hoglin/piglin population census) this crate
 /// has no seam for. `super`'s own module doc already discloses "a piglin's
@@ -644,15 +632,15 @@ const AVOID_ZOMBIFIED_DURATION: (i64, i64) = (100, 140);
 ///
 /// **A piglin has no work/rest/bed schedule and no golem-summon mechanism —
 /// neither applies, and building either would be fiction, not a gap.**
-/// `PiglinAi.java` registers no `Schedule` at all (`Piglin`/`AbstractPiglin`
-/// are hostile mobs, not villagers, and share none of `Villager`'s
-/// `WORK`/`MEET`/`REST` machinery), and `spawnGolemIfNeeded` lives only on
-/// `VillagerPanicTrigger` — nothing in `PiglinAi.java` calls anything
-/// resembling it. `babyAvoidNemesis` (a baby piglin fleeing a nearby hoglin)
-/// is the other half of `initCoreActivity`'s avoid pair and is **not**
-/// ported here either: it needs a `NEAREST_VISIBLE_NEMESIS` sensor this
-/// crate also has no host primitive for yet, a separate gap from
-/// `avoidZombified`'s.
+/// Vanilla's own piglin AI registers no schedule at all (piglins
+/// are hostile mobs, not villagers, and share none of a villager's
+/// work/meet/rest machinery), and the golem-summon-on-hurt behaviour lives
+/// only on the villager's own panic trigger — nothing in vanilla's own
+/// piglin AI calls anything resembling it. A baby piglin fleeing a nearby
+/// hoglin is the other half of vanilla's own core-activity avoid pair and is
+/// **not** ported here either: it needs a nearest-visible-nemesis sensor
+/// this crate also has no host primitive for yet, a separate gap from the
+/// avoid-zombified one.
 ///
 /// `piglin_brute` deliberately does **not** get this brain — see
 /// [`brain_for`]'s own piglin arm for why.
@@ -665,7 +653,7 @@ const AVOID_ZOMBIFIED_DURATION: (i64, i64) = (100, 140);
 pub fn piglin_brain() -> Brain {
     let mut brain = scaffold(SCAFFOLD_STROLL_SPEED, SCAFFOLD_LOOK_DISTANCE);
     brain.add_sensor(Box::new(NearestVisibleZombifiedSensor));
-    // `PiglinAi.initCoreActivity`'s own `avoidZombified()` row — always
+    // Vanilla's own core-activity avoid-zombified row — always
     // ticking, refreshing `AVOID_TARGET` from `NEAREST_VISIBLE_ZOMBIFIED`
     // every tick a zombified piglin is visible.
     brain.add_activity(
@@ -684,10 +672,10 @@ pub fn piglin_brain() -> Brain {
     );
     brain.add_activity(
         Activity::AVOID,
-        // `PiglinAi.initRetreatActivity`'s own priority 1 for the walk-away
-        // behaviour (priority 0's `SetEntityLookTargetSometimes` and
-        // priority 3's `EraseMemoryIf` early-exit are both disclosed as not
-        // ported, on `AvoidTarget`'s own doc).
+        // Vanilla's own retreat-activity priority 1 for the walk-away
+        // behaviour (priority 0's glance-back-while-fleeing behaviour and
+        // priority 3's early-exit memory-erase check are both disclosed as
+        // not ported, on `AvoidTarget`'s own doc).
         vec![(1, leaf(AvoidTarget::new(1.0)))],
         vec![(MemoryModuleType::AVOID_TARGET, MemoryStatus::ValuePresent)],
         Vec::new(),
@@ -695,10 +683,9 @@ pub fn piglin_brain() -> Brain {
     brain
 }
 
-/// `AnimalPanic`'s own speed multiplier, one row per species that registers
-/// it — `new AnimalPanic(speedMultiplier)` (or, for the sniffer, the
-/// anonymous subclass's identical constructor argument) in each species' own
-/// `registerGoals`/`*Ai.initCoreActivity`.
+/// Vanilla's own panic-behaviour speed multiplier, one row per species that
+/// registers it (or, for the sniffer, its own AI's identical constructor
+/// argument for the same behaviour).
 const PANIC_SPEED_MULTIPLIER: &[(&str, f32)] = &[
     ("allay", 2.5),
     ("armadillo", 2.0),
@@ -761,8 +748,8 @@ pub fn brain_for(species: &str) -> Option<BrainGoal> {
     }
     // Same shape again: `piglin_brain` needs both an extra activity (`AVOID`)
     // and a candidate list that offers it. `piglin_brute` is deliberately
-    // excluded — `PiglinBruteAi.updateActivity` offers only
-    // `[Activity.FIGHT, Activity.IDLE]` in the jar, so a brute never flees a
+    // excluded — vanilla's own piglin-brute AI offers only fight and idle,
+    // so a brute never flees a
     // zombified piglin and falls through to the plain [`scaffold`] below like
     // every other brain species this crate has no dedicated package for.
     if species == "piglin" {
@@ -854,10 +841,10 @@ mod tests {
             );
         }
         // Axolotl is the named exclusion — vanilla gives it play-dead instead
-        // of AnimalPanic, so it must never silently pick this table up.
+        // of this panic behaviour, so it must never silently pick this table up.
         assert!(
             !PANIC_SPEED_MULTIPLIER.iter().any(|&(s, _)| s == "axolotl"),
-            "axolotl must not be in the AnimalPanic table"
+            "axolotl must not be in the panic-speed-multiplier table"
         );
     }
 
@@ -928,8 +915,8 @@ mod tests {
     /// **The discriminating gate for this whole slice.** A hurt species from
     /// [`PANIC_SPEED_MULTIPLIER`] must actually run `panic` — not merely have
     /// a `HURT_BY`-shaped memory slot registered — while a brain species
-    /// outside that table (the warden, which has no `AnimalPanic` in the jar
-    /// at all) must never run it however hard it is hit. Ticked through
+    /// outside that table (the warden, which has no panic behaviour in
+    /// vanilla at all) must never run it however hard it is hit. Ticked through
     /// [`brain_for`]/[`Brain::tick`], the same production path
     /// `MobSim::spawn_species` uses, so this measures the roster wiring
     /// itself rather than a `Panic` constructed by hand.
@@ -1040,13 +1027,13 @@ mod tests {
                 .find(|&&(s, _)| s == species)
                 .map(|&(_, speed)| speed)
         };
-        assert_eq!(lookup("camel"), Some(4.0), "Camel.CamelPanic(4.0F)");
-        assert_eq!(lookup("allay"), Some(2.5), "Allay's AnimalPanic(2.5F)");
-        assert_eq!(lookup("goat"), Some(2.0), "AnimalPanic(2.0F) in GoatAi");
-        assert_eq!(lookup("frog"), Some(2.0), "AnimalPanic(2.0F) in FrogAi");
-        assert_eq!(lookup("sniffer"), Some(2.0), "AnimalPanic<Sniffer>(2.0F) in SnifferAi");
-        assert_eq!(lookup("armadillo"), Some(2.0), "ArmadilloAi.ArmadilloPanic(2.0F)");
-        assert_eq!(lookup("axolotl"), None, "axolotl has no AnimalPanic in the jar at all");
+        assert_eq!(lookup("camel"), Some(4.0), "camel's own panic speed multiplier");
+        assert_eq!(lookup("allay"), Some(2.5), "allay's own panic speed multiplier");
+        assert_eq!(lookup("goat"), Some(2.0), "goat's own panic speed multiplier");
+        assert_eq!(lookup("frog"), Some(2.0), "frog's own panic speed multiplier");
+        assert_eq!(lookup("sniffer"), Some(2.0), "sniffer's own panic speed multiplier");
+        assert_eq!(lookup("armadillo"), Some(2.0), "armadillo's own panic speed multiplier");
+        assert_eq!(lookup("axolotl"), None, "axolotl has no panic behaviour in vanilla at all");
         // The two must genuinely differ, or the presence check above could
         // pass with every species sharing one hardcoded constant.
         assert_ne!(lookup("camel"), lookup("goat"));
@@ -1381,7 +1368,7 @@ mod tests {
     }
 
     /// `piglin_brute` must never pick up the piglin's `AVOID` package —
-    /// `PiglinBruteAi.updateActivity` offers only `[FIGHT, IDLE]` in the jar,
+    /// vanilla's own piglin-brute AI offers only fight and idle,
     /// so a brute is too brave to flee a zombified piglin the way an
     /// ordinary piglin does.
     #[test]
