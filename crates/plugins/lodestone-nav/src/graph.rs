@@ -26,10 +26,10 @@ pub const STEP_HEIGHT: f64 = lodestone_physics::EntityDimensions::PLAYER.step_he
 /// The player's height, for the head-clearance check.
 pub const BODY_HEIGHT: f64 = lodestone_physics::EntityDimensions::PLAYER.height as f64;
 
-/// Vanilla's `Attributes.SAFE_FALL_DISTANCE` default, in blocks
-/// (`Attributes.java:87`: `new RangedAttribute(…, 3.0, …)`). Fall damage is
-/// `floor(fallDistance + 1e-6 - SAFE_FALL_DISTANCE)` half-hearts
-/// (`LivingEntity.java:1856`), so this is the real number below which a fall
+/// Vanilla's own safe-fall-distance attribute default, in blocks.
+/// Fall damage is
+/// `floor(fallDistance + 1e-6 - SAFE_FALL_DISTANCE)` half-hearts,
+/// so this is the real number below which a fall
 /// deals zero damage — [`crate::policy::NavPolicy::max_fall_blocks`]'s default.
 pub const SAFE_FALL_DISTANCE: f64 = 3.0;
 
@@ -187,9 +187,9 @@ impl Dir4 {
     }
 
     /// The next direction clockwise — `Dir4::ALL`'s own successor, matching
-    /// vanilla's `Direction.getClockWise()` for a horizontal direction
-    /// (`.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java:143`:
-    /// `Direction secondDirection = direction.getClockWise();`).
+    /// vanilla's own clockwise-rotation step for a horizontal direction, used
+    /// by its mob pathfinder to derive a second diagonal direction from the
+    /// first.
     ///
     /// This is the pairing [`MoveKind::WalkDiagonal`] always uses: `(North,
     /// East)`, `(East, South)`, `(South, West)`, `(West, North)` — the same
@@ -430,8 +430,8 @@ pub enum MoveKind {
     StepUp(Dir4),
     /// −1 Y onto solid ground: the nearest standable surface below is exactly
     /// one cell down. Never damaging — the resulting surface delta is always
-    /// under vanilla's `SAFE_FALL_DISTANCE` (3.0 blocks,
-    /// `Attributes.java:87`), so unlike [`Self::Drop`] this has no
+    /// under vanilla's own safe-fall-distance attribute default (3.0 blocks),
+    /// so unlike [`Self::Drop`] this has no
     /// damage-vs-health legality to apply.
     Descend(Dir4),
     /// Fall more than one cell onto solid ground, landing on the block whose top
@@ -439,8 +439,7 @@ pub enum MoveKind {
     /// [`crate::policy::NavPolicy::max_fall_blocks`] lives in the search's edge
     /// cost (`docs/baritone-port.md` §4.4), not here — this type only proves
     /// *where* the fall lands, which [`fall_step`] derives from the same real
-    /// jar rule (`LivingEntity.java:1856`:
-    /// `fallDistance + 1e-6 - SAFE_FALL_DISTANCE`) the damage check itself uses.
+    /// jar rule (`fallDistance + 1e-6 - SAFE_FALL_DISTANCE`) the damage check itself uses.
     Drop(Dir4, u8),
     /// A `(1, 1)` diagonal step, same-cell-height family like [`Self::Walk`]
     /// (no diagonal ascend/descend/jump — that would be a third cost-model
@@ -707,10 +706,9 @@ const WALK_NORTH: [[i32; 3]; 8] = [
 pub fn stand_surface(view: &dyn NavView, x: i32, y: i32, z: i32) -> Option<f64> {
     let inside = view.facts_at(x, y, z)?;
     // A climbable block's own collision shape must never be read as a
-    // support, in **either** branch below — `LadderBlock`/`VineBlock` both
-    // call `forceSolidOff()`
-    // (`.cache/mc/26.2/src/net/minecraft/world/level/block/LadderBlock.java`'s
-    // `Properties` — see `lodestone_model::adapter::block_blocks_motion`'s own
+    // support, in **either** branch below — vanilla's own ladder and vine
+    // block properties both
+    // force their solid-motion flag off — see `lodestone_model::adapter::block_blocks_motion`'s own
     // doc comment, which names the ladder's `0.7291666666666666` mean-extent
     // threshold specifically *because* landing on one produces the wrong
     // answer), so `blocks_motion` is `false` regardless of its shape.
@@ -930,7 +928,7 @@ pub fn successors(view: &dyn NavView, from: NavNode, out: &mut Vec<Step>) {
             }
         }
         // Diagonals last, in the same clockwise pairing order vanilla's own mob
-        // evaluator iterates them (`WalkNodeEvaluator.java:142-158`) — determinism
+        // evaluator iterates them — determinism
         // for the byte-identical-plan gate, same as the cardinal loop above.
         for d1 in Dir4::ALL {
             if let Some(step) = diagonal_step(view, from, from_surface, d1, d1.clockwise()) {
@@ -1180,14 +1178,16 @@ pub fn fall_step(view: &dyn NavView, from: NavNode, from_surface: f64, dir: Dir4
 /// source, not Baritone — is the right citation even though this crate does not
 /// (and per `docs/baritone-port.md` §3.4, should not) extend that pathfinder:
 ///
-/// `WalkNodeEvaluator.isDiagonalValid(pos, ew, ns)`
-/// (`.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java:167-182`):
+/// Vanilla's own diagonal-validity check for a mob pathfinder node, for the
+/// two orthogonal "shoulder" neighbours a diagonal move sits between:
 ///
 /// ```text
-/// if (ns == null || ew == null || ns.y > pos.y || ew.y > pos.y) return false;
-/// ...
-/// return (ns.y < pos.y || ns.costMalus >= 0.0F || canPassBetweenPosts)
-///     && (ew.y < pos.y || ew.costMalus >= 0.0F || canPassBetweenPosts);
+/// refuse if either shoulder is absent, or if either shoulder sits above the
+/// current cell
+///
+/// otherwise require, for each shoulder independently: it sits below the
+/// current cell, OR it has a non-negative cost malus, OR diagonal
+/// post-passing is allowed
 /// ```
 ///
 /// Translated: **both** shoulders must be a legally walkable neighbour (a real
@@ -1197,11 +1197,11 @@ pub fn fall_step(view: &dyn NavView, from: NavNode, from_surface: f64, dir: Dir4
 /// *up*, and real vanilla refuses it as a diagonal shoulder anyway, before it
 /// ever looks at cost). This function reuses [`walk_step`]'s own hazard and
 /// head-room checks for the "legally walkable" half — the direct analogue of
-/// the evaluator reusing its cardinal neighbour nodes for `ns`/`ew` rather than
-/// re-deriving them — and adds the `y <= from.y` gate on top.
+/// the evaluator reusing its cardinal neighbour nodes rather than
+/// re-deriving them — and adds the "no shoulder above the current cell" gate on top.
 ///
 /// One real permissiveness is **not** replicated: vanilla accepts a shoulder
-/// that is strictly *lower* than `pos.y` regardless of its malus, i.e. even a
+/// that is strictly *lower* than the current cell regardless of its malus, i.e. even a
 /// hazardous one, on the reasoning that a mob's body does not reach down into
 /// a cell below its feet while merely clipping past its corner. This crate
 /// stays conservative instead — every shoulder goes through the same
@@ -1269,8 +1269,8 @@ pub fn diagonal_step(
 ///
 /// # Why this needs no support/facing check, unlike vanilla's own `canSurvive`
 ///
-/// `LadderBlock.canSurvive` (`.cache/mc/26.2/src/net/minecraft/world/level/block/LadderBlock.java:52-55`)
-/// requires a sturdy neighbour opposite the ladder's `FACING`, and `VineBlock`
+/// Vanilla's own ladder support check
+/// requires a sturdy neighbour opposite the ladder's facing, and vanilla's own vine support check
 /// has its own multi-face version. This crate's per-state census
 /// (`crate::facts::BlockFacts`) carries no facing or per-face attachment data —
 /// only tag membership (`climbable: bool`) — so re-deriving either check is not
@@ -1840,14 +1840,13 @@ mod tests {
         assert!((step.to_surface - 1.0).abs() < 1e-9);
     }
 
-    /// The corner-cutting rule, from real vanilla source
-    /// (`WalkNodeEvaluator.isDiagonalValid`,
-    /// `.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java:167-182`):
+    /// The corner-cutting rule, from real vanilla source (vanilla's own
+    /// diagonal-validity check for a mob pathfinder node):
     /// a diagonal requires **both** orthogonal shoulders to be legally
     /// walkable. A single-block wall in just the East shoulder — with the
     /// North shoulder and the destination both left open — must refuse the
-    /// whole diagonal, matching `ew.costMalus >= 0.0F`'s requirement on `ew`
-    /// alone being insufficient to save it.
+    /// whole diagonal, matching the requirement that both shoulders pass
+    /// their own check independently, one alone being insufficient to save it.
     #[test]
     fn a_diagonal_across_a_blocked_corner_is_refused() {
         let mut view = flat();
@@ -1898,7 +1897,7 @@ mod tests {
     /// even when it is otherwise a perfectly legal `Walk` — stepping off a
     /// soul-sand floor (surface `0.875`) onto ordinary stone beside it
     /// (surface `1.0`) is a legal one-cell-up `Walk`, and
-    /// `WalkNodeEvaluator.isDiagonalValid`'s `ns.y > pos.y` check refuses it
+    /// vanilla's own diagonal-validity check refuses it
     /// as a diagonal shoulder anyway, before it ever looks at cost. Without
     /// this the corner-cutting rule could be satisfied by a check that only
     /// ever asked "is this shoulder walkable", never "is it also not higher".
@@ -1925,7 +1924,7 @@ mod tests {
         assert!(
             diagonal_step(&view, from, from_surface, Dir4::North, Dir4::East).is_none(),
             "a shoulder that walk_step accepts but that sits above from.y must still refuse \
-             the diagonal, matching WalkNodeEvaluator's own ns.y > pos.y / ew.y > pos.y check"
+             the diagonal, matching vanilla's own no-shoulder-above-the-current-cell check"
         );
     }
 

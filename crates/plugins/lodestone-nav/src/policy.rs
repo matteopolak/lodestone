@@ -29,8 +29,7 @@ pub struct NavPolicy {
     /// **not** a cell count, a real `to_surface`-relative distance, because
     /// that is the unit vanilla's own damage rule uses.
     ///
-    /// Default is vanilla's own `SAFE_FALL_DISTANCE` attribute default (`3.0`,
-    /// `Attributes.java:87`), so a *default* policy never takes fall damage at
+    /// Default is vanilla's own `SAFE_FALL_DISTANCE` attribute default (`3.0`), so a *default* policy never takes fall damage at
     /// all — `search::Search::edge_cost` still computes and charges
     /// [`Self::damage_cost`] for whatever this is raised to, per
     /// `docs/baritone-port.md` §4.4's "legality is separate" rule, but the
@@ -54,8 +53,7 @@ pub struct NavPolicy {
     /// measuring the bot's own jump success rate.
     pub jump_penalty: f64,
     /// Ticks charged per half-heart of a `Drop`'s expected fall damage, from the
-    /// real rule (`floor(delta + 1e-6 - SAFE_FALL_DISTANCE)`,
-    /// `LivingEntity.java:1856`) — makes fall damage trade against time instead
+    /// real rule (`floor(delta + 1e-6 - SAFE_FALL_DISTANCE)`) — makes fall damage trade against time instead
     /// of being boolean, on top of [`Self::max_fall_blocks`]'s hard legality cap.
     pub damage_cost: f64,
 
