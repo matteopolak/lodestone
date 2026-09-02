@@ -1,4 +1,4 @@
-//! `Player.maybeBackOffFromEdge` — the sneak-at-a-ledge back-off.
+//! Vanilla's own edge-back-off step — the sneak-at-a-ledge back-off.
 //!
 //! # What these tests are for, and what they are *not*
 //!
@@ -18,9 +18,10 @@
 //!    satisfied by a fixture with no edge in it.
 //! 2. **Hand-derived expectations for the parts a smooth trace hides**: that the
 //!    delta is walked toward zero in a *loop* rather than clamped once, that X and
-//!    Z are probed independently before jointly, and that `fallDistance` gates the
-//!    airborne branch — each with the number derived from the inequality in
-//!    `Player.canFallAtLeast`, not from running this crate.
+//!    Z are probed independently before jointly, and that the fall-distance
+//!    field gates the airborne branch — each with the number derived from the
+//!    inequality in vanilla's own "can fall at least" check, not from running
+//!    this crate.
 //!
 //! **On `fall_distance` specifically:** `fall_distance_gates_the_airborne_branch`
 //! below tests the gate's *sensitivity* to the input at the [`move_entity`]
@@ -28,13 +29,13 @@
 //! tool for isolating the gate's own arithmetic from everything upstream of it.
 //! What it does *not* cover, and what used to make the hand-set value the whole
 //! story: whether `PlayerState::fall_distance` itself is ever anything other than
-//! the permanent `0.0` it started as (issue #194). It no longer is —
+//! the permanent `0.0` it started as. It no longer is —
 //! `PlayerState::fall_distance`'s own doc lists every accumulation/reset site
 //! this crate now reproduces from the jar — and `tests/fall_distance.rs` is
 //! where that maintenance is tested: every reset driven by real ticks through
 //! the public `tick`/`tick_air`/`tick_water`/`tick_lava`/`tick_elytra` entry
 //! points (never by hand-setting the field under test), plus one flagship test
-//! that drives a real fall to a real `fall_distance > maxDownStep` and shows it
+//! that drives a real fall to a real `fall_distance` past the max-down-step value and shows it
 //! changes the *committed position* at this exact gate, against a zero control.
 
 use std::collections::HashSet;
@@ -55,8 +56,8 @@ impl World {
     /// A floor at `y = 0` whose eastern edge is the `x = 1` plane: solid for
     /// `x <= 0` only.
     ///
-    /// A player standing at `x = 0.5` has box `[0.2, 0.8]`, and `canFallAtLeast`
-    /// insets the probe by `1e-7`, so the probe clears the support exactly when
+    /// A player standing at `x = 0.5` has box `[0.2, 0.8]`, and vanilla's own
+    /// "can fall at least" check insets the probe by `1e-7`, so the probe clears the support exactly when
     /// `0.2 + 1e-7 + deltaX >= 1.0`, i.e. `deltaX >= 0.8 - 1e-7`. Every expected
     /// value below is derived from that one inequality.
     fn ledge_at_x1() -> Self {
@@ -95,8 +96,9 @@ impl CollisionView for World {
     }
 }
 
-/// Runs one `Entity.move` with the given candidate delta and returns the position
-/// it commits. `on_ground` is the pre-move flag `isAboveGround` reads.
+/// Runs one vanilla-own move step with the given candidate delta and returns
+/// the position it commits. `on_ground` is the pre-move flag vanilla's own
+/// "is above ground" check reads.
 fn move_once(
     world: &World,
     position: Vec3d,
@@ -121,7 +123,7 @@ fn move_once(
     motion.position
 }
 
-/// `isStayingOnGroundSurface()` held, nothing else notable.
+/// Vanilla's own "is staying on ground surface" check held, nothing else notable.
 const SNEAKING: EdgeBackOff = EdgeBackOff::Player {
     staying_on_ground_surface: true,
     fall_distance: 0.0,
@@ -130,7 +132,7 @@ const SNEAKING: EdgeBackOff = EdgeBackOff::Player {
 #[test]
 fn back_off_is_the_only_difference() {
     // THE PURE CONTROL. One delta, one world, one position; the only thing that
-    // varies between the two arms is which `maybeBackOffFromEdge` override the
+    // varies between the two arms is which edge-back-off override the
     // entity has. `EdgeBackOff::Entity` is vanilla's base implementation
     // (`return delta`), i.e. exactly the behaviour this crate had before the rule
     // was modelled.
@@ -248,7 +250,7 @@ fn upward_delta_and_released_shift_both_veto_the_rule() {
         "an upward delta must not be backed off"
     );
 
-    // `isStayingOnGroundSurface()`: the raw shift key.
+    // Vanilla's own "is staying on ground surface" check: the raw shift key.
     let not_sneaking = move_once(
         &world,
         start,
@@ -276,16 +278,18 @@ fn upward_delta_and_released_shift_both_veto_the_rule() {
 
 #[test]
 fn fall_distance_gates_the_airborne_branch() {
-    // `isAboveGround` = `onGround() || fallDistance < maxDownStep &&
-    //                    !canFallAtLeast(0, 0, maxDownStep - fallDistance)`.
+    // Vanilla's own "is above ground" check: on ground, or fall-distance
+    // below the max-down-step value and the "can fall at least" check (over
+    // the remaining down-step allowance) fails.
     //
     // Feet at y = 1.3, airborne, descending: the floor top is 0.3 below.
     //
     // * `fallDistance = 0.0` probes the full 0.6, which reaches the floor, so
-    //   `canFallAtLeast` is false, `isAboveGround` is TRUE, and the rule applies.
-    // * `fallDistance = 0.45` probes only 0.15, which does *not* reach the floor
-    //   0.3 below, so `canFallAtLeast` is true, `isAboveGround` is FALSE, and the
-    //   rule does not apply.
+    //   the "can fall at least" check is false, "is above ground" is TRUE,
+    //   and the rule applies.
+    // * `fallDistance = 0.45` probes only 0.15, which does *not* reach the
+    //   floor 0.3 below, so the "can fall at least" check is true, "is above
+    //   ground" is FALSE, and the rule does not apply.
     //
     // That asymmetry is why `fall_distance` is a real input and not decoration:
     // defaulting it to 0.0 makes the gate open more often than vanilla's, never
@@ -330,7 +334,7 @@ fn fall_distance_gates_the_airborne_branch() {
 
 #[test]
 fn a_mob_never_gets_the_player_override() {
-    // `Entity.maybeBackOffFromEdge` is the identity, and `MoveContext::default()` —
+    // Vanilla's own base edge-back-off step is the identity, and `MoveContext::default()` —
     // what `lodestone-shell`'s dropped-item mover and any mob loop pass — selects
     // it. This is the structural guarantee the enum buys over a bare bool.
     let world = World::ledge_at_x1();
@@ -348,9 +352,9 @@ fn a_mob_never_gets_the_player_override() {
 
 #[test]
 fn back_off_does_not_zero_the_velocity_it_cancels() {
-    // Vanilla rewrites only the *local* candidate delta; it never calls
-    // `setDeltaMovement`. So `xCollision` (which compares against the backed-off
-    // delta) reads false, restitution never fires, and the velocity survives the
+    // Vanilla rewrites only the *local* candidate delta; it never rewrites
+    // its own velocity field. So the X-collision flag (which compares against
+    // the backed-off delta) reads false, restitution never fires, and the velocity survives the
     // tick intact. Releasing shift therefore launches you at full speed — this is
     // vanilla behaviour, and a "clamp the velocity" implementation would lose it.
     let world = World::ledge_at_x1();
