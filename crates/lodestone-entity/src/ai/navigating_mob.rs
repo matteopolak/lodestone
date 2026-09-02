@@ -93,8 +93,8 @@ pub const PANIC_DAMAGE_TICKS: i32 = 40;
 pub const DEFAULT_FOLLOW_RANGE: f64 = 16.0;
 
 /// The floor vanilla puts under the target-acquisition range, in blocks:
-/// its own targeting-conditions test compares against
-/// `Math.max(this.range * modifier, 2.0)`, whose `2.0` is vanilla's own
+/// its own targeting-conditions test takes the larger of the follow range
+/// times a modifier and `2.0`, where `2.0` is vanilla's own
 /// minimum-visibility-distance-for-invisible-target constant. It exists so an invisible
 /// target is still attackable at point-blank range; the floor applies
 /// unconditionally, so a mob whose `FOLLOW_RANGE` is *below* `2.0` still

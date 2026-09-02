@@ -257,7 +257,8 @@ pub trait CollisionView {
 
 /// Vanilla's own per-axis step-order helper — the per-axis resolution order.
 ///
-/// `Math.abs(x) < Math.abs(z) ? [Y, Z, X] : [Y, X, Z]`.
+/// If the x-movement's magnitude is less than the z-movement's, resolve
+/// `[Y, Z, X]`; otherwise `[Y, X, Z]`.
 fn axis_step_order(movement: Vec3d) -> [Axis; 3] {
     if movement.x.abs() < movement.z.abs() {
         [Axis::Y, Axis::Z, Axis::X]

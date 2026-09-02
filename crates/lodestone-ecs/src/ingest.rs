@@ -349,11 +349,11 @@ pub fn apply_entity_movement(
 ///
 /// # Why the local player takes a different path — this is the knockback fix
 ///
-/// Vanilla's `Entity.lerpMotion`
-/// (`ClientPacketListener.handleSetEntityMotion` calls it) is
-/// `this.setDeltaMovement(movement)` — an unconditional **replace**, despite
-/// the "lerp" name — and `LocalPlayer` declares no override, so a
-/// `ClientboundSetEntityMotionPacket` naming our own id (server-applied
+/// Vanilla's own entity motion-lerp step
+/// (called from its own set-entity-motion packet handler) is
+/// an unconditional **replace** of the entity's velocity field, despite
+/// the "lerp" name — and the client-side player type declares no override, so a
+/// set-entity-motion packet naming our own id (server-applied
 /// knockback, an explosion, elytra push, …) means "overwrite your own
 /// velocity", the exact field [`crate::player::player_physics`] integrates
 /// every `TickSet::Physics`.
@@ -400,13 +400,13 @@ pub fn apply_entity_velocity(
 
 /// Vanilla's own hurt-duration/hurt-time reset value, in ticks —
 /// its own hurt-animation call and
-/// its own damage-event handler both write
-/// `hurtDuration = 10; hurtTime = hurtDuration;`.
+/// its own damage-event handler both reset the identical pair of internal
+/// fields to `10`.
 const HURT_DURATION_TICKS: u32 = 10;
 
 /// `IngestSet::Apply`: `ClientEvent::EntityDamaged` → [`HurtTime`].
 ///
-/// Mirrors `LivingEntity.handleDamageEvent`'s countdown reset (see
+/// Mirrors vanilla's own damage-event handler's countdown reset (see
 /// [`HURT_DURATION_TICKS`]). The damage-type/cause/direct/source-position
 /// fields the event also carries have no consumer here — this system's whole
 /// job is starting the hurt-flash countdown a render layer would fade over,
@@ -430,7 +430,7 @@ pub fn apply_entity_damaged(
 /// `IngestSet::Apply`: `ClientEvent::EntityHurtAnimation` → [`HurtTime`].
 ///
 /// The same countdown reset as [`apply_entity_damaged`] —
-/// `LivingEntity.animateHurt` writes the identical two fields. The packet's
+/// vanilla's own hurt-animation step writes the identical two fields. The packet's
 /// `yaw` is not carried into the component: vanilla's own override accepts
 /// the parameter and does not store it, so there is
 /// nothing to lose by not carrying it further here.
@@ -452,8 +452,8 @@ pub fn apply_entity_hurt_animation(
 /// `IngestSet::Apply`: `ClientEvent::FallingBlockState` → [`FallingBlockState`].
 ///
 /// The one thing a client is ever told about which block a `minecraft:falling_block`
-/// is imitating. `FallingBlockEntity.defineSynchedData` registers `DATA_START_POS`
-/// and nothing else, so the state arrives only in the spawn packet's Object Data
+/// is imitating. Vanilla's own falling-block synced-data registration registers only
+/// its start-position field, so the state arrives only in the spawn packet's Object Data
 /// field and only once — see that event's own doc.
 ///
 /// Id-addressed through [`EntityIndex`] like every other system in this set, so it
@@ -538,18 +538,18 @@ const ENTITY_STATUS_DEATH: u8 = 3;
 ///
 /// # Only byte 3, and only as an insert
 ///
-/// `LivingEntity.handleEntityEvent`'s `case 3` plays the death sound and, for a
-/// non-player, does `setHealth(0); die();`. Its own `die()` is what makes
+/// Vanilla's own entity-event handler's `case 3` plays the death sound and, for a
+/// non-player, zeroes health and runs the death handler. Its own death handler is what makes
 /// its own "is dead or dying" query true, which is what lets its own
-/// `tickDeath()` start incrementing —
+/// death-tick step start incrementing —
 /// so on this side the whole of that chain is "the entity now has a
 /// [`DeathTime`]", and [`tick_death_time`] is vanilla's own death-tick half.
 ///
-/// **One documented divergence.** Vanilla's `case 3` guards the kill with
-/// `!(this instanceof Player)`, so a *remote player* falls over off their synced
+/// **One documented divergence.** Vanilla's `case 3` guards the kill with a
+/// check that the entity is not a player, so a *remote player* falls over off their synced
 /// health reaching zero rather than off this byte, one tick later than a mob
 /// would. This does not reproduce that split: the server broadcasts byte 3 for
-/// every `LivingEntity.die()` including players, so reacting to it uniformly
+/// every entity's own death handler, including players, so reacting to it uniformly
 /// costs a sub-tick head start on a remote player's fall-over and saves a second
 /// trigger path keyed on health that would have to agree with this one about when
 /// death began.
@@ -582,7 +582,7 @@ pub fn apply_entity_status(
 }
 
 /// `TickSet::Animate`: age every dying entity's [`DeathTime`] **up**, one tick at a
-/// time — `LivingEntity.tickDeath`'s `deathTime++`.
+/// time — vanilla's own death-tick step incrementing its death-time field.
 ///
 /// The opposite direction from [`tick_hurt_time`], and paired with it in the same
 /// set for that reason: a mob's killing blow starts both counters, one running out
@@ -746,7 +746,7 @@ pub fn apply_entity_passengers(
 
 /// `TickSet::Animate`: advance every entity's [`AttackSwing`] one tick, the
 /// same rate [`crate::entity::AttackSwing::tick`] models
-/// `LivingEntity.updateSwingTime` at. Runs over every entity that carries the
+/// vanilla's own swing-time update at. Runs over every entity that carries the
 /// component; a remote entity gains one only once [`apply_entity_animation`]
 /// has seen its first `SwingMainHand` report, exactly like [`tick_hurt_time`]
 /// and [`HurtTime`].
@@ -892,7 +892,7 @@ pub fn apply_entity_metadata(
         if let Some(baby) = metadata.baby {
             entity.insert(Baby(baby));
         }
-        // `TamableAnimal.DATA_FLAGS_ID & 4`. Per-entity state —
+        // Vanilla's own tameable-animal flags metadata index, bit 2. Per-entity state —
         // there can be several tamed wolves at once, each independently tame
         // or not — so this belongs beside `Baby`/`Health` in `ingest`, not in
         // `crate::session`, which carries only the local player's own scalars.
@@ -901,7 +901,7 @@ pub fn apply_entity_metadata(
         if let Some(tamed) = metadata.tamed {
             entity.insert(Tamed(tamed));
         }
-        // The creeper fuse direction (`Creeper.DATA_SWELL_DIR`), the last hop of
+        // The creeper fuse direction (vanilla's own swell-direction metadata index), the last hop of
         // the chain `docs/entity-rendering.md`'s "Creeper swell" section left
         // for this crate: `lodestone-shell::entities`' `CreeperFuse`/
         // `tick_creeper_fuse`/white-flash-overlay path is fully wired and reads
@@ -910,7 +910,7 @@ pub fn apply_entity_metadata(
         if let Some(dir) = metadata.creeper_swell_dir {
             entity.insert(CreeperSwellDir(dir));
         }
-        // An experience orb's XP value (`ExperienceOrb.DATA_VALUE`). This arm is
+        // An experience orb's XP value (vanilla's own experience-orb value metadata index). This arm is
         // the reason an orb draws at all: the server has streamed the field since
         // the orb entity landed, and with no fold here it reached
         // `EntityMetadataUpdate` and stopped — a decoded field with no component,
@@ -927,14 +927,14 @@ pub fn apply_entity_metadata(
             entity.insert(ExperienceOrbValue(value));
         }
         // The eight-step rotation of the stack in an item frame
-        // (`ItemFrame.DATA_ROTATION`). Per-*entity* state, so this system and
+        // (vanilla's own item-frame rotation metadata index). Per-*entity* state, so this system and
         // not `crate::session` — the fork that has cost work twice: an arm in
         // the wrong router compiles, its unit test passes, and it never runs.
         if let Some(rotation) = metadata.item_frame_rotation {
             entity.insert(ItemFrameRotation(rotation));
         }
-        // A vehicle's rocking triple (`VehicleEntity.DATA_ID_HURT`/
-        // `DATA_ID_HURTDIR`/`DATA_ID_DAMAGE`). Merged rather than replaced, for
+        // A vehicle's rocking triple (vanilla's own hurt/hurt-direction/damage
+        // metadata indices). Merged rather than replaced, for
         // the same reason the firework flags below are: they arrive as separate
         // metadata entries and a packet mentions only what changed. The hurt
         // clock counts down every tick while the direction usually stays put, so
@@ -965,7 +965,7 @@ pub fn apply_entity_metadata(
                     }
                 });
         }
-        // Which painting is hung (`Painting.DATA_PAINTING_VARIANT_ID`).
+        // Which painting is hung (vanilla's own painting-variant metadata index).
         // Per-entity state, so this router and not `crate::session`. Cloned
         // rather than copied because the key is an owned identifier, and
         // `insert`'s replace semantics are right: a painting's variant can be
@@ -1221,7 +1221,7 @@ pub fn apply_entity_leash(batch: Res<IngestBatch>, index: Res<EntityIndex>, mut 
 /// before `flags` is read, and no amount of correct generic folding can surface
 /// it. A session-scoped fold is the only route.
 ///
-/// Bit 0 is `Entity.FLAG_ONFIRE`, read through
+/// Bit 0 is vanilla's own on-fire flag, read through
 /// [`lodestone_entity::metadata::SharedEntityFlags`] rather than by testing
 /// `& 0x01` inline — the flags byte carries seven other meanings and an inline
 /// mask is the kind of thing that gets copied to the wrong bit later.
@@ -1860,9 +1860,9 @@ mod tests {
 
     /// The knockback half of local-player velocity handling. `ClientEvent::EntityVelocity` naming the
     /// **local player's own** id must overwrite `PhysicsState.velocity`
-    /// directly — vanilla's `Entity.lerpMotion` is
-    /// `this.setDeltaMovement(movement)`, an unconditional replace, and
-    /// `LocalPlayer` declares no override — rather than falling into the
+    /// directly — vanilla's own entity motion-lerp step is
+    /// an unconditional replace of the velocity field, and
+    /// the client-side player type declares no override — rather than falling into the
     /// generic [`Velocity`] component the rest of this test file already pins
     /// (`a_spawn_without_a_velocity_leaves_the_component_absent`), which
     /// nothing reads for the local player.
@@ -2662,7 +2662,7 @@ mod tests {
     /// `entity_view()` can never surface it because the local player has no
     /// `EntityKind`.
     ///
-    /// `0x01` is `Entity.FLAG_ONFIRE`; `0x08` (sprinting) is fed first as a
+    /// `0x01` is vanilla's own on-fire flag; `0x08` (sprinting) is fed first as a
     /// **discriminator** — a fold that tested "any flags present" rather than the
     /// specific bit would report burning for a sprinting player, which is a much
     /// worse bug than not showing the overlay at all.
@@ -2844,7 +2844,7 @@ mod tests {
     }
 
     /// Both hurt reports reset the same countdown to the same value —
-    /// `LivingEntity.handleDamageEvent` and `LivingEntity.animateHurt` write
+    /// vanilla's own damage-event handler and hurt-animation step write
     /// the identical pair of fields in vanilla.
     #[test]
     fn entity_damaged_and_hurt_animation_both_start_the_hurt_countdown() {
@@ -3054,7 +3054,7 @@ mod tests {
     /// The negative control for the action-id filter documented on
     /// [`apply_entity_animation`]: every action byte other than
     /// `SwingMainHand` — including `SwingOffHand`, which vanilla *does* run
-    /// through `LivingEntity.swing` — must leave [`AttackSwing`] absent,
+    /// through its own swing-start step — must leave [`AttackSwing`] absent,
     /// proving the filter actually runs rather than every action starting a
     /// swing by accident.
     #[test]

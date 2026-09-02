@@ -21,22 +21,24 @@
 //!
 //! - **Vanilla 26.2** has a real permission system now — it is no longer the
 //!   bare numeric op level of earlier versions. Read from the
-//!   26.2 jar's own permissions package:
-//!   `PermissionLevel` is a five-variant enum (`ALL`=0, `MODERATORS`=1,
+//!   26.2 jar's own permissions package: it has a five-variant command-level
+//!   enum (`ALL`=0, `MODERATORS`=1,
 //!   `GAMEMASTERS`=2, `ADMINS`=3, `OWNERS`=4) with an "is equal or higher
 //!   than" comparison;
-//!   `Permission` is a sum of `Atom(Identifier)` and
-//!   `HasCommandLevel(PermissionLevel)`; `PermissionSet` is the
-//!   `hasPermission(Permission) -> boolean` interface with `NO_PERMISSIONS`,
-//!   `ALL_PERMISSIONS` and `union`; and `PermissionCheck` is `AlwaysPass` or
-//!   `Require(Permission)`. [`PermissionLevel`] and [`Permission`] here are
+//!   a permission is either a plain named atom or "requires at least this
+//!   command level"; a permission-set interface answers a single
+//!   yes/no membership query, with an always-empty set, an always-full set,
+//!   and a union operation; and a permission check is either
+//!   "always passes" or "requires holding a given permission".
+//!   [`PermissionLevel`] and [`Permission`] here are
 //!   that model, transliterated in name and numbering so a future
 //!   `ops.json`/`ClientboundCommandsPacket` consumer needs no mapping table.
 //!
 //! - **Bukkit/Paper** is what a *plugin author* expects, and it is a different
 //!   shape: dotted string nodes, four-valued defaults, and attachments. Its
 //!   resolution order is layered on top of the vanilla model rather than
-//!   replacing it, exactly as the real Bukkit does (`PermissibleBase` sits on
+//!   replacing it, exactly as the real Bukkit does (a subject's permissible
+//!   base sits on
 //!   top of vanilla's op level, it does not supersede it).
 //!
 //! ## The resolution order, and where each step comes from
@@ -84,8 +86,9 @@
 //!    earlier draft of this module had exactly that bug — the step was
 //!    documented, implemented, and could not change any answer.
 //!
-//! 5. **The node's declared default**, evaluated against op status —
-//!    `PermissionDefault.getValue(boolean op)` from Bukkit, whose four values
+//! 5. **The node's declared default**, evaluated against op status — the
+//!    node's default resolved against whether the subject is an operator,
+//!    whose four values
 //!    are exactly [`PermissionDefault`]'s: `TRUE`→`true`, `FALSE`→`false`,
 //!    `OP`→`op`, `NOT_OP`→`!op`. A three-value description of the default —
 //!    "`true`/`false`/`op`" — misses one: Bukkit has **four**, and
@@ -94,40 +97,31 @@
 //!
 //! 6. **An undeclared node falls back to [`DEFAULT_PERMISSION`], which is
 //!    `Op`** — not `False`. This is the step most likely to surprise: Bukkit's
-//!    `Permission.DEFAULT_PERMISSION` really is `PermissionDefault.OP`, so in
+//!    own global fallback for an undeclared permission really is its
+//!    op-default value, so in
 //!    Bukkit a node no plugin ever declared is held by every operator. We
 //!    match it, because a plugin ported from Bukkit will have been written
 //!    against it. [`Permissions::strict`] flips this one step to `False` for a
 //!    deployment that wants deny-by-default; nothing else changes.
 //!
-//! Source for steps 1 and 5–6, quoted from `PermissibleBase.hasPermission`
-//! (Bukkit master, `org.bukkit.permissions.PermissibleBase`):
+//! Steps 1 and 5–6 reproduce Bukkit's own permission-check algorithm: check
+//! whether the permission was explicitly set for this subject and use that
+//! value; otherwise, look up the permission's registered default and
+//! evaluate it against op status; otherwise (the permission was never
+//! registered by any plugin), evaluate the global fallback default against op
+//! status.
 //!
-//! ```text
-//! String name = inName.toLowerCase();
-//! if (isPermissionSet(name)) {
-//!     return permissions.get(name).getValue();
-//! } else {
-//!     Permission perm = Bukkit.getServer().getPluginManager().getPermission(name);
-//!     if (perm != null) {
-//!         return perm.getDefault().getValue(isOp());
-//!     } else {
-//!         return Permission.DEFAULT_PERMISSION.getValue(isOp());
-//!     }
-//! }
-//! ```
-//!
-//! Note the `toLowerCase()`: Bukkit permission nodes are **case-insensitive**,
+//! Note the case-folding: Bukkit permission nodes are **case-insensitive**,
 //! and so are these — every node is normalised through
 //! [`normalize_node`] on both the grant and the query side.
 //!
 //! ## Where we knowingly diverge from Bukkit, and why
 //!
-//! **Bukkit does not match wildcards at check time at all.** Its
-//! `PermissibleBase.hasPermission` is an exact `HashMap` lookup;
+//! **Bukkit does not match wildcards at check time at all.** Its own
+//! permission-check algorithm is an exact hash-map lookup;
 //! `myplugin.*` only works in Bukkit because a plugin *declares* that
-//! permission with `getChildren()`, and `calculateChildPermissions` flattens
-//! those children into the attachment map when the permission is **set**. That
+//! permission along with its child permissions, and those get flattened
+//! into the attachment map when the permission is **set**. That
 //! design cannot answer "does `myplugin.admin.reload` match the `myplugin.*`
 //! this player holds?" for a node nobody declared in advance — which is
 //! precisely the "wildcard suffix matching" this module exists to answer.
@@ -273,7 +267,7 @@ impl PermissionLevel {
         self.id() >= other.id()
     }
 
-    /// Whether this level counts as "op" for Bukkit's `isOp()`, which is what
+    /// Whether this level counts as "op" for Bukkit's own op-status check, which is what
     /// [`PermissionDefault::Op`] is evaluated against.
     ///
     /// Defined as `>= MODERATORS`, because `ops.json` has no entry for a
@@ -289,8 +283,9 @@ impl PermissionLevel {
 /// namespaced atom and a command-level requirement.
 ///
 /// Both variants exist because vanilla really does mix them in one interface:
-/// its own `COMMANDS_GAMEMASTER` constant is a `HasCommandLevel`, while
-/// its own `CHAT_SEND_COMMANDS` constant is an `Atom("chat/send_commands")`. A
+/// its own built-in gamemaster-commands permission is a command-level
+/// requirement, while
+/// its own send-chat-commands permission is a plain named atom (`"chat/send_commands"`). A
 /// plugin's own nodes are always [`Permission::Atom`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Permission {
@@ -315,10 +310,10 @@ impl Permission {
     }
 }
 
-/// Bukkit's `org.bukkit.permissions.PermissionDefault` — what a *declared*
+/// Bukkit's own permission-default enum — what a *declared*
 /// node resolves to when no grant matched.
 ///
-/// All four values, with Bukkit's exact `getValue(boolean op)` table. A
+/// All four values, with Bukkit's exact op-status resolution table. A
 /// three-value description (`true`/`false`/`op`) misses one; [`PermissionDefault::NotOp`]
 /// is the fourth and is not decorative — it is how a plugin makes a node that
 /// staff specifically *lack* (a "show the newbie hints" toggle, say).
@@ -337,7 +332,7 @@ pub enum PermissionDefault {
 }
 
 impl PermissionDefault {
-    /// Bukkit's `PermissionDefault.getValue(boolean op)`, exactly.
+    /// Bukkit's own default-to-boolean resolution against op status, exactly.
     pub fn value(self, op: bool) -> bool {
         match self {
             Self::True => true,
@@ -348,8 +343,8 @@ impl PermissionDefault {
     }
 }
 
-/// Bukkit's `Permission.DEFAULT_PERMISSION`, which really is
-/// `PermissionDefault.OP` — the default applied to a node **no plugin
+/// Bukkit's own global default-permission fallback, which really is
+/// the op-only default — the default applied to a node **no plugin
 /// declared**.
 ///
 /// Spelled out as a constant because it is the single most surprising step in
@@ -1055,7 +1050,7 @@ mod tests {
     // Bukkit parity: PermissionDefault
     // ---------------------------------------------------------------------
 
-    /// Bukkit's `PermissionDefault.getValue(boolean op)` table, all four
+    /// Bukkit's own default-to-boolean resolution table, all four
     /// values against both op states. Eight cells, because the interesting
     /// value (`NotOp`) is the one a three-value description of the default
     /// omits.
@@ -1076,10 +1071,10 @@ mod tests {
         }
     }
 
-    /// Bukkit's `Permission.DEFAULT_PERMISSION` is `OP`, so an undeclared node
+    /// Bukkit's own global default-permission fallback is op-only, so an undeclared node
     /// is held by an op and not by anyone else. This is the step most likely
     /// to be "corrected" to `False` by someone who has not read
-    /// `PermissibleBase`, so it is pinned directly.
+    /// Bukkit's own permission-check algorithm, so it is pinned directly.
     #[test]
     fn an_undeclared_node_is_held_by_ops_and_nobody_else() {
         let mut permissions = Permissions::new();
@@ -1093,7 +1088,7 @@ mod tests {
             .set_level(player_id(), PermissionLevel::Gamemasters);
         assert!(
             permissions.has(player(), "nobody.declared.this"),
-            "an op must hold an undeclared node — Bukkit's DEFAULT_PERMISSION is OP"
+            "an op must hold an undeclared node — Bukkit's global default-permission fallback is op-only"
         );
     }
 

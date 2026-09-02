@@ -570,7 +570,7 @@ impl Default for ServerAlive {
 }
 
 /// The server entity id of the vehicle the **local player** is riding, or `None`
-/// when on foot — vanilla's `Entity.getVehicle()` for our own player.
+/// when on foot — vanilla's own get-vehicle accessor for our own player.
 ///
 /// # Why this is session state and not just [`crate::entity::Vehicle`]
 ///
@@ -1043,7 +1043,7 @@ pub fn apply_local_player_state(
                 // too, so all three writers of `ServerGameMode` sit together.
                 ClientEvent::GameModeChanged { game_mode: mode } => game_mode.0 = Some(*mode),
                 // Assigned as a **whole record**, never field-by-field:
-                // vanilla's `Abilities.apply(Packed)` overwrites every field from
+                // vanilla's own abilities-apply step overwrites every field from
                 // one packet, so a server that clears `mayfly` clears it here too.
                 // Merging fields would let a stale `may_fly: true` outlive the
                 // grant that set it — which is the failure this fold exists to
