@@ -12703,9 +12703,9 @@ where
         // The F4 switcher. A *request*, not an instruction: the two directives
         // below echo the mode this server actually applied, so a client that
         // guessed wrong (including one that guessed a refusal wrong) is
-        // corrected either way. `GameModeCommand.PERMISSION_CHECK`
+        // corrected either way. Vanilla's own game-mode-command permission check
         // (`Permissions.COMMANDS_GAMEMASTER`, level 2) is
-        // `handleChangeGameMode`'s own gate — real now `crate::access` exists,
+        // its own change-game-mode handler's own gate — real now `crate::access` exists,
         // see `DifficultyChanged`'s own comment above; this crate's `/gamemode`
         // built-in already carries the identical `GAMEMODE_LEVEL` check on the
         // command path, so this brings the packet path to parity with it
@@ -12907,7 +12907,7 @@ where
         // `ServerboundPingRequestPacket` shares one wire struct across Status
         // and Play (see the decode arm's own comment), so `PingRequest` reaches
         // here too, unlike its `Handshake`/`LoginStart`/etc. siblings below.
-        // `ServerGamePacketListenerImpl.handlePingRequest` is exactly "echo the
+        // Vanilla's own ping-request handler is exactly "echo the
         // time back" — the same body the Status-state arm above uses, minus the
         // connection close, since a Play-state ping must not end the session.
         ServerBound::PingRequest { time } => {
@@ -12915,14 +12915,14 @@ where
         }
         // `ServerboundPickItemFromBlockPacket` (middle-click pick, issue
         // #558). `crate::item_use::try_pick_item` is the "where it goes"
-        // three-way split (`ServerGamePacketListenerImpl::tryPickItem`); this
+        // three-way split (vanilla's own try-pick-item routine); this
         // arm resolves the "what" — the clicked block's clone-item-stack —
         // and the one thing only this function can see: the interaction
         // range and the live block state. `include_data` is not read: the
         // gate it feeds (`addBlockDataToItem`, copying a block entity's NBT
         // onto the stack) has no consumer in this crate, the same "not
         // modelled, no completion hook" scope cut `crate::item_use`'s module
-        // doc already takes for other `Item.use` arms.
+        // doc already takes for other item-use-routine arms.
         ServerBound::PickItemFromBlock { pos, include_data: _ } => {
             let feet = player_pos.map(|(x, y, z)| Vec3::new(x, y, z));
             if crate::block_breaking::within_interaction_range(feet, pos) {
@@ -13348,12 +13348,12 @@ where
     let mut experience = saved_player
         .as_ref()
         .map_or_else(crate::experience::PlayerExperience::default, |data| data.experience);
-    // Vanilla's `Player.takeXpDelay`. Starts at `0`, so the first orb a player walks
+    // Vanilla's own `takeXpDelay` field. Starts at `0`, so the first orb a player walks
     // into is absorbed immediately — see `collect_nearby_orbs`.
     let mut take_xp_delay: i32 = 0;
     let mut effects = crate::mob_effects::ActiveEffects::new();
     let mut burn = crate::burning::BurnState::new();
-    // The `nextInt(1, 3)` ramp draw `BaseFireBlock.fireIgnite` makes on a player's
+    // The `nextInt(1, 3)` ramp draw vanilla's own fire-block ignite routine makes on a player's
     // contact tick. Its own stream, so standing in fire cannot shift which roll a
     // later block drop or composter insert sees.
     let mut burn_rng = SpawnRng::new(BURN_BEHAVIOR_SEED);
@@ -13365,7 +13365,7 @@ where
     // `apply_use_item_on`'s bed arm. Never read here — the placement half of
     // P2 is the next consumer (see `crate::world_spawn`'s module doc).
     let mut respawn: Option<RespawnPoint> = None;
-    // Issue #241's raid trigger: vanilla's `ServerPlayer.raidOmenPosition`.
+    // Issue #241's raid trigger: vanilla's own `raidOmenPosition` field.
     // Set the tick Bad Omen converts to Raid Omen (the block the carrier
     // stood on then), read and cleared on Raid Omen's own last tick — see
     // the `vitals_tick` arm below for both halves.
