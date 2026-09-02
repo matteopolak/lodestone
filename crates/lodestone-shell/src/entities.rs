@@ -79,7 +79,7 @@
 //!
 //! A **dropped item is not eased between position packets like every other
 //! entity** — it is simulated. `ItemEntity`'s `EntityType` registers
-//! `updateInterval(20)` and vanilla's `ServerEntity.sendChanges` only
+//! `updateInterval(20)` and vanilla's own entity-changes broadcast only
 //! re-evaluates whether to send a position/motion packet at all once every
 //! `updateInterval` ticks (or immediately on a ground-state change, or when
 //! `needsSync`/dirty metadata forces it) — so **an airborne item gets exactly
@@ -92,7 +92,7 @@
 //! then teleports down" instead of arcing.
 //!
 //! Vanilla's own client does not treat this as an interpolation problem: it
-//! ticks `ItemEntity.tick()` locally every client tick, exactly like the
+//! ticks its own item-entity tick locally every client tick, exactly like the
 //! server does, driven by the velocity `set_entity_motion`/`add_entity` report
 //! and the same gravity/drag constants — the rare server correction just
 //! nudges the local simulation back onto the authoritative track. This module
@@ -181,15 +181,15 @@ fn from_physics_vec3d(v: Vec3d) -> lodestone_model::Vec3 {
     lodestone_model::Vec3::new(v.x, v.y, v.z)
 }
 
-/// A dropped item's collision hitbox: `EntityTypes.ITEM` is `sized(0.25F,
-/// 0.25F)`, and `ItemEntity` (not a `LivingEntity`) never overrides
-/// `Entity.maxUpStep()`, whose base implementation returns `0.0F` — items do
+/// A dropped item's collision hitbox: vanilla's own item entity type is
+/// sized 0.25×0.25, and `ItemEntity` (not a `LivingEntity`) never overrides
+/// vanilla's own max-up-step accessor, whose base implementation returns `0.0F` — items do
 /// not auto-step at all.
 const ITEM_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.25, 0.25, 0.0);
 
-/// `ItemEntity.getBlockPosBelowThatAffectsMyMovement()` — the block an item
+/// Vanilla's own item below-position lookup — the block an item
 /// reads ground friction from. This overrides the base entity's
-/// `getOnPos(0.500001F)` with `getOnPos(0.999999F)`: an item's 0.25-tall
+/// on-pos lookup at a 0.500001 offset with one at 0.999999: an item's 0.25-tall
 /// hitbox sits *inside* the block it rests on, not straddling the block
 /// below, so the friction sample has to reach almost a full block down, not
 /// half of one. Reproduced here (rather than reused from
@@ -208,21 +208,21 @@ fn item_friction_block(position: Vec3d) -> (i32, i32, i32) {
 /// One tick of a dropped item's *own* client-run physics, run against a real
 /// [`CollisionView`] instead of [`ItemMotion::tick`]'s bare `position +=
 /// velocity`. Without this an airborne item only ever gets a floor from the
-/// server's own once-a-second correction (`EntityTypes.ITEM`'s
-/// `updateInterval(20)`) and visibly sinks through terrain in between — the
+/// server's own once-a-second correction (vanilla's own item entity type's
+/// 20-tick update interval) and visibly sinks through terrain in between — the
 /// gap the module docs on [`ItemPhysics`] call out.
 ///
 /// Mirrors vanilla's own item-entity tick's real order, traced against
 /// the 26.2 decompile:
 /// gravity is subtracted from `velocity.y` *before* the move
-/// (`applyGravity()`); [`move_entity`] is vanilla's own
-/// `Entity.move(MoverType.SELF, deltaMovement)` — the single shared collider
+/// (vanilla's own apply-gravity); [`move_entity`] is vanilla's own
+/// generic self-move step — the single shared collider
 /// this crate must not fork, per the module's own architecture note — and it
 /// both commits the collided position and derives this tick's authoritative
 /// `on_ground` (not last tick's stale server-reported value, which is what
 /// `on_ground` held before this fix); drag is then applied to the
-/// *post-collision* velocity exactly as `ItemEntity.tick()` re-reads
-/// `getDeltaMovement()` after `move()`, using the real block friction under
+/// *post-collision* velocity exactly as vanilla's own item-entity tick re-reads
+/// its own velocity accessor after the move step, using the real block friction under
 /// the item via [`CollisionView::friction`] rather than [`ItemMotion`]'s
 /// unqueried constant; and the `-0.5` landing bounce follows drag, matching
 /// vanilla's tail end of the branch exactly.
@@ -239,7 +239,7 @@ fn item_friction_block(position: Vec3d) -> (i32, i32, i32) {
 /// library: it is the vanilla-constant carrier, and its per-tick trace is what
 /// the tests below pin.
 fn step_item_physics(sim: &mut ItemMotion, view: &dyn CollisionView, profile: &PhysicsProfile) {
-    // `ItemEntity.applyGravity()`, before the move.
+    // Vanilla's own item-entity apply-gravity, before the move.
     sim.velocity.y -= ITEM_GRAVITY;
 
     let mut motion = EntityMotion {
@@ -254,8 +254,8 @@ fn step_item_physics(sim: &mut ItemMotion, view: &dyn CollisionView, profile: &P
     // flag is the sneaking-player case, `LivingEntity`-only).
     move_entity(&mut motion, ITEM_DIMENSIONS, view, profile, MoveContext::default());
 
-    // Drag on the post-collision velocity, exactly as `ItemEntity.tick()`
-    // scales `getDeltaMovement()` after `move()` returns.
+    // Drag on the post-collision velocity, exactly as vanilla's own
+    // item-entity tick scales its own velocity accessor after the move step returns.
     let mut ground_friction = ITEM_AIR_DRAG;
     if motion.on_ground {
         let (fx, fy, fz) = item_friction_block(motion.position);
@@ -354,7 +354,7 @@ pub struct NameTag {
     pub text: Text,
     /// Whether the depth-testless, faded pass draws in addition to the normal
     /// depth-tested one — `false` while the entity is sneaking
-    /// (`Entity.isDiscrete()`), which is when vanilla suppresses it. See
+    /// (vanilla's own is-discrete check), which is when vanilla suppresses it. See
     /// `gpu/nametag.rs`'s module doc for the two passes' exact depth
     /// settings.
     pub see_through: bool,
@@ -509,10 +509,11 @@ struct EntityFacts {
     /// Narrowed from `DisplayItem`'s full `ItemStack::count` in
     /// [`resolve_entity_facts`]; unlike the data components dropped there, it
     /// changes *how many* copies vanilla draws rather than how one looks
-    /// (`ItemClusterRenderState::getRenderedAmount`: 1 copy at count ≤ 1, then
+    /// (vanilla's own item-cluster rendered-amount accessor: 1 copy at count ≤ 1, then
     /// 2, 3, 4, 5 as the count passes 1, 16, 32 and 48).
     count: u32,
-    /// Whether the carried stack has the enchantment foil — `ItemStack.hasFoil`,
+    /// Whether the carried stack has the enchantment foil — vanilla's own
+    /// has-foil check,
     /// narrowed from `DisplayItem`'s components the same way [`Self::count`] is.
     foil: bool,
     /// The stack named by [`Self::item`]'s `minecraft:dyed_color`, narrowed from
@@ -635,7 +636,7 @@ pub const EXPERIENCE_ORB_TYPE_PATH: &str = "experience_orb";
 ///
 /// Unlike [`EXPERIENCE_ORB_TYPE_PATH`] this one does have a model, and the type
 /// test is not about selecting a pipeline — it is the switch that decides
-/// whether the rig runs vanilla's `ArmorStandArmorModel.setupAnim` (pose
+/// whether the rig runs vanilla's own armor-stand armor-model animation setup (pose
 /// assignment) or the plain humanoid one (walk cycle). It has to be answered for
 /// **every** stand, not only for one carrying pose metadata, because vanilla's
 /// assignment is unconditional and a stand nobody has posed still overwrites the
@@ -795,7 +796,7 @@ pub struct EntityDraw {
     /// avoided.
     pub block_state: Option<u32>,
     /// Which of the eight 45° steps the stack in an item frame is turned to —
-    /// `ItemFrame.getRotation()`, `0..8`.
+    /// vanilla's own item-frame rotation accessor, `0..8`.
     ///
     /// `0` for everything that is not an item frame, and for a frame whose
     /// rotation has not been reported: that is vanilla's own accessor default
@@ -884,8 +885,9 @@ pub struct EntityDraw {
     /// ending ten ticks after the killing blow.
     pub hurt: bool,
     /// This entity's `deathTime + partialTicks` while it is dying, `0.0` while it
-    /// is alive — vanilla's `LivingEntityRenderer.extractRenderState` writes
-    /// `state.deathTime = entity.deathTime > 0 ? entity.deathTime + partialTicks : 0.0F`.
+    /// is alive — vanilla's own living-entity render-state extraction writes
+    /// the death time as the tick count plus the partial tick while dying, or
+    /// zero while alive.
     ///
     /// Read off [`lodestone_ecs::entity::DeathTime`] through [`EntityIndex`] in
     /// [`extract_entity_draws`], bridged exactly like [`Self::hurt`] and for the
@@ -901,7 +903,7 @@ pub struct EntityDraw {
     /// topple disagreeing about when death began.
     ///
     /// Not to be confused with `camera_rig`'s own `death_roll_degrees`, which is a
-    /// *different* vanilla expression (`GameRenderer.bobHurt`'s
+    /// *different* vanilla expression (vanilla's own damage-bob transform's
     /// `40 - 8000/(min(deathTime, 20) + 200)`) on the same input: that one rolls the
     /// local player's **camera** when *they* die, this one topples an entity's
     /// **model**. Both are driven by a `deathTime` and they are not interchangeable.
@@ -927,7 +929,7 @@ pub struct EntityDraw {
     /// `RenderState::merge_held_items` must compare it against the arm it is
     /// drawing or a skeleton drawing a bow would bend its off-hand item too.
     pub item_use: Option<ItemUse>,
-    /// `Mob.getMainArm() == HumanoidArm.LEFT`, i.e.
+    /// Vanilla's own main-arm accessor equal to left-handed, i.e.
     /// [`lodestone_ecs::entity::MobState::left_handed`]. `false` (right-handed)
     /// for every entity that has never reported the mob-flags byte, same as
     /// [`AnimInput::aggressive`](lodestone_render::entity_anim::AnimInput::aggressive).
@@ -936,10 +938,10 @@ pub struct EntityDraw {
     /// mesh resolve to: a left-handed mob's main-hand item and its ranged pose
     /// both belong on its left arm, not its right. Every equipment-slot → `Arm`
     /// mapping in `gpu/entity_passes.rs`/`gpu/world_items.rs` must XOR against
-    /// this rather than assume `Mob.getMainArm()` is always `RIGHT`.
+    /// this rather than assume vanilla's own main-arm accessor is always right-handed.
     pub main_arm_left: bool,
-    /// A creeper's pre-detonation swell, `0.0..~1.07`, vanilla's
-    /// `Creeper.getSwelling(partialTick)` — `0.0` (and hence
+    /// A creeper's pre-detonation swell, `0.0..~1.07`, vanilla's own
+    /// per-partial-tick swelling accessor — `0.0` (and hence
     /// [`lodestone_render::entity_anim::Skeleton::pose_swelling`]'s exact
     /// identity case) for every non-creeper, and for a creeper whose fuse is
     /// unlit. Interpolated from [`CreeperFuse::old_swell`]/`swell` by this
@@ -953,7 +955,7 @@ pub struct EntityDraw {
     /// the white-flash overlay — see those two functions' docs for why one
     /// swelling value is enough to drive both.
     pub creeper_swelling: f32,
-    /// `LivingEntity.swimAmount`, interpolated for this frame — a `0..1` ramp
+    /// Vanilla's own swim-amount field, interpolated for this frame — a `0..1` ramp
     /// toward the swim pose, `0.0` for every entity that has never reported
     /// [`Pose`]`::`[`Swimming`](lodestone_model::EntityPose::Swimming). Mirrors
     /// [`lodestone_physics::player::PlayerState::swim_amount`] for a network
@@ -963,8 +965,8 @@ pub struct EntityDraw {
     /// Its only consumer today is the body-pitch rotation
     /// `gpu/entity_passes.rs` applies to a `"player"` [`Self::type_path`] —
     /// see that module for why only the player is ported (vanilla's own
-    /// `LivingEntityRenderer.setupRotations` has no swim branch at all; only
-    /// `AvatarRenderer` and `DrownedRenderer` override it, with two different
+    /// living-entity rotation setup has no swim branch at all; only
+    /// its own avatar renderer and drowned renderer override it, with two different
     /// formulas, and this field only drives the one this build implements).
     pub swim_amount: f32,
     /// Whether this entity's shared-flags byte reports bit `0x01` — vanilla's
@@ -992,15 +994,16 @@ pub struct EntityDraw {
     /// it. See `docs/entity-rendering.md`'s "Mob fire" section.
     pub on_fire: bool,
     /// Bit `0x20` of the same shared-flags byte [`Self::on_fire`] reads bit
-    /// `0x01` of — vanilla's `Entity.isInvisible()`. Bridged off the ingest
+    /// `0x01` of — vanilla's own is-invisible check. Bridged off the ingest
     /// entity's `EntityFlags` through `EntityIndex` in
     /// [`extract_entity_draws`], the same way `on_fire` is; `false` for an
     /// entity that has never reported the byte.
     ///
     /// Gates only the entity's own body/rig — `RenderState::prepare_entities`
     /// (`gpu/entity_passes.rs`) skips the model batch entirely when this is
-    /// set, matching `LivingEntityRenderer.submit`'s `isBodyVisible` gate on
-    /// its `submitModel` call. Armour and held items are unaffected: they are
+    /// set, matching vanilla's own living-entity render submission's
+    /// is-body-visible gate on
+    /// its own submit-model call. Armour and held items are unaffected: they are
     /// drawn by `prepare_armour`/`merge_held_items`/`special_item_instances`,
     /// each of which re-resolves the entity's pose independently rather than
     /// reusing the body pass's instance, matching vanilla's own
@@ -1016,7 +1019,7 @@ pub struct EntityDraw {
     /// `canSeeFriendlyInvisibles`. This draw site has no notion of the
     /// *local* viewer's own game mode, and doing this faithfully needs a
     /// translucent render path this renderer does not have. The glowing
-    /// outline (bit `0x40`, `Entity.isCurrentlyGlowing()`) is the same story
+    /// outline (bit `0x40`, vanilla's own is-currently-glowing check) is the same story
     /// — it needs a real outline pass — and is left decoded-and-unread on the
     /// shared-flags byte rather than added here as a field with no consumer,
     /// which is the exact island shape this repo's evidence standards call
@@ -1035,9 +1038,10 @@ pub struct EntityDraw {
     /// `prepare_entities`, which collapses the named part's own matrix to a
     /// point instead of drawing it — the corpus's `armor_stand` model has
     /// real `left_arm`/`right_arm`/`base_plate` parts to hide, matching
-    /// vanilla's `ArmorStandModel.setupAnim` toggling `ModelPart.visible` on
+    /// vanilla's own armor-stand-model animation setup toggling each part's
+    /// visibility on
     /// the same three. `marker` has no consumer: vanilla's own use of it is a
-    /// render-type switch (`ArmorStandRenderer.getRenderType`, cutout instead
+    /// render-type switch (vanilla's own armor-stand render-type accessor, cutout instead
     /// of the default humanoid render type) with no equivalent pipeline state
     /// here, so it stays decoded-and-unread rather than approximated.
     pub armor_stand: Option<lodestone_ecs::entity::ArmorStandFlags>,
@@ -1250,7 +1254,7 @@ pub struct ItemPhysics {
 
 /// Client-side ballistic state for arrows, spectral arrows, and tridents.
 /// Vanilla sends these entities at a 20-tick update interval, so simulating the
-/// same `AbstractArrow.tick` locally is required for motion between corrections.
+/// same vanilla arrow-entity tick locally is required for motion between corrections.
 /// The absence of this component keeps every other entity on network interpolation.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ProjectilePhysics {
@@ -1276,7 +1280,8 @@ const CREEPER_MAX_SWELL_TICKS: i32 = 30;
 
 /// A creeper's fuse, integrated **client-side** one tick at a time from the
 /// synced [`EntityFacts::creeper_swell_dir`] — exactly what vanilla's own
-/// client does (`Creeper.java`, `this.swell += swellDir`), because only
+/// client does (its own creeper tick increments the swell counter by the
+/// swell direction), because only
 /// the *direction* is ever on the wire, never the counter itself. See
 /// [`lodestone_render::entity_anim::pose_swelling`]'s doc for the full
 /// derivation of why this split exists.
@@ -1291,7 +1296,7 @@ pub struct CreeperFuse {
     /// [`update_track`] is what writes it, from a snapshot that reported one.
     pub swell_dir: i32,
     /// The integrated counter one tick ago — what [`extract_entity_draws`]
-    /// interpolates *from*, exactly as `Creeper.oldSwell` does.
+    /// interpolates *from*, exactly as vanilla's own previous-swell field does.
     pub old_swell: i32,
     /// The integrated counter as of the most recent tick — what
     /// [`extract_entity_draws`] interpolates *to*.
@@ -1299,8 +1304,8 @@ pub struct CreeperFuse {
 }
 
 impl CreeperFuse {
-    /// Vanilla's own accessor default (`Creeper.java`,
-    /// `entityData.define(DATA_SWELL_DIR, -1)`): idle, nothing swollen. Used
+    /// Vanilla's own accessor default (its own swell-direction metadata
+    /// defines it as `-1`): idle, nothing swollen. Used
     /// to seed a freshly spawned creeper before its first metadata report —
     /// see [`spawn_track`].
     pub const IDLE: Self = Self {
@@ -1311,9 +1316,9 @@ impl CreeperFuse {
 }
 
 /// `GameTick` / `TickSet::Animate`: integrates every tracked creeper's fuse by
-/// exactly one tick, byte-for-byte `Creeper.java`'s
-/// `this.swell += swellDir` (clamped `0..=maxSwell` the same way `tick()`
-/// clamps it — `Creeper.java`). Run client-side because only
+/// exactly one tick, byte-for-byte vanilla's own creeper tick's
+/// swell-counter increment (clamped `0..=maxSwell` the same way its own tick
+/// clamps it). Run client-side because only
 /// [`CreeperFuse::swell_dir`] is ever synced; the counter itself is not.
 pub fn tick_creeper_fuse(mut fuses: Query<&mut CreeperFuse>) {
     for mut fuse in &mut fuses {
@@ -1322,11 +1327,11 @@ pub fn tick_creeper_fuse(mut fuses: Query<&mut CreeperFuse>) {
     }
 }
 
-/// `LivingEntity.swimAmount`, integrated **client-side** one tick at a time —
+/// Vanilla's own swim-amount field, integrated **client-side** one tick at a time —
 /// the render-track counterpart of [`CreeperFuse`], and the same reason it
-/// exists: only the *pose* (`Pose.SWIMMING`, at metadata index 6) is ever on
+/// exists: only the *pose* (vanilla's own swimming pose, at metadata index 6) is ever on
 /// the wire, never the ramp itself, so [`tick_swim_ramp`] has to advance it
-/// here exactly as `LivingEntity.updateSwimAmount()` does
+/// here exactly as vanilla's own swim-amount update does
 /// rather than reading a synced value.
 ///
 /// **Present on every track entity**, not gated by [`RenderKind`] the way
@@ -1334,7 +1339,7 @@ pub fn tick_creeper_fuse(mut fuses: Query<&mut CreeperFuse>) {
 /// species-specific machinery the way a creeper's swell is (see
 /// [`crate::gpu::entity_passes`]'s swim rotation for the one species this
 /// build actually ports it for), and an entity that never reports
-/// `Pose.SWIMMING` just sits at `0.0` forever, which costs nothing to carry.
+/// vanilla's own swimming pose just sits at `0.0` forever, which costs nothing to carry.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct SwimRamp {
     /// The last-synced pose, read from [`Pose`] at metadata index 6 every
@@ -1344,7 +1349,7 @@ pub struct SwimRamp {
     /// synced value, so there is no separate fold step to bridge it through.
     pub swimming: bool,
     /// The integrated ramp one tick ago — what [`extract_entity_draws`]
-    /// interpolates *from*, exactly as `LivingEntity.swimAmountO` does.
+    /// interpolates *from*, exactly as vanilla's own previous-swim-amount field does.
     pub old: f32,
     /// The integrated ramp as of the most recent tick — what
     /// [`extract_entity_draws`] interpolates *to*.
@@ -1364,7 +1369,7 @@ impl SwimRamp {
     };
 }
 
-/// `LivingEntity.updateSwimAmount()`, run against the last pose
+/// Vanilla's own swim-amount update, run against the last pose
 /// [`tick_swim_ramp`] itself read off the ingest [`Pose`] component — advances
 /// by `SWIM_AMOUNT_PER_TICK` (`0.09F`, the same constant
 /// `lodestone_physics::player::update_swim_amount` uses for the local player)
@@ -1422,9 +1427,9 @@ pub struct CapeLag {
     /// (`InterpTo::feet`), kept so the *next* tick can compute a fresh delta
     /// without re-reading the query tuple's `InterpTo` a second time.
     pub last_feet: Vec3,
-    /// `ClientAvatarState.bob`: an eased 0..0.1 walk-bob amplitude,
-    /// `AbstractClientPlayer.updateBob`'s `tBob` (this tick's horizontal
-    /// travel, clamped to `0.1`, zeroed while swimming) eased by `0.4` per
+    /// Vanilla's own client-avatar-state bob field: an eased 0..0.1 walk-bob amplitude,
+    /// vanilla's own player-bob update's this-tick horizontal
+    /// travel, clamped to `0.1`, zeroed while swimming, eased by `0.4` per
     /// tick toward the target.
     pub bob: f32,
     /// `bob`, one tick ago — what [`extract_entity_draws`] interpolates
@@ -1450,7 +1455,7 @@ impl CapeLag {
     }
 }
 
-/// `ClientAvatarState.moveCloak` + `AbstractClientPlayer.updateBob`, one 20 Hz
+/// Vanilla's own cape-move and player-bob-update, one 20 Hz
 /// step, for every tracked entity — cheap enough (see [`CapeLag`]'s doc) not
 /// to gate by type, and it must run at tick rate: both are per-tick eases in
 /// vanilla, not per-frame ones, exactly like [`tick_swim_ramp`].
@@ -1507,7 +1512,7 @@ pub fn tick_cape_lag(
     }
 }
 
-/// Vanilla's `AvatarRenderer.extractCapeState` (`26.2`), given this frame's
+/// Vanilla's own avatar-renderer cape-state extraction (`26.2`), given this frame's
 /// interpolated cloak lag and body yaw: the `(capeLean, capeLean2, capeFlap)`
 /// triple [`lodestone_render::entity::cape_local_rotation`] turns into a
 /// rotation.
@@ -1701,8 +1706,8 @@ const PICKUP_LIFE_TICKS: f32 = 3.0;
 /// The height above the collector's feet the item flies *to*, as a fraction of
 /// the collector's eye height.
 ///
-/// `ItemPickupParticle.updatePosition()` targets
-/// `(target.getY() + target.getEyeY()) / 2.0`, and `Entity.getEyeY()` is
+/// Vanilla's own pickup-particle position update targets
+/// `(target.getY() + target.getEyeY()) / 2.0`, and its own eye-Y accessor is
 /// `position.y + eyeHeight` — an **absolute** Y, not an
 /// offset. So the midpoint is `y + eyeHeight / 2`, i.e. this constant times the
 /// eye height above the feet. Reading `getEyeY()` as a relative offset instead
@@ -1729,10 +1734,10 @@ const REMOTE_COLLECTOR_EYE_HEIGHT: f32 = lodestone_physics::player::DEFAULT_EYE_
 /// # Why a copy, and not the item entity retargeted
 ///
 /// This is the part that is easy to get backwards. Vanilla does **not** keep the
-/// item entity alive and lerp it: `ClientPacketListener.handleTakeItemEntity`
+/// item entity alive and lerp it: its own take-item-entity packet handling
 /// extracts the item's render state (`extractEntity(from, 1.0F)`), hands that
-/// *copy* to a new `ItemPickupParticle`, and then calls
-/// `this.level.removeEntity(packet.getItemId(), RemovalReason.DISCARDED)` in the
+/// *copy* to a new pickup particle, and then calls
+/// its own remove-entity with a discarded reason in the
 /// same breath. The entity is gone before the animation starts; what flies is a
 /// snapshot.
 ///
@@ -1807,12 +1812,9 @@ impl PickupAnimations {
     }
 }
 
-/// Vanilla's `ItemPickupParticleGroup.ParticleInstance.fromParticle` easing:
-///
-/// ```text
-/// time = (life + partialTick) / 3.0;  time *= time;
-/// pos  = lerp(time, itemRenderState.pos, targetPos)
-/// ```
+/// Vanilla's own pickup-particle-group instance easing: the age fraction
+/// (life plus partial tick, divided by the 3-tick lifetime) is squared before
+/// it is used to lerp the item's position toward the collector.
 ///
 /// So the interpolant is **quadratic in the age fraction** — an ease-*in*: the
 /// item leaves slowly and arrives fast. A linear lerp is the obvious wrong
@@ -1884,7 +1886,8 @@ pub fn begin_item_pickup(world: &mut World, item_entity_id: i32, collector_id: i
 
 /// `GameTick` / `TickSet::Animate`: one 20 Hz step of every pickup flight.
 ///
-/// `ItemPickupParticle.tick()` is `life++; if (life == 3) remove();` — so an
+/// Vanilla's own pickup-particle tick increments `life` and removes the
+/// particle once it reaches 3 — so an
 /// animation is drawn on ticks 0, 1 and 2 and gone on 3. Advancing this per
 /// *frame* would make the flight last 3 frames (50 ms at 60 fps), the same
 /// frame-rate-dependence `Sim::step`'s note on `chest_lids.tick()` records.
@@ -1977,7 +1980,7 @@ pub fn extract_pickup_draws(
             main_arm_left: false,
             // An item entity is never a creeper.
             creeper_swelling: 0.0,
-            // An item entity never swims — `Item.updateSwimAmount` is a
+            // An item entity never swims — vanilla's own swim-amount update is a
             // `LivingEntity` behaviour and `ItemEntity` is not one.
             swim_amount: 0.0,
             // A pickup-flight animation is synthetic (this pass's own item, not
@@ -2000,7 +2003,7 @@ pub fn extract_pickup_draws(
 /// Where a pickup flies *to*: the collector's `(x, y + eyeHeight/2, z)`.
 ///
 /// Resolved fresh every frame rather than captured at pickup time, because
-/// `ItemPickupParticle.updatePosition()` re-reads `target.getX()/getY()` on every
+/// vanilla's own pickup-particle position update re-reads `target.getX()/getY()` on every
 /// tick — a pickup while walking must chase the collector, not aim at where they
 /// used to be.
 ///
@@ -2114,7 +2117,8 @@ pub(crate) fn riding_render_seat(
     let version = world.get_resource::<lodestone_ecs::VersionData>()?;
     let facts = version.entity_facts(&kind.0)?;
     let passengers = world.get::<lodestone_ecs::entity::Passengers>(vehicle);
-    // `Entity.getDefaultPassengerAttachmentPoint`: `vehicle.getPassengers().indexOf(passenger)`,
+    // Vanilla's own default passenger-attachment-point lookup indexes the
+    // vehicle's passenger list to find this seat,
     // the same degenerate-case-agrees reasoning `pin_passenger_to_vehicle`'s
     // own doc gives for defaulting to seat 0.
     let seat_index = own_network_id
@@ -2190,19 +2194,19 @@ fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
 /// arm (issue #10 / `docs/arm-swing-animation.md`). The local player's own
 /// swing is *not* this path — it is not a tracked network entity, and it goes
 /// through `Sim::body_pose`/`Sim::hand_swing_progress` instead.
-/// `aggressive` is `Mob.isAggressive()` — bit `0x04` of the mob-flags byte, folded
+/// `aggressive` is vanilla's own is-aggressive check — bit `0x04` of the mob-flags byte, folded
 /// into [`MobState`] by `ingest::apply_entity_metadata` and resolved by the caller
 /// through [`EntityIndex`] the same way `swing_progress` is. It was a
 /// hardcoded `false` here, which made the zombie arm lift in
 /// `Skeleton::animate_zombie_arms` unreachable.
 ///
-/// `crouching` is `Entity.isCrouching()` — the [`Pose`] component at metadata
+/// `crouching` is vanilla's own is-crouching check — the [`Pose`] component at metadata
 /// index 6, **not** the shift-key bit of the shared-flags byte; see the `poses`
 /// query in [`extract_entity_draws`] for why the two are not interchangeable.
 /// It drives `Skeleton::pose`'s humanoid crouch branch, so a sneaking remote
 /// player hunches exactly as the local self-avatar does.
 ///
-/// `swim_amount` is `LivingEntity.getSwimAmount()`, interpolated for this
+/// `swim_amount` is vanilla's own swim-amount accessor, interpolated for this
 /// frame — the same [`SwimRamp`]-integrated value [`extract_entity_draws`]
 /// already computes and carries on [`EntityDraw::swim_amount`] for the
 /// whole-body prone rotation. This is the second, independent consumer: it
@@ -2249,15 +2253,15 @@ fn render_anim(
 /// bow's arm pose from its path alone.
 const VANILLA: &str = "minecraft";
 /// The `minecraft:bow` item path, matched by identity because the arm pose is a
-/// per-item special case in vanilla too (`ItemUseAnimation.BOW`).
+/// per-item special case in vanilla too (vanilla's own bow use-animation).
 const BOW_PATH: &str = "bow";
 /// The `minecraft:crossbow` item path.
 const CROSSBOW_PATH: &str = "crossbow";
-/// The `minecraft:air` item path — `ItemStack.isEmpty()`'s other half. A slot
+/// The `minecraft:air` item path — vanilla's own is-empty check's other half. A slot
 /// holding air is an *empty* hand, so it must not raise an arm.
 const AIR_PATH: &str = "air";
 
-/// Vanilla's `CrossbowItem.getChargeDuration` with **no Quick Charge**:
+/// Vanilla's own crossbow charge-duration accessor with **no Quick Charge**:
 /// `25 - 5 * level`, at level 0.
 ///
 /// The enchantment level is not modelled. Reading it would mean resolving a
@@ -2284,24 +2288,25 @@ struct ArmPoseChoice {
 }
 
 /// Chooses the arm pose from the item in the used hand and how long it has been
-/// used — vanilla's `AvatarRenderer.getArmPose` / `AbstractSkeletonRenderer.getArmPose`,
+/// used — vanilla's own avatar and abstract-skeleton arm-pose selection,
 /// reduced to the poses [`ArmPose`] models.
 ///
 /// # Bow vs crossbow: two different triggers, and only one is the using-item bit
 ///
-/// * **Bow** — `ItemUseAnimation.BOW`, gated purely on
+/// * **Bow** — vanilla's own bow use-animation, gated purely on
 ///   `getUsedItemHand() == hand && getUseItemRemainingTicks() > 0`. Our
 ///   [`ItemUse`] flag is exactly that gate.
-/// * **Crossbow charge** — `ItemUseAnimation.CROSSBOW`, same gate, plus the wind
+/// * **Crossbow charge** — vanilla's own crossbow use-animation, same gate, plus the wind
 ///   fraction from the tick counter.
 /// # The mob trigger is a *different flag*, and it is checked first
 ///
 /// Vanilla selects an arm pose per **renderer**, and
-/// `AbstractSkeletonRenderer.getArmPose` overrides the base one:
-/// `isAggressive() && mainHandItem.is(BOW)` ⇒ `BOW_AND_ARROW`, else `super`. That
+/// its own abstract-skeleton arm-pose selection overrides the base one:
+/// `isAggressive() && mainHandItem.is(BOW)` ⇒ `BOW_AND_ARROW`, else the base
+/// case. That
 /// branch is what makes a skeleton shooting at you actually draw. It is **not**
 /// the using-item bit: a skeleton's ranged attack goal calls
-/// `performRangedAttack` and never enters the item-use state, so `item_use` is
+/// its own ranged-attack routine and never enters the item-use state, so `item_use` is
 /// forever `using: false` for it and #57's mechanism — correct for players and
 /// remote players — reaches zero mobs.
 ///
@@ -2312,8 +2317,8 @@ struct ArmPoseChoice {
 /// class entirely.
 ///
 /// * **Crossbow hold** — **not** an in-use pose at all. Vanilla checks
-///   `!swinging && is(CROSSBOW) && CrossbowItem.isCharged(stack)`, where
-///   `isCharged` reads the stack's `minecraft:charged_projectiles` component.
+///   `!swinging && is(CROSSBOW) &&` its own is-charged check, where
+///   that check reads the stack's `minecraft:charged_projectiles` component.
 ///   That component is **not modelled** by this build's item codec
 ///   ([`lodestone_model::ItemComponents`] has no field for it, and an
 ///   unrecognised component sets `has_unmodeled` and halts the patch decode), so
@@ -2327,11 +2332,12 @@ struct ArmPoseChoice {
 ///
 /// # `ArmPose::Item` for a merely-held item, and why only an avatar gets it
 ///
-/// Vanilla's final `return itemInHand.is(ItemTags.SPEARS) ? SPEAR : ITEM;` runs for
-/// **any non-empty hand**, in use or not — but that line is in
-/// `AvatarRenderer.getArmPose`, and **a humanoid mob never reaches it**.
-/// `HumanoidMobRenderer.getArmPose`, the base every mob override delegates to, ends
-/// `? SPEAR : EMPTY` instead. So a player holding a sword raises the arm and a zombie
+/// Vanilla's own avatar-arm-pose selection's final rule — spears get their own
+/// pose, everything else non-empty gets the plain item pose — runs for
+/// **any non-empty hand**, in use or not — but that rule is in
+/// its own avatar-only arm-pose selection, and **a humanoid mob never reaches it**.
+/// Its own humanoid-mob-renderer arm-pose selection, the base every mob override delegates to, ends
+/// with spears posed and everything else empty instead. So a player holding a sword raises the arm and a zombie
 /// holding the same sword does not, and [`renderer_is_avatar`] is what separates
 /// them. An earlier reading of this file had it that *every* armed mob raises an arm
 /// in vanilla; that was a transcription of the right method for the wrong renderer,
@@ -2347,8 +2353,9 @@ fn arm_pose_for(
     aggressive: bool,
     main_arm_left: bool,
 ) -> ArmPoseChoice {
-    // `AbstractSkeletonRenderer.getArmPose`'s override, ahead of the base
-    // using-item rule exactly as vanilla's `? :` puts it ahead of `super`.
+    // Vanilla's own abstract-skeleton arm-pose selection's override, ahead of
+    // the base using-item rule exactly as vanilla's `? :` puts it ahead of the
+    // base case.
     //
     // `getMainArm() == arm` is vanilla's left-handed fork. The bow always sits
     // in the main *hand* (`main_hand_holds_bow` only ever looks at
@@ -2366,7 +2373,7 @@ fn arm_pose_for(
     held_item_arm_pose(type_path, equipment, main_arm_left)
 }
 
-/// `AvatarRenderer.getArmPose`'s using-item `if` chain — the poses that need the
+/// Vanilla's own avatar-arm-pose selection's using-item `if` chain — the poses that need the
 /// item to be *in use*, ahead of the merely-held fallthrough.
 ///
 /// `None` means "no in-use pose applies", which is a different answer from
@@ -2401,12 +2408,12 @@ fn in_use_arm_pose(
         CROSSBOW_PATH => ArmPose::CrossbowCharge {
             progress: item_use.ticks as f32 / CROSSBOW_CHARGE_TICKS,
         },
-        // Vanilla's `ItemUseAnimation` chain, reduced. **For eating and drinking
+        // Vanilla's own use-animation chain, reduced. **For eating and drinking
         // this is not an approximation — it is what vanilla does.**
-        // `ItemUseAnimation.EAT` and `DRINK` are deliberately absent from that
+        // Its own eat and drink use-animations are deliberately absent from that
         // chain, so a consuming entity takes the plain held-item raise and the
         // whole distinctive eating motion lives in
-        // `ItemInHandRenderer.applyEatTransform`, first person only.
+        // vanilla's own held-item eat-transform, first person only.
         //
         // For the poses `ArmPose` still does not model — `BLOCK` (a raised shield),
         // `SPYGLASS`, `TOOT_HORN`, `BRUSH`, `THROW_TRIDENT`, `SPEAR` — this is a
@@ -2427,11 +2434,11 @@ fn in_use_arm_pose(
     })
 }
 
-/// `AvatarRenderer.getArmPose`'s tail: any non-empty hand gets `ArmPose.ITEM`,
+/// Vanilla's own avatar-arm-pose selection's tail: any non-empty hand gets `ArmPose.ITEM`,
 /// whether the item is in use or not.
 ///
 /// **Avatar renderers only** — see [`renderer_is_avatar`] for the measurement. A
-/// humanoid *mob* ends at `HumanoidMobRenderer.getArmPose`'s `EMPTY`, so its arms
+/// humanoid *mob* ends at its own humanoid-mob-renderer arm-pose selection's `EMPTY`, so its arms
 /// hang, which is what this build already did and what vanilla does.
 ///
 /// Vanilla poses each arm from its own hand and can raise **both** at once
@@ -2466,7 +2473,7 @@ fn held_item_arm_pose(
 ///
 /// [`RenderEquipment`] only carries occupied slots — the narrowing drops an explicit
 /// clear rather than keeping it as a present-but-empty entry — so presence is most of
-/// the answer. `minecraft:air` is rejected as well: `ItemStack.isEmpty()` is
+/// the answer. `minecraft:air` is rejected as well: vanilla's own is-empty check is
 /// air-or-zero-count, and a server that sends air explicitly must not raise an arm.
 fn hand_is_occupied(equipment: &[(EquipmentSlot, ResourceLocation)], slot: EquipmentSlot) -> bool {
     equipment
@@ -2474,7 +2481,7 @@ fn hand_is_occupied(equipment: &[(EquipmentSlot, ResourceLocation)], slot: Equip
         .any(|(s, item)| *s == slot && !(item.namespace() == VANILLA && item.path() == AIR_PATH))
 }
 
-/// `mob.getMainHandItem().is(Items.BOW)` — the *item identity* half of the
+/// Vanilla's own main-hand-item-is-bow check — the *item identity* half of the
 /// skeleton override.
 ///
 /// Split out so the "does the fixture's mob actually hold a bow in the equipment
@@ -2596,11 +2603,12 @@ pub fn extract_entity_draws(
     // byte `EntityFlags` carries), bridged the same way. It was folded and read by
     // nothing: this is the query that turns it into a sneaking player's crouch.
     //
-    // **Deliberately not `EntityFlags & 0x02`.** Vanilla's `isCrouching()` is
-    // `hasPose(Pose.CROUCHING)` and the shift-key bit is
-    // `isShiftKeyDown()`/`isDiscrete()` (`:2691-2705`) — which is what the
+    // **Deliberately not `EntityFlags & 0x02`.** Vanilla's own is-crouching check
+    // tests the crouching pose, and the shift-key bit is
+    // vanilla's own is-shift-key-down/is-discrete checks — which is what the
     // *nametag* see-through gate below reads, correctly, because
-    // `EntityRenderer.shouldShowName` really does ask `isDiscrete()`. Two
+    // vanilla's own should-show-name check really does ask its own is-discrete
+    // check. Two
     // questions, two fields; a shift-key-down player whose standing box does not
     // fit is `SWIMMING`, not `CROUCHING`.
     poses: Query<&Pose>,
@@ -2800,8 +2808,9 @@ pub fn extract_entity_draws(
             .and_then(|entity| swings.get(entity).ok())
             .map_or(0.0, |swing| swing.attack_anim_lerp(partial_tick));
         // `deathTime + partialTicks` while dying, `0.0` while alive — vanilla's
-        // `LivingEntityRenderer.extractRenderState`:
-        // `state.deathTime = entity.deathTime > 0 ? entity.deathTime + partialTicks : 0.0F`.
+        // own living-entity render-state extraction:
+        // the death time is the tick count plus the partial tick while dying, or
+        // zero while alive.
         //
         // The ternary is not decoration: `DeathTime` is inserted at **zero** on the
         // tick death is announced (see its own doc), and a bare `+ partial_tick`
@@ -2860,7 +2869,7 @@ pub fn extract_entity_draws(
             .and_then(|entity| item_uses.get(entity).ok())
             .map(|item_use| *item_use);
         let arm_pose = arm_pose_for(&kind.0, &equipment.0, item_use, aggressive, main_arm_left);
-        // `Entity.isCrouching()`. `false` for an entity that has never reported
+        // Vanilla's own is-crouching check. `false` for an entity that has never reported
         // the pose accessor (`Pose` absent) — which is every entity that has
         // never left `STANDING`, since the server only sends metadata that
         // differs from the default.
@@ -2868,7 +2877,7 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| poses.get(entity).ok())
             .is_some_and(|pose| pose.0 == lodestone_model::EntityPose::Crouching);
-        // `Entity.isPassenger()`. `false` for an entity that has never been
+        // Vanilla's own is-passenger check. `false` for an entity that has never been
         // named as a rider by `SET_PASSENGERS` (`Vehicle` absent) — see
         // `vehicles`'s own doc above. This is the local-player-*excluded* half
         // of the sit pose: the local player never has an ingest entity of its
@@ -2881,7 +2890,7 @@ pub fn extract_entity_draws(
         // `0.0` (and hence a bit-identical `pose_swelling` to `pose`, per that
         // function's own doc) for every non-creeper — `fuse` is `None` — and
         // for a creeper whose fuse has never moved off idle. Vanilla's own
-        // `Creeper.getSwelling`: `lerp(partialTick, oldSwell, swell) /
+        // per-partial-tick swelling accessor: `lerp(partialTick, oldSwell, swell) /
         // (maxSwell - 2)`, `maxSwell` fixed at 30 client-side (see
         // `CREEPER_MAX_SWELL_TICKS`'s doc).
         let creeper_swelling = fuse.map_or(0.0, |fuse| {
@@ -2892,12 +2901,12 @@ pub fn extract_entity_draws(
         // `Mth.lerp(partialTick, swimAmountO, swimAmount)` — see [`SwimRamp`]
         // for why this is integrated here rather than read off the wire.
         let swim_amount = swim.old + (swim.current - swim.old) * partial_tick;
-        // `AvatarRenderer.extractCapeState`, given this frame's interpolated
+        // Vanilla's own avatar-renderer cape-state extraction, given this frame's interpolated
         // lagged cloak position (against the *drawn* feet, exactly as
         // vanilla's own `Mth.lerp(partialTicks, entity.xo, entity.getX())`
         // resolves against the same partial tick every other interpolated
         // field here does) and this frame's body yaw. `walk.walk.position_lerp`
-        // stands in for `ClientAvatarState.getInterpolatedWalkDistance` — a
+        // stands in for vanilla's own client-avatar-state interpolated-walk-distance accessor — a
         // different accumulator in vanilla, but the same shape (a
         // monotonic walk-cycle distance that drives the flap's footstep-synced
         // wobble), and the only one already tracked on this component.
@@ -2937,7 +2946,7 @@ pub fn extract_entity_draws(
             .and_then(|entity| armor_stands.get(entity).ok())
             .copied();
         // The stand's six part rotations. Gated on the **type**, not on the
-        // component: vanilla's `ArmorStandArmorModel.setupAnim` assigns all six
+        // component: vanilla's own armor-stand armor-model animation setup assigns all six
         // over the humanoid base pass unconditionally, so a stand that has never
         // reported a pose still overwrites the walk cycle — with
         // `ArmorStand`'s own `defineId` defaults, which is what
@@ -2994,7 +3003,7 @@ pub fn extract_entity_draws(
         // missing one.
         //
         // Interpolated here rather than at the draw site, because vanilla's
-        // `AbstractBoatRenderer.extractRenderState` subtracts the partial tick
+        // own abstract-boat-renderer render-state extraction subtracts the partial tick
         // from *both* the clock and the damage (the damage clamped at zero, the
         // clock deliberately not — a negative clock is the renderer's own "not
         // hurt" test).
@@ -3199,7 +3208,8 @@ pub fn tick_item_physics(
     });
 }
 
-/// `AbstractArrow.tick` recomputes its entity rotations from the current delta
+/// Vanilla's own arrow-entity tick recomputes its entity rotations from the
+/// current delta
 /// movement every tick. These are projectile angles (`atan2(x, z)` and positive
 /// pitch while rising), not the player's camera yaw/pitch convention.
 fn projectile_angles(velocity: lodestone_model::Vec3) -> (f32, f32) {
@@ -3210,7 +3220,7 @@ fn projectile_angles(velocity: lodestone_model::Vec3) -> (f32, f32) {
     )
 }
 
-/// `GameTick` / `TickSet::Physics`: one vanilla `AbstractArrow.tick` step for
+/// `GameTick` / `TickSet::Physics`: one vanilla arrow-entity tick step for
 /// each tracked arrow, spectral arrow, or trident. Their network update interval
 /// is twenty ticks, so this keeps the render pose moving between corrections.
 pub fn tick_projectile_physics(
@@ -3272,13 +3282,13 @@ fn new_projectile_physics(snap: &EntityFacts) -> ProjectilePhysics {
     }
 }
 
-/// The client-simulated body yaw for a **player** entity — vanilla's
-/// `LivingEntity.yBodyRot`, run locally because nothing ever sends it.
+/// The client-simulated body yaw for a **player** entity — vanilla's own
+/// body-yaw field, run locally because nothing ever sends it.
 ///
 /// A player's own `Rotation`/`HeadYaw` arrive over the wire **equal**:
-/// `ServerEntity.sendChanges` broadcasts `Mth.packDegrees(entity.getYRot())`
-/// as the move/rotation packet's angle and `Mth.packDegrees(entity.getYHeadRot())`
-/// as the head packet's, and `Player.aiStep` forces `this.yHeadRot =
+/// vanilla's own entity-changes broadcast packs the entity's own yaw accessor
+/// as the move/rotation packet's angle and its own head-yaw accessor
+/// as the head packet's, and vanilla's own player AI-step forces `this.yHeadRot =
 /// this.getYRot()` every tick — a player has no second, independently-aimed
 /// value the way a `Mob`'s `LookControl` gives its head. So feeding the
 /// reported [`Rotation`] yaw straight into [`EntityFacts::yaw`], which is
@@ -3289,7 +3299,7 @@ fn new_projectile_physics(snap: &EntityFacts) -> ProjectilePhysics {
 ///
 /// Real vanilla clients never receive a body yaw for another player either:
 /// every receiving client's own `RemotePlayer` puppet runs
-/// `LivingEntity.tick()`'s generic `tickHeadTurn` lag **locally**, deriving
+/// vanilla's own living-entity tick's generic head-turn lag **locally**, deriving
 /// its rendered body yaw from the received look yaw and that puppet's own
 /// per-tick movement. [`tick_remote_body_yaw`] is that same simulation,
 /// reusing [`crate::sim::step::body_yaw_target`]/[`crate::sim::step::tick_head_turn`]
@@ -3311,7 +3321,7 @@ pub struct BodyYawState {
 
 /// `GameTick`/`TickSet::Animate`: advances [`BodyYawState`] for every tracked
 /// **player** entity, once per tick — the client-side half of
-/// `LivingEntity.tickHeadTurn` real vanilla runs for every other player's
+/// vanilla's own living-entity head-turn tick real vanilla runs for every other player's
 /// puppet on every receiving client. See [`BodyYawState`]'s doc for why a
 /// player needs this simulation and a mob (whose `Rotation` is already an
 /// independent, AI-driven body yaw) must not get it — gated here on
@@ -3332,7 +3342,7 @@ pub struct BodyYawState {
 /// already documents itself as being, for the identical reason.
 ///
 /// The `50.0` `max_head_rotation` is vanilla's un-narrowed
-/// `LivingEntity.getMaxHeadRotationRelativeToBody()`. `Player`'s own `15.0`
+/// max-head-rotation-relative-to-body accessor. `Player`'s own `15.0`
 /// override while blocking with a shield is **not** modelled here: it needs
 /// a decoded remote block/use-item state this crate does not carry yet, so a
 /// blocking remote player's body currently drags at the wider, un-narrowed
@@ -3422,7 +3432,7 @@ fn is_blank_name_tag(name: &str) -> bool {
     name.is_empty() || name == "<empty>"
 }
 
-/// The `LivingEntityRenderer.shouldShowName` team gate from the 26.2 client.
+/// Vanilla's own living-entity should-show-name team gate from the 26.2 client.
 ///
 /// `target_team` is the team that owns the tag; `local_team` is the viewer's.
 /// `invisible` is the shared entity-flags bit. Armour stands intentionally do
@@ -3486,7 +3496,7 @@ fn resolve_entity_facts(
         .get::<lodestone_ecs::entity::ArmorStandFlags>()
         .is_some_and(|flags| flags.small)
     {
-        // `ArmorStand.isSmall()` (`ArmorStandRenderer.submit`) bakes and draws
+        // Vanilla's own is-small check (its own armor-stand render submission) bakes and draws
         // an entirely separate, smaller model rather than scaling the big one
         // — this renderer has no second bake, so a uniform half-scale stands
         // in for it, the same approximation already made for a baby mob two
@@ -3546,7 +3556,8 @@ fn resolve_entity_facts(
             .and_then(|model| ResourceLocation::new(model.namespace(), model.path()).ok()),
         _ => None,
     };
-    // `PlayerHeadSpecialRenderer.extractArgument` reads PROFILE from the
+    // Vanilla's own player-head special-renderer argument extraction reads
+    // its profile component from the
     // gameplay player-head stack, before the stack is narrowed to its item id.
     // Preserve that one extra visual fact beside the id for the drop renderer.
     let item_skin = match &display_item {
@@ -3629,7 +3640,8 @@ fn resolve_entity_facts(
         .iter()
         .filter_map(|eq| {
             let stack = eq.item.as_ref()?;
-            // PlayerHeadSpecialRenderer.extractArgument reads PROFILE from a
+            // Vanilla's own player-head special-renderer argument extraction
+            // reads its profile component from a
             // player-head stack. `item_model` can retarget its definition but
             // never changes that gameplay/component owner.
             if stack.item.namespace() != VANILLA || stack.item.path() != "player_head" {
@@ -3657,9 +3669,10 @@ fn resolve_entity_facts(
     // Nametag resolution. The source of a player tag is its
     // tab-list display name; every other entity uses its custom name gated on
     // `CUSTOM_NAME_VISIBLE`. Both still pass through the renderer's base
-    // visibility predicate: `LivingEntityRenderer.shouldShowName` suppresses
+    // visibility predicate: vanilla's own living-entity should-show-name check
+    // suppresses
     // an invisible player/helper entity. Armour stands are the deliberate
-    // exception: `ArmorStandRenderer.shouldShowName` only checks
+    // exception: vanilla's own armor-stand should-show-name check only checks
     // `isCustomNameVisible`, which is how invisible hologram stands retain
     // their text.
     let is_player = type_key.path() == "player";
@@ -3669,7 +3682,7 @@ fn resolve_entity_facts(
         .get::<CustomName>()
         .map_or(Reported::Unreported, |name| Reported::Reported(name.0.clone()));
     let custom_name_visible = entity.get::<CustomNameVisible>().map(|visible| visible.0);
-    // `Player.getScoreboardName()` is the profile name, not the display name
+    // Vanilla's own player scoreboard-name accessor is the profile name, not the display name
     // used for the tag. Other entities use their UUID string. This is the same
     // holder mapping the collision team gate uses in `sim/collide.rs`.
     let scoreboard_holder = if is_player {
@@ -3741,7 +3754,7 @@ fn resolve_entity_facts(
         // all the way to the drawn vertex, with no legacy-string round trip
         // to lose a hex colour along the way.
         text,
-        // `Entity.isDiscrete()`'s shift-key bit (`0x02`) — unknown (no
+        // Vanilla's own is-discrete check's shift-key bit (`0x02`) — unknown (no
         // metadata yet) defaults open, matching every other not-yet-reported
         // boolean here.
         see_through: flags.map_or(true, |f| f & 0x02 == 0),
@@ -3840,8 +3853,8 @@ pub fn player_skin_for_uuid(
             // offline-mode server (whose profile carries no property at
             // all), and any online-mode account that has never set a skin.
             // Vanilla does **not** fall back to a fixed rig here either —
-            // `SkinManager.registerTextures` still calls
-            // `DefaultPlayerSkin.get(profileId)`, the uuid-hash pick over
+            // vanilla's own skin-manager texture registration still calls
+            // its own default-player-skin lookup, the uuid-hash pick over
             // the 18 built-in identities `lodestone_assets::skin`
             // (`default_skin_for_uuid`) now ports. Before this, every such
             // player was hardcoded wide (`type_path`, unmodified — see
@@ -4499,8 +4512,9 @@ impl EntityInterpolator {
     /// component set.
     ///
     /// An item entity with no entry here draws nothing, which is also what
-    /// vanilla does with an empty stack (`ItemEntityRenderer.submit` returns
-    /// early on `state.item.isEmpty()`).
+    /// vanilla does with an empty stack (vanilla's own item-entity render
+    /// submission returns
+    /// early on an empty item state).
     ///
     /// Sets the count to `1` — the neutral value for a caller that only knows
     /// identity. See [`Self::set_item_stack_with_count`] to carry a real stack
@@ -4883,7 +4897,7 @@ mod tests {
         assert!(facts.on_ground);
     }
 
-    /// `ArmorStand.isSmall()` halves the whole model — `small`
+    /// Vanilla's own is-small check halves the whole model — `small`
     /// clause, folded into [`EntityFacts::scale`] the same way [`Baby`]
     /// already is (a uniform half-scale approximating vanilla's separate
     /// small-model bake). Two arms, not one: `small: false` must leave scale
@@ -5152,7 +5166,7 @@ mod tests {
     ///
     /// The expected value comes from outside our code: vanilla's own default
     /// leather RGB is the literal `10511680` in
-    /// `ItemStackComponentizationFix.java`, which writes it as
+    /// vanilla's own data-fixer for pre-componentized item stacks, which writes it as
     /// `dyed_color`'s `rgb` when an old stack carries no explicit colour.
     /// That is `0x00A06540`.
     #[test]
@@ -5366,7 +5380,7 @@ mod tests {
 
         use super::*;
 
-        /// `LivingEntityRenderer.shouldShowName` honours the target team's
+        /// Vanilla's own living-entity should-show-name check honours the target team's
         /// `NEVER` rule even when the entity itself is otherwise visible. A
         /// player-type NPC helper can use that protocol state to suppress its
         /// profile name without relying on a plugin-specific name prefix.
@@ -5506,8 +5520,8 @@ mod tests {
 
             // And a player whose profile declares nothing -- every offline-mode
             // server -- no longer collapses to a hardcoded wide/Steve default.
-            // `SkinManager.registerTextures` falls through to
-            // `DefaultPlayerSkin.get(profileId)` in exactly this case (no `SKIN`
+            // Vanilla's own skin-manager texture registration falls through to
+            // its own default-player-skin lookup in exactly this case (no `SKIN`
             // texture entry), so `resolve_entity_facts` must too, keyed on the
             // same uuid the nametag above already reads off the same tab-list
             // entry. Uuid 43 is a discriminating input, not an arbitrary one: it
@@ -5813,8 +5827,9 @@ mod tests {
         }
 
         /// Every other entity's tag is its `CUSTOM_NAME`, gated on
-        /// `CUSTOM_NAME_VISIBLE` — `LivingEntity.shouldShowName() =
-        /// isCustomNameVisible()` (`LivingEntity.java`/`:2365`), unlike
+        /// `CUSTOM_NAME_VISIBLE` — vanilla's own living-entity
+        /// should-show-name check reduces to its own is-custom-name-visible
+        /// check for a non-player, unlike
         /// a player.
         #[test]
         fn a_mob_with_a_visible_custom_name_shows_it() {
@@ -5850,7 +5865,7 @@ mod tests {
             );
         }
 
-        /// The gate the base `Entity.shouldShowName()` predicate is: a
+        /// The gate the base vanilla should-show-name predicate is: a
         /// custom name with `CUSTOM_NAME_VISIBLE` unset (or `false`) shows
         /// nothing, even though the name itself is known.
         #[test]
@@ -5933,7 +5948,7 @@ mod tests {
             );
         }
 
-        /// `Entity.isDiscrete()` (`isShiftKeyDown()`, bit 1 of the shared
+        /// Vanilla's own is-discrete check (its own is-shift-key-down check, bit 1 of the shared
         /// flags byte) gates the see-through pass off while sneaking.
         #[test]
         fn sneaking_suppresses_see_through_but_not_the_tag_itself() {
@@ -5977,7 +5992,7 @@ mod tests {
         )]
     }
 
-    /// Vanilla's `AbstractSkeletonRenderer.getArmPose` override, all four terms of
+    /// Vanilla's own abstract-skeleton arm-pose selection override, all four terms of
     /// its conjunction moved one at a time.
     ///
     /// Each `false` case below is a way the bug could come back, and each is a
@@ -6091,8 +6106,8 @@ mod tests {
         )]
     }
 
-    /// `AvatarRenderer.getArmPose`'s tail — `? SPEAR : ITEM` for **any** non-empty
-    /// hand, in use or not — against `HumanoidMobRenderer`'s `? SPEAR : EMPTY`.
+    /// Vanilla's own avatar-arm-pose selection's tail — `? SPEAR : ITEM` for **any** non-empty
+    /// hand, in use or not — against its own humanoid-mob-renderer's `? SPEAR : EMPTY`.
     ///
     /// # The discriminating input is the *renderer*, not the item
     ///
@@ -6109,7 +6124,7 @@ mod tests {
     fn a_merely_held_item_raises_an_avatars_arm_and_no_mobs() {
         // (type_path, equipment, expected pose, expected left_hand)
         let cases: Vec<(&str, Vec<(EquipmentSlot, ResourceLocation)>, ArmPose, bool)> = vec![
-            // Avatars: `AvatarRenderer.getArmPose` reaches `ITEM`.
+            // Avatars: vanilla's own avatar-arm-pose selection reaches `ITEM`.
             (
                 "player",
                 sword_in(EquipmentSlot::MainHand),
@@ -6162,7 +6177,7 @@ mod tests {
             ),
             // Empty hands: nothing to hold, nothing to raise.
             ("player", Vec::new(), ArmPose::Empty, false),
-            // `minecraft:air` in the slot is `ItemStack.isEmpty()`'s other half.
+            // `minecraft:air` in the slot is vanilla's own is-empty check's other half.
             (
                 "player",
                 vec![(
@@ -7144,7 +7159,7 @@ mod tests {
     /// [`snap`] reports the same yaw for both `Rotation` and `HeadYaw`
     /// (`head_yaw: yaw` in its own literal), which is exactly a mob's
     /// spawn-time convention *and* a real player's wire convention every
-    /// tick (`ServerEntity.sendChanges` sends `getYRot()` and
+    /// tick (vanilla's own entity-changes broadcast sends `getYRot()` and
     /// `getYHeadRot()` — equal for a `Player`, since nothing ever moves the
     /// latter independently). Only the `type_path` differs from [`snap`]'s
     /// `"pig"`, which is what routes `tick_remote_body_yaw` at all — see
@@ -7162,7 +7177,7 @@ mod tests {
         // The discriminating input this bug needs: a **player**, standing
         // still (`dx = dz = 0`, so `body_yaw_target`'s walking clause never
         // fires), whose reported yaw turns 30° from where it spawned. 30° is
-        // comfortably *inside* vanilla's 50° `tickHeadTurn` drag threshold —
+        // comfortably *inside* vanilla's 50° head-turn-tick drag threshold —
         // an angle at or past the clamp would drag the body under either
         // hypothesis and would prove nothing. Before `BodyYawState`/
         // `tick_remote_body_yaw` existed, `resolve_entity_facts` fed the one
@@ -7701,7 +7716,7 @@ mod tests {
         );
 
         // Vanilla's arrow entity is updated by the server only every 20 ticks;
-        // the client must run AbstractArrow.tick locally in the gap. Sample
+        // the client must run vanilla's own arrow-entity tick locally in the gap. Sample
         // after several fixed ticks rather than exactly at the first tick
         // boundary: that boundary deliberately starts interpolation from the
         // previous pose, so it is not itself a visible-frame sample.
@@ -7941,7 +7956,8 @@ mod tests {
     // ---- ballistic item drops (the reported defect) ----------------------
     //
     // Vanilla's `ItemEntity` registers `updateInterval(20)`
-    // (`EntityTypes.ITEM`), so `ServerEntity.sendChanges` only re-evaluates a
+    // (vanilla's own item entity type), so vanilla's own entity-changes
+    // broadcast only re-evaluates a
     // position/motion send once every 20 ticks while the item is airborne —
     // roughly one correction per second, not one per tick. These tests feed a
     // spawn (with vanilla's real pop velocity, `ItemEntity`'s zero-arg
@@ -8275,7 +8291,7 @@ mod tests {
         assert_eq!(draw.item.as_ref(), Some(&stone()));
         assert_eq!(draw.id, ITEM, "the bob phase key must stay the item's own id");
 
-        // The target: `(x, y + eyeHeight/2, z)` — `ItemPickupParticle.updatePosition`.
+        // The target: `(x, y + eyeHeight/2, z)` — vanilla's own pickup-particle position update.
         let target = Vec3::new(
             collector_feet.x,
             collector_feet.y + REMOTE_COLLECTOR_EYE_HEIGHT * PICKUP_TARGET_EYE_FRACTION,
@@ -8463,7 +8479,7 @@ mod tests {
         );
     }
 
-    /// `ItemPickupParticle.tick()` removes the particle when `life` reaches
+    /// Vanilla's own pickup-particle tick removes the particle when `life` reaches
     /// `LIFE_TIME == 3`, so the flight lasts exactly three ticks (150 ms) and then
     /// nothing is drawn. An animation that never expires leaves a copy of every item
     /// you have ever picked up hovering at your waist.
@@ -8713,7 +8729,7 @@ mod tests {
             seat.x
         );
 
-        // The seat height: `Boat.rideHeight` = height / 3 = 0.5625 / 3 =
+        // The seat height: vanilla's own boat ride-height accessor = height / 3 = 0.5625 / 3 =
         // 0.1875, minus the player's own 0.6 vehicle attachment
         // (`riding::PLAYER_VEHICLE_ATTACHMENT_Y`) — `lodestone_ecs::riding`'s
         // own arithmetic, cited rather than restated.
@@ -8912,7 +8928,7 @@ mod tests {
     /// neither may be one of the two legacy names.
     ///
     /// A gate asserting only "a sheet was chosen" cannot see the bug this
-    /// guards. `DefaultPlayerSkin`'s pick was already being made — its `.model`
+    /// guards. Vanilla's own default-player-skin pick was already being made — its `.model`
     /// (the rig) was read and honoured — and only its `.texture` was dropped,
     /// so *some* plausible answer came back for every player. The wrong
     /// hypothesis and the right one agree on the rig and differ only here.
