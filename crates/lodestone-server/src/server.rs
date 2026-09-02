@@ -5065,7 +5065,7 @@ where
                 // **Not a refusal.** Vanilla's shortfall branch arms
                 // `hasDelayedDestroy` and keeps accruing progress in
                 // `ServerPlayerGameMode.tick` until the block is fully earned
-                // (`ServerPlayerGameMode.java:229-234`); it sends no rollback
+                // (vanilla's own per-player game-mode tick); it sends no rollback
                 // here at all. Refusing instead — which is what this arm did
                 // between #531 and this fix — made every non-instant block
                 // unbreakable, because a `StopDestroy` arriving on the same tick
@@ -5817,11 +5817,11 @@ fn collect_nearby_orbs(
     })
 }
 
-/// Vanilla's `Direction.fromYRot` (`Direction.java:291-293`) restricted to the
+/// Vanilla's own `Direction.fromYRot` restricted to the
 /// four horizontal directions, from a player yaw in degrees.
 ///
 /// The 2d-data layout is `south=0, west=1, north=2, east=3`
-/// (`Direction.java:33-38`), so `floor(yaw / 90 + 0.5) & 3` maps yaw `0` →
+/// (vanilla's own per-variant direction field table), so `floor(yaw / 90 + 0.5) & 3` maps yaw `0` →
 /// south, `90` → west, `±180` → north, `-90` → east — the same "yaw 0 =
 /// south, increasing clockwise" convention the shell's `camera_rig`/`hud`
 /// use for the yaw this server receives from `move_player_rot`. Implemented
@@ -6235,7 +6235,7 @@ where
     Ok(())
 }
 
-/// `SlabBlock.canBeReplaced` (`SlabBlock.java:84-97`) for the clicked block:
+/// Vanilla's own `SlabBlock.canBeReplaced` for the clicked block:
 /// `true` when placing `held` onto `clicked` should turn it into a double slab
 /// rather than start a new one in the next cell.
 ///
@@ -6472,11 +6472,11 @@ enum ComposterUseOutcome {
     NotComposter,
     /// The composter consumed the click but nothing moved — level `7`,
     /// waiting on its scheduled tick (vanilla's `useItemOn` returns `SUCCESS`
-    /// there, `ComposterBlock.java:248-270`, and the hand is untouched). No
+    /// there, and the hand is untouched). No
     /// placement may follow.
     Noop,
     /// One item was consumed from the player's hand (`itemStack.consume(1)`,
-    /// `ComposterBlock.java:263`). `remainder` is the hand's new contents for
+    /// vanilla's own composter fill routine). `remainder` is the hand's new contents for
     /// the caller to push as a window-0 slot update; `block_state` is the new
     /// block state to write — `Some` when the fill level advanced, `None` on a
     /// failed roll (the item is still consumed; only the state is unchanged).
@@ -6484,8 +6484,8 @@ enum ComposterUseOutcome {
         remainder: Option<ItemStack>,
         block_state: Option<String>,
     },
-    /// Bone meal was extracted (level `8` -> `0`, `extractProduce`,
-    /// `ComposterBlock.java:298-309`) — the caller spawns the item entity and
+    /// Bone meal was extracted (level `8` -> `0`, vanilla's own `extractProduce`)
+    /// — the caller spawns the item entity and
     /// writes `block_state`.
     Extracted { block_state: String },
 }
@@ -6519,7 +6519,7 @@ fn composter_state(level: u8) -> String {
 ///
 /// Mirrors `ComposterBlock.useItemOn`'s order: the held item (if any) is
 /// offered to the fill machine first, and whatever the item offer does not
-/// consume falls through to `useWithoutItem` (`ComposterBlock.java:272-283`),
+/// consume falls through to vanilla's own `useWithoutItem`,
 /// which extracts at level `8` and otherwise `PASS`s. Concretely:
 ///
 /// * an empty hand on a ready (level `8`) composter extracts the bone meal;
@@ -6561,7 +6561,7 @@ fn apply_composter_use(
             return ComposterStep::FallThrough;
         };
         let Some(held) = held else {
-            // Empty hand: `useWithoutItem` (`ComposterBlock.java:272-283`).
+            // Empty hand: vanilla's own `useWithoutItem`.
             if composter.extract() {
                 return ComposterStep::Extract;
             }
@@ -6626,7 +6626,7 @@ fn apply_composter_use(
             }
         }
         ComposterStep::Extract => {
-            // `extractProduce` (`ComposterBlock.java:298-309`): exactly one
+            // Vanilla's own `extractProduce`: exactly one
             // bone meal at the block's top, with the hand untouched. Vanilla's
             // `offsetRandomXZ(0.7F)` jitter on the velocity is skipped because
             // this crate has no gaussian f64 source; a gentle upward toss is
@@ -6693,7 +6693,7 @@ fn apply_composter_use(
 ///
 /// Sends [`ServerProtocol::encode_block_update`] for **both** `pos` and its
 /// `face`-neighbour unconditionally, matching vanilla's own
-/// `handleUseItemOn` (`ServerGamePacketListenerImpl.java:1397-1398`), which
+/// `handleUseItemOn`, which
 /// sends both regardless of whether the placement succeeded — this doubles
 /// as the correction for a client that predicted a placement the server
 /// rejected.
@@ -6719,8 +6719,8 @@ fn apply_composter_use(
 ///
 /// Whether writing `state` at `target` would intersect the placer's own
 /// bounding box — vanilla's `BlockItem.canPlace` refusing when
-/// `Level.isUnobstructed(state, pos, CollisionContext.empty())` is false
-/// (`Level.java`), narrowed to the one entity this server can currently name
+/// `Level.isUnobstructed(state, pos, CollisionContext.empty())` is false,
+/// narrowed to the one entity this server can currently name
 /// at a placement site: the placer, from `player_pos`. A full
 /// `isUnobstructed` tests *every* entity's bounding box in the cell and
 /// excludes spectators; this crate has no per-connection entity-bounding-box
@@ -7150,7 +7150,7 @@ where
     if is_bed_block(&source.block_state(pos.x, pos.y, pos.z)) {
         // Issue #325: a bed click registers this connection's player in the
         // night-skip vote. Vanilla's `ServerPlayer.startSleepInBed` calls
-        // `sleepStatus.setSleeping` (`ServerPlayer.java`) — this arm is this
+        // `sleepStatus.setSleeping` — this arm is this
         // crate's stand-in for that call (see `crate::sleep`'s module doc for
         // the disclosed gap: bed-entry *gates* — day/night, monsters nearby,
         // already-sleeping — are unmodelled, and the 100-tick deep-sleep
@@ -7505,7 +7505,7 @@ where
     let placed = held_item
         .as_deref()
         .and_then(|item| block_items::block_for_item(item).map(|block| (item, block)));
-    // `SlabBlock.canBeReplaced` (`SlabBlock.java:84-97`) is the one
+    // Vanilla's own `SlabBlock.canBeReplaced` is the one
     // `canBeReplaced` override a hand placement can hit, and without it a slab
     // clicked onto a matching half-slab lands in the cell *above* instead of
     // doubling. Every other block reaches the plain air-or-fluid test.
@@ -7612,7 +7612,7 @@ where
             }
             source.set_block(target.x, target.y, target.z, &state);
             // `BlockItem.place`'s own `level.playSound(player, …)`
-            // (`BlockItem.java:87`) — the placer is vanilla's `except` argument,
+            // — the placer is vanilla's `except` argument,
             // and here it must be, because the shell predicts its own place
             // sound. `roll` stands in for vanilla's per-play `nextLong()`: it is
             // already a live draw from this connection's `SpawnRng`, one per
@@ -8007,8 +8007,7 @@ where
 /// `dispatch_play_packet` call site, see `COMMANDS_GAMEMASTER_LEVEL`'s own
 /// doc, not in this state struct.)
 /// Applies a difficulty-change request (`ServerBound::DifficultyChanged`),
-/// mirroring `ServerGamePacketListenerImpl::handleChangeDifficulty`
-/// (`.cache/mc/26.2/src/net/minecraft/server/network/ServerGamePacketListenerImpl.java:2088-2099`).
+/// mirroring vanilla's own `handleChangeDifficulty`.
 /// Vanilla gates this on `Permissions.COMMANDS_GAMEMASTER` **or**
 /// `isSingleplayerOwner()` — the caller in `dispatch_play_packet` now performs
 /// that same check (`commands.permission_level`, which already resolves an
@@ -8035,8 +8034,7 @@ where
 }
 
 /// Applies a game-rule change request (`ServerBound::GameRuleChanged`),
-/// mirroring `ServerGamePacketListenerImpl::handleSetGameRule`
-/// (`.cache/mc/26.2/src/net/minecraft/server/network/ServerGamePacketListenerImpl.java:800-816`).
+/// mirroring vanilla's own `handleSetGameRule`.
 /// The permission check (see [`apply_difficulty_change`]'s own doc comment)
 /// happens before this function is ever called — a refused request arrives
 /// with an empty `entries`, so the reply below is naturally an empty
@@ -8090,7 +8088,7 @@ where
 /// # `action == 1`, `REQUEST_STATS`
 ///
 /// Issue #338. Vanilla answers with `player.getStats().sendStats(player)`
-/// (`ServerGamePacketListenerImpl.java:1910`) — a full `ClientboundAwardStatsPacket`.
+/// — a full `ClientboundAwardStatsPacket`.
 /// Here the same reply is built from [`AdvancementManager::stats_snapshot`] of
 /// this connection's [`crate::advancements`] store and lowered through
 /// [`ServerProtocol::encode_award_stats`] (a no-op default on protocols
@@ -8144,7 +8142,7 @@ async fn apply_client_command<T, P, S>(
     state: &mut State,
     vitals: &mut PlayerVitals,
     // The fall accumulator, reset by the respawn arm. Vanilla resets
-    // `fallDistance` on every position snap (`Entity.java:2897`, `:2946`) and a
+    // `fallDistance` on every position snap (vanilla's own entity position-snap sites) and a
     // respawn is one — `FallTracker::reset`'s own doc comment used to say
     // "nothing calls this yet", and this is the caller it was waiting for.
     fall: &mut FallTracker,
@@ -8799,7 +8797,7 @@ fn apply_container_clicked<P: ServerProtocol>(
     // after closing and reopening the table). Vanilla has no such hole: `doClick` is
     // followed unconditionally by `broadcastChanges`, which diffs **every** slot
     // against `remoteSlots`, and `slotChangedCraftingGrid` additionally pushes slot 0
-    // on any grid change (`CraftingMenu.java:69-71`).
+    // on any grid change (vanilla's own crafting-menu slot-changed hook).
     //
     // An honest prediction still costs no traffic — the control for that is
     // `a_claimed_item_is_never_stored_and_the_client_is_corrected`'s second half.
@@ -9579,7 +9577,7 @@ fn spawn_dropped_stacks(
 /// Throws the selected hotbar stack into the world — `Q` (`whole_stack: false`,
 /// one item) or `Ctrl+Q` (`whole_stack: true`, all of it).
 ///
-/// Vanilla's `ServerPlayer.drop(boolean)` (`ServerPlayer.java:2081-2092`), which is
+/// Vanilla's own `ServerPlayer.drop(boolean)`, which is
 /// three steps: `Inventory.removeFromSelected(all)` takes the items, the menu is
 /// told the selected slot's *new* contents, and `LivingEntity.drop` spawns the
 /// entity with [`crate::block_drops::thrown_item_velocity`].
@@ -10423,7 +10421,7 @@ fn apply_spectator_action(
 
 /// Maps a wire hand ordinal (`0` main, `1` off) to
 /// `ClientboundAnimatePacket`'s own action byte (`SWING_MAIN_HAND = 0`,
-/// `SWING_OFF_HAND = 3`) — see `ClientboundAnimatePacket.java`'s constants,
+/// `SWING_OFF_HAND = 3`) — see vanilla's own `ClientboundAnimatePacket` constants,
 /// which `ServerProtocol::encode_animate`'s own doc comment already names.
 /// Anything outside `0..=1` degrades to the main-hand swing, the same
 /// "malformed input degrades the effect" convention `ServerBound::Swing`'s
@@ -10729,8 +10727,7 @@ where
     Ok(())
 }
 
-/// `PermissionLevel.GAMEMASTERS` (`.cache/mc/26.2/src/net/minecraft/server/
-/// permissions/PermissionLevel.java`) — the level `Permissions
+/// Vanilla's own `PermissionLevel.GAMEMASTERS` — the level `Permissions
 /// .COMMANDS_GAMEMASTER` requires, and the gate `handleChangeDifficulty`/
 /// `handleLockDifficulty`/`handleSetGameRule`/`handleSetCommandBlock`/
 /// `handleChangeGameMode` all share. The built-in `/gamemode`/`/gamerule`/
@@ -12447,7 +12444,7 @@ where
             // joined with. That made lowering render distance mid-session work
             // and raising it silently do nothing, which is the owner's report.
             // Vanilla clamps against `serverViewDistance`, a server setting
-            // (`ChunkMap.java:826`), never against the player's current view.
+            // (its own server view-distance field), never against the player's current view.
             //
             // The ceiling now lives on the `ViewTracker` as its own field and
             // `set_view_radius` applies it — see `ViewTracker::max_radius` for
@@ -13133,13 +13130,13 @@ impl LoopStallWatch {
 /// schedule rather than strictly in response to one inbound packet —
 /// * a server-initiated keep-alive, matching vanilla's fixed 15-second
 ///   interval and the same-length disconnect timeout
-///   (`ServerCommonPacketListenerImpl.java:35-36,118-133`; see the
+///   (vanilla's own common packet-listener; see the
 ///   `KEEP_ALIVE_INTERVAL` doc comment for why that is one interval, not two);
 /// * a periodic time-of-day broadcast, matching vanilla's every-20-ticks
-///   cadence (`MinecraftServer.java:1095-1099`; see `TIME_SYNC_INTERVAL`);
+///   cadence (its own main server loop; see `TIME_SYNC_INTERVAL`);
 /// * view streaming (chunk-cache-center, forget, and send) whenever a
 ///   [`ServerBound::PlayerMoved`] packet crosses into a new chunk column
-///   (`ChunkMap::move`/`updateChunkTracking`, `ChunkMap.java:1071-1120`);
+///   (vanilla's own `ChunkMap::move`/`updateChunkTracking`);
 ///
 /// all layered over the same entity-streaming pass the join sequence already
 /// ran once, now repeated on every inbound packet exactly as the original
@@ -13331,8 +13328,8 @@ where
     // `dispatch_play_packet`. Finished by the per-tick arm below, not by a packet.
     let mut item_in_use: Option<ItemInUse> = None;
     // Vanilla's `ServerPlayer::nextContainerCounter` starts at `0` and the
-    // very first open bumps it to `1` before use (`ServerPlayer.java:1330,
-    // 1343`) — see [`open_container_screen`]'s own `% 100 + 1` wrap.
+    // very first open bumps it to `1` before use (vanilla's own player fields)
+    // — see [`open_container_screen`]'s own `% 100 + 1` wrap.
     let mut next_window_id: i32 = 0;
     // Issue #249. This connection's composter roll stream — see
     // `COMPOSTER_BEHAVIOR_SEED` and `dispatch_play_packet`'s parameter comment.
@@ -13969,8 +13966,8 @@ where
                 if pending_keep_alive.is_some() {
                     // Issue #279: tell the client *why* before hanging up.
                     // Vanilla sends `Component.translatable("disconnect.timeout")`
-                    // on exactly this path (`ServerCommonPacketListenerImpl
-                    // .java:37,86`) — up to now we closed the socket silently and
+                    // on exactly this path (its own common packet-listener)
+                    // — up to now we closed the socket silently and
                     // a real client showed a generic "connection lost".
                     //
                     // The write is best-effort: a peer that stopped answering
@@ -14417,8 +14414,8 @@ where
                 if let Some((x, y, z)) = player_pos {
                     // Issue #326 B1: border damage, applied *before* the
                     // submersion test — vanilla's `LivingEntity.baseTick` runs
-                    // the border `else if` ahead of the water-breath block
-                    // (`LivingEntity.java:425-434`). Snapshot the border once
+                    // the border `else if` ahead of the water-breath block.
+                    // Snapshot the border once
                     // per timer tick and ask it for the damage the tracked
                     // position attracts; `apply_border_damage` is `Some` only
                     // when the hit landed (a dead player is a no-op), and a
@@ -19101,7 +19098,7 @@ mod tests {
     }
 
     /// **Control**: a failed roll still consumes the item (vanilla consumes on
-    /// every accepted insert, `ComposterBlock.java:263`) but leaves the level —
+    /// every accepted insert, per its own composter fill routine) but leaves the level —
     /// and therefore the block state — unchanged.
     #[test]
     fn a_failed_roll_still_consumes_the_item_but_keeps_the_state() {
@@ -19152,7 +19149,7 @@ mod tests {
 
     /// A full (level 7, waiting on its scheduled tick) composter consumes the
     /// click without touching the hand — vanilla `useItemOn` returns SUCCESS
-    /// at `fillLevel == 7` with nothing to add (`ComposterBlock.java:257-259`).
+    /// at `fillLevel == 7` with nothing to add.
     #[test]
     fn level_seven_consumes_the_click_without_touching_the_hand() {
         let mut composter = Composter::new();
@@ -19403,7 +19400,7 @@ mod tests {
     }
 
     /// The yaw → horizontal-facing map is vanilla's `Direction.fromYRot`
-    /// (`Direction.java:291-293`): yaw 0 = south, 90 = west, ±180 = north,
+    /// (vanilla's own per-variant direction field table): yaw 0 = south, 90 = west, ±180 = north,
     /// -90 = east, split at the 45° midpoints (the value at which
     /// `floor(yaw / 90 + 0.5) & 3` rolls over). This is the facing a placed
     /// diode then inverts so the block faces the player (issue #475).
@@ -19447,9 +19444,10 @@ mod tests {
     /// reads, and everything else falls through to `crate::block_placement`
     /// (whose own tests cover the per-block conventions). The observer is
     /// deliberately **not** inverted: `ObserverBlock.getStateForPlacement`
-    /// applies `.getOpposite()` twice (`ObserverBlock.java:133-136`), so it
+    /// applies `.getOpposite()` twice (vanilla's own observer-block placement state),
+    /// so it
     /// watches in the player's look direction — unlike the diodes' single
-    /// inversion (`DiodeBlock.java:155-158`), which makes them face the player.
+    /// inversion (vanilla's own diode-block placement state), which makes them face the player.
     #[test]
     fn placed_block_state_faces_diodes_at_the_player_and_observers_with_the_player() {
         let looking = |yaw: Option<f32>| crate::block_placement::PlaceContext {
