@@ -3,7 +3,7 @@
 //!
 //! # What it is
 //!
-//! A port of vanilla's `StructureTemplate`: the `.nbt` files under
+//! A port of vanilla's own structure-template type: the `.nbt` files under
 //! `assets/structure/` (1212 of them, see
 //! [`docs/worldgen-structure-corpus.md`](../../../../docs/worldgen-structure-corpus.md))
 //! decoded into a palette plus a block list, and placed into a
@@ -28,12 +28,14 @@
 //! `StructureStart` does not have:
 //!
 //! * **Every random draw here is position-seeded.** Palette choice is
-//!   `RandomSource.create(Mth.getSeed(templatePosition))` and
-//!   `BlockRotProcessor`'s keep/drop roll is `Mth.getSeed(blockPos)` — so two
+//!   a fresh default random source seeded from a position-derived hash of
+//!   `templatePosition` and
+//!   vanilla's own block-rot processor's keep/drop roll is the same
+//!   position-derived hash of `blockPos` — so two
 //!   chunks placing two halves of the same piece agree without communicating.
 //! * **A write outside the grid's box is a no-op** ([`DenseBlockGrid::set`]), so
 //!   "clip this piece to the chunk" needs no explicit box: the grid *is* the box.
-//!   This is vanilla's `placeSettings.setBoundingBox(chunkBB)` by construction.
+//!   This is vanilla's own place-settings bounding-box assignment by construction.
 //!
 //! # How to change it
 //!
@@ -52,7 +54,7 @@
 //! * Entities and block entities are parsed but **not** placed. Loot chests and
 //!   the `structure_block` data markers that create them need block entities plus
 //!   loot tables, which no worldgen stage has yet; the markers themselves are
-//!   dropped by the same `BlockIgnoreProcessor` vanilla drops them with.
+//!   dropped by the same block-ignore processor vanilla drops them with.
 //! * **A block's `nbt` compound is retained** ([`TemplateBlock::nbt`]), which S2
 //!   deliberately dropped. It is not decoration: a jigsaw block's *entire*
 //!   configuration — `name`, `target`, `pool`, `final_state`, `joint`,
@@ -98,7 +100,7 @@ pub fn nbt_string<'a>(nbt: &'a BlockNbt, key: &str) -> Option<&'a str> {
 
 /// One integer field of a [`BlockNbt`], accepting any of NBT's integral widths
 /// (vanilla writes `placement_priority`/`selection_priority` as `Int`, but
-/// `getIntOr` reads a `Byte` too).
+/// vanilla's own "get int or" reads a `Byte` too).
 #[must_use]
 pub fn nbt_int(nbt: &BlockNbt, key: &str) -> Option<i32> {
     nbt.iter().find(|(k, _)| k == key).and_then(|(_, v)| match *v {
@@ -109,8 +111,8 @@ pub fn nbt_int(nbt: &BlockNbt, key: &str) -> Option<i32> {
     })
 }
 
-/// One of vanilla's four `Rotation`s, in `Rotation.values()` order — the order
-/// `Rotation.getRandom` indexes with a single `nextInt(4)`.
+/// One of vanilla's four rotations, in vanilla's own declaration order — the order
+/// vanilla's own random-rotation pick indexes with a single `nextInt(4)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rotation {
     /// `NONE`.
@@ -125,7 +127,8 @@ pub enum Rotation {
 }
 
 impl Rotation {
-    /// `Rotation.getRandom(random)` — `Util.getRandom(values(), random)`, one
+    /// Vanilla's own random-rotation pick at `(random)` — its own pick-a-random-list-element
+    /// helper over all four values, one
     /// `nextInt(4)`.
     pub fn random<R: RandomSource>(random: &mut R) -> Self {
         match random.next_int_bounded(4) {
@@ -222,7 +225,7 @@ impl BlockState {
         out
     }
 
-    /// `BlockState.rotate(rotation)`, per property (see the module doc for the
+    /// Vanilla's own block-state rotate at `(rotation)`, per property (see the module doc for the
     /// deliberate limits).
     #[must_use]
     pub fn rotate(&self, rotation: Rotation) -> Self {
@@ -249,7 +252,7 @@ impl BlockState {
             }
         }
         if let Some(value) = out.properties.get("rotation").and_then(|r| r.parse::<u32>().ok()) {
-            // `Rotation.rotate(i, 16)`: +4 per clockwise quarter turn.
+            // Vanilla's own rotation-index rotate over a span of 16: +4 per clockwise quarter turn.
             let rotated = (value + 4 * turns) % 16;
             out.properties.insert("rotation".into(), rotated.to_string());
         }
@@ -267,7 +270,7 @@ impl BlockState {
         out
     }
 
-    /// `JigsawBlock.getFrontFacing` / `getTopFacing` — the two halves of the
+    /// Vanilla's own jigsaw-block front-facing / top-facing accessors — the two halves of the
     /// `orientation` property (`FrontAndTop`, serialised `"<front>_<top>"`).
     ///
     /// Returns `None` for a state with no `orientation`, which is every block
@@ -277,7 +280,7 @@ impl BlockState {
         self.properties.get("orientation")?.split_once('_')
     }
 
-    /// `BlockState.mirror(mirror)` for the same property set.
+    /// Vanilla's own block-state mirror at `(mirror)` for the same property set.
     #[must_use]
     pub fn mirror(&self, mirror: Mirror) -> Self {
         if mirror == Mirror::None {
@@ -293,7 +296,7 @@ impl BlockState {
                 _ => None,
             }
         };
-        // `StairBlock.mirror` — the one place a mirror needs *block-class*
+        // Vanilla's own stair-block mirror — the one place a mirror needs *block-class*
         // knowledge, and now reachable: a coded piece with a SOUTH or WEST
         // orientation mirrors LEFT_RIGHT, and both the swamp hut and the pyramids
         // place stairs with an explicit `shape`. Vanilla applies the shape swap
@@ -365,7 +368,7 @@ impl BlockState {
     }
 }
 
-/// `BaseRailBlock.rotate(RailShape, Rotation)`, transcribed.
+/// Vanilla's own base-rail-block rotate at `(RailShape, Rotation)`, transcribed.
 ///
 /// Keyed on the `shape` **value** rather than on the presence of neighbouring
 /// properties, because `shape` is spelled by two unrelated block families here: a
@@ -411,7 +414,7 @@ fn rotate_rail_shape(shape: &str, turns: u32) -> Option<&'static str> {
     }
 }
 
-/// `BaseRailBlock.mirror(RailShape, Mirror)`, transcribed.
+/// Vanilla's own base-rail-block mirror at `(RailShape, Mirror)`, transcribed.
 ///
 /// Note the asymmetry, which is vanilla's: `LEFT_RIGHT` leaves `ascending_east` and
 /// `ascending_west` alone and `FRONT_BACK` leaves `ascending_north`/`ascending_south`
@@ -448,10 +451,10 @@ fn rotate_direction(dir: &str, turns: u32) -> Option<&'static str> {
     Some(CW[(index + turns as usize) % 4])
 }
 
-/// `OctahedralGroup.rotate(FrontAndTop)` for a Y-axis rotation:
+/// Vanilla's own octahedral-group rotate at `(FrontAndTop)` for a Y-axis rotation:
 /// `fromFrontAndTop(rotate(front), rotate(top))`.
 ///
-/// A vertical component is invariant (`Rotation.rotate(Direction)` returns a
+/// A vertical component is invariant (vanilla's own rotation-of-direction returns a
 /// Y-axis direction unchanged), which is what makes this a per-component rewrite
 /// rather than a 12-entry table. **Load-bearing for jigsaw assembly**: the front
 /// facing of a rotated jigsaw block is the direction the connection points in,
@@ -464,7 +467,7 @@ fn rotate_orientation(orientation: &str, turns: u32) -> Option<String> {
     Some(format!("{front}_{top}"))
 }
 
-/// `Direction.getOpposite`.
+/// Vanilla's own direction "get opposite".
 #[must_use]
 pub fn opposite_direction(dir: &str) -> &str {
     match dir {
@@ -478,7 +481,7 @@ pub fn opposite_direction(dir: &str) -> &str {
     }
 }
 
-/// `Direction.getStepX/Y/Z` — the unit offset of a named direction.
+/// Vanilla's own per-axis direction step accessors — the unit offset of a named direction.
 #[must_use]
 pub fn direction_step(dir: &str) -> [i32; 3] {
     match dir {
@@ -509,7 +512,7 @@ fn rotate_directional_flags(state: &mut BlockState, turns: u32) {
     }
 }
 
-/// `StructureTemplate.transform(pos, mirror, rotation, pivot)`.
+/// Vanilla's own structure-template transform at `(pos, mirror, rotation, pivot)`.
 #[must_use]
 pub fn transform(pos: [i32; 3], mirror: Mirror, rotation: Rotation, pivot: [i32; 3]) -> [i32; 3] {
     let [mut x, y, mut z] = pos;
@@ -684,7 +687,7 @@ impl StructureTemplate {
         })
     }
 
-    /// The template `StructureTemplateManager.getOrCreate` invents when a
+    /// The template vanilla's own structure-template-manager get-or-create invents when a
     /// referenced `.nbt` does not exist: **zero size, no palette, no blocks.**
     ///
     /// This is not a defensive stub; it is vanilla's own behaviour for a dangling
@@ -729,13 +732,13 @@ impl StructureTemplate {
         }
     }
 
-    /// `getSize()`.
+    /// Vanilla's own size accessor.
     #[must_use]
     pub fn size(&self) -> [i32; 3] {
         self.size
     }
 
-    /// `getBoundingBox(settings, position)` — the transformed corner-to-corner
+    /// Vanilla's own bounding-box accessor at `(settings, position)` — the transformed corner-to-corner
     /// box, in world space.
     #[must_use]
     pub fn bounding_box(&self, position: [i32; 3], settings: &PlaceSettings) -> BoundingBox {
@@ -756,9 +759,10 @@ impl StructureTemplate {
         }
     }
 
-    /// `StructurePlaceSettings.getRandomPalette(palettes, position)` — the
+    /// Vanilla's own place-settings random-palette accessor at `(palettes,
+    /// position)` — the
     /// palette index for a placement at `position`, from a fresh
-    /// `RandomSource.create(Mth.getSeed(pos))`.
+    /// default random source seeded from a position-derived hash.
     #[must_use]
     pub fn palette_for(&self, position: [i32; 3]) -> usize {
         if self.palettes.len() == 1 {

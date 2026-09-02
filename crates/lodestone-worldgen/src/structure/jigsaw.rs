@@ -1,4 +1,4 @@
-//! **Jigsaw assembly** — `JigsawPlacement.addPieces` and its `Placer`
+//! **Jigsaw assembly** — vanilla's own jigsaw-placement add-pieces and its placer
 //! (structure placement's S4).
 //!
 //! # What it is
@@ -11,30 +11,30 @@
 //! # How it works
 //!
 //! ```text
-//! addPieces:
+//! add_pieces (vanilla's own jigsaw-placement entry point):
 //!     height  = start_height.sample(random)              <- 0 draws for `absolute`
-//!     rotation = Rotation.getRandom(random)              <- 1 draw
-//!     centre  = start_pool.getRandomTemplate(random)     <- 1 draw
+//!     rotation = a random rotation draw                  <- 1 draw
+//!     centre  = start_pool's own random-template pick     <- 1 draw
 //!     [start_jigsaw_name: shuffle the centre's jigsaws and find it by name]
 //!     move the centre so its ground sits on the heightmap
 //!     stub position = (centreX, centreY, centreZ)        <- the biome filter's point
 //!  -- everything below happens only if the biome check passed --
 //!     free = maxDistanceAabb - centreBox
 //!     queue = [centre]
-//!     while queue: tryPlacingChildren(pop the highest placement priority)
+//!     while queue: try_placing_children (pop the highest placement priority)
 //! ```
 //!
 //! **RNG draw order and count are the specification**, and the nesting is where
-//! that bites: `getShuffledTemplates` is drawn once per source jigsaw,
-//! `Rotation.getShuffled` once per candidate element, and
-//! `getShuffledJigsawBlocks` once per *(element, rotation)* pair — inside two
+//! that bites: vanilla's own shuffled-templates accessor is drawn once per source jigsaw,
+//! its own shuffled-rotation pick once per candidate element, and
+//! its own shuffled-jigsaw-blocks accessor once per *(element, rotation)* pair — inside two
 //! loops. A draw hoisted out of the innermost loop produces a village that is
 //! entirely plausible and is not vanilla's.
 //!
 //! # Free space is exact, not approximate
 //!
-//! Vanilla accumulates free space in a `VoxelShape` and asks
-//! `joinIsNotEmpty(free, targetBox.deflate(0.25), ONLY_SECOND)`. Every operation it
+//! Vanilla accumulates free space in its own voxel-shape type and asks
+//! its own "join is not empty" test against `targetBox.deflate(0.25)` restricted to the second operand. Every operation it
 //! performs is "subtract an axis-aligned box", so the whole shape is always
 //! `positive \ (b₁ ∪ b₂ ∪ …)` and the containment question reduces exactly to
 //! `target ⊆ positive ∧ ∀i target ∩ bᵢ = ∅` — see [`FreeSpace`]. This is not a
@@ -42,8 +42,8 @@
 //!
 //! # Where this runs, and why that is a deviation
 //!
-//! Vanilla assembles lazily inside `getPiecesBuilder()` and then fixes piece Y
-//! inside `postProcess`, mutating a shared `StructureStart`. Assembly here happens
+//! Vanilla assembles lazily inside its own pieces-builder accessor and then fixes piece Y
+//! inside its own post-process step, mutating a shared `StructureStart`. Assembly here happens
 //! **eagerly at start time**, in
 //! [`StructureKind::generate_pieces`](super::StructureKind), for the reason S2
 //! recorded: our chunks are generated independently and memoised, so anything
@@ -82,7 +82,7 @@ use super::{
     BoundingBox, HeightmapKind, PiecePlacement, StartContext, StructurePiece, free_height,
 };
 
-/// `JigsawBlockEntity.JointType`.
+/// Vanilla's own jigsaw-block-entity joint-type enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JointType {
     /// `aligned` — the two blocks' `top` facings must match as well as their
@@ -92,8 +92,8 @@ pub enum JointType {
     Rollable,
 }
 
-/// One jigsaw block of an element — vanilla's
-/// `StructureTemplate.JigsawBlockInfo`.
+/// One jigsaw block of an element — vanilla's own
+/// structure-template jigsaw-block-info type.
 #[derive(Debug, Clone)]
 pub struct JigsawBlockInfo {
     /// The block's world position (already transformed by the scan's position and
@@ -161,7 +161,7 @@ impl JigsawBlockInfo {
         }
     }
 
-    /// `FeaturePoolElement.getShuffledJigsawBlocks`' single synthetic block:
+    /// Vanilla's own feature-pool-element's shuffled-jigsaw-blocks accessor's single synthetic block:
     /// `fromFrontAndTop(DOWN, SOUTH)`, pool and target `minecraft:empty`, name
     /// `minecraft:bottom`, joint `rollable`, both priorities 0.
     #[must_use]
@@ -179,7 +179,7 @@ impl JigsawBlockInfo {
         }
     }
 
-    /// `JigsawBlock.canAttach(source, target)`.
+    /// Vanilla's own jigsaw-block "can attach" at `(source, target)`.
     ///
     /// Three conditions, and the third is the one that is easy to get backwards:
     /// the **source's `target`** must equal the **target's `name`**, not the other
@@ -192,7 +192,7 @@ impl JigsawBlockInfo {
     }
 }
 
-/// An axis-aligned box in `f64`, i.e. `AABB.of(BoundingBox)`.
+/// An axis-aligned box in `f64`, i.e. vanilla's own AABB-of-bounding-box conversion.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Aabb {
     min: [f64; 3],
@@ -200,7 +200,7 @@ struct Aabb {
 }
 
 impl Aabb {
-    /// `AABB.of(box)` — a `BoundingBox` is inclusive, an `AABB` half-open, so the
+    /// Vanilla's own AABB-of-bounding-box conversion — a `BoundingBox` is inclusive, an `AABB` half-open, so the
     /// maximum grows by one.
     fn of(b: BoundingBox) -> Self {
         Self {
@@ -224,8 +224,8 @@ impl Aabb {
         (0..3).all(|i| other.min[i] >= self.min[i] && other.max[i] <= self.max[i])
     }
 
-    /// Strict overlap — two boxes that merely touch share no volume, and a
-    /// `VoxelShape` join of them is empty.
+    /// Strict overlap — two boxes that merely touch share no volume, and
+    /// vanilla's own voxel-shape join of them is empty.
     fn overlaps(self, other: Self) -> bool {
         (0..3).all(|i| self.min[i] < other.max[i] && self.max[i] > other.min[i])
     }
@@ -233,7 +233,7 @@ impl Aabb {
 
 /// The free-space accumulator: `positive` minus everything in `subtracted`.
 ///
-/// See the module doc for why this is exactly vanilla's `VoxelShape` and not an
+/// See the module doc for why this is exactly vanilla's own voxel shape and not an
 /// approximation of it.
 #[derive(Debug, Clone)]
 struct FreeSpace {
@@ -242,8 +242,8 @@ struct FreeSpace {
 }
 
 impl FreeSpace {
-    /// `!Shapes.joinIsNotEmpty(free, create(AABB.of(box).deflate(0.25)),
-    /// ONLY_SECOND)` — is the deflated box entirely inside the free region?
+    /// Vanilla's own negated "join is not empty" test against the deflated box,
+    /// restricted to the second operand — is the deflated box entirely inside the free region?
     ///
     /// The `0.25` deflation exists so that two boxes sharing a face do not count
     /// as colliding. Over integer boxes it changes no answer, which is worth
@@ -254,14 +254,14 @@ impl FreeSpace {
         self.positive.contains(candidate) && !self.subtracted.iter().any(|s| s.overlaps(candidate))
     }
 
-    /// `joinUnoptimized(free, create(AABB.of(box)), ONLY_FIRST)` — subtract the
+    /// Vanilla's own unoptimized-join, restricted to the first operand — subtract the
     /// box, undeflated.
     fn occupy(&mut self, box_: BoundingBox) {
         self.subtracted.push(Aabb::of(box_));
     }
 }
 
-/// `SequencedPriorityIterator` — FIFO within a priority, highest priority first.
+/// Vanilla's own sequenced-priority iterator — FIFO within a priority, highest priority first.
 ///
 /// Vanilla iterates a fastutil hash map to find the next highest priority, which
 /// looks order-dependent and is not: one queue per priority means the maximum is
@@ -303,7 +303,7 @@ impl<T> PriorityQueue<T> {
 pub enum HeightProvider {
     /// `constant` — the bare `{"absolute": n}` shape included. **No draw.**
     Constant(VerticalAnchor),
-    /// `uniform` — `Mth.randomBetweenInclusive`, exactly **one** draw.
+    /// `uniform` — vanilla's own math-helper random-between-inclusive, exactly **one** draw.
     Uniform(VerticalAnchor, VerticalAnchor),
 }
 
@@ -540,7 +540,7 @@ fn parse_weighted<T>(
     Ok(out)
 }
 
-/// `WeightedList.getRandomOrThrow(random)` — one `nextInt(totalWeight)`, then the
+/// Vanilla's own weighted-list "get random or throw" at `(random)` — one `nextInt(totalWeight)`, then the
 /// cumulative walk. `Flat` and `Compact` are the same function of that index, so
 /// there is only one behaviour to reproduce, and a **zero-weight entry is
 /// unreachable** rather than reachable-with-probability-zero.
@@ -559,12 +559,14 @@ fn weighted_pick<'a, T, R: RandomSource>(entries: &'a [(T, i32)], random: &mut R
     None
 }
 
-/// `PoolAliasLookup` — the resolved alias → target map for one structure instance.
+/// The resolved alias → target map for one structure instance — vanilla's own
+/// pool-alias-lookup.
 ///
 /// # Its random is not the structure's stream
 ///
-/// `PoolAliasLookup.create(bindings, startPos, seed)` builds
-/// `RandomSource.create(seed).forkPositional().at(startPos)` — a *positional* fork
+/// Vanilla's own pool-alias-lookup construction at `(bindings, startPos, seed)` builds
+/// a fresh default random source seeded from `seed`, forked positional and
+/// re-seeded at `startPos` — a *positional* fork
 /// of the **world** seed, entirely separate from the `WorldgenRandom` the rest of
 /// jigsaw assembly draws from. So the bindings cost the structure's own stream
 /// nothing, and the map is a pure function of `(world seed, start position)`.
@@ -574,7 +576,7 @@ pub struct PoolAliasLookup {
 }
 
 impl PoolAliasLookup {
-    /// `PoolAliasLookup.create(bindings, pos, seed)`. An empty binding list is
+    /// Vanilla's own pool-alias-lookup construction at `(bindings, pos, seed)`. An empty binding list is
     /// vanilla's `EMPTY`, i.e. the identity, and derives no random at all.
     #[must_use]
     pub fn create(bindings: &[PoolAlias], pos: [i32; 3], seed: i64) -> Self {
@@ -752,7 +754,7 @@ pub struct JigsawStub<R> {
     aliases: PoolAliasLookup,
 }
 
-/// `JigsawPlacement.addPieces`' eager half: everything up to the stub position.
+/// Vanilla's own jigsaw-placement add-pieces' eager half: everything up to the stub position.
 ///
 /// `Ok(None)` is vanilla's `Optional.empty()` — an empty centre pool, a missing
 /// named start jigsaw, or a centre piece that does not fit the dimension padding.
@@ -771,9 +773,10 @@ pub fn begin<R: RandomSource>(
 ) -> Option<JigsawStub<R>> {
     let start_height = config.start_height.sample(&mut random, min_y, height);
     let position = [cx * 16, start_height, cz * 16];
-    // `PoolAliasLookup.create(this.poolAliases, startPos, context.seed())` is an
-    // *argument* to `addPieces`, so it is built after the start height is sampled
-    // and before `Rotation.getRandom`. Its own random is a positional fork of the
+    // Vanilla's own pool-alias-lookup construction at `(this.poolAliases,
+    // startPos, context.seed())` is an
+    // *argument* to its own jigsaw-placement add-pieces, so it is built after the start height is sampled
+    // and before its own random-rotation draw. Its own random is a positional fork of the
     // world seed, so where it sits in that sequence changes nothing — but the
     // position it keys on is the pre-adjustment `startPos`, not the centre.
     let aliases = PoolAliasLookup::create(&config.pool_aliases, position, seed);
@@ -898,14 +901,14 @@ pub fn finish<R: RandomSource>(
 }
 
 /// The `referencePos` every piece of a start is processed against:
-/// `StructureStart.placeInChunk`'s
+/// vanilla's own structure-start place-in-chunk step's own
 /// `new BlockPos(centre.getX(), pieces[0].boundingBox.minY(), centre.getZ())`,
 /// where `centre` is the **first** piece's box centre.
 ///
 /// A whole-start fact, computed once from the piece list rather than carried by
 /// each piece — which is also why it is public here and consumed by
 /// `structure_place_stage` rather than baked into a [`PiecePlacement`].
-/// `BoundingBox.getCenter()` is `min + (max - min + 1) / 2`, an integer divide, and
+/// Vanilla's own bounding-box "get center" is `min + (max - min + 1) / 2`, an integer divide, and
 /// it is **not** `(min + max) / 2` for an even span.
 #[must_use]
 pub fn reference_position(pieces: &[StructurePiece]) -> [i32; 3] {
@@ -920,7 +923,7 @@ pub fn reference_position(pieces: &[StructurePiece]) -> [i32; 3] {
     ]
 }
 
-/// One entry of `JigsawPlacement.Placer.placing`.
+/// One entry of vanilla's own jigsaw-placement placer's `placing` queue.
 #[derive(Debug, Clone, Copy)]
 struct PieceState {
     piece: usize,
@@ -1101,7 +1104,7 @@ impl Placer<'_> {
                         let target_box_position =
                             [raw_box_pos[0], raw_box_pos[1] + y_offset, raw_box_pos[2]];
                         if expand_to > 0 {
-                            // `BoundingBox.encapsulate(pos)` **mutates**, and the
+                            // Vanilla's own bounding-box "encapsulate" **mutates**, and the
                             // grown box is what the piece, the free-space
                             // subtraction and the beard all see.
                             let new_size =
@@ -1254,7 +1257,7 @@ fn element_placements(
     }
 }
 
-/// `BoundingBox.isInside(pos)`.
+/// Vanilla's own bounding-box "is inside" at `(pos)`.
 fn is_inside(box_: BoundingBox, pos: [i32; 3]) -> bool {
     (0..3).all(|i| pos[i] >= box_.min[i] && pos[i] <= box_.max[i])
 }
@@ -1547,7 +1550,7 @@ mod tests {
         assert!(why.contains("minecraft:future"), "{why}");
     }
 
-    /// `WeightedList.getRandomOrThrow` is one `nextInt(totalWeight)` plus the
+    /// Vanilla's own weighted-list "get random or throw" is one `nextInt(totalWeight)` plus the
     /// cumulative walk, and a zero-weight entry is unreachable rather than rare.
     #[test]
     fn weighted_pick_walks_cumulative_weights() {
@@ -1579,7 +1582,7 @@ mod tests {
     }
 
     /// `referencePos` is the **first** piece's box centre with its own `minY`, and
-    /// `getCenter` is `min + (max - min + 1) / 2` — not `(min + max) / 2`, which
+    /// vanilla's own "get center" is `min + (max - min + 1) / 2` — not `(min + max) / 2`, which
     /// differs by one on every even span.
     #[test]
     fn reference_position_is_the_first_pieces_centre_column_and_floor() {
@@ -1619,7 +1622,7 @@ mod tests {
         use lodestone_worldgen_core::rng::{LegacyRandomSource, WorldgenRandom};
         let fresh = || WorldgenRandom::new(LegacyRandomSource::new(99));
 
-        // `ConstantHeight.sample` returns `value.resolveY(context)` — no draw.
+        // Vanilla's own constant-height sample returns `value.resolveY(context)` — no draw.
         let mut constant_arm = fresh();
         assert_eq!(
             HeightProvider::Constant(VerticalAnchor::Absolute(0)).sample(&mut constant_arm, -64, 384),
@@ -1632,7 +1635,8 @@ mod tests {
             "a constant start height consumed a draw"
         );
 
-        // `UniformHeight.sample` is `Mth.randomBetweenInclusive(random, min, max)`,
+        // Vanilla's own uniform-height sample is its own math-helper
+        // random-between-inclusive at `(random, min, max)`,
         // i.e. one `nextInt(max - min + 1)`.
         let uniform =
             HeightProvider::Uniform(VerticalAnchor::Absolute(-40), VerticalAnchor::Absolute(-20));
