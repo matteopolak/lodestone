@@ -2,7 +2,7 @@
 //!
 //! # What it is
 //!
-//! The shell's `LevelStorageSource`: it answers "which worlds exist?", "which
+//! The shell's counterpart to vanilla's own level-storage source: it answers "which worlds exist?", "which
 //! directory is this one?", "where does a new one go?" and "delete that one".
 //! Persistence itself landed in issue
 //!  and reached
@@ -43,19 +43,19 @@
 //!
 //! [`saves_dir`] is the root; every world is a subdirectory of it holding a
 //! `level.dat` (vanilla's own layout, so nothing had to move). Enumeration is
-//! `LevelStorageSource.findLevelCandidates` + `loadLevelSummaries`
+//! vanilla's own level-storage-source find-level-candidates + load-level-summaries
 //! collapsed into one synchronous pass:
 //!
 //! - list the root's entries, keep the **directories**, keep those with a
 //!   regular `level.dat` (vanilla additionally accepts the pre-1.13
 //!   `level.dat_old`, which this client has never written and does not read);
 //! - read each `level.dat` through [`lodestone_anvil::level_dat`] into a
-//!   [`WorldSummary`], vanilla's `LevelSummary`;
+//!   [`WorldSummary`], vanilla's own level summary;
 //! - a directory whose `level.dat` will not decode becomes an
-//!   **unreadable** summary rather than being dropped — vanilla's
-//!   `CorruptedLevelSummary`, which is still listed, still deletable and not
+//!   **unreadable** summary rather than being dropped — vanilla's own
+//!   corrupted-level summary, which is still listed, still deletable and not
 //!   playable;
-//! - sort by [`WorldSummary::cmp_for_list`], which is `LevelSummary.compareTo`
+//! - sort by [`WorldSummary::cmp_for_list`], which is vanilla's own level-summary compare-to
 //!   verbatim: last-played **descending**, ties broken by directory name
 //!   ascending.
 //!
@@ -81,8 +81,8 @@
 //!   world's first open with whatever seed the launcher requested. Because
 //!   [`create_world`] made a *fresh* directory, that file does not exist yet, so
 //!   the requested seed wins — which is the whole point.
-//! - **Names**: [`sanitise_name`] is `FileUtil.sanitizeName` and
-//!   [`available_dir_name`] is `FileUtil.findAvailableName`, including its
+//! - **Names**: [`sanitise_name`] is vanilla's own sanitize-name and
+//!   [`available_dir_name`] is vanilla's own find-available-name, including its
 //!   `" (N)"` counter. See each for the two places this deliberately differs.
 //! - **Deletion is [`delete_world_in`], and it exists because its screen does**
 //!   (issue ). This
@@ -133,7 +133,7 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 /// The directory name every world folder sits under, matching vanilla's own
-/// `saves/` (`LevelStorageSource.createDefault` roots at `<game dir>/saves`).
+/// `saves/` (vanilla's own level-storage-source default roots at `<game dir>/saves`).
 pub const SAVES_DIR: &str = "saves";
 
 /// The folder name a *dedicated* server uses (`level-name=world` in
@@ -146,20 +146,20 @@ pub const SAVES_DIR: &str = "saves";
 pub const DEFAULT_WORLD_NAME: &str = "world";
 
 /// `selectWorld.newWorld` — the name [`available_dir_name`] falls back to for an
-/// empty typed name, matching `WorldCreationUiState.findResultFolder`.
+/// empty typed name, matching vanilla's own world-creation-UI-state find-result-folder.
 pub const DEFAULT_NEW_WORLD_NAME: &str = "New World";
 
-/// `WorldCreationUiState.findResultFolder`'s own second fallback (`:108`), used
+/// Vanilla's own world-creation-UI-state find-result-folder's own second fallback, used
 /// when the first one cannot produce a usable folder name at all.
 const LAST_RESORT_NAME: &str = "World";
 
-/// `SharedConstants.ILLEGAL_FILE_CHARACTERS`,
+/// Vanilla's own illegal-file-characters constant,
 /// verbatim and in vanilla's own order.
 const ILLEGAL_FILE_CHARACTERS: [char; 15] = [
     '/', '\n', '\r', '\t', '\0', '\u{c}', '`', '?', '*', '\\', '<', '>', '|', '"', ':',
 ];
 
-/// `FileUtil.MAX_FILE_NAME`.
+/// Vanilla's own max-file-name constant.
 const MAX_FILE_NAME: usize = 255;
 
 /// The root every world folder lives under.
@@ -182,7 +182,7 @@ pub fn default_world_dir() -> PathBuf {
     saves_dir().join(DEFAULT_WORLD_NAME)
 }
 
-/// One world on disk, as much of vanilla's `LevelSummary` as a 26.2 `level.dat`
+/// One world on disk, as much of vanilla's own level summary as a 26.2 `level.dat`
 /// can actually supply.
 ///
 /// # What is here and what vanilla has that this does not
@@ -193,7 +193,7 @@ pub fn default_world_dir() -> PathBuf {
 /// seed**, **no weather** and **no day-time**, so none of those can appear on a
 /// row no matter how much the UI would like them.
 ///
-/// Deliberately **not** ported from `LevelSummary`:
+/// Deliberately **not** ported from vanilla's own level summary:
 ///
 /// - `icon` — vanilla shows `icon.png`, a screenshot the client saves on quit.
 ///   This client writes none, so an icon field would be `None` forever: the
@@ -204,7 +204,7 @@ pub fn default_world_dir() -> PathBuf {
 /// - `requiresManualConversion` / `requiresFileFixing` / `experimental` /
 ///   `BackupStatus` — all four are `DataFixer` questions, and there is no data
 ///   fixer here. [`Self::readable`] is the one real failure mode this client
-///   has, and it maps to vanilla's `CorruptedLevelSummary`.
+///   has, and it maps to vanilla's own corrupted-level summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldSummary {
     /// The directory name under [`saves_dir`] — vanilla's `levelId`.
@@ -213,27 +213,28 @@ pub struct WorldSummary {
     /// to turn one back into a directory, and it re-checks that.
     pub dir_name: String,
     /// `LevelName`, or [`Self::dir_name`] when it is absent or empty —
-    /// `LevelSummary.getLevelName`.
+    /// vanilla's own level-name accessor.
     pub display_name: String,
     /// `LastPlayed`, epoch millis, or `-1` when unknown.
     ///
-    /// `-1` is vanilla's own sentinel, not ours: `SymlinkLevelSummary.getLastPlayed`
-    /// returns `-1L` and `WorldListEntry` tests
+    /// `-1` is vanilla's own sentinel, not ours: its own symlink-level-summary
+    /// last-played accessor
+    /// returns `-1L` and vanilla's own world-list-entry widget tests
     /// `lastPlayed != -1L` before formatting a date.
     pub last_played: i64,
     /// `GameType`: 0 survival, 1 creative, 2 adventure, 3 spectator. `None`
     /// when the field is absent.
     pub game_type: Option<i32>,
     /// `Version.Name`, the display version string — `None` is vanilla's
-    /// `selectWorld.versionUnknown`.
+    /// own unknown-version placeholder.
     pub version_name: Option<String>,
-    /// `allowCommands` — `LevelSummary.hasCommands`.
+    /// `allowCommands` — vanilla's own has-commands accessor.
     pub allow_commands: bool,
-    /// `difficulty_settings.hardcore` — `LevelSummary.isHardcore`.
+    /// `difficulty_settings.hardcore` — vanilla's own is-hardcore accessor.
     pub hardcore: bool,
     /// `false` when the directory has a `level.dat` that would not decode.
     ///
-    /// Vanilla's `CorruptedLevelSummary`: still listed, still deletable, **not**
+    /// Vanilla's own corrupted-level summary: still listed, still deletable, **not**
     /// playable and not editable. Dropping such a world from the list instead
     /// would leave a folder the player can see in Finder and cannot get rid of
     /// from the game.
@@ -241,7 +242,7 @@ pub struct WorldSummary {
 }
 
 impl WorldSummary {
-    /// `LevelSummary.primaryActionActive` (`:193-195`) — whether **Play
+    /// Vanilla's own primary-action-active accessor — whether **Play
     /// Selected World** is live for this row.
     ///
     /// Narrowed to `readable`: vanilla's `isDisabled()` is
@@ -253,13 +254,13 @@ impl WorldSummary {
         self.readable
     }
 
-    /// `LevelSummary.canEdit` (`:201-203`).
+    /// Vanilla's own can-edit accessor.
     #[must_use]
     pub fn can_edit(&self) -> bool {
         self.readable
     }
 
-    /// `LevelSummary.canRecreate` (`:205-207`) — the same predicate vanilla
+    /// Vanilla's own can-recreate accessor — the same predicate vanilla
     /// gives `canEdit`, kept separate because they answer different questions
     /// and only one of them is going to gain a screen first.
     #[must_use]
@@ -267,7 +268,7 @@ impl WorldSummary {
         self.readable
     }
 
-    /// `LevelSummary.canDelete` (`:209-211`) — **unconditionally `true`**, in
+    /// Vanilla's own can-delete accessor — **unconditionally `true`**, in
     /// vanilla too. A corrupt world is the one you most need to be able to
     /// remove.
     #[must_use]
@@ -275,7 +276,7 @@ impl WorldSummary {
         true
     }
 
-    /// `LevelSummary.compareTo` (`:78-84`), verbatim: last played
+    /// Vanilla's own level-summary compare-to, verbatim: last played
     /// **descending** (most recent first), ties broken by `levelId` ascending.
     ///
     /// Written as an explicit comparator rather than an `Ord` impl because the
@@ -289,7 +290,7 @@ impl WorldSummary {
             .then_with(|| self.dir_name.cmp(&rhs.dir_name))
     }
 
-    /// `LevelSummary.getInfo`'s readable branch (`:153-187`), minus the four
+    /// Vanilla's own level-summary get-info readable branch, minus the four
     /// `DataFixer` clauses this client has no source for: the game mode, then
     /// `", Cheats"` if commands are on, then `", Version: <name>"`.
     ///
@@ -313,12 +314,12 @@ impl WorldSummary {
         out
     }
 
-    /// `WorldListEntry`'s second text line:
+    /// Vanilla's own world-list-entry widget's second text line:
     /// the folder name, plus the last-played timestamp in parentheses when
     /// there is one.
     ///
     /// **The format is a deliberate deviation.** Vanilla uses
-    /// `Util.localizedDateFormatter(FormatStyle.SHORT)` — the *user's* locale
+    /// its own localized-date-formatter at short style — the *user's* locale
     /// and the *system* time zone. This shell has neither a locale table nor a
     /// tz database, so it prints ISO `YYYY-MM-DD HH:MM` in **UTC**. Guessing a
     /// locale format would be wrong in a way nobody could test; an ISO
@@ -335,8 +336,8 @@ impl WorldSummary {
     }
 }
 
-/// `GameType.getName()`, via the `gameMode.*` translation keys
-/// `LevelSummary.createInfo` builds (`:168`).
+/// Vanilla's own game-type name accessor, via the `gameMode.*` translation keys
+/// its own level-summary create-info builds.
 fn game_mode_caption(game_type: Option<i32>) -> &'static str {
     match game_type {
         Some(0) => "Survival",
@@ -385,13 +386,13 @@ pub fn format_epoch_millis_utc(millis: i64) -> Option<String> {
 
 /// Every world under `root`, sorted by [`WorldSummary::cmp_for_list`].
 ///
-/// `LevelStorageSource.findLevelCandidates` + `loadLevelSummaries`. Never fails:
+/// Vanilla's own level-storage-source find-level-candidates + load-level-summaries. Never fails:
 /// a missing or unlistable `root` is an **empty** list, which is the state a
 /// fresh install is in and which the world-select screen must render rather than
 /// crash on.
 ///
 /// Unlike vanilla this does **not** create `root` when it is missing
-/// (`findLevelCandidates` does, `LevelStorageSource.java`). Listing is a
+/// (vanilla's own find-level-candidates does). Listing is a
 /// read; the directory is created by [`create_world_in`], the one operation that
 /// needs it to exist. A client that is opened and never played should write
 /// nothing.
@@ -468,7 +469,7 @@ fn summarise_dir(path: &Path) -> Option<WorldSummary> {
     }
 }
 
-/// `FileUtil.sanitizeName`: every
+/// Vanilla's own sanitize-name: every
 /// [`ILLEGAL_FILE_CHARACTERS`] becomes `_`, then so does every `.`, `/` and `"`.
 ///
 /// The second pass overlaps the first (`/` and `"` are in both lists) and is
@@ -487,7 +488,7 @@ pub fn sanitise_name(name: &str) -> String {
         .collect()
 }
 
-/// `FileUtil.isPathPartPortable` (`:83-85`) — the reserved-Windows-filename
+/// Vanilla's own is-path-part-portable check — the reserved-Windows-filename
 /// check, as a matcher rather than a regex.
 ///
 /// Vanilla's pattern is `.*\.|(?:COM|CLOCK\$|CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?`
@@ -515,7 +516,7 @@ fn is_path_part_portable(name: &str) -> bool {
     true
 }
 
-/// `FileUtil.findAvailableName` (`:31-71`) against `root`: the directory name a
+/// Vanilla's own find-available-name against `root`: the directory name a
 /// world called `requested` should get, guaranteed not to be one that already
 /// exists.
 ///
@@ -533,7 +534,7 @@ fn is_path_part_portable(name: &str) -> bool {
 ///   creation immediately afterwards reports an unwritable root anyway.
 /// - An empty or whitespace-only `requested` becomes
 ///   [`DEFAULT_NEW_WORLD_NAME`], which is
-///   `WorldCreationUiState.findResultFolder`'s job (`:105`) rather than
+///   vanilla's own world-creation-UI-state find-result-folder's job rather than
 ///   `findAvailableName`'s. It is here because this is the only entry point.
 ///
 /// The counter is bounded: after [`MAX_DUPLICATE_ATTEMPTS`] it gives up and
@@ -587,14 +588,14 @@ pub fn available_dir_name(root: &Path, requested: &str) -> String {
 /// and the failure mode of exceeding it is one clashing name rather than a hang.
 const MAX_DUPLICATE_ATTEMPTS: u32 = 1_000;
 
-/// `FileUtil.COPY_COUNTER_PATTERN` (`:18`) applied: split `"name (7)"` into
+/// Vanilla's own copy-counter pattern applied: split `"name (7)"` into
 /// `("name", 7)`, or leave a name with no counter alone at `("name", 0)`.
 ///
 /// Vanilla's regex is `(<name>.*) \((<count>\d*)\)` with `DOTALL`, anchored by
 /// `matches()`. Note `\d*` accepts an **empty** count, which
 /// `Integer.parseInt("")` then throws on — vanilla would propagate that out of
 /// `findAvailableName` as an unchecked exception, which
-/// `WorldCreationUiState.findResultFolder` catches and answers with `"World"`.
+/// vanilla's own world-creation-UI-state find-result-folder catches and answers with `"World"`.
 /// Here an unparseable count simply means "no counter", which reaches the same
 /// place without the round trip through a panic.
 fn split_copy_counter(name: &str) -> (String, u32) {
@@ -761,7 +762,7 @@ pub fn create_world_in(
     std::fs::create_dir(&dir).map_err(SaveError::Io)?;
 
     // The typed name, trimmed, or the folder name when the player typed
-    // nothing — `LevelSummary.getLevelName` falls back to the id for an empty
+    // nothing — vanilla's own level-name accessor falls back to the id for an empty
     // `LevelName`, so writing an empty one would list the folder anyway; being
     // explicit means the file itself is honest.
     let trimmed = name.trim();
@@ -835,7 +836,7 @@ impl std::fmt::Display for DeleteError {
 impl std::error::Error for DeleteError {}
 
 /// Remove the world named `dir_name` from under `root` —
-/// `LevelStorageSource.LevelStorageAccess.deleteLevel`, and the destructive half
+/// vanilla's own level-storage-access delete-level, and the destructive half
 /// of issue.
 ///
 /// **There is deliberately no no-argument twin.** Every other operation here has
@@ -1058,7 +1059,7 @@ mod tests {
             by_dir("delta").display_name,
             "delta",
             "an empty LevelName falls back to the folder name \
-             (LevelSummary.getLevelName)"
+             (vanilla's own level-name accessor)"
         );
         assert_eq!(
             by_dir("alpha").version_name.as_deref(),
@@ -1067,7 +1068,7 @@ mod tests {
         );
 
         // The corrupt world: listed, not playable, still deletable — vanilla's
-        // `CorruptedLevelSummary`.
+        // own corrupted-level summary.
         let broken = by_dir("broken");
         assert!(!broken.readable);
         assert!(!broken.can_play());
@@ -1121,14 +1122,14 @@ mod tests {
         assert_eq!(
             dirs,
             vec!["zebra".to_string(), "aardvark".to_string()],
-            "most recently played first — `LevelSummary.compareTo` returns 1 \
-             when this.lastPlayed < rhs.lastPlayed"
+            "most recently played first — vanilla's own level-summary compare-to \
+             returns 1 when this.lastPlayed < rhs.lastPlayed"
         );
     }
 
     #[test]
     fn illegal_characters_become_underscores_including_the_dot() {
-        // Every character in `SharedConstants.ILLEGAL_FILE_CHARACTERS`, plus
+        // Every character in vanilla's own illegal-file-characters constant, plus
         // the `.` that only the second pass catches.
         assert_eq!(sanitise_name("a/b\\c:d*e?f\"g<h>i|j"), "a_b_c_d_e_f_g_h_i_j");
         assert_eq!(sanitise_name(".."), "__", "the traversal name is defused");
@@ -1150,7 +1151,7 @@ mod tests {
         plant_world(&root, "New World (1)", "New World", 1, 0);
         assert_eq!(available_dir_name(&root, "New World"), "New World (2)");
         // Asking for the *already-suffixed* name adopts its counter rather than
-        // producing `New World (1) (1)` — `FileUtil.COPY_COUNTER_PATTERN`.
+        // producing `New World (1) (1)` — vanilla's own copy-counter pattern.
         assert_eq!(available_dir_name(&root, "New World (1)"), "New World (2)");
         // An empty typed name is vanilla's `selectWorld.newWorld`.
         assert_eq!(available_dir_name(&root, "   "), "New World (2)");
