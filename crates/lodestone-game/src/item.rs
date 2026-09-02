@@ -22,7 +22,7 @@ use lodestone_model::{
 };
 
 /// The default maximum stack size when an item carries no
-/// `minecraft:max_stack_size` component. Matches vanilla's `Item.Properties`
+/// `minecraft:max_stack_size` component. Matches vanilla's own item-properties
 /// default of 64.
 pub const DEFAULT_MAX_STACK_SIZE: i32 = 64;
 
@@ -144,8 +144,8 @@ pub const BANNER_PATTERNS_COMPONENT: &str = "minecraft:banner_patterns";
 /// Well-known component identifier for `minecraft:base_color`.
 ///
 /// A shield stack's own dye tint, independent of any
-/// [`BANNER_PATTERNS_COMPONENT`] layer — vanilla's `DataComponents.BASE_COLOR`
-/// (`ShieldSpecialRenderer.submit`'s `baseColor`). Carried as
+/// [`BANNER_PATTERNS_COMPONENT`] layer — vanilla's own base-color component
+/// (its own shield-renderer's `baseColor`). Carried as
 /// [`ComponentValue::BaseColor`].
 pub const BASE_COLOR_COMPONENT: &str = "minecraft:base_color";
 /// Well-known component identifier for `minecraft:custom_model_data`.
@@ -193,7 +193,7 @@ pub fn is_bundle(item: &Identifier) -> bool {
 }
 
 /// The seven vanilla items carrying `minecraft:piercing_weapon`
-/// (`DataComponents.PIERCING_WEAPON`) in 26.2 — every tier of the spear,
+/// (vanilla's own piercing-weapon component) in 26.2 — every tier of the spear,
 /// transcribed from the real jar's item registration rather than guessed
 /// from a naming convention (unlike [`is_bundle`], "ends with `_spear`" is
 /// not itself the vanilla rule, just how this particular family happens to

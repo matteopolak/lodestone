@@ -150,7 +150,7 @@ pub struct LastSeenTracker {
 }
 
 impl LastSeenTracker {
-    /// Vanilla's window size (`LastSeenMessages.LAST_SEEN_MESSAGES_MAX_LENGTH`).
+    /// Vanilla's own last-seen-messages max-length constant.
     pub const VANILLA_CAPACITY: usize = 20;
 
     /// Vanilla's flush threshold: `markMessageAsProcessed` sends a standalone

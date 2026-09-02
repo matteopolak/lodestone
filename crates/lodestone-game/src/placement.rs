@@ -60,7 +60,7 @@
 use lodestone_model::math::{BlockPos, Rotation, Vec3f};
 use lodestone_model::{BlockFace, ClientAction, Hand, Identifier};
 
-/// A block axis (`Direction.Axis`). Version-free; the model models faces but not
+/// A block axis (vanilla's own direction-axis type). Version-free; the model models faces but not
 /// a bare axis, so pillar/log placement needs its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Axis {

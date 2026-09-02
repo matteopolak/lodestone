@@ -13,7 +13,7 @@
 //! I hand-write can round-trip through my own encoder happily while being wrong
 //! about the wire. Only the server's own bytes settle it. The zero-trailing-byte
 //! assertion after each decode is the alignment detector: a misparse of the
-//! variable-length NBT `Text` or the `ChatType.Bound` tail leaves the buffer
+//! variable-length NBT `Text` or the bound-chat-type tail leaves the buffer
 //! misaligned and trips instantly.
 //!
 //! Run:
@@ -101,7 +101,7 @@ fn read_string(r: &mut Reader) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// A `ChatType.Bound` as it appears on the wire: a registry `Holder<ChatType>`
+/// Vanilla's own bound chat type as it appears on the wire: a registry `Holder<ChatType>`
 /// (a VarInt reference id, since chat types are registered during config),
 /// a decorated sender name, and an optional target name.
 #[derive(Debug)]
@@ -164,7 +164,7 @@ struct DisguisedChat {
     chat_type: BoundChatType,
 }
 
-/// `ClientboundDisguisedChatPacket` = trusted NBT component + `ChatType.Bound`.
+/// `ClientboundDisguisedChatPacket` = trusted NBT component + a bound chat type.
 fn decode_disguised_chat(payload: &[u8]) -> DisguisedChat {
     let mut r = Reader::new(payload);
     let message = Text::from_nbt(&read_network_nbt(&mut r).expect("disguised chat message"));

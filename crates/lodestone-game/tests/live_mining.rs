@@ -101,7 +101,7 @@ const PORT: u16 = 25565;
 const RCON_PORT: u16 = 25566;
 const RCON_PASSWORD: &str = "lodestone";
 
-/// Stone's destroy time (`Blocks.STONE` `.strength(1.5F, 6.0F)`), used to build
+/// Stone's destroy time (vanilla's own stone block, `.strength(1.5F, 6.0F)`), used to build
 /// the `BreakInputs` the machine accumulates. Kept as an *injected* input, the
 /// same way `CollisionView` injects geometry — the crate holds no block table, so
 /// this test cannot pass by agreeing with a fixture we minted ourselves.

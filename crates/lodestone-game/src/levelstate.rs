@@ -85,7 +85,7 @@ use std::collections::BTreeMap;
 /// The 26.2 game-rule keys this crate names.
 ///
 /// 26.2 moved game rules to a registry
-/// entries under `BuiltInRegistries.GAME_RULE`, renamed to snake_case, 59 of
+/// entries under vanilla's own game-rule registry, renamed to snake_case, 59 of
 /// them, only `BOOL` and `INT` types. The renames are the trap: a 1.21 name is
 /// not deprecated, it is simply absent, so a lookup with the old spelling returns
 /// `None` forever and looks like a server that did not report the rule.
