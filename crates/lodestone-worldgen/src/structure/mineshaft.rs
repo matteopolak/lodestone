@@ -1,33 +1,33 @@
-//! **Mineshafts** — `MineshaftStructure` plus all four `MineshaftPieces` types,
+//! **Mineshafts** — the piece generator and all four piece kinds,
 //! and the first structure in this engine whose pieces are generated *eagerly*.
 //!
 //! # What it is
 //!
-//! A port of `MineshaftStructure.generatePiecesAndAdjust` and the four piece
-//! classes (`MineShaftRoom`, `MineShaftCorridor`, `MineShaftCrossing`,
-//! `MineShaftStairs`), producing the same [`StructurePiece`] list the rest of the
+//! An implementation of the reference piece-tree generator and the four piece
+//! kinds (room, corridor, crossing,
+//! stairs), producing the same [`StructurePiece`] list the rest of the
 //! structure engine consumes. Two structures ride on it: `minecraft:mineshaft` and
 //! `minecraft:mineshaft_mesa`, which differ only in three block states
-//! (`MineshaftStructure.Type`).
+//! (the mineshaft's wood/material type).
 //!
 //! # How it works, and why it is a second engine rather than a third generator
 //!
-//! Every other coded structure so far is a `SinglePieceStructure`: one box, one
-//! `postProcess`, and `findGenerationPoint` draws nothing. A mineshaft is the
+//! Every other coded structure so far is a single-piece structure: one box, one
+//! block-writing walk, and a generation-point search that draws nothing. A mineshaft is the
 //! opposite of that on both axes, and the two facts compound.
 //!
-//! **The pieces come first.** `findGenerationPoint` returns
-//! `Either.right(builder)` — the piece tree is grown *before* the biome filter runs
-//! and the start's own Y is `moveBelowSeaLevel`'s answer, which is a function of the
+//! **The pieces come first.** The generation-point search returns
+//! the whole finished builder — the piece tree is grown *before* the biome filter runs
+//! and the start's own Y is the answer of moving the whole tree below sea level, which is a function of the
 //! tree's total height. So the structure's generation point cannot be computed
 //! without generating pieces, which is the exact inversion of the lazy-stub rule the
 //! rest of [`super`] is built on. [`generate`] therefore does the whole job and
 //! [`super::Stub::Mineshaft`] carries the finished list across the biome check.
 //!
-//! **The tree is grown in two passes, boxes then blocks.** `addChildren` recurses to
+//! **The tree is grown in two passes, boxes then blocks.** The child-placement walk recurses to
 //! depth 8, each candidate box tested against every piece placed so far
-//! (`findCollisionPiece`), and *then* the whole set is shifted vertically by
-//! `moveBelowSeaLevel`. Blocks cannot be resolved during the first pass because
+//! (a collision-piece search), and *then* the whole set is shifted vertically by
+//! the move-below-sea-level step. Blocks cannot be resolved during the first pass because
 //! every one of them would move. [`Shaft`] is that first pass and
 //! [`Shaft::into_pieces`] is the second.
 //!
@@ -36,46 +36,46 @@
 //!     random.next_double()                     <- discarded; shifts the stream
 //!     Shaft::room(...)  +  add_children()      <- boxes only, depth <= 8
 //!     move_below_sea_level / mesa's surface pick
-//!     into_pieces(ctx, &mut random)             <- postProcess, in list order
+//!     into_pieces(ctx, &mut random)             <- block-writing walk, in list order
 //! ```
 //!
 //! # How to change it
 //!
 //! * **The RNG order is the specification and the two passes share one stream.**
-//!   `addChildren`'s draws interleave with `createRandomShaftPiece`'s
-//!   `nextInt(100)`, with `findCorridorSize`'s `nextInt(3)` and with the per-child
+//!   The child-placement walk's draws interleave with the random-shaft-piece pick's
+//!   draw bounded by 100, with the corridor-size search's draw bounded by 3 and with the per-child
 //!   recursion, so a reordering that looks like a tidy-up builds a different
-//!   mineshaft. `postProcess` then continues from the same stream — see the
+//!   mineshaft. The block-writing walk then continues from the same stream — see the
 //!   deviation note below.
-//! * **`getBlock` reads what earlier pieces wrote.** [`Shaft::into_pieces`] holds
-//!   one [`View`] for the whole start, so a corridor's `placeDoubleLowerOrUpperSupport`
+//! * **A block read sees what earlier pieces wrote.** [`Shaft::into_pieces`] holds
+//!   one [`View`] for the whole start, so a corridor's double lower/upper support placement
 //!   sees the planks the same corridor laid two statements earlier, and a crossing's
-//!   `placeSupportPillar` sees the terrain above it. Generating pieces into
+//!   support-pillar placement sees the terrain above it. Generating pieces into
 //!   independent block lists would break both.
-//! * **`canBeReplaced` is overridden for every mineshaft piece** and is the reason a
+//! * **The replaceability test is overridden for every mineshaft piece** and is the reason a
 //!   corridor's `cave_air` sweep does not erase the supports of the corridor it
 //!   crosses. [`View::can_be_replaced`] is that override; dropping it produces a
 //!   mineshaft with no woodwork wherever two pieces touch.
 //!
 //! # Deviations, all three of them the same shape
 //!
-//! Vanilla runs `postProcess` once **per decorating chunk**, with that chunk's own
-//! feature random, and clips every write to `chunkBB`. A corridor spanning two
+//! A faithful implementation runs its block-writing walk once **per decorating chunk**, with that chunk's own
+//! feature random, and clips every write to that chunk's own box. A corridor spanning two
 //! chunks therefore draws its cobwebs twice, from two unrelated streams, and keeps
-//! whichever half landed. There is no single vanilla answer to reproduce, exactly as
+//! whichever half landed. There is no single deterministic answer to reproduce, exactly as
 //! `swamp_hut`'s average ground height had none. Resolved eagerly here, once:
 //!
-//! | vanilla | here | ledger row |
+//! | reference behaviour | here | ledger row |
 //! |---|---|---|
-//! | `postProcess`'s random is the decorating chunk's | the structure's own stream, continuing after piece layout | `coded:region_random` |
-//! | `isInInvalidLocation` clamps its shell walk to `chunkBB`, so a piece can be invalid in one chunk and valid in another | the walk covers the whole inflated box, once | `mineshaft:invalid_location_scope` |
-//! | `hasSturdyNeighbours` / `placeBlock` skip positions outside `chunkBB` | no chunk gate; `structure_place_stage` clips instead | as above |
+//! | the block-writing walk's random is the decorating chunk's | the structure's own stream, continuing after piece layout | `coded:region_random` |
+//! | the invalid-location check clamps its shell walk to the decorating chunk's box, so a piece can be invalid in one chunk and valid in another | the walk covers the whole inflated box, once | `mineshaft:invalid_location_scope` |
+//! | the sturdy-neighbours check / block placement skip positions outside the decorating chunk's box | no chunk gate; `structure_place_stage` clips instead | as above |
 //!
 //! # Dependencies
 //!
 //! [`StartContext`] for column heights and the four-way
 //! [`BlockKind`](crate::aquifer::BlockKind), and
-//! [`super::template::BlockState`] for the mirror/rotate transform `placeBlock`
+//! [`super::template::BlockState`] for the mirror/rotate transform block placement
 //! applies.
 
 use std::collections::HashMap;
@@ -91,27 +91,28 @@ use super::{
     BoundingBox, CodedBlock, HeightmapKind, StartContext, StructurePiece, free_height,
 };
 
-/// `MineshaftPieces.MAX_DEPTH`.
+/// The deepest a child piece may recurse.
 const MAX_DEPTH: i32 = 8;
-/// The `Math.abs(footX - startBox.minX()) <= 80` bound in `generateAndAddPiece`.
+/// The absolute-distance-from-the-start-box-min-X bound a new piece's foot must
+/// stay within.
 const MAX_SPREAD: i32 = 80;
-/// `MineshaftPieces.MAGIC_START_Y` — every box is laid out at this Y and then
+/// Every box is laid out at this Y and then
 /// moved.
 const MAGIC_START_Y: i32 = 50;
-/// `MineshaftPieces.MAX_PILLAR_HEIGHT`.
+/// The tallest a support pillar may rise.
 const MAX_PILLAR_HEIGHT: i32 = 20;
-/// `MineshaftPieces.MAX_CHAIN_HEIGHT`.
+/// The tallest a support chain may rise.
 const MAX_CHAIN_HEIGHT: i32 = 50;
-/// `BuiltInLootTables.ABANDONED_MINESHAFT`.
+/// The abandoned-mineshaft loot table id.
 const MINESHAFT_LOOT: &str = "minecraft:chests/abandoned_mineshaft";
 
-/// `MineshaftStructure.Type` — the three wood states, and nothing else.
+/// A mineshaft's wood/material type — the three states, and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wood {
-    /// `NORMAL` — oak.
+    /// Oak.
     Normal,
-    /// `MESA` — dark oak, and the type whose vertical placement samples the
-    /// surface instead of `moveBelowSeaLevel`.
+    /// Dark oak, and the type whose vertical placement samples the
+    /// surface instead of moving below sea level.
     Mesa,
 }
 
@@ -130,7 +131,7 @@ impl Wood {
         }
     }
 
-    /// The fence's *block name* only: `placeSupport` sets `west`/`east` on it, so
+    /// The fence's *block name* only: support placement sets `west`/`east` on it, so
     /// the caller spells the properties.
     fn fence_name(self) -> &'static str {
         match self {
@@ -148,23 +149,23 @@ impl Wood {
 }
 
 /// Which piece a slot in [`Shaft::pieces`] holds, plus the per-kind facts its
-/// `postProcess` reads.
+/// block-writing walk reads.
 #[derive(Debug, Clone)]
 enum Kind {
-    /// `MineShaftRoom`. Carries `childEntranceBoxes`, which `move` shifts along
+    /// A room. Carries its child entrance boxes, which the vertical-move step shifts along
     /// with the box — the one piece here with mutable state beyond its box.
     Room { entrances: Vec<BoundingBox> },
-    /// `MineShaftCorridor`.
+    /// A corridor.
     Corridor {
         has_rails: bool,
         spider_corridor: bool,
         sections: i32,
     },
-    /// `MineShaftCrossing`. `direction` is a *field*, not the piece's orientation
-    /// — `MineShaftCrossing` never calls `setOrientation`, so its `postProcess`
+    /// A crossing. `direction` is a *field*, not the piece's orientation
+    /// — a crossing never sets an orientation, so its block-writing walk
     /// works in absolute coordinates.
     Crossing { direction: Facing, two_floored: bool },
-    /// `MineShaftStairs`.
+    /// A stairs piece.
     Stairs,
 }
 
@@ -172,7 +173,7 @@ enum Kind {
 #[derive(Debug, Clone)]
 struct Node {
     box_: BoundingBox,
-    /// `setOrientation`'s argument, or `None` for the room and the crossing — both
+    /// The piece's fixed orientation, or `None` for the room and the crossing — both
     /// of which leave `orientation` null and therefore address blocks absolutely.
     orientation: Option<Facing>,
     gen_depth: i32,
@@ -180,7 +181,7 @@ struct Node {
 }
 
 impl Node {
-    /// `getWorldX/Y/Z`, including the null-orientation identity both the room and
+    /// The local-to-world position transform, including the null-orientation identity both the room and
     /// the crossing depend on.
     fn world_pos(&self, x: i32, y: i32, z: i32) -> [i32; 3] {
         let Some(orientation) = self.orientation else {
@@ -199,7 +200,7 @@ impl Node {
         [wx, y + self.box_.min[1], wz]
     }
 
-    /// `setOrientation`'s `(mirror, rotation)` table, or the null-orientation
+    /// The orientation's `(mirror, rotation)` table, or the null-orientation
     /// identity.
     fn transform(&self) -> (Mirror, Rotation) {
         match self.orientation {
@@ -221,7 +222,7 @@ impl Node {
     }
 }
 
-/// The piece tree under construction — `StructurePiecesBuilder`, narrowed to what
+/// The piece tree under construction — a piece-builder, narrowed to what
 /// a mineshaft asks of it.
 #[derive(Debug)]
 pub struct Shaft {
@@ -258,7 +259,7 @@ impl Shaft {
             })
     }
 
-    /// `offsetPiecesVertically(dy)`, including `MineShaftRoom.move`'s override that
+    /// Shifts every piece's box by `dy`, including the room's own override that
     /// shifts the entrance boxes too.
     fn offset_vertically(&mut self, dy: i32) {
         for piece in &mut self.pieces {
@@ -273,9 +274,9 @@ impl Shaft {
         }
     }
 
-    /// `moveBelowSeaLevel(seaLevel, minY, random, 10)`.
+    /// Moves the whole shaft's box below sea level, offset by `offset`.
     ///
-    /// The `random.nextInt` is conditional on the shaft fitting under `maxY`, so a
+    /// The random draw is conditional on the shaft fitting under `max_y`, so a
     /// tall shaft consumes no draw here — which is why this cannot be hoisted out
     /// of the branch.
     fn move_below_sea_level<R: RandomSource>(
@@ -287,7 +288,7 @@ impl Shaft {
     ) -> i32 {
         let max_y = sea_level - offset;
         let box_ = self.bounding_box();
-        // `getYSpan()` is `maxY - minY + 1`.
+        // The box's Y span is `maxY - minY + 1`.
         let mut y1 = (box_.max[1] - box_.min[1] + 1) + min_y + 1;
         if y1 < max_y {
             y1 += random.next_int_bounded(max_y - y1);
@@ -298,10 +299,10 @@ impl Shaft {
     }
 }
 
-/// `MineshaftStructure.findGenerationPoint` + `generatePiecesAndAdjust`, whole.
+/// A mineshaft's generation-point search plus piece generation, whole.
 ///
-/// Returns the finished piece list and the start position vanilla's stub reports
-/// — `(middleBlockX, 50 + dy, minBlockZ)`, which is *not* the chunk middle in Z and
+/// Returns the finished piece list and the start position a faithful stub reports
+/// — the chunk's middle block X, `50 + dy`, the chunk's min block Z, which is *not* the chunk middle in Z and
 /// is not the room's own corner either.
 #[must_use]
 pub fn generate<R: RandomSource>(
@@ -312,16 +313,15 @@ pub fn generate<R: RandomSource>(
     blocking_biomes: &std::collections::HashSet<String>,
     random: &mut R,
 ) -> (Vec<StructurePiece>, [i32; 3]) {
-    // `context.random().nextDouble()` — discarded, and the canonical
+    // One discarded double draw — the canonical
     // stream-shifting trap. Without it every draw below lands one value early.
     let _ = random.next_double();
     let mut shaft = Shaft {
         pieces: Vec::new(),
         wood,
     };
-    // `new MineShaftRoom(0, random, chunkPos.getBlockX(2), chunkPos.getBlockZ(2))`
-    // — the room's corner is at local (2, 2) of the chunk, and its three spans are
-    // three draws in constructor-argument order: maxX, maxY, maxZ.
+    // The starting room's corner is at local (2, 2) of the chunk, and its three
+    // spans are three draws in this order: maxX, maxY, maxZ.
     let west = cx * 16 + 2;
     let north = cz * 16 + 2;
     let max_x = west + 7 + random.next_int_bounded(6);
@@ -343,7 +343,7 @@ pub fn generate<R: RandomSource>(
 
     let sea_level = ctx.sea_level();
     let dy = if wood == Wood::Mesa {
-        // `getCenter` is `min + (max - min + 1) / 2` per axis, the same asymmetric
+        // The box centre is `min + (max - min + 1) / 2` per axis, the same asymmetric
         // rounding `jigsaw::reference_position` documents.
         let box_ = shaft.bounding_box();
         let centre = [
@@ -351,12 +351,12 @@ pub fn generate<R: RandomSource>(
             box_.min[1] + (box_.max[1] - box_.min[1] + 1) / 2,
             box_.min[2] + (box_.max[2] - box_.min[2] + 1) / 2,
         ];
-        // `getBaseHeight` is `getFirstOccupiedHeight + 1`.
+        // The free-height convention: one above the topmost occupied cell.
         let surface = free_height(ctx, centre[0], centre[2], HeightmapKind::WorldSurfaceWg);
         let target = if surface <= sea_level {
             sea_level
         } else {
-            // `Mth.randomBetweenInclusive(random, seaLevel, surface)`.
+            // An inclusive-both-ends draw between sea level and the surface.
             random.next_int_bounded(surface - sea_level + 1) + sea_level
         };
         let dy = target - centre[1];
@@ -373,8 +373,8 @@ pub fn generate<R: RandomSource>(
     )
 }
 
-/// `MineshaftPieces.generateAndAddPiece` — the spread bound, then
-/// `createRandomShaftPiece`, then recursion.
+/// The spread bound, then
+/// a random shaft piece pick, then recursion.
 fn generate_and_add<R: RandomSource>(
     shaft: &mut Shaft,
     start_box: BoundingBox,
@@ -396,10 +396,10 @@ fn generate_and_add<R: RandomSource>(
     Some(index)
 }
 
-/// `MineshaftPieces.createRandomShaftPiece`.
+/// Picks and builds a random shaft piece kind at `foot`.
 ///
-/// One `nextInt(100)` decides the family, and only the chosen family's `find*`
-/// draws anything — so a rejected candidate still costs the family's own draws.
+/// One draw bounded by 100 decides the family, and only the chosen family's own
+/// candidate search draws anything — so a rejected candidate still costs the family's own draws.
 fn create_random_shaft_piece<R: RandomSource>(
     shaft: &mut Shaft,
     random: &mut R,
@@ -430,7 +430,8 @@ fn create_random_shaft_piece<R: RandomSource>(
         }))
     } else {
         let box_ = find_corridor_size(shaft, random, foot, direction)?;
-        // `MineShaftCorridor`'s constructor draws *after* `findCorridorSize`, and
+        // The corridor's own has-rails/is-spider draws happen *after* the
+        // corridor-size search, and
         // both come out of the same stream: two draws for an accepted corridor,
         // none for a rejected one.
         let has_rails = random.next_int_bounded(3) == 0;
@@ -460,8 +461,8 @@ fn moved(min: [i32; 3], max: [i32; 3], foot: [i32; 3]) -> BoundingBox {
     }
 }
 
-/// `MineShaftCorridor.findCorridorSize` — up to three candidate lengths, longest
-/// first, one `nextInt(3)` total.
+/// A corridor's candidate-length search — up to three candidate lengths, longest
+/// first, one draw bounded by 3 total.
 fn find_corridor_size<R: RandomSource>(
     shaft: &Shaft,
     random: &mut R,
@@ -485,7 +486,7 @@ fn find_corridor_size<R: RandomSource>(
     None
 }
 
-/// `MineShaftCrossing.findCrossing` — the `nextInt(4)` that decides a two-floored
+/// A crossing's candidate search — the draw bounded by 4 that decides a two-floored
 /// crossing is drawn **before** the collision test, so it is spent either way.
 fn find_crossing<R: RandomSource>(
     shaft: &Shaft,
@@ -507,7 +508,7 @@ fn find_crossing<R: RandomSource>(
     }
 }
 
-/// `MineShaftStairs.findStairs` — no RNG at all.
+/// A stairs piece's candidate search — no RNG at all.
 fn find_stairs(shaft: &Shaft, foot: [i32; 3], direction: Facing) -> Option<BoundingBox> {
     let candidate = match direction {
         Facing::South => moved([0, -5, 0], [2, 2, 8], foot),
@@ -522,7 +523,7 @@ fn find_stairs(shaft: &Shaft, foot: [i32; 3], direction: Facing) -> Option<Bound
     }
 }
 
-/// `StructurePiece.addChildren`, dispatched on the piece kind.
+/// Grows a piece's children, dispatched on the piece kind.
 fn add_children<R: RandomSource>(
     shaft: &mut Shaft,
     index: usize,
@@ -553,7 +554,7 @@ fn add_children<R: RandomSource>(
     }
 }
 
-/// `MineShaftCorridor.addChildren`.
+/// A corridor's own children growth.
 fn corridor_children<R: RandomSource>(
     shaft: &mut Shaft,
     box_: BoundingBox,
@@ -651,8 +652,8 @@ fn corridor_children<R: RandomSource>(
     }
 }
 
-/// `MineShaftCrossing.addChildren` — three arms always, plus up to four more for a
-/// two-floored crossing, each behind its own `nextBoolean`.
+/// A crossing's own children growth — three arms always, plus up to four more for a
+/// two-floored crossing, each behind its own boolean draw.
 fn crossing_children<R: RandomSource>(
     shaft: &mut Shaft,
     box_: BoundingBox,
@@ -685,8 +686,8 @@ fn crossing_children<R: RandomSource>(
         }
     }
     if two_floored {
-        // `minY + 3 + 1`, the upper floor's foot. Four independent `nextBoolean`s,
-        // all four drawn in source order regardless of whether the piece lands.
+        // `minY + 3 + 1`, the upper floor's foot. Four independent boolean draws,
+        // all four drawn in this fixed order regardless of whether the piece lands.
         let upper = box_.min[1] + 3 + 1;
         if random.next_bool() {
             generate_and_add(shaft, start_box, random, [box_.min[0] + 1, upper, box_.min[2] - 1], Facing::North, depth);
@@ -703,7 +704,7 @@ fn crossing_children<R: RandomSource>(
     }
 }
 
-/// `MineShaftStairs.addChildren` — one child, straight on.
+/// A stairs piece's own children growth — one child, straight on.
 fn stairs_children<R: RandomSource>(
     shaft: &mut Shaft,
     box_: BoundingBox,
@@ -724,7 +725,7 @@ fn stairs_children<R: RandomSource>(
     generate_and_add(shaft, start_box, random, foot, orientation, depth);
 }
 
-/// `MineShaftRoom.addChildren` — four walls, each a `while` loop whose *step* is a
+/// A room's own children growth — four walls, each a `while` loop whose *step* is a
 /// draw, so the number of draws depends on their own values.
 fn room_children<R: RandomSource>(
     shaft: &mut Shaft,
@@ -795,9 +796,9 @@ fn room_children<R: RandomSource>(
 /// # Why this is not simply a block list
 ///
 /// Six of the mineshaft's helpers read the world and *branch* on what they find:
-/// `canBeReplaced`, `isSupportingBox`, `placeSupportPillar`, `setPlanksBlock`,
-/// `placeDoubleLowerOrUpperSupport` and `fillPillarDownOrChainUp`. In vanilla they
-/// read the level, which by then holds both the terrain and whatever earlier pieces
+/// the replaceability test, the supporting-box check, support-pillar placement, plank-block assignment,
+/// double lower/upper support placement and the downward pillar/chain probe. A faithful implementation
+/// reads the level, which by then holds both the terrain and whatever earlier pieces
 /// of the same start wrote. So the overlay is not an optimisation — without it a
 /// corridor's pillars would be decided against bare stone and would never appear.
 struct View<'a> {
@@ -822,8 +823,8 @@ impl<'a> View<'a> {
         }
     }
 
-    /// `state.isAir()`. `cave_air` is air — which matters, because the whole
-    /// interior of a mineshaft is `cave_air` and `isSupportingBox` asks exactly this
+    /// Whether the block is air. `cave_air` is air — which matters, because the whole
+    /// interior of a mineshaft is `cave_air` and the supporting-box check asks exactly this
     /// question about the block above a support.
     fn is_air(&self, pos: [i32; 3]) -> bool {
         match self.sample(pos) {
@@ -834,8 +835,8 @@ impl<'a> View<'a> {
         }
     }
 
-    /// `state.liquid()`. No mineshaft piece writes a fluid, so a written block is
-    /// never liquid — stated rather than assumed, because `isInInvalidLocation`
+    /// Whether the block is a fluid. No mineshaft piece writes a fluid, so a written block is
+    /// never liquid — stated rather than assumed, because the invalid-location check
     /// walks a box that other pieces have written into.
     fn is_liquid(&self, pos: [i32; 3]) -> bool {
         match self.sample(pos) {
@@ -848,14 +849,14 @@ impl<'a> View<'a> {
         matches!(self.sample(pos), Sample::Terrain(BlockKind::Lava))
     }
 
-    /// `isReplaceableByStructures` — air or fluid. (Glow lichen and seagrass are in
-    /// vanilla's set and cannot exist pre-surface.)
+    /// Whether a structure may freely replace the block — air or fluid. (Glow
+    /// lichen and seagrass are in the reference set and cannot exist pre-surface.)
     fn is_replaceable(&self, pos: [i32; 3]) -> bool {
         self.is_air(pos) || self.is_liquid(pos)
     }
 
-    /// `state.isFaceSturdy(level, pos, UP)` / `isSolidRender` / `canSupportCenter`,
-    /// which the three column walks all reduce to.
+    /// Whether the block's up face is sturdy — the face-sturdiness, solid-render
+    /// and can-support-centre tests the three column walks all reduce to.
     ///
     /// A table over the blocks that can actually appear here, not a general
     /// solidity model: pre-surface terrain is one solid kind, and the only written
@@ -880,9 +881,9 @@ impl<'a> View<'a> {
         }
     }
 
-    /// True when the written block at `pos` is exactly `name` — `state.is(Block)`,
-    /// used only for the four wood/chain tests `canBeReplaced` and
-    /// `placeDoubleLowerOrUpperSupport` make. Terrain is never one of these.
+    /// True when the written block at `pos` is exactly `name` —
+    /// used only for the four wood/chain tests the replaceability check and
+    /// double lower/upper support placement make. Terrain is never one of these.
     fn is_block(&self, pos: [i32; 3], name: &str) -> bool {
         match self.sample(pos) {
             Sample::Terrain(_) => false,
@@ -890,7 +891,7 @@ impl<'a> View<'a> {
         }
     }
 
-    /// `MineShaftPiece.canBeReplaced` — the override that protects a mineshaft's own
+    /// A mineshaft piece's replaceability override that protects a mineshaft's own
     /// woodwork from a neighbouring piece's `cave_air` sweep.
     fn can_be_replaced(&self, pos: [i32; 3], wood: Wood) -> bool {
         !self.is_block(pos, wood.planks())
@@ -899,7 +900,7 @@ impl<'a> View<'a> {
             && !self.is_block(pos, "minecraft:iron_chain")
     }
 
-    /// `level.setBlock(pos, state, 2)` — the raw write, with no `canBeReplaced` and
+    /// The raw write, with no replaceability check and
     /// no transform. Four helpers use it directly.
     fn set(&mut self, pos: [i32; 3], state: &str) {
         let shared: Arc<str> = Arc::from(state);
@@ -915,7 +916,7 @@ impl<'a> View<'a> {
     }
 }
 
-/// One piece's `postProcess`, bound to its node and the shared [`View`].
+/// One piece's block-writing walk, bound to its node and the shared [`View`].
 struct Place<'a, 'v> {
     node: &'a Node,
     view: &'a mut View<'v>,
@@ -925,7 +926,7 @@ struct Place<'a, 'v> {
 }
 
 impl Place<'_, '_> {
-    /// `placeBlock` — `canBeReplaced`, then mirror, then rotate, then write.
+    /// Places one block — the replaceability check, then mirror, then rotate, then write.
     fn place(&mut self, state: &BlockState, x: i32, y: i32, z: i32) {
         let pos = self.node.world_pos(x, y, z);
         if !self.view.can_be_replaced(pos, self.wood) {
@@ -970,7 +971,7 @@ impl Place<'_, '_> {
         }
     }
 
-    /// `generateMaybeBox` — **one `nextFloat` per position, unconditionally**, and
+    /// A probabilistic hollow box — **one float draw per position, unconditionally**, and
     /// it is the leftmost operand of the `&&` chain, so it is spent before either
     /// world test runs.
     #[allow(clippy::too_many_arguments)]
@@ -1005,7 +1006,7 @@ impl Place<'_, '_> {
         }
     }
 
-    /// `maybeGenerateBlock` — always one draw.
+    /// Places one block with probability `probability` — always one draw.
     fn maybe_generate_block<R: RandomSource>(
         &mut self,
         random: &mut R,
@@ -1020,8 +1021,8 @@ impl Place<'_, '_> {
         }
     }
 
-    /// `generateUpperHalfSphere` — the room's ceiling. Float arithmetic in `f32`
-    /// because vanilla's is, and the `1.05F` threshold sits close enough to 1 that
+    /// The room's dome ceiling. Float arithmetic in `f32`
+    /// deliberately, and the `1.05` threshold sits close enough to 1 that
     /// a promotion to `f64` moves the boundary cells.
     #[allow(clippy::too_many_arguments)]
     fn generate_upper_half_sphere(
@@ -1053,10 +1054,11 @@ impl Place<'_, '_> {
         }
     }
 
-    /// `MineShaftPiece.isInInvalidLocation` — the biome veto, then a liquid walk
+    /// A mineshaft piece's invalid-location check — the biome veto, then a liquid walk
     /// over the six faces of the box inflated by one.
     ///
-    /// The inflation is vanilla's `±1` clamped to `chunkBB`; here it is clamped to
+    /// The inflation is `±1` clamped to the decorating chunk's own box in a
+    /// faithful implementation; here it is clamped to
     /// the dimension instead, which is the deviation this module's doc names.
     fn is_in_invalid_location(&self, blocking_biomes: &std::collections::HashSet<String>) -> bool {
         let box_ = self.node.box_;
@@ -1104,9 +1106,9 @@ impl Place<'_, '_> {
         false
     }
 
-    /// `setPlanksBlock` — a floor plank wherever the piece is underground and the
-    /// existing block cannot be stood on. `level.setBlock` directly, so no
-    /// `canBeReplaced` and no transform.
+    /// A floor plank wherever the piece is underground and the
+    /// existing block cannot be stood on. The raw write directly, so no
+    /// replaceability check and no transform.
     fn set_planks_block(&mut self, planks: &str, x: i32, y: i32, z: i32) {
         if !self.is_interior(x, y, z) {
             return;
@@ -1118,13 +1120,13 @@ impl Place<'_, '_> {
         self.view.set(pos, planks);
     }
 
-    /// `isSupportingBox` — every block above the span is non-air.
+    /// Whether every block above the span is non-air.
     fn is_supporting_box(&self, x0: i32, x1: i32, y1: i32, z0: i32) -> bool {
         (x0..=x1).all(|x| !self.air_at(x, y1 + 1, z0))
     }
 }
 
-/// `MineShaftCorridor.placeSupport`.
+/// A corridor's own support placement.
 fn place_support<R: RandomSource>(
     p: &mut Place<'_, '_>,
     random: &mut R,
@@ -1164,7 +1166,7 @@ fn place_support<R: RandomSource>(
     }
 }
 
-/// `MineShaftCorridor.maybePlaceCobWeb` — `isInterior` gates the **draw**, so this
+/// A corridor's probabilistic cobweb placement — the interior check gates the **draw**, so this
 /// cannot be reordered into "draw, then test".
 fn maybe_place_cobweb<R: RandomSource>(
     p: &mut Place<'_, '_>,
@@ -1187,9 +1189,9 @@ fn maybe_place_cobweb<R: RandomSource>(
     p.place(&cobweb, x, y, z);
 }
 
-/// `hasSturdyNeighbours` — at least `count` of the six neighbours present a sturdy
-/// face toward this position. `Direction.values()` order is DOWN, UP, NORTH, SOUTH,
-/// WEST, EAST; only the *count* is read, so the order is inert, but it is kept
+/// Whether at least `count` of the six neighbours present a sturdy
+/// face toward this position. The direction order is down, up, north, south,
+/// west, east; only the *count* is read, so the order is inert, but it is kept
 /// because a future predicate that short-circuits differently would not be.
 fn has_sturdy_neighbours(p: &Place<'_, '_>, x: i32, y: i32, z: i32, count: i32) -> bool {
     let pos = p.node.world_pos(x, y, z);
@@ -1214,7 +1216,7 @@ fn has_sturdy_neighbours(p: &Place<'_, '_>, x: i32, y: i32, z: i32, count: i32) 
     false
 }
 
-/// `MineShaftCorridor.fillPillarDownOrChainUp` — a wood pillar down to the first
+/// A corridor's downward pillar/chain probe — a wood pillar down to the first
 /// surface that can carry it, or a fence-and-chain hang up to the first ceiling
 /// that can hold one, whichever is found first at equal distance.
 ///
@@ -1260,8 +1262,8 @@ fn fill_pillar_down_or_chain_up(p: &mut Place<'_, '_>, x: i32, y: i32, z: i32) {
     }
 }
 
-/// `MineShaftCorridor.placeDoubleLowerOrUpperSupport` — the two outer floor columns,
-/// each only if the floor plank the `setPlanksBlock` sweep just laid is actually
+/// A corridor's double lower/upper support placement — the two outer floor columns,
+/// each only if the floor plank the plank-assignment sweep just laid is actually
 /// there.
 fn place_double_support(p: &mut Place<'_, '_>, x: i32, y: i32, z: i32) {
     let planks = p.wood.planks().to_string();
@@ -1342,7 +1344,7 @@ fn post_process<R: RandomSource>(
     }
 }
 
-/// `MineShaftCorridor.postProcess`.
+/// A corridor's block-writing walk.
 fn corridor_post<R: RandomSource>(
     p: &mut Place<'_, '_>,
     random: &mut R,
@@ -1381,16 +1383,17 @@ fn corridor_post<R: RandomSource>(
             create_chest_minecart(p, random, loot, 0, 0, z + 1);
         }
         if spider_corridor && !placed_spider {
-            // The `nextInt(3)` is drawn before `isInterior` is consulted, unlike
-            // `maybePlaceCobWeb` — the asymmetry is vanilla's.
+            // The draw bounded by 3 happens before the interior check runs, unlike
+            // the cobweb placement's own draw-then-test order — the asymmetry
+            // is deliberate.
             let spider_z = z - 1 + random.next_int_bounded(3);
             if p.is_interior(1, 0, spider_z) {
                 placed_spider = true;
                 let pos = p.node.world_pos(1, 0, spider_z);
                 p.view.set(pos, "minecraft:spawner");
-                // `spawner.setEntityId(CAVE_SPIDER, random)` draws nothing on the
-                // `RandomSource` — `SpawnData`'s constructor takes the random only
-                // to seed a `SimpleWeightedRandomList` that is already resolved.
+                // Assigning the spawner's entity type draws nothing from the
+                // random source — the spawn-entry constructor takes the random
+                // only to seed an already-resolved weighted list.
             }
         }
     }
@@ -1407,12 +1410,12 @@ fn corridor_post<R: RandomSource>(
     }
 
     if has_rails {
-        // `RailShape.NORTH_SOUTH`, which the piece's own rotation then turns into
-        // `EAST_WEST` for an east/west corridor — the reason `BlockState::rotate`
+        // The rail's north-south shape, which the piece's own rotation then turns into
+        // its east-west shape for an east/west corridor — the reason `BlockState::rotate`
         // grew a rail table with this unit.
         let rail = BlockState::parse("minecraft:rail[shape=north_south,waterlogged=false]");
         for z in 0..=length {
-            // `!floor.isAir() && floor.isSolidRender()`: two tests, and for the
+            // Not-air and solid-render: two tests, and for the
             // blocks that can be here the second implies the first.
             let floor = p.node.world_pos(1, -1, z);
             if p.view.is_air(floor) || !p.view.is_sturdy_up(floor) {
@@ -1424,11 +1427,11 @@ fn corridor_post<R: RandomSource>(
     }
 }
 
-/// `MineShaftCorridor.createChest` — the override that places a **rail** and a chest
+/// A corridor's own container placement — an override that places a **rail** and a chest
 /// *minecart*, not a chest.
 ///
-/// Two draws in vanilla, in this order: `nextBoolean` for the rail shape, then
-/// `nextLong` for the loot seed, and both only when the position is air over a
+/// Two draws, in this order: a boolean draw for the rail shape, then
+/// a 64-bit draw for the loot seed, and both only when the position is air over a
 /// non-air block. The minecart itself is an entity, so the container is on the
 /// ledger (`coded:worldgen_entities`) while the rail is real.
 fn create_chest_minecart<R: RandomSource>(
@@ -1459,7 +1462,7 @@ fn create_chest_minecart<R: RandomSource>(
     });
 }
 
-/// `MineShaftCrossing.postProcess` — absolute coordinates throughout, because the
+/// A crossing's block-writing walk — absolute coordinates throughout, because the
 /// crossing has no orientation.
 fn crossing_post(p: &mut Place<'_, '_>, two_floored: bool) {
     let cave_air = BlockState::of("minecraft:cave_air");
@@ -1487,7 +1490,7 @@ fn crossing_post(p: &mut Place<'_, '_>, two_floored: bool) {
     }
 }
 
-/// `MineShaftCrossing.placeSupportPillar` — only where the crossing's ceiling has
+/// A crossing's support-pillar placement — only where the crossing's ceiling has
 /// something above it to hold up.
 fn place_support_pillar(p: &mut Place<'_, '_>, x: i32, y0: i32, z: i32, y1: i32) {
     if p.air_at(x, y1 + 1, z) {
@@ -1498,7 +1501,7 @@ fn place_support_pillar(p: &mut Place<'_, '_>, x: i32, y0: i32, z: i32, y1: i32)
     p.generate_box(x, y0, z, x, y1, z, &planks, &cave_air);
 }
 
-/// `MineShaftStairs.postProcess` — five stepped boxes plus the two landings, and
+/// A stairs piece's block-writing walk — five stepped boxes plus the two landings, and
 /// the only piece here with no RNG and no world read.
 fn stairs_post(p: &mut Place<'_, '_>) {
     let cave_air = BlockState::of("minecraft:cave_air");
@@ -1512,7 +1515,7 @@ fn stairs_post(p: &mut Place<'_, '_>) {
     }
 }
 
-/// `MineShaftRoom.postProcess` — the floor slab, each entrance's lintel, then the
+/// A room's block-writing walk — the floor slab, each entrance's lintel, then the
 /// domed ceiling.
 fn room_post(p: &mut Place<'_, '_>, entrances: &[BoundingBox]) {
     let cave_air = BlockState::of("minecraft:cave_air");
@@ -1773,7 +1776,7 @@ mod tests {
         );
     }
 
-    /// `canBeReplaced` is what stops a second piece's `cave_air` sweep erasing the
+    /// The replaceability check is what stops a second piece's `cave_air` sweep erasing the
     /// first piece's woodwork. Asserted through the [`View`] rather than through a
     /// whole shaft, because the failure is one predicate.
     #[test]
