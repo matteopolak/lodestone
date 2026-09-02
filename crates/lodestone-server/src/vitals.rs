@@ -1,51 +1,31 @@
-//! Server-authoritative air supply and drowning damage (issue #267).
+//! Server-authoritative air supply and drowning damage.
 //!
 //! # Where the truth comes from
 //!
-//! `LivingEntity.baseTick` (`.cache/mc/26.2/src/net/minecraft/world/entity/
-//! LivingEntity.java:436-458`), the override `Entity.baseTick` itself does
-//! not touch air at all — the water-breath block lives one class down:
+//! The per-entity base tick's water-breath rule does not touch air at all
+//! unless the entity's eye is submerged and the block there is not a bubble
+//! column:
 //!
-//! ```java
-//! if (this.isEyeInFluid(FluidTags.WATER) && !level.getBlockState(eyePos).is(Blocks.BUBBLE_COLUMN)) {
-//!     boolean canDrownInWater = !this.canBreatheUnderwater()
-//!         && !MobEffectUtil.hasWaterBreathing(this)
-//!         && (!isPlayer || !((Player) this).getAbilities().invulnerable);
-//!     if (canDrownInWater) {
-//!         this.setAirSupply(this.decreaseAirSupply(this.getAirSupply()));
-//!         if (this.shouldTakeDrowningDamage()) {
-//!             this.setAirSupply(0);
-//!             level.broadcastEntityEvent(this, (byte) 67);
-//!             this.hurtServer(level, this.damageSources().drown(), 2.0F);
-//!         }
-//!     } else if (this.getAirSupply() < this.getMaxAirSupply() && MobEffectUtil.shouldEffectsRefillAirsupply(this)) {
-//!         this.setAirSupply(this.increaseAirSupply(this.getAirSupply()));
-//!     }
-//! } else if (this.getAirSupply() < this.getMaxAirSupply()) {
-//!     this.setAirSupply(this.increaseAirSupply(this.getAirSupply()));
-//! }
-//! ```
+//! * If the entity cannot breathe underwater, has no water-breathing effect
+//!   active, and (for a player) is not in an invulnerable/creative-style
+//!   state, air decreases by one step. Once the decreased value crosses the
+//!   drowning threshold, air is reset to zero, an event byte broadcasts the
+//!   bubble pop, and a fixed hit lands.
+//! * Otherwise, if air is below the max and something is actively
+//!   replenishing it, air increases by one step.
+//! * If the eye is not submerged at all, air simply increases toward the max
+//!   whenever it is below it.
 //!
-//! `decreaseAirSupply`/`increaseAirSupply`/`shouldTakeDrowningDamage`
-//! (`LivingEntity.java:588-601`, `:506-508`):
+//! The decrease/increase/threshold steps, each on its own:
 //!
-//! ```java
-//! protected int decreaseAirSupply(int currentSupply) {
-//!     AttributeInstance respiration = this.getAttribute(Attributes.OXYGEN_BONUS);
-//!     double oxygenBonus = respiration != null ? respiration.getValue() : 0.0;
-//!     return oxygenBonus > 0.0 && this.random.nextDouble() >= 1.0 / (oxygenBonus + 1.0)
-//!         ? currentSupply : currentSupply - 1;
-//! }
-//! protected int increaseAirSupply(int currentSupply) {
-//!     return Math.min(currentSupply + 4, this.getMaxAirSupply());
-//! }
-//! protected boolean shouldTakeDrowningDamage() {
-//!     return this.getAirSupply() <= -20;
-//! }
-//! ```
+//! * Decreasing: with no respiration bonus (nothing here models one), air
+//!   always drops by exactly `-1`. A respiration bonus instead gives each
+//!   tick a chance of being skipped, scaling with the bonus.
+//! * Increasing: `min(current + 4, max)`.
+//! * The drowning-damage gate: `air <= -20`.
 //!
-//! `Entity.TOTAL_AIR_SUPPLY = 300` (`Entity.java:194`) is the max/starting
-//! value returned by the default `getMaxAirSupply()` (`Entity.java:2805`).
+//! The max/starting air value is `300` — the default returned by anything
+//! that does not override its own maximum (nothing this crate models does).
 //!
 //! # The cadence this produces
 //!
@@ -53,67 +33,62 @@
 //! modelled — see below), so a fully-submerged player takes exactly **300
 //! ticks (15s)** to empty from full, then **20 more ticks (1s)** to reach the
 //! `<= -20` threshold — at which point air is reset to `0` and a **2.0**
-//! (one heart) hit lands via `damageSources().drown()`. Because the reset
-//! re-arms the identical countdown, every subsequent hit is another flat
-//! **20 ticks (1s)** apart, not "every tick underwater" — a player who is
-//! merely low on air (air still `> -20`) must take **zero** damage, which is
-//! exactly what the `shouldTakeDrowningDamage` gate is for and what this
-//! module's negative-air-no-damage-yet test checks.
+//! (one heart) drowning hit lands. Because the reset re-arms the identical
+//! countdown, every subsequent hit is another flat **20 ticks (1s)** apart,
+//! not "every tick underwater" — a player who is merely low on air (air
+//! still `> -20`) must take **zero** damage, which is exactly what the
+//! drowning-threshold gate is for and what this module's
+//! negative-air-no-damage-yet test checks.
 //!
-//! Refilling is **gradual**, not instant, once the eye clears the water (or,
-//! per the `else if` above, whenever it is not submerged at all):
-//! `Math.min(currentSupply + 4, max)` per tick — full recovery from `0` takes
-//! `ceil(300 / 4) = 75` ticks (3.75s). This must agree with the client's
-//! `getCurrentAirSupplyBubble` ceiling-based bubble-count mapping
+//! Refilling is **gradual**, not instant, once the eye clears the water (or
+//! whenever it is not submerged at all): `min(current + 4, max)` per tick —
+//! full recovery from `0` takes `ceil(300 / 4) = 75` ticks (3.75s). This must
+//! agree with the client's ceiling-based bubble-count mapping
 //! (`docs/sky-and-air-bubbles.md`), which is why this ticks the exact same
-//! `+4`-capped-at-max integer step vanilla does rather than any smoothed
-//! approximation.
+//! `+4`-capped-at-max integer step rather than any smoothed approximation.
 //!
 //! # What is deliberately not modelled, and why
 //!
-//! * **Respiration (`Attributes.OXYGEN_BONUS`) and the water-breathing /
-//!   conduit-power effects** (`decreaseAirSupply`'s `oxygenBonus` term,
-//!   `MobEffectUtil.hasWaterBreathing`/`shouldEffectsRefillAirsupply`).
-//!   Nothing in `lodestone-server` or `lodestone-entity` models potion
-//!   effects or enchantments at all yet (`grep -rl "MobEffect\|Enchantment"`
-//!   across both crates turns up nothing but a doc-comment mention in
-//!   `lodestone-entity::damage`), so there is no attribute or effect state
-//!   to read here. `decrease_air_supply` below is the unconditional `-1`
-//!   branch only. A future enchantment/effect system is the natural place to
-//!   wire this back in — the seam is exactly `PlayerVitals::tick`'s
-//!   `eye_in_water` boolean plus a rate parameter, not a rewrite.
-//! * **Bubble columns** (`!level.getBlockState(eyePos).is(Blocks
-//!   .BUBBLE_COLUMN)`). The overworld generator this crate serves does not
+//! * **Respiration and the water-breathing / conduit-power effects** (the
+//!   decrease step's respiration-bonus term, and the two effect checks that
+//!   gate the decrease and refill branches). Nothing in `lodestone-server`
+//!   or `lodestone-entity` models potion effects or enchantments at all yet
+//!   (`grep -rl "MobEffect\|Enchantment"` across both crates turns up
+//!   nothing but a doc-comment mention in `lodestone-entity::damage`), so
+//!   there is no attribute or effect state to read here.
+//!   `decrease_air_supply` below is the unconditional `-1` branch only. A
+//!   future enchantment/effect system is the natural place to wire this back
+//!   in — the seam is exactly `PlayerVitals::tick`'s `eye_in_water` boolean
+//!   plus a rate parameter, not a rewrite.
+//! * **Bubble columns.** The overworld generator this crate serves does not
 //!   place bubble columns (`docs/served-session-liveness.md` /
 //!   `worldgen_data`'s documented scope), so the guard can never actually
 //!   fire against real terrain; omitted rather than dead code.
-//! * **Invulnerability i-frames** (vanilla's `invulnerableTime`, ticked
-//!   elsewhere in `LivingEntity.baseTick` and consulted by `hurtServer`).
-//!   [`crate::fall::FallTracker`] (issue #265) is now a second damage source
-//!   reaching the player (no melee or explosions yet) and
-//!   [`PlayerVitals::apply_fall_damage`] does not consult a `HurtCooldown` —
-//!   still deferred, so a fall landing in the same window as a drowning hit
-//!   would currently double-apply, exactly the gap this note already
-//!   flagged. Not forgotten, just still nothing to gate against anything
-//!   *else* yet.
-//! * **Non-player entities.** `Entity` carries air supply too (mobs can
+//! * **Invulnerability i-frames** (ticked elsewhere in the base tick and
+//!   consulted before any hit lands). [`crate::fall::FallTracker`] is now a
+//!   second damage source reaching the player (no melee or explosions yet)
+//!   and [`PlayerVitals::apply_fall_damage`] does not consult a
+//!   `HurtCooldown` — still deferred, so a fall landing in the same window
+//!   as a drowning hit would currently double-apply, exactly the gap this
+//!   note already flagged. Not forgotten, just still nothing to gate against
+//!   anything *else* yet.
+//! * **Non-player entities.** Every entity carries air supply (mobs can
 //!   drown), but [`MobSim`](crate::MobSim) has no health-vs-submersion tick
 //!   at all right now and streams no metadata to a client (see its own
 //!   module doc comment: "does not stream the resulting positions to a
 //!   connected client"). This module is player-only; a mob-drowning ticker
 //!   would be a `MobSim::tick` addition reusing the same pure
 //!   `PlayerVitals`-shaped step function, not a reason to touch this file.
-//! * **Death.** Vanilla's air/drown block is guarded by `this.isAlive()` one
-//!   level up; [`PlayerVitals::tick`] mirrors that by becoming a no-op once
-//!   `health` reaches `0.0`. **The death *screen* is no longer out of scope**:
-//!   every damage site in [`crate::server`] now names its [`DeathCause`], and
-//!   crossing zero sends `ClientboundPlayerCombatKillPacket`
+//! * **Death.** The air/drown rule only runs while the entity is alive;
+//!   [`PlayerVitals::tick`] mirrors that by becoming a no-op once `health`
+//!   reaches `0.0`. **The death *screen* is no longer out of scope**: every
+//!   damage site in [`crate::server`] now names its [`DeathCause`], and
+//!   crossing zero sends the client's death-notification packet
 //!   ([`ServerProtocol::encode_player_combat_kill`](crate::ServerProtocol::encode_player_combat_kill)).
 //!   Still no corpse and no death-location record.
 
-/// Vanilla's `Entity.TOTAL_AIR_SUPPLY` (`Entity.java:194`) — the default
-/// `getMaxAirSupply()` (`Entity.java:2805-2807`) for anything that does not
-/// override it (nothing this crate models does).
+/// The default maximum air supply for anything that does not override it
+/// (nothing this crate models does).
 pub const MAX_AIR_SUPPLY: i32 = 300;
 
 /// What killed the player, for the death message on the death screen.
@@ -124,57 +99,57 @@ pub const MAX_AIR_SUPPLY: i32 = 300;
 /// site, not a silently wrong message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeathCause {
-    /// [`PlayerVitals::apply_fall_damage`] — vanilla's `fall` damage type.
+    /// [`PlayerVitals::apply_fall_damage`] — the `minecraft:fall` damage type.
     Fall,
-    /// [`PlayerVitals::tick`]'s drowning hit — vanilla's `drown` damage type.
+    /// [`PlayerVitals::tick`]'s drowning hit — the `minecraft:drown` damage type.
     Drown,
-    /// [`PlayerVitals::apply_border_damage`] — vanilla's `outside_border`.
+    /// [`PlayerVitals::apply_border_damage`] — `minecraft:outside_border`.
     OutsideBorder,
     /// [`PlayerVitals::apply_damage`], the generic melee/mob entry point.
     Generic,
-    /// [`PlayerVitals::tick_food`]'s starvation arm — vanilla's `starve` damage
-    /// type.
+    /// [`PlayerVitals::tick_food`]'s starvation arm — the `minecraft:starve`
+    /// damage type.
     Starve,
     /// A status effect's periodic damage ([`PlayerVitals::apply_effect_damage`]) —
-    /// vanilla's `wither` damage type.
+    /// the `minecraft:wither` damage type.
     ///
     /// **One variant for both poison and wither, and that is a real
-    /// approximation**: vanilla's poison uses `magic` and wither uses `wither`, two
-    /// different message ids. Both reduce to the same *number* here (neither is
+    /// approximation**: poison and wither use two different damage types with
+    /// two different message ids. Both reduce to the same *number* here (neither is
     /// armour-reducible in a crate with no armour model), so the divergence is only
     /// in the death message, and collapsing them keeps `DeathCause` closed by
     /// construction rather than adding a variant whose only difference is a string.
     /// Split it when the message is actually rendered.
     Wither,
-    /// [`crate::burning`]'s burn tick and fire/lava contact damage — vanilla's
-    /// `on_fire` damage type.
+    /// [`crate::burning`]'s burn tick and fire/lava contact damage — the
+    /// `minecraft:on_fire` damage type.
     ///
     /// One variant for the three sources (`in_fire`, `on_fire`, `lava`) for the same
     /// reason [`Self::Wither`] covers two: they differ only in the death message, and
     /// the amounts are already distinguished by [`crate::burning::BurnSource`].
     OnFire,
-    /// [`PlayerVitals::kill`] — `/kill`'s damage type
-    /// (`DamageTypes.GENERIC_KILL`, `generic_kill.json`'s `"message_id":
-    /// "genericKill"` — camelCase, like its `outside_border` neighbour; see
-    /// [`Self::message_id`]'s own doc for why that is measured rather than
-    /// derived from the file name).
+    /// [`PlayerVitals::kill`] — `/kill`'s damage type, `minecraft:generic_kill`,
+    /// whose message id is `"genericKill"` — camelCase, like its
+    /// `outside_border` neighbour; see [`Self::message_id`]'s own doc for why
+    /// that is measured rather than derived from the registry id.
     GenericKill,
 }
 
 impl DeathCause {
-    /// Vanilla's `message_id` for this damage type, read off the damage-type
-    /// records in `.cache/mc/26.2/src/data/minecraft/damage_type/*.json` — e.g.
-    /// `fall.json` carries `"message_id": "fall"`.
+    /// The message id for this damage type, read off the real damage-type
+    /// records — e.g. the `minecraft:fall` record carries `"message_id":
+    /// "fall"`.
     ///
-    /// **Not derived from the variant name, and not from the file name either.**
-    /// Measured, because the first version of this function guessed and was wrong:
-    /// `outside_border.json` carries `"message_id": "outsideBorder"` — camelCase,
-    /// in a directory that is otherwise snake_case — and its neighbour
-    /// `generic_kill.json` is `genericKill` for the same reason, while
-    /// `fall.json`, `drown.json` and `generic.json` match their file names. Any
-    /// snake-case-from-the-variant helper produces `death.attack.outside_border`,
-    /// a key no language file has, and the failure is invisible from here because
-    /// an unknown key renders as itself.
+    /// **Not derived from the variant name, and not from the registry id
+    /// either.** Measured, because the first version of this function guessed
+    /// and was wrong: `minecraft:outside_border` carries `"message_id":
+    /// "outsideBorder"` — camelCase, where every other id here is snake_case —
+    /// and its neighbour `minecraft:generic_kill` is `genericKill` for the
+    /// same reason, while `fall`, `drown` and `generic` match their registry
+    /// ids. Any snake-case-from-the-variant helper produces
+    /// `death.attack.outside_border`, a key no language file has, and the
+    /// failure is invisible from here because an unknown key renders as
+    /// itself.
     #[must_use]
     pub fn message_id(self) -> &'static str {
         match self {
@@ -189,22 +164,12 @@ impl DeathCause {
         }
     }
 
-    /// The death message vanilla shows on the death screen, mirroring
-    /// `DamageSource.getLocalizedDeathMessage`
-    /// (`.cache/mc/26.2/src/net/minecraft/world/damagesource/DamageSource.java:71-86`):
-    ///
-    /// ```java
-    /// String deathMsg = "death.attack." + this.type().msgId();
-    /// if (this.causingEntity == null && this.directEntity == null) {
-    ///    LivingEntity source = victim.getKillCredit();
-    ///    return source != null
-    ///       ? Component.translatable(deathMsg + ".player", victim.getDisplayName(), source.getDisplayName())
-    ///       : Component.translatable(deathMsg, victim.getDisplayName());
-    /// }
-    /// ```
-    ///
-    /// This crate tracks no kill credit and no causing entity for any of the four
-    /// causes, so it is always the two-argument-free branch:
+    /// The death message shown on the death screen: `"death.attack.<id>"`,
+    /// where `<id>` is [`Self::message_id`]. The full rule has a second
+    /// branch for a kill credited to another living entity (a two-argument
+    /// key naming both the victim and the credited killer), but this crate
+    /// tracks no kill credit and no causing entity for any of the four
+    /// causes here, so it is always the one-argument branch:
     /// `translatable("death.attack.<id>", victimName)`.
     ///
     /// A **translatable** component, not a pre-rendered string, because that is
@@ -222,25 +187,22 @@ impl DeathCause {
     }
 }
 
-/// Vanilla's `Avatar.DEFAULT_EYE_HEIGHT` (`.cache/mc/26.2/src/net/minecraft/
-/// world/entity/Avatar.java:16`, also `:22`'s `withEyeHeight(1.62F)` on the
-/// standing pose) — the only pose this crate's server-side player tracks, so
-/// this is *the* eye-height constant rather than a pose-keyed table.
+/// The standing eye height — the only pose this crate's server-side player
+/// tracks, so this is *the* eye-height constant rather than a pose-keyed
+/// table.
 pub const EYE_HEIGHT: f64 = 1.62;
 
-/// `LivingEntity.shouldTakeDrowningDamage`'s threshold (`LivingEntity.java:
-/// 506-508`): `getAirSupply() <= -20`.
+/// The drowning-damage threshold: air `<= -20`.
 const DROWNING_DAMAGE_AIR_THRESHOLD: i32 = -20;
 
-/// The raw drowning hit, matching `this.hurtServer(level,
-/// this.damageSources().drown(), 2.0F)` (`LivingEntity.java:447`). Applied
-/// directly to health: this crate has no player armour/absorption model to
-/// reduce it through (the same "no inventory model" scope note
-/// `crate::server`'s `UseItemOn` handling already carries).
+/// The raw drowning hit. Applied directly to health: this crate has no
+/// player armour/absorption model to reduce it through (the same "no
+/// inventory model" scope note `crate::server`'s `UseItemOn` handling
+/// already carries).
 pub const DROWN_DAMAGE: f32 = 2.0;
 
 /// `minecraft:fall`, resolved from the real damage-type registry
-/// ([`lodestone_data::damage_types`], issue #263).
+/// ([`lodestone_data::damage_types`]).
 ///
 /// Not a `const`: [`DamageType::from_name`] is a table scan, so this is a
 /// function. It is called once per landing, not per tick, and the panic is
@@ -282,29 +244,23 @@ fn drown_damage_type() -> lodestone_data::damage_types::DamageType {
 /// `SetHealth { health: 20.0, .. }` fresh-spawn default.
 pub const MAX_HEALTH: f32 = 20.0;
 
-/// The `yaw` field of vanilla's `ClientboundHurtAnimationPacket` — the direction
+/// The `yaw` field of the client's hurt-animation packet — the direction
 /// the **camera damage tilt** leans away from, in degrees, in the victim's own
 /// frame.
 ///
-/// # The record
+/// # The rule
 ///
-/// `ServerPlayer.indicateDamage` is the whole of it, and it is one line:
+/// It is one expression: `atan2(zd, xd) * 180 / pi - victim_yaw_degrees`,
+/// where `xd`/`zd` are the horizontal offset from the victim toward the
+/// source of the hit (`source_position - victim_position` on the horizontal
+/// axes) — so they point **from the victim toward whatever hurt them**, and
+/// the argument order into `atan2` is `(z, x)`, not `(x, z)`. Getting either
+/// of those backwards still produces a plausible-looking tilt, so they are
+/// the two things to check against the rule rather than against intuition.
 ///
-/// ```java
-/// this.hurtDir = (float)(Mth.atan2(zd, xd) * 180.0F / (float)Math.PI - this.getYRot());
-/// this.connection.send(new ClientboundHurtAnimationPacket(this));
-/// ```
-///
-/// `xd`/`zd` come from its caller `LivingEntity.dealDefaultKnockback`, as
-/// `source.getSourcePosition() - this.position()` on the horizontal axes — so
-/// they point **from the victim toward whatever hurt them**, and the argument
-/// order into `atan2` is `(z, x)`, not `(x, z)`. Getting either of those backwards
-/// still produces a plausible-looking tilt, so they are the two things to check
-/// against the record rather than against intuition.
-///
-/// `LivingEntity.getHurtDir` is a constant `0.0F` and `LivingEntity.indicateDamage`
-/// is empty, so in vanilla **only a `ServerPlayer` ever carries a non-zero value
-/// here** — a mob's hurt animation is always the pure roll.
+/// A hit with no attributable source position carries this at a constant
+/// zero, and only a real player-visible hit ever carries a non-zero value —
+/// a mob's own hurt animation is always the pure roll.
 ///
 /// [`PURE_ROLL`](Self::PURE_ROLL) is that zero, named, because it is the value
 /// every production call site in this crate currently uses and a bare `0.0`
@@ -317,21 +273,20 @@ impl HurtDirection {
     /// component at all.
     ///
     /// This is the correct value for **every damage source this crate currently
-    /// has**, and that is a fact about vanilla's tags rather than a shortcut:
-    /// `dealDefaultKnockback` (the only thing that ever calls `indicateDamage`)
-    /// runs solely for a source *outside*
-    /// `#minecraft:damage_type/no_knockback`, and that tag contains `fall`,
-    /// `drown`, `starve`, `on_fire`, `in_fire`, `lava`, `outside_border`, `wither`,
-    /// `magic` and `generic` — which is the complete set of
-    /// [`DeathCause`] variants. It is also what a mob's own hurt animation carries
-    /// (`LivingEntity.getHurtDir`).
+    /// has**, and that is a fact about which damage types carry a directional
+    /// knockback rather than a shortcut: a directional tilt is only computed for
+    /// a source *outside* the `#minecraft:damage_type/no_knockback` tag, and
+    /// that tag contains `fall`, `drown`, `starve`, `on_fire`, `in_fire`, `lava`,
+    /// `outside_border`, `wither`, `magic` and `generic` — which is the complete
+    /// set of [`DeathCause`] variants. It is also what a mob's own hurt
+    /// animation always carries.
     pub const PURE_ROLL: Self = Self(0.0);
 
-    /// The tilt direction for a hit whose source has a position — vanilla's
+    /// The tilt direction for a hit whose source has a position — the
     /// formula above, given the victim's position and yaw in degrees.
     ///
     /// Its production caller is `crate::server::serve_play`'s `vitals_tick`
-    /// arm (issue #625), fed from `crate::mobs::MobSim::take_player_hits`'
+    /// arm, fed from `crate::mobs::MobSim::take_player_hits`'
     /// `attacker_pos`.
     #[must_use]
     pub fn from_source(
@@ -410,8 +365,8 @@ pub struct PlayerVitals {
 impl Default for PlayerVitals {
     /// A freshly joined player: full air, full health — matching
     /// `V770ServerProtocol::begin_play`'s fresh-spawn `SetHealth` and the
-    /// metadata default (`entityDataBuilder.define(DATA_AIR_SUPPLY_ID,
-    /// this.getMaxAirSupply())`, `Entity.java:319`).
+    /// entity metadata's own air-supply default, which is likewise the
+    /// entity's maximum.
     fn default() -> Self {
         Self {
             air_supply: MAX_AIR_SUPPLY,
@@ -432,9 +387,9 @@ impl PlayerVitals {
     }
 
     /// Current health (`0.0..=20.0`). `0.0` means dead; [`tick`](Self::tick)
-    /// becomes a no-op once this is reached (mirrors vanilla's `isAlive()`
-    /// guard one level up from the air/drown block — see this module's own
-    /// doc comment for why death/respawn are out of scope beyond that).
+    /// becomes a no-op once this is reached (mirrors the liveness guard one
+    /// level up from the air/drown rule — see this module's own doc comment
+    /// for why death/respawn are out of scope beyond that).
     #[must_use]
     pub fn health(&self) -> f32 {
         self.health
@@ -443,9 +398,9 @@ impl PlayerVitals {
     /// Advances vitals by exactly one server tick, given whether the eye is
     /// currently submerged in water (the caller's job — see
     /// `crate::server`'s use of [`ChunkSource::block_state`](crate::ChunkSource)
-    /// at the eye position). Mirrors `LivingEntity.baseTick`'s water-breath
-    /// block byte-for-byte within this module's documented scope (no
-    /// respiration/water-breathing, no i-frames, no bubble columns).
+    /// at the eye position). Mirrors the water-breath rule byte-for-byte
+    /// within this module's documented scope (no respiration/water-breathing,
+    /// no i-frames, no bubble columns).
     pub fn tick(&mut self, eye_in_water: bool) -> VitalsTick {
         if self.health <= 0.0 {
             return VitalsTick::default();
@@ -455,7 +410,7 @@ impl PlayerVitals {
 
         if eye_in_water {
             let before = self.air_supply;
-            // `decreaseAirSupply` with no `OXYGEN_BONUS` attribute: the flat
+            // The decrease step with no respiration bonus: the flat
             // `currentSupply - 1` branch, unconditionally (see module docs).
             self.air_supply -= 1;
             if self.air_supply != before {
@@ -479,14 +434,14 @@ impl PlayerVitals {
         out
     }
 
-    /// Applies `raw` points (already vanilla's `floor(...)` value — see
+    /// Applies `raw` points (already the floored damage value — see
     /// [`crate::fall::FallTracker::on_player_moved`]) of fall damage through
     /// the real reduction pipeline
-    /// ([`lodestone_entity::apply_reductions`]), matching
-    /// `LivingEntity.actuallyHurt`'s stage order.
+    /// ([`lodestone_entity::apply_reductions`]), matching the real
+    /// damage-application stage order.
     ///
     /// The flags come from the real `minecraft:damage_type` table
-    /// ([`lodestone_entity::DamageFlags::for_damage_type`], issue #263) rather
+    /// ([`lodestone_entity::DamageFlags::for_damage_type`]) rather
     /// than a hand-written `bypasses_armor: true` — `minecraft:fall` *is*
     /// `bypasses_armor`-tagged, so the derived flag is `true` and armour never
     /// reduces fall damage, but that now comes from the datapack instead of from
@@ -513,37 +468,27 @@ impl PlayerVitals {
         Some(outcome.to_health)
     }
 
-    /// Applies border damage (issue #326, B1 enforcement) — the
-    /// `max(1, floor(-dist * damage_per_block))` hit `LivingEntity.baseTick`
-    /// lands on a player standing past the world border's safe zone
-    /// (`LivingEntity.java:425-434`, read verbatim):
+    /// Applies border damage (B1 enforcement) — the
+    /// `max(1, floor(-dist * damage_per_block))` hit that lands on a player
+    /// standing past the world border's safe zone: when a player is outside
+    /// the border's bounds, the signed distance past the safe zone is
+    /// computed, and if negative (i.e. actually past it) and the border's
+    /// configured damage-per-block is positive, the player takes
+    /// `max(1, floor(-dist * damage_per_block))`.
     ///
-    /// ```java
-    /// else if (isPlayer && !level.getWorldBorder().isWithinBounds(this.getBoundingBox())) {
-    ///     double dist = getDistanceToBorder() + getSafeZone();
-    ///     if (dist < 0.0) {
-    ///         double damagePerBlock = getDamagePerBlock();
-    ///         if (damagePerBlock > 0.0) {
-    ///             this.hurtServer(level, damageSources().outOfBorder(),
-    ///                 Math.max(1, Mth.floor(-dist * damagePerBlock)));
-    ///         }
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// It is an `else if` *before* the water-breath block in `baseTick`, which
-    /// is why [`tick`](Self::tick) and this entry point run side by side: a
-    /// player under water outside the border takes border damage *and*
-    /// drowning, in that order (vanilla's own branch order, one branch per
-    /// `baseTick`).
+    /// This rule is checked *before* the water-breath rule in the shared
+    /// per-entity tick, which is why [`tick`](Self::tick) and this entry
+    /// point run side by side: a player under water outside the border
+    /// takes border damage *and* drowning, in that order (the real branch
+    /// order, one branch per tick).
     ///
     /// `raw` is already the `max(1, floor(...))` value computed by
     /// [`crate::WorldBorder::damage_for_position`] — this method is the
     /// *application* half, mirroring how [`apply_fall_damage`](Self::apply_fall_damage)
     /// receives a pre-floored value from [`crate::FallTracker`]. Like that
     /// method it bypasses the i-frame gate ([`hurt_cooldown`](Self::hurt_cooldown)),
-    /// matching vanilla's `outOfBorder()` damage type carrying no
-    /// `bypassesCooldown`-style exemption — border damage lands **every
+    /// matching the real `outside_border` damage type carrying no
+    /// cooldown-bypass exemption of its own — border damage lands **every
     /// tick** a player is past the safe zone, exactly as the plan's gate
     /// ("a player at distance d outside takes exactly `max(1, floor(d*0.2))`
     /// per tick") requires.
@@ -554,7 +499,7 @@ impl PlayerVitals {
     /// This used to pass `DamageFlags::default()` and justify it like so:
     /// *"`minecraft:outside_border` is not in the generated table (verified:
     /// `grep outside_border crates/lodestone-data/src/damage_types.rs` → empty)
-    /// … the vanilla JSON carries **no bypass tags**, so the derived flags would
+    /// … the real record carries **no bypass tags**, so the derived flags would
     /// be all `false` anyway."*
     ///
     /// A tripwire test asserted that absence and named the production change it
@@ -572,21 +517,21 @@ impl PlayerVitals {
     /// behaviour-neutral **today** — `Defenses::default()` has zero armour, and
     /// `bypasses_armor` cannot change a reduction of nothing — and that is the
     /// point: when a real equipment model lands, border damage will bypass armour
-    /// because vanilla says it does, rather than because nobody revisited a
-    /// hardcoded default.
+    /// because the real damage type says it does, rather than because nobody
+    /// revisited a hardcoded default.
     ///
     /// # One thing this deliberately does **not** change
     ///
     /// The table also says `outside_border` is **not** `bypasses_cooldown`, while
     /// this method bypasses the i-frame gate structurally (it never consults
-    /// [`hurt_cooldown`](Self::hurt_cooldown)). Vanilla routes border damage
-    /// through `hurtServer`, so its i-frame logic does apply — and since the
-    /// damage at a fixed distance is constant, vanilla would land it once per 20
-    /// ticks rather than every tick. That contradicts the plan gate's stated
-    /// per-tick cadence, which this crate's tests pin. Recorded rather than
-    /// changed: it is a behavioural question about the cadence, not about where
-    /// the flags come from, and picking it up here would silently move a number
-    /// three gates assert on.
+    /// [`hurt_cooldown`](Self::hurt_cooldown)). The real border-damage rule
+    /// applies through the same path as every other hit, so its i-frame logic
+    /// does apply there — and since the damage at a fixed distance is
+    /// constant, that would land it once per 20 ticks rather than every tick.
+    /// That contradicts the plan gate's stated per-tick cadence, which this
+    /// crate's tests pin. Recorded rather than changed: it is a behavioural
+    /// question about the cadence, not about where the flags come from, and
+    /// picking it up here would silently move a number three gates assert on.
     ///
     /// Returns `Some(damage_dealt)` if the hit landed (a dead player is a
     /// no-op, mirroring [`apply_fall_damage`](Self::apply_fall_damage)), `None`
@@ -604,17 +549,16 @@ impl PlayerVitals {
         Some(outcome.to_health)
     }
 
-    /// Applies a generic incoming hit (issue #12: "mob-on-player damage needs
-    /// a `PlayerVitals` entry point") through the same two-stage pipeline
+    /// Applies a generic incoming hit ("mob-on-player damage needs a
+    /// `PlayerVitals` entry point") through the same two-stage pipeline
     /// [`crate::SimMob::apply_damage`] already runs for a mob: the
     /// invulnerability-frame gate ([`HurtCooldown::on_hurt`]), then
     /// [`lodestone_entity::apply_reductions`]. Unlike
     /// [`apply_fall_damage`](Self::apply_fall_damage) (which bypasses the
     /// gate entirely, matching fall's own `bypasses_cooldown`-style
     /// omission — see this module's own doc comment), a generic hit is
-    /// gated by [`hurt_cooldown`](Self::hurt_cooldown), matching
-    /// `LivingEntity.hurt`'s real i-frame behaviour for anything that is not
-    /// specifically exempted.
+    /// gated by [`hurt_cooldown`](Self::hurt_cooldown), matching the real
+    /// i-frame behaviour for anything that is not specifically exempted.
     ///
     /// Returns `None` if the player is already dead or the hit was fully
     /// ignored by the i-frame gate — the same "landed vs not" distinction
@@ -622,19 +566,19 @@ impl PlayerVitals {
     /// effect" from "not alive to hit" only by checking [`health`](Self::health)
     /// separately if it needs to.
     ///
-    /// # Status: wired (issue #625)
+    /// # Status: wired
     ///
     /// This closed the gap `lodestone_entity::damage`'s own module doc named
     /// ("`PlayerVitals` only has `tick` (drowning) and `apply_fall_damage` —
     /// no generic melee/mob-damage entry point") when it landed, but stayed
-    /// unreachable from a hostile mob for a while longer: the goal seam
-    /// (`NearestAttackableTargetGoal`/`MeleeAttackGoal`) carries only a bare
-    /// `Vec3` target, never a player identity, so nothing could say *which*
-    /// player a connected attack belonged to. `crate::mobs::MobSim` now
-    /// resolves that by matching the attack's target position against its
-    /// own fed player list (see `crate::mobs::PlayerHit`'s doc comment) and
-    /// hands the result to `crate::server::serve_play`'s `vitals_tick` arm,
-    /// which is this function's real production caller.
+    /// unreachable from a hostile mob for a while longer: the melee-target
+    /// goal seam carries only a bare `Vec3` target, never a player identity,
+    /// so nothing could say *which* player a connected attack belonged to.
+    /// `crate::mobs::MobSim` now resolves that by matching the attack's
+    /// target position against its own fed player list (see
+    /// `crate::mobs::PlayerHit`'s doc comment) and hands the result to
+    /// `crate::server::serve_play`'s `vitals_tick` arm, which is this
+    /// function's real production caller.
     pub fn apply_damage(
         &mut self,
         raw_damage: f32,
@@ -654,9 +598,9 @@ impl PlayerVitals {
         Some(outcome.to_health)
     }
 
-    /// Heals — vanilla's `LivingEntity.heal`, clamped at [`MAX_HEALTH`]. A dead
-    /// entity is not healed (`isAlive()` guard), which is what stops a regeneration
-    /// effect reviving a corpse.
+    /// Heals, clamped at [`MAX_HEALTH`]. A dead entity is not healed (the
+    /// liveness guard), which is what stops a regeneration effect reviving a
+    /// corpse.
     pub fn heal(&mut self, amount: f32) {
         if self.health <= 0.0 {
             return;
@@ -664,11 +608,11 @@ impl PlayerVitals {
         self.health = (self.health + amount).min(MAX_HEALTH);
     }
 
-    /// `/kill` — `Entity.kill()` → `hurtServer(damageSources().genericKill(),
-    /// Float.MAX_VALUE)`. Straight to zero, unconditionally: no defenses
-    /// reduction and no hurt-cooldown gate, because vanilla's kill command is
-    /// meant to work through invulnerability and creative alike — unlike
-    /// [`Self::apply_damage`], which both of those legitimately block.
+    /// `/kill`: a hit for the maximum representable amount, going straight
+    /// to zero unconditionally — no defenses reduction and no hurt-cooldown
+    /// gate, because the kill command is meant to work through
+    /// invulnerability and creative alike — unlike [`Self::apply_damage`],
+    /// which both of those legitimately block.
     pub fn kill(&mut self) {
         self.health = 0.0;
     }
@@ -676,12 +620,13 @@ impl PlayerVitals {
     /// Applies a status effect's periodic damage — poison's `magic` or wither's
     /// `wither` hit.
     ///
-    /// **No i-frame gate**, deliberately: vanilla routes these through `hurtServer`,
-    /// but the *interval* is the effect's own (25 or 40 ticks, both longer than the
-    /// 20-tick invulnerability window at amplifier 0), so a gate would be inert at
-    /// low amplifiers and would silently swallow hits at high ones — where
-    /// `25 >> 5 == 0` makes poison fire every tick and vanilla really does land every
-    /// hit. Recorded rather than added, because adding one would change a number
+    /// **No i-frame gate**, deliberately: these hits land through the same
+    /// path as any other, but the *interval* is the effect's own (25 or 40
+    /// ticks, both longer than the 20-tick invulnerability window at
+    /// amplifier 0), so a gate would be inert at low amplifiers and would
+    /// silently swallow hits at high ones — where `25 >> 5 == 0` makes
+    /// poison fire every tick and really does land every hit. Recorded
+    /// rather than added, because adding one would change a number
     /// `crate::mob_effects`' gates pin.
     ///
     /// **Poison's own `health > 1.0` guard is the caller's** — [`crate::mob_effects`]
@@ -710,7 +655,7 @@ impl PlayerVitals {
     }
 
 
-    /// Rebuilds vitals from a saved player file (issue #302).
+    /// Rebuilds vitals from a saved player file.
     ///
     /// Both values are **clamped to their legal ranges** rather than trusted:
     /// they come off disk, and a `.dat` a user has edited (or one this code wrote
@@ -751,8 +696,8 @@ impl PlayerVitals {
         self.food = food;
     }
 
-    /// Charges hunger exhaustion for an action — vanilla's
-    /// `Player.causeFoodExhaustion`, whose one guard is `!abilities.invulnerable`.
+    /// Charges hunger exhaustion for an action — the real rule's one guard
+    /// is `!abilities.invulnerable`.
     ///
     /// **That guard is the caller's**, because this type does not know the game
     /// mode, and forgetting it makes a creative player starve. Every production call
@@ -767,14 +712,12 @@ impl PlayerVitals {
     }
 
     /// Advances hunger by one server tick and applies its health consequences —
-    /// `FoodData.tick` plus the `player.heal` / `hurtServer(starve)` calls it makes
-    /// on the way out.
+    /// the food-tick step plus the heal/starve hit it makes on the way out.
     ///
     /// Separate from [`tick`](Self::tick) rather than folded into it, because the
     /// two need different inputs: drowning needs the block at the player's eye, and
     /// hunger needs the difficulty and a game rule. `crate::server`'s `vitals_tick`
-    /// calls both, in vanilla's own order (`baseTick`'s air block, then
-    /// `ServerPlayer.tick`'s `foodData.tick`).
+    /// calls both, in the real order (the air rule, then the food tick).
     ///
     /// A dead player is a no-op, mirroring every other entry point here.
     pub fn tick_food(
@@ -954,9 +897,9 @@ mod tests {
     ///
     /// So this asserts the two things that *are* observable: the derivation
     /// yields the real tag value, and that value is load-bearing when composed
-    /// with armour. The flag matters the moment a player equipment model lands
-    /// (issue #261); until then it is correct-and-inert here, which is worth
-    /// pinning rather than leaving to a comment.
+    /// with armour. The flag matters the moment a player equipment model lands;
+    /// until then it is correct-and-inert here, which is worth pinning rather
+    /// than leaving to a comment.
     #[test]
     fn fall_flags_come_from_the_damage_type_table_and_are_load_bearing() {
         let flags = lodestone_entity::DamageFlags::for_damage_type(fall_damage_type());
@@ -1050,7 +993,7 @@ mod tests {
         assert_eq!(v.health(), 0.0);
     }
 
-    // ---- `apply_border_damage` (issue #326, B1 enforcement) --------------
+    // ---- `apply_border_damage` (B1 enforcement) --------------------------
 
     /// A border hit reduces health by exactly the `max(1, floor(-dist *
     /// damage_per_block))` value [`WorldBorder::damage_for_position`] handed
@@ -1094,8 +1037,8 @@ mod tests {
     }
 
     /// Border damage **bypasses the i-frame gate** — that is the plan gate's
-    /// "per tick" cadence (`LivingEntity.baseTick` lands it every tick a
-    /// player is past the safe zone). Two back-to-back hits both land, unlike
+    /// "per tick" cadence (the real rule lands it every tick a player is
+    /// past the safe zone). Two back-to-back hits both land, unlike
     /// a gated [`apply_damage`](Self::apply_damage) whose second call within
     /// 20 ticks is ignored. This is the property that distinguishes border
     /// damage from a generic hit, so it is asserted directly rather than left
@@ -1200,7 +1143,7 @@ mod tests {
         );
     }
 
-    // ---- `apply_damage` (issue #12's "mob-on-player" entry point) --------
+    // ---- `apply_damage` (the "mob-on-player" entry point) ----------------
 
     /// The full reduction pipeline runs, with the same live-verified
     /// diamond-armour number `mob_attack.rs` (`lodestone-server`'s own
@@ -1243,7 +1186,7 @@ mod tests {
     /// already prove for the other two.
     /// [`PlayerVitals::respawn`] must actually restore a dead player to full
     /// health/air, not merely leave `health` untouched at `0.0` — the
-    /// positive half of issue #270's respawn consumer.
+    /// positive half of the respawn consumer.
     #[test]
     fn respawn_restores_full_health_and_air_after_death() {
         let mut v = PlayerVitals::default();
@@ -1486,8 +1429,8 @@ mod tests {
         assert_eq!(v.food().tick_timer(), 0);
     }
 
-    /// `HurtDirection::from_source` is `ServerPlayer.indicateDamage`'s expression,
-    /// on an **off-axis** hit.
+    /// `HurtDirection::from_source` is the real hurt-direction expression,
+    /// tested on an **off-axis** hit.
     ///
     /// # Why the input is off-axis, and why these particular numbers
     ///
