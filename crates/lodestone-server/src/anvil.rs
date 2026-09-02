@@ -1,14 +1,12 @@
-//! The anvil (issue #254): repair-with-material, repair-by-combining, rename,
-//! the prior-work penalty and the "too expensive" cap; plus the grindstone,
+//! The anvil: repair-with-material, repair-by-combining, rename, the
+//! prior-work penalty and the "too expensive" cap; plus the grindstone,
 //! which shares the anvil's combine-repair maths but strips enchantments
 //! instead of merging them.
 //!
 //! # What it is
 //!
-//! A line-by-line port of `AnvilMenu.createResult`
-//! (`.cache/mc/26.2/src/net/minecraft/world/inventory/AnvilMenu.java:117-274`)
-//! and `GrindstoneMenu`'s `computeResult`/`mergeItems`/`removeNonCursesFrom`
-//! (`GrindstoneMenu.java:117-198`). Both stations reuse
+//! A line-by-line port of the anvil's own combine/repair/rename rule and the
+//! grindstone's combine/strip-curses rule. Both stations reuse
 //! [`crate::enchantment_data`] for the weight/exclusivity/anvil-cost table an
 //! anvil combine and a grindstone's XP refund both need.
 //!
@@ -17,10 +15,10 @@
 //! [`compute`] takes the anvil's two input slots plus an optional typed rename
 //! and returns [`AnvilOutcome`]: the result stack (or `None` if the operation
 //! is invalid), the XP-level cost, whether this is a *pure* rename (which
-//! never hits the too-expensive cap — vanilla clamps a pure rename's cost to
+//! never hits the too-expensive cap — a pure rename's cost is clamped to
 //! `39`), and how many of the addition stack a repair-with-material consumes
-//! (`0` means "consume the whole addition slot instead", matching
-//! `AnvilMenu.onTake`'s own two-branch consumption). The caller
+//! (`0` means "consume the whole addition slot instead", matching the real
+//! rule's own two-branch consumption on take). The caller
 //! ([`crate::server`]) is expected to charge XP and shrink/clear the input
 //! slots from these fields when the *result* slot is taken — this module does
 //! not touch a `PlayerExperience`, matching this crate's existing split
@@ -28,20 +26,20 @@
 //!
 //! [`grindstone_result`]/[`grindstone_xp`] are the grindstone's two independent
 //! questions: what the combined/stripped item looks like, and how much XP its
-//! *removed* enchantments refund (a per-enchantment `getMinCost(level)` sum,
-//! not a flat amount — `GrindstoneMenu`'s own `getExperienceAmount`/
-//! `getExperienceFromItem`).
+//! *removed* enchantments refund (a per-enchantment minimum-cost sum, not a
+//! flat amount).
 //!
 //! # How to change it
 //!
 //! Every magic number here (`0.12F` anvil-damage chance, `12%`/`5%` durability
-//! bonus fractions, the `40` too-expensive threshold) is transcribed with its
-//! vanilla citation in the function body — change the citation, not the
-//! number, if 26.2's own value is ever re-read and found to differ.
+//! bonus fractions, the `40` too-expensive threshold) is transcribed with a
+//! description of where it comes from in the function body — verify the
+//! description against the real rule, not the number, if it is ever found to
+//! differ.
 //!
-//! **Not modelled**: the anvil block's own 12% chance to degrade
-//! (`AnvilBlock.damage`/the `chipped_anvil`/`damaged_anvil` state walk) — this
-//! needs block-state writes this module has no `ChunkSource` access to, and
+//! **Not modelled**: the anvil block's own 12% chance to degrade (the
+//! `chipped_anvil`/`damaged_anvil` block-state walk) — this needs block-state
+//! writes this module has no `ChunkSource` access to, and
 //! [`crate::server`]'s caller is the natural place to add it if wanted, not
 //! here.
 
@@ -50,9 +48,9 @@ use lodestone_model::{ItemEnchantment, ItemStack};
 use crate::enchantment_data;
 use crate::mob_spawn::SpawnRng;
 
-/// The XP-level threshold at which the anvil refuses the whole operation
-/// (`AnvilMenu`'s `this.cost.get() >= 40` guard) — vanilla's real "too
-/// expensive" message fires here, not at some rounder-looking `50`.
+/// The XP-level threshold at which the anvil refuses the whole operation —
+/// the real "too expensive" message fires here, not at some rounder-looking
+/// `50`.
 pub const TOO_EXPENSIVE: i32 = 40;
 
 /// One anvil evaluation's outcome — [`compute`]'s return value.
@@ -65,8 +63,8 @@ pub struct AnvilOutcome {
     pub cost: i32,
     /// Whether this operation is *purely* a rename — no material/enchant
     /// change at all. A pure rename's cost is clamped below [`TOO_EXPENSIVE`]
-    /// rather than blocked by it (`AnvilMenu.createResult`'s `namingCost ==
-    /// price` branch).
+    /// rather than blocked by it (the real rule's "naming cost equals total
+    /// price" branch).
     pub only_renaming: bool,
     /// How many of the addition stack a repair-with-material take consumes.
     /// `0` means "not a repair-with-material take" — the caller's take-time
@@ -121,11 +119,11 @@ fn level_of(list: &[(&'static str, u32)], key: &str) -> u32 {
     list.iter().find(|(k, _)| *k == key).map_or(0, |(_, l)| *l)
 }
 
-/// `StringUtil.isAllowedChatCharacter`/`filterText` — drops control
-/// characters, `DEL` (127), and the `§` formatting-code prefix (code point
-/// 167) from a client-typed string. `char`-wise rather than UTF-16-code-unit-
-/// wise (vanilla's `String.length()` counts the latter); this crate does not
-/// model the surrogate-pair distinction anywhere else either.
+/// The client-typed-string filter — drops control characters, `DEL` (127),
+/// and the `§` formatting-code prefix (code point 167). `char`-wise rather
+/// than UTF-16-code-unit-wise (the real rule counts the latter, via its
+/// string length); this crate does not model the surrogate-pair distinction
+/// anywhere else either.
 fn filter_text(input: &str) -> String {
     input
         .chars()
@@ -136,11 +134,11 @@ fn filter_text(input: &str) -> String {
         .collect()
 }
 
-/// `AnvilMenu.validateName`, reached from `setItemName`: filters, then
-/// **rejects** (never truncates) anything left longer than 50 characters.
-/// `None` means the whole rename attempt is discarded — the caller must leave
+/// The rename-field validation rule: filters, then **rejects** (never
+/// truncates) anything left longer than 50 characters. `None` means the
+/// whole rename attempt is discarded — the caller must leave
 /// [`crate::inventory::PlayerInventory::pending_rename`] exactly as it was,
-/// matching `setItemName`'s own `validatedName != null` gate.
+/// matching the real rule's own "only accept a non-null validated name" gate.
 #[must_use]
 pub fn validate_rename(name: &str) -> Option<String> {
     let filtered = filter_text(name);
@@ -152,9 +150,9 @@ pub fn validate_rename(name: &str) -> Option<String> {
 }
 
 /// Adds or upgrades one enchantment on `item` to `level` — the write half of
-/// `ItemStack.enchant`, shared by the enchanting table's
-/// `EnchantmentMenu.clickMenuButton` (`crate::server`'s consumer) rather than
-/// duplicating [`enchantments_of`]/[`to_wire_enchantments`]/[`set_level`]'s
+/// the enchant rule, shared with the enchanting table's own apply-enchantment
+/// button handler (`crate::server`'s consumer) rather than duplicating
+/// [`enchantments_of`]/[`to_wire_enchantments`]/[`set_level`]'s
 /// read-modify-write shape a second time.
 pub(crate) fn apply_enchantment(item: &mut ItemStack, key: &'static str, level: u32) {
     let mut list = enchantments_of(item);
@@ -162,14 +160,13 @@ pub(crate) fn apply_enchantment(item: &mut ItemStack, key: &'static str, level: 
     item.components.enchantments = to_wire_enchantments(&list);
 }
 
-/// `AnvilMenu.calculateIncreasedRepairCost` — the prior-work-penalty doubling.
+/// The prior-work-penalty doubling.
 #[must_use]
 pub fn calculate_increased_repair_cost(base_cost: u32) -> u32 {
     base_cost.saturating_mul(2).saturating_add(1)
 }
 
-/// `Item.isValidRepairItem`/`ToolMaterial.repairIngredient` — is `addition` the
-/// tier-matched raw material for `base`'s tool/armour tier?
+/// Is `addition` the tier-matched raw material for `base`'s tool/armour tier?
 ///
 /// Tiers and their repair ingredient are read straight off
 /// `tags/item/{material}_tool_materials.json` (tools) and
@@ -218,11 +215,12 @@ fn is_valid_repair_item(base: &str, addition: &str) -> bool {
     false
 }
 
-/// `AnvilMenu.createResult`, ported field for field. `item_name` is the
-/// player-typed rename text (an empty/whitespace string clears an existing
-/// name, `None` means the rename field was never touched this evaluation —
-/// see [`AnvilOutcome`]'s own doc for why a touched-but-unchanged input still
-/// strips a pre-existing name, matching vanilla).
+/// The anvil's combine/repair/rename rule, ported field for field.
+/// `item_name` is the player-typed rename text (an empty/whitespace string
+/// clears an existing name, `None` means the rename field was never touched
+/// this evaluation — see [`AnvilOutcome`]'s own doc for why a
+/// touched-but-unchanged input still strips a pre-existing name, matching
+/// the real rule).
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn compute(
@@ -276,8 +274,8 @@ pub fn compute(
                 let max_damage = effective_max_damage(&result).unwrap_or(0);
                 let remaining1 = max_damage.saturating_sub(damage_value(input));
                 let remaining2 = max_damage.saturating_sub(damage_value(addition));
-                // `AnvilMenu.java:160` — `result.getMaxDamage() * 12 / 100`, integer
-                // truncation both steps, in that order.
+                // `max_damage * 12 / 100`, integer truncation both steps, in that
+                // order.
                 let bonus = remaining2 + max_damage * 12 / 100;
                 let remaining = remaining1 + bonus;
                 let new_damage = max_damage.saturating_sub(remaining);
@@ -392,9 +390,9 @@ pub fn compute(
 // Grindstone
 // ---------------------------------------------------------------------------
 
-/// `GrindstoneMenu.computeResult`: strip-curses-only for one item, or a
-/// combine-repair (`mergeItems`) for two of the same item — distinct from the
-/// anvil's combine, which merges enchantments rather than stripping to curses.
+/// The grindstone's result rule: strip-curses-only for one item, or a
+/// combine-repair for two of the same item — distinct from the anvil's
+/// combine, which merges enchantments rather than stripping to curses.
 #[must_use]
 pub fn grindstone_result(a: Option<&ItemStack>, b: Option<&ItemStack>) -> Option<ItemStack> {
     match (a, b) {
@@ -445,9 +443,9 @@ fn merge_items(input: &ItemStack, addition: &ItemStack) -> Option<ItemStack> {
     Some(remove_non_curses(new_item))
 }
 
-/// `GrindstoneMenu.mergeEnchantsFrom` — `updateEnchantments` + `upgrade`: a
-/// non-curse on `source` upgrades to the higher of the two levels; a curse
-/// only transfers if the target does not already carry it.
+/// The grindstone's merge-enchants rule: a non-curse on `source` upgrades to
+/// the higher of the two levels; a curse only transfers if the target does
+/// not already carry it.
 fn merge_enchants(target: &mut ItemStack, source: &ItemStack) {
     let mut list = enchantments_of(target);
     for (key, level) in enchantments_of(source) {
@@ -460,10 +458,10 @@ fn merge_enchants(target: &mut ItemStack, source: &ItemStack) {
     target.components.enchantments = to_wire_enchantments(&list);
 }
 
-/// `GrindstoneMenu.removeNonCursesFrom` — keeps only curses, and re-derives
-/// `repair_cost` as `calculateIncreasedRepairCost` applied once per remaining
-/// (curse) enchantment, starting from `0`. An enchanted book left with no
-/// curses transmutes back to a plain book.
+/// The grindstone's strip-non-curses rule: keeps only curses, and re-derives
+/// `repair_cost` as [`calculate_increased_repair_cost`] applied once per
+/// remaining (curse) enchantment, starting from `0`. An enchanted book left
+/// with no curses transmutes back to a plain book.
 fn remove_non_curses(mut item: ItemStack) -> ItemStack {
     let kept: Vec<(&'static str, u32)> = enchantments_of(&item)
         .into_iter()
@@ -481,12 +479,12 @@ fn remove_non_curses(mut item: ItemStack) -> ItemStack {
     item
 }
 
-/// `GrindstoneMenu`'s result-slot `getExperienceAmount`: half the summed
-/// `getMinCost(level)` of every non-curse enchantment across **both** input
-/// slots, rounded up, plus a further `[0, half)` random bonus —
+/// The grindstone's result-slot XP refund rule: half the summed minimum
+/// cost of every non-curse enchantment across **both** input slots, rounded
+/// up, plus a further `[0, half)` random bonus —
 /// `halfAmount + random.nextInt(halfAmount)`. `0` when neither item carried a
-/// refundable enchantment (no RNG draw in that case, matching vanilla's
-/// `amount > 0` guard).
+/// refundable enchantment (no RNG draw in that case, matching the real
+/// rule's own "amount > 0" guard).
 #[must_use]
 pub fn grindstone_xp(a: Option<&ItemStack>, b: Option<&ItemStack>, rng: &mut SpawnRng) -> u32 {
     let amount = xp_from_item(a) + xp_from_item(b);
@@ -602,7 +600,7 @@ mod tests {
         assert!(out.cost >= TOO_EXPENSIVE);
     }
 
-    /// `filterText` drops the `§` formatting-code prefix and control
+    /// The text filter drops the `§` formatting-code prefix and control
     /// characters but keeps ordinary printable text untouched.
     #[test]
     fn rename_filters_section_sign_and_control_characters() {
@@ -610,9 +608,10 @@ mod tests {
         assert_eq!(validate_rename(&raw), Some("Excalibur".to_owned()));
     }
 
-    /// `validateName` **rejects** an over-length name outright rather than
-    /// truncating it to 50 — the plausible-but-wrong reading that would
-    /// silently accept a clipped name instead of leaving the field unchanged.
+    /// The rename validation rule **rejects** an over-length name outright
+    /// rather than truncating it to 50 — the plausible-but-wrong reading that
+    /// would silently accept a clipped name instead of leaving the field
+    /// unchanged.
     #[test]
     fn rename_over_fifty_characters_is_rejected_not_truncated() {
         let exactly_fifty = "a".repeat(50);
@@ -622,7 +621,7 @@ mod tests {
     }
 
     /// [`apply_enchantment`] both adds a fresh enchantment and upgrades an
-    /// existing one to the new level, matching `ItemStack.enchant`'s
+    /// existing one to the new level, matching the real enchant rule's
     /// set-not-stack semantics.
     #[test]
     fn apply_enchantment_adds_and_upgrades() {
