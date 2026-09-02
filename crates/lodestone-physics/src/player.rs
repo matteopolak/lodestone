@@ -1,13 +1,13 @@
-//! Player movement core, mirroring vanilla's `LivingEntity`/`Player` tick.
+//! Player movement core, mirroring vanilla's own per-tick player movement.
 //!
 //! The per-tick pipeline reproduced here is (for a non-fluid, non-elytra
 //! player), in order:
 //!
-//! 1. `aiStep` velocity snap-to-zero (`< 9.0E-6` horizontal, `< 0.003` vertical).
-//! 2. Jump handling (`jumpFromGround`, including the sprint boost).
-//! 3. `travel` → `travelInAir`:
-//!    - `moveRelative` adds the friction-influenced input acceleration,
-//!    - `move` resolves collision and applies the block speed factor,
+//! 1. Velocity snap-to-zero (`< 9.0E-6` horizontal, `< 0.003` vertical).
+//! 2. Jump handling (leaving the ground, including the sprint boost).
+//! 3. Travel resolution:
+//!    - input acceleration, scaled by friction, is added,
+//!    - collision is resolved and the block speed factor applied,
 //!    - gravity is subtracted from the post-move Y,
 //!    - horizontal drag (`blockFriction * 0.91`) and vertical drag (`0.98`) are
 //!      applied last.
@@ -27,66 +27,61 @@ use crate::mth::{self};
 use crate::pose::{Pose, update_player_pose};
 use crate::profile::{FluidModel, InputModel, PhysicsProfile};
 
-/// `Avatar.DEFAULT_EYE_HEIGHT` — the player standing eye offset (`1.62F`), used
-/// as the default pose [`eye height`](PlayerState::eye_height). The swimming /
-/// crawling / gliding pose lowers it to `0.4`, crouching to `1.27`; [`crate::pose`]
-/// owns that mapping and [`tick`] applies it.
+/// Vanilla's standing eye offset (`1.62F`), used as the default pose
+/// [`eye height`](PlayerState::eye_height). The swimming / crawling / gliding
+/// pose lowers it to `0.4`, crouching to `1.27`; [`crate::pose`] owns that
+/// mapping and [`tick`] applies it.
 pub const DEFAULT_EYE_HEIGHT: f32 = 1.62;
 
-/// `UseEffects` (`world/item/component/UseEffects.java`) — the pair vanilla's
-/// `LocalPlayer` consults while `isUsingItem()` is true: how much to scale
-/// movement input (`itemUseSpeedMultiplier`, folded into `modifyInput`) and
-/// whether sprinting may continue at all (`canSprint`, ANDed into
-/// `canStartSprinting` as `!isSlowDueToUsingItem()`).
+/// The pair vanilla's own client movement code consults while the player is
+/// using an item: how much to scale movement input (folded into the input
+/// modifier) and whether sprinting may continue at all (ANDed into the "may
+/// start sprinting" check as "not slowed by item use").
 ///
 /// Only two values exist in the 26.2 item table, and there is no third to add
-/// a case for without a new jar reading: [`Self::DEFAULT`] (`UseEffects.
-/// DEFAULT`) is what every item without an explicit override gets — food,
-/// potions, the bow, the crossbow, the shield — and the seven spear items
-/// (wooden/stone/copper/iron/golden/diamond/netherite, via
-/// `Item.Properties.spear(...)`, `Item.java:542`) are the *only* override,
-/// [`Self::SPEAR`]. So a caller resolving "which effects apply" needs only
-/// "is the held item a spear", not a general item-effects table.
+/// a case for without a new jar reading: [`Self::DEFAULT`] is what every item
+/// without an explicit override gets — food, potions, the bow, the crossbow,
+/// the shield — and the seven spear items (wooden/stone/copper/iron/golden/
+/// diamond/netherite, via vanilla's own per-item builder override) are the
+/// *only* override, [`Self::SPEAR`]. So a caller resolving "which effects
+/// apply" needs only "is the held item a spear", not a general item-effects
+/// table.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UseEffects {
-    /// Whether sprinting may continue while this item is in use
-    /// (`UseEffects.canSprint()`).
+    /// Whether sprinting may continue while this item is in use.
     pub can_sprint: bool,
-    /// The movement-input scale applied while this item is in use
-    /// (`UseEffects.speedMultiplier()`).
+    /// The movement-input scale applied while this item is in use.
     pub speed_multiplier: f32,
 }
 
 impl UseEffects {
-    /// `UseEffects.DEFAULT` — every use-item except a spear: no sprinting,
+    /// Vanilla's default: every use-item except a spear gets no sprinting,
     /// input scaled to a fifth.
     pub const DEFAULT: Self = Self {
         can_sprint: false,
         speed_multiplier: 0.2,
     };
-    /// The spear override (`Item.Properties.spear(...)`) — charging a spear
-    /// neither slows movement nor blocks sprinting.
+    /// Vanilla's spear override — charging a spear neither slows movement
+    /// nor blocks sprinting.
     pub const SPEAR: Self = Self {
         can_sprint: true,
         speed_multiplier: 1.0,
     };
 
-    /// Resolve which [`UseEffects`] a held item's own `use()` would arm,
+    /// Resolve which [`UseEffects`] a held item's own use-action would arm,
     /// from its id alone — see this type's own doc for why an id is enough:
-    /// the seven spear items (`Item.Properties.spear(...)`) are the *only*
-    /// override in the 26.2 item table, and every one of them is named
-    /// `*_spear` (`wooden_spear`, `stone_spear`, `copper_spear`,
-    /// `iron_spear`, `golden_spear`, `diamond_spear`, `netherite_spear`).
-    /// Anything else — including an empty main hand — gets [`Self::DEFAULT`],
-    /// matching vanilla's per-item `useEffects` field defaulting to
-    /// `UseEffects.DEFAULT` when a `Item.Properties` builder never overrides
-    /// it.
+    /// the seven spear items are the *only* override in the 26.2 item table,
+    /// and every one of them is named `*_spear` (`wooden_spear`,
+    /// `stone_spear`, `copper_spear`, `iron_spear`, `golden_spear`,
+    /// `diamond_spear`, `netherite_spear`). Anything else — including an
+    /// empty main hand — gets [`Self::DEFAULT`], matching vanilla's own
+    /// per-item use-effects field defaulting when nothing overrides it.
     #[must_use]
     pub fn for_item(id: &str) -> Self {
         // Namespace-agnostic on purpose: a resource pack's own custom item
         // could ship under a different namespace, and the *path* is the only
-        // part vanilla's own builder call keys off (`Item.Properties.spear`
-        // is applied per Java call site, not looked up by namespace).
+        // part vanilla's own per-item override keys off (applied per item
+        // definition, not looked up by namespace).
         let path = id.rsplit_once(':').map_or(id, |(_, path)| path);
         if path.ends_with("_spear") {
             Self::SPEAR
@@ -99,7 +94,8 @@ impl UseEffects {
 /// Raw player intent for one tick, before any client-side transformation.
 ///
 /// `forward`/`strafe` are the digital movement axes (typically `-1.0`, `0.0` or
-/// `1.0`), matching `Input.getMoveVector()` (`y` = forward, `x` = strafe).
+/// `1.0`), matching vanilla's own move-vector convention (`y` = forward,
+/// `x` = strafe).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MovementInput {
     /// Forward (`+`) / backward (`-`) intent.
@@ -115,13 +111,14 @@ pub struct MovementInput {
     /// This tick's [`UseEffects`] if an item is being used (charging, eating,
     /// drawing a bow, blocking with a shield, …), or `None` while idle.
     ///
-    /// `LocalPlayer.modifyInput` applies `speed_multiplier` between the
-    /// `0.98` scale and the sneak scale (`modify_input_unit_square` below);
-    /// the sprint half of `UseEffects` (`can_sprint`) is a *separate*
-    /// conjunct on `canStartSprinting` that the caller (`lodestone-controller`'s
-    /// `compute_movement_intent`) must apply itself before ever constructing
-    /// this — by the time `sprint` reaches here it is already gated, matching
-    /// how the food-level sprint gate already works.
+    /// Vanilla's own input-modifier step applies `speed_multiplier` between
+    /// the `0.98` scale and the sneak scale (`modify_input_unit_square`
+    /// below); the sprint half of [`UseEffects`] (`can_sprint`) is a
+    /// *separate* conjunct on the "may start sprinting" check that the
+    /// caller (`lodestone-controller`'s `compute_movement_intent`) must
+    /// apply itself before ever constructing this — by the time `sprint`
+    /// reaches here it is already gated, matching how the food-level sprint
+    /// gate already works.
     pub using_item: Option<UseEffects>,
 }
 
@@ -140,67 +137,69 @@ impl MovementInput {
 /// Active status effects that influence the movement integration.
 ///
 /// Only the effects that change the *physics* (not just stats) live here.
-/// Speed/Slowness are deliberately **absent**: they are attribute modifiers on
-/// `MOVEMENT_SPEED`, so they arrive pre-folded into the effective movement speed
-/// via the attribute pipeline (see the crate docs' "attribute seam"), not as a
-/// physics flag.
+/// Speed/Slowness are deliberately **absent**: they are movement-speed
+/// attribute modifiers, so they arrive pre-folded into the effective
+/// movement speed via the attribute pipeline (see the crate docs' "attribute
+/// seam"), not as a physics flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StatusEffects {
-    /// `MobEffects.LEVITATION` amplifier (0-based) if active. In `travelInAir`
-    /// this *replaces* gravity with `y += (0.05*(amp+1) - y) * 0.2`.
+    /// The Levitation effect's amplifier (0-based) if active. During
+    /// airborne travel this *replaces* gravity with
+    /// `y += (0.05*(amp+1) - y) * 0.2`.
     pub levitation: Option<u32>,
-    /// `MobEffects.SLOW_FALLING`. Reduces `getEffectiveGravity()` to
-    /// `min(gravity, 0.01)` **while falling** — which, in fluids, is precisely
-    /// what revives the otherwise-dead `-0.003` slow-descent clamp.
+    /// The Slow Falling effect. Reduces the effective gravity to
+    /// `min(gravity, 0.01)` **while falling** — which, in fluids, is
+    /// precisely what revives the otherwise-dead `-0.003` slow-descent
+    /// clamp.
     pub slow_falling: bool,
-    /// `MobEffects.DOLPHINS_GRACE`. Forces the in-water horizontal slow-down to
-    /// `0.96F` regardless of sprint state.
+    /// The Dolphin's Grace effect. Forces the in-water horizontal slow-down
+    /// to `0.96F` regardless of sprint state.
     pub dolphins_grace: bool,
-    /// `MobEffects.JUMP_BOOST` amplifier (0-based) if active. Per the ruling that
-    /// Jump Boost is **not** a `MOVEMENT_SPEED` modifier, it rides its own field:
-    /// `getJumpBoostPower()` adds `0.1F * (amp + 1)` to the jump velocity in
-    /// `getJumpPower`, *after* the `JUMP_STRENGTH * blockJumpFactor` product.
+    /// The Jump Boost effect's amplifier (0-based) if active. Per the ruling
+    /// that Jump Boost is **not** a movement-speed attribute modifier, it
+    /// rides its own field: it adds `0.1F * (amp + 1)` to the jump velocity,
+    /// *after* the jump-strength/block-jump-factor product.
     pub jump_boost: Option<u32>,
 }
 
 /// Mutable player physics state carried across ticks.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlayerState {
-    /// World position (feet centre), `Vec3` in vanilla.
+    /// World position (feet centre).
     pub position: Vec3d,
-    /// Delta movement (velocity), `Vec3` in vanilla.
+    /// Delta movement (velocity).
     pub velocity: Vec3d,
     /// Yaw in degrees; `0` faces `+Z` (south).
     pub yaw: f32,
     /// Pitch in degrees.
     pub pitch: f32,
     /// Whether the player is on the ground, i.e. this tick's move collided
-    /// **downward** (`verticalCollisionBelow` in `Entity.move`). This is the flag
-    /// the client **transmits** to the server on every movement packet
-    /// (`ServerboundMovePlayerPacket`'s `onGround`).
+    /// **downward**. This is the flag the client **transmits** to the server
+    /// on every movement packet.
     ///
     /// It is a *distinct decision* from the collision result the server re-runs
     /// from our reported position: if the server ever believes we are unsupported
-    /// and not descending in open air, it counts `aboveGroundTickCount` and
-    /// disconnects with `multiplayer.disconnect.flying` at `getMaximumFlyingTicks`
-    /// (80 ticks at default gravity). Because our position is bit-exact, the
-    /// server's own downward collision stays aligned with this flag, so the two
-    /// never diverge — but a driver must transmit *this* value unmodified rather
-    /// than re-deriving one.
+    /// and not descending in open air, it counts consecutive above-ground ticks
+    /// and disconnects with `multiplayer.disconnect.flying` once that count
+    /// exceeds its maximum (80 ticks at default gravity). Because our position
+    /// is bit-exact, the server's own downward collision stays aligned with
+    /// this flag, so the two never diverge — but a driver must transmit *this*
+    /// value unmodified rather than re-deriving one.
     ///
     /// Vanilla computes it identically in **every** movement mode (walking,
     /// swimming, climbing, falling); there is no bespoke "supported" notion for
-    /// swimming or climbing. The **sole override** is `Player.tick`, which forces
-    /// `onGround = false` while a **spectator or passenger** (riding a
-    /// boat/minecart/horse). This engine still has no riding state — that is a
-    /// session fact, not a physics one — and the override now has a real owner:
-    /// `lodestone_ecs::player::pin_passenger_to_vehicle` applies it off
-    /// `lodestone_ecs::session::Riding` in the same system that snaps the player
-    /// onto the seat, so `on_ground` keeps exactly one writer per tick. See the
-    /// `spectator_or_passenger_note` contract test in `tests/on_ground.rs` for why
-    /// it is not a field here, and for the measured correction that the *server*
-    /// never kicks a passenger over this flag (its float check is
-    /// `&& !isPassenger()`) — the override is for local readers.
+    /// swimming or climbing. The **sole override** is vanilla's own per-tick
+    /// player update, which forces `onGround = false` while a **spectator or
+    /// passenger** (riding a boat/minecart/horse). This engine still has no
+    /// riding state — that is a session fact, not a physics one — and the
+    /// override now has a real owner: `lodestone_ecs::player::pin_passenger_to_vehicle`
+    /// applies it off `lodestone_ecs::session::Riding` in the same system that
+    /// snaps the player onto the seat, so `on_ground` keeps exactly one writer
+    /// per tick. See the `spectator_or_passenger_note` contract test in
+    /// `tests/on_ground.rs` for why it is not a field here, and for the
+    /// measured correction that the *server* never kicks a passenger over this
+    /// flag (it excludes passengers from that check explicitly) — the
+    /// override is for local readers.
     ///
     /// Note: a player starting from rest reports airborne for exactly one settle
     /// tick, because a tick runs `move()` before applying gravity — matching the
@@ -208,11 +207,10 @@ pub struct PlayerState {
     pub on_ground: bool,
     /// Whether the player collided horizontally last tick.
     pub horizontal_collision: bool,
-    /// `noJumpDelay` countdown that gates repeated jumps.
+    /// Countdown that gates repeated jumps (vanilla's own no-jump-delay timer).
     pub no_jump_delay: i32,
-    /// `LocalPlayer.autoJumpEnabled` — the client Options Auto-Jump toggle,
-    /// defaulting **on** exactly like the `LocalPlayer` field
-    /// (`LocalPlayer.java:152-153, 299`).
+    /// The client Options Auto-Jump toggle, defaulting **on** exactly like
+    /// vanilla's own client-side field.
     ///
     /// **This is the only gate on the detector, and it is now really driven.**
     /// The shell's `Options::auto_jump` reaches it once per tick through
@@ -221,144 +219,144 @@ pub struct PlayerState {
     /// decorative — the option read OFF and [`update_auto_jump`] still armed
     /// jumps. See that resource's doc for the seam.
     pub auto_jump_enabled: bool,
-    /// `LocalPlayer.autoJumpTime` — the one-tick deferral that carries the
-    /// auto-jump *decision* (made at the end of `move()` by [`update_auto_jump`])
-    /// across to the next `aiStep`, where it is spent as a forced jump
-    /// (`LocalPlayer.java:784-789`). `0` means idle.
+    /// The one-tick deferral that carries the auto-jump *decision* (made at
+    /// the end of this tick's move by [`update_auto_jump`]) across to the
+    /// next tick's movement step, where it is spent as a forced jump. `0`
+    /// means idle.
     pub auto_jump_time: i32,
     /// Whether the player is currently sprinting (affects movement speed).
     pub sprinting: bool,
-    /// Whether the player is gliding with an elytra (`isFallFlying()`). When set,
-    /// [`tick`] routes to [`tick_elytra`] instead of [`tick_air`] (fluid still
-    /// takes precedence, matching vanilla's `travel()` dispatch order).
+    /// Whether the player is gliding with an elytra. When set, [`tick`]
+    /// routes to [`tick_elytra`] instead of [`tick_air`] (fluid still takes
+    /// precedence, matching vanilla's own travel dispatch order).
     pub fall_flying: bool,
     /// Active physics-affecting status effects.
     pub effects: StatusEffects,
-    /// Effective `MOVEMENT_SPEED` attribute value handed in by the entity layer
+    /// Effective movement-speed attribute value handed in by the entity layer
     /// (`lodestone-entity`'s `AttributeInstance.value()`), or `None` to let
     /// physics compute the standalone base+sprint value itself.
     ///
-    /// **Reconciled attribute seam.** Vanilla `Player` does, every tick,
-    /// `setSpeed((float) getAttributeValue(MOVEMENT_SPEED))` and movement reads
-    /// that float via `getSpeed()`. That attribute value already folds in the
-    /// transient **sprint** modifier (`AddMultipliedTotal 0.3`) *and* any
-    /// Speed/Slowness/Depth-Strider modifiers, computed by the three-stage
-    /// `calculateValue()` (AddValue → AddMultipliedBase → AddMultipliedTotal).
-    /// Physics must **not** reimplement that maths or re-apply sprint: when this
-    /// is `Some(v)`, [`friction_influenced_speed`] uses `v as f32` directly
-    /// (reproducing vanilla's `(float)` cast at the same place) and ignores the
-    /// `sprinting` flag, so there is no double-count. Pass the raw `f64` — never
-    /// a pre-cast `f32` — so the double→float rounding stays inside physics.
+    /// **Reconciled attribute seam.** Vanilla's own player update does, every
+    /// tick, casts the resolved movement-speed attribute value to a `float`
+    /// and stores it, and movement reads that float back. That attribute
+    /// value already folds in the transient **sprint** modifier (a `+30%`
+    /// multiply-on-total) *and* any Speed/Slowness/Depth-Strider modifiers,
+    /// computed by vanilla's three-stage modifier resolution (flat add →
+    /// multiply-on-base → multiply-on-total, applied in that order). Physics
+    /// must **not** reimplement that maths or re-apply sprint: when this is
+    /// `Some(v)`, [`friction_influenced_speed`] uses `v as f32` directly
+    /// (reproducing vanilla's own cast to `float` at the same place) and
+    /// ignores the `sprinting` flag, so there is no double-count. Pass the
+    /// raw `f64` — never a pre-cast `f32` — so the double→float rounding
+    /// stays inside physics.
     pub movement_speed: Option<f64>,
-    /// Pending **"stuck in block" speed multiplier** (`Entity.stuckSpeedMultiplier`),
-    /// set last tick by the block we were inside and consumed at the top of the
-    /// next move (see [`CollisionView::stuck_multiplier`]). `ZERO` means "not
-    /// stuck"; vanilla treats `lengthSqr <= 1.0E-7` as unset. Cobweb, powder snow
-    /// and sweet berry bush write this; consumption multiplies the tick's
-    /// movement component-wise and then zeroes velocity, exactly as vanilla — the
-    /// one-tick delay between entering the block and being slowed is observable
-    /// and reproduced.
+    /// Pending **"stuck in block" speed multiplier**, set last tick by the
+    /// block we were inside and consumed at the top of the next move (see
+    /// [`CollisionView::stuck_multiplier`]). `ZERO` means "not stuck"; vanilla
+    /// treats a squared length `<= 1.0E-7` as unset. Cobweb, powder snow and
+    /// sweet berry bush write this; consumption multiplies the tick's
+    /// movement component-wise and then zeroes velocity, exactly as vanilla —
+    /// the one-tick delay between entering the block and being slowed is
+    /// observable and reproduced.
     pub stuck_speed_multiplier: Vec3d,
     /// The player's current [`Pose`], which decides the **collision box** (via
     /// [`Self::dimensions`]) and the [`eye height`](Self::eye_height).
     ///
-    /// **An output of [`tick`], not an input to it.** `Player.updatePlayerPose`
-    /// runs at the end of `Player.tick()` and is fit-gated — a pose whose box
-    /// would not fit where the player stands is vetoed — so it cannot be
-    /// meaningfully set from outside per tick. [`Self::with_pose`] exists to seed
-    /// an initial pose (a test fixture, or a session resuming mid-swim); after the
-    /// first [`tick`] the machine owns it. See [`crate::pose`] for the state
-    /// machine and for why skipping its gate would clip a surfacing swimmer into
-    /// a ceiling with nothing to catch them.
+    /// **An output of [`tick`], not an input to it.** Vanilla's own pose
+    /// update runs at the end of its per-tick player update and is
+    /// fit-gated — a pose whose box would not fit where the player stands is
+    /// vetoed — so it cannot be meaningfully set from outside per tick.
+    /// [`Self::with_pose`] exists to seed an initial pose (a test fixture, or
+    /// a session resuming mid-swim); after the first [`tick`] the machine
+    /// owns it. See [`crate::pose`] for the state machine and for why
+    /// skipping its gate would clip a surfacing swimmer into a ceiling with
+    /// nothing to catch them.
     ///
     /// The narrower travel entry points ([`tick_air`], [`tick_water`],
-    /// [`tick_lava`], [`tick_elytra`]) are vanilla's `travel`, not `Player.tick`:
-    /// they *read* the pose for the box and never write it.
+    /// [`tick_lava`], [`tick_elytra`]) are vanilla's own travel dispatch, not
+    /// its full per-tick player update: they *read* the pose for the box and
+    /// never write it.
     pub pose: Pose,
-    /// Pose **eye height** (`getEyeHeight`), the offset from feet to eye used by
+    /// Pose **eye height**, the offset from feet to eye used by
     /// [`crate::compute_fluid_state`] to decide eye-in-fluid. Standing is
-    /// `1.62` (`Avatar.DEFAULT_EYE_HEIGHT`); the swimming/crawling/gliding pose is
-    /// `0.4`, crouching `1.27`.
-    /// `getEyeY()` widens it to `double` and adds `position.y`, reproduced exactly.
+    /// `1.62` (vanilla's own default eye height); the swimming/crawling/gliding
+    /// pose is `0.4`, crouching `1.27`. Vanilla widens it to `double` and adds
+    /// the feet Y to get the eye's world Y, reproduced exactly.
     ///
     /// **Derived from [`Self::pose`], and rewritten by every [`tick`].** In
-    /// vanilla the two are one record — `refreshDimensions` sets
-    /// `this.eyeHeight = newDim.eyeHeight()` in the same three lines that set the
-    /// box (`Entity.java:3395-3400`) — and splitting them is observable: a
-    /// `0.6`-high box with a `1.62` eye makes a fully submerged swimmer read
-    /// `eye_in_water == false`, because `compute_fluid_state`'s cell sweep is
-    /// bounded by the *box* and so never reaches the eye's cell. That kills the
-    /// fog, the overlay and `updateSwimming`'s entry condition at once.
+    /// vanilla the two are one record — refreshing the collision dimensions
+    /// sets the eye height in the same step that sets the box — and
+    /// splitting them is observable: a `0.6`-high box with a `1.62` eye makes
+    /// a fully submerged swimmer read `eye_in_water == false`, because
+    /// `compute_fluid_state`'s cell sweep is bounded by the *box* and so
+    /// never reaches the eye's cell. That kills the fog, the overlay and the
+    /// swim-state entry condition at once.
     ///
-    /// It is therefore an **output mirror**, published for the camera and the fog:
-    /// nothing inside [`tick`] reads this field. Both places that need an eye
-    /// height (`compute_fluid_state`'s eye sweep and `getFluidJumpThreshold`) call
-    /// [`Pose::eye_height`] directly, so a caller that overwrites this field
-    /// between ticks — as `lodestone-ecs`'s own pose layer currently does — can
-    /// mislead the camera but can never desynchronise the eye from the box inside
-    /// physics.
+    /// It is therefore an **output mirror**, published for the camera and the
+    /// fog: nothing inside [`tick`] reads this field. Both places that need
+    /// an eye height (`compute_fluid_state`'s eye sweep and the fluid-jump
+    /// threshold) call [`Pose::eye_height`] directly, so a caller that
+    /// overwrites this field between ticks — as `lodestone-ecs`'s own pose
+    /// layer currently does — can mislead the camera but can never
+    /// desynchronise the eye from the box inside physics.
     ///
-    /// [`Self::with_eye_height`] therefore only usefully models a pose this crate
-    /// does not have (`SLEEPING`, `DYING`), and only for a driver that does not
-    /// call [`tick`].
+    /// [`Self::with_eye_height`] therefore only usefully models a pose this
+    /// crate does not have (sleeping, dying), and only for a driver that does
+    /// not call [`tick`].
     pub eye_height: f32,
-    /// **Output.** `isEyeInFluid(WATER)` from the last [`tick`], i.e. the eye
-    /// block-column held water spanning the eye Y. Combine with in-water via
-    /// [`Self::eye_in_water`] + fluid presence for `isUnderWater`; the shell reads
-    /// this for submerged fog, the underwater overlay, and `ambient.underwater.*`.
+    /// **Output.** Whether the eye is in water as of the last [`tick`], i.e.
+    /// the eye block-column held water spanning the eye Y. Combine with
+    /// in-water via [`Self::eye_in_water`] + fluid presence for the
+    /// underwater check; the shell reads this for submerged fog, the
+    /// underwater overlay, and `ambient.underwater.*`.
     pub eye_in_water: bool,
-    /// **Output.** `isEyeInFluid(LAVA)` from the last [`tick`].
+    /// **Output.** Whether the eye is in lava as of the last [`tick`].
     pub eye_in_lava: bool,
-    /// **Output.** `Entity.isSwimming()` after the last [`tick`]'s
-    /// `updateSwimming`: sprint-swimming, entered when sprinting while submerged in
-    /// water and sustained while sprinting in water.
+    /// **Output.** Whether the player is sprint-swimming after the last
+    /// [`tick`]'s swim-state update: entered when sprinting while submerged
+    /// in water and sustained while sprinting in water.
     ///
-    /// The server derives this **itself**, in its own `Entity.baseTick` →
-    /// `updateSwimming`, from `isSprinting()` and its own collision — there is no
-    /// swimming bit anywhere on the wire (`Input` is seven booleans:
-    /// forward/backward/left/right/jump/shift/sprint, `Input.java`). What a driver
-    /// must transmit is the **sprint** edge, via
-    /// `ServerboundPlayerCommandPacket(START_SPRINTING/STOP_SPRINTING)`
-    /// (`LocalPlayer.sendIsSprintingIfNeeded`, `LocalPlayer.java:303-312`) — the
-    /// `Input` packet's `sprint` flag is stored as `lastClientInput` and does *not*
-    /// call `setSprinting` (`ServerGamePacketListenerImpl.java:424` vs `:1719`).
-    /// Send only sprint and the server's swim pose follows; send the input packet
-    /// alone and it never does.
+    /// The server derives this **itself**, from its own sprinting flag and
+    /// its own collision — there is no swimming bit anywhere on the wire
+    /// (the movement-input packet is seven booleans:
+    /// forward/backward/left/right/jump/shift/sprint). What a driver must
+    /// transmit is the **sprint** edge, via a dedicated start/stop-sprinting
+    /// packet — the movement-input packet's `sprint` flag is stored as the
+    /// last-seen client input and does *not* itself flip the server's
+    /// sprinting flag. Send only the sprint edge and the server's swim pose
+    /// follows; send the input packet alone and it never does.
     pub swimming: bool,
-    /// **Output.** `LivingEntity.swimAmount` after the last [`tick`] — a `0..1`
-    /// ramp toward the swim pose, advanced by `SWIM_AMOUNT_PER_TICK` (`0.09F`,
-    /// `LivingEntity.java:174`) per tick and clamped to `[0, 1]`
-    /// (`LivingEntity.java:3478-3483`), never snapping the way
+    /// **Output.** The swim-amount ramp after the last [`tick`] — a `0..1`
+    /// value ramping toward the swim pose, advanced by a fixed per-tick step
+    /// (`0.09F`) and clamped to `[0, 1]`, never snapping the way
     /// [`Self::swimming`] itself does. Vanilla advances this **every tick**,
-    /// right after `updateSwimming` decides this tick's [`Self::swimming`] and
-    /// before `aiStep`/`travel` runs (`LivingEntity.tick()`,
-    /// `LivingEntity.java:2755-2758`), so [`crate::player::tick`] updates it in
-    /// that same slot.
+    /// right after the swim-state update decides this tick's
+    /// [`Self::swimming`] and before the rest of its per-tick movement runs,
+    /// so [`crate::player::tick`] updates it in that same slot.
     ///
     /// Vanilla uses this to blend the swimming model's body-pitch animation
-    /// (`HumanoidModel`/`HumanoidMobRenderer`) — **not** the camera eye height,
-    /// which Camera.java smooths independently (see `camera_rig.rs`'s
-    /// `EyeHeightSmoother`). Nothing in this crate reads this field; it exists
-    /// so a renderer can consume the exact per-tick ramp instead of
-    /// re-deriving one from [`Self::swimming`] (which would reintroduce the
-    /// snap this field exists to avoid).
+    /// — **not** the camera eye height, which the camera rig smooths
+    /// independently (see `camera_rig.rs`'s `EyeHeightSmoother`). Nothing in
+    /// this crate reads this field; it exists so a renderer can consume the
+    /// exact per-tick ramp instead of re-deriving one from [`Self::swimming`]
+    /// (which would reintroduce the snap this field exists to avoid).
     pub swim_amount: f32,
-    /// **Output.** The previous tick's [`Self::swim_amount`]
-    /// (`swimAmountO`), for a partial-tick interpolated read —
-    /// `Mth.lerp(a, swimAmountO, swimAmount)` (`LivingEntity.java:401`).
-    /// Because the ramp is monotonic and clamped (unlike the arm-swing's
-    /// sawtooth `attack_anim`, whose `getAttackAnim` wraps a negative delta), a
-    /// plain `lerp(a, swim_amount_o, swim_amount)` is exactly vanilla's read —
-    /// no wrap-around correction needed.
+    /// **Output.** The previous tick's [`Self::swim_amount`], for a
+    /// partial-tick interpolated read — vanilla linearly interpolates
+    /// between the two by the frame's tick fraction. Because the ramp is
+    /// monotonic and clamped (unlike the arm-swing's sawtooth `attack_anim`,
+    /// which wraps a negative delta), a plain `lerp(a, swim_amount_o,
+    /// swim_amount)` is exactly vanilla's read — no wrap-around correction
+    /// needed.
     pub swim_amount_o: f32,
-    /// `Attributes.WATER_MOVEMENT_EFFICIENCY` — the Depth Strider attribute, as an
-    /// **input** from the equipment layer (like [`Self::movement_speed`]).
+    /// The Depth Strider attribute value, as an **input** from the
+    /// equipment layer (like [`Self::movement_speed`]).
     ///
-    /// Vanilla's `travelInWater` reads `getAttributeValue(WATER_MOVEMENT_EFFICIENCY)`
-    /// (`LivingEntity.java:2509`), halves it when airborne, and then uses it to lerp
-    /// the horizontal slow-down toward `0.546_000_06` and the input speed toward
-    /// `getSpeed()`. Depth Strider contributes `0.33` per level via its enchantment
-    /// effect, so a level-III boot is `0.99`.
+    /// Vanilla's own in-water travel step reads this attribute value, halves
+    /// it when airborne, and then uses it to lerp the horizontal slow-down
+    /// toward `0.546_000_06` and the input speed toward the effective
+    /// movement speed. Depth Strider contributes `0.33` per level via its
+    /// enchantment effect, so a level-III boot is `0.99`.
     ///
     /// **Default `0.0`, because no caller in this repo can reach the value yet — but
     /// it is closer than it looks, and the gap is a missing accessor, not missing
@@ -369,34 +367,34 @@ pub struct PlayerState {
     /// `EntityAttributeSnapshot`s. What is absent is (a) any route from the shell to
     /// the **local player's** attribute set — the shell's `EntitySnapshot` drops the
     /// `attributes` field, and there is no `NetClient` accessor for it — and (b) the
-    /// three-stage `calculateValue()` fold from base + modifiers to an effective
-    /// value, which the shell also does not do for `MOVEMENT_SPEED` (it recomputes
-    /// that itself instead).
+    /// three-stage modifier-resolution fold from base + modifiers to an effective
+    /// value, which the shell also does not do for the movement-speed attribute
+    /// (it recomputes that itself instead).
     ///
     /// The arithmetic lives in [`tick_water`] so that the value is the *only* missing
     /// piece rather than the whole branch, and so nothing can silently substitute a
     /// plausible number for it.
     pub water_movement_efficiency: f32,
-    /// `Abilities.flying` — **creative flight is currently engaged**.
+    /// Whether **creative flight is currently engaged**.
     ///
-    /// This is *server authority*, not a local toggle:
-    /// `ClientboundPlayerAbilitiesPacket` carries it, and vanilla's client-side
-    /// toggle is gated on `abilities.mayfly` (which lives on the driver, not here
-    /// — physics never decides whether flight is *allowed*, only what it does).
-    /// A driver that lets the player fly without a server grant is a bug, not a
-    /// feature: see `docs/creative-flight.md`.
+    /// This is *server authority*, not a local toggle: the player-abilities
+    /// packet carries it, and vanilla's client-side toggle is gated on a
+    /// separate may-fly grant (which lives on the driver, not here — physics
+    /// never decides whether flight is *allowed*, only what it does). A
+    /// driver that lets the player fly without a server grant is a bug, not
+    /// a feature: see `docs/creative-flight.md`.
     ///
     /// # What setting this does, in three places and no more
     ///
     /// Flight is **not** a fourth travel mode beside air/water/lava/elytra. It is
     /// a set of modifications to the machinery that already exists, because
-    /// `Player.travel` *wraps* `super.travel(input)` rather than replacing it
-    /// (`Player.java:1416-1424`):
+    /// vanilla's own player travel step *wraps* the base travel behaviour
+    /// rather than replacing it:
     ///
-    /// 1. **A dispatch suppressor.** `Player.isAffectedByFluids()` is
-    ///    `!abilities.flying` (`Player.java:875-878`) and `shouldTravelInFluid`
-    ///    requires it, so a flying player **never takes the fluid branch** — flying
-    ///    underwater goes through [`tick_air`], not [`tick_water`].
+    /// 1. **A dispatch suppressor.** Vanilla's fluid-affected check is
+    ///    `!abilities.flying`, and its fluid-travel gate requires it, so a
+    ///    flying player **never takes the fluid branch** — flying underwater
+    ///    goes through [`tick_air`], not [`tick_water`].
     /// 2. **A speed substitution**, via [`player_flying_speed`] /
     ///    [`Self::flying_speed`].
     /// 3. **A post-travel Y overwrite**: the *pre*-travel Y, times `0.6`,
@@ -408,140 +406,133 @@ pub struct PlayerState {
     /// which is applied at its own site.
     ///
     /// **Collision stays on.** Creative flight is not noclip; only *spectator*
-    /// mode sets `noPhysics`, which this crate does not model at all (see the
-    /// module docs).
+    /// mode disables physics entirely, which this crate does not model at all
+    /// (see the module docs).
     pub flying: bool,
-    /// `Abilities.flyingSpeed` — the **creative-flight** input speed, server-set,
-    /// default `0.05F` (`Abilities.java`'s `DEFAULT_FLYING_SPEED`).
+    /// The **creative-flight** input speed, server-set, default `0.05F`
+    /// (vanilla's own default flying speed).
     ///
     /// Consumed by [`player_flying_speed`], which doubles it while sprinting. Note
-    /// the vertical fly impulse (`LocalPlayer.aiStep`'s `inputYa *
-    /// abilities.getFlyingSpeed() * 3.0F`) uses this **raw**, *un*-doubled value
-    /// even while sprinting — that asymmetry is the driver's to reproduce, and
+    /// the vertical fly impulse (the ascend/descend input, times this speed,
+    /// times `3.0F`) uses this **raw**, *un*-doubled value even while
+    /// sprinting — that asymmetry is the driver's to reproduce, and
     /// `lodestone-ecs`'s `apply_creative_flight_input` does.
     ///
     /// **Not [`PhysicsProfile::flying_speed`]**, which is the unrelated `0.02F`
     /// non-flying airborne constant. They are 2.5x apart and both are called
     /// "flying speed" in vanilla.
     pub flying_speed: f32,
-    /// `Entity.fallDistance` (`Entity.java:245` — a `double`, not a `float`, since
-    /// 26.2).
+    /// Vanilla's own fall-distance accumulator — a `double`, not a `float`,
+    /// since 26.2.
     ///
-    /// **Why it is load-bearing.** [`move_entity`] is documented as modelling only
-    /// "the parts of `Entity.move` that affect an entity's reported position", and
-    /// fall distance used to be squarely outside that: it drives fall *damage*,
-    /// which the server owns. `Player.maybeBackOffFromEdge` changes that —
-    /// `isAboveGround` consults `fallDistance`, and the back-off moves you, so fall
-    /// distance is now a position input.
+    /// **Why it is load-bearing.** [`move_entity`] is documented as modelling
+    /// only "the parts of vanilla's own move step that affect an entity's
+    /// reported position", and fall distance used to be squarely outside
+    /// that: it drives fall *damage*, which the server owns. Vanilla's own
+    /// edge back-off behaviour changes that — it consults the accumulator to
+    /// decide whether the player is "above ground", and the back-off moves
+    /// you, so fall distance is now a position input.
     ///
-    /// **`isAboveGround` (`Player.java:932`) is the only reader in *this* crate,
-    /// not the only reader in vanilla.** The others are all outside this crate's
-    /// scope today, and are listed because a maintained value is what unblocks
-    /// them: `Player.canCriticalAttack` (`Player.java:1033`, `fallDistance > 0.0`
-    /// — the crit condition), `LivingEntity.checkFallDamage`'s damage calculation
-    /// (`LivingEntity.java:368-370`), and `Block.fallOn` (`Entity.java:1571`).
+    /// **The "above ground" check is the only reader in *this* crate, not
+    /// the only reader in vanilla.** The others are all outside this crate's
+    /// scope today, and are listed because a maintained value is what
+    /// unblocks them: the critical-hit condition (fall distance above zero),
+    /// the fall-damage calculation, and block-landing effects.
     ///
     /// **This crate maintains it.** [`tick`]/[`tick_air`]/[`tick_water`]/
     /// [`tick_lava`]/[`tick_elytra`] reproduce every site vanilla touches it:
     ///
-    /// * **Accumulation + grounded reset** — `Entity.checkFallDamage`
-    ///   (`Entity.java:1564-1582`, reached through `LivingEntity`'s override at
-    ///   `LivingEntity.java:363-394`, which spawns landing particles and then calls
-    ///   `super.checkFallDamage` unchanged): `if (!isInWater() && ya < 0.0)
-    ///   fallDistance -= (float) ya;` then, unconditionally, `if (onGround)
-    ///   resetFallDistance();`. Note the `(float)` truncation of the `double` delta
-    ///   *before* the subtraction into the `double` field — reproduced here as
-    ///   `state.fall_distance -= f64::from(ya as f32)`. In vanilla this call sits
-    ///   inside `Entity.move()` itself (`Entity.java:783-784`), gated on
-    ///   `isLocalInstanceAuthoritative()` — always `true` for `LocalPlayer`
-    ///   (`Entity.java:3594-3596`, `Player.java:1276-1283`,
-    ///   `LocalPlayer.java:376`), which is the only player this crate models. The
-    ///   `movementLength >= 1.0` clip-through reset that also lives inside `move()`
-    ///   (`Entity.java:747-754`) needs a world raycast against
-    ///   `ClipContext.Block.FALLDAMAGE_RESETTING` and is **not** modelled — see
+    /// * **Accumulation + grounded reset** — vanilla's own fall-damage
+    ///   bookkeeping (reached through the living-entity override, which
+    ///   spawns landing particles and then defers to the base behaviour
+    ///   unchanged): if not in water and moving downward, subtract the
+    ///   downward velocity delta from the accumulator; then, unconditionally,
+    ///   if on the ground, reset it to zero. Note the truncation of the
+    ///   `double` delta to `float` *before* the subtraction into the `double`
+    ///   field — reproduced here as `state.fall_distance -=
+    ///   f64::from(ya as f32)`. In vanilla this call sits inside the move
+    ///   step itself, gated on a check that is always `true` for the local
+    ///   player, which is the only player this crate models. The
+    ///   full-block-or-more clip-through reset that also lives inside the
+    ///   move step needs a world raycast and is **not** modelled — see
     ///   [`crate::entity::move_entity`]'s own scope note.
-    /// * **Water reset** — `Entity.updateFluidInteraction`: `if (inWater)
-    ///   resetFallDistance();` (`Entity.java:1658-1659`), called from `baseTick`
-    ///   (`Entity.java:537`) before `travel`. This crate's dispatch already
-    ///   computes the same per-tick fluid summary before choosing [`tick_water`],
-    ///   so the reset lands at the top of that function. **The `baseTick` call is
-    ///   not the only one**: `LivingEntity.checkFallDamage` calls
-    ///   `updateFluidInteraction` again from *inside* `move()`
-    ///   (`LivingEntity.java:365`), which is why the water-**entry** tick diverges
-    ///   by one tick here — see [`accumulate_fall_distance`], which documents the
-    ///   bound and why it cannot move the player.
-    /// * **Lava halving** — `Entity.baseTick`: `if (isInLava()) fallDistance *=
-    ///   0.5;` (`Entity.java:555-557`), applied at the top of [`tick_lava`] for the
-    ///   same reason.
-    /// * **Climbable reset** — `LivingEntity.handleOnClimbable`: `if
-    ///   (onClimbable()) resetFallDistance();` (`LivingEntity.java:2693-2695`),
-    ///   reached only through `travelInAir` (`LivingEntity.java:2666-2669`), so
-    ///   only [`tick_air`] applies it — matching vanilla, where a climbable never
+    /// * **Water reset** — vanilla's own fluid-interaction update resets the
+    ///   accumulator on entering water, called before travel runs each tick.
+    ///   This crate's dispatch already computes the same per-tick fluid
+    ///   summary before choosing [`tick_water`], so the reset lands at the
+    ///   top of that function. **That call is not the only one**: the
+    ///   fall-damage check calls the same fluid-interaction update again
+    ///   from *inside* the move step, which is why the water-**entry** tick
+    ///   diverges by one tick here — see [`accumulate_fall_distance`], which
+    ///   documents the bound and why it cannot move the player.
+    /// * **Lava halving** — vanilla's own per-tick update halves the
+    ///   accumulator while in lava, applied at the top of [`tick_lava`] for
+    ///   the same reason.
+    /// * **Climbable reset** — vanilla resets the accumulator while on a
+    ///   climbable, reached only through its airborne travel step, so only
+    ///   [`tick_air`] applies it — matching vanilla, where a climbable never
     ///   resets fall distance while swimming or gliding.
-    /// * **Slow Falling / Levitation reset** — `LivingEntity.aiStep`: `if
-    ///   (hasEffect(SLOW_FALLING) || hasEffect(LEVITATION)) resetFallDistance();`
-    ///   (`LivingEntity.java:3123-3125`), unconditionally before the `travel()`
-    ///   dispatch — applied in [`tick`] before it picks a travel path.
-    /// * **Elytra accumulation clamp** — `Entity.checkFallDistanceAccumulation`:
-    ///   `if (deltaMovement.y() > -0.5 && fallDistance > 1.0) fallDistance = 1.0;`
-    ///   (`Entity.java:2904-2908`), called from `LivingEntity.updateFallFlying`
-    ///   (`LivingEntity.java:3183-3184`), itself only reached `if (isFallFlying())`
-    ///   in `aiStep` (`LivingEntity.java:3117-3119`) — before the Slow
-    ///   Falling/Levitation check and before `travel()`. Applied in [`tick`]
-    ///   alongside that check, gated on [`Self::fall_flying`].
-    /// * **Stuck-in-block reset** — `Entity.makeStuckInBlock`: `resetFallDistance();
-    ///   this.stuckSpeedMultiplier = speedMultiplier;` (`Entity.java:2945-2947`),
-    ///   fired every tick `Block.entityInside` finds a stuck-triggering block
-    ///   (cobweb, powder snow, sweet berry bush, honey). This crate's
-    ///   `update_stuck_multiplier` already reproduces the block scan that feeds
-    ///   `stuckSpeedMultiplier`; the reset rides along whenever it finds one.
+    /// * **Slow Falling / Levitation reset** — vanilla resets the
+    ///   accumulator unconditionally, before its travel dispatch, whenever
+    ///   either effect is active — applied in [`tick`] before it picks a
+    ///   travel path.
+    /// * **Elytra accumulation clamp** — vanilla clamps the accumulator to
+    ///   `1.0` while gliding, whenever the vertical velocity is above `-0.5`
+    ///   and the accumulator already exceeds `1.0`; checked only while
+    ///   gliding, before the Slow Falling/Levitation check and before
+    ///   travel. Applied in [`tick`] alongside that check, gated on
+    ///   [`Self::fall_flying`].
+    /// * **Stuck-in-block reset** — vanilla resets the accumulator (and
+    ///   stamps the stuck-speed multiplier) every tick its block scan finds
+    ///   a stuck-triggering block (cobweb, powder snow, sweet berry bush,
+    ///   honey). This crate's `update_stuck_multiplier` already reproduces
+    ///   that block scan; the reset rides along whenever it finds one.
     ///
-    /// **Not modelled, matching pre-existing gaps elsewhere in this crate.** The
-    /// mid-`move` water re-evaluation (`LivingEntity.java:365`) is the one gap
-    /// that is a *divergence* rather than an absent feature — bounded to the
+    /// **Not modelled, matching pre-existing gaps elsewhere in this crate.**
+    /// The mid-move water re-evaluation is the one gap that is a
+    /// *divergence* rather than an absent feature — bounded to the
     /// water-entry tick and unable to affect position, fully documented on
     /// [`accumulate_fall_distance`] and pinned by a test.
-    /// Creative flight (`Player.aiStep`: `if (abilities.flying &&
-    /// !isPassenger()) resetFallDistance();`, `Player.java:449-451`) does not
-    /// apply — see [`tick_air`]'s own doc on `!abilities.flying`, "this crate has
-    /// no creative flight". Riding/vehicles do not apply — "this engine has no
-    /// riding state" (see the `on_ground` doc on
-    /// [`Self::on_ground`]/`tests/on_ground.rs`'s `spectator_or_passenger_note`).
-    /// Bubble columns do not apply — see [`tick_water`]'s "Not modelled" list.
-    /// **Teleport is a driver responsibility**: this crate has no teleport
-    /// primitive of its own (a driver sets [`Self::position`] directly), so a
-    /// caller that snaps the position (server correction, respawn, an ender pearl
-    /// or chorus fruit consume effect, all of which call `resetFallDistance()` in
-    /// vanilla) must also call [`Self::reset_fall_distance`] itself.
+    /// Creative flight (vanilla resets the accumulator while flying, unless
+    /// a passenger) does not apply — see [`tick_air`]'s own doc on
+    /// `!abilities.flying`, "this crate has no creative flight".
+    /// Riding/vehicles do not apply — "this engine has no riding state" (see
+    /// the `on_ground` doc on [`Self::on_ground`]/`tests/on_ground.rs`'s
+    /// `spectator_or_passenger_note`). Bubble columns do not apply — see
+    /// [`tick_water`]'s "Not modelled" list. **Teleport is a driver
+    /// responsibility**: this crate has no teleport primitive of its own (a
+    /// driver sets [`Self::position`] directly), so a caller that snaps the
+    /// position (server correction, respawn, an ender pearl or chorus fruit
+    /// consume effect, all of which reset the accumulator in vanilla) must
+    /// also call [`Self::reset_fall_distance`] itself.
     ///
-    /// **Sign, verified against the jar rather than assumed.** A negative `ya`
-    /// (moving down) makes `fallDistance -= (float) ya` an *increase* — e.g.
-    /// `ya = -0.5` gives `fallDistance -= -0.5`, i.e. `+= 0.5`. This is invisible
-    /// in any test where the player never leaves the ground, and it is exactly the
-    /// input this field exists for.
+    /// **Sign, verified against the jar rather than assumed.** A negative
+    /// downward-velocity delta (moving down) makes the subtraction an
+    /// *increase* — e.g. a delta of `-0.5` gives `fall_distance -= -0.5`,
+    /// i.e. `+= 0.5`. This is invisible in any test where the player never
+    /// leaves the ground, and it is exactly the input this field exists for.
     pub fall_distance: f64,
-    /// `Entity.DATA_TICKS_FROZEN` (`TicksFrozen`) — ticks accumulated standing in
-    /// powder snow, `0..=`[`Self::TICKS_REQUIRED_TO_FREEZE`]. Maintained by
+    /// Ticks accumulated standing in powder snow (the `TicksFrozen` field on
+    /// the wire), `0..=`[`Self::TICKS_REQUIRED_TO_FREEZE`]. Maintained by
     /// [`tick`] (`update_freezing`, issue #212): `+1` (capped) each tick the
     /// swept movement segment finds `CollisionView::is_powder_snow`, `-2`
-    /// (floored at `0`) every other tick — `LivingEntity.aiStep`'s freezing
-    /// block, `LivingEntity.java:3139-3151`. See [`Self::is_freezing`],
+    /// (floored at `0`) every other tick — vanilla's own per-tick freezing
+    /// update. See [`Self::is_freezing`],
     /// [`Self::is_fully_frozen`], [`Self::percent_frozen`] and
     /// [`Self::should_apply_freeze_damage`] for what a driver reads it through.
     pub frozen_ticks: u32,
-    /// `LivingEntity.autoSpinAttackTicks` — the riptide-trident spin-attack
-    /// countdown (issue #208), started at `20` by [`apply_riptide`]
-    /// (`TridentItem.releaseUsing`: `player.startAutoSpinAttack(20, 8.0F,
-    /// itemStack)`, `TridentItem.java:100`) and decremented by [`tick`] every
-    /// tick thereafter (`LivingEntity.java:3158-3159`), unconditionally — no
-    /// `!flying` gate, matching vanilla. `> 0` is
-    /// `LivingEntity.isAutoSpinAttack()` ([`Self::is_auto_spin_attack`]), which
-    /// [`crate::pose::desired_pose`] reads to select [`Pose::SpinAttack`].
+    /// The riptide-trident spin-attack countdown (issue #208), started at
+    /// `20` by [`apply_riptide`] (vanilla's own release-using trident logic:
+    /// arms a 20-tick spin attack at power `8.0F`) and decremented by
+    /// [`tick`] every tick thereafter, unconditionally — no `!flying` gate,
+    /// matching vanilla. `> 0` means the spin attack is active
+    /// ([`Self::is_auto_spin_attack`]), which [`crate::pose::desired_pose`]
+    /// reads to select [`Pose::SpinAttack`].
     ///
-    /// **Not modelled**: the attack-damage side (`autoSpinAttackDmg`,
-    /// `autoSpinAttackItemStack`, `checkAutoSpinAttack`'s entity-hit sweep) —
-    /// this crate applies no damage anywhere, matching [`Self::frozen_ticks`]'s
-    /// scope note.
+    /// **Not modelled**: the attack-damage side (the spin's own damage
+    /// value, its held item snapshot, and its entity-hit sweep) — this crate
+    /// applies no damage anywhere, matching [`Self::frozen_ticks`]'s scope
+    /// note.
     pub auto_spin_attack_ticks: u32,
 }
 
@@ -557,8 +548,8 @@ impl PlayerState {
             on_ground: false,
             horizontal_collision: false,
             no_jump_delay: 0,
-            // Vanilla's `LocalPlayer` field defaults to `true` and is read from
-            // Options when the player is created (`LocalPlayer.java:152, 299`).
+            // Vanilla's own client-side field defaults to `true` and is read
+            // from Options when the player is created.
             auto_jump_enabled: true,
             auto_jump_time: 0,
             sprinting: false,
@@ -575,10 +566,10 @@ impl PlayerState {
             swim_amount_o: 0.0,
             water_movement_efficiency: 0.0,
             flying: false,
-            // `Abilities.DEFAULT_FLYING_SPEED`. Seeded to vanilla's default rather
-            // than `0.0` so that a driver which sets `flying` but forgets to
-            // forward the server's speed flies at vanilla's default rate instead
-            // of being unable to move at all — a wrong-but-plausible failure is
+            // Seeded to vanilla's own default flying speed rather than `0.0`
+            // so that a driver which sets `flying` but forgets to forward
+            // the server's speed flies at vanilla's default rate instead of
+            // being unable to move at all — a wrong-but-plausible failure is
             // far easier to see than a silently frozen one.
             flying_speed: 0.05,
             fall_distance: 0.0,
@@ -587,11 +578,11 @@ impl PlayerState {
         }
     }
 
-    /// Returns a copy of this state with creative flight engaged or released, and
-    /// the server-reported `Abilities.flyingSpeed` it flies at.
+    /// Returns a copy of this state with creative flight engaged or released,
+    /// and the server-reported flying speed it flies at.
     ///
-    /// `flying_speed` is ignored while `flying` is `false` — vanilla's
-    /// `Player.getFlyingSpeed()` takes its non-flying arm then — but it is stored
+    /// `flying_speed` is ignored while `flying` is `false` — vanilla's own
+    /// flying-speed accessor takes its non-flying arm then — but it is stored
     /// regardless so a toggle does not have to re-supply it.
     #[must_use]
     pub fn with_flight(mut self, flying: bool, flying_speed: f32) -> Self {
@@ -600,8 +591,7 @@ impl PlayerState {
         self
     }
 
-    /// `Entity.resetFallDistance()` (`Entity.java:2910-2912`) — zeroes
-    /// [`Self::fall_distance`].
+    /// Zeroes [`Self::fall_distance`], matching vanilla's own reset.
     ///
     /// Every reset condition this crate's own tick reaches (landing, water,
     /// climbable, Slow Falling/Levitation, a stuck-in-block match) is applied
@@ -614,50 +604,49 @@ impl PlayerState {
         self.fall_distance = 0.0;
     }
 
-    /// `Entity.getTicksRequiredToFreeze()` (`Entity.java:2838-2840`) /
-    /// `Entity.BASE_TICKS_REQUIRED_TO_FREEZE` (`Entity.java:203`) — `140`, and
-    /// unconditionally so for a player: `LivingEntity` does not override the
-    /// getter, and vanilla only ever varies it per living-entity subclass (none
-    /// of which this crate models).
+    /// Vanilla's own base ticks-required-to-freeze value — `140`, and
+    /// unconditionally so for a player: vanilla only ever varies it per
+    /// living-entity subclass (none of which this crate models).
     pub const TICKS_REQUIRED_TO_FREEZE: u32 = 140;
 
-    /// `Entity.isFullyFrozen()` (`Entity.java:2834-2836`):
-    /// `getTicksFrozen() >= getTicksRequiredToFreeze()`.
+    /// Matches vanilla's own fully-frozen check: accumulated ticks at or
+    /// past the required threshold.
     #[must_use]
     pub fn is_fully_frozen(&self) -> bool {
         self.frozen_ticks >= Self::TICKS_REQUIRED_TO_FREEZE
     }
 
-    /// `Entity.getPercentFrozen()` (`Entity.java:2829-2832`):
+    /// Matches vanilla's own percent-frozen expression:
     /// `min(ticksFrozen, ticksToFreeze) / ticksToFreeze`, as an `f32` — the
     /// freezing-overlay vignette's `0..1` ramp. The `min` is redundant given
     /// [`Self::frozen_ticks`] is already capped at [`Self::TICKS_REQUIRED_TO_FREEZE`]
-    /// by [`tick`], but kept to mirror the vanilla expression exactly rather than
-    /// rely on that invariant holding for every future writer of the field.
+    /// by [`tick`], but kept to mirror vanilla's own expression exactly
+    /// rather than rely on that invariant holding for every future writer of
+    /// the field.
     #[must_use]
     pub fn percent_frozen(&self) -> f32 {
         (self.frozen_ticks.min(Self::TICKS_REQUIRED_TO_FREEZE) as f32)
             / (Self::TICKS_REQUIRED_TO_FREEZE as f32)
     }
 
-    /// `LivingEntity.aiStep`'s freeze-damage trigger
-    /// (`LivingEntity.java:3147-3149`): `tickCount % 40 == 0 && isFullyFrozen()
-    /// && canFreeze()`. `canFreeze()` is unconditionally `true` for a player —
-    /// see [`Self::frozen_ticks`]'s "not modelled" note — so this reduces to the
-    /// two terms this crate can actually answer, plus the one input it cannot
-    /// own: `tick_count` is vanilla's `Entity.tickCount`, an absolute count
-    /// against the world's clock that this crate has no field for (every timer
-    /// it owns is a countdown). Pass the driver's own tick counter; this
-    /// function applies no damage itself — see [`Self::frozen_ticks`]'s doc for
-    /// why the amount and its application are out of this crate's scope
-    /// entirely.
+    /// Matches vanilla's own per-tick freeze-damage trigger:
+    /// `tickCount % 40 == 0 && isFullyFrozen() && canFreeze()`. The
+    /// "can freeze" check is unconditionally `true` for a player — see
+    /// [`Self::frozen_ticks`]'s "not modelled" note — so this reduces to the
+    /// two terms this crate can actually answer, plus the one input it
+    /// cannot own: `tick_count` is vanilla's own absolute tick counter
+    /// against the world's clock, which this crate has no field for (every
+    /// timer it owns is a countdown). Pass the driver's own tick counter;
+    /// this function applies no damage itself — see [`Self::frozen_ticks`]'s
+    /// doc for why the amount and its application are out of this crate's
+    /// scope entirely.
     #[must_use]
     pub fn should_apply_freeze_damage(&self, tick_count: u64) -> bool {
         tick_count % 40 == 0 && self.is_fully_frozen()
     }
 
-    /// `LivingEntity.isAutoSpinAttack()` (`LivingEntity.java:3278-3280`):
-    /// `autoSpinAttackTicks > 0`.
+    /// Matches vanilla's own auto-spin-attack check: the countdown above
+    /// zero.
     #[must_use]
     pub fn is_auto_spin_attack(&self) -> bool {
         self.auto_spin_attack_ticks > 0
@@ -685,8 +674,9 @@ impl PlayerState {
     }
 
     /// Returns a copy of this state seeded with `pose`, setting the derived
-    /// [`eye height`](Self::eye_height) to match — the pair that vanilla's
-    /// `refreshDimensions` always writes together.
+    /// [`eye height`](Self::eye_height) to match — the pair that vanilla
+    /// always writes together when it refreshes an entity's collision
+    /// dimensions.
     ///
     /// This seeds an *initial* pose. [`tick`] re-decides it every tick through the
     /// fit gate ([`crate::pose::update_player_pose`]), so this is not a way to
@@ -698,12 +688,12 @@ impl PlayerState {
         self
     }
 
-    /// The hitbox dimensions for this state's [`pose`](Self::pose) —
-    /// `Entity.getDimensions(getPose())` for an `Avatar`.
+    /// The hitbox dimensions for this state's [`pose`](Self::pose) — matches
+    /// vanilla's own per-pose dimensions lookup for a player.
     ///
     /// This is what the collision sweep is handed, and the whole reason the pose
     /// exists: `0.6 × 1.8` standing, `0.6 × 1.5` crouching, `0.6 × 0.6` swimming
-    /// or gliding. `step_height` is pose-independent (the `STEP_HEIGHT`
+    /// or gliding. `step_height` is pose-independent (the step-height
     /// attribute).
     #[must_use]
     pub fn dimensions(&self) -> EntityDimensions {
@@ -718,7 +708,7 @@ impl PlayerState {
     }
 
     /// Returns a copy of this state with the entity layer's effective
-    /// `MOVEMENT_SPEED` attribute value injected (see [`Self::movement_speed`]).
+    /// movement-speed attribute value injected (see [`Self::movement_speed`]).
     #[must_use]
     pub fn with_movement_speed(mut self, value: f64) -> Self {
         self.movement_speed = Some(value);
@@ -734,25 +724,26 @@ impl PlayerState {
     }
 
     /// The player's bounding box at its current position, **in its current
-    /// pose** — `Entity.getBoundingBox()`.
+    /// pose** — matches vanilla's own bounding-box accessor.
     ///
     /// The hitbox is per-entity data ([`EntityDimensions`]), not version data, so
     /// it does not come from the profile. The `profile` parameter is retained (as
     /// `_profile`) purely for source compatibility with existing callers; it is
     /// unused, and a caller may drop the argument once its call sites are updated.
     ///
-    /// Since `makeBoundingBox` anchors `minY` at the feet, a pose change moves
-    /// only the top face (and, for poses this crate does not model, the width).
+    /// Since vanilla's own box construction anchors `minY` at the feet, a
+    /// pose change moves only the top face (and, for poses this crate does
+    /// not model, the width).
     #[must_use]
     pub fn bounding_box(&self, _profile: &PhysicsProfile) -> Aabb {
         self.dimensions().bounding_box(self.position)
     }
 }
 
-/// `getSpeed()` for a player: the `MOVEMENT_SPEED` attribute cast to `float`.
+/// Vanilla's own player speed: the movement-speed attribute cast to `float`.
 ///
 /// Walking is the base `0.1F` (widened to `double` when stored, then cast back
-/// to `float`); sprinting applies the `+0.3` `ADD_MULTIPLIED_TOTAL` modifier in
+/// to `float`); sprinting applies the `+0.3` multiply-on-total modifier in
 /// `double` before the final `float` cast. Reproduced exactly here.
 #[must_use]
 fn player_speed(profile: &PhysicsProfile, sprinting: bool) -> f32 {
@@ -764,12 +755,13 @@ fn player_speed(profile: &PhysicsProfile, sprinting: bool) -> f32 {
     }
 }
 
-/// Client-side `LocalPlayer.modifyInput` for the modern (1.21+) input pipeline.
+/// Vanilla's own client-side input modifier, for the modern (1.21+) input
+/// pipeline.
 ///
-/// **Version note:** the square-movement normalization
-/// (`modifyInputSpeedForSquareMovement`) is a *structural* difference between
-/// modern and legacy clients, not a scalar — see [`PhysicsProfile`] docs. This
-/// implements the modern form; a 1.8 client would use a different mapping.
+/// **Version note:** the square-movement normalization is a *structural*
+/// difference between modern and legacy clients, not a scalar — see
+/// [`PhysicsProfile`] docs. This implements the modern form; a 1.8 client
+/// would use a different mapping.
 #[must_use]
 fn modify_input(
     model: InputModel,
@@ -806,11 +798,11 @@ fn modify_input_unit_square(
     }
     let mut sx = strafe * 0.98;
     let mut sy = forward * 0.98;
-    // `LocalPlayer.modifyInput`: `if (isUsingItem() && !isPassenger()) newInput
-    // = newInput.scale(itemUseSpeedMultiplier())` — between the `0.98` scale
-    // above and the sneak scale below. `!isPassenger()` is dropped: this crate
-    // has no riding state (see `PlayerState::on_ground`'s own note on the same
-    // gap).
+    // Vanilla's own input modifier: while using an item (and not a
+    // passenger), scale the input by the item's use-speed multiplier —
+    // between the `0.98` scale above and the sneak scale below. The
+    // "not a passenger" conjunct is dropped: this crate has no riding state
+    // (see `PlayerState::on_ground`'s own note on the same gap).
     if let Some(effects) = using_item {
         sx *= effects.speed_multiplier;
         sy *= effects.speed_multiplier;
@@ -834,20 +826,21 @@ fn modify_input_unit_square(
     (dir_x * modified_length, dir_y * modified_length)
 }
 
-/// `Entity.getInputVector(relativeInput, speed, yRot)` — the yaw-rotated,
-/// speed-scaled acceleration that `moveRelative` adds to velocity.
+/// Vanilla's own relative-input-to-velocity step: the yaw-rotated,
+/// speed-scaled acceleration that gets added to velocity each tick.
 ///
 /// This is entity-agnostic and public so a mob loop can produce its per-tick
-/// velocity *contribution* the same way the player pipeline does — vanilla drives
-/// both players and mobs through `moveRelative`, and re-deriving this yaw rotation
-/// by hand is a divergence surface (the `Mth.sin`/`Mth.cos` LUT and the exact
-/// `f32`/`f64` widths must match). Feed the result (plus gravity) into
-/// [`crate::entity::move_entity`] as `motion.velocity`.
+/// velocity *contribution* the same way the player pipeline does — vanilla
+/// drives both players and mobs through the same relative-movement step, and
+/// re-deriving this yaw rotation by hand is a divergence surface (the
+/// quantized sin/cos table and the exact `f32`/`f64` widths must match). Feed
+/// the result (plus gravity) into [`crate::entity::move_entity`] as
+/// `motion.velocity`.
 ///
-/// Scope: `strafe`/`forward` are the horizontal relative-movement axes (vanilla's
-/// `xxa`/`zza`); the vertical relative component is fixed at `0`, which covers
-/// walking mobs. A fully-general `moveRelative(Vec3)` with a vertical input (a
-/// swimming or flying mob) can be added when one is wired.
+/// Scope: `strafe`/`forward` are the horizontal relative-movement axes; the
+/// vertical relative component is fixed at `0`, which covers walking mobs. A
+/// fully-general relative-movement step with a vertical input (a swimming or
+/// flying mob) can be added when one is wired.
 pub fn input_vector(strafe: f32, forward: f32, speed: f32, yaw: f32) -> Vec3d {
     let input = Vec3d::new(f64::from(strafe), 0.0, f64::from(forward));
     let length_sqr = input.length_sqr();
@@ -870,7 +863,7 @@ pub fn input_vector(strafe: f32, forward: f32, speed: f32, yaw: f32) -> Vec3d {
     )
 }
 
-/// `Entity.getBlockPosBelowThatAffectsMyMovement()` → `getOnPos(0.500001F)`.
+/// Vanilla's own "block below that affects my movement" lookup.
 ///
 /// For the common case (no fence/wall special-casing) this is the block at
 /// `(floor(x), floor(y - 0.500001), floor(z))`.
@@ -882,10 +875,10 @@ pub(crate) fn friction_block(position: Vec3d) -> (i32, i32, i32) {
 }
 
 /// The player's per-tick call into the shared entity move core
-/// ([`move_entity`]). Restricted, as vanilla's `Entity.move(MoverType.SELF, …)`
-/// is, to the parts that affect a player's reported position: collide, commit
-/// position, update collision flags, run `restituteMovementAfterCollisions`, and
-/// apply the block speed factor.
+/// ([`move_entity`]). Restricted, as vanilla's own self-mover-type move step
+/// is, to the parts that affect a player's reported position: collide,
+/// commit position, update collision flags, restitute movement after
+/// collisions, and apply the block speed factor.
 ///
 /// This is a thin wrapper: it lifts the player's motion into an [`EntityMotion`],
 /// supplies the player's current-pose hitbox ([`PlayerState::dimensions`]) and a
@@ -895,12 +888,12 @@ pub(crate) fn friction_block(position: Vec3d) -> (i32, i32, i32) {
 /// call [`move_entity`] directly with its own dimensions and velocity — the
 /// arithmetic is identical, which is the whole point of the shared core.
 ///
-/// `suppress_bounce` (`isSuppressingBounce()`) and `staying_on_ground_surface`
-/// (`isStayingOnGroundSurface()`) are **both** `isShiftKeyDown()` in vanilla, but
-/// they are separate parameters here on purpose: they are separate virtual methods
-/// serving unrelated rules, our elytra path already disagrees about the first
-/// (passing `false`), and collapsing them would make the edge back-off silently
-/// inherit whatever that path decided about bouncing.
+/// `suppress_bounce` and `staying_on_ground_surface` are **both** the sneak
+/// key in vanilla, but they are separate parameters here on purpose: they
+/// are separate virtual methods serving unrelated rules, our elytra path
+/// already disagrees about the first (passing `false`), and collapsing them
+/// would make the edge back-off silently inherit whatever that path decided
+/// about bouncing.
 fn do_move(
     state: &mut PlayerState,
     view: &dyn CollisionView,
