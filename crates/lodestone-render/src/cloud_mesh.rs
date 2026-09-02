@@ -20,7 +20,7 @@
 //! Straight from vanilla's cloud-renderer class in the real 26.2 `client.jar`.
 //!
 //! **Cell packing.** A texel is an empty cell when its alpha is below
-//! 10 (`isCellEmpty`), *not* when it is fully transparent — so faint texels are
+//! 10 (vanilla's own is-cell-empty predicate), *not* when it is fully transparent — so faint texels are
 //! empty too. A filled cell also records whether each of its four horizontal
 //! neighbours is empty, which is what the side-face culling below reads.
 //!
@@ -66,10 +66,8 @@
 //!
 //! **One deliberate divergence from vanilla.** Vanilla's cloud-renderer class
 //! wraps the *x* axis by `height` when sampling the east and west neighbours:
-//!
-//! ```text
-//! boolean east = isCellEmpty(texture.getPixel(Math.floorMod(x + 1, height), y));
-//! ```
+//! its east-neighbour check floor-mods `x + 1` by `height` (not `width`)
+//! before testing whether that pixel's cell is empty.
 //!
 //! `width` is the correct modulus there. It cannot manifest in vanilla because
 //! `clouds.png` is 256×256, so the two are equal — [`CloudCells::from_rgba`] uses
@@ -88,25 +86,25 @@
 //! None beyond `core`. This module is why the fancy path can be developed and
 //! asserted with no adapter.
 
-/// A face's outward direction, in vanilla's `Direction.get3DDataValue()` order.
+/// A face's outward direction, in vanilla's own direction-to-3D-data-value order.
 ///
-/// The numbering is not decorative: `encodeFace` packs it into the low bits of a
+/// The numbering is not decorative: vanilla's own face-encoding function packs it into the low bits of a
 /// byte alongside the flags, so it is part of the wire format between the mesh
 /// builder and the shader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum CloudFaceDir {
-    /// `-Y`, vanilla's `Direction.DOWN`.
+    /// `-Y`, vanilla's own down direction.
     Down = 0,
-    /// `+Y`, vanilla's `Direction.UP`.
+    /// `+Y`, vanilla's own up direction.
     Up = 1,
-    /// `-Z`, vanilla's `Direction.NORTH`.
+    /// `-Z`, vanilla's own north direction.
     North = 2,
-    /// `+Z`, vanilla's `Direction.SOUTH`.
+    /// `+Z`, vanilla's own south direction.
     South = 3,
-    /// `-X`, vanilla's `Direction.WEST`.
+    /// `-X`, vanilla's own west direction.
     West = 4,
-    /// `+X`, vanilla's `Direction.EAST`.
+    /// `+X`, vanilla's own east direction.
     East = 5,
 }
 
@@ -165,7 +163,7 @@ pub struct CloudFace {
 /// Per-cell occupancy plus which horizontal neighbours are empty.
 ///
 /// One byte per cell: bit 4 is "filled", bits 3..0 are north/east/south/west
-/// "neighbour is empty", matching `packCellData`'s bit order (`:105-107`) minus
+/// "neighbour is empty", matching vanilla's own cell-data-packing function's bit order minus
 /// the packed colour, which this renderer does not use — the cloud colour is a
 /// single uniform (`crate::sky::CLOUD_COLOR_RGB`), not per-texel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,7 +186,7 @@ impl CloudCells {
     /// all-empty rather than panicking: a cloud layer that fails to draw is a
     /// better outcome than a crash on a malformed resource pack.
     ///
-    /// Neighbour wrapping is `floorMod`, so the texture tiles — see the module's
+    /// Neighbour wrapping is a floor-mod, so the texture tiles — see the module's
     /// note on vanilla's `height`-vs-`width` slip.
     #[must_use]
     pub fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Self {
@@ -210,7 +208,7 @@ impl CloudCells {
                     continue;
                 }
                 let mut packed = FILLED;
-                // `floorMod` on `usize` is just the wrap, and `+ w - 1` avoids an
+                // A floor-mod on `usize` is just the wrap, and `+ w - 1` avoids an
                 // underflow at x == 0 that a plain `x - 1` would hit.
                 if empty_at(x, (y + h - 1) % h) {
                     packed |= NORTH_EMPTY;
@@ -259,7 +257,7 @@ impl CloudCells {
 }
 
 /// Builds the visible faces of every filled cell within `radius_cells` of the
-/// camera's cell — vanilla's `buildMesh` with `extrude = true`.
+/// camera's cell — vanilla's own mesh-building function with its extrude flag set.
 ///
 /// `center_cell_x`/`center_cell_z` are the camera's **absolute** cell, which is
 /// what indexes the texture; the returned faces are camera-*relative*.
@@ -357,7 +355,7 @@ impl CloudFaceCache {
     }
 }
 
-/// Vanilla's `buildMesh` with `extrude = false`: one `DOWN` face per filled cell,
+/// Vanilla's own mesh-building function with its extrude flag clear: one `DOWN` face per filled cell,
 /// flagged [`FLAG_USE_TOP_COLOR`].
 ///
 /// Present so `FAST` and `FANCY` come out of one enumeration rather than two
@@ -390,7 +388,7 @@ pub fn flat_faces(
     faces
 }
 
-/// Vanilla's ring walk (`buildMesh`, `:239-256`): taxicab rings clipped to a disc.
+/// Vanilla's ring walk (its own mesh-building function): taxicab rings clipped to a disc.
 ///
 /// Factored out so both mesh modes enumerate identically. The `rz != 0` guard is
 /// vanilla's and is not an optimisation — without it every on-axis cell would be
@@ -410,7 +408,7 @@ fn for_each_cell_in_disc(radius_cells: i32, mut visit: impl FnMut(i32, i32)) {
     }
 }
 
-/// `buildExtrudedCell` (`:294-326`).
+/// Vanilla's own extruded-cell-building function.
 fn push_extruded_cell(
     faces: &mut Vec<CloudFace>,
     x: i32,
@@ -479,7 +477,7 @@ mod tests {
         rgba
     }
 
-    /// `isCellEmpty` is `alpha < 10`, and the boundary is where a wrong
+    /// Vanilla's own is-cell-empty predicate is `alpha < 10`, and the boundary is where a wrong
     /// `alpha > 0` or `alpha == 255` test shows up. Both neighbours of the
     /// threshold are asserted, because a one-sided check passes on `<= 10` too.
     #[test]
@@ -654,7 +652,7 @@ mod tests {
     }
 
     /// `flat_faces` is one `DOWN` face per filled cell with the top-colour flag —
-    /// vanilla's `buildFlatCell` — and it must agree with `extruded_faces` about
+    /// vanilla's own flat-cell-building function — and it must agree with `extruded_faces` about
     /// *which* cells are filled, since they share the enumeration.
     #[test]
     fn flat_mode_is_one_top_coloured_down_face_per_filled_cell() {
@@ -683,7 +681,8 @@ mod tests {
     /// in an 8×8 texture appears at four relative offsets within radius 8, since
     /// `rem_euclid(8)` maps −4 and +4 to the same texel.
     ///
-    /// This is vanilla's behaviour too (`tryBuildCell`'s `Math.floorMod`) and is
+    /// This is vanilla's behaviour too (its own per-cell build attempt uses the
+    /// same floor-mod wrap) and is
     /// why `clouds.png` is 256 cells across: at 12 blocks per cell that is 3072
     /// blocks of period, far beyond any render distance, so a player never sees
     /// the repeat. It is pinned here because it caught this file's own first
