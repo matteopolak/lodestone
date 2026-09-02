@@ -32,7 +32,7 @@ pub enum Action {
 
 /// Vanilla's double-tap-forward-to-sprint window, in 20 Hz ticks.
 ///
-/// Read from `.cache/mc/26.2/client-src/net/minecraft/client/Options.java`:
+/// Read from the decompiled client's own options defaults:
 /// the `options.sprintWindow` slider is an `OptionInstance.IntRange(0, 10)` with
 /// default `7` (`0` disables double-tap sprint; `LocalPlayer.java` arms the
 /// timer with this value). The value is exposed as a settings

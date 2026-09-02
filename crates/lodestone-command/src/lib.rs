@@ -77,7 +77,7 @@
 //! ## Known simplifications versus real Brigadier
 //!
 //! Ported from `com.mojang.brigadier` 1.3.10 (decompiled sources at
-//! `.cache/mc/26.2/src/net/minecraft/commands/synchronization/brigadier` plus
+//! the decompiled tree's command-argument synchronization package plus
 //! the upstream `Mojang/brigadier` sources for the parts Mojang doesn't
 //! subclass — `StringReader`, `CommandDispatcher`, `Suggestions`), with two
 //! deliberate departures documented where they matter most:
