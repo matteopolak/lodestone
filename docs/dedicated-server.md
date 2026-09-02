@@ -263,18 +263,20 @@ or the key is missing). Absent or `false` refuses to start (writing the
 template first if the file did not exist) and exits with status `1`; `true`
 proceeds.
 
-**The wording is a placeholder, and deliberately not a decision made here.**
-`crate::eula::NOTICE` is a single named constant carrying explicit
-placeholder text ("The exact terms of that agreement are not yet written").
-Vanilla's own file points at Mojang's EULA, wording this project cannot
-reuse — this repository's own `docs/legal-notices.md` and non-affiliation
-disclaimer exist because Lodestone is not Mojang and is not obviously bound
-by an agreement written for their server binary. **The open question, for
-the repository owner:** should `eula.txt` link to anything at all, and if so
-what — a from-scratch server's own terms, a link to this project's license,
-or nothing beyond "you're choosing to run this software"? The mechanism
-works with any string substituted into `NOTICE`; only the wording needs a
-decision.
+**The wording was an open question; it is decided now.**
+`crate::eula::NOTICE` points the operator at Mojang's own EULA
+(`https://aka.ms/MinecraftEULA`) as the terms governing *operating* a
+Minecraft-compatible server — reasoning: Mojang's EULA governs Mojang's
+software and Lodestone is a from-scratch reimplementation, not obviously
+bound by an agreement written for their binary (this repository's own
+`docs/legal-notices.md` and non-affiliation disclaimer exist for exactly
+that reason), but an operator running this dedicated server is still
+joining Mojang's ecosystem, over which Mojang does assert their EULA and
+commercial-usage guidelines regardless of whose server binary is involved.
+The notice text says so plainly — pointing at the EULA without claiming
+Lodestone is Mojang's software or is affiliated with Mojang — and separately
+notes that Lodestone itself is provided under its own open-source license.
+See `crate::eula`'s own module doc for the full reasoning.
 
 ## A real, measured persistence gap
 
@@ -304,8 +306,9 @@ not something this doc's own binary can fix from the outside.
 - **Wiring a currently-ignored key**: find its bucket above and follow the
   pointer; most of them (`enable-query`, `spawn-protection`) name the exact
   gap and the exact existing machinery (or lack of it) to close it with.
-- **The EULA wording**: edit `crate::eula::NOTICE` only, once the owner has
-  decided the text — see "eula.txt" above.
+- **The EULA wording**: a `crate::eula::NOTICE`-only edit if it ever needs to
+  change again — see "eula.txt" above for the reasoning behind the current
+  text.
 - **Loosening `MAX_SIM_RADIUS`**: only after `crate::tick`'s loaded-chunk
   ticket-driven set (issue #289) replaces the fixed-radius tick area this
   crate still has everywhere (`LAN_TICK_RADIUS` included) — raising the

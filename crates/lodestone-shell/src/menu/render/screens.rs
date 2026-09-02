@@ -7,22 +7,25 @@
 use crate::sim::{SessionEnd, SessionEndKind};
 use super::*;
 
-/// Vanilla's `title.credits` string (`en_us.json`), drawn bottom-right on the
-/// title screen exactly as `TitleScreen.init` does
-/// (`TitleScreen.java`). It refers to the Mojang GUI assets
-/// this screen is drawn with, which are genuinely Mojang's, so it is reproduced
-/// verbatim.
-pub(super) const COPYRIGHT: &str = "Copyright Mojang AB. Do not distribute!";
+/// The bottom-right corner string on the title screen, occupying vanilla's
+/// `title.credits` slot (`TitleScreen.init`, `TitleScreen.java`). Vanilla's own
+/// text there — `"Copyright Mojang AB. Do not distribute!"` — is a notice about
+/// Mojang's own client assets and, on its face, an instruction not to
+/// distribute; neither is true of this project's own build, so it is replaced
+/// with Lodestone's own notice rather than reproduced.
+pub(super) const COPYRIGHT: &str = "Lodestone — a from-scratch, open-source client";
 
-/// The bottom-left corner string, vanilla's
-/// `"Minecraft " + version.name()` (+ `menu.modded` for a modified client,
-/// `TitleScreen.java`).
+/// The bottom-left corner string, occupying vanilla's
+/// `"Minecraft " + version.name()` slot (+ `menu.modded` for a modified
+/// client, `TitleScreen.java`).
 ///
-/// A from-scratch reimplementation is about as "modified" as a client gets, so
-/// naming Lodestone and its version here is this line's honest equivalent —
-/// claiming to be plain `Minecraft 26.2` would be the dishonest option.
+/// Phrased as Lodestone's own version string, not vanilla's: it leads with
+/// this project's name and version, with the protocol version it speaks
+/// (`26.2`) kept alongside because that is functionally meaningful — it says
+/// which server family this build can join — rather than because it is
+/// vanilla's own line.
 pub(super) fn version_line() -> String {
-    format!("Minecraft 26.2 (Lodestone {})", env!("CARGO_PKG_VERSION"))
+    format!("Lodestone {} (protocol: Minecraft 26.2)", env!("CARGO_PKG_VERSION"))
 }
 
 /// Builds the pause menu's overlay frame: vanilla's widgets at vanilla's
@@ -1226,9 +1229,9 @@ pub(super) fn error_frame(end: Option<&SessionEnd>) -> MenuFrame<'static> {
 //    credits roll names actual Mojang employees — reproducing either here
 //    would be copying a copyrighted creative work wholesale in one case and
 //    fabricating attribution to real people in the other (this project's own
-//    contributors did not write Mojang's game). `version_line`'s "Minecraft
-//    26.2 (Lodestone …)" a few lines up in this file already drew this same
-//    line once: naming this project rather than borrowing vanilla's.
+//    contributors did not write Mojang's game). `version_line`'s "Lodestone …"
+//    a few lines up in this file already drew this same line once: naming
+//    this project rather than borrowing vanilla's.
 //
 // So this screen is a short, honestly-Lodestone-authored placeholder: it
 // proves the screen/session-teardown mechanism (issue #192's own scope is

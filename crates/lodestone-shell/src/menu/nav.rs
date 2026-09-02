@@ -502,11 +502,11 @@ impl EditForm {
         let mut name =
             EditBox::new(name_rect.0, name_rect.1, name_rect.2, name_rect.3, "Server Name")
                 .with_max_length(MAX_NAME_CHARS);
-        // `nameEdit.setHint(DEFAULT_SERVER_NAME)` (`ManageServerScreen.java`),
-        // `selectServer.defaultName` = "Minecraft Server" — shown only while
-        // the field is empty and unfocused (`EditBox.hint`'s own doc), so this
-        // was missing entirely rather than merely mislabelled.
-        name.hint = Some("Minecraft Server".to_string());
+        // Vanilla shows a default hint name here while the field is empty and
+        // unfocused (`EditBox.hint`'s own doc) — this is Lodestone's own hint
+        // text rather than vanilla's `selectServer.defaultName`, since the
+        // field labels a server the user is adding, not naming our product.
+        name.hint = Some("My Server".to_string());
         let mut fields = FormFields {
             name,
             address: EditBox::new(
@@ -6913,16 +6913,17 @@ mod tests {
     }
 
     #[test]
-    fn the_edit_form_fields_carry_vanillas_real_narration_and_hint() {
+    fn the_edit_form_fields_carry_vanillas_real_narration_and_our_own_hint() {
         // `ManageServerScreen.java`: `manageServer.enterName`/
         // `manageServer.enterIp` (`en_us.json`: "Server Name"/"Server
-        // Address") as each field's own message, and `nameEdit.setHint(
-        // selectServer.defaultName)` = "Minecraft Server" on the name field
-        // only — the IP field never gets a hint in the jar either.
+        // Address") as each field's own message — those narration strings are
+        // kept. The name field's hint is Lodestone's own text,
+        // shown while the field is empty and unfocused; the IP field never
+        // gets a hint in the jar either, and we match that.
         let form = EditForm::adding();
         assert_eq!(form.fields.name.widget.message, "Server Name");
         assert_eq!(form.fields.address.widget.message, "Server Address");
-        assert_eq!(form.fields.name.hint.as_deref(), Some("Minecraft Server"));
+        assert_eq!(form.fields.name.hint.as_deref(), Some("My Server"));
         assert_eq!(
             form.fields.address.hint, None,
             "vanilla's ipEdit never gets a setHint call"

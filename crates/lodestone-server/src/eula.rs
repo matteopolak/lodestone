@@ -10,18 +10,25 @@
 //! [`Gate`] mirrors mechanically: same file, same single boolean key, same
 //! "absent or false refuses" rule.
 //!
-//! ## The wording is not decided here, on purpose
+//! ## The wording, and why it says what it says
 //!
-//! **What text the file prints is a legal question, not a code one, and this
-//! module deliberately does not answer it.** Vanilla's own file points at
-//! Mojang's EULA — wording this project cannot reuse: this codebase's own
-//! `docs/legal-notices.md` and its non-affiliation disclaimer exist because
-//! Lodestone is not Mojang and is not obviously bound by an agreement written
-//! for their server binary. [`NOTICE`] is a single named constant carrying an
-//! explicit placeholder, not real legal text — see its own doc comment. The
-//! actual wording (and whether a URL belongs in it at all) is left for the
-//! repository owner to decide; the mechanism below works with any string
-//! substituted in.
+//! **What text the file prints is a legal/policy question, not a code one —
+//! [`NOTICE`] is the single constant that answers it, decided by the
+//! repository owner, not invented by this module.** The tension is real and
+//! worth stating plainly: Mojang's own EULA (`https://aka.ms/MinecraftEULA`)
+//! governs Mojang's server software, and Lodestone is a from-scratch
+//! reimplementation, not obviously bound by an agreement written for their
+//! binary — this codebase's own `docs/legal-notices.md` and its
+//! non-affiliation disclaimer exist for exactly that reason. But an operator
+//! running this dedicated server is still running something that speaks
+//! Minecraft's protocol and joins its ecosystem, over which Mojang does
+//! assert their EULA and commercial-usage guidelines regardless of whose
+//! server binary is involved. [`NOTICE`] therefore points the operator at
+//! Mojang's EULA as the terms governing *operating* a Minecraft-compatible
+//! server, while stating plainly that Lodestone is not Mojang's software, is
+//! not affiliated with Mojang, and is itself provided under its own
+//! open-source license. See `docs/dedicated-server.md` for the fuller
+//! picture.
 //!
 //! ## How it works
 //!
@@ -37,10 +44,11 @@
 //!
 //! ## How to change it
 //!
-//! Change [`NOTICE`]'s text once the owner has decided it; nothing else in
-//! this module needs to change. Do not weaken [`Gate::check`] to accept a
-//! missing file as agreement — that is the one property this gate exists to
-//! enforce, and vanilla's own `Eula` does not either
+//! Any further change to the wording is a [`NOTICE`]-only edit; nothing else
+//! in this module needs to change, since `check`/`agreed`/`write_template`
+//! all treat it as an opaque string. Do not weaken [`Gate::check`] to accept
+//! a missing file as agreement — that is the one property this gate exists
+//! to enforce, and vanilla's own `Eula` does not either
 //! (`SharedConstants.IS_RUNNING_IN_IDE` is a JVM-only escape hatch this port
 //! has no equivalent of and should not invent one for).
 //!
@@ -54,15 +62,18 @@
 
 use std::path::Path;
 
-/// Placeholder EULA notice text. **Not legal text** — the repository owner
-/// has not yet decided what this file should say or whether it should link
-/// anywhere; see this module's own doc comment for why that decision does
-/// not belong to the code that implements the mechanism. Replace this
-/// constant (and only this constant) once that decision is made.
+/// The `eula.txt` notice text — see this module's doc comment for the
+/// reasoning behind it. Points the operator at Mojang's EULA as the terms
+/// governing running a Minecraft-compatible server, without claiming or
+/// implying that Lodestone is Mojang's software or affiliated with Mojang.
 pub const NOTICE: &str =
     "By changing the setting below to TRUE you are indicating your agreement to run this \
-     software. (The exact terms of that agreement are not yet written — see this project's \
-     own tracker for the open question.)";
+     software. Lodestone is an independent, from-scratch reimplementation and is not Mojang's \
+     software; this project is not affiliated with, endorsed by, or associated with Mojang or \
+     Microsoft (see docs/legal-notices.md). Operating a Minecraft-compatible server is \
+     nonetheless governed by Mojang's own End User License Agreement: \
+     https://aka.ms/MinecraftEULA. Lodestone itself is provided under its own open-source \
+     license (see LICENSE-MIT / LICENSE-APACHE).";
 
 /// Whether `eula.txt` at `path` says `eula=true`.
 ///

@@ -1230,7 +1230,7 @@ pub fn describe_auth_error(e: &lodestone_auth::AuthError) -> String {
     match e {
         E::AuthorizationDeclined => "Sign-in was declined.".to_string(),
         E::DeviceCodeExpired => "The sign-in code expired before it was used. Try again.".to_string(),
-        E::NoMinecraftProfile => "This Microsoft account does not own Minecraft.".to_string(),
+        E::NoMinecraftProfile => "No Minecraft profile was found for this Microsoft account.".to_string(),
         // `kind.describe()` is the short, user-facing text; `message` is
         // Microsoft's own raw (English, developer-oriented) response body —
         // see the variant's own doc comment on why the UI wants the former.
@@ -2210,7 +2210,7 @@ mod tests {
         let e = lodestone_auth::AuthError::AuthorizationDeclined;
         assert_eq!(describe_auth_error(&e), "Sign-in was declined.");
         let e = lodestone_auth::AuthError::NoMinecraftProfile;
-        assert!(describe_auth_error(&e).contains("does not own Minecraft"));
+        assert!(describe_auth_error(&e).contains("No Minecraft profile was found"));
         // A variant with no special-case arm still renders something, via
         // `Display` — not a panic and not an empty string.
         let e = lodestone_auth::AuthError::Service {

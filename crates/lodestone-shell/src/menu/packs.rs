@@ -169,7 +169,7 @@ impl PackRow {
         Self {
             id: BUILTIN_ID.to_string(),
             title: "Default (built-in)".to_string(),
-            description: "The default look and feel of Minecraft".to_string(),
+            description: "Lodestone's default look and feel".to_string(),
             icon: None,
             builtin: true,
             locked: true,

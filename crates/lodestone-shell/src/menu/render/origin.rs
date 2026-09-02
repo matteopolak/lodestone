@@ -311,7 +311,7 @@ impl Origin {
             | Origin::Telemetry(
                 TelemetryPlacement::Title
                 | TelemetryPlacement::DescriptionLine(_)
-                | TelemetryPlacement::HeaderButton(_),
+                | TelemetryPlacement::HeaderButton,
             )
             | Origin::Confirm(
                 ConfirmPlacement::Title | ConfirmPlacement::Message | ConfirmPlacement::Button(_),

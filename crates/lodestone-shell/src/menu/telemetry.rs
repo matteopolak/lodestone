@@ -58,13 +58,22 @@
 //!
 //! - **Wired**: reaching the screen (the root grid's "Telemetry Data..."
 //!   button is now live) and back (Escape/Done → Root), and — genuinely,
-//!   not just present — **Privacy Statement** and **Give Feedback**: both
-//!   open the real vanilla URLs (`CommonLinks.PRIVACY_STATEMENT`,
-//!   `CommonLinks.RELEASE_FEEDBACK`, transcribed byte-for-byte) in the
+//!   not just present — **Give Feedback**: opens the real vanilla URL
+//!   (`CommonLinks.RELEASE_FEEDBACK`, transcribed byte-for-byte) in the
 //!   system browser through [`super::accounts::open_in_browser`], the same
 //!   best-effort, no-new-dependency OS handoff the account screen's
-//!   device-code sign-in already uses. Neither needs any telemetry state to
+//!   device-code sign-in already uses. It needs no telemetry state to
 //!   exist — a link is not a data path.
+//! - **Deliberately dropped, not a gap**: vanilla's other header button,
+//!   **Privacy Statement**, linked `CommonLinks.PRIVACY_STATEMENT`
+//!   (`go.microsoft.com/fwlink/?LinkId=521839`) — Microsoft's own general
+//!   privacy statement, disclosed here only because vanilla's telemetry
+//!   pipeline sends data covered by it. This client has no telemetry
+//!   pipeline (see the module docs above), so a button surfacing that
+//!   statement on *this* screen existed only because vanilla had it, with
+//!   nothing of ours behind it — keeping it would read as if Lodestone's
+//!   (non-existent) data collection were governed by Microsoft's policy.
+//!   Dropped along with its URL constant rather than kept as dead weight.
 //! - **Present-and-inactive**: **View My Data**
 //!   (`minecraft.getTelemetryManager().getLogDirectory()`) — there is no
 //!   telemetry manager and so no directory to open.
@@ -83,29 +92,30 @@
 //!   [`super::key_binds::footer_controls`] already made.
 //! - `super::layout` — [`super::layout::HeaderAndFooterLayout`],
 //!   [`super::layout::LinearLayout`], [`super::layout::widget_rects`].
-//! - The 26.2 jar's `assets/minecraft/lang/en_us.json` for every caption
-//!   verbatim (`telemetry_info.screen.title`, `.description`,
-//!   `.button.privacy_statement`, `.button.give_feedback`,
-//!   `.button.show_data`) and `.cache/mc/26.2/client-src/net/minecraft/util/
-//!   CommonLinks.java` for the two URLs.
+//! - The 26.2 jar's `assets/minecraft/lang/en_us.json` for the surviving
+//!   captions verbatim (`telemetry_info.screen.title`,
+//!   `.button.give_feedback`, `.button.show_data`) and
+//!   `.cache/mc/26.2/client-src/net/minecraft/util/CommonLinks.java` for the
+//!   feedback URL. The description body is Lodestone's own text, not a
+//!   transcription — see below.
 
 use super::options::{self, Placement};
 use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
 use super::widget::{LayoutElement, Widget};
 use super::layout::{self, HeaderAndFooterLayout, LayoutSettings, LinearLayout};
 
-/// `CommonLinks.PRIVACY_STATEMENT` — transcribed verbatim.
-pub const PRIVACY_STATEMENT_URL: &str = "http://go.microsoft.com/fwlink/?LinkId=521839";
 /// `CommonLinks.RELEASE_FEEDBACK` — transcribed verbatim.
 pub const RELEASE_FEEDBACK_URL: &str = "https://aka.ms/javafeedback?ref=game";
 
-/// `telemetry_info.screen.description`, split on its one literal `\n` — see
-/// the module docs' declared departure on why each half draws unwrapped.
+/// Lodestone's own description of its (lack of) telemetry — not a
+/// transcription of `telemetry_info.screen.description`, whose text
+/// describes vanilla's real data collection. This client collects none, so
+/// the honest copy says that plainly instead. Split across two
+/// lines for the same unwrapped-line layout the vanilla string used — see
+/// the module docs' declared departure.
 pub const DESCRIPTION_LINES: [&str; 2] = [
-    "Collecting this data helps us improve Minecraft by guiding us in \
-     directions that are relevant to our players.",
-    "You can also send in additional feedback to help us keep improving \
-     Minecraft.",
+    "Lodestone collects no telemetry: nothing about your play is sent to us or to anyone else.",
+    "There is no data collection to opt in or out of, and no telemetry log to show here.",
 ];
 
 // -- geometry, transcribed (see the module docs) -----------------------------
@@ -130,8 +140,7 @@ fn button(w: f32) -> Box<dyn LayoutElement> {
 
 const TITLE_RECT: usize = 0;
 const DESCRIPTION_RECT: usize = 1;
-const PRIVACY_RECT: usize = 2;
-const FEEDBACK_RECT: usize = 3;
+const FEEDBACK_RECT: usize = 2;
 
 /// The header's widget column, arranged for one canvas — asked of a real
 /// [`HeaderAndFooterLayout`] rather than restated, the same rule
@@ -147,8 +156,11 @@ pub fn header_widget_rects(width: f32, height: f32) -> Vec<(f32, f32, f32, f32)>
     *header.default_cell_setting() = LayoutSettings::defaults().align_horizontally_center();
     header.add_child(label_stand_in(options::HEADER_LINE_HEIGHT)); // title
     header.add_child(label_stand_in(DESCRIPTION_HEIGHT)); // description, both lines
+    // Vanilla's button row held two buttons (Privacy Statement, Give
+    // Feedback); Privacy Statement is dropped here (see the module docs), so
+    // one button remains, still in its own row for layout symmetry with the
+    // rest of this tree's header/footer pages.
     let mut buttons = LinearLayout::horizontal().spacing(8);
-    buttons.add_child(button(options::SMALL_BUTTON_WIDTH)); // Privacy Statement
     buttons.add_child(button(options::SMALL_BUTTON_WIDTH)); // Give Feedback
     header.add_child(Box::new(buttons));
     root.add_to_header(Box::new(header));
@@ -171,8 +183,8 @@ pub enum TelemetryPlacement {
     Title,
     /// `index` 0 or 1 — the description's two `\n`-separated lines.
     DescriptionLine(u8),
-    /// `index` 0 (Privacy Statement) or 1 (Give Feedback).
-    HeaderButton(u8),
+    /// The one surviving header button, Give Feedback.
+    HeaderButton,
 }
 
 #[must_use]
@@ -184,8 +196,7 @@ pub fn placement_anchor(placement: TelemetryPlacement, width: f32, height: f32) 
             let (x, y) = header_rect_xy(&rects, DESCRIPTION_RECT);
             (x, y + f32::from(line) * options::HEADER_LINE_HEIGHT)
         }
-        TelemetryPlacement::HeaderButton(0) => header_rect_xy(&rects, PRIVACY_RECT),
-        TelemetryPlacement::HeaderButton(_) => header_rect_xy(&rects, FEEDBACK_RECT),
+        TelemetryPlacement::HeaderButton => header_rect_xy(&rects, FEEDBACK_RECT),
     }
 }
 
@@ -193,7 +204,6 @@ pub fn placement_anchor(placement: TelemetryPlacement, width: f32, height: f32) 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TelemetryControl {
-    PrivacyStatement,
     GiveFeedback,
     /// Present-and-inactive — see the module docs.
     ViewMyData,
@@ -204,7 +214,6 @@ impl TelemetryControl {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            TelemetryControl::PrivacyStatement => "Privacy Statement", // telemetry_info.button.privacy_statement
             TelemetryControl::GiveFeedback => "Give Feedback", // telemetry_info.button.give_feedback
             TelemetryControl::ViewMyData => "View My Data", // telemetry_info.button.show_data
             TelemetryControl::Done => "Done", // gui.done
@@ -217,9 +226,9 @@ impl TelemetryControl {
     }
 }
 
-/// Every control, in vanilla's own `init()` order.
-pub const ALL_CONTROLS: [TelemetryControl; 4] = [
-    TelemetryControl::PrivacyStatement,
+/// Every control, in vanilla's own `init()` order (with Privacy Statement
+/// dropped — see the module docs).
+pub const ALL_CONTROLS: [TelemetryControl; 3] = [
     TelemetryControl::GiveFeedback,
     TelemetryControl::ViewMyData,
     TelemetryControl::Done,
@@ -227,15 +236,8 @@ pub const ALL_CONTROLS: [TelemetryControl; 4] = [
 
 fn slot_for(control: TelemetryControl) -> Slot {
     match control {
-        TelemetryControl::PrivacyStatement => Slot {
-            origin: Origin::Telemetry(TelemetryPlacement::HeaderButton(0)),
-            dx: 0.0,
-            dy: 0.0,
-            w: options::SMALL_BUTTON_WIDTH,
-            h: options::WIDGET_H,
-        },
         TelemetryControl::GiveFeedback => Slot {
-            origin: Origin::Telemetry(TelemetryPlacement::HeaderButton(1)),
+            origin: Origin::Telemetry(TelemetryPlacement::HeaderButton),
             dx: 0.0,
             dy: 0.0,
             w: options::SMALL_BUTTON_WIDTH,
@@ -266,7 +268,7 @@ pub enum TelemetryOutcome {
     Back,
 }
 
-/// This screen's own cursor. No scroll, no search — four fixed controls.
+/// This screen's own cursor. No scroll, no search — three fixed controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TelemetryNav {
     cursor: usize,
@@ -321,10 +323,6 @@ impl TelemetryNav {
             // docs — so it happens right here rather than bubbling a
             // MenuAction up to `app.rs`, exactly like `accounts.rs`'s own
             // device-code sign-in already calls `open_in_browser` directly.
-            TelemetryControl::PrivacyStatement => {
-                super::accounts::open_in_browser(PRIVACY_STATEMENT_URL);
-                TelemetryOutcome::None
-            }
             TelemetryControl::GiveFeedback => {
                 super::accounts::open_in_browser(RELEASE_FEEDBACK_URL);
                 TelemetryOutcome::None
@@ -398,12 +396,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_controls_carries_all_four_in_vanillas_own_order() {
-        assert_eq!(ALL_CONTROLS.len(), 4);
-        assert_eq!(ALL_CONTROLS[0], TelemetryControl::PrivacyStatement);
-        assert_eq!(ALL_CONTROLS[1], TelemetryControl::GiveFeedback);
-        assert_eq!(ALL_CONTROLS[2], TelemetryControl::ViewMyData);
-        assert_eq!(ALL_CONTROLS[3], TelemetryControl::Done);
+    fn all_controls_carries_all_three_surviving_in_vanillas_own_order() {
+        assert_eq!(ALL_CONTROLS.len(), 3);
+        assert_eq!(ALL_CONTROLS[0], TelemetryControl::GiveFeedback);
+        assert_eq!(ALL_CONTROLS[1], TelemetryControl::ViewMyData);
+        assert_eq!(ALL_CONTROLS[2], TelemetryControl::Done);
     }
 
     #[test]
@@ -422,7 +419,7 @@ mod tests {
         let mut nav = TelemetryNav::default();
         assert_eq!(nav.cursor(), 0);
         nav.step(false);
-        assert_eq!(nav.cursor(), 3, "stepping back from 0 wraps to the last control");
+        assert_eq!(nav.cursor(), 2, "stepping back from 0 wraps to the last control");
         nav.step(true);
         assert_eq!(nav.cursor(), 0);
     }
@@ -430,15 +427,15 @@ mod tests {
     #[test]
     fn done_is_reachable_and_leaves_the_page() {
         let mut nav = TelemetryNav::default();
-        nav.cursor = 3;
+        nav.cursor = 2;
         assert_eq!(nav.enter(), TelemetryOutcome::Back);
     }
 
     #[test]
     fn view_my_data_does_nothing_even_when_clicked_directly() {
         let mut nav = TelemetryNav::default();
-        assert_eq!(nav.click_row(2), TelemetryOutcome::None);
-        assert_eq!(nav.cursor(), 2, "an inactive control is still reachable, matching departure 4");
+        assert_eq!(nav.click_row(1), TelemetryOutcome::None);
+        assert_eq!(nav.cursor(), 1, "an inactive control is still reachable, matching departure 4");
     }
 
     #[test]
@@ -447,29 +444,27 @@ mod tests {
     }
 
     #[test]
-    fn the_privacy_and_feedback_urls_are_vanillas_own() {
-        assert_eq!(
-            PRIVACY_STATEMENT_URL,
-            "http://go.microsoft.com/fwlink/?LinkId=521839"
-        );
+    fn the_feedback_url_is_vanillas_own_and_privacy_statement_is_gone() {
+        // Privacy Statement (`go.microsoft.com/fwlink/?LinkId=521839`) is
+        // dropped entirely — see the module docs — so there is no constant
+        // left to assert on for it; this only pins the surviving link.
         assert_eq!(RELEASE_FEEDBACK_URL, "https://aka.ms/javafeedback?ref=game");
     }
 
     #[test]
-    fn the_header_widget_rects_place_two_buttons_after_title_and_description() {
+    fn the_header_widget_rects_place_one_button_after_title_and_description() {
         let rects = header_widget_rects(480.0, 270.0);
-        assert_eq!(rects.len(), 4);
+        assert_eq!(rects.len(), 3);
     }
 
     #[test]
     fn a_row_placement_off_the_known_indices_is_off_canvas() {
-        // `header_widget_rects` always returns exactly 4 — this asserts the
+        // `header_widget_rects` always returns exactly 3 — this asserts the
         // fixed indices this module reads from it stay in range rather than
         // silently reading a stale/absent rect.
         let rects = header_widget_rects(480.0, 270.0);
         assert!(TITLE_RECT < rects.len());
         assert!(DESCRIPTION_RECT < rects.len());
-        assert!(PRIVACY_RECT < rects.len());
         assert!(FEEDBACK_RECT < rects.len());
     }
 }
