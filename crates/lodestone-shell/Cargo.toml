@@ -251,6 +251,13 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 # source (`fetch`), i.e. the three seams that replace `Instant::now`, `options.json`
 # and `std::fs::read` respectively. See `docs/browser-shell-port.md`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# `menu/accounts.rs`'s device-code sign-in worker (`run_device_code_login_wasm`)
+# builds its own short-lived `reqwest::Client` on this target too, exactly as
+# the native worker does — the same `[workspace.dependencies]` entry the
+# native block below uses, which resolves to reqwest's `fetch`-backed wasm
+# client here rather than its hyper one; see `lodestone-auth/Cargo.toml`'s
+# comment on why enabling its TLS-related features is harmless on wasm32.
+reqwest = { workspace = true }
 tokio = { version = "1", default-features = false, features = [
     "io-util",
     "rt",
@@ -319,7 +326,7 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # **A dev dependency, and that is the structural fix — do not move it back up
 # into `[dependencies]`.** It was a *normal* dependency here — the only crate in
 # the workspace where it was: 11 others have it under `[dev-dependencies]`, and
-# `lodestone-sound` has it `optional` behind `live-v770` and names it only from
+# `lodestone-sound` has it `optional` behind `live-v26-2` and names it only from
 # `tests/`. That one line is how `net.rs` came to re-export
 # `unique_username` — a helper that cannot return the same name twice by
 # construction — straight into the production join path, giving the player a new
@@ -379,19 +386,19 @@ harness = false
 # version family, which is the version seam's whole point. That is now checked
 # explicitly instead — `cargo check -p lodestone-shell --no-default-features` is in
 # `CLAUDE.md`'s health checks. Keep it there; it is the only thing standing between
-# the seam and a hardcoded `v770` dependency creeping into shell code.
+# the seam and a hardcoded `v26-2` dependency creeping into shell code.
 default = ["live"]
-live = ["lodestone-registry/v770"]
+live = ["lodestone-registry/v26-2"]
 # Test-only discriminator for `sim::build`'s physics-profile wiring
 # (`lodestone_registry::physics_profile_for_protocol`). With only `live`
-# (`v770`) compiled, every protocol this crate can ever see resolves to
+# (`v26-2`) compiled, every protocol this crate can ever see resolves to
 # `mc_1_21()` — the *old* hardcoded constant and the *correct* answer
 # coincide, so nothing in the default test build can tell "the registry was
-# actually consulted" from "the hardcoded call is still there". `v47`'s
+# actually consulted" from "the hardcoded call is still there". `v1-8`'s
 # correct answer (`mc_1_8()`) differs from that constant, which is what makes
 # `physics_profile_threads_the_configured_protocol_through_the_session` in
 # `app/tests.rs` a real assertion rather than one two hypotheses both satisfy
 # — see `CLAUDE.md`'s note on an input where the hypotheses coincide not
-# being a test. Not part of `default`; enable explicitly (`--features v47`)
+# being a test. Not part of `default`; enable explicitly (`--features v1-8`)
 # to run that one test with a discriminating input.
-v47 = ["lodestone-registry/v47"]
+v1-8 = ["lodestone-registry/v1-8"]

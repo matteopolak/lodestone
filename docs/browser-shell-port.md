@@ -75,8 +75,8 @@ These do not compile at all, so a plain `cargo check --target wasm32-unknown-unk
 | `pollster` | blocks the browser main thread | gated; `spawn_local` is the wasm arm |
 | `memory-stats` | reads `/proc`/`task_info` | replaced: `core::arch::wasm32::memory_size(0)` as a high-water-mark proxy for RSS |
 | `lodestone-anvil` | `std::fs`-based region/`level.dat` codecs | gated |
-| `reqwest` | no blocking client in a browser | gated with the sign-in workers |
-| `lodestone-auth` | looked native-only, is not | **not gated** — its `metadata`/`paths` modules are plain `serde`/`uuid`/`PathBuf` with no HTTP client or keychain, and the account switcher's UI state needs them; only `login`/`flow`/`store`/`texture` stay native-only |
+| `reqwest` | blocking client (`.blocking` feature) is native-only | reqwest itself is **not** gated any more: its `wasm32-unknown-unknown` arm is `fetch`-backed and async, so the sign-in workers use the same `reqwest::Client` type on both targets |
+| `lodestone-auth` | looked native-only, is not | **not gated** — `metadata`/`paths`/`entitlement` were always plain `serde`/`uuid`/`PathBuf`; `flow`/`login`/`store` joined them once the device-code flow (needs no listener) got a wasm32 HTTP client and `store::LocalStorageStore` replaced the OS keychain (see `docs/accounts-and-join.md`). Only `browser_login` (the loopback flow — a real listener and an OS browser process), `chat_session`, `texture` and `tls` stay native-only. |
 
 ### Degradation-class (`std::fs`), by subsystem
 
@@ -103,12 +103,16 @@ simply unreachable here.
 
 Each is gated with an **explicit, self-describing refusal** rather than a silent no-op, because
 a UI row that silently shows nothing is indistinguishable from a subsystem that is broken:
-audio (needs an `AudioWorklet` sink; the mixer itself is already wasm-clean), Microsoft sign-in
-(needs a real HTTP client, OS keychain, and a loopback listener — browser accounts are
-offline-identity only), server-list ping (needs an async probe over a relay, since a page cannot
-open a raw `TcpStream`), remote player skins (blocked on porting the authlib host-allowlist that
-guards the fetch, not merely swapping the HTTP client), and screenshots (would need to trigger a
-download instead of a disk write). Audio's gate is an **uninhabited type**
+audio (needs an `AudioWorklet` sink; the mixer itself is already wasm-clean), server-list ping
+(needs an async probe over a relay, since a page cannot open a raw `TcpStream`), remote player
+skins (blocked on porting the authlib host-allowlist that guards the fetch, not merely swapping
+the HTTP client — a signed-in browser account plays with the default skin rig until this lands),
+and screenshots (would need to trigger a download instead of a disk write).
+**Microsoft sign-in is no longer in this list**: it used to need a real HTTP client, an OS
+keychain, and (via the loopback flow) a listener, so browser accounts were offline-identity
+only. The device-code flow needs none of those — see `docs/accounts-and-join.md` for the
+`flow`/`login`/`store::LocalStorageStore` wiring and `crate::platform::relay::sleep` as the
+`tokio::time::sleep` replacement in its poll loop. Audio's gate is an **uninhabited type**
 (`pub enum ShellAudio {}`) rather than a stub with do-nothing methods — a stub is a reachable
 value that silently produces nothing, which is exactly the shape that makes a subsystem look
 wired while doing nothing; an uninhabited type makes that a compile-time impossibility.

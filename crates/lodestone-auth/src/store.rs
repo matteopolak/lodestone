@@ -51,6 +51,28 @@
 //! reading the disk gets an attacker both. Session-only was judged the
 //! honest choice: it fails loudly (the account has to be re-added) rather
 //! than pretending to protect a secret it cannot actually protect.
+//!
+//! ## The wasm32 backend: `localStorage`, and why it is not "the keychain, but browser"
+//!
+//! [`LocalStorageStore`] is a real [`SecretStore`] for the browser build, not
+//! a stub — a browser account round-trips a refresh token exactly like a
+//! native one. But it is **not equivalent protection**, and code that meets a
+//! stored token in a browser context should not imply otherwise:
+//!
+//! * an OS keychain entry is access-controlled by the OS (macOS Keychain
+//!   prompts, Secret Service is per-user-session); `localStorage` is readable
+//!   by any JavaScript that runs on the same origin — any XSS on this page,
+//!   or a browser extension with page access, reads it in plaintext;
+//! * it has no encryption of its own — the browser stores it as a plain
+//!   string on disk;
+//! * it survives a tab close but not "clear site data"/private-mode
+//!   teardown, and is scoped per-origin rather than per-OS-user.
+//!
+//! This is why [`StorageMode::BrowserLocalStorage`] is its own variant rather
+//! than reusing [`StorageMode::Keychain`]'s label: a UI surfacing
+//! [`AccountSecrets::mode`] must be able to say which protection an account
+//! actually has, not report "keychain" for a token sitting in
+//! `localStorage`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -244,6 +266,11 @@ pub enum StorageMode {
         /// Why the real keychain was not used.
         reason: String,
     },
+    /// Tokens are held in the browser's `localStorage` — [`LocalStorageStore`],
+    /// the wasm32 backend. **Weaker than [`Self::Keychain`], not an
+    /// equivalent**: see this module's doc for why, and never render this the
+    /// same way `Keychain` is rendered.
+    BrowserLocalStorage,
 }
 
 impl std::fmt::Display for StorageMode {
@@ -253,6 +280,11 @@ impl std::fmt::Display for StorageMode {
             Self::SessionOnly { reason } => write!(
                 f,
                 "session-only (in-memory, lost on exit; OS keychain unavailable: {reason})"
+            ),
+            Self::BrowserLocalStorage => write!(
+                f,
+                "browser local storage (weaker than an OS keychain: readable by any script \
+                 on this page; cleared if you clear this site's data)"
             ),
         }
     }
@@ -325,9 +357,15 @@ impl SecretStore for MemoryStore {
 /// The real OS-keychain-backed [`SecretStore`]. Holds no state of its own —
 /// every call builds a fresh `keyring::Entry` for the profile it is given —
 /// so it is trivially `Send + Sync` and cheap to construct.
+///
+/// Native-only: no wasm32 keychain backend exists. [`LocalStorageStore`]
+/// below is the wasm32 sibling — a real `SecretStore`, but a strictly weaker
+/// one; see this module's doc for why the two are not interchangeable labels.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct KeychainStore;
 
+#[cfg(not(target_arch = "wasm32"))]
 impl KeychainStore {
     fn entry(profile: Uuid) -> keyring::Result<keyring::Entry> {
         keyring::Entry::new(KEYCHAIN_SERVICE, &profile.to_string())
@@ -338,6 +376,7 @@ impl KeychainStore {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SecretStore for KeychainStore {
     fn save_refresh_token(&self, profile: Uuid, token: &str) -> Result<()> {
         Self::entry(profile)?.set_password(token)?;
@@ -410,12 +449,110 @@ impl SecretStore for KeychainStore {
 /// backend could not be reached at all" (`Err`) — e.g. no D-Bus Secret
 /// Service session on headless Linux, which is exactly the case the brief
 /// asks to degrade gracefully rather than panic or fall back to plaintext.
+#[cfg(not(target_arch = "wasm32"))]
 fn probe_keychain() -> std::result::Result<(), String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, "lodestone-availability-probe")
         .map_err(|e| e.to_string())?;
     match entry.get_password() {
         Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The wasm32 [`SecretStore`]: the browser's `localStorage`, in place of the
+/// OS keychain — see this module's doc for why this is a real backend, not a
+/// stub, and why it is not equivalent protection. Holds no state of its own,
+/// like [`KeychainStore`]: every call reaches `window.localStorage` fresh.
+///
+/// Keyed under the *same* two service strings [`KeychainStore`] uses
+/// ([`KEYCHAIN_SERVICE`]/[`SESSION_KEYCHAIN_SERVICE`]), joined with the
+/// profile UUID — there is no cross-origin collision risk to defend against
+/// here the way there might be on a shared multi-app keyring, since a
+/// browser's `localStorage` is already same-origin-isolated, but reusing the
+/// constants keeps one naming scheme rather than two.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LocalStorageStore;
+
+#[cfg(target_arch = "wasm32")]
+impl LocalStorageStore {
+    /// The live `localStorage` handle, or a typed error if this page has none
+    /// — e.g. `window` itself absent (a non-browser wasm host), or storage
+    /// disabled/blocked by the user's browser settings.
+    fn storage() -> Result<web_sys::Storage> {
+        web_sys::window()
+            .ok_or_else(|| crate::AuthError::Storage("no global `window` in this wasm host".to_owned()))?
+            .local_storage()
+            .map_err(|e| crate::AuthError::Storage(format!("{e:?}")))?
+            .ok_or_else(|| {
+                crate::AuthError::Storage(
+                    "this browser has no `localStorage` (disabled, or blocked by settings)"
+                        .to_owned(),
+                )
+            })
+    }
+
+    fn key(service: &str, profile: Uuid) -> String {
+        format!("{service}:{profile}")
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl SecretStore for LocalStorageStore {
+    fn save_refresh_token(&self, profile: Uuid, token: &str) -> Result<()> {
+        Self::storage()?
+            .set_item(&Self::key(KEYCHAIN_SERVICE, profile), token)
+            .map_err(|e| crate::AuthError::Storage(format!("{e:?}")))
+    }
+
+    fn load_refresh_token(&self, profile: Uuid) -> Result<Option<String>> {
+        Self::storage()?
+            .get_item(&Self::key(KEYCHAIN_SERVICE, profile))
+            .map_err(|e| crate::AuthError::Storage(format!("{e:?}")))
+    }
+
+    fn delete_refresh_token(&self, profile: Uuid) -> Result<()> {
+        Self::storage()?
+            .remove_item(&Self::key(KEYCHAIN_SERVICE, profile))
+            .map_err(|e| crate::AuthError::Storage(format!("{e:?}")))
+    }
+
+    fn save_session(&self, profile: Uuid, session: &CachedSession) -> Result<()> {
+        // Same non-triggerable-in-practice failure `KeychainStore::save_session`
+        // notes: a serialise failure here means `CachedSession` cannot
+        // round-trip at all, a programmer error in this crate rather than a
+        // storage failure.
+        let text = serde_json::to_string(session)?;
+        Self::storage()?
+            .set_item(&Self::key(SESSION_KEYCHAIN_SERVICE, profile), &text)
+            .map_err(|e| crate::AuthError::Storage(format!("{e:?}")))
+    }
+
+    fn load_session(&self, profile: Uuid) -> Result<Option<CachedSession>> {
+        let text = Self::storage()?
+            .get_item(&Self::key(SESSION_KEYCHAIN_SERVICE, profile))
+            .map_err(|e| crate::AuthError::Storage(format!("{e:?}")))?;
+        let Some(text) = text else { return Ok(None) };
+        match serde_json::from_str(&text) {
+            Ok(session) => Ok(Some(session)),
+            Err(e) => {
+                // Same degrade-and-log rule as `KeychainStore::load_session` —
+                // see the trait doc.
+                tracing::warn!(
+                    target: "auth",
+                    profile = %profile,
+                    error = %e,
+                    "cached session for this profile could not be parsed; treating as absent"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    fn delete_session(&self, profile: Uuid) -> Result<()> {
+        Self::storage()?
+            .remove_item(&Self::key(SESSION_KEYCHAIN_SERVICE, profile))
+            .map_err(|e| crate::AuthError::Storage(format!("{e:?}")))
     }
 }
 
@@ -438,6 +575,7 @@ impl AccountSecrets {
     /// Opens the real store: tries the OS keychain, and falls back to an
     /// in-memory, session-only store (logging why) if it cannot be reached.
     /// Never falls back to a plaintext file.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn open() -> Self {
         match probe_keychain() {
@@ -453,6 +591,43 @@ impl AccountSecrets {
                     reason = %reason,
                     "OS keychain unavailable; refresh tokens will be kept in memory for this \
                      session only and lost on exit (never falling back to a plaintext file)"
+                );
+                Self {
+                    backend: Box::new(MemoryStore::new()),
+                    mode: StorageMode::SessionOnly { reason },
+                }
+            }
+        }
+    }
+
+    /// Opens the real store on the wasm32 target: there is no OS keychain to
+    /// try at all, so this goes straight to [`LocalStorageStore`] — still
+    /// falling back to an in-memory, session-only store if `localStorage`
+    /// itself turns out to be unavailable (private-mode restrictions, or a
+    /// non-browser wasm host with no `window`), by the same probe-once
+    /// principle [`Self::open`]'s native arm uses.
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub fn open() -> Self {
+        // A throwaway key, never left behind: `Storage::get_item` on a key
+        // that was never set is `Ok(None)`, so this distinguishes "no
+        // localStorage at all" (an `Err` from `LocalStorageStore::storage`)
+        // from "localStorage works and this key simply is not in it" without
+        // writing anything real.
+        match LocalStorageStore::storage() {
+            Ok(_) => {
+                tracing::debug!("browser localStorage available; refresh tokens will be stored there");
+                Self {
+                    backend: Box::new(LocalStorageStore),
+                    mode: StorageMode::BrowserLocalStorage,
+                }
+            }
+            Err(e) => {
+                let reason = e.to_string();
+                tracing::warn!(
+                    reason = %reason,
+                    "browser localStorage unavailable; refresh tokens will be kept in memory \
+                     for this tab only and lost on reload"
                 );
                 Self {
                     backend: Box::new(MemoryStore::new()),

@@ -17,8 +17,18 @@
 use crate::error::{AuthError, Result};
 use crate::flow::{self, MsToken, Session};
 use crate::metadata::{AccountProfile, AccountsMetadata};
-use crate::migrate::unix_now;
 use crate::store::{CachedSession, SecretStore};
+
+/// This module's wall clock. **Not** `crate::migrate::unix_now` — that
+/// function is a plain `SystemTime::now()` confined to the native-only
+/// `migrate` module (a legacy-cache one-time migration that has no wasm32
+/// caller), and this module now runs on both targets (see this crate's
+/// `lib.rs` doc on why `login` is unconditional). `lodestone_time::
+/// epoch_duration()` is the portable equivalent every wasm-linked crate in
+/// this workspace uses instead of `SystemTime::now()`, which traps on wasm32.
+fn unix_now() -> u64 {
+    lodestone_time::epoch_duration().as_secs()
+}
 
 /// Slack subtracted from a cached session's real `expires_at` when deciding
 /// whether it is still usable, so a token that would expire *during* the
@@ -437,7 +447,7 @@ pub async fn finish_interactive(
         // a URL that later becomes disallowed cannot be laundered by already
         // being in `profiles.json`.
         skin_url: session.profile.skin.as_ref().map(|s| s.url.clone()),
-        last_used: crate::migrate::unix_now(),
+        last_used: unix_now(),
     });
     metadata.selected = Some(session.profile.id);
     Ok(session)

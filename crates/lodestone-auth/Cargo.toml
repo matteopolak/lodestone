@@ -22,13 +22,26 @@ uuid = { workspace = true }
 sha1 = { workspace = true, features = ["oid"] }
 num-bigint = { workspace = true }
 base64 = { workspace = true }
+# The portable clock (`docs/`, `lodestone-time`'s own crate docs): `flow`'s
+# `session_from_ms_token` and `login`'s cache-expiry check both need a wall
+# clock, and now that both compile for wasm32 (see the target section below)
+# neither may reach `std::time::SystemTime::now()` directly — it traps there.
+# Unconditional, matching every other depender: this crate's own
+# `unix_now`-shaped need used to be served by the native-only `migrate`
+# module, which cannot serve a wasm32 caller.
+lodestone-time = { workspace = true }
 
 # HTTP client for the Microsoft OAuth / Xbox Live / XSTS / Minecraft-services
-# call chain and the session-server `join` POST. Native-only: a browser build
-# authenticates over a different path and cannot open these sockets directly.
-#
-# `keyring` (the OS credential store, `docs/accounts.md`) is native-only for
-# the same reason: no wasm32 backend exists.
+# call chain and the session-server `join` POST. `reqwest` itself is *not*
+# native-only any more — see the `wasm32` target section below, which depends
+# on the identical `[workspace.dependencies]` entry: reqwest's own manifest
+# target-gates every hyper/rustls/tokio dependency its TLS-related features
+# pull in to `cfg(not(wasm32))`, so requesting them here is a no-op on wasm32
+# and the crate falls through to its `fetch`-backed wasm client instead. What
+# stays native-only in *this* block is `tokio` (the device-code poll loop's
+# blocking runtime, `crate::browser_login`'s socket, and this crate's own
+# `#[tokio::test]`s) and `keyring` (the OS credential store, `docs/accounts.md`
+# — no wasm32 backend exists, hence `crate::store::LocalStorageStore` below).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { workspace = true }
 tokio = { workspace = true }
@@ -63,6 +76,21 @@ rand = { workspace = true }
 # no RNG (PKCS#1 v1.5 signature padding is deterministic, unlike PSS/OAEP), so
 # this is not pulling in randomness the browser build would need to source.
 rsa = { workspace = true }
+
+# The browser build's own half of the device-code chain. `reqwest` here is the
+# *same* `[workspace.dependencies]` entry the native block above uses — see
+# that block's comment for why enabling `rustls-no-provider`/`http2`/`charset`
+# is harmless on this target (every dependency they would pull in is itself
+# target-gated to `cfg(not(wasm32))` in reqwest's own manifest, so the features
+# simply have nothing to activate here) — reqwest picks its `fetch`-backed
+# `wasm` client module instead of the hyper one, with no TLS stack of its own
+# to configure (the browser's own `fetch` already speaks TLS). `web-sys` is
+# `crate::metadata::AccountsMetadata`'s and `crate::store::LocalStorageStore`'s
+# `localStorage` seam, mirroring the precedent `lodestone-shell`'s
+# `menu/accounts.rs::open_in_browser` already set for this exact crate pairing.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+reqwest = { workspace = true }
+web-sys = { version = "0.3", features = ["Window", "Storage"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

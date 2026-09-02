@@ -1,9 +1,12 @@
 //! The Microsoft → Xbox Live → XSTS → Minecraft services authentication chain,
 //! and the session-server `join` call.
 //!
-//! This module is native-only: it drives a series of HTTPS requests through
-//! [`reqwest`] and a browser build authenticates over a different path. The flow
-//! is:
+//! This module drives a series of HTTPS requests through [`reqwest`], and —
+//! unlike this crate's other network modules — it compiles and runs on
+//! **both** native and wasm32: reqwest's own `wasm32-unknown-unknown` arm is
+//! `fetch`-backed and needs no TLS stack or blocking runtime of ours, so the
+//! whole chain below `request_device_code` is one code path for both targets.
+//! The flow is:
 //!
 //! 1. request a device code from Microsoft and show the user a code + URL;
 //! 2. poll until they finish signing in, yielding an MS OAuth token;
@@ -12,6 +15,15 @@
 //! 5. fetch the player's profile (name + UUID);
 //! 6. later, `POST` the server hash to the session server to prove ownership of
 //!    the shared secret during a server join.
+//!
+//! **[`PendingLogin::wait`] is the one piece that stays native-only** — it
+//! blocks the calling task on `tokio::time::sleep`, which is not just absent
+//! but *traps* on wasm32 (see this workspace's `CLAUDE.md`). A wasm32 caller
+//! drives [`PendingLogin::poll_once`] from its own timer instead — see that
+//! method's doc — which is exactly the "GUI or browser caller" case the type's
+//! own doc already anticipated before a browser caller existed.
+//! [`authenticate_with_device_code`] composes `wait` for a terminal-shaped
+//! caller and is native-only for the same reason.
 //!
 //! None of these calls can be exercised without a real Microsoft account, so the
 //! crate's automated tests cover only the pure pieces (the server hash and JSON
@@ -353,7 +365,13 @@ pub async fn poll_token(
 pub struct PendingLogin {
     prompt: DeviceCodePrompt,
     interval: u64,
-    remaining: u64,
+    /// When [`Self::begin`] requested the code — a real wall-clock instant
+    /// rather than a counter [`Self::wait`]'s loop decrements, precisely so
+    /// [`Self::is_expired`] is meaningful to a caller that never calls `wait`
+    /// at all (every wasm32 caller). `lodestone_time::Instant`, not
+    /// `std::time::Instant`: the latter traps on wasm32 (`CLAUDE.md`), and
+    /// this field is read on both targets.
+    started: lodestone_time::Instant,
 }
 
 impl PendingLogin {
@@ -365,11 +383,10 @@ impl PendingLogin {
     pub async fn begin(client: &reqwest::Client, client_id: &str) -> Result<Self> {
         let prompt = request_device_code(client, client_id).await?;
         let interval = prompt.interval;
-        let remaining = prompt.expires_in;
         Ok(Self {
             prompt,
             interval,
-            remaining,
+            started: lodestone_time::Instant::now(),
         })
     }
 
@@ -384,6 +401,18 @@ impl PendingLogin {
     #[must_use]
     pub fn interval(&self) -> u64 {
         self.interval
+    }
+
+    /// Whether [`DeviceCodePrompt::expires_in`] seconds have elapsed since
+    /// [`Self::begin`]. A caller driving [`Self::poll_once`] from its own
+    /// timer (every wasm32 caller, and any native GUI caller that does not
+    /// use [`Self::wait`]) should check this each tick and give up — showing
+    /// the user a fresh [`AuthError::DeviceCodeExpired`]-shaped prompt to
+    /// restart — rather than polling Microsoft forever on a code that can
+    /// never complete.
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        self.started.elapsed().as_secs() >= self.prompt.expires_in
     }
 
     /// Polls once for completion.
@@ -415,18 +444,25 @@ impl PendingLogin {
     /// Drives the poll loop to completion, sleeping [`Self::interval`] seconds
     /// between attempts and giving up when the device code expires.
     ///
+    /// **Native-only**: the sleep is `tokio::time::sleep`, which traps on
+    /// wasm32 rather than merely failing to compile (`CLAUDE.md`). A wasm32
+    /// caller must not add a `cfg`-gated wasm body here that swaps in a
+    /// browser-timer sleep — that would duplicate the poll loop across two
+    /// bodies that can drift. Instead drive [`Self::poll_once`] directly from
+    /// whatever timer the host already has; `lodestone-shell`'s
+    /// `menu/accounts.rs` is that caller for the browser build.
+    ///
     /// # Errors
     ///
     /// Returns [`AuthError::AuthorizationDeclined`] or
     /// [`AuthError::DeviceCodeExpired`] as appropriate, or any transport error.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn wait(mut self, client: &reqwest::Client, client_id: &str) -> Result<MsToken> {
         loop {
-            let delay = self.interval;
-            if self.remaining < delay {
+            if self.is_expired() {
                 return Err(AuthError::DeviceCodeExpired);
             }
-            self.remaining -= delay;
-            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(self.interval)).await;
             if let Some(token) = self.poll_once(client, client_id).await? {
                 return Ok(token);
             }
@@ -446,6 +482,10 @@ impl PendingLogin {
 ///
 /// Propagates any failure from the device-code, token, Xbox, XSTS,
 /// Minecraft-login or profile steps.
+///
+/// Native-only: composes [`PendingLogin::wait`], which is. See that method's
+/// doc for the wasm32 replacement shape.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn authenticate_with_device_code<F>(
     client: &reqwest::Client,
     client_id: &str,
@@ -816,11 +856,13 @@ pub async fn session_from_ms_token(
     let xsts = authorize_xsts(client, &xbl).await?;
     let (access_token, expires_in) = login_with_xbox(client, &xsts).await?;
     let profile = fetch_profile(client, &access_token).await?;
-    // `crate::migrate::unix_now()` is the same clock `crate::login` stamps
-    // `AccountProfile::last_used` with; sharing it keeps every "now" in this
-    // crate reading the same wall clock rather than each call site
-    // re-deriving it.
-    let expires_at = crate::migrate::unix_now().saturating_add(expires_in);
+    // `lodestone_time::epoch_duration()` is the same clock `crate::login`
+    // stamps `AccountProfile::last_used` with; sharing it keeps every "now" in
+    // this crate reading the same wall clock rather than each call site
+    // re-deriving it. Not `crate::migrate::unix_now()` (a plain
+    // `SystemTime::now()`, native-only and gated off wasm32 for exactly that
+    // reason) — this function runs on both targets, so its clock must too.
+    let expires_at = lodestone_time::epoch_duration().as_secs().saturating_add(expires_in);
     Ok(Session {
         access_token,
         profile,
