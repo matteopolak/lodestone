@@ -1896,7 +1896,7 @@ impl IntegratedServer {
         // because the ranges are consumed by `seed_coords` above.
         let restore_area = (cx_range.clone(), cz_range.clone());
         let seed_task = spawn_tick_task(&shutdown, async move {
-            let t_seed = web_time::Instant::now();
+            let t_seed = lodestone_time::Instant::now();
             tracing::info!(
                 "mob seed task: generating {} columns for mob_area",
                 seed_coords.len(),
@@ -4740,7 +4740,7 @@ mod tests {
         // the constructor used to make inline. Run first, on the same box in the
         // same second as the post-fix reading below, so the pair is a comparison
         // and not two independent samples of a 2.3×-noisy quantity.
-        let started = web_time::Instant::now();
+        let started = lodestone_time::Instant::now();
         let seeded = MobHandle::seeded(
             &crate::overworld_chunk_source(seed),
             -MOB_RADIUS..=MOB_RADIUS,
@@ -4752,7 +4752,7 @@ mod tests {
         let before = started.elapsed();
         drop(seeded);
 
-        let started = web_time::Instant::now();
+        let started = lodestone_time::Instant::now();
         let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
             Silent,
             crate::overworld_chunk_source(seed),

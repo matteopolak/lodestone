@@ -21,7 +21,7 @@
 //! `std::time::SystemTime::now()`** — this crate links into the wasm32
 //! bundle and that call traps at runtime there (`docs/browser-shell-port.md`
 //! carries the census); `now_millis` already exists as this crate's one
-//! `web_time`-backed portable "now".
+//! `lodestone_time`-backed portable "now".
 //!
 //! # What is not built
 //!

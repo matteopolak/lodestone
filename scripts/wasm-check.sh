@@ -475,6 +475,16 @@ CONFINEMENT_RULES=(
   # a real, documented gap rather than a live trap, so it is allowlisted rather
   # than making this rule impossible to turn green.
   "lodestone-server tokio-instant-ban|crates/lodestone-server/src|tokio::time::Instant|tick.rs"
+  # This crate's clock now goes through `lodestone_time::` rather than a direct
+  # `web_time::` dependency -- `Cargo.toml` no longer lists `web-time` at all, so a
+  # reintroduced bare `web_time::` call would not even compile. That is not a reason
+  # to skip a rule for it: the whole point of a confinement guard, per the two rules
+  # above, is to catch a regression by name before anyone waits on a build to find
+  # it. Empty allowlist: every legitimate call site in this crate (including
+  # `browser_timer.rs`, migrated alongside the rest -- its `BrowserInstant` alias is
+  # `lodestone_time::Instant`, the identical type on every target) reads
+  # `lodestone_time::`, which this qualified `web_time::` pattern does not match.
+  "lodestone-server web-time-ban|crates/lodestone-server/src|web_time::|"
   "lodestone-worldgen instant-ban|crates/lodestone-worldgen/src|std::time::Instant|"
   "lodestone-worldgen systemtime-ban|crates/lodestone-worldgen/src|std::time::SystemTime|"
   "lodestone-particle instant-ban|crates/lodestone-particle/src|std::time::Instant|"

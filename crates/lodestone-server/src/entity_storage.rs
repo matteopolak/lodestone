@@ -525,13 +525,8 @@ impl EntityStorage {
             }
         };
 
-        let timestamp = u32::try_from(
-            web_time::SystemTime::now()
-                .duration_since(web_time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        )
-        .unwrap_or(u32::MAX);
+        let timestamp =
+            u32::try_from(lodestone_time::epoch_duration().as_secs()).unwrap_or(u32::MAX);
 
         let mut entries: Vec<ChunkToWrite> = Vec::new();
         let mut written = 0usize;

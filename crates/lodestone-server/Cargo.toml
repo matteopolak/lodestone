@@ -38,14 +38,14 @@ redstone-counters = []
 bundled-worldgen-v26_2 = []
 
 [dependencies]
-# The portable clock. **`web-time`'s non-wasm arm is literally `pub use std::time::*`,
-# so on native this IS `std::time` — same types, not newtypes — and native behaviour is
-# unchanged.** It is here because `Instant::now()` and `SystemTime::now()` COMPILE for
-# wasm32 and then TRAP at runtime (measured, executed in a wasm VM: `RuntimeError:
-# unreachable`), and this crate runs in the browser: `lodestone-shell`'s browser build
-# reached a world and died here. `web-time` is already in that bundle via `winit`, so it
-# costs nothing. See `docs/browser-shell-port.md`.
-web-time = "1"
+# The portable clock. Not a direct `web-time` dependency any more:
+# `lodestone-time` is the one crate that depends on `web-time` directly, so
+# every other crate's clock goes through it instead of an improvised copy. See
+# `docs/browser-shell-port.md`. It is needed because `Instant::now()` and
+# `SystemTime::now()` COMPILE for wasm32 and then TRAP at runtime (measured,
+# executed in a wasm VM: `RuntimeError: unreachable`), and this crate runs in
+# the browser: `lodestone-shell`'s browser build reached a world and died here.
+lodestone-time = { workspace = true }
 # The server's own `bevy_ecs::World` (issue #433, `docs/server-ecs.md`;
 # Phase 0 of `docs/plans/server-ecs-migration.md`). Pinned through the same
 # `[workspace.dependencies]` entries `lodestone-ecs` already builds against —

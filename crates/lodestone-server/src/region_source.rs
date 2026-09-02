@@ -380,10 +380,7 @@ impl LevelDatHandle {
 /// Wall-clock milliseconds since the epoch, saturating rather than panicking
 /// on a system clock set before 1970.
 fn now_millis() -> i64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+    i64::try_from(lodestone_time::epoch_duration().as_millis()).unwrap_or(i64::MAX)
 }
 
 /// Counters for what the save/load path actually did.
@@ -1460,13 +1457,8 @@ impl WorldSaveHandle {
         }
 
         // Then the dirty ones, encoded fresh.
-        let timestamp = u32::try_from(
-            web_time::SystemTime::now()
-                .duration_since(web_time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        )
-        .unwrap_or(u32::MAX);
+        let timestamp =
+            u32::try_from(lodestone_time::epoch_duration().as_secs()).unwrap_or(u32::MAX);
         let mut count = 0usize;
         // Snapshotted **before** the `edits` lock is taken, never underneath
         // it. The connection task takes the block-entity registry lock and

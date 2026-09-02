@@ -63,24 +63,25 @@
 //!
 //! # Dependencies
 //!
-//! `web_time::Instant` (this crate's existing portable clock, already a
-//! dependency — see `Cargo.toml`'s comment on why `web-time` and not
-//! `std::time::Instant`, which traps on wasm32) for elapsed-time bookkeeping,
-//! and `js-sys`/`web-sys`/`wasm-bindgen-futures` (wasm32-only dependencies,
-//! same versions `crate::chunk::yield_to_browser` already pins) for the real
-//! macrotask.
+//! `lodestone_time::Instant` (the workspace's portable clock seam — see
+//! `Cargo.toml`'s comment on why this crate depends on `lodestone-time`
+//! rather than `std::time::Instant`, which traps on wasm32) for elapsed-time
+//! bookkeeping, and `js-sys`/`web-sys`/`wasm-bindgen-futures` (wasm32-only
+//! dependencies, same versions `crate::chunk::yield_to_browser` already pins)
+//! for the real macrotask.
 
 use std::time::Duration;
 
-/// This module's portable "now". `web_time::Instant`'s non-wasm arm is
-/// literally `pub use std::time::*` (see `Cargo.toml`), so on every other
-/// target this is `std::time::Instant` unchanged — the alias exists so
-/// [`next_deadline`] reads the same on both targets and so this file never
-/// spells out `std::time::Instant` or `tokio::time::Instant` itself: the
-/// former traps on wasm32 at runtime, and the latter is `tick.rs`'s one
-/// documented allowance under `scripts/wasm-check.sh`'s `tokio-instant-ban`
-/// rule, which this file is deliberately not a second exception to.
-pub(crate) type BrowserInstant = web_time::Instant;
+/// This module's portable "now". `lodestone_time::Instant` is `web_time::
+/// Instant`, whose non-wasm arm is literally `pub use std::time::*` (see
+/// `lodestone-time`'s own `Cargo.toml`), so on every other target this is
+/// `std::time::Instant` unchanged — the alias exists so [`next_deadline`]
+/// reads the same on both targets and so this file never spells out
+/// `std::time::Instant` or `tokio::time::Instant` itself: the former traps on
+/// wasm32 at runtime, and the latter is `tick.rs`'s one documented allowance
+/// under `scripts/wasm-check.sh`'s `tokio-instant-ban` rule, which this file
+/// is deliberately not a second exception to.
+pub(crate) type BrowserInstant = lodestone_time::Instant;
 
 /// Resolves after `duration` via a real browser macrotask, never
 /// `tokio::time::sleep` — see this module's doc for why that hangs rather
