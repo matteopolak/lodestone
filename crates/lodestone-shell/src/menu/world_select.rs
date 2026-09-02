@@ -21,7 +21,7 @@
 //! Delete its confirmation screen, four before that fix enabled Create — and
 //! **`active = false` is the whole mechanism**, see [`super::widget`]. Vanilla
 //! disables them itself, for our exact reason:
-//! `SelectWorldScreen.updateButtonStatus(null)`
+//! vanilla's own select-world screen's update-button-status call, given no selection,
 //! turns Edit, Delete and Re-Create off whenever nothing is selected, which is a
 //! state this screen really reaches (an empty `saves/`, or a filter matching
 //! nothing). What is left is the *client-level* ceiling: `Edit` and `Re-Create`
@@ -31,7 +31,7 @@
 //! with the feature unavailable.
 //!
 //! What vanilla does with a **tooltip** on such a button
-//! (`TitleScreen.java`, `OptionsScreen.java`) is still deferred, for
+//! (vanilla's own title-screen and options-screen rendering) is still deferred, for
 //! That fix's reason narrowed by that fix: nothing in this shell tracks hover *dwell
 //! time*, so a `tooltip` field would reach zero pixels. See
 //! `docs/menu-focus.md`'s deliberate-gaps list.
@@ -49,7 +49,7 @@
 //!
 //! - the content band holds **N** rows, one per [`crate::saves::WorldSummary`],
 //!   drawn with `WorldListEntry`'s geometry (a 32 px icon column and three text
-//!   lines — `WorldSelectionList.java`) rather than `NoWorldsEntry`'s
+//!   lines — vanilla's own world-selection list rendering) rather than `NoWorldsEntry`'s
 //!   single centred string. The icon square itself stays empty: this client
 //!   writes no `icon.png`, so there is nothing to blit into it, and the column
 //!   is reserved anyway because the three text lines' x is measured from it
@@ -97,7 +97,7 @@
 //!
 //! The title screen's Singleplayer button — [`super::nav::MainButton::Singleplayer`]
 //! calls [`UiState::open_world_select`](super::UiState::open_world_select), which
-//! is vanilla's own wiring (`TitleScreen.java` opens `SelectWorldScreen`; nothing
+//! is vanilla's own wiring (its own title-screen rendering opens `SelectWorldScreen`; nothing
 //! launches a world straight off the title). That arm also **re-enumerates**:
 //! `MenuNav` rebuilds this screen from disk on entry, the way vanilla constructs
 //! a fresh `SelectWorldScreen`, so a world created a moment ago is on the list.
@@ -126,7 +126,8 @@ pub const WORLD_SELECT_TITLE: &str = "Select World";
 /// [`EditBox::hint`]'s draw in [`super::render`].
 pub const SEARCH_HINT: &str = "Search...";
 
-/// The search box's narration `Component` (`SelectWorldScreen.java` passes
+/// The search box's narration `Component` (vanilla's own select-world screen
+/// rendering passes
 /// the title through as the narration message). Never drawn.
 pub const SEARCH_NARRATION: &str = "Select World";
 
@@ -279,7 +280,7 @@ pub enum WorldSelectButton {
     Edit,
     /// `selectWorld.delete`, 71 px. **Live** since that fix:
     /// `summary.canDelete()` (`:172`), and vanilla's own
-    /// `LevelSummary.canDelete()` is unconditionally `true`
+    /// level-summary can-delete accessor is unconditionally `true`
     /// — so this is off only in the no-selection
     /// branch, where there is nothing to delete. Its press opens
     /// [`super::Screen::Confirm`]; it does not delete anything itself.
@@ -474,7 +475,7 @@ pub enum WorldSelectOutcome {
     /// folder name is what [`crate::saves::delete_world_in`] resolves (through
     /// [`crate::saves::world_dir_in`], the containment check); the display name
     /// rides along because vanilla's `selectWorld.deleteWarning` interpolates
-    /// `LevelSummary.getLevelName()` rather than the folder
+    /// vanilla's own level-summary get-level-name accessor rather than the folder
     ///, and quoting the wrong one of the two is
     /// exactly how a player confirms the deletion of a different world.
     DeleteWorld {
@@ -512,7 +513,7 @@ pub struct WorldSelectNav {
     /// The **unfiltered** set. [`Self::shown`] is the filtered view, and the two
     /// are kept apart so typing in the search box does not lose worlds — vanilla
     /// keeps `currentlyDisplayedLevels` for the same reason
-    /// (`WorldSelectionList.java`: `updateFilter` re-fills from the
+    /// (vanilla's own world-selection list rendering: `updateFilter` re-fills from the
     /// retained list rather than re-reading the disk).
     worlds: Vec<WorldSummary>,
     /// Indices into [`Self::worlds`] that pass the search filter, in list order.
@@ -764,7 +765,8 @@ impl WorldSelectNav {
         self.error = Some(message.into());
     }
 
-    /// `SelectWorldScreen.updateButtonStatus(summary)` (`:159-184`), now with a
+    /// Vanilla's own select-world screen's update-button-status call, given a
+    /// summary (`:159-184`), now with a
     /// real summary to ask.
     ///
     /// Vanilla's non-null branch reads four `LevelSummary` predicates —
@@ -826,7 +828,7 @@ impl WorldSelectNav {
         WorldSelectButton::at_row(self.focus.focused()?)
     }
 
-    /// `AbstractWidget.isActive()` for the widget at `row`.
+    /// Vanilla's own abstract-widget base's is-active accessor for the widget at `row`.
     ///
     /// **Read the widget, not [`WorldSelectButton::enabled`].** That method is
     /// the *initial* value [`Self::update_button_status`] writes, exactly as
@@ -973,7 +975,7 @@ impl WorldSelectNav {
     /// Mirrors `ContainerEventHandler.mouseClicked` (`:44-52`) by row instead of
     /// by coordinate: the child answers whether it consumed the click
     /// (`AbstractWidget.mouseClicked` returns `false` when inactive,
-    /// `AbstractWidget.java`) and only then does it take focus, gated on
+    /// vanilla's own abstract-widget base) and only then does it take focus, gated on
     /// `shouldTakeFocusAfterInteraction()` — `true` for a plain `Button`.
     pub fn click_row(&mut self, row: usize) -> WorldSelectOutcome {
         if row == SEARCH_FIELD {
@@ -1046,7 +1048,8 @@ impl WorldSelectNav {
         match button {
             WorldSelectButton::Back => WorldSelectOutcome::Close,
             // Vanilla's `loadSelectedWorld()` (`:117-121`), which is
-            // `WorldSelectionList.getSelectedOpt().ifPresent(Entry::joinWorld)`.
+            // vanilla's own world-selection list's get-selected-opt accessor,
+            // applying the join-world call if present.
             WorldSelectButton::Play => self.play_selected(),
             // Opens `Screen::CreateWorld`.
             WorldSelectButton::Create => WorldSelectOutcome::CreateWorld,
@@ -1090,7 +1093,7 @@ impl WorldSelectNav {
         }
     }
 
-    /// `WorldListEntry.deleteWorld()`: **ask** about the selection, or do nothing
+    /// Vanilla's own world-list-entry delete-world call: **ask** about the selection, or do nothing
     /// when there is none.
     ///
     /// The name is `delete_selected` and it deletes nothing, which is deliberate —
@@ -1107,7 +1110,7 @@ impl WorldSelectNav {
         }
     }
 
-    /// The selected world — `WorldSelectionList.getSelectedOpt()`.
+    /// The selected world — vanilla's own world-selection list's get-selected-opt accessor.
     ///
     /// `None` is a state this screen really reaches now (an empty `saves/`, or a
     /// search matching nothing), where it used to be unreachable because there
@@ -1732,7 +1735,7 @@ mod tests {
         assert_eq!(nav.search().value(), "cav", "the field kept its text");
 
         // Repeated Down must reach Back eventually and then stay there —
-        // arrows do not wrap (`Screen.java` gates the retry on Tab).
+        // arrows do not wrap (vanilla's own screen base gates the retry on Tab).
         let mut steps = 0;
         while nav.focused_row() != Some(WorldSelectButton::Back.row()) {
             nav.handle_key(MenuKey::Down);
