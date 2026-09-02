@@ -1,4 +1,4 @@
-//! Spawn eggs — the decision half of vanilla's `SpawnEggItem.useOn`.
+//! Spawn eggs — the decision half of vanilla's real use-on-block rule for them.
 //!
 //! # What it is
 //!
@@ -22,13 +22,13 @@
 //! mechanism"), and nothing else carries the mapping. So this module needed a
 //! source, and the honest one is the jar.
 //!
-//! Vanilla holds it as a per-registration field: `Items.registerSpawnEgg(id, type)`
-//! puts the `EntityType` into the item's `spawnEgg` property, and
-//! `SpawnEggItem.getType` reads it back — so "the name matches" is a *hypothesis*
-//! about 88 independent registrations, not a rule. It was checked against the
-//! pinned 26.2 decompile by extracting every
-//! `registerSpawnEgg(ItemIds.X, EntityTypes.Y)` pair and comparing `X` minus its
-//! `_spawn_egg` suffix against `Y`: **88 registrations, zero mismatches.** So the
+//! Vanilla holds it as a per-registration field: the spawn-egg registration
+//! function puts the entity type into the item's own egg-type property, and reads
+//! it back at use time — so "the name matches" is a *hypothesis* about 88
+//! independent registrations, not a rule. It was checked against the
+//! pinned 26.2 decompile by extracting every item-id/entity-type registration pair
+//! and comparing the item id minus its `_spawn_egg` suffix against the entity type:
+//! **88 registrations, zero mismatches.** So the
 //! derivation is exact for this version, and
 //! [`entity_type_for_egg`] additionally requires the derived name to be a real
 //! entry in [`lodestone_data::entity_types`] — a misspelled or modded
@@ -43,29 +43,29 @@
 //!
 //! # Where the mob lands
 //!
-//! `SpawnEggItem.useOn` picks the cell, then `EntityType.create` picks the
-//! sub-cell height. Both halves are here, and the second one is the part that is
-//! easy to get almost right:
+//! The real use-on-block rule picks the cell, then the real entity-create rule
+//! picks the sub-cell height. Both halves are here, and the second one is the part
+//! that is easy to get almost right:
 //!
-//! 1. **The cell.** `blockState.getCollisionShape(level, pos).isEmpty()` → the
+//! 1. **The cell.** An empty collision shape at the clicked position → the
 //!    clicked cell itself; otherwise the neighbour across the clicked face. So an
 //!    egg used on tall grass spawns *in* the grass, and one used on stone spawns
 //!    beside or on top of it.
-//! 2. **`movedUp`** is `pos != spawnPos && clickedFace == UP` — true only for the
-//!    top face of a cell that had collision.
-//! 3. **The height** is `spawnPos.y + yOff`, where
-//!    `yOff = 1.0 + Shapes.collide(Y, entityBox, collisions, movedUp ? -2.0 : -1.0)`
-//!    and the collisions are those inside `AABB(spawnPos)`, expanded one cell
-//!    **downward** when `movedUp`. The entity box starts one cell above `spawnPos`
-//!    and falls, bounded. Re-expressed without a sweep — see [`y_offset`] — that
-//!    is `max(highest collision top in the searched cells, movedUp ? -1.0 : 0.0)`,
-//!    relative to `spawnPos.y`.
+//! 2. **`moved_up`** is `spawn_pos != clicked_pos && clicked_face == UP` — true
+//!    only for the top face of a cell that had collision.
+//! 3. **The height** is `spawn_pos.y + y_off`, where
+//!    `y_off = 1.0 + collide(Y, entity_box, collisions, moved_up ? -2.0 : -1.0)`
+//!    and the collisions are those inside the spawn-position bounding box, expanded
+//!    one cell **downward** when `moved_up`. The entity box starts one cell above
+//!    `spawn_pos` and falls, bounded. Re-expressed without a sweep — see
+//!    [`y_offset`] — that is `max(highest collision top in the searched cells,
+//!    moved_up ? -1.0 : 0.0)`, relative to `spawn_pos.y`.
 //!
 //! The common case is the one worth checking by hand: clicking the **top** of a
-//! full block gives `spawnPos = pos + up`, `movedUp = true`, and the clicked
-//! block's own top is `spawnPos.y - 1 + 1.0 = spawnPos.y`, so `yOff = 0.0` and the
-//! mob stands on the clicked face. Do the same with a bottom slab underfoot and
-//! its top is `spawnPos.y - 0.5`, so `yOff = -0.5` and the mob stands on the slab
+//! full block gives `spawn_pos = pos + up`, `moved_up = true`, and the clicked
+//! block's own top is `spawn_pos.y - 1 + 1.0 = spawn_pos.y`, so `y_off = 0.0` and
+//! the mob stands on the clicked face. Do the same with a bottom slab underfoot and
+//! its top is `spawn_pos.y - 0.5`, so `y_off = -0.5` and the mob stands on the slab
 //! rather than half a block above it. A gate that only ever clicked full cubes
 //! cannot tell those two apart from a hardcoded `0.0`, which is why
 //! [`y_offset`]'s tests use both.
@@ -74,7 +74,7 @@
 //!
 //! * **A new egg** needs nothing: the derivation covers it as soon as the entity
 //!   type is in the registry table.
-//! * **The dispenser behaviour** (`SpawnEggItemBehavior`) reuses
+//! * **The dispenser behaviour** reuses
 //!   [`entity_type_for_egg`] and nothing else here — its placement rule is the
 //!   dispenser's facing, not a clicked face.
 //! * **Clicking a spawner block** is deliberately *not* this module's job even
@@ -85,18 +85,17 @@
 //!
 //! ## Gotchas
 //!
-//! * **A spawner check must come before this.** `SpawnEggItem.useOn` tests
-//!   `level.getBlockEntity(pos) instanceof Spawner` *first*, and that branch
+//! * **A spawner check must come before this.** The real use-on-block rule checks
+//!   for a spawner block entity at the clicked position *first*, and that branch
 //!   returns without creating anything. Nothing here can see block entities, so
 //!   ordering is the caller's responsibility.
-//! * **Peaceful refuses.** `type.canSpawn(level)` is
-//!   `isAllowedInPeaceful() || difficulty != PEACEFUL`, and a `FAIL` there means
-//!   the stack is *not* consumed. [`SpawnEggUse::Refused`] carries that
-//!   distinction — returning `NotSpawnEgg` instead would make the egg place a
-//!   block.
-//! * **The stack shrinks only on success.** `spawnMob` consumes one *after*
-//!   `type.spawn` returned non-null, so a caller must not decrement before the
-//!   spawn.
+//! * **Peaceful refuses.** The real can-spawn-here rule is "allowed in peaceful, or
+//!   the difficulty is not peaceful", and a refusal there means the stack is *not*
+//!   consumed. [`SpawnEggUse::Refused`] carries that distinction — returning
+//!   `NotSpawnEgg` instead would make the egg place a block.
+//! * **The stack shrinks only on success.** The real spawn rule consumes one item
+//!   *after* the entity spawn returned non-null, so a caller must not decrement
+//!   before the spawn.
 //!
 //! # Dependencies
 //!
@@ -115,9 +114,9 @@ pub enum SpawnEggUse {
     /// The held item is not a spawn egg. The caller continues to whatever it
     /// would have done — block placement, most often.
     NotSpawnEgg,
-    /// A spawn egg, but vanilla's `useOn` returns `FAIL`: the derived entity type
+    /// A spawn egg, but the real use-on-block rule refuses: the derived entity type
     /// is not in the registry, or the difficulty is `Peaceful` and the species is
-    /// `notInPeaceful`. **The stack is not consumed**, and no block is placed.
+    /// not allowed there. **The stack is not consumed**, and no block is placed.
     Refused,
     /// Create `entity_type` with its feet at `position`, then consume one from the
     /// stack.
@@ -158,7 +157,7 @@ pub fn entity_type_for_egg(item: &str) -> Option<ResourceKey> {
 ///
 /// * `clicked` is the block position from the `use_item_on` packet and `face` the
 ///   clicked face.
-/// * `difficulty` is the **world** difficulty, for `EntityType.canSpawn`.
+/// * `difficulty` is the **world** difficulty, for the real can-spawn-here rule.
 /// * `block_state` reads a full block-state string at world coordinates — the
 ///   same closure shape the item-settling pass takes, so the caller passes its
 ///   live `ChunkSource` rather than a snapshot.
@@ -180,7 +179,7 @@ pub fn use_spawn_egg(
     let Some(entity_type) = entity_type_for_egg(item) else {
         return SpawnEggUse::Refused;
     };
-    // `EntityType.canSpawn(level)`.
+    // The real can-spawn-here rule.
     if difficulty == Difficulty::Peaceful
         && !crate::mob_spawn::allowed_in_peaceful(entity_type.path())
     {
@@ -196,8 +195,9 @@ pub fn use_spawn_egg(
     };
     let moved_up = spawn_pos != clicked && face == BlockFace::Up;
 
-    // `getCollisions(null, AABB(spawnPos))`, plus the cell below when `movedUp`
-    // expands the box downward. Tops are expressed relative to `spawnPos.y`.
+    // The collisions inside the spawn-position bounding box, plus the cell below
+    // when `moved_up` expands the box downward. Tops are expressed relative to
+    // `spawn_pos.y`.
     let mut top = None;
     let mut consider = |cell: BlockPos, base: f64| {
         for b in collision_boxes_for(&block_state(cell.x, cell.y, cell.z)) {
@@ -258,13 +258,13 @@ pub enum SpawnEggApplied {
 ///
 /// # What is deliberately not modelled
 ///
-/// * **The random yaw.** `EntityType.create` snaps the entity to
-///   `Mth.wrapDegrees(random.nextFloat() * 360)`, then copies it into `yHeadRot`
-///   and `yBodyRot`. This has no RNG stream to draw from and [`crate::MobSim`]
+/// * **The random yaw.** The real entity-create rule snaps the entity to a
+///   wrapped-degrees random angle, then copies it into the head and body rotation
+///   too. This has no RNG stream to draw from and [`crate::MobSim`]
 ///   exposes no rotation setter, so an egg-spawned mob faces the sim's default
 ///   until one of those exists. Cosmetic, and stated rather than silently
 ///   approximated.
-/// * **`Mob.finalizeSpawn`.** Vanilla calls it with the *regional* difficulty at
+/// * **The finalize-spawn step.** Vanilla calls it with the *regional* difficulty at
 ///   the spawn position, which is what gives a zombie its chance of armour and a
 ///   spider its potion effect. Neither regional difficulty nor mob equipment is
 ///   modelled here, so nothing is passed and nothing is applied.
@@ -298,24 +298,21 @@ pub fn apply_spawn_egg(
     }
 }
 
-/// `EntityType.getYOffset` re-expressed without a sweep.
+/// The real spawn-height rule, re-expressed without a sweep.
 ///
-/// Vanilla places the entity's box one cell **above** `spawnPos` and sweeps it
-/// down by at most `movedUp ? 2.0 : 1.0`, then adds 1.0:
+/// Vanilla places the entity's box one cell **above** `spawn_pos` and sweeps it
+/// down by at most `moved_up ? 2.0 : 1.0`, then adds 1.0: the height is
+/// `1.0 + collide(Y, entity_box, shapes, moved_up ? -2.0 : -1.0)`.
 ///
-/// ```java
-/// return 1.0 + Shapes.collide(Direction.Axis.Y, entityBox, shapes, movedUp ? -2.0 : -1.0);
-/// ```
-///
-/// `Shapes.collide` returns the *achieved* displacement, which for a box starting
-/// at relative `y = 1` is `max(limit, top - 1.0)` — the fall stops on the highest
-/// surface it meets, or runs out of budget. Adding the 1.0 back leaves
+/// That collision sweep returns the *achieved* displacement, which for a box
+/// starting at relative `y = 1` is `max(limit, top - 1.0)` — the fall stops on the
+/// highest surface it meets, or runs out of budget. Adding the 1.0 back leaves
 /// `max(1.0 + limit, top)`, i.e. `max(0.0, top)` for a side click and
 /// `max(-1.0, top)` for a top click. `top` is `None` when no searched cell has
 /// any collision at all, in which case the box falls the whole budget.
 ///
 /// The two limits are what make this worth a named function: a top click can drop
-/// the mob *below* `spawnPos` (onto a slab in the cell beneath), and a side click
+/// the mob *below* `spawn_pos` (onto a slab in the cell beneath), and a side click
 /// never can.
 #[must_use]
 pub fn y_offset(top: Option<f64>, moved_up: bool) -> f64 {
@@ -418,8 +415,8 @@ mod tests {
     }
 
     /// **Clicking the top of a solid block puts the mob on top of it.** The number
-    /// is derived rather than guessed: `spawnPos` is `(0, 65, 0)`, the clicked
-    /// block's top is `65.0`, so `yOff = 0.0` and the feet are at `y = 65`.
+    /// is derived rather than guessed: `spawn_pos` is `(0, 65, 0)`, the clicked
+    /// block's top is `65.0`, so `y_off = 0.0` and the feet are at `y = 65`.
     #[test]
     fn a_top_click_stands_the_mob_on_the_clicked_face() {
         let out = use_spawn_egg(
@@ -439,9 +436,9 @@ mod tests {
     }
 
     /// **The discriminating input for [`y_offset`]: a bottom slab under the spawn
-    /// cell.** A `movedUp` click searches the cell below too, and the slab's top is
-    /// `spawnPos.y - 0.5`, so the mob stands at `64.5` — half a block *below*
-    /// `spawnPos`. A hardcoded `0.0` offset, or a search that skipped the lower
+    /// cell.** A `moved_up` click searches the cell below too, and the slab's top is
+    /// `spawn_pos.y - 0.5`, so the mob stands at `64.5` — half a block *below*
+    /// `spawn_pos`. A hardcoded `0.0` offset, or a search that skipped the lower
     /// cell, yields `65.0` and passes the full-cube test above.
     #[test]
     fn a_top_click_on_a_slab_lands_the_mob_on_the_slab() {
@@ -464,7 +461,7 @@ mod tests {
 
     /// A cell with **no** collision at all is spawned into directly, and the mob
     /// does not fall through the floor: the searched cell is empty and a side-click
-    /// floor of `0.0` holds it at `spawnPos.y`.
+    /// floor of `0.0` holds it at `spawn_pos.y`.
     #[test]
     fn an_egg_used_on_a_collisionless_block_spawns_in_that_cell() {
         let grass = BlockPos::new(0, 65, 0);
@@ -478,7 +475,7 @@ mod tests {
         let SpawnEggUse::Spawn { position, .. } = out else {
             panic!("short grass has an empty collision shape: {out:?}");
         };
-        // `spawnPos == clicked`, so `movedUp` is false and the floor is 0.0.
+        // `spawn_pos == clicked`, so `moved_up` is false and the floor is 0.0.
         assert_eq!(position, Vec3::new(0.5, 65.0, 0.5));
     }
 
@@ -553,10 +550,10 @@ mod tests {
         ));
     }
 
-    /// Every `registerSpawnEgg` item id in the pinned 26.2 decompile, extracted by
-    /// the same pass this module's doc describes and committed here so the gate
-    /// does not need `.cache/` present. **Sorted**, so a hand edit lands where the
-    /// extraction would have put it.
+    /// Every spawn-egg registration's item id in the pinned 26.2 decompile,
+    /// extracted by the same pass this module's doc describes and committed here so
+    /// the gate does not need `.cache/` present. **Sorted**, so a hand edit lands
+    /// where the extraction would have put it.
     static JAR_SPAWN_EGG_ITEMS: [&str; 88] = [
         "allay_spawn_egg",
         "armadillo_spawn_egg",
