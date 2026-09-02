@@ -1,6 +1,7 @@
 //! One module per shared packet (or tightly-coupled packet family), so
 //! concurrent edits to different packets never touch the same file.
 
+pub mod keep_alive;
 pub mod login;
 pub mod movement;
 pub mod player_info;
