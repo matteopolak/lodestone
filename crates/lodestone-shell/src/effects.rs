@@ -97,11 +97,11 @@ pub struct HudEffectIcon {
     /// [`HUD_EFFECT_BACKGROUND_SPRITE`] or, for an ambient effect,
     /// [`HUD_EFFECT_BACKGROUND_AMBIENT_SPRITE`].
     pub background: &'static str,
-    /// The **icon** blit's tint alpha (`ARGB.white(alpha)`); `1.0` except
+    /// The **icon** blit's tint alpha (vanilla's own white-with-alpha tint); `1.0` except
     /// while flashing. The background is never tinted — see
     /// [`hud_icon_alpha`].
     pub alpha: f32,
-    /// `MobEffect.isBeneficial()`: top row when `true`, bottom row otherwise.
+    /// Vanilla's own is-beneficial check: top row when `true`, bottom row otherwise.
     pub beneficial: bool,
 }
 
@@ -110,14 +110,14 @@ pub struct HudEffectIcon {
 /// Two differences from [`inventory_rows`], both vanilla's:
 ///
 /// * `showIcon()` **is** honoured here (the inventory column uses
-///   `getActiveEffects()` whole);
-/// * the order is `Ordering.natural().`**`reverse()`**`.sortedCopy(...)`,
+///   the whole active-effects list);
+/// * the order is vanilla's own natural ordering reversed,
 ///   the inventory column's order backwards. That order decides which icon
 ///   sits furthest right within each row, so it is not cosmetic.
 #[must_use]
 pub fn hud_icons(fx: &ActiveEffects) -> Vec<HudEffectIcon> {
     let mut sorted: Vec<&StatusEffect> = fx.iter().collect();
-    // `Ordering.natural().reverse()` — arguments swapped rather than a
+    // Vanilla's own natural-order reversal — arguments swapped rather than a
     // `.reverse()` on the result, so a tie stays a tie instead of flipping.
     sorted.sort_by(|a, b| natural_order(b, a));
     sorted
@@ -173,14 +173,16 @@ pub fn hud_icon_alpha(e: &StatusEffect) -> f32 {
     (ramp + lodestone_physics::mth::cos(phase) * swing).clamp(0.0, 1.0)
 }
 
-/// `MobEffect.isBeneficial()` — `category == MobEffectCategory.BENEFICIAL`.
+/// Vanilla's own is-beneficial check — the effect's category equals the
+/// beneficial category.
 ///
 /// Transcribed from vanilla's own mob-effects registration class's own per-effect category argument (see
 /// `docs/inventory-potion-effects.md`), which is the only place it is stated: it is a
 /// constructor argument, so it appears in no generated registry dump. Note
 /// **`NEUTRAL` is not beneficial** — `glowing`, `bad_omen`, `trial_omen` and
-/// `raid_omen` all draw in the lower row, which is what `isBeneficial()`
-/// returning `category == BENEFICIAL` (rather than `!= HARMFUL`) means.
+/// `raid_omen` all draw in the lower row, which is what vanilla's own
+/// is-beneficial check comparing the category equal to beneficial (rather
+/// than testing it not-equal to harmful) means.
 ///
 /// An id this table does not know is treated as not beneficial, so an effect
 /// from a future version lands in the lower row instead of vanishing. The
@@ -322,11 +324,12 @@ pub struct InventoryEffectRow {
     /// `mob_effect/<path>` — [`mob_effect_sprite`]'s output, the sprite id the
     /// draw site blits.
     pub sprite: String,
-    /// `MobEffect.getDisplayName()` (the `effect.minecraft.<path>` key run
+    /// Vanilla's own effect display-name accessor (the `effect.minecraft.<path>` key run
     /// through the language table) plus, for amplifier `1..=9`, a space and
     /// `enchantment.level.<amplifier + 1>` — vanilla's own roman numerals.
     pub name: String,
-    /// `MobEffectUtil.formatDuration(effect, 1.0, 20.0)`: `mm:ss`, `hh:mm:ss`
+    /// Vanilla's own effect duration formatter at real time (1.0, 20 ticks per
+    /// second): `mm:ss`, `hh:mm:ss`
     /// past an hour, or the translated `effect.duration.infinite` (`∞`).
     pub duration: String,
     /// vanilla's own effect-instance ambient flag — selects the ambient background sprite.
@@ -334,15 +337,15 @@ pub struct InventoryEffectRow {
 }
 
 /// The game's fixed tick rate, which is what
-/// `Level.tickRateManager().tickrate()` reports for an ordinary world and what
+/// vanilla's own tick-rate-manager accessor reports for an ordinary world and what
 /// vanilla's own tick-duration formatter divides by. A server running
 /// `/tick rate` would report something else; this client has no
 /// `TickRateManager`, so the constant is the honest value rather than a
 /// placeholder.
 const TICKRATE: f32 = 20.0;
 
-/// `MobEffect.getDisplayName()` — `Component.translatable(descriptionId)`,
-/// where `descriptionId` is `Util.makeDescriptionId("effect", key)`, i.e.
+/// Vanilla's own effect display-name accessor — a translatable component
+/// keyed on the effect's own description id, which is built as
 /// `effect.minecraft.<path>`.
 ///
 /// Falls back to the raw key when the language table has no entry, matching
@@ -380,7 +383,7 @@ fn effect_row_name(
     }
 }
 
-/// `StringUtil.formatTickDuration(ticks, tickrate)`: `mm:ss`, widening to
+/// Vanilla's own tick-duration formatter: `mm:ss`, widening to
 /// `hh:mm:ss` only once there is at least one whole hour.
 #[must_use]
 fn format_tick_duration(ticks: i32, tickrate: f32) -> String {
@@ -396,7 +399,7 @@ fn format_tick_duration(ticks: i32, tickrate: f32) -> String {
     }
 }
 
-/// `MobEffectUtil.formatDuration(instance, 1.0, tickrate)`.
+/// Vanilla's own effect-duration formatter at real time (1.0, tick rate).
 fn format_duration(effect: &StatusEffect, translate: &dyn Fn(&str) -> Option<String>) -> String {
     if effect.is_infinite() {
         return translate("effect.duration.infinite")
@@ -405,7 +408,7 @@ fn format_duration(effect: &StatusEffect, translate: &dyn Fn(&str) -> Option<Str
     format_tick_duration(effect.duration_ticks, TICKRATE)
 }
 
-/// `MobEffect.getColor()` for `path`, the last tiebreaker in
+/// Vanilla's own effect-color accessor for `path`, the last tiebreaker in
 /// [`natural_order`]. `None` for an effect this build's registry table does
 /// not know, which sorts last rather than panicking.
 fn effect_color(path: &str) -> Option<u32> {
@@ -414,7 +417,7 @@ fn effect_color(path: &str) -> Option<u32> {
 }
 
 /// vanilla's own effect-instance comparator — the order
-/// `Ordering.natural().sortedCopy(activeEffects)` puts the column in.
+/// vanilla's own natural-order sort puts the column in.
 ///
 /// Two branches, and which one applies depends on the pair: while either
 /// duration is at or under the `32147` cutoff, **or** either effect is
@@ -442,7 +445,7 @@ fn natural_order(a: &StatusEffect, b: &StatusEffect) -> std::cmp::Ordering {
 }
 
 /// Fold the active effects into the inventory column's rows, in vanilla's own
-/// `Ordering.natural()` order.
+/// natural-order.
 ///
 /// `translate` is the live language table (`Sim::translator`). Passing
 /// `&|_| None` yields raw keys, which is the jar-less degradation every other
@@ -740,11 +743,11 @@ mod tests {
         assert_ne!(
             want.to_bits(),
             std_hypothesis.to_bits(),
-            "this input does not separate Mth.cos from f32::cos, so pick another"
+            "this input does not separate vanilla's own cos lookup table from f32::cos, so pick another"
         );
     }
 
-    /// The overlay's order is `Ordering.natural().reverse()` — the inventory
+    /// The overlay's order is vanilla's own natural ordering reversed — the inventory
     /// column's order backwards. It decides which icon sits furthest right,
     /// so a gate that only checks membership cannot see it.
     #[test]
@@ -785,8 +788,9 @@ mod tests {
     }
 
     /// The keys this widget asks the language table for, recorded rather than
-    /// assumed. `effect.minecraft.<path>` is `MobEffect.getDisplayName()`'s
-    /// `descriptionId` and `enchantment.level.<amplifier + 1>` is
+    /// assumed. `effect.minecraft.<path>` is vanilla's own effect
+    /// display-name accessor's
+    /// description id and `enchantment.level.<amplifier + 1>` is
     /// vanilla's own effects-widget get-effect-name routine's numeral — asking for anything else
     /// (or asking for nothing, which is what drew `speed` on screen) is the
     /// reported bug.
@@ -895,8 +899,8 @@ mod tests {
         assert_eq!(inventory_rows(&fx, &translate).remove(0).duration, "INF");
     }
 
-    /// `Ordering.natural().sortedCopy(activeEffects)` — `MobEffectInstance`'s
-    /// own `compareTo`: non-ambient before ambient, then finite before
+    /// Vanilla's own natural-order sort — its own effect-instance comparator:
+    /// non-ambient before ambient, then finite before
     /// infinite, then shorter duration first.
     ///
     /// The insertion order below is deliberately the reverse of the expected
