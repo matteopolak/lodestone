@@ -1,22 +1,24 @@
 //! The **transmitted `on_ground` contract**.
 //!
 //! `PlayerState::on_ground` is the flag the client reports to the server every
-//! movement packet (`ServerboundMovePlayerPacket`'s `onGround`), and it is a
-//! *distinct decision* from "did our position end up resting on a block": the
-//! server runs its **own** collision from our reported position and, if it ever
-//! believes we are unsupported and not descending in open air, increments
-//! `aboveGroundTickCount` and disconnects us with `multiplayer.disconnect.flying`
-//! at `getMaximumFlyingTicks` — `ceil(80 * max(0.08/gravity, 1))` = **80 ticks**
-//! at default gravity. That failure is silent and physical: our motion stays
-//! perfect locally while the server's belief about us drifts, then kicks ~80
-//! ticks later with nothing in between to point at.
+//! movement packet (the client's own move-player packet's own ground flag), and
+//! it is a *distinct decision* from "did our position end up resting on a
+//! block": the server runs its **own** collision from our reported position
+//! and, if it ever believes we are unsupported and not descending in open
+//! air, increments its own above-ground-tick counter and disconnects us with
+//! the flying-kick message at its own maximum-flying-ticks value —
+//! `ceil(80 * max(0.08/gravity, 1))` = **80 ticks** at default gravity. That
+//! failure is silent and physical: our motion stays perfect locally while the
+//! server's belief about us drifts, then kicks ~80 ticks later with nothing
+//! in between to point at.
 //!
-//! Vanilla's rule (`Entity.move` → `setOnGroundWithMovement`) is that
-//! `onGround = verticalCollisionBelow` — i.e. "we collided *downward* this
-//! move" — in **every** movement mode. Swimming, climbing a ladder/vine, and
-//! free-fall do **not** get a bespoke "supported" notion; they are simply
-//! `verticalCollisionBelow`, which is `false` unless the downward sweep hit
-//! something. The sole override is `Player.tick`: a **spectator or passenger**
+//! Vanilla's rule (its own move step → its own on-ground-with-movement
+//! setter) is that `onGround = verticalCollisionBelow` — i.e. "we collided
+//! *downward* this move" — in **every** movement mode. Swimming, climbing a
+//! ladder/vine, and free-fall do **not** get a bespoke "supported" notion;
+//! they are simply its own vertical-collision-below flag, which is `false`
+//! unless the downward sweep hit something. The sole override is vanilla's
+//! own per-tick player update: a **spectator or passenger**
 //! (riding a boat/minecart/horse) forces `onGround = false` regardless of
 //! collision — see [`spectator_or_passenger_note`].
 //!
@@ -38,7 +40,7 @@ use lodestone_physics::{
 };
 
 /// The server's flying-kick threshold at default gravity
-/// (`getMaximumFlyingTicks` = `ceil(80 * max(0.08/gravity, 1))`). A sustained
+/// (vanilla's own maximum-flying-ticks value = `ceil(80 * max(0.08/gravity, 1))`). A sustained
 /// on-ground property must hold for at least this many ticks to be meaningful.
 const MAX_FLYING_TICKS: usize = 80;
 
@@ -137,12 +139,13 @@ fn resting_on_floor_settles_to_grounded_after_one_tick() {
     //
     // Vanilla's tick order is `move()` *then* apply gravity: on the very first
     // tick the downward sweep runs with velocity.y == 0, so nothing moves,
-    // nothing collides, and `verticalCollisionBelow` is false — the flag reports
-    // **airborne for exactly one settling tick**. Gravity is applied *after*, so
-    // the next tick's sweep moves down 0.0784, hits the floor, and the flag flips
-    // to grounded and stays there. This one-tick settle is vanilla-exact and
-    // harmless: it is a single tick, ~80x under the flying-kick threshold, and
-    // the block directly under us keeps `noBlocksAround` false so no counting
+    // nothing collides, and its own vertical-collision-below flag is false —
+    // the flag reports **airborne for exactly one settling tick**. Gravity is
+    // applied *after*, so the next tick's sweep moves down 0.0784, hits the
+    // floor, and the flag flips to grounded and stays there. This one-tick
+    // settle is vanilla-exact and harmless: it is a single tick, ~80x under
+    // the flying-kick threshold, and the block directly under us keeps its
+    // own "no blocks around" check false so no counting
     // even begins. We pin it so a "fix" that eagerly reports grounded on tick 0
     // (which would *not* match the server's own first-tick computation) is caught.
     let world = World::flat_floor(4, 0);
@@ -252,8 +255,9 @@ fn climbing_open_ladder_reports_airborne() {
     // A ladder column in open space with no floor below. Vanilla does not invent
     // a "supported" state for climbing — on_ground stays verticalCollisionBelow,
     // which is false because nothing is hit downward. (The server does not kick:
-    // the ladder block is within `noBlocksAround`'s inflated box. But the flag we
-    // send is still airborne, and that is what this pins.)
+    // the ladder block is within its own "no blocks around" check's inflated
+    // box. But the flag we send is still airborne, and that is what this
+    // pins.)
     let mut world = World::default();
     world.add_climbable_column(0, 0, -8..=8);
     let profile = PhysicsProfile::mc_1_21();
@@ -332,17 +336,17 @@ fn stepping_up_a_slab_preserves_grounded() {
 }
 
 /// Documents (as an executable note) the one vanilla override this engine does
-/// not model **and never will**: `Player.tick` forces `onGround = false` for a
-/// **spectator or passenger** (`Player.java:232-236`, verified in
-/// `.cache/mc/26.2`:
-/// `if (this.isSpectator() || this.isPassenger()) { this.setOnGround(false); }`).
+/// not model **and never will**: vanilla's own per-tick player update forces
+/// `onGround = false` for a **spectator or passenger** — verified in the 26.2
+/// decompile: if spectating or a passenger, the on-ground flag is forced
+/// `false`.
 ///
 /// # It has a driver now, and it is not here
 ///
 /// The note used to say "if riding state is ever added to `PlayerState`, replace
 /// this with a real assertion". Riding state was added — and *not* to
 /// `PlayerState`, deliberately. Whether we are a passenger is a **session** fact
-/// folded from `ClientboundSetPassengersPacket`
+/// folded from vanilla's own set-passengers packet
 /// (`lodestone_ecs::session::Riding`), and the override is applied by
 /// `lodestone_ecs::player::pin_passenger_to_vehicle`, which is also what snaps
 /// the player onto the seat. Putting a `passenger: bool` on `PlayerState` would
@@ -357,12 +361,12 @@ fn stepping_up_a_slab_preserves_grounded() {
 /// # And the reason usually given for the override is wrong
 ///
 /// This module's header frames `on_ground` as a wire contract policed by the
-/// server's `aboveGroundTickCount` / `multiplayer.disconnect.flying` counter. That
+/// server's above-ground-tick counter / flying-kick message. That
 /// is right for a walking player and **not** why the passenger override matters:
-/// the server's float check is explicitly `&& !this.player.isPassenger()`
-/// (`ServerGamePacketListenerImpl.java:323`) and its move handler discards a
+/// the server's float check is explicitly "and not a passenger" (vanilla's own
+/// server-side packet listener) and its move handler discards a
 /// passenger's reported position outright, keeping only the rotation
-/// (`ServerGamePacketListenerImpl.java:1086-1088`). A mounted client cannot be
+/// (that same listener). A mounted client cannot be
 /// kicked for this flag. The override exists for the *local* readers — pose, view
 /// bob, jump, flight cancel — which would otherwise treat a seated player as
 /// standing on something.
