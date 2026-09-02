@@ -73,7 +73,7 @@ pub trait MobController {
         None
     }
 
-    /// A candidate wander destination (vanilla's `DefaultRandomPos.getPos`).
+    /// A candidate wander destination (vanilla's own random-position search).
     /// Returning `None` means no valid spot was found this attempt.
     fn random_stroll_target(&mut self) -> Option<Vec3>;
 
@@ -92,7 +92,7 @@ pub trait MobController {
 
     /// The bare item id this mob is currently holding in its main hand (e.g.
     /// `"trident"`), or `None` for empty-handed. Feeds a goal whose vanilla
-    /// `canUse` reads `getMainHandItem()` — [`RangedAttackGoal`]'s optional
+    /// eligibility check reads the main-hand item — [`RangedAttackGoal`]'s optional
     /// weapon requirement is the one production consumer today.
     ///
     /// Defaults to `None` so every existing implementor (including hermetic
@@ -123,10 +123,9 @@ pub trait MobController {
     ///
     /// Vanilla reads it in two places with the *same* number:
     /// `NearestAttackableTargetGoal` acquires within it
-    /// (`TargetGoal::getFollowDistance`) and
-    /// `TargetGoal::canContinueToUse` **drops a target that leaves it**
-    /// (`distanceToSqr(target) > within * within`).
-    /// The default is `Mob::createMobAttributes`'s `16.0`, so a
+    /// (vanilla's own follow-distance getter) and
+    /// vanilla's own continue-eligibility check **drops a target that leaves it**.
+    /// The default is vanilla's own mob-attribute default of `16.0`, so a
     /// controller that does not track the attribute still releases targets at a
     /// vanilla-plausible distance rather than chasing one forever.
     fn follow_range(&self) -> f64 {
@@ -140,9 +139,9 @@ pub trait MobController {
     }
 
     /// The position of whoever most recently damaged this mob's **owner**,
-    /// within the same retaliation window. Drives `OwnerHurtByTargetGoal`
-    /// (`ai/goal/target/OwnerHurtByTargetGoal.java`), which reads
-    /// `owner.getLastHurtByMob()` directly — a player is a `LivingEntity`
+    /// within the same retaliation window. Drives `OwnerHurtByTargetGoal`,
+    /// which reads the owner's own last-hurt-by state
+    /// directly — a player is a living entity
     /// like any other, so that is the *same* field and the *same* decay rule
     /// `last_hurt_by` already models, just recorded on the owner rather than
     /// on this mob.
@@ -155,8 +154,8 @@ pub trait MobController {
 
     /// The position of whoever this mob's **owner** most recently attacked,
     /// same decay rule as [`owner_hurt_by`](MobController::owner_hurt_by).
-    /// Drives `OwnerHurtTargetGoal` (`ai/goal/target/OwnerHurtTargetGoal.java`),
-    /// which reads `owner.getLastHurtMob()` — a pet joins whatever fight its
+    /// Drives `OwnerHurtTargetGoal`, which reads the owner's own
+    /// last-hurt-mob state — a pet joins whatever fight its
     /// owner just started.
     ///
     /// Defaults to `None`.
@@ -170,8 +169,8 @@ pub trait MobController {
     /// This is the third hostility state, and it is why a per-species boolean
     /// would be wrong. Vanilla has always-hostile mobs (zombie, creeper), never-
     /// hostile ones (cow), and *neutral* ones — zombified piglin, wolf, bee,
-    /// enderman — whose target registration ends in a `this::isAngryAt` selector
-    /// (`NeutralMob.isAngryAt`), which narrows the candidate set to the one
+    /// enderman — whose target registration ends in an is-angry-at selector,
+    /// which narrows the candidate set to the one
     /// entity the grudge names. A neutral mob with no grudge has an empty
     /// candidate set, which is what makes it neutral;
     /// [`NearestAttackableTargetGoal::anger_gated`](crate::ai::goals::NearestAttackableTargetGoal::anger_gated)
@@ -179,11 +178,10 @@ pub trait MobController {
     ///
     /// **The host owns the clock, on purpose.** 26.2 stores an **absolute
     /// game-time deadline**, not a countdown
-    /// (`NeutralMob::setTimeToRemainAngry` adds to `level().getGameTime()`, and
-    /// `NeutralMob::isAngry` subtracts the current game time back off the stored
-    /// deadline; `NO_ANGER_END_TIME = -1`), and the grudge is a uniform
-    /// `[400, 780]` ticks for all four species (`rangeOfSeconds(20, 39)` →
-    /// `UniformInt.of(400, 780)`). A decrementing counter is the wrong model —
+    /// (vanilla's own anger-timer setter adds to the current game time, and
+    /// its own is-angry check subtracts the current game time back off the stored
+    /// deadline; a sentinel end-time means "never angry"), and the grudge is a uniform
+    /// `[400, 780]` ticks for all four species. A decrementing counter is the wrong model —
     /// it drifts against a stepped tick loop — and this seam has no shared game
     /// clock to compare a deadline against, so expiry is resolved by the host
     /// and only the *answer* crosses. That is the same division as
@@ -210,9 +208,9 @@ pub trait MobController {
         None
     }
 
-    /// The position of this mob's owner, if it has one — vanilla
-    /// `OwnableEntity::getOwner` (inherited by `TamableAnimal`, which
-    /// implements `OwnableEntity`), read as a position because that is all
+    /// The position of this mob's owner, if it has one — vanilla's own
+    /// tamed-owner resolution (a tamable animal's own owner lookup),
+    /// read as a position because that is all
     /// this seam carries.
     ///
     /// # Why the owner's identity does not cross
@@ -220,15 +218,13 @@ pub trait MobController {
     /// The seam deliberately carries positions, never entity ids — the same
     /// division [`angry_target`](MobController::angry_target) documents — and
     /// a *tamed* owner is, in vanilla, a **player**:
-    /// `TamableAnimal::DATA_OWNERUUID_ID` stores an `EntityReference` wrapping
-    /// a `UUID`, and `OwnableEntity::getOwner` resolves it against the level
-    /// (`EntityReference::getLivingEntity`). This seam has no notion of a
+    /// the owner is stored as a synced UUID reference, resolved against the
+    /// level to a live entity. This seam has no notion of a
     /// player at all, so the host resolves "who owns me" and feeds only the
     /// owner's current position, exactly as it feeds
     /// [`parent_position`](MobController::parent_position).
     /// The host's own record of *which id owns which mob* — the thing a
-    /// wolf-pack `alertOthers` same-owner filter needs
-    /// (`HurtByTargetGoal::alertOthers`) — is a census question this
+    /// wolf-pack same-owner alert filter needs — is a census question this
     /// crate cannot answer; `lodestone_server`'s `SimMob::owner_id` is where
     /// it lives.
     ///
@@ -237,28 +233,27 @@ pub trait MobController {
         None
     }
 
-    /// Whether this mob is *tame at all* — vanilla
-    /// `TamableAnimal.isTame()`, the `0x04` bit of `TamableAnimal.DATA_FLAGS_ID`.
+    /// Whether this mob is *tame at all* — vanilla's own tame flag bit.
     ///
     /// Distinct from [`owner_position`](MobController::owner_position) being
     /// `Some`, and the distinction is load-bearing rather than pedantic: a tamed
     /// wolf whose owner has logged out has no owner *position* and is still
     /// tame. A goal that reads `owner_position().is_some()` as "am I tame" would
     /// therefore un-tame every pet the moment its owner walked out of the
-    /// player list, which is what `SitWhenOrderedToGoal`'s `!isTame()` arm and
-    /// `Wolf.WolfAvoidEntityGoal`'s `!wolf.isTame()` guard both hinge on.
+    /// player list, which is what `SitWhenOrderedToGoal`'s own tame guard and
+    /// a wolf's own avoid-entity goal's tame guard both hinge on.
     fn is_tame(&self) -> bool {
         false
     }
 
-    /// Whether the owner has told this mob to sit — vanilla
-    /// `TamableAnimal.isOrderedToSit()`, which is the *persisted intent* rather
+    /// Whether the owner has told this mob to sit — vanilla's own
+    /// ordered-to-sit flag, which is the *persisted intent* rather
     /// than the pose.
     ///
     /// Vanilla keeps two pieces of state here and only one of them is this:
-    /// `orderedToSit` is the field an owner's right-click toggles and NBT
-    /// round-trips (`TamableAnimal.addAdditionalSaveData`'s `Sitting`), while
-    /// `setInSittingPose` is the *synced* `0x01` flag bit that
+    /// the ordered-to-sit field an owner's right-click toggles and NBT
+    /// round-trips, while a separate sitting-pose setter is the *synced*
+    /// `0x01` flag bit that
     /// `SitWhenOrderedToGoal::start`/`stop` writes as the goal actually runs.
     /// The intent is what a goal must read to decide whether to run; the pose is
     /// what the goal produces. Collapsing them means a sitting order silently
@@ -268,8 +263,8 @@ pub trait MobController {
         false
     }
 
-    /// Reports that this mob has entered or left the sitting **pose** — vanilla
-    /// `TamableAnimal.setInSittingPose`, called by `SitWhenOrderedToGoal`'s
+    /// Reports that this mob has entered or left the sitting **pose** — vanilla's
+    /// own sitting-pose setter, called by `SitWhenOrderedToGoal`'s
     /// `start` and `stop`. The host turns this into the synced `0x01` flag bit.
     fn set_in_sitting_pose(&mut self, sitting: bool) {
         let _ = sitting;
@@ -299,25 +294,25 @@ pub trait MobController {
         None
     }
 
-    /// Whether this mob is in the lying pose — vanilla `Cat.isLying()`
-    /// (`DATA_LIES`), what [`CatLieOnBedGoal`](super::goals::CatLieOnBedGoal)
+    /// Whether this mob is in the lying pose — vanilla's own lying-pose flag,
+    /// what [`CatLieOnBedGoal`](super::goals::CatLieOnBedGoal)
     /// toggles once it reaches its bed.
     fn is_lying(&self) -> bool {
         false
     }
 
-    /// Sets the lying pose — vanilla `Cat.setLying`. The host turns this into
+    /// Sets the lying pose — vanilla's own lying-pose setter. The host turns this into
     /// the synced flag.
     fn set_lying(&mut self, lying: bool) {
         let _ = lying;
     }
 
     /// How many consecutive ticks this mob's **owner** has been sleeping, or
-    /// `None` while the owner is awake (or unresolved) — vanilla
-    /// `Player.isSleeping()` plus `Player.getSleepTimer()`, read together
-    /// because [`Cat.CatRelaxOnOwnerGoal`](super::goals::CatRelaxOnOwnerGoal)
+    /// `None` while the owner is awake (or unresolved) — vanilla's own
+    /// is-sleeping flag plus its own sleep-timer counter, read together
+    /// because [`CatRelaxOnOwnerGoal`](super::goals::CatRelaxOnOwnerGoal)
     /// needs both: *whether* to walk to the owner at all, and later, at
-    /// `stop()`, whether `getSleepTimer() >= 100` (the host crate's own
+    /// `stop()`, whether the sleep timer has reached 100 (the host crate's own
     /// deep-sleep threshold, `lodestone_server::sleep::DEEP_SLEEP_TICKS`) to
     /// roll a morning gift. Folding the two into one `Option<u32>` avoids a
     /// second method for what is really one fact sampled at two moments.
@@ -329,10 +324,9 @@ pub trait MobController {
     }
 
     /// Records that this mob's relax-on-owner goal ended after the owner had
-    /// slept long enough to be woken by the deep-sleep threshold — vanilla
-    /// `Cat.CatRelaxOnOwnerGoal.stop`'s own gift roll
-    /// (`ownerPlayer.getSleepTimer() >= 100 && random.nextFloat() <
-    /// CAT_WAKING_UP_GIFT_CHANCE`).
+    /// slept long enough to be woken by the deep-sleep threshold — vanilla's
+    /// own gift roll on that goal's stop: the sleep timer past 100 and a
+    /// random roll under the waking-up gift chance.
     ///
     /// An **intent**, exactly like [`ate`](MobController::ate) and
     /// [`damage_self`](MobController::damage_self): the RNG roll against the
@@ -342,9 +336,9 @@ pub trait MobController {
     /// the rest. Defaults to a no-op.
     fn request_gift(&mut self) {}
 
-    /// Ticks since this mob last dismounted (or was created) — vanilla
-    /// `ShoulderRidingEntity.rideCooldownCounter`, which gates
-    /// `canSitOnShoulder()` (`> 100`) so a just-dismounted parrot cannot
+    /// Ticks since this mob last dismounted (or was created) — vanilla's own
+    /// ride-cooldown counter, which gates
+    /// its own can-sit-on-shoulder check (`> 100`) so a just-dismounted parrot cannot
     /// re-mount the instant it lands. The host increments this once per tick
     /// the same way it already tracks every other per-mob counter; a
     /// controller that does not track it returns `i32::MAX`, the permissive
@@ -357,28 +351,27 @@ pub trait MobController {
     }
 
     /// Records that this mob wants to land on its owner's shoulder —
-    /// vanilla `LandOnOwnersShoulderGoal.tick`'s
-    /// `this.entity.setEntityOnShoulder(owner)`.
+    /// vanilla's own land-on-owner's-shoulder goal's per-tick mount request.
     ///
     /// An **intent**: whether a shoulder slot is actually free, and the
     /// mechanics of discarding this mob entity and attaching its identity to
-    /// the owner, all live on the host (`ShoulderRidingEntity.
-    /// setEntityOnShoulder` discards the entity and hands its saved NBT to
-    /// `ServerPlayer.setEntityOnShoulder`, the same shape
+    /// the owner, all live on the host (vanilla's own shoulder-mount setter
+    /// discards the entity and hands its saved NBT to the player's own
+    /// shoulder-entity setter, the same shape
     /// [`request_gift`](MobController::request_gift) already uses for an
     /// effect this seam cannot perform itself). Defaults to a no-op.
     fn request_shoulder_ride(&mut self) {}
 
-    /// Whether this mob is part of an active pillager patrol — vanilla
-    /// `PatrollingMonster.isPatrolling()`.
+    /// Whether this mob is part of an active pillager patrol — vanilla's own
+    /// is-patrolling check.
     ///
     /// Defaults to `false`.
     fn is_patrolling(&self) -> bool {
         false
     }
 
-    /// Whether this mob leads its patrol — vanilla
-    /// `PatrollingMonster.isPatrolLeader()`. Only a leader repicks its own
+    /// Whether this mob leads its patrol — vanilla's own is-patrol-leader
+    /// check. Only a leader repicks its own
     /// far-off waypoint once it arrives; see
     /// [`LongDistancePatrolGoal`](super::goals::LongDistancePatrolGoal)'s own
     /// doc comment for why a follower's movement is driven by
@@ -389,16 +382,16 @@ pub trait MobController {
         false
     }
 
-    /// This mob's own current long-distance patrol waypoint — vanilla
-    /// `PatrollingMonster.getPatrolTarget()`.
+    /// This mob's own current long-distance patrol waypoint — vanilla's own
+    /// patrol-target getter.
     ///
-    /// Defaults to `None`, vanilla's `hasPatrolTarget() == false` state.
+    /// Defaults to `None`, vanilla's own has-patrol-target-false state.
     fn patrol_target(&self) -> Option<Vec3> {
         None
     }
 
-    /// Records a newly chosen patrol waypoint — vanilla
-    /// `PatrollingMonster.setPatrolTarget`/`findPatrolTarget`, called both when
+    /// Records a newly chosen patrol waypoint — vanilla's own
+    /// patrol-target setter/search, called both when
     /// a leader picks a fresh far-off target and when a follower adopts
     /// [`patrol_group_target`](MobController::patrol_group_target).
     fn set_patrol_target(&mut self, target: Option<Vec3>) {
@@ -407,8 +400,8 @@ pub trait MobController {
 
     /// For a **non-leader**: the patrol's shared waypoint, as the host
     /// resolves it by searching nearby patrol leaders. Vanilla's own
-    /// `LongDistancePatrolGoal.tick` runs this search itself
-    /// (`findPatrolCompanions`, a `getEntitiesOfClass` query) and *pushes* its
+    /// per-tick update runs this search itself
+    /// (a nearby-entities-of-class query) and *pushes* its
     /// current near-term waypoint out to every companion it finds; this crate
     /// has no "find nearby entities of a class" query on this seam at all — it
     /// hands goals answers, never populations — so the direction is reversed: a
@@ -694,13 +687,11 @@ pub trait MobController {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EatenBlock {
     /// The block the mob was standing *in* (`#edible_for_sheep`, e.g.
-    /// `short_grass`). Vanilla **destroys** it in `EatBlockGoal::tick`:
-    /// `level.destroyBlock(pos, false)` — no drops, hence the `false`.
+    /// `short_grass`). Vanilla **destroys** it, with no drops.
     AtFeet,
     /// The `grass_block` the mob was standing *on*. Vanilla **replaces** it with
-    /// dirt rather than destroying it, plus level event `2001` for the break
-    /// particles, also in `EatBlockGoal::tick`:
-    /// `setBlock(below, Blocks.DIRT.defaultBlockState(), 2)`.
+    /// dirt rather than destroying it, plus a level event for the break
+    /// particles.
     Below,
 }
 
@@ -712,42 +703,36 @@ pub enum EatenBlock {
 /// also keeps `lodestone-entity`'s AI module free of any registry dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectileKind {
-    /// `minecraft:arrow` — skeleton/stray bow shots
-    /// (`AbstractSkeleton::performRangedAttack`).
+    /// `minecraft:arrow` — skeleton/stray bow shots.
     Arrow,
-    /// `minecraft:small_fireball` — blaze
-    /// (`Blaze.BlazeAttackGoal::tick`).
+    /// `minecraft:small_fireball` — the blaze's own attack.
     SmallFireball,
-    /// `minecraft:snowball` — snow golem
-    /// (`SnowGolem::performRangedAttack`).
+    /// `minecraft:snowball` — snow golem.
     Snowball,
-    /// `minecraft:splash_potion` — witch (`Witch::performRangedAttack`).
+    /// `minecraft:splash_potion` — witch.
     SplashPotion,
-    /// `minecraft:trident` — drowned
-    /// (`Drowned::performRangedAttack`).
+    /// `minecraft:trident` — drowned.
     Trident,
-    /// `minecraft:fireball` — the ghast's own attack
-    /// (`Ghast.GhastShootFireballGoal.tick`, which constructs a
-    /// `net.minecraft.world.entity.projectile.hurtingprojectile.LargeFireball`).
-    /// **The registry name is not the class name**: `LargeFireball`'s own
-    /// constructor passes `EntityTypes.FIREBALL` to its `Fireball` superclass,
+    /// `minecraft:fireball` — the ghast's own attack, which constructs
+    /// vanilla's own large-fireball projectile type.
+    /// **The registry name is not the class name**: vanilla's own large-fireball
+    /// type registers under the base fireball entity type,
     /// so the wire id is `minecraft:fireball`, the same one a small fireball's
-    /// class is *not* named after either — checked against
-    /// `lodestone_data::generated::entity_types`, not assumed from the Java
-    /// class name.
+    /// own class is *not* named after either — checked against
+    /// `lodestone_data::generated::entity_types`, not assumed from a
+    /// vanilla class name.
     LargeFireball,
-    /// `minecraft:wither_skull` — the wither's own ranged attack
-    /// (`WitherBoss::performRangedAttack`, ported at
-    /// `lodestone_server::wither`/`lodestone_server::mobs::wither`). Not
+    /// `minecraft:wither_skull` — the wither's own ranged attack,
+    /// ported at
+    /// `lodestone_server::wither`/`lodestone_server::mobs::wither`. Not
     /// currently launched through this goal-driven seam — the wither is a
     /// plain tracked entity, not a `SimMob`, the same shape
     /// `mobs::dragon`'s own module doc explains for the ender dragon — but
     /// the variant lives here so `projectile_entity_type`/`integrates_as_arrow`
     /// have one shared table to read from either way.
     WitherSkull,
-    /// `minecraft:dragon_fireball` — the ender dragon's strafe attack
-    /// (`DragonStrafePlayerPhase`, `crate::dragon::phase::PhaseEffect::FireFireball`,
-    /// ported at `lodestone_server::mobs::dragon::tick_one_dragon`). Not
+    /// `minecraft:dragon_fireball` — the ender dragon's own strafe attack,
+    /// ported at `lodestone_server::mobs::dragon::tick_one_dragon`. Not
     /// launched through this goal-driven seam either, for the same reason
     /// [`WitherSkull`](Self::WitherSkull) is not.
     DragonFireball,
@@ -758,10 +743,10 @@ pub enum ProjectileKind {
 /// Carries a resolved `origin` and `velocity` rather than a target, because
 /// vanilla's aiming maths is **per species** — the skeleton adds
 /// `horizontalDistance * 0.2` to the vertical component and shoots at power
-/// `1.6` (`AbstractSkeleton::performRangedAttack`), the blaze normalises a
-/// triangle-jittered direction and scales by its acceleration power `0.1`
-/// (`Blaze.BlazeAttackGoal::tick`, `AbstractHurtingProjectile::assignDirectionalMovement`
-/// and its `accelerationPower` field). Resolving
+/// `1.6`, the blaze normalises a
+/// triangle-jittered direction and scales by its own acceleration power `0.1`
+/// (vanilla's own directional-movement assignment and its own acceleration-
+/// power field). Resolving
 /// it in the goal keeps that citation next to the numbers it came from, and
 /// leaves the host with nothing to re-derive.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -776,24 +761,24 @@ pub struct ProjectileLaunch {
 }
 
 impl ProjectileLaunch {
-    /// A launch aimed along `(dx, dy, dz)` at `power`, mirroring vanilla
-    /// `Projectile::getMovementToShoot`:
+    /// A launch aimed along `(dx, dy, dz)` at `power`, mirroring vanilla's own
+    /// projectile movement-to-shoot resolution:
     /// normalise the direction, then scale by power.
     ///
-    /// **The inaccuracy term is not modelled.** Vanilla adds
-    /// `random.triangle(0.0, 0.0172275 * uncertainty)` on each axis before
-    /// scaling, in the same `Projectile::getMovementToShoot`, which for a
-    /// skeleton is `14 - difficulty * 4` (`AbstractSkeleton::performRangedAttack`)
+    /// **The inaccuracy term is not modelled.** Vanilla adds a triangular
+    /// random jitter on each axis before
+    /// scaling, in the same resolution step, with an uncertainty that for a
+    /// skeleton is `14 - difficulty * 4`
     /// — a real spread. Ours
     /// flies dead straight. That is a disclosed simplification, not a
-    /// transcription error: the spread needs vanilla's `RandomSource.triangle`
+    /// transcription error: the spread needs vanilla's own triangular-random
     /// distribution to match, and a deterministic velocity is also what lets a
     /// gate predict the exact value rather than assert a direction.
     #[must_use]
     pub fn aimed(kind: ProjectileKind, origin: Vec3, dx: f64, dy: f64, dz: f64, power: f64) -> Self {
         let len = (dx * dx + dy * dy + dz * dz).sqrt();
-        // `Vec3.normalize` returns ZERO for a zero-length vector rather than
-        // NaN, and vanilla relies on that (`phys/Vec3.java`); reproduce it, or a
+        // Vanilla's own vector-normalise returns ZERO for a zero-length vector
+        // rather than NaN, and vanilla relies on that; reproduce it, or a
         // mob standing exactly on its target launches a NaN projectile that
         // poisons every later position it is integrated into.
         let velocity = if len < 1.0e-4 {
