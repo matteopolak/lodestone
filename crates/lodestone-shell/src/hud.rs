@@ -1330,7 +1330,7 @@ pub struct RecipeToastView {
 /// (`AdvancementToast.java`).
 pub const ADVANCEMENT_TOAST_SPRITE: &str = "toast/advancement";
 
-/// One advancement-completion toast (issue #167).
+/// One advancement-completion toast.
 ///
 /// `AdvancementToast.extractRenderState` (`AdvancementToast.java`), the
 /// single-title-line branch: the type's own heading at `(30, 7)` in yellow — or
@@ -1371,7 +1371,7 @@ pub struct HudFrame<'a> {
     /// up (pause, chat, a container).
     ///
     /// Vanilla is *not* the authority for that suppression — settled, not just
-    /// suspected (issue #71). Read directly rather than from memory:
+    /// suspected. Read directly rather than from memory:
     /// `Hud.extractRenderState` (`Hud.java`, `.cache/mc/26.2/client-src`)
     /// calls `extractCrosshair` whenever the HUD itself is not F1-hidden and the
     /// active screen is not a `LevelLoadingScreen` — there is no
@@ -1402,7 +1402,7 @@ pub struct HudFrame<'a> {
     ///
     /// **This flag is about the crosshair and nothing else.** It used to double as
     /// the hotbar's gate — one boolean answering two questions — which is exactly
-    /// how the hotbar came to vanish behind the pause menu (issue #61). See
+    /// how the hotbar came to vanish behind the pause menu. See
     /// [`Self::hotbar`].
     pub crosshair: bool,
     /// Recent chat lines, oldest-first; drawn bottom-left. Each is a legacy
@@ -1450,7 +1450,7 @@ pub struct HudFrame<'a> {
     /// every caller not yet wired, and drawing a badge for a row this slice
     /// does not cover would be inventing a verdict.
     pub chat_trust: &'a [Option<lodestone_game::chat::MessageTrust>],
-    /// Sound-subtitle captions (issue #198), **oldest first** — vanilla's own
+    /// Sound-subtitle captions, **oldest first** — vanilla's own
     /// order, with row 0 at the bottom of the stack. Drawn bottom-right, above the
     /// hotbar, and empty whenever `showSubtitles` is off or nothing is audible.
     pub sound_subtitles: &'a [crate::audio::subtitles::SubtitleCaption],
@@ -1618,10 +1618,10 @@ pub struct HudFrame<'a> {
     /// highlighted.
     ///
     /// This used to say "`Some` while in active play", and the call site agreed
-    /// with it, so the hotbar disappeared the moment any screen opened
-    /// (issue #61). Vanilla draws the hotbar under `readyForLevelRendering`
-    /// (`GameRenderer.java` → `Gui.java`) and gates it on game
-    /// mode only (`Hud.java`); the *screen* then paints its translucent
+    /// with it, so the hotbar disappeared the moment any screen opened.
+    /// Vanilla draws the hotbar under a "ready for level rendering" flag
+    /// and gates it on game
+    /// mode only; the *screen* then paints its translucent
     /// background over the top, and that is the whole of the difference. See
     /// `app::hud_follows_world`, and [`Self::crosshair`] for the one element we
     /// do deliberately hide.
@@ -1635,7 +1635,7 @@ pub struct HudFrame<'a> {
     /// experience. Drawn as a green progress bar above the hotbar with the level
     /// centred above it. Off a live server this is `None` — no bar is drawn.
     pub xp: Option<(i32, f32)>,
-    /// The locator bar's dots (issue #26), already resolved to a screen
+    /// The locator bar's dots, already resolved to a screen
     /// offset and colour by [`locator::locator_dots`] — empty when the
     /// local player is tracking no waypoint, which is also
     /// [`HudFrame::new`]'s default. Occupies the same on-screen slot as
@@ -1665,7 +1665,7 @@ pub struct HudFrame<'a> {
     /// `None`/`alpha <= 0.0` draws nothing. Unlike [`Self::action_bar`] and
     /// [`Self::title`], the *timer* this alpha comes from is not
     /// server-driven — it is a purely client-side reaction to the selected
-    /// hotbar item's identity changing (issue #126), so a caller populates
+    /// hotbar item's identity changing, so a caller populates
     /// this from whatever owns that timer each frame rather than from a
     /// decoded packet.
     ///
@@ -1759,7 +1759,7 @@ pub struct HudFrame<'a> {
     /// toast appears the moment the decode lands, and no fake producer was
     /// added to make it light up early.
     pub recipe_toast: Option<RecipeToastView>,
-    /// The advancement-completion toast (issue #167), `Some` while one is inside
+    /// The advancement-completion toast, `Some` while one is inside
     /// its 5000 ms window. Drawn in the same top-right slot as
     /// [`Self::recipe_toast`] — vanilla's `ToastManager` stacks them, and this
     /// client only ever has one queue live at a time.
@@ -2396,7 +2396,7 @@ pub struct HudGeometry {
     pub item_verts: Vec<f32>,
     /// The **enchantment-glint** copies of [`item_verts`](Self::item_verts):
     /// one quad per flat sprite layer of every enchanted stack, same rect and
-    /// same atlas UVs, drawn on its own pipeline over the icon (issue #452).
+    /// same atlas UVs, drawn on its own pipeline over the icon.
     /// Empty when nothing on screen is enchanted.
     pub glint_verts: Vec<f32>,
     /// The 3-D **block-item** icons: baked model geometry already posed into GUI
@@ -3397,12 +3397,12 @@ impl HudGeometry {
             );
         }
 
-        // Held-item name (issue #126): the selected hotbar item's styled name,
+        // Held-item name: the selected hotbar item's styled name,
         // above the hotbar, fading with a server-independent client timer.
         // Unlike the action bar and title, vanilla draws this **unscaled**
         // (`Hud.java`, a plain `graphics.textWithBackdrop` call, no
         // ×2) — the same "vanilla's own draw never scales the font" lesson
-        // the XP level number's fix (issue #256) already established two
+        // the XP level number's fix already established two
         // blocks up in [`sprite_vitals`]. Using `scale` here would repeat
         // that exact defect on a second piece of HUD text.
         // `held_item_spans` is the hex-carrying sibling (see its own doc) and
@@ -3785,18 +3785,18 @@ impl HudGeometry {
             }
         }
 
-        // Sound-subtitle captions, bottom-right (issue #198).
+        // Sound-subtitle captions, bottom-right.
         if !frame.sound_subtitles.is_empty() {
             draw_sound_subtitles(&mut b, frame.sound_subtitles);
         }
 
-        // Recipe-unlock toast, top-right (issue #163). Drawn last so it lands
+        // Recipe-unlock toast, top-right. Drawn last so it lands
         // over the sidebar/tab overlays, matching vanilla's own toast layer,
         // which `ToastManager.render` composites after the HUD entirely.
         if let Some(toast) = &frame.recipe_toast {
             draw_recipe_toast(&mut b, toast);
         }
-        // The advancement-completion toast (issue #167), same slot and layer.
+        // The advancement-completion toast, same slot and layer.
         if let Some(toast) = &frame.advancement_toast {
             draw_advancement_toast(&mut b, toast);
         }
@@ -4227,7 +4227,7 @@ const CHAT_TOOLTIP_MAX_WIDTH: f32 = 200.0;
 /// span-carrying sibling of the flattened string this used to take, so a
 /// hex-coloured `show_text` hover reaches real per-glyph colour rather than
 /// losing it to [`lodestone_model::Text::to_legacy_string`]'s sixteen-code
-/// ceiling (issue #656).
+/// ceiling.
 fn chat_hover_tooltip_layout(
     tooltip: &ChatHoverTooltip,
     canvas_w: f32,
@@ -4557,7 +4557,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
             // Crop by shrinking both the destination width and the sampled UV
             // span, so the bar reveals its pattern instead of squashing it.
             //
-            // The level-up flash (issue #30) rides the *fill*'s vertex tint. The
+            // The level-up flash rides the *fill*'s vertex tint. The
             // sprite is already near-white, so the visible part of the effect is
             // the level number below; brightening the fill too is what stops the
             // number looking like it flashed on its own. `white` unchanged at
@@ -6956,7 +6956,7 @@ impl HudRenderer {
     }
 
     /// Attach the 2-D GUI enchantment-glint pass, so an enchanted hotbar item
-    /// shimmers (issue #452). Must follow [`Self::attach_items`] — the pass masks
+    /// shimmers. Must follow [`Self::attach_items`] — the pass masks
     /// itself against the item atlas — and is a no-op otherwise.
     pub fn attach_glint(
         &mut self,
@@ -7359,7 +7359,7 @@ impl HudRenderer {
         queue.submit(std::iter::once(encoder.finish()));
     }
 
-    /// Draw one frame of the **recipe-book panel** (issue #163) as its own pass,
+    /// Draw one frame of the **recipe-book panel** as its own pass,
     /// over whatever is already in `view`.
     ///
     /// This is the call that stops
@@ -7659,7 +7659,7 @@ const HUD_WGSL: &str = include_str!("shaders/hud.wgsl");
 
 const HUD_SPRITE_WGSL: &str = include_str!("shaders/hud_sprite.wgsl");
 
-/// The 2-D GUI enchantment glint (issue #452). Shares `hud_sprite.wgsl`'s vertex
+/// The 2-D GUI enchantment glint. Shares `hud_sprite.wgsl`'s vertex
 /// layout — see `item_icon::GuiGlint` for why it cannot share
 /// `lodestone_render`'s own glint pipeline.
 const HUD_GLINT_WGSL: &str = include_str!("shaders/hud_glint.wgsl");
@@ -12157,7 +12157,7 @@ fn coverage(
     (covered, inside, bbox)
 }
 
-/// Gate for the recipe-unlock toast draw (issue #163).
+/// Gate for the recipe-unlock toast draw.
 ///
 /// The toast timing (`RecipeToastQueue`) landed unit-tested in `lodestone-game`
 /// and reached zero pixels because `hud.rs` never rendered it. This measures the
@@ -12329,7 +12329,7 @@ mod chat_hover_tooltip_gate {
     /// A single unstyled [`TextSpan`] carrying `s` — the plain-text fixture
     /// shape every test in this module needs now that
     /// [`ChatHoverTooltip::spans`] replaced the flattened `&str` it used to
-    /// carry (issue #656).
+    /// carry.
     fn plain_spans(s: &str) -> Vec<TextSpan> {
         vec![TextSpan { text: s.to_string(), style: TextStyle::default() }]
     }

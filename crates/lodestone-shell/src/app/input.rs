@@ -115,7 +115,7 @@ pub(crate) struct KeyGate {
     /// active whenever the anvil screen is open **and** its input slot (slot
     /// 0) is occupied, with no separate focus flag to track. See
     /// [`crate::container::AnvilRenameState`]'s own module doc for the whole
-    /// chain (issue #603).
+    /// chain.
     pub anvil_rename_active: bool,
     /// The local player's server-authoritative game mode is `Spectator`
     /// (`Sim::is_spectator`) — issue #613's `TeleportToEntity` remainder.

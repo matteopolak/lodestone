@@ -247,14 +247,14 @@ impl WindowApp {
                 // a future caller reaching `QuitToTitle` some other way.
                 self.set_grab(false);
             }
-            // The death screen's Respawn button (issue #103): submit the
+            // The death screen's Respawn button: submit the
             // manual `ClientAction::Respawn` — `Sim::respawn` is a no-op
             // unless `Sim::is_dead` is still true, so a stray/duplicate call
             // (e.g. a double-click before the server's confirmation lands)
             // costs nothing. `UiState` stays on `Screen::Death` until
             // `net::NetUpdate::Respawned` arrives; see `drive_ui_from_session`.
             MenuAction::Respawn => self.sim.respawn(),
-            // The command-block screen's Done button (issue #47):
+            // The command-block screen's Done button:
             // `populateAndSendPacket` (`CommandBlockEditScreen.java`).
             //
             // `into_action` is the one step `MenuAction`'s `Eq` derive cannot
@@ -320,7 +320,7 @@ impl WindowApp {
                     self.sim.close_open_menu();
                 }
             }
-            // The pause menu's Open to LAN (issue #535). Native only: there is no
+            // The pause menu's Open to LAN. Native only: there is no
             // TCP listener to bind in a browser, which is the same reason
             // `Origin::Integrated`'s `lan_port` is `cfg`'d out there.
             #[cfg(not(target_arch = "wasm32"))]

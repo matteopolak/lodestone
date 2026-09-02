@@ -254,36 +254,35 @@ pub enum LiveOption {
     /// per presented frame by `app.rs` and handed to `Sim::set_view_bobbing`;
     /// see `docs/view-bobbing.md`.
     ViewBobbing,
-    /// `options.showSubtitles` → [`crate::config::Options::show_subtitles`]
-    /// (issue #198). Gates the sound-subtitle caption overlay; read per presented
+    /// `options.showSubtitles` → [`crate::config::Options::show_subtitles`].
+    /// Gates the sound-subtitle caption overlay; read per presented
     /// frame by `app/redraw.rs`. Vanilla carries the same option on **two** pages
     /// (Sound and Accessibility), and so do both rows here.
     ShowSubtitles,
-    /// `key.sneak` → [`crate::config::Options::toggle_sneak`] (issue #202).
+    /// `key.sneak` → [`crate::config::Options::toggle_sneak`].
     /// Fed to `InputState::set_toggle_modes` every tick.
     ToggleSneak,
-    /// `key.sprint` → [`crate::config::Options::toggle_sprint`] (issue #202).
+    /// `key.sprint` → [`crate::config::Options::toggle_sprint`].
     ToggleSprint,
-    /// `key.attack` → [`crate::config::Options::toggle_attack`] (issue #444).
+    /// `key.attack` → [`crate::config::Options::toggle_attack`].
     ToggleAttack,
-    /// `key.use` → [`crate::config::Options::toggle_use`] (issue #444).
+    /// `key.use` → [`crate::config::Options::toggle_use`].
     ToggleUse,
-    /// `options.autoJump` → [`crate::config::Options::auto_jump`] (issue #444).
+    /// `options.autoJump` → [`crate::config::Options::auto_jump`].
     /// Fed to `Sim::set_auto_jump`, read by the tick loop's auto-jump gate.
     AutoJump,
-    /// `options.sprintWindow` → [`crate::config::Options::sprint_window_ticks`]
-    /// (issue #444). An `IntRange(0, 10)`, so it goes through
+    /// `options.sprintWindow` → [`crate::config::Options::sprint_window_ticks`].
+    /// An `IntRange(0, 10)`, so it goes through
     /// `SliderRange`/[`slider_fraction`] like `RenderDistance`, not
     /// [`Self::unit_double`]. Fed to `Sim::set_sprint_window_ticks`.
     SprintWindow,
-    /// `options.invertMouseX` → [`crate::config::Options::invert_mouse_x`]
-    /// (issue #203). Fed to `apply_look_inverted`.
+    /// `options.invertMouseX` → [`crate::config::Options::invert_mouse_x`].
+    /// Fed to `apply_look_inverted`.
     InvertMouseX,
-    /// `options.invertMouseY` → [`crate::config::Options::invert_mouse_y`]
-    /// (issue #203).
+    /// `options.invertMouseY` → [`crate::config::Options::invert_mouse_y`].
     InvertMouseY,
     /// `options.discreteMouseScroll` →
-    /// [`crate::config::Options::discrete_mouse_scroll`] (issue #444).
+    /// [`crate::config::Options::discrete_mouse_scroll`].
     ///
     /// The first row of #444's six, and the one that needed no new subsystem:
     /// `MouseHandler.onScroll` applies it at the input boundary
@@ -295,7 +294,7 @@ pub enum LiveOption {
     /// row exists for them.
     DiscreteMouseScroll,
     /// `options.mouseWheelSensitivity` →
-    /// [`crate::config::Options::mouse_wheel_sensitivity`] (issue #203). Fed
+    /// [`crate::config::Options::mouse_wheel_sensitivity`]. Fed
     /// to the hotbar scroll handler.
     MouseWheelSensitivity,
     /// `options.chat.scale` → [`crate::config::Options::chat_scale`].
@@ -970,7 +969,7 @@ impl Cell {
     ///
     /// Two sources, neither a guess:
     ///
-    /// - `mouseWheelSensitivity` (issue #203) is the one live slider on the
+    /// - `mouseWheelSensitivity` is the one live slider on the
     ///   tree, so its fraction comes from the real, persisted config value
     ///   via [`mouse_wheel_slider_fraction`].
     /// - Every other slider is inactive — this client wires no behaviour to
@@ -987,8 +986,7 @@ impl Cell {
     /// range this client has not ported (`renderDistance`,
     /// `menuBackgroundBlurriness`, `chatDelay`, `notificationDisplayTime`, …).
     /// Those return `None` rather than a fabricated position; porting each
-    /// range is a bigger job than a handle draw and is tracked separately
-    /// (issue #424).
+    /// range is a bigger job than a handle draw and is tracked separately.
     #[must_use]
     pub fn slider_fraction(self, options: &crate::config::Options) -> Option<f32> {
         let Cell::Option(spec) = self else { return None };
@@ -1016,7 +1014,7 @@ impl Cell {
         if spec.live == Some(LiveOption::GraphicsPreset) {
             return Some(graphics_preset_slider_fraction(options.graphics_preset));
         }
-        // Same shape, for `sprintWindow`'s `IntRange(0, 10)` (issue #444): the
+        // Same shape, for `sprintWindow`'s `IntRange(0, 10)`: the
         // handle must track the live tick count, not the frozen default 7.
         if spec.live == Some(LiveOption::SprintWindow) {
             return Some(sprint_window_slider_fraction(options.sprint_window_ticks));
@@ -2306,7 +2304,7 @@ static VIDEO: &[Entry] = &[
 static CONTROLS: &[Entry] = &[
     pair(
         nav("Mouse Settings...", SettingsPage::Mouse),
-        // `controls.keybinds` (issue #15). No longer `no_screen`: the
+        // `controls.keybinds`. No longer `no_screen`: the
         // rebindable layer (`crate::keybinds`) has had no screen in front of
         // it since it landed; `SettingsPage::KeyBinds` is that screen.
         nav("Key Binds...", SettingsPage::KeyBinds),
@@ -2332,9 +2330,9 @@ static CONTROLS: &[Entry] = &[
 /// `InputConstants.isRawMouseInputSupported()`, which is true on every desktop
 /// GLFW build, so the seven-control shape is the one a player sees.
 ///
-/// **Scroll Sensitivity and both inverts are live** (issue #203) —
+/// **Scroll Sensitivity and both inverts are live** —
 /// [`crate::config::Options::mouse_wheel_sensitivity`]/`invert_mouse_x`/
-/// `invert_mouse_y`. **Sensitivity (look) is now live too** (issue #443): it
+/// `invert_mouse_y`. **Sensitivity (look) is now live too**: it
 /// used to live only on [`crate::config::Config`], parsed from argv and never
 /// written back, so a row for it would have been fabricated persistence; it is
 /// now a real [`crate::config::Options`] field that
@@ -2718,7 +2716,7 @@ pub enum SettingsPage {
     /// stays inactive, exactly as it always has. See [`controls`]'s
     /// `Placement::Root(2)` branch and [`SettingsNav::in_world`].
     Online,
-    /// `controls/KeyBindsScreen` (issue #15) — **not** an `OptionsList` page.
+    /// `controls/KeyBindsScreen` — **not** an `OptionsList` page.
     /// [`SettingsNav`] delegates every query and every input to
     /// [`super::key_binds::KeyBindsNav`] whenever `page == SettingsPage::KeyBinds`,
     /// the same way it special-cases [`SettingsPage::Root`] for a tree with no
@@ -2729,7 +2727,7 @@ pub enum SettingsPage {
     /// Reached from the Controls page's own "Key Binds..." button — vanilla's
     /// own wiring (`ControlsScreen.java`), not the root grid.
     KeyBinds,
-    /// `LanguageSelectScreen` (issue #415) — **not** an `OptionsList` page,
+    /// `LanguageSelectScreen` — **not** an `OptionsList` page,
     /// same reason as [`SettingsPage::KeyBinds`]: [`SettingsNav`] delegates to
     /// [`super::language::LanguageNav`] whenever `page ==
     /// SettingsPage::Language`, so [`Self::entries`]/[`Self::footer`] never
@@ -2741,7 +2739,7 @@ pub enum SettingsPage {
     /// LANGUAGE, ...))`, the same `helper.addChild` sequence [`ROOT_GRID`]
     /// mirrors).
     Language,
-    /// `TelemetryInfoScreen` (issue #415) — **not** an `OptionsList` page
+    /// `TelemetryInfoScreen` — **not** an `OptionsList` page
     /// either, for the same structural reason as [`SettingsPage::Language`]
     /// and [`SettingsPage::KeyBinds`]: [`SettingsNav`] delegates to
     /// [`super::telemetry::TelemetryNav`] whenever `page ==
@@ -2765,7 +2763,7 @@ pub enum SettingsPage {
     /// two working external links — where vanilla's own binary choice assumes
     /// a telemetry-less screen has nothing worth reaching.
     Telemetry,
-    /// `PackSelectionScreen` (issue #415) — **not** an `OptionsList` page,
+    /// `PackSelectionScreen` — **not** an `OptionsList` page,
     /// for the same structural reason as [`SettingsPage::Language`]/
     /// [`SettingsPage::Telemetry`]: two transferable columns over a real pack
     /// repository. Landed first as a reduced one-entry list and now built for
@@ -2901,7 +2899,7 @@ pub enum Placement {
         page: SettingsPage,
         /// The entry's absolute index in [`SettingsPage::entries`].
         entry: u16,
-        /// The list's scroll offset in **pixels** (issue #445), not the index of
+        /// The list's scroll offset in **pixels**, not the index of
         /// the entry at the top of the window. See [`entry_offset`].
         scroll: f32,
         /// `0` or `1` — the `addSmall` column.
@@ -2913,7 +2911,7 @@ pub enum Placement {
         page: SettingsPage,
         /// The entry's absolute index.
         entry: u16,
-        /// The list's scroll offset in **pixels** (issue #445).
+        /// The list's scroll offset in **pixels**.
         scroll: f32,
     },
 }
@@ -3158,7 +3156,7 @@ pub fn entry_offset(entries: &[Entry], index: usize) -> f32 {
 /// 25 px tall but paints a 20 px widget inset 2 px, so the trailing 3 px are
 /// blank and excluding a row for them would drop a row that fits.
 #[must_use]
-/// This page's list, as the generic [`super::widget::ListSpec`] (issue #445).
+/// This page's list, as the generic [`super::widget::ListSpec`].
 ///
 /// **The one screen here with non-uniform rows**, which is why
 /// `ScrollList::new_variable` was settled before any conversion started: a header
@@ -3195,7 +3193,7 @@ pub fn list_spec(page: SettingsPage, scroll: f32) -> super::widget::ListSpec {
 
 /// The entries visible with entry `first` at the top.
 ///
-/// **No longer on the draw path (issue #445)** — `controls` and `settings_frame`
+/// **No longer on the draw path** — `controls` and `settings_frame`
 /// emit every entry and let `render::draw` clip to the band. This survives as
 /// [`LIST_WINDOW_PX`]'s executable documentation and for the tests that describe
 /// the old window budget; nothing that positions a widget calls it.
@@ -3511,7 +3509,7 @@ pub struct SettingsNav {
     page: SettingsPage,
     stack: Vec<SettingsPage>,
     cursor: usize,
-    /// Scroll offset in **pixels** (issue #445), not the index of the entry at
+    /// Scroll offset in **pixels**, not the index of the entry at
     /// the top of the window.
     scroll: f32,
     /// Vanilla's `inWorld` (`OptionsScreen.java`): whether this screen
@@ -3529,21 +3527,21 @@ pub struct SettingsNav {
     /// stays open, which is the whole lifetime this field needs to be right
     /// for.
     in_world: bool,
-    /// The Key Binds screen's own cursor/scroll/capture state (issue #15) —
+    /// The Key Binds screen's own cursor/scroll/capture state —
     /// live only while [`Self::page`] is [`SettingsPage::KeyBinds`], but kept
     /// unconditionally (like every other field here) rather than boxed away,
     /// since it is a few `usize`s and an `Option<InputAction>`. See
     /// [`super::key_binds::KeyBindsNav`] and [`Self::key_binds`].
     key_binds: super::key_binds::KeyBindsNav,
-    /// The Language screen's own cursor/search/filter state (issue #415) —
+    /// The Language screen's own cursor/search/filter state —
     /// live only while [`Self::page`] is [`SettingsPage::Language`], kept
     /// unconditionally for the same reason as [`Self::key_binds`].
     language: super::language::LanguageNav,
-    /// The Telemetry screen's own cursor (issue #415) — live only while
+    /// The Telemetry screen's own cursor — live only while
     /// [`Self::page`] is [`SettingsPage::Telemetry`], kept unconditionally
     /// for the same reason.
     telemetry: super::telemetry::TelemetryNav,
-    /// The Resource Packs screen's own cursor (issue #415) — live only
+    /// The Resource Packs screen's own cursor — live only
     /// while [`Self::page`] is [`SettingsPage::ResourcePacks`], kept
     /// unconditionally for the same reason.
     packs: super::packs::PacksNav,
@@ -3773,7 +3771,7 @@ impl SettingsNav {
     }
 
     /// `AbstractSelectionList.scrollToEntry`, through
-    /// [`super::widget::ScrollList::scroll_to_entry`] (issue #445) — bring the
+    /// [`super::widget::ScrollList::scroll_to_entry`] — bring the
     /// cursor's entry into the band, moving the **minimum number of pixels**.
     ///
     /// Was a `while !visible_entries(entries, self.first).contains(&entry) {
@@ -3976,7 +3974,7 @@ pub fn settings_frame(
     options: &crate::config::Options,
     save_error: Option<&str>,
 ) -> MenuFrame<'static> {
-    // `SettingsPage::KeyBinds` (issue #15) is not an `OptionsList` page — see
+    // `SettingsPage::KeyBinds` is not an `OptionsList` page — see
     // that variant's own doc — so it builds its frame in a different module
     // entirely rather than falling through the `Cell`/`Control` path below.
     // The error label is appended here rather than in `key_binds::frame`
@@ -3997,7 +3995,7 @@ pub fn settings_frame(
         }
         return frame;
     }
-    // `SettingsPage::Language` (issue #415) is not an `OptionsList` page
+    // `SettingsPage::Language` is not an `OptionsList` page
     // either — same reason and same shape as the `KeyBinds` branch above.
     if nav.page() == SettingsPage::Language {
         let mut frame = super::language::frame(nav.language());
@@ -4014,14 +4012,14 @@ pub fn settings_frame(
         }
         return frame;
     }
-    // `SettingsPage::Telemetry` (issue #415) — same shape again. No
+    // `SettingsPage::Telemetry` — same shape again. No
     // save-error line: this page persists nothing, so `save_error` cannot
     // fire for it, but the branch is spelled out the same way rather than
     // silently dropping a future error this page never expects.
     if nav.page() == SettingsPage::Telemetry {
         return super::telemetry::frame(nav.telemetry());
     }
-    // `SettingsPage::ResourcePacks` (issue #415) — same shape again.
+    // `SettingsPage::ResourcePacks` — same shape again.
     if nav.page() == SettingsPage::ResourcePacks {
         return super::packs::frame(nav.packs());
     }
@@ -5723,7 +5721,7 @@ mod tests {
         );
         // Scrolled by entry 2's own absolute offset (two 25 px entries = 50 px),
         // entry 2 lands exactly where entry 0 was. The third argument is
-        // **pixels** (issue #445), not the index of the top entry — `2` used to
+        // **pixels**, not the index of the top entry — `2` used to
         // mean "entry 2 at the top" and `50.0` means the same thing here, which is
         // the conversion in one line.
         assert_eq!(entry_offset(page.entries(), 2), 50.0);
@@ -6208,7 +6206,7 @@ mod tests {
         nav.cursor = world_options;
         assert_eq!(nav.enter(), SettingsOutcome::None);
         assert_eq!(nav.page(), SettingsPage::Root, "and must not move");
-        // Root -> Language (issue #415), and back — the third list-widget
+        // Root -> Language, and back — the third list-widget
         // kind, reached from the root grid rather than a sub-page.
         let mut nav = SettingsNav::new();
         let language = all_controls(SettingsPage::Root, false)
@@ -6220,7 +6218,7 @@ mod tests {
         assert_eq!(nav.page(), SettingsPage::Language);
         nav.escape();
         assert_eq!(nav.page(), SettingsPage::Root);
-        // Root -> Telemetry (issue #415), and back.
+        // Root -> Telemetry, and back.
         let mut nav = SettingsNav::new();
         let telemetry = all_controls(SettingsPage::Root, false)
             .iter()
@@ -6231,7 +6229,7 @@ mod tests {
         assert_eq!(nav.page(), SettingsPage::Telemetry);
         nav.escape();
         assert_eq!(nav.page(), SettingsPage::Root);
-        // Root -> Resource Packs (issue #415), and back.
+        // Root -> Resource Packs, and back.
         let mut nav = SettingsNav::new();
         let packs = all_controls(SettingsPage::Root, false)
             .iter()
@@ -6471,7 +6469,7 @@ mod tests {
     }
 
     /// **One notch is `floor(DEFAULT_ITEM_HEIGHT / 2)` = `floor(25 / 2)` = 12 px**
-    /// (issue #445), and the offset must coincide with no entry top.
+    ///, and the offset must coincide with no entry top.
     ///
     /// 25, not 20: [`DEFAULT_ITEM_HEIGHT`] is `AbstractSelectionList`'s
     /// `defaultEntryHeight` and [`WIDGET_H`] is the 20 px widget drawn *inside*

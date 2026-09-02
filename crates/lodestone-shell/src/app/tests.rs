@@ -350,7 +350,7 @@ mod chat_click_dispatch {
     }
 }
 
-/// `WorldOptions.parseSeed` (issue #190): a valid `i64` literal is used
+/// `WorldOptions.parseSeed`: a valid `i64` literal is used
 /// verbatim (vanilla tries `Long.parseLong` first), whitespace is
 /// trimmed, and non-numeric text falls back to the Java hash — not a new
 /// rule, just `parse_seed` calling straight through to the constant test
@@ -2206,7 +2206,7 @@ fn held_bindings_report_both_edges_and_one_shot_bindings_only_the_press() {
             "{one_shot:?} must not fire on release"
         );
     }
-    // F3 is deliberately *not* in that list any more (issue #197): it is the
+    // F3 is deliberately *not* in that list any more: it is the
     // debug modifier, so it reports both edges, and the driver toggles the
     // overlay on the release when no chord fired.
     assert_eq!(
@@ -2690,8 +2690,7 @@ fn an_unnameable_physical_key_is_ignored_by_the_binding_chain() {
     );
 }
 
-/// **Pressing Play Selected World reaches a running integrated server**
-/// (issue #287).
+/// **Pressing Play Selected World reaches a running integrated server**.
 ///
 /// This is the anti-island gate for singleplayer, and it is the only test
 /// anywhere that crosses *every* seam of it in one go: the registry's
@@ -3629,7 +3628,7 @@ fn a_non_notifying_unlock_never_toasts() {
     );
 }
 
-/// `RecipeBookSeenRecipe` (issue #613): the encoder existed in every protocol
+/// `RecipeBookSeenRecipe`: the encoder existed in every protocol
 /// family and nothing anywhere called it. Drives the real chain: a real
 /// `WindowApp`, a real `ClientEvent::RecipeBookAdded` folded through the same
 /// `NetIngest` schedule the net thread runs, a recipe corpus loaded so the

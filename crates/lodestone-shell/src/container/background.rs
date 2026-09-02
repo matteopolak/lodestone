@@ -55,7 +55,7 @@ fn split_mob_effect_path(path: &str) -> Option<(&str, &str)> {
     Some((namespace, name))
 }
 
-/// Vanilla's real container-background art (issue #51): `container/inventory`,
+/// Vanilla's real container-background art: `container/inventory`,
 /// `container/crafting_table` and `container/generic_54`, stitched into one
 /// small atlas.
 ///
@@ -108,7 +108,7 @@ pub struct ContainerBackground {
     /// a taller-than-usual `230×219` whole-panel blit
     /// (`BeaconScreen.java`'s `super(menu, inventory, title, 230, 219)`).
     beacon: ResourceLocation,
-    /// The creative screen's three sheets (issue #158) — `tab_items`,
+    /// The creative screen's three sheets — `tab_items`,
     /// `tab_item_search`, `tab_inventory`. Same family as every sheet above:
     /// loose `textures/gui/container/**` art with no `.mcmeta` and no
     /// `GuiScaling`, blitted at native size. See
@@ -118,7 +118,7 @@ pub struct ContainerBackground {
     creative_search: ResourceLocation,
     /// See [`Self::creative_items`](Self::creative_quad).
     creative_inventory: ResourceLocation,
-    /// The Advancements screen's window art (issue #167) —
+    /// The Advancements screen's window art —
     /// `textures/gui/advancements/window.png`, another loose sheet blitted at a
     /// sub-rect (`252 x 140` of `256 x 256`).
     advancements_window: ResourceLocation,
@@ -291,7 +291,7 @@ impl ContainerBackground {
             .expect("hardcoded location is always valid");
         let beacon = ResourceLocation::new("minecraft", "gui/container/beacon")
             .expect("hardcoded location is always valid");
-        // The creative screen's three sheets (issue #158). Unlike the tab-button
+        // The creative screen's three sheets. Unlike the tab-button
         // and scroller art — which is `gui/sprites/**` and rides `GUI_SPRITES`
         // below — these are loose `gui/container/**` textures, so they need their
         // own locations exactly as the sixteen above do.
@@ -305,7 +305,7 @@ impl ContainerBackground {
             ResourceLocation::new("minecraft", "gui/container/creative_inventory/tab_inventory")
                 .expect("hardcoded location is always valid");
         // The Advancements screen's window plus its five tiled backgrounds
-        // (issue #167). Same loose-`gui/**` family as everything above.
+        //. Same loose-`gui/**` family as everything above.
         let advancements_window = ResourceLocation::new("minecraft", "gui/advancements/window")
             .expect("hardcoded location is always valid");
         let advancements_tiles: Vec<(&'static str, ResourceLocation)> = ADVANCEMENT_TILE_IDS
@@ -345,7 +345,7 @@ impl ContainerBackground {
         for (_, loc) in &advancements_tiles {
             builder.load(manager, loc)?;
         }
-        // The hover highlight and the empty-slot placeholders (issue #376) ride
+        // The hover highlight and the empty-slot placeholders ride
         // in this same atlas rather than a second one. They are ordinary
         // textures with an ordinary `.png.mcmeta`, so `AtlasBuilder` needs no
         // new capability — and reusing the atlas means reusing the bind group
@@ -466,7 +466,7 @@ impl ContainerBackground {
     /// every other sheet [`Self::SHEET_DECLARED`] covers.
     const MERCHANT_DECLARED: (f32, f32) = (512.0, 256.0);
 
-    /// The Advancements screen's window blit (issue #167) —
+    /// The Advancements screen's window blit —
     /// `graphics.blit(..., WINDOW_LOCATION, leftPos, topPos, 0, 0, 252, 140, 256,
     /// 256)` (`AdvancementsScreen.java`).
     ///
@@ -481,7 +481,7 @@ impl ContainerBackground {
     /// starting at the sprite's atlas origin, so a 2x pack (a `512x512`
     /// sheet) sampled only its top-left quarter — cropping the window's own
     /// bottom and right edges clean off, exactly the reported symptom. The
-    /// same fraction-of-declared-size fix as the nine-slice arm (issue #561),
+    /// same fraction-of-declared-size fix as the nine-slice arm,
     /// applied to this hand-rolled sub-rect blit instead, since `window.png`
     /// is loose `textures/gui/container/**` art and never reaches
     /// [`lodestone_render::GuiAtlas`]'s `GuiScaling` system at all.
@@ -542,7 +542,7 @@ impl ContainerBackground {
     }
 
     /// [`sprite_quad`](Self::sprite_quad), reachable from outside this module —
-    /// the Advancements screen (issue #167) draws every one of its widgets through
+    /// the Advancements screen draws every one of its widgets through
     /// it, and lives in `crate::menu` rather than here.
     #[must_use]
     pub(crate) fn sprite_quad_for(
@@ -556,7 +556,7 @@ impl ContainerBackground {
         self.sprite_quad(id, x, y, w, h)
     }
 
-    /// The creative screen's own background blit (issue #158) —
+    /// The creative screen's own background blit —
     /// `graphics.blit(..., selectedTab.getBackgroundTexture(), leftPos, topPos,
     /// 0, 0, imageWidth, imageHeight, 256, 256)`
     /// (`CreativeModeInventoryScreen.java`), i.e. the top-left
@@ -737,7 +737,7 @@ impl ContainerBackground {
     /// [`sprite_quad`](Self::sprite_quad) always samples the *whole* sprite,
     /// which is right for the highlight pair and the empty-slot placeholders
     /// but wrong for the furnace family's lit/burn bars and the brewing
-    /// stand's fuel/brew/bubble bars (issue #28): vanilla grows every one of
+    /// stand's fuel/brew/bubble bars: vanilla grows every one of
     /// those from a partial `blitSprite` sub-rectangle of a larger sprite —
     /// e.g. `AbstractFurnaceScreen.java`'s lit flame samples a `14×n`
     /// window of a `14×14` sprite, offset from the *bottom*, via

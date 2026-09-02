@@ -12,7 +12,7 @@
 //!    arrived is wrong in more ways than a missing face** — see [`Neighbour`] and
 //!    [`SnapshotOutcome`] for the typed distinction between "air, and air is the
 //!    truth" and "air, and air is a guess", and why the second one defers the
-//!    build instead of baking it (issue #389).
+//!    build instead of baking it.
 //! 2. On worker threads, [`mesh_snapshot`] turns a snapshot into a
 //!    [`lodestone_render::Mesh`] with no access to the live world at all.
 //!
@@ -613,7 +613,7 @@ pub fn snapshot_section_live(
 /// artificially dark, the same class of bug this function exists to prevent —
 /// just aimed the other direction.
 ///
-/// # The registry answers this now (issue #288), and the name match is the fallback
+/// # The registry answers this now, and the name match is the fallback
 ///
 /// `dimension_type` is the server's own `minecraft:dimension_type` entry, decoded
 /// off the Configuration `registry_data` packet and carried on
@@ -1068,7 +1068,7 @@ impl ModelSectionView for SnapshotModelView<'_> {
         self.models.quads(id)
     }
 
-    /// Vanilla's `ambientocclusion` model-JSON flag, per state (issue #22).
+    /// Vanilla's `ambientocclusion` model-JSON flag, per state.
     ///
     /// The trait default is `true`, which is what preserved behaviour while this
     /// was unwired — so **the flag mechanism was inert in the running game until
@@ -2774,7 +2774,7 @@ pub struct TerrainMesh {
     /// [`MeshScheduler::new`].
     pub column_source: ColumnSource,
     /// How many times a section's **first** build was held back because a
-    /// horizontal neighbour column had not arrived (issue #389).
+    /// horizontal neighbour column had not arrived.
     ///
     /// Expected to be non-zero and rising during chunk streaming — every column
     /// on the frontier defers until the ring beyond it lands — and to stop rising
@@ -3117,7 +3117,7 @@ impl TerrainMesh {
     }
 
     /// Drop every GPU section belonging to the column at `(cx, cz)`, which the
-    /// server has just told us to forget (issue #479).
+    /// server has just told us to forget.
     ///
     /// **This is the mesh side of an eviction that only ever had a collision
     /// side.** The adapter answers `forget_level_chunk` by calling

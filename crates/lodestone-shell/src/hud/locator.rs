@@ -1,4 +1,4 @@
-//! Vanilla's locator bar (issue #26) — geometry only, ported from
+//! Vanilla's locator bar — geometry only, ported from
 //! `.cache/mc/26.2/client-src/net/minecraft/client/gui/contextualbar/LocatorBar.java`
 //! and `net/minecraft/world/waypoints/TrackedWaypoint.java`.
 //!

@@ -48,7 +48,7 @@
 //!   [`draw_legacy`](VanillaFont::draw_legacy) — see
 //!   [`resolve_legacy`](VanillaFont::resolve_legacy) and
 //!   [`glyph_styled`](VanillaFont::glyph_styled). This used to be the one
-//!   documented gap in this module (issue #117): the metrics existed
+//!   documented gap in this module: the metrics existed
 //!   (`Font::advance_bold`, `metrics::ITALIC_SHEAR`) and `§l`/`§o`/`§n`/`§m`/`§k`
 //!   were parsed for **width** (`Font::legacy_width`), but the draw side treated
 //!   every flag as zero-width state and dropped it, so a bold or italic name

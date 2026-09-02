@@ -1,5 +1,5 @@
 //! The connect/load phase names and the terrain progress count behind the
-//! loading screen (issue #449).
+//! loading screen.
 //!
 //! # What it is
 //!
@@ -185,7 +185,7 @@ impl TerrainProgress {
 /// The most the progress bar will ever report. See [`TerrainProgress::fraction`].
 pub const MAX_FRACTION: f32 = 0.99;
 
-/// One chunk's status in the loading grid (issue #568) — vanilla's
+/// One chunk's status in the loading grid — vanilla's
 /// `LevelLoadingScreen` per-chunk squares, reduced to the two states this
 /// client can actually observe.
 ///

@@ -686,7 +686,7 @@ impl WindowApp {
             .sim
             .block_entity_frame_snapshot(render_camera.position);
 
-        // Block entities — chests (issue #23). **This install is what makes a
+        // Block entities — chests. **This install is what makes a
         // chest visible at all**: a 26.2 chest has no block model (its
         // `block/chest.json` declares only a particle texture, zero elements), so
         // without this the terrain mesher leaves a hole where every chest is.
@@ -971,7 +971,7 @@ impl WindowApp {
         // `Sim::void_fog` for the two constants this replaced.
         render.set_void_fog(self.sim.void_fog());
 
-        // Filled maps (issue #184). This is the hop that turns the `SessionMaps`
+        // Filled maps. This is the hop that turns the `SessionMaps`
         // fold from an F3 readout into the picture itself — the palette, the
         // per-map texture and the held/framed quads were all landed with no live
         // producer, so without this call a map draws its blank inventory sprite.
@@ -1233,7 +1233,7 @@ impl WindowApp {
             .player_menu()
             .player_native(HEAD_NATIVE_SLOT)
             .is_some_and(|st| st.item().to_string() == "minecraft:carved_pumpkin");
-        // The freeze overlay's per-frame input (issue #139). `PlayerState::
+        // The freeze overlay's per-frame input. `PlayerState::
         // percent_frozen` is real, tested physics state (`update_freezing`,
         // issue #212, `lodestone-physics`) — not a stub. `Sim::player()`
         // already returns `PlayerState` by value, so this needs no new `Sim`
@@ -1271,7 +1271,7 @@ impl WindowApp {
             // intensity rather than a pre-multiplied strength.
             portal_intensity: self.sim.portal_effect_intensity(),
         };
-        // Route the progressive-mining crack overlay(s) (issue #410): the local
+        // Route the progressive-mining crack overlay(s): the local
         // player's own dig plus one slot for every *other* player's overlay the
         // server has reported. `CrackPipeline`/`render_with_crack_and_effects`
         // accept any number of targets in one pass, and `Sim::crack_targets`
@@ -1508,7 +1508,7 @@ impl WindowApp {
         // HUD hotbar further down. It borrows `self.sim`, so it cannot be hoisted
         // above the `self.sim.stats` writes just above — but it must exist before
         // the container overlay, which is the pass that was missing it.
-        // Sound-subtitle captions (issue #198). Gated on the persisted
+        // Sound-subtitle captions. Gated on the persisted
         // `showSubtitles` accessibility option. Collected **here**, above
         // `item_models`, and not beside the rest of the HUD frame: this needs
         // `&mut self.sim` (the caption queue purges as it is read) while
@@ -1652,13 +1652,13 @@ impl WindowApp {
             .map(|a| (a, lodestone_game::player_state::HudState::MAX_AIR, self.sim.player().eye_in_water));
         let sidebar = self.sim.sidebar();
         let boss_bars = self.sim.boss_bars();
-        // The locator bar's dots (issue #26), from the exact eye camera the
+        // The locator bar's dots, from the exact eye camera the
         // 3-D pass above renders with — vanilla resolves the locator bar
         // against `gameRenderer.mainCamera()`, not any third-person offset.
         let locator_dots = self.sim.locator_dots(camera.position, camera.yaw);
         // Two different questions, and they used to share one boolean named
         // `crosshair` — which is why the hotbar vanished behind the pause menu
-        // and the inventory (issue #61). The crosshair is the aiming reticle and
+        // and the inventory. The crosshair is the aiming reticle and
         // belongs to *active* play; the hotbar belongs to the **world**, and
         // vanilla keeps it on screen behind every in-game screen.
         let crosshair = self.ui.is_playing();
@@ -1827,7 +1827,7 @@ impl WindowApp {
         // paths and both gates are correct, and zero pixels change.
         hud_frame.armour = self.sim.armour_value();
         hud_frame.food = food;
-        // Without this the hunger wobble (issue #30) is computed correctly and
+        // Without this the hunger wobble is computed correctly and
         // never fires: vanilla shakes the row only while saturation is
         // exhausted, so an unfed `saturation` reads as "always satisfied".
         hud_frame.saturation = self.sim.saturation();
@@ -1856,12 +1856,12 @@ impl WindowApp {
         // not the map's own picture — see `HudFrame::map_debug` for what is still
         // missing and why it is a texture job rather than a wiring one.
         hud_frame.map_debug = map_debug_when_visible(self.show_debug, || self.sim.map_debug());
-        // The recipe-unlock toast (issue #163). `None` on every real session
+        // The recipe-unlock toast. `None` on every real session
         // today, because the queue's only possible producer is the
         // `recipe_book_add` decode that does not exist yet — see the field's own
         // doc. Wired here anyway so it lights up the moment that lands.
         hud_frame.recipe_toast = recipe_toast_view(&self.recipe_toasts, recipe_toast_now_ms());
-        // The advancement-completion toast (issue #167), resolved above the
+        // The advancement-completion toast, resolved above the
         // field-borrow split like every other `Sim`-derived view.
         hud_frame.advancement_toast = advancement_toast;
         // Always `Some`: `Sim::attack_strength_scale` is defined on both the
@@ -1870,7 +1870,7 @@ impl WindowApp {
         // `health`/`food`/`xp` which stay `None` until a server reports them.
         // `hud.rs`'s draw site is what actually gates this on
         // `frame.crosshair` — see that field's doc for why the crosshair
-        // hides behind an open screen but the hotbar does not (issue #61).
+        // hides behind an open screen but the hotbar does not.
         hud_frame.attack_cooldown = Some(self.sim.attack_strength_scale());
         // Which of vanilla's three placements draws that value — `options.
         // attackIndicator`. Copied per frame off `MenuNav::options`, the same
@@ -1907,7 +1907,7 @@ impl WindowApp {
         // and the HUD's own model sub-pass independently clear the shared depth
         // buffer immediately before drawing their own GUI items, so swapping the
         // two relative to each other is safe — see `docs/container-screen.md`.
-        // The creative-inventory screen (issue #158) **replaces** the player's
+        // The creative-inventory screen **replaces** the player's
         // inventory screen rather than overlaying it, exactly as vanilla's
         // `Minecraft.openInventory` picks one screen or the other. So it is
         // resolved before the container block below and short-circuits it — two
@@ -1952,7 +1952,7 @@ impl WindowApp {
             // Through the language table, not `Text::to_plain_string` — the
             // server sends `translate("container.crafting")`, and the model's
             // stub table has no `container.*` key, so flattening it directly put
-            // the raw key on screen (issue #52). See `container::menu_title`.
+            // the raw key on screen. See `container::menu_title`.
             //
             // The merchant screen composes a level badge into the title
             // itself (`MerchantScreen.extractLabels`) rather than merely
@@ -1977,7 +1977,7 @@ impl WindowApp {
             (Some(&open.menu), title)
         } else if self.ui.is_container_open() {
             player_menu = self.sim.player_menu();
-            // **"Crafting"**, not "Inventory" (issue #370). `InventoryScreen`
+            // **"Crafting"**, not "Inventory". `InventoryScreen`
             // passes `translatable("container.crafting")` as its title
             // (`InventoryScreen.java`) — it names the 2x2 grid — and the
             // literal `"Inventory"` that used to sit here was wrong twice: wrong
@@ -2005,7 +2005,7 @@ impl WindowApp {
             // `inventory_label` above; `ContainerFrame`'s own draw path is
             // what gates it on the screen actually being a merchant.
             let trades_label = crate::container::merchant_trades_label(self.sim.translator().as_ref());
-            // The anvil rename box's current value (issue #603).
+            // The anvil rename box's current value.
             // `AnvilRenameState::sync` is vanilla's `slotChanged`: it resets
             // `self.anvil_rename` to the input slot's own hover name whenever
             // that slot's identity changes, and otherwise leaves whatever the
@@ -2027,7 +2027,7 @@ impl WindowApp {
                 // `ItemStack.getHoverName().getString()`, the plain-text
                 // accessor with no `§` codes at all, not the legacy-coded
                 // string `styled_hover_name` would give an edit box nowhere
-                // to render (issue #656).
+                // to render.
                 let item = menu.slot_item(0).map(|stack| {
                     (
                         stack.custom_name().is_some(),
@@ -2164,7 +2164,7 @@ impl WindowApp {
                 // *same* `body_pose.render(partial_tick)` call as the limb swing, so
                 // the swing and the walk cannot drift by a frame.
                 .with_avatar_pose(self.sim.local_body_anim())
-                // The local player's own uuid (issue #646), so the
+                // The local player's own uuid, so the
                 // inventory avatar's *default* skin resolves through the
                 // same `default_skin_for_uuid` call the world side already
                 // uses for every other player with no declared skin —
@@ -2229,7 +2229,7 @@ impl WindowApp {
                 w,
                 h,
                 || {
-                    // The recipe-book panel (issue #163), **over** the container
+                    // The recipe-book panel, **over** the container
                     // panel it belongs to and **under** the cursor stack — the
                     // toggle button sits on the container's own chrome and the
                     // book body overlaps its left edge at narrow canvases
@@ -2321,7 +2321,7 @@ impl WindowApp {
             menu_overlays_drawn += 1;
         }
 
-        // The Advancements screen (issue #167), drawn over the still-rendering
+        // The Advancements screen, drawn over the still-rendering
         // paused world for the same reason the pause overlay above is: it is
         // reached from the pause menu and vanilla keeps the world behind it.
         //
@@ -2358,7 +2358,7 @@ impl WindowApp {
             );
         }
 
-        // The death screen (issue #103) follows exactly the same overlay
+        // The death screen follows exactly the same overlay
         // shape as pause, for the same reason: a live server holds a dead
         // player with no chunk stream until it respawns, so this must draw
         // over the still-rendering, still-ticking world rather than replace
@@ -2585,7 +2585,7 @@ impl WindowApp {
             menu_overlays_drawn += 1;
         }
 
-        // `key.screenshot` (issue #16), and **this position is the whole
+        // `key.screenshot`, and **this position is the whole
         // correctness argument**: every pass above — world, HUD, container, and
         // the three overlay blocks — has now written into `frame.view()`, and
         // `present` below consumes `frame` by value. Capturing right after

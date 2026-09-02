@@ -1,4 +1,4 @@
-//! The World Creation screen (issue #190) — vanilla's `CreateWorldScreen`,
+//! The World Creation screen — vanilla's `CreateWorldScreen`,
 //! reached from [`super::world_select`]'s "Create New World" button, which
 //! issue #397 deliberately left present-and-disabled for this issue to build.
 //!
@@ -231,11 +231,11 @@ pub const GAME_RULES_BUTTON_LABEL: &str = "Game Rules...";
 /// `PackSelectionScreen` scoped to data packs.
 pub const DATA_PACKS_BUTTON_LABEL: &str = "Data Packs...";
 /// `selectWorld.experiments`, verbatim from `en_us.json` — vanilla's More tab
-/// button that opens `ExperimentsScreen` (issue #693).
+/// button that opens `ExperimentsScreen`.
 pub const EXPERIMENTS_BUTTON_LABEL: &str = "Experiments...";
 
 /// `createWorld.tab.game.title`/`.world.title`/`.more.title`, verbatim from
-/// `en_us.json` — this screen's own tab bar (issue #567), built from the same
+/// `en_us.json` — this screen's own tab bar, built from the same
 /// shared widget [`super::stats::TAB_LABELS`] uses.
 pub const TAB_LABELS: [&str; 3] = ["Game", "World", "More"];
 pub const GAME_TAB: usize = 0;
@@ -696,13 +696,13 @@ pub struct CreateWorldWidgets {
     pub world_type: Widget,
     pub create: Widget,
     pub cancel: Widget,
-    /// More tab's Game Rules button (issue #592) — opens
+    /// More tab's Game Rules button — opens
     /// [`CreateWorldMode::GameRules`].
     pub game_rules: Widget,
-    /// More tab's Data Packs button (issue #592) — opens
+    /// More tab's Data Packs button — opens
     /// [`CreateWorldMode::DataPacks`].
     pub data_packs: Widget,
-    /// More tab's Experiments button (issue #693) — opens
+    /// More tab's Experiments button — opens
     /// [`CreateWorldMode::Experiments`].
     pub experiments: Widget,
 }
@@ -756,7 +756,7 @@ pub enum CreateWorldOutcome {
     Cancel,
     /// Pressing Create — carries the [`WorldCreationConfig`] the player
     /// collected, for `menu/nav.rs`'s `apply_create_world` to hand to
-    /// `MenuAction::Singleplayer` (issue #190). Not `Copy` any more:
+    /// `MenuAction::Singleplayer`. Not `Copy` any more:
     /// `WorldCreationConfig` carries a `String` (the world name and the
     /// typed seed text), which `Handled`/`Cancel` never needed.
     Create(WorldCreationConfig),
@@ -769,7 +769,7 @@ pub struct CreateWorldNav {
     pub widgets: CreateWorldWidgets,
     focus: FocusSet,
     config: WorldCreationConfig,
-    /// Which of [`TAB_LABELS`] is currently showing (issue #567). Starts at
+    /// Which of [`TAB_LABELS`] is currently showing. Starts at
     /// [`GAME_TAB`] — vanilla's own `MenuTabBar.builder(..).addTabs(GameTab,
     /// WorldTab, MoreTab)` order, and the tab `CreateWorldScreen.
     /// setInitialFocus` would land on if it ran (it does not — see the
@@ -2271,7 +2271,7 @@ struct ExperimentRow {
     enabled: bool,
 }
 
-/// The Experiments sub-screen's own live state (issue #693) — three fixed
+/// The Experiments sub-screen's own live state — three fixed
 /// toggle rows plus Done, the shape [`DataPacksEditor`] takes for a scanned
 /// list, simplified: the flag set is fixed
 /// ([`ExperimentFlag::ALL`]), so there is no scan, and — four rows total,
@@ -2860,7 +2860,7 @@ mod tests {
         assert_eq!(nav.hovered(), None);
     }
 
-    // -- hover (issue #567) --------------------------------------------------
+    // -- hover --------------------------------------------------
 
     #[test]
     fn a_fresh_screen_has_nothing_hovered_so_the_frame_carries_none() {

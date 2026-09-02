@@ -470,7 +470,7 @@ pub struct Sim {
     /// `with_demo_world` fixture's terrain alone.
     adopted_live_world: bool,
     status: String,
-    /// The loading screen's current step (issue #449) — set only from
+    /// The loading screen's current step — set only from
     /// `NetUpdate::ConnectPhase`/`LoggedIn`, i.e. from real boundaries in the
     /// session task, so it can never advance on a timer. Read by
     /// `WindowApp::drive_ui_from_session`.
@@ -481,7 +481,7 @@ pub struct Sim {
     expected_view_columns: Option<usize>,
     /// The raw view radius `Sim::set_view_radius` was called with — the same
     /// value `expected_view_columns` was squared from, kept alongside it
-    /// because the chunk-status grid (issue #568) needs a side length, not an
+    /// because the chunk-status grid needs a side length, not an
     /// area. `None` under the same condition `expected_view_columns` is.
     expected_view_radius: Option<u32>,
     /// When the terrain-streaming phase began, for
@@ -558,7 +558,7 @@ pub struct Sim {
     /// flipped in real play.
     pub recover_from_death: bool,
     /// The most recent death's message (`NetUpdate::Death`'s `message`, already
-    /// flattened to plain text), for the death screen (issue #103) to draw.
+    /// flattened to plain text), for the death screen to draw.
     /// `Some` from the moment [`Self::set_dead`] marks the player dead until the
     /// server-confirmed respawn clears it (or [`Self::end_session`] resets it).
     /// Not an ECS component: it is read by exactly one consumer (`app.rs`'s
@@ -566,7 +566,7 @@ pub struct Sim {
     /// teardown/reconnect the way `RespawnCount` and the other session-lifetime
     /// state in `lodestone_ecs::session` do.
     death_message: Option<String>,
-    /// Set once `NetUpdate::WinGame` (issue #192) has arrived — the local
+    /// Set once `NetUpdate::WinGame` has arrived — the local
     /// player exited the End through the exit portal after the dragon fight.
     /// Latched rather than transient for the same reason [`Self::death_message`]
     /// is a plain field, not an ECS component: exactly one consumer reads it
@@ -655,7 +655,7 @@ pub struct Sim {
     /// view by 1.22 blocks in a single frame. Ticked once per physics tick beside
     /// [`Self::body_pose`], read interpolated in [`Self::camera`].
     eye_height_smoother: crate::camera_rig::EyeHeightSmoother,
-    /// The walk bob's phase and amplitude (issue #58) — like
+    /// The walk bob's phase and amplitude — like
     /// [`Self::eye_height_smoother`] and [`Self::body_pose`], per-tick state that
     /// cannot be a pure function of the current [`PlayerState`]. Ticked once per
     /// physics tick in [`Self::step`], read interpolated in
@@ -754,7 +754,7 @@ pub struct Sim {
     /// and `scripts/wasm-check.sh`'s `lodestone-shell instant-confinement` rule
     /// keeps it from being written with the trapping type.
     first_chunk_at: Option<crate::platform::Instant>,
-    /// Per-position chest lid animation state (issue #23) — vanilla's
+    /// Per-position chest lid animation state — vanilla's
     /// `ChestLidController`, one per open or closing chest.
     ///
     /// A plain field rather than an ECS resource for the same reason
@@ -769,18 +769,18 @@ pub struct Sim {
     /// only "somebody is looking in this chest", and the *angle* is a client-side
     /// accumulator — see `crate::block_entities::ChestLids`.
     chest_lids: crate::block_entities::ChestLids,
-    /// Per-position bell shake state (issue #23). Fed by `NetUpdate::BlockEvent`
+    /// Per-position bell shake state. Fed by `NetUpdate::BlockEvent`
     /// in [`Self::poll_net`] and advanced once per tick, exactly like
     /// [`chest_lids`](Self::chest_lids) — the same `b0 == 1` event drives both,
     /// and the *gather* is what decides which tracker a given position reads
     /// from (see `block_entities::BellShakes::apply_block_event`).
     bell_shakes: crate::block_entities::BellShakes,
-    /// Per-position end gateway teleport-cooldown state (issue #23). Fed by
+    /// Per-position end gateway teleport-cooldown state. Fed by
     /// `NetUpdate::BlockEvent` and advanced once per tick, the same
     /// `b0 == 1` collision [`bell_shakes`](Self::bell_shakes) documents —
     /// see `crate::block_entities::GatewayCooldowns`.
     gateway_cooldowns: crate::block_entities::GatewayCooldowns,
-    /// Per-position enchanting-table book animation state (issue #23).
+    /// Per-position enchanting-table book animation state.
     ///
     /// **Not fed by any packet**, which is what makes it the odd one of the three:
     /// `chest_lids` and `bell_shakes` are both started by `NetUpdate::BlockEvent`,
@@ -789,7 +789,7 @@ pub struct Sim {
     /// nothing on the wire would ever reveal that it had stopped — see
     /// `crate::block_entities::EnchantingTableBooks`.
     enchanting_table_books: crate::block_entities::EnchantingTableBooks,
-    /// Per-position moving-piston animation state (issue #23).
+    /// Per-position moving-piston animation state.
     ///
     /// The **fourth** block-entity clock and the shortest by far: a whole push is
     /// two ticks. Like [`enchanting_table_books`](Self::enchanting_table_books) no
@@ -798,7 +798,7 @@ pub struct Sim {
     /// `progress`), which is why an untracked position draws from the NBT rather
     /// than from zero. See `crate::block_entities::PistonMoves`.
     moving_pistons: crate::block_entities::PistonMoves,
-    /// Per-position conduit animation state (issue #23).
+    /// Per-position conduit animation state.
     ///
     /// The fifth block-entity clock and, like
     /// [`enchanting_table_books`](Self::enchanting_table_books) and
@@ -808,7 +808,7 @@ pub struct Sim {
     /// from `crate::block_entities::conduit_positions` and
     /// `conduit_scan_frame`; see `crate::block_entities::ConduitTicks`.
     conduit_ticks: crate::block_entities::ConduitTicks,
-    /// Per-position mob-spawner/trial-spawner spin state (issue #23).
+    /// Per-position mob-spawner/trial-spawner spin state.
     ///
     /// The sixth block-entity clock, and started by **both** routes at once:
     /// a `NetUpdate::BlockEvent` `b0 == 1` resets its `spawnDelay`
@@ -969,7 +969,7 @@ impl Sim {
         lodestone_ecs::hold_write(&self.ecs, f)
     }
 
-    /// The mode a plugin has claimed `key` in (issue #162), or `None` if
+    /// The mode a plugin has claimed `key` in, or `None` if
     /// unclaimed. Read by the driver before calling
     /// `crate::app::input::resolve_key`, so the precedence chain itself stays
     /// a pure function of plain data — see that function's own doc.
@@ -1149,7 +1149,7 @@ impl Sim {
     /// Whether the use button is currently held down on an item (armed by
     /// [`Self::use_item`], cleared by [`Self::end_use`]).
     ///
-    /// Half of vanilla's `Player.isScoping()` (issue #154):
+    /// Half of vanilla's `Player.isScoping()`:
     /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
     /// (`Player.java`). This crate has no held-item identity check
     /// — the caller already has `held` (the `ResourceLocation` used for

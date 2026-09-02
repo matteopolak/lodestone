@@ -704,7 +704,7 @@ impl BellShakes {
     }
 }
 
-/// `TheEndGatewayBlockEntity.teleportCooldown` (issue #23), a per-position
+/// `TheEndGatewayBlockEntity.teleportCooldown`, a per-position
 /// counter driven by the gateway's own `BLOCK_EVENT` and advanced once per
 /// client tick — the same `b0 == 1` collision [`BellShakes`]'s doc already
 /// names, told apart by the block at the position rather than the packet.

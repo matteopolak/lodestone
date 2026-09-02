@@ -783,7 +783,7 @@ pub const SCROLLER_SPRITE: &str = "widget/scroller";
 /// (`AbstractScrollArea.java`).
 pub const SCROLLER_BACKGROUND_SPRITE: &str = "widget/scroller_background";
 
-// -- the tab widget (issue #564) ---------------------------------------------
+// -- the tab widget ---------------------------------------------
 //
 // Vanilla's `MenuTabBar.MenuTabButton` (`MenuTabBar.java`) — the tab
 // strip `StatsScreen` and `CreateWorldScreen` both use. Built once here rather
@@ -3034,7 +3034,7 @@ mod tests {
         assert_eq!(LIST_CONTENT_PADDING, 2.0);
     }
 
-    // -- RowBand: the canvas-relative row edge (issue #445) --------------------
+    // -- RowBand: the canvas-relative row edge --------------------
 
     /// **The regression guard for splitting `row_w` into [`RowBand`].** Every
     /// existing list here is `RowBand::Centred`, and the refactor must not have
@@ -3247,7 +3247,7 @@ mod tests {
         assert_ne!(spanning.row_right(854.0), spec.row_right(854.0));
     }
 
-    // -- the tab widget (issue #564) -----------------------------------------
+    // -- the tab widget -----------------------------------------
 
     #[test]
     fn tab_sprites_are_keyed_by_selected_and_hovered_not_active() {

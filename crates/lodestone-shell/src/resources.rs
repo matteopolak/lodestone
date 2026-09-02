@@ -149,7 +149,7 @@ impl BlockResources {
         };
 
         let zip = ZipSource::from_bytes(bytes).map_err(|e| format!("open client.jar: {e}"))?;
-        // The user's selected packs sit on top of the built-in jar (issue #415),
+        // The user's selected packs sit on top of the built-in jar,
         // so a pack that ships `assets/minecraft/textures/block/**` changes the
         // world's appearance from this session on. This is the block atlas' own
         // stack, not a shared one — see `selected_pack_sources`' doc.
@@ -335,7 +335,7 @@ fn build_pack_stack(builtin: Box<dyn ResourceSource>) -> ResourceManager {
     ResourceManager::new(sources)
 }
 
-// -- the pack repository (issue #415) ----------------------------------------
+// -- the pack repository ----------------------------------------
 
 /// The user's `resourcepacks/` folder — vanilla's `FolderRepositorySource`
 /// root, alongside `saves/`, `servers.json` and `options.json` in the same
@@ -1622,7 +1622,7 @@ pub fn load_panorama() -> Option<Arc<crate::menu::panorama::PanoramaFaces>> {
     }
 }
 
-/// Load vanilla's real container-panel art (issue #51):
+/// Load vanilla's real container-panel art:
 /// `container/{generic_54,crafting_table,inventory}.png`, stitched into one
 /// small atlas via [`crate::container::ContainerBackground`]. Version-free and
 /// fail-open like every other loader here: `None` when no pack is found or the

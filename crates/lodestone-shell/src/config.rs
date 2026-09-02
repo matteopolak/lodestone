@@ -440,7 +440,7 @@ pub const SOUND_CATEGORY_NAMES: [&str; 11] = [
     "voice", "ui",
 ];
 
-/// Vanilla's `mouseWheelSensitivity` slider bounds (issue #203):
+/// Vanilla's `mouseWheelSensitivity` slider bounds:
 /// `logMouse(-200)` and `logMouse(100)`, i.e. `10^(-200/100)` and
 /// `10^(100/100)` (`Options.java`, `:1195-1196`).
 pub const MIN_MOUSE_WHEEL_SENSITIVITY: f32 = 0.01;
@@ -618,11 +618,9 @@ pub struct Options {
     /// As [`Self::toggle_sneak`], for `key.sprint`/`Options::toggleSprint`
     /// (`Options.java`).
     pub toggle_sprint: bool,
-    /// As [`Self::toggle_sneak`], for `key.attack`/`Options::toggleAttack`
-    /// (issue #444).
+    /// As [`Self::toggle_sneak`], for `key.attack`/`Options::toggleAttack`.
     pub toggle_attack: bool,
-    /// As [`Self::toggle_sneak`], for `key.use`/`Options::toggleUse`
-    /// (issue #444).
+    /// As [`Self::toggle_sneak`], for `key.use`/`Options::toggleUse`.
     pub toggle_use: bool,
     /// Vanilla's `options.autoJump` (`Options.java`), default `false`.
     pub auto_jump: bool,
@@ -691,9 +689,9 @@ pub struct Options {
     /// (`ComponentRenderUtils.stripColor`, `ComponentRenderUtils.java`) —
     /// it does not affect the input line, which never carries codes.
     pub chat_colors: bool,
-    /// Vanilla's `options.showSubtitles` (`Options.java`), default `false` —
-    /// the accessibility toggle for the sound-subtitle caption overlay
-    /// (issue #198). Vanilla exposes it on **two** settings pages, Sound and
+    /// Vanilla's own subtitle-caption toggle, default `false` —
+    /// the accessibility toggle for the sound-subtitle caption overlay.
+    /// Vanilla exposes it on **two** settings pages, Sound and
     /// Accessibility, both writing this one field.
     pub show_subtitles: bool,
     /// Vanilla's look **sensitivity** (`options.sensitivity`,
@@ -1612,7 +1610,7 @@ pub fn options_path() -> PathBuf {
     crate::menu::servers::data_dir().join("options.json")
 }
 
-/// The Social Interactions screen's (issue #189) per-player "Hide in Chat"
+/// The Social Interactions screen's per-player "Hide in Chat"
 /// choices, keyed by UUID. **Not** part of [`Options`]: `Options` derives
 /// `Copy` deliberately (see its own doc — "the menu layer that reads it by
 /// value does not have to change"), and a `Vec` field would take that away
@@ -1704,7 +1702,7 @@ pub fn hidden_players_path() -> PathBuf {
     crate::menu::servers::data_dir().join("hidden_players.json")
 }
 
-/// The Resource Packs screen's (issue #415) ordered selection, **highest
+/// The Resource Packs screen's ordered selection, **highest
 /// priority first** — the same order the screen's Selected column shows
 /// top-to-bottom, and the order
 /// [`lodestone_assets::ResourceManager::from_priority_order`] documents.
@@ -2488,7 +2486,7 @@ mod tests {
 
     #[test]
     fn an_unknown_key_in_the_file_is_ignored_rather_than_failing_the_load() {
-        // The `unlock_framerate` debug knob (issue #382) used to live here and
+        // The `unlock_framerate` debug knob used to live here and
         // is now deleted, so an install that toggled it still has the key on
         // disk. A stale key must be *ignored*, not turned into a parse failure
         // that silently resets everything else — which is what would happen if
@@ -3174,7 +3172,7 @@ mod tests {
         assert_eq!(options_path().file_name().unwrap(), "options.json");
     }
 
-    // -- HiddenPlayers (issue #189) -------------------------------------------
+    // -- HiddenPlayers -------------------------------------------
 
     fn temp_hidden_path(tag: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(

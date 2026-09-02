@@ -92,7 +92,7 @@ pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
 /// value substituted (`DeathScreen.java`).
 const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 
-/// Builds the death screen's overlay frame (issue #103): vanilla's
+/// Builds the death screen's overlay frame: vanilla's
 /// `DeathScreen` — the title, the server's death message, the score line, and
 /// two buttons (Respawn / Title Screen) at vanilla's rects (see
 /// [`death_slot`] and [`super::nav::DeathButton`]) — reproduced from
@@ -205,7 +205,7 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
     }
 }
 
-/// Builds the command block edit screen's overlay frame (issue #47): vanilla's
+/// Builds the command block edit screen's overlay frame: vanilla's
 /// `CommandBlockEditScreen` — see [`super::command_block`]'s module doc for
 /// the full geometry citation and the two named islands (no tree ever reaches
 /// this client yet; nothing yet opens this screen from a real interaction).
@@ -902,7 +902,7 @@ pub fn spectator_menu_frame(state: &spectator_menu::SpectatorMenuState) -> MenuF
     }
 }
 
-/// Builds the loading screen's frame (issue #449): the panorama under
+/// Builds the loading screen's frame: the panorama under
 /// `menu_background.png`'s wash, with one centred line of text — the current
 /// `ConnectPhase`'s own vanilla string
 /// (`connect.connecting`/`connect.joining`) while the handshake and
@@ -974,7 +974,7 @@ const LOADING_DETAIL_DY: f32 = 8.0;
 const LOADING_DETAIL: [f32; 4] = [160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.0, 1.0];
 
 /// As [`loading_frame`], but with vanilla's `LevelLoadingScreen` progress bar
-/// and a raw count line under it (issue #449).
+/// and a raw count line under it.
 ///
 /// This is the terrain-streaming half of the loading screen, and the *only*
 /// screen in this file that draws a number. The number has to be real: it is
@@ -1025,7 +1025,7 @@ pub fn chunk_grid_dy(radius: u32) -> f32 {
 }
 
 /// As [`loading_frame_with_progress`], but also carrying vanilla's
-/// `LevelLoadingScreen` chunk-status grid (issue #568) when one is available.
+/// `LevelLoadingScreen` chunk-status grid when one is available.
 ///
 /// `grid` is `None` under exactly the conditions
 /// `Sim::terrain_chunk_grid` returns `None` for — no session, or no declared
@@ -1207,7 +1207,7 @@ pub(super) fn error_frame(end: Option<&SessionEnd>) -> MenuFrame<'static> {
     }
 }
 
-// -- the credits/end-poem screen (issue #192) ---------------------------------
+// -- the credits/end-poem screen ---------------------------------
 //
 // **Not vanilla geometry.** `WinScreen.java` draws no widgets at all: it is a
 // full-height scrolling column of text (the end poem, then a real Mojang

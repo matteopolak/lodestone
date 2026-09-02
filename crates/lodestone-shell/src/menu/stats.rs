@@ -1,4 +1,4 @@
-//! The Statistics screen (issue #188), reached from the pause menu's
+//! The Statistics screen, reached from the pause menu's
 //! Statistics button — vanilla's `StatsScreen`.
 //!
 //! ## What is and is not built
@@ -85,7 +85,7 @@ pub const TITLE: &str = "Statistics";
 
 /// `StatsScreen.GENERAL_BUTTON`/`ITEMS_BUTTON`/`MOBS_BUTTON` — `stat.
 /// generalButton`/`stat.itemsButton`/`stat.mobsButton`, verbatim from
-/// `en_us.json`. This screen's tab bar (issue #564).
+/// `en_us.json`. This screen's tab bar.
 pub const TAB_LABELS: [&str; 3] = ["General", "Items", "Mobs"];
 /// [`TAB_LABELS`]'s index of the only tab this screen builds a real list for
 /// (see the module docs above) — General.
@@ -431,7 +431,7 @@ const COLUMN_HALF_W: f32 = 150.0;
 const VALUE_RIGHT_MARGIN: f32 = 10.0;
 const NAME_LEFT_INSET: f32 = 4.0;
 
-/// This screen's header height (issue #564) — **not**
+/// This screen's header height — **not**
 /// [`options::SUB_HEADER_HEIGHT`], which is `HeaderAndFooterLayout`'s default
 /// 33 px title band and is not what this screen uses. `StatsScreen.
 /// repositionElements` calls `this.layout.setHeaderHeight(tabAreaTop)`, where
@@ -453,7 +453,7 @@ pub fn band_top() -> f32 {
     HEADER_HEIGHT + options::LIST_TOP_INSET
 }
 
-/// This screen's [`widget::ListSpec`] (issue #445), the one declaration the
+/// This screen's [`widget::ListSpec`], the one declaration the
 /// scrollbar, the wheel and the row placement all read.
 ///
 /// `top` is [`HEADER_HEIGHT`] rather than [`band_top`]: the spec's band is the
@@ -478,7 +478,7 @@ pub fn list_spec(len: usize, scroll: f32) -> widget::ListSpec {
 /// own text: every row is a pair of [`super::render::MenuLabel`]s at this y,
 /// not a [`super::render::MenuRow`]/[`Slot`].
 ///
-/// **The offset is pixels** (issue #445). This used to be
+/// **The offset is pixels**. This used to be
 /// `band_top + (row - first) * ROW_H` against a `first: usize` row index,
 /// which structurally could not express a half-scrolled row. `scroll.floor()`
 /// matches [`widget::ScrollList::row_top`]'s single `(int)` truncation —
@@ -507,7 +507,7 @@ pub fn general_row_colour(index: usize) -> [f32; 4] {
 /// control.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct StatsNav {
-    /// Scroll offset in **pixels** (issue #445), not a row index.
+    /// Scroll offset in **pixels**, not a row index.
     ///
     /// `Eq` came off this derive when the field changed type, and that is the
     /// point rather than a cost: a row-index offset is always a multiple of
@@ -669,7 +669,7 @@ impl StatsNav {
 pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
     let stats = general_rows(snapshot);
 
-    // **Every** row is emitted, not a `[first..end]` window (issue #445). The
+    // **Every** row is emitted, not a `[first..end]` window. The
     // slice was what made a partially-scrolled row impossible to express: a
     // row either fitted wholly or was absent. `list_labels` is clipped to the
     // band by `render::draw`, so a row straddling the bottom now paints its
@@ -678,7 +678,7 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
     let mut list_labels = Vec::with_capacity(stats.len() * 2);
     for (i, (caption, value)) in stats.iter().enumerate() {
         let y = row_label_y(i as u16, scroll);
-        // Zebra striping (issue #564) — `GeneralStatisticsList.Entry.
+        // Zebra striping — `GeneralStatisticsList.Entry.
         // extractContent` (`StatsScreen.java`): both the name and the
         // value get the *same* `color`, computed once per row from the
         // row's own displayed index (this loop's `i`, matching vanilla's
@@ -716,7 +716,7 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
         }),
         ..Default::default()
     }];
-    // Vanilla's real tab widget (issue #564), one [`MenuRow`] per
+    // Vanilla's real tab widget, one [`MenuRow`] per
     // [`TAB_LABELS`] entry rather than a `MenuLabel` each — see [`tab_row_rect`]
     // for why `slot` cannot express its geometry. Only General is `enabled`:
     // `StatsScreen.setTabActiveStateAndTooltip` disables a tab whose list is
@@ -946,7 +946,7 @@ mod tests {
         );
     }
 
-    // -- the tab widget (issue #564) -----------------------------------------
+    // -- the tab widget -----------------------------------------
 
     #[test]
     fn the_frame_carries_three_real_tab_rows_and_only_general_is_live() {

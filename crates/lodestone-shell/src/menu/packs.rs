@@ -1,4 +1,4 @@
-//! The Resource Packs screen (issue #415) — vanilla's `PackSelectionScreen`.
+//! The Resource Packs screen — vanilla's `PackSelectionScreen`.
 //!
 //! ## What it is
 //!

@@ -345,7 +345,7 @@ impl Sim {
     }
 
     /// Handle a [`NetUpdate::ChunkUnloaded`] signal: drop every GPU section the
-    /// column at `(cx, cz)` still owns (issue #479).
+    /// column at `(cx, cz)` still owns.
     ///
     /// Deliberately *not* a `terrain_and_world` call, unlike every other method
     /// in this cluster: [`TerrainMesh::forget_column`] takes no store, because

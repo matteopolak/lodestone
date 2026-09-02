@@ -2731,7 +2731,7 @@ fn disconnect_reason_without_a_language_table_falls_back_to_the_raw_key() {
     }
 }
 
-/// The proof (issue #68): a real translation key reaches `Screen::Error`
+/// The proof: a real translation key reaches `Screen::Error`
 /// as the real English vanilla ships for it, not as the raw key. The
 /// expected string is not this test's own formatter's output — it is
 /// copied verbatim from the real vanilla `en_us.json`
@@ -3379,7 +3379,7 @@ fn game_info_chat_folds_into_the_action_bar_not_the_feed() {
     );
 }
 
-/// The held-item name highlight (issue #126) end to end: selecting an
+/// The held-item name highlight end to end: selecting an
 /// item's name reaches [`Sim::held_item_overlay`] — the accessor
 /// `app.rs`'s `hud_frame.held_item = self.sim.held_item_overlay()` reads
 /// every frame — and, the property `docs/held-item-name-tooltip.md`
@@ -4017,7 +4017,7 @@ fn tick_nearby_entities_keeps_a_boat_as_a_hard_collider_without_making_it_a_crow
 }
 
 // -----------------------------------------------------------------------
-// Local placement prediction (issue #381)
+// Local placement prediction
 // -----------------------------------------------------------------------
 
 /// The state ids below are transcribed from
@@ -4810,7 +4810,7 @@ fn begin_attack_swings_the_arm_on_a_demo_world_miss() {
     let peak = peak_swing_over(&mut sim, 10);
     assert!(
         peak > 0.4,
-        "a miss must still swing the arm (issue #72), progress peaked at {peak}"
+        "a miss must still swing the arm, progress peaked at {peak}"
     );
 }
 
@@ -6067,7 +6067,7 @@ fn end_use_live_sends_nothing_with_no_prior_press() {
     assert!(sent_again.is_empty(), "still nothing on a repeated release");
 }
 
-/// `ItemUseEffects`'s real writer (issue #671): before this, the component
+/// `ItemUseEffects`'s real writer: before this, the component
 /// existed, was read by `compute_movement_intent`, and had zero production
 /// writers — every query resolved `None` and the use-item slowdown/sprint
 /// veto were both permanently inert. `use_item_live` must now resolve the
@@ -7955,7 +7955,7 @@ fn a_real_text_display_folded_through_ingest_and_extract_reaches_sim_display_dra
     );
 }
 
-// -- world border + spawn point + game rules (issue #436) --------------
+// -- world border + spawn point + game rules --------------
 //
 // `SessionWorldBorder`, `SessionSpawnPoint` and `SessionGameRules` were
 // folded, reset on quit-to-title and gated through the real
