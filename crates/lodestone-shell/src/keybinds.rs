@@ -20,47 +20,47 @@
 //!
 //! Both are read out of the decompiled 26.2 client, **not** from memory:
 //!
-//! - Action names and categories: `Options.java`, which declares every
-//!   `KeyMapping` with its name, GLFW keysym and `KeyMapping.Category`.
-//! - Category order: `KeyMapping.java`. `Category.SORT_ORDER` is
+//! - Action names and categories: vanilla's own persisted-options declarations, which declares every
+//!   key binding with its name, GLFW keysym and category.
+//! - Category order: vanilla's own key-binding class. `Category.SORT_ORDER` is
 //!   *registration* order, and it is **not** alphabetical or intuitive —
 //!   `MISC` comes second, before `MULTIPLAYER`, `GAMEPLAY` and `INVENTORY`.
 //!   [`Category::SORT_ORDER`] reproduces it because that is the order vanilla's
 //!   Controls screen groups by.
-//! - Persisted binding names: `InputConstants.java`'s `addKey` table
+//! - Persisted binding names: vanilla's own input-constants `addKey` table
 //!   (`key.keyboard.w`, `key.mouse.left`, `key.keyboard.left.shift`, …).
-//! - The save-line shape: `Options.java` writes each mapping as
+//! - The save-line shape: vanilla's own persisted-options declarations write each mapping as
 //!   `key_<name>` → `saveString()`.
 //!
 //! ## Deliberate divergences from vanilla, and why
 //!
-//! 1. **F3 *is* a real `KeyMapping` in 26.2.** This was worth checking rather
+//! 1. **F3 *is* a real key binding in 26.2.** This was worth checking rather
 //!    than assuming: in older versions the debug keys were handled inline in
-//!    `KeyboardHandler`'s debug path, but 26.2 declares
-//!    `keyDebugOverlay = new KeyMapping("key.debug.overlay", KEYSYM, 292,
-//!    Category.DEBUG, -2)` and `KeyboardHandler` dispatches
-//!    it through `KeyMapping::matches` like any other binding
+//!    the keyboard handler's debug path, but 26.2 declares
+//!    a real debug-overlay key binding at keysym 292, debug category,
+//!    and the keyboard handler dispatches
+//!    it through the ordinary key-matching path like any other binding
 //!   . So routing F3 through this table is
 //!    vanilla-*correct*, not a divergence. [`Category::Debug`] exists for it.
 //!
 //!    **And so are the F3 *chords*, which is the opposite of what this file
-//!    used to assume.** `Options.java` declares `keyDebugShowHitboxes`,
+//!    used to assume.** Vanilla's own persisted-options declarations declares `keyDebugShowHitboxes`,
 //!    `keyDebugShowChunkBorders`, `keyDebugShowAdvancedTooltips`,
 //!    `keyDebugSpectate`, `keyDebugSwitchGameMode`, `keyDebugFocusPause` and
-//!    `keyDebugCopyLocation` as `Category.DEBUG` `KeyMapping`s, collects them
+//!    `keyDebugCopyLocation` as debug-category key bindings, collects them
 //!    in `debugKeys`, and folds that array into `keyMappings` — the one
-//!    vanilla persists and the Controls screen lists. `KeyboardHandler.
-//!    handleDebugKeys` then asks each of them `matches(event)`. All seven are
+//!    vanilla persists and the Controls screen lists. Vanilla's own
+//!    debug-key handling then asks each of them whether it matches the event. All seven are
 //!    in this table for that reason. Two chords are **not**, and both are
 //!    Lodestone-only rather than ports: `Shift+F3` (the profiler pie chart's
 //!    visibility, which vanilla has no mapping for) and the chart's number-row
-//!    navigation — vanilla's own four chart chords are `KeyMapping`s with a
+//!    navigation — vanilla's own four chart chords are key bindings with a
 //!    `clashContext`, a concept this table has no equivalent of, and without
 //!    one nine digit actions would report a permanent conflict against the
 //!    nine hotbar keys they share a keysym with.
 //!
-//! 2. **Escape is genuinely not a `KeyMapping`.** Vanilla handles it in
-//!    `Screen`/`KeyboardHandler` directly, so it cannot be rebound there. We
+//! 2. **Escape is genuinely not a key binding.** Vanilla handles it in
+//!    its own screen/keyboard-handler code directly, so it cannot be rebound there. We
 //!    route it through the table as [`InputAction::Pause`] because the user
 //!    asked for nothing hardcoded and a Controls menu should be able to display
 //!    it. **Hazard:** rebinding it away leaves no gameplay route to the pause
@@ -68,8 +68,8 @@
 //!
 //! 3. **Menu navigation and text editing stay literal.** Arrow keys, Enter,
 //!    Backspace and Delete in `app.rs`'s `menu_key_for`/`handle_chat_key` are
-//!    *not* in this table, matching vanilla: those are `Screen`-level keyboard
-//!    handling, not `KeyMapping`s, and a rebindable "move the menu cursor down"
+//!    *not* in this table, matching vanilla: those are screen-level keyboard
+//!    handling, not key bindings, and a rebindable "move the menu cursor down"
 //!    is not a thing vanilla's Controls screen offers either. The boundary is
 //!    "gameplay and world bindings are rebindable; UI chrome is not".
 //!
@@ -78,7 +78,7 @@
 //!    on `F` — a free-cam/noclip developer affordance with no vanilla
 //!    counterpart. That fix deleted it (vanilla's `/gamemode creative` plus
 //!    That fix's real double-tap-jump flight cover it), which freed `F` for vanilla's
-//!    actual binding: `key.swapOffhand`, `Options.java`, GLFW keysym 70.
+//!    actual binding: `key.swapOffhand`, vanilla's own persisted-options declarations, GLFW keysym 70.
 //!
 //!    That collision was a real blocker, not a tidiness complaint — adding
 //!    `SwapOffhand` on `F` alongside `ToggleFly` turned
@@ -101,13 +101,13 @@
 //!      `ServerboundPlayerActionPacket` / `SWAP_ITEM_WITH_OFFHAND`
 //!      — **no slot, no hit test, no container**.
 //!      Reached through `KeyOutcome::SwapOffhand`, guarded on
-//!      `!player.isSpectator()` and sent with no local prediction, because
-//!      vanilla performs none either (the server does the exchange:
-//!      `ServerGamePacketListenerImpl.java`).
+//!      the player not being a spectator and sent with no local prediction, because
+//!      vanilla performs none either (the server does the exchange).
 //!
 //!    The two arms also ask in **different orders relative to the number keys**,
-//!    which is not an inconsistency: `checkHotbarKeyPressed` asks the off-hand
-//!    key first, `Minecraft.handleKeybinds` asks the hotbar keys first
+//!    which is not an inconsistency: vanilla's own container-screen hotbar-swap
+//!    key handling asks the off-hand
+//!    key first, vanilla's own client-side key handling asks the hotbar keys first
 //!    (`:1873` vs `:1900`). It only shows if someone rebinds the off-hand key
 //!    onto a digit.
 //!
@@ -124,7 +124,7 @@
 //! the key left of `S` "w" regardless of what is printed on it, so a Controls
 //! menu built on [`Binding::label`] will show "W" to an AZERTY user pressing the
 //! key marked Z. Vanilla has the same tension and resolves it the same way
-//! (`InputConstants.Type.KEYSYM` is GLFW's layout-independent keysym). Fixing
+//! (vanilla's own keysym input type is GLFW's layout-independent keysym). Fixing
 //! the *label* means asking the platform for the layout-dependent character for
 //! a physical key at display time — winit exposes that as
 //! `KeyEvent::logical_key`/`text`, but only on a real event, so a Controls menu
@@ -156,7 +156,7 @@ use lodestone_controller::Action;
 
 /// The group a binding is listed under in a Controls menu.
 ///
-/// Mirrors `KeyMapping.Category`. All eight vanilla
+/// Mirrors vanilla's own key-binding category. All eight vanilla
 /// categories are present even though this client only populates six, so that
 /// adding (say) a creative hotbar-save binding later does not also require
 /// touching this enum and the menu's grouping at the same time.
@@ -174,7 +174,7 @@ pub enum Category {
 
 impl Category {
     /// Vanilla's `Category.SORT_ORDER` — **registration** order from
-    /// `KeyMapping.java`, not alphabetical and not the order a reader
+    /// vanilla's own key-binding class, not alphabetical and not the order a reader
     /// would guess. `Misc` really is second. A Controls menu should walk this
     /// rather than sorting the enum.
     pub const SORT_ORDER: [Category; 8] = [
@@ -234,7 +234,7 @@ pub enum InputAction {
     Attack,
     /// Use / place.
     Use,
-    /// Vanilla's `key.pickItem` (`Options.java`, `Type.MOUSE` button `2`,
+    /// Vanilla's `key.pickItem` (vanilla's own persisted-options declarations, mouse-button type, button `2`,
     /// category `GAMEPLAY`). Middle-click (or, once rebound, a key) requests
     /// the item under the crosshair be placed in the hotbar.
     ///
@@ -246,7 +246,7 @@ pub enum InputAction {
     /// PickItem` arm (`container.rs`) was built and tested with **no**
     /// producer for the *keyboard* form of the same screen — see
     /// [`crate::app::KeyOutcome::ContainerPickItem`]. With no screen open,
-    /// vanilla's `Minecraft.pickBlockOrEntity`
+    /// vanilla's own pick-block-or-entity handling
     /// switches on the current `HitResult`: `ClientAction::
     /// PickItemFromEntity` when the crosshair is over an entity,
     /// `ClientAction::PickItemFromBlock` when it is over a block, nothing on
@@ -273,10 +273,10 @@ pub enum InputAction {
     /// **Two mechanisms depending on context, the same shape as
     /// [`Self::SwapOffhand`].** With a container screen open and a slot
     /// hovered, it is a `ContainerInput::Throw` click against that slot
-    /// (`AbstractContainerScreen.java`, gated on `hoveredSlot != null
+    /// (vanilla's own container-screen key handling, gated on `hoveredSlot != null
     /// && hoveredSlot.hasItem()`, not an empty cursor); with no screen open it
     /// is a bare `ClientAction::DropSelectedItem`/`DropSelectedItemStack`
-    /// (`Minecraft.handleKeybinds`, `PLAYER_ACTION`/`DROP_ITEM`). `app.rs`'s
+    /// (vanilla's own client-side key handling, `PLAYER_ACTION`/`DROP_ITEM`). `app.rs`'s
     /// `resolve_key` routes the two from different arms — see
     /// [`crate::app::KeyOutcome::ContainerDrop`]/[`crate::app::KeyOutcome::Drop`].
     Drop,
@@ -296,26 +296,26 @@ pub enum InputAction {
     /// Hold to show the player list.
     PlayerList,
     // -- misc -------------------------------------------------------------
-    /// Vanilla's `key.screenshot` (`Options.java`, GLFW keysym `291` =
+    /// Vanilla's `key.screenshot` (vanilla's own persisted-options declarations, GLFW keysym `291` =
     /// F2, category `MISC`).
     ///
     /// **The odd one out: purely local, no packet.** Every other action in
     /// this enum ends at a `ClientAction`/container `Click`; this one ends at
-    /// a file. Vanilla's `Screenshot.grab` copies
+    /// a file. Vanilla's own screenshot-grab copies
     /// the main render target's colour texture to a CPU buffer and writes it
     /// as a PNG to `<gameDirectory>/screenshots/`, named
-    /// `Util.getFilenameFormattedDateTime()` (`yyyy-MM-dd_HH.mm.ss`, the
+    /// by vanilla's own filename-formatted-date-time helper (`yyyy-MM-dd_HH.mm.ss`, the
     /// system clock at capture time) with a `_2`, `_3`, … suffix appended on
-    /// a same-second collision (`Screenshot.getFile`, `:136-148`) — never
+    /// a same-second collision (vanilla's own get-file lookup) — never
     /// overwriting an existing file. See [`crate::app::KeyOutcome::
     /// Screenshot`] for the capture itself, which needs the GPU device/
     /// surface texture and so lives in `gpu.rs`, not here.
     ///
     /// **Not modelled: the Control-held panorama variant.**
-    /// `Minecraft.handleGlobalKeyPress` passes `controlDown` straight to
-    /// `Screenshot.grab(this, controlDown)`, which only takes the
+    /// Vanilla's own global-key-press handling passes `controlDown` straight to
+    /// its own screenshot-grab, which only takes the
     /// four-angle `panorama_0..3.png` branch when
-    /// `SharedConstants.DEBUG_PANORAMA_SCREENSHOT` is also true — a
+    /// a build-time debug-panorama-screenshot flag is also true — a
     /// developer-only flag vanilla ships `false` in every release build. A
     /// normal player's Ctrl+F2 is byte-identical to a plain F2, so this
     /// action carries no `ctrl` payload; the consumer may still read the
@@ -323,7 +323,7 @@ pub enum InputAction {
     /// variant, but nothing here requires it to.
     ///
     /// **Not modelled: `handleGlobalKeyPress`'s screen-independence.**
-    /// Vanilla checks this key *outside* `Screen.keyPressed` entirely, so a
+    /// Vanilla checks this key *outside* its own screen key-handling entirely, so a
     /// screenshot can be taken from the pause menu or an open inventory.
     /// This port routes it through [`crate::app::resolve_key`] like every
     /// other action, which the menu/chat/container gates swallow first — the
@@ -351,12 +351,12 @@ pub enum InputAction {
     DebugOverlay,
     /// F3+B — `key.debug.showHitboxes`, GLFW 66.
     ///
-    /// **The seven chords below are `KeyMapping`s in 26.2, checked in the jar
-    /// rather than assumed.** `Options.java` declares each one with a
-    /// `Category.DEBUG` and puts them in `debugKeys`, which is folded into
+    /// **The seven chords below are real key bindings in 26.2, checked in the jar
+    /// rather than assumed.** Vanilla's own persisted-options declarations declare each one with a
+    /// debug category and puts them in `debugKeys`, which is folded into
     /// `keyMappings` — the array vanilla persists and the Controls screen
-    /// lists — and `KeyboardHandler.handleDebugKeys` dispatches every one
-    /// through `KeyMapping::matches(event)`, not through a literal keysym.
+    /// lists — and vanilla's own debug-key handling dispatches every one
+    /// through its own key-matching check, not through a literal keysym.
     /// So a rebindable F3+B is vanilla-*correct*; hardcoding it was the
     /// divergence. See [`crate::app::KeyGate::debug_held`] for why the F3
     /// *modifier* itself stays a gate flag rather than becoming an eighth
@@ -379,7 +379,8 @@ pub enum InputAction {
 
 impl InputAction {
     /// Every action, in declaration order. Declaration order is grouped by
-    /// category and, within a category, follows `Options.java`'s own
+    /// category and, within a category, follows vanilla's own persisted-options
+    /// declarations' own
     /// declaration order — so walking `ALL` filtered by [`Category::SORT_ORDER`]
     /// reproduces vanilla's Controls-screen ordering without a sort.
     pub const ALL: [InputAction; 36] = [
@@ -476,7 +477,7 @@ impl InputAction {
         InputAction::ALL.into_iter().find(|a| a.name() == name)
     }
 
-    /// The Controls-menu group. Matches the `KeyMapping.Category` vanilla gives
+    /// The Controls-menu group. Matches the category vanilla gives
     /// the corresponding mapping.
     #[must_use]
     pub fn category(self) -> Category {
@@ -521,14 +522,14 @@ impl InputAction {
     /// Vanilla's default binding.
     ///
     /// Every keyboard default is the winit [`KeyCode`] for the GLFW keysym
-    /// `Options.java` declares, and every mouse default is the
-    /// `InputConstants.Type.MOUSE` button index it declares. The GLFW number is
+    /// vanilla's own persisted-options declarations declares, and every mouse default is the
+    /// mouse-button index it declares. The GLFW number is
     /// named in each comment so the mapping is checkable against the source
     /// without trusting this table.
     #[must_use]
     pub fn default_binding(self) -> Binding {
         match self {
-            // `Options.java` — 87/83/65/68/32/340/341.
+            // vanilla's own persisted-options declarations — 87/83/65/68/32/340/341.
             InputAction::Forward => Binding::Key(KeyCode::KeyW),
             InputAction::Back => Binding::Key(KeyCode::KeyS),
             InputAction::Left => Binding::Key(KeyCode::KeyA),
@@ -536,17 +537,17 @@ impl InputAction {
             InputAction::Jump => Binding::Key(KeyCode::Space),
             InputAction::Sneak => Binding::Key(KeyCode::ShiftLeft),
             InputAction::Sprint => Binding::Key(KeyCode::ControlLeft),
-            // `Options.java` — `Type.MOUSE` 0 and 1. Note the *order*
+            // vanilla's own persisted-options declarations — mouse-button type, buttons 0 and 1. Note the *order*
             // in the source is `keyUse` (button 1) then `keyAttack` (button 0).
             InputAction::Attack => Binding::Mouse(MouseButton::Left),
             InputAction::Use => Binding::Mouse(MouseButton::Right),
-            // `Options.java` — `Type.MOUSE` 2.
+            // vanilla's own persisted-options declarations — mouse-button type, button 2.
             InputAction::PickItem => Binding::Mouse(MouseButton::Middle),
-            // `Options.java` — 69, 70 and 81.
+            // vanilla's own persisted-options declarations — 69, 70 and 81.
             InputAction::Inventory => Binding::Key(KeyCode::KeyE),
             InputAction::SwapOffhand => Binding::Key(KeyCode::KeyF),
             InputAction::Drop => Binding::Key(KeyCode::KeyQ),
-            // `Options.java` — 49..57, i.e. the number row, not the keypad.
+            // vanilla's own persisted-options declarations — 49..57, i.e. the number row, not the keypad.
             InputAction::Hotbar1 => Binding::Key(KeyCode::Digit1),
             InputAction::Hotbar2 => Binding::Key(KeyCode::Digit2),
             InputAction::Hotbar3 => Binding::Key(KeyCode::Digit3),
@@ -556,19 +557,19 @@ impl InputAction {
             InputAction::Hotbar7 => Binding::Key(KeyCode::Digit7),
             InputAction::Hotbar8 => Binding::Key(KeyCode::Digit8),
             InputAction::Hotbar9 => Binding::Key(KeyCode::Digit9),
-            // `Options.java` — 84/47/258.
+            // vanilla's own persisted-options declarations — 84/47/258.
             InputAction::Chat => Binding::Key(KeyCode::KeyT),
             InputAction::Command => Binding::Key(KeyCode::Slash),
             InputAction::PlayerList => Binding::Key(KeyCode::Tab),
-            // `Options.java` — 291.
+            // vanilla's own persisted-options declarations — 291.
             InputAction::Screenshot => Binding::Key(KeyCode::F2),
-            // `Options.java` — 294.
+            // vanilla's own persisted-options declarations — 294.
             InputAction::TogglePerspective => Binding::Key(KeyCode::F5),
             // No vanilla counterpart (Escape is not a `KeyMapping`); GLFW 256.
             InputAction::Pause => Binding::Key(KeyCode::Escape),
-            // `Options.java` — 292.
+            // vanilla's own persisted-options declarations — 292.
             InputAction::DebugOverlay => Binding::Key(KeyCode::F3),
-            // `Options.java`'s `debugKeys` — 66/71/72/78/293/80/67.
+            // vanilla's own persisted-options declarations's `debugKeys` — 66/71/72/78/293/80/67.
             InputAction::DebugShowHitboxes => Binding::Key(KeyCode::KeyB),
             InputAction::DebugShowChunkBorders => Binding::Key(KeyCode::KeyG),
             InputAction::DebugShowAdvancedTooltips => Binding::Key(KeyCode::KeyH),
@@ -631,24 +632,24 @@ impl InputAction {
 ///
 /// ## Why there is no `Scroll` variant
 ///
-/// Checked rather than assumed. Vanilla's `InputConstants.Type` is exactly
-/// `KEYSYM`, `SCANCODE` and `MOUSE` — there is
-/// no scroll type, so no vanilla `KeyMapping` can be bound to a wheel direction.
-/// The one thing this client does with the wheel is cycle the hotbar, which
-/// vanilla also handles outside the mapping table (in `MouseHandler`, not as a
-/// `KeyMapping`), so nothing in the shell needs it. Adding a
-/// `Scroll(ScrollDirection)` variant later is a local change: the persisted
-/// format is a string, [`Binding::parse`] already returns `None` for names it
-/// does not know, and unknown names fall back to the default rather than
-/// failing the load.
+/// Checked rather than assumed. Vanilla's own input-source classification has
+/// exactly three kinds of binding target — a named keysym, a raw scancode,
+/// and a mouse button — there is no scroll type, so no vanilla key binding
+/// can be bound to a wheel direction. The one thing this client does with the
+/// wheel is cycle the hotbar, which vanilla also handles outside the binding
+/// table (as part of its mouse handling, not as a bindable key), so nothing
+/// in the shell needs it. Adding a `Scroll(ScrollDirection)` variant later is
+/// a local change: the persisted format is a string, [`Binding::parse`]
+/// already returns `None` for names it does not know, and unknown names fall
+/// back to the default rather than failing the load.
 ///
-/// `SCANCODE` is likewise absent: it is vanilla's fallback for keys GLFW cannot
-/// name, and winit's [`KeyCode`] already *is* a physical-position identity, so
-/// there is no second identity to fall back to.
+/// A raw scancode kind is likewise absent: it is vanilla's fallback for keys
+/// GLFW cannot name, and winit's [`KeyCode`] already *is* a physical-position
+/// identity, so there is no second identity to fall back to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Binding {
-    /// Bound to nothing. Vanilla's `InputConstants.UNKNOWN`; such a binding
-    /// never matches any input.
+    /// Bound to nothing. Matches vanilla's own unbound-key sentinel; such a
+    /// binding never matches any input.
     Unbound,
     /// A **physical** key position — see the module docs on non-QWERTY layouts.
     Key(KeyCode),
@@ -730,8 +731,8 @@ impl fmt::Display for Binding {
 
 /// winit [`KeyCode`] ↔ persisted-name table.
 ///
-/// The vanilla-named entries are transcribed from `InputConstants.java`
-/// verbatim; the `winit.*`-namespaced tail covers physical keys winit can report
+/// The vanilla-named entries are transcribed from vanilla's own key-name
+/// table verbatim; the `winit.*`-namespaced tail covers physical keys winit can report
 /// that GLFW/vanilla has no name for, so that saving a binding to one is
 /// lossless instead of quietly reverting on the next load.
 ///
@@ -1166,7 +1167,7 @@ mod tests {
     // -- defaults, against the decompiled source ---------------------------
     //
     // The expected values below are **GLFW keysyms transcribed from
-    // `Options.java`**, paired with the winit `KeyCode` for that
+    // vanilla's own persisted-options declarations**, paired with the winit `KeyCode` for that
     // physical key. They do not come from `default_binding`, so a mistake there
     // cannot also be the thing this test asserts. `CLAUDE.md`'s rule: an
     // expected value must originate outside the code under test.
@@ -1244,11 +1245,11 @@ mod tests {
             (InputAction::Hotbar7, 55, Category::Inventory),
             (InputAction::Hotbar8, 56, Category::Inventory),
             (InputAction::Hotbar9, 57, Category::Inventory),
-            // `Options.java` — a real `KeyMapping` in 26.2, category DEBUG.
+            // vanilla's own persisted-options declarations — a real key binding in 26.2, category debug.
             (InputAction::DebugOverlay, 292, Category::Debug),
-            // `Options.java`'s `debugKeys`, every one a `Category.DEBUG`
-            // `KeyMapping` folded into `keyMappings` and dispatched through
-            // `KeyMapping::matches` by `KeyboardHandler.handleDebugKeys` —
+            // The debug-only bindings below are, in vanilla, folded into the
+            // ordinary binding table and dispatched through the same
+            // per-frame key-matching pass as every other binding —
             // which is why they are in this table rather than literal
             // `KeyCode`s in `resolve_key`.
             (InputAction::DebugShowHitboxes, 66, Category::Debug),
@@ -1274,9 +1275,9 @@ mod tests {
             );
         }
 
-        // The three mouse defaults: `Options.java` declares
-        // `keyUse` as `Type.MOUSE` 1, `keyAttack` as `Type.MOUSE` 0 and
-        // `keyPickItem` as `Type.MOUSE` 2; `InputConstants.java` names
+        // The three mouse defaults: vanilla's own persisted-options declarations declares
+        // `keyUse` as mouse-button type button 1, `keyAttack` as mouse-button type button 0 and
+        // `keyPickItem` as mouse-button type button 2; vanilla's own input-constants module names
         // those `left`, `right` and `middle`.
         assert_eq!(
             InputAction::Attack.default_binding(),
@@ -1429,8 +1430,9 @@ mod tests {
 
     #[test]
     fn categories_are_grouped_in_vanillas_registration_order() {
-        // `KeyMapping.java`. The point of pinning this: the order is
-        // *not* alphabetical and not what a reader would guess — MISC is second.
+        // Matches vanilla's own key-binding registration order. The point of
+        // pinning this: the order is *not* alphabetical and not what a
+        // reader would guess — MISC is second.
         assert_eq!(
             Category::SORT_ORDER.map(Category::id),
             [
@@ -1460,8 +1462,8 @@ mod tests {
         assert_eq!(Keybinds::in_category(Category::Spectator).count(), 0);
         assert_eq!(Keybinds::in_category(Category::Movement).count(), 7);
         // Inventory: `key.inventory`, `key.swapOffhand`, `key.drop`, and the
-        // nine hotbar slots — all twelve of vanilla's `Category.INVENTORY`
-        // mappings.
+        // nine hotbar slots — all twelve of vanilla's own inventory-category
+        // bindings.
         assert_eq!(Keybinds::in_category(Category::Inventory).count(), 12);
         // Misc lost a member to that fix (`key.lodestone.toggleFly` is gone) and
         // gained one back here (`key.screenshot`, that fix): `key.screenshot`,
@@ -1476,8 +1478,8 @@ mod tests {
         // `parse(write(x)) == x` is satisfied by two symmetric misunderstandings
         // (`CLAUDE.md`'s round-trip warning), so the format is pinned against a
         // literal written out by hand from vanilla's own vocabulary — the
-        // `key_key.forward:key.keyboard.w` shape of `Options.java`
-        // and `InputConstants.java`, as JSON.
+        // `key_key.forward:key.keyboard.w` shape of vanilla's own
+        // persisted-options declarations and its own key-name table, as JSON.
         let mut binds = Keybinds::new();
         binds.set(InputAction::Forward, Binding::Key(KeyCode::ArrowUp));
         binds.set(InputAction::Sneak, Binding::Key(KeyCode::ShiftRight));
