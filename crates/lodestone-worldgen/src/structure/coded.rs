@@ -1,30 +1,31 @@
-//! **Coded** structure pieces — the ones whose blocks are Java statements rather
-//! than an `.nbt` template (issue #514's S5).
+//! **Coded** structure pieces — the ones whose blocks are written by code rather
+//! than an `.nbt` template.
 //!
 //! # What it is
 //!
-//! A port of `StructurePiece`'s block-writing helpers (`placeBlock`,
-//! `generateBox`, `fillColumnDown`, the `getWorldX/Y/Z` orientation transform) plus
-//! `ScatteredFeaturePiece`'s two ground-height rules, and on top of them the piece
+//! An implementation of the block-writing helpers a coded piece needs (block
+//! placement, box generation, a downward column walk, the local-to-world
+//! orientation transform) plus
+//! two ground-height rules shared across the scattered-feature-style pieces, and on top of them the piece
 //! generators for `swamp_hut` and `desert_pyramid`.
 //!
 //! # How it works
 //!
-//! Vanilla's coded generators write **into the world** as they walk, from whichever
-//! chunk's `postProcess` reaches them first, reading heights and existing blocks at
+//! A faithful coded generator writes **into the world** as it walks, from whichever
+//! chunk's block-writing pass reaches it first, reading heights and existing blocks at
 //! arbitrary positions and freely crossing chunk borders. Our chunks are generated
 //! independently and memoised, so that is unavailable — the same wall S2 hit for
 //! template piece Y, one step further along.
 //!
 //! So a [`Builder`] accumulates the piece's whole block list **eagerly at start
 //! time**, against [`StartContext`], and `structure_place_stage` clips it per chunk
-//! ([`StructurePiece::blocks`]). `chunkBB` disappears from every signature: a write
-//! that vanilla would have skipped because it was outside the decorating chunk is
+//! ([`StructurePiece::blocks`]). The decorating-chunk clip disappears from every signature: a write
+//! that a per-chunk pass would have skipped because it was outside the decorating chunk is
 //! recorded here and clipped later, which is the same set of blocks in the same
 //! last-write-wins order.
 //!
 //! ```text
-//! Builder::new(west, north, orientation, w, h, d)   <- makeBoundingBox + setOrientation
+//! Builder::new(west, north, orientation, w, h, d)   <- box construction + orientation setup
 //! builder.lowest_ground_height(ctx, offset)?        <- moves the box down onto the terrain
 //! builder.generate_box(...) / place(...) / fill_column_down(ctx, ...)
 //! builder.finish(piece_id)                          -> StructurePiece
@@ -38,20 +39,20 @@
 //! * **Local coordinates are not world coordinates**, and the mapping depends on
 //!   the piece's orientation ([`Builder::world_x`]). A NORTH piece's local Z counts
 //!   *down* from the box maximum; a WEST piece swaps the axes. Alongside that,
-//!   `setOrientation` gives SOUTH and WEST a `LEFT_RIGHT` **mirror**, which is what
+//!   the orientation transform gives SOUTH and WEST a `LEFT_RIGHT` **mirror**, which is what
 //!   makes `BlockState::mirror`'s stair `shape` handling load-bearing rather than
 //!   the inert ledger row it was for templates.
 //! * **The two ground rules are different functions and the difference matters.**
-//!   `updateHeightPositionToLowestGroundHeight` scans the whole piece box and is
-//!   chunk-independent in vanilla too; `updateAverageGroundHeight` averages over
-//!   *the intersection of the box with the decorating chunk*, so vanilla's own
+//!   The lowest-ground-height rule scans the whole piece box and is
+//!   chunk-independent in a faithful implementation too; the average-ground-height rule averages over
+//!   *the intersection of the box with the decorating chunk*, so a faithful implementation's own
 //!   answer depends on which chunk got there first. [`Builder::average_ground_height`]
 //!   deliberately averages over the **whole box** — see its doc.
 //!
 //! # Dependencies
 //!
 //! [`StartContext`] for terrain heights and column contents, and
-//! [`super::template::BlockState`] for the mirror/rotate transform `placeBlock`
+//! [`super::template::BlockState`] for the mirror/rotate transform block placement
 //! applies.
 
 use std::sync::Arc;
@@ -63,23 +64,22 @@ use super::{
     BoundingBox, CodedBlock, HeightmapKind, StartContext, StructurePiece, free_height,
 };
 
-/// A horizontal `Direction`, in `Direction.Plane.HORIZONTAL` order — which is the
-/// order `getRandomHorizontalDirection`'s single `nextInt(4)` indexes.
+/// A horizontal direction, in a fixed order — which is the
+/// order the random-horizontal-direction pick's single draw bounded by 4 indexes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Facing {
-    /// `NORTH`, 2D data value 2.
+    /// North, 2D data value 2.
     North,
-    /// `EAST`, 2D data value 3.
+    /// East, 2D data value 3.
     East,
-    /// `SOUTH`, 2D data value 0.
+    /// South, 2D data value 0.
     South,
-    /// `WEST`, 2D data value 1.
+    /// West, 2D data value 1.
     West,
 }
 
 impl Facing {
-    /// `getRandomHorizontalDirection(random)` — `Util.getRandom(HORIZONTAL.faces,
-    /// random)`, exactly one `nextInt(4)`, over `{NORTH, EAST, SOUTH, WEST}`.
+    /// A uniform pick over `{NORTH, EAST, SOUTH, WEST}`, exactly one draw bounded by 4.
     pub fn random<R: RandomSource>(random: &mut R) -> Self {
         match random.next_int_bounded(4) {
             1 => Self::East,
@@ -89,7 +89,7 @@ impl Facing {
         }
     }
 
-    /// `get2DDataValue()` — the value persisted as a piece's `O`.
+    /// The value persisted as a piece's `O`.
     #[must_use]
     pub fn data_2d(self) -> i32 {
         match self {
@@ -100,17 +100,17 @@ impl Facing {
         }
     }
 
-    /// True when this direction's axis is Z, i.e. `makeBoundingBox` keeps
+    /// True when this direction's axis is Z, i.e. box construction keeps
     /// `(width, depth)` in `(x, z)` rather than swapping them.
     ///
-    /// Also `getOrientation().getAxis() == Axis.Z`, which is how a mineshaft
+    /// Also true exactly when this is how a mineshaft
     /// corridor counts its 5-block sections along the right axis.
     #[must_use]
     pub fn is_z_axis(self) -> bool {
         matches!(self, Self::North | Self::South)
     }
 
-    /// `setOrientation`'s `(mirror, rotation)` pair.
+    /// The orientation's `(mirror, rotation)` pair.
     ///
     /// Not derivable from the facing by any obvious rule — SOUTH mirrors but does
     /// not rotate, WEST does both, EAST only rotates, NORTH neither — so it is a
@@ -138,8 +138,8 @@ pub struct Builder {
 }
 
 impl Builder {
-    /// `ScatteredFeaturePiece`'s constructor: `makeBoundingBox(west, floor, north,
-    /// direction, width, height, depth)` plus `setOrientation(direction)`.
+    /// A scattered-feature-style piece's constructor: the box and orientation
+    /// setup shared by these coded piece kinds.
     ///
     /// `floor` is the literal 64 every scattered piece starts at, before
     /// [`Self::lowest_ground_height`] or [`Self::average_ground_height`] moves it.
@@ -153,7 +153,7 @@ impl Builder {
         height: i32,
         depth: i32,
     ) -> Self {
-        // The axis swap is the whole of `makeBoundingBox`: an X-axis orientation
+        // The axis swap is the whole of the box construction: an X-axis orientation
         // lays the piece out `depth` blocks along x and `width` along z.
         let (dx, dz) = if orientation.is_z_axis() {
             (width, depth)
@@ -208,29 +208,29 @@ impl Builder {
         true
     }
 
-    /// `updateAverageGroundHeight(level, chunkBB, offset)`, made
+    /// The average-ground-height rule, made
     /// **order-independent**.
     ///
     /// # The deviation, and why it is the right one
     ///
-    /// Vanilla averages the heightmap over *the intersection of the piece box with
+    /// A faithful implementation averages the heightmap over *the intersection of the piece box with
     /// the decorating chunk*, so its answer depends on which of the chunks a hut
-    /// spans generated first — a real order dependence in vanilla, not an artefact
-    /// of our pipeline. There is therefore no "vanilla answer" to reproduce: there
-    /// are up to four of them for one hut, and vanilla resolves the ambiguity by
-    /// memoising whichever it computed first into `HPos`.
+    /// spans generated first — a real order dependence in a faithful implementation, not an artefact
+    /// of our pipeline. There is therefore no single deterministic answer to reproduce: there
+    /// are up to four of them for one hut, and a faithful implementation resolves the ambiguity by
+    /// memoising whichever it computed first into a per-piece cached value.
     ///
     /// This averages over the **whole box**, which is:
     ///
-    /// * the same value vanilla computes whenever the piece lies inside one chunk
+    /// * the same value a faithful implementation computes whenever the piece lies inside one chunk
     ///   (a 7×9 hut placed from the chunk's min corner spans at most two chunks, so
     ///   this is a real fraction of cases, not a degenerate one);
-    /// * the arithmetic mean of vanilla's per-chunk answers weighted by area, so it
+    /// * the arithmetic mean of the per-chunk answers weighted by area, so it
     ///   never sits outside their range;
     /// * a pure function of the seed and the chunk, which is the property the whole
     ///   engine depends on. A hut whose Y depended on visit order would shear along
     ///   a chunk border, and the two halves would be at different heights on
-    ///   *reload* as well, since only one `HPos` is persisted.
+    ///   *reload* as well, since only one cached value is persisted.
     ///
     /// Recorded on the ledger as `coded:average_ground_height`.
     pub fn average_ground_height(&mut self, ctx: &dyn StartContext, offset: i32) -> bool {
@@ -294,11 +294,11 @@ impl Builder {
         [self.world_x(x, z), self.world_y(y), self.world_z(x, z)]
     }
 
-    /// `placeBlock(level, state, x, y, z, chunkBB)` — mirror, then rotate, then
+    /// Places one block — mirror, then rotate, then
     /// record.
     ///
-    /// `canBeReplaced` is `true` for every piece here (only mineshaft overrides it)
-    /// and the `chunkBB` test becomes the clip at write time.
+    /// The replaceability check is `true` for every piece here (only mineshaft overrides it)
+    /// and the decorating-chunk clip test becomes the clip at write time.
     pub fn place(&mut self, state: &BlockState, x: i32, y: i32, z: i32) {
         let transformed = state.mirror(self.mirror).rotate(self.rotation);
         let pos = self.world_pos(x, y, z);
@@ -308,7 +308,7 @@ impl Builder {
         });
     }
 
-    /// `generateBox(..., edge, fill, skipAir = false)`.
+    /// Generates a hollow-or-solid box, edge blocks distinct from fill blocks.
     ///
     /// A block is `edge` when it is on any face of the box and `fill` otherwise —
     /// so a 1-thick box is entirely `edge`, which is how the same call spells both
@@ -336,10 +336,10 @@ impl Builder {
         }
     }
 
-    /// `generateAirBox(level, chunkBB, x0, y0, z0, x1, y1, z1)`.
+    /// Fills a box with air.
     ///
-    /// Not `generate_box` with air for both arguments: it is a distinct vanilla
-    /// method and spelling it out keeps the transcription line-for-line, which is
+    /// Not `generate_box` with air for both arguments: it is a distinct
+    /// reference helper and spelling it out keeps the implementation line-for-line, which is
     /// the property that makes a 300-statement piece reviewable at all.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_air_box(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32) {
@@ -353,20 +353,20 @@ impl Builder {
         }
     }
 
-    /// `generateBox(..., skipAir = false, random, selector)` — the
-    /// [`StructurePiece.BlockSelector`] overload.
+    /// A box filled by a per-position block selector.
     ///
-    /// **The draw count is the specification.** `selector.next` is called for
-    /// *every* position in the box, before `placeBlock`, so a box of `n` positions
+    /// **The draw count is the specification.** The selector's own next-block draw
+    /// is called for
+    /// *every* position in the box, before block placement, so a box of `n` positions
     /// consumes exactly `n` selector draws whether or not each write lands inside
     /// the decorating chunk. Skipping a position — for instance to "optimise" a box
     /// that is entirely outside the served chunk — desynchronises the stream for
     /// everything after it.
     ///
-    /// `is_edge` is vanilla's inline
+    /// `is_edge` is the inline test
     /// `y == y0 || y == y1 || x == x0 || x == x1 || z == z0 || z == z1`, which is
     /// the *negation* of [`Self::generate_box`]'s `interior` test — not
-    /// `isInterior`, the unrelated heightmap probe on the same class.
+    /// the unrelated heightmap probe with a similarly-named check.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_box_selected<R: RandomSource>(
         &mut self,
@@ -390,19 +390,21 @@ impl Builder {
         }
     }
 
-    /// `createChest(level, chunkBB, random, x, y, z, lootTable)`.
+    /// A coded piece's own chest placement.
     ///
     /// Three faithfulness notes, each of which would be invisible if it were wrong:
     ///
-    /// * **`createChest` calls `level.setBlock` directly, not `placeBlock`**, so the
+    /// * **Chest placement writes the raw state directly, not through block
+    ///   placement**, so the
     ///   piece's mirror/rotation is *not* applied to the chest — unlike
-    ///   [`Self::create_dispenser`], which does go through `placeBlock`. The state
+    ///   [`Self::create_dispenser`], which does go through block placement. The state
     ///   is pushed raw.
-    /// * `random.nextLong()` is drawn **whenever the chest lands inside the
-    ///   decorating chunk**, and vanilla's `placedMainChest` flag makes that happen
+    /// * The 64-bit draw is drawn **whenever the chest lands inside the
+    ///   decorating chunk**, and a faithful implementation's own placed-main-chest
+    ///   flag makes that happen
     ///   exactly once per piece across all the chunk passes. One draw here, in
-    ///   source order, is the same total.
-    /// * vanilla's facing comes from `StructurePiece.reorient`, which reads the
+    ///   this fixed order, is the same total.
+    /// * a faithful implementation's facing comes from a reorient step, which reads the
     ///   render-solidity of the four horizontal neighbours *of the world as written
     ///   so far*. There is no block-state read on [`StartContext`] and no solidity
     ///   table in this crate, so the default `facing=north` is kept and the
@@ -428,9 +430,9 @@ impl Builder {
         });
     }
 
-    /// `createDispenser(level, chunkBB, random, x, y, z, facing, lootTable)`.
+    /// A coded piece's own dispenser placement.
     ///
-    /// Unlike [`Self::create_chest`] this one *does* route through `placeBlock`, so
+    /// Unlike [`Self::create_chest`] this one *does* route through block placement, so
     /// the dispenser's `facing` is mirrored and rotated with the piece.
     pub fn create_dispenser<R: RandomSource>(
         &mut self,
@@ -455,12 +457,12 @@ impl Builder {
         });
     }
 
-    /// `fillColumnDown(level, state, x, startY, z, chunkBB)` — write downward from
-    /// `startY` while the column is replaceable.
+    /// Writes downward from
+    /// `start_y` while the column is replaceable.
     ///
     /// The one helper that reads the world, through
-    /// [`StartContext::is_replaceable_at`]. The `pos.getY() > level.getMinY() + 1`
-    /// bound is vanilla's and is what stops a stilt over a void column running to
+    /// [`StartContext::is_replaceable_at`]. The `pos.y > min_y + 1`
+    /// bound is what stops a stilt over a void column running to
     /// the bottom of the world.
     pub fn fill_column_down(
         &mut self,
@@ -508,8 +510,8 @@ impl Builder {
             extra_placements: Vec::new(),
             blocks: Some(Arc::new(self.blocks)),
             loot: self.loot,
-            // `Beardifier.java:75`'s `else` branch: a non-pool piece is a rigid box
-            // with `groundLevelDelta` 0 and no junctions. Inert for both structures
+            // The beardifier's fallback branch: a non-pool piece is a rigid box
+            // with a zero ground-level delta and no junctions. Inert for both structures
             // here, whose `terrain_adaptation` is `none`.
             beard: None,
             refine: None,
@@ -517,12 +519,12 @@ impl Builder {
     }
 }
 
-/// A shorthand for the many `Blocks.X.defaultBlockState()`s below.
+/// A shorthand for the many default block states below.
 fn s(spec: &str) -> BlockState {
     BlockState::parse(spec)
 }
 
-/// `SwampHutStructure.generatePieces` → `SwampHutPiece`.
+/// A swamp hut's piece generator.
 ///
 /// The whole piece, minus the witch and the cat: entity spawning at worldgen time
 /// has no driver in this engine, and the gap is on the ledger
@@ -597,17 +599,17 @@ pub fn swamp_hut_pieces<R: RandomSource>(
     vec![b.finish("minecraft:tesw")]
 }
 
-/// `DesertPyramidStructure` → `DesertPyramidPiece`, including the cellar and the
-/// `afterPlace` suspicious-sand pass.
+/// A desert pyramid's piece generator, including the cellar and the
+/// post-placement suspicious-sand pass.
 ///
 /// # Two deviations, both forced and both the same shape
 ///
-/// * Vanilla's cellar `variant` boolean and its collapsed-roof `nextFloat() < 0.33`
-///   come from `level.getRandom()` — the *decorating region's* random, so vanilla's
+/// * A faithful implementation's cellar `variant` boolean and its collapsed-roof draw below 0.33
+///   come from the *decorating region's* random, so a faithful implementation's
 ///   own answer depends on which chunk placed the piece. Both are position-seeded
 ///   here, exactly as [`super::processor::Processor::BlockRot`] is, so two chunks
 ///   placing two halves of one pyramid agree.
-/// * The chests (`createChest` ×4) need block entities and loot tables; the
+/// * The chests (own chest placement ×4) need block entities and loot tables; the
 ///   suspicious sand's own loot table likewise. The **blocks** are placed and the
 ///   contents are on the ledger.
 #[must_use]
@@ -820,25 +822,25 @@ pub fn desert_pyramid_pieces<R: RandomSource>(
         b.place(&chiseled, ox, -10, oz);
         b.place(&cut, ox, -11, oz);
     }
-    // `for (Direction direction : Direction.Plane.HORIZONTAL) { … createChest(10 +
-    // stepX*2, -11, 10 + stepZ*2, DESERT_PYRAMID) }` — the four alcove floors, each
+    // A loop over the four horizontal directions placing a chest at each
+    // alcove floor, each
     // overwriting the `air` the loop above wrote there. **The iteration order is the
-    // specification**, because each chest consumes one `nextLong()`: NORTH, EAST,
+    // specification**, because each chest consumes one 64-bit draw: NORTH, EAST,
     // SOUTH, WEST, i.e. steps (0,-1), (1,0), (0,1), (-1,0).
     for (dx, dz) in [(0, -2), (2, 0), (0, 2), (-2, 0)] {
         b.create_chest(random, 10 + dx, -11, 10 + dz, DESERT_PYRAMID_LOOT);
     }
 
-    // `addCellar`.
+    // The pyramid's underground cellar.
     let (rx, ry, rz) = (16, -4, 13);
-    // `addCellarStairs`: three counterclockwise-rotated stairs plus the sand slope.
-    // `sandStoneStairs.rotate(COUNTERCLOCKWISE_90)` on a default (north-facing)
-    // stair is west-facing.
+    // The cellar's stairs: three counterclockwise-rotated stairs plus the sand slope.
+    // A sandstone stair rotated 90 degrees counterclockwise from its default
+    // (north-facing) orientation is west-facing.
     let ccw = stairs("west");
     b.place(&ccw, 13, -1, 17);
     b.place(&ccw, 14, -2, 17);
     b.place(&ccw, 15, -3, 17);
-    // `level.getRandom().nextBoolean()` — position-seeded here; see the fn doc.
+    // The decorating region's own boolean draw — position-seeded here; see the fn doc.
     let variant = {
         let mut r = lodestone_worldgen_core::rng::LegacyRandomSource::new(
             lodestone_worldgen_core::rng::get_seed(
@@ -859,9 +861,9 @@ pub fn desert_pyramid_pieces<R: RandomSource>(
     b.place(&sandstone, rx, ry + 2, rz + 4);
     b.place(&sand, rx, ry + 1, rz + 4);
 
-    // `addCellarRoom`. Note `skipAir = true` on every `generateBox` here, which in
-    // vanilla means "only overwrite a non-air block". Every one of these positions
-    // is inside the sandstone slab written by the very first `generateBox`, so the
+    // The cellar's room. Note "only overwrite a non-air block" applies to every
+    // box here in a faithful implementation. Every one of these positions
+    // is inside the sandstone slab written by the very first box generated, so the
     // predicate is true throughout and the boxes are unconditional — which is why
     // the eager list needs no world read for them.
     for (x0, y0, z0, x1, y1, z1, state) in [
@@ -880,8 +882,8 @@ pub fn desert_pyramid_pieces<R: RandomSource>(
     ] {
         b.generate_box(x0, y0, z0, x1, y1, z1, state, state);
     }
-    // `placeSandBox` / `placeSand` do **not** place anything: they record candidate
-    // positions for the structure's `afterPlace` suspicious-sand pass. The blocks
+    // The sand-box/sand candidate collection does **not** place anything: it records candidate
+    // positions for the structure's post-placement suspicious-sand pass. The blocks
     // that end up there are all written below.
     let mut candidates: Vec<[i32; 3]> = Vec::new();
     for y in (ry + 1)..=(ry + 3) {
@@ -891,7 +893,7 @@ pub fn desert_pyramid_pieces<R: RandomSource>(
             }
         }
     }
-    // `placeCollapsedRoof(x-2, y+4, z-2, x+2, z+2)`.
+    // The collapsed-roof placement, over the box centred on the cellar.
     let roof_y = ry + 4;
     for x in (rx - 2)..=(rx + 2) {
         for z in (rz - 2)..=(rz + 2) {
@@ -954,17 +956,17 @@ pub fn desert_pyramid_pieces<R: RandomSource>(
     vec![piece]
 }
 
-/// `DesertPyramidPiece.WIDTH`. Public because `SinglePieceStructure`'s
-/// `findGenerationPoint` samples the four corner heights of this footprint
+/// A desert pyramid's footprint width. Public because a single-piece structure's
+/// generation-point search samples the four corner heights of this footprint
 /// *before* any piece exists, and refuses the start outright when the lowest is
 /// below sea level.
 pub const PYRAMID_WIDTH: i32 = 21;
-/// `DesertPyramidPiece.DEPTH`.
+/// A desert pyramid's footprint depth.
 pub const PYRAMID_DEPTH: i32 = 21;
 
-/// A stand-in for `level.getSeed()` inside the pyramid's roof pick.
+/// A stand-in for the world seed inside the pyramid's roof pick.
 ///
-/// `randomCollapsedRoofPos` forks the **world** seed positionally, and the piece
+/// The random collapsed-roof-position pick forks the **world** seed positionally, and the piece
 /// generator does not have it: a start predicate is handed `seed` but the roof pick
 /// happens inside `postProcess`, three layers down. Using a fixed value here makes
 /// the pick a pure function of position, which is the property that matters (it is
@@ -974,12 +976,12 @@ pub const PYRAMID_DEPTH: i32 = 21;
 /// `coded:pyramid_roof_seed` on the ledger.
 const PYRAMID_ROOF_SEED_PLACEHOLDER: i64 = 0;
 
-/// `DesertPyramidStructure.afterPlace` — turn some of the cellar's recorded sand
+/// A desert pyramid's post-placement pass — turn some of the cellar's recorded sand
 /// candidates into suspicious sand and the rest into plain sand.
 ///
-/// Chunk-independent in vanilla already: the candidate set is the whole piece's,
+/// Chunk-independent in a faithful implementation already: the candidate set is the whole piece's,
 /// the shuffle is a positional fork at the piece box's centre, and only the
-/// *writes* are clipped by `chunkBB`. So it maps onto the eager model directly, and
+/// *writes* are clipped by the decorating chunk. So it maps onto the eager model directly, and
 /// the blocks it produces are appended to the piece's list — after everything the
 /// piece itself wrote, which is what makes them win.
 fn after_place_suspicious_sand(
@@ -991,15 +993,15 @@ fn after_place_suspicious_sand(
     let suspicious = "minecraft:suspicious_sand[dusted=0]";
     let plain = "minecraft:sand";
     let mut out: Vec<CodedBlock> = Vec::new();
-    // `placeSuspiciousSand(chunkBB, level, getRandomCollapsedRoofPos())` runs
+    // The guaranteed collapsed-roof suspicious-sand placement runs
     // *before* the shuffled walk, so a roof position that is also a candidate is
     // overwritten by the walk's verdict. Order preserved.
     out.push(CodedBlock {
         pos: collapsed_roof_pos,
         state: suspicious.to_string(),
     });
-    // `SortedArraySet.create(Vec3i::compareTo)` — unique, and sorted by
-    // `Vec3i.compareTo`, which orders by **y, then z, then x**. The order is the
+    // A unique, sorted set — sorted
+    // lexicographically by **y, then z, then x**. The order is the
     // specification: it is the list the shuffle permutes.
     let mut unique: Vec<[i32; 3]> = candidates.to_vec();
     unique.sort_by_key(|p| (p[1], p[2], p[0]));
@@ -1016,8 +1018,8 @@ fn after_place_suspicious_sand(
         .fork_positional()
         .at(centre[0], centre[1], centre[2]);
     super::pool::shuffle(&mut unique, &mut random);
-    // `positionalRandom.nextInt(5, 8)` is `origin + nextInt(bound - origin)`, i.e.
-    // 5..=7 — **not** `nextIntBetweenInclusive(5, 8)`, which would be 5..=8.
+    // A draw over `[5, 8)` is `origin + (draw bounded by bound - origin)`, i.e.
+    // 5..=7 — **not** an inclusive-both-ends draw over `[5, 8]`, which would be 5..=8.
     let mut to_place = i32::min(
         i32::try_from(unique.len()).unwrap_or(i32::MAX),
         random.next_int_bounded(3) + 5,
@@ -1040,36 +1042,36 @@ fn after_place_suspicious_sand(
     piece.blocks = Some(Arc::new(blocks));
 }
 
-/// `JungleTemplePiece.WIDTH`. Public for the same reason
-/// [`PYRAMID_WIDTH`] is: `SinglePieceStructure.findGenerationPoint` samples this
+/// A jungle temple's footprint width. Public for the same reason
+/// [`PYRAMID_WIDTH`] is: a single-piece structure's generation-point search samples this
 /// footprint's four corners *before* any piece exists.
 pub const JUNGLE_WIDTH: i32 = 12;
-/// `JungleTemplePiece.DEPTH`.
+/// A jungle temple's footprint depth.
 pub const JUNGLE_DEPTH: i32 = 15;
 
-/// `JungleTempleStructure` → `JungleTemplePiece` — the whole temple, its two
+/// A jungle temple's piece generator — the whole temple, its two
 /// tripwire/dispenser traps and its piston puzzle.
 ///
 /// # The one deviation, and why the draw *count* still matches
 ///
-/// `postProcess`'s `random` is the **decorating chunk's** feature stream, not the
+/// A faithful block-writing walk's random is the **decorating chunk's** feature stream, not the
 /// start's, and every one of this piece's draws comes from it: **1,522**
-/// `MossStoneSelector.nextFloat()` calls (the summed volume of the 43 selector
-/// `generateBox` call sites, loops expanded) plus four `nextLong()`s for the two
-/// chests and two dispensers. Vanilla is therefore chunk-order dependent here in exactly
+/// moss-stone selector float draws (the summed volume of the 43 selector
+/// box-generation call sites, loops expanded) plus four 64-bit draws for the two
+/// chests and two dispensers. A faithful implementation is therefore chunk-order dependent here in exactly
 /// the way §12.139 records for `desert_pyramid` — a temple spanning two chunks gets
 /// its cobble/mossy pattern from whichever chunk's stream reached each block, and
-/// the four `placed*` booleans mean the container draws happen in whichever pass
-/// first had the container inside `chunkBB`.
+/// the four placed-container flags mean the container draws happen in whichever pass
+/// first had the container inside the decorating chunk's box.
 ///
 /// Resolved the same way `swamp_hut`'s sink and the beached shipwreck's
-/// `nextInt(3)` were: the draws come out of the **structure's own per-chunk
-/// stream**, continuing after the orientation draw, in source order. That stream is
+/// draw bounded by 3 were: the draws come out of the **structure's own per-chunk
+/// stream**, continuing after the orientation draw, in this fixed order. That stream is
 /// per-structure-per-chunk and nothing reads it after this call, so no other
 /// structure's draws move, and the whole temple becomes a pure function of
 /// `(seed, chunk)`. Ledgered as `coded:decoration_random`.
 ///
-/// The *number* and *order* of draws is vanilla's, which is the half that a wrong
+/// The *number* and *order* of draws is a faithful implementation's, which is the half that a wrong
 /// implementation gets wrong silently: a box whose selector is only consulted for
 /// positions inside the served chunk still produces a plausible temple.
 #[must_use]
@@ -1080,8 +1082,8 @@ pub fn jungle_pyramid_pieces<R: RandomSource>(
     ctx: &dyn StartContext,
     random: &mut R,
 ) -> Vec<StructurePiece> {
-    // `getRandomHorizontalDirection(random)` in the piece constructor, from
-    // `context.random()` — the one draw vanilla also takes from this stream.
+    // The random-horizontal-direction pick in the piece constructor, from
+    // the structure's own stream — the one draw a faithful implementation also takes from this stream.
     let orientation = Facing::random(random);
     let w = JUNGLE_WIDTH;
     let d = JUNGLE_DEPTH;
@@ -1093,7 +1095,7 @@ pub fn jungle_pyramid_pieces<R: RandomSource>(
     let cobble = s("minecraft:cobblestone");
     let mossy = s("minecraft:mossy_cobblestone");
     let air = s("minecraft:air");
-    // `MossStoneSelector.next`: one `nextFloat()` per position, ignoring the
+    // The moss-stone selector: one float draw per position, ignoring the
     // coordinates and the edge flag entirely.
     let mut moss = |r: &mut R, _x: i32, _y: i32, _z: i32, _edge: bool| {
         if r.next_float() < 0.4 {
@@ -1102,8 +1104,8 @@ pub fn jungle_pyramid_pieces<R: RandomSource>(
             mossy.clone()
         }
     };
-    // One name per `generateBox(level, chunkBB, …, false, random, STONE_SELECTOR)`,
-    // so the transcription below stays line-for-line with the Java.
+    // One name per selector-driven box generation call,
+    // so the implementation below stays line-for-line with the reference.
     macro_rules! moss_box {
         ($x0:expr, $y0:expr, $z0:expr, $x1:expr, $y1:expr, $z1:expr) => {
             b.generate_box_selected($x0, $y0, $z0, $x1, $y1, $z1, random, &mut moss)
@@ -1325,11 +1327,11 @@ pub fn jungle_pyramid_pieces<R: RandomSource>(
     vec![b.finish("minecraft:tejp")]
 }
 
-/// `BuiltInLootTables.JUNGLE_TEMPLE`.
+/// The jungle temple chest loot table id.
 const JUNGLE_TEMPLE_LOOT: &str = "minecraft:chests/jungle_temple";
-/// `BuiltInLootTables.JUNGLE_TEMPLE_DISPENSER`.
+/// The jungle temple dispenser loot table id.
 const JUNGLE_TEMPLE_DISPENSER_LOOT: &str = "minecraft:chests/jungle_temple_dispenser";
-/// `BuiltInLootTables.DESERT_PYRAMID`.
+/// The desert pyramid chest loot table id.
 const DESERT_PYRAMID_LOOT: &str = "minecraft:chests/desert_pyramid";
 
 #[cfg(test)]
@@ -1350,7 +1352,7 @@ mod tests {
         }
     }
 
-    /// `makeBoundingBox`'s axis swap, and `getWorldX/Z`'s four orientation cases.
+    /// Box construction's axis swap, and the local-to-world transform's four orientation cases.
     ///
     /// The failure this excludes is the one with no visible symptom in a
     /// screenshot: an orientation whose coordinate mapping is wrong still builds a
@@ -1412,7 +1414,7 @@ mod tests {
         assert_eq!(Facing::East.data_2d(), 3);
     }
 
-    /// `generateBox`'s edge/fill split: a 3×3×3 box is 26 edge blocks and one
+    /// Box generation's edge/fill split: a 3×3×3 box is 26 edge blocks and one
     /// interior, and a 1-thick box is entirely edge.
     #[test]
     fn generate_box_splits_edge_from_fill() {
@@ -1480,11 +1482,11 @@ mod tests {
         }
     }
 
-    /// The pyramid is built and its `afterPlace` pass places **exactly** 5–7
+    /// The pyramid is built and its post-placement pass places **exactly** 5–7
     /// suspicious sand blocks plus the one guaranteed roof block.
     ///
-    /// A predicted count, not a direction: `nextInt(5, 8)` is `5 + nextInt(3)`, so
-    /// 8 is the wrong upper bound and `nextIntBetweenInclusive` would allow it.
+    /// A predicted count, not a direction: a draw over `[5, 8)` is `5 + (draw bounded by 3)`, so
+    /// 8 is the wrong upper bound and an inclusive-both-ends draw would allow it.
     #[test]
     fn a_desert_pyramid_places_its_layers_and_a_bounded_suspicious_sand_count() {
         use lodestone_worldgen_core::rng::{LegacyRandomSource, WorldgenRandom};
@@ -1523,12 +1525,12 @@ mod tests {
     ///
     /// # Both numbers come from outside this module
     ///
-    /// The draw count was derived by a script over
-    /// `.cache/mc/26.2/.../JungleTemplePiece.java` — 43 `generateBox(…, false,
-    /// random, STONE_SELECTOR)` call sites, loops expanded, summed volume **1,522**
-    /// — plus one `nextInt(4)` for the orientation and four `nextLong()`s for the
+    /// The draw count was derived by a script over the decompiled reference
+    /// source for the jungle temple piece — 43 selector-driven box-generation
+    /// call sites, loops expanded, summed volume **1,522**
+    /// — plus one draw bounded by 4 for the orientation and four 64-bit draws for the
     /// two chests and two dispensers. `WorldgenRandom::count()` counts `next(bits)`
-    /// calls, and a legacy `nextLong()` is two of them, so `1 + 1522 + 8 = 1531`.
+    /// calls, and a legacy 64-bit draw is two of them, so `1 + 1522 + 8 = 1531`.
     ///
     /// **This is the assertion that a plausible temple cannot satisfy by accident.**
     /// Skipping the selector for a position outside the served chunk, shuffling a
