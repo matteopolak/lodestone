@@ -9,7 +9,7 @@
 //!
 //! ## Why a wall clock, not the server's game tick
 //!
-//! Every duration below is copied from `Hud.java` in **vanilla ticks** (20 per
+//! Every duration below is copied from vanilla's own hud rendering in **vanilla ticks** (20 per
 //! second, 50ms each). Nothing reaches `hud.rs` with the server's own tick
 //! counter — `HudFrame` carries only current-value vitals (`health`, `food`,
 //! …), not a clock, and `sim.rs`/`app.rs` are a different agent's files for
@@ -31,7 +31,7 @@
 //! ## Why the jitter is not vanilla's exact RNG sequence
 //!
 //! Vanilla reuses one `RandomSource` field, reseeded once per
-//! `extractPlayerHealth` call (`Hud.java`, `random.setSeed(tickCount *
+//! `extractPlayerHealth` call (vanilla's own hud rendering, `random.setSeed(tickCount *
 //! 312871)`) and then consumed sequentially across heart containers and food
 //! pips in a fixed draw order. Reproducing that exact sequence buys nothing
 //! visible — nobody can screenshot-diff a purely cosmetic jitter against a
@@ -94,12 +94,12 @@ impl HeartAnim {
     }
 
     /// Advances the state to `tick` for this frame's `health` (in
-    /// half-points, `Player.getHealth()`'s unit) and returns vanilla's
-    /// `blink` and `displayHealth` (`Hud.java` —
+    /// half-points, vanilla's own get-health accessor's unit) and returns vanilla's
+    /// `blink` and `displayHealth` (vanilla's own hud rendering —
     /// the count the "ghost" heart overlay draws during a blink window).
     ///
     /// `blink` is read from the *previous* call's window before this call's
-    /// health comparison updates it — `Hud.java` runs before the
+    /// health comparison updates it — vanilla's own hud rendering runs before the
     /// `healthBlinkTime` reassignment at `:770`/`:773` — so a hit's blink
     /// becomes visible starting the following tick, not the same one that
     /// registered the change. That one-tick lag is vanilla's, not an
@@ -120,12 +120,12 @@ impl HeartAnim {
                 self.caught_up_tick = tick;
             }
             Some(last) if current < last => {
-                // Damage, `Hud.java`: 20-tick blink window.
+                // Damage, vanilla's own hud rendering: 20-tick blink window.
                 self.blink_until_tick = tick + 20;
                 self.caught_up_tick = tick;
             }
             Some(last) if current > last => {
-                // Heal, `Hud.java`: 10-tick blink window.
+                // Heal, vanilla's own hud rendering: 10-tick blink window.
                 self.blink_until_tick = tick + 10;
                 self.caught_up_tick = tick;
             }
@@ -178,7 +178,7 @@ pub(super) fn hunger_wobble(tick: i64, food: i32, saturation: f32, pip: usize) -
 /// client-side (a slot's item identity changed, or its count rose) since
 /// nothing forwards the server's own `Inventory.add` call site here, and
 /// returns each slot's current pop amount on vanilla's own `5.0 → 0.0` scale
-/// (`Hud.java`, `getPopTime() - partialTick`), stepped once per tick
+/// (vanilla's own hud rendering, `getPopTime() - partialTick`), stepped once per tick
 /// rather than partial-tick-interpolated.
 #[derive(Debug, Clone)]
 pub(super) struct HotbarPop {
