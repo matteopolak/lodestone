@@ -4537,6 +4537,29 @@ const SERVER_LIST_FIRST_ENTRY_Y_VANILLA: f32 = 2.0;
 /// `servers.json`, and a test that added rows through it would rewrite the real
 /// file. Hostnames are RFC 2606 `.invalid`, so nothing here can resolve even if a
 /// probe were ever spawned.
+/// Writes a roster holding one account into `dir`, so a `MenuNav` built on it
+/// is **past the ownership gate**.
+///
+/// Every gate in this file that presses menu keys needs one: with an empty
+/// roster the gate intercepts the first keystroke and the symptom is a screen
+/// assertion failing on `Screen::Ownership`, which names nothing about
+/// accounts. Must run before the `MenuNav` is constructed — the account screen
+/// reads the roster once, in its constructor.
+fn seed_owning_account(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).expect("a temp dir for the seeded roster");
+    let mut meta = lodestone_auth::AccountsMetadata::default();
+    let id = uuid::Uuid::new_v4();
+    meta.upsert(lodestone_auth::AccountProfile {
+        profile_id: id,
+        username: "OwnerAccount".to_owned(),
+        skin_url: None,
+        last_used: 1,
+    });
+    meta.selected = Some(id);
+    meta.save_to(&dir.join("profiles.json"))
+        .expect("the temp roster must be writable");
+}
+
 fn app_with_servers(tag: &str, n: usize) -> WindowApp {
     use crate::menu::nav::{MenuKey, MenuNav};
 
@@ -4549,6 +4572,7 @@ fn app_with_servers(tag: &str, n: usize) -> WindowApp {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
+    seed_owning_account(&dir);
     app.nav = MenuNav::with_path(dir.join("servers.json"));
     app.ui.open_server_list();
     for i in 0..n {
@@ -4969,6 +4993,7 @@ fn rebinding_toggle_perspective_in_the_controls_screen_takes_effect_without_a_re
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
+    seed_owning_account(&dir);
     app.nav = MenuNav::with_path(dir.join("servers.json"));
 
     // Vanilla's own default, and the control for the second half below.
@@ -5111,6 +5136,7 @@ fn a_rebound_f3_chord_fires_on_its_new_key_and_stops_on_its_old_one() {
     });
     let dir = std::env::temp_dir().join(format!("lodestone-rebind-chord-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    seed_owning_account(&dir);
     app.nav = MenuNav::with_path(dir.join("servers.json"));
 
     // Vanilla's `key.debug.showChunkBorders`, GLFW 71.
