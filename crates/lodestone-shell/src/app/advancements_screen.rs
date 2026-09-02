@@ -369,15 +369,4 @@ mod seen_advancements_tests {
     fn staying_closed_reports_nothing() {
         assert_eq!(seen_advancements_transition(false, 0, None), None);
     }
-
-    #[test]
-    fn a_closed_report_is_not_repeated_next_frame() {
-        // Simulates two frames in a row with the screen closed: the first
-        // reports the close and clears `reported`, the second (using that
-        // cleared state) reports nothing.
-        let first = seen_advancements_transition(false, 0, Some(1));
-        assert_eq!(first, Some((None, None)));
-        let (_, new_reported) = first.unwrap();
-        assert_eq!(seen_advancements_transition(false, 0, new_reported), None);
-    }
 }

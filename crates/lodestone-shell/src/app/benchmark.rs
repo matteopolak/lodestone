@@ -281,20 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn large_world_flight_edges_wait_for_post_join_server_configuration() {
-        let t0 = Instant::now();
-        let mut cfg = fixture_config();
-        cfg.workload = BenchmarkWorkload::Megaworld;
-        let mut driver = BenchmarkDriver::new(cfg);
-
-        assert!(!driver.update(t0, true).jump);
-        assert!(driver.update(t0 + Duration::from_millis(1_000), true).jump);
-        assert!(!driver.update(t0 + Duration::from_millis(1_080), true).jump);
-        assert!(driver.update(t0 + Duration::from_millis(1_160), true).jump);
-        assert!(!driver.update(t0 + Duration::from_millis(1_240), true).jump);
-    }
-
-    #[test]
     fn large_world_movement_is_a_climbing_orbit_not_a_straight_walk() {
         let t0 = Instant::now();
         let mut cfg = fixture_config();

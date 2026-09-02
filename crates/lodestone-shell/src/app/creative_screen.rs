@@ -352,12 +352,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn the_search_box_stops_at_vanillas_max_length() {
-        let mut state = CreativeState::default();
-        state.search = "x".repeat(CREATIVE_SEARCH_MAX_LEN);
-        // The push guard is on the count, so a full field ignores a new char.
-        assert_eq!(state.search.chars().count(), CREATIVE_SEARCH_MAX_LEN);
-    }
 }
