@@ -122,7 +122,7 @@ impl JavaRandom {
         Self::new(nanos)
     }
 
-    /// `Random.setSeed(seed)` — reseeds in place, with the same scramble as
+    /// Reseeds in place, with the same scramble as
     /// [`Self::new`].
     pub fn set_seed(&mut self, seed: i64) {
         self.seed = (seed ^ MULTIPLIER) & MASK;

@@ -3,9 +3,9 @@
 //!
 //! # The blocker this removes
 //!
-//! `Entity.isClientAuthoritative()` delegates to the controlling passenger and
-//! `Player.isClientAuthoritative()` is `true`, so a ridden vehicle's server-side
-//! `LivingEntity.travelRidden` takes the `setDeltaMovement(Vec3.ZERO)` branch and
+//! Vanilla's own client-authoritative check delegates to the controlling passenger, and
+//! for a player passenger it is always `true`, so a ridden vehicle's server-side
+//! ridden-travel step takes the zero-out-movement branch and
 //! the server only **accepts** what we report. Every riding-shaped item on the
 //! wire was therefore stuck behind one missing thing: a local simulation.
 //!
@@ -165,8 +165,8 @@ pub fn mount_rule(path: &str) -> Option<MountRule> {
 ///
 /// # A resource, not a component on the vehicle
 ///
-/// There is exactly one controlled vehicle per client — vanilla's
-/// `LocalPlayer.getControlledVehicle()` is a single reference — so a component
+/// There is exactly one controlled vehicle per client — vanilla's own
+/// client-side controlled-vehicle accessor returns a single reference — so a component
 /// would need inserting and removing through `Commands` on every mount and
 /// dismount, and a stale one left on a vehicle we stopped riding would keep
 /// simulating it. A resource cannot go stale: [`tick_controlled_vehicle`] rebuilds
@@ -540,8 +540,8 @@ pub fn tick_controlled_vehicle(
         grounded.0 = held.motion.on_ground;
     }
 
-    // `AbstractBoat.positionRider` → `clampRotation(passenger)`: a rider who is
-    // not `CAN_TURN_IN_BOATS`-tagged is carried by the boat's own turn and then
+    // Vanilla's own boat rider-positioning step: a rider who is
+    // not tagged as able to turn freely in boats is carried by the boat's own turn and then
     // clamped to ±105° of its heading. The player is not in that tag (it holds
     // the boat-turning mobs), so this applies to us.
     if family == VehicleFamily::Boat {
@@ -572,11 +572,11 @@ pub fn mount_speed(attributes: Option<&Attributes>) -> Option<f64> {
 
 /// `TickSet::Send`: the producers this whole unit exists to add.
 ///
-/// * `ClientAction::MoveVehicle` — vanilla's `LocalPlayer.tick()` passenger
-///   branch sends `ServerboundMoveVehiclePacket.fromEntity(vehicle)` once per
+/// * `ClientAction::MoveVehicle` — vanilla's own client-side player-tick passenger
+///   branch sends the move-vehicle packet once per
 ///   tick, unconditionally, for as long as
-///   `vehicle != this && vehicle.isLocalInstanceAuthoritative()`.
-/// * `ClientAction::PaddleBoat` — sent from inside `AbstractBoat.tick`'s
+///   the controlled vehicle is a different entity and is locally authoritative.
+/// * `ClientAction::PaddleBoat` — sent from inside vanilla's own boat-tick
 ///   authoritative branch, **every tick and not on change**. Vanilla has no edge
 ///   tracker here, so neither does this: the animation is driven by the packet
 ///   arriving, and an edge-triggered version leaves a stuck paddle whenever one is
@@ -598,8 +598,8 @@ pub fn send_vehicle_actions(
     };
     if held.family == VehicleFamily::Boat {
         // Before `MoveVehicle`, matching vanilla's order: the paddle send is
-        // inside `AbstractBoat.tick`, which runs from `super.tick()` in
-        // `LocalPlayer.tick`, and the vehicle-move send is after that call.
+        // inside vanilla's own boat-tick step, which runs from the base entity
+        // tick inside the client-side player-tick step, and the vehicle-move send is after that call.
         queue.0.push(ClientAction::PaddleBoat {
             left: held.paddles.0,
             right: held.paddles.1,

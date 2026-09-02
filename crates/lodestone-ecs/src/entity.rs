@@ -144,10 +144,10 @@ pub struct Health(pub f32);
 /// [`lodestone_model::ClientEvent::EntityDamaged`]) and
 /// vanilla's own hurt-animation call (folding
 /// [`lodestone_model::ClientEvent::EntityHurtAnimation`]) both reset the
-/// identical pair of fields — `hurtDuration = 10; hurtTime = hurtDuration;` —
-/// so one countdown here covers both reports. [`crate::ingest::tick_hurt_time`]
-/// ages it toward zero, one per `GameTick`, the same rate
-/// `LivingEntity.tick()` decrements the vanilla field.
+/// identical pair of internal fields to `10`, so one countdown here covers
+/// both reports. [`crate::ingest::tick_hurt_time`]
+/// ages it toward zero, one per `GameTick`, the same rate vanilla's own
+/// living-entity tick step decrements it.
 ///
 /// **Absent** until the first report, like [`Health`]. Nothing in this crate
 /// reads the countdown yet — it exists so a render-side hurt tint has real
@@ -156,10 +156,10 @@ pub struct Health(pub f32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HurtTime(pub u32);
 
-/// Ticks since this entity died — vanilla's `LivingEntity.deathTime`, which counts
+/// Ticks since this entity died — vanilla's own death-time counter, which counts
 /// **up** rather than down. Folded by [`crate::ingest::apply_entity_status`] from
-/// `EntityEvent.DEATH` and aged by [`crate::ingest::tick_death_time`], one per
-/// `GameTick`, the same rate `LivingEntity.tickDeath` increments the vanilla field.
+/// the death status event and aged by [`crate::ingest::tick_death_time`], one per
+/// `GameTick`, the same rate vanilla's own death-tick step increments it.
 ///
 /// **Absent** until the entity dies, and the absence is the switch a renderer keys
 /// on — exactly like [`FallingBlockState`] below, and unlike [`HurtTime`], whose
@@ -170,9 +170,9 @@ pub struct HurtTime(pub u32);
 ///
 /// Inserted as `DeathTime(0)`, not `DeathTime(1)`. Vanilla's own death-time
 /// field is still
-/// `0` at the instant its own `die()` runs and only reaches `1` on the *next*
-/// `tickDeath()`, and both consumers of the field test `deathTime > 0`
-/// (`LivingEntityRenderer`'s red overlay and its fall-over rotation). So the first
+/// `0` at the instant its own death handler runs and only reaches `1` on the *next*
+/// death-tick, and both consumers of the field test for it being greater than zero
+/// (the death-renderer's red overlay and its fall-over rotation). So the first
 /// tick of death draws upright, and the killing blow's own [`HurtTime`] is what
 /// keeps the entity red across that one frame. Seeding `1` would start the
 /// fall-over a tick early and make the seam visible.
@@ -189,7 +189,7 @@ pub struct HurtTime(pub u32);
 pub struct DeathTime(pub u32);
 
 /// The block state a `minecraft:falling_block` entity is imitating —
-/// `FallingBlockEntity.blockState`, as a global block-state id.
+/// vanilla's own falling-block-entity block-state field, as a global block-state id.
 ///
 /// Folded by [`crate::ingest::apply_falling_block_state`] from
 /// [`lodestone_model::ClientEvent::FallingBlockState`], which the version adapter
@@ -207,12 +207,12 @@ pub struct DeathTime(pub u32);
 /// wants the name has `lodestone_data::block_states::block_name`.
 ///
 /// Never updated after the spawn: vanilla has no packet that revises Object Data,
-/// and `FallingBlockEntity` synchs no block-state field. A falling block that
+/// and vanilla's own falling-block entity synchs no block-state field. A falling block that
 /// changed which block it was would be a different entity.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FallingBlockState(pub u32);
 
-/// Who launched this projectile — `Projectile.getOwner()`'s entity id, as the
+/// Who launched this projectile — vanilla's own projectile-owner accessor's entity id, as the
 /// spawn packet's Object Data field reported it.
 ///
 /// Folded by [`crate::ingest::apply_projectile_owner`] from
@@ -222,7 +222,7 @@ pub struct FallingBlockState(pub u32);
 /// exactly as [`FallingBlockState`] above.
 ///
 /// Never updated after the spawn: vanilla has no packet that revises Object Data,
-/// and neither `Projectile` nor `FishingHook` synchs an owner field. A hook that
+/// and neither the base projectile type nor the fishing-hook entity synchs an owner field. A hook that
 /// changed owner would be a different entity.
 ///
 /// # It is an id, not a resolved entity
@@ -273,7 +273,8 @@ pub struct AttackSwing {
 }
 
 impl AttackSwing {
-    /// Begins a swing, or extends one already running — `LivingEntity.swing`,
+    /// Begins a swing, or extends one already running — vanilla's own swing
+    /// start,
     /// mirrored from [`lodestone_entity::pose::EntityPose::start_swing`].
     /// Swallows a restart before the half-way point, which is what turns a
     /// held mine's every-tick `SwingMainHand` report into one continuous arc
@@ -287,7 +288,7 @@ impl AttackSwing {
     }
 
     /// One tick's advance — the swing half of
-    /// [`lodestone_entity::pose::EntityPose::tick`] (`LivingEntity.updateSwingTime`).
+    /// [`lodestone_entity::pose::EntityPose::tick`] (vanilla's own swing-time update).
     /// A no-op sawtooth hold at `0.0` before the first [`Self::start_swing`]
     /// call, since `swing_duration` defaults to `0` and is clamped to at least
     /// `1` in the division below rather than dividing by zero.
@@ -305,8 +306,8 @@ impl AttackSwing {
         self.attack_anim = self.swing_time.max(0) as f32 / self.swing_duration.max(1) as f32;
     }
 
-    /// Interpolated swing progress for a partial tick — vanilla's
-    /// `LivingEntity.getAttackAnim`, identical to
+    /// Interpolated swing progress for a partial tick — vanilla's own
+    /// attack-anim query, identical to
     /// [`lodestone_entity::pose::EntityPose::attack_anim_lerp`]: a negative
     /// delta is wrapped forward by one whole swing so the arm carries forward
     /// to rest instead of rewinding backward through the arc when a swing ends
@@ -352,12 +353,12 @@ impl AttackSwing {
 /// [`AttackSwing`] and [`HurtTime`].
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
 pub struct ItemUse {
-    /// Whether an item is in use right now (`LivingEntity.isUsingItem`).
+    /// Whether an item is in use right now (vanilla's own is-using-item query).
     pub using: bool,
-    /// Whether the item is in the off hand (`getUsedItemHand() == OFF_HAND`).
+    /// Whether the item is in the off hand (vanilla's own used-item-hand query).
     /// Meaningless while `!using`.
     pub off_hand: bool,
-    /// Ticks elapsed since the use began — vanilla's `getTicksUsingItem()`.
+    /// Ticks elapsed since the use began — vanilla's own ticks-using-item query.
     /// Held at `0` while `!using`.
     pub ticks: u32,
 }
@@ -374,8 +375,8 @@ impl ItemUse {
     /// zero and produce a bow that is permanently un-drawn while looking, from the
     /// byte alone, perfectly correct. So the counter only resets on a **rising
     /// edge** (`!was_using && now using`) or on the hand changing, which vanilla
-    /// treats the same way — `LivingEntity.startUsingItem` is guarded by
-    /// `!this.isUsingItem()`.
+    /// treats the same way — its own start-using-item step is guarded by
+    /// "not already using an item".
     pub fn apply_flags(&mut self, using: bool, off_hand: bool) {
         let restart = (using && !self.using) || (using && off_hand != self.off_hand);
         if restart {
@@ -400,13 +401,13 @@ impl ItemUse {
 }
 
 /// The mob-flags byte's decoded state — today just **aggressive**, vanilla's
-/// `Mob.isAggressive()`.
+/// own is-aggressive query.
 ///
 /// # Why this is not a field on [`ItemUse`]
 ///
 /// They come from *different bytes at different metadata indices* and mean
-/// unrelated things. `ItemUse` is `LivingEntity`'s using-item state, which is what
-/// a **player** sets when drawing a bow; this is `Mob`'s attack state, which is
+/// unrelated things. `ItemUse` is the living-entity using-item state, which is what
+/// a **player** sets when drawing a bow; this is the mob attack state, which is
 /// what a **mob** sets. A skeleton shooting at you sets this and never the other,
 /// and a player drawing a bow sets the other and never this — so folding them
 /// would make "is the bow drawn" read off whichever byte arrived last.
@@ -415,8 +416,8 @@ impl ItemUse {
 ///
 /// A bow draw's *fraction* has to be counted locally because vanilla never syncs
 /// it. Aggressive has no fraction: vanilla's own skeleton-base renderer maps it straight to
-/// `BOW_AND_ARROW`, which is a fixed pose, and vanilla's own zombie-arm animation maps it to one
-/// of two constants. So this is a plain latched boolean and `IngestSet::Apply`'s
+/// a fixed bow-and-arrow pose, and vanilla's own zombie-arm animation maps it to one
+/// of two fixed poses. So this is a plain latched boolean and `IngestSet::Apply`'s
 /// `Commands::insert` (which *replaces* the component) is the right shape for it,
 /// unlike `ItemUse`.
 ///
@@ -426,22 +427,22 @@ impl ItemUse {
 /// stand's index-15 byte means something else entirely).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MobState {
-    /// `Mob.isAggressive()` — set by the attack goals while a target is engaged.
+    /// Vanilla's own is-aggressive query — set by the attack goals while a target is engaged.
     pub aggressive: bool,
-    /// `Mob.isLeftHanded()` — `Mob.getMainArm() == HumanoidArm.LEFT`.
+    /// Vanilla's own is-left-handed query — whether the mob's main arm is the left one.
     ///
     /// Flips which physical arm every ranged-pose and held-item resolution
     /// treats as the main hand: a left-handed skeleton draws its bow with its
     /// left arm, and a left-handed mob's main-hand item renders in its left
     /// hand rather than its right. Rides the same byte as
-    /// [`Self::aggressive`] (`Mob.DATA_MOB_FLAGS_ID`) at a different bit, so
+    /// [`Self::aggressive`] (vanilla's own mob-flags metadata index) at a different bit, so
     /// it is folded alongside it here rather than through a separate wire
     /// fact.
     pub left_handed: bool,
 }
 
 /// The armour-stand client-flags byte's decoded state —
-/// `ArmorStand.DATA_CLIENT_FLAGS`
+/// vanilla's own armour-stand client-flags metadata index
 /// ([`lodestone_model::event::EntityMetadataUpdate::armor_stand_flags`]).
 ///
 /// # Why this is not a field on [`MobState`]
@@ -449,9 +450,9 @@ pub struct MobState {
 /// Same shape as [`MobState`] itself versus [`crate::entity::ItemUse`]: this
 /// comes from *the other claimant* of the exact same metadata index (15), the
 /// same serializer (`BYTE`), and unrelated bit meanings — `0x04` is
-/// `Mob.isAggressive()` in [`MobState`] and `ArmorStand.showArms()` here. The
+/// the is-aggressive query in [`MobState`] and the show-arms query here. The
 /// v770 adapter withholds one or the other depending on which concrete type it
-/// established (`class == ArmorStand` vs. `mob`), so at most one of
+/// established (armour stand vs. mob), so at most one of
 /// [`MobState`]/[`ArmorStandFlags`] is ever present on a given entity — they are
 /// not two views of the same fact, they are two different facts that happen to
 /// share a wire byte.
@@ -470,21 +471,21 @@ pub struct MobState {
 ///
 /// **Absent** until the first metadata packet carrying the byte, like
 /// [`MobState`] — and absent forever for every entity that is not an
-/// `ArmorStand`, because the adapter withholds the byte for those.
+/// armour stand, because the adapter withholds the byte for those.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ArmorStandFlags {
-    /// `ArmorStand.isSmall()` — halves the model scale.
+    /// Vanilla's own is-small query — halves the model scale.
     pub small: bool,
-    /// `ArmorStand.showArms()` — without it vanilla draws no arms at all.
+    /// Vanilla's own show-arms query — without it vanilla draws no arms at all.
     pub show_arms: bool,
     /// Whether the base plate is hidden.
     pub no_base_plate: bool,
-    /// `ArmorStand.isMarker()` — no hitbox, ignores piston pushes.
+    /// Vanilla's own is-marker query — no hitbox, ignores piston pushes.
     pub marker: bool,
 }
 
-/// An armour stand's six part rotations — `ArmorStand.DATA_HEAD_POSE` through
-/// `DATA_RIGHT_LEG_POSE`
+/// An armour stand's six part rotations — vanilla's own six per-part-pose
+/// metadata indices, head through right leg
 /// ([`lodestone_model::event::EntityMetadataUpdate::armor_stand_head_pose`] and
 /// its five siblings), merged onto whatever pose the stand already held.
 ///
@@ -502,8 +503,8 @@ pub struct ArmorStandFlags {
 ///
 /// **Absent** until the first metadata packet carrying one of the six, like
 /// [`ArmorStandFlags`] — but unlike that byte, absence here is *not* the same
-/// as "nothing to apply". Vanilla's `ArmorStandArmorModel.setupAnim` runs the
-/// humanoid `super.setupAnim` — walk cycle, idle bob and all — and then assigns
+/// as "nothing to apply". Vanilla's own armour-stand model setup-animation step runs the
+/// humanoid base setup — walk cycle, idle bob and all — and then assigns
 /// all six part rotations from the pose unconditionally, so the swing is
 /// computed and discarded on every armour stand in the game, posed or not. A
 /// draw site that applies the pose only when this component exists leaves the
@@ -519,7 +520,8 @@ pub struct ArmorStandPose(pub lodestone_model::ArmorStandPose);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Baby(pub bool);
 
-/// Whether the entity is tamed — `TamableAnimal.DATA_FLAGS_ID & 4`
+/// Whether the entity is tamed — vanilla's own tameable-animal flags
+/// metadata index, bit 2
 /// ([`lodestone_model::event::EntityMetadataUpdate::tamed`]), decoded by the
 /// v770 adapter and, until this component existed, dropped on the floor: the
 /// wire carried the bit end to end and nothing folded it into per-entity
@@ -555,16 +557,16 @@ pub struct Tamed(pub bool);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Leashed(pub Option<i32>);
 
-/// A creeper's fuse direction — `Creeper.DATA_SWELL_DIR`
+/// A creeper's fuse direction — vanilla's own creeper swell-direction metadata index
 /// ([`lodestone_model::event::EntityMetadataUpdate::creeper_swell_dir`]), `-1`
 /// while idle or backing off, `1` while counting up to detonation. **Absent**
 /// until the first report, like [`Baby`] — which for an idle, never-approached
-/// creeper is forever, since `SynchedEntityData` never puts a field on the wire
+/// creeper is forever, since vanilla's own synced-entity-data machinery never puts a field on the wire
 /// that is already at its accessor default (the protocol adapter works around
 /// this at spawn; see `docs/entity-rendering.md`'s "Creeper swell" section).
 ///
-/// Only the direction is a component here, not `Creeper.DATA_IS_POWERED`/
-/// `DATA_IS_IGNITED` alongside it: both decode at the protocol layer
+/// Only the direction is a component here, not vanilla's own is-powered/
+/// is-ignited metadata indices alongside it: both decode at the protocol layer
 /// (`EntityMetadataUpdate::creeper_powered`/`creeper_ignited`), but nothing
 /// downstream of the ECS reads either one yet — `lodestone-shell::entities`'
 /// `CreeperFuse`/white-flash-overlay chain only ever consumes the direction.
@@ -574,14 +576,14 @@ pub struct Leashed(pub Option<i32>);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreeperSwellDir(pub i32);
 
-/// An experience orb's XP value — `ExperienceOrb.DATA_VALUE`
+/// An experience orb's XP value — vanilla's own experience-orb value metadata index
 /// ([`lodestone_model::event::EntityMetadataUpdate::experience_orb_value`]).
 /// **Absent** until the first report, like [`CreeperSwellDir`], and absent
 /// forever for every entity that is not an orb, because the protocol adapter
 /// withholds the field for those (index 8's `INT` means something else on a
 /// primed TNT, a fishing hook, a vehicle and a display entity).
 ///
-/// The value's only consumer is the sprite: `ExperienceOrb.getIcon()` buckets it
+/// The value's only consumer is the sprite: vanilla's own orb-icon query buckets it
 /// into one of eleven cells of `experience_orb.png`. An orb whose value has never
 /// been reported therefore draws cell 0, which is what vanilla's own accessor
 /// default of `0` produces — not "draw nothing".
@@ -589,7 +591,7 @@ pub struct CreeperSwellDir(pub i32);
 pub struct ExperienceOrbValue(pub i32);
 
 /// Which of the eight 45° steps the stack in an item frame is turned to —
-/// `ItemFrame.DATA_ROTATION`
+/// vanilla's own item-frame rotation metadata index
 /// ([`lodestone_model::event::EntityMetadataUpdate::item_frame_rotation`]),
 /// already masked to `0..8` by the protocol adapter.
 ///
@@ -601,10 +603,10 @@ pub struct ExperienceOrbValue(pub i32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemFrameRotation(pub u8);
 
-/// A `VehicleEntity`'s rocking state — the hurt clock, its sign and the
+/// A ridable vehicle entity's rocking state — the hurt clock, its sign and the
 /// accumulated damage that scales it. Every boat, raft, chest boat and minecart
-/// carries these three (`VehicleEntity.DATA_ID_HURT`/`DATA_ID_HURTDIR`/
-/// `DATA_ID_DAMAGE`), and together they are the whole of what tips a punched
+/// carries these three (vanilla's own hurt/hurt-direction/damage metadata
+/// indices), and together they are the whole of what tips a punched
 /// hull over and lets it swing back.
 ///
 /// **Merged, never replaced.** The three arrive as separate metadata entries and
@@ -613,23 +615,23 @@ pub struct ItemFrameRotation(pub u8);
 /// freshly-defaulted value for one would clear the others. Same rule as
 /// [`FireworkFlags`].
 ///
-/// The direction's default is `1`, not `0`: that is `VehicleEntity
-/// .defineSynchedData`'s own registered default, and it is load-bearing, because
+/// The direction's default is `1`, not `0`: that is vanilla's own vehicle
+/// synced-data registration's own registered default, and it is load-bearing, because
 /// the rock angle is *multiplied* by it. A `0` here would multiply the whole
 /// rotation away and draw a perfectly still boat while every other link worked.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct VehicleHurt {
-    /// `getHurtTime()` — ticks remaining, `10` at the moment of the hit.
+    /// Vanilla's own hurt-time query — ticks remaining, `10` at the moment of the hit.
     pub time: i32,
-    /// `getHurtDir()` — `+1` or `-1`, negated by the server on every hit.
+    /// Vanilla's own hurt-direction query — `+1` or `-1`, negated by the server on every hit.
     pub dir: i32,
-    /// `getDamage()` — accumulated damage x 10, decayed by `1.0` per tick.
+    /// Vanilla's own damage query — accumulated damage x 10, decayed by `1.0` per tick.
     pub damage: f32,
 }
 
 impl Default for VehicleHurt {
     fn default() -> Self {
-        // `VehicleEntity.defineSynchedData`: `(0, 1, 0.0F)`. The `1` is the
+        // Vanilla's own vehicle synced-data registration: `(0, 1, 0.0F)`. The `1` is the
         // direction's real registered default -- see the type's own doc.
         Self { time: 0, dir: 1, damage: 0.0 }
     }
@@ -650,7 +652,8 @@ impl Default for VehicleHurt {
 /// than against vanilla; it is still the honest fold.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FireworkFlags {
-    /// Riding a gliding player. `FireworkRocketEntity.shouldRender` returns
+    /// Riding a gliding player. Vanilla's own firework-rocket should-render
+    /// query returns
     /// false for this case, so a consumer must draw **nothing**.
     pub attached: bool,
     /// Fired from a crossbow, and so spun onto its flight axis rather than
@@ -658,7 +661,7 @@ pub struct FireworkFlags {
     pub shot_at_angle: bool,
 }
 
-/// Which painting is hung on the wall — `Painting.DATA_PAINTING_VARIANT_ID`
+/// Which painting is hung on the wall — vanilla's own painting-variant metadata index
 /// resolved to its registry key
 /// ([`lodestone_model::event::EntityMetadataUpdate::painting_variant`]).
 ///
@@ -671,7 +674,8 @@ pub struct FireworkFlags {
 /// synthesized at spawn by the version adapter, exactly as a sheep's default
 /// fleece is.
 ///
-/// The painting's **facing** is deliberately not here: `HangingEntity` writes
+/// The painting's **facing** is deliberately not here: vanilla's own base
+/// hanging-entity type writes
 /// the direction into the entity's ordinary yaw, so [`Rotation`] already
 /// carries it.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -710,7 +714,7 @@ pub struct Equipment(pub Vec<EntityEquipment>);
 pub struct DisplayItem(pub Option<ItemStack>);
 
 /// A `Display` entity's billboard-constraint byte
-/// (`Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`, raw wire ordinal —
+/// (vanilla's own billboard-render-constraints metadata index, raw wire ordinal —
 /// `0`=fixed, `1`=vertical, `2`=horizontal, `3`=center), folded from
 /// [`lodestone_model::event::EntityMetadataUpdate::display_billboard`].
 ///
@@ -721,16 +725,16 @@ pub struct DisplayItem(pub Option<ItemStack>);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayBillboard(pub u8);
 
-/// A `Display` entity's `DATA_TRANSLATION_ID`, in blocks — one quarter of the
-/// shared `Transformation` every subtype carries, folded from
+/// A `Display` entity's own translation metadata index, in blocks — one quarter of the
+/// shared transform every subtype carries, folded from
 /// [`lodestone_model::event::EntityMetadataUpdate::display_translation`].
 /// **Absent** until first reported; a consumer should default to
 /// `Vec3f::default()` (zero), the accessor's own default.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
 pub struct DisplayTranslation(pub Vec3f);
 
-/// A `Display` entity's `DATA_SCALE_ID` — the second quarter of the shared
-/// `Transformation`. **Absent** until first reported; a consumer should
+/// A `Display` entity's own scale metadata index — the second quarter of the shared
+/// transform. **Absent** until first reported; a consumer should
 /// default to `(1, 1, 1)`, the accessor's own default — **not**
 /// `Vec3f::default()`'s zero, which would collapse the model to nothing.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
@@ -742,18 +746,18 @@ impl Default for DisplayScale {
     }
 }
 
-/// A `Display` entity's `DATA_LEFT_ROTATION_ID` — applied **before** scale
-/// (`Transformation.compose`). **Absent** until first reported; a consumer
+/// A `Display` entity's own left-rotation metadata index — applied **before** scale
+/// (vanilla's own transform-composition step). **Absent** until first reported; a consumer
 /// should default to [`Quat::IDENTITY`], the accessor's own default.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
 pub struct DisplayLeftRotation(pub Quat);
 
-/// A `Display` entity's `DATA_RIGHT_ROTATION_ID` — applied **after** scale.
+/// A `Display` entity's own right-rotation metadata index — applied **after** scale.
 /// Same default contract as [`DisplayLeftRotation`].
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
 pub struct DisplayRightRotation(pub Quat);
 
-/// A `text_display`'s current text (`Display.TextDisplay.DATA_TEXT_ID`),
+/// A `text_display`'s current text (vanilla's own text-display text metadata index),
 /// folded from [`lodestone_model::event::EntityMetadataUpdate::display_text`].
 /// **Absent** until first reported — vanilla's own accessor default is the
 /// empty string, so a consumer reading absence should draw no text, exactly
@@ -765,19 +769,19 @@ pub struct DisplayRightRotation(pub Quat);
 pub struct DisplayText(pub Text);
 
 /// A `text_display`'s wrap width in pixels
-/// (`Display.TextDisplay.DATA_LINE_WIDTH_ID`). **Absent** until first
+/// (vanilla's own text-display line-width metadata index). **Absent** until first
 /// reported; a consumer should default to `200`, the accessor's own default.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayLineWidth(pub i32);
 
 /// A `text_display`'s background panel colour, packed ARGB
-/// (`Display.TextDisplay.DATA_BACKGROUND_COLOR_ID`). **Absent** until first
+/// (vanilla's own text-display background-color metadata index). **Absent** until first
 /// reported; a consumer should default to `0x4000_0000`
 /// (vanilla's translucent-black panel), the accessor's own default.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayBackgroundColor(pub i32);
 
-/// A `text_display`'s text alpha (`Display.TextDisplay.DATA_TEXT_OPACITY_ID`,
+/// A `text_display`'s text alpha (vanilla's own text-display text-opacity metadata index,
 /// a signed byte). **Absent** until first reported; a consumer should default
 /// to `-1` (fully opaque, read as the top byte of an ARGB colour), the
 /// accessor's own default.
@@ -785,7 +789,7 @@ pub struct DisplayBackgroundColor(pub i32);
 pub struct DisplayTextOpacity(pub i8);
 
 /// A `text_display`'s style-flags byte
-/// (`Display.TextDisplay.DATA_STYLE_FLAGS_ID`: `0x01` shadow, `0x02`
+/// (vanilla's own text-display style-flags metadata index: `0x01` shadow, `0x02`
 /// see-through, `0x04` use-viewer's-own-default-background, `0x08`/`0x10`
 /// alignment). **Absent** until first reported; a consumer should default to
 /// `0` (no shadow, opaque, explicit background colour, centre-aligned).
@@ -793,7 +797,7 @@ pub struct DisplayTextOpacity(pub i8);
 pub struct DisplayStyleFlags(pub u8);
 
 /// A `block_display`'s imitated block state
-/// (`Display.BlockDisplay.DATA_BLOCK_STATE_ID`), as a global block-state id —
+/// (vanilla's own block-display block-state metadata index), as a global block-state id —
 /// the same id space [`FallingBlockState`] and `World::set_block` use.
 /// **Absent** until first reported, and forever for every entity that is not
 /// a `block_display` (the adapter withholds index 23's `INT` for those — see
@@ -807,15 +811,15 @@ pub struct DisplayStyleFlags(pub u8);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayBlockState(pub u32);
 
-/// An `item_display`'s `ItemDisplayContext` ordinal
-/// (`Display.ItemDisplay.DATA_ITEM_DISPLAY_ID`) — which perspective (`GUI`,
+/// An `item_display`'s display-context ordinal
+/// (vanilla's own item-display item-display-context metadata index) — which perspective (`GUI`,
 /// `GROUND`, `FIXED`, …) the item's own model should be posed in. **Absent**
 /// until first reported; a consumer should default to `NONE` (ordinal `0`),
 /// which is vanilla's own accessor default for this field.
 ///
 /// `NONE` does **not** mean "draws nothing" — an earlier version of this doc
-/// said so and it is false. `ItemTransforms.getTransform` answers it with
-/// `ItemTransform.NO_TRANSFORM`, the identity pose, so a context-less
+/// said so and it is false. Vanilla's own per-context item-transform lookup answers it with
+/// the identity pose, so a context-less
 /// `item_display` draws its model unscaled and unrotated. Defaulting to `FIXED`
 /// instead would apply an item frame's half-scale pose to every hologram that
 /// never reported a context.
@@ -823,10 +827,10 @@ pub struct DisplayBlockState(pub u32);
 pub struct DisplayItemContext(pub u8);
 
 /// A `Display` entity's packed brightness override
-/// (`Display.DATA_BRIGHTNESS_OVERRIDE_ID`), in vanilla's own
-/// `Brightness.pack()` layout (`block << 4 | sky << 20`) — **not** this
+/// (vanilla's own brightness-override metadata index), in vanilla's own
+/// packed-brightness layout (`block << 4 | sky << 20`) — **not** this
 /// renderer's one-byte `sky << 4 | block`. **Absent** until first reported, and
-/// `-1` (`Display.NO_BRIGHTNESS_OVERRIDE`) when the entity explicitly has no
+/// `-1` (vanilla's own no-brightness-override sentinel) when the entity explicitly has no
 /// override.
 ///
 /// Shared by all three `Display` subtypes, like the transformation fields
@@ -840,8 +844,8 @@ pub struct DisplayItemContext(pub u8);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayBrightness(pub i32);
 
-/// Who is riding this entity, in mounting order — `Entity.passengers`, folded
-/// from `ClientboundSetPassengersPacket` by
+/// Who is riding this entity, in mounting order — vanilla's own passengers list, folded
+/// from the set-passengers packet by
 /// [`crate::ingest::apply_entity_passengers`].
 ///
 /// **Server entity ids, not `bevy_ecs::Entity`s**, and deliberately so: the
@@ -866,7 +870,7 @@ pub struct DisplayBrightness(pub i32);
 pub struct Passengers(pub Vec<i32>);
 
 /// The server entity id of the vehicle this entity is riding, if any —
-/// `Entity.vehicle`, the reverse of [`Passengers`].
+/// vanilla's own vehicle field, the reverse of [`Passengers`].
 ///
 /// Derived by [`crate::ingest::apply_entity_passengers`] from the same packet
 /// rather than reported separately: `SET_PASSENGERS` names the vehicle and lists

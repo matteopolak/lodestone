@@ -4,7 +4,7 @@
 //! # What this is
 //!
 //! The two capabilities `docs/plugin-api.md`'s own analysis names as the
-//! achievable half of a Bukkit-class `World.spawnEntity`/`Entity.remove()` API
+//! achievable half of a Bukkit-class spawn/remove entity API
 //! and custom entity-type registration, given today's architecture: a
 //! plugin creating and destroying a **local, non-networked** entity, and
 //! registering a logical entity kind of its own that disguises as a real
