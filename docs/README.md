@@ -237,13 +237,13 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `crates/lodestone-server/src/natural_spawn.rs`, with entity-side timing state in
   `crates/lodestone-entity/src/ai/navigating_mob.rs`.
 - [The multi-protocol seam: version crates, canonicalisation, and framing](./multi-protocol-seam.md) —
-  How `crates/versions/<family>` family crates are structured and named, how the registry
-  resolves a negotiated protocol number to the right adapter, how each pre-26.2 family
-  translates its own wire block-state representation into the canonical 26.2
-  block-state space, the reference table of protocol/data-version numbers this project
-  tracks per Minecraft release, and the packet-framing shape (length prefix,
-  compression, the one frame that carries no packet) all four families share
-  underneath `lodestone-net`.
+  How `crates/versions/<family>` family crates are structured and named, how the
+  registry resolves a negotiated protocol number to the right adapter, how each
+  pre-26.2 family translates its own wire block-state representation into the
+  canonical 26.2 block-state space, the reference table of protocol/data-version
+  numbers this project tracks per Minecraft release, and the packet-framing shape
+  (length prefix, compression, the one frame that carries no packet) all four families
+  share underneath `lodestone-net`.
 - [Oracle assets: what's on disk under `.cache/mc/`, and who reads it](./oracle-assets.md) —
   A census of `.cache/mc/` — the vanilla server jars, client jars, and booted-server
   world directories this repo has fetched — cross-referenced against `crates/`,
