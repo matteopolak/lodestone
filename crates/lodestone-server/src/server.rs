@@ -17535,11 +17535,11 @@ mod tests {
     }
 
     /// Issue #617: the anvil result can be taken for free without enough XP
-    /// levels, because `container_click` had no `Slot.mayPickup` gate at all.
+    /// levels, because `container_click` had no vanilla-style slot may-pickup gate at all.
     /// End to end through `apply_container_clicked` (not just
     /// `container_click`'s own unit tests): a 0-XP survival player must be
     /// refused outright — item stays in the result slot, cursor stays empty,
-    /// nothing consumed — matching `AnvilMenu.mayPickup`'s
+    /// nothing consumed — matching vanilla's own anvil-menu may-pickup gate's
     /// `(hasInfiniteMaterials() || experienceLevel >= cost) && cost > 0`.
     ///
     /// Two companion arms make the refusal above meaningful rather than
@@ -17611,7 +17611,7 @@ mod tests {
         }
 
         // Exactly `cost` XP levels, survival: succeeds — the `>=`, not `>`, half
-        // of `AnvilMenu.mayPickup`'s comparison.
+        // of vanilla's own anvil-menu may-pickup gate's comparison.
         {
             let mut inventory = PlayerInventory::new();
             let block_entities = BlockEntityHandle::new();
@@ -17663,7 +17663,7 @@ mod tests {
         }
     }
 
-    /// The anvil's genuinely bespoke take rule (`AnvilMenu.onTake`): a take
+    /// The anvil's genuinely bespoke take rule (vanilla's own anvil-menu on-take routine): a take
     /// priced *purely* by a pending rename must leave a present-but-not-
     /// consumed addition cell completely untouched, not cleared as if a real
     /// combine had consumed it. `container_click::take_result`'s own internal
@@ -17809,7 +17809,7 @@ mod tests {
     /// [`crate::anvil::compute`] for real (a pure rename costs exactly 1 XP
     /// level — the number `docs/workstation-economy.md` named as the thing a
     /// player could not yet see) and re-sending the identical name is a no-op,
-    /// matching `AnvilMenu.setItemName`'s own dedup.
+    /// matching vanilla's own anvil-menu item-name setter's own dedup.
     #[test]
     fn rename_item_prices_a_pure_rename_at_one_and_is_idempotent() {
         let mut inventory = PlayerInventory::new();
@@ -17857,7 +17857,7 @@ mod tests {
     /// Issue #253-#255's last mile, half two: choosing an enchanting-table
     /// offer through the real click path actually enchants the item, spends
     /// XP levels, consumes lapis, and rerolls the seed
-    /// (`Player.onEnchantmentPerformed`) — the join
+    /// (vanilla's own on-enchantment-performed routine) — the join
     /// `docs/workstation-economy.md` named as the only thing still missing.
     #[test]
     fn container_button_click_enchants_the_item_and_charges_xp_and_lapis() {
@@ -18050,7 +18050,7 @@ mod tests {
 
     /// Issue #150, end to end: a loom with a banner, a dye and a specific
     /// pattern *item* auto-selects that item's one pattern — no
-    /// `ContainerButtonClick` needed, matching `LoomMenu.slotsChanged`'s own
+    /// `ContainerButtonClick` needed, matching vanilla's own loom-menu slots-changed routine's own
     /// auto-select branch — and taking the result consumes exactly one
     /// banner and one dye while leaving the pattern item untouched, so it
     /// can stamp a second banner.
