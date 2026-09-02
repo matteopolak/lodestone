@@ -479,11 +479,6 @@ fn is_mob_effect_png(path: &str) -> bool {
         && !path.ends_with(".png.mcmeta")
 }
 
-/// Split `assets/<ns>/textures/gui/sprites/<id>.png` into `(ns, id)`.
-fn split_sprite_path(path: &str) -> Option<(&str, &str)> {
-    split_source_path(path, SPRITES_INFIX)
-}
-
 /// `(namespace, atlas id)` for either of `atlases/gui.json`'s two directory
 /// sources, or `None` for a path belonging to neither.
 ///
@@ -909,7 +904,10 @@ mod tests {
     #[test]
     fn path_split_is_namespace_general() {
         assert_eq!(
-            split_sprite_path("assets/mypack/textures/gui/sprites/hud/heart/full.png"),
+            split_source_path(
+                "assets/mypack/textures/gui/sprites/hud/heart/full.png",
+                SPRITES_INFIX
+            ),
             Some(("mypack", "hud/heart/full"))
         );
         assert!(is_sprite_png(
