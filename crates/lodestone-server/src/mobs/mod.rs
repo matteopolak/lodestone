@@ -11807,7 +11807,7 @@ mod anger_tests {
         );
     }
 
-    /// `ZombifiedPiglin.ALERT_INTERVAL`'s own `[80, 120]` window, stated
+    /// Vanilla's own zombified-piglin alert-interval's own `[80, 120]` window, stated
     /// independently of [`PIGLIN_ALERT_INTERVAL_TICKS`] for the same reason
     /// [`JAR_LO`]/[`JAR_HI`] are stated independently of [`ANGER_TICKS`]
     /// above: a magnitude check that read the expectation off the constant
@@ -11831,8 +11831,8 @@ mod anger_tests {
         }
     }
 
-    /// The ongoing `maybeAlertOthers` mechanism, isolated from the one-shot
-    /// `HurtByTargetGoal.alertOthers` propagation it sits alongside.
+    /// The ongoing vanilla alert-others mechanism, isolated from the one-shot
+    /// "alert others of the same owner" goal propagation it sits alongside.
     ///
     /// The one-shot half fires immediately on a *new* grudge
     /// (`MobSim::attack`'s `pack_alert`), so a naive test that spawns both
@@ -12126,8 +12126,9 @@ mod block_cues_tests {
         );
     }
 
-    /// `grass_block` is the *equality* cue, not a tag member — vanilla tests it
-    /// with block equality (`ai/goal/EatBlockGoal.java:34`, `:71`). So it must set
+    /// `grass_block` is the *equality* cue, not a tag member — vanilla's own
+    /// "eat block" goal tests it
+    /// with block equality. So it must set
     /// `grass_block` and must **not** set `edible_for_sheep`: a sheep standing on
     /// grass eats the block below, a sheep standing in short grass eats the block
     /// at its feet, and conflating the two would make either mechanism fire in the
@@ -12544,15 +12545,16 @@ mod baby_metadata_tests {
     }
 
     /// **Positive arm**: every species this sim scopes ageing to
-    /// (`AgeableMob`'s breedable-animal set plus the `Zombie` family — see
+    /// (vanilla's own ageable-mob breedable-animal set plus the zombie family — see
     /// `SimMob::snapshot`'s own comment for the mechanical derivation off
     /// `.cache/mc/26.2/src/`) must push `MetadataField::Baby(false)` as a
     /// freshly-spawned adult.
     ///
     /// **Negative control**: index 16's other real claimants — `creeper`
-    /// (`Creeper.DATA_SWELL_DIR`, an `INT`, already the producer for a
+    /// (vanilla's own swell-direction metadata field, an `INT`, already the producer for a
     /// different variant at this same index), `ghast`
-    /// (`Ghast.DATA_IS_CHARGING`) and `phantom` (`Phantom.ID_SIZE`) — must
+    /// (vanilla's own "is charging" metadata field) and `phantom` (vanilla's
+    /// own size metadata field) — must
     /// push no `Baby` field at all. These are exactly the entities a shared
     /// "is baby" encoder would corrupt: a ghast told `Baby(false)` reads to
     /// a real client as "not charging", and a phantom's size becomes `0`.
@@ -12688,8 +12690,8 @@ mod leash_tests {
         );
     }
 
-    /// **Control: a hostile species refuses a lead** — vanilla
-    /// `Mob.canBeLeashed()` is `!(this instanceof Enemy)`, so this is the
+    /// **Control: a hostile species refuses a lead** — vanilla's own
+    /// generic "can be leashed" check is "not a hostile-tagged mob", so this is the
     /// discriminating input against "every mob accepts a lead".
     #[test]
     fn control_a_hostile_mob_refuses_a_lead() {
@@ -12870,7 +12872,7 @@ mod leash_tests {
     }
 
     /// Right-clicking a fence with a lead re-parents every mob leashed to
-    /// the player onto that fence position — vanilla `LeadItem.bindPlayerMobs`.
+    /// the player onto that fence position — vanilla's own lead-item "bind player mobs" call.
     #[test]
     fn leashing_to_a_fence_reparents_every_mob_the_player_was_holding() {
         let world = flat_world();
