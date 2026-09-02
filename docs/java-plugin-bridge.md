@@ -1,4 +1,4 @@
-# Java plugin bridge: backing Paper's own NMS calls with Rust
+# Java plugin bridge: backing Paper's own internal calls with Rust
 
 ## What it is
 
@@ -7,10 +7,13 @@ Bukkit/Spigot/Paper plugin jars** against this server, with **zero cost when no 
 loaded**.
 
 The approach is not "reimplement the Bukkit API in Rust". Bukkit is only the *API*;
-Paper/CraftBukkit is the *implementation* that bridges Bukkit interfaces onto `net.minecraft.*`
-(NMS). `CraftPlayer` wraps `ServerPlayer`, `CraftWorld` wraps `ServerLevel`, `CraftBlock` reads a
-`BlockState`. So if we supply classes with **NMS names and signatures** backed by JNI calls into
-Rust, Paper's own bytecode does all the Bukkit translation for us — including the event bus,
+Paper/CraftBukkit is the *implementation* that bridges Bukkit interfaces onto vanilla's own
+internal classes (NMS — the internal package tree Bukkit's implementation layer sits on top of).
+Each Bukkit-facing wrapper type is a thin shell around one internal counterpart: a player wrapper
+around the internal player object, a world wrapper around the internal level object, a block
+wrapper reading directly from internal block state. So if we supply classes with **NMS names and
+signatures** backed by JNI calls into Rust, Paper's own bytecode does all the Bukkit translation
+for us — including the event bus,
 listener priorities and cancellation semantics, which the plugin-API audit identified as among the
 hardest things to express natively in an ECS.
 
@@ -36,7 +39,7 @@ repo targets, so the census lines up with the decompiled source already under `.
 |---|---|
 | classes parsed | 10,353 |
 | **parse failures** | **0** |
-| `net.minecraft` classes defined in the jar | 7,492 |
+| vanilla-internal classes defined in the jar | 7,492 |
 | **distinct NMS members the Bukkit layer references** | **6,991** |
 | distinct NMS classes it touches | 1,400 |
 | external reference sites | 10,938 |
@@ -44,8 +47,8 @@ repo targets, so the census lines up with the decompiled source already under `.
 
 **The ratio is the finding.** Paper's own bytecode makes 189,914 NMS references across 88,140
 distinct members — but 88,140 is the size of *Minecraft*, not the size of this project. The members
-reached from **outside** `net.minecraft` (i.e. from `org.bukkit.craftbukkit.*`, `io.papermc.paper.*`
-and friends) number **6,991**, a **12.6× reduction**. That number is what separates "reimplement the
+reached from **outside** vanilla's own internal package (i.e. from CraftBukkit's and Paper's own
+code) number **6,991**, a **12.6× reduction**. That number is what separates "reimplement the
 game" from "implement a bounded, enumerable API".
 
 Refining further by also treating Paper's rewritten chunk system and data converters
@@ -70,58 +73,54 @@ transformation. The first is cheap for immutable-after-construction data and wro
 the second turns "supply shim classes" into "supply shim classes *and* a bytecode rewriter", which
 is a materially larger project. **This is unresolved and is the largest single design risk below.**
 
-### 1.3 Where the work is, by package
+### 1.3 Where the work is, by subsystem
 
-External member references by NMS package (top of 6,991):
+External member references by internal subsystem (top of 6,991):
 
-| package | members |
+| subsystem | members |
 |---|---|
-| `world/entity` | 1,924 |
-| `world/level` | 1,829 |
-| `world/item` | 616 |
-| `server/level` | 350 |
-| `core/component` | 160 |
-| `world/inventory` | 129 |
-| `server/dedicated` | 111 |
-| `world/damagesource` | 97 |
-| `network/protocol` | 97 |
-| `network/chat` | 86 |
+| entities | 1,924 |
+| world/level | 1,829 |
+| items | 616 |
+| server-side level state | 350 |
+| data components | 160 |
+| inventories | 129 |
+| dedicated-server config | 111 |
+| damage sources | 97 |
+| network protocol | 97 |
+| chat networking | 86 |
 
-`world/entity` and `world/level` are **54%** of the surface between them. That is the good news the
+Entities and world/level are **54%** of the surface between them. That is the good news the
 issue predicted: those are precisely the subsystems this repo already implements, so Java-plugin
 compatibility really does reduce largely to server parity rather than being a separate project.
 
-Most-referenced classes: `Entity` (274), `DataComponents` (257), `ServerPlayer` (223), `ServerLevel`
-(212), `MinecraftServer` (207), `CompoundTag` (191), `EntityTypes` (191), `WorldGenLevel` (170),
-`Registries` (165), `BlockState` (152).
+Most-referenced types, by rough category: the base entity type (274 refs), the item-data-component
+registry (257), the server-side player type (223), the server-side level/world type (212), the
+server singleton (207), the generic compound-tag/NBT container (191), the entity-type registry
+(191), the world-generation-facing level view (170), the registry-of-registries type (165), and
+the block-state type (152).
 
-Most-referenced members, which give the natural implementation order:
-
-| refs | member |
-|---|---|
-| 55 | `MinecraftServer.getServer()` |
-| 50 | `IntegerProperty.max` (field) |
-| 39 | `ResourceKey.identifier()` |
-| 31 | `Holder.value()` |
-| 30 | `Block.defaultBlockState()` |
-| 28 | `Entity.getBukkitEntity()` |
-| 24 | `BlockState.getBlock()` |
-| 23 | `ServerLevel.getChunkSource()` |
+Most-referenced individual members, which give the natural implementation order — all simple
+accessors or constructors, not behaviour: a server-singleton getter (55 refs), a block-state
+property's bound (50, a field), a registry-key accessor (39), a holder unwrap (31), a
+default-block-state constructor (30), a wrapper-object accessor that hands back the Bukkit-facing
+object for a given internal one (28), a state-to-block accessor (24), and a chunk-source accessor
+on the server-side level type (23).
 
 ### 1.4 The finding that most changes the design: Paper-injected members
 
-**143 of the 6,991 members have `org.bukkit` types in their own signature.** Examples:
+**143 of the 6,991 members have Bukkit-facing types in their own signature.** Examples of the
+shape: an entity's internal type gaining an accessor that hands back its Bukkit-facing wrapper
+object; a block-state type gaining an accessor that hands back Bukkit-facing block data; a
+server-side level type gaining an accessor that hands back its Bukkit-facing world object; the
+server singleton gaining a field that holds its Bukkit-facing server object; a generic
+inventory-holder type gaining an accessor that hands back a Bukkit inventory-holder interface.
 
-- `net.minecraft.world.entity.Entity.getBukkitEntity() → org.bukkit.craftbukkit.entity.CraftEntity`
-- `net.minecraft.world.level.block.state.BlockState.asBlockData() → CraftBlockData`
-- `net.minecraft.server.level.ServerLevel.getWorld() → CraftWorld`
-- `net.minecraft.server.MinecraftServer.server` (field) `→ CraftServer`
-- `net.minecraft.world.Container.getOwner() → org.bukkit.inventory.InventoryHolder`
-
-**These members do not exist in vanilla NMS.** They are Paper's own patches *into* NMS classes, and
-they are how the Craft* wrapper layer finds its counterpart object. So the shim layer is not "supply
-vanilla's NMS API"; it is "supply vanilla's NMS API **plus Paper's injected hooks**, and construct
-real Paper `Craft*` objects from Rust". That is a genuine bidirectional seam — Rust must instantiate
+**These members do not exist in vanilla's own internals.** They are Paper's own patches *into*
+those internal classes, and they are how the Bukkit-facing wrapper layer finds its counterpart
+object. So the shim layer is not "supply vanilla's internal API"; it is "supply vanilla's internal
+API **plus Paper's injected hooks**, and construct real Paper-defined Bukkit-facing objects from
+Rust". That is a genuine bidirectional seam — Rust must instantiate
 Java objects belonging to the user's Paper jar — and it means the shim set is **Paper-version-coupled
 in a way the vanilla NMS surface is not**. It does not invalidate the approach; it does mean "adapts
 across Paper versions for free" is too strong a claim.
@@ -130,12 +129,13 @@ across Paper versions for free" is too strong a claim.
 
 **Trap 1: the download contains no server.** The Paper distribution is a *paperclip* launcher: its
 `META-INF/versions/26.2/` holds `server-26.2.jar.patch`, a binary patch, not classes. Scanning the
-downloaded jar directly gives **10,500 classes and zero `net.minecraft` references** — a confident,
-well-formed, completely wrong census that reads as good news. The real jar only exists after
-paperclip applies its patch to a vanilla jar, which needs a JVM.
+downloaded jar directly gives **10,500 classes and zero references into vanilla's own internals** —
+a confident, well-formed, completely wrong census that reads as good news. The real jar only exists
+after paperclip applies its patch to a vanilla jar, which needs a JVM.
 
 **Trap 2: jars nest, and so does the vanilla one.** `.cache/mc/26.2/server.jar` is Mojang's bundler:
-**4 classes** at the top level (`net/minecraft/bundler/Main*`), with the real server one level down.
+**4 classes** at the top level (the bundler's own entry class and its helpers), with the real server
+one level down.
 Scanning it without recursion finds 4 classes; with recursion, **30,563**. The scanner recurses by
 default for this reason and `--no-recurse` exists mainly to keep the difference measurable.
 
@@ -151,7 +151,7 @@ a small confident number for input it could not actually read*. The scanner ther
 container run --rm -v <work>:/work -w /work eclipse-temurin:25-jdk \
     java -Dpaperclip.patchonly=true -jar /work/paper.jar
 cargo run --release -p lodestone-nms-census --bin nms-census -- \
-    <work>/versions/26.2/paper-26.2.jar --internal net/minecraft/ --top 40
+    <work>/versions/26.2/paper-26.2.jar --internal <vanilla's internal package prefix> --top 40
 ```
 
 Pre-seed `<work>/cache/mojang_26.2.jar` from `.cache/mc/26.2/server.jar` to save paperclip a
@@ -169,15 +169,16 @@ it is correct, in the order it was gathered:
   every later index to its neighbour. A fixture without one passes under both the correct and the
   incorrect reading.
 - **At scale**, against the real vanilla 26.2 server: **30,563 classes, 0 parse failures**, and the
-  most-referenced members come out as `RandomSource.nextInt`, `BlockPos.getX/getY/getZ`,
-  `Block.defaultBlockState`, `BlockState.setValue/getValue`, `Level.isClientSide`. Those being
-  *semantically* what Minecraft server code does is stronger evidence than the counts.
+  most-referenced members come out as exactly the kind of thing dense server code calls
+  constantly: a random-number roll, a block position's coordinate accessors, a default-block-state
+  constructor, a block-state get/set pair, and a level's client-side check. Those being
+  *semantically* what server code does is stronger evidence than the counts.
 - **End to end**, a jar built in-test containing the fixture, censused back to exactly one external
   reference attributed to the right referrer.
 
 What it does **not** answer: it counts *symbolic references*, so an NMS member reached purely
 through reflection or a `MethodHandle` bootstrap is invisible to it. Paper uses reflection sparingly
-in the Craft* layer, but "6,991" is a lower bound rather than a total.
+in the Bukkit-facing wrapper layer, but "6,991" is a lower bound rather than a total.
 
 ---
 
@@ -207,7 +208,7 @@ The design's licensing property is that **we distribute no Paper bytecode, modif
 | the Paper jar | **the user**, obtained from PaperMC themselves | we never distribute it |
 | shim classes with NMS names/signatures | us | see §2.3 |
 | the Rust bridge crate | us | MIT OR Apache-2.0 |
-| the classloader that redirects `net.minecraft.*` | us | our own code |
+| the classloader that redirects vanilla's own internal classes | us | our own code |
 | the Paper jar used for the census | downloaded locally, **never committed** | a measurement input |
 
 Paper is never patched, never repackaged, and never redistributed. Classload interception — proven
@@ -372,13 +373,15 @@ actually had, and needs no carve-out in a shared manifest.
 
 ## 4. Classload interception — the mechanism, executed
 
-The design rests entirely on one claim: `net.minecraft.*` can be redirected to signature-identical
-shims **at classload time**, so Paper's already-compiled bytecode calls into us with no bytecode
+The design rests entirely on one claim: vanilla's own internal classes can be redirected to
+signature-identical shims **at classload time**, so Paper's already-compiled bytecode calls into us
+with no bytecode
 modification and no redistribution. That had never been executed here, so it was an assumption.
 
 `crates/plugins/lodestone-jvm-bridge/spike/` executes it, under Apple `container` (this host has no
-Java runtime; see `docs/oracle-runtimes.md`). `org.example.Caller` is compiled **once** against a
-real NMS-shaped `Level` and then loaded through two loaders differing in exactly one path element:
+Java runtime; see `docs/oracle-runtimes.md`). A stand-in caller class is compiled **once** against a
+stand-in whose name and signature mirror one of vanilla's own world-level types, then loaded through
+two loaders differing in exactly one path element:
 
 ```
 control arm [real, app]: REAL:11,1,4
