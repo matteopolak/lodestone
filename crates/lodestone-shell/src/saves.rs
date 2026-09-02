@@ -695,8 +695,58 @@ pub fn create_world(
     name: &str,
     game_type: i32,
     enabled_features: &[String],
+    generator_override: Option<(&GeneratorOverride, &str)>,
 ) -> Result<PathBuf, SaveError> {
-    create_world_in(&saves_dir(), name, game_type, enabled_features)
+    create_world_in(&saves_dir(), name, game_type, enabled_features, generator_override)
+}
+
+/// A chosen "Customize Type" generator, collected from
+/// [`crate::menu::create_world::WorldCreationConfig::flat_layers`]/
+/// [`crate::menu::create_world::WorldCreationConfig::single_biome`] — see
+/// [`create_world_in`]'s own doc for where and why this reaches disk.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg(not(target_arch = "wasm32"))]
+pub enum GeneratorOverride {
+    /// Vanilla's own flat ("Superflat") generator — bottom-to-top
+    /// `(block id, height)` pairs, plus the fixed surface biome and the two
+    /// decoration flags real flat presets carry.
+    Flat { layers: Vec<(String, i32)>, biome: String, features: bool, lakes: bool },
+    /// Vanilla's own fixed-biome noise generator — one biome id, everywhere.
+    FixedBiome { biome: String },
+}
+
+/// Vanilla's own seed-parsing rule — trim, a valid `i64` literal used
+/// verbatim, free text hashed with Java's own `String.hashCode()`, empty
+/// means a fresh random `i64` — applied here **only** so a "Customize Type"
+/// choice has a real seed to write alongside it into `world_gen_settings.dat`
+/// at world-creation time, before `app/launch.rs`'s own
+/// `resolve_launch_seed`/`parse_seed` would normally resolve one.
+///
+/// This deliberately duplicates that pair rather than sharing them: this
+/// session's working scope keeps `crates/lodestone-shell/src/app/**` off
+/// limits (another agent's concurrent work), and the rule itself is small,
+/// stable and independently checkable — see this module's own tests, which
+/// check it against the JVM-verified `String.hashCode()` constants
+/// `lodestone_worldgen_core::hash`'s own tests use, not against
+/// `app/launch.rs`'s copy. The two copies computing the *same* deterministic
+/// value from the *same* typed string can never disagree; the only place
+/// this matters at all is an **empty** seed, where either copy's random draw
+/// is equally valid — see [`create_world_in`]'s own doc for why the draw made
+/// here, not `app/launch.rs`'s later one, is the one that actually sticks
+/// once a customized world is created.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_seed_for_creation(raw: &str) -> i64 {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(crate::platform::epoch_duration().as_nanos());
+        return hasher.finish() as i64;
+    }
+    if let Ok(n) = trimmed.parse::<i64>() {
+        return n;
+    }
+    i64::from(lodestone_worldgen_core::hash::java_string_hash(trimmed))
 }
 
 /// Create a new world directory under `root` for a world the player named
@@ -716,9 +766,12 @@ pub fn create_world(
 ///    change it" on why leaving it to
 ///    `region_source::LevelDatHandle::open_or_create` loses it.
 ///
-/// The seed is deliberately **not** written — `resolve_world_seed` creates
-/// `world_gen_settings.dat` on the world's first open, and because this
-/// directory is new the requested seed is the one that wins.
+/// The seed is deliberately **not** written on the ordinary path —
+/// `resolve_world_seed` creates `world_gen_settings.dat` on the world's first
+/// open, and because this directory is new the requested seed is the one
+/// that wins. `generator_override` is the one exception: see this doc's own
+/// section below for why a "Customize Type" choice needs the seed written
+/// *here* instead.
 ///
 /// `enabled_features` is [`crate::menu::create_world::WorldCreationConfig::experiments`]
 /// (Experiments half) — bare flag ids, [`ExperimentFlag::id`]'s
@@ -729,15 +782,57 @@ pub fn create_world(
 ///
 /// [`ExperimentFlag::id`]: crate::menu::create_world::ExperimentFlag::id
 ///
+/// # `generator_override` — the "Customize Type" half, and why it is not
+/// `level.dat`
+///
+/// `Some((override, raw_seed))` is
+/// [`crate::menu::create_world::WorldCreationConfig::flat_layers`]/
+/// [`crate::menu::create_world::WorldCreationConfig::single_biome`], paired
+/// with the screen's own typed seed text
+/// ([`crate::menu::create_world::WorldCreationConfig::seed`]). Vanilla does
+/// **not** keep generator customization in `level.dat` — a 26.2 `level.dat`
+/// has no such field at all (this crate's own `level_dat` module doc measured
+/// the real 14-field schema); it lives in
+/// `<world>/data/minecraft/world_gen_settings.dat`, in the *same*
+/// `dimensions.minecraft:overworld.generator` compound the seed's own file
+/// carries — verified against a real 26.2 world folder, hand-decoded
+/// independently of this crate's own NBT reader (see
+/// [`lodestone_anvil::world_gen_settings`]'s own doc and the fixture its
+/// tests check into `crates/lodestone-anvil/tests/support/`).
+///
+/// That file is normally created lazily, by `resolve_world_seed` on first
+/// open — but that function **errors** if the file already exists without a
+/// numeric `seed` field (`Error::MissingSeed`, propagated as a session-open
+/// failure, not a fallback), so a generator override cannot be pre-written
+/// with no seed alongside it. [`resolve_seed_for_creation`] resolves the same
+/// seed `app/launch.rs`'s own `resolve_launch_seed` would (vanilla's own
+/// seed-parsing rule — see that function's own doc for why it is duplicated
+/// rather than shared) and this function writes both together, before the
+/// server ever opens the directory — the same "shell writes it first, the
+/// server only ever reads it back" shape [`Self`] already uses for
+/// `enabled_features`. Because `resolve_world_seed`'s existing-file branch
+/// always wins over a `requested` seed, the value resolved *here* — not
+/// whatever `app/launch.rs` independently resolves moments later at launch —
+/// is the one that sticks; for a literal or hashed seed the two computations
+/// agree by construction (same deterministic rule, same input string), and
+/// for an empty (random) seed either draw is an equally valid "give me a
+/// random seed".
+///
+/// `None` (every world type this screen offers besides Flat and Single
+/// Biome) changes nothing: no extra file is written, matching the "seed is
+/// not written here" rule above exactly as it always has.
+///
 /// # Errors
 ///
 /// [`SaveError::Io`] if either directory cannot be created,
-/// [`SaveError::Anvil`] if `level.dat` cannot be written.
+/// [`SaveError::Anvil`] if `level.dat` (or, for a customized world,
+/// `world_gen_settings.dat`) cannot be written.
 pub fn create_world_in(
     root: &Path,
     name: &str,
     game_type: i32,
     enabled_features: &[String],
+    generator_override: Option<(&GeneratorOverride, &str)>,
 ) -> Result<PathBuf, SaveError> {
     // Browser: refuse explicitly rather than half-succeeding. `create_dir_all`
     // below returns `Err(Unsupported)` on wasm32 (measured), so this would already
@@ -748,7 +843,7 @@ pub fn create_world_in(
     // `saves/` directory and no `level.dat`.
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = (root, name, game_type, enabled_features);
+        let _ = (root, name, game_type, enabled_features, generator_override);
         return Err(SaveError::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "a browser has no saves directory; browser worlds are in-memory only",
@@ -786,6 +881,30 @@ pub fn create_world_in(
         &lodestone_anvil::level_dat::path_in(&dir),
     )
     .map_err(SaveError::Anvil)?;
+
+    if let Some((generator, raw_seed)) = generator_override {
+        let seed = resolve_seed_for_creation(raw_seed);
+        let settings = lodestone_anvil::world_gen_settings::WorldGenSettings::from_seed(seed);
+        let settings = match generator {
+            GeneratorOverride::Flat { layers, biome, features, lakes } => {
+                let layer_refs: Vec<_> = layers
+                    .iter()
+                    .map(|(block, height)| lodestone_anvil::world_gen_settings::FlatLayer {
+                        block,
+                        height: *height,
+                    })
+                    .collect();
+                settings.with_overworld_flat_generator(&layer_refs, biome, *features, *lakes)
+            }
+            GeneratorOverride::FixedBiome { biome } => settings.with_overworld_fixed_biome_generator(biome),
+        };
+        lodestone_anvil::world_gen_settings::write_to_file(
+            &settings,
+            &lodestone_anvil::world_gen_settings::path_in(&dir),
+        )
+        .map_err(SaveError::Anvil)?;
+    }
+
     Ok(dir)
     }
 }
@@ -1192,7 +1311,7 @@ mod tests {
     #[test]
     fn creating_a_world_writes_the_typed_name_and_a_fresh_directory() {
         let root = temp_root("create");
-        let dir = create_world_in(&root, "My World!", 1, &[]).expect("creates");
+        let dir = create_world_in(&root, "My World!", 1, &[], None).expect("creates");
         assert_eq!(
             dir.file_name().and_then(|n| n.to_str()),
             Some("My World!"),
@@ -1210,7 +1329,7 @@ mod tests {
         // The second create with the same name must be a **different**
         // directory — this is the whole bug the save list exists to fix, so it
         // is asserted directly rather than inferred from `available_dir_name`.
-        let second = create_world_in(&root, "My World!", 1, &[]).expect("creates a second");
+        let second = create_world_in(&root, "My World!", 1, &[], None).expect("creates a second");
         assert_ne!(second, dir, "Create New World must not reopen the first one");
         assert_eq!(
             second.file_name().and_then(|n| n.to_str()),
@@ -1234,10 +1353,76 @@ mod tests {
         );
     }
 
+    /// **The control for the customize-write path**: with no
+    /// `generator_override`, nothing changes — same assertion as the test
+    /// above, restated here so it stands next to the positive case below
+    /// rather than only living on an unrelated-looking test.
+    #[test]
+    fn creating_an_uncustomized_world_still_writes_no_world_gen_settings_file() {
+        let root = temp_root("create-uncustomized");
+        let dir = create_world_in(&root, "Plain", 0, &[], None).expect("creates");
+        assert!(!lodestone_anvil::world_gen_settings::path_in(&dir).exists());
+    }
+
+    /// A "Customize Type" choice reaches disk: `world_gen_settings.dat` is
+    /// written **at creation time** (not left for `resolve_world_seed` to
+    /// create later) with the chosen flat layers plus a real, numeric seed —
+    /// the two together, which is the whole reason this write happens here
+    /// rather than being left to the ordinary lazy path (see
+    /// [`create_world_in`]'s own doc). A literal numeric seed makes the
+    /// resolved value predictable, so this checks the exact number rather
+    /// than merely "some seed got written".
+    #[test]
+    fn customizing_a_flat_world_writes_the_layers_and_a_real_seed_at_creation_time() {
+        let root = temp_root("create-flat-customized");
+        let generator = GeneratorOverride::Flat {
+            layers: vec![("minecraft:bedrock".to_string(), 1), ("minecraft:air".to_string(), 59)],
+            biome: "minecraft:plains".to_string(),
+            features: false,
+            lakes: false,
+        };
+        let dir = create_world_in(&root, "Flat World", 0, &[], Some((&generator, "4242")))
+            .expect("creates");
+
+        let path = lodestone_anvil::world_gen_settings::path_in(&dir);
+        assert!(path.is_file(), "world_gen_settings.dat must exist right after creation, not \
+             only after the world is first opened");
+        let settings = lodestone_anvil::world_gen_settings::read_from_file(&path).expect("decodes");
+        assert_eq!(settings.seed().expect("a literal seed parses verbatim"), 4242);
+        assert!(settings.has_dimensions(), "the customized generator must be present");
+    }
+
+    /// The random-seed leg of [`resolve_seed_for_creation`]: an empty typed
+    /// seed must still resolve to *some* real `i64` — vanilla's own "empty
+    /// means random" rule — and two independent creations must not collide on
+    /// the same draw (the discriminating control: a stub that always
+    /// returned e.g. `0` would pass an "is present" check but fail this one).
+    #[test]
+    fn customizing_with_an_empty_seed_still_resolves_a_real_distinct_seed() {
+        let root = temp_root("create-flat-random-seed");
+        let generator = GeneratorOverride::FixedBiome { biome: "minecraft:desert".to_string() };
+        let dir_a = create_world_in(&root, "A", 0, &[], Some((&generator, ""))).expect("creates");
+        let dir_b = create_world_in(&root, "B", 0, &[], Some((&generator, ""))).expect("creates");
+
+        let seed_a = lodestone_anvil::world_gen_settings::read_from_file(
+            &lodestone_anvil::world_gen_settings::path_in(&dir_a),
+        )
+        .expect("decodes")
+        .seed()
+        .expect("a random draw is still a real seed");
+        let seed_b = lodestone_anvil::world_gen_settings::read_from_file(
+            &lodestone_anvil::world_gen_settings::path_in(&dir_b),
+        )
+        .expect("decodes")
+        .seed()
+        .expect("a random draw is still a real seed");
+        assert_ne!(seed_a, seed_b, "two independent random draws must not collide");
+    }
+
     #[test]
     fn a_name_of_only_illegal_characters_still_produces_a_usable_folder() {
         let root = temp_root("illegal-only");
-        let dir = create_world_in(&root, "///", 0, &[]).expect("creates");
+        let dir = create_world_in(&root, "///", 0, &[], None).expect("creates");
         assert_eq!(dir.file_name().and_then(|n| n.to_str()), Some("___"));
         assert_eq!(list_worlds_in(&root).len(), 1);
     }

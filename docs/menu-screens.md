@@ -91,6 +91,23 @@ structures, bonus chest, allow cheats) and online mode, arranged across vanilla'
 (Game/World/More) using the shared tab-bar widget also used by the Statistics screen. Its model lives
 in `menu/create_world.rs`.
 
+Four sub-editors reach off the main tabs, each a fixed-row screen (no scan, no scrollbar): Game Rules
+and Data Packs (More tab), Experiments (More tab, three fixed feature-flag toggles), and Customize
+(World tab, present but only active while World Type is Flat or Single Biome — cycles a bundled
+quick-preset layer stack or a curated fixed biome list). Experiments and Customize both reach real
+disk: `crate::saves::create_world_in` writes the chosen feature flags into the new world's `level.dat`
+(`lodestone_anvil::level_dat::LevelDat::with_enabled_features`) and, for a customized Flat/Single Biome
+world, writes the chosen generator straight into `world_gen_settings.dat`'s
+`dimensions.minecraft:overworld.generator` compound alongside a real, resolved seed
+(`lodestone_anvil::world_gen_settings::WorldGenSettings::with_overworld_flat_generator`/
+`with_overworld_fixed_biome_generator`) — before the server ever opens the directory, since that file's
+own lazy-create-on-first-open path errors if it already exists with no seed field. Neither choice is
+yet read back by this client's own world-generation launch path, so a freshly created world still
+generates the same way it always has from *this* client; only a real vanilla server re-opening the save
+folder would see either customization. Game Rules is the one sub-editor with a network effect: its diff
+is sent as `SetGameRules` once the session reaches Play. Data Packs is collected but has no consumer at
+all (no data-pack loader in this crate yet).
+
 ### World select
 
 `Screen::WorldSelect` — vanilla's `SelectWorldScreen`, reached from the title screen's Singleplayer
