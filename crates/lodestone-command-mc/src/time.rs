@@ -17,7 +17,7 @@
 //! permits it, but every existing caller in this server
 //! passes a whole number of ticks, and adding fractional parsing without a
 //! caller to exercise it would be the risk this crate's own doc names for
-//! `hasValueHere`-style edges: untested and easy to get wrong. A bare
+//! this-kind-of-vanilla-grammar-edge cases: untested and easy to get wrong. A bare
 //! integer plus `d`/`s`/`t` is what this parses.
 
 use lodestone_command::{ArgumentType, ParseError, ParseErrorKind, ParsedValue, StringReader};
