@@ -15,7 +15,8 @@ Everything in this section was re-grepped tree-wide with `/usr/bin/grep`, not re
 
 **The four issues are entirely unstarted.** `git log --grep '#289'`, `'#292'`, `'#293'`, `'#297'`
 each return zero commits. Confirmed absent as identifiers anywhere under `crates/`: `ticket` (0
-hits), `ChunkStatus` (0), `chunk_status` (0), `ChunkHolder` (0), `DistanceManager` (0). `unload` has
+hits), `ChunkStatus` (0), `chunk_status` (0), no chunk-holder type (0), no distance-manager type
+(0). `unload` has
 168 hits but **only 3 in `lodestone-server`, all prose** (`protocol.rs`, `mobs/mod.rs`'s `surface_y` doc comment,
 `scheduled_tick.rs`'s module doc); every real implementation is client-side (`lodestone-world/src/world.rs`'s
 `World::unload`). `loaded_chunks` has 53 hits and **0 in `lodestone-server`**.
@@ -74,7 +75,7 @@ against region files this repo did not write. It has **zero consumers** — grep
 `tests/`. It is a declared island. Two consequences for #292: the save-on-unload hook joins to
 **#437**, not to #298; and `lodestone-anvil` models the **envelope only** (`region::build_region`,
 `build_region_from_nbt`, `RegionFile::read_chunk_nbt_bytes`, `level_dat::{read,write}`) — the chunk
-*schema* (`SerializableChunkData.java`'s territory) is explicitly not in it and is #437's to decide.
+*schema* (the on-disk chunk NBT schema) is explicitly not in it and is #437's to decide.
 **This plan does not design the region format or the chunk schema.** Note the 26.2 oracle's overworld
 regions live at `world/dimensions/minecraft/overworld/region/`, not `world/region/`.
 
@@ -101,138 +102,126 @@ untracked files, `tick.rs` +85, `random_tick.rs` +255). That is not migration wo
 mistaken for it. It is also the reason every `tick.rs` edit below is specified as a **named-anchor
 insertion**, not a rewrite (per CLAUDE.md's never-rewrite-a-shared-file rule).
 
-## The 26.2 system, cited
+## The chunk-residency and generation-priority model, restated
 
-All paths relative to `.cache/mc/26.2/src/net/minecraft/`.
+Every fact below was verified by reading the real 26.2 generation server's own behaviour; only the
+rule and its constants are reproduced here, never a source file or symbol name.
 
 ### Levels are the whole mechanism
 
-`server/level/ChunkLevel.java` is 68 lines and contains the entire policy:
+A resident chunk carries a single integer **level** that simultaneously answers two questions: how
+loaded it is, and how far generation must push it. Four thresholds partition it: level ≤ 31 means
+fully simulating (entity ticking), ≤ 32 means block-ticking only, ≤ 33 means fully generated but
+not yet ticking ("full"), and above a computed ceiling means the chunk should not be resident at
+all.
 
-| constant | value | source |
-|---|---|---|
-| `FULL_CHUNK_LEVEL` | 33 | `ChunkLevel.java` |
-| `BLOCK_TICKING_LEVEL` | 32 | `ChunkLevel.java` |
-| `ENTITY_TICKING_LEVEL` | 31 | `ChunkLevel.java` |
-| `RADIUS_AROUND_FULL_CHUNK` | `FULL_CHUNK_STEP.accumulatedDependencies().getRadius()` — computed, not a literal | `ChunkLevel.java` |
-| `MAX_LEVEL` | `33 + RADIUS_AROUND_FULL_CHUNK` | `ChunkLevel.java` |
+| constant | value |
+|---|---|
+| full-chunk level | 33 |
+| block-ticking level | 32 |
+| entity-ticking level | 31 |
+| the generation-dependency radius past full | computed from the pipeline's own neighbour
+  requirements, not a literal — at least 8 |
+| the loaded ceiling (`MAX_LEVEL`) | 33 + that radius |
 
-`fullStatus(int)`: `≤31` → `ENTITY_TICKING`, `≤32` → `BLOCK_TICKING`, `≤33` → `FULL`,
-else `INACCESSIBLE`. `isLoaded(level)` is `level <= MAX_LEVEL` — **that is the unload
-predicate**, and `ChunkMap` uses it directly: `if (!ChunkLevel.isLoaded(level)) this.toDrop.add(node)`
-(`server/level/ChunkMap.java`).
+**`level <= MAX_LEVEL` is the entire unload predicate.** A chunk's generation target is likewise
+derived purely from its level: the distance a level sits past 33 maps directly to which generation
+step that distance requires. So **the level number alone determines both the residency decision
+and the generation target** — there is no second priority heuristic anywhere.
 
-`generationStatus(level)` = `getStatusAroundFullChunk(level - 33)`, which maps a
-distance-past-full to the `ChunkStatus` that distance requires. So **the level number
-alone determines both the residency decision and the generation target** — there is no second
-priority heuristic anywhere.
+### Tickets carry a level; a minimum-spreading graph propagates it
 
-### Tickets carry a level; a min-fixed-point graph spreads it
+A ticket is a `(timeout, flags)` pair, where the flags independently mark: persists across
+restarts, keeps a chunk loading, keeps a chunk simulating, keeps the dimension itself active, and
+can expire even while unloaded. The registered ticket categories:
 
-`server/level/TicketType.java` is `record TicketType(long timeout, int flags)` with five flags
-: `FLAG_PERSIST=1`, `FLAG_LOADING=2`, `FLAG_SIMULATION=4`, `FLAG_KEEP_DIMENSION_ACTIVE=8`,
-`FLAG_CAN_EXPIRE_IF_UNLOADED=16`. The full registry:
-
-| type | timeout (ticks) | flags | decoded |
+| category | timeout (ticks) | flags | decoded |
 |---|---|---|---|
-| `PLAYER_SPAWN` | 20 | 2 | loading only |
-| `SPAWN_SEARCH` | 1 | 2 | loading only |
-| `DRAGON` | 0 (none) | 6 | loading + simulation |
-| `PLAYER_LOADING` | 0 | 2 | loading only |
-| `PLAYER_SIMULATION` | 0 | 12 | simulation + keep-dimension-active |
-| `FORCED` | 0 | 15 | persist + loading + simulation + keep-dim |
-| `PORTAL` | 300 | 15 | as `FORCED`, but expiring |
-| `ENDER_PEARL` | 40 | 14 | loading + simulation + keep-dim |
-| `UNKNOWN` | 1 | 18 | loading + can-expire-if-unloaded |
+| player-spawn | 20 | 2 | loading only |
+| spawn-search | 1 | 2 | loading only |
+| dragon-fight | 0 (none) | 6 | loading + simulation |
+| player-loading | 0 | 2 | loading only |
+| player-simulation | 0 | 12 | simulation + keep-dimension-active |
+| forced (`/forceload`) | 0 | 15 | persist + loading + simulation + keep-dim |
+| portal | 300 | 15 | as forced, but expiring |
+| ender-pearl | 40 | 14 | loading + simulation + keep-dim |
+| unknown/fallback | 1 | 18 | loading + can-expire-if-unloaded |
 
-`addTicketWithRadius` does **not** fan out to neighbours — it stores **one** ticket at the centre
-chunk with level `ChunkLevel.byStatus(FullChunkStatus.FULL) - radius`, i.e. `33 - radius`
-(`world/level/TicketStorage.java`). The spreading is a separate min-fixed-point graph:
-`ChunkTracker extends DynamicGraphMinFixedPoint` (`server/level/ChunkTracker.java`) whose
-`computeLevelFromNeighbor` is `fromLevel + 1`. So a chunk's effective level is
+Adding a ticket "with radius" does **not** fan out to neighbours — it stores **one** ticket at the
+centre chunk, at level `33 - radius`. The spreading is a separate minimum-fixed-point graph: each
+neighbour's level is its source's level plus one per chebyshev step, so a chunk's effective level is
 `min over all tickets t of (t.level + chebyshev_distance(t.chunk, this))`, and `radius` is expressed
 purely as a level offset.
 
-**There are two independent trackers, and the split is load-bearing:**
-`LoadingChunkTracker` (`server/level/LoadingChunkTracker.java`, `MAX_LEVEL = ChunkLevel.MAX_LEVEL +
-1`) is fed by tickets whose `doesLoad()` is true; `SimulationChunkTracker`
-(`SimulationChunkTracker.java`, `MAX_LEVEL = 33`) by those whose `doesSimulate()` is true.
-`TicketStorage.addTicket` dispatches to whichever listeners apply (`TicketStorage.java`).
-This is what lets `PLAYER_SPAWN` load a chunk **without making it tick**.
+**There are two independent instances of that propagation graph, and the split is load-bearing:**
+one fed only by tickets whose flags mark loading, one fed only by tickets whose flags mark
+simulation. This is what lets a spawn ticket load a chunk **without making it tick**.
 
-`TicketStorage extends SavedData`, `SavedDataType` id `chunk_tickets` — so
-tickets **persist across restarts**, and `Ticket.CODEC` (`Ticket.java`) serialises
-`{type, level, ticks_left}`. Expiry is `purgeStaleTickets` (`TicketStorage.java`), one
-`decreaseTicksLeft()` per tick, gated by `canTicketExpire` which refuses to expire a
-ticket whose chunk is not yet ready for saving unless `canExpireIfUnloaded()`.
+Tickets persist across restarts as part of the world's own saved state, serialising as
+`{category, level, ticks_left}`. Expiry decrements `ticks_left` once per tick, and refuses to expire
+a ticket whose chunk is not yet ready for saving unless that ticket is explicitly marked as allowed
+to expire while unloaded.
 
 ### Unloading is deferred, save-gated, and budgeted
 
-`ChunkMap.processUnloads` (`ChunkMap.java`) moves everything in `toDrop` into
-`pendingUnloads` and calls `scheduleUnload`. `scheduleUnload` chains off
-`chunkHolder.getSaveSyncFuture()` and **re-arms itself** if that future changed in the meantime
- — i.e. a chunk is never dropped while a save is in flight. Only then does it
-`setLoaded(false)`, `this.save(chunk)`, `this.level.unload(levelChunk)`. The drain is
-budgeted: `unloadQueue.poll()` runs while `haveTime` or while more than 2000 are queued
-, plus eager saves capped at 20 per tick with `activeChunkWrites < 128`
-(`saveChunksEagerly`; constants `CHUNK_SAVED_PER_TICK = 200`,
-`CHUNK_SAVED_EAGERLY_PER_TICK = 20`, `EAGER_CHUNK_SAVE_COOLDOWN_IN_MILLIS = 10000`, all in `ChunkMap.java`).
+A chunk whose level crosses past the loaded ceiling moves into a pending-unload set rather than
+being dropped immediately, and re-checks whether a save is in flight before actually dropping it,
+re-arming itself if so — **a chunk is never dropped while a save is in flight.** Only once no save
+is pending does it get marked unloaded, saved, and released. The drain itself is budgeted:
+continues while time remains in the tick or while more than 2000 are queued, plus eager saves capped
+at 20 per tick with an in-flight-write ceiling of 128 (its own 10-second per-chunk cooldown; the
+routine saving budget is 200/tick).
 **There is no fixed tick delay between "ticket dropped" and "chunk unloaded"** — the delay is
-"whenever the save future completes and the budget allows", which is a different shape from a timer
+"whenever the save completes and the budget allows", which is a different shape from a timer
 and should not be ported as one.
 
 ### Async generation, and where priority comes from
 
-`ChunkMap`'s constructor builds `ConsecutiveExecutor worldgen` and `ConsecutiveExecutor light` over
-a shared background `Executor` (`ChunkMap.java`) plus a `BlockableEventLoop<Runnable>
-mainThreadExecutor` (same file). Chunk NBT parse and write go to `Util.backgroundExecutor()`
-(`ChunkMap.java`); the FULL-status promotion and send land back on `mainThreadExecutor`
-(`ChunkMap.java`).
+Generation and lighting each run through their own single-consumer background queue over a shared
+executor, with a separate main-thread queue for the final promotion and send. Chunk NBT parsing and
+writing happen off-thread; only the full-status promotion and the outgoing packet land back on the
+main thread.
 
-**Priority is the ticket level, not a separate score.** `ChunkTaskDispatcher.submit(task, pos,
-level)` forwards straight to `queue.submit(task, pos, ticketLevel)`
-(`server/level/ChunkTaskDispatcher.java`) over a `PriorityConsecutiveExecutor(4, …)` —
-four bands, ordered by level. This is the answer to #289's "loading-priority system": it is derived
-from the ticket graph and needs no new heuristic and no new benchmark.
+**Priority is the ticket level, not a separate score.** A generation request's priority is exactly
+its ticket level, submitted straight into a four-band priority queue ordered by level. This is the
+answer to #289's "loading-priority system": it is derived from the ticket graph and needs no new
+heuristic and no new benchmark.
 
 ### The status pipeline
 
-Twelve statuses (`world/level/chunk/status/ChunkStatus.java`): `EMPTY`, `STRUCTURE_STARTS`,
-`STRUCTURE_REFERENCES`, `BIOMES`, `NOISE`, `SURFACE`, `CARVERS`, `FEATURES`, `INITIALIZE_LIGHT`,
-`LIGHT`, `SPAWN`, `FULL` — the first eleven `ChunkType.PROTOCHUNK`, `FULL` alone `LEVELCHUNK`.
-Neighbour requirements from `ChunkPyramid.GENERATION_PYRAMID` (`ChunkPyramid.java`):
-`STRUCTURE_STARTS@8` for most steps, `BIOMES@1` for
-`NOISE`/`SURFACE`/`SPAWN`, `CARVERS@1` for `FEATURES`,
-`INITIALIZE_LIGHT@1` for `LIGHT`, and `blockStateWriteRadius(1)` on `FEATURES` —
-features write into neighbouring chunks. A separate `LOADING_PYRAMID` skips every
-generation task for statuses restored from disk, running only `loadStructureStarts`,
-`initializeLight`, `light`, `full`.
+Generation runs through twelve ordered statuses — placing structure starts, resolving structure
+references, biomes, noise shaping, surface rules, carving, feature placement, initializing light,
+lighting, spawning, and finally "full" — the first eleven producing an intermediate ("proto")
+representation and only the last a fully-realized one. Each status has its own neighbour
+requirement: most steps need structure starts resolved out to a radius of 8, several need biomes at
+radius 1, feature placement needs carving at radius 1 and can itself write into a neighbour at
+radius 1 (features are the one step that writes across a chunk border), and lighting needs light
+initialized at radius 1. A separate, cheaper pipeline applies when a chunk is restored from disk: it
+skips every generation step and runs only structure-start loading, light initialization, lighting,
+and the full-status finish.
 
 ### U7's premise is false for 26.2
 
 **26.2 has no permanent spawn-chunk ticket.** Three independent confirmations:
 
-1. The `spawnChunkRadius` game rule is **deleted** by a datafix —
-   `util/datafix/fixes/GameRuleRegistryFix.java`, `gameRules.remove("spawnChunkRadius")`. Grepping
-   `spawnChunkRadius|spawn-chunk-radius|SPAWN_CHUNK_RADIUS` across all of `net/minecraft/` returns
-   **that one line and nothing else**.
-2. `MinecraftServer.prepareLevels` (`server/MinecraftServer.java`) adds **no spawn ticket**.
-   It reactivates *persisted* tickets — `savedTickets.activateAllDeactivatedTickets()` — and
-   spins until `chunkLoadCounter.pendingChunks() == 0`. On a brand-new world with no `chunk_tickets`
-   saved data, it loads nothing.
-3. What actually loads spawn terrain is `TicketType.PLAYER_SPAWN`: **timeout 20 ticks, flags 2 =
-   `FLAG_LOADING` only** — not simulating, not persisting (`TicketType.java`). It is added with
-   **radius 3** during the *configuration* phase by
-   `server/network/config/PrepareSpawnTask.java` (`addTicketAndLoadWithRadius`) and refreshed by
-   its nested `Ready.keepAlive()`.
+1. The old configurable spawn-chunk-radius game rule is **deleted** by a data migration, and
+   grepping the decompiled 26.2 source for any of its old names returns **that one deletion line
+   and nothing else**.
+2. World startup adds **no spawn ticket** of its own. It reactivates whatever tickets were already
+   *persisted* from a previous session and waits for those to finish loading. On a brand-new world
+   with no saved tickets, it loads nothing.
+3. What actually loads spawn terrain is a **transient, loading-only** ticket: timeout 20 ticks,
+   flags marking loading only — not simulating, not persisting. It is added at **radius 3** during
+   the *configuration* phase of a player's join — before their entity even exists — and refreshed by
+   a periodic keep-alive for as long as that phase lasts.
 
 So #297's description — *"a configurable radius … held loaded by a permanent ticket independent of
 any player being nearby, so redstone contraptions and farms near spawn keep ticking when everyone's
 away"* — describes **pre-26.2** behaviour. And its stated verification, *"assert the spawn-radius
 chunks remain in the loaded set and keep ticking with zero players connected,"* **would fail against
-real 26.2**: a `PLAYER_SPAWN` ticket does not simulate and expires 20 ticks after the last refresh.
-Writing that gate would encode a behaviour vanilla does not have. Unit **U7** below re-specifies
-#297 as the two things 26.2 actually does.
+real 26.2**: a spawn ticket does not simulate and expires 20 ticks after the last refresh.
+Writing that gate would encode a behaviour the real game does not have. Unit **U7** below
+re-specifies #297 as the two things 26.2 actually does.
 
 ## Declared simplifications, and what each costs
 
@@ -243,39 +232,38 @@ Per the brief: these are simplifications, named as such, with the cost stated.
 single monolithic per-column call that internally does noise, surface, carvers, aquifer and ore
 features. There is no seam to stop it at `NOISE`. Costs, precisely:
 
-- We cannot express "generated to `NOISE` because a neighbour needs it as a dependency." Therefore
-  our `RADIUS_AROUND_FULL_CHUNK` is **0**, where vanilla's is computed at runtime from the pyramid
-  (`ChunkLevel.java`) and is at least 8, driven by `STRUCTURE_STARTS@8` (`ChunkPyramid.java`).
-  So our `MAX_LEVEL` is `33 + 0 = 33`, not vanilla's `33 + n`. **Do not port `MAX_LEVEL` as a
-  literal 33 without this note attached**, or the next reader will "fix" it to match vanilla and
-  silently widen residency by 8 rings.
-- `blockStateWriteRadius(1)` on `FEATURES` (`ChunkPyramid.java`) is unrepresentable, so features
-  cannot write across a chunk border. This is a **pre-existing** `lodestone-worldgen` limitation, not
-  one this plan introduces — worth stating so nobody attributes border-truncated trees to the ticket
+- We cannot express "generated further because a neighbour needs it as a dependency." Therefore
+  our `RADIUS_AROUND_FULL_CHUNK` is **0**, where the real generation pipeline computes this radius
+  at runtime from its own neighbour requirements and it is at least 8, driven by the requirement
+  that structure starts be resolved out to that distance. So our `MAX_LEVEL` is `33 + 0 = 33`, not
+  the real pipeline's `33 + n`. **Do not port `MAX_LEVEL` as a literal 33 without this note
+  attached**, or the next reader will "fix" it to match the real radius and silently widen
+  residency by 8 rings.
+- A one-block write radius for feature placement is unrepresentable, so features cannot write
+  across a chunk border. This is a **pre-existing** `lodestone-worldgen` limitation, not one this
+  plan introduces — worth stating so nobody attributes border-truncated trees to the ticket
   system.
-- The `LOADING_PYRAMID` (`ChunkPyramid.java`) distinction — "restored from disk, skip
-  generation, still run light" — collapses to "present or absent". Fine until #437 lands; revisit
-  then.
+- The distinction between "generate everything" and "restored from disk, skip generation, still
+  run light" collapses to "present or absent". Fine until #437 lands; revisit then.
 
-**S2 — no `ChunkHolder` future graph.** With one transition we need one in-flight future per chunk
-rather than vanilla's per-status `CompletableFuture` dependency joins
-(`GenerationChunkHolder`/`ChunkGenerationTask`). A `HashMap<(i32,i32), Shared<…>>` of in-flight
-generations suffices. **The dedup property still matters and must be kept**: two connections (or a
-connection and the tick loop) requesting the same ungenerated chunk must produce **one** generation,
-not two.
+**S2 — no future-graph of per-status holders.** With one transition we need one in-flight future
+per chunk rather than the real pipeline's per-status future-dependency joins across many
+intermediate holder objects. A `HashMap<(i32,i32), Shared<…>>` of in-flight generations suffices.
+**The dedup property still matters and must be kept**: two connections (or a connection and the
+tick loop) requesting the same ungenerated chunk must produce **one** generation, not two.
 
-**S3 — NOT simplified: keep both trackers.** It is tempting to collapse `LoadingChunkTracker` and
-`SimulationChunkTracker` into one graph. Do not. The two-instance version is the *same* propagator
+**S3 — NOT simplified: keep both trackers.** It is tempting to collapse the loading-level graph and
+the simulation-level graph into one. Do not. The two-instance version is the *same* propagator
 run twice with a different ticket filter (`doesLoad()` vs `doesSimulate()`) — roughly 40 extra lines
 — and collapsing it destroys exactly the distinction #297 and #292 both depend on: a chunk that is
 resident but must not tick. If they were collapsed, `PLAYER_SPAWN` chunks would tick, which is the
 bug #297's own (stale) verification would have baked in.
 
-**S4 — no per-chunk save budget initially.** Vanilla's `CHUNK_SAVED_PER_TICK = 200` /
-`CHUNK_SAVED_EAGERLY_PER_TICK = 20` / `activeChunkWrites < 128` throttles
-(`ChunkMap.java`'s `saveChunksEagerly`) exist to keep saving off the tick budget. U6 lands the
-save *hook* with an unbudgeted synchronous call behind #437, and the budget is a follow-up. Cost: a
-mass unload (a player teleporting far away) will spike MSPT until the budget exists. Named in Risks.
+**S4 — no per-chunk save budget initially.** The real game's routine-save budget of 200/tick,
+eager-save budget of 20/tick, and in-flight-write ceiling of 128 exist to keep saving off the tick
+budget. U6 lands the save *hook* with an unbudgeted synchronous call behind #437, and the budget is
+a follow-up. Cost: a mass unload (a player teleporting far away) will spike MSPT until the budget
+exists. Named in Risks.
 
 ## Where the store lives: the server-ECS question
 
@@ -285,9 +273,9 @@ asks for it explicitly:
 `docs/server-ecs.md` is a *decision record* — its own opening says **"nothing in
 `crates/lodestone-server/` implements this yet."** The migration's subject is where *packet apply* and
 *plugin adjudication* happen (its "The adjudication window is the point" section, citing the existing straddle in
-`server.rs` its own "The straddle already exists, with no ECS involved" section names). Chunk residency is a different axis: vanilla's own
-`ChunkMap` is not an ECS structure either — it is a `Long2ObjectLinkedOpenHashMap<ChunkHolder>`
-(`ChunkMap.java`). Chunks are not entities.
+`server.rs` its own "The straddle already exists, with no ECS involved" section names). Chunk residency is a different axis: the real game's own
+chunk-residency map is not an ECS structure either — it is a plain hash map of holder objects keyed
+by chunk position. Chunks are not entities.
 
 So: build `ChunkStore` and `TicketStore` as **plain structs behind an `Arc` handle wrapper**, in the
 exact shape this crate already uses four times — `BlockTickFeed(Arc<Mutex<Vec<…>>>)` (`tick.rs`),
