@@ -118,9 +118,9 @@ vertical-only change. Do #220 before or alongside #194, not after.
 > **Stale as written: #194 landed first, and #220 is still open.** The advice above
 > was sound but was not followed, so record what that cost — nothing, as it turned
 > out. `fall_distance` only reaches position through
-> `Player.maybeBackOffFromEdge`, which rewrites the **horizontal** components
+> vanilla's own edge-back-off adjustment, which rewrites the **horizontal** components
 > only, and the server's own rubber-band comparison zeroes `yDist` before
-> measuring (`ServerGamePacketListenerImpl.java:1137-1139`) — so the
+> measuring — so the
 > vertical-disagreement question #220 exists to answer could not have gated #194
 > either way. #220 remains worth doing, and it is still the vehicle for
 > `edge-back-off.md`'s owed live sneak-at-a-ledge gate, which #194 did **not**

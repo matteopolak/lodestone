@@ -369,7 +369,7 @@ From `CLAUDE.md`, restated here because a benchmark is where they matter most:
   … | tail` once reported "exit code 0" while cargo returned 101 and its own last line was
   `error: 1 target failed:`. Let cargo write to a file and check its real exit status.
 - **A truncated search is not a negative result.** `| head` once hid a real hit
-  (`Player.java:1408`'s swim-descent constants) and produced a confidently wrong
+  (vanilla's own swim-descent constants) and produced a confidently wrong
   conclusion. Before writing "no such benchmark exists" or "this is unmeasured", grep for
   the producer across the whole tree, not the consumer in one named file.
 - **A self-authored oracle validates the behaviour you chose to model.** Where a benchmark
