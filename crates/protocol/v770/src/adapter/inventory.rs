@@ -290,23 +290,22 @@ pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, A
 ///
 /// # Where the order comes from
 ///
-/// `Registries.TRIM_MATERIAL` is a **dynamic** registry — it has no
-/// `Registry.register` call sequence at all. Its entries are the JSON files
-/// under `data/minecraft/trim_material/`, loaded by
-/// `ResourceManagerRegistryLoadTask.load`, which registers them
-/// `.sorted(Entry.comparingByKey())` over the resource `Identifier`.
-/// `Identifier.compareTo` compares **path first**, so for a registry whose
-/// entries are all `minecraft:` the id order is plain alphabetical order of
-/// the file stems.
+/// The trim-material registry is a **dynamic** registry — it has no static
+/// registration call sequence at all. Its entries are the JSON files
+/// under `data/minecraft/trim_material/`, loaded by vanilla's own
+/// resource-manager registry-load task, which registers them sorted by
+/// resource id's own natural ordering. That ordering compares **path
+/// first**, so for a registry whose entries are all `minecraft:` the id
+/// order is plain alphabetical order of the file stems.
 ///
-/// **`TrimMaterials.bootstrap` is not that order.** It takes a
-/// `net.minecraft.data.worldgen.BootstrapContext` — it is the *datagen*
-/// routine that writes those JSON files, and it runs in no server. This
-/// table was previously transcribed from it, and the resulting mapping was
-/// wrong for eight of the eleven materials: an emerald trim (id 3) drew as
-/// `redstone`, which is the bootstrap list's fourth entry. That is the shape
-/// this repo's evidence standards call an authoritative source answering a
-/// *neighbouring* question.
+/// **Vanilla's datagen bootstrap routine for this registry is not that
+/// order.** It runs against a datagen-only bootstrap context — it is the
+/// *datagen* routine that writes those JSON files, and it runs in no
+/// server. This table was previously transcribed from it, and the
+/// resulting mapping was wrong for eight of the eleven materials: an
+/// emerald trim (id 3) drew as `redstone`, which is the bootstrap list's
+/// fourth entry. That is the shape this repo's evidence standards call an
+/// authoritative source answering a *neighbouring* question.
 ///
 /// # Why a table and not the synced registry
 ///
@@ -341,9 +340,9 @@ const TRIM_MATERIAL_IDS: &[&str] = &[
 ];
 /// `minecraft:trim_pattern` registry paths in the order a vanilla server
 /// assigns holder ids — the `data/minecraft/trim_pattern/` file stems sorted
-/// by resource id. See [`TRIM_MATERIAL_IDS`] for why that, and not
-/// `TrimPatterns.bootstrap`'s datagen call order, is the id order, and for
-/// the id-space caveat this table shares.
+/// by resource id. See [`TRIM_MATERIAL_IDS`] for why that, and not the
+/// equivalent datagen bootstrap routine's call order, is the id order, and
+/// for the id-space caveat this table shares.
 const TRIM_PATTERN_IDS: &[&str] = &[
     "bolt",
     "coast",
@@ -364,30 +363,30 @@ const TRIM_PATTERN_IDS: &[&str] = &[
     "wayfinder",
     "wild",
 ];
-/// Decodes `minecraft:trim`'s payload — `ArmorTrim.STREAM_CODEC`
-/// (`ArmorTrim.java`), a `Holder<TrimMaterial>` then a
-/// `Holder<TrimPattern>`.
+/// Decodes `minecraft:trim`'s payload — vanilla's own armor-trim stream
+/// codec, a `Holder<TrimMaterial>` then a `Holder<TrimPattern>`.
 ///
-/// Each holder is `ByteBufCodecs.holder(registry, DIRECT_STREAM_CODEC)`: a VarInt
+/// Each holder is vanilla's registry-holder codec: a VarInt
 /// where `0` introduces an **inline** definition and any positive value references
 /// the registry at `value - 1`. Both forms are handled, because both must be — the
 /// inline form is what a datapack-defined trim arrives as, and consuming the wrong
 /// number of bytes for it would desync the rest of the packet exactly as the
 /// unmodeled-component cliff this arm exists to remove does.
 ///
-/// The inline bodies, from the two `DIRECT_STREAM_CODEC`s:
+/// The inline bodies, from the two direct (non-registry) stream codecs:
 ///
-/// * `TrimMaterial` (`TrimMaterial.java`) — a `MaterialAssetGroup` (an
-///   `AssetInfo` = one UTF-8 string, then a map of `ResourceKey -> AssetInfo`,
-///   i.e. a VarInt count of `(string, string)` pairs) then a description
-///   `Component` (network NBT).
-/// * `TrimPattern` (`TrimPattern.java`) — an `Identifier` (string), a
-///   description `Component`, then a `bool` `decal`.
+/// * [`TrimMaterial`] — vanilla's own asset-group shape (one UTF-8 string,
+///   then a map of `ResourceKey -> string`, i.e. a VarInt count of
+///   `(string, string)` pairs) then a description `Component` (network
+///   NBT).
+/// * [`TrimPattern`] — an identifier (string), a description `Component`,
+///   then a `bool` `decal`.
 ///
 /// **The inline material carries no registry name**, only its asset suffix, so
 /// that is what is reported: for every vanilla material the suffix *is* the
-/// registry path (`MaterialAssetGroup::create(base)`, `MaterialAssetGroup.java`),
-/// and it is also the half `lodestone_assets::trim::trim_sprite_id` actually needs.
+/// registry path (confirmed against vanilla's own asset-group construction
+/// helper), and it is also the half `lodestone_assets::trim::trim_sprite_id`
+/// actually needs.
 fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
     let material = match reader.var_i32().map_err(dec_err)? {
         0 => {
@@ -434,8 +433,8 @@ fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
 /// [`TRIM_MATERIAL_IDS`]' registry is (it appears in
 /// `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` and in no built-in
 /// `registries.json` report), so the same reasoning applies verbatim: the id
-/// order is `ResourceManagerRegistryLoadTask.load`'s
-/// `.sorted(Entry.comparingByKey())`, and `BannerPatterns.bootstrap`'s
+/// order is `vanilla's resource-manager registry-load task`'s
+/// `.sorted(a by-key comparator())`, and `the equivalent datagen bootstrap routine`'s
 /// register-call order — which this table previously transcribed — is a
 /// datagen routine that runs in no server. Only entry `0` (`base`) happened
 /// to coincide; the other 42 were shifted.
@@ -488,12 +487,12 @@ const BANNER_PATTERN_IDS: &[&str] = &[
     "triangles_top",
 ];
 
-/// Vanilla `DyeColor.STREAM_CODEC` (`ByteBufCodecs.idMapper`) id order —
-/// `DyeColor.java`'s enum declaration order, `0..=15`, `WHITE` first. A bare
-/// VarInt with no `+1` and no `0` sentinel, unlike the `ByteBufCodecs.holder`
-/// shape [`BANNER_PATTERN_IDS`] resolves — the same idMapper-vs-holder
-/// distinction [`read_pot_decorations`]' own doc documents for
-/// `ByteBufCodecs.registry`.
+/// Vanilla's own `DyeColor` stream codec (a plain id-mapper) id order —
+/// its enum declaration order, `0..=15`, `WHITE` first. A bare
+/// VarInt with no `+1` and no `0` sentinel, unlike the registry-holder
+/// shape [`BANNER_PATTERN_IDS`] resolves — the same id-mapper-vs-holder
+/// distinction [`read_pot_decorations`]' own doc documents for vanilla's
+/// registry codec.
 const DYE_COLOR_NAMES: [&str; 16] = [
     "white",
     "orange",
@@ -513,17 +512,16 @@ const DYE_COLOR_NAMES: [&str; 16] = [
     "black",
 ];
 
-/// Decodes `minecraft:banner_patterns`' payload — `BannerPatternLayers
-/// .STREAM_CODEC`, `Layer.STREAM_CODEC.apply(ByteBufCodecs.list())`
-/// (`BannerPatternLayers.java`): a VarInt element count (unbounded on the wire
-/// — `ByteBufCodecs.list()`'s no-arg overload caps at `Integer.MAX_VALUE`, not
-/// a real limit) followed by that many `Layer`s. Each `Layer`
-/// (`BannerPatternLayers.Layer.STREAM_CODEC`) is a `Holder<BannerPattern>` —
-/// the same `ByteBufCodecs.holder(registry, DIRECT_STREAM_CODEC)` shape
-/// [`read_armor_trim`] decodes: `0` introduces an inline `(Identifier assetId,
+/// Decodes `minecraft:banner_patterns`' payload — vanilla's own
+/// banner-pattern-layers stream codec, a list codec over each layer's own
+/// stream codec: a VarInt element count (unbounded on the wire — vanilla's
+/// no-arg list-codec overload caps at `Integer.MAX_VALUE`, not
+/// a real limit) followed by that many layers. Each layer is a
+/// `Holder<BannerPattern>` — the same registry-holder codec shape
+/// [`read_armor_trim`] decodes: `0` introduces an inline `(identifier assetId,
 /// String translationKey)` pair, any `n > 0` references [`BANNER_PATTERN_IDS`]
 /// at `n - 1` — followed by a bare-VarInt `DyeColor`
-/// (`ByteBufCodecs.idMapper`, resolved against [`DYE_COLOR_NAMES`]).
+/// (vanilla's own id-mapper codec, resolved against [`DYE_COLOR_NAMES`]).
 ///
 /// Decoded rather than left unmodeled for the same reason as `minecraft:trim`,
 /// map id, pot decorations, profile, the two book contents and bundle
@@ -581,24 +579,24 @@ fn read_banner_pattern_layers(reader: &mut Reader<'_>) -> Result<Vec<BannerPatte
 }
 
 /// Decodes `minecraft:pot_decorations`' payload — `PotDecorations.STREAM_CODEC`,
-/// which is `ByteBufCodecs.registry(Registries.ITEM).apply(ByteBufCodecs.list(4))`.
+/// which is `vanilla's registry codec(Registries.ITEM).apply(vanilla's list codec (max 4))`.
 ///
-/// So the wire is a VarInt element count (`ByteBufCodecs.readCount`, capped at 4)
+/// So the wire is a VarInt element count (vanilla's read-count helper, capped at 4)
 /// followed by that many **bare** item registry ids as VarInts. Two shapes it is
 /// easy to get wrong, both re-read from the jar rather than inferred:
 ///
-/// * `ByteBufCodecs.registry` is `idMapper`, which writes `VarInt.write(id)` with
-///   **no `+1` and no `0` sentinel** — unlike `ByteBufCodecs.holder`, which
+/// * vanilla's registry codec is `idMapper`, which writes `a plain VarInt write(id)` with
+///   **no `+1` and no `0` sentinel** — unlike vanilla's registry-holder codec, which
 ///   `minecraft:trim` uses two arms above. Adding an offset here would consume the
 ///   right number of bytes and report the wrong four sherds.
 /// * The list is `list(4)`, a *maximum*, not a fixed width. A vanilla server
 ///   always writes four (`PotDecorations::ordered` builds a four-element list
 ///   unconditionally), but a shorter list is legal on the wire and its missing
-///   tail is `Optional.empty()` — `PotDecorations::getItem`'s `i >= sherds.size()`
+///   tail is `an empty optional()` — `PotDecorations::getItem`'s `i >= sherds.size()`
 ///   arm.
 ///
 /// `minecraft:brick` decodes to `None`, mirroring `getItem`'s
-/// `item == Items.BRICK ? Optional.empty() : Optional.of(item)`. An id outside the
+/// `item == Items.BRICK ? an empty optional() : Optional.of(item)`. An id outside the
 /// item registry decodes as `None` rather than failing, for the same reason
 /// [`TRIM_MATERIAL_IDS`] tolerates an unknown holder: the bytes are consumed
 /// either way, and that is the property keeping the rest of the packet readable.
@@ -606,7 +604,7 @@ fn read_pot_decorations(reader: &mut Reader<'_>) -> Result<PotDecorations, Adapt
     let count = reader.var_i32().map_err(dec_err)?;
     if !(0..=4).contains(&count) {
         return Err(AdapterError::Decode(format!(
-            "pot_decorations declares {count} sherds; ByteBufCodecs.list(4) permits 0..=4"
+            "pot_decorations declares {count} sherds; vanilla's list codec (max 4) permits 0..=4"
         )));
     }
     let mut sides: [Option<ResourceKey>; 4] = [None, None, None, None];
@@ -634,15 +632,15 @@ fn read_pot_decorations(reader: &mut Reader<'_>) -> Result<PotDecorations, Adapt
 /// [`lodestone_data::potion::potion_color`], since nothing else in this client reads
 /// the raw potion id or effect list back out.
 fn read_potion_contents_color(reader: &mut Reader<'_>) -> Result<u32, AdapterError> {
-    // `Potion.STREAM_CODEC = ByteBufCodecs.holderRegistry(Registries.POTION)`: a
+    // `Potion.STREAM_CODEC = vanilla's holder-registry codec(Registries.POTION)`: a
     // plain 0-based VarInt registry id (the same shape `minecraft:mob_effect` uses),
-    // wrapped in `ByteBufCodecs.optional` — a bool presence flag then the value.
+    // wrapped in vanilla's optional-value codec — a bool presence flag then the value.
     let potion = if reader.bool().map_err(dec_err)? {
         Some(reader.var_i32().map_err(dec_err)?)
     } else {
         None
     };
-    // `ByteBufCodecs.INT.apply(ByteBufCodecs::optional)`: fixed-width, not a VarInt —
+    // `vanilla's fixed-width `INT` codec.apply(vanilla's optional-value codec)`: fixed-width, not a VarInt —
     // the same `minecraft:dyed_color` trap documented above.
     let custom_color = if reader.bool().map_err(dec_err)? {
         Some(reader.i32().map_err(dec_err)? as u32)
@@ -650,7 +648,7 @@ fn read_potion_contents_color(reader: &mut Reader<'_>) -> Result<u32, AdapterErr
         None
     };
     let custom_effects = read_mob_effect_instances(reader)?;
-    // `customName`: `ByteBufCodecs.STRING_UTF8.apply(ByteBufCodecs::optional)`,
+    // `customName`: `vanilla's UTF-8 string codec.apply(vanilla's optional-value codec)`,
     // consumed for alignment only — nothing here reads it back.
     if reader.bool().map_err(dec_err)? {
         reader.string(32767).map_err(dec_err)?;
@@ -658,12 +656,11 @@ fn read_potion_contents_color(reader: &mut Reader<'_>) -> Result<u32, AdapterErr
     Ok(lodestone_data::potion::potion_color(potion, custom_color, &custom_effects))
 }
 
-/// `ResolvableProfile.STREAM_CODEC` (`world/item/component/ResolvableProfile.java`):
-/// `StreamCodec.composite(either(GAME_PROFILE, Partial.STREAM_CODEC), unpack,
-/// PlayerSkin.Patch.STREAM_CODEC, skinPatch, create)` — a bool-tagged identity
-/// (full `GameProfile` or a `Partial`), followed by an always-present skin-patch
-/// tail. **Both halves are read on every code path**; the bool only selects
-/// *which* identity shape follows, not whether the skin patch is present.
+/// Vanilla's own resolvable-profile stream codec: a composite of a
+/// bool-tagged identity (full game profile or a partial one) then an
+/// always-present skin-patch tail. **Both halves are read on every code
+/// path**; the bool only selects *which* identity shape follows, not
+/// whether the skin patch is present.
 ///
 /// The skin patch's four fields (`body`/`cape`/`elytra` resource-id textures and
 /// an optional model) are consumed for alignment and discarded: nothing in this
@@ -674,7 +671,7 @@ fn read_potion_contents_color(reader: &mut Reader<'_>) -> Result<u32, AdapterErr
 /// *identity-bearing* for its first half and pure-alignment for its second.
 fn read_resolvable_profile(reader: &mut Reader<'_>) -> Result<ItemProfile, AdapterError> {
     let profile = if reader.bool().map_err(dec_err)? {
-        // `ByteBufCodecs.GAME_PROFILE`: uuid, then `PLAYER_NAME` (cap 16), then
+        // vanilla's game-profile codec: uuid, then `PLAYER_NAME` (cap 16), then
         // `GAME_PROFILE_PROPERTIES` — both always present, unlike the partial
         // form below.
         let id = reader.uuid().map_err(dec_err)?;
@@ -707,7 +704,7 @@ fn read_resolvable_profile(reader: &mut Reader<'_>) -> Result<ItemProfile, Adapt
 
     // `PlayerSkin.Patch.STREAM_CODEC`: three optional `Identifier` textures
     // (`ClientAsset.ResourceTexture.STREAM_CODEC.apply(optional)`, each a bare
-    // `ByteBufCodecs.STRING_UTF8`, cap 32767) then an optional `PlayerModelType`
+    // vanilla's UTF-8 string codec, cap 32767) then an optional `PlayerModelType`
     // (`PlayerModelType.STREAM_CODEC.apply(optional)`). **The model field is a
     // bool wrapping a bool** — one presence flag, and if true, one more
     // slim/wide flag — not a single flag the way every other optional in this
@@ -725,8 +722,8 @@ fn read_resolvable_profile(reader: &mut Reader<'_>) -> Result<ItemProfile, Adapt
     Ok(profile)
 }
 
-/// `ByteBufCodecs.GAME_PROFILE_PROPERTIES`: a VarInt element count capped at 16
-/// (`ByteBufCodecs.readCount(input, 16)`), then that many `(name, value,
+/// `vanilla's game-profile codec_PROPERTIES`: a VarInt element count capped at 16
+/// (`vanilla's read-count helper(input, 16)`), then that many `(name, value,
 /// signature)` triples — name capped at 64 bytes, value at 32767, and an
 /// optional signature capped at 1024. This is the exact shape
 /// `player_info.rs`'s `read_add_player` already reads for `ADD_PLAYER`'s
@@ -739,7 +736,7 @@ fn read_profile_properties(
     let count = reader.var_i32().map_err(dec_err)?;
     if !(0..=16).contains(&count) {
         return Err(AdapterError::Decode(format!(
-            "profile properties count {count} exceeds ByteBufCodecs.readCount's max of 16"
+            "profile properties count {count} exceeds vanilla's read-count helper's max of 16"
         )));
     }
     let mut properties = Vec::with_capacity(count as usize);
@@ -760,7 +757,7 @@ fn read_profile_properties(
     Ok(properties)
 }
 
-/// One `Filterable<String>` (`Filterable.streamCodec`): the raw string
+/// One `Filterable<String>` (vanilla's filterable stream codec): the raw string
 /// (capped at `max`), then an optional filtered alternate (same cap),
 /// discarded — see [`ItemComponents::writable_book_content`]'s own doc for
 /// why only the raw half is ever worth keeping here.
@@ -772,15 +769,15 @@ fn read_filterable_string(reader: &mut Reader<'_>, max: usize) -> Result<String,
     Ok(raw)
 }
 
-/// `WritableBookContent.STREAM_CODEC`
-/// (`Filterable.streamCodec(ByteBufCodecs.stringUtf8(1024)).apply(ByteBufCodecs.list(100))`):
+/// Vanilla's own writable-book-content stream codec (a filterable-string
+/// codec applied through a capped list codec):
 /// a VarInt page count capped at 100, then that many
 /// [`read_filterable_string`] entries capped at 1024 characters each.
 fn read_writable_book_content(reader: &mut Reader<'_>) -> Result<Vec<String>, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
     if !(0..=100).contains(&count) {
         return Err(AdapterError::Decode(format!(
-            "writable_book_content page count {count} exceeds ByteBufCodecs.list's max of 100"
+            "writable_book_content page count {count} exceeds vanilla's list-codec max of 100"
         )));
     }
     let mut pages = Vec::with_capacity(count as usize);
@@ -790,16 +787,16 @@ fn read_writable_book_content(reader: &mut Reader<'_>) -> Result<Vec<String>, Ad
     Ok(pages)
 }
 
-/// `WrittenBookContent.STREAM_CODEC`: `Filterable<String>` title (cap 32),
-/// plain `author` (`ByteBufCodecs.STRING_UTF8`, cap 32767), VarInt
-/// `generation`, a `ByteBufCodecs.list()`-capped (no explicit bound, so
+/// Vanilla's own written-book-content stream codec: `Filterable<String>`
+/// title (cap 32), plain `author` (a UTF-8 string codec, cap 32767), VarInt
+/// `generation`, a list-codec-capped (no explicit bound, so
 /// `Integer.MAX_VALUE` — read defensively bounded below) list of
 /// `Filterable<Component>` pages, then a `resolved` bool — in that
-/// declaration order, which is also `STREAM_CODEC`'s composite order (see
-/// `WrittenBookContent.java`).
+/// declaration order, which is also the composite stream codec's order
+/// (confirmed against the decompiled 26.2 source).
 ///
-/// Each page is read as network-NBT (`ComponentSerialization.STREAM_CODEC`,
-/// the same chat-component wire shape `minecraft:custom_name` and
+/// Each page is read as network-NBT (vanilla's own component-serialization
+/// stream codec, the same chat-component wire shape `minecraft:custom_name` and
 /// `minecraft:item_name` already use) via [`Text::from_nbt`], then the
 /// optional filtered alternate — network-NBT too — is read and discarded for
 /// the same reason [`read_filterable_string`]'s is.
@@ -837,7 +834,7 @@ fn read_written_book_content(reader: &mut Reader<'_>) -> Result<WrittenBookConte
     })
 }
 
-/// `MobEffectInstance.STREAM_CODEC.apply(ByteBufCodecs.list())`: a VarInt count then
+/// `MobEffectInstance.STREAM_CODEC.apply(vanilla's list codec())`: a VarInt count then
 /// that many `(MobEffect id, MobEffectInstance.Details)` pairs. Only the effect id
 /// and amplifier are kept — the colour mix needs nothing else — but every field is
 /// still read off the wire in declaration order, because skipping one would
@@ -846,7 +843,7 @@ fn read_mob_effect_instances(reader: &mut Reader<'_>) -> Result<Vec<(i32, u8)>, 
     let count = read_count(reader, "potion custom_effects")?;
     let mut out = Vec::with_capacity(count.min(64));
     for _ in 0..count {
-        // `MobEffect.STREAM_CODEC = ByteBufCodecs.holderRegistry(Registries.MOB_EFFECT)`:
+        // `MobEffect.STREAM_CODEC = vanilla's holder-registry codec(Registries.MOB_EFFECT)`:
         // the same plain 0-based VarInt shape as the potion holder above.
         let effect_id = reader.var_i32().map_err(dec_err)?;
         let amplifier = read_mob_effect_details(reader)?;
@@ -924,8 +921,8 @@ fn read_component_patch(
             Some("minecraft:tool") => {
                 components.tool = ToolPatch::Set(read_tool(reader)?);
             }
-            // `DyedItemColor.STREAM_CODEC` is a bare `ByteBufCodecs.INT`
-            // (`DyedItemColor.java`) — fixed-width, not a `VarInt` like
+            // Vanilla's own dyed-item-color stream codec is a bare `INT`
+            // — fixed-width, not a `VarInt` like
             // every other scalar component here, so this is the one `i32()`
             // read in this match rather than `var_i32()`.
             Some("minecraft:dyed_color") => {
@@ -937,9 +934,9 @@ fn read_component_patch(
             Some("minecraft:trim") => {
                 components.trim = Some(read_armor_trim(reader)?);
             }
-            // `MapId.STREAM_CODEC` is `ByteBufCodecs.VAR_INT.map(MapId::new, …)`
-            // (`MapId.java`), registered `networkSynchronized` at
-            // `DataComponents.java`. Decoded for the same reason as the trim
+            // Vanilla's own map-id stream codec is a `VAR_INT` mapped through its
+            // id constructor, registered as network-synchronized in vanilla's
+            // data-components table. Decoded for the same reason as the trim
             // above — a filled map in any inventory was truncating the packet from
             // here on, not merely losing which map it showed.
             Some("minecraft:map_id") => {
@@ -974,20 +971,21 @@ fn read_component_patch(
                 components.profile = Some(read_resolvable_profile(reader)?);
             }
             // Decoded for the same reason as the trim, map id, pot decorations,
-            // potion contents and profile above: `WritableBookContent
-            // .STREAM_CODEC` has no length prefix, so an unsigned book-and-quill
-            // in any inventory used to truncate the rest of the packet. See
-            // [`read_writable_book_content`].
+            // potion contents and profile above: vanilla's own
+            // writable-book-content stream codec has no length prefix, so an
+            // unsigned book-and-quill in any inventory used to truncate the
+            // rest of the packet. See [`read_writable_book_content`].
             Some("minecraft:writable_book_content") => {
                 components.writable_book_content = Some(read_writable_book_content(reader)?);
             }
-            // Same reasoning, one component over: `WrittenBookContent
-            // .STREAM_CODEC` is equally unprefixed. See
+            // Same reasoning, one component over: vanilla's own
+            // written-book-content stream codec is equally unprefixed. See
             // [`read_written_book_content`].
             Some("minecraft:written_book_content") => {
                 components.written_book_content = Some(read_written_book_content(reader)?);
             }
-            // Both of these are `ByteBufCodecs.VAR_INT` (`DataComponents.java`)
+            // Both of these are vanilla's `VAR_INT` codec (per its data-components
+            // table)
             // and both *override* the prototype value seeded above. They are
             // decoded rather than treated as unmodeled not because servers send
             // them often — they essentially never do — but because a patch that
@@ -1034,16 +1032,17 @@ fn read_component_patch(
             // ---------------------------------------------------------------
 
             // **The derived-NBT family.** These components are registered with
-            // `persistent(codec)` and **no** `networkSynchronized(...)`, so
-            // `DataComponentType.Builder.build` falls back to
-            // `ByteBufCodecs.fromCodecWithRegistries(codec)` — which writes the
-            // value as a single `FriendlyByteBuf.writeNbt` tag (root tag id then
+            // a persistent-only codec and **no** network-synchronized one, so
+            // vanilla's own data-component-type builder falls back to its
+            // registry-aware codec-to-stream-codec bridge — which writes the
+            // value as a single raw-NBT tag (root tag id then
             // payload, no name, no length prefix). One rule covers all seven, and
-            // it is *not* the same codec as `CustomData.STREAM_CODEC`, which is
-            // `@Deprecated` and used by `bucket_entity_data` rather than by
+            // it is *not* the same codec as vanilla's own custom-data stream
+            // codec, which is deprecated and used by `bucket_entity_data` rather
+            // than by
             // `custom_data`. Reading either as a bare compound would be wrong for
             // `recipes` (a list tag) and for the `Unit`-valued one (an empty
-            // compound from `MapCodec.unitCodec`).
+            // compound from vanilla's own unit map-codec).
             //
             // `custom_data` is the one worth singling out: it is component id 0,
             // it is what every Bukkit/Paper plugin stamps on a GUI item, and while
@@ -1064,17 +1063,17 @@ fn read_component_patch(
                 read_network_nbt(reader).map_err(dec_err)?;
             }
 
-            // `Unit.STREAM_CODEC` is `StreamCodec.unit(INSTANCE)`: **zero bytes**.
+            // Vanilla's own `Unit` stream codec is a unit codec: **zero bytes**.
             // The component's presence in the patch is the whole value.
             Some(
                 "minecraft:unbreakable" | "minecraft:creative_slot_lock" | "minecraft:glider",
             ) => {}
 
-            // A bare VarInt. `rarity`, `dye` and `map_post_processing` are
-            // `ByteBufCodecs.idMapper`, which is `VarInt.read` with no `+1` and
-            // no `0` sentinel; the rest are `ByteBufCodecs.VAR_INT` directly, or a
-            // one-field `StreamCodec.composite` over it (`enchantable`,
-            // `ominous_bottle_amplifier`).
+            // A bare VarInt. `rarity`, `dye` and `map_post_processing` use
+            // vanilla's own id-mapper codec, which is a plain VarInt read with
+            // no `+1` and no `0` sentinel; the rest are vanilla's `VAR_INT`
+            // codec directly, or a one-field composite stream codec over it
+            // (`enchantable`, `ominous_bottle_amplifier`).
             Some(
                 "minecraft:rarity"
                 | "minecraft:repair_cost"
@@ -1087,11 +1086,11 @@ fn read_component_patch(
                 reader.var_i32().map_err(dec_err)?;
             }
 
-            // `minecraft:base_color` — the same `ByteBufCodecs.idMapper` VarInt
+            // `minecraft:base_color` — the same id-mapper-codec VarInt
             // shape as `dye`/`rarity` above, resolved against [`DYE_COLOR_NAMES`]
             // exactly like a `banner_patterns` layer's own colour. A shield's dye
             // tint, independent of any loom pattern layers
-            // (`ShieldSpecialRenderer.submit`'s `baseColor`) — was previously
+            // (vanilla's own shield-rendering `baseColor` field) — was previously
             // discarded with the bare-VarInt group above, which is why a shield
             // combined with a banner drew no base tint at all even once its
             // pattern layers decoded. An id outside `DYE_COLOR_NAMES` stores
@@ -1106,8 +1105,8 @@ fn read_component_patch(
             }
 
             // Fixed-width scalars, **not** VarInts. `MapItemColor.STREAM_CODEC` is
-            // `ByteBufCodecs.INT` (the same trap `minecraft:dyed_color` documents
-            // above), and the two floats are `ByteBufCodecs.FLOAT`.
+            // vanilla's fixed-width `INT` codec (the same trap `minecraft:dyed_color` documents
+            // above), and the two floats are vanilla's fixed-width `FLOAT` codec.
             Some("minecraft:map_color") => {
                 reader.i32().map_err(dec_err)?;
             }
@@ -1118,7 +1117,7 @@ fn read_component_patch(
                 reader.bool().map_err(dec_err)?;
             }
 
-            // `Identifier.STREAM_CODEC` is `ByteBufCodecs.STRING_UTF8.map(...)`:
+            // vanilla's identifier stream codec is `vanilla's UTF-8 string codec.map(...)`:
             // one length-prefixed string, capped at 32767.
             Some("minecraft:item_model") => {
                 let raw = reader.string(32767).map_err(dec_err)?;
@@ -1139,13 +1138,13 @@ fn read_component_patch(
             }
 
             // `ItemLore.STREAM_CODEC` is `ComponentSerialization.STREAM_CODEC
-            // .apply(ByteBufCodecs.list(256))`: a VarInt count then that many
+            // .apply(vanilla's list codec (max 256))`: a VarInt count then that many
             // network-NBT components. 256 is the codec's own cap.
             Some("minecraft:lore") => {
                 let lines = read_count(reader, "lore line")?;
                 if lines > 256 {
                     return Err(AdapterError::Decode(format!(
-                        "lore declares {lines} lines; ByteBufCodecs.list(256) permits at most 256"
+                        "lore declares {lines} lines; vanilla's list codec (max 256) permits at most 256"
                     )));
                 }
                 components.lore.reserve(lines);
@@ -1344,13 +1343,13 @@ fn read_component_patch(
                 }
             }
 
-            // `BlocksAttacks.STREAM_CODEC`: float blockDelaySeconds, float
-            // disableCooldownScale, `List<DamageReduction>` (float
+            // Vanilla's own blocks-attacks stream codec: float blockDelaySeconds,
+            // float disableCooldownScale, `List<DamageReduction>` (float
             // horizontalBlockingAngle, `Optional<HolderSet<DamageType>>`, float
             // base, float factor — four fields, in that order), one
-            // `ItemDamageFunction` (float threshold, float base, float factor — not
-            // a list), `Optional<HolderSet<DamageType>>` bypassedBy, then two
-            // `Optional<Holder<SoundEvent>>` (blockSound, disableSound).
+            // item-damage-function record (float threshold, float base, float
+            // factor — not a list), `Optional<HolderSet<DamageType>>` bypassedBy,
+            // then two `Optional<Holder<SoundEvent>>` (blockSound, disableSound).
             Some("minecraft:blocks_attacks") => {
                 reader.f32().map_err(dec_err)?;
                 reader.f32().map_err(dec_err)?;
@@ -1368,9 +1367,9 @@ fn read_component_patch(
                     reader.f32().map_err(dec_err)?; // base
                     reader.f32().map_err(dec_err)?; // factor
                 }
-                reader.f32().map_err(dec_err)?; // ItemDamageFunction.threshold
-                reader.f32().map_err(dec_err)?; // ItemDamageFunction.base
-                reader.f32().map_err(dec_err)?; // ItemDamageFunction.factor
+                reader.f32().map_err(dec_err)?; // item-damage-function threshold
+                reader.f32().map_err(dec_err)?; // item-damage-function base
+                reader.f32().map_err(dec_err)?; // item-damage-function factor
                 if reader.bool().map_err(dec_err)? {
                     let _ = read_holder_set(reader)?; // bypassedBy
                 }
@@ -1443,7 +1442,7 @@ fn read_component_patch(
                 }
             }
 
-            // `TypedEntityData.streamCodec(EntityType.STREAM_CODEC)`: a bare
+            // `vanilla's typed-entity-data stream codec(EntityType.STREAM_CODEC)`: a bare
             // registry VarInt (`EntityType`) then a network-NBT compound tag. See
             // [`read_typed_entity_data`].
             Some("minecraft:entity_data") => {
@@ -1452,13 +1451,13 @@ fn read_component_patch(
 
             // `CustomData.STREAM_CODEC` here (unlike plain `minecraft:custom_data`
             // above, which has no `networkSynchronized` at all) is
-            // `ByteBufCodecs.COMPOUND_TAG` directly — one network-NBT compound tag,
+            // vanilla's compound-tag codec directly — one network-NBT compound tag,
             // no leading type id.
             Some("minecraft:bucket_entity_data") => {
                 read_network_nbt(reader).map_err(dec_err)?;
             }
 
-            // `TypedEntityData.streamCodec(ByteBufCodecs.registry(BLOCK_ENTITY_TYPE))`:
+            // `vanilla's typed-entity-data stream codec(vanilla's registry codec(BLOCK_ENTITY_TYPE))`:
             // the same shape as `minecraft:entity_data` above, keyed by
             // `BlockEntityType` instead. Found live: a `minecraft:spawner` stack
             // truncated the rest of the packet from here on while this was
@@ -1467,11 +1466,11 @@ fn read_component_patch(
                 read_typed_entity_data(reader)?;
             }
 
-            // `Instrument.STREAM_CODEC = ByteBufCodecs.holder(Registries.INSTRUMENT,
+            // `Instrument.STREAM_CODEC = vanilla's registry-holder codec(Registries.INSTRUMENT,
             // DIRECT_STREAM_CODEC)`: `0` for an inline instrument (a
             // `Holder<SoundEvent>`, then two floats — useDuration, range — then a
             // network-NBT chat component description), a positive value for a bare
-            // registry reference (`id + 1`, no body) — the same `ByteBufCodecs.holder`
+            // registry reference (`id + 1`, no body) — the same vanilla's registry-holder codec
             // discriminator [`read_sound_event_holder`] already reads.
             Some("minecraft:instrument") => {
                 if reader.var_i32().map_err(dec_err)? == 0 {
@@ -1482,7 +1481,7 @@ fn read_component_patch(
                 }
             }
 
-            // `TrimMaterial.STREAM_CODEC = ByteBufCodecs.holder(Registries.TRIM_MATERIAL,
+            // `TrimMaterial.STREAM_CODEC = vanilla's registry-holder codec(Registries.TRIM_MATERIAL,
             // DIRECT_STREAM_CODEC)`: same `0`-inline / `id + 1`-reference shape as
             // `minecraft:instrument` above. The inline body is a
             // `MaterialAssetGroup` (a base asset-info UTF8 string, then a
@@ -1506,7 +1505,7 @@ fn read_component_patch(
             }
 
             // `JukeboxPlayable.STREAM_CODEC` is a single `Holder<JukeboxSong>`;
-            // `JukeboxSong.STREAM_CODEC` uses the same `ByteBufCodecs.holder`
+            // `JukeboxSong.STREAM_CODEC` uses the same vanilla's registry-holder codec
             // discriminator again. The inline body is a `Holder<SoundEvent>`, a
             // network-NBT chat component description, a float lengthInSeconds and
             // a VarInt comparatorOutput.
@@ -1519,7 +1518,7 @@ fn read_component_patch(
                 }
             }
 
-            // `ByteBufCodecs.holderSet(Registries.BANNER_PATTERN)` — the same
+            // `vanilla's holder-set codec(Registries.BANNER_PATTERN)` — the same
             // `HolderSet<T>` shape [`read_holder_set`] already reads.
             Some("minecraft:provides_banner_patterns") => {
                 let _ = read_holder_set(reader)?;
@@ -1549,7 +1548,7 @@ fn read_component_patch(
                 let count = read_count(reader, "fireworks explosion")?;
                 if count > 256 {
                     return Err(AdapterError::Decode(format!(
-                        "fireworks declares {count} explosions; ByteBufCodecs.list's max is 256"
+                        "fireworks declares {count} explosions; vanilla's list codec's max is 256"
                     )));
                 }
                 for _ in 0..count {
@@ -1566,7 +1565,7 @@ fn read_component_patch(
                 let count = read_count(reader, "container item")?;
                 if count > 256 {
                     return Err(AdapterError::Decode(format!(
-                        "container declares {count} items; ByteBufCodecs.list's max is 256"
+                        "container declares {count} items; vanilla's list codec's max is 256"
                     )));
                 }
                 for _ in 0..count {
@@ -1629,13 +1628,13 @@ fn read_component_patch(
             }
 
             // `SoundEvent.STREAM_CODEC` directly (not optional) — the same
-            // `ByteBufCodecs.holder` discriminator [`read_sound_event_holder`]
+            // vanilla's registry-holder codec discriminator [`read_sound_event_holder`]
             // already reads.
             Some("minecraft:break_sound") => {
                 read_sound_event_holder(reader)?;
             }
 
-            // `PaintingVariant.STREAM_CODEC = ByteBufCodecs.holder(Registries.PAINTING_VARIANT,
+            // `PaintingVariant.STREAM_CODEC = vanilla's registry-holder codec(Registries.PAINTING_VARIANT,
             // DIRECT_STREAM_CODEC)`: same `0`-inline / `id + 1`-reference shape as
             // `minecraft:instrument` above. The inline body is two VarInts (width,
             // height), a bare UTF8 identifier (assetId), then two
@@ -1655,9 +1654,9 @@ fn read_component_patch(
             }
 
             // A single bare, 0-based VarInt with no framing beyond it — either
-            // `ByteBufCodecs.holderRegistry` (a synced-registry `Holder<T>`
+            // vanilla's holder-registry codec (a synced-registry `Holder<T>`
             // reference: `damage_type` and every `Holder<…Variant>`/
-            // `Holder<…SoundVariant>` below) or `ByteBufCodecs.idMapper` (a
+            // `Holder<…SoundVariant>` below) or vanilla's id-mapper codec (a
             // `StringRepresentable` enum ordinal: every plain, non-`Holder`
             // `…Variant`/`DyeColor` field below) — both shapes are one VarInt on
             // the wire with no discriminator, so they share this arm. Consumed for
@@ -1707,12 +1706,12 @@ fn read_component_patch(
                 //
                 // **Skipping is genuinely impossible here, re-verified against the
                 // jar rather than inherited from this comment.** 26.2 has two patch
-                // codecs: `DataComponentPatch.STREAM_CODEC` writes each payload raw
-                // and `DELIMITED_STREAM_CODEC` length-prefixes it
-                // (`DataComponentPatch.java`). Clientbound stacks use
-                // `ItemStack.OPTIONAL_STREAM_CODEC`, built on the **undelimited**
-                // one; the delimited variant is `OPTIONAL_UNTRUSTED_STREAM_CODEC`,
-                // i.e. serverbound only (`ItemStack.java`). So there is no
+                // codecs: vanilla's own undelimited stream codec writes each
+                // payload raw and its delimited variant length-prefixes it
+                // (confirmed against the decompiled source). Clientbound stacks
+                // use the item-stack optional stream codec, built on the
+                // **undelimited** one; the delimited variant is the
+                // untrusted-optional one, i.e. serverbound only. So there is no
                 // length to skip and no self-describing framing to walk. The only
                 // way to stop a given component being a decode cliff is to model
                 // it, which is what the `minecraft:trim` arm above does.
@@ -1753,8 +1752,8 @@ fn read_component_patch(
             Some("minecraft:tool") => components.tool = ToolPatch::Removed,
             // A removal clears the component back to *nothing*, and vanilla's
             // own fallback with no `minecraft:max_stack_size` at all is **1**,
-            // not 64 (`ItemInstance.java`) — so this is a real, if exotic,
-            // way to make an item unstackable.
+            // not 64 (confirmed against the decompiled item-stack source) —
+            // so this is a real, if exotic, way to make an item unstackable.
             Some("minecraft:max_stack_size") => components.max_stack_size = Some(1),
             // No `minecraft:max_damage` means not damageable, which is exactly
             // what `None` means here.
@@ -1767,7 +1766,7 @@ fn read_component_patch(
     Ok((components, true))
 }
 
-/// Consumes `ConsumeEffect.STREAM_CODEC.apply(ByteBufCodecs.list())` — the
+/// Consumes `ConsumeEffect.STREAM_CODEC.apply(vanilla's list codec())` — the
 /// payload shape shared by `minecraft:consumable`'s `onConsumeEffects` and
 /// `minecraft:death_protection`'s `deathEffects`.
 ///
@@ -1781,7 +1780,7 @@ fn read_component_patch(
 /// caller apply the same has-unmodeled-component treatment.
 ///
 /// Bounded at 1024 entries defensively: the codec itself declares no cap
-/// (`ByteBufCodecs.list()` with no argument).
+/// (`vanilla's list codec()` with no argument).
 fn read_consume_effects(reader: &mut Reader<'_>) -> Result<bool, AdapterError> {
     let count = read_count(reader, "consume effect")?;
     if count > 1024 {
@@ -1819,13 +1818,13 @@ fn read_consume_effects(reader: &mut Reader<'_>) -> Result<bool, AdapterError> {
     Ok(true)
 }
 
-/// Consumes a `TypedEntityData<T>.STREAM_CODEC` (`TypedEntityData.streamCodec`):
+/// Consumes a `TypedEntityData<T>.STREAM_CODEC` (vanilla's typed-entity-data stream codec):
 /// a bare, 0-based registry VarInt naming the entity/block-entity type, then a
 /// network-NBT compound tag. Shared by `minecraft:entity_data`
 /// (`EntityType`-keyed), `minecraft:block_entity_data`
 /// (`BlockEntityType`-keyed) and each entry of `minecraft:bees`' occupant list
 /// (`EntityType`-keyed) — the leading id's registry differs per caller, but
-/// its wire shape (a plain `ByteBufCodecs.registry` VarInt) does not.
+/// its wire shape (a plain vanilla's registry codec VarInt) does not.
 fn read_typed_entity_data(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
     reader.var_i32().map_err(dec_err)?;
     read_network_nbt(reader).map_err(dec_err)?;
@@ -1871,7 +1870,7 @@ fn read_item_stack_template_tolerant(
 /// entry of `minecraft:fireworks`' explosion list.
 ///
 /// Both colour lists are bounded at 256 entries defensively: neither codec
-/// declares a cap (`ByteBufCodecs.INT.apply(ByteBufCodecs.list())`), but no
+/// declares a cap (`vanilla's fixed-width `INT` codec.apply(vanilla's list codec())`), but no
 /// legitimate firework star carries anywhere near that many colours.
 fn read_firework_explosion(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
     reader.var_i32().map_err(dec_err)?; // Shape
@@ -1916,7 +1915,7 @@ fn read_network_nbt_bytes(reader: &mut Reader<'_>) -> Result<Vec<u8>, AdapterErr
 /// (`CustomModelData.STREAM_CODEC`).
 ///
 /// Four independent VarInt-counted lists, in order: floats, flags (bools),
-/// strings, colours. **The colours are `ByteBufCodecs.INT`** — fixed-width
+/// strings, colours. **The colours are vanilla's fixed-width `INT` codec** — fixed-width
 /// big-endian, not VarInts — which is the one width in this component that a
 /// VarInt-by-default reader gets wrong, and getting it wrong misaligns the whole
 /// rest of the packet instead of merely losing a colour.
@@ -1944,7 +1943,7 @@ fn read_custom_model_data(reader: &mut Reader<'_>) -> Result<Vec<u32>, AdapterEr
 /// Consumes a `minecraft:tooltip_display` payload (`TooltipDisplay.STREAM_CODEC`).
 ///
 /// A bool `hideTooltip`, then a VarInt-counted collection of
-/// `DataComponentType.STREAM_CODEC` — which is `ByteBufCodecs.registry`, i.e. a
+/// `DataComponentType.STREAM_CODEC` — which is vanilla's registry codec, i.e. a
 /// bare data-component-type registry id per entry with no offset.
 ///
 /// This component replaced 1.21.4's `minecraft:hide_tooltip` and
@@ -1964,16 +1963,16 @@ fn read_tooltip_display(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
 ///
 /// A VarInt-counted list of `Entry`, each of which is, in wire order:
 ///
-/// * the attribute as `Attribute.STREAM_CODEC` = `ByteBufCodecs.holderRegistry`,
+/// * the attribute as `Attribute.STREAM_CODEC` = vanilla's holder-registry codec,
 ///   a **bare** VarInt registry id — `holderRegistry` is `registry(…,
-///   Registry::asHolderIdMap)`, so unlike `ByteBufCodecs.holder` there is no `+1`
+///   Registry::asHolderIdMap)`, so unlike vanilla's registry-holder codec there is no `+1`
 ///   and no inline-holder `0` sentinel;
 /// * the modifier as `AttributeModifier.STREAM_CODEC` — an `Identifier` string, a
 ///   **`ByteBufCodecs.DOUBLE`** (fixed-width f64, not a float), then the operation
 ///   as an idMapper VarInt;
 /// * the slot group as `EquipmentSlotGroup.STREAM_CODEC`, an idMapper VarInt;
 /// * the display as `Display.STREAM_CODEC`, a VarInt `Display.Type` id dispatching
-///   to a payload: `default` (0) and `hidden` (1) are `StreamCodec.unit`, i.e.
+///   to a payload: `default` (0) and `hidden` (1) are vanilla's unit stream codec, i.e.
 ///   **zero bytes**, and `override` (2) carries one network-NBT chat component.
 ///
 /// The `display` field is the trap: it is new enough that a transcription from an
@@ -1990,7 +1989,7 @@ fn read_attribute_modifiers(reader: &mut Reader<'_>) -> Result<(), AdapterError>
         reader.var_i32().map_err(dec_err)?; // EquipmentSlotGroup
         let display = reader.var_i32().map_err(dec_err)?;
         match display {
-            // `default` and `hidden` are `StreamCodec.unit`: no payload.
+            // `default` and `hidden` are vanilla's unit stream codec: no payload.
             0 | 1 => {}
             // `override` carries the replacement text.
             2 => {
@@ -2013,7 +2012,7 @@ fn read_attribute_modifiers(reader: &mut Reader<'_>) -> Result<(), AdapterError>
 /// speed as an f32, the damage-per-block as a VarInt, and the
 /// can-destroy-in-creative flag as a bool. Each rule is a `HolderSet<Block>`,
 /// then an optional f32 speed and an optional bool correct-for-drops (both
-/// `ByteBufCodecs::optional`, so a present-flag byte then the value).
+/// vanilla's optional-value codec, so a present-flag byte then the value).
 ///
 /// Note this component is *rarely* on the wire: a stack carries only the delta
 /// from its item's prototype component map, and vanilla puts a pickaxe's
@@ -2053,7 +2052,7 @@ fn read_tool(reader: &mut Reader<'_>) -> Result<ItemTool, AdapterError> {
     ))
 }
 
-/// Decodes a `HolderSet<Block>` (26.2 `ByteBufCodecs.holderSet(Registries.BLOCK)`).
+/// Decodes a `HolderSet<Block>` (26.2 `vanilla's holder-set codec(Registries.BLOCK)`).
 ///
 /// A single VarInt discriminates: `0` means a named tag follows as an
 /// identifier string; any `n > 0` means `n - 1` direct holders follow, each a
@@ -2062,8 +2061,8 @@ fn read_tool(reader: &mut Reader<'_>) -> Result<ItemTool, AdapterError> {
 /// # The direct holders are *not* `id + 1`
 ///
 /// There are two holder codecs in 26.2 and they differ by exactly one:
-/// `ByteBufCodecs.holder(key, directCodec)` reserves `0` for an inline element
-/// definition and so writes `id + 1`, while `ByteBufCodecs.holderRegistry(key)`
+/// `vanilla's registry-holder codec(key, directCodec)` reserves `0` for an inline element
+/// definition and so writes `id + 1`, while `vanilla's holder-registry codec(key)`
 /// — which is what `holderSet` uses internally — delegates to the private
 /// `registry(key, Registry::asHolderIdMap)` and writes the id **as-is**. Only
 /// the outer set-size discriminator is offset by one.
@@ -2076,7 +2075,7 @@ fn read_tool(reader: &mut Reader<'_>) -> Result<ItemTool, AdapterError> {
 fn read_block_holder_set(reader: &mut Reader<'_>) -> Result<ToolBlocks, AdapterError> {
     let discriminator = reader.var_i32().map_err(dec_err)?;
     if discriminator == 0 {
-        // Vanilla's `Identifier.STREAM_CODEC` is an unbounded UTF-8 string, so
+        // Vanilla's vanilla's identifier stream codec is an unbounded UTF-8 string, so
         // the limit here is the shared 32,767-char ceiling the rest of this
         // adapter uses, not a tighter guess that could reject a valid tag.
         let tag = reader.string(32767).map_err(dec_err)?;
@@ -2176,7 +2175,7 @@ fn decode_open_screen(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
-/// Registry ids of `minecraft:slot_display`, from `SlotDisplays.java`'s
+/// Registry ids of `minecraft:slot_display`, from vanilla's own slot-display
 /// registration order (and cross-checked against `registries.json`).
 ///
 /// A **built-in** registry, so these ids are fixed by the jar rather than synced
@@ -2264,7 +2263,7 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
             items.push(item_id);
         }
         slot_display::TAG => {
-            // `TagKey.streamCodec` is one `Identifier` string. The tag's *members*
+            // vanilla's tag-key stream codec is one `Identifier` string. The tag's *members*
             // are not on the wire, so there is no item id to collect — a consumer
             // that needs one resolves the tag itself.
             let _tag = reader.string(32767).map_err(dec_err)?;
@@ -2309,7 +2308,7 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
                 }
                 items.extend(inner.items);
             }
-            // `TrimPattern.STREAM_CODEC` is `ByteBufCodecs.holder`: `0` means an
+            // `TrimPattern.STREAM_CODEC` is vanilla's registry-holder codec: `0` means an
             // inline `TrimPattern` follows, which this adapter does not model, so
             // that case abandons the packet rather than guessing at its length.
             let holder = reader.var_i32().map_err(dec_err)?;
@@ -2345,16 +2344,18 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
 /// `craftingStation`/`furnace` in vanilla's own field names).
 ///
 /// The result is what a recipe panel and a toast both key on; the station is
-/// what a recipe-unlock toast draws as its corner icon (`RecipeToast.Entry`).
+/// what a recipe-unlock toast draws as its corner icon (vanilla's own
+/// recipe-toast entry).
 /// Every `RecipeDisplay` variant's station is its **final** walked `SlotDisplay`
-/// — `RecipeDisplays.java`'s field order puts `craftingStation`/`furnace` last in
-/// all five variants — so `walked.last()` after the loop below is always it, with
-/// no per-kind branch needed. The ingredient slots in between are walked only
-/// because they must be consumed. Returns `None` when the walk hit something
-/// unmodeled, with the same "abandon the packet" contract as [`read_slot_display`].
+/// — vanilla's own recipe-display registration puts `craftingStation`/`furnace`
+/// last in all five variants — so `walked.last()` after the loop below is
+/// always it, with no per-kind branch needed. The ingredient slots in
+/// between are walked only because they must be consumed. Returns `None`
+/// when the walk hit something unmodeled, with the same "abandon the
+/// packet" contract as [`read_slot_display`].
 ///
-/// Variant ids are `RecipeDisplays.java`'s registration order: shapeless, shaped,
-/// furnace, stonecutter, smithing.
+/// Variant ids are vanilla's own recipe-display registration order:
+/// shapeless, shaped, furnace, stonecutter, smithing.
 fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<(Vec<i32>, Vec<i32>)>, AdapterError> {
     let kind = reader.var_i32().map_err(dec_err)?;
     // Each variant is a fixed sequence of `SlotDisplay`s plus, for two of them,
@@ -2450,7 +2451,7 @@ fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<(Vec<i32>, Vec<
     Ok(Some((result_items, station_items)))
 }
 
-/// Decodes `ClientboundAwardStatsPacket`: a VarInt-counted map of
+/// Decodes vanilla's clientbound award-stats packet: a VarInt-counted map of
 /// `(stat_type id, value id) -> count`.
 ///
 /// `Stat.STREAM_CODEC` is `registry(STAT_TYPE).dispatch(Stat::getType,
@@ -2510,7 +2511,7 @@ fn decode_award_stats(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 /// Consumes a `HolderSet<T>` and returns the direct entries' registry ids, or an
 /// empty list for the tag form.
 ///
-/// `ByteBufCodecs.holderSet` uses this same wire shape for `Item` ingredients,
+/// vanilla's holder-set codec uses this same wire shape for `Item` ingredients,
 /// `Repairable`'s items, and `Equippable`'s entity types: a VarInt where `0`
 /// means a tag identifier follows and `n` means `n - 1` explicit bare registry
 /// ids. The caller decides whether those ids are worth retaining.
@@ -2531,7 +2532,7 @@ fn read_holder_set(reader: &mut Reader<'_>) -> Result<Vec<i32>, AdapterError> {
 
 /// Consumes a `Holder<SoundEvent>` (`SoundEvent.STREAM_CODEC`).
 ///
-/// `ByteBufCodecs.holder` writes `0` for a direct sound definition, whose body
+/// vanilla's registry-holder codec writes `0` for a direct sound definition, whose body
 /// is an identifier and an optional fixed-range float; a positive value is a
 /// registry reference encoded as `id + 1` and has no body. The decoded sound is
 /// intentionally discarded: equippable-slot alignment is the only consumer.
@@ -2545,11 +2546,12 @@ fn read_sound_event_holder(reader: &mut Reader<'_>) -> Result<(), AdapterError> 
     Ok(())
 }
 
-/// Decodes `Equippable.STREAM_CODEC`, retaining only the slot.
+/// Decodes vanilla's own equippable-component stream codec, retaining only
+/// the slot.
 ///
-/// The slot is a `ByteBufCodecs.idMapper(BY_ID, ...)`, not an enum ordinal.
-/// In particular wire id 5 is `OffHand` while enum ordinal 5 is `Head`; map
-/// from the ids in `EquipmentSlot.java` explicitly. `BY_ID` uses its ZERO
+/// The slot is a plain id-mapper codec, not an enum ordinal. In particular
+/// wire id 5 is `OffHand` while enum ordinal 5 is `Head`; map from vanilla's
+/// own equipment-slot wire ids explicitly. Vanilla's id-mapper uses its ZERO
 /// out-of-bounds strategy, so malformed ids alias `MainHand` just as vanilla
 /// does rather than inventing a second validation policy here.
 fn read_equippable(reader: &mut Reader<'_>) -> Result<EquipmentSlot, AdapterError> {
@@ -2581,7 +2583,7 @@ fn read_equippable(reader: &mut Reader<'_>) -> Result<EquipmentSlot, AdapterErro
     Ok(slot)
 }
 
-/// Decodes `ClientboundRecipeBookAddPacket`.
+/// Decodes vanilla's clientbound recipe-book-add packet.
 ///
 /// **The trailing `replace: bool` sits after the entry list**, so the list cannot
 /// be taken as opaque trailing bytes — the whole reason this packet waited for
@@ -2634,7 +2636,7 @@ fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
     })])
 }
 
-/// Decodes `ClientboundUpdateRecipesPacket`: the property sets, then the
+/// Decodes vanilla's clientbound update-recipes packet: the property sets, then the
 /// stonecutter list.
 ///
 /// Despite the name this is **not** the recipe corpus — it is the per-slot "which
@@ -2690,7 +2692,7 @@ fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
     )])
 }
 
-/// Decodes `ClientboundMerchantOffersPacket`.
+/// Decodes vanilla's clientbound merchant-offers packet.
 ///
 /// # The two traps
 ///
@@ -2792,9 +2794,9 @@ fn read_item_cost(reader: &mut Reader<'_>) -> Result<Option<(i32, i32)>, Adapter
     Ok(Some((item_id, count)))
 }
 
-/// Decodes `ClientboundShowDialogPacket`'s Play-state form.
+/// Decodes vanilla's clientbound show-dialog packet's Play-state form.
 ///
-/// The field is `ByteBufCodecs.holder(Registries.DIALOG, …)`: a VarInt where `0`
+/// The field is `vanilla's registry-holder codec(Registries.DIALOG, …)`: a VarInt where `0`
 /// means "an inline value follows" and `n > 0` means registry id `n - 1` with no
 /// further bytes. **The off-by-one is the trap** — reading the raw VarInt as the
 /// id would reference the wrong dialog for every entry.
@@ -2821,7 +2823,7 @@ fn decode_show_dialog(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 ///
 /// A **built-in** registry, so the ids are fixed by the jar rather than synced
 /// during Configuration (`MapDecorationType.STREAM_CODEC` is
-/// `ByteBufCodecs.holderRegistry`, a bare VarInt registry id). That is why a
+/// vanilla's holder-registry codec, a bare VarInt registry id). That is why a
 /// table is correct here where it would be a guess for a dynamic registry — see
 /// [`TRIM_MATERIAL_IDS`] for the contrast.
 const MAP_DECORATION_TYPE_IDS: &[&str] = &[
@@ -2861,13 +2863,14 @@ const MAP_DECORATION_TYPE_IDS: &[&str] = &[
     "swamp_hut",
     "trial_chambers",
 ];
-/// Decodes `ClientboundMapItemDataPacket` (id 51).
+/// Decodes vanilla's clientbound map-item-data packet (id 51).
 ///
 /// Wire shape, from the record's own `STREAM_CODEC`: a VarInt `MapId`, a `byte`
 /// scale, a `bool` locked, `Optional<List<MapDecoration>>`, then
-/// `MapPatch.STREAM_CODEC`'s optional.
+/// the map-patch stream codec's optional.
 ///
-/// Two traps in the patch codec, both from `MapItemSavedData.MapPatch.read`:
+/// Two traps in the patch codec, both confirmed against the decompiled
+/// map-saved-data source's own map-patch reader:
 ///
 /// * the field order on the wire is **width, height, startX, startY** — *not*
 ///   the record's declaration order (`startX, startY, width, height`); and
@@ -2975,9 +2978,9 @@ fn read_item_stack_template(reader: &mut Reader<'_>) -> Result<ItemStack, Adapte
     })
 }
 
-/// Decodes `minecraft:bundle_contents`' payload — `BundleContents.STREAM_CODEC`
-/// (`ItemStackTemplate.STREAM_CODEC.apply(ByteBufCodecs.list())`, mapped
-/// straight onto `BundleContents`' `items` list — `BundleContents.java`).
+/// Decodes `minecraft:bundle_contents`' payload — vanilla's own
+/// bundle-contents stream codec (an item-stack-template codec applied
+/// through a list codec, mapped straight onto its own `items` list).
 ///
 /// Each entry is `ItemStackTemplate.STREAM_CODEC`: item id, then count, then a
 /// **nested** `DataComponentPatch` — [`read_component_patch`] called
@@ -3065,7 +3068,7 @@ fn read_charged_projectiles(reader: &mut Reader<'_>) -> Result<(Vec<ItemStack>, 
     Ok((items, true))
 }
 
-/// Decodes `ClientboundUpdateAdvancementsPacket` (id 130).
+/// Decodes vanilla's clientbound update-advancements packet (id 130).
 ///
 /// Wire shape, from the packet's own reader: a `bool` reset, a list of
 /// `AdvancementHolder`, a collection of removed identifiers, a map of
@@ -3194,10 +3197,10 @@ mod dynamic_registry_order {
     //! The three tables in this module that stand in for a **dynamic**
     //! registry's holder-id space share one ordering rule, and it is a rule
     //! the type system cannot state: a dynamic registry has no
-    //! `Registry.register` sequence, so its ids come from
-    //! `ResourceManagerRegistryLoadTask.load` registering its JSON entries
-    //! `.sorted(Entry.comparingByKey())` over the resource `Identifier` —
-    //! and `Identifier.compareTo` compares **path first**. Every entry in
+    //! `vanilla's static registration` sequence, so its ids come from
+    //! `vanilla's resource-manager registry-load task` registering its JSON entries
+    //! `.sorted(a by-key comparator())` over the resource `Identifier` —
+    //! and `vanilla's identifier comparator` compares **path first**. Every entry in
     //! these three registries is `minecraft:`, so that reduces to plain
     //! ascending order of the file stems.
     //!
