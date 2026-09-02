@@ -1,11 +1,11 @@
 # Lodestone — the orchestrator's handbook
 
-Read [`CLAUDE.md`](./CLAUDE.md) first — it is the rules, this is the workflow. Your job is to read the
+Read [`CLAUDE.md`](../../CLAUDE.md) first — it is the rules, this is the workflow. Your job is to read the
 tracker, dispatch subagents, verify what lands, and close the loop. Nothing here describes the current
 state of the project; work that out yourself from the tracker and the tree.
 
 - **Open work is [GitHub issues](https://github.com/matteopolak/lodestone/issues)**, organised as tier
-  epics. Work the tiers in order. [`docs/backlog.md`](./docs/backlog.md) holds the tier definitions and
+  epics. Work the tiers in order. [`docs/backlog.md`](../backlog.md) holds the tier definitions and
   the per-item "what already exists and what will silently mislead you" notes — read the note for an
   item before dispatching it.
 - **A player report from the user outranks the tier order.** They are the only source of evidence that
@@ -18,11 +18,11 @@ state of the project; work that out yourself from the tracker and the tree.
   which you are passing on faith. Ask for "anything in this brief that turned out wrong" and read that
   part of the report first. When an agent contradicts you and is right, say so and move on.
 - **Parallel Cargo runs are supported through sccache.** Give each agent its own literal `--target-dir`
-  under `/tmp` and a bounded `-j` value, following [`docs/build-caching.md`](./docs/build-caching.md).
+  under `/tmp` and a bounded `-j` value, following [`docs/build-caching.md`](../build-caching.md).
   A count taken while agents are mid-edit is still a sample rather than a measurement — the invariant is
   zero failures, never a number. Run a final integrated verification when a group lands, using the health
   checks in `CLAUDE.md` — `just health` (see
-  [`docs/task-runner.md`](./docs/task-runner.md)), or the four `just check`/`check-all`/`check-seam`/`test`
+  [`docs/task-runner.md`](../task-runner.md)), or the four `just check`/`check-all`/`check-seam`/`test`
   recipes individually when you need to name which one failed. Feed failures back to the owning agent by
   name. Also run `just wasm-check` (and, less often, `just wasm-size`) as part of the same batched pass —
   nothing else calls either script.
@@ -34,7 +34,7 @@ state of the project; work that out yourself from the tracker and the tree.
   send one agent, not two. Have them commit through a private `GIT_INDEX_FILE` + `commit-tree`, reading
   the tree and committing in one step.
 - **Broker the high-churn wiring files: you are their only writer.** Measured over 200 commits:
-  `docs/README.md` (50), `app.rs` (26), `sim.rs` (25), `gpu.rs` (22), `menu/render.rs` (20),
+  `docs/README.md` (generated now, so no longer hand-edited), `app.rs` (26), `sim.rs` (25), `gpu.rs` (22), `menu/render.rs` (20),
   `crates/lodestone-render/src/lib.rs` (13). Every feature needs one line in some of them — an index
   entry, a source install, a system registration, a draw call, a `pub mod` — which is why they collide
   constantly. Agents send you the file, ~5 lines of anchor text, and the exact lines; you apply it.
