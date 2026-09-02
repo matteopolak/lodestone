@@ -799,18 +799,18 @@ fn shove_entities_from_piston(
 }
 
 /// How far behind wall-clock schedule the loop must fall before it gives up
-/// trying to catch up and forgives the backlog, matching vanilla's
-/// `runServer` overload check
-/// (`MinecraftServer.java:734-736`):
-/// ```text
-/// long behindTimeNanos = Util.getNanos() - this.nextTickTimeNanos;
-/// if (behindTimeNanos > OVERLOADED_THRESHOLD_NANOS + 20L * thisTickNanos && ...)
-/// ```
-/// `OVERLOADED_THRESHOLD_NANOS` (`MinecraftServer.java:197`) is
-/// `20L * NANOSECONDS_PER_SECOND / 20L`, i.e. exactly one second; the `20L *
-/// thisTickNanos` term is 20 ticks' worth of the tick period (1s at 50ms/tick
-/// here, since this crate has no `TickRateManager`/sprinting to vary
-/// `thisTickNanos` with). Total: **2 seconds** behind before vanilla — and
+/// trying to catch up and forgives the backlog, matching the real per-world
+/// run-server overload check, transcribed as the rule it implements: the
+/// server is overloaded once the elapsed time since the next scheduled tick
+/// exceeds a fixed threshold plus twenty ticks' worth of this tick's own
+/// duration.
+///
+/// The real overload threshold is
+/// exactly one second; the "twenty ticks' worth of this tick's own duration"
+/// term is 20 ticks' worth of the tick period (1s at 50ms/tick
+/// here, since this crate has no tick-rate manager/sprinting to vary
+/// that duration with). Total: **2 seconds** behind before the real engine —
+/// and
 /// this loop — gives up on the backlog.
 fn overload_threshold() -> Duration {
     Duration::from_secs(1) + TICK_PERIOD * 20
