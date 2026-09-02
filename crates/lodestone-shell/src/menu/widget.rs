@@ -102,7 +102,7 @@
 //! [`super::render`].
 
 /// Vanilla's inactive-message colour as the **signed** ARGB integer the jar
-/// writes: `Style.EMPTY.withColor(-6250336)` in
+/// writes: vanilla's own empty style with color -6250336 in
 /// `AbstractWidget.WithInactiveMessage.defaultInactiveMessage`.
 ///
 /// `-6250336 as u32` is `0xFF_A0_A0_A0` — opaque grey 160. Kept in vanilla's own
@@ -119,7 +119,7 @@ pub const INACTIVE_LABEL: [f32; 4] = [160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.
 
 /// An active widget's label colour: plain white.
 ///
-/// `AbstractButton` tints only the *sprite* with `ARGB.white(this.alpha)`
+/// `AbstractButton` tints only the *sprite* with vanilla's own ARGB-white helper applied to `this.alpha`
 ///; the label keeps the component's own default, which
 /// for every menu button is white.
 pub const ACTIVE_LABEL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -314,7 +314,7 @@ pub const SLIDER_SPRITES: WidgetSprites = WidgetSprites::with_disabled(
 /// `focused` is `false`, and both `active` and `visible` are public because they
 /// are public fields there too — every vanilla
 /// disable site is a plain `button.active = …` assignment
-/// (`OptionsSubScreen.java`, `TitleScreen.java`).
+/// (vanilla's own options-sub-screen base, vanilla's own title-screen rendering).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Widget {
     /// Left edge, in logical GUI pixels.
@@ -425,7 +425,7 @@ impl Widget {
         }
     }
 
-    /// `AbstractSliderButton.getSprite()`:
+    /// vanilla's own abstract slider button's get-sprite accessor:
     /// `isActive() && isFocused() && !canChangeValue ? HIGHLIGHTED : SLIDER`.
     ///
     /// **Both** arguments differ from [`Self::background_sprite`]'s, in the same
@@ -447,7 +447,7 @@ impl Widget {
         self.sprites.map(|s| s.get(self.is_active(), self.focused))
     }
 
-    /// `AbstractSliderButton.getHandleSprite()`
+    /// vanilla's own abstract slider button's get-handle-sprite accessor
     ///:
     /// `!isActive() || (!isHovered && !canChangeValue) ? SLIDER_HANDLE :
     /// SLIDER_HANDLE_HIGHLIGHTED`.
@@ -489,7 +489,7 @@ impl Widget {
         }
     }
 
-    /// `AbstractWidget.isActive()`:
+    /// vanilla's own abstract-widget base's is-active accessor:
     /// `visible && active`.
     ///
     /// Not the same question as [`Self::active`], and the difference is what
@@ -499,7 +499,7 @@ impl Widget {
         self.visible && self.active
     }
 
-    /// `(x, y, width, height)` — vanilla's `LayoutElement.getRectangle()`.
+    /// `(x, y, width, height)` — vanilla's own layout-element interface's get-rectangle accessor.
     #[must_use]
     pub fn rect(&self) -> (f32, f32, f32, f32) {
         (self.x, self.y, self.width, self.height)
@@ -519,7 +519,7 @@ impl Widget {
     ///
     /// This is the **click** half of the disabled path — the half that matters,
     /// because vanilla still *hovers* a disabled widget (`isHovered` is set from
-    /// geometry alone, `AbstractWidget.java`) and merely refuses to act on it.
+    /// geometry alone, vanilla's own abstract-widget base) and merely refuses to act on it.
     #[must_use]
     pub fn is_mouse_over(&self, mx: f32, my: f32) -> bool {
         self.is_active() && self.contains(mx, my)
@@ -538,7 +538,7 @@ impl Widget {
         self.is_active() && !self.focused
     }
 
-    /// `AbstractWidget.isHoveredOrFocused()`:
+    /// vanilla's own abstract-widget base's is-hovered-or-focused accessor:
     /// `isHovered() || isFocused()`.
     ///
     /// **The `||` is the whole point of this method existing.** #393 collapsed
@@ -561,7 +561,7 @@ impl Widget {
     /// docs — and the second is [`Self::is_hovered_or_focused`], **not**
     /// [`Self::focused`].
     ///
-    /// `EditBox` differs on *both* arguments: `EditBox.java` is
+    /// `EditBox` differs on *both* arguments: vanilla's own edit-box widget is
     /// `SPRITES.get(this.isActive(), this.isFocused())` — hover does not
     /// highlight a text field, only focus does. That is
     /// [`super::edit_box::EditBox::background_sprite`], deliberately not this.
@@ -573,7 +573,7 @@ impl Widget {
 
     /// The label colour: [`ACTIVE_LABEL`] or, when inactive, [`INACTIVE_LABEL`].
     ///
-    /// `AbstractWidget.WithInactiveMessage.getMessage()` is
+    /// vanilla's own abstract-widget base's with-inactive-message get-message accessor is
     /// `this.active ? super.getMessage() : this.inactiveMessage`
     /// — keyed on `active`, like the sprite, not
     /// on `isActive()`.
@@ -593,7 +593,7 @@ impl Widget {
 
     /// The label's top row for a font of `line_height`:
     /// `(top + bottom - lineHeight) / 2 + 1`
-    /// (`ActiveTextCollector.java`, reached through
+    /// (vanilla's own active-text-collector type, reached through
     /// `acceptScrollingWithDefaultCenter`).
     ///
     /// Floored before the `+ 1`, which is what integer arithmetic in the jar
@@ -650,7 +650,7 @@ pub fn over_bottom_left_quarter(rel_x: f32, rel_y: f32, size: f32) -> bool {
     rel_x >= 0.0 && rel_x < size * 0.5 && rel_y >= size * 0.5 && rel_y < size
 }
 
-/// Vanilla's `LayoutElement` (`gui/layouts/LayoutElement.java`), the interface
+/// Vanilla's `LayoutElement` (vanilla's own layout-element interface's own source file), the interface
 /// every `AbstractLayout` arranges.
 ///
 /// **The seam.** [`super::layout`] (#394) ports `LinearLayout`,
@@ -706,7 +706,7 @@ pub trait LayoutElement: core::fmt::Debug {
         (self.x(), self.y(), self.width(), self.height())
     }
 
-    /// `Layout.arrangeElements()`: size this element from its children and place
+    /// vanilla's own layout interface's arrange-elements call: size this element from its children and place
     /// them. A no-op for a leaf, which is what makes the recursion in
     /// [`super::layout`]'s containers a plain `visit_children`.
     fn arrange_elements(&mut self) {}
@@ -782,8 +782,8 @@ pub const SCROLLER_BACKGROUND_SPRITE: &str = "widget/scroller_background";
 ///
 /// Keyed by `(selected, hoveredOrFocused)`, **not** `(active, …)` like every
 /// other [`WidgetSprites`] user in this module — a tab's *background* never
-/// reads `this.active` at all (`extractWidgetRenderState`, `MenuTabBar.java:
-/// 125-138`); only the underline colour and the label do. `WidgetSprites::get`
+/// reads `this.active` at all (`extractWidgetRenderState`, vanilla's own
+/// menu-tab-bar type, own source at `:125-138`); only the underline colour and the label do. `WidgetSprites::get`
 /// is generic on its two `bool`s, so the (enabled, focused)-shaped API still
 /// answers this (selected, hovered)-shaped question correctly — the field
 /// names are just the wrong axis for this one caller.
@@ -857,8 +857,8 @@ pub fn tab_label_top(y: f32, height: f32, selected: bool, line_height: f32) -> f
     ((top + bottom - line_height) / 2.0).floor() + 1.0
 }
 
-/// `MenuTabButton.UNDERLINE_HEIGHT`/`_MARGIN_BOTTOM` (`MenuTabBar.java:
-/// 116-118,152-157`): a 1 px bar, its own height above the tab's bottom edge,
+/// `MenuTabButton.UNDERLINE_HEIGHT`/`_MARGIN_BOTTOM` (vanilla's own
+/// menu-tab-bar type, own source at `:116-118,152-157`): a 1 px bar, its own height above the tab's bottom edge,
 /// centred under the label and no wider than `tab_width - 4`.
 pub const TAB_UNDERLINE_H: f32 = 1.0;
 pub const TAB_UNDERLINE_MARGIN_BOTTOM: f32 = 2.0;
@@ -1337,7 +1337,7 @@ impl ScrollList {
     }
 
     /// `scrollRate()`, which for a selection list is `defaultEntryHeight / 2`
-    /// (`AbstractSelectionList.java` → `AbstractScrollArea.defaultSettings`,
+    /// (vanilla's own abstract selection-list base → `AbstractScrollArea.defaultSettings`,
     /// `:145-147`).
     ///
     /// **Integer division, and `scrollRate` is an `int` field of the record**
@@ -1754,7 +1754,7 @@ pub enum ListChrome {
 /// full-width one has to declare it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RowBand {
-    /// `AbstractSelectionList.getRowLeft()`: a fixed-width row centred on the
+    /// vanilla's own abstract selection-list base's get-row-left accessor: a fixed-width row centred on the
     /// canvas.
     Centred {
         /// `getRowWidth()`.
@@ -1932,7 +1932,7 @@ mod tests {
     #[test]
     fn vanillas_inactive_grey_is_derived_not_transcribed() {
         // The expected value originates **outside** this file's own constant:
-        // `-6250336` is lifted verbatim from `AbstractWidget.java`, and
+        // `-6250336` is lifted verbatim from vanilla's own abstract-widget base, and
         // unpacking it must land on `INACTIVE_LABEL`. Without this the array
         // would only ever agree with itself.
         assert_eq!(argb_to_rgba(INACTIVE_MESSAGE_ARGB), INACTIVE_LABEL);
@@ -1950,7 +1950,7 @@ mod tests {
 
     #[test]
     fn the_collapsing_constructors_match_vanillas_record() {
-        // `WidgetSprites.java`. The 3-argument form's fourth field is the
+        // vanilla's own widget-sprites record. The 3-argument form's fourth field is the
         // one that carries the whole "disabled wins over hovered" rule.
         let one = WidgetSprites::uniform("a");
         assert_eq!(
@@ -2022,7 +2022,7 @@ mod tests {
 
     #[test]
     fn a_slider_has_a_track_but_no_disabled_track() {
-        // `AbstractSliderButton.getSprite()` is a **conjunction** —
+        // vanilla's own abstract slider button's get-sprite accessor is a **conjunction** —
         // `isActive() && isFocused() && !canChangeValue` — so a greyed-out
         // slider draws the *ordinary* track whatever focus did, and its entire
         // disabled state is the grey label. This is the assertion that caught
@@ -2088,7 +2088,7 @@ mod tests {
 
     #[test]
     fn a_sliders_handle_highlights_on_hover_or_focus() {
-        // `AbstractSliderButton.getHandleSprite()`
+        // vanilla's own abstract slider button's get-handle-sprite accessor
         // is
         // `!isActive() || (!isHovered && !canChangeValue) ? SLIDER_HANDLE : …`,
         // and `canChangeValue` is `true` for a slider focused by mouse or Tab
@@ -2123,7 +2123,7 @@ mod tests {
 
     #[test]
     fn a_widget_is_active_and_visible_by_default() {
-        // `AbstractWidget.java` — and a `derive(Default)` would give the
+        // vanilla's own abstract-widget base — and a `derive(Default)` would give the
         // opposite, greying out every widget built from `..Default::default()`.
         let w = Widget::default();
         assert!(w.active && w.visible && !w.focused);
@@ -2285,7 +2285,7 @@ mod tests {
 
     #[test]
     fn buttons_carry_vanillas_own_metrics() {
-        // `Button.java`, so a screen never restates one.
+        // vanilla's own button type, so a screen never restates one.
         assert_eq!(
             [SMALL_WIDTH, DEFAULT_WIDTH, BIG_WIDTH, DEFAULT_HEIGHT, DEFAULT_SPACING],
             [120.0, 150.0, 200.0, 20.0, 8.0]
@@ -3021,7 +3021,7 @@ mod tests {
     /// existing list here is `RowBand::Centred`, and the refactor must not have
     /// moved one pixel of any of them.
     ///
-    /// The expected values are `AbstractSelectionList.getRowLeft()`'s own
+    /// The expected values are vanilla's own abstract selection-list base's get-row-left accessor's own
     /// arithmetic — `width / 2 - rowWidth / 2` with **two separate integer
     /// divisions** — evaluated by hand at three widths for the multiplayer list's
     /// real 340, not by calling the code under test. The odd width is the one that
@@ -3232,7 +3232,7 @@ mod tests {
 
     #[test]
     fn tab_sprites_are_keyed_by_selected_and_hovered_not_active() {
-        // `MenuTabBar.java`: unselected+plain, selected+plain,
+        // Vanilla's own menu-tab-bar type: unselected+plain, selected+plain,
         // unselected+hovered, selected+hovered — all four combinations, none of
         // them consulting an "active" flag at all.
         assert_eq!(TAB_SPRITES.get(false, false), "widget/tab");
@@ -3244,7 +3244,7 @@ mod tests {
     #[test]
     fn tab_underline_colour_matches_vanillas_two_argb_constants() {
         // Expected values originate outside this module: `-1` and `-6250336`
-        // are `MenuTabBar.java`'s own literals, unpacked by the shared
+        // are vanilla's own menu-tab-bar type's own literals, unpacked by the shared
         // `argb_to_rgba` rather than restated as a second pair of floats.
         assert_eq!(tab_underline_colour(true), argb_to_rgba(-1));
         assert_eq!(tab_underline_colour(false), argb_to_rgba(-6_250_336));
@@ -3255,7 +3255,7 @@ mod tests {
 
     #[test]
     fn tab_label_drops_three_pixels_only_while_unselected() {
-        // `MenuTabBar.java`: `getY() + (isSelected() ? 0 : 3)`.
+        // Vanilla's own menu-tab-bar type: `getY() + (isSelected() ? 0 : 3)`.
         assert_eq!(tab_label_dy(true), 0.0);
         assert_eq!(tab_label_dy(false), 3.0);
     }
