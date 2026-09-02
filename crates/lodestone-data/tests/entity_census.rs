@@ -8,14 +8,14 @@
 //! `tests/support/entity_census_jvm.txt` is an authoritative dump produced by
 //! booting the real 26.2 server and, for every one of the 158 registered entity
 //! types, reporting its implementation class, whether that class is a
-//! `LivingEntity`, which class in its hierarchy declares `pushEntities()` and
-//! `doPush(Entity)`, and its base `EntityDimensions`
-//! (`EntityCensusOracle.java`, walking `BuiltInRegistries.ENTITY_TYPE`). It is
+//! living entity, which class in its hierarchy declares its own "push entities" and
+//! "do push" steps, and its base entity-dimensions record
+//! (`EntityCensusOracle.java`, walking vanilla's own entity-type registry). It is
 //! committed as the external anchor (§ "an expected value must originate outside
 //! the code under test").
 //!
 //! Note what the dump does and does not contain. Every column is a *mechanical*
-//! fact about the jar — a class name, an `isAssignableFrom`, a raw `f32` bit
+//! fact about the jar — a class name, a class-assignability check, a raw `f32` bit
 //! pattern. None of it is a boolean the oracle decided. The reduction to "can
 //! this type shove the local player" lives in [`PUSH_MODEL`] below, next to the
 //! `26.2` source citations it was read from, and **fails closed**: an override
@@ -54,7 +54,7 @@
 //! ```
 //!
 //!    If the dump introduced an override site [`PUSH_MODEL`] does not know, this
-//!    step **panics** naming the class. Read the new `pushEntities`/`doPush` in
+//!    step **panics** naming the class. Read the new "push entities"/"do push" step in
 //!    the 26.2 tree, add the row with its citation, and re-run. Do not add a
 //!    permissive catch-all.
 
@@ -86,14 +86,15 @@ struct Row {
     /// without a re-dump, and carried here so a future model can reach it.
     impl_class: String,
     living: bool,
-    /// `Mob.class.isAssignableFrom(impl)` — strictly narrower than
+    /// Vanilla's own mob-class assignability check against the implementation
+    /// class — strictly narrower than
     /// [`living`](Self::living), and the class that declares the flags byte
-    /// behind `isAggressive()`. Shipped unreduced as `ENTITY_IS_MOB`.
+    /// behind its own "is aggressive" check. Shipped unreduced as `ENTITY_IS_MOB`.
     mob: bool,
-    /// Class declaring `pushEntities()`, or `None` when nothing in the hierarchy
-    /// does (the expected value for a plain `Entity` subclass).
+    /// Class declaring its own "push entities" step, or `None` when nothing in the hierarchy
+    /// does (the expected value for a plain entity subclass).
     push_entities_decl: Option<String>,
-    /// Class declaring `doPush(Entity)`, same convention.
+    /// Class declaring its own "do push" step, same convention.
     do_push_decl: Option<String>,
     width_bits: u32,
     height_bits: u32,
@@ -103,86 +104,93 @@ struct Row {
 // The reduction: raw jar facts -> "can this type shove the local player"
 // ---------------------------------------------------------------------------
 
-/// What a `pushEntities()` / `doPush(Entity)` override at a given class does to
+/// What a "push entities" / "do push" override at a given class does to
 /// the crowd pass, as read from the 26.2 source.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Effect {
     /// The pass still reaches `player.push(neighbour)`. Either the inherited
-    /// `LivingEntity` implementation, or an override that decorates and then
+    /// living-entity implementation, or an override that decorates and then
     /// calls `super`.
     Reaches,
-    /// The override can never push a `Player`.
+    /// The override can never push a player.
     Blocks,
 }
 
-/// The **closed** classification of every class that declares `pushEntities()`
-/// or `doPush(Entity)` in the 26.2 tree, with the citation it was read from.
+/// The **closed** classification of every class that declares its own "push
+/// entities"
+/// or "do push" step in the 26.2 tree, with the citation it was read from.
 ///
 /// Closed is the point: [`classify`] errors on a declaring class absent from
 /// this table, so a version bump that adds an override site cannot silently
 /// inherit a permissive default. Adding a row is a deliberate act with a source
 /// line attached.
 ///
-/// `ServerPlayer.pushEntities` (a tick-rate-manager
-/// gate around `super`) is intentionally absent: `EntityType<Player>` is typed on
-/// `Player`, so a client-side census never reaches `ServerPlayer`, and a row here
+/// The server-only player entity's own "push entities" override (a tick-rate-manager
+/// gate around `super`) is intentionally absent: the player entity type is typed on
+/// the client-visible player class, so a client-side census never reaches the
+/// server-only subclass, and a row here
 /// would be dead.
 const PUSH_MODEL: &[(&str, Effect, &str)] = &[
-    // `pushEntities()` declarers.
+    // "push entities" declarers.
     (
         "LivingEntity",
         Effect::Reaches,
-        "LivingEntity.java:3222 — the crowd pass itself; \
-         LivingEntity.java:3271 doPush -> entity.push(this)",
+        "vanilla's own living-entity class's own crowd pass itself; \
+         its own do-push override calls entity.push(this)",
     ),
     (
         "Bat",
         Effect::Blocks,
-        "Bat.java:95 — `protected void pushEntities() {}`, an empty body; \
-         Bat.java:91 doPush is likewise empty",
+        "vanilla's own bat entity class's own push-entities override is \
+         `protected void pushEntities() {}`, an empty body; \
+         its own do-push override is likewise empty",
     ),
     (
         "ArmorStand",
         Effect::Blocks,
-        "ArmorStand.java:178 — pushEntities() iterates only RIDABLE_MINECARTS, \
-         never a player; ArmorStand.java:174 doPush is empty",
+        "vanilla's own armour-stand entity class's own push-entities override iterates \
+         only RIDABLE_MINECARTS, never a player; its own do-push override is empty",
     ),
-    // `doPush(Entity)` declarers that are not also `pushEntities()` declarers.
+    // "do push" declarers that are not also "push entities" declarers.
     (
         "Parrot",
         Effect::Blocks,
-        "Parrot.java:390 — `if (!(entity instanceof Player)) super.doPush(entity);`, \
+        "vanilla's own parrot entity class's own do-push override is \
+         `if (!(entity instanceof Player)) super.doPush(entity);`, \
          so a parrot pushes everything except a player",
     ),
     (
         "IronGolem",
         Effect::Reaches,
-        "IronGolem.java:106 — may retarget an Enemy, then calls super.doPush",
+        "vanilla's own iron-golem entity class's own do-push override may retarget \
+         an enemy, then calls super.doPush",
     ),
     (
         "SulfurCube",
         Effect::Reaches,
-        "SulfurCube.java:731 — calls super.doPush, then applyContactDamage",
+        "vanilla's own sulfur-cube entity class's own do-push override calls \
+         super.doPush, then applies contact damage",
     ),
     (
         "Warden",
         Effect::Reaches,
-        "Warden.java:529 — records a disturbance, then calls super.doPush",
+        "vanilla's own warden entity class's own do-push override records a \
+         disturbance, then calls super.doPush",
     ),
 ];
 
-/// Implementation classes whose `canBeCollidedWith` override can return true.
+/// Implementation classes whose own "can be collided with" override can return true.
 /// The dump carries the concrete class, so every wood variant follows its
 /// shared boat implementation without a hand-maintained entity-name list.
 const HARD_COLLISION_CLASSES: &[(&str, &str)] = &[
-    ("Boat", "AbstractBoat.canBeCollidedWith — unconditional true"),
-    ("ChestBoat", "inherits AbstractBoat.canBeCollidedWith"),
-    ("Raft", "inherits AbstractBoat.canBeCollidedWith"),
-    ("ChestRaft", "inherits AbstractBoat.canBeCollidedWith"),
-    ("Shulker", "Shulker.canBeCollidedWith — isAlive()"),
+    ("Boat", "vanilla's own abstract-boat class's own override — unconditional true"),
+    ("ChestBoat", "inherits vanilla's own abstract-boat class's own override"),
+    ("Raft", "inherits vanilla's own abstract-boat class's own override"),
+    ("ChestRaft", "inherits vanilla's own abstract-boat class's own override"),
+    ("Shulker", "vanilla's own shulker entity class's own override — isAlive()"),
     (
         "HappyGhast",
-        "HappyGhast.canBeCollidedWith — true in eligible runtime states",
+        "vanilla's own happy-ghast entity class's own override — true in eligible runtime states",
     ),
 ];
 
@@ -200,7 +208,7 @@ fn effect_of(class: &str) -> Effect {
         .unwrap_or_else(|| {
             panic!(
                 "unknown push override site `{class}`: the JVM dump names a class that declares \
-                 pushEntities()/doPush(Entity) and PUSH_MODEL has never seen. Read its body in \
+                 its own push-entities/do-push step and PUSH_MODEL has never seen. Read its body in \
                  .cache/mc/26.2/src and add a row with its citation. Do NOT add a permissive \
                  catch-all — see the module docs."
             )
@@ -208,16 +216,16 @@ fn effect_of(class: &str) -> Effect {
 }
 
 /// Whether an entity of this type can shove the local player through
-/// `LivingEntity.pushEntities()`.
+/// vanilla's own living-entity class's own "push entities" step.
 ///
 /// The three vanilla facts, in order:
 ///
-/// 1. Only `LivingEntity` runs the pass at all (`LivingEntity.aiStep` is the
-///    sole caller of `pushEntities()` in the tree), so a non-living type is
+/// 1. Only the living-entity class runs the pass at all (its own "ai step" is the
+///    sole caller of "push entities" in the tree), so a non-living type is
 ///    `false` regardless of anything else. This is also the **default-deny**
 ///    hinge: a future non-living type needs no table entry to be excluded.
-/// 2. Its `pushEntities()` must still be able to see a player.
-/// 3. Its `doPush(Entity)` must still reach `entity.push(this)` for a player.
+/// 2. Its own "push entities" step must still be able to see a player.
+/// 3. Its own "do push" step must still reach `entity.push(this)` for a player.
 fn classify(row: &Row) -> bool {
     if !row.living {
         // Cross-check the dump's own consistency while here: a non-living class
@@ -225,7 +233,7 @@ fn classify(row: &Row) -> bool {
         // are introduced by `LivingEntity`.
         assert!(
             row.push_entities_decl.is_none() && row.do_push_decl.is_none(),
-            "{} is not a LivingEntity yet declares a crowd-pass method",
+            "{} is not a living entity yet declares a crowd-pass method",
             row.name
         );
         return false;
@@ -234,11 +242,11 @@ fn classify(row: &Row) -> bool {
     let push_entities = row
         .push_entities_decl
         .as_deref()
-        .unwrap_or_else(|| panic!("{} is a LivingEntity but declares no pushEntities()", row.name));
+        .unwrap_or_else(|| panic!("{} is a living entity but declares no push-entities step", row.name));
     let do_push = row
         .do_push_decl
         .as_deref()
-        .unwrap_or_else(|| panic!("{} is a LivingEntity but declares no doPush()", row.name));
+        .unwrap_or_else(|| panic!("{} is a living entity but declares no do-push step", row.name));
 
     effect_of(push_entities) == Effect::Reaches && effect_of(do_push) == Effect::Reaches
 }
@@ -330,14 +338,14 @@ fn generate(rows: &[Row]) -> String {
     out.push_str(
         "// @generated by `cargo test -p lodestone-data --test entity_census -- --ignored`\n\
          // from tests/support/entity_census_jvm.txt (a headless 26.2 server dump of each\n\
-         // entity type's implementation class, LivingEntity-ness, and pushEntities()/\n\
-         // doPush(Entity) declaring classes, protocol 776 / Minecraft 26.2). DO NOT EDIT\n\
+         // entity type's implementation class, living-entity-ness, and its own\n\
+         // push-entities/do-push declaring classes, protocol 776 / Minecraft 26.2). DO NOT EDIT\n\
          // BY HAND. Regenerate with LODESTONE_REGEN=1 (see the test module docs).\n",
     );
     out.push_str(
         "//! Generated per-entity-type push census for protocol 776 (Minecraft 26.2),\n\
          //! indexed by network entity-type registry id. `true` means an entity of that\n\
-         //! type can shove the local player through vanilla `LivingEntity.pushEntities()`.\n\
+         //! type can shove the local player through vanilla's own living-entity class's own \"push entities\" step.\n\
          //! Default-deny: see [`crate::entity_census`] for the reduction and its citations.\n\n",
     );
 
@@ -392,18 +400,18 @@ fn generate(rows: &[Row]) -> String {
 
     // The raw `living` column, shipped unreduced. It is a *different* fact from
     // `ENTITY_PUSHES_PLAYERS` above and cannot be recovered from it: `bat`,
-    // `armor_stand` and `parrot` are all `LivingEntity` subclasses that do not
+    // `armor_stand` and `parrot` are all living-entity subclasses that do not
     // push (`tests` `the_three_living_types_that_cannot_reach_a_player_do_not_push`),
     // so reading the push table as an is-living test gets those three wrong.
     //
-    // Its consumer is metadata decode, not physics: `DATA_LIVING_ENTITY_FLAGS`
-    // sits at metadata index 8, and so does `AbstractArrow.ID_FLAGS` — both
+    // Its consumer is metadata decode, not physics: the living-entity flags field
+    // sits at metadata index 8, and so does the arrow base class's own flags field — both
     // plain bytes, indistinguishable by serializer. A version adapter needs this
     // to know whether an index-8 byte is a using-item bitfield or an arrow's
     // crit flag.
     let _ = writeln!(
         out,
-        "\n/// Whether this type's implementation class is a `LivingEntity`, by network\n\
+        "\n/// Whether this type's implementation class is a living entity, by network\n\
          /// registry id."
     );
     let _ = writeln!(out, "pub static ENTITY_IS_LIVING: [bool; {count}] = [");
@@ -418,12 +426,12 @@ fn generate(rows: &[Row]) -> String {
     out.push_str("];\n");
 
     // The raw `mob` column, likewise unreduced — and a *third* distinct fact.
-    // `Mob` is where `DATA_MOB_FLAGS_ID` (metadata index 15, the aggressive bit)
-    // is declared, and index 15 is *also* `ArmorStand.DATA_CLIENT_FLAGS` and
-    // `Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`, all three `BYTE`. An armour
+    // The mob class is where its own mob-flags field (metadata index 15, the aggressive bit)
+    // is declared, and index 15 is *also* the armour-stand entity class's own client-flags field and
+    // a display entity's own billboard-render-constraints field, all three `BYTE`. An armour
     // stand's `0x04` is "show arms" where a mob's is "aggressive", so an
     // is-*living* guard is not enough for index 15 the way it is for index 8:
-    // `ArmorStand` is living. See `tests/support/entity_data_index_jvm.txt` in
+    // an armour stand is living. See `tests/support/entity_data_index_jvm.txt` in
     // the `v770` crate for the collision, read off the jar.
     let _ = writeln!(
         out,
@@ -535,9 +543,10 @@ fn the_committed_is_mob_column_matches_the_dump_row_for_row() {
 #[test]
 fn is_mob_is_strictly_narrower_than_is_living_and_the_gap_is_named() {
     // The whole reason a third column exists. Metadata index 15 is
-    // `Mob.DATA_MOB_FLAGS_ID` on a mob and `ArmorStand.DATA_CLIENT_FLAGS` on an
+    // the mob class's own mob-flags field on a mob and the armour-stand entity
+    // class's own client-flags field on an
     // armour stand, both `BYTE` — and bit `0x04` is "aggressive" on one and "show
-    // arms" on the other. `ArmorStand` is a `LivingEntity`, so unlike index 8 the
+    // arms" on the other. An armour stand is a living entity, so unlike index 8 the
     // is-living guard does **not** resolve this one, and reading `is_living` as an
     // is-mob test would make every armour stand with arms report itself as an
     // aggressive mob.
@@ -545,7 +554,8 @@ fn is_mob_is_strictly_narrower_than_is_living_and_the_gap_is_named() {
     for row in &rows {
         assert!(
             !row.mob || row.living,
-            "{} is a mob but not living, which is impossible (Mob extends LivingEntity)",
+            "{} is a mob but not living, which is impossible (vanilla's own mob class extends \
+             its own living-entity class)",
             row.name
         );
     }
@@ -554,7 +564,7 @@ fn is_mob_is_strictly_narrower_than_is_living_and_the_gap_is_named() {
         .filter(|row| row.living && !row.mob)
         .map(|row| row.name.as_str())
         .collect();
-    // Read off the 26.2 tree: `LivingEntity`'s direct non-`Mob` descendants.
+    // Read off the 26.2 tree: the living-entity class's direct non-mob descendants.
     // Asserted by name because the *identity* of the gap is the finding, not its
     // size — a later version adding one must be looked at, not absorbed.
     assert_eq!(
@@ -564,7 +574,7 @@ fn is_mob_is_strictly_narrower_than_is_living_and_the_gap_is_named() {
             "minecraft:mannequin",
             "minecraft:player",
         ],
-        "the living-but-not-Mob set changed; each of these has its own claimant on \
+        "the living-but-not-mob set changed; each of these has its own claimant on \
          metadata index 15 and needs reading before the guard is widened"
     );
     // And the positive side: the mobs whose arm pose the aggressive bit drives.
