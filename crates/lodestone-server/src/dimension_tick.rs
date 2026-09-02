@@ -243,7 +243,7 @@ mod tests {
 
     /// A single flat Nether-shaped column of netherrack, edited to carry a
     /// fire block at a known cell so a random tick has something to burn out
-    /// — `FireBlock.tick`'s no-neighbouring-flammable-block case removes
+    /// — the real fire-block random-tick rule's no-neighbouring-flammable-block case removes
     /// fire outright, which is the predicted, non-round-number outcome this
     /// test checks for rather than merely "the block changed".
     #[derive(Debug, Default)]
