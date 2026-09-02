@@ -319,14 +319,13 @@ impl ClientHandle {
     /// [`ClientAction::DropSelectedItem`]/`DropSelectedItemStack` the caller
     /// submits itself, because the caller is also where the game-mode gate lives
     /// (a spectator drops nothing and sends nothing, and that decision must not
-    /// be duplicated). Order matters and is vanilla's: predict, *then* send —
-    /// `LocalPlayer.java:316-317`.
+    /// be duplicated). Order matters and is vanilla's: predict, *then* send.
     ///
     /// # Why a prediction is mandatory here rather than an optimisation
     ///
     /// This is the one inventory mutation with **no** server echo. `DROP_ITEM`
-    /// and `DROP_ALL_ITEMS` reach `ServerGamePacketListenerImpl.java:1303-1314`,
-    /// which calls `player.drop(…)` and returns — no `SET_CONTAINER_SLOT`, no
+    /// and `DROP_ALL_ITEMS` reach vanilla's own drop handler and return — no
+    /// `SET_CONTAINER_SLOT`, no
     /// content packet, nothing. So an unpredicted drop leaves the local count
     /// *permanently* wrong, not briefly wrong: the item really is gone
     /// server-side and only our display disagrees. That was the reported bug.
@@ -367,7 +366,7 @@ impl ClientHandle {
         self.state.chunk_world()
     }
 
-    /// The write half of the store split (issue #423), paired with
+    /// The write half of the store split, paired with
     /// [`chunk_world`](Self::chunk_world) on the **same** `Arc`.
     ///
     /// The driver adopts both (`Sim::adopt_live_world`) so that the store its
@@ -509,7 +508,8 @@ impl ClientHandle {
     /// Returns a clone of chunk `pos`'s `MOTION_BLOCKING` heightmap, or `None`
     /// if the chunk is not loaded or carries no such map.
     ///
-    /// This is the `y` rain lands at (`Heightmap.getFirstAvailable`, i.e. the
+    /// This is the `y` rain lands at (vanilla's own first-available-height
+    /// lookup, i.e. the
     /// first non-passable-or-fluid position above the ground) — see
     /// `lodestone_render::WeatherProbe::column_top` for the consumer this
     /// exists for. Hands back the whole 16×16 map rather than one column's

@@ -47,8 +47,9 @@ use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, SectionLight, Wor
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-/// `Heightmap.Types.MOTION_BLOCKING`'s registry id on the 1.21.5+ typed-list
-/// wire form (`docs/motion-blocking-heightmap.md`). Duplicated rather than
+/// Vanilla's own motion-blocking heightmap type's registry id on the
+/// 1.21.5+ typed-list wire form (`docs/motion-blocking-heightmap.md`).
+/// Duplicated rather than
 /// imported: the crate that owns the canonical constant
 /// (`lodestone_worldgen::overworld::MOTION_BLOCKING_HEIGHTMAP_TYPE_ID`) is
 /// server-only, and this crate must stay reachable from a browser build.
@@ -99,8 +100,9 @@ pub struct PlayerSnapshot {
     /// the first report is the same "not yet reported reads as full" convention
     /// `HudState::default` already uses (`docs/sky-and-air-bubbles.md`).
     pub air: i32,
-    /// Whether the player entity is burning — `Entity.FLAG_ONFIRE`, folded from
-    /// `Vitals::on_fire` (issue #112).
+    /// Whether the player entity is burning — vanilla's own on-fire entity
+    /// flag, folded from
+    /// `Vitals::on_fire`.
     ///
     /// Unreported reads as `false`, the safe default: an absent flag meaning
     /// "not burning" is the harmless direction, unlike `air` above, whose absence
@@ -111,7 +113,7 @@ pub struct PlayerSnapshot {
     /// Current dimension, once known.
     pub dimension: Option<DimensionId>,
     /// The **dimension type** the current dimension points at, as the server
-    /// declared it in the Configuration `registry_data` (issue #288). Read from
+    /// declared it in the Configuration `registry_data`. Read from
     /// [`ServerDimensionType`].
     ///
     /// `None` means the server said nothing usable — **not** "the overworld". A
@@ -123,12 +125,13 @@ pub struct PlayerSnapshot {
     ///
     /// Not part of [`DimensionTypeInfo`] on purpose — it is a level property,
     /// not a registry entry — but it travels with it because vanilla reads the
-    /// two together: `ClientLevelData.voidDarknessOnsetRange()` is `1.0` when
+    /// two together: its own void-darkness-onset-range formula returns `1.0`
+    /// when
     /// flat and `32.0` otherwise, and the void fade spans that many blocks
     /// above the dimension type's own `min_y`.
     pub world_is_flat: bool,
     /// Every biome's `minecraft:visual/sky_color` as the server declared it in
-    /// the Configuration `registry_data` (issue #96), **indexed by biome holder
+    /// the Configuration `registry_data`, **indexed by biome holder
     /// id** and packed `0x00RR_GGBB` in sRGB bytes. Read from
     /// [`ServerBiomeSkyColors`].
     ///
@@ -252,7 +255,8 @@ pub struct EntityView {
     /// different state from a known-but-plain variant. Do not treat `None` as
     /// "unknown".
     pub variant: Option<EntityVariant>,
-    /// A creeper's fuse direction (`Creeper.DATA_SWELL_DIR`), once reported —
+    /// A creeper's fuse direction (vanilla's own swell-direction metadata
+    /// field), once reported —
     /// `-1` while idle or backing off, `1` while counting up to detonation.
     /// **Absent** until the first report, like [`baby`](Self::baby) — which for
     /// an idle, never-approached creeper is forever, since the protocol adapter
@@ -386,7 +390,7 @@ pub(crate) struct SharedState {
     session: Entity,
     /// Whether [`Self::ecs`] carries [`lodestone_ecs::GameEventBus`] — checked
     /// **once**, at construction, and cached here so [`Self::apply`]'s hot
-    /// path is a plain `bool` read when the bus is off (issue #104's "zero
+    /// path is a plain `bool` read when the bus is off ("zero
     /// cost when unused"). See [`lodestone_ecs::GameEventBusPlugin`]'s doc for
     /// why a runtime toggle is not needed: a plugin opts in by being present
     /// when the `World` is built, and that is always before a `SharedState`
@@ -397,7 +401,7 @@ pub(crate) struct SharedState {
     /// `Directive::SetState` arm in `driver.rs`.
     ///
     /// A plain [`AtomicBool`] rather than a field on [`LocalEcho`] behind the
-    /// `RwLock`: this is read on the shell's net loop every drain (issue #674 --
+    /// `RwLock`: this is read on the shell's net loop every drain (
     /// a per-tick `Move` submitted while the connection has dropped back into
     /// `Configuration`, e.g. a mid-session dimension-change reconfigure, has no
     /// encode arm and was spamming "action has no packet in current state" once
@@ -458,7 +462,7 @@ impl Default for SharedState {
     }
 }
 
-/// Pushes `event` onto the plugin event bus (issue #104), unconditionally —
+/// Pushes `event` onto the plugin event bus, unconditionally —
 /// no `match` on `event` anywhere in this function's body, checked by
 /// `tests::game_event_bus_write_site_has_no_match_on_the_event` below in the
 /// style of `lodestone_model::event::route_tests::route_has_no_catch_all_arm`.
@@ -514,7 +518,7 @@ impl SharedState {
     ///
     /// Also checks `ecs` once for [`lodestone_ecs::GameEventBus`] — see
     /// [`Self::game_event_bus_enabled`]'s field doc. This is today's real
-    /// opt-in path for issue #104's bus: whoever builds `ecs` (currently
+    /// opt-in path for the plugin event bus: whoever builds `ecs` (currently
     /// `lodestone_shell::sim::Sim`, brokered / out of this pass's scope)
     /// decides by adding `GameEventBusPlugin` before calling this.
     pub(crate) fn adopting(ecs: EcsHandle, session: Entity) -> Self {
@@ -648,7 +652,7 @@ impl SharedState {
         ChunkWorld::from_shared(Arc::clone(&self.world))
     }
 
-    /// The write half of the store split (issue #423), on the **same** `Arc`
+    /// The write half of the store split, on the **same** `Arc`
     /// [`chunk_world`](Self::chunk_world) hands out — the sanctioned route for a
     /// driver (`Sim::adopt_live_world`) or a test harness that must edit the
     /// store, paired with the read handle so the two never name different worlds.
@@ -1108,7 +1112,7 @@ impl SharedState {
     }
 
     /// One player's announced chat-signing session, if the tab list has
-    /// folded one in for them (issue #283) — the lookup
+    /// folded one in for them — the lookup
     /// [`crate::driver::Driver`]'s incoming-chat signature verification needs.
     ///
     /// A single-entry lookup rather than routing every caller through
@@ -1216,9 +1220,9 @@ impl SharedState {
     /// Predicts a `key.drop` press against the one authoritative
     /// [`SessionMenus`], returning whether anything was actually dropped.
     ///
-    /// The `bool` is vanilla's own return at this layer: `LocalPlayer.drop`
-    /// (`LocalPlayer.java:314-319`) discards the stack and returns
-    /// `!prediction.isEmpty()`, which `Minecraft.java:1907-1911` uses for exactly
+    /// The `bool` is vanilla's own return at this layer: vanilla's
+    /// local-player drop routine discards the stack and returns whether the
+    /// dropped prediction was non-empty, which the caller uses for exactly
     /// one thing — swinging the arm only when the slot was not empty. The stack
     /// itself stays inside `lodestone_game`; the dropped item entity is
     /// server-authoritative and arrives as an ordinary spawn packet, so no caller
@@ -1227,8 +1231,8 @@ impl SharedState {
     /// Same "must run here, not on a snapshot" argument as
     /// [`menu_click`](Self::menu_click) — and here it is the whole point of the
     /// method. A drop is the one inventory mutation the server performs
-    /// **silently**: `ServerGamePacketListenerImpl.java:1303-1314` calls
-    /// `player.drop(…)` and returns without sending a slot update, so nothing
+    /// **silently**: vanilla's own drop-packet handler calls its drop
+    /// routine and returns without sending a slot update, so nothing
     /// will ever arrive to fix a missed prediction. `lodestone_game::menus::Menus::drop_selected`
     /// carries the citations.
     ///
@@ -1800,7 +1804,7 @@ mod tests {
         // guard is visible through the handle without any propagation step.
         assert_eq!(handed_out.len(), 0);
         assert!(state.world_write().is_empty());
-        // `ChunkWorld` exposes no `Arc` (issue #423) — identity is compared by
+        // `ChunkWorld` exposes no `Arc` — identity is compared by
         // rebuilding a read handle from the same field `world_write` locks and
         // using the store's own `is_same_store`, which is `Arc::ptr_eq` inside.
         let from_write_target = ChunkWorld::from_shared(Arc::clone(&state.world));
@@ -1819,7 +1823,7 @@ mod tests {
         assert!(!a.chunk_world().is_same_store(&b.chunk_world()));
     }
 
-    // ---- issue #104: the plugin event bus ---------------------------------
+    // ---- the plugin event bus ----------------------------------------------
 
     /// Builds a [`SharedState`] the way [`SharedState::default`] does, except
     /// the underlying `World` carries `GameEventBusPlugin` before
