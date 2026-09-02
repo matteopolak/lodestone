@@ -560,8 +560,8 @@ impl AquiferSystem {
         }
     }
 
-    /// Vanilla `WorldCarver.getCarveState`'s aquifer branch:
-    /// `aquifer.computeSubstance(SinglePointContext(x,y,z), 0.0)`. `None` means
+    /// Vanilla's own world-carver carve-state lookup's aquifer branch:
+    /// its aquifer's combined substance computation at this single point, threshold 0.0. `None` means
     /// "do not carve — keep the existing block" (only reachable if the local
     /// density were positive, which the carver never passes); `Some` is the
     /// carve substance (air below the surface, or the local water/lava table).
@@ -663,7 +663,7 @@ impl AquiferSystem {
 
         let global_fluid = self.global_fluid(pos_y);
         if !self.enabled {
-            // `Aquifer.createDisabled`'s entire body. Deliberately before the
+            // Vanilla's own disabled-aquifer constructor's entire body. Deliberately before the
             // `skip_sampling_above_y` shortcut rather than folded into it: that
             // shortcut is an optimisation inside the *noise* aquifer with its own
             // derivation, and reusing it here would make the disabled path's

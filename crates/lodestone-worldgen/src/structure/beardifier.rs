@@ -1,9 +1,9 @@
-//! The beardifier — issue #514's S3, and the only part of structure generation
+//! The beardifier — this change's S3, and the only part of structure generation
 //! that changes *terrain* rather than adding blocks to it.
 //!
 //! # What it is
 //!
-//! Vanilla's `Beardifier` (`world/level/levelgen/Beardifier.java`). A density
+//! Vanilla's own beardifier. A density
 //! term, added to `final_density` at every block of a chunk, that raises the
 //! density under and around an adaptation-bearing structure's pieces so the
 //! terrain grows a flat foundation ("beard") or swallows the piece whole
@@ -14,18 +14,13 @@
 //!
 //! Two things have to be right, and they are at opposite ends of the pipeline.
 //!
-//! **Where the term is added.** `NoiseChunk`'s constructor
-//! (`NoiseChunk.java:155-160`) does not read `final_density` directly:
-//!
-//! ```text
-//! fullNoiseValue = DensityFunctions.cacheAllInCell(
-//!         DensityFunctions.add(wrappedRouter.finalDensity(), BeardifierMarker.INSTANCE))
-//!     .mapAll(this::wrap);
-//! ```
-//!
-//! and `NoiseChunk.wrap` substitutes the real `Beardifier` for the marker. So the
+//! **Where the term is added.** Vanilla's own noise-chunk sampler's constructor
+//! does not read `final_density` directly: it wraps the router's own final-density
+//! function in a plain two-argument `add` against a beardifier-marker leaf, caches
+//! that sum over the whole cell, and then re-maps every leaf of the resulting
+//! graph, substituting the real beardifier for the marker at map time. So the
 //! beard is **one operand of a plain `add` at the very top of the graph**, and
-//! `Ap2(ADD)` is `argument1.compute(ctx) + argument2.compute(ctx)`. That is why
+//! that binary-add node's evaluation is `argument1.compute(ctx) + argument2.compute(ctx)`. That is why
 //! this type does not live inside the density evaluator at all: adding it at the
 //! `final_density` *call site* is the same floating-point expression, in the same
 //! order, and it keeps a per-chunk mutable input out of a graph that is shared
@@ -40,7 +35,8 @@
 //! overworld's own adaptation comes from the code-level `add` above. Anyone
 //! chasing "why is `OpKind::Beardifier => 0.0`" should stop here.
 //!
-//! **Which pieces are in scope.** `Beardifier.forStructuresInChunk` takes the
+//! **Which pieces are in scope.** Vanilla's own "beardifier for structures in
+//! chunk" constructor takes the
 //! chunk's `References` starts with `terrainAdaptation() != NONE`, then keeps
 //! each *piece* within 12 blocks of the chunk. [`super::super::overworld::structures::StructureRefs`]
 //! already computes the start-level set (deliberately *wider* than vanilla's, so
@@ -48,7 +44,7 @@
 //! piece-level filter here re-narrows it to exactly vanilla's set. That the two
 //! agree is not an accident of tuning: a piece within 12 blocks of the chunk
 //! implies the start's 12-inflated box intersects the chunk box, which is
-//! precisely vanilla's `createReferences` test, so "piece within 12" is the
+//! precisely vanilla's own structure-reference-gathering test, so "piece within 12" is the
 //! binding condition either way.
 //!
 //! # How to change it, and the gotchas
@@ -64,8 +60,8 @@
 //!   integer, not `1.0 / sqrt(x)`; the two differ in the 11th significant digit,
 //!   and the beard shape is the difference between a flat plaza and a lumpy one.
 //! * **`ground_level_delta` is a jigsaw fact, and until S4 lands every piece
-//!   reports `0`** — vanilla's own answer for a non-`PoolElementStructurePiece`
-//!   (`Beardifier.java:75`). [`PieceBeard`] is the seam: give a piece `Some(..)`
+//!   reports `0`** — vanilla's own answer for a non-jigsaw structure piece.
+//!   [`PieceBeard`] is the seam: give a piece `Some(..)`
 //!   and its rigid/junction behaviour switches on.
 //! * The kernel is 13,824 `f32`s built once. It is keyed `[zi][xi][yi]` — **Y
 //!   innermost**, which is not the order the loop that builds it reads, so the
@@ -83,20 +79,20 @@ use std::sync::OnceLock;
 
 use super::{BoundingBox, StructureStart, TerrainAdjustment};
 
-/// `Beardifier.BEARD_KERNEL_RADIUS` — also the amount
-/// `Structure.adjustBoundingBox` inflates an adaptation-bearing box by, and the
-/// piece-level `isCloseToChunk` distance. One number, three uses, all the same
+/// Vanilla's own beard-kernel radius — also the amount
+/// vanilla's own bounding-box adjustment inflates an adaptation-bearing box by, and the
+/// piece-level "close to chunk" distance. One number, three uses, all the same
 /// reason.
 pub const BEARD_KERNEL_RADIUS: i32 = 12;
 
-/// `Beardifier.BEARD_KERNEL_SIZE`.
+/// Vanilla's own beard-kernel size.
 const BEARD_KERNEL_SIZE: i32 = 24;
 
 /// How far past the union of the in-scope pieces the beard can reach —
-/// `anyPieceBoundingBox.inflatedBy(24)`.
+/// any piece's own bounding box inflated by 24.
 const AFFECTED_INFLATION: i32 = 24;
 
-/// `Beardifier.BEARD_KERNEL`: `exp(-|(dx, dy + 0.5, dz)|² / 16)` over the
+/// Vanilla's own beard kernel: `exp(-|(dx, dy + 0.5, dz)|² / 16)` over the
 /// 24×24×24 offset cube, as `f32`, indexed `[zi * 576 + xi * 24 + yi]`.
 ///
 /// Built once per process rather than per chunk. `f32` because vanilla's array
@@ -124,7 +120,7 @@ fn kernel() -> &'static [f32; 13824] {
     })
 }
 
-/// `Beardifier.computeBeardContribution(int, double, int)`.
+/// Vanilla's own beard-contribution computation at `(int, double, int)`.
 ///
 /// `E.powf(..)` rather than `(..).exp()` to mirror vanilla's
 /// `Math.pow(Math.E, x)` as an expression. The two agree to within an ulp and the
@@ -136,17 +132,17 @@ fn compute_beard_contribution(dx: i32, dy: f64, dz: i32) -> f64 {
     std::f64::consts::E.powf(-distance_sqr / 16.0)
 }
 
-/// `Mth.lengthSquared(x, y, z)`.
+/// Vanilla's own math-helper length-squared at `(x, y, z)`.
 fn length_squared(x: f64, y: f64, z: f64) -> f64 {
     x * x + y * y + z * z
 }
 
-/// `Mth.length(x, y, z)`.
+/// Vanilla's own math-helper length at `(x, y, z)`.
 fn length(x: f64, y: f64, z: f64) -> f64 {
     length_squared(x, y, z).sqrt()
 }
 
-/// `Mth.fastInvSqrt` (`Mth.java:449-455`) — one Newton step from the classic
+/// Vanilla's own math-helper fast-inverse-sqrt — one Newton step from the classic
 /// magic-constant seed.
 ///
 /// **Not** `1.0 / x.sqrt()`, and the difference is real: the relative error of
@@ -160,13 +156,13 @@ fn fast_inv_sqrt(x: f64) -> f64 {
     x * (1.5 - xhalf * x * x)
 }
 
-/// `Beardifier.getBuryContribution` — a linear falloff from 1 at the piece to 0
+/// Vanilla's own bury-contribution — a linear falloff from 1 at the piece to 0
 /// at distance 6.
 fn bury_contribution(dx: f64, dy: f64, dz: f64) -> f64 {
     crate::math::clamped_map(length(dx, dy, dz), 0.0, 6.0, 1.0, 0.0)
 }
 
-/// `Beardifier.getBeardContribution` — the kernel sample, signed by how far the
+/// Vanilla's own beard-contribution — the kernel sample, signed by how far the
 /// query sits above the piece's ground level.
 fn beard_contribution(dx: i32, dy: i32, dz: i32, y_to_ground: i32) -> f64 {
     let xi = dx + BEARD_KERNEL_RADIUS;
@@ -186,7 +182,7 @@ fn in_kernel_range(i: i32) -> bool {
     (0..BEARD_KERNEL_SIZE).contains(&i)
 }
 
-/// A jigsaw junction — `JigsawJunction`, the point where two template pool
+/// A jigsaw junction — vanilla's own jigsaw-junction type, the point where two template pool
 /// pieces meet.
 ///
 /// Each one contributes its own soft beard at 0.4 weight, which is what smooths
@@ -194,17 +190,18 @@ fn in_kernel_range(i: i32) -> bool {
 /// by S4; nothing constructs one yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Junction {
-    /// `getSourceX`.
+    /// Vanilla's own source-x accessor.
     pub source_x: i32,
-    /// `getSourceGroundY`.
+    /// Vanilla's own source-ground-y accessor.
     pub source_ground_y: i32,
-    /// `getSourceZ`.
+    /// Vanilla's own source-z accessor.
     pub source_z: i32,
 }
 
-/// The `PoolElementStructurePiece`-only facts the beardifier reads.
+/// The jigsaw-piece-only facts the beardifier reads.
 ///
-/// A piece with `None` here is vanilla's `else` branch (`Beardifier.java:75`): it
+/// A piece with `None` here is vanilla's own `else` branch for a non-jigsaw
+/// piece: it
 /// beards as a rigid box with `groundLevelDelta == 0` and contributes no
 /// junctions. That is the correct answer for every coded piece, so this stays
 /// `Option` rather than gaining a "not jigsaw" variant.
@@ -215,14 +212,14 @@ pub struct PieceBeard {
     /// it follows the terrain instead of flattening it — but its junctions still
     /// count.
     pub rigid: bool,
-    /// `getGroundLevelDelta` — how far above the piece's `minY` its own floor
+    /// Vanilla's own ground-level-delta accessor — how far above the piece's `minY` its own floor
     /// sits, from the template's `groundLevelDelta` marker.
     pub ground_level_delta: i32,
-    /// `getJunctions`.
+    /// Vanilla's own junctions accessor.
     pub junctions: Vec<Junction>,
 }
 
-/// One `Beardifier.Rigid`: a piece box, its structure's adjustment, and its
+/// Vanilla's own rigid-piece record: a piece box, its structure's adjustment, and its
 /// ground-level delta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Rigid {
@@ -247,19 +244,20 @@ pub struct Beardifier {
 }
 
 impl Beardifier {
-    /// `Beardifier.EMPTY` — no pieces, no junctions, and therefore a constant
+    /// Vanilla's own empty-beardifier singleton — no pieces, no junctions, and therefore a constant
     /// `0.0`.
     #[must_use]
     pub fn empty() -> Self {
         Self::default()
     }
 
-    /// `Beardifier.forStructuresInChunk`, over the starts
+    /// Vanilla's own "beardifier for structures in chunk" constructor, over the starts
     /// [`StructureRefs::adaptation_bearing`](crate::overworld::structures::StructureRefs::adaptation_bearing)
     /// already filtered.
     ///
     /// `starts` must already be adaptation-bearing; this does not re-check, for
-    /// the same reason vanilla passes the predicate to `startsForStructure`
+    /// the same reason vanilla passes the predicate to its own
+    /// starts-for-structure lookup
     /// rather than testing inside the loop — the filter belongs to the reference
     /// walk, which is where it can be paid for once per chunk instead of once per
     /// piece.
@@ -300,8 +298,8 @@ impl Beardifier {
                         }
                         for junction in &jigsaw.junctions {
                             // Strict inequalities, and the window is the chunk
-                            // plus 12 on each side — vanilla's
-                            // `Beardifier.java:66-70`.
+                            // plus 12 on each side — vanilla's own junction
+                            // in-range test.
                             if junction.source_x > chunk_start_block_x - BEARD_KERNEL_RADIUS
                                 && junction.source_z > chunk_start_block_z - BEARD_KERNEL_RADIUS
                                 && junction.source_x
@@ -343,7 +341,7 @@ impl Beardifier {
         }
     }
 
-    /// Whether this beardifier is `Beardifier.EMPTY`-equivalent — a constant
+    /// Whether this beardifier is equivalent to vanilla's own empty singleton — a constant
     /// `0.0` at every position.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -370,7 +368,7 @@ impl Beardifier {
         self.affected_box
     }
 
-    /// `Beardifier.compute` — the density term to add to `final_density` at this
+    /// Vanilla's own beardifier compute — the density term to add to `final_density` at this
     /// block.
     ///
     /// Accumulation order is the specification: rigids in insertion order, then
@@ -431,7 +429,7 @@ impl Beardifier {
     }
 }
 
-/// `Beardifier.includeBoundingBox`.
+/// Vanilla's own include-bounding-box helper.
 fn include(encompassing: Option<BoundingBox>, new: BoundingBox) -> BoundingBox {
     match encompassing {
         None => new,
@@ -439,7 +437,7 @@ fn include(encompassing: Option<BoundingBox>, new: BoundingBox) -> BoundingBox {
     }
 }
 
-/// `BoundingBox.isInside(x, y, z)`.
+/// Vanilla's own "is inside" check at `(x, y, z)`.
 fn contains(b: BoundingBox, x: i32, y: i32, z: i32) -> bool {
     x >= b.min[0]
         && x <= b.max[0]
@@ -483,8 +481,8 @@ mod tests {
         }
     }
 
-    /// `Mth.fastInvSqrt` against values hand-carried through the record
-    /// definition (`Mth.java:449-455`): seed = `longBitsToDouble(6910469410427058090 -
+    /// Vanilla's own math-helper fast-inverse-sqrt against values hand-carried through the record
+    /// definition: seed = `longBitsToDouble(6910469410427058090 -
     /// (doubleToRawLongBits(x) >> 1))`, then one Newton step.
     ///
     /// The point of the test is the **gap from the exact answer**, because that
@@ -492,7 +490,8 @@ mod tests {
     /// tolerance-based check and fail this one.
     #[test]
     fn fast_inv_sqrt_is_newton_not_exact() {
-        // Values from expanding `Mth.java:449-455` on the raw bit patterns — the
+        // Values from expanding vanilla's own fast-inverse-sqrt on the raw bit
+        // patterns — the
         // integer subtract, the reinterpret, and the one Newton step — independent
         // of this file. Full `f64` precision, so a one-ulp drift fails.
         let expected: [(f64, f64); 8] = [

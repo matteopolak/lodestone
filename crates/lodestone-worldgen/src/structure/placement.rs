@@ -1,10 +1,8 @@
-//! `StructurePlacement`: which chunks a structure *set* may start a structure in.
+//! Vanilla's own structure-placement types: which chunks a structure *set* may start a structure in.
 //!
-//! Ported from the record definitions under
-//! `.cache/mc/26.2/src/net/minecraft/world/level/levelgen/structure/placement/`
-//! (`StructurePlacement`, `RandomSpreadStructurePlacement`, `RandomSpreadType`,
-//! `ConcentricRingsStructurePlacement`) plus
-//! `chunk/ChunkGeneratorStructureState.generateRingPositions`.
+//! Ported from vanilla's own structure-placement, random-spread-placement,
+//! random-spread-type and concentric-rings-placement record definitions, plus
+//! its own chunk-generator structure-state ring-position generator.
 //!
 //! # RNG draw order and count are the specification
 //!
@@ -15,9 +13,9 @@
 //! same seed, and nothing about the result looks wrong: structures simply appear
 //! somewhere else. So:
 //!
-//! * `getPotentialStructureChunk` draws **exactly two** spread values, X then Z,
+//! * Vanilla's own potential-structure-chunk lookup draws **exactly two** spread values, X then Z,
 //!   from one salt-seeded legacy source. `triangular` spends **two** draws per
-//!   axis (four total), `linear` one (two total) — [`RandomSpreadType::evaluate`].
+//!   axis (four total), `linear` one (two total) — [`SpreadType::evaluate`].
 //! * The four `frequency_reduction_method`s are four *different* derivations, not
 //!   one derivation with four thresholds, and three of them are legacy shims kept
 //!   for pre-1.18 worlds. `legacy_type_1` (pillager outposts) does not use
@@ -34,7 +32,7 @@
 use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
 use serde_json::Value;
 
-/// `RandomSpreadType` — how the in-cell offset is drawn.
+/// Vanilla's own random-spread-type enum — how the in-cell offset is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpreadType {
     /// `random.nextInt(limit)`.
@@ -61,21 +59,23 @@ impl SpreadType {
     }
 }
 
-/// `StructurePlacement.FrequencyReductionMethod` — four distinct seed
+/// Vanilla's own frequency-reduction-method enum — four distinct seed
 /// derivations, one per historical era of vanilla structure placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrequencyReduction {
-    /// `default` — `setLargeFeatureWithSalt(seed, salt, sourceX, sourceZ)`
+    /// `default` — vanilla's own large-feature-with-salt seeding at
+    /// `(seed, salt, sourceX, sourceZ)`
     /// (note the argument order) then `nextFloat() < probability`.
     Default,
     /// `legacy_type_1` — the pillager-outpost reducer. Seeds from
     /// `cx ^ cz << 4 ^ seed` where `cx = sourceX >> 4`, **discards one
     /// `nextInt()`**, then tests `nextInt(1/probability) == 0`.
     LegacyType1,
-    /// `legacy_type_2` — `setLargeFeatureWithSalt(seed, sourceX, sourceZ, 10387320)`
-    /// with vanilla's `HIGHLY_ARBITRARY_RANDOM_SALT`, ignoring the set's own salt.
+    /// `legacy_type_2` — vanilla's own large-feature-with-salt seeding at
+    /// `(seed, sourceX, sourceZ, 10387320)`
+    /// with vanilla's own hardcoded "highly arbitrary" random salt, ignoring the set's own salt.
     LegacyType2,
-    /// `legacy_type_3` — `setLargeFeatureSeed` then `nextDouble() < probability`.
+    /// `legacy_type_3` — vanilla's own large-feature-seed derivation then `nextDouble() < probability`.
     LegacyType3,
 }
 
@@ -89,7 +89,7 @@ impl FrequencyReduction {
         }
     }
 
-    /// `HIGHLY_ARBITRARY_RANDOM_SALT` — `StructurePlacement.java:27`.
+    /// Vanilla's own hardcoded "highly arbitrary" random salt.
     const ARBITRARY_SALT: i32 = 10_387_320;
 
     fn should_generate(
@@ -133,7 +133,7 @@ impl FrequencyReduction {
     }
 }
 
-/// `StructurePlacement.ExclusionZone` — "not within `chunk_count` chunks of a
+/// Vanilla's own exclusion-zone record — "not within `chunk_count` chunks of a
 /// placement chunk of `other_set`".
 #[derive(Debug, Clone)]
 pub struct ExclusionZone {
@@ -248,7 +248,7 @@ impl Placement {
         }
     }
 
-    /// `RandomSpreadStructurePlacement.getPotentialStructureChunk` — the one
+    /// Vanilla's own random-spread-placement potential-structure-chunk lookup — the one
     /// chunk of the grid cell containing `(source_x, source_z)` that this set may
     /// start in. `None` for a non-random-spread placement.
     #[must_use]
@@ -302,19 +302,19 @@ impl Placement {
     }
 }
 
-/// `ChunkGeneratorStructureState.generateRingPositions` — the stronghold ring
+/// Vanilla's own chunk-generator structure-state ring-position generator — the stronghold ring
 /// positions, in vanilla's own draw order.
 ///
 /// **`biome_pick` is called once per position, in position order**, and is handed
 /// the *forked* generator vanilla forks per position plus the ring-centre chunk
-/// coordinates; returning `None` keeps vanilla's fallback (`new ChunkPos(initialX,
-/// initialZ)` — note that is a *chunk* position built from what were section
+/// coordinates; returning `None` keeps vanilla's fallback (a chunk position built
+/// from what were section
 /// coordinates, which is vanilla's own behaviour and not a unit slip).
 ///
 /// The draw order, which is the specification: one `nextDouble` for the initial
 /// angle, then per position one `nextDouble` for the distance jitter and one
 /// `fork()`, and one extra `nextDouble` each time a ring completes. The source is
-/// **xoroshiro** (`RandomSource.create()`), not the legacy LCG every other
+/// **xoroshiro** (vanilla's own default random-source constructor), not the legacy LCG every other
 /// placement decision uses.
 ///
 /// # Not verified against vanilla output
@@ -352,8 +352,8 @@ where
             + (random.next_double() - 0.5) * f64::from(distance) * 2.5;
         let initial_x = (angle.cos() * dist).round() as i32;
         let initial_z = (angle.sin() * dist).round() as i32;
-        // `RandomSource.fork()` for xoroshiro is
-        // `new XoroshiroRandomSource(nextLong(), nextLong())` — the raw
+        // Vanilla's own fork for xoroshiro is
+        // a fresh xoroshiro source built directly from two raw draws — the raw
         // `(lo, hi)` constructor with no seed upgrade, hence `from_128bit`
         // rather than `new`. Spelled out here rather than added to the
         // `RandomSource` trait, which no other caller needs.

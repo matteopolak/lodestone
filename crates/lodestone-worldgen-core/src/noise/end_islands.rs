@@ -54,7 +54,8 @@
 //!   only then widened for a `f32` sqrt. The centre-hole test
 //!   `total_chunk² > 4096` is separately **`i64`**.
 //! * **`island_size` is a slope, not a radius**, range `[9, 22)`.
-//! * **`island_size` / `xd` / `zd` / `new_doffs` are all `f32`.** `Mth.sqrt` is
+//! * **`island_size` / `xd` / `zd` / `new_doffs` are all `f32`.** Vanilla's own
+//!   float-sqrt helper is
 //!   `(float) Math.sqrt(f)` — a `f64` sqrt narrowed back to `f32`, which is what
 //!   `(x as f64).sqrt() as f32` spells.
 //! * Loop bounds are `-12..=12` on both axes: **625 candidate chunks per call**,

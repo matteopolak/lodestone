@@ -512,10 +512,10 @@ impl OverworldGenerator {
     /// post-vegetation world.
     ///
     /// **No 3×3 driver, and that is vanilla's own behaviour, not a narrowing.**
-    /// `SnowAndFreezeFeature.place` loops `dx`/`dz` over `0..16` from the chunk
+    /// Vanilla's own snow-and-freeze feature's placement loops `dx`/`dz` over `0..16` from the chunk
     /// origin and writes only at `(x, y, z)` / `(x, y - 1, z)` of that same
-    /// column (`SnowAndFreezeFeature.java:26-45`), so it has no
-    /// `blockStateWriteRadius(1)` spill for [`Self::ore_stage`]'s and
+    /// column, so it has no
+    /// neighbour-write spill for [`Self::ore_stage`]'s and
     /// [`Self::vegetation_stage`]'s neighbour drivers to model. A neighbour's own
     /// freeze pass cannot reach into this chunk, and this one cannot reach out.
     /// That also means this stage costs no neighbour recomputation at all — it is
