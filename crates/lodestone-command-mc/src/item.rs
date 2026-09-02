@@ -1,8 +1,8 @@
-//! `minecraft:item_stack` — `ItemArgument`, v1.
+//! `minecraft:item_stack` — vanilla's own item argument, v1.
 //!
 //! # v1 ships without the component patch, and that is clean
 //!
-//! Vanilla's `ItemParser` accepts `minecraft:diamond_sword[minecraft:damage=5,
+//! Vanilla's own item parser accepts `minecraft:diamond_sword[minecraft:damage=5,
 //! minecraft:custom_name='…']` — an SNBT-adjacent component patch. **No textual
 //! SNBT parser exists anywhere in this workspace** (the only `snbt` hits are
 //! live-test strings, and `read_component_patch` is *wire* decode, a genuinely
@@ -10,8 +10,8 @@
 //! explicit refusal.
 //!
 //! That is a truthful refusal at the right layer rather than a fudge, and the
-//! reason is the wire: `minecraft:item_stack` carries **no network payload**
-//! (`SingletonArgumentInfo`), so the transmitted node, the client's
+//! reason is the wire: `minecraft:item_stack` carries **no network payload**,
+//! so the transmitted node, the client's
 //! autocompletion, and `/give @s minecraft:diamond_sword 3` are all *complete
 //! now*. The later SNBT unit replaces the single `[` arm in
 //! [`ItemArg::parse`] — not the tree, not the wire, and not
@@ -19,8 +19,8 @@
 //!
 //! # The id is validated at parse time
 //!
-//! `ItemParser` resolves against `BuiltInRegistries.ITEM` and throws
-//! `ERROR_UNKNOWN_ITEM` on a miss. This does the same against
+//! Vanilla's own item parser resolves against the item registry and throws
+//! an unknown-item error on a miss. This does the same against
 //! `lodestone_data::items`, so a typo fails as a *parse error the player sees*
 //! rather than reaching an executor that has to invent a response. That is the
 //! same layering `ChoicesArgument::strict` exists for and the same reason
@@ -80,11 +80,12 @@ impl ItemInput {
     }
 }
 
-/// `GiveCommand.MAX_ALLOWED_ITEMSTACKS` — the multiplier on the item's own max
-/// stack size that bounds `/give`'s count (`commands.give.failed.toomanyitems`).
+/// Vanilla's own give-command item-stack-count multiplier — the multiplier
+/// on the item's own max stack size that bounds `/give`'s count
+/// (`commands.give.failed.toomanyitems`).
 pub const MAX_ALLOWED_ITEMSTACKS: u32 = 100;
 
-/// `ItemArgument.item(context)`.
+/// Vanilla's own item argument.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ItemArg;
 
@@ -126,7 +127,7 @@ impl ArgumentType for ItemArg {
     fn suggest(&self, _partial: &str) -> Vec<String> {
         // Every item in the 26.2 census. `CommandTree::suggest` applies the
         // case-insensitive prefix filter, exactly as
-        // `SharedSuggestionProvider.suggestResource` does, so this is offered
+        // vanilla's own resource-suggestion helper does, so this is offered
         // unfiltered.
         //
         // Both the namespaced and bare forms, because vanilla's own
@@ -153,7 +154,7 @@ impl McArg for ItemArg {
     }
 }
 
-/// `Identifier.read`'s character class, for an item id.
+/// Vanilla's own resource-location reader's character class, for an item id.
 fn read_item_id(reader: &mut StringReader) -> String {
     let start = reader.cursor();
     while reader.can_read() {

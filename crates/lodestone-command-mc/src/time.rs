@@ -1,19 +1,20 @@
-//! `minecraft:time` — `TimeArgument.time()`, the `/time`, `/xp` and delay-style
+//! `minecraft:time` — vanilla's own time argument, the `/time`, `/xp` and delay-style
 //! integer-with-suffix grammar.
 //!
 //! # The suffixes, and the one vanilla omits from its own error text
 //!
-//! `TimeArgument.parse` reads a run of digits (or a bare `-`/`.`-tolerant
-//! double, per `readDoubleText`) then an optional single-letter unit —
+//! Vanilla's own time-argument parser reads a run of digits (or a bare
+//! `-`/`.`-tolerant
+//! double) then an optional single-letter unit —
 //! `d` (day, ×24000), `s` (second, ×20) or `t` (tick, ×1, also the default
-//! with no suffix) — and rounds the product to the nearest tick
-//! (`Math.round(value * unit)`). A value that rounds to something outside
+//! with no suffix) — and rounds the product to the nearest tick. A value
+//! that rounds to something outside
 //! `min..=i32::MAX` is refused with vanilla's own two-argument
-//! `ERROR_TOO_SMALL`/`ERROR_INVALID_VALUE` shape, and `/time set`/`/time add`
-//! both use `time(0)` — no negative time.
+//! too-small/invalid-value error shape, and `/time set`/`/time add`
+//! both use its zero-minimum constructor — no negative time.
 //!
 //! v1 does not parse the fractional form (`1.5s`); vanilla's own grammar
-//! permits it (`readDoubleText`), but every existing caller in this server
+//! permits it, but every existing caller in this server
 //! passes a whole number of ticks, and adding fractional parsing without a
 //! caller to exercise it would be the risk this crate's own doc names for
 //! `hasValueHere`-style edges: untested and easy to get wrong. A bare
@@ -24,14 +25,14 @@ use lodestone_model::command_tree::ArgumentParser;
 
 use crate::McArg;
 
-/// `TimeArgument.time(min)` — `minecraft:time`.
+/// Vanilla's own time argument — `minecraft:time`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TimeArg {
     pub min: i32,
 }
 
 impl TimeArg {
-    /// `TimeArgument.time(0)` — what `/time set` and `/time add` both use.
+    /// Vanilla's own zero-minimum constructor — what `/time set` and `/time add` both use.
     #[must_use]
     pub const fn non_negative() -> Self {
         Self { min: 0 }

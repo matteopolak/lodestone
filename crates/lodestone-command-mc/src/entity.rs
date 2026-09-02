@@ -3,8 +3,8 @@
 //!
 //! # The split, restated because it is the design
 //!
-//! Vanilla has `EntitySelectorParser` (text → `EntitySelector`) and
-//! `EntitySelector.findEntities(CommandSourceStack)` (AST + world → entities).
+//! Vanilla has a selector parser (text → an AST) and
+//! a selector-resolution step (AST + world → entities).
 //! This module is the first half only. [`EntitySelector`] is plain data with no
 //! world access, and the server resolves it — see
 //! `lodestone_server::commands::source` for the resolver.
@@ -40,10 +40,10 @@ use uuid::Uuid;
 
 use crate::McArg;
 
-/// `MinMaxBounds`: an inclusive range with either end optional.
+/// Vanilla's own min/max-bounds shape: an inclusive range with either end optional.
 ///
 /// `5` parses as `min == max == 5`; `1..3` as both; `1..` and `..3` as one.
-/// Both ends absent is an error (`MinMaxBounds.ERROR_EMPTY`).
+/// Both ends absent is an error.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Bounds<T> {
     pub min: Option<T>,
@@ -68,9 +68,9 @@ impl<T: PartialOrd + Copy> Bounds<T> {
     }
 }
 
-/// `MinMaxBounds.Bounds.fromReader` for `f64`.
+/// Vanilla's own bounds reader for `f64`.
 ///
-/// The one subtle rule is `isAllowedInputChar`: a `.` is part of the number
+/// The one subtle rule: a `.` is part of the number
 /// **unless** it begins a `..`, which is what lets `1..5` tokenize without
 /// backtracking and `1.5..` still read `1.5`.
 fn read_bounds_f64(reader: &mut StringReader) -> Result<Bounds<f64>, ParseError> {
@@ -101,7 +101,7 @@ fn read_bounds_f64(reader: &mut StringReader) -> Result<Bounds<f64>, ParseError>
         }
     };
     let bounds = Bounds { min: parse(min)?, max: parse(max)? };
-    // `MinMaxBounds.Doubles.fromReader`'s `areSwapped` check.
+    // Vanilla's own bounds reader's swapped-order check.
     if let (Some(min), Some(max)) = (bounds.min, bounds.max) {
         if min > max {
             reader.set_cursor(start);
@@ -141,15 +141,16 @@ fn peek_at(reader: &StringReader, offset: usize) -> Option<char> {
 /// The order a selector's candidates are put in before `limit` truncates them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SelectorOrder {
-    /// `EntitySelector.ORDER_ARBITRARY` — insertion order, which for this
+    /// Vanilla's own arbitrary-order constant — insertion order, which for
+    /// this
     /// server is the player registry's own order.
     #[default]
     Arbitrary,
-    /// `EntitySelectorParser.ORDER_NEAREST`.
+    /// Vanilla's own nearest-order constant.
     Nearest,
-    /// `EntitySelectorParser.ORDER_FURTHEST`.
+    /// Vanilla's own furthest-order constant.
     Furthest,
-    /// `EntitySelectorParser.ORDER_RANDOM`.
+    /// Vanilla's own random-order constant.
     Random,
 }
 
@@ -167,19 +168,19 @@ pub enum SelectorPredicate {
     /// against `lodestone_data::entity_types` at parse time.
     EntityType { id: String, inverted: bool },
     /// `gamemode=` / `gamemode=!` — matches players only; a non-player
-    /// candidate always fails, inverted or not (`EntitySelectorOptions`'s
-    /// `instanceof ServerPlayer` guard returns `false`, it does not negate).
+    /// candidate always fails, inverted or not (vanilla's own player-type
+    /// guard returns `false`, it does not negate).
     GameMode { mode: GameMode, inverted: bool },
     /// The entity must be alive. Added implicitly by `@e` and `@n`, exactly as
-    /// `parseSelector`'s `yield true` branches do.
+    /// vanilla's own selector-parsing branches for those two selectors do.
     Alive,
     /// `scores={obj1=1..5,obj2=10}` — every named objective must have a score
-    /// recorded for this holder, within its range. `EntitySelectorOptions.
-    /// SCORES`'s own predicate returns `false`, not "skip", for either an
+    /// recorded for this holder, within its range. Vanilla's own
+    /// scores-option predicate returns `false`, not "skip", for either an
     /// unknown objective or a holder with no score on a known one — both are
     /// modelled the same way here: the lookup returning `None`.
     Scores(Vec<(String, crate::scoreboard::IntRange)>),
-    /// `team=` / `team=!` — `EntitySelectorOptions.registerTeam`: `name` is
+    /// `team=` / `team=!` — vanilla's own team-option registration: `name` is
     /// the empty string for the bare `team=` form (matches an entity with no
     /// team), or a team name. Vanilla's own comparison is against the
     /// entity's team name **or `""` when it has none** — there is no
@@ -223,14 +224,14 @@ pub struct EntitySelector {
     pub distance: Option<Bounds<f64>>,
     pub position: SelectorPosition,
     /// `dx`/`dy`/`dz` — a box volume rather than a radius. Absent components
-    /// are `0.0` once any one is present, matching `createAabb`'s own
-    /// `deltaX == null ? 0.0 : deltaX`.
+    /// are `0.0` once any one is present, matching vanilla's own
+    /// box-construction routine's null-coalescing rule.
     pub volume: Option<[f64; 3]>,
     /// Whether an `@`-selector was used at all, as opposed to a bare name or
-    /// uuid. Vanilla's `EntitySelectorParser` refuses to even recognise `@`
-    /// syntax when the command source lacks `Permissions.COMMANDS_ENTITY_SELECTORS`
-    /// (`EntityArgument.parse` constructs the parser with
-    /// `source.permissions().hasPermission(...)` as an `allowSelectors` flag).
+    /// uuid. Vanilla's own selector parser refuses to even recognise `@`
+    /// syntax when the command source lacks the entity-selector permission
+    /// (vanilla's own entity-argument parser constructs the parser with
+    /// the source's own permission check as an `allowSelectors` flag).
     /// Computed and set here, but genuinely unenforced: `ArgumentType::parse`
     /// (`lodestone_command`'s trait this crate's [`EntityArg`] implements) has
     /// no execution-context/permission parameter at all, so nothing in this
@@ -272,12 +273,13 @@ impl EntitySelector {
 }
 
 /// `minecraft:player` — the type `@a`/`@p`/`@r` narrow to
-/// (`parseSelector`'s `limitToType(EntityTypes.PLAYER)`).
+/// (vanilla's own selector parser limits the type to the player entity type).
 pub const PLAYER_TYPE: &str = "minecraft:player";
 
-/// `EntityArgument` — `entity()`, `entities()`, `player()`, `players()`.
+/// Vanilla's own entity argument — `entity()`, `entities()`, `player()`, `players()`.
 ///
-/// The two booleans are exactly the two bits `EntityArgument.Info` puts on the
+/// The two booleans are exactly the two bits vanilla's own entity-argument
+/// info puts on the
 /// wire, and they are also the two constraints this parser enforces, which is
 /// the point of [`McArg`]: `players()` sends `players_only` **and** rejects
 /// `@e`, from one object.
@@ -290,25 +292,25 @@ pub struct EntityArg {
 }
 
 impl EntityArg {
-    /// `EntityArgument.entity()` — one entity.
+    /// Vanilla's own `entity()` — one entity.
     #[must_use]
     pub const fn entity() -> Self {
         Self { single: true, players_only: false }
     }
 
-    /// `EntityArgument.entities()` — any number of entities.
+    /// Vanilla's own `entities()` — any number of entities.
     #[must_use]
     pub const fn entities() -> Self {
         Self { single: false, players_only: false }
     }
 
-    /// `EntityArgument.player()` — one player.
+    /// Vanilla's own `player()` — one player.
     #[must_use]
     pub const fn player() -> Self {
         Self { single: true, players_only: true }
     }
 
-    /// `EntityArgument.players()` — any number of players. What `/gamemode`'s
+    /// Vanilla's own `players()` — any number of players. What `/gamemode`'s
     /// `<target>` and `/give`'s `<targets>` both use.
     #[must_use]
     pub const fn players() -> Self {
@@ -329,8 +331,9 @@ impl ArgumentType for EntityArg {
     }
 
     fn suggest(&self, _partial: &str) -> Vec<String> {
-        // `fillSelectorSuggestions`' own order (`EntitySelectorParser.java`),
-        // narrowed by `players_only` the way `EntityArgument.listSuggestions`
+        // Vanilla's own selector-suggestion order,
+        // narrowed by `players_only` the way vanilla's own entity-argument
+        // suggestion list
         // narrows it. `CommandTree::suggest` applies the prefix filter, so these
         // are offered unfiltered exactly as vanilla's builder does.
         //
@@ -383,8 +386,8 @@ pub(crate) fn parse_selector(reader: &mut StringReader, arg: EntityArg) -> Resul
     }
 }
 
-/// `EntitySelectorParser.parseSelector`'s switch, including which kinds add the
-/// implicit `Entity::isAlive` predicate (`@e` and `@n` only — the player kinds
+/// Vanilla's own selector-parsing switch, including which kinds add the
+/// implicit is-alive predicate (`@e` and `@n` only — the player kinds
 /// deliberately do not, because a dead player is still in the roster).
 fn parse_at_selector(reader: &mut StringReader) -> Result<EntitySelector, ParseError> {
     let position = reader.cursor();
@@ -441,7 +444,7 @@ fn parse_at_selector(reader: &mut StringReader) -> Result<EntitySelector, ParseE
     Ok(selector)
 }
 
-/// `EntitySelectorParser.parseNameOrUUID`.
+/// Vanilla's own name-or-uuid parser.
 ///
 /// A uuid-shaped token is a uuid and includes non-player entities; anything else
 /// is a player name, which must be 1..=16 characters. `max_results` is 1 either
@@ -467,14 +470,15 @@ fn parse_name_or_uuid(reader: &mut StringReader) -> Result<EntitySelector, Parse
 /// The `single`/`players_only` constraints the argument type declares, applied
 /// after the whole selector is known.
 ///
-/// This is `EntityArgument.parse`'s own post-check
-/// (`EntityArgument.java:106-124`), and it has two details worth stating.
+/// This is vanilla's own entity-argument post-check, and it has two details
+/// worth stating.
 ///
 /// **It runs after the options.** `@e[limit=1]` *is* a legal single-entity
 /// selector, and a check placed in `parse_at_selector`'s switch would reject it.
 ///
-/// **`@s` is exempt from `players_only`.** The vanilla condition is
-/// `includesEntities() && playersOnly && !isSelfSelector()`. `@s` sets
+/// **`@s` is exempt from `players_only`.** Vanilla's own condition requires
+/// the selector to include entities, be players-only, and not be the
+/// self-selector. `@s` sets
 /// `includesEntities = true` (the caller might not be a player), so without the
 /// exemption `/gamemode creative @s` — a `players()` argument — is refused. That
 /// is exactly what the first run of `the_six_selector_kinds…` caught.
@@ -493,7 +497,7 @@ fn enforce(
     Ok(())
 }
 
-/// `EntitySelectorParser.parseOptions` — the `[a=b,c=d]` loop.
+/// Vanilla's own options parser — the `[a=b,c=d]` loop.
 fn parse_options(reader: &mut StringReader, selector: &mut EntitySelector) -> Result<(), ParseError> {
     skip_whitespace(reader);
     while reader.can_read() && reader.peek() != Some(']') {
@@ -651,7 +655,7 @@ fn parse_option(
     Ok(())
 }
 
-/// `EntitySelectorOptions.SCORES`'s map literal: `{obj1=1..5,obj2=10}`. Each
+/// Vanilla's own scores-option map literal: `{obj1=1..5,obj2=10}`. Each
 /// range reuses [`crate::scoreboard::IntRangeArg`] rather than a second
 /// hand-written reader, so the two syntaxes (`/execute if score … matches`
 /// and this) cannot drift apart.
@@ -703,7 +707,7 @@ fn read_scores_map(
     Ok(entries)
 }
 
-/// `EntitySelectorParser.shouldInvertValue`.
+/// Vanilla's own invert-value check.
 fn read_inversion(reader: &mut StringReader) -> bool {
     skip_whitespace(reader);
     if reader.peek() == Some('!') {
@@ -715,7 +719,7 @@ fn read_inversion(reader: &mut StringReader) -> bool {
     }
 }
 
-/// `Identifier.read`: `[a-z0-9_.-]*:[a-z0-9_./-]*`, defaulting the namespace to
+/// Vanilla's own resource-location reader: `[a-z0-9_.-]*:[a-z0-9_./-]*`, defaulting the namespace to
 /// `minecraft` when there is no colon.
 fn read_resource_key(reader: &mut StringReader, position: usize) -> Result<String, ParseError> {
     let start = reader.cursor();
@@ -1058,8 +1062,8 @@ mod tests {
         assert!(EntityArg::entities().suggest("").contains(&"@e".to_string()));
     }
 
-    /// `distance=5..1` is swapped and refused (`MinMaxBounds.Doubles.fromReader`'s
-    /// `areSwapped`), and the `Bounds::matches` predicate the resolver uses is
+    /// `distance=5..1` is swapped and refused (vanilla's own bounds
+    /// reader's swapped-order check), and the `Bounds::matches` predicate the resolver uses is
     /// checked against hand-computed values rather than against itself.
     #[test]
     fn bounds_reject_a_swapped_range_and_match_inclusively() {

@@ -1,6 +1,6 @@
-//! `minecraft:function` — `FunctionArgument`'s own grammar: a resource
+//! `minecraft:function` — vanilla's own function-argument grammar: a resource
 //! location, optionally prefixed with `#` to name a function *tag* instead of
-//! a single function (issue #48's remainder — `/function`).
+//! a single function (`/function`).
 //!
 //! # No registry to validate against here either
 //!
@@ -10,7 +10,7 @@
 //! *parse* time. An unknown single function is a *runtime* refusal
 //! (`crate::commands::function`'s own module doc, in `lodestone-server`,
 //! names the exact asymmetry); an unknown tag is not an error at all,
-//! matching vanilla's own `getOrDefault(tag, List.of())`.
+//! matching vanilla's own empty-default lookup for an unknown tag.
 
 use lodestone_command::{ArgumentType, ParseError, ParseErrorKind, ParsedValue, StringReader};
 use lodestone_model::command_tree::ArgumentParser;
@@ -64,7 +64,7 @@ impl McArg for FunctionArg {
     }
 }
 
-/// `Identifier.read`'s character class, plus the leading `#` this argument
+/// Vanilla's own resource-location reader's character class, plus the leading `#` this argument
 /// alone accepts (handled by the caller before this runs) — the same set
 /// [`crate::identifier`]/[`crate::nbt_path`] each carry their own copy of.
 fn read_identifier(reader: &mut StringReader) -> String {

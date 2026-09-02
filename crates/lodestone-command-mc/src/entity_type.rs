@@ -1,13 +1,12 @@
 //! `minecraft:resource` narrowed to the `minecraft:entity_type` registry —
-//! `ResourceArgument.resource(ctx, Registries.ENTITY_TYPE)`, `/summon`'s
+//! vanilla's own resource argument narrowed to the entity-type registry, `/summon`'s
 //! `<entity>`.
 //!
 //! # Validated at parse time, against the real 26.2 census
 //!
 //! Same posture as [`crate::BlockArg`]/[`crate::ItemArg`]:
 //! `lodestone_data::entity_types::entity_type_id` is the generated table from
-//! Mojang's own `registries.json` for protocol 776 (issue #343's canonical
-//! version), so `/summon minecraft:not_a_mob` is a parse error rather than a
+//! Mojang's own `registries.json` for protocol 776, so `/summon minecraft:not_a_mob` is a parse error rather than a
 //! runtime refusal three nodes later.
 
 use lodestone_command::{ArgumentType, ParseError, ParseErrorKind, ParsedValue, StringReader};
@@ -23,7 +22,7 @@ pub struct EntityTypeInput {
     pub entity_type: ResourceKey,
 }
 
-/// `ResourceArgument.resource(.., Registries.ENTITY_TYPE)` — `minecraft:resource`.
+/// Vanilla's own resource argument narrowed to the entity-type registry — `minecraft:resource`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EntityTypeArg;
 
@@ -62,7 +61,7 @@ impl McArg for EntityTypeArg {
     }
 }
 
-/// `Identifier.read`'s character class, for an entity-type id — the same set
+/// Vanilla's own resource-location reader's character class, for an entity-type id — the same set
 /// [`crate::block::BlockArg`]'s own reader accepts.
 fn read_entity_type_id(reader: &mut StringReader) -> String {
     let start = reader.cursor();

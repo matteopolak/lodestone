@@ -1,6 +1,5 @@
-//! `minecraft:float_range` — `RangeArgument.floatRange()`, `/execute
-//! if`/`unless stopwatch <id> <range>`'s own argument (issue #48's
-//! remainder). The `f64` twin of [`crate::IntRangeArg`]; see that module's
+//! `minecraft:float_range` — vanilla's own float-range argument, `/execute
+//! if`/`unless stopwatch <id> <range>`'s own argument. The `f64` twin of [`crate::IntRangeArg`]; see that module's
 //! doc for the four-shape grammar (`5`, `1..3`, `1..`, `..3`) this mirrors
 //! exactly, substituting a float parse for the integer one.
 
@@ -9,7 +8,7 @@ use lodestone_model::command_tree::ArgumentParser;
 
 use crate::McArg;
 
-/// `MinMaxBounds.Doubles` — an inclusive `f64` range with either end optional.
+/// Vanilla's own double-bounds shape — an inclusive `f64` range with either end optional.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct FloatRange {
     pub min: Option<f64>,

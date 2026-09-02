@@ -1,10 +1,10 @@
-//! `minecraft:swizzle` — `SwizzleArgument.swizzle()`, `/execute align <axes>`.
+//! `minecraft:swizzle` — vanilla's own swizzle argument, `/execute align <axes>`.
 //!
 //! # An unquoted run of `x`/`y`/`z`, each at most once, order irrelevant
 //!
-//! `SwizzleArgument.parse` reads characters up to the next space, mapping each
+//! Vanilla's own swizzle-argument parser reads characters up to the next space, mapping each
 //! to an axis and rejecting a repeat; the *set* of axes is all that matters
-//! downstream (`Vec3.align`), so this stores three flags rather than the
+//! downstream (vanilla's own axis-alignment routine), so this stores three flags rather than the
 //! original character order. An **empty** swizzle (`align ` immediately
 //! followed by whatever comes next) is legal — vanilla's loop simply never
 //! executes and returns the empty set — so this does not require at least one
@@ -15,7 +15,7 @@ use lodestone_model::command_tree::ArgumentParser;
 
 use crate::McArg;
 
-/// Which axes `/execute align` floors — `EnumSet<Direction.Axis>`.
+/// Which axes `/execute align` floors — vanilla's own axis enum set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Axes {
     pub x: bool,
@@ -23,7 +23,7 @@ pub struct Axes {
     pub z: bool,
 }
 
-/// `SwizzleArgument.swizzle()` — `minecraft:swizzle`.
+/// Vanilla's own swizzle argument — `minecraft:swizzle`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SwizzleArg;
 

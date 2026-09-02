@@ -1,4 +1,4 @@
-//! `minecraft:entity_anchor` — `EntityAnchorArgument.anchor()`,
+//! `minecraft:entity_anchor` — vanilla's own entity-anchor argument,
 //! `/execute anchored <anchor>` and `/execute facing entity <targets>
 //! <anchor>`.
 //!
@@ -6,8 +6,8 @@
 //!
 //! Exactly the split [`crate::position`]'s module doc states for coordinates:
 //! this crate produces the parsed value (`feet`/`eyes`), never a position. The
-//! eye-height addition (`EntityAnchorArgument.Anchor.EYES`'s
-//! `p.y + e.getEyeHeight()`) needs a live entity and belongs in
+//! eye-height addition (vanilla's own eyes-anchor variant adds the
+//! entity's own eye height to its feet position) needs a live entity and belongs in
 //! `lodestone_server::commands`, which already carries the position/rotation a
 //! `CommandSource` needs.
 
@@ -16,7 +16,7 @@ use lodestone_model::command_tree::ArgumentParser;
 
 use crate::McArg;
 
-/// `EntityAnchorArgument.Anchor` — which point on an entity `^`-local
+/// Vanilla's own entity-anchor enum — which point on an entity `^`-local
 /// coordinates and `facing` resolve from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AnchorInput {
@@ -25,7 +25,7 @@ pub enum AnchorInput {
     Eyes,
 }
 
-/// `EntityAnchorArgument.anchor()` — `minecraft:entity_anchor`.
+/// Vanilla's own entity-anchor argument — `minecraft:entity_anchor`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EntityAnchorArg;
 

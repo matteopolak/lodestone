@@ -1,27 +1,30 @@
-//! `minecraft:rotation` — `RotationArgument.rotation()`, `/execute rotated
+//! `minecraft:rotation` — vanilla's own rotation argument, `/execute rotated
 //! <rotation>`'s two-component `<yaw> <pitch>`.
 //!
-//! # The field names in the jar do not match the read order, and that is not a
+//! # The variable names upstream do not match the read order, and that is not a
 //! transposition bug
 //!
-//! `RotationArgument.parse` reads its **first** token into a local named `y`
-//! and its **second** into a local named `x`, then builds
-//! `new WorldCoordinates(x, y, zero)`. That looks backwards until
-//! `WorldCoordinates.getRotation` is read too: it returns
-//! `Vec2(x.get(rot.x), y.get(rot.y))`, and vanilla's own `Vec2` rotation
-//! convention is `(x = pitch, y = yaw)` (`Entity.getRotationVector()`). So the
-//! local named `x` (the **second**-read token) ends up controlling the output
-//! *pitch*, and the local named `y` (the **first**-read token) ends up
-//! controlling the output *yaw* — the locals are named for the `WorldCoordinates`
+//! Vanilla's own rotation-argument parser reads its **first** input token
+//! into a variable and its **second** into another, then packs them into a
+//! coordinate pair using vanilla's own `(x, y)` field order — but the
+//! variable holding the *second*-read token is the one labelled for the
+//! pair's `x` field, and the *first*-read token's variable is labelled for
+//! the `y` field. That looks backwards until the rotation-resolution step is
+//! read too: it maps the pair's `x` field to the output's pitch and its `y`
+//! field to the output's yaw — vanilla's own 2D-rotation convention. So the
+//! *second*-read token ends up controlling the output
+//! *pitch*, and the *first*-read token ends up
+//! controlling the output *yaw* — the variables are named for the coordinate-pair
 //! field they occupy, not for the order they were read in. Net effect: input
 //! order really is `<yaw> <pitch>`, matching every in-game usage
-//! (`/execute rotated 0 0`, `TeleportCommand`'s own `<rotation>`), and this
+//! (`/execute rotated 0 0`, the teleport command's own `<rotation>`), and this
 //! module reads `yaw` first and `pitch` second directly — no transposition,
-//! just confusingly-named upstream locals that this port does not reproduce.
+//! just confusingly-labelled upstream variables that this port does not reproduce.
 //!
 //! # `~`-relative, never `^`-local
 //!
-//! Each component is `WorldCoordinate.parseDouble(reader, false)` — the same
+//! Each component uses vanilla's own world-coordinate double reader with
+//! centre-correction off — the same
 //! grammar [`crate::position::Vec3Arg`]'s absolute/`~` components use (no
 //! centre correction; a bare `~` is `~0`), but rotation has no `^` dialect at
 //! all, so a leading `^` is simply not `~` and parses as (or fails as) an
@@ -42,7 +45,7 @@ pub struct Rotation2 {
 
 impl Rotation2 {
     /// Resolve against the command source's own current rotation —
-    /// `WorldCoordinates.getRotation(source)`.
+    /// vanilla's own rotation-resolution step.
     #[must_use]
     pub fn resolve(&self, source_rotation: (f32, f32)) -> (f32, f32) {
         let yaw = self.yaw.resolve(f64::from(source_rotation.0));
@@ -55,7 +58,7 @@ impl Rotation2 {
     }
 }
 
-/// `RotationArgument.rotation()` — `minecraft:rotation`.
+/// Vanilla's own rotation argument — `minecraft:rotation`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RotationArg;
 
@@ -90,7 +93,8 @@ impl McArg for RotationArg {
     }
 }
 
-/// `WorldCoordinate.parseDouble(reader, false)` — never centre-corrected, no
+/// Vanilla's own world-coordinate double reader with centre-correction
+/// off — never centre-corrected, no
 /// `^` dialect (a leading `^` here is just not a `~` and falls through to a
 /// plain, and here invalid, number read).
 fn read_component(reader: &mut StringReader) -> Result<Coordinate, ParseError> {
