@@ -272,8 +272,8 @@ pub(crate) fn stack_skin_url(stack: &lodestone_game::item::ItemStack) -> Option<
 ///
 /// Until the baked-override census landed, this function read only the
 /// `minecraft:enchantments` component, which is why an unenchanted
-/// `minecraft:enchanted_book` never glinted: vanilla's own `isEnchanted` does
-/// not read `STORED_ENCHANTMENTS` either, so no amount of attaching
+/// `minecraft:enchanted_book` never glinted: vanilla's own is-enchanted check does
+/// not read the stored-enchantments component either, so no amount of attaching
 /// enchantment content to the stack could have fixed it. `has_foil_for_item`
 /// checks the item id against the baked census first and only falls back to
 /// the enchantments list when the census has no opinion — see its doc, and
@@ -466,7 +466,7 @@ pub(crate) fn draw_item_icon(
     draw_item_icon_counted(sink, assets, view, slot, x, y, size, font, COUNT_INK);
 }
 
-/// The ink vanilla's `itemDecorations` draws a stack count in: plain white.
+/// The ink vanilla's own item-decoration draw draws a stack count in: plain white.
 pub(crate) const COUNT_INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// Vanilla's own yellow chat-formatting colour — `0xFFFF55`, the colour vanilla's

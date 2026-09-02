@@ -311,8 +311,8 @@ impl HeldItemEquip {
         1.0 - (self.previous + (self.height - self.previous) * partial)
     }
 
-    /// The item to **draw** this frame — vanilla's `mainHandItem`, not the selected
-    /// one — plus its enchantment-foil flag (the glint gate, that fix). `None`
+    /// The item to **draw** this frame — vanilla's own rendered main-hand item, not
+    /// the selected one — plus its enchantment-foil flag (the glint gate, that fix). `None`
     /// draws the bare arm.
     pub(super) fn visible(&self) -> Option<&(ResourceLocation, bool)> {
         self.visible.as_ref()
@@ -627,8 +627,8 @@ impl RenderState {
     ///
     /// # The swing
     ///
-    /// The pose is driven by [`HandSwingSource`] — vanilla's `attackValue`, a
-    /// tick-advanced clock read with this frame's partial tick. It is polled here
+    /// The pose is driven by [`HandSwingSource`] — vanilla's own swing-progress
+    /// clock, a tick-advanced value read with this frame's partial tick. It is polled here
     /// rather than passed in for the same reason the light and sky-darken samplers
     /// are: `render` takes only `&[EntityDraw]`, and the local player is not in it.
     ///
@@ -1582,7 +1582,7 @@ impl RenderState {
             }
             // A filled map: the same four bind groups as the item branch with
             // **group 1 swapped** to the map's own texture. No glint second pass —
-            // vanilla's `renderMap` draws no foil, and a map is not enchantable.
+            // vanilla's own map-render path draws no foil, and a map is not enchantable.
             FirstPersonHand::Map(mesh, texture) => {
                 if let Some(model) = self.model.as_ref() {
                     pass.set_pipeline(&model.pipeline.pipeline);

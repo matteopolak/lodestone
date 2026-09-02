@@ -495,8 +495,8 @@ impl ViewBob {
     ///
     /// `moved_horizontal` is the distance the feet actually travelled this tick
     /// in the XZ plane (post-collision — a player walking into a wall does not
-    /// bob). `speed_horizontal` is the horizontal speed vanilla's `updateBob`
-    /// reads off `getDeltaMovement()`.
+    /// bob). `speed_horizontal` is the horizontal speed vanilla's own bob
+    /// update reads off the player's current velocity.
     ///
     /// # Order matters and is vanilla's, not the readable one
     ///
@@ -1860,7 +1860,7 @@ mod tests {
         assert_eq!(cam.aspect, 1.0);
     }
 
-    // --- vanilla's `fov` option reaches the projection. ---
+    // --- vanilla's own field-of-view option reaches the projection. ---
 
     /// `cot(35°)` — what `m[1][1]` is at [`FOV_Y_DEGREES`], and therefore the
     /// **frozen-default hypothesis** every assertion below has to land away from.

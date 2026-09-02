@@ -192,10 +192,10 @@ pub struct ContainerFrame<'a> {
     ///
     /// **Keyboard-wired now.** This used to say there was no
     /// per-keystroke state anywhere in the crate, so the value could only
-    /// ever be `slotChanged`'s own default (the slot-0 item's hover name),
+    /// ever be vanilla's own per-frame default (the slot-0 item's hover name),
     /// never anything the player had typed. `crate::container::AnvilRenameState`
     /// is that state now — held on `WindowApp`, synced from the input slot
-    /// once per frame (vanilla's `slotChanged`) and edited per keystroke
+    /// once per frame (vanilla's own slot-change hook) and edited per keystroke
     /// (`KeyOutcome::AnvilRename` in `app/lifecycle.rs`), which is also what
     /// produces `ClientAction::RenameItem`. This field is still just the
     /// **value** to draw — this struct owns no widget state itself, the same
@@ -310,8 +310,8 @@ impl<'a> ContainerFrame<'a> {
         self
     }
 
-    /// Draw the hovered slot's **tooltip**, with vanilla's `advancedItemTooltips`
-    /// (F3+H) either on or off — see [`Self::tooltips`].
+    /// Draw the hovered slot's **tooltip**, with vanilla's own advanced-tooltips
+    /// option (F3+H) either on or off — see [`Self::tooltips`].
     ///
     /// Needs [`with_cursor`](Self::with_cursor) as well: the hovered slot is
     /// resolved from the cursor, so a frame with tooltips enabled and no cursor
@@ -736,7 +736,7 @@ pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
 /// matched with `.floor()`, which agrees for every real title because they are
 /// all narrower than the panel and the numerator is therefore non-negative.
 /// `layout.width` is used rather than a literal `176.0` because it already *is*
-/// vanilla's `imageWidth` for every type in the table.
+/// vanilla's own background-image width for every type in the table.
 ///
 /// A `None` return means "no override" and the caller keeps [`label_layout`]'s
 /// anchor. Every other server-openable type genuinely matches `(8, 6)` in
