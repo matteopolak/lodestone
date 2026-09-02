@@ -37,7 +37,7 @@
 //! Vanilla's own entity push is **symmetric**: it computes one horizontal
 //! vector from the two positions and hands `-v` to `this` and `+v` to the
 //! other entity, each gated independently on `!isVehicle() && isPushable()`.
-//! A ridden entity (`isVehicle()`) absorbs the shove and passes it to
+//! A ridden entity (vanilla's own "is vehicle" check) absorbs the shove and passes it to
 //! nobody.
 //!
 //! Naive pairwise separation has a real ordering dependency, and vanilla's answer
@@ -149,9 +149,10 @@ pub enum CollisionRule {
 ///
 /// Ported literally, including Java's operator precedence in the final line
 /// (`a != X && b != X || sameTeam` groups as `(a != X && b != X) || sameTeam`) and
-/// the fact that a `PUSH_OWN_TEAM` on **either** side vetoes an allied pair while
-/// `PUSH_OTHER_TEAMS` on either side vetoes a non-allied one. The two rules are
-/// not mirror images of each other, which is easy to "simplify" wrongly.
+/// the fact that a push-own-team rule on **either** side vetoes an allied
+/// pair while a push-other-teams rule on either side vetoes a non-allied
+/// one. The two rules are not mirror images of each other, which is easy to
+/// "simplify" wrongly.
 #[must_use]
 pub fn team_allows_push(own: CollisionRule, theirs: CollisionRule, same_team: bool) -> bool {
     if own == CollisionRule::Never || theirs == CollisionRule::Never {
@@ -170,7 +171,7 @@ pub fn team_allows_push(own: CollisionRule, theirs: CollisionRule, same_team: bo
 /// source field by field rather than by intent. Nothing here is derived from
 /// anything else here: in particular [`Self::position`] is vanilla's own feet
 /// position and is *not* recoverable from [`Self::bounding_box`] — the push
-/// direction reads `getX()`/`getZ()` while the pair test reads the box, and
+/// direction reads vanilla's own X/Z accessors while the pair test reads the box, and
 /// conflating them would be a guess about an entity whose box is offset from
 /// its position.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -251,8 +252,8 @@ impl NearbyEntity {
 pub struct PushSelf {
     /// Vanilla's own "is alive" check.
     pub alive: bool,
-    /// Vanilla's own "is spectator" check. Vetoes `isPushable()` *and*, via
-    /// vanilla's own per-tick player update setting no-physics to match
+    /// Vanilla's own "is spectator" check. Vetoes its own "is pushable"
+    /// check *and*, via vanilla's own per-tick player update setting no-physics to match
     /// spectator state, the whole of vanilla's own entity push.
     pub spectator: bool,
     /// Vanilla's own "is vehicle" check — we are being ridden, so we absorb
@@ -298,7 +299,7 @@ impl PushSelf {
 /// Three consequences, each of which contradicts a reading you would arrive at from
 /// the shape of the source:
 ///
-/// 1. **The normaliser is `sqrt(absMax)`, not the vector length.** `absMax` is the
+/// 1. **The normaliser is `sqrt(abs_max)`, not the vector length.** `abs_max` is the
 ///    larger component magnitude (see [`mth::abs_max`]). For `(0.15, 0.08)` the two
 ///    differ by 6%, on both axes, on every tick.
 /// 2. **There is no distance falloff.** The magnitude is `0.05f × min(√m, 1)` times
@@ -352,8 +353,8 @@ pub fn pair_push_vector(self_pos: Vec3d, other_pos: Vec3d) -> Option<Vec3d> {
 /// pushable-by selector applied to us as the pushee, the box test vanilla's
 /// own entity query performs, and vanilla's own entity-push's two guards.
 ///
-/// `self_pushable` is our resolved `isPushable()` (including the `onClimbable`
-/// term, which needs a world view and so is resolved by the caller — see
+/// `self_pushable` is our resolved "is pushable" check (including the
+/// "on climbable" term, which needs a world view and so is resolved by the caller — see
 /// [`apply_entity_push`]).
 fn pair_admitted(
     self_box: Aabb,
@@ -374,7 +375,7 @@ fn pair_admitted(
         return false;
     }
     // Vanilla's own "no spectators" filter on the pushee (us) and, via
-    // `noPhysics`, on a spectating pusher.
+    // vanilla's own "no physics" flag, on a spectating pusher.
     if self_no_physics || other.no_physics {
         return false;
     }
@@ -442,8 +443,8 @@ fn accumulate_pushes(
 /// crowd-push pass — vanilla's whole crowd pass, from the pushee's point of
 /// view.
 ///
-/// `self_pushable` is the resolved `isPushable()`; `self_box` is our
-/// `getBoundingBox()`; `nearby` is every entity whose box could overlap ours.
+/// `self_pushable` is the resolved "is pushable" check; `self_box` is our
+/// own bounding box; `nearby` is every entity whose box could overlap ours.
 /// Candidates that fail any gate contribute nothing, so a caller may pass a
 /// generously-sized neighbourhood.
 ///
@@ -511,7 +512,7 @@ pub fn reciprocal_push_impulse(
 /// Vanilla's own "is pushable" check for the local entity:
 /// `isAlive() && !isSpectator() && !onClimbable()`.
 ///
-/// The `onClimbable` term is why this needs a [`CollisionView`]: it is
+/// The "on climbable" term is why this needs a [`CollisionView`]: it is
 /// vanilla's own "on climbable" check, the climbable tag at the entity's
 /// **feet block position**, the same query [`crate::entity::travel_in_air`]
 /// already makes. A player on a ladder is immovable — hold a ladder in a
@@ -609,7 +610,7 @@ pub fn no_entity_collision(test_area: Aabb, nearby: &[NearbyEntity]) -> bool {
 /// [`no_collision`] remains the block-only form for callers with no entity
 /// snapshot.
 ///
-/// **`noBorderCollision` is still unmodelled** — this engine has no world border,
+/// **The world-border collision check is still unmodelled** — this engine has no world border,
 /// so a box the border would block reads as free. That is a pre-existing gap, now
 /// the *only* remaining term of the three.
 #[must_use]
@@ -666,7 +667,7 @@ mod tests {
         assert_eq!(v.z.to_bits(), expect_z.to_bits());
         assert_eq!(v.y, 0.0, "the push is horizontal-only");
 
-        // The control that makes the above an assertion about `absMax` rather than
+        // The control that makes the above an assertion about `abs_max` rather than
         // about arithmetic in general: normalising by the vector length instead
         // would be a visibly different answer, not a last-bits one.
         let by_length = (dx * dx + dz * dz).sqrt();
@@ -900,7 +901,7 @@ mod tests {
 
     #[test]
     fn crowd_impulses_accumulate_with_no_cap() {
-        // There is no `MAX_ENTITY_CRAMMING`-style clamp on the movement side: eight
+        // There is no cramming-damage-style clamp on the movement side: eight
         // pushers deliver eight impulses. Arranged symmetrically in z so the x sum
         // is a clean multiple and the z terms cancel in pairs.
         let us = Vec3d::new(0.5, 1.0, 0.5);
@@ -962,7 +963,7 @@ mod tests {
             Vec3d::ZERO
         );
 
-        // A boat: `canBeCollidedWith` true *and* `isPushable` true — both halves.
+        // A boat: vanilla's own "can be collided with" check true *and* its own "is pushable" check true — both halves.
         let mut boat = mob;
         boat.collidable = true;
         assert!(!no_entity_collision(probe, &[boat]));
