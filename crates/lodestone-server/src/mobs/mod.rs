@@ -8970,12 +8970,13 @@ impl<'w> MobSim<'w> {
     /// the context has no attacker field to fill (see [`crate::loot`]).
     fn reap_dead(&mut self) {
         let now = self.tick_count;
-        // `drops_experience` is `LivingEntity.dropExperience`'s own guard, read here
+        // `drops_experience` is vanilla's own drop-experience call's own guard, read here
         // while the mob still exists: a player's hit within the last
         // `PLAYER_HURT_EXPERIENCE_TIME` ticks, and not a baby
-        // (`shouldDropExperience()` is `!isBaby()`).
+        // (its own "should drop experience" check is "not a baby").
         //
-        // `drops_ominous_bottle` is `RaiderPredicate.CAPTAIN_WITHOUT_RAID`
+        // `drops_ominous_bottle` is vanilla's own "captain without raid"
+        // raider predicate
         // (`hasRaid=false, isCaptain=true`) — see
         // [`drop_ominous_bottle`](Self::drop_ominous_bottle)'s own doc for
         // why it is resolved here rather than through
@@ -9011,19 +9012,22 @@ impl<'w> MobSim<'w> {
             if drops_ominous_bottle {
                 self.drop_ominous_bottle(position);
             }
-            // Vanilla's `die` calls `dropAllDeathLoot` then `dropExperience`, in that
+            // Vanilla's own generic die handler calls "drop all death loot"
+            // then "drop experience", in that
             // order, so the orbs land after the items.
             if drops_experience {
                 self.drop_death_experience(&entity_type, position);
             }
-            // Issue #459's vibration substrate: `LivingEntity.die` posts
-            // `GameEvent.ENTITY_DIE` (`GameEvent.Context.of(this)`) at the
+            // Issue #459's vibration substrate: vanilla's own generic die
+            // handler posts
+            // an entity-die game event at the
             // dying mob's own position — this crate's first real producer.
-            // `GameEvent.Context.sourceEntity()` for this call is the dying
-            // mob itself (`this`), so `source` names the same id — a warden
+            // Vanilla's own game-event context's source-entity for this call
+            // is the dying
+            // mob itself, so `source` names the same id — a warden
             // that hears this gets angry at the corpse's own identity,
-            // matching `Warden.VibrationUser.onReceiveVibration`'s
-            // no-projectile branch (`increaseAngerAt(sourceEntity)`)
+            // matching vanilla's own warden vibration-listener's
+            // no-projectile branch (its own "increase anger at" call)
             // faithfully rather than substituting something that reads more
             // sensibly. Every other vanilla producer (`block_destroy`,
             // `step`, `container_open`, ...) lives outside this file's owned
@@ -9037,7 +9041,8 @@ impl<'w> MobSim<'w> {
     /// future block-break/container hook in `server.rs`, say) can post one
     /// without this module changing; [`reap_dead`](Self::reap_dead) is the
     /// one producer this file owns today. `source` is
-    /// `GameEvent.Context.sourceEntity()`'s id, when the producer has one —
+    /// vanilla's own game-event context's source-entity id, when the
+    /// producer has one —
     /// see [`PostedVibration::source`]'s own doc.
     pub fn post_vibration(&mut self, position: Vec3, event: VibrationEvent, source: Option<i32>) {
         self.posted_vibrations.push(PostedVibration { position, event, source });
@@ -9059,7 +9064,7 @@ impl<'w> MobSim<'w> {
             } else {
                 None
             };
-            // `AllayAi.hearNoteblock` (issue #230), the vibration substrate's
+            // Vanilla's own allay-brain "heard a note block" handler (issue #230), the vibration substrate's
             // second consumer: an allay within `ALLAY_LISTENER_RADIUS` of a
             // `NoteBlockPlay` this tick either adopts it (no liked note block
             // yet) or refreshes its cooldown (the *same* position heard
@@ -9083,7 +9088,8 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// `InventoryCarrier::pickUpItem`/`Allay.wantsToPickUp` (issue #230): a
+    /// Vanilla's own "pick up item" inventory-carrier helper /
+    /// allay-specific "wants to pick up" check (issue #230): a
     /// held-item allay with inventory room absorbs the nearest matching
     /// dropped item within [`ALLAY_ITEM_PICKUP_RADIUS`], the ground half of
     /// this crate's own [`ALLAY_ITEM_PICKUP_RADIUS`] doc-disclosed
@@ -9092,7 +9098,8 @@ impl<'w> MobSim<'w> {
     /// deciding what to pick up reads `self.item_state` while mutating
     /// `self.mobs` would need it held mutably too.
     ///
-    /// **Disclosed narrowing**: `wantsToPickUp`'s own `GameRules.MOB_GRIEFING`
+    /// **Disclosed narrowing**: vanilla's own "wants to pick up" check's own
+    /// `GameRules.MOB_GRIEFING`
     /// gate is not checked — this sim has no live game-rule value at this
     /// seam (the same cut `tick.rs`'s own `mob_griefing` stub already
     /// discloses); every eligible allay always picks up.
@@ -9150,14 +9157,15 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// `GoAndGiveItemsToTarget` (issue #230): a carrying allay within
+    /// Vanilla's own allay item-delivery behavior (issue #230): a carrying allay within
     /// [`ALLAY_DELIVER_ARRIVAL_DISTANCE`] of its own
     /// [`SimMob::allay_liked_noteblock`]'s `.above()` cell throws one item
     /// from its inventory there per tick — a real dropped
     /// [`ItemEntity`](lodestone_entity::item_entity), not a state flag, so a
     /// player can actually walk over and collect it. The real jar throws on
-    /// a `GIVE_ITEM_TIMEOUT_DURATION` (20-tick) cadence with a small random
-    /// velocity per throw (`onItemThrown`'s own pitch-varied sound, no
+    /// a give-item-timeout-duration (20-tick) cadence with a small random
+    /// velocity per throw (its own "item thrown" hook's own pitch-varied
+    /// sound, no
     /// modelled velocity spread here); this drains one per tick instead — a
     /// disclosed, faster narrowing rather than porting the timeout memory.
     ///
@@ -9207,7 +9215,7 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// `LivingEntity.dropExperience`: pops this species' reward as orbs at `position`.
+    /// Vanilla's own generic drop-experience call: pops this species' reward as orbs at `position`.
     ///
     /// The caller has already applied vanilla's two eligibility tests (see
     /// [`reap_dead`](Self::reap_dead)); this applies the third,
