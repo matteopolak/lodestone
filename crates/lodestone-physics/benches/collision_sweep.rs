@@ -1,5 +1,5 @@
-//! Collision-sweep throughput against the real 26.2 shape census (issue #78
-//! epic, sub-issue #120): [`collide`] swept against three scenes of
+//! Collision-sweep throughput against the real 26.2 shape census:
+//! [`collide`] swept against three scenes of
 //! increasing geometric complexity — open air (no candidates), simple
 //! full-cube terrain (the common case), and a dense mix of real complex
 //! shapes (stairs, fences, slabs, walls — the worst *realistic* case, not a

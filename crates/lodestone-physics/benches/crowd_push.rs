@@ -1,4 +1,4 @@
-//! Crowd-push pair-test cost at scale (issue #78 epic, sub-issue #102):
+//! Crowd-push pair-test cost at scale:
 //! [`entity_push_impulse`] (the pure pair-accumulation core
 //! [`apply_entity_push`] calls), which `docs/entity-push.md` documents as an
 //! O(pairs) mechanism by construction — every entity checks every nearby
@@ -6,7 +6,7 @@
 //!
 //! Benchmarks the pair test at increasing crowd density (N = 10/50/200/1000
 //! nearby entities, all within push range) and reports both wall time *and*
-//! the ratio against N, so a future broad-phase (issue #19,
+//! the ratio against N, so a future broad-phase (a narrower
 //! `NEARBY_ENTITY_RADIUS`) that changes how many entities actually reach this
 //! call can be judged against this baseline — if this function's own cost
 //! per call ever stops being ~linear in `nearby.len()`, that is a regression

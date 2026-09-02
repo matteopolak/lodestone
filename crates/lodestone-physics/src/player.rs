@@ -214,7 +214,7 @@ pub struct PlayerState {
     ///
     /// **This is the only gate on the detector, and it is now really driven.**
     /// The shell's `Options::auto_jump` reaches it once per tick through
-    /// `lodestone_ecs::player::AutoJump` (issue #201): before that the field sat
+    /// `lodestone_ecs::player::AutoJump`: before that the field sat
     /// at its `true` default for the whole session, so the settings toggle was
     /// decorative — the option read OFF and [`update_auto_jump`] still armed
     /// jumps. See that resource's doc for the seam.
@@ -514,14 +514,14 @@ pub struct PlayerState {
     pub fall_distance: f64,
     /// Ticks accumulated standing in powder snow (the `TicksFrozen` field on
     /// the wire), `0..=`[`Self::TICKS_REQUIRED_TO_FREEZE`]. Maintained by
-    /// [`tick`] (`update_freezing`, issue #212): `+1` (capped) each tick the
+    /// [`tick`] (`update_freezing`): `+1` (capped) each tick the
     /// swept movement segment finds `CollisionView::is_powder_snow`, `-2`
     /// (floored at `0`) every other tick — vanilla's own per-tick freezing
     /// update. See [`Self::is_freezing`],
     /// [`Self::is_fully_frozen`], [`Self::percent_frozen`] and
     /// [`Self::should_apply_freeze_damage`] for what a driver reads it through.
     pub frozen_ticks: u32,
-    /// The riptide-trident spin-attack countdown (issue #208), started at
+    /// The riptide-trident spin-attack countdown, started at
     /// `20` by [`apply_riptide`] (vanilla's own release-using trident logic:
     /// arms a 20-tick spin attack at power `8.0F`) and decremented by
     /// [`tick`] every tick thereafter, unconditionally — no `!flying` gate,
@@ -1311,7 +1311,7 @@ fn can_fall_at_least(
 }
 
 /// Vanilla's own ground-jump impulse (including the sprint boost), and
-/// vanilla's own trident-release riptide impulse, issue #208.
+/// vanilla's own trident-release riptide impulse.
 ///
 /// # What this function is, and is not, responsible for
 ///
@@ -1428,7 +1428,7 @@ pub fn can_glide(state: &PlayerState, glider_equipped: bool) -> bool {
         && glider_equipped
 }
 
-/// Vanilla's own start-fall-flying attempt, issue #206 — the
+/// Vanilla's own start-fall-flying attempt — the
 /// **client-predicted** start of an elytra glide.
 ///
 /// ```text
@@ -2714,7 +2714,7 @@ fn tick_elytra_among_entities(
     accumulate_fall_distance(state, state.position.y - old_y, false);
 }
 
-/// Vanilla's own firework-rocket glide-boost impulse, issue #206 — the
+/// Vanilla's own firework-rocket glide-boost impulse — the
 /// elytra speed boost from using a firework rocket while gliding.
 ///
 /// # What this function is, and is not, responsible for

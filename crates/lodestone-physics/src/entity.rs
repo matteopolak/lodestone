@@ -421,8 +421,8 @@ pub struct AirTravelContext {
     /// a mob always passes `false`.
     ///
     /// This is the *sneak* input alone, not the full vanilla conjunct: the
-    /// scaffolding exception (`!getInBlockState().is(Blocks.SCAFFOLDING)`,
-    /// issue #210) is applied inside [`travel_in_air`] against the same
+    /// scaffolding exception (`!getInBlockState().is(Blocks.SCAFFOLDING)`)
+    /// is applied inside [`travel_in_air`] against the same
     /// in-block position `is_climbable` already queries, because it needs a
     /// [`CollisionView`] call this context struct has none of — see that
     /// function's climbing block.
