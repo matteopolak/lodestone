@@ -249,9 +249,9 @@ pub struct Mining {
     ///
     /// # Why the machine reports destruction instead of callers reading the packets
     ///
-    /// This is vanilla's shape. `MultiPlayerGameMode` has exactly one destroy
+    /// This is vanilla's shape. Its own client-side game-mode handler has exactly one destroy
     /// funnel — `destroyBlock(pos)` — and **four** call sites reach it
-    /// (`MultiPlayerGameMode.java`, 26.2): the two creative branches, the
+    /// in 26.2: the two creative branches, the
     /// instant-break branch inside `startDestroyBlock`, and the
     /// progress-reached-`1.0` branch inside `continueDestroyBlock`. Everything
     /// keyed on a block actually breaking hangs off that funnel, not off any
@@ -266,7 +266,7 @@ pub struct Mining {
     /// `START_DESTROY_BLOCK` and nothing else, because the block is already gone.
     /// A consumer that scanned the returned [`ClientAction`]s for `StopDestroy`
     /// therefore saw progressive breaks and silently missed every one-shot block —
-    /// which is exactly issue #387: grass, saplings and flowers threw no debris
+    /// which is exactly the shape of a real, reported defect: grass, saplings and flowers threw no debris
     /// while stone did.
     destroyed: Option<BlockPos>,
 }
@@ -364,8 +364,8 @@ impl Mining {
             // Vanilla's `instabuild` (creative) branch never reaches
             // `getDestroyProgress`/hardness at all — it is a separate check
             // ahead of the formula, not a value the formula happens to
-            // produce (`Player.getAbilities().instabuild` in
-            // `startDestroyBlock`, checked before any block-state read). A
+            // produce (vanilla's own instabuild ability flag, checked
+            // in its own start-destroy-block step before any block-state read). A
             // creative player breaks even an unbreakable block in one click,
             // so this bypasses the `!inputs.is_air` guard's sibling
             // (hardness) too, though the air guard itself stays — there is
@@ -374,13 +374,13 @@ impl Mining {
                 // Instant break: the server breaks the block on START, so no
                 // live dig is retained and no STOP is ever sent.
                 //
-                // Vanilla's equivalent branch (`startDestroyBlock`'s
-                // `getDestroyProgress(..) >= 1.0F` arm, or its `instabuild`
+                // Vanilla's equivalent branch (its own start-destroy-block
+                // step's `getDestroyProgress(..) >= 1.0F` arm, or its `instabuild`
                 // arm) calls `this.destroyBlock(pos)` here, which is the
                 // *same* funnel the progressive finish in `continue_`
                 // reaches. Latching it is what makes the effect keyed on
                 // destruction rather than on the `StopDestroy` packet a
-                // one-shot never sends (issue #387).
+                // one-shot never sends.
                 //
                 // **Also arms the same 5-tick cooldown `continue_`'s progressive
                 // finish sets.** Without it, holding the button in creative
@@ -594,7 +594,7 @@ impl BlockDestructionOverlays {
     ///
     /// [`stage_at`](Self::stage_at) answers "what's shown at a position I
     /// already know" — the terrain/block-entity draw passes' shape. The
-    /// per-frame crack-render loop has the opposite problem (issue #410): it
+    /// per-frame crack-render loop has the opposite problem: it
     /// does not know any position in advance and has to draw *every* active
     /// overlay, which `stage_at`'s single-position probe cannot serve. This is
     /// that enumeration, added with no change to the existing probe or its
@@ -922,7 +922,7 @@ mod tests {
         assert!(
             !acts.iter().any(|a| is_stop(a, p)),
             "an instant break sends no STOP — which is why a consumer keyed on \
-             STOP misses it entirely (issue #387)"
+             STOP misses it entirely"
         );
         assert_eq!(
             m.take_destroyed(),
@@ -1074,7 +1074,7 @@ mod tests {
         assert_eq!(
             m.take_destroyed(),
             Some(p),
-            "…and must still be reported destroyed — this is issue #387"
+            "…and must still be reported destroyed, even with no STOP packet to key off"
         );
         assert_eq!(
             m.take_destroyed(),

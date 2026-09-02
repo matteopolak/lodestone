@@ -3,13 +3,14 @@
 //!
 //! # What it is
 //!
-//! `lodestone_server::item_use::can_eat` implements `Player.canEat` verbatim
+//! `lodestone_server::item_use::can_eat` implements vanilla's own can-eat
+//! check verbatim
 //! and is the server's real gate — nutrition, saturation and the rest of
 //! `minecraft:food` stay server-authoritative in `lodestone_server::item_use`'s
 //! `FOODS` table, which this crate cannot see (`pub(crate)`, a different
 //! crate). What this module carries is the **one flag** a client-side
 //! prediction needs to agree with that gate before it *looks* like eating
-//! started: `FoodProperties.canAlwaysEat` (`Foods.java`'s `alwaysEdible`),
+//! started: vanilla's own always-eat flag (its own `alwaysEdible` field),
 //! per item.
 //!
 //! Without this, [`crate::consumable::consumable_for_item`] alone treats every
@@ -28,16 +29,16 @@
 //! only source, exactly as `lodestone_server::item_use::FOODS` and
 //! `lodestone_game::consumable::CONSUMABLES` already transcribe it twice each
 //! for their own disjoint fields. This is a third, disjoint slice of the same
-//! 40-row source (`Foods.java`/`Items.java`): only the `alwaysEdible` column,
+//! 40-row source: only the `alwaysEdible` column,
 //! because nutrition/saturation stay server-side and the consume duration is
 //! `minecraft:consumable`'s column, already carried in `consumable.rs`.
 //!
 //! # How to change it
 //!
 //! Adding a food is one row in [`ALWAYS_EAT`], kept sorted for the binary
-//! search — check `Foods.java`'s `alwaysEdible` argument for the new item
+//! search — check vanilla's own `alwaysEdible` argument for the new item
 //! (`false` unless it is a golden apple, honey bottle, chorus fruit or
-//! suspicious stew; `Foods.java` has had exactly five `true` rows since food
+//! suspicious stew; vanilla's own food-properties table has had exactly five `true` rows since food
 //! components were introduced, matching [`tests::exactly_five_items_are_always_edible`]).
 //! A drink (`milk_bucket`, `potion`, `ominous_bottle`) does not go here at
 //! all — [`always_eat_for_food`] returning `None` for it is what tells the
@@ -45,12 +46,12 @@
 //! hunger gate applies, and adding a row for one would incorrectly start
 //! gating it on hunger.
 
-/// `FoodData.needsFood()`'s ceiling, and `Player.canEat`'s — the same number
+/// Vanilla's own food-needed ceiling, and its own can-eat check's — the same number
 /// `lodestone_server::food::MAX_FOOD` names server-side.
 pub const MAX_FOOD: i32 = 20;
 
 /// Whether `item` carries `minecraft:food` at all, and if so its
-/// `FoodProperties.canAlwaysEat`.
+/// vanilla's own always-eat flag.
 ///
 /// `None` means `item` is not `minecraft:food` — a drink, a tool, or
 /// anything else — which the caller must read as "no hunger gate applies",
@@ -64,7 +65,7 @@ pub fn always_eat_for_food(item: &str) -> Option<bool> {
         .map(|index| ALWAYS_EAT[index].1)
 }
 
-/// `Player.canEat(canAlwaysEat)` — `abilities.invulnerable || canAlwaysEat ||
+/// Vanilla's own can-eat check — `abilities.invulnerable || canAlwaysEat ||
 /// foodData.needsFood()`, where `needsFood()` is `foodLevel < 20`. Mirrors
 /// `lodestone_server::item_use::can_eat` so a client prediction of "am I
 /// about to eat" agrees with what the server will actually accept.
@@ -73,8 +74,8 @@ pub fn can_eat(always_eat: bool, food_level: i32, invulnerable: bool) -> bool {
     invulnerable || always_eat || food_level < MAX_FOOD
 }
 
-/// Every `minecraft:food` item in 26.2 and its `alwaysEdible` flag
-/// (`Foods.java`/`Items.java`), sorted by id for [`always_eat_for_food`]'s
+/// Every `minecraft:food` item in 26.2 and its `alwaysEdible` flag,
+/// sorted by id for [`always_eat_for_food`]'s
 /// binary search. Cross-checked against `lodestone_server::item_use::FOODS`'s
 /// 40 rows and its own five `can_always_eat: true` entries — the two tables
 /// must have identical `true` sets or the client's prediction and the

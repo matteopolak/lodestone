@@ -1,4 +1,4 @@
-//! Issue #436: throwing an item out with `Q` must change the count the hotbar
+//! Throwing an item out with `Q` must change the count the hotbar
 //! and the inventory screen draw.
 //!
 //! # The bug, and why it is unrecoverable rather than merely late
@@ -7,12 +7,12 @@
 //! Vanilla's protocol contract for this action is *client predicts, server
 //! trusts*, and the server half is the load-bearing part:
 //!
-//! * `ServerGamePacketListenerImpl.java:1303-1314` — `case DROP_ITEM:` /
+//! * Vanilla's own server-side drop-item packet handler's `case DROP_ITEM:` /
 //!   `case DROP_ALL_ITEMS:` call `this.player.drop(false)` / `drop(true)` and
 //!   `return`. **No `SET_CONTAINER_SLOT`, no content packet, nothing comes back.**
-//! * `LocalPlayer.java:314-319` — the client does
+//! * Vanilla's own local-player drop step: the client does
 //!   `ItemStack prediction = this.getInventory().removeFromSelected(all);` and
-//!   *then* sends the bare `ServerboundPlayerActionPacket`. Vanilla names the
+//!   *then* sends the bare drop-item action packet. Vanilla names the
 //!   variable `prediction`.
 //!
 //! So with no local mutation the count stays wrong **forever**, which is exactly
@@ -21,20 +21,14 @@
 //!
 //! # Where the expected values come from
 //!
-//! `Inventory.removeFromSelected`
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/player/Inventory.java:527-530`):
+//! Vanilla's own selected-item removal step: if the selected stack is empty,
+//! return empty; otherwise remove either the whole stack or a single item
+//! from it,
 //!
-//! ```java
-//! public ItemStack removeFromSelected(final boolean all) {
-//!    ItemStack selectedItem = this.getSelectedItem();
-//!    return selectedItem.isEmpty() ? ItemStack.EMPTY : this.removeItem(this.selected, all ? selectedItem.getCount() : 1);
-//! }
-//! ```
-//!
-//! lowering through `Inventory.removeItem` (`:332-346`) →
-//! `ContainerHelper.removeItem` (`ContainerHelper.java:13-15`, which guards
-//! `!isEmpty() && count > 0`) → `ItemStack.split` (`ItemStack.java:327-332`,
-//! `min(amount, count)` then `shrink`).
+//! lowering through vanilla's own inventory-remove step →
+//! its own container-helper remove step (which guards
+//! `!isEmpty() && count > 0`) → its own stack-split step (`min(amount, count)`
+//! then `shrink`).
 //!
 //! Every count below is that arithmetic, predicted **exactly** — `4`, never
 //! "less than 5". Per `CLAUDE.md`'s *magnitude* species, a direction-only
@@ -262,7 +256,7 @@ fn unpredicted_drop_leaves_the_stale_count() {
         hud_count(&menus, NATIVE_HOTBAR_0),
         Some(5),
         "control: without the prediction the HUD still reads five, and the server will \
-         never correct it (`ServerGamePacketListenerImpl.java:1303-1314` sends nothing). \
+         never correct it (vanilla's own drop-item packet handler sends nothing). \
          If this ever reads `4`, the fixture is predicting behind the test's back and \
          every assertion above is vacuous"
     );
@@ -271,7 +265,7 @@ fn unpredicted_drop_leaves_the_stale_count() {
 /// The removal must reach the copy that is actually drawn while a **container
 /// screen is open**.
 ///
-/// Issue #373's hazard applies directly: there is one player inventory and its
+/// The single-owner-inventory hazard applies directly: there is one player inventory and its
 /// owner *moves* to the container's menu when a screen opens, leaving window 0's
 /// player section an empty husk. A `drop_selected` that wrote `self.player`
 /// would land in a menu nothing reads. Vanilla has no such fork — its `Slot`s
