@@ -252,8 +252,8 @@ fn quad_counts_match_vanilla_box_counts() {
     }
 }
 
-/// The creeper body box unwrap, computed independently from the vanilla
-/// `ModelPart.Cube` texel formula: box `(-4,0,-2)` size `(8,12,4)`, texOffs
+/// The creeper body box unwrap, computed independently from vanilla's
+/// per-box texel-rect formula: box `(-4,0,-2)` size `(8,12,4)`, tex-offset
 /// `(16,16)`, on a 64x32 sheet. The NORTH face texel rect is
 /// `(u1=16+4=20, v1=16+4=20)`..`(u2=20+8=28, v2=20+12=32)`. This is the same
 /// class of check as impl-entity's arrow test: a wrong axis or flipped V must
@@ -303,11 +303,11 @@ fn creeper_body_north_uv_matches_hand_derived_vanilla_unwrap() {
     );
 }
 
-/// Vanilla composes part rotation as `rotationZYX(zRot, yRot, xRot)` = `Rz*Ry*Rx`
-/// (`ModelPart.translateAndRotate`, client 26.2), applied *after* the
-/// pivot translation. The order only matters when two or more axes rotate at
+/// Vanilla composes part rotation as `Rz*Ry*Rx` (z outermost, x innermost),
+/// applied *after* the pivot translation (client 26.2). The order only matters
+/// when two or more axes rotate at
 /// once — which is exactly the shape of a spider leg (both `yRot` and `zRot`
-/// nonzero via `offsetAndRotation`). This test hand-derives two multi-axis
+/// nonzero on a single part). This test hand-derives two multi-axis
 /// results and asserts the bake matches, so a transposed multiply (`Rx*Ry*Rz`)
 /// cannot pass: it would land the probe at a *different, also-plausible* point.
 #[test]
@@ -650,11 +650,11 @@ fn sheep_wool_model_shares_sheep_body_part_names_and_pivots() {
 /// "pin these on the baked geometry, not the constants" rule, because a
 /// deformation dropped anywhere between the table and the bake would still
 /// pass a test that only re-reads the argument. Every value here is computed
-/// by hand from `SheepFurModel.java`'s literal box constants
-/// (`origin ± grow`, independent of this crate's `CubeDef::grown`), not
-/// re-derived from the code under test.
+/// by hand from vanilla's literal per-part box constants for this mob's fur
+/// overlay mesh (`origin ± grow`, independent of this crate's `CubeDef::grown`),
+/// not re-derived from the code under test.
 #[test]
-fn sheep_wool_inflations_match_vanilla_sheepfurmodel() {
+fn sheep_wool_inflations_match_hand_derived_vanilla_values() {
     use lodestone_assets::entity_models::sheep_wool_model;
 
     let parts = bake_entity_parts(&sheep_wool_model());
@@ -721,10 +721,10 @@ fn sheep_wool_inflations_match_vanilla_sheepfurmodel() {
     );
 }
 
-/// `sheep_wool_model` declares the same 64×32 sheet as `sheep_model`
-/// (`LayerDefinition.create(mesh, 64, 32)` in both `SheepModel` and
-/// `SheepFurModel`) — the real-PNG check against `entity/sheep/sheep_wool.png`
-/// lives in `real_jar.rs`, since that needs the client jar.
+/// `sheep_wool_model` declares the same 64×32 sheet as `sheep_model` (both
+/// mesh definitions declare that sheet size) — the real-PNG check against
+/// `entity/sheep/sheep_wool.png` lives in `real_jar.rs`, since that needs the
+/// client jar.
 #[test]
 fn sheep_wool_model_sheet_is_64x32() {
     use lodestone_assets::entity_models::sheep_wool_model;
@@ -735,14 +735,14 @@ fn sheep_wool_model_sheet_is_64x32() {
     assert_eq!(quads.len(), 6 * 6, "6 boxes (head, body, 4 legs) = 36 quads");
 }
 
-/// `sheep_wool_tint`'s 16-entry table, hand-computed from `DyeColor.java`'s
-/// literal `textureDiffuseColor` constants and `ColorLerper`'s fixed
-/// `brightness = 0.75` for `Type.SHEEP` (`floor(channel * 0.75)`), with
-/// `DyeColor.WHITE` special-cased to vanilla's own literal `-1644826`
-/// (`0xE6E6E6`). Computed independently of `sheep_wool_tint`'s source, not by
-/// calling the same formula the function under test uses.
+/// `sheep_wool_tint`'s 16-entry table, hand-computed from vanilla's literal
+/// per-dye diffuse-color constants and a fixed brightness factor of 0.75
+/// applied per channel (`floor(channel * 0.75)`) for the sheep fur
+/// color-lerp case, with white special-cased to vanilla's own literal
+/// `-1644826` (`0xE6E6E6`). Computed independently of `sheep_wool_tint`'s
+/// source, not by calling the same formula the function under test uses.
 #[test]
-fn sheep_wool_tint_matches_vanilla_color_lerper() {
+fn sheep_wool_tint_matches_hand_derived_vanilla_values() {
     use lodestone_assets::entity_models::sheep_wool_tint;
 
     let expected: [[u8; 3]; 16] = [
@@ -781,14 +781,15 @@ fn sheep_wool_tint_matches_vanilla_color_lerper() {
 // Projectile rigs
 // ============================================================================
 
-/// The arrow's box unwrap, computed independently from vanilla's
-/// `ModelPart.Cube` texel formula rather than from our own baker.
+/// The arrow's box unwrap, computed independently from vanilla's per-box
+/// texel-rect formula rather than from our own baker.
 ///
-/// The interesting part is the `cross` box's **non-unit `texScale`**:
-/// `addBox(-12, -2, 0, 16, 4, 0, CubeDeformation.NONE, 1.0F, 0.8F)` divides `v`
-/// by `32 * 0.8 = 25.6` instead of `32`, which is why the shaft strip in
-/// `arrow.png` is 5 pixels tall for a 4-texel-tall box. Nothing else in the
-/// corpus exercises `texScale`, so if this is wrong nothing else catches it.
+/// The interesting part is the `cross` box's **non-unit texture scale**:
+/// its declaration — origin `(-12, -2, 0)`, size `(16, 4, 0)`, no extra
+/// inflation, u-scale `1.0`, v-scale `0.8` — divides `v` by `32 * 0.8 = 25.6`
+/// instead of `32`, which is why the shaft strip in `arrow.png` is 5 pixels
+/// tall for a 4-texel-tall box. Nothing else in the corpus exercises a
+/// non-unit texture scale, so if this is wrong nothing else catches it.
 ///
 /// Hand-derived NORTH face of `cross` (`d = 0`, `w = 16`, `h = 4`, `texOffs
 /// (0, 0)`): `u1 = 0 + 0 = 0`, `u2 = 0 + 16 = 16`, `v1 = 0 + 0 = 0`,
@@ -843,7 +844,7 @@ fn arrow_cross_north_uv_matches_hand_derived_vanilla_unwrap() {
         );
         assert!(
             (vmin - 0.0).abs() < 1e-6 && (vmax - 0.15625).abs() < 1e-6,
-            "cross NORTH v span {vmin}..{vmax}, want 0.0..0.15625 — a `texScale` of \
+            "cross NORTH v span {vmin}..{vmax}, want 0.0..0.15625 — a v-scale of \
              1.0 instead of 0.8 gives 0.125 here, which looks plausible and crops \
              the shaft"
         );
@@ -852,13 +853,13 @@ fn arrow_cross_north_uv_matches_hand_derived_vanilla_unwrap() {
 
 /// The mesh-wide `0.9×` and the fletching's extra `0.8×` both reach the geometry.
 ///
-/// `LayerDefinition.create(mesh.transformed(pose -> pose.scaled(0.9F)), 32, 32)`
-/// reads as "scale every part", but `PartDefinition.transformed` applies the
-/// function to *its own* pose and copies children untouched,
-/// so it is the **root** pose that carries the
-/// 0.9. Modelling it as a per-part 0.9 on each of the three children instead would
-/// look identical for `cross_1`/`cross_2` and put the fletching in the wrong place,
-/// because `back`'s pivot at `x = -11` would then not be scaled by it.
+/// Vanilla's mesh declaration applies the `0.9` scale to the whole mesh's
+/// **root** pose, not per-part — a transform applied to a part's own pose
+/// composes into its children rather than re-applying to each of them
+/// independently. Modelling it as a per-part 0.9 on each of the three children
+/// instead would look identical for `cross_1`/`cross_2` and put the fletching
+/// in the wrong place, because `back`'s pivot at `x = -11` would then not be
+/// scaled by it.
 #[test]
 fn arrow_carries_both_vanilla_scale_factors() {
     use lodestone_assets::entity_models::arrow_model;
