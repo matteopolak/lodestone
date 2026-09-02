@@ -15,8 +15,8 @@
 //! that tracks whether **direct redstone signal touches this rail, or a
 //! chain of same-orientation powered rails up to 8 cells away (through
 //! boosters) eventually reaches one that does**
-//! (`PoweredRailBlock.findPoweredRailSignal`/`isSameRailWithPower`,
-//! `PoweredRailBlock.java:30-125`). Activator rail's own *activation* effect
+//! (vanilla's own `PoweredRailBlock.findPoweredRailSignal`/`isSameRailWithPower`).
+//! Activator rail's own *activation* effect
 //! — `AbstractMinecart.activateMinecart` (a plain minecart ejects its rider,
 //! a TNT minecart primes) — is now modelled, in
 //! `crate::mobs::minecart::apply_activation`; this module's own `POWERED`
@@ -32,7 +32,7 @@
 //! # What is deliberately not modelled: connectivity (`SHAPE`)
 //!
 //! `BaseRailBlock`'s own generic curve/straight connection algorithm
-//! (`updateDir`/`RailState.place`, `BaseRailBlock.java:70-77,111-118`) decides
+//! (`updateDir`/`RailState.place`) decides
 //! which of the (for `PoweredRailBlock`, six non-curved) `SHAPE` values a rail
 //! settles into from its neighbours — a placement/shape-pipeline concern
 //! shared with the plain, non-redstone `minecraft:rail`, and out of this
@@ -46,13 +46,13 @@
 //!
 //! * **Trigger**: a neighbour notification, reacting through the same
 //!   `PoweredRailBlock.updateState` override `BaseRailBlock.neighborChanged`
-//!   calls (`BaseRailBlock.java:80-92`) — wired into `react_to_notification`
+//!   calls — wired into `react_to_notification`
 //!   exactly like the hopper `ENABLED`/note-block `POWERED` arms, no
 //!   scheduled tick.
 //! * **Propagation is *not* a plain six-direction fan-out.** Vanilla calls
 //!   `updateNeighborsAt(pos.below(), this)` unconditionally on a `POWERED`
 //!   flip, and *additionally* `updateNeighborsAt(pos.above(), this)` only
-//!   when the rail's own `SHAPE` is a slope (`PoweredRailBlock.java:133-139`).
+//!   when the rail's own `SHAPE` is a slope (vanilla's own powered-rail block).
 //!   [`NeighborFanOut`] carries exactly that pair so a caller does not
 //!   over-notify a flat rail's cell above it.
 //! * **Scheduled tick**: none — this is a same-tick decision, like the note
@@ -79,7 +79,7 @@ pub const POWERED_RAIL: &str = "minecraft:powered_rail";
 pub const ACTIVATOR_RAIL: &str = "minecraft:activator_rail";
 
 /// `PoweredRailBlock.findPoweredRailSignal`'s own recursion cap
-/// (`searchDepth >= 8`, `PoweredRailBlock.java:31`).
+/// (`searchDepth >= 8`).
 pub const MAX_SEARCH_DEPTH: i32 = 8;
 
 /// `RailShape`, narrowed to the six values `PoweredRailBlock.SHAPE`

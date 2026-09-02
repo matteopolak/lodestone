@@ -9,8 +9,8 @@
 //!
 //! # Where this comes from in the jar
 //!
-//! `net.minecraft.world.level.SignalGetter` (`SignalGetter.java`) is
-//! vanilla's own query layer, and every function below is a direct,
+//! Vanilla's own `SignalGetter` interface is
+//! its own query layer, and every function below is a direct,
 //! citation-per-function port of it:
 //!
 //! - [`weak_signal`] ~ `BlockState.getSignal` (each block's own override —
@@ -521,8 +521,7 @@ pub fn diode_powered(state: &str) -> bool {
 pub fn repeater_locked(state: &str) -> bool {
     get_bool_property(state, "locked").unwrap_or(false)
 }
-/// `RepeaterBlock.DELAY`, `1..=4` (vanilla default `1`,
-/// `RepeaterBlock.java:35`).
+/// `RepeaterBlock.DELAY`, `1..=4` (vanilla default `1`).
 #[must_use]
 pub fn repeater_delay_ticks(state: &str) -> u32 {
     get_u32_property(state, "delay").unwrap_or(1).clamp(1, 4)
@@ -532,7 +531,7 @@ pub fn comparator_mode_subtract(state: &str) -> bool {
     get_str_property(state, "mode") == Some("subtract")
 }
 /// The comparator's last-computed analog output, `0..=15` — vanilla stores
-/// this in a `ComparatorBlockEntity` (`ComparatorBlock.java:67-69`); this
+/// this in a `ComparatorBlockEntity`; this
 /// crate has no block-entity storage plumbed into this module (`ChunkColumn`
 /// has no block-entity registry access from here — see
 /// `crate::redstone_diode`'s own module doc for the full citation), so it is
@@ -556,9 +555,9 @@ pub fn observer_powered(state: &str) -> bool {
 }
 
 /// A diode's own output value while powered — `DiodeBlock.getOutputSignal`
-/// defaults to `15` (`DiodeBlock.java:192-194`, unmodified by
+/// defaults to `15` (unmodified by
 /// `RepeaterBlock`); `ComparatorBlock` overrides it to read its stored
-/// analog output (`ComparatorBlock.java:67-69`) — see
+/// analog output — see
 /// [`comparator_output`]'s own doc comment for where that value lives here.
 #[must_use]
 fn diode_output_signal(state: &str) -> u8 {
@@ -652,7 +651,7 @@ pub fn is_signal_source(state: &str) -> bool {
 /// `ignore_wire`: when `true`, a wire's own contribution is forced to `0` —
 /// mirrors `RedStoneWireBlock.getBlockSignal` toggling its private
 /// `shouldSignal` flag off for the duration of its own
-/// `getBestNeighborSignal` call (`RedStoneWireBlock.java:285-290`), so a
+/// `getBestNeighborSignal` call, so a
 /// wire recomputing its target strength never counts an adjacent wire's
 /// power as if it were a power *source* (that contribution is handled
 /// separately, and with a `-1` decay, by
@@ -738,7 +737,7 @@ pub fn direct_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8
         // RedstoneTorchBlock.getDirectSignal (`:99-101`): only straight DOWN
         // from the querier's perspective — i.e. only the block directly
         // ABOVE a torch receives strong power from it. Wall torches inherit
-        // this unmodified (no override in `RedstoneWallTorchBlock.java`).
+        // this unmodified (no override in vanilla's own wall-torch block).
         if direction == Direction::Down {
             own_signal(state)
         } else {
@@ -801,7 +800,7 @@ pub fn direct_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8
     }
 }
 
-/// `SignalGetter.getDirectSignalTo` (`SignalGetter.java:17-46`): the
+/// Vanilla's own `SignalGetter.getDirectSignalTo`: the
 /// strongest direct/strong signal touching any of `pos`'s six faces.
 /// `lookup` reads a block state at an absolute world position; see
 /// `crate::random_tick`'s call sites for why it returns air rather than
@@ -902,7 +901,7 @@ where
 /// `DiodeBlock.getAlternateSignal` (`:125-134`) — the stronger of a diode's
 /// two side inputs (its `FACING`'s clockwise/counterclockwise neighbours).
 /// `side_input_diodes_only` is `DiodeBlock.sideInputDiodesOnly()`: `true` for
-/// repeaters (`RepeaterBlock.java:88-90`, only another diode's *output* can
+/// repeaters (only another diode's *output* can
 /// lock a repeater), `false` for comparators (any signal source counts as a
 /// side input).
 #[must_use]
@@ -1121,7 +1120,7 @@ mod tests {
 
     /// `alternate_signal` reads the clockwise/counterclockwise neighbours of
     /// a diode facing `East` — clockwise(East) = South, counterclockwise(East)
-    /// = North (`Direction.getClockWise`, `Direction.java:195-203`). Uses a
+    /// = North (vanilla's own `Direction.getClockWise`). Uses a
     /// WIRE as the side source rather than a torch: `control_input_signal`'s
     /// `!only_diodes` branch reads a wire's `POWER` directly regardless of
     /// direction, whereas a torch only ever contributes through

@@ -188,7 +188,7 @@ pub struct NeighborReaction {
     pub schedule_fire: bool,
 }
 
-/// `DispenserBlock.neighborChanged` (`DispenserBlock.java:127-139`).
+/// Vanilla's own dispenser-block neighbor-changed hook.
 /// `should_trigger` is vanilla's `hasNeighborSignal(pos) ||
 /// hasNeighborSignal(pos.above())` — the caller computes both `best_neighbor_signal`
 /// reads (see this module's own doc comment on why the `above` half matters).
@@ -215,7 +215,7 @@ pub fn on_neighbor_changed(state: &str, should_trigger: bool) -> Option<Neighbor
     }
 }
 
-/// `DispenserBlockEntity.getRandomSlot` (`DispenserBlockEntity.java:34-46`) —
+/// Vanilla's own dispenser-block-entity random-slot getter —
 /// reservoir sampling over whichever slots `occupied` marks non-empty,
 /// `None` for an entirely empty container (vanilla's own `-1`, which callers
 /// read as "play the empty click sound instead").
@@ -241,7 +241,7 @@ pub fn random_slot(occupied: &[bool], mut next_int: impl FnMut(u32) -> u32) -> O
     replace_slot
 }
 
-/// `DispenserBlock.getDispensePosition` (`DispenserBlock.java:161-169`), the
+/// Vanilla's own dispenser-block dispense-position getter, the
 /// zero-offset overload — the world-space point [`DISPENSE_SCALE`] of a block
 /// out from `center` (the dispenser's own centre, `pos + 0.5` on every axis)
 /// in the direction it faces.
@@ -266,7 +266,7 @@ fn step(d: Direction) -> (f64, f64, f64) {
     }
 }
 
-/// `RandomSource.triangle(mean, spread)` (`RandomSource.java:59-61`):
+/// Vanilla's own `RandomSource.triangle(mean, spread)`:
 /// `mean + spread * (next() - next())`. Two draws, always in this order —
 /// [`plain_toss`]'s own doc comment names why draw order matters here as much
 /// as everywhere else in this crate's RNG-threaded code.
@@ -308,8 +308,8 @@ pub fn projectile_dispense_position(center: (f64, f64, f64), face: Direction) ->
     (px, py + 0.1, pz)
 }
 
-/// `Projectile.getMovementToShoot(xd, yd, zd, pow, uncertainty)`
-/// (`Projectile.java:130-139`), with `(xd, yd, zd)` fixed to the dispenser's
+/// Vanilla's own `Projectile.getMovementToShoot(xd, yd, zd, pow, uncertainty)`,
+/// with `(xd, yd, zd)` fixed to the dispenser's
 /// own facing unit vector — `ProjectileDispenseBehavior.execute` passes
 /// `direction.getStepX/Y/Z()`, never a drawn or aimed direction, so
 /// `.normalize()` on that input is always a no-op and is skipped here.
@@ -324,7 +324,7 @@ pub fn projectile_velocity(
     next_f64: &mut impl FnMut() -> f64,
 ) -> (f64, f64, f64) {
     let (dx, dy, dz) = step(face);
-    // `0.0172275` is `Projectile.java`'s own literal — the per-unit-uncertainty
+    // `0.0172275` is vanilla's own projectile-entity literal — the per-unit-uncertainty
     // spread each axis draws its noise from.
     let spread = 0.017_227_5 * uncertainty;
     (
@@ -340,8 +340,8 @@ pub fn projectile_velocity(
 const DEFAULT_ACCURACY: f64 = 6.0;
 
 /// The world-space feet position and velocity of a plain-tossed item —
-/// `DefaultDispenseItemBehavior.execute` → `spawnItem`
-/// (`DefaultDispenseItemBehavior.java:22-49`). Every dropper dispense, and
+/// `DefaultDispenseItemBehavior.execute` → `spawnItem`,
+/// vanilla's own default dispense behaviour. Every dropper dispense, and
 /// every dispenser item this module has no special behaviour for (the
 /// `*everything else*` row of this module's own table), uses this.
 ///
@@ -424,7 +424,7 @@ pub fn spawn_egg_position(origin: BlockPos, face: Direction, block_state: &dyn F
 
 /// `Direction.toYRot()` — `(data2d & 3) * 90`. Vanilla's `data2d` is `-1` for
 /// the two vertical directions and `0..=3` for south/west/north/east in that
-/// order (`Direction.java`'s own per-variant field table); [`boat_dispense`]
+/// order (vanilla's own per-variant direction field table); [`boat_dispense`]
 /// calls this unconditionally, even for a dispenser facing up or down, so the
 /// vertical case is included rather than treated as unreachable.
 fn to_y_rot(face: Direction) -> f32 {
