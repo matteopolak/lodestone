@@ -2582,16 +2582,17 @@ fn tick_lava_among_entities(
     jump_out_of_fluid(state, old_y, view, profile);
 }
 
-/// Advances the player by one tick, dispatching to the water, lava, or air path
-/// exactly as `travel` → `shouldTravelInFluid`/`travelInFluid` does: water takes
+/// Advances the player by one tick, dispatching to the water, lava, or air
+/// path exactly as vanilla's own travel dispatch does: water takes
 /// precedence over lava, and both over air.
-/// `Entity.calculateViewVector(xRot, yRot)` — the look-direction unit vector.
+/// Vanilla's own look-direction unit vector.
 ///
-/// The trig comes from the **`Mth` LUT** (`float`), and each component is a
-/// `float` product widened to `double` by the `Vec3` constructor. The
-/// degrees→radians factor is `(float)(Math.PI / 180.0)` — the division happens
-/// in `double` *then* narrows to `float`, which is a different bit pattern from
-/// the input path's `(float)Math.PI / 180.0F`; we mirror the exact form.
+/// The trig comes from vanilla's own **quantized sine/cosine table**
+/// (`float`), and each component is a `float` product widened to `double` on
+/// construction. The degrees→radians factor is `(float)(Math.PI / 180.0)` —
+/// the division happens in `double` *then* narrows to `float`, which is a
+/// different bit pattern from the input path's `(float)Math.PI / 180.0F`; we
+/// mirror the exact form.
 fn calculate_view_vector(pitch: f32, yaw: f32) -> Vec3d {
     let deg_to_rad = (core::f64::consts::PI / 180.0) as f32;
     let real_x_rot = pitch * deg_to_rad;
@@ -2607,12 +2608,13 @@ fn calculate_view_vector(pitch: f32, yaw: f32) -> Vec3d {
     )
 }
 
-/// `LivingEntity.updateFallFlyingMovement(Vec3)` — the elytra glide update.
+/// Vanilla's own elytra glide update.
 ///
-/// Preserves vanilla's exact operation order and its two distinct trig sources:
-/// the look vector uses the `Mth` LUT (`float`), while `liftForce` and the
-/// nose-up lift use `java.lang.Math` (`double`) `cos`/`sin`. The final drag is
-/// `multiply(0.99F, 0.98F, 0.99F)` with each `float` widened to `double`.
+/// Preserves vanilla's exact operation order and its two distinct trig
+/// sources: the look vector uses vanilla's own quantized table (`float`),
+/// while `liftForce` and the nose-up lift use the real-valued (`double`)
+/// `cos`/`sin`. The final drag is `multiply(0.99F, 0.98F, 0.99F)` with each
+/// `float` widened to `double`.
 fn update_fall_flying_movement(
     state: &PlayerState,
     profile: &PhysicsProfile,
@@ -2627,7 +2629,8 @@ fn update_fall_flying_movement(
         movement.y <= 0.0,
         state.effects.slow_falling,
     );
-    // liftForce = Mth.square(Math.cos(leanAngle)) — real double cos, not the LUT.
+    // liftForce = square(cos(leanAngle)) — real double cos, not the
+    // quantized table.
     let cos_lean = f64::from(lean_angle).cos();
     let lift_force = mth::square_f64(cos_lean);
 
@@ -2645,7 +2648,8 @@ fn update_fall_flying_movement(
     }
 
     if lean_angle < 0.0 && look_hor_len > 0.0 {
-        // -Mth.sin(leanAngle): the LUT sine again, negated and widened.
+        // -sin(leanAngle): vanilla's own quantized table again, negated and
+        // widened.
         let convert = move_hor_len * f64::from(-mth::sin(f64::from(lean_angle))) * 0.04;
         mx += -look.x * convert / look_hor_len;
         my += convert * 3.2;
@@ -2664,7 +2668,7 @@ fn update_fall_flying_movement(
     )
 }
 
-/// `LivingEntity.travelFallFlying` (client path) — one tick of elytra flight.
+/// Vanilla's own travel-fall-flying (client path) — one tick of elytra flight.
 ///
 /// Direction comes purely from the look angle; WASD `input` is ignored while
 /// gliding (except that landing on a climbable hands control back to
