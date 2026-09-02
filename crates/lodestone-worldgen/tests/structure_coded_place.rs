@@ -1,4 +1,4 @@
-//! **Coded** structure pieces reach blocks (issue #514's S5).
+//! **Coded** structure pieces reach blocks.
 //!
 //! `swamp_hut` and `desert_pyramid` have no `.nbt` template: their blocks are Java
 //! statements, ported in `structure/coded.rs` and resolved eagerly at start time.
@@ -284,14 +284,14 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         // transition this pair of loops exists to make visible.
         "minecraft:mineshaft",
         "minecraft:mineshaft_mesa",
-        // `StrongholdPieces` places real blocks now (issue #514's remaining piece
+        // `StrongholdPieces` places real blocks now (this change's remaining piece
         // generator); the `stronghold:` and `coded:worldgen_entities` rows below
         // are its named deviations, the same "absent -> present with deviations"
         // transition as the mineshaft pair above.
         "minecraft:stronghold",
-        // `OceanMonumentPieces` places real blocks now, the last item on issue
-        // #514; `coded:worldgen_entities` and `monument:postprocess_random_unseeded`
-        // below are its named deviations.
+        // `OceanMonumentPieces` places real blocks now, the last item in this
+        // port's structure-placement work; `coded:worldgen_entities` and
+        // `monument:postprocess_random_unseeded` below are its named deviations.
         "minecraft:monument",
     ] {
         assert!(
@@ -361,7 +361,7 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
     );
     // The two rows S6 corrected. `template:data_markers` claimed shipwreck / igloo /
     // ocean-ruin loot chests were not placed at all; `lodestone_server`'s
-    // `structure_loot` has been rolling them since #337, so the row named a closed
+    // `structure_loot` has been rolling them for a while now, so the row named a closed
     // gap and hid the open one. It must be **gone**, and its replacement present:
     // the 132 templates whose loot lives in a block's own `nbt` compound.
     assert!(

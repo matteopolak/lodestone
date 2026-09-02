@@ -72,8 +72,8 @@ fn make_generator() -> OverworldGenerator {
 }
 
 /// Every block's solidity in the composed output must match the **real
-/// aquifer's own** solid/non-solid decision (issue #295) — not raw
-/// `density > 0` any more. Before #295 composed the real aquifer, shape
+/// aquifer's own** solid/non-solid decision — not raw
+/// `density > 0` any more. Before this crate composed the real aquifer, shape
 /// solidity *was* exactly `density > 0` (the sea-level fluid approximation
 /// never overrode it), which is what this test originally asserted against
 /// the isolated `density_chunk_jvm.txt` fixture. `aquifer_parity` already
@@ -128,7 +128,7 @@ fn composed_shape_matches_fresh_aquifer_solid_decision() {
     );
 }
 
-/// Companion control: the pre-#295 premise ("solid == density > 0") must now
+/// Companion control: the earlier premise ("solid == density > 0") must now
 /// actually be *false* somewhere in this chunk — otherwise the rewrite above
 /// would be proving nothing new over the original assertion. Uses the same
 /// `density_chunk_jvm.txt` fixture the original test compared against.

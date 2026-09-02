@@ -28,7 +28,7 @@ pub enum GenStage {
 
 impl OverworldGenerator {
     /// Adopts the final dense world grid straight into a [`GeneratedColumn`] —
-    /// no re-intern pass (issue #295's Job 2): a centre-chunk-sized
+    /// no re-intern pass (this change's Job 2): a centre-chunk-sized
     /// [`crate::dense_grid::DenseBlockGrid`]'s own `(palette, blocks)` layout is
     /// already identical to [`GeneratedColumn`]'s (`((ly * 16 + lz) * 16 + lx)`,
     /// verified by the `debug_assert!` below rather than merely asserted in a
@@ -57,8 +57,8 @@ impl OverworldGenerator {
         debug_assert_eq!(world.bounds().4, self.height, "centre chunk height must match the generator's");
         debug_assert_eq!(world.bounds().5, 16, "centre chunk depth must be 16");
         let (palette, blocks) = world.into_palette_and_blocks();
-        // Issue #518 part 2: the `SPAWN` stage. Computed here, alongside
-        // #516's heightmap scan above, for the identical reason — this is the
+        // The SPAWN stage's part 2. Computed here, alongside
+        // the heightmap scan above, for the identical reason — this is the
         // one place already holding the *final* palette/block field and biome
         // quarts, so no earlier stage has to grow a spawn-shaped call site.
         // See `crate::spawn_stage`'s module doc for what these candidates are
@@ -90,7 +90,7 @@ impl OverworldGenerator {
         } else {
             Vec::new()
         };
-        // Issue #516. Computed here rather than in its own stage for two
+        // Computed here rather than in its own stage for two
         // reasons: this is the one place that already holds the *final* palette
         // and block field (so the scan is integer-only — see
         // `motion_blocking_from_palette`), and both `column` and `column_timed`
@@ -125,9 +125,8 @@ impl OverworldGenerator {
     }
 }
 
-/// `Heightmap.Types.MOTION_BLOCKING`'s registry id — `MOTION_BLOCKING(4,
-/// "MOTION_BLOCKING", Heightmap.Usage.CLIENT, …)`
-/// (`.cache/mc/26.2/src/net/minecraft/world/level/levelgen/Heightmap.java:151`).
+/// Vanilla's own `MOTION_BLOCKING` heightmap-type registry id, read off its
+/// enum constant's own first constructor argument.
 ///
 /// This is the key the 1.21.5+ typed-list heightmap framing carries on the wire
 /// (a VarInt registry id, then a VarInt-prefixed long array — see
@@ -146,19 +145,19 @@ pub const HEIGHTMAP_COLUMNS: usize = 256;
 ///
 /// # Both halves come from the record definition
 ///
-/// * The **predicate** is `input.blocksMotion() || !input.getFluidState().isEmpty()`,
-///   read off `Heightmap.java:151` itself rather than off a summary, and it is
+/// * The **predicate** is a block that blocks motion, or has a non-empty
+///   fluid state — vanilla's own definition, read off its own enum constant
+///   rather than off a summary, and it is
 ///   already ported as [`crate::feature::top_layer::SnowSupport::motion_blocking`]
 ///   over two jar-dumped per-state columns. Nothing new is guessed here.
-/// * The **stored value** is `topMatchingY + 1`, offset by `minY`:
-///   `Heightmap.primeHeightmaps` scans each column downward and calls
-///   `setHeight(x, z, m + 1)` at the first matching block
-///   (`Heightmap.java:60-64`), and `setHeight` stores `y - chunk.getMinY()` while
-///   `getFirstAvailable` adds it back (`Heightmap.java:70-78`). A column with no
-///   matching block never gets a `setHeight` call at all, so its slot stays `0`,
+/// * The **stored value** is `topMatchingY + 1`, offset by `minY`: vanilla's
+///   own heightmap priming scans each column downward and stores that value
+///   at the first matching block, offset by the chunk's minimum Y (and read
+///   back by re-adding that offset). A column with no
+///   matching block never gets that store at all, so its slot stays `0`,
 ///   i.e. `minY` — which is why an all-air column here is `0` and not a sentinel.
 ///
-/// The index is `Heightmap.getIndex(x, z) = x + z * 16`, matching
+/// The index is vanilla's own `x + z * 16`, matching
 /// `lodestone_world::heightmap::Heightmap::index`, so a consumer can `set` each
 /// column straight across with no re-ordering.
 ///
@@ -166,11 +165,11 @@ pub const HEIGHTMAP_COLUMNS: usize = 256;
 ///
 /// The same argument [`crate::feature::top_layer::motion_blocking_first_free`]
 /// makes: vanilla primes the heightmaps at the start of the `features` status and
-/// maintains them through `Heightmap.update` per placed block, which is an
+/// maintains them per placed block thereafter, which is an
 /// incremental form of exactly this scan. This runs after **every** stage
 /// including `TOP_LAYER_MODIFICATION`, so there is nothing left to place and a
-/// top-down scan of the finished field lands on the same answer. Issue #516's
-/// scope asks for incremental maintenance through the region view; that is a
+/// top-down scan of the finished field lands on the same answer. A future
+/// change could ask for incremental maintenance through the region view; that is a
 /// *cost* refinement (worldgen-rewrite candidate 3), not a correctness one, and
 /// doing it here would not change a single stored height.
 ///
@@ -209,7 +208,7 @@ fn motion_blocking_from_palette(
 }
 
 /// Per-stage wall-clock cost of one [`OverworldGenerator::column_timed`] call:
-/// **one field per stage the pipeline actually has**, which is what issue #85
+/// **one field per stage the pipeline actually has**, which is what this change
 /// asks for.
 ///
 /// # What changed here, and why the old field names were misleading
@@ -226,7 +225,7 @@ fn motion_blocking_from_palette(
 ///   The old doc comment did admit the folding, but the recorded benchmark
 ///   metric was named `stage_intern_pct`, so the persisted number attributed
 ///   carvers, ore features and vegetal decoration to "interning" — the precise
-///   rot #85 exists to stop. Those four now have their own fields.
+///   rot the per-stage cost split exists to stop. Those four now have their own fields.
 ///
 /// So a `stage_intern_pct` figure in `bench-results/generation.jsonl` recorded
 /// before this change is **not** interning cost and must not be compared
@@ -244,37 +243,37 @@ fn motion_blocking_from_palette(
 /// inputs are identical to `column`'s, so the *output* is identical too —
 /// `benches/generation.rs` asserts exactly that against a pair of freshly
 /// constructed generators, which is the anti-drift control the "do not create a
-/// second pipeline" half of #85 asks for.
+/// second pipeline" half of the per-stage cost split asks for.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy)]
 pub struct StageTimes {
-    /// Building the per-chunk [`crate::aquifer::AquiferSystem`] (issue #295) —
-    /// split out of `shape` because #85 names the aquifer as a stage whose cost
+    /// Building the per-chunk [`crate::aquifer::AquiferSystem`] —
+    /// split out of `shape` because the per-stage cost split names the aquifer as a stage whose cost
     /// should be visible on its own terms.
     pub aquifer: std::time::Duration,
     /// The noise router: `fill_stage` (density field, aquifer-participating
     /// fill) plus `heights_from_field`.
     pub shape: std::time::Duration,
-    /// Biome sampling (issue #405's [`OverworldGenerator::biome_stage`]).
+    /// Biome sampling (this change's [`OverworldGenerator::biome_stage`]).
     /// Previously, and misleadingly, called `fluid_heightmap`.
     pub biome: std::time::Duration,
     /// Surface rules.
     pub surface: std::time::Duration,
     /// Turning the density field plus the surface diff into a dense block grid.
     pub materialize: std::time::Duration,
-    /// Carvers (`crate::carver::apply_carvers`, issue #295).
+    /// Carvers (`crate::carver::apply_carvers`, this change).
     pub carve: std::time::Duration,
-    /// The `UNDERGROUND_ORES` 3×3 neighbourhood driver (issue #295).
+    /// The `UNDERGROUND_ORES` 3×3 neighbourhood driver.
     pub ore: std::time::Duration,
-    /// Vegetal decoration (issue #406).
+    /// Vegetal decoration.
     pub vegetation: std::time::Duration,
-    /// `TOP_LAYER_MODIFICATION` — `freeze_top_layer`'s snow and ice (issue
-    /// #404's U2). The first stage to earn its own field rather than being
+    /// `TOP_LAYER_MODIFICATION` — `freeze_top_layer`'s snow and ice. The
+    /// first stage to earn its own field rather than being
     /// folded into `intern`, because `docs/plans/worldgen-parity.md` §6 makes a
     /// *quantitative* prediction about it (<5% of composed column cost) that
     /// something has to be able to check.
     pub top_layer: std::time::Duration,
-    /// Palette interning, plus issue #516's `MOTION_BLOCKING` heightmap scan —
+    /// Palette interning, plus this change's `MOTION_BLOCKING` heightmap scan —
     /// and nothing else.
     ///
     /// The heightmap is folded in here rather than given its own field because
@@ -317,23 +316,23 @@ pub struct GeneratedColumn {
     height: i32,
     palette: Vec<String>,
     blocks: Vec<u16>,
-    /// Biome id per horizontal quart, row-major `qz * 4 + qx` (issue #405) —
+    /// Biome id per horizontal quart, row-major `qz * 4 + qx` —
     /// see [`OverworldGenerator::biome_stage`]. **The surface answer**: this is
     /// the biome a player standing on the column sees, and it is what surface
     /// material, carve and decorate consume.
     ///
-    /// It is *not* the biome of the column, and issue #512 is why: broadcasting
+    /// It is *not* the biome of the column, and this change is why: broadcasting
     /// it vertically is what made `lush_caves`/`dripstone_caves`/`deep_dark`
     /// unreachable. Read [`Self::biome_cells`] for anything that has a `y`.
     biome_quarts: [String; 16],
-    /// Issue #512: the full 4×4×4 biome grid — the authoritative per-cell answer,
+    /// The full 4×4×4 biome grid — the authoritative per-cell answer,
     /// and what a per-section biome container on the wire or in a region file
     /// must be built from. See [`super::biome_cells`].
     biome_cells: super::BiomeCells,
-    /// Issue #520: block entities decoration produced inside this chunk, in write
+    /// Block entities decoration produced inside this chunk, in write
     /// order. Empty for every chunk with no bee nest, which is nearly all of them.
     block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
-    /// Issue #516: the `MOTION_BLOCKING` heightmap in vanilla's stored form —
+    /// The `MOTION_BLOCKING` heightmap in vanilla's stored form —
     /// see [`motion_blocking_from_palette`] and
     /// [`Self::motion_blocking_heightmap`].
     ///
@@ -348,7 +347,7 @@ pub struct GeneratedColumn {
     /// column, so 512 bytes is noise, and a `Box` would add one allocation per
     /// column to a crate with four allocation-attribution gates.
     motion_blocking: Option<[u16; HEIGHTMAP_COLUMNS]>,
-    /// Issue #518 part 2: the `SPAWN` stage's proposed creature placements —
+    /// The SPAWN stage's part 2: proposed creature placements —
     /// unconditioned on light/ground legality. See
     /// [`crate::spawn_stage`]'s module doc and [`Self::spawn_candidates`].
     /// Empty for the overwhelming majority of chunks (any biome with no
@@ -412,7 +411,7 @@ impl GeneratedColumn {
         self.blocks.iter().filter(|b| **b != 0).count()
     }
 
-    /// Biome id at local `(lx, lz)` in `0..16` (issue #405) — quart
+    /// Biome id at local `(lx, lz)` in `0..16` — quart
     /// resolution, broadcast vertically (see [`OverworldGenerator::biome_stage`]),
     /// so the same answer comes back for every `y` at this `(lx, lz)`.
     ///
@@ -441,8 +440,8 @@ impl GeneratedColumn {
     /// blocks, biome_quarts)`, where `blocks[(ly * 16 + lz) * 16 + lx]`
     /// indexes into `palette` (`palette[0] == "minecraft:air"`), `ly = y -
     /// min_y`, and `biome_quarts[qz * 4 + qx]` is this column's biome id for
-    /// horizontal quart `(qx, qz)` (issue #405), constant across `y`.
-    ///    /// Issue #512's per-cell biome grid. **Read this, not [`Self::biome_quarts_ref`],
+    /// horizontal quart `(qx, qz)`, constant across `y`.
+    ///    /// The full per-cell biome grid. **Read this, not [`Self::biome_quarts_ref`],
     /// for anything that has a `y`** — a per-section biome container, a region-file
     /// `biomes` palette, underground tint/fog, or a spawn rule.
     ///
@@ -454,19 +453,19 @@ impl GeneratedColumn {
         &self.biome_cells
     }
 
-    /// Issue #520: the block entities this chunk's decoration produced, with
+    /// The block entities this chunk's decoration produced, with
     /// absolute world positions.
     ///
     /// **Nothing downstream consumes this yet.** `ChunkColumn` has no block-entity
     /// field and the chunk-data packet writes a hardcoded `var_i32(0)`, both outside
     /// this crate — so a generated bee nest still reaches the client empty until
-    /// that lands. See #520.
+    /// that lands.
     #[must_use]
     pub fn block_entities(&self) -> &[super::block_entities::GeneratedBlockEntity] {
         &self.block_entities
     }
 
-    /// Issue #518 part 2: the `SPAWN` stage's proposed creature placements for
+    /// The SPAWN stage's part 2: proposed creature placements for
     /// this chunk — see [`crate::spawn_stage`]'s module doc for what a
     /// candidate is and is not (unconditioned on light/ground). Empty for
     /// most chunks.
@@ -475,7 +474,7 @@ impl GeneratedColumn {
         &self.spawn_candidates
     }
 
-    /// Issue #516: this column's `MOTION_BLOCKING` heightmap, ready to pack — 256
+    /// This column's `MOTION_BLOCKING` heightmap, ready to pack — 256
     /// heights in vanilla's **stored** form (`first_free_y - min_y`, so a value in
     /// `0..=height`), indexed `lx + lz * 16`.
     ///
@@ -540,9 +539,9 @@ mod tests {
     /// hand-built field: the `+1`, the `lx + lz * 16` index, and that an air
     /// column stores `0` (i.e. `min_y`) rather than a sentinel.
     ///
-    /// The expected values come from `Heightmap.primeHeightmaps`'s
-    /// `setHeight(x, z, m + 1)` and `setHeight`'s own `y - getMinY()`
-    /// (`Heightmap.java:60-70`), not from this function.
+    /// The expected values come from vanilla's own heightmap-priming
+    /// derivation — `topMatchingY + 1`, stored offset by `minY` — not from
+    /// this function.
     #[test]
     fn motion_blocking_stores_the_first_free_row_at_the_vanilla_index() {
         let height = 8i32;
@@ -606,7 +605,7 @@ mod tests {
         assert_eq!(map[9 + 5 * 16], 0, "the index is `lx + lz * 16`, not transposed");
     }
 
-    /// The registry id is read off `Heightmap.java:151`'s own first constructor
+    /// The registry id is read off vanilla's own enum constant's first constructor
     /// argument. Pinned here so a consumer keying a heightmap under the wrong id
     /// — which vanilla would trust rather than re-derive — cannot happen quietly.
     #[test]
