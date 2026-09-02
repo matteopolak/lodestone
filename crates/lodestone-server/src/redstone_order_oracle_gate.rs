@@ -36,7 +36,7 @@
 //! `x=92..=93`, a `repeater[facing=west,delay=1]` at `x=94`, output dust at
 //! `x=95`, and a side-lock `repeater[facing=south,delay=1]` at `(94, 1, 99)`
 //! (north of the main repeater's row, i.e. `z=99`, feeding it from the side
-//! `DiodeBlock.getSignal` reads).
+//! the real diode get-signal rule reads).
 //!
 //! ## What was measured
 //!
@@ -92,7 +92,7 @@
 //! - **A BUD (block-update detector) rig**: a comparator or observer sensing
 //!   a block-state change with no power change at all, which is the
 //!   scenario `docs/plans/redstone-execution-model.md` §9 flags as needing a
-//!   read of `CollectingNeighborUpdater`/chunk-ticket sources before it can
+//!   read of vanilla's own neighbour-update-collection machinery and chunk-ticket sources before it can
 //!   even be designed correctly, not just measured.
 //!
 //! Each needs its own rig and its own live-oracle session; folding an
@@ -126,7 +126,7 @@ const OUT_X: i32 = 5;
 /// The side-lock repeater's row — `ROW_Z + 1`, matching
 /// `redstone_diode_oracle_gate.rs`'s own locking rig, whose own doc comment
 /// explains why: the main repeater faces west, so its side positions are
-/// north/south, and `DiodeBlock.getSignal` only answers for its own `FACING`.
+/// north/south, and the real diode get-signal rule only answers for its own facing.
 const LOCK_Z: i32 = ROW_Z + 1;
 
 /// `redstone_diode_oracle_gate.rs`'s live-measured `delay=1` timing: the

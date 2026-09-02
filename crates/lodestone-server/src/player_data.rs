@@ -66,7 +66,7 @@
 //!   the writer emits it twice. [`PlayerData::from_nbt`] filters by
 //!   [`MODELLED_FIELDS`]; add the name there and the filter follows.
 //! - **`DataVersion` is checked on read** through
-//!   [`lodestone_anvil::require_supported_data_version`] (issue #305), so a file
+//!   [`lodestone_anvil::require_supported_data_version`], so a file
 //!   from another game version is refused rather than mis-decoded. It is not in
 //!   the preserved set, because [`to_nbt`](PlayerData::to_nbt) always stamps our
 //!   own.
@@ -325,7 +325,7 @@ impl PlayerData {
     /// carries all of them, but a *partial* file must produce a usable player
     /// rather than an error, because the alternative is refusing the join of
     /// someone whose save is merely old-shaped. The one thing that **is** refused
-    /// is a `DataVersion` this build cannot read (issue #305).
+    /// is a `DataVersion` this build cannot read.
     ///
     /// # Errors
     ///
@@ -437,7 +437,7 @@ impl PlayerDataStore {
     /// # Errors
     ///
     /// The file exists but will not decode, or was written by another game
-    /// version (issue #305). Both are refusals rather than a silent empty
+    /// version. Both are refusals rather than a silent empty
     /// player: overwriting a save we cannot read is the one outcome that loses
     /// data irrecoverably.
     pub fn read(&self, uuid: uuid::Uuid) -> Result<Option<PlayerData>, lodestone_anvil::Error> {
@@ -514,7 +514,7 @@ fn read_rotation(nbt: Option<&Nbt>) -> Option<Rotation> {
     Some(Rotation::new(get(0)?, get(1)?))
 }
 
-/// Vanilla's `GameType` ordinals (`GameType.java`): survival 0, creative 1,
+/// Vanilla's own game-type ordinals: survival 0, creative 1,
 /// adventure 2, spectator 3. Written as an explicit match rather than an `as`
 /// cast off our own enum's declaration order, because that order is ours to
 /// change and this number is not.

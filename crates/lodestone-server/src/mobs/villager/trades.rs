@@ -1,4 +1,4 @@
-//! Villager trade generation — issue #245's generation-facing seam.
+//! Villager trade generation — the generation-facing seam of villager trades.
 //!
 //! # What it is
 //!
@@ -66,14 +66,14 @@ pub fn offers_for(profession: Profession, level: i32) -> Vec<TradeRecord> {
     }
 }
 
-/// Every trade a villager at `level` actually offers: `Villager.updateTrades`
-/// is called once per level-up and *adds* that level's `TradeSet` on top of
-/// whatever the villager already offers (`addOffersFromTradeSet` appends,
-/// `Villager.java`'s `updateTrades`/`increaseMerchantCareer`) — so a
+/// Every trade a villager at `level` actually offers: the real update-trades
+/// rule is called once per level-up and *adds* that level's trade set on top of
+/// whatever the villager already offers (vanilla's own append rule adds new
+/// offers without clearing old ones) — so a
 /// level-3 farmer still offers its level-1 and level-2 trades alongside its
 /// level-3 ones. This is that accumulation, computed fresh from the level
 /// rather than modelling the incremental history (restocking/relisting is
-/// issue #245's third piece and is not built here).
+/// a third piece not built here).
 #[must_use]
 pub fn offers_up_to(profession: Profession, level: i32) -> Vec<TradeRecord> {
     (1..=level.clamp(1, 5))
