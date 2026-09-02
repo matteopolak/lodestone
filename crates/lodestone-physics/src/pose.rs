@@ -4,23 +4,19 @@
 //! # It is a state machine, not a lookup
 //!
 //! The obvious model — "swimming ⇒ use the `0.6 × 0.6` box" — is wrong, and
-//! dangerously so. Vanilla's `Player.updatePlayerPose`
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/player/Player.java:343-357`) is:
+//! dangerously so. Vanilla's own per-tick pose-update step is, in outline:
 //!
-//! ```java
-//! protected void updatePlayerPose() {
-//!    if (this.canPlayerFitWithinBlocksAndEntitiesWhen(Pose.SWIMMING)) {
-//!       Pose desiredPose = this.getDesiredPose();
-//!       Pose actualPose;
-//!       if (this.isSpectator() || this.isPassenger() || this.canPlayerFitWithinBlocksAndEntitiesWhen(desiredPose)) {
-//!          actualPose = desiredPose;
-//!       } else if (this.canPlayerFitWithinBlocksAndEntitiesWhen(Pose.CROUCHING)) {
-//!          actualPose = Pose.CROUCHING;
-//!       } else {
-//!          actualPose = Pose.SWIMMING;
-//!       }
-//!       this.setPose(actualPose);
-//!    }
+//! ```text
+//! if fits(SWIMMING) {
+//!     desired = compute_desired_pose()
+//!     actual = if in_spectator_or_passenger || fits(desired) {
+//!         desired
+//!     } else if fits(CROUCHING) {
+//!         CROUCHING
+//!     } else {
+//!         SWIMMING
+//!     };
+//!     set_pose(actual)
 //! }
 //! ```
 //!
@@ -31,53 +27,53 @@
 //!    where the player already stands is refused and the machine falls back
 //!    `desired → CROUCHING → SWIMMING`.
 //! 2. **The whole body is behind an outer guard.** If even the `0.6 × 0.6`
-//!    swimming box does not fit, `updatePlayerPose` returns without calling
-//!    `setPose` *at all* — the pose is **sticky**, keeping whatever it was, rather
-//!    than collapsing to the smallest box. (Encased in blocks, you keep the pose
-//!    you arrived in.)
+//!    swimming box does not fit, vanilla's own pose-update step returns
+//!    without ever committing a pose — the pose is **sticky**, keeping
+//!    whatever it was, rather than collapsing to the smallest box. (Encased
+//!    in blocks, you keep the pose you arrived in.)
 //! 3. **There is no recovery if a player's box grows into a space it does not
-//!    fit.** `Entity.refreshDimensions` (`Entity.java:3395-3411`) calls
-//!    `fudgePositionAfterSizeChange` only when
-//!    `!this.level.isClientSide() && … && !(this instanceof Player)`. Both
-//!    conjuncts exclude us twice over: no client ever fudges, and no `Player`ever
-//!    does. **The fit gate is the only thing preventing a surfacing swimmer from
-//!    being clipped into a low ceiling**, which is exactly what tying the box to
+//!    fit.** Vanilla's own dimensions-refresh step only re-centres an entity
+//!    whose hitbox just grew when it is **not** running on the client and
+//!    **not** a player. Both conjuncts exclude us twice over: no client ever
+//!    re-centres, and no player ever does. **The fit gate is the only thing
+//!    preventing a surfacing swimmer from being clipped into a low
+//!    ceiling**, which is exactly what tying the box to
 //!    [`PlayerState::swimming`] and skipping the gate would do.
 //!
 //! # What the pose actually changes
 //!
-//! `setPose` → `onSyncedDataUpdated(DATA_POSE)` → `refreshDimensions()`
-//! (`Entity.java:3380-3411`), which sets `dimensions`, sets `eyeHeight =
-//! newDim.eyeHeight()`, and calls `reapplyPosition()` — `setPos(position)`, which
-//! rebuilds the bounding box from the **feet**. So a pose change never moves the
-//! player: `makeBoundingBox` anchors `minY` at `position.y`
-//! (`EntityDimensions.java:19-23`), and the box only grows or shrinks upward.
-//! Width is `0.6` in every pose a player can hold here, so in practice the pose
-//! decides exactly two numbers: **box height** and **eye height**.
+//! Committing a pose sets the entity's hitbox dimensions and eye height, then
+//! re-anchors the bounding box at the **feet**. So a pose change never moves
+//! the player: the box's minimum Y is pinned to the feet position, and the
+//! box only grows or shrinks upward. Width is `0.6` in every pose a player
+//! can hold here, so in practice the pose decides exactly two numbers: **box
+//! height** and **eye height**.
 //!
-//! Those two must move together. They are one record in vanilla
-//! (`EntityDimensions.eyeHeight`), and splitting them is observable: with a
-//! `0.6`-high box and a `1.62` eye, `compute_fluid_state`'s cell sweep never
-//! reaches the eye's own cell, so a fully submerged swimmer reads
-//! `eye_in_water == false` — no fog, no overlay, and `updateSwimming` can never
-//! re-enter the pose. [`update_player_pose`] therefore writes both.
+//! Those two must move together. They are one record in vanilla, and
+//! splitting them is observable: with a `0.6`-high box and a `1.62` eye,
+//! `compute_fluid_state`'s cell sweep never reaches the eye's own cell, so a
+//! fully submerged swimmer reads `eye_in_water == false` — no fog, no
+//! overlay, and vanilla's own swimming-state update can never re-enter the
+//! pose. [`update_player_pose`] therefore writes both.
 //!
 //! # Timing
 //!
-//! `updatePlayerPose` is the **last statement of `Player.tick()`**
-//! (`Player.java:284`), after `super.tick()` has run `baseTick`, `aiStep`,
-//! `travel` and the move. So the box a tick's movement collides with is the pose
-//! decided at the end of the *previous* tick, and the fit gate always probes the
-//! **post-move** position. [`crate::player::tick`] calls it in that position; the
-//! narrower entry points ([`crate::player::tick_air`] and friends) are `travel`,
-//! not `Player.tick`, and deliberately leave the pose alone.
+//! Vanilla's own pose-update step is the **last statement of its per-tick
+//! player update**, run after the base tick, the AI step, travel and the move
+//! have all happened. So the box a tick's movement collides with is the pose
+//! decided at the end of the *previous* tick, and the fit gate always probes
+//! the **post-move** position. [`crate::player::tick`] calls it in that
+//! position; the narrower entry points ([`crate::player::tick_air`] and
+//! friends) run only the travel step, not the full per-tick update, and
+//! deliberately leave the pose alone.
 //!
 //! # Step height is not pose data
 //!
-//! Vanilla's `EntityDimensions` record carries width/height/eyeHeight and *not*
-//! step height — that is the `STEP_HEIGHT` attribute, read through
-//! `Entity.maxUpStep()`. A crouching player still steps `0.6`, so every
-//! [`Pose::dimensions`] keeps [`EntityDimensions::PLAYER`]'s `step_height`.
+//! Vanilla's own dimensions record carries width/height/eye-height and *not*
+//! step height — that lives on the step-height attribute, read through
+//! vanilla's own max-up-step accessor. A crouching player still steps `0.6`,
+//! so every [`Pose::dimensions`] keeps [`EntityDimensions::PLAYER`]'s
+//! `step_height`.
 
 use crate::collision::{CollisionView, no_collision};
 use crate::entity::EntityDimensions;
@@ -85,62 +81,63 @@ use crate::geometry::{Aabb, Vec3d};
 use crate::player::{MovementInput, PlayerState};
 use crate::push::{NearbyEntity, no_collision_among_entities};
 
-/// `AABB.deflate(1.0E-7)` — the shrink
-/// `Player.canPlayerFitWithinBlocksAndEntitiesWhen` applies before testing
-/// (`Player.java:374`). It is what makes a box exactly as tall as its gap *fit*:
-/// overlap is the strict `min < max` test, and this pulls a flush face off the
-/// boundary.
+/// The shrink vanilla's own fit check applies before testing collision — an
+/// inflate by `-1.0E-7` on all six faces. It is what makes a box exactly as
+/// tall as its gap *fit*: overlap is the strict `min < max` test, and this
+/// pulls a flush face off the boundary.
 pub const POSE_FIT_DEFLATION: f64 = 1.0E-7;
 
-/// The subset of `net.minecraft.world.entity.Pose` a player driven by this crate
-/// can hold.
+/// The subset of vanilla's own pose enum a player driven by this crate can
+/// hold.
 ///
-/// The five modelled poses are the five `Player.getDesiredPose`
-/// (`Player.java:359-371`) can return from state this crate has: swimming,
-/// fall-flying, spin-attack (riptide, issue #208), and the shift-key
-/// crouch/stand pair.
+/// The five modelled poses are the five vanilla's own "desired pose" step can
+/// return from state this crate has: swimming, fall-flying, spin-attack
+/// (riptide), and the shift-key crouch/stand pair.
 ///
-/// **Deliberately absent**, with vanilla's dimensions recorded so adding one is
-/// mechanical rather than research (all from `Avatar.POSES`, `Avatar.java:24-37`):
+/// **Deliberately absent**, with vanilla's dimensions recorded so adding one
+/// is mechanical rather than research:
 ///
 /// | pose | dimensions | why it is not here |
 /// |---|---|---|
-/// | `SLEEPING` | `LivingEntity.SLEEPING_DIMENSIONS` = `fixed(0.2, 0.2)`, eye `0.2` | no bed/sleep state in this crate; `getDesiredPose` tests it **first**, so a driver adding sleep must add the pose too |
-/// | `DYING` | `fixed(0.2, 0.2)`, eye `1.62` | set by the death handler, never by `updatePlayerPose` |
+/// | sleeping | a fixed `0.2 × 0.2` box, eye `0.2` | no bed/sleep state in this crate; vanilla's own "desired pose" step tests it **first**, so a driver adding sleep must add the pose too |
+/// | dying | a fixed `0.2 × 0.2` box, eye `1.62` | set by the death handler, never by vanilla's own pose-update step |
 ///
-/// Note `SLEEPING` and `DYING` are `fixed`, so the `SCALE`-attribute fold
-/// (`LivingEntity.getDimensions` → `.scale(getScale())`, `LivingEntity.java:3729`)
-/// does not apply to them. That fold is unmodelled here for the same reason
-/// [`EntityDimensions`]'s docs give: the scale attribute is applied by the caller
-/// before dimensions are constructed, and no caller in this repo reports one.
+/// Note the sleeping and dying poses are fixed-size, so the scale-attribute
+/// fold does not apply to them. That fold is unmodelled here for the same
+/// reason [`EntityDimensions`]'s docs give: the scale attribute is applied by
+/// the caller before dimensions are constructed, and no caller in this repo
+/// reports one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum Pose {
-    /// `Pose.STANDING` — `scalable(0.6, 1.8)`, eye `1.62`. The default.
+    /// Vanilla's own standing pose — a `0.6 × 1.8` box, eye `1.62`. The
+    /// default.
     #[default]
     Standing,
-    /// `Pose.CROUCHING` — `scalable(0.6, 1.5)`, eye `1.27`. Note the height is
-    /// `Avatar.CROUCH_BB_HEIGHT`, `1.5F` — **not** `1.65` and not `1.62`.
+    /// Vanilla's own crouching pose — a `0.6 × 1.5` box, eye `1.27`. Note the
+    /// height is a distinct crouch-box constant, `1.5F` — **not** `1.65` and
+    /// not `1.62`.
     Crouching,
-    /// `Pose.SWIMMING` — `scalable(0.6, 0.6)`, eye `0.4`. The flat box that fits
-    /// through a one-block gap.
+    /// Vanilla's own swimming pose — a `0.6 × 0.6` box, eye `0.4`. The flat
+    /// box that fits through a one-block gap.
     Swimming,
-    /// `Pose.FALL_FLYING` — the same `scalable(0.6, 0.6)` / eye `0.4` record as
-    /// [`Self::Swimming`], which is why an elytra glider also fits a one-block
-    /// gap. Kept a distinct variant because `getDesiredPose` distinguishes them
-    /// and because a caller reading the pose for animation must be able to.
+    /// Vanilla's own fall-flying pose — the same `0.6 × 0.6` box / eye `0.4`
+    /// as [`Self::Swimming`], which is why an elytra glider also fits a
+    /// one-block gap. Kept a distinct variant because vanilla's own "desired
+    /// pose" step distinguishes them and because a caller reading the pose
+    /// for animation must be able to.
     FallFlying,
-    /// `Pose.SPIN_ATTACK` — the riptide-trident pose, entered by
-    /// [`crate::player::apply_riptide`] (issue #208). Same `scalable(0.6, 0.6)` /
-    /// eye `0.4` record as [`Self::Swimming`]/[`Self::FallFlying`]; kept a
-    /// distinct variant for the same reason those two are — `getDesiredPose`
-    /// distinguishes it (it is checked *after* `FALL_FLYING`, so gliding wins a
-    /// tick where both would otherwise apply) and an animation reader needs to
-    /// tell it apart from a swim.
+    /// Vanilla's own spin-attack pose — the riptide-trident pose, entered by
+    /// [`crate::player::apply_riptide`]. Same `0.6 × 0.6` box / eye `0.4` as
+    /// [`Self::Swimming`]/[`Self::FallFlying`]; kept a distinct variant for
+    /// the same reason those two are — vanilla's own "desired pose" step
+    /// distinguishes it (it is checked *after* fall-flying, so gliding wins a
+    /// tick where both would otherwise apply) and an animation reader needs
+    /// to tell it apart from a swim.
     SpinAttack,
 }
 
 impl Pose {
-    /// This pose's hitbox, as `Avatar.POSES` defines it.
+    /// This pose's hitbox, as vanilla's own pose table defines it.
     ///
     /// `step_height` is **not** pose data — see the module docs — so it is
     /// [`EntityDimensions::PLAYER`]'s `0.6` for every pose.
@@ -154,11 +151,12 @@ impl Pose {
         EntityDimensions::new(0.6, height, EntityDimensions::PLAYER.step_height)
     }
 
-    /// This pose's `EntityDimensions.eyeHeight`, i.e. `Entity.getEyeHeight(pose)`.
+    /// This pose's eye height, i.e. vanilla's own eye-height-for-pose
+    /// accessor.
     ///
-    /// Every value is an explicit `withEyeHeight` in `Avatar.POSES`; none is the
-    /// `height * 0.85F` default (`EntityDimensions.defaultEyeHeight`), which for
-    /// standing would give `1.53` rather than `1.62`.
+    /// Every value is an explicit override in vanilla's own pose table; none
+    /// is the `height * 0.85F` default (vanilla's own default-eye-height
+    /// formula), which for standing would give `1.53` rather than `1.62`.
     #[must_use]
     pub const fn eye_height(self) -> f32 {
         match self {
@@ -168,8 +166,9 @@ impl Pose {
         }
     }
 
-    /// The box `Player.canPlayerFitWithinBlocksAndEntitiesWhen` tests for this
-    /// pose at `position`: `dims.makeBoundingBox(position).deflate(1.0E-7)`.
+    /// The box vanilla's own block-and-entity fit check tests for this pose
+    /// at `position`: the pose's bounding box at that position, deflated by
+    /// `1.0E-7`.
     #[must_use]
     pub fn fit_box(self, position: Vec3d) -> Aabb {
         self.dimensions()
@@ -178,16 +177,16 @@ impl Pose {
     }
 }
 
-/// `Player.canPlayerFitWithinBlocksAndEntitiesWhen(pose)` with the **block half
-/// only** — `level().noBlockCollision(this, fit_box)`.
+/// Vanilla's own block-and-entity fit check, with the **block half only**.
 ///
-/// This is the form [`update_player_pose`] uses when the caller has no entity
-/// snapshot, and the gap it leaves is narrow rather than notional:
-/// `getEntityCollisions` filters on `Entity.canBeCollidedWith`, which `Entity`
-/// answers `false` and **`LivingEntity` does not override**. The only three
-/// overrides in 26.2 are `AbstractBoat`, `Shulker` and `HappyGhast`, so for a
-/// player with none of those inside its pose box the entity term is *vacuously
-/// true* and this is the whole predicate. See
+/// This is the form [`update_player_pose`] uses when the caller has no
+/// entity snapshot, and the gap it leaves is narrow rather than notional:
+/// vanilla's own nearby-entity-collisions query filters on its own "can be
+/// collided with" check, which the base entity type answers `false` and
+/// **the living-entity type does not override**. The only three overrides in
+/// 26.2 are a boat, a shulker and a happy ghast, so for a player with none of
+/// those inside its pose box the entity term is *vacuously true* and this is
+/// the whole predicate. See
 /// [`can_player_fit_within_blocks_and_entities_when`] for the full form and
 /// `docs/entity-push.md` for the measurement.
 #[must_use]
@@ -199,12 +198,11 @@ pub fn can_player_fit_within_blocks_when(
     no_collision(view, pose.fit_box(position))
 }
 
-/// `Player.canPlayerFitWithinBlocksAndEntitiesWhen(pose)` in full
-/// (`Player.java:373-375`): `noCollision(this, fit_box)`, i.e. blocks **and**
-/// entities.
+/// Vanilla's own block-and-entity fit check in full: no block collision
+/// **and** no entity collision with the fit box.
 ///
-/// `noBorderCollision` — the third term — remains unmodelled (no world border in
-/// this engine).
+/// The world-border term vanilla also checks remains unmodelled (no world
+/// border in this engine).
 #[must_use]
 pub fn can_player_fit_within_blocks_and_entities_when(
     view: &dyn CollisionView,
@@ -215,29 +213,31 @@ pub fn can_player_fit_within_blocks_and_entities_when(
     no_collision_among_entities(view, pose.fit_box(position), nearby)
 }
 
-/// `Player.getDesiredPose()` (`Player.java:359-371`) — what the player *wants*,
-/// before the fit gate has a say.
+/// Vanilla's own "desired pose" step — what the player *wants*, before the
+/// fit gate has a say.
 ///
-/// Vanilla's order is `SLEEPING > SWIMMING > FALL_FLYING > SPIN_ATTACK >
-/// CROUCHING/STANDING`; the one absent branch (`SLEEPING`) is documented on
+/// Vanilla's order is sleeping > swimming > fall-flying > spin-attack >
+/// crouching/standing; the one absent branch (sleeping) is documented on
 /// [`Pose`].
 ///
-/// Three terms deserve their citations:
+/// Three terms deserve their explanation:
 ///
-/// * `isSwimming()` is [`PlayerState::swimming`] — `Entity.updateSwimming`'s
-///   sprint-swim flag, maintained by [`crate::player::tick`]. It is **not** "in
-///   water": a walking player in a pond is `STANDING`.
-/// * `isAutoSpinAttack()` is `state.auto_spin_attack_ticks > 0`
+/// * the swimming term is [`PlayerState::swimming`] — vanilla's own
+///   swimming-state update's sprint-swim flag, maintained by
+///   [`crate::player::tick`]. It is **not** "in water": a walking player in a
+///   pond is standing.
+/// * the spin-attack term is `state.auto_spin_attack_ticks > 0`
 ///   ([`PlayerState::is_auto_spin_attack`]) — set by
 ///   [`crate::player::apply_riptide`] and decremented once per tick, exactly
-///   like vanilla's `autoSpinAttackTicks` countdown.
-/// * the crouch term is `isShiftKeyDown() && !this.abilities.flying`, i.e. the
-///   **raw shift key** (the same input `isStayingOnGroundSurface` reads for the
-///   edge back-off, `Player.java:300-302`) and not `isCrouching()`, which is
-///   *derived from the pose* and would be circular. This crate models no
-///   creative flight, so the `!flying` conjunct is vacuously true — a driver with
-///   a fly mode must not call [`crate::player::tick`] while flying (which it
-///   already must not, for `updateSwimming`'s sake).
+///   like vanilla's own auto-spin-attack countdown.
+/// * the crouch term is "shift key held **and** not creative-flying", i.e.
+///   the **raw shift key** (the same input vanilla's own ground-surface
+///   check reads for the edge back-off) and not vanilla's own "is crouching"
+///   check, which is *derived from the pose* and would be circular. This
+///   crate models no creative flight, so the "not flying" conjunct is
+///   vacuously true — a driver with a fly mode must not call
+///   [`crate::player::tick`] while flying (which it already must not, for the
+///   swimming-state update's sake).
 #[must_use]
 pub fn desired_pose(state: &PlayerState, input: MovementInput) -> Pose {
     if state.swimming {
@@ -247,11 +247,11 @@ pub fn desired_pose(state: &PlayerState, input: MovementInput) -> Pose {
     } else if state.is_auto_spin_attack() {
         Pose::SpinAttack
     } else if input.sneak && !state.flying {
-        // `Player.getDesiredPose()` (`Player.java:369`):
-        // `isShiftKeyDown() && !this.abilities.flying ? CROUCHING : STANDING`.
-        // Holding shift while flying is the *descend* control, not a crouch, so the
-        // box must stay `1.8` tall — a `1.27` box would let a descending flier slip
-        // into gaps vanilla keeps them out of, and `update_player_pose`'s fit gate
+        // Vanilla's own "desired pose" step: shift key held && not
+        // creative-flying ? CROUCHING : STANDING. Holding shift while flying
+        // is the *descend* control, not a crouch, so the box must stay `1.8`
+        // tall — a `1.27` box would let a descending flier slip into gaps
+        // vanilla keeps them out of, and `update_player_pose`'s fit gate
         // would then refuse to let them stand back up under a low ceiling.
         Pose::Crouching
     } else {
@@ -259,23 +259,24 @@ pub fn desired_pose(state: &PlayerState, input: MovementInput) -> Pose {
     }
 }
 
-/// `Player.updatePlayerPose()` (`Player.java:343-357`) — pick the pose, veto it
-/// against the world, and commit box **and** eye height together.
+/// Vanilla's own pose-update step — pick the pose, veto it against the
+/// world, and commit box **and** eye height together.
 ///
 /// Called from the end of [`crate::player::tick`] /
 /// [`crate::player::tick_among_entities`]; see the module docs for why that
-/// position is load-bearing and why the narrower travel entry points do not call
-/// it.
+/// position is load-bearing and why the narrower travel entry points do not
+/// call it.
 ///
-/// `nearby` supplies the entity term of the gate. Passing `&[]` is the block-only
-/// predicate and is correct for every world without a boat, shulker or happy
-/// ghast overlapping the player.
+/// `nearby` supplies the entity term of the gate. Passing `&[]` is the
+/// block-only predicate and is correct for every world without a boat,
+/// shulker or happy ghast overlapping the player.
 ///
-/// The `isSpectator() || isPassenger()` shortcut that lets vanilla adopt an
-/// unfittable desired pose is **not** modelled: this crate has neither spectator
-/// mode nor vehicles, and a driver that adds them must apply the bypass itself
-/// rather than have physics guess. Its absence is conservative — it can only
-/// refuse a pose vanilla would have granted, never the reverse.
+/// Vanilla's own spectator/passenger shortcut, which lets it adopt an
+/// unfittable desired pose, is **not** modelled: this crate has neither
+/// spectator mode nor vehicles, and a driver that adds them must apply the
+/// bypass itself rather than have physics guess. Its absence is conservative
+/// — it can only refuse a pose vanilla would have granted, never the
+/// reverse.
 pub fn update_player_pose(
     state: &mut PlayerState,
     input: MovementInput,
@@ -287,7 +288,7 @@ pub fn update_player_pose(
     };
 
     // The outer guard: with not even the smallest box fitting, vanilla never
-    // reaches `setPose` and the pose is left exactly as it was.
+    // commits a pose and the pose is left exactly as it was.
     if !fits(Pose::Swimming) {
         return;
     }
@@ -302,14 +303,14 @@ pub fn update_player_pose(
     set_pose(state, actual);
 }
 
-/// `Entity.setPose` → `refreshDimensions` for the two fields that reach this
-/// crate: the pose itself (which [`PlayerState::dimensions`] reads for the box)
-/// and the derived eye height.
+/// The two fields of vanilla's own "set pose, then refresh dimensions" step
+/// that reach this crate: the pose itself (which [`PlayerState::dimensions`]
+/// reads for the box) and the derived eye height.
 ///
-/// Vanilla's `reapplyPosition()` has no analogue to write, because this crate
-/// stores the feet position and derives the box on demand rather than caching it.
-/// The size-growth recovery is *deliberately* absent — it excludes players and
-/// clients twice over; see the module docs.
+/// Vanilla's own position-reapply step has no analogue to write, because
+/// this crate stores the feet position and derives the box on demand rather
+/// than caching it. The size-growth recovery is *deliberately* absent — it
+/// excludes players and clients twice over; see the module docs.
 fn set_pose(state: &mut PlayerState, pose: Pose) {
     state.pose = pose;
     state.eye_height = pose.eye_height();
@@ -519,9 +520,9 @@ mod tests {
 
     #[test]
     fn the_outer_guard_leaves_the_pose_alone_rather_than_shrinking_it() {
-        // Encased in solid blocks: `canPlayerFitWithinBlocksAndEntitiesWhen(
-        // SWIMMING)` is false, so vanilla never calls setPose and the pose is
-        // whatever it already was — including a pose that manifestly does not fit.
+        // Encased in solid blocks: vanilla's own fit check for SWIMMING is
+        // false, so vanilla never commits a pose and the pose is whatever it
+        // already was — including a pose that manifestly does not fit.
         for held in [Pose::Standing, Pose::Crouching, Pose::Swimming] {
             let mut s = player(held);
             update_player_pose(&mut s, sneaking(), &Solid, &[]);
@@ -559,9 +560,10 @@ mod tests {
 
     #[test]
     fn an_entity_can_veto_a_pose_and_a_mob_cannot() {
-        // The entity term of the gate, with the same asymmetry `docs/entity-push.md`
-        // measured: `canBeCollidedWith` is false for every player and every mob, so
-        // only a boat/shulker/happy ghast can change the answer.
+        // The entity term of the gate, with the same asymmetry
+        // `docs/entity-push.md` measured: vanilla's own "can be collided
+        // with" check is false for every player and every mob, so only a
+        // boat/shulker/happy ghast can change the answer.
         let dims = EntityDimensions::PLAYER;
         let mob = NearbyEntity::living(feet(), dims.bounding_box(feet()));
         assert!(can_player_fit_within_blocks_and_entities_when(
