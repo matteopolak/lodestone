@@ -71,7 +71,7 @@ const EXPECTED_VERSION_NAME: &str = "26.2";
 /// fixture is missing — a *precondition*-species vacuous test would `return`
 /// here and report green with nothing measured.
 fn vanilla_capture() -> serde_json::Value {
-    let raw = include_str!("fixtures/vanilla_status_response_26_2.json");
+    let raw = include_str!("../fixtures/vanilla_status_response_26_2.json");
     serde_json::from_str(raw).expect("checked-in vanilla status capture is valid JSON")
 }
 
