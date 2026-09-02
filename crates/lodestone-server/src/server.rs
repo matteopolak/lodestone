@@ -120,10 +120,10 @@ use crate::world_spawn::{RespawnPoint, find_initial_spawn, is_bed_block, is_lega
 /// Server-initiated keep-alive interval, and the width of the window in
 /// which an echo must arrive before the connection is treated as dead.
 ///
-/// Vanilla's `LATENCY_CHECK_INTERVAL` and `CLOSED_LISTENER_TIMEOUT`
-/// (`ServerCommonPacketListenerImpl.java:35-36`) are both the literal
+/// Vanilla's own latency-check-interval and closed-listener-timeout constants
+/// are both the literal
 /// constant `15000` (milliseconds) — **not** two different numbers.
-/// `keepConnectionAlive` (`ServerCommonPacketListenerImpl.java:118-133`)
+/// Vanilla's own "keep connection alive" step
 /// sends a fresh challenge once `now - keepAliveTime >= 15000`, and
 /// disconnects immediately if the *previous* challenge is still pending at
 /// that point — so an unanswered challenge is caught within one more
@@ -134,7 +134,7 @@ const KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(15_000);
 /// MOTD reported in the server-list status reply (issue #277).
 ///
 /// Vanilla's own default is `server.properties`' `motd=A Minecraft Server`
-/// (`net/minecraft/server/dedicated/DedicatedServerProperties.java`, and the
+/// (vanilla's own dedicated-server properties reader, and the
 /// `.cache/mc/26.2/server.properties` this repo's oracles run against). This
 /// crate has no properties file, so the equivalent constant names Lodestone
 /// instead of impersonating vanilla.
@@ -149,7 +149,8 @@ pub const STATUS_MAX_PLAYERS: i32 = 20;
 
 /// Issue #325 / `crate::sleep`: the server-side entity id of the single local
 /// player in a singleplayer world — the roster key a connection with no
-/// [`PlayerRegistry`] uses when it votes (see `SleepVoteInner.sleepers`'s doc
+/// [`PlayerRegistry`] uses when it votes (see the sleep-vote inner state's
+/// own sleepers doc
 /// comment). Matches `crates/protocol/v770/src/server_protocol.rs`'s
 /// `LOCAL_PLAYER_ENTITY_ID`, which is what the v770 encoder believes the local
 /// player's id is; keeping the two constants equal is the join, and the
@@ -158,17 +159,17 @@ pub(crate) const LOCAL_PLAYER_ENTITY_ID: i32 = 1;
 
 /// The disconnect reason for an unanswered keep-alive (issue #279).
 ///
-/// Vanilla's is exactly `Component.translatable("disconnect.timeout")`
-/// (`net/minecraft/server/network/ServerCommonPacketListenerImpl.java:37`, sent
-/// at `:86`), so the key is not ours to choose. The `fallback` is vanilla's own
+/// Vanilla's is exactly a translatable text component keyed
+/// `"disconnect.timeout"`, sent
+/// from its own generic "keep connection alive" step, so the key is not ours to choose. The `fallback` is vanilla's own
 /// English string for that key, read from
 /// `.cache/mc/26.2/client-src/assets/minecraft/lang/en_us.json:3498`
 /// (`"disconnect.timeout": "Timed out"`) — not invented here.
 ///
 /// Carrying a fallback at all is a deliberate improvement over vanilla's bare
-/// `translatable`, and it is a real vanilla feature, not an extension:
-/// `TranslatableContents` resolves `currentLanguage.getOrDefault(key, fallback)`
-/// (`network/chat/contents/TranslatableContents.java:90`). So a real client shows
+/// translatable text component, and it is a real vanilla feature, not an extension:
+/// vanilla's own translatable-text-content resolver resolves
+/// `currentLanguage.getOrDefault(key, fallback)`. So a real client shows
 /// its own localized "Timed out", while any client that cannot resolve the key —
 /// including *our* client today, which renders raw translation keys (issue #68) —
 /// shows readable English instead of the literal string `disconnect.timeout`.
@@ -185,10 +186,10 @@ fn timeout_reason() -> Text {
 
 /// Whether `name` is a username vanilla's own server would accept.
 ///
-/// `StringUtil.isValidPlayerName` (`net/minecraft/util/StringUtil.java:66-68`):
+/// Vanilla's own "is valid player name" check:
 /// at most 16 characters, and **no** character `<= 32` or `>= 127` — i.e. every
 /// char must be printable ASCII, excluding space. Vanilla checks this on the
-/// login-phase `hello` packet (`ServerLoginPacketListenerImpl.java:120`).
+/// login-phase `hello` packet.
 ///
 /// Note the bound is on `char`s, matching vanilla's `name.chars()` (Java code
 /// points) rather than bytes: a name of 16 multi-byte characters is length-16 to
@@ -200,8 +201,9 @@ fn is_valid_player_name(name: &str) -> bool {
 /// The disconnect reason for a username our server will not accept.
 ///
 /// Unlike [`timeout_reason`], the *text* here is ours: vanilla rejects an invalid
-/// name by throwing (`Validate.validState(StringUtil.isValidPlayerName(...))`,
-/// `ServerLoginPacketListenerImpl.java:120`), which closes the connection with no
+/// name by throwing (a validation helper wrapping its own "is valid player
+/// name" check),
+/// which closes the connection with no
 /// translatable reason at all. Rejecting is faithful; explaining is an
 /// improvement, so this is a plain literal rather than a translation key we would
 /// have had to invent.
@@ -237,8 +239,8 @@ fn expired_profile_public_key_reason() -> Text {
 /// Cadence of the periodic time-of-day broadcast.
 ///
 /// Vanilla re-broadcasts the world's monotonic game time every 20 ticks
-/// (`MinecraftServer::forceGameTimeSynchronization`,
-/// `MinecraftServer.java:1095-1099`: `if (this.tickCount % 20 == 0)`) —
+/// (vanilla's own "force game time synchronization" step,
+/// gated on `if (this.tickCount % 20 == 0)`) —
 /// carrying an *empty* clock-update map, which is what tells a client to keep
 /// its held day/night anchor rather than resetting it (see
 /// `packets::time::SetTime::day_clock`'s doc comment in the `v770` crate).
@@ -257,7 +259,8 @@ const TIME_SYNC_INTERVAL: Duration = Duration::from_millis(1_000);
 /// `Session::set_render_distance` sends `render_distance + 1` (the outermost
 /// streamed ring can never be meshed, so asking for exactly `render_distance`
 /// loses the last visible ring) — so `33` is the largest value a real client on
-/// this project can ask for, and vanilla's own `ClientInformation.viewDistance`
+/// this project can ask for, and vanilla's own client-information view-distance
+/// field
 /// is documented as `2..=32` on [`ServerBound::ClientInformationChanged`].
 ///
 /// This is a *sanity* bound rather than a memory policy: the wire field is an
@@ -276,9 +279,10 @@ pub const MAX_CLIENT_VIEW_RADIUS: i32 = 33;
 #[cfg(not(target_arch = "wasm32"))]
 const MILLIS_PER_TICK: u128 = 50;
 
-/// A bare-handed player's raw melee damage — `Player.createAttributes()`'s
-/// own `.add(Attributes.ATTACK_DAMAGE, 1.0)`, **not** `LivingEntity`'s generic
-/// `RangedAttribute` default of `2.0` a player would otherwise inherit.
+/// A bare-handed player's raw melee damage — vanilla's own player attribute
+/// builder's
+/// own `.add(Attributes.ATTACK_DAMAGE, 1.0)`, **not** the generic living-entity
+/// ranged-attribute default of `2.0` a player would otherwise inherit.
 ///
 /// **No longer what every hit deals.** [`apply_attack`] now resolves the held
 /// item through [`lodestone_entity::equipment`]'s real `ATTACK_DAMAGE` modifier
@@ -290,20 +294,21 @@ const MILLIS_PER_TICK: u128 = 50;
 /// read from the same line of the jar (pinned equal by
 /// `bare_hand_damage_is_the_player_attribute_base`).
 ///
-/// Still not modelled: `Player.attack`'s `baseDamageScaleFactor()`
+/// Still not modelled: vanilla's own player-attack step's base-damage-scale
+/// factor
 /// (cooldown-scaled damage) and the critical-hit bonus, because there is no
 /// server-tracked attack-strength ticker to read, so every hit is treated as
 /// full-strength.
 const PLAYER_BARE_HAND_ATTACK_DAMAGE: f32 = 1.0;
 
 /// The melee knockback-bonus power a **sprinting** attacker's hit applies,
-/// matching `Player.attack`'s `knockbackAttack` bonus exactly:
+/// matching vanilla's own player-attack step's own sprint-knockback bonus exactly:
 /// `causeExtraKnockback(entity, this.getKnockback(entity, damageSource) +
-/// (knockbackAttack ? 0.5F : 0.0F), ...)` (`Player.java:987-988`), where
-/// `knockbackAttack = this.isSprinting() && fullStrengthAttack`
-/// (`Player.java:963-966`). `getKnockback` itself resolves to the attacker's
-/// `minecraft:attack_knockback` attribute (registry default `0.0`,
-/// `Attributes.java:18`) — `0.0` for a bare-handed player, since this crate
+/// (knockbackAttack ? 0.5F : 0.0F), ...)`, where
+/// `knockbackAttack = this.isSprinting() && fullStrengthAttack`.
+/// Vanilla's own "get knockback" getter itself resolves to the attacker's
+/// `minecraft:attack_knockback` attribute (registry default `0.0`)
+/// — `0.0` for a bare-handed player, since this crate
 /// has no weapon/enchantment model to add to it — so a **non-sprinting**
 /// attack's total knockback power is exactly `0.0`. That is not a
 /// placeholder: it is the literal jar formula for the one case this crate can
@@ -314,7 +319,7 @@ const PLAYER_BARE_HAND_ATTACK_DAMAGE: f32 = 1.0;
 const SPRINT_ATTACK_KNOCKBACK_POWER: f64 = 0.5;
 
 /// Cadence of the air-supply/drowning-damage tick ([`crate::vitals`]).
-/// Vanilla ticks `LivingEntity.baseTick`'s water-breath block once per real
+/// Vanilla ticks its own generic per-tick base update's water-breath block once per real
 /// server tick (20 TPS); this crate has no fixed tick loop (see the module
 /// docs), so — exactly like [`TIME_SYNC_INTERVAL`] standing in for "every 20
 /// ticks" — a wall-clock interval of [`MILLIS_PER_TICK`] stands in for "every
@@ -431,10 +436,10 @@ pub trait EntitySource: Send + Sync {
 /// The order is load-bearing and the reason this is one function rather than
 /// two call sites. A client that receives an `ADD_ENTITY` of type
 /// `minecraft:player` before it holds a `PlayerInfo` for that uuid **discards
-/// the spawn** — `ClientPacketListener.createEntityFromPacket` returns `null`
-/// and logs "Server attempted to add player prior to sending player info"
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/
-/// ClientPacketListener.java:591-604`). So the roster adds must precede the
+/// the spawn** — vanilla's own client-side "create entity from packet" step
+/// returns `null`
+/// and logs "Server attempted to add player prior to sending player info".
+/// So the roster adds must precede the
 /// spawn, in the same pass, and both must come from
 /// [`crate::players::PlayerRegistry::view`]'s single lock acquisition — two
 /// separate reads could interleave a join between them and produce precisely
