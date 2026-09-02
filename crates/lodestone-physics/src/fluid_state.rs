@@ -2,9 +2,9 @@
 //!
 //! Vanilla computes, once per tick in its own per-tick base update, a
 //! per-fluid summary of how the entity's box sits in water and lava: the
-//! fluid **height** it reaches (`getFluidHeight`, `> 0` ⇒
+//! fluid **height** it reaches (vanilla's own fluid-height getter, `> 0` ⇒
 //! [`FluidState::in_water`]/[`FluidState::in_lava`]) and whether the **eye**
-//! is submerged (`isEyeInFluid`). Those two are *distinct* — the box can
+//! is submerged (vanilla's own eye-in-fluid check). Those two are *distinct* — the box can
 //! intersect water while the eye is in open air (wading), and the eye can
 //! be under while the feet are not (at a ledge) — and vanilla tracks water
 //! and lava **separately**. This module reproduces that distinction
@@ -17,9 +17,10 @@
 //!
 //! # Presence vs. height
 //!
-//! Vanilla derives presence from height (`isInFluid = getFluidHeight > 0`), and
-//! height from the per-block fluid **level** (`getHeight = hasSameAbove ? 1 :
-//! amount/9`). Where the world exposes that level via
+//! Vanilla derives presence from height (its own "is in fluid" check is
+//! `height > 0`), and height from the per-block fluid **level** (its own
+//! per-block height formula: `1.0` if the same fluid sits directly above,
+//! else `amount/9`). Where the world exposes that level via
 //! [`CollisionView::fluid_at`], this reproduces it exactly (the surface-bobbing
 //! case needs it). Where the world only exposes the coarse
 //! [`CollisionView::is_water`]/[`CollisionView::is_lava`] presence booleans — as
@@ -30,8 +31,8 @@
 //! # Widths (load-bearing)
 //!
 //! Vanilla's own per-block fluid-height getter is a **`float`** (`amount /
-//! 9.0F`), added to a `double` `fluidBottom`; vanilla's own eye-Y accessor
-//! adds a **`float`** `eyeHeight` to a `double` `position.y`. Both
+//! 9.0F`), added to a `double` fluid-bottom value; vanilla's own eye-Y
+//! accessor adds a **`float`** eye-height value to a `double` `position.y`. Both
 //! float→double promotions are reproduced at the same places, because the
 //! server re-derives eye-in-water from the position we report and a
 //! `0.001`-scale disagreement at the waterline flips the boolean.
@@ -58,9 +59,10 @@ pub struct FluidState {
     /// for lava.
     pub lava_height: f64,
     /// Vanilla's own eye-in-fluid check for water — the eye block-column
-    /// holds water spanning the eye Y. On its own this is *not*
-    /// `isUnderWater`; combine with [`Self::in_water`] via
-    /// [`Self::under_water`], exactly as vanilla's `wasEyeInWater && isInWater`.
+    /// holds water spanning the eye Y. On its own this is *not* vanilla's own
+    /// is-underwater check; combine with [`Self::in_water`] via
+    /// [`Self::under_water`], exactly as vanilla's own "eye was in water and
+    /// box is in water" check.
     pub eye_in_water: bool,
     /// Vanilla's own eye-in-fluid check for lava.
     pub eye_in_lava: bool,
@@ -206,8 +208,9 @@ fn fluid_kind_at(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> Option<Flu
 ///
 /// Height is a **`float`**. When [`CollisionView::fluid_at`] gives the level, the
 /// own-height is `amount / 9.0F`; without it (coarse presence only) a present cell
-/// is a full cell, so height is `1.0`. `hasSameAbove` checks the cell directly
-/// above for the same fluid, via the same fine-then-coarse resolution.
+/// is a full cell, so height is `1.0`. Vanilla's own "has same above" check
+/// tests the cell directly above for the same fluid, via the same
+/// fine-then-coarse resolution.
 ///
 /// # A known, narrow approximation
 ///
