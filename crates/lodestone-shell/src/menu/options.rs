@@ -138,7 +138,7 @@ use super::widget::{self, LayoutElement, Widget};
 /// `OptionsList.BIG_BUTTON_WIDTH` — an `addBig` row, and
 /// also the row width `getRowWidth()` returns (`:64-66`).
 pub const BIG_BUTTON_WIDTH: f32 = 310.0;
-/// The width `OptionInstance.createButton(options)` defaults to
+/// The width vanilla's own option-instance type's create-button call defaults to
 ///, i.e. every `addSmall` control.
 /// `Button.DEFAULT_WIDTH` is the same 150.
 pub const SMALL_BUTTON_WIDTH: f32 = widget::DEFAULT_WIDTH;
@@ -154,9 +154,9 @@ pub const COLUMN_PITCH: f32 = 160.0;
 /// 2` because that is how the jar spells it, and because the two would silently
 /// stop agreeing if `getRowWidth()` ever changed alone.
 pub const ROW_LEFT_INSET: f32 = 155.0;
-/// `AbstractSelectionList.getFirstEntryY()`'s `getY() + 2`.
+/// Vanilla's own abstract selection-list base's get-first-entry-y accessor's `getY() + 2`.
 pub const LIST_TOP_INSET: f32 = 2.0;
-/// `AbstractSelectionList.Entry.getContentY()`'s `getY() + 2` (`:481-483`) —
+/// Vanilla's own abstract selection-list base's entry's get-content-y accessor's `getY() + 2` (`:481-483`) —
 /// where a row's widget is placed inside its 25 px entry.
 pub const ENTRY_CONTENT_INSET: f32 = 2.0;
 /// The `int lineHeight = 9` in `OptionsList.addHeader`,
@@ -172,7 +172,7 @@ pub const HEADER_PADDING_BOTTOM: f32 = 4.0;
 
 /// `HeaderAndFooterLayout.DEFAULT_HEADER_AND_FOOTER_HEIGHT` — every
 /// `OptionsSubScreen`'s header band, and *every* page's footer band
-/// (`OptionsSubScreen.java` takes the 1-argument constructor).
+/// (vanilla's own options-sub-screen base takes the 1-argument constructor).
 pub const SUB_HEADER_HEIGHT: f32 = layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT;
 /// The footer band, on every page including the root.
 pub const FOOTER_HEIGHT: f32 = layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT;
@@ -190,8 +190,8 @@ pub const GRID_PADDING_H: i32 = 4;
 pub const GRID_PADDING_BOTTOM: i32 = 4;
 /// `OptionsScreen.COLUMNS`.
 pub const GRID_COLUMNS: usize = 2;
-/// `Button.builder(GUI_DONE, …).width(200)` (`OptionsSubScreen.java`,
-/// `OptionsScreen.java`).
+/// `Button.builder(GUI_DONE, …).width(200)` (vanilla's own options-sub-screen base,
+/// vanilla's own options-screen rendering).
 pub const DONE_WIDTH: f32 = 200.0;
 /// Every menu button's height — `Button.DEFAULT_HEIGHT`.
 pub const WIDGET_H: f32 = widget::DEFAULT_HEIGHT;
@@ -201,7 +201,7 @@ pub const WIDGET_H: f32 = widget::DEFAULT_HEIGHT;
 ///
 /// This is the **shortest** content band any `gui_scale` can produce:
 /// `calculate_gui_scale` clamps the logical canvas to at least
-/// [`crate::config::MIN_SCALED_HEIGHT`] (vanilla's `Window.java`), so a band
+/// [`crate::config::MIN_SCALED_HEIGHT`] (vanilla's own gui-scale calculation), so a band
 /// of `MIN_SCALED_HEIGHT - header - footer` is available at every scale and the
 /// window derived from it can never overrun the footer. Deliberately
 /// conservative on a tall canvas — see the module docs' departure (3).
@@ -521,12 +521,12 @@ pub enum LiveOption {
     /// `options.attackIndicator` →
     /// [`crate::config::Options::attack_indicator`].
     ///
-    /// Three states, not a boolean: `AttackIndicatorStatus` is
+    /// Three states, not a boolean: vanilla's own attack-indicator-status enum is
     /// `OFF, CROSSHAIR, HOTBAR` and the cycle
     /// visits them in that declaration order, `CloudStatus`'s shape.
     ///
     /// **Another whole-label option** — its stringifier is
-    /// `(caption, value) -> ((AttackIndicatorStatus)value).caption()`
+    /// vanilla's own attack-indicator-status enum's own caption call
     ///, which discards the caption exactly as
     /// `cloudStatus`' and `inactivityFpsLimit`' do. See
     /// [`Self::value_is_the_whole_label`].
@@ -540,7 +540,7 @@ pub enum LiveOption {
     AttackIndicator,
     /// `options.particles` → [`crate::config::Options::particles`].
     ///
-    /// Three states, `CloudStatus`'s shape: `ParticleStatus` is
+    /// Three states, `CloudStatus`'s shape: vanilla's own particle-status enum is
     /// `ALL, DECREASED, MINIMAL` and the cycle visits
     /// them in that declaration order. **Another whole-label option** — its
     /// stringifier is `(caption, value) -> value.caption()`,
@@ -749,11 +749,11 @@ impl LiveOption {
     /// (`(caption, value) -> value.caption()`, vanilla's own options class), so it joins
     /// `CloudStatus` here — vanilla's "Reduce FPS when" button reads "AFK" or
     /// "Minimized" alone. `attackIndicator`'s is the same again
-    /// (`(caption, value) -> ((AttackIndicatorStatus)value).caption()`), so
+    /// (vanilla's own attack-indicator-status enum's own caption call), so
     /// vanilla's Attack Indicator button reads "Crosshair", never
     /// "Attack Indicator: Crosshair".
     ///
-    /// `particles`' is the same shape again (`ParticleStatus.caption()`), so
+    /// `particles`' is the same shape again (vanilla's own particle-status enum's own caption call), so
     /// vanilla's Particles button reads "Decreased" alone.
     ///
     /// These are the only four, and the sweep
@@ -1076,7 +1076,7 @@ impl Cell {
 /// sqrt(v)`; both default to `1.0`, and `sqrt(1.0) == 1.0`, so the xmap does
 /// not change the number recorded here.
 ///
-/// Exhaustive over `grep -n "UnitDouble.INSTANCE" Options.java` — every
+/// Exhaustive over a grep of `"UnitDouble.INSTANCE"` in vanilla's own persisted-options declarations — every
 /// accessor that string touches is listed, so a slider added later that is
 /// *not* here is provably not one of these, rather than merely uncounted.
 /// Every `OptionInstance` on this tree that carries a tooltip, keyed by
@@ -1103,7 +1103,7 @@ impl Cell {
 ///
 /// ## What is in it, and what is deliberately not
 ///
-/// Derived from `grep -n cachedConstantTooltip Options.java` (34 sites) plus
+/// Derived from a grep of `cachedConstantTooltip` in vanilla's own persisted-options declarations (34 sites) plus
 /// `OnlineOptionsScreen`'s two `withTooltip` call sites, resolved through the
 /// declaring field name and then through `en_us.json`. Of those, **33 land on rows
 /// this tree has**; two do not and are not omissions:
@@ -1204,7 +1204,8 @@ const UNIT_DOUBLE_DEFAULTS: &[(&str, f32)] = &[
     ("chatScale", 1.0),
     // vanilla's own options class.
     ("chatWidth", 1.0),
-    // vanilla's own options class, default `ChatComponent.defaultUnfocusedPct()`
+    // vanilla's own options class, default vanilla's own chat-component
+    // rendering's default-unfocused-pct accessor
     // = `70.0 / (getHeight(1.0) - 20)` = `70.0 / 160.0`
     //.
     ("chatHeightUnfocused", 70.0 / 160.0),
@@ -1405,7 +1406,7 @@ const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
     ("sprintWindow", SliderRange { min: 0, max: 10 }, 7),
     // vanilla's own options class: `IntRange(30, 110)`, default `70`. The
     // `Codec.DOUBLE.xmap` on the line between them is a **persistence** codec
-    // (the 7-arg `OptionInstance` overload, `OptionInstance.java`), not
+    // (the 7-arg `OptionInstance` overload, vanilla's own option-instance type), not
     // a `ValueSet::xmap`, so it does not touch the slider at all — reading it
     // as one would put the handle at `(int)(70 * 40 + 70)`, far off the track.
     ("fov", SliderRange { min: 30, max: 110 }, 70),
@@ -1624,7 +1625,7 @@ pub fn graphics_preset_slider_fraction(preset: crate::config::GraphicsPreset) ->
 
 /// The inverse of [`graphics_preset_slider_fraction`] — the **drag** write
 /// side. Vanilla's `SliderableValueSet` default `fromSliderValue`
-/// (`OptionInstance.java`, `IntRangeBase`'s, which `SliderableEnum`
+/// (vanilla's own option-instance type, `IntRangeBase`'s, which `SliderableEnum`
 /// inherits): `floor(map(slider, 0, 1, 0, size))`, clamping a `slider >= 1.0`
 /// down first so the top of the track cannot floor *past* the last index.
 #[must_use]
@@ -1675,7 +1676,7 @@ pub fn mouse_wheel_slider_fraction(value: f32) -> f32 {
 }
 
 /// `Options.genericValueLabel`:
-/// `Component.translatable("options.generic_value", caption, value)`, whose
+/// vanilla's own translatable-component construction for "options.generic_value", caption, value, whose
 /// `en_us.json` pattern is `"%s: %s"`.
 #[must_use]
 pub fn generic_value_label(caption: &str, value: &str) -> String {
@@ -1752,7 +1753,8 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::MouseWheelSensitivity => {
             format!("{:.2}", options.mouse_wheel_sensitivity)
         }
-        // `value == 0.0 ? CommonComponents.optionStatus(caption, false) :
+        // `value == 0.0 ?` vanilla's own common-components option-status helper
+        // applied to `(caption, false)` `:
         // percentValueLabel(caption, value)` — the one
         // chat slider with an OFF caption, and `optionStatus(caption, false)`
         // is itself `genericValueLabel(caption, OPTION_OFF)`, so composing
@@ -1764,10 +1766,12 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
                 percent_value(options.chat_scale)
             }
         }
-        // `pixelValueLabel(caption, ChatComponent.getWidth(value))`
+        // `pixelValueLabel(caption,` vanilla's own chat-component rendering's
+        // get-width accessor applied to `value)`
         //.
         LiveOption::ChatWidth => pixel_value(chat_width_px(options.chat_width)),
-        // `pixelValueLabel(caption, ChatComponent.getHeight(value))`
+        // `pixelValueLabel(caption,` vanilla's own chat-component rendering's
+        // get-height accessor applied to `value)`
         //.
         LiveOption::ChatHeightFocused => pixel_value(chat_height_px(options.chat_height_focused)),
         // As above.
@@ -1923,7 +1927,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             crate::config::InactivityFpsLimit::Minimized => "Minimized".to_string(),
             crate::config::InactivityFpsLimit::Afk => "AFK".to_string(),
         },
-        // `Component.translatable(value.getKey())` — `en_us.json`'s
+        // Vanilla's own translatable-component construction for `value.getKey()` — `en_us.json`'s
         // `options.graphics.fast`/`.fancy`/`.fabulous`/`.custom`.
         LiveOption::GraphicsPreset => match options.graphics_preset {
             crate::config::GraphicsPreset::Fast => "Fast".to_string(),
@@ -1959,7 +1963,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
                 options.menu_background_blurriness.to_string()
             }
         }
-        // `AttackIndicatorStatus.caption()` — the enum's own component, keyed
+        // vanilla's own attack-indicator-status enum's own caption call — the enum's own component, keyed
         // `options.off`/`options.attack.crosshair`/`options.attack.hotbar`
         //, i.e. "OFF"/"Crosshair"/"Hotbar" in
         // `en_us.json`.
@@ -1971,7 +1975,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             crate::config::AttackIndicator::Crosshair => "Crosshair".to_string(),
             crate::config::AttackIndicator::Hotbar => "Hotbar".to_string(),
         },
-        // `ParticleStatus.caption()` — the enum's own component, keyed
+        // vanilla's own particle-status enum's own caption call — the enum's own component, keyed
         // `options.particles.all`/`.decreased`/`.minimal`
         //, i.e. "All"/"Decreased"/"Minimal" in
         // `en_us.json`. Note these are **not** OFF/ON-shaped: even `Minimal`
@@ -2260,7 +2264,7 @@ static VIDEO: &[Entry] = &[
     ),
 ];
 
-/// `ControlsScreen.addOptions` (`controls/ControlsScreen.java`).
+/// `ControlsScreen.addOptions` (vanilla's own controls-screen rendering's own source file).
 ///
 /// The four `toggle*` options are the only ones in the tree whose caption is a
 /// **keybind** name rather than an `options.*` key — `key.sneak`, `key.sprint`,
@@ -2300,7 +2304,7 @@ static CONTROLS: &[Entry] = &[
 /// `MouseSettingsScreen.addOptions` (`:23-29`).
 ///
 /// `rawMouseInput` is included: vanilla appends it only when
-/// `InputConstants.isRawMouseInputSupported()`, which is true on every desktop
+/// vanilla's own input-constants raw-mouse-input-supported check, which is true on every desktop
 /// GLFW build, so the seven-control shape is the one a player sees.
 ///
 /// **Scroll Sensitivity and both inverts are live** —
@@ -2342,8 +2346,8 @@ static MOUSE: &[Entry] = &[
 
 /// `SoundOptionsScreen.addOptions` (`:18-24`).
 ///
-/// The eleven volume sliders are `SoundSource.values()` in declaration order
-/// (`sounds/SoundSource.java`) with `MASTER` pulled out into the `addBig`
+/// The eleven volume sliders are vanilla's own sound-category enum's own values in declaration order
+/// (vanilla's own sound-source declarations' own source file) with `MASTER` pulled out into the `addBig`
 /// row; their captions are `soundCategory.<name>`.
 ///
 /// **All eleven are live.** Each carries its own
@@ -2550,7 +2554,7 @@ static ACCESSIBILITY: &[Entry] = &[
 
 /// `SkinCustomizationScreen.addOptions` (`:20-31`): the seven
 /// `PlayerModelPart`s in declaration order
-/// (`world/entity/player/PlayerModelPart.java`) as `onOffBuilder` cycle
+/// (vanilla's own player-model-part declarations' own source file) as `onOffBuilder` cycle
 /// buttons, then `mainHand`.
 ///
 /// These seven are the only controls in the tree that are **not**
@@ -2708,7 +2712,7 @@ pub enum SettingsPage {
     /// the whole screen.
     ///
     /// Reached from the **root grid**, unlike `KeyBinds` — vanilla's own
-    /// wiring (`OptionsScreen.java`, `helper.addChild(this.openScreenButton(
+    /// wiring (vanilla's own options-screen rendering, `helper.addChild(this.openScreenButton(
     /// LANGUAGE, ...))`, the same `helper.addChild` sequence [`ROOT_GRID`]
     /// mirrors).
     Language,
@@ -2724,7 +2728,7 @@ pub enum SettingsPage {
     /// cover.
     ///
     /// Reached from the **root grid**, vanilla's own wiring
-    /// (`OptionsScreen.java`, `helper.addChild(this.openScreenButton(
+    /// (vanilla's own options-screen rendering, `helper.addChild(this.openScreenButton(
     /// TELEMETRY, ...))`).
     ///
     /// **Considered departure**: vanilla itself disables this exact button
@@ -2746,7 +2750,7 @@ pub enum SettingsPage {
     /// (pack-format validation).
     ///
     /// Reached from the **root grid**, vanilla's own wiring
-    /// (`OptionsScreen.java`, `helper.addChild(this.openScreenButton(
+    /// (vanilla's own options-screen rendering, `helper.addChild(this.openScreenButton(
     /// RESOURCEPACK, () -> new PackSelectionScreen(...)))`).
     ResourcePacks,
 }
@@ -3080,7 +3084,7 @@ pub fn entry_of_control(page: SettingsPage, control: usize) -> Option<usize> {
 /// One entry's height.
 ///
 /// `addEntry(entry)` uses the list's `defaultEntryHeight` of 25
-/// (`AbstractSelectionList.java`, `OptionsList.java`); `addHeader`
+/// (vanilla's own abstract selection-list base, vanilla's own options-list type); `addHeader`
 /// passes `paddingTop + lineHeight + 4` explicitly,
 /// where `paddingTop` is `0` for the first entry in the list and `18`
 /// otherwise (`:58`). That first-header case is the reason this takes an index
@@ -3207,7 +3211,7 @@ pub fn row_left(width: f32, column: u8) -> f32 {
 ///
 /// `list.updateSize(width, layout)` puts the list at
 /// `(0, layout.getHeaderHeight())` sized `(width, layout.getContentHeight())`
-/// (`OptionsSubScreen.java`, `AbstractSelectionList.java`), so the
+/// (vanilla's own options-sub-screen base, vanilla's own abstract selection-list base), so the
 /// list's own `getY()` is the header height and everything below is
 /// `getFirstEntryY()` + the entry walk + `getContentY()`'s inset.
 #[must_use]
@@ -4154,7 +4158,7 @@ mod tests {
         //
         // Each figure counts focusable widgets including the page's own footer,
         // which is how the census counted the root's Done. Online's 8 is
-        // `OnlineOptionsScreen.java`'s seven controls (`:85-116`) plus its Done.
+        // vanilla's own online-options screen rendering's seven controls (`:85-116`) plus its Done.
         let expected = [
             (SettingsPage::Root, 13),
             (SettingsPage::Video, 32),
@@ -4571,7 +4575,7 @@ mod tests {
     /// `ChatComponent.getWidth`/`getHeight`, the
     /// percentages are `Options.percentValueLabel`'s `(int)(value * 100.0)`
     /// truncation, and `chatScale`'s OFF branch is
-    /// `CommonComponents.optionStatus(caption, false)`.
+    /// vanilla's own common-components option-status helper applied to `(caption, false)`.
     ///
     /// The load-bearing row is `chatOpacity`, which is **affine**:
     /// `percentValueLabel(caption, value * 0.9 + 0.1)`. The
@@ -5065,7 +5069,7 @@ mod tests {
         /// Hypothesis A, "endpoint span": map the value linearly onto
         /// `min..=max`. This is the obvious reading of a range, and it is what
         /// you get by forgetting that vanilla's slider selects a **bucket**
-        /// (`fromSliderValue` floors, `OptionInstance.java`) rather
+        /// (`fromSliderValue` floors, vanilla's own option-instance type) rather
         /// than a point. Differs from vanilla's by up to half a bucket.
         pub fn endpoint_span(min: i32, max: i32, value: i32) -> f32 {
             ((f64::from(value - min) / f64::from(max - min)) as f32).clamp(0.0, 1.0)
@@ -5073,7 +5077,7 @@ mod tests {
 
         /// Hypothesis B, "unpinned centres": vanilla's bucket-centre `Mth.map`
         /// but *without* the two endpoint special cases at
-        /// `OptionInstance.java`. Correct in the interior, short of the
+        /// vanilla's own option-instance type. Correct in the interior, short of the
         /// ends by half a bucket — the failure that leaves a maxed-out slider
         /// drawing its handle inside the track.
         pub fn unpinned_centres(min: i32, max: i32, value: i32) -> f32 {
@@ -5565,7 +5569,7 @@ mod tests {
     /// other's bus while both labels read correctly and every round-trip test
     /// still passes. The expected mapping originates outside this file — it is
     /// [`crate::config::SOUND_CATEGORY_NAMES`], which is
-    /// `SoundSource.getName()` in `SoundSource` declaration order, the same list
+    /// vanilla's own sound-category name lookup in `SoundSource` declaration order, the same list
     /// the file keys and the mixer buses are derived from.
     #[test]
     fn sound_rows_index_the_category_they_name() {
@@ -5631,7 +5635,7 @@ mod tests {
     #[test]
     fn only_slider_backed_options_are_sliders() {
         // `OptionInstance.createButton` dispatches on the `ValueSet`, and
-        // `ClampingLazyMaxIntRange.createCycleButton()` is `true`
+        // vanilla's own clamping-lazy-max-int-range's create-cycle-button call is `true`
         // — so GUI Scale, an int range, is a
         // **cycle** button. Getting this backwards would draw a slider track
         // under the one option on the page that works.
