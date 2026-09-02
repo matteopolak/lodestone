@@ -69,11 +69,10 @@
 //! # What a client actually experiences
 //!
 //! Vanilla's own pushable-by selector has a clause that changes the whole
-//! shape of the port:
-//!
-//! ```text
-//! if (!entity.level().isClientSide() || input instanceof Player player && player.isLocalPlayer()) { … } else { return false; }
-//! ```
+//! shape of the port: the pusher admits the pushee only when the pusher's
+//! level is *not* client-side, **or** the pushee is a player and specifically
+//! the local player — any other case (in particular, a remote entity trying
+//! to push a remote player on a client) returns false outright.
 //!
 //! `entity` is the *pusher*, `input` the *pushee*. On a client, the only admissible
 //! pushee is the local player. Therefore:
