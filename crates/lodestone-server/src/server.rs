@@ -10195,7 +10195,7 @@ fn apply_release_use_item(
     if power < BOW_MIN_POWER {
         return false;
     }
-    // `BowItem.releaseUsing` resolves the ammunition *before* checking the power in
+    // Vanilla's own bow-item release-using routine resolves the ammunition *before* checking the power in
     // vanilla; the order is unobservable here because neither has a side effect
     // until both pass.
     let Some(ammo_slot) = find_item_slot(inventory, BOW_AMMUNITION) else {
@@ -10405,8 +10405,8 @@ fn apply_spectator_action(
             .find(|c| c.entity_id == target_id)
             .map(|c| c.position)
     })?;
-    // Vanilla's `isWithinEntityInteractionRange` grows the target's actual
-    // bounding box by this constant (`Player.INTERACTION_RANGE` for
+    // Vanilla's own is-within-entity-interaction-range check grows the target's actual
+    // bounding box by this constant (its own `INTERACTION_RANGE` for
     // spectator-camera checks) before measuring; this crate tracks no
     // per-entity bounding box, so a plain centre-to-centre distance against
     // the same 3-block figure is the disclosed narrowing.
@@ -10466,7 +10466,7 @@ fn swing_action(hand: u8) -> u8 {
 /// * `fall_resetting` — the same feet cell, since a climbable is something the
 ///   player is *inside*.
 /// * `block_damage_modifier` — the cell **below** the feet, at `y - 0.2`, which is
-///   vanilla's own `getOnPosLegacy()` offset (`Entity.getOnPos`'s `0.2` epsilon).
+///   vanilla's own `getOnPosLegacy()` offset (its own `getOnPos`'s `0.2` epsilon).
 ///   A plain `y - 1` is wrong for a player standing exactly on a block boundary.
 ///
 /// One `ChunkSource::block_state` call per cell, two cells — and `block_state` is
@@ -10496,7 +10496,7 @@ fn fall_sample<S: ChunkSource + ?Sized>(source: &S, x: f64, y: f64, z: f64, on_g
 ///
 /// Before this function the five damage sites each sent `encode_set_health` and
 /// nothing else, and `set_health(0.0)` does not raise a death screen — not in
-/// vanilla's client (`ClientPacketListener.handleSetHealth` only calls
+/// vanilla's client (its own client-side set-health handler only calls
 /// `hurtTo`/`setFoodLevel`/`setSaturation`) and not in this workspace's, whose
 /// `NetUpdate::Death` is decoded from `player_combat_kill` alone. The visible
 /// result was a player pinned at zero hearts with no screen and no respawn
@@ -10583,8 +10583,8 @@ where
     P: ServerProtocol,
 {
     // Ahead of the health packet, matching vanilla's order: `indicateDamage`
-    // fires inside `hurtServer`, while the health value rides the next
-    // `ServerPlayer.doTick`. The client folds this into the view bob's countdown,
+    // fires inside `hurtServer`, while the health value rides vanilla's own
+    // per-player tick routine. The client folds this into the view bob's countdown,
     // so it wants to arrive with (or before) the health drop it explains.
     if let Some(direction) = hurt {
         apply(
@@ -10593,7 +10593,7 @@ where
             proto.encode_hurt_animation(player_entity_id, direction.yaw_degrees()),
         )
         .await?;
-        // `LivingEntity.hurtServer`'s `playHurtSound`/`die`'s death sound,
+        // Vanilla's own `hurtServer`'s `playHurtSound`/`die`'s death sound,
         // folded into this same choke point for the reason this function's doc
         // gives. `died` picks the death sound instead of the hurt one on the
         // killing blow, matching the `encode_entity_event` branch below rather
@@ -10635,8 +10635,9 @@ where
             proto.encode_player_combat_kill(player_entity_id, &message),
         )
         .await?;
-        // `LivingEntity.die`'s own broadcast, which `ServerLevel.broadcastEntityEvent`
-        // sends to the dying player too (`ChunkMap.broadcastAndSend`). It is what
+        // Vanilla's own entity-die routine's own broadcast, which its own
+        // level broadcast-entity-event routine
+        // sends to the dying player too (its own chunk-map broadcast-and-send routine). It is what
         // starts the client's `deathTime` counter — the fall-over tilt the red
         // overlay persists through. The death *screen* comes from the packet above;
         // this is the body behind it, and without it the avatar stands upright
@@ -10656,8 +10657,8 @@ where
 /// reported (issue #262).
 ///
 /// Reusing the remembered y is not an approximation: `move_player_rot` and
-/// `move_player_status_only` are precisely the two packets vanilla's
-/// `LocalPlayer.sendPosition` picks when position did *not* change this tick,
+/// `move_player_status_only` are precisely the two packets vanilla's own
+/// client-side send-position routine picks when position did *not* change this tick,
 /// so the last reported y is the current y by construction. Feeding it back
 /// with the new `on_ground` is therefore the same `(y, on_ground)` pair the
 /// tracker would have seen had the client sent a position packet.
@@ -10683,7 +10684,7 @@ async fn fall_status_sample<T, P, S>(
     // `#minecraft:bypasses_invulnerability` (only `out_of_world` and
     // `generic_kill` are), so an invulnerable player takes none of it. The
     // *tracker* still samples, so the fall is still tracked; only the hit is
-    // skipped, which is `Player.isInvulnerableTo`'s own placement.
+    // skipped, which is vanilla's own is-invulnerable-to check's own placement.
     invulnerable: bool,
     // Issue #338's `minecraft:deaths` counter, threaded only to reach
     // `publish_health` — see its own parameter comment for why the count belongs
