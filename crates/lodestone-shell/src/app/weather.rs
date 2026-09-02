@@ -116,7 +116,7 @@ impl WeatherTracker {
 /// # What each answer costs, and what this doc used to claim
 ///
 /// Vanilla samples a heightmap, a biome and a lightmap **per column** (441 of each
-/// at the default radius, `WeatherEffectRenderer.java`), reading a level it
+/// at the default radius, in its own weather-effect rendering), reading a level it
 /// owns directly. This client reaches the world through
 /// [`crate::net::entity_light_at`] and [`lodestone_client::ClientHandle`], each of
 /// which takes the client's world lock **per call**.
@@ -144,7 +144,7 @@ impl WeatherTracker {
 /// **This doc also used to list "no per-column terrain height" and "sky
 /// visibility is the camera's, not the column's" as two separate divergences,
 /// and that was wrong too — they were one bug wearing two descriptions.**
-/// `WeatherEffectRenderer.extractRenderState` has no `canSeeSky` check at all;
+/// Vanilla's own weather-effect render-state extraction has no sky-visibility check at all;
 /// the *only* thing that keeps rain out of a room or a cave is the
 /// `MOTION_BLOCKING` heightmap clamp on the column's own `y0`/`y1`
 /// (`max(camera_y ± radius, terrainHeight)`), because a column clamped to the
@@ -314,14 +314,14 @@ impl ProbeMemo {
         table[index].1.as_ref().map(read)
     }
 
-    /// `(x, z)`'s `MOTION_BLOCKING` height — vanilla's `Level.getHeight`, the
+    /// `(x, z)`'s `MOTION_BLOCKING` height — vanilla's own world-height query, the
     /// world-`y` of the first non-passable-or-fluid position above the ground,
     /// i.e. where rain lands — with the world-dimensions and heightmap reads
     /// memoised. `None` at either hop is "the server has not told us yet",
     /// exactly like [`Self::precipitation_at`]'s `None`; the caller decides
     /// the fallback.
     ///
-    /// The stored heightmap value is `topMatchingY + 1 - min_y`
+    /// The stored heightmap value is the matching column top plus one minus `min_y`
     /// (`docs/motion-blocking-heightmap.md`), so `min_y` is added back here to
     /// return an absolute world-`y`.
     fn column_top_at(
@@ -343,8 +343,8 @@ impl ProbeMemo {
 
     /// The whole per-column resolve: `(x, y, z)`'s standing biome translated to
     /// a [`lodestone_render::Precipitation`] via vanilla's own
-    /// `getPrecipitationAt`, height-adjusted the same way
-    /// `Biome.getHeightAdjustedTemperature` is, with all
+    /// precipitation-at-position resolve, height-adjusted the same way
+    /// vanilla's own height-adjusted-temperature computation is, with all
     /// three world reads memoised.
     ///
     /// The three reads arrive as closures because that is what lets one type own
@@ -443,8 +443,8 @@ pub(super) fn section_key(
 impl ShellWeatherProbe {
     /// Resolve `(x, y, z)`'s standing biome and translate its declared
     /// climate to a [`lodestone_render::Precipitation`] via vanilla's own
-    /// `getPrecipitationAt`, height-adjusted the same
-    /// way `Biome.getHeightAdjustedTemperature` is.
+    /// precipitation-at-position resolve, height-adjusted the same
+    /// way vanilla's own height-adjusted-temperature computation is.
     ///
     /// `None` at any hop — world not loaded, section elided (all-air), the
     /// climate table still empty, or the biome's own `temperature`/
@@ -492,7 +492,7 @@ impl lodestone_render::WeatherProbe for ShellWeatherProbe {
 
     fn precipitation(&self, x: i32, y: i32, z: i32) -> lodestone_render::Precipitation {
         // No camera-level "can I see the sky" gate here, deliberately: vanilla's
-        // `WeatherEffectRenderer.extractRenderState` has none either. The
+        // own weather-effect render-state extraction has none either. The
         // per-column `column_top` clamp above is what keeps rain out of a room
         // or a cave — see the struct doc for the incident this replaced.
         //
@@ -605,7 +605,7 @@ mod tests {
     /// `biome_sky_colours_resolve_by_holder_id` fixture).
     const WARM_BIOME: u32 = 1;
     /// Biome holder id whose climate snows (temperature 0.0, below vanilla's
-    /// `warmEnoughToRain` 0.15 at `Biome.java`).
+    /// own warm-enough-to-rain threshold of 0.15).
     const COLD_BIOME: u32 = 7;
 
     /// Drives the **production** resolve ([`ProbeMemo::precipitation_at`]) with

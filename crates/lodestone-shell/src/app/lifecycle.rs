@@ -97,11 +97,11 @@ impl ApplicationHandler for WindowApp {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        // Vanilla's `FramerateLimitTracker::onInputReceived`, called from
-        // `KeyboardHandler.java` and three sites in `MouseHandler.java`
+        // Vanilla's own framerate-limit tracker resets its AFK clock on input,
+        // called from the keyboard and mouse handlers
         // (key press, mouse press, scroll) — deliberately **not**
         // `CursorMoved`, which vanilla never routes through it. Resets the AFK
-        // clock `inactivityFpsLimit` reads (`app::pacing::effective_target_fps`).
+        // clock the inactivity FPS limit reads (`app::pacing::effective_target_fps`).
         if matches!(
             event,
             WindowEvent::KeyboardInput { .. }
@@ -169,8 +169,8 @@ impl ApplicationHandler for WindowApp {
                 // the sim keeps ticking (see `FramePacer`), which is what keeps
                 // keep-alives and movement flowing to the server.
                 //
-                // Gated on `Options.pauseOnLostFocus` (F3+P) — vanilla's
-                // `Minecraft.pauseIfInactive` calls `pauseGame` only when the
+                // Gated on the pause-on-lost-focus option (F3+P) — vanilla's
+                // own lost-focus handling pauses only when the
                 // option is on; the pointer release and the
                 // pacer's background throttle are a different mechanism (mouse
                 // capture, frame rate). The opt-in benchmark keeps foreground
@@ -218,8 +218,8 @@ impl ApplicationHandler for WindowApp {
             // viewport pan. Its own arm before the menu one below, which would
             // otherwise try to hover a menu row on a screen that has none.
             // The command-suggestion dropdown's pointer half — vanilla's
-            // `CommandSuggestions.mouseClicked`/`mouseScrolled` plus the
-            // `mouseMoved` hover inside `SuggestionsList.extractRenderState`.
+            // own click and scroll handling for the popup, plus the
+            // hover tracking inside its list-rendering pass.
             //
             // Its own three arms rather than a branch inside the menu ones
             // because `Screen::Chat` is not `routes_menu_input`: the chat box
@@ -229,8 +229,8 @@ impl ApplicationHandler for WindowApp {
             WindowEvent::CursorMoved { position, .. } if self.ui.is_chat_open() => {
                 self.cursor = (position.x as f32, position.y as f32);
                 // Hover **only when the pointer actually moved**, which is what
-                // this arm firing already means (`mouseMoved` in vanilla is
-                // `lastMouse != (mouseX, mouseY)`). Without that gate the row
+                // this arm firing already means (vanilla's own mouse-moved
+                // handling gates on the position actually changing). Without that gate the row
                 // under a stationary pointer would fight the arrow keys for the
                 // selection every frame.
                 if let Some(row) = self.suggestion_row_under_cursor() {
@@ -241,7 +241,7 @@ impl ApplicationHandler for WindowApp {
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     if let Some(row) = self.suggestion_row_under_cursor() {
                         // The suggestion popup gets first refusal, matching
-                        // `CommandSuggestions.mouseClicked`'s own precedence
+                        // vanilla's own click-handling precedence
                         // over the scrollback beneath it.
                         self.chat_input.suggestion_click(row);
                     } else {
@@ -253,20 +253,18 @@ impl ApplicationHandler for WindowApp {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } if self.ui.is_chat_open() => {
-                // `mouseScrolled` requires the pointer to be inside the rect —
+                // Vanilla's own mouse-wheel handling requires the pointer to be inside the rect —
                 // resolving a row is a stricter version of the same test, and the
                 // one place both come from.
                 if self.suggestion_row_under_cursor().is_some() {
                     self.chat_input.suggestion_scroll(wheel_notches(delta) as i32);
                 } else {
-                    // `ChatScreen.mouseScrolled`: the popup gets first refusal
-                    // (the arm above, mirroring `commandSuggestions
-                    // .mouseScrolled` returning `true`); everything else
+                    // Vanilla's chat-screen scroll handling: the popup gets first refusal
+                    // (the arm above, mirroring the command-suggestion popup's own
+                    // scroll handling returning "handled"); everything else
                     // scrolls the scrollback itself. Vanilla clamps the raw
                     // notch to a single unit *before* applying the ×7 "not
-                    // holding shift" multiplier
-                    // (`scrollY = Mth.clamp(scrollY, -1.0, 1.0);` then
-                    // `if (!hasShiftDown()) scrollY *= 7.0;`), so a precise
+                    // holding shift" multiplier, so a precise
                     // trackpad gesture is not amplified sevenfold — only a
                     // whole mouse-wheel click is.
                     let notch = wheel_notches(delta).clamp(-1.0, 1.0);
@@ -317,8 +315,8 @@ impl ApplicationHandler for WindowApp {
             }
             WindowEvent::MouseWheel { delta, .. } if self.ui.is_advancements() => {
                 if let Some((w, h)) = self.target.as_ref().map(RenderTarget::size) {
-                    // Vanilla's `mouseScrolled` passes `scrollY` straight into
-                    // `AdvancementTab.scroll(0, scrollY * 16)`, so the notch count
+                    // Vanilla's mouse-wheel handling passes the scroll delta straight into
+                    // the advancement tab's own scroll, multiplied by 16, so the notch count
                     // goes through verbatim.
                     self.scroll_advancements(wheel_notches(delta) as f32, w, h);
                 }
@@ -327,9 +325,9 @@ impl ApplicationHandler for WindowApp {
                 if crate::menu::nav::routes_menu_input(&self.ui) =>
             {
                 self.cursor = (position.x as f32, position.y as f32);
-                // A slider drag in progress owns the cursor: vanilla's
-                // `AbstractSliderButton.onDrag` keeps calling
-                // `setValueFromMouse` for as long as the button is held, whether
+                // A slider drag in progress owns the cursor: vanilla's own
+                // slider widget keeps updating its
+                // value from the mouse position for as long as the button is held, whether
                 // or not the cursor is still inside the widget. Hovering (and
                 // therefore re-highlighting some other row) while dragging would
                 // both move the keyboard cursor mid-drag and, worse, make the
@@ -396,11 +394,11 @@ impl ApplicationHandler for WindowApp {
                             if dragged {
                                 self.menu_slider_drag = Some(row);
                             } else {
-                                // `AbstractWidget.mouseClicked`: `playDownSound`
-                                // fires unconditionally before `onClick`, on
+                                // Vanilla's own widget click handling: the click
+                                // sound fires unconditionally before the click action, on
                                 // every activating click — a slider is the one
-                                // exception (`AbstractSliderButton` overrides
-                                // `playDownSound` to a no-op here and plays it on
+                                // exception (vanilla's slider widget overrides
+                                // the click sound to a no-op here and plays it on
                                 // *release* instead, handled below), which is
                                 // exactly why this arm is reached only on the
                                 // non-`dragged` branch. This was the owner's
@@ -415,11 +413,11 @@ impl ApplicationHandler for WindowApp {
                     }
                 }
                 if state == ElementState::Released && button == MouseButton::Left {
-                    // `AbstractSliderButton.onRelease`: the drag ends, and
+                    // Vanilla's own slider-release handling: the drag ends, and
                     // *this* is where a slider's click sound plays (its
-                    // `playDownSound` override is a no-op on press — see the
+                    // click-sound override is a no-op on press — see the
                     // press arm above) — only when a drag was actually live,
-                    // matching vanilla's `onRelease` being a widget method that
+                    // matching vanilla's release handling being a widget method that
                     // fires only for the widget that started the drag.
                     if self.menu_slider_drag.take().is_some() {
                         self.sim.play_ui_click_sound();
@@ -491,9 +489,9 @@ impl ApplicationHandler for WindowApp {
                 ) {
                     match state {
                         ElementState::Pressed => {
-                            // `AbstractContainerScreen.mouseClicked`'s own three-way:
+                            // Vanilla's own container-screen click handling three-way:
                             // the pick-item button clones (and it is *only* a clone for
-                            // a player with `instabuild`, which this screen already
+                            // a player with instant-build permission, which this screen already
                             // guarantees), shift quick-moves, everything else picks up.
                             // Vanilla's raw button number is 0 for left and 1 for
                             // right, and the clone arm passes whichever button was used.
@@ -669,10 +667,10 @@ impl ApplicationHandler for WindowApp {
                         (Some(InputAction::Use), ElementState::Released) => {
                             self.sim.end_use();
                         }
-                        // Middle-click by default (`Options.java` binds
-                        // `key.pickItem` to `Type.MOUSE, 2`), so unlike
+                        // Middle-click by default (vanilla's default options
+                        // bind `key.pickItem` to the middle mouse button), so unlike
                         // attack/use this is the *primary* route rather than the
-                        // rebound one. Press-only: `pickBlockOrEntity` is a
+                        // rebound one. Press-only: vanilla's pick-block-or-entity is a
                         // one-shot with no release edge.
                         (Some(InputAction::PickItem), ElementState::Pressed) => {
                             self.sim.pick_block_or_entity(self.ctrl_held);
@@ -769,10 +767,10 @@ impl ApplicationHandler for WindowApp {
                 }
             }
             // The multiplayer server list (issues #402, #445): the notch count
-            // goes through **verbatim**, as vanilla's `scrollY`, and
+            // goes through **verbatim**, as vanilla's own scroll delta, and
             // `MenuNav::scroll_server_list` turns it into
-            // `scrollY * scrollRate()` pixels — 18 px for a 36 px row
-            // (`AbstractScrollArea.java`, `AbstractSelectionList.java`).
+            // delta times a per-list scroll rate, in pixels — 18 px for a 36 px row
+            // (vanilla's own scroll-area and selection-list scrolling).
             //
             // **This used to collapse `dy` to `-1`/`0`/`+1` rows**, and that was
             // the owner's bug report: a list that jumps a whole 36 px entry per
@@ -812,9 +810,10 @@ impl ApplicationHandler for WindowApp {
             {
                 let dy = wheel_notches(delta);
                 // The same boundary transform the hotbar arm above uses, because
-                // vanilla computes it **once** for both: `MouseHandler.onScroll`
-                // hands one `scaledYOffset` to
-                // `screen().mouseScrolled(..)` and to `ScrollWheelHandler` alike.
+                // vanilla computes it **once** for both: its own mouse-scroll
+                // handling scales the raw offset once and
+                // hands the same scaled value to the screen's scroll handling and
+                // to the hotbar-cycling path alike.
                 // Deliberately **not** run through `accumulate_scroll`, which exists
                 // for the hotbar's sub-notch *quantization*: `cycle_slot` takes a
                 // discrete slot step so it must carry fractions until one is due,
@@ -938,8 +937,8 @@ impl WindowApp {
         // input is not being accepted.
         //
         // **Deliberately still a literal key, and vanilla agrees**: it
-        // checks `Screen.hasShiftDown()` — the raw modifier state — not
-        // `options.keyShift`, so rebinding sneak does *not* move
+        // checks the raw shift-modifier state — not
+        // the sneak key binding, so rebinding sneak does *not* move
         // shift-click. Same boundary as `menu_button_for`: container
         // gestures are UI chrome, not gameplay bindings. Both shifts
         // count, because this is asking "is a shift modifier down".
@@ -1138,7 +1137,7 @@ impl WindowApp {
             Some(KeyOutcome::Pause) => {
                 // Escape on a container screen **closes the container and
                 // returns to gameplay** — it does not open the pause menu.
-                // That is `Screen.onClose()` in vanilla, and it is why this
+                // That is a screen's own close handling in vanilla, and it is why this
                 // is an `else` rather than a close followed by `on_escape`:
                 // the old form paused *as well*, leaving the pause menu
                 // drawn over a menu that was still open server-side.
@@ -1216,7 +1215,7 @@ impl WindowApp {
                 // Only meaningful while the chart is actually shown —
                 // otherwise this chord falls through with no visible
                 // effect, matching vanilla's own number-key handling
-                // (`DebugScreenOverlay.keyPressed` no-ops when the
+                // (its debug-overlay key handling no-ops when the
                 // profiler chart is not up).
                 if self.show_profiler_chart {
                     self.profiler_chart_selected = selection;
@@ -1431,9 +1430,9 @@ impl WindowApp {
 ///
 /// # Why this intercepts rather than living inside `handle_chat_key`
 ///
-/// Vanilla splits the same way. `ChatScreen.keyPressed` offers the event to
-/// `CommandSuggestions` **first** and only then reaches its own `switch` on
-/// `264`/`265`, so the arrows are a distinct layer above ordinary text entry.
+/// Vanilla splits the same way. Its own chat-screen key handling offers the event to
+/// the command-suggestion popup **first** and only then reaches its own key-code
+/// switch for the history arrows, so the arrows are a distinct layer above ordinary text entry.
 /// Here that layer is the routing site: `handle_chat_key` is the text-entry and
 /// submit path, and these keys are handled before it sees them.
 impl WindowApp {
@@ -1850,9 +1849,9 @@ impl WindowApp {
     ///
     /// Three keys are touched and only one is consumed:
     ///
-    /// * `ArrowUp`/`ArrowDown` — `ChatScreen.moveInHistory(∓1)`. Consumed, and
-    ///   consumed even when the line does not change: vanilla's `switch` arm
-    ///   `return true`s regardless of what `moveInHistory` decided, so an arrow
+    /// * `ArrowUp`/`ArrowDown` — vanilla's own chat-history navigation. Consumed, and
+    ///   consumed even when the line does not change: vanilla's key-handling arm
+    ///   reports the key as handled regardless of what the history move decided, so an arrow
     ///   at either end of the list must not fall through and be typed.
     /// * `Tab` — **not** consumed. It only refreshes the name list the chat
     ///   input completes against, then lets the existing Tab arm run, so there
@@ -1873,8 +1872,8 @@ impl WindowApp {
         };
         match code {
             // The suggestion popup gets first refusal on both arrows —
-            // `SuggestionsList.keyPressed`'s `isUp`/`isDown` arms run before
-            // `ChatScreen`'s own `264`/`265` switch, so while the dropdown is up
+            // vanilla's suggestion-list key handling runs its up/down arms before
+            // the chat screen's own history-arrow switch, so while the dropdown is up
             // the arrows browse it and the history is unreachable. Both return
             // `true` either way, so the key is consumed regardless of which
             // layer answered it.

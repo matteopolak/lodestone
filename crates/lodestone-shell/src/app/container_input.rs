@@ -631,9 +631,9 @@ impl WindowApp {
     /// A number-key / off-hand-key `SWAP` against the slot under the cursor
     /// (part 3).
     ///
-    /// Vanilla's `AbstractContainerScreen.checkHotbarKeyPressed`
+    /// Vanilla's hotbar-swap key handling
     /// guards on exactly two pieces of
-    /// **state**: `menu.getCarried().isEmpty()` and `hoveredSlot != null`. Both
+    /// **state**: the cursor stack must be empty, and a slot must be hovered. Both
     /// are checked here rather than in `resolve_key`, which only knows about keys.
     /// Failing either does nothing — the same thing an open container did with
     /// these keys before this landed, so a miss is not a new dead end.
@@ -645,9 +645,9 @@ impl WindowApp {
     pub(super) fn send_container_swap(&mut self, button: i32) {
         // The creative screen replaces the inventory screen rather than overlaying it,
         // and its slot clicks never become a `container_click` — see
-        // `container/creative.rs`'s `CreativeEffect`. Vanilla's own
-        // `CreativeModeInventoryScreen.keyPressed` reaches `checkHotbarKeyPressed`
-        // through its overridden `slotClicked`, which is what this routes to. The
+        // `container/creative.rs`'s `CreativeEffect`. Vanilla's own creative screen
+        // reaches the same hotbar-swap key handling through its own overridden
+        // slot-click routing, which is what this routes to. The
         // carried-empty guard below is vanilla's too, so it still applies.
         if self.creative_screen_open() {
             if self.sim.player_menu().carried().is_none() {
@@ -699,8 +699,8 @@ impl WindowApp {
     ///
     /// Goes through [`MenuInput::key_pressed`] rather than building the
     /// `Click` directly the way [`Self::send_container_swap`] does, because
-    /// `key_pressed` already carries vanilla's `hoveredSlot.hasItem()` guard
-    /// and the `PickItem`/`Drop`
+    /// `key_pressed` already carries vanilla's guard that the hovered slot must
+    /// hold an item, and the `PickItem`/`Drop`
     /// `else if` — duplicating either here would be a second copy that can
     /// drift from the one `container.rs` already tests. `Click::drop_one`/
     /// `drop_stack` and `do_throw` (`lodestone-game`) were built and tested
@@ -708,7 +708,8 @@ impl WindowApp {
     pub(super) fn send_container_drop(&mut self, ctrl: bool) {
         // Same interception as `send_container_swap`. Vanilla's raw button number for a
         // throw is `0` for one item and `1` for the whole stack, which is what `ctrl`
-        // selects (`AbstractContainerScreen.keyPressed`'s `hasControlDown()`).
+        // selects (the container screen's drop-key handler reads the control-key
+        // modifier to pick between them).
         if self.creative_screen_open() {
             let button = i32::from(ctrl);
             self.handle_creative_key(button, lodestone_game::click::ContainerInput::Throw);
@@ -744,8 +745,8 @@ impl WindowApp {
         }
     }
 
-    /// `key.pickItem` pressed with a container screen open — `ClickType::CLONE`
-    /// against the hovered slot.
+    /// `key.pickItem` pressed with a container screen open — vanilla's clone
+    /// click against the hovered slot.
     ///
     /// Identical in shape to [`Self::send_container_drop`] except that there is
     /// no modifier variant to carry: vanilla's clone click has no `ctrl` form.
@@ -755,8 +756,8 @@ impl WindowApp {
     /// no clicks, which is the honest degradation rather than a fabricated one.
     pub(super) fn send_container_pick_item(&mut self) {
         // Same interception as `send_container_swap`. This is the one click type the
-        // creative screen makes *reachable*: `AbstractContainerScreen` gates
-        // `ContainerInput::CLONE` on `player.hasInfiniteMaterials()`, so on the ordinary
+        // creative screen makes *reachable*: vanilla's container-screen click handling
+        // gates the clone click on the player being in creative mode, so on the ordinary
         // container path below it still resolves to nothing.
         if self.creative_screen_open() {
             self.handle_creative_key(0, lodestone_game::click::ContainerInput::Clone);
@@ -803,14 +804,14 @@ impl WindowApp {
     /// consequence: *"throwing out items with Q doesn't update the count in my
     /// inventory or hotbar, but it does work properly otherwise."* `DROP_ITEM` /
     /// `DROP_ALL_ITEMS` are the one inventory change a vanilla server applies
-    /// **silently** — `ServerGamePacketListenerImpl.java` calls
-    /// `player.drop(…)` and returns with no slot or content packet — so an
-    /// unpredicted drop leaves the count wrong *forever*, not briefly.
+    /// **silently** — the server drops the item and returns with no slot or
+    /// content packet — so an unpredicted drop leaves the count wrong
+    /// *forever*, not briefly.
     ///
     /// Two things about the shape below are deliberate:
     ///
-    /// * **Order.** Predict, then send, which is vanilla's own order inside
-    ///   `LocalPlayer.removeFromSelected`.
+    /// * **Order.** Predict, then send, which is vanilla's own order: the
+    ///   client-side slot is cleared before the drop is sent to the server.
     /// * **Inside the `if let`.** [`drop_selected_action`] already returns `None`
     ///   for a spectator, so putting the prediction here gives it that gate for
     ///   free rather than duplicating the game-mode check — a spectator predicts

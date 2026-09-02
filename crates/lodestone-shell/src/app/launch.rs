@@ -169,7 +169,7 @@ pub(super) fn parse_seed(raw: &str) -> i64 {
     i64::from(java_string_hash_code(trimmed))
 }
 
-/// `RandomSource.create().nextLong()` — vanilla asks for *some* fresh long,
+/// Vanilla's own random-source draws a fresh long — vanilla asks for *some* fresh long,
 /// with no algorithm this port needs to match (a world seed is opaque once
 /// generated); `std::collections::hash_map::RandomState` already draws a
 /// fresh random key from the OS per instance for exactly this reason, so
@@ -188,7 +188,7 @@ fn random_seed() -> i64 {
 
 /// Java's `String.hashCode()`: `s[0]*31^(n-1) + … + s[n-1]`, over UTF-16 code
 /// units (not bytes, not `char`s) with wrapping 32-bit arithmetic — the exact
-/// formula `WorldOptions.parseSeed`'s catch arm calls. Widening the result to
+/// formula vanilla's own seed-parsing calls on a non-numeric seed. Widening the result to
 /// `i64` (its caller's job, not this function's) is sign-extending, matching
 /// Java's own `int`→`long` widening.
 pub(super) fn java_string_hash_code(s: &str) -> i32 {
