@@ -4,7 +4,7 @@
 //! morning."
 //!
 //! Vanilla's model is a **world-global** vote (`ServerLevel.sleepStatus`, a
-//! `SleepStatus` — `net/minecraft/server/level/SleepStatus.java`), not a
+//! `SleepStatus`), not a
 //! per-player flag: `updateSleepingPlayers` counts every player, spectators
 //! excluded, and the night skips only when enough players are asleep **and**
 //! enough of them have been asleep long enough. That vote cannot be computed
@@ -34,7 +34,7 @@
 //! the plan flags as an unplanned client follow-up), and the night skip is
 //! simply the clock jump.
 //!
-//! # The skip, after vanilla `ServerLevel.java:367-379`
+//! # The skip, after vanilla's own night-skip broadcast routine
 //!
 //! The vote passing runs three steps, in vanilla's order:
 //!
@@ -74,7 +74,7 @@
 //!   per-connection `WorldAdminState::game_rules` is the wrong side of the
 //!   world for a tick loop that runs with no connection at all.
 //! * **Bed-entry gates** are unmodelled. Vanilla's `startSleepInBed`
-//!   (`ServerPlayer.java:1186-1240`) rejects a bed that is not legally
+//!   (vanilla's own start-sleep-in-bed routine) rejects a bed that is not legally
 //!   enterable (blocked, out of reach, monsters within ±8/±5, daytime, the
 //!   player flying/creative) with per-reason messages. The monster check is
 //!   already a documented remainder in `crate::world_spawn`'s
@@ -98,7 +98,7 @@ use std::sync::{Arc, Mutex};
 
 /// Ticks a sleeper must have lain down before the night-skip vote can pass —
 /// vanilla `Player::isSleepingLongEnough`: `isSleeping() && sleepCounter >=
-/// 100` (`net/minecraft/world/entity/player/Player.java`), the `100` the plan's
+/// 100` (vanilla's own player entity), the `100` the plan's
 /// S1 names as the deep-sleep threshold. It is what stops the vote from
 /// passing the instant the Nth player's head touches a pillow.
 pub const DEEP_SLEEP_TICKS: u64 = 100;
@@ -109,7 +109,7 @@ pub const DEEP_SLEEP_TICKS: u64 = 100;
 pub const DAY_LENGTH_TICKS: i64 = 24_000;
 
 /// A skip a connection must learn about — the server-side half of vanilla's
-/// night-skip broadcast (`ServerLevel.java:367-379`): the world's clock jumped
+/// night-skip broadcast (vanilla's own night-skip broadcast routine): the world's clock jumped
 /// forward to the next morning and every sleeper woke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepEvent {
@@ -131,7 +131,7 @@ pub enum SleepEvent {
 /// The shared night-skip vote: which players are in beds right now, and how
 /// many players can vote.
 ///
-/// Mirrors vanilla `SleepStatus` (`SleepStatus.java`) as **shared state** — the
+/// Mirrors vanilla's own `SleepStatus` as **shared state** — the
 /// roster is populated by the connections on bed entry/exit and read by the
 /// world tick loop, so the vote is computed over *all* players, never from one
 /// connection's own flags. That is the plan's S1 prohibition ("do not build a
@@ -201,7 +201,7 @@ impl SleepVote {
     }
 
     /// Empties the roster after a skip — vanilla's `wakeUpAllPlayers` calls
-    /// `sleepStatus.removeAllSleepers()` first (`ServerLevel.java:373`), so the
+    /// `sleepStatus.removeAllSleepers()` first (vanilla's own wake-all-players routine), so the
     /// next tick does not re-register the just-woken players.
     pub(crate) fn clear(&self) {
         self.0.lock().expect("sleep vote lock poisoned").sleepers.clear();
@@ -233,14 +233,14 @@ pub struct SleepState {
 impl SleepState {
     /// The next morning after `day_time` — vanilla's `moveToTimeMarker` with
     /// the `WAKE_UP_FROM_SLEEP` marker `ClockTimeMarker(0, 24000)`:
-    /// `Mth.ceil(dayTime / 24000.0) * 24000` (`ServerLevel.java`). At
+    /// `Mth.ceil(dayTime / 24000.0) * 24000` (vanilla's own time-marker mover). At
     /// `day_time == 0` (a world's very first tick) that is `0` itself —
     /// sunrise, exactly as vanilla reports it.
     pub fn morning_after(day_time: i64) -> i64 {
         ((day_time + DAY_LENGTH_TICKS - 1) / DAY_LENGTH_TICKS) * DAY_LENGTH_TICKS
     }
 
-    /// Vanilla's `sleepersNeeded(pct)` (`SleepStatus.java:21-23`):
+    /// Vanilla's own `sleepersNeeded(pct)`:
     /// `Math.max(1, Mth.ceil(activePlayers * pct / 100.0F))`. The `max(1, …)`
     /// is what makes a single-player world work with the default `100` rule —
     /// with exactly one active player `ceil(1 * 100 / 100) = 1`, and with no
@@ -299,7 +299,7 @@ impl SleepState {
         self.sleepers.iter().map(|s| (s.entity_id, s.since_game_tick)).collect()
     }
 
-    /// The wake-all — vanilla's `wakeUpAllPlayers` (`ServerLevel.java:367-379`)
+    /// The wake-all — vanilla's own `wakeUpAllPlayers`
     /// per-sleeper `stopSleepInBed(false, false)`. This crate has no
     /// per-player sleep state to clear, so dropping the roster *is* the wake;
     /// the caller is also responsible for [`SleepVote::clear`], which is what
@@ -339,7 +339,7 @@ impl SleepFeed {
 mod tests {
     use super::*;
 
-    /// Pins the vote arithmetic to vanilla's `SleepStatus.java:21-23`:
+    /// Pins the vote arithmetic to vanilla's own `sleepersNeeded`:
     /// `max(1, ceil(active * pct / 100))`. The four rows are the ones that
     /// matter: a lone player with the default `100` needs 1; two players with
     /// `100` need both; two players at `50` need one (a bare majority can

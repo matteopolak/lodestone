@@ -68,7 +68,7 @@ const NATURAL_SPAWN_SEED: u64 = 0x5350_4157_4E45_5221;
 
 /// Vanilla's `mobGriefing` game rule, which gates whether a mob may change the
 /// world — here, whether a grazing sheep's eat actually removes the block
-/// (`ai/goal/EatBlockGoal.java:63,71`; `GameRules.RULE_MOBGRIEFING`, default
+/// (vanilla's own eat-block goal; `GameRules.RULE_MOBGRIEFING`, default
 /// **true**).
 ///
 /// A function returning vanilla's default rather than a real rule lookup, and
@@ -93,7 +93,7 @@ fn mob_griefing() -> bool {
 /// cycle's timers advance at all — issue #324 / `docs/plans/world-state.md`
 /// W1, read by [`crate::weather::WeatherState::tick`]. Vanilla's
 /// `GameRules.ADVANCE_WEATHER` defaults to **true**
-/// (`ServerLevel.java:713` gates `advanceWeatherCycle`'s timer block on it).
+/// (vanilla's own per-tick world update gates `advanceWeatherCycle`'s timer block on it).
 ///
 /// A function returning vanilla's default rather than a real rule lookup, and
 /// that is the same disclosed gap as [`mob_griefing`] just above: this crate
@@ -113,8 +113,8 @@ fn advance_weather() -> bool {
 }
 
 /// Issue #325 / `docs/plans/world-state.md` S1: whether a passed night-skip
-/// vote may actually jump the clock. Vanilla's `ServerLevel.advanceTime`
-/// (`ServerLevel.java:367-379`) — the rule checked inside `tickSleepingPlayers`
+/// vote may actually jump the clock. Vanilla's own `ServerLevel.advanceTime`
+/// — the rule checked inside `tickSleepingPlayers`
 /// after a vote passes — returns true only when the weather has not ended a
 /// thunder storm this tick (the world is not allowed to "skip" while a
 /// thunderstorm is being resolved).
@@ -134,8 +134,8 @@ fn advance_time() -> bool {
 
 /// Issue #325 / `docs/plans/world-state.md` S1: the fraction of players whose
 /// vote is required to skip the night — the `playersSleepingPercentage` of
-/// `ServerLevel`'s `sleepStatus` (`SleepStatus.java`, defaulting to
-/// `sleepingPercentage=100` in `ServerLevel.java`'s constructor).
+/// `ServerLevel`'s `sleepStatus` (vanilla's own `SleepStatus`, defaulting to
+/// `sleepingPercentage=100` in `ServerLevel`'s own constructor).
 ///
 /// Another R1-shaped constant: vanilla's `GameRules.PLAYERS_SLEEPING_PERCENTAGE`
 /// ships at 100 (every player must be in bed) and is command-tunable. This
@@ -185,7 +185,7 @@ pub(crate) type PlayTimerInstant = tokio::time::Instant;
 
 /// Rolling-average window for [`TickStats::mspt_avg_ms`] — matches vanilla's
 /// own `tickTimesNanos` ring buffer size
-/// (`MinecraftServer.java:248`, `private final long[] tickTimesNanos = new long[100];`).
+/// (`private final long[] tickTimesNanos = new long[100];`).
 const HISTORY_LEN: usize = 100;
 
 /// One coarse phase of [`run_tick_loop`]'s body, for per-phase timing.
@@ -279,9 +279,9 @@ pub struct PhaseStats {
 }
 
 /// Vanilla's own per-queue drain cap, `ServerLevel.MAX_SCHEDULED_TICKS_PER_TICK`
-/// (`ServerLevel.java:194`) — see `crate::scheduled_tick`'s module doc for the
+/// — see `crate::scheduled_tick`'s module doc for the
 /// full citation of `blockTicks.tick(tick, 65536, ...)`/`fluidTicks.tick(tick,
-/// 65536, ...)` (`ServerLevel.java:389,391`).
+/// 65536, ...)`.
 const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65536;
 
 /// How many ticks after world open to defer the first random-tick pass
@@ -449,7 +449,7 @@ pub struct BlockTickFeed(
     /// does.
     ///
     /// The `Option<Uuid>` is vanilla's `except` player — the first argument of
-    /// `Level.playSound(@Nullable Entity except, …)` (`Level.java:436`) and of
+    /// `Level.playSound(@Nullable Entity except, …)` (vanilla's own `Level`) and of
     /// `Level.levelEvent(@Nullable Entity except, …)`. `None` reaches everyone.
     /// Without it the acting player's own break and place sounds could not be
     /// published at all, because the shell predicts them locally and would play
@@ -817,10 +817,10 @@ fn overload_threshold() -> Duration {
 }
 
 /// Throttles how often the overload warning re-fires once triggered, matching
-/// `MinecraftServer.java:736`'s
+/// vanilla's own main server loop's
 /// `this.nextTickTimeNanos - this.lastOverloadWarningNanos >=
 /// OVERLOADED_WARNING_INTERVAL_NANOS + 100L * thisTickNanos`.
-/// `OVERLOADED_WARNING_INTERVAL_NANOS` (`MinecraftServer.java:199`) is 10
+/// `OVERLOADED_WARNING_INTERVAL_NANOS` (vanilla's own constant) is 10
 /// seconds; `100L * thisTickNanos` is 100 ticks (5s here). Total: **15
 /// seconds** between warnings while the server stays behind.
 fn overload_warning_interval() -> Duration {
@@ -857,7 +857,7 @@ struct OverloadEvent {
 ///
 /// # Why `Option<Instant>`, not `Instant`, for `last_overload_warning_at`
 ///
-/// Vanilla's own field (`lastOverloadWarningNanos`, `MinecraftServer.java:254`)
+/// Vanilla's own field (`lastOverloadWarningNanos`)
 /// is a bare `long`, Java-default-initialized to `0` — nanoseconds since an
 /// arbitrary epoch, not "now." So on a real server's very first overload, the
 /// gap `nextTickTimeNanos - 0` is enormous and the warning-interval check at
@@ -1214,8 +1214,8 @@ fn run_command_block_command(
 /// an earlier read of it got only half right: **vanilla does catch up, just
 /// not indefinitely.** `next_tick_at` tracks the wall-clock instant the next
 /// tick should start; `next_tick_at += TICK_PERIOD` happens unconditionally
-/// every iteration (vanilla: `this.nextTickTimeNanos += thisTickNanos;`,
-/// `MinecraftServer.java:752`), and `tokio::time::sleep_until` for an
+/// every iteration (vanilla's own main server loop: `this.nextTickTimeNanos += thisTickNanos;`),
+/// and `tokio::time::sleep_until` for an
 /// already-past instant resolves immediately with no artificial delay — so
 /// while only mildly behind, consecutive iterations run back-to-back at full
 /// speed with no sleep between them, exactly matching vanilla's own
@@ -1230,8 +1230,8 @@ fn run_command_block_command(
 /// `next_tick_at` (2 real seconds — see that function's own doc comment), the
 /// loop gives up: it logs a rate-limited warning and jumps `next_tick_at`
 /// forward by however many tick periods it was behind, exactly like
-/// vanilla's `this.nextTickTimeNanos += ticks * thisTickNanos;`
-/// (`MinecraftServer.java:741`). The world tick body still runs exactly once
+/// vanilla's own main server loop's `this.nextTickTimeNanos += ticks * thisTickNanos;`.
+/// The world tick body still runs exactly once
 /// per loop iteration, both before and after this adjustment — that backlog,
 /// specifically, is forgiven rather than replayed; smaller backlogs are
 /// still replayed by the back-to-back iterations described above. A tick
@@ -1243,10 +1243,10 @@ fn run_command_block_command(
 /// Each iteration additionally drains the block-tick queue, then the
 /// fluid-tick queue, then runs random ticks over `tick_area` — in exactly
 /// that order, mirroring `ServerLevel.tick`'s own sequence
-/// (`ServerLevel.java:388-391,400-401`: `blockTicks.tick(...)` before
+/// (`blockTicks.tick(...)` before
 /// `fluidTicks.tick(...)` before `this.getChunkSource().tick(...)`, which is
 /// what eventually calls `tickChunk`'s random ticks — see
-/// `ServerChunkCache.java:403`). See [`crate::scheduled_tick`] for the queues'
+/// vanilla's own chunk-cache tick). See [`crate::scheduled_tick`] for the queues'
 /// own ordering contract and [`crate::random_tick`] for the random-tick
 /// selection and the one block (grass ↔ dirt) modeled end to end.
 ///
@@ -1471,7 +1471,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // what decides a pass (see `crate::sleep`'s module doc).
     let mut sleep_state = SleepState::default();
     // #308: one queue per vanilla queue (`ServerLevel.blockTicks`/
-    // `fluidTicks`, `ServerLevel.java:209-210`). Owned by `scheduled` rather
+    // `fluidTicks`, vanilla's own scheduled-tick fields). Owned by `scheduled` rather
     // than by this function since #468, which is what lets them be saved; they
     // are borrowed out of it once per tick below.
     // #307.
@@ -1968,7 +1968,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // drain is what makes the grass actually disappear rather than the goal
         // counting down against a world that never changes.
         //
-        // Vanilla `ai/goal/EatBlockGoal.java:59-80`, and the two variants really
+        // Vanilla's own eat-block goal, and the two variants really
         // are different operations rather than one with a different block id:
         //
         // * `AtFeet` is `destroyBlock(pos, false)` — the block the sheep stands
@@ -2291,15 +2291,15 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         }
         // Issue #325 / `docs/plans/world-state.md` S1: the night-skip vote, in
         // vanilla's own position — `ServerLevel.tick` runs
-        // `tickSleepingPlayers` right after the weather-cycle timers
-        // (`ServerLevel.java:367-379`). Snapshot the shared roster, fold it
+        // `tickSleepingPlayers` right after the weather-cycle timers.
+        // Snapshot the shared roster, fold it
         // into the loop-owned [`SleepState`] (recording each sleeper's
         // lay-down tick and dropping anyone who woke), then test the vote: at
         // least `sleepers_needed` players asleep, and at least that many deep
         // (`DEEP_SLEEP_TICKS`).
         //
         // On a pass, vanilla's three steps run in order
-        // (`ServerLevel.java:367-379`): the clock jumps to the next morning
+        // (its own night-skip broadcast routine): the clock jumps to the next morning
         // (`moveToTimeMarker`, gated on the `advanceTime` rule standing in for
         // R1); the skip is broadcast so each connection can re-anchor its day
         // clock (`encode_set_time` on the connection side); and every sleeper
@@ -2447,7 +2447,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             }
         }
 
-        // #308, block before fluid (`ServerLevel.java:388-391`). Draining
+        // #308, block before fluid (vanilla's own per-tick queue order). Draining
         // (rather than iterating a live queue) is what keeps a tick
         // scheduled *by* one of these callbacks out of this same pass — see
         // `ScheduledTickQueue::drain_due`'s own doc comment.
@@ -3223,9 +3223,8 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             }
         }
 
-        // #307, after both scheduled-tick queues (`ServerChunkCache.java:403`
-        // runs after `ServerLevel`'s own `blockTicks`/`fluidTicks.tick`,
-        // `:388-391`).
+        // #307, after both scheduled-tick queues (vanilla's own chunk-cache tick
+        // runs after `ServerLevel`'s own `blockTicks`/`fluidTicks.tick`).
         //
         // #481: the random-tick pass is deferred for the first few ticks
         // after world open, so the background column-seeding task has time to
@@ -3718,7 +3717,7 @@ mod tests {
 
     /// Predicted value: `now` built as exactly [`overload_threshold`] past
     /// `next_tick_at` — the boundary vanilla's own check is strictly `>`,
-    /// not `>=`, about (`MinecraftServer.java:735`). Must **not** trigger.
+    /// not `>=`, about (its own main server loop). Must **not** trigger.
     #[test]
     fn resolve_overload_does_not_trigger_at_exactly_the_threshold() {
         let base = tokio::time::Instant::now();

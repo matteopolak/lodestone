@@ -4,8 +4,8 @@
 //! # What it is
 //!
 //! A port of `SmithingTransformRecipe`/`TransmuteRecipe.createWithOriginalComponents`
-//! (netherite upgrade) and `SmithingTrimRecipe`/`applyTrim` (trim), both under
-//! `.cache/mc/26.2/src/net/minecraft/world/item/crafting/`. The template slot
+//! (netherite upgrade) and `SmithingTrimRecipe`/`applyTrim` (trim), both from
+//! vanilla's own crafting-recipe types. The template slot
 //! decides *which* family a given input set can even match — a netherite
 //! upgrade always uses `minecraft:netherite_upgrade_smithing_template`, a trim
 //! always uses one of the 18 `<pattern>_armor_trim_smithing_template` items —

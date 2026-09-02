@@ -70,8 +70,7 @@
 //! marker)` pair to [`marker_loot_table`] and, if the chest is *created* by the
 //! marker rather than already present in the template, add it to
 //! [`marker_places_chest`]. Both come straight from that structure's
-//! `handleDataMarker` in
-//! `.cache/mc/26.2/src/net/minecraft/world/level/levelgen/structure/structures/`.
+//! `handleDataMarker` in vanilla's own per-structure processor classes.
 //!
 //! The other two passes need **no per-structure table at all** — they read the table
 //! id out of the data — so a new structure using either form works the day its
