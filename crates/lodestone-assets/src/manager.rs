@@ -42,9 +42,8 @@ impl ResourceManager {
     ///   and its own "push internal" step appends — so the **last** pack handed to
     ///   its own multi-pack resource manager wins. That is [`Self::new`]'s order, and
     ///   [`Self::read`]'s own `.iter().rev()` matches it exactly.
-    /// - Vanilla's own pack-selection-model constructor does
-    ///   `this.selected = Lists.newArrayList(repository.getSelectedPacks());
-    ///   Collections.reverse(this.selected);`,
+    /// - Vanilla's own pack-selection-model constructor copies the
+    ///   repository's selected-packs list and reverses it in place,
     ///   and its own commit step (via its own "update repo selected list" step)
     ///   reverses back — so the
     ///   **first** row of the Selected column is the last pack in the stack,
