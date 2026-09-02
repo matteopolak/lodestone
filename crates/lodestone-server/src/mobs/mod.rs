@@ -9278,9 +9278,9 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// `Items.OMINOUS_BOTTLE` off a pillager patrol captain's death —
+    /// The ominous bottle item off a pillager patrol captain's death —
     /// vanilla's `entities/pillager.json` loot pool, gated on
-    /// `RaiderPredicate.CAPTAIN_WITHOUT_RAID` (`hasRaid=false,
+    /// vanilla's own "captain without raid" raider predicate (`hasRaid=false,
     /// isCaptain=true`): a patrol leader ([`SimMob::is_patrol_leader`]) not
     /// currently a member of any active raid
     /// ([`raid::MobSim::raid_containing_raider`]). [`reap_dead`](Self::reap_dead)
@@ -9300,7 +9300,7 @@ impl<'w> MobSim<'w> {
     ///
     /// **Disclosed narrowing**: vanilla rolls a uniform `0..=4` amplifier
     /// onto the bottle's own `minecraft:ominous_bottle_amplifier` component
-    /// (`SetOminousBottleAmplifierFunction`); every bottle dropped here is
+    /// (its own "set ominous bottle amplifier" loot function); every bottle dropped here is
     /// amplifier `0` instead of the real roll, because persisting a
     /// per-stack amplifier needs a new field on
     /// `lodestone_model::ItemComponents`, which this session's ownership
@@ -9329,12 +9329,14 @@ impl<'w> MobSim<'w> {
         );
     }
 
-    /// `EnvironmentAttributes.CAT_WAKING_UP_GIFT_CHANCE` at `day_time` —
+    /// Vanilla's own environment-attribute "cat waking-up gift chance" value
+    /// at `day_time` —
     /// hand-transcribed from its one modifier track
-    /// (`Timelines.java`'s `CAT_WAKING_UP_GIFT_CHANCE` row: `FloatModifier.MAXIMUM`,
-    /// `EasingType.CONSTANT`, keyframes `0.0F` at tick 362 and `0.7F` at tick
+    /// (its own timelines table's cat-waking-up-gift-chance row: a maximum
+    /// float modifier,
+    /// constant easing, keyframes `0.0F` at tick 362 and `0.7F` at tick
     /// 23667 within the 24000-tick day cycle) rather than read from a general
-    /// timeline engine — this crate has no `EnvironmentAttributes`/timeline
+    /// timeline engine — this crate has no environment-attribute/timeline
     /// reader at all, the same disclosed gap
     /// [`natural_spawn::surface_slime_spawn_chance`](crate::natural_spawn)'s own
     /// doc names for the moon-phase slime chance, and building one for a
@@ -9350,14 +9352,14 @@ impl<'w> MobSim<'w> {
         if !(362..23_667).contains(&t) { 0.7 } else { 0.0 }
     }
 
-    /// Resolves every [`Cat.CatRelaxOnOwnerGoal`]-driven gift request
+    /// Resolves every [`CatRelaxOnOwnerGoal`]-driven gift request
     /// recorded this tick (issue #229): rolls [`Self::cat_gift_chance`] at
     /// the current [`MobSim::day_time`], and on success rolls
     /// `gameplay/cat_morning_gift` and spawns the result at the cat's own
     /// position — the same loot-table-then-`spawn_item` shape
     /// [`drop_death_loot`](Self::drop_death_loot) already uses.
     ///
-    /// [`Cat.CatRelaxOnOwnerGoal`]: lodestone_entity::ai::goals::CatRelaxOnOwnerGoal
+    /// [`CatRelaxOnOwnerGoal`]: lodestone_entity::ai::goals::CatRelaxOnOwnerGoal
     ///
     /// **Disclosed simplification**: no `randomTeleport` hop before the
     /// drop — vanilla relocates the cat to a random point within roughly five
@@ -9407,9 +9409,9 @@ impl<'w> MobSim<'w> {
     }
 
     /// Resolves every [`LandOnOwnersShoulderGoal`]-driven mount request
-    /// recorded this tick (issue #229): vanilla `ShoulderRidingEntity
-    /// .setEntityOnShoulder` discards the mob entity and hands its saved NBT
-    /// to `ServerPlayer.setEntityOnShoulder`. This crate has no per-player
+    /// recorded this tick (issue #229): vanilla's own shoulder-mount setter
+    /// discards the mob entity and hands its saved NBT
+    /// to its own player-side shoulder-mount setter. This crate has no per-player
     /// NBT inventory to hand it to, so [`SimMob::owner`] resolved to a uuid
     /// plus [`self.shoulder_riders`](Self::shoulder_riders) — one slot per
     /// owner rather than vanilla's two (left/right) — is the stand-in: the
@@ -9533,11 +9535,12 @@ impl<'w> MobSim<'w> {
                     head_yaw: 0.0,
                     velocity: t.projectile.velocity,
                     metadata: Vec::new(),
-                    // `AbstractArrow` and friends leave `getAddEntityPacket`'s
-                    // data at `0`; only `getAddEntityPacket` overrides carry one,
+                    // The base arrow entity and friends leave the add-entity
+                    // packet's
+                    // data at `0`; only add-entity-packet overrides carry one,
                     // and no projectile this sim spawns has one.
                     object_data: 0,
-                    // A projectile is never a `Leashable`.
+                    // A projectile is never leashable, vanilla's own interface for that.
                     leash_link: None,
                 });
             }
@@ -9549,7 +9552,7 @@ impl<'w> MobSim<'w> {
                 // *entity* type and used to be set to `state.item` — so a
                 // dropped `minecraft:bone_meal` streamed with entity type
                 // `minecraft:bone_meal`, which is not in the entity-type
-                // registry at all. `v770`'s `encode_add_entity_body` resolves it
+                // registry at all. `v770`'s add-entity-body encoder resolves it
                 // with `entity_type_id(name).unwrap_or(0)`, and network entity
                 // type `0` is `minecraft:acacia_boat` — so every dropped item
                 // this server has ever spawned arrived at the client as a boat,
@@ -9559,7 +9562,7 @@ impl<'w> MobSim<'w> {
                 // CLAUDE.md records for `SET_TIME` (#323).
                 //
                 // The item's *identity* belongs in `metadata` instead, as
-                // `ItemEntity.DATA_ITEM` (index 8, an `ITEM_STACK` serializer) —
+                // vanilla's own item-entity item metadata field (index 8, an `ITEM_STACK` serializer) —
                 // see this field's note below.
                 uuid: state.uuid,
                 entity_type: item_entity_type(),
@@ -9569,7 +9572,8 @@ impl<'w> MobSim<'w> {
                 velocity: state.motion.velocity,
                 // **The field that makes a drop draw at all** (issue #537). A
                 // client draws nothing for an item entity whose stack it has
-                // not been told: vanilla's `ItemEntityRenderer.submit` returns
+                // not been told: vanilla's own item-entity renderer's submit
+                // step returns
                 // early on `state.item.isEmpty()`, and this project's own
                 // client does the same (`EntityInterpolator::set_item_stack`).
                 // So until this was filled a block drop spawned, streamed as a
@@ -9579,7 +9583,8 @@ impl<'w> MobSim<'w> {
                 //
                 // This is the **only** place in the tree that constructs a
                 // `MetadataField::Item`, and that is load-bearing rather than
-                // incidental: `ItemEntity.DATA_ITEM`'s wire index (8) is shared
+                // incidental: vanilla's own item-entity item metadata field's
+                // wire index (8) is shared
                 // with nineteen other fields on other classes, so the encoder
                 // in `crates/protocol/v770/src/server_protocol.rs` relies on
                 // every `Item` field belonging to a `minecraft:item` entity by
@@ -9598,7 +9603,7 @@ impl<'w> MobSim<'w> {
                 // `ItemEntity` does not override `getAddEntityPacket`; the stack
                 // travels as metadata (above), not as object data.
                 object_data: 0,
-                // A dropped item is never a `Leashable`.
+                // A dropped item is never leashable, vanilla's own interface for that.
                 leash_link: None,
             });
         }
@@ -9617,30 +9622,31 @@ impl<'w> MobSim<'w> {
                 uuid: orb.uuid,
                 entity_type: orb_entity_type(),
                 position: orb.motion.position,
-                // `ExperienceOrb`'s constructor sets a random `yRot`, which nothing
-                // reads: `ExperienceOrbRenderer` billboards the sprite at the camera.
+                // Vanilla's own orb constructor sets a random `yRot`, which nothing
+                // reads: vanilla's own orb renderer billboards the sprite at the camera.
                 // Sending a rotation would be sending a value with no consumer.
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: orb.motion.velocity,
                 // **The field that decides which of the eleven sprite frames draws.**
-                // `ExperienceOrb.getIcon` buckets `getValue()` — not `count`, and not
+                // Vanilla's own icon-bucketing getter buckets the orb's own value getter — not `count`, and not
                 // linearly — so an orb whose value never reaches the client draws frame
-                // 0 (the smallest) whatever it is worth. `defineSynchedData` registers
-                // `DATA_VALUE` and nothing else, so metadata is the only channel;
-                // there is no object data on `getAddEntityPacket` to carry it.
+                // 0 (the smallest) whatever it is worth. Vanilla's own metadata
+                // registration registers
+                // its own value field and nothing else, so metadata is the only channel;
+                // there is no object data on the add-entity packet to carry it.
                 //
                 // `count` is deliberately *not* sent: vanilla does not synchronise it,
                 // and a client that knew it would still draw one sprite.
                 metadata: vec![MetadataField::ExperienceOrbValue { value: orb.value }],
                 object_data: 0,
-                // An experience orb is never a `Leashable`.
+                // An experience orb is never leashable, vanilla's own interface for that.
                 leash_link: None,
             });
         }
-        // `FallingBlockEntity`. The **only** producer of a non-zero
-        // `object_data` in this crate: `getAddEntityPacket` passes
-        // `Block.getId(this.getBlockState())`, and that field is the sole channel
+        // The falling-block entity. The **only** producer of a non-zero
+        // `object_data` in this crate: vanilla's own add-entity packet passes
+        // the block-state id, and that field is the sole channel
         // by which a client learns which block is falling (see
         // `TrackedFallingBlock`'s own doc for why metadata cannot carry it).
         //
@@ -9660,16 +9666,19 @@ impl<'w> MobSim<'w> {
                 uuid: tracked.uuid,
                 entity_type: falling_block_entity_type(),
                 position: tracked.motion.position,
-                // `FallingBlockEntity` never rotates: `fall` sets no `yRot`/`xRot`
+                // Vanilla's own falling-block entity never rotates: its own
+                // fall step sets no `yRot`/`xRot`
                 // and nothing writes them afterwards. A falling block that visibly
                 // spun would be a *more* interesting animation and a wrong one.
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: Vec3::new(0.0, tracked.motion.velocity_y, 0.0),
-                // `defineSynchedData` registers `DATA_START_POS` alone, and that
+                // Vanilla's own metadata registration registers its own
+                // start-position field alone, and that
                 // accessor's value is the entity's own spawn cell — which the
-                // client recovers from the `ADD_ENTITY` position in
-                // `recreateFromPacket`. So there is genuinely nothing to send.
+                // client recovers from the add-entity packet's position in
+                // its own client-side reconstruction. So there is genuinely
+                // nothing to send.
                 metadata: Vec::new(),
                 // `unwrap_or(0)` rather than skipping the entity: an unresolvable
                 // state is a data-table gap, and streaming the entity with a wrong
@@ -9678,7 +9687,7 @@ impl<'w> MobSim<'w> {
                 // three states `crate::gravity_tick::is_gravity_block` accepts all
                 // resolve.
                 object_data: block_states::state_id(&tracked.state).unwrap_or(0) as i32,
-                // A falling block is never a `Leashable`.
+                // A falling block is never leashable, vanilla's own interface for that.
                 leash_link: None,
             });
         }
@@ -9750,7 +9759,7 @@ impl<'w> MobSim<'w> {
                 ],
                 // `AbstractBoat` does not override `getAddEntityPacket`.
                 object_data: 0,
-                // A boat is never a `Leashable`.
+                // A boat is never leashable, vanilla's own interface for that.
                 leash_link: None,
             });
         }
