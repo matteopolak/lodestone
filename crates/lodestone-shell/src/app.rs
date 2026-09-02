@@ -16,7 +16,7 @@
 //! * `pacing` --- Frame pacing: the tick-catch-up clamp and the unfocused/occluded schedule.
 //! * `launch` --- Starting a session: the integrated server, seed resolution, and `LaunchError`.
 //! * `weather` --- Weather and time-of-day plumbing for the render crate's rain/snow columns.
-//! * `recipe_panel` --- The recipe-book panel's layout, geometry and unlock toasts (issue #163).
+//! * `recipe_panel` --- The recipe-book panel's layout, geometry and unlock toasts.
 //! * `session` --- `WindowApp` construction, cursor grab, and session start/teardown.
 //! * `container_input` --- `WindowApp`'s container-screen gestures: clicks, swaps, drops, pick-item.
 //! * `menus` --- `WindowApp`'s menu keyboard/mouse routing and the `MenuAction` match.
@@ -294,9 +294,9 @@ fn movement_action_for(binds: &Keybinds, code: KeyCode) -> Option<Action> {
         .find_map(InputAction::movement)
 }
 
-/// Wire button number for an off-hand `SWAP` click — vanilla's literal `40` in
-/// `AbstractContainerScreen.checkHotbarKeyPressed` and the `buttonNum == 40`
-/// guard in `AbstractContainerMenu.doClick`'s `SWAP` arm. Not a slot index: the
+/// Wire button number for an off-hand `SWAP` click — vanilla's literal `40`,
+/// used both by the hotbar-key intercept that emits it and by the container
+/// menu's own `SWAP` click arm that matches it. Not a slot index: the
 /// off-hand's *native* index happens to be 40 too, which is why this is named
 /// after the button rather than the slot.
 const OFFHAND_SWAP_BUTTON: i32 = 40;
@@ -333,63 +333,58 @@ fn mouse_action_for(binds: &Keybinds, button: MouseButton) -> Option<InputAction
 /// translucent background *over* it; that background is the dim, and it is the
 /// only reason an open inventory looks different from playing:
 ///
-/// - `GameRenderer.extract` computes
-///   `readyForLevelRendering = resourcesLoaded && advanceGameTime && level != null`
-///   and passes it straight into the GUI (`GameRenderer.java`) — note it
-///   asks about the *level*, never about `screen`.
-/// - `Gui.extractRenderState` calls `hud.extractRenderState` under that flag
-///   alone (`Gui.java`), then draws the open screen **afterwards**
-///   (`Gui.java`), i.e. on top.
-/// - `Hud.extractRenderState` itself gates only on F1 (`isHidden`) and
-///   `LevelLoadingScreen` (`Hud.java`). Inside it, the hotbar, hearts,
-///   hunger, the XP bar and the held-item name are gated on **game mode** only
-///   (`Hud.java`) — nothing there consults `screen()`.
+/// - Vanilla's own render-extract step computes a "ready for level rendering"
+///   flag from resources-loaded, advance-game-time and a non-null level, and
+///   passes it straight into the GUI extract — note it asks about the
+///   *level*, never about the open screen.
+/// - The GUI extract step runs the HUD's own extract under that flag alone,
+///   then draws the open screen **afterwards**, i.e. on top.
+/// - The HUD's own extract gates only on F1 ("hidden") and the loading
+///   screen. Inside it, the hotbar, hearts, hunger, the XP bar and the
+///   held-item name are gated on **game mode** only — nothing there consults
+///   the open screen.
 ///
-/// Exactly two HUD elements in vanilla do consult `screen()`, and neither is a
-/// vital: the potion-effect icons (`Hud.java`, suppressed only when the
-/// screen `showsActiveEffects()`, which is overridden `true` by `InventoryScreen`
-/// and `CreativeModeInventoryScreen` because those draw their own) and the
-/// subtitle overlay (`Hud.java`). The crosshair is **not** one of them
-/// (`Hud.java` gates on camera type and spectator mode only) — we still
-/// hide it with [`crate::menu::UiState::is_playing`], a deliberate divergence
-/// while container screens have no dimmed background pass to hide behind
-/// (issue #51).
+/// Exactly two HUD elements in vanilla do consult the open screen, and
+/// neither is a vital: the potion-effect icons (suppressed only when the
+/// screen reports it draws its own, which the inventory and creative
+/// inventory screens both do) and the subtitle overlay. The crosshair is
+/// **not** one of them (it gates on camera type and spectator mode only) —
+/// we still hide it with [`crate::menu::UiState::is_playing`], a deliberate
+/// divergence while container screens have no dimmed background pass to hide
+/// behind.
 ///
-/// [`Screen::Connecting`] is excluded because there is no world yet — since
-/// issue #449 it is an `owns_frame` screen, so `draw_menu` returns early and
+/// [`Screen::Connecting`] is excluded because there is no world yet — it is
+/// an `owns_frame` screen, so `draw_menu` returns early and
 /// this function is never even asked about it, but the negative control in
 /// `app/tests.rs` asserts the answer anyway so the set cannot silently grow.
 /// The menu and error screens never get here at all: `draw_menu` returns early.
 fn hud_follows_world(screen: crate::menu::Screen) -> bool {
     use crate::menu::Screen;
-    // `Screen::Death` (issue #103) follows the same rule as `Paused`: vanilla's
-    // `Hud.extractRenderState` gates only on F1/`LevelLoadingScreen`, never on
-    // which screen is open, so the hotbar/hearts/hunger keep drawing (dimmed by
-    // the death screen's own background pass) behind the death screen too.
+    // `Screen::Death` follows the same rule as `Paused`: vanilla's own HUD
+    // extract gates only on F1/the loading screen, never on which screen is
+    // open, so the hotbar/hearts/hunger keep drawing (dimmed by the death
+    // screen's own background pass) behind the death screen too.
     matches!(
         screen,
         Screen::Playing | Screen::Chat | Screen::Container | Screen::Paused | Screen::Death
     )
 }
 
-/// `MouseHandler.onScroll`'s scroll-delta transform (`MouseHandler.java`),
-/// which is the boundary **both** wheel consumers read (issues #203, #444):
-///
-/// ```java
-/// boolean discreteScroll = this.minecraft.options.discreteMouseScroll().get();
-/// double scrollSensitivity = this.minecraft.options.mouseWheelSensitivity().get();
-/// double scaledYOffset = (discreteScroll ? Math.signum(yoffset) : yoffset) * scrollSensitivity;
-/// ```
+/// Vanilla's own scroll-delta transform, which is the boundary **both**
+/// wheel consumers read: with discrete scroll on, the delta collapses to its
+/// sign; either way the result is then multiplied by the wheel-sensitivity
+/// option.
 ///
 /// ## Why it is one function, applied in two arms
 ///
-/// Vanilla computes `scaledYOffset` **once** and hands the same value to
-/// `screen().mouseScrolled(..)` and to `ScrollWheelHandler.onMouseScroll`. So neither
-/// `discreteMouseScroll` nor `mouseWheelSensitivity` is a hotbar option or a
-/// list option — they define what a wheel notch *is*, before anything decides what to
-/// do with it. Putting the transform inside either consumer would have made the other
-/// one silently ignore both options, which is how `discreteMouseScroll` came to be
-/// #444's only row with a consumer this shell could actually reach.
+/// Vanilla computes the scaled offset **once** and hands the same value to
+/// both the open screen's own scroll handler and to the hotbar/list scroll
+/// handler. So neither the discrete-scroll option nor the sensitivity option
+/// is a hotbar option or a list option — they define what a wheel notch *is*,
+/// before anything decides what to do with it. Putting the transform inside
+/// either consumer would have made the other one silently ignore both
+/// options, which is how discrete-scroll support came to have only one
+/// consumer this shell could actually reach.
 ///
 /// **The order matters and is vanilla's:** `signum` first, *then* the sensitivity
 /// multiply. Reversed, a sensitivity of 2.0 with discrete scrolling on would yield
@@ -400,9 +395,9 @@ fn hud_follows_world(screen: crate::menu::Screen) -> bool {
 /// exactly as [`accumulate_scroll`] and [`resolve_key`] are.
 fn scale_scroll(dy: f64, discrete: bool, sensitivity: f32) -> f64 {
     let d = if discrete {
-        // `Math.signum`, which is 0.0 for 0.0 — not `1.0`. `f64::signum` returns
-        // 1.0 for +0.0, so a zero delta must be handled explicitly or a stationary
-        // wheel would scroll one notch per event.
+        // Vanilla's own sign function returns 0.0 for 0.0 — not 1.0.
+        // `f64::signum` returns 1.0 for +0.0, so a zero delta must be handled
+        // explicitly or a stationary wheel would scroll one notch per event.
         if dy == 0.0 { 0.0 } else { dy.signum() }
     } else {
         dy
@@ -433,9 +428,8 @@ fn adapter_lines(gpu: &GpuContext) -> Vec<String> {
 }
 
 /// How long after the last Render Distance change the new value goes live —
-/// vanilla's literal `600L` in
-/// `OptionInstance.OptionInstanceSliderButton.applyValue`
-/// (`OptionInstance.java`): `this.delayedApplyAt = Util.getMillis() + 600L`.
+/// vanilla's literal `600` (milliseconds) applied by its own delayed-slider
+/// commit logic.
 pub(crate) const RENDER_DISTANCE_APPLY_DELAY: Duration = Duration::from_millis(600);
 
 /// GLFW's own scale for a **precise** scrolling delta — a trackpad or a Magic
@@ -453,8 +447,8 @@ pub(crate) const RENDER_DISTANCE_APPLY_DELAY: Duration = Duration::from_millis(6
 /// _glfwInputScroll(window, deltaX, deltaY);
 /// ```
 ///
-/// This is what vanilla's `yoffset` already has applied by the time
-/// `MouseHandler.onScroll` sees it, so it belongs at *our* boundary too rather
+/// This is what vanilla's own scroll offset already has applied by the time
+/// its mouse handler sees it, so it belongs at *our* boundary too rather
 /// than anywhere downstream.
 const PRECISE_SCROLL_SCALE: f64 = 0.1;
 
@@ -471,9 +465,9 @@ const PRECISE_SCROLL_SCALE: f64 = 0.1;
 /// it is by definition the number vanilla receives for the same physical gesture.
 ///
 /// Free function for [`scale_scroll`]'s reason — and applied *before* it, because
-/// `discreteMouseScroll`'s `signum` must see a notch count. Applied after, a
-/// trackpad event would be `signum(12.0) == 1.0` either way and the option would
-/// mask the bug rather than the bug showing.
+/// the discrete-scroll option's sign-collapse must see a notch count. Applied
+/// after, a trackpad event would be `signum(12.0) == 1.0` either way and the
+/// option would mask the bug rather than the bug showing.
 fn wheel_notches(delta: winit::event::MouseScrollDelta) -> f64 {
     match delta {
         winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
@@ -481,16 +475,15 @@ fn wheel_notches(delta: winit::event::MouseScrollDelta) -> f64 {
     }
 }
 
-/// Vanilla's `ScrollWheelHandler.onMouseScroll` (issue #203): folds a
-/// sensitivity-scaled, possibly-fractional scroll offset into a whole number
-/// of hotbar slots, carrying the remainder in `accum` across calls so a
-/// `mouseWheelSensitivity` below 1.0 does not silently drop sub-notch scroll.
+/// Vanilla's own scroll-wheel handler: folds a sensitivity-scaled,
+/// possibly-fractional scroll offset into a whole number of hotbar slots,
+/// carrying the remainder in `accum` across calls so a sensitivity below 1.0
+/// does not silently drop sub-notch scroll.
 ///
-/// `accum` resets to zero on a direction reversal
-/// (`Math.signum(scaledYOffset) != Math.signum(this.accumulatedScrollY)`,
-/// `ScrollWheelHandler.java`) rather than fighting the new direction with
-/// old carry — one hard flick back should not need to "pay off" the previous
-/// direction's fractional debt first.
+/// `accum` resets to zero on a direction reversal (the scaled offset's sign
+/// differing from the accumulator's own) rather than fighting the new
+/// direction with old carry — one hard flick back should not need to "pay
+/// off" the previous direction's fractional debt first.
 fn accumulate_scroll(accum: &mut f64, scaled: f64) -> i32 {
     if *accum != 0.0 && scaled.signum() != accum.signum() {
         *accum = 0.0;
@@ -501,20 +494,14 @@ fn accumulate_scroll(accum: &mut f64, scaled: f64) -> i32 {
     whole as i32
 }
 
-/// Vanilla's `ScrollWheelHandler.getNextScrollWheelSelection` (issue #597):
-/// collapses the whole-notch count [`accumulate_scroll`] returns to its
-/// **sign** before it becomes a hotbar-slot step —
-///
-/// ```java
-/// public static int getNextScrollWheelSelection(final double wheel, int currentSelected, final int limit) {
-///    int step = (int)Math.signum(wheel);
-///    currentSelected -= step;
-///    ...
-/// ```
+/// Vanilla's own hotbar-selection step: collapses the whole-notch count
+/// [`accumulate_scroll`] returns to its **sign** before it becomes a
+/// hotbar-slot step — the selection index is decremented by that sign,
+/// clamped/wrapped to the hotbar's length.
 ///
 /// [`accumulate_scroll`] can legitimately return a magnitude greater than one:
-/// a high `mouseWheelSensitivity`, or — the common case on a trackpad — a
-/// single `PixelDelta` event large enough that its scaled offset crosses
+/// a high sensitivity setting, or — the common case on a trackpad — a
+/// single pixel-delta event large enough that its scaled offset crosses
 /// several whole notches at once. Vanilla never turns that magnitude into
 /// several slots; the hotbar always advances by exactly one slot per scroll
 /// *event*, discarding the rest of that event's whole-notch count rather than
@@ -533,7 +520,7 @@ fn hotbar_scroll_step(whole: i32) -> i32 {
 }
 
 /// What one raw physical key means while a Controls-menu bind button is
-/// mid-capture (issue #15's last hop) — extracted as a pure function so the
+/// mid-capture — extracted as a pure function so the
 /// decision is unit-testable without a window, the same reason
 /// [`resolve_key`] and [`WindowApp::menu_key_for`] are split out. Deliberately
 /// **not** `menu_key_for`: that function drops any physical key with no
@@ -542,8 +529,8 @@ fn hotbar_scroll_step(whole: i32) -> i32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CaptureKey {
     /// Escape: cancel the capture without changing the binding. Vanilla sets
-    /// `InputConstants.UNKNOWN` on Escape unconditionally
-    /// (`KeyBindsScreen.java`); this client deliberately does not — see
+    /// its own "unbound" sentinel on Escape unconditionally; this client
+    /// deliberately does not — see
     /// [`crate::menu::nav::MenuNav::capture_binding`]'s own doc on why
     /// unconditional-Unbound is the `Pause` hazard.
     Cancel,
@@ -615,13 +602,13 @@ struct WindowApp {
     /// (`pos=… fps=… chunks=…`) is unaffected and remains the instrument that
     /// does not depend on anyone having pressed a key.
     show_debug: bool,
-    /// Whether the debug modifier (F3) is currently held — issue #197's chords.
+    /// Whether the debug modifier (F3) is currently held, for its chords.
     /// Fed into [`app::input::KeyGate::debug_held`]; see there for why this is a
     /// gate flag rather than a second bindable action.
     debug_held: bool,
     /// Whether a chord (F3+B/F3+G) fired while the modifier was held. Vanilla's
-    /// `didDebugAction`: on release, the overlay toggles only if this is `false`,
-    /// so F3+B does not also open the overlay.
+    /// own "did a debug action" flag: on release, the overlay toggles only if
+    /// this is `false`, so F3+B does not also open the overlay.
     debug_chord_used: bool,
     /// F3+B — draw entity hitboxes. `Arc<AtomicBool>` because the only consumer
     /// is the `Send + Sync + 'static` closure `install_debug_lines_source`
@@ -646,7 +633,7 @@ struct WindowApp {
     /// `redraw`, never accumulated in the HUD layer itself.
     profiler_chart_selected: Option<usize>,
     /// The menu row whose slider the mouse is currently dragging, if any —
-    /// vanilla's `AbstractSliderButton.dragging`.
+    /// vanilla's own slider-drag flag.
     ///
     /// Holds the **row**, not just a flag, because a drag continues while the
     /// cursor leaves the row: once it has begun, the row is fixed and only the
@@ -656,17 +643,16 @@ struct WindowApp {
     ///
     /// Seeded from the launch config, so the first frame arms nothing.
     render_distance_seen: u32,
-    /// When the pending Render Distance change becomes live — vanilla's
-    /// `OptionInstance.OptionInstanceSliderButton.delayedApplyAt`.
+    /// When the pending Render Distance change becomes live — vanilla's own
+    /// delayed-apply deadline for the slider.
     ///
     /// # Why deferred rather than per-frame
     ///
-    /// `renderDistance` is the one `IntRange` vanilla builds with
-    /// `applyValueImmediately == false` (`Options.java`), and
-    /// `applyValue` is `this.delayedApplyAt = Util.getMillis() + 600L`
-    /// (`OptionInstance.java`), committed from the render extract once
-    /// the deadline passes (`:429-435`). Re-armed by *every* change, so the
-    /// commit lands 600 ms after the drag stops, not 600 ms after it starts.
+    /// Render distance is the one slider option vanilla builds with immediate
+    /// apply turned off, and its own apply routine sets the deadline to 600 ms
+    /// in the future, committed from the render extract once the deadline
+    /// passes. Re-armed by *every* change, so the commit lands 600 ms after
+    /// the drag stops, not 600 ms after it starts.
     ///
     /// Applying per frame instead would reload chunks on every pixel of the
     /// drag — which is exactly the cost the delay exists to avoid, and why the
@@ -676,7 +662,7 @@ struct WindowApp {
     render_distance_apply_at: Option<Instant>,
     /// Whether the player-list binding is currently held (shows the overlay).
     tab_held: bool,
-    /// A `key.screenshot` press waiting to be serviced (issue #16).
+    /// A `key.screenshot` press waiting to be serviced.
     ///
     /// **The capture cannot happen at key time**, which is the whole reason
     /// this field exists rather than the effects arm doing the work: a
@@ -706,7 +692,7 @@ struct WindowApp {
     /// Wrapped chat rows, persisted across frames — see
     /// [`crate::hud::ChatWrapCache`]. Lives here rather than in `hud` because
     /// the HUD `Frame` is rebuilt from scratch every frame and so can hold no
-    /// state of its own; issue #527 (a).
+    /// state of its own.
     chat_wrap: crate::hud::ChatWrapCache,
     /// Press/drag/release state machine for the open container screen; see
     /// [`container::MenuInput`]. Drives every predicted click this app sends.
@@ -718,9 +704,8 @@ struct WindowApp {
     shift_held: bool,
     /// Whether either Control key is currently held, tracked the same way as
     /// [`Self::shift_held`] and for the same reason `resolve_key` needs it: to
-    /// distinguish `key.drop`'s drop-one from drop-stack
-    /// (`Screen.hasControlDown()`/`Minecraft.hasControlDown()`), which is a
-    /// modifier read at drop time, not a `KeyMapping` of its own.
+    /// distinguish `key.drop`'s drop-one from drop-stack, which vanilla reads
+    /// as a live Control-held check, not a bindable key of its own.
     ctrl_held: bool,
     /// The live winit modifier state — Shift/Control/Alt/Super — updated from
     /// `WindowEvent::ModifiersChanged` (`app::lifecycle`'s `window_event`).
@@ -737,10 +722,10 @@ struct WindowApp {
     /// macOS-aware `EDIT_SHORTCUT_MODIFIER` shortcuts (select-all/copy/cut/
     /// paste, `crate::menu::focus::EDIT_SHORTCUT_MODIFIER`).
     modifiers: ModifiersState,
-    /// Fractional carry for the hotbar mouse-wheel scroll (issue #203), so a
-    /// `mouseWheelSensitivity` below 1.0 does not lose sub-notch scroll and
-    /// above 1.0 can cross more than one slot per notch. Mirrors vanilla's
-    /// `ScrollWheelHandler.accumulatedScrollY`: each event adds
+    /// Fractional carry for the hotbar mouse-wheel scroll, so a sensitivity
+    /// below 1.0 does not lose sub-notch scroll and above 1.0 can cross more
+    /// than one slot per notch. Mirrors vanilla's own scroll accumulator:
+    /// each event adds
     /// `dy * sensitivity`, [`accumulate_scroll`] truncates off the whole
     /// slots and keeps the remainder, and a direction reversal drops
     /// whatever was carried in the old direction rather than fighting it.
@@ -764,7 +749,7 @@ struct WindowApp {
     /// debug-overlay counter — the crafting result slot itself is always the
     /// server's, never a local match (see `docs/crafting.md`).
     ///
-    /// Since issue #148 this is a **cache** of `lodestone_ecs::RecipeRegistry`'s
+    /// This is a **cache** of `lodestone_ecs::RecipeRegistry`'s
     /// book, not the authority: plugins register recipes into that resource, and
     /// `Self::sync_recipe_book` re-clones this field when
     /// [`recipe_book_revision`](Self::recipe_book_revision) falls behind. Reads
@@ -774,14 +759,14 @@ struct WindowApp {
     recipe_book: Option<RecipeBook>,
     /// The `RecipeRegistry::revision` [`recipe_book`](Self::recipe_book) was
     /// cloned at, so a plugin registering mid-session refreshes the cache exactly
-    /// once rather than on every frame. Issue #148.
+    /// once rather than on every frame.
     recipe_book_revision: u64,
-    /// Persisted recipe-book **panel** state (issue #163): whether the panel is
+    /// Persisted recipe-book **panel** state: whether the panel is
     /// open, and the search/tab/page the user last left it on.
     ///
     /// Persisted across frames *and* across container open/close, deliberately:
-    /// vanilla's `RecipeBookComponent` state lives on the client's own
-    /// `RecipeBook`, not on the screen, so reopening a crafting table keeps the
+    /// vanilla's own recipe-book-panel state lives on the client's own recipe
+    /// book, not on the screen, so reopening a crafting table keeps the
     /// book open with the same tab. Rebuilding it per frame would reset the
     /// search box on every mouse move.
     recipe_panel: RecipePanelState,
@@ -809,14 +794,14 @@ struct WindowApp {
     /// seen".
     recipe_toast_synced: bool,
     /// `RecipeDisplayId`s [`WindowApp::sync_recipe_book_seen`] has already
-    /// reported to the server this session (vanilla's
-    /// `ServerboundRecipeBookSeenRecipePacket`), so a recipe whose button
-    /// stays on screen for many frames is reported exactly once rather than
-    /// every frame the panel stays open on that page.
+    /// reported to the server this session (vanilla's own "recipe book seen"
+    /// packet), so a recipe whose button stays on screen for many frames is
+    /// reported exactly once rather than every frame the panel stays open on
+    /// that page.
     recipe_book_seen: HashSet<i32>,
     /// The bundle slot currently tracking a scroll-driven selection highlight
-    /// (issue #616's `BUNDLE_ITEM_SELECTED` / #613's `SelectBundleItem`), or
-    /// `None` when no bundle is being scrolled — see
+    /// (`BUNDLE_ITEM_SELECTED` / `SelectBundleItem`), or `None` when no bundle
+    /// is being scrolled — see
     /// `crate::container::bundle`'s module doc for why this lives beside the
     /// menu rather than mutated inside it the way vanilla's own client does.
     bundle_selection: Option<crate::container::bundle::BundleSelection>,
@@ -825,8 +810,8 @@ struct WindowApp {
     /// sources by [`WindowApp::install_session_render_sources`] and cleared with
     /// the session, so a fresh connect never inherits the last one's storm.
     /// The rain **ambience** is deliberately absent from this struct. Its cadence
-    /// lives in [`lodestone_render::RainAmbience`] (vanilla's `rainSoundTime`,
-    /// unit-tested), but it has **no producer**, because the only `ShellAudio` in
+    /// lives in [`lodestone_render::RainAmbience`] (vanilla's own rain-sound
+    /// timer, unit-tested), but it has **no producer**, because the only `ShellAudio` in
     /// the process is a private field on `Sim` with no public play method. Adding
     /// one `pub fn play_local_sound(&mut self, name: &str, category, pos, volume,
     /// pitch)` to `crate::sim::Sim` — forwarding to `self.audio` exactly as the
@@ -836,19 +821,19 @@ struct WindowApp {
     /// `CLAUDE.md`'s island rule: an unused field reads as an oversight, a named
     /// blocker does not.
     weather: Option<Arc<WeatherTracker>>,
-    /// The creative-inventory screen's own UI state (issue #158): selected tab,
+    /// The creative-inventory screen's own UI state: selected tab,
     /// scroll offset, search text.
     ///
     /// Persisted across open/close for the same reason
-    /// [`recipe_panel`](Self::recipe_panel) is — vanilla's `selectedTab` is a
-    /// `static` field on `CreativeModeInventoryScreen`, so reopening the screen
-    /// returns to the tab you left it on.
+    /// [`recipe_panel`](Self::recipe_panel) is — vanilla's own selected-tab
+    /// field is `static` on its creative screen class, so reopening the
+    /// screen returns to the tab you left it on.
     ///
     /// Whether the screen is *showing* is not stored here: it is
     /// [`WindowApp::creative_screen_open`], derived from the container flag plus
     /// the player's own abilities, so the two can never disagree.
     creative: crate::container::CreativeState,
-    /// The Advancements screen's in-flight viewport drag (issue #167): the cursor
+    /// The Advancements screen's in-flight viewport drag: the cursor
     /// position the last pan was measured from, in physical pixels.
     ///
     /// The *screen* state (tab, per-tab scroll) lives on [`MenuNav`] beside every
@@ -857,25 +842,24 @@ struct WindowApp {
     /// [`menu_slider_drag`](Self::menu_slider_drag) already makes.
     advancements_drag: Option<(f32, f32)>,
     /// The live advancement progress snapshot plus the completion-toast queue
-    /// (issue #167) — see [`AdvancementsFeed`](advancements_screen::AdvancementsFeed).
+    /// — see [`AdvancementsFeed`](advancements_screen::AdvancementsFeed).
     advancement_feed: advancements_screen::AdvancementsFeed,
-    /// The world this process is *hosting*, if any (issue #535).
+    /// The world this process is *hosting*, if any.
     ///
     /// Set by [`WindowApp::begin_singleplayer`] and cleared on quit-to-title, and
     /// read by exactly one thing: the pause menu's Open to LAN, which republishes
     /// the same launch on a TCP port. `None` for a multiplayer session, which is
     /// what makes that button honest there — there is no world of ours to publish.
     hosted_world: Option<crate::menu::nav::SingleplayerLaunch>,
-    /// The merchant screen's own UI state (issue #245's UI half) — vanilla's
-    /// `MerchantScreen.shopItem`, which trade row is selected: whose
-    /// out-of-stock overlay shows, and the index the next `SELECT_TRADE` send
-    /// carries.
+    /// The merchant screen's own UI state — vanilla's own "selected trade"
+    /// field: which trade row is selected, whose out-of-stock overlay shows,
+    /// and the index the next `SELECT_TRADE` send carries.
     ///
     /// Not reset on close, matching [`creative`](Self::creative)/
     /// [`recipe_panel`](Self::recipe_panel)'s own "persisted across open/close"
-    /// precedent — vanilla's own field is `screen`-scoped state that a fresh
-    /// `MerchantScreen` starts at `0` every time, but this client rebuilds no
-    /// screen object per open, so restarting at `0` here would need an extra
+    /// precedent — vanilla's own field is scoped to its merchant screen
+    /// object, which starts at `0` every time it is freshly constructed, but
+    /// this client rebuilds no screen object per open, so restarting at `0` here would need an extra
     /// reset call at the one place a merchant menu opens, for a difference no
     /// player can see (`0` is what a stale value most often already is). A
     /// stale value past the real offer list is harmless either way: every
@@ -885,7 +869,7 @@ struct WindowApp {
     merchant_selected: usize,
     /// The anvil rename box's persistent editable-text state — see
     /// [`crate::container::AnvilRenameState`]'s own module doc for the whole
-    /// chain this closes (issue #603). Synced from the input slot once per
+    /// chain this closes. Synced from the input slot once per
     /// frame in `redraw`'s anvil-name computation, edited per keystroke by
     /// `KeyOutcome::AnvilRename`, and read back by `ContainerFrame::with_anvil_name`.
     ///
@@ -894,8 +878,8 @@ struct WindowApp {
     /// from whatever is in slot 0 the next time an anvil is open, so a stale
     /// value between sessions is never visible.
     anvil_rename: crate::container::AnvilRenameState,
-    /// The beacon screen's pending primary/secondary power selection (issue
-    /// #613's `SetBeaconEffects` remainder) — see
+    /// The beacon screen's pending primary/secondary power selection
+    /// (`SetBeaconEffects` remainder) — see
     /// [`crate::container::beacon::BeaconSelection`]'s own module doc.
     /// Synced from `container_data` once per frame in `redraw`, the same
     /// place [`Self::anvil_rename`] is, and edited by
@@ -907,7 +891,7 @@ struct WindowApp {
     /// beacon is open, so a stale value between sessions is never visible.
     beacon_selection: crate::container::beacon::BeaconSelection,
     /// The stonecutter recipe grid's persisted scroll offset (`0.0..=1.0`,
-    /// `StonecutterScreen.scrollOffs`) — advanced by
+    /// vanilla's own scroll-offset field) — advanced by
     /// [`WindowApp::scroll_stonecutter`], read by
     /// [`WindowApp::handle_stonecutter_click`] through
     /// [`crate::container::stonecutter::start_index_for_scroll`].
@@ -925,8 +909,8 @@ struct WindowApp {
     /// [`WindowApp::handle_loom_click`] through
     /// [`crate::container::loom::start_row_for_scroll`].
     loom_scroll: f32,
-    /// Game-rule overrides collected on Create New World's More tab (issue
-    /// #592), queued for exactly one send once the fresh singleplayer session
+    /// Game-rule overrides collected on Create New World's More tab, queued
+    /// for exactly one send once the fresh singleplayer session
     /// reaches `SessionPhase::Connected` — see
     /// [`Self::drive_ui_from_session`]'s own arm and
     /// [`crate::sim::Sim::send_set_game_rules`]. `Option` rather than a bare
@@ -936,11 +920,10 @@ struct WindowApp {
     /// doc on why it is not a one-shot transition) cannot resend it.
     pending_game_rules: Option<Vec<(lodestone_model::ResourceKey, String)>>,
     /// When the F3 debug overlay's own network-chart figures were last
-    /// refreshed via a `ClientAction::PingRequest` send (issue #613's
-    /// `PingRequest` remainder) — `None` means "never, this session". Real
+    /// refreshed via a `ClientAction::PingRequest` send (`PingRequest`
+    /// remainder) — `None` means "never, this session". Real
     /// vanilla re-sends this every client tick while its own network-chart
-    /// sub-panel shows (`PingDebugMonitor.tick`, gated on
-    /// `DebugScreenOverlay.showNetworkCharts()`); this client has no such
+    /// sub-panel shows; this client has no such
     /// sub-panel, so the closest honest equivalent is "while F3 is open, at
     /// most once per second" — real, F3-gated traffic rather than either an
     /// unconditional per-tick spam or a send with no UI behind it at all.
@@ -952,7 +935,7 @@ struct WindowApp {
 #[cfg(test)]
 mod tests;
 
-/// Gates for the recipe-book panel wiring (issue #163).
+/// Gates for the recipe-book panel wiring.
 ///
 /// The recipe-book UI landed fully built and unit-tested in `container.rs` and
 /// `lodestone-game`, and reached **zero pixels** because the three call sites
