@@ -1,7 +1,7 @@
 //! Block **physics facts** that are not geometry, in two halves that are keyed
 //! differently on purpose:
 //!
-//! 1. the per-block-state `legacySolid` / `blocksMotion` census generated into
+//! 1. the per-block-state "legacy solid" / "blocks motion" census generated into
 //!    `src/generated/block_solidity.rs` and read through
 //!    [`lodestone_data::block_solidity`] — state-keyed, so it lives behind the
 //!    version seam (`VersionAdapter::block_blocks_motion`);
@@ -21,12 +21,12 @@
 //!
 //! `tests/support/block_physics_jvm.txt` is an authoritative dump produced by
 //! booting the real 26.2 server (`BlockPhysicsOracle.java`) and reading, per
-//! block, `Block.getFriction/getSpeedFactor/getJumpFactor/getBounceRestitution`
-//! plus `BlockTags.CLIMBABLE`/`SUPPRESSES_BOUNCE` membership; and per block
-//! *state*, `BlockStateBase.isSolid()` and `BlockStateBase.blocksMotion()`.
+//! block, vanilla's own friction/speed-factor/jump-factor/bounce-restitution accessors,
+//! plus climbable/suppresses-bounce block-tag membership; and per block
+//! *state*, vanilla's own "is solid" and "blocks motion" accessors.
 //!
 //! None of it is in `blocks.json` (which carries block *properties* only — no
-//! friction, no `destroySpeed`, no geometry), and `vendor/minecraft-data` has no
+//! friction, no destroy speed, no geometry), and `vendor/minecraft-data` has no
 //! 26.x data at all and was measured 92.29% covered and stale for 26.2 on the
 //! collision census. So "boot the jar and ask it" is again the only
 //! authoritative source.
@@ -35,10 +35,10 @@
 //! make *negative* claims non-vacuously:
 //!
 //! * `F <block> <forceSolidOn> <forceSolidOff> <dynamicShape>` — the two private
-//!   `Properties` flags, read by reflection because neither has a getter. This is
+//!   block-properties-builder flags, read by reflection because neither has a getter. This is
 //!   what makes "the shape cannot answer this" a measurement rather than a claim.
 //! * `E <block> <class>` — every block whose class overrides
-//!   `entityInside` at all. `makeStuckInBlock`'s vector is imperative code, not a
+//!   its own entity-inside step at all. The stuck-in-block step's vector is imperative code, not a
 //!   property, so it cannot be dumped; what *can* be dumped is the candidate set,
 //!   which turns `lodestone_model`'s three-row `stuck_multiplier` table from an
 //!   asserted-complete list into a checked-complete one
@@ -60,7 +60,7 @@
 //! ```
 //!
 //!    No `--add-opens` is needed even though the oracle reflects into
-//!    `BlockBehaviour.Properties`' private `forceSolid*` fields: the server jar is
+//!    vanilla's own block-properties builder's private `forceSolid*` fields: the server jar is
 //!    on the *classpath*, so its classes are in the unnamed module, where
 //!    `setAccessible(true)` is unrestricted. That stops being true the day the
 //!    server ships as a named module.
@@ -97,7 +97,7 @@ const DUMP: &str = include_str!("support/block_physics_jvm.txt");
 
 /// One block's name-keyed constants, exactly as the server reported them.
 struct Constants {
-    /// Raw `Float.floatToRawIntBits` patterns, so the text round-trip is lossless.
+    /// Raw `Float.floatToRawIntBits` patterns (standard Java library), so the text round-trip is lossless.
     friction_bits: u32,
     speed_factor_bits: u32,
     jump_factor_bits: u32,
@@ -106,7 +106,8 @@ struct Constants {
     suppresses_bounce: bool,
 }
 
-/// `Properties.forceSolidOn` / `forceSolidOff` / `Block.hasDynamicShape`.
+/// Vanilla's own block-properties builder's "force solid on"/"force solid off"
+/// flags, and its own block class's "has dynamic shape" check.
 #[derive(Clone, Copy)]
 struct SolidFlags {
     force_on: bool,
@@ -119,17 +120,17 @@ struct Dump {
     block_count: usize,
     /// Per-block constants, keyed by `minecraft:*` name.
     constants: BTreeMap<String, Constants>,
-    /// Per-block `forceSolid*` / `dynamicShape` flags.
+    /// Per-block force-solid-on/off and dynamic-shape flags.
     flags: BTreeMap<String, SolidFlags>,
-    /// Blocks whose class overrides `entityInside`, name → declaring class.
+    /// Blocks whose class overrides the entity-inside step, name → declaring class.
     entity_inside: BTreeMap<String, String>,
     /// `(first state id, block name)` per block, ascending.
     blocks: Vec<(usize, String)>,
-    /// Per-state `BlockStateBase.isSolid()`.
+    /// Per-state "is solid" accessor.
     legacy_solid: Vec<bool>,
-    /// Per-state `BlockStateBase.blocksMotion()`.
+    /// Per-state "blocks motion" accessor.
     blocks_motion: Vec<bool>,
-    /// Per-state `calculateSolid`'s geometry branch alone — the best a consumer
+    /// Per-state "calculate solid" step's geometry branch alone — the best a consumer
     /// holding only a shape table could do.
     geometry_solid: Vec<bool>,
 }
@@ -316,11 +317,11 @@ fn generate(dump: &Dump) -> String {
     out.push_str(
         "// @generated by `cargo test -p lodestone-data --test block_physics -- --ignored`\n\
          // from tests/support/block_physics_jvm.txt (a headless 26.2 server dump of\n\
-         // BlockStateBase.isSolid()/blocksMotion(), protocol 776 / Minecraft 26.2).\n\
+         // vanilla's own is-solid/blocks-motion accessors, protocol 776 / Minecraft 26.2).\n\
          // DO NOT EDIT BY HAND. Regenerate with LODESTONE_REGEN=1 (see the test module docs).\n",
     );
     out.push_str(
-        "//! Generated per-block-state `legacySolid`/`blocksMotion` bitsets for\n\
+        "//! Generated per-block-state \"legacy solid\"/\"blocks motion\" bitsets for\n\
          //! protocol 776 (Minecraft 26.2), indexed by global block-state id.\n\
          //! Consumed by [`crate::block_solidity`].\n\n",
     );
@@ -330,13 +331,13 @@ fn generate(dump: &Dump) -> String {
     emit_bitset(
         &mut out,
         "LEGACY_SOLID",
-        "`BlockStateBase.isSolid()` (the cached `legacySolid` flag)",
+        "vanilla's own \"is solid\" accessor (the cached \"legacy solid\" flag)",
         &dump.legacy_solid,
     );
     emit_bitset(
         &mut out,
         "BLOCKS_MOTION",
-        "`BlockStateBase.blocksMotion()` (`legacySolid` net of the cobweb / \
+        "vanilla's own \"blocks motion\" accessor (\"legacy solid\" net of the cobweb / \
          bamboo-sapling exclusions)",
         &dump.blocks_motion,
     );
@@ -437,7 +438,7 @@ fn ids_are_contiguous_and_out_of_range_is_none() {
     assert_eq!(block_solidity::blocks_motion(u32::MAX), None);
 }
 
-/// `blocksMotion` is `legacySolid` minus exactly two blocks in 26.2. Pinned as a
+/// "Blocks motion" is "legacy solid" minus exactly two blocks in 26.2. Pinned as a
 /// completeness statement about vanilla's hard-coded exclusion list — if a third
 /// block joins it, this fails rather than the shell quietly disagreeing with the
 /// server about one cell.
@@ -450,21 +451,21 @@ fn blocks_motion_differs_from_legacy_solid_on_exactly_cobweb_and_bamboo_sapling(
             assert_eq!(
                 block_solidity::blocks_motion(id),
                 Some(false),
-                "the exclusion list can only turn blocksMotion *off* (state {id})"
+                "the exclusion list can only turn \"blocks motion\" *off* (state {id})"
             );
         }
     }
     assert_eq!(
         differ.into_iter().collect::<Vec<_>>(),
         vec!["minecraft:bamboo_sapling", "minecraft:cobweb"],
-        "vanilla's blocksMotion exclusion list changed"
+        "vanilla's \"blocks motion\" exclusion list changed"
     );
 }
 
-/// Vanilla's own `calculateSolid` geometry branch, replayed by the oracle with the
+/// Vanilla's own "calculate solid" geometry branch, replayed by the oracle with the
 /// two `forceSolid*` early-returns deleted, versus the truth. **This is the
 /// measurement that justifies the census existing**: it is computed in the JVM
-/// against the same `Cache.collisionShape` this repo's collision census dumps, so
+/// against the same shape cache's own collision-shape field this repo's collision census dumps, so
 /// it is not our arithmetic being graded against our own data.
 #[test]
 fn the_geometry_branch_alone_is_wrong_for_two_thousand_states() {
@@ -609,9 +610,9 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
         "minecraft:big_dripleaf",
         "minecraft:chorus_plant",
         "minecraft:chorus_flower",
-        // `scaffolding` is the *third* branch, not a `forceSolidOff`: it is a
-        // `dynamicShape()` block, so vanilla never builds its shape cache and
-        // `calculateSolid` returns false before it ever looks at geometry — while
+        // `scaffolding` is the *third* branch, not a "force solid off" block: it is a
+        // dynamic-shape block, so vanilla never builds its shape cache and
+        // its own "calculate solid" step returns false before it ever looks at geometry — while
         // the collision census does report its standing shape.
         "minecraft:scaffolding",
     ] {
@@ -629,7 +630,8 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
 
     // A ladder is the reason the threshold constant is what it is: its mean
     // extent is *exactly* `(1 + 1 + 3/16) / 3`, so it lands on the `>=` and the
-    // geometry branch calls it solid. `forceSolidOff()` on `Blocks.LADDER` is
+    // geometry branch calls it solid. The ladder block's own "force solid off"
+    // flag is
     // what makes vanilla disagree, and the old code hard-coded that one case.
     let ladder = first_id_named("minecraft:ladder");
     let boxes = collision_shapes::collision_boxes(ladder).expect("resolves");
@@ -647,14 +649,15 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
 /// source so the table is not merely self-consistent.
 #[test]
 fn hand_checked_solidity_rows() {
-    // `Blocks.SLIME_BLOCK` registers with no forceSolid* call and a
+    // The slime block registers with no forceSolid* call and a
     // full cube, so geometry and truth agree: solid.
     assert_eq!(
         block_solidity::blocks_motion(first_id_named("minecraft:slime_block")),
         Some(true)
     );
-    // `WebBlock`'s `noCollission()` empties its collision shape, its
-    // `forceSolidOn()` makes `legacySolid` true anyway, and `blocksMotion`'s own
+    // The cobweb block's own "no collision" marker empties its collision shape, its
+    // own "force solid on" flag makes "legacy solid" true anyway, and "blocks
+    // motion"'s own
     // `block != COBWEB` clause turns it back off. All three layers, one block.
     let cobweb = first_id_named("minecraft:cobweb");
     assert_eq!(block_solidity::legacy_solid(cobweb), Some(true));
@@ -706,8 +709,8 @@ fn name_keyed_constants_match_the_committed_dump_for_every_block() {
             got.jump_factor
         );
         // `bounce_restitution` is contracted as already net of
-        // `BlockTags.SUPPRESSES_BOUNCE`, so a suppressed block must read 0.0
-        // whatever `getBounceRestitution` says.
+        // the suppresses-bounce block tag, so a suppressed block must read 0.0
+        // whatever vanilla's own "get bounce restitution" accessor says.
         let expected_bounce = if want.suppresses_bounce {
             0.0f32
         } else {
@@ -771,7 +774,7 @@ fn only_twenty_three_blocks_set_a_non_default_movement_constant() {
     }
 }
 
-/// `BlockTags.CLIMBABLE`, from the dump rather than from the tag JSON we read by
+/// The climbable block tag, from the dump rather than from the tag JSON we read by
 /// hand. Nine members in 26.2.
 #[test]
 fn climbable_is_exactly_the_nine_tagged_blocks() {
@@ -795,11 +798,11 @@ fn climbable_is_exactly_the_nine_tagged_blocks() {
             "minecraft:weeping_vines",
             "minecraft:weeping_vines_plant",
         ],
-        "BlockTags.CLIMBABLE membership changed"
+        "climbable-tag membership changed"
     );
 }
 
-/// `BlockTags.SUPPRESSES_BOUNCE`'s only member in 26.2 is `honey_block`, which
+/// The suppresses-bounce block tag's only member in 26.2 is `honey_block`, which
 /// sets no restitution — so folding the tag in changes nothing today, and
 /// `bounce_restitution`'s "already net of the tag" contract is currently
 /// unexercised. Pinned because a future bouncy suppressor would otherwise break
@@ -817,7 +820,7 @@ fn the_bounce_suppression_tag_is_currently_a_no_op_and_that_is_load_bearing() {
     assert_eq!(
         suppressors,
         vec!["minecraft:honey_block"],
-        "BlockTags.SUPPRESSES_BOUNCE membership changed"
+        "suppresses-bounce-tag membership changed"
     );
     for name in &suppressors {
         assert_eq!(
@@ -828,10 +831,11 @@ fn the_bounce_suppression_tag_is_currently_a_no_op_and_that_is_load_bearing() {
     }
 }
 
-/// `makeStuckInBlock`'s vector is imperative code inside `Block.entityInside`, so
+/// The stuck-in-block step's vector is imperative code inside vanilla's own
+/// entity-inside step, so
 /// it cannot be dumped as data. What *can* be checked mechanically is
 /// completeness: every block `lodestone-model` gives a `stuck_multiplier` must
-/// override `entityInside`, and the override census is 61 blocks — so the
+/// override the entity-inside step, and the override census is 61 blocks — so the
 /// three-row table is checked against a real candidate set rather than asserted
 /// to be exhaustive.
 #[test]
@@ -840,7 +844,7 @@ fn stuck_multiplier_is_only_set_by_blocks_that_override_entity_inside() {
     assert_eq!(
         dump.entity_inside.len(),
         61,
-        "the entityInside override census changed"
+        "the entity-inside override census changed"
     );
     let with_stuck: Vec<&str> = dump
         .constants
@@ -860,11 +864,11 @@ fn stuck_multiplier_is_only_set_by_blocks_that_override_entity_inside() {
     for name in &with_stuck {
         assert!(
             dump.entity_inside.contains_key(*name),
-            "{name} carries a stuck multiplier but does not override entityInside"
+            "{name} carries a stuck multiplier but does not override the entity-inside step"
         );
     }
-    // The three declaring classes, pinned: if `WebBlock` stops overriding
-    // `entityInside`, the row above is stale and this says so.
+    // The three declaring classes, pinned: if the cobweb block's class stops
+    // overriding the entity-inside step, the row above is stale and this says so.
     assert_eq!(
         dump.entity_inside["minecraft:cobweb"],
         "net.minecraft.world.level.block.WebBlock"
