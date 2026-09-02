@@ -15515,7 +15515,7 @@ where
 {
     let invulnerable = Abilities::for_mode(game_mode).invulnerable;
 
-    // `LivingEntity.updateUsingItem` — see the native arm's identical block
+    // Vanilla's own update-using-item routine — see the native arm's identical block
     // (`server::serve_play`'s `vitals_tick`) for the full reasoning: the
     // periodic eat/drink sound, then the finish once `finish_tick` is
     // reached.
@@ -16170,7 +16170,7 @@ where
     let mut take_xp_delay: i32 = 0;
     let mut effects = crate::mob_effects::ActiveEffects::new();
     let mut burn = crate::burning::BurnState::new();
-    // The `nextInt(1, 3)` ramp draw `BaseFireBlock.fireIgnite` makes on a player's
+    // The `nextInt(1, 3)` ramp draw vanilla's own fire-block ignite routine makes on a player's
     // contact tick. Its own stream, so standing in fire cannot shift which roll a
     // later block drop or composter insert sees.
     let mut burn_rng = SpawnRng::new(BURN_BEHAVIOR_SEED);
@@ -16481,7 +16481,7 @@ mod tests {
     use lodestone_model::{Rotation, Vec3};
     use uuid::Uuid;
 
-    /// The two places `Player.createAttributes()`' `add(Attributes.ATTACK_DAMAGE,
+    /// The two places vanilla's own player attribute-supplier's `add(Attributes.ATTACK_DAMAGE,
     /// 1.0)` is transcribed must not drift: this module's own constant, and the
     /// attribute base [`lodestone_entity::equipment`] folds equipment onto.
     ///
@@ -16596,7 +16596,7 @@ mod tests {
 
     /// The signing path: a title present transmutes the stack to
     /// `minecraft:written_book` and stamps the signer's name as author —
-    /// `ServerGamePacketListenerImpl.signBook`'s own literal `0`/`true` for
+    /// vanilla's own sign-book handler's own literal `0`/`true` for
     /// generation/resolved.
     #[test]
     fn edit_book_signing_transmutes_to_written_book() {
@@ -16628,7 +16628,7 @@ mod tests {
     }
 
     /// **Control**: a slot outside the hotbar or off-hand must be refused —
-    /// vanilla's own `Inventory.isHotbarSlot(slot) || slot == 40` gate.
+    /// vanilla's own `isHotbarSlot(slot) || slot == 40` gate.
     /// Without this, an implementation that skipped the slot check entirely
     /// would still pass the two tests above (both use in-range slots).
     #[test]
