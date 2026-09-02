@@ -2128,21 +2128,20 @@ fn on_climbable_here(state: &PlayerState, view: &dyn CollisionView) -> bool {
 /// `true`; the dispatch in [`travel_and_check_inside_blocks`] guarantees the
 /// other three paths are only reached when it is `false`).
 ///
-/// **That constant is an approximation, and this is the subsystem's one known
-/// divergence.** `isInWater()` is *not* frozen for the tick: it reads the cached
-/// `wasTouchingWater` (`Entity.java:1605-1607`), and `updateFluidInteraction`
-/// rewrites that cache from **two** call sites — `Entity.baseTick`
-/// (`Entity.java:537`, pre-`travel`, the one this crate's dispatch reproduces)
-/// and `LivingEntity.checkFallDamage` (`LivingEntity.java:365`), which runs
-/// *inside* `move()` against the **post-move** position under
-/// `if (!this.isInWater())`. So on the tick a fall first enters water vanilla
-/// resets mid-`move` (`Entity.java:1658-1659`) and then skips the accumulation
-/// below, ending that tick at exactly `0.0`, whereas this crate is still on the
-/// `tick_air` path and accumulates the descent.
+/// **That constant is an approximation, and this is the subsystem's one
+/// known divergence.** Vanilla's "in water" check is *not* frozen for the
+/// tick: it reads a cached flag, and its own fluid-interaction update
+/// rewrites that cache from **two** call sites — its baseline per-tick
+/// update (pre-travel, the one this crate's dispatch reproduces) and its
+/// fall-damage check, which runs *inside* the move step against the
+/// **post-move** position, only while not already in water. So on the tick
+/// a fall first enters water vanilla resets mid-move and then skips the
+/// accumulation below, ending that tick at exactly `0.0`, whereas this crate
+/// is still on the `tick_air` path and accumulates the descent.
 ///
 /// The divergence is bounded to that single tick and **cannot move the player**:
-/// this call happens at the *end* of the move, after
-/// `Player.maybeBackOffFromEdge` has already read the old value, and the next
+/// this call happens at the *end* of the move, after vanilla's own
+/// sneak-at-a-ledge back-off has already read the old value, and the next
 /// tick's dispatch re-derives the summary from the same post-move position
 /// vanilla used, so [`tick_water`]'s reset lands before any gate reads it. It is
 /// therefore observable only to an external reader between ticks (a future
@@ -2152,9 +2151,9 @@ fn on_climbable_here(state: &PlayerState, view: &dyn CollisionView) -> bool {
 /// `water_entry_tick_is_the_one_known_divergence_and_it_lasts_exactly_one_tick`
 /// pins both halves of that claim.
 ///
-/// The `(float)` cast is vanilla's, not an approximation: `fallDistance` is a
-/// `double` field but the tick's `ya` is truncated to `float` precision *before*
-/// the subtraction (`Entity.java:1566`).
+/// The `(float)` cast is vanilla's, not an approximation: the fall-distance
+/// accumulator is a `double` field but the tick's `ya` is truncated to
+/// `float` precision *before* the subtraction.
 fn accumulate_fall_distance(state: &mut PlayerState, ya: f64, in_water: bool) {
     if !in_water && ya < 0.0 {
         state.fall_distance -= f64::from(ya as f32);
@@ -2164,29 +2163,27 @@ fn accumulate_fall_distance(state: &mut PlayerState, ya: f64, in_water: bool) {
     }
 }
 
-/// `Entity.checkFallDistanceAccumulation()` (`Entity.java:2904-2908`) — clamps
-/// `fallDistance` to at most `1.0` while not descending fast. Called only from
-/// `LivingEntity.updateFallFlying`, itself only reached `if (isFallFlying())` in
-/// `aiStep`, ahead of the Slow Falling/Levitation reset and `travel()`
-/// (`LivingEntity.java:3117-3125`) — so this reads `state.velocity` as it stood
-/// at the *end of the previous* tick, exactly as vanilla's pre-`travel()`
-/// placement does.
+/// Vanilla's own fall-distance-accumulation clamp — clamps the accumulator
+/// to at most `1.0` while not descending fast. Called only from vanilla's
+/// own fall-flying update, itself only reached while gliding, ahead of the
+/// Slow Falling/Levitation reset and travel — so this reads
+/// `state.velocity` as it stood at the *end of the previous* tick, exactly
+/// as vanilla's pre-travel placement does.
 fn check_fall_distance_accumulation(state: &mut PlayerState) {
     if state.velocity.y > -0.5 && state.fall_distance > 1.0 {
         state.fall_distance = 1.0;
     }
 }
 
-/// `LivingEntity.aiStep`'s **jump** block for an entity standing in fluid
-/// (`LivingEntity.java:3088-3113`).
+/// Vanilla's own **jump** block for an entity standing in fluid.
 ///
 /// This is the sinking-vs-swimming decision, and it is *not* "jump means `+0.04`
 /// in water". Vanilla compares the fluid's **height** against
 /// [`fluid_jump_threshold`]:
 ///
 /// * shallow enough (`onGround && !(height > threshold)`, or not in water at all)
-///   ⇒ an ordinary `jumpFromGround()` — you jump out of a puddle normally;
-/// * otherwise ⇒ `jumpInLiquid()`, the `+0.04F` swim-up impulse.
+///   ⇒ an ordinary ground jump — you jump out of a puddle normally;
+/// * otherwise ⇒ vanilla's own in-liquid jump, the `+0.04F` swim-up impulse.
 ///
 /// Modelling this needs a real fluid height, which is why the summary is passed
 /// in rather than re-derived from the coarse presence booleans: with a
@@ -2212,10 +2209,11 @@ fn apply_fluid_jump(
         fluid.water_height
     };
     let in_water_and_has_height = fluid.in_water() && fluid_height > 0.0;
-    // `getEyeHeight()` is *always* `getDimensions(getPose()).eyeHeight()` in
-    // vanilla — one record, no way for the two to disagree. Read it from the pose
-    // rather than from [`PlayerState::eye_height`] so an out-of-band write to that
-    // field cannot make the box and the eye disagree here either.
+    // Vanilla's own eye height is *always* derived from the pose's own
+    // dimensions — one record, no way for the two to disagree. Read it from
+    // the pose rather than from [`PlayerState::eye_height`] so an
+    // out-of-band write to that field cannot make the box and the eye
+    // disagree here either.
     let threshold = fluid_jump_threshold(state.pose.eye_height());
     // The outer test is vanilla's `!(fluidHeight > threshold)` and the two inner
     // ones are its `<=` — transcribed as written rather than normalised, because the
