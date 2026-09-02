@@ -64,6 +64,13 @@ pub mod chat_session;
 pub mod flow;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod login;
+/// The ownership proof every play path in the shell must be handed: a token
+/// that can only be produced from a roster holding a real account.
+///
+/// Not `cfg`-gated, for [`metadata`]'s reason — it is a pure function of a
+/// roster, with no HTTP client and no keychain, and the browser build needs the
+/// same gate the native one has.
+pub mod entitlement;
 /// The account roster (`profiles.json`): which accounts exist, their display
 /// names, and which one is selected.
 ///
@@ -110,6 +117,7 @@ pub use chat_session::{
     profile_public_key_has_expired, profile_public_key_signature_payload, verify_signature,
 };
 
+pub use entitlement::Entitlement;
 pub use error::XstsErrorKind;
 #[cfg(not(target_arch = "wasm32"))]
 pub use flow::{

@@ -159,7 +159,12 @@ impl WindowApp {
     pub(super) fn apply_menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::None => {}
-            MenuAction::Singleplayer(config) => {
+            // The leading `Entitlement` is the ownership gate's proof, and it is
+            // consumed here rather than read: reaching this arm at all *is* the
+            // evidence, because `MenuNav` cannot have built the variant without
+            // a stored account that owns the game. Nothing downstream needs the
+            // value, so it is bound and dropped rather than threaded on.
+            MenuAction::Singleplayer(_owned, config) => {
                 // A real integrated server, not the old offline demo
                 // world. `Sim::new` no longer builds one (see its docs): a client
                 // holds the server's world or none at all, and a demo world left
@@ -183,7 +188,8 @@ impl WindowApp {
                 // could not create a second one. See `crate::saves`' module doc.
                 self.begin_singleplayer(config);
             }
-            MenuAction::Connect(entry) => {
+            // See the `Singleplayer` arm above for what the first field is.
+            MenuAction::Connect(_owned, entry) => {
                 // Set before dialing: `net::set_pending_server_pack_policy`'s
                 // own doc explains why this is a one-shot global read at
                 // `NetClient::connect_impl` rather than a `Sim::connect`

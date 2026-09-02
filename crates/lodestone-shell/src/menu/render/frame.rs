@@ -1016,7 +1016,10 @@ pub fn owns_frame(screen: super::Screen) -> bool {
     use super::Screen;
     matches!(
         screen,
-        Screen::MainMenu
+        // The ownership gate: a full-frame screen with two buttons and nothing
+        // behind it worth rendering — no world can be loaded while it is up.
+        Screen::Ownership
+            | Screen::MainMenu
             | Screen::ServerList
             | Screen::ServerEdit
             | Screen::WorldSelect

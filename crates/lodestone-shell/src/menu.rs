@@ -92,6 +92,33 @@ pub enum SessionKind {
 /// Which screen the shell is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
+    /// **The ownership gate**: shown instead of anything else while no locally
+    /// stored account owns the game.
+    ///
+    /// Not a vanilla screen — real Minecraft is launched by a separate launcher
+    /// that has already resolved an account before the game starts, so there is
+    /// nothing to reproduce. Lodestone has no separate launcher, so the game
+    /// itself has to ask.
+    ///
+    /// It is a **hard** gate, not a nag: singleplayer, the server list, world
+    /// creation and the offline identity are all behind it. Its two affordances
+    /// are "Add Account" (which opens [`Screen::Accounts`], the same screen and
+    /// the same store the switcher uses) and Quit.
+    ///
+    /// **What actually enforces it is not this variant.** A screen is a UI
+    /// state and could be routed around by a future entry path; the enforcement
+    /// is that [`nav::MenuAction::Singleplayer`] and [`nav::MenuAction::Connect`]
+    /// each carry a `lodestone_auth::Entitlement`, which has no public
+    /// constructor other than one that reads a roster with a real account in
+    /// it. This screen is what the player *sees* when that token cannot be
+    /// produced; the token is what makes playing without one unrepresentable.
+    ///
+    /// Reached from [`nav::MenuNav::key`]/[`nav::MenuNav::click`], which
+    /// reconcile onto it before dispatching, and from
+    /// [`render::frame_for`](render::frame_for), which draws it for the very
+    /// first frame — before any input has arrived to reconcile anything.
+    /// Escape here means Quit, because there is nothing to back out to.
+    Ownership,
     /// Title screen: choose Singleplayer / Multiplayer / Quit.
     MainMenu,
     /// The multiplayer server list: pick a saved server, or add/edit/delete one.
@@ -446,6 +473,59 @@ pub enum Screen {
 }
 
 impl Screen {
+    /// Whether a session is being established or played behind this screen.
+    ///
+    /// The fork the **ownership gate** turns on: the gate may replace a
+    /// pre-session screen and must never replace an in-session one. A live
+    /// world is by construction a world an ownership proof already authorised
+    /// (see [`nav::MenuAction::Singleplayer`]), so painting the gate over it
+    /// would strand a player mid-game rather than stop anyone playing.
+    ///
+    /// Written as an **exhaustive match** rather than a `matches!` allow-list on
+    /// purpose: a screen added later must be classified deliberately, and a
+    /// compile error asking "is this one over a world?" is the only thing that
+    /// makes that happen. The failure direction matters — a new in-session
+    /// screen misfiled as pre-session is a player kicked to the gate mid-session
+    /// — and neither default is safe enough to guess.
+    ///
+    /// [`Self::Connecting`] counts as in-session: the launch was authorised, and
+    /// the gate replacing a loading screen would look like a failed connect.
+    #[must_use]
+    pub fn in_session(self) -> bool {
+        match self {
+            Screen::Ownership
+            | Screen::MainMenu
+            | Screen::ServerList
+            | Screen::ServerEdit
+            | Screen::WorldSelect
+            | Screen::Accounts
+            | Screen::CreateWorld
+            | Screen::Confirm
+            | Screen::Error
+            // Reachable from the title *and* from the pause menu; the in-world
+            // case is already covered by `Screen::Paused` being in-session, so
+            // classifying the screen itself as pre-session costs nothing.
+            | Screen::Settings => false,
+            Screen::Connecting
+            | Screen::Playing
+            | Screen::Chat
+            | Screen::Container
+            | Screen::CommandBlockEdit
+            | Screen::SignEdit
+            | Screen::BookEdit
+            | Screen::BookView
+            | Screen::SpectatorMenu
+            | Screen::Paused
+            | Screen::Death
+            | Screen::Credits
+            | Screen::Social
+            | Screen::Statistics
+            | Screen::ServerLinks
+            | Screen::Advancements
+            | Screen::ResourcePackPrompt => true,
+        }
+    }
+
     /// Every variant, in declaration order.
     ///
     /// Exists so a test that has to walk *all* screens iterates the enum instead
@@ -468,7 +548,8 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 26] = [
+    pub const ALL: [Screen; 27] = [
+        Screen::Ownership,
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -703,7 +784,11 @@ impl UiState {
     pub fn is_menu(&self) -> bool {
         matches!(
             self.screen,
-            Screen::MainMenu
+            // The ownership gate is a pre-session menu screen exactly as the
+            // title screen it stands in front of is: no world is loaded and the
+            // menu renderer owns the frame.
+            Screen::Ownership
+                | Screen::MainMenu
                 | Screen::ServerList
                 | Screen::ServerEdit
                 | Screen::WorldSelect
@@ -974,8 +1059,30 @@ impl UiState {
     /// [`open_server_list`](Self::open_server_list)'s reasoning: a stray call
     /// must never pull the player out of a world.
     pub fn open_accounts(&mut self) {
-        if self.screen == Screen::MainMenu {
+        // [`Screen::Ownership`] too, and that edge is the gate's only exit: the
+        // account screen is where an account gets added, so a gate that could
+        // not reach it would be a gate nobody can pass.
+        if matches!(self.screen, Screen::MainMenu | Screen::Ownership) {
             self.screen = Screen::Accounts;
+        }
+    }
+
+    /// Show the ownership gate.
+    ///
+    /// Guarded on there being **no session** rather than on a screen list: the
+    /// gate exists to stop a session starting, so it has no business appearing
+    /// over one that is already running, and `kind` is the one field that says
+    /// whether that is the case. In practice the guard never fires — a session
+    /// cannot have started without an `Entitlement` — but it is the difference
+    /// between "cannot happen" and "cannot happen, and here is what would
+    /// happen if it did".
+    ///
+    /// Callers are [`nav::MenuNav::key`], [`nav::MenuNav::click`] and
+    /// [`nav::MenuNav::leave_accounts`]; the predicate they all consult is
+    /// [`nav::MenuNav::ownership_gate_blocks`].
+    pub fn open_ownership_gate(&mut self) {
+        if self.kind.is_none() {
+            self.screen = Screen::Ownership;
         }
     }
 
@@ -1472,6 +1579,11 @@ impl UiState {
             Screen::Accounts => self.close_accounts(),
             Screen::Settings => self.close_settings(),
             Screen::MainMenu => self.request_quit(),
+            // Quit, not an unwind: there is no screen behind the gate to back
+            // out to. `MenuNav::key_ownership` says the same thing first in
+            // production; this arm keeps the match exhaustive and agrees with
+            // it for a caller that reaches here some other way.
+            Screen::Ownership => self.request_quit(),
             Screen::Connecting => self.cancel_connect(),
             // Deliberately a no-op, not "unwind one level" like every screen
             // above: vanilla's `DeathScreen.shouldCloseOnEsc()` returns

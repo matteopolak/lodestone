@@ -42,6 +42,7 @@ use super::widget;
 use super::options::LiveOption;
 use super::{Screen, SessionKind, UiState};
 use crate::config::{MAX_MANUAL_GUI_SCALE, Options};
+use lodestone_auth::Entitlement;
 
 /// Longest accepted address string in the edit form, in characters. A hostname
 /// is capped at 253 by DNS; the extra room is for `:port`.
@@ -176,9 +177,21 @@ pub enum MenuAction {
     /// kept as the seam the integrated server would land on. It is worth naming
     /// because "the variant exists and is matched" was true throughout and is
     /// exactly what an island looks like from the inside.
-    Singleplayer(SingleplayerLaunch),
+    ///
+    /// **The leading [`Entitlement`] is the ownership gate**, and it is a type
+    /// rather than a check on purpose: `Entitlement`'s fields are private and
+    /// its only constructor reads an account roster holding a real account, so
+    /// this variant cannot be built — here, in a test, or by a future second
+    /// entry path someone adds next year — without one. A `bool` consulted in
+    /// [`MenuNav::key`] would be forgotten by that future path and nothing
+    /// would go red; this fails to compile instead.
+    Singleplayer(Entitlement, SingleplayerLaunch),
     /// Connect to this server (the app opens the session and shows Connecting).
-    Connect(ServerEntry),
+    ///
+    /// Carries an [`Entitlement`] for [`Self::Singleplayer`]'s reason — the two
+    /// are the only verbs that start a session, so they are the two the gate has
+    /// to be expressed in.
+    Connect(Entitlement, ServerEntry),
     /// Shut the game down cleanly.
     Quit,
     /// The list changed or a re-ping was asked for: the app should refresh
@@ -794,6 +807,43 @@ pub const MAIN_BUTTONS: [MainButton; 9] = [
     MainButton::Accounts,
 ];
 
+/// The two widgets on the ownership gate ([`Screen::Ownership`]).
+///
+/// Deliberately only two, and deliberately not a title screen with everything
+/// greyed: a greyed row invites a click and reads as "temporarily unavailable",
+/// while a screen with one thing to do reads as "do this". The gate is not a
+/// nag, so there is no "Continue anyway".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnershipButton {
+    /// Open [`Screen::Accounts`] — the *same* account switcher the title screen
+    /// reaches, writing the *same* roster. Adding an account here therefore adds
+    /// it to the switcher by construction; there is no second store and no
+    /// second sign-in path to keep in sync.
+    AddAccount,
+    /// Quit the game. Present on every host, unlike the title screen's own Quit
+    /// (see [`MainButton::enabled_on`]): a browser tab cannot end its process,
+    /// but a gate whose only two rows are "add an account" and one that does
+    /// nothing is worse than one row.
+    Quit,
+}
+
+impl OwnershipButton {
+    /// The button's caption.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            OwnershipButton::AddAccount => "Add Account",
+            OwnershipButton::Quit => "Quit Game",
+        }
+    }
+}
+
+/// The ownership gate's widgets, in display order. As with [`MAIN_BUTTONS`],
+/// these indices are the one index space shared by keyboard selection, mouse
+/// hover, hit-testing and the renderer.
+pub const OWNERSHIP_BUTTONS: [OwnershipButton; 2] =
+    [OwnershipButton::AddAccount, OwnershipButton::Quit];
+
 /// Whether this build can end its own process, which is what **Quit Game**
 /// means. False in a browser tab — see [`MainButton::enabled_on`].
 pub const CAN_EXIT_PROCESS: bool = !cfg!(target_arch = "wasm32");
@@ -1258,6 +1308,13 @@ impl DeathButton {
 #[derive(Debug)]
 pub struct MenuNav {
     main: usize,
+    /// Highlighted row on the ownership gate ([`OWNERSHIP_BUTTONS`]).
+    ///
+    /// Its own cursor rather than a reuse of `main`: the gate and the title
+    /// screen can both be on screen across one transition (adding an account
+    /// moves from one to the other), and a shared cursor would carry the gate's
+    /// "Quit" row onto the title screen's fourth button.
+    ownership: usize,
     server: usize,
     /// Highlighted row on the pause menu ([`PAUSE_BUTTONS`]).
     paused: usize,
@@ -1575,6 +1632,7 @@ impl MenuNav {
             .unwrap_or_else(|| std::path::PathBuf::from(crate::saves::SAVES_DIR));
         Self {
             main: 0,
+            ownership: 0,
             server: 0,
             paused: 0,
             death: 0,
@@ -1621,6 +1679,135 @@ impl MenuNav {
             lan_published: false,
             has_singleplayer_server: false,
         }
+    }
+
+    /// **The ownership gate's whole question**: proof that a locally stored
+    /// account owns the game, or `None`.
+    ///
+    /// Delegates to the account screen, which owns the loaded roster — not a
+    /// second read of `profiles.json`, because two readers of one file are two
+    /// answers that can disagree the moment an account is added or removed.
+    ///
+    /// Deliberately recomputed per call rather than cached at construction:
+    /// removing the last account has to close the gate again in the same frame,
+    /// and a cached token is exactly how it would not.
+    #[must_use]
+    pub fn entitlement(&self) -> Option<Entitlement> {
+        self.accounts.entitlement()
+    }
+
+    /// Whether the ownership gate must be showing instead of whatever `ui` is
+    /// on.
+    ///
+    /// One expression with four callers — [`Self::key`], [`Self::click`],
+    /// [`Self::hover`] and `render::frame_for` — because a gate whose input
+    /// routing and whose drawing disagree about being closed is a gate you can
+    /// click through.
+    ///
+    /// Takes the whole [`UiState`] rather than a [`Screen`] because one screen
+    /// cannot answer on its own: [`Screen::Settings`] is reached both from the
+    /// title *and* from the pause menu, and the in-world one sits over a live
+    /// session. `settings_in_world` is the only thing that tells them apart.
+    ///
+    /// Exempt, each for its own reason:
+    ///
+    /// * [`Screen::Accounts`] is the *only* way out of the gate. Blocking it
+    ///   would make the gate unopenable.
+    /// * [`Screen::Error`] carries a failure the app has already decided to
+    ///   show (a build with no version family, for instance). Painting the gate
+    ///   over it would replace a real diagnosis with an unrelated screen.
+    /// * Every **in-session** screen — see [`Screen::in_session`] for why the
+    ///   gate must never paint over a live world, and why that fork is an
+    ///   exhaustive match rather than a list here — plus in-world Settings,
+    ///   which `in_session` cannot classify without this extra bit.
+    ///
+    /// [`Screen::Ownership`] itself is not exempt and does not need to be:
+    /// reconciling the gate onto the gate is a no-op.
+    #[must_use]
+    pub fn ownership_gate_blocks(&self, ui: &UiState) -> bool {
+        let screen = ui.screen();
+        if matches!(screen, Screen::Accounts | Screen::Error)
+            || screen.in_session()
+            || (screen == Screen::Settings && ui.settings_in_world())
+        {
+            return false;
+        }
+        self.entitlement().is_none()
+    }
+
+    /// Refuse a play verb that was reached without an [`Entitlement`], landing
+    /// the player back on the gate.
+    ///
+    /// **Unreachable through the UI as it stands** — [`Self::key`] and
+    /// [`Self::click`] reconcile onto [`Screen::Ownership`] before any screen
+    /// that can produce a play verb gets to dispatch — and that is exactly why
+    /// it exists rather than an `unreachable!()`: the whole point of the gate is
+    /// to survive an entry path nobody has written yet, and a refusal that
+    /// visibly lands on the gate is the right answer for one, where a panic and
+    /// a silent `MenuAction::None` are both wrong.
+    fn refuse_unowned(&mut self, ui: &mut UiState) -> MenuAction {
+        tracing::warn!(
+            target: "auth",
+            screen = ?ui.screen(),
+            "a play action was reached with no account that owns the game; \
+             returning to the ownership gate"
+        );
+        self.ownership = 0;
+        ui.open_ownership_gate();
+        MenuAction::None
+    }
+
+    /// The gate's highlighted widget.
+    #[must_use]
+    pub fn ownership_button(&self) -> OwnershipButton {
+        OWNERSHIP_BUTTONS[self.ownership.min(OWNERSHIP_BUTTONS.len() - 1)]
+    }
+
+    /// The gate's highlighted row index, for the renderer.
+    #[must_use]
+    pub fn ownership_index(&self) -> usize {
+        self.ownership.min(OWNERSHIP_BUTTONS.len() - 1)
+    }
+
+    /// One key on [`Screen::Ownership`].
+    ///
+    /// Escape is **Quit**, not an unwind: there is no screen behind the gate to
+    /// back out to, and an Escape that did nothing would read as a frozen game.
+    fn key_ownership(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Up => {
+                self.ownership = wrap_prev(self.ownership, OWNERSHIP_BUTTONS.len());
+                MenuAction::None
+            }
+            MenuKey::Down => {
+                self.ownership = wrap_next(self.ownership, OWNERSHIP_BUTTONS.len());
+                MenuAction::None
+            }
+            MenuKey::Enter => match self.ownership_button() {
+                OwnershipButton::AddAccount => {
+                    ui.open_accounts();
+                    MenuAction::None
+                }
+                OwnershipButton::Quit => {
+                    ui.request_quit();
+                    MenuAction::Quit
+                }
+            },
+            MenuKey::Escape => {
+                ui.request_quit();
+                MenuAction::Quit
+            }
+            _ => MenuAction::None,
+        }
+    }
+
+    /// A click on rendered row `row` of [`Screen::Ownership`].
+    fn click_ownership(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        if row >= OWNERSHIP_BUTTONS.len() {
+            return MenuAction::None;
+        }
+        self.ownership = row;
+        self.key_ownership(ui, MenuKey::Enter)
     }
 
     /// The saved servers.
@@ -2757,6 +2944,18 @@ impl MenuNav {
     /// is the *click*: `key_main`/`key_paused` refuse Enter on a disabled button,
     /// which is why moving the highlight onto one here is safe.
     pub fn hover(&mut self, ui: &UiState, row: usize) {
+        // The gate takes `&UiState`, so unlike `key`/`click` this cannot
+        // reconcile the screen — it aims the gate's own cursor instead. Without
+        // it, hovering during the window between the first drawn frame and the
+        // first key or click (the gate is drawn from `frame_for`, which cannot
+        // move `UiState` either) would move the *title screen's* cursor under a
+        // gate the player is looking at.
+        if self.ownership_gate_blocks(ui) || ui.screen() == Screen::Ownership {
+            if row < OWNERSHIP_BUTTONS.len() {
+                self.ownership = row;
+            }
+            return;
+        }
         match ui.screen() {
             Screen::MainMenu if row < MAIN_BUTTONS.len() => self.main = row,
             // Two cursors on one screen (#396), and hover drives only one of
@@ -2956,6 +3155,22 @@ impl MenuNav {
     }
 
     pub fn click(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        // The gate reconcile — [`Self::key`]'s, for the other of the two paths
+        // every input takes. A click that arrives while the gate is closed must
+        // land on the gate, not on whatever row the screen behind it had there.
+        if self.ownership_gate_blocks(ui) {
+            let was = ui.screen();
+            ui.open_ownership_gate();
+            // [`Self::key`]'s reasoning: a click aimed at the screen the gate
+            // just replaced must not activate a gate button under the cursor.
+            if ui.screen() != was {
+                self.ownership = 0;
+                return MenuAction::None;
+            }
+        }
+        if ui.screen() == Screen::Ownership {
+            return self.click_ownership(ui, row);
+        }
         // The edit form is the second screen where "hover then Enter" is wrong,
         // and #395 is what makes it visible. `ContainerEventHandler.mouseClicked`
         // focuses the child it hit and calls *its* `onClick`; it does not activate
@@ -3124,7 +3339,7 @@ impl MenuNav {
         if ui.screen() == Screen::Accounts && self.accounts.is_editing_name() {
             use crate::menu::accounts::AccountsSignal;
             match self.accounts.click_name_edit_row(row) {
-                AccountsSignal::Back => ui.close_accounts(),
+                AccountsSignal::Back => self.leave_accounts(ui),
                 AccountsSignal::None => {}
             }
             return MenuAction::None;
@@ -3217,11 +3432,14 @@ impl MenuNav {
             // the bug a player report (2026-08-04) traced to this function.
             if let Some((rx, ry, size)) = self.entry_icon_cursor(row) {
                 if widget::over_right_half(rx, ry, size) {
+                    let Some(auth) = self.entitlement() else {
+                        return self.refuse_unowned(ui);
+                    };
                     return match self.list.get(row) {
                         Some(entry) => {
                             let entry = entry.clone();
                             ui.begin(SessionKind::Multiplayer);
-                            MenuAction::Connect(entry)
+                            MenuAction::Connect(auth, entry)
                         }
                         None => MenuAction::None,
                     };
@@ -3240,11 +3458,14 @@ impl MenuNav {
             // in reaching this before, and must not gate it now either.
             let now_ms = self.click_clock.elapsed().as_millis() as u64;
             if self.double_click.click(now_ms, (Screen::ServerList, row)) {
+                let Some(auth) = self.entitlement() else {
+                    return self.refuse_unowned(ui);
+                };
                 return match self.list.get(row) {
                     Some(entry) => {
                         let entry = entry.clone();
                         ui.begin(SessionKind::Multiplayer);
-                        MenuAction::Connect(entry)
+                        MenuAction::Connect(auth, entry)
                     }
                     None => MenuAction::None,
                 };
@@ -3288,14 +3509,19 @@ impl MenuNav {
     /// keyboard can already do, except Direct Connection, which is inactive.
     fn activate_list_button(&mut self, ui: &mut UiState, button: ServerListButton) -> MenuAction {
         match button {
-            ServerListButton::Select => match self.list.get(self.server) {
-                Some(entry) => {
-                    let entry = entry.clone();
-                    ui.begin(SessionKind::Multiplayer);
-                    MenuAction::Connect(entry)
+            ServerListButton::Select => {
+                let Some(auth) = self.entitlement() else {
+                    return self.refuse_unowned(ui);
+                };
+                match self.list.get(self.server) {
+                    Some(entry) => {
+                        let entry = entry.clone();
+                        ui.begin(SessionKind::Multiplayer);
+                        MenuAction::Connect(auth, entry)
+                    }
+                    None => MenuAction::None,
                 }
-                None => MenuAction::None,
-            },
+            }
             ServerListButton::Add => {
                 self.form = EditForm::adding();
                 ui.open_server_edit();
@@ -3325,7 +3551,26 @@ impl MenuNav {
     /// Handles one key for the current screen, mutating `ui` for navigation and
     /// returning the action the app must perform.
     pub fn key(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        // **The gate reconcile**, and it is here rather than at each play verb
+        // because this is one of the two places every keystroke passes through.
+        // Sampled before the dispatch below, so a key pressed on a screen the
+        // gate blocks lands on the gate rather than on the screen it was aimed
+        // at. See `ownership_gate_blocks` for the two exempt screens.
+        if self.ownership_gate_blocks(ui) {
+            let was = ui.screen();
+            ui.open_ownership_gate();
+            // **Swallow the keystroke that moved the screen.** It was aimed at
+            // whatever was showing before, and letting it through would make the
+            // very first Enter after launch both reveal the gate and press its
+            // first button — a screen the player never saw and never chose.
+            // A key pressed while the gate is *already* up falls through.
+            if ui.screen() != was {
+                self.ownership = 0;
+                return MenuAction::None;
+            }
+        }
         match ui.screen() {
+            Screen::Ownership => self.key_ownership(ui, key),
             Screen::MainMenu => self.key_main(ui, key),
             Screen::ServerList => self.key_list(ui, key),
             Screen::ServerEdit => self.key_edit(ui, key),
@@ -3555,9 +3800,12 @@ impl MenuNav {
             }
             MenuKey::Enter => match self.list.get(self.server) {
                 Some(entry) => {
+                    let Some(auth) = self.entitlement() else {
+                        return self.refuse_unowned(ui);
+                    };
                     let entry = entry.clone();
                     ui.begin(SessionKind::Multiplayer);
-                    MenuAction::Connect(entry)
+                    MenuAction::Connect(auth, entry)
                 }
                 // An empty list must not silently swallow Enter; open the add
                 // form, which is the only useful thing to do here.
@@ -4145,8 +4393,11 @@ impl MenuNav {
             // `None` and the press does nothing rather than opening the saves root
             // itself as a world.
             WorldSelectOutcome::Play(dir_name) => {
+                let Some(auth) = self.entitlement() else {
+                    return self.refuse_unowned(ui);
+                };
                 match crate::saves::world_dir_in(&self.saves_root, &dir_name) {
-                    Some(dir) => MenuAction::Singleplayer(SingleplayerLaunch::Open(dir)),
+                    Some(dir) => MenuAction::Singleplayer(auth, SingleplayerLaunch::Open(dir)),
                     None => {
                         self.world_select
                             .set_error(format!("{dir_name:?} is not a world folder"));
@@ -4358,6 +4609,9 @@ impl MenuNav {
             // "decorative" list already records for difficulty, structures, bonus
             // chest and cheats.
             CreateWorldOutcome::Create(config) => {
+                let Some(auth) = self.entitlement() else {
+                    return self.refuse_unowned(ui);
+                };
                 let game_type = match config.game_mode {
                     crate::menu::create_world::WorldGameMode::Creative => 1,
                     crate::menu::create_world::WorldGameMode::Survival
@@ -4389,7 +4643,10 @@ impl MenuNav {
                         "creating an in-memory browser world (nothing is written to disk; \
                          it is lost when the tab closes)"
                     );
-                    return MenuAction::Singleplayer(SingleplayerLaunch::Created { config });
+                    return MenuAction::Singleplayer(
+                        auth,
+                        SingleplayerLaunch::Created { config },
+                    );
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 match crate::saves::create_world_in(
@@ -4398,9 +4655,10 @@ impl MenuNav {
                     game_type,
                     &config.experiments,
                 ) {
-                    Ok(world_dir) => {
-                        MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, config })
-                    }
+                    Ok(world_dir) => MenuAction::Singleplayer(
+                        auth,
+                        SingleplayerLaunch::Created { world_dir, config },
+                    ),
                     // Reported over a screen the player recognises, never routed
                     // around: a failed `create_dir` means the data directory is
                     // unwritable, and silently opening *some other* world would be
@@ -5380,10 +5638,27 @@ impl MenuNav {
     fn key_accounts(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         use crate::menu::accounts::AccountsSignal;
         match self.accounts.handle_key(key) {
-            AccountsSignal::Back => ui.close_accounts(),
+            AccountsSignal::Back => self.leave_accounts(ui),
             AccountsSignal::None => {}
         }
         MenuAction::None
+    }
+
+    /// Leave [`Screen::Accounts`] to whichever screen is legal to leave to.
+    ///
+    /// The account screen is the one screen the ownership gate exempts, so it is
+    /// also the one screen that can be left into a *closed* gate — a player who
+    /// removed their last account has to land back on the gate, not on a title
+    /// screen the reconcile would only bounce them off at the next keystroke.
+    ///
+    /// Both exits (Escape and the Cancel button) go through here, so they cannot
+    /// disagree about where "back" is.
+    fn leave_accounts(&mut self, ui: &mut UiState) {
+        ui.close_accounts();
+        if self.ownership_gate_blocks(ui) {
+            self.ownership = 0;
+            ui.open_ownership_gate();
+        }
     }
 
     /// The pause menu: Up/Down move the highlight, Enter activates the
@@ -6365,12 +6640,50 @@ mod tests {
 
     /// A nav whose list persists to a unique temporary file, so tests exercise
     /// the *real* save path without touching the developer's server list.
-    fn nav(tag: &str) -> (MenuNav, std::path::PathBuf) {
+    fn nav_path(tag: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
             "lodestone-nav-{}-{tag}/servers.json",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        path
+    }
+
+    /// Writes a `profiles.json` beside `path` holding one account, so the
+    /// ownership gate is **open** for the `MenuNav` about to be built from it.
+    ///
+    /// Must run before construction: `AccountsNav` reads the roster once, in its
+    /// constructor.
+    fn grant_ownership(path: &std::path::Path) {
+        let mut meta = lodestone_auth::AccountsMetadata::default();
+        let id = uuid::Uuid::new_v4();
+        meta.upsert(lodestone_auth::AccountProfile {
+            profile_id: id,
+            username: "OwnerAccount".to_owned(),
+            skin_url: None,
+            last_used: 1,
+        });
+        meta.selected = Some(id);
+        meta.save_to(&path.parent().unwrap().join("profiles.json"))
+            .expect("the temp roster must be writable");
+    }
+
+    /// A `MenuNav` on a fresh temp directory **with an account that owns the
+    /// game**, i.e. past the ownership gate.
+    ///
+    /// Seeding is deliberate and is the premise almost every test in this module
+    /// wants — they are about what a player who can play sees. It does mean the
+    /// whole corpus is blind to the gate by construction, which is why the gate
+    /// has its own tests built on [`unowned_nav`] rather than on this.
+    fn nav(tag: &str) -> (MenuNav, std::path::PathBuf) {
+        let path = nav_path(tag);
+        grant_ownership(&path);
+        (MenuNav::with_path(path.clone()), path)
+    }
+
+    /// [`nav`]'s twin with **no** account: the ownership gate is closed.
+    fn unowned_nav(tag: &str) -> (MenuNav, std::path::PathBuf) {
+        let path = nav_path(tag);
         (MenuNav::with_path(path.clone()), path)
     }
 
@@ -6622,7 +6935,7 @@ mod tests {
         nav.key(&mut ui, MenuKey::Enter);
 
         match nav.key(&mut ui, MenuKey::Enter) {
-            MenuAction::Connect(e) => {
+            MenuAction::Connect(_, e) => {
                 assert_eq!(e.host, "play.example");
                 assert_eq!(e.effective_port(), super::super::servers::DEFAULT_PORT);
             }
@@ -7027,7 +7340,17 @@ mod tests {
     fn a_save_failure_is_reported_rather_than_swallowed() {
         // A player who adds a server and sees it vanish deserves the reason.
         // `/dev/null/...` cannot be a directory on any Unix.
-        let mut nav = MenuNav::with_path(std::path::PathBuf::from("/dev/null/nope/servers.json"));
+        // The roster lives on a *writable* temp path while the server list does
+        // not: this test is about a failed server-list write, and an unwritable
+        // roster would additionally close the ownership gate, which would stop
+        // the keystrokes below ever reaching the edit form.
+        let profiles = nav_path("savefail-profiles");
+        grant_ownership(&profiles);
+        let mut nav = MenuNav::with_paths(
+            std::path::PathBuf::from("/dev/null/nope/servers.json"),
+            std::path::PathBuf::from("/dev/null/nope/options.json"),
+            profiles.parent().unwrap().join("profiles.json"),
+        );
         let mut ui = UiState::new();
         ui.open_server_list();
         nav.key(&mut ui, MenuKey::Char('a'));
@@ -8854,7 +9177,7 @@ mod tests {
             .frame_row_for_focus_id(CREATE_ROW)
             .expect("Create is always visible, on every tab");
         let action = nav.click(&mut ui, create_row);
-        let MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, config }) = action
+        let MenuAction::Singleplayer(_, SingleplayerLaunch::Created { world_dir, config }) = action
         else {
             panic!("expected MenuAction::Singleplayer(Created {{ .. }}), got {action:?}");
         };
@@ -8947,7 +9270,7 @@ mod tests {
             .frame_row_for_focus_id(CREATE_ROW)
             .expect("Create is always visible, on every tab");
         let action = nav.click(&mut ui, create_row);
-        let MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, config }) = action
+        let MenuAction::Singleplayer(_, SingleplayerLaunch::Created { world_dir, config }) = action
         else {
             panic!("expected MenuAction::Singleplayer(Created {{ .. }}), got {action:?}");
         };
@@ -9245,7 +9568,7 @@ mod tests {
                 .frame_row_for_focus_id(CREATE_ROW)
                 .expect("Create is always visible, on every tab");
             let action = nav.click(&mut ui, create_row);
-            let MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, .. }) = action
+            let MenuAction::Singleplayer(_, SingleplayerLaunch::Created { world_dir, .. }) = action
             else {
                 panic!("expected Created, got {action:?}");
             };
@@ -9297,7 +9620,7 @@ mod tests {
                 .dir_name
                 .clone();
             let action = nav.click(&mut ui, B::Play.row());
-            let MenuAction::Singleplayer(SingleplayerLaunch::Open(dir)) = action else {
+            let MenuAction::Singleplayer(_, SingleplayerLaunch::Open(dir)) = action else {
                 panic!("expected Open, got {action:?}");
             };
             assert_eq!(
@@ -9337,7 +9660,7 @@ mod tests {
             .frame_row_for_focus_id(CREATE_ROW)
             .expect("Create is always visible, on every tab");
         let action = nav.click(&mut ui, create_row);
-        let MenuAction::Singleplayer(SingleplayerLaunch::Created { config, .. }) = action else {
+        let MenuAction::Singleplayer(_, SingleplayerLaunch::Created { config, .. }) = action else {
             panic!("expected MenuAction::Singleplayer(Created {{ .. }}), got {action:?}");
         };
         assert_eq!(
@@ -9395,11 +9718,17 @@ mod tests {
             "premise: opening the screen enumerated the planted world"
         );
 
+        // Destructured rather than compared against a whole constructed value:
+        // the action now carries an `Entitlement`, which has no public
+        // constructor, so a test cannot build the expected variant — which is
+        // the ownership gate working as designed.
+        let action = nav.click(&mut ui, B::Play.row());
+        let MenuAction::Singleplayer(_, SingleplayerLaunch::Open(dir)) = action else {
+            panic!("expected MenuAction::Singleplayer(_, Open(..)), got {action:?}");
+        };
         assert_eq!(
-            nav.click(&mut ui, B::Play.row()),
-            MenuAction::Singleplayer(SingleplayerLaunch::Open(
-                nav.saves_root().join("planted")
-            )),
+            dir,
+            nav.saves_root().join("planted"),
             "Play Selected World must ask the app to launch that world's directory"
         );
         assert_eq!(
@@ -9424,12 +9753,11 @@ mod tests {
         );
         nav.key(&mut ui, MenuKey::Tab);
         assert_eq!(nav.world_select().focused_row(), Some(B::Play.row()));
-        assert_eq!(
-            nav.key(&mut ui, MenuKey::Enter),
-            MenuAction::Singleplayer(SingleplayerLaunch::Open(
-                nav.saves_root().join("planted")
-            ))
-        );
+        let action = nav.key(&mut ui, MenuKey::Enter);
+        let MenuAction::Singleplayer(_, SingleplayerLaunch::Open(dir)) = action else {
+            panic!("expected MenuAction::Singleplayer(_, Open(..)), got {action:?}");
+        };
+        assert_eq!(dir, nav.saves_root().join("planted"));
     }
 
     /// Typing on the world list goes into the search box, and Escape leaves.
@@ -9457,16 +9785,16 @@ mod tests {
 
     #[test]
     fn a_settings_save_failure_is_reported_rather_than_swallowed() {
+        // The roster is seeded before construction, on a writable path: this
+        // test is about a failed *options* write, and an empty roster would
+        // additionally close the ownership gate, swallowing every key before
+        // the settings tree sees one.
+        let seeded = nav_path("settingsfail");
+        grant_ownership(&seeded);
         let mut nav = MenuNav::with_paths(
-            std::env::temp_dir().join(format!(
-                "lodestone-nav-{}-settingsfail/servers.json",
-                std::process::id()
-            )),
+            seeded.parent().unwrap().join("servers.json"),
             std::path::PathBuf::from("/dev/null/nope/options.json"),
-            std::env::temp_dir().join(format!(
-                "lodestone-nav-{}-settingsfail/profiles.json",
-                std::process::id()
-            )),
+            seeded.parent().unwrap().join("profiles.json"),
         );
         let mut ui = UiState::new();
         ui.open_settings();
@@ -10488,7 +10816,7 @@ mod tests {
         let (jx, jy) = icon_point(0, 0.75, 0.5);
         point_at(&mut nav, jx, jy);
         match nav.click(&mut ui, 0) {
-            MenuAction::Connect(entry) => assert_eq!(entry.host, "h0.example"),
+            MenuAction::Connect(_, entry) => assert_eq!(entry.host, "h0.example"),
             other => panic!("the join icon must connect, got {other:?}"),
         }
         assert_eq!(nav.server_index(), 0, "and it selects the row it joined");
@@ -10520,7 +10848,7 @@ mod tests {
         );
         assert_eq!(ui.screen(), Screen::ServerList);
         match nav.click(&mut ui, 0) {
-            MenuAction::Connect(entry) => assert_eq!(entry.host, "h0.example"),
+            MenuAction::Connect(_, entry) => assert_eq!(entry.host, "h0.example"),
             other => panic!("a double-click on the row body must join, got {other:?}"),
         }
         assert_eq!(ui.screen(), Screen::Connecting);
@@ -10627,7 +10955,7 @@ mod tests {
 
         let row = button_row(&nav, ServerListButton::Select);
         match nav.click(&mut ui, row) {
-            MenuAction::Connect(entry) => assert_eq!(entry.host, "h0.example"),
+            MenuAction::Connect(_, entry) => assert_eq!(entry.host, "h0.example"),
             other => panic!("Join Server must connect, got {other:?}"),
         }
         assert_eq!(ui.screen(), Screen::Connecting);
@@ -11462,7 +11790,11 @@ mod tests {
         use crate::menu::accounts::{NAME_EDIT_DONE_ROW, NAME_EDIT_FIELD_ROW};
         use crate::offline_identity::OfflineIdentity;
 
-        let (mut nav, path) = nav("offline-name-click");
+        // `unowned_nav`, so the offline row really is row 0 — this test's own
+        // stated premise. The account screen is exempt from the ownership gate
+        // (it is the only way through it), so an empty roster is reachable here
+        // exactly as a player who has just launched would find it.
+        let (mut nav, path) = unowned_nav("offline-name-click");
         let dir = path.parent().expect("the temp path has a parent");
         let offline_file = dir.join("offline.json");
         let mut ui = UiState::new();

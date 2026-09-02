@@ -11,7 +11,9 @@ use super::account_screen::{
     accounts_failed_frame, accounts_flow_frame, accounts_idle_frame, accounts_name_edit_frame,
 };
 use super::measure::{MANAGE_SERVER_TITLE_Y, manage_server_slot};
-use super::screens::{COPYRIGHT, credits_frame, error_frame, loading_frame, version_line};
+use super::screens::{
+    COPYRIGHT, credits_frame, error_frame, loading_frame, ownership_frame, version_line,
+};
 use super::server_list::SERVER_LIST_FOOTER_H;
 
 /// Builds vanilla's `JoinMultiplayerScreen`: one row per saved server at
@@ -190,6 +192,20 @@ pub fn frame_for<'a>(
     use super::Screen;
     use super::nav::{FormField, MAIN_BUTTONS};
 
+    // **The ownership gate, ahead of the screen switch.** `frame_for` is the
+    // only per-frame call this menu is guaranteed to get, so it is the only
+    // place that can draw the gate for the *first* frame — `MenuNav::key` and
+    // `MenuNav::click` reconcile `UiState` onto `Screen::Ownership`, but neither
+    // runs until the player presses something, and a title screen shown for the
+    // seconds before that is a title screen a player can read as usable.
+    //
+    // The predicate is `MenuNav::ownership_gate_blocks`, the same expression
+    // both input paths consult — one expression, three callers, so what is drawn
+    // and what a keystroke does cannot disagree about whether the gate is
+    // closed.
+    if nav.ownership_gate_blocks(ui) {
+        return Some(ownership_frame(nav));
+    }
     let frame = match ui.screen() {
         // Vanilla's `TitleScreen`: the logo pair, eight widgets at vanilla's
         // rects (see `title_slot`) with two of them present-and-disabled
@@ -542,6 +558,11 @@ pub fn frame_for<'a>(
         // an `is_menu()` screen: a session that dies mid-game used to leave a
         // frozen world on screen with no explanation. See `error_frame` for the
         // vanilla `DisconnectedScreen` this now reproduces.
+        // Reached only once an account exists — the guard above returns before
+        // the switch otherwise — so this arm is the gate *after* it has opened,
+        // i.e. a player who removed their last account and has not yet been
+        // reconciled off the screen. It draws normally.
+        Screen::Ownership => Some(ownership_frame(nav)),
         Screen::Error => Some(error_frame(ui.error())),
         // The credits/end-poem screen — see `credits_frame`'s own doc
         // for why its content is a short placeholder rather than vanilla's
