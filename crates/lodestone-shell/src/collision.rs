@@ -28,7 +28,7 @@
 //! **2× the rubber-band threshold**.
 //!
 //! The real shapes come from the version crate's generated collision census
-//! (dumped from the real server's `Block.BLOCK_STATE_REGISTRY`) and reach this
+//! (dumped from the real server's own block-state registry) and reach this
 //! version-free module through [`VersionAdapter::block_collision`] — the same
 //! sanctioned seam `block_hardness` and `tool_mining` use. See
 //! [`docs/collision-shapes.md`](https://github.com/) in this repo for the census
@@ -85,7 +85,7 @@
 //! (collision) must never be used to decide what the crosshair selects.
 //! [`LiveCollision::is_pickable`] now answers that question from the real
 //! per-state **outline** census (`VersionAdapter::block_outline`, dumped from
-//! `BlockStateBase.getShape`) rather than the "has baked model quads" proxy
+//! vanilla's own block-state shape getter) rather than the "has baked model quads" proxy
 //! that shipped with the kelp fix — see that method's docs for what changed
 //! and the one deliberate behaviour change (`minecraft:light`).
 //!
@@ -220,7 +220,7 @@ fn shape_bounds(shape: &[BlockAabb]) -> Option<([f32; 3], [f32; 3])> {
     Some((min, max))
 }
 
-/// Vanilla's `BlockStateBase.calculateSolid` over the collision shape:
+/// Vanilla's own calculate-solid routine over the collision shape:
 /// non-empty, and either the *mean* of the bounding box's three dimensions is at
 /// least `0.7291666666666666` or its Y size is at least `1.0`.
 ///
@@ -273,13 +273,14 @@ fn shape_face_is_full(shape: &[BlockAabb], dir: HorizontalDir) -> bool {
 // ---------------------------------------------------------------------------
 //
 // Six of `CollisionView`'s answers — friction, speed factor, jump factor, bounce
-// restitution, stuck multiplier and climbable — are `BlockBehaviour.Properties`
+// restitution, stuck multiplier and climbable — are vanilla's own per-block
+// behaviour-properties
 // fields and tag memberships rather than geometry, so no collision census can
 // carry them. They are keyed by block *name*, which is why
 // `VersionAdapter::block_name` exists.
 //
 // **They no longer live here.** They used to be six private functions in this
-// module, hand-transcribed from the decompiled `Blocks.java`. Two things were
+// module, hand-transcribed from the decompiled block-registration class. Two things were
 // wrong with that: nothing outside the code under test pinned the numbers (every
 // other block table in this repo is dumped from the real server), and a
 // third-party plugin — for which "how expensive is it to walk over this block" is
@@ -391,7 +392,7 @@ fn fluid_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> Option<FluidCell> {
 /// that `calculateSolid()`
 /// computes once per state. Only the *last* of
 /// that method's branches is geometry — the first three are
-/// `Properties.forceSolidOn` (237 blocks in 26.2), `forceSolidOff` (8), and a
+/// vanilla's own force-solid-on property (237 blocks in 26.2), force-solid-off (8), and a
 /// null shape cache for the 23 `dynamicShape()` blocks. None of the three has a
 /// getter, appears in `blocks.json`, or is recoverable from a shape.
 ///
@@ -433,7 +434,7 @@ fn blocks_motion_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
     }
 }
 
-/// `FlowingFluid.isSolidFace`, horizontal case:
+/// Vanilla's own flowing-fluid is-solid-face check, horizontal case:
 /// `false` if the cell holds **the same fluid as `kind`** (the fluid asking —
 /// see [`CollisionView::is_solid_face`]'s doc for why that is not the cell's own
 /// fluid), `false` for ice, else `isFaceSturdy(FULL)` = [`shape_face_is_full`].
@@ -795,13 +796,13 @@ pub struct LiveCollision {
 }
 
 /// The blocks whose **outline** shape is `Shapes.empty()` *and* whose cell holds
-/// no fluid, i.e. the ones `Entity.pick` must walk straight through without them
+/// no fluid, i.e. the ones vanilla's own entity-pick routine must walk straight through without them
 /// being identifiable as "a fluid cell".
 ///
-/// All three register as `AirBlock`, whose `getShape`
+/// All three register as vanilla's own air block type, whose shape getter
 /// returns `Shapes.empty()`, so none of them is targetable
 /// in vanilla. This matters because **`minecraft:air` is not the only air**:
-/// `WorldCarver` writes `Blocks.CAVE_AIR`, as do lakes,
+/// vanilla's own world-carver writes `minecraft:cave_air`, as do lakes,
 /// monster rooms and strongholds, and the end's void column is `void_air`. Each is
 /// a *distinct block-state id*, so a pick predicate written as `state_id != 0`
 /// targets the empty space one block in front of the player's face in any carved
@@ -1151,7 +1152,7 @@ impl LiveCollision {
     ///
     /// The pre-census proxy's second clause ("no fluid ⇒ pickable") kept
     /// `light` targetable as a side effect of having no baked model geometry.
-    /// The real census says `LightBlock.getShape` is
+    /// The real census says vanilla's own light-block shape getter is
     /// `isHoldingItem(Items.LIGHT) ? block() : empty()`
     ///, dumped with no item held — so light is now
     /// **un**pickable, matching what vanilla does for every player who is not
@@ -1209,22 +1210,23 @@ impl LiveCollision {
     }
 
     /// Whether the view ray can **target** this cell — the client-side stand-in for
-    /// vanilla's `clip(ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE)`.
+    /// vanilla's own level-clip routine called with an outline block-shape,
+    /// no-fluid clip context.
     ///
     /// # This is a different question from `is_water`, and conflating them is the bug
     ///
     /// Picking is *not* collision (a cross-plant has an empty collision shape and is
     /// still breakable), and it is *not* "the cell has no fluid" either. Vanilla
-    /// walks the **outline** shape (`BlockStateBase.getShape`) with fluid shapes
-    /// switched off (`Fluid.NONE`, `Entity.pick`, `Entity.java`). So the
+    /// walks the **outline** shape (vanilla's own block-state shape getter) with fluid shapes
+    /// switched off (`Fluid.NONE`, vanilla's own entity-pick routine). So the
     /// real question is *does the block in this cell have a non-empty outline*:
     ///
-    /// * `LiquidBlock.getShape` → `Shapes.empty()`, so
+    /// * vanilla's own liquid-block shape getter → `Shapes.empty()`, so
     ///   open water and lava are never targeted;
-    /// * `KelpBlock`'s is `Block.column(16, 0, 9)` and
-    ///   `SeagrassBlock`'s is `Block.column(12, 0, 12)` —
+    /// * vanilla's own kelp block's is `Block.column(16, 0, 9)` and
+    ///   its own seagrass block's is `Block.column(12, 0, 12)` —
     ///   **non-empty**, so kelp and seagrass are targeted and breakable, even though
-    ///   both hardcode `getFluidState` → `Fluids.WATER`.
+    ///   both hardcode their own fluid-state getter → vanilla's own water-fluid constant.
     ///
     /// The pick used to be `is_solid(cell) || (state != AIR && !is_water && !is_lava)`.
     /// That worked only for as long as `is_water` meant literally
@@ -1277,7 +1279,7 @@ impl LiveCollision {
     /// cube to the hit test even after the selection box on screen was being
     /// drawn from the real census. Reported from play: leaf litter stayed
     /// highlighted with the crosshair well above it. Vanilla clips the outline
-    /// boxes themselves (`ClipContext.Block.OUTLINE`, `Entity.java`),
+    /// boxes themselves (its own outline block-shape clip context),
     /// which is what emitting them here lets the ray do.
     ///
     /// Empty output means "nothing to target here", the correct answer for air,
@@ -1520,7 +1522,8 @@ mod tests {
 
     /// The shape helpers are pure functions of a box list, so they can be pinned
     /// without any world, atlas or version data — and the expected numbers are
-    /// vanilla's own (`Blocks.java` / `BlockBehaviour.calculateSolid`), not this
+    /// vanilla's own (its own block registration class / its own calculate-solid
+    /// routine), not this
     /// module's output.
     #[test]
     fn shape_helpers_match_vanilla_on_hand_written_shapes() {
@@ -2241,8 +2244,8 @@ mod tests {
     /// could not be targeted, so it could not be broken, and neither could a
     /// waterlogged stair or slab. None of them is a full cube either, so `is_solid`
     /// did not save it. Vanilla targets all of them, because their **outline**
-    /// shapes are non-empty (`KelpBlock.java`, `SeagrassBlock.java`) and
-    /// `Entity.pick` runs with `ClipContext.Fluid.NONE`.
+    /// shapes are non-empty (vanilla's own kelp and seagrass block classes) and
+    /// vanilla's own entity-pick routine runs with a no-fluid clip context.
     ///
     /// The `dry` list is not decoration, it is the control: open water and lava must
     /// stay un-targetable (else you would break the ocean instead of the sand under
@@ -2302,7 +2305,7 @@ mod tests {
     /// **The deliberate behaviour change.** The pre-census proxy's "no fluid ⇒
     /// pickable" clause kept `minecraft:light` targetable as a side effect of it
     /// having no baked model geometry. The real outline census says
-    /// `LightBlock.getShape` is `isHoldingItem(Items.LIGHT) ? block() : empty()`
+    /// vanilla's own light-block shape getter is `isHoldingItem(Items.LIGHT) ? block() : empty()`
     ///, dumped with no item held, so vanilla itself does
     /// not let you target a bare-handed light block — and now neither do we.
     ///
@@ -2336,7 +2339,7 @@ mod tests {
     /// **The visible half of this change.** Before the outline census, every
     /// pickable cell was drawn as a full unit-cube selection box; a bottom slab's
     /// box should be a half-height box like its own collision shape
-    /// (`SlabBlock.java`: `SHAPE_BOTTOM = Block.column(16, 0, 8)`), not the
+    /// (vanilla's own slab block class: `SHAPE_BOTTOM = Block.column(16, 0, 8)`), not the
     /// full cell.
     ///
     /// Stone is the control: a state whose outline genuinely *is* a full unit
@@ -2465,9 +2468,9 @@ mod tests {
     /// (`lodestone-data/tests/support/outline_shape_jvm.txt`), not produced by
     /// the ray under test:
     ///
-    /// * `CarpetBlock.java` — `SHAPE = Block.column(16.0, 0.0, 1.0)`, i.e. the
+    /// * vanilla's own carpet block — `SHAPE = Block.column(16.0, 0.0, 1.0)`, i.e. the
     ///   full cell in x/z and **`1/16` of a block tall**;
-    /// * `LeafLitterBlock` via `SegmentableBlock.java` —
+    /// * vanilla's own leaf-litter block via its own segmentable-block base class —
     ///   `Block.box(0, 0, 0, 8, getShapeHeight() = 1, 8)` per segment, so a
     ///   four-segment litter is the same `1/16`-tall plate over the whole cell.
     ///
@@ -2547,7 +2550,7 @@ mod tests {
     ///
     /// `minecraft:oak_fence` with all four sides connected is three boxes in the
     /// census — the west–east bar through the middle plus the two z arms
-    /// (`CrossCollisionBlock.java`: `column(4, 0, 16)` for the post and
+    /// (vanilla's own cross-collision block base class: `column(4, 0, 16)` for the post and
     /// `boxZ(4, 0, 16, 0, 8)` rotated for each arm, unioned and decomposed):
     ///
     /// ```text
@@ -2671,8 +2674,8 @@ mod tests {
     /// waterfall or a draining pool actually looks in a live world.
     ///
     /// Layer `y` holds `minecraft:water[level=y]`. Expected `(amount,
-    /// falling)` pairs are vanilla's own `LiquidBlock` state-cache rule, read
-    /// out of `LiquidBlock.java`'s constructor — `stateCache.add(fluid.
+    /// falling)` pairs are vanilla's own liquid-block state-cache rule, read
+    /// out of its own constructor — `stateCache.add(fluid.
     /// getSource(false))` for `level 0`, then `fluid.getFlowing(8 - level,
     /// false)` for `level` in `1..8`, then `fluid.getFlowing(8, true)` for
     /// `level >= 8` — not derived from this crate's own encoder, per the
@@ -2754,7 +2757,8 @@ mod tests {
     /// `is_water`/`is_lava` presence) until `67ff7c3`, one commit later,
     /// implemented [`fluid_cell_of`](LiveCollision::fluid_cell_of) for real. The
     /// moment that landed, this test started asserting a height vanilla never
-    /// produces for a *source block with air above*: `FluidState.getHeight` is
+    /// produces for a *source block with air above*: vanilla's own fluid-state
+    /// get-height routine is
     /// `hasSameAbove ? 1.0 : getOwnHeight()`, and a lone source's own height is
     /// `getAmount()/9.0 = 8/9`, not `1.0` — `1.0` only applies to a cell that
     /// itself has the *same fluid* directly above it (see [`fluid_at`]'s own
