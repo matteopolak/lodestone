@@ -430,7 +430,7 @@ fn flame_hitbox_width(type_path: &str, age_scale: f32) -> Option<f32> {
 /// # What this table cannot express
 ///
 /// Vanilla resolves the eye height of the entity's **current pose**
-/// (`Entity.getDimensions(pose).eyeHeight()`), and two things it varies by are
+/// (its own per-pose dimensions' eye-height accessor), and two things it varies by are
 /// not on this side of the wire as far as [`EntityDraw`] is concerned:
 ///
 /// * **Pose.** A crouching player's eye is `1.27` and a swimming one's `0.4`,
@@ -903,19 +903,20 @@ fn fishing_owner_eye_offset(owner: &EntityDraw) -> f32 {
 }
 
 /// The packed `sky << 4 | block` light one entity draws with — the whole of
-/// vanilla's `EntityRenderer.getPackedLightCoords`, and the single place any
+/// vanilla's own get-packed-light-coords entity renderer accessor, and the single place any
 /// pass in this module or [`super::world_items`] should get an entity's light.
 ///
 /// Two rules, both of which this file used to miss:
 ///
 /// * **The probe is the entity's eye, not its feet.**
-///   `getPackedLightCoords` is `BlockPos.containing(entity.getLightProbePosition(t))`
-///   and `getLightProbePosition` returns `getEyePosition`, so a tall mob in a
+///   Vanilla's own get-packed-light-coords accessor floors the entity's own
+///   light-probe position at a given partial tick into a block position
+///   and its own get-light-probe-position accessor returns `getEyePosition`, so a tall mob in a
 ///   dark cell with a lit head is lit *by its head*. Every call site here passed
 ///   `feet` before, and a comment on `EntityLightSource` claimed that was
 ///   vanilla; it never was.
 /// * **Fire forces the block half to 15, and only the block half.**
-///   `EntityRenderer.getBlockLightLevel` is
+///   Vanilla's own get-block-light-level entity renderer accessor is
 ///   `entity.isOnFire() ? 15 : level.getBrightness(BLOCK, pos)`, while
 ///   `getSkyLightLevel` has no such branch — so a burning mob in a pitch-dark
 ///   cave lights itself without also acquiring a daytime sky, which is what
@@ -936,7 +937,7 @@ pub(super) fn entity_light(source: &super::EntityLightSource, draw: &EntityDraw)
 /// The packed light an item **frame** — its body, and by default its contents —
 /// is drawn at.
 ///
-/// `ItemFrameRenderer.getBlockLightLevel` overrides the base renderer's to
+/// Vanilla's own item-frame renderer's get-block-light-level override overrides the base renderer's to
 /// `Math.max(5, super…)` for a `glow_item_frame`, so a glowing frame is never
 /// darker than block light 5 however dark the wall behind it. That floor is on
 /// the **block** nibble only; the sky nibble passes through, which is what keeps
@@ -1855,7 +1856,7 @@ impl RenderState {
     ///
     /// # Batched by sprite cell, because the cell is geometry
     ///
-    /// `ExperienceOrb.getIcon()` buckets an orb's value into one of eleven cells,
+    /// Vanilla's own experience-orb icon lookup buckets an orb's value into one of eleven cells,
     /// and the cell rides the quad's **UVs**, so two orbs in different buckets
     /// cannot share an instanced draw. One batch per cell actually on screen; a
     /// world full of 1-XP orbs is therefore still a single draw call.
@@ -2099,7 +2100,7 @@ impl RenderState {
     /// # Resolving the anchor, which is the whole of the interesting part
     ///
     /// Vanilla forks on `getCameraType().isFirstPerson() && owner ==
-    /// Minecraft.getInstance().player`: our own rod seen from our own eyes gets
+    /// (vanilla's own client-instance-accessor's player)`: our own rod seen from our own eyes gets
     /// a near-plane projection, everything else gets an offset off the owner
     /// entity's body. This reproduces that fork **without** knowing our own
     /// entity id, because two facts already encode it:
@@ -2187,7 +2188,7 @@ impl RenderState {
                     // the defect shape `CLAUDE.md` records for
                     // `creeper_swelling`, and the source already existed.
                     //
-                    // The **arm** is not: `Player.getMainArm()` is a synced
+                    // The **arm** is not: vanilla's own main-arm accessor is a synced
                     // client option this build does not decode for anyone,
                     // local player included, so right-handed is vanilla's own
                     // default rather than a guess — the same gap

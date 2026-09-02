@@ -47,7 +47,7 @@ pub struct ScreenEffects {
     /// modelling the general per-item lookup table that has exactly one
     /// entry today.
     pub wearing_pumpkin: bool,
-    /// Vanilla's `Entity.getPercentFrozen()`, `0.0..=1.0` —
+    /// Vanilla's own get-percent-frozen accessor, `0.0..=1.0` —
     /// drives the freeze overlay's alpha. `0.0` (the default) means "not
     /// freezing", which is also the honest value while no live producer feeds
     /// this yet (`ScreenEffects` doc's own construction-site pattern; see
@@ -55,15 +55,15 @@ pub struct ScreenEffects {
     /// *not* first-person-gated** — see [`Self::any_active`]'s doc.
     pub freeze_percent: f32,
     /// Whether the local player is scoping with a held spyglass
-    /// — vanilla's `Player.isScoping()`:
-    /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
+    /// — vanilla's own is-scoping check: using an item that
+    /// is the spyglass
     ///. First-person-gated, like
-    /// [`Self::wearing_pumpkin`] (both live inside `Hud.
-    /// extractCameraOverlays`'s `if (getCameraType().isFirstPerson())`
-    /// block, `Hud.java`) — unlike freeze/nausea/portal below.
+    /// [`Self::wearing_pumpkin`] (both live inside vanilla's own
+    /// camera-overlays extraction's `if (getCameraType().isFirstPerson())`
+    /// block) — unlike freeze/nausea/portal below.
     pub scoping: bool,
-    /// Vanilla's `LivingEntity.getEffectBlendFactor(MobEffects.NAUSEA,
-    /// partialTicks)`, `0.0..=1.0` — drives the confusion
+    /// Vanilla's own get-effect-blend-factor accessor for the nausea effect,
+    /// at a given partial tick, `0.0..=1.0` — drives the confusion
     /// overlay's strength and (blended with [`Self::portal_intensity`]) the
     /// world-projection "spinning" warp (`Camera::view_projection_warped`).
     /// `0.0` (the default) is the honest value today: no potion-effect
@@ -76,7 +76,7 @@ pub struct ScreenEffects {
     /// drives the portal overlay's alpha and (blended with
     /// [`Self::nausea_intensity`]) the same projection warp. Takes priority
     /// over nausea when both are positive
-    /// (`Hud.java`: `if (portalIntensity > 0.0F) { portal } else if
+    /// (vanilla's own hud rendering: `if (portalIntensity > 0.0F) { portal } else if
     /// (nauseaIntensity > 0.0F) { confusion }`) — `RenderState::render_inner`
     /// reproduces that `if`/`else if`, not an independent pair of checks.
     /// `0.0` (the default) is the honest value today: no nether-portal
@@ -107,7 +107,7 @@ impl ScreenEffects {
     ///   third person too. Checked against the jar directly, not assumed —
     ///   see `docs/screen-overlays.md`.
     ///
-    /// `spectator` still gates both groups: vanilla's own `Hud.java` has no
+    /// `spectator` still gates both groups: vanilla's own hud rendering has no
     /// explicit spectator check anywhere in `extractCameraOverlays`, but this
     /// codebase's established convention (already applied to underwater/fire/
     /// pumpkin before this) is "nothing about my own body renders in
@@ -250,7 +250,7 @@ mod tests {
             ..ScreenEffects::default()
         };
         assert!(fx.any_active(true), "freeze must activate in first person");
-        assert!(fx.any_active(false), "freeze must activate in third person too -- Hud.java is a sibling of the isFirstPerson block, not nested in it");
+        assert!(fx.any_active(false), "freeze must activate in third person too -- vanilla's own hud rendering has it as a sibling of the isFirstPerson block, not nested in it");
     }
 
     #[test]
