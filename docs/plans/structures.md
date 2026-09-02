@@ -22,12 +22,13 @@ inventory was stale in exactly this area (corrected in the same commit as this f
   is where a scoped `find` measures zero. Landed `6c6c0e10`, byte-identical to the
   jar (`worldgen-structure-corpus.md`). The only Rust reader is the drift gate
   `crates/lodestone-server/tests/worldgen_structure_corpus.rs`.
-- **`WorldgenRandom.setLargeFeatureWithSalt` is absent**: `/usr/bin/grep -rn
+- **Vanilla's structure-set salted-seed derivation is absent**: `/usr/bin/grep -rn
   "large_feature_with_salt" --include='*.rs' crates/` → 0 hits.
   `lodestone-worldgen-core/src/rng/mod.rs` has `set_decoration_seed`,
   `set_feature_seed`, `set_large_feature_seed` and nothing else. The record
-  definition, read from `.cache/mc/26.2/src/.../WorldgenRandom.setLargeFeatureWithSalt` (not from a call
-  site): `long result = x * 341873128712L + z * 132897987541L + seed + blend; setSeed(result)`
+  definition, read from vanilla's own RNG-seeding source (not from a call
+  site): `result = x * 341873128712 + z * 132897987541 + seed + blend`, then the generator is
+  re-seeded with that value
   — the fourth parameter is the structure set's `salt` (the decompiler names it `blend`).
 - **The beardifier is a constant-zero leaf**: `Density::Beardifier` parses in
   `Builder::build_object` (`crates/lodestone-worldgen-core/src/density/mod.rs`) and evaluates `0.0` in `Density::compute` (same file).
@@ -97,7 +98,7 @@ for the same seed* — authored by different implementations, sharing nothing.
 
 ## Where structures slot into the pipeline (the S0 answer)
 
-Vanilla's order (`chunk/status/ChunkStatus.java`) is `… STRUCTURE_STARTS →
+Vanilla's own generation-stage order is `… STRUCTURE_STARTS →
 STRUCTURE_REFERENCES → BIOMES → NOISE …`: starts precede noise **because the beardifier
 reads structure bounds during fill**. In our engine, fill lives inside
 `OverworldGenerator::pre_ore_stage`, memoised by the staged store
@@ -187,8 +188,8 @@ enforced, not aspirational.
 
 **Stronghold honesty**: the oracle area contains no stronghold (nearest ring starts
 ~1,280 blocks out; the generated area does not reach a start). The ring *math* lands in S1
-gated only by the record definition (`ConcentricRingsStructurePlacement.java` +
-`ChunkGeneratorStructureState`) and a hand-computed first-ring fixture; its
+gated only by vanilla's own concentric-rings placement record and generator-side structure-state
+tracker, and a hand-computed first-ring fixture; its
 vanilla-equality gate is a named deferred obligation until the oracle world's area is
 extended under `container` (a one-command teleport session). Do not report stronghold
 placement as verified until that runs.
@@ -197,7 +198,7 @@ placement as verified until that runs.
 
 The NBT structure-template loader (blocks, palettes, entities, **jigsaw block entities** —
 which S4 needs as its connection graph, so this loader is shared infrastructure), placement
-semantics (`StructureTemplate.placeInWorld`: rotation, mirror, pivot, `structure_void`
+semantics (vanilla's own template-placement routine: rotation, mirror, pivot, `structure_void`
 transparency, water-loggable handling), processor lists (all 40 bundled documents must
 parse; `rule`, `block_rot`, `block_ignore`, `capped`, … — unknown types fail loudly), and
 the template-coded structures with oracle presence, in order of oracle richness:
@@ -246,9 +247,9 @@ trial_chambers) or group NE (nether_fossil). The plan records that as an explici
 obligation inside S4's gate list rather than pretending S3 is fully proven at landing.
 
 **Gate at S3 landing.** (a) Kernel and contribution math against the record definition:
-`computeBeardContribution` spot values hand-computed from `Beardifier.java`'s own formula
+vanilla's own beard-contribution formula, spot values hand-computed
 at ~10 lattice offsets (outside-origin arithmetic, no JVM needed), including both
-hypotheses at one point where dropping the `groundLevelDelta` term gives a distinct value
+hypotheses at one point where dropping the ground-level-delta term gives a distinct value
 — predict the value, not the sign. (b) Identity: all 13 parity binaries plus the composed
 seed-42 fixture byte-identical — **with the precondition measured, not assumed**: S1's
 engine computes starts for seed 42 over the fixture chunks and asserts zero
@@ -263,8 +264,8 @@ assert fill output changes exactly within the kernel's reach with the predicted 
 printed bounding box, and does not change one cell beyond it. Before believing it, ask
 what else paints there: run the same injection with adaptation `none` and assert **zero**
 change — the control's own control, since a `none` start reaching the density graph would
-be a mis-filter (vanilla filters `terrainAdaptation() != NONE` in
-`forStructuresInChunk`).
+be a mis-filter (vanilla's own per-chunk structure lookup filters out any start whose terrain
+adaptation is `none` before it ever reaches the density graph).
 
 **Cost counter.** `beardifier_evals == 0` exact for structure-free chunks (this is the
 whole serve-path budget story: the overworld C_ss sweep must be counter-identical to
@@ -272,9 +273,9 @@ pre-S3); for affected chunks, evals ≤ pieces × interpolation cells, asserted.
 
 ### S4 — jigsaw (L, the largest single piece)
 
-`JigsawPlacement.addPieces` semantics: start pool resolution, per-template jigsaw block
+Vanilla's own jigsaw-assembly semantics: start pool resolution, per-template jigsaw block
 entities as connectors (name/target/pool/final_state/joint — read from the 1,212 templates
-S2's loader already parses), weighted element selection with **vanilla's `Util.shuffle`
+S2's loader already parses), weighted element selection with **vanilla's own shuffle
 draw order**, rotation draws, fallback pools, `max_depth`, `use_expansion_hack` (villages'
 terrain matching), `project_start_to_heightmap`, `dimension_padding` and **pool aliases**
 (trial_chambers binds aliases per start from its own seeded draw), plus emitted
