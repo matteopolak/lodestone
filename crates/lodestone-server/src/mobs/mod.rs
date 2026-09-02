@@ -10570,7 +10570,7 @@ fn surface_y(world: &ChunkWorld, x: i32, z: i32) -> Option<i32> {
 
 /// Approximates vanilla's own no-active-raid "current difficulty at
 /// position, effective difficulty" formula for [`MobSim::run_patrol_spawn_cycle`]'s group
-/// size, `(int) Math.ceil(effectiveDifficulty) + 1`
+/// size, the ceiling of the effective difficulty plus one
 /// (vanilla's own patrol-spawner group-size formula).
 ///
 /// Vanilla's effective difficulty is a continuous value accumulated per
@@ -13154,7 +13154,7 @@ mod villager_gossip_reputation_and_curing_tests {
 
     /// A golden apple on a zombie villager with no Weakness must do nothing
     /// at all — no conversion state, `Pass`, matching vanilla's own
-    /// `InteractionResult.CONSUME`-no-reduction arm (disclosed as `Pass`,
+    /// plain-success-no-reduction arm (disclosed as `Pass`,
     /// see `InteractOutcome::ZombieVillagerConversionStarted`'s own doc).
     #[test]
     fn a_golden_apple_on_an_unweakened_zombie_villager_does_nothing() {
@@ -13513,7 +13513,7 @@ mod allay_carrying_tests {
     }
 
     /// The negative control: an allay **already** carrying an item must
-    /// refuse a second one — vanilla's `Allay.mobInteract` gate is
+    /// refuse a second one — vanilla's own allay interaction override's gate is
     /// specifically "empty main hand", not "any interaction with an item".
     /// Without this, the positive gate above could be passing because every
     /// interaction overwrites the held item unconditionally rather than
@@ -13570,7 +13570,8 @@ mod allay_carrying_tests {
         assert!(sim.get(id).expect("still alive").mob.main_hand_item().is_none());
     }
 
-    /// `Allay.wantsToPickUp`/`InventoryCarrier::pickUpItem`: a carrying allay
+    /// Vanilla's own allay-specific "wants to pick up" check / its own "pick
+    /// up item" inventory-carrier helper: a carrying allay
     /// with a matching item dropped right next to it absorbs the whole
     /// stack into [`SimMob::allay_inventory_count`] and the ground item is
     /// gone, driven through the real production path (`MobSim::tick` →
@@ -13693,7 +13694,7 @@ mod allay_carrying_tests {
         assert_eq!(sim.item_count(), 0);
     }
 
-    /// `Allay.mobInteract`'s duplication arm (issue #230), through the real
+    /// Vanilla's own allay interaction override's duplication arm (issue #230), through the real
     /// production path — driven with the disclosed `isDancing()`
     /// substitution `InteractOutcome::AllayDuplicated`'s own doc names
     /// (a live `allay_liked_noteblock` standing in for a jukebox-driven
@@ -13728,8 +13729,9 @@ mod allay_carrying_tests {
                 effect,
                 crate::effects::WorldEffect::Particles { particle, .. } if particle == "minecraft:heart"
             )),
-            "Allay.handleEntityEvent(18)'s heart burst must reach the production \
-             queue too, not just the outcome's own particle() classification"
+            "vanilla's own allay entity-event handler's status-18 heart burst \
+             must reach the production queue too, not just the outcome's own \
+             particle() classification"
         );
     }
 
@@ -13762,7 +13764,7 @@ mod allay_carrying_tests {
     }
 }
 
-/// Issue #231: `VillagerPanicTrigger.tick`'s golem-summon-on-hurt.
+/// Issue #231: vanilla's own villager-panic trigger's golem-summon-on-hurt.
 #[cfg(test)]
 mod golem_summon_tests {
     use super::*;
