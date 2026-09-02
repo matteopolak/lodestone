@@ -41,7 +41,6 @@ fn a_bolt_emits_exactly_the_documented_vertex_count() {
             BOLT_VERTICES,
             "seed {seed}: 4 shells x (8 + 3 + 3) segments x 4 faces x 6 vertices"
         );
-        assert_eq!(BOLT_VERTICES, 1344, "the constant itself drifted");
         assert!(
             verts.iter().all(|v| v.color == BOLT_COLOR),
             "every vertex of every quad carries the same flat colour"

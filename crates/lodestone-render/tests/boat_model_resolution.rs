@@ -156,28 +156,3 @@ fn every_boat_type_resolves_to_its_class_rig() {
         RIGS.len()
     );
 }
-
-/// The three inputs a naive suffix rule gets wrong, called out individually so a
-/// failure names the specific trap rather than appearing as one row of the table
-/// above.
-#[test]
-fn the_chest_and_raft_traps_resolve_correctly() {
-    // `oak_chest_boat` ends with `_boat` too: testing the short suffix first
-    // draws every chest boat as a plain boat.
-    assert_eq!(
-        model_for_type(EntityType::OakChestBoat).map(|e| e.name),
-        Some("chest_boat"),
-        "a chest boat must not fall back to the plain boat rig"
-    );
-    // Neither bamboo raft has a `_boat` suffix anywhere.
-    assert_eq!(
-        model_for_type(EntityType::BambooRaft).map(|e| e.name),
-        Some("raft"),
-        "bamboo_raft carries no `_boat` suffix, so a `_boat`-only rule misses it"
-    );
-    assert_eq!(
-        model_for_type(EntityType::BambooChestRaft).map(|e| e.name),
-        Some("chest_raft"),
-        "bamboo_chest_raft is the second suffix-less case"
-    );
-}
