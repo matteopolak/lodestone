@@ -948,6 +948,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   Every production join, remote and singleplayer alike, asks
   `join_identity::join_identity()` who it is, and gets one answer: the account the
   switcher has selected, or the persisted "Play offline" identity when there is none.
+- [Join readiness](./join-readiness.md) — The rule that decides when a join stops
+  showing the loading screen and starts showing the world. It is **two** conditions,
+  not one: the terrain rule (the player's own chunk column has arrived) *and* an asset
+  rule (no server-pushed resource pack is still downloading or waiting to be applied
+  to the block atlas). Before the asset half existed the screen cleared on the column
+  alone, so a server that pushes a pack dropped the player into a world wearing the
+  *previous* pack's textures, hitched for about a second while the atlas rebuilt, and
+  popped.
 - [Join generation scheduler](./join-scheduler.md) — The server-side scheduler that
   decides in what order, and with how much concurrency, the `(2r + 1)²` chunk columns
   of a joining player's view are generated. It is a **primed sliding window** over the

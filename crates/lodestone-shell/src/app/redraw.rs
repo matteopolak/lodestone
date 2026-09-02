@@ -2395,21 +2395,45 @@ impl WindowApp {
         // still streaming in. Drawn as an overlay over the still-rendering
         // world rather than replacing it, for the same reason Paused/Death are
         // overlays: chunks must keep meshing and uploading behind the text —
-        // the very thing a full-frame `owns_frame` screen would stop. The
-        // predicate is vanilla's own `DownloadingTerrainScreen` rule (the chunk
-        // column under the player is loaded), so the text clears the moment the
-        // ground the player is standing on arrives.
+        // the very thing a full-frame `owns_frame` screen would stop. It is
+        // nonetheless opaque: `loading_frame`'s backdrop is `Panorama`, whose
+        // no-panorama fallback is a flat opaque fill, so nothing of the world
+        // shows through while this is up.
         //
-        // The bar and the count line only appear when there is a real
-        // denominator to divide by (the session declared a view radius); with
-        // none, this stays the bare phase label it always was, because a
-        // progress bar wired to nothing is worse than no bar.
+        // The predicate is `Sim::world_wait`, which is **two** rules and not
+        // one. The terrain half is vanilla's own `LevelLoadTracker`
+        // readiness rule (the chunk column under the player is loaded); the
+        // asset half holds the screen while a server-pushed resource pack is
+        // still downloading or has not yet been applied to the block atlas.
+        //
+        // The second half is why this block sits *below*
+        // `Sim::reload_resource_pack_atlas` in this same function rather than
+        // above it, and the ordering is the whole point. On the frame a pack
+        // lands, the reload up there rebuilds the atlas and re-meshes every
+        // loaded column — the visible second-long hitch — and only then does
+        // this predicate go quiet. So the last frame the player actually saw
+        // before the hitch is this screen, and the first world frame presented
+        // after it already wears the new pack. Moving this above the reload
+        // would present one frame of the old atlas and reinstate the flash.
+        //
+        // The bar and the count line only appear when the terrain half is what
+        // is holding *and* there is a real denominator to divide by (the
+        // session declared a view radius); with neither, this stays the bare
+        // phase label it always was, because a progress bar wired to nothing is
+        // worse than no bar.
         if self.ui.is_playing()
-            && self.sim.terrain_loading()
+            && let Some(wait) = self.sim.world_wait()
             && let Some(menu) = self.menu.as_mut()
         {
-            let label = crate::menu::loading::ConnectPhase::LoadingTerrain.label();
-            let loading_frame = match self.sim.terrain_progress() {
+            let label = wait.label();
+            // `has_terrain_progress` is false for the pack wait, which draws the
+            // bare label: nothing here observes a download's byte count, so a bar
+            // would be the synthesised progress `menu::loading`'s own doc forbids.
+            let loading_frame = match self
+                .sim
+                .terrain_progress()
+                .filter(|_| wait.has_terrain_progress())
+            {
                 Some(progress) => crate::menu::render::loading_frame_with_progress_and_grid(
                     label,
                     progress,

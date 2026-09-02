@@ -4338,15 +4338,106 @@ fn apply_pack_response(
     }
 }
 
+/// Server-pack downloads that have been **accepted** and have not yet reached a
+/// terminal status.
+///
+/// The loading screen reads this through [`packs_in_flight`] so a join does not
+/// drop the player into a world still wearing the previous pack's textures. It
+/// has to live out here rather than on `NetClient` because the thing that
+/// resolves it is [`spawn_pack_download`]'s own detached thread, which owns no
+/// reference back to the session — the same reason the pack bytes themselves
+/// land in a process-wide cell in `crate::resources`.
+static PACK_APPLIES_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// How many accepted server packs are still downloading or installing.
+///
+/// **`Acquire`, and that is load-bearing rather than cargo-culted.** The
+/// download thread calls `crate::resources::set_server_pack` — which bumps
+/// `pack_generation` with a `Relaxed` store — and only *then* drops its
+/// [`PackApplyInFlight`] guard, whose decrement is a `Release`. Reading this
+/// with `Acquire` is what makes that ordering observable: a reader that sees the
+/// count reach zero is guaranteed to see the generation bump too. With two
+/// `Relaxed` accesses it could see the zero and not the bump, and dismiss the
+/// loading screen on the one frame the atlas is stale — precisely the window
+/// `crate::menu::loading::AssetWait::atlas_stale` exists to cover.
+#[must_use]
+pub fn packs_in_flight() -> usize {
+    PACK_APPLIES_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Holds [`PACK_APPLIES_IN_FLIGHT`] up for the lifetime of one accepted pack.
+///
+/// An RAII guard rather than a matched increment/decrement pair because
+/// [`spawn_pack_download`]'s closure has **five** terminal paths (no runtime,
+/// download failure, hash mismatch, install failure, success) and a missed
+/// decrement is a loading screen that never clears. The guard makes the count
+/// balance a property of the type rather than of remembering.
+///
+/// It is not the *only* thing standing between a lost decrement and a hang —
+/// this workspace builds release with `panic = "abort"`, so an unwind would not
+/// run `Drop` at all. `assets_ready`'s timeout is the actual bound; this guard
+/// is what keeps the healthy path from needing it.
+struct PackApplyInFlight;
+
+impl PackApplyInFlight {
+    /// Register one accepted pack. Paired with [`Drop`], never called for a
+    /// declined or invalid-URL push — those never start a download and so were
+    /// never outstanding.
+    fn begin() -> Self {
+        PACK_APPLIES_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for PackApplyInFlight {
+    fn drop(&mut self) {
+        // Saturating rather than a bare `fetch_sub`: an underflow here would
+        // wrap to `usize::MAX` and hold every future join's loading screen for
+        // the whole timeout, which is a far worse failure than a count that is
+        // merely one too low.
+        let _ = PACK_APPLIES_IN_FLIGHT.try_update(
+            std::sync::atomic::Ordering::Release,
+            std::sync::atomic::Ordering::Acquire,
+            |n| Some(n.saturating_sub(1)),
+        );
+    }
+}
+
+/// Hold the in-flight count up from a test, using the **production**
+/// increment and the production `Drop`.
+///
+/// A seam rather than a double, and the distinction matters: a gate that
+/// stubbed the count would be asserting against its own stub. This hands out
+/// the same guard [`begin_accept`] takes, so a test that holds one has a pack
+/// outstanding in exactly the sense the loading screen means. `#[cfg(test)]`,
+/// because there is no reason for production to construct one anywhere but
+/// `begin_accept`.
+#[cfg(test)]
+pub(crate) fn hold_pack_apply_for_test() -> impl Drop {
+    PackApplyInFlight::begin()
+}
+
 /// Accepts pack `id`: sends `ACCEPTED` immediately — matching vanilla's own
 /// `PackLoadFeedback.Update.ACCEPTED`, sent the instant the request is
 /// registered and before any byte has moved — then starts the download.
+///
+/// The in-flight guard is taken **here**, not inside the download thread, so the
+/// pack is already outstanding by the time this returns. Taking it on the
+/// spawned thread instead would leave a window in which the accept has been sent
+/// and nothing yet counts it, and the loading screen could dismiss through it.
 fn begin_accept(id: Uuid, url: &str, hash: &str, handle: Arc<ClientHandle>) {
     let _ = handle.send_action(ClientAction::ResourcePackResponse {
         id,
         response: ResourcePackResponseKind::Accepted,
     });
-    spawn_pack_download(id, url.to_string(), hash.to_string(), handle);
+    spawn_pack_download(
+        id,
+        url.to_string(),
+        hash.to_string(),
+        handle,
+        PackApplyInFlight::begin(),
+    );
 }
 
 /// Downloads, verifies, and applies pack `id`, reporting the rest of
@@ -4361,14 +4452,28 @@ fn begin_accept(id: Uuid, url: &str, hash: &str, handle: Arc<ClientHandle>) {
 /// never resolving because the player never asked for it again) rather than
 /// stall the whole session the way an oversized `select!` arm did elsewhere
 /// in this crate.
+///
+/// `in_flight` is moved all the way into the closure and dropped when it ends,
+/// however it ends, so every one of the terminal paths below decrements the
+/// count without naming it. The spawn-failure branch drops it too, by falling
+/// out of scope.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_pack_download(id: Uuid, url: String, hash: String, handle: Arc<ClientHandle>) {
+fn spawn_pack_download(
+    id: Uuid,
+    url: String,
+    hash: String,
+    handle: Arc<ClientHandle>,
+    in_flight: PackApplyInFlight,
+) {
     // Cloned so the spawn-failure fallback below still has a handle to
     // answer through — `spawn`'s closure takes the original by `move`.
     let for_failure = Arc::clone(&handle);
     let spawned = std::thread::Builder::new()
         .name("lodestone-resourcepack".to_owned())
         .spawn(move || {
+            // Moved in so the count falls to zero on every exit from this
+            // closure, including the three early `return`s below.
+            let _in_flight = in_flight;
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -4457,8 +4562,17 @@ fn spawn_pack_download(id: Uuid, url: String, hash: String, handle: Arc<ClientHa
 /// accept pending: a pending response that nothing will ever finish can
 /// neither be retried nor stop looking answered, which is the same argument
 /// `remote_skins.rs`'s spawn-failure branch makes for its own case.
+///
+/// `_in_flight` is dropped on return, so the browser never holds a loading
+/// screen for a download it is not going to attempt.
 #[cfg(target_arch = "wasm32")]
-fn spawn_pack_download(id: Uuid, _url: String, _hash: String, handle: Arc<ClientHandle>) {
+fn spawn_pack_download(
+    id: Uuid,
+    _url: String,
+    _hash: String,
+    handle: Arc<ClientHandle>,
+    _in_flight: PackApplyInFlight,
+) {
     tracing::warn!(
         target: "assets",
         "not downloading a server resource pack in a browser: this path needs \
