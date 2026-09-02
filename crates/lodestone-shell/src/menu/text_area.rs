@@ -1,5 +1,5 @@
 //! A multi-line, word-wrapping text field — vanilla's `MultilineTextField`
-//! (`client/gui/components/MultilineTextField.java`), the model
+//! (vanilla's own multiline-text-field type), the model
 //! `MultiLineEditBox` wraps for `BookEditScreen`'s page editor.
 //!
 //! ## What it is
@@ -17,7 +17,7 @@
 //!
 //! ## Word-wrap is the fixed-advance approximation, not `Font.Splitter`
 //!
-//! Vanilla wraps by real glyph width (`Font.getSplitter().splitLines`). This
+//! Vanilla wraps by real glyph width (its own font-splitter's split-lines call). This
 //! widget has no `Font` — the same "pure data, no renderer dependency" rule
 //! [`super::edit_box::EditBox`]'s own module doc states and justifies at
 //! length — so [`TextArea::wrap_chars`] is a **character count**, not a pixel
@@ -289,7 +289,7 @@ impl TextArea {
     /// with `input`, filtered through
     /// [`super::edit_box::is_allowed_chat_character`] and truncated to
     /// whatever the character limit still allows. Vanilla's own filter
-    /// (`StringUtil.filterText(input, true)`) passes `allowNewlines = true`,
+    /// (its own string-util filter-text helper applied to `(input, true)`) passes `allowNewlines = true`,
     /// unlike [`super::edit_box::filter_text`]'s single-line callers — a
     /// pasted multi-line block keeps its newlines here.
     pub fn insert_text(&mut self, input: &str) {

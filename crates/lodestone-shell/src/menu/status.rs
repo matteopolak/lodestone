@@ -78,8 +78,8 @@ pub struct ServerStatus {
     pub online: Option<u32>,
     /// Online players' names, from the status `sample`, in server order.
     ///
-    /// This is what a "who's online" tooltip reads (vanilla
-    /// `ServerSelectionList.java`). Plain names rather than the full
+    /// This is what a "who's online" tooltip reads (vanilla's own
+    /// server-selection list rendering). Plain names rather than the full
     /// `(id, name)` pairs the net layer decodes, because the row only displays
     /// names — the anonymous-profile shaping vanilla applies per id
     /// needs the profile the shell drops,
@@ -93,7 +93,7 @@ pub struct ServerStatus {
     ///
     /// This is what decides [`ServerState::Incompatible`], so it is not
     /// cosmetic: vanilla compares `serverData.protocol` with
-    /// `SharedConstants.getCurrentVersion().protocolVersion()` and paints
+    /// its own current-version's protocol-version accessor and paints
     /// `server_list/incompatible` plus the version string in red on any
     /// mismatch. A server that
     /// omits `version.protocol` therefore reads as incompatible, in vanilla
@@ -179,7 +179,7 @@ impl StatusSlot {
     /// The mapping is one-to-one except at the top: vanilla has a distinct
     /// `INITIAL` state that exists for exactly one frame (`extractContent`
     /// flips it to `PINGING` the first time it draws a row,
-    /// `ServerSelectionList.java`), and [`StatusSlot::Idle`] is the
+    /// vanilla's own server-selection list rendering), and [`StatusSlot::Idle`] is the
     /// same "no probe has been started" fact.
     #[must_use]
     pub fn state(&self, our_protocol: i32) -> ServerState {
@@ -566,7 +566,7 @@ impl StatusCache {
     /// Milliseconds since this cache was built — the clock
     /// [`pinging_sprite`]'s animation runs on.
     ///
-    /// Vanilla reads `Util.getMillis()`, a process-wide monotonic clock. The
+    /// Vanilla reads its own millis-since-epoch clock, a process-wide monotonic clock. The
     /// origin does not matter (the animation is `& 7` of a tenth-of-a-second
     /// counter, so any offset only changes which frame a row starts on), and
     /// hanging it off the cache keeps the clock out of `render::frame_for`'s

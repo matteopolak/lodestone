@@ -305,7 +305,7 @@ pub enum Screen {
     /// left only by [`respawn_confirmed`](Self::respawn_confirmed) once the
     /// server confirms the respawn the Respawn button asked for
     /// (`Sim::respawn`) — **not** by [`on_escape`](Self::on_escape), which is
-    /// a deliberate no-op here: vanilla's `DeathScreen.shouldCloseOnEsc()`
+    /// a deliberate no-op here: vanilla's vanilla's own death-screen should-close-on-esc check
     /// returns `false`, so Escape does not dismiss it.
     ///
     /// Drawn the same way [`Screen::Paused`] is — an overlay over the
@@ -324,7 +324,7 @@ pub enum Screen {
     ///
     /// **What this is not**: vanilla's `WinScreen` auto-scrolls a ~1500-word
     /// poem plus a real Mojang employee credits roll, driven by elapsed time
-    /// (`WinScreen.java`'s own tick counter). Two things rule that out here —
+    /// (vanilla's own win-screen rendering's own tick counter). Two things rule that out here —
     /// see [`render::credits_frame`] for the full reasoning:
     /// 1. [`render::frame_for`] is a pure function of [`UiState`]/[`nav::MenuNav`]
     ///    with no elapsed-time input, so a real auto-scroll needs a per-frame
@@ -379,8 +379,8 @@ pub enum Screen {
     /// The Server Links screen: vanilla surfaces this as a `Dialogs.SERVER_LINKS`
     /// dialog button on the pause menu, labelled `menu.server_links`
     /// ("Server Links...") and only present when the server actually
-    /// announced any (`SERVER_LINKS`, `!ServerLinks.isEmpty()` in
-    /// `PauseScreen.getCustomAdditions`). This client has no generic
+    /// announced any (`SERVER_LINKS`, a non-empty server-links check in
+    /// vanilla's own pause-screen custom-additions). This client has no generic
     /// dialog-registry renderer, so it is a dedicated screen instead: a flat
     /// list of the server's links, and a link-open confirmation reusing
     /// vanilla's `ConfirmLinkScreen` wording — see [`server_links`]'s module
@@ -1046,7 +1046,7 @@ impl UiState {
     }
 
     /// Back to the title screen from the world list — vanilla's
-    /// `SelectWorldScreen.onClose()`, which is `setScreen(this.lastScreen)`
+    /// own select-world screen's on-close handling, which is `setScreen(this.lastScreen)`
     ///, and also what its Back button does
     /// (`:106`).
     pub fn close_world_select(&mut self) {
@@ -1586,7 +1586,7 @@ impl UiState {
             Screen::Ownership => self.request_quit(),
             Screen::Connecting => self.cancel_connect(),
             // Deliberately a no-op, not "unwind one level" like every screen
-            // above: vanilla's `DeathScreen.shouldCloseOnEsc()` returns
+            // above: vanilla's vanilla's own death-screen should-close-on-esc check returns
             // `false`, so Escape does not dismiss
             // it. `MenuNav::key_death` mirrors this — it does not call
             // `on_escape` for `MenuKey::Escape` the way every other screen's
@@ -1623,7 +1623,7 @@ impl UiState {
             Screen::CreateWorld => self.close_create_world(),
             // In practice `MenuNav::key_confirm` intercepts Escape before this is
             // reached, and it must: on the confirmation screen Escape is the
-            // *negative answer* (`ConfirmScreen.java` runs
+            // *negative answer* (vanilla's own confirm-screen rendering runs
             // `callback.accept(false)` rather than `onClose`, which is why
             // `shouldCloseOnEsc()` is `false` there), so the callback has to run.
             // This arm keeps the match exhaustive and unwinds one level, which for
@@ -2529,7 +2529,7 @@ mod tests {
 
     #[test]
     fn escape_does_not_leave_the_death_screen() {
-        // Vanilla's `DeathScreen.shouldCloseOnEsc()` is `false` — this is the
+        // Vanilla's vanilla's own death-screen should-close-on-esc check is `false` — this is the
         // one screen in this file where `on_escape` must be a pure no-op.
         let mut ui = UiState::new();
         ui.enter_dev_world();
