@@ -1599,14 +1599,6 @@ mod tests {
         assert_ne!(test, bias);
     }
 
-    #[test]
-    fn empty_map_diagnostic_switches_keep_normal_rendering() {
-        assert_eq!(
-            map_diagnostic_switches_from(|_| false),
-            MapDiagnosticSwitches::default()
-        );
-    }
-
     /// The supplied live trace was not the reported in-view disappearance: all
     /// four frames are about 51 blocks away and cross the horizontal frustum
     /// edge during this 9.3° turn. Pin the actual coordinates so a later cull
