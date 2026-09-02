@@ -1,4 +1,4 @@
-//! Vanilla's `EditBox` (`client/gui/components/EditBox.java`) — a single-line
+//! Vanilla's `EditBox` (vanilla's own edit-box widget's own source file) — a single-line
 //! text field with a caret, a selection, horizontal scrolling and a length cap.
 //!
 //! ## What it is
@@ -16,7 +16,7 @@
 //!
 //! Vanilla's `EditBox` carries a `suggestion` field — ghost text drawn after
 //! the caret, in *append* mode only — plus a fixed colour for it
-//! (`EditBox.java`: `graphics.text(.., -8355712, ..)`). This box used to carry
+//! (vanilla's own edit-box widget: `graphics.text(.., -8355712, ..)`). This box used to carry
 //! both, and neither had a producer or a consumer: no screen in this shell
 //! ever set the field, [`EditBoxDraw`] carried no position to draw it at even
 //! if one had, and [`EditBox::draw_state_with`] never read it. That is the
@@ -40,12 +40,12 @@
 //! ## What vanilla does *not* have, which the written record got wrong
 //!
 //! - **There is no `setFilter`.** Input restriction is a fixed built-in:
-//!   `insertText` runs `StringUtil.filterText` and `charTyped` gates on
+//!   `insertText` runs vanilla's own string-util filter-text helper and `charTyped` gates on
 //!   `CharacterEvent.isAllowedChatCharacter`, both of which are
 //!   `StringUtil.isAllowedChatCharacter` — `ch != 167 && ch >= 32 && ch != 127`
 //!  . A per-field predicate does not exist and cannot
 //!   be added without editing the class. `addFormatter` **is** real but is
-//!   display-only (`EditBox.java`, a `FormattedCharSequence`), so it
+//!   display-only (vanilla's own edit-box widget, a `FormattedCharSequence`), so it
 //!   cannot reject a character either. [`is_allowed_chat_character`] is the whole
 //!   of the rule.
 //!
@@ -54,14 +54,14 @@
 //!   marginally stricter than vanilla. This port follows the jar.
 //!
 //! - **There is no disabled sprite, but there *is* a `WidgetSprites`.**
-//!   `EditBox.java` uses the **two**-argument constructor
+//!   vanilla's own edit-box widget uses the **two**-argument constructor
 //!   ([`super::widget::WidgetSprites::focusable`]), which collapses `disabled`
 //!   onto `enabled`. "No `WidgetSprites` for `Checkbox`/`EditBox`/slider" is true
 //!   of `Checkbox` and `AbstractSliderButton` and false of this one.
 //!
 //! - **Both `get` arguments differ from `AbstractButton`'s.**
-//!   `EditBox.java` is `SPRITES.get(this.isActive(), this.isFocused())`
-//!   where `AbstractButton.java` is
+//!   vanilla's own edit-box widget is `SPRITES.get(this.isActive(), this.isFocused())`
+//!   where vanilla's own abstract-button base is
 //!   `SPRITES.get(this.active, this.isHoveredOrFocused())`. So: `isActive()`
 //!   (i.e. `visible && active`) not the raw field, and **`isFocused()` alone** —
 //!   hovering a text field does *not* draw its highlighted sprite. #393's
@@ -70,7 +70,7 @@
 //!   [`super::widget::Widget::background_sprite`].
 //!
 //! - **The grey text colour is keyed on `isEditable`, not on `active`.**
-//!   `EditBox.java` is `this.isEditable ? this.textColor :
+//!   vanilla's own edit-box widget is `this.isEditable ? this.textColor :
 //!   this.textColorUneditable`, and `isEditable` is a *separate* flag from
 //!   `AbstractWidget.active`. A field can be active (clickable, focusable) and
 //!   uneditable, which is how vanilla shows read-only text you can still select
@@ -96,7 +96,7 @@
 //! ## Measurement is a fixed advance, and that is a real deviation
 //!
 //! `displayPos` scrolling, the visible substring and the caret's x all depend on
-//! `Font.plainSubstrByWidth`/`Font.width` — a **proportional** measure. This
+//! Vanilla's own font plain-substr-by-width/width accessors — a **proportional** measure. This
 //! widget has no `Font`: it is pure data, and threading a font through
 //! [`super::focus::FocusTarget::key_pressed`] would put the renderer inside the
 //! input layer.
@@ -163,13 +163,13 @@
 //!   six places, and a seventh that forgets is a field drawing at a stale
 //!   offset. Computing them on demand deletes that bug class outright.
 //! - **The caret does not blink.** `EditBox` blinks on
-//!   `Util.getMillis() - focusedTime` with a 300 ms interval
+//!   its own millis-since-epoch clock minus `focusedTime` with a 300 ms interval
 //!  , and no `super::render::MenuFrame` carries
 //!   a clock. [`is_cursor_visible`] is the pure predicate, ready for the day one
 //!   does; [`EditBox::show_cursor`] takes `None` to mean "always on", which is
 //!   what the shell passes and what the pre-existing form caret already did.
 //! - **Clipboard shortcuts are real, ported line-for-line from
-//!   `EditBox.keyPressed`'s `default:` group.** `isCopy`/`isCut`/`isPaste` all
+//!   vanilla's own edit-box widget's key-pressed handler's `default:` group.** `isCopy`/`isCut`/`isPaste` all
 //!   return `true` in vanilla *and* touch
 //!   `Minecraft.keyboardHandler.setClipboard`/`getClipboard`; [`clipboard_seam`]
 //!   is that boundary here — the real OS clipboard in production, an in-memory
@@ -182,7 +182,7 @@
 //!   for the paste-inserts-`v` report this replaced.
 //! - **A `false` from [`EditBox::handle_key`] is load-bearing.** It is what
 //!   lets Up/Down out to `Screen`'s focus navigation
-//!   (`EditBox.java` lists 260/264/265/266/267 in the `default:` group),
+//!   (vanilla's own edit-box widget lists 260/264/265/266/267 in the `default:` group),
 //!   and it is the entire reason this widget composes with a screen that
 //!   navigates by arrow key. Consuming a key "to be safe" breaks Tab traversal
 //!   in a way no unit test of this file can see.
@@ -202,7 +202,7 @@ use super::focus::{
 use super::widget::{LayoutElement, Widget, WidgetSprites, argb_to_rgba};
 
 /// The clipboard `handle_key`'s copy/cut/paste arms read and write —
-/// `Minecraft.getInstance().keyboardHandler.getClipboard()`/`setClipboard`.
+/// vanilla's own client-instance keyboard-handler's get-clipboard/set-clipboard accessors.
 ///
 /// Forked at compile time exactly the way `accounts::open_in_browser` forks
 /// its own OS side effect (`CLAUDE.md`'s "test that performs an OS-level side
@@ -272,7 +272,7 @@ pub const DEFAULT_MAX_LENGTH: usize = 32;
 /// A practically-unbounded [`EditBox::max_length`] for a field whose real
 /// vanilla cap is proportional (see [`EditBox::max_pixel_width`]) rather than
 /// a character count — vanilla's own `TextFieldHelper` (the sign editor's
-/// field type, distinct from `EditBox.java`) has no `maxLength` at all, only
+/// field type, distinct from vanilla's own edit-box widget) has no `maxLength` at all, only
 /// its pixel-width `stringValidator`. `usize::MAX` itself is not safe here:
 /// [`EditBox::insert_text`]'s budget arithmetic casts `max_length` to
 /// `isize`, and `usize::MAX as isize` wraps to `-1`. `usize::MAX / 2` casts
@@ -287,7 +287,7 @@ pub const DEFAULT_WIDTH: f32 = 150.0;
 /// See [`DEFAULT_WIDTH`].
 pub const DEFAULT_HEIGHT: f32 = 20.0;
 
-/// The horizontal inset a bordered box's text starts at (`EditBox.java`:
+/// The horizontal inset a bordered box's text starts at (vanilla's own edit-box widget:
 /// `this.bordered ? 4 : 0`), and half of what [`EditBox::inner_width`] subtracts.
 pub const BORDER_INSET: f32 = 4.0;
 
@@ -327,14 +327,14 @@ pub fn is_allowed_chat_character(ch: char) -> bool {
     c != 167 && c >= 32 && c != 127
 }
 
-/// `StringUtil.filterText(input)`, single-line: drop
+/// vanilla's own string-util filter-text helper applied to `input`, single-line: drop
 /// every character [`is_allowed_chat_character`] refuses.
 #[must_use]
 pub fn filter_text(input: &str) -> String {
     input.chars().filter(|&c| is_allowed_chat_character(c)).collect()
 }
 
-/// `TextCursorUtils.isCursorVisible(timeInMs)`: on for 300 ms, off for 300 ms.
+/// vanilla's own text-cursor-utility is-cursor-visible check applied to `timeInMs`: on for 300 ms, off for 300 ms.
 #[must_use]
 pub const fn is_cursor_visible(millis_since_focus: u64) -> bool {
     millis_since_focus / CURSOR_BLINK_INTERVAL_MS % 2 == 0
@@ -377,7 +377,7 @@ pub struct EditBoxDraw {
     pub show_cursor: bool,
 }
 
-/// `EditBox` (`client/gui/components/EditBox.java`).
+/// `EditBox` (vanilla's own edit-box widget's own source file).
 ///
 /// Wraps a [`Widget`] rather than duplicating its bounds and state, so the
 /// [`LayoutElement`] seam #394's containers arrange through, and the
@@ -387,7 +387,7 @@ pub struct EditBoxDraw {
 pub struct EditBox {
     /// The `AbstractWidget` half: bounds, `active`, `visible`, `focused`, and
     /// the narration message (`EditBox` never draws it — `createNarrationMessage`
-    /// is its only reader, `EditBox.java`).
+    /// is its only reader, vanilla's own edit-box widget).
     pub widget: Widget,
     /// `EditBox.value`.
     value: String,
@@ -425,8 +425,8 @@ pub struct EditBox {
     /// `stringValidator`: an insertion that would push the value over this
     /// width is rejected outright, not truncated to fit (unlike
     /// [`Self::max_length`]'s own truncate-to-fit behaviour — the two fields
-    /// port two different vanilla types, `EditBox.java` and
-    /// `TextFieldHelper.java`, which disagree on this). `None` (the default)
+    /// port two different vanilla types, vanilla's own edit-box widget and
+    /// vanilla's own text-field-helper type, which disagree on this). `None` (the default)
     /// means no proportional cap — every existing field keeps
     /// [`Self::max_length`]'s plain character-count behaviour unchanged.
     /// `menu::sign_edit` is the one caller that sets this, matching
@@ -581,7 +581,7 @@ impl EditBox {
             .map_or(self.value.len(), |(b, _)| b)
     }
 
-    /// `Font.width(s)` under this box's fixed advance.
+    /// vanilla's own font width accessor applied to `s` under this box's fixed advance.
     #[must_use]
     pub fn measure(&self, s: &str) -> f32 {
         s.chars().count() as f32 * self.advance
@@ -601,7 +601,7 @@ impl EditBox {
         }
     }
 
-    /// `Font.plainSubstrByWidth(s, width)`'s *length*, under a fixed advance.
+    /// vanilla's own font plain-substr-by-width helper applied to `(s, width)`'s *length*, under a fixed advance.
     fn fits(&self, width: f32) -> usize {
         if self.advance <= 0.0 {
             return 0;
@@ -927,7 +927,7 @@ impl EditBox {
 
     /// Whether the caret is painted this frame.
     ///
-    /// `millis_since_focus` is `Util.getMillis() - focusedTime`; `None` means
+    /// `millis_since_focus` is vanilla's own millis-since-epoch clock minus `focusedTime`; `None` means
     /// "no clock available, always visible", which is what `super::render`
     /// passes — see the module docs.
     #[must_use]
@@ -1026,7 +1026,7 @@ impl EditBox {
         }
     }
 
-    /// `EditBox.keyPressed(KeyEvent)`.
+    /// vanilla's own edit-box widget's key-pressed handler.
     ///
     /// **The `false` returns are the interesting part**, not the `true` ones —
     /// they are what let Up/Down (and anything unhandled) reach
@@ -1114,7 +1114,7 @@ impl EditBox {
         }
     }
 
-    /// `EditBox.charTyped(CharacterEvent)`.
+    /// vanilla's own edit-box widget's char-typed handler.
     pub fn handle_char(&mut self, ch: char) -> bool {
         if !self.can_consume_input() {
             return false;
@@ -1162,7 +1162,7 @@ impl super::focus::FocusTarget for EditBox {
         self.widget.focused
     }
 
-    /// `EditBox.setFocused(boolean)`: the
+    /// vanilla's own edit-box widget's set-focused call: the
     /// `canLoseFocus || focused` guard means a `canLoseFocus == false` box
     /// **ignores** being unfocused.
     fn set_focused(&mut self, focused: bool) {
@@ -1179,8 +1179,8 @@ impl super::focus::FocusTarget for EditBox {
         self.widget.is_mouse_over(x, y)
     }
 
-    /// `AbstractWidget.mouseClicked` -> `onClick` (`AbstractWidget.java`,
-    /// `EditBox.java`): the caret moves to the click *and* the click is
+    /// vanilla's own abstract-widget base's mouse-clicked handler -> `onClick` (vanilla's own abstract-widget base,
+    /// vanilla's own edit-box widget): the caret moves to the click *and* the click is
     /// reported as consumed, which is what makes `ContainerEventHandler` focus
     /// the box.
     fn mouse_clicked(&mut self, x: f32, y: f32) -> bool {
@@ -1261,9 +1261,9 @@ mod tests {
     fn vanillas_own_constants_are_lifted_not_invented() {
         // The values come from the jar; the *channels* are derived from them, so
         // neither can agree with itself.
-        assert_eq!(DEFAULT_MAX_LENGTH, 32, "`EditBox.java`");
-        assert_eq!(DEFAULT_TEXT_COLOR_ARGB, -2_039_584, "`EditBox.java`");
-        assert_eq!(TEXT_COLOR_UNEDITABLE_ARGB, -9_408_400, "`EditBox.java`");
+        assert_eq!(DEFAULT_MAX_LENGTH, 32, "vanilla's own edit-box widget");
+        assert_eq!(DEFAULT_TEXT_COLOR_ARGB, -2_039_584, "vanilla's own edit-box widget");
+        assert_eq!(TEXT_COLOR_UNEDITABLE_ARGB, -9_408_400, "vanilla's own edit-box widget");
         assert_eq!(DEFAULT_TEXT_COLOR_ARGB as u32, 0xFF_E0_E0_E0);
         // The two colours must actually differ, or `text_colour`'s branch is
         // unobservable and the `isEditable` keying could not be wrong.
@@ -1281,14 +1281,14 @@ mod tests {
         assert_eq!(
             b.text_colour(),
             editable,
-            "`EditBox.java` reads `isEditable`; keying on `active` here would \
+            "vanilla's own edit-box widget reads `isEditable`; keying on `active` here would \
              grey the text of every disabled-but-editable field"
         );
     }
 
     #[test]
     fn the_sprite_is_the_two_argument_collapse_and_keys_on_focus_alone() {
-        // `EditBox.java` + `:407`. Both differences from `AbstractButton`
+        // vanilla's own edit-box widget + `:407`. Both differences from `AbstractButton`
         // are asserted, because both are easy to "fix" into the button's rule.
         assert_eq!(SPRITES.enabled, "widget/text_field");
         assert_eq!(
@@ -1417,7 +1417,7 @@ mod tests {
         assert!(!b.handle_char('a'), "but typing does nothing");
         assert!(b.is_empty());
         // Backspace on an uneditable box is *consumed* and does nothing
-        // (`EditBox.java`: the `isEditable` test is inside the case, and
+        // (vanilla's own edit-box widget: the `isEditable` test is inside the case, and
         // `return true` is outside it).
         b.is_editable = true;
         typed(&mut b, "ab");
@@ -1835,7 +1835,7 @@ mod tests {
 
     /// The exact cursor x `draw_state_with` must produce for a wide,
     /// never-scrolled [`field`], derived independently from the same
-    /// `EditBox.java` arithmetic `draw_state_with` implements —
+    /// vanilla's own edit-box widget arithmetic `draw_state_with` implements —
     /// `text_x + width(before) + 1.0`, minus 1 more when the caret is the
     /// insert bar rather than the append underscore — but evaluated here with
     /// a hand-computed width, not by calling the code under test.
@@ -1972,7 +1972,7 @@ mod tests {
     }
 
     /// The highlight rect's far edge is measured the same way `cursor_x` is
-    /// (`EditBox.java`'s `highlightX`), so a selection under a
+    /// (vanilla's own edit-box widget's `highlightX`), so a selection under a
     /// proportional font must widen by the *selected characters'* real
     /// widths, not by `count * MENU_TEXT_ADVANCE`.
     #[test]
