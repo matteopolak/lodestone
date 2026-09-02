@@ -302,7 +302,8 @@ pub fn frame_for<'a>(
                         ..Default::default()
                     },
                     // `ServerData.ServerPackStatus::getName` as the
-                    // `CycleButton`'s own drawn text (`ManageServerScreen.java`
+                    // `CycleButton`'s own drawn text (vanilla's own manage-server
+                    // screen rendering
                     // draws "Name: Value" through `CommonComponents
                     // .optionNameValue`-shaped labels) — live now that
                     // `EditForm::pack_status` has somewhere real to go. See

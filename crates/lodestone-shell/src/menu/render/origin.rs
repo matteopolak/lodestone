@@ -21,7 +21,7 @@ use super::*;
 pub enum Origin {
     /// `(w / 2, 0)` — the top of the screen, for the logo band and the pause
     /// screen's title. `this.width` is `int` everywhere vanilla anchors off it
-    /// (e.g. `this.width / 2 - 100` at `TitleScreen.java`), so `w / 2` is
+    /// (e.g. `this.width / 2 - 100` at its own title-screen rendering), so `w / 2` is
     /// Java integer division — hence the `floor`.
     ScreenTop,
     /// `(floor(w / 2), floor(h / 4) + 48)` — vanilla `TitleScreen.init`'s
@@ -32,7 +32,8 @@ pub enum Origin {
     /// The top-left of vanilla `PauseScreen`'s **arranged** `GridLayout`:
     /// `(floor((w - 212) / 2), floor((h - 166) / 4))`.
     ///
-    /// That comes from `FrameLayout.alignInRectangle(grid, 0, 0, w, h, 0.5, 0.25)`
+    /// That comes from vanilla's own align-in-rectangle frame-layout helper
+    /// applied to `(grid, 0, 0, w, h, 0.5, 0.25)`
     ///, and since that fix it is *evaluated* rather than
     /// restated: [`layout::align_in_dimension`] applied to
     /// [`pause_grid_size`], which is the arranged
@@ -149,7 +150,7 @@ pub enum Origin {
     Confirm(super::confirm::ConfirmPlacement),
     /// The command block edit screen's Done/Cancel row:
     /// `(floor(w/2), floor(h/4) + 132)` —
-    /// `AbstractCommandBlockEditScreen.java`'s
+    /// vanilla's own abstract command-block edit-screen base's
     /// `this.height / 4 + 120 + 12` for `y`, the same `width/2` x-anchor as
     /// every other widget on that screen ([`Origin::ScreenTop`]). Not folded
     /// into [`Origin::TitleTop`] (`floor(h/4) + 48`): the two screens' extra

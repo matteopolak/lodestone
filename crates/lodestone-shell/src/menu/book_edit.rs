@@ -133,8 +133,8 @@ pub struct BookEditState {
     /// round-trips within one edit session, which this mirrors by simply
     /// never resetting the field.
     pub title: EditBox,
-    /// `BookSignScreen`'s `Component.translatable("book.byAuthor", owner.
-    /// getName())` — kept as the plain player name rather than the
+    /// `BookSignScreen`'s own translatable-component construction for
+    /// "book.byAuthor" over the owner's name — kept as the plain player name rather than the
     /// pre-formatted string, so [`Self::author_line`] can format it once
     /// where every consumer already expects a plain string (`MenuLabel`,
     /// matching every other screen in this shell — see `sign_edit`'s own
@@ -250,7 +250,8 @@ impl BookEditState {
     }
 
     /// Whether the Finalize button is active — `titleBox.setResponder(value
-    /// -> finalizeButton.active = !StringUtil.isBlank(value))`.
+    /// -> finalizeButton.active = !isBlank)`, where `isBlank` is vanilla's own
+    /// string-util is-blank check applied to `value`.
     #[must_use]
     pub fn can_finalize(&self) -> bool {
         !self.title.value().trim().is_empty()
@@ -288,7 +289,7 @@ impl BookEditState {
         }
     }
 
-    /// `BookSignScreen.saveChanges()` — Finalize, with the trimmed title.
+    /// Vanilla's own book-sign-screen save-changes call — Finalize, with the trimmed title.
     #[must_use]
     pub fn to_sign_action(&mut self) -> BookEditSubmit {
         self.erase_empty_trailing_pages();
