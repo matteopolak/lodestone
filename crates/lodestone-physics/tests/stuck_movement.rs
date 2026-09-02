@@ -1,13 +1,14 @@
-//! The **stuck-in-block** movement mechanism (`Entity.makeStuckInBlock` /
-//! `Entity.stuckSpeedMultiplier`).
+//! The **stuck-in-block** movement mechanism (vanilla's own "make stuck in
+//! block" step / its own stuck-speed-multiplier field).
 //!
 //! A handful of blocks grab an entity that stands inside them and scale its
 //! movement by a per-axis vector: cobweb `(0.25, 0.05, 0.25)`, powder snow
 //! `(0.9, 1.5, 0.9)`, sweet berry bush `(0.8, 0.75, 0.8)`. Vanilla implements
-//! this as a **per-tick vector**, not a drag term: at the top of `Entity.move`,
-//! if a multiplier is pending it multiplies the tick's movement component-wise,
-//! then zeroes both the multiplier and the velocity. The multiplier is *set* one
-//! tick earlier by `checkInsideBlocks` from the block the box is inside, so there
+//! this as a **per-tick vector**, not a drag term: at the top of vanilla's
+//! own move step, if a multiplier is pending it multiplies the tick's movement
+//! component-wise, then zeroes both the multiplier and the velocity. The
+//! multiplier is *set* one tick earlier by vanilla's own "check inside
+//! blocks" step from the block the box is inside, so there
 //! is an observable one-tick lag between entering the block and being grabbed.
 //!
 //! These tests validate the mechanism two ways (the discipline this project
@@ -25,13 +26,13 @@ use lodestone_physics::{
     Aabb, CollisionView, MovementInput, PhysicsProfile, PlayerState, Vec3d, tick,
 };
 
-/// Cobweb's stuck-speed multiplier (`WebBlock.entityInside`).
+/// Cobweb's stuck-speed multiplier (vanilla's own web-block "entity inside" hook).
 const COBWEB: Vec3d = Vec3d {
     x: 0.25,
     y: 0.05,
     z: 0.25,
 };
-/// Powder snow's stuck-speed multiplier (`PowderSnowBlock.entityInside`).
+/// Powder snow's stuck-speed multiplier (vanilla's own powder-snow-block "entity inside" hook).
 const POWDER_SNOW: Vec3d = Vec3d {
     x: 0.9,
     y: 1.5,
@@ -287,11 +288,11 @@ fn powder_snow_scales_by_its_own_vector_not_cobwebs() {
     );
 }
 
-// --- Axis 3: issue #216, the swept segment vs. the resting box -------------
+// --- Axis 3: the swept segment vs. the resting box -------------
 
 #[test]
 fn a_fast_faller_is_grabbed_by_a_one_block_layer_it_never_rests_in() {
-    // The defect #216 fixes: the pre-fix `update_stuck_multiplier` sampled only
+    // The defect this fixes: the pre-fix `update_stuck_multiplier` sampled only
     // the *final* resting bounding box, so an entity moving fast enough to pass
     // straight through a thin stuck-in-block layer within a single tick took no
     // impulse at all. Constructed so neither the pre-move nor the post-move box

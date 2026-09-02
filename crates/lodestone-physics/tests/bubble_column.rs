@@ -1,5 +1,5 @@
-//! `BubbleColumnBlock`'s up/down impulse — the four constants, in isolation.
-//! Issue #199.
+//! Vanilla's own bubble-column block's up/down impulse — the four constants,
+//! in isolation.
 //!
 //! `tests/golden.rs` already replays four bubble-column scenarios bit-for-bit
 //! against the independent Python oracle. That proves the *whole pipeline* agrees;
@@ -10,12 +10,12 @@
 //! This file isolates them. Every expectation here is a **difference** between two
 //! worlds that are identical except for the bubble column, so water drag and
 //! buoyancy cancel exactly and what remains is the impulse literal from
-//! `Entity.java`:
+//! vanilla's own entity per-tick update:
 //!
 //! | | `drag=false` (soul sand) | `drag=true` (magma) |
 //! |---|---|---|
-//! | inside (`Entity.java:2887-2898`) | `min(0.7, vy + 0.06)` | `max(-0.3, vy - 0.03)` |
-//! | above (`Entity.java:2855-2866`) | `min(1.8, vy + 0.1)` | `max(-0.9, vy - 0.03)` |
+//! | inside | `min(0.7, vy + 0.06)` | `max(-0.3, vy - 0.03)` |
+//! | above | `min(1.8, vy + 0.1)` | `max(-0.9, vy - 0.03)` |
 //!
 //! The literals came from the decompiled 26.2 source, and the two block-state ids
 //! the `drag` property distinguishes (`15294` = `drag=true`, the default; `15295` =
@@ -39,8 +39,8 @@ use lodestone_physics::geometry::Aabb;
 use lodestone_physics::player::{MovementInput, PlayerState, tick};
 use lodestone_physics::{PhysicsProfile, Vec3d};
 
-/// The impulse literals, named. Taken from `Entity.handleOnInsideBubbleColumn` /
-/// `handleOnAboveBubbleColumn`, not from anything in this repo.
+/// The impulse literals, named. Taken from vanilla's own inside/above
+/// bubble-column handlers, not from anything in this repo.
 const INSIDE_UP_STEP: f64 = 0.06;
 const INSIDE_UP_CLAMP: f64 = 0.7;
 const INSIDE_DOWN_STEP: f64 = -0.03;
@@ -64,8 +64,8 @@ impl World {
         self.water.insert((x, y, z));
     }
     /// A bubble column cell. Registers as water too — see
-    /// `BubbleColumnBlock.getFluidState`, which returns a water *source*. A dry
-    /// bubble column is not a world vanilla can build.
+    /// vanilla's own bubble-column fluid-state accessor, which returns a
+    /// water *source*. A dry bubble column is not a world vanilla can build.
     fn bubble(&mut self, x: i32, y: i32, z: i32, drag_down: bool) {
         self.bubble.insert((x, y, z), drag_down);
         self.water.insert((x, y, z));
@@ -159,8 +159,8 @@ fn plain_water_baseline_sinks() {
 #[test]
 fn inside_push_up_is_one_step_per_cell() {
     // Feet at 85.0 → box 85.0..86.8 → cells 85 and 86. Only 85 is a column, so a
-    // single impulse. Cell 86 is water, so cell 85's `nothingAbove` is false and
-    // the inside pair is selected.
+    // single impulse. Cell 86 is water, so cell 85's "nothing above" test is
+    // false and the inside pair is selected.
     let (with, without) = one_tick_vy(85.0, &[(85, false)]);
     assert_eq!(
         with,
@@ -231,8 +231,9 @@ fn inside_clamps_are_terminal() {
     );
 }
 
-/// The **branch control**. `nothingAbove` is what selects the strong surface pair,
-/// and it must be *false* whenever anything at all occupies the cell above.
+/// The **branch control**. The "nothing above" test is what selects the
+/// strong surface pair, and it must be *false* whenever anything at all
+/// occupies the cell above.
 ///
 /// Three worlds, identical but for the cell above the column's top: air, water, and
 /// a solid lid. Only the air one may take the `+0.1` step. Run the water and lid
@@ -272,10 +273,10 @@ fn above_branch_requires_open_air_over_the_cell() {
     assert!(
         air > water,
         "open air over the column ({air}) must give a stronger push than water \
-         over it ({water}) — `nothingAbove` is not selecting the surface branch"
+         over it ({water}) — the 'nothing above' test is not selecting the surface branch"
     );
     // Both non-air lids must land on the *same* inside-branch answer as each
-    // other: the fluid half and the shape half of `nothingAbove` are an AND, so
+    // other: the fluid half and the shape half of the "nothing above" test are an AND, so
     // either one being occupied is enough to disqualify.
     assert_eq!(
         water, solid,

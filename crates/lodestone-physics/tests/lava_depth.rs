@@ -1,5 +1,4 @@
-//! `LivingEntity.travelInLava`'s shallow-vs-deep branch
-//! (`LivingEntity.java:2539-2555`, issue #214).
+//! Vanilla's own in-lava travel step's shallow-vs-deep branch.
 //!
 //! # What this file is for, and what it is not
 //!
@@ -22,14 +21,16 @@
 //!    a flat `scale(0.5)`), not by calling the crate's own private helpers —
 //!    the same discipline `edge_back_off.rs` uses for its primitive-level
 //!    checks.
-//! 3. **The predicate's boundary.** `isInShallowFluid` is `getFluidHeight(tag)
-//!    <= getFluidJumpThreshold()` — `<=`, not `<`. `predicate_boundary_is_inclusive`
+//! 3. **The predicate's boundary.** Vanilla's own "is in shallow fluid" check
+//!    is its own fluid-height accessor `<= ` its own fluid-jump-threshold
+//!    accessor — `<=`, not `<`. `predicate_boundary_is_inclusive`
 //!    checks a lava height exactly at the standing threshold (`0.4`) takes the
 //!    shallow arm, and a hair above it takes the deep arm.
 //!
 //! **On `fall_distance`:** it deliberately plays no role in either test here.
-//! Reading `travelInFluid`/`travelInLava`/`getFluidFallingAdjustedMovement`
-//! directly (not a summary) shows none of the three references `fallDistance`
+//! Reading vanilla's own in-fluid travel / in-lava travel / falling-adjusted
+//! fluid movement steps directly (not a summary) shows none of the three
+//! references the fall-distance field
 //! — the predicate and both arms are driven entirely by
 //! [`FluidState::lava_height`] and [`PlayerState::velocity`]/`sprinting`. So,
 //! unlike the `fall_distance` accumulation work elsewhere in this crate, this
@@ -111,10 +112,11 @@ fn shallow_vs_deep_is_the_only_difference() {
         deep_expected_y
     );
 
-    // Shallow: `multiply(0.5, 0.8, 0.5)`, then `getFluidFallingAdjustedMovement`'s
-    // `movement.y - baseGravity/16` arm (the `-0.003` slow-sink clamp does not
-    // fire here — `|movement.y - baseGravity/16|` is far outside its `0.003`
-    // window), then the same shared `-baseGravity/4` term.
+    // Shallow: `multiply(0.5, 0.8, 0.5)`, then vanilla's own falling-adjusted
+    // fluid movement step's `movement.y - baseGravity/16` arm (the `-0.003`
+    // slow-sink clamp does not fire here — `|movement.y - baseGravity/16|` is
+    // far outside its `0.003` window), then the same shared `-baseGravity/4`
+    // term.
     let shallow_movement_y = -0.1 * f64::from(0.8f32);
     let shallow_expected_y = (shallow_movement_y - gravity / 16.0) + (-gravity / 4.0);
     assert!(
@@ -133,8 +135,9 @@ fn shallow_vs_deep_is_the_only_difference() {
 
 #[test]
 fn predicate_boundary_is_inclusive() {
-    // isInShallowFluid(tag) = getFluidHeight(tag) <= getFluidJumpThreshold().
-    // Standing eye height (1.62) keeps the threshold at 0.4 (Entity.java:3692-3694:
+    // Vanilla's own "is in shallow fluid" check: its own fluid-height
+    // accessor <= its own fluid-jump-threshold accessor. Standing eye height
+    // (1.62) keeps the threshold at 0.4 (vanilla's own jump-threshold formula:
     // eyeHeight < 0.4 ? 0.0 : 0.4). At exactly 0.4 the branch must still be
     // shallow; a hair above it must be deep.
     let world = EmptyWorld;
