@@ -159,8 +159,8 @@ impl PackedCell {
                     FluidKind::Water => KIND_WATER,
                     FluidKind::Lava => KIND_LAVA,
                 };
-                // `amount` is `1..=8` by construction (`LiquidBlock`'s level
-                // maps onto that range), so it always fits four bits. A value
+                // `amount` is `1..=8` by construction (vanilla's own fluid
+                // level maps onto that range), so it always fits four bits. A value
                 // out of range would silently truncate, so clamp it loudly in
                 // debug and saturate in release rather than aliasing onto a
                 // different height.
