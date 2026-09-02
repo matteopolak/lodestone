@@ -441,7 +441,7 @@ symmetric mirror of the server list.
 |---|---|---|
 | [#283](https://github.com/matteopolak/lodestone/issues/283) | Secure chat signing entirely absent client-side | would get us silently dropped by `enforce-secure-profile` servers |
 | [#286](https://github.com/matteopolak/lodestone/issues/286) | `MessageSignatureCache` built, tested, unconsumed | `island` label — cheap, standalone fix |
-| [#288](https://github.com/matteopolak/lodestone/issues/288) | Client never ingests `registry_data` | **client half landed** — dimension types + world clocks decoded and consumed; see [`registry-data-ingest.md`](../registry-data-ingest.md). Server half is still #275 |
+| [#288](https://github.com/matteopolak/lodestone/issues/288) | Client never ingests `registry_data` | **client half landed** — dimension types + world clocks decoded and consumed; see [`registry-data-ingest.md`](../registries.md). Server half is still #275 |
 | [#291](https://github.com/matteopolak/lodestone/issues/291) | Cookies and transfers are dead ends | `transfer` is a player-visible gap (hub/lobby networks) |
 | [#294](https://github.com/matteopolak/lodestone/issues/294) | `resource_pack_push`/`pop` only handled in Play, not Configuration | near-direct lift of existing Play-state logic |
 | [#296](https://github.com/matteopolak/lodestone/issues/296) | `update_tags` never decoded | invisible against vanilla today because our hardcoded tables happen to match |
@@ -456,7 +456,7 @@ packet, `minecraft:dimension_type` and `minecraft:world_clock` are typed, and th
 previously-hardcoded values now come off the wire (column height, `has_skylight`, which
 clock is the day clock). It was the confirmed root cause of two already-observed bugs
 (#34 and the clock selection — the End really was following the overworld's clock on
-plain vanilla). See [`registry-data-ingest.md`](../registry-data-ingest.md).
+plain vanilla). See [`registry-data-ingest.md`](../registries.md).
 
 The **server** half (#275) remains: the wire type there is decode-only. Building it
 against that same `RegistryData` struct is still the right move — an `Encode` impl beside

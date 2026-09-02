@@ -8,7 +8,7 @@ against what a native `bevy_app::Plugin` (and, where it exists only on paper tod
 WASM host) can do in this codebase *right now*, with a gap and an issue number attached
 to every row that is not fully closed. Epic [#7](https://github.com/matteopolak/lodestone/issues/7)
 owns the ECS substrate that makes any of this possible
-([`../bevy-migration.md`](../bevy-migration.md), [`../world-unification.md`](../world-unification.md));
+([`../bevy-migration.md`](../architecture.md), [`../world-unification.md`](../architecture.md));
 this doc and its 49 sub-issues own whether that substrate adds up to **capability parity**
 with the Java ecosystem, which is a different and harder question than "does the ECS
 exist."
@@ -23,9 +23,9 @@ it does not pass today, in one specific and non-negotiable way.
 Every capability below was checked against the actual tree, not against what a design doc
 says should exist — the two disagree in one important place (§"A stale claim found and
 fixed" below). Sources read in full: [`../plugin-api.md`](../plugin-api.md),
-[`../bevy-migration.md`](../bevy-migration.md), [`../world-unification.md`](../world-unification.md),
-[`../entity-components.md`](../entity-components.md), [`../local-player-components.md`](../local-player-components.md),
-[`../session-components.md`](../session-components.md), `crates/lodestone-ecs/src/{sets,schedules,player,session}.rs`,
+[`../bevy-migration.md`](../architecture.md), [`../world-unification.md`](../architecture.md),
+[`../entity-components.md`](../player-simulation.md), [`../local-player-components.md`](../player-simulation.md),
+[`../session-components.md`](../player-simulation.md), `crates/lodestone-ecs/src/{sets,schedules,player,session}.rs`,
 `crates/lodestone-model/src/{adapter,action}.rs`, `crates/plugins/lodestone-nav` (the one
 real, 75-test clean-room plugin), and the existing issue tracker (`gh issue list --state
 all --limit 200`, to avoid duplicating #20, #35, #36, #37, #38, #46, #48, #67, all of
@@ -345,12 +345,12 @@ lands a workable design or documents why it cannot.
 
 - [`../plugin-api.md`](../plugin-api.md) — the surface as a specification, including the
   now-corrected gap list (see [#180](https://github.com/matteopolak/lodestone/issues/180)).
-- [`../bevy-migration.md`](../bevy-migration.md) — the staged ECS plan; §6/§6.1 are the
+- [`../bevy-migration.md`](../architecture.md) — the staged ECS plan; §6/§6.1 are the
   plugin-API and two-tier sections this doc's audit checks against the real tree.
-- [`../world-unification.md`](../world-unification.md) — the lock-discipline section every
+- [`../world-unification.md`](../architecture.md) — the lock-discipline section every
   reentrancy-adjacent issue in this epic (`#156`, `#157`, `#177`, `#179`) must be read
   against before implementation starts.
-- [`../baritone-port.md`](../baritone-port.md) — the one archetype in the port-feasibility
+- [`../baritone-port.md`](../autonomous-navigation.md) — the one archetype in the port-feasibility
   table that is already real, and the source of the WASM-cost analysis this doc leans on
   for the native-vs-WASM verdict.
 - [`./README.md`](./README.md) — the roadmap index; epic #7 (substrate) vs. epic #77

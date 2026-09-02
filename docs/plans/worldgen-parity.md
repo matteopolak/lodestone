@@ -8,11 +8,11 @@ not the build — of the seam that lets other versions' generators be added late
 prerequisite work the owner already expects (structures and the other unported decoration steps),
 names agent-sized units with file ownership, and states what "full parity" cannot mean yet.
 
-Companion docs, which this plan extends rather than repeats: [`worldgen-plan.md`](../worldgen-plan.md)
+Companion docs, which this plan extends rather than repeats: [`worldgen-plan.md`](../worldgen.md)
 (the original phased plan — its Phases 1–3 have since **landed** and closed),
-[`worldgen-parity.md`](../worldgen-parity.md) (the whole-chunk harness and its measured numbers),
-[`worldgen-biomes.md`](../worldgen-biomes.md), [`worldgen-vegetation.md`](../worldgen-vegetation.md),
-[`worldgen-surface-perf.md`](../worldgen-surface-perf.md). Tracker: epic #404 (its Phase children are
+[`worldgen-parity.md`](../worldgen.md) (the whole-chunk harness and its measured numbers),
+[`worldgen-biomes.md`](../worldgen-biomes.md), [`worldgen-vegetation.md`](../worldgen-decoration.md),
+[`worldgen-surface-perf.md`](../worldgen.md). Tracker: epic #404 (its Phase children are
 closed; this plan covers what the epic marked out of scope, because the owner has since asked for it),
 #407 (the seam), #428 (trunk placers), #85/#87 (benches), #136 (structures — placement API blocked on
 this plan's Phase S).
@@ -44,7 +44,7 @@ prose — several worldgen claims in this repo's own files are stale (see §"sta
 | 6f | `SURFACE_STRUCTURES` step *features* (`blue_ice` in frozen oceans; `desert_well` etc.) | **absent** | |
 | 6g | `UNDERGROUND_DECORATION` (`dripstone_cluster`, `pointed_dripstone`, sculk...) | **absent** — and unreachable until 3-D biomes, since only cave biomes carry these | |
 | 6h | `FLUID_SPRINGS` (`spring_water`, `spring_lava`) | **absent** | in every biome's list |
-| 6i | `TOP_LAYER_MODIFICATION` (`freeze_top_layer` — snow layers + ice) | **ported + composed, bit-exact at 4 fixtures** | U2, closed. `top_layer_parity` (in `lodestone-server/src/worldgen_data.rs`) loads vanilla's own post-vegetation field and requires the same writes at the same coordinates: snowy_plains 250 snow + 250 `snowy` flips, frozen_ocean 36 ice + 0 snow, windswept_hills 115 snow, desert 0. Plus 1,024 columns of `MOTION_BLOCKING` heightmap against vanilla's own `getHeight`. Four controls run and observed. See [`worldgen-freeze-top-layer.md`](../worldgen-freeze-top-layer.md) |
+| 6i | `TOP_LAYER_MODIFICATION` (`freeze_top_layer` — snow layers + ice) | **ported + composed, bit-exact at 4 fixtures** | U2, closed. `top_layer_parity` (in `lodestone-server/src/worldgen_data.rs`) loads vanilla's own post-vegetation field and requires the same writes at the same coordinates: snowy_plains 250 snow + 250 `snowy` flips, frozen_ocean 36 ice + 0 snow, windswept_hills 115 snow, desert 0. Plus 1,024 columns of `MOTION_BLOCKING` heightmap against vanilla's own `getHeight`. Four controls run and observed. See [`worldgen-freeze-top-layer.md`](../worldgen-biomes.md) |
 | 7 | structures proper (`structure_starts`/`structure_references` statuses + jigsaw assembly) | **absent entirely** | tracked as "do not start implementation"; no Rust module; data exists (34 `structure`, 20 `structure_set`, 188 `template_pool`, 40 `processor_list` JSON) |
 | 8 | `initialize_light` / `light`; heightmaps | **absent from the served wire** | `encode_column_body`, `crates/protocol/v770/src/server_protocol.rs`: heightmaps sent empty, light all-`Missing` — documented gap; client relights locally |
 | 9 | `spawn` (initial mob generation, `disable_mob_generation`) | **absent from generation** | runtime spawning is `crates/lodestone-server/src/natural_spawn.rs` (a different mechanism, currently another agent's file) |

@@ -586,7 +586,7 @@ This plan says of its projected draw counts: *"re-measure with the U1 counters b
 any of these"*. The submission term has now been measured **before** U1 exists, so each unit's
 expected win can be stated in instructions rather than only in section counts.
 `crates/lodestone-shell/tests/client_chunk_cycles.rs` (`d7b823f6`), method and controls in
-[`../client-chunk-cycles.md`](../client-chunk-cycles.md), record in `DESIGN.md` §12.120.
+[`../client-chunk-cycles.md`](../chunk-lifecycle.md), record in `DESIGN.md` §12.120.
 
 | quantity | measured |
 |---|---|

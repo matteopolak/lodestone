@@ -290,6 +290,6 @@ its own doc.
 bundled data under `assets/worldgen/`, `.cache/mc/survival/world` (Nether oracle),
 `.cache/mc/26.2/src/` (record definitions), `scripts/worldgen-oracle/` + Apple `container`
 (strengthening). Companions: [`worldgen-dimensions.md`](../worldgen-dimensions.md) (the
-engine-gap report this plan sequences), [`worldgen-gap-census.md`](../worldgen-gap-census.md)
+engine-gap report this plan sequences), [`worldgen-gap-census.md`](../worldgen.md)
 §1, and the worldgen-data-census, algorithm-switch, 3-D-biome-sampling, missing-feature-types
 and portal/dimension-travel issues named above.

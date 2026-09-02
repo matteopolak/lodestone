@@ -461,7 +461,7 @@ implied.
 as directories), Phase C landed as `4aa7ac85` — extracting the *corrected* closed set including
 `counters` (see Phase C below, corrected in `4be59556`). The as-built ownership map, and the
 gotchas the split actually hit, are in
-[`../worldgen-module-layout.md`](../worldgen-module-layout.md); this section remains as the
+[`../worldgen-module-layout.md`](../worldgen.md); this section remains as the
 design record. Older docs naming `overworld.rs`/`feature/vegetation.rs` read as the directory of
 the same name, deliberately not bulk-rewritten.
 
@@ -504,7 +504,7 @@ construction, and the parity suite proves it anyway.
   set — `math` imports nothing crate-internal, `rng` only `hash`, `noise` only `math`/`rng`,
   `density` only `math`/`noise`/`rng` — so the boundary exists today and the extraction is
   mechanical. 3,670 lines, ~22% of the crate. **Correction, measured in U16 (see
-  [`docs/worldgen-module-layout.md`](../worldgen-module-layout.md)): this set is NOT closed, and
+  [`docs/worldgen-module-layout.md`](../worldgen.md)): this set is NOT closed, and
   the module it misses is the one that matters.** Re-running the scan while separating *code*
   lines from *doc-comment* lines finds **8 real call sites into `crate::counters`** —
   `density/chunk.rs`'s `bump_density_eval`/`bump_corner_lookup`/`bump_slot_hit` and `rng`'s
@@ -586,7 +586,7 @@ acceptance is always counters and gates — never a profile, never a bare durati
 | U7 | In-place region decoration view; delete stitch copies + `RegionGrid`/`VegGrid` re-seeding | `feature/mod.rs`, `feature/vegetation.rs`, `overworld.rs` | U3, U6 | M | **must not** — same driver order |
 | U8 | Vegetation engine port to ids + region view (the 3.6k-line module) | `feature/vegetation.rs` | U3, U7 | L | **must not** — depth-first recursion untouched |
 | U9 | Biome layer: memoised per-source biome in store + RTree port | `biome.rs`, `src/engine/` | U6 | M | none, but **values must match brute force exactly** |
-| U10 | Server scheduler: dependency-edge generation, delete per-ring barrier — **landed** `7ba0176b`/`0a3ede8d` (#494), see [`../join-scheduler.md`](../join-scheduler.md) | `lodestone-server/src/{server,chunk,join_scheduler}.rs` | U6, U7 | M | none |
+| U10 | Server scheduler: dependency-edge generation, delete per-ring barrier — **landed** `7ba0176b`/`0a3ede8d` (#494), see [`../join-scheduler.md`](../accounts-and-join.md) | `lodestone-server/src/{server,chunk,join_scheduler}.rs` | U6, U7 | M | none |
 | U11 | 3-D biome sampling (4×4×4 quart cells) on the RTree | `biome.rs`, `overworld.rs`, serve boundary | U9 | M | **changes biome-dependent placement inputs** — vanilla-ward; needs fresh JVM fixtures |
 | U12 | Missing decoration steps: lakes, springs, geodes/icebergs, disks, dungeons/fossils | `feature/`, `compose.rs` | U7 | L | additive (per-feature `set_feature_seed` isolates streams; index-preservation already in place) |
 | U13 | Nether + End generation — **unit group NE**, own issue tree; see [inventory](#full-parity-inventory-jar-derived-262) | new engine instantiations + data + server dimension plumbing | U4–U9 | XL (group) | new content |
@@ -810,7 +810,7 @@ superflat is `lodestone_worldgen::flat::FlatLevelSource`, a standalone generator
 no new biome-source type at all — `OverworldGenerator`'s existing fixed-biome fallback path
 *is* `FixedBiomeSource`, selected deliberately via `worldgen_data::SingleBiomeResolver`
 withholding `biome_parameters`. See
-[`worldgen-world-type-selection.md`](../worldgen-world-type-selection.md) for the full
+[`worldgen-world-type-selection.md`](../worldgen.md) for the full
 preset-to-entry-point table. **Not landed**: a world-creation-screen surface to pick any of
 them — every entry point is reachable from `lodestone-server` but nothing outside it
 constructs one yet.
