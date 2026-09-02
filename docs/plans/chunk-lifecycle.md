@@ -254,7 +254,7 @@ tick loop) requesting the same ungenerated chunk must produce **one** generation
 
 **S3 — NOT simplified: keep both trackers.** It is tempting to collapse the loading-level graph and
 the simulation-level graph into one. Do not. The two-instance version is the *same* propagator
-run twice with a different ticket filter (`doesLoad()` vs `doesSimulate()`) — roughly 40 extra lines
+run twice with a different ticket filter (does-load vs does-simulate) — roughly 40 extra lines
 — and collapsing it destroys exactly the distinction #297 and #292 both depend on: a chunk that is
 resident but must not tick. If they were collapsed, `PLAYER_SPAWN` chunks would tick, which is the
 bug #297's own (stale) verification would have baked in.
@@ -436,9 +436,8 @@ is genuinely still open, and this plan does not close it. **Do not move either b
 lives in `lodestone-server/examples/`, not `lodestone-worldgen/`, which is correct: it benches the
 server's consumer of the generator, which is precisely what these units change.
 
-**#289's priority system needs no new bench.** Priority *is* the ticket level
-(`ChunkTaskDispatcher.java`), a derived integer, so its correctness is a unit-testable ordering
-property (U4's gate), not a throughput question.
+**#289's priority system needs no new bench.** Priority *is* the ticket level, a derived integer,
+so its correctness is a unit-testable ordering property (U4's gate), not a throughput question.
 
 **Gate.** None — this is a measurement tool, not a test, and #87 is labelled `bench`. But the
 retained-vs-dropped pair **is** its own control: if the RSS delta between the two modes is ≈0, the
@@ -518,25 +517,25 @@ known tick count. Do not read `TickClock` — it outlives the gate (see U1).
 **What.** Port, with S1's `MAX_LEVEL = 33` and its caveat written into the doc comment:
 
 - `TicketType { timeout: u64, flags: u8 }` with the five flag constants and the nine registered
-  types, transcribed from `TicketType.java` (the table above). Predicate methods `persist()`,
-  `does_load()`, `does_simulate()` mirroring the same file.
-- `Ticket { ty, level, ticks_left }` (`Ticket.java`), `reset_ticks_left`.
-- `add_ticket_with_radius(ty, pos, radius)` → one ticket at level `33 - radius`
-  (`TicketStorage.java`). **Not a fan-out.**
+  types, transcribed from the table above. Predicate methods `persist()`, `does_load()`,
+  `does_simulate()` mirroring the same categorisation.
+- `Ticket { ty, level, ticks_left }`, `reset_ticks_left`.
+- `add_ticket_with_radius(ty, pos, radius)` → one ticket at level `33 - radius`. **Not a fan-out.**
 - The propagator: effective level = `min over tickets t of (t.level + chebyshev(t.pos, pos))`,
-  from `ChunkTracker.computeLevelFromNeighbor == fromLevel + 1` (`ChunkTracker.java`). A
-  straightforward BFS from ticket sources is correct and clearer than porting
-  `DynamicGraphMinFixedPoint`; note in the doc comment that vanilla's incremental version exists for
-  a scale we do not have yet.
+  using the same minimum-plus-one-per-step rule described above. A straightforward BFS from ticket
+  sources is correct and clearer than porting an incremental min-fixed-point graph; note in the
+  doc comment that an incremental version of this propagation exists for a scale we do not have
+  yet.
 - **Two instances** (S3): loading (filter `does_load()`) and simulation (filter `does_simulate()`).
-- `purge_stale()` — one `decrease_ticks_left()` per tick, per `TicketStorage.java`.
+- `purge_stale()` — one `decrease_ticks_left()` per tick.
 
 **Consumer / driver.** `run_tick_loop` gains one call per tick: `tickets.purge_stale()` then
 `propagate()`, then push the resulting levels into `ChunkStore`. **Anchor: immediately after the
-`fluid_ticks.drain_due` loop closes in `tick.rs`, before the random-tick comment there** — matching vanilla's own ordering (`ServerChunkCache` runs after `ServerLevel`'s
-`blockTicks`/`fluidTicks`, already cited in that comment). `ChunkStore`'s status target is now
-`generationStatus(level)` (S1: `Full` iff `level <= 33`), and the simulation level decides whether the
-random-tick loop visits a chunk at all — replacing the fixed `tick_area` (`tick.rs`).
+`fluid_ticks.drain_due` loop closes in `tick.rs`, before the random-tick comment there** — matching
+the real game's own ordering (its chunk-cache tick runs after its level's block/fluid ticks, as
+already noted in that comment). `ChunkStore`'s status target is now derived from the level (S1:
+`Full` iff `level <= 33`), and the simulation level decides whether the random-tick loop visits a
+chunk at all — replacing the fixed `tick_area` (`tick.rs`).
 
 **Gate.** `crates/lodestone-server/tests/ticket_levels.rs`, three properties, each with an expected
 value derived from the vanilla constants above rather than from our own code:
@@ -554,7 +553,7 @@ configuration, so the control is permanent.
 
 **What would make it vacuous.** Deriving the expected levels by calling our own propagator (the
 `decode(encode(x))` trap). Every expected number in properties 1–3 must be written out by hand from
-`ChunkLevel.java` and `TicketStorage.java`.
+the level and ticket rules stated above, not derived from our own code.
 
 **Duration species.** `purge_stale` decrements per tick, so a gate asserting "the 20-tick
 `PLAYER_SPAWN` ticket expired" must count ticks it drives itself. `run_tick_loop`'s `game_tick`
@@ -574,15 +573,13 @@ absolute value is not, since another test's loop may have advanced it.
   `build_batch`, the forget-chunk diff, the one-in-flight batch gate
   (`send_view_update`).
 - **Simulation (moves to tickets):** *which chunks exist*. The `PlayerMoved` arm adds/moves
-  a `PLAYER_SIMULATION` ticket at level 31 (`DistanceManager.java`) plus a
-  `PLAYER_LOADING` ticket at `PLAYER_TICKET_LEVEL`, instead of driving generation itself.
-  `ClientInformationChanged` adjusts the ticket radius rather than calling
-  `set_view_radius` to generate.
+  a `PLAYER_SIMULATION` ticket at level 31 plus a `PLAYER_LOADING` ticket at
+  `PLAYER_TICKET_LEVEL`, instead of driving generation itself. `ClientInformationChanged` adjusts
+  the ticket radius rather than calling `set_view_radius` to generate.
 
-Vanilla's own relationship, for the constant: `getPlayerTicketLevel()` is
-`max(0, byStatus(ENTITY_TICKING) - simulationDistance)` (`DistanceManager.java`) with
-`simulationDistance = 10`, and `PlayerTicketTracker(32)` is the separate view-distance
-graph.
+The real game's own derivation of that loading-ticket level, for the constant: it is
+`max(0, entity_ticking_level - simulation_distance)`, with a simulation distance of 10, and a
+separate view-distance propagation graph capped at level 32.
 
 **Why this unit is mandatory and not optional polish.** Without it, U3 and U4 are a textbook island:
 a store and a ticket graph that nothing populates, while `ViewTracker` goes on generating chunks
@@ -679,8 +676,8 @@ the opposite of #297's suggested gate on the key point:
 
 1. At configuration-finished, chunks within Chebyshev 3 of spawn are resident. Radius 3 ⇒ level
    `33 - 3 = 30` at centre, so the ring at distance 3 is level 33 — resident — and distance 4 is 34,
-   **not** resident. That off-by-one is derived from `TicketStorage.java` and is exactly what
-   a hand-rolled version gets wrong.
+   **not** resident. That off-by-one is derived from the ticket-level rule above and is exactly
+   what a hand-rolled version gets wrong.
 2. Those chunks are **not simulating** (loading-only, flags 2).
 3. With no refresh, the ticket **expires after 20 ticks** and they become droppable.
 4. A `FORCED` ticket at level 31 **does** simulate, with zero players connected.

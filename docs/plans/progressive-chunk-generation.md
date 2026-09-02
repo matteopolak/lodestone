@@ -637,8 +637,8 @@ the new radii.
   addresses generation cost only, which is the third-largest problem at that radius. The
   plan says so rather than agreeing; rd 64 is the deliverable, LOD meshing the named
   follow-on.
-- **Rejected: vanilla's 12-status ProtoChunk pipeline** (per-status neighbour radii,
-  `ChunkStatus`/`ChunkPyramid` as in `.cache/mc/26.2/src`). It is the "real" version of
+- **Rejected: a full twelve-status generation pipeline with per-status neighbour radii** —
+  the real model the actual generation server uses. It is the "real" version of
   this design, and it would mean rebuilding the staged store's dependency graph as an
   explicit status machine — a rewrite of a subsystem that already encodes those
   dependencies in its memo slots, for no player-visible gain over two tiers. Revisit only
