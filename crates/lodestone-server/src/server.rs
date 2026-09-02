@@ -10712,7 +10712,7 @@ where
             Vec3::new(x, y, z),
             // Always `LOCAL_PLAYER_ENTITY_ID`, never the registry ticket's id:
             // this packet goes straight to `conn`, this player's own socket,
-            // and `GameLogin.entity_id` (`begin_play_at`) always claims that
+            // and vanilla's own login entity-id field (`begin_play_at`) always claims that
             // constant regardless of whether a `PlayerRegistry` exists — see
             // `LOCAL_PLAYER_ENTITY_ID`'s own doc comment. The ticket's real id
             // is for *other* connections' view of this player, never this one.
@@ -10907,7 +10907,7 @@ async fn dispatch_play_packet<T, P, S>(
     game_tick: Option<u64>,
     // Issue #260. This connection's in-progress bow draw, if any: the server tick
     // the `USE_ITEM` arrived on, so the `RELEASE_USE_ITEM` that ends it can turn
-    // the interval into `BowItem.getPowerForTime`. `None` whenever nothing
+    // the interval into vanilla's own bow-item power-for-time routine. `None` whenever nothing
     // chargeable is being held down.
     //
     // Per-connection rather than shared, exactly like `sprinting` and
@@ -10917,8 +10917,8 @@ async fn dispatch_play_packet<T, P, S>(
     // This connection's in-progress *consume* — eating or drinking. Held here for
     // the same reason `bow_draw` is, and separately from it because the two end
     // differently: a draw ends on a packet (`RELEASE_USE_ITEM`), while a consume
-    // ends on the **server's own clock** — vanilla's `LivingEntity
-    // ::updateUsingItem` counts `useItemRemaining` down and calls
+    // ends on the **server's own clock** — vanilla's own
+    // update-using-item routine counts `useItemRemaining` down and calls
     // `completeUsingItem` itself, and the client sends nothing at all when a
     // steak finishes. `serve_play`'s per-tick arm is what finishes it here.
     item_in_use: &mut Option<ItemInUse>,
@@ -10951,7 +10951,7 @@ where
             on_ground,
         } => {
             // Hunger exhaustion for the distance just travelled — vanilla's
-            // `ServerPlayer.checkMovementStatistics`, which is driven by the
+            // vanilla's own check-movement-statistics routine, which is driven by the
             // position delta rather than by a per-tick constant. Charged **before**
             // `player_pos` is overwritten, because the delta needs the old value.
             //
@@ -11023,7 +11023,7 @@ where
             // correct answer. The same is true of `held_item` until they move
             // after a hotbar switch.
             // The identity is what makes ownership expressible: a mob's owner is an
-            // account uuid (vanilla's `TamableAnimal.DATA_OWNERUUID_ID`), and
+            // account uuid (vanilla's own tamable-animal owner-uuid data field), and
             // `MobSim` resolves a tamed pet's owner *position* by looking that uuid
             // up in this list every tick. `set_players` is generic over
             // `Into<PerceivedPlayer>`, so supplying the bare perception compiles fine
@@ -11035,7 +11035,7 @@ where
             // a `MovePlayerPos` packet that carries no rotation at all before
             // the first look). Same formula `block_placement.rs`'s
             // `nearest_look` already uses for the block-placement raycast
-            // (`Entity.calculateViewVector`).
+            // (vanilla's own entity view-vector calculator).
             let facing = player_rot.unwrap_or_default();
             let (yaw_rad, pitch_rad) = (f64::from(facing.yaw).to_radians(), f64::from(facing.pitch).to_radians());
             let view_direction = Vec3::new(
@@ -11059,7 +11059,7 @@ where
 
             // Chunk coordinate = floor(block / 16), not truncating division —
             // `-1.0_f64 / 16.0` must floor to chunk `-1`, matching vanilla's
-            // `SectionPos.blockToSectionCoord` (an arithmetic right shift).
+            // vanilla's own section-position block-to-section-coord conversion (an arithmetic right shift).
             let cx = (x / 16.0).floor() as i32;
             let cz = (z / 16.0).floor() as i32;
             // **This is what makes the world tick follow the player.**
