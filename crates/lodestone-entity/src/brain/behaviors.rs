@@ -362,19 +362,19 @@ impl Behavior for LookAtTargetSink {
     }
 }
 
-/// `AnimalPanic` (`world/entity/ai/behavior/AnimalPanic.java`) — flees a
-/// recent attacker at `speed_multiplier` for 100–120 ticks, re-picking a
-/// random fleeing destination every time navigation finishes. Lives in
-/// `CORE` in vanilla (goat, camel, armadillo, frog, sniffer, allay all
-/// register it there), which is why it interrupts whatever `IDLE` behaviour
+/// Vanilla's own panic behaviour — flees a recent attacker at
+/// `speed_multiplier` for 100–120 ticks, re-picking a random fleeing
+/// destination every time navigation finishes. Lives at the core activity
+/// level in vanilla (goat, camel, armadillo, frog, sniffer, allay all
+/// register it there), which is why it interrupts whatever idle behaviour
 /// was running rather than competing with it for a turn — matching the
-/// `RandomStroll`/[`MoveToTargetSink`] pair's own "coordinate only through
+/// random-stroll/[`MoveToTargetSink`] pair's own "coordinate only through
 /// `WALK_TARGET`" shape, one activity level up.
 ///
 /// **Two disclosed cuts**, both already named on [`super::sensor::HurtBySensor`]:
-/// no damage-type filter (every hurt panics, not just
-/// `DamageTypeTags.PANIC_CAUSES`), and no on-fire water-seeking branch
-/// (`AnimalPanic.getPanicPos`'s `lookForWater` needs a block/fluid read no
+/// no damage-type filter (every hurt panics, not just vanilla's own
+/// panic-causing damage-type tag), and no on-fire water-seeking branch
+/// (vanilla's own panic-position search needs a block/fluid read no
 /// [`BrainMob`] seam exposes). Per-species extras on top of the plain
 /// constructor — the sniffer resets its sniffing memory on start, the
 /// armadillo rolls out of its ball — are not modelled either; each is a
@@ -386,8 +386,8 @@ pub struct Panic {
 }
 
 impl Panic {
-    /// `new AnimalPanic(speedMultiplier)` — the per-species figure is the
-    /// caller's own jar citation, not this struct's.
+    /// Builds the behaviour from a fleeing speed multiplier — the per-species
+    /// figure is the caller's own citation, not this struct's.
     #[must_use]
     pub fn new(speed_multiplier: f32) -> Self {
         Self {
@@ -405,7 +405,7 @@ impl Behavior for Panic {
         &self.entry
     }
 
-    // `AnimalPanic`'s own constructor: `super(..., 100, 120)`.
+    // Vanilla's own duration bounds for this behaviour: 100 to 120 ticks.
     fn min_duration(&self) -> i32 {
         100
     }
@@ -415,9 +415,9 @@ impl Behavior for Panic {
     }
 
     fn check_extra_start_conditions(&mut self, mem: &mut Memories, _mob: &mut dyn BrainMob) -> bool {
-        // `AnimalPanic.checkExtraStartConditions`: a fresh hurt, or a panic
-        // already in progress (so a hurt landing mid-flee re-arms the timer
-        // rather than letting the behaviour lapse and restart from scratch).
+        // A fresh hurt, or a panic already in progress (so a hurt landing
+        // mid-flee re-arms the timer rather than letting the behaviour lapse
+        // and restart from scratch).
         mem.has_value(MemoryModuleType::HURT_BY) || mem.has_value(MemoryModuleType::IS_PANICKING)
     }
 
@@ -426,8 +426,8 @@ impl Behavior for Panic {
     }
 
     fn start(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
-        // `AnimalPanic.start`: mark panicking, drop whatever walk target was
-        // already in flight, and stop navigating toward it.
+        // Mark panicking, drop whatever walk target was already in flight,
+        // and stop navigating toward it.
         mem.set(MemoryModuleType::IS_PANICKING, MemoryValue::Unit);
         mem.erase(MemoryModuleType::WALK_TARGET);
         mob.stop_navigation();
@@ -438,8 +438,8 @@ impl Behavior for Panic {
     }
 
     fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob, _time: i64) {
-        // `AnimalPanic.tick`: only pick a new fleeing point once the current
-        // one is exhausted, not every tick — a panicking mob commits to each
+        // Only pick a new fleeing point once the current one is exhausted,
+        // not every tick — a panicking mob commits to each
         // leg of its flight rather than juddering toward a new point every
         // frame.
         if mob.navigation_done()
@@ -457,13 +457,13 @@ impl Behavior for Panic {
     }
 }
 
-/// Copies `source` into `dest` with a randomised expiry — vanilla
-/// `CopyMemoryWithExpiry.create(predicate, source, dest, durationRange)`,
-/// minus the predicate: every jar caller's predicate reduces to "does
-/// `source` hold a value at all" once `source` is itself produced by a
-/// sensor that already applies the real filter (see
-/// [`super::roster::piglin_brain`]'s own doc for why `PiglinAi::isNearZombified`
-/// needs no separate check here). A one-shot behaviour, re-triggered every
+/// Copies `source` into `dest` with a randomised expiry — vanilla's own
+/// copy-memory-with-expiry behaviour, minus the predicate: every vanilla
+/// caller's predicate reduces to "does `source` hold a value at all" once
+/// `source` is itself produced by a sensor that already applies the real
+/// filter (see [`super::roster::piglin_brain`]'s own doc for why the
+/// near-zombified check needs no separate check here). A one-shot behaviour,
+/// re-triggered every
 /// tick `source` is present — [`Brain::tick`](super::Brain::tick)'s own
 /// per-tick retry of stopped behaviours is what makes that a continuous
 /// refresh rather than a single copy.
@@ -518,10 +518,9 @@ impl Behavior for CopyMemoryWithExpiry {
     }
 }
 
-/// Flees [`MemoryModuleType::AVOID_TARGET`] — vanilla
-/// `SetWalkTargetAwayFrom.entity(AVOID_TARGET, speedModifier, desiredDistance,
-/// false)`, the movement half of a piglin's `AVOID` activity
-/// (`PiglinAi.initRetreatActivity`).
+/// Flees [`MemoryModuleType::AVOID_TARGET`] — vanilla's own
+/// walk-away-from-entity behaviour, the movement half of a piglin's avoid
+/// activity.
 ///
 /// # Disclosed simplification
 ///
@@ -529,9 +528,8 @@ impl Behavior for CopyMemoryWithExpiry {
 /// specifically chosen to increase distance from the avoid target — the same
 /// simplification [`Panic`]'s own doc discloses for the six species sharing
 /// it, applied here to a directed-flee vanilla behaviour instead of an
-/// undirected one. `SetEntityLookTargetSometimes` (glancing back while
-/// fleeing) and `EraseMemoryIf(PiglinAi::wantsToStopFleeing, AVOID_TARGET)`
-/// (an early exit) are not ported; [`AVOID_TARGET`](MemoryModuleType::AVOID_TARGET)'s
+/// undirected one. Vanilla's glance-back-while-fleeing behaviour and its
+/// early-exit memory-erase check are not ported; [`AVOID_TARGET`](MemoryModuleType::AVOID_TARGET)'s
 /// own expiry is what ends the flee here.
 #[derive(Debug)]
 pub struct AvoidTarget {
@@ -591,23 +589,23 @@ impl Behavior for AvoidTarget {
     }
 }
 
-/// Rolls `min + next_i32(max + 1 - min)` — vanilla's `UniformInt.sample`,
-/// reused by both goat-ram cooldown rolls below rather than duplicated.
+/// Rolls `min + next_i32(max + 1 - min)` — vanilla's own uniform-integer
+/// sampling, reused by both goat-ram cooldown rolls below rather than duplicated.
 fn uniform_roll(mob: &mut dyn BrainMob, min: i32, max: i32) -> i32 {
     let span = max + 1 - min;
     if span > 0 { min + mob.next_i32(span) } else { min }
 }
 
-/// `PrepareRamNearestTarget` (`world/entity/ai/behavior/PrepareRamNearestTarget.java`)
-/// — the goat ram's first phase: pick the nearest visible living entity, back
-/// away from it to a ramming distance, wait
-/// [`ram_prepare_time`](Self::new)'s worth of ticks once there, then hand off
-/// to [`RamTarget`] by writing [`MemoryModuleType::RAM_TARGET`].
+/// Vanilla's own goat-ram-preparation behaviour — the goat ram's first phase:
+/// pick the nearest visible living entity, back away from it to a ramming
+/// distance, wait [`ram_prepare_time`](Self::new)'s worth of ticks once
+/// there, then hand off to [`RamTarget`] by writing
+/// [`MemoryModuleType::RAM_TARGET`].
 ///
-/// # Three disclosed cuts from the jar original
+/// # Three disclosed cuts from the vanilla original
 ///
-/// * **No `TargetingConditions` species/world-border filter.** Vanilla's
-///   `RAM_TARGET_CONDITIONS` excludes other goats and (with `mobGriefing`
+/// * **No targeting-condition species/world-border filter.** Vanilla's own
+///   ram-target conditions exclude other goats and (with `mobGriefing`
 ///   off) armour stands; this crate's [`NearbyBrainEntity`](super::mob::NearbyBrainEntity)
 ///   carries no species tag a filter could read (see
 ///   [`NearestVisibleLivingEntitiesSensor`](super::sensor::NearestVisibleLivingEntitiesSensor)'s
@@ -642,12 +640,13 @@ pub struct PrepareRam {
 }
 
 impl PrepareRam {
-    /// `min_ram_distance`/`max_ram_distance` are `RAM_MIN_DISTANCE`/`RAM_MAX_DISTANCE`
-    /// (4/7 for a goat), `walk_speed` is `SPEED_MULTIPLIER_WHEN_PREPARING_TO_RAM`
-    /// (1.25), `ram_prepare_time` is `RAM_PREPARE_TIME` (20), and the two
-    /// cooldown bounds are `GoatAi.TIME_BETWEEN_RAMS`'s own range (600–6000
-    /// for a non-screaming goat; this crate does not model the screaming
-    /// variant's shorter 100–300 range).
+    /// `min_ram_distance`/`max_ram_distance` are vanilla's own ram min/max
+    /// distance (4/7 for a goat), `walk_speed` is vanilla's own
+    /// speed-multiplier-while-preparing-to-ram (1.25), `ram_prepare_time` is
+    /// vanilla's own ram-prepare-time (20), and the two cooldown bounds are
+    /// vanilla's own time-between-rams range (600–6000 for a non-screaming
+    /// goat; this crate does not model the screaming variant's shorter
+    /// 100–300 range).
     #[must_use]
     pub fn new(
         min_ram_distance: f64,
@@ -807,18 +806,18 @@ impl Behavior for PrepareRam {
     }
 }
 
-/// `RamTarget` (`world/entity/ai/behavior/RamTarget.java`) — the goat ram's
+/// Vanilla's own ram-target behaviour — the goat ram's
 /// second phase: charge [`MemoryModuleType::RAM_TARGET`] at `speed`, and hit
 /// the first thing that comes within [`CONTACT_RANGE`](Self::CONTACT_RANGE).
 ///
-/// **Three disclosed cuts from the jar original.** The impact deals no
-/// jar-derived knockback direction/force of its own — it records a plain
+/// **Three disclosed cuts from the vanilla original.** The impact deals no
+/// vanilla-derived knockback direction/force of its own — it records a plain
 /// [`BrainMob::attack`] at the victim's position and leaves
 /// damage/knockback to whatever pipeline already resolves a goal-driven
-/// melee hit, rather than porting `RamTarget`'s own charge-direction,
+/// melee hit, rather than porting vanilla's own charge-direction,
 /// speed-scaled knockback formula (this is the same seam
-/// [`super::mob::BrainMob::attack`]'s own doc already names). The
-/// horn-breaking-block check (`hasRammedHornBreakingBlock`) is not ported —
+/// [`super::mob::BrainMob::attack`]'s own doc already names). Vanilla's
+/// horn-breaking-block check is not ported —
 /// this seam has no block-state read. And the "reached or gave up" exit
 /// check reads the **mob's own position**, not vanilla's literal
 /// (effectively self-comparing) one — see [`tick`](Behavior::tick)'s own
@@ -835,14 +834,14 @@ pub struct RamTarget {
 impl RamTarget {
     /// A hit lands once the mob is within this many blocks (horizontally) of
     /// whatever it is perceiving — a standin for vanilla's own bounding-box
-    /// overlap test (`level.getNearbyEntities(..., body.getBoundingBox())`),
-    /// which this seam has no box to evaluate.
+    /// overlap test against nearby entities, which this seam has no box to
+    /// evaluate.
     pub const CONTACT_RANGE: f64 = 1.2;
 
-    /// `speed` is `SPEED_MULTIPLIER_WHEN_RAMMING` (3.0 for a goat); the
-    /// cooldown bounds are the same `GoatAi.TIME_BETWEEN_RAMS` range
-    /// [`PrepareRam::new`] takes, reused here for the post-ram cooldown vanilla's
-    /// own `finishRam` rolls from the identical supplier.
+    /// `speed` is vanilla's own speed-multiplier-while-ramming (3.0 for a
+    /// goat); the cooldown bounds are the same time-between-rams range
+    /// [`PrepareRam::new`] takes, reused here for the post-ram cooldown
+    /// vanilla's own ram-finishing step rolls from the identical supplier.
     #[must_use]
     pub fn new(speed: f32, cooldown_min: i32, cooldown_max: i32) -> Self {
         Self {
@@ -945,32 +944,32 @@ impl Behavior for RamTarget {
     }
 }
 
-/// `ShootTongue` (`world/entity/animal/frog/ShootTongue.java`) — a frog's
+/// Vanilla's own tongue-shooting behaviour — a frog's
 /// tongue attack: chase [`MemoryModuleType::NEAREST_ATTACKABLE_FOOD`] and
 /// land a hit once within [`EATING_DISTANCE`](Self::EATING_DISTANCE).
 ///
-/// # Disclosed cuts from the jar original
+/// # Disclosed cuts from the vanilla original
 ///
-/// * **No `MOVE_TO_TARGET`/`CATCH_ANIMATION`/`EAT_ANIMATION` state machine.**
+/// * **No move-to-target/catch-animation/eat-animation state machine.**
 ///   Vanilla spends 6 ticks on a catch animation and 10 on an eat animation
-///   before the hit actually lands (`ShootTongue.tick`'s own `State` enum);
+///   before the hit actually lands, tracked by its own internal state enum;
 ///   this crate has no tongue-animation client state to time against, so the
 ///   hit resolves the instant the mob is in range — see
 ///   [`super::mob::BrainMob::attack`]'s own doc for the shared melee-hit
 ///   seam this reuses, the same one [`RamTarget`] already writes through.
-/// * **No target-locking or reachability memory.** Real `ShootTongue` picks
-///   one target at `start()` and tracks it by identity for the whole
-///   behaviour, falling back to `UNREACHABLE_TONGUE_TARGETS` on a failed
-///   path. This crate's `BrainMob` seam has no entity handle to lock onto —
-///   only a position, host-resolved fresh every tick (see
+/// * **No target-locking or reachability memory.** Vanilla's own behaviour
+///   picks one target at start and tracks it by identity for the whole
+///   behaviour, falling back to a per-target unreachable-targets set on a
+///   failed path. This crate's `BrainMob` seam has no entity handle to lock
+///   onto — only a position, host-resolved fresh every tick (see
 ///   [`MemoryModuleType::NEAREST_ATTACKABLE_FOOD`]'s own doc) — so this
 ///   behaviour re-aims at whatever the sensor currently reports instead,
-///   the same "no `TargetingConditions` filter, lean on `move_to`'s own A\*
+///   the same "no targeting-condition filter, lean on `move_to`'s own A\*
 ///   to fail closed" trade [`PrepareRam`]'s own doc already discloses for
 ///   an identical gap.
-/// * **No `Pose.CROAKING`/breeding gate.** `checkExtraStartConditions`'s own
-///   `body.getPose() != Pose.CROAKING && !isBreeding(mob)` checks are not
-///   modelled — this seam has no pose or breeding-goal state to read.
+/// * **No croaking-pose/breeding gate.** Vanilla's own start-condition check
+///   excludes a croaking or breeding frog — not modelled here, since this
+///   seam has no pose or breeding-goal state to read.
 #[derive(Debug)]
 pub struct ShootTongue {
     speed: f32,
@@ -978,13 +977,13 @@ pub struct ShootTongue {
 }
 
 impl ShootTongue {
-    /// The 3D `distanceTo` bound `ShootTongue.EATING_DISTANCE` uses in the
-    /// jar; this port checks it via [`horizontal_distance`] instead, the
+    /// The 3D distance bound vanilla's own eating-distance constant uses;
+    /// this port checks it via [`horizontal_distance`] instead, the
     /// same bounding-box-to-flat-check substitution [`RamTarget::CONTACT_RANGE`]
     /// already makes for the identical reason (no bounding box on this seam).
     pub const EATING_DISTANCE: f64 = 1.75;
 
-    /// `speed` is `ShootTongue.tick`'s own `WalkTarget` speed (`2.0F`).
+    /// `speed` is vanilla's own walk-target speed for this behaviour (`2.0F`).
     #[must_use]
     pub fn new(speed: f32) -> Self {
         Self {
@@ -999,7 +998,7 @@ impl Behavior for ShootTongue {
         &self.entry
     }
 
-    // `ShootTongue.TIME_OUT_DURATION` — a fixed ceiling, not a rolled range.
+    // Vanilla's own time-out duration for this behaviour — a fixed ceiling, not a rolled range.
     fn min_duration(&self) -> i32 {
         100
     }
