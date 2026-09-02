@@ -541,10 +541,11 @@ impl AquiferSystem {
     }
 
     /// [`block_at`](Self::block_at) with a beardifier term added to the density —
-    /// vanilla's `add(finalDensity, beardifier)` (`NoiseChunk.java:157`).
+    /// vanilla's own structure-adaptation density addition.
     ///
-    /// The `+ beard` is the whole of this change's S3 at this layer, and the
-    /// **operand order is the specification**: `Ap2(ADD)` evaluates
+    /// The `+ beard` is the whole of structure placement's S3 at this layer, and the
+    /// **operand order is the specification**: vanilla's own binary-add node
+    /// evaluates
     /// `argument1.compute(ctx) + argument2.compute(ctx)`, so the interpolated
     /// density comes first. See
     /// [`crate::structure::beardifier`] for why the term is added here rather

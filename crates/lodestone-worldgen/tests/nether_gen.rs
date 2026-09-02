@@ -206,10 +206,10 @@ fn oracle() -> Oracle {
 /// 6,122,849` away. 2000 is the exact midpoint of 0 and 4000.
 ///
 /// At an exact tie vanilla's answer is **a function of the previous query on the
-/// same thread**, not of the target. `Climate.RTree.search` seeds the descent with
-/// `this.lastResult.get()` — a `ThreadLocal<Leaf>` — and `SubTree.search` compares
+/// same thread**, not of the target. Vanilla's own R-tree search seeds the descent with
+/// its own last-result field — a `ThreadLocal<Leaf>` — and its own subtree search compares
 /// with a strict `minDistance > childDistance`, so a tied candidate never displaces
-/// the incumbent (`Climate.java:389-392, 443-460`). The incumbent is whatever the
+/// the incumbent. The incumbent is whatever the
 /// previous sampled position resolved to, and that `ThreadLocal` **persists across
 /// chunks**: the neighbouring quart at (−80, −84) really is `crimson_forest`.
 ///

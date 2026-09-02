@@ -1,5 +1,5 @@
 //! Template **processors** — the per-block filters vanilla runs between a
-//! template's palette and the world (issue #514's S2, widened by S4).
+//! template's palette and the world.
 //!
 //! # What it is
 //!
@@ -694,10 +694,11 @@ fn block_age_mossy(state: &BlockState, new_name: &str) -> BlockState {
     moss
 }
 
-/// `getRandomFacingStairs(random, stairBlock)` — `Direction.Plane.HORIZONTAL`'s
+/// Vanilla's own random-facing-stairs helper — its own horizontal-plane's
 /// own face order is `[NORTH, EAST, SOUTH, WEST]`
-/// (`Direction.java`'s `Plane.HORIZONTAL` array literal, not the direction's
-/// `2D data value` order `coded::Facing` uses), then `Half.values()` is
+/// (vanilla's own horizontal-plane array literal, not the direction's
+/// `2D data value` order `coded::Facing` uses), then vanilla's own half-enum
+/// values are
 /// `[TOP, BOTTOM]`.
 fn random_facing_stairs(random: &mut LegacyRandomSource, name: &str) -> BlockState {
     const FACES: [&str; 4] = ["north", "east", "south", "west"];
