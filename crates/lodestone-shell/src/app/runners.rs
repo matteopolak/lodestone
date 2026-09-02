@@ -43,7 +43,7 @@ pub(super) fn run_windowed(config: Config) -> anyhow::Result<()> {
 /// halves are native: `std::fs` returns `Err(Unsupported)` in a browser, and there is
 /// no command line to select this mode in the first place.
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn run_headless(config: Config) -> anyhow::Result<()> {
+pub(super) fn run_headless(_owned: lodestone_auth::Entitlement, config: Config) -> anyhow::Result<()> {
     let ctx = GpuContext::new_headless_blocking()
         .map_err(|e| anyhow::anyhow!("headless GPU bring-up failed: {e}"))?;
     let device = ctx.device();
@@ -171,7 +171,7 @@ fn write_ppm(path: &str, w: u32, h: u32, rgba: &[u8]) -> std::io::Result<()> {
 /// rather than reachable today, because nothing in a browser can select this mode, but
 /// gated rather than left as a trap one `Config` change away.
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn run_connect(config: Config) -> anyhow::Result<()> {
+pub(super) fn run_connect(_owned: lodestone_auth::Entitlement, config: Config) -> anyhow::Result<()> {
     println!(
         "connecting to {}:{} (protocol {}) for {}s…",
         config.host,

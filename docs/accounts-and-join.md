@@ -93,6 +93,14 @@ frame, before any input has arrived to move `UiState`. Two screens are exempt: `
 diagnosis the gate must not paint over), plus every screen `Screen::in_session` reports as
 sitting over a live world.
 
+The two native CLI diagnostic modes — `--headless` (render one frame of a world to a PPM) and
+`--connect` (dial a server and stream events) — never build a `MenuAction`, so the menu's gate
+structurally cannot cover them. They take an `Entitlement` as a parameter instead, resolved in
+`app::run` from the real roster, and refuse with a message naming the Accounts screen when there
+is none. A third diagnostic mode added later has to obtain one too, or it does not compile.
+`Mode::Window` deliberately does *not* go through that check: it has a UI, so showing the gate
+and letting the player add an account is a better answer than exiting.
+
 **The browser build cannot currently pass the gate**, because it has no Microsoft sign-in: the
 flow needs an OS keychain for the refresh token and a blocking HTTP client, neither of which
 exists on `wasm32`. The Add Account button there reports that in a sentence rather than doing

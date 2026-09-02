@@ -152,10 +152,20 @@ pub fn run(config: Config) -> anyhow::Result<()> {
         // line to select anything else — so the arms are refused rather than gated
         // into silence, which keeps "how did we get here?" answerable if a future
         // caller does set one.
+        // **These two are behind the ownership gate as well**, and they are the
+        // one pair the menu's own gate structurally cannot cover: neither ever
+        // builds a `MenuAction`, so neither passes the `Entitlement` the play
+        // verbs carry. `--connect` establishes a real session against a real
+        // server and `--headless` renders a world; a compliance gate a command
+        // line walks around is not a gate.
+        //
+        // The proof is a parameter on each runner rather than a check here, so
+        // the requirement travels with the function: a third diagnostic mode
+        // added later has to obtain one too, or it does not compile.
         #[cfg(not(target_arch = "wasm32"))]
-        Mode::Headless => run_headless(config),
+        Mode::Headless => run_headless(require_owned_account()?, config),
         #[cfg(not(target_arch = "wasm32"))]
-        Mode::Connect => run_connect(config),
+        Mode::Connect => run_connect(require_owned_account()?, config),
         #[cfg(target_arch = "wasm32")]
         Mode::Headless | Mode::Connect => Err(anyhow::anyhow!(
             "{:?} is a native CLI diagnostic mode: it needs a filesystem to write a \
@@ -165,6 +175,28 @@ pub fn run(config: Config) -> anyhow::Result<()> {
         )),
         Mode::Window => run_windowed(config),
     }
+}
+
+/// The ownership gate for the CLI diagnostic modes: the real account roster, or
+/// a refusal naming what to do about it.
+///
+/// `Mode::Window` does **not** come through here, and that is not an oversight:
+/// the windowed build has a UI, so it shows `crate::menu::Screen::Ownership` and
+/// lets the player add an account, which is a better answer than exiting. These
+/// two modes have no UI to offer, so the only honest answer is to stop.
+///
+/// # Errors
+/// Returns an error when no locally stored account owns the game.
+#[cfg(not(target_arch = "wasm32"))]
+fn require_owned_account() -> anyhow::Result<lodestone_auth::Entitlement> {
+    lodestone_auth::Entitlement::from_metadata(&lodestone_auth::AccountsMetadata::load()).ok_or_else(
+        || {
+            anyhow::anyhow!(
+                "no Microsoft account that owns Minecraft is signed in. Run the game \
+                 without --headless/--connect and add one from the Accounts screen first."
+            )
+        },
+    )
 }
 
 /// Sky distance fog sized to the shell's real render distance, so terrain
