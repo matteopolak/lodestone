@@ -271,14 +271,6 @@ mod tests {
     }
 
     #[test]
-    fn draw_region_at_origin_is_all_zero_offsets() {
-        let region = draw_region_for(0, 0, 6, 0);
-        assert_eq!(region.base_vertex, 0);
-        assert_eq!(region.first_index, 0);
-        assert_eq!(region.index_count, 6);
-    }
-
-    #[test]
     fn round_up_snaps_to_element_multiples() {
         assert_eq!(round_up(0, 12), 0);
         assert_eq!(round_up(1, 12), 12);

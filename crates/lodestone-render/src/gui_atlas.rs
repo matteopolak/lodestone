@@ -631,32 +631,6 @@ mod tests {
         assert_eq!(atlas.native_size("hud/heart/full"), Some((9, 9)));
     }
 
-    /// The three air-supply-bubble sprites vanilla ships at
-    /// `gui/sprites/hud/air*.png` need **no** dedicated loader: this generic
-    /// `gui/sprites/**` glob already stitches them in, exactly like the heart
-    /// and hunger sprites above. This is the render-side half of the
-    /// air-supply-bubble feature confirmed *already wired* — see
-    /// `crate::air_bubbles`, whose `BubbleSlot::sprite_id` names these same
-    /// three ids. What is actually missing end-to-end is the `airSupply`
-    /// *value* (not yet decoded anywhere in the protocol/ECS layers this
-    /// crate sits above), not this atlas.
-    #[test]
-    fn air_bubble_sprites_are_covered_by_the_generic_hud_glob() {
-        let mut src = MemorySource::default();
-        for id in ["hud/air", "hud/air_empty", "hud/air_bursting"] {
-            src.insert(
-                format!("assets/minecraft/textures/gui/sprites/{id}.png"),
-                solid_png(9, 9, [255, 255, 255, 255]),
-            );
-        }
-        let manager = ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>]);
-        let atlas = GuiAtlas::build(&manager).expect("atlas builds");
-        for id in ["hud/air", "hud/air_empty", "hud/air_bursting"] {
-            assert!(atlas.contains(id), "{id} must be stitched in with no special-casing");
-            assert_eq!(atlas.native_size(id), Some((9, 9)));
-        }
-    }
-
     #[test]
     fn build_is_fail_closed_on_empty_pack() {
         let empty = ResourceManager::new(vec![

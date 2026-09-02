@@ -358,21 +358,6 @@ mod tests {
         }
     }
 
-    /// Values re-typed from `DyeColor.java:30-45` (see the constant's own
-    /// doc), spot-checked here so a transcription slip in the big table is
-    /// caught by a small, independently-computed set of hex conversions.
-    #[test]
-    fn dye_diffuse_colors_match_the_jar_hex_values() {
-        assert_eq!(DyeColor::White.packed_rgb(), 0x00F9_FFFE);
-        assert_eq!(DyeColor::Red.packed_rgb(), 0x00B0_2E26);
-        assert_eq!(DyeColor::Black.packed_rgb(), 0x001D_1D21);
-        // Cross-check against the decimal constants in the jar directly,
-        // independent of the hex re-typing above.
-        assert_eq!(DyeColor::White.packed_rgb(), 16_383_998);
-        assert_eq!(DyeColor::Orange.packed_rgb(), 16_351_261);
-        assert_eq!(DyeColor::Black.packed_rgb(), 1_908_001);
-    }
-
     /// Every one of the 16 `textureDiffuseColor` decimal constants,
     /// transcribed straight from `DyeColor.java:30-45`'s constructor calls
     /// (the *decimal* literal, not the hex table above) and checked against

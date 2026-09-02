@@ -296,18 +296,6 @@ mod tests {
         }
     }
 
-    /// A checkerboard of solid/air by parity of `(x+y+z)`.
-    struct CheckerSection;
-    impl SectionView for CheckerSection {
-        fn cell(&self, x: usize, y: usize, z: usize) -> Cell {
-            if (x + y + z).is_multiple_of(2) {
-                Cell::solid(SpriteId(1))
-            } else {
-                Cell::EMPTY
-            }
-        }
-    }
-
     #[test]
     fn face_order_is_canonical() {
         for (i, f) in Face::ALL.iter().enumerate() {
@@ -391,13 +379,5 @@ mod tests {
         assert_eq!(split(16, 16), (1, 0));
         assert_eq!(split(-16, 16), (-1, 0));
         assert_eq!(split(-17, 16), (-2, 15));
-    }
-
-    #[test]
-    fn checker_section_alternates() {
-        let s = CheckerSection;
-        assert!(s.cell(0, 0, 0).occludes);
-        assert!(!s.cell(1, 0, 0).occludes);
-        assert!(s.cell(1, 1, 0).occludes);
     }
 }

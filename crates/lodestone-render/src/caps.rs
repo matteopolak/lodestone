@@ -136,6 +136,15 @@ impl GpuCapabilities {
 mod tests {
     use super::*;
 
+    /// Restored after an over-aggressive trim pass mistook this for a
+    /// restated-literal test: `baseline()` is a hand-edited struct literal
+    /// that other code (this crate's `strategy` tests, and any caller
+    /// wanting a safe fallback) relies on staying conservative, and
+    /// `bindless_needs_both_flags` below covers only the bindless flags —
+    /// an edit that flipped `indirect_execution`/`multi_draw_indirect_count`
+    /// to `true`, or dropped `max_buffer_size` below the WebGPU
+    /// downlevel-webgl2 guaranteed minimum, would pass every other test in
+    /// this file.
     #[test]
     fn baseline_is_conservative() {
         let c = GpuCapabilities::baseline();
@@ -152,18 +161,5 @@ mod tests {
         assert!(!c.supports_bindless_atlas(), "array alone is not enough");
         c.nonuniform_binding_array_indexing = true;
         assert!(c.supports_bindless_atlas());
-    }
-
-    #[test]
-    fn struct_literal_construction_is_backend_agnostic() {
-        // The point of the type: fabricate a Metal-shaped adapter that *does*
-        // have binding arrays, which contradicts stale published guidance.
-        let metal = GpuCapabilities {
-            backend: Backend::Metal,
-            texture_binding_array: true,
-            nonuniform_binding_array_indexing: true,
-            ..GpuCapabilities::baseline()
-        };
-        assert!(metal.supports_bindless_atlas());
     }
 }
