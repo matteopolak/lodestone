@@ -253,7 +253,7 @@ pub(crate) fn stack_skin_url(stack: &lodestone_game::item::ItemStack) -> Option<
     profile_skin_url(&stack.profile()?)
 }
 
-/// `ItemStack.hasFoil()` for a shell-side [`lodestone_game::item::ItemStack`],
+/// Vanilla's own has-foil check for a shell-side [`lodestone_game::item::ItemStack`],
 /// delegating the actual predicate to
 /// [`lodestone_render::glint::has_foil_for_item`].
 ///
@@ -425,7 +425,8 @@ pub(crate) enum PatternFamily {
 ///
 /// The item id is still consulted, but only *within* a `kind`, to pick the sheet:
 /// `kind` says "this is a chest", the item path says "an oxidized copper one".
-/// That is exactly vanilla's split — `ChestSpecialRenderer.Unbaked` carries the
+/// That is exactly vanilla's split — its own chest special-renderer's
+/// unbaked model carries the
 /// `texture` field the item definition names, and `chest_type` defaults to
 /// `SINGLE`, which is why an item chest is always the single-chest layer and
 /// never one of the two double halves.
@@ -468,8 +469,8 @@ pub(crate) fn draw_item_icon(
 /// The ink vanilla's `itemDecorations` draws a stack count in: plain white.
 pub(crate) const COUNT_INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
-/// `ChatFormatting.YELLOW` — `0xFFFF55`, the colour vanilla's
-/// `AbstractContainerScreen.extractSlot` (`:214`) uses for a drag preview's count
+/// Vanilla's own yellow chat-formatting colour — `0xFFFF55`, the colour vanilla's
+/// own per-slot extract routine uses for a drag preview's count
 /// once it has been **clamped** by the destination cell's cap, so the player can
 /// see the split was cut short. See [`draw_item_icon_counted`].
 pub(crate) const COUNT_INK_CLAMPED: [f32; 4] = [1.0, 1.0, 85.0 / 255.0, 1.0];
@@ -638,11 +639,11 @@ fn pop_squeeze_rect(x: f32, y: f32, size: f32, pop: f32) -> [f32; 4] {
 /// As [`draw_item_icon`], but the icon layer squashes/stretches through
 /// vanilla's pickup "pop" animation before settling.
 ///
-/// `pop` is vanilla's `ItemStack.getPopTime() - partialTick`
+/// `pop` is vanilla's own pop-time minus the partial tick
 ///: `5.0` the instant a stack lands in the slot — set by
-/// `Inventory.add` whenever an item merges into or fills one
+/// vanilla's own inventory-add routine whenever an item merges into or fills one
 /// — decaying to `0.0` over 5 ticks
-/// (`ItemStack.java`, one tick per call there). `0.0` (idle) draws
+/// (one tick per call there). `0.0` (idle) draws
 /// pixel-identically to [`draw_item_icon`]; every caller of that function is
 /// unaffected by this one existing.
 ///
@@ -764,12 +765,9 @@ pub(crate) fn draw_item_icon_popped(
 
 /// Where a stack count's **right edge** sits, in slot-local GUI pixels.
 ///
-/// `GuiGraphicsExtractor.itemCount` (`:947-952`, and identically
-/// `SpectatorGui.java`):
-///
-/// ```java
-/// this.text(font, amount, x + 19 - 2 - font.width(amount), y + 6 + 3, -1, true);
-/// ```
+/// Vanilla's own GUI-graphics-extractor item-count routine (and identically
+/// its own spectator-GUI routine): the count is drawn right-aligned at
+/// `x + 19 - 2 - text_width`, `y + 6 + 3`.
 ///
 /// so `19 - 2 = 17` — **one pixel past** the 16 px icon's right edge, which is why
 /// this is not `size`.
@@ -914,9 +912,9 @@ fn log_diamond_sword_model_resolution(
 /// and `display_matrix` ends with the `-0.5` centring translate. A chest spans
 /// `y 0..14` texels, so centring it about `0.5` puts it ~0.6 px low in a 16 px
 /// cell rather than resting on the cell floor. That is **not** a bug to correct:
-/// `ItemTransform.apply` ends with `pose.translate(-0.5F, -0.5F, -0.5F)` in both
-/// its branches, and `ItemStackRenderState.Layer.applyTransform` calls it for the
-/// `specialRenderer != null` branch and the ordinary quad branch from the *same*
+/// Vanilla's own item-transform apply routine ends with `pose.translate(-0.5F, -0.5F, -0.5F)` in both
+/// its branches, and its own render-state layer apply-transform routine calls it for the
+/// special-renderer branch and the ordinary quad branch from the *same*
 /// line — read from the record definition rather than from a summary of the call
 /// site. Vanilla centres a chest icon about the block centre too.
 ///
@@ -999,7 +997,8 @@ fn push_special_icon(
 
     // The shield rig is one mesh (plate+handle together) pushed once,
     // opaque, then re-submitted per pattern layer through the identical
-    // translucent pass — `ShieldSpecialRenderer.submit` ported. See
+    // translucent pass — vanilla's own shield special-renderer submit routine
+    // ported. See
     // `gpu/first_person.rs`'s `prepare_special_hand` shield branch, which
     // this mirrors for the GUI-icon surface.
     if kind == "minecraft:shield" {
@@ -2024,10 +2023,11 @@ pub(crate) fn build_sprite_pipeline(
 }
 
 /// This frame's [`GuiGlintUniform`], at the player's **Glint Speed** and **Glint
-/// Strength** (`Options.java`, two `UnitDouble`s defaulting to `0.5` and
+/// Strength** (vanilla's own options type, two `UnitDouble`s defaulting to `0.5` and
 /// `0.75`).
 ///
-/// The clock is wall-clock milliseconds, vanilla's `Util.getMillis()` — the same
+/// The clock is wall-clock milliseconds, vanilla's own millisecond-clock
+/// helper — the same
 /// origin `gpu/glint.rs` keys the world and hand glint off, so all three shimmer
 /// in phase. **Both options must be pushed to all three or they fall out of
 /// phase**, which is why the world/hand pair reads
@@ -2182,7 +2182,7 @@ impl GuiGlint {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
-                    // `BlendFunction.GLINT`: `dst += src * src`, destination alpha
+                    // Vanilla's own glint blend function: `dst += src * src`, destination alpha
                     // untouched. Not ADDITIVE and not TRANSLUCENT — both are the
                     // obvious guess and both were measured wrong.
                     blend: Some(lodestone_render::glint::glint_blend()),
@@ -2810,7 +2810,7 @@ impl IconRenderer {
     /// own offsets would collapse the hierarchy and put the lid at the origin.
     ///
     /// `&[]` overrides: an item chest is `openness = 0`, which is
-    /// `ChestSpecialRenderer.Unbaked`'s default and means the rest pose *is* the
+    /// vanilla's own chest special-renderer's unbaked-model default and means the rest pose *is* the
     /// closed lid. Nothing here drives the lid clock, so a chest in the inventory
     /// cannot drift open with the one you are standing at.
     fn prepare_special(
@@ -3094,8 +3094,8 @@ fn build_banner_layer_batches(
         .collect()
 }
 
-/// Which **stratum** an icon draw belongs to — vanilla's `graphics.nextStratum()`
-/// in `AbstractContainerScreen.extractCarriedItem`
+/// Which **stratum** an icon draw belongs to — vanilla's own stratum-advance
+/// call in its own carried-item extract routine
 ///, which is called immediately before the
 /// carried stack is drawn and nowhere else on that screen.
 ///
@@ -3688,8 +3688,8 @@ mod tint_wiring_tests {
         }
     }
 
-    /// `minecraft:potion`'s tint source, `default` set to vanilla's
-    /// `PotionContents.BASE_POTION_COLOR` (`-13_083_194`) — the same default
+    /// `minecraft:potion`'s tint source, `default` set to vanilla's own
+    /// base-potion-colour constant (`-13_083_194`) — the same default
     /// every real `potion`/`splash_potion`/`lingering_potion`/`tipped_arrow`
     /// item definition carries.
     fn potion_layer() -> SpriteLayer {
@@ -3704,8 +3704,8 @@ mod tint_wiring_tests {
         }
     }
 
-    /// `minecraft:dye`'s tint source, `default` set to vanilla's
-    /// `DyedItemColor.LEATHER_COLOR` (`-6_265_536`) — every vanilla `dye`
+    /// `minecraft:dye`'s tint source, `default` set to vanilla's own
+    /// dyed-item leather-colour constant (`-6_265_536`) — every vanilla `dye`
     /// item definition's own default.
     fn dye_layer() -> SpriteLayer {
         SpriteLayer {
@@ -3732,7 +3732,7 @@ mod tint_wiring_tests {
     #[test]
     fn potion_and_dye_components_reach_the_emitted_quad_colour() {
         let cases: Vec<(&str, SpriteLayer, ItemIcon, u32)> = vec![
-            // `MobEffects.SPEED`'s particle colour. A single-effect potion's
+            // Vanilla's own speed-effect particle colour. A single-effect potion's
             // mixed colour is the effect's own colour regardless of
             // amplifier (the weighted average has one term), so
             // `potion_color` is set directly rather than re-deriving the
@@ -3744,7 +3744,7 @@ mod tint_wiring_tests {
                 icon(None, Some(0xFF33_EBFF)),
                 0x33_EBFF,
             ),
-            // `MobEffects.INSTANT_DAMAGE`'s particle colour — more than 60
+            // Vanilla's own instant-damage-effect particle colour — more than 60
             // apart from swiftness on every channel (118, 134, 149; see
             // `potion_pair_is_discriminating_on_every_channel` below), so no
             // pairwise-equal fixture value can hide a transposition.
@@ -3755,7 +3755,7 @@ mod tint_wiring_tests {
                 0xA9_656A,
             ),
             // The control: no `potion_contents` at all resolves to
-            // `PotionContents.BASE_POTION_COLOR`, proving this gate is not
+            // vanilla's own base-potion-colour constant, proving this gate is not
             // merely "not the default" — it pins the *specific* default too.
             (
                 "water_bottle_control",
@@ -3776,7 +3776,7 @@ mod tint_wiring_tests {
                 0x88_99AA,
             ),
             // The dye control: an undyed leather item resolves to
-            // `DyedItemColor.LEATHER_COLOR`, vanilla's own definition default.
+            // vanilla's own dyed-item leather-colour constant, vanilla's own definition default.
             (
                 "undyed_leather_default",
                 dye_layer(),
