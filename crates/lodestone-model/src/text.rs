@@ -28,8 +28,8 @@ use lodestone_core::Nbt;
 /// exhaustion on hostile network input.
 const MAX_DEPTH: usize = 64;
 
-/// The section sign that introduces a legacy formatting code —
-/// `ChatFormatting.PREFIX_CODE`, U+00A7. Named because it appears in a parser, a
+/// The section sign that introduces a legacy formatting code — vanilla's own
+/// prefix code, U+00A7. Named because it appears in a parser, a
 /// re-serialiser and an expansion pass, and `'\u{00a7}'` at a call site reads as
 /// an arbitrary codepoint.
 pub const LEGACY_PREFIX: char = '\u{00a7}';
@@ -154,15 +154,15 @@ impl TextColor {
 
     /// This colour's 24-bit RGB value, packed as `0x00rrggbb`.
     ///
-    /// The sixteen named values are vanilla's own, transcribed from
-    /// `TextColor.java` in 26.2. **Do not look for them in
-    /// `ChatFormatting`**: in 26.2 that enum's constructor is
-    /// `ChatFormatting(final char code)` and carries *no colour at all* — the
+    /// The sixteen named values are vanilla's own, transcribed from its
+    /// 26.2 text-color class. **Do not look for them on the legacy
+    /// formatting enum**: in 26.2 that enum's constructor takes only the
+    /// format code character and carries *no colour at all* — the
     /// obvious place to check is empty, and its emptiness looks like "vanilla
     /// has no table" rather than "the table moved". Vanilla writes them in
-    /// decimal (`named("gold", 16755200)`), so each arm below carries the
-    /// decimal alongside, because the hex is the reviewable form and the
-    /// decimal is the citable one.
+    /// decimal (e.g. gold is defined as `16755200`), so each arm below
+    /// carries the decimal alongside, because the hex is the reviewable form
+    /// and the decimal is the citable one.
     ///
     /// This is the only bridge from a model colour to a pixel colour. Before it
     /// existed the sole route was `legacy_code()` → `char` → the renderer's own
@@ -188,7 +188,7 @@ impl TextColor {
             Self::LightPurple => 0x00ff_55ff, // 16733695
             Self::Yellow => 0x00ff_ff55,      // 16777045
             Self::White => 0x00ff_ffff,       // 16777215
-            // `TextColor(final int value)` masks with 16777215 (`TextColor.java`),
+            // Vanilla's own RGB-value constructor masks with 16777215,
             // so a hex colour carrying stray high bits is truncated, not rejected.
             Self::Rgb(value) => value & 0x00ff_ffff,
         }
@@ -578,8 +578,9 @@ impl Text {
     /// literal content expanded into their own runs.
     ///
     /// This is the one function a render surface should call. Vanilla has no
-    /// non-expanding string path either — `Font.drawInBatch` and `Font.width`
-    /// both go through `StringDecomposer.iterateFormatted`, which applies `§`
+    /// non-expanding string path either — every text-draw and text-measure
+    /// entry point goes through its own formatted-string decomposition step,
+    /// which applies `§`
     /// codes at *draw* time. That is exactly why a plugin server can put `§7`
     /// inside a modern component and have it colour, and why a client that
     /// flattens without expanding puts `§7` on screen as two glyphs.
@@ -596,9 +597,9 @@ impl Text {
     /// ([`TextStyle::inherit`]), so `{"color":"gold","text":"a§cb"}` yields gold
     /// `a` then red `b` — the legacy code overrides the colour it names and the
     /// component's colour still governs the run before it. `§r` resets to the
-    /// *enclosing component's* style rather than to nothing, which is
-    /// `iterateFormatted`'s `resetStyle` parameter: it is seeded with the
-    /// component's own style, not `Style.EMPTY`.
+    /// *enclosing component's* style rather than to nothing, which is the
+    /// reset-style value that decomposition step is seeded with: the
+    /// component's own style, not an empty one.
     ///
     /// Adjacent runs are **not** merged. `translate` nodes are rendered as a
     /// single run carrying the node's resolved style (their argument sub-styles
@@ -865,26 +866,27 @@ impl Text {
     ///
     /// # An unrecognised code, and a dangling `§`, are both *dropped*
     ///
-    /// Not printed literally, and not partially printed. This is
-    /// `StringDecomposer.iterateFormatted`, whose `§` branch is:
+    /// Not printed literally, and not partially printed. This is vanilla's
+    /// own formatted-string decomposition step, whose section-sign branch
+    /// runs, in order, on encountering `§`:
     ///
     /// ```text
-    /// if (ch == 167) {
-    ///    if (i + 1 >= size) break;               // dangling §: the § is dropped
-    ///    ChatFormatting f = ChatFormatting.getByCode(string.charAt(i + 1));
-    ///    if (f != null) { … apply … }            // null: style untouched …
-    ///    i++;                                    // … but i++ runs regardless
-    /// }
+    /// if no character follows the §, stop        // dangling §: the § is dropped
+    /// look up the following character as a formatting code
+    /// if it resolves, apply it                   // if not, style is untouched …
+    /// advance past the code character either way  // … but this runs regardless
     /// ```
     ///
-    /// `i++` is outside the `f != null` test, so an unrecognised pair consumes
+    /// The advance step is unconditional — it does not depend on the lookup
+    /// resolving — so an unrecognised pair consumes
     /// **both** characters and emits neither — the sink never sees them. Three
     /// answers were plausible here (print the pair, drop the `§` and keep the
     /// code, drop both) and this is the one vanilla gives; the previous version
     /// of this function chose the first.
     ///
     /// The consequence worth knowing: `§x§r§r§g§g§b§b`, the BungeeCord hex
-    /// dialect, is **not** honoured by vanilla 26.2 — `getByCode('x')` is null,
+    /// dialect, is **not** honoured by vanilla 26.2 — looking up `'x'` as a
+    /// formatting code resolves to nothing,
     /// so `§x` vanishes and the six following pairs are read as six ordinary
     /// colour codes, leaving the run coloured by the last one. Ours does the
     /// same, deliberately: a client that honoured the dialect would disagree with
@@ -1017,14 +1019,15 @@ fn flush_legacy_segment(root: &mut Text, buffer: &mut String, style: TextStyle) 
     });
 }
 
-/// `Style.applyLegacyFormat`, as a `TextStyle` transform. `None` means the code
-/// is not one vanilla's `ChatFormatting.getByCode` recognises.
+/// Vanilla's own legacy-format-application routine, as a `TextStyle`
+/// transform. `None` means the code is not one vanilla's own formatting-code
+/// lookup recognises.
 ///
 /// Two asymmetries, and swapping them makes `§c§lFoo` render in a way that looks
 /// almost right:
 ///
 /// * **A colour code clears the five flags; a formatting code leaves the colour
-///   alone.** Vanilla's `default:` arm (every colour) assigns
+///   alone.** Vanilla's default-case branch (every colour) assigns
 ///   `bold = italic = strikethrough = underlined = obfuscated = false`
 ///   *explicitly*, then sets the colour; the five named arms touch one field
 ///   each and nothing else.
@@ -1036,16 +1039,17 @@ fn flush_legacy_segment(root: &mut Text, buffer: &mut String, style: TextStyle) 
 ///   [`TextStyle`]'s own docs warn about, arrived at from the other direction.
 ///
 /// `§r` stays all-`None` on purpose, and that is not the same claim: under
-/// `iterateFormatted` a reset restores `resetStyle`, which is seeded with the
-/// *component's own* style rather than `Style.EMPTY`, so all-unspecified plus
+/// vanilla's own decomposition step a reset restores the seeded reset-style,
+/// which is the *component's own* style rather than an empty one, so
+/// all-unspecified plus
 /// [`TextStyle::inherit`] reproduces it exactly. At the root, where there is no
-/// enclosing style, all-unspecified *is* `Style.EMPTY`. One representation, both
+/// enclosing style, all-unspecified *is* an empty style. One representation, both
 /// cases right.
 fn apply_legacy_code(mut style: TextStyle, code: char) -> Option<TextStyle> {
     if let Some(color) = TextColor::from_legacy_code(code) {
-        // `Style.applyLegacyFormat`'s colour branch passes `this.font`
-        // through unchanged (its constructor call ends `..., this.font`) —
-        // only colour and the five format flags are legacy-codeable, so a
+        // Vanilla's own legacy-format-application routine's colour branch
+        // passes the current font through unchanged — only colour and the
+        // five format flags are legacy-codeable, so a
         // colour code must not drop whatever font the component itself set.
         return Some(TextStyle {
             color: Some(color),

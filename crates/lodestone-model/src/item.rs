@@ -84,10 +84,9 @@ pub struct ItemComponents {
     /// `minecraft:dyed_color`'s RGB, when the patch carries one — leather
     /// armour (and any other item whose base material takes dye) coloured by
     /// a dye or a dyeing table. Low 24 bits are the colour; vanilla's own
-    /// `DyedItemColor.STREAM_CODEC` is a bare `ByteBufCodecs.INT`
-    /// (`DyedItemColor.java`), so this is the raw wire int, not yet split
-    /// into RGB bytes — `lodestone_render::entity::armour_layer_tint_with_dye`
-    /// does that, matching `ArmorMaterial`/`EquipmentLayerRenderer`'s own
+    /// dyed-color network codec is a bare int codec, so this is the raw wire
+    /// int, not yet split into RGB bytes — `lodestone_render::entity::armour_layer_tint_with_dye`
+    /// does that, matching vanilla's own armour-layer renderer's
     /// `dyeColor & 0x00FFFFFF != 0` "is this dyed" gate.
     /// `None` when the stack carries no dye (an undyed leather item, or any
     /// non-dyeable item) — a different state from a dye that resolves to
@@ -124,8 +123,8 @@ pub struct ItemComponents {
     /// during the initial world load.
     pub pot_decorations: Option<PotDecorations>,
     /// **Effective** `minecraft:potion_contents` colour: the opaque ARGB a potion
-    /// item's `minecraft:potion` tint source resolves to (`Potion.calculate` /
-    /// `PotionContents.getColorOr`), already folded with the potion's own built-in
+    /// item's `minecraft:potion` tint source resolves to (vanilla's own
+    /// potion-color resolution), already folded with the potion's own built-in
     /// effect list and any `customEffects`/`customColor` the patch carried.
     ///
     /// `None` when the patch carries no `minecraft:potion_contents` at all (a
@@ -144,13 +143,13 @@ pub struct ItemComponents {
     /// tradeoff [`max_stack_size`] already makes.
     pub potion_color: Option<u32>,
     /// The raw `minecraft:potion_contents` `potion` field: the network
-    /// `minecraft:potion` registry id itself (`Potion.STREAM_CODEC`'s
-    /// `Holder<Potion>`), not [`potion_color`](Self::potion_color)'s already-mixed
-    /// colour.
+    /// `minecraft:potion` registry id itself (vanilla's potion network
+    /// codec's registry reference), not [`potion_color`](Self::potion_color)'s
+    /// already-mixed colour.
     ///
     /// [`potion_color`](Self::potion_color) alone cannot drive a tooltip title or
     /// effect lore: `swiftness`/`long_swiftness`/`strong_swiftness` all mix to the
-    /// same colour (`Potion.calculate` only sees the effect list, and all three
+    /// same colour (vanilla's potion-color resolution only sees the effect list, and all three
     /// share one) but must resolve to three different lore bodies (different
     /// duration, and `strong_swiftness` a different amplifier). `None` when the
     /// patch carries no `minecraft:potion_contents`, or one with no `potion`
@@ -174,7 +173,7 @@ pub struct ItemComponents {
     /// truncated the rest of the packet from that slot onward.
     ///
     /// **Only the identity half of the wire component is kept.** 26.2's
-    /// `ResolvableProfile` also carries a `PlayerSkin.Patch` — an optional
+    /// resolvable-profile component also carries a skin patch — an optional
     /// direct resource-id override for the body/cape/elytra texture and rig,
     /// bypassing the Mojang session service entirely. Nothing in this client
     /// resolves a resource-id skin yet, so those bytes are decoded (to keep the
@@ -194,13 +193,13 @@ pub struct ItemComponents {
     /// **Effective** `minecraft:max_stack_size`: how many of this item fit in one
     /// slot. `None` when the producing adapter has no item-prototype census.
     ///
-    /// This is a *prototype* component — vanilla's `COMMON_ITEM_COMPONENTS` sets
-    /// it to `64` for every item and individual items override it — so a
+    /// This is a *prototype* component — vanilla's default item-component set
+    /// sets it to `64` for every item and individual items override it — so a
     /// clientbound patch essentially never mentions it and it cannot be
     /// recovered from the wire. Guessing `64` is wrong for a great many items
     /// (`minecraft:water_bucket` and every shulker box are `1`,
     /// `minecraft:egg` is `16`), and guessing `1` — vanilla's own fallback when
-    /// the component is genuinely absent, `ItemInstance.getMaxStackSize` — is
+    /// the component is genuinely absent — is
     /// wrong for almost everything else. A consumer that gets `None` should
     /// treat the cap as unknown rather than substituting either.
     pub max_stack_size: Option<u32>,
@@ -209,8 +208,8 @@ pub struct ItemComponents {
     /// prototype census (the two are indistinguishable here by design — an
     /// undamageable item and an unknown one both have no durability to show).
     ///
-    /// Also a prototype component, and the gate on vanilla
-    /// `ItemStack.isDamageableItem` and therefore `ItemStack.isStackable`: while
+    /// Also a prototype component, and the gate on vanilla's own
+    /// damageable-item check and therefore its stackability check: while
     /// this is absent, two identically-componented swords look stackable and
     /// merge into a stack of two.
     pub max_damage: Option<u32>,
@@ -218,30 +217,30 @@ pub struct ItemComponents {
     /// `None` for an item that is not equippable (or an adapter with no
     /// prototype census).
     ///
-    /// Also a prototype component. `ArmorSlot.mayPlace` is
-    /// `owner.isEquippableInSlot(stack, slot)`, which is
-    /// `slot == equippable.slot() && …`, so while this is `None` **no item can
+    /// Also a prototype component. Vanilla's armour-slot placement check
+    /// requires the target slot to equal the item's own equip slot, so
+    /// while this is `None` **no item can
     /// be placed in any armour slot by any click type**.
     ///
-    /// Only the slot is carried. Vanilla's `Equippable` also has an
-    /// `allowedEntities` set — `minecraft:wolf_armor` is wolves only,
+    /// Only the slot is carried. Vanilla's equippable component also has an
+    /// allowed-entities set — `minecraft:wolf_armor` is wolves only,
     /// `minecraft:saddle` is `#minecraft:can_equip_saddle` — which
-    /// `Equippable.canBeEquippedBy` additionally requires. Every restricted item
+    /// vanilla's own equip-eligibility check additionally requires. Every restricted item
     /// in 26.2 is in a non-humanoid slot ([`EquipmentSlot::Body`] or
     /// [`EquipmentSlot::Saddle`]) and so cannot reach a player armour slot on
     /// the slot check alone, but a consumer wanting the restriction itself must
     /// ask the version seam (`VersionAdapter::item_prototype`), not this field.
     ///
     /// **[`EquipmentSlot::Body`] is not chest armour.** Vanilla gates humanoid
-    /// armour on `EquipmentSlot.Type.HUMANOID_ARMOR`, which covers
+    /// armour on a distinct "humanoid armour" slot-type grouping, which covers
     /// [`Feet`](EquipmentSlot::Feet)/[`Legs`](EquipmentSlot::Legs)/[`Chest`](EquipmentSlot::Chest)/[`Head`](EquipmentSlot::Head)
-    /// and deliberately **excludes** `BODY` (animal armour). Folding `"body"`
-    /// into `Chest` makes wolf armour and horse armour placeable in a player's
-    /// chestplate slot.
+    /// and deliberately **excludes** the body slot (animal armour). Folding
+    /// `"body"` into `Chest` makes wolf armour and horse armour placeable in a
+    /// player's chestplate slot.
     pub equippable: Option<EquipmentSlot>,
     /// `minecraft:custom_data`: the plugin/datapack NBT blob, kept **opaque** as
     /// the raw network-NBT bytes (root tag id then payload, exactly as
-    /// `FriendlyByteBuf.writeNbt` wrote them).
+    /// vanilla's own network-NBT writer wrote them).
     ///
     /// Nothing in this client interprets it, and nothing should: it is arbitrary
     /// server-defined data. It is carried rather than discarded only so a
@@ -256,9 +255,9 @@ pub struct ItemComponents {
     /// `Eq`: NBT carries floats, which are not `Eq`.
     pub custom_data: Option<Vec<u8>>,
     /// `minecraft:repair_cost`: the anvil's "prior work penalty" counter —
-    /// vanilla's `AnvilMenu.calculateIncreasedRepairCost` doubles-and-adds-one
+    /// vanilla's anvil-menu repair-cost formula doubles-and-adds-one
     /// each time an item is worked, and the anvil's XP cost sums both
-    /// operands' values (`AnvilMenu.createResult`'s `tax`).
+    /// operands' resulting values.
     ///
     /// **Server-side bookkeeping only.** The wire component exists
     /// (`minecraft:repair_cost`, a bare VarInt) but this build's protocol
@@ -270,12 +269,12 @@ pub struct ItemComponents {
     /// output) sets this field directly in Rust, never through a decode, so
     /// the anvil economy is internally consistent even though the value does
     /// not yet round-trip through a real client. Defaults to `0`, matching
-    /// vanilla's own `getOrDefault(DataComponents.REPAIR_COST, 0)`.
+    /// vanilla's own default of `0` when the repair-cost component is
+    /// absent.
     pub repair_cost: u32,
     /// `minecraft:writable_book_content`: an unsigned book-and-quill's draft
-    /// pages, in order — vanilla's `WritableBookContent`
-    /// (`world/item/component/WritableBookContent.java`), a list of up to 100
-    /// `Filterable<String>` pages capped at 1024 characters each.
+    /// pages, in order — vanilla's writable-book-content component, a list
+    /// of up to 100 filterable-string pages capped at 1024 characters each.
     ///
     /// Only the *raw* half of each `Filterable` is kept — the *filtered*
     /// alternate exists for a chat-filtering service this crate does not run,
@@ -285,14 +284,13 @@ pub struct ItemComponents {
     /// least once; a freshly crafted one carries no component at all.
     ///
     /// Decoded rather than left unmodeled for the same reason as
-    /// [`trim`](Self::trim): `WritableBookContent.STREAM_CODEC` has no length
-    /// prefix, so a writable book sitting in *any* container used to truncate
-    /// the rest of that packet.
+    /// [`trim`](Self::trim): vanilla's writable-book-content network codec
+    /// has no length prefix, so a writable book sitting in *any* container
+    /// used to truncate the rest of that packet.
     pub writable_book_content: Option<Vec<String>>,
     /// `minecraft:written_book_content`: a signed book's title, author,
-    /// generation and page text — vanilla's `WrittenBookContent`
-    /// (`world/item/component/WrittenBookContent.java`). `None` for every
-    /// item but a `minecraft:written_book`.
+    /// generation and page text — vanilla's written-book-content component.
+    /// `None` for every item but a `minecraft:written_book`.
     ///
     /// Decoded for the same reason as
     /// [`writable_book_content`](Self::writable_book_content): its stream
@@ -300,51 +298,52 @@ pub struct ItemComponents {
     /// inventory used to truncate the rest of that packet.
     pub written_book_content: Option<WrittenBookContent>,
     /// `minecraft:bundle_contents`: a bundle's nested items, in slot order (index
-    /// 0 is the most-recently-inserted stack — vanilla's `Mutable::tryInsert`
-    /// always `add(0, …)`). Empty for every non-bundle item and for an empty
+    /// 0 is the most-recently-inserted stack — vanilla's bundle-insert
+    /// routine always inserts at index 0). Empty for every non-bundle item and for an empty
     /// bundle; the two are indistinguishable here, the same "absent patch field
     /// and an explicitly-empty one collapse to the same value" convention
     /// [`enchantments`](Self::enchantments) already uses.
     ///
     /// Each entry is a **full nested `ItemStack`**, not a display-only summary —
-    /// `BundleContents.STREAM_CODEC` wire-carries a whole `ItemStackTemplate`
-    /// (item, count, and its own recursive `DataComponentPatch`) per contained
-    /// item, and a bundle can legally contain another bundle
-    /// (`BUNDLE_IN_BUNDLE_WEIGHT`), which is why the nesting is real rather than
-    /// flattened to one level.
+    /// vanilla's bundle-contents network codec wire-carries a whole nested
+    /// item-stack template (item, count, and its own recursive component
+    /// patch) per contained item, and a bundle can legally contain another
+    /// bundle (vanilla weights that nesting to discourage it, but never
+    /// forbids it), which is why the nesting is real rather than flattened
+    /// to one level.
     ///
     /// Decoded rather than treated as unmodeled for the same reason as
-    /// [`trim`](Self::trim) and the rest of that group: `ItemStackTemplate
-    /// .STREAM_CODEC` carries no length prefix, so a filled bundle sitting in
-    /// any inventory used to truncate the rest of the packet from that slot
-    /// onward.
+    /// [`trim`](Self::trim) and the rest of that group: vanilla's nested
+    /// item-stack-template codec carries no length prefix, so a filled
+    /// bundle sitting in any inventory used to truncate the rest of the
+    /// packet from that slot onward.
     ///
-    /// **`BundleContents`'s own `selectedItem` never reaches the wire** — its
-    /// `STREAM_CODEC` maps straight onto the constructor that always defaults it
-    /// to `-1` (`BundleContents.java`); the tooltip highlight vanilla's client
-    /// shows is derived from local mouse/scroll state (`BundleMouseActions`),
-    /// never from this component. So there is no `selected_index` field here to
-    /// carry, and there should not be one — a field for it would always read as
-    /// unset from a real server.
+    /// **Vanilla's own bundle-contents component tracks a selected item that
+    /// never reaches the wire** — its network codec maps straight onto a
+    /// constructor path that always defaults it to `-1`; the tooltip
+    /// highlight vanilla's client shows is derived from local mouse/scroll
+    /// state, never from this component. So there is no `selected_index`
+    /// field here to carry, and there should not be one — a field for it
+    /// would always read as unset from a real server.
     pub bundle_contents: Vec<ItemStack>,
     /// `minecraft:banner_patterns`: a banner or shield stack's loom-applied
-    /// pattern layers, in the stack's own stored order — vanilla draws them
-    /// in exactly that order and no other
-    /// (`BannerRenderer.submitPatterns`). Empty for every non-banner,
+    /// pattern layers, in the stack's own stored order — vanilla's banner
+    /// renderer draws them in exactly that order and no other. Empty for every non-banner,
     /// non-shield item and for a plain banner carrying no patterns; the two
     /// are indistinguishable here, the same absent-patch-field-and-explicitly-
     /// empty convention [`enchantments`](Self::enchantments) already uses.
     ///
     /// Decoded rather than treated as unmodeled for the same reason as
     /// [`trim`](Self::trim) and the rest of that group:
-    /// `BannerPatternLayers.STREAM_CODEC`'s `Layer` carries no length prefix,
+    /// vanilla's banner-pattern-layers network codec's per-layer entry
+    /// carries no length prefix,
     /// so a banner or shield sitting in *any* container — inventory, chest,
     /// shulker box, a loom's own input slot — used to truncate the rest of
     /// the packet from that slot onward.
     pub banner_patterns: Vec<BannerPatternLayer>,
     /// `minecraft:base_color`: a shield's own dye tint, independent of any
-    /// [`Self::banner_patterns`] layer — vanilla's `DataComponents.BASE_COLOR`
-    /// (`ShieldSpecialRenderer.submit`'s `baseColor`). `None` for a
+    /// [`Self::banner_patterns`] layer — vanilla's own base-color component.
+    /// `None` for a
     /// never-dyed shield and for every non-shield item; stored by vanilla's
     /// own snake_case dye name, matching [`BannerPatternLayer::color`]'s
     /// convention (and, like it, the field a plain banner's own base-colour
@@ -387,9 +386,9 @@ pub struct ItemComponents {
     pub has_unmodeled: bool,
 }
 
-/// `minecraft:written_book_content`'s modeled shape — vanilla's
-/// `WrittenBookContent` record (`title`, `author`, `generation`, `pages`,
-/// `resolved`), with each `Filterable<T>` collapsed to its raw value for the
+/// `minecraft:written_book_content`'s modeled shape — vanilla's own
+/// written-book-content record (`title`, `author`, `generation`, `pages`,
+/// `resolved`), with each filterable field collapsed to its raw value for the
 /// same reason [`ItemComponents::writable_book_content`] is: this crate runs
 /// no chat-filtering service, so the *filtered* alternate is never the value
 /// a consumer wants.
@@ -398,44 +397,44 @@ pub struct WrittenBookContent {
     /// The book's title, as typed at signing time (≤32 characters).
     pub title: String,
     /// The signing player's plain-text display name
-    /// (`ServerGamePacketListenerImpl.signBook`'s
-    /// `player.getPlainTextName()`), not the uuid.
+    /// (vanilla's book-signing handler's plain-text-name accessor), not the uuid.
     pub author: String,
     /// Copy generation: `0` original, `1` copy, `2` copy of a copy, `3`
-    /// tattered — vanilla's `WrittenBookContent.MAX_GENERATION`. Every book
+    /// tattered — vanilla's own maximum-generation constant. Every book
     /// this crate itself signs starts at `0`; a build with no book-cloning
     /// item yet never produces `1..=3`.
     pub generation: u8,
     /// Page contents, in order, as chat components — signing turns each raw
-    /// page string into `Component.literal(page)`
-    /// (`ServerGamePacketListenerImpl.signBook`), so this is never anything
+    /// page string into a literal text component (vanilla's book-signing
+    /// handler), so this is never anything
     /// richer than a literal for a book this crate produces, but the field is
     /// typed as [`Text`] because a page decoded off the wire (from a real
     /// vanilla server, or a future click/hover-bearing book) is not
     /// guaranteed to be one.
     pub pages: Vec<Text>,
     /// Whether this book's pages have finished click/hover-event resolution
-    /// (`WrittenBookContent.resolved`). Always `true` for a book this crate
+    /// (vanilla's own resolved flag). Always `true` for a book this crate
     /// signs — its pages are plain literals with nothing left to resolve.
     pub resolved: bool,
 }
 
-/// The four sherds of a `minecraft:decorated_pot` — vanilla's `PotDecorations`
-/// record (`PotDecorations`, four `Optional<Item>` fields in the order `back`,
+/// The four sherds of a `minecraft:decorated_pot` — vanilla's own
+/// decorated-pot record (four optional-item fields in the order `back`,
 /// `left`, `right`, `front`).
 ///
 /// # `None` means a plain brick face, not "unknown"
 ///
-/// Vanilla's own `PotDecorations::getItem` maps `Items.BRICK` to
-/// `Optional.empty()` on the way in and `ordered()` maps empty back to
-/// `Items.BRICK` on the way out, so a brick and a blank face are the same state
+/// Vanilla's own sherd accessor maps a plain brick to an empty optional on
+/// the way in, and its reverse accessor maps an empty optional back to a
+/// plain brick on the way out, so a brick and a blank face are the same state
 /// by construction. This type mirrors that: a `None` side is an undecorated
 /// side, and it is what a pot crafted from four plain bricks decodes to.
 ///
-/// The wire list is `ByteBufCodecs.list(4)`, so a shorter list is legal and its
-/// missing tail is `None` — that is `getItem`'s `i >= sherds.size()` arm. In
-/// practice a vanilla server always writes exactly four, because `ordered()`
-/// builds a four-element list unconditionally.
+/// The wire list is a fixed-length-4 codec, so a shorter list is legal and
+/// its missing tail is `None` — that is vanilla's own out-of-range
+/// sherd-index fallback. In practice a vanilla server always writes exactly
+/// four, because its ordering helper builds a four-element list
+/// unconditionally.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PotDecorations {
     /// The sherd on the pot's back face, or `None` for a plain brick.
@@ -448,34 +447,34 @@ pub struct PotDecorations {
     pub front: Option<ResourceKey>,
 }
 
-/// One stored layer of `minecraft:banner_patterns` — vanilla's
-/// `BannerPatternLayers.Layer` record (a `Holder<BannerPattern>` plus a
-/// `DyeColor`), carried the same way [`ArmorTrim`] carries its two holders:
+/// One stored layer of `minecraft:banner_patterns` — vanilla's own
+/// banner-pattern-layer record (a registry reference to a banner pattern
+/// plus a dye colour), carried the same way [`ArmorTrim`] carries its two
+/// registry references:
 /// as bare asset/name strings rather than the registry's own value, since
 /// that is the form a renderer actually keys sprites by
 /// (`lodestone_render::banner_pattern`'s `PatternLayer`/`StoredPatternLayer`).
 ///
-/// `color` is a vanilla `DyeColor` snake_case name (`DyeColor::getName()`,
-/// e.g. `"light_blue"`) rather than a typed enum: this crate is the base of
+/// `color` is a vanilla-style `DyeColor` snake_case name (matching vanilla's
+/// own name accessor, e.g. `"light_blue"`) rather than a typed enum: this crate is the base of
 /// the model/game/render layering and defines no `DyeColor` of its own —
 /// `lodestone_render::banner_pattern::DyeColor` is the canonical type, and a
 /// consumer there parses this string back with `DyeColor::from_name`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BannerPatternLayer {
-    /// The pattern's bare asset id (e.g. `"creeper"`), matching
-    /// `BannerPattern::assetId()` — never a full `minecraft:`-namespaced
-    /// identifier, and never the numeric registry id the wire itself sends
-    /// for a non-inline holder.
+    /// The pattern's bare asset id (e.g. `"creeper"`), matching vanilla's
+    /// own asset-id accessor for the pattern — never a full
+    /// `minecraft:`-namespaced identifier, and never the numeric registry
+    /// id the wire itself sends for a non-inline registry reference.
     pub pattern_asset_id: String,
     /// The layer's dye colour, by vanilla's own snake_case name.
     pub color: String,
 }
 
-/// `minecraft:profile`'s identity half — vanilla's `ResolvableProfile`
-/// (`world/item/component/ResolvableProfile.java`), which is either a full
-/// `GameProfile` (uuid + name + properties, all present) or a `Partial`
-/// (each of name/id independently optional, properties always present but
-/// possibly empty).
+/// `minecraft:profile`'s identity half — vanilla's resolvable-profile
+/// component, which is either a full game profile (uuid + name +
+/// properties, all present) or a partial one (each of name/id independently
+/// optional, properties always present but possibly empty).
 ///
 /// This type folds both wire shapes into one: `name` and `id` are `None`
 /// exactly when the *partial* form omitted them (the full-profile form always
@@ -575,17 +574,18 @@ impl AttackRange {
     }
 }
 
-/// A smithing-table armour trim — vanilla's `ArmorTrim` record
-/// (`world/item/equipment/trim/ArmorTrim.java`), which is a
-/// `Holder<TrimMaterial>` plus a `Holder<TrimPattern>`.
+/// A smithing-table armour trim — vanilla's own armour-trim record, which
+/// holds a registry reference to a trim material plus a registry reference
+/// to a trim pattern.
 ///
 /// Both are carried as bare registry **paths** (`"iron"`, `"sentry"`), the form
 /// `lodestone_assets::trim::{trim_material, trim_pattern}` keys its sprite tables
-/// by, so a renderer can go straight from this to a trim sprite. Neither holder's
-/// *value* is kept: `TrimMaterial` is an asset-suffix group plus a description
-/// component and `TrimPattern` is an asset id plus a description and a `decal`
-/// flag, all of which the asset layer already has statically for the eleven
-/// materials and eighteen patterns 26.2 ships.
+/// by, so a renderer can go straight from this to a trim sprite. Neither
+/// registry reference's *value* is kept: a trim material is an asset-suffix
+/// group plus a description component and a trim pattern is an asset id
+/// plus a description and a `decal` flag, all of which the asset layer
+/// already has statically for the eleven materials and eighteen patterns
+/// 26.2 ships.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ArmorTrim {
     /// Trim material registry path, e.g. `"netherite"`.
@@ -594,20 +594,21 @@ pub struct ArmorTrim {
     pub pattern: String,
 }
 
-/// What a stack's `DataComponentPatch` said about `minecraft:tool`.
+/// What a stack's component patch said about `minecraft:tool`.
 ///
 /// # This is a *patch*, not the effective component
 ///
 /// A clientbound stack carries only the **delta** from the item's built-in
 /// prototype component map, and vanilla puts a tool's `minecraft:tool` in that
-/// prototype (`ToolMaterial.applyToolProperties`). So an ordinary diamond
+/// prototype (set by the tool-material's own property-application step). So
+/// an ordinary diamond
 /// pickaxe arrives with an *empty* patch and this field is
 /// [`Inherited`](Self::Inherited) — the mining speed still has to come from
 /// somewhere, and that somewhere is version data the protocol crate owns.
 ///
 /// Read this only through a version adapter's mining seam
 /// (`VersionAdapter::tool_mining`), which folds the prototype and this patch
-/// together the way `ItemStack.get(DataComponents.TOOL)` does. Treating
+/// together the way vanilla's own component lookup does. Treating
 /// `Inherited` as "no tool" is the trap: it makes every real pickaxe mine at
 /// bare-hand speed.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -630,8 +631,7 @@ pub enum ToolPatch {
     Removed,
 }
 
-/// A decoded `minecraft:tool` data component (26.2
-/// `net.minecraft.world.item.component.Tool`).
+/// A decoded `minecraft:tool` data component.
 ///
 /// The mining speed for a block state is the first rule whose block set matches
 /// **and** carries a speed, else [`default_mining_speed`](Self::default_mining_speed);
@@ -646,12 +646,13 @@ pub enum ToolPatch {
 pub struct ItemTool {
     /// Match rules, in wire order. First match wins.
     pub rules: Vec<ToolRule>,
-    /// Raw IEEE-754 bits of `Tool.defaultMiningSpeed` (vanilla default `1.0`).
+    /// Raw IEEE-754 bits of vanilla's own default-mining-speed field
+    /// (vanilla default `1.0`).
     /// See [`ItemTool::default_mining_speed`] for why this is stored as bits.
     default_mining_speed_bits: u32,
-    /// `Tool.damagePerBlock`: durability spent per block broken.
+    /// Vanilla's own damage-per-block field: durability spent per block broken.
     pub damage_per_block: u32,
-    /// `Tool.canDestroyBlocksInCreative`. Creative-mode policy only; it does not
+    /// Vanilla's own creative-destroy-blocks flag. Creative-mode policy only; it does not
     /// enter the break-time formula.
     pub can_destroy_blocks_in_creative: bool,
 }
@@ -673,7 +674,7 @@ impl ItemTool {
         }
     }
 
-    /// `Tool.defaultMiningSpeed`: the speed used when no rule matches.
+    /// Vanilla's own default-mining-speed field: the speed used when no rule matches.
     ///
     /// Stored as raw bits so [`ItemComponents`] — and therefore [`ItemStack`],
     /// which the client compares for equality in inventory reconciliation and
@@ -686,7 +687,7 @@ impl ItemTool {
     }
 }
 
-/// One `Tool.Rule`: a block set, an optional speed override, and an optional
+/// One vanilla tool rule: a block set, an optional speed override, and an optional
 /// correct-for-drops verdict. Either optional field may be absent — a rule that
 /// only denies drops carries no speed, and a rule that only overrides speed
 /// carries no verdict.
