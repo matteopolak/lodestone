@@ -333,8 +333,8 @@ fn dimension_settings_carry_the_engine_relevant_scalars() {
     );
 
     // Cell dimensions. Vanilla derives cell size as
-    // `QuartPos.toBlock(noiseSize*)` = `size * 4` (`NoiseSettings.getCellHeight`/
-    // `NoiseSettings.getCellWidth`),
+    // `QuartPos.toBlock(noiseSize*)` = `size * 4` (vanilla's own noise-settings
+    // cell-height/cell-width accessors),
     // so the Overworld's 4x8 cell is (size_horizontal 1, size_vertical 2) and
     // the End's is (2, 1) => an 8-wide, 4-tall cell. The engine's
     // `CELL_WIDTH`/`CELL_HEIGHT` are `const` 4/8, so the End needs these
@@ -428,7 +428,8 @@ fn end_islands_is_the_only_novel_density_function_type() {
 /// [`DIMENSION_FILES`]: the jar's
 /// `multi_noise_biome_source_parameter_list/nether.json` is 37 bytes of
 /// `{"preset": "minecraft:nether"}`, because the table lives in Java
-/// (`MultiNoiseBiomeSourceParameterList.Preset.NETHER`) and its codec only ever
+/// (vanilla's own multi-noise-biome-source-parameter-list nether preset) and
+/// its codec only ever
 /// serialises the preset id. The committed file is the oracle's output.
 const NETHER_PARAMETERS: &str = "biome_parameters/nether.json";
 
@@ -493,10 +494,11 @@ fn nether_biome_parameters_agree_with_the_nether_surface_rule_biome_set() {
 fn nether_biome_parameters_are_degenerate_points_discriminated_by_offset() {
     let rows = nether_rows();
 
-    // Magnitude, not sign: the exact quantized table. `Climate.parameters`'
-    // 7-float overload wraps each channel in `Parameter.point(v)` (= `span(v,v)`)
-    // and quantizes by 10000 (`Climate.QUANTIZATION_FACTOR`, applied in
-    // `Climate.quantizeCoord`), so every bound is an
+    // Magnitude, not sign: the exact quantized table. Vanilla's own climate
+    // parameters'
+    // 7-float overload wraps each channel in a degenerate point (= `span(v,v)`)
+    // and quantizes by 10000 (vanilla's own quantization-factor constant, applied in
+    // vanilla's own coordinate-quantizer), so every bound is an
     // exact multiple of the source constant: crimson_forest's 0.4F -> 4000,
     // warped_forest's 0.375F offset -> 3750, basalt_deltas' 0.175F -> 1750.
     let expected: Vec<([i64; 13], &str)> = vec![
@@ -517,7 +519,7 @@ fn nether_biome_parameters_are_degenerate_points_discriminated_by_offset() {
     // Structural properties the engine relies on, asserted rather than assumed:
     for (nums, biome) in &rows {
         // Every channel is a degenerate point (min == max). Unlike the
-        // overworld table, the nether list never uses `Parameter.span`.
+        // overworld table, the nether list never uses a span parameter.
         for ch in 0..6 {
             assert_eq!(
                 nums[ch * 2],
@@ -527,7 +529,7 @@ fn nether_biome_parameters_are_degenerate_points_discriminated_by_offset() {
         }
         // continentalness / erosion / depth / weirdness are all zero, because
         // the nether router sets those channels to `zero()`
-        // (`NoiseRouterData.nether`). Only temperature, humidity and
+        // (vanilla's own noise-router-data nether preset). Only temperature, humidity and
         // offset discriminate — which is why the two nether-specific noises
         // matter so much: they ARE the biome layout.
         for ch in 2..6 {
@@ -535,8 +537,9 @@ fn nether_biome_parameters_are_degenerate_points_discriminated_by_offset() {
         }
     }
 
-    // Exactly two rows carry a nonzero offset. Vanilla's `fitness` adds
-    // `Mth.square(this.offset)` as a flat penalty (`Climate.ParameterPoint.fitness`), so
+    // Exactly two rows carry a nonzero offset. Vanilla's own "fitness" step adds
+    // `Mth.square(this.offset)` (standard squaring helper) as a flat penalty
+    // (vanilla's own climate parameter-point fitness step), so
     // these two are the deliberately-rarer biomes. Our engine reaches the same
     // number via `params[6].distance(0)^2`, which equals `offset^2` for either
     // sign — equivalent, not a gap.
@@ -641,7 +644,7 @@ fn nether_biome_parameters_match_the_jvm_oracle() {
 
     // The oracle writes nothing but the JSON document to stdout. If a stray log
     // line ever leaks in — log4j over System.err comes back out on stdout once
-    // `Bootstrap.bootStrap()` has run, which the oracle's first version did —
+    // vanilla's own bootstrap step has run, which the oracle's first version did —
     // this parse fails loudly rather than the bytes being written through.
     let dumped = String::from_utf8(out.stdout).expect("oracle stdout is UTF-8");
     let parsed: Value = serde_json::from_str(&dumped).unwrap_or_else(|e| {
