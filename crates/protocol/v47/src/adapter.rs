@@ -84,7 +84,7 @@ const REL_Z: i8 = 0x04;
 const REL_YAW: i8 = 0x08;
 const REL_PITCH: i8 = 0x10;
 
-/// Per-connection state used by 1.8.9's `EntityPlayerSP.onUpdateWalkingPlayer`.
+/// Per-connection state used by 1.8.9's client-side player-movement-send tick.
 ///
 /// Unlike later clients, the 1.8 branch emits its base `flying` packet every
 /// tick when neither position nor rotation is dirty. Its reminder counter is
@@ -174,7 +174,7 @@ struct PendingTabComplete {
 /// Byte offset of the last whitespace-delimited word in `text` — the start of
 /// the range 1.8/1.12's `tab_complete` matches replace, since those versions
 /// send full replacement strings for that word rather than a server-declared
-/// range. Mirrors `CommandSuggestions.getLastWordIndex`'s shape: the offset
+/// range. Mirrors the vanilla client's own last-word-index lookup: the offset
 /// just past the final run of whitespace, or `0` when there is none.
 fn last_word_index(text: &str) -> usize {
     let mut result = 0;
@@ -495,10 +495,11 @@ fn json_reason_text(reason: &str) -> Text {
 }
 
 /// Largest block coordinate any vanilla world can legitimately contain, on
-/// either horizontal axis: `WorldBorder.absoluteMaxSize` (`WorldBorder.java`)
-/// is 29,999,984, and the border is what bounds every world regardless of the
-/// `worldborder` command or the world's own settings. Anything past this is not
-/// an awkward-but-real position, it is invalid input.
+/// either horizontal axis: the world border implementation's absolute
+/// maximum size constant is 29,999,984, and the border is what bounds every
+/// world regardless of the `worldborder` command or the world's own
+/// settings. Anything past this is not an awkward-but-real position, it is
+/// invalid input.
 const ABSOLUTE_MAX_BLOCK: i32 = 29_999_984;
 
 /// Turns a wire-supplied chunk coordinate into the block coordinate of its
@@ -654,7 +655,7 @@ const fn chat_kind(position: i8) -> ChatKind {
 /// 1.8 has no off-hand at all — its five ordinals are `0` held item, `1`
 /// boots, `2` leggings, `3` chestplate, `4` helmet — verified against
 /// minecraft-data's 1.8 `packet_entity_equipment` (which only ever carries
-/// `0..=4`) and against `EntityLiving.getEquipmentInSlot`'s five-slot array
+/// `0..=4`) and against the living-entity class's five-slot equipment array
 /// in the same era. Using the modern table here would silently render every
 /// 1.8 boots-equip as an off-hand item and shift the rest of the armor one
 /// slot off.
@@ -1499,8 +1500,9 @@ impl V47Adapter {
             let pos = pos.0;
             world.set_block(pos.x, pos.y, pos.z, state);
             // Writing a state is what creates/removes a block entity in
-            // vanilla (`LevelChunk.setBlockState`, no packet involved) — the
-            // same reasoning `lodestone-v340`'s `BLOCK_CHANGE` arm documents.
+            // vanilla (done inside the chunk's own block-state setter, no
+            // packet involved) — the same reasoning `lodestone-v340`'s
+            // `BLOCK_CHANGE` arm documents.
             world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
             return Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
                 section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),

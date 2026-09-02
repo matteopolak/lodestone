@@ -80,7 +80,7 @@ const REL_Z: i8 = 0x04;
 const REL_YAW: i8 = 0x08;
 const REL_PITCH: i8 = 0x10;
 
-/// Per-connection state used by 1.16.5's `LocalPlayer.sendPosition`.
+/// Per-connection state used by 1.16.5's client-side player-position-send tick.
 #[derive(Debug, Clone, Copy)]
 struct MovementSendState {
     last_pos: Vec3,
@@ -1210,7 +1210,8 @@ impl V735Adapter {
         let pos = pos.0;
         world.set_block(pos.x, pos.y, pos.z, state);
         // Writing a state is what creates/removes a block entity in vanilla
-        // (`LevelChunk.setBlockState`, no packet involved).
+        // (done inside the chunk's own block-state setter, no packet
+        // involved).
         world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
         Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
             section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),

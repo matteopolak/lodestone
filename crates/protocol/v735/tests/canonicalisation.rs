@@ -8,9 +8,9 @@
 //! # Data provenance
 //!
 //! `tests/support/blocks_1_16_5_jar.json` is **not** a community dataset —
-//! it is the unmodified output of Mojang's own data generator
-//! (`net.minecraft.data.Main --reports`) run against the real
-//! `.cache/mc/1.16.5/server.jar`, the same tool and report shape
+//! it is the unmodified output of Mojang's own data generator, run in its
+//! `--reports` mode against the real `.cache/mc/1.16.5/server.jar`, the same
+//! tool and report shape
 //! `crates/lodestone-data/tests/block_states.rs` reads for the 26.2 side
 //! (`.cache/mc/26.2/generated/reports/blocks.json`). Every state lists its
 //! own `id` and `properties` explicitly, so no combinatorial re-derivation
@@ -45,8 +45,11 @@
 //!     -v "$PWD/.cache/mc/1.16.5/server.jar:/server.jar:ro" \
 //!     -v "$PWD/out:/out" \
 //!     eclipse-temurin:8-jdk \
-//!     java -cp /server.jar net.minecraft.data.Main --reports --output /out
+//!     java -cp /server.jar <vanilla data-generator entry point> --reports --output /out
 //! ```
+//!
+//! (the entry point is documented in Mojang's own server-jar usage notes,
+//! not reproduced here)
 //!
 //!    then copy `out/reports/blocks.json` over
 //!    `tests/support/blocks_1_16_5_jar.json`.
@@ -234,9 +237,9 @@ fn resolve(
     }
 
     // Every mob-head/skull block gained a `powered` redstone-signal property
-    // after 1.16.5. Confirmed against the decompiled 26.2 source
-    // (`AbstractSkullBlock.registerDefaultState(...POWERED, false)`):
-    // `false` is the block's own registry default, and 1.16.5 has no
+    // after 1.16.5. Confirmed against the decompiled 26.2 source, where the
+    // skull base class's own default-state registration sets `POWERED` to
+    // `false`: that is the block's own registry default, and 1.16.5 has no
     // redstone-signal concept for skulls at all, so this is exact rather
     // than a guess.
     let mut with_powered = props;

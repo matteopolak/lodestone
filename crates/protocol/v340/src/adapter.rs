@@ -84,7 +84,7 @@ const REL_Z: i8 = 0x04;
 const REL_YAW: i8 = 0x08;
 const REL_PITCH: i8 = 0x10;
 
-/// Per-connection state used by 1.12.2's `EntityPlayerSP.onUpdateWalkingPlayer`.
+/// Per-connection state used by 1.12.2's client-side player-movement-send tick.
 #[derive(Debug, Clone, Copy)]
 struct MovementSendState {
     last_pos: Vec3,
@@ -150,8 +150,8 @@ struct PendingTabComplete {
 /// Byte offset of the last whitespace-delimited word in `text` — the start of
 /// the range 1.12.2's `tab_complete` matches replace, since this version
 /// sends full replacement strings for that word rather than a
-/// server-declared range. Mirrors `CommandSuggestions.getLastWordIndex`'s
-/// shape: the offset just past the final run of whitespace, or `0` when
+/// server-declared range. Mirrors the vanilla client's own last-word-index
+/// lookup: the offset just past the final run of whitespace, or `0` when
 /// there is none.
 fn last_word_index(text: &str) -> usize {
     let mut result = 0;
@@ -554,10 +554,11 @@ fn dimension_id(value: i32) -> Result<lodestone_model::DimensionId, AdapterError
 }
 
 /// Largest block coordinate any vanilla world can legitimately contain, on
-/// either horizontal axis: `WorldBorder.absoluteMaxSize` (`WorldBorder.java`)
-/// is 29,999,984, and the border is what bounds every world regardless of the
-/// `worldborder` command or the world's own settings. Anything past this is not
-/// an awkward-but-real position, it is invalid input.
+/// either horizontal axis: the world border implementation's absolute
+/// maximum size constant is 29,999,984, and the border is what bounds every
+/// world regardless of the `worldborder` command or the world's own
+/// settings. Anything past this is not an awkward-but-real position, it is
+/// invalid input.
 const ABSOLUTE_MAX_BLOCK: i32 = 29_999_984;
 
 /// Turns a wire-supplied chunk coordinate into the block coordinate of its
@@ -1213,9 +1214,9 @@ impl V340Adapter {
         let pos = pos.0;
         world.set_block(pos.x, pos.y, pos.z, state);
         // Writing a state is what creates/removes a block entity in
-        // vanilla (`LevelChunk.setBlockState`, no packet involved) — the
-        // same reasoning `lodestone-v770`'s `BLOCK_UPDATE` arm
-        // documents.
+        // vanilla (done inside the chunk's own block-state setter, no
+        // packet involved) — the same reasoning `lodestone-v770`'s
+        // `BLOCK_UPDATE` arm documents.
         world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
         return Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
             section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),
