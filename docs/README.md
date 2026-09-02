@@ -182,7 +182,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the wire, how one item resolves to several baked geometries (`ItemVariants`), custom
   (plugin-defined) items, armour trim, goat horns, the portable clock crate, and the
   entity-metadata field a dropped item's identity rides on.
-- [Java plugin bridge: backing Paper's own NMS calls with Rust](./java-plugin-bridge.md) —
+- [Java plugin bridge: backing Paper's own internal calls with Rust](./java-plugin-bridge.md) —
   A design, a measurement, and a foundation crate for running **real, unmodified
   Bukkit/Spigot/Paper plugin jars** against this server, with **zero cost when no Java
   plugin is loaded**.
@@ -386,8 +386,8 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   underwater tint and scroll, fire, a carved-pumpkin vignette, freezing in powder
   snow, the spyglass scope, the nausea "confusion" swirl, and the nether/end portal
   swirl (portal wins when both are active), plus the world-border warning's cyan
-  vignette tint. In vanilla these come from two different mechanisms —
-  `ScreenEffectRenderer.submit` for underwater/fire, and `Hud.extractCameraOverlays`
+  vignette tint. In vanilla these come from two different mechanisms — its own
+  screen-effect submission for underwater/fire, and its own camera-overlay extraction
   for the rest — but all share one "textured, alpha-blended, screen-space quad after
   the hand pass" shape, so this port draws all of them through one pipeline. Confusion
   and portal additionally drive a world-space projection warp that lives in
@@ -683,17 +683,17 @@ of these caught the *brief* being wrong rather than the code.
   [`worldgen-rewrite.md`](./worldgen-rewrite.md) (its U13 row): Nether and End terrain
   — legacy RNG wiring, the bespoke noise instantiations, the `nether_cave` carver,
   the disabled-aquifer fluid picker, the Nether multi-noise biome source, the
-  `end_islands` density type, `TheEndBiomeSource`, End cell geometry, and the serve
-  seam that keeps any of it from being an island. Written 2026-08-08 against `HEAD`
-  `5f37fb83`. Engine work only: **the data phase is complete** (verified below), and
-  portals/dimension travel are gameplay, out of scope — a Nether generator is
-  oracle-testable with no portal existing.
+  `end_islands` density type, the End's own biome source, End cell geometry, and the
+  serve seam that keeps any of it from being an island. Written 2026-08-08 against
+  `HEAD` `5f37fb83`. Engine work only: **the data phase is complete** (verified
+  below), and portals/dimension travel are gameplay, out of scope — a Nether
+  generator is oracle-testable with no portal existing.
 - [Backing Paper's NMS calls with Rust: census and feasibility](./plans/paper-nms-bridge.md) —
   The feasibility census issue
   [#341](https://github.com/matteopolak/lodestone/issues/341) asked for before any
   design: what it would take to run real, unmodified Bukkit/Spigot/Paper plugin jars
-  against this server by supplying `net.minecraft.*`-shaped classes backed by Rust.
-  The verdict is **viable only as the last plugin, not the first**: every seam the JVM
+  against this server by supplying vanilla-internal-shaped classes backed by Rust. The
+  verdict is **viable only as the last plugin, not the first**: every seam the JVM
   tier needs is a seam the public bevy-plugin API must expose anyway, none of those
   seams is reachable today, and the JVM tier itself should not start until the
   adjudication window and player registry exist.
