@@ -12,12 +12,11 @@
 //! Three things about 26.2 that are easy to get wrong and easy to guess backwards:
 //!
 //! **1. Cave ambience is attached to the *dimension*, not the biome.**
-//! `AmbientSounds.LEGACY_CAVE_SETTINGS` is set as an `EnvironmentAttributes`
-//! `AMBIENT_SOUNDS` value on the **overworld** dimension type and on **the End**
-//! (both in `DimensionTypes.bootstrap`). The Nether dimension sets *nothing*;
+//! Vanilla's own legacy-cave ambient-sound settings are set as an ambient-sounds
+//! environment-attribute value on the **overworld** dimension type and on **the End**
+//! (both in vanilla's own dimension-type bootstrap). The Nether dimension sets *nothing*;
 //! instead its five biomes each override the attribute with their own loop + mood
-//! + additions (`NetherBiomes.netherWastes`, `.soulSandValley`, `.basaltDeltas`,
-//! `.crimsonForest`, `.warpedForest`). So a per-biome-only lookup finds cave ambience in zero
+//! + additions (vanilla's own per-nether-biome ambient-sound setters). So a per-biome-only lookup finds cave ambience in zero
 //! biomes and concludes it does not exist, and a dimension-only lookup silences the
 //! entire Nether. Both layers are needed — see [`AmbientSounds::resolve`].
 //!
@@ -36,15 +35,15 @@
 //! **Rain.** The weather loop is scoped to land together with rain-level state
 //! tracking, and a correct primitive for it **already exists and is unwired**:
 //! `lodestone_render::weather::RainAmbience`, which carries the exact
-//! `ClientLevel.tickWeatherEffects` constants (`weather.rain` at 0.2/1.0,
-//! `weather.rain.above` at 0.1/0.5), vanilla's post-increment `rainSoundTime`
+//! vanilla weather-effects-tick constants (`weather.rain` at 0.2/1.0,
+//! `weather.rain.above` at 0.1/0.5), vanilla's post-increment rain-sound-time
 //! counter, and the exact `landing.y > camera.y + 1 && heightmap > floor(camera.y)`
 //! conjunction. Writing a second one here would be the duplicate-subsystem mistake
 //! this repo warns about; it needs a *caller*, not a reimplementation.
 //!
-//! **Underwater ambience.** `LocalPlayer.updateIsUnderwater` plays
-//! `ambient.underwater.enter`/`.exit` via `playLocalSound` on the water-state
-//! transition, and there is a separate `UnderwaterAmbientSoundHandler` for the loop.
+//! **Underwater ambience.** Vanilla's own underwater-state-change handler plays
+//! `ambient.underwater.enter`/`.exit` via a local-sound routine on the water-state
+//! transition, and there is a separate underwater-ambient-sound handler for the loop.
 //! That is a distinct handler from this one and is left for whoever wires the
 //! water-state edge.
 
@@ -53,19 +52,19 @@ use std::borrow::Cow;
 use glam::{DVec3, IVec3};
 use lodestone_audio::JavaRandom;
 
-/// `BiomeAmbientSoundsHandler.LOOP_SOUND_CROSS_FADE_TIME`. Ticks for a
+/// Vanilla's own loop-sound cross-fade-time constant. Ticks for a
 /// loop to fade fully in or out.
 pub const LOOP_SOUND_CROSS_FADE_TIME: i32 = 40;
 
-/// `BiomeAmbientSoundsHandler.SKY_MOOD_RECOVERY_RATE`. How fast sky light
+/// Vanilla's own sky-mood-recovery-rate constant. How fast sky light
 /// *drains* accumulated moodiness.
 pub const SKY_MOOD_RECOVERY_RATE: f32 = 0.001;
 
 /// Vanilla's maximum sky/block light level, the divisor in the sky-recovery term
-/// (`BiomeAmbientSoundsHandler.tick`).
+/// (vanilla's own biome-ambient-sounds tick routine).
 pub const MAX_LIGHT: f32 = 15.0;
 
-/// One randomised "mood" sound — vanilla's `AmbientMoodSettings` record.
+/// One randomised "mood" sound — vanilla's own mood-settings record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AmbientMoodSettings {
     /// Namespace-stripped event key, e.g. `ambient.cave`.
@@ -96,18 +95,18 @@ impl AmbientMoodSettings {
         }
     }
 
-    /// `AmbientMoodSettings.LEGACY_CAVE_SETTINGS`:
+    /// Vanilla's own legacy-cave mood settings:
     /// `(ambient.cave, 6000, 8, 2.0)`.
     pub const LEGACY_CAVE: Self = Self::of("ambient.cave", 6_000, 8, 2.0);
 
     /// The side length of the sampled cube: `extent * 2 + 1`
-    /// (`BiomeAmbientSoundsHandler.tick`).
+    /// (vanilla's own biome-ambient-sounds tick routine).
     pub const fn search_span(&self) -> i32 {
         self.block_search_extent * 2 + 1
     }
 }
 
-/// A sound with a flat per-tick probability — vanilla's `AmbientAdditionsSettings`
+/// A sound with a flat per-tick probability — vanilla's own additions-settings
 /// record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AmbientAdditionsSettings {
@@ -127,7 +126,7 @@ impl AmbientAdditionsSettings {
         }
     }
 
-    /// `BiomeAmbientSoundsHandler.tick` — fires on
+    /// Vanilla's own biome-ambient-sounds tick routine — fires on
     /// `random.nextDouble() < tick_chance`.
     ///
     /// Strictly `<`, so a `tick_chance` of `0.0` never fires even though
@@ -137,7 +136,7 @@ impl AmbientAdditionsSettings {
     }
 }
 
-/// The whole ambient-sound attribute value — vanilla's `AmbientSounds` record.
+/// The whole ambient-sound attribute value — vanilla's own ambient-sounds record.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AmbientSounds {
     /// A continuously looping, head-relative sound.
@@ -145,7 +144,7 @@ pub struct AmbientSounds {
     /// The randomised darkness-driven one-shot.
     pub mood: Option<AmbientMoodSettings>,
     /// Flat-probability one-shots. Vanilla's codec is a *compact list*
-    /// (`AmbientSounds.CODEC`), so the JSON is either a single object or an array;
+    /// (its own ambient-sounds codec), so the JSON is either a single object or an array;
     /// the generator normalises both to a list.
     ///
     /// [`Cow`] rather than `Vec` so the generated biome table can be a `static` —
@@ -155,16 +154,16 @@ pub struct AmbientSounds {
 }
 
 impl AmbientSounds {
-    /// `AmbientSounds.EMPTY`, the attribute default.
+    /// Vanilla's own empty ambient-sounds constant, the attribute default.
     pub const EMPTY: Self = Self {
         loop_sound: None,
         mood: None,
         additions: Cow::Borrowed(&[]),
     };
 
-    /// `AmbientSounds.LEGACY_CAVE_SETTINGS`: the cave
+    /// Vanilla's own legacy-cave ambient-sound settings: the cave
     /// mood and nothing else. This is what the **overworld and End dimension types**
-    /// carry (both set in `DimensionTypes.bootstrap`).
+    /// carry (both set in vanilla's own dimension-type bootstrap).
     pub const LEGACY_CAVE: Self = Self {
         loop_sound: None,
         mood: Some(AmbientMoodSettings::LEGACY_CAVE),
@@ -195,12 +194,12 @@ impl AmbientSounds {
     }
 }
 
-/// A sampled block's light levels, as `Level.getBrightness` reports them.
+/// A sampled block's light levels, as vanilla's own brightness accessor reports them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LightSample {
-    /// `LightLayer.SKY` brightness at the sampled block, `0..=15`.
+    /// Vanilla's own SKY light layer's brightness at the sampled block, `0..=15`.
     pub sky: i32,
-    /// `LightLayer.BLOCK` brightness, `0..=15`.
+    /// Vanilla's own BLOCK light layer's brightness, `0..=15`.
     pub block: i32,
 }
 
@@ -214,7 +213,7 @@ pub struct MoodPlay {
     pub position: DVec3,
 }
 
-/// Vanilla's `moodiness` accumulator — the mood section of `BiomeAmbientSoundsHandler.tick`.
+/// Vanilla's own `moodiness` accumulator — the mood section of its own biome-ambient-sounds tick routine.
 ///
 /// # The trigger condition, which is not what it is usually assumed to be
 ///
@@ -236,7 +235,7 @@ pub struct MoodPlay {
 /// when the player stands in light.
 ///
 /// At `moodiness >= 1.0` the sound plays and the accumulator resets to `0.0`;
-/// otherwise it is floored at `0.0` in `BiomeAmbientSoundsHandler.tick`, so drainage cannot bank negative
+/// otherwise it is floored at `0.0` in vanilla's own biome-ambient-sounds tick routine, so drainage cannot bank negative
 /// credit that would delay the next sound.
 #[derive(Debug, Clone, Default)]
 pub struct MoodAccumulator {
@@ -250,7 +249,7 @@ impl MoodAccumulator {
     }
 
     /// Current moodiness, in `0.0..=1.0`. Exposed because vanilla shows it on the
-    /// debug screen (`DebugEntrySoundMood`), which makes it a legitimate readout
+    /// debug screen (its own sound-mood debug entry), which makes it a legitimate readout
     /// rather than just test surface.
     pub fn moodiness(&self) -> f32 {
         self.moodiness
@@ -279,8 +278,9 @@ impl MoodAccumulator {
         let span = mood.search_span();
         let extent = mood.block_search_extent;
 
-        // `BlockPos.containing` floors, and the three draws happen in x, y, z order
-        // (`BiomeAmbientSoundsHandler.tick`). Note the y draw is around the *eye*, not the feet.
+        // Vanilla's own block-position-containing helper floors, and the three
+        // draws happen in x, y, z order
+        // (its own biome-ambient-sounds tick routine). Note the y draw is around the *eye*, not the feet.
         let sample = IVec3::new(
             (eye.x + f64::from(rng.next_i32_bound(span) - extent)).floor() as i32,
             (eye.y + f64::from(rng.next_i32_bound(span) - extent)).floor() as i32,
@@ -292,7 +292,7 @@ impl MoodAccumulator {
             self.moodiness -= light.sky as f32 / MAX_LIGHT * SKY_MOOD_RECOVERY_RATE;
         } else {
             // Integer subtraction *then* float divide, as vanilla writes it
-            // in `BiomeAmbientSoundsHandler.tick`. At block light 0 this ADDS 1/tick_delay.
+            // in its own biome-ambient-sounds tick routine. At block light 0 this ADDS 1/tick_delay.
             self.moodiness -= (light.block - 1) as f32 / mood.tick_delay as f32;
         }
 
@@ -327,11 +327,11 @@ impl MoodAccumulator {
     }
 }
 
-/// One looping ambient voice's crossfade state — vanilla's
-/// `BiomeAmbientSoundsHandler.LoopSoundInstance`.
+/// One looping ambient voice's crossfade state — vanilla's own
+/// loop-sound-instance type.
 ///
 /// The fade is a plain integer counter, `volume = clamp(fade / 40, 0, 1)`, and the
-/// **stop check happens before the counter moves** (`LoopSoundInstance.tick`), so a faded-out loop
+/// **stop check happens before the counter moves** (vanilla's own loop-sound-instance tick routine), so a faded-out loop
 /// survives one extra tick at negative fade before stopping. Reordering that makes
 /// the loop stop a tick early and clip.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -346,13 +346,13 @@ impl LoopFade {
         Self::default()
     }
 
-    /// `LoopSoundInstance.fadeIn`.
+    /// Vanilla's own loop-sound-instance fade-in routine.
     pub fn fade_in(&mut self) {
         self.fade = self.fade.max(0);
         self.fade_direction = 1;
     }
 
-    /// `LoopSoundInstance.fadeOut`.
+    /// Vanilla's own loop-sound-instance fade-out routine.
     pub fn fade_out(&mut self) {
         self.fade = self.fade.min(LOOP_SOUND_CROSS_FADE_TIME);
         self.fade_direction = -1;
@@ -366,7 +366,7 @@ impl LoopFade {
     /// Advance one tick. Returns the new volume, or `None` when the voice should
     /// stop.
     pub fn tick(&mut self) -> Option<f32> {
-        // `LoopSoundInstance.tick` — checked before the increment, deliberately.
+        // Vanilla's own loop-sound-instance tick routine — checked before the increment, deliberately.
         if self.fade < 0 {
             return None;
         }
@@ -397,7 +397,7 @@ pub enum LoopAction {
 }
 
 /// Tracks the set of live ambient loops and crossfades between them —
-/// `BiomeAmbientSoundsHandler.tick`'s loop half.
+/// vanilla's own biome-ambient-sounds tick routine's loop half.
 ///
 /// # Why more than one loop can be live at once
 ///
@@ -441,7 +441,7 @@ impl AmbientLoops {
     /// Advance one tick with `current` as the loop the player's position now
     /// selects, returning the actions the caller should apply in order.
     ///
-    /// Mirrors `BiomeAmbientSoundsHandler.tick`'s loop-selection section: reap stopped voices, and *only on a change* fade every
+    /// Mirrors vanilla's own biome-ambient-sounds tick routine's loop-selection section: reap stopped voices, and *only on a change* fade every
     /// existing loop out and fade the newly selected one in (creating it if it is
     /// not already live). A tick where the selection is unchanged touches no fade
     /// directions, which is what lets a loop reach full volume and stay there.

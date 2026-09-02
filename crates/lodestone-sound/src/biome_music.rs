@@ -44,10 +44,10 @@
 //!   music", and the caller should fall back to
 //!   [`BackgroundMusic::overworld`](crate::music::BackgroundMusic::overworld) in
 //!   the overworld. A biome that sets no `BACKGROUND_MUSIC` attribute leaves
-//!   `EnvironmentAttributeMap.applyModifier`'s base value untouched, so vanilla's
+//!   vanilla's own environment-attribute-map modifier's base value untouched, so vanilla's
 //!   layered attribute system falls through to the dimension's own value
-//!   (`BackgroundMusic.OVERWORLD`, set on the overworld dimension type in
-//!   `DimensionTypes.bootstrap`) rather than any per-biome helper.
+//!   (vanilla's own OVERWORLD background-music constant, set on the overworld dimension type in
+//!   its own dimension-type bootstrap) rather than any per-biome helper.
 //!   `pale_garden` is the one biome that means
 //!   *genuinely* no music, and it says so with a present-but-empty entry, which
 //!   is why [`biome_music`] returns `Some(&EMPTY)` for it rather than `None`.

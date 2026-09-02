@@ -281,8 +281,8 @@ impl AudioEngine {
     }
 
     /// Sets the `Music` bus's runtime gain — the primitive
-    /// `MusicManager.fadePlaying`'s crossfade drives
-    /// (`updateCategoryVolume(SoundSource.MUSIC, gain)`), applied here via
+    /// vanilla's own fade-playing routine's crossfade drives
+    /// (its own category-volume update for the music bus), applied here via
     /// [`CategoryVolumes::set_runtime_gain`](lodestone_audio::CategoryVolumes::set_runtime_gain)
     /// rather than a per-voice field — see [`StreamSource`]'s own doc for why
     /// the fade is a bus property, not an instance one.
@@ -344,8 +344,8 @@ impl AudioEngine {
         self.lock_mixer().set_voice_position(handle, position)
     }
 
-    /// Plays a **head-relative, one-shot** sound — vanilla's
-    /// `SimpleSoundInstance.forUI` shape (`Attenuation.NONE`, `RELATIVE`): no
+    /// Plays a **head-relative, one-shot** sound — vanilla's own
+    /// UI-sound-instance shape (no attenuation, head-relative): no
     /// distance falloff and no stereo panning, so it sounds identical no matter
     /// where the listener stands or faces. This is [`play_loop`](Self::play_loop)
     /// minus the forced `looping = true` — the two share the same
@@ -383,7 +383,7 @@ impl AudioEngine {
     }
 
     /// Starts a **looping, head-relative** voice — the ambient biome/dimension
-    /// loop (`BiomeAmbientSoundsHandler.LoopSoundInstance`).
+    /// loop (vanilla's own loop-sound-instance type).
     ///
     /// Head-relative and looping are both forced here rather than left to the
     /// caller, because they are what distinguishes a loop from every other play
@@ -439,8 +439,8 @@ impl AudioEngine {
     }
 
     /// Pushes the eleven `soundSource.*` slider values onto their mixer buses —
-    /// vanilla's `Options.soundSourceVolumes`, the write side of
-    /// `getFinalSoundSourceVolume`.
+    /// vanilla's own sound-source-volumes map, the write side of
+    /// its own final-source-volume formula.
     ///
     /// # Why the whole set, under one lock
     ///
