@@ -8191,10 +8191,9 @@ impl<'w> MobSim<'w> {
             });
             if let Some((entity_type, position, chance, own_target)) = reinforcement_info
                 && self.reinforcement_rng.next_f32() < chance as f32
-                // `target = this.getTarget(); if (target == null &&
-                // source.getEntity() is Living) target = source` — the
+                // Vanilla's own reinforcement-target resolution: the
                 // mob's own current attack target, falling back to whoever
-                // just hit it.
+                // just hit it (only if that attacker is a living entity).
                 && let Some(reinforcement_target) = own_target.or_else(|| attacker.map(|a| a.entity_id))
             {
                 if let Some(mob) = self.get_mut(target_id) {
@@ -8207,9 +8206,11 @@ impl<'w> MobSim<'w> {
                 });
             }
         }
-        // `Wolf.OwnerHurtTargetGoal`: a wolf (or any tamed pet) joins whatever
-        // fight its owner just started, reading `owner.getLastHurtMob()` on
-        // the *owner's* own `LivingEntity`. This is the same field vanilla's
+        // Vanilla's own "owner hurt target" retaliation goal: a wolf (or any
+        // tamed pet) joins whatever
+        // fight its owner just started, reading the owner's own "last hurt
+        // mob" field on
+        // the *owner's* own living-entity state. This is the same field vanilla's
         // `HurtByTargetGoal` reads off a mob itself, just recorded on the
         // player instead — see `NavigatingMob::set_owner_hurt_target`'s own
         // doc comment for the decay rule. Every tame pet owned by the
@@ -8322,7 +8323,8 @@ impl<'w> MobSim<'w> {
             .map(|m| m.id)
     }
 
-    /// `Entity.startRiding` for a mounted mob — `AbstractHorse.doPlayerRide`'s
+    /// Vanilla's own generic "start riding" call for a mounted mob — its own
+    /// horse-family mount interaction's
     /// occupancy half. Mirrors [`mount_vehicle`](Self::mount_vehicle)'s shape
     /// exactly; the difference is what it operates on, a full [`SimMob`]
     /// rather than an AI-less [`TrackedVehicle`].
@@ -8363,7 +8365,7 @@ impl<'w> MobSim<'w> {
         true
     }
 
-    /// `Entity.stopRiding` for whatever mob `player_entity_id` is aboard,
+    /// Vanilla's own generic "stop riding" call for whatever mob `player_entity_id` is aboard,
     /// returning the mob it left. Called on an explicit dismount as well as
     /// on disconnect: a mount whose rider vanished must resume its own goal
     /// AI ([`tick`](Self::tick) skips a ridden mob's goal tick entirely — see
@@ -8377,14 +8379,15 @@ impl<'w> MobSim<'w> {
         Some(id)
     }
 
-    /// `Camel.onPlayerJump`/`executeRidersJump` — the rider-triggered half
+    /// Vanilla's own camel rider-jump handler/rider-jump executor — the rider-triggered half
     /// of camel dash. Called from `crate::server`'s `ServerBound::PlayerInput`
     /// consumer on every received `jump: true` (see that call site's own
     /// comment for why a received packet already is the rising edge).
     ///
     /// Refuses when `player_entity_id` rides no mob, the mob it rides is
     /// not a camel, or `SimMob::camel_dash_cooldown` has not yet reached
-    /// zero (`Camel.onPlayerJump`'s own `dashCooldown <= 0` gate). Two of
+    /// zero (vanilla's own rider-jump handler's own cooldown-at-or-below-zero
+    /// gate). Two of
     /// vanilla's three gates are not checked at all — see
     /// `ServerBound::PlayerInput`'s consumer for why (no saddle-equip
     /// model, no `onGround` for a client-authoritative mount).
@@ -8392,8 +8395,9 @@ impl<'w> MobSim<'w> {
     /// Sets `camel_dash_cooldown` to [`CAMEL_DASH_COOLDOWN_TICKS`], which
     /// both gates the next dash and — through
     /// [`SimMob::camel_is_dashing`] — makes the next [`snapshots`](Self::snapshots)
-    /// diff carry `Camel.DASH: true` to every other connected viewer. The
-    /// actual position impulse (`executeRidersJump`'s velocity add) is not
+    /// diff carry the dash flag as `true` to every other connected viewer. The
+    /// actual position impulse (vanilla's own rider-jump executor's velocity
+    /// add) is not
     /// applied here: this crate has no server-side ridden-mob physics at
     /// all (`lodestone_physics::vehicle`'s module doc — a mounted camel is
     /// exactly as client-authoritative as a horse or a boat), so the visible
@@ -8421,7 +8425,8 @@ impl<'w> MobSim<'w> {
     /// [`apply_vehicle_move`](Self::apply_vehicle_move), and intended for the
     /// same `VehicleMoved` wire packet: vanilla's client is authoritative over
     /// its own ridden entity's position regardless of whether that entity is
-    /// a boat or a horse (`Player.isClientAuthoritative()` does not
+    /// a boat or a horse (vanilla's own player-specific "is client
+    /// authoritative" override does not
     /// distinguish them), so the two share one packet and should share one
     /// dispatch, trying this after (or instead of)
     /// [`apply_vehicle_move`](Self::apply_vehicle_move) depending on which one
