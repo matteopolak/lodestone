@@ -296,6 +296,17 @@ mod neighbor_update;
 pub mod piston;
 mod players;
 mod plugin_channels;
+/// Issue #134: the plugin-facing custom-dimension registry — see
+/// `docs/plugin-worldgen-api.md`.
+pub mod plugin_dimension;
+/// Issue #132's decision made concrete: bridges a plugin's
+/// `lodestone_worldgen::generator::ChunkGenerator` into a real
+/// [`chunk::ChunkSource`] — see `docs/plugin-worldgen-api.md`.
+pub mod plugin_worldgen;
+/// Issue #150: the plugin-facing crafting-station (anvil/grindstone/
+/// smithing/loom/stonecutter) result-hook registry — see
+/// `docs/plugin-crafting-hooks.md`.
+pub mod plugin_crafting;
 mod protocol;
 /// The GameSpy4 / UT3 server-query protocol (issue #332): a UDP listener
 /// answering the challenge-response dance server-list aggregators use, wired
@@ -322,6 +333,13 @@ pub use redstone::{TICK_COMPARATOR, TICK_OBSERVER, TICK_REPEATER, TICK_TORCH};
 /// future measurement harness (U6's bench, or a `tests/` gate) reads
 /// `snapshot()`/`reset()` from outside this crate.
 pub mod redstone_counters;
+/// The reaction classes `redstone_counters::Snapshot::notifications_by_class`
+/// is indexed by, and their names — re-exported for the same reason the tick
+/// -kind constants above are: a measurement harness outside this crate reads
+/// that histogram and needs to label its buckets without duplicating the
+/// list. `redstone_graph` itself stays private; this is the only part of its
+/// surface anything outside this crate needs.
+pub use redstone_graph::{ReactionClass, CLASS_NAMES as REACTION_CLASS_NAMES, CLASS_COUNT as REACTION_CLASS_COUNT};
 mod redstone_diode;
 mod redstone_dispenser;
 /// Issue #315/#317's end-to-end gates: repeater delay/locking, comparator
@@ -329,6 +347,12 @@ mod redstone_dispenser;
 /// against values measured on a real 26.2 server. Test-only.
 #[cfg(test)]
 mod redstone_diode_oracle_gate;
+/// The palette-derived reaction classification the neighbour-notification
+/// dispatch runs on: `ReactionClass` plus the `classify` that mirrors
+/// `random_tick::react_to_notification`'s own predicate chain, so "what
+/// reacts at this cell" costs two array indexes instead of a string
+/// allocation and up to fifteen `strcmp`s. See `docs/redstone-execution.md`.
+mod redstone_graph;
 mod redstone_note_block;
 mod redstone_observer;
 mod redstone_openable;
@@ -419,6 +443,12 @@ pub mod spawn_egg;
 /// Structure chests (issue #337): the data-marker pass that fills a shipwreck's,
 /// igloo's or ocean ruin's chest with a rolled loot table at generation time.
 mod structure_loot;
+/// Issue #136: pasting a structure template into an already-generated,
+/// live/persisted world — the runtime entry point
+/// `lodestone_worldgen::structure::template::StructureTemplate::place` does
+/// not itself provide (it only writes into a generation-time
+/// `DenseBlockGrid`). See `docs/plugin-worldgen-api.md`.
+pub mod structure_placement;
 /// Gates for the support-collapse pass — `server::collapse_unsupported` driven
 /// against a rig world, one arm per block family shape. `#![cfg(test)]` inside,
 /// like the redstone gate modules beside it.

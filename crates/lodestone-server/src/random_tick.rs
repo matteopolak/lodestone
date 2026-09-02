@@ -375,6 +375,16 @@ fn spreading_snowy_state(block: &str, above_state: &str) -> &'static str {
 /// leaves them.
 const SNOWY_FAMILY: [&str; 3] = [GRASS_BLOCK, MYCELIUM_BLOCK, PODZOL_BLOCK];
 
+/// [`SNOWY_FAMILY`] membership as a named predicate, so
+/// [`crate::redstone_graph::classify`] can mirror this dispatcher's own
+/// `snowy` arm without the family list leaving this module. Takes a **base
+/// name**, matching the `SNOWY_FAMILY.contains(&base_name(&state))` guard it
+/// reproduces.
+#[must_use]
+pub(crate) fn is_snowy_family(base: &str) -> bool {
+    SNOWY_FAMILY.contains(&base)
+}
+
 /// `true` iff `block_state` is one this crate models a random tick for.
 /// Mirrors `BlockState.isRandomlyTicking()`
 /// (`BlockBehaviour.java:401-402`) — grass/mycelium-family spreading (see
@@ -1710,6 +1720,37 @@ fn react_to_notification(
         }
 
         crate::redstone_counters::bump_notification();
+
+        // **Which family — if any — reacts here, in two array indexes.**
+        // Read from the column's palette-derived classification table
+        // (`crate::redstone_graph`), not by parsing the state string: the
+        // classification happened once when this palette entry was interned,
+        // and the palette is append-only, so it cannot be stale.
+        //
+        // This replaces the chain of fifteen `base_name`-plus-`strcmp`
+        // family predicates each arm below used to open with. Every guard is
+        // now `class == ReactionClass::X` instead of `family::is_x(&state)`;
+        // the arms' bodies are untouched, and `redstone_graph`'s own gate
+        // proves the two agree over **every** block state in 26.2, not over
+        // a sample.
+        //
+        // **Ordering is unaffected.** `NeighborPropagator::propagate` still
+        // enumerates and counts the same notifications in the same
+        // `UPDATE_ORDER`; only what one costs on arrival changes.
+        let class = column.reaction_class(tlx, n.pos.y, tlz);
+        crate::redstone_counters::bump_notification_class(class);
+
+        // The early out that carries the win: a cell reacting to nothing
+        // already fell through every arm below to an empty cascade, having
+        // first cloned its state string and evaluated all fifteen
+        // predicates. It now costs the table read above and this branch.
+        // Observationally identical by inspection — no arm ran, nothing was
+        // written, the cascade was empty — which is why this is a
+        // short-circuit and not a new decision.
+        if class.is_inert() {
+            return Vec::new();
+        }
+
         let state = column.block_state(tlx, n.pos.y, tlz).to_string();
 
         // 1. Gravity — first, matching the existing precedent.
@@ -1730,7 +1771,7 @@ fn react_to_notification(
         // No further fan-out (empty return): `updateShape` returns
         // `super.updateShape(...)` unchanged, so nothing about the world moved and
         // there is nothing to notify.
-        if gravity_tick::is_gravity_block(base_name(&state)) {
+        if class == crate::redstone_graph::ReactionClass::Gravity {
             block_ticks.schedule(
                 (n.pos.x, n.pos.y, n.pos.z),
                 gravity_tick::TICK_GRAVITY.to_string(),
@@ -1751,7 +1792,7 @@ fn react_to_notification(
         // agree, and this needs no assumption about `Notification::from`'s
         // orientation. Flag 2 in vanilla's own `setBlock` — clients told, no
         // further fan-out, hence the empty return.
-        if SNOWY_FAMILY.contains(&base_name(&state)) {
+        if class == crate::redstone_graph::ReactionClass::Snowy {
             let above = column.block_state(tlx, n.pos.y + 1, tlz).to_string();
             let want_snowy = is_snowy_setting(&above);
             // Compared on the *value*, not on the whole string: a property-less
@@ -1770,7 +1811,7 @@ fn react_to_notification(
         }
 
         // 2. Redstone dust (#314).
-        if redstone::is_wire(&state) {
+        if class == crate::redstone_graph::ReactionClass::Wire {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Dust);
             crate::redstone_counters::bump_wire_recompute();
             let new_power = redstone_wire::calculate_target_strength(&redstone::make_lookup(column, min_x, min_z), n.pos);
@@ -1785,7 +1826,7 @@ fn react_to_notification(
         }
 
         // 3a. Redstone torches (#314).
-        if redstone::is_torch(&state) {
+        if class == crate::redstone_graph::ReactionClass::Torch {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Torch);
             let has_signal = redstone_torch::has_neighbor_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, &state);
             if redstone_torch::should_schedule_check(&state, has_signal) {
@@ -1805,7 +1846,7 @@ fn react_to_notification(
         }
 
         // 3b. Repeaters (#315).
-        if redstone::is_repeater(&state) {
+        if class == crate::redstone_graph::ReactionClass::Repeater {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Repeater);
             let facing = redstone::diode_facing(&state);
             let recomputed_lock = redstone_diode::recompute_locked(&redstone::make_lookup(column, min_x, min_z), n.pos, &state);
@@ -1860,7 +1901,7 @@ fn react_to_notification(
         // What is still missing is interruption (a pending commit runs to
         // completion, so no 0-tick pulse) and entity shoving. Both are named in
         // `crate::piston`'s module doc; #316 stays open on them.
-        if crate::piston::is_piston(&state) {
+        if class == crate::redstone_graph::ReactionClass::Piston {
             let facing = crate::piston::piston_facing(&state);
             let extended = crate::piston::piston_extended(&state);
             let want_extended =
@@ -2069,7 +2110,7 @@ fn react_to_notification(
         }
 
         // 3c. Comparators (#315).
-        if redstone::is_comparator(&state) {
+        if class == crate::redstone_graph::ReactionClass::Comparator {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Comparator);
             let facing = redstone::diode_facing(&state);
             let input = redstone::input_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, facing);
@@ -2111,7 +2152,7 @@ fn react_to_notification(
         // block state is the single source of truth, exactly as in vanilla, and
         // it is a real property of `minecraft:hopper` so the client is told
         // precisely (see `redstone::with_property`).
-        if redstone::is_hopper(&state) {
+        if class == crate::redstone_graph::ReactionClass::Hopper {
             let should_be_on =
                 redstone::best_neighbor_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, false) == 0;
             if should_be_on != redstone::hopper_enabled(&state) {
@@ -2123,7 +2164,7 @@ fn react_to_notification(
         }
 
         // 3d. Observers (#317).
-        if redstone::is_observer(&state) {
+        if class == crate::redstone_graph::ReactionClass::Observer {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Observer);
             let watch = redstone_observer::watch_direction(&state);
             if n.from == watch && redstone_observer::should_start_signal(&state) {
@@ -2152,7 +2193,7 @@ fn react_to_notification(
         // diode/observer families. See `crate::redstone_openable`'s module doc
         // for the full citation and for why the door's two-high half is synced
         // here (this crate has no `updateShape` pass for vanilla's to live in).
-        if redstone_openable::is_openable(&state) {
+        if class == crate::redstone_graph::ReactionClass::Openable {
             let has_signal = redstone_openable::has_neighbor_signal(
                 &redstone::make_lookup(column, min_x, min_z),
                 n.pos,
@@ -2205,7 +2246,7 @@ fn react_to_notification(
         // doc for the client-visible "pulse" half this crate cannot transport
         // yet (`reaction.play_pulse` is computed correctly but not consumed
         // here — there is nowhere in this event type to put it).
-        if base_name(&state) == redstone_note_block::NOTE_BLOCK {
+        if class == crate::redstone_graph::ReactionClass::NoteBlock {
             let (has_signal, above_is_air) = {
                 let lookup = redstone::make_lookup(column, min_x, min_z);
                 let has_signal = redstone::best_neighbor_signal(&lookup, n.pos, false) > 0;
@@ -2228,7 +2269,7 @@ fn react_to_notification(
         // module doc). `PoweredRailBlock.updateState`, reached through
         // `BaseRailBlock.neighborChanged` (`:80-92`) since neither block
         // overrides `neighborChanged` itself.
-        if redstone_rail::is_powered_rail_family(&state) {
+        if class == crate::redstone_graph::ReactionClass::Rail {
             let new_state = {
                 let lookup = redstone::make_lookup(column, min_x, min_z);
                 let has_signal = |p: BlockPos| redstone::best_neighbor_signal(&lookup, p, false) > 0;
@@ -2254,7 +2295,7 @@ fn react_to_notification(
         // (`DispenserBlock.java:127-139`); see `crate::redstone_dispenser`'s
         // own module doc for exactly why the actual fire (the scheduled tick
         // this arm schedules) has nothing to consume yet.
-        if redstone_dispenser::is_dispenser_family(&state) {
+        if class == crate::redstone_graph::ReactionClass::Dispenser {
             let should_trigger = {
                 let lookup = redstone::make_lookup(column, min_x, min_z);
                 redstone::best_neighbor_signal(&lookup, n.pos, false) > 0
@@ -2289,7 +2330,7 @@ fn react_to_notification(
         // spawn a `PrimedTnt` into, so it schedules
         // `crate::mobs::tnt::TICK_TNT_PRIME` instead — see that constant's
         // own doc for the handoff and its one-tick cost.
-        if crate::mobs::tnt::is_tnt_block(&state) {
+        if class == crate::redstone_graph::ReactionClass::Tnt {
             let has_signal = {
                 let lookup = redstone::make_lookup(column, min_x, min_z);
                 redstone::best_neighbor_signal(&lookup, n.pos, false) > 0
@@ -2323,7 +2364,7 @@ fn react_to_notification(
         // branch and this arm is a no-op for them, exactly as before this
         // landed.
         if let Some(block_entities) = block_entities {
-            if crate::command_block::is_command_block_family(&state) {
+            if class == crate::redstone_graph::ReactionClass::CommandBlock {
                 // `hasNeighborSignal`, not `getBestOwnOrNeighbourSignal`: a
                 // command block is not itself a signal source
                 // (`SignalGetter.java`'s own default-method pair), so there is
