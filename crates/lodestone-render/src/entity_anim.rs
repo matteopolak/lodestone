@@ -40,7 +40,7 @@
 //! state gap — the pose is unconditional, so leaving it out drew every zombie,
 //! husk and drowned with its arms hanging at its sides.
 //!
-//! # One thing here is not a `setupAnim` at all
+//! # One thing here is not a pose-setup step at all
 //!
 //! A creeper's pre-detonation swell ([`creeper_swell_scale`],
 //! [`Skeleton::pose_swelling`]) is a **whole-model scale**, not a joint rotation.
@@ -666,7 +666,7 @@ impl AnimInput {
 }
 
 /// How a humanoid rig holds its arms for the item it is using — vanilla's
-/// `HumanoidModel.ArmPose`, reduced to the cases this build draws.
+/// own humanoid arm-pose enum, reduced to the cases this build draws.
 ///
 /// # What is modelled, and what a variant means
 ///
@@ -695,33 +695,34 @@ pub enum ArmPose {
     /// No item pose: the arms keep the walk/attack/idle result.
     #[default]
     Empty,
-    /// Holding an item (`ArmPose::ITEM`) — the arm lifts by `PI/10` and its own
+    /// Holding an item (vanilla's item-hold pose) — the arm lifts by `PI/10` and its own
     /// swing is halved.
     ///
-    /// **This is vanilla's pose for eating and drinking.** `HumanoidModel.ArmPose`
-    /// has no `EAT` or `DRINK` variant and `AvatarRenderer.getArmPose` deliberately
-    /// omits `ItemUseAnimation.EAT`/`DRINK` from its `if` chain, so a consuming
-    /// entity falls through to `ITEM`. All of vanilla's distinctive eating motion —
+    /// **This is vanilla's pose for eating and drinking.** Vanilla's arm-pose
+    /// enum has no separate eat/drink variant, and its arm-pose selection logic
+    /// deliberately
+    /// omits the eating/drinking item-use states from its `if` chain, so a consuming
+    /// entity falls through to the item-hold pose. All of vanilla's distinctive eating motion —
     /// the dip and the jitter toward the mouth — is *first-person only*, in
-    /// `ItemInHandRenderer.applyEatTransform`; in third person another player
+    /// vanilla's first-person eat-transform function; in third person another player
     /// eating is an entity with a raised arm and crumbs coming off it. Looking for
     /// a third-person eating animation and not finding one is the expected outcome,
     /// not a gap.
     ///
     /// # The first one-handed pose here
     ///
-    /// `ArmPose.ITEM(false, false)` — neither two-handed nor
-    /// `affectsOffhandPose()` — so vanilla poses each arm from *its own* pose and
+    /// Vanilla's item-hold pose is neither two-handed nor
+    /// flagged as affecting the off-hand pose — so vanilla poses each arm from *its own* pose and
     /// this one touches only the arm actually holding the item.
     /// [`Skeleton::pose_arms_for_item`] therefore writes one arm for this variant
     /// and two for every other, which is why `arm_pose_left_hand` is load-bearing
     /// here in a way it is not for the ranged poses (where a wrong value merely
     /// mirrors a symmetric result).
     Item,
-    /// Drawing a bow (`ArmPose::BOW_AND_ARROW`). Both arms come up in front,
+    /// Drawing a bow (vanilla's bow-and-arrow pose). Both arms come up in front,
     /// tracking the head.
     BowAndArrow,
-    /// Winding a crossbow (`ArmPose::CROSSBOW_CHARGE`). The pulling arm rotates
+    /// Winding a crossbow (vanilla's crossbow-charge pose). The pulling arm rotates
     /// further as the charge advances.
     CrossbowCharge {
         /// Charge fraction in `0..=1`, vanilla's
@@ -729,7 +730,7 @@ pub enum ArmPose {
         /// maxCrossbowChargeDuration`.
         ///
         /// The **fraction** rather than `(ticks, duration)` on purpose: the
-        /// duration is `CrossbowItem.getChargeDuration`, which is
+        /// duration is vanilla's crossbow charge-duration function, which is
         /// `25 - 5 * QuickCharge level`, and resolving an enchantment level needs
         /// the enchantment registry. A caller with no enchantment data supplies
         /// `ticks / 25.0`, which is exact for an unenchanted crossbow and merely
@@ -737,7 +738,7 @@ pub enum ArmPose {
         /// this function cannot silently assume level 0.
         progress: f32,
     },
-    /// Holding an already-charged crossbow (`ArmPose::CROSSBOW_HOLD`), which is
+    /// Holding an already-charged crossbow (vanilla's crossbow-hold pose), which is
     /// **not** an in-use pose: vanilla shows it whenever a charged crossbow is
     /// held and the entity is not swinging, driven by the item's
     /// `minecraft:charged_projectiles` component rather than by the using-item
@@ -747,7 +748,7 @@ pub enum ArmPose {
 
 impl ArmPose {
     /// Whether this pose occupies **both** arms, so the off hand's own pose is
-    /// suppressed (vanilla `ArmPose.isTwoHanded`).
+    /// suppressed (vanilla's two-handed arm-pose flag).
     ///
     /// Every pose modelled here is two-handed, which is not a coincidence — the
     /// ranged poses are exactly the ones that need a second arm — but it is
@@ -796,7 +797,7 @@ struct Slots {
     left_middle_front_leg: Option<usize>,
     right_wing: Option<usize>,
     left_wing: Option<usize>,
-    /// The three armour-stand-only parts `ArmorStandModel.setupAnim` drives
+    /// The three armour-stand-only parts vanilla's armour-stand pose setup drives
     /// from the *body* pose alongside `body` itself. No other model in the
     /// corpus declares them, so they resolve to `None` everywhere else and cost
     /// nothing.
@@ -870,7 +871,7 @@ impl Skeleton {
     /// Selects the humanoid arm rig, folding a [`HumanoidArms::Zombie`] rig's
     /// **resting** arm pose into the skeleton's authored rest.
     ///
-    /// Why the rest pose and not just `setup_anim`: `animateZombieArms` assigns
+    /// Why the rest pose and not just `setup_anim`: vanilla's zombie-arms animation assigns
     /// `xRot = -PI/2.25` and `yRot = ±0.1` unconditionally, so those *are* the
     /// zombie's resting arm angles — at `attackTime == 0` every other term in
     /// the formula is zero. Baking them in keeps the two invariants the rest
@@ -945,7 +946,7 @@ impl Skeleton {
     /// [`Self::pose`], with a creeper's pre-detonation swell folded in as a
     /// whole-model scale (see [`creeper_swell_scale`]).
     ///
-    /// `swell` is vanilla's `Creeper.getSwelling(partialTick)`: `0.0` while the
+    /// `swell` is vanilla's creeper swell-fraction accessor: `0.0` while the
     /// fuse is unlit, rising to [`MAX_SWELL`] at detonation. `0.0` is exactly
     /// [`Self::pose`] — the scale reduces to the identity, not merely to
     /// something close to it, so passing it costs nothing and no non-creeper
@@ -958,20 +959,21 @@ impl Skeleton {
     /// That is false as of the chain landing, and it is worth recording
     /// exactly what closed it so the next reader does not have to re-derive
     /// it (a stale "still missing" claim here almost cost a wasted
-    /// investigation once already): metadata index 16
-    /// (`Creeper.DATA_SWELL_DIR`, decoded as `CreeperSwellDir`) reaches
-    /// `ingest.rs:754`, folds into per-entity state at `state.rs:1128`,
-    /// crosses the shell boundary at `net.rs:2108`, and lands on
-    /// `entities.rs`' `CreeperFuse` component (`entities.rs:1832`/`1888`),
-    /// which `tick_creeper_fuse` (`entities.rs:839`) integrates every tick —
-    /// `swell += swell_dir` — exactly vanilla's `Creeper.getSwelling`
-    /// client-side accumulation. `extract_entity_draws` (`entities.rs:1612`)
+    /// investigation once already): the creeper's swell-direction metadata
+    /// index, decoded as `CreeperSwellDir`, reaches
+    /// `ingest.rs`, folds into per-entity state,
+    /// crosses the shell boundary, and lands on
+    /// `entities.rs`' `CreeperFuse` component,
+    /// which its fuse-tick integrates every tick —
+    /// `swell += swell_dir` — exactly vanilla's client-side swell-fraction
+    /// accumulation. `extract_entity_draws`
     /// reads that counter and is the caller that threads it into this
     /// method. `docs/entity-rendering.md` records the chain as closed.
     ///
     /// The "divide by 28" this method's own [`MAX_SWELL`] encodes is not a
-    /// second, conflicting constant next to "`maxSwell` is 30" — they are the
-    /// same fact: `Creeper.java`'s `maxSwell = 30`, and the client divides
+    /// second, conflicting constant next to "vanilla's max-swell tick count is
+    /// 30" — they are the
+    /// same fact: vanilla's max-swell tick count is 30, and the client divides
     /// the accumulated counter by `maxSwell - 2 = 28`
     /// (`MAX_SWELL = 30.0 / (30.0 - 2.0)`, above).
     ///
@@ -1008,15 +1010,15 @@ impl Skeleton {
         poses
     }
 
-    /// The model-space matrix for `HumanoidModel.translateToHand(arm)` (or the
+    /// The model-space matrix for vanilla's held-item hand transform (or the
     /// model's own override — see [`HandPoseOverride`]), for the item this arm
     /// is holding.
     ///
     /// `input` re-derives the same animated pose [`Self::pose`] would, so a
     /// held item reflects the mob's current walk/attack state exactly as
-    /// vanilla does (it poses the whole model, then runs `translateToHand`
+    /// vanilla does (it poses the whole model, then runs the hand transform
     /// against the posed parts — never the rest pose). `left` selects the arm
-    /// vanilla reads from `HumanoidArm`.
+    /// vanilla reads from its main-hand-side setting.
     ///
     /// Returns `None` only when this skeleton has no `right_arm`/`left_arm`
     /// slot at all — a family with no arms has nothing for a caller to fall
@@ -1093,7 +1095,7 @@ impl Skeleton {
     }
 
     /// Applies this model's family animation to a copy of the rest poses,
-    /// mirroring the corresponding vanilla `setupAnim`.
+    /// mirroring the corresponding vanilla pose-setup function.
     fn setup_anim(&self, poses: &mut [PartPose], input: &AnimInput) {
         let s = &self.slots;
         let pos = input.limb_swing;
@@ -1107,7 +1109,7 @@ impl Skeleton {
             // (`head.xRot = headPitch * DEG`), which is identical here for every
             // model that authors a zero head rotation -- but hoglin's head is
             // authored at 0.87 rad and vanilla *restores* exactly that in
-            // `animateHeadbutt`, and the ender dragon likewise carries an
+            // its headbutt-charge animation, and the ender dragon likewise carries an
             // authored head rotation. Assigning would level both heads.
             poses[h].y_rot += input.head_yaw_deg * DEG;
             poses[h].x_rot += input.head_pitch_deg * DEG;
@@ -1116,7 +1118,7 @@ impl Skeleton {
         match self.family {
             AnimFamily::Static | AnimFamily::HeadOnly => {}
 
-            // QuadrupedModel.setupAnim: diagonally opposite legs swing together.
+            // Vanilla's quadruped pose setup: diagonally opposite legs swing together.
             AnimFamily::Quadruped => {
                 let swing = |phase: f32| (pos * WALK_FREQ + phase).cos() * 1.4 * amt;
                 set_x_rot(poses, s.right_hind_leg, swing(0.0));
@@ -1125,7 +1127,7 @@ impl Skeleton {
                 set_x_rot(poses, s.left_front_leg, swing(0.0));
             }
 
-            // SpiderModel.setupAnim: legs splay outward (yRot) and lift (zRot),
+            // Vanilla's spider pose setup: legs splay outward (yRot) and lift (zRot),
             // each pair a quarter-cycle out of phase, and the adjustments are
             // *added* to the authored splay rather than replacing it.
             AnimFamily::Spider => {
@@ -1158,11 +1160,11 @@ impl Skeleton {
                 }
             }
 
-            // HumanoidModel.setupAnim, minus the swim/ride branches whose state
+            // Vanilla's humanoid pose setup, minus the swim/ride branches whose state
             // we do not decode yet. The item-pose branch landed with #57
             // (`pose_arms_for_item`) and the crouch branch is below.
             AnimFamily::Humanoid => {
-                // `HumanoidModel.setupAnim`'s swim head-pitch clause — only the
+                // Vanilla's humanoid pose setup swim head-pitch clause — only the
                 // `swimAmount > 0.0F` half; `isFallFlying` is state this module's
                 // own doc already lists as absent. Transcribed exactly:
                 // `head.xRot = Mth.rotLerpRad(swimAmount, head.xRot, -PI/4)`.
@@ -1179,8 +1181,8 @@ impl Skeleton {
 
                 let arm = |phase: f32| (pos * WALK_FREQ + phase).cos() * 2.0 * amt * 0.5;
                 let leg = |phase: f32| (pos * WALK_FREQ + phase).cos() * 1.4 * amt;
-                // A zombie rig runs `HumanoidModel.setupAnim` too, but
-                // `animateZombieArms` then *assigns* over both arms, so the walk
+                // A zombie rig runs vanilla's humanoid pose setup too, but
+                // its zombie-arms animation then *assigns* over both arms, so the walk
                 // swing and the first bob are dead stores. Skipping them here is
                 // that same net effect without the wasted work — and, unlike
                 // adding then overwriting, it cannot leave a stray term behind
@@ -1198,24 +1200,19 @@ impl Skeleton {
                 set_z_rot(poses, s.right_leg, 0.005);
                 set_z_rot(poses, s.left_leg, -0.005);
 
-                // `HumanoidModel.setupAnim`'s `isPassenger` branch
-                // (`HumanoidModel.java`), transcribed exactly:
-                //
-                // ```java
-                // if (state.isPassenger) {
-                //    this.rightArm.xRot += -PI / 5;   this.leftArm.xRot += -PI / 5;
-                //    this.rightLeg.xRot = -1.4137167F; this.leftLeg.xRot = -1.4137167F;
-                //    this.rightLeg.yRot = PI / 10;     this.leftLeg.yRot = -PI / 10;
-                //    this.rightLeg.zRot = 0.07853982F; this.leftLeg.zRot = -0.07853982F;
-                // }
-                // ```
+                // Vanilla's humanoid pose setup applies a passenger (riding/sitting)
+                // branch, transcribed exactly: both arms rotate an additional
+                // `-PI / 5` on their x-axis; both legs get a fixed sit rotation
+                // (`x_rot = -1.4137167`), splayed outward on y (`+PI/10` /
+                // `-PI/10`) and z (`+0.07853982` / `-0.07853982`) for the right and
+                // left leg respectively.
                 //
                 // Placed exactly where vanilla places it: **after** the walk-swing
                 // legs above (which it wholly overwrites — a riding leg has no walk
                 // cycle) and **before** `pose_arms_for_item` below (the arms only
                 // *add*, so a using-item passenger's item pose still lands on top of
                 // the sit rotation rather than being erased by it — vanilla's own
-                // `poseRightArm`/`poseLeftArm` run after this block and assign over
+                // per-arm item-pose step runs after this block and assigns over
                 // whatever it left).
                 if input.is_passenger {
                     if let Some(i) = s.right_arm {
@@ -1236,36 +1233,29 @@ impl Skeleton {
                     }
                 }
 
-                // Vanilla's ordering exactly: `setupAnim` poses the arms for the
-                // item *after* the walk swing and *before* `setupAttackAnimation`
-                // (`HumanoidModel.java:248-273`). It matters in both directions —
+                // Vanilla's ordering exactly: its humanoid pose setup poses the arms for the
+                // item *after* the walk swing and *before* the attack-swing step.
+                // It matters in both directions —
                 // the item pose must overwrite the walk swing (it assigns), and
                 // the attack swing must then be layered on top of it (it adds).
                 self.pose_arms_for_item(poses, input);
 
                 self.attack_anim(poses, input);
 
-                // `HumanoidModel.setupAnim`'s crouch branch
-                // (`HumanoidModel.java:274-284`), transcribed exactly:
-                //
-                // ```java
-                // if (state.isCrouching) {
-                //    this.body.xRot = 0.5F;
-                //    this.rightArm.xRot += 0.4F;   this.leftArm.xRot += 0.4F;
-                //    this.rightLeg.z += 4.0F;      this.leftLeg.z += 4.0F;
-                //    this.head.y += 4.2F;          this.body.y += 3.2F;
-                //    this.leftArm.y += 3.2F;       this.rightArm.y += 3.2F;
-                // }
-                // ```
+                // Vanilla's humanoid pose setup applies a crouch branch,
+                // transcribed exactly: the body pitches to `0.5` (assign, not
+                // add); both arms gain an additional `+0.4` x-rotation; both
+                // legs shift `+4.0` on z; the head shifts `+4.2` and the body,
+                // left arm and right arm all shift `+3.2` on y.
                 //
                 // Three things this position in the sequence is load bearing for,
                 // all of them vanilla's ordering rather than the readable one:
                 //
-                // * It is **after** `setupAttackAnimation`, so a crouched swing
+                // * It is **after** the attack-swing step, so a crouched swing
                 //   keeps the body pitch — the attack twists `body.y_rot` and this
                 //   assigns `body.x_rot`, two different axes, so neither erases the
                 //   other.
-                // * It is **before** `bobModelPart`, so the idle arm bob rides on
+                // * It is **before** the idle-bob step, so the idle arm bob rides on
                 //   top of the lowered arms rather than being replaced by them.
                 // * The arm `x_rot` and both leg/head/body translations **add**;
                 //   only `body.x_rot` assigns. Making the whole block assign would
@@ -1274,7 +1264,7 @@ impl Skeleton {
                 //
                 // Translations are in model texels because `PartPose` is
                 // (`Affine::of_pose` is `translate(pivot/16) ∘ rotZYX ∘ scale`,
-                // matching `ModelPart.translateAndRotate`), so no unit or sign
+                // matching vanilla's model-part translate-and-rotate transform), so no unit or sign
                 // conversion applies — vanilla's model space is the same Y-down
                 // texel space ours is, and the flip to world orientation happens
                 // once, downstream of every pose.
@@ -1300,20 +1290,20 @@ impl Skeleton {
                 }
 
                 match self.arms {
-                    // AnimationUtils.bobModelPart on each arm, opposite signs,
-                    // then `HumanoidModel.setupAnim`'s swim arm-stroke clause
+                    // Vanilla's idle-bob animation utility on each arm, opposite signs,
+                    // then vanilla's humanoid pose setup swim arm-stroke clause
                     // (see [`Self::pose_swim_arms`]) — vanilla runs both inside
                     // the same base-class call a zombie's raised-arm override
-                    // (`animateZombieArms`) runs strictly *after* and wholly
+                    // (its own zombie-arms animation) runs strictly *after* and wholly
                     // overwrites, so neither belongs on the `Zombie` arm.
                     HumanoidArms::Swinging => {
                         bob(poses, s.right_arm, input.age_ticks, 1.0);
                         bob(poses, s.left_arm, input.age_ticks, -1.0);
 
-                        // `if (!state.isUsingItem)` — approximated as `arm_pose
+                        // "not currently using an item" — approximated as `arm_pose
                         // == Empty` since every `ArmPose` variant this build
                         // tracks (`Item`, `BowAndArrow`, the crossbow poses)
-                        // corresponds to a real vanilla `isUsingItem() == true`
+                        // corresponds to a real vanilla using-item
                         // state (`Item` doubles as vanilla's eat/drink pose; see
                         // [`ArmPose::Item`]'s own doc). The `rightArmPose`/
                         // `leftArmPose != SPEAR` and `attackArm` conjuncts vanilla
@@ -1330,7 +1320,7 @@ impl Skeleton {
                     HumanoidArms::Zombie => self.animate_zombie_arms(poses, input),
                 }
 
-                // `HumanoidModel.setupAnim`'s swim leg-kick clause — outside the
+                // Vanilla's humanoid pose setup swim leg-kick clause — outside the
                 // `isUsingItem` gate above (vanilla's legs kick regardless of the
                 // arms) and not gated by [`Self::arms`] either (a swimming
                 // zombie's raised-arm override never touches its legs, so the
@@ -1355,7 +1345,7 @@ impl Skeleton {
                 }
             }
 
-            // VillagerModel.setupAnim: legs at half a humanoid's amplitude, arms
+            // Vanilla's villager pose setup: legs at half a humanoid's amplitude, arms
             // fused into one part that vanilla leaves at its authored pose.
             AnimFamily::Villager => {
                 let leg = |phase: f32| (pos * WALK_FREQ + phase).cos() * 1.4 * amt * 0.5;
@@ -1365,7 +1355,7 @@ impl Skeleton {
                 set_y_rot(poses, s.left_leg, 0.0);
             }
 
-            // ChickenModel.setupAnim. The wing flap is driven by `flap`/
+            // Vanilla's chicken pose setup. The wing flap is driven by `flap`/
             // `flapSpeed`, which are wing-oscillator state we do not track, so
             // only the legs move; a guessed flap would be motion for its own
             // sake.
@@ -1376,8 +1366,8 @@ impl Skeleton {
             }
         }
 
-        // `ArmorStandArmorModel.setupAnim`, which is `super.setupAnim(state)`
-        // — everything above — followed by an unconditional assignment of all
+        // Vanilla's armour-stand-armour pose setup, which is the base humanoid
+        // pose setup — everything above — followed by an unconditional assignment of all
         // six part rotations from the stand's pose. Placed here, last, because
         // that is where vanilla places it: the base pass has already run in
         // full and every joint it wrote is about to be overwritten.
@@ -1390,13 +1380,14 @@ impl Skeleton {
         }
     }
 
-    /// `ArmorStandArmorModel.setupAnim`'s six assignments, plus
-    /// `ArmorStandModel.setupAnim`'s three body sticks.
+    /// Vanilla's armour-stand-armour pose setup's six assignments, plus
+    /// vanilla's armour-stand pose setup's three body sticks.
     ///
-    /// Two vanilla classes, one function, because the split between them is a
-    /// Java inheritance detail with no counterpart here: `ArmorStandArmorModel`
+    /// Two vanilla model classes, one function, because the split between them is a
+    /// Java inheritance detail with no counterpart here: the armour-stand-armour
+    /// model
     /// exists so the *armour* layer can be posed by the same code as the stand,
-    /// and it drives head/body/arms/legs; `ArmorStandModel` extends it to add
+    /// and it drives head/body/arms/legs; the armour-stand model extends it to add
     /// the stand's own decorative sticks, which take the **body** pose. Our
     /// corpus has one `armor_stand` model carrying all of it, and a model
     /// lacking the sticks (any armour layer built on this rig) simply resolves
@@ -1404,7 +1395,7 @@ impl Skeleton {
     ///
     /// # What is deliberately not ported
     ///
-    /// `ArmorStandModel.setupAnim` also sets `basePlate.yRot = -state.yRot`,
+    /// Vanilla's armour-stand pose setup also sets `basePlate.yRot = -state.yRot`,
     /// cancelling the stand's body rotation so the plate stays world-aligned.
     /// That needs the entity's **absolute** yaw, which [`AnimInput`] does not
     /// carry — it holds head yaw *relative to the body*, by contract — and the
@@ -1430,7 +1421,7 @@ impl Skeleton {
             (s.right_arm, pose.right_arm),
             (s.left_leg, pose.left_leg),
             (s.right_leg, pose.right_leg),
-            // `ArmorStandModel.setupAnim`: all three sticks take the body pose.
+            // Vanilla's armour-stand pose setup: all three sticks take the body pose.
             (s.right_body_stick, pose.body),
             (s.left_body_stick, pose.body),
             (s.shoulder_stick, pose.body),
@@ -1444,7 +1435,7 @@ impl Skeleton {
         }
     }
 
-    /// `AnimationUtils.animateZombieArms`: both arms held out in front, thrust
+    /// Vanilla's zombie-arms animation utility: both arms held out in front, thrust
     /// forward and inward during an attack, then bobbed.
     ///
     /// Transcribed from the decompiled 26.2 client:
@@ -1468,7 +1459,7 @@ impl Skeleton {
     /// * It does **not** touch the arms' `x`/`z` *translation*, so
     ///   [`Self::attack_anim`]'s orbit of the twisting torso survives.
     /// * The bob is applied *again* after the assignment. Vanilla bobs zombie
-    ///   arms twice (once in `HumanoidModel`, once here); only the second
+    ///   arms twice (once in the base humanoid pose setup, once here); only the second
     ///   survives the assignment, so exactly one bob is correct.
     ///
     /// The `x_rot`/`y_rot` assignments here reproduce the resting values
@@ -1493,7 +1484,7 @@ impl Skeleton {
         bob(poses, s.left_arm, input.age_ticks, -1.0);
     }
 
-    /// `HumanoidModel.setupAnim`'s `swimAmount > 0.0F` arm-stroke block
+    /// Vanilla's humanoid pose setup swim arm-stroke block (`swimAmount > 0.0F`)
     /// (the `!state.isUsingItem` half — see the call site's own doc for the
     /// gate), transcribed exactly from the 26.2 client. Three windows of
     /// `animationPos % 26.0`: the recovery reach (`< 14`), the catch
@@ -1560,7 +1551,7 @@ impl Skeleton {
         }
     }
 
-    /// `HumanoidModel.poseRightArm`/`poseLeftArm` for the ranged [`ArmPose`]s:
+    /// Vanilla's per-arm item-pose functions for the ranged [`ArmPose`]s:
     /// both arms come up to hold the weapon, tracking the head (issue #57).
     ///
     /// # These assign, they do not accumulate
@@ -1585,8 +1576,8 @@ impl Skeleton {
     ///
     /// `HumanoidArms::Zombie` runs [`Self::animate_zombie_arms`] afterwards, which
     /// *assigns* over both arms and so erases whatever happened here. That is
-    /// vanilla's behaviour, not a bug in the ordering: `AbstractZombieModel.setupAnim`
-    /// calls `super.setupAnim` and then `AnimationUtils.animateZombieArms`
+    /// vanilla's behaviour, not a bug in the ordering: vanilla's zombie pose setup
+    /// calls the base humanoid pose setup and then its zombie-arms animation utility
     /// unconditionally, so a bow-holding zombie keeps the arms-forward zombie pose
     /// in vanilla too. Skeletons — the rig the issue was reported against — are
     /// `HumanoidArms::Swinging` and do keep it.
@@ -1595,8 +1586,9 @@ impl Skeleton {
         let (Some(right), Some(left)) = (s.right_arm, s.left_arm) else {
             return;
         };
-        // `poseRightArm`/`poseLeftArm` differ only in which arm is treated as the
-        // holder; vanilla picks by `mainHandUsed == rightHanded`. Both branches of
+        // Vanilla's per-arm item-pose functions differ only in which arm is treated as the
+        // holder; vanilla picks by whether the using hand matches the mob's main
+        // hand. Both branches of
         // every modelled pose write both arms, so this resolves to one pair.
         let holding_in_right = !input.arm_pose_left_hand;
         let head_y_rot = s.head.map_or(0.0, |i| poses[i].y_rot);
@@ -1605,12 +1597,9 @@ impl Skeleton {
         match input.arm_pose {
             ArmPose::Empty => {}
 
-            // `case ITEM` in `poseRightArm`/`poseLeftArm`:
-            //
-            // ```java
-            // this.rightArm.xRot = this.rightArm.xRot * 0.5F - (float)(Math.PI / 10);
-            // this.rightArm.yRot = 0.0F;
-            // ```
+            // Vanilla's per-arm item-pose function, item case: the holding
+            // arm's x-rotation becomes half its previous value minus `PI / 10`,
+            // and its y-rotation is reset to `0.0`.
             //
             // **This is the third-person pose for eating and drinking** — see
             // [`ArmPose::Item`] for why vanilla has no separate one.
@@ -1622,9 +1611,9 @@ impl Skeleton {
             //   swing put there. Replacing `x_rot * 0.5` with a constant freezes a
             //   walking player's arm, which reads as the pose being applied at the
             //   wrong time rather than as a dropped term.
-            // * It writes **one** arm. `ArmPose.ITEM` is neither two-handed nor
-            //   `affectsOffhandPose()`, so vanilla poses each arm from its own
-            //   pose and the off hand — `EMPTY` for an empty hand — keeps its
+            // * It writes **one** arm. Vanilla's item arm-pose is neither two-handed nor
+            //   flagged as affecting the off-hand pose, so vanilla poses each arm from its own
+            //   pose and the off hand — empty-pose for an empty hand — keeps its
             //   swing. Touching both arms here would raise the empty hand too,
             //   which is what makes it look like a shrug rather than a bite.
             ArmPose::Item => {
@@ -1633,8 +1622,8 @@ impl Skeleton {
                 poses[holder].y_rot = 0.0;
             }
 
-            // `case BOW_AND_ARROW` (`HumanoidModel.java:353-357` for the right
-            // arm, `:398-402` for the left). Both arms take the *same* xRot; the
+            // Vanilla's bow-and-arrow arm pose (right-arm and left-arm cases are
+            // mirror images of each other). Both arms take the *same* xRot; the
             // two branches differ only in that the arm which is **not** holding
             // splays a further 0.4 rad away. Written out rather than folded into
             // one signed expression: the first attempt at that put the splay on
@@ -1654,7 +1643,7 @@ impl Skeleton {
                 poses[left].x_rot = x_rot;
             }
 
-            // `AnimationUtils.animateCrossbowCharge` (`AnimationUtils.java:20-32`).
+            // Vanilla's crossbow-charge arm animation.
             // The holding arm is fixed; the pulling arm's yaw lerps 0.4 -> 0.85 and
             // its pitch lerps toward -PI/2 as the charge advances. Note the holding
             // arm does **not** track the head here — unlike the hold pose below —
@@ -1673,7 +1662,7 @@ impl Skeleton {
                 poses[pulling].x_rot = lerp(alpha, -0.970_796_35, -std::f32::consts::FRAC_PI_2);
             }
 
-            // `AnimationUtils.animateCrossbowHold` (`AnimationUtils.java:11-18`).
+            // Vanilla's crossbow-hold arm animation.
             ArmPose::CrossbowHold => {
                 let (holding, shooting) = if holding_in_right {
                     (right, left)
@@ -1689,7 +1678,7 @@ impl Skeleton {
         }
     }
 
-    /// `HumanoidModel.setupAttackAnimation`'s `WHACK` branch: the body twists,
+    /// Vanilla's attack-animation setup, melee ("whack") branch: the body twists,
     /// both arms are carried around with it, and the swinging arm arcs down.
     ///
     /// Assumes the right arm is the attacking one — we do not decode a mob's
@@ -1753,13 +1742,13 @@ fn rot_lerp_rad(alpha: f32, from: f32, to: f32) -> f32 {
     from + alpha * diff
 }
 
-/// `Ease.outQuart`: `1 - (1 - t)^4`.
+/// Vanilla's ease-out-quart curve: `1 - (1 - t)^4`.
 fn ease_out_quart(t: f32) -> f32 {
     let inv = 1.0 - t;
     1.0 - inv * inv * inv * inv
 }
 
-/// `AnimationUtils.bobModelPart`: a slow idle sway on an arm.
+/// Vanilla's idle-bob animation utility: a slow idle sway on an arm.
 fn bob(poses: &mut [PartPose], slot: Option<usize>, age: f32, scale: f32) {
     if let Some(i) = slot {
         poses[i].z_rot += scale * ((age * 0.09).cos() * 0.05 + 0.05);
@@ -1767,7 +1756,7 @@ fn bob(poses: &mut [PartPose], slot: Option<usize>, age: f32, scale: f32) {
     }
 }
 
-// Vanilla's `setupAnim` *assigns* limb rotations (`rightHindLeg.xRot = ...`)
+// Vanilla's pose setup *assigns* limb rotations (`rightHindLeg.xRot = ...`)
 // onto a part whose authored rotation it knows to be zero. Adding is identical
 // wherever that holds -- `models_that_author_a_driven_limb_rotation` pins the
 // corpus so the exception set cannot grow unnoticed -- and it stops a model
@@ -1960,9 +1949,9 @@ mod tests {
         // For these, adding preserves the authored pose at rest (which is what
         // the culling AABB depends on) but diverges from vanilla's assignment
         // *while the limb is moving*. Spiders are not a divergence at all --
-        // `SpiderModel.setupAnim` adds to the authored splay, which is why the
+        // vanilla's spider pose setup adds to the authored splay, which is why the
         // Spider arm uses `add_*` deliberately. The rest are approximations
-        // pending a per-model `setupAnim` port, and are recorded in HANDOFF.md.
+        // pending a per-model pose-setup port, and are recorded in HANDOFF.md.
         let driven = [
             "right_leg",
             "left_leg",
@@ -2056,7 +2045,7 @@ mod tests {
         }
     }
 
-    /// [`death_fall_over_degrees`] against `LivingEntityRenderer.setupRotations`, at
+    /// [`death_fall_over_degrees`] against vanilla's living-entity rotation setup, at
     /// ticks where the **linear** reading — "90 degrees over 20 ticks", the answer
     /// anybody writes from the description — gives a different angle.
     ///
@@ -2135,14 +2124,14 @@ mod tests {
         }
         assert!(
             mismatches.is_empty(),
-            "death fall-over diverges from LivingEntityRenderer.setupRotations:\n  {}",
+            "death fall-over diverges from vanilla's living-entity rotation setup:\n  {}",
             mismatches.join("\n  ")
         );
     }
 
     #[test]
     fn creeper_swell_scale_transcribes_the_vanilla_formula() {
-        // Hand-evaluated from `CreeperRenderer.scale`, not read back off this
+        // Hand-evaluated from vanilla's creeper scale function, not read back off this
         // implementation.
         for swell in [0.25f32, 0.5, 0.75, 1.0, MAX_SWELL] {
             let wobble = 1.0 + (swell * 100.0).sin() * swell * 0.01;
@@ -2164,7 +2153,7 @@ mod tests {
         }
     }
 
-    /// Hand-evaluated from `CreeperRenderer.getWhiteOverlayProgress`'s decompiled
+    /// Hand-evaluated from vanilla's creeper white-overlay-progress function's decompiled
     /// source at a grid of steps, not read back off this implementation — the
     /// same discipline `creeper_swell_scale_transcribes_the_vanilla_formula`
     /// uses one test up.
@@ -2481,14 +2470,14 @@ mod tests {
                 assert!(
                     reach > 0.5,
                     "{name}'s {arm} reached only {reach} blocks forward at rest — vanilla's \
-                     animateZombieArms puts it at ~0.74"
+                     zombie-arms animation puts it at ~0.74"
                 );
             }
         }
     }
 
     /// The pose must be *unconditional*, not a by-product of the walk cycle:
-    /// vanilla assigns over `HumanoidModel`'s arm swing, so a walking zombie's
+    /// vanilla assigns over the base humanoid pose setup's arm swing, so a walking zombie's
     /// arms stay out in front while its legs swing normally.
     #[test]
     fn a_walking_zombie_keeps_its_arms_out_and_still_swings_its_legs() {
@@ -2515,7 +2504,7 @@ mod tests {
         let b = arm_reach(&skel, "right_arm", &half_cycle);
         assert!(
             (a - b).abs() < 1.0e-5,
-            "the arm moved between walk phases ({a} vs {b}) — animateZombieArms assigns, so a \
+            "the arm moved between walk phases ({a} vs {b}) — vanilla's zombie-arms animation assigns, so a \
              zombie's arms do not swing as it walks"
         );
         // ...while the legs must still be swinging, or this passed by freezing
@@ -2529,7 +2518,7 @@ mod tests {
         assert!(delta > 1.0e-3, "the legs stopped swinging too (delta {delta})");
     }
 
-    /// `animateZombieArms`'s attack and aggression terms, which a pose that only
+    /// Vanilla's zombie-arms animation's attack and aggression terms, which a pose that only
     /// hardcoded the resting elevation would silently drop.
     #[test]
     fn zombie_arms_thrust_on_attack_and_lift_when_aggressive() {
@@ -2595,7 +2584,7 @@ mod tests {
         }
     }
 
-    /// `HumanoidModel.setupAnim`'s swim head-pitch clause:
+    /// Vanilla's humanoid pose setup swim head-pitch clause:
     /// `head.xRot = Mth.rotLerpRad(swimAmount, head.xRot, -PI/4)`. At
     /// `AnimInput::REST`'s `head_pitch_deg: 0.0`, `head.xRot` going in is
     /// `0.0`, so a full `swim_amount` must land exactly on `-PI/4` — an exact
@@ -2641,7 +2630,7 @@ mod tests {
         );
     }
 
-    /// `HumanoidModel.setupAnim`'s swim arm-stroke clause
+    /// Vanilla's humanoid pose setup swim arm-stroke clause
     /// ([`Skeleton::pose_swim_arms`]'s own doc has the full transcription),
     /// predicted here independently from the same 26.2 decompile rather than
     /// by calling that method — a transcription mistake in the
@@ -2736,7 +2725,7 @@ mod tests {
         );
     }
 
-    /// `HumanoidModel.setupAnim`'s swim leg-kick clause is unconditional —
+    /// Vanilla's humanoid pose setup swim leg-kick clause is unconditional —
     /// not gated by `isUsingItem`, and (unlike the arm block) not gated by
     /// [`HumanoidArms`] either, since a swimming zombie's raised-arm override
     /// never touches its legs. `zombie` is used here specifically to prove
@@ -2812,10 +2801,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The crouch (`HumanoidModel.setupAnim`'s `state.isCrouching` branch)
+    // The crouch (vanilla's humanoid pose setup, crouch branch)
     // -----------------------------------------------------------------------
 
-    /// **The expected values are `HumanoidModel.java:274-284`'s literals**, not a
+    /// **The expected values are vanilla's own crouch-branch literals**, not a
     /// restatement of the port: `body.xRot = 0.5F` (an assign), `arm.xRot += 0.4F`,
     /// `leg.z += 4.0F`, `head.y += 4.2F`, `body.y += 3.2F`, `arm.y += 3.2F`.
     ///
@@ -2934,11 +2923,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The riding sit pose (`HumanoidModel.setupAnim`'s `state.isPassenger`
+    // The riding sit pose (vanilla's humanoid pose setup, passenger
     // branch)
     // -----------------------------------------------------------------------
 
-    /// **The expected values are `HumanoidModel.java`'s own literals**, not a
+    /// **The expected values are vanilla's own literals**, not a
     /// restatement of the port: arms `+= -PI/5` (an add), legs `xRot =
     /// -1.4137167F` / `yRot = ±PI/10` / `zRot = ±0.07853982F` (all three
     /// assignments). Predicting the assign/add split matters here exactly as it
@@ -3036,7 +3025,7 @@ mod tests {
     }
 
     /// **The expected values come from the 26.2 decompile, not from this code.**
-    /// `HumanoidModel.poseRightArm`'s `case BOW_AND_ARROW` is four assignments
+    /// Vanilla's right-arm item-pose function's bow-and-arrow case is four assignments
     /// with literal constants (`-0.1`, `0.1 + 0.4`, `-PI/2` twice); they are
     /// restated here so a change to the port shows up as a disagreement with
     /// vanilla rather than with our own previous output.
@@ -3093,7 +3082,7 @@ mod tests {
         let ((_, r_ry, _), (_, r_ly, _)) = arm_rots("skeleton", &right);
         let ((_, l_ry, _), (_, l_ly, _)) = arm_rots("skeleton", &left);
         // Holding right: the *left* arm splays (+0.4). Holding left: the *right*
-        // arm splays (-0.4). Vanilla `HumanoidModel.java:353-357` vs `:398-402`.
+        // arm splays (-0.4). Vanilla's mirrored right-arm/left-arm bow poses.
         assert!((r_ry - -0.1).abs() < 1e-6, "holding right, right yaw {r_ry}");
         assert!((r_ly - 0.5).abs() < 1e-6, "holding right, left yaw {r_ly}");
         assert!((l_ry - -0.5).abs() < 1e-6, "holding left, right yaw {l_ry}");
@@ -3105,7 +3094,7 @@ mod tests {
         );
     }
 
-    /// `AnimationUtils.animateCrossbowCharge`: the holding arm is fixed and the
+    /// Vanilla's crossbow-charge arm animation: the holding arm is fixed and the
     /// pulling arm interpolates. Checks both endpoints against the vanilla
     /// literals *and* that the middle is strictly between them — a lerp with its
     /// arguments swapped passes an endpoint check on one end and fails this.
@@ -3283,13 +3272,13 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");
-        assert!(!ArmPose::Item.is_two_handed(), "ArmPose.ITEM(false, false)");
+        assert!(!ArmPose::Item.is_two_handed(), "vanilla's item-hold pose is one-handed");
     }
 
     /// A zombie rig **loses** the pose, because `animate_zombie_arms` assigns over
     /// both arms afterwards — vanilla's own behaviour
-    /// (`AbstractZombieModel.setupAnim` calls `super.setupAnim` then
-    /// `animateZombieArms` unconditionally). Asserted rather than left implicit
+    /// (its zombie pose setup calls the base humanoid pose setup then
+    /// its zombie-arms animation unconditionally). Asserted rather than left implicit
     /// because it looks exactly like the pose failing to wire up, and the next
     /// person to see a bow-holding zombie with forward arms needs this test to
     /// tell them it is correct.
@@ -3403,9 +3392,9 @@ mod tests {
         }
     }
 
-    /// `VexModel.translateToHand`: `root · body · arm`, then `scale(0.55)`,
+    /// Vanilla's vex hand-transform function: `root · body · arm`, then `scale(0.55)`,
     /// then a small arm-signed translate. Vex's arm rig never rotates in this
-    /// port (`AnimFamily::HeadOnly` runs no arm `setupAnim`, and the rest pose
+    /// port (`AnimFamily::HeadOnly` runs no arm pose setup, and the rest pose
     /// authors no rotation either), so every step in the chain is a pure
     /// translation or a uniform scale — cheap to hand-compute independently
     /// and compare, with nothing shared with `translate_to_hand`'s own code.
@@ -3443,7 +3432,7 @@ mod tests {
         }
     }
 
-    /// `AllayModel.translateToHand` never calls `getArm(arm)` at all: it reads
+    /// Vanilla's allay hand-transform function never selects an arm by handedness at all: it reads
     /// `right_arm.xRot` and never mirrors by handedness (not even the
     /// translate's sign) — so a main-hand and an off-hand item pose the same.
     /// This is read from source (see [`HandPoseOverride::Allay`]'s doc
@@ -3455,7 +3444,7 @@ mod tests {
         let body = skel.index_of("body").unwrap();
         let world_body = skel.pose(&AnimInput::REST)[body];
         // Allay's arms never rotate in this port either (`HeadOnly` family, no
-        // arm `setupAnim`, zero authored rotation), so `right_arm.xRot` is
+        // arm pose setup, zero authored rotation), so `right_arm.xRot` is
         // exactly `0.0` here and `Rx(0)` is the identity — independently
         // computable without reading any of this crate's own posed state.
         let expected = world_body
@@ -3551,9 +3540,9 @@ mod tests {
     }
 
     /// The armour stand is posed by the wire, not by the walk cycle:
-    /// `ArmorStandArmorModel.setupAnim` runs the whole humanoid `super.setupAnim`
+    /// vanilla's armour-stand-armour pose setup runs the whole base humanoid pose setup
     /// and then **assigns** head, body, both arms and both legs from the stand's
-    /// six pose accessors, and `ArmorStandModel.setupAnim` drives the three body
+    /// six pose accessors, and vanilla's armour-stand pose setup drives the three body
     /// sticks from the body pose on top.
     ///
     /// Nine exact predictions — `degrees * PI / 180`, derived from the wire's
@@ -3607,8 +3596,8 @@ mod tests {
     /// Both hypotheses are computed from outside constants and the measurement
     /// has to land on one of them: the walk value is
     /// `cos(limbSwing * 0.6662) * 1.4 * limbSwingAmount` from
-    /// `HumanoidModel.setupAnim`, and the pose value is `1 degree` from
-    /// `ArmorStand.DEFAULT_RIGHT_LEG_POSE`. At this phase they are nowhere near
+    /// vanilla's humanoid pose setup, and the pose value is `1 degree` from
+    /// vanilla's default right-leg armour-stand pose. At this phase they are nowhere near
     /// each other, which is what makes the pair discriminating.
     #[test]
     fn without_a_pose_the_same_input_swings_the_stands_limbs() {

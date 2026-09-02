@@ -1,12 +1,9 @@
 //! Pixel gate: **the stack count sits where vanilla puts it**.
 //!
 //! Reported from play as "the number should be lower and further left".
-//! `GuiGraphicsExtractor.itemCount` (`:947-952`, identical in
-//! `SpectatorGui.java`):
-//!
-//! ```java
-//! this.text(font, amount, x + 19 - 2 - font.width(amount), y + 6 + 3, -1, true);
-//! ```
+//! Vanilla's item-count overlay draws the count string right-aligned two
+//! pixels inside the icon's 19px slot cell, at `y + 6 + 3` down from the
+//! slot's top, with a drop shadow:
 //!
 //! — right edge at `x + 17` (one pixel *past* the 16 px icon), top at `y + 9`,
 //! drop shadow on.

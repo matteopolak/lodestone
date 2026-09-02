@@ -8,16 +8,10 @@
 //! capture (`lodestone-v770`'s `live_destroy_block_event` gate) shows
 //! `level_event` 2001 carrying the cascaded block's correct block-state id, and
 //! that id resolves to the correct `#particle` sprite. What was missing is the
-//! *other* half of vanilla's `TerrainParticle` constructor:
-//!
-//! ```java
-//! this.rCol = this.gCol = this.bCol = 0.6F;
-//! BlockTintSource tintSource = ...getBlockColors().getTintSource(blockState, 0);
-//! if (tintSource != null) {
-//!    int col = tintSource.colorAsTerrainParticle(blockState, level, pos);
-//!    this.rCol *= (col >> 16 & 0xFF) / 255.0F;  // and g, b
-//! }
-//! ```
+//! *other* half of vanilla's break-particle construction: the base colour
+//! starts at a fixed grey (0.6 in each channel), then — if the block state has
+//! a biome tint source at tint index 0 — that source's colour (evaluated for
+//! this block, level and position) is multiplied into each channel.
 //!
 //! Both shell emit sites passed a hardcoded `[1.0; 3]` there. The tinted blocks
 //! are *exactly* the ones whose atlas sprites are **greyscale** (`grass`,
@@ -177,8 +171,8 @@ fn burst(p: &mut Particles, models: &BlockModels, state: u32) -> Burst {
     });
 
     // The state's own tint, already folded into the instance colour as
-    // `base * tint` where `base` is `TerrainParticle`'s 0.6 grey times the light
-    // shade — channel-independent, so the control's untinted colour is recovered
+    // `base * tint` where `base` is vanilla's break-particle 0.6 grey times the
+    // light shade — channel-independent, so the control's untinted colour is recovered
     // by *dividing the tint back out of one channel*, not by dividing every
     // channel. That distinction is load-bearing: `redstone_wire` at power 0 has
     // a tint of `[0.3, 0.0, 0.0]`, so two of its channels are exactly zero and a
@@ -369,8 +363,8 @@ fn cascading_block_debris_is_tinted_not_grey() {
 
     // Untinted blocks must stay untinted — the fix must not tint the world.
     // `grass_block` is the one that catches a fix built on the *face* tint
-    // rather than the particle tint: vanilla's `grassBlock()` overrides
-    // `colorAsTerrainParticle` to `-1` precisely because its `#particle` is
+    // rather than the particle tint: vanilla special-cases its break-particle
+    // tint source to "no tint" precisely because its `#particle` is
     // `block/dirt`, so a face-derived fix throws green dirt.
     for name in [
         "minecraft:stone",
@@ -385,7 +379,7 @@ fn cascading_block_debris_is_tinted_not_grey() {
             models.particle_tint(state),
             None,
             "{name} must have no particle tint; vanilla registers no layer-0 tint source for it \
-             (or, for grass_block, overrides colorAsTerrainParticle to -1 so its block/dirt \
+             (or, for grass_block, special-cases the break-particle tint to none so its block/dirt \
              particle sprite is not tinted green)"
         );
         let Burst {

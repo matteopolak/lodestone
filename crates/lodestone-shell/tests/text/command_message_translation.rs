@@ -5,9 +5,10 @@
 //!
 //! `/gamemode`, `/give` and `/gamerule` currently send **literal English
 //! strings** from the server (`lodestone-server/src/commands/*.rs` call
-//! `ctx.send_success(format!(…))`). Vanilla sends *components*:
-//! `Component.translatable("commands.gamemode.success.self", mode)` where `mode`
-//! is itself `Component.translatable("gameMode.creative")`. This file pins what
+//! `ctx.send_success(format!(…))`). Vanilla sends *translated components*: the
+//! feedback is built from a translation key plus arguments, e.g.
+//! `"commands.gamemode.success.self"` with a nested translated mode-name
+//! component (`"gameMode.creative"`) as its argument. This file pins what
 //! that component must resolve to, so the server-side change to emit real keys
 //! has a target it can be checked against rather than a description.
 //!
@@ -28,7 +29,7 @@
 //!
 //! | what | source |
 //! |---|---|
-//! | which key, and its argument **order** | the decompiled 26.2 command classes under `.cache/mc/26.2/src/net/minecraft/server/commands/`, cited per line below |
+//! | which key, and its argument **order** | the decompiled 26.2 server-command sources, cited per line below |
 //! | the format string for each key | `assets/minecraft/lang/en_us.json` in `client.jar` |
 //! | the **expected sentence** | those two, expanded **by hand** here |
 //!
@@ -49,39 +50,38 @@ use lodestone_model::{Text, TextColor, TextStyle};
 /// [`transcribed_patterns_match_the_real_en_us_json`], which is what stops this
 /// list quietly becoming a table of this test's own opinions.
 const PATTERNS: &[(&str, &str)] = &[
-    // `GameModeCommand.java` / `:51`.
+    // `/gamemode` on yourself.
     ("commands.gamemode.success.self", "Set own game mode to %s"),
     (
         "commands.gamemode.success.other",
         "Set %s's game mode to %s",
     ),
-    // `GameModeCommand.java` builds `"gameMode." + newType.getName()`.
+    // The mode-name key vanilla builds as `"gameMode." + <mode name>`.
     ("gameMode.creative", "Creative Mode"),
     ("gameMode.survival", "Survival Mode"),
-    // `GameModeCommand.java`, the message the *target* receives.
+    // The message the *target* of `/gamemode` receives.
     ("gameMode.changed", "Your game mode has been updated to %s"),
-    // `GiveCommand.java` / `:102`.
+    // `/give`'s success feedback.
     ("commands.give.success.single", "Gave %s %s to %s"),
     ("commands.give.success.multiple", "Gave %s %s to %s players"),
-    // `GiveCommand.java`, a `sendFailure`.
+    // `/give`'s failure feedback, sent when the requested count is too high.
     (
         "commands.give.failed.toomanyitems",
         "Can't give more than %s of %s",
     ),
-    // `GameRuleCommand.java` / `:52`.
+    // `/gamerule` set and query feedback.
     ("commands.gamerule.set", "Gamerule %s is now set to: %s"),
     (
         "commands.gamerule.query",
         "Gamerule %s is currently set to: %s",
     ),
-    // `CommandSourceStack.java`, the op broadcast — this is where vanilla's
-    // *italics* come from.
+    // The op broadcast wrapper — this is where vanilla's *italics* come from.
     ("chat.type.admin", "[%s: %s]"),
     // An item display name, for `/give`'s second argument.
     ("item.minecraft.diamond_sword", "Diamond Sword"),
-    // `Inventory.java`'s client-side default, already used by the container
-    // screen — included as a cross-check that this list agrees with a key the
-    // shell resolves in production.
+    // The container screen's client-side default title — included as a
+    // cross-check that this list agrees with a key the shell resolves in
+    // production.
     ("container.inventory", "Inventory"),
 ];
 
@@ -101,12 +101,10 @@ fn resolve(text: &Text) -> String {
     lodestone_game::text::resolve_to_string(text, &lang.translator())
 }
 
-/// `/gamemode creative` on yourself — `GameModeCommand.java`:
-///
-/// ```java
-/// Component mode = Component.translatable("gameMode." + newType.getName());
-/// source.sendSuccess(() -> Component.translatable("commands.gamemode.success.self", mode), true);
-/// ```
+/// `/gamemode creative` on yourself — vanilla's gamemode-change feedback: the
+/// mode name is itself a translated component (`"gameMode." + <mode name>`),
+/// and that nested component is passed as the sole argument to
+/// `"commands.gamemode.success.self"`.
 ///
 /// The **nesting** is what makes this worth asserting rather than a string
 /// compare: the argument is itself a translate component, so a resolver that
@@ -135,8 +133,9 @@ fn gamemode_success_self_resolves_to_vanillas_sentence() {
     assert_ne!(resolve(&message), "Set own game mode to creative");
 }
 
-/// `/gamemode` on someone else — `GameModeCommand.java`,
-/// `translatable("commands.gamemode.success.other", target.getDisplayName(), mode)`.
+/// `/gamemode` on someone else — vanilla's gamemode-change-other feedback,
+/// `"commands.gamemode.success.other"` with the target's display name as the
+/// first argument and the (nested, translated) mode name as the second.
 ///
 /// Two same-typed arguments in a pattern that reads naturally **either way
 /// round**, which is exactly the case an order mistake survives review in: "Set
@@ -162,8 +161,8 @@ fn gamemode_success_other_puts_the_player_first_and_the_mode_second() {
     );
 }
 
-/// `/give` — `GiveCommand.java`,
-/// `translatable("commands.give.success.single", count, prototypeItemStack.getDisplayName(), <target>)`.
+/// `/give` — vanilla's give feedback, `"commands.give.success.single"` with
+/// the count, the given stack's display name, and the target as arguments.
 ///
 /// The middle argument is the item's **display name**, not its id. That is the
 /// substantive difference from what the server sends today
@@ -184,7 +183,7 @@ fn give_success_single_uses_the_items_display_name_not_its_id() {
     assert_ne!(resolve(&message), "Gave 3 minecraft:diamond_sword to Steve");
 }
 
-/// `/gamerule` set and query — `GameRuleCommand.java` / `:52`. Two keys whose
+/// `/gamerule` set and query — vanilla's two gamerule-feedback keys, whose
 /// *only* difference is "is now" versus "is currently", so a wrong key here is
 /// invisible unless both are pinned.
 #[test]
@@ -208,12 +207,9 @@ fn gamerule_set_and_query_are_two_different_sentences() {
     assert_ne!(resolve(&set), resolve(&query));
 }
 
-/// Where the **italics** live: `CommandSourceStack.java`.
-///
-/// ```java
-/// Component broadcast = Component.translatable("chat.type.admin", this.getDisplayName(), message)
-///     .withStyle(ChatFormatting.GRAY, ChatFormatting.ITALIC);
-/// ```
+/// Where the **italics** live: vanilla builds the op-broadcast message as
+/// `"chat.type.admin"` with the source's display name and the feedback
+/// message as arguments, then styles the *whole* broadcast grey and italic.
 ///
 /// So a command's feedback is *not* italic to the caller — the op **broadcast**
 /// is, and grey with it. Asserted on the resolved spans rather than on the tree,

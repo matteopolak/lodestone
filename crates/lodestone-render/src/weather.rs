@@ -536,8 +536,8 @@ impl WeatherProbe for FullBrightRainProbe {
     }
 }
 
-/// Vanilla's default `weatherRadius` option (`Options.java`'s
-/// `weatherRadius`, exposed in this shell's options menu as
+/// Vanilla's default `weatherRadius` option (its own
+/// `weatherRadius` settings field, exposed in this shell's options menu as
 /// "Weather Effect Radius" — `crates/lodestone-shell/src/menu/options.rs:496`).
 ///
 /// 10 columns each way is 441 columns, which is what keeps this a cheap pass. It
@@ -545,7 +545,8 @@ impl WeatherProbe for FullBrightRainProbe {
 /// [`column_offset_table`]; [`extract_columns`] clamps rather than panicking.
 pub const DEFAULT_WEATHER_RADIUS: i32 = 10;
 
-/// Vanilla's per-column random seed (`WeatherEffectRenderer.java:80`).
+/// Vanilla's per-column random seed, from the weather-effect renderer's own
+/// per-column seed function.
 ///
 /// Reproduced with wrapping arithmetic because the Java expression overflows
 /// `int` for most `x`/`z` and relies on it; `as i32` on a widened product would
@@ -603,7 +604,7 @@ impl ColumnRandom {
     }
 }
 
-/// Build a rain column (`WeatherEffectRenderer.createRainColumnInstance`, `:163-172`).
+/// Build a rain column (vanilla's weather-effect renderer's rain-column builder).
 #[must_use]
 pub fn rain_column(
     random: &mut ColumnRandom,
@@ -631,7 +632,7 @@ pub fn rain_column(
     }
 }
 
-/// Build a snow column (`WeatherEffectRenderer.createSnowColumnInstance`, `:174-184`).
+/// Build a snow column (vanilla's weather-effect renderer's snow-column builder).
 ///
 /// The light boost is vanilla's: each half of the packed byte becomes
 /// `(l * 3 + 15) / 4`, i.e. snow is lit three-quarters of the way to full bright
@@ -755,10 +756,10 @@ pub fn extract_columns(
     columns
 }
 
-/// Vanilla's rain max alpha (`WeatherEffectRenderer.java:133`).
+/// Vanilla's rain max alpha, from the weather-effect renderer's instance builder.
 pub const RAIN_MAX_ALPHA: f32 = 1.0;
 
-/// Vanilla's snow max alpha (`:134`) — snow is drawn 20% more transparent.
+/// Vanilla's snow max alpha, same instance builder — snow is drawn 20% more transparent.
 pub const SNOW_MAX_ALPHA: f32 = 0.8;
 
 /// One column's quad, ready for the vertex buffer.
@@ -778,7 +779,8 @@ pub struct WeatherInstance {
     pub shade: [f32; 4],
 }
 
-/// Turn one column into its quad (`WeatherEffectRenderer.renderInstances`, `:186-222`).
+/// Turn one column into its quad (vanilla's weather-effect renderer's instance
+/// builder).
 ///
 /// `offsets` must be [`column_offset_table`]. The distance fade is vanilla's:
 /// alpha runs from the kind's max at the camera to `0.5` at the radius, then the
@@ -837,8 +839,8 @@ pub fn rain_count(columns: &[WeatherColumn]) -> usize {
         .count()
 }
 
-/// The looping rain ambience, driven exactly as `ClientLevel.tickWeatherEffects`
-/// drives it (`ClientLevel.java:383-392`).
+/// The looping rain ambience, driven exactly as vanilla's per-level
+/// weather-effect tick function drives it.
 ///
 /// Not a true looped voice: vanilla's rain is a **repeated one-shot** gated on a
 /// counter, and `weather.rain` is an 8-sample set
@@ -866,7 +868,7 @@ pub struct RainSound {
     pub pitch: f32,
 }
 
-/// `weather.rain` played at the listener's own level (`ClientLevel.java:390`).
+/// `weather.rain` played at the listener's own level.
 pub const RAIN_SOUND_NEAR: RainSound = RainSound {
     name: "weather.rain",
     volume: 0.2,
@@ -874,7 +876,7 @@ pub const RAIN_SOUND_NEAR: RainSound = RainSound {
 };
 
 /// `weather.rain.above` — the muffled variant for rain landing on a roof above
-/// the player (`ClientLevel.java:388`).
+/// the player.
 pub const RAIN_SOUND_ABOVE: RainSound = RainSound {
     name: "weather.rain.above",
     volume: 0.1,
@@ -935,13 +937,13 @@ mod tests {
         assert_eq!(
             w.rain_level(),
             0.0,
-            "vanilla's ClientPacketListener.java:1543 sets 0.0 on START_RAINING"
+            "vanilla's packet-listener sets 0.0 on START_RAINING"
         );
         w.apply_raining(false);
         assert_eq!(
             w.rain_level(),
             1.0,
-            "vanilla's ClientPacketListener.java:1545 sets 1.0 on STOP_RAINING"
+            "vanilla's packet-listener sets 1.0 on STOP_RAINING"
         );
         // …and the control that the level is genuinely writable the other way,
         // which is what makes the inversion harmless in practice: the server
@@ -958,10 +960,10 @@ mod tests {
         assert_eq!(w.raw_thunder_level(), 0.8);
         assert!(
             (w.thunder_level() - 0.4).abs() < 1e-6,
-            "getThunderLevel multiplies by the rain level (Level.java:918)"
+            "vanilla's thunder-level accessor multiplies by the rain level"
         );
         // A stale non-zero thunder level with no rain must be inert — this is the
-        // join case (PlayerList.java:654-656 sends all three unconditionally).
+        // join case (vanilla's player-list join logic sends all three unconditionally).
         w.apply_rain_level(0.0);
         assert_eq!(w.thunder_level(), 0.0);
         w.apply_rain_level(5.0);
@@ -976,11 +978,11 @@ mod tests {
         w.apply_rain_level(0.1);
         assert!(
             w.any_precipitation(),
-            "the renderer extracts on > 0.0 (WeatherEffectRenderer.java:64)"
+            "the weather-effect renderer extracts on > 0.0"
         );
         assert!(
             !w.is_raining(),
-            "but Level.isRaining is > 0.2 (Level.java:947) — conflating them pops"
+            "but vanilla's is-raining check is > 0.2 — conflating them pops"
         );
     }
 
@@ -1035,7 +1037,7 @@ mod tests {
             after_rain + (WEATHER_SKY_LIGHT_FLOOR - after_rain) * THUNDER_SKY_LIGHT_ALPHA;
         assert!(
             (got - correct).abs() < 1e-5,
-            "expected {correct} (WeatherAttributes.java:49-50 subtracts thunder from rain), \
+            "expected {correct} (vanilla's weather attributes subtract thunder from rain), \
              got {got}; the double-counted hypothesis is {double_counted}"
         );
         assert!(
@@ -1075,7 +1077,7 @@ mod tests {
         assert_eq!(
             weather_sky_light_factor(0.24, &w),
             1.0,
-            "ClientLevel.java:268 forces SKY_LIGHT_FACTOR to 1.0 during a flash"
+            "vanilla's per-level tick forces SKY_LIGHT_FACTOR to 1.0 during a flash"
         );
         for _ in 0..LIGHTNING_FLASH_TICKS {
             assert!(w.flashing());
@@ -1157,7 +1159,7 @@ mod tests {
         assert_eq!(
             precipitation_for_temperature(true, 0.15),
             Precipitation::Rain,
-            "the threshold is inclusive (Biome.java:176 is `>=`)"
+            "the threshold is inclusive (vanilla's biome check is `>=`)"
         );
         assert_eq!(
             precipitation_for_temperature(true, 0.149),
@@ -1395,7 +1397,7 @@ mod tests {
         assert!(
             v1 > v0,
             "the top of the column must take the larger V (bottom_y*0.25 vs \
-             top_y*0.25, WeatherEffectRenderer.java:214-215): v0={v0} v1={v1}"
+             top_y*0.25, per the weather-effect renderer's instance builder): v0={v0} v1={v1}"
         );
         assert!((v1 - v0 - 5.0).abs() < 1e-5, "20 blocks * 0.25 = 5 tiles");
     }

@@ -1,5 +1,5 @@
 //! Posing a **living entity** into a 2-D GUI rect — vanilla's
-//! `InventoryScreen.extractEntityInInventoryFollowsMouse`, i.e. the player
+//! inventory-screen entity-follows-mouse extraction function, i.e. the player
 //! standing in the inventory panel with their head tracking the cursor.
 //!
 //! This is the entity counterpart of [`item_render`](crate::item_render): pure
@@ -13,7 +13,7 @@
 //!
 //! # The record definition
 //!
-//! `InventoryScreen.java:104-140` (26.2), read rather than summarised:
+//! Vanilla's inventory-screen entity-placement function (26.2), read rather than summarised:
 //!
 //! ```text
 //! centerX = (x0 + x1) / 2      xAngle = atan((centerX - mouseX) / 40)
@@ -27,7 +27,8 @@
 //! ```
 //!
 //! **`bodyRot` and `yRot` are not the same kind of number, and reading them as
-//! two absolute yaws 180° apart is the trap.** `LivingEntityRenderer.java:246`
+//! two absolute yaws 180° apart is the trap.** Vanilla's living-entity render-state
+//! extraction function
 //! fills the render state with `state.yRot = wrapDegrees(headRot - state.bodyRot)`
 //! — `yRot` is the head yaw *relative to the body* (vanilla's `netHeadYaw`),
 //! `bodyRot` is absolute. So the assignment above puts the body at `180 + a` and
@@ -39,11 +40,12 @@
 //!
 //! # Why there is no offscreen texture here
 //!
-//! 26.2 renders this through `PictureInPictureRenderer`: an offscreen
+//! 26.2 renders this through its picture-in-picture renderer base class: an offscreen
 //! `(x1-x0) * guiScale × (y1-y0) * guiScale` colour+depth pair, an ortho over
 //! *that* texture, then a premultiplied-alpha blit into the rect. Its model-view
 //! is `translate(w/2, h/2, 0) · scale(s, s, -s)` with `s = guiScale * size`
-//! (`PictureInPictureRenderer.java:47-49`, `GuiEntityRenderer.getTranslateY`).
+//! (that base class's setup function, and vanilla's GUI-entity-renderer
+//! translate-Y accessor).
 //!
 //! Every term there is proportional to `guiScale`, so the whole thing collapses
 //! to one matrix in **logical** GUI pixels with `s = size` — which is the space
@@ -58,7 +60,7 @@
 //! [`gui_entity_pose`] composes vanilla's `rotateZ(PI)` over
 //! [`entity_model_matrix`]'s `scale(-1, -1, 1)`, and `Rz(π) · S(-1,-1,1) = I` at
 //! zero mouse offset. That is not a coincidence to optimise away — it is *why*
-//! vanilla rotates by π at all: `LivingEntityRenderer` flips the rig so a
+//! vanilla rotates by π at all: vanilla's living-entity renderer flips the rig so a
 //! `+Y`-up world can draw a `Y`-**down** mesh, and the GUI is already `y`-down,
 //! so the flip has to be undone. Cancelling them leaves the baked mesh's own
 //! `Y`-down frame mapping directly onto GUI `y`-down: head up, feet down.
@@ -82,29 +84,31 @@ use crate::entity_anim::AnimInput;
 
 /// The `40.0` in `atan((centerX - mouseX) / 40.0F)` — how many GUI pixels of
 /// cursor travel amount to one radian of raw look angle before the `20`
-/// multiplier. `InventoryScreen.java:118-119`.
+/// multiplier. Vanilla's inventory-screen entity-placement function.
 pub const MOUSE_ANGLE_DIVISOR: f32 = 40.0;
 
 /// The `20.0F` every look angle is multiplied by. Vanilla multiplies the
 /// **radian** output of `atan` by this and then treats the product as
-/// *degrees* (`InventoryScreen.java:121,125-128`) — a genuine unit mix in the
+/// *degrees* (same inventory-screen entity-placement function) — a genuine unit mix in the
 /// original, reproduced verbatim rather than "corrected", because correcting it
 /// would change the swivel by a factor of `180/π`.
 pub const LOOK_ANGLE_SCALE_DEG: f32 = 20.0;
 
-/// `InventoryScreen`'s own recess: the avatar rect is
+/// Vanilla's inventory screen's own recess: the avatar rect is
 /// `(leftPos + 26, topPos + 8)` to `(leftPos + 75, topPos + 78)`
-/// (`InventoryScreen.java:101`), i.e. this offset and [`INVENTORY_RECT_SIZE`].
+/// (same entity-placement function), i.e. this offset and [`INVENTORY_RECT_SIZE`].
 pub const INVENTORY_RECT_OFFSET: [f32; 2] = [26.0, 8.0];
 
 /// The size half of [`INVENTORY_RECT_OFFSET`]: `75 - 26` by `78 - 8`.
 pub const INVENTORY_RECT_SIZE: [f32; 2] = [49.0, 70.0];
 
-/// `InventoryScreen`'s `size` argument, `30` (`InventoryScreen.java:101`) — GUI
+/// Vanilla's inventory screen's `size` argument, `30` (same entity-placement
+/// function) — GUI
 /// pixels per block of entity height.
 pub const INVENTORY_SIZE: f32 = 30.0;
 
-/// `InventoryScreen`'s `offsetY`, `0.0625F` (`InventoryScreen.java:101`) — one
+/// Vanilla's inventory screen's `offsetY`, `0.0625F` (same entity-placement
+/// function) — one
 /// sixteenth of a block of extra lift, in *entity* units, applied on top of
 /// `boundingBoxHeight / 2`.
 pub const INVENTORY_OFFSET_Y: f32 = 0.0625;
@@ -120,17 +124,17 @@ pub const INVENTORY_OFFSET_Y: f32 = 0.0625;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GuiEntityLook {
     /// Absolute body yaw in degrees, Minecraft convention (`0` faces `+Z`) —
-    /// vanilla's `LivingEntityRenderState.bodyRot`, `180 + xAngle * 20`. `180`
+    /// vanilla's living-entity render state's body-rotation field, `180 + xAngle * 20`. `180`
     /// is "turned to face the viewer".
     pub body_yaw_deg: f32,
     /// Head yaw **relative to the body**, in degrees — vanilla's
-    /// `LivingEntityRenderState.yRot`, which
-    /// `LivingEntityRenderer.extractRenderState` defines as
+    /// living-entity render state's y-rotation field, which
+    /// vanilla's living-entity render-state extraction function defines as
     /// `wrapDegrees(headRot - bodyRot)`. Feeds [`AnimInput::head_yaw_deg`]
     /// directly, same convention, same sign.
     pub head_yaw_deg: f32,
     /// Head pitch in degrees, positive looking **down** — vanilla's
-    /// `LivingEntityRenderState.xRot`, `-yAngle * 20`, forced to `0` for a
+    /// living-entity render state's x-rotation field, `-yAngle * 20`, forced to `0` for a
     /// `FALL_FLYING` pose. Feeds [`AnimInput::head_pitch_deg`].
     ///
     /// This is the field that makes the eyes follow the cursor vertically, and
@@ -139,8 +143,8 @@ pub struct GuiEntityLook {
     /// The `rotateX` folded into the *view*, in degrees: `+yAngle * 20`, the
     /// exact negation of [`head_pitch_deg`](Self::head_pitch_deg) — and
     /// **not** zeroed while fall-flying, because vanilla builds `rotation`
-    /// before it ever looks at the pose (`InventoryScreen.java:120-122` vs
-    /// `:127-131`).
+    /// before it ever looks at the pose (its inventory-screen entity-placement
+    /// function).
     pub camera_pitch_deg: f32,
 }
 
@@ -189,14 +193,14 @@ pub fn gui_entity_look(rect_px: [f32; 4], mouse_px: [f32; 2], fall_flying: bool)
 /// T(centre of rect) · S(size, size, -size) · T(0, bb_height/2 + offset_y, 0) · Rz(π) · Rx(camera pitch)
 /// ```
 ///
-/// Read right to left that is vanilla's stack order: `GuiEntityRenderer`'s
+/// Read right to left that is vanilla's stack order: its GUI-entity-renderer's
 /// `translate(translation)` then `mulPose(rotation)` sit *inside*
-/// `PictureInPictureRenderer`'s `translate(w/2, h/2, 0)` then
+/// its picture-in-picture renderer base class's `translate(w/2, h/2, 0)` then
 /// `scale(s, s, -s)`, and a `PoseStack` right-multiplies.
 ///
 /// Separate from [`gui_entity_pose`] so a caller can pose something that is not
-/// placed by [`entity_model_matrix`] (a block-entity rig, a bare `Model.Simple`
-/// as `GuiGraphicsExtractor.skin` does) against the same view.
+/// placed by [`entity_model_matrix`] (a block-entity rig, a bare model
+/// as vanilla's GUI-graphics skin-drawing function does) against the same view.
 #[must_use]
 pub fn gui_entity_view(
     rect_px: [f32; 4],
@@ -267,7 +271,7 @@ mod tests {
     use crate::entity::{EntityModelSet, MODEL_FEET_OFFSET, player_model_name};
     use crate::gui_ortho;
 
-    /// `InventoryScreen`'s rect at a panel origin of `(0, 0)`, derived from the
+    /// Vanilla's inventory screen's rect at a panel origin of `(0, 0)`, derived from the
     /// published constants rather than restated.
     const RECT: [f32; 4] = [
         INVENTORY_RECT_OFFSET[0],
@@ -471,7 +475,7 @@ mod tests {
     /// Project a mesh point to **logical GUI pixels** through `m`, by inverting
     /// [`gui_ortho`]'s NDC mapping. Asserting in pixels rather than NDC is what
     /// lets the failure message print a rect the reader can compare against
-    /// `InventoryScreen`'s own numbers.
+    /// vanilla's inventory screen's own numbers.
     fn to_gui_px(m: Mat4, p: Vec3) -> [f32; 2] {
         let c = m * p.extend(1.0);
         let ndc = c.truncate() / c.w;
