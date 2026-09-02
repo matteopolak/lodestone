@@ -120,7 +120,8 @@ const EAST: (i32, i32) = (1, 0);
 ///    `ConfiguredFeature::Unsupported` stubs with real placers. A stub silently
 ///    consumed zero RNG draws; a real placer draws and mutates the shared per-source
 ///    overlay, so every feature *downstream of it in the same step* now lands
-///    somewhere else than it used to — exactly the mechanism `#513` exercised before
+///    somewhere else than it used to — exactly the mechanism the earlier
+///    decoration-step landing exercised before
 ///    it (see the paragraph below), just with a different set of newly-real feature
 ///    types. Measured in isolation (`git worktree` at each commit, same fixture, same
 ///    binary): before these two landings the total was the previous pin, 64; after

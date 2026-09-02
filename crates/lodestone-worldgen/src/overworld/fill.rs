@@ -16,7 +16,7 @@ use crate::surface::{PreState, SurfaceDiff};
 use super::{OverworldGenerator, PreOreResult};
 
 /// The real aquifer's eight router outputs plus its positional RNG factory,
-/// pre-built once (issue #295) from the same shared [`Builder`] that builds
+/// pre-built once from the same shared [`Builder`] that builds
 /// `final_density`/surface/climate, so every slot index they reference shares
 /// one address space with [`OverworldGenerator::slot_count`] (captured *after*
 /// every `builder.build()` call in [`OverworldGenerator::new`], which is
@@ -54,14 +54,14 @@ impl OverworldGenerator {
         let base_z = cz * 16;
 
         let aquifer = self.build_aquifer(cx, cz);
-        // Issue #514's S3. Built here rather than passed in because the *only*
+        // Structure placement's S3. Built here rather than passed in because the *only*
         // consumer is the fill below, and it must be built from this chunk's own
         // refs — a beardifier from a neighbouring chunk has a different junction
         // window and a different affected box.
         let beard = self.beardifier_for(cx, cz);
         let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
         let heights = self.heights_from_field(&field);
-        // Issue #512: the 4x4x4 grid is now the primary biome product and the
+        // The 4x4x4 grid is now the primary biome product and the
         // 16-entry surface array is read out of it. Two separate sample passes
         // would be two chances to diverge; see `biome_stage`.
         let biome_cells = self.biome_cells_stage(base_x, base_z);
@@ -70,7 +70,7 @@ impl OverworldGenerator {
 
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
-        // Issue #514's S2. A no-op (and free) for a generator with no structure
+        // Structure placement's S2. A no-op (and free) for a generator with no structure
         // data, which is every fixture resolver in this workspace.
         let world = self.structure_place_stage(cx, cz, world);
 
@@ -110,15 +110,16 @@ impl OverworldGenerator {
         )
     }
 
-    /// Stage 1 (issue #295): `fillFromNoise` — shape + the **real** aquifer,
+    /// Stage 1: `fillFromNoise` — shape + the **real** aquifer,
     /// replacing the sea-level approximation this generator used before.
     /// Returns a `16×height×16` dense field of [`BlockKind`] indexed by
     /// [`Self::idx`].
     ///
-    /// # The two loops, and why they are two (issue #514's S3)
+    /// # The two loops, and why they are two
     ///
-    /// `beard` is vanilla's `add(finalDensity, BeardifierMarker)`
-    /// (`NoiseChunk.java:157`). For an **empty** beardifier — every chunk with no
+    /// `beard` is vanilla's structure-adaptation density term, added directly
+    /// onto the final noise-router density before the solidity check. For an
+    /// **empty** beardifier — every chunk with no
     /// adaptation-bearing structure within reach, which is the overwhelming
     /// majority of the world — this runs the *original* loop, calling
     /// [`AquiferSystem::block_at`] with no addition at all.
@@ -195,7 +196,7 @@ impl OverworldGenerator {
     /// Returns a **sparse diff** (see [`SurfaceSystem::build_surface`]): only
     /// the positions a surface rule actually rewrote.
     ///
-    /// # This stage was 92% of the pipeline's allocations (issue #501, U21)
+    /// # This stage was 92% of the pipeline's allocations
     ///
     /// Measured over a 3×3 cold sweep at seed 42 with real `GlobalAlloc` calls
     /// binned by innermost stage (`tests/ore_alloc_attribution.rs`), the three
@@ -280,7 +281,7 @@ impl OverworldGenerator {
     }
 
     /// Materialises the full `16×height×16` post-surface column into a
-    /// dense, world-anchored grid (issue #295's Job 2 —
+    /// dense, world-anchored grid (this change's Job 2 —
     /// [`crate::dense_grid::DenseBlockGrid`], not a `HashMap`) — the shape
     /// [`crate::carver::apply_carvers`] consumes via [`CarveGrid::from_dense`].
     /// Seeded from `field` (the same solid/fluid/air default
@@ -306,7 +307,7 @@ impl OverworldGenerator {
         );
         // `surface_diff` is consulted by **point lookup**, in the same fixed
         // `(lz, lx, ly)` order as the base fill below — never iterated
-        // directly. This was a real bug (issue #295's Job 2, found by
+        // directly. This was a real bug (this change's Job 2, found by
         // `worldgen_data::tests::column_is_byte_identical_across_two_independently_constructed_generators`):
         // a `DenseBlockGrid`'s palette is built incrementally, in `.set()`
         // call order, unlike the old `HashMap<(i32,i32,i32), String>` `world`
@@ -329,7 +330,7 @@ impl OverworldGenerator {
         // this deletes 98,304 block-state *string* hashes per chunk and changes
         // nothing else — the palette is still appended in this loop's order,
         // which is the property the comment above is about.
-        // Issue #496: `OreVeinifier`. Bound to this chunk once, outside the loop,
+        // The ore-vein sampler. Bound to this chunk once, outside the loop,
         // because `vein_toggle`/`vein_ridged` are `minecraft:interpolated` and the
         // sampler's cell caches are per-chunk — see `super::veins`.
         let veins = self
@@ -346,8 +347,8 @@ impl OverworldGenerator {
                         BlockKind::Lava => self.default_lava_pre.state,
                         BlockKind::Air => crate::interner::StateId::AIR,
                     };
-                    // Veins replace the *default block* only: vanilla's
-                    // `MaterialRuleList` reaches `OreVeinifier` after the aquifer
+                    // Veins replace the *default block* only: vanilla's material
+                    // rule chain reaches vein replacement after the aquifer
                     // and only where it returned that block, never over air or a
                     // fluid.
                     let vein_state = if base == self.default_block_pre.state {
@@ -358,10 +359,10 @@ impl OverworldGenerator {
                         None
                     };
                     // **A vein wins over the surface diff, and that is not an
-                    // ordering shortcut.** Vanilla runs `buildSurface` *after* the
-                    // fill that placed the vein, but `SurfaceSystem.buildSurface`
-                    // opens with `if (old == this.defaultBlock)`
-                    // (`SurfaceSystem.java:151`) — a cell holding copper ore or
+                    // ordering shortcut.** Vanilla runs surface building *after* the
+                    // fill that placed the vein, but that pass opens by comparing
+                    // the cell against the default block before applying any rule
+                    // — a cell holding copper ore or
                     // granite is not the default block, so every surface rule skips
                     // it. Applying the diff unconditionally here was measured to
                     // erase **every** vein cell: the overworld surface rules write
@@ -385,7 +386,7 @@ impl OverworldGenerator {
         world
     }
 
-    /// Stage 4 (issue #295): `applyCarvers` over the post-surface world grid.
+    /// Stage 4: `applyCarvers` over the post-surface world grid.
     /// `heights`/`biome_quarts` feed the dirt-recap `top_material` callback
     /// (a carved grass block re-caps the dirt exposed beneath it with the
     /// *local* biome's surface material, looked up via `biome_quarts` since

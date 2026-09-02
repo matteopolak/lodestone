@@ -41,7 +41,7 @@ use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
 use super::OverworldGenerator;
 
 impl OverworldGenerator {
-    /// Stage 5 (issue #295): the real `UNDERGROUND_ORES` 3×3 neighbourhood
+    /// Stage 5: the real `UNDERGROUND_ORES` 3×3 neighbourhood
     /// driver (`crate::feature::apply_ore_step_3x3_per_source`). Builds the
     /// driven region (centre plus its 8 neighbours, each via
     /// [`Self::pre_ore_stage`]) and the `OCEAN_FLOOR_WG` heightmap over the
@@ -54,7 +54,7 @@ impl OverworldGenerator {
     ///
     /// No-op (returns `center_world` unchanged) when the resolver supplied no
     /// biome carries any ore data (`ores_by_biome` all-empty) — the same
-    /// "no data supplied" convention every other #295 resolver method
+    /// "no data supplied" convention every other resolver method
     /// follows, and the one every existing `Resolver` that predates this
     /// increment (most of this crate's own test fixtures) still gets.
     pub(super) fn ore_stage(
@@ -280,7 +280,7 @@ impl OverworldGenerator {
         }
     }
 
-    /// Stage 6 (issue #406, cross-chunk spill closed by issue #427):
+    /// Stage 6:
     /// `VEGETAL_DECORATION`, over the real 3×3 `center ± 1` neighbourhood —
     /// [`crate::feature::vegetation::apply_vegetal_decoration_step_3x3_per_source`],
     /// the same [`Self::ore_stage`] shape applied to vegetal decoration
@@ -299,7 +299,7 @@ impl OverworldGenerator {
     /// 9×). Biome (and therefore feature list) is resolved per-source from
     /// that source's own **surface-height** biome — [`Self::biome_stage`]'s
     /// per-quart map, quart 0 (the source's min-block corner) — **not**
-    /// [`Self::biome_for_carver_source`]'s y=0 answer: issue #480, the
+    /// [`Self::biome_for_carver_source`]'s y=0 answer: this change, the
     /// `crate::biome` module doc's "y = 0 trap" (at y=0 the `depth` gradient
     /// is already ≈ +1.0, so surface dark_forest chunks resolved as lush_caves
     /// and decorated with that biome's all-silent feature list). Vegetation
@@ -308,9 +308,9 @@ impl OverworldGenerator {
     /// convention (their own deliberate, different question).
     ///
     /// No-op (returns `world` unchanged) when the resolver supplied no biome
-    /// with a vegetation step, matching every other #295/#406/#427 resolver
-    /// "no data supplied" convention.
-    /// Issue #520 widened the return: the second element is the block entities
+    /// with a vegetation step, matching every other resolver's "no data
+    /// supplied" convention.
+    /// The return was later widened: the second element is the block entities
     /// decoration produced **inside the served 16x16**, in write order. Spill into a
     /// neighbour is dropped here for the same reason a spilled *block* is — the
     /// neighbour's own pass produces its own copy, and keeping both would double it.
@@ -410,7 +410,7 @@ impl OverworldGenerator {
         );
 
         let features_for_source = |source_x: i32, source_z: i32| -> &[(i32, usize, crate::feature::vegetation::PlacedRef)] {
-            // Issue #480: resolve the per-source feature list from the source
+            // Resolve the per-source feature list from the source
             // chunk's own SURFACE-HEIGHT biome — [`Self::biome_stage`]'s
             // per-quart map, quart 0 = the source's min-block corner sampled
             // at its own generated surface height — **not** the y=0
@@ -419,7 +419,7 @@ impl OverworldGenerator {
             // a surface dark_forest chunk resolved as lush_caves and decorated
             // with lush_caves' feature list (vines/vegetation_patch/
             // root_system — all silent no-ops), meaning dark_forest's own step
-            // (including the 66.7%-weight dark oak branch, issue #428) never
+            // (including the 66.7%-weight dark oak branch, this change) never
             // ran. The source's `PreOreResult` is already in
             // [`Self::pre_ore_cache`] from the stitching loop above
             // (each neighbour's `post_ore_world` ran its own `pre_ore_stage`),
@@ -430,7 +430,7 @@ impl OverworldGenerator {
         };
 
         // Vegetal decoration draws from the SAME per-chunk `WorldgenRandom`
-        // shape every #295/#427 decoration stage uses (`set_decoration_seed`
+        // shape every decoration stage uses (`set_decoration_seed`
         // then per-feature `set_feature_seed`) — the fresh `XoroshiroRandomSource::new(0)`
         // seed here is a throwaway carrier state; only `set_decoration_seed`'s
         // own derivation (which mixes in `self.seed` and each source's own
@@ -493,7 +493,7 @@ impl OverworldGenerator {
         for (x, y, z, state) in grid.dirty_cell_ids() {
             world.set_id(x, y, z, state);
         }
-        // Issue #520. Filtered to the served chunk exactly as the fold-back above
+        // Filtered to the served chunk exactly as the fold-back above
         // is: `DenseBlockGrid::set` silently drops an out-of-box write, so the block
         // half needs no explicit test; this half does.
         let block_entities = grid
@@ -507,7 +507,7 @@ impl OverworldGenerator {
         (world, block_entities)
     }
 
-    /// Stage 7 (issue #404's U2): the `TOP_LAYER_MODIFICATION` step —
+    /// Stage 7: the `TOP_LAYER_MODIFICATION` step —
     /// `freeze_top_layer`'s snow layers and surface ice, over the finished
     /// post-vegetation world.
     ///

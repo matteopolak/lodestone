@@ -10,7 +10,7 @@
 //! references arrive through a [`Resolver`], exactly as the parity tests supply
 //! them, so the engine stays version-free (plan §3).
 //!
-//! # Composed pipeline (issue #295), and vanilla's own order
+//! # Composed pipeline, and vanilla's own order
 //!
 //! `NoiseBasedChunkGenerator`'s real order is `fillFromNoise` (shape + the real
 //! aquifer, the aquifer participating *inside* fill rather than after it) ->
@@ -21,14 +21,15 @@
 //!    `final_density` field *and* the real aquifer's barrier/floodedness/
 //!    spread/lava routing together (`computeSubstance`), the same code
 //!    `aquifer_parity` proves block-for-block against the JVM. This replaces
-//!    the sea-level-only fluid approximation this generator used before #295:
-//!    underground water/lava pockets now come from the real aquifer, not just
+//!    the sea-level-only fluid approximation this generator used before the
+//!    real aquifer landed: underground water/lava pockets now come from the
+//!    real aquifer, not just
 //!    "below sea level ⇒ water."
-//! 2. **Biome** — one climate sample per quart, unchanged from #405 (real
-//!    multi-noise biome variety), now sampling the fill stage's real
+//! 2. **Biome** — one climate sample per quart, unchanged since biome
+//!    sampling first landed (real multi-noise biome variety), now sampling the fill stage's real
 //!    solid-top heightmap.
-//! 3. **Surface** — [`SurfaceSystem::build_surface`], unchanged from #405,
-//!    now consuming the real aquifer's fill instead of the approximation.
+//! 3. **Surface** — [`SurfaceSystem::build_surface`], unchanged since that
+//!    same landing, now consuming the real aquifer's fill instead of the approximation.
 //! 4. **Carve** — [`crate::carver::apply_carvers`] over a materialised
 //!    world-keyed block grid, replicating vanilla's real per-source-chunk
 //!    `carverBiome` resolution (each of the 17×17 source chunks in the carve
@@ -91,7 +92,7 @@
 //! against a real
 //! vanilla JVM.
 //!
-//! # Performance (issue #295's Job 2), and an honest miss
+//! # Performance (this change's Job 2), and an honest miss
 //!
 //! **A correctness bug this refactor introduced, found and fixed before
 //! landing.** A [`crate::dense_grid::DenseBlockGrid`]'s palette is built
@@ -110,7 +111,7 @@
 //! (added as a permanent regression control, no threading involved) after
 //! it was first surfaced by `lodestone-server`'s own
 //! `chunk::tests::parallel_generation_is_deterministic_and_matches_serial`
-//! (issue #414, a different agent's concurrently-landed feature — confirmed
+//! (this change, a different agent's concurrently-landed feature — confirmed
 //! via an isolated `git worktree` at the commit *before* this crate's ore
 //! composition that the failure did not exist there, ruling out a
 //! threading bug in that test's own new code before spending time on it).
@@ -168,7 +169,7 @@
 //! that engine's own signature to a dense grid too is further work, also
 //! not attempted in this pass.
 //!
-//! # Badlands (issue #405's carried-over gap, now closed)
+//! # Badlands (this change's carried-over gap, now closed)
 //!
 //! `minecraft:badlands`/`eroded_badlands`/`wooded_badlands` used to be
 //! excluded from the searchable biome table
@@ -250,7 +251,7 @@ type PreOreResult = (
     Arc<crate::dense_grid::DenseBlockGrid>,
     [i32; 256],
     [(String, bool); 16],
-    // Issue #512: the full 4x4x4 biome grid for this chunk. Behind an `Arc` for
+    // The full 4x4x4 biome grid for this chunk. Behind an `Arc` for
     // the same reason the world is -- `vegetation_stage` pulls eight neighbours'
     // `PreOreResult`s out of the store and must not copy 1,536 cells per
     // neighbour to do it. The 16-entry surface array above is *derived from* this
@@ -274,7 +275,7 @@ type PreOreResult = (
 /// declared *below* it.
 #[derive(Debug, Default)]
 struct ChunkStages {
-    /// Stage 0a (issue #514's S1) — this chunk's own structure starts. **The
+    /// Stage 0a — this chunk's own structure starts. **The
     /// topmost stage**, and the only one whose computation reads no other stage:
     /// see [`structures`]'s module doc for why starts must precede noise, and
     /// [`store`]'s for why "above the stages it consumes" is the rule that keeps
@@ -313,7 +314,7 @@ const COLUMN_CLOSURE_RADIUS: i32 = 2;
 ///
 /// # Why this is not [`COLUMN_CLOSURE_RADIUS`], and what it cost to find out
 ///
-/// Issue #514's S1 added one upstream edge: [`OverworldGenerator::pre_ore_stage`]
+/// Structure placement's S1 added one upstream edge: [`OverworldGenerator::pre_ore_stage`]
 /// reads `structure_refs_stage` for its own chunk, and that stage walks
 /// `structure_starts_stage` over [`structures::REFS_RADIUS`] = 8 chunks in every
 /// direction (vanilla's `createReferences` range). Compose that with the 5×5
@@ -356,7 +357,7 @@ const STRUCTURE_CLOSURE_RADIUS: i32 = COLUMN_CLOSURE_RADIUS + structures::REFS_R
 /// it, and also comfortably covers the 12×12 parity sweep's 32×32 = 1,024-chunk
 /// closure.
 ///
-/// **This was 512 and 512 was the pre-#514 derivation** — the same sentence with
+/// **This was 512 and 512 was the derivation from before structure placement landed** — the same sentence with
 /// the pre-ore radius 2 in place of the structure radius 10, giving 441 and 256.
 /// It is on the record in `DESIGN.md` §12.130 as a *measured* regression rather
 /// than a theoretical one: at 512 the 12×12 sweep recomputed `pre_ore` 740 times
@@ -418,7 +419,7 @@ pub struct OverworldGenerator {
     /// — not a simplification, this is vanilla's own behaviour.
     default_lava: String,
     /// The three `default_*` strings above as [`PreState`]s — interned id plus
-    /// air/fluid/stone class — resolved once here (issue #501, U21).
+    /// air/fluid/stone class — resolved once here.
     ///
     /// [`Self::surface_stage`]'s `pre` closure and [`Self::materialize_world`]
     /// both need a block-state per position and used to `clone()` / re-hash one
@@ -432,7 +433,7 @@ pub struct OverworldGenerator {
     /// branch differently and still produce a plausible column. The `String`
     /// forms are kept as the definition `surface_stage` re-derives against on
     /// every entry under `debug_assertions`.
-    /// Issue #496: `OreVeinifier`'s three router channels plus its positional RNG,
+    /// The ore-vein sampler's three router channels plus its positional RNG,
     /// or `None` when the settings do not enable veins. Consumed by
     /// [`Self::materialize_world`]. See [`veins`].
     veins: Option<veins::VeinPrograms>,
@@ -441,7 +442,7 @@ pub struct OverworldGenerator {
     default_lava_pre: crate::surface::PreState,
     /// The biome (and its `coldEnoughToSnow` answer) used for every column
     /// when [`Self::dynamic_biome`] is `None` — i.e. exactly the whole-world
-    /// behaviour this generator had before issue #405, kept as the fallback
+    /// behaviour this generator had before this change, kept as the fallback
     /// a [`Resolver`] with no biome data still gets.
     fallback_biome: String,
     fallback_cold_enough_to_snow: bool,
@@ -451,22 +452,22 @@ pub struct OverworldGenerator {
     dynamic_biome: Option<DynamicBiome>,
     seed: i64,
     aquifer_trees: AquiferTrees,
-    /// `#overworld_carver_replaceables` tag closure (issue #295) — which
+    /// `#overworld_carver_replaceables` tag closure — which
     /// blocks a carver is allowed to overwrite. Empty when the [`Resolver`]
     /// supplies no tag data (`Resolver::block_tag`'s default), in which case
     /// `carver::apply_carvers`'s own `can_replace` is always false and
     /// carving becomes a harmless no-op rather than a panic — matching the
-    /// "no data supplied" convention every #295 resolver method establishes.
+    /// "no data supplied" convention every resolver method establishes.
     carver_replaceable: HashSet<String>,
     /// Per-biome carver list, resolved once at construction for every biome
     /// name the [`Resolver`]'s biome-parameter table (or the fallback biome)
     /// can produce — see `crate::compose::build_biome_carvers`.
     carvers_by_biome: HashMap<String, Vec<CarverConfig>>,
-    /// Per-biome `UNDERGROUND_ORES` list (issue #295), resolved the same way
+    /// Per-biome `UNDERGROUND_ORES` list, resolved the same way
     /// and at the same time as `carvers_by_biome` — see
     /// `crate::compose::build_biome_ores`. Empty (whole map) when the
     /// resolver supplies no biome documents with an ore step, in which case
-    /// [`Self::ore_stage`] is a no-op (matches every other #295 resolver
+    /// [`Self::ore_stage`] is a no-op (matches every other resolver
     /// "no data supplied" convention).
     ores_by_biome: HashMap<String, Vec<PlacedOre>>,
     /// Block-tag closures for every tag referenced by any biome's ore
@@ -501,9 +502,9 @@ pub struct OverworldGenerator {
     /// `ores_by_biome` — see `crate::compose::build_biome_decoration`. Empty
     /// (whole map) when the resolver supplies no biome documents with any driven
     /// step, in which case [`Self::vegetation_stage`] is a no-op, matching every
-    /// other #295/#406 resolver "no data supplied" convention.
+    /// other resolver's "no data supplied" convention.
     ///
-    /// **Issue #513 widened this from `VEGETAL_DECORATION` alone to every step in
+    /// **This later widened from `VEGETAL_DECORATION` alone to every step in
     /// `crate::compose::DRIVEN_STEPS`**, so entries now carry their own step index
     /// and the map is no longer one-step-per-biome. The name is unchanged because
     /// [`Self::vegetation_stage`] is still the one stage that consumes it.
@@ -525,7 +526,7 @@ pub struct OverworldGenerator {
     biome_climates: HashMap<String, crate::feature::top_layer::BiomeClimate>,
     /// Per-biome `MobSpawnSettings` — `spawners` and `spawn_costs` — read out of
     /// the same `Resolver::biome_document` walk as `biome_climates`, so it costs
-    /// no extra JSON parse (issue #518, part 1). See
+    /// no extra JSON parse. See
     /// [`crate::spawners`] for the parse and [`Self::biome_spawners`] for the
     /// accessor.
     ///
@@ -539,7 +540,8 @@ pub struct OverworldGenerator {
     spawners_by_biome: HashMap<String, crate::spawners::BiomeSpawners>,
     /// Which biomes list `minecraft:freeze_top_layer` in their
     /// `TOP_LAYER_MODIFICATION` step. In vanilla 26.2 that is **every** biome
-    /// (`BiomeDefaultFeatures.java:413`), so this is not really a filter — it is
+    /// (vanilla's own default per-biome feature registration adds it
+    /// unconditionally), so this is not really a filter — it is
     /// there so a trimmed or modified datapack that omits the step gets a
     /// snow-free world rather than snow this engine invented.
     freeze_biomes: HashSet<String>,
@@ -553,7 +555,7 @@ pub struct OverworldGenerator {
     /// [`Self::top_layer_stage`], and cheap enough (~780 draws) to build
     /// unconditionally.
     climate_noise: crate::noise::ClimateNoise,
-    /// The structure placement engine (issue #514's S1), or `None` when the
+    /// The structure placement engine, or `None` when the
     /// resolver supplied no `structure_set_ids` — which is every fixture resolver
     /// in this workspace, and the reason this unit changes no parity fixture.
     ///
@@ -625,7 +627,7 @@ impl OverworldGenerator {
         let canon = identity_canon(settings);
         // Built here rather than in the `Self { .. }` literal below because
         // `SurfaceSystem::new` interns its whole result-state set into it at
-        // parse time (issue #501) — see that method's own note on why a set
+        // parse time — see that method's own note on why a set
         // walked out of the parsed data cannot drift the way a hand-maintained
         // pre-intern list would.
         let interner = Arc::new(crate::interner::StateInterner::new());
@@ -641,7 +643,7 @@ impl OverworldGenerator {
         let default_fluid =
             canonical_state_from_settings(&settings["default_fluid"], "minecraft:water[level=0]");
         let default_lava = "minecraft:lava[level=0]".to_string();
-        // Issue #496. Built from the same `builder` every other router channel uses,
+        // Built from the same `builder` every other router channel uses,
         // so `vein_toggle`'s slot indices share one address space with
         // `final_density`'s -- the property `slot_count` below depends on.
         let veins = veins::VeinPrograms::build(&builder, settings, &interner);
@@ -663,7 +665,7 @@ impl OverworldGenerator {
             })
         };
 
-        // Aquifer support trees (issue #295) — built via the same shared
+        // Aquifer support trees — built via the same shared
         // `builder` as final_density/surface/climate above; see
         // `AquiferTrees`'s doc comment for why `slot_count` is captured only
         // after every one of these `builder.build()` calls.
@@ -687,7 +689,7 @@ impl OverworldGenerator {
             },
         };
 
-        // Carver-replaceable tag closure (issue #295): without this
+        // Carver-replaceable tag closure: without this
         // populated, every carve write is rejected (`can_replace` always
         // false) — the same trap `CarverOracle.java`'s own header warns
         // about for the isolated oracle.
@@ -702,7 +704,7 @@ impl OverworldGenerator {
             );
         }
 
-        // Per-biome carver composition data (issue #295): resolved once for
+        // Per-biome carver composition data: resolved once for
         // every biome name that can appear (every distinct name in the usable
         // biome table, plus the fallback biome) — a handful of JSON parses at
         // construction time, not one per chunk or per source-chunk. Ore
@@ -717,12 +719,12 @@ impl OverworldGenerator {
         let mut carvers_by_biome = HashMap::new();
         let mut ores_by_biome = HashMap::new();
         let mut vegetation_by_biome = HashMap::new();
-        // Issue #404's U2: the same per-biome document walk also yields each
+        // The same per-biome document walk also yields each
         // biome's `ClimateSettings` and whether it lists `freeze_top_layer`, so
         // `TOP_LAYER_MODIFICATION` composition costs no extra JSON parses.
         let mut biome_climates = HashMap::new();
         let mut freeze_biomes = HashSet::new();
-        // Issue #518 part 1 rides the same walk, for the same reason.
+        // The SPAWN generation's part 1 rides the same walk, for the same reason.
         let mut spawners_by_biome = HashMap::new();
         for name in &biome_names {
             carvers_by_biome.insert(
@@ -756,7 +758,7 @@ impl OverworldGenerator {
         // doc comment for why this is always a safe bound.
         let slot_count = builder.slot_count();
 
-        // Issue #514's S1. Built here, from the same `resolver` borrow every
+        // Structure placement's S1. Built here, from the same `resolver` borrow every
         // other composition table above uses, because the registry parses ~54
         // JSON documents plus their biome-tag closures and must not do that per
         // chunk. An empty `structure_set_ids` (the `Resolver` default) yields
@@ -813,14 +815,14 @@ impl OverworldGenerator {
         }
     }
 
-    /// Issue #518 part 1: one biome's parsed `MobSpawnSettings`, or `None` when
+    /// The SPAWN generation's part 1: one biome's parsed `MobSpawnSettings`, or `None` when
     /// the biome declares no spawner entry and no spawn cost (which includes every
     /// biome a fixture `Resolver` supplies, and any name this generator's biome
     /// table cannot produce).
     ///
     /// Resolved once at construction, so this is a map lookup rather than a JSON
-    /// parse. **Nothing calls it in production** — `crate::spawn_stage` (issue
-    /// #518 part 2) and `lodestone_server::natural_spawn` (parts 3/4) are wired
+    /// parse. **Nothing calls it in production** — `crate::spawn_stage` (the
+    /// SPAWN generation's part 2) and `lodestone_server::natural_spawn` (parts 3/4) are wired
     /// and running, but both read `MobSpawnSettings` through their own copy of
     /// [`crate::spawners::parse_biome_spawners`] rather than through this
     /// generator's cache, so this accessor and [`Self::all_biome_spawners`]
@@ -907,8 +909,9 @@ impl OverworldGenerator {
         self.store.evicted()
     }
 
-    /// Issue #515: whether `(cx, cz)` is a slime chunk for **this generator's**
-    /// seed — `WorldgenRandom.seedSlimeChunk` plus its `nextInt(10) == 0`.
+    /// Whether `(cx, cz)` is a slime chunk for **this generator's**
+    /// seed — vanilla's own slime-chunk RNG seeding, followed by a
+    /// `nextInt(10) == 0` roll.
     ///
     /// A method on the generator rather than a bare function so a caller never has
     /// to know the world seed to ask; the derivation itself is
@@ -917,10 +920,10 @@ impl OverworldGenerator {
     /// transcribed lattice.
     ///
     /// **This has no gameplay consumer yet, and that is the honest state.** Slime
-    /// spawning is blocked on there being a natural spawn cycle at all (#222) and a
-    /// per-species spawn rule table (#221); nothing here can make slimes appear. It
-    /// is a proven predicate waiting for whichever of those lands first, or for the
-    /// F3 chunk-borders overlay (#197) to read it.
+    /// spawning is blocked on there being a natural spawn cycle at all and a
+    /// per-species spawn rule table; nothing here can make slimes appear. It
+    /// is a proven predicate waiting for whichever of those lands first, or for a
+    /// future F3 chunk-borders overlay to read it.
     #[must_use]
     pub fn is_slime_chunk(&self, cx: i32, cz: i32) -> bool {
         crate::rng::is_slime_chunk(cx, cz, self.seed)
@@ -935,12 +938,12 @@ impl OverworldGenerator {
         // guess. Dropped at the end of the call.
         //
         // [`STRUCTURE_CLOSURE_RADIUS`], not [`COLUMN_CLOSURE_RADIUS`]: since
-        // issue #514 the closure is 21×21, and pinning the inner 5×5 of it left
+        // this change the closure is 21×21, and pinning the inner 5×5 of it left
         // the request's own structure-start entries evictable *by the request
         // itself*. See that constant for the measured cost.
         let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
         let cached = self.pre_ore_stage(cx, cz);
-        // Issue #427: routed through `post_ore_world` (which wraps
+        // Routed through `post_ore_world` (which wraps
         // `ore_stage` in `Self::post_ore_cache`) rather than calling
         // `ore_stage` directly, so this chunk's post-ore result is
         // available with no recomputation to any OTHER chunk's
@@ -958,7 +961,7 @@ impl OverworldGenerator {
         // centre source of the in-place region view, and the private mutable copy
         // is taken once at the end. Same one clone, one stage later.
         let (world, block_entities) = self.vegetation_stage(cx, cz, self.post_ore_world(cx, cz));
-        // Issue #404's U2: `TOP_LAYER_MODIFICATION` is vanilla's LAST decoration
+        // `TOP_LAYER_MODIFICATION` is vanilla's LAST decoration
         // step (index 10) and must run after vegetation, because the
         // `MOTION_BLOCKING` height it reads includes leaves and logs — snow sits
         // on a spruce canopy. Running it before vegetation would put snow at the
@@ -1022,7 +1025,7 @@ impl OverworldGenerator {
     /// post-carve world (absolute-coordinate keyed, populated only for its
     /// own 16×16 columns), its heightmap and its biome quarts.
     ///
-    /// Factored out of [`Self::column`] so [`Self::ore_stage`] (issue #295)
+    /// Factored out of [`Self::column`] so [`Self::ore_stage`]
     /// can call it again for each of the 8 neighbour chunks in the ore
     /// driver's 3×3 neighbourhood: vanilla's real `blockStateWriteRadius(1)`
     /// ore spill (`FeatureOracle.java`'s own doc comment,
@@ -1058,7 +1061,7 @@ impl OverworldGenerator {
         entry.pre_ore.get_or_compute(
             crate::counters::bump_pre_ore,
             || {
-                // Issue #514's S1 added the upstream edge to `structure_refs`
+                // Structure placement's S1 added the upstream edge to `structure_refs`
                 // here as a placeholder with a `debug_assert` guarding the gap;
                 // **S3 closed it**, and the edge is now a real data dependency
                 // consumed inside `pre_ore_stage_uncached` →
@@ -1166,7 +1169,7 @@ impl OverworldGenerator {
 
         let t_aquifer_start = lodestone_time::Instant::now();
         let aquifer = self.build_aquifer(cx, cz);
-        // Issue #514's S3, inside the *aquifer* timing bucket rather than given one
+        // Structure placement's S3, inside the *aquifer* timing bucket rather than given one
         // of its own: for a chunk with no adaptation-bearing start in reach this is
         // a store read and an empty `Vec`, and the per-block cost it can add lands
         // in `shape` where it belongs.
@@ -1175,7 +1178,7 @@ impl OverworldGenerator {
         let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
         let heights = self.heights_from_field(&field);
         let t_biome_start = lodestone_time::Instant::now();
-        // Issue #512: same two-line shape as `pre_ore_stage_uncached` — the 4x4x4
+        // Same two-line shape as `pre_ore_stage_uncached` — the 4x4x4
         // grid is sampled and the 16 surface quarts are read out of it, so this
         // timing bucket now covers 96x the samples it used to. That is the point
         // of measuring it here.
@@ -1201,7 +1204,7 @@ impl OverworldGenerator {
         // shared — see there.
         let (world, block_entities) = self.vegetation_stage(cx, cz, Arc::new(world));
         let t_top_layer_start = lodestone_time::Instant::now();
-        // Issue #404's U2. This call is why `StageTimes` grew a field rather
+        // This call is why `StageTimes` grew a field rather
         // than folding another stage into `intern`: `top_layer_stage` is the
         // first stage cheap enough that its cost had to be *measured* to be
         // believed, and `docs/plans/worldgen-parity.md` §6 predicts <5% for it.

@@ -415,7 +415,7 @@ impl<E: Default> StagedStore<E> {
     /// `inserted` flag is always false, and its ceiling check is unreachable in
     /// the game. For one release that meant `reclaim` never ran at all outside
     /// tests and the store grew by 21 entries (~7.9 MiB) per chunk of travel,
-    /// without bound: issue #503, `docs/worldgen-store-distance-leak.md`,
+    /// without bound: this change, `docs/worldgen-store-distance-leak.md`,
     /// DESIGN.md §12.108–§12.109. Hence the ceiling check below.
     ///
     /// # Why the check is after the loop and cannot go inside it
@@ -793,7 +793,7 @@ mod tests {
     /// `overworld::STRUCTURE_CLOSURE_RADIUS`, restated for the same reason. The
     /// 21×21 pin every `column()` call opens.
     ///
-    /// **This was 2 and it had to move.** Issue #514 put a `structure_refs` walk
+    /// **This was 2 and it had to move.** Structure placement put a `structure_refs` walk
     /// (`REFS_RADIUS` = 8) upstream of `pre_ore`, so the real pin is `2 + 8`. A
     /// model at radius 2 is not a cheaper version of production's shape — it is a
     /// 59-entry-per-column shape where production is 1,243, and every number below
@@ -867,7 +867,7 @@ mod tests {
         let join_len = store.len();
 
         // The closure of a 17×17 view is 37×37 = 1,369 (it was 21×21 = 441 before
-        // issue #514 widened the pin). Asserting it here is what says this hermetic
+        // this change widened the pin). Asserting it here is what says this hermetic
         // model reproduces production's geometry rather than some cheaper shape
         // that could not leak in the first place — and it is under the ceiling, so
         // it holds on both arms.

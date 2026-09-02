@@ -1,4 +1,4 @@
-//! Issue #512: the full 4×4×4 biome grid, replacing the vertically-broadcast
+//! The full 4×4×4 biome grid, replacing the vertically-broadcast
 //! 16-quart surface array as the *authoritative* biome answer for a column.
 //!
 //! ## What it is

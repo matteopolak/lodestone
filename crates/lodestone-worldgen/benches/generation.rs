@@ -1,5 +1,5 @@
 //! Chunk-generation benchmarks for the real, JVM-verified overworld pipeline
-//! (issue #78 epic, sub-issues #84/#85). Builds the *real*
+//! (this crate's column- and per-stage-cost benchmark work). Builds the *real*
 //! [`OverworldGenerator`] the same way `tests/overworld_gen.rs` and
 //! `tests/*_parity.rs` do — an `FsResolver` reading the checked-in
 //! `tests/support/worldgen_data` JSON tree — rather than a synthetic stand-in,
@@ -81,7 +81,7 @@ thread_local! {
     ///
     /// ## Per-thread, not a global atomic — and that is not a style choice
     ///
-    /// `lodestone-fuzz/tests/length_prefix_allocation.rs` records (issue #450)
+    /// `lodestone-fuzz/tests/length_prefix_allocation.rs` records
     /// what happens with the obvious design: a bare process-wide
     /// `AtomicU64` let one measurement absorb another thread's allocations, and
     /// the follow-up fix — the same atomic plus a mutex held across each
@@ -606,8 +606,8 @@ fn bench_column_throughput(c: &mut Criterion) {
     // SHAPE-ONLY: this is the noise-router throughput number, deliberately not
     // the composed pipeline's. See `make_shape_only_generator`.
     let generator = make_shape_only_generator(SEED);
-    // A small patch so criterion's sampling stays fast; #84/#87 (region-scale
-    // throughput) are the place for a full render-distance sweep.
+    // A small patch so criterion's sampling stays fast; the region-level
+    // generation benches below are the place for a full render-distance sweep.
     let coords: Vec<(i32, i32)> = (-2..=2).flat_map(|cz| (-2..=2).map(move |cx| (cx, cz))).collect();
 
     // Warm up (touch caches / branch predictor) before either measurement.
@@ -648,11 +648,11 @@ fn bench_column_throughput(c: &mut Criterion) {
     });
 }
 
-/// **Issue #85** — the per-stage cost split, now with **one bucket per stage
+/// **The per-stage cost split** — now with **one bucket per stage
 /// the pipeline actually has**: aquifer, noise router (shape), biome, surface,
 /// materialize, carve, ore, vegetation, top-layer, intern.
 ///
-/// # What this pass changed, and why the previous split was not #85's answer
+/// # What this pass changed, and why the previous split was not the answer
 ///
 /// A four-bucket split already existed here and was recorded to
 /// `bench-results/generation.jsonl`. Two of its four buckets did not measure
@@ -662,7 +662,7 @@ fn bench_column_throughput(c: &mut Criterion) {
 ///   computed inside the shape window.
 /// * `stage_intern_pct` was **materialize + carve + ore + vegetation +
 ///   intern**. So carvers, ore features and vegetal decoration — the three
-///   things #85 explicitly says are "missing from that split entirely" — were
+///   things the per-stage split explicitly says are "missing from that split entirely" — were
 ///   present in the total but invisible, filed under "interning".
 ///
 /// Both are fixed by [`StageTimes`]'s new fields. **Do not compare a
@@ -670,9 +670,9 @@ fn bench_column_throughput(c: &mut Criterion) {
 /// string differs, which is what keeps `cargo xtask bench-compare` from pairing
 /// them.
 ///
-/// # The anti-drift control #85 asks for
+/// # The anti-drift control the per-stage split asks for
 ///
-/// #85's method note is that the previously-deleted instrumented twin was a
+/// The per-stage split's method note is that the previously-deleted instrumented twin was a
 /// *correctness* risk because it duplicated the verified pipeline. `column_timed`
 /// is not a duplicate — it calls the same private stage functions in the same
 /// order — but it does bypass the two memo caches `column()` goes through, which
@@ -697,7 +697,7 @@ fn bench_stage_split(c: &mut Criterion) {
             (plain.min_y(), plain.height(), plain.non_air_count()),
             (timed.min_y(), timed.height(), timed.non_air_count()),
             "column_timed's column shape differs from column()'s — the timed path has drifted \
-             from the verified one, which is the risk #85's method note is about"
+             from the verified one, which is the risk the per-stage split's method note is about"
         );
         let mut first_mismatch = None;
         let mut mismatches = 0usize;
@@ -940,7 +940,7 @@ fn bench_linearity_check(c: &mut Criterion) {
     group.finish();
 }
 
-/// Issue #106's before/after: the ore-composition 3×3 driver's per-chunk cost
+/// The ore-composition work's before/after: the ore-composition 3×3 driver's per-chunk cost
 /// over a sweep large enough to exercise `pre_ore_cache` the same way a real
 /// server view does (adjacent chunks share 8 of their 9 driven neighbours).
 /// `tests/support/worldgen_data/biome/plains.json` carries plains' real
@@ -1020,8 +1020,8 @@ fn bench_ore_composition_sweep(c: &mut Criterion) {
     });
 }
 
-/// **Issue #87** — region-level generation with **peak resident-set growth**,
-/// the half of #87 that was missing (its render-distance and linearity halves
+/// **Region-level generation** with **peak resident-set growth**,
+/// the half of that work that was missing (its render-distance and linearity halves
 /// are `bench_ore_composition_sweep` and `bench_linearity_check` above).
 ///
 /// # Deltas, never absolutes
@@ -1036,7 +1036,7 @@ fn bench_ore_composition_sweep(c: &mut Criterion) {
 ///
 /// # Why the sweep is small by default
 ///
-/// #87 asks for RD 8/16/32. At the composed pipeline's real release cost those
+/// The region-level plan asks for RD 8/16/32. At the composed pipeline's real release cost those
 /// are 289, 1089 and 4225 columns — roughly 4 minutes, 15 minutes and an hour on
 /// this machine, which is not a benchmark anybody will run. So the default sweep
 /// is small and the large radii are opt-in via `LODESTONE_BENCH_BIG_RD=1`. The
@@ -1045,7 +1045,7 @@ fn bench_ore_composition_sweep(c: &mut Criterion) {
 ///
 /// # On "how long before a joining player sees terrain"
 ///
-/// #87 asks to cross-reference the integrated server's spawn chunk-send radius.
+/// The region-level plan asks to cross-reference the integrated server's spawn chunk-send radius.
 /// Checked: there is no constant to cite — `view_radius` is a caller-supplied
 /// parameter (`lodestone_server::integrated::open_in_memory(.., view_radius)`,
 /// clamped per-client in `server.rs:2080`), so the region a joining player needs
@@ -1058,7 +1058,7 @@ fn bench_region_rss(_c: &mut Criterion) {
     if !big {
         println!(
             "worldgen region RSS: running small radii {radii:?} only; set LODESTONE_BENCH_BIG_RD=1 \
-             for the RD 8/16 sweep #87 describes (RD 16 is ~1089 columns and takes minutes)"
+             for the RD 8/16 sweep the region-level plan describes (RD 16 is ~1089 columns and takes minutes)"
         );
     }
 
@@ -1124,7 +1124,7 @@ fn bench_region_rss(_c: &mut Criterion) {
 
 /// Current process resident set in bytes. In-process sampling rather than
 /// `lodestone-allocbench`'s `/usr/bin/time -l` subprocess wrapper, because that
-/// pattern can only report one figure for a whole process and #87 wants a
+/// pattern can only report one figure for a whole process and the region-level plan wants a
 /// per-radius sweep inside one run. `memory-stats` reads the same OS counter
 /// (`task_info` on macOS) with no subprocess and no output parsing — notably
 /// *not* a shell pipeline, per `CLAUDE.md`'s rule that a number a conclusion
@@ -1173,7 +1173,7 @@ const SWEEP_STRUCTURE_RADIUS: i32 =
 
 /// Chunks whose **structure starts** one cold `column()` must compute.
 ///
-/// This is issue #514's new closure and it is much wider than the terrain one.
+/// This is this change's new closure and it is much wider than the terrain one.
 /// `pre_ore_stage` reads `structure_refs_stage` for its own chunk (S1's ordering
 /// edge), and `structure_refs_stage` walks `structure_starts_stage` over
 /// `overworld::structures::REFS_RADIUS` = 8 chunks in every direction —
@@ -1311,7 +1311,7 @@ fn bench_counter_calibration(_c: &mut Criterion) {
          neighbourhood); got {}",
         s.stage_entered[Stage::Shape as usize]
     );
-    // `block_at` has **two** consumers as of issue #514, and this assertion is an
+    // `block_at` has **two** consumers as of this change, and this assertion is an
     // exhaustive decomposition rather than a literal.
     //
     // 1. `fill_stage` — one call per cell, `256 × height` per chunk fill, over the
@@ -1357,7 +1357,7 @@ fn bench_counter_calibration(_c: &mut Criterion) {
     assert!(
         s.structure_height_probes > 0,
         "no structure height probe ran on a cold column against embedded data, so the \
-         `block_at` decomposition above degenerates to the pre-#514 form and would not \
+         `block_at` decomposition above degenerates to the pre-structure-placement form and would not \
          notice the probes coming back. Structure sets failed to resolve."
     );
     assert!(

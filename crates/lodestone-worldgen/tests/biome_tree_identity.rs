@@ -1,5 +1,5 @@
-//! Unit 9's central gates, re-pointed by the owner's ruling on #492: the ported
-//! `Climate.RTree` must reproduce **vanilla's own indexed search**, and the
+//! Unit 9's central gates, re-pointed by the owner's ruling: the ported
+//! R-tree must reproduce **vanilla's own indexed search**, and the
 //! relationship to brute force is now a *measured divergence* rather than the
 //! target.
 //!
@@ -20,7 +20,7 @@
 //! |---|---|---|
 //! | every node's span contains its children's | **theorem premise**, enumerated over every node/child pair × 7 axes | [`the_real_tree_is_shaped_right_and_every_node_contains_its_children`] |
 //! | the tree finds the same *minimum squared distance* as brute force | **always**, at every target | [`the_minimum_distance_matches_brute_force_over_a_complete_lattice`] and the release sweeps |
-//! | the tree returns the same *row* as brute force | **only where no tie exists** — this is the #492 divergence, measured not asserted | [`the_row_divergence_from_brute_force_is_exactly_the_tie_set`] |
+//! | the tree returns the same *row* as brute force | **only where no tie exists** — this is the ruling's accepted divergence, measured not asserted | [`the_row_divergence_from_brute_force_is_exactly_the_tie_set`] |
 //! | `lastResult` cannot change the distance | **always** | [`no_seed_can_change_the_minimum_distance`] |
 //! | `lastResult` *can* change the row | demonstrated on a concrete case | [`a_tying_seed_changes_the_returned_row`] |
 //!
@@ -201,7 +201,7 @@ fn hull_containment_control_fires_on_a_perturbed_interior_node() {
 
 /// **The distance claim, always-on**: over every point of a complete 4⁶ lattice, the
 /// row vanilla's search selects sits at exactly the minimum squared distance brute
-/// force finds. This is the assertion that survived #492 unchanged in strength.
+/// force finds. This is the assertion that survived the ruling unchanged in strength.
 #[test]
 fn the_minimum_distance_matches_brute_force_over_a_complete_lattice() {
     let rows = real_rows();
@@ -285,7 +285,7 @@ fn distance_control_fires_when_a_prunable_tree_node_is_perturbed() {
     );
 }
 
-/// **The #492 divergence, characterised rather than tolerated.** Where the tree and
+/// **The ruling's divergence, characterised rather than tolerated.** Where the tree and
 /// brute force pick different rows, it must always be because several rows tie on
 /// the minimum distance — never because one of them found a nearer row. That
 /// distinction is the whole reason this change is safe to make: the tree is not
@@ -322,7 +322,7 @@ fn the_row_divergence_from_brute_force_is_exactly_the_tie_set() {
          minimum — that is not a tie-break difference, it means one search is wrong"
     );
     eprintln!(
-        "[U9 #492] 4^6 lattice: {row_differs} row disagreements, {biome_differs} of them \
+        "[U9] 4^6 lattice: {row_differs} row disagreements, {biome_differs} of them \
          resolving to a different biome id, 0 at a unique minimum"
     );
 }
@@ -493,7 +493,7 @@ fn the_minimum_distance_matches_brute_force_at_every_unit_step_along_every_axis(
     assert_eq!(differs_without_a_tie, 0);
 }
 
-/// The divergence figure the docs and #492 quote, measured on arbitrary (non-round)
+/// The divergence figure the docs quote, measured on arbitrary (non-round)
 /// targets — the ones that bound the production risk, since a regular lattice
 /// inflates exact ties through symmetry.
 #[test]
@@ -541,7 +541,7 @@ fn the_divergence_from_brute_force_on_arbitrary_targets() {
     assert_eq!(differs_without_a_tie, 0);
 }
 
-/// **The production-impact measurement for #492.** How often does the tie-break
+/// **The production-impact measurement for the ruling.** How often does the tie-break
 /// change actually change a biome at coordinates the world really generates?
 ///
 /// The 0.98% figure is over *arbitrary* climate targets. Real climate is
@@ -593,7 +593,7 @@ fn the_tiebreak_moves_exactly_the_eight_recorded_source_biomes_and_no_surface_qu
     assert_eq!(surface_quarts, 12 * 12 * 16, "the surface sweep must actually run");
 
     println!(
-        "#492 production impact: carver/ore sources {}/{source_checked} differ at {:?}; \
+        "production impact: carver/ore sources {}/{source_checked} differ at {:?}; \
          surface quarts {surface_differing}/{surface_quarts} differ",
         differing_sources.len(),
         differing_sources
@@ -634,7 +634,7 @@ fn the_tiebreak_moves_exactly_the_eight_recorded_source_biomes_and_no_surface_qu
     );
 }
 
-/// **The JVM fixture for #492, taken at the coordinates that discriminate.**
+/// **The JVM fixture for the ruling, taken at the coordinates that discriminate.**
 ///
 /// A fixture at arbitrary coordinates would prove almost nothing here: vanilla's two
 /// searches agree at over 99% of real source chunks, so a randomly chosen probe set
@@ -654,7 +654,7 @@ fn the_tiebreak_moves_exactly_the_eight_recorded_source_biomes_and_no_surface_qu
 /// the divergence rather than a one-sided check:
 ///
 /// * `indexed` — vanilla's real answer, and what this engine must now produce;
-/// * `brute` — vanilla's reference answer, and what this engine produced before #492.
+/// * `brute` — vanilla's reference answer, and what this engine produced before the ruling.
 ///
 /// If a future change made the two coincide, this test fails rather than silently
 /// passing, because it asserts the brute-force column too.

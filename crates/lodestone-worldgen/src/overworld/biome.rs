@@ -10,7 +10,7 @@ use crate::biome::{BiomeTable, ClimateSampler};
 use super::OverworldGenerator;
 use super::biome_cells::BiomeCells;
 
-/// Real multi-noise biome assignment (issue #405), present on
+/// Real multi-noise biome assignment, present on
 /// [`OverworldGenerator`] whenever its [`Resolver`] supplies a non-empty
 /// [`Resolver::biome_parameters`] table. See `crate::biome`'s module doc for
 /// the resolution/height/excluded-biome decisions baked into this.
@@ -26,12 +26,12 @@ pub(super) struct DynamicBiome {
 }
 
 impl OverworldGenerator {
-    /// Stage 2 (issue #405, rebuilt by #512): the 16 **surface** quarts —
+    /// Stage 2: the 16 **surface** quarts —
     /// `(qx, qz)` in `0..4`, row-major `qz * 4 + qx`, matching `ChunkSection`'s own
     /// `BIOME_EDGE` of 4 — each read at that quart's own already-generated surface
     /// height.
     ///
-    /// **This no longer samples anything.** Issue #512 made
+    /// **This no longer samples anything.** The full biome grid made
     /// [`Self::biome_cells_stage`]'s 4×4×4 grid the primary product, and this reads
     /// the layer each quart's surface falls in. That is exact, not an
     /// approximation: the surface sample height is `(height >> 2) << 2`, already
@@ -64,7 +64,7 @@ impl OverworldGenerator {
         })
     }
 
-    /// Stage 2b (issue #512): the **full** 4×4×4 biome grid for this column —
+    /// Stage 2b: the **full** 4×4×4 biome grid for this column —
     /// `16 × height/4` cells, one `MultiNoiseBiomeSource.getNoiseBiome` per
     /// `QuartPos` cell, which is what `LevelChunkSection`'s biome container holds.
     ///
@@ -94,7 +94,7 @@ impl OverworldGenerator {
         })
     }
 
-    /// **Diagnostic for #492, not used by generation.** At one source chunk's own
+    /// **Diagnostic for the R-tree ruling, not used by generation.** At one source chunk's own
     /// `y = 0` climate target, does vanilla's indexed search (what
     /// [`Self::biome_for_carver_source`] now uses) resolve to a different biome id
     /// than the brute-force scan it used before?

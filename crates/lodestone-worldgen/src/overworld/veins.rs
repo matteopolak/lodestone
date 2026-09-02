@@ -1,9 +1,9 @@
-//! Issue #496: `OreVeinifier` — the large copper and iron veins.
+//! The ore-vein sampler — the large copper and iron veins.
 //!
 //! ## What it is
 //!
-//! A port of `net.minecraft.world.level.levelgen.OreVeinifier`, the
-//! `NoiseChunk.BlockStateFiller` that runs during fill, behind the aquifer, and
+//! A port of vanilla's ore-vein density filler, which runs during fill,
+//! behind the aquifer, and
 //! replaces the default block with `copper_ore`/`raw_copper_block`/`granite` in
 //! `y 0..50` or `deepslate_iron_ore`/`raw_iron_block`/`tuff` in `y -60..-8`.
 //!
@@ -17,17 +17,17 @@
 //!
 //! Three density programs plus a positional RNG, and no feature-step RNG anywhere
 //! — that last part matters, because it means veins cannot desync the ore or
-//! vegetation streams no matter what they do. The RNG is
-//! `randomState.oreRandom()`, i.e. `positional.from_hash_of("minecraft:ore")
+//! vegetation streams no matter what they do. The RNG is vanilla's own
+//! ore-vein positional source, i.e. `positional.from_hash_of("minecraft:ore")
 //! .fork_positional()`, sampled `at(x, y, z)`; identical in shape to the
 //! aquifer's own `"minecraft:aquifer"` factory next to it in
 //! [`super::OverworldGenerator::new`].
 //!
 //! [`super::OverworldGenerator::materialize_world`] applies it: for every cell the
 //! fill stage reported as solid **and** the surface rules did not rewrite, ask
-//! [`VeinChunk::state_at`]. That placement is what mirrors vanilla's
-//! `MaterialRuleList` order — veins only see positions where the aquifer returned
-//! the default block, and `buildSurface` still wins above them.
+//! [`VeinChunk::state_at`]. That placement is what mirrors vanilla's own
+//! material-rule ordering — veins only see positions where the aquifer returned
+//! the default block, and surface building still wins above them.
 //!
 //! ## How to change it, and the one named approximation
 //!
@@ -39,8 +39,8 @@
 //! produce veins in the right *places* with the wrong *shape*, which is the
 //! hardest kind of wrong to notice.
 //!
-//! **Not yet anchored on a JVM fixture.** The issue asks for a vein-positive dump
-//! and that is the right gate; what exists today is a generated-column spot check
+//! **Not yet anchored on a JVM fixture.** A vein-positive dump would be the
+//! right gate; what exists today is a generated-column spot check
 //! (copper and iron both appear, in their own Y bands, at seed 42). Treat the block
 //! choices and thresholds as transcribed-and-reviewed, not measured.
 
@@ -50,7 +50,7 @@ use crate::interner::StateId;
 use crate::math::clamped_map;
 use crate::rng::{PositionalRandomFactory, RandomSource, AnyPositionalFactory};
 
-/// `OreVeinifier`'s own constants, named as vanilla names them.
+/// Vanilla's own constants, named to match.
 const VEININESS_THRESHOLD: f64 = 0.4;
 const EDGE_ROUNDOFF_BEGIN: f64 = 20.0;
 const MAX_EDGE_ROUNDOFF: f64 = -0.2;
@@ -61,7 +61,7 @@ const MAX_RICHNESS_THRESHOLD: f64 = 0.6;
 const CHANCE_OF_RAW_ORE_BLOCK: f32 = 0.02;
 const SKIP_ORE_IF_GAP_NOISE_IS_BELOW: f64 = -0.3;
 
-/// `OreVeinifier.VeinType` — its three block states (pre-interned) and Y band.
+/// Vanilla's own per-vein-type record — its three block states (pre-interned) and Y band.
 #[derive(Debug, Clone, Copy)]
 struct VeinType {
     ore: StateId,
@@ -168,7 +168,7 @@ pub(super) struct VeinChunk {
 }
 
 impl VeinChunk {
-    /// `OreVeinifier.create`'s `BlockStateFiller`, verbatim in order: the Y-band
+    /// Vanilla's own vein density filler, verbatim in order: the Y-band
     /// test, the edge roundoff, the solidness roll, the ridged test, the richness
     /// roll and the raw-ore roll — all three RNG draws off one positional source,
     /// in that order, because they share it.

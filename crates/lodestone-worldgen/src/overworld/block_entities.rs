@@ -1,4 +1,4 @@
-//! Issue #520: the generator's block-entity layer.
+//! The generator's block-entity layer.
 //!
 //! ## What it is
 //!
@@ -33,7 +33,7 @@
 //!
 //! None. The **consumer** side is not in this crate: `ChunkColumn` has no
 //! block-entity field and the chunk-data packet writes a hardcoded `var_i32(0)`,
-//! both outside `lodestone-worldgen`. See #520's own comment for that patch.
+//! both outside `lodestone-worldgen`. See that patch's own comment for the reason.
 
 /// One block entity a generated column carries, with its **absolute** world
 /// position.

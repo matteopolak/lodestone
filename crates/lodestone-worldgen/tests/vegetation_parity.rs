@@ -1,5 +1,5 @@
-//! Block-for-block parity of vegetal decoration (grass/flowers/trees, issue
-//! #406) against the real 26.2 server — the evidence gap that module's own
+//! Block-for-block parity of vegetal decoration (grass/flowers/trees)
+//! against the real 26.2 server — the evidence gap that module's own
 //! doc comment named plainly: "no oracle validates this against a real
 //! vanilla dump." This closes it.
 //!
@@ -25,8 +25,8 @@
 //! `(5,5)` (picked once, before any number was known, specifically so the
 //! measured spill fraction couldn't be cherry-picked to look small — see
 //! CLAUDE.md's evidence standard on picking coordinates that exercise real
-//! structure, not a vacuous sweep) — plus two `minecraft:savanna` (issue
-//! #428, added alongside [`crate::feature::vegetation::TrunkPlacerCfg::Forking`]/
+//! structure, not a vacuous sweep) — plus two `minecraft:savanna` (added
+//! alongside [`crate::feature::vegetation::TrunkPlacerCfg::Forking`]/
 //! [`crate::feature::vegetation::FoliagePlacerCfg::Acacia`]): chunk `(20,-5)`
 //! and chunk `(-30,15)`.
 //!
@@ -40,19 +40,20 @@
 //! own `(-2500,3200)`) where `trees_savanna`'s outer count is
 //! `weighted_list{1: 9, 2: 1}` — never zero, across 9 sources.** Getting no
 //! tree there is not plausible sampling noise; it pointed at the oracle
-//! itself. `VegetationOracle.java`'s `WorldGenLevel` proxy had no case for
-//! `isStateAtPosition`/`isFluidAtPosition` — both ABSTRACT on
-//! `LevelSimulatedReader` (`Level`'s own implementation is just
-//! `predicate.test(this.getBlockState/getFluidState(pos))`,
-//! `Level.java:1053/1058`), so every call fell through to the proxy's
-//! `default:` branch, which force-returns `Boolean.FALSE` for any
-//! unrecognised boolean-returning method. `TreeFeature.validTreePos`
-//! (`TreeFeature.java:52-54`) is defined as exactly one such call — the gate
-//! both `TrunkPlacer.placeLog` (every log) and `FoliagePlacer.tryPlaceLeaf`
-//! (every leaf) require before writing anything — so it always evaluated to
-//! `false`, and **no trunk placer of any kind, for any biome, had ever
-//! placed a single block through this oracle** since it was created for
-//! issue #406. Fixed by adding both cases, routed through the same
+//! itself. `VegetationOracle.java`'s level proxy had no case for the two
+//! predicate-against-block/fluid-state-at-a-position queries vanilla's tree
+//! placement validity check depends on — both left abstract by vanilla's
+//! own simulated-level interface for a generation-time level (a real loaded
+//! level answers them by just testing the predicate against the block/fluid
+//! state already at that position), so every call fell through to the
+//! proxy's `default:` branch, which force-returns `Boolean.FALSE` for any
+//! unrecognised boolean-returning method. Vanilla's own tree-position
+//! validity check is defined as exactly one such call — the gate both
+//! trunk placement (every log) and foliage placement (every leaf) require
+//! before writing anything — so it always evaluated to `false`, and **no
+//! trunk placer of any kind, for any biome, had ever placed a single block
+//! through this oracle** since it was first written. Fixed by adding both
+//! cases, routed through the same
 //! `chunkAt`-backed `getBlockState`/`getFluidState` the proxy's other cases
 //! already use. Confirmed by re-running the exact plains fixtures below
 //! before and after the fix and diffing byte-for-byte: **zero change** (so
@@ -61,10 +62,11 @@
 //! tree, independent of this bug) — while savanna, whose distribution
 //! guarantees an attempt, went from zero tree cells anywhere in a 48×48
 //! region across every coordinate tried to real `acacia_log`/`acacia_leaves`/
-//! `oak_log`/`oak_leaves` content immediately. This means the pre-#428
-//! plains parity numbers this file's own history recorded (single-chunk
-//! "23/23 and equivalent counts", `full3x3` "30/30"/"57/57" after issue
-//! #427) validated grass/flowers/glow_lichen against a real JVM but **never
+//! `oak_log`/`oak_leaves` content immediately. This means the plains parity
+//! numbers this file's own history recorded from before savanna support
+//! existed (single-chunk "23/23 and equivalent counts", `full3x3`
+//! "30/30"/"57/57" after the 3×3-driver widening) validated
+//! grass/flowers/glow_lichen against a real JVM but **never
 //! actually exercised straight-trunk oak placement against one** — an
 //! instance of CLAUDE.md's "world" vacuous-test species (the flaw was in
 //! what the oracle's own input/mechanism could produce, not in any
@@ -147,12 +149,12 @@ impl Resolver for FsResolver {
 struct Fixture {
     /// The WHOLE driven `-16..32` region's post-ore terrain (`base.*`,
     /// centre-relative local coordinates) — what `VegGrid`/
-    /// `VegGrid::with_footprint` is seeded from. Widened from centre-only
-    /// (issue #427): the real 3×3 driver needs every one of the 9 sources'
-    /// own terrain, not just the centre's — see
+    /// `VegGrid::with_footprint` is seeded from. Widened from centre-only:
+    /// the real 3×3 driver needs every one of the 9 sources' own terrain,
+    /// not just the centre's — see
     /// `VegetationOracle.java::dumpRegionBaseline`'s own doc comment for why
-    /// this changed from the narrower `dumpCentreBaseline` issue #406
-    /// shipped with.
+    /// this widened from the narrower `dumpCentreBaseline` an earlier
+    /// version of this oracle shipped with.
     base: HashMap<(i32, i32, i32), String>,
     /// Every cell the SINGLE (centre-only) pass changed, local coordinates
     /// (a subset can fall outside `0..16` — see module doc's "single mode's
@@ -169,7 +171,7 @@ struct Fixture {
     chunk_x: i32,
     chunk_z: i32,
     seed: i64,
-    /// `meta.biome` — issue #428's savanna fixtures share this parser with
+    /// `meta.biome` — this change's savanna fixtures share this parser with
     /// the original plains-only ones, so the biome can no longer be a
     /// hardcoded literal at the call site.
     biome: String,
@@ -254,7 +256,7 @@ fn load(name: &str) -> Fixture {
     f
 }
 
-/// Two plains fixtures (issue #406) plus two savanna fixtures (issue #428,
+/// Two plains fixtures plus two savanna fixtures (this change,
 /// picked from a scan of several savanna coordinates specifically because
 /// they contain real acacia — see this module's own doc "The acacia oracle
 /// bug" section for why most savanna coordinates tried during that scan did
@@ -295,7 +297,7 @@ fn run_our_engine(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32)
 }
 
 /// Runs `crate::feature::vegetation`'s real, production
-/// `apply_vegetal_decoration_step_3x3_per_source` (issue #427's real vanilla
+/// `apply_vegetal_decoration_step_3x3_per_source` (this change's real vanilla
 /// 3×3 driver — the exact function
 /// `OverworldGenerator::vegetation_stage` calls in production once its
 /// centre and 8 neighbours' post-ore terrain is stitched), seeded from
@@ -344,7 +346,7 @@ fn assert_matches_single(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32)
     // engine's known, named single-chunk scope, not a discrepancy this gate
     // is checking.
     // `glow_lichen` (`multiface_growth`) is a named, accepted gap — see
-    // `crate::feature::vegetation`'s module doc: nothing in issue #406's
+    // `crate::feature::vegetation`'s module doc: nothing in this change's
     // scope models `MultifaceGrowthFeature` (it isn't a tree/grass/flower),
     // so it's excluded here rather than treated as a correctness failure.
     // Every OTHER cell in `single_diff` (grass/flowers/trees) is real,
@@ -452,7 +454,7 @@ fn single_chunk_only_undercounts_real_vanilla_centre_content() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #427: the real 3×3 driver against the JVM's FULL3X3 pass.
+// The real 3×3 driver against the JVM's FULL3X3 pass.
 // ---------------------------------------------------------------------------
 
 /// Strips a `distance=N` property (if present) from a canonical block-state
@@ -477,12 +479,12 @@ fn strip_distance(state: &str) -> String {
 /// to the centre 16×16 window (the same `inCentre` boundary
 /// `VegetationOracle.java::dumpDiff` itself uses to report
 /// `full3x3.meta.centreChanged`) instead of `f.single_diff` over the whole
-/// region — this is the gate issue #427 exists to make pass.
+/// region — this is the gate this change exists to make pass.
 ///
 /// **A measured, bounded, named residual, not a silently loosened bound**
 /// (CLAUDE.md's evidence standard: report a residual, don't hide it).
 /// `crate::feature::vegetation::update_leaf_distances`'s real vanilla port
-/// (`TreeFeature.updateLeaves`, issue #428) gets *which block occupies each
+/// (`TreeFeature.updateLeaves`, this change) gets *which block occupies each
 /// cell* exactly right — checked here as a hard requirement via
 /// [`strip_distance`] — but for a handful of cells, `distance=N` differs by
 /// a small amount from the oracle. Investigated directly on the one
@@ -592,7 +594,7 @@ fn assert_matches_full3x3(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32
     (distance_only.len() + identity_mismatches.len(), expected.len())
 }
 
-/// The headline result for issue #427: driving `crate::feature::vegetation`'s
+/// The headline result for this change: driving `crate::feature::vegetation`'s
 /// real 3×3 driver against the JVM's own `FULL3X3` pass, centre window, must
 /// match **exactly on block identity** (modulo the same named `glow_lichen`
 /// gap [`assert_matches_single`] already excludes) — not merely move the
