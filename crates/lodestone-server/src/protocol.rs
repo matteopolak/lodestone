@@ -2417,8 +2417,8 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes a `BOSS_EVENT` `UPDATE_PROGRESS` operation — vanilla
-    /// `ClientboundBossEventPacket.createUpdateProgressPacket`. Sent on every
+    /// Encodes a `BOSS_EVENT` `UPDATE_PROGRESS` operation — vanilla's own
+    /// boss-event-packet update-progress-packet constructor. Sent on every
     /// streaming pass where a previously-added bar's `progress` changed and it
     /// is still `visible`; see [`encode_boss_event_add`](Self::encode_boss_event_add).
     fn encode_boss_event_update_progress(&self, id: Uuid, progress: f32) -> ServerDirective {
@@ -2426,8 +2426,8 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes a `BOSS_EVENT` `REMOVE` operation — vanilla
-    /// `ClientboundBossEventPacket.createRemovePacket`. Sent once a
+    /// Encodes a `BOSS_EVENT` `REMOVE` operation — vanilla's own
+    /// boss-event-packet remove-packet constructor. Sent once a
     /// previously-added bar's [`BossBarSnapshot::visible`] goes `false`, or the
     /// id vanishes from the source entirely (the dragon itself despawned);
     /// see [`encode_boss_event_add`](Self::encode_boss_event_add).
@@ -2443,7 +2443,7 @@ pub trait ServerProtocol: Send + Sync {
     /// **This is not cosmetic, and it is not optional for player entities.** A
     /// real client *drops* an `ADD_ENTITY` whose type is `minecraft:player`
     /// when it holds no `PlayerInfo` for that uuid:
-    /// `ClientPacketListener.createEntityFromPacket` logs
+    /// vanilla's own client-side create-entity-from-packet routine logs
     /// `"Server attempted to add player prior to sending player info"` and
     /// returns `null`, so the entity is never added to the level
     /// (the real client's own packet-listener logs this and bails).
@@ -2658,7 +2658,7 @@ pub trait ServerProtocol: Send + Sync {
     /// `Some`, anchors the day/night clock to that many elapsed ticks at the
     /// normal 1:1 rate — sent once at join, mirroring vanilla's full clock
     /// sync (`ServerClockManager::createFullSyncPacket`, sent from
-    /// `PlayerList.sendLevelInfo`). `None` sends only the monotonic
+    /// vanilla's own send-level-info routine). `None` sends only the monotonic
     /// game-time broadcast vanilla repeats every 20 ticks
     /// (`MinecraftServer::forceGameTimeSynchronization`) without touching the
     /// client's already-held day/night anchor. The default emits nothing.
@@ -2895,7 +2895,7 @@ pub trait ServerProtocol: Send + Sync {
     /// # Why this is not `encode_respawn` with an argument
     ///
     /// The two differ in the one field that decides what the client throws away.
-    /// `PlayerList.respawn` passes `KEEP_ALL_DATA` (`KEEP_ATTRIBUTE_MODIFIERS |
+    /// Vanilla's own player-list respawn routine passes `KEEP_ALL_DATA` (`KEEP_ATTRIBUTE_MODIFIERS |
     /// KEEP_ENTITY_DATA`) for a dimension change and **zero** for a death, and
     /// `encode_respawn`'s own doc comment explains why zero is right there: it is
     /// what makes the client rebuild its player state. Rebuilding player state is
