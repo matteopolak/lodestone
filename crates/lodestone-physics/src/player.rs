@@ -3288,9 +3288,9 @@ fn travel_and_check_inside_blocks(
     } else {
         tick_air_among_entities(state, input, view, profile, nearby);
     }
-    // The Y overwrite, closing `Player.travel`. `with(Direction.Axis.Y, …)` — the
-    // X and Z the dispatch produced are kept untouched. There is **no** horizontal
-    // drag term in this branch, however much "0.6" looks like one.
+    // The Y overwrite, closing vanilla's own player travel step. `with(Direction.Axis.Y, …)`
+    // — the X and Z the dispatch produced are kept untouched. There is **no**
+    // horizontal drag term in this branch, however much "0.6" looks like one.
     if let Some(y) = original_movement_y {
         state.velocity.y = y * 0.6;
     }
@@ -3359,15 +3359,15 @@ pub fn tick_among_entities(
 ) {
     travel_and_check_inside_blocks(state, input, view, profile, nearby);
     crate::push::apply_entity_push(state, view, profile, nearby, self_flags);
-    // The pose comes *after* the push, because `pushEntities` is the tail of
-    // `aiStep` (inside `super.tick()`) and `updatePlayerPose` is the tail of
-    // `Player.tick()`. `nearby` also supplies the entity term of the fit gate —
+    // The pose comes *after* the push, because the crowd-push pass is the
+    // tail of vanilla's own per-tick update (inside its base per-tick
+    // update) and the pose update is the tail of its own player-tick
+    // update. `nearby` also supplies the entity term of the fit gate —
     // vacuous unless one of them is a boat, a shulker or a happy ghast.
     update_player_pose(state, input, view, nearby);
 }
 
-/// `Entity.updateSwimming()` (`Entity.java:1644-1652`) — the sprint-swimming pose
-/// state machine.
+/// Vanilla's own swim-state update — the sprint-swimming pose state machine.
 ///
 /// Entering requires being **under water** (eye submerged) *and* the block at the
 /// feet holding water; once swimming, it is sustained merely by sprinting while
@@ -3375,8 +3375,8 @@ pub fn tick_among_entities(
 /// surface. Passenger/vehicle state is not modelled here (this engine has none),
 /// matching the `!isPassenger()` guard being vacuously true.
 ///
-/// `Player.updateSwimming` (`Player.java:1433-1439`) adds one override: a *flying*
-/// player is never swimming. This engine has no flight, so a driver with a
+/// Vanilla's own player override adds one override: a *flying* player is
+/// never swimming. This engine has no flight, so a driver with a
 /// free-fly/creative-flight mode must clear [`PlayerState::swimming`] itself while
 /// flying rather than relying on this function — it is only reached from [`tick`],
 /// which a flying driver does not call.
@@ -3394,9 +3394,9 @@ fn update_swimming(
     }
 }
 
-/// `level.getFluidState(blockPosition).is(WATER)` — water at the entity's own
-/// block position (`floor` of each coordinate), fine-then-coarse like the rest of
-/// the fluid state.
+/// Vanilla's own per-block fluid-state check for water — water at the
+/// entity's own block position (`floor` of each coordinate), fine-then-coarse
+/// like the rest of the fluid state.
 fn water_at_block(view: &dyn CollisionView, position: Vec3d) -> bool {
     let bx = mth::floor(position.x);
     let by = mth::floor(position.y);
@@ -3407,17 +3407,18 @@ fn water_at_block(view: &dyn CollisionView, position: Vec3d) -> bool {
     }
 }
 
-/// `LivingEntity.updateSwimAmount()` (`LivingEntity.java:3478-3483`) — advances
-/// the `0..1` swim-pose ramp by `SWIM_AMOUNT_PER_TICK` (`0.09F`) toward `1.0`
-/// while `swimming`, or back toward `0.0` otherwise, clamping at both ends.
+/// Vanilla's own swim-amount update — advances the `0..1` swim-pose ramp by
+/// a fixed per-tick step (`0.09F`) toward `1.0` while `swimming`, or back
+/// toward `0.0` otherwise, clamping at both ends.
 ///
 /// Called immediately after [`update_swimming`] decides this tick's swim flag,
-/// mirroring vanilla's exact call order: `LivingEntity.tick()` calls
-/// `updateSwimAmount()` right after `super.tick()` (where `Entity.baseTick`'s
-/// `updateSwimming()` lives) and *before* `aiStep()` (where `travel` — and
-/// therefore the look-descent in [`tick_water`] — runs). So this ramp always
-/// reflects `swimming` as of the **start** of the current tick, one step ahead
-/// of the travel branch that consumes `swimming` directly.
+/// mirroring vanilla's exact call order: its own per-tick update calls its
+/// swim-amount update right after the base per-tick update (where the
+/// swim-state update lives) and *before* the rest of its per-tick update
+/// (where `travel` — and therefore the look-descent in [`tick_water`] —
+/// runs). So this ramp always reflects `swimming` as of the **start** of
+/// the current tick, one step ahead of the travel branch that consumes
+/// `swimming` directly.
 fn update_swim_amount(state: &mut PlayerState) {
     const SWIM_AMOUNT_PER_TICK: f32 = 0.09;
     state.swim_amount_o = state.swim_amount;
@@ -3428,9 +3429,9 @@ fn update_swim_amount(state: &mut PlayerState) {
     };
 }
 
-/// `LivingEntity.getFrictionInfluencedSpeed(blockFriction)`.
-/// The player's effective walk speed for `getFrictionInfluencedSpeed`, i.e.
-/// vanilla's `getSpeed()`. Uses the injected attribute value when present
+/// The player's effective walk speed for vanilla's own friction-influenced
+/// speed step, i.e. vanilla's `getSpeed()`. Uses the injected attribute value
+/// when present
 /// (sprint + Speed/Slowness already folded in by the entity layer), reproducing
 /// the `(float)` cast; otherwise computes the standalone base+sprint value.
 fn effective_speed(profile: &PhysicsProfile, state: &PlayerState) -> f32 {
@@ -3457,19 +3458,19 @@ fn friction_influenced_speed(
     )
 }
 
-/// `LivingEntity.getFrictionInfluencedSpeed(float)` (LivingEntity.java:2710),
-/// entity-agnostic core. `speed` is the caller's `getSpeed()` — the player's
-/// movement-speed attribute or a mob's AI-supplied speed. On the ground the
-/// `0.21600002F / friction^3` factor rescales it (all in `float`); airborne it
-/// is discarded entirely for `flying_speed`, the caller's already-resolved
-/// `getFlyingSpeed()`. `speed` therefore only reaches the result on the ground,
+/// Vanilla's own friction-influenced speed step, entity-agnostic core.
+/// `speed` is the caller's `getSpeed()` — the player's movement-speed
+/// attribute or a mob's AI-supplied speed. On the ground the
+/// `0.21600002F / friction^3` factor rescales it (all in `float`); airborne
+/// it is discarded entirely for `flying_speed`, the caller's already-resolved
+/// flying speed. `speed` therefore only reaches the result on the ground,
 /// exactly as vanilla.
 ///
-/// **`flying_speed` is a parameter, not `profile.flying_speed`, because vanilla's
-/// `getFlyingSpeed()` is virtual and the `Player` override is stateful** — it
-/// depends on `abilities.flying`, `abilities.flyingSpeed` and `isSprinting()`
-/// (`Player.java:1974-1980`). Reading a profile constant here silently
-/// implemented only the "not flying, not sprinting" corner of it; see
+/// **`flying_speed` is a parameter, not `profile.flying_speed`, because
+/// vanilla's own flying-speed accessor is virtual and the player override is
+/// stateful** — it depends on `abilities.flying`, `abilities.flyingSpeed` and
+/// `isSprinting()`. Reading a profile constant here silently implemented
+/// only the "not flying, not sprinting" corner of it; see
 /// [`player_flying_speed`] and `PhysicsProfile::airborne_sprint_speed`.
 #[must_use]
 pub(crate) fn friction_influenced_speed_value(
@@ -3491,8 +3492,8 @@ pub(crate) fn friction_influenced_speed_value(
     }
 }
 
-/// `Player.getFlyingSpeed()` (`Player.java:1974-1980`) — the airborne input speed
-/// `getFrictionInfluencedSpeed` substitutes for `getSpeed()`.
+/// Vanilla's own flying-speed accessor — the airborne input speed vanilla's
+/// own friction-influenced speed step substitutes for `getSpeed()`.
 ///
 /// ```text
 /// if (this.abilities.flying && !this.isPassenger()) {
@@ -3694,9 +3695,9 @@ mod tests {
 
     #[test]
     fn fluid_jump_threshold_boundary_is_the_swimming_eye_height() {
-        // `Entity.getFluidJumpThreshold()` = `getEyeHeight() < 0.4 ? 0.0 : 0.4`
-        // (Entity.java:3692-3694). The swimming pose's eye height is *exactly*
-        // 0.4 (Avatar.java:28), so it sits on the false side of a strict `<` and
+        // Vanilla's own fluid-jump threshold = `getEyeHeight() < 0.4 ? 0.0 : 0.4`.
+        // The swimming pose's eye height is *exactly* 0.4, so it sits on
+        // the false side of a strict `<` and
         // keeps the 0.4 threshold. Coding this as `<=` would collapse a swimmer's
         // threshold to zero and turn every swim-up into a standing jump.
         assert_eq!(fluid_jump_threshold(DEFAULT_EYE_HEIGHT), 0.4);
@@ -3706,8 +3707,8 @@ mod tests {
 
     #[test]
     fn shallow_water_jumps_but_deep_water_swims_up() {
-        // The sinking-versus-swimming decision (`LivingEntity.aiStep`, the jump
-        // block at LivingEntity.java:3088-3113). Expected magnitudes come from
+        // The sinking-versus-swimming decision (vanilla's own per-tick jump
+        // block). Expected magnitudes come from
         // vanilla constants, not from this port:
         //   * shallow  -> jumpFromGround, JUMP_STRENGTH = 0.42F, then the water
         //     tick's own `* 0.8F` vertical drag and `- gravity/16` buoyancy step
@@ -3747,7 +3748,7 @@ mod tests {
 
     #[test]
     fn sneaking_sinks_and_not_sneaking_barely_does() {
-        // `LocalPlayer.aiStep` -> `goDownInWater()` (LivingEntity.java:2395-2397):
+        // Vanilla's own client per-tick update -> sneak-to-sink impulse:
         // shift while in water adds -0.04F. Expected values from vanilla constants:
         // the tick's vertical drag is 0.8F and buoyancy is -gravity/16 = -0.005, so
         //   no shift: 0.0  * 0.8 - 0.005 = -0.005
@@ -3788,7 +3789,7 @@ mod tests {
 
     #[test]
     fn swimming_into_a_ledge_hops_out_of_the_water() {
-        // `LivingEntity.jumpOutOfFluid` (LivingEntity.java:2556-2561): a horizontal
+        // Vanilla's own jump-out-of-fluid hop: a horizontal
         // collision plus a lifted box that is free of blocks *and* of liquid
         // replaces vertical velocity with a flat 0.3F. The expected value is that
         // literal, straight from the source.
@@ -3835,9 +3836,9 @@ mod tests {
 
     #[test]
     fn depth_strider_attribute_speeds_up_swimming() {
-        // `travelInWater` lerps both the horizontal slow-down (toward 0.546_000_06)
-        // and the input speed (toward `getSpeed()`) by
-        // `getAttributeValue(WATER_MOVEMENT_EFFICIENCY)` (LivingEntity.java:2507-2517).
+        // Vanilla's own in-water travel lerps both the horizontal slow-down
+        // (toward 0.546_000_06) and the input speed (toward `getSpeed()`) by
+        // the resolved Depth Strider attribute value.
         // No caller can reach that attribute value yet (see the field docs on
         // `PlayerState::water_movement_efficiency` for exactly what is missing), so
         // this drives it directly: the *arithmetic* is what is under test, and the
@@ -4052,8 +4053,8 @@ mod tests {
 
     #[test]
     fn use_item_default_scales_straight_input_by_the_vanilla_0_2_constant() {
-        // `UseEffects.DEFAULT.speedMultiplier` = `0.2F` (`world/item/component/
-        // UseEffects.java`), applied inside `modifyInput` between the existing
+        // Vanilla's own default use-effects speed multiplier = `0.2F`,
+        // applied inside vanilla's own input modifier between the existing
         // `0.98` scale and the sneak scale. Straight-forward input has no
         // diagonal clamp to interact with, so the predicted magnitude is
         // exactly the product of the two outside-sourced record constants —
@@ -4069,9 +4070,9 @@ mod tests {
 
     #[test]
     fn spear_use_effects_apply_no_slowdown_the_discriminating_item() {
-        // Every use-item except a spear gets `UseEffects.DEFAULT`
-        // (`speed_multiplier = 0.2`); the seven spear items are the *only*
-        // override, at `1.0` (`Item.Properties.spear(...)`, `Item.java:542`).
+        // Every use-item except a spear gets vanilla's own default use
+        // effects (`speed_multiplier = 0.2`); the seven spear items are the
+        // *only* override, at `1.0` (vanilla's own per-item spear override).
         // A fixture corpus containing only food cannot tell "the multiplier is
         // applied" from "the multiplier is applied to the wrong item set" —
         // the spear is the one input where the two hypotheses diverge.
@@ -4101,9 +4102,10 @@ mod tests {
 
     #[test]
     fn use_item_scale_applies_before_the_unit_square_clamp_not_after() {
-        // `LocalPlayer.modifyInput` applies `itemUseSpeedMultiplier` to the raw
-        // strafe/forward *before* `modifyInputSpeedForSquareMovement`'s
-        // `length * dist_to_unit_square` clamp to `1.0`. A diagonal input is
+        // Vanilla's own input modifier applies `itemUseSpeedMultiplier` to
+        // the raw strafe/forward *before* its own square-movement
+        // normalization's `length * dist_to_unit_square` clamp to `1.0`. A
+        // diagonal input is
         // the discriminating shape: full-magnitude diagonal input saturates
         // that clamp, but a 5x-reduced one (0.2 multiplier) typically does
         // not — so scaling *before* the clamp and scaling the *already-
