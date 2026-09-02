@@ -12,6 +12,34 @@ and its first finding is that the issue's own premise needs correcting: **there 
 rescan to replace**. The expensive thing is the per-event constant factor, and the missing thing
 is cross-chunk propagation — not incrementality, which the current model already has.
 
+## Status
+
+**Layer B has landed, and it absorbed the part of Layer A that mattered.**
+`lodestone_server::redstone_graph` is the palette-derived reaction classification (§3.2's Layer
+B); `ChunkColumn::palette_reaction`/`reaction_class` is its per-column table, the third beside
+`palette_ticking` and `palette_state_ids`; `random_tick::react_to_notification` now reads the
+class first, returns immediately for `Inert`, and guards every arm on a class comparison instead
+of a string predicate. The fifteen-predicate chain and the unconditional per-notification
+block-state `String` clone are both gone. `redstone_counters::Snapshot::notifications_by_class`
+is the instrument. Landed behaviour, measurements and the design's fallback cases are in
+[`../redstone-execution.md`](../redstone-execution.md).
+
+Still open, in the order that doc argues for:
+
+- **Layer A's remaining half — `redstone::make_lookup`'s per-read `String` allocation.** Not
+  done: it is a signature change across ~60 call sites reaching outside the redstone family
+  (`fire.rs`, `fluid.rs`, `block_placement.rs`, `server.rs`), and it is now the largest remaining
+  constant factor by a wide margin — 5899 allocating reads against 837 notifications on
+  `raid_farm.litematic`'s active tick.
+- **Layer C, the cross-column seam.** Untouched, and still the largest *correctness* gap.
+- **§3.3's `WritePlan` unification (U4).** Untouched.
+- **Layer D, the listener index (U7).** Deliberately not built; §8's argument stands and
+  `../redstone-execution.md` records why the classification captures its win without its
+  staleness class.
+
+§9's first open question ("the actual cost split") is answered there against a real contraption
+rather than the 15-cell proxy.
+
 ---
 
 ## 1. What the current model actually is
