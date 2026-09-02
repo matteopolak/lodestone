@@ -1,6 +1,6 @@
 //! The first-person hand pass: the bare arm or the held item, drawn in its
-//! own render pass with the depth buffer cleared (vanilla's
-//! `GameRenderer.renderLevel` does the same before `renderItemInHand`). See
+//! own render pass with the depth buffer cleared (vanilla's own level-render
+//! routine does the same before drawing the held item). See
 //! [`RenderState::prepare_first_person_hand`] for the vanilla parity notes
 //! and `docs/arm-swing-animation.md`.
 use lodestone_assets::ResourceLocation;
@@ -26,8 +26,8 @@ use super::{MainHandItem, RenderState, RenderStats};
 /// One server tick, in seconds — the rate [`HeldItemEquip`] steps at.
 const TICK: f32 = lodestone_ecs::TICK_PERIOD as f32;
 
-/// `ItemInHandRenderer.tick`'s per-tick ramp: `Mth.clamp(target - height, -0.4F,
-/// 0.4F)`, so the height moves at most **0.4 per tick** in either direction.
+/// Vanilla's own held-item-renderer per-tick ramp: `clamp(target - height, -0.4,
+/// 0.4)`, so the height moves at most **0.4 per tick** in either direction.
 ///
 /// A full `0 → 1` raise is therefore `1 / 0.4 = 2.5` ticks — **125 ms** — and a
 /// complete swap (down then up) is twice that plus the tick the model changes on.
@@ -36,9 +36,9 @@ const TICK: f32 = lodestone_ecs::TICK_PERIOD as f32;
 /// clamped step is exactly a linear ramp).
 const EQUIP_RATE_PER_TICK: f32 = 0.4;
 
-/// `ItemInHandRenderer.tick`'s `if (this.mainHandHeight < 0.1F) this.mainHandItem =
-/// nextMainHand;` — **the visible item changes at the bottom of the dip**, not when
-/// the slot changes.
+/// Vanilla's own held-item-renderer per-tick step: below this height, the
+/// visible main-hand item is swapped to the queued next item — **the visible
+/// item changes at the bottom of the dip**, not when the slot changes.
 ///
 /// This is the constant that makes the animation read as a swap rather than a
 /// twitch: without it the new item appears instantly and then dips, so you watch
@@ -234,8 +234,8 @@ impl HeldItemEquip {
         }
     }
 
-    /// One 20 Hz step — `ItemInHandRenderer.tick()`, main hand only, in vanilla's
-    /// own order.
+    /// One 20 Hz step — vanilla's own held-item-renderer tick, main hand
+    /// only, in vanilla's own order.
     ///
     /// The order is load-bearing at both ends. The *pre*-step value is saved first
     /// (that is what `oMainHandHeight` is for), and the visible-item exchange is
@@ -243,8 +243,9 @@ impl HeldItemEquip {
     /// the bottom rather than the tick after.
     fn step(&mut self, expected: Option<&MainHandItem>) {
         self.previous = self.height;
-        // `shouldInstantlyReplaceVisibleItem`: vanilla's `matchesIgnoringComponents`
-        // plus the item model's `handAnimationOnSwap` opt-out.
+        // Vanilla's own "should instantly replace visible item" check: an
+        // ignoring-components item match, plus the item model's swap-animation
+        // opt-out.
         //
         // **Reduced to an (id, foil) comparison here, and that loses two triggers.**
         // Vanilla compares whole `ItemStack`s, so `getCount()` and the rest of the
@@ -263,7 +264,7 @@ impl HeldItemEquip {
         // real comparison would add either — see [`Self::visible_dyed_color`]'s
         // doc — so this comparison is unchanged from before that pair existed.
         //
-        // The `handAnimationOnSwap` opt-out (`ItemModelResolver::shouldPlaySwapAnimation`,
+        // The swap-animation opt-out (vanilla's own item-model resolver check,
         // default `true`, overridden per item-model definition) is likewise not
         // reachable from an item id alone, so every item animates.
         let expected_key = expected.map(|item| (&item.item, item.foil));
@@ -279,11 +280,11 @@ impl HeldItemEquip {
         }
     }
 
-    /// Vanilla's `inverseArmHeight` for this frame:
-    /// `swapAnimationScale(item) · (1 - Mth.lerp(frameInterp, oHeight, height))`.
+    /// Vanilla's own inverse-arm-height for this frame:
+    /// `swap_animation_scale(item) · (1 - lerp(frame_interp, previous_height, height))`.
     ///
     /// `swapAnimationScale` is the item model definition's `swap_animation_scale`,
-    /// **defaulting to `1.0`** (`ItemModelResolver.swapAnimationScale` returns `1.0F`
+    /// **defaulting to `1.0`** (vanilla's own item-model resolver returns `1.0`
     /// for a stack with no `minecraft:item_model` component). The item pipeline does
     /// not read item-model definitions, so `1.0` is used for every item — the
     /// per-item override is the only thing missing, not the animation.
@@ -387,16 +388,16 @@ const NO_DAMAGE_TILT: f32 = 0.0;
 /// `Sim::render_camera` bakes
 /// [`BobFrame::eye_transform`] into the camera's position/yaw/pitch via
 /// [`crate::camera_rig::bobbed_camera`], mirroring vanilla's own
-/// `GameRenderer.renderLevel`'s
-/// `projectionMatrix.mul(bobStack.last().pose())` — the bob folded into the
+/// level-render step's post-multiply of the bob stack onto the projection —
+/// the bob folded into the
 /// **world's** projection matrix.
 ///
-/// Vanilla's hand path (`GameRenderer.renderItemInHand`, same file, `:333-362`)
+/// Vanilla's own hand-render path
 /// does not read that folded value at all. It builds a **second, independent**
-/// `PoseStack`, seeds it with `modelViewMatrix.invert()` — the camera's
-/// *unbobbed* view rotation — and then applies `bobHurt`/`bobView` to *that*
-/// stack a second time (`:344-347`). The GPU's own model-view is pushed as the
-/// very same unbobbed `modelViewMatrix` (`:342-343`), so at draw time the
+/// pose stack, seeds it with the inverse of the camera's *unbobbed* view
+/// rotation — and then applies the hurt/death roll and walk bob to *that*
+/// stack a second time. The GPU's own model-view is pushed as the
+/// very same unbobbed view matrix, so at draw time the
 /// inverse cancels it exactly and the hand's net pose is **just the bob
 /// matrix**, with no trace of the world's position and none of
 /// [`crate::camera_rig::bobbed_camera`]'s lossy roll-dropping decomposition —
@@ -438,11 +439,11 @@ impl std::fmt::Debug for HandBobSource {
 
 /// The hand pass's whole camera-space transform: [`hand_projection`] composed
 /// with a fresh copy of the walk/hurt bob — vanilla's own second application
-/// of it (`GameRenderer.java`), described in full on
+/// of it, described in full on
 /// [`HandBobSource`]'s doc.
 ///
-/// **Post-multiplied, matching vanilla's own `projectionMatrix.mul(bobStack.
-/// pose())` (`GameRenderer.java`)** — the bob lands between the projection
+/// **Post-multiplied, matching vanilla's own projection-times-bob-stack
+/// multiply** — the bob lands between the projection
 /// and the already-camera-space arm/item pose, exactly where vanilla's own
 /// `Proj · ModelViewStack · PoseStack` puts it once the view rotation cancels
 /// (see [`hand_projection`]'s own doc for that cancellation). Pre-multiplying
@@ -591,9 +592,10 @@ impl RenderState {
     ///
     /// # Which one, and why it is exclusive
     ///
-    /// Vanilla's `ItemInHandRenderer.submitArmWithItem` branches on
-    /// `itemStack.isEmpty()`: the empty hand gets `renderPlayerArm`, and a
-    /// non-empty one gets the *item* through `applyItemArmTransform` **with no arm
+    /// Vanilla's own held-item-renderer submit routine branches on
+    /// whether the item stack is empty: the empty hand gets its own
+    /// player-arm render, and a
+    /// non-empty one gets the *item* through its own item-arm transform **with no arm
     /// drawn at all**. So this returns a [`FirstPersonHand`] and the caller draws
     /// exactly one of its two variants. Drawing both — the tempting "add the item
     /// on top of the arm" reading — puts an item model inside the wrist.
@@ -606,8 +608,9 @@ impl RenderState {
     ///
     /// Also rewrites the arm pass's group-0 uniform. That uniform's `view_proj`
     /// is [`hand_projection`] — **the projection alone** — because
-    /// `GameRenderer.renderItemInHand` multiplies the pose stack by
-    /// `modelViewMatrix.invert()` while pushing `modelViewStack.mul(modelViewMatrix)`,
+    /// vanilla's own held-item render routine multiplies the pose stack by
+    /// the inverse model-view matrix while pushing the model-view stack
+    /// times the model-view matrix,
     /// and the shader evaluates `Proj · ModelViewStack · PoseStack`: the view
     /// rotation cancels exactly, leaving a camera-space pose. Feeding
     /// `Camera::view_projection` here instead would leave the arm parked at the
@@ -710,8 +713,9 @@ impl RenderState {
         // reads the pose from, so the resolved variant and its transform cannot
         // disagree about which slot this pass is.
         // A filled map first: vanilla forks *before* the ordinary
-        // item pose too — `renderArmWithItem` tests `MapItem.isFilledMap` and
-        // calls `renderMap`, which is a textured quad and not the item's baked
+        // item pose too — its own arm-with-item render routine tests whether
+        // the item is a filled map and
+        // calls its own map-render routine, which is a textured quad and not the item's baked
         // model. Falling through would draw `item/filled_map`'s flat blank sprite,
         // which looks like a working map until you notice it has no terrain on it.
         if let Some((mesh, texture)) = self.prepare_held_map(device, queue, inverse_arm_height) {
@@ -868,9 +872,10 @@ impl RenderState {
                     .and_then(|skin| self.entities.variant_textures.get(skin.default_sheet))
             })
             .or_else(|| self.entities.textures.get(rig))?;
-        // The bare arm takes the *same* dip: `renderPlayerArm` is called with the
-        // very `inverseArmHeight` `submitArmWithItem` computed for the item branch
-        // (`ItemInHandRenderer.java`), so swapping an item away for an empty slot
+        // The bare arm takes the *same* dip: vanilla's own player-arm render
+        // routine is called with the
+        // very inverse-arm-height its own submit routine computed for the item branch,
+        // so swapping an item away for an empty slot
         // lowers the item and raises the arm as one continuous motion.
         let pose =
             first_person_arm_pose_with_equip(mesh, ARM, self.hand_swing.value(), inverse_arm_height)?;
@@ -1037,7 +1042,8 @@ impl RenderState {
         // The shield rig is one mesh (plate+handle together, see
         // `lodestone_render::block_entity::SHIELD`'s doc) drawn opaque once,
         // then re-submitted per pattern layer through the same translucent
-        // pass a banner's flag uses — `ShieldSpecialRenderer.submit` ported.
+        // pass a banner's flag uses — vanilla's own shield special-renderer
+        // submit routine ported.
         // Unlike a banner, there is no separate "flag" quad the layers paint
         // over: `base` re-tints the *whole* shield mesh each time.
         if form.kind == "minecraft:shield" {
@@ -1063,8 +1069,8 @@ impl RenderState {
                         })
                     })
                     .collect();
-                // `Objects.requireNonNullElse(baseColor, DyeColor.WHITE)` —
-                // `ShieldSpecialRenderer.submit`'s own default when a shield
+                // Vanilla's own shield special-renderer submit routine's
+                // default (base colour or white) when a shield
                 // has stored patterns but no `minecraft:base_color` at all.
                 let base_dye = base_color
                     .and_then(lodestone_render::DyeColor::from_name)
@@ -1096,15 +1102,16 @@ impl RenderState {
         }
 
         // A decorated pot is five draws sharing one placement — a base and four
-        // independently sheeted faces, which is `DecoratedPotRenderer.submit`'s
+        // independently sheeted faces, which is vanilla's own decorated-pot
+        // renderer's submit routine's
         // own decomposition and the reason it cannot be a `special_item_rig`
         // pair. Unlike a banner's layers these are ordinary opaque draws, so
         // there is no translucent list to return alongside them.
         //
-        // **The four sherds are `PotDecorations.EMPTY` here, not the stack's
-        // own.** That is exactly what vanilla does for a stack carrying no
-        // `minecraft:pot_decorations`
-        // (`Objects.requireNonNullElse(decorations, PotDecorations.EMPTY)`), so
+        // **The four sherds are vanilla's own empty-decorations sentinel here,
+        // not the stack's own.** That is exactly what vanilla does for a
+        // stack carrying no
+        // `minecraft:pot_decorations`, so
         // an undecorated pot — the overwhelmingly common one — is *correct*
         // rather than approximate. A pot that really does carry sherds draws
         // with the four default side sprites, and the missing link is named
@@ -1137,9 +1144,9 @@ impl RenderState {
 
         // The trident is the one special rig whose mesh lives in the **entity**
         // corpus rather than in `BLOCK_ENTITY_MODELS` — it is the same
-        // `"trident"` entry `ThrownTridentRenderer` draws a thrown one with, and
-        // vanilla bakes it the same way (`TridentSpecialRenderer.bake` takes
-        // `ModelLayers.TRIDENT` out of `context.entityModelSet()`). So it cannot
+        // `"trident"` entry vanilla's own thrown-trident renderer draws a thrown one with, and
+        // vanilla bakes it the same way (its own trident special-renderer bake
+        // routine takes the trident model layer out of the entity model set). So it cannot
         // go through `special_item_rig`, whose `&'static str` is a
         // `BLOCK_ENTITY_MODELS` key; see `lodestone_render::trident_item_rig`.
         //
@@ -1193,8 +1200,10 @@ impl RenderState {
     /// The upload shape is otherwise identical, deliberately: same
     /// `part_transforms(placement, &[])` with no pose overrides, same untinted
     /// instance, same "a missing part range is skipped, an empty result is
-    /// `None`" fail-open. A trident has no animated part — `TridentModel` is a
-    /// static rig and `TridentSpecialRenderer.submit` calls no `setupAnim` — so
+    /// `None`" fail-open. A trident has no animated part — vanilla's own
+    /// trident model is a
+    /// static rig and its own trident special-renderer submit routine calls
+    /// no pose-setup routine — so
     /// the empty override list is the rest pose *and* the right pose, not a
     /// simplification.
     fn build_entity_rig_hand_draw<'a>(
@@ -1316,24 +1325,18 @@ impl RenderState {
 
     /// The packed light byte the first-person hand is lit with, for both branches.
     ///
-    /// `renderItemInHand`'s `getPackedLightCoords(minecraft.player, partialTick)`.
+    /// Vanilla's own held-item render routine's packed-light-coords lookup,
+    /// evaluated for the local player at the frame's partial tick.
     ///
     /// # The eye is not a deviation, and the byte is not one channel
     ///
     /// This doc used to read "sampled at the **eye** rather than the feet", framed
     /// as a departure we chose. It is not — it is what vanilla does. Following the
-    /// call through:
-    ///
-    /// ```java
-    /// // EntityRenderer.java
-    /// BlockPos blockPos = BlockPos.containing(entity.getLightProbePosition(partialTickTime));
-    /// return LightCoordsUtil.pack(this.getBlockLightLevel(entity, blockPos),
-    ///                             this.getSkyLightLevel(entity, blockPos));
-    /// // Entity.java
-    /// public Vec3 getLightProbePosition(final float partialTickTime) {
-    ///    return this.getEyePosition(partialTickTime);
-    /// }
-    /// ```
+    /// call through: vanilla's own entity-renderer light lookup resolves the
+    /// sample position via a per-entity "light probe position" hook, which the
+    /// base entity implementation simply returns as the interpolated eye
+    /// position; it then reads the block-light and sky-light levels at that
+    /// position's containing block and packs them into one value.
     ///
     /// And the `u32::from(u8)` is a widen, not a truncation to a single channel:
     /// [`EntityLightSource::sample`](super::sources::EntityLightSource) returns
@@ -1386,8 +1389,9 @@ impl RenderState {
     /// Rewrite both hand passes' group-0 uniforms with [`hand_view_proj`].
     ///
     /// **No view matrix, but now a bob matrix**, because
-    /// `GameRenderer.renderItemInHand` multiplies the pose stack by
-    /// `modelViewMatrix.invert()` while pushing `modelViewStack.mul(modelViewMatrix)`
+    /// vanilla's own held-item render routine multiplies the pose stack by
+    /// the inverse model-view matrix while pushing the model-view stack
+    /// times the model-view matrix
     /// and the shader evaluates `Proj · ModelViewStack · PoseStack`: the view
     /// rotation cancels exactly, leaving a camera-space pose. Feeding
     /// `Camera::view_projection` here instead parks the hand at the world origin,
@@ -1485,9 +1489,9 @@ impl RenderState {
     /// the depth buffer cleared.
     ///
     /// Vanilla does exactly this, and it is not an optimisation detail:
-    /// `GameRenderer.renderLevel` calls
-    /// `clearDepthTexture(mainRenderTarget.getDepthTexture(), 0.0)`
-    /// immediately before `renderItemInHand`. Vanilla's depth is reversed-Z,
+    /// vanilla's own level-render routine clears the main render target's
+    /// depth texture to `0.0`
+    /// immediately before drawing the held item. Vanilla's depth is reversed-Z,
     /// so its `0.0` is *far*; ours is `[0,1]` DirectX-style, so the equivalent
     /// clear value is `1.0`. (This is the sign flip `CLAUDE.md` warns about,
     /// applied to a clear rather than a comparison.)
@@ -1633,7 +1637,8 @@ impl RenderState {
                 // "flag" part's index is what made this pass draw at all.
                 //
                 // **A shield's layers redraw the *whole* mesh, not one named
-                // part.** `ShieldSpecialRenderer.submit` re-submits `this.model`
+                // part.** Vanilla's own shield special-renderer submit routine
+                // re-submits its whole model
                 // (both `plate` and `handle`) unchanged per pattern layer —
                 // there is no shield analogue of a banner's separate `"flag"`
                 // quad (see `lodestone_render::block_entity::SHIELD`'s doc) — so
@@ -1805,7 +1810,7 @@ mod tests {
     }
 
     /// **The magnitude gate on the ramp itself.** The per-tick height sequence must
-    /// be the one vanilla's `Mth.clamp(target - height, -0.4F, 0.4F)` produces from
+    /// be the one vanilla's own `clamp(target - height, -0.4, 0.4)` produces from
     /// rest, not merely a decreasing one.
     ///
     /// Truth, from `1.0` toward `0.0`: `0.6, 0.2, 0.0`. Two wrong readings of the
