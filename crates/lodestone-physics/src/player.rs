@@ -2240,8 +2240,8 @@ fn apply_fluid_jump(
     }
 }
 
-/// `LivingEntity.jumpOutOfFluid(oldY)` (`LivingEntity.java:2556-2561`) — the hop
-/// that carries a swimmer *out* of the water onto the ledge they just swam into.
+/// Vanilla's own jump-out-of-fluid hop — the hop that carries a swimmer
+/// *out* of the water onto the ledge they just swam into.
 ///
 /// Runs at the end of both fluid travel branches. When the tick's move collided
 /// horizontally and the box would be **free of blocks and of liquid** if lifted to
@@ -2249,8 +2249,8 @@ fn apply_fluid_jump(
 /// Without it a player pressed against a shoreline swims into the wall forever;
 /// this is the single most visible piece of water movement after buoyancy.
 ///
-/// `isFree` is `noCollision(box) && !containsAnyLiquid(box)` (`Entity.java:664-670`)
-/// — the liquid half is what stops it firing repeatedly while still submerged.
+/// `isFree` is vanilla's own "no collision and contains no liquid" check —
+/// the liquid half is what stops it firing repeatedly while still submerged.
 fn jump_out_of_fluid(
     state: &mut PlayerState,
     old_y: f64,
@@ -2272,14 +2272,14 @@ fn jump_out_of_fluid(
     }
 }
 
-/// One tick of in-water movement (`travel` → `travelInFluid` → `travelInWater`,
-/// `LivingEntity.java:2494-2530`), plus the in-water parts of `aiStep` that
-/// precede it.
+/// One tick of in-water movement (vanilla's own travel → in-fluid travel →
+/// in-water travel dispatch), plus the in-water parts of its per-tick
+/// player update that precede it.
 ///
-/// In order: the `baseTick` flow-current push, `LocalPlayer.aiStep`'s
-/// sneak-to-sink (`goDownInWater`, `-0.04F`), the velocity snap-to-zero prologue,
-/// the shallow-vs-deep jump decision ([`apply_fluid_jump`]), `Player.travel`'s
-/// swim look-descent (blending vertical velocity toward the look angle), the
+/// In order: the baseline per-tick flow-current push, vanilla's own
+/// sneak-to-sink (`-0.04F`), the velocity snap-to-zero prologue, the
+/// shallow-vs-deep jump decision ([`apply_fluid_jump`]), vanilla's own swim
+/// look-descent (blending vertical velocity toward the look angle), the
 /// slow-down/input-speed terms (sprint, Depth Strider, Dolphin's Grace), the
 /// collision move, the ladder clamp, the `multiply(slowDown, 0.8F, slowDown)`
 /// drag, buoyancy ([`fluid_falling_adjusted_movement`]) and finally
@@ -2287,15 +2287,15 @@ fn jump_out_of_fluid(
 ///
 /// # Not modelled
 ///
-/// * Bubble-column impulses are **not** here, and never were vanilla's to put
-///   here: `BubbleColumnBlock.entityInside` is reached from
-///   `applyEffectsFromBlocks`, which `LivingEntity.aiStep` calls *after*
-///   `travel()` (`LivingEntity.java:3130` then `:3134`). They live one level up,
-///   in [`apply_bubble_column`], beside the other `entityInside` effect this
-///   crate models ([`update_stuck_multiplier`]). Issue #199.
-/// * `WATER_MOVEMENT_EFFICIENCY` has no source in this repo — see
-///   [`PlayerState::water_movement_efficiency`]. The arithmetic is here; the value
-///   is `0.0`.
+/// * Bubble-column impulses are **not** here, and never were vanilla's to
+///   put here: vanilla's own bubble-column block effect is reached from its
+///   per-tick block-effects pass, which its per-tick player update calls
+///   *after* travel. They live one level up, in [`apply_bubble_column`],
+///   beside the other block-inside effect this crate models
+///   ([`update_stuck_multiplier`]). Issue #199.
+/// * The Depth Strider (water-movement-efficiency) attribute has no source
+///   in this repo — see [`PlayerState::water_movement_efficiency`]. The
+///   arithmetic is here; the value is `0.0`.
 pub fn tick_water(
     state: &mut PlayerState,
     input: MovementInput,
