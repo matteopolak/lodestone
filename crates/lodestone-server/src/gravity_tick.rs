@@ -5,44 +5,33 @@
 //! doc comment, and `docs/tick-scheduling.md`'s "what this module does not
 //! yet have a real producer for").
 //!
-//! # Cited directly
+//! # The real falling-block hooks, transcribed as the rules they implement
 //!
-//! `FallingBlock.onPlace`/`updateShape`/`tick`:
+//! On place: schedule a tick at the placed position, delayed by the
+//! block's own "delay after place".
 //!
-//! (Line numbers deliberately dropped from these citations — a class-and-method
-//! name is just as findable in `.cache/mc/26.2/src` and does not rot when the
-//! cache is re-extracted.)
+//! On a neighbor shape update: schedule that same tick again at this
+//! position, then continue with the ordinary shape-update behaviour.
 //!
-//! ```text
-//! protected void onPlace(BlockState state, Level level, BlockPos pos, BlockState oldState, boolean movedByPiston) {
-//!    level.scheduleTick(pos, this, this.getDelayAfterPlace());
-//! }
-//! protected BlockState updateShape(..., BlockPos pos, ..., BlockPos neighbourPos, BlockState neighbourState, ...) {
-//!    ticks.scheduleTick(pos, this, this.getDelayAfterPlace());
-//!    return super.updateShape(...);
-//! }
-//! protected void tick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
-//!    if (isFree(level.getBlockState(pos.below())) && pos.getY() >= level.getMinY()) {
-//!       FallingBlockEntity entity = FallingBlockEntity.fall(level, pos, state);
-//!       this.falling(entity);
-//!    }
-//! }
-//! public static boolean isFree(BlockState state) {
-//!    return state.isAir() || state.is(BlockTags.FIRE) || state.liquid() || state.canBeReplaced();
-//! }
-//! ```
+//! On the scheduled tick itself: if the cell below is "free" (see below) and
+//! this position is not below the world's build-height floor, spawn a
+//! falling-block entity carrying this state and begin tracking its fall.
 //!
-//! `getDelayAfterPlace` defaults to `2` (`FallingBlock.getDelayAfterPlace`). Note
+//! "Free" is: air, a block tagged as fire, a fluid, or anything otherwise
+//! replaceable.
+//!
+//! The delay after place defaults to `2`. Note
 //! `tick()` itself draws **zero** RNG values — the eligibility check
-//! (`isFree(below)`) is entirely deterministic, unlike every random-tick
-//! family in `crate::random_tick`/`crate::growth_tick`. `sand`/`red_sand`
-//! (`SandBlock`) and `gravel` (`GravelBlock`) are plain `FallingBlock`
+//! (whether the cell below is free) is entirely deterministic, unlike every random-tick
+//! family in `crate::random_tick`/`crate::growth_tick`. Sand, red sand
+//! and gravel are plain falling-block
 //! subclasses with no override of any of the above.
 //!
-//! # Deviations from the jar, and the two that are now closed
+//! # Deviations from the real engine, and the two that are now closed
 //!
-//! **The `FallingBlockEntity` is now real — this deviation is closed.**
-//! [`FallingBlockMotion`] is the port of `FallingBlockEntity.tick`'s motion half,
+//! **The falling-block entity is now real — this deviation is closed.**
+//! [`FallingBlockMotion`] is the port of the real falling-block entity's own
+//! tick's motion half,
 //! `crate::mobs::MobSim`'s falling-block registry tracks and broadcasts one, and
 //! `tick.rs`'s scheduled-tick drain is the single place one is created. The
 //! one-shot [`find_landing_y`] is still here and still used, but only to resolve
@@ -50,16 +39,16 @@
 //!
 //! **The 2-tick scheduled delay is now real — this deviation is closed.**
 //! [`ticks_after_place`] schedules [`TICK_GRAVITY`] at the placed position with
-//! [`DELAY_AFTER_PLACE`], which is `FallingBlock.onPlace`'s
-//! `level.scheduleTick(pos, this, this.getDelayAfterPlace())` and nothing more.
+//! [`DELAY_AFTER_PLACE`], which is the real on-place hook's
+//! own scheduled tick and nothing more.
 //! `tick.rs`'s scheduled-tick drain dispatches it to
 //! `crate::random_tick::settle_gravity_at` **at the tick's own position**, which
-//! is `FallingBlock.tick`'s `isFree(below)` check verbatim.
+//! is the real per-tick eligibility check verbatim.
 //!
 //! The position matters and is the trap this arm had to avoid: the settle could
 //! not simply be routed through `propagate_and_react` like every other reaction,
 //! because `NeighborPropagator::propagate(origin)` notifies the origin's **six
-//! neighbours and not the origin**. Vanilla's `onPlace` tick fires on the placed
+//! neighbours and not the origin**. The real on-place tick fires on the placed
 //! block itself, so a propagate-based arm would have settled the sand's
 //! neighbours and left the sand hanging — the same symptom, with a scheduled
 //! tick that looked like it was working.
@@ -71,12 +60,13 @@
 //! 1. **A neighbour mutation.**
 //!    `crate::random_tick::RandomTickScheduler::tick_randomly_ticking_block`
 //!    calls `NeighborPropagator::propagate` on every position any of its
-//!    mutation families just changed, mirroring vanilla's `setBlockAndUpdate`
-//!    always notifying neighbours. Narrow: it fires only when one of *those*
+//!    mutation families just changed, mirroring the real "set block and
+//!    update" always notifying neighbours. Narrow: it fires only when one of *those*
 //!    mutations lands next to an unsupported gravity block. This route now
 //!    **schedules** [`TICK_GRAVITY`] rather than settling inline, which is what
-//!    `FallingBlock.updateShape` does — it is `scheduleTick(pos, this,
-//!    getDelayAfterPlace())` and nothing else. Settling inline was a second,
+//!    the real shape-update hook
+//!    does — it schedules a tick with the same delay-after-place
+//!    and nothing else. Settling inline was a second,
 //!    undocumented fall path that skipped the delay *and* the entity; there is
 //!    now exactly one place a block ever leaves the world for a fall, and it is
 //!    the drain below.
@@ -87,20 +77,20 @@
 //!    only a neighbour update could reach the check, so placing sand in mid-air
 //!    left it hanging until something else happened next to it.
 //!
-//! # The fall itself: `FallingBlockEntity.tick`'s motion half
+//! # The fall itself: the real falling-block entity's tick's motion half
 //!
-//! `FallingBlockEntity.tick` runs, in this order: `time++`, `applyGravity()`,
-//! `move(SELF, getDeltaMovement())`, the landing decision, and — as the method's
+//! The real per-tick update runs, in this order: increment its own elapsed
+//! time, apply gravity, move by the resulting delta, the landing decision, and — as the method's
 //! **last** statement, after everything above —
-//! `setDeltaMovement(getDeltaMovement().scale(getAirDrag()))`.
+//! scale the delta movement by the entity's own air drag.
 //!
-//! `Entity.applyGravity` is `setDeltaMovement(getDeltaMovement().add(0, -gravity,
-//! 0))` with `FallingBlockEntity.getDefaultGravity` = `0.04`, and
-//! `Entity.getAirDrag` is `0.98F`. So the displacement taken in tick *n* is
+//! The real apply-gravity step adds `-gravity` to the vertical delta
+//! movement, with the real falling-block entity's own default gravity of
+//! `0.04`, and
+//! the real air-drag value is `0.98F`. So the displacement taken in tick *n* is
 //!
-//! ```text
-//! v_n = 0.98 * v_(n-1) - 0.04,   v_0 = 0     (setDeltaMovement(Vec3.ZERO))
-//! ```
+//! `v_n = 0.98 * v_(n-1) - 0.04`, with `v_0 = 0` (the entity starts with a
+//! zero delta movement).
 //!
 //! **with the displacement applied before the drag.** That ordering is the whole
 //! of [`fall_step`] and it is the part that is easy to get backwards: tick one
@@ -109,8 +99,8 @@
 //! no approximate assertion can separate them — which is why
 //! [`fall_step`]'s own test predicts both and requires the wrong one to fail.
 //!
-//! One named numeric deviation: `getAirDrag` returns a **`float`** and
-//! `Vec3.scale` takes a `double`, so the JVM widens `0.98F` to
+//! One named numeric deviation: the real air-drag query returns a **`float`** and
+//! the real vector-scale operation takes a `double`, so the JVM widens `0.98F` to
 //! `0.980000019073486…`. [`FALLING_BLOCK_AIR_DRAG`] is the exact decimal `0.98`,
 //! matching `lodestone_entity::item_entity::ITEM_AIR_DRAG`, which is the same
 //! choice already made for dropped items. The divergence is ~2e-9 blocks per
@@ -128,13 +118,15 @@
 //!
 //! 1. **Displacement before drag** — above.
 //! 2. **Clear the origin cell before the entity is broadcast.**
-//!    `FallingBlockEntity.fall` is `new FallingBlockEntity(...)`,
-//!    `level.setBlock(pos, air, 3)`, *then* `level.addFreshEntity(entity)`. A
+//!    The real "fall" constructor builds the falling-block entity,
+//!    clears the origin block to air, *then* adds the fresh entity to the
+//!    world. A
 //!    client that sees the `ADD_ENTITY` first shows the block **and** the entity
 //!    in the same cell for as long as the two packets are apart.
 //! 3. **Place the landed block before discarding the entity.** The landing branch
-//!    is `level.setBlock(pos, blockState, 3)`, then
-//!    `sendToTrackingPlayers(ClientboundBlockUpdatePacket)`, then `discard()`. The
+//!    sets the landed block, then
+//!    sends the block-update packet to tracking players, then discards the
+//!    entity. The
 //!    reverse leaves the client with *neither* a block nor an entity — the shape
 //!    that made the item-pickup animation invisible, where `take` had to precede
 //!    `discard` for the same reason.
@@ -157,9 +149,10 @@ pub const SAND: &str = "minecraft:sand";
 pub const RED_SAND: &str = "minecraft:red_sand";
 pub const GRAVEL: &str = "minecraft:gravel";
 
-/// `true` for a plain-`FallingBlock` base name this crate models. Vanilla
-/// also has `ConcretePowderBlock`/`AnvilBlock`/`PointedDripstoneBlock` as
-/// `FallingBlock` subclasses; not covered here (none appear in this crate's
+/// `true` for a plain falling-block base name this crate models. The real
+/// engine
+/// also has concrete powder, anvils and pointed dripstone as
+/// falling-block subclasses; not covered here (none appear in this crate's
 /// worldgen — see `crate::chunk`'s module doc — so extending this table has
 /// no way to be exercised end to end yet, the same reasoning
 /// `crate::growth_tick` gives for not inventing tree placement).
@@ -168,10 +161,10 @@ pub fn is_gravity_block(base: &str) -> bool {
     matches!(base, SAND | RED_SAND | GRAVEL)
 }
 
-/// `FallingBlock.isFree`, narrowed to what this
-/// crate can check. `state.isAir() || state.liquid()` maps directly onto
-/// `crate::chunk::is_air_or_fluid`. `state.is(BlockTags.FIRE)` and
-/// `state.canBeReplaced()` are not modeled here: `crate::fire::is_fire` could
+/// The real "is free" check, narrowed to what this
+/// crate can check. Its air/liquid clause maps directly onto
+/// `crate::chunk::is_air_or_fluid`. Its fire-tag clause and
+/// its generic can-be-replaced clause are not modeled here: `crate::fire::is_fire` could
 /// answer the first now that this crate has a real fire block, but nothing
 /// wires it into this predicate yet, and there is still no generic "can be
 /// replaced" predicate beyond `is_air_or_fluid` itself (`crate::chunk`'s own
@@ -191,7 +184,7 @@ pub fn is_free(state: &str) -> bool {
 /// pure function with no world type in scope, exactly like
 /// `crate::growth_tick`'s decision functions.
 ///
-/// This is the one-shot replacement for vanilla's multi-tick physics fall —
+/// This is the one-shot replacement for the real engine's multi-tick physics fall —
 /// see this module's own doc comment for why a single computed landing
 /// position, rather than an animated descent, is what this crate models.
 #[must_use]
@@ -203,22 +196,23 @@ pub fn find_landing_y(mut is_free_below: impl FnMut(i32) -> bool, start_y: i32, 
     y
 }
 
-/// The scheduled-tick kind a placed gravity block waits on — `FallingBlock`'s own
-/// entry in vanilla's `blockTicks` queue, dispatched by `tick.rs`'s drain.
+/// The scheduled-tick kind a placed gravity block waits on — the real falling
+/// block's own
+/// entry in the real per-chunk pending-block-tick queue, dispatched by `tick.rs`'s drain.
 ///
 /// A distinct kind rather than reusing a redstone or fluid one because
 /// `ScheduledTickQueue` deduplicates on `(pos, kind)`: sharing a kind would let a
 /// fluid tick at the same cell swallow the gravity check, or the reverse.
 pub const TICK_GRAVITY: &str = "gravity";
 
-/// `FallingBlock.getDelayAfterPlace`, which is `2`.
+/// The real delay-after-place query, which is `2`.
 ///
 /// Not "a couple of ticks": the value is what makes the delay observable as a
 /// delay. At 20 ticks per second a placed sand block hangs for 100 ms and then
-/// falls, which is the pause vanilla has and an immediate settle does not.
+/// falls, which is the pause the real engine has and an immediate settle does not.
 pub const DELAY_AFTER_PLACE: u64 = 2;
 
-/// `FallingBlock.onPlace`: the scheduled tick a gravity block owes itself the
+/// The real on-place hook: the scheduled tick a gravity block owes itself the
 /// moment it is placed.
 ///
 /// Empty for anything [`is_gravity_block`] rejects, so the caller needs no guard —
@@ -231,8 +225,8 @@ pub const DELAY_AFTER_PLACE: u64 = 2;
 /// `ScheduledTick::sub_tick_order` is private — again the idiom
 /// `crate::fluid::ticks_after_edit` established.
 ///
-/// `TickPriority::Normal` is vanilla's: `scheduleTick(pos, block, delay)` with no
-/// priority argument resolves to `TickPriority.NORMAL`.
+/// `TickPriority::Normal` is the real default: a scheduled tick with no
+/// priority argument resolves to the normal priority.
 #[must_use]
 pub fn ticks_after_place(pos: BlockPos, state: &str) -> Vec<ScheduledTick<String>> {
     let base = state.split('[').next().unwrap_or(state);
@@ -249,27 +243,27 @@ pub fn ticks_after_place(pos: BlockPos, state: &str) -> Vec<ScheduledTick<String
     pending.drain_due(u64::MAX, usize::MAX)
 }
 
-/// `FallingBlockEntity.getDefaultGravity` — `0.04` blocks per tick, per tick.
+/// The real falling-block entity's own default-gravity override — `0.04` blocks per tick, per tick.
 ///
-/// Note this is the *entity's* override, not `Entity.getDefaultGravity`, which is
+/// Note this is the *entity's* override, not the generic entity default, which is
 /// `0.0`: an entity with no override does not fall at all. It happens to equal
 /// `lodestone_entity::item_entity::ITEM_GRAVITY`, which is a coincidence of two
 /// separate overrides and not a shared constant.
 pub const FALLING_BLOCK_GRAVITY: f64 = 0.04;
 
-/// `Entity.getAirDrag` — `0.98F`, applied to the whole delta as the **last**
-/// statement of `FallingBlockEntity.tick`.
+/// The real air-drag query — `0.98F`, applied to the whole delta as the **last**
+/// statement of the real per-tick update.
 ///
 /// See this module's doc for why this is the exact decimal `0.98` rather than the
 /// `float`-widened `0.980000019073486…` the JVM actually multiplies by, and what
 /// that costs.
 pub const FALLING_BLOCK_AIR_DRAG: f64 = 0.98;
 
-/// `EntityTypes.FALLING_BLOCK`'s registry key — the `entity_type` a tracked
+/// The real falling-block entity type's registry key — the `entity_type` a tracked
 /// falling block streams under.
 pub const FALLING_BLOCK_ENTITY_TYPE: &str = "minecraft:falling_block";
 
-/// `FallingBlockEntity.tick`'s hard cap: `this.time > 600` discards the entity
+/// The real per-tick update's hard cap: elapsed time past 600 discards the entity
 /// wherever it is.
 ///
 /// Unreachable in this crate for a fall that starts inside the world —
@@ -279,10 +273,10 @@ pub const FALLING_BLOCK_ENTITY_TYPE: &str = "minecraft:falling_block";
 /// mode is an entity that streams forever.
 pub const MAX_FALL_TICKS: u32 = 600;
 
-/// One tick of `FallingBlockEntity`'s vertical motion, in vanilla's own order:
-/// `applyGravity` (which *adds* `-0.04` to the delta), then `move` with that
+/// One tick of the real falling-block entity's vertical motion, in the real
+/// order: apply gravity (which *adds* `-0.04` to the delta), then move with that
 /// delta, then — after the landing decision — the trailing
-/// `scale(getAirDrag())`.
+/// air-drag scale.
 ///
 /// Returns `(dy, velocity_after)`: the displacement this tick takes and the
 /// velocity the *next* tick starts from. Both are negative for a falling block.
@@ -293,38 +287,39 @@ pub const MAX_FALL_TICKS: u32 = 600;
 /// `0.0392` on the first tick instead of `0.04`.
 #[must_use]
 pub fn fall_step(velocity_y: f64) -> (f64, f64) {
-    // `Entity.applyGravity`: `setDeltaMovement(getDeltaMovement().add(0, -g, 0))`.
+    // The real apply-gravity step: add `-g` to the vertical delta movement.
     let after_gravity = velocity_y - FALLING_BLOCK_GRAVITY;
-    // `move(MoverType.SELF, getDeltaMovement())` — the displacement is the delta
+    // The real move step — the displacement is the delta
     // as it stands *now*, before the method's trailing drag.
     let dy = after_gravity;
-    // The last statement of `tick()`.
+    // The last statement of the real per-tick update.
     (dy, after_gravity * FALLING_BLOCK_AIR_DRAG)
 }
 
-/// A live `FallingBlockEntity`'s own motion state: everything
-/// `FallingBlockEntity.tick` reads and writes that is not the world.
+/// A live falling-block entity's own motion state: everything
+/// the real per-tick update reads and writes that is not the world.
 ///
-/// `x`/`z` never change. `FallingBlockEntity`'s constructor calls
-/// `setDeltaMovement(Vec3.ZERO)` and `move(SELF, delta)` with a purely vertical
+/// `x`/`z` never change. The real falling-block entity's constructor starts
+/// with a zero delta movement, and moving with a purely vertical
 /// delta adds no horizontal component, so a falling block descends in a straight
 /// line — which is also why [`velocity_y`](Self::velocity_y) is a scalar rather
 /// than a [`Vec3`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FallingBlockMotion {
-    /// Entity position, in vanilla's own entity-space: the **centre** of the
+    /// Entity position, in the real engine's own entity-space: the **centre** of the
     /// block's footprint horizontally, its bottom face vertically.
     pub position: Vec3,
     /// Vertical velocity in blocks per tick, negative while falling. Starts at
-    /// exactly `0.0` (`setDeltaMovement(Vec3.ZERO)`), *not* at `-0.04`.
+    /// exactly `0.0` (a zero delta movement), *not* at `-0.04`.
     pub velocity_y: f64,
-    /// `FallingBlockEntity.time`, incremented once per tick before the motion.
+    /// The real entity's own elapsed-time field, incremented once per tick before the motion.
     pub time: u32,
 }
 
 impl FallingBlockMotion {
-    /// `FallingBlockEntity.fall`'s spawn position: `pos.getX() + 0.5`,
-    /// `pos.getY()`, `pos.getZ() + 0.5`.
+    /// The real "fall" constructor's spawn position: block position plus `0.5`
+    /// on `x`,
+    /// unshifted on `y`, plus `0.5` on `z`.
     ///
     /// The `+ 0.5` on `x`/`z` and **not** on `y` is not a rounding choice: an
     /// entity's position is its feet, so a falling block whose `y` is the block's
@@ -340,10 +335,10 @@ impl FallingBlockMotion {
         }
     }
 
-    /// One `FallingBlockEntity.tick`, against a pre-resolved `landing_y`.
+    /// One real per-tick update, against a pre-resolved `landing_y`.
     ///
     /// `landing_y` is [`find_landing_y`]'s answer, captured when the entity was
-    /// created. Vanilla instead asks `onGround()` every tick, which re-reads the
+    /// created. The real engine instead asks whether the entity is on ground every tick, which re-reads the
     /// world; `crate::mobs::MobSim` holds its world immutably and cannot see an
     /// edit made after it was built (see `crate::tick`'s own note on that), so
     /// re-reading here would answer from a stale snapshot anyway. The visible
@@ -379,21 +374,21 @@ pub enum FallingBlockStep {
         /// The `y` the block is written at.
         y: i32,
     },
-    /// `FallingBlockEntity.tick`'s `time > 600` cap. Discard with no placement.
+    /// The real per-tick update's `time > 600` cap. Discard with no placement.
     Expired,
 }
 
 /// One world-visible effect of the falling-block lifecycle, **in the order
-/// vanilla produces it**.
+/// the real engine produces it**.
 ///
 /// This enum exists for one reason: the two orderings a player can see are
 /// otherwise properties of the order a caller wrote two statements in, which no
 /// test can observe. As a returned sequence they are assertable. See this
-/// module's doc for the two jar citations and for what each reversal looks like
+/// module's doc for what each reversal looks like
 /// on screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FallingBlockEffect {
-    /// `FallingBlockEntity.fall`'s `level.setBlock(pos, air, 3)`. Comes
+    /// The real "fall" constructor's origin-clearing block write. Comes
     /// **before** [`Spawned`](Self::Spawned).
     ClearedOrigin {
         /// The cell the block left.
@@ -492,7 +487,7 @@ mod tests {
     /// instantaneous). Asserted on the relative delay because that is what
     /// `BlockTickFeed`'s pending lane carries.
     ///
-    /// The **position** assertion is the load-bearing one. Vanilla's `onPlace`
+    /// The **position** assertion is the load-bearing one. The real on-place
     /// tick fires on the placed block itself, and scheduling it on a neighbour
     /// instead would settle the wrong cell while looking entirely correct in a
     /// queue dump — see this module's doc comment for why the propagate-based
@@ -532,14 +527,14 @@ mod tests {
             assert_eq!(
                 ticks_after_place(BlockPos::new(0, 64, 0), state).len(),
                 1,
-                "{state} is a gravity block and must schedule its own onPlace tick"
+                "{state} is a gravity block and must schedule its own on-place tick"
             );
         }
         for state in [
             "minecraft:stone",
             "minecraft:torch",
             "minecraft:air",
-            // A `FallingBlock` subclass this crate deliberately does not model —
+            // A falling-block subclass this crate deliberately does not model —
             // see `is_gravity_block`. Listed so widening the table is a visible
             // decision rather than an accident.
             "minecraft:anvil",
@@ -563,7 +558,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // `FallingBlockEntity.tick`'s motion, against a hand-solved closed form
+    // The real per-tick update's motion, against a hand-solved closed form
     // -----------------------------------------------------------------------
 
     /// The **correct** hypothesis' displacement on tick `n`, solved by hand from
@@ -709,7 +704,7 @@ mod tests {
         );
     }
 
-    /// The spawn position is `FallingBlockEntity.fall`'s: block centre in `x`/`z`,
+    /// The spawn position is the real "fall" constructor's: block centre in `x`/`z`,
     /// the block's own `y` **unshifted**, and zero velocity.
     ///
     /// The `y` is the discriminating field: `+ 0.5` there too is the plausible
@@ -794,7 +789,7 @@ mod tests {
     }
 
     /// The `time > 600` cap fires for a fall with no floor at all, and does so
-    /// after 601 steps rather than 600 — `FallingBlockEntity.tick` increments
+    /// after 601 steps rather than 600 — the real per-tick update increments
     /// `time` *before* the comparison, so the strict `>` is reached on the tick
     /// after the count equals the bound.
     ///
