@@ -1,22 +1,20 @@
 //! `level.dat` world metadata: a single gzip-wrapped, named-root NBT file.
 //!
-//! Cited against `.cache/mc/26.2/src/`:
+//! Verified against the real 26.2 read/write path, not transcribed from
+//! memory:
 //!
-//! - `net/minecraft/nbt/NbtIo.java`: `readCompressed`/`writeCompressed` wrap
-//!   the payload in gzip (`createDecompressorStream`/`createCompressorStream`
-//!   use `GZIPInputStream`/`GZIPOutputStream`) — **not** zlib, unlike the
-//!   *default* region-chunk scheme. This is the trap this crate's own
-//!   `level_dat` module exists to avoid: don't reuse `region.rs`'s container
-//!   for this file, only the shared NBT codec.
-//! - `LevelStorageSource.LevelStorageAccess.saveLevelData`'s
-//!   `NbtIo.writeCompressed(root, dataFile);` is the real level.dat write
-//!   call (distinct from the generic `LevelStorageSource.writeSavedData`,
-//!   which is for the unrelated per-type `.dat` files under a world's
-//!   `data/` folder, e.g. saved game rules — easy to conflate at a skim,
-//!   since both call `NbtUtils.addCurrentDataVersion` then
-//!   `NbtIo.writeCompressed`).
-//! - `LevelStorageSource.readLevelDataTagRaw` — `NbtIo.readCompressed(dataFile,
-//!   NbtAccounter.uncompressedQuota())` is the read side.
+//! - The payload is wrapped in **gzip**, not zlib — unlike the *default*
+//!   region-chunk scheme. This is the trap this crate's own `level_dat`
+//!   module exists to avoid: don't reuse `region.rs`'s container for this
+//!   file, only the shared NBT codec.
+//! - The real level.dat write is its own direct compressed-NBT write,
+//!   distinct from the generic per-type `.dat`-file save path used for the
+//!   unrelated files under a world's `data/` folder (e.g. saved game
+//!   rules) — easy to conflate at a skim, since both stamp the current
+//!   data version onto the root tag before writing.
+//! - The read side reads the compressed file directly, with the NBT
+//!   byte-accounting limit relaxed to unbounded, since decompression
+//!   already ran.
 //!
 //! # The `Data`/`DataVersion` structure, verified against a real file
 //!
@@ -32,7 +30,7 @@
 //!   length 0) root `Compound` tag, exactly the "named NBT with an empty
 //!   root name" form [`lodestone_core::read_named_nbt`] already implements.
 //! - Its first field is `0a 0004 "Data"` — a `Compound` named `"Data"`,
-//!   matching the constant `LevelStorageSource.TAG_DATA = "Data"`.
+//!   the name every real file uses for this compound.
 //! - Nested inside `"Data"`, at byte offset 368, is a field named
 //!   `"DataVersion"` (an 11-character UTF-8 name, tag byte `0x03` = `Int`)
 //!   with value **4903** — this oracle's world was created with the 26.2
@@ -115,12 +113,10 @@ pub const ANVIL_VERSION: i32 = 19133;
 /// `<world_dir>/level.dat`.
 ///
 /// Unlike [`crate::world_gen_settings::path_in`] this one is flat: `level.dat`
-/// is *not* under `data/`, because it is written by
-/// `LevelStorageSource.LevelStorageAccess.saveLevelData`'s direct
-/// `NbtIo.writeCompressed(root, dataFile)` rather than by the generic
-/// `LevelStorageSource.writeSavedData` path that resolves a
-/// `ResourceLocation` against `data/`. Conflating the two is exactly the
-/// trap this module's header warns about.
+/// is *not* under `data/`, because it is written along its own direct
+/// compressed-NBT write path rather than by the generic per-type-file save
+/// path that resolves a namespaced identifier against `data/`. Conflating
+/// the two is exactly the trap this module's header warns about.
 #[must_use]
 pub fn path_in(world_dir: &Path) -> PathBuf {
     world_dir.join("level.dat")
@@ -319,21 +315,18 @@ impl LevelDat {
         ]))
     }
 
-    /// Adds vanilla's `enabled_features` field to the `"Data"` compound —
-    /// `WorldDataConfiguration.enabledFeatures`
-    /// (`FeatureFlagRegistry::codec`'s `Identifier.CODEC.listOf()`), for the
+    /// Adds the `enabled_features` field to the `"Data"` compound, for the
     /// experimental feature flags a player turned on in Create New World's
-    /// Experiments screen (issue #693's Experiments half).
+    /// Experiments screen.
     ///
     /// `ids` are bare flag ids with no namespace — [`ExperimentFlag`]'s own
-    /// `id()` shape (`lodestone_shell::menu::create_world`, not depended on
-    /// from here, so the caller passes plain strings). The written list
-    /// always carries `"minecraft:vanilla"` alongside them: every real
-    /// `FeatureFlagSet` a freshly created world can have already contains it
-    /// (`FeatureFlags.DEFAULT_FLAGS`), and vanilla's own construction path
-    /// only ever *joins* onto that default (`WorldDataConfiguration::expandFeatures`)
+    /// `id()` shape (the shell's world-creation menu passes plain strings;
+    /// not depended on from here). The written list always carries
+    /// `"minecraft:vanilla"` alongside them: every real feature-flag set a
+    /// freshly created world can have already contains it by default, and
+    /// vanilla's own construction path only ever *joins* onto that default
     /// rather than replacing it. Each id gets the `minecraft:` namespace
-    /// `Identifier`'s wire form always carries.
+    /// prefix a namespaced identifier's wire form always carries.
     ///
     /// A no-op for an empty slice, deliberately not folded into
     /// [`Self::for_new_world`]: every real 26.2 `level.dat` this crate has
@@ -381,8 +374,8 @@ impl LevelDat {
 
     /// `enabled_features`, verbatim (with whatever namespace the list carries,
     /// `minecraft:` for everything [`Self::with_enabled_features`] writes) —
-    /// empty if the field is absent, matching vanilla's own default
-    /// (`FeatureFlags.DEFAULT_FLAGS`, no experiment turned on).
+    /// empty if the field is absent, matching vanilla's own default (the
+    /// base feature-flag set, no experiment turned on).
     #[must_use]
     pub fn enabled_features(&self) -> Vec<String> {
         let Some(data) = self.data() else {
@@ -439,10 +432,9 @@ impl LevelDat {
     ///
     /// **Not [`DATA_VERSION_26_2`] and not the lowercase `version` field.**
     /// All three coexist in one file and mean different things (see the module
-    /// doc's table); this is the only one that is a *display* string, which is
-    /// what vanilla's `LevelSummary.getWorldVersionName` shows on a
-    /// world-select row. A `None` here is vanilla's
-    /// `selectWorld.versionUnknown`, not an error.
+    /// doc's table); this is the only one that is a *display* string, the one
+    /// vanilla shows on a world-select row. A `None` here matches vanilla's
+    /// own placeholder for an unrecognised version, not an error.
     #[must_use]
     pub fn version_name(&self) -> Option<&str> {
         let version = compound_field(self.data()?, "Version")?;
@@ -452,9 +444,8 @@ impl LevelDat {
         }
     }
 
-    /// `allowCommands` — vanilla's `LevelSummary.hasCommands()`, which decides
-    /// whether a world-select row says "Cheats". Absent or mistyped is
-    /// `false`, matching a fresh world.
+    /// `allowCommands` — decides whether a world-select row says "Cheats".
+    /// Absent or mistyped is `false`, matching a fresh world.
     #[must_use]
     pub fn allow_commands(&self) -> bool {
         matches!(
@@ -463,8 +454,7 @@ impl LevelDat {
         )
     }
 
-    /// The `hardcore` byte inside `difficulty_settings` — vanilla's
-    /// `LevelSummary.isHardcore()`.
+    /// The `hardcore` byte inside `difficulty_settings`.
     ///
     /// Nested beside [`Self::difficulty`] rather than flat: 26.2 moved both
     /// into `difficulty_settings`, so code ported from a pre-1.21 schema looks
@@ -607,7 +597,7 @@ pub fn read_from_file(path: &Path) -> Result<LevelDat> {
 }
 
 /// Encodes `level` as a full `level.dat` file's contents (gzip-wrapped named
-/// NBT, matching `NbtIo.writeCompressed`).
+/// NBT, matching the real write path).
 pub fn write(level: &LevelDat) -> Result<Vec<u8>> {
     use std::io::Write;
 
@@ -708,9 +698,9 @@ mod tests {
         assert_eq!(level.last_played(), Some(1_785_182_459_463));
         assert_eq!(level.difficulty(), Some("easy"));
         assert_eq!(level.data_version().expect("has DataVersion"), 4903);
-        // The three world-select fields (`LevelSummary.getWorldVersionName`,
-        // `hasCommands`, `isHardcore`), read out of this same file by the same
-        // foreign parser: `Version = {Snapshot: 0, Series: "main", Id: 4903,
+        // The three world-select fields (the version-name string, the
+        // cheats flag, the hardcore flag), read out of this same file by the
+        // same foreign parser: `Version = {Snapshot: 0, Series: "main", Id: 4903,
         // Name: "26.2"}`, `allowCommands = 0`, `difficulty_settings.hardcore = 0`.
         // All three land on the *default*-looking answer here, which is why
         // `the_hardcore_and_cheats_detectors_fire_on_a_world_that_has_them` is
