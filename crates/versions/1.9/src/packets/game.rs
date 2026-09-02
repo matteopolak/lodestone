@@ -244,6 +244,52 @@ pub struct BlockPlace {
     pub cursor_z: f32,
 }
 
+/// Serverbound `block_place` as protocols 110 and 210 accept it: the cursor
+/// is three **signed bytes**, not three floats.
+///
+/// The unit is the same in both forms — a sixteenth of a block face, so a
+/// cursor `y` above the halfway point is what makes a slab place as a top
+/// slab — but before 1.11 it was carried as the pixel index rather than the
+/// fraction. That is a retype of three fields in the middle of the packet, so
+/// it is a separate struct; encoding twelve bytes where the server expects
+/// three would desynchronise the whole stream, not just this packet.
+/// [`quantise_cursor`] converts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(
+    name = "minecraft:block_place",
+    state = Play,
+    bound = Server,
+    protocols = "110..=210"
+)]
+pub struct BlockPlaceByteCursor {
+    /// Target block position (or `(-1,-1,-1)` for use-in-air).
+    pub location: Position,
+    /// Face being placed against (`0..=5`, or `-1` for use-in-air).
+    #[mc(varint)]
+    pub direction: i32,
+    /// Hand used (`0` main, `1` off).
+    #[mc(varint)]
+    pub hand: i32,
+    /// Cursor X within the face, in sixteenths (`0..=15`).
+    pub cursor_x: i8,
+    /// Cursor Y within the face, in sixteenths (`0..=15`).
+    pub cursor_y: i8,
+    /// Cursor Z within the face, in sixteenths (`0..=15`).
+    pub cursor_z: i8,
+}
+
+/// Quantises a `0.0..=1.0` face coordinate into the sixteenth-of-a-face index
+/// protocols 110 and 210 carry.
+///
+/// Clamped rather than wrapped: a raytraced cursor of exactly `1.0` must land
+/// on the last pixel of the face, not roll over into the next block.
+#[must_use]
+pub fn quantise_cursor(value: f32) -> i8 {
+    #[allow(clippy::cast_possible_truncation)]
+    let scaled = (value * 16.0).floor() as i32;
+    scaled.clamp(0, 15) as i8
+}
+
 /// Serverbound `use_entity` for an **attack** (mouse `1`): no hand, no hit
 /// location.
 ///
@@ -428,6 +474,56 @@ pub struct NamedSoundEffect {
     pub pitch: f32,
 }
 
+/// Clientbound `named_sound_effect` as protocol 110 (Minecraft 1.9.4) sends
+/// it: a single **unsigned byte** pitch rather than a float.
+///
+/// 1.10 widened the field; every earlier release quantised the pitch into one
+/// byte on the way out. This is a retype, not a field appearing, so it is a
+/// separate struct — see [`super::common`]'s module docs for why an
+/// `#[mc(since)]` predicate cannot express one. [`legacy_pitch`] converts.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(
+    name = "minecraft:named_sound_effect",
+    state = Play,
+    bound = Client,
+    protocols = "110..=110"
+)]
+pub struct NamedSoundEffectBytePitch {
+    /// Sound event name; may or may not carry a `namespace:` prefix.
+    #[mc(max = 256)]
+    pub sound_name: String,
+    /// Vanilla `SoundCategory` ordinal.
+    #[mc(varint)]
+    pub sound_category: i32,
+    /// Fixed-point X (real coordinate × 8).
+    pub x: i32,
+    /// Fixed-point Y (real coordinate × 8).
+    pub y: i32,
+    /// Fixed-point Z (real coordinate × 8).
+    pub z: i32,
+    /// Volume multiplier.
+    pub volume: f32,
+    /// Quantised pitch — see [`legacy_pitch`].
+    pub pitch: u8,
+}
+
+/// Scale the pre-1.10 sound packets quantise a pitch multiplier by before
+/// putting it in one byte.
+///
+/// Measured, not recalled: `/playsound … 1 1.5` against a real 1.9.4 server
+/// puts **94** on the wire, and `… 1 0.5` puts **31**. 94/1.5 = 62.67 and
+/// 31/0.5 = 62 are both consistent with a truncating `pitch * 63` and with
+/// nothing else in the plausible range — a scale of 62 would give 93/31 and a
+/// scale of 64 would give 96/32, so the pair of observations separates all
+/// three. See `tests/captures/README.md` for the capture that recorded them.
+pub const LEGACY_SOUND_PITCH_SCALE: f32 = 63.0;
+
+/// Converts a pre-1.10 quantised pitch byte back to a multiplier.
+#[must_use]
+pub fn legacy_pitch(pitch: u8) -> f32 {
+    f32::from(pitch) / LEGACY_SOUND_PITCH_SCALE
+}
+
 /// Clientbound `sound_effect` — plays a sound by its registry id.
 ///
 /// Verified against minecraft-data's 1.12.2 `packet_sound_effect`: identical
@@ -452,6 +548,35 @@ pub struct SoundEffect {
     pub volume: f32,
     /// Pitch multiplier.
     pub pitch: f32,
+}
+
+/// Clientbound `sound_effect` as protocol 110 sends it: a single **unsigned
+/// byte** pitch rather than a float, matching
+/// [`NamedSoundEffectBytePitch`]. Convert with [`legacy_pitch`].
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
+#[mc(
+    name = "minecraft:sound_effect",
+    state = Play,
+    bound = Client,
+    protocols = "110..=110"
+)]
+pub struct SoundEffectBytePitch {
+    /// Legacy `SoundEvent` registry id.
+    #[mc(varint)]
+    pub sound_id: i32,
+    /// Vanilla `SoundCategory` ordinal.
+    #[mc(varint)]
+    pub sound_category: i32,
+    /// Fixed-point X (real coordinate × 8).
+    pub x: i32,
+    /// Fixed-point Y (real coordinate × 8).
+    pub y: i32,
+    /// Fixed-point Z (real coordinate × 8).
+    pub z: i32,
+    /// Volume multiplier.
+    pub volume: f32,
+    /// Quantised pitch — see [`legacy_pitch`].
+    pub pitch: u8,
 }
 
 /// Clientbound `scoreboard_display_objective` — assigns an objective to a

@@ -34,7 +34,11 @@ const END: u8 = 0xFF;
 /// Upper bound on a metadata string, matching the vanilla limit.
 const MAX_STRING: usize = 32_767;
 
-/// A single typed value in a 1.12.2 entity-metadata list.
+/// First protocol in this era whose metadata type table carries an NBT
+/// serializer (type 13). Minecraft 1.12; 1.9.4, 1.10.2 and 1.11.2 stop at 12.
+const NBT_METADATA_SINCE: i32 = 340;
+
+/// A single typed value in this era's entity-metadata list.
 ///
 /// The variant set is exactly 1.12.2's serializer table. Note `Position` is a
 /// **packed** `i64` block position (unlike 1.8's unpacked triple), and several
@@ -76,6 +80,7 @@ pub enum MetadataValue {
     /// Type 12: VarInt block-state id (`0` = absent/air).
     BlockId(i32),
     /// Type 13: NBT tag, stored as raw bytes (`None` = the `TAG_End` marker).
+    /// Protocol 340 only — see [`NBT_METADATA_SINCE`].
     Nbt(Option<Vec<u8>>),
 }
 
@@ -101,6 +106,12 @@ impl MetadataValue {
     }
 
     fn encode_value(&self, w: &mut Writer, ctx: Ctx) -> Result<()> {
+        if matches!(self, MetadataValue::Nbt(_)) && ctx.version < NBT_METADATA_SINCE {
+            return Err(Error::InvalidEnumVariant {
+                name: "v1-9 metadata type (NBT arrived in 1.12)",
+                value: 13,
+            });
+        }
         match self {
             MetadataValue::Byte(v) => w.i8(*v),
             MetadataValue::VarInt(v) | MetadataValue::Direction(v) | MetadataValue::BlockId(v) => {
@@ -161,7 +172,14 @@ impl MetadataValue {
             10 => MetadataValue::Direction(r.var_i32()?),
             11 => MetadataValue::OptUuid(if r.bool()? { Some(r.uuid()?) } else { None }),
             12 => MetadataValue::BlockId(r.var_i32()?),
-            13 => MetadataValue::Nbt(decode_optional_nbt(r)?),
+            // The NBT serializer joined the table in 1.12 (protocol 340); the
+            // three earlier releases in this era stop at 12. Accepting 13 on
+            // 110/210/316 would turn a genuinely malformed list into a
+            // plausible-looking NBT read that consumes the rest of the
+            // packet, so the gate is a real check rather than a comment.
+            13 if ctx.version >= NBT_METADATA_SINCE => {
+                MetadataValue::Nbt(decode_optional_nbt(r)?)
+            }
             other => {
                 return Err(Error::InvalidEnumVariant {
                     name: "v1-9 metadata type",
