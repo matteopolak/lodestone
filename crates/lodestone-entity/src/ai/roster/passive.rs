@@ -6,7 +6,7 @@
 //! # What it is
 //!
 //! One [`Registration`] table per species, transcribed from
-//! `.cache/mc/26.2/src/net/minecraft/world/entity/animal/`; extend it here
+//! the decompiled tree's passive-animal package; extend it here
 //! and nothing else in the tree changes.
 //!
 //! # Why this family is where the roster first becomes visible

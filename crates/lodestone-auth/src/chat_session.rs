@@ -17,7 +17,7 @@
 //! * **Per-message signing** ([`ChatSession`]) — `LocalChatSession` +
 //!   `SignedMessageChain.Encoder` + `PlayerChatMessage.updateSignature` +
 //!   `SignedMessageLink.updateSignature` + `SignedMessageBody.updateSignature`
-//!   (`.cache/mc/26.2/src/net/minecraft/network/chat/`), hand-expanded clause
+//!   (the decompiled tree's chat package), hand-expanded clause
 //!   by clause into [`build_signature_payload`] since there is no captured
 //!   real signed-chat packet or published test vector for this scheme
 //!   available here. **Independent check performed**: the RSA-SHA256-PKCS1v15
