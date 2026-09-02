@@ -20,41 +20,39 @@ use crate::chunk::ChunkColumn;
 
 /// The `EntityEvent` constants this crate sends through
 /// [`ServerProtocol::encode_entity_event`], transcribed from
-/// `net.minecraft.world.entity.EntityEvent`'s own `public static final byte`
-/// declarations.
+/// the real per-entity byte-event constant set.
 ///
 /// A module rather than a Rust `enum`, because the wire field is an arbitrary
-/// byte whose meaning is **per entity type**: vanilla reuses values across
-/// classes (`ClientboundEntityEventPacket` carries no type tag), so an
+/// byte whose meaning is **per entity type**: the real engine reuses values across
+/// classes (the entity-event packet carries no type tag), so an
 /// exhaustive enum would claim a closed set that does not exist. Naming only
 /// the values with a producer here keeps the set honest, and the constant name
 /// keeps the number out of the call site.
 pub mod entity_event {
-    /// `EntityEvent.DEATH` — `LivingEntity.die`'s broadcast. The client's
-    /// `LivingEntity.handleEntityEvent` `case 3` starts `deathTime`, which is
+    /// The real death-event constant — the living-entity die broadcast. The client's
+    /// own entity-event handler's death case starts `deathTime`, which is
     /// what tips a mob onto its side and holds the death screen's red overlay.
     pub const DEATH: u8 = 3;
 
-    /// `EntityEvent.TAMING_FAILED` — the smoke puff of a failed tame roll
-    /// (`TamableAnimal.spawnTamingParticles(false)`).
+    /// The real taming-failed constant — the smoke puff of a failed tame roll.
     pub const TAMING_FAILED: u8 = 6;
 
-    /// `EntityEvent.TAMING_SUCCEEDED` — the hearts of a successful tame
-    /// (`TamableAnimal.spawnTamingParticles(true)`).
+    /// The real taming-succeeded constant — the hearts of a successful tame.
     pub const TAMING_SUCCEEDED: u8 = 7;
 
-    /// `EntityEvent.IN_LOVE_HEARTS` — the breeding hearts an `Animal` in love
-    /// emits. **Not** `LOVE_HEARTS` (12), which is the villager's.
+    /// The real in-love-hearts constant — the breeding hearts an animal in love
+    /// emits. **Not** the villager's own love-hearts constant (12).
     pub const IN_LOVE_HEARTS: u8 = 18;
 }
 
-/// The local player's movement abilities — vanilla's `Player.Abilities`, as
-/// carried by `ClientboundPlayerAbilitiesPacket`.
+/// The local player's movement abilities — the real per-player abilities
+/// record, as
+/// carried by the player-abilities packet.
 ///
 /// This is the packet that actually grants creative flight and instant build.
 /// A client told "you are in creative" through
 /// [`ServerProtocol::encode_game_mode`] alone still cannot fly, because
-/// permission lives here — which is why `ServerPlayer.setGameMode` sends both.
+/// permission lives here — which is why the real set-game-mode step sends both.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Abilities {
     /// Takes no damage.
@@ -66,21 +64,21 @@ pub struct Abilities {
     /// Breaks blocks instantly and has infinite materials.
     pub instabuild: bool,
     /// Permitted to place and break at all — `false` only in adventure and
-    /// spectator (`GameType.isBlockPlacingRestricted`).
+    /// spectator (the real is-block-placing-restricted query).
     pub may_build: bool,
-    /// Flight speed multiplier; vanilla's `Abilities` default is `0.05`.
+    /// Flight speed multiplier; the real default is `0.05`.
     pub flying_speed: f32,
-    /// Walk speed multiplier; vanilla's `Abilities` default is `0.1`.
+    /// Walk speed multiplier; the real default is `0.1`.
     pub walking_speed: f32,
 }
 
 impl Abilities {
-    /// Vanilla's `Abilities` field defaults (`Abilities.java`).
+    /// The real abilities record's field defaults.
     pub const DEFAULT_FLYING_SPEED: f32 = 0.05;
     /// See [`DEFAULT_FLYING_SPEED`](Self::DEFAULT_FLYING_SPEED).
     pub const DEFAULT_WALKING_SPEED: f32 = 0.1;
 
-    /// `GameType.updatePlayerAbilities` (`GameType.java:62-80`), verbatim:
+    /// The real "update player abilities" derivation, verbatim:
     /// creative may fly and instabuilds and is invulnerable; spectator may fly,
     /// *is* flying and is invulnerable but does not instabuild; survival and
     /// adventure get none of it. `may_build` is `!isBlockPlacingRestricted()`,
@@ -142,25 +140,26 @@ pub struct EntitySnapshot {
     /// comment for why resending the full set is the simpler and cheap
     /// choice here.
     pub metadata: Vec<MetadataField>,
-    /// The `ADD_ENTITY` **Object Data** field — vanilla's own name for the
+    /// The `ADD_ENTITY` **Object Data** field — the real engine's own name for the
     /// trailing VarInt on the spawn packet, whose meaning is decided entirely by
     /// the entity type.
     ///
     /// `0` for everything that does not override
-    /// `Entity.getAddEntityPacket`/`ClientboundAddEntityPacket`'s data argument,
+    /// the real add-entity-packet builder's data argument,
     /// which is every entity kind this server spawns except one:
-    /// `FallingBlockEntity.getAddEntityPacket` passes
-    /// `Block.getId(this.getBlockState())`.
+    /// the real falling-block entity's own override passes
+    /// the block-state id of the state it imitates.
     ///
     /// This is a **spawn-only** field and deliberately not part of the update
-    /// path: vanilla sends it once, in `ADD_ENTITY`, and has no packet that
+    /// path: the real engine sends it once, in `ADD_ENTITY`, and has no packet that
     /// revises it. It is still compared by this struct's `PartialEq`, so a value
     /// that somehow changed mid-life would produce a redundant position update
     /// rather than silently disagreeing with what the client holds.
     ///
     /// # Why the block state cannot ride `metadata` instead
     ///
-    /// `FallingBlockEntity.defineSynchedData` registers `DATA_START_POS` and
+    /// The real falling-block entity's own synced-data definition registers a
+    /// start-position field and
     /// nothing else — the imitated block state is **never** in a `SET_ENTITY_DATA`
     /// packet. So a client that is not told this field has no other source, and
     /// draws whatever state id `0` resolves to. That is the same failure shape as
@@ -168,7 +167,7 @@ pub struct EntitySnapshot {
     /// travelling it.
     pub object_data: i32,
     /// The wire entity id this entity is leashed to, or `None` when it carries no
-    /// lead (issue #236) — vanilla `Leashable.LeashData.leashHolder`, resolved to
+    /// lead (issue #236) — the real leashable interface's own lead-data holder field, resolved to
     /// an id by [`crate::mobs::MobSim::snapshots`] (a player uuid resolves through
     /// the connected-player list; a leashed mob resolves to its own already-wire
     /// id; a fence-knot holder has no entity to resolve to yet and stays `None` —
@@ -189,21 +188,22 @@ pub struct EntitySnapshot {
 /// [`encode_boss_event_remove`](ServerProtocol::encode_boss_event_remove),
 /// diffed by [`crate::server::EntityStreamer`] the same way [`EntitySnapshot`]
 /// is: a fresh `id` sends ADD, a changed `progress`/`visible` sends
-/// UPDATE_PROGRESS (or REMOVE, once `visible` goes `false` — vanilla's own
-/// `ClientboundBossEventPacket` has no wire "visible" flag; visibility is
+/// UPDATE_PROGRESS (or REMOVE, once `visible` goes `false` — the real
+/// boss-event packet has no wire "visible" flag; visibility is
 /// spelled by whether the bar is on the client at all, exactly as
-/// `ServerBossEvent`'s own player-set add/remove does), and a vanished `id`
+/// the real per-world boss-event tracker's own player-set add/remove does), and a vanished `id`
 /// sends REMOVE.
 ///
-/// Color (`PINK`) and overlay (`PROGRESS`) are not fields here because vanilla
-/// never varies them for the one producer today (`EnderDragonFight.init`,
-/// `EnderDragonFight`'s own module doc) — an implementor hardcodes them once,
+/// Color (`PINK`) and overlay (`PROGRESS`) are not fields here because the
+/// real engine
+/// never varies them for the one producer today (the real dragon-fight
+/// init step, per `crate::dragon::fight`'s own module doc) — an implementor hardcodes them once,
 /// same as that constructor does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BossBarSnapshot {
     /// The bar's stable id — **not** necessarily the boss entity's own uuid on
-    /// the wire (vanilla mints a separate `Mth.createInsecureUUID` for
-    /// `EnderDragonFight`'s bar); [`crate::mobs::MobSim::boss_bars`] reuses the
+    /// the wire (the real engine mints a separate insecure random UUID for
+    /// the dragon fight's bar); [`crate::mobs::MobSim::boss_bars`] reuses the
     /// dragon's entity uuid as a documented simplification, since this crate
     /// tracks one bar per dragon and nothing needs the two identities to
     /// differ.
@@ -223,8 +223,8 @@ pub struct BossBarSnapshot {
 /// version-free vocabulary
 /// [`ServerProtocol::encode_player_info_add`] takes a slice of.
 ///
-/// Only the two fields `ADD_PLAYER` cannot do without. Vanilla's own
-/// `ClientboundPlayerInfoUpdatePacket.Entry` also carries a game mode, a
+/// Only the two fields `ADD_PLAYER` cannot do without. The real
+/// per-player-info-update entry also carries a game mode, a
 /// latency, a `listed` flag, a display-name component, a chat session and a
 /// list-order — each behind its own action bit. None of those has a
 /// server-side source of truth in this crate yet (there is no per-connection
@@ -247,22 +247,22 @@ pub struct PlayerListing {
     pub username: String,
 }
 
-/// A server-initiated resource pack push (vanilla
-/// `ClientboundResourcePackPushPacket`) in version-free vocabulary — the
+/// A server-initiated resource pack push (the real resource-pack-push
+/// packet) in version-free vocabulary — the
 /// server side of issue #334, fed by
 /// [`ServerProtocol::encode_resource_pack_push`].
 ///
 /// Mirrors the wire record exactly: a fresh per-push [`Uuid`] the client
 /// echoes back verbatim in its accept/decline response, the download [`url`],
-/// the pack's SHA-1 [`hash`] (lowercase hex, at most 40 chars — vanilla's
-/// `ClientboundResourcePackPushPacket.MAX_HASH_LENGTH`), the [`required`]
+/// the pack's SHA-1 [`hash`] (lowercase hex, at most 40 chars — the real
+/// packet's own max-hash-length constant), the [`required`]
 /// flag that makes declining a disconnect, and an optional [`prompt`] chat
 /// component shown on the accept/decline screen. `url` and `hash` are owned
 /// `String`s (not borrowed) so a push can outlive its construction site and
 /// ride a feed across a task boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResourcePackPush {
-    /// The push's own uuid — vanilla generates a fresh one per push, and the
+    /// The push's own uuid — the real engine generates a fresh one per push, and the
     /// client's response echoes it (see
     /// `crate::server`'s decode of the serverbound `RESOURCE_PACK` frame).
     pub id: Uuid,
@@ -288,7 +288,7 @@ pub struct ResourcePackPush {
 /// change to [`EntityStreamer::sync`](crate::server) at all, since that
 /// diffing loop already treats `EntitySnapshot::metadata` generically.
 ///
-/// Each variant names the vanilla field it mirrors, not the wire index or
+/// Each variant names the real field it mirrors, not the wire index or
 /// serializer id — those are the implementor's concern (see
 /// `crates/protocol/v770/src/server_protocol.rs`'s own constants, verified
 /// against the `EntityDataIndexOracle` dump the same way
@@ -307,26 +307,26 @@ pub struct ResourcePackPush {
 /// implementor. See DESIGN.md §12.116.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetadataField {
-    /// `Creeper.DATA_SWELL_DIR` — which way `swell` is currently moving
+    /// The real creeper's own swell-direction field — which way `swell` is currently moving
     /// (`-1`, `0`, or `1`). See [`crate::mobs::SimMob::snapshot`]'s own doc
     /// comment for why this is always included for a creeper, even at its
     /// `-1` default, unlike the monotonic [`CreeperIgnited`](Self::CreeperIgnited).
     CreeperSwellDir(i32),
-    /// `Creeper.DATA_IS_IGNITED` — set once by `ignite()`, never cleared.
+    /// The real creeper's own is-ignited field — set once by its ignite step, never cleared.
     CreeperIgnited(bool),
-    /// `ItemEntity.DATA_ITEM` — the stack a dropped item entity is showing,
+    /// The real item entity's own item field — the stack a dropped item entity is showing,
     /// and the *whole* of its visible identity.
     ///
     /// A client draws nothing for an item entity whose stack it has not been
-    /// told: vanilla's `ItemEntityRenderer.submit` returns early on
-    /// `state.item.isEmpty()`, and this project's own client does the same (see
+    /// told: the real item-entity renderer returns early on
+    /// an empty item state, and this project's own client does the same (see
     /// `EntityInterpolator::set_item_stack`). So an item entity streamed
     /// without this field spawns, falls, merges and can be picked up — every
     /// one of which is observable — while drawing zero pixels. That is why it
     /// is one field and not an optimisation.
     ///
-    /// `count` is the *entity's* stack size (vanilla's
-    /// `ItemLifecycle::count`), not the number of entities.
+    /// `count` is the *entity's* stack size (the real item-lifecycle
+    /// count), not the number of entities.
     Item {
         /// The item's registry key, e.g. `minecraft:diamond`. **Not** an
         /// entity type — see [`crate::mobs::MobSim::snapshots`] for the
@@ -336,85 +336,87 @@ pub enum MetadataField {
         /// nothing — the same as sending no field at all.
         count: u8,
     },
-    /// `ExperienceOrb.DATA_VALUE` — the points **one** absorption of this orb pays
+    /// The real experience orb's own value field — the points **one** absorption of this orb pays
     /// out, and the whole of what a client is told about an orb.
     ///
-    /// It is what selects the sprite: `ExperienceOrb.getIcon` buckets the value into
+    /// It is what selects the sprite: the real orb-icon derivation buckets the value into
     /// eleven frames at the same thresholds as the denomination ladder, so an orb whose
     /// value never arrives draws frame 0 — the smallest — however much it is worth. The
     /// orb's `count` (how many absorptions it holds after merging) is deliberately not
-    /// here, because vanilla does not synchronise it and one entity draws one sprite
+    /// here, because the real engine does not synchronise it and one entity draws one sprite
     /// whatever its count.
     ///
     /// **Index 8, shared with [`Item`](Self::Item) under a different serializer.**
-    /// `DATA_VALUE` is an `INT` and `ItemEntity.DATA_ITEM` an `ITEM_STACK` at the same
+    /// The real orb value field is an `INT` and the real item field an `ITEM_STACK` at the same
     /// index; the encoder can tell them apart only because the field list is built per
     /// entity kind by [`crate::mobs::MobSim::snapshots`], whose orb loop iterates the
     /// orb map. Never push this variant for anything but an experience orb.
     ExperienceOrbValue {
-        /// Points per absorption, vanilla's `getValue()`.
+        /// Points per absorption, the real orb's own value query.
         value: i32,
     },
-    /// `TamableAnimal.DATA_FLAGS_ID` — the wolf/cat/parrot flag byte at index
-    /// **18**, whose `0x01` bit is the sitting pose and `0x04` bit is tameness
-    /// (`TamableAnimal.isInSittingPose` is `& 1`, `isTame` is `& 4`).
+    /// The real tamable-animal's own flags field — the wolf/cat/parrot flag byte at index
+    /// **18**, whose `0x01` bit is the sitting pose and `0x04` bit is tameness.
     ///
     /// # Why this is not shared with [`HorseFlags`](Self::HorseFlags)
     ///
     /// Index 18 is the most crowded index in the game — 37 claimants in the
     /// committed jar dump (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`),
-    /// of which **four** are the `BYTE` serializer: `TamableAnimal.DATA_FLAGS_ID`,
-    /// `AbstractHorse.DATA_ID_FLAGS`, `Sheep.DATA_WOOL_ID` and
-    /// `Shulker.DATA_COLOR_ID`. No census column separates them; the *producer*
+    /// of which **four** are the `BYTE` serializer: the tamable animal's own
+    /// flags field, the
+    /// abstract horse's own flags field, the sheep's own wool-color field and
+    /// the shulker's own color field. No census column separates them; the *producer*
     /// has to know the species, which is why the species switch lives in
     /// [`crate::mobs::SimMob::snapshot`] and never in an encoder.
     ///
-    /// And the bit differs: tame is `0x04` here and `FLAG_TAME = 2` on a horse. A
+    /// And the bit differs: tame is `0x04` here and the horse's own tame bit
+    /// is `2`. A
     /// single shared variant therefore sets an **unnamed** bit on whichever species
     /// it was not written for — `0x04` is not in the horse's flag set at all
-    /// (`FLAG_BRED` is `8`), and `0x02` is not in the tamable's — so the animal
+    /// (its own bred bit is `8`), and `0x02` is not in the tamable's — so the animal
     /// reads as *untamed* while the packet looks correct on the wire. That is worse
     /// than a wrong flag, because there is nothing visibly wrong to chase.
     TamableFlags {
-        /// `0x04` — `TamableAnimal.isTame()`.
+        /// `0x04` — the real tamable animal's own is-tame query.
         tame: bool,
-        /// `0x01` — `TamableAnimal.isInSittingPose()`, the pose
-        /// `SitWhenOrderedToGoal` writes, **not** the persisted `orderedToSit`.
+        /// `0x01` — the real tamable animal's own is-in-sitting-pose query, the pose
+        /// its own sit-when-ordered goal writes, **not** the persisted "ordered to sit" flag.
         sitting: bool,
     },
-    /// `AbstractHorse.DATA_ID_FLAGS` — the horse family's own flag byte, also at
+    /// The real abstract horse's own flags field — the horse family's own flag byte, also at
     /// index 18. See [`TamableFlags`](Self::TamableFlags) for why this is a
     /// separate variant.
     ///
-    /// Only `FLAG_TAME` (`0x02`) is modelled. `FLAG_BRED` (`0x08`), `FLAG_EATING`
-    /// (`0x10`), `FLAG_STANDING` (`0x20`) and `FLAG_OPEN_MOUTH` (`0x40`) have no
+    /// Only the real tame bit (`0x02`) is modelled. The real bred bit (`0x08`), eating bit
+    /// (`0x10`), standing bit (`0x20`) and open-mouth bit (`0x40`) have no
     /// server-side state to drive them yet — the values are transcribed from
-    /// `AbstractHorse`'s own constants so the next one to be wired does not have to
+    /// the real abstract horse's own constants so the next one to be wired does not have to
     /// be looked up again.
     HorseFlags {
-        /// `0x02` — `AbstractHorse.isTamed()`.
+        /// `0x02` — the real abstract horse's own is-tamed query.
         tame: bool,
     },
-    /// Whether this mob is a baby — `AgeableMob.DATA_BABY_ID` for the
+    /// Whether this mob is a baby — the real ageable-mob's own baby field for the
     /// breedable-animal family (cow, sheep, pig, chicken, rabbit, wolf), and
-    /// each of `Zombie.DATA_BABY_ID`/`Zoglin.DATA_BABY_ID` declared
-    /// separately on those classes rather than inherited from `AgeableMob`
-    /// (`Zombie`/`Zoglin` extend `Monster`, not `AgeableMob`) — all three
+    /// each of the zombie's and zoglin's own baby fields declared
+    /// separately on those classes rather than inherited from the ageable
+    /// base
+    /// (zombie/zoglin extend the monster base, not the ageable one) — all three
     /// land at the same wire index as the same `BOOLEAN` serializer, which is
     /// what lets one variant cover every eligible species; see
     /// [`crate::mobs::SimMob::snapshot`] for the species switch that decides
-    /// who gets it. Vanilla's `LivingEntityRenderer` reads it to apply the
+    /// who gets it. The real living-entity renderer reads it to apply the
     /// age-scale shrink (`0.5` generic, or the species' real
-    /// `BABY_DIMENSIONS` literal where one is modelled) to the model,
+    /// baby-dimensions literal where one is modelled) to the model,
     /// independently of the hitbox — this crate's aging unit already
     /// computes the correct **hitbox** dimensions server-side
     /// (`crate::mobs::species_shape`); this variant is what lets the
     /// *client* apply the same shrink to what it draws.
     Baby(bool),
-    /// `Villager.DATA_VILLAGER_DATA` (issue #243) — index **19**, serializer
-    /// `VILLAGER_DATA` (`18`): a `Holder<VillagerType>` + `Holder<VillagerProfession>`
-    /// + a plain level int, which is the *whole* of what a client's
-    /// `VillagerProfessionLayer` needs to pick a texture. Pushed
+    /// The real villager's own villager-data field (issue #243) — index **19**, serializer
+    /// `VILLAGER_DATA` (`18`): a villager type plus a villager profession
+    /// plus a plain level int, which is the *whole* of what a client's
+    /// villager-profession texture layer needs to pick a texture. Pushed
     /// unconditionally for every `minecraft:villager` (see
     /// [`crate::mobs::SimMob::snapshot`]'s doc for why — the same "a
     /// transition needs the same treatment as the arrival" reasoning
@@ -427,27 +429,30 @@ pub enum MetadataField {
         /// `minecraft:villager_profession`, e.g. `minecraft:farmer`.
         /// `minecraft:none` for an unemployed villager.
         profession: ResourceKey,
-        /// `VillagerData.level`, `1..=5`.
+        /// The real villager-data record's own level field, `1..=5`.
         level: i32,
     },
-    /// `PrimedTnt.DATA_FUSE_ID` — ticks remaining before detonation.
+    /// The real primed-tnt entity's own fuse field — ticks remaining before detonation.
     ///
     /// **Index 8, a fifth claimant alongside [`Item`](Self::Item) and
     /// [`ExperienceOrbValue`](Self::ExperienceOrbValue).** The committed jar
     /// dump (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`)
-    /// lists five `INT`/`ITEM_STACK` claimants at index 8:
-    /// `ExperienceOrb.DATA_VALUE`, `PrimedTnt.DATA_FUSE_ID`,
-    /// `FishingHook.DATA_HOOKED_ENTITY`, `VehicleEntity.DATA_ID_HURT` and
-    /// `Display`'s interpolation-delay field, plus `ItemEntity.DATA_ITEM`
+    /// lists five `INT`/`ITEM_STACK` claimants at index 8: the real
+    /// experience orb's own value field, the real primed-tnt's own fuse field,
+    /// the real fishing hook's own hooked-entity field, the real vehicle
+    /// entity's own hurt-id field and
+    /// a display entity's interpolation-delay field, plus the real item
+    /// entity's own item field
     /// under the self-identifying `ITEM_STACK` serializer. Never push this
     /// variant for anything but a `minecraft:tnt` entity — see
     /// [`crate::mobs::MobSim::snapshots`]'s TNT loop, the only producer.
     TntFuse(i32),
-    /// `MinecartFurnace.DATA_ID_FUEL` — whether the furnace minecart is
+    /// The real furnace minecart's own fuel field — whether the furnace minecart is
     /// currently lit (real remaining fuel), the field that drives the smoke
     /// particle client-side.
     ///
-    /// **Index 13**, shared with `MinecartCommandBlock.DATA_ID_COMMAND_NAME`
+    /// **Index 13**, shared with the real command-block minecart's own
+    /// command-name field
     /// (a `STRING`) under a different serializer — the committed jar dump
     /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`) lists
     /// both. The two can never collide in practice: only
@@ -455,7 +460,7 @@ pub enum MetadataField {
     /// this variant, and it never fires for a command-block minecart (this
     /// crate does not model that entity type).
     MinecartFuel(bool),
-    /// `AbstractBoat.DATA_ID_PADDLE_LEFT`/`DATA_ID_PADDLE_RIGHT` — purely
+    /// The real abstract boat's own left/right paddle fields — purely
     /// cosmetic: whether each paddle is currently animating. Issue #262's
     /// `PADDLE_BOAT` remainder — a second connected player watching a rowed
     /// boat from outside is the only consumer, since the rider's own client
@@ -465,9 +470,10 @@ pub enum MetadataField {
     ///
     /// **Indices 11 and 12**, each a two-way `BOOLEAN` collision in the
     /// committed jar dump (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
-    /// index 11 is `AbstractBoat.DATA_ID_PADDLE_LEFT` and
-    /// `LivingEntity.DATA_EFFECT_AMBIENCE_ID`; index 12 is
-    /// `AbstractBoat.DATA_ID_PADDLE_RIGHT` and `ThrownTrident.ID_FOIL`. No
+    /// index 11 is the real abstract boat's own left-paddle field and
+    /// the real living entity's own effect-ambience field; index 12 is
+    /// the real abstract boat's own right-paddle field and the real thrown
+    /// trident's own foil field. No
     /// census column separates them, so — the same rule
     /// [`TamableFlags`](Self::TamableFlags) states — the guard is the
     /// producer's own species knowledge: only
