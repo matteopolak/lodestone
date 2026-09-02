@@ -1493,7 +1493,7 @@ impl LayoutElement for SpacerElement {
     fn visit_widgets(&self, _visitor: &mut dyn FnMut(&Widget)) {}
 }
 
-// -- the tab widget's row geometry (issue #564) ------------------------------
+// -- the tab widget's row geometry ------------------------------
 //
 // `MenuTabBar.arrangeElements` (`MenuTabBar.java`) — not a
 // `LayoutElement`, unlike everything above: a `MenuTabBar` positions its own
@@ -2027,7 +2027,7 @@ mod tests {
         assert_eq!(hf.contents().y(), 63.0);
     }
 
-    // -- the tab widget's geometry (issue #564) ------------------------------
+    // -- the tab widget's geometry ------------------------------
 
     #[test]
     fn round_toward_rounds_up_to_the_multiple_never_down() {

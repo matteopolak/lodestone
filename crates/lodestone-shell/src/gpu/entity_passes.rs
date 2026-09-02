@@ -172,7 +172,7 @@ fn note_missing_entity_model(type_path: &str, model_path: &str) {
 /// Resolves `type_path` through [`lodestone_data::entity_type::EntityType::from_name`]
 /// (binary search over the generated registry) rather than
 /// `entity_type_id_parts`'s linear `strip_prefix` scan — called once per
-/// on-fire entity per frame, so the scan cost was real (issue #523).
+/// on-fire entity per frame, so the scan cost was real.
 /// Issue #573: `AvatarRenderer.setupRotations`'s swim branch — vanilla's own
 /// player-only body-pitch rotation toward horizontal as `swim_amount` ramps
 /// `0..1`, applied as an extra whole-body rotation on top of whatever
@@ -874,7 +874,7 @@ fn eye_probe_offset(type_path: &str, age_scale: f32) -> f32 {
     }
     // `EntityDimensions.defaultEyeHeight`: `height * 0.85F`, off the same base
     // dimensions table `flame_hitbox_width` reads. Same binary-search resolve
-    // as that function, for the same reason (issue #523).
+    // as that function, for the same reason.
     lodestone_data::entity_type::EntityType::from_name(type_path)
         .map(lodestone_data::entity_dimensions::base_dimensions_for)
         .map_or(0.0, |dims| dims.height * 0.85 * age_scale)

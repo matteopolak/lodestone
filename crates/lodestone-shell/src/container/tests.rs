@@ -971,7 +971,7 @@ fn a_one_cell_paint_blanks_that_cell_rather_than_previewing_it() {
 }
 
 // ---------------------------------------------------------------------
-// Container background art (issue #51) and the hotbar dim (issue #61's
+// Container background art and the hotbar dim (issue #61's
 // leftover). GPU-free: `ContainerBackground` is deliberately a pure
 // producer/consumer split (see its own doc comment) so this needs no
 // device. The GPU pixel proof lives in
@@ -1623,7 +1623,7 @@ fn synthetic_background_with_window_size(window_w: u32, window_h: u32) -> Contai
         // grabs a `276x166` sub-rect regardless of the sheet's own dimensions,
         // the same way it already does for every sheet in this list.
         "villager",
-        // The creative screen's three sheets (issue #158) — loaded by
+        // The creative screen's three sheets — loaded by
         // `ContainerBackground::build` alongside the sixteen above, so a
         // missing stand-in fails every test in this module rather than just
         // the creative ones.
@@ -1636,7 +1636,7 @@ fn synthetic_background_with_window_size(window_w: u32, window_h: u32) -> Contai
             solid_png(256, 256),
         );
     }
-    // The Advancements screen's loose art (issue #167): the window sheet
+    // The Advancements screen's loose art: the window sheet
     // (vanilla's real size is `256 x 256`; `window_w`/`window_h` let a test
     // stand in a higher-resolution pack instead — see this function's own
     // doc) and the five `16 x 16` tab backgrounds, keyed by the same ids
@@ -1658,7 +1658,7 @@ fn synthetic_background_with_window_size(window_w: u32, window_h: u32) -> Contai
     // the same const the loader walks, so a sprite added there cannot be
     // forgotten here — `ContainerBackground::build` would fail instead.
     for id in super::all_gui_sprites() {
-        // The furnace/brewing progress sprites (issue #28) are sized at
+        // The furnace/brewing progress sprites are sized at
         // their own real vanilla dimensions rather than folded into the
         // `CELL` default, so a test reading back a sub-region through
         // `sprite_subregion_quad` is exercising the same native size
@@ -1982,7 +1982,7 @@ fn geo_with_background(menu: &Menu, cursor: Option<[f32; 2]>) -> ContainerGeomet
 }
 
 /// As [`geo_with_background`], with `container_set_data` properties
-/// attached — the feed the furnace/brewing progress bars (issue #28)
+/// attached — the feed the furnace/brewing progress bars
 /// read through `frame.cost_data`.
 fn geo_with_background_and_data(menu: &Menu, data: &[(i32, i32)]) -> ContainerGeometry {
     let bg = synthetic_background();
@@ -2404,7 +2404,7 @@ fn build_inner_without_a_background_falls_back_to_the_flat_fill_and_still_dims()
     );
 }
 
-// -- Recipe-book panel (issue #163) ----------------------------------
+// -- Recipe-book panel ----------------------------------
 
 fn id(name: &str) -> lodestone_model::Identifier {
     name.parse().expect("valid identifier")

@@ -395,7 +395,7 @@ impl RenderState {
             decorated_pot_source: DecoratedPotSource::default(),
             // Likewise `set_conduit_source`.
             conduit_source: ConduitSource::default(),
-            // Likewise `set_map_source` (issue #184).
+            // Likewise `set_map_source`.
             map_source: MapSource::default(),
             map_cache: std::cell::RefCell::default(),
             // Likewise `set_banner_source`.
@@ -466,7 +466,7 @@ impl RenderState {
                 a: 1.0,
             },
             // Fog fades into that same sky colour. Sized for `Config`'s default
-            // render distance, on vanilla's own span (issue #388) rather than a
+            // render distance, on vanilla's own span rather than a
             // fraction; both shell bring-up paths override it from the *real*
             // configured render distance via `set_fog` before the first frame
             // (`app.rs`'s `sky_fog`), and the per-frame reconciliation then
@@ -966,7 +966,7 @@ impl RenderState {
     }
 
     /// Install the enchantment-glint pass from the already-decoded glint sheet
-    /// (issue #452) — same caller/IO split as [`install_sky`](Self::install_sky):
+    /// — same caller/IO split as [`install_sky`](Self::install_sky):
     /// `crate::resources::load_glint_texture` owns the `client.jar` read, this
     /// owns the upload and pipeline build.
     ///
@@ -1178,8 +1178,7 @@ impl RenderState {
         self.weather.as_ref().map_or(0, |w| w.rain_count())
     }
 
-    /// Upload the stitched particle sheet and rebind the particle pass to it
-    /// (issue #45).
+    /// Upload the stitched particle sheet and rebind the particle pass to it.
     ///
     /// `atlas` **must** be the very same [`ParticleAtlas`] whose UV table was
     /// installed into [`crate::particles::Particles`] via
@@ -1509,7 +1508,7 @@ impl RenderState {
     /// # }
     /// ```
     ///
-    /// # This also steps the equip/swap animation (issue #366)
+    /// # This also steps the equip/swap animation
     ///
     /// A setter with a side effect, deliberately, and worth reading before moving
     /// it. Vanilla's swap state (`ItemInHandRenderer.mainHandItem` /
@@ -1864,7 +1863,7 @@ impl RenderState {
         self.eye_bob
     }
 
-    /// Install the source for this frame's filled-map pictures (issue #184).
+    /// Install the source for this frame's filled-map pictures.
     ///
     /// Re-installed every frame like the block-entity sources, and for a sharper
     /// reason than theirs: the closure captures a **snapshot** of `SessionMaps`, so
@@ -2064,7 +2063,7 @@ impl RenderState {
                 sheet_instances = self.particles.sheet_count(),
                 "sheet particles resolved but no particle sheet is bound; they will draw \
                  nothing. Call RenderState::install_particle_sheet_atlas with the same \
-                 ParticleAtlas Particles::with_particle_atlas was given (issue #45)."
+                 ParticleAtlas Particles::with_particle_atlas was given."
             );
         }
     }

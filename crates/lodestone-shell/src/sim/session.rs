@@ -230,13 +230,13 @@ impl Sim {
         // A reconnect that hits the same id-space mismatch must warn again: see
         // `Sim::warned_id_space_mismatch`'s own doc for why this is not left set.
         self.warned_id_space_mismatch = false;
-        // A death screen (issue #103) must not survive into the next session —
+        // A death screen must not survive into the next session —
         // `reset_local_player` below clears the `Dead` marker itself, but this
         // field is plain `Sim` state, not an ECS component, so it needs its own
         // line (see its doc comment on why it lives here rather than in
         // `lodestone_ecs::session`).
         self.death_message = None;
-        // The credits screen (issue #192) must not survive into the next
+        // The credits screen must not survive into the next
         // session either, for the same reason `death_message` does not: a
         // quit-to-title and reconnect must start un-won.
         self.won = false;
@@ -364,7 +364,7 @@ impl Sim {
     }
 
     /// Whether the terrain under the player is still streaming in — the
-    /// post-login half of the loading screen (issue #449). `false` with no live
+    /// post-login half of the loading screen. `false` with no live
     /// session: the demo/dev world has no net client and is never "loading
     /// terrain".
     ///
@@ -472,7 +472,7 @@ impl Sim {
         crate::menu::loading::world_wait(terrain, self.asset_wait())
     }
 
-    /// The loading screen's current step (issue #449).
+    /// The loading screen's current step.
     ///
     /// Distinct from [`Self::session_phase`], which is the coarse *state
     /// machine* the menu switches on: this is the human-readable step the
@@ -503,7 +503,7 @@ impl Sim {
 
     /// Declare how many columns this session's initial view contains, from the
     /// view radius the launcher asked the server for. Establishes the progress
-    /// bar's denominator (issue #449).
+    /// bar's denominator.
     pub fn set_view_radius(&mut self, view_radius: u32) {
         self.expected_view_columns =
             Some(crate::menu::loading::TerrainProgress::expected_for_radius(view_radius));
@@ -527,7 +527,7 @@ impl Sim {
         })
     }
 
-    /// The loading screen's chunk-status grid (issue #568): real per-column
+    /// The loading screen's chunk-status grid: real per-column
     /// state for every column in the current view, or `None` under the same
     /// conditions [`Self::terrain_progress`] is — no session, or no declared
     /// view radius to size the grid from.
@@ -605,7 +605,7 @@ impl Sim {
         self.read(|w| w.get::<Dead>(self.local).is_some())
     }
 
-    /// The current death's message, for the death screen (issue #103) to draw
+    /// The current death's message, for the death screen to draw
     /// — `None` once the player is alive again, or before any death this
     /// session. See [`Self::death_message`]'s field doc.
     #[must_use]
@@ -613,7 +613,7 @@ impl Sim {
         self.death_message.as_deref()
     }
 
-    /// Whether `NetUpdate::WinGame` (issue #192) has arrived this session —
+    /// Whether `NetUpdate::WinGame` has arrived this session —
     /// the ground truth `app.rs`'s `drive_ui_from_session` reconciles into the
     /// credits screen, the same way [`Self::is_dead`] is reconciled into the
     /// death screen. See [`Self::won`]'s field doc.
@@ -655,7 +655,7 @@ impl Sim {
     /// mid-game, and a no-op off a live session (nothing to send to).
     ///
     /// Manual because [`crate::net::run`] now builds the client with
-    /// [`lodestone_client::RespawnPolicy::Manual`] (issue #103): the library
+    /// [`lodestone_client::RespawnPolicy::Manual`]: the library
     /// used to answer every `Death` event with an automatic
     /// `ClientAction::Respawn`, which is what let the shell ride through death
     /// with no screen at all. See `docs/pause-menu.md`'s note on the death
@@ -744,7 +744,7 @@ impl Sim {
     /// The one writer that is not the wire. Vanilla has the same seam —
     /// `ChatComponent.addMessage` is called by local commands and by
     /// `MultiplayerOptionsScreen`'s publish result — and this exists for exactly
-    /// that second caller (issue #535): the LAN port has to be readable while the
+    /// that second caller: the LAN port has to be readable while the
     /// host reads it out, which a toast is not.
     ///
     /// **Not for anything the server could say instead.** A client-authored line
@@ -795,7 +795,7 @@ impl Sim {
     /// Server-reported food saturation — the hidden reserve that drains before
     /// `food` does — or `None` before the first `set_health`.
     ///
-    /// Read by the HUD's hunger wobble (issue #30): vanilla shakes the hunger
+    /// Read by the HUD's hunger wobble: vanilla shakes the hunger
     /// row only while saturation is exhausted (`Hud.java`), so without
     /// this the animation is computed correctly and never fires on a live
     /// server. `Vitals::saturation` was already populated; only the accessor
@@ -923,7 +923,7 @@ impl Sim {
         self.net.as_ref()?.local_uuid()
     }
 
-    /// The locator bar's dots (issue #26) for the given camera pose —
+    /// The locator bar's dots for the given camera pose —
     /// [`lodestone_ecs::session::SessionWaypoints`] is fully decoded and
     /// folded and, until this accessor, read by nothing at all. Empty off
     /// a live server or once the last tracked waypoint is untracked.
@@ -1149,7 +1149,7 @@ impl Sim {
         Some((self.resolve_text(text).to_spans(), state.alpha()))
     }
 
-    /// The held-item name highlight (issue #126) as `(styled name, alpha)`,
+    /// The held-item name highlight as `(styled name, alpha)`,
     /// `Some` while a selected item's name is showing. Ticked in
     /// [`lodestone_ecs::session::tick_hud_overlays`], keyed on the selected
     /// stack's *identity* rather than slot — see
@@ -1338,7 +1338,7 @@ impl Sim {
     }
 
     // -----------------------------------------------------------------------
-    // Plugin-opened local menus (issue #145)
+    // Plugin-opened local menus
     // -----------------------------------------------------------------------
 
     /// Open a menu a plugin built, with no server container behind it —
@@ -1448,7 +1448,7 @@ impl Sim {
             tracing::debug!(
                 command = rest,
                 "client-local # command refused: no plugin registers commands \
-                 yet (issue #118). Consumed rather than leaked to chat."
+                 yet. Consumed rather than leaked to chat."
             );
             return false;
         }
@@ -1686,8 +1686,8 @@ impl Sim {
         }
     }
 
-    /// The world difficulty and lock state, as the server last reported it
-    /// (issue #411). `None` until the first `ClientEvent::DifficultyChanged`
+    /// The world difficulty and lock state, as the server last reported it.
+    /// `None` until the first `ClientEvent::DifficultyChanged`
     /// arrives — off a server, and briefly after login before the packet lands.
     ///
     /// Mirrors [`Self::selected_slot`]'s shape: a plain read of the local
@@ -1948,7 +1948,7 @@ impl Sim {
 
     /// Set a container slot's contents by creative fiat — vanilla's
     /// `ServerboundSetCreativeModeSlotPacket`, sent by the creative-inventory
-    /// screen (issue #158).
+    /// screen.
     ///
     /// The **producer** half of a round trip whose encoder already existed:
     /// [`ClientAction::SetCreativeModeSlot`] is encoded by every protocol family
@@ -2059,7 +2059,7 @@ impl Sim {
     }
 
     /// The advancement tree and the local player's progress on it, as
-    /// `UPDATE_ADVANCEMENTS` last reported them (issue #167).
+    /// `UPDATE_ADVANCEMENTS` last reported them.
     ///
     /// Cloned for [`Self::game_rules`]' reason — handing out a reference means
     /// handing out a live read guard. The clone is only taken while the
@@ -2104,7 +2104,7 @@ impl Sim {
     }
 
     /// Every filled map the server has sent contents for, as `MAP_ITEM_DATA`
-    /// last reported them (issue #184).
+    /// last reported them.
     ///
     /// Keyed on **map id**, not on an entity: several players and several item
     /// frames can show the same map, which is why the fold is session-scoped.

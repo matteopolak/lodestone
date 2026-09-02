@@ -265,7 +265,7 @@ pub fn build(
             };
             b.text(&label.text, x, ay + label.dy, label.scale, label.colour);
         }
-        // The loading screen's progress bar (issue #449), drawn after the labels
+        // The loading screen's progress bar, drawn after the labels
         // so it sits over the backdrop and under nothing. Vanilla's
         // `LevelLoadingScreen` geometry: 200x2, centred, black track, green
         // fill; the fill is `round(fraction * 200)` so a partial column shows as
@@ -279,7 +279,7 @@ pub fn build(
                 b.rect(bar_x, bar_y, filled, PROGRESS_BAR_H, PROGRESS_BAR_FG);
             }
         }
-        // The loading screen's chunk-status grid (issue #568): one real quad
+        // The loading screen's chunk-status grid: one real quad
         // per column in the current view, coloured by
         // `crate::menu::render::frame::chunk_cell_colour`. Drawn after the
         // bar for the same "over the backdrop, under nothing" reason as the
@@ -616,7 +616,7 @@ pub fn build(
             }
             let selected = i == frame.selected;
             let hovered = frame.hovered == Some(i);
-            // A **resource-pack entry** (issue #415) is a selection-list row, not a
+            // A **resource-pack entry** is a selection-list row, not a
             // button: a 32×32 icon, a name, and up to two description lines. It is
             // tested here rather than before `slot` — unlike the three lists above —
             // because its rect *is* the slot; see `MenuRow::pack`.
@@ -1724,7 +1724,7 @@ fn draw_widget(
     // screen draws nine of these with no world behind it, so it is not worth a
     // lifetime parameter on `Widget` to avoid.
     // A settings slider carries `AbstractSliderButton`'s track instead of
-    // `AbstractButton`'s three `widget/button*` states (issue #55). Which sprite
+    // `AbstractButton`'s three `widget/button*` states. Which sprite
     // set a row gets is still the *widget's* decision, not this function's — the
     // only thing decided here is which kind of widget the row is.
     let mut widget = if row.slider {
@@ -1833,7 +1833,7 @@ fn draw_widget(
 
     // A **triangle** drawn centred instead of the label, for a button whose whole
     // meaning is a direction: the Resource Packs screen's two reorder buttons
-    // (issue #415). Geometry rather than a glyph because the fallback font is
+    //. Geometry rather than a glyph because the fallback font is
     // upper-case 5×7 with no arrow in it — see `MenuRow::arrow`.
     //
     // This replaces the pack-*row* draw that used to live here, gated on
@@ -1878,7 +1878,7 @@ fn draw_widget(
 /// then `renderLabel()` unconditionally last — so the underline sits
 /// *beneath* the label z-order-wise, not drawn over it).
 ///
-/// ## "Meshes with the border, and changes when selected" (issue #567)
+/// ## "Meshes with the border, and changes when selected"
 ///
 /// Two vanilla behaviours this now ports, neither of which is a size choice —
 /// `MenuTabBar.HEIGHT`/`tab_bar_geometry` were already vanilla's own

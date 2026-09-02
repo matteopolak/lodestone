@@ -291,7 +291,7 @@ impl ApplicationHandler for WindowApp {
                     // uses (`app/redraw.rs`) — `ChatFeed`'s own capacity, so
                     // this is the true total, not a windowed subset of it.
                     // `recent_chat_spans`, not `recent_chat`: only the count is
-                    // read here (issue #656), but the legacy `to_legacy_string`
+                    // read here, but the legacy `to_legacy_string`
                     // path has no remaining production reason to run at all.
                     let total = self.sim.recent_chat_spans(100).len();
                     self.chat_input.scroll_mut().scroll(notch as i32, total, rows_per_page);
@@ -444,7 +444,7 @@ impl ApplicationHandler for WindowApp {
             // container overlay draws over the world, it does not replace it.
             WindowEvent::CursorMoved { position, .. } if self.ui.is_container_open() => {
                 self.cursor = (position.x as f32, position.y as f32);
-                // The creative screen's scrollbar drag (issue #158). Checked
+                // The creative screen's scrollbar drag. Checked
                 // first and exclusively: on that screen there is no slot layout
                 // to paint a quick-craft across, so the drag below has nothing
                 // to do.
@@ -477,7 +477,7 @@ impl ApplicationHandler for WindowApp {
                     }
                 }
             }
-            // The creative screen (issue #158) owns every click while it is up: it
+            // The creative screen owns every click while it is up: it
             // *replaces* the inventory screen rather than overlaying it (see
             // `creative_screen_open`), so falling through to the slot path would
             // click a panel that is not on screen. Its own arm rather than a
@@ -525,8 +525,8 @@ impl ApplicationHandler for WindowApp {
                     )
                 {
                     // The merchant trade-list buttons get first refusal, then
-                    // the beacon's power/confirm/cancel buttons (issue #613),
-                    // then the recipe-book panel (issue #163). The panel
+                    // the beacon's power/confirm/cancel buttons,
+                    // then the recipe-book panel. The panel
                     // overlaps the main panel's left edge at narrow canvases by
                     // `container.rs`'s documented design, so testing it
                     // *after* the slot layout would make its own widgets
@@ -705,7 +705,7 @@ impl ApplicationHandler for WindowApp {
             }
             // Scroll cycles the hotbar (down = right, like vanilla) only
             // during active play; menus and the chat prompt ignore it. The
-            // step is scaled by `mouseWheelSensitivity` (issue #203) through
+            // step is scaled by `mouseWheelSensitivity` through
             // the same fractional accumulator vanilla's `ScrollWheelHandler`
             // uses, so sensitivity below 1.0 can take more than one notch to
             // move a slot.
@@ -719,7 +719,7 @@ impl ApplicationHandler for WindowApp {
             // a bit, nothing; scroll more, jumps six slots" report: a single
             // large trackpad `PixelDelta` event can cross several whole
             // notches at once.
-            // The creative grid scrolls by whole rows (issue #158). Its own arm
+            // The creative grid scrolls by whole rows. Its own arm
             // and placed first, because none of the arms below can see it: the
             // hotbar's is gated on `accepts_gameplay_input`, which an open
             // container makes false, and `scroll_active_list` only knows about
@@ -1566,7 +1566,7 @@ impl WindowApp {
         // so the lines it exists to show reached zero pixels.
         self.sim.stats.adapter = adapter_lines(&gpu);
         // Upload the stitched particle sheet the emitter already resolves its
-        // flame/smoke/crit UVs against (issue #45). `load_particle_atlas` is
+        // flame/smoke/crit UVs against. `load_particle_atlas` is
         // memoised, so this is the **same** `ParticleAtlas` object `Sim` built
         // its `(Sheet, frame) -> UV` table from — not a second stitch that
         // happens to pack the same way. The bug being closed here is a UV table
@@ -1675,7 +1675,7 @@ impl WindowApp {
                 anim,
             );
         }
-        // Vanilla's real `container/*.png` panel art (issue #51). A jar-less
+        // Vanilla's real `container/*.png` panel art. A jar-less
         // run leaves this `None` and the screen keeps its flat programmatic
         // fill — the same "is a thing attached" degradation as the two calls
         // above.
@@ -1836,7 +1836,7 @@ impl WindowApp {
         // keeping the three connect paths uniform.
         self.install_debug_lines_source();
         // Same reasoning as the debug-line install immediately above, for the
-        // billboard channel (issue #161).
+        // billboard channel.
         self.install_plugin_billboards_source();
         self.hud = Some(hud);
         self.container = Some(container);

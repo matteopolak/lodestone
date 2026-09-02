@@ -332,7 +332,7 @@ const POS_EPS: f32 = 1.0e-4;
 /// to body yaw, head yaw and pitch alike.
 const YAW_EPS: f32 = 1.0e-2;
 
-/// A resolved nametag (issue #100): the plain text to draw above the entity,
+/// A resolved nametag: the plain text to draw above the entity,
 /// plus whether the depth-see-through pass applies.
 ///
 /// Resolved once, inside [`resolve_entity_facts`] — a player's tag from the
@@ -364,7 +364,7 @@ pub struct NameTag {
 /// of this frame — resolved fresh each fold by [`resolve_entity_facts`], never
 /// stored.
 ///
-/// # Replaces `EntitySnapshot` (issue #36)
+/// # Replaces `EntitySnapshot`
 ///
 /// This module used to receive a `Vec<EntitySnapshot>` built by
 /// `net::entity_snapshot` from a *separate, already-released* read of the
@@ -480,7 +480,7 @@ struct EntityFacts {
     /// only an id, while the third-person special-head path additionally needs
     /// this one profile-derived texture selection.
     equipment_skin: Vec<(EquipmentSlot, Arc<str>)>,
-    /// Per-slot `minecraft:trim` (issue #17), narrowed exactly as
+    /// Per-slot `minecraft:trim`, narrowed exactly as
     /// [`Self::equipment_dye`] is and additive for the same reason.
     ///
     /// Trim is a *texture* rather than a tint, so unlike dye it cannot ride an
@@ -532,7 +532,7 @@ struct EntityFacts {
     /// [`lodestone_model::item::ItemComponents::potion_color`]'s doc for why
     /// this is the pre-mixed colour and not the raw patch.
     item_potion_color: Option<u32>,
-    /// This entity's resolved nametag (issue #100), or `None` when nothing
+    /// This entity's resolved nametag, or `None` when nothing
     /// should draw above it — a mob with no visible custom name, or a player
     /// entity with no matching tab-list entry. See [`NameTag`].
     name_tag: Option<NameTag>,
@@ -662,7 +662,7 @@ pub struct EntityDraw {
     pub id: i32,
     /// The entity type's canonical path (e.g. `"pig"`).
     ///
-    /// `Arc<str>`, not `String` (issue #523) — cloned from [`RenderKind`] once
+    /// `Arc<str>`, not `String` — cloned from [`RenderKind`] once
     /// per tracked entity per frame in `extract_entity_draws`; see that
     /// component's doc for why a refcount bump replaced a heap allocation
     /// here.
@@ -712,7 +712,7 @@ pub struct EntityDraw {
     /// special-item renderer consumes this only for player-head rigs; absent
     /// means retain that rig's static default (Steve) texture.
     pub equipment_skin: Vec<(EquipmentSlot, Arc<str>)>,
-    /// Per-slot `minecraft:trim` (issue #17), mirroring
+    /// Per-slot `minecraft:trim`, mirroring
     /// [`EntityFacts::equipment_trim`] and narrowed exactly as
     /// [`Self::equipment_dye`] is.
     ///
@@ -857,7 +857,7 @@ pub struct EntityDraw {
     /// draws nothing at all there, but a bobber whose owner is untracked is
     /// already outside anything this client can see.
     pub projectile_owner: Option<i32>,
-    /// This entity's resolved nametag (issue #100), narrowed from
+    /// This entity's resolved nametag, narrowed from
     /// [`RenderNameTag`]. `None` draws nothing — the common case for every
     /// entity with no visible custom name.
     pub name_tag: Option<NameTag>,
@@ -1070,7 +1070,7 @@ pub struct EntityDraw {
     /// species and different breeds are therefore two batches, which is what vanilla
     /// pays too — its `getTextureLocation` is per entity.
     ///
-    /// **A wolf's tame state is part of this** (issue #235):
+    /// **A wolf's tame state is part of this**:
     /// [`extract_entity_draws`] bridges [`lodestone_ecs::entity::Tamed`] off the
     /// ingest entity, the same way it bridges `Variant`, and passes it through to
     /// `entity_variant_sheet_for`'s `tamed` parameter — see that function's own doc
@@ -1135,13 +1135,13 @@ impl EntityDraw {
 ///
 /// Distinct from `lodestone_ecs::entity::EntityKind` (a `ResourceKey`) because
 /// this is the bare path string `lodestone-render`'s model set is keyed by,
-/// while `EntityKind` is the network vocabulary. `EntitySnapshot` (issue #36)
+/// while `EntityKind` is the network vocabulary. `EntitySnapshot`
 /// is gone, but collapsing these two into one component is a separate,
 /// larger change nothing here requires — `RenderKind` still exists
 /// specifically so this module needs no `ResourceKey`-shaped lookup on every
 /// extract.
 ///
-/// `Arc<str>` rather than `String` (issue #523): `extract_entity_draws` reads
+/// `Arc<str>` rather than `String`: `extract_entity_draws` reads
 /// this component into a fresh `EntityDraw` every rendered frame for every
 /// tracked entity, and a `String` clone there was a per-frame heap allocation
 /// plus byte copy for a value that only actually changes on a rare
@@ -1563,7 +1563,7 @@ pub struct RenderEquipmentSkin(pub Vec<(EquipmentSlot, Arc<str>)>);
 
 /// Per-slot `minecraft:trim`, narrowed from [`EntityFacts::equipment_trim`] — a
 /// third component beside [`RenderEquipment`] and [`RenderEquipmentDye`] for
-/// their reason, and because a piece can be dyed and trimmed at once (issue #17).
+/// their reason, and because a piece can be dyed and trimmed at once.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct RenderEquipmentTrim(pub Vec<(EquipmentSlot, lodestone_model::item::ArmorTrim)>);
 
@@ -1577,7 +1577,7 @@ pub struct RenderEquipmentTrim(pub Vec<(EquipmentSlot, lodestone_model::item::Ar
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderWool(pub Option<SheepWool>);
 
-/// This entity's resolved nametag (issue #100), narrowed from
+/// This entity's resolved nametag, narrowed from
 /// [`EntityFacts::name_tag`].
 ///
 /// A component for the same reason [`RenderEquipment`]/[`RenderWool`] are:
@@ -1689,7 +1689,7 @@ pub struct TrackIndex(HashMap<i32, Entity>);
 pub struct ExtractedDraws(Vec<EntityDraw>);
 
 // ---------------------------------------------------------------------------
-// The item-pickup fly-to-collector animation (issue #365)
+// The item-pickup fly-to-collector animation
 // ---------------------------------------------------------------------------
 
 /// `ItemPickupParticle.LIFE_TIME` — the pickup flight lasts **3 ticks** (150 ms).
@@ -2193,7 +2193,7 @@ fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
 /// through `Sim::body_pose`/`Sim::hand_swing_progress` instead.
 /// `aggressive` is `Mob.isAggressive()` — bit `0x04` of the mob-flags byte, folded
 /// into [`MobState`] by `ingest::apply_entity_metadata` and resolved by the caller
-/// through [`EntityIndex`] the same way `swing_progress` is (issue #379). It was a
+/// through [`EntityIndex`] the same way `swing_progress` is. It was a
 /// hardcoded `false` here, which made the zombie arm lift in
 /// `Skeleton::animate_zombie_arms` unreachable.
 ///
@@ -2286,7 +2286,7 @@ struct ArmPoseChoice {
 
 /// Chooses the arm pose from the item in the used hand and how long it has been
 /// used — vanilla's `AvatarRenderer.getArmPose` / `AbstractSkeletonRenderer.getArmPose`,
-/// reduced to the poses [`ArmPose`] models (issue #57).
+/// reduced to the poses [`ArmPose`] models.
 ///
 /// # Bow vs crossbow: two different triggers, and only one is the using-item bit
 ///
@@ -2304,7 +2304,7 @@ struct ArmPoseChoice {
 /// the using-item bit: a skeleton's ranged attack goal calls
 /// `performRangedAttack` and never enters the item-use state, so `item_use` is
 /// forever `using: false` for it and #57's mechanism — correct for players and
-/// remote players — reaches zero mobs (issue #379).
+/// remote players — reaches zero mobs.
 ///
 /// The override is keyed on the entity type by
 /// [`mob_draws_bow_when_aggressive`], because it is genuinely per-renderer: an
@@ -3642,7 +3642,7 @@ fn resolve_entity_facts(
             Some((eq.slot, crate::hud::item_icon::profile_skin_url(profile)?))
         })
         .collect();
-    // `minecraft:trim`, narrowed identically (issue #17). Kept out of
+    // `minecraft:trim`, narrowed identically. Kept out of
     // `equipment_dye`'s tuple deliberately: an item can carry both, and the two
     // reach the GPU by different routes — dye as an instance tint, trim as its own
     // texture and therefore its own batch.
@@ -3655,7 +3655,7 @@ fn resolve_entity_facts(
         })
         .collect();
 
-    // Nametag resolution (issue #100). The source of a player tag is its
+    // Nametag resolution. The source of a player tag is its
     // tab-list display name; every other entity uses its custom name gated on
     // `CUSTOM_NAME_VISIBLE`. Both still pass through the renderer's base
     // visibility predicate: `LivingEntityRenderer.shouldShowName` suppresses
@@ -3897,7 +3897,7 @@ fn default_remote_skin(uuid: uuid::Uuid) -> crate::remote_skins::RemoteSkin {
 /// for newly-seen entities, re-anchor eases for ones that moved or turned, and
 /// prune everything [`EntityIndex`] no longer mentions.
 ///
-/// # Replaces `fold_snapshots` + `net::entity_snapshots` (issue #36)
+/// # Replaces `fold_snapshots` + `net::entity_snapshots`
 ///
 /// This used to take a `&[EntitySnapshot]` `sim.rs` built by calling
 /// `NetClient::entity_snapshots()` — a *separate* read of the same `World`
@@ -4822,7 +4822,7 @@ mod tests {
     /// only the components that function actually reads need real values,
     /// the rest are "never reported" by omission. The net.rs-era sibling of
     /// this was `bare_entity_view`, building an `EntityView` for the now-
-    /// deleted `entity_snapshot` (issue #36): that boundary is now ingest
+    /// deleted `entity_snapshot`: that boundary is now ingest
     /// components -> [`EntityFacts`], and [`resolve_entity_facts`] is called
     /// directly with an explicit id and an `EntityRef` rather than through
     /// [`EntityIndex`], the same way [`fold_entities`] calls it per tracked
@@ -5360,7 +5360,7 @@ mod tests {
     /// render path — the render-level pixel gate (`tests/nametag_pixels.rs`)
     /// proves the wiring end to end, this proves the *resolution logic* in
     /// isolation. Moved from `net.rs`'s now-deleted `entity_snapshot` tests
-    /// (issue #36): the boundary these pin is ingest components ->
+    ///: the boundary these pin is ingest components ->
     /// `EntityFacts`, not `EntityView` -> `EntitySnapshot`.
     mod name_tag {
         use uuid::Uuid;
@@ -5980,7 +5980,7 @@ mod tests {
     }
 
     /// Vanilla's `AbstractSkeletonRenderer.getArmPose` override, all four terms of
-    /// its conjunction moved one at a time (issue #379).
+    /// its conjunction moved one at a time.
     ///
     /// Each `false` case below is a way the bug could come back, and each is a
     /// *different* mechanism: the flag not arriving, the wrong renderer family, and
@@ -8195,7 +8195,7 @@ mod tests {
              prove the positive test's floor is load-bearing; got {final_y}"
         );
     }
-    // ---- the item-pickup fly-to-collector animation (issue #365) ----------
+    // ---- the item-pickup fly-to-collector animation ----------
 
     /// The interpolant is **quadratic** in the age fraction, and the midpoint is
     /// where that matters: `ItemPickupParticleGroup` computes

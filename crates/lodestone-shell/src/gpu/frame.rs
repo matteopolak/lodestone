@@ -352,7 +352,7 @@ impl RenderState {
             &self.debug_lines_source.sample(camera.position),
         );
 
-        // Same constraint for the plugin-billboard pass (issue #161): sample
+        // Same constraint for the plugin-billboard pass: sample
         // and upload before the pass opens. Zero instances (the default,
         // until a caller installs `set_plugin_billboards_source`) is a cheap
         // no-op, not a wasted upload — `prepare` returns early on an empty
@@ -2089,7 +2089,7 @@ impl RenderState {
             self.debug_lines.draw(&mut pass, debug_line_count);
 
             // Right beside the debug lines, for the same reason: a plugin
-            // billboard (issue #161) is a world-space overlay a plugin author
+            // billboard is a world-space overlay a plugin author
             // wants clearly visible, not a piece of real terrain competing
             // for draw order.
             self.plugin_billboards.draw(&mut pass, plugin_billboard_count);

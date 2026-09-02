@@ -962,7 +962,7 @@ pub fn drive_mining(
     // than it already is for the progressive mining chips a few lines above,
     // which predict exactly as eagerly.
     //
-    // # The local block-edit prediction (issue #596)
+    // # The local block-edit prediction
     //
     // Vanilla's `destroyBlock` does not just spawn debris — it first sets the
     // block to air *locally, synchronously*

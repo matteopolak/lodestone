@@ -62,7 +62,7 @@ pub struct MenuRow {
     /// drawable type or draw call to drift from the favicon one. See
     /// [`default_head_icon`] for why the *texture* is a parameter here
     /// rather than a hardcoded draw, which is what makes swapping in a real
-    /// downloaded skin later (issue #62) a data change, not a rewrite.
+    /// downloaded skin later a data change, not a rewrite.
     pub head: Option<FaviconMosaic>,
     /// Whether the row can be activated (a failed row is still selectable).
     pub enabled: bool,
@@ -76,7 +76,7 @@ pub struct MenuRow {
     /// with a caret parked after it.
     pub field: bool,
     /// Draw the row's background as vanilla's `AbstractSliderButton` track
-    /// instead of a `Button` (issue #55).
+    /// instead of a `Button`.
     ///
     /// A settings screen's numeric options are sliders and its enums and
     /// booleans are `CycleButton`s (`OptionInstance.java`), and the two
@@ -165,7 +165,7 @@ pub struct MenuRow {
     /// live.
     pub world: Option<WorldEntryView>,
     /// Set on a [`super::packs::PacksControl::Entry`] row — the Resource Packs
-    /// screen's pack entries (issue #415).
+    /// screen's pack entries.
     ///
     /// Its presence routes the row to [`draw_pack_entry`] instead of
     /// [`draw_widget`], which is the **only** thing it decides. Unlike
@@ -215,7 +215,7 @@ pub struct MenuRow {
     /// and its lines are the player sample), so `draw_server_entry` reports it from
     /// the geometry it already has. This field is the whole-widget kind.
     pub tooltip: Option<String>,
-    /// Set on one of the Statistics screen's tab-bar rows (issue #564).
+    /// Set on one of the Statistics screen's tab-bar rows.
     ///
     /// Its presence routes the row to [`draw_tab`] instead of [`draw_widget`],
     /// tested before `slot` for [`Self::pack`]'s reason: a tab is not a button
@@ -300,7 +300,7 @@ pub enum Arrow {
     Down,
 }
 
-/// One resource-pack row's state (issue #415).
+/// One resource-pack row's state.
 ///
 /// Two fields, for [`WorldEntryView`]'s reason: everything else a pack row draws
 /// is already a [`MenuRow`] field. Both of these say what the **hover overlay**
@@ -381,7 +381,7 @@ pub struct WorldEntryView {
     /// the row the mouse is over. All three are visible at once and mean different
     /// things — the same split `world_select`'s own module doc argues for.
     pub selected: bool,
-    /// The list's scroll offset, **in logical pixels** (issue #541).
+    /// The list's scroll offset, **in logical pixels**.
     ///
     /// Denormalized onto every entry for exactly [`ServerEntryView::scroll`]'s
     /// reason: [`world_list_row_rect`] is also `app`'s hit-test, so it must resolve
@@ -819,7 +819,7 @@ pub struct MenuFrame<'a> {
     pub progress: Option<MenuProgress>,
     /// The loading screen's chunk-status grid, `None` on every other screen
     /// and `None` on the loading screen itself until a view radius is known
-    /// (issue #568) — see [`ChunkGridView`] and
+    /// — see [`ChunkGridView`] and
     /// [`loading_frame_with_progress_and_grid`].
     pub chunk_grid: Option<ChunkGridView>,
 }
@@ -855,7 +855,7 @@ pub const PROGRESS_BAR_BG: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 /// The filled portion — `LevelLoadingScreen`'s `0xFF00FF00`.
 pub const PROGRESS_BAR_FG: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 
-/// Vanilla's `LevelLoadingScreen` chunk-status grid (issue #568), as a frame
+/// Vanilla's `LevelLoadingScreen` chunk-status grid, as a frame
 /// primitive — the [`crate::menu::loading::TerrainChunkGrid`] data plus the
 /// one thing that is a render decision rather than an observation: where its
 /// centre sits.
@@ -994,7 +994,7 @@ impl FaviconCache {
 /// game is paused, which is exactly the regression [`super::Screen::Paused`]'s
 /// own doc comment warns against.
 ///
-/// [`Screen::Connecting`] is **included** (issue #449): it is the full-frame
+/// [`Screen::Connecting`] is **included**: it is the full-frame
 /// loading screen, with a flat dark backdrop and no rows to interact with, and
 /// nothing behind it worth rendering — no chunk packets arrive until after
 /// login, so the Clear pass that replaces the frame costs nothing. The

@@ -7,7 +7,7 @@
 //! [`ClientBuilder::connect`], preserving the [`Transport`] seam a future wasm
 //! build needs.
 //!
-//! ## Singleplayer is the same code with a different transport (issue #287)
+//! ## Singleplayer is the same code with a different transport
 //!
 //! [`NetClient::open_singleplayer`] starts `lodestone_server`'s
 //! `IntegratedServer` on this module's own net thread and speaks to it over an
@@ -345,7 +345,7 @@ pub type SharedWeather = Arc<WeatherCell>;
 
 /// One biome's declared climate at its holder id, as
 /// [`ClientEvent::BiomeClimates`] carries it — the `temperature`/
-/// `has_precipitation` pair `ShellWeatherProbe::precipitation` (issue #25)
+/// `has_precipitation` pair `ShellWeatherProbe::precipitation`
 /// needs to answer rain vs snow, `downfall` carried alongside for a future
 /// grass/foliage tint consumer (see `docs/worldgen-biomes.md`).
 ///
@@ -961,7 +961,7 @@ pub enum NetUpdate {
     // (see `lodestone_ecs::session::ServerAlive`'s docs on why the two liveness
     // rules must not merge).
     /// The player died. A transient state, not the end of the session: the
-    /// shell shows the death screen (issue #103) and [`NetUpdate::Respawned`]
+    /// shell shows the death screen and [`NetUpdate::Respawned`]
     /// follows once the player clicks Respawn and the server confirms it — the
     /// client library no longer auto-respawns (`RespawnPolicy::Manual`, set on
     /// the `ClientBuilder` in [`run`]), which is the actual behaviour change
@@ -973,7 +973,7 @@ pub enum NetUpdate {
         /// [`forward`] — **not** resolved through the language table.
         /// Untranslated components (most death causes) render as their raw
         /// key. [`Self::Disconnected`] used to flatten the same way and no
-        /// longer does (issue #68); this variant is the one that still does,
+        /// longer does; this variant is the one that still does,
         /// named as a deliberate, separate follow-up in
         /// `docs/death-screen.md`'s "What was deliberately left out" section
         /// rather than fixed here.
@@ -1004,7 +1004,7 @@ pub enum NetUpdate {
         /// change I can justify", not as the overworld.
         dimension: Option<lodestone_client::DimensionId>,
     },
-    /// The server signalled `WIN_GAME` (issue #192): the local player exited
+    /// The server signalled `WIN_GAME`: the local player exited
     /// the End through the exit portal after the dragon fight. Carries no
     /// data — see [`lodestone_model::event::ClientEvent::WinGame`]'s own doc
     /// for why. `Sim::poll_net` latches this into a `won` flag,
@@ -1012,7 +1012,7 @@ pub enum NetUpdate {
     /// screen (`UiState::show_credits`) — the same shape as
     /// [`NetUpdate::Death`]/`Sim::is_dead`/`UiState::die`.
     WinGame,
-    /// The world was published to LAN on `port` (issue #535). Reported rather
+    /// The world was published to LAN on `port`. Reported rather
     /// than assumed because the caller may have asked for port `0`, and because a
     /// player who cannot see the port cannot tell anyone how to join.
     ///
@@ -1132,7 +1132,7 @@ pub enum NetUpdate {
     /// are resolved through `Sim::translator()` at the read boundary
     /// ([`Sim::poll_net`]'s `Disconnected` arm), so a kick reason like
     /// `multiplayer.disconnect.kicked` reaches `Screen::Error` as English
-    /// rather than the raw key (issue #68). The synthetic senders in this
+    /// rather than the raw key. The synthetic senders in this
     /// module (`"stream closed"`, the `TransferRequested`-derived "server
     /// transferred you to …" message `run_async` builds when the stream
     /// closes right after a transfer, and `sim.rs`'s test-only `"Server
@@ -1286,7 +1286,7 @@ pub struct NetClient {
     /// thread — see [`NET_RELAY_CAPACITY`]'s doc for why blocking is unsafe
     /// on this driver's wasm32 path.
     action_tx: SyncSender<ClientAction>,
-    /// "Open to LAN" requests (issue #562): a port to add a TCP listener on,
+    /// "Open to LAN" requests: a port to add a TCP listener on,
     /// drained by the net thread's own loop rather than handed to the client
     /// handle like [`Self::action_tx`] — this is not a wire packet, it is a
     /// local call into the **running** `IntegratedServer` this thread already
@@ -1447,7 +1447,7 @@ enum Origin {
         auth: RemoteAuth,
     },
     /// Host `lodestone-server`'s integrated server in **this thread's runtime**
-    /// and speak to it over an in-memory duplex — singleplayer (issue #287).
+    /// and speak to it over an in-memory duplex — singleplayer.
     ///
     /// `protocol` is a trait object resolved by
     /// [`lodestone_registry::server_protocol_for_protocol`], which is what keeps
@@ -1475,7 +1475,7 @@ enum Origin {
         view_radius: i32,
         /// Where to save this world, or `None` for a throwaway in-memory one.
         ///
-        /// `Some` is what makes singleplayer persist (issue #468) — it selects
+        /// `Some` is what makes singleplayer persist — it selects
         /// `IntegratedServer::open_persistent_with_mobs` over the in-memory
         /// constructor. `None` is not dead: it is what `wasm32` gets (a browser
         /// world has no filesystem) and what a test wanting a world that leaves
@@ -1549,7 +1549,7 @@ impl std::fmt::Debug for Origin {
 const SINGLEPLAYER_ADDRESS: (&str, u16) = ("singleplayer", 0);
 
 /// How long a connected client waits for the server to send **any** packet
-/// before declaring the connection dead (issue #280).
+/// before declaring the connection dead.
 ///
 /// Vanilla arms the same bound at the socket with Netty's
 /// `ReadTimeoutHandler(30)` — `Connection.java` — a 30-second stall that
@@ -1823,7 +1823,7 @@ impl NetClient {
     }
 
     /// Start the **integrated server** in-process and connect to it —
-    /// singleplayer (issue #287).
+    /// singleplayer.
     ///
     /// `server_protocol` is the serverbound half of a version family, obtained
     /// from [`lodestone_registry::server_protocol_for_protocol`]; `protocol` is
@@ -1843,7 +1843,7 @@ impl NetClient {
     /// `session` means what it does for [`Self::connect`] (§4.1(c)): pass the
     /// caller's `World` or the fold lands somewhere nothing reads. Prefer
     /// [`crate::sim::Sim`]'s own launch path over calling this with `None`.
-    /// `world_dir` is where the world is saved (issue #468). `Some` opens it
+    /// `world_dir` is where the world is saved. `Some` opens it
     /// persistently, creating it on first use and writing it back on autosave
     /// and on session end; `None` is the old throwaway in-memory world.
     /// [`crate::saves::default_world_dir`] is what the menu passes.
@@ -1903,7 +1903,7 @@ impl NetClient {
     }
 
     /// [`Self::open_singleplayer`], but the world is hosted on a **TCP port** so
-    /// other machines can join it — the pause menu's Open to LAN (issue #535).
+    /// other machines can join it — the pause menu's Open to LAN.
     ///
     /// Identical in every other respect: same registry-resolved
     /// `ServerProtocol`, same seed and world directory, same
@@ -2125,8 +2125,8 @@ impl NetClient {
     }
 
     /// Ask the net thread to add a TCP listener to the **already-running**
-    /// integrated server (issue #562) — "Open to LAN" without a restart.
-    /// `port` of `0` asks the OS for one (issue #559); the actual bound port
+    /// integrated server — "Open to LAN" without a restart.
+    /// `port` of `0` asks the OS for one; the actual bound port
     /// is reported back through [`NetUpdate::LanOpened`], never the number
     /// passed here.
     ///
@@ -2853,7 +2853,7 @@ async fn run_async(
         // the serving task**, so binding it inside a `match` arm would kill the
         // server the instant the arm ended.
         let mut integrated_server = None;
-        // The Open-to-LAN world's own save handle (issue #535). `open_to_lan` sets
+        // The Open-to-LAN world's own save handle. `open_to_lan` sets
         // `save: None` and so flushes nothing at shutdown; this is what the
         // teardown below writes through, and it is `None` for every other origin.
         #[cfg(not(target_arch = "wasm32"))]
@@ -3360,7 +3360,7 @@ async fn run_async(
         // already carries `IngestPlugin`/`SessionPlugin` and the entity is
         // `Sim.local` — because `add_systems` does not deduplicate.
         //
-        // `RespawnPolicy::Manual` (issue #103): the library's default,
+        // `RespawnPolicy::Manual`: the library's default,
         // `Automatic`, answers every `Death` event with an unconditional
         // `ClientAction::Respawn`, which is what let the shell ride through
         // death with no screen at all — the death packet arrived and left
@@ -4773,7 +4773,7 @@ fn forward(
             // known, separately-tracked gap — see `docs/death-screen.md`),
             // `reason` is passed through unresolved: `Sim::poll_net` is the
             // read boundary that owns translation for this class of event
-            // (issue #68), so flattening here would throw the translation
+            //, so flattening here would throw the translation
             // key away before it ever reaches `Sim::translator()`.
             let _ = tx.try_send(NetUpdate::Disconnected(Box::new(reason)));
             return Err(());
@@ -4812,7 +4812,7 @@ fn forward(
         ClientEvent::Respawned { dimension, .. } => NetUpdate::Respawned {
             dimension: Some(dimension),
         },
-        // WIN_GAME (issue #192): a pure signal, forwarded unconditionally —
+        // WIN_GAME: a pure signal, forwarded unconditionally —
         // `route()` claims this `shell: true, shell_conditional: false`, so
         // this arm is `must_forward()` and its absence would trip `forward`'s
         // own `debug_assert!` on the catch-all below.
@@ -4914,7 +4914,7 @@ fn forward(
             z: section.z,
             blocks,
         },
-        // Block events, forwarded raw (issue #23). Until this arm existed the
+        // Block events, forwarded raw. Until this arm existed the
         // event reached the terminal `_ =>` below and was dropped, which is why
         // chest lids never moved. The two bytes are per-block-type and are
         // interpreted by `Sim::poll_net`'s one consumer, not here.
@@ -4944,7 +4944,7 @@ fn forward(
         // `OPEN_BOOK` was decoded by v770 but had no consumer after the
         // adapter, so server-authorised book opens were silently dropped.
         ClientEvent::BookOpened { main_hand } => NetUpdate::BookOpened { main_hand },
-        // The item-pickup fly-to-collector animation (issue #365), forwarded
+        // The item-pickup fly-to-collector animation, forwarded
         // **raw** for the same reason `TitleEvent` is: the one consumer is a
         // `lodestone-game` fold that already takes a `&ClientEvent`
         // (`lodestone_game::mining::PickupFeed::apply`), and re-typing the three
@@ -6193,7 +6193,7 @@ mod tests {
     }
 
     /// Both command arms fold into [`CommandTreeCell`] and neither crosses the
-    /// channel (issue #471).
+    /// channel.
     ///
     /// The arms are load-bearing before any screen reads the cell:
     /// `lodestone_model::event::route` claims `shell`/`must_forward` for both

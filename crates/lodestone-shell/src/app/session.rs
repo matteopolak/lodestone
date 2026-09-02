@@ -167,7 +167,7 @@ impl WindowApp {
                 }
             }
         }
-        // The death screen (issue #103): `net::run` now builds the client
+        // The death screen: `net::run` now builds the client
         // with `RespawnPolicy::Manual`, so nothing auto-respawns any more —
         // `Sim::is_dead` is the ground truth for whether the screen should be
         // up, reconciled here the same way `SessionPhase` is reconciled into
@@ -200,7 +200,7 @@ impl WindowApp {
         self.restore_recipe_book_settings();
         self.sync_recipe_toasts();
         self.sync_recipe_book_seen();
-        // The credits screen (issue #192): `Sim::has_won()` is the ground
+        // The credits screen: `Sim::has_won()` is the ground
         // truth `NetUpdate::WinGame` sets in `poll_net`, reconciled here the
         // same way `is_dead()` is reconciled above. The `!= Screen::Credits`
         // guard mirrors the `!self.ui.is_death()` one: `show_credits` is
@@ -869,7 +869,7 @@ impl WindowApp {
     /// they were the instant before the button was pressed — see that
     /// method's own doc comment for what state a publish-time joiner shares.
     ///
-    /// `0` — an OS-assigned port (issue #559) — rather than a fixed one:
+    /// `0` — an OS-assigned port — rather than a fixed one:
     /// vanilla's `/publish` defaults to `HttpUtil.getAvailablePort()`, and the
     /// actual bound port comes back through `NetUpdate::LanOpened`, which
     /// `Sim::apply` already turns into the "Local game hosted on port N" chat
@@ -1003,7 +1003,7 @@ impl WindowApp {
         }
     }
 
-    /// Start singleplayer and show the loading screen (issue #287).
+    /// Start singleplayer and show the loading screen.
     ///
     /// The multiplayer twin of this is [`Self::connect_to`], and after the
     /// session is attached the two are *the same function*: both call
@@ -1160,7 +1160,7 @@ impl WindowApp {
                 .ui
                 .session_failed(crate::sim::SessionEnd::failed(lodestone_model::Text::literal(e.to_string()))),
         }
-        // Remembered for Open to LAN (issue #535), which republishes this exact
+        // Remembered for Open to LAN, which republishes this exact
         // launch on a TCP port. Recorded even on the error arm above: a failed
         // launch left no session, and the field is only ever read behind one.
         self.hosted_world = Some(launch_for_lan);

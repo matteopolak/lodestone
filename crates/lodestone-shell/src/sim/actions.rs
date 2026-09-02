@@ -1217,7 +1217,7 @@ impl Sim {
             // and not in frames — a 200 fps client must not reach the threshold ten
             // times sooner than a 20 fps one.
             self.write(|w| w.resource_mut::<ItemUseTicks>().0 = Some(0));
-            // [`ItemUseEffects`]'s writer (issue #671): resolve which
+            // [`ItemUseEffects`]'s writer: resolve which
             // [`UseEffects`] the held main-hand item arms. `UseEffects::for_item`
             // itself still only distinguishes spear-vs-default — `uses_item`
             // above is what keeps a non-use item from ever reaching it in the

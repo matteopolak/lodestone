@@ -1002,7 +1002,7 @@ impl ContainerGeometry {
                     frame.cursor.map(|[cx, cy]| [cx / scale, cy / scale]),
                 )
                 .with_pose(frame.avatar_pose)
-                // The local player's own uuid (issue #646), so the *default*
+                // The local player's own uuid, so the *default*
                 // skin — when nothing local or fetched has claimed the
                 // avatar — resolves through the same `default_skin_for_uuid`
                 // call the world side uses. See `PlayerAvatar::uuid`'s doc.

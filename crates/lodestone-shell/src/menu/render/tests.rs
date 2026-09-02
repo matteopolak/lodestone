@@ -208,7 +208,7 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
     let mut fav = FaviconCache::new();
     let statuses = StatusCache::with_probe(unavailable_probe());
     // A real cursor position, not the default `None` — so the mechanical
-    // check below (issue #567) has something to actually distinguish. A
+    // check below has something to actually distinguish. A
     // frame that left `cursor` at its own `..Default::default()` of `None`
     // would pass a `None == None` comparison vacuously; this makes the
     // stamped value `Some(_)`, which only the real stamp can produce.
@@ -4004,7 +4004,7 @@ fn the_death_screens_title_is_anchored_on_the_left_quarter_not_the_centre() {
     // centred heading in this file (`Origin::ScreenTop`). A layout
     // "corrected" to the screen centre would fail this by a wide margin.
     //
-    // `.floor()`ed (issue #401): `854.0 / 4.0` is `213.5`, not a whole
+    // `.floor()`ed: `854.0 / 4.0` is `213.5`, not a whole
     // pixel, where vanilla's `this.width / 2 / 2` is two Java integer
     // divisions and can only ever land on a whole pixel.
     assert_eq!(Origin::DeathTitle.anchor(V_W, V_H), ((V_W / 4.0).floor(), 0.0));
@@ -4923,7 +4923,7 @@ fn every_sprite_id_the_vanilla_screens_name_exists_in_the_real_pack() {
     assert_eq!(atlas.native_size("title/minecraft"), Some((1024, 256)));
     assert_eq!(atlas.native_size("title/edition"), Some((512, 64)));
 
-    // The Resource Packs screen's own sprites (issue #415): the two hover overlays
+    // The Resource Packs screen's own sprites: the two hover overlays
     // off `gui/sprites/transferable_list/**`, plus the *loose*
     // `misc/unknown_pack` fallback icon, which only reaches the atlas because
     // `MENU_TEXTURES` names it. A typo in any of them draws nothing at all, in
@@ -5083,7 +5083,7 @@ fn an_empty_menu_still_clears_the_screen() {
 }
 
 
-// -- world select (issue #397) --------------------------------------------
+// -- world select --------------------------------------------
 
 /// A nav and a `UiState` sitting on the world-select screen, reached the way
 /// a player reaches it: by activating the title screen's Singleplayer button.
@@ -6886,7 +6886,7 @@ fn solid_png(side: u32, rgba: [u8; 4]) -> Vec<u8> {
     out
 }
 
-/// The loading screen's progress bar (issue #449) reaches geometry, at vanilla's
+/// The loading screen's progress bar reaches geometry, at vanilla's
 /// `LevelLoadingScreen` rect, and its **green fill tracks the real fraction**.
 ///
 /// The fill width is the assertion, not the bar's presence: a bar that drew at a
@@ -6949,7 +6949,7 @@ fn the_loading_bar_fill_tracks_the_real_column_count() {
     );
 }
 
-/// The loading screen's chunk-status grid (issue #568) reaches geometry as
+/// The loading screen's chunk-status grid reaches geometry as
 /// **real per-cell colour**, not a uniform block that merely proves the grid
 /// drew *something*.
 ///
