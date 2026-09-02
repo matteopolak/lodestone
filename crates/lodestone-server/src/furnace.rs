@@ -3,107 +3,91 @@
 //!
 //! # Where the truth comes from
 //!
-//! `.cache/mc/26.2/src/net/minecraft/world/level/block/entity/
-//! AbstractFurnaceBlockEntity.java` (the shared engine; `FurnaceBlockEntity`/
-//! `SmokerBlockEntity`/`BlastFurnaceBlockEntity` are thin subclasses that
+//! The pinned 26.2 decompile's block-entity source for the shared furnace
+//! engine (the furnace, smoker and blast furnace are thin subclasses that
 //! only pick a [`FuelValues`]-halving strategy and a recipe type — see
-//! below), `FuelValues.java` (fuel burn durations), and the four
-//! `AbstractCookingRecipe` subclasses (`SmeltingRecipe.java`,
-//! `SmokingRecipe.java`, `BlastingRecipe.java`) for the default cook time per
-//! recipe kind. The concrete recipe table below (ingredient -> result/count/
-//! experience/cooking_time) is transcribed mechanically from every
-//! `minecraft:smelting`/`minecraft:blasting`/`minecraft:smoking` recipe JSON
-//! under `.cache/mc/26.2/client-src/data/minecraft/recipe/` (Mojang's own
-//! generated data — data source #1 per `CLAUDE.md`), not hand-typed from
+//! below), its fuel-value table (fuel burn durations), and the four cooking
+//! recipe subclasses (smelting, smoking, blasting, plus the excluded
+//! campfire kind) for the default cook time per recipe kind. The concrete
+//! recipe table below (ingredient -> result/count/experience/cooking_time) is
+//! transcribed mechanically from every `minecraft:smelting`/
+//! `minecraft:blasting`/`minecraft:smoking` recipe JSON in Mojang's own
+//! generated data (data source #1 per `CLAUDE.md`), not hand-typed from
 //! memory or a wiki. `minecraft:campfire_cooking` recipes are excluded: a
-//! campfire has no fuel/lit state machine at all (no block entity — vanilla
-//! ticks it directly off `CampfireBlock`), so it is not part of this
-//! "furnace family" issue's scope.
+//! campfire has no fuel/lit state machine at all (no block entity — the real
+//! campfire ticks its cooking directly off the block itself), so it is not
+//! part of this "furnace family" issue's scope.
 //!
-//! ## The state machine (`AbstractFurnaceBlockEntity.serverTick`)
+//! ## The state machine
 //!
-//! Quoted here because [`Furnace::tick`] is a direct, line-by-line port:
+//! Quoted here because [`Furnace::tick`] is a direct, line-by-line port of
+//! the real per-tick block-entity update:
 //!
-//! ```java
-//! if (entity.litTimeRemaining > 0) {
-//!     wasLit = true;
-//!     entity.litTimeRemaining--;
-//!     isLit = entity.litTimeRemaining > 0;
-//! } else {
-//!     wasLit = false;
-//!     isLit = false;
-//! }
-//! // ... hasIngredient/hasFuel from slots 0/1 ...
-//! if (isLit || hasFuel && hasIngredient) {
-//!     if (hasIngredient) {
-//!         // look up recipe for slot 0; if found and canBurn(...):
-//!         //   if (!isLit) { light from fuel; consume 1 fuel if burn time > 0; }
-//!         //   if (isLit) { cookingTimer++; if (== cookingTotalTime) { reset, produce, setRecipeUsed }; }
-//!         //   else { cookingTimer = 0; }
-//!         // else (canBurn false): cookingTimer = 0;
-//!         // (recipe == null: cookingTimer is left untouched — a real vanilla quirk, preserved here)
-//!     } else {
-//!         cookingTimer = 0;
-//!     }
-//! } else if (cookingTimer > 0) {
-//!     cookingTimer = clamp(cookingTimer - BURN_COOL_SPEED, 0, cookingTotalTime);
-//! }
-//! ```
+//! 1. If lit time remaining is above zero: remember it was lit this tick,
+//!    decrement it, and it is still lit iff the remaining time is still
+//!    above zero. Otherwise: it was not lit and is not lit.
+//! 2. Read whether the ingredient and fuel slots are occupied.
+//! 3. If lit, or (has fuel and has ingredient):
+//!    - With an ingredient present: look up a recipe for the input slot. If
+//!      one is found and its can-burn check passes — if not already lit,
+//!      light from fuel and consume one fuel item when its burn time is
+//!      positive; if lit, advance the cooking timer and, once it reaches the
+//!      total cook time, reset it, produce the result and mark the recipe
+//!      used; otherwise reset the cooking timer to zero. If the can-burn
+//!      check fails, reset the cooking timer to zero. If no recipe matches
+//!      at all, the cooking timer is left **untouched** — a real quirk,
+//!      preserved here.
+//!    - With no ingredient: reset the cooking timer to zero.
+//! 4. Otherwise, while the cooking timer is still positive, cool it down by
+//!    [`BURN_COOL_SPEED`] per tick, clamped to the total cook time.
 //!
-//! `cookingTotalTime` is **not** recomputed every tick — it is fixed the
-//! moment the input slot changes to a different item
-//! (`AbstractFurnaceBlockEntity.setItem`:
-//! `slot == 0 && !same` recomputes it from the new recipe, or
-//! `200` if none), which is why the produced item's cook time cannot change
+//! The total cook time is **not** recomputed every tick — it is fixed the
+//! moment the input slot changes to a different item (a slot-0 change to a
+//! different item recomputes it from the new recipe, or falls back to `200`
+//! if none), which is why the produced item's cook time cannot change
 //! mid-cook even if the recipe table were hot-swapped. [`Furnace::set_input`]
 //! mirrors that.
 //!
-//! ## Fuel: `FuelValues.java`
+//! ## Fuel
 //!
-//! `baseUnit = 200` (`FuelValues.vanillaBurnTimes`). [`base_burn_duration`]
-//! restates every concrete `.add(ItemLike, ...)` entry
-//! (`FuelValues.vanillaBurnTimes`'s `.add` chain) plus the flammable-wood-family tags
-//! (`logs_that_burn`/`planks`/`wooden_slabs`/`wooden_stairs`/`wooden_doors`/
-//! `wooden_trapdoors`/`wooden_fences`/`fence_gates`/
-//! `wooden_pressure_plates`/`wooden_buttons`/`signs`/`hanging_signs`/
-//! `boats`/`wooden_shelves`, each `.cache/mc/26.2/client-src/data/minecraft/
-//! tags/item/*.json`) for the nine flammable overworld wood species (oak,
-//! spruce, birch, jungle, acacia, dark_oak, pale_oak, mangrove, cherry) plus
-//! bamboo for the tags that include it, with `crimson_`/`warped_` explicitly
-//! excluded — `NON_FLAMMABLE_WOOD` (`non_flammable_wood.json`) is exactly
-//! those two prefixes, verified directly rather than assumed
-//! (`FuelValues.vanillaBurnTimes`'s `.remove(ItemTags.NON_FLAMMABLE_WOOD)`). Wool
-//! (`ItemTags.WOOL`, any of the 16 dye colours) and wool carpets
-//! (`ItemTags.WOOL_CARPETS`) and banners (`ItemTags.BANNERS`) are matched by suffix for the same reason —
-//! every colour is flammable, there is no exclusion tag for them. Smoker and
-//! blast furnace halve the *fuel* burn duration, not the cook time
-//! (`SmokerBlockEntity`/`BlastFurnaceBlockEntity` override `getBurnDuration`
-//! to `return super.getBurnDuration(...) / 2;`) — modeled as
-//! [`Furnace::effective_burn_duration`]'s per-[`FurnaceKind`] halving,
-//! **separate** from the recipe table's own per-kind cook time (which is
-//! independently already 100 vs 200 in the JSON — see the recipe doc above).
+//! The base fuel unit is `200`. [`base_burn_duration`] restates every
+//! concrete per-item fuel-value entry plus the flammable-wood-family tags
+//! (logs that burn, planks, wooden slabs, stairs, doors, trapdoors, fences,
+//! fence gates, pressure plates, buttons, signs, hanging signs, boats,
+//! shelves) for the nine flammable overworld wood species (oak, spruce,
+//! birch, jungle, acacia, dark_oak, pale_oak, mangrove, cherry) plus bamboo
+//! for the tags that include it, with `crimson_`/`warped_` explicitly
+//! excluded — the real non-flammable-wood tag is exactly those two prefixes,
+//! verified directly rather than assumed against the real fuel-value table's
+//! own removal of that tag from the flammable set. Wool (any of the 16 dye
+//! colours), wool carpets and banners are matched by suffix for the same
+//! reason — every colour is flammable, there is no exclusion tag for them.
+//! Smoker and blast furnace halve the *fuel* burn duration, not the cook
+//! time — each real block entity overrides the burn-duration query to halve
+//! its parent's result — modeled as [`Furnace::effective_burn_duration`]'s
+//! per-[`FurnaceKind`] halving, **separate** from the recipe table's own
+//! per-kind cook time (which is independently already 100 vs 200 in the JSON
+//! — see the recipe doc above).
 //!
 //! Not modeled, documented rather than silently wrong: item-specific max
-//! stack size for `canBurn`'s output-space check (every recipe result this
+//! stack size for the can-burn output-space check (every recipe result this
 //! table produces stacks to 64, the assumed default — see [`MAX_STACK_SIZE`]);
-//! the wet-sponge + bucket -> water-bucket special case
-//! (inside `AbstractFurnaceBlockEntity.burn`); and any fuel item's crafting
-//! remainder (e.g. a lava bucket leaving an empty bucket behind,
-//! `AbstractFurnaceBlockEntity.consumeFuel`) — this crate's `ItemStack` has no
-//! `ItemStackTemplate`/crafting-remainder registry to resolve one from, the
+//! the wet-sponge + bucket -> water-bucket special case inside the real burn
+//! step; and any fuel item's crafting remainder (e.g. a lava bucket leaving
+//! an empty bucket behind, in the real fuel-consumption step) — this crate's
+//! `ItemStack` has no crafting-remainder registry to resolve one from, the
 //! same gap `PlayerInventory`'s own docs note elsewhere.
 
 use std::collections::HashMap;
 
 use lodestone_model::ItemStack;
 
-/// `AbstractFurnaceBlockEntity.BURN_COOL_SPEED`: how fast cooking
-/// progress decays per tick once the fire goes out with nothing left to
-/// relight it.
+/// How fast cooking progress decays per tick once the fire goes out with
+/// nothing left to relight it, in the real block entity.
 pub const BURN_COOL_SPEED: i32 = 2;
 
-/// The cook-time fallback when no recipe matches the current input
-/// (`AbstractFurnaceBlockEntity.getTotalCookTime`'s `.orElse(200)`).
+/// The cook-time fallback when no recipe matches the current input, in the
+/// real total-cook-time query.
 pub const DEFAULT_COOK_TIME: i32 = 200;
 
 /// The assumed output stack cap for [`Furnace::can_burn`] — see the module
@@ -118,11 +102,11 @@ pub const MAX_STACK_SIZE: u32 = 64;
 pub enum FurnaceKind {
     /// The plain furnace: `Smelting` recipes, full fuel duration.
     Furnace,
-    /// `Smoking` recipes (food only), half fuel duration
-    /// (`SmokerBlockEntity.getBurnDuration`).
+    /// `Smoking` recipes (food only), half fuel duration, in the real
+    /// smoker's own burn-duration override.
     Smoker,
-    /// `Blasting` recipes (ores/tools), half fuel duration
-    /// (`BlastFurnaceBlockEntity.getBurnDuration`).
+    /// `Blasting` recipes (ores/tools), half fuel duration, in the real
+    /// blast furnace's own burn-duration override.
     BlastFurnace,
 }
 
@@ -437,9 +421,9 @@ fn strip_species_suffix<'a>(item: &'a str, suffixes: &[&str], species: &[&str]) 
 }
 
 /// The base (furnace-speed) fuel burn duration for `item`, restated from
-/// `FuelValues.vanillaBurnTimes` (`baseUnit = 200`) — see the module doc
-/// comment. `0` for anything not a fuel (matching `Object2IntSortedMap`'s
-/// implicit zero default for a missing key, `FuelValues.burnDuration`).
+/// the real fuel-value table (base unit `200`) — see the module doc
+/// comment. `0` for anything not a fuel (matching the real burn-duration
+/// query's implicit zero default for a missing key).
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn base_burn_duration(item: &str) -> i32 {
@@ -567,12 +551,11 @@ pub fn base_burn_duration(item: &str) -> i32 {
     if strip_species_suffix(item, &["_button"], FLAMMABLE_WOOD_SPECIES_WITH_BAMBOO).is_some() {
         return BASE / 2;
     }
-    // Boats are per-species items (`oak_boat`, ..., `ItemTags.BOATS`, in
-    // `FuelValues.vanillaBurnTimes`); bamboo's boat is irregularly named
-    // `bamboo_raft` (`boats.json`), handled as its own concrete entry rather
-    // than the `_boat` suffix. Chest boats (`#minecraft:chest_boats`,
-    // nested inside `boats.json`) are not modeled — a narrower, documented
-    // gap (chest boats are a rare fuel source).
+    // Boats are per-species items (`oak_boat`, ...) in the real fuel-value
+    // table's boat entries; bamboo's boat is irregularly named `bamboo_raft`,
+    // handled as its own concrete entry rather than the `_boat` suffix.
+    // Chest boats, nested inside the real boat tag, are not modeled — a
+    // narrower, documented gap (chest boats are a rare fuel source).
     if item == "minecraft:bamboo_raft" {
         return BASE * 6;
     }
@@ -585,9 +568,9 @@ pub fn base_burn_duration(item: &str) -> i32 {
 
 /// The halving strategy per furnace kind: [`FurnaceKind::Furnace`] burns
 /// fuel at the base rate, [`FurnaceKind::Smoker`]/[`FurnaceKind::BlastFurnace`]
-/// halve it (`SmokerBlockEntity`/`BlastFurnaceBlockEntity.getBurnDuration`:
-/// `return super.getBurnDuration(fuelValues, itemStack) / 2;`) — Java integer
-/// division, matched here with `i32` division.
+/// halve it — each real block entity's own burn-duration override simply
+/// divides its parent's result by two, integer division, matched here with
+/// `i32` division.
 #[must_use]
 pub fn effective_burn_duration(kind: FurnaceKind, item: &str) -> i32 {
     let base = base_burn_duration(item);
@@ -601,8 +584,7 @@ pub fn effective_burn_duration(kind: FurnaceKind, item: &str) -> i32 {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FurnaceTick {
     /// `Some(now_lit)` when the lit/unlit block-state boolean flipped this
-    /// tick (`AbstractFurnaceBlock.LIT`) — the caller's cue to sync a block
-    /// update.
+    /// tick — the caller's cue to sync a block update.
     pub lit_changed: Option<bool>,
     /// Whether a cook completed and moved into the output slot this tick.
     pub cooked: bool,
@@ -611,8 +593,8 @@ pub struct FurnaceTick {
 }
 
 /// A furnace-family block entity's burn/cook state, shared by the furnace,
-/// smoker, and blast furnace (see the module doc comment for the vanilla
-/// citation `AbstractFurnaceBlockEntity` this ports).
+/// smoker, and blast furnace (see the module doc comment for the block
+/// entity this ports).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Furnace {
     kind: FurnaceKind,
@@ -688,7 +670,7 @@ impl Furnace {
         }
     }
 
-    /// The four burn/cook timers in vanilla's own `AbstractFurnaceBlockEntity`
+    /// The four burn/cook timers in the real block entity's own
     /// field order: `lit_time_remaining`, `lit_total_time`,
     /// `cooking_time_spent`, `cooking_total_time`.
     ///
@@ -744,10 +726,9 @@ impl Furnace {
         (self.cooking_timer, self.cooking_total_time)
     }
 
-    /// The four values vanilla's `ContainerData` exposes for this block
-    /// entity's menu (`AbstractFurnaceBlockEntity.DATA_LIT_TIME` = 0,
-    /// `DATA_LIT_DURATION` = 1, `DATA_COOKING_PROGRESS` = 2,
-    /// `DATA_COOKING_TOTAL_TIME` = 3) — exposed here so a future
+    /// The four values the real container-data interface exposes for this
+    /// block entity's menu (lit time at index 0, lit duration at 1, cooking
+    /// progress at 2, cooking total time at 3) — exposed here so a future
     /// wiring layer can feed `ServerProtocol::encode_container_set_data`
     /// (not implemented anywhere yet; see this crate's top-level report for
     /// the declared gap) without re-deriving the index mapping.
@@ -762,11 +743,11 @@ impl Furnace {
         }
     }
 
-    /// Sets the input (slot 0), mirroring `AbstractFurnaceBlockEntity.setItem`'s
-    /// slot-0 branch: when the new item differs from what was there
-    /// (`!ItemStack.isSameItemSameComponents`), immediately recomputes
-    /// `cookingTotalTime` from the new recipe (or [`DEFAULT_COOK_TIME`] if
-    /// none) and resets `cookingTimer` to `0` — this is *not* deferred to
+    /// Sets the input (slot 0), mirroring the real block entity's slot-0
+    /// item-set branch: when the new item differs from what was there (not
+    /// the same item with the same components), immediately recomputes the
+    /// total cook time from the new recipe (or [`DEFAULT_COOK_TIME`] if
+    /// none) and resets the cooking timer to `0` — this is *not* deferred to
     /// the next tick.
     pub fn set_input(&mut self, item: Option<ItemStack>) {
         let same = matches!((&item, &self.input), (Some(a), Some(b)) if a.item == b.item && a.components == b.components);
@@ -818,8 +799,8 @@ impl Furnace {
     }
 
     /// Drains the banked recipe-use counts (recipe key -> times cooked since
-    /// the last drain), matching `AbstractFurnaceBlockEntity.awardUsedRecipesAndPopExperience`'s
-    /// `this.recipesUsed.clear()` call. A caller wires this to whatever
+    /// the last drain), matching the real block entity's own experience-award
+    /// step clearing its recipe-use map. A caller wires this to whatever
     /// stands in for "the player closed the furnace menu" — not done by
     /// this crate today (see the module doc comment / the top-level report
     /// for the declared gap); pair with [`experience_for`] to turn a drained
@@ -837,7 +818,7 @@ impl Furnace {
         effective_burn_duration(self.kind, item)
     }
 
-    /// `AbstractFurnaceBlockEntity.canBurn`: the output slot must be empty, or already
+    /// The real can-burn check: the output slot must be empty, or already
     /// hold the exact same item (ignoring count) with room under
     /// [`MAX_STACK_SIZE`] for the new output.
     fn can_burn(&self, recipe: &CookingRecipe) -> bool {
@@ -865,7 +846,7 @@ impl Furnace {
         }
     }
 
-    /// `AbstractFurnaceBlockEntity.burn`, minus the wet-sponge special case (see the
+    /// The real burn step, minus the wet-sponge special case (see the
     /// module doc comment).
     fn burn(&mut self, recipe: &CookingRecipe, ingredient_key: &str) {
         let Ok(result_id) = recipe.result.parse::<lodestone_model::ResourceKey>() else {
@@ -890,7 +871,7 @@ impl Furnace {
     }
 
     /// Advances the furnace by exactly one server tick — a direct port of
-    /// `AbstractFurnaceBlockEntity.serverTick`; see the module
+    /// the real block entity's per-tick update; see the module
     /// doc comment for the quoted control flow this mirrors line-by-line.
     pub fn tick(&mut self) -> FurnaceTick {
         let mut out = FurnaceTick::default();
@@ -960,20 +941,20 @@ impl Furnace {
     }
 }
 
-/// `AbstractFurnaceBlockEntity.createExperience`: `amount`
+/// The real per-recipe experience derivation: `amount`
 /// successful cooks of a recipe worth `experience_per_item` XP each bank
 /// `floor(amount * experience_per_item)` XP for certain, plus one more with
 /// probability equal to the fractional remainder — `roll` is the injected
-/// `[0.0, 1.0)` sample standing in for `level.getRandom().nextFloat()`, the
+/// `[0.0, 1.0)` sample standing in for the real random draw, the
 /// same "caller supplies the randomness" shape [`crate::composter::Composter::insert`]
 /// uses.
 #[must_use]
 /// Turns one drained [`Furnace::take_recipes_used`] map into a total XP award —
-/// vanilla's `AbstractFurnaceBlockEntity.awardUsedRecipesAndPopExperience`, which
-/// walks the banked recipes and calls `createExperience` for each.
+/// the real experience-award step, which
+/// walks the banked recipes and derives an experience amount for each.
 ///
 /// `roll` is one `[0.0, 1.0)` draw **per recipe entry**, supplied by the caller in
-/// the order the map is walked, because `createExperience`'s fractional remainder is
+/// the order the map is walked, because the real derivation's fractional remainder is
 /// probabilistic (see [`experience_for`]). The map is a `HashMap`, so its iteration
 /// order is not reproducible — which matters only for *which* entry gets which roll,
 /// not for the total's distribution, and is recorded rather than papered over.

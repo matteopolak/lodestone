@@ -1217,20 +1217,14 @@ impl LootFunction {
                 if !conditions.iter().all(|c| c.test(context, rng)) {
                     return;
                 }
-                // `ApplyExplosionDecay.run`, transcribed:
-                //
-                // ```java
-                // Float explosionRadius = context.getOptionalParameter(EXPLOSION_RADIUS);
-                // if (explosionRadius != null) {
-                //     float probability = 1.0F / explosionRadius;
-                //     int currentCount = itemStack.getCount();
-                //     int resultCount = 0;
-                //     for (int i = 0; i < currentCount; i++) {
-                //         if (random.nextFloat() <= probability) { resultCount++; }
-                //     }
-                //     itemStack.setCount(resultCount);
-                // }
-                // ```
+                // The real explosion-decay function, transcribed as the rule it
+                // implements: when an explosion radius is present, the survival
+                // probability is `1.0 / radius`, and the stack is thinned by
+                // drawing once **per item currently in the stack** — each item
+                // survives independently if its draw falls at or under that
+                // probability — then the stack's count is replaced with however
+                // many survived. With no explosion radius present, the stack is
+                // left untouched.
                 //
                 // **One draw per item in the stack**, not one per stack — that is
                 // the whole difference between this and `survives_explosion`, and
@@ -1238,10 +1232,10 @@ impl LootFunction {
                 // gated by the condition, a multi-item drop (a fortune-boosted
                 // ore, a clutch of seeds) is *thinned* item by item here.
                 //
-                // `setCount(0)` is reachable and left as `count = 0`, not turned
-                // into an absent stack: vanilla's caller drops empty stacks when
-                // it collects them, and doing it here would hide the difference
-                // between "rolled nothing" and "never rolled".
+                // A result count of zero is reachable and left as `count = 0`, not
+                // turned into an absent stack: the real caller drops empty stacks
+                // when it collects them, and doing it here would hide the
+                // difference between "rolled nothing" and "never rolled".
                 let Some(radius) = context.explosion_radius else {
                     return;
                 };
@@ -1597,15 +1591,11 @@ impl LootCondition {
                     state.block == *block && properties.iter().all(|m| m.matches(state))
                 }
             },
-            // `ExplosionCondition.test`, transcribed:
-            //
-            // ```java
-            // Float explosionRadius = context.getOptionalParameter(EXPLOSION_RADIUS);
-            // if (explosionRadius != null) {
-            //     float probability = 1.0F / explosionRadius;
-            //     return random.nextFloat() <= probability;
-            // } else { return true; }
-            // ```
+            // The real survives-explosion condition, transcribed as the rule it
+            // implements: when an explosion radius is present, draw once and
+            // survive if the draw falls at or under `1.0 / radius`; with no
+            // explosion radius present (a mined block, not a blast), the
+            // condition is unconditionally true and draws nothing.
             //
             // Two things a paraphrase gets wrong. The comparison is `<=`, not
             // `<` — irrelevant for a continuous draw but not for a reader
