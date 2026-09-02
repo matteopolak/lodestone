@@ -5,45 +5,40 @@
 //! # Where the record definition comes from
 //!
 //! Not from a community wiki, and not from the decompiled `client-src` — the
-//! payload is `com.mojang.authlib`'s, and authlib is a *library*, shipped as a
+//! payload is the services library's own, and that library is shipped as a
 //! jar rather than as source. The shape below was read out of the real jar
 //! 26.2 itself resolves,
-//! `.cache/mc/26.2/libraries/com/mojang/authlib/9.0.75/authlib-9.0.75.jar`, by
+//! by
 //! walking the constant pool of three classes:
 //!
 //! | class | what it fixes |
 //! |---|---|
-//! | `yggdrasil/response/MinecraftTexturesPayload` | a record of `timestamp: long`, `profileId: UUID`, `profileName: String`, `isPublic: boolean`, `textures: Map` |
-//! | `minecraft/MinecraftProfileTexture$Type` | the map's keys, an enum of exactly `SKIN`, `CAPE`, `ELYTRA` — GSON writes an enum key as its own name, so those are the literal JSON keys |
-//! | `minecraft/MinecraftProfileTexture` | each value's fields: `url: String` and `metadata: Map<String, String>`, read through `getMetadata(key)` |
+//! | the services library's own textures-payload record | a record of `timestamp: long`, `profileId: UUID`, `profileName: String`, `isPublic: boolean`, `textures: Map` |
+//! | the services library's own profile-texture-type enum | the map's keys, an enum of exactly `SKIN`, `CAPE`, `ELYTRA` — GSON writes an enum key as its own name, so those are the literal JSON keys |
+//! | the services library's own profile-texture record | each value's fields: `url: String` and `metadata: Map<String, String>`, read through its own per-key metadata accessor |
 //!
 //! and the *consumer* is 26.2's own source, which is available:
-//! `SkinManager.registerTextures` does exactly
+//! vanilla's own skin-manager register-textures step reads the model name
+//! straight off the skin texture's metadata under the key
+//! `"model"`, then resolves it through its own by-legacy-services-name lookup —
+//! so the model lives on the **skin** texture's metadata under that key,
+//! and nowhere else.
 //!
-//! ```text
-//! model = PlayerModelType.byLegacyServicesName(skinInfo.getMetadata("model"));
-//! ```
+//! # The trap in vanilla's own player-model-type enum, and it is a real one
 //!
-//! so the model lives on the **skin** texture's metadata under the key
-//! `"model"`, and nowhere else.
-//!
-//! # The trap in `PlayerModelType`, and it is a real one
-//!
-//! `PlayerModelType`
-//! (`.cache/mc/26.2/client-src/net/minecraft/world/entity/player/PlayerModelType.java`)
+//! Vanilla's own player-model-type enum
+//! (in the decompiled 26.2 client source)
 //! carries **two** names per variant, and they are not the same string:
 //!
-//! ```text
-//! SLIM("slim", "slim"),
-//! WIDE("wide", "default");
-//! ```
+//! roughly, a `SLIM` variant constructed with `("slim", "slim")` and a `WIDE`
+//! variant constructed with `("wide", "default")`.
 //!
-//! The first is the `id` (the `StringRepresentable` serialized name, used by
-//! the datapack `CODEC` and by the `skin_patch` item component); the second is
-//! the `legacyServicesId`, and **that** is what the session service writes into
+//! The first is the `id` (the serialized name, used by
+//! the datapack codec and by the `skin_patch` item component); the second is
+//! the legacy-services id, and **that** is what the session service writes into
 //! `metadata.model`. So the wide value on the wire here is `"default"`, not
 //! `"wide"` — matching on `"wide"` finds nothing and, because
-//! `byLegacyServicesName` is `requireNonNullElse(…, WIDE)`, still *appears* to
+//! the by-legacy-services-name lookup falls back to `WIDE` on no match, still *appears* to
 //! work: every skin resolves wide, including every slim one, and the only
 //! symptom is Alex's arms being one pixel too thick. [`PlayerModelType::WIDE_LEGACY_SERVICES_ID`]
 //! is published so a caller cannot restate the wrong one.
@@ -51,7 +46,7 @@
 //! Absence is also wide, deliberately and not defensively: a texture pack-less
 //! account, a texture with no `metadata` map at all, and an unrecognised value
 //! all resolve to [`PlayerModelType::Wide`], which is exactly
-//! `Objects.requireNonNullElse(NAME_LOOKUP.apply(name), WIDE)`.
+//! vanilla's own fallback-to-default lookup over the name table.
 //!
 //! # Why base64 is decoded here rather than by a crate
 //!
@@ -67,7 +62,8 @@
 //! **Fetch anything.** The URL comes back as a string; nothing here opens a
 //! socket, and the texture bytes are somebody else's problem
 //! ([`crate::Image::decode_png`] takes them once they arrive). Nor is the
-//! Yggdrasil signature checked — `MinecraftProfileTextures.signatureState()`
+//! Yggdrasil signature checked — vanilla's own profile-textures
+//! signature-state query
 //! feeds vanilla's `secure()` flag, which only gates the "require secure
 //! profiles" server option; this crate never sees the signature because the
 //! property's `signature` field is a sibling of `value`, not part of it.
@@ -117,9 +113,9 @@ impl PlayerModelType {
     /// The `legacyServicesId` of `SLIM`, which happens to equal its `id`.
     pub const SLIM_LEGACY_SERVICES_ID: &'static str = "slim";
 
-    /// `PlayerModelType.byLegacyServicesName` — `"slim"` is slim, and
+    /// Vanilla's own by-legacy-services-name lookup — `"slim"` is slim, and
     /// **everything else, including `None`, is wide**
-    /// (`Objects.requireNonNullElse(NAME_LOOKUP.apply(name), WIDE)`).
+    /// (a name-table lookup falling back to `WIDE` on no match).
     #[must_use]
     pub fn by_legacy_services_name(name: Option<&str>) -> Self {
         match name {
@@ -131,8 +127,9 @@ impl PlayerModelType {
     /// `true` for the slim rig — the shape `lodestone_render`'s
     /// `player_model_name(slim: bool)` and `gpu/sources.rs`'s
     /// `ThirdPersonBodyState::slim` already take, so a caller does not have to
-    /// re-derive the polarity. (Vanilla agrees: `PlayerModelType::STREAM_CODEC`
-    /// is `BOOL.map(slim -> slim ? SLIM : WIDE)`, so `true` is slim there too.)
+    /// re-derive the polarity. (Vanilla agrees: its own wire codec for this
+    /// enum
+    /// maps a bare bool to `slim ? SLIM : WIDE`, so `true` is slim there too.)
     #[must_use]
     pub const fn is_slim(self) -> bool {
         matches!(self, PlayerModelType::Slim)
@@ -168,24 +165,23 @@ impl PlayerModelType {
     }
 }
 
-/// One of vanilla's 18 identity skins — `DefaultPlayerSkin.get(uuid)`'s own
+/// One of vanilla's 18 identity skins — vanilla's own default-player-skin
+/// per-uuid lookup's own
 /// answer for an account that has never set a skin, or whose skin has not
 /// (yet) been fetched.
 ///
 /// # Where the record definition comes from
 ///
-/// `DefaultPlayerSkin` (`.cache/mc/26.2/client-src/net/minecraft/client/resources/DefaultPlayerSkin.java`,
+/// Vanilla's own default-player-skin type (in the decompiled 26.2 client
+/// source,
 /// a client-only class) carries a fixed 18-entry table — nine slim identities
 /// then the same nine wide, each `alex`/`ari`/`efe`/`kai`/`makena`/`noor`/
-/// `steve`/`sunny`/`zuri` — and:
+/// `steve`/`sunny`/`zuri` — and its per-uuid lookup picks the table entry at
+/// the uuid's hash code, reduced modulo the table length by a floor-mod (never
+/// negative, unlike Java's plain `%`).
 ///
-/// ```java
-/// public static PlayerSkin get(final UUID profileId) {
-///    return DEFAULT_SKINS[Math.floorMod(profileId.hashCode(), DEFAULT_SKINS.length)];
-/// }
-/// ```
-///
-/// `UUID.hashCode()` and `Long.hashCode(long)` are JDK library methods, not
+/// The uuid's hash code and the underlying long-hash-code helper it calls are
+/// JDK library methods, not
 /// Mojang's, so they are not in the decompile; [`default_skin_for_uuid`]'s own
 /// doc cites the exact `openjdk/jdk` source read to port them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,7 +237,7 @@ pub const fn default_skins() -> &'static [DefaultSkin; 18] {
     &DEFAULT_SKINS
 }
 
-/// `DefaultPlayerSkin.getDefaultSkin()` — index `6`, `slim/steve` (the array's
+/// Vanilla's own no-uuid-available default-skin query — index `6`, `slim/steve` (the array's
 /// first nine entries are slim, so index `6` is still in the slim half) —
 /// vanilla's answer when no uuid is available at all. Distinct from
 /// [`default_skin_for_uuid`], which is the uuid-hash pick every *identified*
@@ -252,7 +248,7 @@ pub const fn default_skin() -> DefaultSkin {
     DEFAULT_SKINS[6]
 }
 
-/// `DefaultPlayerSkin.get(UUID)` — the uuid-hash pick over the 18 built-in
+/// Vanilla's own per-uuid default-skin lookup — the uuid-hash pick over the 18 built-in
 /// identities, for a profile that has declared no skin at all (or one not yet
 /// fetched). This is **one resolver, shared by every consumer that only has a
 /// uuid to go on**: a player-head item's owner (once threaded through), a
@@ -267,7 +263,7 @@ pub const fn default_skin() -> DefaultSkin {
 /// This crate takes no dependency on the `uuid` crate (every consumer of this
 /// function already has one, gated behind their own feature or none at all), so
 /// the two 64-bit halves are the parameter — exactly the shape
-/// `java.util.UUID`'s own two private fields take, and exactly what
+/// the JDK's own UUID type's own two private fields take, and exactly what
 /// `uuid::Uuid::as_u64_pair()` returns, reinterpreted as signed: `let (hi, lo) =
 /// uuid.as_u64_pair(); default_skin_for_uuid(hi as i64, lo as i64)`.
 ///
@@ -277,23 +273,17 @@ pub const fn default_skin() -> DefaultSkin {
 /// source rather than transcribed from familiarity — the discipline this
 /// codebase asks of every port:
 ///
-/// ```java
-/// // DefaultPlayerSkin.java (26.2 client decompile)
-/// DEFAULT_SKINS[Math.floorMod(profileId.hashCode(), DEFAULT_SKINS.length)]
+/// - vanilla's own default-player-skin per-uuid lookup (26.2 client
+///   decompile): indexes the built-in skins table at the uuid's hash code,
+///   reduced modulo the table length by a floor-mod.
+/// - the JDK's own UUID hash-code method (openjdk/jdk, not Mojang's, so not
+///   in the 26.2 decompile; read from the real JDK source): XORs the uuid's
+///   two 64-bit halves and passes that through the JDK's own long hash-code
+///   helper.
+/// - the JDK's own long hash-code helper (openjdk/jdk): XORs the 64-bit value
+///   with itself shifted right 32 bits (unsigned), then truncates to 32 bits.
 ///
-/// // java.util.UUID (openjdk/jdk, java.base/java.util.UUID -- not Mojang's,
-/// // so not in the 26.2 decompile; read from the real JDK source)
-/// public int hashCode() {
-///     return Long.hashCode(mostSigBits ^ leastSigBits);
-/// }
-///
-/// // java.lang.Long (openjdk/jdk, java.base/java.lang.Long)
-/// public static int hashCode(long value) {
-///     return (int)(value ^ (value >>> 32));
-/// }
-/// ```
-///
-/// `>>> `is Java's **unsigned** right shift. The final truncating `(int)` cast
+/// The final truncating cast to a 32-bit int
 /// keeps only the low 32 bits either way, and XORing two 32-bit halves whose
 /// upper half only differs by its fill bits (sign- vs zero-extended) leaves
 /// that upper half discarded regardless — so an arithmetic and a logical shift
@@ -301,28 +291,28 @@ pub const fn default_skin() -> DefaultSkin {
 /// explicit `u64` shift anyway, matching the Java operator literally rather
 /// than leaning on that equivalence.
 ///
-/// `Math.floorMod` for a positive divisor is "the least non-negative
+/// The JDK's own floor-mod, for a positive divisor, is "the least non-negative
 /// remainder", which is exactly [`i32::rem_euclid`]'s contract for a positive
 /// argument.
 #[must_use]
 pub fn default_skin_for_uuid(most_sig_bits: i64, least_sig_bits: i64) -> DefaultSkin {
     let hilo = most_sig_bits ^ least_sig_bits;
-    // `Long.hashCode(long)`: `(int)(value ^ (value >>> 32))`, `>>>` unsigned.
+    // The JDK's own long hash-code helper: `(int)(value ^ (value >>> 32))`, `>>>` unsigned.
     let long_hash = hilo ^ (((hilo as u64) >> 32) as i64);
     let hash = long_hash as i32;
     let index = hash.rem_euclid(DEFAULT_SKINS.len() as i32) as usize;
     DEFAULT_SKINS[index]
 }
 
-/// One entry of `MinecraftTexturesPayload.textures` — a URL plus its declared
+/// One entry of vanilla's own textures-payload record's texture map — a URL plus its declared
 /// model. `model` is meaningful only for the `SKIN` entry; a cape or elytra
 /// carries no `metadata.model` and so reads as [`PlayerModelType::Wide`],
 /// which is why [`ProfileTextures`] exposes the cape and elytra as bare URLs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkinTexture {
     /// The texture URL, verbatim. Not fetched, not validated as a URL, and
-    /// **not** host-checked — vanilla's own `TextureUrlChecker` restricts the
-    /// allowed hosts, and a caller that goes on to fetch this must do the same.
+    /// **not** host-checked — vanilla's own services library restricts the
+    /// allowed hosts (see `crate::texture`'s module doc), and a caller that goes on to fetch this must do the same.
     pub url: String,
     /// The declared rig, from `metadata.model` via
     /// [`PlayerModelType::by_legacy_services_name`].
@@ -333,7 +323,7 @@ pub struct SkinTexture {
 ///
 /// Every field is optional because the payload's `textures` map is: an account
 /// that has never set a skin sends `{}`, and vanilla falls back to
-/// `DefaultPlayerSkin.get(profileId)` (a UUID hash over the eight built-in
+/// its own per-uuid default-skin lookup (a UUID hash over the eight built-in
 /// sheets) in that case — a fallback this type deliberately does not perform,
 /// so a caller can tell "no skin declared" from "a skin declared as wide".
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -352,9 +342,10 @@ pub struct ProfileTextures {
 
 impl ProfileTextures {
     /// The declared rig, or [`PlayerModelType::Wide`] when no skin is declared
-    /// at all — the same collapse `SkinManager.registerTextures` performs when
+    /// at all — the same collapse vanilla's own skin-manager register-textures
+    /// step performs when
     /// `textures.skin()` is null and it falls through to
-    /// `DefaultPlayerSkin.get(profileId).model()` (whose own default is wide
+    /// its own per-uuid default-skin lookup's own model query (whose own default is wide
     /// for all but three of the eight built-ins; this port does not model the
     /// UUID-hash pick, so it reports wide).
     #[must_use]
@@ -608,7 +599,7 @@ mod tests {
     }
 
     /// [`DEFAULT_SKINS`]'s own declared order, checked directly against
-    /// `DefaultPlayerSkin.java`'s array literal: nine slim identities in
+    /// vanilla's own default-player-skin type's array literal: nine slim identities in
     /// `alex, ari, efe, kai, makena, noor, steve, sunny, zuri` order, then the
     /// same nine names wide, in the same order. This is the input every
     /// [`default_skin_for_uuid`] test below trusts implicitly, so it gets its
@@ -637,11 +628,11 @@ mod tests {
                 i + 9
             );
         }
-        assert_eq!(default_skin(), DEFAULT_SKINS[6], "getDefaultSkin() is index 6");
+        assert_eq!(default_skin(), DEFAULT_SKINS[6], "vanilla's own no-uuid-available default-skin query is index 6");
         assert_eq!(
             default_skin(),
             DefaultSkin { model: PlayerModelType::Slim, texture: "entity/player/slim/steve" },
-            "DefaultPlayerSkin.getDefaultSkin() is slim/steve -- index 6 is still in the \
+            "vanilla's own no-uuid-available default-skin query is slim/steve -- index 6 is still in the \
              array's first (slim) nine, not the wide half, which only starts at index 9"
         );
     }
@@ -713,7 +704,7 @@ mod tests {
         );
     }
 
-    /// `Math.floorMod`, not Rust's default `%`: a negative `hash` must still
+    /// The JDK's own floor-mod, not Rust's default `%`: a negative `hash` must still
     /// land in `0..18`, never wrap negative. `most_sig_bits = -19, least_sig_bits
     /// = 0` was hand-derived (see the module doc) to land on index `0` --
     /// verified independently: `hilo = -19` (`0xFFFF_FFFF_FFFF_FFED`), the
