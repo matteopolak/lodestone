@@ -156,7 +156,7 @@ const RATIO_LIGHT_APPLIED: f32 = 0.423_07;
 
 /// **The ambient-free prediction**, i.e. vanilla's chain with `AmbientColor`
 /// dropped as a believed no-op — what this gate asserted before
-/// `DimensionTypes.java:36` was read. `0.363117`. It is only `0.06` from the
+/// `DimensionTypes`'s own decompiled source was read. `0.363117`. It is only `0.06` from the
 /// correct value, which is why [`BAND`] has to be tight.
 const RATIO_AMBIENT_FREE: f32 = 0.363_12;
 
@@ -742,7 +742,7 @@ fn the_grass_block_side_overlay_survives_the_depth_test() {
 /// Issue #386 named the `0.2` floor as the mechanism and was right, but the first
 /// fix overshot to pure black: `get_brightness(0)` is `0`, yet `lightmap.fsh`
 /// seeds its accumulator with `AmbientColor`, which the overworld sets to
-/// `0x0A0A0A` (`DimensionTypes.java:36`). After the `notGamma` mix that is
+/// `0x0A0A0A` (`DimensionTypes`'s own decompiled source). After the `notGamma` mix that is
 /// `0.0935`.
 ///
 /// Asserted on the same four populations, because a tinted quad is the

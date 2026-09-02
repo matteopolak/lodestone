@@ -41,7 +41,7 @@
 //! # The fix this pins
 //!
 //! Vanilla does not use a look-at. `Camera.setRotation`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/Camera.java:336-344`) builds
+//! (vanilla's decompiled camera source, 26.2) builds
 //! a YXZ Euler quaternion and **derives** all three basis vectors from it:
 //!
 //! ```text

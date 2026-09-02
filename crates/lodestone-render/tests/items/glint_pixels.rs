@@ -5,9 +5,9 @@
 //!
 //! A **second pass over the item's own geometry** — not a texture swap, not a flat
 //! overlay quad. Vanilla re-emits every baked quad into a glint buffer
-//! (`ItemFeatureRenderer.java:74-84`) and draws it with `RenderPipelines.GLINT`,
+//! (`ItemFeatureRenderer`'s own decompiled source) and draws it with `RenderPipelines.GLINT`,
 //! whose depth state is `CompareOp.EQUAL` with **zero** bias
-//! (`RenderPipelines.java:431`). That only works if the two passes rasterise
+//! (`RenderPipelines`'s own decompiled source). That only works if the two passes rasterise
 //! byte-identical clip positions, which is why `glint.wgsl` recomputes `clip` the
 //! same way `model.wgsl` does and why the glint pipeline consumes `ModelVertex`'s
 //! own vertex layout so it can be handed the *same* vertex buffer.
@@ -21,9 +21,9 @@
 //!
 //! | hypothesis | jar | linear-space result |
 //! |---|---|---|
-//! | `GLINT` (correct) | `BlendFunction.java:8` — `SRC_COLOR, ONE` | `dst + src²` |
-//! | `ADDITIVE` | `BlendFunction.java:17` — `ONE, ONE` | `dst + src` |
-//! | `TRANSLUCENT` | `BlendFunction.java:10-12` — `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` | `src` (at α=1) |
+//! | `GLINT` (correct) | `BlendFunction`'s own decompiled source — `SRC_COLOR, ONE` | `dst + src²` |
+//! | `ADDITIVE` | `BlendFunction`'s own decompiled source — `ONE, ONE` | `dst + src` |
+//! | `TRANSLUCENT` | `BlendFunction`'s own decompiled source — `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` | `src` (at α=1) |
 //!
 //! `SRC_COLOR` is the source **squared**, and it is neither of the two obvious
 //! guesses. At the synthetic glint value used here the three predictions are tens
@@ -100,7 +100,7 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const ITEM: &str = "minecraft:diamond_sword";
 
 /// The real glint texture inside `client.jar`
-/// (`ItemFeatureRenderer.java:23`).
+/// (`ItemFeatureRenderer`'s own decompiled source).
 const GLINT_PNG: &str = "assets/minecraft/textures/misc/enchanted_glint_item.png";
 
 /// Jar-verified dimensions of both glint PNGs.

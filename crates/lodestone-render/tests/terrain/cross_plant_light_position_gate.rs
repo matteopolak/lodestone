@@ -6,7 +6,7 @@
 //! Vanilla's `ModelBlockRenderer`/`BlockModelLighter` samples a quad's light
 //! from **the neighbour the quad's `cullface` opens into** if it has one, or
 //! from **the neighbour in `quad.direction()`** only when the quad's plane is
-//! flush with the block boundary (`faceCubic`, `BlockModelLighter.java:
+//! flush with the block boundary (`faceCubic`, vanilla's decompiled block-model-lighter source:
 //! 265-272`). An unculled quad whose plane is *not* on the boundary — a cross
 //! blade, whose `cross.json` element sits on a diagonal — is lit from the
 //! **block's own cell** instead.
@@ -276,10 +276,10 @@ fn the_falsifiable_prediction_all_four_quads_bake_to_north_or_south() {
 /// not the north neighbour's (`0x00`).
 ///
 /// **Expected value's origin, outside this crate:**
-/// `BlockModelLighter.java:207` says the sample cell is `pos` when
+/// `BlockModelLighter`'s own decompiled source says the sample cell is `pos` when
 /// `faceCubic` is false; `:268`'s `NORTH` arm needs `minZ == maxZ`, which
 /// `cross.json`'s `"angle": 45` rotation makes false; and
-/// `ModelBlockRenderer.java:65` plus `"ambientocclusion": false` selects
+/// `ModelBlockRenderer`'s own decompiled source plus `"ambientocclusion": false` selects
 /// `tesselateFlat`, whose unculled bucket passes `CHECK_LIGHT` (`-1`). The
 /// plant's own cell is `0xF0` by this view's construction, so vanilla's
 /// answer is `0xF0` for all 16 vertices.

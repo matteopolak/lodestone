@@ -7,7 +7,7 @@
 //!
 //! 1. `lodestone_assets::item_model::parse_tint` read only the JSON key
 //!    `default`. Seven of vanilla's eight tint sources use that name;
-//!    `minecraft:constant` alone uses **`value`** (`Constant.java:22`). So every
+//!    `minecraft:constant` alone uses **`value`** (`Constant`'s own decompiled source). So every
 //!    constant item tint in the game parsed to `None` and its colour was thrown
 //!    away — the six leaves items, `vine`, `lily_pad`, `filled_map`'s layer 0,
 //!    `firework_star`'s layer 0, `wolf_armor`.
@@ -25,7 +25,7 @@
 //!   `0x71C35C`. It is the case that discriminates *item* tints from *block*
 //!   tints: our `vanilla_tint_kind` table gives the lily pad block
 //!   `LILY_PAD_IN_WORLD` = `0x208030`, and vanilla's item renderer never consults
-//!   `BlockColors` at all (`CuboidItemModelWrapper.java:89` evaluates the item
+//!   `BlockColors` at all (`CuboidItemModelWrapper`'s own decompiled source evaluates the item
 //!   definition's own list). Leaves and `grass_block` happen to agree between the
 //!   two mechanisms — `0x48B518` either way — which is exactly why substituting
 //!   one for the other looked fine.
@@ -116,7 +116,7 @@ const LILY_PAD_TINT: u32 = 0x71_C35C;
 /// inequality is the whole reason this subject discriminates the two mechanisms.
 const LILY_PAD_BLOCK_TINT: u32 = 0x20_8030;
 
-/// `PotionContents.BASE_POTION_COLOR` (`PotionContents.java:46`, `-13083194`),
+/// `PotionContents.BASE_POTION_COLOR` (`PotionContents`'s own decompiled source, `-13083194`),
 /// which is also the `default` on `items/potion.json`'s one `minecraft:potion`
 /// tint.
 const POTION_TINT: u32 = 0x38_5DC6;

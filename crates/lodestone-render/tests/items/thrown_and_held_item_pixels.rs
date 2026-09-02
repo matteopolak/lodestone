@@ -422,7 +422,7 @@ fn repose(mesh: &ModelMesh, extra: glam::Mat4) -> ModelMesh {
 /// against itself. Hermetic — no GPU, no jar.
 #[test]
 fn the_thrown_item_table_matches_the_26_2_registrations() {
-    // `EntityRenderers.java` registers exactly nine types to `ThrownItemRenderer`.
+    // `EntityRenderers`'s own decompiled source registers exactly nine types to `ThrownItemRenderer`.
     for (type_path, item, scale, full_bright) in [
         ("egg", "minecraft:egg", 1.0, false),
         ("ender_pearl", "minecraft:ender_pearl", 1.0, false),

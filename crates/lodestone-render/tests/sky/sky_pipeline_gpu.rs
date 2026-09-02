@@ -764,7 +764,7 @@ fn render_textured_quad(
 /// fully **opaque** PNG (palette-indexed, no `tRNS` chunk — confirmed by
 /// walking its raw chunks) whose RGB is a near-black-to-bright-white radial
 /// falloff. Vanilla's `RenderPipelines.CELESTIAL`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/RenderPipelines.java`)
+/// (vanilla's decompiled render-pipelines source, 26.2)
 /// blends it with `BlendFunction.OVERLAY` — additive, `dst_factor: One` — so
 /// that near-black RGB only ever *adds* a sliver onto the sky.
 /// `CelestialPipeline` used ordinary `SrcAlpha`/`OneMinusSrcAlpha` blending
@@ -772,7 +772,7 @@ fn render_textured_quad(
 /// i.e. everywhere in this texture — painting the whole opaque 60-block-wide
 /// quad as a mostly-black square: the reported bug, and also why the sun
 /// *looked* oversized. The geometry itself was never wrong — `SUN_SIZE =
-/// 30.0` matches vanilla's own half-extent exactly (`SkyRenderer.java`'s
+/// 30.0` matches vanilla's own half-extent exactly (`SkyRenderer`'s own decompiled source's
 /// `modelViewStack.scale(30.0F, 1.0F, 30.0F)` applied to a `-1..1` quad is the
 /// same half-extent-of-30 this crate's `celestial_quad_positions` computes) —
 /// only how much of the quad was visible changed.
