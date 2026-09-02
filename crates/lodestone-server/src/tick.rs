@@ -2435,8 +2435,8 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             let cx = hit.pos.x.div_euclid(16);
             let cz = hit.pos.z.div_euclid(16);
             let mut column = world.column(cx, cz);
-            for event in crate::random_tick::propagate_and_react_with_entities(
-                &mut column, cx * 16, cz * 16, hit.pos.x, hit.pos.y, hit.pos.z, &mut block_ticks, game_tick,
+            for event in crate::random_tick::propagate_and_react_with_entities_across_chunks(
+                &mut column, cx * 16, cz * 16, &*world, hit.pos.x, hit.pos.y, hit.pos.z, &mut block_ticks, game_tick,
                 Some(&block_entities),
             ) {
                 let (ex, ey, ez) = event.pos;
@@ -2586,10 +2586,11 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     // arm in `react_to_notification` schedules rather than settles,
                     // so this cascades with vanilla's delay per layer instead of
                     // resolving the whole column in one tick.
-                    for event in crate::random_tick::propagate_and_react_with_entities(
+                    for event in crate::random_tick::propagate_and_react_with_entities_across_chunks(
                         &mut column,
                         min_x,
                         min_z,
+                        &*world,
                         x,
                         y,
                         z,
@@ -2615,7 +2616,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             // wire segment between them, not a single position — see
             // `crate::random_tick::run_tripwire_recheck`'s own doc comment.
             if due.kind == crate::redstone_tripwire::TICK_TRIPWIRE_RECHECK {
-                for event in crate::random_tick::run_tripwire_recheck(&mut column, min_x, min_z, BlockPos::new(x, y, z)) {
+                for event in crate::random_tick::run_tripwire_recheck(&mut column, min_x, min_z, &*world, BlockPos::new(x, y, z)) {
                     let (ex, ey, ez) = event.pos;
                     world.set_block(ex, ey, ez, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
@@ -3094,30 +3095,42 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 continue;
             }
 
-            let new_state = if due.kind == crate::redstone::TICK_TORCH {
-                let has_signal = crate::redstone_torch::has_neighbor_signal(&crate::redstone::make_lookup(&column, min_x, min_z), BlockPos::new(x, y, z), &state);
-                crate::redstone_torch::run_scheduled_tick(&state, has_signal)
-            } else if due.kind == crate::redstone::TICK_REPEATER {
-                let facing = crate::redstone::diode_facing(&state);
-                let should_on =
-                    crate::redstone_diode::repeater_should_turn_on(&crate::redstone::make_lookup(&column, min_x, min_z), BlockPos::new(x, y, z), facing);
-                match crate::redstone_diode::run_scheduled_tick(&state, should_on) {
-                    crate::redstone_diode::RepeaterTickOutcome::TurnedOff(s) => Some(s),
-                    crate::redstone_diode::RepeaterTickOutcome::TurnedOn { new_state, reschedule } => {
-                        if reschedule {
-                            let delay = crate::redstone_diode::repeater_delay(&new_state);
-                            block_ticks.schedule((x, y, z), crate::redstone::TICK_REPEATER.to_string(), game_tick + u64::from(delay), TickPriority::VeryHigh);
+            // Issue #548: the torch/repeater/comparator reads below used to
+            // go through `redstone::make_lookup(&column, ..)`, home column
+            // only. They now build a `RedstoneColumns` over the same
+            // `column` plus `world`, so a repeater/comparator whose input or
+            // side reaches across a chunk border reads whatever an
+            // already-loaded neighbour actually holds there instead of air.
+            // Scoped to this one `let` so the borrow it holds on `column`
+            // ends before the direct `column.set_block` a few lines below
+            // and the fresh `RedstoneColumns` the subsequent
+            // `propagate_and_react_with_entities_across_chunks` call builds.
+            let new_state = {
+                let columns = crate::random_tick::RedstoneColumns::new(&mut column, min_x, min_z, &*world);
+                if due.kind == crate::redstone::TICK_TORCH {
+                    let has_signal = crate::redstone_torch::has_neighbor_signal(&crate::redstone::make_columns_lookup(&columns), BlockPos::new(x, y, z), &state);
+                    crate::redstone_torch::run_scheduled_tick(&state, has_signal)
+                } else if due.kind == crate::redstone::TICK_REPEATER {
+                    let facing = crate::redstone::diode_facing(&state);
+                    let should_on =
+                        crate::redstone_diode::repeater_should_turn_on(&crate::redstone::make_columns_lookup(&columns), BlockPos::new(x, y, z), facing);
+                    match crate::redstone_diode::run_scheduled_tick(&state, should_on) {
+                        crate::redstone_diode::RepeaterTickOutcome::TurnedOff(s) => Some(s),
+                        crate::redstone_diode::RepeaterTickOutcome::TurnedOn { new_state, reschedule } => {
+                            if reschedule {
+                                let delay = crate::redstone_diode::repeater_delay(&new_state);
+                                block_ticks.schedule((x, y, z), crate::redstone::TICK_REPEATER.to_string(), game_tick + u64::from(delay), TickPriority::VeryHigh);
+                            }
+                            Some(new_state)
                         }
-                        Some(new_state)
+                        crate::redstone_diode::RepeaterTickOutcome::Locked | crate::redstone_diode::RepeaterTickOutcome::NoChange => None,
                     }
-                    crate::redstone_diode::RepeaterTickOutcome::Locked | crate::redstone_diode::RepeaterTickOutcome::NoChange => None,
-                }
-            } else if due.kind == crate::redstone::TICK_COMPARATOR {
-                let facing = crate::redstone::diode_facing(&state);
-                let input = crate::redstone::input_signal(&crate::redstone::make_lookup(&column, min_x, min_z), BlockPos::new(x, y, z), facing);
-                let side = crate::redstone::alternate_signal(&crate::redstone::make_lookup(&column, min_x, min_z), BlockPos::new(x, y, z), facing, false);
-                crate::redstone_diode::run_scheduled_comparator_tick(&state, input, side)
-            } else if due.kind == crate::redstone::TICK_OBSERVER {
+                } else if due.kind == crate::redstone::TICK_COMPARATOR {
+                    let facing = crate::redstone::diode_facing(&state);
+                    let input = crate::redstone::input_signal(&crate::redstone::make_columns_lookup(&columns), BlockPos::new(x, y, z), facing);
+                    let side = crate::redstone::alternate_signal(&crate::redstone::make_columns_lookup(&columns), BlockPos::new(x, y, z), facing, false);
+                    crate::redstone_diode::run_scheduled_comparator_tick(&state, input, side)
+                } else if due.kind == crate::redstone::TICK_OBSERVER {
                 let (new_state, reschedule) = crate::redstone_observer::run_scheduled_tick(&state);
                 if reschedule {
                     block_ticks.schedule((x, y, z), crate::redstone::TICK_OBSERVER.to_string(), game_tick + 2, TickPriority::Normal);
@@ -3153,9 +3166,10 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     None
                 }
             } else {
-                // No other block-tick behaviour is modeled — see this
-                // function's own doc comment.
-                None
+                    // No other block-tick behaviour is modeled — see this
+                    // function's own doc comment.
+                    None
+                }
             };
 
             if let Some(new_state) = new_state {
@@ -3169,8 +3183,8 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     world.set_block(x, y, z, &new_state);
                     block_tick_out.publish(x, y, z, new_state);
                 }
-                for event in crate::random_tick::propagate_and_react_with_entities(
-                    &mut column, min_x, min_z, x, y, z, &mut block_ticks, game_tick, Some(&block_entities),
+                for event in crate::random_tick::propagate_and_react_with_entities_across_chunks(
+                    &mut column, min_x, min_z, &*world, x, y, z, &mut block_ticks, game_tick, Some(&block_entities),
                 ) {
                     let (ex, ey, ez) = event.pos;
                     publish_openable_sound(&block_tick_out, BlockPos::new(ex, ey, ez), &event.from, &event.to, game_tick);
@@ -3371,10 +3385,11 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 let cx = pos.x.div_euclid(16);
                 let cz = pos.z.div_euclid(16);
                 let mut column = world.column(cx, cz);
-                for event in crate::random_tick::propagate_and_react_with_entities(
+                for event in crate::random_tick::propagate_and_react_with_entities_across_chunks(
                     &mut column,
                     cx * 16,
                     cz * 16,
+                    &*world,
                     pos.x,
                     pos.y,
                     pos.z,

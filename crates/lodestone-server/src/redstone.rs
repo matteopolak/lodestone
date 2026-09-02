@@ -965,6 +965,20 @@ pub fn make_lookup(column: &crate::chunk::ChunkColumn, min_x: i32, min_z: i32) -
     }
 }
 
+/// [`make_lookup`], backed by a [`crate::random_tick::RedstoneColumns`]
+/// multi-column cache instead of a single column — the read half of
+/// cross-chunk propagation (issue #548). A position beyond the home
+/// column's own 16×16 footprint is answered from whichever already-loaded
+/// neighbour column it falls in, rather than unconditionally air; a
+/// position whose own chunk is not resident still answers air, matching
+/// vanilla's own boundary (a circuit does not propagate into a chunk nobody
+/// is simulating) — this only extends reach to chunks the server is
+/// already ticking, never generates one to answer a redstone read.
+#[must_use]
+pub fn make_columns_lookup<'a>(columns: &'a crate::random_tick::RedstoneColumns<'_, '_>) -> impl Fn(BlockPos) -> String + 'a {
+    move |p: BlockPos| columns.state(p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
