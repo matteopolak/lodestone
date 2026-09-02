@@ -1,5 +1,6 @@
 //! Vanilla's **fancy** cloud mesh: `clouds.png` voxelized into cells and the
-//! visible faces of each extruded, as `CloudRenderer.buildMesh` does.
+//! visible faces of each extruded, as vanilla's cloud-renderer mesh-building
+//! function does.
 //!
 //! # What it is
 //!
@@ -16,20 +17,20 @@
 //!
 //! # How it works
 //!
-//! Straight from `CloudRenderer.java` in the real 26.2 `client.jar`.
+//! Straight from vanilla's cloud-renderer class in the real 26.2 `client.jar`.
 //!
-//! **Cell packing** (`:60-107`). A texel is an empty cell when its alpha is below
+//! **Cell packing.** A texel is an empty cell when its alpha is below
 //! 10 (`isCellEmpty`), *not* when it is fully transparent — so faint texels are
 //! empty too. A filled cell also records whether each of its four horizontal
 //! neighbours is empty, which is what the side-face culling below reads.
 //!
-//! **Ring enumeration** (`buildMesh`, `:239-256`). Cells are visited in
+//! **Ring enumeration** (vanilla's mesh-building function). Cells are visited in
 //! taxicab rings out to `radius`, and kept only when
 //! `relative_x² + relative_z² <= radius²` — a *disc*, not a square. Each
 //! `(x, ring - |x|)` pair yields two cells, at `+z` and `-z`, except when `z == 0`
 //! where it would be the same cell twice.
 //!
-//! **Face selection** (`buildExtrudedCell`, `:294-326`). This is the interesting
+//! **Face selection** (vanilla's extruded-cell-building function). This is the interesting
 //! part, and it is not "cull faces against neighbours":
 //!
 //! * `UP` unless the camera is below the layer; `DOWN` unless it is above. Both
@@ -43,7 +44,8 @@
 //!   flagged [`FLAG_INSIDE_FACE`], which is what keeps the cloud you are standing
 //!   in from vanishing as the culling above removes its back faces.
 //!
-//! [`FLAG_USE_TOP_COLOR`] is `FAST`'s single `DOWN` face flag (`buildFlatCell`),
+//! [`FLAG_USE_TOP_COLOR`] is `FAST`'s single `DOWN` face flag (vanilla's
+//! flat-cell-building function),
 //! carried here so both modes share one encoding.
 //!
 //! # How to change it
@@ -62,8 +64,8 @@
 //! one false, and the false one was the one a reader of *this* file would find.
 //! [`CloudFaceCache`] is what closed it; `DESIGN.md` §12.114 has the counter.
 //!
-//! **One deliberate divergence from vanilla.** `CloudRenderer.java:74` and `:76`
-//! wrap the *x* axis by `height` when sampling the east and west neighbours:
+//! **One deliberate divergence from vanilla.** Vanilla's cloud-renderer class
+//! wraps the *x* axis by `height` when sampling the east and west neighbours:
 //!
 //! ```text
 //! boolean east = isCellEmpty(texture.getPixel(Math.floorMod(x + 1, height), y));
@@ -108,16 +110,16 @@ pub enum CloudFaceDir {
     East = 5,
 }
 
-/// `CloudRenderer.FLAG_INSIDE_FACE` (`:34`). Set on the six faces emitted for
+/// Vanilla's cloud-renderer class's `FLAG_INSIDE_FACE`. Set on the six faces emitted for
 /// cells within one cell of the camera, which are the ones seen from inside.
 pub const FLAG_INSIDE_FACE: u8 = 16;
 
-/// `CloudRenderer.FLAG_USE_TOP_COLOR` (`:35`). `FAST`'s single `DOWN` face carries
+/// Vanilla's cloud-renderer class's `FLAG_USE_TOP_COLOR`. `FAST`'s single `DOWN` face carries
 /// it so the flat mode is shaded as a cloud top rather than an underside.
 pub const FLAG_USE_TOP_COLOR: u8 = 32;
 
-/// The alpha below which a texel is an empty cell (`CloudRenderer.isCellEmpty`,
-/// `:101-103`).
+/// The alpha below which a texel is an empty cell (vanilla's cloud-renderer
+/// empty-cell check).
 ///
 /// **Not zero.** A texel at alpha 9 is empty and one at 10 is filled, so a
 /// resource pack's soft cloud edges collapse rather than producing a fringe of
@@ -126,7 +128,7 @@ pub const FLAG_USE_TOP_COLOR: u8 = 32;
 pub const CELL_EMPTY_ALPHA: u8 = 10;
 
 /// Which side of the cloud layer the camera is on
-/// (`CloudRenderer.RelativeCameraPos`).
+/// (vanilla's cloud-renderer relative-camera-position enum).
 ///
 /// An input rather than something derived here — see the module's "How to change
 /// it". It selects the horizontal faces: you cannot see the underside from above
