@@ -10,6 +10,20 @@ Re-verified 2026-08-05 at `d197d555`, and again the same day at `e2508e3` — by
 **units U1, U2 and U3 had already landed** (`3ba959a`, `02b8053`, `fa75f38`); every
 "X exists / X is missing" claim below was re-checked rather than copied forward.
 
+**Status, 2026-09-01 — superseded in part.**
+[`docs/plans/multi-version-protocol-dedup.md`](./multi-version-protocol-dedup.md)'s Stage 0
+measurement supersedes three things here: the **family map** below (it groups the same
+versions but additionally merges v340 into v110 and v735 into v498, rather than keeping
+them as separate crates alongside the new groupings — see that plan's own open decision 1
+for the point still unresolved), the **U6/U8/U9 unit scoping** (written against the
+un-merged map), and the **"~900 hand-written lines" irreducible-cost figure** a few
+paragraphs down — measured at `16b72257`, the real per-family hand-written cost is
+**5,139–6,201 lines**, roughly 5x higher, which changes the payoff arithmetic that figure
+feeds. This plan's canonicalisation regimes (`lodestone-canonical`, the DFU-derived state
+tables), its oracle strategy, and its H0–H4 hosting units are **not** affected and still
+stand. Read the dedup plan first for anything family-map- or per-family-cost-shaped;
+come back here for hosting and canonicalisation detail it does not repeat.
+
 ## Verified ground truth, 2026-08-05, second pass at `e2508e3`
 
 Re-verified per CLAUDE.md rule 2. The previous revision of this plan (written 2026-08-04,
@@ -224,6 +238,10 @@ Evidence, not preference:
    recorded that the `xtask new-version` cloning experiment produced "a 1.12.2 client
    wearing 1.16 packet IDs" — now structurally mitigated by the `SHAPE_REVIEW.toml` gate,
    but the lesson stands: fifteen clones would be ~13k lines of near-duplicate wire code.
+   **This figure is stale by roughly 5x** — `docs/plans/multi-version-protocol-dedup.md`
+   measured the smallest real family (v735) at 5,139 hand-written lines via
+   `cargo xtask codegen-ratio`, not ~900; the *qualitative* argument (a clone is
+   near-duplicate wire code) still holds, only the magnitude was wrong.
 2. Adjacent-version deltas inside an era are small and *table-shaped* (packet id
    renumbering, a handful of shape changes), which is exactly what the generated
    `packet_ids.rs` per version already expresses — `xtask gen-packet-ids --source
@@ -239,7 +257,12 @@ Evidence, not preference:
    failure lives; staying inside one is cheap.
 
 **The resulting family map** (protocol numbers from the derived table,
-`crates/lodestone-registry/src/generated/version_table.rs` — never hand-derived):
+`crates/lodestone-registry/src/generated/version_table.rs` — never hand-derived).
+**Superseded**: `docs/plans/multi-version-protocol-dedup.md` groups the same versions but
+merges v340 into v110 and v735 into v498 rather than keeping them separate crates
+alongside the new groupings (open decision 1 there is the point still unresolved) — read
+that plan's family map as the current one; this table is kept for the U6/U8/U9 prose below
+that was written against it:
 
 | family | protocols | versions | issues | status |
 |---|---|---|---|---|
@@ -489,7 +512,11 @@ asserting a chest item placed by RCON with known id:damage decodes to the canoni
 the explicit `Unmapped` variant, not to air/default — and prove the detector fires by
 feeding a known-bad pair. Blocked by: nothing — U1 landed; dispatchable now.
 
-**U6 — family v110 (1.9.4, 1.10.2, 1.11.2), issues #346–#348.** First new crate
+**U6 — family v110 (1.9.4, 1.10.2, 1.11.2), issues #346–#348.** **Scoping superseded** —
+written against the un-merged family map above; `docs/plans/multi-version-protocol-dedup.md`
+absorbs v340 into this same v110 crate (its stage 4, the plan's own calibration point for
+whether `since`/`until` carries the cost this unit assumed a from-scratch crate would need).
+Re-check that plan before dispatching this unit. First new crate
 (scaffolded via `xtask new-version`, `SHAPE_REVIEW.toml` discharged before registry
 support); first consumer of U2's machinery; three generated `packet_ids` tables; pre-1.13
 canonicalisation from day one via U1 (never the v47 raw-palette shape). Scope: the
@@ -511,7 +538,10 @@ State mapping via the first *small* DFU walk (1631 → 4903). Owns: `crates/prot
 + registry 2-liner. Gate/control: as U6, jar already on disk. Blocked by: U4's oracle
 pattern (not U2 — single protocol).
 
-**U8 — family v498 (1.14.4, 1.15.2), issues #351–#352.** Light out of the chunk packet
+**U8 — family v498 (1.14.4, 1.15.2), issues #351–#352.** **Scoping superseded** — the dedup
+plan's stage 7 absorbs v735 into this same v498 crate alongside 1.14.4/1.15.2, rather than
+leaving v735 a separate crate as this map assumed; re-check that plan before dispatching.
+Light out of the chunk packet
 (1.14), biome array into it (1.15) — the intra-family branch is confined to `chunk.rs`.
 Owns: `crates/protocol/v498/` + registry 2-liner. Blocked by: U7 (pattern; U2 landed).
 

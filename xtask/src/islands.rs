@@ -243,7 +243,13 @@ fn has_path_ident_test(attrs: &[Attribute]) -> bool {
     })
 }
 
-fn token_stream_has_test_ident(tokens: proc_macro2::TokenStream) -> bool {
+// `pub(crate)`, not `fn`: `xtask::protocol_dup`'s struct/function collectors
+// need the identical "is this module/item test-only" classification (a
+// `#[cfg(test)] mod tests { .. }` block's packet-shaped fixtures and helper
+// fns must not be counted as production duplication), and re-deriving it
+// with a second hand-rolled attribute walk risks the two definitions
+// silently drifting apart. Widened, not rewritten.
+pub(crate) fn token_stream_has_test_ident(tokens: proc_macro2::TokenStream) -> bool {
     tokens.into_iter().any(|tree| match tree {
         proc_macro2::TokenTree::Ident(ident) => ident == "test",
         proc_macro2::TokenTree::Group(group) => token_stream_has_test_ident(group.stream()),
@@ -251,7 +257,7 @@ fn token_stream_has_test_ident(tokens: proc_macro2::TokenStream) -> bool {
     })
 }
 
-fn has_cfg_test(attrs: &[Attribute]) -> bool {
+pub(crate) fn has_cfg_test(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if !attr.path().is_ident("cfg") {
             return false;
