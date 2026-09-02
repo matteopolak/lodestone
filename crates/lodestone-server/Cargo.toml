@@ -10,7 +10,7 @@ description = "Lodestone integrated server (singleplayer + open-to-LAN) over the
 workspace = true
 
 [features]
-default = []
+default = ["bundled-worldgen-v26_2"]
 # Structural counters through the redstone notification/reaction/scheduling
 # path — the instrument `docs/plans/redstone-execution-model.md`'s U1 unit
 # specifies. See `src/redstone_counters.rs`'s own module doc. Default off,
@@ -18,6 +18,24 @@ default = []
 # `lodestone-worldgen-core`'s `gen-counters` makes: enabling it cannot change
 # any propagation or scheduling decision, only what gets counted.
 redstone-counters = []
+# The embedded 26.2 overworld/Nether/End worldgen bundle (`src/worldgen_data.rs`,
+# `assets/worldgen/`) — issue #407's version gate. Real, but only a *partial*
+# one: this crate's own internal callers (`chunk_store.rs`'s tests,
+# `integrated.rs`, `structure_loot.rs`, `world_spawn.rs`, `dimension.rs`,
+# `examples/bench_worldgen.rs`, and most of `tests/`) all still call
+# `overworld_generator`/`overworld_chunk_source` unconditionally, so turning
+# this feature off today breaks this crate's own build, not just a
+# downstream one — that migration (routing every internal caller through
+# `crate::protocol::ServerProtocol::worldgen_scope` /
+# `crate::worldgen_data::bundled_worldgen_serves` first) is real, separate
+# work, out of scope for the gate itself. What this feature buys today: the
+# data is no longer compiled in with **no** Cargo-level acknowledgement that
+# it is 26.2-specific at all — the prior state this issue was filed
+# against. Default on, so every existing consumer (`lodestone-shell`,
+# `lodestone-v770`'s dev-dependency, this crate's own test suite) is
+# unaffected; a future non-v770 hosting family, or a build that wants to
+# drop the bundle's size, is the one that turns it off.
+bundled-worldgen-v26_2 = []
 
 [dependencies]
 # The portable clock. **`web-time`'s non-wasm arm is literally `pub use std::time::*`,

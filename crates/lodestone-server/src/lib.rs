@@ -622,8 +622,9 @@ pub use weather::{WeatherEvent, WeatherFeed, WeatherState};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{
     bundled_biome_spawners, bundled_worldgen_serves, nether_chunk_source, nether_generator,
-    overworld_chunk_source, overworld_chunk_source_of_type, overworld_generator,
-    overworld_generator_of_type, BUNDLED_WORLDGEN_SCOPE, WorldType,
+    overworld_chunk_source, overworld_chunk_source_checked, overworld_chunk_source_of_type,
+    overworld_generator, overworld_generator_of_type, BUNDLED_WORLDGEN_SCOPE, WorldType,
+    WorldgenScopeMismatch,
 };
 // Issue #519's remaining three presets (`single_biome_surface`, `flat`/
 // `flat_all_dimensions`, `debug_all_block_states`): re-exported so a
