@@ -6,8 +6,8 @@
 post-hand-pass overlays: underwater tint and scroll, fire, a carved-pumpkin vignette, freezing in
 powder snow, the spyglass scope, the nausea "confusion" swirl, and the nether/end portal swirl
 (portal wins when both are active), plus the world-border warning's cyan vignette tint. In vanilla
-these come from two different mechanisms — `ScreenEffectRenderer.submit` for underwater/fire, and
-`Hud.extractCameraOverlays` for the rest — but all share one "textured, alpha-blended, screen-space
+these come from two different mechanisms — its own screen-effect submission for underwater/fire, and
+its own camera-overlay extraction for the rest — but all share one "textured, alpha-blended, screen-space
 quad after the hand pass" shape, so this port draws all of them through one pipeline. Confusion and
 portal additionally drive a world-space projection warp that lives in `camera.rs`, not in this pass.
 
@@ -91,7 +91,7 @@ the stale value actually diverges from reality.
 ### The world-border warning
 
 Vanilla's border warning is not one of this module's overlays — it is a cyan tint applied to the
-existing vignette texture inside `Hud.extractVignette`, derived from distance to the border, the
+existing vignette texture inside vanilla's own vignette-extraction routine, derived from distance to the border, the
 border's warning-blocks setting, and how fast the border is currently moving. It shares this doc
 because it is the same family of "screen darkening keyed off world state" effect and because its
 formula carries a real unit hazard worth recording: one of vanilla's own inputs to the "how fast is

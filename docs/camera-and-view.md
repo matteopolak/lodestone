@@ -14,7 +14,7 @@ and whether it presents at all.
 
 `Camera` is a plain `Copy` struct — eye `position`, `yaw`/`pitch` in degrees,
 `fov_y_degrees`, `aspect`, `near`, `far` — reconciled term-for-term against
-vanilla's `net.minecraft.client.Camera`. Its basis is a direct expansion of
+vanilla's own client-side camera type. Its basis is a direct expansion of
 vanilla's single YXZ Euler rotation (`Ry(π − yaw) · Rx(−pitch)`, no roll), **not** a
 look-at built from a hardcoded `Vec3::Y` up vector. A look-at is degenerate at pitch
 `±90°`: in exact arithmetic the cross product needed for `right` is zero there, and
@@ -82,7 +82,7 @@ Constants (all read from the 26.2 decompile, not remembered): `walkDist` advance
 `0.6 × horizontal distance moved` per tick; `bob` eases toward
 `min(0.1, speed)` at `0.4` per tick, decaying to `0` off the ground, dead, or
 swimming; the walk translate/nod/roll and the `sin(t⁴·π) · 14° · damageTiltStrength`
-hurt tilt are vanilla's own `GameRenderer.bobView`/`bobHurt` formulas; View Bobbing
+hurt tilt are vanilla's own view-bob and hurt-tilt formulas; View Bobbing
 defaults on and `damageTiltStrength` defaults to `1.0`. Two details that are easy to
 get backwards: the walk phase (`bd`) is an *extrapolation* (`-(walkDist + delta ×
 partial_tick)`), not a lerp of the two most recent samples; and the nod's phase

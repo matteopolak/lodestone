@@ -76,7 +76,7 @@ march itself.
 
 ## How to change it, and the gotchas
 
-- **`Mth.sin`/`Mth.cos` are a quantized lookup table, not `f32::sin`/`f32::cos`** — substituting the
+- **Vanilla's own sin/cos helpers are a quantized lookup table, not `f32::sin`/`f32::cos`** — substituting the
   standard library diverges exactly at the poles. Any ballistics code porting a vanilla trig call
   (bobber launch angle, riptide direction, thrown-item velocity) must use `lodestone_physics::mth`, never
   `f32::sin`/`f32::cos`; a fixture at a cardinal angle or zero-crossing is exactly the input that exposes

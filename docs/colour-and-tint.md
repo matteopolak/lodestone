@@ -41,7 +41,7 @@ bucketing of the sorted table (measured faster than a `binary_search_by` here,
 because a plain string-length-first comparison beats `memcmp`-based ordering for
 short probe strings — the details are counter-intuitive enough that changing either
 lookup strategy needs re-measuring). The actual colour is vanilla's own box average
-(`ClientLevel.calculateBlockTint`, a `(2·radius+1)²` average of the *already
+(its own per-block-tint calculation, a `(2·radius+1)²` average of the *already
 colormap-resolved* colour, radius 2 — this client has no biome-blend-radius
 setting, so `2` is the only value ever reached), computed with a sliding
 row-cursor that reuses 20 of 25 samples between adjacent cells and must stay
@@ -133,7 +133,8 @@ surface: a legacy `§`-coded string (chat, the action bar), a component tree alr
 expanded into spans (the scoreboard, tab list, kick screen), or — historically, for
 about ten of seventeen text-drawing surfaces — a plain string handed to a
 "plain-draw" path that had no way to apply `§` codes at all, because there is no
-non-decomposing string draw in vanilla to be faithful to (`Font.drawInBatch` always
+non-decomposing string draw in vanilla to be faithful to (its own batched-text-draw
+routine always
 applies legacy codes at draw time). Every one of those ten now decomposes. The
 sixteen legacy colours and the `TextColor`-carrying path share one Rust-side
 lookup table so they cannot disagree about what a named colour means, but a legacy
