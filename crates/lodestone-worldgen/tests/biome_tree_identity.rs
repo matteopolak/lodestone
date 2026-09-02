@@ -645,8 +645,8 @@ fn the_tiebreak_moves_exactly_the_eight_recorded_source_biomes_and_no_surface_qu
 ///
 /// Ground truth: `scripts/worldgen-oracle/BiomeOracle.java sample 42 <x> 0 <z>`, run
 /// **once per coordinate in its own JVM process**. That is not incidental — within a
-/// single process vanilla's `findValue` for sample *N* is seeded by sample *N−1*'s
-/// leaf via `RTree.lastResult`, so only the first sample of a process is the
+/// single process vanilla's own indexed-search value lookup for sample *N* is seeded by sample *N−1*'s
+/// leaf via its own cached last-result, so only the first sample of a process is the
 /// fresh-instance answer this port implements. A batched oracle run would have
 /// produced history-contaminated expectations.
 ///

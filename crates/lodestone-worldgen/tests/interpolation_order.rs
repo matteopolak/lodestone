@@ -3,12 +3,12 @@
 //!
 //! # The trap
 //!
-//! `NoiseChunk.NoiseInterpolator` has two value paths, and they are different
+//! Vanilla's own noise-chunk-sampler's noise-interpolator has two value paths, and they are different
 //! floating-point expressions over the same eight cell corners:
 //!
 //! | vanilla path | expression | nesting |
 //! |---|---|---|
-//! | `fillingCell == true` | `Mth.lerp3(...)`, whose `lerp2` is `lerp(dy, lerp(dx, x00, x10), lerp(dx, x01, x11))` | **X inner**, then Y, then Z |
+//! | `fillingCell == true` | vanilla's own math-helper trilinear lerp, whose bilinear half is `lerp(dy, lerp(dx, x00, x10), lerp(dx, x01, x11))` | **X inner**, then Y, then Z |
 //! | `fillingCell == false` | the incremental `updateForY` → `updateForX` → `updateForZ` chain | **Y inner**, then X, then Z |
 //!
 //! Bilinear interpolation is order-independent *algebraically* and is **not**
@@ -18,26 +18,25 @@
 //!
 //! # The answer, and why it is not the obvious one
 //!
-//! The per-block field uses **`Mth.lerp3` (X inner)**, which is what
+//! The per-block field uses **vanilla's own math-helper trilinear lerp (X inner)**, which is what
 //! `lodestone-worldgen-core`'s `density/chunk.rs` implements.
 //!
-//! The reason is two levels removed from the interpolator. `NoiseChunk`'s
-//! constructor (`NoiseChunk.java:157-160`) does not read the router's
-//! `final_density` directly — it wraps it:
-//!
-//! ```text
-//! fullNoiseValue = DensityFunctions.cacheAllInCell(
-//!         DensityFunctions.add(wrappedRouter.finalDensity(), BeardifierMarker.INSTANCE))
-//!     .mapAll(this::wrap);
-//! ```
+//! The reason is two levels removed from the interpolator. Vanilla's own
+//! noise-chunk-sampler's
+//! constructor does not read the router's
+//! `final_density` directly — it wraps it: it builds a plain two-argument `add`
+//! between the wrapped router's own final-density function and a
+//! beardifier-marker leaf, caches that sum over the whole cell, and then
+//! re-maps every leaf of the resulting graph through its own wrap step.
 //!
 //! That `cache_all_in_cell` is applied **in code, not in data** — `grep` finds
 //! no `minecraft:cache_all_in_cell` anywhere in the 26.2 worldgen JSON, so
 //! reading the `noise_settings` document alone cannot see it. Its cell array is
-//! pre-filled inside `selectCellYZ` (`NoiseChunk.java:295-311`), which brackets
+//! pre-filled inside vanilla's own "select cell YZ" step, which brackets
 //! the fill with `fillingCell = true` / `fillingCell = false`. So every value
-//! `getInterpolatedDensity()` ever returns for `final_density` was produced in
-//! the `fillingCell == true` regime — i.e. by `Mth.lerp3`. The incremental
+//! vanilla's own interpolated-density accessor ever returns for `final_density` was produced in
+//! the `fillingCell == true` regime — i.e. by vanilla's own math-helper
+//! trilinear lerp. The incremental
 //! `updateForY/X/Z` chain, despite being the machinery the driver loop appears
 //! to be feeding, is **never** what `final_density` reads.
 //!
@@ -113,7 +112,7 @@ fn lerp(t: f64, a: f64, b: f64) -> f64 {
     a + t * (b - a)
 }
 
-/// `Mth.lerp3` — X innermost, then Y, then Z. Vanilla's `fillingCell` path, and
+/// Vanilla's own math-helper trilinear lerp — X innermost, then Y, then Z. Vanilla's `fillingCell` path, and
 /// what `density/chunk.rs` implements.
 #[allow(clippy::too_many_arguments)]
 fn nesting_x_inner(

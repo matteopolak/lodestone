@@ -308,7 +308,7 @@ fn print_the_bastion_palette_difference() {
 /// `surface_rule` text and from `default_block`/`default_fluid`, which is the only
 /// other thing that writes a block in this dimension. That matters because the
 /// obvious candidates are wrong: `minecraft:blackstone` and `minecraft:basalt` are
-/// both `SurfaceRuleData.nether()` products (basalt deltas' floor and pillars), and
+/// both products of vanilla's own bundled Nether surface-rule data (basalt deltas' floor and pillars), and
 /// a gate built on either would pass in the control arm too.
 /// The list is the *measured* with-minus-without palette difference narrowed to the
 /// names that cannot be terrain, not a guess: `print_the_bastion_palette_difference`
@@ -329,15 +329,15 @@ const BASTION_ONLY: &[&str] = &[
 /// `bone_block` is the only block a `nether_fossils/fossil_*` template contains, and
 /// `dried_ghast` is the coin-flip extra. Both are checked against the Nether's own
 /// `surface_rule` by `the_discriminating_blocks_are_not_terrain`, the same way
-/// [`BASTION_ONLY`] is — and unlike `basalt`, neither is a `SurfaceRuleData.nether()`
-/// product, which is what makes this list two names rather than a narrowing exercise.
+/// [`BASTION_ONLY`] is — and unlike `basalt`, neither is a product of vanilla's own bundled Nether surface-rule data,
+/// which is what makes this list two names rather than a narrowing exercise.
 const FOSSIL_ONLY: &[&str] = &["minecraft:bone_block", "minecraft:dried_ghast"];
 
 /// The nearest `nether_fossil` placement cell that really starts one, **measured** by
 /// [`find_the_nearest_fossil`].
 ///
 /// `nether_fossils` is `random_spread` with `spacing 2`, so cells are dense — but
-/// `findGenerationPoint` can still return `Optional.empty()` for any of them, because
+/// vanilla's own "find generation point" can still return `Optional.empty()` for any of them, because
 /// the downward walk gives up at sea level. So "a placement cell" and "a fossil" are
 /// different questions here for a reason that has nothing to do with biomes.
 ///

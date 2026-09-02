@@ -1,7 +1,7 @@
 //! Block-for-block parity of the **carvers** (caves + canyons) over whole chunks.
 //!
 //! `surface_parity` proves the post-surface column; this test proves the next
-//! stage: vanilla's `NoiseBasedChunkGenerator.applyCarvers` scans the 17×17
+//! stage: vanilla's own carve-application step scans the 17×17
 //! source-chunk neighbourhood, seeds a positional RNG per source chunk × carver,
 //! rolls the `isStartChunk` probability, and — on success — carves tunnels and
 //! ravines that overwrite the centre chunk's blocks with air/water/lava.

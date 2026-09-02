@@ -484,7 +484,7 @@ fn strip_distance(state: &str) -> String {
 /// **A measured, bounded, named residual, not a silently loosened bound**
 /// (CLAUDE.md's evidence standard: report a residual, don't hide it).
 /// `crate::feature::vegetation::update_leaf_distances`'s real vanilla port
-/// (`TreeFeature.updateLeaves`, this change) gets *which block occupies each
+/// (vanilla's own tree-feature update-leaves, this change) gets *which block occupies each
 /// cell* exactly right — checked here as a hard requirement via
 /// [`strip_distance`] — but for a handful of cells, `distance=N` differs by
 /// a small amount from the oracle. Investigated directly on the one

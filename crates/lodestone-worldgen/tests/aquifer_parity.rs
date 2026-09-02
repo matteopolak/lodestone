@@ -1,17 +1,17 @@
-//! Block-for-block parity of the **aquifer + density fill** (`doFill`) over whole
+//! Block-for-block parity of the **aquifer + density fill** (vanilla's own fill step) over whole
 //! chunks.
 //!
 //! `chunk_parity` proves the interpolated `final_density` scalar field;
 //! `surface_parity` proves the surface rules *on top of* an aquifer-filled
-//! column. This test proves the stage *between* them: vanilla's
-//! `NoiseBasedChunkGenerator.doFill` asks the `Aquifer` for every block whether
+//! column. This test proves the stage *between* them: vanilla's own
+//! chunk-generator fill step asks its own aquifer for every block whether
 //! it is the default block (stone), a fluid (water/lava) or air, building local
 //! water tables and air pockets from the barrier/floodedness/spread/lava noise
 //! routes and the positional aquifer-centre RNG. That decision is what the
 //! surface system consumes, so it must be bit-exact first.
 //!
 //! The oracle is the very same `scripts/worldgen-oracle/SurfaceOracle.java` used
-//! by `surface_parity`: its `pre.*` column is the real 26.2 `doFill` output
+//! by `surface_parity`: its `pre.*` column is the real 26.2 fill-step output
 //! (aquifer applied), dumped block-for-block at seed 42 with the biome pinned.
 //! [`AquiferSystem`] must reproduce that column exactly — 16×16×384 = 98304
 //! blocks per chunk.
@@ -167,7 +167,7 @@ fn run_fixture(label: &str, text: &str, expect_water: bool, expect_lava: bool) {
 
     let pct = 100.0 * matching as f64 / total as f64;
     println!(
-        "aquifer/doFill whole-chunk parity [{label}] chunk ({},{}): {matching}/{total} = {pct:.4}% bit-exact",
+        "aquifer/fill-step whole-chunk parity [{label}] chunk ({},{}): {matching}/{total} = {pct:.4}% bit-exact",
         r.chunk_x, r.chunk_z
     );
 

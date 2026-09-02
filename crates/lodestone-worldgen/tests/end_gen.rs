@@ -15,7 +15,7 @@
 //! | source | used by |
 //! |---|---|
 //! | **a record definition, hand-expanded** — `noise_settings/end.json`'s router read as a tree, plus `y_clamped_gradient` / `mul` / `squeeze` from `.cache/mc/26.2/src` | the dead-band gate, which is the strongest thing in this file |
-//! | **arithmetic** — `FluidStatus.at` against `sea_level 0` / `min_y 0`, and `cell_geometry`'s `size * 4` | the no-fluid gate and the cell-geometry gate |
+//! | **arithmetic** — vanilla's own fluid-status accessor against `sea_level 0` / `min_y 0`, and `cell_geometry`'s `size * 4` | the no-fluid gate and the cell-geometry gate |
 //! | **a cross-arm invariant / cross-dimension control** — the Nether generator over the same engine | the proof that the no-fluid detector fires at all |
 //!
 //! And what is **not** gated is named rather than papered over: see
@@ -155,8 +155,8 @@ const SCENE: &[(i32, i32)] = &[
 ///   g2 = y_clamped_gradient(from_value 1.0 @ from_y 56, to_value 0.0 @ to_y 312)
 /// ```
 ///
-/// `Mth.clampedMap` clamps *below* `from_y` to `from_value`, so **`g1(y) = 0.0`
-/// exactly for every `y <= 4`** — and `DensityFunctions.Ap2.Mul` short-circuits on
+/// Vanilla's own math-helper clamped-map clamps *below* `from_y` to `from_value`, so **`g1(y) = 0.0`
+/// exactly for every `y <= 4`** — and vanilla's own binary-multiply node short-circuits on
 /// `argument1 == 0.0` without evaluating `argument2`, so at those heights the island
 /// field, `base_3d_noise` and the seed are *structurally* not consulted. The whole
 /// expression collapses to
@@ -165,7 +165,7 @@ const SCENE: &[(i32, i32)] = &[
 /// squeeze(0.64 * -0.234375) = squeeze(-0.15) = -0.15/2 - (-0.15)^3/24 = -0.07485938
 /// ```
 ///
-/// which is `<= 0.0`, so `Aquifer.createDisabled` returns the global fluid — and with
+/// which is `<= 0.0`, so vanilla's own disabled-aquifer constructor returns the global fluid — and with
 /// `sea_level 0` that is air. **Every block at `y` in `0..=4`, everywhere in the End,
 /// at every seed, is air.** The interpolation cannot disturb it either: the cell
 /// height is 4, so the corners bracketing this band sit at `y = 0` and `y = 4` and
@@ -275,10 +275,10 @@ fn the_dead_band_gate_fails_under_the_swapped_gradient() {
 
 /// **The End has no fluid at all, and that is arithmetic rather than an observation.**
 ///
-/// `NoiseBasedChunkGenerator.createFluidPicker` returns the deep-lava status only for
+/// Vanilla's own chunk-generator "create fluid picker" returns the deep-lava status only for
 /// `y < min(-54, seaLevel)`; the End's `sea_level` is `0` and its `min_y` is `0`, so
 /// that branch is unreachable, and the sea status is
-/// `FluidStatus(fluid_level = 0, fluid_type = default_fluid)`. `FluidStatus.at(y)`
+/// `FluidStatus(fluid_level = 0, fluid_type = default_fluid)`. Vanilla's own fluid-status accessor at `(y)`
 /// returns the type only when `y < fluid_level`, i.e. never. So air is the answer at
 /// every position **whatever `default_fluid` says** — and `end.json` says air anyway.
 ///
