@@ -1,10 +1,10 @@
-//! Regional difficulty — vanilla's `DifficultyInstance`: a scalar grown from
-//! world difficulty, elapsed world time (moon phase included) and how long a
-//! chunk has been loaded, clamped into a small range.
+//! Regional difficulty — the real per-position difficulty scalar: a value
+//! grown from world difficulty, elapsed world time (moon phase included) and
+//! how long a chunk has been loaded, clamped into a small range.
 //!
 //! # What it is
 //!
-//! `getCurrentDifficultyAt` (`ServerLevel.java`) builds one of these per
+//! The real per-query builder combines one of these per
 //! query from four inputs — the world's [`Difficulty`], the world's total game
 //! time, one chunk's "local" (inhabited) time, and the moon's brightness at
 //! that position — and reduces them to a single `f32`,
@@ -14,36 +14,25 @@
 //!
 //! # How it works
 //!
-//! [`calculate_difficulty`] is `DifficultyInstance.calculateDifficulty`
-//! (`DifficultyInstance.java`), transcribed clause by clause:
-//!
-//! ```java
-//! private float calculateDifficulty(Difficulty base, long totalGameTime, long localGameTime, float moonBrightness) {
-//!    if (base == Difficulty.PEACEFUL) {
-//!       return 0.0F;
-//!    }
-//!    boolean isHard = base == Difficulty.HARD;
-//!    float scale = 0.75F;
-//!    float globalScale = Mth.clamp(((float)totalGameTime + -72000.0F) / 1440000.0F, 0.0F, 1.0F) * 0.25F;
-//!    scale += globalScale;
-//!    float localScale = 0.0F;
-//!    localScale += Mth.clamp((float)localGameTime / 3600000.0F, 0.0F, 1.0F) * (isHard ? 1.0F : 0.75F);
-//!    localScale += Mth.clamp(moonBrightness * 0.25F, 0.0F, globalScale);
-//!    if (base == Difficulty.EASY) {
-//!       localScale *= 0.5F;
-//!    }
-//!    scale += localScale;
-//!    return base.getId() * scale;
-//! }
-//! ```
+//! [`calculate_difficulty`] is the real calculate-difficulty rule,
+//! transcribed clause by clause. In prose: peaceful short-circuits to `0.0`
+//! immediately; otherwise the scale starts at `0.75`, gains a "global"
+//! (world-age) term that ramps from `0.0` to `0.25` as total game time
+//! climbs from `72,000` to `1,512,000` ticks, then gains a "local" term that
+//! is the sum of two parts — an inhabited-time ramp (`0.0` to `1.0` over
+//! `3,600,000` ticks, scaled by `1.0` on Hard or `0.75` otherwise) and a
+//! moon-brightness term clamped to `[0, global_scale]` rather than `[0, 1]`.
+//! On Easy the local term is halved. The final scale is multiplied by the
+//! difficulty's own numeric id (Easy=1, Normal=2, Hard=3) to give the
+//! returned value.
 //!
 //! Each clause and where it lands in [`calculate_difficulty`]:
 //!
-//! | clause | Java | here |
+//! | clause | rule | here |
 //! |---|---|---|
-//! | Peaceful short-circuit | `if (base == PEACEFUL) return 0.0F` | the first `if` |
-//! | base scale | `float scale = 0.75F` | `let mut scale = 0.75` |
-//! | global (world-age) ramp | `globalScale = clamp((total - 72000) / 1440000, 0, 1) * 0.25` | `global_scale` |
+//! | Peaceful short-circuit | returns `0.0` immediately | the first `if` |
+//! | base scale | starts at `0.75` | `let mut scale = 0.75` |
+//! | global (world-age) ramp | `clamp((total - 72000) / 1440000, 0, 1) * 0.25` | `global_scale` |
 //! | fold into scale | `scale += globalScale` | `scale += global_scale` |
 //! | local (inhabited-time) ramp, hard-vs-not coefficient | `clamp(local / 3600000, 0, 1) * (isHard ? 1.0 : 0.75)` | first `local_scale +=` |
 //! | moon term, clamped by `globalScale` **not** `1.0` | `clamp(moonBrightness * 0.25, 0, globalScale)` | second `local_scale +=` |
@@ -58,18 +47,17 @@
 //! is the test that would fail if that upper bound were written as `1.0`
 //! instead.
 //!
-//! [`moon_brightness_for_day_time`] is `DimensionType.MOON_BRIGHTNESS_PER_PHASE`
-//! (`DimensionType.java`) indexed by `ServerLevel.getMoonBrightness`'s moon
-//! phase, `(dayTime / 24000) % 8` (`MoonPhase.java`'s `startTick`/`index`
-//! relationship, read backwards): day 0 is a full moon (brightness `1.0`), and
-//! the cycle is 8 phases of 24,000 ticks each. This duplicates the array
+//! [`moon_brightness_for_day_time`] is the real per-moon-phase brightness
+//! table indexed by the real moon-phase rule, `(dayTime / 24000) % 8`: day 0
+//! is a full moon (brightness `1.0`), and the cycle is 8 phases of 24,000
+//! ticks each. This duplicates the array
 //! [`crate::natural_spawn`] already carries for the surface-slime spawn
-//! chance (that one is scaled `* 0.5` for a different vanilla formula; this
-//! one is the raw `DimensionType` table `DifficultyInstance` itself reads) —
+//! chance (that one is scaled `* 0.5` for a different real formula; this
+//! one is the raw per-phase table this difficulty rule itself reads) —
 //! two call sites, not two facts, and if they ever drift the jar is the
 //! tiebreaker.
 //!
-//! `total_game_time` is `ServerLevel.getOverworldClockTime()`, which this
+//! `total_game_time` is the real overworld clock time, which this
 //! crate does not model as a distinct world-clock (26.2 splits `game_time`
 //! from a per-dimension clock; see `crate::world_state`'s module doc). Every
 //! call site here passes [`crate::world_state::WorldStateHandle`]'s
@@ -81,9 +69,9 @@
 //!
 //! **`local_game_time` (a chunk's `InhabitedTime`) is not tracked anywhere in
 //! this crate.** `crate::chunk_nbt`'s `InhabitedTime` field is a hardcoded
-//! `Nbt::Long(0)` — vanilla increments it once per natural-spawning cycle by
-//! `ServerChunkCache.tickSpawningChunk`'s `chunk.incrementInhabitedTime(timeDiff)`,
-//! and no per-chunk counter exists here to increment. [`DifficultyInstance::new`]
+//! `Nbt::Long(0)` — the real rule increments it once per natural-spawning
+//! cycle by the elapsed tick delta, and no per-chunk counter exists here to
+//! increment. [`DifficultyInstance::new`]
 //! therefore takes `local_game_time` as a plain parameter rather than deriving
 //! it, so every call site passes `0` until chunk-inhabited-time tracking
 //! lands — which understates `effective_difficulty` by up to `0.75`/`1.0` (the
@@ -91,32 +79,31 @@
 //! never wrongly disagrees about Peaceful (still forced to `0.0`) or about
 //! which side of a threshold a *fresh* chunk sits on.
 //!
-//! **Every consumer the issue named is now real, except spawn-cap
-//! composition (which turned out not to be a real vanilla mechanic — see
+//! **Every consumer is now real, except spawn-cap
+//! composition (which turned out not to be a real mechanic — see
 //! below).** `crate::mobs::spawn_equipment`'s armour/weapon roll and the
 //! zombie family's door-breaking coin flip both read
 //! [`DifficultyInstance::special_multiplier`]/[`DifficultyInstance::is_hard`],
 //! fed from a fresh `DifficultyInstance` `crate::tick::run_tick_loop`
 //! resolves once per tick and passes to `MobSim::set_spawn_difficulty`/
 //! `set_spawn_monsters_enabled` — see `docs/mob-species-spawning.md`.
-//! `MobSim::attack_from_player`'s zombie-reinforcement roll (`Zombie
-//! .hurtServer`) reads the same two fields. **Enchanted spawn gear**
-//! (`populateDefaultEquipmentEnchantments`) remains unmodelled — this
+//! `MobSim::attack_from_player`'s zombie-reinforcement roll reads the same
+//! two fields. **Enchanted spawn gear** remains unmodelled — this
 //! workspace has no enchantment model at all, the same disclosed gap
 //! `lodestone_entity::equipment`'s own module doc names.
 //!
 //! **Spawn-cap composition is not a real formula to port**: read against
-//! `.cache/mc/26.2/src/net/minecraft/world/level/NaturalSpawner.java`, every
-//! `getCurrentDifficultyAt` read in that file is inside `finalizeSpawn` (the
-//! gear/door/reinforcement roll above) — the mob-cap arithmetic itself is
-//! not difficulty-scaled in vanilla at all.
+//! the decompiled 26.2 tree's natural-spawner source, every difficulty read
+//! in that file is inside the finalize-spawn step (the gear/door/
+//! reinforcement roll above) — the mob-cap arithmetic itself is
+//! not difficulty-scaled at all.
 //!
-//! [`crate::lightning`]'s skeleton-horse-trap roll
-//! (`ServerLevel.tickThunder`'s `random.nextDouble() < difficulty.getEffectiveDifficulty() * 0.01`)
-//! remains the one consumer reading [`DifficultyInstance::effective_difficulty`]
+//! [`crate::lightning`]'s skeleton-horse-trap roll (a per-tick random draw
+//! against `effective_difficulty * 0.01`) remains the one consumer reading
+//! [`DifficultyInstance::effective_difficulty`]
 //! directly rather than through the two derived fields above — see that
-//! module's doc for why the *spawn* half of that roll (an actual
-//! `SkeletonHorse` entity) is out of reach the same way.
+//! module's doc for why the *spawn* half of that roll (an actual skeleton
+//! horse entity) is out of reach the same way.
 //!
 //! # Dependencies
 //!
@@ -127,19 +114,19 @@
 
 use lodestone_model::Difficulty;
 
-/// `DifficultyInstance.DIFFICULTY_TIME_GLOBAL_OFFSET`.
+/// The real difficulty-time global offset.
 const DIFFICULTY_TIME_GLOBAL_OFFSET: f32 = -72_000.0;
-/// `DifficultyInstance.MAX_DIFFICULTY_TIME_GLOBAL`.
+/// The real max difficulty-time global span.
 const MAX_DIFFICULTY_TIME_GLOBAL: f32 = 1_440_000.0;
-/// `DifficultyInstance.MAX_DIFFICULTY_TIME_LOCAL`.
+/// The real max difficulty-time local span.
 const MAX_DIFFICULTY_TIME_LOCAL: f32 = 3_600_000.0;
 
-/// `DimensionType.MOON_BRIGHTNESS_PER_PHASE` — indexed by moon phase, `0` a
+/// The real per-moon-phase brightness table — indexed by moon phase, `0` a
 /// full moon. See the module doc for why this duplicates (rather than
 /// reuses) `crate::natural_spawn`'s copy of the same array.
 pub const MOON_BRIGHTNESS_PER_PHASE: [f32; 8] = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75];
 
-/// `ServerLevel.getMoonBrightness`: `MOON_BRIGHTNESS_PER_PHASE[(dayTime / 24000) % 8]`,
+/// The real moon-brightness lookup: `MOON_BRIGHTNESS_PER_PHASE[(dayTime / 24000) % 8]`,
 /// with a `div_euclid`/`rem_euclid` pair so a negative `day_time` (`/time set`
 /// can produce one) still indexes a real phase rather than panicking.
 #[must_use]
@@ -148,8 +135,9 @@ pub fn moon_brightness_for_day_time(day_time: i64) -> f32 {
     MOON_BRIGHTNESS_PER_PHASE[phase]
 }
 
-/// `Difficulty.getId` — Peaceful 0, Easy 1, Normal 2, Hard 3, exactly the
-/// enum's declaration order, so a plain cast suffices. [`crate::fire`] already
+/// The real difficulty-to-numeric-id mapping — Peaceful 0, Easy 1, Normal 2,
+/// Hard 3, exactly the enum's declaration order, so a plain cast suffices.
+/// [`crate::fire`] already
 /// establishes this mapping under the name `difficulty_id`; this is the same
 /// fact, kept local so this module has no dependency on `crate::fire`.
 #[must_use]
@@ -162,10 +150,10 @@ fn difficulty_id(base: Difficulty) -> i32 {
     }
 }
 
-/// `DifficultyInstance` — an immutable snapshot of the world's [`Difficulty`]
+/// An immutable snapshot of the world's [`Difficulty`]
 /// plus the derived [`effective_difficulty`](Self::effective_difficulty)
-/// scalar, computed once at construction exactly as the `@Immutable` Java
-/// type does.
+/// scalar, computed once at construction exactly as the real immutable
+/// record does.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DifficultyInstance {
     base: Difficulty,
@@ -173,7 +161,8 @@ pub struct DifficultyInstance {
 }
 
 impl DifficultyInstance {
-    /// `new DifficultyInstance(base, totalGameTime, localGameTime, moonBrightness)`.
+    /// Builds a snapshot from the base difficulty and the three time/moon
+    /// inputs.
     ///
     /// See the module doc for what each argument means and where it comes
     /// from in this crate; `local_game_time` is `0` at every call site today
@@ -186,32 +175,32 @@ impl DifficultyInstance {
         }
     }
 
-    /// `DifficultyInstance.getDifficulty`.
+    /// The base [`Difficulty`] this snapshot was built from.
     #[must_use]
     pub fn difficulty(&self) -> Difficulty {
         self.base
     }
 
-    /// `DifficultyInstance.getEffectiveDifficulty`.
+    /// The derived effective-difficulty scalar.
     #[must_use]
     pub fn effective_difficulty(&self) -> f32 {
         self.effective_difficulty
     }
 
-    /// `DifficultyInstance.isHard` — `effectiveDifficulty >= Difficulty.HARD.ordinal()`.
+    /// Whether this snapshot's effective difficulty has reached Hard's own
+    /// numeric id.
     #[must_use]
     pub fn is_hard(&self) -> bool {
         self.effective_difficulty >= difficulty_id(Difficulty::Hard) as f32
     }
 
-    /// `DifficultyInstance.isHarderThan` — a **strict** `>`, unlike
-    /// [`is_hard`](Self::is_hard)'s `>=`.
+    /// A **strict** `>`, unlike [`is_hard`](Self::is_hard)'s `>=`.
     #[must_use]
     pub fn is_harder_than(&self, required_difficulty: f32) -> bool {
         self.effective_difficulty > required_difficulty
     }
 
-    /// `DifficultyInstance.getSpecialMultiplier` — `0` below `2.0`, `1` above
+    /// The real special-multiplier rule — `0` below `2.0`, `1` above
     /// `4.0`, and a linear ramp between.
     #[must_use]
     pub fn special_multiplier(&self) -> f32 {
@@ -225,9 +214,9 @@ impl DifficultyInstance {
     }
 }
 
-/// `Mth.clamp(value, min, max)` for `f32`: unlike [`f32::clamp`] this never
+/// The real clamp rule for `f32`: unlike [`f32::clamp`] this never
 /// panics when `min > max` (dead here since every call site's bounds are
-/// non-negative, but matching the Java semantics exactly rather than relying
+/// non-negative, but matching the real semantics exactly rather than relying
 /// on that).
 fn mth_clamp(value: f32, min: f32, max: f32) -> f32 {
     if value < min {
@@ -237,7 +226,7 @@ fn mth_clamp(value: f32, min: f32, max: f32) -> f32 {
     }
 }
 
-/// `DifficultyInstance.calculateDifficulty` — see the module doc's clause
+/// The real calculate-difficulty rule — see the module doc's clause
 /// table for the line-by-line correspondence.
 #[must_use]
 fn calculate_difficulty(base: Difficulty, total_game_time: i64, local_game_time: i64, moon_brightness: f32) -> f32 {
@@ -427,7 +416,7 @@ mod tests {
         assert!(!saturated_hard.is_harder_than(6.75 + 0.01));
     }
 
-    /// The moon-phase table, indexed the way `ServerLevel.getMoonBrightness`
+    /// The moon-phase table, indexed the way the real moon-brightness lookup
     /// does: day 0 is a full moon, and the cycle wraps every 8 * 24000 ticks.
     /// Also exercises a negative `day_time` (`/time set` can produce one),
     /// which must index a real phase rather than panic.
