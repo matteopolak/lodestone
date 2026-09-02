@@ -4589,14 +4589,14 @@ impl<'w> MobSim<'w> {
         // has no template for, `attrs` is empty and `attr` returns the *registry*
         // default of **32.0** — not 0.0, and not a harmless approximation. 32.0
         // is the single value this attribute never legitimately holds, because
-        // `Mob.createMobAttributes()` overrides it to 16.0 for every mob
-        // (`Mob.java:166-168`), so nothing in the game carries the registry
+        // vanilla's own generic mob attribute builder overrides it to 16.0 for every mob,
+        // so nothing in the game carries the registry
         // number. Falling back explicitly to `DEFAULT_FOLLOW_RANGE` is what makes
         // an unlisted species behave like a plain vanilla mob instead of like
         // nothing at all.
         //
-        // Species that raise it do so in their own `createAttributes` — the
-        // zombie family 35.0 (`monster/zombie/Zombie.java:133`), blaze 48.0,
+        // Species that raise it do so in their own attribute builder — the
+        // zombie family 35.0, blaze 48.0,
         // enderman 64.0 — and `attribute.rs::type_spec` has arms for only
         // thirteen species (issue #457). So `zombie` gets its real 35.0 here
         // while `zombie_villager`, which vanilla also puts at 35.0, gets 16.0.
@@ -4620,7 +4620,7 @@ impl<'w> MobSim<'w> {
         // follower's own rate.
         let goals = roster::goals_for(&species_path, &SpeciesContext::new(base_speed));
 
-        // `Mob.populateDefaultEquipmentSlots` — what this mob spawns holding
+        // Vanilla's own default-equipment-population step — what this mob spawns holding
         // and wearing (`lodestone_entity::spawn_equipment`'s module doc has
         // the full per-species table). Folded into `attrs` *before*
         // `spawn_with_type` reads combat stats from a fresh
@@ -4634,15 +4634,16 @@ impl<'w> MobSim<'w> {
         );
         equipment::apply_equipment(&mut attrs, equipped.iter());
 
-        // `Goat.finalizeSpawn`'s own pre-broken-horn roll — see
+        // Vanilla's own goat spawn-finalization's own pre-broken-horn roll — see
         // `goat_horn_spawn_roll`'s own doc. Rolled here, before `entity_type`
         // moves into `spawn_with_type` below, for the identical reason
         // `species_path` was captured above.
         let (has_left_horn, has_right_horn) = goat_horn_spawn_roll(&species_path, &mut self.goat_horn_rng);
 
-        // `Zombie.randomizeReinforcementsChance` — `handleAttributes` calls
-        // it for the whole zombie family (`Husk`/`Drowned`/`ZombieVillager`/
-        // `ZombifiedPiglin` all extend `Zombie` and override neither method —
+        // Vanilla's own reinforcements-chance randomizer — its attribute-handling
+        // step calls
+        // it for the whole zombie family (husk/drowned/zombie-villager/
+        // zombified-piglin all extend the base zombie class and override neither method —
         // the same species list `can_open_doors` above already establishes).
         // Rolled here for the identical reason `has_left_horn`/
         // `has_right_horn` are: before `entity_type` moves into
@@ -4718,8 +4719,8 @@ impl<'w> MobSim<'w> {
     /// `LocalPlayer`.
     ///
     /// **Drops no loot and grants no experience** — unlike
-    /// [`reap_dead`](Self::reap_dead)'s death sweep, this is Java's plain
-    /// `Entity.remove()`, not a kill. A plugin that wants a despawned mob to
+    /// [`reap_dead`](Self::reap_dead)'s death sweep, this is vanilla's plain
+    /// generic entity-remove call, not a kill. A plugin that wants a despawned mob to
     /// drop loot calls whatever already grants that on a real death, not this.
     pub fn remove_mob(&mut self, id: i32) -> bool {
         let before = self.mobs.len();
@@ -4729,9 +4730,8 @@ impl<'w> MobSim<'w> {
 
     /// Given a just-placed carved pumpkin or jack o'lantern at `pumpkin_pos`,
     /// checks whether it completes a valid snow- or iron-golem block pattern
-    /// and, if so, spawns the golem — vanilla
-    /// `CarvedPumpkinBlock.trySpawnGolem`
-    /// (`.cache/mc/26.2/src/net/minecraft/world/level/block/CarvedPumpkinBlock.java`).
+    /// and, if so, spawns the golem — vanilla's
+    /// own carved-pumpkin "try spawn golem" step.
     ///
     /// Tries the snow golem pattern first and returns on a match, exactly as
     /// vanilla's early `return` does — a pumpkin that happens to complete
@@ -4777,8 +4777,8 @@ impl<'w> MobSim<'w> {
                     golem::golem_feet_to_spawn_pos(feet),
                 )
                 .id();
-            // vanilla additionally calls `setPlayerCreated(true)`
-            // (`IronGolem.java:79`), which suppresses this golem attacking
+            // vanilla additionally calls its own "set player created" setter,
+            // which suppresses this golem attacking
             // the player who angered it and is checked on NBT save/load.
             // This sim has no such per-golem flag and no player-directed
             // hostility model for a neutral mob to suppress — a disclosed
@@ -4795,9 +4795,9 @@ impl<'w> MobSim<'w> {
 
     /// Advances every mob one tick: run its goals (which drive A\* and path
     /// following through the [`MobController`] seam), then step the follower.
-    /// Each mob's `no_action_time` ages by one tick, mirroring vanilla
-    /// `serverAiStep`'s `noActionTime++`, and is first cleared for any mob
-    /// vanilla's `Mob.checkDespawn` would clear it for — a persistent mob, or
+    /// Each mob's `no_action_time` ages by one tick, mirroring vanilla's own
+    /// server AI step incrementing its own no-action-time field, and is first cleared for any mob
+    /// vanilla's own "check despawn" step would clear it for — a persistent mob, or
     /// one within its category's immune radius of a player from
     /// [`set_players`](Self::set_players). See the body for why that reset lives
     /// here rather than only in [`despawn_pass`](MobSim::despawn_pass), which
@@ -4854,7 +4854,8 @@ impl<'w> MobSim<'w> {
     fn tick_villager_professions(&mut self) {
         let world = self.world;
         let claims = &mut self.workstation_claims;
-        // `Villager.restock`'s own cadence check (`WorkAtPoi`'s per-AI-tick
+        // Vanilla's own villager restock step's own cadence check (its own
+        // per-AI-tick brain activity
         // call, not built here — see `villager_trade`'s module doc), run
         // once per profession pass for every employed villager instead.
         // `tick_count` is this sim's only clock (see its own field doc);
@@ -4913,8 +4914,8 @@ impl<'w> MobSim<'w> {
     /// search for an unclaimed villager, re-verification for a claimed one.
     ///
     /// Independent of [`tick_villager_professions`](Self::tick_villager_professions):
-    /// a bed (`MemoryModuleType.HOME`) and a job site
-    /// (`MemoryModuleType.JOB_SITE`) are two separate memories in vanilla,
+    /// a bed (vanilla's own "home" memory) and a job site
+    /// (vanilla's own "job site" memory) are two separate memories in vanilla,
     /// and a villager can hold either, both, or neither at once. Same
     /// re-verification shape as professions — see that method's own doc for
     /// why a poll, not an event hook, is how "losing the bed loses the
@@ -4960,8 +4961,8 @@ impl<'w> MobSim<'w> {
     /// [`crate::poi_storage::PoiStorage::occupied_in_range`] restricted to
     /// `home` POIs: every bed claimed through [`tick_villager_beds`](Self::tick_villager_beds)
     /// within `radius` real blocks of `center`. Issue #241's raid trigger
-    /// (`Raids.createOrExtendRaid`'s own `PoiManager.getInRange(#village,
-    /// 64, IS_OCCUPIED)` query) is this method's reason to exist: a bed
+    /// (vanilla's own raid-creation-or-extension step's own point-of-interest
+    /// range query over the `#village` tag, occupied only) is this method's reason to exist: a bed
     /// claimed through [`villager::BedClaims`] is never written to the
     /// on-disk `poi/` region set (see that type's own doc), so a caller
     /// wiring the real trigger against *live* villagers reads this rather
@@ -4976,8 +4977,8 @@ impl<'w> MobSim<'w> {
         self.bed_claims.occupied_in_range(center, radius)
     }
 
-    /// The full `PoiManager.getInRange(e -> e.is(PoiTypeTags.VILLAGE), …,
-    /// Occupancy.IS_OCCUPIED)` query issue #241's raid trigger actually
+    /// The full point-of-interest range query, filtered to the `#village`
+    /// point-of-interest tag and occupied only, that issue #241's raid trigger actually
     /// needs — every claimed bed, workstation *or* bell within `radius` real
     /// blocks of `center`, unioning [`occupied_homes_in_range`](Self::occupied_homes_in_range)
     /// with [`villager::WorkstationClaims::occupied_in_range`] and
@@ -5018,9 +5019,9 @@ impl<'w> MobSim<'w> {
     ///
     /// Independent of [`tick_villager_beds`](Self::tick_villager_beds)/
     /// [`tick_villager_professions`](Self::tick_villager_professions): a
-    /// bell (`MemoryModuleType.MEETING_POINT`), a bed
-    /// (`MemoryModuleType.HOME`) and a job site
-    /// (`MemoryModuleType.JOB_SITE`) are three separate memories in vanilla,
+    /// bell (vanilla's own "meeting point" memory), a bed
+    /// (vanilla's own "home" memory) and a job site
+    /// (vanilla's own "job site" memory) are three separate memories in vanilla,
     /// and a villager can hold any combination of the three at once.
     ///
     /// Native-only, for [`tick_villager_professions`](Self::tick_villager_professions)'s
@@ -5063,18 +5064,21 @@ impl<'w> MobSim<'w> {
     /// bounded terrain scan — the same shape
     /// [`JOB_SEARCH_INTERVAL_TICKS`](Self::JOB_SEARCH_INTERVAL_TICKS) is, and
     /// for the identical reason: a scope choice, not a transcribed vanilla
-    /// constant. `MoveToBlockGoal.nextStartTick` itself re-searches every
+    /// constant. Vanilla's own generic "move to block" goal's own re-search
+    /// timer itself re-searches every
     /// 200-400 ticks per cat, which this approximates rather than mirrors
     /// exactly, since this scan runs independently of whether either goal is
     /// currently eligible to start.
     const CAT_BLOCK_SEARCH_INTERVAL_TICKS: i32 = 100;
-    /// `CatSitOnBlockGoal`'s own bounds: `searchRange` 8, `verticalSearchRange`
-    /// 1 (the two-arg `MoveToBlockGoal` convenience constructor's implicit
-    /// default, `verticalSearchStart` 0).
+    /// `CatSitOnBlockGoal`'s own bounds: horizontal search range 8, vertical
+    /// search range
+    /// 1 (the two-arg generic "move to block" goal convenience constructor's implicit
+    /// default, vertical search start 0).
     const CAT_SIT_HORIZONTAL_RANGE: i32 = 8;
     const CAT_SIT_VERTICAL_RANGE: i32 = 1;
-    /// `CatLieOnBedGoal`'s own bounds: `searchRange` 8, `verticalSearchStart`
-    /// -2, `verticalSearchRange` 6.
+    /// `CatLieOnBedGoal`'s own bounds: horizontal search range 8, vertical
+    /// search start
+    /// -2, vertical search range 6.
     const CAT_BED_HORIZONTAL_RANGE: i32 = 8;
     const CAT_BED_VERTICAL_MIN: i32 = -2;
     const CAT_BED_VERTICAL_MAX: i32 = 6;
@@ -5119,7 +5123,7 @@ impl<'w> MobSim<'w> {
                 pos.z.floor() as i32,
             );
 
-            // `CatSitOnBlockGoal.isValidTarget`: a chest, or a lit furnace, or
+            // `CatSitOnBlockGoal`'s own valid-target check: a chest, or a lit furnace, or
             // a bed's non-head part.
             let sit = Self::find_nearest_cat_block(
                 world,
@@ -5136,7 +5140,7 @@ impl<'w> MobSim<'w> {
             );
             mob.mob.set_cat_sit_target(sit);
 
-            // `CatLieOnBedGoal.isValidTarget`: any bed part — vanilla makes
+            // `CatLieOnBedGoal`'s own valid-target check: any bed part — vanilla makes
             // no head/foot distinction here, unlike the sit goal above.
             let bed = Self::find_nearest_cat_block(
                 world,
@@ -5153,12 +5157,13 @@ impl<'w> MobSim<'w> {
     /// The bounded box scan [`tick_cat_block_search`](Self::tick_cat_block_search)
     /// runs for both cat goals: every cell in `[-horiz, horiz]` horizontally
     /// and `[y_min, y_max]` vertically around `origin`, gated by the same
-    /// headroom check vanilla's own `isValidTarget` makes
-    /// (`level.isEmptyBlock(pos.above())`, approximated here as the `#air`
+    /// headroom check vanilla's own valid-target check makes
+    /// (an "is empty block" test on the cell above, approximated here as the `#air`
     /// tag's three members — `air`/`cave_air`/`void_air` — rather than a real
     /// per-block-state emptiness census). Returns the nearest match's
     /// stand-on point: one block above the matched cell, block-centred,
-    /// matching `MoveToBlockGoal.getMoveToTarget` (`blockPos.above()`).
+    /// matching vanilla's own generic "move to block" goal's own
+    /// move-to-target getter (one block above).
     fn find_nearest_cat_block(
         world: &ChunkWorld,
         origin: BlockPos,
@@ -5201,21 +5206,21 @@ impl<'w> MobSim<'w> {
 
     /// Ticks between gossip-spread passes — a scope choice, not a
     /// transcribed vanilla constant (see this method's own doc for why it
-    /// replaces vanilla's real per-*pair* 1200-tick `lastGossipTime`
+    /// replaces vanilla's real per-*pair* 1200-tick "last gossip time"
     /// cooldown with one whole-pass throttle instead), the same shape as
     /// [`JOB_SEARCH_INTERVAL_TICKS`].
     const GOSSIP_SPREAD_INTERVAL_TICKS: u64 = 100;
     /// How close two villagers must be to gossip this pass — vanilla's own
-    /// trigger has no fixed radius (it is whichever villagers a Brain
-    /// `Sensor` happens to bring within `INTERACTION_RANGE` of each other
-    /// during `MeetVillagerSensor`/`gossip` behaviours), so this is this
+    /// trigger has no fixed radius (it is whichever villagers a brain
+    /// sensor happens to bring within interaction range of each other
+    /// during its own "meet a nearby villager"/gossip behaviours), so this is this
     /// crate's own bound, not a transcribed one.
     const GOSSIP_SPREAD_RADIUS_SQR: f64 = 64.0; // 8 blocks
 
-    /// Issue #244: `Villager.gossip`'s nearby-villager spread
+    /// Issue #244: vanilla's own villager gossip step's nearby-villager spread
     /// (`GossipContainer::transfer_from`, issue #244's own port), approximated
     /// as a periodic radius-bounded scan over every villager pair rather than
-    /// vanilla's `Sensor`-driven "meet in village" Brain behaviour (Brain
+    /// vanilla's own sensor-driven "meet in village" brain behaviour (brain
     /// package work is issue #231/#243's remainder, off limits for this
     /// change — see `villager`'s own module doc for the same off-limits
     /// boundary already drawn around workstation claiming).
@@ -5262,27 +5267,29 @@ impl<'w> MobSim<'w> {
         self.gossip_spread_rng = rng;
     }
 
-    /// Ticks between golem-summon checks — `VillagerPanicTrigger.tick`'s own
+    /// Ticks between golem-summon checks — vanilla's own villager-panic
+    /// trigger's own
     /// `timestamp % 100L == 0L` gate.
     const GOLEM_SUMMON_INTERVAL_TICKS: u64 = 100;
-    /// `hasHostile`'s host-side radius, matching
+    /// Vanilla's own "has hostile" check's host-side radius, matching
     /// `lodestone_entity::brain::NearestHostileSensor::RANGE` (8.0) — see
     /// [`tick_golem_summon`](Self::tick_golem_summon)'s own doc for why this
-    /// recomputes the test rather than reading a villager's Brain memory.
+    /// recomputes the test rather than reading a villager's brain memory.
     const GOLEM_SUMMON_HOSTILE_RANGE_SQR: f64 = 64.0;
-    /// `spawnGolemIfNeeded`'s own `getBoundingBox().inflate(10.0, 10.0, 10.0)`.
+    /// Vanilla's own "spawn golem if needed" step's own box, inflated `10.0`
+    /// on every axis.
     const GOLEM_AGREEMENT_RADIUS: f64 = 10.0;
-    /// `VillagerPanicTrigger.tick`'s own `spawnGolemIfNeeded(level, timestamp, 3)`
+    /// Vanilla's own villager-panic trigger's own "spawn golem if needed"
     /// argument — the hurt/hostile path's agreement threshold (vanilla's other
-    /// call site, `Villager.gossip`'s post-transfer check, uses `5` instead;
+    /// call site, its own villager-gossip step's post-transfer check, uses `5` instead;
     /// only the hurt/hostile path is built here).
     const GOLEM_VILLAGERS_NEEDED: usize = 3;
-    /// `GolemSensor.MEMORY_TIME_TO_LIVE` — how long a village suppresses a
+    /// Vanilla's own golem-detection sensor's own memory-time-to-live constant — how long a village suppresses a
     /// further summon attempt after a successful one.
     const GOLEM_DETECTED_TTL: u64 = 599;
 
-    /// Issue #231's golem-summon-on-hurt: `VillagerPanicTrigger.tick`'s
-    /// `spawnGolemIfNeeded(level, timestamp, 3)`, called on the same 100-tick
+    /// Issue #231's golem-summon-on-hurt: vanilla's own villager-panic
+    /// trigger's own "spawn golem if needed" call, called on the same 100-tick
     /// cadence for every villager that is hurt or has a hostile nearby.
     ///
     /// # Why this lives on `MobSim` rather than as a `Brain` behaviour
@@ -5290,24 +5297,26 @@ impl<'w> MobSim<'w> {
     /// It needs two things no single mob's [`lodestone_entity::brain::BrainMob`]
     /// seam can give it: **other villagers' own state** (the agreement count)
     /// and **the power to create a new entity**. Villager panic itself is
-    /// Brain-driven (`villager_brain`, `lodestone-entity`), but the brain
+    /// brain-driven (`villager_brain`, `lodestone-entity`), but the brain
     /// lives inside an opaque `Box<dyn Goal>` once installed
     /// (`BrainGoal`) — this sim has no way to read *into* it, so "is this
     /// villager hurt or does it see a hostile" is recomputed here directly
     /// against [`SimMob::last_hurt_by`] and [`species::is_hostile_species`]
-    /// over `self.mobs`, mirroring what `HurtBySensor`/`NearestHostileSensor`
+    /// over `self.mobs`, mirroring what vanilla's own hurt-by/nearest-hostile
+    /// sensors
     /// would answer rather than reading their output.
     ///
     /// # Three disclosed cuts from the jar original
     ///
-    /// * **`golemSpawnConditionsMet`'s `LAST_SLEPT` gate is not enforced.**
+    /// * **Vanilla's own "spawn conditions met" check's own "last slept"
+    ///   gate is not enforced.**
     ///   Vanilla additionally requires the villager to have slept within the
     ///   last 24000 ticks — a proxy for "this is a real village with resting
     ///   villagers", not merely a stray hurt animal. This crate has no
     ///   sleep/bed tracking for villagers yet (the rest/schedule half of
     ///   issue #231), so every villager is eligible regardless of sleep
     ///   history.
-    /// * **No `SpawnUtil.trySpawnMob` placement search.** Vanilla searches a
+    /// * **No placement search from vanilla's own generic mob-spawn utility.** Vanilla searches a
     ///   10-block horizontal, 8-block vertical box for a legal iron-golem
     ///   cell; this sim's terrain read is a pathfinding snapshot, not a live
     ///   column scan suited to that search, so the golem spawns one block
