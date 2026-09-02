@@ -1,4 +1,4 @@
-//! Driving vanilla's `BiomeAmbientSoundsHandler` and `ClientLevel`'s rain
+//! Driving vanilla's own biome ambient-sounds handler and level's rain
 //! cadence from the shell — the call sites `that fix` built the state machines for
 //! and never had.
 //!
@@ -7,7 +7,7 @@
 //! [`ShellAmbience`] owns the four pieces of per-session ambience state:
 //! [`MoodAccumulator`] (cave ambience), [`AmbientLoops`] (the biome/dimension
 //! loop with its 40-tick crossfade), [`RainAmbience`] (the repeated one-shot
-//! `ClientLevel.tickWeatherEffects` drives) and the [`JavaRandom`] all three draw
+//! vanilla's own weather-effects tick drives) and the [`JavaRandom`] all three draw
 //! from. It is ticked at 20 Hz from the render loop.
 //!
 //! # Why the tick is pure and playing is a second step
@@ -57,8 +57,7 @@ const TICK: Duration = Duration::from_millis(50);
 /// accumulation in one frame.
 const MAX_CATCH_UP_TICKS: u32 = 10;
 
-/// Vanilla's `rainSoundTime` roll bound — `ClientLevel.java`
-/// (`random.nextInt(3)`).
+/// Vanilla's own rain-sound-timer roll bound — a random integer in `0..3`.
 const RAIN_ROLL_BOUND: i32 = 3;
 
 /// Everything one ambience tick needs from the world, gathered by the caller.
@@ -206,8 +205,8 @@ impl ShellAmbience {
         probe: &mut impl FnMut(IVec3) -> LightSample,
         events: &mut Vec<AmbienceEvent>,
     ) {
-        // The loop half first, matching `BiomeAmbientSoundsHandler.tick`'s own
-        // order (`:43-62` before the mood and additions at `:64-107`) — it is the
+        // The loop half first, matching vanilla's own biome ambient-sounds tick
+        // order (loop before the mood and additions) — it is the
         // order the RNG draws happen in, so swapping it would desynchronise the
         // additions' stream from the jar's.
         for action in self.loops.tick(input.ambient.loop_sound.as_deref()) {
@@ -242,9 +241,9 @@ impl ShellAmbience {
             });
         }
 
-        // Rain, from `ClientLevel.tickWeatherEffects` rather than the biome
+        // Rain, from vanilla's own weather-effects tick rather than the biome
         // handler. The roll is taken unconditionally so the stream does not
-        // depend on whether it is raining — vanilla reaches `nextInt(3)` only
+        // depend on whether it is raining — vanilla reaches its own bounded roll only
         // under rain, but our `RainAmbience::tick` takes the roll as an
         // argument, so drawing it here keeps the call shape single-branch.
         let roll = self.rng.next_i32_bound(RAIN_ROLL_BOUND).max(0) as u32;
@@ -260,7 +259,7 @@ impl ShellAmbience {
             events.push(AmbienceEvent::OneShot {
                 name: Cow::Borrowed(sound.name),
                 // Vanilla plays this at the *listener*, relative, not at the
-                // landing block — `ClientLevel.java` passes the camera
+                // landing block — vanilla's own ambient-sound trigger passes the camera
                 // position.
                 position: input.eye,
                 volume: sound.volume,
@@ -335,7 +334,7 @@ impl ShellAmbience {
 }
 
 /// Vanilla's step volume/pitch for a block's `SoundType` —
-/// `Entity.playStepSound`: `volume * 0.15`, pitch as-is.
+/// vanilla's own step-sound trigger scales volume by 0.15, pitch as-is.
 ///
 /// Split out here rather than inlined at the call site so the two multipliers
 /// live beside the rest of the ambience constants and are not retyped.

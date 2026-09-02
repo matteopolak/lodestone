@@ -201,8 +201,8 @@ pub(crate) fn menu_situation() -> MusicSituation<'static> {
 /// # The selection input is not the biome, and not `GameMode`
 ///
 /// 26.2 asks the camera's environment-attribute probe for
-/// `audio/background_music` (`Minecraft.java`,
-/// `EnvironmentAttributes.java`), which yields a three-slot
+/// `audio/background_music` (vanilla's own client and environment-attribute
+/// code), which yields a three-slot
 /// [`BackgroundMusic`] whose precedence is **underwater → creative → default**
 ///. Our biome table *is* that probe's answer
 /// (a biome is what sets the attribute), so `background_music` is looked up per
@@ -396,7 +396,7 @@ mod tests {
     ///
     /// A count, not a duration — see [`ShellMusic::requests`]'s doc. Asserted on
     /// **both** sides of the boundary, which is what makes it a gate on the jar's
-    /// `MusicManager.java` starting delay of 100 ticks rather than a vague
+    /// own music-manager starting delay of 100 ticks rather than a vague
     /// "music eventually starts": one tick short must be silent, and the boundary
     /// tick must produce precisely one named request.
     #[test]
