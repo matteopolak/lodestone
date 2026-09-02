@@ -9711,13 +9711,15 @@ impl<'w> MobSim<'w> {
                     vehicle.motion.position.z,
                 ),
                 // **The yaw is the point.** A boat's hull is the only thing that
-                // shows which way it faces, and `BoatItem.use` sets it from the
+                // shows which way it faces, and vanilla's own boat-item use
+                // handler sets it from the
                 // placing player — a boat streamed at yaw 0 always points south
-                // however you placed it. The pitch stays 0: `AbstractBoat` never
+                // however you placed it. The pitch stays 0: vanilla's own boat
+                // entity never
                 // writes `xRot`.
                 rotation: Rotation::new(vehicle.yaw, 0.0),
-                // `AbstractBoat` is not a `LivingEntity`, so there is no separate
-                // head rotation to send; `ClientboundRotateHeadPacket` is only sent
+                // Vanilla's own boat entity is not a living entity, so there is no separate
+                // head rotation to send; the rotate-head packet is only sent
                 // for entities that have one.
                 head_yaw: 0.0,
                 velocity: Vec3::new(
@@ -9725,28 +9727,29 @@ impl<'w> MobSim<'w> {
                     vehicle.motion.velocity.y,
                     vehicle.motion.velocity.z,
                 ),
-                // `AbstractBoat.defineSynchedData` registers `DATA_ID_PADDLE_LEFT`,
-                // `DATA_ID_PADDLE_RIGHT` and `DATA_ID_BUBBLE_TIME`, on top of
-                // `VehicleEntity`'s hurt/hurtdir/damage triple.
+                // Vanilla's own boat metadata registration registers its own
+                // paddle-left,
+                // paddle-right and bubble-time fields, on top of
+                // vanilla's own shared vehicle hurt/hurtdir/damage triple.
                 //
                 // The paddle pair is now sent — issue #262's `PADDLE_BOAT`
                 // remainder — via `MetadataField::BoatPaddles`, whose own doc
                 // has the index-11/12 collision this loop is the guard for
                 // (every entry here is a boat by construction, never the
-                // `LivingEntity`/`ThrownTrident` that also claim those
+                // living entity/thrown-trident that also claim those
                 // indices). Always included, even at its `false, false`
                 // default — the same "always included" convention
                 // `CreeperSwellDir`'s own doc states, and load-bearing here:
                 // a stop-paddling transition must reach a diffing consumer as
                 // a real `false, false` rather than as an absent field.
-                // `DATA_ID_BUBBLE_TIME` stays unsent: nothing in this crate's
+                // Vanilla's own bubble-time metadata field stays unsent: nothing in this crate's
                 // boat physics tracks a bubble-column timer.
                 metadata: vec![
                     crate::protocol::MetadataField::BoatPaddles {
                         left: vehicle.paddle_left,
                         right: vehicle.paddle_right,
                     },
-                    // `VehicleEntity`'s hurt triple. Always included, at its
+                    // Vanilla's own shared vehicle hurt triple. Always included, at its
                     // resting `(0, 1, 0.0)` as well, for `BoatPaddles`' own
                     // stated reason: the *end* of a rock has to reach a diffing
                     // consumer as a real zero rather than as an absent field, or
@@ -9757,7 +9760,7 @@ impl<'w> MobSim<'w> {
                         damage: vehicle.damage,
                     },
                 ],
-                // `AbstractBoat` does not override `getAddEntityPacket`.
+                // Vanilla's own boat entity does not override the add-entity packet.
                 object_data: 0,
                 // A boat is never leashable, vanilla's own interface for that.
                 leash_link: None,
@@ -9777,18 +9780,20 @@ impl<'w> MobSim<'w> {
                 uuid: t.uuid,
                 entity_type: tnt::tnt_entity_type(),
                 position: Vec3::new(t.motion.position.x, t.motion.position.y, t.motion.position.z),
-                // `PrimedTnt` never rotates — `Entity`'s base `yRot`/`xRot`
+                // Vanilla's own primed-tnt entity never rotates — the base
+                // entity's `yRot`/`xRot`
                 // stay `0.0` for the whole of its short life.
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: Vec3::new(t.motion.velocity.x, t.motion.velocity.y, t.motion.velocity.z),
-                // `PrimedTnt.DATA_FUSE_ID` — see `MetadataField::TntFuse`'s own
+                // Vanilla's own fuse metadata field — see `MetadataField::TntFuse`'s own
                 // doc for why this is index 8's fifth `INT` claimant and must be
                 // class-guarded on decode.
                 metadata: vec![MetadataField::TntFuse(t.fuse)],
-                // `PrimedTnt` does not override `getAddEntityPacket`.
+                // Vanilla's own primed-tnt entity does not override the
+                // add-entity packet.
                 object_data: 0,
-                // Never a `Leashable`.
+                // Never leashable.
                 leash_link: None,
             });
         }
@@ -9800,8 +9805,8 @@ impl<'w> MobSim<'w> {
             let Some(cart) = self.minecarts.get(&id) else {
                 continue;
             };
-            // `MinecartFurnace.DATA_ID_FUEL` — index 13, shared with
-            // `MinecartCommandBlock.DATA_ID_COMMAND_NAME` (a `STRING`) under a
+            // Vanilla's own furnace-minecart fuel metadata field — index 13, shared with
+            // its own command-block-minecart command-name field (a `STRING`) under a
             // different serializer; this is the only producer of a
             // `MinecartFuel` field and it only ever fires from the furnace
             // loop, so the two can never collide the way `MetadataField::Item`'s
@@ -9817,25 +9822,27 @@ impl<'w> MobSim<'w> {
                 entity_type: cart.kind.entity_type(),
                 position: Vec3::new(cart.motion.position.x, cart.motion.position.y, cart.motion.position.z),
                 rotation: Rotation::new(cart.yaw, 0.0),
-                // `AbstractMinecart` is not a `LivingEntity`; no separate head
+                // Vanilla's own minecart entity is not a living entity; no separate head
                 // rotation packet is ever sent for one.
                 head_yaw: 0.0,
                 velocity: Vec3::new(cart.motion.velocity.x, cart.motion.velocity.y, cart.motion.velocity.z),
                 metadata,
-                // `AbstractMinecart` does not override `getAddEntityPacket`.
+                // Vanilla's own minecart entity does not override the add-entity packet.
                 object_data: 0,
-                // Never a `Leashable`.
+                // Never leashable.
                 leash_link: None,
             });
         }
-        // `LightningBolt` (issue #269). Sorted ids for the same reason the two
+        // The lightning-bolt entity (issue #269). Sorted ids for the same
+        // reason the two
         // loops above are: a bolt is short-lived but real entities, and a
         // `HashMap` order would reshuffle which of two simultaneous strikes
         // `EntityStreamer::sync` updates first.
         //
-        // **Empty metadata is correct, not an omission**: `LightningBolt`
-        // overrides `defineSynchedData` with an empty body — it registers no
-        // accessor at all (`.cache/mc/26.2/src/net/minecraft/world/entity/LightningBolt.java`),
+        // **Empty metadata is correct, not an omission**: vanilla's own
+        // lightning-bolt entity
+        // overrides its own metadata registration with an empty body — it registers no
+        // accessor at all,
         // so there is nothing to send.
         let mut bolt_ids: Vec<i32> = self.lightning_bolts.keys().copied().collect();
         bolt_ids.sort_unstable();
