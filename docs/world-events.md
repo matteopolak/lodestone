@@ -60,10 +60,10 @@ piglin; villager → witch; mooshroom variant guarded per-bolt but never flips (
 red/brown variant exists); turtle takes a lethal hit, no ignite. The "skeleton horse
 trap" is *not* a `thunderHit` effect — it's a flag rolled at horse spawn time
 (reading `effective_difficulty()` directly) that a later AI goal turns into a
-cosmetic bolt plus a skeleton posse. Not modelled: the lightning-rod power pulse,
-copper-waxing reset, `GAME_EVENT(LIGHTNING_STRIKE)`/thunder sounds, setting a struck
-mob alight (no burn state on `SimMob`), players as `thunderHit` candidates, and the
-lightning-rod POI search (approximated as "no rod, ever" — no POI manager).
+cosmetic bolt plus a skeleton posse. Not modelled: the lightning-rod power pulse and
+copper-waxing reset, setting a struck mob alight (no burn state on `SimMob`), players
+as `thunderHit` candidates, and lightning rods themselves (no POI manager exists, so
+the rod search always misses).
 
 ### Regional difficulty
 
@@ -71,15 +71,14 @@ lightning-rod POI search (approximated as "no rod, ever" — no POI manager).
 resolved fresh once per tick by `run_tick_loop` from world difficulty, elapsed world
 time, a chunk's inhabited time, and moon phase — nothing persists an instance, only a
 per-query recomputation. Distinct from **world difficulty** (`/difficulty`,
-peaceful/easy/normal/hard) — this is derived from it, not a setting itself.
-
-`calculate_difficulty`: Peaceful is always `0.0`. Otherwise start from base scale
-`0.75`, add up to `0.25` as total world time passes a 72,000-tick offset (capped at
-1,440,000 ticks), add a local term from the chunk's inhabited time (capped at
+peaceful/easy/normal/hard), which it's derived from rather than being a setting
+itself. `calculate_difficulty`: Peaceful is always `0.0`. Otherwise start from base
+scale `0.75`, add up to `0.25` as total world time passes a 72,000-tick offset (capped
+at 1,440,000 ticks), add a local term from the chunk's inhabited time (capped at
 3,600,000 ticks, weighted `1.0` on Hard / `0.75` otherwise, halved again on Easy), add
 a moon-phase term **clamped by the global term, not by `1.0`** (the one clause easy to
-get backwards), then multiply the total by the difficulty's ordinal (Peaceful 0 … Hard
-3). Moon brightness indexes `(day_time / 24000) % 8`, day 0 full moon.
+get backwards, indexed by `(day_time / 24000) % 8`, day 0 full moon), then multiply
+the total by the difficulty's ordinal (Peaceful 0 … Hard 3).
 
 Chunk inhabited time is not tracked anywhere yet — it's hardcoded to `0` on save, so
 the local term always understates the true result. Real consumers: zombie/skeleton
@@ -125,13 +124,13 @@ Wave counts are copied verbatim from `Raid.getNumGroups` (Peaceful 0 / Easy 3 / 
 bonus roll (`nextInt(2)` Easy, flat `1` Normal, flat `2` Hard, then `nextInt(bonus +
 1)`). Each wave clears on live health checks, advances on a 300-tick cooldown, and
 reaches Victory with vanilla's 40-tick post-clear delay. Only pillagers and
-vindicators spawn. `Raid.RaidStatus.LOSS` is not ported (needs the village
-section-distance tracker, a different subsystem), so a raid can only reach Ongoing or
-Victory; the overall 48000-tick (40-minute) timeout is ported, so an abandoned raid
-still stops being tracked. The boss bar reuses the existing `BOSS_EVENT` path; its
-progress is wave count, not vanilla's living-raider health sum. The captain marker is
-data-only — no mob in this tree carries server-side equipment state, so neither the
-captain's nor the patrol leader's ominous banner can be drawn.
+vindicators spawn — no other raider species exist in this crate's roster.
+`Raid.RaidStatus.LOSS` (the village section-distance tracker) is not ported, so a raid
+can only reach Ongoing or Victory; the 48000-tick (40-minute) overall timeout is
+ported, so an abandoned raid still stops being tracked. The boss bar reuses the
+existing `BOSS_EVENT` path; its progress is wave count, not vanilla's living-raider
+health sum. The captain marker is data-only — no mob here carries server-side
+equipment state, so neither the captain's nor the patrol leader's banner is drawn.
 
 ### Dragon fight
 
@@ -212,9 +211,9 @@ wither-effect duration (currently always Normal).
   health-based boss-bar progress needs `Raid` to record each wave's starting health.
 * **Dragon/wither fights**: each function cites the vanilla symbol it ports by class
   and method — re-verify against the decompile under `.cache/mc/26.2/` rather than
-  trusting a paraphrase. A new phase transition or fight effect needs a
-  transition-table test (a scripted input sequence asserting the resulting
-  phase/stage *sequence*), not a single "some phase changed" assertion.
+  trusting a paraphrase. A new phase/emergence transition needs a transition-table
+  test (a scripted input sequence asserting the resulting *sequence*), not a single
+  "some phase changed" assertion.
 
 ## Configuration
 

@@ -19,22 +19,21 @@ consequences. Depletion is a three-layer buffer: **exhaustion** accumulates
 from actions (capped 40.0); each tick, exhaustion **strictly above** `4.0`
 (`EXHAUSTION_DROP`) is spent — `4.0` subtracted, one point of **saturation**
 lost; only once saturation hits `0.0` does the visible **food level** drop,
-and never on Peaceful. Because the test is strict, a fresh spawn sprints
-**241** blocks, not 200, before the bar first moves.
-
-Costs per block/event: sprint `0.1`, walk/crouch **0** (vanilla's literal
-`0.0F` multiply — charging it invents depletion vanilla doesn't have), break
-a block `0.005`, attack `0.1`; swim/jump/sprint-jump aren't charged (no wire
-signal yet). Eating applies `nutrition * modifier * 2.0` saturation, clamped
-to the new food level.
+never on Peaceful. Because the test is strict, a fresh spawn sprints **241**
+blocks, not 200, before the bar first moves. Costs per block/event: sprint
+`0.1`, walk/crouch **0** (vanilla's literal `0.0F` multiply — charging it
+invents depletion vanilla doesn't have), break a block `0.005`, attack
+`0.1`; swim/jump/sprint-jump aren't charged (no wire signal yet). Eating
+applies `nutrition * modifier * 2.0` saturation, clamped to the new food
+level.
 
 Regen/starvation is **one** if/else chain sharing a timer (can't regen and
 starve the same tick): saturated regen (10 ticks, heal `min(sat,6)/6`,
 exhausts by the amount spent), slow regen (80 ticks, heal `1.0`, exhaust
 `6.0`, needs food ≥ 18), starvation (80 ticks, `1.0` damage, food ≤ 0), else
-reset. The starvation gate is `health > 10 || HARD || (health > 1 &&
-NORMAL)` — **Easy and Peaceful still starve a player down to 10 health**;
-Peaceful's real protection is that depletion never reaches zero food there.
+reset. The gate is `health > 10 || HARD || (health > 1 && NORMAL)` —
+**Easy and Peaceful still starve a player down to 10 health**; Peaceful's
+real protection is that depletion never reaches zero food there.
 
 ### Drowning
 
