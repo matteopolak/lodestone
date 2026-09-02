@@ -64,14 +64,15 @@
 //!   period in
 //!   `scripts/live-oracles/save-parity.sh`.
 //! - **A loaded-but-unmodified chunk is not rewritten.** `save-all flush`
-//!   writes what `ChunkMap` holds, and an untouched chunk can be `unsaved =
-//!   false`. What actually forces the rewrite here is that we write
-//!   `isLightOn = 0`: vanilla relights on load and
-//!   `ChunkAccess.setLightCorrect(true)` calls `markUnsaved()`. That is an
-//!   inference about vanilla's internals, so it is not trusted — each direction
-//!   carries a `vanilla_rewrote` control asserting the region bytes changed
-//!   **and** that a field only vanilla writes is now present. Without it, "no
-//!   differences" would be indistinguishable from "vanilla never looked".
+//!   writes whatever the server's in-memory chunk cache holds, and an
+//!   untouched chunk can be `unsaved = false`. What actually forces the
+//!   rewrite here is that we write `isLightOn = 0`: vanilla relights on
+//!   load, and marking a chunk's light correct is itself a write that
+//!   dirties it. That is an inference about vanilla's internals, so it is
+//!   not trusted — each direction carries a `vanilla_rewrote` control
+//!   asserting the region bytes changed **and** that a field only vanilla
+//!   writes is now present. Without it, "no differences" would be
+//!   indistinguishable from "vanilla never looked".
 //!
 //! # How to change it
 //!
@@ -318,12 +319,12 @@ const ALLOWED: &[Allowed] = &[
     Allowed {
         pattern: "Heightmaps",
         allow: Allow::AddedOrChanged,
-        reason: "We deliberately omit heightmaps (`chunk_nbt.rs`'s module doc): \
-                 `SerializableChunkData` calls `Heightmap.primeHeightmaps` for every type in \
-                 `status.heightmapsAfter()` that the file lacks, so an absent heightmap is \
-                 recomputed from the blocks while a *wrong* one is trusted and silently \
-                 corrupts terrain. Vanilla adding them is the designed outcome. (The wire \
-                 half of the same gap is issue #516 and is not about this file.)",
+        reason: "We deliberately omit heightmaps (`chunk_nbt.rs`'s module doc): vanilla's \
+                 chunk deserialization recomputes every heightmap type the file lacks from \
+                 the blocks, so an absent heightmap is recomputed while a *wrong* one is \
+                 trusted and silently corrupts terrain. Vanilla adding them back is the \
+                 designed outcome. (The wire half of the same gap is issue #516 and is not \
+                 about this file.)",
     },
     Allowed {
         pattern: "Heightmaps.**",
@@ -336,9 +337,9 @@ const ALLOWED: &[Allowed] = &[
         allow: Allow::Changed,
         reason: "We write `0` because we ship no light arrays, and claiming correct light \
                  would make a real client render our terrain pitch black instead of relighting \
-                 it (`chunk_nbt.rs`). Vanilla's light engine relights on load and \
-                 `ChunkAccess.setLightCorrect(true)` sets the flag — which is also what marks \
-                 the chunk unsaved and so what makes this gate's comparison non-vacuous.",
+                 it (`chunk_nbt.rs`). Vanilla's light engine relights on load, and marking a \
+                 chunk's light correct is itself the write that marks the chunk unsaved — \
+                 which is what makes this gate's comparison non-vacuous.",
     },
     Allowed {
         pattern: "sections[Y=*].BlockLight.**",
@@ -364,8 +365,8 @@ const ALLOWED: &[Allowed] = &[
     Allowed {
         pattern: "PostProcessing",
         allow: Allow::Added,
-        reason: "Vanilla writes `ChunkAccess.getPostProcessing()` — a `ShortList[]` with one \
-                 sub-list per section (24 for the overworld) — and a chunk loaded with the field \
+        reason: "Vanilla writes its post-processing queue — one sub-list of positions per \
+                 section (24 for the overworld) — and a chunk loaded with the field \
                  absent gets an empty array, so writing 24 empty sub-lists where we wrote \
                  nothing is the round trip of nothing. **Measured, not assumed**: an independent \
                  stdlib Python NBT parser over all 841 chunks vanilla saved found every one \
@@ -376,15 +377,15 @@ const ALLOWED: &[Allowed] = &[
     Allowed {
         pattern: "LastUpdate",
         allow: Allow::Changed,
-        reason: "A clock: `SerializableChunkData.copyOf` stamps `level.getGameTime()` at save \
-                 time. We write 0 because a freshly generated column has no game time to \
-                 report.",
+        reason: "A clock: vanilla's chunk-serialization save path stamps the world's current \
+                 game time onto this field at save time. We write 0 because a freshly \
+                 generated column has no game time to report.",
     },
     Allowed {
         pattern: "InhabitedTime",
         allow: Allow::Changed,
         reason: "A clock: accumulated per tick while the chunk is loaded within a player's \
-                 range (`LevelChunk.setUnsaved`/`ChunkMap`'s inhabited-time bookkeeping). \
+                 range (vanilla's own per-chunk inhabited-time bookkeeping). \
                  Force-loading a chunk with nobody online should leave it at 0, but it is a \
                  counter by construction and a gate that failed on it would be asserting \
                  against vanilla's tick scheduler rather than against our save format.",
@@ -1231,9 +1232,9 @@ fn assert_vanilla_accepted_the_world(server_root: &Path) {
     let log = std::fs::read_to_string(&log_path)
         .unwrap_or_else(|e| panic!("read {} ({e}) — the harness should have left one", log_path.display()));
 
-    // `LevelStorageSource.readExistingSavedData` failing makes vanilla log
-    // this and build `WorldOptions.defaultWithRandomSeed()`, silently replacing
-    // the seed. Every block already on disk still loads, so no blocks-only
+    // Vanilla's own world-gen-settings read failing makes it log this and
+    // fall back to a freshly randomized seed, silently replacing the real
+    // one. Every block already on disk still loads, so no blocks-only
     // assertion can see it.
     assert!(
         !log.contains("Unable to read or access the world gen settings file"),
@@ -1929,8 +1930,8 @@ fn our_fresh_world_survives_a_vanilla_load_and_save() {
     .expect("write level.dat");
 
     // `world_gen_settings.dat` comes from the checked-in **real vanilla** file
-    // rather than from `WorldGenSettings::from_seed`, which writes no
-    // `dimensions` compound and so produces a file `WorldGenSettings.CODEC`
+    // rather than from our own `WorldGenSettings::from_seed`, which writes no
+    // `dimensions` compound and so produces a file vanilla's own decoder
     // rejects — vanilla then falls back to a random seed. That gap is named in
     // `world_gen_settings`'s own module doc, and reusing the fixture's seed as
     // this test's SEED is what makes the file self-consistent.

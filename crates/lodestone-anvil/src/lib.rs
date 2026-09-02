@@ -18,13 +18,13 @@
 //! - [`region`]: the `.mca` container — an 8 KiB header of 1024 sector
 //!   locations + 1024 timestamps, 4 KiB sector-addressed chunk payloads,
 //!   oversized-chunk externalization to `.mcc` files. Deliberately generic
-//!   over the NBT tree a chunk holds; parses no chunk *schema*
-//!   (`SerializableChunkData.java`'s territory), only the envelope around
-//!   it, so the same code is meant to be reusable for entity-region storage
-//!   later without changes.
+//!   over the NBT tree a chunk holds; parses no chunk *schema* — that is a
+//!   separate layer's territory — only the envelope around it, so the same
+//!   code is meant to be reusable for entity-region storage later without
+//!   changes.
 //! - [`level_dat`]: `level.dat`'s container — an un-chunked, gzip-wrapped
-//!   NBT file, and the `DataVersion` field inside it. Everything else in
-//!   `LevelData` (seed, spawn, gamerules, weather, ...) is explicitly
+//!   NBT file, and the `DataVersion` field inside it. Everything else vanilla
+//!   models there (seed, spawn, gamerules, weather, ...) is explicitly
 //!   *not* modelled yet — deliberately sequenced behind whichever future
 //!   work settles each field's in-memory representation first, rather than
 //!   guess a schema here that would need a second pass per subsystem landed
@@ -191,9 +191,8 @@ pub enum Error {
         file_len: usize,
     },
     /// A chunk's location entry was nonzero but its declared stream length
-    /// was 0 — present in the table, but with no data
-    /// (`RegionFile.getChunkDataInputStream`'s "Chunk is allocated, but
-    /// stream is missing").
+    /// was 0 — present in the table, but with no data. Vanilla's own reader
+    /// treats this exact case as "chunk is allocated, but stream is missing".
     #[error("chunk ({local_x}, {local_z}) is allocated but its stream is missing")]
     ChunkStreamMissing {
         /// Region-local X.
@@ -213,8 +212,9 @@ pub enum Error {
     /// A chunk declared a compression-scheme byte this crate does not
     /// recognize as decodable (i.e. not one of the four ids in
     /// [`compression::CompressionScheme`], and not the "chunk absent"
-    /// sentinel 0). Notably includes 127 (`RegionFileVersion.VERSION_CUSTOM`),
-    /// which vanilla itself immediately errors on decoding.
+    /// sentinel 0). Notably includes 127, vanilla's own reserved
+    /// "custom compression" id, which vanilla itself immediately errors on
+    /// decoding.
     #[error("unsupported compression scheme id {0}")]
     UnsupportedCompressionScheme(u8),
     /// A chunk's compressed bytes needed more than 254 sectors while being
@@ -298,13 +298,14 @@ pub enum Error {
     /// A gzip-NBT world file had no `"DataVersion"` field where one was
     /// expected, or it was not an `Int`. Raised by both [`level_dat`] (inside
     /// its `"Data"` compound) and [`world_gen_settings`] (at the root, where
-    /// `NbtUtils.addCurrentDataVersion` puts it).
+    /// vanilla's own save path stamps the current data version onto every
+    /// world file it writes).
     #[error(r#"no integer "DataVersion" field"#)]
     MissingDataVersion,
 
     /// A [`world_gen_settings`] file's root had no lowercase `"data"`
-    /// compound — the wrapper `LevelStorageSource.writeSavedData` puts the
-    /// codec output under. Deliberately distinct from
+    /// compound — the wrapper vanilla's own generic per-type-file save path
+    /// puts the codec output under. Deliberately distinct from
     /// [`Error::MissingDataCompound`], which is `level.dat`'s **capital**
     /// `"Data"`; the two files really do differ in case, and conflating them
     /// is the kind of thing that reads as a corrupt world.

@@ -95,21 +95,20 @@ use lodestone_core::Nbt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// The `"data"` wrapper `LevelStorageSource.writeSavedData` puts the codec
-/// output under — lowercase, unlike `level.dat`'s `"Data"`
-/// (`LevelStorageSource.TAG_DATA`).
+/// The `"data"` wrapper vanilla's generic per-type-file save path puts the
+/// codec output under — lowercase, unlike `level.dat`'s `"Data"`.
 const DATA_FIELD: &str = "data";
-/// Set by `NbtUtils.addCurrentDataVersion`, called from
-/// `LevelStorageSource.writeSavedData`.
+/// Stamped onto the root tag by vanilla's own save path, the same
+/// current-data-version write [`crate::level_dat`] documents.
 const DATA_VERSION_FIELD: &str = "DataVersion";
-/// `WorldOptions.CODEC`'s seed field.
+/// The world seed, as vanilla's own world-options codec names it.
 const SEED_FIELD: &str = "seed";
-/// `WorldOptions.CODEC`'s `generateStructures` field.
+/// Whether structures generate, as vanilla's own world-options codec names it.
 const GENERATE_STRUCTURES_FIELD: &str = "generate_structures";
-/// `WorldOptions.CODEC`'s `generateBonusChest` field.
+/// Whether the bonus chest spawns, as vanilla's own world-options codec names it.
 const BONUS_CHEST_FIELD: &str = "bonus_chest";
 
-/// `SharedConstants`' data version for the 26.2 server this repo builds
+/// Vanilla's own data version for the 26.2 server this repo builds
 /// against — read out of a real file written by `.cache/mc/creative/server.jar`
 /// (see [`crate::level_dat`]'s doc, which measured the same 4903 independently),
 /// not guessed.
@@ -118,10 +117,10 @@ pub const DATA_VERSION_26_2: i32 = 4903;
 /// The path 26.2 stores world-gen settings at, relative to a world folder:
 /// `<world_dir>/data/minecraft/world_gen_settings.dat`.
 ///
-/// From `writeSavedData`'s
-/// `type.id().withSuffix(".dat").resolveAgainst(worldFolder.resolve("data"))`
-/// where `WorldGenSettings.TYPE`'s id is `minecraft:world_gen_settings` — a
-/// `ResourceLocation`, so its namespace becomes a directory component.
+/// Derived by vanilla's generic per-type-file save path from this file's
+/// registered id, `minecraft:world_gen_settings` — a namespaced identifier,
+/// so its namespace becomes a directory component and the id (with a `.dat`
+/// suffix) becomes the filename, resolved under the world folder's `data/`.
 #[must_use]
 pub fn path_in(world_dir: &Path) -> PathBuf {
     world_dir
@@ -304,7 +303,7 @@ pub fn read_from_file(path: &Path) -> Result<WorldGenSettings> {
 }
 
 /// Encodes `settings` as a full file's contents (gzip-wrapped named NBT,
-/// matching `NbtIo.writeCompressed`).
+/// matching the real write path).
 ///
 /// # Errors
 ///
@@ -321,8 +320,8 @@ pub fn write(settings: &WorldGenSettings) -> Result<Vec<u8>> {
 }
 
 /// Encodes and writes `settings` to `path`, creating parent directories —
-/// vanilla's own `FileUtil.createDirectoriesSafe(path.getParent())`, called
-/// from `LevelStorageSource.writeSavedData`, needed because
+/// matching vanilla's own generic per-type-file save path, which does the
+/// same safe directory creation before writing, needed because
 /// `<world>/data/minecraft/` does not exist in a world folder this code has
 /// only ever written regions to.
 ///
