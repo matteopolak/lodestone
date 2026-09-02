@@ -9367,7 +9367,7 @@ fn apply_container_button_click<P: ServerProtocol>(
         return Vec::new();
     }
 
-    // `EnchantmentMenu.getEnchantmentList`: reseeded per slot so each of the
+    // Vanilla's own enchantment-menu enchantment-list getter: reseeded per slot so each of the
     // three offers is an independent draw off the same base seed.
     let mut rng = SpawnRng::new(seed.wrapping_add(slot as i64) as u64);
     let offers = crate::enchanting::select_enchantments(&mut rng, &item, cost);
@@ -9427,14 +9427,14 @@ fn apply_container_button_click<P: ServerProtocol>(
 }
 
 /// [`apply_container_button_click`]'s loom/stonecutter branch —
-/// `LoomMenu.clickMenuButton`/`StonecutterMenu.clickMenuButton`. Both just
+/// vanilla's own loom-menu/stonecutter-menu click-menu-button routines. Both just
 /// pick which offer [`workstation_result`] shows next; neither has a lapis
 /// or XP cost (contrast the enchanting table above), so this only ever needs
 /// to validate the index and resend the menu.
 ///
 /// `station == Station::Stonecutter`'s own reselect guard
-/// (`StonecutterMenu.clickMenuButton`'s `if (selectedRecipeIndex.get() ==
-/// buttonId) return false;`) is reproduced; `LoomMenu.clickMenuButton` has no
+/// (its own stonecutter-menu click-menu-button routine's `if (selectedRecipeIndex.get() ==
+/// buttonId) return false;`) is reproduced; its own loom-menu click-menu-button routine has no
 /// such guard and re-applies unconditionally when the index is valid.
 fn apply_workstation_button_click<P: ServerProtocol>(
     proto: &P,
@@ -9547,8 +9547,8 @@ fn spawn_dropped_stacks(
     }
     let Some((x, y, z)) = player_pos else { return };
     // Vanilla routes a container throw through the *same* `drop(stack, false,
-    // true)` the `Q` key uses (`AbstractContainerMenu.doClick`'s outside case →
-    // `Player.drop`), so it gets the same hand position and the same forward
+    // true)` the `Q` key uses (its own container-menu doClick outside case →
+    // its own player-drop routine), so it gets the same hand position and the same forward
     // impulse. This used to release at the eye with **zero** velocity and a
     // 10-tick pickup delay, with a comment saying facing was not tracked here — it
     // is (`player_rot`), and the effect of the old shape was that a stack thrown
@@ -9581,13 +9581,13 @@ fn spawn_dropped_stacks(
 ///
 /// Vanilla's own `ServerPlayer.drop(boolean)`, which is
 /// three steps: `Inventory.removeFromSelected(all)` takes the items, the menu is
-/// told the selected slot's *new* contents, and `LivingEntity.drop` spawns the
+/// told the selected slot's *new* contents, and vanilla's own entity-drop routine spawns the
 /// entity with [`crate::block_drops::thrown_item_velocity`].
 ///
 /// # The slot update is a deliberate divergence from vanilla, not a port of it
 ///
 /// **Vanilla sends nothing here.** There is no drop ack, and
-/// `ServerPlayer.drop`'s `containerMenu.setRemoteSlot(slotIndex, …)` is *not* a
+/// vanilla's own per-player drop routine's `containerMenu.setRemoteSlot(slotIndex, …)` is *not* a
 /// send — it updates the server's record of what the client is believed to hold,
 /// which **suppresses** the corrective broadcast that would otherwise follow. That
 /// works because the client predicts the drop itself (`lodestone-client`'s
@@ -9778,14 +9778,14 @@ fn launch_intent(path: &str) -> Option<LaunchIntent> {
 
 /// The ammunition a drawn bow consumes, and whether the inventory has any.
 ///
-/// `Player.getProjectile` searches for anything matching the weapon's
+/// Vanilla's own `getProjectile` searches for anything matching the weapon's
 /// `ammoPredicate`; this crate models the plain arrow only, which is the ammunition
 /// a vanilla bow finds first anyway.
 const BOW_AMMUNITION: &str = "arrow";
 
 /// One consume (eat or drink) in progress on a connection.
 ///
-/// Vanilla's `LivingEntity.useItem`/`useItemRemaining` pair, reduced to the two
+/// Vanilla's own `useItem`/`useItemRemaining` pair, reduced to the two
 /// facts the completion needs: which slot is being eaten from, and when it
 /// finishes. `item` is carried so a slot whose contents changed mid-bite (a
 /// container click, a hotbar swap) cannot complete as if it were still the food
@@ -9796,11 +9796,11 @@ pub(crate) struct ItemInUse {
     native: usize,
     /// The item that started the use, full registry name.
     item: String,
-    /// The `MobSim` tick the use completes on — `started + Consumable.consumeTicks()`.
+    /// The `MobSim` tick the use completes on — `started` plus vanilla's own consumable consume-ticks value.
     finish_tick: u64,
     /// The `remaining` value the last periodic consume sound was published for.
     ///
-    /// `Consumable.shouldEmitParticlesAndSounds` is a predicate on
+    /// Vanilla's own consumable emit-particles-and-sounds predicate is on
     /// `remaining % 4 == 0`, which is correct **only if it is evaluated exactly once
     /// per tick**. The loop that drives it reads `MobSim`'s counter from a 50 ms
     /// timer arm, and the two clocks are not the same object: if the timer fires
@@ -9810,7 +9810,7 @@ pub(crate) struct ItemInUse {
     last_effect_remaining: Option<u32>,
 }
 
-/// What a `USE_ITEM` started. Vanilla's `Item.use` returns an
+/// What a `USE_ITEM` started. Vanilla's own item-use routine returns an
 /// `InteractionResult`; this is the subset with a consequence here.
 #[derive(Debug)]
 enum UseItemOutcome {
@@ -9820,22 +9820,22 @@ enum UseItemOutcome {
     Draw(BowDraw),
     /// A consume opened; the server's own clock ends it.
     Consuming(ItemInUse),
-    /// An equip swap already happened — arm 2 of `Item.use` is instantaneous,
+    /// An equip swap already happened — arm 2 of vanilla's own item-use routine is instantaneous,
     /// unlike arms 1, 3 and 4.
     Equipped(crate::item_use::EquipSwap),
 }
 
-/// Applies a `USE_ITEM`: `Item.use`'s ordered arms, plus the projectile items
+/// Applies a `USE_ITEM`: vanilla's own item-use routine's ordered arms, plus the projectile items
 /// whose own `use` override replaces it.
 ///
-/// The order below is `Item.use`'s own, and it is load-bearing — see
+/// The order below is vanilla's own item-use routine's own, and it is load-bearing — see
 /// `crate::item_use`'s module doc. The launch arm sits first because those items
-/// (`BowItem`, `SnowballItem`, `ThrowablePotionItem`) *override* `Item.use`
+/// (`BowItem`, `SnowballItem`, `ThrowablePotionItem`) *override* vanilla's own item-use routine
 /// entirely rather than being an arm of it, so they are a disjoint set and cannot
 /// race the arms below.
 ///
 /// `food_level` and `invulnerable` are the acting player's, for
-/// `Player.canEat`'s two non-item disjuncts.
+/// vanilla's own can-eat check's two non-item disjuncts.
 #[allow(clippy::too_many_arguments)]
 fn apply_use_item(
     mobs: &MobHandle,
