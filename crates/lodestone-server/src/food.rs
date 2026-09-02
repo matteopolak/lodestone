@@ -3,10 +3,10 @@
 //!
 //! # What it is
 //!
-//! [`FoodData`] is a transcription of vanilla's `net.minecraft.world.food.FoodData`
+//! [`FoodData`] is a transcription of vanilla's own food-data record
 //! — a plain value type with a pure [`tick`](FoodData::tick) step. It owns the four
-//! numbers vanilla's does (`foodLevel`, `saturationLevel`, `exhaustionLevel`,
-//! `tickTimer`) and reports what a tick decided as a [`FoodTick`] rather than
+//! numbers vanilla's does (food level, saturation level, exhaustion level,
+//! tick timer) and reports what a tick decided as a [`FoodTick`] rather than
 //! reaching into health itself, so [`crate::vitals::PlayerVitals`] stays the single
 //! owner of health and this module stays unit-testable in isolation. That is the
 //! same split `PlayerVitals::tick` already draws for drowning.
@@ -33,8 +33,8 @@
 //!
 //! ## The exhaustion costs, and the one that is zero
 //!
-//! Read off `FoodConstants` and `ServerPlayer.checkMovementStatistics`, which is
-//! where the per-distance ones live. Vanilla's distance term is
+//! Read off vanilla's own food constants and its per-player movement-statistics
+//! rule, which is where the per-distance ones live. Vanilla's distance term is
 //! `round(sqrt(dx² + dz²) * 100)` centimetres, multiplied by `0.01` again — so the
 //! per-**block** cost is just the leading constant:
 //!
@@ -76,7 +76,8 @@
 //!
 //! ## Regeneration and starvation are one if/else chain
 //!
-//! `FoodData.tick`'s second half is a four-arm chain sharing **one** `tickTimer`,
+//! The real per-tick rule's second half is a four-arm chain sharing **one** tick
+//! timer,
 //! and the exclusivity is load-bearing — a player cannot be regenerating and
 //! starving in the same tick, and any arm not taken resets the timer to zero:
 //!
@@ -107,12 +108,12 @@
 //!   from the site that knows the action happened. The constants live here; the
 //!   producer sites are in `crate::server`.
 //! * **Eating**: [`FoodData::eat`] takes nutrition and a saturation *modifier*, and
-//!   `saturationByModifier` is `nutrition * modifier * 2.0` — not `nutrition *
-//!   modifier`. The per-item table is data, not formula, and lives in the item's
+//!   the real saturation-by-modifier rule is `nutrition * modifier * 2.0` — not
+//!   `nutrition * modifier`. The per-item table is data, not formula, and lives in the item's
 //!   food component; nothing supplies it yet, so `eat` has no production caller.
 //! * **Persistence**: the four fields map to `level.dat`-style player NBT under
 //!   `foodLevel` / `foodTickTimer` / `foodSaturationLevel` / `foodExhaustionLevel`,
-//!   vanilla's own names ([`FoodData::restored`]).
+//!   vanilla's own field names ([`FoodData::restored`]).
 //!
 //! # Dependencies
 //!
@@ -122,72 +123,74 @@
 
 use lodestone_model::Difficulty;
 
-/// `FoodConstants.MAX_FOOD` — the food level a fresh player has and the cap
+/// The real max-food constant — the food level a fresh player has and the cap
 /// [`FoodData::eat`] clamps to.
 pub const MAX_FOOD: i32 = 20;
 
-/// `FoodConstants.START_SATURATION` — a fresh player's hidden saturation buffer.
+/// The real start-saturation constant — a fresh player's hidden saturation buffer.
 ///
 /// The reason a new spawn can sprint 200 blocks before the haunches move: at `0.1`
 /// exhaustion per block and `4.0` exhaustion per saturation point, `5.0` saturation
 /// is `5 * 40` blocks.
 pub const START_SATURATION: f32 = 5.0;
 
-/// `FoodConstants.EXHAUSTION_DROP` — how much exhaustion one point of saturation
+/// The real exhaustion-drop constant — how much exhaustion one point of saturation
 /// (or, once saturation is gone, one point of food) costs.
 pub const EXHAUSTION_DROP: f32 = 4.0;
 
-/// The cap `addExhaustion` clamps to (`Math.min(this.exhaustionLevel + amount, 40.0F)`).
+/// The cap the real add-exhaustion rule clamps to.
 ///
-/// Not in `FoodConstants` — it is a literal inside `FoodData.addExhaustion`, which
+/// Not in the food constants — it is a literal inside that rule itself, which
 /// is why it is easy to leave out. Without it a single huge exhaustion event (a
 /// long fall's worth of damage, a scripted teleport) would drain the whole food bar
 /// over the following ticks instead of costing at most ten saturation points.
 pub const MAX_EXHAUSTION: f32 = 40.0;
 
-/// `FoodConstants.HEAL_LEVEL` — the food level at or above which the slow
+/// The real heal-level constant — the food level at or above which the slow
 /// regeneration arm runs.
 pub const HEAL_LEVEL: i32 = 18;
 
-/// `FoodConstants.HEALTH_TICK_COUNT` — the slow regeneration and starvation period.
+/// The real health-tick-count constant — the slow regeneration and starvation period.
 pub const HEALTH_TICK_COUNT: i32 = 80;
 
-/// `FoodConstants.HEALTH_TICK_COUNT_SATURATED` — the fast regeneration period,
+/// The real health-tick-count-saturated constant — the fast regeneration period,
 /// available only at a full food bar with saturation left.
 pub const HEALTH_TICK_COUNT_SATURATED: i32 = 10;
 
-/// `FoodConstants.EXHAUSTION_HEAL` — what the slow regeneration arm charges for one
+/// The real exhaustion-heal constant — what the slow regeneration arm charges for one
 /// heart. Six saturation points per half-heart-and-a-half is why regenerating from
 /// low health empties a food bar.
 pub const EXHAUSTION_HEAL: f32 = 6.0;
 
-/// `FoodConstants.EXHAUSTION_JUMP`.
+/// The real exhaustion-jump constant.
 pub const EXHAUSTION_JUMP: f32 = 0.05;
 
-/// `FoodConstants.EXHAUSTION_SPRINT_JUMP` — four times a walking jump.
+/// The real exhaustion-sprint-jump constant — four times a walking jump.
 pub const EXHAUSTION_SPRINT_JUMP: f32 = 0.2;
 
-/// `FoodConstants.EXHAUSTION_MINE` — per block broken.
+/// The real exhaustion-mine constant — per block broken.
 pub const EXHAUSTION_MINE: f32 = 0.005;
 
-/// `FoodConstants.EXHAUSTION_ATTACK` — per swing that lands.
+/// The real exhaustion-attack constant — per swing that lands.
 pub const EXHAUSTION_ATTACK: f32 = 0.1;
 
-/// `FoodConstants.EXHAUSTION_SPRINT`, as the leading constant of
-/// `checkMovementStatistics`' `0.1F * cm * 0.01F` — i.e. **per block**, since the
-/// `cm` term is `distance * 100` and the trailing factor is `0.01`.
+/// The real exhaustion-sprint constant, as the leading constant of
+/// vanilla's own per-player movement-statistics rule's `0.1F * cm * 0.01F` — i.e.
+/// **per block**, since the `cm` term is `distance * 100` and the trailing factor
+/// is `0.01`.
 pub const EXHAUSTION_SPRINT_PER_BLOCK: f32 = 0.1;
 
-/// `FoodConstants.EXHAUSTION_SWIM`, per block, derived the same way as
+/// The real exhaustion-swim constant, per block, derived the same way as
 /// [`EXHAUSTION_SPRINT_PER_BLOCK`]. Also the cost of walking with the eye
 /// underwater and of walking on water, which share the constant.
 pub const EXHAUSTION_SWIM_PER_BLOCK: f32 = 0.01;
 
-/// `FoodConstants.EXHAUSTION_WALK` — **zero**, and written as an explicit `0.0F`
+/// The real exhaustion-walk constant — **zero**, and written as an explicit `0.0F`
 /// multiply in vanilla rather than as a missing branch. See this module's doc.
 pub const EXHAUSTION_WALK_PER_BLOCK: f32 = 0.0;
 
-/// The starvation hit (`player.hurtServer(level, damageSources().starve(), 1.0F)`).
+/// The starvation hit (vanilla's own hurt rule, with the starve damage source, for
+/// `1.0F`).
 pub const STARVE_DAMAGE: f32 = 1.0;
 
 /// What one [`FoodData::tick`] decided, so the caller can apply it to health and
@@ -271,17 +274,17 @@ impl FoodData {
         self.tick_timer
     }
 
-    /// `vanilla FoodData.addExhaustion` — clamped at [`MAX_EXHAUSTION`].
+    /// The real add-exhaustion rule — clamped at [`MAX_EXHAUSTION`].
     ///
-    /// The caller is responsible for vanilla's `Player.causeFoodExhaustion` guard
-    /// (`!abilities.invulnerable`), because this type does not know the game mode.
+    /// The caller is responsible for vanilla's own cause-food-exhaustion guard
+    /// (not invulnerable), because this type does not know the game mode.
     /// Skipping that guard makes a creative player starve.
     pub fn add_exhaustion(&mut self, amount: f32) {
         self.exhaustion = (self.exhaustion + amount).min(MAX_EXHAUSTION);
     }
 
-    /// `vanilla FoodData.eat(int, float)` — nutrition plus
-    /// `FoodConstants.saturationByModifier(nutrition, modifier)`, which is
+    /// The real eat rule — nutrition plus
+    /// the real saturation-by-modifier rule, which is
     /// `nutrition * modifier * 2.0F`.
     ///
     /// **The `* 2.0` is the part that gets dropped**, and dropping it halves every
@@ -291,16 +294,16 @@ impl FoodData {
         self.add(nutrition, nutrition as f32 * saturation_modifier * 2.0);
     }
 
-    /// `vanilla FoodData.add` — the private half [`eat`](Self::eat) goes through.
+    /// The real add rule — the private half [`eat`](Self::eat) goes through.
     fn add(&mut self, food: i32, saturation: f32) {
         self.food_level = (self.food_level + food).clamp(0, MAX_FOOD);
         self.saturation = (self.saturation + saturation).clamp(0.0, self.food_level as f32);
     }
 
-    /// Advances hunger by exactly one server tick — `FoodData.tick`, transcribed.
+    /// Advances hunger by exactly one server tick — the real per-tick rule, transcribed.
     ///
-    /// `health` and `max_health` are the player's, for the `isHurt()` test
-    /// (`getHealth() < getMaxHealth()`) and for the starvation difficulty gate.
+    /// `health` and `max_health` are the player's, for the real is-hurt test
+    /// (current health below max health) and for the starvation difficulty gate.
     /// `natural_regen` is the `natural_health_regeneration` game rule.
     ///
     /// Returns what to apply rather than applying it — see [`FoodTick`].
@@ -378,7 +381,7 @@ impl FoodData {
     }
 
     /// Rebuilds from saved player NBT, under vanilla's own field names
-    /// (`readAdditionalSaveData`'s `foodLevel` / `foodTickTimer` /
+    /// (`foodLevel` / `foodTickTimer` /
     /// `foodSaturationLevel` / `foodExhaustionLevel`).
     ///
     /// Every value is **clamped to its legal range** rather than trusted, for the
@@ -398,13 +401,8 @@ impl FoodData {
     }
 }
 
-/// Vanilla's starvation difficulty gate, verbatim:
-///
-/// ```java
-/// player.getHealth() > 10.0F
-///    || difficulty == Difficulty.HARD
-///    || player.getHealth() > 1.0F && difficulty == Difficulty.NORMAL
-/// ```
+/// Vanilla's starvation difficulty gate, restated: health above 10, or difficulty
+/// is Hard, or (health above 1 and difficulty is Normal).
 ///
 /// Read as behaviour rather than as three clauses: **Hard starves you to death,
 /// Normal stops at 1 health, and Easy *and Peaceful* stop at 10.** Peaceful appears
