@@ -18,7 +18,10 @@
 //!   being built for (a range widened without checking it against every
 //!   protocol it now claims to cover);
 //! - a [`Handler`] bound to a name absent from the protocol's own id table
-//!   (a handler nobody's wire will ever call).
+//!   (a handler nobody's wire will ever call) -- *unless* the handler's own
+//!   range excludes the protocol being built for, which is how an era crate
+//!   spanning several protocols names a packet only some of them carry. The
+//!   same qualifier applies to a stale [`IGNORED`] entry.
 //!
 //! Both `Handler` and `Table` are generic over the payload a family actually
 //! runs (`T`) — this module knows nothing about `ClientEvent`, `Directive`,
@@ -54,6 +57,13 @@ impl<T> Handler<T> {
 /// `"v26-2 has this; backport"`). The all-caps name mirrors the per-family
 /// `static IGNORED: &[dispatch::IGNORED]` table this type is meant to
 /// populate.
+///
+/// Like [`Handler`], an entry carries the protocol range over which it is a
+/// live exemption. A single-protocol family leaves it at
+/// [`ProtocolRange::ALL`] via [`IGNORED::new`]; an era crate covering several
+/// protocols uses [`IGNORED::ranged`] for a packet only some of its protocols
+/// carry, so the entry is neither demanded by a protocol that has no such
+/// packet nor silently tolerated by one that does.
 #[derive(Debug, Clone, Copy)]
 #[allow(non_camel_case_types)]
 pub struct IGNORED {
@@ -61,13 +71,33 @@ pub struct IGNORED {
     pub name: &'static str,
     /// Why this packet has no handler.
     pub reason: &'static str,
+    /// Protocol range over which this exemption applies.
+    pub protocols: ProtocolRange,
 }
 
 impl IGNORED {
-    /// Builds an ignore-list entry.
+    /// Builds an ignore-list entry valid for every protocol.
     #[must_use]
     pub const fn new(name: &'static str, reason: &'static str) -> Self {
-        Self { name, reason }
+        Self {
+            name,
+            reason,
+            protocols: ProtocolRange::ALL,
+        }
+    }
+
+    /// Builds an ignore-list entry valid only over `protocols`.
+    #[must_use]
+    pub const fn ranged(
+        name: &'static str,
+        reason: &'static str,
+        protocols: ProtocolRange,
+    ) -> Self {
+        Self {
+            name,
+            reason,
+            protocols,
+        }
     }
 }
 
@@ -171,20 +201,29 @@ impl<'a, T> Table<'a, T> {
                 entries.insert(id, &handler.run);
                 continue;
             }
-            if let Some(entry) = ignored.iter().find(|entry| entry.name == name) {
+            if let Some(entry) = ignored
+                .iter()
+                .find(|entry| entry.name == name && entry.protocols.contains(protocol))
+            {
                 matched_ignored.insert(entry.name, ());
                 continue;
             }
             return Err(DispatchError::UnlistedId { name, id });
         }
 
-        for (name, _) in handlers {
-            if !matched_handlers.contains_key(name) {
+        // A handler or ignore entry whose declared range excludes `protocol`
+        // is *expected* to go unmatched here: it describes a packet some other
+        // protocol in this family carries and this one does not. Only an entry
+        // that claims to cover `protocol` and still found no id is a defect --
+        // without that qualifier an era crate could not name a packet at all
+        // unless every protocol it serves carried it.
+        for (name, handler) in handlers {
+            if !matched_handlers.contains_key(name) && handler.protocols.contains(protocol) {
                 return Err(DispatchError::UnboundHandler { name });
             }
         }
         for entry in ignored {
-            if !matched_ignored.contains_key(entry.name) {
+            if !matched_ignored.contains_key(entry.name) && entry.protocols.contains(protocol) {
                 return Err(DispatchError::StaleIgnored { name: entry.name });
             }
         }
@@ -369,6 +408,118 @@ mod tests {
             err,
             DispatchError::StaleIgnored {
                 name: "minecraft:long_gone",
+            }
+        );
+    }
+
+    /// An era crate covering several protocols binds handlers for packets
+    /// only some of those protocols carry. A handler whose declared range
+    /// excludes the protocol being built for must therefore be *skipped*
+    /// when this protocol's table has no such id -- not reported as an
+    /// unbound handler.
+    #[test]
+    fn handler_outside_this_protocol_may_be_absent_from_the_id_table() {
+        const OLD_IDS: &[(&str, i32)] = &[("minecraft:set_health", 0)];
+        let handlers: &[(&str, Handler<fn(i32) -> i32>)] = &[
+            (
+                "minecraft:set_health",
+                Handler::new(ProtocolRange::ALL, handle_set_health),
+            ),
+            (
+                // Only exists from 776 on; the 340 table below has no such id.
+                "minecraft:add_entity",
+                Handler::new(ProtocolRange::new(776, 776), handle_add_entity),
+            ),
+        ];
+
+        let table = Table::build(340, OLD_IDS, handlers, &[]).expect("table should build");
+        assert_eq!(table.len(), 1);
+    }
+
+    /// Negative control for the test above: the *same* absent name, with a
+    /// range that does claim to cover this protocol, must still fail. Without
+    /// this pair the skip above would be indistinguishable from having
+    /// deleted the check.
+    #[test]
+    fn negative_control_in_range_handler_absent_from_id_table_still_fails() {
+        const OLD_IDS: &[(&str, i32)] = &[("minecraft:set_health", 0)];
+        let handlers: &[(&str, Handler<fn(i32) -> i32>)] = &[
+            (
+                "minecraft:set_health",
+                Handler::new(ProtocolRange::ALL, handle_set_health),
+            ),
+            (
+                "minecraft:add_entity",
+                Handler::new(ProtocolRange::new(110, 776), handle_add_entity),
+            ),
+        ];
+
+        let err = Table::build(340, OLD_IDS, handlers, &[])
+            .expect_err("an in-range handler with no id must still fail");
+        assert_eq!(
+            err,
+            DispatchError::UnboundHandler {
+                name: "minecraft:add_entity",
+            }
+        );
+    }
+
+    /// The `IGNORED` half of the same rule: an exemption declared only for
+    /// protocols that carry the packet is not stale on one that does not.
+    #[test]
+    fn ranged_ignore_entry_outside_this_protocol_is_not_stale() {
+        const OLD_IDS: &[(&str, i32)] = &[("minecraft:set_health", 0)];
+        let handlers: &[(&str, Handler<fn(i32) -> i32>)] = &[(
+            "minecraft:set_health",
+            Handler::new(ProtocolRange::ALL, handle_set_health),
+        )];
+        let ignored = &[IGNORED::ranged(
+            "minecraft:debug_sample",
+            "only exists from 776",
+            ProtocolRange::new(776, 776),
+        )];
+
+        let table = Table::build(340, OLD_IDS, handlers, ignored).expect("table should build");
+        assert_eq!(table.len(), 1);
+
+        // Negative control: the same entry left at ALL is stale at 340.
+        let stale = &[IGNORED::new("minecraft:debug_sample", "only exists from 776")];
+        assert_eq!(
+            Table::build(340, OLD_IDS, handlers, stale).expect_err("ALL range must be stale"),
+            DispatchError::StaleIgnored {
+                name: "minecraft:debug_sample",
+            }
+        );
+    }
+
+    /// A ranged ignore entry that excludes the protocol does **not** silently
+    /// excuse an id this protocol really does carry: the id falls through to
+    /// `UnlistedId`, the same error an absent entry would give.
+    #[test]
+    fn out_of_range_ignore_entry_does_not_excuse_a_present_id() {
+        let handlers: &[(&str, Handler<fn(i32) -> i32>)] = &[
+            (
+                "minecraft:set_health",
+                Handler::new(ProtocolRange::ALL, handle_set_health),
+            ),
+            (
+                "minecraft:add_entity",
+                Handler::new(ProtocolRange::ALL, handle_add_entity),
+            ),
+        ];
+        let ignored = &[IGNORED::ranged(
+            "minecraft:debug_sample",
+            "server-only debug packet",
+            ProtocolRange::new(776, 776),
+        )];
+
+        let err = Table::build(340, IDS, handlers, ignored)
+            .expect_err("an out-of-range exemption must not cover a live id");
+        assert_eq!(
+            err,
+            DispatchError::UnlistedId {
+                name: "minecraft:debug_sample",
+                id: 2,
             }
         );
     }

@@ -3,7 +3,7 @@
 //!
 //! Reported as "skeletons charging bows do not animate, and neither does the
 //! player". The state half of that (decoding `LivingEntity`'s using-item bit into
-//! an `ItemUse` component) is covered by hermetic tests in `lodestone-v770` and
+//! an `ItemUse` component) is covered by hermetic tests in `lodestone-v26-2` and
 //! `lodestone-ecs`; this is the half that decides whether any of it counts, because
 //! a crate's own test suite is a closed loop and every piece of this could be green
 //! while the screen is unchanged.

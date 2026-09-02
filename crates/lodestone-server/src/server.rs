@@ -1848,10 +1848,10 @@ impl OnlineModeConfig {
     /// **Not `#[cfg(test)]`**, deliberately, even though every current caller
     /// is a test: the login-sequence test that needs it
     /// (`tests/online_mode.rs`) drives the real [`V770ServerProtocol`] from
-    /// `lodestone-v770`, which has a *normal* dependency on this crate for the
-    /// `ServerProtocol` trait. Adding `lodestone-v770` as a *dev*-dependency
+    /// `lodestone-v26-2`, which has a *normal* dependency on this crate for the
+    /// `ServerProtocol` trait. Adding `lodestone-v26-2` as a *dev*-dependency
     /// here (so a `#[cfg(test)] mod tests` unit test could reach it) makes
-    /// this crate's own lib-test compilation and the copy `lodestone-v770`
+    /// this crate's own lib-test compilation and the copy `lodestone-v26-2`
     /// links against two different instantiations of the same trait —
     /// measured: `V770ServerProtocol: ServerProtocol is not implemented`
     /// against the crate's own trait. An external `tests/*.rs` binary has no
@@ -17101,7 +17101,7 @@ mod tests {
     /// A protocol double whose container encoders tag each directive with a
     /// distinct packet id, `window_id`, and `state_id`/`property` — enough
     /// for [`sync_open_container`]'s tests to read the diff *decisions* back
-    /// off the returned directives without needing the real `lodestone-v770`
+    /// off the returned directives without needing the real `lodestone-v26-2`
     /// wire encoding. Every other method is unreachable from these tests.
     struct ContainerTagProto;
 

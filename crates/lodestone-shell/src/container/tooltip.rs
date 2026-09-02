@@ -1508,7 +1508,7 @@ mod tests {
         const HOTBAR_0_MENU_SLOT: i16 = 36;
         // `minecraft:container_set_slot`'s protocol-776 clientbound id, from
         // Mojang's own `packets.json` (the same table
-        // `lodestone_v770::packet_ids` is generated from). Written here
+        // `lodestone_v26_2::packet_ids` is generated from). Written here
         // rather than imported because the shell must not name a protocol
         // family directly -- that is the version seam `just check-seam`
         // guards.

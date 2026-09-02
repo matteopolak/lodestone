@@ -647,7 +647,7 @@ pub use lodestone_worldgen::flat::{FlatLayer, FlatLevelGeneratorSettings, FlatLe
 
 /// `Heightmap.Types.MOTION_BLOCKING`'s registry id, re-exported for the same
 /// reason (issue #516): `lodestone-worldgen` is only a *dev*-dependency of
-/// `lodestone-v770`, so the encoder that writes
+/// `lodestone-v26-2`, so the encoder that writes
 /// [`ChunkColumn::motion_blocking`] into the chunk packet cannot name the
 /// constant at its source. Re-exported rather than restated so the id is never
 /// retyped from memory.

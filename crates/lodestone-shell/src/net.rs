@@ -5799,7 +5799,7 @@ mod tests {
     /// Player report: "the creeper has a hiss but no explosion sound."
     /// `decode_explode` (`crates/protocol/v770/src/adapter.rs`) already turns
     /// the `explode` packet into a `ClientEvent::Sound`, and that decode is
-    /// proven twice over in `lodestone-v770`'s own tests — once against a
+    /// proven twice over in `lodestone-v26-2`'s own tests — once against a
     /// hand-assembled fixture transcribed from `ClientboundExplodePacket`'s
     /// wire spec, once against a real vanilla 26.2 server's actual detonation
     /// (`live_creeper_explosion.rs`, `#[ignore]`d). Neither of those calls
