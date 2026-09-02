@@ -60,6 +60,13 @@ impl Plugin for CorePlugin {
         // silently unmeasured (`hold_read`/`hold_write` tolerate its absence),
         // which is precisely how a counter stops being evidence.
         app.init_resource::<crate::LockHolds>();
+        // Basic enough, and a missing resource behind a `ResMut<T>` system
+        // parameter panics at runtime with no compile-time warning, that
+        // every `App` gets entity-id minting the same way it gets a clock —
+        // see `crate::entity_spawn`'s module doc for why this resource in
+        // particular is folded in here rather than left to its own opt-in
+        // plugin the way `CustomEntityRegistry` is.
+        app.init_resource::<crate::entity_spawn::PluginEntityIds>();
 
         app.init_schedule(NetIngest);
         app.configure_sets(
