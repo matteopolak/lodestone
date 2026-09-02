@@ -1,34 +1,23 @@
 //! Observers: a 1-tick-wide pulse out the back face whenever
 //! the block the observer faces changes.
 //!
-//! # Cited directly
+//! # Transcribed from the real observer block
 //!
-//! `ObserverBlock.updateShape`/`startSignal`/`tick`:
+//! The real observer's shape-update, start-signal and scheduled-tick hooks,
+//! transcribed as the rules they implement:
 //!
-//! ```text
-//! protected BlockState updateShape(..., final Direction directionToNeighbour, ...) {
-//!    if (state.getValue(FACING) == directionToNeighbour && !state.getValue(POWERED)) {
-//!       this.startSignal(level, ticks, pos);
-//!    }
-//!    return super.updateShape(...);
-//! }
-//! private void startSignal(final LevelReader level, final ScheduledTickAccess ticks, final BlockPos pos) {
-//!    if (!level.isClientSide() && !ticks.getBlockTicks().hasScheduledTick(pos, this)) {
-//!       ticks.scheduleTick(pos, this, 2);
-//!    }
-//! }
-//! protected void tick(...) {
-//!    if (state.getValue(POWERED)) {
-//!       level.setBlock(pos, state.setValue(POWERED, false), 2);
-//!    } else {
-//!       level.setBlock(pos, state.setValue(POWERED, true), 2);
-//!       level.scheduleTick(pos, this, 2);
-//!    }
-//!    this.updateNeighborsInFront(level, pos, state);
-//! }
-//! ```
+//! On a neighbor shape update: if the changed neighbour sits in this
+//! observer's own facing direction and it is not already powered, start its
+//! signal.
 //!
-//! `updateShape`'s `directionToNeighbour` is "the direction travelled *from*
+//! To start the signal: on the server side only, and only if no tick is
+//! already pending, schedule one two ticks out.
+//!
+//! On the scheduled tick: if currently powered, unpower it. Otherwise, power
+//! it and immediately schedule another tick two ticks out. Either way,
+//! notify the blocks in front of it.
+//!
+//! The shape-update hook's neighbour direction is "the direction travelled *from*
 //! the observer *to* the neighbour that changed" — the opposite of
 //! `crate::neighbor_update::Notification::from` (which this crate's own
 //! doc comment defines as "the direction travelled from the *causing*
@@ -45,20 +34,21 @@
 //!
 //! # Named gaps
 //!
-//! **Placement/removal-specific behaviour is not modeled.** `onPlace`
+//! **Placement/removal-specific behaviour is not modeled.** The real
+//! on-place hook
 //! (forcing a freshly-placed observer unpowered without a pulse
 //! if it happened to load already-`POWERED`) and
-//! `affectNeighborsAfterRemoval` (firing a final pulse on
+//! the real affect-neighbors-after-removal hook (firing a final pulse on
 //! removal if one was mid-flight) both exist for save/load and
 //! player-placement edge cases. This crate has no player-driven block
 //! placement pipeline for any redstone component yet — the same "no producer to exercise it yet"
 //! reasoning `crate::redstone_torch`'s own module doc gives for skipping the
 //! anti-oscillation guard.
 //!
-//! **The trigger surface is narrower than vanilla's `updateShape`.**
-//! Vanilla's hook fires on *any* state change at the watched position,
+//! **The trigger surface is narrower than the real shape-update hook's.**
+//! The real hook fires on *any* state change at the watched position,
 //! including a piston pushing a block there or a block-entity data change
-//! vanilla specifically excludes. This crate only ever issues a [`Notification`] from the
+//! the real engine specifically excludes. This crate only ever issues a [`Notification`] from the
 //! handful of mutation families `crate::random_tick`'s reaction dispatch
 //! already covers (grass/dirt, crop/sapling/leaf, gravity, dust, torches,
 //! diodes) — the same "narrower, but real" trigger-surface deviation
@@ -82,16 +72,16 @@ pub fn watch_direction(state: &str) -> Direction {
 }
 
 /// `true` iff a pulse should be scheduled right now: not already powered
-/// (`updateShape`'s own `!state.getValue(POWERED)` guard — the
-/// "not already scheduled" half of `startSignal`'s guard is provided by
+/// (the real shape-update hook's own not-powered guard — the
+/// "not already scheduled" half of the real start-signal step's guard is provided by
 /// [`crate::scheduled_tick::ScheduledTickQueue::has_scheduled`] at the call
-/// site, matching `ScheduledTickAccess.getBlockTicks().hasScheduledTick`).
+/// site, matching the real engine's own has-scheduled-tick query).
 #[must_use]
 pub fn should_start_signal(state: &str) -> bool {
     !observer_powered(state)
 }
 
-/// `ObserverBlock.tick` — the unconditional toggle. Returns the new state
+/// The real observer's scheduled-tick hook — the unconditional toggle. Returns the new state
 /// and whether a follow-up tick must be scheduled (only when turning ON, so
 /// the pulse is always exactly one scheduled-tick period wide).
 #[must_use]
