@@ -487,7 +487,7 @@ pub enum MetadataField {
         /// Index 12.
         right: bool,
     },
-    /// `VehicleEntity.DATA_ID_HURT`/`DATA_ID_HURTDIR`/`DATA_ID_DAMAGE` — the
+    /// Vanilla's own vehicle-entity hurt-time/hurt-direction/damage synced-data trio — the
     /// rocking triple every boat, raft and minecart carries. Together they are
     /// the whole of the animation a punched hull plays: the client rolls the
     /// model by `sin(time) * time * damage / 10 * dir` about its own X axis.
@@ -502,8 +502,8 @@ pub enum MetadataField {
     /// knowledge. Only [`crate::mobs::MobSim::snapshots`]'s vehicle loop ever
     /// builds this variant, and every entry in that loop is a boat.
     ///
-    /// `dir`'s resting value is **`1`**, not `0` — `VehicleEntity
-    /// .defineSynchedData`'s registered default — and it multiplies the whole
+    /// `dir`'s resting value is **`1`**, not `0` — vanilla's own
+    /// vehicle-entity synced-data-definition registered default — and it multiplies the whole
     /// roll, so a `0` here draws a still boat rather than an unhurt one.
     VehicleHurt {
         /// Index 8: ticks remaining, `10` at the moment of the hit.
@@ -513,22 +513,23 @@ pub enum MetadataField {
         /// Index 10: accumulated damage x 10.
         damage: f32,
     },
-    /// `EnderDragon.DATA_PHASE` — the dragon's current
+    /// Vanilla's own ender-dragon phase synced-data field — the dragon's current
     /// `crate::dragon::phase::Phase` id (`Phase::id`), the wire twin of the
     /// state [`crate::mobs::MobSim::tick_dragons`] already drives for real.
     ///
     /// **Index 16, one of six `INT` claimants** in the committed jar dump
     /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
-    /// `Creeper.DATA_SWELL_DIR`, `Display.DATA_BRIGHTNESS_OVERRIDE_ID`,
-    /// `EnderDragon.DATA_PHASE`, `Phantom.ID_SIZE`, `Warden.CLIENT_ANGER_LEVEL`,
-    /// `WitherBoss.DATA_TARGET_A` (index 16 also carries `EnderMan.DATA_CARRY_STATE`,
+    /// the creeper's own swell-direction field, the display entity's own
+    /// brightness-override field, the ender dragon's own phase field, the
+    /// phantom's own size field, the warden's own client-anger-level field,
+    /// and the wither's own target-A field (index 16 also carries the enderman's own carry-state field,
     /// but that one is `OPTIONAL_BLOCK_STATE`, a different serializer). The
     /// serializer alone cannot separate one `INT` claimant from another, so
     /// only the producer — `MobSim::push_dragon_snapshots`, the sole caller —
     /// disambiguates; never push this variant for anything but a
     /// `minecraft:ender_dragon`.
     DragonPhase(i32),
-    /// `EndCrystal.DATA_BEAM_TARGET` — where the crystal's healing/summoning
+    /// Vanilla's own end-crystal beam-target synced-data field — where the crystal's healing/summoning
     /// beam points, or `None` for no beam (vanilla's own default).
     ///
     /// **Index 8, serializer `OPTIONAL_BLOCK_POS`** — self-identifying at that
@@ -536,7 +537,7 @@ pub enum MetadataField {
     /// `OPTIONAL_BLOCK_POS`; the other seventeen are `BYTE`/`FLOAT`/`INT`/
     /// `ITEM_STACK`/`BLOCK_POS`/`DIRECTION`/`BOOLEAN`), but `OPTIONAL_BLOCK_POS`
     /// itself is **not** globally self-identifying — the same serializer is
-    /// also `LivingEntity.SLEEPING_POS_ID` at index 14 and `Creaking.HOME_POS`
+    /// also the base living-entity's own sleeping-position field at index 14 and the creaking's own home-position field
     /// at index 19, so a decoder must still key on the index, not the
     /// serializer alone.
     ///
@@ -548,19 +549,19 @@ pub enum MetadataField {
     /// (matching [`crate::mobs::MobSim::damage_dragon`]'s own "not yet wired
     /// to a real hit" precedent), not a silent stub.
     CrystalBeamTarget(Option<BlockPos>),
-    /// `EndCrystal.DATA_SHOW_BOTTOM` — whether the crystal draws its bedrock
+    /// Vanilla's own end-crystal show-bottom synced-data field — whether the crystal draws its bedrock
     /// base, `true` unless it is a caged crystal on an obsidian spike.
     ///
     /// **Index 9, one of three `BOOLEAN` claimants** in the jar dump:
-    /// `AreaEffectCloud.DATA_WAITING`, `EndCrystal.DATA_SHOW_BOTTOM`,
-    /// `FishingHook.DATA_BITING` — the serializer does not separate them, so
+    /// the area-effect-cloud's own waiting field, the end-crystal's own show-bottom field,
+    /// and the fishing-hook's own biting field — the serializer does not separate them, so
     /// only the producer (`MobSim::push_end_crystal_snapshots`) disambiguates.
     /// Always `true` in this crate today: there are no obsidian pillars and so
     /// no caged crystal is ever spawned (see [`CrystalBeamTarget`](Self::CrystalBeamTarget)'s
     /// own doc) — a real field, pushed unconditionally, whose value simply
     /// never varies yet.
     CrystalShowBottom(bool),
-    /// `Entity.DATA_POSE` — index **6**, the one and only `POSE`-serializer
+    /// Vanilla's own base-entity pose synced-data field — index **6**, the one and only `POSE`-serializer
     /// claimant in the jar dump (`entity_data_index_jvm.txt`), so no species
     /// switch is needed to disambiguate it the way index 8 or 18 need one.
     ///
@@ -579,33 +580,33 @@ pub enum MetadataField {
     /// including this field the tick emerging ends would leave a client that
     /// received the `13` believing the warden is stuck emerging forever.
     Pose(u32),
-    /// `WitherBoss.DATA_ID_INV` — the invulnerable "emerging" countdown
+    /// Vanilla's own wither-boss invulnerable-ticks synced-data field — the invulnerable "emerging" countdown
     /// (`crate::wither::INVULNERABLE_TICKS` down to `0`) that drives the
     /// client-side shield visual while a freshly-summoned wither is still
     /// rising out of the ground.
     ///
     /// **Index 19, one of six `INT` claimants** in the committed jar dump
     /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
-    /// `Dolphin.MOISTNESS_LEVEL`, `Horse.DATA_ID_TYPE_VARIANT`,
-    /// `Panda.SNEEZE_COUNTER`, `Sniffer.DATA_DROP_SEED_AT_TICK`,
-    /// `SulfurCube.MAX_FUSE`, `WitherBoss.DATA_ID_INV` (index 19 also carries
-    /// several non-`INT` claimants such as `ArmorStand.DATA_RIGHT_ARM_POSE`
-    /// and `TamableAnimal.DATA_OWNERUUID_ID`, which a different serializer
+    /// the dolphin's own moistness-level field, the horse's own type-variant field,
+    /// the panda's own sneeze-counter field, the sniffer's own drop-seed-at-tick field,
+    /// the magma-cube's own max-fuse field, and the wither's own invulnerable-ticks field (index 19 also carries
+    /// several non-`INT` claimants such as the armor-stand's own right-arm-pose field
+    /// and the tamable-animal's own owner-uuid field, which a different serializer
     /// already separates). The serializer alone cannot separate one `INT`
     /// claimant from another, so only the producer disambiguates, exactly as
     /// [`DragonPhase`](Self::DragonPhase) documents for its own index; never
     /// push this variant for anything but a `minecraft:wither`.
     WitherInvulnerableTicks(i32),
-    /// `Goat.DATA_HAS_LEFT_HORN`/`Goat.DATA_HAS_RIGHT_HORN` — the two fields
-    /// `GoatRenderer` reads to hide a broken horn's cuboid.
+    /// Vanilla's own goat has-left-horn/has-right-horn synced-data fields — the two fields
+    /// its own renderer reads to hide a broken horn's cuboid.
     ///
     /// **Indices 19 and 20**, each one of a large `BOOLEAN` claimant set in
     /// the committed jar dump
     /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
     /// index 19 alone has thirteen non-`BOOLEAN` claimants
-    /// (`Villager.DATA_VILLAGER_DATA`, `TamableAnimal.DATA_OWNERUUID_ID`, …)
-    /// plus several other `BOOLEAN` ones (`Camel.DASH`,
-    /// `Axolotl.DATA_PLAYING_DEAD`, `Strider.DATA_SUFFOCATING`, …); index 20
+    /// (the villager's own villager-data field, the tamable-animal's own owner-uuid field, …)
+    /// plus several other `BOOLEAN` ones (the camel's own dash field,
+    /// the axolotl's own playing-dead field, the strider's own suffocating field, …); index 20
     /// is the same shape. The serializer alone cannot separate a goat's own
     /// pair from any of those, so only the producer
     /// ([`crate::mobs::SimMob::snapshot`]'s `"goat"` arm, the sole caller)
@@ -616,7 +617,7 @@ pub enum MetadataField {
     /// common case), matching [`Baby`](Self::Baby)'s own "a transition needs
     /// the same treatment as the arrival" reasoning — though in this crate
     /// today there is no mid-game transition to reach: the value is decided
-    /// once at spawn (`Goat.finalizeSpawn`'s pre-broken-horn roll,
+    /// once at spawn (vanilla's own goat finalize-spawn routine's pre-broken-horn roll,
     /// `crate::mobs::goat_horn_spawn_roll`) and never changes afterward,
     /// since `RamTarget`'s own doc discloses that the block-contact
     /// horn-breaking trigger is not ported (no block-state read on that
@@ -626,7 +627,7 @@ pub enum MetadataField {
         has_left: bool,
         has_right: bool,
     },
-    /// `Axolotl.DATA_PLAYING_DEAD` — index 19, one of the `BOOLEAN`
+    /// Vanilla's own axolotl playing-dead synced-data field — index 19, one of the `BOOLEAN`
     /// claimants [`GoatHorns`](Self::GoatHorns)'s own doc already names at
     /// that index. The producer ([`crate::mobs::SimMob::snapshot`]'s
     /// `"axolotl"` arm, the sole caller) disambiguates it from every other
@@ -639,10 +640,10 @@ pub enum MetadataField {
     /// too" reasoning: an axolotl that stops playing dead must send `false`,
     /// not merely stop sending `true`. Backed by
     /// [`crate::mobs::SimMob::axolotl_is_playing_dead`], itself
-    /// `Axolotl.hurtServer`'s own trigger collapsed to a plain countdown —
+    /// vanilla's own axolotl hurt-server routine's own trigger collapsed to a plain countdown —
     /// see that method's own doc for the roll and the disclosed narrowings.
     PlayingDead(bool),
-    /// `Camel.DASH` — index 19, one of the `BOOLEAN` claimants
+    /// Vanilla's own camel dash synced-data field — index 19, one of the `BOOLEAN` claimants
     /// [`GoatHorns`](Self::GoatHorns)'s own doc already names at that index.
     /// The producer ([`crate::mobs::SimMob::snapshot`]'s `"camel"` arm, the
     /// sole caller) disambiguates it from every other claimant, the same
@@ -655,17 +656,17 @@ pub enum MetadataField {
     /// [`crate::mobs::SimMob::camel_is_dashing`] — see that method's own
     /// doc for the disclosed narrowing (no `onGround` signal exists for a
     /// client-authoritative mount, so the reported window is
-    /// `Camel.DASH_MINIMUM_DURATION_TICKS` rather than the real
+    /// vanilla's own camel dash-minimum-duration-ticks constant rather than the real
     /// landing-triggered one).
     Dash(bool),
-    /// `Sniffer.DATA_STATE` — index 18, the crate's own `SNIFFER_STATE`
+    /// Vanilla's own sniffer state synced-data field — index 18, the crate's own `SNIFFER_STATE`
     /// serializer (id 35), not a reused generic one. The producer
     /// ([`crate::mobs::SimMob::snapshot`]'s `"sniffer"` arm, the sole
     /// caller) is the only thing that ever pushes this; never push it for
     /// anything but a `minecraft:sniffer`.
     ///
     /// Carries [`crate::mobs::sniffer::SnifferState::wire_ordinal`]'s
-    /// output directly — the real `Sniffer.State` enum ordinal, not a
+    /// output directly — the real sniffer-state enum ordinal, not a
     /// crate-local renumbering. Pushed unconditionally for every sniffer,
     /// matching [`Dash`](Self::Dash)'s own "the reset must reach the client
     /// too" reasoning.
