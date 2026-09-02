@@ -4967,7 +4967,7 @@ async fn apply_block_action<T, P, S>(
     // rather than refusing it.
     player_feet: Option<Vec3>,
     // Issue #327: the world's rules, for the `block_drops` gate below (vanilla's
-    // own gate site, inside `Block.dropResources`).
+    // own gate site, inside its own resource-drop routine).
     world: &crate::world_state::WorldStateHandle,
     // Issue #531. The server tick this packet is being handled on, for the
     // destroy-progress accounting. `None` on `wasm32`, which has no timer to
@@ -4978,7 +4978,7 @@ async fn apply_block_action<T, P, S>(
     // is published *except* for (this connection's own).
     block_ticks: &BlockTickFeed,
     breaker: uuid::Uuid,
-    // Issue: creative mode. `ServerPlayerGameMode.handleBlockBreakAction`'s very
+    // Issue: creative mode. Vanilla's own block-break-action handler's very
     // first branch is `if (this.isCreative()) { destroyAndAck(...); return; }` —
     // no hardness clock and no drops, whatever the block or the tool.
     creative: bool,
@@ -5107,10 +5107,10 @@ where
 /// Breaks the block at `pos`: rolls and pops its loot, clears any block entity
 /// and open container against it, and tells the client.
 ///
-/// Vanilla's `ServerPlayerGameMode.destroyBlock` funnel. Extracted from
+/// Vanilla's own destroy-block funnel. Extracted from
 /// [`apply_block_action`] by issue #531 because there are now **two** call sites
 /// — the instant break on `StartDestroy` and the validated `StopDestroy` — and
-/// vanilla likewise reaches `destroyBlock` from both.
+/// vanilla likewise reaches its own destroy-block routine from both.
 #[allow(clippy::too_many_arguments)]
 async fn destroy_block<T, P, S>(
     conn: &mut Connection<T>,
@@ -5123,13 +5123,13 @@ async fn destroy_block<T, P, S>(
     mobs: &MobHandle,
     drops_rng: &mut SpawnRng,
     held: Option<&ItemStack>,
-    // The break's own level event (`LevelEvent.PARTICLES_DESTROY_BLOCK`, sound
+    // The break's own level event (vanilla's own `PARTICLES_DESTROY_BLOCK`, sound
     // *and* particles in one packet), published excluding `breaker` — the
     // acting client predicts its own break sound locally, every other player
     // must hear it. See `BlockTickFeed::publish_effect_except`.
     block_ticks: &BlockTickFeed,
     breaker: uuid::Uuid,
-    // `false` in creative — `ServerPlayerGameMode.destroyBlock` calls
+    // `false` in creative — vanilla's own destroy-block routine calls
     // `removeBlock(pos, false)` there, so a creative break drops nothing and
     // rolls no loot at all (which also means it consumes no RNG draws).
     drop_loot: bool,
@@ -5141,12 +5141,12 @@ async fn destroy_block<T, P, S>(
     pos: BlockPos,
     // The statistics store, for the `minecraft:mined` counter. Keyed by the block
     // that was broken, and incremented on **every** break including a creative
-    // one — vanilla's `ServerPlayerGameMode.destroyBlock` calls
+    // one — vanilla's own destroy-block routine calls
     // `awardStat(Stats.BLOCK_MINED)` before the `isCreative()` fork that decides
     // whether anything drops, so gating this on `drop_loot` would silently stop
     // counting in creative.
     advancements: &mut AdvancementManager,
-    // Hunger's mining cost (`FoodConstants.EXHAUSTION_MINE`, 0.005 per block).
+    // Hunger's mining cost (vanilla's own `EXHAUSTION_MINE` constant, 0.005 per block).
     // `None` for a creative break — vanilla's guard is on `causeFoodExhaustion`
     // (`!abilities.invulnerable`), not on the break, so an invulnerable player mines
     // for free. An `Option` rather than a bool beside the vitals, so the guard
@@ -5162,14 +5162,14 @@ where
     // the whole reason the drop has to happen here rather than in a
     // later tick — once `set_block` has run, what was broken is
     // unrecoverable, and vanilla's own `removeBlock` likewise
-    // captures the fluid state first (`Level.removeBlock` reads
+    // captures the fluid state first (its own removal routine reads
     // `getFluidState(pos)`, and only then `setBlock(pos,
     // fluidState.createLegacyBlock())` — **not** air unconditionally,
     // see `new_state` below).
     let broken = source.block_state(pos.x, pos.y, pos.z);
-    // `Level.removeBlock`'s own write, which is what `ServerPlayerGameMode
-    // .destroyBlock` actually calls (not `Level.destroyBlock`, despite the
-    // name): the cell's *fluid* state survives a break. For a dry block
+    // Vanilla's own removal routine's own write, which is what its own
+    // destroy-block routine actually calls (not its own plain block-destroy
+    // routine, despite the name): the cell's *fluid* state survives a break. For a dry block
     // `fluid_state_of` is `None` and this is plain air, which is why every
     // existing break gate — all of them dry blocks — could not see the
     // difference. A waterlogged block's fluid state is a water source
@@ -5211,19 +5211,19 @@ where
     // caller to the wire path mobs already proved reaches a client.
     //
     // **Gated on `block_drops`** (pre-26.2 `doTileDrops`), which vanilla
-    // consults in the same place — `Block.dropResources` wraps
+    // consults in the same place — its own resource-drop routine wraps
     // `popResource` in `level.getGameRules().get(RULE_DOBLOCKDROPS)`.
     // ~~"this crate has no live game-rule registry to consult"~~ was
     // true when written; the registry is now `world_state`.
     //
     // **Issue #539: the tool decides both whether anything drops at
-    // all and what.** `drops_are_allowed` is vanilla's
-    // `Player.hasCorrectToolForDrops`, consulted by `destroyBlock`
+    // all and what.** `drops_are_allowed` is vanilla's own
+    // correct-tool-for-drops check, consulted by `destroyBlock`
     // *before* it calls `dropResources` — so a bare hand on stone
     // breaks the block and drops nothing, and the roll's RNG draws
     // never happen either (folding the check into the table would
     // still consume them and shift the next break's stream). `held`
-    // then rides into the roll as `LootContextParams.TOOL`, which is
+    // then rides into the roll as vanilla's own tool loot-context parameter, which is
     // what makes `match_tool`, `apply_bonus` and `table_bonus`
     // evaluate against a real item instead of an absent one.
     let popped = if drop_loot && crate::block_drops::drops_are_allowed(&broken, held) {
@@ -5254,7 +5254,7 @@ where
             }
         });
     }
-    // `Block.spawnAfterBreak` → `tryDropExperience` → `popExperience`: an ore pops
+    // Vanilla's own spawn-after-break → try-drop-experience → pop-experience chain: an ore pops
     // experience orbs at the **centre** of the broken cell, not at the jittered
     // positions its item drops used.
     //
@@ -5319,7 +5319,7 @@ where
     // never recomputed the dust and breaking the block *under* anything never
     // destroyed it. Both are here now, shapes first, matching that order.
     let mut collapsed = collapse_unsupported(source, pos);
-    // `NetherPortalBlock.updateShape` is a *second* member of
+    // Vanilla's own nether-portal block's update-shape hook is a *second* member of
     // `updateNeighbourShapes`, alongside `block_support`'s survives table
     // `collapse_unsupported` already runs above — a broken frame block must
     // extinguish the portal cells it was holding up, which
@@ -5332,18 +5332,18 @@ where
     if let Some(dimension) = source.dimension() {
         collapsed.extend(crate::portal::extinguish_broken_frames(source, dimension, pos));
     }
-    // `Block.updateOrDestroy` → `Level.destroyBlock(pos, true)` → `dropResources`.
+    // Vanilla's own update-or-destroy → destroy-block → drop-resources chain.
     //
     // **Gated on `cascade_drops`, not on `drop_loot`, and the difference is
-    // vanilla's**: the creative no-drop is `ServerPlayerGameMode.destroyBlock`
+    // vanilla's**: the creative no-drop is its own destroy-block routine
     // choosing `removeBlock(pos, false)` for the block *the player broke*, while a
-    // cell that self-destructs goes through `updateOrDestroy`, which knows nothing
+    // cell that self-destructs goes through its own update-or-destroy routine, which knows nothing
     // about who caused it. So a creative player mining the dirt under a flower does
     // get the flower, and reusing `drop_loot` here would have silently eaten it.
     //
-    // The tool is not consulted either: `updateOrDestroy` reaches the
-    // three-argument `Block.dropResources(state, level, pos)`, which carries no
-    // `LootContextParams.TOOL` — hence `None` rather than `held`, and no
+    // The tool is not consulted either: the update-or-destroy routine reaches the
+    // three-argument drop-resources call, which carries no
+    // tool loot-context parameter — hence `None` rather than `held`, and no
     // `drops_are_allowed` call.
     if cascade_drops {
         for (cell, was) in &collapsed {
@@ -5371,7 +5371,7 @@ where
         }
     }
     let mut fanned: Vec<(BlockPos, String)> = Vec::new();
-    // `TripWireBlock.affectNeighborsAfterRemoval` — the "the string just broke"
+    // Vanilla's own tripwire-block affect-neighbors-after-removal routine — the "the string just broke"
     // instant pulse. `broken` is `pos`'s own state from *before* this function
     // overwrote it, exactly what `propagate_removal_with_entities` needs; a
     // no-op for every block that is not a tripwire.
@@ -5417,7 +5417,7 @@ where
     Ok(())
 }
 
-/// Vanilla's `maxChainedNeighborUpdates` for the support cascade specifically.
+/// Vanilla's own `maxChainedNeighborUpdates` for the support cascade specifically.
 ///
 /// The tallest real chain is a bamboo or sugar-cane column (16 at the very most)
 /// or a two-cell door, so this is a runaway guard rather than a behavioural
@@ -5464,7 +5464,7 @@ where
         }) {
             continue;
         }
-        // `Block.updateOrDestroy` reaches `Level.destroyBlock`, which — like
+        // Vanilla's own update-or-destroy routine reaches its own destroy-block routine, which — like
         // `removeBlock` above in this file — writes `fluidState
         // .createLegacyBlock()`, not literal air: a waterlogged sign whose
         // support block collapses leaves its water source behind. See
@@ -5614,8 +5614,8 @@ where
 /// inventory, and returns the native slots that changed (issue #337's fifth and
 /// last link).
 ///
-/// This is vanilla's `Player.aiStep` → `ItemEntity.playerTouch` →
-/// `Inventory.add` chain, minus the XP-orb branch. See
+/// This is vanilla's own per-tick step → item-entity player-touch →
+/// inventory-add chain, minus the XP-orb branch. See
 /// [`crate::block_drops::is_within_pickup_range`] for the volume and
 /// [`PlayerInventory::add`] for the destination order — both are vanilla
 /// behaviour that a plausible simplification gets wrong.
@@ -5762,7 +5762,7 @@ fn collect_nearby_items(
     Pickups { changed, takes }
 }
 
-/// Vanilla `Player.takeXpDelay`, the value `ExperienceOrb.playerTouch` resets it to.
+/// Vanilla's own `takeXpDelay` field, the value its own experience-orb player-touch routine resets it to.
 ///
 /// Two ticks, so a player standing in a pile absorbs one orb every other tick rather
 /// than all of them at once. It is what makes a big drop *sound* and *look* like a
@@ -5779,7 +5779,7 @@ struct AbsorbedOrb {
 }
 
 /// Absorbs at most one nearby experience orb into `experience` — the pickup half of
-/// `ExperienceOrb.playerTouch`.
+/// vanilla's own experience-orb player-touch routine.
 ///
 /// # Why at most one
 ///
@@ -5830,7 +5830,7 @@ fn collect_nearby_orbs(
 /// mask's `floor` does.
 ///
 /// The returned direction is the one the player is **looking**, matching the
-/// horizontal component of `BlockPlaceContext.getNearestLookingDirection` —
+/// horizontal component of vanilla's own nearest-looking-direction getter —
 /// a placed diode then applies `.opposite()` so the block faces the player.
 #[must_use]
 fn horizontal_look_direction(yaw: f32) -> Direction {
@@ -5842,7 +5842,7 @@ fn horizontal_look_direction(yaw: f32) -> Direction {
     }
 }
 
-/// `BlockState.getStateForPlacement` for the block a player just placed, or
+/// Vanilla's own `getStateForPlacement` for the block a player just placed, or
 /// `None` when no convention applies and the caller should keep the census's
 /// bare default-state name.
 ///
@@ -5854,7 +5854,7 @@ fn horizontal_look_direction(yaw: f32) -> Direction {
 /// property set rather than leaving it to be defaulted downstream.
 ///
 /// The observer is deliberately still yaw-only here, where vanilla's
-/// `ObserverBlock.getStateForPlacement` (`:134`) resolves a vertical facing too;
+/// vanilla's own observer-block placement state getter resolves a vertical facing too;
 /// `crate::redstone_observer` models horizontal observers only, so a
 /// `facing=up` observer would be a state the signal model cannot read.
 fn placed_block_state<F>(
@@ -5883,7 +5883,7 @@ where
     crate::block_placement::placement(block, ctx, block_at)
 }
 
-/// The two packets `ServerPlayer.setGameMode` sends: the mode itself, then the
+/// The two packets vanilla's own set-game-mode routine sends: the mode itself, then the
 /// abilities it implies.
 ///
 /// One helper because the pair must never be split — a client told it is in
