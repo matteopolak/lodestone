@@ -1250,14 +1250,15 @@ pub enum ServerBound {
     /// The client's movement-input flags for the current tick
     /// (`ServerboundPlayerInputPacket`). Three of the seven flags are
     /// threaded through: `sprint` is half of vanilla's melee knockback-bonus
-    /// gate (`Player.attack`'s `isSprinting() && fullStrengthAttack` — see
+    /// gate (vanilla's own attack routine's `isSprinting() && fullStrengthAttack` — see
     /// `crate::server::apply_attack`'s own doc comment for the other half,
-    /// which this crate cannot track), `shift` drives vanilla's
-    /// `Player.rideTick` dismount check (`wantsToStopRiding()` is
+    /// which this crate cannot track), `shift` drives vanilla's own
+    /// per-player ride-tick dismount check (`wantsToStopRiding()` is
     /// `isShiftKeyDown()`, tested every tick a passenger is aboard — see
     /// `crate::server`'s `PlayerInput` consumer for why reacting to each
     /// received packet already reproduces that edge, given this packet's own
-    /// producer only sends on change), and `jump` is `Camel.onPlayerJump`'s
+    /// producer only sends on change), and `jump` is vanilla's own camel
+    /// on-player-jump routine's
     /// whole trigger — see `crate::server`'s `PlayerInput` consumer for the
     /// same "a received packet already is the edge" reasoning `shift`
     /// documents, applied to a mounted camel's dash instead of a dismount.
@@ -1274,7 +1275,7 @@ pub enum ServerBound {
         /// vanilla's `wantsToStopRiding()` input.
         shift: bool,
         /// Whether the client reports itself as jumping this tick —
-        /// `Camel.onPlayerJump`'s trigger for a mounted camel's dash.
+        /// vanilla's own camel on-player-jump routine's trigger for a mounted camel's dash.
         jump: bool,
     },
     /// A creative-mode inventory slot write predicted locally by the client
@@ -1433,12 +1434,12 @@ pub enum ServerBound {
     },
     /// A client announced (or re-announced) its chat-signing session
     /// (`minecraft:chat_session_update`) —
-    /// `ServerboundChatSessionUpdatePacket` → `RemoteChatSession.Data`.
+    /// `ServerboundChatSessionUpdatePacket` → vanilla's own remote-chat-session data record.
     ///
     /// `crate::chat_session::ServerChatSession::new` is this variant's one
     /// consumer: it replaces whatever session this connection had announced
     /// before (resetting the verification chain to index 0, mirroring
-    /// vanilla's `resetPlayerChatState` swapping the whole
+    /// vanilla's own `resetPlayerChatState` swapping the whole
     /// `signedMessageDecoder` rather than repairing one) — see that type's
     /// own doc for what is and is not checked about it.
     ChatSessionAnnounced {
