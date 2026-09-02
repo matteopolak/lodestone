@@ -132,7 +132,7 @@ pub fn assert_monitor_system_is_read_only<M>(system: impl bevy_ecs::system::Into
     assert!(
         !access.combined_access().has_any_write(),
         "system `{}` was registered for EventPriority::Monitor but has \
-         mutable World access — Monitor must be read-only (issue #110)",
+         mutable World access — Monitor must be read-only",
         system.name()
     );
 }

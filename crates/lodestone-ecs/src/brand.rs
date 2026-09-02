@@ -82,9 +82,8 @@ pub struct ServerBrandPayload {
 impl PluginChannel for ServerBrandPayload {
     const CHANNEL: &'static str = "minecraft:brand";
 
-    /// Vanilla's `BrandPayload` is a single `FriendlyByteBuf::readUtf` — a VarInt
-    /// byte length then exactly that many UTF-8 bytes — and nothing else
-    /// (`net/minecraft/network/protocol/common/custom/BrandPayload.java`).
+    /// Vanilla's own brand payload is a single UTF string read — a VarInt
+    /// byte length then exactly that many UTF-8 bytes — and nothing else.
     ///
     /// Returns `None` on a truncated VarInt, a length that overruns the buffer,
     /// **trailing bytes after the string**, or invalid UTF-8. Strictness is right

@@ -1,4 +1,4 @@
-//! Extract-time custom draw-buffer API for client plugins (issue #161):
+//! Extract-time custom draw-buffer API for client plugins:
 //! generalizes [`crate::player::DebugLines`]' precedent — the one working
 //! instance of "a plugin pushes world-space geometry into a resource, the
 //! renderer polls it" — into textured/billboard-style world-space draws, the

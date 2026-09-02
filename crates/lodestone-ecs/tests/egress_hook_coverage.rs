@@ -158,7 +158,7 @@ fn the_set_of_direct_send_action_sites_has_not_changed() {
     assert_eq!(
         found, expected,
         "\n\nThe set of files calling send_action directly changed.\n\n\
-         EgressFilters (issue #157) hooks the ActionQueue drain only. A NEW file \
+         EgressFilters hooks the ActionQueue drain only. A NEW file \
          here is an action path a plugin cannot inspect or suppress.\n\n\
          Decide which it is, then update KNOWN_DIRECT_SEND_FILES in this file:\n\
          - if it should be filterable, queue into ActionQueue instead of calling \

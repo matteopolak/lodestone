@@ -36,7 +36,7 @@ pub struct WorldTime {
 /// reason to keep it now that there is one clock.
 pub const TICK_PERIOD: f64 = 1.0 / 20.0;
 
-/// Vanilla's `MAX_TICKS_PER_UPDATE` (`Minecraft.java`): how many catch-up ticks
+/// Vanilla's own max-ticks-per-update constant: how many catch-up ticks
 /// one driver iteration may run before the remaining backlog is dropped rather
 /// than replayed in a burst.
 pub const MAX_CATCH_UP_TICKS: u32 = 10;

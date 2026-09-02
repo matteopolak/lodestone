@@ -74,8 +74,8 @@ impl CollisionSource for Sea {
 /// crate that deliberately depends on no protocol family can still supply the
 /// vehicle's real box.
 ///
-/// The box is `sized(1.375F, 0.5625F)` from `EntityTypes.java`'s boat family — an
-/// outside constant, and one the buoyancy divisor genuinely reads.
+/// The box is `sized(1.375F, 0.5625F)` from vanilla's own entity-type registry's
+/// boat family — an outside constant, and one the buoyancy divisor genuinely reads.
 #[derive(Debug)]
 struct BoatFactsAdapter;
 
