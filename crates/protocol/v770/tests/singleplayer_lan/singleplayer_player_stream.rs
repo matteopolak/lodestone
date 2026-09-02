@@ -37,6 +37,7 @@ use lodestone_v770::packet_ids::{configuration, login, play};
 use lodestone_v770::packets::player_info::PlayerInfoUpdate;
 use uuid::Uuid;
 
+#[path = "../common/mod.rs"]
 mod common;
 use common::unique_username;
 
