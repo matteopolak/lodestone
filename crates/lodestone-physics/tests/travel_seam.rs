@@ -1,8 +1,8 @@
 //! `travel_in_air` seam tests — proving the gravity + drag + input-assembly core
 //! is genuinely entity-agnostic and is the *same* integrator the player runs.
 //!
-//! `LivingEntity.travelInAir` used to live inline in the player's `tick_air`. It
-//! was extracted into the public [`travel_in_air`] seam so a mob loop can call it
+//! Vanilla's own airborne travel step used to live inline in the player's
+//! `tick_air`. It was extracted into the public [`travel_in_air`] seam so a mob loop can call it
 //! without reimplementing gravity and drag — the "second copy of vanilla motion"
 //! failure this crate exists to prevent. Two things must hold, and this file
 //! asserts both rather than assuming them:
@@ -91,7 +91,7 @@ fn player_free_fall_routes_through_the_seam() {
     let mut saw_real_fall = false;
     for _ in 0..40 {
         tick_air(&mut player, MovementInput::NONE, &world, &profile);
-        // The player's `getSpeed()` at rest is its walk speed; with zero input the
+        // The player's own speed accessor at rest is its walk speed; with zero input the
         // rotated acceleration is zero, so any non-zero speed cannot leak in — the
         // fall is pure gravity + drag, exactly what the mob call below sees.
         travel_in_air(

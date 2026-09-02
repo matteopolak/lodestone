@@ -122,7 +122,7 @@ fn walk_into_ledge(world: &dyn CollisionView, dims: EntityDimensions, feet: Vec3
 #[test]
 fn box_half_widths_are_derived_in_f64() {
     // width / 2 is done in f64 *after widening the f32 width* (vanilla
-    // `makeBoundingBox`). That widening is observable: `0.6f32` is not `0.6f64`,
+    // vanilla's own bounding-box construction). That widening is observable: `0.6f32` is not `0.6f64`,
     // so the player half-width is 0.30000001192092896, not a clean 0.3, and the
     // box edge lands at 0.19999998807907104 rather than 0.2. Asserting the naive
     // decimal here would be wrong for exactly the reason the whole crate exists —
