@@ -6,8 +6,8 @@
 //!
 //! # The eye height is a parameter, not a constant
 //!
-//! Vanilla's eye height is pose-dependent (`Avatar.java`: `0.4` swimming,
-//! `1.27` crouching, `1.62` standing), so [`build_camera`] takes it explicitly.
+//! Vanilla's eye height is pose-dependent (`0.4` swimming, `1.27` crouching,
+//! `1.62` standing), so [`build_camera`] takes it explicitly.
 //! It used to hardcode
 //! [`PLAYER_EYE_HEIGHT`](lodestone_render::camera::PLAYER_EYE_HEIGHT), and the
 //! swimming work therefore pre-biased the *feet* Y by the difference at the call
@@ -20,39 +20,26 @@
 //!
 //! A pose change (standing `1.62` ↔ swimming `0.4`) is a **snap** in
 //! [`PlayerState::eye_height`] — it is set once, atomically, by
-//! `crate::pose::update_player_pose` (`Player.java`). Passing that
-//! straight into [`build_camera`] every frame is exactly what vanilla does
-//! *not* do, and is the source of the entering/leaving-swim camera jerk: real
-//! `Camera` (`.cache/mc/26.2/client-src/net/minecraft/client/Camera.java`)
-//! keeps its **own** `eyeHeight`/`eyeHeightOld` pair, entirely separate from
-//! the entity's, and eases toward the target by half the remaining distance
-//! every tick:
+//! `crate::pose::update_player_pose`. Passing that straight into
+//! [`build_camera`] every frame is exactly what vanilla does *not* do, and is
+//! the source of the entering/leaving-swim camera jerk: the real camera keeps
+//! its **own** current/previous eye-height pair, entirely separate from the
+//! entity's, and eases toward the target by half the remaining distance every
+//! tick — `eye_height_old = eye_height; eye_height += (target - eye_height) *
+//! 0.5`, run once per game tick — and reads it back with the same
+//! current/previous + partial-tick shape as the player's own position:
+//! `lerp(partial_tick, y_prev, y) + lerp(partial_tick, eye_height_prev,
+//! eye_height)`.
 //!
-//! ```java
-//! // Camera.tick(), :80-88
-//! this.eyeHeightOld = this.eyeHeight;
-//! this.eyeHeight = this.eyeHeight + (this.entity.getEyeHeight() - this.eyeHeight) * 0.5F;
-//! ```
-//!
-//! and reads it with the same current/previous + partial-tick shape as the
-//! player's own position (`Camera.alignWithEntity`, `:246-264`):
-//!
-//! ```java
-//! Mth.lerp(partialTicks, this.entity.yo, this.entity.getY())
-//!    + Mth.lerp(partialTicks, this.eyeHeightOld, this.eyeHeight)
-//! ```
-//!
-//! [`EyeHeightSmoother`] is that pair. **It is not `swimAmount`.** `swimAmount`
-//! (`LivingEntity.java`, modelled as
-//! [`PlayerState::swim_amount`]/`swim_amount_o`) is a linear `0..1` ramp at
-//! `0.09`/tick that blends the swimming **model**'s body-pitch animation —
-//! grepping every `.cache/mc/26.2/client-src` hit for `swimAmount` turns up
-//! only `HumanoidModel`, `HumanoidMobRenderer`, `DrownedRenderer`/`DrownedModel`
-//! and the humanoid render state, never `Camera` or `GameRenderer`. The two
-//! ramps happen to share the "current + previous twin, partial-tick lerp"
-//! shape, but their update rules differ (exponential decay toward a target vs.
-//! a linear clamped increment) and they smooth two unrelated things, so they
-//! are kept as two separate types rather than forced into one.
+//! [`EyeHeightSmoother`] is that pair. **It is not the swim-amount ramp.**
+//! [`PlayerState::swim_amount`]/`swim_amount_o` is a separate, linear `0..1`
+//! ramp at `0.09`/tick that blends the swimming **model**'s body-pitch
+//! animation only — it feeds the humanoid body model and the render state,
+//! never the camera. The two ramps happen to share the "current + previous
+//! twin, partial-tick lerp" shape, but their update rules differ (exponential
+//! decay toward a target vs. a linear clamped increment) and they smooth two
+//! unrelated things, so they are kept as two separate types rather than
+//! forced into one.
 //!
 //! A working smoother needs state that outlives one frame — unlike everything
 //! else in this module, [`EyeHeightSmoother`] cannot be a pure function of the
@@ -69,19 +56,17 @@
 //! # Riding needs nothing here, and that is a measured claim
 //!
 //! The obvious place to put "the camera sits on the vehicle" is this module, and
-//! it would be wrong. 26.2's `Camera.alignWithEntity`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/Camera.java`) has
-//! **no `isPassenger()` branch** — it lerps `entity.xo/yo/zo` and adds the
-//! smoothed eye height, mounted or not. The single exception is a fix-up for
-//! *new-behaviour minecarts* (`:247-256`), which recomputes the attachment
-//! against `behavior.getCartLerpPosition(partialTicks)` so the camera does not
+//! it would be wrong. Vanilla's entity-alignment step for the camera has
+//! **no passenger branch** — it lerps the entity's previous/current position
+//! and adds the smoothed eye height, mounted or not. The single exception is
+//! a fix-up for *new-behaviour minecarts*, which recomputes the attachment
+//! against the cart's own interpolated position so the camera does not
 //! stutter against a cart interpolating between server positions; that is a
 //! smoothing correction, not a different camera.
 //!
-//! Riding also does not change the eye height: `Player.updatePlayerPose`
-//! (`src/net/minecraft/world/entity/player/Player.java`) has no riding
-//! case and there is no `SITTING` pose, so a mounted player keeps
-//! `Avatar.DEFAULT_EYE_HEIGHT = 1.62` (`Avatar.java`).
+//! Riding also does not change the eye height: the pose-update routine has no
+//! riding case and there is no sitting pose, so a mounted player keeps the
+//! standing default of `1.62`.
 //!
 //! So the whole of camera-on-the-vehicle is `lodestone_ecs::player::
 //! pin_passenger_to_vehicle` moving the player's **feet** onto the seat — which
@@ -96,7 +81,7 @@ use lodestone_physics::{Aabb, CollisionView, PlayerState};
 use lodestone_render::Camera;
 
 /// Vertical field of view in degrees — vanilla's **default**, "Normal" FOV
-/// (`Options.java`: `IntRange(30, 110)`, default `70`).
+/// (the option's range is `30..=110`, default `70`).
 ///
 /// **This is a default and no longer a pin.** [`build_camera`] used to write it
 /// into every camera unconditionally, which made vanilla's FOV option
@@ -108,68 +93,62 @@ pub const FOV_Y_DEGREES: f32 = 70.0;
 /// Near plane distance in blocks.
 pub const NEAR: f32 = 0.05;
 
-/// Vanilla's third-person "back" camera distance, in blocks
-/// (`Camera`'s zoom starts at `4.0` and is only ever pulled *in* from there by
-/// collision, never pushed further out). This is the *desired* pullback before
-/// [`collision_pullback`] clamps it against real geometry.
+/// Vanilla's third-person "back" camera distance, in blocks — zoom starts at
+/// `4.0` and is only ever pulled *in* from there by collision, never pushed
+/// further out. This is the *desired* pullback before [`collision_pullback`]
+/// clamps it against real geometry.
 pub const THIRD_PERSON_DISTANCE: f32 = 4.0;
 
 /// How far short of a real collision surface the pulled-back camera stops, in
 /// blocks. Without this the eye would sit exactly on the wall it just clipped
 /// against (and could poke a hair through it on the next frame's float
-/// rounding); vanilla's own `Camera.getMaxZoom` shaves a small buffer the same
-/// way (`partialTickTime` clip step 0.1).
+/// rounding); vanilla shaves a small buffer off its own zoom clamp the same
+/// way (a clip step of `0.1`).
 pub const COLLISION_MARGIN: f32 = 0.1;
 
-/// Vanilla's `net.minecraft.client.CameraType`, transcribed from the enum rather
-/// than from a call site — the three states `F5` cycles through.
-///
-/// ```java
-/// // CameraType.java
-/// FIRST_PERSON(true, false),
-/// THIRD_PERSON_BACK(false, false),
-/// THIRD_PERSON_FRONT(false, true);
-/// ```
+/// Vanilla's three camera modes, transcribed from the enum rather than from a
+/// call site — the states `F5` cycles through: first person, third-person
+/// back (behind, not mirrored), and third-person front (behind, mirrored so
+/// the camera ends up facing the player).
 ///
 /// # The two predicates are not complements, and that is the whole point
 ///
 /// Vanilla asks [`is_first_person`](Self::is_first_person) — "is the camera in
 /// the player's head" — everywhere it gates the hand, the screen overlays and
 /// the FOV zoom, and [`is_mirrored`](Self::is_mirrored) in exactly one place,
-/// `Camera.alignWithEntity`'s detached branch. A call site that means "the
+/// the entity-alignment step's detached branch. A call site that means "the
 /// camera is not in the head" and asks "is it *behind* them" ships the
 /// first-person arm and the pumpkin/underwater overlays back into the front
 /// view — which is why this carries two named predicates rather than one bool
 /// plus an ad-hoc comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum CameraType {
-    /// `FIRST_PERSON` — the true eye. The default, as in vanilla's `Options`.
+    /// The true eye. The default, as in vanilla's options.
     #[default]
     FirstPerson,
-    /// `THIRD_PERSON_BACK` — pulled straight backward along the view direction.
+    /// Pulled straight backward along the view direction.
     ThirdPersonBack,
-    /// `THIRD_PERSON_FRONT` — the same rig with the rotation mirrored, so the
-    /// camera ends up in front of the player looking back at them.
+    /// The same rig with the rotation mirrored, so the camera ends up in
+    /// front of the player looking back at them.
     ThirdPersonFront,
 }
 
 impl CameraType {
-    /// `CameraType.isFirstPerson()`. **This, not "is it third person", is what
-    /// almost every consumer wants** — see the type's own docs.
+    /// **This, not "is it third person", is what almost every consumer
+    /// wants** — see the type's own docs.
     #[must_use]
     pub const fn is_first_person(self) -> bool {
         matches!(self, Self::FirstPerson)
     }
 
-    /// `CameraType.isMirrored()` — true for the front view alone. Read by
-    /// [`third_person_camera`] and nothing else, exactly as in vanilla.
+    /// True for the front view alone. Read by [`third_person_camera`] and
+    /// nothing else, exactly as in vanilla.
     #[must_use]
     pub const fn is_mirrored(self) -> bool {
         matches!(self, Self::ThirdPersonFront)
     }
 
-    /// `CameraType.cycle()` — `VALUES[(ordinal() + 1) % VALUES.length]`, i.e.
-    /// what `F5` does. First → back → front → first.
+    /// The cyclic advance `F5` performs: first → back → front → first.
     #[must_use]
     pub const fn cycle(self) -> Self {
         match self {
@@ -195,30 +174,20 @@ impl CameraType {
 ///
 /// # The mirror is a field write, deliberately, and not a decomposition
 ///
-/// `Camera.alignWithEntity` (`Camera.java`) is:
-///
-/// ```java
-/// this.detached = !this.minecraft.options.getCameraType().isFirstPerson();
-/// if (this.detached) {
-///    if (this.minecraft.options.getCameraType().isMirrored()) {
-///       this.setRotation(this.yRot + 180.0F, -this.xRot);
-///    }
-///    ...
-///    this.move(-this.getMaxZoom(...), 0.0F, 0.0F);
-/// }
-/// ```
-///
-/// so it is `yaw + 180`, `-pitch`, applied to the *angles* and never to a
-/// direction vector. Writing `Camera::yaw`/`pitch` directly keeps it that way:
-/// there is no `atan2` here, so the pole hazard [`yaw_pitch_from_forward_or`]
-/// exists for cannot be reintroduced by this path. Only `forward()` is read back
+/// Vanilla's own camera setup, when detached (not first person), mirrors the
+/// angles before pulling back: for the front view it sets `yaw + 180`,
+/// `-pitch` and then moves backward along the (now mirrored) view direction.
+/// The mirror is applied to the *angles* and never to a direction vector.
+/// Writing `Camera::yaw`/`pitch` directly keeps it that way: there is no
+/// `atan2` here, so the pole hazard [`yaw_pitch_from_forward_or`] exists for
+/// cannot be reintroduced by this path. Only `forward()` is read back
 /// afterwards, and that is a pure sin/cos of the two angles.
 ///
 /// # One recorded divergence in ordering
 ///
-/// Vanilla mirrors and pulls back in `Camera.setup`, then folds the bob into the
-/// *projection* in `GameRenderer.renderLevel`, so its bob acts in the final
-/// (already-mirrored) eye space. `Sim::render_camera` folds the bob into the
+/// Vanilla mirrors and pulls back during its own camera setup, then folds the
+/// bob into the *projection* during level rendering, so its bob acts in the
+/// final (already-mirrored) eye space. `Sim::render_camera` folds the bob into the
 /// eye camera *before* calling this, so in the front view the bob's ≤`0.05`-block
 /// sway is mirrored along with everything else. That inherits the back view's
 /// existing bob-then-pullback ordering rather than restructuring shared
@@ -234,8 +203,8 @@ pub fn third_person_camera(
     }
     let mut cam = eye;
     if camera_type.is_mirrored() {
-        // `setRotation(this.yRot + 180.0F, -this.xRot)`, and **unwrapped**,
-        // exactly as `Camera.setRotation` leaves it: it is a plain field
+        // Set to `yaw + 180`, `-pitch`, and **unwrapped**, exactly as
+        // vanilla's own rotation setter leaves it: it is a plain field
         // assignment there too. The first version of this line wrapped into
         // `-180..180` for tidiness and got the wrap itself wrong — `(yaw + 180)
         // .rem_euclid(360) - 180` maps a yaw of `0` straight back to `0`, i.e.
@@ -401,32 +370,32 @@ fn sign(v: f32) -> i32 {
     }
 }
 
-/// `Camera`'s own `eyeHeight`/`eyeHeightOld` pair (`Camera.java`) —
-/// the fix for that fix's entering/leaving-swim camera jerk.
+/// Vanilla's own current/previous eye-height pair — the fix for
+/// entering/leaving-swim camera jerk.
 ///
 /// This is deliberately **not** [`PlayerState::swim_amount`]; see the module
 /// docs for why the two must stay separate. Own one of these per camera (per
 /// [`PlayerState`], for split-screen or spectating another entity) and:
 ///
 /// * call [`Self::tick`] exactly once per **physics** tick, with the target
-///   pose's eye height (`entity.getEyeHeight()`, i.e. [`PlayerState::eye_height`]
-///   *after* that tick's pose update) — never once per frame, or the `0.5`
+///   pose's eye height ([`PlayerState::eye_height`] *after* that tick's pose
+///   update) — never once per frame, or the `0.5`
 ///   decay rate would not match vanilla's fixed 20 Hz tick;
 /// * read the camera's actual eye height every **frame** via [`Self::lerp`]
 ///   with the frame's partial-tick alpha, exactly like the player's own
 ///   position interpolation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EyeHeightSmoother {
-    /// `Camera.eyeHeightOld` — the value as of the *previous* tick.
+    /// The smoothed value as of the *previous* tick.
     previous: f32,
-    /// `Camera.eyeHeight` — the value as of the *current* tick.
+    /// The smoothed value as of the *current* tick.
     current: f32,
 }
 
 impl EyeHeightSmoother {
     /// A smoother with no jerk to ease out of — both the current and previous
-    /// value start at `initial_eye_height`, matching a `Camera` freshly bound
-    /// to an entity (its `eyeHeight`/`eyeHeightOld` fields default to `0.0F`,
+    /// value start at `initial_eye_height`, matching a camera freshly bound
+    /// to an entity (vanilla's own pair defaults both fields to `0.0`,
     /// but the very next [`Self::tick`] call, given a real target, is what
     /// actually matters here; seeding both fields equal is what keeps that
     /// first tick from itself producing a spurious half-jump).
@@ -438,18 +407,18 @@ impl EyeHeightSmoother {
         }
     }
 
-    /// `Camera.tick()` (`Camera.java`): ease halfway from the current
-    /// smoothed value toward `target_eye_height` (the entity's real, possibly
-    /// just-snapped, pose eye height). Call this once per physics tick.
+    /// Vanilla's own per-tick ease: halfway from the current smoothed value
+    /// toward `target_eye_height` (the entity's real, possibly just-snapped,
+    /// pose eye height). Call this once per physics tick.
     pub fn tick(&mut self, target_eye_height: f32) {
         self.previous = self.current;
         self.current += (target_eye_height - self.current) * 0.5;
     }
 
-    /// `Mth.lerp(partialTicks, eyeHeightOld, eyeHeight)` — the frame's actual
-    /// eye height, interpolated between the last two ticks' smoothed values by
-    /// `alpha` (the same partial-tick fraction used for position
-    /// interpolation elsewhere). `alpha` is not clamped, matching `Mth.lerp`.
+    /// The frame's actual eye height, interpolated between the last two
+    /// ticks' smoothed values by `alpha` (the same partial-tick fraction used
+    /// for position interpolation elsewhere). `alpha` is not clamped, matching
+    /// vanilla's own unclamped lerp helper.
     #[must_use]
     pub fn lerp(&self, alpha: f32) -> f32 {
         self.previous + (self.current - self.previous) * alpha
@@ -460,13 +429,13 @@ impl EyeHeightSmoother {
 // View bobbing
 // ---------------------------------------------------------------------------
 
-/// Vanilla's `hurtDuration`, set alongside `hurtTime` by both
-/// `LivingEntity.animateHurt` (`LivingEntity.java`) and
-/// `handleDamageEvent` (`:2044-2049`). Ten ticks — half a second.
+/// Vanilla's hurt-flash duration, set alongside the hurt countdown by both
+/// the damage-animation trigger and the damage-event handler. Ten ticks —
+/// half a second.
 pub const HURT_DURATION_TICKS: f32 = 10.0;
 
-/// The walk-bob state vanilla spreads across `ClientAvatarState` and
-/// `LocalPlayer`, gathered into one per-camera value.
+/// The walk-bob state vanilla spreads across its client-side avatar and
+/// local-player state, gathered into one per-camera value.
 ///
 /// # What this is, and the four fields that are really two pairs
 ///
@@ -475,17 +444,14 @@ pub const HURT_DURATION_TICKS: f32 = 10.0;
 /// reason: the update rule runs at the fixed 20 Hz tick, and a frame between two
 /// ticks must interpolate rather than re-run it.
 ///
-/// * `walk_dist`/`walk_dist_o` — `ClientAvatarState.walkDist`/`walkDistO`. The
-///   **phase** of the bob: total horizontal distance walked, scaled by `0.6`
-///   (`LocalPlayer.move`, `LocalPlayer.java`:
-///   `addWalkedDistance(Mth.length(deltaX, deltaZ) * 0.6F)` — note it is the
-///   distance actually *moved*, post-collision, not the intended delta).
-/// * `bob`/`bob_o` — `ClientAvatarState.bob`/`bobO`. The **amplitude**, an
-///   exponential ease toward `min(0.1, horizontal speed)`
-///   (`AbstractClientPlayer.updateBob`, `ClientAvatarState.updateBob`):
-///   `bob += (target - bob) * 0.4`, and the target is a flat `0.0` unless the
-///   player is on the ground and neither dead nor swimming. That gate is why the
-///   bob fades out in mid-air instead of snapping.
+/// * `walk_dist`/`walk_dist_o` — The **phase** of the bob: total horizontal
+///   distance walked, scaled by `0.6` and accumulated from the distance
+///   actually *moved*, post-collision, not the intended delta.
+/// * `bob`/`bob_o` — The **amplitude**, an exponential ease toward
+///   `min(0.1, horizontal speed)`: `bob += (target - bob) * 0.4`, and the
+///   target is a flat `0.0` unless the player is on the ground and neither
+///   dead nor swimming. That gate is why the bob fades out in mid-air
+///   instead of snapping.
 ///
 /// The `0.1` ceiling is the reason the bob does not grow without bound while
 /// sprinting: vanilla's sprint speed exceeds it, so amplitude saturates and only
@@ -493,12 +459,12 @@ pub const HURT_DURATION_TICKS: f32 = 10.0;
 ///
 /// # `hurt_time`/`hurt_dir` are not interpolated the same way
 ///
-/// They have no `previous` twin because vanilla does not keep one: `Camera.setup`
-/// reads `hurtTime - partialTicks` and `hurtDir` raw. The
+/// They have no `previous` twin because vanilla does not keep one: its own
+/// camera setup reads `hurtTime - partialTicks` and the hurt direction raw. The
 /// subtraction is what smooths the flash out, and it is also why
 /// [`BobFrame::hurt_roll_degrees`] must tolerate a *negative* `hurt` — vanilla's
-/// `bobHurt` returns early on `hurt < 0.0F`, which is the ordinary case in the
-/// frames just after the countdown reaches zero.
+/// own hurt-tilt routine returns early on a negative `hurt`, which is the
+/// ordinary case in the frames just after the countdown reaches zero.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ViewBob {
     walk_dist: f32,
@@ -507,12 +473,13 @@ pub struct ViewBob {
     bob_o: f32,
     hurt_time: u32,
     hurt_dir_degrees: f32,
-    /// `LivingEntity.deathTime`, counted up while dead and reset to zero when
-    /// alive.
+    /// Vanilla's death-time counter, counted up while dead and reset to zero
+    /// when alive.
     ///
     /// Client-side, like `hurt_time`: nothing on the wire carries it (see
-    /// `crate::entities`' note that `deathTime` has no component on this side),
-    /// and for the *local* player we know exactly when we died, so the counter is
+    /// `crate::entities`' note that the death timer has no component on this
+    /// side), and for the *local* player we know exactly when we died, so the
+    /// counter is
     /// reconstructed here from the `dead` flag [`ViewBob::tick`] already takes.
     death_time: u32,
 }
@@ -533,10 +500,11 @@ impl ViewBob {
     ///
     /// # Order matters and is vanilla's, not the readable one
     ///
-    /// `AbstractClientPlayer.tick` saves `walkDistO = walkDist` **before**
-    /// `super.tick()` runs the movement, and `aiStep` calls `updateBob()`
-    /// **before** `super.aiStep()` — so within one tick the amplitude is eased
-    /// first and the phase advanced second. Doing it the other way round shifts
+    /// Vanilla's own client-player tick saves the phase's previous value
+    /// **before** running the movement, and its per-tick AI step eases the
+    /// amplitude **before** the movement step runs — so within one tick the
+    /// amplitude is eased first and the phase advanced second. Doing it the
+    /// other way round shifts
     /// the bob by one tick against the stride, which is a phase error rather
     /// than an amplitude one and therefore does not show up as "too much bob".
     pub fn tick(
@@ -547,10 +515,10 @@ impl ViewBob {
         dead: bool,
         swimming: bool,
     ) {
-        // 1. `ClientAvatarState.tick`: the phase's previous value, saved before
-        //    this tick's movement is added to it.
+        // 1. The phase's previous value, saved before this tick's movement is
+        //    added to it.
         self.walk_dist_o = self.walk_dist;
-        // 2. `AbstractClientPlayer.updateBob` -> `ClientAvatarState.updateBob`.
+        // 2. The bob amplitude's per-tick ease.
         let target = if on_ground && !dead && !swimming {
             speed_horizontal.min(0.1)
         } else {
@@ -558,13 +526,13 @@ impl ViewBob {
         };
         self.bob_o = self.bob;
         self.bob += (target - self.bob) * 0.4;
-        // 3. `LocalPlayer.move` -> `addWalkedDistance`.
+        // 3. The walked-distance accumulator.
         self.walk_dist += moved_horizontal * 0.6;
-        // 4. `LivingEntity.tick`'s countdown, saturating at zero — the same
+        // 4. The hurt countdown, saturating at zero — the same
         //    rule `lodestone_ecs::ingest::tick_hurt_time` applies to remote
         //    entities.
         self.hurt_time = self.hurt_time.saturating_sub(1);
-        // 5. `LivingEntity.tick`'s `deathTime++` under `isDeadOrDying`, and the
+        // 5. The death-time counter, incremented while dead or dying, and the
         //    reset on respawn. Counted **up**, unlike `hurt_time`, and saturating
         //    so a player who stays on the death screen for an hour cannot wrap it
         //    — `death_roll_degrees` clamps at 20 ticks anyway, so anything past
@@ -576,10 +544,10 @@ impl ViewBob {
         };
     }
 
-    /// A damage report: `LivingEntity.animateHurt(yaw)` (`:1873-1876`), which
-    /// resets the countdown to [`HURT_DURATION_TICKS`] and records the direction
-    /// the hit came from. `yaw_degrees` is the wire value from
-    /// `ClientboundHurtAnimationPacket`.
+    /// A damage report: vanilla's own hurt-animation trigger, which resets
+    /// the countdown to [`HURT_DURATION_TICKS`] and records the direction
+    /// the hit came from. `yaw_degrees` is the wire value from the hurt
+    /// animation packet.
     pub fn hurt(&mut self, yaw_degrees: f32) {
         self.hurt_time = HURT_DURATION_TICKS as u32;
         self.hurt_dir_degrees = yaw_degrees;
@@ -588,62 +556,54 @@ impl ViewBob {
     /// The frame's interpolated bob, for the partial-tick fraction `alpha`.
     #[must_use]
     pub fn frame(&self, alpha: f32) -> BobFrame {
-        // `ClientAvatarState.getBackwardsInterpolatedWalkDistance`:
-        //     float wda = walkDist - walkDistO;
-        //     return -(walkDist + wda * partialTicks);
-        // Note this is **not** `Mth.lerp` — it extrapolates *forward* from the
-        // current value and then negates, so it runs slightly ahead of the
-        // interpolated position rather than between the two ticks. The sibling
-        // `getInterpolatedWalkDistance` is the lerp, and nothing in `bobView`
-        // uses it. Reading the lerp here instead would be a plausible-looking
-        // half-tick phase error.
+        // Vanilla's own "backwards interpolated" walk distance:
+        //     wda = walk_dist - walk_dist_o
+        //     return -(walk_dist + wda * partial_ticks)
+        // Note this is **not** a plain lerp — it extrapolates *forward* from
+        // the current value and then negates, so it runs slightly ahead of
+        // the interpolated position rather than between the two ticks.
+        // Vanilla keeps a sibling helper that *is* the lerp, and nothing in
+        // its own view-bob routine uses it. Reading the lerp here instead
+        // would be a plausible-looking half-tick phase error.
         let wda = self.walk_dist - self.walk_dist_o;
         BobFrame {
             walk_phase: -(self.walk_dist + wda * alpha),
             bob: self.bob_o + (self.bob - self.bob_o) * alpha,
-            // `Camera.setup`: `hurtTime - cameraEntityPartialTicks`.
+            // Vanilla's own camera setup: `hurt_time - partial_ticks`.
             hurt: self.hurt_time as f32 - alpha,
             hurt_dir_degrees: self.hurt_dir_degrees,
-            // Raw, like `hurt_dir`: vanilla's `bobHurt` reads
-            // `entityRenderState.deathTime` with no partial-tick term, and the
-            // clamp at 20 makes the last three-quarters of a second constant
-            // regardless.
+            // Raw, like `hurt_dir`: vanilla's own hurt-tilt routine reads the
+            // death timer with no partial-tick term, and the clamp at 20
+            // makes the last three-quarters of a second constant regardless.
             death_time: self.death_time as f32,
         }
     }
 }
 
-/// One frame's worth of interpolated bob input — what vanilla puts on
-/// `CameraRenderState.entityRenderState` for `GameRenderer.bobView`/`bobHurt` to
-/// read (`Camera.setup`).
+/// One frame's worth of interpolated bob input — what vanilla threads through
+/// its own per-frame render state for its walk-bob and hurt-bob routines to
+/// read.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct BobFrame {
-    /// `backwardsInterpolatedWalkDistance`. **Already negated** by
-    /// [`ViewBob::frame`], matching vanilla, so every use below is a bare
-    /// `walk_phase * PI` with no sign of its own.
+    /// Vanilla's own "backwards interpolated" walk distance. **Already
+    /// negated** by [`ViewBob::frame`], matching vanilla, so every use below
+    /// is a bare `walk_phase * PI` with no sign of its own.
     pub walk_phase: f32,
     /// The interpolated amplitude, `0.0..=0.1`.
     pub bob: f32,
-    /// `hurtTime - partialTicks`. Negative means no flash — see
-    /// [`Self::hurt_roll_degrees`].
+    /// The hurt countdown minus the frame's partial-tick fraction. Negative
+    /// means no flash — see [`Self::hurt_roll_degrees`].
     pub hurt: f32,
-    /// `hurtDir`, in degrees.
+    /// The direction the hit came from, in degrees.
     pub hurt_dir_degrees: f32,
-    /// `deathTime`, in ticks, `0` while alive — see [`Self::death_roll_degrees`].
+    /// The death timer, in ticks, `0` while alive — see [`Self::death_roll_degrees`].
     pub death_time: f32,
 }
 
 impl BobFrame {
-    /// `GameRenderer.bobView`'s eye-space translation
-    /// (`GameRenderer.java`), as `(x, y, z)`:
-    ///
-    /// ```java
-    /// poseStack.translate(
-    ///    Mth.sin(bd * (float) Math.PI) * bob * 0.5F,
-    ///    -Math.abs(Mth.cos(bd * (float) Math.PI) * bob),
-    ///    0.0F
-    /// );
-    /// ```
+    /// Vanilla's own walk-bob eye-space translation, as `(x, y, z)`:
+    /// `(sin(bd·π)·bob·0.5, -|cos(bd·π)·bob|, 0)`, where `bd` is the
+    /// interpolated walk phase.
     ///
     /// The `abs` on Y is the whole character of the walk bob: the sway is a full
     /// sine (left, right, left) but the dip is **rectified**, so the eye drops
@@ -660,21 +620,20 @@ impl BobFrame {
         )
     }
 
-    /// `bobView`'s Z rotation in degrees (`GameRenderer.java`):
-    /// `sin(bd * PI) * bob * 3.0`. A **roll**, in phase with the sway.
+    /// Vanilla's own walk-bob Z rotation in degrees: `sin(bd·π)·bob·3.0`. A
+    /// **roll**, in phase with the sway.
     #[must_use]
     pub fn view_roll_degrees(&self) -> f32 {
         (self.walk_phase * std::f32::consts::PI).sin() * self.bob * 3.0
     }
 
-    /// `bobView`'s X rotation in degrees (`GameRenderer.java`):
-    /// `abs(cos(bd * PI - 0.2) * bob) * 5.0`.
+    /// Vanilla's own walk-bob X rotation in degrees:
+    /// `|cos(bd·π - 0.2)·bob|·5.0`.
     ///
     /// **The `- 0.2` is inside the cosine and is in radians, not a multiple of
-    /// PI** — `Mth.cos(backwardsInterpolatedWalkDistance * (float) Math.PI - 0.2F)`.
-    /// It is a small phase lead that makes the nod peak just before the dip
-    /// bottoms out. Folding it in as `(bd - 0.2) * PI` would be a 36° phase
-    /// error and would still look like a nod.
+    /// PI.** It is a small phase lead that makes the nod peak just before the
+    /// dip bottoms out. Folding it in as `(bd - 0.2) * PI` would be a 36°
+    /// phase error and would still look like a nod.
     ///
     /// Rectified like the dip, so it is always a nod in one direction.
     #[must_use]
@@ -683,25 +642,18 @@ impl BobFrame {
         (phase.cos() * self.bob).abs() * 5.0
     }
 
-    /// `GameRenderer.bobHurt`'s tilt magnitude in degrees
-    /// (`GameRenderer.java`), before it is swung onto the damage
-    /// direction:
-    ///
-    /// ```java
-    /// if (hurt < 0.0F) { return; }
-    /// hurt /= hurtDuration;
-    /// hurt = Mth.sin(hurt * hurt * hurt * hurt * (float) Math.PI);
-    /// ...
-    /// float tiltAmount = (float)(-hurt * 14.0 * damageTiltStrength);
-    /// ```
+    /// Vanilla's own hurt-tilt magnitude in degrees, before it is swung onto
+    /// the damage direction. It returns early (zero) once `hurt` goes
+    /// negative; otherwise it normalises `hurt` by the hurt duration, shapes
+    /// it as `sin(t⁴·π)`, and scales by `-14.0 * damage_tilt_strength`.
     ///
     /// The quartic inside the sine is doing real work: `sin(t⁴ · π)` stays near
     /// zero for most of the window and then spikes, so the tilt is a sharp jolt
     /// at the moment of the hit rather than a slow lean. `sin(t · π)` would be a
     /// smooth arc over the whole half-second and would read as nausea.
     ///
-    /// `damage_tilt_strength` is vanilla's accessibility option
-    /// (`Options.java`, default `1.0`); pass `1.0` for the default.
+    /// `damage_tilt_strength` is vanilla's accessibility option (its range
+    /// defaults to `1.0`); pass `1.0` for the default.
     #[must_use]
     pub fn hurt_roll_degrees(&self, damage_tilt_strength: f32) -> f32 {
         if self.hurt < 0.0 {
@@ -712,32 +664,28 @@ impl BobFrame {
         -shaped * 14.0 * damage_tilt_strength
     }
 
-    /// `GameRenderer.bobHurt`'s death roll, in degrees:
-    ///
-    /// ```java
-    /// if (isDeadOrDying) {
-    ///     duration = Math.min(deathTime, 20.0F);
-    ///     poseStack.mulPose(Axis.ZP.rotationDegrees(40.0F - 8000.0F / (duration + 200.0F)));
-    /// }
-    /// ```
+    /// Vanilla's own death roll, in degrees: while dead or dying, the death
+    /// timer is clamped to 20 ticks and fed into `40.0 - 8000.0 / (duration +
+    /// 200.0)`.
     ///
     /// # It is not gated by the hurt-time early return
     ///
-    /// This runs **before** `bobHurt`'s `if (hurt < 0.0F) return;`, so it applies
-    /// on every frame of the death screen and not only during the ten-tick hurt
-    /// flash. Folding it in after the return — the natural reading if you skim
-    /// the method — means the camera un-rolls half a second after you die.
+    /// This runs **before** the hurt-tilt routine's early return on a negative
+    /// `hurt`, so it applies on every frame of the death screen and not only
+    /// during the ten-tick hurt flash. Folding it in after the return — the
+    /// natural reading if you skim the combined routine — means the camera
+    /// un-rolls half a second after you die.
     ///
     /// # The magnitude is small, and that is the record, not a transcription slip
     ///
-    /// `40 − 8000/200 = 0` at `deathTime == 0` and `40 − 8000/220 = 3.6364°` at
+    /// `40 − 8000/200 = 0` at `death_time == 0` and `40 − 8000/220 = 3.6364°` at
     /// the clamp, so the whole effect is a **`3.64°`** lean acquired over one
     /// second. It looks like it ought to be a dramatic spin from the shape of the
     /// expression; it is not. Do not "fix" it by dropping the `min(.., 20)` — the
     /// clamp is what stops it creeping toward `40°` while the death screen is up.
     ///
     /// `death_time == 0` means alive, which is why this returns `0` there: at
-    /// vanilla's own `deathTime == 0` the expression is exactly zero, so the two
+    /// vanilla's own zero death timer the expression is exactly zero, so the two
     /// readings agree and no `is_dead` flag has to travel alongside.
     #[must_use]
     pub fn death_roll_degrees(&self) -> f32 {
@@ -747,8 +695,8 @@ impl BobFrame {
         40.0 - 8000.0 / (self.death_time.min(20.0) + 200.0)
     }
 
-    /// `GameRenderer.bobHurt` as a matrix — the death roll, then the damage tilt
-    /// swung onto the direction the hit came from:
+    /// Vanilla's own hurt/death roll routine as a matrix — the death roll,
+    /// then the damage tilt swung onto the direction the hit came from:
     ///
     /// ```text
     /// Rz(death) · Ry(-hurtDir) · Rz(tilt) · Ry(+hurtDir)
@@ -757,16 +705,16 @@ impl BobFrame {
     /// # The `Ry` sandwich is the whole direction mechanism
     ///
     /// `Rz` alone rolls the camera the same way regardless of where the hit came
-    /// from. Conjugating it by `Ry(hurtDir)` rotates the *axis* of the roll, so a
-    /// hit from straight ahead (`hurtDir == 0`) is pure roll and a hit from the
+    /// from. Conjugating it by `Ry(hurt_dir)` rotates the *axis* of the roll, so a
+    /// hit from straight ahead (`hurt_dir == 0`) is pure roll and a hit from the
     /// side is pure nod. A gate that only checks "the transform changed" passes
     /// with the sandwich missing.
     ///
     /// Split out of [`Self::eye_transform`] because the two halves reach pixels by
-    /// different routes: `bobView` is folded into the [`Camera`] by
+    /// different routes: the walk bob is folded into the [`Camera`] by
     /// [`bobbed_camera`], which structurally cannot carry roll, while this half is
     /// multiplied into the world view-projection in eye space — vanilla's own
-    /// `projectionMatrix.mul(bobStack)`. See [`bobbed_camera`]'s table.
+    /// projection-times-bob-stack multiply. See [`bobbed_camera`]'s table.
     #[must_use]
     pub fn hurt_transform(&self, damage_tilt_strength: f32) -> glam::Mat4 {
         use glam::Mat4;
@@ -778,21 +726,22 @@ impl BobFrame {
             * Mat4::from_rotation_y(d)
     }
 
-    /// The full eye-space bob transform: `bobHurt` then `bobView`, pushed onto
-    /// one pose stack in that order (`GameRenderer.java`), which is
-    /// `Hurt * View` as a matrix product.
+    /// The full eye-space bob transform: the hurt/death roll then the walk
+    /// bob, pushed onto one pose stack in that order, which is `Hurt * View`
+    /// as a matrix product.
     ///
     /// # Why this is a *projection* post-multiply in vanilla, and what that means here
     ///
-    /// `GameRenderer.renderLevel` does `projectionMatrix.mul(bobStack.last().pose())`
-    /// — the bob lands **between** the projection and the view, so it acts on
-    /// **eye-space** coordinates. Our eye space is the same as vanilla's (`+X`
-    /// right, `+Y` up, forward `-Z`: `Camera.FORWARDS` is `(0, 0, -1)` and
-    /// `glam::camera::rh::view::look_to_mat4` produces the same basis), so every
-    /// constant above transcribes with **no sign flip**. The `[0,1]`-vs-reversed-Z
-    /// depth difference `CLAUDE.md` warns about lives entirely inside the
-    /// projection matrix, which sits to the *left* of this one in `P · B · V` and
-    /// therefore cannot affect it.
+    /// Vanilla's own level-rendering step post-multiplies the projection
+    /// matrix by the bob stack — the bob lands **between** the projection and
+    /// the view, so it acts on **eye-space** coordinates. Our eye space is
+    /// the same as vanilla's (`+X` right, `+Y` up, forward `-Z`, matching
+    /// vanilla's own forward-axis convention), and
+    /// `glam::camera::rh::view::look_to_mat4` produces the same basis, so
+    /// every constant above transcribes with **no sign flip**. The
+    /// `[0,1]`-vs-reversed-Z depth difference `CLAUDE.md` warns about lives
+    /// entirely inside the projection matrix, which sits to the *left* of
+    /// this one in `P · B · V` and therefore cannot affect it.
     ///
     /// Nothing in the shell multiplies this into a projection today —
     /// [`bobbed_camera`] folds it into the [`Camera`] instead, because
@@ -802,9 +751,9 @@ impl BobFrame {
     #[must_use]
     pub fn eye_transform(&self, damage_tilt_strength: f32) -> glam::Mat4 {
         use glam::Mat4;
-        // bobHurt, including the death roll — see `hurt_transform`.
+        // The hurt/death roll — see `hurt_transform`.
         let hurt = self.hurt_transform(damage_tilt_strength);
-        // bobView: T * Rz * Rx.
+        // The walk bob: T * Rz * Rx.
         let view = Mat4::from_translation(self.view_translation())
             * Mat4::from_rotation_z(self.view_roll_degrees().to_radians())
             * Mat4::from_rotation_x(self.view_nod_degrees().to_radians());
@@ -840,10 +789,10 @@ impl BobFrame {
 ///
 /// | bob term | magnitude | carried? |
 /// |---|---|---|
-/// | `bobView` translate (sway + dip) | ≤ `0.05` blocks | yes, exactly |
-/// | `bobView` nod (`Axis.XP`) | ≤ `0.5°` | yes, exactly |
-/// | `bobView` roll (`Axis.ZP`) | ≤ `0.3°` | **no** |
-/// | `bobHurt` tilt (`Axis.ZP`, swung by `hurtDir`) | ≤ `14°` | only the component that lands on the nod axis |
+/// | walk-bob translate (sway + dip) | ≤ `0.05` blocks | yes, exactly |
+/// | walk-bob nod (X axis) | ≤ `0.5°` | yes, exactly |
+/// | walk-bob roll (Z axis) | ≤ `0.3°` | **no** |
+/// | hurt tilt (Z axis, swung by hurt direction) | ≤ `14°` | only the component that lands on the nod axis |
 ///
 /// **This is a divergence, recorded rather than hidden.** Carrying roll needs one
 /// more field on [`Camera`] (or a `Mat4` hook on `view_projection`), and every
@@ -1030,7 +979,7 @@ pub fn build_camera(
 /// The bounds are named here rather than imported from
 /// `crate::config::{MIN_FOV, MAX_FOV}` deliberately: this module is the render
 /// rig and has no dependency on the persisted-settings layer in either
-/// direction, and the pair is a *vanilla record* (`Options.java`) that both
+/// direction, and the pair is a *vanilla option range* that both
 /// places cite independently. `crate::config`'s own doc names this function as
 /// the second clamp.
 #[must_use]
@@ -1042,10 +991,10 @@ fn clamp_fov(degrees: f32) -> f32 {
     }
 }
 
-/// Applies the spyglass FOV-zoom modifier to an already-built
-/// camera — `AbstractClientPlayer.getFieldOfViewModifier`
-/// (`AbstractClientPlayer.java`) returns `0.1F` outright (overriding
-/// every other FOV modifier) when `firstPerson && isScoping()`, and
+/// Applies the spyglass FOV-zoom modifier to an already-built camera —
+/// vanilla's own field-of-view modifier lookup returns `0.1` outright
+/// (overriding every other FOV modifier) when the player is in first person
+/// and scoping through a spyglass, and
 /// [`lodestone_render::spyglass_fov_modifier`] is the tested pure function
 /// for that.
 ///
@@ -1213,9 +1162,9 @@ mod tests {
     #[test]
     fn the_dip_is_rectified_but_the_sway_is_not() {
         // Two half-strides apart: the sway must reverse sign, the dip must not.
-        // This is the `Math.abs` on the Y term, and the defect it guards against
-        // (dropping the abs) halves the apparent cadence rather than changing the
-        // amplitude — invisible in a still frame.
+        // This is the absolute value on the Y term, and the defect it guards
+        // against (dropping the abs) halves the apparent cadence rather than
+        // changing the amplitude — invisible in a still frame.
         let a = BobFrame {
             walk_phase: -0.5,
             bob: 0.1,
@@ -1240,7 +1189,7 @@ mod tests {
 
     #[test]
     fn the_nods_phase_offset_is_zero_point_two_radians_not_zero_point_two_pi() {
-        // `Mth.cos(bd * (float) Math.PI - 0.2F)`. Getting this wrong is a 36°
+        // `cos(bd * PI - 0.2)`. Getting this wrong is a 36°
         // phase error that still looks like a nod, so it is pinned against the
         // hand-evaluated value rather than against a restatement of the code.
         let f = BobFrame {
@@ -1561,7 +1510,7 @@ mod tests {
     /// `P · B · V` for every term `Camera` can express.
     ///
     /// This is what stops a sign from being *asserted*. `BobFrame::eye_transform`
-    /// is a direct transcription of `GameRenderer.bobView`, and the fold is a
+    /// is a direct transcription of vanilla's own walk-bob routine, and the fold is a
     /// mechanical decomposition of it — so if either the transcription or the
     /// decomposition has a polarity backwards, the two disagree here rather than
     /// both looking plausible in a screenshot.
@@ -2141,7 +2090,7 @@ mod tests {
 
     #[test]
     fn f5_cycles_first_back_front_and_wraps() {
-        // `CameraType.cycle()` is `VALUES[(ordinal() + 1) % 3]`, so three presses
+        // Cycling advances through the three modes and wraps, so three presses
         // return to where they started — the property a bool cannot have.
         let mut t = CameraType::default();
         assert_eq!(t, CameraType::FirstPerson, "vanilla's Options default");
