@@ -1,41 +1,30 @@
-//! Neighbour-update propagation: vanilla's fixed
+//! Neighbour-update propagation: the real engine's fixed
 //! direction order plus its depth-first cascade semantics, the piece a piston
-//! landing elsewhere in this crate calls "vanilla's update-order quirks."
+//! landing elsewhere in this crate calls "the real update-order quirks."
 //!
-//! # The direction order, cited directly
+//! # The direction order, transcribed from the real engine
 //!
-//! `NeighborUpdater.UPDATE_ORDER`:
-//!
-//! ```text
-//! Direction[] UPDATE_ORDER = new Direction[]{Direction.WEST, Direction.EAST, Direction.DOWN, Direction.UP, Direction.NORTH, Direction.SOUTH};
-//! ```
+//! The real fixed neighbor-update direction order is, in order: west, east,
+//! down, up, north, south.
 //!
 //! [`UPDATE_ORDER`] below is that array, verbatim.
 //!
-//! # The propagation shape is depth-first, not breadth-first — cited directly
+//! # The propagation shape is depth-first, not breadth-first — transcribed
+//! from the real engine
 //!
-//! `ServerLevel`/`Level` use `CollectingNeighborUpdater`
-//! (`Level`'s own constructor, `this.neighborUpdater = new
-//! CollectingNeighborUpdater(this, maxChainedNeighborUpdates);`). Its
-//! `runUpdates` drives an explicit
-//! `ArrayDeque` stack, and the load-bearing part is `addAndRun`:
+//! The real per-world state uses a collecting neighbor-updater, constructed
+//! once with a cap on chained updates. Its run-updates step drives an explicit
+//! stack, and the load-bearing part is its add-and-run step, transcribed as
+//! the rule it implements:
 //!
-//! ```text
-//! private void addAndRun(final BlockPos pos, final NeighborUpdates update) {
-//!    boolean runningAlready = this.count > 0;
-//!    ...
-//!    if (!tooManyUpdates) {
-//!       if (runningAlready) { this.addedThisLayer.add(update); }
-//!       else { this.stack.push(update); }
-//!    }
-//!    ...
-//!    if (!runningAlready) { this.runUpdates(); }
-//! }
-//! ```
+//! Check whether an update is already running. If the total-update cap has
+//! not been hit: when already running, queue this update onto the current
+//! layer; otherwise push it directly onto the stack. Then, only if nothing
+//! was already running, drive the run-updates loop.
 //!
 //! A neighbour notification issued *while* another is already running
-//! (`runningAlready`) is queued as `addedThisLayer` and, per `runUpdates`'s
-//! own loop, pushed onto the **top** of the stack before the outer work
+//! is queued onto the current layer and, per the run-updates loop's
+//! own logic, pushed onto the **top** of the stack before the outer work
 //! resumes — so any cascade a single notification triggers is fully drained
 //! (including *its own* further cascades) before the direction loop that
 //! issued it moves on to the next direction. Concretely: notifying `WEST`
@@ -47,13 +36,13 @@
 //! next" (depth-first). [`NeighborPropagator::propagate`]'s explicit `Vec`
 //! stack is that same algorithm, flattened to the one call shape this crate
 //! needs (fan-out to up to six neighbours, each of which may report further
-//! single-target cascades) rather than vanilla's four `NeighborUpdates`
+//! single-target cascades) rather than the real engine's four update
 //! variants (shape/full/simple/multi), none of which this crate has a
 //! second consumer for yet.
 //!
-//! `maxChainedNeighborUpdates` caps total notifications per
+//! The real chained-update cap caps total notifications per
 //! `propagate` call, logging once and discarding the rest, inside
-//! `CollectingNeighborUpdater.addAndRun` — [`NeighborPropagator::propagate`]
+//! the real collecting updater's own add-and-run step — [`NeighborPropagator::propagate`]
 //! mirrors this with `max_chained`.
 //!
 //! # Production status, corrected
@@ -74,8 +63,8 @@
 //! **Since a later landing, it is true.** `crate::random_tick::RandomTickScheduler
 //! ::tick_randomly_ticking_block` calls [`NeighborPropagator::propagate`] on
 //! every position any of its four mutation families (grass↔dirt, and
-//! crop growth/sapling growth/leaf decay) just changed, mirroring vanilla's
-//! `setBlockAndUpdate` always notifying neighbours. The `notify` closure is
+//! crop growth/sapling growth/leaf decay) just changed, mirroring the real
+//! "set block and update" always notifying neighbours. The `notify` closure is
 //! no longer empty either: `crate::gravity_tick`'s sand/gravel settle check
 //! is the one real reaction today. The redstone family is the next
 //! consumer of this same call site, inheriting the depth-first ordering
@@ -85,8 +74,8 @@
 use lodestone_model::BlockPos;
 
 /// One of the six axis-aligned neighbour directions — mirrors
-/// `net.minecraft.core.Direction`'s six cardinal/vertical values, narrowed
-/// to what [`UPDATE_ORDER`] needs (vanilla's `Direction` also carries
+/// the real direction enum's six cardinal/vertical values, narrowed
+/// to what [`UPDATE_ORDER`] needs (the real direction enum also carries
 /// diagonal values used elsewhere, irrelevant here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
@@ -99,8 +88,8 @@ pub enum Direction {
 }
 
 impl Direction {
-    /// The block position one step off `pos` in this direction — vanilla's
-    /// `BlockPos.relative(Direction)`.
+    /// The block position one step off `pos` in this direction — the real
+    /// per-direction relative-position query.
     #[must_use]
     pub fn relative(self, pos: BlockPos) -> BlockPos {
         let (dx, dy, dz) = match self {
@@ -114,9 +103,9 @@ impl Direction {
         BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
     }
 
-    /// Vanilla's `Direction.getOpposite()`, backed
-    /// by each variant's own `oppositeIndex` field —
-    /// `Direction`'s own enum declaration order: down/up, north/south, west/east each pair off.
+    /// The real get-opposite query, backed
+    /// by each variant's own opposite-index field —
+    /// the real direction enum's own declaration order: down/up, north/south, west/east each pair off.
     /// Needed by the redstone family (e.g. an observer's pulse
     /// travels out the face opposite the one it watches).
     #[must_use]
@@ -131,16 +120,16 @@ impl Direction {
         }
     }
 
-    /// Vanilla's `Direction.getClockWise()` — the
-    /// default (Y-axis) rotation used by every `HorizontalDirectionalBlock`,
+    /// The real get-clockwise query — the
+    /// default (Y-axis) rotation used by every horizontal-directional block,
     /// including repeaters/comparators reading their side inputs
-    /// (`DiodeBlock.getAlternateSignal`). Defined only
-    /// for the four horizontal directions, matching the jar's own
-    /// `IllegalStateException` on `DOWN`/`UP` — callers here only ever pass a
+    /// (the real diode's alternate-signal query). Defined only
+    /// for the four horizontal directions, matching the real engine's own
+    /// exception on `DOWN`/`UP` — callers here only ever pass a
     /// diode's `FACING`, which is always horizontal, so `Down`/`Up` are
     /// unreachable in practice; returning `self` for them (rather than
     /// panicking) keeps this a total function since nothing depends on the
-    /// jar's defensive exception firing.
+    /// real engine's own defensive exception firing.
     #[must_use]
     pub fn clockwise(self) -> Direction {
         match self {
@@ -152,7 +141,7 @@ impl Direction {
         }
     }
 
-    /// Vanilla's `Direction.getCounterClockWise()`
+    /// The real get-counter-clockwise query
     /// — see [`clockwise`](Self::clockwise)'s doc comment for the same
     /// horizontal-only scope note.
     #[must_use]
@@ -167,9 +156,9 @@ impl Direction {
     }
 }
 
-/// Vanilla's own fan-out order, verbatim from `NeighborUpdater.UPDATE_ORDER`:
+/// The real engine's own fan-out order, verbatim:
 /// **west, east, down, up, north, south**. Not alphabetical, not axis-major
-/// — this exact sequence is the "vanilla update-order quirk" a piston
+/// — this exact sequence is the "real update-order quirk" a piston
 /// landing elsewhere in this crate names, and every consumer of [`NeighborPropagator::propagate`] observes
 /// neighbours notified in this order (modulo `skip`).
 pub const UPDATE_ORDER: [Direction; 6] = [
@@ -182,7 +171,7 @@ pub const UPDATE_ORDER: [Direction; 6] = [
 ];
 
 /// One pending notification: "tell the block at `pos` that its neighbour
-/// changed, as if approached from `from`" — vanilla's `neighborChanged`
+/// changed, as if approached from `from`" — the real neighbor-changed hook
 /// carries the *source* block/orientation, not a direction into `pos`, but
 /// every caller in this crate reasons in terms of "which of my six sides
 /// triggered this," so `from` here is the direction from the *causing*
@@ -198,9 +187,9 @@ pub struct Notification {
 #[derive(Debug, Clone, Copy)]
 pub struct NeighborPropagator {
     /// Caps total notifications per [`propagate`](Self::propagate) call —
-    /// mirrors `CollectingNeighborUpdater`'s own `maxChainedNeighborUpdates` field.
+    /// mirrors the real collecting updater's own chained-update-cap field.
     /// `None` means unbounded (only test code should choose this; a live
-    /// world always caps it, matching vanilla always constructing its
+    /// world always caps it, matching the real engine always constructing its
     /// updater with a finite value).
     pub max_chained: Option<usize>,
 }
@@ -227,15 +216,15 @@ enum WorkItem {
 
 impl NeighborPropagator {
     /// Notifies every neighbour of `origin` except `skip` (pass `None` to
-    /// notify all six), in [`UPDATE_ORDER`], with vanilla's depth-first
+    /// notify all six), in [`UPDATE_ORDER`], with the real engine's depth-first
     /// cascade semantics: `notify` is called once per notification actually
     /// issued, and any [`Notification`]s it returns are fully resolved
     /// (including their own further cascades) before the next direction in
     /// the original fan-out is issued. Mirrors
-    /// `NeighborUpdater.updateNeighborsAtExceptFromFacing`
+    /// the real engine's own "update neighbors at, except from facing"
     /// as the entry point, backed by
-    /// `CollectingNeighborUpdater`'s stack — see this module's doc comment
-    /// for the full citation.
+    /// the real collecting updater's stack — see this module's doc comment
+    /// for the full derivation.
     ///
     /// Returns every [`Notification`] actually issued, in the exact order
     /// `notify` was called for them — the "observable behaviour" a caller
@@ -318,11 +307,11 @@ impl NeighborPropagator {
     }
 }
 
-/// All six directions — vanilla's `Direction.values()`
-/// (`Direction`'s own enum declaration order: down, up, north, south,
+/// All six directions — the real engine's own full direction-values list
+/// (its own enum declaration order: down, up, north, south,
 /// west, east). Distinct from [`UPDATE_ORDER`] on purpose: this is the order
-/// `SignalGetter.getBestNeighborSignal` and a
-/// handful of other jar loops iterate in — see `crate::redstone`'s own
+/// the real best-neighbor-signal query and a
+/// handful of other real-engine loops iterate in — see `crate::redstone`'s own
 /// module doc for why that particular order is irrelevant there (every use
 /// is a commutative `max`, not a notify cascade), unlike [`UPDATE_ORDER`]
 /// where the order *is* the observable behaviour.
@@ -343,10 +332,10 @@ mod tests {
         BlockPos::new(x, y, z)
     }
 
-    /// `getOpposite()` pins direct from `Direction`'s own
-    /// `oppositeIndex` field: down/up, north/south, west/east.
+    /// `getOpposite()` pins direct from the real direction enum's own
+    /// opposite-index field: down/up, north/south, west/east.
     #[test]
-    fn opposite_pairs_match_the_jar_field() {
+    fn opposite_pairs_match_the_real_field() {
         assert_eq!(Direction::Down.opposite(), Direction::Up);
         assert_eq!(Direction::Up.opposite(), Direction::Down);
         assert_eq!(Direction::North.opposite(), Direction::South);
@@ -355,7 +344,7 @@ mod tests {
         assert_eq!(Direction::East.opposite(), Direction::West);
     }
 
-    /// `Direction.getClockWise()`/`getCounterClockWise()`:
+    /// The real get-clockwise/get-counter-clockwise queries:
     /// a full clockwise loop returns to the start, and going one step
     /// clockwise then one step counter-clockwise is a no-op — a magnitude
     /// check (the whole cycle), not just "it changed".
@@ -399,7 +388,8 @@ mod tests {
     }
 
     /// `skip` removes exactly one direction and leaves the other five in
-    /// order — mirrors `updateNeighborsAtExceptFromFacing`'s own `skipDirection`.
+    /// order — mirrors the real "update neighbors at, except from facing"
+    /// hook's own skip-direction parameter.
     #[test]
     fn skip_direction_is_omitted_but_order_is_otherwise_unchanged() {
         let prop = NeighborPropagator::default();
