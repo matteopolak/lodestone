@@ -43,7 +43,7 @@ fn vs_main(inst: Instance, @builtin(vertex_index) vi: u32) -> VsOut {
     let cx = select(-1.0, 1.0, vi >= 2u);
     let cy = select(-1.0, 1.0, (vi & 1u) == 1u);
 
-    // Roll about the view axis, matching vanilla's `Particle.roll`.
+    // Roll about the view axis, matching vanilla's own per-particle roll field.
     let s = sin(inst.roll_light.x);
     let c = cos(inst.roll_light.x);
     let rx = cx * c - cy * s;

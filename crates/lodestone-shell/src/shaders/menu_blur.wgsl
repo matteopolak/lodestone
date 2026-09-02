@@ -1,21 +1,21 @@
 // The blur vanilla runs behind an open in-game menu.
 //
-// Record: `Screen.extractBackground` (`net.minecraft.client.gui.screens.Screen`)
-// calls `extractBlurredBackground` for every screen that is not
-// `isInGameUi()` (that fork is the flat translucent gradient instead --
+// Record: vanilla's own background-extraction routine
+// runs a blur pass for every screen that is not
+// a genuine in-game HUD overlay (that fork is the flat translucent gradient instead --
 // `Container`/sign-edit/command-block-edit screens want no blur, which is why
 // this pass is only ever invoked for the overlay screens that set
-// `MenuFrame::blur`, not for every `MenuBackdrop::Dim` frame). That method
-// calls `GuiRenderState::blurBeforeThisStratum`, which is realised as
-// `GameRenderer::processBlurEffect` running the `minecraft:blur` post chain
-// (`assets/minecraft/post_effect/blur.json`) over the already-drawn frame,
+// `MenuFrame::blur`, not for every `MenuBackdrop::Dim` frame). That routine
+// triggers vanilla's own pre-stratum blur hook, which is realised as
+// vanilla's own post-processing-effect runner applying its built-in blur post chain
+// over the already-drawn frame,
 // before the screen's own widgets are drawn on top -- so the background blurs
 // and the menu stays sharp.
 //
-// The chain is six passes, three horizontal+vertical pairs, each running this
-// fragment stage (`assets/minecraft/shaders/post/box_blur.fsh`). The radius
-// comes from `Options::menuBackgroundBlurriness` (an accessibility option,
-// `0..=10`, default `5` -- `Options.BLURRINESS_DEFAULT_VALUE`) and is passed
+// The chain is six passes, three horizontal+vertical pairs, each running the
+// same box-blur fragment stage vanilla ships. The radius
+// comes from vanilla's own menu-background-blurriness accessibility option
+// (`0..=10`, default `5`) and is passed
 // through untransformed as the shader's `MenuBlurRadius` global. This port
 // hardcodes that default (see `menu/render/blur.rs::BLUR_RADIUS`) rather than
 // wiring a settings row, which is a deliberate, stated scope cut.

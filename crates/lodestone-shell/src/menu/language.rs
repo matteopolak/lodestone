@@ -1,26 +1,25 @@
-//! The Language screen — vanilla's `LanguageSelectScreen`, the
+//! The Language screen — vanilla's own language-selection screen, the
 //! first of the three settings sub-screens the settings-branch plan always said would need
 //! a *different* list widget than `OptionsList` (per this screen's own
-//! `ObjectSelectionList` note) or `KeyBindsList`.
+//! selection-list-widget note) or `KeyBindsList`.
 //!
 //! ## Why this is the third list-widget kind, not a fold into an existing one
 //!
-//! `LanguageSelectScreen`'s list is vanilla's `ObjectSelectionList`
-//! (`LanguageSelectScreen.java`, extending
-//! `net.minecraft.client.gui.components.ObjectSelectionList`), and it is
+//! Vanilla's own language-selection screen's list is vanilla's own generic
+//! selection-list widget, and it is
 //! shaped like neither list this tree already has:
 //!
 //! - Unlike [`super::options`]'s `OptionsList`, an entry here is not a
 //!   caption-plus-widget pair — it is one centred line of text standing for
 //!   the whole row, and the *row itself* is the click target
-//!   (`Entry.mouseClicked` selects; `Entry.keyPressed`'s `isSelection()` case
-//!   does too), not a button drawn inside it.
+//!   (vanilla's own entry click and key-press handlers both select on it),
+//!   not a button drawn inside it.
 //! - Unlike [`super::key_binds`]'s `KeyBindsList`, there is exactly one
 //!   control per row, not two right-anchored buttons plus a name label.
 //!
 //! ## The deliberate departure: rows draw as buttons
 //!
-//! Vanilla's `AbstractSelectionList` draws a selected/hovered entry with a
+//! Vanilla's own generic list-widget base draws a selected/hovered entry with a
 //! 1 px outline and a darker fill — no `widget/button*` nine-slice sprite at
 //! all. Building that second selection-highlight primitive, in this pipeline,
 //! for a list that (see below) has exactly **one** real entry, is geometry in
@@ -51,11 +50,11 @@
 //! shape rather than gating it".
 //!
 //! `en_us`'s display name (`"English (US)"`) is transcribed from vanilla's
-//! well-known `languages.json` entry (`{"name":"English","region":"US"}`,
-//! joined by `LanguageInfo.toComponent`) rather than read out of this repo's
-//! own jar snapshot — that jar ships no `languages.json` at all, only
-//! `en_us.json` (`unzip -l .cache/mc/26.2/client.jar | /usr/bin/grep -i
-//! lang/`), so unlike every other citation in this module this one is public
+//! well-known language-metadata entry for that locale (name "English", region
+//! "US", joined into one display string) rather than read out of this repo's
+//! own jar snapshot — that jar ships no language-metadata table at all, only
+//! the translation file itself, so unlike every other citation in this module
+//! this one is public
 //! vanilla knowledge, not jar-verified, and is flagged here rather than
 //! presented as if it were.
 //!
@@ -64,14 +63,14 @@
 //! - **Wired**: reaching the screen (the root grid's "Language..." button is
 //!   now live) and back (Escape/Done → Root), a real search [`EditBox`]
 //!   (typing filters [`LANGUAGES`] by name — see [`filtered`] — exactly the
-//!   mechanism vanilla's `filterEntries` runs, just fed one entry), moving
+//!   mechanism vanilla's own entry-filtering runs, just fed one entry), moving
 //!   the selection cursor, and selecting the one real entry.
-//! - **Decorative — the selection's effect.** Vanilla's `onDone` calls
-//!   `languageManager.setSelected` and `minecraft.reloadResourcePacks()`
+//! - **Decorative — the selection's effect.** Vanilla's own on-done handler
+//!   commits the newly selected language and reloads resource packs
 //!   when the selected code differs from
 //!   the current one. It never can here: the one entry *is* the current
-//!   language, so the guard vanilla itself has (`!selectedEntry.code.equals(
-//!   this.languageManager.getSelected())`) is always false. Nothing is
+//!   language, so the guard vanilla itself has (comparing the selected entry's
+//!   code against the current language) is always false. Nothing is
 //!   faked to look otherwise.
 //! - **Present-and-inactive**: the footer's "Font Settings..." button
 //!   (`options.font`), vanilla's own next hop to `FontOptionsScreen` — out of
