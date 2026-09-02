@@ -36,7 +36,7 @@
 //! `lodestone_auth::resolve_selected_account` on the net thread — that one opens
 //! the OS keychain and POSTs to Microsoft, so it happens once per remote join and
 //! never for singleplayer, which vanilla does not authenticate either
-//! (`ServerLoginPacketListenerImpl.handleHello` skips the encryption request for
+//! (vanilla's own server-side login-hello handler skips the encryption request for
 //! a memory connection — see `docs/accounts.md`).
 //!
 //! The two cannot drift, because both key off the same

@@ -46,7 +46,7 @@ pub fn screenshot_dir() -> PathBuf {
 }
 
 /// Vanilla's filename scheme: `yyyy-MM-dd_HH.mm.ss.png`
-/// (`Screenshot.getFile`, `Screenshot.java`), with `_2`, `_3`, … on a
+/// (vanilla's own screenshot-file-naming routine), with `_2`, `_3`, … on a
 /// same-second collision so an existing file is never overwritten.
 ///
 /// **In UTC, not local time** — a named divergence from

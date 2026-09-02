@@ -157,8 +157,8 @@ pub fn spans_lines(spans: &[TextSpan]) -> Vec<Vec<TextSpan>> {
 ///
 /// Earlier this carried a `color: [f32; 3]` RGB tint instead, on the
 /// (unchecked) assumption that vanilla paints one greyscale bar and tints it.
-/// `BossHealthOverlay.BAR_BACKGROUND_SPRITES`/`BAR_PROGRESS_SPRITES`
-/// (`.cache/mc/26.2/client-src`) say otherwise: seven **distinct** sprite
+/// Vanilla's own boss-health-overlay background/progress sprite tables
+/// say otherwise: seven **distinct** sprite
 /// files per colour, blitted with `color = -1` (opaque white, no tint at
 /// all). A tint field could not have driven that draw no matter what the HUD
 /// did with it — the fold had already thrown away the one piece of
@@ -186,10 +186,11 @@ pub struct BossBarView {
     pub overlay: BossBarOverlay,
 }
 
-/// Vanilla's `Mth.lerpDiscrete(alpha, p0, p1)` (`.cache/mc/26.2/client-src`):
+/// Vanilla's own discrete-lerp helper `lerpDiscrete(alpha, p0, p1)`:
 /// an integer interpolation between `p0` and `p1` that is `0` only at
 /// `alpha == 0.0` and `p1` only at `alpha >= 1.0`, otherwise
-/// `p0 + floor(alpha * (p1 - p0 - 1)) + 1`. `BossHealthOverlay.extractBar`
+/// `p0 + floor(alpha * (p1 - p0 - 1)) + 1`. Vanilla's own boss-health-overlay
+/// bar-extract routine
 /// feeds this `(progress, 0, 182)` to get the progress sprite's pixel width —
 /// **not** `progress * 182` rounded or truncated, which disagrees with this
 /// formula at most fractions (they coincide at `0.0`, `1.0`, and `0.5`, which
@@ -447,7 +448,7 @@ mod tests {
         );
     }
 
-    /// [`lerp_discrete_width`] against vanilla's own `Mth.lerpDiscrete`
+    /// [`lerp_discrete_width`] against vanilla's own discrete-lerp
     /// formula, hand-expanded — the exact source of the boss bar's clipped
     /// progress-fill width, not a naive `progress * native_width` round or
     /// truncation. `0.0`/`1.0`/`0.5` are where the naive version happens to

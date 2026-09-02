@@ -5,8 +5,8 @@
 //!
 //! The server owns *what eating does* (nutrition, saturation, the use clock,
 //! cancel-on-release — `lodestone_server::item_use`). This module owns the two
-//! client-visible halves vanilla's `Consumable.emitParticlesAndSounds` and
-//! `ItemInHandRenderer.applyEatTransform` produce, and neither is a guess about
+//! client-visible halves vanilla's own consumable particles/sounds routine and
+//! its own held-item eat-transform routine produce, and neither is a guess about
 //! server state: both are derived from the local player's own use, exactly as
 //! vanilla's client derives them.
 //!
@@ -19,10 +19,11 @@
 //!
 //! # Why the sound is not on this side
 //!
-//! Vanilla runs `Consumable.emitParticlesAndSounds` on both sides and each drops
-//! the half it cannot do: `ServerLevel.addParticle` is a no-op, and
-//! `ClientLevel.playSeededSound` skips a sound whose excluded player is not the
-//! local one — which `Entity.playSound`'s `playSound(null, …)` always satisfies. So
+//! Vanilla runs its own consumable particles/sounds routine on both sides and each drops
+//! the half it cannot do: the server-side add-particle call is a no-op, and
+//! the client-side seeded-sound player skips a sound whose excluded player is not the
+//! local one — which vanilla's own entity sound-play call with a null excluded
+//! player always satisfies. So
 //! particles are *always* predicted and the eating sound is *always* the server's
 //! broadcast. Emitting the sound here too would double it against a real 26.2
 //! server, which is the same trap `docs/sound-playback.md` records for block
@@ -47,7 +48,7 @@
 //! 5. for a `minecraft:food` item, the hunger gate
 //!    ([`lodestone_game::food::can_eat`]) — a full, non-invulnerable player's
 //!    use of an ordinary food resolves to `None` here, the same `FAIL`
-//!    vanilla's server-side `Player.canEat` gives it, rather than the whole
+//!    vanilla's own server-side can-eat check gives it, rather than the whole
 //!    bite animation and crumbs for a use the server was always going to
 //!    refuse.
 //!
@@ -116,8 +117,8 @@ impl ConsumeState {
     /// crumbs for a food the server was about to refuse with `FAIL`.
     /// [`lodestone_game::food::always_eat_for_food`] narrows to the 40 items that
     /// are actually `minecraft:food`; `None` (a drink, or anything non-food) means
-    /// no hunger gate applies at all, matching vanilla's `Consumable.startConsuming`
-    /// only checking `canEat` for food in the first place. `food_level: None`
+    /// no hunger gate applies at all, matching vanilla's own start-consuming
+    /// routine only checking the can-eat gate for food in the first place. `food_level: None`
     /// (the server has not told us yet) does **not** gate — an unknown hunger
     /// level must never block a use this prediction cannot actually verify either
     /// way, and the server's own refusal is still the authority if this guesses
@@ -144,7 +145,8 @@ impl ConsumeState {
         }
         // The bound that makes the animation self-terminating — see the module
         // docs. `>=` and not `>`: at `ticks_used == consume_ticks` vanilla's
-        // `useItemRemaining` has reached 0 and `completeUsingItem` has run.
+        // own use-item-remaining counter has reached 0 and its own
+        // complete-using-item routine has run.
         if ticks_used >= consumable.consume_ticks {
             return None;
         }
@@ -156,7 +158,7 @@ impl ConsumeState {
         })
     }
 
-    /// `LivingEntity.getUseItemRemainingTicks()` — what every vanilla consume
+    /// Vanilla's own use-item-remaining-ticks getter — what every vanilla consume
     /// expression is written in terms of.
     #[must_use]
     pub fn remaining_ticks(&self) -> u32 {
@@ -164,7 +166,7 @@ impl ConsumeState {
     }
 
     /// Whether this tick is one of the six (for a default food) on which
-    /// `ItemStack.onUseTick` fires effects — **and** whether this item has
+    /// vanilla's own per-tick item-use hook fires effects — **and** whether this item has
     /// particles at all.
     ///
     /// The conjunction is here rather than at the call site because the two
@@ -179,7 +181,7 @@ impl ConsumeState {
             )
     }
 
-    /// `true` for `ItemUseAnimation.DRINK`. Kept as an accessor because the
+    /// `true` for vanilla's own drink use-animation. Kept as an accessor because the
     /// animation is *not* what selects the pose (eat and drink share one transform)
     /// — only the sound and the particle flag differ, and reading `animation` at a
     /// pose site is the mistake that invites.
@@ -189,8 +191,9 @@ impl ConsumeState {
     }
 }
 
-/// `ItemStack.onUseTick` → `Consumable.emitParticlesAndSounds` →
-/// `LivingEntity.spawnItemParticles(stack, 5)`, for the local player.
+/// Vanilla's own per-tick item-use hook → its own emit-particles-and-sounds
+/// routine → its own spawn-item-particles routine (5 particles), for the
+/// local player.
 ///
 /// Runs in `TickSet::Send`'s chain next to `drive_mining` because it shares
 /// [`ParticleSim`] with it and this app runs with

@@ -119,7 +119,8 @@ pub const DEFAULT_USERNAME: &str = "Player";
 
 /// The `nameUUIDFromBytes` prefix vanilla uses for offline accounts.
 ///
-/// From `Player.createPlayerUUID` / the server's `GameProfile` construction in
+/// From vanilla's own offline-player-UUID routine / the server's `GameProfile`
+/// construction in
 /// offline mode. The exact bytes are load-bearing: change them and every
 /// existing offline player file becomes unreachable.
 const OFFLINE_PREFIX: &str = "OfflinePlayer:";
@@ -150,7 +151,7 @@ pub enum NameError {
     /// there is no "trim it for them" reading that keeps the name valid.
     Empty,
     /// More than 16 characters — the server's hard limit
-    /// (`StringUtil.isValidPlayerName`).
+    /// (vanilla's own player-name validator).
     TooLong,
     /// Contains a character the login-start packet's validator rejects:
     /// anything at or below `' '`, or anything outside 7-bit ASCII.
@@ -173,7 +174,7 @@ impl std::error::Error for NameError {}
 
 /// Whether `name` is one a server will accept.
 ///
-/// Mirrors vanilla's `StringUtil.isValidPlayerName` — the rule
+/// Mirrors vanilla's own player-name validator — the rule
 /// `lodestone_server`'s own login handler applies before it derives the account
 /// UUID (`is_valid_player_name`, `crates/lodestone-server/src/server.rs`) —
 /// plus a non-empty check, because that helper accepts `""` and a server will

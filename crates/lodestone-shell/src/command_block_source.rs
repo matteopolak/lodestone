@@ -33,16 +33,16 @@
 //! itself reads the two separately:
 //!
 //! * **Mode** comes from the *block*, not the NBT —
-//!   `CommandBlockEntity.getMode()` matches
-//!   on `Blocks.COMMAND_BLOCK` / `REPEATING_COMMAND_BLOCK` /
-//!   `CHAIN_COMMAND_BLOCK`. There is no mode field on the wire at all, which is
+//!   vanilla's own command-block-entity mode lookup matches
+//!   on `minecraft:command_block` / `minecraft:repeating_command_block` /
+//!   `minecraft:chain_command_block`. There is no mode field on the wire at all, which is
 //!   why a reader that only looked at NBT would show every chain block as
 //!   Redstone.
-//! * **Conditional** likewise — `CommandBlockEntity.isConditional()`
-//!   (`:155-158`) reads `blockState.getValue(CommandBlock.CONDITIONAL)`.
+//! * **Conditional** likewise — vanilla's own command-block-entity
+//!   is-conditional check reads the block state's own conditional property.
 //! * **Command / TrackOutput / LastOutput / auto** come from the NBT
-//!   (`BaseCommandBlock.save`, `BaseCommandBlock.java`, and
-//!   `CommandBlockEntity.saveAdditional`, `:69-75`).
+//!   (vanilla's own base-command-block save routine, and
+//!   its own command-block-entity save-additional routine).
 //!
 //! # Fail open, never fail blank
 //!
@@ -59,7 +59,7 @@ use crate::menu::command_block::CommandBlockOpen;
 
 /// The three command-block blocks, and the mode each one *is*.
 ///
-/// Ordered as `CommandBlockEntity.getMode` tests them. Note the mapping is not
+/// Ordered as vanilla's own command-block-entity mode lookup tests them. Note the mapping is not
 /// alphabetical or intuitive: the plain `command_block` is **Redstone**, the
 /// *repeating* one is **Auto**, and the *chain* one is **Sequence**.
 const COMMAND_BLOCKS: [(&str, CommandBlockMode); 3] = [
@@ -108,11 +108,11 @@ pub fn mode_for_state(state_id: u32) -> Option<CommandBlockMode> {
 }
 
 /// Whether `state_id`'s `conditional` property is set —
-/// `CommandBlock.CONDITIONAL`.
+/// vanilla's own conditional block-state property.
 ///
 /// Absent property reads `false`, matching
-/// `CommandBlockEntity.isConditional()`'s own fallback for a block that is not
-/// a `CommandBlock`.
+/// vanilla's own command-block-entity is-conditional check's own fallback for a block that is not
+/// a command block.
 #[must_use]
 fn conditional_for_state(state_id: u32) -> bool {
     lodestone_data::block_states::properties(state_id)
@@ -171,7 +171,8 @@ pub fn command_block_open(pos: BlockPos, state_id: u32, nbt: &Nbt) -> Option<Com
         _ => &[],
     };
 
-    // `BaseCommandBlock.load` defaults: `Command` to `""`, `TrackOutput` to
+    // Vanilla's own base-command-block load routine's defaults: `Command` to
+    // `""`, `TrackOutput` to
     // **`true`** — note the asymmetry, it is
     // the one field here whose default is not `false`/empty.
     let command = find(fields, "Command")
@@ -182,7 +183,7 @@ pub fn command_block_open(pos: BlockPos, state_id: u32, nbt: &Nbt) -> Option<Com
     let automatic = find(fields, "auto").and_then(as_bool).unwrap_or(false);
 
     // `LastOutput` is a chat `Component`, and vanilla only shows it when
-    // tracking is on (`AbstractCommandBlockEditScreen.java` sets the
+    // tracking is on (vanilla's own abstract command-block-edit screen sets the
     // previous-output line to `"-"` otherwise). Drawn as `"-"` by the screen
     // when `None`, so an absent or untracked output needs no special case here.
     let previous_output = track_output

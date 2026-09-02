@@ -23,10 +23,11 @@
 //! asked "is this cell occupied", never "does the ray pass through the shape in
 //! it".
 //!
-//! Vanilla is `Entity.pick` → `Level.clip` with `ClipContext.Block.OUTLINE`
-//!, which walks the same DDA (`BlockGetter
-//! .traverseBlocks`) and clips each cell's `state.getShape(…).toAabbs()` with
-//! `AABB.clip`. [`raycast`] now does exactly that, and two consequences follow
+//! Vanilla is its own entity-pick routine calling its own level-clip routine
+//! with an outline-shape clip context
+//!, which walks the same DDA (its own block-traversal
+//! helper) and clips each cell's real collision shape with
+//! its own AABB-clip routine. [`raycast`] now does exactly that, and two consequences follow
 //! that a cube-shaped hit test could not express:
 //!
 //! * **the hit face comes from the box that was actually hit**, not from the
@@ -87,12 +88,12 @@ pub struct RayHit {
     /// (e.g. `[0, 1, 0]` when the ray hit the top of a box). This is the face of
     /// the **outline box** that was hit, not of the cell: a ray that enters a
     /// leaf-litter cell through its `-X` side and then meets the `1/16`-tall
-    /// litter box from above reports `[0, 1, 0]`, exactly as vanilla's
-    /// `AABB.clip` does. Also the offset to the cell a placed block would
+    /// litter box from above reports `[0, 1, 0]`, exactly as
+    /// vanilla's own AABB-clip routine does. Also the offset to the cell a placed block would
     /// occupy against that face.
     pub normal: [i32; 3],
-    /// Exact world-space point where the ray entered the box — vanilla's
-    /// `BlockHitResult.getLocation()`. `use_item_on`'s cursor field is this
+    /// Exact world-space point where the ray entered the box — vanilla's own
+    /// block-hit-result location. `use_item_on`'s cursor field is this
     /// minus [`block`](Self::block); see [`Self::cursor`].
     pub hit: [f64; 3],
     /// Distance from the eye to [`hit`](Self::hit), in blocks along the
@@ -141,8 +142,8 @@ impl RayHit {
     }
 
     /// The hit point in **block-local** coordinates, which is exactly the cursor
-    /// vector `ServerboundUseItemOnPacket` carries (vanilla writes
-    /// `location - blockPos`, `writeBlockHitResult`).
+    /// vector vanilla's own serverbound use-item-on packet carries (vanilla writes
+    /// `location - blockPos`, its own block-hit-result write routine).
     ///
     /// Narrowed to `f32` because that is the wire type. Not clamped to `0..1`:
     /// a box may legitimately reach outside its cell, and vanilla sends the raw
@@ -170,7 +171,7 @@ impl RayHit {
 /// within a cell the **nearest** box wins — so a block whose outline is several
 /// disjoint boxes (a fence's post and arms, a pane's cross, a stair's two
 /// slabs) is tested in full. A box the origin is already *inside* is skipped,
-/// which is what vanilla's `AABB.clip` does (it only ever reports a face
+/// which is what vanilla's own AABB-clip routine does (it only ever reports a face
 /// crossing), so standing inside a cobweb does not target it.
 #[must_use]
 pub fn raycast(
@@ -271,8 +272,8 @@ fn clip_cell(
         let Some((t, normal)) = clip_box(origin, d, reach, min, max) else {
             continue;
         };
-        // `[0, 0, 0]` is "the origin is already inside this box", which vanilla's
-        // `AABB.clip` reports as no crossing at all.
+        // `[0, 0, 0]` is "the origin is already inside this box", which
+        // vanilla's own AABB-clip routine reports as no crossing at all.
         if normal != [0, 0, 0] && best.is_none_or(|(bt, _)| t < bt) {
             best = Some((t, normal));
         }
@@ -290,8 +291,8 @@ fn clip_cell(
     })
 }
 
-/// Ray-vs-AABB slab test, mirroring vanilla's `AABB.clip(Vec3, Vec3)` used by
-/// `Entity.getClippedBounds`/`ProjectileUtil`-style entity picking.
+/// Ray-vs-AABB slab test, mirroring vanilla's own AABB-clip routine used by
+/// its own clipped-bounds/projectile-util-style entity picking.
 ///
 /// `dir` need not be normalised (matches [`raycast`]'s convention); `reach` is
 /// in the same blocks-along-the-normalised-ray units as [`raycast`]'s. Returns
@@ -321,11 +322,11 @@ pub fn ray_aabb(
 /// which case `t` is `0.0`. The two callers want opposite things there, which is
 /// why this reports it instead of choosing:
 ///
-/// * **blocks** ([`raycast`]) skip such a box, matching vanilla's `AABB.clip`,
+/// * **blocks** ([`raycast`]) skip such a box, matching vanilla's own AABB-clip routine,
 ///   which is written in terms of face crossings and returns
 ///   `Optional.empty()` for a start point inside;
 /// * **entities** ([`ray_aabb`]) treat it as a hit at distance zero, matching
-///   `ProjectileUtil.getEntityHitResult`, which special-cases
+///   vanilla's own projectile-util entity-hit-result routine, which special-cases
 ///   `aabb.contains(from)` before consulting `clip`.
 fn clip_box(
     origin: [f64; 3],
@@ -481,7 +482,7 @@ mod tests {
 
     #[test]
     fn a_box_the_eye_is_already_inside_is_not_targeted() {
-        // Vanilla's `AABB.clip` is written in terms of face crossings and reports
+        // Vanilla's vanilla's own AABB-clip routine is written in terms of face crossings and reports
         // nothing for a start point inside the box — which is why standing inside
         // a cobweb (a full-cube outline with no collision) does not target it.
         // `ray_aabb` deliberately answers the *other* way for entities.
@@ -513,12 +514,12 @@ mod tests {
     // Every box below is hand-transcribed from 26.2's own source, so the
     // expected geometry originates outside this module:
     //
-    // * `CarpetBlock.java` — `SHAPE = Block.column(16.0, 0.0, 1.0)`, i.e.
+    // * Vanilla's own carpet block — `SHAPE = Block.column(16.0, 0.0, 1.0)`, i.e.
     //   x/z `0..16` and y `0..1` in sixteenths: **1/16 of a block tall**.
-    //   `LeafLitterBlock` is the same height via `SegmentableBlock
-    //   .getShapeHeight() = 1.0`, over a
+    //   Vanilla's own leaf-litter block is the same height via its own
+    //   shape-height getter (`= 1.0`), over a
     //   quarter of the cell per segment.
-    // * `StairBlock.java` — `SHAPE_OUTER = or(column(16, 0, 8),
+    // * Vanilla's own stair block — `SHAPE_OUTER = or(column(16, 0, 8),
     //   box(0, 8, 0, 8, 16, 8))` and `SHAPE_STRAIGHT` unions its 90° rotation:
     //   a full-width **half-height slab** plus a **half-width upper step**, two
     //   disjoint boxes.

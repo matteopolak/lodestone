@@ -4,7 +4,7 @@
 //!
 //! The authoritative fold lives in [`lodestone_game::tablist::TabList`]. This
 //! module lowers that state into a [`TabListView`] — the shape `hud.rs` draws
-//! while Tab is held, laid out to vanilla's `PlayerTabOverlay`.
+//! while Tab is held, laid out to vanilla's own tab overlay.
 //!
 //! ## How it works
 //!
@@ -14,14 +14,14 @@
 //!   **styled spans**, so a server that colours a name gets a coloured row;
 //! * when an entry carries **no** explicit `display_name`, runs the plain
 //!   profile name through the player's scoreboard team —
-//!   `PlayerTabOverlay.getNameForDisplay`'s other half,
-//!   `PlayerTeam.formatNameForTeam` — via
+//!   vanilla's own get-name-for-display's other half,
+//!   its own format-name-for-team routine — via
 //!   [`Scoreboard::display_name_of`](lodestone_game::scoreboard::Scoreboard::display_name_of).
 //!   This is the more common source of a coloured tab-list name in practice: a
 //!   server that runs `/team modify <team> color` never sets a display name at
 //!   all, and a `tab_list_view` that only checked `display_name` would show
 //!   every one of its players in plain white;
-//! * applies vanilla's `limit(80)` — `PlayerTabOverlay.getPlayerInfos` caps the
+//! * applies vanilla's `limit(80)` — vanilla's own get-player-infos routine caps the
 //!   overlay at 80 entries, after sorting, and a 200-player server therefore
 //!   shows the first 80 in comparator order rather than 200 rows off the bottom
 //!   of the screen;
@@ -38,7 +38,7 @@
 //! space.
 //!
 //! **This client draws no player head, and that is vanilla's own behaviour on
-//! every server we can host.** `PlayerTabOverlay.extractRenderState` gates the
+//! every server we can host.** Vanilla's own overlay render-state extract routine gates the
 //! 8×8 face on `showHead = this.minecraft.getConnection().onlineMode()`, which
 //! comes from the LOGIN packet's `onlineMode` field. Our own server writes
 //! `false` there (`v770`'s `server_protocol`), so vanilla joined to it would
@@ -61,14 +61,14 @@ use lodestone_model::Text;
 use lodestone_model::text::TextSpan;
 
 /// Vanilla's cap on how many rows the overlay shows —
-/// `PlayerTabOverlay.getPlayerInfos`'s `.limit(80L)`, applied **after** the
+/// vanilla's own get-player-infos routine's `.limit(80L)`, applied **after** the
 /// comparator so which 80 you see is well defined.
 pub const MAX_TAB_ROWS: usize = 80;
 
 /// One row of the tab overlay.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabListRow {
-    /// The name to draw, as styled spans — `PlayerTabOverlay.getNameForDisplay`,
+    /// The name to draw, as styled spans — vanilla's own get-name-for-display routine,
     /// which prefers `getTabListDisplayName()` and falls back to the plain
     /// profile name.
     pub name: Vec<TextSpan>,
@@ -122,7 +122,7 @@ impl TabListView {
 }
 
 /// The signal-bar sprite for a latency in milliseconds —
-/// `PlayerTabOverlay.extractPingIcon`, transcribed.
+/// vanilla's own ping-icon extract routine, transcribed.
 ///
 /// The bands are **not** evenly spaced and the strongest is the widest: anything
 /// under 150 ms gets all five bars, and it takes a full second to fall to one.
@@ -178,10 +178,10 @@ pub fn tab_list_view(
     }
 }
 
-/// `PlayerTabOverlay.getNameForDisplay`: an explicit tab-list display name
+/// vanilla's own get-name-for-display routine: an explicit tab-list display name
 /// wins outright (`entry.effective_name()` already does that half); with none,
 /// the plain profile name is run through the player's scoreboard team
-/// (`PlayerTeam.formatNameForTeam`) rather than left bare.
+/// (vanilla's own format-name-for-team routine) rather than left bare.
 ///
 /// This is the fold [`PlayerListEntry::effective_name`] deliberately does not
 /// do, because it lives in `lodestone-game`'s per-entry state and has no
@@ -206,7 +206,7 @@ fn name_for_display(entry: &PlayerListEntry, scoreboard: Option<&Scoreboard>) ->
 /// An absent, empty or whitespace-only banner yields **no lines**, which
 /// is what makes `Option`-ing the result at the call site unnecessary: vanilla
 /// draws nothing for an empty header rather than an empty gap
-/// (`PlayerTabOverlay.render`, which only measures a non-null header).
+/// (vanilla's own overlay render routine, which only measures a non-null header).
 ///
 /// Trailing empties are dropped but interior blank lines are kept: a server
 /// separating two banner halves with a blank line means it.
@@ -352,9 +352,9 @@ mod tests {
         );
     }
 
-    /// `PlayerTabOverlay.getNameForDisplay`'s other half: a player with **no**
+    /// vanilla's own get-name-for-display routine's other half: a player with **no**
     /// explicit display name is still coloured, through their scoreboard team —
-    /// `PlayerTeam.formatNameForTeam`. This is the common case a server that
+    /// vanilla's own format-name-for-team routine. This is the common case a server that
     /// only runs `/team modify <team> color` hits, with no display-name
     /// component ever sent, so a `tab_list_view` that only checked
     /// `display_name` would show every one of these players in plain white.
