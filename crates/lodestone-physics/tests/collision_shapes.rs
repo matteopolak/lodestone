@@ -8,7 +8,7 @@
 //! it is *not* authoritative for our target version.
 //!
 //! The authoritative source is the game itself: `oracle-java/ShapeOracle.java`
-//! bootstraps the real 26.2 server and reads `BlockState.getCollisionShape` for
+//! bootstraps the real 26.2 server and reads vanilla's own per-block-state collision-shape accessor for
 //! every one of the 32,366 states. A curated, bit-exact subset of that output is
 //! checked in as `support/collision_shapes_jvm.txt`; this test parses it and
 //! asserts our collision engine reproduces the geometry and the resulting

@@ -1,7 +1,6 @@
 //! The elytra firework-rocket glide boost — issue #206.
 //!
-//! `FireworkRocketEntity.tick`'s attached-to-a-glider branch
-//! (`FireworkRocketEntity.java:122-137`):
+//! Vanilla's own firework-rocket per-tick step's attached-to-a-glider branch:
 //!
 //! ```text
 //! lookAngle = attachedToEntity.getLookAngle();
