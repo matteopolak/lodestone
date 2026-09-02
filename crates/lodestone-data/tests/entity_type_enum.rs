@@ -8,7 +8,7 @@
 //!
 //! `tests/support/entity_census_jvm.txt` is already a committed JVM dump for
 //! this registry: `EntityCensusOracle.java` walks
-//! `BuiltInRegistries.ENTITY_TYPE` on the real 26.2 server and writes one
+//! vanilla's own entity-type registry on the real 26.2 server and writes one
 //! `<id> <name> …` line per type, in registration order (its own header
 //! documents `id` as "network entity-type registry id (dense 0..158)"). This
 //! generator reads only the `id`/`name` columns; the remaining columns
