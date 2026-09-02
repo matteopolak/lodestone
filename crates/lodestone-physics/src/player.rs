@@ -233,7 +233,7 @@ pub struct PlayerState {
     /// Active physics-affecting status effects.
     pub effects: StatusEffects,
     /// Effective movement-speed attribute value handed in by the entity layer
-    /// (`lodestone-entity`'s `AttributeInstance.value()`), or `None` to let
+    /// (`lodestone-entity`'s resolved attribute-value accessor), or `None` to let
     /// physics compute the standalone base+sprint value itself.
     ///
     /// **Reconciled attribute seam.** Vanilla's own player update does, every
@@ -653,7 +653,7 @@ impl PlayerState {
     }
 
     /// Returns a copy of this state with the
-    /// [`WATER_MOVEMENT_EFFICIENCY`](Self::water_movement_efficiency) attribute
+    /// [water-movement-efficiency](Self::water_movement_efficiency) attribute
     /// value (Depth Strider) injected.
     #[must_use]
     pub fn with_water_movement_efficiency(mut self, value: f32) -> Self {
@@ -731,8 +731,8 @@ impl PlayerState {
     /// `_profile`) purely for source compatibility with existing callers; it is
     /// unused, and a caller may drop the argument once its call sites are updated.
     ///
-    /// Since vanilla's own box construction anchors `minY` at the feet, a
-    /// pose change moves only the top face (and, for poses this crate does
+    /// Since vanilla's own box construction anchors its own minimum Y at the
+    /// feet, a pose change moves only the top face (and, for poses this crate does
     /// not model, the width).
     #[must_use]
     pub fn bounding_box(&self, _profile: &PhysicsProfile) -> Aabb {
@@ -775,8 +775,8 @@ fn modify_input(
         InputModel::UnitSquareProjection => {
             modify_input_unit_square(strafe, forward, using_item, sneak, sneak_factor)
         }
-        // Structural seam: 1.8 used `moveFlying` (normalise by max(1, magnitude),
-        // no unit-square projection). Deliberately not modelled yet — failing
+        // Structural seam: 1.8 used its own "move flying" step (normalise by
+        // max(1, magnitude), no unit-square projection). Deliberately not modelled yet — failing
         // loudly here is correct, because silently running the modern transform
         // would produce wrong-but-plausible 1.8 movement. Blocked on the 1.8
         // client restructure + a 1.8 JVM oracle.
@@ -1096,8 +1096,8 @@ pub enum EdgeBackOff {
 ///   this crate has no equivalent of) and the mover types used for
 ///   vehicle/knockback pushes.
 ///
-/// `maxDownStep` is vanilla's own resolved max-up-step value, i.e. the
-/// resolved **step-height attribute**, whose ranged-attribute default is
+/// Vanilla's own "max down step" is its own resolved max-up-step value,
+/// i.e. the resolved **step-height attribute**, whose ranged-attribute default is
 /// `0.6` — *not* a literal. It arrives as [`EntityDimensions::step_height`],
 /// which is documented as the post-modifier value, so a step-height modifier
 /// is honoured for free. Hard-coding `0.6` would agree today and silently
@@ -1273,8 +1273,8 @@ fn is_above_ground(
 /// count); vertically the bottom is pushed `1e-7` further **down** — an expansion,
 /// not a shrink — while the top sits exactly at the feet plane. Because overlap is
 /// the strict `min < max` test, the block you are standing on still registers
-/// (its top face is at `minY`, and `minY - h - 1e-7 < minY` holds), which is what
-/// makes standing on solid ground report "cannot fall".
+/// (its top face is at the box's own minimum Y, and `min_y - h - 1e-7 < min_y`
+/// holds), which is what makes standing on solid ground report "cannot fall".
 ///
 /// The consequence for the caller is that this is a **whole-box** test: it only
 /// reports true once the entire inset footprint clears every collider. A sneaking
@@ -1461,21 +1461,19 @@ pub fn try_start_fall_flying(
     true
 }
 
-/// The half of vanilla's own fall-flying update that ends a glide, issue
-/// #206.
+/// The half of vanilla's own fall-flying update that ends a glide.
 ///
-/// ```text
-/// if (!this.level().isClientSide()) {
-///    if (!this.canGlide()) {
-///       this.setSharedFlag(7, false);
-/// ```
+/// Vanilla's own version of this check runs only when **not** on the client,
+/// and inside that guard clears its own shared "gliding" flag once its own
+/// "can glide" check fails.
 ///
-/// Vanilla runs this **server-side only** and syncs the cleared flag; we run it
-/// on the client because this client has no server that tracks glide state
-/// (issue #206's residue names exactly that gap). Predicting the stop locally is
-/// the safe direction: the dominant trigger is `onGround`, and a client that
-/// keeps `fall_flying` set after touching down routes every subsequent tick
-/// through [`tick_elytra`] and can never walk again.
+/// Vanilla runs this **server-side only** and syncs the cleared flag; we run
+/// it on the client because this client has no server that tracks glide
+/// state, a gap left by an unfinished server-side glide tracker. Predicting
+/// the stop locally is the safe direction: the dominant trigger is the
+/// on-ground flag, and a client that keeps `fall_flying` set after touching
+/// down routes every subsequent tick through [`tick_elytra`] and can never
+/// walk again.
 ///
 /// The elytra-durability and glide game-event halves of vanilla's own
 /// update are deliberately not modelled — both are server-only effects on
@@ -1883,7 +1881,7 @@ fn tick_air_among_entities(
         input.jump = true;
     }
 
-    // --- aiStep prologue: velocity snap-to-zero -------------------------------
+    // --- AI-step prologue: velocity snap-to-zero -------------------------------
     decrement_no_jump_delay(state);
     state.velocity = snap_small_velocity(state.velocity);
 
@@ -1894,16 +1892,16 @@ fn tick_air_among_entities(
     // Vanilla's own jump block is `if (this.jumping &&
     // this.isAffectedByFluids())` — and the player's fluid-affected check is
     // `!abilities.flying`. So a **flying player never jumps from the ground
-    // at all**; the `else` arm runs and clears `noJumpDelay`.
+    // at all**; the `else` arm runs and clears its own no-jump-delay flag.
     //
     // This conjunct is easy to miss because the fluid-affected check reads
     // like it should only guard the *fluid* sub-branches, and because
     // vanilla's own creative-flight feel is unaffected in the common case
-    // (you are rarely `onGround` while flying). It matters at ground level:
+    // (you are rarely on the ground while flying). It matters at ground level:
     // without it, holding jump while hovering just above the floor would
-    // add the ground-jump impulse's `0.42` *on top of* the `flyingSpeed * 3`
-    // vertical impulse the driver applies, and launch the player at three
-    // times vanilla's climb rate.
+    // add the ground-jump impulse's `0.42` *on top of* the flying-speed
+    // times 3 vertical impulse the driver applies, and launch the player at
+    // three times vanilla's climb rate.
     //
     // The one-shot hop vanilla *does* perform when flight is **engaged**
     // while standing (its own per-tick client update: if flying and on the
@@ -2249,8 +2247,9 @@ fn apply_fluid_jump(
 /// Without it a player pressed against a shoreline swims into the wall forever;
 /// this is the single most visible piece of water movement after buoyancy.
 ///
-/// `isFree` is vanilla's own "no collision and contains no liquid" check —
-/// the liquid half is what stops it firing repeatedly while still submerged.
+/// Vanilla's own "is free" check is its own "no collision and contains no
+/// liquid" check — the liquid half is what stops it firing repeatedly while
+/// still submerged.
 fn jump_out_of_fluid(
     state: &mut PlayerState,
     old_y: f64,
@@ -2323,15 +2322,15 @@ fn tick_water_among_entities(
             unimplemented!("1.8 fluid movement is not implemented yet")
         }
     }
-    // --- baseTick: vanilla's own fluid-interaction water reset ----------------
+    // --- base tick: vanilla's own fluid-interaction water reset ----------------
     // This function is only reached when the per-tick fluid summary already says
     // `in_water()` (see `travel_and_check_inside_blocks`'s dispatch), so the
     // condition is unconditionally true here — matching vanilla, where the same
     // predicate decides both the reset and the in-fluid travel dispatch.
     state.fall_distance = 0.0;
-    // --- baseTick: vanilla's own fluid current push ---------------------------
-    // Vanilla applies the flow current in `baseTick`, before `aiStep`/`travel`
-    // within the same tick, so it lands here (ahead of the snap-to-zero prologue)
+    // --- base tick: vanilla's own fluid current push ---------------------------
+    // Vanilla applies the flow current in its own base tick, before its own
+    // AI step / travel step within the same tick, so it lands here (ahead of the snap-to-zero prologue)
     // and its result is what the prologue and the accel step then see.
     apply_fluid_push(
         state,
@@ -2353,21 +2352,21 @@ fn tick_water_among_entities(
             .velocity
             .add(Vec3d::new(0.0, -f64::from(0.04f32), 0.0));
     }
-    // --- aiStep prologue: velocity snap-to-zero (identical to the air path) ----
+    // --- AI-step prologue: velocity snap-to-zero (identical to the air path) ----
     decrement_no_jump_delay(state);
     state.velocity = snap_small_velocity(state.velocity);
 
     let (xxa, zza) = set_sprint_and_modify_input(state, input, profile);
 
-    // --- aiStep jump: shallow water jumps, deep water swims up -----------------
+    // --- AI-step jump: shallow water jumps, deep water swims up -----------------
     apply_fluid_jump(state, input, fluid, view, profile);
 
     // --- vanilla's own swim look-descent ---------------------------------------
     // Runs in vanilla's own player travel step, which wraps its base travel
     // (travel → in-fluid travel → in-water travel, i.e. the rest of this
-    // function) — so it modifies `deltaMovement.y` *before* the in-water
-    // physics ever sees it, which is why this sits ahead of the `isFalling`/
-    // `oldY` capture below rather than after it.
+    // function) — so it modifies its own velocity's Y component *before* the
+    // in-water physics ever sees it, which is why this sits ahead of the
+    // is-falling flag / old-Y capture below rather than after it.
     //
     // While swimming, blend vertical velocity toward the look direction's Y
     // component (steeper multiplier `0.085` looking notably down, `< -0.2`;
@@ -2400,9 +2399,9 @@ fn tick_water_among_entities(
     }
 
     // --- vanilla's own in-fluid / in-water travel ------------------------------
-    // `isFalling` and `oldY` are read at the top of vanilla's own in-fluid
-    // travel, i.e. *after* the jump block above has already altered
-    // velocity.
+    // The is-falling flag and old-Y position are read at the top of
+    // vanilla's own in-fluid travel, i.e. *after* the jump block above has
+    // already altered velocity.
     let is_falling = state.velocity.y <= 0.0;
     let old_y = state.position.y;
     let base_gravity = effective_gravity(
@@ -2414,7 +2413,7 @@ fn tick_water_among_entities(
     // Vanilla's own in-water travel, in vanilla's order: the sprint/walk base, then
     // the Depth Strider lerp, then Dolphin's Grace *overriding* the result. The
     // order is observable — Grace wins outright, but the Strider term still moves
-    // `speed` even when Grace has flattened `slowDown`.
+    // `speed` even when Grace has flattened the slow-down value.
     let mut slow_down = if state.sprinting {
         profile.water_sprint_slow_down
     } else {
@@ -2483,7 +2482,8 @@ fn tick_water_among_entities(
 /// [`fluid_jump_threshold`] inputs rather than adding a parallel predicate.
 ///
 /// The fall-distance accumulator does **not** participate in this predicate
-/// or either arm — `isFalling` here is `getDeltaMovement().y <= 0.0`, not a
+/// or either arm — the is-falling flag here is the velocity's own Y
+/// component `<= 0.0`, not a
 /// fall-distance comparison, despite the "fall-distance or depth comparison"
 /// pattern this file's sibling gravity code might suggest. Confirmed by
 /// reading vanilla's own in-fluid travel, in-lava travel and fluid-falling
@@ -2518,7 +2518,7 @@ fn tick_lava_among_entities(
     // `in_lava()`, matching vanilla's own "in lava" predicate deciding both this
     // halving and the in-lava travel dispatch.
     state.fall_distance *= 0.5;
-    // baseTick fluid current push (see `tick_water`); lava uses its own scale.
+    // Base-tick fluid current push (see `tick_water`); lava uses its own scale.
     apply_fluid_push(
         state,
         view,
@@ -2536,8 +2536,8 @@ fn tick_lava_among_entities(
     // `apply_fluid_jump`).
     apply_fluid_jump(state, input, fluid, view, profile);
 
-    // `isFalling`/`baseGravity` are read here, at the top of vanilla's own
-    // in-fluid travel, i.e. after the jump block above has already altered
+    // The is-falling flag / base-gravity value are read here, at the top of
+    // vanilla's own in-fluid travel, i.e. after the jump block above has already altered
     // velocity but before the relative-move step adds this tick's input
     // acceleration. Vanilla's own effective-gravity check folds in the Slow
     // Falling clamp exactly as `tick_water` computes it a few lines above;
@@ -2612,8 +2612,8 @@ fn calculate_view_vector(pitch: f32, yaw: f32) -> Vec3d {
 ///
 /// Preserves vanilla's exact operation order and its two distinct trig
 /// sources: the look vector uses vanilla's own quantized table (`float`),
-/// while `liftForce` and the nose-up lift use the real-valued (`double`)
-/// `cos`/`sin`. The final drag is `multiply(0.99F, 0.98F, 0.99F)` with each
+/// while the lift-force value and the nose-up lift use the real-valued
+/// (`double`) `cos`/`sin`. The final drag is `multiply(0.99F, 0.98F, 0.99F)` with each
 /// `float` widened to `double`.
 fn update_fall_flying_movement(
     state: &PlayerState,
@@ -2672,7 +2672,7 @@ fn update_fall_flying_movement(
 ///
 /// Direction comes purely from the look angle; WASD `input` is ignored while
 /// gliding (except that landing on a climbable hands control back to
-/// [`tick_air`] and ends the glide, mirroring vanilla). The `aiStep` small-
+/// [`tick_air`] and ends the glide, mirroring vanilla). The AI-step small-
 /// velocity collapse runs first, exactly as for the other travel modes.
 pub fn tick_elytra(
     state: &mut PlayerState,
@@ -2703,7 +2703,7 @@ fn tick_elytra_among_entities(
 
     decrement_no_jump_delay(state);
 
-    // aiStep velocity collapse (players use the horizontal-distance test).
+    // AI-step velocity collapse (players use the horizontal-distance test).
     let collapsed = snap_small_velocity(state.velocity);
 
     state.velocity = update_fall_flying_movement(state, profile, collapsed);
@@ -2739,9 +2739,9 @@ fn tick_elytra_among_entities(
 ///
 /// What *is* physics, reproduced exactly: `movement.add(lookAngle * 0.1 +
 /// (lookAngle * 1.5 - movement) * 0.5)`, component-wise, all in `double`
-/// (no `float` narrowing anywhere in the source line). `lookAngle` is
-/// vanilla's own look-angle accessor, which is [`calculate_view_vector`] at
-/// the player's current pitch/yaw.
+/// (no `float` narrowing anywhere in the source line). The look-angle vector
+/// is vanilla's own look-angle accessor, which is [`calculate_view_vector`]
+/// at the player's current pitch/yaw.
 pub fn apply_firework_boost(state: &mut PlayerState) {
     let look = calculate_view_vector(state.pitch, state.yaw);
     let m = state.velocity;
@@ -2759,8 +2759,8 @@ pub fn apply_firework_boost(state: &mut PlayerState) {
 /// it to `.isPresent()`-shaped logic, and that is the only vanilla caller
 /// relevant to the blocks this module's swept scan cares about (every
 /// stuck-multiplier and powder-snow cell presents a solid-block shape to
-/// vanilla's own "get entity-inside collision shape" query, so `insideBlock`
-/// reduces to exactly this segment test).
+/// vanilla's own "get entity-inside collision shape" query, so its own
+/// "inside block" step reduces to exactly this segment test).
 ///
 /// `from`/`to` are the entity's **box centres** at the start and end of the
 /// move — equal to vanilla's own box-collided-along-vector's own
@@ -2911,28 +2911,28 @@ fn update_stuck_multiplier(
             found = m;
         }
     });
-    // Vanilla's own "make stuck in block": `resetFallDistance();
-    // this.stuckSpeedMultiplier = speedMultiplier;` — the reset rides along
-    // with every call that finds a stuck-triggering block (cobweb, powder
-    // snow, sweet berry bush, honey), which is every tick vanilla's own
-    // per-block "entity inside" effect sees one, not just the first.
+    // Vanilla's own "make stuck in block" step resets the fall-distance
+    // accumulator and sets the stuck-speed multiplier — the reset rides
+    // along with every call that finds a stuck-triggering block (cobweb,
+    // powder snow, sweet berry bush, honey), which is every tick vanilla's
+    // own per-block "entity inside" effect sees one, not just the first.
     if found != Vec3d::ZERO {
         state.fall_distance = 0.0;
     }
     state.stuck_speed_multiplier = found;
 }
 
-/// Issue #212. Vanilla's own per-tick freezing block plus the increment
-/// half of its powder-snow "entity inside" freeze effect, reached via the
-/// same "check inside blocks" sweep [`update_stuck_multiplier`] models:
+/// Vanilla's own per-tick freezing block plus the increment half of its
+/// powder-snow "entity inside" freeze effect, reached via the same "check
+/// inside blocks" sweep [`update_stuck_multiplier`] models:
 ///
 /// ```text
-/// FREEZE effect, applied once per tick the swept segment finds powder snow:
-///   setIsInPowderSnow(true);
-///   if (canFreeze()) ticksFrozen = min(ticksRequiredToFreeze, ticksFrozen + 1);
+/// freeze effect, applied once per tick the swept segment finds powder snow:
+///   mark "in powder snow";
+///   if not freeze-immune, advance the frozen-ticks counter toward its cap;
 ///
 /// end-of-tick, unconditional:
-///   if (!isInPowderSnow || !canFreeze()) ticksFrozen = max(0, ticksFrozen - 2);
+///   if not in powder snow, or freeze-immune, decay the frozen-ticks counter by 2;
 /// ```
 ///
 /// Collapsed into one function because this crate has no per-tick "flag set
@@ -2940,13 +2940,13 @@ fn update_stuck_multiplier(
 /// and consumed in the same call, which is equivalent since nothing else reads
 /// it between the two vanilla call sites.
 ///
-/// `canFreeze()` is vanilla's own "not tagged freeze-immune" check; the
-/// player entity type is never a member (only certain mobs — striders,
-/// blazes, snow golems and others — are), so it is unconditionally `true`
-/// for every [`PlayerState`] and not modelled as a field.
+/// Vanilla's own "can freeze" check is its own "not tagged freeze-immune"
+/// check; the player entity type is never a member (only certain mobs —
+/// striders, blazes, snow golems and others — are), so it is unconditionally
+/// `true` for every [`PlayerState`] and not modelled as a field.
 ///
-/// **What this does not do: apply freeze damage.** Vanilla's own trigger,
-/// `tickCount % 40 == 0 && isFullyFrozen() && canFreeze()`, needs an
+/// **What this does not do: apply freeze damage.** Vanilla's own trigger —
+/// every 40 ticks, when fully frozen and able to freeze — needs an
 /// absolute server tick count this
 /// crate has no notion of — every other timer here is a countdown
 /// ([`PlayerState::no_jump_delay`], [`PlayerState::fall_distance`]'s resets),
@@ -3008,7 +3008,7 @@ fn update_freezing(
 ///
 /// This is the part that surprises. Vanilla's own "check inside blocks"
 /// sweep visits every block the movement intersects, dedupes by *position*
-/// (`visitedBlocks`), and calls
+/// (its own visited-blocks set), and calls
 /// its own per-block "entity inside" effect on each — and vanilla's own
 /// bubble-column block applies its impulse **immediately**, inside that
 /// callback, rather than deferring it to the effect-applier the way fire
@@ -3020,10 +3020,10 @@ fn update_freezing(
 /// half the rate, which is exactly the kind of sub-tick divergence the server's
 /// movement check accumulates.
 ///
-/// # `resetFallDistance` on `inside` only
+/// # The fall-distance reset applies on `inside` only
 ///
-/// Vanilla's own inside-bubble-column handler ends with
-/// `entity.resetFallDistance()`; its own above-bubble-column handler ends
+/// Vanilla's own inside-bubble-column handler ends with its own fall-distance
+/// reset; its own above-bubble-column handler ends
 /// with sending bubble-column particles and **no** reset. The asymmetry is
 /// reproduced here faithfully, but **no test pins it, because it is currently
 /// unobservable and cannot honestly be made observable.** A bubble column *is* a
@@ -3167,7 +3167,7 @@ pub fn tick(
 /// keeping vanilla's ordering: the crowd-push pass is the end of its
 /// per-tick update, *inside* the base per-tick update, and therefore
 /// **before** the pose update. That order is observable, because the
-/// push's pair test reads `getBoundingBox()` — which the pose sizes.
+/// push's pair test reads vanilla's own bounding-box accessor — which the pose sizes.
 fn travel_and_check_inside_blocks(
     state: &mut PlayerState,
     input: MovementInput,
@@ -3183,7 +3183,7 @@ fn travel_and_check_inside_blocks(
     let pre_move_position = state.position;
 
     // Vanilla's own per-tick base update computes the fluid summary from the
-    // *pre-move* box, before travel reads `isInWater`/`isInLava`. Do the
+    // *pre-move* box, before travel reads its own in-water/in-lava flags. Do the
     // same: one source of truth for
     // eye/box submersion, recorded on the state for the swimming pose and for the
     // shell's fog / overlay / ambient-sound consumers.
@@ -3220,25 +3220,26 @@ fn travel_and_check_inside_blocks(
     // between the swim-state update and the travel dispatch below.
     update_swim_amount(state);
 
-    // Vanilla's own per-tick update: `if (isFallFlying()) updateFallFlying();`,
-    // which is `checkFallDistanceAccumulation`'s only call site for a player.
-    // Runs before the Slow Falling/Levitation check and before `travel()`,
-    // on the velocity as it stood at the end of the *previous* tick — see
-    // `check_fall_distance_accumulation`'s doc.
+    // Vanilla's own per-tick update calls its own update-fall-flying step
+    // whenever fall-flying is active, which is
+    // `check_fall_distance_accumulation`'s only call site for a player.
+    // Runs before the Slow Falling/Levitation check and before the travel
+    // step, on the velocity as it stood at the end of the *previous* tick —
+    // see `check_fall_distance_accumulation`'s doc.
     if state.fall_flying {
         check_fall_distance_accumulation(state);
     }
-    // Vanilla's own per-tick update: `if (hasEffect(SLOW_FALLING) ||
-    // hasEffect(LEVITATION)) resetFallDistance();`, unconditionally before
-    // the `travel()` dispatch below, regardless of which path it picks.
+    // Vanilla's own per-tick update resets the fall-distance accumulator
+    // whenever Slow Falling or Levitation is active, unconditionally before
+    // the travel dispatch below, regardless of which path it picks.
     if state.effects.slow_falling || state.effects.levitation.is_some() {
         state.fall_distance = 0.0;
     }
 
-    // Vanilla's own per-tick player update: `if (abilities.flying &&
-    // !isPassenger()) resetFallDistance();` — **before** the rest of its
-    // per-tick update, so before the travel dispatch below, alongside the
-    // Slow Falling reset rather than after the move.
+    // Vanilla's own per-tick player update resets the fall-distance
+    // accumulator while flying and not a passenger — **before** the rest of
+    // its per-tick update, so before the travel dispatch below, alongside
+    // the Slow Falling reset rather than after the move.
     if state.flying {
         state.fall_distance = 0.0;
     }
@@ -3272,11 +3273,12 @@ fn travel_and_check_inside_blocks(
     //
     // **This suppressor is what makes flight a wrapper rather than a fourth
     // travel mode**, and it is the single strongest discriminator between the two
-    // shapes: a player flying through water takes `travelInAir`, so they keep
-    // moving at flight speed with no `0.8` water slow-down, no buoyancy and no
-    // sneak-to-sink. Note it does **not** gate the elytra arm: `canGlide()` is
-    // `!flying && super.canGlide()`, which stops a flying player *starting* a
-    // glide, but `isFallFlying()` is a server-owned entity-data bit and
+    // shapes: a player flying through water takes vanilla's own airborne
+    // travel step, so they keep moving at flight speed with no `0.8` water
+    // slow-down, no buoyancy and no sneak-to-sink. Note it does **not** gate
+    // the elytra arm: vanilla's own "can glide" check is "not flying and the
+    // base can-glide check", which stops a flying player *starting* a glide,
+    // but the fall-flying flag is a server-owned entity-data bit and
     // vanilla's dispatch still honours it if both are somehow set.
     let affected_by_fluids = !state.flying;
     if affected_by_fluids && fluid.in_water() {
@@ -3430,8 +3432,8 @@ fn update_swim_amount(state: &mut PlayerState) {
 }
 
 /// The player's effective walk speed for vanilla's own friction-influenced
-/// speed step, i.e. vanilla's `getSpeed()`. Uses the injected attribute value
-/// when present
+/// speed step, i.e. vanilla's own speed accessor. Uses the injected
+/// attribute value when present
 /// (sprint + Speed/Slowness already folded in by the entity layer), reproducing
 /// the `(float)` cast; otherwise computes the standalone base+sprint value.
 fn effective_speed(profile: &PhysicsProfile, state: &PlayerState) -> f32 {
@@ -3459,7 +3461,7 @@ fn friction_influenced_speed(
 }
 
 /// Vanilla's own friction-influenced speed step, entity-agnostic core.
-/// `speed` is the caller's `getSpeed()` — the player's movement-speed
+/// `speed` is the caller's own speed accessor — the player's movement-speed
 /// attribute or a mob's AI-supplied speed. On the ground the
 /// `0.21600002F / friction^3` factor rescales it (all in `float`); airborne
 /// it is discarded entirely for `flying_speed`, the caller's already-resolved
@@ -3468,8 +3470,9 @@ fn friction_influenced_speed(
 ///
 /// **`flying_speed` is a parameter, not `profile.flying_speed`, because
 /// vanilla's own flying-speed accessor is virtual and the player override is
-/// stateful** — it depends on `abilities.flying`, `abilities.flyingSpeed` and
-/// `isSprinting()`. Reading a profile constant here silently implemented
+/// stateful** — it depends on the flying ability flag, its own flying-speed
+/// value and vanilla's own "is sprinting" check. Reading a profile constant
+/// here silently implemented
 /// only the "not flying, not sprinting" corner of it; see
 /// [`player_flying_speed`] and `PhysicsProfile::airborne_sprint_speed`.
 #[must_use]
@@ -3493,7 +3496,8 @@ pub(crate) fn friction_influenced_speed_value(
 }
 
 /// Vanilla's own flying-speed accessor — the airborne input speed vanilla's
-/// own friction-influenced speed step substitutes for `getSpeed()`.
+/// own friction-influenced speed step substitutes for its own speed
+/// accessor.
 ///
 /// ```text
 /// if (this.abilities.flying && !this.isPassenger()) {
@@ -3635,9 +3639,9 @@ mod tests {
         }
     }
 
-    /// A hand-built world: explicit solid cells, explicit water cells with a real
-    /// `getAmount()`, so the fluid **height** branches (jump threshold, hop-out)
-    /// are exercised rather than the coarse full-cell fallback.
+    /// A hand-built world: explicit solid cells, explicit water cells with a
+    /// real fluid amount, so the fluid **height** branches (jump threshold,
+    /// hop-out) are exercised rather than the coarse full-cell fallback.
     #[derive(Default)]
     struct Pool {
         solid: std::collections::HashSet<(i32, i32, i32)>,
@@ -3753,8 +3757,8 @@ mod tests {
         // the tick's vertical drag is 0.8F and buoyancy is -gravity/16 = -0.005, so
         //   no shift: 0.0  * 0.8 - 0.005 = -0.005
         //   shift:   -0.04 * 0.8 - 0.005 = -0.037
-        // The pair is the point: without `goDownInWater` both read -0.005 and the
-        // only way down is to release jump and wait.
+        // The pair is the point: without the sneak-to-sink impulse both read
+        // -0.005 and the only way down is to release jump and wait.
         let p = PhysicsProfile::mc_1_21();
         let view = WaterEverywhere;
 
@@ -3817,10 +3821,10 @@ mod tests {
         }
         assert!(hopped, "never hopped out; final state {s:?}");
 
-        // Control: the identical pool with no shore block. `jumpOutOfFluid` is
-        // gated on `horizontalCollision`, so with nothing to swim into the same
-        // detector must never fire — proving the assertion above is not just
-        // "0.3 appears sometimes".
+        // Control: the identical pool with no shore block. The jump-out-of-
+        // fluid step is gated on the horizontal-collision flag, so with
+        // nothing to swim into the same detector must never fire — proving
+        // the assertion above is not just "0.3 appears sometimes".
         let mut open = Pool::default();
         open.floor(0).water(0, 1, 0, 8);
         let mut s = PlayerState::at(Vec3d::new(0.5, 1.9, 0.5), 0.0);
@@ -3837,8 +3841,8 @@ mod tests {
     #[test]
     fn depth_strider_attribute_speeds_up_swimming() {
         // Vanilla's own in-water travel lerps both the horizontal slow-down
-        // (toward 0.546_000_06) and the input speed (toward `getSpeed()`) by
-        // the resolved Depth Strider attribute value.
+        // (toward 0.546_000_06) and the input speed (toward its own speed
+        // accessor) by the resolved Depth Strider attribute value.
         // No caller can reach that attribute value yet (see the field docs on
         // `PlayerState::water_movement_efficiency` for exactly what is missing), so
         // this drives it directly: the *arithmetic* is what is under test, and the
@@ -3953,7 +3957,8 @@ mod tests {
     #[test]
     fn tick_sets_swimming_and_eye_in_water_when_sprinting_submerged() {
         // The real consumer of the eye-in-fluid state inside physics:
-        // `updateSwimming`. A sprinting player fully under water enters the
+        // vanilla's own swimming-state update. A sprinting player fully
+        // under water enters the
         // sprint-swimming pose, and the eye/box submersion flags are recorded on
         // the state for the shell (fog / overlay / ambient sound) to read.
         let p = PhysicsProfile::mc_1_21();
@@ -4102,8 +4107,8 @@ mod tests {
 
     #[test]
     fn use_item_scale_applies_before_the_unit_square_clamp_not_after() {
-        // Vanilla's own input modifier applies `itemUseSpeedMultiplier` to
-        // the raw strafe/forward *before* its own square-movement
+        // Vanilla's own input modifier applies its own item-use speed
+        // multiplier to the raw strafe/forward *before* its own square-movement
         // normalization's `length * dist_to_unit_square` clamp to `1.0`. A
         // diagonal input is
         // the discriminating shape: full-magnitude diagonal input saturates
