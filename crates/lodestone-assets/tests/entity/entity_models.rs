@@ -1077,7 +1077,7 @@ fn a_y_flip_of_the_arrow_rig_moves_no_geometry() {
         t_pos(&plain),
         t_pos(&flipped),
         "a Y flip moved the arrow's geometry, so the silhouette is NOT flip-invariant \
-         and #380's long-axis gate would after all catch a flip. If this fires the \
+         and the long-axis gate would after all catch a flip. If this fires the \
          doc comment above is wrong."
     );
 
