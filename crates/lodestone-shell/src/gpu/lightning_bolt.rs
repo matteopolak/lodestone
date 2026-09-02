@@ -13,8 +13,9 @@
 //!
 //! # The blend function is the whole look
 //!
-//! `RenderPipelines.LIGHTNING` carries `new ColorTargetState(BlendFunction.LIGHTNING)`,
-//! and `BlendFunction.LIGHTNING` is `(BlendFactor.SRC_ALPHA, BlendFactor.ONE)`
+//! Vanilla's own lightning render pipeline carries its own lightning blend
+//! function,
+//! and that blend function is `(BlendFactor.SRC_ALPHA, BlendFactor.ONE)`
 //! — **additive, scaled by the source alpha**. Nothing else in this workspace
 //! uses that pair: `glint_blend()` is `(Src, One)` colour with `(Zero, One)`
 //! alpha and its own doc warns that reaching for a stock `ADDITIVE` is wrong.
@@ -29,7 +30,7 @@
 //!
 //! # Depth, culling and the 128-block height
 //!
-//! Depth-tested and depth-writing (vanilla's `DepthStencilState.DEFAULT`, whose
+//! Depth-tested and depth-writing (vanilla's own default depth-stencil state, whose
 //! `GREATER_THAN_OR_EQUAL` becomes this engine's `LessEqual` per `CLAUDE.md`'s
 //! reversed-Z rule), and `cull_mode: None` — a bolt is a hollow tube a player
 //! can stand inside, and vanilla's own `affectedByCulling` returns `false` for
@@ -145,7 +146,7 @@ impl LightningBoltRenderer {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
-                    // `BlendFunction.LIGHTNING` = `(SRC_ALPHA, ONE)`. See the
+                    // Vanilla's own lightning blend function = `(SRC_ALPHA, ONE)`. See the
                     // module doc: this is what turns four dim blue-grey shells
                     // into a white bolt, and a stock `ALPHA_BLENDING` here
                     // draws the same geometry looking flat and grey.

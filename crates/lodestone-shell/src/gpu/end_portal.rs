@@ -8,7 +8,7 @@
 //!
 //! # One pipeline, not two
 //!
-//! Vanilla splits `RenderPipelines.END_PORTAL`/`END_GATEWAY` into two
+//! Vanilla splits its own end-portal and end-gateway render pipelines into two
 //! pipelines sharing one shader snippet, differing only in a
 //! `withShaderDefine("PORTAL_LAYERS", 15 | 16)` — a compile-time unroll
 //! count, not a behavioural difference `wgpu` needs two pipeline objects to
@@ -19,9 +19,9 @@
 //! hazard a *dynamic* loop count would. That means both an end portal's and
 //! an end gateway's geometry can share one vertex buffer and one draw call.
 //!
-//! # Depth/blend, ported from `RenderPipelines.END_PORTAL_SNIPPET`
+//! # Depth/blend, ported from vanilla's own end-portal render-pipeline snippet
 //!
-//! `DepthStencilState.DEFAULT` (`GREATER_THAN_OR_EQUAL`, write **true**) and
+//! Vanilla's own default depth-stencil state (`GREATER_THAN_OR_EQUAL`, write **true**) and
 //! no `ColorTargetState` blend override at all — this is fully opaque
 //! geometry, matching every other opaque block-entity pass in this crate.
 //! This renderer is reversed-Z like vanilla, so vanilla's
@@ -30,7 +30,7 @@
 //!
 //! # `cull_mode: None`, deliberately
 //!
-//! The real jar's `END_PORTAL_SNIPPET` sets no explicit cull state (vanilla
+//! The real jar's end-portal render-pipeline snippet sets no explicit cull state (vanilla
 //! defaults to back-face culling), but this pass disables culling outright.
 //! [`lodestone_render::end_portal`]'s `FaceInfo`-derived winding was
 //! transcribed rather than independently re-derived, and getting a

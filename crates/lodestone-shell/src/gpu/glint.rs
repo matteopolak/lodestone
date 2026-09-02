@@ -156,7 +156,7 @@ impl GlintPass {
 }
 
 /// Wall-clock milliseconds for the glint scroll — vanilla's
-/// `System.currentTimeMillis()` (see `TextureTransform.setupGlintTexturing`),
+/// own current-time-millis clock (see its own glint-texturing setup routine),
 /// the same origin `crate::app::recipe_toast_now_ms` uses for the recipe toast.
 #[must_use]
 pub(super) fn glint_now_ms() -> f64 {

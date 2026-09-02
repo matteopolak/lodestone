@@ -100,9 +100,10 @@ impl RenderState {
         // The entity's own placement at the origin — `entity_model_matrix`'s
         // flip/lift, with no translation, since the outer chain below
         // supplies the actual position. This is the second half of the
-        // nesting `SpawnerRenderer.submitEntityInSpawner` produces by
+        // nesting vanilla's own spawner-renderer submit-entity-in-spawner
+        // routine produces by
         // handing an already-transformed pose stack to
-        // `EntityRenderDispatcher.submit`: the outer matrix places and
+        // its own entity-render-dispatcher submit routine: the outer matrix places and
         // spins the cage slot, and the entity's own renderer (here, this
         // same matrix) places the mob inside it.
         let entity_own_placement = entity_model_matrix(glam::Vec3::ZERO, 0.0, 1.0);
