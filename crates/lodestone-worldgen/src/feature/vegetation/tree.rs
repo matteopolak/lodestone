@@ -17,17 +17,17 @@ use super::config::{BlockStateProvider, VegTags, try_parse_int_provider};
 use super::grid::VegGrid;
 use super::ids::{Rewrite, Tag};
 
-/// Vanilla's own trunk-placer base class (the
+/// The reference trunk-placer base kind (the
 /// `Straight`/`Forking` subset — the savanna/acacia increment adds `Forking`, acacia's real
 /// trunk placer, alongside the `Straight` this module shipped with
 /// originally). Both variants carry the identical `(base_height, height_rand_a,
-/// height_rand_b)` triple `TrunkPlacer.getTreeHeight` (a base-class method,
+/// height_rand_b)` triple the shared tree-height sampler (a base-kind method,
 /// not overridden by either subclass) draws from — kept as one shared shape
 /// rather than duplicating the three fields per variant.
 ///
 /// **No longer `Copy`** since the `Cherry`/`UpwardsBranching`
-/// variants carry `IntProvider` fields (not `Copy` — `WeightedList`/`.. `
-/// hold a `Vec`). Every match against this type already binds by reference
+/// variants carry `IntProvider` fields (not `Copy` — a weighted list
+/// holds a `Vec`). Every match against this type already binds by reference
 /// (`match self`/`match &cfg.trunk_placer`, never `match *self`), so nothing
 /// downstream needed to change.
 #[derive(Clone, Debug)]
@@ -37,89 +37,89 @@ pub enum TrunkPlacerCfg {
         height_rand_a: i32,
         height_rand_b: i32,
     },
-    /// `ForkingTrunkPlacer` — acacia's real trunk: a single
+    /// The forking trunk placer — acacia's real trunk: a single
     /// leaning column, plus (usually) one branch in a different horizontal
-    /// direction. See [`place_trunk`] for the port of `placeTrunk` itself.
+    /// direction. See [`place_trunk`] for its own trunk-placement implementation.
     Forking {
         base_height: i32,
         height_rand_a: i32,
         height_rand_b: i32,
     },
-    /// `DarkOakTrunkPlacer` — dark oak's real trunk: a 2×2 log
+    /// The dark oak trunk placer — dark oak's real trunk: a 2×2 log
     /// column (four logs per level) that leans one step for its upper
     /// portion, on a 2×2 `below_trunk_provider` base, plus up to a few short
     /// hanging branches around the canopy top. See [`place_dark_oak_trunk`]
-    /// for the port of `placeTrunk` itself. Shared with pale oak, which uses
+    /// for its own trunk-placement implementation. Shared with pale oak, which uses
     /// the same placer type with its own providers.
     DarkOak {
         base_height: i32,
         height_rand_a: i32,
         height_rand_b: i32,
     },
-    /// `GiantTrunkPlacer` — the redwood/giant-spruce trunk: a
+    /// The giant trunk placer — the redwood/giant-spruce trunk: a
     /// static 2×2 log column, no lean, no anchor gate. Also the base shape
-    /// [`Self::MegaJungle`] places via its own `super.placeTrunk` before
-    /// adding branches — see [`place_giant_trunk`] for the port.
+    /// [`Self::MegaJungle`] places via its own base-kind trunk placement before
+    /// adding branches — see [`place_giant_trunk`] for its own implementation.
     Giant {
         base_height: i32,
         height_rand_a: i32,
         height_rand_b: i32,
     },
-    /// `MegaJungleTrunkPlacer` — mega jungle's real trunk:
+    /// The mega jungle trunk placer — mega jungle's real trunk:
     /// [`Self::Giant`]'s own 2×2 column, then a spiral of short radial
-    /// branches. See [`place_mega_jungle_trunk`] for the port.
+    /// branches. See [`place_mega_jungle_trunk`] for its own implementation.
     MegaJungle {
         base_height: i32,
         height_rand_a: i32,
         height_rand_b: i32,
     },
-    /// `FancyTrunkPlacer` — the `fancy_oak_*`/`fancy_oak_checked` branch
+    /// The fancy trunk placer — the `fancy_oak_*`/`fancy_oak_checked` branch
     /// shared by oak, jungle and dark_forest (this change's highest-value
     /// remaining gap). Structurally distinct from every other placer here:
     /// a slim central trunk plus a scattered spray of diagonal limbs, each
     /// walked out from a randomly-angled, randomly-scaled offset and only
     /// actually grown if a dry-run check finds room. See
-    /// [`place_fancy_trunk`] for the port of `placeTrunk` itself.
+    /// [`place_fancy_trunk`] for its own trunk-placement implementation.
     Fancy {
         base_height: i32,
         height_rand_a: i32,
         height_rand_b: i32,
     },
-    /// `CherryTrunkPlacer` — cherry's real trunk: a single
+    /// The cherry trunk placer — cherry's real trunk: a single
     /// straight column, then one or two (and sometimes a third, dead-centre)
     /// side branches climbing away from the trunk. See [`place_cherry_trunk`]
-    /// for the port of `placeTrunk`/`generateBranch`.
+    /// for its own trunk-placement and branch-generation implementation.
     Cherry {
         base_height: i32,
         height_rand_a: i32,
         height_rand_b: i32,
-        /// `branchCount` — `weighted_list` over `{1, 2, 3}` for every shipped
+        /// The branch count — a weighted list over `{1, 2, 3}` for every shipped
         /// cherry config.
         branch_count: IntProvider,
-        /// `branchHorizontalLength`.
+        /// The branch's horizontal length.
         branch_horizontal_length: IntProvider,
-        /// `branchStartOffsetFromTop` — `(min, max)` inclusive. The SECOND
-        /// branch's own start offset samples `UniformInt.of(min, max - 1)`,
+        /// The branch's start offset from the top — `(min, max)` inclusive. The SECOND
+        /// branch's own start offset samples an inclusive-both-ends draw over `(min, max - 1)`,
         /// not this same range again — see [`place_cherry_trunk`]'s own doc
         /// on why the two draws use different bounds.
         branch_start_offset_from_top: (i32, i32),
-        /// `branchEndOffsetFromTop`.
+        /// The branch's end offset from the top.
         branch_end_offset_from_top: IntProvider,
     },
-    /// `UpwardsBranchingTrunkPlacer` — mangrove's real trunk: a
+    /// The upwards-branching trunk placer — mangrove's real trunk: a
     /// single straight column, with a real chance (per log, per level except
     /// the top) of budding a short horizontal branch that grows its own
-    /// foliage attachment. See [`place_upwards_branching_trunk`] for the port
-    /// of `placeTrunk`/`placeBranch`.
+    /// foliage attachment. See [`place_upwards_branching_trunk`] for its own
+    /// trunk-placement and branch-placement implementation.
     UpwardsBranching {
         base_height: i32,
         height_rand_a: i32,
         height_rand_b: i32,
-        /// `extraBranchSteps`.
+        /// The number of extra branch steps.
         extra_branch_steps: IntProvider,
-        /// `placeBranchPerLogProbability`.
+        /// The probability of placing a branch per log.
         place_branch_per_log_probability: f32,
-        /// `extraBranchLength`.
+        /// The extra branch length.
         extra_branch_length: IntProvider,
     },
 }
@@ -180,16 +180,16 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
         }
     }
 
-    /// `TrunkPlacer.getTreeHeight` — shared across every subclass (not
-    /// overridden by `ForkingTrunkPlacer`, `DarkOakTrunkPlacer`, etc. in
-    /// real vanilla either).
+    /// The shared tree-height sampler — shared across every trunk placer kind (not
+    /// overridden by the forking, dark oak or any other trunk placer kind
+    /// in a faithful implementation either).
 pub(super)     fn get_tree_height<R: RandomSource>(&self, random: &mut R) -> i32 {
         let (base_height, height_rand_a, height_rand_b) = self.heights();
         base_height + random.next_int_bounded(height_rand_a + 1) + random.next_int_bounded(height_rand_b + 1)
     }
 }
 
-/// `FoliagePlacer.FoliageAttachment` — one trunk-placement result the
+/// One trunk-placement result the
 /// foliage placer runs `create_foliage` against. [`TrunkPlacerCfg::Straight`]
 /// always produces exactly one; [`TrunkPlacerCfg::Forking`] can produce one
 /// or two (the lean column always attaches if it placed any log at all; the
@@ -198,12 +198,12 @@ pub(super)     fn get_tree_height<R: RandomSource>(&self, random: &mut R) -> i32
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Attachment {
 pub(super)     pos: BlockPos,
-    /// `FoliageAttachment.radiusOffset` — nonzero only for
-    /// `ForkingTrunkPlacer`'s primary (lean) attachment (`1`); every other
+    /// The attachment's radius offset — nonzero only for
+    /// the forking trunk placer's primary (lean) attachment (`1`); every other
     /// attachment this module produces uses `0`. Consumed by
     /// [`FoliagePlacerCfg::Acacia`]'s `create_foliage`.
 pub(super)     radius_offset: i32,
-    /// `FoliageAttachment.doubleTrunk` — `true` only for
+    /// Whether this attachment came from a double (2×2) trunk — `true` only for
     /// [`TrunkPlacerCfg::DarkOak`]'s primary (2×2-trunk) attachment;
     /// `false` for every other attachment this module produces (`Straight`,
     /// `Forking`, and DarkOak's branch attachments). Consumed by
@@ -213,27 +213,27 @@ pub(super)     radius_offset: i32,
 pub(super)     double_trunk: bool,
 }
 
-/// `ForkingTrunkPlacer.placeTrunk` — acacia's real trunk.
-/// Places `placeBelowTrunkBlock(origin.below())` first (matching
-/// `StraightTrunkPlacer`'s own convention, [`place_tree`]'s existing
+/// The forking trunk placer's own trunk placement — acacia's real trunk.
+/// Places a below-trunk block at the origin's below position first (matching
+/// the straight trunk placer's own convention, [`place_tree`]'s existing
 /// pre-loop call for the `Straight` case), then a single leaning log column
-/// (`Direction.Plane.HORIZONTAL.getRandomDirection` = `random.nextInt(4)`
+/// (a random horizontal direction = one draw bounded by 4
 /// indexing `[NORTH, EAST, SOUTH, WEST]`, i.e. step vectors `(0,-1)`,
-/// `(1,0)`, `(0,1)`, `(-1,0)` in that exact order — `Direction.java`'s own
-/// `Plane.HORIZONTAL` face array), and then, only if a *second*,
+/// `(1,0)`, `(0,1)`, `(-1,0)` in that exact order — the fixed
+/// horizontal-plane face array), and then, only if a *second*,
 /// independently-rolled direction differs from the first, a branch that
 /// starts partway up the lean and runs for a few more logs in that second
-/// direction. Both attachments are only added if `placeLog` actually placed
-/// at least one log along that column (`OptionalInt` in the Java; `Option`
-/// here) — an entirely-blocked lean or branch contributes no
-/// [`Attachment`], matching vanilla exactly rather than attaching at a
+/// direction. Both attachments are only added if log placement actually placed
+/// at least one log along that column (an optional integer in a faithful
+/// implementation; `Option` here) — an entirely-blocked lean or branch contributes no
+/// [`Attachment`], matching a faithful implementation exactly rather than attaching at a
 /// position nothing was ever placed at.
 /// Returns `(attachments, trunk_positions, placed_any)`. `trunk_positions`
-/// is every position `trunkSetter`/`placeBelowTrunkBlock` was actually
-/// invoked at (matching vanilla's real `trunks` set in `TreeFeature.place`)
-/// — including the below-origin block, which real `placeBelowTrunkBlock`
-/// places via the SAME `trunkSetter` (`TrunkPlacer.java`'s own
-/// `placeBelowTrunkBlock`), and therefore counts as a real distance-0
+/// is every position the trunk setter/below-trunk placement was actually
+/// invoked at (matching a faithful implementation's real trunk-position set)
+/// — including the below-origin block, which a faithful below-trunk block
+/// placement places via the SAME trunk setter, and therefore counts as a
+/// real distance-0
 /// source for [`update_leaf_distances`], not merely cosmetic soil.
 /// Unit 8: `attachments` and `trunk_positions` are now caller-owned reusable
 /// buffers (already cleared) rather than freshly allocated `Vec`s, and the return
@@ -322,7 +322,7 @@ pub(super) fn place_forking_trunk<R: RandomSource>(
     placed_any
 }
 
-/// `TreeFeature.validTreePos`: air or `#minecraft:replaceable_by_trees`.
+/// A tree's valid-position check: air or `#minecraft:replaceable_by_trees`.
 ///
 /// One grid read and two bit tests since Unit 8 — it was an interner read guard,
 /// a `split('[')` and two `HashSet<String>` probes, evaluated once per candidate
@@ -334,15 +334,15 @@ pub(super) fn valid_tree_pos(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: 
     tags.has(interner, Tag::Air, id) || tags.has(interner, Tag::ReplaceableByTrees, id)
 }
 
-/// `DarkOakTrunkPlacer.placeTrunk` — dark oak's real trunk,
+/// The dark oak trunk placer's own trunk placement — dark oak's real trunk,
 /// also the trunk of pale oak (both use `dark_oak_trunk_placer`). A 2×2 log
-/// column: four `placeBelowTrunkBlock`s at the origin's `(0,0)`, `east`,
+/// column: four below-trunk-block placements at the origin's `(0,0)`, `east`,
 /// `south`, `south().east()` base, then per level (gated by the anchor's
-/// `TreeFeature.isAirOrLeaves` — a dark oak trunk can grow up through a
+/// own air-or-leaves check — a dark oak trunk can grow up through a
 /// neighbour's already-placed canopy, which dense dark forests depend on) up
-/// to four `placeLog`s at the same 2×2 footprint, the whole column leaning
-/// one step for its upper portion (`leanHeight`/`leanSteps`, the same
-/// `Direction.Plane.HORIZONTAL.getRandomDirection` indexing
+/// to four log placements at the same 2×2 footprint, the whole column leaning
+/// one step for its upper portion (`lean_height`/`lean_steps`, the same
+/// random-horizontal-direction indexing
 /// [`place_forking_trunk`]'s `STEP` table). Around the top, up to a few
 /// short hanging branches descend from just below `ey` and end in their own
 /// [`Attachment`]s. The primary attachment is `double_trunk: true` (the 2×2
@@ -350,7 +350,7 @@ pub(super) fn valid_tree_pos(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: 
 /// attachments are `false`.
 /// Returns `(attachments, trunk_positions, placed_any)` in the same shape as
 /// [`place_forking_trunk`] — `trunk_positions` is every position
-/// `trunkSetter`/`placeBelowTrunkBlock` fired at (the below-origin 2×2
+/// the trunk setter/below-trunk placement fired at (the below-origin 2×2
 /// included), seeding [`update_leaf_distances`]'s BFS.
 /// Unit 8: same buffer-in / `bool`-out change as [`place_forking_trunk`].
 #[allow(clippy::too_many_arguments)]
@@ -366,8 +366,8 @@ pub(super) fn place_dark_oak_trunk<R: RandomSource>(
     trunk_positions: &mut Vec<BlockPos>,
 ) -> bool {
     // The 2×2 base: `below`, `below.east()`, `below.south()`,
-    // `below.south().east()` — each via `placeBelowTrunkBlock`, in exactly
-    // vanilla's order.
+    // `below.south().east()` — each via the below-trunk-block placement, in exactly
+    // this fixed order.
     for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
         if let Some(below_provider) = below_trunk_provider {
             let below_pos = BlockPos {
@@ -399,10 +399,10 @@ pub(super) fn place_dark_oak_trunk<R: RandomSource>(
             lean_steps -= 1;
         }
         let yy = origin.y + dy;
-        // `TreeFeature.isAirOrLeaves` at the anchor — the outer gate before
-        // the four `placeLog` calls; each log itself still individually
-        // checks `validTreePos` (air or `#replaceable_by_trees`) below,
-        // matching vanilla exactly.
+        // The air-or-leaves check at the anchor — the outer gate before
+        // the four log-placement calls; each log itself still individually
+        // checks the valid-tree-position check (air or `#replaceable_by_trees`) below,
+        // matching a faithful implementation exactly.
         let anchor = grid.get_id(tx, yy, tz);
         if tags.has(grid.interner(), Tag::Air, anchor)
             || tags.has(grid.interner(), Tag::Leaves, anchor)
@@ -458,24 +458,25 @@ pub(super) fn place_dark_oak_trunk<R: RandomSource>(
     placed_any
 }
 
-/// `GiantTrunkPlacer.placeTrunk` — the redwood/giant-spruce trunk (added
+/// The giant trunk placer's own trunk placement — the redwood/giant-spruce trunk (added
 /// with the savanna/acacia increment), and the shared base [`place_mega_jungle_trunk`] calls via its own
-/// `super.placeTrunk`. A static 2×2 log column: four `placeBelowTrunkBlock`s
+/// base-kind trunk placement. A static 2×2 log column: four below-trunk-block placements
 /// at the origin's `(0,0)`, east, south, south+east base (the same order as
 /// [`place_dark_oak_trunk`]'s own base), then per level `0..tree_height` a
-/// `placeLogIfFree` at `(0,0)`, plus — only for every level EXCEPT the last
+/// free-to-place log at `(0,0)`, plus — only for every level EXCEPT the last
 /// (`hh < tree_height - 1`) — three more at `(1,0)`, `(1,1)`, `(0,1)`, so the
 /// column is a full 2×2 for every row but its very top.
 ///
-/// No lean, and no `isAirOrLeaves` anchor gate the way [`place_dark_oak_trunk`]
-/// has one. `GiantTrunkPlacer.placeLogIfFree`'s own gate (`isFree` — real
-/// `validTreePos` OR "already a log") is provably equivalent here to gating
-/// purely on [`valid_tree_pos`]: `placeLogIfFree` calls `placeLog`
-/// unconditionally once `isFree` passes, and `placeLog` itself re-checks
-/// `validTreePos` before ever drawing from `trunk_provider` or writing — so
-/// the "OR already a log" half of `isFree` can only ever gate a call that
+/// No lean, and no air-or-leaves anchor gate the way [`place_dark_oak_trunk`]
+/// has one. The giant trunk placer's own free-to-place log gate (real
+/// valid-tree-position check OR "already a log") is provably equivalent here to gating
+/// purely on [`valid_tree_pos`]: the free-to-place log placement calls the
+/// unconditional log placement
+/// once the free-to-place check passes, and that log placement itself re-checks
+/// the valid-tree-position check before ever drawing from `trunk_provider` or writing — so
+/// the "OR already a log" half of the free-to-place check can only ever gate a call that
 /// then draws nothing and writes nothing. Neither half of the gate chain
-/// (`isFree` or `validTreePos`) consumes RNG on its own; only
+/// (the free-to-place check or the valid-tree-position check) consumes RNG on its own; only
 /// `trunk_provider.get_state_id` conditionally does, exactly as in every
 /// other trunk placer in this module.
 ///
@@ -514,8 +515,8 @@ pub(super) fn place_giant_trunk<R: RandomSource>(
     for hh in 0..tree_height {
         let yy = origin.y + hh;
         // `(0,0)` always fires; the other three cells of the 2×2 only fire
-        // for every level except the topmost — `GiantTrunkPlacer.placeTrunk`'s
-        // own `hh < treeHeight - 1` guard.
+        // for every level except the topmost — the giant trunk placer's own
+        // `hh < tree_height - 1` guard.
         const WIDE: [(i32, i32); 4] = [(0, 0), (1, 0), (1, 1), (0, 1)];
         let cells: &[(i32, i32)] = if hh < tree_height - 1 { &WIDE } else { &WIDE[..1] };
         for &(dx, dz) in cells {
@@ -539,31 +540,32 @@ pub(super) fn place_giant_trunk<R: RandomSource>(
     placed_any
 }
 
-/// `MegaJungleTrunkPlacer.placeTrunk` — mega jungle's real trunk (added
-/// with the savanna/acacia increment): [`place_giant_trunk`]'s own 2×2 column (`super.placeTrunk` in real
-/// vanilla — `MegaJungleTrunkPlacer extends GiantTrunkPlacer`), then a spiral
+/// The mega jungle trunk placer's own trunk placement — mega jungle's real trunk (added
+/// with the savanna/acacia increment): [`place_giant_trunk`]'s own 2×2 column (a base-kind trunk placement in a
+/// faithful implementation, since the mega jungle placer extends the giant
+/// placer), then a spiral
 /// of short radial branches climbing the trunk's upper half.
 ///
-/// RNG order, matching the real Java `for` loop's desugaring exactly (`init`
+/// RNG order, matching a faithful `for` loop's desugaring exactly (`init`
 /// once, then `while(cond) { body; update }`): `branch_height = tree_height -
-/// 2 - random.nextInt(4)` is drawn exactly once (the loop's `init` clause);
-/// `branch_height -= 2 + random.nextInt(4)` fires at the END of every
+/// 2 - random.next_int_bounded(4)` is drawn exactly once (the loop's `init` clause);
+/// `branch_height -= 2 + random.next_int_bounded(4)` fires at the END of every
 /// iteration's body (the loop's `update` clause) — **including** the
 /// iteration whose resulting `branch_height` fails the next `>
 /// tree_height / 2` check and ends the loop, so that final draw is real and
 /// must not be skipped by restructuring this as a Rust `while let` that only
 /// draws when about to run the body again.
 ///
-/// Each branch draws one `nextFloat` angle, then walks 5 steps outward along
-/// `(cos(angle), sin(angle))` — vanilla's own sine **table**
+/// Each branch draws one float angle, then walks 5 steps outward along
+/// `(cos(angle), sin(angle))` — the reference's own sine **table**
 /// ([`lodestone_worldgen_core::math::cos`]/`sin`), not `f32::cos`/`sin`: the
 /// two are not guaranteed to land on the same integer after the `(int)`
 /// truncation immediately below, and this is the first placer in this module
 /// where that distinction is load-bearing (every earlier trunk/foliage
 /// placer's geometry is integer arithmetic with no trig at all). Each step
-/// places via `placeLog` directly — no `isFree`/anchor gate at all, draws and
+/// places via the unconditional log placement directly — no free-to-place/anchor gate at all, draws and
 /// places exactly when [`valid_tree_pos`], same as every other unconditional
-/// `placeLog` call in this module.
+/// log placement call in this module.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn place_mega_jungle_trunk<R: RandomSource>(
     random: &mut R,
@@ -599,8 +601,8 @@ pub(super) fn place_mega_jungle_trunk<R: RandomSource>(
         let mut bx = 0i32;
         let mut bz = 0i32;
         for b in 0..5i32 {
-            // `Mth.cos`/`Mth.sin` take `double` — `angle` (a `float`) widens
-            // exactly, matching Java's implicit widening at the call site.
+            // The sine/cosine table functions take `double` — `angle` (a `float`) widens
+            // exactly, matching the reference's implicit widening at the call site.
             bx = (1.5_f32 + lodestone_worldgen_core::math::cos(angle as f64) * b as f32) as i32;
             bz = (1.5_f32 + lodestone_worldgen_core::math::sin(angle as f64) * b as f32) as i32;
             let pos = BlockPos {
@@ -627,23 +629,23 @@ pub(super) fn place_mega_jungle_trunk<R: RandomSource>(
     placed_any
 }
 
-/// `TrunkPlacer.isFree` — `validTreePos(pos) || pos is a log`. Every other
+/// The shared free-to-place check — `valid_tree_pos(pos) || pos is a log`. Every other
 /// placer in this module only ever needs [`valid_tree_pos`] on its own
 /// (argued case-by-case in each one's own doc comment: the OR-with-logs
-/// clause never changes the outcome because the subsequent `placeLog` call
-/// re-checks `validTreePos` regardless). [`place_fancy_trunk`]'s dry-run
+/// clause never changes the outcome because the subsequent log placement
+/// re-checks the valid-tree-position check regardless). [`place_fancy_trunk`]'s dry-run
 /// limb check is the first place in this module where that argument does
-/// NOT apply — `makeLimb`'s `doPlace: false` branch uses `isFree` directly
-/// as its own accept/reject verdict, with no follow-up `placeLog` to fall
+/// NOT apply — the limb-placement helper's own `doPlace: false` branch uses this free-to-place check directly
+/// as its own accept/reject verdict, with no follow-up log placement to fall
 /// back on, so the "OR already a log" half is load-bearing here.
 fn is_free(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i32) -> bool {
     valid_tree_pos(grid, tags, x, y, z) || tags.has(grid.interner(), Tag::Logs, grid.get_id(x, y, z))
 }
 
-/// `FancyTrunkPlacer.getLogAxis`: the log axis a limb step should carry,
+/// The fancy trunk placer's own log-axis resolution: the log axis a limb step should carry,
 /// derived from how far this step has moved horizontally from the limb's
 /// own start — `Axis::Y` only when the step hasn't moved horizontally at
-/// all (`maxdiff == 0`), matching vanilla exactly (not merely "usually Y for
+/// all (`maxdiff == 0`), matching a faithful implementation exactly (not merely "usually Y for
 /// a vertical trunk").
 fn fancy_log_axis(start_pos: BlockPos, pos: BlockPos) -> &'static str {
     let xdiff = (pos.x - start_pos.x).abs();
@@ -656,13 +658,13 @@ fn fancy_log_axis(start_pos: BlockPos, pos: BlockPos) -> &'static str {
     }
 }
 
-/// `FancyTrunkPlacer.makeLimb` — walks the straight line from `start_pos` to
-/// `end_pos` in exactly `getSteps(delta)` = `max(|dx|,|dy|,|dz|)` increments
+/// The fancy trunk placer's own limb placement — walks the straight line from `start_pos` to
+/// `end_pos` in exactly `max(|dx|,|dy|,|dz|)` increments
 /// (so every limb, however diagonal, visits its endpoints exactly and
 /// distributes evenly between them), either placing a real log at each step
 /// (`do_place: true`, unconditionally through the whole line) or checking
 /// [`is_free`] at each step and bailing the moment one fails (`do_place:
-/// false`, a pure dry run — real vanilla's own "is there room for this
+/// false`, a pure dry run — a faithful implementation's own "is there room for this
 /// limb" probe, called with the identical `start_pos`/`end_pos` pair the
 /// placing call would use later).
 ///
@@ -670,7 +672,7 @@ fn fancy_log_axis(start_pos: BlockPos, pos: BlockPos) -> &'static str {
 /// integer division — `steps` can only be `0` when `do_place` is `true` and
 /// the two endpoints coincide (guarded by the caller never doing that; see
 /// [`place_fancy_trunk`]'s own call sites), but the division is written to
-/// match Java's `0.0f/0` = NaN / `x/0.0f` = ±Infinity semantics rather than
+/// match the reference's `0.0f/0` = NaN / `x/0.0f` = ±Infinity semantics rather than
 /// risk an integer-division panic if that guarantee is ever loosened.
 #[allow(clippy::too_many_arguments)]
 fn make_limb<R: RandomSource>(
@@ -719,12 +721,12 @@ fn make_limb<R: RandomSource>(
     true
 }
 
-/// `FancyTrunkPlacer.treeShape`: the limb-spray envelope radius at height
+/// The fancy trunk placer's own limb-spray envelope radius at height
 /// `y` of a tree whose total (already `+2`-adjusted) height is `height` —
 /// `-1.0` below `0.3 * height` (no limbs grow that low), `0.0` once the
 /// implied circle would extend past its own centre, and a real ellipse
 /// radius (halved) in between. `distance` is computed unconditionally
-/// before either branch, matching vanilla's own evaluation order exactly
+/// before either branch, matching a faithful implementation's own evaluation order exactly
 /// (including that it can transiently hold a value from a negative
 /// `sqrt` argument on the `adjacent == 0.0` path, which is immediately
 /// overwritten rather than read).
@@ -743,33 +745,33 @@ fn tree_shape(height: i32, y: i32) -> f32 {
     distance * 0.5
 }
 
-/// `FancyTrunkPlacer.trimBranches`: whether a branch based this low
+/// The fancy trunk placer's own branch-trimming check: whether a branch based this low
 /// (`local_y`, relative to the tree's own origin) survives into the final
 /// foliage-attachment list at all — `local_y >= height * 0.2`, in `f64`
-/// (Java widens both operands via the `double` literal `0.2`).
+/// (a faithful implementation widens both operands via the `double` literal `0.2`).
 fn trim_branches(height: i32, local_y: i32) -> bool {
     f64::from(local_y) >= f64::from(height) * 0.2
 }
 
-/// `FancyTrunkPlacer.placeTrunk` — oak's `fancy_oak_*`/`fancy_oak_checked`
+/// The fancy trunk placer's own trunk placement — oak's `fancy_oak_*`/`fancy_oak_checked`
 /// branch (this change's highest-value remaining gap): a slim central trunk,
 /// plus a scattered spray of short diagonal "check" limbs (one candidate
-/// per `relativeY` level counting down from `height - 5`, gated by
+/// per `relative_y` level counting down from `height - 5`, gated by
 /// [`tree_shape`]'s envelope), each of which only actually grows — as a
-/// `checkBranchBase → checkStart` limb rooted back at the main trunk — if
+/// branch-base-to-check-start limb rooted back at the main trunk — if
 /// its own outward dry-run limb *and* its inward branch-to-trunk dry-run
 /// limb both find room via [`is_free`]. Foliage attaches at every
-/// `checkStart` whose owning branch survives [`trim_branches`], including
+/// check-start whose owning branch survives [`trim_branches`], including
 /// the tree's own always-present first entry (`origin.above(height - 5)`,
 /// paired with `trunk_top` as its own "branch base" — added before the walk
-/// even starts, exactly matching vanilla's unconditional first push).
+/// even starts, exactly matching a faithful implementation's unconditional first push).
 ///
-/// `clusters_per_y` (`Math.min(1, Mth.floor(1.382 + (height/13.0)^2))`) is
-/// carried as vanilla's own formula rather than inlined as the literal `1`
+/// `clusters_per_y` (`min(1, floor(1.382 + (height/13.0)^2))`) is
+/// carried as the reference's own formula rather than inlined as the literal `1`
 /// it always evaluates to for every `height >= 0` (the squared term can only
 /// push the sum higher, never below `1.382`, so the `floor` is always `>= 1`
-/// and `min(1, …)` is always exactly `1`) — ported for fidelity to the real
-/// class, not because this module has observed a `height` where it differs.
+/// and `min(1, …)` is always exactly `1`) — implemented for fidelity to the real
+/// behaviour, not because this module has observed a `height` where it differs.
 ///
 /// RNG draw order: `place_below_trunk_block` (draws only if a below-trunk
 /// provider is configured and its own provider draws), then exactly TWO
@@ -779,12 +781,12 @@ fn trim_branches(height: i32, local_y: i32) -> bool {
 /// per-log draws inside the main trunk's [`make_limb`] call, then the real
 /// per-log draws inside each surviving branch's own [`make_limb`] call, in
 /// `foliage_coords`' own insertion order (branch spray order, tree-origin
-/// entry first). `Math.sin`/`Math.cos` here are the REAL, unbounded
+/// entry first). The sine/cosine here are the REAL, unbounded
 /// `f64::sin`/`cos` — **not** [`lodestone_worldgen_core::math::sin`]/`cos`
-/// (the 65536-entry table): `FancyTrunkPlacer.placeTrunk` calls
-/// `Math.sin(angle)`/`Math.cos(angle)` directly, unlike
+/// (the 65536-entry table): the fancy trunk placer's own trunk placement calls
+/// the unbounded sine/cosine functions directly, unlike
 /// [`place_mega_jungle_trunk`]'s branch geometry, which really does go
-/// through `Mth.sin`/`Mth.cos`. Verified against `.cache/mc/26.2/src`
+/// through the sine/cosine table. Verified against the decompiled 26.2 source
 /// rather than assumed from that placer's own precedent.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn place_fancy_trunk<R: RandomSource>(
@@ -830,11 +832,11 @@ pub(super) fn place_fancy_trunk<R: RandomSource>(
         let shape = tree_shape(height, relative_y);
         if shape >= 0.0 {
             for _ in 0..clusters_per_y.max(0) {
-                // `1.0 * treeShape * (nextFloat() + 0.328)` — the whole
+                // `1.0 * tree_shape * (next_float() + 0.328)` — the whole
                 // expression is `double` (the `1.0`/`0.328` literals force
-                // it), but `angle` below is NOT: Java's
-                // `nextFloat() * 2.0F * Math.PI` multiplies in `float`
-                // first, THEN promotes to `double` for the `Math.PI` term —
+                // it), but `angle` below is NOT: a faithful implementation's
+                // `next_float() * 2.0F * PI` multiplies in `float`
+                // first, THEN promotes to `double` for the PI term —
                 // preserved here as two separate casts, not one combined
                 // `f64` multiply, because that changes the rounding.
                 let radius = 1.0_f64 * f64::from(shape) * (f64::from(random.next_float()) + 0.328);
@@ -887,7 +889,7 @@ pub(super) fn place_fancy_trunk<R: RandomSource>(
         trunk_positions,
     );
 
-    // `makeBranches`: for every foliage coord whose own base differs from
+    // The branch-growth pass: for every foliage coord whose own base differs from
     // its attachment position AND survives `trim_branches`, grow the real
     // branch limb from the trunk out to that attachment.
     for fc in &foliage_coords {
@@ -909,22 +911,22 @@ pub(super) fn place_fancy_trunk<R: RandomSource>(
     placed_any
 }
 
-/// `Direction.getAxis()` for one of [`place_forking_trunk`]'s `STEP` vectors —
+/// A direction's own axis for one of [`place_forking_trunk`]'s `STEP` vectors —
 /// `x` for EAST/WEST, `z` for NORTH/SOUTH. Shared by [`place_cherry_trunk`]'s
-/// `sidewaysStateModifier` (`RotatedPillarBlock.AXIS`).
+/// own sideways state modifier (the rotated-pillar-block axis property).
 fn horizontal_axis(direction: (i32, i32)) -> &'static str {
     if direction.0 != 0 { "x" } else { "z" }
 }
 
-/// `CherryTrunkPlacer.generateBranch` — walks one side branch out from the
+/// The cherry trunk placer's own branch generation — walks one side branch out from the
 /// trunk to a randomly-chosen end position, alternating a per-step coin flip
 /// (weighted by how much vertical vs. horizontal distance remains) between
 /// climbing and reaching outward. Every log placed while moving horizontally
 /// gets its axis rewritten to `branch_direction`'s axis
 /// ([`horizontal_axis`]); every log placed while climbing keeps the
 /// trunk_provider's own (vertical) axis untouched — matching
-/// `Function.identity()` vs. `sidewaysStateModifier` in the real Java
-/// exactly.
+/// the identity function vs. the sideways state modifier in a faithful
+/// implementation exactly.
 #[allow(clippy::too_many_arguments)]
 fn generate_cherry_branch<R: RandomSource>(
     random: &mut R,
@@ -1009,13 +1011,13 @@ fn generate_cherry_branch<R: RandomSource>(
     }
 }
 
-/// `CherryTrunkPlacer.placeTrunk` — cherry's real trunk. A
+/// The cherry trunk placer's own trunk placement — cherry's real trunk. A
 /// single straight column (whose height depends on how many branches there
 /// will be — the full `tree_height` only if there is a middle branch), plus
 /// one branch always, a second (opposite-direction) branch if `branch_count
 /// >= 2`, and a synthetic middle attachment directly above the trunk if
-/// `branch_count == 3`. `secondBranchStartOffsetFromTop` samples
-/// `UniformInt.of(min, max - 1)` — a NARROWER range than the first branch's
+/// `branch_count == 3`. The second branch's own start offset from the top samples
+/// an inclusive-both-ends draw over `(min, max - 1)` — a NARROWER range than the first branch's
 /// own `branch_start_offset_from_top`, not the same one redrawn — and if the
 /// resulting offset ties-or-exceeds the first branch's, it is bumped by one
 /// so the two branches never start at the same height.
@@ -1046,7 +1048,7 @@ pub(super) fn place_cherry_trunk<R: RandomSource>(
     let (bs_min, bs_max) = branch_start_offset_from_top;
     let first_branch_offset_from_origin =
         (tree_height - 1 + lodestone_worldgen_core::math::random_between_inclusive(random, bs_min, bs_max)).max(0);
-    // `UniformInt.of(min, max - 1)` — a genuinely narrower range, not the
+    // An inclusive-both-ends draw over `(min, max - 1)` — a genuinely narrower range, not the
     // same `(bs_min, bs_max)` redrawn. See this function's own doc.
     let mut second_branch_offset_from_origin = (tree_height - 1
         + lodestone_worldgen_core::math::random_between_inclusive(random, bs_min, bs_max - 1))
@@ -1127,15 +1129,15 @@ pub(super) fn place_cherry_trunk<R: RandomSource>(
     placed_any
 }
 
-/// `UpwardsBranchingTrunkPlacer.placeTrunk` — mangrove's real trunk. A
-/// single straight column, base-first (`placeBelowTrunkBlock`,
+/// The upwards-branching trunk placer's own trunk placement — mangrove's real trunk. A
+/// single straight column, base-first (a below-trunk-block placement,
 /// exactly like [`place_forking_trunk`]'s own convention), climbing
 /// `tree_height` logs. At every level except the very top, a successfully
 /// placed log has a `place_branch_per_log_probability` chance of budding a
-/// short horizontal branch (`placeBranch`) that walks outward
+/// short horizontal branch (a branch placement) that walks outward
 /// `extra_branch_steps` times, each step attempted via [`valid_tree_pos`]
 /// **extended** with `can_grow_through` (mangrove's real
-/// `validTreePos` override — see [`place_upwards_branching_valid`]),
+/// valid-tree-position override — see [`place_upwards_branching_valid`]),
 /// contributing one [`Attachment`] per branch step (not just at the end —
 /// unlike every other trunk placer here) plus, if the branch climbed at all,
 /// two more attachments at its tip and two below. The tree's own top always
@@ -1217,10 +1219,10 @@ pub(super) fn place_upwards_branching_trunk<R: RandomSource>(
     placed_any
 }
 
-/// `UpwardsBranchingTrunkPlacer.placeBranch`. `log_x`/`log_z` walk away from
+/// The upwards-branching trunk placer's own branch placement. `log_x`/`log_z` walk away from
 /// the trunk one step per iteration (never reset to the trunk column); the
 /// FIRST iteration (`branch_placement_index == branch_pos`, which can be `0`)
-/// is deliberately skipped by the real Java's own `if (branchPlacementIndex
+/// is deliberately skipped by a faithful implementation's own `if (branchPlacementIndex
 /// >= 1)` guard, so a `branch_pos` of `0` places its first REAL log one step
 /// further out than the loop's own starting index, not at the trunk itself.
 #[allow(clippy::too_many_arguments)]
@@ -1277,7 +1279,7 @@ fn place_mangrove_branch<R: RandomSource>(
     }
 }
 
-/// `UpwardsBranchingTrunkPlacer.validTreePos` — [`valid_tree_pos`] OR the
+/// The upwards-branching trunk placer's own valid-tree-position check — [`valid_tree_pos`] OR the
 /// species' own `can_grow_through` tag.
 fn place_upwards_branching_valid(
     grid: &VegGrid,
@@ -1290,8 +1292,7 @@ fn place_upwards_branching_valid(
     valid_tree_pos(grid, tags, x, y, z) || tags.has(grid.interner(), can_grow_through, grid.get_id(x, y, z))
 }
 
-/// `net.minecraft.world.level.levelgen.feature.rootplacers.AboveRootPlacement`
-/// — `MangroveRootPlacer`'s optional extra block dropped above a root, e.g.
+/// The mangrove root placer's optional extra block dropped above a root, e.g.
 /// moss carpet.
 #[derive(Clone, Debug)]
 pub(super) struct AboveRootPlacementCfg {
@@ -1299,12 +1300,12 @@ pub(super) struct AboveRootPlacementCfg {
     pub(super) provider: BlockStateProvider,
 }
 
-/// `net.minecraft.world.level.levelgen.feature.rootplacers.RootPlacer` (the
-/// `MangroveRootPlacer` subclass — no other
-/// vanilla `RootPlacer` exists as of 26.2, so this is a one-variant enum for
+/// The reference root-placer base kind (the mangrove root placer subclass —
+/// no other root placer exists as of 26.2, so this is a one-variant enum for
 /// the same reason [`TrunkPlacerCfg`]/[`FoliagePlacerCfg`] started as
-/// one-variant enums originally). [`super::place::place_roots`] is the port
-/// of `placeRoots`/`simulateRoots`/`potentialRootPositions`/`placeRoot`.
+/// one-variant enums originally). [`super::place::place_roots`] is the
+/// implementation of root placement, root simulation, candidate-root-position
+/// search and individual root placement.
 #[derive(Clone, Debug)]
 pub(super) enum RootPlacerCfg {
     Mangrove {
@@ -1356,7 +1357,7 @@ impl RootPlacerCfg {
         }
     }
 
-    /// `RootPlacer.getTrunkOrigin` — `origin.above(trunkOffsetY.sample(random))`.
+    /// A root placer's own trunk-origin resolution — `origin.above(trunkOffsetY.sample(random))`.
     pub(super) fn get_trunk_origin<R: RandomSource>(&self, origin: BlockPos, random: &mut R) -> BlockPos {
         match self {
             Self::Mangrove { trunk_offset_y, .. } => {
@@ -1366,17 +1367,17 @@ impl RootPlacerCfg {
     }
 }
 
-/// `RootPlacer.canPlaceRoot`/`MangroveRootPlacer.canPlaceRoot` —
+/// The mangrove root placer's own can-place-root check —
 /// [`valid_tree_pos`] OR the species' `can_grow_through` tag.
 pub(super) fn can_place_root(grid: &VegGrid, tags: &VegTags, can_grow_through: Tag, pos: BlockPos) -> bool {
     valid_tree_pos(grid, tags, pos.x, pos.y, pos.z)
         || tags.has(grid.interner(), can_grow_through, grid.get_id(pos.x, pos.y, pos.z))
 }
 
-/// `MangroveRootPlacer.potentialRootPositions` — up to two candidate
+/// The mangrove root placer's own candidate-root-position search — up to two candidate
 /// positions for the next root segment, drawn from `pos`'s manhattan
 /// distance to `root_origin` and, in the two RNG-bearing branches, real
-/// draws. Order matches Java's `List.of(...)` construction exactly (`below`
+/// draws. Order matches a faithful implementation's own list construction exactly (`below`
 /// first where both are returned).
 fn potential_root_positions<R: RandomSource>(
     pos: BlockPos,
@@ -1408,8 +1409,8 @@ fn potential_root_positions<R: RandomSource>(
     }
 }
 
-/// `MangroveRootPlacer.simulateRoots` — recurses along one direction until
-/// either it runs out of room (`canPlaceRoot` fails for every candidate at a
+/// The mangrove root placer's own root simulation — recurses along one direction until
+/// either it runs out of room (the can-place-root check fails for every candidate at a
 /// layer — a normal, successful stop) or `layer` reaches `max_root_length`
 /// (`layer != maxRootLength` going false), in which case the WHOLE root
 /// placement is abandoned — see [`super::place::place_roots`]'s own doc for
@@ -1449,14 +1450,15 @@ pub(super) fn simulate_roots<R: RandomSource>(
     }
 }
 
-/// `TreeFeature.updateLeaves` — the real post-processing pass vanilla runs
+/// The leaf-decay-distance update pass — the real post-processing pass a
+/// faithful implementation runs
 /// after a tree's trunk, foliage AND decorators have all been placed: a
 /// multi-source BFS from every position in `trunk_positions` (bucket 0),
 /// lowering every reachable `distance`-carrying block's `distance` property
 /// to the true shortest distance-to-a-log, capped at 7 (never written past
-/// that cap, matching `LeavesBlock.DECAY_DISTANCE`). This is why every
+/// that cap, matching the leaves block's own decay-distance cap). This is why every
 /// configured leaves state's own JSON-literal `distance` (always `7`, the
-/// "fresh, undecayed" default) is not what real vanilla ever actually
+/// "fresh, undecayed" default) is not what a real reference client ever actually
 /// serves near a trunk — before this function existed, this engine placed
 /// every leaf at the JSON's literal `distance=7` and never corrected it, a
 /// real, measured mismatch found by this change's savanna oracle fixtures
@@ -1466,11 +1468,11 @@ pub(super) fn simulate_roots<R: RandomSource>(
 /// comment "A real bug in the oracle itself" for the reason trees were
 /// never actually exercised before).
 ///
-/// **Not a literal line-for-line port of the bucket/queue mechanics** — the
-/// real Java keeps `toCheck`'s buckets as `Set`s and only guards re-adding
-/// a position via a separately-tracked `DiscreteVoxelShape` "filled" bitset
-/// checked at *dequeue* time (`shape.fill`)/*enqueue* time
-/// (`shape.isFull`). A first attempt at translating that literally with
+/// **Not a literal line-for-line port of the bucket/queue mechanics** — a
+/// faithful implementation keeps its check-buckets as `Set`s and only guards re-adding
+/// a position via a separately-tracked voxel-shape "filled" bitset
+/// checked at *dequeue* time (a fill call)/*enqueue* time
+/// (a fullness check). A first attempt at translating that literally with
 /// per-bucket `VecDeque`s and no cross-bucket dedup **hung indefinitely**:
 /// a log's neighbour (a leaf) enqueues the log's own position back into
 /// bucket 0 every time it is visited (the log always answers distance `0`,
@@ -1495,17 +1497,17 @@ pub(super) fn simulate_roots<R: RandomSource>(
 /// not an approximation, so this reuses [`VegTags::logs`] rather than
 /// resolving a second, redundant tag.
 ///
-/// **`bbox` is load-bearing, not a perf bound.** Real
-/// `TreeFeature.place`/`updateLeaves` scopes its own BFS to
-/// `BoundingBox.encapsulatingPositions(trunks ∪ foliage ∪ decorations ∪
-/// roots)` — the bounding box of THIS ONE TREE's own placed blocks, not the
+/// **`bbox` is load-bearing, not a perf bound.** A faithful implementation's
+/// own tree-placement and leaf-decay-update pass scopes its own BFS to
+/// the bounding box encapsulating trunks ∪ foliage ∪ decorations ∪
+/// roots — the bounding box of THIS ONE TREE's own placed blocks, not the
 /// whole world — and gates BOTH the write and the neighbour-expansion step
-/// on `bounds.isInside(pos)`. A first version of this port had no such
+/// on an inside-bounds check. A first version of this port had no such
 /// bound at all (any in-grid position was fair game), and measured wrong
 /// against real savanna oracle fixtures: it found a *closer* neighbouring
 /// tree's log through gaps between two adjacent canopies, giving every
-/// affected leaf a lower `distance` than vanilla's own bbox-scoped BFS ever
-/// would (vanilla's version, confined to one tree's own extent, simply
+/// affected leaf a lower `distance` than a faithful bbox-scoped BFS ever
+/// would (a faithful implementation, confined to one tree's own extent, simply
 /// cannot see a different tree's logs at all, no matter how close). `bbox`
 /// is `(min_x, min_y, min_z, max_x, max_y, max_z)`, inclusive, computed by
 /// the caller from exactly the positions this one [`place_tree`] call wrote
@@ -1536,8 +1538,8 @@ pub(super) fn update_leaf_distances(
     }
     visited.clear();
     // Every trunk position is, by construction, inside `bbox` (the caller
-    // derives `bbox` to encapsulate them) — matching real vanilla, where
-    // `bounds` is built FROM `trunks`, so a log is trivially always its own
+    // derives `bbox` to encapsulate them) — matching a faithful implementation, where
+    // the bounds are built FROM the trunk positions, so a log is trivially always its own
     // bbox member. No `inside` check needed here.
     for p in trunk_positions {
         let key = (p.x, p.y, p.z);
@@ -1644,7 +1646,7 @@ thread_local! {
 // bodies survive verbatim inside those two functions; nothing about the property
 // syntax handling changed.
 
-/// `net.minecraft.world.level.levelgen.feature.foliageplacers.FoliagePlacer`
+/// The reference foliage-placer base kind
 /// (the `Blob`/`Spruce`/`Pine`/`Acacia` subset — see module doc's "Named
 /// per-branch gaps" for why `Pine` is here despite not being one of the
 /// three originally-named species; `Acacia` is the savanna/acacia increment's addition, paired
@@ -1666,31 +1668,31 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `AcaciaFoliagePlacer` — acacia's real foliage. Its
-    /// `foliageHeight` override always returns the constant `0`, drawing no
+    /// The acacia foliage placer — acacia's real foliage. Its
+    /// foliage-height override always returns the constant `0`, drawing no
     /// RNG at all (unlike `Blob`'s config-constant `height` field or
     /// `Pine`'s sampled one) — see [`Self::foliage_height`]'s own arm.
     Acacia {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `DarkOakFoliagePlacer` — dark oak's real foliage, paired
+    /// The dark oak foliage placer — dark oak's real foliage, paired
     /// with [`TrunkPlacerCfg::DarkOak`] (and shared with pale oak). Rows are
     /// drawn relative to each [`Attachment`] with radii that depend on
     /// `double_trunk` (`leafRadius + 2/-1`, `leafRadius + 3/0`,
-    /// `leafRadius + 2/1`, plus a `nextBoolean`-gated `leafRadius/2` row for
+    /// `leafRadius + 2/1`, plus a boolean-draw-gated `leafRadius/2` row for
     /// the primary 2×2-trunk attachment only), and the skip logic overrides
     /// the signed wrapper too — see [`Self::should_skip_location_signed`].
-    /// `foliageHeight` is the constant `4`, no RNG.
+    /// The foliage height is the constant `4`, no RNG.
     DarkOak {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `BushFoliagePlacer` — jungle_bush's real foliage: a
-    /// `BlobFoliagePlacer` subclass (shares its `height` field, parsed the
-    /// same way) that overrides both `createFoliage` (a different per-row
-    /// radius formula, and no `/2` term) and `shouldSkipLocation` (an
-    /// unconditional corner coin flip, not `Blob`'s `coin || y == 0`). See
+    /// The bush foliage placer — jungle_bush's real foliage: a
+    /// blob-foliage-placer subclass (shares its `height` field, parsed the
+    /// same way) that overrides both foliage creation (a different per-row
+    /// radius formula, and no `/2` term) and the skip-location predicate (an
+    /// unconditional corner coin flip, not the blob placer's `coin || y == 0`). See
     /// [`Self::create_foliage`]'s own `Bush` arm and
     /// [`Self::should_skip_location`]'s own `Bush` arm.
     Bush {
@@ -1698,19 +1700,20 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `MegaJungleFoliagePlacer` — mega jungle's real foliage,
-    /// paired with [`TrunkPlacerCfg::MegaJungle`]. Registered in vanilla as
-    /// `"jungle_foliage_placer"` (not `"mega_jungle_foliage_placer"` — see
-    /// `FoliagePlacerType.MEGA_JUNGLE_FOLIAGE_PLACER`'s own registration
+    /// The mega jungle foliage placer — mega jungle's real foliage,
+    /// paired with [`TrunkPlacerCfg::MegaJungle`]. Registered in a faithful
+    /// implementation as
+    /// `"jungle_foliage_placer"` (not `"mega_jungle_foliage_placer"` — a
+    /// naming quirk of the reference registration
     /// name). Carries its own `height` field like `Bush` above.
     MegaJungle {
         height: i32,
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `MegaPineFoliagePlacer` — the redwood/giant-spruce foliage (added
+    /// The mega pine foliage placer — the redwood/giant-spruce foliage (added
     /// with the savanna/acacia increment), paired with [`TrunkPlacerCfg::Giant`] directly (mega_spruce/
-    /// mega_pine use `giant_trunk_placer`, not `MegaJungleTrunkPlacer`).
+    /// mega_pine use `giant_trunk_placer`, not the mega jungle trunk placer).
     /// `crown_height` replaces the other placers' constant/derived
     /// `foliage_height` with its own sampled `IntProvider`.
     MegaPine {
@@ -1718,20 +1721,20 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `FancyFoliagePlacer` — oak's `fancy_oak_*` foliage,
-    /// paired with [`TrunkPlacerCfg::Fancy`]. A `BlobFoliagePlacer`
+    /// The fancy foliage placer — oak's `fancy_oak_*` foliage,
+    /// paired with [`TrunkPlacerCfg::Fancy`]. A blob-foliage-placer
     /// subclass sharing its `height` field and parse shape (like
     /// [`Self::Bush`]/[`Self::MegaJungle`] above) but overriding both
-    /// `createFoliage` (a widened-middle descending-row shape, no RNG in the
-    /// radius formula itself) and `shouldSkipLocation` (a pure `(dx+0.5,
-    /// dz+0.5)` distance test, no RNG draw — unlike `Blob`'s corner coin
+    /// foliage creation (a widened-middle descending-row shape, no RNG in the
+    /// radius formula itself) and the skip-location predicate (a pure `(dx+0.5,
+    /// dz+0.5)` distance test, no RNG draw — unlike the blob placer's corner coin
     /// flip).
     Fancy {
         height: i32,
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `CherryFoliagePlacer` — cherry's real foliage, paired
+    /// The cherry foliage placer — cherry's real foliage, paired
     /// with [`TrunkPlacerCfg::Cherry`]. `height` is a genuinely sampled
     /// `IntProvider` (unlike `Blob`/`Bush`/`MegaJungle`/`Fancy`'s constant
     /// literal). See [`Self::create_foliage`]'s own `Cherry` arm for the
@@ -1746,12 +1749,12 @@ pub enum FoliagePlacerCfg {
         hanging_leaves_chance: f32,
         hanging_leaves_extension_chance: f32,
     },
-    /// `RandomSpreadFoliagePlacer` — mangrove's real foliage,
+    /// The random-spread foliage placer — mangrove's real foliage,
     /// paired with [`TrunkPlacerCfg::UpwardsBranching`]. The only placer in
-    /// this module with no `shouldSkipLocation`/row structure at all: it
+    /// this module with no skip-location predicate/row structure at all: it
     /// throws `leaf_placement_attempts` independent darts inside a box
     /// `radius × 2` wide and `foliage_height × 2` tall, each landing wherever
-    /// two independent `nextInt(bound) - nextInt(bound)` draws put it (a
+    /// two independent bounded draws' difference put it (a
     /// triangular, not uniform, distribution — see [`Self::create_foliage`]'s
     /// own `RandomSpread` arm).
     RandomSpread {
@@ -1831,28 +1834,30 @@ pub(super)     fn foliage_height<R: RandomSource>(&self, random: &mut R, tree_he
                 (tree_height - trunk_height.sample(random)).max(4)
             }
             FoliagePlacerCfg::Pine { height, .. } => height.sample(random),
-            // `AcaciaFoliagePlacer.foliageHeight` ignores every one of its
+            // The acacia foliage placer's own foliage-height override ignores
+            // every one of its
             // own arguments and returns the constant `0` — no RNG draw.
             FoliagePlacerCfg::Acacia { .. } => 0,
-            // `DarkOakFoliagePlacer.foliageHeight` returns the constant `4`
+            // The dark oak foliage placer's own foliage-height override returns the constant `4`
             // — no RNG draw.
             FoliagePlacerCfg::DarkOak { .. } => 4,
-            // `BushFoliagePlacer` doesn't override `foliageHeight` — it
-            // inherits `BlobFoliagePlacer`'s own constant `height` field, no
+            // The bush foliage placer doesn't override foliage height — it
+            // inherits the blob foliage placer's own constant `height` field, no
             // RNG draw, same shape as `Blob` above.
             FoliagePlacerCfg::Bush { height, .. } => *height,
-            // `MegaJungleFoliagePlacer.foliageHeight` returns its own
+            // The mega jungle foliage placer's own foliage-height override returns its own
             // constant `height` field — no RNG draw.
             FoliagePlacerCfg::MegaJungle { height, .. } => *height,
-            // `MegaPineFoliagePlacer.foliageHeight` is the one override in
+            // The mega pine foliage placer's own foliage-height override is the one override in
             // this module that samples an `IntProvider` here rather than
             // returning a config-literal constant.
             FoliagePlacerCfg::MegaPine { crown_height, .. } => crown_height.sample(random),
-            // `FancyFoliagePlacer` doesn't override `foliageHeight` either —
-            // inherits `BlobFoliagePlacer`'s own constant `height` field,
+            // The fancy foliage placer doesn't override foliage height either —
+            // inherits the blob foliage placer's own constant `height` field,
             // same shape as `Blob`/`Bush`/`MegaJungle` above.
             FoliagePlacerCfg::Fancy { height, .. } => *height,
-            // `CherryFoliagePlacer`/`RandomSpreadFoliagePlacer.foliageHeight` —
+            // The cherry and random-spread foliage placers' own foliage-height
+            // override —
             // both sample a real `IntProvider` field (no constant, unlike
             // `Blob`/`Bush`/`MegaJungle`/`Fancy` above).
             FoliagePlacerCfg::Cherry { height, .. } | FoliagePlacerCfg::RandomSpread { height, .. } => {
@@ -1871,9 +1876,9 @@ pub(super)     fn foliage_radius<R: RandomSource>(&self, random: &mut R, trunk_l
             | FoliagePlacerCfg::MegaJungle { radius, .. }
             | FoliagePlacerCfg::MegaPine { radius, .. }
             | FoliagePlacerCfg::Fancy { radius, .. }
-            // Neither `CherryFoliagePlacer` nor `RandomSpreadFoliagePlacer`
-            // overrides `foliageRadius` — both inherit `FoliagePlacer`'s own
-            // base `this.radius.sample(random)`.
+            // Neither the cherry nor the random-spread foliage placer
+            // overrides the foliage-radius sampler — both inherit the base
+            // kind's own `this.radius.sample(random)`.
             | FoliagePlacerCfg::Cherry { radius, .. }
             | FoliagePlacerCfg::RandomSpread { radius, .. } => radius.sample(random),
             FoliagePlacerCfg::Pine { radius, .. } => {
@@ -1898,8 +1903,8 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
         }
     }
 
-    /// `FoliagePlacer.shouldSkipLocation` — the plain (already-abs'd,
-    /// `doubleTrunk`-free) skip predicate, the leaf of
+    /// The base kind's own skip-location predicate — the plain (already-abs'd,
+    /// `double_trunk`-free) skip predicate, the leaf of
     /// [`Self::should_skip_location_signed`]'s default path for every placer
     /// except [`FoliagePlacerCfg::DarkOak`] (which overrides the signed
     /// wrapper *and* the inner predicate, so its own arm here is unreachable
@@ -1928,7 +1933,7 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
             FoliagePlacerCfg::Spruce { .. } | FoliagePlacerCfg::Pine { .. } => {
                 dx == current_radius && dz == current_radius && current_radius > 0
             }
-            // `AcaciaFoliagePlacer.shouldSkipLocation` — pure geometry, no
+            // The acacia foliage placer's own skip-location predicate — pure geometry, no
             // RNG draw (unlike `Blob`'s corner coin flip above).
             FoliagePlacerCfg::Acacia { .. } => {
                 if y == 0 {
@@ -1940,20 +1945,20 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
             // Unreachable — [`Self::should_skip_location_signed`] handles
             // DarkOak entirely (see that method's own doc).
             FoliagePlacerCfg::DarkOak { .. } => false,
-            // `BushFoliagePlacer.shouldSkipLocation` — an UNCONDITIONAL
+            // The bush foliage placer's own skip-location predicate — an UNCONDITIONAL
             // corner coin flip (unlike `Blob`'s `coin || y == 0`, this has no
             // `y`-based override — the draw's result alone decides).
             FoliagePlacerCfg::Bush { .. } => {
                 dx == current_radius && dz == current_radius && random.next_int_bounded(2) == 0
             }
-            // `MegaJungleFoliagePlacer.shouldSkipLocation` and
-            // `MegaPineFoliagePlacer.shouldSkipLocation` are textually
-            // identical in real vanilla — pure geometry, no RNG draw.
+            // The mega jungle and mega pine foliage placers' own
+            // skip-location predicates are textually
+            // identical in a faithful implementation — pure geometry, no RNG draw.
             FoliagePlacerCfg::MegaJungle { .. } | FoliagePlacerCfg::MegaPine { .. } => {
                 dx + dz >= 7 || dx * dx + dz * dz > current_radius * current_radius
             }
-            // `FancyFoliagePlacer.shouldSkipLocation` —
-            // `Mth.square(dx+0.5F) + Mth.square(dz+0.5F) > currentRadius^2`,
+            // The fancy foliage placer's own skip-location predicate —
+            // `square(dx+0.5F) + square(dz+0.5F) > current_radius^2`,
             // comparing a float sum against an int product widened to
             // float. Pure geometry, no RNG draw.
             FoliagePlacerCfg::Fancy { .. } => {
@@ -1962,10 +1967,10 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
                 let rr = (current_radius * current_radius) as f32;
                 dxf * dxf + dzf * dzf > rr
             }
-            // `CherryFoliagePlacer.shouldSkipLocation`. `y == -1`'s two-edge
+            // The cherry foliage placer's own skip-location predicate. `y == -1`'s two-edge
             // hole roll is checked and drawn FIRST and short-circuits the
             // whole call if it fires — the corner/wide-layer roll below is
-            // never reached in that case, matching Java's `if { return
+            // never reached in that case, matching a faithful implementation's `if { return
             // true; }` early-out exactly (not merely `||`d together with it).
             FoliagePlacerCfg::Cherry { wide_bottom_layer_hole_chance, corner_hole_chance, .. } => {
                 if y == -1
@@ -1982,28 +1987,30 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
                     corner && random.next_float() < *corner_hole_chance
                 }
             }
-            // `RandomSpreadFoliagePlacer.shouldSkipLocation` returns the
+            // The random-spread foliage placer's own skip-location predicate
+            // returns the
             // constant `false` — but this arm is genuinely unreachable in
             // practice, because [`Self::create_foliage`]'s own `RandomSpread`
             // arm never calls [`place_leaves_row`]/`should_skip_location_signed`
-            // at all (`createFoliage` throws darts directly via
-            // [`try_place_leaf`], matching real
-            // `RandomSpreadFoliagePlacer.createFoliage`, which never calls
-            // `placeLeavesRow` either).
+            // at all (foliage creation throws darts directly via
+            // [`try_place_leaf`], matching a faithful implementation's own
+            // foliage creation, which never calls
+            // leaves-row placement either).
             FoliagePlacerCfg::RandomSpread { .. } => false,
         }
     }
 
-    /// `FoliagePlacer.shouldSkipLocationSigned` — the entry
-    /// [`place_leaves_row`] always uses (vanilla's `placeLeavesRow` calls the
+    /// The base kind's own signed skip-location wrapper — the entry
+    /// [`place_leaves_row`] always uses (a faithful implementation's own
+    /// leaves-row placement calls the
     /// signed wrapper, never the plain predicate). For every placer except
     /// [`FoliagePlacerCfg::DarkOak`] this is exactly the wrapper's default:
     /// `shouldSkipLocation(|dx|, |dz|)` — identical to what the callers
     /// previously passed to [`Self::should_skip_location`] directly, so no
     /// draw-count or result changes for oak/birch/spruce/pine/acacia.
     ///
-    /// `DarkOakFoliagePlacer` overrides BOTH the signed wrapper and the inner
-    /// predicate in real vanilla, so it gets its own arm. The wrapper
+    /// The dark oak foliage placer overrides BOTH the signed wrapper and the inner
+    /// predicate in a faithful implementation, so it gets its own arm. The wrapper
     /// override short-circuits to `true` (skip) only for the double-trunk
     /// `y == 0` row when `dx` AND `dz` are both at the row's extremes
     /// (`dx == -r || dx >= r` and the same for `dz` — the corner 2×2s of the
@@ -2012,7 +2019,7 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
     /// (the distance to the nearer of the 2×2 trunk's two columns) before the
     /// inner predicate: `y == -1 && !doubleTrunk` skips the corners, and
     /// `y == 1` skips where `minDx + minDz > 2 * r - 2`. All pure geometry —
-    /// `DarkOakFoliagePlacer` draws no RNG in its skip logic.
+    /// the dark oak foliage placer draws no RNG in its skip logic.
     fn should_skip_location_signed<R: RandomSource>(
         &self,
         random: &mut R,
@@ -2024,8 +2031,9 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
     ) -> bool {
         match self {
             FoliagePlacerCfg::DarkOak { .. } => {
-                // `DarkOakFoliagePlacer.shouldSkipLocationSigned`'s
-                // short-circuit head: delegate to the superclass unless
+                // The dark oak foliage placer's own signed skip-location
+                // wrapper's
+                // short-circuit head: delegate to the base kind unless
                 // `y == 0 && doubleTrunk && dx && dz` are all "at the edge".
                 let delegate = y != 0
                     || !double_trunk
@@ -2034,8 +2042,9 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
                 if !delegate {
                     return true;
                 }
-                // `FoliagePlacer.shouldSkipLocationSigned`'s default (the
-                // super call), then `DarkOakFoliagePlacer.shouldSkipLocation`.
+                // The base kind's own signed skip-location wrapper's default (the
+                // base-kind call), then the dark oak foliage placer's own
+                // skip-location predicate.
                 let (min_dx, min_dz) = if double_trunk {
                     (dx.abs().min((dx - 1).abs()), dz.abs().min((dz - 1).abs()))
                 } else {
@@ -2136,15 +2145,16 @@ pub(super)     fn create_foliage<R: RandomSource>(
                     yo -= 1;
                 }
             }
-            // `AcaciaFoliagePlacer.createFoliage` — exactly three explicit
-            // `placeLeavesRow` calls (not a scanning loop like `Blob`/
-            // `Spruce`/`Pine` above), at `y = -1 - foliageHeight`,
-            // `-foliageHeight`, `0` — with `foliageHeight` always `0` (see
+            // The acacia foliage placer's own foliage creation — exactly three explicit
+            // leaves-row placement calls (not a scanning loop like `Blob`/
+            // `Spruce`/`Pine` above), at `y = -1 - foliage_height`,
+            // `-foliage_height`, `0` — with `foliage_height` always `0` (see
             // `Self::foliage_height`), that's `y = -1, 0, 0`. The two `y =
             // 0` rows use DIFFERENT radii (`leaf_radius - 1` then
             // `leaf_radius + radius_offset - 1`) and are both real, in that
             // exact order — the second simply overwrites part of what the
-            // first already wrote, matching vanilla's own redundancy rather
+            // first already wrote, matching a faithful implementation's own
+            // redundancy rather
             // than an engine bug.
             FoliagePlacerCfg::Acacia { .. } => {
                 place_leaves_row(
@@ -2155,10 +2165,10 @@ pub(super)     fn create_foliage<R: RandomSource>(
                     random, attachment, leaf_radius + radius_offset - 1, 0, grid, tags, self, provider, foliage_positions, placed_any, false,
                 );
             }
-            // `DarkOakFoliagePlacer.createFoliage` — `pos =
+            // The dark oak foliage placer's own foliage creation — `pos =
             // foliageAttachment.pos().above(offset)`, then three rows whose
-            // radii depend on `doubleTrunk` (`leafRadius + 2`, `+ 3`, `+ 2`
-            // at `y = -1, 0, 1`), plus a `nextBoolean`-gated `leafRadius` row
+            // radii depend on `double_trunk` (`leaf_radius + 2`, `+ 3`, `+ 2`
+            // at `y = -1, 0, 1`), plus a boolean-draw-gated `leaf_radius` row
             // at `y = 2` for the primary 2×2-trunk attachment only. The
             // non-double branches get two rows (`leafRadius + 2` at `-1`,
             // `leafRadius + 1` at `0`).
@@ -2180,7 +2190,7 @@ pub(super)     fn create_foliage<R: RandomSource>(
                     place_leaves_row(random, pos, leaf_radius + 1, 0, grid, tags, self, provider, foliage_positions, placed_any, false);
                 }
             }
-            // `BushFoliagePlacer.createFoliage` — same descending-row shape
+            // The bush foliage placer's own foliage creation — same descending-row shape
             // as `Blob`, but the radius formula has no `/2` term and adds
             // `radius_offset` (always `0` here — jungle_bush's only trunk
             // placer, `Straight`, never sets it nonzero, but it is threaded
@@ -2193,11 +2203,11 @@ pub(super)     fn create_foliage<R: RandomSource>(
                     );
                 }
             }
-            // `MegaJungleFoliagePlacer.createFoliage` — `leafHeight` draws
+            // The mega jungle foliage placer's own foliage creation — `leaf_height` draws
             // RNG only for a non-double-trunk (branch) attachment; the
             // primary (`double_trunk: true`) attachment uses the constant
             // `foliage_height` field instead, no draw. Rows descend from
-            // `offset` to `offset - leafHeight` inclusive.
+            // `offset` to `offset - leaf_height` inclusive.
             FoliagePlacerCfg::MegaJungle { .. } => {
                 let leaf_height = if double_trunk {
                     foliage_height
@@ -2213,14 +2223,14 @@ pub(super)     fn create_foliage<R: RandomSource>(
                     yo -= 1;
                 }
             }
-            // `MegaPineFoliagePlacer.createFoliage` — the one placer in this
+            // The mega pine foliage placer's own foliage creation — the one placer in this
             // module whose rows are addressed by ABSOLUTE Y (via a shifted
             // row origin, `y = 0` every call) rather than a relative offset
             // passed to `place_leaves_row`'s own `y` parameter, and whose
             // radius is smoothed then "jagged" every other row. No RNG draw
-            // anywhere in this arithmetic — `Mth.floor` and the `(yy & 1)`
+            // anywhere in this arithmetic — the floor function and the `(yy & 1)`
             // parity check are pure. `yy % 2 == 0` is Rust's equivalent of
-            // Java's `(yy & 1) == 0` for this equality-to-zero check: both
+            // the reference's `(yy & 1) == 0` for this equality-to-zero check: both
             // are zero exactly when `yy` is even, for either sign.
             FoliagePlacerCfg::MegaPine { .. } => {
                 let mut prev_radius = 0;
@@ -2256,7 +2266,7 @@ pub(super)     fn create_foliage<R: RandomSource>(
                     yy += 1;
                 }
             }
-            // `FancyFoliagePlacer.createFoliage` — descends from `offset` to
+            // The fancy foliage placer's own foliage creation — descends from `offset` to
             // `offset - foliageHeight` inclusive (same direction as
             // `Blob`/`Bush` above), widening the radius by 1 for every row
             // EXCEPT the very top (`yo == offset`) and very bottom
@@ -2272,14 +2282,14 @@ pub(super)     fn create_foliage<R: RandomSource>(
                     );
                 }
             }
-            // `CherryFoliagePlacer.createFoliage` — `foliagePos =
-            // foliageAttachment.pos().above(offset)`, `currentRadius =
+            // The cherry foliage placer's own foliage creation — `foliagePos =
+            // foliageAttachment.pos().above(offset)`, `current_radius =
             // leafRadius + radiusOffset - 1`, two fixed-radius rows at
             // `foliageHeight - 3`/`foliageHeight - 4`, then a full-radius
             // scan down to `y = 0`, then two rows that ALSO try to hang a
             // extra one or two leaves below themselves
             // ([`place_leaves_row_with_hanging_leaves_below`]) at `y = -1`
-            // (radius `currentRadius`) and `y = -2` (radius `currentRadius -
+            // (radius `current_radius`) and `y = -2` (radius `current_radius -
             // 1`).
             FoliagePlacerCfg::Cherry { hanging_leaves_chance, hanging_leaves_extension_chance, .. } => {
                 let foliage_pos = BlockPos { x: attachment.x, y: attachment.y + offset, z: attachment.z };
@@ -2307,13 +2317,13 @@ pub(super)     fn create_foliage<R: RandomSource>(
                     *hanging_leaves_extension_chance, grid, tags, self, provider, foliage_positions, placed_any,
                 );
             }
-            // `RandomSpreadFoliagePlacer.createFoliage` — the one placer in
+            // The random-spread foliage placer's own foliage creation — the one placer in
             // this module with no row structure at all. `origin =
             // foliageAttachment.pos()` DIRECTLY, ignoring the `offset`
             // parameter entirely (unlike every row-based placer above, which
             // reads `offset` before its own first draw) — that is real
-            // vanilla behaviour, not an omission: `RandomSpreadFoliagePlacer
-            // .createFoliage` never references its own `offset` parameter.
+            // reference behaviour, not an omission: the random-spread
+            // foliage placer's own foliage creation never references its own `offset` parameter.
             // Each of `leaf_placement_attempts` iterations draws SIX ints
             // (`nextInt(leafRadius)` twice for `dx`, twice for `dz`, and
             // `nextInt(foliageHeight)` twice for `dy`, in that exact
@@ -2345,7 +2355,7 @@ pub(super) fn place_leaves_row<R: RandomSource>(
     placed_any: &mut bool,
     double_trunk: bool,
 ) {
-    // `FoliagePlacer.placeLeavesRow`: for a double trunk the loop is widened
+    // The base kind's own leaves-row placement: for a double trunk the loop is widened
     // by one in the positive direction (`offset = doubleTrunk ? 1 : 0`) to
     // cover the 2×2 trunk footprint, and every cell is gated by the placer's
     // SIGNED skip logic (the non-signed `should_skip_location` is only ever
@@ -2365,16 +2375,16 @@ pub(super) fn place_leaves_row<R: RandomSource>(
     }
 }
 
-/// `FoliagePlacer.placeLeavesRowWithHangingLeavesBelow` — cherry's own
+/// The base kind's own leaves-row-with-hanging-leaves-below placement — cherry's own
 /// extension of [`place_leaves_row`]: after placing the row
-/// itself, walk its four edges (`Direction.Plane.HORIZONTAL`, the usual
+/// itself, walk its four edges (the horizontal plane, the usual
 /// NORTH/EAST/SOUTH/WEST order) and, wherever the row directly above
-/// (queried through `foliage_positions` — this module's stand-in for real
-/// vanilla's `FoliageSetter.isSet`, which only ever answers "did THIS tree's
+/// (queried through `foliage_positions` — this module's stand-in for a real
+/// foliage setter's own is-set query, which only ever answers "did THIS tree's
 /// own foliage pass set a leaf here") carries a leaf, roll one extra hanging
 /// leaf immediately below and, if that one lands, a second one below that.
 /// `log_pos` (`origin.below()`, fixed once for the whole call) is the
-/// `distManhattan` anchor both rolls bail out past a distance of 7 from —
+/// manhattan-distance anchor both rolls bail out past a distance of 7 from —
 /// see [`try_place_extension`].
 #[allow(clippy::too_many_arguments)]
 fn place_leaves_row_with_hanging_leaves_below<R: RandomSource>(
@@ -2399,9 +2409,9 @@ fn place_leaves_row_with_hanging_leaves_below<R: RandomSource>(
     let offset = if double_trunk { 1 } else { 0 };
     let log_pos = BlockPos { x: origin.x, y: origin.y - 1, z: origin.z };
 
-    // `Direction.Plane.HORIZONTAL` (NORTH, EAST, SOUTH, WEST), each paired
-    // with its own `getClockWise()` (NORTH->EAST, EAST->SOUTH, SOUTH->WEST,
-    // WEST->NORTH) and that direction's `getAxisDirection() == POSITIVE`
+    // The horizontal plane (NORTH, EAST, SOUTH, WEST), each paired
+    // with its own clockwise direction (NORTH->EAST, EAST->SOUTH, SOUTH->WEST,
+    // WEST->NORTH) and that direction's positive-axis-direction flag
     // (EAST/SOUTH are positive-x/positive-z; WEST/NORTH are not).
     const ALONG_EDGE: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
     const TO_EDGE: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
@@ -2432,9 +2442,9 @@ fn place_leaves_row_with_hanging_leaves_below<R: RandomSource>(
     }
 }
 
-/// `FoliagePlacer.tryPlaceExtension` — one hanging-leaf roll, bounded to
+/// The base kind's own hanging-leaf extension attempt — one hanging-leaf roll, bounded to
 /// within 7 Manhattan blocks of `log_pos`. Draws `next_float()`
-/// unconditionally once the distance gate passes (matching Java's `random
+/// unconditionally once the distance gate passes (matching a faithful implementation's `random
 /// .nextFloat() > chance ? false : tryPlaceLeaf(...)`, which evaluates the
 /// comparison before short-circuiting to [`try_place_leaf`]).
 #[allow(clippy::too_many_arguments)]
@@ -2495,9 +2505,9 @@ pub(super) fn try_place_leaf<R: RandomSource>(
         )
         .unwrap_or(state);
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
-    // `FoliageSetter.set`'s own `foliage.add(pos.immutable())` — this
-    // module's stand-in for real vanilla's per-tree foliage-position set, so
-    // [`place_leaves_row_with_hanging_leaves_below`]'s `isSet` queries can
+    // A faithful foliage setter's own position-add call — this
+    // module's stand-in for a real per-tree foliage-position set, so
+    // [`place_leaves_row_with_hanging_leaves_below`]'s own is-set queries can
     // answer from something other than this tree's earlier writes leaking
     // into a later tree's query (the set is cleared per [`super::place::place_tree`]
     // call — see that function's own `FOLIAGE_POS` scratch buffer).
