@@ -23,10 +23,10 @@
 //! never a second.
 //!
 //! **The side's own dye colour is the default a run falls back to, not an
-//! override**: `AbstractSignRenderer.submitSignText` passes the side's
+//! override**: vanilla's own sign-renderer submit routine passes the side's
 //! resolved colour (full dye when glowing, `ARGB.scaleRGB(dye, 0.4)`
-//! otherwise) as `Font`'s own default-colour argument, and
-//! `Font.java::getTextColor` only substitutes it when a glyph's own `Style`
+//! otherwise) as the font's own default-colour argument, and
+//! vanilla's own text-colour resolver only substitutes it when a glyph's own style
 //! carries no colour at all — a run that *does* specify one always wins,
 //! at any brightness. [`default_run_color`] resolves that default (via
 //! [`sign_side_color`], the existing glow/dark-scale logic, unchanged), and
@@ -35,13 +35,12 @@
 //!
 //! # Depth: vanilla's ordered normal-outline / polygon-offset-ink passes
 //!
-//! `AbstractSignRenderer.submitSignText` submits with
-//! `Font.DisplayMode.POLYGON_OFFSET`, which resolves to
-//! `RenderPipelines.TEXT_POLYGON_OFFSET`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/RenderPipelines.java`):
-//! `new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`.
+//! Vanilla's own sign-renderer submit routine submits with
+//! its own "polygon offset" display mode, which resolves to
+//! its own text-polygon-offset render pipeline:
+//! a depth-stencil state of `(GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`.
 //! `crack_pipeline.rs` already worked out this record's real field order from
-//! `VulkanRenderPipeline.java` — `(depthTest, writeDepth,
+//! vanilla's own render-pipeline record — `(depthTest, writeDepth,
 //! depthBiasScaleFactor, depthBiasConstant)` — for the *same* two numeric
 //! constants (`1.0F`, `10.0F`) on a different pipeline
 //! (`GREATER_THAN_OR_EQUAL, false, 1.0F, 10.0F`, vanilla's `pipeline/

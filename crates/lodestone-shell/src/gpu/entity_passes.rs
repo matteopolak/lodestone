@@ -1714,10 +1714,8 @@ impl RenderState {
     }
 
     /// Resolve this frame's entity ground shadows (owner report: "entity
-    /// shadows are missing") into one vertex buffer — `EntityRenderer.
-    /// extractShadow`/`extractShadowPiece`
-    /// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/entity/
-    /// EntityRenderer.java`), transcribed as a formula rather than a
+    /// shadows are missing") into one vertex buffer — vanilla's own
+    /// entity-renderer shadow-extract routines, transcribed as a formula rather than a
     /// per-species table; see `SHADOW_RADIUS`/`SHADOW_STRENGTH` for the
     /// disclosed simplification.
     ///

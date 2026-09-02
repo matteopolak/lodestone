@@ -20,9 +20,8 @@ use super::FLOATS_PER_VERTEX;
 //
 // The toggle button + browsable panel (search box, category tabs, a paged
 // icon grid) for the crafting-table and furnace-family screens. Every
-// constant below is transcribed from the decompiled 26.2 client, cited by
-// `file:line`, under `.cache/mc/26.2/client-src/net/minecraft/client/gui/
-// screens/recipebook/`.
+// constant below is transcribed from the decompiled 26.2 client's own
+// recipe-book screen classes.
 //
 // **The screen shift is now real, and this note used to say it was not.** The
 // old text read "this does *not* replicate `RecipeBookComponent.
