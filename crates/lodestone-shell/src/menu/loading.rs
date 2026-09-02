@@ -233,11 +233,13 @@ pub struct TerrainChunkGrid {
 /// The grid's own radius, in chunks — **a constant, not the render distance**.
 ///
 /// This is vanilla's number, and reading it out of the jar is the whole of this
-/// constant's justification. `Minecraft.doWorldLoad` builds the view the
-/// loading screen draws as
-/// `createChunkLoadStatusView(Math.max(5, 3) + ChunkLevel.RADIUS_AROUND_FULL_CHUNK + 1)`,
-/// and `ChunkLevel.RADIUS_AROUND_FULL_CHUNK` is
-/// `ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.FULL).accumulatedDependencies().getRadius()`,
+/// constant's justification. Vanilla's own client entry point's world-load
+/// routine builds the view the
+/// loading screen draws as a chunk-load-status view sized by the max of 5 and
+/// 3, plus the radius-around-full-chunk constant, plus 1,
+/// and that radius constant is
+/// the generation pyramid's own accumulated-dependency radius for reaching
+/// the full status,
 /// which evaluates to **11** for 26.2's pyramid (the chain's widest accumulated
 /// dependency is `LIGHT`'s, `STRUCTURE_STARTS` at radius 8 pushed out by the
 /// `BIOMES`/`CARVERS`/`INITIALIZE_LIGHT` radius-1 steps above it). So vanilla's
@@ -320,27 +322,17 @@ pub struct TerrainWait {
     pub within_build_height: bool,
 }
 
-/// Vanilla's `LevelLoadTracker.WaitingForPlayerChunk.isReady`, ported.
+/// Vanilla's own level-load-tracker's waiting-for-player-chunk state's own
+/// is-ready check, ported.
 ///
-/// The record, so the port is auditable:
-///
-/// ```text
-/// private boolean isReady() {
-///    if (Util.getMillis() > this.timeoutAfter) {
-///       LOGGER.warn("Timed out while waiting for the client to load chunks, letting the player into the world anyway");
-///       return true;
-///    } else {
-///       BlockPos playerPos = this.player.blockPosition();
-///       BlockPos cameraPos = Minecraft.getInstance().gameRenderer.mainCamera().blockPosition();
-///       return !this.level.isOutsideBuildHeight(playerPos.getY())
-///             && !this.level.isOutsideBuildHeight(cameraPos.getY())
-///             && !this.player.isSpectator()
-///             && this.player.isAlive()
-///          ? this.playerSectionReady.get()
-///          : true;
-///    }
-/// }
-/// ```
+/// The behavior, so the port is auditable: once the wall clock passes the
+/// stored timeout, it logs a warning and reports ready unconditionally,
+/// letting the player in regardless of chunk state. Otherwise it reads the
+/// player's block position and the main camera's block position and reports
+/// ready outright unless *all four* of these hold: the player's Y is inside
+/// the world's build height, the camera's Y is inside it too, the player is
+/// not a spectator, and the player is alive — only when every one of those
+/// four holds does it defer to the actual "has this section loaded" flag.
 ///
 /// Read carefully, the ternary is **"only wait if waiting could work"**: every one
 /// of those four conditions failing makes the answer `true`, i.e. *ready*. They
@@ -418,7 +410,7 @@ pub struct AssetWait {
 /// This shares [`CLIENT_WAIT_TIMEOUT`] *and the clock it is measured against*
 /// with [`is_level_ready`] rather than getting a second deadline of its own, and
 /// that is a port rather than a convenience. Vanilla's `LevelLoadTracker` stamps
-/// `Util.getMillis() + CLIENT_WAIT_TIMEOUT_MS` **once**, in `startClientLoad`,
+/// its own millis-since-epoch clock plus `CLIENT_WAIT_TIMEOUT_MS` **once**, in `startClientLoad`,
 /// and `WaitingForServer.loadingPacketsReceived` carries that same `timeoutAfter`
 /// into `WaitingForPlayerChunk` unchanged — one deadline for the whole client
 /// load, not one per sub-wait. Two waits sharing one deadline is therefore the
