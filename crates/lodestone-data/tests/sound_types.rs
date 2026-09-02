@@ -7,7 +7,7 @@
 //!
 //! # What is being anchored
 //!
-//! `LevelEventHandler.levelEvent`'s `case 2001` plays
+//! Vanilla's own level-event handler's break case plays
 //! `Block.stateById(data).getSoundType().getBreakSound()` at
 //! `(soundType.getVolume() + 1.0F) / 2.0F` and `soundType.getPitch() * 0.8F`. The
 //! packet carries only the state id, so the sound is a **local lookup** — which
@@ -18,7 +18,7 @@
 //!
 //! `tests/support/sound_types_jvm.txt` is an authoritative dump produced by
 //! booting the real 26.2 server (`oracle-java/SoundTypeOracle.java`) and reading
-//! `BlockStateBase.getSoundType()` per block state. It carries:
+//! vanilla's own "get sound type" accessor per block state. It carries:
 //!
 //! * `C <states> <blocks> <distinctValues> <distinctIdentities>` — the two
 //!   distinct counts, so [`value_dedup_collapses_nothing`] can *measure* whether
@@ -32,7 +32,7 @@
 //! * `T <index> <volumeBits> <pitchBits> <break> <step> <place> <hit> <fall>` —
 //!   the deduplicated table, floats as raw bits so no decimal formatting sits
 //!   between the JVM and the assertion.
-//! * `O <block> <class>` — the `getSoundType(BlockState)` override census by
+//! * `O <block> <class>` — the per-state sound-type override census by
 //!   reflection, which makes "exactly one block is per-state" a measurement
 //!   ([`decorated_pot_is_the_only_per_state_sound_type`]).
 //! * `B <firstStateId> <block>` and `R <index> <runLength>` — block ranges and a
@@ -97,7 +97,7 @@ struct Dump {
     block_count: usize,
     distinct_values: usize,
     distinct_identities: usize,
-    /// `O` rows: block name -> the class declaring its `getSoundType`.
+    /// `O` rows: block name -> the class declaring its own "get sound type" accessor.
     overrides: BTreeMap<String, String>,
     /// `N` rows: sound-event registry id -> name, from the live registry.
     sound_names: BTreeMap<u16, String>,
@@ -256,7 +256,7 @@ fn generate(dump: &Dump) -> String {
 
     let _ = writeln!(
         out,
-        "/// Number of distinct `SoundType` values, i.e. `ENTRIES.len()`."
+        "/// Number of distinct sound-type values, i.e. `ENTRIES.len()`."
     );
     let _ = writeln!(out, "pub const ENTRY_COUNT: u32 = {};\n", distinct.len());
 
@@ -345,10 +345,10 @@ fn value_dedup_collapses_nothing() {
     );
 }
 
-/// `SoundType.java` declares **127** `public static final SoundType` constants
+/// Vanilla's own sound-type source declares **127** `public static final` sound-type constants
 /// and only 126 are reachable from a block state. The dead one is
-/// `TWISTING_VINES`, the only static with `pitch = 0.5F`; twisting vines
-/// themselves use `WEEPING_VINES` (`Blocks.TWISTING_VINES`). This asserts the
+/// the twisting-vines constant, the only static with `pitch = 0.5F`; twisting vines
+/// themselves use the weeping-vines constant. This asserts the
 /// consequence — no state anywhere carries pitch `0.5` — which is the exact value
 /// a name-matched hand transcription of that file would have shipped.
 #[test]
@@ -386,7 +386,7 @@ fn no_state_carries_the_dead_twisting_vines_pitch() {
 }
 
 /// The ids in this table and the names in [`sound_events`] come from two
-/// different generators — the live `BuiltInRegistries.SOUND_EVENT` here, Mojang's
+/// different generators — the live sound-event registry here, Mojang's
 /// `registries.json` there. Their agreement is the whole licence for storing bare
 /// `u16`s with no names, so it is asserted over **every** referenced id rather
 /// than spot-checked.
@@ -572,8 +572,10 @@ fn dump_block_ranges_agree_with_the_block_state_table() {
 /// renumbering.
 #[test]
 fn the_common_break_sounds_match_vanilla_by_name() {
-    // (block, break sound, step sound) — read off `SoundType.java`'s constants
-    // and `Blocks.java`'s `.sound(..)` calls, which is a *different* source from
+    // (block, break sound, step sound) — read off vanilla's own sound-type
+    // source's constants
+    // and its own block-registration source's `.sound(..)` calls, which is a
+    // *different* source from
     // the dump's reflection over the live registry.
     let cases: &[(&str, &str, &str)] = &[
         ("minecraft:stone", "minecraft:block.stone.break", "minecraft:block.stone.step"),
@@ -583,7 +585,7 @@ fn the_common_break_sounds_match_vanilla_by_name() {
         ("minecraft:glass", "minecraft:block.glass.break", "minecraft:block.glass.step"),
         ("minecraft:sand", "minecraft:block.sand.break", "minecraft:block.sand.step"),
         ("minecraft:white_wool", "minecraft:block.wool.break", "minecraft:block.wool.step"),
-        // `SoundType.IRON` and `SoundType.METAL` are *different* types and the
+        // The iron and metal sound-type constants are *different* types and the
         // obvious pairing is wrong: iron blocks are `IRON` (`block.iron.*`, pitch
         // 1.0) while `METAL` (pitch 1.5) belongs to gold, rails and hoppers.
         ("minecraft:iron_block", "minecraft:block.iron.break", "minecraft:block.iron.step"),
@@ -628,8 +630,8 @@ fn hard_crop_places_with_the_crop_sound_not_the_wood_one() {
 }
 
 /// Vanilla's break/place scaling, predicted from constants outside the code under
-/// test: `(volume + 1) / 2` and `pitch * 0.8` (`LevelEventHandler.levelEvent`,
-/// `BlockItem.place`). Asserted on all three volume/pitch populations, so a
+/// test: `(volume + 1) / 2` and `pitch * 0.8` (vanilla's own level-event handler,
+/// its own block-item place step). Asserted on all three volume/pitch populations, so a
 /// transposed multiplier cannot pass by landing on 1.0 everywhere.
 #[test]
 fn break_and_place_scaling_matches_vanilla_for_every_population() {
@@ -729,7 +731,7 @@ fn every_state_resolves_to_a_named_sound_type() {
     }
     assert_eq!(unresolved_state, 0, "states with no sound type");
     assert_eq!(unresolved_sound, 0, "sound ids that resolve to no name");
-    // Measured: exactly three blocks carry `SoundType.EMPTY`, and all three are
+    // Measured: exactly three blocks carry the empty sound-type constant, and all three are
     // fluids, which no `LEVEL_EVENT` 2001 can name. Asserted by name so a version
     // bump that empties a *solid* surface's break slot is visible rather than
     // absorbed by a threshold.
