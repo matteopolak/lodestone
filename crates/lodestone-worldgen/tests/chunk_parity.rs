@@ -1,13 +1,13 @@
 //! Block-for-block parity of the **interpolated** `final_density` field over a
 //! whole chunk, reported as a percentage.
 //!
-//! `region_parity` proves the raw noise router at `SinglePointContext`. This
-//! test proves the next stage: vanilla's `NoiseChunk` does **not** write the
+//! `region_parity` proves the raw noise router at a single-point context. This
+//! test proves the next stage: vanilla's own noise-chunk sampler does **not** write the
 //! point field to blocks — it samples `final_density` at 4×8×4 cell corners and
 //! trilinearly interpolates (plus `flat_cache` XZ/quart snapping). The oracle
 //! `scripts/worldgen-oracle/DensityChunkOracle.java` drives the real 26.2
-//! `NoiseChunk` interpolation loop (the exact `NoiseBasedChunkGenerator.doFill`
-//! order) and dumps `getInterpolatedDensity()` for every block in chunk (0,0) at
+//! noise-chunk-sampler interpolation loop (the exact fill-step
+//! order) and dumps its own interpolated-density accessor for every block in chunk (0,0) at
 //! seed 42 — 16×16×384 = 98304 blocks. [`NoiseChunkSampler`] must reproduce it
 //! bit-for-bit.
 //!

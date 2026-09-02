@@ -1,14 +1,14 @@
-//! Bit-for-bit parity of `Mth`'s trig table and value helpers against the JVM.
+//! Bit-for-bit parity of vanilla's own math-helper trig table and value helpers against the JVM.
 //!
-//! The carvers lean entirely on `Mth.sin`/`Mth.cos` (a 65536-entry float lookup
-//! table) for tunnel/canyon walking, and on `Mth.randomBetween[Inclusive]` for
+//! The carvers lean entirely on vanilla's own math-helper sin/cos (a 65536-entry float lookup
+//! table) for tunnel/canyon walking, and on its own random-between[-inclusive] for
 //! sampling `FloatProvider`/`HeightProvider` config fields. If any table entry
 //! or the index arithmetic is off by a bit, cave shapes drift and every
 //! downstream carve diverges — so this is a load-bearing primitive that must be
 //! proven before the geometry on top of it.
 //!
 //! Oracle: `scripts/worldgen-oracle/MthOracle.java` reads the game's own `SIN`
-//! field via reflection and calls the real `Mth.sin/cos/randomBetween`. We
+//! field via reflection and calls the real math-helper sin/cos/random-between. We
 //! compare every one of the 65536 table entries, plus `sin`/`cos` over a dense
 //! sweep of the exact `double` inputs the oracle used, plus the RNG-driven
 //! helpers — element-wise, naming the first divergent index on failure.

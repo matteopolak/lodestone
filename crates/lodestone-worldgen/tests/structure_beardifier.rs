@@ -1,4 +1,4 @@
-//! The beardifier changes **terrain** (issue #514's S3), and a chunk with no
+//! The beardifier changes **terrain**, and a chunk with no
 //! adaptation-bearing start nearby does not change at all.
 //!
 //! # Why both arms are here
@@ -25,7 +25,7 @@
 //! # Where the expected values come from
 //!
 //! Not from our own generator. The *arithmetic* is hand-expanded from
-//! `Beardifier.java` in `crates/lodestone-worldgen/src/structure/beardifier.rs`'s
+//! vanilla's own beardifier source in `crates/lodestone-worldgen/src/structure/beardifier.rs`'s
 //! own unit tests (`bury` falling linearly to 0 at distance 6, `beard_thin`
 //! flipping sign at the piece's ground level, and the exact kernel product at the
 //! floor). What this file adds is the *consequence*: that those numbers, added to
@@ -204,7 +204,7 @@ fn a_beard_raises_terrain_under_the_piece() {
          with beard {raised}"
     );
     // **A prediction, not a direction.** `floor - 1` is the exact answer
-    // `Beardifier.java` implies and it is derivable without running anything: the
+    // vanilla's own beardifier source implies and it is derivable without running anything: the
     // sign of `beard_thin`'s contribution is `-(dy_to_ground + 0.5)`, so at
     // `y == ground_y` the term is *negative* (−0.557 at dx = dz = 0) and at
     // `y == ground_y - 1` it is the mirror positive (+0.557). The foundation

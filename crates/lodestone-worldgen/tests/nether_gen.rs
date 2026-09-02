@@ -14,7 +14,8 @@
 //!    entire Nether noise stack, because in this dimension the biome *is* the
 //!    noise: `noise_settings/nether.json` zeroes continentalness, erosion, depth
 //!    and weirdness, so a biome is a pure function of two `NormalNoise`s that only
-//!    exist if `legacy_random_source`, `NormalNoise.createLegacyNetherBiome` and
+//!    exist if `legacy_random_source`, vanilla's own legacy-Nether-biome-noise
+//!    constructor and
 //!    the `seed + 0` / `seed + 1` seeding are all right at once. Get any one of
 //!    them wrong and the map is a different map.
 //! 2. **The bedrock floor and roof masks** of eight `minecraft:full` chunks —

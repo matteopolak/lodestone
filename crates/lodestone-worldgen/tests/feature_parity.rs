@@ -2,24 +2,24 @@
 //! whole chunks, against the real 26.2 server.
 //!
 //! `carver_parity` proves the post-carve column; this proves the next stage:
-//! vanilla's `ChunkGenerator.applyBiomeDecoration` derives a per-chunk decoration
+//! vanilla's own biome-decoration application derives a per-chunk decoration
 //! seed, then for each ore feature in the biome's `UNDERGROUND_ORES` step reseeds
-//! (`setFeatureSeed`) and runs the placement pipeline + `OreFeature.place`, which
+//! (`setFeatureSeed`) and runs the placement pipeline + its own ore-feature place, which
 //! carves ore blobs into the stone.
 //!
 //! The oracle `scripts/worldgen-oracle/FeatureOracle.java` drives the real
-//! `doFill` + `buildSurface` + `applyCarvers` (identical to `CarverOracle`) over a
+//! fill-step + surface-building + carve-application (identical to `CarverOracle`) over a
 //! real 3×3 chunk neighbourhood (centre + 8 neighbours), then runs the
 //! `UNDERGROUND_ORES` step for EACH of those 9 chunks — each with its own origin
-//! and own decorationSeed, exactly as vanilla's `applyBiomeDecoration` does per
+//! and own decorationSeed, exactly as vanilla's own biome-decoration application does per
 //! chunk — via a dynamic-proxy `WorldGenLevel` whose `getChunk`/`getHeight` route
 //! through a memoised, on-demand per-chunk generator (clamped beyond the 3×3
 //! region — see `FeatureOracle.java`'s own header for the measured, bounded
-//! residual). This models vanilla's real `blockStateWriteRadius(1)` ore spill
+//! residual). This models vanilla's real one-chunk-into-neighbours ore spill
 //! from a neighbour chunk's own decoration into the centre — a prior version of
 //! this oracle ran only the centre's own ore features against an empty
 //! neighbourhood and answered every `getHeight` probe by wrapping it back into
-//! the centre chunk, which this replaces (see issue #295's ore-oracle-parity
+//! the centre chunk, which this replaces (see this change's ore-oracle-parity
 //! increment and `docs/worldgen-parity.md`'s "known gap" section). Earlier
 //! feature steps that precede ores (lakes/springs) are still not modelled — both
 //! sides start from the same post-carve field and run only `UNDERGROUND_ORES`.
@@ -275,7 +275,7 @@ fn run_fixture(
     // still be cross-checked against the oracle's `meta.decorationSeed`
     // without a second, separate derivation.
     let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-    // `RegionGrid` is a `DenseBlockGrid` (issue #106) — build one from this
+    // `RegionGrid` is a `DenseBlockGrid` — build one from this
     // fixture's own sparse `HashMap` via the test-adapter seam
     // `crate::dense_grid` documents for exactly this purpose (production
     // code never goes through `HashMap` at all; only this fixture-driven

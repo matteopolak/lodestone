@@ -14,7 +14,7 @@
 //! | 2 | `interpolated`-inside-corner transparency | transparent value vs bilinear blend |
 //! | 3 | `flat_cache`'s quart snap and forced `y = 0` | equality classes over `(x, z)`, independence from `y` |
 //! | 4 | `cache_2d` / `cache_once` scoping | the two evaluators deliberately disagreeing |
-//! | 5 | `cache_all_in_cell` selecting `Mth.lerp3` | X-inner vs Y-inner nesting |
+//! | 5 | `cache_all_in_cell` selecting vanilla's own math-helper trilinear lerp | X-inner vs Y-inner nesting |
 //!
 //! # Why `cell_width = 8` for most of them
 //!
@@ -380,10 +380,10 @@ fn cache_once_and_friends_are_transparent_in_both_evaluators() {
 }
 
 // =========================================================================
-// Semantic 5 — cache_all_in_cell selects Mth.lerp3 (X inner)
+// Semantic 5 — cache_all_in_cell selects vanilla's own math-helper trilinear lerp (X inner)
 // =========================================================================
 
-/// The block field interpolates in the `Mth.lerp3` nesting — **X inner**, then
+/// The block field interpolates in vanilla's own math-helper trilinear-lerp nesting — **X inner**, then
 /// Y, then Z — not the incremental `updateForY → X → Z` chain, which is Y inner.
 ///
 /// `tests/interpolation_order.rs` is the standing guard for this on the *real
@@ -440,7 +440,7 @@ fn the_field_interpolates_x_inner_not_y_inner() {
              and the comparison is a tautology"
         );
 
-        // X inner: lerp over x, then y, then z. This is Mth.lerp3.
+        // X inner: lerp over x, then y, then z. This is vanilla's own math-helper trilinear lerp.
         let x_inner = math::lerp3(fx, fy, fz, n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]);
         // Y inner: lerp over y first, then x, then z — the incremental chain's
         // order. Algebraically identical, a different IEEE 754 expression.
@@ -457,7 +457,7 @@ fn the_field_interpolates_x_inner_not_y_inner() {
         assert_eq!(
             got.to_bits(),
             x_inner.to_bits(),
-            "at ({px},{py},{pz}) the field gave {got}; Mth.lerp3 (X inner) is \
+            "at ({px},{py},{pz}) the field gave {got}; vanilla's own math-helper trilinear lerp (X inner) is \
              {x_inner} and the incremental chain (Y inner) is {y_inner}. Landing \
              on the Y-inner value is the 90563/98304 failure, which reads as a \
              tolerance problem rather than a wrong algorithm."

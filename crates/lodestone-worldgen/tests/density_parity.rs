@@ -2,15 +2,16 @@
 //! real JVM.
 //!
 //! `scripts/worldgen-oracle/DensityOracle.java` bootstraps the **actual 26.2
-//! vanilla registries**, builds `RandomState.create(provider, OVERWORLD, seed)`,
-//! and dumps `NoiseRouter` channel outputs at fixed block positions via
-//! `DensityFunction.SinglePointContext`; the dump is checked in as
+//! vanilla registries**, builds vanilla's own per-world random-state holder for
+//! the overworld at the given seed,
+//! and dumps the noise router's channel outputs at fixed block positions via
+//! vanilla's own single-point density-function context; the dump is checked in as
 //! `support/density_jvm.txt`. This test loads the same data-driven noise router
 //! from the checked-in vanilla JSON, builds it with the Rust interpreter, and
 //! evaluates the same probes, diffing element-wise by raw bit pattern and naming
 //! the exact key that diverges (plan §12.6 forbids hash-only comparison).
 //!
-//! Because the oracle uses `SinglePointContext` (no cell interpolation), passing
+//! Because the oracle uses a single-point context (no cell interpolation), passing
 //! this test proves the **interpreter tree math** — every node type, the noise
 //! seeding, and the f32 spline arithmetic — not the interpolated/cached chunk
 //! sampling that `NoiseChunk` layers on top (a separate, later stage).

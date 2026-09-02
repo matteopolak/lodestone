@@ -1,4 +1,4 @@
-//! Structure placement against a **vanilla-authored** save (issue #514's S1).
+//! Structure placement against a **vanilla-authored** save.
 //!
 //! The expected values come from `tests/support/structure_starts_survival.txt`,
 //! scanned out of the per-chunk `structures.starts` NBT of the real 26.2 server's
@@ -13,7 +13,7 @@
 //! today: `shipwrecks`, `ocean_ruins`, `buried_treasures`, `ocean_monuments`,
 //! `mineshafts` (S7) and — now — `ruined_portals`. Every structure they can
 //! place has a decidable start (biome-valid implies start-valid for all six:
-//! `RuinedPortalStructure.findGenerationPoint`, like the other five, always
+//! vanilla's own ruined-portal structure "find generation point", like the other five, always
 //! returns `Optional.of(...)`), so for those the placement answer is exactly
 //! vanilla's and both directions are checkable:
 //!
@@ -50,7 +50,7 @@ const FIXTURE: &str = include_str!("support/structure_starts_survival.txt");
 /// The structure sets every structure of which this engine can decide.
 ///
 /// `mineshafts` joined the list with S7. It is closed for the same reason the other
-/// four are: `MineshaftStructure.findGenerationPoint` returns `Optional.of(...)`
+/// four are: vanilla's own mineshaft structure "find generation point" returns `Optional.of(...)`
 /// unconditionally, so biome-valid implies start-valid and this engine's answer for
 /// the set is exactly vanilla's — in **both** directions, which is what makes the
 /// 46 oracle mineshaft starts a usable expected value rather than a superset.
@@ -159,7 +159,7 @@ impl Resolver for ServerAssets {
         self.try_read("tags/worldgen/biome", id)
     }
     /// The NBT templates sit beside `worldgen/`, under `assets/structure/`
-    /// (issue #514's S2). Without this every template-driven structure is demoted
+    ///. Without this every template-driven structure is demoted
     /// to unsupported — which is exactly what the ledger test below caught when
     /// this method was missing, so it is load-bearing for the *positive* half of
     /// that test, not just for placement.
