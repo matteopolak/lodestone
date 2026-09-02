@@ -414,7 +414,7 @@ impl SkullType {
 
 /// The animation position every placed skull in this client draws at.
 ///
-/// Vanilla's `animationPos` is produced by its own per-block-entity animation
+/// Vanilla's own animation position is produced by its own per-block-entity animation
 /// accessor, a per-block tick counter that **only advances while the block state's `powered`
 /// property is set** and that freezes rather than resets when power is
 /// removed. It is therefore per-block-entity state this client does not carry:
@@ -432,9 +432,9 @@ impl SkullType {
 pub const SKULL_RESTING_ANIMATION_POS: f32 = 0.0;
 
 /// The dragon head's jaw angle — vanilla's own model pose:
-/// `jaw.xRot = (sin(animationPos * PI * 0.2) + 1) * 0.2`.
+/// `jaw.rot_x = (sin(animation_pos * PI * 0.2) + 1) * 0.2`.
 ///
-/// Note this is **never zero**: at rest (`animationPos == 0`) it is `0.2`
+/// Note this is **never zero**: at rest (`animation_pos == 0`) it is `0.2`
 /// radians, so the authored `PartPose` the jaw carries in the mesh is not the
 /// angle a dragon head is ever drawn at. Reading the mesh's rest pose instead
 /// of calling this gives a jaw clamped shut.
@@ -447,15 +447,15 @@ pub fn dragon_head_jaw_x_rot(animation_pos: f32) -> f32 {
 /// vanilla's own model pose:
 ///
 /// ```text
-/// leftEar.zRot  = -(cos(animationPos * PI * 0.2 * 1.2) + 2.5) * 0.2
-/// rightEar.zRot =  (cos(animationPos * PI * 0.2      ) + 2.5) * 0.2
+/// left_ear.rot_z  = -(cos(animation_pos * PI * 0.2 * 1.2) + 2.5) * 0.2
+/// right_ear.rot_z =  (cos(animation_pos * PI * 0.2      ) + 2.5) * 0.2
 /// ```
 ///
 /// The `1.2` on the left ear only — vanilla names it `asymmetry` — is the
 /// whole point: with it the two ears drift out of phase, without it they are
 /// mirror images forever and the animation reads as a single rocking motion.
 /// It is also invisible at rest, where both sides evaluate to `±0.7`, so a
-/// fixture at `animationPos == 0` cannot tell the two hypotheses apart.
+/// fixture at `animation_pos == 0` cannot tell the two hypotheses apart.
 ///
 /// Like the jaw, these override rather than add to the authored `±PI/6` rest
 /// pose, and `±0.7` is not `±PI/6` (`≈ ±0.5236`).
@@ -582,8 +582,8 @@ pub fn skull_wall_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4 {
 /// ```text
 /// MODEL_TRANSLATION = (0.5, 0.0, 0.5)
 /// MODEL_SCALE       = (0.6666667, -0.6666667, -0.6666667)
-/// Transformation(MODEL_TRANSLATION, Axis.YP.rotationDegrees(-angle), MODEL_SCALE, null)
-/// angle = RotationSegment.convertToDegrees(segment)   // segment * 22.5
+/// transform(MODEL_TRANSLATION, rotate_y_degrees(-angle), MODEL_SCALE, none)
+/// angle = segment * 22.5   // the rotation segment converted to degrees
 /// ```
 ///
 /// # A third placement shape, not a variant of the other two
@@ -682,7 +682,7 @@ pub fn banner_phase(pos: [i32; 3], game_time: i64, partial_tick: f32) -> f32 {
 /// pose:
 ///
 /// ```text
-/// flag.xRot = (-0.0125 + 0.01 * cos(2*PI*phase)) * PI
+/// flag.rot_x = (-0.0125 + 0.01 * cos(2*PI*phase)) * PI
 /// ```
 ///
 /// A single per-part rotation, not per-vertex cloth animation — see
@@ -1161,28 +1161,28 @@ pub fn shulker_placement_matrix(pos: [i32; 3], facing: ShulkerFacing) -> Mat4 {
         * Mat4::from_translation(Vec3::new(0.0, -1.0, 0.0))
 }
 
-/// Which face a shulker box's lid opens toward — `ShulkerBoxBlock.FACING`, one
-/// of all six directions rather than the four horizontals a chest has.
+/// Which face a shulker box's lid opens toward — the block's own FACING
+/// property, one of all six directions rather than the four horizontals a
+/// chest has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ShulkerFacing {
-    /// `Direction.UP`, and `ShulkerBoxRenderer`'s own
-    /// `getValueOrElse(FACING, Direction.UP)` default.
+    /// UP, and vanilla's own default when the FACING property is absent.
     #[default]
     Up,
-    /// `Direction.DOWN`.
+    /// DOWN.
     Down,
-    /// `Direction.NORTH`.
+    /// NORTH.
     North,
-    /// `Direction.SOUTH`.
+    /// SOUTH.
     South,
-    /// `Direction.WEST`.
+    /// WEST.
     West,
-    /// `Direction.EAST`.
+    /// EAST.
     East,
 }
 
 impl ShulkerFacing {
-    /// `Direction.getRotation()` (vanilla's direction-to-rotation function) as a rotation matrix.
+    /// Vanilla's direction-to-rotation function, as a rotation matrix.
     ///
     /// `rotationXYZ(x, y, z)` is JOML's **X then Y then Z** intrinsic order, which
     /// for the four horizontals here is `Mat4::from_rotation_z * from_rotation_x`
@@ -1222,9 +1222,9 @@ impl ShulkerFacing {
 }
 
 /// The lid's `(y_offset, y_rot)` for an open fraction —
-/// `ShulkerBoxRenderer.ShulkerBoxModel.setupAnim` (`:135-138`):
-/// `lid.setPos(0, 24 - progress * 0.5 * 16, 0)` and
-/// `lid.yRot = 270° * progress`.
+/// vanilla's own lid animation update:
+/// `lid.set_pos(0, 24 - progress * 0.5 * 16, 0)` and
+/// `lid.rot_y = 270° * progress`.
 ///
 /// `24.0` is the part's rest `y`, so the returned offset is absolute and not a
 /// delta. `progress == 0` gives exactly the rest pose, which is why a closed box
@@ -1255,30 +1255,29 @@ pub const DECORATED_POT_SIDE_LEFT: &str = "decorated_pot_side_left";
 /// Model name of the pot's right side quad.
 pub const DECORATED_POT_SIDE_RIGHT: &str = "decorated_pot_side_right";
 
-/// The jar sheet the pot's base always draws with —
-/// `Sheets.DECORATED_POT_BASE` (`entity/decorated_pot/decorated_pot_base`).
+/// The jar sheet the pot's base always draws with — vanilla's own
+/// decorated-pot-base sheet mapping (`entity/decorated_pot/decorated_pot_base`).
 pub const DECORATED_POT_BASE_TEXTURE_STEM: &str = "entity/decorated_pot/decorated_pot_base";
 
-/// The jar sheet an undecorated side draws with —
-/// `Sheets.DECORATED_POT_SIDE` (`entity/decorated_pot/decorated_pot_side`),
-/// `DecoratedPotRenderer.getSideSprite`'s fallback for an absent or
+/// The jar sheet an undecorated side draws with — vanilla's own
+/// decorated-pot-side sheet mapping (`entity/decorated_pot/decorated_pot_side`),
+/// the decorated-pot renderer's own side-sprite fallback for an absent or
 /// unrecognised sherd.
 pub const DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM: &str =
     "entity/decorated_pot/decorated_pot_side";
 
 /// A stored sherd's item path (namespace stripped, e.g.
 /// `"angler_pottery_sherd"`) to the sherd's own pattern texture stem —
-/// `DecoratedPotPatterns.itemToPatternMappings` plus
-/// `DecoratedPotPattern.assetId()`/`Sheets.DECORATED_POT_MAPPER`, transcribed
-/// from vanilla's decorated-pot-patterns class's own `bootstrap` (26.2's
-/// decompiled source) — the pattern's registered
+/// vanilla's own item-to-pattern mapping table plus each pattern's registered
+/// asset id, transcribed from vanilla's decorated-pot-patterns class's own
+/// bootstrap listing (26.2's decompiled source) — the pattern's registered
 /// asset id, not a guess from the sherd's own name (they happen to share a
 /// `<name>_pottery_pattern`/`<name>_pottery_sherd` stem, but that is a jar
 /// convention this reads off the real registration, not an assumption).
 ///
 /// `None` (an absent side, or an item path this table does not recognise —
-/// vanilla's own `getSideSprite` falls back identically for a `null` map
-/// lookup) maps to [`DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM`] by the caller,
+/// vanilla's own side-sprite lookup falls back identically for a missing map
+/// entry) maps to [`DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM`] by the caller,
 /// not here, so this function's contract stays "sherd path in, pattern stem
 /// out" with no third case to remember at the call site.
 #[must_use]
@@ -1354,9 +1353,9 @@ pub fn decorated_pot_texture_stems() -> Vec<&'static str> {
 }
 
 /// The world placement transform for a decorated pot at `pos` facing
-/// `facing_yaw_deg` — `DecoratedPotRenderer.createModelTransformation`:
-/// `rotateAround(Axis.YP.rotationDegrees(180.0F - entityDirection.toYRot()),
-/// 0.5F, 0.5F, 0.5F)`.
+/// `facing_yaw_deg` — vanilla's own model-transformation construction:
+/// rotate about Y by `(180.0F - facing_yaw)` around the pivot
+/// `(0.5F, 0.5F, 0.5F)`.
 ///
 /// **Not [`block_entity_placement_matrix`] with a yaw**: the pivot is the
 /// block's *centre* (`0.5, 0.5, 0.5`, like [`shulker_placement_matrix`]'s,
@@ -1377,20 +1376,20 @@ pub fn decorated_pot_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat
 /// The caller owns every field: `HORIZONTAL_FACING` off the block state →
 /// `facing_yaw_deg` (the same [`horizontal_facing_yaw`] convention chest
 /// uses); the block entity's own NBT `"sherds"` list, namespace-stripped and
-/// ordered `[back, left, right, front]` per `PotDecorations.CODEC` → the four
-/// `Option<String>` fields (`None` for an absent side — vanilla's own
-/// `PotDecorations` maps a stored `minecraft:brick` to absent at parse time,
-/// so a caller reading raw NBT should do the same rather than passing
-/// `Some("brick")` through); world light → `light`.
+/// ordered `[back, left, right, front]` per vanilla's own pot-decorations
+/// codec → the four `Option<String>` fields (`None` for an absent side —
+/// vanilla's own pot-decorations type maps a stored `minecraft:brick` to
+/// absent at parse time, so a caller reading raw NBT should do the same
+/// rather than passing `Some("brick")` through); world light → `light`.
 ///
-/// No wobble phase: `DecoratedPotBlockEntity`'s hit-wobble is a `BLOCK_EVENT`
+/// No wobble phase: the decorated pot's hit-wobble is a block-event-driven
 /// animation with no producer in this workspace yet, the same
 /// not-yet-triggered gap [`ShulkerSpawn::progress`] documents for the lid.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DecoratedPotSpawn {
     /// Block position.
     pub pos: [i32; 3],
-    /// `Direction.toYRot()` for the block's `HORIZONTAL_FACING`.
+    /// The facing direction's yaw, for the block's `HORIZONTAL_FACING`.
     pub facing_yaw_deg: f32,
     /// The front side's stored sherd item path, or `None`.
     pub front: Option<String>,
@@ -1419,38 +1418,38 @@ impl DecoratedPotSpawn {
     }
 }
 
-/// Model name of the conduit's inactive shell — `ConduitRenderer.shell`
-/// (`ModelLayers.CONDUIT_SHELL`), the 6×6×6 layer.
+/// Model name of the conduit's inactive shell — vanilla's own conduit
+/// shell model layer, the 6×6×6 layer.
 pub const CONDUIT_SHELL: &str = "conduit_shell";
 
-/// Model name of the conduit's active shell ("cage") — `ConduitRenderer.cage`
-/// (`ModelLayers.CONDUIT_CAGE`), the 8×8×8 layer. A distinct mesh from
+/// Model name of the conduit's active shell ("cage") — vanilla's own
+/// conduit cage model layer, the 8×8×8 layer. A distinct mesh from
 /// [`CONDUIT_SHELL`], not a scaled reuse — see
 /// [`lodestone_assets::block_entity_models::conduit_cage_model`]'s doc.
 pub const CONDUIT_CAGE: &str = "conduit_cage";
 
-/// Model name of the conduit's wind plane — `ConduitRenderer.wind`
-/// (`ModelLayers.CONDUIT_WIND`), one 16×16×16 cube drawn twice per active
-/// frame at two different poses sharing this one mesh.
+/// Model name of the conduit's wind plane — vanilla's own conduit wind
+/// model layer, one 16×16×16 cube drawn twice per active frame at two
+/// different poses sharing this one mesh.
 pub const CONDUIT_WIND: &str = "conduit_wind";
 
-/// Model name of the conduit's billboarded eye — `ConduitRenderer.eye`
-/// (`ModelLayers.CONDUIT_EYE`), the near-planar 8×8 box.
+/// Model name of the conduit's billboarded eye — vanilla's own conduit eye
+/// model layer, the near-planar 8×8 box.
 pub const CONDUIT_EYE: &str = "conduit_eye";
 
-/// `ConduitRenderer.SHELL_TEXTURE` — `entity/conduit/base`, the inactive shell's
+/// Vanilla's own inactive-shell texture — `entity/conduit/base`, the inactive shell's
 /// sheet.
 pub const CONDUIT_SHELL_TEXTURE_STEM: &str = "entity/conduit/base";
 
-/// `ConduitRenderer.ACTIVE_SHELL_TEXTURE` — `entity/conduit/cage`, the active
+/// Vanilla's own active-cage texture — `entity/conduit/cage`, the active
 /// cage's sheet.
 pub const CONDUIT_CAGE_TEXTURE_STEM: &str = "entity/conduit/cage";
 
-/// `ConduitRenderer.WIND_TEXTURE` — `entity/conduit/wind`, used for both wind
+/// Vanilla's own wind texture — `entity/conduit/wind`, used for both wind
 /// planes whenever [`ConduitSpawn::animation_phase`] is not `1`.
 pub const CONDUIT_WIND_TEXTURE_STEM: &str = "entity/conduit/wind";
 
-/// `ConduitRenderer.VERTICAL_WIND_TEXTURE` — `entity/conduit/wind_vertical`,
+/// Vanilla's own vertical-wind texture — `entity/conduit/wind_vertical`,
 /// used for both wind planes when [`ConduitSpawn::animation_phase`] **is**
 /// `1`. Same UV layout as [`CONDUIT_WIND_TEXTURE_STEM`], different sheet —
 /// picking the texture without also picking the plane's own rotation
@@ -1458,11 +1457,11 @@ pub const CONDUIT_WIND_TEXTURE_STEM: &str = "entity/conduit/wind";
 /// turns to face the direction its "vertical" sheet implies.
 pub const CONDUIT_WIND_VERTICAL_TEXTURE_STEM: &str = "entity/conduit/wind_vertical";
 
-/// `ConduitRenderer.OPEN_EYE_TEXTURE` — `entity/conduit/open_eye`, drawn while
+/// Vanilla's own open-eye texture — `entity/conduit/open_eye`, drawn while
 /// [`ConduitSpawn::hunting`].
 pub const CONDUIT_OPEN_EYE_TEXTURE_STEM: &str = "entity/conduit/open_eye";
 
-/// `ConduitRenderer.CLOSED_EYE_TEXTURE` — `entity/conduit/closed_eye`, drawn
+/// Vanilla's own closed-eye texture — `entity/conduit/closed_eye`, drawn
 /// otherwise (including the entire inactive branch, which never submits an
 /// eye instance at all).
 pub const CONDUIT_CLOSED_EYE_TEXTURE_STEM: &str = "entity/conduit/closed_eye";
@@ -1499,21 +1498,21 @@ pub fn conduit_texture_stems() -> Vec<&'static str> {
 pub struct ConduitSpawn {
     /// Block position.
     pub pos: [i32; 3],
-    /// `ConduitBlockEntity.isActive()` — [`ConduitFrame::is_active`].
+    /// Vanilla's own active check — [`ConduitFrame::is_active`].
     pub active: bool,
-    /// `ConduitBlockEntity.isHunting()` — [`ConduitFrame::is_hunting`]. Only
-    /// meaningful (and only ever read) while `active`; vanilla's own
-    /// `state.isHunting` can theoretically be true while `state.isActive` is
-    /// false for one frame of hysteresis, but the inactive branch never reads
-    /// it, so [`Self::resolve_conduit`]/[`BlockEntityModelSet::resolve_conduit`]
-    /// does not either.
+    /// Vanilla's own hunting check — [`ConduitFrame::is_hunting`]. Only
+    /// meaningful (and only ever read) while `active`; vanilla's own hunting
+    /// flag can theoretically be true while its active flag is false for one
+    /// frame of hysteresis, but the inactive branch never reads it, so
+    /// [`Self::resolve_conduit`]/[`BlockEntityModelSet::resolve_conduit`] does
+    /// not either.
     pub hunting: bool,
     /// [`conduit_active_rotation_value`]'s output — see that function's doc
     /// for why the same number is read as degrees in one branch and radians
     /// in the other.
     pub active_rotation_value: f32,
-    /// [`conduit_anim_time`] — `tickCount + partialTick`, feeds
-    /// [`conduit_bob`].
+    /// [`conduit_anim_time`] — the block entity's tick counter plus the
+    /// partial tick, feeds [`conduit_bob`].
     pub anim_time: f32,
     /// [`conduit_animation_phase`] — `0`, `1` or `2`.
     pub animation_phase: u8,
@@ -1549,7 +1548,7 @@ impl ConduitSpawn {
 }
 
 /// Total cells [`conduit_frame_scan`]'s 5×5×5 pass ever tests, regardless of
-/// which blocks are placed — `ConduitBlockEntity.MIN_KILL_SIZE`'s own value,
+/// which blocks are placed — vanilla's own "hunting" threshold value,
 /// which is exactly this count: "hunting" is not a majority threshold, it is
 /// *every* candidate cell filled. Checked by
 /// `conduit_frame_candidate_count_is_42_and_matches_min_kill_size` as an
@@ -1557,28 +1556,28 @@ impl ConduitSpawn {
 /// predicate.
 pub const CONDUIT_FRAME_CANDIDATE_COUNT: u32 = 42;
 
-/// One conduit's activation frame — `ConduitBlockEntity.updateShape`'s
-/// `effectBlocks.size()`, plus the two booleans it and `updateHunting` derive.
+/// One conduit's activation frame — vanilla's own shape-update effect-block
+/// count, plus the two booleans it and the hunting update derive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ConduitFrame {
-    /// `effectBlocks.size()`. `0` whenever the inner 3×3×3 was not entirely
-    /// water — `updateShape` clears the list and returns before the 5×5×5
-    /// pass ever runs in that case, so a zero here does not distinguish "no
-    /// water" from "water but zero frame blocks"; nothing downstream needs
-    /// to.
+    /// The effect-block count. `0` whenever the inner 3×3×3 was not entirely
+    /// water — vanilla's own shape update clears the list and returns before
+    /// the 5×5×5 pass ever runs in that case, so a zero here does not
+    /// distinguish "no water" from "water but zero frame blocks"; nothing
+    /// downstream needs to.
     pub effect_block_count: u32,
 }
 
 impl ConduitFrame {
-    /// `ConduitBlockEntity.MIN_ACTIVE_SIZE` — `updateShape`'s own return
+    /// Vanilla's own "active" threshold — the shape update's own return
     /// value.
     #[must_use]
     pub fn is_active(self) -> bool {
         self.effect_block_count >= 16
     }
 
-    /// `ConduitBlockEntity.MIN_KILL_SIZE` — `updateHunting`
-    /// (`effectBlocks.size() >= 42`). Exactly
+    /// Vanilla's own "hunting" threshold — the hunting update's own
+    /// condition (effect-block count >= 42). Exactly
     /// [`CONDUIT_FRAME_CANDIDATE_COUNT`], so this requires *every* candidate
     /// cell filled, not a majority.
     #[must_use]
@@ -1588,11 +1587,11 @@ impl ConduitFrame {
 }
 
 /// Scans a conduit's activation frame around `pos` —
-/// `ConduitBlockEntity.updateShape`, clause by clause:
+/// vanilla's own shape-update scan, clause by clause:
 ///
 /// 1. The inner 3×3×3 (`ox,oy,oz` each `-1..=1`, all 27 cells, including the
 ///    conduit's own position) must be **entirely water** —
-///    `Level.isWaterAt(pos)`, which is `getFluidState(pos).is(FluidTags.WATER)`:
+///    vanilla's own water-at check, which tests the fluid state's water tag:
 ///    true for a source, for flowing water, and for a waterlogged block. A
 ///    single non-water cell anywhere in the inner cube returns an *empty*
 ///    frame immediately, matching vanilla's early `return false` — so
@@ -1609,7 +1608,7 @@ impl ConduitFrame {
 ///    `oz==0 && (ax==2||ay==2)` — count how many hold one of the four frame
 ///    blocks: `minecraft:prismarine`, `minecraft:prismarine_bricks`,
 ///    `minecraft:sea_lantern`, `minecraft:dark_prismarine`
-///    (`ConduitBlockEntity.VALID_BLOCKS`).
+///    (vanilla's own valid-frame-block set).
 ///
 /// Both closures receive **absolute** world positions (`pos` already added),
 /// so a caller needs no coordinate math of its own — see
@@ -1656,8 +1655,8 @@ pub fn conduit_frame_scan(
 }
 
 /// One client tick's counter bookkeeping for a placed conduit —
-/// `ConduitBlockEntity.clientTick`'s non-scan half: `tickCount` always
-/// advances by one, `activeRotation` only advances `if (entity.isActive())`.
+/// vanilla's own client-tick update's non-scan half: the tick counter always
+/// advances by one, the active-rotation counter only advances while active.
 /// The 40-tick-periodic shape rescan ([`conduit_frame_scan`]) is the caller's
 /// job; this only advances the two counters the animation math below reads.
 /// Returns `(tick_count, active_rotation_ticks)`.
@@ -1676,27 +1675,26 @@ pub fn conduit_advance(
     (tick_count, active_rotation_ticks)
 }
 
-/// `ConduitBlockEntity.getActiveRotation`/`ROTATION_SPEED` (`-0.0375`), folded
-/// with the partial tick exactly as `ConduitRenderer.extractRenderState` does:
-/// `getActiveRotation(isActive ? partialTicks : 0.0F)` — the partial tick is
-/// folded in only while active, so the inactive spin advances one **whole**
-/// step per tick with no sub-tick smoothing.
+/// Vanilla's own active-rotation accessor with its rotation-speed constant
+/// (`-0.0375`), folded with the partial tick exactly as vanilla's own
+/// render-state extraction does: the partial tick is added only while
+/// active, so the inactive spin advances one **whole** step per tick with no
+/// sub-tick smoothing.
 ///
 /// # The returned number is not one unit — read both call sites before "fixing" this
 ///
-/// This returns the raw `(counter + partial) * -0.0375` vanilla calls
-/// `state.activeRotation`, and `ConduitRenderer.submit` reads it two
+/// This returns the raw `(counter + partial) * -0.0375` vanilla calls its
+/// own active-rotation state, and vanilla's own submit step reads it two
 /// **different** ways depending on which branch runs:
 ///
-/// * **Inactive**: `rotationY(state.activeRotation * (Math.PI / 180.0))` —
-///   treated as **degrees**, converted once. See
+/// * **Inactive**: rotate about Y by `state * (PI / 180.0)` (`java.lang.Math`'s
+///   own PI) — treated as **degrees**, converted once. See
 ///   [`conduit_inactive_y_rot_radians`].
-/// * **Active**: `float rotation = state.activeRotation * (180.0F /
-///   (float)Math.PI); … rotationAxis(rotation * (float)(Math.PI / 180.0),
-///   axis)` — multiplied by `180/π` and then immediately back by `π/180`,
-///   which is the identity; the two conversions cancel and the axis rotation
-///   ends up using the raw value **as radians**, unconverted. See
-///   [`conduit_active_axis_rotation_radians`].
+/// * **Active**: `rotation = state * (180.0F / PI); … rotate about the axis
+///   by rotation * (PI / 180.0)` — multiplied by `180/π` and then immediately
+///   back by `π/180`, which is the identity; the two conversions cancel and
+///   the axis rotation ends up using the raw value **as radians**,
+///   unconverted. See [`conduit_active_axis_rotation_radians`].
 ///
 /// So the same field is degrees in one branch and radians in the other in the
 /// jar itself. This is transcribed literally rather than "simplified" to one
@@ -1734,14 +1732,14 @@ pub fn conduit_active_axis_rotation_radians(active_rotation_value: f32) -> f32 {
     active_rotation_value
 }
 
-/// `blockEntity.tickCount + partialTicks` — `ConduitRenderer.extractRenderState`'s
-/// `state.animTime`. Feeds [`conduit_bob`].
+/// The block entity's tick counter plus the partial tick — vanilla's own
+/// render-state extraction's anim-time field. Feeds [`conduit_bob`].
 #[must_use]
 pub fn conduit_anim_time(tick_count: u32, partial_tick: f32) -> f32 {
     tick_count as f32 + partial_tick
 }
 
-/// `blockEntity.tickCount / 66 % 3` — **integer** division, so this steps once
+/// The block entity's tick counter / 66 % 3 — **integer** division, so this steps once
 /// every 66 ticks regardless of the fractional partial tick baked into
 /// [`conduit_anim_time`] (which this does *not* take; it reads the raw tick
 /// counter directly). Selects which of the two wind planes' extra rotation
@@ -1752,10 +1750,10 @@ pub fn conduit_animation_phase(tick_count: u32) -> u8 {
     ((tick_count / 66) % 3) as u8
 }
 
-/// The bob-height fold shared by the cage and the eye —
-/// `ConduitRenderer.submit`'s own `hh`, used as `0.3 + hh * 0.2`.
+/// The bob-height fold shared by the cage and the eye — vanilla's own
+/// submit-step local `hh`, used as `0.3 + hh * 0.2`.
 ///
-/// **Not** `ConduitBlockEntity.animationTick`'s same-named local — that one
+/// **Not** vanilla's animation-tick same-named local — that one
 /// adds a `+35`-tick phase offset and a trailing `* 0.3F` this one does not
 /// have (`hh = (hh*hh+hh) * 0.3`, for a *particle* spawn position, not
 /// geometry). The two share a name and a shape, which is exactly how a port
@@ -1769,19 +1767,20 @@ pub fn conduit_bob(anim_time: f32) -> f32 {
 /// Model name of the open-book rig, keying both the mesh set and the shell's
 /// texture map.
 ///
-/// Named for the *mesh* rather than for the lectern, because
-/// `LecternRenderer` and `EnchantTableRenderer` bake the same
-/// `ModelLayers.BOOK` layer. Both consume it — [`BlockEntityModels::
+/// Named for the *mesh* rather than for the lectern, because the lectern and
+/// the enchanting table renderers bake the same book model layer. Both
+/// consume it — [`BlockEntityModels::
 /// resolve_lectern`] and [`BlockEntityModels::resolve_enchanting_table`] — and
 /// the whole difference is the animation state on top: the lectern's is frozen
 /// (see [`LECTERN_BOOK_OPENNESS`]) and the table's is live.
 pub const BOOK: &str = "book";
 
-/// The jar sheet a book draws with — `EnchantTableRenderer.BOOK_TEXTURE`
-/// (`Sheets.BLOCK_ENTITIES_MAPPER.defaultNamespaceApply("enchantment/enchanting_table_book")`).
+/// The jar sheet a book draws with — the enchanting table renderer's own
+/// book texture, resolved under the block-entity sheet mapper to
+/// `"enchantment/enchanting_table_book"`.
 ///
-/// **`LecternRenderer` has no texture of its own** — it passes
-/// `EnchantTableRenderer.BOOK_TEXTURE` straight through, which is why this stem
+/// **The lectern renderer has no texture of its own** — it passes the
+/// enchanting table's book texture straight through, which is why this stem
 /// says `enchantment` and not `lectern`. Grepping the jar for a lectern book
 /// texture finds nothing.
 pub const BOOK_TEXTURE_STEM: &str = "entity/enchantment/enchanting_table_book";
@@ -1795,40 +1794,42 @@ pub fn book_texture_stems() -> Vec<&'static str> {
 
 /// A lectern book's `openness`, which is a **compile-time constant**.
 ///
-/// `LecternRenderer.BOOK_STATE` is
-/// `BookModel.State.forAnimation(0.0, 0.1, 0.9, 1.2)`, and `forAnimation`
-/// computes `openness = (sin(progress * 0.02) * 0.1 + 1.25) * openness`. With
+/// The lectern's book animation state is built with fixed arguments
+/// `(0.0, 0.1, 0.9, 1.2)`, and the animation-state constructor computes
+/// `openness = (sin(progress * 0.02) * 0.1 + 1.25) * openness`. With
 /// `progress == 0` the `sin` term is exactly zero, so the whole expression
 /// collapses to `1.25 * 1.2 == 1.5` for every lectern in the world, every frame.
 ///
 /// That dead arithmetic is the trap: it *looks* like an animation, and porting a
 /// live `progress` here would make every lectern book breathe, which vanilla's
-/// does not. The page-flip animation belongs to `EnchantTableRenderer`, which
-/// feeds `forAnimation` a real, client-simulated `progress`.
+/// does not. The page-flip animation belongs to the enchanting table renderer,
+/// which feeds that same animation-state constructor a real,
+/// client-simulated `progress`.
 pub const LECTERN_BOOK_OPENNESS: f32 = 1.5;
 
-/// A lectern book's `pageFlip1`/`pageFlip2` — `BOOK_STATE`'s second and third
+/// A lectern book's page-flip pair — the animation state's second and third
 /// arguments, also constant. Kept as named constants rather than inlined
 /// because [`book_part_poses`] is the shared entry point for the enchanting
 /// table too, where both of these *do* vary.
 pub const LECTERN_BOOK_PAGE_FLIP: (f32, f32) = (0.1, 0.9);
 
-/// `BookModel.setupAnim`'s six per-part poses, as `(part name, y_rot, x)`.
+/// The book model's per-part animation update: six per-part poses, as
+/// `(part name, y_rot, x)`.
 ///
 /// ```text
-/// left_lid.yRot    = PI + openness
-/// right_lid.yRot   = -openness
-/// left_pages.yRot  = openness
-/// right_pages.yRot = -openness
-/// flip_page1.yRot  = openness - openness * 2 * page_flip1
-/// flip_page2.yRot  = openness - openness * 2 * page_flip2
+/// left_lid.rot_y    = PI + openness
+/// right_lid.rot_y   = -openness
+/// left_pages.rot_y  = openness
+/// right_pages.rot_y = -openness
+/// flip_page1.rot_y  = openness - openness * 2 * page_flip1
+/// flip_page2.rot_y  = openness - openness * 2 * page_flip2
 /// left_pages.x = right_pages.x = flip_page1.x = flip_page2.x = sin(openness)
 /// ```
 ///
-/// `x` is an **absolute** pivot in texels, not a delta: `setupAnim` assigns
-/// `this.leftPages.x = Mth.sin(openness)`, overwriting the rest pose's `0`. The
-/// two lids keep their rest `z` of ∓1 and are not moved in `x` at all, so they
-/// carry `None`.
+/// `x` is an **absolute** pivot in texels, not a delta: the animation update
+/// assigns the left-pages pivot to `sin(openness)`, overwriting the rest
+/// pose's `0`. The two lids keep their rest `z` of ∓1 and are not moved in
+/// `x` at all, so they carry `None`.
 ///
 /// `seam` is deliberately absent — the jar never poses it, and its rest
 /// `rotation(0, PI/2, 0)` is the spine's quarter turn. Adding it here with a
@@ -1857,16 +1858,16 @@ pub fn book_part_poses(
     ]
 }
 
-/// `Direction.getClockWise().toYRot()` for vanilla's four horizontal facing
+/// Vanilla's clockwise-rotated yaw for its four horizontal facing
 /// names, or `None` for anything else.
 ///
-/// `LecternRenderer.extractRenderState` stores
-/// `getValue(FACING).getClockWise().toYRot()`, **not** `FACING.toYRot()`, and
-/// then `submit` rotates by the *negation* of it. Both steps are easy to unwind
+/// The lectern renderer's extracted render state stores the FACING
+/// property's clockwise-rotated yaw, **not** its own bare yaw, and then the
+/// submit step rotates by the *negation* of it. Both steps are easy to unwind
 /// wrongly and each is a quarter turn: a book fed [`horizontal_facing_yaw`]
 /// directly lies across the lectern's shelf at 90° to the reader.
 ///
-/// A clockwise turn is `+90°` in `toYRot()` terms (north `180` → east `270`,
+/// A clockwise turn is `+90°` in yaw terms (north `180` → east `270`,
 /// east `270` → south `0`), which is why this is one addition and not a second
 /// four-arm match to keep in sync.
 #[must_use]
@@ -1874,13 +1875,13 @@ pub fn horizontal_facing_clockwise_yaw(name: &str) -> Option<f32> {
     horizontal_facing_yaw(name).map(|yaw| (yaw + 90.0) % 360.0)
 }
 
-/// The world placement transform for a lectern's book — `LecternRenderer.submit`:
+/// The world placement transform for a lectern's book:
 ///
 /// ```text
-/// translate(0.5, 1.0625, 0.5) · rotateY(-yRot) · rotateZ(67.5°) · translate(0, -0.125, 0)
+/// translate(0.5, 1.0625, 0.5) · rotateY(-yaw) · rotateZ(67.5°) · translate(0, -0.125, 0)
 /// ```
 ///
-/// `yRot` is [`horizontal_facing_clockwise_yaw`]'s value, in degrees.
+/// `yaw` is [`horizontal_facing_clockwise_yaw`]'s value, in degrees.
 ///
 /// **Not [`block_entity_placement_matrix`] with a yaw.** Three differences, all
 /// visible: the translation is `1.0625` blocks up (the shelf's own height) and is
@@ -1899,7 +1900,7 @@ pub fn lectern_book_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4
         * Mat4::from_translation(Vec3::new(0.0, -0.125, 0.0))
 }
 
-/// `EnchantTableRenderer.submit`'s `Axis.ZP.rotationDegrees(80.0F)` — the tilt
+/// The enchanting table renderer's Z-axis tilt of 80 degrees — the tilt
 /// that stands the floating book up.
 ///
 /// **Not the lectern's `67.5`.** The two renderers share one mesh and one
@@ -1919,8 +1920,7 @@ pub fn enchanting_table_book_hover(time: f32) -> f32 {
     0.1 + (time * 0.1).sin() * 0.01
 }
 
-/// The world placement transform for the floating book over an enchanting table
-/// — `EnchantTableRenderer.submit`:
+/// The world placement transform for the floating book over an enchanting table:
 ///
 /// ```text
 /// T(pos) · T(0.5, 0.75, 0.5) · T(0, hover(time), 0) · Ry(-y_rot) · Rz(80°)
@@ -1928,13 +1928,13 @@ pub fn enchanting_table_book_hover(time: f32) -> f32 {
 ///
 /// # `y_rot` is **radians**, and it is not a block facing
 ///
-/// `Axis.YP.rotation(-yRot)` takes radians where the lectern's
-/// `Axis.YP.rotationDegrees` takes degrees, and the value is
-/// `EnchantingTableBlockEntity.rot` — a client-simulated angle that chases the
-/// nearest player, not a `Direction`. An enchanting table has no `facing`
-/// property at all, so there is nothing on its block state this could have come
-/// from; feeding it a facing yaw would pin every book to a compass direction and
-/// look plausible until a player walks around one.
+/// Vanilla's Y-axis rotation for this book takes radians where the lectern's
+/// takes degrees, and the value is the block entity's own client-simulated
+/// rotation angle that chases the nearest player, not a facing direction. An
+/// enchanting table has no `facing` property at all, so there is nothing on
+/// its block state this could have come from; feeding it a facing yaw would
+/// pin every book to a compass direction and look plausible until a player
+/// walks around one.
 #[must_use]
 pub fn enchanting_table_book_placement_matrix(pos: [i32; 3], y_rot: f32, time: f32) -> Mat4 {
     let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
@@ -1944,7 +1944,7 @@ pub fn enchanting_table_book_placement_matrix(pos: [i32; 3], y_rot: f32, time: f
         * Mat4::from_rotation_z(ENCHANTING_TABLE_BOOK_TILT_DEG.to_radians())
 }
 
-/// `BookModel.State.forAnimation`'s first output — the live `openness` the
+/// The book animation state's first output — the live `openness` the
 /// lectern's [`LECTERN_BOOK_OPENNESS`] is the frozen case of:
 ///
 /// ```text
@@ -1963,7 +1963,7 @@ pub fn enchanting_table_book_openness(time: f32, open: f32) -> f32 {
     ((time * 0.02).sin() * 0.1 + 1.25) * open
 }
 
-/// `EnchantTableRenderer.submit`'s two page-flip phases, from the block entity's
+/// The enchanting table renderer's two page-flip phases, from the block entity's
 /// `flip` accumulator:
 ///
 /// ```text
@@ -1987,21 +1987,21 @@ pub fn enchanting_table_page_flips(flip: f32) -> (f32, f32) {
     )
 }
 
-/// How many cooking slots a campfire has — `CampfireBlockEntity`'s
-/// `NonNullList.withSize(4, ItemStack.EMPTY)`.
+/// How many cooking slots a campfire has — vanilla's own fixed-size list of
+/// 4 empty stacks.
 pub const CAMPFIRE_SLOTS: usize = 4;
 
-/// `CampfireRenderer.SIZE`: the uniform scale each cooking item is drawn at.
+/// The uniform scale each cooking item is drawn at.
 pub const CAMPFIRE_ITEM_SCALE: f32 = 0.375;
 
-/// `CampfireRenderer.submit`'s lift: `0.44921875` blocks, i.e. `115/256`.
+/// The campfire item's vertical lift: `0.44921875` blocks, i.e. `115/256`.
 ///
 /// Not `0.4375` (`7/16`, the campfire block model's own top face) — the extra
 /// `1/256` is what keeps a flat food sprite from z-fighting the log it lies on.
 pub const CAMPFIRE_ITEM_LIFT: f32 = 0.449_218_75;
 
 /// The world placement transform for the item cooking in a campfire's `slot`,
-/// ported from `CampfireRenderer.submit` term for term:
+/// ported from vanilla's own pose-stack construction term for term:
 ///
 /// ```text
 /// T(pos) · T(0.5, 0.44921875, 0.5) · Ry(-slotYRot) · Rx(90°)
@@ -2010,14 +2010,14 @@ pub const CAMPFIRE_ITEM_LIFT: f32 = 0.449_218_75;
 ///
 /// Compose it with the item's own `display.fixed`
 /// ([`display_matrix`](crate::display_matrix)) on the **right** — vanilla applies
-/// the `ItemTransform` inside `ItemStackRenderState.LayerRenderState.submit`,
+/// that item transform inside its own layer-render-state submit step,
 /// after everything above is on the pose stack. [`crate::entity::campfire_item_mesh`]
 /// is that composition; prefer it to hand-multiplying here.
 ///
 /// # A campfire is the only block entity here whose renderer draws no mesh of
 /// its own
 ///
-/// `CampfireRenderer` has no model, no layer and no sheet: the fire, the logs and
+/// The campfire's own renderer has no model, no layer and no sheet: the fire, the logs and
 /// the smoke are all part of the **block** model, and the whole renderer is this
 /// pose repeated over four item stacks. So there is no `campfire_model()` builder
 /// and no texture stem to preload — reading "campfire needs a fire texture" off
@@ -2026,19 +2026,20 @@ pub const CAMPFIRE_ITEM_LIFT: f32 = 0.449_218_75;
 ///
 /// # `slot` is an offset from the block's facing, not an absolute corner
 ///
-/// Vanilla's `Direction.from2DDataValue((slot + facing.get2DDataValue()) % 4)`
-/// means slot 0 always sits in the corner the campfire *faces away* toward, and
+/// Vanilla derives the slot's world direction from `(slot + facing's 2D
+/// index) % 4`, which means slot 0 always sits in the corner the campfire
+/// *faces away* toward, and
 /// the four march clockwise from there. Ignoring the facing term puts every
 /// campfire's first item in the same world corner, which looks right until two
 /// campfires face different ways.
 ///
 /// `facing_yaw_deg` is [`horizontal_facing_yaw`]'s convention (south `0`), and
-/// `get2DDataValue()` is exactly that divided by `90` — `toYRot()` is
-/// `(data2d & 3) * 90` in `Direction` itself, so the two are one expression and
-/// there is no second table to keep in sync.
+/// the 2D facing index is exactly that divided by `90` — the yaw is
+/// `(data2d & 3) * 90` in vanilla's own direction type, so the two are one
+/// expression and there is no second table to keep in sync.
 #[must_use]
 pub fn campfire_item_matrix(pos: [i32; 3], facing_yaw_deg: f32, slot: usize) -> Mat4 {
-    // `(slot + facing.get2DDataValue()) % 4`, then back through `toYRot()`.
+    // `(slot + facing's 2D index) % 4`, then back through the yaw formula.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -2054,14 +2055,14 @@ pub fn campfire_item_matrix(pos: [i32; 3], facing_yaw_deg: f32, slot: usize) -> 
         * Mat4::from_scale(Vec3::splat(CAMPFIRE_ITEM_SCALE))
 }
 
-/// `BrushableBlockRenderer.translations`'s base offset — `[0.5, 0.0, 0.5]`
+/// The brushable block renderer's base offset — `[0.5, 0.0, 0.5]`
 /// before the hit-direction override below replaces one axis.
 const BRUSHABLE_ITEM_BASE_OFFSET: Vec3 = Vec3::new(0.5, 0.0, 0.5);
 
-/// `BrushableBlockRenderer.submit`'s outward lift along the hit direction:
-/// `completionState / 10.0F * 0.75F`, where `completionState` is the block
-/// state's own `dusted` property (`0..=3`, `BrushableBlockEntity.getCompletionState`'s
-/// own range) fed straight in — **not** rescaled to `0..=10` first, matching
+/// Vanilla's own outward lift along the hit direction:
+/// `completion_state / 10.0F * 0.75F`, where `completion_state` is the block
+/// state's own `dusted` property (`0..=3`, vanilla's own completion-state
+/// range) fed straight in — **not** rescaled to `0..=10` first, matching
 /// the real jar's own (slightly odd) division by a constant larger than the
 /// value's own range.
 #[must_use]
@@ -2081,19 +2082,18 @@ fn brushable_item_offset(hit_direction: lodestone_assets::Direction, dust_progre
 }
 
 /// The world placement matrix for the item revealed by brushing a suspicious
-/// sand/gravel block, ported from `BrushableBlockRenderer.submit`'s pose
-/// stack term for term:
+/// sand/gravel block, ported from vanilla's own pose stack term for term:
 ///
 /// ```text
 /// T(pos) · T(0, 0.5, 0) · T(translations(hitDirection, dustProgress))
-///        · Ry(75°) · Ry((eastWest ? 90 : 0) + 11°) · S(0.5)
+///        · Ry(75°) · Ry((east_west ? 90 : 0) + 11°) · S(0.5)
 /// ```
 ///
 /// Compose with the item's own `display.fixed` on the right —
 /// [`crate::entity::brushable_item_mesh`] does this, the same composition
-/// [`campfire_item_matrix`] uses for the same `ItemDisplayContext.FIXED`
-/// reason (`extractRenderState` resolves `blockEntity.getItem()` in `FIXED`,
-/// not `GROUND`).
+/// [`campfire_item_matrix`] uses for the same FIXED display-context
+/// reason (vanilla's own render-state extraction resolves the block entity's
+/// item in FIXED, not GROUND).
 #[must_use]
 pub fn brushable_item_matrix(
     pos: [i32; 3],
@@ -2113,18 +2113,18 @@ pub fn brushable_item_matrix(
         * Mat4::from_scale(Vec3::splat(0.5))
 }
 
-/// How many item slots a shelf has — `ShelfBlockEntity.MAX_ITEMS`.
+/// How many item slots a shelf has — vanilla's own max-items constant.
 pub const SHELF_SLOTS: usize = 3;
 
-/// `ShelfRenderer.ITEM_SIZE`: the uniform scale each shelved item is drawn at.
+/// The uniform scale each shelved item is drawn at.
 pub const SHELF_ITEM_SCALE: f32 = 0.25;
 
-/// `ShelfRenderer.ALIGN_ITEMS_TO_BOTTOM`: the extra downward offset applied
-/// when `align_items_to_bottom` is set, in the pre-scale (0.25×) local frame.
+/// Vanilla's own downward offset applied when `align_items_to_bottom` is
+/// set, in the pre-scale (0.25×) local frame.
 pub const SHELF_ALIGN_BOTTOM_OFFSET: f32 = -0.25;
 
-/// `ShelfRenderer.submitItem`'s per-slot offset, before the item's own
-/// bounding-box correction: `((slot - 1) * 0.3125, alignToBottom ? -0.25 :
+/// Vanilla's own per-slot offset, before the item's own
+/// bounding-box correction: `((slot - 1) * 0.3125, align_to_bottom ? -0.25 :
 /// 0.0, -0.25)`. Slot `0` sits left of centre, slot `2` right of it, each
 /// `0.3125` blocks apart in the *pre-scale* local frame (so `0.3125 * 0.25 =
 /// 0.078125` world blocks).
@@ -2148,20 +2148,19 @@ pub fn shelf_item_offset(slot: usize, align_to_bottom: bool) -> Vec3 {
 /// supplied by the caller: it needs the item's baked geometry, which this
 /// function never sees.
 ///
-/// Ports `ShelfRenderer.submitItem`'s pose stack up to (not including) the
-/// final `poseStack.translate(0.0, offsetY, 0.0)`:
+/// Ports vanilla's own per-item pose stack construction up to (not
+/// including) the final translate-by-offset-Y step:
 ///
 /// ```text
-/// T(pos) · T(0.5, 0.5, 0.5) · Ry(yRot) · T(offset) · S(0.25)
+/// T(pos) · T(0.5, 0.5, 0.5) · Ry(yaw) · T(offset) · S(0.25)
 /// ```
 ///
 /// `facing_yaw_deg` is [`horizontal_facing_yaw`]'s convention (south `0`) —
-/// `ShelfBlock.FACING` is horizontal-only in the real jar (`north`/`south`/
-/// `west`/`east`), so `ShelfRenderer.submit`'s `state.facing.getAxis()
-/// .isHorizontal() ? -state.facing.toYRot() : 180.0F` never actually reaches
-/// its `180.0F` arm for a placed shelf; this function ports only the
-/// reachable horizontal case for that reason, taking the yaw directly rather
-/// than a `Direction`.
+/// the shelf's own FACING property is horizontal-only in the real jar
+/// (`north`/`south`/`west`/`east`), so vanilla's own submit step's
+/// horizontal-vs-vertical branch never actually reaches its `180.0F` arm for
+/// a placed shelf; this function ports only the reachable horizontal case
+/// for that reason, taking the yaw directly rather than a facing direction.
 #[must_use]
 pub fn shelf_slot_matrix(
     pos: [i32; 3],
@@ -2177,7 +2176,7 @@ pub fn shelf_slot_matrix(
         * Mat4::from_scale(Vec3::splat(SHELF_ITEM_SCALE))
 }
 
-/// Which of `CopperGolemStatueBlock.Pose`'s four values a placed statue is
+/// Which of vanilla's four statue-pose values a placed statue is
 /// showing — `copper_golem_pose` on the block state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CopperGolemPose {
@@ -2210,8 +2209,8 @@ pub const COPPER_GOLEM_POSES: &[CopperGolemPose] = &[
     CopperGolemPose::Star,
 ];
 
-/// `WeatheringCopper.WeatherState` restricted to the four values a statue's
-/// own block name can encode — `CopperGolemOxidationLevels.getOxidationLevel`'s
+/// Vanilla's own weathering-state enum, restricted to the four values a
+/// statue's own block name can encode — vanilla's own oxidation-level lookup
 /// key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CopperGolemOxidation {
@@ -2221,7 +2220,7 @@ pub enum CopperGolemOxidation {
     Oxidized,
 }
 
-/// `CopperGolemOxidationLevels.getOxidationLevel(state).texture()` — the
+/// Vanilla's own oxidation-level-to-texture lookup — the
 /// sheet stem for each oxidation level. Waxing does not change the texture
 /// (it only halts further weathering), so there is no fifth stem for a waxed
 /// variant — both callers fold `waxed_` away before this ever runs
@@ -2253,16 +2252,16 @@ pub fn copper_golem_statue_texture_stems() -> Vec<&'static str> {
 }
 
 /// The world placement matrix for a copper golem statue —
-/// `CopperGolemStatueBlockRenderer.createModelTransformation`, composed with
-/// the model's own `root.zRot = PI` (`CopperGolemStatueModel.setupAnim`):
+/// vanilla's own model-transformation construction, composed with
+/// the model's own `root.rot_z = PI` (vanilla's own statue animation update):
 ///
 /// ```text
-/// T(pos) · T(0.5, 0, 0.5) · Ry(-oppositeYaw) · Rz(180°)
+/// T(pos) · T(0.5, 0, 0.5) · Ry(-opposite_yaw) · Rz(180°)
 /// ```
 ///
-/// **`oppositeYaw`, not `facing_yaw_deg` itself**: vanilla's
-/// `TRANSFORMATIONS` map is built from `entityDirection.getOpposite().toYRot()`
-/// — the *opposite* of the block's own `facing`, unlike every other
+/// **`opposite_yaw`, not `facing_yaw_deg` itself**: vanilla's own
+/// per-direction transformation map is built from the block's facing
+/// direction's *opposite*, not the facing itself, unlike every other
 /// block-entity placement in this crate (chest/skull/sign all rotate by the
 /// facing directly). `facing_yaw_deg` here is still [`horizontal_facing_yaw`]'s
 /// raw convention; the opposite is `+ 180°`, folded in below rather than
@@ -2272,7 +2271,7 @@ pub fn copper_golem_statue_texture_stems() -> Vec<&'static str> {
 /// so `RotZ(180°)`'s matrix *is* `diag(-1, -1, 1)`) — the same Y-down-model
 /// flip [`skull_ground_placement_matrix`] applies via an explicit scale;
 /// this function uses the rotation form because that is what the real jar's
-/// own `setupAnim` does, and the two are algebraically identical.
+/// own animation update does, and the two are algebraically identical.
 #[must_use]
 pub fn copper_golem_statue_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4 {
     let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
@@ -2282,8 +2281,8 @@ pub fn copper_golem_statue_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) 
         * Mat4::from_rotation_z(std::f32::consts::PI)
 }
 
-/// One copper golem statue to draw this frame — vanilla's
-/// `CopperGolemStatueBlockRenderer`. Resolved through [`BlockEntityModelSet`]
+/// One copper golem statue to draw this frame — vanilla's own statue
+/// renderer. Resolved through [`BlockEntityModelSet`]
 /// like chest/skull/bell (a real cuboid rig, unlike the campfire/vault/
 /// brushable/shelf item-model family), since `copper_golem_statue.json` is a
 /// total-absence hole exactly like chest's.
@@ -2406,8 +2405,8 @@ impl BlockEntityModelSet {
     /// # No pose overrides, deliberately
     ///
     /// `part_transforms(placement, &[])`, so a chest's lid is **shut** and a
-    /// shulker box's is **closed**: `ChestSpecialRenderer`/`ShulkerBoxSpecialRenderer`
-    /// carry a fixed `openness` and no animation at all. An item is not the block,
+    /// shulker box's is **closed**: vanilla's own item special renderers for
+    /// these carry a fixed `openness` and no animation at all. An item is not the block,
     /// and passing a lid angle here would open every chest lying on every floor.
     #[must_use]
     pub fn resolve_special_item(
@@ -2444,7 +2443,7 @@ impl BlockEntityModelSet {
         let placement = block_entity_placement_matrix(spawn.pos, spawn.facing_yaw_deg);
 
         // The lid and the lock rotate together about the *same* pivot
-        // (`lock.xRot = lid.xRot`), which is why the asset corpus makes them
+        // (`lock.rot_x = lid.rot_x`), which is why the asset corpus makes them
         // siblings sharing `offset(0, 9, 1)` rather than nesting the lock.
         let x_rot = chest_lid_x_rot(chest_lid_openness(spawn.openness));
         let mut overrides = Vec::with_capacity(2);
@@ -2479,14 +2478,14 @@ impl BlockEntityModelSet {
     ///
     /// # The head part is never posed; two child parts are
     ///
-    /// No type poses its **head**: `SkullBlockRenderState.yRot`/`xRot` are
-    /// only ever set for the *item-frame*/GUI skull paths, never by
-    /// `SkullBlockRenderer.extractRenderState` for a placed block, so every
-    /// `setupAnim`'s `head.yRot = state.yRot * PI/180` line is a multiply by
-    /// zero here.
+    /// No type poses its **head**: vanilla's own render-state yaw/pitch fields
+    /// are only ever set for the *item-frame*/GUI skull paths, never by
+    /// vanilla's own render-state extraction for a placed block, so every
+    /// animation update's `head.rot_y = state.rot_y * PI/180` line is a
+    /// multiply by zero here.
     ///
     /// The dragon's jaw and the piglin's two ears are the exception, and they
-    /// are an exception in the direction that bites: their `setupAnim`
+    /// are an exception in the direction that bites: their animation update
     /// **assigns** rather than adds, and the assigned value at rest is not the
     /// authored rest pose (`0.2` against `0` for the jaw, `±0.7` against
     /// `±PI/6` for the ears). Drawing either from the mesh's own rest pose
@@ -2574,10 +2573,10 @@ impl BlockEntityModelSet {
     /// `bell_body` is the only part overridden — `bell_base` is its *child*
     /// in the baked mesh (see `lodestone_assets::block_entity_models::bell_model`'s
     /// doc), so rotating the body carries the rim with it through
-    /// [`BlockEntityMesh::part_transforms`]'s own chain, exactly as
-    /// `ModelPart`'s parent/child composition does in the jar. There is no
+    /// [`BlockEntityMesh::part_transforms`]'s own chain, exactly as vanilla's
+    /// own model-part parent/child composition does in the jar. There is no
     /// second override for `bell_base`, unlike chest's `lid`/`lock` pair,
-    /// because vanilla itself poses only `bellBody.xRot`/`zRot`.
+    /// because vanilla itself poses only the bell body's `rot_x`/`rot_z`.
     #[must_use]
     pub fn resolve_bell(&self, spawn: &BellSpawn) -> Option<BlockEntityInstance> {
         let mesh = self.get(BELL)?;
@@ -2669,9 +2668,9 @@ impl BlockEntityModelSet {
     ///
     /// # Every side always draws
     ///
-    /// Vanilla's `DecoratedPotRenderer.submit` calls `submitModelPart` for
-    /// `front`/`back`/`left`/`right` unconditionally, falling back to
-    /// `Sheets.DECORATED_POT_SIDE` per side rather than skipping an
+    /// Vanilla's own decorated-pot renderer submits each side part for
+    /// `front`/`back`/`left`/`right` unconditionally, falling back to its own
+    /// default side sheet per side rather than skipping an
     /// undecorated one — so this returns all four side instances always, not
     /// only the decorated ones. Skipping a blank side would draw a pot with
     /// invisible faces on three sides of the corpus's test cases and silently
@@ -2711,18 +2710,18 @@ impl BlockEntityModelSet {
         Some([base, front, back, left, right])
     }
 
-    /// Resolves one conduit into its drawable instances — `ConduitRenderer.submit`,
-    /// branch by branch. Returns one instance (the slowly-spinning inactive
+    /// Resolves one conduit into its drawable instances — vanilla's own submit
+    /// step, branch by branch. Returns one instance (the slowly-spinning inactive
     /// shell) or four (the tumbling cage, both wind planes, and the
-    /// camera-facing eye) — never a mix, because vanilla's own `submit` is a
-    /// single `if (!state.isActive) { … } else { … }`, not two independently
+    /// camera-facing eye) — never a mix, because vanilla's own submit step is a
+    /// single active/inactive branch, not two independently
     /// gated draws. A missing mesh drops that one instance rather than the
     /// whole conduit, the same fail-open [`Self::resolve_decorated_pot`]'s four
     /// sides use.
     ///
     /// `camera_orientation` is [`crate::entity::camera_orientation`] applied to
     /// the frame's view matrix — only the eye instance reads it
-    /// (`poseStack.mulPose(camera.orientation)`, active branch only), but it is
+    /// (folded into the pose stack, active branch only), but it is
     /// taken unconditionally so building it is the caller's problem once per
     /// frame, exactly as [`crate::entity::experience_orb_matrix`] does.
     ///
@@ -2758,10 +2757,10 @@ impl BlockEntityModelSet {
         };
 
         if !spawn.active {
-            // `!state.isActive`: `translate(0.5,0.5,0.5)` then
-            // `rotationY(state.activeRotation * (PI/180))` — the "degrees"
+            // Inactive: `translate(0.5,0.5,0.5)` then
+            // `rotationY(state * (PI/180))` — the "degrees"
             // reading, see [`conduit_inactive_y_rot_radians`]'s doc — then the
-            // 6×6×6 `shell` layer against `SHELL_TEXTURE` (`entity/conduit/base`).
+            // 6×6×6 shell model against its own inactive-shell texture (`entity/conduit/base`).
             let placement = Mat4::from_translation(origin + Vec3::new(0.5, 0.5, 0.5))
                 * Mat4::from_rotation_y(conduit_inactive_y_rot_radians(
                     spawn.active_rotation_value,
@@ -2780,7 +2779,7 @@ impl BlockEntityModelSet {
         let mut out = Vec::with_capacity(4);
 
         // Cage: tumbles about the fixed diagonal `Vector3f(0.5,1,0.5).normalize()`,
-        // using the "radians" reading of `state.activeRotation` — see
+        // using the "radians" reading of the active-rotation state — see
         // [`conduit_active_axis_rotation_radians`]'s doc for why that is not a
         // second unit conversion.
         let axis = Vec3::new(0.5, 1.0, 0.5).normalize();
@@ -2792,15 +2791,15 @@ impl BlockEntityModelSet {
         out.extend(make(CONDUIT_CAGE, CONDUIT_CAGE_TEXTURE_STEM, cage_placement));
 
         // The two wind planes share **one** texture choice — vanilla computes
-        // `windSpriteId`/`windRenderType`/`windSprite` once and passes the same
-        // three to both `submitModelPart` calls.
+        // its own wind sprite id/render type/sprite once and passes the same
+        // three to both submit calls.
         let wind_texture = if spawn.animation_phase == 1 {
             CONDUIT_WIND_VERTICAL_TEXTURE_STEM
         } else {
             CONDUIT_WIND_TEXTURE_STEM
         };
-        // First wind plane: `translate(0.5,0.5,0.5)` then, only by
-        // `animationPhase`, a quarter turn about X (phase 1) or Z (phase 2) —
+        // First wind plane: `translate(0.5,0.5,0.5)` then, only by the
+        // animation phase, a quarter turn about X (phase 1) or Z (phase 2) —
         // phase 0 submits with no extra rotation at all.
         let wind1_rot = match spawn.animation_phase {
             1 => Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
@@ -2854,10 +2853,10 @@ impl BlockEntityModelSet {
     ///
     /// # Two meshes, three draws — see the module's banner section
     ///
-    /// Vanilla's `submitBanner` draws the pole+bar opaque, the flag opaque
-    /// (both with `Sheets.BANNER_BASE`), then `submitPatterns`: the base
-    /// mask tinted by `base_color` plus every stored pattern layer, all
-    /// through `RenderTypes::bannerPattern`
+    /// Vanilla's own banner submit step draws the pole+bar opaque, the flag
+    /// opaque (both with its own banner-base sheet), then its own
+    /// pattern-submit step: the base mask tinted by `base_color` plus every
+    /// stored pattern layer, all through the banner-pattern render type
     /// (`EntityPipeline::banner_layer_pipeline`). The first two ride the
     /// ordinary [`plan_block_entities`] batcher via
     /// [`BannerInstances::body`]/[`BannerInstances::flag`]; the third is
@@ -2871,10 +2870,11 @@ impl BlockEntityModelSet {
     ///
     /// Every pattern mask paints over the *posed* flag (the same sway
     /// [`banner_flag_x_rot`] applies to the opaque flag draw), never the
-    /// pole/bar — `submitPatterns` is called with the same `flagModel`
-    /// [`submitBanner`] already posed. [`BannerLayerDraw::transform`] is
-    /// therefore the flag part's own world matrix, computed once and shared
-    /// by all `1 + patterns.len().min(MAX_PATTERN_LAYERS)` layers.
+    /// pole/bar — vanilla's own pattern-submit step is called with the same
+    /// flag model its own banner-submit step already posed.
+    /// [`BannerLayerDraw::transform`] is therefore the flag part's own world
+    /// matrix, computed once and shared by all
+    /// `1 + patterns.len().min(MAX_PATTERN_LAYERS)` layers.
     #[must_use]
     pub fn resolve_banner(&self, spawn: &BannerSpawn) -> Option<BannerInstances> {
         // Both the mesh pair and the placement angle come from the attachment, in
@@ -3060,16 +3060,16 @@ impl BlockEntityModelSet {
 /// frame — every field already interpolated by the caller.
 ///
 /// **The only spawn in this module whose every animated field is client-simulated
-/// with nothing on the wire.** `EnchantingTableBlockEntity.bookAnimationTick` runs
+/// with nothing on the wire.** Vanilla's own book-animation tick runs
 /// on the client, driven by the nearest player's position, and the server sends
 /// none of `time`/`open`/`flip`/`rot` — so a source that captured a stale copy of
 /// this state freezes the book, and there is no packet whose absence would
 /// explain it.
 ///
-/// Interpolation belongs to the caller (`EnchantTableRenderer.extractRenderState`
-/// does it, not `submit`): `open` and `flip` are `lerp(partialTicks, o*, *)`,
+/// Interpolation belongs to the caller (vanilla's own render-state extraction
+/// does it, not the submit step): `open` and `flip` are `lerp(partialTicks, o*, *)`,
 /// `time` is `time + partialTicks`, and `y_rot` is the **shortest-arc** lerp of
-/// `oRot`→`rot`. That last one is not an ordinary lerp — see
+/// `o_rot`→`rot`. That last one is not an ordinary lerp — see
 /// [`Self::y_rot`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EnchantingTableSpawn {
@@ -3084,7 +3084,7 @@ pub struct EnchantingTableSpawn {
     /// which happens whenever a player walks past the north-west corner. A plain
     /// `lerp` is wrong in exactly one place and looks right everywhere else.
     pub y_rot: f32,
-    /// `EnchantingTableBlockEntity.time + partialTicks` — vanilla's raw tick
+    /// The block entity's own `time + partialTicks` — vanilla's raw tick
     /// counter, feeding both the hover and the openness breath.
     pub time: f32,
     /// `lerp(partialTicks, oOpen, open)`, `0..1`: how far the book has opened.
@@ -3092,7 +3092,7 @@ pub struct EnchantingTableSpawn {
     /// [`enchanting_table_book_openness`] returns `0`, and [`book_part_poses`]
     /// at openness `0` puts `left_lid` at `PI` against `right_lid` at `0`, i.e.
     /// the covers folded together over six real posed parts.
-    /// `EnchantTableRenderer.submit` has no early return: vanilla draws a book
+    /// Vanilla's own submit step has no early return: vanilla draws a book
     /// for every enchanting table it renders, and the nearest-player test
     /// decides only whether it opens. A caller that skips a shut book therefore
     /// deletes every table nobody is standing at, which is exactly what this
@@ -3126,17 +3126,18 @@ impl EnchantingTableSpawn {
 /// The version-free description of one lectern's book to draw this frame.
 ///
 /// Two fields and no animation state at all, which makes this the cheapest type
-/// in the module: `LecternBlock.HAS_BOOK` decides whether there is a spawn to
-/// make in the first place (a bookless lectern draws nothing here — its shelf is
-/// a real block model), and `FACING` gives the yaw. There is no NBT read and
+/// in the module: the lectern block's own HAS_BOOK property decides whether
+/// there is a spawn to make in the first place (a bookless lectern draws
+/// nothing here — its shelf is a real block model), and `FACING` gives the
+/// yaw. There is no NBT read and
 /// nothing on the wire.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LecternSpawn {
     /// Block position.
     pub pos: [i32; 3],
-    /// `Direction.getClockWise().toYRot()` of `LecternBlock.FACING`, in degrees
+    /// The clockwise-rotated yaw of the lectern's own FACING property, in degrees
     /// — see [`horizontal_facing_clockwise_yaw`], which is the only correct way
-    /// to produce this. Passing `FACING.toYRot()` puts the book sideways.
+    /// to produce this. Passing the facing's bare yaw puts the book sideways.
     pub facing_yaw_deg: f32,
     /// Packed sky/block light. Pass [`ENTITY_FULLBRIGHT`] only when there is
     /// genuinely no world to sample.
@@ -3172,7 +3173,7 @@ impl Default for BlockEntityModelSet {
 pub struct ChestSpawn {
     /// Block position (the block's minimum corner, in world coordinates).
     pub pos: [i32; 3],
-    /// `Direction.toYRot()` of the chest's `facing` property.
+    /// The facing direction's yaw, of the chest's `facing` property.
     pub facing_yaw_deg: f32,
     /// Which layer to draw.
     pub half: ChestHalf,
@@ -3239,9 +3240,9 @@ impl SkullSpawn {
 /// The version-free description of one bell to draw this frame.
 ///
 /// Unlike [`ChestSpawn`]/[`SkullSpawn`], placement needs no facing at all:
-/// `BellRenderer.submit` applies no rotation of its own before
-/// `submitModel` (contrast `ChestRenderer.submit`'s explicit
-/// `rotationAround`), so every `FACING`/`ATTACHMENT` combination poses the
+/// Vanilla's own bell renderer applies no rotation of its own before
+/// submitting the model (contrast the chest renderer's explicit
+/// rotate-around-pivot step), so every `FACING`/`ATTACHMENT` combination poses the
 /// body identically — only the block's own attachment-frame *model* (drawn
 /// by the ordinary block mesher, not this pass) differs per attachment.
 /// [`BlockEntityModelSet::resolve_bell`] therefore calls
@@ -3256,8 +3257,8 @@ pub struct BellSpawn {
     /// `0..50`), or `None` at rest.
     ///
     /// **`None` is the only value this pass can produce today.** The
-    /// `BLOCK_EVENT` trigger that starts a shake (`b0 == 1`, direction packed
-    /// in `b1` — `BellBlockEntity.triggerEvent`) is not wired from any
+    /// block-event trigger that starts a shake (`b0 == 1`, direction packed
+    /// in `b1` — vanilla's own bell trigger-event handler) is not wired from any
     /// gather in this crate; see `docs/block-entity-renderers.md`'s Bell
     /// section for exactly what is missing and why (the install call site is
     /// outside this crate's file ownership for the session that ported the
@@ -3294,17 +3295,18 @@ impl BellSpawn {
 pub struct ShulkerSpawn {
     /// Block position.
     pub pos: [i32; 3],
-    /// `ShulkerBoxBlock.FACING`, defaulting to [`ShulkerFacing::Up`] the way
-    /// `ShulkerBoxRenderer.extractRenderState`'s `getValueOrElse` does.
+    /// The shulker box block's own FACING property, defaulting to
+    /// [`ShulkerFacing::Up`] the way vanilla's own render-state extraction
+    /// does.
     pub facing: ShulkerFacing,
     /// The dye colour name (`"red"`, …) or `None` for the undyed box.
     pub colour: Option<&'static str>,
-    /// `ShulkerBoxBlockEntity.getProgress(partialTicks)` — `0.0` closed, `1.0`
+    /// Vanilla's own open/close progress accessor — `0.0` closed, `1.0`
     /// fully open.
     ///
     /// **`0.0` is the only value this pass can produce today.** Progress comes
     /// from the block entity's own open/close counter, which the server drives
-    /// through the same `BLOCK_EVENT` path a chest lid uses — and unlike a chest,
+    /// through the same block-event path a chest lid uses — and unlike a chest,
     /// nothing in this workspace folds a shulker box's event yet. A closed box is
     /// what a shulker box looks like whenever nobody has it open, so this is the
     /// honest state rather than a placeholder; see
@@ -3335,8 +3337,9 @@ impl ShulkerSpawn {
 ///
 /// The caller owns every field, the same contract as [`ChestSpawn`]: the
 /// `ROTATION` property or `FACING`, whichever the block has → `attachment`; the
-/// banner **block's own** colour (`AbstractBannerBlock.getColor()` — one banner
-/// block per dye colour, there is no `type`-style state property, so this is
+/// banner **block's own** colour (vanilla's own per-block-registration colour
+/// — one banner block per dye colour, there is no `type`-style state
+/// property, so this is
 /// not read off block state the way [`ChestSpawn::material`] is) →
 /// `base_color`; the block entity's own NBT `"patterns"` key
 /// (`docs/banner-shield-patterns.md`'s "Prerequisite 1 does not block the
@@ -3345,8 +3348,9 @@ impl ShulkerSpawn {
 /// → `light`.
 ///
 /// Everything past `attachment` is shared by both forms, including the sway and
-/// the whole pattern-layer stack — `BannerRenderer` picks two meshes and an angle
-/// off the attachment type and then runs one `submitBanner` for either.
+/// the whole pattern-layer stack — vanilla's own banner renderer picks two
+/// meshes and an angle off the attachment type and then runs one banner
+/// submit step for either.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BannerSpawn {
     /// Block position.
@@ -3403,8 +3407,8 @@ impl BannerSpawn {
 /// does not exist.
 ///
 /// One per **occupied** slot, so a campfire holding two steaks yields two of
-/// these and an empty campfire yields none — matching
-/// `CampfireRenderer.submit`'s `if (!itemState.isEmpty())`.
+/// these and an empty campfire yields none — matching vanilla's own submit
+/// step's per-slot non-empty guard.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CampfireItemSpawn {
     /// Block position of the campfire.
@@ -3423,51 +3427,51 @@ pub struct CampfireItemSpawn {
 }
 
 /// One suspicious sand/gravel block's revealed item, for this frame —
-/// vanilla's `BrushableBlockRenderer`.
+/// vanilla's own brushable-block renderer.
 ///
 /// **A second `*Spawn` here [`BlockEntityModelSet`] does not resolve**, for the
-/// same reason [`CampfireItemSpawn`] is the first: `BrushableBlockRenderer`
-/// draws an *item model*, not a cuboid part rig — the sand/gravel a player
+/// same reason [`CampfireItemSpawn`] is the first: vanilla's own brushable-block
+/// renderer draws an *item model*, not a cuboid part rig — the sand/gravel a player
 /// sees is the ordinary **block** model, real geometry the terrain mesher
 /// already draws (`suspicious_sand`/`suspicious_gravel` are not a hole in the
 /// world), so this feeds the model pipeline through
 /// [`crate::entity::brushable_item_mesh`] the way a dropped item does.
 ///
-/// Present only once **both** `BrushableBlockEntity.getHitDirection()` is
+/// Present only once **both** vanilla's own hit-direction accessor is
 /// non-null (a player has brushed at least once) and `item` is non-empty (a
-/// loot table has actually rolled a reward) and `dustProgress > 0` —
-/// vanilla's own three-part guard in `BrushableBlockRenderer.submit`. A brand
+/// loot table has actually rolled a reward) and `dust_progress > 0` —
+/// vanilla's own three-part guard in its own submit step. A brand
 /// new, never-brushed block therefore contributes no spawn at all.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrushableItemSpawn {
     /// Block position of the suspicious sand/gravel.
     pub pos: [i32; 3],
     /// The face a player last brushed, from `hit_direction` NBT
-    /// (`Direction.LEGACY_ID_CODEC`) — feeds [`brushable_item_matrix`].
+    /// (vanilla's own legacy direction-id codec) — feeds [`brushable_item_matrix`].
     pub hit_direction: lodestone_assets::Direction,
     /// The block state's own `dusted` property, `0..=3` —
-    /// `BrushableBlockEntity.getCompletionState()`'s range, read off the
-    /// state rather than re-derived from `brushCount` (which is not on the
-    /// wire; only the property is).
+    /// vanilla's own completion-state range, read off the
+    /// state rather than re-derived from the block entity's own brush counter
+    /// (which is not on the wire; only the property is).
     pub dust_progress: u8,
     /// The revealed item's id, from the block entity's `item` NBT
-    /// (`ItemStack.CODEC`).
+    /// (vanilla's own item-stack codec).
     pub item: ResourceLocation,
     /// Packed sky/block light at the block.
     pub light: u8,
 }
 
-/// One item on a shelf's `slot`, for this frame — vanilla's `ShelfRenderer`.
+/// One item on a shelf's `slot`, for this frame — vanilla's own shelf renderer.
 ///
 /// **A third `*Spawn` here [`BlockEntityModelSet`] does not resolve**, for the
 /// same reason [`CampfireItemSpawn`]/[`BrushableItemSpawn`] are the first
-/// two: `ShelfRenderer` draws item models, not a cuboid part rig — a shelf's
+/// two: vanilla's own shelf renderer draws item models, not a cuboid part rig — a shelf's
 /// own board/back/sides are all real block-model geometry the terrain
 /// mesher already draws — so this feeds the model pipeline through
 /// [`crate::entity::shelf_item_mesh`] the way a dropped item does.
 ///
-/// One per **occupied** slot, matching `ShelfRenderer.submit`'s per-slot
-/// `if (itemStackRenderState != null)` guard — an empty shelf yields none.
+/// One per **occupied** slot, matching vanilla's own submit step's per-slot
+/// non-null render-state guard — an empty shelf yields none.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShelfItemSpawn {
     /// Block position of the shelf.
@@ -3476,7 +3480,7 @@ pub struct ShelfItemSpawn {
     pub facing_yaw_deg: f32,
     /// Which of the three slots (`0..SHELF_SLOTS`) this item is in.
     pub slot: usize,
-    /// `ShelfBlockEntity.getAlignItemsToBottom()`'s own NBT flag.
+    /// Vanilla's own align-items-to-bottom accessor's own NBT flag.
     pub align_to_bottom: bool,
     /// The item id whose baked geometry to draw, from the block entity's
     /// `Items` NBT list.
@@ -3486,11 +3490,11 @@ pub struct ShelfItemSpawn {
 }
 
 /// One vault's floating display-item cluster, for this frame — vanilla's
-/// `VaultRenderer`.
+/// own vault renderer.
 ///
 /// **A third `*Spawn` here [`BlockEntityModelSet`] does not resolve**, for the
-/// same reason [`CampfireItemSpawn`] is the first: `VaultRenderer.submit` is
-/// `ItemEntityRenderer.renderMultipleFromCount` at a fixed pose, not a cuboid
+/// same reason [`CampfireItemSpawn`] is the first: vanilla's own vault-submit
+/// step draws multiple item-entity-style instances at a fixed pose, not a cuboid
 /// part rig — the vault's own cage, base and door are all real *block* model
 /// geometry the ordinary terrain mesher already draws (`blockstates/vault.json`
 /// is a plain `variants` map over `facing`/`ominous`/`vault_state`, the same
@@ -3498,10 +3502,10 @@ pub struct ShelfItemSpawn {
 /// proved), so this feeds the model pipeline through
 /// [`crate::entity::vault_display_item_mesh`] the way a dropped item does.
 ///
-/// Present only when `VaultBlockEntity.Client.shouldDisplayActiveEffects`
-/// (`sharedData.hasDisplayItem()`) is true — an empty `shared_data.display_item`
+/// Present only when vanilla's own client-side active-effects check
+/// (its own has-display-item test) is true — an empty `shared_data.display_item`
 /// yields **no** spawn for that vault, matching vanilla's own
-/// `!displayItem.isEmpty()` guard in `VaultRenderer.extractRenderState`. A
+/// non-empty guard in its own render-state extraction. A
 /// vault the server has not yet rolled a reward for (state `INACTIVE`) is
 /// therefore silent, not a partially-drawn cluster.
 #[derive(Debug, Clone, PartialEq)]
@@ -3523,12 +3527,13 @@ pub struct VaultSpawn {
     pub light: u8,
 }
 
-/// One `moving_piston` block entity for this frame — vanilla's
-/// `PistonHeadRenderer`.
+/// One `moving_piston` block entity for this frame — vanilla's own
+/// piston-head renderer.
 ///
 /// **The second `*Spawn` here [`BlockEntityModelSet`] does not resolve**, and for
-/// the same reason [`CampfireItemSpawn`] is the first: `PistonHeadRenderer`'s
-/// constructor calls no `bakeLayer`, so it owns no cuboid rig. What it draws is
+/// the same reason [`CampfireItemSpawn`] is the first: vanilla's own
+/// piston-head renderer's constructor bakes no model layer, so it owns no
+/// cuboid rig. What it draws is
 /// whole *block models* posed somewhere other than their own cell, which is the
 /// moving-block seam (`gpu/moving_blocks.rs` in the shell) rather than either the
 /// entity or the item pipeline.
@@ -3536,9 +3541,10 @@ pub struct VaultSpawn {
 /// # Everything here is semantic, not a matrix
 ///
 /// The offset is deliberately **not** precomputed into a `Mat4` by the gather.
-/// `getExtendedProgress` is the one piece of arithmetic in this renderer that a
-/// plausible reading gets backwards — it is `progress - 1.0` while extending and
-/// `1.0 - progress` while retracting, and the two agree at `progress == 0.5` — so
+/// Vanilla's own extended-progress calculation is the one piece of arithmetic
+/// in this renderer that a plausible reading gets backwards — it is
+/// `progress - 1.0` while extending and `1.0 - progress` while retracting, and
+/// the two agree at `progress == 0.5` — so
 /// it lives next to its sibling `falling_block_pose` where its wrong hypothesis is
 /// evaluated against it. Carrying `direction`/`progress`/`extending` keeps that
 /// possible.
@@ -3546,34 +3552,38 @@ pub struct VaultSpawn {
 pub struct MovingPistonSpawn {
     /// The cell the `moving_piston` block entity itself occupies. Geometry draws
     /// at this cell **plus** the offset derived from the three fields below; the
-    /// cell itself has no block model (`moving_piston` is
-    /// `RenderShape.INVISIBLE`), which is why an unset source leaves a hole.
+    /// cell itself has no block model (`moving_piston` renders as
+    /// invisible), which is why an unset source leaves a hole.
     pub pos: [i32; 3],
     /// The global block-state id to draw offset — already resolved by the gather,
-    /// because two of `extractRenderState`'s three branches *synthesise* a state
-    /// rather than using the stored one (a `piston_head` with `short` set from the
+    /// because two of vanilla's own render-state extraction's three branches
+    /// *synthesise* a state rather than using the stored one (a `piston_head`
+    /// with `short` set from the
     /// progress, in particular).
     pub state_id: u32,
     /// The retracting **source** piston's own base, drawn at [`Self::pos`] with
-    /// no offset at all — `submit` pops the translated pose before submitting it.
+    /// no offset at all — vanilla's own submit step pops the translated pose
+    /// before submitting it.
     /// `None` for every other case, which is the common one.
     pub base_state_id: Option<u32>,
-    /// `PistonMovingBlockEntity.direction`'s unit step.
+    /// The block entity's own facing direction's unit step.
     ///
-    /// **Not the movement direction.** `getMovementDirection()` is `extending ?
-    /// direction : direction.getOpposite()`, but `getXOff`/`getYOff`/`getZOff`
-    /// multiply the *raw* `direction` step by a signed progress that carries the
+    /// **Not the movement direction.** Vanilla's own movement-direction
+    /// accessor is `extending ? direction : direction.opposite()`, but the
+    /// per-axis direction-step accessors multiply the *raw* `direction` step
+    /// by a signed progress that carries the
     /// retraction's sign itself. Using the movement direction here and a positive
     /// progress would double-negate the retracting case.
     pub direction: [i32; 3],
-    /// `getProgress(partialTick)` — `lerp(a, progressO, progress)`, in `0..=1`.
+    /// Vanilla's own progress accessor — `lerp(a, progress_o, progress)`, in `0..=1`.
     pub progress: f32,
-    /// `PistonMovingBlockEntity.extending`.
+    /// The block entity's own extending flag.
     pub extending: bool,
     /// Packed sky/block light for the offset geometry. Vanilla samples it one cell
     /// **back** along the movement direction
-    /// (`getBlockPos().relative(getMovementDirection().getOpposite())`), not at the
-    /// block entity's own cell — the cell being moved *into* is the one full of
+    /// (the block's own position, offset by the opposite of the movement
+    /// direction), not at the block entity's own cell — the cell being moved
+    /// *into* is the one full of
     /// `moving_piston`.
     pub light: u8,
     /// Packed sky/block light for [`Self::base_state_id`], sampled at
@@ -3582,7 +3592,7 @@ pub struct MovingPistonSpawn {
 }
 
 /// Which block-entity rig and sheet draw one `minecraft:special` **item** form —
-/// vanilla's `SpecialModelRenderer` family, the ex-`builtin/entity` items.
+/// vanilla's own special-model-renderer family, the ex-`builtin/entity` items.
 ///
 /// `kind` is the special-renderer id an item definition names
 /// (`lodestone_assets::IconPart::Special::kind`); `item_path` is the item's own
@@ -3603,12 +3613,13 @@ pub struct MovingPistonSpawn {
 /// The family is ten `kind`s over 91 item definitions. A `match` on the item id
 /// alone would need 91 arms and would leave any datapack item invisible; the
 /// `kind` says *what rig*, and the path only picks *which sheet* within it —
-/// exactly vanilla's split, where `ChestSpecialRenderer.Unbaked` carries the
-/// `texture` field the item definition names.
+/// exactly vanilla's split, where vanilla's own unbaked chest special
+/// renderer carries the `texture` field the item definition names.
 ///
-/// `ChestHalf::Single` is not a simplification: `ChestSpecialRenderer.Unbaked`'s
-/// `chest_type` defaults to `ChestType.SINGLE` and no 26.2 item definition
-/// overrides it, so an item chest is never one of the two double halves.
+/// `ChestHalf::Single` is not a simplification: vanilla's own unbaked chest
+/// special renderer's `chest_type` defaults to SINGLE and no 26.2 item
+/// definition overrides it, so an item chest is never one of the two double
+/// halves.
 ///
 /// # Which kinds resolve today
 ///
@@ -3626,13 +3637,14 @@ pub struct MovingPistonSpawn {
 ///
 /// # The conduit item is one layer, not four
 ///
-/// The obvious reading of `ConduitRenderer` is that a conduit needs four
-/// (`bakeLayer` is called for shell, cage, wind and eye), and an earlier
-/// version of this doc said exactly that. That is the **block entity**.
-/// `ConduitSpecialRenderer.bake` bakes `ModelLayers.CONDUIT_SHELL` alone and
-/// its `submit` issues one `submitModelPart` against
-/// `ConduitRenderer.SHELL_TEXTURE` — no cage, no wind, no eye, because an item
-/// conduit is never *active*. So it is a plain pair, and it always was.
+/// The obvious reading of vanilla's own conduit renderer is that a conduit
+/// needs four (a model layer is baked for shell, cage, wind and eye), and an
+/// earlier version of this doc said exactly that. That is the **block
+/// entity**. Vanilla's own conduit-item special renderer bakes the shell
+/// model layer alone and its own submit step issues one part-submit call
+/// against its own inactive-shell texture — no cage, no wind, no eye,
+/// because an item conduit is never *active*. So it is a plain pair, and it
+/// always was.
 ///
 /// # A copper golem statue item is always the **standing** pose
 ///
@@ -3671,8 +3683,8 @@ pub struct MovingPistonSpawn {
 /// resolve**, including `dragon_head`/`piglin_head`, which reach their own
 /// multi-part rigs rather than a skull layer; vanilla scales the dragon head's
 /// icon down through its base model's own `gui` display transform
-/// (`item/dragon_head.json`, `scale 0.6`), which is the caller's `DisplayTransform`
-/// and not this function's business.
+/// (`item/dragon_head.json`, `scale 0.6`), which is the caller's own display
+/// transform and not this function's business.
 #[must_use]
 pub fn special_item_rig(kind: &str, item_path: &str) -> Option<(&'static str, &'static str)> {
     match kind {
@@ -3713,8 +3725,8 @@ pub fn special_item_rig(kind: &str, item_path: &str) -> Option<(&'static str, &'
         // a dyed or patterned shield still only reaches pixels through the
         // hand/GUI call sites that bypass this resolver entirely.
         "minecraft:shield" => Some((SHIELD, SHIELD_BASE_NO_PATTERN_TEXTURE_STEM)),
-        // One layer, not four — `ConduitSpecialRenderer.bake` takes
-        // `CONDUIT_SHELL` alone. See this function's own doc for why the
+        // One layer, not four — vanilla's own conduit-item special renderer
+        // takes the shell model alone. See this function's own doc for why the
         // four-layer reading is about the block entity instead.
         "minecraft:conduit" if item_path == "conduit" => {
             Some((CONDUIT_SHELL, CONDUIT_SHELL_TEXTURE_STEM))
@@ -3738,8 +3750,8 @@ pub fn special_item_rig(kind: &str, item_path: &str) -> Option<(&'static str, &'
 /// sheet for all eight paths without a block state.
 ///
 /// `waxed_` is stripped first: waxing halts further weathering but does not
-/// change which of the four sheets a statue draws, and
-/// `CopperGolemOxidationLevels` has no fifth, waxed-specific entry. That makes
+/// change which of the four sheets a statue draws, and vanilla's own
+/// oxidation-level table has no fifth, waxed-specific entry. That makes
 /// the eight item paths four sheets, which is exactly what the eight item
 /// definitions in the 26.2 jar name — `waxed_oxidized_copper_golem_statue.json`
 /// and `oxidized_copper_golem_statue.json` both carry
@@ -3763,7 +3775,7 @@ pub fn copper_golem_statue_oxidation_from_item_path(
 }
 
 /// [`decorated_pot_item_rig`]'s result: five opaque draws sharing one
-/// placement, in `DecoratedPotRenderer.submit`'s own submission order.
+/// placement, in vanilla's own decorated-pot renderer's own submission order.
 ///
 /// Five rather than two (a banner) or one (a shield) because the thing that
 /// varies here is the **diffuse sheet per quad**, not a tint over one mesh —
@@ -3794,21 +3806,23 @@ impl DecoratedPotItemRig {
     }
 }
 
-/// The `minecraft:decorated_pot` item rig — `DecoratedPotSpecialRenderer.submit`,
-/// which forwards straight to the same `DecoratedPotRenderer.submit` a placed pot
-/// uses with `Objects.requireNonNullElse(decorations, PotDecorations.EMPTY)`.
+/// The `minecraft:decorated_pot` item rig — vanilla's own decorated-pot-item
+/// special renderer's submit step, which forwards straight to the same
+/// decorated-pot renderer submit step a placed pot uses, substituting an
+/// empty decorations value when the stack carries none.
 ///
 /// The four arguments are the sherd **item paths** off the stack's own
 /// `minecraft:pot_decorations` component, namespace stripped, in vanilla's
 /// record order. `None` is a plain brick face rather than "unknown" —
-/// `PotDecorations::getItem` maps `Items.BRICK` to `Optional.empty()` on the way
-/// in, so a blank face and a brick face are the same state by construction.
+/// Vanilla's own pot-decorations accessor maps the brick item to "absent" on
+/// the way in, so a blank face and a brick face are the same state by
+/// construction.
 ///
 /// # Every side always draws
 ///
 /// An undecorated side takes [`DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM`] rather
-/// than being skipped, because vanilla's `submit` calls `submitModelPart` for
-/// all four faces unconditionally. Skipping blank sides would draw a pot with
+/// than being skipped, because vanilla's own submit step submits a model
+/// part for all four faces unconditionally. Skipping blank sides would draw a pot with
 /// three invisible faces for the overwhelmingly common undecorated stack, and
 /// then **silently autocorrect** the moment a player added their first sherd —
 /// which is the failure that looks like a component-decode bug rather than a
@@ -3822,7 +3836,7 @@ impl DecoratedPotItemRig {
 /// item rather than guess", and the asymmetry is the point: there, an
 /// unrecognised path means we do not know what rig the item wants; here we know
 /// exactly what rig it wants and only one of its four sheets is unknown, and
-/// vanilla's own `getSideSprite` takes precisely this fallback.
+/// vanilla's own side-sprite lookup takes precisely this fallback.
 ///
 /// Unlike a banner's, no argument here is optional-by-shortfall — the sherds are
 /// a real decoded component (`lodestone_model::PotDecorations`), so a caller
@@ -3849,13 +3863,14 @@ pub fn decorated_pot_item_rig(
 }
 
 /// The entity-corpus model name a held `minecraft:trident` draws —
-/// `TridentSpecialRenderer.bake`'s `new TridentModel(bakeLayer(ModelLayers.TRIDENT))`.
+/// vanilla's own trident-item special renderer bakes its trident model from
+/// the trident model layer.
 ///
 /// # Why this is not an arm in [`special_item_rig`]
 ///
 /// Not because the rig is unported — it has been in the tree all along. The
 /// trident's mesh is `lodestone_assets::entity_models`' `"trident"` entry, the
-/// same one `ThrownTridentRenderer` draws a thrown trident with, and
+/// same one vanilla's own thrown-trident renderer draws a thrown trident with, and
 /// [`special_item_rig`]'s contract is that its `&'static str` is a key into
 /// [`BLOCK_ENTITY_MODELS`]. Returning an entity-corpus name from there would
 /// type-check, resolve to nothing in every one of that function's callers, and
@@ -3871,7 +3886,8 @@ pub fn decorated_pot_item_rig(
 ///
 /// Unlike a chest, there is no second key to return: the entity corpus binds a
 /// texture per entry (`EntityTexture::Fixed("entity/trident/trident")`, which is
-/// `TridentModel.TEXTURE`), so a caller looks the sheet up by this same name
+/// vanilla's own trident-model texture), so a caller looks the sheet up by
+/// this same name
 /// rather than by a stem. That is why this returns one string and not a pair.
 ///
 /// # The GUI is deliberately not a caller
@@ -3890,8 +3906,9 @@ pub fn trident_item_rig(item_path: &str) -> Option<&'static str> {
 }
 
 /// The `lodestone_assets::entity_models` corpus entry a trident is registered
-/// under — shared by [`trident_item_rig`] and `ThrownTridentRenderer`'s own
-/// projectile path so the held and thrown tridents cannot drift onto two
+/// under — shared by [`trident_item_rig`] and vanilla's own thrown-trident
+/// renderer's own projectile path so the held and thrown tridents cannot
+/// drift onto two
 /// meshes.
 pub const TRIDENT_ENTITY_MODEL: &str = "trident";
 
@@ -3906,12 +3923,12 @@ pub const TRIDENT_ENTITY_MODEL: &str = "trident";
 ///
 /// The first landing multiplied the base colour directly into the opaque flag
 /// texture — an approximation, disclosed at the time: vanilla's own opaque
-/// body+flag pass (`Sheets.BANNER_BASE`, the plain wood/cloth sheet
+/// body+flag pass (its own plain wood/cloth sheet
 /// [`BANNER_BASE_TEXTURE_STEM`] names) is drawn **untinted**, and everything
 /// the player perceives as colour is a *second*, translucent
-/// `submitPatterns` draw layered over it — first the base mask tinted by the
+/// pattern-submit draw layered over it — first the base mask tinted by the
 /// base colour, then up to 16 loom pattern masks, each its own draw
-/// (`BannerRenderer.submitPatterns`). A single flat tint cannot show a
+/// (vanilla's own banner-pattern submit step). A single flat tint cannot show a
 /// pattern at all.
 ///
 /// Now that `minecraft:banner_patterns` decodes to a real, typed value (see
@@ -3964,8 +3981,8 @@ pub struct BannerItemRig {
     pub flag: (&'static str, &'static str),
 }
 
-// A skull special renderer submits the raw Y-down `SkullModel` cube
-// (`addBox(-4, -8, -4, 8, 8, 8)`, matching this crate's
+// A skull special renderer submits the raw Y-down skull model cube
+// (built from an `addBox(-4, -8, -4, 8, 8, 8)`-shaped box, matching this crate's
 // `SKULL_HUMANOID`/`SKULL_MOB` AABB). It does not supply a pose itself: 26.2's
 // `items/player_head.json` and every ordinary `items/*_head.json` instead put
 // `T(0.5, 0, 0.5) * Rx(180°)` on the `minecraft:special` model node. The parser
@@ -4406,9 +4423,9 @@ mod tests {
         }
     }
 
-    /// `translations()`'s per-direction override, predicted from the real jar's
+    /// Vanilla's own per-direction offset override, predicted from the real jar's
     /// arithmetic rather than restated: at `dust_progress = 3` (the maximum,
-    /// `BrushableBlockEntity.getCompletionState()`'s own ceiling),
+    /// vanilla's own completion-state accessor's own ceiling),
     /// `completionOffset = 3 / 10.0 * 0.75 = 0.225`, so an `EAST` hit pushes the
     /// item's `x` to `0.73 + 0.225 = 0.955` and leaves `y`/`z` at the base
     /// `0.0`/`0.5`.
@@ -4434,7 +4451,7 @@ mod tests {
 
     /// Every hit direction moves the item to a **distinct** point at the same
     /// `dust_progress`, and the outward distance grows monotonically with
-    /// progress — the two properties `BrushableBlockRenderer.translations`
+    /// progress — the two properties vanilla's own per-direction offset table
     /// exists to give: which face, and how far the dig has revealed the item.
     #[test]
     fn brushable_offset_differs_per_direction_and_grows_with_progress() {
@@ -4467,12 +4484,12 @@ mod tests {
     }
 
     /// The extra `Ry` term is `11°` on north/south/up/down and `101°` on
-    /// east/west — `(eastWest ? 90 : 0) + 11`, predicted rather than restated.
+    /// east/west — `(east_west ? 90 : 0) + 11`, predicted rather than restated.
     /// Told apart via the local `+Z` axis after the fixed `75°` turn is undone
     /// algebraically: composing the matrix's own rotation out would just
     /// restate the code under test, so this instead checks the two east/west
     /// results agree with each other and disagree with the four others, which
-    /// a dropped `eastWest` branch (always `+11°`) cannot produce.
+    /// a dropped `east_west` branch (always `+11°`) cannot produce.
     #[test]
     fn brushable_matrix_turns_an_extra_ninety_degrees_on_the_horizontal_axis() {
         use lodestone_assets::Direction;
@@ -4595,8 +4612,9 @@ mod tests {
     }
 
     /// The rotation term is the **opposite** of `facing_yaw_deg`, not the
-    /// facing itself — `TRANSFORMATIONS`'s own `entityDirection.getOpposite()
-    /// .toYRot()`, the one real surprise in this placement. A south-facing
+    /// facing itself — vanilla's own per-direction transformation map takes
+    /// the facing direction's opposite's yaw, the one real surprise in this
+    /// placement. A south-facing
     /// statue (`facing_yaw_deg = 0`, opposite = north = `180°`) must
     /// therefore differ from a north-facing one (`facing_yaw_deg = 180`,
     /// opposite = south = `0°`) — if the opposite term were dropped, south
@@ -4682,7 +4700,7 @@ mod tests {
         }
     }
 
-    /// `Axis.XP.rotationDegrees(90)` is what makes a food sprite lie *on* the
+    /// Vanilla's own X-axis rotation of 90 degrees is what makes a food sprite lie *on* the
     /// campfire instead of standing up out of it, and a missing `Rx` leaves the
     /// item vertical while every corner assertion above still passes.
     ///
@@ -4946,8 +4964,8 @@ mod tests {
         assert_eq!(ChestMaterial::from_block_path("chest_boat"), None);
     }
 
-    /// `getChestMaterial` checks copper and ender *before* the seasonal flag, so
-    /// December must not repaint them.
+    /// Vanilla's own chest-material accessor checks copper and ender *before* the
+    /// seasonal flag, so December must not repaint them.
     #[test]
     fn christmas_overrides_only_plain_and_trapped_chests() {
         assert_eq!(
@@ -5231,7 +5249,7 @@ mod tests {
     }
 
     /// The dragon's jaw and the piglin's ears are **assigned** by
-    /// `setupAnim`, not added to their authored rest pose, and at rest the
+    /// vanilla's own animation update, not added to their authored rest pose, and at rest the
     /// assigned value differs from the authored one in both cases. Predicting
     /// both hypotheses is the point: reading the mesh's own rest pose gives
     /// `0.0` for the jaw and `±PI/6` for the ears, and both are plausible
@@ -5524,7 +5542,7 @@ mod tests {
     }
 
     /// The six facings are six distinct placements, and a down-facing box is the
-    /// up-facing one turned over — the `Direction.getRotation()` port.
+    /// up-facing one turned over — the direction-to-rotation port.
     #[test]
     fn every_shulker_facing_is_a_distinct_placement() {
         let facings = [
@@ -5571,7 +5589,7 @@ mod tests {
         assert_eq!(ShulkerFacing::default(), ShulkerFacing::Up);
     }
 
-    /// `BellModel.setupAnim`'s exact formula, predicted independently of the
+    /// Vanilla's own bell animation update's exact formula, predicted independently of the
     /// port rather than by re-deriving its own arithmetic: choosing
     /// `ticks = pi^2 / 2` makes `sin(ticks / pi) == sin(pi/2) == 1` exactly,
     /// so the only remaining unknown is `base_rot = 1 / (4 + ticks/3)` and
@@ -5977,9 +5995,9 @@ mod tests {
         );
     }
 
-    /// `Direction.getClockWise().toYRot()`, hand-expanded from the jar's own two
-    /// tables (`Direction.getClockWise`: north→east→south→west→north, and
-    /// `toYRot`: south 0, west 90, north 180, east 270).
+    /// Vanilla's own clockwise-rotated yaw, hand-expanded from the jar's own two
+    /// tables (the clockwise-turn table: north→east→south→west→north, and
+    /// the yaw table: south 0, west 90, north 180, east 270).
     ///
     /// The wrong hypothesis is not an error but a quarter turn, and it is
     /// spelled with the function *next to* the right one, so this asserts both
@@ -6009,7 +6027,8 @@ mod tests {
         assert_eq!(horizontal_facing_clockwise_yaw("up"), None);
     }
 
-    /// `BookModel.State.forAnimation(0.0, 0.1, 0.9, 1.2)` collapses to a
+    /// Vanilla's own book animation-state constructor, called with
+    /// `(0.0, 0.1, 0.9, 1.2)`, collapses to a
     /// constant, computed here from the jar's four literals rather than by
     /// reading [`LECTERN_BOOK_OPENNESS`] back.
     ///
@@ -6032,7 +6051,8 @@ mod tests {
         );
     }
 
-    /// The six posed parts, against `BookModel.setupAnim` transcribed by hand.
+    /// The six posed parts, against vanilla's own book animation update
+    /// transcribed by hand.
     ///
     /// `seam` must be absent from the list: the jar never poses it, and its rest
     /// `rotation(0, PI/2, 0)` is the spine's quarter turn — an override with a
@@ -6300,7 +6320,7 @@ mod special_item_tests {
 
     /// A held chest is always the **single** chest layer, never a double half.
     ///
-    /// `ChestSpecialRenderer.Unbaked`'s `chest_type` defaults to `ChestType.SINGLE`
+    /// Vanilla's own unbaked chest special renderer's `chest_type` defaults to SINGLE
     /// and no 26.2 item definition overrides it. The two double halves are 15 texels
     /// wide against the single's 14 and each omits the face meeting its partner, so
     /// picking one of those for an item leaves a chest with a hole in its side — and
@@ -6938,8 +6958,8 @@ mod special_item_tests {
     /// An undecorated pot resolves to five instances — the base plus all
     /// four sides, every side falling back to
     /// [`DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM`] — matching
-    /// `DecoratedPotRenderer.submit`'s own unconditional four
-    /// `submitModelPart` calls: a blank side is drawn with the default
+    /// vanilla's own decorated-pot renderer's own unconditional four
+    /// part-submit calls: a blank side is drawn with the default
     /// sprite, not skipped.
     #[test]
     fn an_undecorated_pot_resolves_to_a_base_and_four_default_sides() {
@@ -7131,7 +7151,7 @@ mod special_item_tests {
 
     /// Outside-arithmetic control on the scan's geometry alone, independent of
     /// which blocks are placed: exactly [`CONDUIT_FRAME_CANDIDATE_COUNT`] cells
-    /// qualify, matching `ConduitBlockEntity.MIN_KILL_SIZE` — "hunting" is a
+    /// qualify, matching vanilla's own "hunting" threshold — "hunting" is a
     /// full house, not a majority.
     #[test]
     fn conduit_frame_candidate_count_is_42_and_matches_min_kill_size() {
@@ -7145,7 +7165,7 @@ mod special_item_tests {
 
     /// The conjunction trap: a room built entirely of frame blocks (all 42
     /// candidates present) is still an **empty** frame if even one cell of the
-    /// conduit's own inner 3×3×3 is not water — vanilla's `updateShape`
+    /// conduit's own inner 3×3×3 is not water — vanilla's own shape update
     /// returns before the 5×5×5 pass ever runs. A resolver that scored the
     /// outer ring independently of the inner-cube gate would activate here;
     /// vanilla does not.
@@ -7466,9 +7486,9 @@ mod special_item_tests {
         }
     }
 
-    /// Only the eye reads `camera_orientation` — vanilla's
-    /// `poseStack.mulPose(camera.orientation)` sits inside the eye's own
-    /// `pushPose`/`popPose` pair alone. Changing it must move the eye's
+    /// Only the eye reads `camera_orientation` — vanilla's own
+    /// pose-stack multiply by the camera orientation sits inside the eye's own
+    /// push/pop pose pair alone. Changing it must move the eye's
     /// transform and leave the cage's and both wind planes' untouched.
     #[test]
     fn resolve_conduit_only_the_eye_billboards_with_camera_orientation() {
