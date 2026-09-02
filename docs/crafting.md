@@ -13,7 +13,7 @@ toast) layered on top. Our own server now computes crafting results too — see
 
 ### Who computes the result slot
 
-**The server does.** Vanilla's `CraftingMenu.slotsChanged` runs server-side
+**The server does.** Vanilla's own crafting-menu slot-change hook runs server-side
 and pushes the result as a `container_set_slot` for slot 0; the vanilla
 client never matches recipes itself. This client does the same, so a local
 recipe corpus is **not** on the critical path for "put items in, see the

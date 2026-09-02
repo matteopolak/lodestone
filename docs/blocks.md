@@ -147,9 +147,10 @@ target's pixel size so it always matches the surface actually drawn to.
 `lodestone_data::sound_types` is the per-state break/step/place/hit/fall
 sound census — `LEVEL_EVENT` 2001 (a block break) carries only a state id and
 nothing else, so a client without this table can decode the packet perfectly
-and still have nothing to play. Measured: 126 distinct `SoundType` values
+and still have nothing to play. Measured: 126 distinct vanilla sound-type values
 over 32,366 states (packed as a 126-entry table plus a per-state `u8` index,
-~19× smaller than a per-state tuple). Hand-transcribing `SoundType.java`
+~19× smaller than a per-state tuple). Hand-transcribing vanilla's own sound-type
+registration
 would have been wrong in three separate, measured ways: it declares 127
 constants but only 126 are reachable from any real block (`TWISTING_VINES` is
 dead — vanilla's twisting-vines blocks use `WEEPING_VINES` instead); `IRON`
@@ -157,25 +158,26 @@ and `METAL` are different types and the obvious name-to-block pairing is
 backwards (`iron_block` is `IRON`; `METAL`, at pitch 1.5, belongs to gold/
 diamond/emerald blocks, rails and hoppers); and two constants mix families
 (`HARD_CROP` is wood's four sounds plus a different placement sound). Air
-itself has a `SoundType` (stone's) — a consumer must guard on `!is_air` or a
+itself has a sound type (stone's) — a consumer must guard on `!is_air` or a
 level event on an air cell plays a stone break. `minecraft:decorated_pot` is
 the one block whose sound is keyed by **state**, not by block (cracked vs.
 intact), which a block-keyed table structurally could not express.
 
-### Block support, placement consumption, and `Item.use`
+### Block support, placement consumption, and item use
 
 Three server-side joins that closed real gaps rather than adding new models:
 a block whose support cell goes to air or fluid now pops off and drops
 (`crate::block_support`, a **generated** 291-row table mapping each block to
-the nearest vanilla ancestor whose `canSurvive` is a self-destruct on one
+the nearest vanilla ancestor whose survival check is a self-destruct on one
 named support cell — hand-typing this table once lost 18 rows and invented
 8), placing a block now actually consumes the item (`ItemStack::consume`, the
 placement branch previously never touched the inventory), and a right-click
-in mid-air now dispatches vanilla's ordered `Item.use` arms
+in mid-air now dispatches vanilla's own ordered item-use arms
 (`CONSUMABLE` → eat, `EQUIPPABLE` → swap into the slot; shield-raise and
 kinetic-weapon are not modelled). Eating ends on the **server's own clock**,
 not a client packet — a per-tick arm lands the bite when `useItemRemaining`
-counts to zero, mirroring vanilla exactly. `Equippable.swapWithEquipmentSlot`'s
+counts to zero, mirroring vanilla exactly. Vanilla's own equip-slot-swap
+routine's
 count branch matters: with `count <= 1` the whole stack swaps and the old
 piece returns to the hand; with `count > 1` only one item equips and the rest
 stays in the hand while the old piece goes to inventory (or the floor).
