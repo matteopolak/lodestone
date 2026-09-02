@@ -9,7 +9,7 @@
 //! real 26.2 server (`oracle-java/ToolOracle.java`), binding the vanilla data
 //! pack's tags, running the item component initializers, and then reading:
 //!
-//! * `BuiltInRegistries.BLOCK`'s registration order (`B` lines),
+//! * vanilla's own block registry's registration order (`B` lines),
 //! * every bound `minecraft:block` tag's membership (`T` lines),
 //! * every item's prototype `minecraft:tool` component (`I`/`R` lines).
 //!
@@ -511,7 +511,7 @@ fn generate_block_enum(dump: &Dump) -> String {
 
     let _ = writeln!(
         out,
-        "/// The global block-state id of each block's `defaultBlockState()`, indexed by\n\
+        "/// The global block-state id of each block's own default-block-state, indexed by\n\
          /// registry id.\n\
          ///\n\
          /// The default is **not** the block's lowest state id — it differs for 661 of the\n\
@@ -1158,7 +1158,8 @@ fn block_registry_order_agrees_with_mojangs_registries_report() {
 /// vanilla data pack (`.cache/mc/26.2/src/data/minecraft/tags/block/**.json`)
 /// rather than from our JVM dump.
 ///
-/// The dump reads `Registry.getTags()` *after* `TagLoader` has resolved nested
+/// The dump reads vanilla's own registry "get tags" accessor *after* its own
+/// tag loader has resolved nested
 /// `#tag` references and dropped optional entries; this walks the raw JSON and
 /// resolves those references independently, so a mistake in the oracle's tag
 /// binding (the failure mode where every tag comes back empty, or a nested
@@ -1187,7 +1188,7 @@ fn block_tag_membership_agrees_with_the_vanilla_datapack() {
         .map(|(id, name)| (name.as_str(), u16::try_from(id).expect("fits u16")))
         .collect();
 
-    // Every tag file, keyed the way the wire and `TagKey.location()` write it.
+    // Every tag file, keyed the way the wire and vanilla's own tag-key location accessor write it.
     let mut raw: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     collect_tag_files(&tag_root, &mut String::new(), &mut raw);
     assert_eq!(

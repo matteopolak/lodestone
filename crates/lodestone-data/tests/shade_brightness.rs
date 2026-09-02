@@ -7,9 +7,9 @@
 //!
 //! # What is being anchored
 //!
-//! `BlockModelLighter.prepareQuadAmbientOcclusion` darkens a smooth-lit vertex
-//! by `cache.getShadeBrightness(state, level, pos)`, i.e.
-//! `BlockBehaviour.getShadeBrightness`:
+//! Vanilla's own "prepare quad ambient occlusion" step darkens a smooth-lit vertex
+//! by its own shade-brightness cache accessor, i.e.
+//! vanilla's own "get shade brightness" accessor:
 //! `state.isCollisionShapeFullBlock(level, pos) ? 0.2F : 1.0F`, with seven class
 //! overrides. That is a **collision** predicate, and a renderer naturally has a
 //! *culling* one to hand instead — the two agree on stone, slabs, water and
@@ -20,8 +20,8 @@
 //!
 //! `tests/support/shade_brightness_jvm.txt` is an authoritative dump produced by
 //! booting the real 26.2 server (`oracle-java/ShadeBrightnessOracle.java`) and
-//! reading, per block state, `BlockStateBase.getShadeBrightness` (column `S`,
-//! reduced to `== 0.2F`) and `BlockStateBase.isCollisionShapeFullBlock` (column
+//! reading, per block state, vanilla's own "get shade brightness" accessor (column `S`,
+//! reduced to `== 0.2F`) and its own "is collision shape full block" check (column
 //! `F`, the base formula with every override stripped). Neither is in
 //! `blocks.json`, which carries no geometry at all, and `vendor/minecraft-data`
 //! has no 26.x data.
@@ -29,7 +29,7 @@
 //! Two columns exist purely so this test's claims are non-vacuous:
 //!
 //! * `V <floatBits> <count>` — the histogram of every distinct
-//!   `getShadeBrightness` return value across all 32,366 states. Two entries
+//!   "get shade brightness" return value across all 32,366 states. Two entries
 //!   means the one-bit encoding is **lossless**; a third would mean the bitset
 //!   is silently wrong ([`shade_brightness_returns_exactly_two_distinct_values`]).
 //! * `F` — the base formula alone, so
@@ -91,7 +91,7 @@ const DUMP: &str = include_str!("support/shade_brightness_jvm.txt");
 struct Dump {
     state_count: usize,
     block_count: usize,
-    /// `O` rows: block name -> the class declaring its `getShadeBrightness`.
+    /// `O` rows: block name -> the class declaring its own "get shade brightness" accessor.
     overrides: BTreeMap<String, String>,
     /// `V` rows: raw float bits -> how many states returned that value.
     histogram: BTreeMap<u32, usize>,
@@ -240,7 +240,7 @@ fn generate(dump: &Dump) -> String {
     let set = dump.shade_occludes.iter().filter(|&&b| b).count();
     let _ = writeln!(
         out,
-        "/// Per-state `BlockStateBase.getShadeBrightness(..) == 0.2F` — vanilla's\n\
+        "/// Per-state vanilla's own \"get shade brightness\" accessor `== 0.2F` — vanilla's\n\
          /// ambient-occlusion occluder test — packed one bit per state: bit `id % 8` of\n\
          /// byte `id / 8`. {set} of {} states are set.",
         dump.state_count
@@ -304,10 +304,11 @@ fn shade_brightness_returns_exactly_two_distinct_values() {
     );
 }
 
-/// `getShadeBrightness` is `protected`, so the set of *blocks* it affects is a
+/// Vanilla's own "get shade brightness" accessor is `protected`, so the set of
+/// *blocks* it affects is a
 /// property of the class hierarchy, not of any data file. This asserts the seven
 /// classes mechanically and checks the family sizes, so nobody is tempted to
-/// hand-type a block list (`TransparentBlock` is 26 blocks wide).
+/// hand-type a block list (the transparent-block base class is 26 blocks wide).
 #[test]
 fn exactly_seven_classes_override_shade_brightness() {
     let dump = parse_dump(DUMP);
@@ -390,7 +391,7 @@ fn deriving_from_the_collision_shape_alone_gets_39_states_wrong() {
 // ---------------------------------------------------------------------------
 
 /// Every leaf state darkens an AO corner. This is the divergence the predicate
-/// swap is *for*: leaves are a full collision cube with no `getShadeBrightness`
+/// swap is *for*: leaves are a full collision cube with no "get shade brightness"
 /// override, so vanilla shades the underside of a canopy at `0.2`, while a
 /// culling-occlusion predicate (leaves are cutout, so they do not occlude)
 /// leaves it full-bright.
