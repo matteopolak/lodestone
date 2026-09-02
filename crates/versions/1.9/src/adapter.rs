@@ -24,7 +24,6 @@ use crate::canonical::{self, FallbackTally};
 use crate::entity_types;
 use crate::item_types;
 use crate::particle_ids;
-use crate::packet_ids::{handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, MapChunk, UnloadChunk};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::{
@@ -52,8 +51,18 @@ use crate::packets::window::{
     ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowItems,
 };
 
-/// Protocol version implemented by this adapter.
-pub const PROTOCOL: i32 = 340;
+/// Protocol version of the newest release this family speaks (Minecraft
+/// 1.12.2), and the one a zero-argument [`adapter`] constructs.
+pub const PROTOCOL: i32 = PROTOCOL_1_12_2;
+
+/// Protocol version of Minecraft 1.9.4 — the era's opening release.
+pub const PROTOCOL_1_9_4: i32 = 110;
+/// Protocol version of Minecraft 1.10.2.
+pub const PROTOCOL_1_10_2: i32 = 210;
+/// Protocol version of Minecraft 1.11.2.
+pub const PROTOCOL_1_11_2: i32 = 316;
+/// Protocol version of Minecraft 1.12.2 — the era's closing release.
+pub const PROTOCOL_1_12_2: i32 = 340;
 
 /// Every protocol number this family speaks — the single source of truth for
 /// its coverage.
@@ -65,14 +74,180 @@ pub const PROTOCOL: i32 = 340;
 /// handle protocol N?" *without* constructing an adapter, now that
 /// construction takes the negotiated protocol (unit U2's multi-protocol seam).
 ///
-/// This family is single-protocol, so the slice has one entry. A
-/// multi-protocol family (the plan's v110/v498/v756 groupings) lists each
-/// protocol in its wire era here and selects the matching generated
-/// `packet_ids` table inside [`adapter_for`].
-pub const PROTOCOLS: &[i32] = &[PROTOCOL];
+/// This family is an *era* crate: one wire generation, four releases. The
+/// four protocols agree on every packet id and on all but nine packet shapes
+/// (`resource_pack_receive`, `named_sound_effect`, `sound_effect`, `collect`,
+/// `spawn_entity_living`, `title`, `block_place`, `keep_alive` and the
+/// entity-metadata type table), each of which is carried by a `since`/`until`
+/// predicate or an explicitly protocol-selected struct rather than by a
+/// second copy of the family. [`adapter_for`] selects that protocol's
+/// generated id table at construction.
+pub const PROTOCOLS: &[i32] = &[
+    PROTOCOL_1_9_4,
+    PROTOCOL_1_10_2,
+    PROTOCOL_1_11_2,
+    PROTOCOL_1_12_2,
+];
 
-/// Fixed decoding/encoding context for protocol 340.
-const CTX: Ctx = Ctx { version: PROTOCOL };
+
+/// The packet ids one protocol in this era assigns to the packets this
+/// adapter names.
+///
+/// The generated `packet_ids_*` tables are one module per protocol, so a
+/// `self.ids().block_dig` path can only ever mean *one* protocol's
+/// id. This struct is the indirection that lets a single adapter body serve
+/// four: it is resolved once, at construction, from the negotiated protocol,
+/// and every id an arm sends reads through it. Nothing in this file may name
+/// a generated module directly outside `packet_ids_from!` -- doing so is how
+/// a 1.9.4 client ends up sending 1.12.2's ids.
+///
+/// Handshake, status and login ids are identical across all four protocols
+/// (measured: the four generated tables differ only in the `play` section),
+/// but they are selected the same way rather than shared, so that a future
+/// era member which does move one cannot do so silently.
+#[derive(Debug)]
+struct PacketIds {
+    /// This protocol's whole clientbound play table, the denominator the
+    /// dispatch table is built against.
+    play_clientbound_entries: &'static [(&'static str, i32)],
+    /// `minecraft:set_protocol`, serverbound handshaking.
+    handshake_set_protocol: i32,
+    /// `minecraft:login_start`, serverbound login.
+    login_start: i32,
+    /// `minecraft:disconnect`, clientbound login.
+    login_disconnect: i32,
+    /// `minecraft:encryption_begin`, clientbound login.
+    login_encryption_begin: i32,
+    /// `minecraft:success`, clientbound login.
+    login_success: i32,
+    /// `minecraft:compress`, clientbound login.
+    login_compress: i32,
+    /// `minecraft:abilities`, serverbound play.
+    abilities: i32,
+    /// `minecraft:arm_animation`, serverbound play.
+    arm_animation: i32,
+    /// `minecraft:block_dig`, serverbound play.
+    block_dig: i32,
+    /// `minecraft:block_place`, serverbound play.
+    block_place: i32,
+    /// `minecraft:chat`, serverbound play.
+    chat: i32,
+    /// `minecraft:client_command`, serverbound play.
+    client_command: i32,
+    /// `minecraft:close_window`, serverbound play.
+    close_window: i32,
+    /// `minecraft:custom_payload`, serverbound play.
+    custom_payload: i32,
+    /// `minecraft:enchant_item`, serverbound play.
+    enchant_item: i32,
+    /// `minecraft:entity_action`, serverbound play.
+    entity_action: i32,
+    /// `minecraft:flying`, serverbound play.
+    flying: i32,
+    /// `minecraft:held_item_slot`, serverbound play.
+    held_item_slot: i32,
+    /// `minecraft:keep_alive`, serverbound play.
+    keep_alive: i32,
+    /// `minecraft:look`, serverbound play.
+    look: i32,
+    /// `minecraft:position`, serverbound play.
+    position: i32,
+    /// `minecraft:position_look`, serverbound play.
+    position_look: i32,
+    /// `minecraft:resource_pack_receive`, serverbound play.
+    resource_pack_receive: i32,
+    /// `minecraft:set_creative_slot`, serverbound play.
+    set_creative_slot: i32,
+    /// `minecraft:settings`, serverbound play.
+    settings: i32,
+    /// `minecraft:spectate`, serverbound play.
+    spectate: i32,
+    /// `minecraft:tab_complete`, serverbound play.
+    tab_complete: i32,
+    /// `minecraft:teleport_confirm`, serverbound play.
+    teleport_confirm: i32,
+    /// `minecraft:use_entity`, serverbound play.
+    use_entity: i32,
+    /// `minecraft:crafting_book_data`, serverbound play. Added in 1.12, so
+    /// `None` for the three earlier protocols in this era -- an `Option`
+    /// rather than a sentinel because "this protocol has no such packet" is
+    /// a real answer an arm has to handle, not an error value.
+    crafting_book_data: Option<i32>,
+}
+
+/// Builds a [`PacketIds`] from one generated table module.
+macro_rules! packet_ids_from {
+    ($table:ident, crafting_book_data = $crafting_book_data:expr) => {
+        PacketIds {
+            play_clientbound_entries: crate::$table::play::clientbound::ENTRIES,
+            handshake_set_protocol: crate::$table::handshaking::serverbound::SET_PROTOCOL,
+            login_start: crate::$table::login::serverbound::LOGIN_START,
+            login_disconnect: crate::$table::login::clientbound::DISCONNECT,
+            login_encryption_begin: crate::$table::login::clientbound::ENCRYPTION_BEGIN,
+            login_success: crate::$table::login::clientbound::SUCCESS,
+            login_compress: crate::$table::login::clientbound::COMPRESS,
+            abilities: crate::$table::play::serverbound::ABILITIES,
+            arm_animation: crate::$table::play::serverbound::ARM_ANIMATION,
+            block_dig: crate::$table::play::serverbound::BLOCK_DIG,
+            block_place: crate::$table::play::serverbound::BLOCK_PLACE,
+            chat: crate::$table::play::serverbound::CHAT,
+            client_command: crate::$table::play::serverbound::CLIENT_COMMAND,
+            close_window: crate::$table::play::serverbound::CLOSE_WINDOW,
+            custom_payload: crate::$table::play::serverbound::CUSTOM_PAYLOAD,
+            enchant_item: crate::$table::play::serverbound::ENCHANT_ITEM,
+            entity_action: crate::$table::play::serverbound::ENTITY_ACTION,
+            flying: crate::$table::play::serverbound::FLYING,
+            held_item_slot: crate::$table::play::serverbound::HELD_ITEM_SLOT,
+            keep_alive: crate::$table::play::serverbound::KEEP_ALIVE,
+            look: crate::$table::play::serverbound::LOOK,
+            position: crate::$table::play::serverbound::POSITION,
+            position_look: crate::$table::play::serverbound::POSITION_LOOK,
+            resource_pack_receive: crate::$table::play::serverbound::RESOURCE_PACK_RECEIVE,
+            set_creative_slot: crate::$table::play::serverbound::SET_CREATIVE_SLOT,
+            settings: crate::$table::play::serverbound::SETTINGS,
+            spectate: crate::$table::play::serverbound::SPECTATE,
+            tab_complete: crate::$table::play::serverbound::TAB_COMPLETE,
+            teleport_confirm: crate::$table::play::serverbound::TELEPORT_CONFIRM,
+            use_entity: crate::$table::play::serverbound::USE_ENTITY,
+            crafting_book_data: $crafting_book_data,
+        }
+    };
+}
+
+/// Minecraft 1.9.4's ids.
+static IDS_1_9_4: PacketIds = packet_ids_from!(packet_ids_110, crafting_book_data = None);
+/// Minecraft 1.10.2's ids.
+static IDS_1_10_2: PacketIds = packet_ids_from!(packet_ids_210, crafting_book_data = None);
+/// Minecraft 1.11.2's ids.
+static IDS_1_11_2: PacketIds = packet_ids_from!(packet_ids_316, crafting_book_data = None);
+/// Minecraft 1.12.2's ids.
+static IDS_1_12_2: PacketIds = packet_ids_from!(
+    packet_ids,
+    crafting_book_data = Some(crate::packet_ids::play::serverbound::CRAFTING_BOOK_DATA)
+);
+
+/// Resolves a negotiated protocol to its id table.
+///
+/// # Panics
+///
+/// Panics for a protocol outside [`PROTOCOLS`]. This is a construction-time
+/// check on a value the registry has already tested for membership, not a
+/// wire value: reaching it means a caller bypassed
+/// `VersionAdapter::supports`, and answering with some other protocol's ids
+/// would be the silent-wrong-wire failure this whole indirection exists to
+/// prevent.
+fn ids_for(protocol: i32) -> &'static PacketIds {
+    match protocol {
+        PROTOCOL_1_9_4 => &IDS_1_9_4,
+        PROTOCOL_1_10_2 => &IDS_1_10_2,
+        PROTOCOL_1_11_2 => &IDS_1_11_2,
+        PROTOCOL_1_12_2 => &IDS_1_12_2,
+        other => panic!(
+            "protocol {other} is outside this family's PROTOCOLS ({PROTOCOLS:?}); \
+             callers must test membership before constructing an adapter"
+        ),
+    }
+}
 
 /// Requested next-state value in the handshake for a login connection.
 const NEXT_STATE_LOGIN: i32 = 2;
@@ -121,6 +296,12 @@ fn recover_movement_state<'a>(
 /// satisfy `Sync`; packets are processed serially so there is no contention.
 #[derive(Debug, Clone)]
 pub struct V340Adapter {
+    /// The negotiated protocol this adapter speaks: one of [`PROTOCOLS`].
+    /// Every codec call in this file reads it through [`V340Adapter::ctx`],
+    /// and every packet id through [`V340Adapter::ids`].
+    protocol: i32,
+    /// This protocol's generated id table, resolved once at construction.
+    ids: &'static PacketIds,
     shape: Arc<Mutex<ChunkShape>>,
     /// Raw 1.12.2 dimension id from the most recent `login`/`respawn`, so a
     /// packet that identifies its dimension only implicitly (e.g.
@@ -179,11 +360,26 @@ impl Default for V340Adapter {
 }
 
 impl V340Adapter {
-    /// Creates a new adapter, defaulting to the overworld chunk shape until a
+    /// Creates a new adapter for the era's newest protocol ([`PROTOCOL`],
+    /// Minecraft 1.12.2), defaulting to the overworld chunk shape until a
     /// join packet announces the real dimension.
+    ///
+    /// Use [`adapter_for`] for any other member of the era.
     #[must_use]
     pub fn new() -> Self {
+        Self::for_protocol(PROTOCOL)
+    }
+
+    /// Creates a new adapter speaking `protocol`.
+    ///
+    /// # Panics
+    ///
+    /// Panics for a protocol outside [`PROTOCOLS`] — see [`ids_for`].
+    #[must_use]
+    pub fn for_protocol(protocol: i32) -> Self {
         Self {
+            protocol,
+            ids: ids_for(protocol),
             shape: Arc::new(Mutex::new(ChunkShape::overworld())),
             current_dimension: Arc::new(Mutex::new(0)),
             pending_tab_complete: Arc::new(Mutex::new(None)),
@@ -217,7 +413,7 @@ impl V340Adapter {
                 pitch: rotation.pitch,
                 on_ground,
             };
-            Some((play::serverbound::POSITION_LOOK, encode_body(&body)?))
+            Some((self.ids().position_look, self.encode_body(&body)?))
         } else if moved {
             let body = ServerboundPosition {
                 x: pos.x,
@@ -225,17 +421,17 @@ impl V340Adapter {
                 z: pos.z,
                 on_ground,
             };
-            Some((play::serverbound::POSITION, encode_body(&body)?))
+            Some((self.ids().position, self.encode_body(&body)?))
         } else if rotated {
             let body = ServerboundLook {
                 yaw: rotation.yaw,
                 pitch: rotation.pitch,
                 on_ground,
             };
-            Some((play::serverbound::LOOK, encode_body(&body)?))
+            Some((self.ids().look, self.encode_body(&body)?))
         } else if state.last_on_ground != on_ground {
             let body = ServerboundFlying { on_ground };
-            Some((play::serverbound::FLYING, encode_body(&body)?))
+            Some((self.ids().flying, self.encode_body(&body)?))
         } else {
             None
         };
@@ -327,16 +523,60 @@ pub fn adapter_for(protocol: i32) -> V340Adapter {
         "adapter_for({protocol}) is outside this family's PROTOCOLS ({PROTOCOLS:?}); \
          callers must test membership before constructing"
     );
-    V340Adapter::new()
+    V340Adapter::for_protocol(protocol)
 }
 
-/// Encodes a packet body into a fresh byte buffer.
-///
-/// Thin wrapper over the version-free [`lodestone_core::encode_body`], which
-/// returns a stringified error because `AdapterError` lives in
-/// `lodestone-model` and `lodestone-core` cannot depend on it.
-fn encode_body<T: Encode>(packet: &T) -> Result<Vec<u8>, AdapterError> {
-    lodestone_core::encode_body(packet, CTX).map_err(AdapterError::Encode)
+impl V340Adapter {
+    /// The codec context for the protocol this adapter was constructed for.
+    ///
+    /// Every `#[mc(since = N)]`/`#[mc(until = N)]` predicate and every
+    /// `#[mc(protocols = "a..=b")]` precondition in this family reads
+    /// `ctx.version`, so this is the single point at which "which protocol
+    /// am I speaking" reaches the codecs. It is a per-instance value, not a
+    /// constant, because one adapter type now serves four protocols.
+    const fn ctx(&self) -> Ctx {
+        Ctx {
+            version: self.protocol,
+        }
+    }
+
+    /// The generated packet-id table for the protocol this adapter was
+    /// constructed for.
+    const fn ids(&self) -> &'static PacketIds {
+        self.ids
+    }
+
+    /// Encodes a packet body into a fresh byte buffer.
+    ///
+    /// Thin wrapper over the version-free [`lodestone_core::encode_body`],
+    /// which returns a stringified error because `AdapterError` lives in
+    /// `lodestone-model` and `lodestone-core` cannot depend on it.
+    fn encode_body<T: Encode>(&self, packet: &T) -> Result<Vec<u8>, AdapterError> {
+        lodestone_core::encode_body(packet, self.ctx()).map_err(AdapterError::Encode)
+    }
+
+    /// Decodes a packet body from raw bytes.
+    fn decode_body<T: Decode>(&self, payload: &[u8]) -> Result<T, AdapterError> {
+        lodestone_core::decode_body(payload, self.ctx()).map_err(AdapterError::Decode)
+    }
+
+    /// Like [`Self::decode_body`] but additionally requires the payload to be
+    /// fully consumed. Used for packets whose whole body we decode (e.g. the
+    /// entity destroy id list), where trailing bytes signal a wrong layout and
+    /// must be rejected rather than silently ignored. Packets that
+    /// deliberately leave a tail unread (metadata terminators, fields we don't
+    /// model yet) keep using the lenient [`Self::decode_body`].
+    fn decode_body_exact<T: Decode>(&self, payload: &[u8]) -> Result<T, AdapterError> {
+        lodestone_core::decode_body_exact(payload, self.ctx()).map_err(AdapterError::Decode)
+    }
+
+    /// Builds a [`Directive::Send`] from a packet id and an encodable body.
+    fn send<T: Encode>(&self, packet_id: i32, packet: &T) -> Result<Directive, AdapterError> {
+        Ok(Directive::Send {
+            packet_id,
+            payload: self.encode_body(packet)?,
+        })
+    }
 }
 
 /// Encodes the serverbound `crafting_book_data` packet body for the
@@ -357,11 +597,6 @@ fn encode_crafting_book_settings(open: bool, filtering: bool) -> Vec<u8> {
     w.into_vec()
 }
 
-/// Decodes a packet body from raw bytes.
-fn decode_body<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
-    lodestone_core::decode_body(payload, CTX).map_err(AdapterError::Decode)
-}
-
 /// Maps a decode error to the adapter's decode-error variant. Used by the
 /// hand-decoded arms (`block_change`/`multi_block_change`/`entity_status`/
 /// `entity_head_rotation`) that read a [`Reader`] directly rather than going
@@ -369,24 +604,6 @@ fn decode_body<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
 /// `dec_err` helper.
 fn dec_err(err: impl std::fmt::Display) -> AdapterError {
     AdapterError::Decode(err.to_string())
-}
-
-/// Like [`decode_body`] but additionally requires the payload to be fully
-/// consumed. Used for packets whose whole body we decode (e.g. the entity
-/// destroy id list), where trailing bytes signal a wrong layout and must be
-/// rejected rather than silently ignored. Packets that deliberately leave a
-/// tail unread (metadata terminators, fields we don't model yet) keep using the
-/// lenient [`decode_body`].
-fn decode_body_exact<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
-    lodestone_core::decode_body_exact(payload, CTX).map_err(AdapterError::Decode)
-}
-
-/// Builds a [`Directive::Send`] from a packet id and an encodable body.
-fn send<T: Encode>(packet_id: i32, packet: &T) -> Result<Directive, AdapterError> {
-    Ok(Directive::Send {
-        packet_id,
-        payload: encode_body(packet)?,
-    })
 }
 
 /// Decodes a 1.8 JSON disconnect reason into a full [`Text`] tree via the
@@ -759,7 +976,10 @@ static PLAY_CLIENTBOUND_HANDLERS: &[(&str, lodestone_core::dispatch::Handler<Pla
     ("minecraft:combat_event", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_combat_event)),
     ("minecraft:world_border", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_world_border)),
     ("minecraft:open_sign_entity", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_open_sign_entity)),
-    ("minecraft:select_advancement_tab", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_select_advancement_tab)),
+    // 1.12 additions: absent from 110/210/316's tables entirely, so the
+    // handler declares the range in which the packet exists. `Table::build`
+    // skips it for the three earlier protocols and demands it for 340.
+    ("minecraft:select_advancement_tab", lodestone_core::dispatch::Handler::new(ProtocolRange::new(PROTOCOL_1_12_2, PROTOCOL_1_12_2), V340Adapter::play_select_advancement_tab)),
     ("minecraft:spawn_entity_painting", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_spawn_entity_painting)),
 ];
 
@@ -774,13 +994,31 @@ static PLAY_CLIENTBOUND_IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new("minecraft:world_event", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:map", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:entity", "bare entity-id packet with no move/look payload (minecraft-data packet_entity is just {entityId}); nothing observable to translate"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:craft_recipe_response", "v26-2 has this; backport"),
+    lodestone_core::dispatch::IGNORED::ranged(
+        "minecraft:craft_recipe_response",
+        "v26-2 has this; backport",
+        // Added in 1.12; the three earlier protocols in this era have no
+        // such packet, so the exemption is ranged rather than blanket.
+        ProtocolRange::new(PROTOCOL_1_12_2, PROTOCOL_1_12_2),
+    ),
     lodestone_core::dispatch::IGNORED::new("minecraft:bed", "removed protocol packet; modern client conveys the sleeping pose via entity metadata, v26-2 has no clientbound equivalent"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:unlock_recipes", "v26-2 has this; backport"),
+    lodestone_core::dispatch::IGNORED::ranged(
+        "minecraft:unlock_recipes",
+        "v26-2 has this; backport",
+        // Added in 1.12; the three earlier protocols in this era have no
+        // such packet, so the exemption is ranged rather than blanket.
+        ProtocolRange::new(PROTOCOL_1_12_2, PROTOCOL_1_12_2),
+    ),
     lodestone_core::dispatch::IGNORED::new("minecraft:resource_pack_send", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:camera", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:entity_metadata", "v26-2 has this; backport"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:advancements", "v26-2 has this; backport"),
+    lodestone_core::dispatch::IGNORED::ranged(
+        "minecraft:advancements",
+        "v26-2 has this; backport",
+        // Added in 1.12; the three earlier protocols in this era have no
+        // such packet, so the exemption is ranged rather than blanket.
+        ProtocolRange::new(PROTOCOL_1_12_2, PROTOCOL_1_12_2),
+    ),
     lodestone_core::dispatch::IGNORED::new("minecraft:entity_update_attributes", "v26-2 has this; backport"),
 ];
 
@@ -796,58 +1034,93 @@ impl V340Adapter {
     /// vocabulary expresses this cleanly; the only unused concept is
     /// [`ConnectionState::Configuration`], which 1.8 never enters.
     fn handle_login(&self, packet_id: i32, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        if packet_id == login::clientbound::COMPRESS {
-            let body: SetCompression = decode_body(payload)?;
+        if packet_id == self.ids().login_compress {
+            let body: SetCompression = self.decode_body(payload)?;
             return Ok(vec![Directive::SetCompression(body.threshold)]);
         }
-        if packet_id == login::clientbound::SUCCESS {
+        if packet_id == self.ids().login_success {
             // Validate the profile decodes (string UUID + name), then advance.
-            let _profile: LoginSuccess = decode_body(payload)?;
+            let _profile: LoginSuccess = self.decode_body(payload)?;
             return Ok(vec![Directive::SetState(ConnectionState::Play)]);
         }
-        if packet_id == login::clientbound::ENCRYPTION_BEGIN {
-            let _request: EncryptionRequest = decode_body(payload)?;
+        if packet_id == self.ids().login_encryption_begin {
+            let _request: EncryptionRequest = self.decode_body(payload)?;
             return Err(AdapterError::Unsupported(
                 "encryption / online-mode authentication (login encryption_begin) is not yet \
                  implemented; connect to an offline-mode server"
                     .to_owned(),
             ));
         }
-        if packet_id == login::clientbound::DISCONNECT {
-            let body: LoginDisconnect = decode_body(payload)?;
+        if packet_id == self.ids().login_disconnect {
+            let body: LoginDisconnect = self.decode_body(payload)?;
             return Ok(vec![Directive::Disconnect(json_reason_text(&body.reason))]);
         }
         Ok(Vec::new())
     }
 
+    /// This protocol's clientbound play dispatch table, built on first use
+    /// and then cached for the life of the process.
+    ///
+    /// One `OnceLock` per protocol in [`PROTOCOLS`], indexed the same way
+    /// [`ids_for`] resolves an id table, so a table built for 1.9.4 can never
+    /// be handed to a 1.12.2 adapter.
+    fn play_dispatch_table(
+        &self,
+    ) -> &'static lodestone_core::dispatch::Table<'static, PlayHandlerFn> {
+        static TABLES: [std::sync::OnceLock<
+            lodestone_core::dispatch::Table<'static, PlayHandlerFn>,
+        >; 4] = [
+            std::sync::OnceLock::new(),
+            std::sync::OnceLock::new(),
+            std::sync::OnceLock::new(),
+            std::sync::OnceLock::new(),
+        ];
+        let slot = match self.protocol {
+            PROTOCOL_1_9_4 => 0,
+            PROTOCOL_1_10_2 => 1,
+            PROTOCOL_1_11_2 => 2,
+            _ => 3,
+        };
+        TABLES[slot].get_or_init(|| {
+            lodestone_core::dispatch::Table::build(
+                self.protocol,
+                self.ids().play_clientbound_entries,
+                PLAY_CLIENTBOUND_HANDLERS,
+                PLAY_CLIENTBOUND_IGNORED,
+            )
+            .unwrap_or_else(|err| {
+                panic!(
+                    "v1-9 play dispatch table for protocol {} must build: every clientbound \
+                     ENTRIES id needs either a bound handler or a PLAY_CLIENTBOUND_IGNORED \
+                     reason covering this protocol -- {err}",
+                    self.protocol
+                )
+            })
+        })
+    }
+
     /// Handles a clientbound packet while in the play state.
     ///
-    /// Dispatch is a `lodestone_core::dispatch::Table` built once from
-    /// `play::clientbound::ENTRIES`, `PLAY_CLIENTBOUND_HANDLERS` and
-    /// `PLAY_CLIENTBOUND_IGNORED`, replacing the former if-chain and its
-    /// silent trailing `_ =>` island: an id in `ENTRIES` with neither a
-    /// handler nor an `IGNORED` reason now fails table construction by name
-    /// instead of being dropped forever with nothing red anywhere.
+    /// Dispatch is a `lodestone_core::dispatch::Table` built once **per
+    /// protocol** from that protocol's own clientbound `ENTRIES`,
+    /// `PLAY_CLIENTBOUND_HANDLERS` and `PLAY_CLIENTBOUND_IGNORED`, replacing
+    /// the former if-chain and its silent trailing `_ =>` island: an id in
+    /// `ENTRIES` with neither a handler nor an `IGNORED` reason fails table
+    /// construction by name instead of being dropped forever with nothing red
+    /// anywhere.
+    ///
+    /// Four protocols means four tables, cached independently, because the
+    /// id→handler mapping genuinely differs: 1.12 inserted `craft_recipe_
+    /// response`, `unlock_recipes`, `select_advancement_tab` and
+    /// `advancements` into the middle of the clientbound table, shifting
+    /// every id above `entity` by up to four.
     fn handle_play(
         &self,
         world: &mut dyn WorldSink,
         packet_id: i32,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
-        static TABLE: std::sync::OnceLock<lodestone_core::dispatch::Table<'static, PlayHandlerFn>> =
-            std::sync::OnceLock::new();
-        let table = TABLE.get_or_init(|| {
-            lodestone_core::dispatch::Table::build(
-                PROTOCOL,
-                play::clientbound::ENTRIES,
-                PLAY_CLIENTBOUND_HANDLERS,
-                PLAY_CLIENTBOUND_IGNORED,
-            )
-            .expect(
-                "v1-9 play dispatch table must build: every play::clientbound::ENTRIES id needs \
-                 either a bound handler or a PLAY_CLIENTBOUND_IGNORED reason",
-            )
-        });
+        let table = self.play_dispatch_table();
         match table.get(packet_id) {
             Some(handler) => handler(self, world, payload),
             // A packet id absent from this protocol's own `ENTRIES` table -- a
@@ -867,7 +1140,7 @@ impl V340Adapter {
     }
 
     fn play_login(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: JoinGame = decode_body(payload)?;
+        let body: JoinGame = self.decode_body(payload)?;
         // Record whether this dimension carries sky light before any chunk
         // arrives, so single `map_chunk` packets decode the right geometry.
         self.set_dimension(body.dimension);
@@ -904,21 +1177,21 @@ impl V340Adapter {
     fn play_unload_chunk(&self, world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         // 1.12.2 has a dedicated forget packet (two ints), unlike 1.8's
         // empty-bitmask trick.
-        let body: UnloadChunk = decode_body(payload)?;
+        let body: UnloadChunk = self.decode_body(payload)?;
         let pos = ChunkPos::new(body.chunk_x, body.chunk_z);
         world.unload(WorldChunkPos::new(body.chunk_x, body.chunk_z));
         return Ok(vec![Directive::Emit(ClientEvent::ChunkUnloaded { pos })]);
     }
 
     fn play_keep_alive(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let keep_alive: KeepAliveRequest = decode_body(payload)?;
+        let keep_alive: KeepAliveRequest = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::KeepAlive {
             id: keep_alive.id,
         })]);
     }
 
     fn play_chat(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: ClientboundChat = decode_body(payload)?;
+        let body: ClientboundChat = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::Chat {
             text: Text::from_json(&body.message),
             kind: chat_kind(body.position),
@@ -929,7 +1202,7 @@ impl V340Adapter {
     }
 
     fn play_position(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: ClientboundPositionLook = decode_body(payload)?;
+        let body: ClientboundPositionLook = self.decode_body(payload)?;
         let flags = TeleportFlags {
             relative_x: body.flags & REL_X != 0,
             relative_y: body.flags & REL_Y != 0,
@@ -944,7 +1217,7 @@ impl V340Adapter {
             teleport_id: body.teleport_id,
         };
         return Ok(vec![
-            send(play::serverbound::TELEPORT_CONFIRM, &confirm)?,
+            self.send(self.ids().teleport_confirm, &confirm)?,
             Directive::Emit(ClientEvent::TeleportPlayer {
                 pos: Vec3::new(body.x, body.y, body.z),
                 rotation: Rotation::new(body.yaw, body.pitch),
@@ -954,7 +1227,7 @@ impl V340Adapter {
     }
 
     fn play_spawn_entity_living(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: SpawnEntityLiving = decode_body(payload)?;
+        let body: SpawnEntityLiving = self.decode_body(payload)?;
         let entity_type = entity_types::mob_type_name(body.kind)
             .ok_or_else(|| {
                 AdapterError::Decode(format!("unknown mob type id {} in spawn", body.kind))
@@ -978,7 +1251,7 @@ impl V340Adapter {
     }
 
     fn play_spawn_entity(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: SpawnObject = decode_body(payload)?;
+        let body: SpawnObject = self.decode_body(payload)?;
         let type_id = i32::from(body.kind);
         let entity_type = entity_types::object_type_name(type_id)
             .ok_or_else(|| {
@@ -1011,7 +1284,7 @@ impl V340Adapter {
     }
 
     fn play_named_entity_spawn(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: NamedEntitySpawn = decode_body(payload)?;
+        let body: NamedEntitySpawn = self.decode_body(payload)?;
         let entity_type = entity_types::PLAYER
             .parse()
             .map_err(|_| AdapterError::Decode("player key invalid".to_owned()))?;
@@ -1026,7 +1299,7 @@ impl V340Adapter {
     }
 
     fn play_rel_entity_move(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: RelEntityMove = decode_body(payload)?;
+        let body: RelEntityMove = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
             entity_id: body.entity_id,
             movement: EntityMovement::Relative(Vec3::new(
@@ -1040,7 +1313,7 @@ impl V340Adapter {
     }
 
     fn play_entity_look(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: EntityLook = decode_body(payload)?;
+        let body: EntityLook = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
             entity_id: body.entity_id,
             movement: EntityMovement::Relative(Vec3::new(0.0, 0.0, 0.0)),
@@ -1053,7 +1326,7 @@ impl V340Adapter {
     }
 
     fn play_entity_move_look(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: EntityMoveLook = decode_body(payload)?;
+        let body: EntityMoveLook = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
             entity_id: body.entity_id,
             movement: EntityMovement::Relative(Vec3::new(
@@ -1070,7 +1343,7 @@ impl V340Adapter {
     }
 
     fn play_entity_teleport(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: EntityTeleport = decode_body(payload)?;
+        let body: EntityTeleport = self.decode_body(payload)?;
         // 1.9+ sends the absolute position directly as `f64`; no
         // fixed-point conversion, unlike 1.8.
         return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
@@ -1085,7 +1358,7 @@ impl V340Adapter {
     }
 
     fn play_entity_velocity(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: EntityVelocityPacket = decode_body(payload)?;
+        let body: EntityVelocityPacket = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::EntityVelocity {
             entity_id: body.entity_id,
             velocity: Vec3::new(
@@ -1101,14 +1374,14 @@ impl V340Adapter {
         // `#[mc(varint)]`-on-`Vec<i32>` macro attribute (reported as a gap
         // and since landed) encodes both the length and each element as a
         // varint, replacing the former hand-decoded loop.
-        let body: EntityDestroy = decode_body_exact(payload)?;
+        let body: EntityDestroy = self.decode_body_exact(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::EntityRemoved {
             entity_ids: body.entity_ids,
         })]);
     }
 
     fn play_kick_disconnect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: KickDisconnect = decode_body(payload)?;
+        let body: KickDisconnect = self.decode_body(payload)?;
         return Ok(vec![Directive::Disconnect(json_reason_text(&body.reason))]);
     }
 
@@ -1119,7 +1392,7 @@ impl V340Adapter {
         // only ever round-tripped in `tests/join_flow.rs`, never wired into
         // `handle_play` — an island per CLAUDE.md's own definition (decoded
         // nowhere in production, tested only against our own encoder).
-        let body: UpdateHealth = decode_body(payload)?;
+        let body: UpdateHealth = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::HealthChanged {
             health: body.health,
             food: body.food,
@@ -1137,7 +1410,7 @@ impl V340Adapter {
         // portal into the nether/end must flip `ChunkShape` before that
         // column's light arrays are decoded, exactly as `LOGIN` does on
         // first join.
-        let body: Respawn = decode_body(payload)?;
+        let body: Respawn = self.decode_body(payload)?;
         self.set_dimension(body.dimension);
         return Ok(vec![Directive::Emit(ClientEvent::Respawned {
             dimension: dimension_id(body.dimension)?,
@@ -1196,7 +1469,7 @@ impl V340Adapter {
         // `DataFixerUpper` flattening fix (see `crate::canonical`'s module
         // docs) — not this crate's own encoder, and not a formula.
         let mut reader = Reader::new(payload);
-        let pos: Position = Position::decode(&mut reader, CTX).map_err(dec_err)?;
+        let pos: Position = Position::decode(&mut reader, self.ctx()).map_err(dec_err)?;
         let raw = reader.var_i32().map_err(dec_err)?;
         reader.ensure_empty().map_err(dec_err)?;
         let raw = u16::try_from(raw)
@@ -1316,7 +1589,7 @@ impl V340Adapter {
         // (`tests/inventory.rs`, wire round trips only); nothing here
         // ever called it, so no 1.12.2 container screen — a chest, a
         // furnace, a crafting table — could ever open.
-        let body: OpenWindow = decode_body(payload)?;
+        let body: OpenWindow = self.decode_body(payload)?;
         let menu_type = resolve_menu_type(&body.inventory_type, body.slot_count);
         return Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
             window_id: i32::from(body.window_id),
@@ -1326,7 +1599,7 @@ impl V340Adapter {
     }
 
     fn play_close_window(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: CloseWindow = decode_body_exact(payload)?;
+        let body: CloseWindow = self.decode_body_exact(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::ScreenClosed {
             window_id: i32::from(body.window_id),
         })]);
@@ -1338,7 +1611,7 @@ impl V340Adapter {
         // this packet the way it might elsewhere, so `state_id` is a
         // fixed 0 and `carried_item` stays `None` — this packet
         // genuinely does not say.
-        let body: WindowItems = decode_body(payload)?;
+        let body: WindowItems = self.decode_body(payload)?;
         let items = body.items.iter().map(slot_to_item_stack).collect();
         return Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
             window_id: i32::from(body.window_id),
@@ -1356,7 +1629,7 @@ impl V340Adapter {
         // screen open, anything else is a slot inside that open
         // container — matching exactly the three-way split the canonical
         // model already draws for the modern versions.
-        let body: SetSlot = decode_body(payload)?;
+        let body: SetSlot = self.decode_body(payload)?;
         let item = slot_to_item_stack(&body.item);
         if body.window_id == -1 {
             return Ok(vec![Directive::Emit(ClientEvent::CursorItemChanged { item })]);
@@ -1488,7 +1761,7 @@ impl V340Adapter {
         // `switch`, byte-identical to 1.8's shape, unlike 26.2's
         // per-entry action bitmask. See `packets::player_info`'s module
         // doc.
-        let body: PlayerInfo = decode_body_exact(payload)?;
+        let body: PlayerInfo = self.decode_body_exact(payload)?;
         let mut updated = Vec::new();
         let mut removed = Vec::new();
         for entry in body.entries {
@@ -1591,7 +1864,7 @@ impl V340Adapter {
         // version through 26.2). The already-defined [`HeldItemSlot`]
         // struct (`packets::window`) was never dispatched from here;
         // this is that decoder's first caller.
-        let body: HeldItemSlot = decode_body(payload)?;
+        let body: HeldItemSlot = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::HeldSlotChanged {
             slot: i32::from(body.slot),
         })]);
@@ -1631,7 +1904,7 @@ impl V340Adapter {
         // no note block ever plays, no piston ever animates, and no
         // chest lid ever opens for a 1.12.2 connection: those are all
         // this packet, not `block_change`.
-        let body: BlockAction = decode_body_exact(payload)?;
+        let body: BlockAction = self.decode_body_exact(payload)?;
         let block_id = u8::try_from(body.block_id).map_err(|_| {
             AdapterError::Decode(format!(
                 "block_action block id {} is outside the legacy 0..=255 block-type space",
@@ -1684,7 +1957,7 @@ impl V340Adapter {
         // `EquipmentSlot` ordinal, then a `slot` item stack. Unlike the
         // modern packet this carries exactly one slot per message, so
         // the emitted `equipment` vec always has a single entry.
-        let body: ClientboundEntityEquipment = decode_body_exact(payload)?;
+        let body: ClientboundEntityEquipment = self.decode_body_exact(payload)?;
         let ordinal = u8::try_from(body.slot).map_err(|_| {
             AdapterError::Decode(format!(
                 "entity_equipment slot ordinal {} is outside u8 range",
@@ -1706,7 +1979,7 @@ impl V340Adapter {
         // varint entity id, then a raw animation code byte. See
         // `Animation`'s own doc for the code table and why `1` maps to
         // `Other` rather than a named variant.
-        let body: Animation = decode_body_exact(payload)?;
+        let body: Animation = self.decode_body_exact(payload)?;
         let action = match body.animation {
             0 => AnimationAction::SwingMainHand,
             2 => AnimationAction::WakeUp,
@@ -1727,7 +2000,7 @@ impl V340Adapter {
         // fixed-point sound-position convention (real coordinate × 8);
         // this era carries no fixed audible range and no variant seed,
         // so both canonical fields are the "not present" default.
-        let body: NamedSoundEffect = decode_body_exact(payload)?;
+        let body: NamedSoundEffect = self.decode_body_exact(payload)?;
         let category_ordinal = u8::try_from(body.sound_category).map_err(|_| {
             AdapterError::Decode(format!(
                 "named_sound_effect category {} is outside u8 range",
@@ -1764,7 +2037,7 @@ impl V340Adapter {
         // string name — resolved through the generated legacy
         // `sound_ids` table (`vendor/minecraft-data`'s
         // `pc/1.12.2/sounds.json`, wire-order network ids).
-        let body: SoundEffect = decode_body_exact(payload)?;
+        let body: SoundEffect = self.decode_body_exact(payload)?;
         let category_ordinal = u8::try_from(body.sound_category).map_err(|_| {
             AdapterError::Decode(format!(
                 "sound_effect category {} is outside u8 range",
@@ -1804,7 +2077,7 @@ impl V340Adapter {
         // revision only ever sends 0/1/2 — the per-team-colour sidebar
         // slots are a later addition — and clears the slot with an
         // empty string rather than a dedicated marker.
-        let body: ScoreboardDisplayObjective = decode_body_exact(payload)?;
+        let body: ScoreboardDisplayObjective = self.decode_body_exact(payload)?;
         let slot = match body.position {
             0 => DisplaySlot::List,
             1 => DisplaySlot::Sidebar,
@@ -2064,7 +2337,7 @@ impl V340Adapter {
     }
 
     fn play_spawn_position(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: SpawnPosition = decode_body(payload)?;
+        let body: SpawnPosition = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::SpawnPositionChanged {
             dimension: dimension_id(self.current_dimension())?,
             pos: body.location.0,
@@ -2074,7 +2347,7 @@ impl V340Adapter {
     }
 
     fn play_update_time(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: UpdateTime = decode_body(payload)?;
+        let body: UpdateTime = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::TimeChanged {
             world_age: body.age,
             time_of_day: body.time,
@@ -2082,7 +2355,7 @@ impl V340Adapter {
     }
 
     fn play_difficulty(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: DifficultyPacket = decode_body(payload)?;
+        let body: DifficultyPacket = self.decode_body(payload)?;
         let difficulty = match body.difficulty {
             0 => Difficulty::Peaceful,
             1 => Difficulty::Easy,
@@ -2102,7 +2375,7 @@ impl V340Adapter {
     }
 
     fn play_playerlist_header(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: PlayerlistHeader = decode_body(payload)?;
+        let body: PlayerlistHeader = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::TabListChanged {
             header: Text::from_json(&body.header),
             footer: Text::from_json(&body.footer),
@@ -2110,7 +2383,7 @@ impl V340Adapter {
     }
 
     fn play_attach_entity(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: AttachEntity = decode_body(payload)?;
+        let body: AttachEntity = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::EntityLeashed {
             entity_id: body.entity_id,
             holder_id: (body.vehicle_id != 0).then_some(body.vehicle_id),
@@ -2118,7 +2391,7 @@ impl V340Adapter {
     }
 
     fn play_set_passengers(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: SetPassengers = decode_body(payload)?;
+        let body: SetPassengers = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(
             ClientEvent::EntityPassengersChanged {
                 vehicle_id: body.entity_id,
@@ -2128,7 +2401,7 @@ impl V340Adapter {
     }
 
     fn play_collect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: Collect = decode_body(payload)?;
+        let body: Collect = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::ItemPickup {
             item_entity_id: body.collected_entity_id,
             player_id: body.collector_entity_id,
@@ -2137,7 +2410,7 @@ impl V340Adapter {
     }
 
     fn play_entity_effect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: EntityEffect = decode_body(payload)?;
+        let body: EntityEffect = self.decode_body(payload)?;
         // 1.12.2's legacy effect id is 1-based; the shared
         // `lodestone-data` registry table is the 0-based modern
         // `minecraft:mob_effect` network id, and the two id spaces have
@@ -2167,7 +2440,7 @@ impl V340Adapter {
     }
 
     fn play_remove_entity_effect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: RemoveEntityEffect = decode_body(payload)?;
+        let body: RemoveEntityEffect = self.decode_body(payload)?;
         let name = mob_effect_name(i32::from(body.effect_id) - 1).ok_or_else(|| {
             AdapterError::Decode(format!("unknown legacy effect id {}", body.effect_id))
         })?;
@@ -2181,7 +2454,7 @@ impl V340Adapter {
     }
 
     fn play_spawn_entity_weather(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: SpawnEntityWeather = decode_body(payload)?;
+        let body: SpawnEntityWeather = self.decode_body(payload)?;
         let entity_type: ResourceKey = "minecraft:lightning_bolt"
             .parse()
             .map_err(|_| AdapterError::Decode("lightning_bolt key invalid".to_owned()))?;
@@ -2196,7 +2469,7 @@ impl V340Adapter {
     }
 
     fn play_spawn_entity_experience_orb(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: SpawnEntityExperienceOrb = decode_body(payload)?;
+        let body: SpawnEntityExperienceOrb = self.decode_body(payload)?;
         let entity_type: ResourceKey = "minecraft:experience_orb"
             .parse()
             .map_err(|_| AdapterError::Decode("experience_orb key invalid".to_owned()))?;
@@ -2419,7 +2692,7 @@ impl V340Adapter {
     }
 
     fn play_open_sign_entity(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: OpenSignEntity = decode_body(payload)?;
+        let body: OpenSignEntity = self.decode_body(payload)?;
         return Ok(vec![Directive::Emit(ClientEvent::SignEditorOpened {
             pos: body.location.0,
             // 1.12.2 has no front/back text distinction — that is a
@@ -2453,7 +2726,7 @@ impl V340Adapter {
     }
 
     fn play_spawn_entity_painting(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: SpawnEntityPainting = decode_body(payload)?;
+        let body: SpawnEntityPainting = self.decode_body(payload)?;
         let entity_type: ResourceKey = "minecraft:painting"
             .parse()
             .map_err(|_| AdapterError::Decode("painting key invalid".to_owned()))?;
@@ -2476,11 +2749,11 @@ impl V340Adapter {
 
 impl VersionAdapter for V340Adapter {
     fn protocol_version(&self) -> i32 {
-        PROTOCOL
+        self.protocol
     }
 
     fn minecraft_versions(&self) -> &'static [&'static str] {
-        &["1.12.2"]
+        &["1.9.4", "1.10.2", "1.11.2", "1.12.2"]
     }
 
     fn supports(&self, protocol: i32) -> bool {
@@ -2493,7 +2766,7 @@ impl VersionAdapter for V340Adapter {
         server: &ServerAddress,
     ) -> Result<Vec<Directive>, AdapterError> {
         let handshake = SetProtocol {
-            protocol_version: PROTOCOL,
+            protocol_version: self.protocol,
             server_host: server.host.clone(),
             server_port: server.port,
             next_state: NEXT_STATE_LOGIN,
@@ -2504,9 +2777,9 @@ impl VersionAdapter for V340Adapter {
             username: profile.username.clone(),
         };
         Ok(vec![
-            send(handshaking::serverbound::SET_PROTOCOL, &handshake)?,
+            self.send(self.ids().handshake_set_protocol, &handshake)?,
             Directive::SetState(ConnectionState::Login),
-            send(login::serverbound::LOGIN_START, &login_start)?,
+            self.send(self.ids().login_start, &login_start)?,
         ])
     }
 
@@ -2537,13 +2810,13 @@ impl VersionAdapter for V340Adapter {
         match action {
             ClientAction::KeepAliveResponse { id } => {
                 let body = KeepAliveResponse { id: *id };
-                Ok(Some((play::serverbound::KEEP_ALIVE, encode_body(&body)?)))
+                Ok(Some((self.ids().keep_alive, self.encode_body(&body)?)))
             }
             ClientAction::SendChat { text } => {
                 let body = ServerboundChat {
                     message: text.clone(),
                 };
-                Ok(Some((play::serverbound::CHAT, encode_body(&body)?)))
+                Ok(Some((self.ids().chat, self.encode_body(&body)?)))
             }
             // 1.8 has no dedicated command packet: a command is a chat message
             // beginning with a slash.
@@ -2551,7 +2824,7 @@ impl VersionAdapter for V340Adapter {
                 let body = ServerboundChat {
                     message: format!("/{command}"),
                 };
-                Ok(Some((play::serverbound::CHAT, encode_body(&body)?)))
+                Ok(Some((self.ids().chat, self.encode_body(&body)?)))
             }
             ClientAction::Move {
                 pos,
@@ -2570,8 +2843,8 @@ impl VersionAdapter for V340Adapter {
                     },
                 };
                 Ok(Some((
-                    play::serverbound::ARM_ANIMATION,
-                    encode_body(&body)?,
+                    self.ids().arm_animation,
+                    self.encode_body(&body)?,
                 )))
             }
 
@@ -2594,7 +2867,7 @@ impl VersionAdapter for V340Adapter {
                     location: Position(*pos),
                     face: face_ordinal(*face) as i8,
                 };
-                Ok(Some((play::serverbound::BLOCK_DIG, encode_body(&body)?)))
+                Ok(Some((self.ids().block_dig, self.encode_body(&body)?)))
             }
             // Item dropping also rides on `block_dig` (statuses 3/4).
             ClientAction::DropSelectedItemStack => {
@@ -2603,7 +2876,7 @@ impl VersionAdapter for V340Adapter {
                     location: Position::new(0, 0, 0),
                     face: 0,
                 };
-                Ok(Some((play::serverbound::BLOCK_DIG, encode_body(&body)?)))
+                Ok(Some((self.ids().block_dig, self.encode_body(&body)?)))
             }
             ClientAction::DropSelectedItem => {
                 let body = BlockDig {
@@ -2611,7 +2884,7 @@ impl VersionAdapter for V340Adapter {
                     location: Position::new(0, 0, 0),
                     face: 0,
                 };
-                Ok(Some((play::serverbound::BLOCK_DIG, encode_body(&body)?)))
+                Ok(Some((self.ids().block_dig, self.encode_body(&body)?)))
             }
             ClientAction::ReleaseUseItem => {
                 let body = BlockDig {
@@ -2619,7 +2892,7 @@ impl VersionAdapter for V340Adapter {
                     location: Position::new(0, 0, 0),
                     face: 0,
                 };
-                Ok(Some((play::serverbound::BLOCK_DIG, encode_body(&body)?)))
+                Ok(Some((self.ids().block_dig, self.encode_body(&body)?)))
             }
             // 1.9+ off-hand swap is `block_dig` status 6 (unlike protocol 47,
             // which has no off-hand and rejects this action).
@@ -2629,7 +2902,7 @@ impl VersionAdapter for V340Adapter {
                     location: Position::new(0, 0, 0),
                     face: 0,
                 };
-                Ok(Some((play::serverbound::BLOCK_DIG, encode_body(&body)?)))
+                Ok(Some((self.ids().block_dig, self.encode_body(&body)?)))
             }
 
             // Placing a block / using an item on a block. 1.12 sends a hand index
@@ -2651,7 +2924,7 @@ impl VersionAdapter for V340Adapter {
                     cursor_y: cursor.y,
                     cursor_z: cursor.z,
                 };
-                Ok(Some((play::serverbound::BLOCK_PLACE, encode_body(&body)?)))
+                Ok(Some((self.ids().block_place, self.encode_body(&body)?)))
             }
             // Using an item in the air: `block_place` with location (-1,-1,-1) and
             // direction -1.
@@ -2668,7 +2941,7 @@ impl VersionAdapter for V340Adapter {
                     cursor_y: 0.0,
                     cursor_z: 0.0,
                 };
-                Ok(Some((play::serverbound::BLOCK_PLACE, encode_body(&body)?)))
+                Ok(Some((self.ids().block_place, self.encode_body(&body)?)))
             }
 
             // Entity interaction. 1.9+ carries the hand for interact/interact-at
@@ -2683,7 +2956,7 @@ impl VersionAdapter for V340Adapter {
                         target: *entity_id,
                         mouse: 1,
                     };
-                    Ok(Some((play::serverbound::USE_ENTITY, encode_body(&body)?)))
+                    Ok(Some((self.ids().use_entity, self.encode_body(&body)?)))
                 }
                 EntityInteraction::Interact { hand } => {
                     let body = UseEntityInteract {
@@ -2691,7 +2964,7 @@ impl VersionAdapter for V340Adapter {
                         mouse: 0,
                         hand: hand_ordinal(*hand),
                     };
-                    Ok(Some((play::serverbound::USE_ENTITY, encode_body(&body)?)))
+                    Ok(Some((self.ids().use_entity, self.encode_body(&body)?)))
                 }
                 EntityInteraction::InteractAt { hand, target } => {
                     let body = UseEntityAt {
@@ -2702,7 +2975,7 @@ impl VersionAdapter for V340Adapter {
                         z: target.z as f32,
                         hand: hand_ordinal(*hand),
                     };
-                    Ok(Some((play::serverbound::USE_ENTITY, encode_body(&body)?)))
+                    Ok(Some((self.ids().use_entity, self.encode_body(&body)?)))
                 }
             },
 
@@ -2730,8 +3003,8 @@ impl VersionAdapter for V340Adapter {
                     jump_boost,
                 };
                 Ok(Some((
-                    play::serverbound::ENTITY_ACTION,
-                    encode_body(&body)?,
+                    self.ids().entity_action,
+                    self.encode_body(&body)?,
                 )))
             }
 
@@ -2742,13 +3015,13 @@ impl VersionAdapter for V340Adapter {
                 let body = ServerboundCloseWindow {
                     window_id: *window_id as u8,
                 };
-                Ok(Some((play::serverbound::CLOSE_WINDOW, encode_body(&body)?)))
+                Ok(Some((self.ids().close_window, self.encode_body(&body)?)))
             }
             ClientAction::SetCarriedItem { slot } => {
                 let body = ServerboundHeldItemSlot { slot: *slot as i16 };
                 Ok(Some((
-                    play::serverbound::HELD_ITEM_SLOT,
-                    encode_body(&body)?,
+                    self.ids().held_item_slot,
+                    self.encode_body(&body)?,
                 )))
             }
             ClientAction::SetCreativeModeSlot { slot, item } => {
@@ -2764,8 +3037,8 @@ impl VersionAdapter for V340Adapter {
                     item: Slot::Empty,
                 };
                 Ok(Some((
-                    play::serverbound::SET_CREATIVE_SLOT,
-                    encode_body(&body)?,
+                    self.ids().set_creative_slot,
+                    self.encode_body(&body)?,
                 )))
             }
             // Container clicks predate the modern `state_id` reconciliation.
@@ -2824,7 +3097,7 @@ impl VersionAdapter for V340Adapter {
                     skin_parts: skin_parts_bits(*skin_parts),
                     main_hand: main_hand_value(*main_hand),
                 };
-                Ok(Some((play::serverbound::SETTINGS, encode_body(&body)?)))
+                Ok(Some((self.ids().settings, self.encode_body(&body)?)))
             }
             ClientAction::SendBrand { brand } => {
                 let body = BrandPayload {
@@ -2832,8 +3105,8 @@ impl VersionAdapter for V340Adapter {
                     brand: brand.clone(),
                 };
                 Ok(Some((
-                    play::serverbound::CUSTOM_PAYLOAD,
-                    encode_body(&body)?,
+                    self.ids().custom_payload,
+                    self.encode_body(&body)?,
                 )))
             }
             ClientAction::ContainerButtonClick {
@@ -2847,7 +3120,7 @@ impl VersionAdapter for V340Adapter {
                     AdapterError::Encode(format!("button id {button_id} overflows i8"))
                 })?;
                 let body = EnchantItem { window_id, button };
-                Ok(Some((play::serverbound::ENCHANT_ITEM, encode_body(&body)?)))
+                Ok(Some((self.ids().enchant_item, self.encode_body(&body)?)))
             }
             ClientAction::SetFlying { flying } => {
                 let body = PlayerAbilities {
@@ -2855,7 +3128,7 @@ impl VersionAdapter for V340Adapter {
                     flying_speed: DEFAULT_FLYING_SPEED,
                     walking_speed: DEFAULT_WALKING_SPEED,
                 };
-                Ok(Some((play::serverbound::ABILITIES, encode_body(&body)?)))
+                Ok(Some((self.ids().abilities, self.encode_body(&body)?)))
             }
             ClientAction::ResourcePackResponse { response, .. } => {
                 // 1.12 `resource_pack_receive` sends only the result varint (no
@@ -2881,8 +3154,8 @@ impl VersionAdapter for V340Adapter {
                     result,
                 };
                 Ok(Some((
-                    play::serverbound::RESOURCE_PACK_RECEIVE,
-                    encode_body(&body)?,
+                    self.ids().resource_pack_receive,
+                    self.encode_body(&body)?,
                 )))
             }
             ClientAction::PongResponse { .. } => Err(AdapterError::Unsupported(
@@ -2937,7 +3210,7 @@ impl VersionAdapter for V340Adapter {
                 writer.string(command);
                 writer.bool(false);
                 writer.bool(false);
-                Ok(Some((play::serverbound::TAB_COMPLETE, writer.into_vec())))
+                Ok(Some((self.ids().tab_complete, writer.into_vec())))
             }
             ClientAction::PaddleBoat { .. } => Err(AdapterError::Unsupported(
                 "protocol 340 paddle boat encoding is not yet implemented".to_owned(),
@@ -2952,14 +3225,14 @@ impl VersionAdapter for V340Adapter {
             // varint action id per minecraft-data's protocol.json).
             ClientAction::Respawn => {
                 let body = ClientCommand { action: 0 };
-                Ok(Some((play::serverbound::CLIENT_COMMAND, encode_body(&body)?)))
+                Ok(Some((self.ids().client_command, self.encode_body(&body)?)))
             }
             // Clicking a name in the tab list while spectating. 1.12.2's
             // `spectate` packet carries the target's uuid directly, which the
             // model already supplies, so no entity registry is needed.
             ClientAction::TeleportToEntity { target } => {
                 let body = Spectate { target: *target };
-                Ok(Some((play::serverbound::SPECTATE, encode_body(&body)?)))
+                Ok(Some((self.ids().spectate, self.encode_body(&body)?)))
             }
             // The continuous spectator-follow action carries only a network
             // entity id, but 1.12.2's wire packet is the same uuid-keyed
@@ -2995,8 +3268,15 @@ impl VersionAdapter for V340Adapter {
                             .to_owned(),
                     ));
                 }
+                let Some(packet_id) = self.ids().crafting_book_data else {
+                    return Err(AdapterError::Unsupported(format!(
+                        "protocol {} predates the recipe book entirely (added in 1.12); \
+                         there is no crafting_book_data packet to encode into",
+                        self.protocol
+                    )));
+                };
                 Ok(Some((
-                    play::serverbound::CRAFTING_BOOK_DATA,
+                    packet_id,
                     encode_crafting_book_settings(*open, *filtering),
                 )))
             }
@@ -3025,6 +3305,9 @@ impl VersionAdapter for V340Adapter {
         }
     }
 }
+
+#[cfg(test)]
+use crate::packet_ids::play;
 
 #[cfg(test)]
 mod movement_tests {
@@ -3072,6 +3355,107 @@ mod dispatch_coverage_tests {
             PLAY_CLIENTBOUND_HANDLERS.len() + PLAY_CLIENTBOUND_IGNORED.len(),
             "every id in ENTRIES must be either handled or explicitly ignored"
         );
+    }
+
+    /// Every protocol in this era must build its own table from its own
+    /// `ENTRIES`. This is the check that fails if a 1.12-only packet is left
+    /// on a blanket handler/ignore range, or if a packet the earlier
+    /// protocols carry gains a 340-only range by accident.
+    #[test]
+    fn every_era_protocol_builds_its_own_dispatch_table() {
+        for &protocol in PROTOCOLS {
+            let ids = ids_for(protocol);
+            let table = Table::build(
+                protocol,
+                ids.play_clientbound_entries,
+                PLAY_CLIENTBOUND_HANDLERS,
+                PLAY_CLIENTBOUND_IGNORED,
+            )
+            .unwrap_or_else(|err| panic!("protocol {protocol} table must build: {err}"));
+
+            // 1.12 added four clientbound packets (craft_recipe_response,
+            // unlock_recipes, select_advancement_tab, advancements); the
+            // first three of those are ignored and the fourth handled, so the
+            // handled count rises by exactly one at 340.
+            let expected_handled = if protocol == PROTOCOL_1_12_2 {
+                PLAY_CLIENTBOUND_HANDLERS.len()
+            } else {
+                PLAY_CLIENTBOUND_HANDLERS.len() - 1
+            };
+            assert_eq!(
+                table.len(),
+                expected_handled,
+                "protocol {protocol} handled-packet count"
+            );
+        }
+    }
+
+    /// Negative control for the id seam, and the one this era crate exists to
+    /// make falsifiable: `update_health` is id **62** at 110/210/316 and id
+    /// **65** at 340 (the four 1.12 clientbound insertions shifted it). An
+    /// adapter constructed for 110 must therefore dispatch 62 and *not* 65,
+    /// and a 340 adapter the reverse. A single shared table -- the state
+    /// before this era merge -- fails this in both directions.
+    #[test]
+    fn update_health_dispatches_on_each_protocols_own_id() {
+        const UPDATE_HEALTH_110: i32 = 62;
+        const UPDATE_HEALTH_340: i32 = 65;
+        assert_eq!(
+            crate::packet_ids_110::play::clientbound::UPDATE_HEALTH,
+            UPDATE_HEALTH_110
+        );
+        assert_eq!(
+            crate::packet_ids::play::clientbound::UPDATE_HEALTH,
+            UPDATE_HEALTH_340
+        );
+
+        // Body of a real `update_health`: health 12.5 (f32), food 7 (varint),
+        // saturation 3.5 (f32). Chosen so a wrong-arm decode cannot coincide
+        // with a right one -- none of the three is a round number, and the
+        // varint sits between two floats.
+        let mut writer = Writer::default();
+        writer.f32(12.5);
+        writer.var_i32(7);
+        writer.f32(3.5);
+        let payload = writer.into_vec();
+
+        for (protocol, own_id, other_id) in [
+            (PROTOCOL_1_9_4, UPDATE_HEALTH_110, UPDATE_HEALTH_340),
+            (PROTOCOL_1_10_2, UPDATE_HEALTH_110, UPDATE_HEALTH_340),
+            (PROTOCOL_1_11_2, UPDATE_HEALTH_110, UPDATE_HEALTH_340),
+            (PROTOCOL_1_12_2, UPDATE_HEALTH_340, UPDATE_HEALTH_110),
+        ] {
+            let adapter = adapter_for(protocol);
+            let mut world = lodestone_world::World::default();
+
+            let directives = adapter
+                .handle_packet(&mut world, ConnectionState::Play, own_id, &payload)
+                .expect("this protocol's own update_health id must decode");
+            assert_eq!(
+                directives,
+                vec![Directive::Emit(ClientEvent::HealthChanged {
+                    health: 12.5,
+                    food: 7,
+                    saturation: 3.5,
+                })],
+                "protocol {protocol} must translate id {own_id} as update_health"
+            );
+
+            // The *other* protocol's id must not produce a health event.
+            // (At 110 id 65 is `held_item_slot`; at 340 id 62 is
+            // `entity_velocity` -- both decode to something else entirely,
+            // which is exactly the silent corruption a shared table causes.)
+            let other = adapter
+                .handle_packet(&mut world, ConnectionState::Play, other_id, &payload)
+                .unwrap_or_default();
+            assert!(
+                !other.iter().any(|directive| matches!(
+                    directive,
+                    Directive::Emit(ClientEvent::HealthChanged { .. })
+                )),
+                "protocol {protocol} must not translate id {other_id} as update_health"
+            );
+        }
     }
 
     /// Negative control: drop one real `IGNORED` entry (`minecraft:statistics`,
