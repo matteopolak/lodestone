@@ -2932,11 +2932,28 @@ async fn run_async(
                 // `world_type` (issue #592's items 1 and 2) picks which of the
                 // seven bundled generators to build — [`preset_chunk_source`]
                 // is the full mapping; `Normal` reproduces the old
-                // unconditional `overworld_chunk_source(seed)` call exactly.
-                // `(min_y, height)` come back alongside the erased source
-                // because only `OverworldChunkSource` exposes those as an
-                // inherent accessor — see `preset_chunk_source`'s own doc.
-                let (source, min_y, height) = preset_chunk_source(seed, world_type);
+                // unconditional call exactly. `(min_y, height)` come back
+                // alongside the erased source because only
+                // `OverworldChunkSource` exposes those as an inherent
+                // accessor — see `preset_chunk_source`'s own doc.
+                //
+                // The hosting protocol declares which worldgen bundle it
+                // needs (`worldgen_scope`); `preset_chunk_source` refuses
+                // rather than silently building from this crate's embedded
+                // bundle when that declaration does not match it. `v770` —
+                // today's only production `ServerProtocol` — always declares
+                // the bundle this crate embeds, so this refusal is a real
+                // guard against a *future* hosting family, not a live path.
+                let (source, min_y, height) =
+                    match preset_chunk_source(server_protocol.worldgen_scope(), seed, world_type) {
+                        Ok(built) => built,
+                        Err(mismatch) => {
+                            let _ = tx.try_send(NetUpdate::Error(format!(
+                                "cannot start this world: {mismatch}"
+                            )));
+                            return;
+                        }
+                    };
                 // Open to LAN (issue #535's scope 1). Taken before the
                 // in-memory constructors below because it is a *different
                 // server*: `IntegratedServer::open_to_lan` binds a TCP listener
@@ -3958,59 +3975,90 @@ fn run(
 /// ask). For `Flat`/`FlatAllDimensions`/`DebugAllBlockStates` this builds a
 /// throwaway `OverworldChunkSource` for the same seed purely to read its
 /// bounds — cheap (wrapping a generator does not generate a column) and
-/// correct rather than a guess: `worldgen_data::flat_generator`/
-/// `debug_generator` are documented to read their own `min_y`/`height` off
-/// that exact overworld noise-settings document, not an independent one, so
-/// the two are guaranteed equal without this crate hardcoding `(-64, 384)` —
-/// exactly the literal-drift gotcha `open_persistent_with_mobs`'s own call
-/// site already warns against.
+/// correct rather than a guess: the flat/debug generators are documented to
+/// read their own `min_y`/`height` off that exact overworld noise-settings
+/// document, not an independent one, so the two are guaranteed equal without
+/// this crate hardcoding `(-64, 384)` — exactly the literal-drift gotcha
+/// `open_persistent_with_mobs`'s own call site already warns against.
+///
+/// # The `scope` gate
+///
+/// `scope` is the hosting protocol's own declared worldgen scope
+/// (`ServerProtocol::worldgen_scope`) — every preset here builds from the
+/// same embedded bundle, so every one is refused uniformly when `scope`
+/// does not match what that bundle serves, rather than only the `Normal`
+/// preset (the one path with a checked constructor of its own) silently
+/// gating while the other five kept building from a bundle the hosting
+/// family never declared it wanted. Today's only production caller reports
+/// the scope this bundle serves, so the refusal branch is unreachable in
+/// practice; it exists for the day a second hosting family does not.
+///
+/// # Errors
+///
+/// The hosting protocol's declared scope, echoed back, when it does not
+/// match what this crate's embedded worldgen bundle serves.
 fn preset_chunk_source(
+    scope: lodestone_server::WorldgenScope,
     seed: i64,
     preset: crate::menu::create_world::WorldTypePreset,
-) -> (Arc<dyn lodestone_server::ChunkSource>, i32, i32) {
+) -> Result<(Arc<dyn lodestone_server::ChunkSource>, i32, i32), lodestone_server::WorldgenScopeMismatch>
+{
     use crate::menu::create_world::WorldTypePreset;
+    // The four presets with no checked constructor of their own share this
+    // one gate — see this function's own doc on why every preset is refused
+    // uniformly rather than only `Normal`.
+    let refuse_unless_served = || {
+        if lodestone_server::bundled_worldgen_serves(scope) {
+            Ok(())
+        } else {
+            Err(lodestone_server::WorldgenScopeMismatch { requested: scope })
+        }
+    };
     match preset {
         WorldTypePreset::Normal => {
-            let s = lodestone_server::overworld_chunk_source(seed);
+            let s = lodestone_server::overworld_chunk_source_checked(scope, seed)?;
             let (min_y, height) = (s.min_y(), s.height());
-            (Arc::new(s), min_y, height)
+            Ok((Arc::new(s), min_y, height))
         }
         WorldTypePreset::LargeBiomes => {
+            refuse_unless_served()?;
             let s = lodestone_server::overworld_chunk_source_of_type(
                 seed,
                 lodestone_server::WorldType::LargeBiomes,
             );
             let (min_y, height) = (s.min_y(), s.height());
-            (Arc::new(s), min_y, height)
+            Ok((Arc::new(s), min_y, height))
         }
         WorldTypePreset::Amplified => {
+            refuse_unless_served()?;
             let s = lodestone_server::overworld_chunk_source_of_type(
                 seed,
                 lodestone_server::WorldType::Amplified,
             );
             let (min_y, height) = (s.min_y(), s.height());
-            (Arc::new(s), min_y, height)
+            Ok((Arc::new(s), min_y, height))
         }
         WorldTypePreset::SingleBiomeSurface => {
+            refuse_unless_served()?;
             // No UI for choosing the biome yet — see this function's own doc
             // and `WorldTypePreset`'s module doc for why the bundled default
             // is used rather than guessing at a picker.
             let biome = lodestone_server::world_preset_single_biome_default_biome();
             let s = lodestone_server::single_biome_chunk_source(seed, &biome);
             let (min_y, height) = (s.min_y(), s.height());
-            (Arc::new(s), min_y, height)
+            Ok((Arc::new(s), min_y, height))
         }
         WorldTypePreset::Flat | WorldTypePreset::FlatAllDimensions => {
             let all_dimensions = matches!(preset, WorldTypePreset::FlatAllDimensions);
             let settings = lodestone_server::world_preset_flat_settings(all_dimensions);
             let s = lodestone_server::flat_chunk_source(settings);
-            let bounds = lodestone_server::overworld_chunk_source(seed);
-            (Arc::new(s), bounds.min_y(), bounds.height())
+            let bounds = lodestone_server::overworld_chunk_source_checked(scope, seed)?;
+            Ok((Arc::new(s), bounds.min_y(), bounds.height()))
         }
         WorldTypePreset::DebugAllBlockStates => {
             let s = lodestone_server::debug_chunk_source();
-            let bounds = lodestone_server::overworld_chunk_source(seed);
-            (Arc::new(s), bounds.min_y(), bounds.height())
+            let bounds = lodestone_server::overworld_chunk_source_checked(scope, seed)?;
+            Ok((Arc::new(s), bounds.min_y(), bounds.height()))
         }
     }
 }
@@ -5113,13 +5161,68 @@ mod tests {
     // `tests/no_production_source_names_testsupport.rs`.
     use lodestone_testsupport::unique_username;
 
-    /// Vanilla's own `handleResourcePackPush` condition, reproduced as a
-    /// truth table over the three policies × required/optional — the
-    /// **discriminating** input the module doc's evidence standards ask
-    /// for: `Enabled` and `Disabled` must answer *differently* for the same
-    /// `required`, and `Disabled` must answer differently for
-    /// required-vs-optional, or this table would not actually be testing
-    /// the condition rather than a constant.
+    /// Every preset must refuse uniformly once the hosting protocol's
+    /// declared worldgen scope stops matching what this crate's embedded
+    /// bundle serves — not just `Normal`, the one preset with a checked
+    /// constructor of its own. Without this, the five other presets would
+    /// keep silently building from the embedded bundle regardless of what
+    /// the hosting protocol actually declared, exactly the silent-default
+    /// hazard the scope gate exists to close.
+    #[test]
+    fn preset_chunk_source_refuses_every_preset_on_a_scope_mismatch() {
+        use crate::menu::create_world::WorldTypePreset;
+        let mismatched = lodestone_server::WorldgenScope::None;
+        for preset in [
+            WorldTypePreset::Normal,
+            WorldTypePreset::LargeBiomes,
+            WorldTypePreset::Amplified,
+            WorldTypePreset::SingleBiomeSurface,
+            WorldTypePreset::Flat,
+            WorldTypePreset::FlatAllDimensions,
+            WorldTypePreset::DebugAllBlockStates,
+        ] {
+            let Err(err) = preset_chunk_source(mismatched, 1, preset) else {
+                panic!("{preset:?} built a chunk source despite a hosting scope mismatch");
+            };
+            assert_eq!(
+                err,
+                lodestone_server::WorldgenScopeMismatch {
+                    requested: mismatched
+                },
+                "{preset:?} must refuse and name the requested scope, not build anyway"
+            );
+        }
+    }
+
+    /// The control for the gate above: every preset must still build when
+    /// the hosting protocol's declared scope really is the one this crate's
+    /// embedded bundle serves — a detector that refused unconditionally
+    /// would pass the test above for the wrong reason.
+    #[test]
+    fn preset_chunk_source_builds_every_preset_when_the_scope_matches() {
+        use crate::menu::create_world::WorldTypePreset;
+        for preset in [
+            WorldTypePreset::Normal,
+            WorldTypePreset::LargeBiomes,
+            WorldTypePreset::Amplified,
+            WorldTypePreset::SingleBiomeSurface,
+            WorldTypePreset::Flat,
+            WorldTypePreset::FlatAllDimensions,
+            WorldTypePreset::DebugAllBlockStates,
+        ] {
+            assert!(
+                preset_chunk_source(lodestone_server::BUNDLED_WORLDGEN_SCOPE, 1, preset).is_ok(),
+                "{preset:?} must still build when the hosting scope matches the embedded bundle"
+            );
+        }
+    }
+
+    /// The push-accept condition, reproduced as a truth table over the three
+    /// policies × required/optional — the **discriminating** input the
+    /// module doc's evidence standards ask for: `Enabled` and `Disabled`
+    /// must answer *differently* for the same `required`, and `Disabled`
+    /// must answer differently for required-vs-optional, or this table
+    /// would not actually be testing the condition rather than a constant.
     #[test]
     fn the_push_decision_matches_vanillas_own_condition() {
         use crate::menu::servers::ServerPackPolicy;
