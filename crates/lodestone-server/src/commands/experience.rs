@@ -1,4 +1,4 @@
-//! `/experience` (`/xp`), from `ExperienceCommand.java`.
+//! `/experience` (`/xp`).
 //!
 //! # `set` zeroes first, `add` does not
 //!
@@ -6,16 +6,17 @@
 //! only [`give_points`](crate::experience::PlayerExperience::give_points) (a
 //! points *delta*, which correctly re-derives level and progress through the
 //! carry algorithm) and [`take_levels`](crate::experience::PlayerExperience::take_levels)
-//! (a level delta downward, `Player.onEnchantmentPerformed`'s own operation).
+//! (a level delta downward, the same operation an enchanting-table hit
+//! performs on the player who paid the levels).
 //! `/xp set` is applied by zeroing the target's experience
 //! ([`crate::experience::PlayerExperience::respawn`], which resets to
 //! `Default`) and then applying the requested *absolute* value from that known
 //! zero — `give_points(amount)` for points, `take_levels(-amount)` for levels
 //! (subtracting a negative level delta is exactly "gain `amount` levels", the
-//! same trick `/xp add … levels` uses below). This is an approximation of
-//! vanilla's own `setExperienceLevels`/`setExperiencePoints`, which do not
-//! necessarily zero progress first; documented rather than silent, since no
-//! test here can currently observe the difference.
+//! same trick `/xp add … levels` uses below). This is an approximation of the
+//! real level/points setters, which do not necessarily zero progress first;
+//! documented rather than silent, since no test here can currently observe
+//! the difference.
 //!
 //! # Targets are `players()`; see [`crate::commands::kill`]'s module doc for why
 
@@ -26,7 +27,7 @@ use super::registrar::{Ctx, Registrar};
 use super::CommandResult;
 use crate::commands::Effect;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const XP_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {
@@ -116,15 +117,15 @@ fn query(
     };
     // `PlayerCandidate::xp_level`/`xp_points` — the same producer/mirror split
     // `game_mode` already has, republished by `crate::server::republish_experience`
-    // at every site that sends `ClientboundSetExperiencePacket` to the target's
-    // own connection. `points` here is the query formula
-    // (`Mth.floor(experienceProgress * getXpNeededForNextLevel())`, see
+    // at every site that sends the client's set-experience packet to the
+    // target's own connection. `points` here is the query formula
+    // (`floor(experienceProgress * xp_needed_for_next_level)`, see
     // `crate::experience::PlayerExperience::query_points`'s own doc), not the
     // lifetime total.
     let result = if points { target.xp_points } else { target.xp_level };
     let unit = if points { "experience points" } else { "experience levels" };
-    // `ExperienceCommand.queryExperience`'s own message shape:
-    // `"%s has %s <points|levels>"`, and its return value is the queried number.
+    // The real message shape: `"%s has %s <points|levels>"`, and its return
+    // value is the queried number.
     ctx.send_success(format!("{} has {result} {unit}", target.username));
     Ok(result)
 }

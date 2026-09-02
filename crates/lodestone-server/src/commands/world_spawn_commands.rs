@@ -1,26 +1,25 @@
-//! `/setworldspawn` and `/spawnpoint`, from `SetWorldSpawnCommand.java` and
-//! `SpawnPointCommand.java`.
+//! `/setworldspawn` and `/spawnpoint`.
 //!
-//! # `/spawnpoint` is self-only here, unlike vanilla's `<targets>` form
+//! # `/spawnpoint` is self-only here, unlike the real `<targets>` form
 //!
-//! Vanilla's tree accepts `/spawnpoint <targets> <pos> <angle>` for any set of
-//! players. [`crate::world_spawn::RespawnPoint`] is a **connection-local**
-//! variable (`dispatch_play_packet`'s own `respawn: &mut Option<RespawnPoint>`
-//! parameter, written today only by the bed-click arm), and reaching another
-//! connection's copy of it would need the same directed-effect plumbing
-//! `/gamemode <target>` uses — [`crate::commands::Effect`] carries no variant for
-//! it yet. So this registers only the no-target and `@s`-implicit forms; a
-//! multi-target `/spawnpoint` is future work once a `SetRespawnPoint` effect
-//! exists.
+//! The real command tree accepts `/spawnpoint <targets> <pos> <angle>` for
+//! any set of players. [`crate::world_spawn::RespawnPoint`] is a
+//! **connection-local** variable (`dispatch_play_packet`'s own
+//! `respawn: &mut Option<RespawnPoint>` parameter, written today only by the
+//! bed-click arm), and reaching another connection's copy of it would need
+//! the same directed-effect plumbing `/gamemode <target>` uses —
+//! [`crate::commands::Effect`] carries no variant for it yet. So this
+//! registers only the no-target and `@s`-implicit forms; a multi-target
+//! `/spawnpoint` is future work once a `SetRespawnPoint` effect exists.
 //!
-//! # The angle argument is a plain bounded float, not `minecraft:angle`
+//! # The angle argument is a plain bounded float, not the real angle parser
 //!
-//! Vanilla's `<angle>` node is `AngleArgument.angle()`, wired as
-//! `minecraft:angle` (id 28, no payload). `lodestone-command-mc` exposes no
-//! `McArg` for that parser yet, so this uses `FloatArgument` bounded to
-//! `-180.0..=180.0` — the same *value* domain, wired as `brigadier:float`
-//! instead. No captured fixture pins either command's tree shape, so this is a
-//! documented approximation rather than a parity gap against anything real.
+//! The real `<angle>` node is wired as `minecraft:angle` (id 28, no
+//! payload). `lodestone-command-mc` exposes no `McArg` for that parser yet,
+//! so this uses `FloatArgument` bounded to `-180.0..=180.0` — the same
+//! *value* domain, wired as `brigadier:float` instead. No captured fixture
+//! pins either command's tree shape, so this is a documented approximation
+//! rather than a parity gap against anything real.
 
 use lodestone_command::FloatArgument;
 use lodestone_command_mc::{BlockPosArg, Coordinates};
@@ -29,7 +28,7 @@ use lodestone_model::Vec3;
 use super::registrar::{Ctx, Registrar};
 use super::CommandResult;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const SPAWN_LEVEL: u8 = 2;
 
 /// Resolves a parsed [`Coordinates`] against the caller's own position — the
@@ -82,10 +81,10 @@ pub(super) fn register(registrar: &mut Registrar) {
         set_spawnpoint(ctx, pos)
     });
 
-    // Vanilla's angle node exists on `/spawnpoint` too, but `RespawnPoint` here
-    // carries no yaw at all (see the module doc) — parsed and discarded rather
-    // than left off the tree, so a client that typed one still gets a command
-    // that runs instead of a parse error.
+    // The real angle node exists on `/spawnpoint` too, but `RespawnPoint`
+    // here carries no yaw at all (see the module doc) — parsed and
+    // discarded rather than left off the tree, so a client that typed one
+    // still gets a command that runs instead of a parse error.
     let (sp_angle_node, _sp_angle_key) =
         registrar.arg(sp_pos_node, "angle", FloatArgument::bounded(-180.0, 180.0));
     registrar.exec(sp_angle_node, move |ctx| {
