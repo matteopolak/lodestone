@@ -1,4 +1,4 @@
-//! `/setblock` and `/fill`, from `SetBlockCommand.java` and `FillCommand.java`.
+//! `/setblock` and `/fill`.
 //!
 //! # Always self-targeted, and why
 //!
@@ -28,21 +28,20 @@
 //!
 //! # `/fill`'s volume cap
 //!
-//! `FillCommand.MAX_FILL_SIZE` is a real limit (32768 in vanilla,
-//! `commandModificationBlockLimit`'s default), refused with
-//! `commands.fill.toobig` before a single position is enumerated — checked
-//! against the *volume*, not after building the position list, so a
-//! `1000000 1000000 1000000` corner pair costs one multiplication rather than
-//! an allocation.
+//! The real limit is 32768 (the default command block-modification limit),
+//! refused with `commands.fill.toobig` before a single position is
+//! enumerated — checked against the *volume*, not after building the
+//! position list, so a `1000000 1000000 1000000` corner pair costs one
+//! multiplication rather than an allocation.
 
 use lodestone_command_mc::{BlockArg, BlockPosArg, Coordinates};
 
 use super::registrar::{Ctx, Registrar};
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const BLOCK_LEVEL: u8 = 2;
 
-/// `FillCommand.MAX_FILL_SIZE`.
+/// The real fill-size limit.
 const MAX_FILL_SIZE: i64 = 32_768;
 
 fn resolve_block_pos(ctx: &Ctx<'_>, coords: Coordinates) -> (i32, i32, i32) {

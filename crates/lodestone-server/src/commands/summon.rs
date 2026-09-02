@@ -1,5 +1,5 @@
-//! `/summon`, from `SummonCommand.java` — the mechanism this command needed
-//! was a synchronous single-mob spawn entry point reachable from an
+//! `/summon` — the mechanism this command needed was a synchronous
+//! single-mob spawn entry point reachable from an
 //! executor, and it already existed: [`crate::mobs::MobHandle::with`] plus
 //! [`crate::mobs::MobSim::spawn_species`] are both `pub` on the mob
 //! simulation's own handle, so this is an API-shape gap closed by
@@ -18,14 +18,14 @@
 //!
 //! # No NBT, and no position-validity check
 //!
-//! Vanilla's `<nbt>` argument needs a textual SNBT parser, which does not
+//! The real `<nbt>` argument needs a textual SNBT parser, which does not
 //! exist anywhere in this tree yet (see `crate::commands`' module doc's
 //! "Known gaps" for the same reason `/give`'s component patch is refused).
-//! `Level.isInSpawnableBounds` (a build-height range check) is also not
-//! reproduced — this crate has no command-reachable build-height constant
-//! plumbed here, and an out-of-range spawn simply produces a mob at an
-//! out-of-range position rather than a refusal, a smaller gap than a command
-//! that silently fails on a well-formed position.
+//! The real build-height range check is also not reproduced — this crate
+//! has no command-reachable build-height constant plumbed here, and an
+//! out-of-range spawn simply produces a mob at an out-of-range position
+//! rather than a refusal, a smaller gap than a command that silently fails
+//! on a well-formed position.
 
 use lodestone_command_mc::{Coordinates, EntityTypeArg, EntityTypeInput, Vec3Arg};
 use lodestone_model::{Difficulty, Vec3};
@@ -34,7 +34,7 @@ use super::registrar::{Ctx, Registrar};
 use super::source::SourceEntity;
 use super::CommandResult;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const SUMMON_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {
@@ -66,8 +66,8 @@ fn resolve_pos(ctx: &Ctx<'_>, coords: Coordinates) -> Vec3 {
     Vec3::new(x, y, z)
 }
 
-/// `SummonCommand.createEntity` + `spawnEntity`, minus NBT and the
-/// build-height bounds check — see the module doc for both.
+/// The real create-and-spawn-entity rule, minus NBT and the build-height
+/// bounds check — see the module doc for both.
 fn summon(ctx: &mut Ctx<'_>, entity: &EntityTypeInput, pos: Vec3) -> CommandResult {
     spawn_entity(ctx, entity, pos)?;
     ctx.send_success(format!("Summoned {}", entity.entity_type));
@@ -75,8 +75,8 @@ fn summon(ctx: &mut Ctx<'_>, entity: &EntityTypeInput, pos: Vec3) -> CommandResu
 }
 
 /// The mechanism `summon` needed and `execute summon <entity>` reuses
-/// verbatim (`ExecuteCommand.spawnEntityAndRedirect` calls the identical
-/// `SummonCommand.createEntity`): spawn one mob into the live sim and hand
+/// verbatim (the real `execute summon` modifier calls the identical
+/// create-entity rule): spawn one mob into the live sim and hand
 /// back the [`SourceEntity`] a caller can fold into a [`CommandSource`
 /// (super::source::CommandSource)`]. Split out of [`summon`] rather than
 /// having `execute`'s modifier re-derive the difficulty/peaceful/no-`mobs`
@@ -105,12 +105,12 @@ pub(super) fn spawn_entity(
 
     let entity_type = entity.entity_type.clone();
     let (uuid, entity_id) = mobs.with(|sim| {
-        // `finalize_spawn` (vanilla's `Mob::finalizeSpawn`, attribute/equipment
-        // randomisation on natural/command spawns) has no port here yet — see
+        // Spawn-time attribute/equipment randomisation (the finalize-spawn
+        // step run on natural/command spawns) has no port here yet — see
         // `crate::mobs`' own scope notes on `spawn_species`. Marked persistent
-        // so `EntitySpawnReason::COMMAND`'s exemption from natural despawn is at
-        // least honoured, the one `finalizeSpawn`-adjacent property this crate
-        // can cheaply keep.
+        // so the command-spawn exemption from natural despawn is at least
+        // honoured, the one finalize-spawn-adjacent property this crate can
+        // cheaply keep.
         let mob = sim.spawn_species(entity_type, pos);
         mob.set_persistent(true);
         (mob.uuid(), mob.id())
@@ -119,12 +119,12 @@ pub(super) fn spawn_entity(
     Ok(SourceEntity {
         uuid,
         entity_id,
-        // A summoned mob has no username — vanilla's own `@s` feedback for a
-        // non-player source falls back to the entity's own display name
-        // (`Entity.getDisplayName()`, its translated type name absent an
-        // NBT `CustomName`). This crate carries no localisation table, so the
-        // canonical id is the closest stand-in; it is never compared against
-        // a real login name anywhere this crate resolves selectors.
+        // A summoned mob has no username — the real `@s` feedback for a
+        // non-player source falls back to the entity's own display name (its
+        // translated type name absent an NBT `CustomName`). This crate
+        // carries no localisation table, so the canonical id is the closest
+        // stand-in; it is never compared against a real login name anywhere
+        // this crate resolves selectors.
         username: entity.entity_type.to_string(),
     })
 }
