@@ -42,8 +42,8 @@ two constant steps for the map. Both variants carry the same slope term: only th
 may differ, because a doubled map slope term makes its separation grow with projected slope and creates
 a curved/triangular floating edge at grazing angles. Applying a second scaled camera matrix to the body
 made the two surfaces round independently at large world coordinates; the trace showed their projected
-order reverse with camera and FOV changes. The raster layers are the forward-depth backend equivalent,
-not world-space nudges.
+order reverse with camera and FOV changes. The raster layers are this backend's equivalent of that
+ordering, not world-space nudges.
 
 Groups 0, 2 and 3 are the frame's existing shared bind groups, so a map draw adds exactly one texture,
 one bind group and one draw call.
@@ -268,7 +268,7 @@ write and the polygon offset together, so a live run under it settled nothing:
 | `LODESTONE_MAP_DISABLE_FRUSTUM_CULL=1` | only `prepare_framed_maps`' CPU item-frame frustum test | the frame reached `EntityDraw`, but the map's wall-offset AABB is the offending boundary |
 | `LODESTONE_MAP_DISABLE_BACKFACE_CULL=1` | only the map pipeline's back-face cull | the quad was prepared but its projected winding/facing is wrong; this does not affect the frame body |
 | `LODESTONE_MAP_DISABLE_DEPTH=1` | the map pipeline's depth test, its depth write **and** its polygon offset | the quad was prepared and rasterized but was displaced by one of those three; it will deliberately paint through world geometry while enabled. **This arm cannot say which** — use the three below |
-| `LODESTONE_MAP_DISABLE_DEPTH_TEST=1` | only the comparison (`Always` in place of `LessEqual`) | the quad genuinely loses a depth comparison against something already in the buffer |
+| `LODESTONE_MAP_DISABLE_DEPTH_TEST=1` | only the comparison (`Always` in place of `DEPTH_COMPARE_NEARER_OR_EQUAL`) | the quad genuinely loses a depth comparison against something already in the buffer |
 | `LODESTONE_MAP_DISABLE_DEPTH_WRITE=1` | only the depth write | the quad wins its own test and is then overdrawn by something that lost to the depth *it* wrote |
 | `LODESTONE_MAP_DISABLE_DEPTH_BIAS=1` | only `MAP_SURFACE_DEPTH_BIAS` | the polygon offset is displacing the picture. Note the measured prediction is that this arm makes the defect **worse or unchanged**: the bias only ever moves a fragment toward the eye, and an over-large one clamps rather than discarding (`docs/coplanar-overlay-depth.md`). If it *fixes* anything, that measurement is wrong |
 
@@ -297,6 +297,14 @@ thing keeping any of it. That is a load-bearing role the polygon offset was neve
 invisible frame's picture stands `1.01 / 128` of a block — **7.9 mm** — outside its attachment block's
 face, and that clearance is supposed to be the separation, with the offset as a tiebreak on top.
 
+**That whole section is a description of the renderer under a *forward* `[0, 1]` projection, which is
+what made the clearance collapse.** `Camera::projection_matrix` is reversed-Z now
+(`docs/camera.md`), and the same 7.9 mm is worth **5,888 representable depth values at 12 blocks
+head-on and 1,655 at 64** where it used to be 47 and 1 (`docs/coplanar-overlay-depth.md` carries both
+tables). The `-20` constant is ~294x smaller than the geometry at 12 m, so it is a tiebreak again and
+the analysis below — which is correct arithmetic about the forward projection — no longer describes
+what a live run will find. Re-take it before quoting it.
+
 `tests/framed_map_pixels.rs`'s `a_board_of_framed_maps_survives_the_depth_test_while_the_camera_turns`
 is the fixture that axis needed. Every other gate in that file renders **one** frame from a
 **translating** camera; this one hangs 35 x 19 invisible framed maps on one stone wall at the live
@@ -319,6 +327,11 @@ The neuter is where the numbers are, and it reproduces the live symptom **exactl
 | offset on | **all ink lost** | intact | intact | intact |
 | offset off | all ink lost | **all ink lost** | **all ink lost** | **all ink lost** |
 | offset on, `LODESTONE_MAP_LIFT_PROBE=0.02` | intact | intact | intact | intact |
+
+Those figures are from the forward projection. The neuter itself still works under reversed-Z — a
+sign-flipped `MAP_RENDERER_DEPTH` puts the picture genuinely 7.9 mm inside the wall, which is thousands
+of ULP on the wrong side and loses everywhere — but the *shipped* row now passes with far more margin
+than "intact" conveys, so re-run the gate rather than reading the table for magnitudes.
 
 Read the first row against the report. A wall seen head-on has a window-space depth gradient of
 **zero**, so the slope-scaled half of the offset contributes nothing there and only its `-20`
@@ -368,12 +381,24 @@ board is whole and the visible frame's picture stops z-fighting. That is an **up
 and only that. The switch's own rule is that the *smallest* value that works is the measurement, and one
 value is not a bracket — a deficit of 0.001 and a deficit of 0.019 both produce a working 0.02.
 
-The arithmetic says how small it could be. Head-on, the slope half of the polygon offset is zero, so the
-picture's entire margin is the `-20` constant, which is worth `20 * 5.96e-8` of depth; converted back to
-world units at eye distance `d` that is `2.4e-5 * d^2` blocks. So a deficit of only **0.0034** blocks is
-enough to lose at 12 m, **0.0095** at 20 m, and **0.0137** at 24 m. Every one of those is under the
-`1.01 / 128` clearance itself, so "0.02 worked" does not rule out a sub-clearance, precision-shaped
-deficit, and it does not imply the lift is inverted.
+The arithmetic said how small it could be **under the forward projection**. Head-on, the slope half of
+the polygon offset is zero, so the picture's entire margin was the `-20` constant, worth `20 * 5.96e-8`
+of depth; converted back to world units at eye distance `d` that is `2.4e-5 * d^2` blocks. So a deficit
+of only **0.0034** blocks was enough to lose at 12 m, **0.0095** at 20 m, and **0.0137** at 24 m — every
+one under the `1.01 / 128` clearance itself, so "0.02 worked" did not rule out a sub-clearance,
+precision-shaped deficit and did not imply the lift was inverted.
+
+**The live probe run is what settled it, and it settled it against precision.** Added clearance moved the
+*onset distance* and never removed the defect: `0.0079` failed at ordinary range, `0.02` failed only when
+the owner stood further back, and `0.2` never failed at any distance tried. Onset going as the square
+root of the clearance is exactly what forward `[0, 1]` depth resolution degrading as `d^2` produces, and
+it is not what a fixed geometric deficit produces. That is the measurement the reversed-Z conversion was
+authorised on.
+
+Under reversed-Z the same head-on arithmetic reads differently: the `20` constant is a *relative*
+`20 * 2^-23`, which at eye distance `d` is equivalent to a clearance of `2.4e-6 * d` blocks — **2.9e-5**
+at 12 m against a shipped `0.0079`. The picture carries roughly 276x the margin the offset alone would
+give it, at every distance rather than at one.
 
 **The lift is not inverted.** `the_picture_stands_in_front_of_its_wall_at_every_facing_of_the_direction_table`
 measures the shipped pose's signed clearance from the attachment block's face at all six facings, at this
