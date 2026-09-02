@@ -1,13 +1,13 @@
 //! Per-block-state **ambient-occlusion occluder** census for protocol 776
-//! (Minecraft 26.2) — vanilla's `BlockStateBase.getShadeBrightness`, reduced to
+//! (Minecraft 26.2) — vanilla's own "get shade brightness" accessor, reduced to
 //! the one bit a smooth-lighting mesher needs.
 //!
 //! # What this answers, and why it is not the culling predicate
 //!
-//! `BlockModelLighter.prepareQuadAmbientOcclusion` darkens a
-//! smooth-lit vertex by averaging `cache.getShadeBrightness(state, level, pos)`
+//! Vanilla's own "prepare quad ambient occlusion" step darkens a
+//! smooth-lit vertex by averaging its own shade-brightness cache accessor
 //! over the three cells around each of a quad's corners. That value is
-//! `BlockBehaviour.getShadeBrightness`:
+//! vanilla's own block-behaviour "get shade brightness" accessor:
 //!
 //! ```text
 //! return state.isCollisionShapeFullBlock(level, pos) ? 0.2F : 1.0F;
@@ -24,15 +24,15 @@
 //!
 //! Measured from the dump this table is generated from: 3,254 of 32,366 states
 //! occlude for AO, against 3,287 that are full collision cubes — the seven
-//! `getShadeBrightness` overrides move **39 states across 30 blocks**, and they
+//! "get shade brightness" overrides move **39 states across 30 blocks**, and they
 //! move them in *both* directions (see below).
 //!
 //! # Why a dump and not a derivation
 //!
-//! Seven classes override `getShadeBrightness` in the whole 26.2 tree, and they
-//! are *classes*, not blocks — `TransparentBlock` alone covers **26** registered
+//! Seven classes override "get shade brightness" in the whole 26.2 tree, and they
+//! are *classes*, not blocks — the transparent-block base class alone covers **26** registered
 //! blocks (glass, all 16 stained glasses, tinted glass, and the eight copper
-//! grates via `WaterloggedTransparentBlock`). A hand-written block list would
+//! grates via its waterlogged variant). A hand-written block list would
 //! have had to expand that family by hand, which is the mistake this repo has
 //! shipped twice ([`crate::entity_census`]'s header records the two off-by-one
 //! metadata indices). So the census is dumped per state from the real server
@@ -44,10 +44,10 @@
 //!
 //! | class | returns | net effect vs. the shape |
 //! | --- | --- | --- |
-//! | `TransparentBlock` (26 blocks) | `1.0` | shape says occlude, override says no |
-//! | `BarrierBlock`, `LightBlock`, `StructureVoidBlock` | `1.0` | same direction |
-//! | `MudBlock`, `SoulSandBlock` | `0.2` | shape says **no** (both sink an entity, so neither collision box is a full cube), override says occlude |
-//! | `SnowLayerBlock` | `LAYERS == 8 ? 0.2 : 1.0` | per **state**, not per block |
+//! | transparent block (26 blocks) | `1.0` | shape says occlude, override says no |
+//! | barrier, light, structure-void blocks | `1.0` | same direction |
+//! | mud, soul-sand blocks | `0.2` | shape says **no** (both sink an entity, so neither collision box is a full cube), override says occlude |
+//! | snow-layer block | `LAYERS == 8 ? 0.2 : 1.0` | per **state**, not per block |
 //!
 //! # Memory design
 //!
@@ -76,21 +76,21 @@ fn bit(bits: &[u8], id: u32) -> Option<bool> {
 }
 
 /// Whether block-state `id` darkens an adjacent ambient-occlusion corner —
-/// vanilla `BlockStateBase.getShadeBrightness(..) == 0.2F`. `None` if `id` is
+/// vanilla's own "get shade brightness" accessor `== 0.2F`. `None` if `id` is
 /// not in `0..`[`STATE_COUNT`].
 ///
 /// This is the predicate a smooth-lighting mesher wants for its AO term. It is
 /// **not** interchangeable with a face-culling occlusion test; see the module
 /// docs for the 39 states where the two part company, and note that the *light*
 /// half of vanilla's smooth blend uses a third predicate again
-/// (`isViewBlocking` / `getLightDampening`, via `translucentN` in
-/// `BlockModelLighter`), so this table must not be substituted there either.
+/// (its own "is view blocking" / "get light dampening" checks, via its own
+/// translucency step), so this table must not be substituted there either.
 #[must_use]
 pub fn occludes_ambient_light(id: u32) -> Option<bool> {
     bit(&table::SHADE_OCCLUDES, id)
 }
 
-/// Vanilla `BlockStateBase.getShadeBrightness` for block-state `id` — the float
+/// Vanilla's own "get shade brightness" accessor for block-state `id` — the float
 /// itself, for a consumer that wants to multiply rather than branch.
 ///
 /// The dump this is generated from carries a histogram of every value the game

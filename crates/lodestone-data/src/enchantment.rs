@@ -13,9 +13,11 @@
 //!
 //! # How it works
 //!
-//! [`ENCHANTMENTS`] is `Enchantment.getMinLevel()`/`getMaxLevel()` for every
+//! [`ENCHANTMENTS`] is vanilla's own enchantment "get min level"/"get max level"
+//! accessors for every
 //! `data/minecraft/enchantment/*.json` file, ordered alphabetically by registry path —
-//! the same order `CreativeModeTabs.generateEnchantmentBookTypesOnlyMaxLevel` walks
+//! the same order vanilla's own creative-tab "generate enchantment book types only
+//! max level" step walks
 //! (see [`crate::generated_enchantments`]'s doc for why that is the vanilla order).
 
 pub use crate::generated_enchantments::{ENCHANTMENT_COUNT, ENCHANTMENTS, EnchantmentCensus};
@@ -94,7 +96,7 @@ pub fn display_name(path: &str) -> Option<&'static str> {
 }
 
 /// `#minecraft:curse` (`.cache/mc/26.2/src/data/minecraft/tags/enchantment/curse.json`)
-/// — exactly two entries. `Enchantment.getFullname` colours a cursed enchantment's
+/// — exactly two entries. Vanilla's own "get full name" accessor colours a cursed enchantment's
 /// lore line red instead of the ordinary gray.
 #[must_use]
 pub fn is_curse(path: &str) -> bool {

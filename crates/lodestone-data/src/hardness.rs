@@ -1,4 +1,4 @@
-//! Per-block-state hardness (vanilla `destroySpeed`) and correct-tool
+//! Per-block-state hardness (vanilla's own "destroy speed" field) and correct-tool
 //! requirement for protocol 776 (Minecraft 26.2).
 //!
 //! `lodestone-game`'s `mining` module (`BreakInputs`) already replays
@@ -11,7 +11,7 @@
 //!
 //! # Data source: interrogate the real jar, not `minecraft-data`
 //!
-//! `blocks.json` (Mojang's data-generator report) has **no `destroySpeed`
+//! `blocks.json` (Mojang's data-generator report) has **no destroy-speed
 //! field** — it is block *properties* only, so there is no property-derived
 //! shortcut. `vendor/minecraft-data` was measured stale/incomplete for 26.2 on
 //! the neighbouring collision-shape table (see [`crate::collision_shapes`]
@@ -19,12 +19,13 @@
 //! no reason to assume its per-block hardness numbers are any fresher. So, as
 //! with collision shapes and entity dimensions, the only authoritative source
 //! is the running game: the table is generated from a dump produced by booting
-//! the real 26.2 server headlessly (`SharedConstants::tryDetectVersion` +
-//! `Bootstrap::bootStrap`) and asking every one of the 32,366 `BlockState`s in
-//! `Block.BLOCK_STATE_REGISTRY` for `getDestroySpeed(null, BlockPos.ZERO)` and
-//! `requiresCorrectToolForDrops()` — see `tests/hardness.rs` for the generator
+//! the real 26.2 server headlessly and asking every one of the 32,366 block
+//! states in
+//! vanilla's own block-state registry for its own "get destroy speed" accessor
+//! (called with a null getter and the origin position) and its own
+//! "requires correct tool for drops" check — see `tests/hardness.rs` for the generator
 //! and drift guard, and `oracle-java/HardnessOracle.java` for why a `null`
-//! `BlockGetter` is a faithful stand-in (no block subclass overrides either
+//! block getter is a faithful stand-in (no block subclass overrides either
 //! method with world/neighbour dependence).
 //!
 //! # Memory design
@@ -39,14 +40,14 @@ use crate::generated_hardness as table;
 
 pub use table::STATE_COUNT;
 
-/// A block state's break-time inputs: vanilla `destroySpeed` (hardness) and
+/// A block state's break-time inputs: vanilla's own "destroy speed" field (hardness) and
 /// whether the correct tool is required for drops.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hardness {
-    /// `BlockState.getDestroySpeed` (vanilla's field name for hardness).
+    /// Vanilla's own "get destroy speed" accessor (vanilla's field name for hardness).
     /// `-1.0` marks an unbreakable block (bedrock, barrier, ...).
     pub hardness: f32,
-    /// `BlockState.requiresCorrectToolForDrops`. Selects vanilla's `30` vs
+    /// Vanilla's own "requires correct tool for drops" check. Selects vanilla's `30` vs
     /// `100` break-speed divider (see `lodestone-game`'s `mining` module).
     pub requires_correct_tool: bool,
 }

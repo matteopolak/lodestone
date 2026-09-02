@@ -107,7 +107,7 @@ impl StateId {
         table::PROPERTY_SETS[set as usize]
     }
 
-    /// Whether this is its block's `defaultBlockState()`. Total, O(1).
+    /// Whether this is its block's own default-block-state. Total, O(1).
     #[must_use]
     pub fn is_default(self) -> bool {
         crate::snow_support::is_default_state(self.0) == Some(true)
@@ -172,7 +172,7 @@ pub fn properties(id: u32) -> Option<&'static [(&'static str, &'static str)]> {
 /// the whole of the reverse map's index, 1,196 entries of 12 bytes.
 ///
 /// `first..=last` is a *contiguous* range because vanilla builds
-/// `Block.BLOCK_STATE_REGISTRY` block by block; `block_state_index` asserts that
+/// its own block-state registry block by block; `block_state_index` asserts that
 /// when it builds this, so a table that ever stopped being block-major fails
 /// loudly at first use rather than silently resolving into a neighbouring
 /// block's states.
@@ -181,7 +181,7 @@ struct BlockSpan {
     first: u32,
     last: u32,
     /// The id `is_default_state` marks, i.e. vanilla's
-    /// `defaultBlockState()`. `first` only when the default column has somehow
+    /// own default-block-state. `first` only when the default column has somehow
     /// lost this block — see [`state_id`]'s tier 3.
     default: u32,
 }
