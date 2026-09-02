@@ -112,8 +112,8 @@ Concretely:
   climate-sampled biome checks plus piece generation, no chunk data — so it is
   embarrassingly parallel and safely memoised. `refs(C)` consults `starts` over the
   **17×17** neighbourhood (`ChunkStatus` gives STRUCTURE_REFERENCES radius 8) and keeps the
-  starts whose bounding boxes come within 12 blocks of `C` (the beardifier's
-  `isCloseToChunk(chunkPos, 12)` reach, `Beardifier.java:forStructuresInChunk`).
+  starts whose bounding boxes come within 12 blocks of `C` (the beardifier's own
+  close-to-chunk reach, from its own per-chunk structure lookup).
 - `pre_ore_stage(C)` gains one upstream edge: it reads `refs(C)` to build the per-chunk
   beardifier context before fill. This **inverts the terrain-first intuition** exactly as
   the rewrite plan warns; the join scheduler (U10, `docs/join-scheduler.md`) grows one more

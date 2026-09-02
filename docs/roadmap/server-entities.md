@@ -121,10 +121,9 @@ nothing needed a name-to-id lookup before this) and looks it up in
 `lodestone_entity::pathfinding::PathType` by a small 1:1 match
 (`census_to_pathfinding_type`). `ChunkWorld::collision_top` reads
 `lodestone_data::collision_shapes` the same way, taking the max Y of the
-state's real collision boxes — matching exactly what vanilla asks at
-`WalkNodeEvaluator.getFloorLevel`
-(`.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java:219-222`:
-`shape.isEmpty() ? 0.0 : shape.max(Direction.Axis.Y)`) — instead of the old
+state's real collision boxes — matching exactly what vanilla asks in its own
+floor-level query for pathfinding (empty shape → 0.0, otherwise the shape's own max Y) —
+instead of the old
 hardcoded `1.0`. `PathWorld::collides` (the coarse jump-clearance/diagonal-reach
 sweep) is unchanged and still reads `ChunkColumn::is_solid`; widening it to real
 per-shape sweeps was judged a separate, larger change outside this issue's
