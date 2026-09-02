@@ -1,4 +1,4 @@
-//! Plugin-defined custom items — issue #147.
+//! Plugin-defined custom items.
 //!
 //! # What this is
 //!
@@ -13,8 +13,8 @@
 //! The same ceiling vanilla itself has. The wire protocol carries an item as a
 //! registry **index** into a fixed table, so a genuinely novel item id is not
 //! representable — a server would have nothing to send and a vanilla client
-//! nothing to look up. This is exactly the constraint #140 hits for entity
-//! types, and real Bukkit/Paper plugins solve it the same way we do here: attach
+//! nothing to look up. This is exactly the same constraint a novel entity type
+//! hits, and real Bukkit/Paper plugins solve it the same way we do here: attach
 //! a `PersistentDataContainer` tag (and usually `custom_model_data`) to a vanilla
 //! item id, then branch on the tag.
 //!
@@ -69,7 +69,7 @@
 //!   would collide with the vanilla item registry the moment anything tried to
 //!   resolve it; a non-vanilla `base` cannot be encoded on the wire at all and
 //!   would hit the same silent-fallback trap `entity_type_id(..).unwrap_or(0)`
-//!   creates for entities (#140).
+//!   creates for entities.
 //! * Adding a component to [`CustomItem`] means adding it to **both**
 //!   [`CustomItem::apply_to`] and the `identify` round-trip test, or a definition
 //!   will build stacks that do not carry the new field.
@@ -403,7 +403,7 @@ mod tests {
     /// and comes back in a `container_set_content`.
     ///
     /// This is the assertion that would catch the tag being dropped by the
-    /// conversion the way `dyed_color` was (issue #143), and it is why the tag
+    /// conversion the way `dyed_color` once was, and it is why the tag
     /// lives in the component map rather than beside it.
     #[test]
     fn the_identity_tag_is_recognised_after_a_model_round_trip() {
@@ -503,7 +503,7 @@ mod tests {
     }
 
     /// A non-vanilla base is refused, because there is no wire encoding for it —
-    /// the item-id analogue of #140's `entity_type_id(..).unwrap_or(0)` trap,
+    /// the item-id analogue of the same `entity_type_id(..).unwrap_or(0)` trap,
     /// where an unknown key silently becomes something else entirely.
     #[test]
     fn a_non_vanilla_base_item_is_refused() {

@@ -1,4 +1,4 @@
-//! Issue #145: a menu a plugin opened, with no server packet behind it.
+//! A menu a plugin opened, with no server packet behind it.
 //!
 //! # What this gates
 //!
@@ -14,8 +14,8 @@
 //!    the shell's close and click paths consult. If it ever answered `false` for a
 //!    plugin menu, a `ContainerClose` and every `ContainerClick` would be
 //!    addressed to a window the server has never heard of.
-//! 3. **The one player inventory still has one owner.** Issue #373's invariant
-//!    must survive a local open and close, or the hotbar goes blank.
+//! 3. **The one player inventory still has one owner.** That single-owner
+//!    invariant must survive a local open and close, or the hotbar goes blank.
 //!
 //! # The route this replaces, and why it was not good enough
 //!
@@ -114,7 +114,7 @@ fn local_is_true_for_a_plugin_menu_and_false_for_a_server_container() {
     assert_eq!(menus.opened_window_id(), Some(3));
 }
 
-/// Claim 3: issue #373's one-inventory invariant survives a local open/close.
+/// Claim 3: the single-owner one-inventory invariant survives a local open/close.
 #[test]
 fn the_one_player_inventory_survives_a_local_open_and_close() {
     let mut menus = Menus::new();

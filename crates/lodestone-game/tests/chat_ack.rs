@@ -18,7 +18,7 @@ fn sig(bytes: &[u8]) -> MessageSignature {
 // ---------------------------------------------------------------------------
 // Checksum goldens (independently computed; see module doc).
 // MessageSignature::checksum == Java Arrays.hashCode(byte[]); the folded byte ==
-// LastSeenMessages.computeChecksum, with 0 remapped to 1.
+// vanilla's own last-seen-messages checksum step, with 0 remapped to 1.
 // ---------------------------------------------------------------------------
 
 #[test]

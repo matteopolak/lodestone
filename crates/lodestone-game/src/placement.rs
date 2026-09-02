@@ -500,9 +500,8 @@ impl Placement {
     /// opposed to [`Self::use_on`]'s block-targeted one).
     ///
     /// Vanilla shares one monotonic sequence across *every* predictive action
-    /// through `BlockStatePredictionHandler.currentSequence()`
-    /// (`MultiPlayerGameMode.startPrediction`,
-    /// `.cache/mc/26.2/client-src/…/MultiPlayerGameMode.java:293-299`), and
+    /// through its own block-state prediction handler's current-sequence
+    /// step (its own start-prediction step), and
     /// [`Self::use_on`] already owns that counter for this machine, so the
     /// generic use borrows the same one rather than starting a second,
     /// independent count.

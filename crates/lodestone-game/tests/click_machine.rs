@@ -135,7 +135,7 @@ fn throw_ctrl_q_drops_whole_slot() {
     assert_eq!(outcome.dropped[0].count(), 5);
 }
 
-/// `AbstractContainerMenu.java:516-518`: `THROW` bails out entirely when
+/// Vanilla's own click-handler THROW step: `THROW` bails out entirely when
 /// `!player.canDropItems()`, before taking anything from the slot. Vanilla
 /// gates it *inside* the `THROW` arm, unlike the outside-cursor drop (`PICKUP`
 /// with `slotIndex == -999`, `:404-412`), which drops unconditionally — so this
@@ -188,8 +188,8 @@ fn hotbar_swap_exchanges_two_stacks() {
 
 // --- Off-hand key swap ---
 
-/// Same `Swap` mode, `buttonNum == 40` (`AbstractContainerMenu.java:471`,
-/// `ContainerInput.SWAP`'s guard: `buttonNum >= 0 && buttonNum < 9 ||
+/// Same `Swap` mode, `buttonNum == 40` (vanilla's own click-handler SWAP
+/// step's guard: `buttonNum >= 0 && buttonNum < 9 ||
 /// buttonNum == 40`) — a distinct wire value from the hotbar keys, addressing
 /// [`lodestone_game::menu::OFFHAND_NATIVE`] instead of a hotbar index.
 #[test]
@@ -354,7 +354,7 @@ fn middle_click_clone_noop_in_survival() {
     assert!(menu.carried().is_none());
 }
 
-/// `AbstractContainerMenu.java:508`: `CLONE` additionally requires
+/// Vanilla's own click-handler CLONE step additionally requires
 /// `this.getCarried().isEmpty()`. A creative middle-click while already
 /// holding something must not overwrite the cursor.
 #[test]

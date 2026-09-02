@@ -506,7 +506,7 @@ async fn inventory_mutation_round_trips_through_client() {
 /// stack into the cursor, so the server empties `Inventory[Slot:0]`, matching the
 /// click machine's prediction (slot → empty, cursor → the stack). What it does
 /// **not** prove: the cursor contents server-side — the carried stack lives in
-/// `AbstractContainerMenu.getCarried()`, not entity NBT, so RCON cannot read it.
+/// vanilla's own carried-item getter, not entity NBT, so RCON cannot read it.
 /// The slot-emptied assertion plus the untouched-slot control is what is
 /// observable, and it is exactly the authoritative half a stubbed encoder cannot
 /// fake.

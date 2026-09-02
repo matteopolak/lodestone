@@ -106,8 +106,8 @@ pub struct PlayerListEntry {
     /// Whether the player's hat (second skin layer) renders in the tab list.
     pub show_hat: bool,
     /// This player's announced chat-signing session, when the server has
-    /// sent one (`INITIALIZE_CHAT`) — the receiving half of secure chat
-    /// (issue #283). `None` means either "never announced" or "not yet
+    /// sent one (`INITIALIZE_CHAT`) — the receiving half of secure chat.
+    /// `None` means either "never announced" or "not yet
     /// folded"; the two are indistinguishable here for the same reason
     /// [`Self::profile`]'s properties collapse an analogous pair — see
     /// `lodestone_model::event::PlayerListEntry::chat_session`'s doc.
@@ -244,7 +244,7 @@ fn spectator_rank(e: &PlayerListEntry) -> u8 {
 // existing entry keeps fields the update omitted. That makes the fold correct
 // whether an adapter emits full snapshots or per-field deltas.
 //
-// The model gap this comment used to name is **closed** (issue #62):
+// The model gap this comment used to name is **closed**:
 // `m::PlayerListEntry::properties` now carries the `ADD_PLAYER` profile-property
 // multimap, and `fold_entry` seeds `GameProfile::properties` from it, so a folded
 // profile has its `textures` blob.
@@ -582,7 +582,7 @@ mod fold_tests {
         );
     }
 
-    /// Issue #283's real gap, closed: `INITIALIZE_CHAT`'s session used to be
+    /// The real gap here, closed: `INITIALIZE_CHAT`'s session used to be
     /// decoded and have nowhere to go once it reached this layer. Same shape
     /// as `a_delta_without_add_player_keeps_the_existing_profile_properties`:
     /// a session survives a delta that did not carry `INITIALIZE_CHAT`.
