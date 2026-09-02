@@ -747,7 +747,7 @@ pub enum ServerBound {
     },
     /// The client asked for the server-list status (mirrors
     /// `ServerboundStatusRequestPacket`, whose body is *empty* —
-    /// vanilla's own `StreamCodec.unit(INSTANCE)`).
+    /// vanilla's own empty stream codec).
     ///
     /// This is the very first thing a real client sends after a handshake whose
     /// `next_state` was Status, i.e. when a player adds our server to their
@@ -1422,7 +1422,7 @@ pub enum ServerBound {
         /// characters by the wire format.
         message: String,
         /// Client-reported timestamp, epoch milliseconds
-        /// (`ServerboundChatPacket.timestamp`). Part of the signed payload —
+        /// (vanilla's own chat-packet timestamp field). Part of the signed payload —
         /// see [`crate::chat_session::decide`].
         timestamp_millis: i64,
         /// Random salt used for signing (`0` for unsigned chat).
@@ -1444,7 +1444,7 @@ pub enum ServerBound {
     /// own doc for what is and is not checked about it.
     ChatSessionAnnounced {
         /// The client-generated session UUID every signed message's chain is
-        /// rooted at (`SignedMessageLink.sessionId`).
+        /// rooted at (vanilla's own signed-message-link session-id field).
         session_id: Uuid,
         /// Profile public key expiry, epoch milliseconds.
         expires_at_millis: i64,
@@ -1885,7 +1885,7 @@ pub trait ServerProtocol: Send + Sync {
 
     /// Encodes the server-list status reply to a [`ServerBound::StatusRequest`]
     /// (vanilla `ClientboundStatusResponsePacket`, whose whole body is one
-    /// length-prefixed JSON document — vanilla's own `ByteBufCodecs.lenientJson(32767)`).
+    /// length-prefixed JSON document — vanilla's own lenient-JSON byte-buf codec, capped at 32767).
     ///
     /// The parameters are deliberately scalars rather than a struct: everything
     /// here is version-free, but the two fields vanilla's own `ServerStatus`
@@ -1936,7 +1936,7 @@ pub trait ServerProtocol: Send + Sync {
     ///
     /// | phase | vanilla packet | reason encoded as |
     /// |---|---|---|
-    /// | Login | `ClientboundLoginDisconnectPacket` | **JSON string** (vanilla's own `ByteBufCodecs.lenientJson(262144)`) |
+    /// | Login | `ClientboundLoginDisconnectPacket` | **JSON string** (vanilla's own lenient-JSON byte-buf codec, capped at 262144) |
     /// | Configuration | `ClientboundDisconnectPacket` | **NBT** (vanilla's own `TRUSTED_CONTEXT_FREE_STREAM_CODEC`) |
     /// | Play | `ClientboundDisconnectPacket` | **NBT**, same codec |
     ///
@@ -3014,7 +3014,7 @@ pub trait ServerProtocol: Send + Sync {
     /// the player's standard 27-main + 9-hotbar inventory rows every such
     /// menu appends — never armour/off-hand, which only the player's own
     /// window `0` exposes), plus the cursor/carried stack. `state_id` is
-    /// vanilla's `AbstractContainerMenu.stateId` at the time of the send —
+    /// vanilla's own container-menu `stateId` field at the time of the send —
     /// this crate does not validate a click's echoed value against it (see
     /// `docs/server-inventory.md`'s existing scope note for window `0`,
     /// which now applies identically to any other window). The default
@@ -3051,7 +3051,7 @@ pub trait ServerProtocol: Send + Sync {
     /// `ServerGamePacketListenerImpl::tryPickItem` (issue #558's pick-block),
     /// whether or not the pick actually moved anything, so the client's
     /// selection is always resynchronised to the server's own
-    /// `Inventory.selected` after a middle-click. The default emits nothing.
+    /// selected-slot value after a middle-click. The default emits nothing.
     fn encode_set_held_slot(&self, slot: u8) -> ServerDirective {
         let _ = slot;
         ServerDirective::None
@@ -3078,7 +3078,7 @@ pub trait ServerProtocol: Send + Sync {
     /// and both display flags; `/effect give … true` sets neither display
     /// flag). `blend` is **not** an effect-type hint (nausea/darkness have no
     /// special case in `ClientboundUpdateMobEffectPacket` itself) — it is the
-    /// call site: `ServerPlayer.onEffectAdded` (a genuinely new instance)
+    /// call site: vanilla's own on-effect-added routine (a genuinely new instance)
     /// passes `true`, `onEffectUpdated` (an existing instance refreshed —
     /// same or higher amplifier, longer duration) passes `false`. The
     /// default emits nothing.
@@ -3209,8 +3209,8 @@ pub trait ServerProtocol: Send + Sync {
     /// `(StatKey, count)` pairs, sent in reply to the client's
     /// `ClientCommand(REQUEST_STATS)` (issue #338). Each `StatKey` is the
     /// stat-type registry id (e.g. `minecraft:mined`) plus the value key
-    /// (item/block/entity id, or the custom-stat id), exactly vanilla's
-    /// `Stat.STREAM_CODEC` dispatch; an implementor maps those to registry
+    /// (item/block/entity id, or the custom-stat id), exactly vanilla's own
+    /// per-stat wire codec dispatch; an implementor maps those to registry
     /// ids and writes the count as a varint. The default emits nothing.
     fn encode_award_stats(&self, stats: &[(crate::advancements::StatKey, i32)]) -> ServerDirective {
         let _ = stats;
