@@ -5,14 +5,11 @@
 //!
 //! In vanilla a block entity is **not** created by a packet. Vanilla's own
 //! chunk class's own "set block state" step creates one from the state alone:
-//!
-//! ```text
-//! if (state.hasBlockEntity() && …) {
-//!     BlockEntity blockEntity = this.getBlockEntity(pos, EntityCreationType.CHECK);
-//!     if (blockEntity != null && !blockEntity.isValidBlockState(state)) { removeBlockEntity(pos); blockEntity = null; }
-//!     if (blockEntity == null) { blockEntity = ((EntityBlock)newBlock).newBlockEntity(pos, state); … }
-//! }
-//! ```
+//! when the new state declares a block entity, it looks up any existing
+//! block entity at that position in "check" mode; if one exists but no
+//! longer matches the new state, it is removed; and if none exists (or was
+//! just removed), the new block's own block-entity factory constructs a
+//! fresh one for that position and state.
 //!
 //! So *setting a chest block state is what creates the chest block entity*, and
 //! `block_entity_data` is only ever **data for an entity that already exists**.

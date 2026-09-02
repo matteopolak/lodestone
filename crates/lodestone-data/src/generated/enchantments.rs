@@ -9,9 +9,9 @@
 //! Generated enchantment census for protocol 776 (Minecraft 26.2).
 //!
 //! Ordered alphabetically by registry path, matching
-//! `SimpleJsonResourceReloadListener`'s `ResourceManager.listResources` (a sorted
+//! `SimpleJsonResourceReloadListener`'s `vanilla's own resource manager's own list resources` (a sorted
 //! `TreeMap<ResourceLocation, Resource>`), which is what feeds the
-//! `HolderLookup<Enchantment>` `CreativeModeTabs.generateEnchantmentBookTypesOnlyMaxLevel`
+//! `HolderLookup<Enchantment>` `vanilla's own creative mode tabs's own generate enchantment book types only max level`
 //! iterates via `listElements`. Each entry is one `data/minecraft/enchantment/*.json`
 //! file's own `min_level`/`max_level` fields.
 
@@ -24,7 +24,7 @@ pub const ENCHANTMENT_COUNT: u32 = 43;
 pub struct EnchantmentCensus {
     /// Registry path, e.g. `"sharpness"`.
     pub path: &'static str,
-    /// `Enchantment.getMinLevel()` — a hardcoded `1` for every enchantment, **not**
+    /// `vanilla's own enchantment's own get min level()` — a hardcoded `1` for every enchantment, **not**
     /// a JSON field (no vanilla enchantment definition carries a `min_level` key).
     pub min_level: u8,
     /// `max_level` from the enchantment's own JSON.

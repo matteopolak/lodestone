@@ -34,7 +34,7 @@
 //!
 //! Vanilla's own damage-type-tags constant declares the tag and
 //! its own "hurt server" step gates the whole i-frame window on it —
-//! `if (this.invulnerableTime > 10.0F && !source.is(DamageTypeTags.BYPASSES_COOLDOWN))`
+//! `if (this.invulnerableTime > 10.0F && !source.is(<the bypasses-cooldown tag>))`
 //! — but **no data file for it exists in the jar**. It is a genuinely empty tag
 //! in vanilla 26.2: the mechanism exists and nothing opts into it. So this table
 //! carries all **35** tags (34 with data files, plus this one) and
@@ -414,7 +414,7 @@ impl DamageType {
     /// Whether this type is in `tag`, using the resolved transitive closure.
     ///
     /// This is the query behaviour keys off — the direct equivalent of
-    /// vanilla's `source.is(DamageTypeTags.X)`.
+    /// vanilla's own damage-source tag-membership check.
     ///
     /// (Not a `const fn`: Rust forbids reading a `static` in a const context,
     /// and the table is a `static` to match every other generated table here.)

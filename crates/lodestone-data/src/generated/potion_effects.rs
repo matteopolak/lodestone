@@ -2,22 +2,24 @@
 // own potion definitions. DO NOT EDIT.
 //! Generated potion->effects table for protocol 776 (Minecraft 26.2).
 //!
-//! Each entry is one `Potions.java` `new Potion(name, MobEffectInstance...)` call's
+//! Each entry is one vanilla potion definition's built-in-effect constructor call's
 //! effect list, as `(mob_effect_index, amplifier, duration_ticks)` triples —
 //! `mob_effect_index` is an index into [`crate::generated_mob_effects::MOB_EFFECT_NAMES`]
 //! (**not** a network mob effect id, though today the two coincide because that table is
-//! itself indexed by network id), `amplifier` is `MobEffectInstance`'s own constructor
-//! argument (`new MobEffectInstance(effect, duration)` implies amplifier `0`), and
+//! itself indexed by network id), `amplifier` is vanilla's own mob-effect-instance
+//! constructor
+//! argument (a two-argument constructor call implies amplifier `0`), and
 //! `duration_ticks` is that same constructor's `duration` argument verbatim — the raw,
-//! unscaled tick count `PotionContents.addPotionTooltip`/`MobEffectUtil.formatDuration`
+//! unscaled tick count vanilla's own potion-tooltip/duration-formatting helpers
 //! read before any `POTION_DURATION_SCALE` component is applied.
 //!
 //! Indexed exactly as [`crate::generated_potions::POTION_NAMES`]. `water`/`mundane`/
-//! `thick`/`awkward` carry no effect (`new Potion(name)`, no `MobEffectInstance` args)
-//! and are empty slices, matching `PotionContents.getAllEffects()`'s empty-list case.
+//! `thick`/`awkward` carry no effect (a name-only constructor call, no effect-instance
+//! args)
+//! and are empty slices, matching vanilla's own get-all-effects empty-list case.
 
 /// One potion's built-in effect list, `(mob_effect_index, amplifier, duration_ticks)`
-/// triples in `Potions.java`'s own declaration order.
+/// triples in vanilla's own potion-definitions declaration order.
 pub static POTION_EFFECTS: [&[(usize, u8, u32)]; crate::generated_potions::POTION_COUNT as usize] = [
     &[],                          // water
     &[],                          // mundane

@@ -2,19 +2,21 @@
 // own potion definitions. DO NOT EDIT.
 //! Generated potion->name-field table for protocol 776 (Minecraft 26.2).
 //!
-//! `Potion`'s constructor takes a `name` string distinct from its registry path —
-//! `Potions.LONG_SWIFTNESS` and `Potions.STRONG_SWIFTNESS` both register
-//! `new Potion("swiftness", ...)`, so `Potion.name()` collapses every duration/potency
-//! variant of one effect onto the same key. `PotionContents.getName(prefix)`
-//! (`PotionContents.java`) reads this field, not the registry path, so it is what
+//! Vanilla's own potion type's constructor takes a `name` string distinct from
+//! its registry path —
+//! the long-swiftness and strong-swiftness potion registrations both register
+//! the same `"swiftness"` name, so that name accessor collapses every duration/potency
+//! variant of one effect onto the same key. Vanilla's own potion-contents
+//! name-getter
+//! (confirmed against the decompiled 26.2 source) reads this field, not the registry path, so it is what
 //! `item.minecraft.<item>.effect.<key>` must be built from — using the registry path
 //! instead would look up a nonexistent `item.minecraft.potion.effect.long_swiftness`
 //! key for every `long_`/`strong_` variant.
 //!
 //! Indexed exactly as [`crate::generated_potions::POTION_NAMES`].
 
-/// `Potion.name()`, i.e. this entry's `new Potion(name, ...)` first constructor
-/// argument, in `Potions.java`'s own declaration order.
+/// Vanilla's own potion name accessor, i.e. this entry's constructor call's first
+/// argument, in vanilla's own potion-definitions declaration order.
 pub static POTION_EFFECT_KEYS: [&str; crate::generated_potions::POTION_COUNT as usize] = [
     "water",
     "mundane",
