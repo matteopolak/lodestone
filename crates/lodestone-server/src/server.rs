@@ -13487,12 +13487,12 @@ where
     // Issue #302, counted down on `vitals_tick` — see that arm.
     let mut player_save_countdown = PLAYER_SAVE_EVERY_VITALS_TICKS;
 
-    // Vanilla's `ServerPlayer::initInventoryMenu`, the last call in
-    // `PlayerList.placeNewPlayer`. `inventory` above is already the restored one, so
+    // Vanilla's own per-player inventory-menu initializer, the last call in
+    // its own new-player placement routine. `inventory` above is already the restored one, so
     // this is the packet that makes a rejoining player's items visible without
     // touching a slot first — see `join_inventory_snapshot` for the whole story.
     apply(conn, &mut state, join_inventory_snapshot(proto, &inventory)).await?;
-    // The first `SET_EXPERIENCE`, which `ServerPlayer.doTick` sends on the tick after
+    // The first `SET_EXPERIENCE`, which vanilla's own per-player tick routine sends on the tick after
     // every join because `lastSentExp` starts at `-99999999`. Without it the bar has
     // no values at all — see `join_experience`.
     apply(conn, &mut state, join_experience(proto, &experience)).await?;
@@ -13586,7 +13586,7 @@ where
                 watch.enter();
                 let Some((packet_id, payload)) = packet? else {
                     // Issue #302: the disconnect save. Vanilla's own
-                    // `PlayerList.remove` writes the player file here, and this is
+                    // player-list remove routine writes the player file here, and this is
                     // the only exit that is reached with the loop's state still
                     // intact — see the periodic save on `vitals_tick` below for
                     // what covers a crash, a cancelled task and every `?`.
@@ -13713,7 +13713,7 @@ where
                 }
                 // Issue #338: drain the advancement flush for anything the
                 // packet just granted. Vanilla flushes every server tick
-                // (`ServerPlayer.tick()` → `advancements.flushDirty(player,
+                // (its own per-player tick routine → `advancements.flushDirty(player,
                 // true)`); every advancement producer in this crate today is
                 // packet-driven, so flushing here — immediately after the
                 // packet was applied — is equivalent and needs no timer this
@@ -14005,9 +14005,9 @@ where
                 keep_alive_sent_at = crate::tick::PlayTimerInstant::now();
                 watch.clear_unserviced();
                 apply(conn, &mut state, proto.encode_keep_alive(next_keep_alive_id)).await?;
-                // Issue #297/#619: vanilla's `Ready.keepAlive()`, run from this
+                // Issue #297/#619: vanilla's own `Ready.keepAlive()`, run from this
                 // connection's own keep-alive timer rather than from the world
-                // tick loop (`tick.rs` is off-limits to this change, and the
+                // tick loop (`tick.rs` is off-limits to this arrangement, and the
                 // ticket graph's own read-driven check-in means there is no
                 // world-tick hook to add regardless — see
                 // `ChunkStore::maybe_tick_tickets`'s doc). A no-op, reported by
@@ -14074,7 +14074,7 @@ where
                     );
                 }
 
-                // Vanilla's `ServerPlayerGameMode.tick` deferred-destroy pass,
+                // Vanilla's own per-player game-mode tick's deferred-destroy pass,
                 // riding this timer because it is the one that already fires
                 // every 50ms — one server tick, exactly the cadence the
                 // continuation is counted in. This is what finishes an ordinary
