@@ -27,7 +27,7 @@
 //! wins), `nothing_selected_falls_back_to_the_offline_identity` (the negative
 //! control) and `unit_tests_never_join_as_the_selected_account` (the fork).
 
-const NET: &str = include_str!("../src/net.rs");
+const NET: &str = include_str!("../../src/net.rs");
 
 /// Everything above `mod tests` — the production half. The test module below it
 /// legitimately names `OfflineIdentity::load()` as an *expected value* read from
