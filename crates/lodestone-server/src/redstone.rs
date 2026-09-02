@@ -13,21 +13,21 @@
 //! its own query layer, and every function below is a direct,
 //! citation-per-function port of it:
 //!
-//! - [`weak_signal`] ~ `BlockState.getSignal` (each block's own override —
+//! - [`weak_signal`] ~ vanilla's own per-block weak-signal override (each block's own override —
 //!   see the per-family jar citations inline below).
-//! - [`direct_signal`] ~ `BlockState.getDirectSignal`.
-//! - [`direct_signal_to`] ~ `SignalGetter.getDirectSignalTo`.
-//! - [`signal_at`] ~ `SignalGetter.getSignal`: a redstone *conductor*
+//! - [`direct_signal`] ~ vanilla's own per-block direct-signal override.
+//! - [`direct_signal_to`] ~ vanilla's own signal-getter direct-signal-to routine.
+//! - [`signal_at`] ~ vanilla's own signal-getter get-signal routine: a redstone *conductor*
 //!   additionally carries whatever direct/strong signal touches any of its six
 //!   faces (`getDirectSignalTo`), which is how a lever on the side of a stone
 //!   block powers a wire sitting on top of that same block. That circuit is
 //!   gated by `a_lever_on_the_side_of_a_conductor_powers_a_wire_on_top_of_it`,
 //!   and it is the case that separates the weak path from the strong one.
-//! - [`best_neighbor_signal`] ~ `SignalGetter.getBestNeighborSignal`.
-//! - [`control_input_signal`] ~ `SignalGetter.getControlInputSignal` —
+//! - [`best_neighbor_signal`] ~ vanilla's own signal-getter best-neighbor-signal routine.
+//! - [`control_input_signal`] ~ vanilla's own signal-getter control-input-signal routine —
 //!   repeaters'/comparators' own side-input read.
 //!
-//! `SignalGetter.DIRECTIONS` (`Direction.values()`) is iterated by
+//! Vanilla's own signal-getter direction list (`Direction.values()`) is iterated by
 //! [`best_neighbor_signal`]/[`direct_signal_to`], but **only ever through a
 //! commutative `max`** — unlike [`crate::neighbor_update::UPDATE_ORDER`],
 //! where the fan-out order is itself the observable behaviour, no query
@@ -41,7 +41,7 @@
 //!
 //! This crate has no collision-shape system (`crate::gravity_tick`'s own doc
 //! comment already names this gap for `isFree`/`canBeReplaced`), so
-//! [`is_redstone_conductor`] cannot check `BlockState.isRedstoneConductor`'s
+//! [`is_redstone_conductor`] cannot check vanilla's own is-redstone-conductor check's
 //! real definition (a full-cube collision shape). The honest reduction used
 //! here: **anything that is not air/fluid and not one of the modelled
 //! non-full-cube redstone blocks is a conductor** — every ordinary solid block
@@ -93,12 +93,12 @@
 //!   and `crate::server`'s use-item-on path fans the change out to neighbours,
 //!   so these two work end to end.
 //! * **pressure plate, weighted pressure plate, detector rail** — need an
-//!   entity-AABB-versus-block census (`BasePressurePlateBlock.getSignalStrength`
-//!   counts entities inside `TOUCH_AABB`), which this crate has no collision
+//!   entity-AABB-versus-block census (vanilla's own base-pressure-plate-block
+//!   signal-strength getter counts entities inside `TOUCH_AABB`), which this crate has no collision
 //!   system for. The read below is correct and its producer is missing, so
 //!   these stay at their default `0` until something writes the property.
 //! * **tripwire hook** — needs `minecraft:tripwire` string state and the
-//!   two-hook span search in `TripWireHookBlock.calculateState`.
+//!   two-hook span search in vanilla's own tripwire-hook-block calculate-state routine.
 //! * **target** — needs projectile-hit dispatch plus the decay tick.
 //! * **daylight detector** — needs a sky-light read at the detector's own
 //!   position.
@@ -318,7 +318,7 @@ pub fn powered_property(state: &str) -> bool {
     get_bool_property(state, "powered").unwrap_or(false)
 }
 
-/// The analog `POWER` property (`BlockStateProperties.POWER`, `0..=15`) carried
+/// The analog `POWER` property (vanilla's own block-state-properties registration, `0..=15`) carried
 /// by a weighted pressure plate, a target and a daylight detector — the same
 /// property dust uses, on blocks that are not dust.
 #[must_use]
@@ -326,7 +326,7 @@ pub fn analog_power(state: &str) -> u8 {
     get_u32_property(state, "power").unwrap_or(0).min(15) as u8
 }
 
-/// `FaceAttachedHorizontalDirectionalBlock.getConnectedDirection` — the
+/// Vanilla's own face-attached-horizontal-directional-block connected-direction getter — the
 /// direction a lever or button *points*, i.e. away from the surface it is
 /// attached to: `Down` for a ceiling mount, `Up` for a floor mount, and the
 /// block's own `FACING` for a wall mount.
@@ -334,7 +334,7 @@ pub fn analog_power(state: &str) -> u8 {
 /// This is the one direction in which such a block sends **strong** power, and
 /// (because the same expression is `getOpposite`d by `canSurvive`) the block
 /// receiving it is exactly the one the lever is stuck to. Defaults to the wall
-/// reading for a state naming no `face`, matching `AttachFace.WALL` being the
+/// reading for a state naming no `face`, matching vanilla's own wall-attach-face being the
 /// default in both registrations.
 #[must_use]
 pub fn attached_connected_direction(state: &str) -> Direction {
@@ -345,14 +345,14 @@ pub fn attached_connected_direction(state: &str) -> Direction {
     }
 }
 
-/// `TripWireHookBlock.FACING` — the direction the hook points away from its
+/// Vanilla's own tripwire-hook-block `FACING` — the direction the hook points away from its
 /// wall, and the one direction it strongly powers.
 #[must_use]
 pub fn tripwire_hook_facing(state: &str) -> Direction {
     get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North)
 }
 
-/// `BasePressurePlateBlock.getSignalForState` for both plate families:
+/// Vanilla's own base-pressure-plate-block signal-for-state getter for both plate families:
 /// `PressurePlateBlock` reads its boolean `POWERED` as 15-or-0, while
 /// `WeightedPressurePlateBlock` reads its analog `POWER` directly.
 ///
@@ -439,7 +439,7 @@ pub(crate) fn with_property(state: &str, key: &str, value: &str) -> String {
     format!("{name}[{}]", parts.join(","))
 }
 
-/// `DiodeBlock.isDiode`.
+/// Vanilla's own diode-block is-diode check.
 #[must_use]
 pub fn is_diode(state: &str) -> bool {
     is_repeater(state) || is_comparator(state)
@@ -485,8 +485,8 @@ pub fn is_redstone_conductor(state: &str) -> bool {
     !crate::chunk::is_air_or_fluid(state) && !is_redstone_component(state)
 }
 
-/// Dust's own `POWER` property (`RedStoneWireBlock.POWER`,
-/// `BlockStateProperties.POWER`, `0..=15`). `0` for anything that is not
+/// Dust's own `POWER` property (vanilla's own redstone-wire-block registration,
+/// `0..=15`). `0` for anything that is not
 /// wire — callers gate on [`is_wire`] first when the distinction matters.
 #[must_use]
 pub fn wire_power(state: &str) -> u8 {
@@ -502,8 +502,8 @@ pub fn torch_lit(state: &str) -> bool {
 }
 
 /// The wall torch's `FACING` — the face it is mounted against (the
-/// direction pointing *into* the block it's attached to), vanilla's
-/// `HorizontalDirectionalBlock.FACING` (`RedstoneWallTorchBlock.FACING`).
+/// direction pointing *into* the block it's attached to), vanilla's own
+/// horizontal-directional-block `FACING` (its own wall-torch-block registration).
 #[must_use]
 pub fn wall_torch_facing(state: &str) -> Direction {
     get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North)
