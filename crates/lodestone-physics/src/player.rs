@@ -2323,14 +2323,13 @@ fn tick_water_among_entities(
             unimplemented!("1.8 fluid movement is not implemented yet")
         }
     }
-    // --- baseTick: `updateFluidInteraction`'s `if (inWater) resetFallDistance()`
-    // (`Entity.java:1658-1659`) ------------------------------------------------
+    // --- baseTick: vanilla's own fluid-interaction water reset ----------------
     // This function is only reached when the per-tick fluid summary already says
     // `in_water()` (see `travel_and_check_inside_blocks`'s dispatch), so the
     // condition is unconditionally true here — matching vanilla, where the same
-    // predicate decides both the reset and the `travelInFluid` dispatch.
+    // predicate decides both the reset and the in-fluid travel dispatch.
     state.fall_distance = 0.0;
-    // --- baseTick: fluid current push (`updateFluidInteraction`) ---------------
+    // --- baseTick: vanilla's own fluid current push ---------------------------
     // Vanilla applies the flow current in `baseTick`, before `aiStep`/`travel`
     // within the same tick, so it lands here (ahead of the snap-to-zero prologue)
     // and its result is what the prologue and the accel step then see.
@@ -2341,14 +2340,14 @@ fn tick_water_among_entities(
         profile.water_push_scale,
         profile,
     );
-    // --- LocalPlayer.aiStep: sneak to sink (`goDownInWater`, -0.04F) -----------
-    // `LocalPlayer.java:855-857` runs this *before* `super.aiStep()`, so it lands
-    // ahead of the snap-to-zero prologue below. (The placement is numerically
-    // inert at this magnitude — `0.04` clears the `0.003` collapse from either
-    // side — but it is where vanilla puts it, and a later `goDownInWater` variant
-    // with a smaller impulse would not be inert.) This is the deliberate-sink half
-    // of "sinking versus swimming": without it the only way down is to release
-    // jump and wait for buoyancy.
+    // --- vanilla's own sneak-to-sink impulse (-0.04F) --------------------------
+    // Vanilla's own client-side per-tick update runs this *before* the rest
+    // of its per-tick update, so it lands ahead of the snap-to-zero prologue
+    // below. (The placement is numerically inert at this magnitude — `0.04`
+    // clears the `0.003` collapse from either side — but it is where vanilla
+    // puts it, and a smaller future sink impulse would not be inert.) This
+    // is the deliberate-sink half of "sinking versus swimming": without it
+    // the only way down is to release jump and wait for buoyancy.
     if input.sneak {
         state.velocity = state
             .velocity
@@ -2363,11 +2362,11 @@ fn tick_water_among_entities(
     // --- aiStep jump: shallow water jumps, deep water swims up -----------------
     apply_fluid_jump(state, input, fluid, view, profile);
 
-    // --- Player.travel: the swim look-descent (Player.java:1401-1415) ---------
-    // Runs in `Player.travel()`, which wraps `super.travel()` (`LivingEntity.
-    // travel` → `travelInFluid` → `travelInWater`, i.e. the rest of this
-    // function) — so it modifies `deltaMovement.y` *before* `travelInWater`'s
-    // own physics ever sees it, which is why this sits ahead of the `isFalling`/
+    // --- vanilla's own swim look-descent ---------------------------------------
+    // Runs in vanilla's own player travel step, which wraps its base travel
+    // (travel → in-fluid travel → in-water travel, i.e. the rest of this
+    // function) — so it modifies `deltaMovement.y` *before* the in-water
+    // physics ever sees it, which is why this sits ahead of the `isFalling`/
     // `oldY` capture below rather than after it.
     //
     // While swimming, blend vertical velocity toward the look direction's Y
@@ -2376,13 +2375,13 @@ fn tick_water_among_entities(
     // submerged at head height — so releasing jump and looking up lets a
     // swimmer coast to the surface instead of being pulled back down, but
     // looking down (or still being underwater) glides them lower. Both
-    // constants are read directly from `Player.java:1408`, not from any
-    // secondhand recollection of them.
+    // constants are read directly from the jar, not from any secondhand
+    // recollection of them.
     if state.swimming {
         let look_angle_y = calculate_view_vector(state.pitch, state.yaw).y;
         let multiplier = if look_angle_y < -0.2 { 0.085 } else { 0.06 };
-        // `BlockPos.containing(x, y + 1.0 - 0.1, z)` — roughly head height,
-        // floored to a block position; `!isEmpty()` is "any fluid present".
+        // The block roughly at head height, floored to a block position;
+        // "any fluid present" is the check.
         let head_submerged = view
             .fluid_at(
                 mth::floor(state.position.x),
@@ -2400,9 +2399,10 @@ fn tick_water_among_entities(
         }
     }
 
-    // --- travelInFluid / travelInWater ----------------------------------------
-    // `isFalling` and `oldY` are read at the top of `travelInFluid`, i.e. *after*
-    // the jump block above has already altered velocity.
+    // --- vanilla's own in-fluid / in-water travel ------------------------------
+    // `isFalling` and `oldY` are read at the top of vanilla's own in-fluid
+    // travel, i.e. *after* the jump block above has already altered
+    // velocity.
     let is_falling = state.velocity.y <= 0.0;
     let old_y = state.position.y;
     let base_gravity = effective_gravity(
@@ -2411,7 +2411,7 @@ fn tick_water_among_entities(
         state.effects.slow_falling,
     );
 
-    // `LivingEntity.travelInWater`, in vanilla's order: the sprint/walk base, then
+    // Vanilla's own in-water travel, in vanilla's order: the sprint/walk base, then
     // the Depth Strider lerp, then Dolphin's Grace *overriding* the result. The
     // order is observable — Grace wins outright, but the Strider term still moves
     // `speed` even when Grace has flattened `slowDown`.
