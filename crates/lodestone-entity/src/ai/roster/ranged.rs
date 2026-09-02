@@ -702,7 +702,7 @@ fn snowball_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
     ))
 }
 
-/// `RangedAttackGoal(this, 1.0, 60, 10.0F)` (vanilla's own witch registration), throwing a
+/// Vanilla's own witch ranged-attack goal, throwing a
 /// splash potion.
 ///
 /// The power is vanilla's own ranged-attack step's own `dist <= 2.0 ? 0.45F : 0.75F`.
@@ -900,7 +900,7 @@ pub static PILLAGER: &[Registration] = &[
     // village bell" behaviour. Raid machinery again.
     Registration::missing(Selector::Goal, 2, "Raider.HoldGroundAttackGoal"),
     Registration::goal(3, "RangedCrossbowAttackGoal", crossbow_attack),
-    // `RandomStrollGoal(this, 0.6)` (vanilla's own pillager registration) — note this is the plain stroll, not
+    // Vanilla's own pillager stroll goal — note this is the plain stroll, not
     // the water-avoiding one the witch gets, and vanilla's speed factor is 0.6.
     // Ours is one goal for both, so the row is `Modelled` with the factor visible
     // at `stroll`'s own definition rather than here.
@@ -1329,17 +1329,17 @@ mod tests {
     fn every_ranged_builder_passes_the_jars_speed_multiplier() {
         // (builder, ctx speed, expected move_to speed, target distance, why)
         let cases: [(fn(&SpeciesContext) -> Box<dyn Goal>, f64, f64, f64, &str); 4] = [
-            // `RangedBowAttackGoal<>(this, 1.0, ...)` × skeleton 0.25
+            // Vanilla's own bow-attack goal × skeleton 0.25
             // (vanilla's own bow-goal field, its own attribute builder). Walks while `seeTime < 20`.
             (bow_attack, 0.25, 0.25, 4.0, "skeleton bow, 1.0 x 0.25"),
             // Vanilla's own blaze attack goal uses 1.0 internally (its own per-tick update) ×
             // blaze 0.23 (its own attribute builder). Only walks inside the melee radius (< 2
             // blocks) or beyond follow range.
             (blaze_fireball, 0.23, 0.23, 1.0, "blaze melee approach, 1.0 x 0.23"),
-            // `RangedAttackGoal(this, 1.25, ...)` (vanilla's own snow-golem registration) × snow
+            // Vanilla's own snow-golem ranged-attack goal × snow
             // golem 0.2 (its own attribute builder). Walks while `seeTime < 5`.
             (snowball_attack, 0.2, 0.25, 4.0, "snow golem, 1.25 x 0.2"),
-            // `DrownedTridentAttackGoal(this, 1.0, ...)` (vanilla's own drowned registration) ×
+            // Vanilla's own drowned trident-attack goal ×
             // drowned 0.23.
             (trident_attack, 0.23, 0.23, 4.0, "drowned trident, 1.0 x 0.23"),
         ];
