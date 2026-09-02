@@ -182,10 +182,10 @@ impl Sim {
         });
     }
 
-    /// Vanilla's `AbstractWidget.playButtonClickSound`
-    /// (`SimpleSoundInstance.forUI(SoundEvents.UI_BUTTON_CLICK, 1.0F)`, which is
-    /// `forUI(sound, pitch, 0.25F)` under the hood): pitch `1.0`, volume
-    /// `0.25`, `SoundSource.UI`. One choke point for the three magic numbers
+    /// Vanilla's own button-click-sound helper
+    /// (its own UI-sound-instance factory for the button-click sound, which is
+    /// a fixed-pitch UI-sound builder under the hood): pitch `1.0`, volume
+    /// `0.25`, the UI sound category. One choke point for the three magic numbers
     /// rather than repeating them at every menu-click call site
     /// (`crate::app::WindowApp`).
     ///
@@ -458,7 +458,7 @@ impl Sim {
 
     /// Whether the player counts as **creative** for music selection.
     ///
-    /// `Minecraft.java` — `instabuild && mayfly`, read off `Abilities`, and
+    /// Vanilla's own client entry point — `instabuild && mayfly`, read off `Abilities`, and
     /// deliberately **not** a `GameMode::Creative` check. The two come apart in
     /// both directions: a survival player granted both abilities hears creative
     /// music in vanilla, and a creative player whose `mayfly` was revoked does not.
@@ -599,18 +599,20 @@ impl Sim {
     /// break/place scaling.
     ///
     /// Three things here are vanilla's, not ours, and all three come from the
-    /// same two call sites (`LevelEventHandler.java` and
-    /// `BlockItem.java`):
+    /// same two call sites — its own level-event handling and its own
+    /// block-item placement:
     ///
-    /// * the position is the **block centre** — `Level.playLocalSound(BlockPos, …)`
+    /// * the position is the **block centre** — vanilla's own local-sound-play
+    ///   at a block position
     ///   forwards `pos.getX() + 0.5` and so on;
     /// * the volume is `(soundType.getVolume() + 1.0) / 2.0` and the pitch is
     ///   `soundType.getPitch() * 0.8`, both computed by
     ///   [`lodestone_data::sound_types::BlockSoundType`] so neither multiplier is
     ///   retyped per call site;
-    /// * the category is `SoundSource.BLOCKS`.
+    /// * the category is the blocks sound category.
     ///
-    /// The **air guard** is vanilla's too (`case 2001`'s `if (!blockState.isAir())`)
+    /// The **air guard** is vanilla's too (its own break-particle level event's
+    /// own `if (!blockState.isAir())` check)
     /// and is not redundant: air has a `SoundType` in the table — `STONE`, as it
     /// happens — so without it an air-state level event would play a stone break.
     fn play_block_surface_sound(

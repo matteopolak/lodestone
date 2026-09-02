@@ -93,7 +93,7 @@ impl Sim {
             .and_then(|net| net.shared_handle().get().and_then(|h| h.player().dimension))
     }
 
-    /// Which sky this dimension draws — vanilla's `DimensionType.skybox()`.
+    /// Which sky this dimension draws — vanilla's own per-dimension skybox choice.
     ///
     /// Pushed to the renderer once per frame by `app/redraw.rs`; see
     /// [`lodestone_render::SkyMode`] for what each mode suppresses and why the
@@ -229,14 +229,15 @@ impl Sim {
     ///
     /// # This is vanilla's own "inside block" test, not a proximity guess
     ///
-    /// `Entity.checkInsideBlocks` walks the cells its bounding box (deflated by
-    /// `1.0E-5`) intersects and calls `state.entityInside(...)` on each;
-    /// `NetherPortalBlock.entityInside` is what sets the portal process. The
+    /// Vanilla's own check-inside-blocks pass walks the cells its bounding box (deflated by
+    /// `1.0E-5`) intersects and calls its own entity-inside hook on each;
+    /// the nether portal block's own entity-inside override is what sets the portal process. The
     /// deflation is what stops a player standing flush against a portal from
     /// registering, and it is why this is not a bare `floor`/`ceil` range.
     ///
-    /// `insideBlock` there is `intersectShape == Shapes.block() || …` and
-    /// `NetherPortalBlock` does not override `getEntityInsideCollisionShape`, so
+    /// Vanilla's own inside-block test there is a full-cube-shape check and
+    /// the nether portal block does not override its own entity-inside collision
+    /// shape, so
     /// its inside-shape is the **full cube** even though its collision shape is a
     /// thin slab. A cell test is therefore exact for this block, not an
     /// approximation of one — which is the whole reason this can be a cell scan

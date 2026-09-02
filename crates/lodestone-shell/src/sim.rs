@@ -99,7 +99,7 @@ const PRE_SESSION_FEET: [f64; 3] = [0.5, 71.0, 0.5];
 const PLACE_BLOCK: u32 = id::STONE;
 /// Vanilla's `DEFAULT_ENTITY_INTERACTION_RANGE` — the reach
 /// for attacking/interacting with an entity, distinct from and shorter than
-/// [`REACH`] (block interaction range, `Player.java`'s `4.5`). Creative
+/// [`REACH`] (block interaction range, vanilla's own default of `4.5`). Creative
 /// adds a further `+2.0` modifier that this shell does not
 /// track, so every session uses the unmodified survival default.
 const ENTITY_REACH: f64 = 3.0;
@@ -644,10 +644,11 @@ pub struct Sim {
     /// [`Self::hand_swing_progress`] for the first-person arm's swing. The swing
     /// half is started by [`Self::swing_hand`].
     body_pose: EntityPose,
-    /// The camera's own eased eye height — vanilla's `Camera.eyeHeight` /
-    /// `eyeHeightOld` pair, **not** the entity's.
+    /// The camera's own eased eye height — vanilla's own camera-eye-height
+    /// current/previous pair, **not** the entity's.
     ///
-    /// `Camera.tick()` does `eyeHeight += (entity.getEyeHeight() - eyeHeight) * 0.5F`,
+    /// Vanilla's own per-tick camera update eases the eye height by half the
+    /// gap to the entity's eye height each tick,
     /// so the camera *chases* the entity's eye rather than adopting it. We had no
     /// equivalent, so [`Self::camera`] was handed the raw pose eye height every
     /// frame — and since the pose fit gate made that atomically snap between
@@ -1149,8 +1150,8 @@ impl Sim {
     /// Whether the use button is currently held down on an item (armed by
     /// [`Self::use_item`], cleared by [`Self::end_use`]).
     ///
-    /// Half of vanilla's `Player.isScoping()`:
-    /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
+    /// Half of vanilla's own is-scoping check: it also requires the held
+    /// item to be a spyglass
     ///. This crate has no held-item identity check
     /// — the caller already has `held` (the `ResourceLocation` used for
     /// `set_main_hand_source`), so `app.rs` combines the two rather than this
