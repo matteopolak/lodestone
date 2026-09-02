@@ -20,7 +20,7 @@ use uuid::Uuid;
 ///
 /// The three fields after `game_type` are the same `CommonPlayerSpawnInfo`
 /// prefix [`Respawn`] carries, and are modelled for the same reason: `is_flat`
-/// is what vanilla's `ClientLevelData.voidDarknessOnsetRange()` reads, so
+/// is what vanilla's own void-darkness onset-range calculation reads, so
 /// swallowing it into `rest` left the client unable to tell a superflat world
 /// from a normal one and applying a 32-block void fade in both.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
@@ -61,8 +61,8 @@ pub struct GameLogin {
     /// Whether this is a debug world.
     pub is_debug: bool,
     /// Whether the level uses the flat world generator. Drives
-    /// `ClientLevelData.voidDarknessOnsetRange()` — `1.0` when flat, `32.0`
-    /// otherwise — and so the whole void-fog curve.
+    /// vanilla's own void-darkness onset-range calculation — `1.0` when flat,
+    /// `32.0` otherwise — and so the whole void-fog curve.
     pub is_flat: bool,
     /// Remaining spawn-info bytes that are not modelled yet.
     #[mc(remaining)]
@@ -153,22 +153,24 @@ pub struct ChatAck {
 /// Serverbound `chat_session_update` packet — announces (or re-announces)
 /// this client's chat-signing session to the server.
 ///
-/// Wire layout mirrors `RemoteChatSession.Data.write` /
-/// `ProfilePublicKey.Data.write` exactly (`.cache/mc/26.2/src/net/minecraft/network/chat/RemoteChatSession.java`,
-/// `.../world/entity/player/ProfilePublicKey.java`): a 16-byte session UUID
+/// Wire layout mirrors vanilla's own remote-chat-session and public-key
+/// record writers exactly (confirmed against the decompiled 26.2 source): a
+/// 16-byte session UUID
 /// (`writeUUID`), a big-endian 64-bit `expires_at` (`writeInstant` = epoch
-/// **milliseconds**, not the epoch-seconds `SignedMessageBody.updateSignature`
+/// **milliseconds**, not the epoch-seconds vanilla's own signed-message-body
+/// signature update
 /// signs over — see `lodestone_auth::build_signature_payload`'s doc for that
 /// distinction), a varint-prefixed DER-encoded RSA public key
-/// (`writePublicKey` = `writeByteArray(key.getEncoded())`), then a
+/// (vanilla's own public-key writer, itself a length-prefixed byte-array
+/// write of the key's encoded form), then a
 /// varint-prefixed Mojang signature over that key (`writeByteArray`, the
 /// `/player/certificates` response's `publicKeySignatureV2`, forwarded
 /// verbatim — this client never re-signs it).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:chat_session_update", state = Play, bound = Server)]
 pub struct ChatSessionUpdate {
-    /// This client's chat-session UUID (`LocalChatSession::create`'s
-    /// client-generated `UUID.randomUUID()`).
+    /// This client's chat-session UUID (vanilla's own local chat-session
+    /// creation helper's client-generated random UUID).
     pub session_id: Uuid,
     /// Profile public key expiry, epoch milliseconds.
     pub expires_at: i64,
@@ -181,10 +183,11 @@ pub struct ChatSessionUpdate {
 }
 
 /// One per-argument signature inside [`ChatCommandSigned`]
-/// (`ArgumentSignatures.Entry`).
+/// (vanilla's own argument-signatures entry record).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct ArgumentSignatureEntry {
-    /// Argument name (max 16 chars, `ArgumentSignatures.MAX_ARGUMENT_NAME_LENGTH`).
+    /// Argument name (max 16 chars, vanilla's own argument-signatures max
+    /// name length).
     #[mc(max = 16)]
     pub name: String,
     /// Signature over that argument's raw text.
@@ -194,16 +197,18 @@ pub struct ArgumentSignatureEntry {
 /// Serverbound `chat_command_signed` packet — sent instead of the plain
 /// [`ChatCommand`] only when the command being typed contains at least one
 /// argument the server's command tree declared signable
-/// (`ArgumentSignatures.signCommand`); every other command still goes through
+/// (vanilla's own argument-signatures command-signing routine); every other
+/// command still goes through
 /// `chat_command`.
 ///
-/// Wire layout (`ServerboundChatCommandSignedPacket`,
-/// `.cache/mc/26.2/src/net/minecraft/network/protocol/game/ServerboundChatCommandSignedPacket.java`):
+/// Wire layout (vanilla's own serverbound signed-chat-command packet,
+/// confirmed against the decompiled 26.2 source):
 /// an unbounded string command (without the leading `/`, `readUtf()` with no
 /// explicit cap), a big-endian 64-bit timestamp (epoch milliseconds), a
 /// big-endian 64-bit salt, a varint-prefixed list of
-/// [`ArgumentSignatureEntry`] (`ArgumentSignatures`, vanilla caps this at 8 on
-/// decode — `MAX_ARGUMENT_COUNT`, not separately enforced by this encoder),
+/// [`ArgumentSignatureEntry`] (vanilla's own argument-signatures max count
+/// caps this at 8 on
+/// decode, not separately enforced by this encoder),
 /// then the same last-seen acknowledgement tail as [`ChatMessage`]: a varint
 /// offset, a fixed 3-byte (20-bit) acknowledged bit set, and a checksum byte.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
@@ -246,17 +251,20 @@ pub struct SetHealth {
 }
 
 /// Clientbound `initialize_border` packet (wire id 43 in 26.2) — the world
-/// border's full state, sent on join by `PlayerList.sendLevelInfo` before the
+/// border's full state, sent on join by vanilla's own player-list
+/// level-info sender before the
 /// time sync and spawn-position packets.
 ///
-/// Wire layout mirrors `ClientboundInitializeBorderPacket.write`'s field order
+/// Wire layout mirrors vanilla's own clientbound initialize-border packet
+/// writer's field order
 /// exactly: two big-endian `f64` centre coordinates, `old_size` and `new_size`
 /// f64s, a VarLong lerp time, then three VarInts for `absolute_max_size`,
 /// `warning_blocks` and `warning_time`.
 ///
 /// **One deliberate divergence: the lerp time is in milliseconds, not vanilla's
-/// ticks.** Vanilla writes `border.getLerpTime()` — the extent's remaining
-/// *server ticks* — directly (`ClientboundInitializeBorderPacket.java`),
+/// ticks.** Vanilla writes its own lerp-time getter — the extent's remaining
+/// *server ticks* — directly (confirmed against the decompiled clientbound
+/// initialize-border packet source),
 /// and the vanilla client re-runs that count as its own tick count. This
 /// crate's client instead decodes the field as `lerp_time_ms` and interpolates
 /// on
@@ -265,8 +273,9 @@ pub struct SetHealth {
 /// served by this crate would lerp 50× too fast; a vanilla *server* joining
 /// this crate's client already shows the same mismatch on this field.
 ///
-/// `old_size`/`new_size` are the extent's `getSize()` and `getLerpTarget()`
-/// (`ClientboundInitializeBorderPacket.java`) — for a static border they
+/// `old_size`/`new_size` are the extent's own size and lerp-target getters
+/// (confirmed against the decompiled clientbound initialize-border packet
+/// source) — for a static border they
 /// are equal and the lerp time is 0.
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
 #[mc(name = "minecraft:initialize_border", state = Play, bound = Client)]
@@ -275,15 +284,16 @@ pub struct InitializeBorder {
     pub center_x: f64,
     /// Border centre Z.
     pub center_z: f64,
-    /// Size at the start of the current lerp (`getSize()`).
+    /// Size at the start of the current lerp (vanilla's own size getter).
     pub old_size: f64,
-    /// Size at the end of the current lerp (`getLerpTarget()`).
+    /// Size at the end of the current lerp (vanilla's own lerp-target getter).
     pub new_size: f64,
     /// Remaining lerp time in **milliseconds** (0 for a static border) — see
     /// the packet doc for why this crate diverges from vanilla's ticks.
     #[mc(varlong)]
     pub lerp_time: i64,
-    /// The border's absolute maximum size (`WorldBorder.getAbsoluteMaxSize`).
+    /// The border's absolute maximum size (vanilla's own world-border
+    /// absolute-max-size getter).
     #[mc(varint)]
     pub absolute_max_size: i32,
     /// Warning distance in blocks.
@@ -298,7 +308,7 @@ pub struct InitializeBorder {
 /// border without changing its size.
 ///
 /// Wire layout: two big-endian `f64` coordinates
-/// (`ClientboundSetBorderCenterPacket`).
+/// (vanilla's own clientbound set border center packet).
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
 #[mc(name = "minecraft:set_border_center", state = Play, bound = Client)]
 pub struct SetBorderCenter {
@@ -314,8 +324,9 @@ pub struct SetBorderCenter {
 /// Wire layout: `old_size` and `new_size` big-endian f64s, then a VarLong
 /// lerp time in **milliseconds** — the same deliberate divergence from the
 /// vanilla wire as [`InitializeBorder`]'s lerp time (see that packet's doc).
-/// Vanilla writes `border.getLerpTime()` — remaining *server ticks* — directly
-/// in both packets (`ClientboundSetBorderLerpSizePacket.java`, no ×50); this
+/// Vanilla writes its own lerp-time getter — remaining *server ticks* — directly
+/// in both packets (confirmed against the decompiled clientbound
+/// set-border-lerp-size packet source, no ×50); this
 /// crate's client decodes the field as `lerp_time_ms` and interpolates on
 /// wall-clock, so the server converts ticks → ms before it reaches this
 /// encoder, which writes the ms value verbatim. A vanilla client served by
@@ -333,10 +344,10 @@ pub struct SetBorderLerpSize {
 }
 
 /// Clientbound `set_border_size` packet (wire id 90 in 26.2) — the instant
-/// snap a `WorldBorder.setSize` broadcasts.
+/// snap vanilla's own world-border size setter broadcasts.
 ///
 /// Wire layout: a single big-endian `f64` size
-/// (`ClientboundSetBorderSizePacket`).
+/// (vanilla's own clientbound set-border-size packet).
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
 #[mc(name = "minecraft:set_border_size", state = Play, bound = Client)]
 pub struct SetBorderSize {
@@ -348,7 +359,7 @@ pub struct SetBorderSize {
 /// warning *time* delta.
 ///
 /// Wire layout: a single VarInt seconds value
-/// (`ClientboundSetBorderWarningDelayPacket`).
+/// (vanilla's own clientbound set border warning delay packet).
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
 #[mc(name = "minecraft:set_border_warning_delay", state = Play, bound = Client)]
 pub struct SetBorderWarningDelay {
@@ -361,7 +372,7 @@ pub struct SetBorderWarningDelay {
 /// the warning *blocks* delta.
 ///
 /// Wire layout: a single VarInt blocks value
-/// (`ClientboundSetBorderWarningDistancePacket`).
+/// (vanilla's own clientbound set border warning distance packet).
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
 #[mc(name = "minecraft:set_border_warning_distance", state = Play, bound = Client)]
 pub struct SetBorderWarningDistance {
@@ -374,14 +385,14 @@ pub struct SetBorderWarningDistance {
 ///
 /// Wire layout: an identifier string naming the dimension, then a single
 /// big-endian 64-bit packed block position (`x` in the high 26 bits, `z` in the
-/// middle 26 bits, `y` in the low 12 bits — the vanilla `BlockPos.asLong`
-/// packing). Only decoded as part of the optional last-death-location field of
+/// middle 26 bits, `y` in the low 12 bits — vanilla's own packed
+/// block-position long value). Only decoded as part of the optional last-death-location field of
 /// the [`Respawn`] spawn info; the packed position is kept verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
 pub struct GlobalPos {
     /// Identifier of the dimension the position belongs to.
     pub dimension: String,
-    /// Packed block position (`BlockPos.asLong`).
+    /// Packed block position (vanilla's own packed block-position long value).
     pub position: i64,
 }
 
@@ -452,8 +463,8 @@ pub const MOVE_FLAG_HORIZONTAL_COLLISION: u8 = 0x02;
 
 /// Serverbound `move_player_pos_rot` packet.
 ///
-/// Sent when both position and rotation change (vanilla's
-/// `LocalPlayer.sendPosition` when position and look are both dirty). This is
+/// Sent when both position and rotation change (vanilla's own client-side
+/// position-send tick when position and look are both dirty). This is
 /// the packet a player controller drives to actually move in the world.
 ///
 /// Wire layout: big-endian `f64` x, y, z, big-endian `f32` yaw and pitch, then
@@ -479,8 +490,8 @@ pub struct MovePlayerPosRot {
 
 /// Serverbound `move_player_pos` packet.
 ///
-/// Sent when position moved but rotation did not (vanilla's
-/// `LocalPlayer.sendPosition` when only position is dirty).
+/// Sent when position moved but rotation did not (vanilla's own
+/// client-side position-send tick when only position is dirty).
 ///
 /// Wire layout: big-endian `f64` x, y, z, then a single flags byte — bit 0
 /// ([`MOVE_FLAG_ON_GROUND`]) and bit 1 ([`MOVE_FLAG_HORIZONTAL_COLLISION`]),
@@ -501,8 +512,8 @@ pub struct MovePlayerPos {
 
 /// Serverbound `move_player_rot` packet.
 ///
-/// Sent when rotation changed but position did not (vanilla's
-/// `LocalPlayer.sendPosition` when only look is dirty).
+/// Sent when rotation changed but position did not (vanilla's own
+/// client-side position-send tick when only look is dirty).
 ///
 /// Wire layout: big-endian `f32` yaw and pitch, then a single flags byte —
 /// bit 0 ([`MOVE_FLAG_ON_GROUND`]) and bit 1
@@ -524,7 +535,7 @@ pub struct MovePlayerRot {
 ///
 /// Sent when neither position nor rotation changed enough to be "dirty", but
 /// on-ground or horizontal-collision status flipped since the last tick
-/// (vanilla's `LocalPlayer.sendPosition` fallback branch). Carries no pose
+/// (vanilla's own client-side position-send tick's fallback branch). Carries no pose
 /// data at all — just the flags byte.
 ///
 /// Wire layout: a single flags byte — bit 0 ([`MOVE_FLAG_ON_GROUND`]) and bit
@@ -539,12 +550,12 @@ pub struct MovePlayerStatusOnly {
 
 /// Serverbound `move_vehicle` packet.
 ///
-/// Sent once per tick while riding a vehicle (`ServerboundMoveVehiclePacket`).
+/// Sent once per tick while riding a vehicle (vanilla's own serverbound move vehicle packet).
 /// Unlike player movement, there is no dirty-tracking selection and no
 /// horizontal-collision flag: vanilla always sends the full shape and packs
 /// only `onGround` as a plain trailing boolean, not a bitset.
 ///
-/// Wire layout: `Vec3.STREAM_CODEC` (big-endian `f64` x, y, z), big-endian
+/// Wire layout: vanilla's own `Vec3` stream codec (big-endian `f64` x, y, z), big-endian
 /// `f32` yaw then pitch, then a single boolean byte for `onGround`.
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:move_vehicle", state = Play, bound = Server)]
@@ -566,7 +577,7 @@ pub struct MoveVehicle {
 /// Serverbound `paddle_boat` packet (boat paddle animation input).
 ///
 /// Wire layout: two plain booleans, `left` then `right`
-/// (`ServerboundPaddleBoatPacket`'s `writeBoolean` pair).
+/// (vanilla's own serverbound paddle boat packet's `writeBoolean` pair).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:paddle_boat", state = Play, bound = Server)]
 pub struct PaddleBoat {
@@ -577,7 +588,7 @@ pub struct PaddleBoat {
 }
 
 /// Serverbound `player_loaded` packet with an empty body
-/// (`ServerboundPlayerLoadedPacket`, `StreamCodec.unit`).
+/// (vanilla's own serverbound player-loaded packet, a unit stream codec).
 ///
 /// Zeroes the server's `clientLoadedTimeoutTimer` early so movement is
 /// validated immediately instead of being silently ignored for the first
@@ -589,7 +600,7 @@ pub struct PlayerLoaded;
 /// Serverbound `command_suggestion` packet (tab-completion request).
 ///
 /// Wire layout: a VarInt transaction id, then a VarInt-length-prefixed UTF-8
-/// command string (`ServerboundCommandSuggestionPacket`'s `readUtf(32500)` /
+/// command string (vanilla's own serverbound command suggestion packet's `readUtf(32500)` /
 /// `writeUtf`).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:command_suggestion", state = Play, bound = Server)]
@@ -604,7 +615,7 @@ pub struct CommandSuggestion {
 /// Serverbound `swing` packet (arm-swing animation).
 ///
 /// Wire layout: a single VarInt interaction-hand ordinal — `0` main hand, `1`
-/// off hand — written as `FriendlyByteBuf.writeEnum` does for `InteractionHand`.
+/// off hand — written as vanilla's own enum-ordinal writer does for `InteractionHand`.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:swing", state = Play, bound = Server)]
 pub struct Swing {
@@ -616,7 +627,7 @@ pub struct Swing {
 /// Serverbound `select_bundle_item` packet.
 ///
 /// Highlights which stack inside a bundle's tooltip preview is selected
-/// (`ServerboundSelectBundleItemPacket`). Wire layout: VarInt slot id, then
+/// (vanilla's own serverbound select bundle item packet). Wire layout: VarInt slot id, then
 /// VarInt selected item index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:select_bundle_item", state = Play, bound = Server)]
@@ -632,7 +643,7 @@ pub struct SelectBundleItem {
 /// Serverbound `container_slot_state_changed` packet.
 ///
 /// Toggles a container slot's enabled state, e.g. a crafter's per-slot
-/// disable toggle (`ServerboundContainerSlotStateChangedPacket`). Wire
+/// disable toggle (vanilla's own serverbound container slot state changed packet). Wire
 /// layout: VarInt slot id, VarInt container id, then a trailing boolean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:container_slot_state_changed", state = Play, bound = Server)]
@@ -651,7 +662,7 @@ pub struct ContainerSlotStateChanged {
 ///
 /// Wire layout: VarInt `RecipeBookType` ordinal (`writeEnum`), then two
 /// trailing booleans, open then filtering
-/// (`ServerboundRecipeBookChangeSettingsPacket`).
+/// (vanilla's own serverbound recipe book change settings packet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:recipe_book_change_settings", state = Play, bound = Server)]
 pub struct RecipeBookChangeSettings {
@@ -668,7 +679,7 @@ pub struct RecipeBookChangeSettings {
 /// Serverbound `recipe_book_seen_recipe` packet.
 ///
 /// Marks a recipe as seen, clearing its "new" highlight
-/// (`ServerboundRecipeBookSeenRecipePacket`). Wire layout: a single VarInt
+/// (vanilla's own serverbound recipe book seen recipe packet). Wire layout: a single VarInt
 /// `RecipeDisplayId` index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:recipe_book_seen_recipe", state = Play, bound = Server)]
@@ -681,7 +692,7 @@ pub struct RecipeBookSeenRecipe {
 /// Serverbound `place_recipe` packet.
 ///
 /// Auto-places a recipe book entry's ingredients into an open crafting
-/// container (`ServerboundPlaceRecipePacket`). Wire layout: VarInt container
+/// container (vanilla's own serverbound place recipe packet). Wire layout: VarInt container
 /// id, VarInt `RecipeDisplayId` index, then a trailing boolean for
 /// "use max items".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
@@ -701,8 +712,9 @@ pub struct PlaceRecipe {
 /// Serverbound `change_game_mode` packet.
 ///
 /// Sent by the singleplayer/LAN cheats-enabled F4 game-mode switcher
-/// (`ServerboundChangeGameModePacket`). Wire layout: a single VarInt
-/// `GameType` id via `ByteBufCodecs.idMapper` (`0` survival, `1` creative,
+/// (vanilla's own serverbound change-game-mode packet). Wire layout: a
+/// single VarInt
+/// game-type id via vanilla's own id-mapper codec (`0` survival, `1` creative,
 /// `2` adventure, `3` spectator) — the server remains authoritative and may
 /// ignore this if the requester lacks permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
@@ -739,7 +751,7 @@ pub struct AcceptTeleportation {
 /// parameter whose meaning depends on the code.
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct GameEvent {
-    /// Event code (see the vanilla `ClientboundGameEventPacket` type table).
+    /// Event code (see vanilla's own clientbound game event packet type table).
     pub event: u8,
     /// Event parameter; interpretation depends on [`event`](GameEvent::event).
     pub param: f32,
@@ -797,13 +809,13 @@ pub struct PlayerAbilities {
 /// level-event code, not a registry id.
 ///
 /// Wire layout: big-endian `i32` event code, a packed 64-bit block position
-/// (`BlockPos.asLong`), a big-endian `i32` data value, then a boolean marking
+/// (vanilla's own packed block-position long value), a big-endian `i32` data value, then a boolean marking
 /// the event as global rather than distance-limited.
 #[derive(Debug, Clone, PartialEq, Eq, Decode)]
 pub struct LevelEvent {
     /// Gameplay-level event code.
     pub event: i32,
-    /// Packed event block position (`BlockPos.asLong`).
+    /// Packed event block position (vanilla's own packed block-position long value).
     pub position: i64,
     /// Event-specific data value.
     pub data: i32,
@@ -871,7 +883,7 @@ pub struct Attack {
 ///
 /// Covers block-breaking phases and the item actions (drop, release, swap,
 /// stab). Wire layout: VarInt action ordinal, packed `BlockPos` long, a single
-/// direction byte (`Direction.get3DDataValue`), then a VarInt prediction
+/// direction byte (vanilla's own direction data-value ordinal), then a VarInt prediction
 /// sequence. Item actions send a zeroed position and a `down` direction.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:player_action", state = Play, bound = Server)]
@@ -881,7 +893,7 @@ pub struct PlayerAction {
     pub action: i32,
     /// Packed `BlockPos` long.
     pub pos: i64,
-    /// Face as `Direction.get3DDataValue` (`0` down … `5` east).
+    /// Face as vanilla's own direction data-value ordinal (`0` down … `5` east).
     pub direction: u8,
     /// Client block-prediction sequence number.
     #[mc(varint)]
@@ -901,7 +913,7 @@ pub struct UseItemOn {
     pub hand: i32,
     /// Packed `BlockPos` long of the targeted block.
     pub pos: i64,
-    /// Face ordinal (`Direction.get3DDataValue`) written as a VarInt.
+    /// Face ordinal (vanilla's own direction data-value ordinal) written as a VarInt.
     #[mc(varint)]
     pub face: i32,
     /// Cursor x within the block face, `0.0`–`1.0`.
@@ -962,11 +974,12 @@ pub struct SetCarriedItem {
 /// Serverbound `change_difficulty` packet.
 ///
 /// Wire layout: a single VarInt difficulty ordinal
-/// (`ServerboundChangeDifficultyPacket`, `Difficulty.STREAM_CODEC` —
-/// `ByteBufCodecs.idMapper`, a raw VarInt of the ordinal, not the
+/// (vanilla's own serverbound change-difficulty packet, whose difficulty
+/// stream codec is a plain id-mapper —
+/// a raw VarInt of the ordinal, not the
 /// `#[mc(varint)]`-tagged *typed* int this crate elsewhere reserves for
 /// packet-prediction sequence numbers; same wire shape either way — see
-/// `.cache/mc/26.2/src/net/minecraft/world/Difficulty.java`: `0` peaceful,
+/// the decompiled 26.2 difficulty enum's own declaration order: `0` peaceful,
 /// `1` easy, `2` normal, `3` hard).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:change_difficulty", state = Play, bound = Server)]
@@ -981,7 +994,7 @@ pub struct ChangeDifficultyServerbound {
 /// sends back.
 ///
 /// Wire layout: VarInt difficulty ordinal, then a `locked` bool
-/// (`ClientboundChangeDifficultyPacket`).
+/// (vanilla's own clientbound change difficulty packet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:change_difficulty", state = Play, bound = Client)]
 pub struct ChangeDifficultyClientbound {
@@ -996,7 +1009,7 @@ pub struct ChangeDifficultyClientbound {
 
 /// Serverbound `lock_difficulty` packet.
 ///
-/// Wire layout: a single bool (`ServerboundLockDifficultyPacket`).
+/// Wire layout: a single bool (vanilla's own serverbound lock difficulty packet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:lock_difficulty", state = Play, bound = Server)]
 pub struct LockDifficulty {
@@ -1007,8 +1020,10 @@ pub struct LockDifficulty {
 /// One `(rule key, raw string value)` pair, shared by [`SetGameRule`]
 /// (serverbound) and [`GameRuleValues`] (clientbound) — both wire formats are
 /// a VarInt-prefixed list of this same pair shape
-/// (`ServerboundSetGameRulePacket.Entry`'s `(ResourceKey<GameRule<?>>,
-/// String)`, whose `ResourceKey` stream codec is `Identifier.STREAM_CODEC` —
+/// (vanilla's own serverbound set-game-rule packet's entry record, a
+/// `(ResourceKey<GameRule<?>>,
+/// String)`, whose `ResourceKey` stream codec is vanilla's own identifier
+/// stream codec —
 /// a plain `namespace:path` string, the same wire shape `GameLogin::levels`
 /// already uses for dimension keys — so `key` here is that string verbatim,
 /// not a registry sync id).
@@ -1025,7 +1040,7 @@ pub struct GameRuleEntry {
 /// Serverbound `set_game_rule` packet.
 ///
 /// Wire layout: a VarInt-prefixed list of [`GameRuleEntry`]
-/// (`ServerboundSetGameRulePacket`).
+/// (vanilla's own serverbound set game rule packet).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:set_game_rule", state = Play, bound = Server)]
 pub struct SetGameRule {
@@ -1036,7 +1051,7 @@ pub struct SetGameRule {
 /// Clientbound `game_rule_values` packet — the confirmation
 /// [`crate::server_protocol::V770ServerProtocol::encode_game_rule_values`]
 /// sends back. Vanilla's own struct carries the *whole* current
-/// rule table as a map (`ClientboundGameRuleValuesPacket`); this crate has no
+/// rule table as a map (vanilla's own clientbound game rule values packet); this crate has no
 /// default rule set to include the rest of, so
 /// `V770ServerProtocol::encode_game_rule_values` only ever sends the entries
 /// that were just changed — same wire shape (a VarInt-prefixed list of
@@ -1241,8 +1256,9 @@ pub const COMMAND_BLOCK_FLAG_AUTOMATIC: u8 = 0x04;
 /// Serverbound `set_command_block` packet.
 ///
 /// Wire layout: packed `BlockPos` long, UTF command string, VarInt
-/// `CommandBlockEntity.Mode` ordinal (`0` sequence, `1` auto, `2` redstone),
-/// then a single flags byte (see the `COMMAND_BLOCK_FLAG_*` constants).
+/// vanilla's own command-block mode ordinal (`0` sequence, `1` auto, `2`
+/// redstone), then a single flags byte (see the `COMMAND_BLOCK_FLAG_*`
+/// constants).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:set_command_block", state = Play, bound = Server)]
 pub struct SetCommandBlock {
@@ -1285,7 +1301,7 @@ pub struct ClientTickEnd;
 /// Serverbound `set_command_minecart` packet (command-block minecart editor).
 ///
 /// Wire layout: VarInt entity id, a UTF command string, then a trailing
-/// boolean for output tracking (`ServerboundSetCommandMinecartPacket`) — no
+/// boolean for output tracking (vanilla's own serverbound set command minecart packet) — no
 /// mode/conditional/automatic flags byte, unlike [`SetCommandBlock`], since a
 /// command-block minecart has neither a mode nor redstone/conditional
 /// behaviour.
@@ -1303,7 +1319,7 @@ pub struct SetCommandMinecart {
 /// Serverbound `jigsaw_generate` packet (jigsaw-block "Generate" button).
 ///
 /// Wire layout: packed `BlockPos` long, VarInt max depth ("levels"), then a
-/// trailing boolean for "keep jigsaws" (`ServerboundJigsawGeneratePacket`).
+/// trailing boolean for "keep jigsaws" (vanilla's own serverbound jigsaw generate packet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Decode)]
 pub struct JigsawGenerate {
     /// Packed `BlockPos` long of the jigsaw block to generate from.
@@ -1319,9 +1335,10 @@ pub struct JigsawGenerate {
 ///
 /// Wire layout: packed `BlockPos` long, then five identifier/UTF strings —
 /// name, target, pool, final-state block-state string, and the joint type's
-/// serialized name (`"aligned"`/`"rollable"`, `JigsawBlockEntity.JointType`)
+/// serialized name (`"aligned"`/`"rollable"`, vanilla's own jigsaw-block
+/// joint-type enum)
 /// — then two VarInts, selection priority and placement priority
-/// (`ServerboundSetJigsawBlockPacket`). Identifiers use the same
+/// (vanilla's own serverbound set-jigsaw-block packet). Identifiers use the same
 /// VarInt-length-prefixed UTF-8 wire shape as a plain string (see
 /// [`BrandPayload`](crate::packets::common::BrandPayload)'s own doc comment),
 /// so `String` decodes all five fields correctly regardless of which are
@@ -1350,10 +1367,11 @@ pub struct SetJigsawBlock {
 
 /// Serverbound `set_structure_block` packet (structure-block editor screen).
 ///
-/// Wire layout (`ServerboundSetStructureBlockPacket`): packed `BlockPos`
-/// long; VarInt `StructureBlockEntity.UpdateType` ordinal and VarInt
-/// `StructureMode` ordinal (both `FriendlyByteBuf.writeEnum`, i.e. a plain
-/// VarInt of `Enum.ordinal()` — **not** the `ByteBufCodecs.idMapper` used
+/// Wire layout (vanilla's own serverbound set-structure-block packet): packed
+/// `BlockPos`
+/// long; VarInt vanilla's own structure-block update-type ordinal and VarInt
+/// `StructureMode` ordinal (both a plain enum-ordinal writer, i.e. a plain
+/// VarInt of the ordinal — **not** the id-mapper codec used
 /// elsewhere in this file, though the two encode identically as a VarInt so
 /// the wire bytes are the same either way); a UTF structure name; six signed
 /// bytes (offset x/y/z then size x/y/z, each clamped `-48..=48`/`0..=48` by
@@ -1368,7 +1386,7 @@ pub struct SetJigsawBlock {
 pub struct SetStructureBlock {
     /// Packed `BlockPos` long of the target structure block.
     pub pos: i64,
-    /// `StructureBlockEntity.UpdateType` ordinal.
+    /// Vanilla's own structure-block update-type ordinal.
     #[mc(varint)]
     pub update_type: i32,
     /// `StructureMode` ordinal.
@@ -1408,9 +1426,9 @@ pub struct SetStructureBlock {
 /// Serverbound `set_test_block` packet (game-test test-block editor).
 ///
 /// Wire layout: packed `BlockPos` long, VarInt `TestBlockMode` ordinal
-/// (`ByteBufCodecs.idMapper`, same VarInt-of-ordinal wire shape as the plain
-/// `writeEnum` fields above), then a plain UTF string message
-/// (`ServerboundSetTestBlockPacket`).
+/// (vanilla's own id-mapper codec, same VarInt-of-ordinal wire shape as the
+/// plain enum-ordinal writer fields above), then a plain UTF string message
+/// (vanilla's own serverbound set-test-block packet).
 #[derive(Debug, Clone, PartialEq, Eq, Decode)]
 pub struct SetTestBlock {
     /// Packed `BlockPos` long of the target test block.
@@ -1426,7 +1444,7 @@ pub struct SetTestBlock {
 /// request for an entity).
 ///
 /// Wire layout: VarInt transaction id, then VarInt entity id
-/// (`ServerboundEntityTagQueryPacket`, decompiled `.cache/mc/26.2/src`). No
+/// (vanilla's own serverbound entity tag query packet, decompiled `.cache/mc/26.2/src`). No
 /// clientbound `tag_query` encoder exists yet to answer it — see this
 /// struct's decode-side consumer for why it is decoded but not acted on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
@@ -1443,7 +1461,7 @@ pub struct EntityTagQuery {
 /// inspection request for a block entity).
 ///
 /// Wire layout: VarInt transaction id, then a packed `BlockPos` long
-/// (`ServerboundBlockEntityTagQueryPacket`). Same "decoded, no reply
+/// (vanilla's own serverbound block entity tag query packet). Same "decoded, no reply
 /// encoder yet" situation as [`EntityTagQuery`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct BlockEntityTagQuery {
@@ -1472,7 +1490,8 @@ mod secure_chat_wire_tests {
     }
 
     /// `ChatSessionUpdate` round-trips through its own `Encode`/`Decode`, and
-    /// its byte layout matches `RemoteChatSession.Data.write` field-by-field:
+    /// its byte layout matches vanilla's own remote-chat-session record
+    /// writer field-by-field:
     /// session UUID, expiry (i64), varint-prefixed public key, varint-prefixed
     /// key signature. Pairwise-distinct field values (and public key /
     /// signature of different lengths) so a transposition would be visible.
@@ -1503,7 +1522,7 @@ mod secure_chat_wire_tests {
 
     /// `ChatCommandSigned` round-trips, including a non-empty
     /// `argument_signatures` list, and matches
-    /// `ServerboundChatCommandSignedPacket.write`'s field order.
+    /// vanilla's own serverbound signed-chat-command packet writer's field order.
     #[test]
     fn chat_command_signed_round_trips_and_matches_the_hand_written_layout() {
         let mut sig_bytes = [0u8; 256];
