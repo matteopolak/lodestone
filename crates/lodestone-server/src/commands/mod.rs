@@ -132,6 +132,10 @@ pub mod effect;
 mod effect_command;
 mod execute;
 mod experience;
+/// `/function` and `/reload` (issue #48's remainder — datapack functions and
+/// function tags). See [`function_store`] for the loader itself.
+mod function;
+pub mod function_store;
 mod gamemode;
 mod gamerule;
 mod give;
@@ -261,6 +265,7 @@ impl ServerCommands {
         worldborder::register(&mut registrar);
         scoreboard::register(&mut registrar);
         team::register(&mut registrar);
+        function::register(&mut registrar);
         Self::from_registrar(registrar)
     }
 
@@ -443,6 +448,7 @@ impl ServerCommands {
             modifiers: &self.inner.modifiers,
             forks: &self.inner.forks,
             argument_nodes: &self.inner.argument_nodes,
+            commands: self,
         };
         Some(dispatcher.dispatch(
             world,

@@ -1811,6 +1811,19 @@ impl IntegratedServer {
         // it (via `ticking`, below) to hand a Nether/End sibling's tick loop
         // the same anchor set this connection publishes into.
         let world_state = crate::world_state::WorldStateHandle::new();
+        // Issue #48's remainder: a persistent world's `datapacks/` folder,
+        // loaded once here rather than left for `/reload` to discover for
+        // the first time — the identical "load at open, `/reload` re-reads
+        // the same root" shape `LevelDatHandle::open_or_create` already
+        // takes for `level.dat` below. `world_dir` is borrowed, not moved,
+        // so the ownership transfer into `with_nether` just below is
+        // unaffected; `None` (every in-memory/browser world) loads nothing,
+        // matching `crate::commands::function_store::FunctionHandle`'s own
+        // "never configured" answer for `/reload` there.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(dir) = world_dir.as_deref() {
+            world_state.functions().load_from(dir);
+        }
         let source = Arc::new(with_nether(
             ChunkStore::for_integrated_view_radius(source, view_radius),
             view_radius,
