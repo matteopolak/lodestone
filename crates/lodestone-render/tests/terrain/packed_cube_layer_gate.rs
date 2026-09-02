@@ -67,6 +67,7 @@ use lodestone_model::{BlockStateRegistry, Identifier};
 use lodestone_render::{BlockModels, RenderLayer, blocks_json_registry, is_full_cube,
     is_packed_cube};
 
+#[path = "../gate_harness/mod.rs"]
 mod gate_harness;
 use gate_harness::{require_blocks_report, require_client_jar};
 

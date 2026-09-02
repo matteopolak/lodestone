@@ -70,6 +70,7 @@ use lodestone_assets::{BakedQuad, Direction, ResourceManager, ZipSource};
 use lodestone_model::{BlockStateRegistry, Identifier};
 use lodestone_render::{BlockModels, ModelSectionView, blocks_json_registry, mesh_models};
 
+#[path = "../gate_harness/mod.rs"]
 mod gate_harness;
 use gate_harness::{require_blocks_report, require_client_jar};
 

@@ -43,6 +43,7 @@
 use lodestone_assets::{Image, ResourceLocation, ResourceManager, ZipSource};
 use lodestone_render::{BlockModels, blocks_json_registry};
 
+#[path = "../gate_harness/mod.rs"]
 mod gate_harness;
 use gate_harness::{require_blocks_report, require_client_jar};
 
