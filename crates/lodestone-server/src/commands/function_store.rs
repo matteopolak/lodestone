@@ -1,22 +1,20 @@
-//! The `/function`/`/reload` datapack function library (issue #48's
-//! remainder) — vanilla's `ServerFunctionLibrary`/`TagLoader<CommandFunction>`,
-//! restated as a plain directory scan behind one shared, cloneable handle,
-//! the same shape every sibling store in this module takes
-//! ([`crate::commands::stopwatch_store::StopwatchHandle`],
+//! The `/function`/`/reload` datapack function library — the real
+//! function-library-plus-tag-loader pair, restated as a plain directory scan
+//! behind one shared, cloneable handle, the same shape every sibling store
+//! in this module takes ([`crate::commands::stopwatch_store::StopwatchHandle`],
 //! [`crate::commands::scoreboard_store::ScoreboardHandle`]).
 //!
 //! # How it works
 //!
 //! [`FunctionHandle::load_from`] walks `<world_dir>/datapacks/<pack>/data/
-//! <namespace>/function/**/*.mcfunction` — the registry-keyed directory
-//! vanilla's own `Registries.elementsDirPath` resolves `minecraft:function`
-//! to (`.cache/mc/26.2/src/net/minecraft/server/ServerFunctionLibrary.java`),
-//! **not** the pre-1.21 `functions/` (plural) folder — and the matching
+//! <namespace>/function/**/*.mcfunction` — the registry-keyed directory the
+//! real rule resolves `minecraft:function` to, **not** the pre-1.21
+//! `functions/` (plural) folder — and the matching
 //! `data/<namespace>/tags/function/**/*.json` tag files, flattening a tag's
 //! `#other:tag` entries into the concrete function ids they eventually name
 //! (cycle-safe: a tag that (transitively) names itself simply stops
 //! contributing further entries rather than looping). Datapack directories
-//! are visited in sorted order — a v1 simplification of vanilla's own
+//! are visited in sorted order — a v1 simplification of the real
 //! `pack.mcmeta`-driven priority, undocumented anywhere in this crate before
 //! now because nothing exercised more than one pack at a time.
 //!
@@ -243,11 +241,11 @@ fn walk(dir: &Path, ext: &str, f: &mut dyn FnMut(&str, &str)) {
     inner(dir, dir, ext, f);
 }
 
-/// `CommandFunction.fromLines`, restated for our own dispatcher rather than
-/// Brigadier's: strips `#`-comments and blank lines, joins a trailing-`\`
+/// The real function-file parse rule, restated for our own dispatcher rather
+/// than Brigadier's: strips `#`-comments and blank lines, joins a trailing-`\`
 /// line continuation, and skips a `$`-prefixed macro line (see this module's
-/// doc for why macros are not expanded). Unlike vanilla, a malformed line is
-/// never a hard load-time error here — an unparseable command is simply run
+/// doc for why macros are not expanded). Unlike the real rule, a malformed
+/// line is never a hard load-time error here — an unparseable command is simply run
 /// (and refused) the same as any other line, at *execution* time, since this
 /// crate's own dispatcher already reports a clean per-line refusal rather
 /// than needing a separate compile pass.
@@ -305,8 +303,8 @@ fn parse_tag_json(contents: &str) -> Vec<String> {
 /// Resolves every tag's raw entries (bare function ids and `#tag`
 /// references) down to concrete function ids, following nested tag
 /// references with a visited set so a cycle simply stops contributing
-/// further entries instead of looping — vanilla's own `TagLoader` does the
-/// equivalent with a `visited` set in `TagLoader.build`.
+/// further entries instead of looping — the real tag loader does the
+/// equivalent with its own visited set.
 #[cfg(not(target_arch = "wasm32"))]
 fn flatten_tags(
     raw: &HashMap<String, Vec<String>>,

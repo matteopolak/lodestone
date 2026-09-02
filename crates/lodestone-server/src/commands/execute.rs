@@ -1,5 +1,5 @@
-//! `/execute`, from `ExecuteCommand.java` (issue #48's remainder) — the
-//! subcommand chain that rewrites a [`CommandSource`] and re-dispatches, built
+//! `/execute` — the subcommand chain that rewrites a [`CommandSource`] and
+//! re-dispatches, built
 //! entirely on the modifier/fork substrate `crate::commands::registrar`
 //! already carried with no production caller.
 //!
@@ -25,8 +25,8 @@
 //!
 //! Every non-conditional subcommand below is exactly one [`Registrar::arg`] (or
 //! bare literal) carrying a [`Registrar::modifier`] plus [`Registrar::redirect`]
-//! back to [`execute_node`]'s own children — Brigadier's `.redirect(execute,
-//! modifier)`. A modifier receives the **one** [`CommandSource`] flowing through
+//! back to [`execute_node`]'s own children — the standard command-parser
+//! redirect-with-modifier shape. A modifier receives the **one** [`CommandSource`] flowing through
 //! this branch (`Dispatcher::dispatch` always calls a modifier with exactly one
 //! input; see that function's own doc) and returns either one rewritten source
 //! (`as`/`at`/`positioned`/… without `as`) or, for a *forking* modifier
@@ -35,32 +35,32 @@
 //! failure inside one branch not abort the others (`execute as @a run give @s
 //! …` must not stop at the first full inventory).
 //!
-//! `run <command>` is the one subcommand with **no modifier at all**:
-//! `registrar.redirect(run_node, registrar.root())` — Brigadier's own
-//! `literal("run").redirect(dispatcher.getRoot())`. With no modifier
-//! registered for that node, `Dispatcher::dispatch`'s walk finds nothing and
-//! passes the current (possibly already-forked) source set straight through
-//! into a full re-parse of the *entire* tree from the top, so `execute as
-//! Steve run kill` really does kill Steve and not the caller. This crate's own
-//! `lodestone-command` doc names this exact shape — "how every vanilla
-//! `/execute ... run <command>` re-enters the root" — as the motivating case
-//! for the redirect-cycle guard in `CommandTree::parse`, and it is exercised
-//! directly by `tests/brigadier_spec.rs` there, not invented here.
+//! `run <command>` is the one subcommand with **no modifier at all**: a plain
+//! redirect of the `run` literal back to the dispatcher's own root. With no
+//! modifier registered for that node, `Dispatcher::dispatch`'s walk finds
+//! nothing and passes the current (possibly already-forked) source set
+//! straight through into a full re-parse of the *entire* tree from the top,
+//! so `execute as Steve run kill` really does kill Steve and not the caller.
+//! This crate's own `lodestone-command` doc names this exact shape — "how
+//! every real `/execute ... run <command>` re-enters the root" — as the
+//! motivating case for the redirect-cycle guard in `CommandTree::parse`, and
+//! it is exercised directly by `tests/brigadier_spec.rs` there, not invented
+//! here.
 //!
 //! # `if`/`unless`: the one place a node needs *both* a modifier and an executor
 //!
-//! `ExecuteCommand.addConditional` attaches **both** `.fork(execute, modifier)`
-//! *and* `.executes(numericConditionalHandler)` to the same condition node,
+//! The real rule's condition-registration step attaches **both** a forking
+//! modifier *and* a numeric-conditional executor to the same condition node,
 //! because both `execute if entity @a run …` (continue the chain, filtered)
 //! and a bare `execute if entity @a` (report pass/fail on its own) are real,
-//! separately-used forms. Real Brigadier's `ContextChain` only ever runs one of
-//! the two for a given parse — the fork fires exclusively when there is a next
-//! stage. [`registrar::Dispatcher::dispatch`] needed one small, documented
-//! change to reproduce that (skip a node's own modifier when that node is also
-//! the parsed path's terminal node and carries its own executor) — see that
-//! function's doc for the failure mode it closes. [`add_boolean_conditional`]/
-//! [`add_numeric_conditional`] are the two shapes `addConditional`/
-//! `createNumericConditionalHandler` take in vanilla.
+//! separately-used forms. The real command dispatcher's context chain only
+//! ever runs one of the two for a given parse — the fork fires exclusively
+//! when there is a next stage. [`registrar::Dispatcher::dispatch`] needed one
+//! small, documented change to reproduce that (skip a node's own modifier
+//! when that node is also the parsed path's terminal node and carries its own
+//! executor) — see that function's doc for the failure mode it closes.
+//! [`add_boolean_conditional`]/[`add_numeric_conditional`] are the two shapes
+//! the real condition-registration and numeric-handler functions take.
 //!
 //! # What is built
 //!
@@ -78,17 +78,16 @@
 //! result threaded through the chain, not just a [`CommandSource`] — and
 //! that much held: [`registrar::StoreSink`] is exactly that thread.
 //! [`Ctx::add_store_sink`] lets `store`'s own modifier attach one (resolving
-//! its target eagerly, at redirect time, matching vanilla's own
-//! `storeValue`/`storeData`), [`registrar::Dispatcher::dispatch`] carries the
+//! its target eagerly, at redirect time, matching the real store-value/
+//! store-data rule), [`registrar::Dispatcher::dispatch`] carries the
 //! accumulated set alongside each (possibly forked) source exactly the way it
 //! already carries `feedback`/`effects`, and calls every sink once the
 //! terminal executor's own outcome is known. See [`registrar::StoreSink`]'s
-//! own doc for the one vanilla subtlety this reproduces faithfully rather
-//! than approximating: a `store` whose *later* fork (an `if`/`as`/`at`/…)
-//! resolves to zero sources leaves the target **unwritten**, not zeroed —
-//! confirmed against `net.minecraft.commands.execution.tasks.BuildContexts
-//! .execute`, which only ever chains a `store`-wrapped source's callback onto
-//! a command that actually runs.
+//! own doc for the one subtlety this reproduces faithfully rather than
+//! approximating: a `store` whose *later* fork (an `if`/`as`/`at`/…) resolves
+//! to zero sources leaves the target **unwritten**, not zeroed — confirmed
+//! against the real command-execution task chain, which only ever chains a
+//! `store`-wrapped source's callback onto a command that actually runs.
 //!
 //! Only `score` and `data storage` sinks are built — `bossbar` has no
 //! subsystem in this crate at all (no `/bossbar` command is registered), and
@@ -105,10 +104,10 @@
 //! `crate::commands::scoreboard_store` to exist first — a real scoreboard,
 //! reached through `ctx.world.state.scoreboard()` exactly like `/scoreboard`
 //! itself reaches it, so a score set by one and read by the other agree by
-//! construction. Both of vanilla's two shapes are built: `matches <range>`
-//! (`lodestone_command_mc::IntRangeArg`) and `<op> <source>
+//! construction. Both of the real command's two shapes are built: `matches
+//! <range>` (`lodestone_command_mc::IntRangeArg`) and `<op> <source>
 //! <sourceObjective>` as five literal comparison tokens (`<`, `<=`, `=`,
-//! `>=`, `>` — vanilla's tree registers these as literals here, **not**
+//! `>=`, `>` — the real tree registers these as literals here, **not**
 //! `minecraft:operation`'s nine-token argument, which is a different, larger
 //! set reserved for `/scoreboard players operation`). Both resolve `<target>`/
 //! `<source>` through `crate::commands::scoreboard::resolve_single`, the same
@@ -157,9 +156,9 @@
 //! change at all — `block_state` plus the already-defaulted `block_entity`
 //! were enough, so this is pure command-layer logic: [`compare_regions`]
 //! walks the `[start, end]` box against its `destination`-relative twin,
-//! comparing the raw block-state string (closer to vanilla's full
-//! `BlockState` comparison than `if block`'s own reduction) and each side's
-//! generated block entity. Vanilla's own fork test is **presence**-based,
+//! comparing the raw block-state string (closer to the real full block-state
+//! comparison than `if block`'s own reduction) and each side's
+//! generated block entity. The real fork test is **presence**-based,
 //! not `count > 0` (a `masked` region whose every source cell is air matches
 //! vacuously with `count == 0`), so this is its own conditional shape rather
 //! than reusing [`add_boolean_conditional`]/[`add_numeric_conditional`].
@@ -170,9 +169,10 @@
 //! `scoreboard`/`team`/`nbt_storage`. Uses
 //! [`crate::chat_session::now_millis`] (`web_time`-backed), never
 //! `std::time::SystemTime::now` — this crate links into the wasm32 bundle
-//! and that call traps at runtime there. **No persistence**: vanilla's
-//! `Stopwatches` is a `SavedData` written to `data/stopwatches.dat`, and this
-//! store is process-lifetime only, a disclosed gap in the same shape
+//! and that call traps at runtime there. **No persistence**: the real
+//! stopwatch registry is a piece of saved data written to
+//! `data/stopwatches.dat`, and this store is process-lifetime only, a
+//! disclosed gap in the same shape
 //! [`crate::chunk::ChunkSource::claim_dragon_fight_start`]'s own doc already
 //! accepts for the End-fight flag — a restart clears every stopwatch.
 //!
@@ -183,8 +183,8 @@
 //! [`crate::commands::summon::spawn_entity`] was split out of `/summon`'s own
 //! executor so both call sites share one difficulty/peaceful/no-`mobs` check
 //! rather than duplicating it. The new source's position is read from the
-//! *current* chain source (`spawnEntityAndRedirect`'s own
-//! `source.getPosition()`), honouring an earlier `positioned`/`at`. **A
+//! *current* chain source (the real `execute summon` modifier's own position
+//! read), honouring an earlier `positioned`/`at`. **A
 //! summoned mob still cannot become the target of a later `@s`** — see
 //! `on <relation>` below, which is the same gap in its general form.
 //!
@@ -206,23 +206,23 @@
 //! * **`predicate`.** The loot-*condition* engine this needs already exists
 //!   and is real: `crate::loot`'s `LootCondition` enum parses and evaluates
 //!   `all_of`/`any_of`/`inverted`/`match_tool`/`block_state_property`/… — the
-//!   same primitives vanilla's own standalone predicate JSON is built from.
-//!   The actual blocker is one layer up: vanilla's `<predicate>` argument
-//!   (`ResourceOrIdArgument.lootPredicate`) resolves a resource location
-//!   against the `minecraft:predicate` **registry**, which is populated
-//!   **only by datapacks** (`data/<namespace>/predicate/*.json`) — and the
-//!   base game ships **zero** files under that directory (verified against
-//!   `.cache/mc/26.2/{src,client-src}/data/minecraft/predicate/`, unlike
-//!   `data/minecraft/loot_table/`'s 1,241 vanilla-authored files, which is
+//!   same primitives the real standalone predicate JSON is built from.
+//!   The actual blocker is one layer up: the real `<predicate>` argument
+//!   resolves a resource location against the `minecraft:predicate`
+//!   **registry**, which is populated **only by datapacks**
+//!   (`data/<namespace>/predicate/*.json`) — and the base game ships
+//!   **zero** files under that directory (verified against the decompiled
+//!   26.2 tree's `data/minecraft/predicate/`, unlike
+//!   `data/minecraft/loot_table/`'s 1,241 base-game files, which is
 //!   why `crate::loot` could bundle those the same way `assets/loot_table/`
 //!   does). So `if predicate` is not "a subsystem not yet built" so much as
-//!   "coupled to datapack loading" — the exact thing issue #48's remainder
-//!   scopes to functions/datapacks, out of this unit. Building a
-//!   lodestone-specific predicate registry with no vanilla datapack behind
+//!   "coupled to datapack loading" — out of this unit's scope, which covers
+//!   commands rather than functions/datapacks. Building a
+//!   lodestone-specific predicate registry with no real datapack behind
 //!   it would not be `if predicate` — it would be a different, invented
 //!   feature wearing that name.
-//! * **`function`.** Explicitly out of scope for this unit — issue #48's
-//!   remainder tracks functions/datapacks separately.
+//! * **`function`.** Explicitly out of scope for this unit — functions and
+//!   datapacks are tracked separately.
 //! * **`on <relation>`**
 //!   (owner/leasher/target/attacker/vehicle/controller/origin/passengers).
 //!   Narrower than "the mob simulation does not expose relationship queries"
@@ -242,8 +242,8 @@
 //!   change, not an addition to this file — before the relationship
 //!   accessors above are reachable from anywhere.
 //! * **`positioned over <heightmap>`.** [`lodestone_command_mc::HeightmapArg`]
-//!   is built and tested (the four `Heightmap.Types::keepAfterWorldgen`
-//!   survivors), but unwired: computing a heightmap needs the **world's
+//!   is built and tested (the four heightmap-type survivors of the real
+//!   "keep after worldgen" filter), but unwired: computing a heightmap needs the **world's
 //!   vertical bounds** to scan, and those are not reachable through
 //!   [`CommandWorld::blocks`](super::registrar::CommandWorld::blocks)'s
 //!   `Option<&dyn ChunkSource>` — `min_y`/`height` are real methods on
@@ -259,11 +259,11 @@
 //!   fluid check, a leaf-block check) is otherwise ordinary and already
 //!   scoped in `HeightmapKind`'s own doc.
 //!
-//! # Command blocks are the other half of this issue and are not this file
+//! # Command blocks are a separate subsystem and not this file
 //!
 //! See `crate::block_entities`'s `BlockEntity::CommandBlock` variant and
 //! `crate::command_block` for the data model and pure tick semantics ported
-//! from `CommandBlockEntity`/`BaseCommandBlock`/`CommandBlock.java`, and their
+//! from the real command-block entity's tick rule, and their
 //! own module docs for exactly how far that got and what is still needed to
 //! reach a running command block end-to-end.
 
@@ -280,12 +280,12 @@ use lodestone_model::Rotation;
 use super::registrar::{ArgKey, Ctx, Registrar, StoreSink};
 use super::source::{CommandSource, EntityAnchor, PlayerCandidate, SelectorError, SourceEntity};
 
-/// `Commands.LEVEL_GAMEMASTERS` — the one permission gate, on the root
-/// `execute` literal; every subcommand beneath it is ungated in vanilla too.
+/// The game-masters permission level — the one permission gate, on the root
+/// `execute` literal; every subcommand beneath it is ungated in the real
+/// command tree too.
 const EXECUTE_LEVEL: u8 = 2;
 
-/// `Player.STANDING_DIMENSIONS.eyeHeight()` — vanilla's own constant, and a
-/// documented approximation in exactly the shape
+/// The real standing-pose eye height, and a documented approximation in exactly the shape
 /// `crate::commands::source::PlayerCandidate`'s own doc already accepts for
 /// position: this crate tracks no per-player pose (crouching, swimming, …),
 /// so every anchor computation here uses the standing value regardless of the
@@ -347,11 +347,11 @@ fn register_store(registrar: &mut Registrar, execute: NodeId) {
     register_store_kind(registrar, store, "success", false, execute);
 }
 
-/// One of `result`/`success` — `store_result` is vanilla's own
-/// `storeResult` flag threaded through `storeValue`/`storeData`: `true` means
+/// One of `result`/`success` — `store_result` is the real store-result flag
+/// threaded through the store-value/store-data rules: `true` means
 /// "write the command's own return value", `false` means "write `1`/`0` for
 /// success/failure" (`storeResult ? result : (success ? 1 : 0)`, the same
-/// expression duplicated at every one of vanilla's sink constructors).
+/// expression duplicated at every one of the real rule's sink constructors).
 fn register_store_kind(registrar: &mut Registrar, store: NodeId, literal: &str, store_result: bool, execute: NodeId) {
     let kind = registrar.literal(store, literal);
 
@@ -361,10 +361,10 @@ fn register_store_kind(registrar: &mut Registrar, store: NodeId, literal: &str, 
     let (obj_node, obj_key) = registrar.arg(targets_node, "objective", ObjectiveArg);
     registrar.modifier(obj_node, false, move |ctx, sources, _parsed| {
         let base = one(sources);
-        // Resolved *now*, at redirect time — matching vanilla's own
-        // `ScoreHolderArgument.getNamesWithDefaultWildcard(c, "targets")`,
-        // called once inside `wrapStores`'s redirect lambda, not deferred to
-        // whenever the sink eventually fires.
+        // Resolved *now*, at redirect time — matching the real rule's own
+        // "resolve targets with default wildcard" call, made once inside its
+        // store-wrapping redirect lambda, not deferred to whenever the sink
+        // eventually fires.
         let holders = super::scoreboard::resolve_many(ctx, targets_key)?;
         let objective = ctx.get(obj_key).clone();
         let sink: StoreSink = Arc::new(move |world, success, result| {
@@ -408,8 +408,8 @@ fn register_store_kind(registrar: &mut Registrar, store: NodeId, literal: &str, 
 
 /// One of `byte`/`short`/`int`/`long`/`float`/`double` under
 /// `store … data storage <target> <path>` — six identically-shaped literal
-/// children (`IntTag.valueOf((int)(v * scale))` and five siblings in
-/// vanilla), differing only in `construct`, which scales the `f64` result and
+/// children (a scaled-and-narrowed tag construction and five siblings in
+/// the real rule), differing only in `construct`, which scales the `f64` result and
 /// narrows it to the tag type. Rust's `as` cast saturates rather than
 /// wrapping on overflow (unlike Java's narrowing primitive cast, which wraps
 /// for the integral targets) — a documented divergence at the extremes, not
@@ -445,9 +445,9 @@ fn register_store_scale(
 
 // ---- as / at ---------------------------------------------------------------
 
-/// `Commands.literal("as").then(argument("targets", entities()).fork(execute,
-/// …withEntity(entity)…))` — rewrites *who*, leaving position/rotation/anchor
-/// untouched. This is the discriminating half of `/execute`: an effect emitted
+/// `as <targets>` — a forking modifier that rewrites *who*, leaving
+/// position/rotation/anchor untouched. This is the discriminating half of
+/// `/execute`: an effect emitted
 /// after `as <other>` targets `<other>`, never the caller.
 fn register_as(registrar: &mut Registrar, execute: NodeId) {
     let as_lit = registrar.literal(execute, "as");
@@ -473,11 +473,10 @@ fn register_as(registrar: &mut Registrar, execute: NodeId) {
     registrar.redirect(targets_node, execute);
 }
 
-/// `Commands.literal("at").then(argument("targets", entities()).fork(execute,
-/// …withLevel(level).withPosition(pos).withRotation(rot)…))` — rewrites
-/// *where*, leaving the acting entity untouched. Position, rotation **and**
-/// anchor-relevant state all transfer: `CommandSourceStack.withPosition`/
-/// `withRotation` both fire in vanilla's own `at`, and
+/// `at <targets>` — a forking modifier that rewrites *where*, leaving the
+/// acting entity untouched. Position, rotation **and**
+/// anchor-relevant state all transfer: both a position and a rotation
+/// rewrite fire in the real `at`, and
 /// `PlayerCandidate::rotation` (`crate::commands::source`) is what makes the
 /// rotation half possible here. Dimension is `base.dimension` unchanged for
 /// the same reason `/tp`'s own module doc gives elsewhere: every candidate on
@@ -507,10 +506,10 @@ fn register_at(registrar: &mut Registrar, execute: NodeId) {
 fn register_positioned(registrar: &mut Registrar, execute: NodeId) {
     let positioned = registrar.literal(execute, "positioned");
 
-    // `positioned <pos>` — `.redirect(execute, c ->
-    // source.withPosition(pos).withAnchor(FEET))`. The anchor reset to `feet`
-    // is vanilla's own and easy to drop by accident: an absolute `<pos>`
-    // deliberately clears whatever `anchored eyes` set earlier in the chain.
+    // `positioned <pos>` — rewrites position and resets the anchor to
+    // `feet`. That reset is the real rule's own and easy to drop by
+    // accident: an absolute `<pos>` deliberately clears whatever
+    // `anchored eyes` set earlier in the chain.
     let (pos_node, pos_key) = registrar.arg(positioned, "pos", Vec3Arg::new());
     registrar.modifier(pos_node, false, move |ctx, sources, _parsed| {
         let base = one(sources);
@@ -524,8 +523,8 @@ fn register_positioned(registrar: &mut Registrar, execute: NodeId) {
     });
     registrar.redirect(pos_node, execute);
 
-    // `positioned as <targets>` — position only, anchor untouched (vanilla's
-    // own fork does not call `withAnchor` here, unlike the bare-`<pos>` form
+    // `positioned as <targets>` — position only, anchor untouched (the real
+    // fork does not reset the anchor here, unlike the bare-`<pos>` form
     // above).
     let as_lit = registrar.literal(positioned, "as");
     let (targets_node, targets_key) = registrar.arg(as_lit, "targets", EntityArg::entities());
@@ -690,13 +689,12 @@ fn register_in(registrar: &mut Registrar, execute: NodeId) {
 
 // ---- summon --------------------------------------------------------------
 
-/// `Commands.literal("summon").then(argument("entity", …).redirect(execute,
-/// spawnEntityAndRedirect()))` — a plain rewrite (`false`, not a fork:
-/// vanilla registers this with `.redirect`, not `.fork`, so exactly one
+/// `summon <entity>` — a plain rewrite (`false`, not a fork: the real rule
+/// registers this as a plain redirect rather than a fork, so exactly one
 /// source goes in and exactly one comes out), unlike `as`/`at`. Reuses
 /// [`super::summon::spawn_entity`] verbatim rather than re-deriving the
-/// difficulty/peaceful/no-`mobs` checks — `SummonCommand.createEntity` is the
-/// one function both vanilla's `/summon` and this modifier call.
+/// difficulty/peaceful/no-`mobs` checks — the real create-entity rule is the
+/// one function both the real `/summon` and this modifier call.
 ///
 /// `/summon minecraft:cow` is unaffected: this is a *new* node under
 /// `execute`, not a change to the root `summon` command
@@ -707,7 +705,7 @@ fn register_summon(registrar: &mut Registrar, execute: NodeId) {
     registrar.modifier(entity_node, false, move |ctx, sources, _parsed| {
         let base = one(sources);
         let entity = ctx.get(entity_key).clone();
-        // `spawnEntityAndRedirect`'s own `source.getPosition()` — the
+        // The real `execute summon` modifier's own position read — the
         // *current* source's position, honouring whatever `positioned`/`at`
         // already rewrote earlier in this same chain.
         let pos = base.position;
@@ -751,11 +749,11 @@ fn register_conditions(registrar: &mut Registrar, execute: NodeId, literal: &str
     register_loaded_condition(registrar, parent, execute, expected);
 }
 
-/// `stopwatch <id> <range>` — `checkStopwatch`'s own boolean shape
-/// (`addConditional`, same as `block`/`dimension`/`biome`), reading
+/// `stopwatch <id> <range>` — the real stopwatch-check's own boolean shape
+/// (a boolean condition registration, same as `block`/`dimension`/`biome`), reading
 /// [`crate::commands::stopwatch_store::StopwatchHandle::elapsed_seconds`].
-/// An unknown id is a hard **refusal** (vanilla's own
-/// `StopwatchCommand.ERROR_DOES_NOT_EXIST`), not merely a failing test — the
+/// An unknown id is a hard **refusal** (the real "does not exist" error),
+/// not merely a failing test — the
 /// same "propagate an `Err`, not a `false`" shape
 /// [`register_block_condition`]'s missing-chunk-source case already takes.
 fn register_stopwatch_condition(
@@ -777,10 +775,10 @@ fn register_stopwatch_condition(
     });
 }
 
-/// `blocks <start> <end> <destination> all|masked` — `ExecuteCommand`'s own
-/// `checkRegions`, restated. Neither [`add_boolean_conditional`] nor
-/// [`add_numeric_conditional`] fit: vanilla's own fork test is
-/// **presence**-based (`checkRegions(..).isPresent()`), not `count > 0` — a
+/// `blocks <start> <end> <destination> all|masked` — the real region-check
+/// rule, restated. Neither [`add_boolean_conditional`] nor
+/// [`add_numeric_conditional`] fit: the real fork test is
+/// **presence**-based, not `count > 0` — a
 /// `masked` region whose every source cell is air matches vacuously with
 /// `count == 0`, and that must still fork/pass, unlike `if entity`'s zero
 /// convention. So this is its own conditional shape, registered the same way
@@ -790,7 +788,7 @@ fn register_stopwatch_condition(
 /// exact string comparison — and, when either side has one, the source's own
 /// *generated* block entity ([`crate::chunk::ChunkSource::block_entity`], not
 /// the live, player-mutated registry — the same distinction
-/// [`register_block_condition`]'s neighbours already accept). Vanilla's own
+/// [`register_block_condition`]'s neighbours already accept). The real
 /// 32768-cell area cap is reproduced, so a malformed region refuses cleanly
 /// rather than scanning unbounded on the tick thread.
 fn register_blocks_condition(
@@ -830,26 +828,26 @@ fn register_blocks_condition(
     }
 }
 
-/// Vanilla's own cell cap (`ExecuteCommand.ERROR_AREA_TOO_LARGE`'s bound) —
-/// `BoundingBox.fromCorners(start, end)`'s span product.
+/// The real too-large-area cell cap — a bounding box's span product between
+/// `start` and `end`.
 const MAX_BLOCKS_REGION_AREA: i64 = 32768;
 
-/// `BoundingBox.fromCorners` plus the cell-by-cell walk
-/// (`ExecuteCommand.checkRegions`). `Some(count)` when every considered cell
+/// The real bounding-box-plus-cell-by-cell-walk region-check rule.
+/// `Some(count)` when every considered cell
 /// matches — every cell under `all`, every **non-air** source cell under
-/// `masked` (vanilla's own `skipAir`) — `None` on the first mismatch,
-/// short-circuiting the remaining scan exactly as vanilla's early `return
-/// OptionalInt.empty()` does. `destination` is the corner the `[start, end]`
-/// box's own **minimum** corner maps to, matching
-/// `BoundingBox.fromCorners(destPos, destPos.offset(from.getLength()))`.
+/// `masked` (the real skip-air option) — `None` on the first mismatch,
+/// short-circuiting the remaining scan exactly as the real rule's early
+/// empty-result return does. `destination` is the corner the `[start, end]`
+/// box's own **minimum** corner maps to, matching the real destination-box
+/// construction (the destination corner offset by the source box's length).
 ///
 /// The block-state comparison is the raw canonical string — including any
 /// `[...]` property suffix the store's own state string may carry, unlike
 /// [`register_block_condition`]'s own user-typed-literal comparison (which
 /// must strip it, since [`lodestone_command_mc::BlockArg`] cannot parse one
 /// in). Both sides here come from the same [`crate::chunk::ChunkSource::block_state`]
-/// accessor, so a raw compare is well-defined and closer to vanilla's own
-/// full-`BlockState` comparison than the base-id reduction elsewhere in this
+/// accessor, so a raw compare is well-defined and closer to the real
+/// full-state comparison than the base-id reduction elsewhere in this
 /// file.
 fn compare_regions(
     ctx: &Ctx<'_>,
@@ -951,11 +949,11 @@ fn register_biome_condition(
     });
 }
 
-/// `loaded <pos>` — `ExecuteCommand.isChunkLoaded`'s own boolean shape
-/// (`addConditional`, the same as `block`/`dimension`, not the count-shaped
-/// `if entity`). Vanilla's own test is narrower than "generated": it also
-/// requires the chunk's status to be `FullChunkStatus.ENTITY_TICKING` and
-/// `ServerLevel::areEntitiesLoaded`, neither of which this crate tracks as a
+/// `loaded <pos>` — the real chunk-loaded check's own boolean shape (a
+/// boolean condition registration, the same as `block`/`dimension`, not the
+/// count-shaped `if entity`). The real test is narrower than "generated": it
+/// also requires the chunk to have reached full entity-ticking status and
+/// have its entities loaded, neither of which this crate tracks as a
 /// distinct per-column state — [`crate::chunk::ChunkSource::is_column_resident`]
 /// ("generated and retained at all", already reached through the same
 /// `ctx.world.blocks` field `if block` uses) is the coarser, documented stand-in,
@@ -978,9 +976,9 @@ fn register_loaded_condition(registrar: &mut Registrar, parent: NodeId, execute:
     });
 }
 
-/// `block <pos> <block>` — `BlockPredicateArgument`'s own boolean shape
-/// (`ExecuteCommand`'s `block` branch is `addConditional`'s
-/// [`add_boolean_conditional`], same as `dimension`, not the count-shaped
+/// `block <pos> <block>` — the real block-predicate's own boolean shape
+/// (the real `block` branch uses a boolean condition registration, same as
+/// `dimension`, not the count-shaped
 /// `if entity`). Compares only the base block id, matching
 /// [`lodestone_command_mc::BlockArg`]'s own v1 reduction (no property list —
 /// `minecraft:furnace[facing=north]` matches `if block ~ ~ ~ furnace`
@@ -1015,9 +1013,9 @@ fn register_block_condition(
     });
 }
 
-/// `data storage <source> <path>` — `DataCommand`'s own numeric-conditional
-/// shape (`NbtPathArgument.NbtPath.count`), matching `if entity`'s count
-/// rather than `if score`'s boolean: real vanilla paths can carry wildcards
+/// `data storage <source> <path>` — the real data-command's own
+/// numeric-conditional shape (an NBT path's match count), matching `if entity`'s count
+/// rather than `if score`'s boolean: a real NBT path can carry wildcards
 /// that match more than one element, so the underlying primitive is a count
 /// even though [`lodestone_command_mc::NbtPathArg`]'s v1 grammar (no
 /// indices, no filter compounds) can only ever produce `0` or `1` here.
@@ -1042,9 +1040,9 @@ fn register_data_storage_condition(
 
 /// `score <target> <targetObjective> matches <range>` and `score <target>
 /// <targetObjective> <op> <source> <sourceObjective>` — the two shapes
-/// `ExecuteCommand.addConditional`'s own `score` branch registers. Both are
+/// the real condition registration's own `score` branch registers. Both are
 /// boolean tests (a comparison result, not a count), so both use
-/// [`add_boolean_conditional`], matching the reference: vanilla's own
+/// [`add_boolean_conditional`], matching the reference: the real
 /// `score` conditional is not fork-counted the way `if entity`'s match count
 /// is.
 fn register_score_conditions(registrar: &mut Registrar, parent: NodeId, execute: NodeId, expected: bool) {
@@ -1069,10 +1067,9 @@ fn register_score_conditions(registrar: &mut Registrar, parent: NodeId, execute:
     });
 
     // `<op> <source> <sourceObjective>`, one literal child per comparison
-    // token — vanilla's tree registers these as five *literals*
-    // (`Commands.literal("<")`, …), not `minecraft:operation`'s nine-token
-    // argument (that parser is `/scoreboard players operation`'s own, a
-    // different, larger token set).
+    // token — the real tree registers these as five *literals*, not
+    // `minecraft:operation`'s nine-token argument (that parser is
+    // `/scoreboard players operation`'s own, a different, larger token set).
     for token in ["<", "<=", "=", ">=", ">"] {
         let op_lit = registrar.literal(target_obj_node, token);
         let (source_node, source_key) = registrar.arg(op_lit, "source", ScoreHolderArg::single());
@@ -1107,7 +1104,7 @@ fn register_score_conditions(registrar: &mut Registrar, parent: NodeId, execute:
     }
 }
 
-/// `ExecuteCommand.addConditional` — a boolean test attached as both a fork
+/// The real boolean condition registration — a boolean test attached as both a fork
 /// modifier (continuing the chain) and an executor (`execute if dimension
 /// <d>` alone). See this module's doc for why both are needed on one node and
 /// what closes the gap between them.
@@ -1136,7 +1133,7 @@ fn add_boolean_conditional(
     registrar.redirect(node, execute);
 }
 
-/// `ExecuteCommand.createNumericConditionalHandler` — vanilla's other shape,
+/// The real numeric-conditional-handler construction — the other shape,
 /// used by `if`/`unless entity` (the count is how many entities matched, not
 /// merely whether any did) and by every condition this module does not build
 /// (`if items`, `if data`, …). `if` succeeds and returns the count when it is
@@ -1184,7 +1181,7 @@ fn one(mut sources: Vec<CommandSource>) -> CommandSource {
     sources.pop().expect("Dispatcher::dispatch hands a modifier exactly one source")
 }
 
-/// `EntityArgument.getOptionalEntities` — unlike [`Ctx::resolve`]'s own
+/// The real "optional entities" resolution — unlike [`Ctx::resolve`]'s own
 /// [`SelectorError::NoPlayersFound`] (right for a plain `<targets>` argument,
 /// which must refuse an empty match), a fork or a numeric condition treats
 /// "matched nobody" as **zero results**, not an error: `execute as @e[type=…]
@@ -1199,8 +1196,8 @@ fn resolve_optional(ctx: &Ctx<'_>, selector: &EntitySelector) -> Result<Vec<Play
     }
 }
 
-/// `EntityAnchorArgument.Anchor.apply(CommandSourceStack)` — `eyes` only adds
-/// height when the source actually has a body (vanilla returns the plain
+/// The real anchor-to-position rule for a command source — `eyes` only adds
+/// height when the source actually has a body (the real rule returns the plain
 /// position outright for a bodiless source, e.g. RCON, regardless of anchor).
 fn anchor_position(source: &CommandSource) -> lodestone_model::Vec3 {
     if source.entity.is_some() && source.anchor == EntityAnchor::Eyes {
@@ -1210,8 +1207,9 @@ fn anchor_position(source: &CommandSource) -> lodestone_model::Vec3 {
     }
 }
 
-/// `EntityAnchorArgument.Anchor.apply(Entity)` — a target entity always has a
-/// body, so `eyes` always adds height (no bodiless case to guard against, the
+/// The real anchor-to-position rule for a target entity — a target entity
+/// always has a body, so `eyes` always adds height (no bodiless case to
+/// guard against, the
 /// asymmetry [`anchor_position`]'s own doc names).
 fn candidate_anchor_position(candidate: &PlayerCandidate, anchor: AnchorInput) -> lodestone_model::Vec3 {
     if anchor == AnchorInput::Eyes {
@@ -1221,7 +1219,7 @@ fn candidate_anchor_position(candidate: &PlayerCandidate, anchor: AnchorInput) -
     }
 }
 
-/// `Mth.wrapDegrees(float)` — wraps to `[-180, 180)`.
+/// The real angle-wrap rule — wraps to `[-180, 180)`.
 fn wrap_degrees(value: f32) -> f32 {
     let mut result = value % 360.0;
     if result >= 180.0 {
@@ -1233,10 +1231,11 @@ fn wrap_degrees(value: f32) -> f32 {
     result
 }
 
-/// `CommandSourceStack.facing(Vec3)` — the yaw/pitch that looks from `from`
-/// toward `to`, computed in `f64` throughout (matching the jar's own
-/// `Vec3`-typed inputs) and only narrowed to `f32` for the final wrap, the
-/// same order of operations `Mth.atan2` feeds into `wrapDegrees(float)`.
+/// The real facing-computation rule — the yaw/pitch that looks from `from`
+/// toward `to`, computed in `f64` throughout (matching the real rule's own
+/// double-precision position inputs) and only narrowed to `f32` for the
+/// final wrap, the same order of operations the real rule's `atan2` feeds
+/// into its angle-wrap step.
 fn compute_facing(from: (f64, f64, f64), to: (f64, f64, f64)) -> (f32, f32) {
     let xd = to.0 - from.0;
     let yd = to.1 - from.1;
