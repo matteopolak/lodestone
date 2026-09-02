@@ -371,7 +371,8 @@ fn a_gated_branch_is_hidden_from_tab_completion_until_granted() {
     );
 }
 
-/// **Subtree pruning, vanilla's `fillUsableCommands` semantics.** `reload` and
+/// **Subtree pruning, vanilla's own command-tree permission-pruning
+/// recursion's semantics.** `reload` and
 /// `set` carry no permission of their own, so a per-*node* check would happily
 /// offer them; they must be invisible because their **parent** is denied.
 ///

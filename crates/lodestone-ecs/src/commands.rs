@@ -83,7 +83,8 @@
 //!
 //! Clientbound command-tree encoding remains absent: no protocol family emits
 //! `COMMANDS` (clientbound id 16). [`command_tree_for`] is ready for that arm
-//! and applies the same permission pruning vanilla's `fillUsableCommands` does.
+//! and applies the same permission pruning vanilla's own command-tree
+//! permission-pruning recursion does.
 //!
 //! ## How to change it
 //!
@@ -842,8 +843,8 @@ pub fn suggest(world: &World, source: &CommandSource, input: &str) -> Vec<String
 /// The permission-pruned tree for one subject, ready for a future clientbound
 /// `COMMANDS` encoder.
 ///
-/// Returns the node ids reachable for `source`, in vanilla's
-/// `fillUsableCommands` order (depth-first, children in insertion order,
+/// Returns the node ids reachable for `source`, in vanilla's own
+/// permission-pruning recursion's order (depth-first, children in insertion order,
 /// skipping a denied node and its whole subtree). Not a `CommandTree` copy:
 /// building one would need to renumber every redirect, and the encoder needs a
 /// flat list with a root index anyway.

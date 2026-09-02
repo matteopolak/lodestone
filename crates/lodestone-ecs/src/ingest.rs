@@ -369,8 +369,8 @@ pub fn apply_entity_movement(
 /// This module's own docs ("How events get in") record that `NetIngest` runs
 /// synchronously on the net thread as each packet decodes, strictly before
 /// the driver's next `GameTick` — so a plain overwrite here is picked up by
-/// that tick's `player_physics` exactly once, matching vanilla's one-shot
-/// `setDeltaMovement`, with nothing buffered in between.
+/// that tick's `player_physics` exactly once, matching vanilla's own
+/// one-shot delta-movement setter, with nothing buffered in between.
 pub fn apply_entity_velocity(
     batch: Res<IngestBatch>,
     index: Res<EntityIndex>,
@@ -398,9 +398,9 @@ pub fn apply_entity_velocity(
     }
 }
 
-/// Vanilla's `hurtDuration`/`hurtTime` reset value, in ticks —
-/// `LivingEntity.animateHurt` and
-/// `LivingEntity.handleDamageEvent` both write
+/// Vanilla's own hurt-duration/hurt-time reset value, in ticks —
+/// its own hurt-animation call and
+/// its own damage-event handler both write
 /// `hurtDuration = 10; hurtTime = hurtDuration;`.
 const HURT_DURATION_TICKS: u32 = 10;
 
@@ -515,8 +515,8 @@ pub fn apply_projectile_owner(
 }
 
 /// `TickSet::Animate`: age every entity's [`HurtTime`] toward zero, one tick
-/// at a time — the same rate `LivingEntity.tick()` decrements vanilla's
-/// `hurtTime` field. Runs over every entity that carries the component, local
+/// at a time — the same rate vanilla's own living-entity tick decrements its
+/// own hurt-time field. Runs over every entity that carries the component, local
 /// player included, with no `With<LocalPlayer>` filter needed either way.
 pub fn tick_hurt_time(mut entities: Query<&mut HurtTime>) {
     for mut hurt in &mut entities {
@@ -539,10 +539,11 @@ const ENTITY_STATUS_DEATH: u8 = 3;
 /// # Only byte 3, and only as an insert
 ///
 /// `LivingEntity.handleEntityEvent`'s `case 3` plays the death sound and, for a
-/// non-player, does `setHealth(0); die();`. `die()` is what makes
-/// `isDeadOrDying()` true, which is what lets `tickDeath()` start incrementing —
+/// non-player, does `setHealth(0); die();`. Its own `die()` is what makes
+/// its own "is dead or dying" query true, which is what lets its own
+/// `tickDeath()` start incrementing —
 /// so on this side the whole of that chain is "the entity now has a
-/// [`DeathTime`]", and [`tick_death_time`] is the `tickDeath` half.
+/// [`DeathTime`]", and [`tick_death_time`] is vanilla's own death-tick half.
 ///
 /// **One documented divergence.** Vanilla's `case 3` guards the kill with
 /// `!(this instanceof Player)`, so a *remote player* falls over off their synced
@@ -810,7 +811,7 @@ pub fn apply_entity_item_use(
 /// `TickSet::Animate`: advance every entity's [`ItemUse`] one tick.
 ///
 /// This is the client-side counter vanilla's own client keeps, because
-/// `useItemRemaining` is not a synced field — see [`crate::entity::ItemUse`]. It
+/// its own "use item remaining" field is not synced — see [`crate::entity::ItemUse`]. It
 /// sits in `Animate` beside [`tick_entity_swing`] rather than in a physics set
 /// because it drives a pose and nothing else.
 pub fn tick_entity_item_use(mut entities: Query<&mut crate::entity::ItemUse>) {
@@ -1031,9 +1032,10 @@ pub fn apply_entity_metadata(
         // client-flags byte above. Unlike every insert around it this one
         // **merges**: a metadata packet mentions only the accessors that
         // changed, so an update nudging one arm must leave the other five parts
-        // where they were, exactly as vanilla's per-accessor `SynchedEntityData`
+        // where they were, exactly as vanilla's own per-accessor synced-data
+        // storage
         // does. The base for a stand seen for the first time is vanilla's own
-        // `defineId` default, not zeroes — see `ArmorStandPose`'s doc for why
+        // metadata-field default, not zeroes — see `ArmorStandPose`'s doc for why
         // that distinction is load bearing and why a *missing* component still
         // means "apply the default pose" rather than "apply nothing".
         let pose_update = metadata.armor_stand_pose;
@@ -1042,7 +1044,7 @@ pub fn apply_entity_metadata(
             // **merges** rather than replaces. A metadata packet mentions only
             // the accessors that changed, so an update nudging one arm must
             // leave the other five parts where they were — exactly vanilla's
-            // per-accessor `SynchedEntityData` semantics.
+            // own per-accessor synced-data-storage semantics.
             //
             // It has to be an entry rather than a read-then-insert because
             // `Commands` is deferred: a `Query` read here would see the
@@ -1052,7 +1054,7 @@ pub fn apply_entity_metadata(
             // command order, so the second merge sees the first's result.
             //
             // The base for a stand seen for the first time is vanilla's own
-            // `defineId` default, not zeroes — and a *missing* component still
+            // metadata-field default, not zeroes — and a *missing* component still
             // means "apply the default pose" rather than "apply nothing"; see
             // `ArmorStandPose`'s own doc for why that distinction is what
             // actually stops a moving stand swinging its arms.
@@ -2925,7 +2927,7 @@ mod tests {
         );
 
         // A status byte that is *not* death must not start the counter. `2` is
-        // `onKineticHit`, a real neighbouring code, rather than an invented one.
+        // vanilla's own "on kinetic hit" code, a real neighbouring code, rather than an invented one.
         feed(
             &mut world,
             ClientEvent::EntityStatus {

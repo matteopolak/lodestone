@@ -189,7 +189,7 @@ pub struct CameraOverride {
 ///
 /// Ordered in [`TickSet::Intent`], before [`TickSet::Physics`]: physics reads
 /// `yaw` to resolve `MovementInput`'s forward/strafe axes into a world-space
-/// direction (vanilla's `getInputVector`), and the egress side reads the same
+/// direction (vanilla's own input-vector resolution), and the egress side reads the same
 /// field to report rotation on the wire — see
 /// `lodestone_controller::action::move_action`. Writing here, once, before
 /// both is what makes "look" and "walk" agree for the same tick regardless of
@@ -605,7 +605,7 @@ pub struct PrevPosition(pub Vec3d);
 /// |---|---|---|
 /// | authority | local, and now unreachable — see above | the **server** (`player_abilities`) |
 /// | collision | **off** (noclip) | **on** — vanilla creative flight collides |
-/// | arithmetic | `position += dir * speed`, no velocity, no drag | vanilla `travelInAir` + the `0.6` Y overwrite |
+/// | arithmetic | `position += dir * speed`, no velocity, no drag | vanilla's own air-travel routine + the `0.6` Y overwrite |
 /// | runs physics | no — [`fly_step`] replaces the whole tick | yes, `lodestone_physics::tick` |
 /// | reaches the server | no | yes, echoed as `ClientAction::SetFlying` |
 ///
@@ -675,16 +675,16 @@ pub struct LastPlayerInput(pub Option<PlayerInput>);
 
 /// The last sprint state put on the wire as a
 /// `PlayerCommand::{StartSprinting, StopSprinting}`, mirroring vanilla's
-/// `wasSprinting` (vanilla's own sprinting-sync routine).
+/// own "was sprinting" field (vanilla's own sprinting-sync routine).
 ///
 /// A **separate packet** from [`LastPlayerInput`] and both are needed:
 /// `ServerboundPlayerInputPacket` only stores its `sprint` bit as
 /// vanilla's own server-player last-client-input field, while the thing that actually calls
-/// `player.setSprinting(...)` is `handlePlayerCommand`. Without this the
-/// server never believes we are sprinting, so its own `updateSwimming` can
+/// its own sprinting setter is its own player-command handler. Without this the
+/// server never believes we are sprinting, so its own swimming-pose update can
 /// never put us in the swimming pose.
 ///
-/// Starts `Some(false)`, not `None`: vanilla's `wasSprinting` starts `false`,
+/// Starts `Some(false)`, not `None`: vanilla's own "was sprinting" field starts `false`,
 /// so a player who joins and does not sprint sends nothing at all rather than
 /// a redundant `STOP_SPRINTING` on the first tick.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -703,7 +703,7 @@ pub struct LastSprintingSent(pub Option<bool>);
 /// landing-cancel sites). Without it the server still believes we are walking,
 /// its own `travel` replay disagrees with the position we claim, and
 /// vanilla's own move-player packet handler corrects us — or, once we have
-/// been unsupported in open air for `getMaximumFlyingTicks`, disconnects us with
+/// been unsupported in open air for its own maximum-flying-ticks limit, disconnects us with
 /// `multiplayer.disconnect.flying`. The kick message is not a coincidence: it is
 /// literally the anti-cheat for this.
 ///
@@ -759,7 +759,8 @@ pub struct Dead;
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
 pub struct ItemUseEffects(pub Option<UseEffects>);
 
-/// Ticks since the local player's last attack — vanilla's `attackStrengthTicker`
+/// Ticks since the local player's last attack — vanilla's own
+/// attack-strength-ticker field
 /// (declared on vanilla's own living-entity base, incremented in its own player tick routine).
 ///
 /// Counts up from `0`, uncapped: vanilla lets the raw field overshoot the
@@ -949,8 +950,8 @@ pub struct FireworkBoost(pub u32);
 /// How many ticks the local player has been holding the use button *with an
 /// item in progress*, or `None` when nothing is being used.
 ///
-/// This is `getUseDuration() - getUseItemRemainingTicks()` — vanilla's
-/// `timeHeld`, which vanilla's own trident-item release routine compares against its `10`-tick
+/// This is `getUseDuration() - getUseItemRemainingTicks()` — vanilla's own
+/// "time held" value, which vanilla's own trident-item release routine compares against its `10`-tick
 /// `THROW_THRESHOLD_TIME`. The driver arms it at the
 /// press edge and reads it at the release edge; [`tick_item_use`] advances it.
 ///
@@ -961,7 +962,7 @@ pub struct FireworkBoost(pub u32);
 pub struct ItemUseTicks(pub Option<u32>);
 
 /// Edge tracker for the glide start: last tick's jump input, as
-/// vanilla's own client-side ai-step routine holds `wasJumping`.
+/// vanilla's own client-side ai-step routine holds its own "was jumping" local.
 ///
 /// A **separate** latch from [`WasJumping`], which
 /// [`apply_creative_flight_input`] overwrites at the end of its own body — a
@@ -1164,7 +1165,7 @@ fn fly_step(
     let (sy, cy) = yaw.sin_cos();
     let f = f64::from(intent.forward);
     let s = f64::from(intent.strafe);
-    // vanilla `getInputVector` with pitch ignored: horizontal move only.
+    // vanilla's own input-vector resolution with pitch ignored: horizontal move only.
     let mut dx = s * cy - f * sy;
     let mut dz = f * cy + s * sy;
     let len = (dx * dx + dz * dz).sqrt();
@@ -1270,7 +1271,7 @@ fn fold_effect_movement_speed(
 /// `WATER_MOVEMENT_EFFICIENCY` (Depth Strider) is injected the same way, via
 /// [`PlayerState::with_water_movement_efficiency`], folded each tick from the
 /// [`Attributes`] component through [`attribute_value`]'s vanilla three-stage
-/// `calculateValue` (`docs/swimming.md`). `Attributes` is `Option`al because it
+/// value-calculation (`docs/swimming.md`). `Attributes` is `Option`al because it
 /// is only inserted on `ClientEvent::Login`
 /// (`lodestone_ecs::ingest::apply_local_player_login`) — the offline demo
 /// world and the pre-login title-screen player carry no attribute snapshot at
@@ -1368,7 +1369,7 @@ pub fn player_physics(
         //
         // **Deliberately not `attribute_value` alone.** Its no-snapshot fallback
         // is `default_def`'s `movement_speed` = `0.7`, which is vanilla's
-        // *generic mob* default from `createMobAttributes` — the player's base is
+        // *generic mob* default from its own mob-attribute-supplier factory — the player's base is
         // `0.1`. Using it would make an offline world, and every frame before the
         // first attributes packet, walk **seven times too fast**. So a missing
         // snapshot is tested for explicitly and answered from the profile.
@@ -1439,7 +1440,7 @@ pub fn player_physics(
             fluid.0 = FluidState::NONE;
             // No `CollisionView`, so there is nothing to gate the pose against.
             // `with_pose` commits box *and* eye height together — the pair
-            // vanilla's `refreshDimensions` always writes at once — so this
+            // vanilla's own dimensions-refresh always writes at once — so this
             // cannot leave a `0.6` box wearing a `1.62` eye.
             //
             // The `View` arm deliberately does **not** do this: `tick_among_
@@ -1491,12 +1492,12 @@ pub fn player_physics(
 /// * **The one-shot hop on engaging flight while standing** (`if (abilities.flying
 ///   && this.onGround()) this.jumpFromGround();`) is **not** modelled:
 ///   `jump_from_ground` is private to `lodestone-physics` and needs a
-///   `CollisionView` for `getBlockJumpFactor`, which this system does not hold.
+///   `CollisionView` for vanilla's own block-jump-factor query, which this system does not hold.
 ///   The cost is a slightly less snappy takeoff from the ground (vanilla gets a
 ///   one-tick `+0.42` Y); flight itself is unaffected because the impulse below
 ///   fires on the same tick. Pinned by
 ///   `takeoff_from_the_ground_does_not_model_vanillas_one_shot_hop`.
-/// * **Auto-jump** (`wasAutoJump`) does not exist here, so its `!` is vacuous.
+/// * **Auto-jump** (vanilla's own "was auto jump" field) does not exist here, so its `!` is vacuous.
 /// * **`!isSwimming()`** *is* modelled, because a sprint-swimmer double-tapping
 ///   space would otherwise take off mid-stroke.
 pub fn apply_creative_flight_input(
@@ -1517,7 +1518,8 @@ pub fn apply_creative_flight_input(
         // vanilla's own client-side tick routine's countdown, saturating at zero.
         trigger.0 = trigger.0.saturating_sub(1).max(0);
 
-        // A dead player is on the death screen and drives no input; `wasJumping`
+        // A dead player is on the death screen and drives no input; vanilla's
+        // own "was jumping" local
         // still latches so the first press after respawn is a genuine rising edge
         // rather than a level that was already held.
         if dead.is_none() && abilities.may_fly && !was_jumping.0 && jump {
@@ -1561,7 +1563,8 @@ pub fn apply_creative_flight_input(
 /// ```
 ///
 /// A **separate system from [`apply_creative_flight_input`]** precisely because
-/// vanilla puts it on the other side of `super.aiStep()`: `onGround` is written by
+/// vanilla puts it on the other side of its own ai-step call: its own "on
+/// ground" field is written by
 /// the move this tick, so reading it before the move would test *last* tick's
 /// landing and cancel flight one tick early — visible as flight cutting out just
 /// before you touch down.
@@ -1611,14 +1614,14 @@ pub fn cancel_flight_on_landing(
 /// this tick's toggle: `can_glide` is `!flying && …`, which is what makes a
 /// mayfly player's jump press toggle flight rather than start a glide. Vanilla
 /// additionally suppresses the glide attempt on the tick flight is toggled
-/// *off* (`justToggledCreativeFlight`); that one-tick creative-only difference
+/// *off* (vanilla's own "just toggled creative flight" field); that one-tick creative-only difference
 /// is not modelled.
 ///
-/// **Before [`player_physics`]** because vanilla's `aiStep` does both before
-/// `travel()`, so the `on_ground` both halves read is the previous tick's move —
+/// **Before [`player_physics`]** because vanilla's own ai-step does both before
+/// its own `travel()`, so the `on_ground` both halves read is the previous tick's move —
 /// exactly as here.
 ///
-/// # `onClimbable`
+/// # The on-climbable case
 ///
 /// Not tested here. [`lodestone_physics::tick_elytra`] already ends a glide on a
 /// climbable on its very first tick (its `is_climbable` branch clears
@@ -1682,7 +1685,7 @@ pub fn tick_firework_boost(
     }
 }
 
-/// `TickSet::Physics`: advance vanilla's `timeHeld` for an in-progress item use.
+/// `TickSet::Physics`: advance vanilla's own "time held" value for an in-progress item use.
 /// See [`ItemUseTicks`].
 pub fn tick_item_use(mut ticks: ResMut<ItemUseTicks>) {
     if let Some(held) = &mut ticks.0 {
@@ -1694,7 +1697,7 @@ pub fn tick_item_use(mut ticks: ResMut<ItemUseTicks>) {
 ///
 /// Registered at the tail of the `TickSet::Physics` chain rather than in
 /// `TickSet::Send`, for two reasons the plugin's own comment carries: vanilla
-/// sends it from inside `aiStep`, *before* the tick's movement packet, and this
+/// sends it from inside its own ai-step, *before* the tick's movement packet, and this
 /// crate cannot order against `lodestone_controller`'s `ActionQueue` writers.
 ///
 /// vanilla's own client-side ai-step routine sends one `ServerboundPlayerCommandPacket(
@@ -1706,7 +1709,8 @@ pub fn tick_item_use(mut ticks: ResMut<ItemUseTicks>) {
 /// **`ClientAction::PlayerCommand`'s `StartFallFlying` had no producer anywhere
 /// in this tree before this system** — four adapters encode it and nothing sent
 /// it, the `SetFlying` shape exactly. Without it the server keeps simulating a
-/// falling player while we glide, and its own `handleMovePlayer` replay
+/// falling player while we glide, and its own move-player-packet-handler
+/// replay
 /// diverges from the position we report.
 pub fn send_fall_flying_command(
     egress: Res<Egress>,
@@ -1772,7 +1776,8 @@ pub fn send_fall_flying_command(
 /// `player_physics` instead would be a *different* engine, and it would also
 /// throw away the fluid-state computation the pose and fog read.
 ///
-/// The one divergence: vanilla zeroes velocity at the **top** of `rideTick`, this
+/// The one divergence: vanilla zeroes velocity at the **top** of its own
+/// ride-tick, this
 /// zeroes it at the bottom. For every tick after the first the two are identical
 /// (travel reads the velocity the previous tick left), so the difference is one
 /// tick of pre-mount momentum, which the same tick's position snap discards
@@ -1789,7 +1794,7 @@ pub fn send_fall_flying_command(
 ///
 /// **The obvious reason to do it is wrong, and the check was worth running.**
 /// `PlayerState::on_ground`'s own docs frame the flag as a wire contract guarded
-/// by the server's `aboveGroundTickCount` / `multiplayer.disconnect.flying`
+/// by the server's own above-ground tick counter / `multiplayer.disconnect.flying`
 /// counter, which would make this a kick-avoidance necessity. It is not: the
 /// server's float check is explicitly `&& !this.player.isPassenger()`
 /// (`ServerGamePacketListenerImpl`'s floating check), and its move handler
@@ -1945,9 +1950,9 @@ pub fn spawn_local_player(world: &mut World, state: PlayerState) -> Entity {
             // inserted.
             (
                 // Creative-flight client state. Both start cleared:
-                // `jumpTriggerTime` at `0` means the *next* jump press opens a
+                // vanilla's own "jump trigger time" field at `0` means the *next* jump press opens a
                 // fresh double-tap window rather than immediately completing
-                // one, and `wasJumping` at `false` makes a jump key already
+                // one, and its own "was jumping" local at `false` makes a jump key already
                 // held at spawn read as a rising edge — which is vanilla's own
                 // initial state for both fields.
                 JumpTriggerTime(0),
@@ -2166,7 +2171,7 @@ impl Plugin for LocalPlayerPlugin {
             (
                 apply_creative_flight_input,
                 // Both **before** `player_physics` and in this
-                // order: the glide decision is `aiStep`'s (pre-`travel`) and
+                // order: the glide decision is vanilla's own ai-step's (pre-`travel`) and
                 // the rocket impulse has to be on the velocity this tick's
                 // travel integrates. `tick_item_use` joins the
                 // chain rather than floating so the use-duration a release
@@ -2991,7 +2996,7 @@ mod tests {
     ///
     /// 1. **No snapshot must fall back to the *player* base (`0.1`), not
     ///    `default_def`'s `0.7`.** That default is vanilla's generic-mob value
-    ///    from `createMobAttributes`; using it would make an offline world walk
+    ///    from its own mob-attribute-supplier factory; using it would make an offline world walk
     ///    seven times too fast. This is the case an online-only test cannot see.
     /// 2. **A real snapshot must reach physics**, so Speed/Slowness — which
     ///    vanilla folds into this attribute server-side — actually change the
@@ -3590,7 +3595,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// An airborne player with no floor at all, so `on_ground` stays false and
-    /// `canGlide`'s first conjunct holds.
+    /// vanilla's own can-glide check's first conjunct holds.
     fn app_with_airborne_player() -> (App, Entity) {
         let mut app = App::new();
         app.add_plugins((crate::CorePlugin, LocalPlayerPlugin));
@@ -3693,7 +3698,7 @@ mod tests {
     /// vector is exactly `(0, 0, 1)` and the impulse is
     /// `movement.add(look * 0.1 + (look * 1.5 - movement) * 0.5)`, i.e.
     /// `0 + (0.1 + (1.5 - 0) * 0.5) = 0.85` on Z alone. `tick_elytra` then
-    /// applies `updateFallFlyingMovement`'s `0.99` horizontal drag plus the lift
+    /// applies vanilla's own fall-flying-movement update's `0.99` horizontal drag plus the lift
     /// terms, so the *post-tick* velocity is not 0.85 — but it must be far above
     /// the unboosted arm, and the unboosted arm from rest is essentially zero on
     /// Z. Both arms are measured, so the difference is attributable to the boost

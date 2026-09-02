@@ -227,8 +227,9 @@ fn riding_a_boat_puts_move_vehicle_on_the_queue_and_moves_the_boat() {
             1,
             "tick {tick}: vanilla sends PaddleBoat every tick, not on change; got {actions:?}"
         );
-        // Forward held rows both oars — `inputUp` alone satisfies both halves of
-        // `setPaddleState`.
+        // Forward held rows both oars — vanilla's own "input up" flag alone
+        // satisfies both halves of
+        // its own paddle-state setter.
         assert!(
             actions.iter().any(|a| matches!(
                 a,
@@ -464,7 +465,7 @@ fn the_horse_jump_command_is_sent_on_the_release_edge_only() {
     // scale 0), so the scale at release is `2 * 0.1` and the byte is 20.
     // `f32` 0.2 * 100 is 20.000000298..., so `floor` is 20 either way — the number
     // that matters is that it is a multiple of ten off the *first* ramp arm and
-    // not the 40 floor of `getPlayerJumpPendingScale`.
+    // not the 40 floor of vanilla's own "player jump pending scale" query.
     let &ClientAction::PlayerCommand {
         command: PlayerCommand::StartRidingJump { boost },
         entity_id,

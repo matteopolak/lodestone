@@ -95,10 +95,12 @@ fn jump_strength_key() -> lodestone_model::Identifier {
 /// covered by one arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VehicleFamily {
-    /// `AbstractBoat` — boats, chest boats, rafts, chest rafts. Never runs
-    /// `travel`; see [`lodestone_physics::vehicle::tick_boat`].
+    /// Vanilla's own boat base class — boats, chest boats, rafts, chest rafts.
+    /// Never runs its own travel method; see
+    /// [`lodestone_physics::vehicle::tick_boat`].
     Boat,
-    /// A `LivingEntity` steered through `travelRidden` — horse, donkey, mule,
+    /// A living entity steered through vanilla's own ridden-travel method —
+    /// horse, donkey, mule,
     /// skeleton/zombie horse, pig, strider, camel.
     LandMount,
 }
@@ -110,8 +112,9 @@ impl VehicleFamily {
     /// **Default-deny, and the minecart is the reason.** An unrecognised type
     /// returns `None` and is left entirely to the server rather than being
     /// simulated under a guessed rule. A minecart is deliberately absent: its
-    /// motion is rail-following (`NewMinecartBehavior`), the server broadcasts it
-    /// through `ClientboundMoveMinecartPacket`, and treating it as a land mount
+    /// motion is rail-following (vanilla's own minecart behaviour class), the
+    /// server broadcasts it
+    /// through its own move-minecart packet, and treating it as a land mount
     /// would fight that with plain gravity.
     #[must_use]
     pub fn for_type_path(path: &str) -> Option<Self> {
@@ -122,12 +125,14 @@ impl VehicleFamily {
     }
 }
 
-/// Which of `AbstractHorse`'s / `Pig`'s / `Strider`'s / `Camel`'s overrides a land
+/// Which of vanilla's own horse-base/pig/strider/camel overrides a land
 /// mount uses, or `None` for a type this client will not simulate.
 ///
-/// **`AbstractHorse`'s rule is not universal, and this table is the whole reason
-/// there is a switch rather than one arm.** `Pig` and `Strider` override
-/// `getRiddenInput` to a constant forward vector — they are steered by the mouse
+/// **Vanilla's own horse-base rule is not universal, and this table is the
+/// whole reason
+/// there is a switch rather than one arm.** Vanilla's own pig and strider override
+/// their own ridden-input method to a constant forward vector — they are
+/// steered by the mouse
 /// alone — and scale their speed down by `0.225` and `0.55`. Reading one rule for
 /// all of them gives a pig you can strafe and reverse, moving 4.4× too fast, and
 /// nothing about the call site would look wrong.
@@ -198,7 +203,8 @@ pub struct ControlledVehicleState {
     /// [`lodestone_physics::move_entity`], so a boat and a player cannot disagree
     /// about a slab.
     pub motion: EntityMotion,
-    /// The vehicle's own yaw, which `controlBoat` writes and a land mount copies
+    /// The vehicle's own yaw, which vanilla's own boat-control routine writes
+    /// and a land mount copies
     /// from its rider.
     pub yaw: f32,
     /// The vehicle's own pitch. A boat never changes it; a land mount takes
@@ -208,11 +214,11 @@ pub struct ControlledVehicleState {
     /// fixed tick. Render code samples from this to [`Self::current_pose`] with
     /// [`crate::FrameClock::interp_alpha`]; it never mutates simulation state.
     pub previous: VehicleRenderPose,
-    /// `AbstractBoat`'s between-tick state. Carried for a land mount too (unused,
+    /// Vanilla's own boat base class's between-tick state. Carried for a land mount too (unused,
     /// at its [`Default`]) rather than making the whole struct an enum — the two
     /// families share every other field and an enum would double every read site.
     pub boat: BoatState,
-    /// This tick's `setPaddleState` pair, for `ClientAction::PaddleBoat`.
+    /// This tick's paddle-state pair, for `ClientAction::PaddleBoat`.
     pub paddles: (bool, bool),
 }
 
@@ -238,21 +244,22 @@ impl ControlledVehicleState {
     }
 }
 
-/// The rider's jump-key charge, mirroring `LocalPlayer.jumpRidingTicks` /
-/// `jumpRidingScale`.
+/// The rider's jump-key charge, mirroring vanilla's own local-player
+/// riding-jump-ticks and riding-jump-scale fields.
 ///
 /// On the local player rather than on the vehicle because that is where vanilla
 /// keeps it: the charge survives a dismount-and-remount, and it is the *rider*
 /// who is holding the key.
 #[derive(bevy_ecs::component::Component, Debug, Clone, Copy, Default, PartialEq)]
 pub struct RidingJumpCharge {
-    /// `jumpRidingTicks`. Negative is the 10-tick cooldown after a release.
+    /// Vanilla's own riding-jump-ticks field. Negative is the 10-tick cooldown after a release.
     pub ticks: i32,
-    /// `jumpRidingScale`, the `0.0..=1.0` charge.
+    /// Vanilla's own riding-jump-scale field, the `0.0..=1.0` charge.
     pub scale: f32,
-    /// The previous tick's jump key, vanilla's `wasJumping` local.
+    /// The previous tick's jump key, vanilla's own "was jumping" local.
     pub was_jumping: bool,
-    /// `AbstractHorse.playerJumpPendingScale` — set on the release edge and spent
+    /// Vanilla's own horse-base "player jump pending scale" field — set on the
+    /// release edge and spent
     /// by the next grounded vehicle tick.
     pub pending: Option<f32>,
 }
@@ -261,22 +268,26 @@ pub struct RidingJumpCharge {
 /// jump charge and send `PlayerCommand::StartRidingJump` on the jump key's
 /// **falling** edge.
 ///
-/// This is `LocalPlayer.aiStep`'s `jumpableVehicle()` block, and it runs before
+/// This is vanilla's own local-player AI-step's "jumpable vehicle" block, and
+/// it runs before
 /// travel there too — which is what lets the same tick's vehicle tick spend the
 /// impulse.
 ///
 /// # `STOP_RIDING_JUMP` is never sent
 ///
-/// It exists on the wire and in `ServerboundPlayerCommandPacket.Action`, and the
-/// vanilla client has no `sendRidingStop` at all: only `sendRidingJump` exists,
-/// and `AbstractHorse.handleStopJump` is empty. Sending it would be a packet
+/// It exists on the wire and in vanilla's own serverbound-player-command
+/// action enum, and the
+/// vanilla client has no "send riding stop" call at all: only "send riding
+/// jump" exists,
+/// and vanilla's own horse-base "handle stop jump" is empty. Sending it would be a packet
 /// vanilla never emits, so it is deliberately absent rather than forgotten.
 ///
 /// # Why the charge runs even when the vehicle cannot jump
 ///
 /// It does not: vanilla gates the whole block on
-/// `jumpableVehicle() != null && getJumpCooldown() == 0`, where `jumpableVehicle`
-/// requires `canJump()` — `isSaddled()` for a horse. This client cannot see the
+/// its own "jumpable vehicle" check being non-null and the jump cooldown
+/// being zero, where the "jumpable vehicle" check
+/// requires "can jump" — "is saddled" for a horse. This client cannot see the
 /// saddle (it is entity metadata we do not decode for equines), so the gate here
 /// is the weaker "we control a land mount". The consequence is a
 /// `START_RIDING_JUMP` sent for an unsaddled mount, which the server's
@@ -617,9 +628,11 @@ pub fn send_vehicle_actions(
 /// produce the rubber-band, because the velocity is exactly what the server just
 /// refused.
 ///
-/// The boat's between-tick state is reset too. `waterLevel` and `landFriction`
+/// The boat's between-tick state is reset too. Vanilla's own water-level and
+/// land-friction fields
 /// were both measured at a position the server has now discarded, and
-/// `deltaRotation` is the angular velocity that helped earn the rejection.
+/// vanilla's own delta-rotation field is the angular velocity that helped
+/// earn the rejection.
 pub fn apply_vehicle_moved(
     batch: Res<IngestBatch>,
     index: Res<EntityIndex>,
