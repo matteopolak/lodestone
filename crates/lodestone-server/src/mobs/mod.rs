@@ -9099,7 +9099,7 @@ impl<'w> MobSim<'w> {
     /// `self.mobs` would need it held mutably too.
     ///
     /// **Disclosed narrowing**: vanilla's own "wants to pick up" check's own
-    /// `GameRules.MOB_GRIEFING`
+    /// `mobGriefing` game-rule
     /// gate is not checked — this sim has no live game-rule value at this
     /// seam (the same cut `tick.rs`'s own `mob_griefing` stub already
     /// discloses); every eligible allay always picks up.
@@ -9446,12 +9446,13 @@ impl<'w> MobSim<'w> {
     }
 
     /// Dismounts every shoulder rider whose owner meets a dismount condition,
-    /// respawning the mob at the owner's position — vanilla
-    /// `ServerPlayer.removeEntitiesOnShoulder`/`respawnEntityOnShoulder`,
+    /// respawning the mob at the owner's position — vanilla's own
+    /// player-side "remove entities on shoulder"/"respawn entity on shoulder"
+    /// calls,
     /// gated the same way on `timeEntitySatOnShoulder + 20 <
     /// gameTime` so a parrot cannot fall off the instant it lands.
     ///
-    /// **Disclosed simplification**: vanilla's `handleShoulderEntities` fires
+    /// **Disclosed simplification**: vanilla's own "handle shoulder entities" step fires
     /// on five conditions (`fallDistance > 0.5`, in water, flying, sleeping,
     /// in powder snow) — this models only **sleeping**, because it is the
     /// only one of the five this sim already tracks for an owner
@@ -9879,7 +9880,7 @@ impl<'w> MobSim<'w> {
     }
 }
 
-/// `EntityTypes.FALLING_BLOCK`'s registry key — the falling-block twin of
+/// Vanilla's own falling-block entity type's registry key — the falling-block twin of
 /// [`item_entity_type`], and parsed per call for the same reason that one is: a
 /// falling block is a rare, short-lived entity, and the parse is cheaper than the
 /// `OnceLock` clone it would replace.
@@ -9890,16 +9891,16 @@ fn falling_block_entity_type() -> ResourceKey {
 }
 
 /// How far below the world's floor an item may sink before it is discarded —
-/// vanilla's `Entity.checkBelowWorld` threshold (`Entity.java`'s
-/// `this.getY() < (double)(this.level().getMinY() - 64)`).
+/// vanilla's own "check below world" threshold (its own min-Y-minus-64 comparison).
 const VOID_DESPAWN_DEPTH: f64 = 64.0;
 
-/// The dropped item's hitbox — vanilla `ItemEntity`'s `EntityType.ITEM`
+/// The dropped item's hitbox — vanilla's own item-entity type
 /// dimensions, `0.25 × 0.25`, with **no** auto-step.
 ///
 /// `step_height` is `0.0` rather than the `0.6` an ordinary mob resolves from its
-/// `STEP_HEIGHT` attribute: `ItemEntity` never overrides `maxUpStep()`, and
-/// `Entity`'s base returns `0.0`. Getting this wrong would let a dropped item climb
+/// `STEP_HEIGHT` attribute: vanilla's own item entity never overrides its
+/// max-up-step getter, and
+/// the base entity's own default returns `0.0`. Getting this wrong would let a dropped item climb
 /// a slab it slid into, which is the sort of thing that looks like a physics
 /// improvement in a screenshot.
 const ITEM_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.25, 0.25, 0.0);
@@ -9986,7 +9987,7 @@ impl CollisionView for ItemCollision<'_> {
 /// # What it models, and what it does not
 ///
 /// Vertical only. Vanilla resolves the item's full `0.25 × 0.25 × 0.25` AABB
-/// against every intersecting shape in `Entity.move`; this pushes the item out of
+/// against every intersecting shape in its own generic entity-move step; this pushes the item out of
 /// a solid cell it has sunk into, zeroes a downward velocity when that happens,
 /// and sets `on_ground` from the cell beneath. Horizontal collision is left out
 /// deliberately rather than by oversight: a dropped item's horizontal velocity is
@@ -10052,7 +10053,8 @@ fn settle_entity(
 
     // **The ordering is deliberately identical to what it replaced**: gravity and
     // drag still happen inside `ItemMotion::tick`, before the collision, and this
-    // still runs after. Vanilla's `ItemEntity.tick` collides *between* them, so its
+    // still runs after. Vanilla's own item-entity per-tick update collides
+    // *between* them, so its
     // friction reads the post-move `onGround`. Matching that is a separate change to
     // a crate outside this one; keeping the order fixed here means the only thing
     // this commit alters is the **geometry**, which is what makes the existing
@@ -10066,7 +10068,8 @@ fn settle_entity(
         before.z + resolved.z,
     );
 
-    // `Entity.move`'s `restituteMovementAfterCollisions`: zero each component the
+    // Vanilla's own generic entity-move step's own "restitute movement after
+    // collisions" helper: zero each component the
     // sweep could not fully apply. Horizontal is included now — the old point test
     // could not see a wall at all, and its doc comment argued that was safe because
     // an item's horizontal velocity decays before it can cross one. That argument
@@ -10082,7 +10085,7 @@ fn settle_entity(
         motion.velocity.y = 0.0;
     }
 
-    // Vanilla's own rule (`Entity.setOnGroundWithMovement`): grounded when the sweep
+    // Vanilla's own rule (its own generic "set on ground with movement" call): grounded when the sweep
     // ate downward movement. This replaces a point probe one epsilon below the
     // bottom face, which is why `ITEM_SUPPORT_EPSILON` is gone: there is no longer a
     // boundary-straddling floor() to defend against, and an item resting on a slab
