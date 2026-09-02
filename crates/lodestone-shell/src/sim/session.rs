@@ -390,9 +390,31 @@ impl Sim {
     /// *future* one present as a 30 s delay rather than as a game that never starts.
     #[must_use]
     pub fn terrain_loading(&self) -> bool {
-        let Some(net) = self.net() else {
-            return false;
-        };
+        self.terrain_wait()
+            .is_some_and(|wait| !crate::menu::loading::is_level_ready(wait))
+    }
+
+    /// How long the terrain phase has been up, shared by [`Self::terrain_wait`]
+    /// and [`Self::asset_wait`] so the two can never disagree about the deadline
+    /// — see `crate::menu::loading::assets_ready` for why they share one at all.
+    ///
+    /// `Duration::ZERO` when the phase boundary was never seen, which can only
+    /// under-report the wait — it never dismisses early.
+    fn load_elapsed(&self) -> core::time::Duration {
+        self.terrain_wait_started
+            .map_or(core::time::Duration::ZERO, |started| started.elapsed())
+    }
+
+    /// The four observations `crate::menu::loading::is_level_ready` reads, or
+    /// `None` with no live session — the demo/dev world has no net client and is
+    /// never "loading terrain".
+    ///
+    /// The column math is the same as `live_collision` (`sim/collide.rs`), the
+    /// other reader of this exact question, so the two cannot disagree about
+    /// which chunk the player is standing on.
+    #[must_use]
+    pub fn terrain_wait(&self) -> Option<crate::menu::loading::TerrainWait> {
+        let net = self.net()?;
         let position = self.player().position;
         let pcx = (position.x.floor() as i32).div_euclid(16);
         let pcz = (position.z.floor() as i32).div_euclid(16);
@@ -407,16 +429,47 @@ impl Sim {
             y >= dims.min_y && y < top
         });
 
-        !crate::menu::loading::is_level_ready(crate::menu::loading::TerrainWait {
+        Some(crate::menu::loading::TerrainWait {
             own_column_loaded: net.is_chunk_loaded(lodestone_client::ChunkPos { x: pcx, z: pcz }),
-            // `Duration::ZERO` when the phase boundary was never seen, which can
-            // only under-report the wait — it never dismisses early.
-            elapsed: self
-                .terrain_wait_started
-                .map_or(core::time::Duration::ZERO, |started| started.elapsed()),
+            elapsed: self.load_elapsed(),
             player_alive: !self.is_dead(),
             within_build_height,
         })
+    }
+
+    /// The observations `crate::menu::loading::assets_ready` reads: how much
+    /// server-pack work is still outstanding.
+    ///
+    /// `atlas_stale` compares the live `crate::resources::pack_generation`
+    /// against the value [`Sim::reload_resource_pack_atlas`] last consumed. That
+    /// latch is the right one to ask because it is the *world's* atlas — the one
+    /// every loaded column has been re-meshed against — and because it always
+    /// advances: `reload_resource_pack_atlas` records the generation **before**
+    /// its own three early returns (no session, no vanilla atlas, a reload that
+    /// fell back to the demo palette), so none of them can strand this term true
+    /// forever.
+    ///
+    /// [`Sim::reload_resource_pack_atlas`]: crate::sim::Sim::reload_resource_pack_atlas
+    #[must_use]
+    pub fn asset_wait(&self) -> crate::menu::loading::AssetWait {
+        crate::menu::loading::AssetWait {
+            packs_in_flight: crate::net::packs_in_flight(),
+            atlas_stale: crate::resources::pack_generation() != self.last_pack_generation,
+            elapsed: self.load_elapsed(),
+        }
+    }
+
+    /// What the loading screen must still hold the world back for, or `None`
+    /// when it is presentable. `None` with no live session, for the same reason
+    /// [`Self::terrain_loading`] is `false` there.
+    ///
+    /// One expression feeding both the dismissal and the label the screen draws
+    /// — `crate::menu::loading::world_wait` holds the decision and the record it
+    /// was ported from; this method's whole job is gathering what it reads.
+    #[must_use]
+    pub fn world_wait(&self) -> Option<crate::menu::loading::WorldWait> {
+        let terrain = self.terrain_wait()?;
+        crate::menu::loading::world_wait(terrain, self.asset_wait())
     }
 
     /// The loading screen's current step (issue #449).

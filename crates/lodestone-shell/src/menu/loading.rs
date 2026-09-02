@@ -47,6 +47,19 @@
 //! that with a 30 s timeout — see [`CLIENT_WAIT_TIMEOUT`] for the incident that
 //! made the bound load-bearing rather than defensive.
 //!
+//! **Terrain is only half of it.** [`world_wait`] is the real dismissal
+//! condition, and it ANDs [`is_level_ready`] with [`assets_ready`]: a
+//! server-pushed resource pack downloads on its own thread and is applied to the
+//! block atlas on a later frame, neither of which the terrain rule can see. The
+//! owner-reported symptom was that gap — the screen cleared on the column
+//! arriving, the world appeared wearing the *previous* pack's textures, and a
+//! second later the atlas rebuild hitched and everything popped. Vanilla has no
+//! such gap for a different reason: an application is an `Overlay`, not a
+//! `Screen`, and `Gui.update` paints an overlay over everything until the reload
+//! future completes, so nothing of the world is presented meanwhile. See
+//! [`assets_ready`] for the bound, and `docs/join-readiness.md` for the whole
+//! sequence.
+//!
 //! Note that 26.2 has no `ReceivingLevelScreen` any more; the screen carrying
 //! `multiplayer.downloadingTerrain` is `LevelLoadingScreen`, and
 //! `Minecraft.doWorldLoad` constructs one unconditionally for singleplayer
@@ -362,13 +375,155 @@ pub fn is_level_ready(wait: TerrainWait) -> bool {
     wait.own_column_loaded
 }
 
+/// Everything [`world_wait`] reads about **asset** work that is still
+/// outstanding, gathered so the decision is a pure function of observations
+/// rather than of a `Sim` — the same shape [`TerrainWait`] has.
+///
+/// This exists because the terrain rule above is not the whole of "is the world
+/// presentable". A server-pushed resource pack is downloaded on its own thread
+/// and applied on a later frame, and neither step is anything
+/// [`is_level_ready`] can see: the player's own column can arrive seconds before
+/// the pack does. The owner-reported symptom is exactly that gap — the loading
+/// screen clears, the world appears wearing the *previous* pack's textures, the
+/// frame that applies the new one takes about a second, and everything pops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssetWait {
+    /// Server-pack downloads that have been accepted and not yet resolved —
+    /// `crate::net::packs_in_flight`. Zero for singleplayer and for any server
+    /// that pushes no pack, which is what makes this gate free there rather
+    /// than a delay everyone pays.
+    pub packs_in_flight: usize,
+    /// Whether the pack stack has moved since the atlas the world is currently
+    /// drawn with was built — `crate::resources::pack_generation` against the
+    /// value `Sim::reload_resource_pack_atlas` last consumed.
+    ///
+    /// This is the *narrow* half and it is only ever true for a fraction of one
+    /// frame, because the rebuild is synchronous inside `redraw`. It is here for
+    /// the race the counter alone cannot cover: the download thread installs the
+    /// bytes (bumping the generation) and only then resolves, so a reader that
+    /// samples between those two points sees `packs_in_flight == 0` with a stale
+    /// atlas. Without this term that reader dismisses the screen one frame early
+    /// — which is the whole defect, just narrower.
+    pub atlas_stale: bool,
+    /// How long the terrain phase has been up. **The same clock and the same
+    /// deadline as [`TerrainWait::elapsed`]**, deliberately: see
+    /// [`assets_ready`].
+    pub elapsed: core::time::Duration,
+}
+
+/// Whether no asset work is outstanding, bounded by [`CLIENT_WAIT_TIMEOUT`].
+///
+/// # The bound, and why it is the terrain wait's own
+///
+/// This shares [`CLIENT_WAIT_TIMEOUT`] *and the clock it is measured against*
+/// with [`is_level_ready`] rather than getting a second deadline of its own, and
+/// that is a port rather than a convenience. Vanilla's `LevelLoadTracker` stamps
+/// `Util.getMillis() + CLIENT_WAIT_TIMEOUT_MS` **once**, in `startClientLoad`,
+/// and `WaitingForServer.loadingPacketsReceived` carries that same `timeoutAfter`
+/// into `WaitingForPlayerChunk` unchanged — one deadline for the whole client
+/// load, not one per sub-wait. Two waits sharing one deadline is therefore the
+/// shape the record already has.
+///
+/// It also settles the scope question by construction. The elapsed time is
+/// measured from the entry into `ConnectPhase::LoadingTerrain`, so a pack pushed
+/// **during a join** is inside the window and holds the screen, while a pack
+/// pushed an hour into a session is far past it and this returns `true`
+/// immediately. That is a named deviation from vanilla, which covers an in-play
+/// reload with its `LoadingOverlay` too: reproducing that half needs a second
+/// clock and a screen reachable from mid-play, and the cost of getting it wrong
+/// is covering a live world, so it is deliberately left out rather than
+/// approximated.
+#[must_use]
+pub fn assets_ready(wait: AssetWait) -> bool {
+    if wait.elapsed >= CLIENT_WAIT_TIMEOUT {
+        return true;
+    }
+    wait.packs_in_flight == 0 && !wait.atlas_stale
+}
+
+/// What the loading screen is waiting for, or `None` when the world is
+/// presentable.
+///
+/// One expression with two consumers — the dismissal *and* the label the screen
+/// draws — so the screen can never name a step it is not actually holding for.
+/// The same reason `menu::render::screens::chunk_grid_dy` is a free function.
+///
+/// **Assets are checked first**, matching vanilla's own precedence: `Gui.update`
+/// renders `overlay` in preference to `screen` (`if (overlay != null) … else if
+/// (resourcesLoaded && screen != null) …`), and a resource reload is an
+/// `Overlay` while the terrain wait is a `Screen`. So when both are outstanding
+/// the player is told about the pack, which is also the honest ordering: the
+/// terrain count is still moving underneath and would read as a stall.
+#[must_use]
+pub fn world_wait(terrain: TerrainWait, assets: AssetWait) -> Option<WorldWait> {
+    if !assets_ready(assets) {
+        return Some(WorldWait::ApplyingPack);
+    }
+    if !is_level_ready(terrain) {
+        return Some(WorldWait::Terrain);
+    }
+    None
+}
+
+/// The step [`world_wait`] is holding the world back for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldWait {
+    /// The player's own chunk column has not arrived — [`is_level_ready`].
+    Terrain,
+    /// A server-pushed resource pack is still downloading or has not been
+    /// applied to the block atlas yet — [`assets_ready`].
+    ApplyingPack,
+}
+
+impl WorldWait {
+    /// The vanilla translation key, recorded for the same reason
+    /// [`ConnectPhase::key`] is.
+    ///
+    /// `multiplayer.applyingPack` is a real 26.2 key with exactly this meaning.
+    /// Vanilla's *server-pack* path shows a `LoadingOverlay` rather than a
+    /// worded screen and so does not use this string itself — Realms' own
+    /// pack-application wait does — but it is the jar's own phrasing for the
+    /// state, not one invented here, which is the rule this module holds itself
+    /// to.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Terrain => ConnectPhase::LoadingTerrain.key(),
+            Self::ApplyingPack => "multiplayer.applyingPack",
+        }
+    }
+
+    /// The `en_us` string for [`Self::key`], transcribed from the 26.2 jar.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            // Delegated rather than restated: the terrain wait already owns
+            // this string, and two copies could drift.
+            Self::Terrain => ConnectPhase::LoadingTerrain.label(),
+            Self::ApplyingPack => "Applying resource pack",
+        }
+    }
+
+    /// Whether this step has a real progress bar and chunk grid to draw.
+    ///
+    /// Only the terrain wait does. Nothing in this client observes a pack
+    /// download's byte count, so an `ApplyingPack` bar would be the synthesised
+    /// progress this module's own doc forbids — the bare label is the honest
+    /// presentation.
+    #[must_use]
+    pub const fn has_terrain_progress(self) -> bool {
+        matches!(self, Self::Terrain)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::time::Duration;
 
     use super::{
-        CLIENT_WAIT_TIMEOUT, ChunkCellStatus, ConnectPhase, MAX_FRACTION, TerrainChunkGrid,
-        TerrainProgress, TerrainWait, is_level_ready,
+        AssetWait, CLIENT_WAIT_TIMEOUT, ChunkCellStatus, ConnectPhase, MAX_FRACTION,
+        TerrainChunkGrid, TerrainProgress, TerrainWait, WorldWait, assets_ready, is_level_ready,
+        world_wait,
     };
 
     /// The state a healthy join is in the instant the terrain phase starts: alive,
@@ -551,5 +706,186 @@ mod tests {
         assert_eq!(grid.get(2, 2), ChunkCellStatus::Full);
         assert_eq!(grid.get(2, 0), ChunkCellStatus::Empty);
         assert_eq!(grid.get(0, 2), ChunkCellStatus::Empty);
+    }
+
+    /// The terrain state a healthy join is in **after** its own column has
+    /// landed — i.e. the exact moment the world used to be presented. Every
+    /// asset case below pairs with this, so what they measure is unambiguously
+    /// the asset half and never a terrain condition leaking in.
+    const TERRAIN_DONE: TerrainWait = TerrainWait {
+        own_column_loaded: true,
+        elapsed: Duration::ZERO,
+        player_alive: true,
+        within_build_height: true,
+    };
+
+    /// No asset work outstanding, at the start of the wait.
+    const ASSETS_DONE: AssetWait = AssetWait {
+        packs_in_flight: 0,
+        atlas_stale: false,
+        elapsed: Duration::ZERO,
+    };
+
+    /// **The defect, stated as a test.** With the terrain half satisfied — the
+    /// world would have been presented — each of the two asset observations
+    /// must independently hold it back.
+    ///
+    /// The control comes first and is load-bearing: it establishes that
+    /// `TERRAIN_DONE`/`ASSETS_DONE` really is the "would have been shown" state,
+    /// so the two holds below are attributable to the field each one moves and
+    /// not to the fixture already being unready.
+    #[test]
+    fn an_outstanding_pack_holds_the_world_back_after_the_terrain_is_ready() {
+        assert_eq!(
+            world_wait(TERRAIN_DONE, ASSETS_DONE),
+            None,
+            "control: with the column landed and no pack outstanding the world \
+             is presentable — this is the state the world used to appear in"
+        );
+
+        assert_eq!(
+            world_wait(
+                TERRAIN_DONE,
+                AssetWait {
+                    packs_in_flight: 1,
+                    ..ASSETS_DONE
+                }
+            ),
+            Some(WorldWait::ApplyingPack),
+            "a download that has been accepted and not yet resolved must hold \
+             the screen: this is the several-second half of the wait"
+        );
+
+        assert_eq!(
+            world_wait(
+                TERRAIN_DONE,
+                AssetWait {
+                    atlas_stale: true,
+                    ..ASSETS_DONE
+                }
+            ),
+            Some(WorldWait::ApplyingPack),
+            "installed bytes whose atlas rebuild has not run yet must hold it \
+             too — the one-frame race the counter alone cannot see"
+        );
+    }
+
+    /// Assets take precedence over terrain when both are outstanding, matching
+    /// vanilla's `Gui.update` preferring `overlay` to `screen`.
+    ///
+    /// The discriminating input is deliberately one where the two hypotheses
+    /// differ: *both* halves unready. With only one unready either ordering
+    /// gives the same answer, so a fixture like that would measure nothing.
+    #[test]
+    fn the_pack_wait_is_named_ahead_of_the_terrain_wait_when_both_are_outstanding() {
+        let terrain_waiting = TerrainWait {
+            own_column_loaded: false,
+            ..TERRAIN_DONE
+        };
+        let assets_waiting = AssetWait {
+            packs_in_flight: 1,
+            ..ASSETS_DONE
+        };
+
+        // Each half alone, to prove both are genuinely unready at these inputs.
+        assert_eq!(
+            world_wait(terrain_waiting, ASSETS_DONE),
+            Some(WorldWait::Terrain)
+        );
+        assert_eq!(
+            world_wait(TERRAIN_DONE, assets_waiting),
+            Some(WorldWait::ApplyingPack)
+        );
+
+        assert_eq!(
+            world_wait(terrain_waiting, assets_waiting),
+            Some(WorldWait::ApplyingPack),
+            "with both outstanding the player is told about the pack: the \
+             terrain count is still moving underneath and would read as a stall"
+        );
+    }
+
+    /// The asset wait is bounded by the terrain wait's own deadline, checked
+    /// one millisecond either side.
+    ///
+    /// A "does it eventually give up" test would pass against any finite bound.
+    /// The prediction is the exact figure the terrain half already uses, and the
+    /// two inputs below are the only ones at which a 30 s bound and any other
+    /// bound disagree.
+    ///
+    /// This is also what scopes the feature to the join window rather than to
+    /// the whole session: `elapsed` is measured from the entry into the terrain
+    /// phase, so the hour-into-a-session case sits far past this bound and is
+    /// never held.
+    #[test]
+    fn the_asset_wait_gives_up_at_the_same_thirty_seconds_the_terrain_wait_does() {
+        let just_short = AssetWait {
+            packs_in_flight: 1,
+            atlas_stale: true,
+            elapsed: Duration::from_millis(29_999),
+        };
+        assert!(
+            !assets_ready(just_short),
+            "at 29.999 s with a pack still outstanding the screen must be held"
+        );
+        assert_eq!(
+            world_wait(TERRAIN_DONE, just_short),
+            Some(WorldWait::ApplyingPack)
+        );
+
+        let at_the_bound = AssetWait {
+            elapsed: CLIENT_WAIT_TIMEOUT,
+            ..just_short
+        };
+        assert!(
+            assets_ready(at_the_bound),
+            "at exactly 30.000 s the player is let in anyway, on the same \
+             deadline `is_level_ready` uses and for the same reason: a pack \
+             that never arrives must not be a game that never starts"
+        );
+        assert_eq!(world_wait(TERRAIN_DONE, at_the_bound), None);
+
+        // An hour in — an in-play push — is past the bound and never held.
+        assert!(assets_ready(AssetWait {
+            elapsed: Duration::from_secs(3600),
+            ..just_short
+        }));
+    }
+
+    /// Singleplayer, and any server that pushes no pack, must pay nothing for
+    /// this: the readiness condition has to be satisfied by the *absence* of
+    /// work rather than by a delay elapsing.
+    ///
+    /// Asserted at `Duration::ZERO` precisely so a fixed wait of any length
+    /// would fail it.
+    #[test]
+    fn a_session_with_no_pack_is_ready_at_zero_elapsed() {
+        assert!(assets_ready(ASSETS_DONE));
+        assert_eq!(world_wait(TERRAIN_DONE, ASSETS_DONE), None);
+    }
+
+    /// Both waits carry a real key and a distinct, non-empty label, and the
+    /// terrain one is the *same string* the phase already owns rather than a
+    /// second copy that could drift.
+    #[test]
+    fn each_world_wait_names_a_real_vanilla_string() {
+        for wait in [WorldWait::Terrain, WorldWait::ApplyingPack] {
+            assert!(wait.key().contains('.'), "{wait:?} key must be a real key");
+            assert!(!wait.label().is_empty());
+        }
+        assert_ne!(WorldWait::Terrain.key(), WorldWait::ApplyingPack.key());
+        assert_ne!(WorldWait::Terrain.label(), WorldWait::ApplyingPack.label());
+
+        assert_eq!(WorldWait::Terrain.key(), ConnectPhase::LoadingTerrain.key());
+        assert_eq!(
+            WorldWait::Terrain.label(),
+            ConnectPhase::LoadingTerrain.label()
+        );
+        assert_eq!(WorldWait::ApplyingPack.key(), "multiplayer.applyingPack");
+        assert_eq!(WorldWait::ApplyingPack.label(), "Applying resource pack");
+
+        // Only the terrain wait has a real denominator to draw a bar from.
+        assert!(WorldWait::Terrain.has_terrain_progress());
+        assert!(!WorldWait::ApplyingPack.has_terrain_progress());
     }
 }

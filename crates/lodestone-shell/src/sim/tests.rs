@@ -8722,3 +8722,109 @@ fn app_rs_fills_hud_frame_chat_spans_not_the_legacy_chat_field() {
          exactly the regression this test exists to catch"
     );
 }
+
+/// **The join-ordering gate.** With the terrain half of the readiness condition
+/// already satisfied — the exact moment the world used to become visible — an
+/// outstanding server resource pack must still hold it back.
+///
+/// The three steps are one sequence on one `Sim`, deliberately, because the
+/// claim is about an *ordering* and not about a state: the world is presentable,
+/// then a pack becomes outstanding and it stops being presentable, then the pack
+/// resolves and it is presentable again. A test that only checked the middle
+/// step would pass against a `world_wait` that was simply always `Some`.
+///
+/// The first assertion is the load-bearing control. It establishes that this
+/// fixture really is in the "would previously have been shown" state, so the
+/// hold in the second step is attributable to the pack and not to the join being
+/// unready for some other reason. Before this change `Sim::world_wait`'s
+/// predecessor (`Sim::terrain_loading`) answered "presentable" at all three
+/// steps.
+///
+/// The guard is `crate::net::hold_pack_apply_for_test`, which hands out the
+/// **production** `PackApplyInFlight` that `begin_accept` takes and whose `Drop`
+/// is the production decrement — not a stub. A stubbed count would be asserting
+/// against itself.
+#[test]
+fn an_outstanding_resource_pack_holds_the_world_back_at_the_moment_it_would_have_appeared() {
+    use crate::net::NetUpdate;
+
+    let mut sim = Sim::new(client_config());
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    sim.poll_net();
+    assert_eq!(sim.session_phase(), SessionPhase::Connected);
+
+    // `pack_generation` is process-wide and other tests in this binary bump it
+    // (the Resource Packs screen's own gates do), so settle the atlas latch
+    // before reading it rather than assuming a quiet process. Bounded, and the
+    // assertion below is what reports a failure to settle.
+    for _ in 0..8 {
+        if !sim.asset_wait().atlas_stale {
+            break;
+        }
+        let _ = sim.reload_resource_pack_atlas();
+    }
+
+    assert_eq!(
+        sim.world_wait(),
+        None,
+        "control: with no pack outstanding this join is presentable — this is \
+         the state the world used to appear in, and it is what makes the hold \
+         below attributable to the pack"
+    );
+
+    {
+        let _pack = crate::net::hold_pack_apply_for_test();
+        assert_eq!(
+            sim.world_wait(),
+            Some(crate::menu::loading::WorldWait::ApplyingPack),
+            "an accepted, unresolved server pack must hold the loading screen: \
+             presenting here is the reported defect — the world appears wearing \
+             the previous pack's textures and pops a second later"
+        );
+    }
+
+    assert_eq!(
+        sim.world_wait(),
+        None,
+        "and it must let go once the pack resolves, or the screen never clears"
+    );
+}
+
+/// The **ordering inside `app/redraw.rs`**, which no type check and no unit test
+/// can see, checked by reading that file's source from this one.
+///
+/// `WindowApp::redraw` is a single ~2,700-line function and the fix depends
+/// entirely on where two of its blocks sit relative to each other:
+/// `Sim::reload_resource_pack_atlas` rebuilds the block atlas and re-meshes
+/// every loaded column (the visible hitch), and the loading overlay's own block
+/// asks `Sim::world_wait` whether to keep covering the screen. The reload must
+/// come **first**. If it did not, the frame on which a pack lands would present
+/// one frame of the old atlas before the overlay went up — reinstating exactly
+/// the flash this is meant to remove — and every other gate here would stay
+/// green, because the two blocks are individually correct either way.
+///
+/// This lives in `sim/tests.rs` rather than in `redraw.rs` on purpose: a
+/// source-grep gate placed inside the file it greps matches its own assertion
+/// string and passes with the real line deleted.
+#[test]
+fn redraw_applies_a_pending_pack_before_it_asks_whether_to_stop_covering_the_world() {
+    let src = include_str!("../app/redraw.rs");
+
+    let reload = src
+        .find("self.sim.reload_resource_pack_atlas()")
+        .expect("app/redraw.rs must still apply a pending resource pack itself");
+    let gate = src
+        .find("self.sim.world_wait()")
+        .expect("the loading overlay must be gated on `Sim::world_wait`, which \
+                 is the two-rule predicate — `terrain_loading` alone dismisses \
+                 while a pack is still being applied");
+
+    assert!(
+        reload < gate,
+        "the atlas reload must run before the loading overlay's own gate in \
+         `WindowApp::redraw`, so the first world frame presented after the \
+         hitch already wears the new pack"
+    );
+}
