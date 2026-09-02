@@ -2,9 +2,8 @@
 //!
 //! # Reconciliation against the real client source
 //!
-//! These conventions were reconciled against the decompiled client at
-//! `.cache/mc/26.2/client-src/net/minecraft/client/Camera.java` and
-//! `renderer/GameRenderer.java` (behavioural reference only). Each assumption
+//! These conventions were reconciled against the decompiled client's own
+//! camera and game-renderer sources (26.2, behavioural reference only). Each assumption
 //! and how it held:
 //!
 //! * **Handedness / axes:** right-handed, `+X` east, `+Y` up, `+Z` south —
@@ -38,7 +37,7 @@
 //!   like vanilla the range is **reversed** — near maps to `1`, far to `0`.
 //! * **Eye height / camera offset:** the camera position is the *eye*, which sits
 //!   `entity.y + eyeHeight` above the feet, with standing
-//!   `DEFAULT_EYE_HEIGHT = 1.62` (`Avatar.java`). This offset is load-bearing for
+//!   `DEFAULT_EYE_HEIGHT = 1.62` (`Avatar`'s own decompiled source). This offset is load-bearing for
 //!   raycast/block-targeting parity, so it is exposed explicitly as
 //!   [`PLAYER_EYE_HEIGHT`] and [`Camera::with_eye_from_feet`] rather than left
 //!   for the caller to remember.
@@ -120,7 +119,7 @@ impl Camera {
     /// The camera's orthonormal world-space basis, `(right, up, forward)`,
     /// derived from a **single YXZ Euler rotation** exactly the way vanilla's
     /// `Camera.setRotation` derives its own `forwards`/`up`/`left`
-    /// (`.cache/mc/26.2/client-src/net/minecraft/client/Camera.java:336-344`):
+    /// (vanilla's decompiled camera source, 26.2):
     ///
     /// ```text
     /// this.rotation.rotationYXZ((float) Math.PI - yRot * (float) (Math.PI / 180.0),
@@ -372,7 +371,7 @@ impl Camera {
 
 /// The nausea/portal "spinning" world-projection warp, issues #144/#149's
 /// shared mechanism (`GameRenderer.renderLevel`,
-/// `.cache/mc/26.2/client-src/net/minecraft/client/renderer/GameRenderer.java:543-552`):
+/// vanilla's decompiled game-renderer source, 26.2):
 ///
 /// ```text
 /// if (spinningEffectIntensity > 0.0F) {
@@ -423,7 +422,7 @@ pub fn nausea_portal_warp(intensity: f32, angle_degrees: f32) -> Mat4 {
 /// The spyglass zoom's field-of-view multiplier (issue #154's *other* half —
 /// see the module doc pointer in `crate::screen_effects` for the vignette/
 /// letterbox half). `AbstractClientPlayer.getFieldOfViewModifier`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/player/AbstractClientPlayer.java:92-114`):
+/// (vanilla's decompiled abstract-client-player source, 26.2):
 ///
 /// ```text
 /// } else if (firstPerson && this.isScoping()) {
@@ -439,8 +438,8 @@ pub fn nausea_portal_warp(intensity: f32, angle_degrees: f32) -> Mat4 {
 /// multiplies `options.fov` by this) when scoping.
 ///
 /// Vanilla smooths this behind `Camera.fovModifier`, a `0.5`-per-frame lerp
-/// toward the target (`Camera.java:172`) clamped to `0.1..=1.5`
-/// (`Camera.java:173`) — this function returns the unsmoothed target only;
+/// toward the target (`Camera`'s own decompiled source) clamped to `0.1..=1.5`
+/// (`Camera`'s own decompiled source) — this function returns the unsmoothed target only;
 /// **not wired to a live `Camera.fov_y_degrees` anywhere in this codebase
 /// yet**, since that value is assigned in `lodestone-shell/src/camera_rig.rs`
 /// (`FOV_Y_DEGREES`/per-frame construction), a file outside this crate and
@@ -858,7 +857,7 @@ mod tests {
 
     #[test]
     fn nausea_portal_warp_at_max_intensity_matches_hand_computed_skew() {
-        // Hud.java / GameRenderer.java:544-552, intensity = 1.0:
+        // vanilla's decompiled hud source / vanilla's decompiled game-renderer source, intensity = 1.0:
         // skew = 5/(1+5) - 0.04 = 0.793333...; skew *= skew = 0.629378...
         let intensity = 1.0_f32;
         let mut skew = 5.0 / (intensity * intensity + 5.0) - intensity * 0.04;
@@ -1006,7 +1005,7 @@ mod tests {
 
     #[test]
     fn spinning_effect_angle_uses_vanillas_blended_speed() {
-        // Portal-only: speed is exactly 20 deg/tick (GameRenderer.java:268).
+        // Portal-only: speed is exactly 20 deg/tick (vanilla's decompiled game-renderer source).
         assert!((spinning_effect_angle_degrees(1, 1.0, 0.0) - 20.0).abs() < 1e-4);
         // Nausea-only: speed is exactly 7 deg/tick.
         assert!((spinning_effect_angle_degrees(1, 0.0, 1.0) - 7.0).abs() < 1e-4);

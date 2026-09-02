@@ -18,7 +18,7 @@
 //! # Vanilla's mechanism (not a texture composite — a draw list)
 //!
 //! `BannerRenderer.submitPatterns`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/BannerRenderer.java:172-201`)
+//! (vanilla's decompiled banner-renderer source, 26.2)
 //! does **not** pre-composite a texture on the CPU. It draws the **same**
 //! flag/shield mesh once per layer, each time sampling a different mask
 //! sprite (white = covered, transparent = not) and tinted by that layer's
@@ -32,7 +32,7 @@
 //!    item's own stored order, each layer's mask sprite
 //!    (`entity/banner/<pattern-asset-id>` / `entity/shield/<pattern-asset-id>`,
 //!    `Sheets.getBannerSprite`/`getShieldSprite`,
-//!    `Sheets.java:100-106`) is drawn, tinted by *that layer's* dye colour.
+//!    `Sheets`'s own decompiled source) is drawn, tinted by *that layer's* dye colour.
 //!
 //! So the "compositing" is draw order plus a per-layer tint, not pixel
 //! blending on the CPU — [`banner_pattern_layers`]/[`shield_pattern_layers`]
@@ -45,7 +45,7 @@
 //! # Colour is gamma space, tint only (no mask blending here)
 //!
 //! Every colour this module returns is vanilla's raw `textureDiffuseColor`
-//! (`DyeColor.java:30-45`), i.e. **gamma-space** sRGB bytes normalised to
+//! (`DyeColor`'s own decompiled source), i.e. **gamma-space** sRGB bytes normalised to
 //! `0.0..=1.0` — the same convention every other tint in this codebase
 //! uses (`CLAUDE.md`: "vanilla is not colour-managed... tint and shade
 //! multiply in gamma space"). A caller's shader must multiply this by the
@@ -85,7 +85,7 @@
 use lodestone_assets::ResourceLocation;
 
 /// Vanilla's 16 [`DyeColor`] variants, in enum-declaration order
-/// (`DyeColor.java:30-45` — id `0..=15`, `WHITE` first, `BLACK` last). Used
+/// (`DyeColor`'s own decompiled source — id `0..=15`, `WHITE` first, `BLACK` last). Used
 /// as the type for both a banner's base colour and each pattern layer's
 /// colour; vanilla's `BannerPatternLayers.Layer` pairs a pattern with
 /// exactly one of these.
@@ -127,7 +127,7 @@ pub enum DyeColor {
 
 /// Vanilla's `textureDiffuseColor` per [`DyeColor`] — the constructor
 /// argument immediately after each variant's display name in
-/// `DyeColor.java:30-45`, e.g. `WHITE(0, "white", 16383998, ...)`. Packed
+/// `DyeColor`'s own decompiled source, e.g. `WHITE(0, "white", 16383998, ...)`. Packed
 /// `0x00RRGGBB`, **gamma-space** sRGB bytes (see the module doc's gamma
 /// note) — this is the colour `submitPatternLayer` passes as
 /// `diffuseColor` to tint a mask sprite, not a linear-light value.
@@ -255,8 +255,8 @@ pub fn gamma_rgb_to_bytes(rgb: [f32; 3]) -> [u8; 3] {
 }
 
 /// The maximum number of pattern layers vanilla ever draws
-/// (`BannerRenderer.MAX_PATTERNS`, `BannerRenderer.java:41` — `= 16`) —
-/// `submitPatterns`' loop bound (`BannerRenderer.java:189`:
+/// (`BannerRenderer.MAX_PATTERNS`, `BannerRenderer`'s own decompiled source — `= 16`) —
+/// `submitPatterns`' loop bound (`BannerRenderer`'s own decompiled source:
 /// `maskIndex < 16 && maskIndex < patterns.layers().size()`). A stack
 /// carrying more layers than this (vanilla itself refuses to add a 17th in
 /// survival, but a command or a foreign save could still produce one) has
@@ -290,7 +290,7 @@ pub struct StoredPatternLayer {
     /// The pattern's asset id, e.g. `"creeper"` — not a full
     /// [`ResourceLocation`], since vanilla's own `BannerPattern.assetId()` is
     /// the un-namespaced path component the sheet mapper appends
-    /// (`Sheets.java:100-106`, `SpriteMapper`'s `"entity/banner"` /
+    /// (`Sheets`'s own decompiled source, `SpriteMapper`'s `"entity/banner"` /
     /// `"entity/shield"` prefix).
     pub pattern_asset_id: String,
     /// The dye colour this layer is drawn in.
@@ -305,14 +305,14 @@ fn banner_or_shield_layers(
     let mut out = Vec::with_capacity(1 + patterns.len().min(MAX_PATTERN_LAYERS));
     // Layer 0: the base mask, tinted by the banner/shield's own base colour
     // — `Sheets.BANNER_PATTERN_BASE`/`SHIELD_PATTERN_BASE` is always
-    // `<mapper-prefix>/base`, regardless of pattern list (`Sheets.java:55-56`).
+    // `<mapper-prefix>/base`, regardless of pattern list (`Sheets`'s own decompiled source).
     out.push(PatternLayer {
         sprite: ResourceLocation::new("minecraft", format!("{mask_namespace}/base"))
             .expect("static path is always valid"),
         color: base_color.gamma_rgb(),
     });
     // Then up to MAX_PATTERN_LAYERS pattern layers, in stored order —
-    // `BannerRenderer.java:189`'s exact loop bound.
+    // `BannerRenderer`'s own decompiled source's exact loop bound.
     for layer in patterns.iter().take(MAX_PATTERN_LAYERS) {
         out.push(PatternLayer {
             sprite: ResourceLocation::new(
@@ -330,8 +330,8 @@ fn banner_or_shield_layers(
 /// `base_color`), then up to [`MAX_PATTERN_LAYERS`] pattern layers in
 /// `patterns`' own order — mirroring
 /// `BannerRenderer.submitPatterns(..., banner = true, ...)`
-/// (`BannerRenderer.java:172-201`) exactly. Sprites resolve under
-/// `entity/banner/…` (`Sheets.BANNER_MAPPER`, `Sheets.java:42`).
+/// (`BannerRenderer`'s own decompiled source) exactly. Sprites resolve under
+/// `entity/banner/…` (`Sheets.BANNER_MAPPER`, `Sheets`'s own decompiled source).
 #[must_use]
 pub fn banner_pattern_layers(base_color: DyeColor, patterns: &[StoredPatternLayer]) -> Vec<PatternLayer> {
     banner_or_shield_layers(base_color, patterns, "entity/banner")
@@ -339,9 +339,9 @@ pub fn banner_pattern_layers(base_color: DyeColor, patterns: &[StoredPatternLaye
 
 /// Resolves a shield's full ordered draw list — same algorithm as
 /// [`banner_pattern_layers`], but sprites resolve under `entity/shield/…`
-/// (`Sheets.SHIELD_MAPPER`, `Sheets.java:43`) instead, per
+/// (`Sheets.SHIELD_MAPPER`, `Sheets`'s own decompiled source) instead, per
 /// `BannerRenderer.submitPatterns(..., banner = false, ...)`'s own branch
-/// (`BannerRenderer.java:180-186`).
+/// (`BannerRenderer`'s own decompiled source).
 #[must_use]
 pub fn shield_pattern_layers(base_color: DyeColor, patterns: &[StoredPatternLayer]) -> Vec<PatternLayer> {
     banner_or_shield_layers(base_color, patterns, "entity/shield")
@@ -359,7 +359,7 @@ mod tests {
     }
 
     /// Every one of the 16 `textureDiffuseColor` decimal constants,
-    /// transcribed straight from `DyeColor.java:30-45`'s constructor calls
+    /// transcribed straight from `DyeColor`'s own decompiled source's constructor calls
     /// (the *decimal* literal, not the hex table above) and checked against
     /// every entry in one pass — the hex table was hand re-typed from these
     /// same decimals once already and had one digit wrong (`LIME`'s

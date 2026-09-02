@@ -205,7 +205,7 @@ impl<F: Fn(BlockPos) -> Option<&'static str>> BiomeTint for NamedBiomeTint<F> {
 ///   `getWaterColor`) — the colormap sample (or override) plus the grass
 ///   modifier, all evaluated at *that* sample's own biome;
 /// * the box: [`blend_box`] wraps it exactly like `ClientLevel.
-///   calculateBlockTint` (`ClientLevel.java:1012-1034`) wraps the resolver —
+///   calculateBlockTint` (`ClientLevel`'s own decompiled source) wraps the resolver —
 ///   a `(2*radius+1)²` average of the *resolved* colour, sampled at fixed `y`
 ///   across `x`±radius, `z`±radius, with vanilla's own per-channel integer
 ///   (floor) division. `radius` should be

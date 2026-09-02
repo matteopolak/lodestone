@@ -845,7 +845,7 @@ pub const CLOUD_COLOR_RGB: [f32; 3] = [1.0, 1.0, 1.0];
 /// per-tick `multiply` leaves it untouched and this is the alpha at every hour.
 ///
 /// It needs the cloud pipeline to blend (vanilla's `CLOUDS_SNIPPET` uses
-/// `BlendFunction.TRANSLUCENT`, `RenderPipelines.java:109`). An opaque cloud
+/// `BlendFunction.TRANSLUCENT`, `RenderPipelines`'s own decompiled source). An opaque cloud
 /// pipeline silently discards it.
 pub const CLOUD_COLOR_ALPHA: f32 = 0.8;
 /// Scroll speed in blocks per tick (vanilla `CloudRenderer.BLOCKS_PER_SECOND`
@@ -980,8 +980,8 @@ impl SkyMode {
 // `crate::cloud_mesh`'s pure face enumeration.
 // ---------------------------------------------------------------------------
 
-/// Vanilla's `CloudStatus` (`net.minecraft.client.CloudStatus`), all three
-/// states. Vanilla's own default is `FANCY` (`Options.java:189`), which is what
+/// Vanilla's `CloudStatus` enum, all three
+/// states. Vanilla's own default is `FANCY` (`Options`'s own decompiled source), which is what
 /// [`SkyFrame::new`] uses.
 ///
 /// # `Off` is an enum variant rather than a skip in the caller, and that is a
@@ -1040,14 +1040,14 @@ impl CloudStatus {
 
 /// Vertical thickness of the FANCY cloud layer, in blocks
 /// (`CloudRenderer.render`'s `relativeTopY = relativeBottomY + 4.0F`,
-/// `CloudRenderer.java:147`).
+/// `CloudRenderer`'s own decompiled source).
 pub const CLOUD_FANCY_THICKNESS: f32 = 4.0;
 
 /// Ring radius, in cells, that [`fancy_cloud_geometry`] builds around the
 /// camera every frame.
 ///
 /// Vanilla's own radius is `ceil(cloudRange * 16 / 12)`, where `cloudRange` is
-/// a **persisted, player-configurable** option (`Options.java` default
+/// a **persisted, player-configurable** option (`Options`'s own decompiled source default
 /// `128` chunks — 2048 blocks). This client has no persisted graphics options
 /// yet (`#403`'s "Making the option live" — only 2 of 93 survive a restart),
 /// and a vanilla-scale radius would rebuild tens of thousands of faces from
@@ -1086,7 +1086,7 @@ pub const fn cloud_fancy_max_faces(radius_cells: i32) -> u32 {
 
 /// Vanilla's cloud sampling position, wrapped into one texture period and
 /// split into a texel cell plus an in-cell offset
-/// (`CloudRenderer.render`, `CloudRenderer.java:157-167`). Shared by `FAST`
+/// (`CloudRenderer.render`, `CloudRenderer`'s own decompiled source). Shared by `FAST`
 /// and `FANCY` in vanilla — the mesh differs, this math does not — but
 /// [`cloud_plane_geometry`]'s FAST quad uses a different, continuous UV
 /// instead (see its own doc), so today only [`fancy_cloud_geometry`] calls
@@ -1104,7 +1104,7 @@ pub const fn cloud_fancy_max_faces(radius_cells: i32) -> u32 {
 ///   module.
 ///
 /// The `+ 3.96` on `cloud_z` is vanilla's own constant
-/// (`CloudRenderer.java:159`, undocumented there too) — kept byte-for-byte
+/// (`CloudRenderer`'s own decompiled source, undocumented there too) — kept byte-for-byte
 /// because it is a real, shipped asymmetry between the X and Z sampling axes,
 /// not a typo to "fix".
 ///
@@ -1140,7 +1140,7 @@ pub fn cloud_cell_and_offset(
 
 /// Which side of the FANCY cloud layer the camera is on, from its world Y
 /// alone (`CloudRenderer.render`'s `relativeTopY`/`relativeBottomY` branch,
-/// `CloudRenderer.java:146-155`).
+/// `CloudRenderer`'s own decompiled source).
 #[must_use]
 pub fn cloud_relative_pos_for_camera_y(camera_y: f32) -> CloudRelativePos {
     let relative_bottom_y = CLOUD_HEIGHT - camera_y;
@@ -1563,8 +1563,8 @@ mod tests {
     }
 
     /// Issue #399. Every expected value here is `Math.min(chunks * 16, 512)`
-    /// worked by hand from `AtmosphericFogEnvironment.java:73` +
-    /// `FogRenderer.java:185`, never by calling the function under test with a
+    /// worked by hand from `AtmosphericFogEnvironment`'s own decompiled source +
+    /// `FogRenderer`'s own decompiled source, never by calling the function under test with a
     /// rearranged argument.
     #[test]
     fn sky_fog_end_is_the_render_distance_clamped_to_the_attribute_default() {
@@ -1760,7 +1760,7 @@ mod tests {
     // FANCY clouds
     // -----------------------------------------------------------------------
 
-    /// Hand-derived from `CloudRenderer.java:157-167`: camera at the origin,
+    /// Hand-derived from `CloudRenderer`'s own decompiled source: camera at the origin,
     /// tick 0 (no scroll), so `cloudX = 0`, `cloudZ = 0 + 3.96`. Both are
     /// already inside `[0, 12)` for a 16x16 texture (192-block period), so
     /// wrapping is a no-op and `cellX = floor(0/12) = 0`,
