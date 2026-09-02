@@ -234,8 +234,7 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
     })
 }
 
-/// Vanilla `SpreadingSnowyBlock.canStayAlive`
-/// (`.cache/mc/26.2/src/net/minecraft/world/level/block/SpreadingSnowyBlock.java:28-41`),
+/// Vanilla's own grass/mycelium can-stay-alive check,
 /// given the canonical state string of the block **directly above** the grass
 /// block.
 ///
@@ -322,8 +321,8 @@ pub fn is_snowy_setting(above_state: &str) -> bool {
 
 /// `defaultBlockState().setValue(SNOWY, isSnowySetting(above))` for a
 /// `SpreadingSnowyBlock` — the write vanilla performs both when grass spreads
-/// (`SpreadingSnowyBlock.java:63`) and when the block above one changes
-/// (`SnowyBlock.updateShape`, `SnowyBlock.java:41-45`).
+/// and when the block above one changes
+/// (its own update-shape hook).
 ///
 /// The property is not optional. `v770`'s `resolve_state_id` resolves a bare
 /// name to the block's default state, so a bare `minecraft:grass_block` is
@@ -360,7 +359,7 @@ pub(crate) fn is_snowy_family(base: &str) -> bool {
 
 /// `true` iff `block_state` is one this crate models a random tick for.
 /// Mirrors `BlockState.isRandomlyTicking()`
-/// (`BlockBehaviour.java:401-402`) — grass/mycelium-family spreading (see
+/// (vanilla's own default implementation) — grass/mycelium-family spreading (see
 /// [`GRASS_BLOCK`]'s doc comment for why dirt is deliberately excluded), plus
 /// the three families issue #310 added: crop growth, sapling growth, and
 /// leaf decay, all cited in `crate::growth_tick`'s own module doc comment.
@@ -409,8 +408,8 @@ mod predicate_calls {
     }
 }
 
-/// The position-pick LCG, verbatim from `Level.getBlockRandomPos`
-/// (`Level.java:1064-1068`) — see this module's doc comment for the exact
+/// The position-pick LCG, verbatim from vanilla's own block-random-pos
+/// getter — see this module's doc comment for the exact
 /// citation. `state` is vanilla's `randValue` field: a 32-bit value that
 /// persists across every call for the lifetime of the level (seeded once,
 /// arbitrarily, at level creation in vanilla; callers here choose their own
@@ -578,8 +577,8 @@ impl RandomTickScheduler {
     }
 
     /// One chunk's worth of random ticks at `tick_speed` picks per
-    /// randomly-ticking 16-block section — mirrors `ServerLevel::tickChunk`'s
-    /// block-ticking loop (`ServerLevel.java:508-535`; this crate does not
+    /// randomly-ticking 16-block section — mirrors vanilla's own per-chunk tick's
+    /// block-ticking loop (this crate does not
     /// model the `iceandsnow`/`tickPrecipitation` loop above it, which is
     /// weather, out of scope for #307/#308).
     ///
@@ -629,9 +628,9 @@ impl RandomTickScheduler {
         //
         // **Fluids are deliberately out of scope, and this is the boundary.**
         // Vanilla's gate is `isRandomlyTickingBlocks() || isRandomlyTickingFluids()`
-        // (`LevelChunkSection.java:110-112`), and lava is the one fluid whose
-        // `isRandomlyTicking()` is true (`LavaFluid.java:221` overrides
-        // `Fluid.java:79`'s `false`; water never overrides). This crate models
+        // (its own per-section ticking counters), and lava is the one fluid whose
+        // `isRandomlyTicking()` is true (its own override
+        // of the base fluid's `false`; water never overrides). This crate models
         // no fluid random ticks — `is_randomly_ticking` names no fluid — so a
         // `tickingFluidCount` today would have zero producers and zero
         // consumers: an island by construction. The disclosed consequence is
@@ -1263,7 +1262,7 @@ fn wire_update_fan_out(pos: BlockPos) -> Vec<Notification> {
 ///    changed, writes the new power and re-fans-out through
 ///    [`wire_update_fan_out`], which is
 ///    `DefaultRedstoneWireEvaluator.updatePowerStrength`'s **complete**
-///    update set (`DefaultRedstoneWireEvaluator.java:27-37`), both layers.
+///    update set (vanilla's own default wire evaluator), both layers.
 /// 3. **Redstone torches/repeaters/comparators/observers (#314/#315/#317)**
 ///    — schedule a delayed recheck into `block_ticks` when the neighbour's
 ///    steady-state condition disagrees with its current state (torch:
@@ -1356,7 +1355,7 @@ pub(crate) fn react_at_placement_with_entities(
     if in_column {
         let state = column.block_state(tlx, y, tlz).to_string();
         let pos = BlockPos::new(x, y, z);
-        // `HopperBlock.onPlace` (`HopperBlock.java:100-104`) calls the same
+        // Vanilla's own hopper-block on-place hook calls the same
         // `checkPoweredState` its `neighborChanged` does, so a hopper placed
         // into an already-powered cell must come up locked (issue #321). The
         // neighbour pass cannot do this: it never notifies the origin.
@@ -1407,7 +1406,7 @@ pub(crate) fn react_at_placement_with_entities(
             }
         }
         // `BaseRailBlock.onPlace` -> `updateState` -> `level.neighborChanged(state,
-        // pos, this, ...)` (`BaseRailBlock.java:64-77`): a freshly placed
+        // pos, this, ...)` (vanilla's own base-rail on-place chain): a freshly placed
         // powered/activator rail notifies **itself**, the same "placed block
         // owes itself a reaction the neighbour pass cannot deliver" shape as the
         // hopper arm above. `crate::redstone_rail`'s own module doc names why
@@ -1537,7 +1536,7 @@ pub(crate) fn run_tripwire_recheck(column: &mut crate::chunk::ChunkColumn, min_x
     own
 }
 
-/// `TripWireBlock.affectNeighborsAfterRemoval` (`TripWireBlock.java:108-111`)
+/// Vanilla's own tripwire-block affect-neighbors-after-removal routine
 /// — the "the string just broke" instantaneous pulse, the block-**removal**
 /// twin of the placement arm above (`redstone_tripwire::find_controlling_hooks`
 /// called from a placed wire cell). `wire_state_before_removal` is the
@@ -1748,8 +1747,8 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 1b. `snowy` upkeep (#546). `SnowyBlock.updateShape`
-        // (`SnowyBlock.java:41-45`) recomputes `snowy` from the block above
+        // 1b. `snowy` upkeep (#546). Vanilla's own snowy-block update-shape hook
+        // recomputes `snowy` from the block above
         // whenever that neighbour changes, so placing or breaking snow on grass
         // flips it in both directions. Nothing did this before, so `snowy` was
         // whatever it was written as and never moved.
@@ -2099,9 +2098,9 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3c-bis. Hoppers (#321). `HopperBlock.checkPoweredState`
-        // (`HopperBlock.java:125-130`), reached from `neighborChanged` (`:119-123`)
-        // and `onPlace` (`:100-104`):
+        // 3c-bis. Hoppers (#321). Vanilla's own hopper-block powered-state check,
+        // reached from `neighborChanged`
+        // and `onPlace`:
         //
         //     boolean shouldBeOn = !level.hasNeighborSignal(pos);
         //     if (shouldBeOn != state.getValue(ENABLED)) {
@@ -2207,8 +2206,8 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3f. Note blocks (issue #322's first fixture). `NoteBlock.neighborChanged`
-        // (`NoteBlock.java:87-99`) — immediate, like the hopper/openable arms
+        // 3f. Note blocks (issue #322's first fixture). Vanilla's own note-block
+        // neighbor-changed hook — immediate, like the hopper/openable arms
         // above, not scheduled. See `crate::redstone_note_block`'s own module
         // doc for the client-visible "pulse" half this crate cannot transport
         // yet (`reaction.play_pulse` is computed correctly but not consumed
@@ -2258,8 +2257,8 @@ fn react_to_notification(
         }
 
         // 3h. Dispensers/droppers (issue #320) — the `TRIGGERED` state
-        // machine only. `DispenserBlock.neighborChanged`
-        // (`DispenserBlock.java:127-139`); see `crate::redstone_dispenser`'s
+        // machine only. Vanilla's own dispenser-block neighbor-changed hook;
+        // see `crate::redstone_dispenser`'s
         // own module doc for exactly why the actual fire (the scheduled tick
         // this arm schedules) has nothing to consume yet.
         if class == crate::redstone_graph::ReactionClass::Dispenser {
@@ -2289,8 +2288,8 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3i. TNT — redstone-signal ignition (`TntBlock::onPlace`/
-        // `neighborChanged`, `TntBlock.java:47-63`). Unlike the dispenser
+        // 3i. TNT — redstone-signal ignition (vanilla's own `TntBlock::onPlace`/
+        // `neighborChanged`). Unlike the dispenser
         // above there is no `TRIGGERED` state machine: vanilla primes and
         // removes the block in the same call, unconditionally, whenever
         // `hasNeighborSignal(pos)` is true. This dispatcher has no `MobSim` to
@@ -2316,9 +2315,8 @@ fn react_to_notification(
         }
 
         // 3j. Command blocks — the redstone-edge half of the command-block
-        // remainder (`CommandBlock.neighborChanged` →
-        // `CommandBlock.setPoweredAndUpdate`, `.cache/mc/26.2/src`'s
-        // `CommandBlock.java`). `crate::command_block::on_power_changed` was
+        // remainder (vanilla's own `CommandBlock.neighborChanged` →
+        // `CommandBlock.setPoweredAndUpdate`). `crate::command_block::on_power_changed` was
         // written and unit-tested with no production caller until this arm;
         // see that module's own doc for the other two hops (wire decode,
         // tick-loop scheduling) that were already wired.
@@ -2334,7 +2332,7 @@ fn react_to_notification(
             if class == crate::redstone_graph::ReactionClass::CommandBlock {
                 // `hasNeighborSignal`, not `getBestOwnOrNeighbourSignal`: a
                 // command block is not itself a signal source
-                // (`SignalGetter.java`'s own default-method pair), so there is
+                // (vanilla's own signal-getter default-method pair), so there is
                 // no "own signal" term to fold in — just the same six-direction
                 // scan the dispenser arm above already uses.
                 let is_powered = {
@@ -3595,7 +3593,7 @@ mod tests {
     /// evaluates the predicate exactly:
     ///
     /// * `tick_speed` times — vanilla's own per-picked-position
-    ///   `blockState.isRandomlyTicking()` (`ServerLevel.java:513`), one per
+    ///   `blockState.isRandomlyTicking()` check, one per
     ///   position draw in the one randomly-ticking section. This term is
     ///   *supposed* to be there; it is bounded by `tick_speed`, not by cells.
     /// * plus `palette.len()` **in debug builds only**, for the definitional
