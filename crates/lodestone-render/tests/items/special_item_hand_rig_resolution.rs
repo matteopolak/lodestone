@@ -61,6 +61,7 @@ use lodestone_render::{
     BlockModels, ItemStateContext, blocks_json_registry, decorated_pot_item_rig, trident_item_rig,
 };
 
+#[path = "../gate_harness/mod.rs"]
 mod gate_harness;
 use gate_harness::{require_blocks_report, require_client_jar};
 

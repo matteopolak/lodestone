@@ -87,6 +87,7 @@
 //! cargo test -p lodestone-render --test banner_pattern_layer_pixels -- --ignored --nocapture
 //! ```
 
+#[path = "../gate_harness/mod.rs"]
 mod gate_harness;
 
 use glam::Vec3;
