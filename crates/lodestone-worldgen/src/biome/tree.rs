@@ -1,32 +1,36 @@
 //! Vanilla's `Climate.RTree`, ported — the search structure that replaces the
 //! O(table_len) brute-force climate scan (`docs/plans/worldgen-rewrite.md` D5),
-//! and since the owner's ruling on #492 also **the definition of the answer**.
+//! and per the owner's own ruling also **the definition of the answer**.
 //!
 //! # What is ported, and the one thing that cannot be
 //!
-//! **The tree structure is a literal port** of `Climate.RTree.create`/`build`/
-//! `bucketize`/`sort`/`cost`/`buildParameterSpace` (`net/minecraft/world/level/
-//! biome/Climate.java`, 26.2 de-obfuscated). Node ordering therefore comes from
+//! **The tree structure is a literal port** of vanilla's own R-tree
+//! construction routines — `create`/`build`/
+//! `bucketize`/`sort`/`cost`/`buildParameterSpace`, 26.2 de-obfuscated. Node
+//! ordering therefore comes from
 //! the game data's own row order run through vanilla's own splitting heuristic —
 //! nothing here re-derives a bucketing scheme of its own.
 //!
 //! **The search is now a literal port too**, with exactly one documented
-//! omission: `RTree.lastResult`. Vanilla's `SubTree.search` is
+//! omission: vanilla's own last-result field. Vanilla's own subtree-search
+//! routine, restated without its Java syntax, is:
 //!
-//! ```java
-//! long minDistance = candidate == null ? Long.MAX_VALUE : distanceMetric.distance(candidate, target);
-//! Leaf<T> closestLeaf = candidate;
-//! for (Node<T> child : this.children) {
-//!    long childDistance = distanceMetric.distance(child, target);
-//!    if (minDistance > childDistance) {
-//!       Leaf<T> leaf = child.search(target, closestLeaf, distanceMetric);
-//!       long leafDistance = child == leaf ? childDistance : distanceMetric.distance(leaf, target);
-//!       if (minDistance > leafDistance) { minDistance = leafDistance; closestLeaf = leaf; }
-//!    }
-//! }
+//! ```text
+//! minDistance = candidate is absent ? MAX : distance(candidate, target)
+//! closestLeaf = candidate
+//! for each child of this node:
+//!    childDistance = distance(child, target)
+//!    if minDistance > childDistance:
+//!       leaf = child.search(target, closestLeaf)
+//!       leafDistance = if child is itself a leaf: childDistance
+//!                      else: distance(leaf, target)
+//!       if minDistance > leafDistance:
+//!          minDistance = leafDistance
+//!          closestLeaf = leaf
 //! ```
 //!
-//! and `RTree.search` seeds `candidate` from `this.lastResult`, a `ThreadLocal`
+//! and vanilla's own top-level search routine seeds `candidate` from its own
+//! last-result field, a `ThreadLocal`
 //! holding *the previous search's leaf*, then stores the new one.
 //!
 //! ## What `lastResult` can and cannot do — traced, not guessed
@@ -75,7 +79,7 @@
 //! Span containment gives the part that still holds unconditionally:
 //!
 //! * **The node bound is a lower bound.** A subtree's `space[i]` is the interval
-//!   hull of its children's (`buildParameterSpace` unions with `Parameter.span`),
+//!   hull of its children's (`buildParameterSpace` unions with vanilla's own per-axis span),
 //!   and for `[lo, hi] ⊇ [lo', hi']`, `distance([lo, hi], t) <= distance([lo',
 //!   hi'], t)` for every `t`. By induction `bound(N, t) <= dist(L, t)` for every
 //!   leaf `L` under `N`. [`BiomeTree::hull_containment_violations`] checks that
@@ -85,7 +89,7 @@
 //!   [`super::nearest_row_brute_force`], at every target.** That is the strongest
 //!   true statement, and it is what the exhaustive lattice gates now assert.
 //!
-//! What is *no longer* claimed — and this is the substance of #492 — is
+//! What is *no longer* claimed is
 //! row-identity with brute force. Brute force breaks a tie by **earliest table
 //! row**; vanilla's tree breaks it by **traversal order**. Measured on the real
 //! table, those disagree on the resolved biome id at 0.98% of arbitrary targets.
@@ -95,11 +99,11 @@
 
 use super::{BiomeParameterPoint, Parameter};
 
-/// Vanilla's `Climate.RTree.CHILDREN_PER_NODE`.
+/// Vanilla's own R-tree children-per-node constant.
 const CHILDREN_PER_NODE: usize = 6;
 
 /// The climate parameter space's dimensionality — vanilla asserts this is 7
-/// (`RTree.create`'s `if (dimensions != 7) throw`), six climate axes plus the
+/// (vanilla's own R-tree `create`'s `if (dimensions != 7) throw`), six climate axes plus the
 /// degenerate `offset` span. See [`BiomeParameterPoint`].
 const DIMENSIONS: usize = 7;
 
@@ -152,7 +156,7 @@ impl Arena {
         id
     }
 
-    /// `Climate.RTree.comparator(dimension, absolute)`'s sort key: the span's
+    /// vanilla's own R-tree `comparator(dimension, absolute)`'s sort key: the span's
     /// centre, `(min + max) / 2` in **truncating** integer division (Java's
     /// `/2L` on a `long`, which Rust's `i64` division matches exactly, including
     /// for negatives — both truncate toward zero).
@@ -163,7 +167,7 @@ impl Arena {
         if absolute { centre.abs() } else { centre }
     }
 
-    /// `Climate.RTree.sort(children, dimensions, dimension, absolute)` — a
+    /// vanilla's own R-tree `sort(children, dimensions, dimension, absolute)` — a
     /// comparator chain starting at `axis` and wrapping through all 7 axes.
     /// **Stable**, matching Java's `List.sort` (TimSort): ties keep the
     /// incoming order, which is part of the resulting structure.
@@ -181,8 +185,8 @@ impl Arena {
         });
     }
 
-    /// `Climate.RTree.buildParameterSpace` — the per-axis interval hull
-    /// (`Parameter.span`: `min` of mins, `max` of maxes) over `ids`.
+    /// vanilla's own R-tree `buildParameterSpace` — the per-axis interval hull
+    /// (vanilla's own per-axis span: `min` of mins, `max` of maxes) over `ids`.
     ///
     /// # Panics
     /// Panics on an empty `ids`, matching vanilla's `SubTree needs at least one
@@ -208,13 +212,13 @@ impl Arena {
     }
 }
 
-/// `Climate.RTree.cost(parameterSpace)` — the summed axis extents of a candidate
+/// vanilla's own R-tree `cost(parameterSpace)` — the summed axis extents of a candidate
 /// bucket's hull. Vanilla picks the split axis minimising the total over buckets.
 fn cost(space: &[Parameter; DIMENSIONS]) -> i64 {
     space.iter().map(|p| (p.max - p.min).abs()).sum()
 }
 
-/// `Climate.RTree.bucketize`'s `expectedChildrenCount`, computed in integers.
+/// vanilla's own R-tree `bucketize`'s `expectedChildrenCount`, computed in integers.
 ///
 /// Vanilla writes it as
 /// `(int) Math.pow(6.0, Math.floor(Math.log(nodes.size() - 0.01) / Math.log(6.0)))`.
@@ -235,7 +239,7 @@ fn expected_bucket_size(n: usize) -> usize {
     size
 }
 
-/// `Climate.RTree.bucketize(nodes)` — a straight sequential chunking of the
+/// vanilla's own R-tree `bucketize(nodes)` — a straight sequential chunking of the
 /// already-sorted list into runs of [`expected_bucket_size`], with a short final
 /// bucket if one is left over.
 fn bucketize(ids: &[u32]) -> Vec<Vec<u32>> {
@@ -265,7 +269,7 @@ pub(crate) struct BiomeTree {
 }
 
 impl BiomeTree {
-    /// `Climate.RTree.create(values)` over the parsed table, in table order.
+    /// vanilla's own R-tree `create(values)` over the parsed table, in table order.
     ///
     /// # Panics
     /// Panics on an empty table, matching vanilla's `Need at least one value to
@@ -324,7 +328,7 @@ impl BiomeTree {
         me
     }
 
-    /// `Climate.RTree.Node.distance(target)`: the summed squared per-axis
+    /// Vanilla's own R-tree node distance routine `distance(target)`: the summed squared per-axis
     /// distance from `target` to this node's span. For a leaf this is exactly
     /// `BiomeParameterPoint::fitness`; for a subtree it is a lower bound on every
     /// leaf beneath it (module doc).
@@ -369,7 +373,7 @@ impl BiomeTree {
         self.search(target, None)
     }
 
-    /// Vanilla's `RTree.search` + `SubTree.search`, transcribed.
+    /// Vanilla's own top-level and subtree search routines, transcribed.
     ///
     /// Vanilla threads `closestLeaf` down as each recursive call's `candidate`, and
     /// a recursive call's own `minDistance` is therefore `dist(closestLeaf)` — the
@@ -406,7 +410,7 @@ impl BiomeTree {
         (self.nodes[best_node as usize].row, best_dist)
     }
 
-    /// One `SubTree.search` frame: iterate children in order, evaluate each
+    /// One subtree-search frame: iterate children in order, evaluate each
     /// child's bound, and descend on **strict** `best_dist > child_bound` —
     /// vanilla's `if (minDistance > childDistance)`. A tie is therefore *pruned*,
     /// which is precisely how the incumbent wins it.
@@ -522,7 +526,7 @@ impl BiomeTree {
     }
 }
 
-/// `Climate.RTree.build(dimensions, children)` — one level of the recursion,
+/// vanilla's own R-tree `build(dimensions, children)` — one level of the recursion,
 /// ported statement for statement. `ids` is consumed and re-sorted in place, the
 /// way vanilla re-sorts its `List` seven times.
 fn build_level(arena: &mut Arena, mut ids: Vec<u32>) -> u32 {
