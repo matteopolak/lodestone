@@ -1921,8 +1921,8 @@ impl V340Adapter {
         // `0` additionally carries the initial member list, and `3`/`4`
         // (add/remove members) carry only a member list. `friendlyFire`
         // packs two flags in one byte (`0x01` friendly fire, `0x02` see
-        // friendly invisibles) — vanilla's `PacketPlayOutScoreboardTeam`
-        // convention. The member-list count is capped against the
+        // friendly invisibles), a convention unchanged since 1.8. The
+        // member-list count is capped against the
         // payload's own remaining length before `Vec::with_capacity`,
         // since `players` is exactly the attacker-influenced unbounded
         // wire count this crate's own trap list warns about.
