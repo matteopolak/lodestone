@@ -854,14 +854,14 @@ impl V47Adapter {
         Ok(Vec::new())
     }
 
-    /// Handles a clientbound packet while in the play state.
-    fn handle_play(
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::LOGIN`.
+    fn handle_play_login(
         &self,
-        world: &mut dyn WorldSink,
-        packet_id: i32,
+        _world: &mut dyn WorldSink,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
-        if packet_id == play::clientbound::LOGIN {
+
             let body: JoinGame = decode_body(payload)?;
             // Record whether this dimension carries sky light before any chunk
             // arrives, so single `map_chunk` packets decode the right geometry.
@@ -871,8 +871,16 @@ impl V47Adapter {
                 game_mode: game_mode(body.game_mode)?,
                 dimension: dimension_id(body.dimension)?,
             })]);
-        }
-        if packet_id == play::clientbound::MAP_CHUNK {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::MAP_CHUNK`.
+    fn handle_play_map_chunk(
+        &self,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // A `map_chunk` with an empty section bitmask is 1.8's chunk-unload
             // signal (there is no dedicated forget packet). Decoding yields an
             // empty column; treat that as an unload rather than storing air.
@@ -896,8 +904,16 @@ impl V47Adapter {
                 LoadedChunk::new(data.column, data.light, Heightmaps::new(), Vec::new()),
             );
             return Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })]);
-        }
-        if packet_id == play::clientbound::MAP_CHUNK_BULK {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::MAP_CHUNK_BULK`.
+    fn handle_play_map_chunk_bulk(
+        &self,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // One packet fans out to several full columns (a 1.8 construct with
             // no modern equivalent): load each and emit one notification each.
             let shape = self.current_shape();
@@ -917,14 +933,30 @@ impl V47Adapter {
                 directives.push(Directive::Emit(ClientEvent::ChunkLoaded { pos }));
             }
             return Ok(directives);
-        }
-        if packet_id == play::clientbound::KEEP_ALIVE {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::KEEP_ALIVE`.
+    fn handle_play_keep_alive(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let keep_alive: KeepAliveRequest = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::KeepAlive {
                 id: i64::from(keep_alive.id),
             })]);
-        }
-        if packet_id == play::clientbound::CHAT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::CHAT`.
+    fn handle_play_chat(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: ClientboundChat = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text: Text::from_json(&body.message),
@@ -933,8 +965,16 @@ impl V47Adapter {
                 sender: None,
                 ack: None,
             })]);
-        }
-        if packet_id == play::clientbound::POSITION {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::POSITION`.
+    fn handle_play_position(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: ClientboundPositionLook = decode_body(payload)?;
             let flags = TeleportFlags {
                 relative_x: body.flags & REL_X != 0,
@@ -991,8 +1031,16 @@ impl V47Adapter {
                 flags,
             }));
             return Ok(directives);
-        }
-        if packet_id == play::clientbound::SPAWN_ENTITY_LIVING {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SPAWN_ENTITY_LIVING`.
+    fn handle_play_spawn_entity_living(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Reuse the existing derived mob-spawn decoder (varint id, u8 type,
             // fixed-point i32 coords, byte angles, i16 velocity, metadata). 1.8
             // mobs carry no UUID.
@@ -1035,8 +1083,16 @@ impl V47Adapter {
                 }));
             }
             return Ok(directives);
-        }
-        if packet_id == play::clientbound::SPAWN_ENTITY {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SPAWN_ENTITY`.
+    fn handle_play_spawn_entity(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Object spawn. The trailing velocity is present only when
             // `object_data != 0`; that head-dependent tail is expressed by the
             // `#[mc(when = "object_data != 0")]` attribute on the derived
@@ -1071,8 +1127,16 @@ impl V47Adapter {
                 rotation: Rotation::new(unpack_degrees(body.yaw), unpack_degrees(body.pitch)),
                 velocity,
             })]);
-        }
-        if packet_id == play::clientbound::NAMED_ENTITY_SPAWN {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::NAMED_ENTITY_SPAWN`.
+    fn handle_play_named_entity_spawn(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Player spawn. 1.8 sends the player UUID as a 128-bit value here
             // (only Login Success uses the string form). Decoded inline: the
             // trailing data-watcher metadata is variable-length and not needed
@@ -1103,8 +1167,16 @@ impl V47Adapter {
                 rotation: Rotation::new(unpack_degrees(yaw), unpack_degrees(pitch)),
                 velocity: None,
             })]);
-        }
-        if packet_id == play::clientbound::REL_ENTITY_MOVE {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::REL_ENTITY_MOVE`.
+    fn handle_play_rel_entity_move(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: RelEntityMove = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
                 entity_id: body.entity_id,
@@ -1116,8 +1188,16 @@ impl V47Adapter {
                 rotation: None,
                 on_ground: body.on_ground,
             })]);
-        }
-        if packet_id == play::clientbound::ENTITY_LOOK {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ENTITY_LOOK`.
+    fn handle_play_entity_look(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: EntityLook = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
                 entity_id: body.entity_id,
@@ -1128,8 +1208,16 @@ impl V47Adapter {
                 )),
                 on_ground: body.on_ground,
             })]);
-        }
-        if packet_id == play::clientbound::ENTITY_MOVE_LOOK {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ENTITY_MOVE_LOOK`.
+    fn handle_play_entity_move_look(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: EntityMoveLook = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
                 entity_id: body.entity_id,
@@ -1144,8 +1232,16 @@ impl V47Adapter {
                 )),
                 on_ground: body.on_ground,
             })]);
-        }
-        if packet_id == play::clientbound::ENTITY_TELEPORT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ENTITY_TELEPORT`.
+    fn handle_play_entity_teleport(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: EntityTeleport = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
                 entity_id: body.entity_id,
@@ -1160,8 +1256,16 @@ impl V47Adapter {
                 )),
                 on_ground: body.on_ground,
             })]);
-        }
-        if packet_id == play::clientbound::ENTITY_VELOCITY {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ENTITY_VELOCITY`.
+    fn handle_play_entity_velocity(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: EntityVelocityPacket = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::EntityVelocity {
                 entity_id: body.entity_id,
@@ -1171,8 +1275,16 @@ impl V47Adapter {
                     f64::from(body.velocity_z) / VELOCITY_SCALE,
                 ),
             })]);
-        }
-        if packet_id == play::clientbound::ENTITY_DESTROY {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ENTITY_DESTROY`.
+    fn handle_play_entity_destroy(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // A varint-counted list of varint ids. Now a derived struct: the
             // `#[mc(varint)]`-on-`Vec<i32>` macro attribute (reported as a gap
             // and since landed) encodes both the length and each element as a
@@ -1183,8 +1295,16 @@ impl V47Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::EntityRemoved {
                 entity_ids: body.entity_ids,
             })]);
-        }
-        if packet_id == play::clientbound::ENTITY_METADATA {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ENTITY_METADATA`.
+    fn handle_play_entity_metadata(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // The incremental metadata packet carries no type of its own —
             // only `spawn_entity_living` names the mob, so a later delta for
             // the same id is gated by whatever `remember_kind` recorded at
@@ -1203,16 +1323,40 @@ impl V47Adapter {
                 entity_id: body.entity_id,
                 metadata,
             })]);
-        }
-        if packet_id == play::clientbound::KICK_DISCONNECT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::KICK_DISCONNECT`.
+    fn handle_play_kick_disconnect(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: KickDisconnect = decode_body(payload)?;
             return Ok(vec![Directive::Disconnect(json_reason_text(&body.reason))]);
-        }
-        if packet_id == play::clientbound::SET_COMPRESSION {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SET_COMPRESSION`.
+    fn handle_play_set_compression(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: PlaySetCompression = decode_body(payload)?;
             return Ok(vec![Directive::SetCompression(body.threshold)]);
-        }
-        if packet_id == play::clientbound::UPDATE_HEALTH {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::UPDATE_HEALTH`.
+    fn handle_play_update_health(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // f32 health, varint food, f32 saturation — verified against
             // minecraft-data's 1.8 `packet_update_health` (identical shape at
             // 1.12.2). `UpdateHealth` already existed in this crate but was
@@ -1226,8 +1370,16 @@ impl V47Adapter {
                 food: body.food,
                 saturation: body.food_saturation,
             })]);
-        }
-        if packet_id == play::clientbound::RESPAWN {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::RESPAWN`.
+    fn handle_play_respawn(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Signed int dimension, u8 difficulty, u8 game mode, string level
             // type — verified against minecraft-data's 1.8 `packet_respawn`.
             // Unlike `join`'s dimension (a signed *byte*), 1.8's `respawn`
@@ -1255,8 +1407,16 @@ impl V47Adapter {
                 previous_game_mode: None,
                 last_death_location: None,
             })]);
-        }
-        if packet_id == play::clientbound::ENTITY_STATUS {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ENTITY_STATUS`.
+    fn handle_play_entity_status(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // A raw (non-VarInt) `i32` entity id, then a raw status byte —
             // verified against minecraft-data's 1.8 `packet_entity_status`
             // (identical shape at 1.12.2) and matching `lodestone-v770`'s own
@@ -1272,8 +1432,16 @@ impl V47Adapter {
                 entity_id,
                 status,
             })]);
-        }
-        if packet_id == play::clientbound::ENTITY_HEAD_ROTATION {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ENTITY_HEAD_ROTATION`.
+    fn handle_play_entity_head_rotation(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // VarInt entity id, then a packed signed-byte yaw (256 steps per
             // circle, the same packing `unpack_degrees` already handles for
             // body rotation) — verified against minecraft-data's 1.8
@@ -1286,8 +1454,16 @@ impl V47Adapter {
                 entity_id,
                 head_yaw: unpack_degrees(packed),
             })]);
-        }
-        if packet_id == play::clientbound::BLOCK_CHANGE {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::BLOCK_CHANGE`.
+    fn handle_play_block_change(
+        &self,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // A packed 1.8 `position` (see `crate::packets::position`, x/y/z
             // big-endian, y in the middle) plus the changed block's legacy
             // composite id as a VarInt — verified both against minecraft-data's
@@ -1334,8 +1510,16 @@ impl V47Adapter {
                     pos.z.rem_euclid(16) as u8,
                 ]],
             })]);
-        }
-        if packet_id == play::clientbound::MULTI_BLOCK_CHANGE {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::MULTI_BLOCK_CHANGE`.
+    fn handle_play_multi_block_change(
+        &self,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Chunk X/Z (i32 each), then a VarInt-counted array of records —
             // verified against minecraft-data's 1.8 `packet_multi_block_change`
             // (identical shape at 1.12.2, where `lodestone-v340`'s own arm
@@ -1417,8 +1601,16 @@ impl V47Adapter {
                     })
                 })
                 .collect());
-        }
-        if packet_id == play::clientbound::OPEN_WINDOW {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::OPEN_WINDOW`.
+    fn handle_play_open_window(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // `OpenWindow`'s codec already existed and was already tested
             // (`tests/inventory.rs`); nothing here ever called it, so no 1.8
             // container screen — a chest, a furnace, a crafting table —
@@ -1430,14 +1622,30 @@ impl V47Adapter {
                 menu_type,
                 title: Text::from_json(&body.window_title),
             })]);
-        }
-        if packet_id == play::clientbound::CLOSE_WINDOW {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::CLOSE_WINDOW`.
+    fn handle_play_close_window(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: CloseWindow = decode_body_exact(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::ScreenClosed {
                 window_id: i32::from(body.window_id),
             })]);
-        }
-        if packet_id == play::clientbound::WINDOW_ITEMS {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::WINDOW_ITEMS`.
+    fn handle_play_window_items(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // 1.8 has no container-synchronization state id (added in a much
             // later version) and does not bundle the cursor item into this
             // packet the way it might elsewhere, so `state_id` is a fixed 0
@@ -1451,8 +1659,16 @@ impl V47Adapter {
                 items,
                 carried_item: None,
             })]);
-        }
-        if packet_id == play::clientbound::SET_SLOT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SET_SLOT`.
+    fn handle_play_set_slot(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // 1.8 unifies what 26.2 splits into three packets
             // (`SET_CURSOR_ITEM`/`SET_PLAYER_INVENTORY`/`CONTAINER_SET_SLOT`)
             // behind one `window_id` sentinel: `-1` is the cursor (dragged
@@ -1477,8 +1693,16 @@ impl V47Adapter {
                 slot: i32::from(body.slot),
                 item,
             })]);
-        }
-        if packet_id == play::clientbound::CRAFT_PROGRESS_BAR {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::CRAFT_PROGRESS_BAR`.
+    fn handle_play_craft_progress_bar(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // `packet_craft_progress_bar` (minecraft-data 1.8/1.12.2, identical
             // shape): `windowId: u8, property: i16, value: i16` — no
             // synchronization state id (added much later, same absence as
@@ -1494,8 +1718,16 @@ impl V47Adapter {
                 property,
                 value,
             })]);
-        }
-        if packet_id == play::clientbound::TITLE {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::TITLE`.
+    fn handle_play_title(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Action-multiplexed, verified field-by-field against
             // minecraft-data's 1.8 `packet_title`: the `text` switch only
             // has cases for actions `0`/`1` (title/subtitle — 1.8 predates
@@ -1539,8 +1771,16 @@ impl V47Adapter {
             };
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![directive]);
-        }
-        if packet_id == play::clientbound::TAB_COMPLETE {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::TAB_COMPLETE`.
+    fn handle_play_tab_complete(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // `packet_tab_complete` (minecraft-data 1.8/1.12.2, identical
             // shape): a bare `matches: string[]`, no transaction id and no
             // replacement range — 1.8 predates both (added in 1.13). Every
@@ -1576,8 +1816,16 @@ impl V47Adapter {
                 length,
                 suggestions,
             })]);
-        }
-        if packet_id == play::clientbound::PLAYER_INFO {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::PLAYER_INFO`.
+    fn handle_play_player_info(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // A single `action` applies to every entry in the packet
             // (verified against minecraft-data's 1.8 `packet_player_info`
             // `switch`), unlike 26.2's per-entry action bitmask — see
@@ -1676,8 +1924,16 @@ impl V47Adapter {
                 }));
             }
             return Ok(directives);
-        }
-        if packet_id == play::clientbound::HELD_ITEM_SLOT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::HELD_ITEM_SLOT`.
+    fn handle_play_held_item_slot(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // A single signed byte, the newly-selected hotbar index — verified
             // against minecraft-data's 1.8 `packet_held_item_slot` (identical
             // shape at every later version through 26.2). The
@@ -1687,8 +1943,16 @@ impl V47Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::HeldSlotChanged {
                 slot: i32::from(body.slot),
             })]);
-        }
-        if packet_id == play::clientbound::ABILITIES {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ABILITIES`.
+    fn handle_play_abilities(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Signed-byte flags (bit 0x01 invulnerable, 0x02 flying, 0x04 can
             // fly, 0x08 instabuild), then f32 flying speed, f32 walking speed
             // — verified against minecraft-data's 1.8 `packet_abilities`.
@@ -1712,8 +1976,16 @@ impl V47Adapter {
                 flying_speed,
                 walking_speed,
             })]);
-        }
-        if packet_id == play::clientbound::SPAWN_POSITION {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SPAWN_POSITION`.
+    fn handle_play_spawn_position(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // The already-defined `SpawnPosition` codec (`packets::game`) was
             // never dispatched from here — this is that decoder's first
             // caller, so the compass never pointed anywhere but world spawn
@@ -1727,8 +1999,16 @@ impl V47Adapter {
                 angle: 0.0,
                 pitch: 0.0,
             })]);
-        }
-        if packet_id == play::clientbound::DIFFICULTY {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::DIFFICULTY`.
+    fn handle_play_difficulty(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: DifficultyPacket = decode_body(payload)?;
             let difficulty = match body.difficulty {
                 0 => Difficulty::Peaceful,
@@ -1744,14 +2024,30 @@ impl V47Adapter {
                 difficulty,
                 locked: false,
             })]);
-        }
-        if packet_id == play::clientbound::CAMERA {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::CAMERA`.
+    fn handle_play_camera(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: CameraPacket = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::CameraSet {
                 entity_id: body.camera_id,
             })]);
-        }
-        if packet_id == play::clientbound::PLAYERLIST_HEADER {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::PLAYERLIST_HEADER`.
+    fn handle_play_playerlist_header(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Both fields are JSON chat components: this packet was
             // introduced alongside 1.8's own JSON text component format
             // (unlike the scoreboard/team packets below, which predate it).
@@ -1760,16 +2056,32 @@ impl V47Adapter {
                 header: Text::from_json(&body.header),
                 footer: Text::from_json(&body.footer),
             })]);
-        }
-        if packet_id == play::clientbound::EXPERIENCE {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::EXPERIENCE`.
+    fn handle_play_experience(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: Experience = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::ExperienceChanged {
                 progress: body.bar,
                 level: body.level,
                 total: body.total,
             })]);
-        }
-        if packet_id == play::clientbound::ANIMATION {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ANIMATION`.
+    fn handle_play_animation(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Verified against minecraft-data's 1.8 `packet_animation`
             // (identical shape at 1.12.2): varint entity id, raw animation
             // code. `1` has no assigned meaning in either era's client
@@ -1787,8 +2099,16 @@ impl V47Adapter {
                 entity_id: body.entity_id,
                 action,
             })]);
-        }
-        if packet_id == play::clientbound::ENTITY_EQUIPMENT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ENTITY_EQUIPMENT`.
+    fn handle_play_entity_equipment(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // 1.8 carries exactly one slot per message (unlike some later
             // revisions' batched form), so the emitted `equipment` vec
             // always has a single entry.
@@ -1799,8 +2119,16 @@ impl V47Adapter {
                 entity_id: body.entity_id,
                 equipment: vec![EntityEquipment { slot, item }],
             })]);
-        }
-        if packet_id == play::clientbound::WORLD_BORDER {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::WORLD_BORDER`.
+    fn handle_play_world_border(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Action-multiplexed, verified field-by-field against
             // minecraft-data's 1.8 `packet_world_border` (identical shape
             // at 1.12.2, action `3` "initialize" carrying every field in
@@ -1866,8 +2194,16 @@ impl V47Adapter {
             };
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![directive]);
-        }
-        if packet_id == play::clientbound::COMBAT_EVENT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::COMBAT_EVENT`.
+    fn handle_play_combat_event(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Action-multiplexed, verified field-by-field against
             // minecraft-data's 1.8 `packet_combat_event` (identical shape
             // at 1.12.2). Event `2` (entity died) is only ever sent to the
@@ -1900,8 +2236,16 @@ impl V47Adapter {
             };
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![directive]);
-        }
-        if packet_id == play::clientbound::OPEN_SIGN_ENTITY {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::OPEN_SIGN_ENTITY`.
+    fn handle_play_open_sign_entity(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: OpenSignEntity = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::SignEditorOpened {
                 pos: body.location.0,
@@ -1910,8 +2254,16 @@ impl V47Adapter {
                 // sign has.
                 is_front_text: true,
             })]);
-        }
-        if packet_id == play::clientbound::ATTACH_ENTITY {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ATTACH_ENTITY`.
+    fn handle_play_attach_entity(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // 1.8 overloads one packet for both leashing and mounting (see
             // `AttachEntity`'s own doc); this is not `lodestone-v340`'s
             // leash-only shape and must not be ported from it verbatim.
@@ -1936,8 +2288,16 @@ impl V47Adapter {
                 vehicle_id: body.vehicle_id,
                 passenger_ids,
             })]);
-        }
-        if packet_id == play::clientbound::COLLECT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::COLLECT`.
+    fn handle_play_collect(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // 1.8's `collect` carries no pickup count (see `Collect`'s own
             // doc); `amount` is presently unread by every consumer of
             // `ClientEvent::ItemPickup` (the fly-to-collector overlay counts
@@ -1950,8 +2310,16 @@ impl V47Adapter {
                 player_id: body.collector_entity_id,
                 amount: 1,
             })]);
-        }
-        if packet_id == play::clientbound::BLOCK_ACTION {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::BLOCK_ACTION`.
+    fn handle_play_block_action(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: BlockAction = decode_body_exact(payload)?;
             let block_id = u8::try_from(body.block_id).map_err(|_| {
                 AdapterError::Decode(format!(
@@ -1965,8 +2333,16 @@ impl V47Adapter {
                 b1: body.byte2,
                 block: legacy_block_type_key(block_id),
             })]);
-        }
-        if packet_id == play::clientbound::BLOCK_BREAK_ANIMATION {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::BLOCK_BREAK_ANIMATION`.
+    fn handle_play_block_break_animation(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: BlockBreakAnimation = decode_body(payload)?;
             let progress = u8::try_from(body.destroy_stage).unwrap_or(0);
             return Ok(vec![Directive::Emit(ClientEvent::BlockDestruction {
@@ -1974,8 +2350,16 @@ impl V47Adapter {
                 pos: body.location.0,
                 progress,
             })]);
-        }
-        if packet_id == play::clientbound::WORLD_EVENT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::WORLD_EVENT`.
+    fn handle_play_world_event(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: WorldEvent = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::LevelEvent {
                 event: body.effect_id,
@@ -1983,8 +2367,16 @@ impl V47Adapter {
                 data: body.data,
                 global: body.global,
             })]);
-        }
-        if packet_id == play::clientbound::NAMED_SOUND_EFFECT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::NAMED_SOUND_EFFECT`.
+    fn handle_play_named_sound_effect(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // 1.8 carries no sound category (defaults to `Master`, matching
             // vanilla's pre-category behaviour) and packs pitch as a single
             // byte — see `NamedSoundEffect`'s own doc for the `/63.0`
@@ -2009,8 +2401,16 @@ impl V47Adapter {
                 fixed_range: None,
                 seed: 0,
             })]);
-        }
-        if packet_id == play::clientbound::ENTITY_EFFECT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::ENTITY_EFFECT`.
+    fn handle_play_entity_effect(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: EntityEffect = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
                 entity_id: body.entity_id,
@@ -2025,15 +2425,31 @@ impl V47Adapter {
                 show_icon: true,
                 blend: false,
             })]);
-        }
-        if packet_id == play::clientbound::REMOVE_ENTITY_EFFECT {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::REMOVE_ENTITY_EFFECT`.
+    fn handle_play_remove_entity_effect(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: RemoveEntityEffect = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
                 entity_id: body.entity_id,
                 effect: legacy_effect_key(body.effect_id)?,
             })]);
-        }
-        if packet_id == play::clientbound::SPAWN_ENTITY_WEATHER {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SPAWN_ENTITY_WEATHER`.
+    fn handle_play_spawn_entity_weather(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: SpawnEntityWeather = decode_body(payload)?;
             let entity_type: ResourceKey = "minecraft:lightning_bolt"
                 .parse()
@@ -2050,8 +2466,16 @@ impl V47Adapter {
                 rotation: Rotation::new(0.0, 0.0),
                 velocity: None,
             })]);
-        }
-        if packet_id == play::clientbound::SPAWN_ENTITY_EXPERIENCE_ORB {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SPAWN_ENTITY_EXPERIENCE_ORB`.
+    fn handle_play_spawn_entity_experience_orb(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: SpawnEntityExperienceOrb = decode_body(payload)?;
             let entity_type: ResourceKey = "minecraft:experience_orb"
                 .parse()
@@ -2068,8 +2492,16 @@ impl V47Adapter {
                 rotation: Rotation::new(0.0, 0.0),
                 velocity: None,
             })]);
-        }
-        if packet_id == play::clientbound::SPAWN_ENTITY_PAINTING {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SPAWN_ENTITY_PAINTING`.
+    fn handle_play_spawn_entity_painting(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             let body: SpawnEntityPainting = decode_body(payload)?;
             let entity_type: ResourceKey = "minecraft:painting"
                 .parse()
@@ -2090,8 +2522,16 @@ impl V47Adapter {
                 rotation: Rotation::new(0.0, 0.0),
                 velocity: None,
             })]);
-        }
-        if packet_id == play::clientbound::SCOREBOARD_OBJECTIVE {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SCOREBOARD_OBJECTIVE`.
+    fn handle_play_scoreboard_objective(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Mode-multiplexed (minecraft-data's 1.8 `packet_scoreboard_objective`,
             // identical shape at 1.12.2), so this is a hand-decoded `Reader`
             // walk. `displayText` is a **plain** legacy-formatted string at
@@ -2140,8 +2580,16 @@ impl V47Adapter {
             };
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::Emit(event)]);
-        }
-        if packet_id == play::clientbound::SCOREBOARD_SCORE {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SCOREBOARD_SCORE`.
+    fn handle_play_scoreboard_score(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Verified against minecraft-data's 1.8 `packet_scoreboard_score`
             // (identical shape at 1.12.2): `itemName` is the score *holder*
             // and `scoreName` is the *objective* — the mcdata field names are
@@ -2175,8 +2623,16 @@ impl V47Adapter {
             };
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::Emit(event)]);
-        }
-        if packet_id == play::clientbound::SCOREBOARD_DISPLAY_OBJECTIVE {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SCOREBOARD_DISPLAY_OBJECTIVE`.
+    fn handle_play_scoreboard_display_objective(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Verified against minecraft-data's 1.8
             // `packet_scoreboard_display_objective` (identical shape at
             // 1.12.2): raw `i8` slot position, then a string objective name.
@@ -2202,8 +2658,16 @@ impl V47Adapter {
                 slot,
                 objective,
             })]);
-        }
-        if packet_id == play::clientbound::SCOREBOARD_TEAM {
+            }
+
+    /// Extracted from the former if-chain arm for
+    /// `play::clientbound::SCOREBOARD_TEAM`.
+    fn handle_play_scoreboard_team(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+
             // Mode-multiplexed (minecraft-data's 1.8 `packet_scoreboard_team`),
             // so this is a hand-decoded `Reader` walk. **1.8 carries no
             // collision-rule field** (a 1.9 addition `lodestone-v340`'s
@@ -2211,8 +2675,8 @@ impl V47Adapter {
             // the pre-collision-rule vanilla behaviour (everyone always
             // pushes) rather than guessing a value this wire cannot supply.
             // `friendlyFire` packs two flags in one byte (`0x01` friendly
-            // fire, `0x02` see friendly invisibles) — vanilla's
-            // `PacketPlayOutScoreboardTeam` convention, unchanged since 1.8.
+            // fire, `0x02` see friendly invisibles), a convention unchanged
+            // since 1.8.
             let mut reader = Reader::new(payload);
             let team = reader.string(16).map_err(dec_err)?;
             let mode = reader.i8().map_err(dec_err)?;
@@ -2275,11 +2739,508 @@ impl V47Adapter {
                 name: team,
                 action,
             })]);
+            }
+
+    /// Handles a clientbound packet while in the play state. Looks up
+    /// `packet_id` in [`Self::play_dispatch_table`] and runs the bound
+    /// handler -- every arm this used to be an if-chain over is now a plain
+    /// fn pointer in [`CLIENTBOUND`], since no arm in this family needed to
+    /// capture anything beyond `&self`, `world` and `payload`.
+    fn handle_play(
+        &self,
+        world: &mut dyn WorldSink,
+        packet_id: i32,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let table = Self::play_dispatch_table();
+        match table.get(packet_id) {
+            Some(handler) => handler(self, world, payload),
+            None => unreachable!(
+                "Table::build already rejected any play::clientbound id with neither \
+                 a handler nor an IGNORED entry"
+            ),
         }
-        // Everything else in play is intentionally ignored for now.
-        Ok(Vec::new())
     }
+
+    /// Builds this family's `play::clientbound` dispatch table from the
+    /// generated `(name, id)` table, [`CLIENTBOUND`]'s handler bindings and
+    /// [`IGNORED`]'s declared-unhandled list. Rebuilt on every call (a
+    /// `BTreeMap` over ~74 entries) rather than cached in a `OnceLock`: this
+    /// family constructs one `V47Adapter` per connection and `handle_play` is
+    /// not the hot per-tick path (chunk/entity streaming dominates), so the
+    /// mechanical choice is the one with no interior-mutability bookkeeping to
+    /// get wrong. `.expect(...)` here is the correct failure mode for a
+    /// genuinely malformed static table -- exactly what `Table::build`'s
+    /// construction-time checks exist to catch; `tests/dispatch_coverage.rs`
+    /// carries the standing proof that it succeeds, plus a negative control
+    /// proving it can fail.
+    fn play_dispatch_table() -> lodestone_core::dispatch::Table<'static, PlayHandlerFn> {
+        lodestone_core::dispatch::Table::build(
+            PROTOCOL,
+            play::clientbound::ENTRIES,
+            CLIENTBOUND,
+            IGNORED,
+        )
+        .expect("v47 play::clientbound dispatch table must be internally consistent")
+    }
+
 }
+
+/// Payload every `play::clientbound` [`lodestone_core::dispatch::Handler`]
+/// below runs: a plain fn pointer, since every extracted arm closes only over
+/// `&self`, `world` and `payload` -- no arm in this family needed a captured
+/// closure or an enum fallback. `pub` (rather than `pub(crate)`) only because
+/// [`CLIENTBOUND`]'s element type names it and a public static may not use a
+/// less-visible type in its signature.
+pub type PlayHandlerFn =
+    fn(&V47Adapter, &mut dyn WorldSink, &[u8]) -> Result<Vec<Directive>, AdapterError>;
+
+/// Every `play::clientbound` packet this family translates, keyed by its
+/// canonical (minecraft-data) name -- the same spelling
+/// `crate::packet_ids::play::clientbound::ENTRIES` uses for this protocol.
+/// [`V47Adapter::play_dispatch_table`] builds the runtime dispatch table from
+/// this slice plus [`IGNORED`]; `Table::build` fails construction if a name
+/// here has no matching id in `ENTRIES` -- see `dispatch.rs`. `pub` so
+/// `tests/dispatch_coverage.rs` can rebuild (and deliberately corrupt) this
+/// same table from outside the crate.
+pub static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandlerFn>)] = &[
+    (
+        "minecraft:login",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_login as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:map_chunk",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_map_chunk as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:map_chunk_bulk",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_map_chunk_bulk as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:keep_alive",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_keep_alive as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:chat",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_chat as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:position",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_position as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:spawn_entity_living",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_spawn_entity_living as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:spawn_entity",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_spawn_entity as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:named_entity_spawn",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_named_entity_spawn as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:rel_entity_move",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_rel_entity_move as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:entity_look",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_entity_look as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:entity_move_look",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_entity_move_look as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:entity_teleport",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_entity_teleport as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:entity_velocity",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_entity_velocity as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:entity_destroy",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_entity_destroy as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:entity_metadata",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_entity_metadata as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:kick_disconnect",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_kick_disconnect as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:set_compression",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_set_compression as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:update_health",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_update_health as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:respawn",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_respawn as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:entity_status",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_entity_status as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:entity_head_rotation",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_entity_head_rotation as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:block_change",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_block_change as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:multi_block_change",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_multi_block_change as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:open_window",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_open_window as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:close_window",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_close_window as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:window_items",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_window_items as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:set_slot",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_set_slot as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:craft_progress_bar",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_craft_progress_bar as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:title",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_title as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:tab_complete",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_tab_complete as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:player_info",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_player_info as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:held_item_slot",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_held_item_slot as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:abilities",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_abilities as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:spawn_position",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_spawn_position as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:difficulty",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_difficulty as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:camera",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_camera as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:playerlist_header",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_playerlist_header as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:experience",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_experience as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:animation",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_animation as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:entity_equipment",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_entity_equipment as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:world_border",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_world_border as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:combat_event",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_combat_event as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:open_sign_entity",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_open_sign_entity as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:attach_entity",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_attach_entity as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:collect",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_collect as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:block_action",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_block_action as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:block_break_animation",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_block_break_animation as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:world_event",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_world_event as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:named_sound_effect",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_named_sound_effect as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:entity_effect",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_entity_effect as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:remove_entity_effect",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_remove_entity_effect as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:spawn_entity_weather",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_spawn_entity_weather as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:spawn_entity_experience_orb",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_spawn_entity_experience_orb as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:spawn_entity_painting",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_spawn_entity_painting as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:scoreboard_objective",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_scoreboard_objective as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:scoreboard_score",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_scoreboard_score as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:scoreboard_display_objective",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_scoreboard_display_objective as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:scoreboard_team",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_scoreboard_team as PlayHandlerFn,
+        ),
+    ),
+];
+
+/// Every `play::clientbound` packet id with deliberately no handler above,
+/// each with its own re-derived reason. `tests/dispatch_coverage.rs` proves
+/// this list plus [`CLIENTBOUND`] together account for every id
+/// `play::clientbound::ENTRIES` declares, and that removing an entry breaks
+/// construction.
+pub static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
+    lodestone_core::dispatch::IGNORED::new("minecraft:update_time", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:bed", "removed from the wire after protocol 340 (1.12.2); vanilla folds sleeping state into entity metadata (a Pose value) from 1.14 onward, so there is no v770 clientbound packet to backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:entity", "entity-tracker no-op heartbeat: minecraft-data's own schema is a bare entityId with no other field, and no protocol family in this workspace (v340, v735, v770) translates it either"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:update_attributes", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:explosion", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:world_particles", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:game_state_change", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:transaction", "removed from the wire after protocol 754 (1.16.5, still present in v735); v770 has no clientbound-or-serverbound transaction-ack packet at all, so there is nothing to backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:update_sign", "the clientbound arm was removed after protocol 754 (v340 and v735 both carry it serverbound-only); modern sign text travels through block-entity NBT instead, so there is no v770 clientbound packet to backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:map", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:tile_entity_data", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:statistics", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:custom_payload", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:resource_pack_send", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:update_entity_nbt", "a debug-only packet (entity id plus its raw NBT tag, per minecraft-data's 1.8 schema); no consumer exists in the canonical model and no later protocol family in this workspace carries an equivalent"),
+];
 
 impl VersionAdapter for V47Adapter {
     fn protocol_version(&self) -> i32 {
