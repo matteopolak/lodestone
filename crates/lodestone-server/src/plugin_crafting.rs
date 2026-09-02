@@ -1,4 +1,4 @@
-//! Plugin-facing crafting-station result hooks (issue #150): anvil,
+//! Plugin-facing crafting-station result hooks: anvil,
 //! grindstone, smithing table, loom and stonecutter.
 //!
 //! # What it is
@@ -104,7 +104,7 @@ pub struct StationInputs {
     /// for the stonecutter. A cell is `None` when that slot is empty, never
     /// omitted, so a hook can tell "empty" from "not this station's shape".
     pub cells: Vec<Option<ItemStack>>,
-    /// The station's own vanilla-computed result, `None` when the inputs do
+    /// The station's own computed result, `None` when the inputs do
     /// not currently combine into anything. This is what makes
     /// [`StationVerdict::Replace`] able to *tweak* a real result (append a
     /// lore line, force a custom name) rather than forcing every replacing

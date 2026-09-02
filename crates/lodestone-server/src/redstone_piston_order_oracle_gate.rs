@@ -1,7 +1,7 @@
 //! `docs/plans/redstone-execution-model.md`'s **U0** corpus, piston half:
 //! interrupting a piston's own pending commit — the specific "update-order
-//! quirk" issue #316 is named for, and the mechanism a 0-tick pulse generator
-//! depends on.
+//! quirk" that names this class of bug, and the mechanism a 0-tick pulse
+//! generator depends on.
 //!
 //! # Why this file is separate from `redstone_order_oracle_gate.rs`
 //!

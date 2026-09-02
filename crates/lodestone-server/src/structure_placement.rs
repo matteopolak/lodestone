@@ -1,5 +1,5 @@
-//! Pastes a parsed structure template into a **live** [`ChunkSource`] — the
-//! runtime entry point issue #136 asks for.
+//! Pastes a parsed structure template into a **live** [`ChunkSource`] — a
+//! runtime placement entry point.
 //!
 //! # The gap this closes
 //!
