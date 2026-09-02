@@ -54,7 +54,7 @@
 //! module's landing created. A potion applies its full unscaled built-in effect
 //! list, milk clears every active effect, and golden apple/pufferfish/rotten
 //! flesh/spider eye/poisonous potato/chicken/honey bottle grant or remove the
-//! effects `Consumables.java` names for them. `chorus_fruit`'s
+//! effects vanilla's own consumables table names for them. `chorus_fruit`'s
 //! `TeleportRandomlyConsumeEffect` is **not** among these — teleport-on-eat is a
 //! movement mechanic, not a status effect, and stays unmodelled here.
 //!
