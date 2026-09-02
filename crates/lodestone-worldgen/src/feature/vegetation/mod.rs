@@ -1,7 +1,7 @@
 //! Vegetal decoration: grass, flowers and trees (oak, birch,
 //! spruce, plus spruce's own `pine` sibling since it shares the same
 //! trunk/foliage engine at near-zero extra cost — see "Scope" below).
-//! `GenerationStep.Decoration.VEGETAL_DECORATION` ([`super::STEP_VEGETAL_DECORATION`]),
+//! Vanilla's own vegetal-decoration generation step ([`super::STEP_VEGETAL_DECORATION`]),
 //! one step after [`super`]'s `UNDERGROUND_ORES` engine, reusing the same
 //! shape: vanilla's placement-modifier pipeline is data, walked by an engine
 //! that reproduces its exact RNG-consumption order (see [`super`]'s own
@@ -12,9 +12,9 @@
 //!
 //! # Scope, named plainly
 //!
-//! **Cross-chunk spill: closed.** Vanilla's
-//! `blockStateWriteRadius(1)` at the FEATURES generation stage
-//! (`ChunkPyramid.java:32-35`, the same limit `docs/worldgen-parity.md`
+//! **Cross-chunk spill: closed.** Vanilla's own
+//! one-chunk-into-neighbours write spill at the FEATURES generation stage
+//! (the same limit `docs/worldgen-parity.md`
 //! documents for the ore 3×3 driver) applies to `VEGETAL_DECORATION` too —
 //! a tree placed near a chunk edge can legitimately spill canopy into a
 //! neighbour, and a neighbour's own pass can spill grass/leaves into this
@@ -68,7 +68,8 @@
 //!   evidence than a captured vanilla byte stream — and it has already been wrong
 //!   in a way that produced *plausible* output: see that test file's own
 //!   "A real bug in the oracle itself" section, where a missing
-//!   `isStateAtPosition` case made `TreeFeature.validTreePos` always false, so no
+//!   "is state at position" case made vanilla's own tree-feature valid-position
+//!   check always false, so no
 //!   trunk placer had ever written a block through it.
 //!
 //! Counts asserted *inside* this crate remain derived **from the embedded
@@ -319,7 +320,7 @@ pub fn apply_vegetal_decoration_step<R: RandomSource>(
 /// [`ConfiguredFeature::Unsupported`]).
 ///
 /// One `set_decoration_seed` per **chunk**, not per step — vanilla derives it
-/// once in `ChunkGenerator.applyBiomeDecoration` and reuses it across all 11
+/// once in its own biome-decoration application and reuses it across all 11
 /// steps. Deriving it per step would give every step after the first a different
 /// stream from vanilla's.
 pub fn apply_decoration_steps<R: RandomSource>(
@@ -631,9 +632,9 @@ fn place_configured_feature<R: RandomSource>(
         }
         ConfiguredFeature::WeightedRandomSelector(list) => {
             census_bump(|c| c.other_feature += 1);
-            // `WeightedList.getRandom`: one `nextInt(total)`, then a linear walk
+            // Vanilla's own weighted-list random pick: one `nextInt(total)`, then a linear walk
             // subtracting each weight — the draw happens even for an empty list
-            // in vanilla only via `getRandom`'s own guard, which returns early.
+            // in vanilla only via that pick's own guard, which returns early.
             let total: i32 = list.iter().map(|(w, _)| *w).sum();
             if total <= 0 {
                 return;
@@ -1647,13 +1648,13 @@ mod tests {
         assert!(matches!(feature, ConfiguredFeature::Tree(_)), "expected Tree, got {feature:?}");
     }
 
-    /// `FancyTrunkPlacer.makeLimb`'s FINAL call (`makeLimb(origin,
+    /// Vanilla's own fancy-trunk-placer make-limb's FINAL call (`makeLimb(origin,
     /// origin.above(trunkHeight), doPlace=true)`) places the tree's own main
     /// vertical column unconditionally — no RNG-dependent branch check gates
     /// it, and on open flat ground every step is `valid_tree_pos`. So its
     /// log count is exactly `trunk_height + 1` regardless of seed, computed
     /// here from the same formula the placer itself uses
-    /// (`Mth.floor((tree_height + 2) * 0.618)`), not guessed: with
+    /// (vanilla's own math-helper floor of `(tree_height + 2) * 0.618`), not guessed: with
     /// `base_height=3, height_rand_a=height_rand_b=0` (deterministic
     /// `tree_height=3`), `height=5`, `trunk_height=floor(5*0.618)=floor(3.09)=3`,
     /// so 4 logs. Two different seeds must agree on this exact count even
@@ -1716,7 +1717,7 @@ mod tests {
         }
     }
 
-    /// `TreeFeature.doPlace`'s `min_clipped_height` acceptance path (the
+    /// Vanilla's own tree-feature inner place step's `min_clipped_height` acceptance path (the
     /// savanna/acacia increment's `fancy_oak` addition) — before this, [`place_tree`] rejected
     /// any tree whose free-height scan found an obstruction at all, which is
     /// wrong for a species like fancy oak whose `two_layers_feature_size`
@@ -1870,7 +1871,7 @@ mod tests {
         }
     }
 
-    /// `FallenTreeFeature.placeLogBlock` places the stump UNCONDITIONALLY —
+    /// Vanilla's own fallen-tree-feature place-log-block places the stump UNCONDITIONALLY —
     /// no `validTreePos` gate — so on any terrain at all, exactly one
     /// `jungle_log` lands at `origin` regardless of seed. This is the
     /// discriminating structural guarantee this test leans on for the
@@ -2015,7 +2016,7 @@ mod tests {
         }
     }
 
-    /// `CherryTrunkPlacer.placeTrunk` with a forced `branch_count == 3`
+    /// Vanilla's own cherry-trunk-placer place-trunk with a forced `branch_count == 3`
     /// (`has_middle_branch`) MUST place the FULL `tree_height` column
     /// regardless of the (still real, still random) branch start offsets —
     /// the wrong hypothesis "the trunk always stops at the first branch's
@@ -2105,7 +2106,7 @@ mod tests {
         }
     }
 
-    /// `UpwardsBranchingTrunkPlacer.placeTrunk` with
+    /// Vanilla's own upwards-branching-trunk-placer place-trunk with
     /// `place_branch_per_log_probability = 0.0` (`nextFloat() < 0.0` is
     /// always false — `nextFloat` never returns a negative number) can never
     /// bud a branch, so this is exactly a straight column: `base_height = 6`
