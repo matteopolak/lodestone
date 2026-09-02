@@ -139,14 +139,10 @@ pub struct ClientboundPositionLook {
 /// clientbound position packet, so the confirm choreography stays entirely
 /// inside the version crate.
 ///
-/// Wire layout: a single varint teleport id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:teleport_confirm", state = Play, bound = Server)]
-pub struct TeleportConfirm {
-    /// Teleport id echoed from the clientbound position packet.
-    #[mc(varint)]
-    pub teleport_id: i32,
-}
+// `TeleportConfirm` is byte-identical to v340's (measured; this packet does
+// not exist in v47/1.8 at all), shared via `lodestone-protocol-common`
+// ranged 340..=754 -- see `packets::entity`'s module docs.
+pub use lodestone_protocol_common::packets::entity::TeleportConfirm;
 
 /// Clientbound `spawn_position` packet setting the client's compass target.
 ///
@@ -416,23 +412,9 @@ pub struct UseEntityAt {
     pub sneaking: bool,
 }
 
-/// Serverbound `entity_action` (player command) — sneak, sprint, leave bed, and
-/// vehicle actions.
-///
-/// Wire layout: varint entity id, varint action id, varint jump boost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:entity_action", state = Play, bound = Server)]
-pub struct EntityAction {
-    /// Player entity id.
-    #[mc(varint)]
-    pub entity_id: i32,
-    /// Action id (see the adapter's `PlayerCommand` mapping).
-    #[mc(varint)]
-    pub action_id: i32,
-    /// Jump boost for the ride-jump action, otherwise `0`.
-    #[mc(varint)]
-    pub jump_boost: i32,
-}
+// `EntityAction` is byte-identical across v47/v340/v735 (measured), shared
+// via `lodestone-protocol-common` -- see `packets::entity`'s module docs.
+pub use lodestone_protocol_common::packets::entity::EntityAction;
 
 /// Serverbound `client_command` packet.
 ///
@@ -514,57 +496,12 @@ pub struct OpenSignEntity {
     pub location: Position,
 }
 
-/// Clientbound `attach_entity` packet — sets or clears an entity's leash
-/// holder.
-///
-/// Wire layout: two raw (non-VarInt) `i32`s, verified against
-/// minecraft-data's 1.16.2 `packet_attach_entity` (byte-identical to
-/// 1.12.2's shape). A `vehicle_id` of `0` means "no holder" (leash removed);
-/// cross-checked against `lodestone-v770`'s own `SET_ENTITY_LINK` decode,
-/// which uses the same `!= 0` convention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:attach_entity", state = Play, bound = Client)]
-pub struct AttachEntity {
-    /// Leashed entity id.
-    pub entity_id: i32,
-    /// Holder entity id, or `0` for "no holder".
-    pub vehicle_id: i32,
-}
-
-/// Clientbound `set_passengers` packet — the full passenger list of a
-/// vehicle.
-///
-/// Wire layout: a VarInt vehicle id then a VarInt-counted VarInt array,
-/// verified against minecraft-data's 1.16.2 `packet_set_passengers`.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:set_passengers", state = Play, bound = Client)]
-pub struct SetPassengers {
-    /// Vehicle entity id.
-    #[mc(varint)]
-    pub entity_id: i32,
-    /// Passenger entity ids, in mounting order.
-    #[mc(varint)]
-    pub passengers: Vec<i32>,
-}
-
-/// Clientbound `collect` packet — an item entity (or experience orb) was
-/// picked up.
-///
-/// Wire layout: three VarInts, verified against minecraft-data's 1.16.2
-/// `packet_collect`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:collect", state = Play, bound = Client)]
-pub struct Collect {
-    /// The entity that was picked up.
-    #[mc(varint)]
-    pub collected_entity_id: i32,
-    /// The entity that did the picking up (usually a player).
-    #[mc(varint)]
-    pub collector_entity_id: i32,
-    /// Stack size collected.
-    #[mc(varint)]
-    pub pickup_item_count: i32,
-}
+// AttachEntity/SetPassengers/Collect are byte-identical to v340's own
+// definitions (measured), shared via `lodestone-protocol-common` ranged
+// 340..=754 -- v47's `attach_entity` carries an extra `leash: bool` field and
+// its `collect` has no pickup count, so neither is in this range. See
+// `packets::entity`'s module docs.
+pub use lodestone_protocol_common::packets::entity::{AttachEntity, Collect, SetPassengers};
 
 /// Clientbound `entity_effect` packet — a status effect was applied to an
 /// entity.
@@ -594,19 +531,10 @@ pub struct EntityEffect {
     pub flags: i8,
 }
 
-/// Clientbound `remove_entity_effect` packet.
-///
-/// Wire layout: VarInt entity id, raw `i8` legacy effect id, verified against
-/// minecraft-data's 1.16.2 `packet_remove_entity_effect`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:remove_entity_effect", state = Play, bound = Client)]
-pub struct RemoveEntityEffect {
-    /// Target entity id.
-    #[mc(varint)]
-    pub entity_id: i32,
-    /// Legacy (1-based) potion-effect id.
-    pub effect_id: i8,
-}
+// `RemoveEntityEffect` is byte-identical to v340's own definition (measured),
+// shared via `lodestone-protocol-common` ranged 340..=754 -- see
+// `packets::entity`'s module docs.
+pub use lodestone_protocol_common::packets::entity::RemoveEntityEffect;
 
 /// Serverbound `recipe_book` packet — toggle a recipe book's open/filtering
 /// state.
