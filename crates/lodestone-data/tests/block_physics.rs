@@ -511,7 +511,7 @@ fn the_geometry_branch_alone_is_wrong_for_two_thousand_states() {
     }
 }
 
-/// The **control** for the whole census, and for this change not being a no-op:
+/// The **control** for the whole census, and for this table not being a no-op:
 /// the derivation the shell shipped before this table existed — `shape_is_solid`
 /// over the committed *collision* census, plus the three hard-coded names — is
 /// asserted here to give the **wrong** answer on a stated number of states, and
