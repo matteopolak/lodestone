@@ -3,7 +3,7 @@
 //! ## What it is
 //!
 //! `minecraft:commands` (clientbound, id 16) sends the server's whole
-//! Brigadier [`CommandDispatcher`] as a flat list of nodes — root / literal /
+//! Brigadier command dispatcher as a flat list of nodes — root / literal /
 //! argument, each with a redirect, an executable flag, and (for arguments) a
 //! parser id plus that parser's own network template. [`CommandTree`] is the
 //! version-free, decode-target shape of that packet: something a protocol
@@ -13,32 +13,31 @@
 //!
 //! `minecraft:command_suggestions` (clientbound, id 15) is the answer to a
 //! serverbound `command_suggestion` request; [`CommandSuggestionsResponse`]
-//! is its decode target, unpacked from
-//! `ClientboundCommandSuggestionsPacket(int id, int start, int length,
-//! List<Entry>)` — a transaction id plus a `[start, start+length)` byte range
-//! of the input line the suggestions replace.
+//! is its decode target, unpacked from a transaction id, a `start` offset and
+//! a `length`, plus the suggestion list — the offset and length describe the
+//! `[start, start+length)` byte range of the input line the suggestions
+//! replace.
 //!
 //! ## How it works
 //!
 //! [`ArgumentParser`] is keyed by 26.2's `minecraft:command_argument_type`
-//! registry id (`.cache/mc/26.2/generated/reports/registries.json`), and each
-//! variant's payload mirrors exactly what that parser's
-//! `ArgumentTypeInfo::serializeToNetwork` writes
-//! (`.cache/mc/26.2/client-src/net/minecraft/commands/synchronization/**`,
-//! `net/minecraft/commands/arguments/**`) — a numeric min/max pair with a
-//! leading flags byte for the four Brigadier primitives, a `StringType`
-//! ordinal for `brigadier:string`, a flags byte for `entity`/`score_holder`,
-//! a plain `int` for `time`, an `Identifier` (VarInt-length UTF-8 registry
-//! key) for the five `resource*` parsers, and no payload at all for every
-//! other parser (`SingletonArgumentInfo::serializeToNetwork` is a no-op).
+//! registry id, and each variant's payload mirrors exactly what that
+//! parser's own network-serialization routine writes — a numeric min/max
+//! pair with a leading flags byte for the four Brigadier primitives, a
+//! `StringType` ordinal for `brigadier:string`, a flags byte for
+//! `entity`/`score_holder`, a plain `int` for `time`, an `Identifier`
+//! (VarInt-length UTF-8 registry key) for the five `resource*` parsers, and
+//! no payload at all for every other parser (whose network-serialization
+//! routine is a no-op).
 //!
 //! Vanilla itself degrades an unrecognised argument-type id to a nameless
-//! pass-through node (`ClientboundCommandsPacket.read` returns `null`, and
-//! `NodeResolver.resolve` turns a null stub into a bare `RootCommandNode`
-//! rather than failing the whole tree) — [`NodeKind::Unrecognized`] keeps the
-//! same shape (no name, no parser, but its children/redirect/executable flag
-//! still apply) rather than rejecting the packet, so a future/mod argument
-//! type this build doesn't know about can't take the whole tree down.
+//! pass-through node (the commands-packet decoder returns null for an
+//! unknown parser, and the tree-resolution step turns that null stub into a
+//! bare root node rather than failing the whole tree) — [`NodeKind::Unrecognized`]
+//! keeps the same shape (no name, no parser, but its children/redirect/executable
+//! flag still apply) rather than rejecting the packet, so a future/mod
+//! argument type this build doesn't know about can't take the whole tree
+//! down.
 //!
 //! A **redirect is a same-position jump, not a token-consuming one** — a
 //! server can legally send a redirect cycle (`execute`'s own `run` argument
@@ -72,10 +71,9 @@ use std::collections::HashSet;
 use crate::ids::ResourceKey;
 use crate::text::Text;
 
-/// `StringArgumentType.StringType`'s three variants, in Brigadier's own
-/// declared enum order — `FriendlyByteBuf.writeEnum`/`readEnum` sends the
-/// ordinal as a VarInt (`ArgumentUtils`-adjacent code in
-/// `StringArgumentSerializer.serializeToNetwork`).
+/// Brigadier's own `StringType`'s three variants, in its declared enum
+/// order — the wire buffer's enum-write helper sends the ordinal as a
+/// VarInt, in the string argument's own network-serialization routine.
 ///
 /// This ordinal order is **not** sourced from this session's decompiled
 /// `.cache/mc/26.2` tree — `com.mojang.brigadier` is a separate library and
@@ -96,20 +94,18 @@ pub enum StringKind {
 }
 
 /// One argument type's parser id and network template, keyed by 26.2's
-/// `minecraft:command_argument_type` registry
-/// (`.cache/mc/26.2/generated/reports/registries.json`).
+/// `minecraft:command_argument_type` registry.
 ///
 /// Every payload here is copied from that parser's own
-/// `ArgumentTypeInfo::{serializeToNetwork,deserializeFromNetwork}` pair; see
-/// this module's own doc for the exact source files. Parsers with no network
-/// payload (`SingletonArgumentInfo`) are unit variants.
+/// network-serialization/deserialization pair. Parsers with no network
+/// payload are unit variants.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArgumentParser {
     /// `brigadier:bool` (id 0). No network payload; Brigadier's own
-    /// `BoolArgumentType` suggests `true`/`false` unconditionally.
+    /// bool-argument type suggests `true`/`false` unconditionally.
     Bool,
-    /// `brigadier:float` (id 1). `FloatArgumentInfo`: a flags byte then an
-    /// `f32` for each present bound; absent bounds are
+    /// `brigadier:float` (id 1). Vanilla's float-argument info: a flags byte
+    /// then an `f32` for each present bound; absent bounds are
     /// `-f32::MAX`/`f32::MAX`.
     Float { min: f32, max: f32 },
     /// `brigadier:double` (id 2). Same shape as `Float`, `f64` bounds.
@@ -119,11 +115,12 @@ pub enum ArgumentParser {
     Integer { min: i32, max: i32 },
     /// `brigadier:long` (id 4). Same shape, `i64` bounds.
     Long { min: i64, max: i64 },
-    /// `brigadier:string` (id 5). `StringArgumentSerializer`: a single
-    /// `StringType` enum ordinal, no bounds.
+    /// `brigadier:string` (id 5). Vanilla's string-argument serializer: a
+    /// single `StringType` enum ordinal, no bounds.
     String(StringKind),
-    /// `minecraft:entity` (id 6). `EntityArgument.Info`: a flags byte, bit 0
-    /// `single` (only one entity/player), bit 1 `players_only`.
+    /// `minecraft:entity` (id 6). Vanilla's entity-argument info: a flags
+    /// byte, bit 0 `single` (only one entity/player), bit 1
+    /// `players_only`.
     Entity { single: bool, players_only: bool },
     /// `minecraft:game_profile` (id 7). No payload.
     GameProfile,
@@ -163,9 +160,9 @@ pub enum ArgumentParser {
     Objective,
     /// `minecraft:objective_criteria` (id 25). No payload.
     ObjectiveCriteria,
-    /// `minecraft:operation` (id 26). No payload. `OperationArgument`
-    /// suggests exactly `["=", "+=", "-=", "*=", "/=", "%=", "<", ">", "><"]`
-    /// (`OperationArgument.java`).
+    /// `minecraft:operation` (id 26). No payload. Vanilla's operation-argument
+    /// parser suggests exactly `["=", "+=", "-=", "*=", "/=", "%=", "<", ">",
+    /// "><"]`.
     Operation,
     /// `minecraft:particle` (id 27). No payload.
     Particle,
@@ -173,17 +170,18 @@ pub enum ArgumentParser {
     Angle,
     /// `minecraft:rotation` (id 29). No payload.
     Rotation,
-    /// `minecraft:scoreboard_slot` (id 30). No payload. `ScoreboardSlotArgument`
-    /// suggests every `DisplaySlot::getSerializedName`
-    /// (`DisplaySlot.java`): `list`, `sidebar`, `below_name`, and
+    /// `minecraft:scoreboard_slot` (id 30). No payload. Vanilla's
+    /// scoreboard-slot-argument parser suggests every display slot's
+    /// serialized name: `list`, `sidebar`, `below_name`, and
     /// `sidebar.team.<colour>` for the sixteen team colours.
     ScoreboardSlot,
-    /// `minecraft:score_holder` (id 31). `ScoreHolderArgument.Info`: a flags
-    /// byte, bit 0 `multiple`.
+    /// `minecraft:score_holder` (id 31). Vanilla's score-holder-argument
+    /// info: a flags byte, bit 0 `multiple`.
     ScoreHolder { multiple: bool },
-    /// `minecraft:swizzle` (id 32). No payload. `SwizzleArgument` has no
-    /// `listSuggestions` override, so Brigadier's default (empty) applies —
-    /// vanilla itself offers zero completions for this parser.
+    /// `minecraft:swizzle` (id 32). No payload. Vanilla's swizzle-argument
+    /// parser has no custom suggestion override, so Brigadier's default
+    /// (empty) applies — vanilla itself offers zero completions for this
+    /// parser.
     Swizzle,
     /// `minecraft:team` (id 33). No payload.
     Team,
@@ -195,10 +193,9 @@ pub enum ArgumentParser {
     ResourceLocation,
     /// `minecraft:function` (id 37). No payload.
     Function,
-    /// `minecraft:entity_anchor` (id 38). No payload. `EntityAnchorArgument`
-    /// suggests exactly `["feet", "eyes"]`
-    /// (`EntityAnchorArgument.Anchor.BY_NAME`'s declaration order,
-    /// `EntityAnchorArgument.java`).
+    /// `minecraft:entity_anchor` (id 38). No payload. Vanilla's
+    /// entity-anchor-argument parser suggests exactly `["feet", "eyes"]`, in
+    /// the anchor enum's declaration order.
     EntityAnchor,
     /// `minecraft:int_range` (id 39). No payload.
     IntRange,
@@ -206,17 +203,18 @@ pub enum ArgumentParser {
     FloatRange,
     /// `minecraft:dimension` (id 41). No payload.
     Dimension,
-    /// `minecraft:gamemode` (id 42). No payload. `GameModeArgument` suggests
-    /// exactly `["survival", "creative", "adventure", "spectator"]`
-    /// (`GameType.java`'s declaration order).
+    /// `minecraft:gamemode` (id 42). No payload. Vanilla's
+    /// game-mode-argument parser suggests exactly `["survival", "creative",
+    /// "adventure", "spectator"]`, in the game-mode enum's declaration
+    /// order.
     GameMode,
-    /// `minecraft:time` (id 43). `TimeArgument.Info`: a plain `i32` minimum
-    /// tick count (no flags byte, no maximum).
+    /// `minecraft:time` (id 43). Vanilla's time-argument info: a plain
+    /// `i32` minimum tick count (no flags byte, no maximum).
     Time { min: i32 },
-    /// `minecraft:resource_or_tag` (id 44). `ResourceOrTagArgument.Info`:
-    /// one `Identifier` registry key (`writeResourceKey` /
-    /// `FriendlyByteBuf.writeIdentifier`: VarInt-length UTF-8, no separate
-    /// namespace/path split on the wire).
+    /// `minecraft:resource_or_tag` (id 44). Vanilla's
+    /// resource-or-tag-argument info: one `Identifier` registry key
+    /// (a VarInt-length UTF-8 string, no separate namespace/path split on
+    /// the wire).
     ResourceOrTag { registry: ResourceKey },
     /// `minecraft:resource_or_tag_key` (id 45). Same shape as
     /// `ResourceOrTag`.
@@ -284,22 +282,23 @@ pub enum NodeKind {
     },
 }
 
-/// One node exactly as `ClientboundCommandsPacket.Entry` carries it: flags,
+/// One node exactly as vanilla's commands-packet entry carries it: flags,
 /// a redirect target, and a child index list, all as flat indices into the
 /// owning [`CommandTree`]'s node list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawCommandNode {
     /// This node's kind and (for arguments) parser.
     pub kind: NodeKind,
-    /// `FLAG_EXECUTABLE` (`0x04`) — a command ending here can be run with no
-    /// further tokens.
+    /// The executable flag bit (`0x04`) — a command ending here can be run
+    /// with no further tokens.
     pub executable: bool,
-    /// `FLAG_RESTRICTED` (`0x20`) — the server would reject this node for a
-    /// permission-lacking sender; carried for parity, not yet enforced by
-    /// this client.
+    /// The restricted flag bit (`0x20`) — the server would reject this node
+    /// for a permission-lacking sender; carried for parity, not yet
+    /// enforced by this client.
     pub restricted: bool,
-    /// `FLAG_REDIRECT` (`0x08`) target, when present: a same-position jump,
-    /// not a token-consuming child. See [`CommandTree::effective_children`].
+    /// The redirect flag bit (`0x08`) target, when present: a
+    /// same-position jump, not a token-consuming child. See
+    /// [`CommandTree::effective_children`].
     pub redirect: Option<usize>,
     /// This node's own children (token-consuming).
     pub children: Vec<usize>,
@@ -321,12 +320,12 @@ pub enum CommandTreeError {
 
 /// The client-side Brigadier command tree, decoded from `minecraft:commands`.
 ///
-/// Deliberately index-based (matching the wire's own flat `Entry` list plus
+/// Deliberately index-based (matching the wire's own flat entry list plus
 /// a root index) rather than a pointer/`Rc`-linked tree: it is what a
-/// protocol adapter can build directly out of
-/// `ClientboundCommandsPacket::entries` with no intermediate allocation
-/// scheme, and indices make [`Self::effective_children`]'s cycle guard a
-/// plain `HashSet<usize>` instead of anything unsafe.
+/// protocol adapter can build directly out of vanilla's flat
+/// commands-packet entry list with no intermediate allocation scheme, and
+/// indices make [`Self::effective_children`]'s cycle guard a plain
+/// `HashSet<usize>` instead of anything unsafe.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandTree {
     nodes: Vec<RawCommandNode>,
@@ -432,8 +431,7 @@ impl CommandTree {
     }
 }
 
-/// One suggestion in a `minecraft:command_suggestions` response
-/// (`ClientboundCommandSuggestionsPacket.Entry`).
+/// One suggestion in a `minecraft:command_suggestions` response.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandSuggestionEntry {
     /// The literal replacement text for the input range this response
@@ -456,8 +454,7 @@ pub struct CommandSuggestionEntry {
 }
 
 /// Decode target for `minecraft:command_suggestions` (clientbound, id 15):
-/// `ClientboundCommandSuggestionsPacket(int id, int start, int length,
-/// List<Entry> suggestions)`.
+/// a transaction id, a `start` offset, a `length`, and the suggestion list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandSuggestionsResponse {
     /// Transaction id, echoing the `id` sent in the serverbound
