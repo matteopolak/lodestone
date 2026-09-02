@@ -720,9 +720,9 @@ pub fn weak_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8 {
 ///
 /// `ignore_wire` — see [`weak_signal`]'s own doc comment for the full
 /// citation of vanilla's `shouldSignal` trick, and why it must reach here
-/// too, not just the weak-signal path: `RedStoneWireBlock.getDirectSignal`
-/// (`:363-365`) is `shouldSignal ? getSignal(...) : 0`, and `shouldSignal` is
-/// a field on the **one shared `RedStoneWireBlock` instance** every wire in
+/// too, not just the weak-signal path: vanilla's own wire-block direct-signal
+/// getter is `shouldSignal ? getSignal(...) : 0`, and `shouldSignal` is
+/// a field on the **one shared wire-block instance** every wire in
 /// the world resolves to — so a wire recomputing its own target strength
 /// suppresses *every* wire's direct signal for that call's duration, not
 /// only its own. Missing this let a wire sitting on a conductor relay a
@@ -750,11 +750,11 @@ pub fn direct_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8
             weak_signal(state, direction, false)
         }
     } else if is_diode(state) || is_observer(state) {
-        // DiodeBlock.getDirectSignal (`:147-149`) / ObserverBlock.getDirectSignal
-        // (`:105-107`): both delegate straight to `getSignal`.
+        // Vanilla's own diode-block/observer-block direct-signal getters:
+        // both delegate straight to `getSignal`.
         weak_signal(state, direction, false)
     } else if is_lever(state) || is_button(state) {
-        // `LeverBlock.getDirectSignal` / `ButtonBlock.getDirectSignal`:
+        // Vanilla's own lever-block/button-block direct-signal getters:
         // `POWERED && getConnectedDirection(state) == direction ? 15 : 0`.
         //
         // This is the arm that makes a lever on the *side* of a block power a
@@ -767,7 +767,7 @@ pub fn direct_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8
             0
         }
     } else if is_pressure_plate(state) || is_weighted_pressure_plate(state) {
-        // `BasePressurePlateBlock.getDirectSignal`: `direction == UP` only, i.e.
+        // Vanilla's own base-pressure-plate-block direct-signal getter: `direction == UP` only, i.e.
         // only the block a plate is standing on receives strong power from it.
         if direction == Direction::Up {
             pressure_plate_signal(state)
@@ -775,25 +775,25 @@ pub fn direct_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8
             0
         }
     } else if is_tripwire_hook(state) {
-        // `TripWireHookBlock.getDirectSignal`: its own `FACING` only.
+        // Vanilla's own tripwire-hook-block direct-signal getter: its own `FACING` only.
         if powered_property(state) && tripwire_hook_facing(state) == direction {
             15
         } else {
             0
         }
     } else if is_detector_rail(state) {
-        // `DetectorRailBlock.getDirectSignal`: `direction == UP` only.
+        // Vanilla's own detector-rail-block direct-signal getter: `direction == UP` only.
         if powered_property(state) && direction == Direction::Up {
             15
         } else {
             0
         }
     } else {
-        // `TargetBlock`, `DaylightDetectorBlock` and `PoweredBlock` override
+        // The target, daylight-detector and powered blocks override
         // neither `getSignal` nor `getDirectSignal`, so they keep
-        // `BlockBehaviour.getDirectSignal`'s `return 0` and send **no** strong
+        // vanilla's own base block-behaviour direct-signal getter's `return 0` and send **no** strong
         // power at all. A block of redstone reaches a wire across a conductor
-        // only through `SignalGetter.getControlInputSignal`'s own
+        // only through vanilla's own signal-getter control-input-signal routine's own
         // `is(Blocks.REDSTONE_BLOCK)` special case — see
         // [`control_input_signal`].
         0
