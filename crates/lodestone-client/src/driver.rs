@@ -66,7 +66,7 @@ pub(crate) struct Driver<T: Transport> {
     /// `None`).
     chat_tracker: LastSeenTracker,
     /// Latch for the automatic `player_loaded` signal. Vanilla ignores our
-    /// movement until its per-join/-respawn `clientLoadedTimeoutTimer` elapses
+    /// movement until its per-join/-respawn client-loaded timeout timer elapses
     /// unless the client zeroes it early with `player_loaded`. Armed on entering
     /// the world (`Login`) and re-armed on `Death` (the server re-seeds the timer
     /// on respawn); consumed by the first placement `TeleportPlayer`, so the
@@ -918,8 +918,8 @@ impl<T: Transport> Driver<T> {
         // completion and only
         // then enables its cipher, which is what actually sends the
         // encryption-response packet. That ordering is load-bearing, not
-        // stylistic: a hosting server's own `ServerLoginPacketListenerImpl
-        // .handleKey` starts its `hasJoinedServer` check the instant it
+        // stylistic: a hosting server's own login-packet listener's key
+        // handler starts its "has joined server" check the instant it
         // receives that packet, on its own thread, with no wait for the
         // client. Sending our response first (as this used to) races our own
         // HTTP POST to Mojang against the server's HTTP GET to the same
@@ -1015,7 +1015,7 @@ impl<T: Transport> Driver<T> {
                 if self.keep_alive.is_automatic() {
                     auto_actions.push(ClientAction::KeepAliveResponse { id: *id });
                 }
-                // Tick flush (vanilla's `sendChatAcknowledgement`, called on the
+                // Tick flush (vanilla's own chat-acknowledgement send, called on the
                 // client tick). The driver has no client tick of its own, so the
                 // keep-alive — the server's regular heartbeat — is the tick
                 // surrogate. This is deliberately independent of the keep-alive
@@ -1149,7 +1149,7 @@ impl<T: Transport> Driver<T> {
                 // placement teleport that follows zeroes the server's
                 // load-timeout timer so our movement stops being ignored.
                 self.awaiting_player_load = true;
-                // Vanilla's `handleLogin` assigns a **new `ClientLevel`**,
+                // Vanilla's own login handler assigns a **new client-side level**,
                 // unconditionally, so every chunk of whatever came before is
                 // gone by the time the first packet of the new epoch decodes.
                 // This used to record the dimension and clear nothing, reasoning
