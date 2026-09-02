@@ -1,5 +1,5 @@
-//! The two full-screen overlays vanilla draws in `ScreenEffectRenderer.submit`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/ScreenEffectRenderer.java`):
+//! The two full-screen overlays vanilla draws in its screen-effect renderer's
+//! submit function (26.2 decompile):
 //! the underwater tint + scrolling texture, and the looping fire overlay.
 //! Issues #108 and #112.
 //!
@@ -7,11 +7,12 @@
 //!
 //! Both are a textured, alpha-blended, depth-less quad drawn late in the
 //! frame (after the world and the first-person hand, before the HUD) — see
-//! `GameRenderer.java:568-577`, which calls `screenEffectRenderer.submit`
-//! immediately after `renderItemInHand` and before `featureRenderDispatcher`.
+//! vanilla's level-render function, which calls the screen-effect renderer's
+//! submit function
+//! immediately after the held-item render step and before the feature-render dispatch step.
 //! Vanilla's two pipelines (`BLOCK_SCREEN_EFFECT`, `FIRE_SCREEN_EFFECT`) are
 //! textually identical builds of the same `GUI_TEXTURED_SNIPPET` base
-//! (`RenderPipelines.java:713-718`) — position+uv+colour, `TRANSLUCENT` blend,
+//! — position+uv+colour, `TRANSLUCENT` blend,
 //! no depth attachment — so one pipeline here draws both, parameterised only
 //! by which texture bind group is active.
 //!
@@ -35,8 +36,8 @@
 //!
 //! **The fire overlay is vanilla's real two-quad geometry, flattened to NDC —
 //! not a tiled strip (issue #420, fixing a regression from #112's original
-//! placement).** `ScreenEffectRenderer.submitFire`/`buildFireQuad`
-//! (`ScreenEffectRenderer.java:168-184`) draws **exactly two** 1×1 unit quads
+//! placement).** Vanilla's fire-overlay submit and quad-building functions
+//! draw **exactly two** 1×1 unit quads
 //! at local `z = -0.5`, each `translate(±0.24, -0.3, 0.0)` then
 //! `rotateY(∓π/18)` (10°) — never a repeated/tiled sprite. A previous pass
 //! here deliberately tiled four mirrored copies across a bottom strip instead
@@ -52,11 +53,12 @@
 //! fills NDC width — the one property the old tiled strip had
 //! (`fire_quads_span_the_full_ndc_width_with_no_gaps`) that this fix
 //! preserves, now met by two *overlapping* quads instead of four disjoint
-//! tiles. UV is vanilla's own "mirrored corner mapping": `buildSpriteQuad`
-//! passes `buildQuad` the sprite's `(u1, v1, u0, v0)` — swapped, not
+//! tiles. UV is vanilla's own "mirrored corner mapping": its sprite-quad
+//! builder
+//! passes its generic quad builder the sprite's `(u1, v1, u0, v0)` — swapped, not
 //! identity — so local `x = -0.5` samples the frame's far U edge and
 //! `x = +0.5` samples its near edge, identically for both quads (there is no
-//! per-quad direction parameter in `buildFireQuad`). The **texture, its
+//! per-quad direction parameter in vanilla's fire-quad builder). The **texture, its
 //! 32-frame animation, the tint maths and the alpha blend** were already
 //! real and are unchanged by this fix.
 //!
@@ -64,7 +66,7 @@
 //!
 //! `submitWater` multiplies the `underwater.png` texel by a **grayscale**
 //! colour (`ARGB.colorFromFloat(0.1F, brightness, brightness, brightness)`,
-//! `ScreenEffectRenderer.java:159`) at alpha `0.1` — not blue; whatever blue
+//! vanilla's own screen-effect renderer) at alpha `0.1` — not blue; whatever blue
 //! cast the overlay has comes entirely from the texture's own pixels. This is
 //! wholly independent of the dimension fog this codebase already models
 //! (`crate::fog`): fog fades *world geometry* into a colour as it recedes,
@@ -111,7 +113,7 @@ fn vertex(position: [f32; 2], uv: [f32; 2], color: [f32; 4]) -> ScreenOverlayVer
 }
 
 /// The underwater overlay's per-fragment tint alpha — vanilla's constant
-/// `0.1F` in `ScreenEffectRenderer.submitWater`.
+/// `0.1F` in its screen-effect renderer's water-submit function.
 pub const UNDERWATER_TINT_ALPHA: f32 = 0.1;
 
 /// How many times the underwater texture tiles across the quad — vanilla's
@@ -131,7 +133,7 @@ pub const UNDERWATER_TILE_COUNT: f32 = 4.0;
 ///
 /// `sky_darken` is passed as `1.0`: this pass has no clock, and the overlay is
 /// drawn over an already-darkened scene. Threading the real factor in is the
-/// remaining gap, and it is the same one `ScreenEffectRenderer` has for fog.
+/// remaining gap, and it is the same one vanilla's screen-effect renderer has for fog.
 ///
 /// `packed` is `sky << 4 | block`, the same encoding
 /// [`crate::entity`]'s light sampling already uses.
@@ -144,7 +146,7 @@ pub fn underwater_brightness(packed_light: u8) -> f32 {
 /// are the camera's look direction (matching vanilla's `getYRot()`/`getXRot()`
 /// convention: yaw about `+Y`, `0` facing `+Z`); the UV scroll formula and
 /// vertex/UV pairing are transcribed unchanged from
-/// `ScreenEffectRenderer.submitWater`/`buildQuad`.
+/// vanilla's water-submit and generic quad-building functions.
 #[must_use]
 pub fn underwater_overlay_quad(
     yaw_degrees: f32,
@@ -182,11 +184,11 @@ pub fn underwater_overlay_triangles(
 
 /// The fire overlay's translucency — vanilla's vertex colour constant
 /// `-436207617` (`ARGB` `(229, 255, 255, 255)`, i.e. white at alpha
-/// `229/255`) in `ScreenEffectRenderer.submitFire`/`buildFireQuad`.
+/// `229/255`) in vanilla's fire-overlay submit and quad-building functions.
 pub const FIRE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 229.0 / 255.0];
 
 /// Vanilla's real fire-overlay transform constants
-/// (`ScreenEffectRenderer.submitFire`, `ScreenEffectRenderer.java:168-180`):
+/// (its fire-overlay submit function):
 /// `poseStack.translate(±FIRE_QUAD_OFFSET_X, FIRE_QUAD_OFFSET_Y, 0.0F);
 /// poseStack.rotateY(∓FIRE_QUAD_TILT_RADIANS)` — one call of each sign, one
 /// quad per call. Transcribed literally rather than simplified.
@@ -209,8 +211,8 @@ pub const FIRE_TILE_COUNT: u32 = 4;
 #[deprecated(note = "the fire overlay no longer uses a fixed strip cap; use fire_overlay_vertical_extent")]
 pub const FIRE_STRIP_TOP: f32 = -0.3;
 
-/// `buildSpriteQuad`'s own local unit-square half-extent and fixed `z`
-/// (`ScreenEffectRenderer.java:184`: `buildSpriteQuad(..., -0.5F, -0.5F,
+/// Vanilla's sprite-quad builder's own local unit-square half-extent and fixed `z`
+/// (its fire-overlay submit function: `buildSpriteQuad(..., -0.5F, -0.5F,
 /// 0.5F, 0.5F, -0.5F, ...)`).
 const FIRE_QUAD_HALF_EXTENT: f32 = 0.5;
 const FIRE_QUAD_LOCAL_Z: f32 = -0.5;
@@ -253,7 +255,7 @@ pub fn fire_overlay_vertical_extent() -> (f32, f32) {
 /// One of the fire overlay's two real quads, flattened into NDC.
 ///
 /// `tilt`/`offset_x` are the quad's own signed `rotateY`/X-translate
-/// (`buildFireQuad` is called once with `(FIRE_QUAD_OFFSET_X,
+/// (vanilla's fire-quad builder is called once with `(FIRE_QUAD_OFFSET_X,
 /// -FIRE_QUAD_TILT_RADIANS)` and once with `(-FIRE_QUAD_OFFSET_X,
 /// FIRE_QUAD_TILT_RADIANS)`). Vanilla's pose-stack applies `rotateY` to the
 /// vertex first, then `translate` (`Matrix4f.translate` then `.rotateY`
@@ -264,7 +266,7 @@ pub fn fire_overlay_vertical_extent() -> (f32, f32) {
 /// for why this whole pass has no camera/projection uniform to do better).
 ///
 /// `mirror_u`/`v0`/`v1` are unchanged from before: vanilla's own "mirrored
-/// corner mapping" (`buildSpriteQuad` passes `buildQuad` the sprite's
+/// corner mapping" (its sprite-quad builder passes its generic quad builder the sprite's
 /// `(u1, v1, u0, v0)`, swapped) applies identically to both quads, so this
 /// takes no direction flag — a caller always passes the same mirroring.
 fn fire_quad(offset_x: f32, tilt: f32, v0: f32, v1: f32) -> [ScreenOverlayVertex; 4] {
@@ -310,7 +312,7 @@ pub fn fire_overlay_triangles(frame_index: u32, frame_count: u32) -> [ScreenOver
 }
 
 /// The pumpkin overlay's vertex tint — opaque white, i.e. no multiply at all
-/// (`ARGB.white(1.0F)` in `Hud.extractTextureOverlay`, called with
+/// (`ARGB.white(1.0F)` in vanilla's HUD texture-overlay extraction function, called with
 /// `alpha = 1.0F` for every equippable camera overlay). The vignette shape
 /// itself comes entirely from `pumpkinblur.png`'s own alpha channel; unlike
 /// the underwater/fire overlays this pass contributes no colour multiply of
@@ -319,7 +321,7 @@ pub const PUMPKIN_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// Builds the pumpkin overlay's one static, full-screen NDC quad. Unlike the
 /// underwater overlay this does not scroll with look direction and does not
-/// tile — vanilla's `extractTextureOverlay` blits the texture once at
+/// tile — vanilla's HUD texture-overlay extraction function blits the texture once at
 /// `(0, 0, guiWidth, guiHeight)` with UV `(0,0)-(1,1)`, no animation, no
 /// per-frame recompute. Built once and never re-uploaded past construction.
 #[must_use]
@@ -334,8 +336,8 @@ pub fn pumpkin_overlay_triangles() -> [ScreenOverlayVertex; 6] {
 }
 
 // ---------------------------------------------------------------------------
-// Freeze overlay (issue #139): `Hud.extractCameraOverlays`'s
-// `player.getTicksFrozen() > 0` branch, `Hud.java:293-295`:
+// Freeze overlay (issue #139): vanilla's HUD camera-overlays extraction function's
+// `player.getTicksFrozen() > 0` branch:
 // `extractTextureOverlay(POWDER_SNOW_OUTLINE_LOCATION, player.getPercentFrozen())`.
 // The freeze *mechanic* (`frozen_ticks`/`percent_frozen`) is
 // `lodestone_physics::player::PlayerState`'s (issue #212); this is only the
@@ -346,7 +348,7 @@ pub fn pumpkin_overlay_triangles() -> [ScreenOverlayVertex; 6] {
 /// [`pumpkin_overlay_triangles`] — a static, untiled, unscrolled blit — but
 /// with `percent` (vanilla's `Entity.getPercentFrozen()`, already `0.0..=1.0`
 /// by construction, see `PlayerState::percent_frozen`) as the vertex alpha
-/// instead of pumpkin's fixed `1.0`: `extractTextureOverlay`'s `alpha`
+/// instead of pumpkin's fixed `1.0`: vanilla's HUD texture-overlay extraction function's `alpha`
 /// parameter is `ARGB.white(alpha)`, i.e. an opaque-white texel multiplied by
 /// a *variable* alpha, not a fixed one. Clamped defensively even though
 /// `percent_frozen` is already bounded, so a future caller passing a raw
@@ -365,18 +367,18 @@ pub fn freeze_overlay_triangles(percent: f32) -> [ScreenOverlayVertex; 6] {
 }
 
 // ---------------------------------------------------------------------------
-// Spyglass overlay (issue #154): `Hud.extractSpyglassOverlay`,
-// `Hud.java:1033-1048`. Not the generic `camera_overlay` component path
+// Spyglass overlay (issue #154): vanilla's HUD spyglass-overlay extraction
+// function. Not the generic `camera_overlay` component path
 // pumpkin uses — `player.isScoping()` gates a *dedicated* method with its own
 // geometry (a centred lens + four solid-black letterbox bars), checked
 // against the jar rather than assumed to be a two-line table addition.
 // ---------------------------------------------------------------------------
 
-/// Vanilla's settled spyglass zoom scale. `Hud.scopeScale` lerps toward this
+/// Vanilla's settled spyglass zoom scale. Vanilla's own scope-scale field lerps toward this
 /// constant every frame while scoping
 /// (`Mth.lerp(0.5F * gameTimeDeltaTicks, this.scopeScale, 1.125F)`,
-/// `Hud.java:276`) and snaps back to `0.5F` the instant scoping stops
-/// (`Hud.java:281`, read on the *next* non-scoping frame — irrelevant here
+/// in its HUD update logic) and snaps back to `0.5F` the instant scoping stops
+/// (read on the *next* non-scoping frame — irrelevant here
 /// since this pass only draws while scoping). This port uses the settled
 /// value directly rather than modelling the few-frame ease-in ramp — a
 /// deliberate simplification in the spirit of the fire overlay's placement
@@ -386,7 +388,7 @@ pub const SPYGLASS_SCALE: f32 = 1.125;
 
 /// The spyglass lens's half-extent in NDC on each axis, for a given screen
 /// `aspect` (width/height). Derived algebraically from
-/// `Hud.extractSpyglassOverlay`'s `srcWidth = srcHeight =
+/// vanilla's HUD spyglass-overlay extraction function's `srcWidth = srcHeight =
 /// min(guiWidth, guiHeight)` and
 /// `ratio = min(guiWidth/srcWidth, guiHeight/srcHeight) * scale`: one of the
 /// two `Math.min` arms is always exactly `1.0` (whichever dimension *is* the
@@ -411,7 +413,7 @@ pub fn spyglass_lens_half_extent(aspect: f32) -> (f32, f32) {
 /// The spyglass lens's textured quad — `spyglass_scope.png`, centred, sized
 /// by [`spyglass_lens_half_extent`]. Opaque white tint: vanilla's
 /// `graphics.blit(RenderPipelines.GUI_TEXTURED, SPYGLASS_SCOPE_LOCATION, ...)`
-/// call (`Hud.java:1043`) is the 9-argument overload with no colour
+/// call (vanilla's HUD spyglass-overlay extraction function) is the 9-argument overload with no colour
 /// parameter, which defaults to full white at full alpha, the same as
 /// [`PUMPKIN_TINT`].
 #[must_use]
@@ -427,7 +429,8 @@ pub fn spyglass_lens_triangles(aspect: f32) -> [ScreenOverlayVertex; 6] {
 }
 
 /// Opaque black — vanilla's four `graphics.fill(RenderPipelines.GUI, ...,
-/// -16777216)` calls around the lens (`Hud.java:1044-1047`; `-16777216` is
+/// -16777216)` calls around the lens (same HUD spyglass-overlay extraction
+/// function; `-16777216` is
 /// ARGB opaque black).
 pub const LETTERBOX_TINT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
@@ -477,7 +480,7 @@ pub fn spyglass_letterbox_triangles(aspect: f32) -> [ScreenOverlayVertex; 24] {
 
 // ---------------------------------------------------------------------------
 // Confusion overlay (issue #144, the nausea screen-space half):
-// `Hud.extractConfusionOverlay`, `Hud.java:1109-1132`. The *other* half of
+// vanilla's HUD confusion-overlay extraction function. The *other* half of
 // #144 — the world-projection "spinning" warp vanilla applies alongside this
 // — is `crate::camera::nausea_portal_warp`, not geometry, so it lives in
 // `camera.rs` rather than here; see that function's doc for why.
@@ -485,10 +488,10 @@ pub fn spyglass_letterbox_triangles(aspect: f32) -> [ScreenOverlayVertex; 24] {
 
 /// Builds the confusion overlay's quad for a given `strength` (vanilla's
 /// `overlayStrength = nauseaIntensity * (1 - screenEffectScale)`,
-/// `Hud.java:305`, already clamped to `0.0..=1.0` by construction there —
+/// already clamped to `0.0..=1.0` by construction there —
 /// clamped again here defensively). The quad is scaled about the screen
 /// centre by `size = Mth.lerp(strength, 2.0F, 1.0F) = 2.0 - strength`
-/// (`Hud.java:1113`, transcribed with vanilla's own literals rather than
+/// (same confusion-overlay extraction function, transcribed with vanilla's own literals rather than
 /// simplified, since `2.0 - strength` reads as unrelated to the source line
 /// it came from) — always `>= 1.0` for `strength` in its valid `(0, 1]`
 /// range, so the quad always at least covers the full NDC screen; the
@@ -498,7 +501,7 @@ pub fn spyglass_letterbox_triangles(aspect: f32) -> [ScreenOverlayVertex; 24] {
 /// only to position, never to the blit's own UV rectangle.
 ///
 /// Tint is vanilla's `red = 0.2 * strength, green = 0.4 * strength, blue =
-/// 0.2 * strength` (`Hud.java:1117-1119`) at alpha `1.0`
+/// 0.2 * strength` (same confusion-overlay extraction function) at alpha `1.0`
 /// (`ARGB.colorFromFloat(1.0F, red, green, blue)`) — a green-biased tint,
 /// unlike every other overlay in this pass, which is why it is not folded
 /// into a shared "tint from strength" helper with anything else here.
@@ -518,14 +521,14 @@ pub fn confusion_overlay_triangles(strength: f32) -> [ScreenOverlayVertex; 6] {
 
 // ---------------------------------------------------------------------------
 // Portal overlay (issue #149, the screen-space half):
-// `Hud.extractPortalOverlay`, `Hud.java:1097-1107`. The shared "spinning"
+// vanilla's HUD portal-overlay extraction function. The shared "spinning"
 // world-projection warp is `crate::camera::nausea_portal_warp` — see the
 // confusion overlay's module comment above; vanilla drives both this overlay
 // and that warp from the same `Entity.portalEffectIntensity`, but only this
 // half is geometry.
 // ---------------------------------------------------------------------------
 
-/// Vanilla's portal-overlay alpha curve (`Hud.java:1097-1102`):
+/// Vanilla's portal-overlay alpha curve (its HUD portal-overlay extraction function):
 /// `if (alpha < 1.0F) { alpha *= alpha; alpha *= alpha; alpha = alpha * 0.8F +
 /// 0.2F; }` — i.e. `alpha^4 * 0.8 + 0.2` below `1.0`, identity at `1.0`.
 /// `intensity` is vanilla's `portalEffectIntensity`, clamped defensively to
@@ -1126,7 +1129,7 @@ impl ScreenEffectRenderer {
     /// for the reasons on [`Self::draw_underwater`]. `percent` is vanilla's
     /// `Entity.getPercentFrozen()` (see [`freeze_overlay_triangles`]) — the
     /// caller is expected to have already checked `percent > 0.0`
-    /// (`Hud.java`'s own `getTicksFrozen() > 0` guard), but this draws
+    /// (vanilla's own `getTicksFrozen() > 0` guard), but this draws
     /// unconditionally like every other method here; gating is
     /// [`super::ScreenEffects`]'s job, one layer up.
     pub fn draw_freeze(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, percent: f32) {
@@ -1184,7 +1187,7 @@ impl ScreenEffectRenderer {
         });
         pass.set_pipeline(&self.pipeline);
         // Bars first, then the lens on top — vanilla's own call order in
-        // `extractSpyglassOverlay` (`Hud.java:1043-1047`) draws the lens
+        // its HUD spyglass-overlay extraction function draws the lens
         // first and the four fills after, but since the two regions are
         // disjoint by construction (see `spyglass_letterbox_triangles`'s
         // doc), draw order between them cannot change the result; bars
@@ -1201,7 +1204,7 @@ impl ScreenEffectRenderer {
     /// `Load` render pass. `strength` is vanilla's `overlayStrength` (see
     /// [`confusion_overlay_triangles`]) — the caller is expected to have
     /// already applied the mutual-exclusion-with-portal and
-    /// `screenEffectScale < 1.0` checks (`Hud.java:300-307`), matching every
+    /// `screenEffectScale < 1.0` checks (vanilla's HUD update logic), matching every
     /// other `draw_*` method's "gating happens one layer up" convention.
     pub fn draw_confusion(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, strength: f32) {
         let verts = confusion_overlay_triangles(strength);
@@ -1268,7 +1271,7 @@ mod tests {
     ///
     /// `get_brightness(0) = 0`, but a fully dark cell is **not** pure black:
     /// vanilla seeds the accumulator with `AmbientColor`, which the overworld sets
-    /// to `0x0A0A0A` (`DimensionTypes.java:36`), giving `0.0935` after the
+    /// to `0x0A0A0A` (vanilla's dimension-type defaults), giving `0.0935` after the
     /// `notGamma` mix. This test previously asserted `0.0` on the strength of the
     /// claim that "vanilla has no floor" — the retired `0.2` floor was indeed
     /// invented, but the correct replacement was a *smaller* floor, not none.
@@ -1506,7 +1509,7 @@ mod tests {
 
     #[test]
     fn pumpkin_overlay_is_untinted_and_opaque() {
-        // `Hud.extractTextureOverlay` is called with `alpha = 1.0F` and no
+        // Vanilla's HUD texture-overlay extraction function is called with `alpha = 1.0F` and no
         // colour multiply for an equippable camera overlay -- the vignette
         // shape comes entirely from the texture's own alpha channel.
         for v in pumpkin_overlay_triangles() {
@@ -1527,10 +1530,10 @@ mod tests {
         assert_eq!(vs.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
     }
 
-    /// Vanilla's own "mirrored corner mapping" (`buildSpriteQuad` passes
-    /// `buildQuad` the sprite's `(u1, v1, u0, v0)`, swapped —
-    /// `ScreenEffectRenderer.java:184,199`) applies identically to *both*
-    /// quads — `buildFireQuad` takes no direction parameter and is called
+    /// Vanilla's own "mirrored corner mapping" (its sprite-quad builder passes
+    /// its generic quad builder the sprite's `(u1, v1, u0, v0)`, swapped —
+    /// its fire-overlay submit function) applies identically to *both*
+    /// quads — vanilla's fire-quad builder takes no direction parameter and is called
     /// the same way for each sign of `translate`/`rotateY`. This is the
     /// opposite of the old design, where mirroring alternated *between*
     /// tiles purely so a repeating strip did not look copy-pasted; there is
@@ -1652,7 +1655,7 @@ mod tests {
         let strong_extent = strong.iter().map(|v| v.position[0].abs()).fold(0.0_f32, f32::max);
         assert!(
             strong_extent < weak_extent,
-            "higher nausea strength must shrink `size` toward 1.0 (Hud.java:1113): \
+            "higher nausea strength must shrink `size` toward 1.0 (vanilla's confusion-overlay extraction function): \
              weak={weak_extent}, strong={strong_extent}"
         );
     }
@@ -1679,7 +1682,7 @@ mod tests {
 
     #[test]
     fn portal_overlay_alpha_follows_vanillas_quartic_floor_curve() {
-        // Hud.java:1097-1102: alpha = alpha^4 * 0.8 + 0.2, below 1.0.
+        // Vanilla's HUD portal-overlay extraction function: alpha = alpha^4 * 0.8 + 0.2, below 1.0.
         let intensity = 0.5_f32;
         let expected = intensity.powi(4) * 0.8 + 0.2;
         assert!((expected - 0.25).abs() < 1e-6, "hypothesis drifted: {expected}");

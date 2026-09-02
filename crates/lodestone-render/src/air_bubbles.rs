@@ -1,6 +1,6 @@
 //! Air-supply bubble row layout — the pure half of vanilla's
-//! `Hud.extractAirBubbles`/`getCurrentAirSupplyBubble`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`, behavioural
+//! HUD air-bubble extraction and per-bubble-sprite selection functions
+//! (26.2 decompile, behavioural
 //! reference only).
 //!
 //! # Why this exists as its own module

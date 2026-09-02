@@ -317,12 +317,13 @@ const fn step(coord: SectionCoord, face: Face) -> SectionCoord {
 #[derive(Debug, Clone, Copy)]
 struct WalkNode {
     /// Every face this section has been reached through, **accumulated** across
-    /// all paths that reached it before it was dequeued. This is vanilla's
-    /// `Node.sourceDirections` and the reason it is a set rather than one face is
+    /// all paths that reached it before it was dequeued. This is vanilla's own
+    /// walk node's accumulated source-directions field, and the reason it is a set rather than one face is
     /// recorded on [`walk_visible`].
     source_faces: [bool; 6],
     /// Exits still permitted: travelling along an axis forbids ever reversing
-    /// along it, so the BFS only expands outward (vanilla's `Node.directions`).
+    /// along it, so the BFS only expands outward (vanilla's walk node's own
+    /// permitted-directions field).
     exits: [bool; 6],
     /// The camera's own section passes the connectivity gate unconditionally —
     /// you can see out of the section you are standing in in every direction,
@@ -347,17 +348,12 @@ struct WalkNode {
 /// or C is "first" depends on `Face::ALL`'s order and on the camera's position,
 /// so the missing geometry appears and vanishes as you turn.
 ///
-/// Vanilla does not do that. `SectionOcclusionGraph.addNeighbors`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/SectionOcclusionGraph.java:342-344`)
-/// merges the direction into an already-created node —
+/// Vanilla does not do that. Its section-occlusion graph's neighbour-linking
+/// step
+/// merges the direction into an already-created node when one already exists
+/// for that section, rather than replacing it —
 ///
-/// ```java
-/// } else if (existingNode != null) {
-///     existingNode.addSourceDirection(direction);
-/// }
-/// ```
-///
-/// — and its visibility test (`:288-301`) passes a neighbour if **any**
+/// and its visibility test passes a neighbour if **any**
 /// accumulated source face connects to the exit. This function does the same:
 /// `source_faces` is a 6-bit set, merged on re-reach, and read at *dequeue* time
 /// so every path that arrived first has already contributed.
@@ -398,10 +394,10 @@ pub fn walk_visible(
 /// and costs exactly what it cost before.
 ///
 /// Treating an absent in-bounds coord as air is not a workaround, it is vanilla's
-/// own model: `ViewArea` holds a `SectionRenderDispatcher.RenderSection` for
+/// own model: vanilla's view-area type holds a render-section handle for
 /// *every* section in the render-distance cylinder regardless of content, and
-/// `SectionOcclusionGraph` walks those. An all-air section there has an empty
-/// `VisibilitySet`, which is `all()` here.
+/// its section-occlusion graph walks those. An all-air section there has an empty
+/// visibility set, which is `all()` here.
 ///
 /// `in_bounds` **must be finite** — this walk has no node cap and its only
 /// termination condition is running out of in-bounds coords. The production

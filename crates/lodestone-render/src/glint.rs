@@ -8,10 +8,8 @@
 //! and the pipeline; the shader is
 //! [`shaders/glint.wgsl`](../src/shaders/glint.wgsl).
 //!
-//! Ported from 26.2's `TextureTransform.setupGlintTexturing`
-//! (`TextureTransform.java:31-38`), `RenderPipelines.GLINT`
-//! (`RenderPipelines.java:419-433`) and `ItemStack.hasFoil`
-//! (`ItemStack.java:968-971`).
+//! Ported from 26.2's glint-texture-matrix setup function, its glint render
+//! pipeline declaration, and its item-stack foil predicate.
 //!
 //! # It is not a texture swap, and it is not one draw
 //!
@@ -20,7 +18,7 @@
 //! **"The glint is drawn twice with two transforms."** It was, historically. In
 //! 26.2 it is a *single* draw whose one translation uses **two different periods
 //! on the two UV axes** — `U` scrolls negative on a 110000 clock and `V` positive
-//! on a 30000 clock (`TextureTransform.java:33-35`). Both components share one
+//! on a 30000 clock. Both components share one
 //! rotation and one scale. Drawing it twice doubles the brightness.
 //!
 //! **"Armour's glint is rotated differently."** It was, historically (`-50°`). In
@@ -29,12 +27,12 @@
 //!
 //! # Depth: the one comparison that does not flip
 //!
-//! Vanilla's glint pipeline is `DepthStencilState(CompareOp.EQUAL, false)` with
+//! Vanilla's glint pipeline is a depth-equal comparison with no depth write, with
 //! **zero** depth bias, which works only because the glint pass rasterises
 //! byte-identical clip positions to the pass beneath it. Our depth is `[0,1]`
 //! reversed-Z like vanilla's, so no ported depth comparison flips sign at all —
 //! and equality would be orientation-independent even if one did, so
-//! `CompareOp.EQUAL` ports across unchanged under any convention. See
+//! vanilla's depth-equal comparison ports across unchanged under any convention. See
 //! [`DEPTH_COMPARE`].
 //!
 //! # Bind groups: 2 of 4, so there is room
@@ -54,15 +52,15 @@ use crate::models::ModelVertex;
 
 /// Vanilla's glint textures. Both are 128x128 and both are sampled `REPEAT` /
 /// `LINEAR` with no mipmaps — their `.mcmeta` is `{"texture":{"blur":true}}` with
-/// no `clamp`, which `ReloadableTexture.java:24-29` turns into exactly that.
+/// no `clamp`, which vanilla's reloadable-texture loading turns into exactly that.
 pub mod textures {
-    /// `ItemFeatureRenderer.ENCHANTED_GLINT_ITEM` (`ItemFeatureRenderer.java:23`).
+    /// Vanilla's item-enchantment-glint texture location constant.
     /// Used by the `glint`, `glint_translucent` and `entity_glint` render types,
     /// i.e. every item form: GUI icon, dropped, held, and the trident/shield
     /// special models. 8-bit RGB with **no alpha channel**.
     pub const ITEM: &str = "minecraft:misc/enchanted_glint_item";
 
-    /// `ItemFeatureRenderer.ENCHANTED_GLINT_ARMOR` (`ItemFeatureRenderer.java:22`).
+    /// Vanilla's armour-enchantment-glint texture location constant.
     /// Used only by `armor_entity_glint`, for worn equipment. Palettised 8-bit.
     ///
     /// There is **no** `enchanted_glint_entity.png` in 26.2; the entity path
@@ -70,16 +68,16 @@ pub mod textures {
     pub const ARMOUR: &str = "minecraft:misc/enchanted_glint_armor";
 }
 
-/// `TextureTransform.MAX_ENCHANTMENT_GLINT_SPEED_MILLIS`
-/// (`TextureTransform.java:9`). Dimensionless, applied to a millisecond count.
+/// Vanilla's max-enchantment-glint-speed-millis constant.
+/// Dimensionless, applied to a millisecond count.
 ///
 /// Note the constant is declared in the jar but **not referenced** by
-/// `setupGlintTexturing`, which hard-codes the literal `8.0` at
-/// `TextureTransform.java:32`. Same value; recorded here so a future divergence
+/// vanilla's glint-texture-matrix setup function, which hard-codes the literal
+/// `8.0` directly. Same value; recorded here so a future divergence
 /// in the jar is visible rather than surprising.
 pub const SPEED_MILLIS: f64 = 8.0;
 
-/// The default of vanilla's `glintSpeed` option (`Options.java:858-865`, a
+/// The default of vanilla's `glintSpeed` option (a
 /// `UnitDouble` in `0.0..=1.0`).
 ///
 /// The effective multiplier at defaults is therefore `8.0 * 0.5 = 4.0`, which
@@ -88,8 +86,8 @@ pub const SPEED_MILLIS: f64 = 8.0;
 /// fast as the game and nothing about the frame looks wrong in a screenshot.
 pub const DEFAULT_SPEED: f64 = 0.5;
 
-/// The default of vanilla's `glintStrength` option (`Options.java:867-874`),
-/// reaching the shader as the `GlintAlpha` global (`GameRenderer.java:412`).
+/// The default of vanilla's `glintStrength` option,
+/// reaching the shader as the `GlintAlpha` global.
 ///
 /// At `0.75` this is a visible 25% reduction in the glint's RGB, so treating it
 /// as `1.0` is a *magnitude* error of exactly the kind that shipped a hurt
@@ -128,18 +126,19 @@ pub fn clamp_strength(strength: f32) -> f32 {
     }
 }
 
-/// The `U`-axis wrap period, in scaled milliseconds (`TextureTransform.java:33`).
+/// The `U`-axis wrap period, in scaled milliseconds (vanilla's glint-texture-matrix
+/// setup function).
 pub const U_PERIOD: i64 = 110_000;
 
-/// The `V`-axis wrap period, in scaled milliseconds (`TextureTransform.java:34`).
+/// The `V`-axis wrap period, in scaled milliseconds (same setup function).
 pub const V_PERIOD: i64 = 30_000;
 
 /// The rotation applied to the glint UV, in degrees: `(float)(Math.PI / 18)` =
-/// exactly `10°` (`TextureTransform.java:36`). One angle for every pass.
+/// exactly `10°` (same setup function). One angle for every pass.
 pub const ROTATION_DEGREES: f32 = 10.0;
 
-/// The depth comparison for the glint pass: `CompareOp.EQUAL`
-/// (`RenderPipelines.java:431`), unflipped — see this module's doc for why this
+/// The depth comparison for the glint pass: a depth-equal comparison
+/// (vanilla's glint render-pipeline declaration), unflipped — see this module's doc for why this
 /// is the one ported comparison that keeps its sense.
 pub const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::Equal;
 
@@ -148,22 +147,22 @@ pub const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::Equal;
 /// depth nudge); the texture, rotation and scroll periods are shared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scale {
-    /// `GLINT_TEXTURING`, scale `8.0` (`TextureTransform.java:13`). The `glint`
+    /// Vanilla's item glint-texturing scale, `8.0`. The `glint`
     /// and `glint_translucent` render types: **every item form** — GUI slot icon,
     /// dropped item, held item.
     Item,
-    /// `ENTITY_GLINT_TEXTURING`, scale `0.5` (`TextureTransform.java:14`). The
+    /// Vanilla's entity glint-texturing scale, `0.5`. The
     /// `entity_glint` render type: the trident and shield special models only.
     Entity,
-    /// `ARMOR_ENTITY_GLINT_TEXTURING`, scale `0.16`
-    /// (`TextureTransform.java:15`). The `armor_entity_glint` render type: worn
+    /// Vanilla's armour-entity glint-texturing scale, `0.16`.
+    /// The `armor_entity_glint` render type: worn
     /// equipment. Uses [`textures::ARMOUR`] rather than [`textures::ITEM`], and
     /// additionally carries [`ARMOUR_VIEW_OFFSET_SCALE`].
     Armour,
 }
 
 impl Scale {
-    /// The scalar passed to `setupGlintTexturing`.
+    /// The scalar passed to vanilla's glint-texture-matrix setup function.
     #[must_use]
     pub const fn factor(self) -> f32 {
         match self {
@@ -183,9 +182,8 @@ impl Scale {
     }
 }
 
-/// `armor_entity_glint`'s `LayeringTransform.VIEW_OFFSET_Z_LAYERING` under a
-/// perspective projection: a uniform model-view scale by `1 - 1/4096`
-/// (`LayeringTransform.java:11-13`, `ProjectionType.java:6`).
+/// `armor_entity_glint`'s view-offset-Z layering constant under a
+/// perspective projection: a uniform model-view scale by `1 - 1/4096`.
 ///
 /// Armour is the only glint type with a layering transform, and it coexists with
 /// depth-`EQUAL`, so worn equipment's glint is deliberately nudged toward the
@@ -193,12 +191,12 @@ impl Scale {
 /// in Z ([`ARMOUR_VIEW_OFFSET_Z_ORTHO`]).
 pub const ARMOUR_VIEW_OFFSET_SCALE: f32 = 1.0 - 1.0 / 4096.0;
 
-/// The orthographic form of [`ARMOUR_VIEW_OFFSET_SCALE`]: `+1/512` in Z
-/// (`ProjectionType.java:7`).
+/// The orthographic form of [`ARMOUR_VIEW_OFFSET_SCALE`]: `+1/512` in Z.
 pub const ARMOUR_VIEW_OFFSET_Z_ORTHO: f32 = 1.0 / 512.0;
 
 /// The scaled-millisecond clock the two UV offsets are taken modulo:
-/// `(long)(Util.getMillis() * glintSpeed * 8.0)` (`TextureTransform.java:32`).
+/// `(long)(Util.getMillis() * glintSpeed * 8.0)` (vanilla's glint-texture-matrix
+/// setup function).
 ///
 /// The `(long)` cast is **truncation, and it is observable**: the offsets step in
 /// discrete units of `1/110000` and `1/30000` rather than moving continuously, so
@@ -213,7 +211,7 @@ pub fn glint_clock(millis: f64, speed: f64) -> i64 {
 /// The two UV offsets as `(u_off, v_off)`, each in `[0, 1)`.
 ///
 /// `u_off = (m % 110000) / 110000` and `v_off = (m % 30000) / 30000`
-/// (`TextureTransform.java:33-34`). The sign is **not** applied here — `U` is
+/// (same setup function). The sign is **not** applied here — `U` is
 /// negated by [`glint_texture_matrix`], matching
 /// `translation(-layerOffset0, layerOffset1, 0)`.
 #[must_use]
@@ -229,13 +227,14 @@ pub fn glint_offsets(clock: i64) -> (f32, f32) {
 /// The edge, in texels, of the vanilla atlas every `setupGlintTexturing` scale
 /// was chosen against.
 ///
-/// Vanilla's glint samples the *atlas* UV (`glint.vsh`'s `UV0`, and
-/// `ItemFeatureRenderer.prepareFoilSubmit` hands the foil buffer the very same
+/// Vanilla's glint samples the *atlas* UV (its glint shader's `UV0`, and
+/// vanilla's foil-submit function hands the foil buffer the very same
 /// `BakedQuad`), so a scale expressed in atlas-normalised units carries vanilla's
 /// atlas size inside it. That size is not documented anywhere in the jar as a
-/// number — it is whatever `Stitcher` produces — so this constant was obtained by
-/// porting `Stitcher` (its `smallestFittingMinTexel` slot rounding, its
-/// `-height, -width, name` sort, its `expand`/`Region.add` shelf split) and
+/// number — it is whatever vanilla's texture-atlas stitcher produces — so this
+/// constant was obtained by
+/// porting that stitcher (its smallest-fitting-min-texel slot rounding, its
+/// `-height, -width, name` sort, its expand/region-add shelf split) and
 /// running it over vanilla's own `atlases/items.json` and `atlases/blocks.json`
 /// sprite lists at the default mip level 4 with anisotropy off, i.e. padding
 /// `1 << 4 = 16`. **Both come out 2048x2048** — items from 860 sprites, blocks
@@ -274,15 +273,15 @@ pub fn atlas_correction(atlas_px: [u32; 2]) -> glam::Vec2 {
 ///
 /// Vanilla builds it as
 /// `new Matrix4f().translation(...).rotateZ(...).scale(...)`
-/// (`TextureTransform.java:35-37`). JOML's `translation` **sets** the matrix while
+/// in its glint-texture-matrix setup function. JOML's `translation` **sets** the matrix while
 /// `rotateZ` and `scale` **post-multiply**, so the result is
 /// `T · Rz · S` — read right-to-left when applied to a vector: scale the incoming
 /// UV, then rotate `+10°` about Z, then translate. Reading the fluent chain
 /// left-to-right as the application order gives `S · Rz · T`, which scales the
 /// translation by 8 and sends the glint off the texture entirely.
 ///
-/// The shader applies it as `(M * vec4(uv, 0, 1)).xy`, exactly vanilla's
-/// `glint.vsh`.
+/// The shader applies it as `(M * vec4(uv, 0, 1)).xy`, exactly vanilla's own
+/// glint vertex shader.
 ///
 /// # Why there is an `atlas_px` vanilla does not have
 ///
@@ -314,22 +313,22 @@ pub fn glint_texture_matrix(
 }
 
 /// Vanilla's baked `ENCHANTMENT_GLINT_OVERRIDE` item-prototype flag, for the
-/// seven items whose `Item.Properties` sets
-/// `.component(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true)`
-/// (`Items.java:1122,1471,1481,1557,1571,1609,1697`).
+/// seven items whose item-properties registration sets
+/// `.component(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true)`.
 ///
 /// `item` is the full identifier, e.g. `"minecraft:enchanted_book"`.
 ///
 /// Returns `Some(true)` for exactly the seven baked items and `None` for every
 /// other item — **never** `Some(false)`. That asymmetry is measured, not a
 /// simplification: every `ENCHANTMENT_GLINT_OVERRIDE` registration in 26.2's
-/// `Items.java` reads `true`; nothing bakes `false`. `None` means "this table
+/// item-registration table reads `true`; nothing bakes `false`. `None` means "this table
 /// has no opinion, ask the enchantments list instead" — the honest answer for
 /// the other 1,530 items, which is why [`has_foil_for_item`] falls back to
 /// [`has_foil_enchantments`] rather than defaulting to `false` on a miss.
 #[must_use]
 pub fn baked_glint_override(item: &str) -> Option<bool> {
-    /// The seven baked-`true` items, in `Items.java` declaration order.
+    /// The seven baked-`true` items, in vanilla's item-registration table's
+    /// declaration order.
     const BAKED_TRUE: [&str; 7] = [
         "minecraft:enchanted_golden_apple",
         "minecraft:experience_bottle",
@@ -342,9 +341,10 @@ pub fn baked_glint_override(item: &str) -> Option<bool> {
     BAKED_TRUE.contains(&item).then_some(true)
 }
 
-/// The full `ItemStack.hasFoil()` predicate for a caller that also has the
+/// The full vanilla item-stack "has foil" predicate for a caller that also has the
 /// stack's item identifier: the baked census wins outright when it has an
-/// opinion (`ItemStack.hasFoil`'s short-circuit — see [`has_foil_enchantments`]'s
+/// opinion (vanilla's item-stack foil predicate's short-circuit — see
+/// [`has_foil_enchantments`]'s
 /// doc for why a baked `true` cannot be reached any other way for
 /// `enchanted_book`), and [`has_foil_enchantments`] decides otherwise.
 #[must_use]
@@ -361,8 +361,8 @@ pub fn has_foil_for_stack(item: &str, components: &lodestone_model::item::ItemCo
     has_foil_for_item(item, &components.enchantments)
 }
 
-/// `ItemStack.hasFoil()`'s enchantments-only half (`ItemStack.java:968-971`,
-/// `Item.java:346-348`, `ItemStack.java:999-1001`: default `Item.isFoil` is
+/// Vanilla's item-stack "has foil" predicate's enchantments-only half (vanilla's item-stack and
+/// item-prototype foil predicates: default `Item.isFoil` is
 /// `!ENCHANTMENTS.isEmpty()`), over a borrowed enchantment list rather than a
 /// [`lodestone_model::item::ItemComponents`].
 ///
@@ -382,8 +382,8 @@ pub fn has_foil_for_stack(item: &str, components: &lodestone_model::item::ItemCo
 /// items whose glint comes only from a baked `ENCHANTMENT_GLINT_OVERRIDE=true`
 /// do **not** glint through this function alone —
 /// `enchanted_golden_apple`, `experience_bottle`, `written_book`, `nether_star`,
-/// `enchanted_book`, `end_crystal`, `debug_stick` (`Items.java:1122`, `:1471`,
-/// `:1481`, `:1557`, `:1571`, `:1609`, `:1697`). **Use [`has_foil_for_item`] or
+/// `enchanted_book`, `end_crystal`, `debug_stick` (vanilla's item-registration
+/// table). **Use [`has_foil_for_item`] or
 /// [`has_foil_for_stack`] whenever the item id is available** — every
 /// production call site has it — since those close the baked-override half of
 /// this shortfall; call this directly only when no item id is in hand.
@@ -437,15 +437,15 @@ impl GlintUniform {
     }
 }
 
-/// `BlendFunction.GLINT` (`BlendFunction.java:8`):
+/// Vanilla's glint blend function:
 /// `(SRC_COLOR, ONE, ZERO, ONE)`, both equations `ADD`.
 ///
 /// So colour is `dst += src * src` — additive, but with the source **squared**
 /// rather than scaled by its alpha — and alpha is `dst * 1 + src * 0`, i.e. the
 /// destination alpha is left completely untouched.
 ///
-/// It is neither `TRANSLUCENT` (`SRC_ALPHA, ONE_MINUS_SRC_ALPHA, …`,
-/// `BlendFunction.java:10-12`) nor `ADDITIVE` (`ONE, ONE`, `:17`). Reaching for
+/// It is neither vanilla's translucent blend function (`SRC_ALPHA, ONE_MINUS_SRC_ALPHA, …`)
+/// nor its additive one (`ONE, ONE`). Reaching for
 /// either is the obvious guess and both are wrong.
 ///
 /// One useful consequence: **no alpha enters the colour equation at all.** The
@@ -484,7 +484,7 @@ impl GlintPipeline {
     /// depth format.
     ///
     /// `cull_mode` is `None`, matching vanilla's `withCull(false)`
-    /// (`RenderPipelines.java:427`). That is not incidental: the item slab's back
+    /// on its glint render-pipeline declaration. That is not incidental: the item slab's back
     /// face is drawn by the model pass, and a culled glint pass would leave it
     /// unshimmered.
     #[must_use]
@@ -575,7 +575,7 @@ impl GlintPipeline {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth_format,
-                // `DepthStencilState(CompareOp.EQUAL, false)`: no depth write.
+                // Vanilla's depth-equal comparison with no write.
                 depth_write_enabled: Some(false),
                 depth_compare: Some(DEPTH_COMPARE),
                 stencil: wgpu::StencilState::default(),
@@ -646,9 +646,9 @@ impl GlintPipeline {
 /// min and mag, no mipmaps.
 ///
 /// Derived rather than chosen: `withTexture("Sampler0", …)` supplies a `null`
-/// sampler (`RenderSetup.java:138-141`), so the sampler comes from the texture's
+/// sampler (vanilla's render-setup declaration), so the sampler comes from the texture's
 /// own `.mcmeta`, which for both glint textures is
-/// `{"texture":{"blur":true}}` — no `clamp`. `ReloadableTexture.java:24-29` maps
+/// `{"texture":{"blur":true}}` — no `clamp`. Vanilla's reloadable-texture loading maps
 /// that to `clamp=false → REPEAT` and `blur=true → LINEAR`, with mipmaps off.
 #[must_use]
 pub fn glint_sampler(device: &wgpu::Device) -> wgpu::Sampler {
@@ -1012,7 +1012,7 @@ mod tests {
     ///
     /// There is no fourth real case ("an item whose baked override forces the
     /// glint *off* despite enchantments"): [`baked_glint_override`]'s own doc
-    /// records that no item in 26.2's `Items.java` bakes `false`, only `true`.
+    /// records that no item in 26.2's item-registration table bakes `false`, only `true`.
     /// A synthetic stand-in for that direction is included below so the
     /// override's *unconditional* precedence (not just "wins on a tie") is
     /// still exercised: a baked-`true` item with a *non-empty* enchantments

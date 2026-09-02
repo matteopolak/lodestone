@@ -4,24 +4,21 @@
 //! theyre beside other ice so it looks like a grid."
 //!
 //! Traced to `mesh_models_layers` (`crates/lodestone-render/src/models.rs`)
-//! missing the second of vanilla's two `Block.shouldRenderFace` early-outs:
+//! missing the second of vanilla's two face-culling early-outs. Vanilla's
+//! face test has two independent clauses, either of which skips the face:
+//! clause 1 checks whether the neighbour's face-occlusion shape is a full
+//! block (`occludes_at`, already ported); clause 2 is a per-block
+//! self-occlusion override that can additionally skip rendering based on the
+//! *pair* of states and the direction — that second clause was missing before
+//! this gate.
 //!
-//! ```java
-//! public static boolean shouldRenderFace(BlockState state, BlockState neighborState, Direction direction) {
-//!    VoxelShape occluder = neighborState.getFaceOcclusionShape(direction.getOpposite());
-//!    if (occluder == Shapes.block()) { return false; }        // clause 1: occludes_at
-//!    if (state.skipRendering(neighborState, direction)) { return false; } // clause 2: MISSING before this gate
-//!    ...
-//! }
-//! ```
-//!
-//! `IceBlock` inherits `HalfTransparentBlock.skipRendering`
-//! (`neighborState.is(this) ? true : ...`) unchanged — a face between two
-//! states of the **exact same** `Block` is never drawn. Clause 1
-//! (`occludes_at`, ported already) does not substitute for it: every member of
-//! this class sets vanilla's `noOcclusion()`, so `occludes_at` is correctly
-//! `false` for all of them, and clause 1 alone therefore culls *nothing*
-//! between two ice blocks — which is exactly the "four walls / grid" symptom.
+//! Ice's family of blocks overrides that self-occlusion clause so that a face
+//! between two states of the exact same block is never drawn, regardless of
+//! shape. Clause 1 (`occludes_at`, ported already) does not substitute for
+//! it: every member of that family sets vanilla's occlusion shape to empty,
+//! so `occludes_at` is correctly `false` for all of them, and clause 1 alone
+//! therefore culls *nothing* between two ice blocks — which is exactly the
+//! "four walls / grid" symptom.
 //!
 //! This gate drives the real production function, `mesh_models_layers`, over
 //! a hand-built [`ModelSectionView`] — no live world or asset pack needed,
@@ -65,11 +62,11 @@ fn full_cube_quads() -> Vec<BakedQuad> {
 }
 
 /// Three full cubes in a row along +X at `y == 8, z == 8`: `x == 7` and
-/// `x == 8` are the same `HalfTransparentBlock` class ("ice"), `x == 9` is a
-/// **different** one ("glass") — every other cell is air.
+/// `x == 8` are the same vanilla half-transparent block family ("ice"),
+/// `x == 9` is a **different** one ("glass") — every other cell is air.
 ///
 /// `occludes_at` is `false` everywhere, by construction: every member of this
-/// vanilla class is `noOcclusion()`, so a fixture where `occludes_at` alone
+/// vanilla family has an empty occlusion shape, so a fixture where `occludes_at` alone
 /// could explain a culled face would not discriminate `skips_rendering_against`
 /// from its absence. This fixture cannot pass its assertions through clause 1
 /// — only clause 2 (the fix) can cull the ice/ice seam, and only clause 2's
@@ -79,7 +76,7 @@ struct HalfTransparentRow {
     quads: Vec<BakedQuad>,
 }
 
-/// The vanilla-class name at a cell, or `None` for air/out of range —
+/// The vanilla block-family name at a cell, or `None` for air/out of range —
 /// `x == 7, 8` are `"ice"`; `x == 9` is `"glass"`; everything else is air.
 fn class_at(x: i32, y: i32, z: i32) -> Option<&'static str> {
     if y != 8 || z != 8 {
@@ -102,8 +99,8 @@ impl ModelSectionView for HalfTransparentRow {
     }
 
     fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
-        // Vanilla `noOcclusion()`: correct and unconditional for this whole
-        // class, and the reason clause 1 cannot be what culls these faces.
+        // Vanilla's empty occlusion shape: correct and unconditional for this
+        // whole family, and the reason clause 1 cannot be what culls these faces.
         false
     }
 
@@ -216,13 +213,13 @@ fn neutered_view_reproduces_the_reported_grid() {
 }
 
 /// `skips_rendering_against` must key on the **exact** block, not merely "is
-/// this class". Three cells, all pairwise distinct: `ice`, `blue_ice`,
-/// `frosted_ice` — three different vanilla `Block` instances (`FrostedIceBlock`
-/// extends `IceBlock` extends `HalfTransparentBlock`; `blue_ice` is its own
-/// sibling registration) that must **not** skip against one another, matching
-/// `neighborState.is(this)`'s literal-identity semantics rather than an
-/// "any half-transparent neighbour" shortcut a coarser implementation could
-/// pass this same corpus with.
+/// this family". Three cells, all pairwise distinct: `ice`, `blue_ice`,
+/// `frosted_ice` — three different vanilla block registrations, with
+/// `frosted_ice` a subtype of `ice` in the half-transparent family and
+/// `blue_ice` its own sibling registration, that must **not** skip against
+/// one another, matching vanilla's literal block-identity self-occlusion
+/// semantics rather than an "any half-transparent neighbour" shortcut a
+/// coarser implementation could pass this same corpus with.
 #[test]
 fn distinct_half_transparent_siblings_do_not_skip_against_each_other() {
     struct ThreeSiblings {

@@ -27,8 +27,8 @@
 //! An exact frustum test culls the section you are *standing in* half the time,
 //! because the near plane slices through it — the classic
 //! "correct-looking cull that fails at certain positions". Vanilla handles this
-//! in `Frustum.offsetToFullyIncludeCameraCube(8)` by walking the frustum origin
-//! backwards until the camera's own 8-block-aligned cube is fully inside; we do
+//! by walking the frustum origin backwards (with an 8-block camera-cube
+//! argument) until the camera's own 8-block-aligned cube is fully inside; we do
 //! the tighter equivalent in [`Frustum::offset_to_include_camera_cube`], pushing
 //! only the planes that cut that cube and only as far as needed.
 
@@ -39,18 +39,19 @@ use crate::section::SECTION_SIZE;
 use crate::visibility::{SectionCoord, VisibilityGraph};
 
 /// The half-section cell vanilla aligns its camera cube to
-/// (`SectionOcclusionGraph`'s 8-block invalidation grid, and the argument to
-/// `Frustum.offsetToFullyIncludeCameraCube`).
+/// (vanilla's section-occlusion-graph 8-block invalidation grid, and the
+/// argument to its camera-cube-inclusion frustum offset).
 pub const CAMERA_CUBE_BLOCKS: f32 = 8.0;
 
-/// Vanilla's chunk view-membership predicate, verbatim from
-/// `ChunkTrackingView.isWithinDistance`
-/// (`.cache/mc/26.2/src/net/minecraft/server/level/ChunkTrackingView.java:71-80`):
+/// Vanilla's chunk view-membership predicate, verbatim from its
+/// chunk-tracking-view distance check: for each axis, subtract one chunk of
+/// buffer from the absolute chunk-space offset (floored at zero), then
+/// compare the squared 2D distance against the squared view distance:
 ///
-/// ```java
-/// long dx = Math.max(0, Math.abs(chunkX - centerX) - 1);
-/// long dz = Math.max(0, Math.abs(chunkZ - centerZ) - 1);
-/// return dx * dx + dz * dz < viewDistance * viewDistance;
+/// ```text
+/// dx = max(0, abs(chunkX - centerX) - 1)
+/// dz = max(0, abs(chunkZ - centerZ) - 1)
+/// dx * dx + dz * dz < viewDistance * viewDistance
 /// ```
 ///
 /// A **rounded circle with a one-chunk buffer**, not the streamed square. The
@@ -110,7 +111,8 @@ pub fn section_coord_of(position: Vec3) -> SectionCoord {
 ///
 /// The frustum is deliberately absent: reachability is cached across frames and
 /// the frustum is applied per frame over the cached set, which is what makes
-/// rotation free. See `SectionOcclusionGraph`'s own frustum/walk split.
+/// rotation free. Vanilla's own section-occlusion graph has the same
+/// frustum/walk split.
 #[must_use]
 pub fn reachable_from_camera(
     graph: &VisibilityGraph,
@@ -331,9 +333,9 @@ impl Frustum {
     /// Push outward any plane that cuts the camera's `offset`-aligned cube, so a
     /// section straddling the camera can never be culled.
     ///
-    /// Vanilla's `Frustum.offsetToFullyIncludeCameraCube(offset)` walks the
+    /// Vanilla's own equivalent walks the
     /// frustum's origin backwards along the view vector in 4-block steps until
-    /// `cubeCompletelyInFrustum` holds for the camera's cube. This is the
+    /// its "cube completely in frustum" test holds for the camera's cube. This is the
     /// closed-form equivalent: for each plane, take the cube corner furthest
     /// *against* the plane normal and, if it is outside, translate that plane by
     /// exactly the deficit. Only planes that actually cut the cube move, and each

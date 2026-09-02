@@ -1,12 +1,12 @@
 //! The `Display` entity family's shared geometry: the billboard orientation
 //! and the `translation`/`left_rotation`/`scale`/`right_rotation`
 //! transformation every `text_display`/`item_display`/`block_display` entity
-//! carries (`world/entity/Display.java`, `26.2`).
+//! carries (26.2's decompiled display-entity source).
 //!
 //! ## What it is
 //!
 //! Vanilla places a display entity in two composed steps
-//! (`DisplayRenderer.submit`, `26.2`):
+//! (its display renderer's submit function, 26.2):
 //!
 //! ```text
 //! pose = T(anchor) * orientation(billboard, entityYaw, entityPitch, cameraYaw, cameraPitch)
@@ -22,7 +22,7 @@
 //!
 //! ## How it works
 //!
-//! Four billboard modes (`Display.BillboardConstraints`) answer one question
+//! Four billboard modes (vanilla's own display billboard-constraints enum) answer one question
 //! differently: **which yaw and which pitch does the entity face with?**
 //!
 //! | mode | yaw source | pitch source |
@@ -41,7 +41,7 @@
 //! ## How to change it
 //!
 //! [`display_orientation`] is a direct transcription of
-//! `DisplayRenderer.calculateOrientation` — do not "simplify" the per-mode
+//! vanilla's display-orientation-calculation function — do not "simplify" the per-mode
 //! yaw/pitch source table above, since that table *is* the four modes' entire
 //! behavioural difference. [`transform_camera_yaw`]/[`transform_camera_pitch`]
 //! carry the `- 180`/negation vanilla applies to the raw camera angles before
@@ -63,7 +63,7 @@
 
 use glam::{Mat4, Quat, Vec3};
 
-/// `Display.BillboardConstraints` (`world/entity/Display.java`, `26.2`): which
+/// Vanilla's display billboard-constraints enum (26.2): which
 /// of the entity's own rotation and the camera's rotation this display faces
 /// with, per axis. See the module doc's table for the exact source of each
 /// axis in each mode.
@@ -80,8 +80,8 @@ pub enum BillboardMode {
     /// Yaw from the entity's own rotation, pitch from the **camera**. Wire
     /// id `2`. Wrong way round in this doc until now: these two variants'
     /// comments had each other's text, while the module table and
-    /// [`display_orientation`] both matched `DisplayRenderer.
-    /// calculateOrientation`, which is `VERTICAL -> transformYRot(cameraYRot)
+    /// [`display_orientation`] both matched vanilla's display-orientation-calculation
+    /// function, which is `VERTICAL -> transformYRot(cameraYRot)
     /// , entityXRot` and `HORIZONTAL -> entityYRot, transformXRot(cameraXRot)`.
     Horizontal,
     /// Both axes from the camera — a full billboard. Wire id `3`.
@@ -89,8 +89,8 @@ pub enum BillboardMode {
 }
 
 impl BillboardMode {
-    /// The wire id `Display.BillboardConstraints.getId()` reports, `Byte`
-    /// metadata index — `ByIdMap.continuous(..., OutOfBoundsStrategy.ZERO)`
+    /// The wire id vanilla's billboard-constraints id accessor reports, `Byte`
+    /// metadata index — vanilla's continuous out-of-range fallback
     /// means an out-of-range byte resolves to `Fixed` (id `0`), which
     /// [`Self::from_wire`] reproduces via its own `unwrap_or(Fixed)` fallback
     /// rather than failing.
@@ -106,7 +106,7 @@ impl BillboardMode {
 
     /// The inverse of [`Self::wire_id`], with vanilla's own out-of-range
     /// fallback to `Fixed` rather than a `None`/error — matching
-    /// `ByIdMap.OutOfBoundsStrategy.ZERO`, since a byte off the wire is not a
+    /// vanilla's continuous out-of-range fallback, since a byte off the wire is not a
     /// `Result` this renderer can refuse to draw.
     #[must_use]
     pub fn from_wire(id: u8) -> Self {
@@ -119,7 +119,7 @@ impl BillboardMode {
     }
 }
 
-/// `DisplayRenderer.transformYRot`: `cameraYRot - 180`. Vanilla's camera yaw
+/// Vanilla's camera-yaw-to-entity-yaw transform: `cameraYRot - 180`. Vanilla's camera yaw
 /// and an entity's own yaw are zeroed at opposite headings (the camera looks
 /// *along* its yaw; an entity's billboard needs to face *back toward* the
 /// camera), so this rotates the raw camera yaw a half-turn before it can
@@ -129,7 +129,7 @@ pub fn transform_camera_yaw(camera_yaw_deg: f32) -> f32 {
     camera_yaw_deg - 180.0
 }
 
-/// `DisplayRenderer.transformXRot`: `-cameraXRot`. The camera's pitch and an
+/// Vanilla's camera-pitch-to-entity-pitch transform: `-cameraXRot`. The camera's pitch and an
 /// entity's own pitch increase in opposite senses (vanilla's camera pitch is
 /// down-positive; the `rotationYXZ` this feeds expects the same sense an
 /// entity's own reported pitch already has), so this negates it before reuse.
@@ -138,7 +138,7 @@ pub fn transform_camera_pitch(camera_pitch_deg: f32) -> f32 {
     -camera_pitch_deg
 }
 
-/// `DisplayRenderer.calculateOrientation` (`26.2`): the rotation a display
+/// Vanilla's display-orientation-calculation function (`26.2`): the rotation a display
 /// entity's model faces, before its own [`DisplayTransformation`] is applied
 /// on top. See the module doc's table for which of `entity_yaw_deg`/
 /// `entity_pitch_deg`/`camera_yaw_deg`/`camera_pitch_deg` each `mode`
@@ -176,29 +176,29 @@ pub fn display_orientation(
     )
 }
 
-/// `com.mojang.math.Transformation`'s four synced fields
-/// (`Display.DATA_TRANSLATION_ID`/`DATA_LEFT_ROTATION_ID`/`DATA_SCALE_ID`/
-/// `DATA_RIGHT_ROTATION_ID`) — shared by **every** `Display` subtype
+/// Vanilla's transformation record's four synced fields
+/// (translation/left-rotation/scale/right-rotation
+/// metadata indices) — shared by **every** `Display` subtype
 /// (`text_display`, `item_display`, `block_display`), which is exactly the
 /// "field declared on a base record, inherited by every variant" shape this
-/// codebase has been burned by before (a shield's `ItemModel.Unbaked`
+/// codebase has been burned by before (a shield's unbaked-item-model
 /// transformation, ported once and read only on `special` nodes). Read it
 /// off every display variant unconditionally, not just the ones that "look
 /// like" they need scaling.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DisplayTransformation {
-    /// `Display.DATA_TRANSLATION_ID`, in blocks.
+    /// Vanilla's translation metadata index, in blocks.
     pub translation: Vec3,
-    /// `Display.DATA_LEFT_ROTATION_ID` — applied **before** scale.
+    /// Vanilla's left-rotation metadata index — applied **before** scale.
     pub left_rotation: Quat,
-    /// `Display.DATA_SCALE_ID`, per-axis.
+    /// Vanilla's scale metadata index, per-axis.
     pub scale: Vec3,
-    /// `Display.DATA_RIGHT_ROTATION_ID` — applied **after** scale.
+    /// Vanilla's right-rotation metadata index — applied **after** scale.
     pub right_rotation: Quat,
 }
 
 impl Default for DisplayTransformation {
-    /// `Transformation.IDENTITY` / the entity data accessors' own defaults
+    /// Vanilla's transformation-record identity / the entity data accessors' own defaults
     /// (`entityData.define(DATA_SCALE_ID, new Vector3f(1,1,1))`, the rest
     /// zero/identity) — what a `/summon` with no `transformation` NBT tag
     /// gets.
@@ -213,7 +213,7 @@ impl Default for DisplayTransformation {
 }
 
 impl DisplayTransformation {
-    /// `Transformation.compose`'s private `compose(...)` (`26.2`):
+    /// Vanilla's transformation-record compose function (`26.2`):
     /// `T(translation) * R(leftRotation) * S(scale) * R(rightRotation)`, in
     /// that order — translate, then the left rotation, then scale, then the
     /// right rotation, composed left-to-right exactly as vanilla's own
@@ -229,17 +229,17 @@ impl DisplayTransformation {
 }
 
 /// The full per-frame placement for a display entity: `T(anchor) *
-/// orientation * transformation`, vanilla's `DisplayRenderer.submit`
+/// orientation * transformation`, vanilla's display-renderer submit function
 /// (`poseStack.pushPose(); mulPose(orientation); mulPose(transformation);`)
 /// with the entity's world position folded in as the outermost translation —
 /// `submit` itself receives that translation already applied by the caller's
-/// own `PoseStack`, one level up (`EntityRenderDispatcher.render`).
+/// own `PoseStack`, one level up (vanilla's entity-render-dispatcher render function).
 #[must_use]
 pub fn display_placement_matrix(anchor: Vec3, orientation: Quat, transform: &DisplayTransformation) -> Mat4 {
     Mat4::from_translation(anchor) * Mat4::from_quat(orientation) * transform.to_matrix()
 }
 
-/// `TextDisplayRenderer.submitInner`'s local-glyph-space-to-entity-space
+/// Vanilla's text-display renderer inner-submit function's local-glyph-space-to-entity-space
 /// matrix (`26.2`), composed **on top of** [`display_placement_matrix`]'s own
 /// `base` (this function's `base` parameter *is* that matrix's result — the
 /// billboard orientation and the synced `Transformation` are both already
@@ -281,7 +281,7 @@ pub fn text_glyph_transform(base: Mat4, total_width: f32, total_height: f32) -> 
 }
 
 /// A `text_display`'s glyph colour: vanilla's `textOpacity << 24 | 0xFFFFFF`
-/// (`TextDisplayRenderer.submitInner`) — the RGB channels are hardcoded
+/// (its text-display renderer's inner-submit function) — the RGB channels are hardcoded
 /// white regardless of the text's own component colour (a real
 /// simplification vanilla itself makes for this render type, not one this
 /// port adds), and only the alpha channel is driven by `opacity`.
@@ -296,11 +296,11 @@ pub fn text_glyph_color(opacity: i8) -> [f32; 4] {
 }
 
 /// A `text_display`'s background-panel colour, unpacked from vanilla's
-/// packed ARGB `Display.TextDisplay.DATA_BACKGROUND_COLOR_ID` int the same
+/// packed ARGB background-color metadata index int the same
 /// way [`crate::sign::sign_side_color`] unpacks a sign's dye colour.
 ///
 /// Callers must still gate on `argb != 0` before drawing anything — vanilla's
-/// own `if (backgroundColor != 0)` (`TextDisplayRenderer.submitInner`) treats
+/// own `if (backgroundColor != 0)` (its text-display renderer's inner-submit function) treats
 /// exactly `0` as "no panel at all", a real reachable value rather than a
 /// sentinel this function could absorb, since a *fully transparent but
 /// non-black* colour (alpha `0`, RGB non-zero) is a different, legal state
@@ -433,7 +433,7 @@ mod tests {
 
     /// `BillboardMode::wire_id`/`from_wire` round-trip for every real id, and
     /// an out-of-range byte falls back to `Fixed` rather than panicking —
-    /// `ByIdMap.OutOfBoundsStrategy.ZERO`.
+    /// vanilla's continuous out-of-range fallback.
     #[test]
     fn wire_id_round_trips_and_out_of_range_falls_back_to_fixed() {
         for mode in [
@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(BillboardMode::from_wire(200), BillboardMode::Fixed);
     }
 
-    /// `Transformation.compose`'s order — translate, left-rotate, scale,
+    /// Vanilla's transformation-record compose function's order — translate, left-rotate, scale,
     /// right-rotate — checked with a case where getting the order wrong
     /// (e.g. scaling before rotating) changes the result: a left rotation of
     /// 90 degrees about Z composed with a non-uniform scale.
@@ -589,7 +589,7 @@ mod tests {
     /// **Why the glyph pipeline's polygon offset is load-bearing rather than
     /// belt-and-braces, as a number.**
     ///
-    /// `TextDisplayRenderer.submitInner` puts the background panel `0.01`
+    /// Vanilla's text-display renderer's inner-submit function puts the background panel `0.01`
     /// behind the glyphs in local glyph space, which
     /// [`text_glyph_transform`]'s `0.025` scale turns into **0.00025 blocks**.
     /// Vanilla resolves that comfortably because its depth buffer is

@@ -165,7 +165,8 @@ const CORNERS: [(u32, u32); 4] = [(0, 0), (1, 0), (1, 1), (0, 1)];
 /// contributing `1.0`, the darkest corner averages to `0.4`, never black.
 const AO_OCCLUDED: f32 = 0.2;
 /// Vanilla only substitutes a dark neighbour's light with the centre light when
-/// the centre is itself lit above this threshold (`LightCoordsUtil.smoothBlend`).
+/// the centre is itself lit above this threshold (vanilla's smooth-light-blend
+/// function).
 const SMOOTH_LIGHT_MIN_CENTRE: u8 = 2;
 
 fn level_to_byte(level: f32) -> u8 {

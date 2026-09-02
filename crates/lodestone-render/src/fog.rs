@@ -25,9 +25,10 @@ use bytemuck::{Pod, Zeroable};
 /// # Why the sky colour lives in a struct named for fog
 ///
 /// Because in vanilla they are one record and they must not be settable apart.
-/// `EnvironmentAttributes` carries `visual/fog_color` and `visual/sky_color`
-/// side by side, `FogRenderer.computeFogColor` blends them, and the sky disc's
-/// horizon *is* its fog end (`sky.fsh` fogs the flat disc, so the gradient runs
+/// Vanilla's per-dimension environmental attributes carry `visual/fog_color`
+/// and `visual/sky_color` side by side, its fog-colour computation blends
+/// them, and the sky disc's horizon *is* its fog end (its shader fogs the
+/// flat disc, so the gradient runs
 /// from `sky_color` at the centre to `color` at the rim). Two setters that can
 /// be called independently is exactly how the horizon has previously banded in
 /// a colour the sky never is — see `RenderState::set_clear_color`'s doc. One
@@ -47,7 +48,7 @@ pub struct FogSettings {
     pub sky_color: [f32; 3],
     /// Distance from the eye at which the **render-distance** fog term begins
     /// (factor 0). Measured **cylindrically** (`max(horizontal, |dy|)`,
-    /// `fog.glsl:36-40`) in the shader — see [`FogUniform`].
+    /// vanilla's shader-side distance metric) in the shader — see [`FogUniform`].
     pub start: f32,
     /// Distance from the eye at which the render-distance term is full
     /// (factor 1).
@@ -55,13 +56,13 @@ pub struct FogSettings {
     /// Distance from the eye at which vanilla's **environmental** fog term
     /// begins (factor 0). Measured **spherically** (`length(pos)`), and
     /// combined with the render-distance term by `max`
-    /// (`fog.glsl:49-53`'s `total_fog_value`), the same combine
+    /// (vanilla's total-fog combine), the same combine
     /// [`total_fog_factor`] and the shaders' `fog_amount` implement.
     ///
     /// Vanilla's overworld/End declare no
     /// `visual/fog_start_distance`/`visual/fog_end_distance` override, so this
     /// falls back to the registered default `0.0..1024.0`
-    /// (`EnvironmentAttributes.java:18-24`) — a real, very slow haze, not an
+    /// — a real, very slow haze, not an
     /// inert placeholder; see [`for_render_distance`](Self::for_render_distance).
     /// Defaults to `0.0` (degenerate with `environmental_end`, i.e. no
     /// contribution) for constructors that do not set it.
@@ -166,15 +167,10 @@ impl FogSettings {
     /// own curve (issue #388).
     ///
     /// Vanilla does **not** start this fog at a fraction of the view distance.
-    /// `FogRenderer.setupFog`
-    /// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/fog/FogRenderer.java:198-200`)
-    /// is three lines and they say something quite different:
-    ///
-    /// ```java
-    /// float renderDistanceFogSpan = Mth.clamp(renderDistanceInBlocks / 10.0F, 4.0F, 64.0F);
-    /// fog.renderDistanceStart = renderDistanceInBlocks - renderDistanceFogSpan;
-    /// fog.renderDistanceEnd = renderDistanceInBlocks;
-    /// ```
+    /// Vanilla's render-distance fog setup instead derives the fade span as a
+    /// clamped fraction of the render distance itself: a tenth of the render
+    /// distance in blocks, clamped to between 4 and 64, and the fog starts
+    /// that span back from the render-distance edge.
     ///
     /// The fade band is an **absolute, capped width** measured back from the
     /// edge — a tenth of the view distance, never narrower than 4 blocks and
@@ -191,16 +187,16 @@ impl FogSettings {
     ///
     /// # The environmental term, and the shader's distance metric
     ///
-    /// Vanilla combines *two* terms (`fog.glsl`'s `total_fog_value`):
-    /// `max(linear(spherical, environmentalStart, environmentalEnd),
-    /// linear(cylindrical, renderDistanceStart, renderDistanceEnd))`. This
+    /// Vanilla combines *two* terms in its total-fog shader function:
+    /// `max(linear(spherical, environmental_start, environmental_end),
+    /// linear(cylindrical, render_distance_start, render_distance_end))`. This
     /// constructor builds the second (render-distance) term in `start`/`end`,
     /// measured **cylindrically** in the shader
-    /// (`max(length(rel.xz), abs(rel.y))`, `fog.glsl:36-40`), and now also
+    /// (`max(length(rel.xz), abs(rel.y))`), and now also
     /// fills in the first: the plain overworld and the End declare no
     /// `visual/fog_start_distance`/`visual/fog_end_distance` override, so
     /// vanilla's environmental term is the registered default
-    /// `0.0..1024.0` (`EnvironmentAttributes.java:18-24`) — a real, very slow
+    /// `0.0..1024.0` — a real, very slow
     /// spherical haze, not an inert placeholder. Reaches `0.125` at 128 blocks
     /// and `0.5` at 512, so it is the dominant term in the *middle* of the
     /// view where the render-distance band has not started yet, which is what
@@ -273,8 +269,7 @@ impl FogSettings {
     /// The End's fog: a flat, near-black backdrop, since the dimension type
     /// carries no `visual/fog_start_distance`/`visual/fog_end_distance`
     /// override, so vanilla's environmental-fog attributes fall back to their
-    /// registered defaults, `0.0`/`1024.0`
-    /// (`EnvironmentAttributes.java:18-24`), and the visible darkening instead
+    /// registered defaults, `0.0`/`1024.0`, and the visible darkening instead
     /// comes from
     /// `visual/fog_color` (`#181318`) mixed with `visual/sky_color`
     /// (`#000000`) at the render-distance edge, exactly the mechanism
@@ -315,9 +310,8 @@ impl FogSettings {
 }
 
 /// The width, in blocks, of vanilla's render-distance fade band for a view
-/// distance of `view_distance_blocks`:
-/// `Mth.clamp(renderDistanceInBlocks / 10.0F, 4.0F, 64.0F)`
-/// (`FogRenderer.java:198`).
+/// distance of `view_distance_blocks`: the render distance in blocks divided
+/// by 10, clamped between 4 and 64.
 ///
 /// A tenth of the view distance, floored at 4 blocks and **capped at 64**. The
 /// cap is the part a "fraction of view distance" model cannot express: past 640
@@ -335,31 +329,24 @@ pub fn render_distance_fade_span(view_distance_blocks: f32) -> f32 {
 /// How far above the world bottom the void darkening starts, and where the
 /// bottom is — the two numbers vanilla's void fog is a function of.
 ///
-/// `FogRenderer.computeFogColor`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/fog/FogRenderer.java:124-139`)
-/// reads exactly these two and nothing else:
-///
-/// ```java
-/// float voidDarknessOnsetRange = level.getLevelData().voidDarknessOnsetRange();
-/// float darkness = Mth.clamp((voidDarknessOnsetRange + level.getMinY() - (float)camera.position().y) / voidDarknessOnsetRange, 0.0F, 1.0F);
-/// ...
-/// float brightness = Mth.square(1.0F - darkness);
-/// fogRed *= brightness; fogGreen *= brightness; fogBlue *= brightness;
-/// ```
+/// Vanilla's void-fog colour computation reads exactly these two and nothing
+/// else: it computes a `darkness` fraction as `(onset_range + min_y - eye_y)
+/// / onset_range`, clamped to `0..1`, then multiplies each fog channel by the
+/// *square* of `1 - darkness`.
 ///
 /// Note what that expression actually says, because the sign is easy to get
 /// backwards from a summary: `darkness` is `0` at `min_y + onset_range` and
 /// `1` **at** `min_y`, so the fog goes black as the eye *descends* to the world
-/// bottom. `brightness` is the *square* of `1 - darkness`, so the falloff is
+/// bottom. The multiplier is the *square* of `1 - darkness`, so the falloff is
 /// quadratic rather than linear.
 ///
-/// `onset_range` is not a constant: `ClientLevel.ClientLevelData.voidDarknessOnsetRange`
-/// (`ClientLevel.java:1277`) returns `1.0` for a **flat** world and `32.0`
+/// `onset_range` is not a constant: vanilla's level-data accessor for it
+/// returns `1.0` for a **flat** world and `32.0`
 /// otherwise, so a superflat world's void fog is a 1-block-tall snap rather
 /// than a 32-block fade.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VoidFog {
-    /// The dimension's bottom Y (`level.getMinY()`), in blocks.
+    /// The dimension's bottom Y, in blocks.
     pub min_y: f32,
     /// How many blocks above [`min_y`](Self::min_y) the darkening begins.
     pub onset_range: f32,
@@ -378,7 +365,7 @@ impl VoidFog {
     };
 
     /// The void fog for a connected level: the dimension type's own `min_y`,
-    /// and `ClientLevelData.voidDarknessOnsetRange()`'s fork on flatness —
+    /// and vanilla's void-darkness onset range, which forks on flatness —
     /// `1.0` when the level uses the flat world generator, `32.0` otherwise.
     ///
     /// **The flat arm is not a rounding of the normal one, it is a different
@@ -408,8 +395,8 @@ impl VoidFog {
     /// eye at `eye_y`: `1.0` at or above `min_y + onset_range`, `0.0` at
     /// `min_y`, quadratic between.
     ///
-    /// Gamma-space is not a detail: `computeFogColor` scales
-    /// `ARGB.redFloat(color)` — a raw `byte / 255`, never linearised — so
+    /// Gamma-space is not a detail: vanilla's fog-colour computation scales
+    /// each channel as a raw `byte / 255`, never linearised — so
     /// applying this to a linear-light colour would pull the whole curve toward
     /// `1.0` and wash the darkening out, exactly the failure `CLAUDE.md`
     /// records for tint and shade. Use [`scale_gamma`] rather than multiplying
@@ -439,9 +426,8 @@ pub fn scale_gamma(linear: [f32; 3], scale: f32) -> [f32; 3] {
 }
 
 /// Multiply a **linear** RGB colour by a per-channel gamma-space factor, the
-/// way vanilla's `ARGB.multiply` does (`red(lhs) * red(rhs) / 255`, straight
-/// byte arithmetic on sRGB values — see
-/// `.cache/mc/26.2/src/net/minecraft/util/ARGB.java:80`).
+/// way vanilla's packed-colour multiply does (`red(lhs) * red(rhs) / 255`,
+/// straight byte arithmetic on sRGB values).
 ///
 /// `factor` is in `0.0..=1.0` sRGB units, i.e. a `#RRGGBB` divided by 255, not
 /// a linear-light ratio. The per-channel twin of [`scale_gamma`].
@@ -521,11 +507,11 @@ pub fn fog_factor(distance: f32, start: f32, end: f32) -> f32 {
     ((distance - start) / (end - start)).clamp(0.0, 1.0)
 }
 
-/// Vanilla's `total_fog_value` (`fog.glsl:49-53`): the `max` of two
+/// Vanilla's total-fog shader function: the `max` of two
 /// independent linear ramps over two different distance metrics — the
 /// **environmental** term (spherical distance, `environmental_start/end`) and
 /// the **render-distance** term (cylindrical distance, `start/end`,
-/// `fog.glsl:36-40`'s `max(length(pos.xz), abs(pos.y))`). This is the CPU twin
+/// `max(length(pos.xz), abs(pos.y))`). This is the CPU twin
 /// of every fogged shader's `fog_amount`, so the headless gates describe the
 /// shader rather than a separate model of it — see `model.wgsl`,
 /// `entity.wgsl`, `fluid.wgsl`.
@@ -565,9 +551,10 @@ pub fn apply_fog(color: [f32; 3], fog_color: [f32; 3], factor: f32) -> [f32; 3] 
 ///
 /// # Why gamma, and how much it mattered
 ///
-/// `fog.glsl`'s `apply_fog` is `mix(inColor.rgb, fogColor.rgb, fogValue)` over
-/// `terrain.fsh`'s `color = texture * vertexColor` — raw, non-colour-managed
-/// bytes — against a `FogColor` that came from `ARGB.vector4fFromARGB32`, i.e.
+/// Vanilla's fog-apply shader step is `mix(color, fog_color, fog_value)` over
+/// a terrain fragment colour that is itself `texture * vertex_color` — raw,
+/// non-colour-managed bytes — against a fog colour that came from unpacking a
+/// packed 32-bit colour into a 0..1 vector, i.e.
 /// bytes over 255. Nothing in that chain is linear light, exactly as
 /// `CLAUDE.md`'s rendering constraints record for tint and shade.
 ///
@@ -621,8 +608,9 @@ pub struct FogUniform {
     /// not by this constructor); `w` = `environmental_end` (measured
     /// spherically in the shader).
     pub end_enabled: [f32; 4],
-    /// `rgb` = this frame's dimension `AMBIENT_LIGHT_COLOR` — the floor
-    /// `lightmap.fsh` seeds its accumulator with before either light half is
+    /// `rgb` = this frame's dimension ambient-light colour — the floor
+    /// vanilla's lightmap shader seeds its accumulator with before either
+    /// light half is
     /// added (`crate::light::light_color_from_levels`'s `ambient` parameter).
     /// Grey in the overworld, warm brown in the Nether, sage in the End; see
     /// `crate::light::OVERWORLD_AMBIENT_LIGHT` and `rgb24_to_channels`. `w` =
@@ -651,7 +639,7 @@ impl FogUniform {
     /// still fog.
     ///
     /// [`FogUniform::ambient_light`] defaults to the overworld's own
-    /// `AMBIENT_LIGHT_COLOR` (`crate::light::OVERWORLD_AMBIENT_LIGHT`) — the
+    /// ambient-light colour (`crate::light::OVERWORLD_AMBIENT_LIGHT`) — the
     /// same "safe, not brighter than before" default every other unset source
     /// in this codebase uses (compare `SkyDarkenSource`'s `1.0`/permanent-noon
     /// default). A caller with a real dimension overwrites it after
@@ -697,7 +685,7 @@ mod ramp_gate {
     //! out from vanilla's arithmetic by hand rather than computed by calling
     //! [`render_distance_fade_span`], so this is not
     //! `decode(encode(x)) == x` against our own formula. The source is
-    //! `FogRenderer.java:198-200` and `fog.glsl:13-21`:
+    //! vanilla's render-distance fog setup and shader ramp:
     //!
     //! ```text
     //! span  = clamp(rd_blocks / 10, 4, 64)
@@ -731,7 +719,7 @@ mod ramp_gate {
         (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
     }
 
-    /// Vanilla's `fog_cylindrical_distance` (`fog.glsl:36-40`):
+    /// Vanilla's cylindrical fog-distance function:
     /// `max(length(pos.xz), abs(pos.y))`. This client does **not** use it; it is
     /// here so the gap can be measured rather than described.
     fn cylindrical(eye: [f32; 3], p: [f32; 3]) -> f32 {
@@ -968,8 +956,8 @@ mod ramp_gate {
 
     /// **Gate C (F2/F3), formerly a pin on an open gap — now a pin that it is
     /// closed.** Until this change, vanilla's render-distance term measured a
-    /// **cylindrical** distance (`max(length(pos.xz), abs(pos.y))`,
-    /// `fog.glsl:36-40`) while every shader here measured a spherical one.
+    /// **cylindrical** distance (`max(length(pos.xz), abs(pos.y))`)
+    /// while every shader here measured a spherical one.
     /// Along a ray pitched down 36.87° the cylindrical distance is `0.8 ×` the
     /// spherical, so this client reached full fog while vanilla was barely
     /// into its ramp — this test's own history is the old assertion
@@ -989,9 +977,9 @@ mod ramp_gate {
         assert!((sph - 300.0).abs() < 1e-3, "spherical {sph}");
         assert!((cyl - 240.0).abs() < 1e-3, "cylindrical {cyl}");
 
-        // Vanilla's total: max(environmental, renderDistance). The overworld
+        // Vanilla's total: max(environmental, render-distance). The overworld
         // declares no fog distances, so environmental is the registered
-        // default 0..1024 (`EnvironmentAttributes.java:18-24`), matching
+        // default 0..1024, matching
         // `for_render_distance`'s new `environmental_start`/`environmental_end`.
         let vanilla_env = fog_factor(sph, 0.0, 1024.0);
         let vanilla_rd = fog_factor(cyl, fog.start, fog.end);
@@ -1019,7 +1007,7 @@ mod ramp_gate {
 
     /// **Gate B (F2).** The environmental term reaching zero was the "no
     /// dropoff at all until the last 10%" complaint. Expectations are
-    /// `fog.glsl:23-24` + `EnvironmentAttributes.java:18-24`'s registered
+    /// vanilla's environmental-fog combine plus the registered
     /// default (`0.0..1024.0`), evaluated along [`LEVEL_X`] where spherical
     /// and cylindrical distance agree, so the table is metric-independent —
     /// the same property [`ramp_matches_vanilla_at_render_distances_8_and_32`]
@@ -1253,7 +1241,7 @@ mod tests {
     #[test]
     fn uniform_is_64_bytes_four_vec4s() {
         // Grew by one `vec4` (`ambient_light`) when the per-dimension
-        // `AMBIENT_LIGHT_COLOR` was added — every original lane was already
+        // ambient-light colour was added — every original lane was already
         // spoken for, so this is a genuine size change, not a reused lane.
         // See `FogUniform::ambient_light`'s doc for why that does not cost a
         // bind group.
@@ -1352,8 +1340,8 @@ mod tests {
         assert!((mid - 0.25).abs() < 1e-5, "expected quadratic 0.25, got {mid}");
     }
 
-    /// A flat world's `voidDarknessOnsetRange` is `1.0`, not `32.0`
-    /// (`ClientLevel.java:1277`), so the same eye height that is fully
+    /// A flat world's void-darkness onset range is `1.0`, not `32.0`,
+    /// so the same eye height that is fully
     /// undarkened on a superflat world is deep into the fade on a normal one.
     #[test]
     fn flat_worlds_have_a_one_block_void_onset() {
