@@ -16,12 +16,12 @@
 //!
 //! # The placement transform (why it is exactly this and not eyeballed)
 //!
-//! Vanilla places a living entity with a fixed sequence of pose-stack ops in
-//! `LivingEntityRenderer.render`, read here from the decompiled 26.2 client:
+//! Vanilla places a living entity with a fixed sequence of pose-stack ops,
+//! read here from the decompiled 26.2 client:
 //!
 //! ```text
-//!   translate(feetPos)                     // EntityRenderDispatcher
-//!   rotateY(180° - bodyYaw)                // setupRotations
+//!   translate(feetPos)                     // move to the entity's feet
+//!   rotateY(180° - bodyYaw)                // face the body's yaw
 //!   scale(-1, -1, 1)                       // model space is Y-down, Z-forward
 //!   translate(0, -1.501, 0)                // lift feet to the ground plane
 //! ```
@@ -54,16 +54,15 @@ use crate::entity_anim::{AnimInput, HandPoseOverride, HumanoidArms, Skeleton};
 use crate::item_render::{UNITS_PER_BLOCK, display_matrix, display_matrix_for_hand};
 use crate::models::{ModelMesh, ModelVertex, mesh_item_quads};
 
-/// The vanilla feet-to-model lift (`LivingEntityRenderer`'s
-/// `translate(0, -1.501, 0)`), in blocks.
+/// The vanilla feet-to-model lift (the pose-stack `translate(0, -1.501, 0)`
+/// applied when placing a living entity), in blocks.
 pub const MODEL_FEET_OFFSET: f32 = 1.501;
 
 /// Packed sky/block light meaning "full sky, no block light" (sky in the high
 /// nibble), the value an entity carries when the caller has no world to sample.
 ///
 /// This is a **fallback, not the normal path**. Vanilla samples the lightmap
-/// once per entity at its block position
-/// (`LivingEntityRenderer` → `Level::getLightColor`), which is why light is one
+/// once per entity at its block position, which is why light is one
 /// byte per *instance* ([`EntityInstance::light`]) and not per vertex: a mob is
 /// uniformly lit by the block it stands in. A caller that has a world supplies
 /// the real byte via [`EntityInstance::with_light`] or
@@ -90,61 +89,54 @@ pub const ENTITY_FULLBRIGHT: u8 = 15 << 4;
 /// So a mob sampling world light perfectly is still full-bright at midnight.
 /// Vanilla applies the darkening client-side only.
 ///
-/// # The curve (issue #49)
+/// # The curve
 ///
-/// 26.2 **deleted** `Level.getSkyDarken` and `LightTexture`'s lift entirely,
-/// replacing both with a data-driven timeline track,
-/// `EnvironmentAttributes.SKY_LIGHT_FACTOR` on `Timelines.OVERWORLD_DAY`
-/// (`.cache/mc/26.2/src/net/minecraft/world/timeline/Timelines.java:77-80`).
+/// 26.2 deleted the older fixed sky-darken curve and lightmap lift entirely,
+/// replacing both with a data-driven timeline track for the sky-light factor.
 /// This is a direct port of that track's sampling machinery, not a
 /// re-derivation of a curve shape:
 ///
 /// * Keyframes (tick → value): `730 → 1.0`, `11270 → 1.0`, `13140 → 0.24`,
-///   `22860 → 0.24`, applied via `FloatModifier.MULTIPLY` over the attribute's
-///   own default of `1.0` (`EnvironmentAttributes.java:79`) — multiplying by
-///   `1.0` is a no-op, so the sampled keyframe value *is* the final factor.
-/// * The easing is **linear, not cubic-bezier**. `KeyframeTrack.Builder`
-///   defaults to `EasingType.LINEAR` (`.cache/mc/26.2/src/net/minecraft/util/KeyframeTrack.java:78`)
-///   and the `SKY_LIGHT_FACTOR` track never calls `.setEasing(...)` — only the
-///   neighbouring `SUN_ANGLE`/`MOON_ANGLE`/`STAR_ANGLE` tracks in the same file
-///   opt into `EasingType.symmetricCubicBezier(0.362, 0.241)`. Issue #49's own
-///   text said "cubic-bezier eased"; that was a transcription error caught by
-///   reading `Timelines.java` itself rather than trusting the summary (exactly
-///   the failure mode `CLAUDE.md` warns about) — see
+///   `22860 → 0.24`, applied as a multiplier over the attribute's own default
+///   of `1.0` — multiplying by `1.0` is a no-op, so the sampled keyframe value
+///   *is* the final factor.
+/// * The easing is **linear, not cubic-bezier**. The track builder defaults to
+///   linear easing and the sky-light-factor track never opts out of that
+///   default — only the neighbouring sun-angle, moon-angle and star-angle
+///   tracks in the same data opt into a symmetric cubic-bezier easing with
+///   control values `0.362`/`0.241`. An earlier note here claimed
+///   "cubic-bezier eased"; that was a transcription error caught by reading
+///   the source data itself rather than trusting the summary (exactly the
+///   failure mode `CLAUDE.md` warns about) — see
 ///   `docs/time-of-day-lighting.md`.
-/// * `KeyframeTrackSampler.bakeSegments` wraps the segment between the
-///   *last* and *first* keyframe through the timeline's 24000-tick period
-///   (`.cache/mc/26.2/src/net/minecraft/util/KeyframeTrackSampler.java`, the
-///   `periodTicks.isPresent()` branch), so the dawn ramp is **one continuous
-///   1870-tick segment running from 22860 through the tick-0 seam to 730**,
-///   not a ramp that resets at midnight-wrap. The implementation below
-///   collapses that wraparound into a single contiguous range by shifting the
-///   day so it starts at the first keyframe, rather than replicating Java's
-///   two-segment split.
+/// * The sampler wraps the segment between the *last* and *first* keyframe
+///   through the timeline's 24000-tick period, so the dawn ramp is **one
+///   continuous 1870-tick segment running from 22860 through the tick-0 seam
+///   to 730**, not a ramp that resets at midnight-wrap. The implementation
+///   below collapses that wraparound into a single contiguous range by
+///   shifting the day so it starts at the first keyframe, rather than
+///   replicating the original two-segment split.
 ///
-/// No `* 0.95 + 0.05` lift: that was specifically `LightTexture`'s second step
-/// of 1.21's *two*-step pipeline (`getSkyDarken` into `[0.2, 1.0]`, then the
-/// lift into `[0.24, 1.0]`). 26.2's keyframes are already expressed directly
-/// in `[0.24, 1.0]`, and the consumer
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/LightmapRenderStateExtractor.java`
-/// into `assets/minecraft/shaders/core/lightmap.fsh`'s
-/// `sky_brightness = get_brightness(sky_level) * lightmapInfo.SkyFactor`)
-/// applies no further affine transform to it.
+/// No `* 0.95 + 0.05` lift: that was specifically an older two-step darkening
+/// pipeline's second step (a sky-darken curve into `[0.2, 1.0]`, then a lift
+/// into `[0.24, 1.0]`). 26.2's keyframes are already expressed directly in
+/// `[0.24, 1.0]`, and the vanilla lightmap shader applies no further affine
+/// transform to the sampled value.
 ///
-/// Verified against every one of the 24000 ticks in a real JVM's
-/// `Timeline`/`AttributeTrackSampler` — not hand-derived interpolation math,
-/// and not this function's own output pasted back. See
+/// Verified against every one of the 24000 ticks in a real JVM's timeline
+/// sampler — not hand-derived interpolation math, and not this function's own
+/// output pasted back. See
 /// `crates/lodestone-render/tests/sky_light_factor_timeline.rs` and
 /// `oracle-java/SkyLightTimelineOracle.java` for provenance.
 ///
 /// # How to change it
 ///
-/// Rain and thunder further blend this factor toward `0.24` at the game-attribute
-/// layer (`WeatherAttributes.java`'s `FloatModifier.ALPHA_BLEND` on the same
-/// attribute) — omitted here because the shell tracks neither yet. Add them as
-/// arguments to this function rather than at the call site, so the one place
-/// that knows vanilla's curve stays the one place. The `0.0`-means-daylight
-/// sentinel lives in the shader, not here — this function never returns `0.0`.
+/// Rain and thunder further blend this factor toward `0.24` at the same
+/// game-attribute layer — omitted here because the shell tracks neither yet.
+/// Add them as arguments to this function rather than at the call site, so the
+/// one place that knows vanilla's curve stays the one place. The
+/// `0.0`-means-daylight sentinel lives in the shader, not here — this
+/// function never returns `0.0`.
 #[must_use]
 pub fn sky_darken_for_time_of_day(time_of_day: i64) -> f32 {
     // The two ramps are symmetric and this many ticks long: 13140-11270 (dusk)
@@ -248,7 +240,7 @@ fn corpus_name_set() -> &'static std::collections::HashSet<&'static str> {
 /// [`path()`]: EntityType::path
 fn canonical_model_name_for_type(entity_type: EntityType) -> Option<&'static str> {
     match entity_type {
-        // `PlayerRenderer` picks a skin model; wide/`steve` is the default.
+        // The player renderer picks a skin model; wide/`steve` is the default.
         EntityType::Player => return Some("player_wide"),
         // A mannequin is the *same* renderer as a player: the dispatcher's
         // type switch routes both classes into the avatar renderer and picks
@@ -259,22 +251,22 @@ fn canonical_model_name_for_type(entity_type: EntityType) -> Option<&'static str
         // for arm-pose purposes and resolved no rig at all, which is the
         // "named all over the draw surface, draws nothing" shape.
         EntityType::Mannequin => return Some("player_wide"),
-        // `BoggedModel` (a skeleton with mushrooms) is not ported yet; the plain
-        // skeleton is the closest ported mesh. Unlike the drowned alias this is
-        // deliberate and outlives no mesh — remove it when `bogged` is ported.
+        // The bogged mob's model (a skeleton with mushrooms) is not ported yet;
+        // the plain skeleton is the closest ported mesh. Unlike the drowned
+        // alias this is deliberate and outlives no mesh — remove it when
+        // `bogged` is ported.
         EntityType::Bogged => return Some("skeleton"),
-        // `EntityRenderers.java` registers both `EntityTypes.WIND_CHARGE` and
-        // `EntityTypes.BREEZE_WIND_CHARGE` against the same `WindChargeRenderer`,
-        // so a breeze's charge rides the plain charge's rig rather than a second
-        // corpus entry — see `wind_charge_model`'s doc for the rig itself and its
-        // known simplifications.
+        // Vanilla registers both the plain wind charge and the breeze's wind
+        // charge against the same renderer, so a breeze's charge rides the
+        // plain charge's rig rather than a second corpus entry — see
+        // `wind_charge_model`'s doc for the rig itself and its known
+        // simplifications.
         EntityType::BreezeWindCharge => return Some("wind_charge"),
-        // `MinecartRenderer`/`AbstractMinecartRenderer`: every subclass shares
-        // vanilla's one `MinecartModel` cart-frame rig (`MinecartModel.
-        // createBodyLayer`) — the subclasses differ only in the block state
-        // vanilla displays *inside* the cart, which `gpu/moving_blocks.rs`'s
-        // `merge_minecart_contents` draws as a second, independent block-model
-        // pass, not a second corpus rig.
+        // Every minecart subclass shares vanilla's one cart-frame rig — the
+        // subclasses differ only in the block state vanilla displays *inside*
+        // the cart, which `gpu/moving_blocks.rs`'s `merge_minecart_contents`
+        // draws as a second, independent block-model pass, not a second
+        // corpus rig.
         //
         // All six subclasses, not the four this repo's own server spawns. The
         // arm used to stop at four, on the reasoning that `spawner_minecart`
@@ -435,32 +427,33 @@ pub fn player_model_name(slim: bool) -> &'static str {
 }
 
 /// Which humanoid arm rig a model animates with — the render-crate side of
-/// vanilla's `AbstractZombieModel` overriding `HumanoidModel`'s arm swing.
+/// vanilla's zombie model overriding the plain humanoid model's arm swing.
 ///
 /// [`AnimFamily`](crate::entity_anim::AnimFamily) is classified *structurally*
 /// from part names, on purpose (see that module's docs). A zombie's skeleton is
 /// part-for-part identical to a player's, so no structural rule can separate
-/// them: the distinction is which Java class vanilla instantiates. That fact is
-/// a name mapping, so it lives here next to [`canonical_model_name`] — the
-/// module that already owns "which vanilla class draws this mob" — rather than
-/// being smuggled into the structural classifier.
+/// them: the distinction is which model vanilla instantiates for the type.
+/// That fact is a name mapping, so it lives here next to
+/// [`canonical_model_name`] — the module that already owns "which vanilla
+/// model draws this mob" — rather than being smuggled into the structural
+/// classifier.
 #[must_use]
 pub fn humanoid_arms_for(model_name: &str) -> HumanoidArms {
     match model_name {
-        // Every model that calls `AnimationUtils.animateZombieArms` after
-        // `super.setupAnim`, enumerated from the 26.2 client tree rather than from
-        // the name "zombie": `AbstractZombieModel:15` (which is `ZombieModel`,
-        // `DrownedModel` and `HuskRenderer`'s reuse of `ZombieModel`),
-        // `ZombieVillagerModel:98`, and `ZombifiedPiglinModel:14`.
+        // Every model that applies the zombie arm-drop animation after its
+        // base pose, enumerated from the 26.2 client tree rather than from
+        // the name "zombie": the shared zombie model family (used directly by
+        // the zombie, and reused by the drowned and the husk), the zombie
+        // villager model, and the zombified piglin model.
         //
-        // `zombified_piglin` was missing until issue #379 and got
-        // `HumanoidArms::Swinging`, i.e. a plain player arm swing where vanilla
-        // gives it the raised undead arms. `giant` is deliberately absent:
-        // `GiantMobRenderer` uses a bare `HumanoidModel`, not a zombie one, so its
-        // arms hang. `IllagerModel:118` also calls `animateZombieArms` but passes
-        // a hardcoded `true` inside one arm-pose branch of a different model
-        // family, so it is not this mapping (see `mob_draws_bow_when_aggressive`
-        // for the illager gap).
+        // `zombified_piglin` was missing and got `HumanoidArms::Swinging`,
+        // i.e. a plain player arm swing where vanilla gives it the raised
+        // undead arms. `giant` is deliberately absent: the giant mob's
+        // renderer uses a bare humanoid model, not a zombie one, so its arms
+        // hang. The illager model also applies the zombie arm-drop animation
+        // but passes a hardcoded flag inside one arm-pose branch of a
+        // different model family, so it is not this mapping (see
+        // `mob_draws_bow_when_aggressive` for the illager gap).
         "zombie" | "husk" | "drowned" | "zombie_villager" | "zombified_piglin" => {
             HumanoidArms::Zombie
         }
@@ -468,38 +461,37 @@ pub fn humanoid_arms_for(model_name: &str) -> HumanoidArms {
     }
 }
 
-/// Whether this entity type's renderer maps **`isAggressive()` + a bow in the
-/// main hand** to `ArmPose::BowAndArrow` — i.e. whether vanilla draws it with
-/// `AbstractSkeletonRenderer` (issue #379).
+/// Whether this entity type's renderer maps **being aggressive with a bow in
+/// the main hand** to the bow-and-arrow arm pose — i.e. whether vanilla draws
+/// it with the skeleton family's renderer.
 ///
 /// # Why this is a per-type rule and not a general one
 ///
-/// `HumanoidModel.ArmPose` is chosen per *renderer*, not per model, and only
-/// `AbstractSkeletonRenderer.getArmPose` has this override
-/// (`AbstractSkeletonRenderer.java:38`):
+/// The arm pose is chosen per *renderer*, not per model, and only the
+/// skeleton-family renderer has this override:
 ///
 /// ```text
-/// mob.getMainArm() == arm && mob.isAggressive() && mob.getMainHandItem().is(Items.BOW)
-///     ? ArmPose.BOW_AND_ARROW : super.getArmPose(mob, arm)
+/// same arm as main hand && is aggressive && main-hand item is a bow
+///     ? bow-and-arrow pose : the base pose
 /// ```
 ///
-/// An aggressive **zombie** holding a bow does *not* get this pose — its renderer
-/// only overrides `getArmPose` for the spear/stab case — and neither does a
-/// pillager, whose whole arm-pose vocabulary is a different enum
-/// (`AbstractIllager.IllagerArmPose`) on a different model class. So applying
-/// "aggressive + bow ⇒ draw" to every mob would put half the hostile mobs in the
-/// world into a pose vanilla never shows.
+/// An aggressive **zombie** holding a bow does *not* get this pose — its
+/// renderer only overrides the arm pose for the spear/stab case — and neither
+/// does a pillager, whose whole arm-pose vocabulary is a different enum on a
+/// different model class. So applying "aggressive + bow ⇒ draw" to every mob
+/// would put half the hostile mobs in the world into a pose vanilla never
+/// shows.
 ///
 /// # The type set
 ///
-/// Every `AbstractSkeletonRenderer` subclass in the 26.2 client tree:
-/// `SkeletonRenderer`, `WitherSkeletonRenderer`, `StrayRenderer`,
-/// `BoggedRenderer`, `ParchedRenderer`. Keyed by entity type path (all five are
-/// registered types — ids 115, 147, 128, 16, 97 in the census dump), because that
-/// is what the extract stage has; note this is *not* the
-/// [`canonical_model_name`] space, where `bogged` currently aliases to
-/// `skeleton`. Rendering `bogged` through the skeleton mesh does not change which
-/// renderer class vanilla would have used, so the rule is keyed on the real type.
+/// Every subclass of the skeleton-family renderer in the 26.2 client tree:
+/// the plain skeleton, wither skeleton, stray, bogged and parched renderers.
+/// Keyed by entity type path (all five are registered types — ids 115, 147,
+/// 128, 16, 97 in the census dump), because that is what the extract stage
+/// has; note this is *not* the [`canonical_model_name`] space, where `bogged`
+/// currently aliases to `skeleton`. Rendering `bogged` through the skeleton
+/// mesh does not change which renderer vanilla would have used, so the rule
+/// is keyed on the real type.
 #[must_use]
 pub fn mob_draws_bow_when_aggressive(type_path: &str) -> bool {
     matches!(
@@ -508,42 +500,42 @@ pub fn mob_draws_bow_when_aggressive(type_path: &str) -> bool {
     )
 }
 
-/// Whether this entity type is drawn by `AvatarRenderer` — the **only** renderer
-/// whose `getArmPose` falls through to `ArmPose.ITEM` for a merely *held* item.
+/// Whether this entity type is drawn by the avatar renderer — the **only**
+/// renderer whose arm-pose fallthrough reaches an "item" pose for a merely
+/// *held* item.
 ///
 /// # "every armed mob raises an arm in vanilla" is false, and this is the record
 ///
-/// Two `getArmPose` implementations sit at the bottom of the humanoid chain, and
+/// Two arm-pose fallthroughs sit at the bottom of the humanoid chain, and
 /// they end differently:
 ///
 /// ```text
-/// AvatarRenderer.getArmPose      … return itemInHand.is(ItemTags.SPEARS)   ? SPEAR : ITEM;
-/// HumanoidMobRenderer.getArmPose … return itemHeldByArm.is(ItemTags.SPEARS) ? SPEAR : EMPTY;
+/// avatar renderer's fallthrough        … held item is a spear ? spear pose : item pose;
+/// humanoid-mob renderer's fallthrough  … held item is a spear ? spear pose : empty pose;
 /// ```
 ///
-/// A **player** holding a sword raises the arm; a **zombie** holding the same sword
-/// does not. Reading only `AvatarRenderer` — which is the file the `ITEM` pose is
-/// naturally discovered in, because it is the one that reaches it — yields the
-/// opposite conclusion, and it was written down here as "vanilla's fallthrough runs
-/// for any non-empty hand, so every armed mob has a raised arm in vanilla and hangs
-/// its arms here". The first clause is true *of that method*; the conclusion is
-/// wrong, because mobs never call that method.
+/// A **player** holding a sword raises the arm; a **zombie** holding the same
+/// sword does not. Reading only the avatar renderer — which is where the
+/// "item" pose is naturally discovered, because it is the one that reaches
+/// it — yields the opposite conclusion, and it was written down here as
+/// "vanilla's fallthrough runs for any non-empty hand, so every armed mob has
+/// a raised arm in vanilla and hangs its arms here". The first clause is true
+/// *of that renderer*; the conclusion is wrong, because mobs never reach it.
 ///
-/// Every humanoid-mob override delegates to `HumanoidMobRenderer`'s `EMPTY` tail:
-/// `AbstractSkeletonRenderer` (aggressive+bow, else `super`),
-/// `AbstractZombieRenderer` (stab, else `super`), `DrownedRenderer`
-/// (aggressive+trident, else `super`), and `PiglinRenderer`, whose pose comes from
-/// the piglin's own server-side enum. So hanging arms on an armed mob is **correct
-/// today**, and widening the fallthrough to all humanoids would have put every armed
+/// Every humanoid-mob override delegates to the humanoid-mob renderer's
+/// "empty" tail: the skeleton family (aggressive+bow, else fall through), the
+/// zombie family (stab, else fall through), the drowned (aggressive+trident,
+/// else fall through), and the piglin, whose pose comes from the piglin's own
+/// server-side enum. So hanging arms on an armed mob is **correct today**,
+/// and widening the fallthrough to all humanoids would have put every armed
 /// zombie, skeleton, husk and armour stand into a pose vanilla never shows.
 ///
 /// # The type set
 ///
-/// `EntityRenderDispatcher.getRenderer` routes exactly two classes to
-/// `AvatarRenderer`: `AbstractClientPlayer` and `ClientMannequin` — the two
-/// `Avatar` subclasses (`Player extends Avatar`, `Mannequin extends Avatar`). Both
-/// are registered entity types, so this is keyed on the type path the extract stage
-/// has, the same space as [`mob_draws_bow_when_aggressive`].
+/// Vanilla's renderer dispatch routes exactly two classes to the avatar
+/// renderer: the player and the mannequin — the two subclasses of its common
+/// base. Both are registered entity types, so this is keyed on the type path
+/// the extract stage has, the same space as [`mob_draws_bow_when_aggressive`].
 #[must_use]
 pub fn renderer_is_avatar(type_path: &str) -> bool {
     matches!(type_path, "player" | "mannequin")
@@ -553,32 +545,31 @@ pub fn renderer_is_avatar(type_path: &str) -> bool {
 // each is left rather than approximated. Kept as a comment beside the rule it
 // bounds, rather than as a doc on some function nobody calls.
 //
-// * **`DrownedRenderer.getArmPose`** (`DrownedRenderer.java:54`): aggressive +
-//   a trident ⇒ `THROW_TRIDENT`. The pose body is two lines
-//   (`HumanoidModel.java:359`), but `THROW_TRIDENT` is the first **one-handed**
-//   pose in vanilla's table (`ArmPose(false, true)`) and every pose
-//   [`crate::ArmPose`] models today is two-handed. One-handed means
-//   `HumanoidModel.setupAnim`'s `affectsOffhandPose` fork actually branches, and
-//   `Skeleton::pose_arms_for_item` does not implement that fork. Adding the pose
-//   without it would silently pose the wrong arm on an off-hand trident — the
-//   defect class #57 already hit once by folding the bow's two branches into one
-//   signed expression.
-// * **`IllagerRenderer`** (`IllagerRenderer.java:27`): copies `isAggressive` into
-//   its render state, but an illager's arms are driven by
-//   `AbstractIllager.IllagerArmPose` — a *different enum* on `IllagerModel`, a
-//   different model class — and the value is computed server-side per subclass
-//   (`Vindicator.java:107` returns `ATTACKING` when aggressive;
-//   `Pillager.java:135` the same, behind two crossbow cases). Reaching it needs
-//   an illager arm family in [`crate::entity_anim`], not a metadata bit.
-// * **`Mob.isLeftHanded`** (bit `0x02` of the same byte, decoded and unconsumed):
-//   flips `getMainArm()`, which flips which arm every pose applies to. See
+// * **The drowned's arm pose**: aggressive + a trident ⇒ a throw-trident
+//   pose. The pose body is two lines, but that pose is the first
+//   **one-handed** pose in vanilla's table and every pose
+//   [`crate::ArmPose`] models today is two-handed. One-handed means the base
+//   setup-animation step's offhand-pose fork actually branches, and
+//   `Skeleton::pose_arms_for_item` does not implement that fork. Adding the
+//   pose without it would silently pose the wrong arm on an off-hand
+//   trident — a defect class already hit once by folding the bow's two
+//   branches into one signed expression.
+// * **The illager renderer**: copies "is aggressive" into its render state,
+//   but an illager's arms are driven by a different enum on a different
+//   model class, and the value is computed server-side per subclass (the
+//   vindicator returns an "attacking" pose when aggressive; the pillager the
+//   same, behind two crossbow cases). Reaching it needs an illager arm
+//   family in [`crate::entity_anim`], not a metadata bit.
+// * **A mob's "left-handed" flag** (bit `0x02` of the same byte, decoded and
+//   unconsumed): flips which arm is the main arm, which flips which arm
+//   every pose applies to. See
 //   `lodestone_entity::metadata::MobFlags::left_handed`.
 //
-// What *is* covered besides the bow: [`humanoid_arms_for`]'s `HumanoidArms::Zombie`
-// family, whose arm drop reads the same flag
-// (`AnimationUtils.animateZombieArms`, `-PI/1.5` aggressive vs `-PI/2.25` not).
-// That was a second island — the field existed on `AnimInput` and every shell call
-// site passed `false`.
+// What *is* covered besides the bow: [`humanoid_arms_for`]'s
+// `HumanoidArms::Zombie` family, whose arm drop reads the same flag (a
+// steeper aggressive drop angle, `-PI/1.5`, vs a shallower one when not
+// aggressive, `-PI/2.25`). That was a second island — the field existed on
+// `AnimInput` and every shell call site passed `false`.
 
 /// Which [`HandPoseOverride`] a model's `translateToHand` needs, keyed by the
 /// same [`entity_models`] name [`humanoid_arms_for`] reads. The five corpus
@@ -673,13 +664,13 @@ pub fn entity_texture_candidates(model_name: &str) -> &'static [&'static str] {
 /// its own answer to "does this key/ordinal actually reach us", and guessing one
 /// wrong produces a confidently wrong skin rather than a missing one.
 ///
-/// # The wolf's tame state: wired end to end (issue #235)
+/// # The wolf's tame state: wired end to end
 ///
 /// The wire carries vanilla's tame bit:
 /// [`EntityMetadataUpdate`](lodestone_model::EntityMetadataUpdate) declares
 /// `tamed: Option<bool>` and `sitting: Option<bool>`, `v770`'s
-/// `read_entity_metadata` populates both from `TamableAnimal.DATA_FLAGS_ID`'s
-/// low bits under `MetadataClass::Tamable`, and `SimMob::snapshot`
+/// `read_entity_metadata` populates both from the tamable-mob shared-flags
+/// metadata field's low bits under `MetadataClass::Tamable`, and `SimMob::snapshot`
 /// (`crates/lodestone-server/src/mobs/mod.rs`) pushes them for wolf/cat/parrot/
 /// ocelot. `crates/lodestone-ecs/src/ingest.rs::apply_entity_metadata` now folds
 /// `tamed` into `lodestone_ecs::entity::Tamed` (per-entity, alongside `Baby` —
@@ -708,8 +699,8 @@ pub fn entity_variant_sheet(
 }
 
 /// [`entity_variant_sheet`], plus the one bit that function cannot yet
-/// receive: whether the entity is tamed (vanilla `TamableAnimal.DATA_FLAGS_ID
-/// & 4`, decoded into
+/// receive: whether the entity is tamed (vanilla's tamable-mob shared-flags
+/// metadata field, bit `4`, decoded into
 /// [`EntityMetadataUpdate::tamed`](lodestone_model::EntityMetadataUpdate::tamed)
 /// today — see [`entity_variant_sheet`]'s own doc for the wire/ECS chain and
 /// exactly which piece downstream still has to change to reach this
