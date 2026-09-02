@@ -1,9 +1,8 @@
-//! The team store (issue #48's remainder) — `/team`'s own state, behind
-//! [`TeamHandle`].
+//! The team store — `/team`'s own state, behind [`TeamHandle`].
 //!
 //! # What it is
 //!
-//! A vanilla `PlayerTeam` carries a display name, colour, prefix/suffix,
+//! The real team record carries a display name, colour, prefix/suffix,
 //! friendly-fire and see-friendly-invisibles flags, three visibility-style
 //! enums (nametag visibility, death-message visibility, collision rule), and
 //! a membership set. This models all of it — unlike
@@ -35,9 +34,9 @@
 //! independently-constructed store would be the island this crate has
 //! already paid twice to learn about.
 //!
-//! A holder is on **at most one team**, matching vanilla's
-//! `Scoreboard.addPlayerToTeam` (which silently removes the holder from
-//! whatever team it was on first) — [`TeamHandle::join`] does the same.
+//! A holder is on **at most one team**, matching the real join-team rule
+//! (which silently removes the holder from whatever team it was on first) —
+//! [`TeamHandle::join`] does the same.
 //!
 //! # How to change it
 //!
@@ -53,7 +52,7 @@
 //! # Dependencies
 //!
 //! `lodestone_model::text::TextColor` for the sixteen named colours (`None`
-//! stands for `reset`, vanilla's `ChatFormatting.RESET` — there is no
+//! stands for `reset`, the real formatting reset code — there is no
 //! seventeenth [`TextColor`](lodestone_model::text::TextColor) variant for
 //! it).
 
@@ -62,8 +61,8 @@ use std::sync::{Arc, Mutex};
 
 use lodestone_model::text::TextColor;
 
-/// `Team.Visibility` — `nametagVisibility` and `deathMessageVisibility` share
-/// this one enum in vanilla, and so do the two fields here.
+/// `nametagVisibility` and `deathMessageVisibility` share this one enum in
+/// the real record, and so do the two fields here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Visibility {
     #[default]
@@ -85,7 +84,7 @@ impl Visibility {
     }
 }
 
-/// `Team.CollisionRule`.
+/// A team's collision-rule setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CollisionRule {
     #[default]
@@ -120,7 +119,7 @@ pub struct Team {
     pub nametag_visibility: Visibility,
     pub death_message_visibility: Visibility,
     pub collision_rule: CollisionRule,
-    /// Insertion order, matching vanilla's own `LinkedHashSet` membership.
+    /// Insertion order, matching the real membership set's own ordering.
     pub members: Vec<String>,
 }
 
@@ -132,7 +131,7 @@ impl Team {
             color: None,
             prefix: String::new(),
             suffix: String::new(),
-            // `PlayerTeam`'s own constructor defaults, `Team.java`.
+            // The real team record's own constructor defaults.
             friendly_fire: true,
             see_friendly_invisibles: true,
             nametag_visibility: Visibility::Always,
@@ -167,8 +166,8 @@ impl TeamState {
 pub struct TeamHandle(Arc<Mutex<TeamState>>);
 
 /// Why a team operation could not run — every variant is a player-facing
-/// message, matching vanilla's own `CommandSyntaxException` text closely
-/// enough to be recognisable.
+/// message, matching the real command's own error text closely enough to be
+/// recognisable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TeamError {
     AlreadyExists(String),
@@ -189,7 +188,7 @@ impl TeamHandle {
         f(&mut self.0.lock().expect("team lock poisoned"))
     }
 
-    /// `TeamCommand.createTeam` — refuses a duplicate name, matching
+    /// The real create-team rule — refuses a duplicate name, matching
     /// [`crate::commands::scoreboard_store::ScoreboardHandle::add_objective`]'s
     /// own refusal shape.
     ///
@@ -206,7 +205,7 @@ impl TeamHandle {
         })
     }
 
-    /// `TeamCommand.deleteTeam` — also clears every membership row it held,
+    /// The real delete-team rule — also clears every membership row it held,
     /// which happens for free here since a member lives only inside its
     /// team's own `members` list.
     ///
@@ -236,7 +235,7 @@ impl TeamHandle {
         self.with(|state| state.team(name).cloned())
     }
 
-    /// `Scoreboard.addPlayerToTeam` — a holder is on at most one team, so
+    /// The real join-team rule — a holder is on at most one team, so
     /// this removes it from whatever team it was already on (a no-op if
     /// none) before adding it here, and does nothing if it is already a
     /// member of `name` itself.
@@ -258,7 +257,7 @@ impl TeamHandle {
         })
     }
 
-    /// `Scoreboard.removePlayerFromTeam` with no team named — removes
+    /// The real leave-team rule with no team named — removes
     /// `holder` from whichever team it is on, across every team (there can be
     /// at most one). Returns whether it was actually on one.
     pub fn leave(&self, holder: &str) -> bool {
@@ -374,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_match_vanillas_own_constructor() {
+    fn defaults_match_the_real_constructor() {
         let teams = TeamHandle::default();
         teams.add_team("red", "Red").unwrap();
         let team = teams.team("red").unwrap();

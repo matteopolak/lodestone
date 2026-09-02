@@ -1,7 +1,7 @@
-//! `/scoreboard`, from `ScoreboardCommand.java` (issue #48's remainder — the
-//! part of `/execute store`/`if score` that needed a real store to exist
-//! before either could be built; see `crate::commands::execute`'s module doc
-//! for the conditional half this unlocks).
+//! `/scoreboard` (the part of `/execute store`/`if score` that needed a real
+//! store to exist before either could be built; see
+//! `crate::commands::execute`'s module doc for the conditional half this
+//! unlocks).
 //!
 //! # What is built
 //!
@@ -19,7 +19,7 @@
 //!   doc names for criteria.
 //! * **`players enable`** (trigger criteria) — meaningless with no criteria
 //!   semantics modelled at all.
-//! * **Selector/`*` holders in `get`.** Vanilla's `get` target is
+//! * **Selector/`*` holders in `get`.** The real `get` target is
 //!   `score_holder` *single*; this uses [`ScoreHolderArg::single`], which
 //!   still accepts a selector or `*` grammatically — resolved down to
 //!   "exactly one holder" the same way `players operation`'s source is, and
@@ -44,7 +44,7 @@ use super::registrar::{ArgKey, Ctx, Registrar};
 use super::scoreboard_store::ScoreboardError;
 use super::CommandResult;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const SCOREBOARD_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {
@@ -76,11 +76,10 @@ fn register_objectives(registrar: &mut Registrar, scoreboard: lodestone_command:
     let add = registrar.literal(objectives, "add");
     let (name_node, name_key) = registrar.arg(add, "objective", ObjectiveArg);
     let (criteria_node, criteria_key) = registrar.arg(name_node, "criteria", ObjectiveCriteriaArg);
-    // No `<displayName>` — vanilla's is `ComponentArgument.textComponent()`
-    // (JSON text), which this crate has no textual parser for (see this
-    // module's doc). Defaulting the display name to the objective's own
-    // name is vanilla's own fallback (`ObjectiveCommand`'s no-display-name
-    // overload uses `PlainTextContents.LiteralContents(name)`).
+    // No `<displayName>` — the real argument is a JSON text component,
+    // which this crate has no textual parser for (see this module's doc).
+    // Defaulting the display name to the objective's own name is the real
+    // rule's own fallback for its no-display-name overload.
     registrar.exec(criteria_node, move |ctx| {
         let name = ctx.get(name_key).clone();
         let criteria = ctx.get(criteria_key).clone();
