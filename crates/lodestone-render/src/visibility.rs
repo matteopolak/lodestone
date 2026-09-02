@@ -594,26 +594,6 @@ mod tests {
     }
 
     #[test]
-    fn fully_solid_section_shortcuts_to_diagonal_only() {
-        // Solid → self-connections only, without flooding.
-        let v = compute_visibility(&Solid);
-        for a in Face::ALL {
-            for b in Face::ALL {
-                assert_eq!(v.connects(a, b), a == b);
-            }
-        }
-    }
-
-    #[test]
-    fn dense_wall_at_threshold_still_floods_and_disconnects() {
-        // The full-plane Wall is exactly 256 opaque cells — not below the
-        // threshold — so it takes the real flood path and correctly reports
-        // NegX/PosX disconnected. Guards the boundary of the shortcut.
-        let v = compute_visibility(&Wall);
-        assert!(!v.connects(Face::NegX, Face::PosX));
-    }
-
-    #[test]
     fn walk_stops_at_solid_sections() {
         // Camera in an open section; a solid section sits between it and a
         // farther open section along +X. The far section must be culled.

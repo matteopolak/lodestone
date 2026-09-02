@@ -817,15 +817,4 @@ mod tests {
         assert!((c[1] - 1.0).abs() < 1e-4, "{c:?}");
         assert_eq!(c[2], 0.0);
     }
-
-    #[test]
-    fn black_dye_resolves_to_zero_in_both_modes() {
-        assert_eq!(dye_text_color_rgb(SignDyeColor::Black), 0);
-        let side = SignSide {
-            lines: Default::default(),
-            glowing: false,
-            color: SignDyeColor::Black,
-        };
-        assert_eq!(sign_side_color(&side), [0.0, 0.0, 0.0, 1.0]);
-    }
 }

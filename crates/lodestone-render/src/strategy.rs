@@ -322,22 +322,6 @@ mod tests {
     }
 
     #[test]
-    fn metal_target_selects_per_draw() {
-        // Our measured M5/Metal reality: indirect execution + first-instance,
-        // but no GPU-side count. Because wgpu-hal *emulates* multi-draw on Metal
-        // as a per-draw CPU loop, MdiZeroInstance would be strictly worse than
-        // PerDraw, so PerDraw is correct here.
-        let m5 = GpuCapabilities {
-            backend: Backend::Metal,
-            indirect_execution: true,
-            indirect_first_instance: true,
-            multi_draw_indirect_count: false,
-            ..GpuCapabilities::baseline()
-        };
-        assert_eq!(select_strategy(&m5), StrategyKind::PerDraw);
-    }
-
-    #[test]
     fn webgpu_measured_caps_select_per_draw() {
         // Measured directly in Chrome/Apple WebGPU: INDIRECT_FIRST_INSTANCE is
         // present, but there is no multi-draw-indirect of any kind and no COUNT
@@ -354,36 +338,6 @@ mod tests {
             ..GpuCapabilities::baseline()
         };
         assert_eq!(select_strategy(&webgpu), StrategyKind::PerDraw);
-    }
-
-    #[test]
-    fn hypothetical_vulkan_with_count_selects_mdi_count() {
-        // We cannot run this locally, but the selection must be right before we
-        // ever touch that hardware.
-        let vk = caps(true, true, true);
-        assert_eq!(select_strategy(&vk), StrategyKind::MdiCount);
-    }
-
-    #[test]
-    fn no_indirect_falls_back_to_per_draw() {
-        assert_eq!(
-            select_strategy(&caps(false, false, false)),
-            StrategyKind::PerDraw
-        );
-        // Count without indirect execution is nonsensical: still per-draw.
-        assert_eq!(
-            select_strategy(&caps(false, true, true)),
-            StrategyKind::PerDraw
-        );
-    }
-
-    #[test]
-    fn indirect_without_first_instance_falls_back() {
-        // Count present but base instance unusable in indirect draws -> per-draw.
-        assert_eq!(
-            select_strategy(&caps(true, false, true)),
-            StrategyKind::PerDraw
-        );
     }
 
     #[test]

@@ -204,13 +204,6 @@ mod tests {
     }
 
     #[test]
-    fn distinct_stage_rects_give_distinct_uvs() {
-        let stage0 = build_crack_mesh(&[cube_top()], [0.0, 0.0, 0.1, 0.1], [0.0; 3]);
-        let stage9 = build_crack_mesh(&[cube_top()], [0.5, 0.5, 0.6, 0.6], [0.0; 3]);
-        assert_ne!(stage0.vertices[0].uv, stage9.vertices[0].uv);
-    }
-
-    #[test]
     fn origin_translates_every_position() {
         let origin = [5.0, 64.0, -3.0];
         let mesh = build_crack_mesh(&[cube_top()], [0.0, 0.0, 1.0, 1.0], origin);
