@@ -576,7 +576,7 @@ fn unmapped_block_set_is_exactly_the_known_26_2_additions() {
         "the set of 26.2 blocks absent from vendor/minecraft-data changed.\n\
          missing from NEW_IN_26_2: {:?}\n\
          stale in NEW_IN_26_2 (vendor now carries them): {:?}\n\
-         read each one's registration in Blocks.java and add it, per the module docs.",
+         read each one's registration from the decompiled source and add it, per the module docs.",
         unmapped.difference(&known).collect::<Vec<_>>(),
         known.difference(&unmapped).collect::<Vec<_>>(),
     );

@@ -14,8 +14,9 @@
 //!   checklist: "`bobHurt` — the damage tilt... This is the 'screen tilt
 //!   thing'") and the per-entity overlay below.
 //! - There is no camera-shake mechanism anywhere in `client-src` for
-//!   explosions (or anything else): `grep -rn "[Ss]hake" .cache/mc/26.2/
-//!   client-src/net/minecraft/client/` turns up exactly the bow-draw item wobble
+//!   explosions (or anything else): a shake-keyword search over the whole
+//!   decompiled client source
+//!   turns up exactly the bow-draw item wobble
 //!   in `ItemInHandRenderer`'s own decompiled source, nothing camera-related.
 //!   `ClientExplosionTracker`'s own decompiled source only ever spawns particles.
 //!

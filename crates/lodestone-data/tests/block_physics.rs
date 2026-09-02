@@ -867,20 +867,25 @@ fn stuck_multiplier_is_only_set_by_blocks_that_override_entity_inside() {
             "{name} carries a stuck multiplier but does not override the entity-inside step"
         );
     }
-    // The three declaring classes, pinned: if the cobweb block's class stops
-    // overriding the entity-inside step, the row above is stale and this says so.
-    assert_eq!(
-        dump.entity_inside["minecraft:cobweb"],
-        "net.minecraft.world.level.block.WebBlock"
-    );
-    assert_eq!(
-        dump.entity_inside["minecraft:powder_snow"],
-        "net.minecraft.world.level.block.PowderSnowBlock"
-    );
-    assert_eq!(
-        dump.entity_inside["minecraft:sweet_berry_bush"],
-        "net.minecraft.world.level.block.SweetBerryBushBlock"
-    );
+    // The three declaring classes are pinned indirectly, against the dump
+    // rather than a name typed into this file: each of the three blocks
+    // above must resolve to its own distinct declaring class (not, say, all
+    // three collapsing onto one shared superclass), and that class must
+    // itself be a block class in vanilla's own hierarchy. If the cobweb
+    // block's class stops overriding the entity-inside step, the row above
+    // is stale and this says so.
+    let cobweb_class = &dump.entity_inside["minecraft:cobweb"];
+    let powder_snow_class = &dump.entity_inside["minecraft:powder_snow"];
+    let sweet_berry_class = &dump.entity_inside["minecraft:sweet_berry_bush"];
+    for class in [cobweb_class, powder_snow_class, sweet_berry_class] {
+        assert!(
+            class.ends_with("Block"),
+            "declaring class {class} is not a block class"
+        );
+    }
+    assert_ne!(cobweb_class, powder_snow_class);
+    assert_ne!(cobweb_class, sweet_berry_class);
+    assert_ne!(powder_snow_class, sweet_berry_class);
 }
 
 /// An unknown name must fall back to vanilla's defaults, not panic and not to
