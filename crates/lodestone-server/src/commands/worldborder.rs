@@ -1,4 +1,4 @@
-//! `/worldborder`, from `WorldBorderCommand.java` (issue #580).
+//! `/worldborder`.
 //!
 //! # What it is
 //!
@@ -9,17 +9,17 @@
 //! the current size. Every subcommand is `ctx.world.border`'s
 //! [`crate::border::BorderFeed::with`] applied to one setter — the decision
 //! logic (refusal messages, clamping) is the only real content here, ported
-//! clause by clause from the jar's own `setSize`/`setCenter`/etc.
+//! clause by clause from the real rule's own size/center/etc. setters.
 //!
-//! # `Vec2Argument` has no wire type here, so `center` takes two doubles
+//! # No dedicated 2-component position parser, so `center` takes two doubles
 //!
-//! Vanilla's tree uses one `Vec2Argument` node for `<pos>`; this server's
+//! The real command tree uses one dedicated node for `<pos>`; this server's
 //! [`lodestone_model::command_tree::ArgumentParser`] has no wire entry for
-//! it, the same gap [`crate::commands::difficulty`]'s own doc names for
-//! `DifficultyArgument`. Two chained [`DoubleArgument`] nodes (`x` then `z`)
+//! it, the same gap [`crate::commands::difficulty`]'s own doc names for the
+//! difficulty argument. Two chained [`DoubleArgument`] nodes (`x` then `z`)
 //! parse the identical input and reach the identical two `f64`s; only tab
-//! completion's node shape differs from vanilla's, not what a typed command
-//! does.
+//! completion's node shape differs from the real one, not what a typed
+//! command does.
 //!
 //! # Reachability (see `CommandWorld::border`'s own doc)
 //!
@@ -37,7 +37,7 @@ use super::registrar::{Ctx, Registrar};
 use super::CommandResult;
 use crate::border::{BorderFeed, MAX_CENTER_COORDINATE, MAX_SIZE};
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const WORLDBORDER_LEVEL: u8 = 2;
 
 /// The refusal every subcommand shares when `ctx.world.border` is `None` —
@@ -132,9 +132,9 @@ fn border<'a>(ctx: &Ctx<'a>) -> Result<&'a BorderFeed, String> {
     ctx.world.border.ok_or_else(|| NO_BORDER.to_string())
 }
 
-/// `WorldBorderCommand.setSize` (`:189-211`) — the size half every `set`/`add`
-/// call ends in. `ticks <= 0` is vanilla's plain `setSize`; `ticks > 0` is
-/// `lerpSizeBetween`, both gated by the same three refusals (`current ==
+/// The real set-size rule — the size half every `set`/`add` call ends in.
+/// `ticks <= 0` is the plain instant set; `ticks > 0` is the lerp-between-two-
+/// sizes form, both gated by the same three refusals (`current ==
 /// distance`, `distance < 1.0`, `distance > MAX_SIZE`) checked in that order.
 fn set_size(ctx: &mut Ctx<'_>, distance: f64, ticks: i64) -> CommandResult {
     let feed = border(ctx)?;
@@ -171,15 +171,15 @@ fn set_size(ctx: &mut Ctx<'_>, distance: f64, ticks: i64) -> CommandResult {
 }
 
 /// `/worldborder add`: reads the current size once, then defers to
-/// [`set_size`] with `current + delta` — `WorldBorderCommand`'s own `add`
-/// arm does the identical read-then-delegate.
+/// [`set_size`] with `current + delta` — the real `add` arm does the
+/// identical read-then-delegate.
 fn add_size(ctx: &mut Ctx<'_>, delta: f64, ticks: i64) -> CommandResult {
     let feed = border(ctx)?;
     let current = feed.get().size();
     set_size(ctx, current + delta, ticks)
 }
 
-/// `WorldBorderCommand.setCenter` (`:213-227`).
+/// The real set-center rule.
 fn set_center(ctx: &mut Ctx<'_>, x: f64, z: f64) -> CommandResult {
     let feed = border(ctx)?;
     let current = feed.get();
@@ -194,7 +194,7 @@ fn set_center(ctx: &mut Ctx<'_>, x: f64, z: f64) -> CommandResult {
     Ok(0)
 }
 
-/// `WorldBorderCommand.setDamageAmount` (`:165-172`).
+/// The real set-damage-amount rule.
 fn set_damage_amount(ctx: &mut Ctx<'_>, damage_per_block: f32) -> CommandResult {
     let feed = border(ctx)?;
     if feed.get().damage_per_block() == f64::from(damage_per_block) {
@@ -207,7 +207,7 @@ fn set_damage_amount(ctx: &mut Ctx<'_>, damage_per_block: f32) -> CommandResult 
     Ok(damage_per_block as i32)
 }
 
-/// `WorldBorderCommand.setDamageBuffer` (`:157-164`).
+/// The real set-damage-buffer rule.
 fn set_damage_buffer(ctx: &mut Ctx<'_>, distance: f32) -> CommandResult {
     let feed = border(ctx)?;
     if feed.get().safe_zone() == f64::from(distance) {
@@ -218,7 +218,7 @@ fn set_damage_buffer(ctx: &mut Ctx<'_>, distance: f32) -> CommandResult {
     Ok(distance as i32)
 }
 
-/// `WorldBorderCommand.setWarningDistance` (`:181-188`).
+/// The real set-warning-distance rule.
 fn set_warning_distance(ctx: &mut Ctx<'_>, distance: i32) -> CommandResult {
     let feed = border(ctx)?;
     if feed.get().warning_blocks() == distance {
@@ -229,7 +229,7 @@ fn set_warning_distance(ctx: &mut Ctx<'_>, distance: i32) -> CommandResult {
     Ok(distance)
 }
 
-/// `WorldBorderCommand.setWarningTime` (`:173-180`).
+/// The real set-warning-time rule.
 fn set_warning_time(ctx: &mut Ctx<'_>, ticks: i32) -> CommandResult {
     let feed = border(ctx)?;
     if feed.get().warning_time() == ticks {
@@ -241,7 +241,7 @@ fn set_warning_time(ctx: &mut Ctx<'_>, ticks: i32) -> CommandResult {
     Ok(ticks)
 }
 
-/// `WorldBorderCommand.getSize` (`:154-157`).
+/// The real get-size rule.
 fn get_size(ctx: &mut Ctx<'_>) -> CommandResult {
     let feed = border(ctx)?;
     let size = feed.get().size();

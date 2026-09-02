@@ -1,16 +1,15 @@
-//! `/effect`, from `EffectCommand.java` — the producer that makes
-//! [`crate::mob_effects`] reachable.
+//! `/effect` — the producer that makes [`crate::mob_effects`] reachable.
 //!
-//! # The tree, as vanilla declares it
+//! # The tree, as the real command declares it
 //!
 //! ```text
-//! literal("effect").requires(LEVEL_GAMEMASTERS)
+//! literal("effect").requires(game-masters level)
 //!   ├─ literal("clear")                                     [executable]
-//!   │    └─ argument("targets", EntityArgument.entities())   [executable]
-//!   │         └─ argument("effect", ResourceArgument…)       [executable]
+//!   │    └─ argument("targets", any entity)                 [executable]
+//!   │         └─ argument("effect", a resource id)           [executable]
 //!   └─ literal("give")
-//!        └─ argument("targets", EntityArgument.entities())
-//!             └─ argument("effect", ResourceArgument…)       [executable: infinite, amplifier 0]
+//!        └─ argument("targets", any entity)
+//!             └─ argument("effect", a resource id)           [executable: infinite, amplifier 0]
 //!                  └─ argument("seconds", integer(1, …))     [executable]
 //!                       └─ argument("amplifier", integer(0, 255)) [executable]
 //!                            └─ argument("hideParticles", bool()) [executable]
@@ -29,25 +28,27 @@
 //!
 //! `give` down to `amplifier`, and `clear` at all three depths. Deliberately absent:
 //!
-//! * **`hideParticles`.** Purely presentational (`MobEffectInstance.visible`), and
-//!   `crate::mob_effects` does not model the presentational fields at all — see its
-//!   own doc for why. A node that parsed the flag and discarded it would be worse
-//!   than one that is not there.
-//! * **The duration `infinite` literal** vanilla accepts in place of `<seconds>`.
-//!   `EffectInstance` supports an infinite duration (`INFINITE_DURATION`) and the
-//!   two-argument `give` form uses it, which is vanilla's own default; only the
-//!   explicit spelling is missing.
-//! * **Non-player targets.** `EntityArgument.entities()` accepts mobs;
+//! * **`hideParticles`.** Purely presentational (a visibility flag on the
+//!   effect instance), and `crate::mob_effects` does not model the
+//!   presentational fields at all — see its own doc for why. A node that
+//!   parsed the flag and discarded it would be worse than one that is not
+//!   there.
+//! * **The duration `infinite` literal** the real command accepts in place
+//!   of `<seconds>`. An effect instance supports an infinite duration and
+//!   the two-argument `give` form uses it, which is the real default; only
+//!   the explicit spelling is missing.
+//! * **Non-player targets.** The real `<targets>` argument accepts mobs;
 //!   `Effect` is per-*player* by construction (`DirectedEffect` carries a profile
 //!   uuid), and `MobSim` holds no effect state. So this uses `players()`, and the
 //!   narrowing is visible in the wire tree rather than silent at runtime.
 //!
 //! # Why seconds, not ticks
 //!
-//! `EffectCommand` multiplies by 20 (`duration = seconds * 20`) and clamps the
-//! *seconds* argument, not the ticks. So the maximum is `1_000_000` seconds, i.e.
-//! 20,000,000 ticks — comfortably inside `i32`, which is why vanilla does not need a
-//! saturating multiply and this does not either.
+//! The real command multiplies by 20 (`duration = seconds * 20`) and clamps
+//! the *seconds* argument, not the ticks. So the maximum is `1_000_000`
+//! seconds, i.e. 20,000,000 ticks — comfortably inside `i32`, which is why
+//! the real rule does not need a saturating multiply and this does not
+//! either.
 
 use lodestone_command::{IntegerArgument, StringArgument};
 use lodestone_command_mc::EntityArg;
@@ -56,13 +57,13 @@ use super::effect::Effect;
 use super::registrar::{Ctx, Registrar};
 use super::CommandResult;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const EFFECT_LEVEL: u8 = 2;
 
-/// `EffectCommand`'s own `20` — the seconds-to-ticks factor.
+/// The real seconds-to-ticks factor.
 const TICKS_PER_SECOND: i32 = 20;
 
-/// The default `give` duration when no `<seconds>` is supplied. Vanilla's
+/// The default `give` duration when no `<seconds>` is supplied. The real
 /// two-argument form is infinite, not 30 seconds — a plausible wrong default that
 /// would make `/effect give @s minecraft:poison` a fixed-length effect.
 const DEFAULT_DURATION: i32 = crate::mob_effects::INFINITE_DURATION;
@@ -75,10 +76,10 @@ pub(super) fn register(registrar: &mut Registrar) {
     // ---- clear, executable at three depths -----------------------------------
     let clear = registrar.literal(effect, "clear");
     registrar.exec(clear, |ctx| {
-        // Bare `/effect clear` targets the sender. Vanilla's zero-argument overload is
-        // `clearEffects(source, Collections.singleton(source.getEntityOrException()))`
-        // — and `getEntityOrException` is exactly that: from the console there is no
-        // entity and the command fails rather than silently affecting nobody.
+        // Bare `/effect clear` targets the sender. The real zero-argument
+        // overload resolves the source to its own entity — and from the
+        // console there is no entity, so the command fails rather than
+        // silently affecting nobody.
         let Some(sender) = ctx.source.entity.clone() else {
             return Err("That command can only be used by a player".to_string());
         };
@@ -116,7 +117,7 @@ pub(super) fn register(registrar: &mut Registrar) {
     let (give_seconds, give_seconds_key) = registrar.arg(
         give_effect,
         "seconds",
-        // Vanilla's bounds are on the *seconds*, which is why no saturating multiply
+        // The real bounds are on the *seconds*, which is why no saturating multiply
         // is needed below.
         IntegerArgument::bounded(1, 1_000_000),
     );
@@ -147,7 +148,7 @@ pub(super) fn register(registrar: &mut Registrar) {
 /// Canonicalises an effect id the way the rest of this crate reads block and item
 /// names: a bare path gets the `minecraft:` namespace.
 ///
-/// Vanilla resolves through the `mob_effect` registry and refuses an unknown id.
+/// The real rule resolves through the `mob_effect` registry and refuses an unknown id.
 /// There is no such registry here, so an unknown id is accepted and simply does
 /// nothing — which is honest but worth knowing: `crate::mob_effects` ticks only the
 /// four periodic effects and stores the rest for a consumer that may not exist yet.
@@ -159,7 +160,7 @@ fn canonical_effect_id(raw: &str) -> String {
     }
 }
 
-/// `EffectCommand.giveEffect`.
+/// The real give-effect rule.
 fn give_effect_to(
     ctx: &mut Ctx<'_>,
     selector: &lodestone_command_mc::EntitySelector,
@@ -187,7 +188,7 @@ fn give_effect_to(
     Ok(i32::try_from(targets.len()).unwrap_or(i32::MAX))
 }
 
-/// `EffectCommand.clearEffects` / `clearEffect`.
+/// The real clear-effects/clear-one-effect rule.
 fn clear_effects(
     ctx: &mut Ctx<'_>,
     selector: &lodestone_command_mc::EntitySelector,
