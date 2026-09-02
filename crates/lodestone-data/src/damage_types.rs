@@ -7,7 +7,7 @@
 //! `effects`, `death_message_type`, and — the load-bearing part — **resolved
 //! tag membership**. Behaviour keys off tags, not off the type: whether a hit
 //! skips armour, ignores i-frames, sets you on fire or applies no knockback is
-//! a `DamageTypeTags` query in vanilla, so it is a
+//! a damage-type-tags query in vanilla, so it is a
 //! [`DamageType::is_in`] query here.
 //!
 //! # Provenance
@@ -32,8 +32,8 @@
 //!
 //! # `bypasses_cooldown` is real, and empty
 //!
-//! `DamageTypeTags.BYPASSES_COOLDOWN` declares the tag and
-//! `LivingEntity.hurtServer` gates the whole i-frame window on it —
+//! Vanilla's own damage-type-tags constant declares the tag and
+//! its own "hurt server" step gates the whole i-frame window on it —
 //! `if (this.invulnerableTime > 10.0F && !source.is(DamageTypeTags.BYPASSES_COOLDOWN))`
 //! — but **no data file for it exists in the jar**. It is a genuinely empty tag
 //! in vanilla 26.2: the mechanism exists and nothing opts into it. So this table
@@ -71,7 +71,7 @@ use crate::generated_damage_types::{
 
 pub use crate::generated_damage_types::{DAMAGE_TYPE_COUNT, DAMAGE_TYPE_TAG_COUNT};
 
-/// How a damage amount scales with world difficulty (`DamageScaling.java`).
+/// How a damage amount scales with world difficulty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DamageScaling {
     /// Never scaled.
@@ -84,7 +84,7 @@ pub enum DamageScaling {
 }
 
 impl DamageScaling {
-    /// The serialized name (`DamageScaling::getSerializedName`).
+    /// The serialized name (vanilla's own "get serialized name" accessor).
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -103,10 +103,10 @@ impl DamageScaling {
     }
 }
 
-/// The hurt animation/sound family a type plays (`DamageEffects.java`).
+/// The hurt animation/sound family a type plays.
 ///
-/// `effects` is `optionalFieldOf("effects", DamageEffects.HURT)` in
-/// `DamageType.DIRECT_CODEC`, so the 39 types with no `effects` key are
+/// `effects` is an optional codec field defaulting to `HURT` in
+/// vanilla's own damage-type direct codec, so the 39 types with no `effects` key are
 /// [`DamageEffects::Hurt`] — a real value, not a missing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DamageEffects {
@@ -125,7 +125,7 @@ pub enum DamageEffects {
 }
 
 impl DamageEffects {
-    /// The serialized name (`DamageEffects::getSerializedName`).
+    /// The serialized name (vanilla's own "get serialized name" accessor).
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -150,10 +150,10 @@ impl DamageEffects {
     }
 }
 
-/// Which death-message form a type uses (`DeathMessageType.java`).
+/// Which death-message form a type uses.
 ///
-/// Also `optionalFieldOf`, defaulting to [`DeathMessageType::Default`]
-/// (`DamageType`'s codec): only `fall`/`ender_pearl`/`stalagmite`-style
+/// Also an optional codec field, defaulting to [`DeathMessageType::Default`]
+/// (vanilla's own damage-type codec): only `fall`/`ender_pearl`/`stalagmite`-style
 /// fall variants and `bad_respawn_point` differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeathMessageType {
@@ -166,7 +166,7 @@ pub enum DeathMessageType {
 }
 
 impl DeathMessageType {
-    /// The serialized name (`DeathMessageType::getSerializedName`).
+    /// The serialized name (vanilla's own "get serialized name" accessor).
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -208,20 +208,20 @@ pub enum DamageTypeTag {
     BurnFromStepping = 5,
     /// Sets an armour stand on fire.
     BurnsArmorStands = 6,
-    /// Skips the armour-absorb stage (`LivingEntity.getDamageAfterArmorAbsorb`).
+    /// Skips the armour-absorb stage (vanilla's own "get damage after armor absorb" step).
     BypassesArmor = 7,
-    /// Ignores the i-frame window (`LivingEntity.hurtServer`).
+    /// Ignores the i-frame window (vanilla's own "hurt server" step).
     ///
     /// **Empty in vanilla 26.2** — a code constant with no data file. See the
     /// module docs; the emptiness is asserted by the test suite.
     BypassesCooldown = 8,
-    /// Skips both Resistance and enchantment protection (`LivingEntity.getDamageAfterMagicAbsorb`).
+    /// Skips both Resistance and enchantment protection (vanilla's own "get damage after magic absorb" step).
     BypassesEffects = 9,
-    /// Skips only enchantment protection (`LivingEntity.getDamageAfterMagicAbsorb`).
+    /// Skips only enchantment protection (vanilla's own "get damage after magic absorb" step).
     BypassesEnchantments = 10,
-    /// Hurts an entity flagged invulnerable (`Entity.isInvulnerableToBase`).
+    /// Hurts an entity flagged invulnerable (vanilla's own "is invulnerable to base" check).
     BypassesInvulnerability = 11,
-    /// Skips only the Resistance effect (`LivingEntity.getDamageAfterMagicAbsorb`).
+    /// Skips only the Resistance effect (vanilla's own "get damage after magic absorb" step).
     BypassesResistance = 12,
     /// Cannot be blocked with a shield.
     BypassesShield = 13,

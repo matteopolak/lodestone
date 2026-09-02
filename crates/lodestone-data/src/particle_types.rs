@@ -24,24 +24,24 @@ pub fn particle_type_name(id: i32) -> Option<&'static str> {
 }
 
 /// Whether a network particle-type id has **no** per-particle payload beyond
-/// the type id itself — vanilla's `SimpleParticleType`, as opposed to a
-/// `ParticleType<T>` whose `ParticleOptions.STREAM_CODEC` reads further bytes
+/// the type id itself — vanilla's own simple-particle-type marker, as opposed to a
+/// payload-carrying particle type whose own stream codec reads further bytes
 /// (dust colour, a block state, an item stack, …).
 ///
-/// Derived from `ParticleTypes.java`'s own two `register` overloads: the
+/// Derived from vanilla's own particle-type registration source's own two `register` overloads: the
 /// two-argument form (`register(name, overrideLimiter)`) constructs a
-/// `SimpleParticleType`, the four-argument form (`register(name,
-/// overrideLimiter, codec, streamCodec)`) constructs a `ParticleType<T>` with
+/// simple particle type, the four-argument form (`register(name,
+/// overrideLimiter, codec, streamCodec)`) constructs a payload-carrying particle type with
 /// a real payload codec. Argument count is unambiguous in the source and this
 /// table is exhaustive over the 26.2 registry (125 entries, 103 simple).
 ///
 /// This is *not* itself proof a given packet's field is safe to skip on the
 /// strength of this id alone — the id still has to be at a fixed byte offset,
 /// which only holds for a field whose own codec is exactly
-/// `ByteBufCodecs.registry(Registries.PARTICLE_TYPE).dispatch(...)` with no
-/// preceding length prefix, e.g. `ClientboundExplodePacket`'s
-/// `explosionParticle` or `SetEntityMotionPacket`'s `SER_PARTICLE`/
-/// `SER_PARTICLES` metadata fields. A caller that recognises the id this way
+/// a registry-dispatch codec over the particle-type registry with no
+/// preceding length prefix, e.g. the clientbound explode packet's own
+/// explosion-particle field or the entity-motion packet's metadata
+/// particle field(s). A caller that recognises the id this way
 /// still consumes exactly zero further bytes for it — nothing else to read,
 /// by construction.
 ///
@@ -49,7 +49,8 @@ pub fn particle_type_name(id: i32) -> Option<&'static str> {
 /// the same fail-closed convention [`particle_type_name`] uses.
 ///
 /// Regenerate by re-running the derivation this table was built from: match
-/// every `register("<name>", <bool>` call in `ParticleTypes.java` for the
+/// every `register("<name>", <bool>` call in vanilla's own particle-type
+/// registration source for the
 /// pinned decompile, split on whether the call has two or four arguments, and
 /// join by name against `registries.json`'s `minecraft:particle_type`
 /// `protocol_id`s.
@@ -61,10 +62,11 @@ pub fn is_simple_particle_type(id: i32) -> bool {
         .unwrap_or(false)
 }
 
-/// Indexed by network particle-type id, `true` for a `SimpleParticleType` —
+/// Indexed by network particle-type id, `true` for a simple particle type —
 /// see [`is_simple_particle_type`]. Hand-derived (not `xtask gen-registries`
 /// output): the generator only ever produces id→name tables, and a
-/// simple/complex classification needs `ParticleTypes.java`'s call-site shape,
+/// simple/complex classification needs vanilla's own particle-type
+/// registration source's call-site shape,
 /// which is source structure rather than registry data.
 #[rustfmt::skip]
 const PARTICLE_TYPE_IS_SIMPLE: [bool; PARTICLE_TYPE_COUNT as usize] = [
@@ -200,11 +202,12 @@ mod tests {
     use super::*;
 
     /// Every id this test names is cross-checked against the pinned 26.2
-    /// decompile's `ParticleTypes.java` at the time this table was built —
+    /// decompile's own particle-type registration source at the time this table was built —
     /// see [`PARTICLE_TYPE_IS_SIMPLE`]'s own doc for the exact derivation.
     /// `gust_emitter_small` (id 34) is the one that matters operationally:
-    /// `WindCharge.explode` sends it as `explode`'s `explosionParticle`, and
-    /// it is a `SimpleParticleType` exactly like `explosion_emitter`/
+    /// vanilla's own wind-charge explode step sends it as its own
+    /// explosion-particle field, and
+    /// it is a simple particle type exactly like `explosion_emitter`/
     /// `explosion`, so a decoder that only allowlists the latter two rejects
     /// a perfectly byte-skippable id.
     #[test]

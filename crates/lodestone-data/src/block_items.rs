@@ -3,8 +3,8 @@
 //!
 //! # Why this is a census and not a name match
 //!
-//! Vanilla's `BlockItem` holds an explicit `Block` reference
-//! (`BlockItem.getBlock()`) and is registered against an
+//! Vanilla's own block-item class holds an explicit block reference
+//! (its own "get block" accessor) and is registered against an
 //! item id that need not match it. "The item places the block of the same
 //! name" is therefore a heuristic, and it is measurably wrong: against the
 //! committed dump it disagrees on **16 of the 1,537 items**, in both
@@ -12,26 +12,26 @@
 //!
 //! * **14 false negatives** — a real placeable item it declines outright,
 //!   because the block has a different name. `minecraft:redstone` places
-//!   `minecraft:redstone_wire` (`Items.REDSTONE`); `minecraft:string`
+//!   `minecraft:redstone_wire`; `minecraft:string`
 //!   places `minecraft:tripwire`; `wheat_seeds`→`wheat`,
 //!   `cocoa_beans`→`cocoa`, `carrot`→`carrots`, `potato`→`potatoes`,
 //!   `pumpkin_seeds`→`pumpkin_stem`, `melon_seeds`→`melon_stem`.
 //! * **2 false positives** — a block of that name exists but the item is not a
-//!   `BlockItem` at all, so a name match would place a block for an item that
+//!   block item at all, so a name match would place a block for an item that
 //!   places nothing. `minecraft:wheat` is the crop's *drop*
-//!   (`Items.WHEAT`, a plain `registerItem`) while `minecraft:wheat` the
+//!   (a plain item registration, not a block item) while `minecraft:wheat` the
 //!   block is the crop; and `minecraft:air`.
 //!
 //! A false positive is the worse failure, because it places a block the player
 //! never asked for — the same class of defect as writing `minecraft:stone` for
 //! everything, just rarer.
 //!
-//! # Scope: `BlockItem`, and the block, not its state
+//! # Scope: block items, and the block, not its state
 //!
 //! Two deliberate cuts:
 //!
-//! * **Only `BlockItem` counts as placing a block.** Items that put something
-//!   into the world by another mechanism — `BucketItem` placing a fluid, spawn
+//! * **Only a block item counts as placing a block.** Items that put something
+//!   into the world by another mechanism — a bucket item placing a fluid, spawn
 //!   eggs and minecarts spawning entities, `flint_and_steel` lighting a fire —
 //!   report `None` here. Each needs its own mechanism, and folding them in
 //!   would be a hand-written guess wearing generated clothes.
@@ -56,7 +56,7 @@ use crate::item::Item;
 pub use generated::ITEM_COUNT;
 
 /// The block that the item with **network registry id** `id` places, or `None`
-/// when that item places no block — either because it is not a `BlockItem`
+/// when that item places no block — either because it is not a block item
 /// (a sword, a bucket, a spawn egg) or because `id` is outside
 /// `0..`[`ITEM_COUNT`].
 ///
@@ -105,16 +105,16 @@ pub fn block_placed_by(item: &str) -> Option<Block> {
 }
 
 /// The **inverse** of [`block_for_item_id`]: the item that picking `block`
-/// yields — vanilla's `Block.asItem()` (`Item.byBlock(this)`), which is what
-/// `BlockBehaviour.getCloneItemStack`'s default `new ItemStack(this.asItem())`
+/// yields — vanilla's own "block as item" accessor, which is what
+/// its own "get clone item stack" default step
 /// bottoms out in, and therefore what pick-block (middle-click) resolves for
-/// every block with no `getCloneItemStack` override.
+/// every block with no override of that step.
 ///
-/// `None` for a block with no registered `BlockItem` at all — air, fire,
+/// `None` for a block with no registered block item at all — air, fire,
 /// fluids, redstone wire, portal blocks, and every other block that is placed
-/// by some mechanism other than right-clicking a `BlockItem`. That is exactly
-/// vanilla's own answer: `Item.byBlock` for such a block returns the sentinel
-/// `Items.AIR`, and `getCloneItemStack`'s caller discards an empty stack — so
+/// by some mechanism other than right-clicking a block item. That is exactly
+/// vanilla's own answer: its own "item by block" accessor for such a block returns the sentinel
+/// air item, and its own "get clone item stack" caller discards an empty stack — so
 /// reporting `None` here rather than a fake `minecraft:air` item spares every
 /// caller from re-deriving "empty" from a specific item value.
 ///
@@ -122,21 +122,21 @@ pub fn block_placed_by(item: &str) -> Option<Block> {
 ///
 /// This is **not** a second hand-maintained census: `BLOCK_FOR_ITEM` already
 /// carries the whole item→block relation, and vanilla registers each block
-/// through at most one `BlockItem`, so the reverse mapping is a pure function
+/// through at most one block item, so the reverse mapping is a pure function
 /// of the forward one. Computed once behind a [`std::sync::OnceLock`] (1,196
 /// entries, one linear pass over `BLOCK_FOR_ITEM`) rather than duplicated as a
 /// second generated file, so the two directions cannot independently drift —
 /// see `crate::block_states::block_state_index`'s identical
 /// compute-once-from-the-generated-table shape.
 ///
-/// # Scope cut: the block, never a `getCloneItemStack` override
+/// # Scope cut: the block, never a "get clone item stack" override
 ///
 /// Like [`block_for_item`]'s own "block, never state" cut, this answers only
 /// the *default* clone-item-stack. Real vanilla overrides it per block for
 /// crops (a wheat *block* clones to `wheat_seeds`, not itself), flower pots
 /// (clones the potted plant), banners (clones the banner entity's pattern
 /// data), beehives, candle cakes, and a dozen more — each one a distinct
-/// `BlockBehaviour.getCloneItemStack` override this crate has no per-block
+/// per-block override this crate has no per-block
 /// model for. Callers that need one of those need their own lookup; this
 /// function is deliberately the base case only, the same "generator-derived
 /// default, not the full override set" cut this module already makes for
@@ -150,8 +150,8 @@ pub fn item_for_block(block: Block) -> Option<Item> {
             let Some(placed) = generated::BLOCK_FOR_ITEM[id as usize] else {
                 continue;
             };
-            // Vanilla registers each block through at most one `BlockItem`
-            // (`Items.registerBlock` is called once per block), so the first
+            // Vanilla registers each block through at most one block item
+            // (its own "register block" call is made once per block), so the first
             // writer to a slot is the only writer in practice; keeping it
             // rather than overwriting is a defensive tie-break, not a
             // modelled choice.
