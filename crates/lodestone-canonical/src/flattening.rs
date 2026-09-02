@@ -1,7 +1,7 @@
 //! Pre-Flattening `id:meta` (protocol 340 / Minecraft 1.12.2) &rarr; modern
 //! block-state lookup: the table multi-version support asked for as the
 //! forcing function, built and verified against the real 1.13.2
-//! server jar's own `DataFixerUpper` flattening fix (the same conversion
+//! server jar's own world-upgrade flattening step (the same conversion
 //! vanilla itself runs to upgrade a pre-1.13 world) rather than written by
 //! hand or trusted blindly from a community dataset.
 //!
@@ -32,9 +32,9 @@
 //! - [`LegacyBlockState::RequiresAdditionalContext`] — vanilla's own
 //!   flattening fix could not resolve identity from `id:meta` alone. Two
 //!   confirmed families: flower pots (old id 140 — the contained plant is a
-//!   TileEntity field, not a meta value; all 16 metas collapse to the same
+//!   block-entity field, not a meta value; all 16 metas collapse to the same
 //!   placeholder `potted_cactus` in vanilla's own table) and skulls (old id
-//!   144 — type/rotation are TileEntity fields; vanilla's own table literally
+//!   144 — type/rotation are block-entity fields; vanilla's own table literally
 //!   leaves its internal placeholder string `%%FILTER_ME%%` in the Name
 //!   field for every skull meta). A third family — the upper half of double
 //!   plants (old id 175, metas 8-11; species is read from the paired lower
@@ -53,8 +53,8 @@
 //!
 //! # What this table is *not* authoritative for
 //!
-//! This is vanilla's own **first** flattening step (`DataFixerUpper` schema
-//! ~V100), not the final word on 1.13.2 spelling. A handful of resolved
+//! This is vanilla's own **first** flattening step (an early schema step in
+//! its world-upgrade pipeline), not the final word on 1.13.2 spelling. A handful of resolved
 //! names/property keys are the **intermediate** snapshot-era spelling that
 //! this one schema step produces, later renamed by separate, unrelated fixes
 //! chained further down the same pipeline — confirmed, not guessed: the
@@ -103,7 +103,7 @@ pub enum LegacyBlockState {
     /// to make that substitution for you.
     NoTableEntry,
     /// Vanilla's own flattening fix could not determine identity from
-    /// `id:meta` alone (TileEntity-dependent — flower pot contents or skull
+    /// `id:meta` alone (block-entity-dependent — flower pot contents or skull
     /// type/rotation). See the module docs for the two families this crate
     /// currently detects.
     RequiresAdditionalContext,
