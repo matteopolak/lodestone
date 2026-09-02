@@ -3056,9 +3056,9 @@ struct ProjectileMeta {
     /// Load-bearing for the impact pass, not bookkeeping: a projectile is spawned
     /// at its shooter's eye, *inside* the shooter's own bounding box, so without
     /// this a skeleton's first arrow strikes the skeleton. Vanilla's own guard is
-    /// two-part — `Projectile.canHitEntity` refuses the owner until
-    /// `checkLeftOwner` has seen the projectile clear it, and
-    /// `ProjectileUtil.computeMargin` keeps the hitbox at zero inflation for the
+    /// two-part — its own "can hit entity" check refuses the owner until
+    /// a "has left owner" check has seen the projectile clear it, and
+    /// vanilla's own margin computation keeps the hitbox at zero inflation for the
     /// first two ticks — and this is the first half.
     owner: Option<i32>,
     /// The thrown stack's raw `minecraft:potion` network id
@@ -3086,13 +3086,14 @@ struct ItemState {
     motion: ItemMotion,
 }
 
-/// One live `ExperienceOrb`.
+/// One live experience orb.
 ///
 /// # `value` and `count` are different numbers and both are player-visible
 ///
-/// `value` is `DATA_VALUE`: the points **one** absorption pays out, and the only
-/// field on the wire. `count` is `ExperienceOrb.count`, how many orbs this single
-/// entity stands for — `merge` adds the absorbed orb's count and `playerTouch`
+/// `value` is vanilla's own value metadata field: the points **one** absorption pays out, and the only
+/// field on the wire. `count` is vanilla's own orb-count field, how many orbs this single
+/// entity stands for — vanilla's own merge step adds the absorbed orb's count and its
+/// own player-touch handler
 /// decrements it, discarding the entity at zero. So a merged orb is one entity, one
 /// texture frame, and several separate absorptions of `value` points each.
 ///
@@ -3105,32 +3106,32 @@ struct ItemState {
 /// [`ItemMotion`] is used purely as the position/velocity/`on_ground` triple, because
 /// [`settle_entity`] already resolves that triple against real block shapes.
 /// [`ItemMotion::tick`] is **not** called for an orb: an item's gravity is 0.04 and
-/// its landing bounce is `velocity.y *= -0.5`, while `ExperienceOrb.getDefaultGravity`
+/// its landing bounce is `velocity.y *= -0.5`, while vanilla's own orb-gravity getter
 /// is `0.03` and its bounce is `-fallSpeed * 0.4` off the *pre-move* fall speed. See
-/// [`MobSim::tick_orbs`], which transcribes `ExperienceOrb.tick` in its own order.
+/// [`MobSim::tick_orbs`], which transcribes vanilla's own orb per-tick update in its own order.
 #[derive(Debug, Clone)]
 struct OrbState {
     uuid: Uuid,
-    /// `ExperienceOrb.DATA_VALUE` — points per absorption.
+    /// Vanilla's own value metadata field — points per absorption.
     value: i32,
-    /// `ExperienceOrb.count` — absorptions remaining before the entity is discarded.
+    /// Vanilla's own orb-count field — absorptions remaining before the entity is discarded.
     count: i32,
-    /// `ExperienceOrb.age`, in ticks. Discarded at [`ORB_LIFETIME`], and reset to `0`
+    /// Vanilla's own age field, in ticks. Discarded at [`ORB_LIFETIME`], and reset to `0`
     /// by a merge so a pile does not expire on its oldest member's clock.
     age: i32,
     motion: ItemMotion,
 }
 
-/// Wire identity plus motion for one live `FallingBlockEntity` — the
+/// Wire identity plus motion for one live falling-block entity — the
 /// falling-block analogue of [`ItemState`].
 ///
 /// The `state` string is the block the entity is *imitating*
-/// (`FallingBlockEntity.blockState`) and is what goes back into the world on
-/// landing. It also resolves the `ADD_ENTITY` object-data field —
-/// `FallingBlockEntity.getAddEntityPacket` passes
-/// `Block.getId(this.getBlockState())` — which is the **only** channel a client
-/// learns what a falling block looks like: `defineSynchedData` registers
-/// `DATA_START_POS` and nothing else, so the state is never in an entity-metadata
+/// (vanilla's own block-state field) and is what goes back into the world on
+/// landing. It also resolves the add-entity packet's own object-data field —
+/// vanilla's own add-entity-packet builder passes
+/// the block-state id — which is the **only** channel a client
+/// learns what a falling block looks like: vanilla's own metadata registration registers
+/// only the start-position field and nothing else, so the state is never in an entity-metadata
 /// packet. A falling block streamed with object data `0` draws as whatever state
 /// id `0` happens to be, silently, exactly as an item entity with no reported
 /// stack drew nothing.
@@ -3199,49 +3200,50 @@ pub struct MobSim<'w> {
     /// (`(orb.getId() - id) % 40 == 0`), which a version-free registry that does not
     /// own ids structurally cannot express.
     orbs: HashMap<i32, OrbState>,
-    /// The `nextInt(40)` draw `ExperienceOrb.tryMergeToExisting` makes per spawned
+    /// The bounded-int-under-40 draw vanilla's own orb-merge attempt makes per spawned
     /// denomination, on its own stream so awarding XP cannot shift which roll a mob
     /// spawn or a block drop sees.
     orb_rng: SpawnRng,
-    /// `Mob.populateDefaultEquipmentSlots`'s own `RandomSource` draws — the
+    /// Vanilla's own default-equipment-population step's own random draws — the
     /// armour-upgrade roll and each species' weapon roll — on its own stream
     /// for [`orb_rng`](Self::orb_rng)'s reason: rolling a drowned's trident
     /// must not shift which denomination an orb merges into or which roll a
     /// despawn check sees.
     equipment_rng: SpawnRng,
-    /// `Goat.finalizeSpawn`'s own `nextFloat() < 0.1F` pre-broken-horn roll,
-    /// plus the `nextBoolean()` that picks which horn — on its own stream
+    /// Vanilla's own goat spawn-finalization's own `< 0.1` pre-broken-horn roll,
+    /// plus the coin flip that picks which horn — on its own stream
     /// for [`orb_rng`](Self::orb_rng)'s reason.
     goat_horn_rng: SpawnRng,
-    /// `Zombie.finalizeSpawn`'s own door-breaking roll
-    /// (`this.setCanBreakDoors(random.nextFloat() < difficultyModifier * 0.1F)`),
+    /// Vanilla's own zombie spawn-finalization's own door-breaking roll
+    /// (a `< difficultyModifier * 0.1` float draw sets the can-break-doors flag),
     /// covering the whole zombie family — on its own stream for
     /// [`orb_rng`](Self::orb_rng)'s reason: rolling whether a zombie can open
     /// doors must not shift which denomination an orb merges into or which
     /// roll a despawn check sees.
     door_rng: SpawnRng,
-    /// `DifficultyInstance.getSpecialMultiplier()` fed to every spawn's
+    /// Vanilla's own "special difficulty multiplier" getter fed to every spawn's
     /// [`lodestone_entity::spawn_equipment::populate_default_equipment_slots`]
     /// call. `0.0` by default — vanilla's own value for a fresh world's
     /// effective difficulty (`< 2.0`) — so armour never rolls until a caller
     /// wires a real regional-difficulty reading through
     /// [`set_spawn_difficulty`](Self::set_spawn_difficulty). The drowned's
-    /// trident roll is independent of this (`Drowned` does not call `super`),
+    /// trident roll is independent of this (the drowned does not call its
+    /// parent's version),
     /// so it works with no wiring at all.
     spawn_special_multiplier: f32,
-    /// `getDifficulty() == Difficulty.HARD`, the second (non-continuous) input
+    /// Vanilla's own "difficulty is hard" check, the second (non-continuous) input
     /// [`base_armor_roll`](lodestone_entity::spawn_equipment::base_armor_roll)
     /// needs alongside `spawn_special_multiplier` — see that function's own
     /// doc for why a saturated `special_multiplier` does not imply this.
     /// `false` by default.
     spawn_hard_difficulty: bool,
-    /// `level.isSpawningMonsters()` — the `spawn_mobs` game rule, fed
+    /// Vanilla's own "is spawning monsters" check — the `spawn_mobs` game rule, fed
     /// alongside [`spawn_hard_difficulty`](Self::spawn_hard_difficulty) since
-    /// `Zombie.hurtServer`'s reinforcement call gates on both. `false` by
+    /// vanilla's own zombie hurt-handler's reinforcement call gates on both. `false` by
     /// default, so an unwired caller sees zero reinforcements rather than
     /// silently-always-on ones.
     spawn_monsters_enabled: bool,
-    /// `Zombie.hurtServer`'s own `RandomSource` draw for the reinforcement
+    /// Vanilla's own zombie hurt-handler's own random draw for the reinforcement
     /// chance roll — on its own stream for [`orb_rng`](Self::orb_rng)'s
     /// reason: whether a hit zombie calls for backup must not shift which
     /// denomination an orb merges into or which roll a despawn check sees.
@@ -3333,10 +3335,10 @@ pub struct MobSim<'w> {
     /// owns no connection). Drained by
     /// [`take_entity_animations`](Self::take_entity_animations).
     ///
-    /// Two packets, not one, because vanilla uses two: the hurt flash is
-    /// `ClientboundHurtAnimationPacket` and the fall-over is
-    /// `ClientboundEntityEventPacket` byte 3
-    /// (`LivingEntity.die`'s `broadcastEntityEvent`). Before this a mob could be
+    /// Two packets, not one, because vanilla uses two: the hurt flash is the
+    /// `HURT_ANIMATION` packet and the fall-over is
+    /// the `ENTITY_EVENT` packet's byte 3
+    /// (vanilla's own death handler broadcasts that entity-status event). Before this a mob could be
     /// beaten to death and simply *vanish* — no flash, no tip-over — because
     /// `ServerProtocol` had no encoder for either.
     pending_animations: Vec<MobAnimation>,
@@ -3409,8 +3411,8 @@ pub struct MobSim<'w> {
     /// [`spawn_species`](Self::spawn_species) would give it a mob's component set
     /// and produce a boat that *wanders*. It also has to stop being
     /// server-driven the instant a player sits in it —
-    /// `Entity.isClientAuthoritative()` delegates to the controlling passenger
-    /// and `Player.isClientAuthoritative()` is `true` — which is a property no
+    /// vanilla's own generic "is client authoritative" check delegates to the controlling passenger
+    /// and its own player-specific override is `true` — which is a property no
     /// mob has.
     ///
     /// A plain map for the reason [`falling_blocks`](Self::falling_blocks) is
@@ -3426,16 +3428,16 @@ pub struct MobSim<'w> {
     /// entity id. See [`TrackedMinecart`] for the shape and `mobs::minecart`'s
     /// own module doc for the physics.
     minecarts: HashMap<i32, TrackedMinecart>,
-    /// The `random.nextDouble()` draw a fresh `PrimedTnt`'s launch direction
-    /// makes (`PrimedTnt`'s three-argument constructor), on its own stream for
+    /// The `random.nextDouble()` draw a fresh primed-tnt entity's launch direction
+    /// makes (vanilla's own three-argument constructor), on its own stream for
     /// [`orb_rng`](Self::orb_rng)'s reason: priming TNT must not shift which
     /// roll a mob spawn, a block drop or anything else sees.
     tnt_rng: SpawnRng,
-    /// Vanilla `PatrolSpawner.nextTick` — ticks remaining before the next
+    /// Vanilla's own patrol-spawner "next tick" field — ticks remaining before the next
     /// patrol-spawn attempt, decremented once per
     /// [`run_patrol_spawn_cycle`](Self::run_patrol_spawn_cycle) call
-    /// regardless of whether it does anything, exactly as vanilla's
-    /// `CustomSpawner.tick` decrements its own countdown every world tick.
+    /// regardless of whether it does anything, exactly as vanilla's own
+    /// generic custom-spawner update decrements its own countdown every world tick.
     patrol_next_tick: i32,
     /// The `random.nextInt(…)` draws [`run_patrol_spawn_cycle`](Self::run_patrol_spawn_cycle)
     /// makes, on its own stream for the same isolation reason
@@ -3443,19 +3445,19 @@ pub struct MobSim<'w> {
     /// patrol-spawn attempt must not shift which roll a mob spawn, a despawn
     /// pass or a tame attempt sees.
     patrol_rng: SpawnRng,
-    /// Vanilla `WanderingTraderSpawner.tickDelay` — ticks remaining before
+    /// Vanilla's own wandering-trader-spawner "tick delay" field — ticks remaining before
     /// the next 1200-tick poll, decremented once per
     /// [`run_wandering_trader_spawn_cycle`](Self::run_wandering_trader_spawn_cycle)
     /// call regardless of outcome, exactly as `patrol_next_tick` is.
     trader_tick_delay: i32,
-    /// Vanilla's saved-data `WanderingTraderData.spawnDelay` — the
+    /// Vanilla's own saved-data "spawn delay" field — the
     /// 24000-tick delay nested inside the 1200-tick poll. This crate has no
     /// save/load for it (see the doc comment on
     /// [`run_wandering_trader_spawn_cycle`](Self::run_wandering_trader_spawn_cycle)),
     /// so it resets with every fresh `MobSim` rather than surviving a
     /// restart.
     trader_spawn_delay: i32,
-    /// Vanilla's saved-data `WanderingTraderData.spawnChance` — climbs 25→75
+    /// Vanilla's own saved-data "spawn chance" field — climbs 25→75
     /// by 25 each time the outer roll is attempted and misses, and resets to
     /// 25 on an actual spawn.
     trader_spawn_chance: i32,
@@ -3574,22 +3576,23 @@ pub struct MobSim<'w> {
     /// reason [`dragon_rng`](Self::dragon_rng) is.
     wither_rng: SpawnRng,
     /// This session's End dragon fight controller state
-    /// (`EnderDragonFight`'s own persisted flags), lazily created by
+    /// (vanilla's own end-dragon-fight persisted flags), lazily created by
     /// [`dragon::MobSim::record_dragon_death`] on the first real kill —
-    /// `None` before that, matching `EnderDragonFight.createDefault()`'s own
+    /// `None` before that, matching vanilla's own default-fight-state
+    /// constructor's own
     /// "no scan has happened yet" starting point. See
     /// [`dragon::MobSim::dragon_fight_killed`]'s own doc for what reads this
     /// and `dragon::MobSim::record_dragon_death`'s for the process-lifetime
     /// (not yet disk-persisted) caveat.
     dragon_fight: Option<crate::dragon::fight::FightState>,
-    /// `EnderDragonFight.gateways` — the shuffled pool
+    /// Vanilla's own end-dragon-fight gateways field — the shuffled pool
     /// [`crate::dragon::fight::GatewayPool`] consumes one slice from per
     /// kill. Lazily shuffled on the first real kill, alongside
     /// [`dragon_fight`](Self::dragon_fight) and for the identical
     /// process-lifetime-only reason (see
     /// [`dragon::MobSim::record_dragon_death`]'s own doc).
     dragon_gateways: Option<crate::dragon::fight::GatewayPool>,
-    /// `Util.shuffle`'s own `RandomSource` draw, ported against
+    /// Vanilla's own generic list-shuffle helper's own random draw, ported against
     /// [`GatewayPool::shuffled`](crate::dragon::fight::GatewayPool::shuffled) —
     /// on its own stream for [`orb_rng`](Self::orb_rng)'s reason. Only ever
     /// drawn from once (the pool shuffles a single time, lazily), but kept
@@ -3605,13 +3608,13 @@ pub struct MobSim<'w> {
     pending_dragon_deaths: Vec<dragon::DragonDeathOutcome>,
 }
 
-/// One live `AbstractBoat` — wire identity, motion, and who is aboard.
+/// One live boat entity — wire identity, motion, and who is aboard.
 ///
 /// # Why the rider is here and not on the connection
 ///
 /// `MobSim::tick` is the only thing that advances a boat, and it must **not**
 /// advance a ridden one: the rider's client owns that boat's position and reports
-/// it through `MoveVehicle`. So the "is anyone aboard" bit has to be readable from
+/// it through its own paddle/move-vehicle packet. So the "is anyone aboard" bit has to be readable from
 /// inside the tick, which means it lives on the vehicle. A per-connection flag
 /// would leave the tick fighting the client, which is the specific failure mode
 /// (*"a boat that fights the player"*) this shape exists to prevent.
@@ -3623,57 +3626,57 @@ struct TrackedVehicle {
     /// the model from this key alone.
     entity_type: ResourceKey,
     motion: lodestone_physics::EntityMotion,
-    /// The hull's yaw in degrees — `setYRot`, written by the placing player and
-    /// then by `controlBoat` on whichever side is authoritative.
+    /// The hull's yaw in degrees — vanilla's own yaw setter, written by the placing player and
+    /// then by vanilla's own boat-control step on whichever side is authoritative.
     yaw: f32,
-    /// `AbstractBoat`'s between-tick state, so the server's float pass and the
+    /// Vanilla's own boat between-tick state, so the server's float pass and the
     /// client's are literally the same code over the same fields.
     boat: lodestone_physics::vehicle::BoatState,
     /// The **player entity id** of the controlling passenger, or `None` for an
     /// empty boat. `Some` suspends the server-side tick entirely.
     rider: Option<i32>,
-    /// `AbstractBoat.DATA_ID_PADDLE_LEFT`/`RIGHT` — the rider's last reported
-    /// `ServerboundPaddleBoatPacket`, purely cosmetic (a *second* connected
+    /// Vanilla's own boat paddle-left/right metadata fields — the rider's last reported
+    /// paddle-boat packet, purely cosmetic (a *second* connected
     /// player's own paddle animation; the rider's own client always animates
     /// locally regardless of what this crate streams back). See
     /// [`MetadataField::BoatPaddles`](crate::protocol::MetadataField::BoatPaddles)
     /// for the wire-index collision this stands clear of.
     paddle_left: bool,
     paddle_right: bool,
-    /// `VehicleEntity.DATA_ID_HURT` — ticks remaining on the rocking animation,
+    /// Vanilla's own shared vehicle "hurt" metadata field — ticks remaining on the rocking animation,
     /// set to `10` by a hit and counted down one per tick.
     hurt_time: i32,
-    /// `VehicleEntity.DATA_ID_HURTDIR` — which way the hull tips. Negated on
+    /// Vanilla's own shared vehicle "hurt direction" metadata field — which way the hull tips. Negated on
     /// every hit, so consecutive punches rock it alternately, and its registered
     /// default is **`1`**, not `0`: the client multiplies the whole rock angle by
     /// it, so a zero here draws a perfectly still boat.
     hurt_dir: i32,
-    /// `VehicleEntity.DATA_ID_DAMAGE` — accumulated damage x 10, decayed by
+    /// Vanilla's own shared vehicle "damage" metadata field — accumulated damage x 10, decayed by
     /// `1.0` per tick. It is the amplitude of the rock.
     damage: f32,
 }
 
-/// One live `PrimedTnt` — wire identity, motion and the fuse countdown.
+/// One live primed-tnt entity — wire identity, motion and the fuse countdown.
 ///
 /// A plain map for [`falling_blocks`](Self::falling_blocks)'s reason: no
 /// lifecycle beyond the motion and a counter, so a `SimMob`'s species/goal
 /// machinery would be pure overhead for an entity with no AI and no box that
 /// matters (it is not selector-visible and nothing paths around it).
 ///
-/// The block state it imitates (`PrimedTnt.DATA_BLOCK_STATE_ID`) is **not**
+/// The block state it imitates (vanilla's own block-state metadata field) is **not**
 /// carried here: this crate's only producers (`TntBlock::prime`'s several call
-/// sites) always construct vanilla's own `DEFAULT_BLOCK_STATE`
-/// (`Blocks.TNT.defaultBlockState()`) — nothing here ever calls
-/// `PrimedTnt.setBlockState` with anything else — so a per-entity field would
+/// sites) always construct vanilla's own default tnt block state
+/// — nothing here ever sets it to
+/// anything else — so a per-entity field would
 /// carry one value forever. See `mobs::tnt`'s module doc for the rest of what
 /// is deliberately simplified.
 #[derive(Debug, Clone)]
 struct TrackedTnt {
     uuid: Uuid,
     motion: lodestone_physics::EntityMotion,
-    /// `PrimedTnt.DATA_FUSE_ID` — ticks remaining before detonation, counting
+    /// Vanilla's own fuse metadata field — ticks remaining before detonation, counting
     /// down from [`tnt::DEFAULT_FUSE_TIME`]. Detonates the tick this reaches
-    /// `0`, matching `if (fuse <= 0)` in `PrimedTnt.tick`.
+    /// `0`, matching vanilla's own per-tick fuse check.
     fuse: i32,
 }
 
@@ -3695,7 +3698,7 @@ struct TrackedDragon {
     max_health: f32,
     phase: crate::dragon::phase::PhaseManager,
     nearest_crystal: crate::dragon::crystal::NearestCrystal,
-    /// `EnderDragon.getFightOrigin()` — the arena centre this dragon orbits
+    /// Vanilla's own fight-origin getter — the arena centre this dragon orbits
     /// and measures egg/portal distances from.
     fight_origin: Vec3,
     /// The simplified orbit's current angle, in radians — this module's own
@@ -3715,10 +3718,10 @@ struct TrackedWither {
     yaw: f32,
     health: f32,
     max_health: f32,
-    /// `WitherBoss.DATA_ID_INV` — `crate::wither::INVULNERABLE_TICKS`
+    /// Vanilla's own wither invulnerability metadata field — `crate::wither::INVULNERABLE_TICKS`
     /// counting down to `0`; `0` means the wither is in its active phase.
     invulnerable_ticks: i32,
-    /// `Entity.tickCount` — this wither's own age, read by
+    /// Vanilla's own generic tick-count field — this wither's own age, read by
     /// `crate::wither::should_heal_while_invulnerable`/`_active`.
     age: i64,
     /// Ticks until the next skull may fire — see `mobs::wither`'s module doc
@@ -3736,7 +3739,7 @@ struct TrackedCrystal {
     position: Vec3,
 }
 
-/// One live `AbstractMinecart` — wire identity, kind, rail-following motion,
+/// One live minecart entity — wire identity, kind, rail-following motion,
 /// riding, and the per-kind extras (a container's slots, a furnace's fuel and
 /// push, a TNT cart's fuse). See `mobs::minecart`'s own module doc for the
 /// physics this drives and everything deliberately simplified.
@@ -3749,14 +3752,14 @@ struct TrackedMinecart {
     uuid: Uuid,
     kind: minecart::MinecartKind,
     motion: lodestone_physics::EntityMotion,
-    /// `AbstractMinecart`'s own `yRot`, computed from the direction of travel
-    /// each tick `OldMinecartBehavior.tick` moves it — never set by a
+    /// Vanilla's own minecart yaw field, computed from the direction of travel
+    /// each tick its rail-following behavior moves it — never set by a
     /// placer, unlike a boat's.
     yaw: f32,
-    /// `Entity.yRotO` — the previous tick's yaw, read by the flip-detection
+    /// Vanilla's own previous-yaw field — the previous tick's yaw, read by the flip-detection
     /// comparison alone.
     yaw_o: f32,
-    /// `AbstractMinecart.flipped` — `FlippedRotation`: when the travel
+    /// Vanilla's own minecart "flipped" rotation state: when the travel
     /// direction reverses near a dead stop, the sprite's *heading* flips
     /// 180° instead of visibly spinning through it.
     flipped: bool,
@@ -3767,12 +3770,12 @@ struct TrackedMinecart {
     /// slots; empty for every non-container kind). See `mobs::minecart`'s
     /// own module doc for why nothing yet opens a menu against this.
     slots: Vec<Option<lodestone_model::ItemStack>>,
-    /// `MinecartFurnace.fuel` — ticks of burn time remaining.
+    /// Vanilla's own furnace-minecart fuel field — ticks of burn time remaining.
     fuel: i32,
-    /// `MinecartFurnace.push` — the constant self-propulsion vector while
+    /// Vanilla's own furnace-minecart push field — the constant self-propulsion vector while
     /// fuelled (`y` always `0.0`).
     push: lodestone_physics::Vec3d,
-    /// `MinecartTNT.fuse` — `-1` unprimed, counts down to `0` (detonate).
+    /// Vanilla's own tnt-minecart fuse field — `-1` unprimed, counts down to `0` (detonate).
     fuse: i32,
 }
 
@@ -3780,16 +3783,16 @@ struct TrackedMinecart {
 /// [`take_entity_animations`](MobSim::take_entity_animations) to hand a driver.
 ///
 /// Two variants because vanilla sends two different packets, and the split is
-/// not cosmetic: the hurt flash is `ClientboundHurtAnimationPacket` (a VarInt id
-/// and a `float`) while the death tip-over is `ClientboundEntityEventPacket` (a
+/// not cosmetic: the hurt flash is the `HURT_ANIMATION` packet (a VarInt id
+/// and a `float`) while the death tip-over is the `ENTITY_EVENT` packet (a
 /// fixed-width `int` id and a status byte). A driver cannot collapse them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MobAnimation {
-    /// The mob flashed red — `ClientboundHurtAnimationPacket`.
+    /// The mob flashed red — the `HURT_ANIMATION` packet.
     ///
     /// No yaw is carried because vanilla's is a constant for anything that is not
-    /// a player: `LivingEntity.getHurtDir` returns `0.0F` and only
-    /// `ServerPlayer` overrides it, so a mob's hurt animation is always the pure
+    /// a player: vanilla's own generic hurt-direction getter returns `0.0F` and only
+    /// its player-specific override changes it, so a mob's hurt animation is always the pure
     /// roll. Adding a field here would invite a producer to invent one.
     Hurt {
         /// The mob's entity id.
