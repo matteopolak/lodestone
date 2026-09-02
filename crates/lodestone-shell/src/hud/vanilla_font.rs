@@ -22,7 +22,7 @@
 //! `BitmapProvider.getActualGlyphWidth` does; `RasterFont` adds the decoded
 //! sheets so the same cells can be drawn as well as measured. The pen advances
 //! by that number, the shadow is `+1` logical px at 25 % of the text colour
-//! (`ARGB.scaleRGB(color, 0.25F)` in `Font.PreparedTextBuilder.getShadowColor`),
+//! (vanilla's own ARGB-scale-RGB helper applied to `(color, 0.25F)` in its own prepared-text-builder's get-shadow-color accessor),
 //! and a glyph's box sits `7 - ascent` logical px below the line's top
 //! (`GlyphBitmap.getTop`).
 //!
@@ -101,7 +101,7 @@ use super::item_icon::ColourStream;
 /// A [`TextColor`] as the sRGB 0..1 triple the HUD's colour stream takes.
 ///
 /// [`TextColor::rgb`] is the single source of truth for the sixteen named
-/// values (transcribed there from vanilla's `TextColor.java`); this only
+/// values (transcribed there from vanilla's own text-color declarations); this only
 /// unpacks it. The division by 255 with **no** transfer function is deliberate
 /// and is the whole colour-management story for text: vanilla is not
 /// colour-managed, so its `0xAA` is written to the framebuffer as the sRGB byte
@@ -259,7 +259,7 @@ pub struct VanillaFont {
     /// occasionally "obfuscate" a glyph into invisible whitespace).
     obfuscation_pool: HashMap<u32, Vec<char>>,
     /// Free-running state for the obfuscated-glyph picker. Vanilla never
-    /// reseeds `Font.random` (`Font.java`, `RandomSource.create()` at
+    /// reseeds its own font-random field (a fresh random source at
     /// construction) — every glyph drawn advances the same stream, so the
     /// same text resamples differently **every frame** with no timer
     /// involved, which is what makes `§k` read as animated rather than a
@@ -652,7 +652,8 @@ impl VanillaFont {
     ///
     /// Identical to [`legacy_width`](Self::legacy_width) — measurement has to
     /// agree with [`draw`](Self::draw), and `draw` decomposes. Vanilla's
-    /// `Font.width(String)` decomposes too (`StringDecomposer.iterateFormatted`
+    /// own font-width accessor decomposes too (its own string-decomposer's
+    /// iterate-formatted call
     /// into a width sink), so there is no version of this that counts a `§` as a
     /// glyph and is still faithful.
     ///
@@ -715,8 +716,8 @@ impl VanillaFont {
     /// # This honours `§` codes, and that is not a convenience
     ///
     /// There is no non-decomposing string draw in vanilla to be faithful to.
-    /// `Font.drawInBatch(String, …)` goes through
-    /// `StringDecomposer.iterateFormatted`, which applies legacy codes at *draw*
+    /// Vanilla's own draw-in-batch call goes through
+    /// its own string-decomposer's iterate-formatted call, which applies legacy codes at *draw*
     /// time — that single fact is why a plugin server can put `§7` in an item
     /// name and have it colour. A plain pass that emitted `§` and `7` as glyphs
     /// was therefore not "the simple case"; it was the wrong case, and the
@@ -793,7 +794,7 @@ impl VanillaFont {
     /// (source) order — the non-drawing half of what used to be `spans_run`'s
     /// body. `position` in the old single-pass version counted glyphs across
     /// the whole span list rather than resetting per span
-    /// (`Font.java`'s `position == 0` check is about the first glyph of
+    /// (vanilla's own font rendering's `position == 0` check is about the first glyph of
     /// the *line*), and that is preserved here too: it is
     /// [`draw_resolved`](Self::draw_resolved) that now assigns `position`,
     /// over the final (bidi-reordered) glyph order.
@@ -905,7 +906,7 @@ impl VanillaFont {
     /// `legacy_run`/`spans_run`'s bodies: both decoders now agree on
     /// [`ResolvedGlyph`], so there is exactly one place glyphs turn into
     /// quads, walked in **visual** order — `position == 0` is therefore the
-    /// first glyph drawn left-to-right on screen, matching `Font.java`
+    /// first glyph drawn left-to-right on screen, matching vanilla's own font rendering
     /// even for a right-to-left run.
     fn draw_resolved(
         &self,
@@ -1031,14 +1032,14 @@ impl VanillaFont {
     /// `(x, y)`. `first` is whether this is the very first glyph
     /// [`draw_resolved`](Self::draw_resolved) draws (`draw_resolved` restarts
     /// its own counter each pass, over the bidi-reordered — i.e. **visual**
-    /// — glyph order), matching `Font.java`'s `position == 0` check for
+    /// — glyph order), matching vanilla's own font rendering's `position == 0` check for
     /// where the underline/strikethrough bar's left edge starts.
     ///
     /// Returns the advance in device pixels, computed from `ch`'s **own**
     /// glyph — even when `style.obfuscated` swaps in a different codepoint's
     /// pixels, see [`obfuscation_pool`](VanillaFont::obfuscation_pool)'s field
     /// docs for why. Effects (underline/strikethrough) and the background
-    /// advance vanilla marks per glyph (`Font.java`, `markBackground`) are
+    /// advance vanilla marks per glyph (vanilla's own font rendering, `markBackground`) are
     /// emitted here **unconditionally** — including for whitespace and the
     /// missing-glyph box — because vanilla's own `accept()` runs the same way
     /// for every character the string decomposes to, ink or not: an
@@ -1063,7 +1064,7 @@ impl VanillaFont {
             None if font.font().contains(cp) => font.advance(cp).unwrap_or(MISSING_ADVANCE),
             None => MISSING_ADVANCE,
         };
-        // `GlyphInfo.getAdvance(boolean)`: `advance + boldOffset` when bold,
+        // Vanilla's own glyph-info advance accessor: `advance + boldOffset` when bold,
         // unchanged otherwise. Vanilla applies this to *every* glyph, drawable
         // or not — a bold space is wider too. The offset is **per glyph**, not a
         // font constant: `UnihexProvider.Glyph.info` overrides `getBoldOffset`
@@ -1092,7 +1093,7 @@ impl VanillaFont {
             self.draw_ink(cs, &draw_ink, x, y, scale, c, style.italic);
             if style.bold {
                 // The second, offset pass that actually makes bold read as
-                // bold (`BakedSheetGlyph.renderChar`, `BakedSheetGlyph.java`)
+                // bold (`BakedSheetGlyph.renderChar`, vanilla's own baked-sheet-glyph type)
                 // — not a font-weight variant, the same glyph redrawn shifted.
                 self.draw_ink(
                     cs,
@@ -1109,7 +1110,7 @@ impl VanillaFont {
         }
 
         if style.has_effect() {
-            // `Font.java`: `effectX0 = position == 0 ? x - 1.0F : x`.
+            // vanilla's own font rendering: `effectX0 = position == 0 ? x - 1.0F : x`.
             let x0 = if first {
                 x - font_metrics::EFFECT_LEAD_IN * scale
             } else {
@@ -1118,12 +1119,12 @@ impl VanillaFont {
             let x1 = x + bold_advance * scale;
             let thickness = font_metrics::EFFECT_THICKNESS * scale;
             if style.strikethrough {
-                // `Font.java`: bar bottom at `y + 4.5F`.
+                // vanilla's own font rendering: bar bottom at `y + 4.5F`.
                 let bottom = y + font_metrics::STRIKETHROUGH_Y * scale;
                 cs.rect(x0, bottom - thickness, x1 - x0, thickness, c);
             }
             if style.underline {
-                // `Font.java`: bar bottom at `y + 9.0F`.
+                // vanilla's own font rendering: bar bottom at `y + 9.0F`.
                 let bottom = y + font_metrics::UNDERLINE_Y * scale;
                 cs.rect(x0, bottom - thickness, x1 - x0, thickness, c);
             }
@@ -1144,7 +1145,7 @@ impl VanillaFont {
     /// [`CachedGlyphInk::top`] records for the glyph's top edge), and the row
     /// shifts in `x` by `ITALIC_SHEAR - ITALIC_SHEAR_SLOPE * v`
     /// (`BakedSheetGlyph.shearTop`/`shearBottom`,
-    /// `BakedSheetGlyph.java`, both `1.0F - 0.25F * v`). Vanilla shears
+    /// vanilla's own baked-sheet-glyph type, both `1.0F - 0.25F * v`). Vanilla shears
     /// the whole glyph as one quad with two sheared edges (a continuous linear
     /// interpolation between the top and bottom edge's shear); this evaluates
     /// that same affine function per texel row instead, which is the run-based
@@ -1162,7 +1163,7 @@ impl VanillaFont {
     ) {
         let texel = ink.texel_size * scale;
         let top = y + ink.top * scale;
-        // `GlyphBitmap.getLeft()` / `BakedSheetGlyph`'s `x0 = x + this.left`:
+        // Vanilla's own glyph-bitmap get-left accessor / its own baked-sheet-glyph's `x0 = x + this.left`:
         // zero for a bitmap-sheet or unihex cell (neither overrides the
         // default), but a `ttf` glyph's outline is not generally flush with
         // its advance box, so it carries a real left bearing here.
@@ -1202,7 +1203,7 @@ impl VanillaFont {
 
     /// Picks a cached `§k` replacement from [`obfuscation_pool`](VanillaFont::obfuscation_pool),
     /// keyed by `ceil(original_advance)` — vanilla's own width class
-    /// (`FontSet.java`, `Mth.ceil(glyph.info().getAdvance(false))`), and
+    /// (vanilla's own font-set type, `Mth.ceil(glyph.info().getAdvance(false))`), and
     /// advances the free-running picker once. `None` only when this font has
     /// no drawable glyph at all of that exact rounded width.
     fn obfuscated_ink(&self, original_advance: f32) -> Option<Arc<CachedGlyphInk>> {
@@ -1457,7 +1458,7 @@ fn load_custom_font(name: &str) -> Option<Arc<RasterFont>> {
     }
 }
 
-/// Vanilla's shadow colour: `ARGB.scaleRGB(color, 0.25F)` — a **gamma-space**
+/// Vanilla's shadow colour: vanilla's own ARGB-scale-RGB helper applied to `(color, 0.25F)` — a **gamma-space**
 /// quarter of each channel with alpha preserved.
 ///
 /// The HUD's colour convention is sRGB 0..1 written verbatim (see
@@ -1997,7 +1998,7 @@ mod tests {
     }
 
     /// The shadow is a quarter of each channel in the space the HUD works in,
-    /// with alpha untouched. Vanilla's `ARGB.scaleRGB(0xFFFFFFFF, 0.25F)` is
+    /// with alpha untouched. Vanilla's own ARGB-scale-RGB helper applied to `(0xFFFFFFFF, 0.25F)` is
     /// `0xFF3F3F3F` — 63/255 = 0.247, which is what a white text colour must
     /// produce here.
     #[test]
@@ -2508,7 +2509,7 @@ mod styling_tests {
     /// **Italic**: each ink row shears in x by
     /// `ITALIC_SHEAR - ITALIC_SHEAR_SLOPE * v`, `v` being that row's own
     /// logical-pixel offset from the line's top
-    /// (`BakedSheetGlyph.shearTop`/`shearBottom`, `BakedSheetGlyph.java`).
+    /// (`BakedSheetGlyph.shearTop`/`shearBottom`, vanilla's own baked-sheet-glyph type).
     /// This predicts the exact x offset between the topmost and bottommost ink
     /// row of an italic `'|'` (a single-column vertical stroke with **no**
     /// serif — verified directly against `RasterFont::raster('|')`'s ink
@@ -2609,7 +2610,7 @@ mod styling_tests {
         );
     }
 
-    /// **Underline / strikethrough**: `Font.java` draws a 1px bar
+    /// **Underline / strikethrough**: vanilla's own font rendering draws a 1px bar
     /// per glyph, spanning that glyph's advance (extended 1px left for the
     /// *first* glyph of the run) — unconditionally, including for a space,
     /// which has no ink of its own. Using two spaces isolates the bar
@@ -2652,7 +2653,7 @@ mod styling_tests {
     }
 
     /// As above, for strikethrough, which sits at a different fixed offset
-    /// (`Font.java`, `STRIKETHROUGH_Y` vs `UNDERLINE_Y`) — the two
+    /// (vanilla's own font rendering, `STRIKETHROUGH_Y` vs `UNDERLINE_Y`) — the two
     /// must land at *different* y, not share one "there is a line somewhere"
     /// implementation.
     #[test]
@@ -2748,7 +2749,7 @@ mod styling_tests {
         );
     }
 
-    /// Space is never obfuscated (`Font.java`, `codepoint != 32`) — an
+    /// Space is never obfuscated (vanilla's own font rendering, `codepoint != 32`) — an
     /// obfuscated string with spaces in it must keep them as gaps, not
     /// replace them with visible ink.
     #[test]
@@ -2807,7 +2808,7 @@ mod span_colour_tests {
     const W: f32 = 400.0;
     const H: f32 = 200.0;
 
-    /// Vanilla's sixteen, hand-transcribed from `TextColor.java` (26.2).
+    /// Vanilla's sixteen, hand-transcribed from vanilla's own text-color declarations (26.2).
     /// Deliberately **not** built from [`TextColor::rgb`] — that is the code under
     /// test, and an expectation derived from it would be satisfied by all sixteen
     /// being wrong together.
