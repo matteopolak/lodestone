@@ -15,7 +15,7 @@ frame-time win sitting in plain sight: `render_inner` rewrote every loaded secti
 camera uniform every frame — ~4000 `queue.write_buffer` calls per frame, each allocating
 and destroying a Metal staging buffer. Median frame time 17.05 ms → 8.19 ms; the main
 thread went from 94% of a core to 56%. See issue #75 and
-[`../section-camera-uniform.md`](../section-camera-uniform.md).
+[`../section-camera-uniform.md`](../terrain-rendering.md).
 
 **Nothing would have caught that, and nothing would catch it coming back.** No benchmark
 suite existed; the only reason #75 was found at all was a `samply` session run because a
@@ -113,7 +113,7 @@ and retrofitting these, not starting from zero.
 `lodestone-worldgen` (`benches/generation.rs`, closing #84/#85) and `lodestone-v770`
 (`benches/{chunk_light_decode,nbt_decode,registry_decode}.rs`, closing the protocol
 decode benches under #137/#142/#146). See
-[`../benchmark-harness.md`](../benchmark-harness.md) for how it actually works, how to
+[`../benchmark-harness.md`](../render-benchmarks.md) for how it actually works, how to
 extend it, and why the `support.rs` recording helper is duplicated per-crate rather than
 promoted to a shared crate. `lodestone-allocbench`, `bench_worldgen.rs`,
 `world_mesher_bench.rs`/`scene_bench.rs` and `lodestone-world/tests/memory.rs` above are
@@ -150,7 +150,7 @@ harness-shape decision when that sub-issue is picked up, not automatically inher
   travel with every number, per the evidence standard below — a number without them is
   not comparable across runs or across machines. **Implemented** as
   `benches/support.rs`'s `record()` in both `lodestone-worldgen` and `lodestone-v770`;
-  see [`../benchmark-harness.md`](../benchmark-harness.md) for the exact shape and why
+  see [`../benchmark-harness.md`](../render-benchmarks.md) for the exact shape and why
   the file is duplicated rather than shared.
 - **Profiling**: the `samply` + `debug = 2` + `threadCPUDelta`-weighting workflow that
   found #75, packaged as a repeatable script (issue #83) rather than tribal knowledge in

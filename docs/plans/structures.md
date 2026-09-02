@@ -365,6 +365,6 @@ None new at plan time. Units that add flags must record them here.
 scheduler (U6/U10, landed), the bundled corpus in `crates/lodestone-server/assets/`,
 `.cache/mc/survival/world` as oracle, `.cache/mc/26.2/src/` as record definition,
 `scripts/worldgen-oracle/` + Apple `container` for strengthening fixtures. Companion:
-[`worldgen-gap-census.md`](../worldgen-gap-census.md) §7,
-[`worldgen-structure-corpus.md`](../worldgen-structure-corpus.md),
+[`worldgen-gap-census.md`](../worldgen.md) §7,
+[`worldgen-structure-corpus.md`](../worldgen-structures.md),
 [`plans/nether-and-end.md`](./nether-and-end.md).

@@ -79,7 +79,7 @@ prediction (`docs/container-clicks.md`, already complete).
 |---|---|---|---|
 | [#191](https://github.com/matteopolak/lodestone/issues/191) | 1 | #1 | Creative/spectator flight as a real physics mode, not a debug free-cam |
 | [#193](https://github.com/matteopolak/lodestone/issues/193) | 1 | #1 | `movement_speed` not attribute-driven — Speed/Slowness inert |
-| ~~[#194](https://github.com/matteopolak/lodestone/issues/194)~~ | 1 | #1 | ~~`fall_distance` never accumulated~~ — **done**, see [`edge-back-off.md`](../edge-back-off.md) |
+| ~~[#194](https://github.com/matteopolak/lodestone/issues/194)~~ | 1 | #1 | ~~`fall_distance` never accumulated~~ — **done**, see [`edge-back-off.md`](../player-simulation.md) |
 | [#196](https://github.com/matteopolak/lodestone/issues/196) | 1 | #1 | Wire the built-but-unused `EyeHeightSmoother` into `Sim` |
 | [#199](https://github.com/matteopolak/lodestone/issues/199) | 1 | #1 | Bubble columns apply no impulse |
 | [#220](https://github.com/matteopolak/lodestone/issues/220) | 1 | #1 | Live gate: the rubber-band threshold and the vertical-disagreement clamp |

@@ -46,7 +46,7 @@ problem is:
 ## Milestone zero: the library exposes the app
 
 > **Status: landed.** `lodestone-app` exists, `client_app()` is the registration point, and `Sim`
-> adopts a pre-built `App` — see [`docs/plugin-registration.md`](../plugin-registration.md) for the
+> adopts a pre-built `App` — see [`docs/plugin-registration.md`](../plugin-api.md) for the
 > shipped shape and the measured gates. Two predictions below were wrong and are corrected there
 > rather than edited out of this plan: **the three shell plugins did not move down** (the "no `wgpu`
 > type in the file" evidence is real but is about the wrong axis — `interact.rs` imports fourteen

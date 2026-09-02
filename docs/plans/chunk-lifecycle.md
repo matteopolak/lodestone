@@ -94,7 +94,7 @@ spawns it, so LAN worlds have no world tick at all."* That was true when written
 (0-connection versus 2-connection tick rate) because the failure mode to fear is one loop **per
 connection**, not zero. So units below that add per-tick work do **not** inherit a
 singleplayer-only gap; they do inherit LAN's fixed `LAN_TICK_RADIUS = 2` tick area, which is what
-this plan's ticket system replaces. See [`docs/server-tick-loop.md`](../server-tick-loop.md).
+this plan's ticket system replaces. See [`docs/server-tick-loop.md`](../dedicated-server.md).
 
 **Redstone work is in flight in `tick.rs` and `random_tick.rs` right now** (~2,081 lines across five
 untracked files, `tick.rs` +85, `random_tick.rs` +255). That is not migration work and must not be

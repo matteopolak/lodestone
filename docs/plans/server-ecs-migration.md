@@ -2,7 +2,7 @@
 
 ## What it is
 
-The phased migration plan that turns [`docs/server-ecs.md`](../server-ecs.md)'s decision record into
+The phased migration plan that turns [`docs/server-ecs.md`](../dedicated-server.md)'s decision record into
 dispatchable work: how today's `Arc<Mutex<_>>`-and-`tokio::spawn` server becomes a tick-thread-owned,
 unlocked `bevy_ecs::World` whose core subsystems are themselves bevy plugins. Written 2026-08-04
 against a re-verified tree; the state census in "The census" below is the core deliverable, and
@@ -724,13 +724,13 @@ is the argument against.
 
 ## See also
 
-- [`docs/server-ecs.md`](../server-ecs.md) — the decision record this plan implements. Read first.
-- [`docs/server-tick-loop.md`](../server-tick-loop.md) — the loop Phase 1 threads a schedule through.
+- [`docs/server-ecs.md`](../dedicated-server.md) — the decision record this plan implements. Read first.
+- [`docs/server-tick-loop.md`](../dedicated-server.md) — the loop Phase 1 threads a schedule through.
   Its §45 reversal is current; do not add a second correction note.
 - [`docs/plans/world-state.md`](./world-state.md) — the sibling plan. Owns the world-state features
   Phase 5 provides storage for; owns the 26.2 constants this plan does not restate.
 - [`docs/plugin-api.md`](../plugin-api.md) — the five clauses, and clause 4's server-side inversion.
-- [`docs/world-unification.md`](../world-unification.md) — the client's one-`World` migration, and the
+- [`docs/world-unification.md`](../architecture.md) — the client's one-`World` migration, and the
   lock-discipline machinery the server deliberately does not build.
 - This migration's own tracking issue unblocks the no-player-entities defect, the plugin framework
   epic, the world state epic, and the mob AI roster epic — see the downstream-epics table above for
