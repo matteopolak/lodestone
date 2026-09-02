@@ -4568,12 +4568,12 @@ fn attempt_villager_trade(
 }
 
 /// Opens a block-entity's container screen for this connection, mirroring
-/// vanilla's `ServerPlayer::openMenu` end to end: a fresh container id
-/// (`nextContainerCounter`: `1..=100`, wrapping — `ServerPlayer.java:1329-1331`),
+/// vanilla's own per-player "open menu" step end to end: a fresh container id
+/// (its own container-counter field: `1..=100`, wrapping),
 /// an `open_screen` send, then an immediate full `container_set_content`
-/// plus every `container_set_data` property (`initMenu`'s `addSlotListener`
-/// triggers `broadcastFullState` the instant the menu is constructed,
-/// `ServerPlayer.java:1343-1356`).
+/// plus every `container_set_data` property (its own "init menu" step's own
+/// "add slot listener" call
+/// triggers its own "broadcast full state" step the instant the menu is constructed).
 ///
 /// `pos` must already hold a [`BlockEntity`] whose [`BlockEntity::menu_name`]
 /// is `Some` — the caller ([`apply_use_item_on`]) checks this before calling
@@ -4829,8 +4829,9 @@ async fn open_enchanting_screen<T, P, S>(
     // A fresh `[0, i32::MAX)` draw from the connection's own `SpawnRng`
     // (`dispatch_play_packet`'s `drops_rng`, the same "pre-drawn value"
     // shape `apply_use_item_on`'s own composter `roll` already uses),
-    // standing in for `Player.getEnchantmentSeed()` at menu-open —
-    // `EnchantmentMenu.enchantmentSeed`'s initial value.
+    // standing in for vanilla's own player-side "get enchantment seed"
+    // getter at menu-open —
+    // vanilla's own enchantment-menu seed field's initial value.
     // `PlayerInventory::open_workstation` just zeroed it; this replaces that
     // zero with a real roll before the first offer is ever computed.
     enchant_seed_roll: i64,
@@ -4878,8 +4879,8 @@ where
         proto.encode_container_content(window_id, state_id, &items, inventory.click_state().carried.as_ref()),
     )
     .await?;
-    // `EnchantmentMenu`'s `addDataSlot`s: three costs, all `0` for an empty
-    // menu — `getEnchantmentCost` is gated on a non-empty, enchantable item 0.
+    // Vanilla's own enchantment-menu's own data-slot registrations: three costs, all `0` for an empty
+    // menu — its own "get enchantment cost" getter is gated on a non-empty, enchantable item 0.
     for index in 0..3i32 {
         apply(conn, state, proto.encode_container_data(window_id, index, 0)).await?;
     }
@@ -4891,7 +4892,8 @@ where
 }
 
 /// Applies one block-breaking phase, mirroring
-/// `ServerPlayerGameMode.handleBlockBreakAction`'s three destroy ordinals.
+/// vanilla's own per-player game-mode "handle block break action" step's
+/// three destroy ordinals.
 ///
 /// Since issue #531 this **validates** the break rather than trusting it: see
 /// [`crate::block_breaking`] for the destroy-progress arithmetic, the tolerance
@@ -4915,11 +4917,11 @@ where
 ///   made impossible.
 ///
 /// `pending_break` is this connection's tracked in-progress dig — the
-/// version-free analogue of vanilla's `destroyPos` + `destroyProgressStart` pair.
+/// version-free analogue of vanilla's own destroy-position + destroy-progress-start pair.
 /// It is what makes `StartDestroy` + `StopDestroy` break a block while
 /// `StartDestroy` + `AbortDestroy` does not, and what makes a `StopDestroy` for a
 /// position nobody started a no-op, mirroring vanilla's own
-/// `pos.equals(this.destroyPos)` guard (`ServerPlayerGameMode.java:217`).
+/// "position equals the tracked destroy position" guard.
 ///
 /// **Also removes a broken position's [`BlockEntity`], if any, from the
 /// registry** — `docs/block-entities.md`'s own note that only placement
@@ -4931,7 +4933,7 @@ where
 /// [`OpenContainer`] pointed at the broken position, it is cleared too —
 /// this crate does not send a `container_close` to force the client's UI
 /// shut in that case (a real, documented gap, not attempted here; vanilla's
-/// own equivalent is `AbstractContainerMenu::stillValid` polling, which this
+/// own equivalent is its own generic container-menu "still valid" polling, which this
 /// crate does not model).
 #[allow(clippy::too_many_arguments)]
 async fn apply_block_action<T, P, S>(
@@ -4951,8 +4953,10 @@ async fn apply_block_action<T, P, S>(
     mobs: &MobHandle,
     drops_rng: &mut SpawnRng,
     // Issue #539. The breaker's main-hand stack, `None` for a bare hand — this
-    // connection's `PlayerInventory::selected_item`. It is `LootContextParams.TOOL`
-    // for the roll *and* the subject of `Player.hasCorrectToolForDrops`, which is
+    // connection's `PlayerInventory::selected_item`. It is the loot-context
+    // "tool" parameter
+    // for the roll *and* the subject of vanilla's own "has correct tool for
+    // drops" check, which is
     // consulted before the roll happens at all. Passed as a borrowed stack rather
     // than the whole inventory because that is all either use needs, and because
     // the caller holds `&mut PlayerInventory` for other reasons.
