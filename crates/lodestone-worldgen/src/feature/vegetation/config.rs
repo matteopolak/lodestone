@@ -1,6 +1,6 @@
 //! The data layer vegetal decoration is parsed into: heightmap kinds, block
 //! predicates, block-state providers, placement modifiers, decorators, and the
-//! `PlacedFeature`/`ConfiguredFeature` resolution that turns a registry document into
+//! placed-feature/configured-feature resolution that turns a registry document into
 //! one of them.
 //!
 //! Moved here verbatim from `feature/vegetation.rs` by U16 Phase B; see [`super`]'s own
@@ -19,7 +19,7 @@ use super::grid::census::bump as census_bump;
 use super::ids::{IdTags, Tag, tag_at};
 use super::tree::{FoliagePlacerCfg, RootPlacerCfg, TrunkPlacerCfg};
 
-/// `Heightmap.Types` (the subset vegetal decoration references). See this
+/// The reference heightmap-type enum (the subset vegetal decoration references). See this
 /// module's doc "Approximations, named" for why only two scans back all
 /// five.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,8 +53,8 @@ impl HeightmapKind {
     }
 }
 
-/// `net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate` (the
-/// subset grass/flower/tree placement and `RuleBasedStateProvider` use).
+/// The reference block-predicate base kind (the
+/// subset grass/flower/tree placement and the rule-based state provider use).
 /// Unknown predicate types degrade to [`BlockPredicate::True`] (this
 /// module's blanket "unsupported degrades, never panics" rule) — see this
 /// module's doc comment for why that must never be a panic.
@@ -62,21 +62,21 @@ impl HeightmapKind {
 pub enum BlockPredicate {
     True,
     Not(Box<BlockPredicate>),
-    /// `AllOfPredicate`/`AnyOfPredicate` — added for `patch_sugar_cane*`'s
+    /// The all-of/any-of predicate combinators — added for `patch_sugar_cane*`'s
     /// `block_predicate_filter`, which nests a `matching_block_tag` +
     /// `would_survive` + `any_of(matching_fluids)` combinator. Before these
     /// two variants existed, every combinator type fell through to
     /// [`BlockPredicate::True`] — harmless while nothing in scope used one,
     /// but it would have made sugar cane's water-adjacency requirement a
     /// silent no-op *in the wrong direction* (always-pass instead of
-    /// always-fail) the moment `BlockColumnFeature` support let sugar cane's
+    /// always-fail) the moment the block-column feature support let sugar cane's
     /// placed feature actually run — named here because that direction of
     /// bug is the more dangerous one this module's "degrade, don't panic"
     /// convention can produce.
     AllOf(Vec<BlockPredicate>),
     AnyOf(Vec<BlockPredicate>),
     MatchingBlockTag(String),
-    /// `MatchingBlocksPredicate` — this change. `blocks` is the JSON's `blocks`
+    /// The matching-blocks predicate — this change. `blocks` is the JSON's `blocks`
     /// field, which is either one id or a list; `offset` is added to the tested
     /// position. Matched by **base** id, so `minecraft:water[level=0]` counts as
     /// `minecraft:water` — the same collapse [`BlockPredicate::MatchingFluid`]
@@ -91,7 +91,7 @@ pub enum BlockPredicate {
         blocks: Vec<String>,
         offset: (i32, i32, i32),
     },
-    /// `MatchingFluidPredicate` — `fluids` is the JSON's raw
+    /// The matching-fluid predicate — `fluids` is the JSON's raw
     /// `minecraft:water`/`minecraft:flowing_water`/`minecraft:lava`/
     /// `minecraft:flowing_lava` id list; `offset` is `(dx, dy, dz)` added to
     /// the tested position. Matched via [`fluid_base_matches`] because this
@@ -104,19 +104,19 @@ pub enum BlockPredicate {
         offset: (i32, i32, i32),
     },
     /// Approximates every `would_survive` check this module reaches as
-    /// `VegetationBlock.mayPlaceOn` — see module doc. The default for any
+    /// the vegetation block's own may-place-on rule — see module doc. The default for any
     /// `would_survive` whose tested state isn't one of the two special-cased
     /// below.
     WouldSurviveOnSupportsVegetation,
-    /// `would_survive` on a `minecraft:cactus` state — `CactusBlock
-    /// .canSurvive`: below is cactus itself or `#minecraft:supports_cactus`,
+    /// `would_survive` on a `minecraft:cactus` state — the cactus block's
+    /// own survival check: below is cactus itself or `#minecraft:supports_cactus`,
     /// all 4 horizontal neighbours non-solid, block above not a fluid.
     /// "Non-solid" is approximated as "air" (see [`BlockPredicate::test`]'s
-    /// own doc on this one) — a named narrowing, not the full vanilla
+    /// own doc on this one) — a named narrowing, not the full reference
     /// solidity table, which this crate has no other reason to carry.
     WouldSurviveCactus,
     /// `would_survive` on a `minecraft:sugar_cane` state — deliberately
-    /// **omits** `SugarCaneBlock.canSurvive`'s water-adjacency half: every
+    /// **omits** the sugar cane block's own survival check's water-adjacency half: every
     /// `patch_sugar_cane*` placed feature already re-checks that adjacency
     /// explicitly via a sibling `any_of(matching_fluids)` predicate in the
     /// same `all_of`, so modelling it twice would be redundant, not more
@@ -295,8 +295,8 @@ pub fn is_fluid(base: &str) -> bool {
     matches!(base, "minecraft:water" | "minecraft:lava")
 }
 
-/// `BlockStateBase.blocksMotion()` — the predicate
-/// `Heightmap.Types.OCEAN_FLOOR`/`MOTION_BLOCKING` actually test, as opposed to
+/// A block state's own blocks-motion flag — the predicate
+/// the ocean-floor/motion-blocking heightmap kinds actually test, as opposed to
 /// "is not air and is not a fluid".
 ///
 /// # Why this exists: stacked, floating seagrass
@@ -308,15 +308,16 @@ pub fn is_fluid(base: &str) -> bool {
 /// maximum height, so the result read as seagrass floating in open water. It needed
 /// two placements to land on one column, which is why it was intermittent.
 ///
-/// Vanilla has no such problem: `OCEAN_FLOOR` tests `blocksMotion()`, seagrass does
+/// A faithful implementation has no such problem: the ocean-floor heightmap tests
+/// the blocks-motion flag, seagrass does
 /// not block motion, so every placement on a column resolves to the same real
 /// floor. The heightmap scans here read the *currently mutating* grid by design
 /// (that is what gives a later feature write-visibility of an earlier one), which is
 /// exactly what let a wrong predicate compound instead of merely being wrong once.
 ///
-/// # What this is, given there is no `blocksMotion` table in this crate
+/// # What this is, given there is no blocks-motion table in this crate
 ///
-/// `blocksMotion` is a `BlockBehaviour.Properties` flag, per block, and this crate
+/// The blocks-motion flag is a per-block properties flag, per block, and this crate
 /// carries no per-block-state property table at all — `lodestone-data` has the
 /// collision shapes but wiring that dependency in here is a bigger change than the
 /// defect. So this is a **deny-list**, and the default direction is deliberate:
@@ -403,7 +404,7 @@ pub fn blocks_motion(base: &str) -> bool {
     )
 }
 
-/// `net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvider`
+/// The reference block-state-provider base kind
 /// (the subset grass/flower/tree configs use). Parsing degrades to `None`
 /// on an unsupported provider type or a sub-provider that itself failed to
 /// parse — see module doc.
@@ -597,26 +598,26 @@ pub struct VegTags {
     pub supports_vegetation: HashSet<String>,
     pub replaceable_by_trees: HashSet<String>,
     pub logs: HashSet<String>,
-    /// `#minecraft:supports_cactus` — `CactusBlock.canSurvive`'s below-block
-    /// check (cactus/`BlockColumnFeature`, added alongside sugar cane).
+    /// `#minecraft:supports_cactus` — the cactus block's own survival check's
+    /// below-block check (cactus/block-column feature, added alongside sugar cane).
     pub supports_cactus: HashSet<String>,
-    /// `#minecraft:supports_sugar_cane` — `SugarCaneBlock.canSurvive`'s
-    /// below-block check. The adjacency-to-water half of that same method
+    /// `#minecraft:supports_sugar_cane` — the sugar cane block's own survival
+    /// check's below-block check. The adjacency-to-water half of that same check
     /// is *not* modelled here; it doesn't need to be, because every biome's
     /// own `patch_sugar_cane*` placed-feature JSON already encodes it as an
     /// explicit sibling `any_of`/`matching_fluids` predicate — see
     /// [`BlockPredicate::MatchingFluid`].
     pub supports_sugar_cane: HashSet<String>,
-    /// `#minecraft:leaves` — `TreeFeature.isAirOrLeaves`, the anchor gate
+    /// `#minecraft:leaves` — the air-or-leaves check, the anchor gate
     /// [`place_dark_oak_trunk`] checks before attempting each 2×2 log layer
     /// (a dark oak trunk can grow up through a neighbour's already-placed
     /// canopy; dense dark forests depend on that).
     pub leaves: HashSet<String>,
     /// `#minecraft:mangrove_logs_can_grow_through` —
-    /// [`TrunkPlacerCfg::UpwardsBranching`]'s extra `validTreePos` OR-arm.
+    /// [`TrunkPlacerCfg::UpwardsBranching`]'s extra valid-tree-position OR-arm.
     pub mangrove_logs_can_grow_through: HashSet<String>,
     /// `#minecraft:mangrove_roots_can_grow_through` — [`RootPlacerCfg::Mangrove`]'s
-    /// `canPlaceRoot` extra OR-arm.
+    /// can-place-root extra OR-arm.
     pub mangrove_roots_can_grow_through: HashSet<String>,
     /// Unit 8: the same membership questions as the sets above, as bitsets
     /// indexed by [`crate::interner::StateId`] — see [`super::ids`] for the whole
@@ -657,7 +658,7 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
     }
 }
 
-/// `net.minecraft.world.level.levelgen.placement.PlacementModifier` (the
+/// The reference placement-modifier base kind (the
 /// vegetal-decoration subset). A separate type from [`super::Placement`]
 /// (the ore engine's) rather than an extension of it — the two engines share
 /// no placement instances and vegetal decoration needs live grid reads
@@ -672,7 +673,7 @@ pub enum VegPlacement {
     Biome,
     RarityFilter(i32),
     SurfaceWaterDepthFilter(i32),
-    /// `NoiseThresholdCountPlacement` — `Biome.BIOME_INFO_NOISE` gated count.
+    /// The noise-threshold count placement — a biome-info-noise gated count.
     NoiseThresholdCount {
         noise_level: f64,
         below: i32,
@@ -688,10 +689,10 @@ pub enum VegPlacement {
     // `height_range`, so before this every one of them reached a decoration step
     // and was silently dropped.
     HeightRange(crate::feature::HeightProvider),
-    /// `CountOnEveryLayerPlacement` — fans out to one position per air/solid
+    /// The count-on-every-layer placement — fans out to one position per air/solid
     /// interface, layer by layer, until a layer produces nothing.
     CountOnEveryLayer(IntProvider),
-    /// `EnvironmentScanPlacement` — walks up or down until `target` matches.
+    /// The environment-scan placement — walks up or down until `target` matches.
     EnvironmentScan {
         /// `+1` for `up`, `-1` for `down`.
         dy: i32,
@@ -699,7 +700,7 @@ pub enum VegPlacement {
         allowed: BlockPredicate,
         max_steps: i32,
     },
-    /// `NoiseBasedCountPlacement`.
+    /// The noise-based count placement.
     NoiseBasedCount {
         noise_to_count_ratio: i32,
         noise_factor: f64,
@@ -732,7 +733,7 @@ pub(super) fn try_parse_int_provider(v: &Value) -> Option<IntProvider> {
                     min: v["min_inclusive"].as_i64()? as i32,
                     max: v["max_inclusive"].as_i64()? as i32,
                 }),
-                // The REAL `TrapezoidInt` sample (two draws, triangular),
+                // The REAL trapezoid-int sample (two draws, triangular),
                 // not a `Uniform` stand-in — see `IntProvider::Trapezoid`'s
                 // own doc comment on why the approximation this replaced
                 // was a real bug, not just a shape simplification: it
@@ -905,7 +906,7 @@ pub(super)     fn get_positions<R: RandomSource>(
             }
             VegPlacement::RandomOffset { xz, y } => {
                 // Two INDEPENDENT samples of `xz` (x, then z) — matches
-                // `RandomOffsetPlacement.getPositions`'s two separate
+                // the random-offset placement's own two separate
                 // `this.xzSpread.sample(random)` calls, not one shared draw.
                 let scatter_x = pos.x + xz.sample(random);
                 let scatter_y = pos.y + y.sample(random);
@@ -1026,7 +1027,7 @@ pub(super)     fn get_positions<R: RandomSource>(
     }
 }
 
-/// `CountOnEveryLayerPlacement.findOnGroundYPosition` — the `layer`-th
+/// The count-on-every-layer placement's own find-ground-y search — the `layer`-th
 /// air-above-solid interface below `y_start`, or `None`.
 fn find_on_ground_y(
     grid: &VegGrid,
@@ -1036,7 +1037,7 @@ fn find_on_ground_y(
     z: i32,
     layer_to_place_on: i32,
 ) -> Option<i32> {
-    // `isEmpty` is air-or-water-or-lava, which is exactly `Tag::Air | Tag::Fluid`.
+    // The empty check is air-or-water-or-lava, which is exactly `Tag::Air | Tag::Fluid`.
     let empty = |y: i32| {
         tag_at(grid, tags, Tag::Air, x, y, z) || tag_at(grid, tags, Tag::Fluid, x, y, z)
     };
@@ -1118,7 +1119,7 @@ impl Positions {
     }
 }
 
-/// `net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator`
+/// The reference tree-decorator base kind
 /// (the subset reachable from oak/birch's `_bees_*` variants — see module
 /// doc). Any other decorator type parses to [`Decorator::Unsupported`] (a
 /// silent no-op — see [`place_beehive_decorator`]'s doc on the RNG-continuity
@@ -1126,13 +1127,13 @@ impl Positions {
 #[derive(Clone, Debug)]
 pub enum Decorator {
     Beehive { probability: f32 },
-    /// `TrunkVineDecorator` — a hanging vine on each of a log's four
+    /// The trunk-vine decorator — a hanging vine on each of a log's four
     /// horizontal neighbours, one independent coin flip per side (the
     /// savanna/acacia increment: reached from `mega_jungle_tree`/`jungle_tree`'s own
     /// `decorators` list, and from every `fallen_*_tree`'s
     /// `stump_decorators`). See [`super::place::place_trunk_vine_decorator`].
     TrunkVine,
-    /// `AttachedToLogsDecorator` — one block (a mushroom, for every shipped
+    /// The attached-to-logs decorator — one block (a mushroom, for every shipped
     /// instance) on a random direction off a random log, gated by
     /// `probability` (this change: every `fallen_*_tree`'s `log_decorators`).
     /// See [`super::place::place_attached_to_logs_decorator`].
@@ -1144,9 +1145,9 @@ pub enum Decorator {
     Unsupported,
 }
 
-/// `Direction.CODEC` — the six cardinal names `AttachedToLogsDecorator`'s
+/// The reference direction codec — the six cardinal names the attached-to-logs decorator's
 /// `directions` list can name (every shipped instance uses only `"up"`, but
-/// the field is a general list in vanilla's own codec).
+/// the field is a general list in a faithful implementation's own codec).
 fn parse_direction(s: &str) -> Option<(i32, i32, i32)> {
     match s {
         "down" => Some((0, -1, 0)),
@@ -1188,10 +1189,10 @@ impl Decorator {
     }
 }
 
-/// `net.minecraft.world.level.levelgen.feature.featuresize.FeatureSize` — both
-/// subclasses vanilla ships, each reachable from tree configs this module
-/// implements: `TwoLayersFeatureSize` (oak, birch, spruce, pine, acacia) and
-/// `ThreeLayersFeatureSize` (dark oak, pale oak — the 2×2-trunk species,
+/// The reference feature-size base kind — both
+/// subclasses a faithful implementation ships, each reachable from tree configs this module
+/// implements: [`Self::TwoLayers`] (oak, birch, spruce, pine, acacia) and
+/// [`Self::ThreeLayers`] (dark oak, pale oak — the 2×2-trunk species,
 /// this change). The two share the `getSizeAtHeight(treeHeight, yo)` shape but
 /// answer it differently: `TwoLayers` splits at `limit`; `ThreeLayers` splits
 /// into lower/middle/upper bands using `upper_limit` measured down from the
@@ -1202,10 +1203,10 @@ pub enum FeatureSizeCfg {
         limit: i32,
         lower_size: i32,
         upper_size: i32,
-        /// `FeatureSize.minClippedHeight` — `fancy_oak`'s own `4` (added
+        /// The feature size's own min-clipped-height field — `fancy_oak`'s own `4` (added
         /// with the savanna/acacia increment). `None` for every other species' `two_layers_feature_size`
         /// (oak's straight branch, birch, spruce, pine, acacia), which is
-        /// exactly vanilla's own `OptionalInt.empty()` default. See
+        /// exactly a faithful implementation's own empty-optional default. See
         /// [`place_tree`]'s own doc on the one place this is read: a tree
         /// clipped by an obstruction can still place a shorter version of
         /// itself when this is `Some` and the clip doesn't cut below it —
@@ -1220,7 +1221,7 @@ pub enum FeatureSizeCfg {
         upper_size: i32,
         /// See [`Self::TwoLayers`]'s own field — no shipped
         /// `three_layers_feature_size` (dark oak, pale oak) sets this, but
-        /// vanilla's codec allows it on either subclass, so it is parsed
+        /// a faithful implementation's codec allows it on either subclass, so it is parsed
         /// here too rather than only where a config happens to use it.
         min_clipped_height: Option<i32>,
     },
@@ -1249,7 +1250,7 @@ impl FeatureSizeCfg {
         }
     }
 
-    /// `FeatureSize.minClippedHeight()` — see [`Self::TwoLayers`]'s own doc
+    /// The feature size's own min-clipped-height accessor — see [`Self::TwoLayers`]'s own doc
     /// on the one caller that reads this.
 pub(super)     fn min_clipped_height(&self) -> Option<i32> {
         match *self {
@@ -1259,7 +1260,7 @@ pub(super)     fn min_clipped_height(&self) -> Option<i32> {
         }
     }
 
-    /// `FeatureSize.getSizeAtHeight(treeHeight, yo)`. The `tree_height`
+    /// The feature size's own size-at-height accessor. The `tree_height`
     /// argument only matters for `ThreeLayers` (the upper band is `yo >=
     /// treeHeight - upperLimit`); `TwoLayers` ignores it.
 pub(super)     fn size_at_height(&self, tree_height: i32, y: i32) -> i32 {
@@ -1284,7 +1285,7 @@ pub(super)     fn size_at_height(&self, tree_height: i32, y: i32) -> i32 {
     }
 }
 
-/// `net.minecraft.world.level.levelgen.feature.configurations.TreeConfiguration`.
+/// The reference tree-configuration record.
 #[derive(Clone, Debug)]
 pub struct TreeConfig {
 pub(super)     below_trunk_provider: Option<BlockStateProvider>,
@@ -1294,7 +1295,7 @@ pub(super)     trunk_placer: TrunkPlacerCfg,
 pub(super)     foliage_placer: FoliagePlacerCfg,
 pub(super)     feature_size: FeatureSizeCfg,
 pub(super)     decorators: Vec<Decorator>,
-    /// `TreeConfiguration.rootPlacer` — `Optional<RootPlacer>`. Absent for
+    /// The tree configuration's own root-placer field — `Optional<RootPlacer>`. Absent for
     /// every species except mangrove/tall_mangrove. A `root_placer`
     /// key that's present in the JSON but fails to parse into a
     /// [`RootPlacerCfg`] this module implements fails the WHOLE [`TreeConfig`]
@@ -1346,8 +1347,7 @@ impl TreeConfig {
     }
 }
 
-/// `net.minecraft.world.level.levelgen.feature.configurations.BlockColumnConfiguration`
-/// + `BlockColumnFeature` — this change's cacti/sugar-cane increment. Used by
+/// The reference block-column configuration and feature — this change's cacti/sugar-cane increment. Used by
 /// `cactus` (desert) and `sugar_cane` (desert/swamp/badlands/beach), both
 /// previously a silent no-op under [`ConfiguredFeature::Unsupported`].
 /// `direction` is `(dx, dy, dz)`; only `up`/`down` parse (every configured
@@ -1394,16 +1394,16 @@ impl BlockColumnConfig {
     }
 }
 
-/// `net.minecraft.world.level.levelgen.feature.ConfiguredFeature` (the
+/// The reference configured-feature base kind (the
 /// subset reached from grass/flower/tree biome steps). [`Unsupported`]
-/// carries the vanilla type string purely for diagnostics — placing it is
+/// carries the reference type string purely for diagnostics — placing it is
 /// always a no-op.
 #[derive(Clone, Debug)]
 pub enum ConfiguredFeature {
     SimpleBlock(BlockStateProvider),
     Tree(Box<TreeConfig>),
     BlockColumn(Box<BlockColumnConfig>),
-    /// `FallenTreeFeature` — a real, distinct feature type, NOT
+    /// The fallen-tree feature — a real, distinct feature type, NOT
     /// a [`Self::Tree`] variant: a vertical stump plus a horizontal fallen
     /// log, no trunk/foliage placer involved at all. Reachable from many
     /// biomes' `fallen_*_tree` `RandomSelector` branches at a small
@@ -1437,28 +1437,28 @@ pub enum ConfiguredFeature {
     Lake(Box<super::features::LakeCfg>),
     VegetationPatch(Box<super::features::VegetationPatchCfg>),
     SculkPatch(Box<super::features::SculkPatchCfg>),
-    /// `RandomBooleanSelectorFeature` — one `nextBoolean()`, then one branch.
+    /// The random-boolean-selector feature — one boolean draw, then one branch.
     RandomBooleanSelector {
         yes: Box<PlacedRef>,
         no: Box<PlacedRef>,
     },
-    /// `WeightedRandomSelectorFeature` — a `WeightedList<PlacedFeature>`.
+    /// The weighted-random-selector feature — a weighted list of placed features.
     WeightedRandomSelector(Vec<(i32, PlacedRef)>),
-    /// `SequenceFeature` — every entry in order, stopping at the first that
+    /// The sequence feature — every entry in order, stopping at the first that
     /// reports failure. This engine's placement bodies do not report success, so
-    /// every entry runs; that matches vanilla for the one bundled instance.
+    /// every entry runs; that matches a faithful implementation for the one bundled instance.
     Sequence(Vec<PlacedRef>),
-    /// `NoOpFeature` — genuinely nothing, and distinct from
+    /// The no-op feature — genuinely nothing, and distinct from
     /// [`ConfiguredFeature::Unsupported`] so it is not counted as a gap.
     NoOp,
     Unsupported(String),
 }
 
-/// `net.minecraft.world.level.levelgen.placement.PlacedFeature` — an ordered
+/// The reference placed-feature record — an ordered
 /// [`VegPlacement`] pipeline plus the [`ConfiguredFeature`] it terminates in.
 /// Every reference to a placed feature (top-level biome step entry, or a
-/// nested option inside a selector) resolves to one of these — vanilla's
-/// `PlacedFeature.place` runs its *own* placement pipeline even when reached
+/// nested option inside a selector) resolves to one of these — a faithful
+/// implementation's own placed-feature placement runs its *own* placement pipeline even when reached
 /// as a selector's branch, and [`place_placed_feature`] reproduces that
 /// uniformly rather than special-casing "top level" vs "nested".
 #[derive(Clone, Debug)]
@@ -1715,9 +1715,9 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         //
         // Every draw count therefore already agrees (a stream error could not
         // produce 23 exact matches), so what is missing is a *predicate*: almost
-        // certainly `MultifaceBlock.canAttachTo`'s full-face test, which this crate
-        // has no block-support-shape table to answer, or `MultifaceSpreader`'s own
-        // second placement. Landing it means porting one of those, not tuning this.
+        // certainly the multiface block's own can-attach-to full-face test, which this crate
+        // has no block-support-shape table to answer, or the multiface spreader's own
+        // second placement. Landing it means implementing one of those, not tuning this.
         //
         // Flipping this to `MultifaceGrowth(...)` is a one-line change once that
         // exists — and the parity gate is what will tell you it worked.
