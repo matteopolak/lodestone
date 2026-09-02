@@ -9,10 +9,10 @@
 //! [`TintSource`] plus an [`ItemTintContext`] to the packed ARGB that the item
 //! model's tinted layer multiplies.
 //!
-//! Faithful to `net.minecraft.client.color.item` in the de-obfuscated 26.2
-//! client — **not** `net.minecraft.client.renderer.item.tint`, which does not
-//! exist. The dispatch table is `ItemTintSources.bootstrap` and the interface
-//! is `ItemTintSource.calculate(ItemStack, ClientLevel, LivingEntity)`.
+//! Faithful to the real client's item-colour dispatch table — not to a
+//! renderer-side tint table, which does not exist there. Each tint source is
+//! evaluated against the item stack, the world, and (optionally) a holder
+//! entity.
 //!
 //! # How it works
 //!
@@ -34,12 +34,12 @@
 //!
 //! The obvious trap is gamma (see below). The *expensive* trap is that vanilla's
 //! item tints and vanilla's **block** tints are two unrelated mechanisms and the
-//! item renderer never consults the block one. `CuboidItemModelWrapper`'s layer
+//! item renderer never consults the block one. The item model's own layer
 //! loop evaluates the item definition's own `tints` list per layer; nothing on the
-//! item path calls `BlockColors`. Substituting the block table for the item list
-//! is wrong wherever the two disagree, and they do disagree: `lily_pad`'s item
-//! definition is `constant 0x71C35C` while `BlockColors` gives it
-//! `LILY_PAD_IN_WORLD` = `0x208030`. It happens to *agree* for leaves
+//! item path calls into the block tint table. Substituting the block table for
+//! the item list is wrong wherever the two disagree, and they do disagree:
+//! `lily_pad`'s item definition is `constant 0x71C35C` while its block tint
+//! gives it `0x208030`. It happens to *agree* for leaves
 //! (`0x48B518` both ways) and for `grass_block`, which is exactly why the
 //! substitution survived review.
 //!
@@ -60,7 +60,7 @@ use lodestone_model::item::ItemComponents;
 /// constructor or `DEFAULT` constant supplies. Every one is a full ARGB with
 /// alpha `0xFF`; see each constant for the vanilla symbol it came from.
 pub mod defaults {
-    /// `PotionContents.BASE_POTION_COLOR` and the
+    /// The base potion tint constant, and the
     /// `default` every one of vanilla's four potion item definitions carries
     /// (`potion`, `splash_potion`, `lingering_potion`, `tipped_arrow`).
     ///
@@ -68,31 +68,30 @@ pub mod defaults {
     /// exists anywhere in 26.2.
     pub const POTION_BASE: u32 = 0xFF38_5DC6;
 
-    /// `MapItemColor.DEFAULT` (`new MapItemColor(4603950)`)
+    /// The map tint source's own default constant (`4603950`)
     /// and the `default` on `filled_map.json`'s `map_color` layer.
     pub const MAP: u32 = 0xFF46_402E;
 
-    /// `DyedItemColor.LEATHER_COLOR` (`-6265536`) and the
+    /// The dye tint source's own leather-colour constant (`-6265536`) and the
     /// `default` on all six vanilla `dye` item definitions.
     pub const LEATHER: u32 = 0xFFA0_6540;
 
-    /// `Firework`'s no-argument default (`-7697782`) and
+    /// The firework tint source's no-argument default (`-7697782`) and
     /// the `default` on `firework_star.json`'s `firework` layer.
     pub const FIREWORK: u32 = 0xFF8A_8A8A;
 
-    /// `Potion`'s no-argument default — identical to
-    /// [`POTION_BASE`], kept separate because they are separate declarations in
-    /// the jar and could drift.
+    /// The potion tint source's own no-argument default — identical to
+    /// [`POTION_BASE`], kept separate because they are two separate constants
+    /// in the source and could drift apart.
     pub const POTION_SOURCE: u32 = 0xFF38_5DC6;
 
-    /// `ColorMapColorUtil.get`'s out-of-range fallback as reached through
-    /// `GrassColor.get` (`-65281`). Magenta, i.e.
-    /// deliberately loud.
+    /// The grass colormap sampler's out-of-range fallback (`-65281`). Magenta,
+    /// i.e. deliberately loud.
     pub const GRASS_COLORMAP_FALLBACK: u32 = 0xFFFF_00FF;
 
     /// The climate inputs every vanilla `minecraft:grass` item tint carries
     /// (`grass_block`, `short_grass`, `tall_grass`, `fern`, `large_fern`,
-    /// `bush`), and `GrassColorSource`'s own no-argument default. Plains.
+    /// `bush`), and the grass tint source's own no-argument default. Plains.
     pub const GRASS_CLIMATE: [f32; 2] = [0.5, 1.0];
 }
 
@@ -126,7 +125,7 @@ pub enum TintProvenance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedTint {
     /// Packed `0xAARRGGBB`. Alpha is `0xFF` for every source whose vanilla
-    /// implementation wraps its result in `ARGB.opaque`; for `dye`'s and
+    /// implementation forces alpha to opaque; for `dye`'s and
     /// `firework`'s fallback paths it is whatever the JSON `default` carried,
     /// because vanilla does **not** force alpha on those two (see
     /// [`resolve`]'s doc table).
@@ -161,7 +160,7 @@ pub struct ItemTintContext<'a> {
     pub grass_colormap: Option<&'a Colormap>,
 }
 
-/// `ARGB.opaque`: force alpha to `0xFF`.
+/// Force alpha to `0xFF`, matching vanilla's own opaque-forcing helper.
 const fn opaque(rgb: u32) -> u32 {
     rgb | 0xFF00_0000
 }
@@ -179,18 +178,18 @@ fn strip_ns(kind: &str) -> &str {
 /// # Per-source behaviour, and which ones force alpha
 ///
 /// The alpha column is not decoration — vanilla is inconsistent about it, and
-/// two sources return their JSON `default` *without* `ARGB.opaque`:
+/// two sources return their JSON `default` *without* forcing alpha opaque:
 ///
-/// | id | component read | alpha forced | jar symbol |
-/// |---|---|---|---|
-/// | `constant` | none | yes, at construction | `Constant`'s canonical constructor |
-/// | `dye` | `dyed_color` | only when present | `Dye.calculate`, `DyedItemColor.getOrDefault` |
-/// | `grass` | none (colormap) | yes, here | `GrassColorSource.calculate` |
-/// | `firework` | `firework_explosion` | only when present | `Firework.calculate` |
-/// | `potion` | `potion_contents` | always | `Potion.calculate` |
-/// | `map_color` | `map_color` | always | `MapColor.calculate` |
-/// | `team` | none (needs a holder) | always | `TeamColor.calculate` |
-/// | `custom_model_data` | `custom_model_data` | always | `CustomModelDataSource.calculate` |
+/// | id | component read | alpha forced |
+/// |---|---|---|
+/// | `constant` | none | yes, at construction |
+/// | `dye` | `dyed_color` | only when present |
+/// | `grass` | none (colormap) | yes, here |
+/// | `firework` | `firework_explosion` | only when present |
+/// | `potion` | `potion_contents` | always |
+/// | `map_color` | `map_color` | always |
+/// | `team` | none (needs a holder) | always |
+/// | `custom_model_data` | `custom_model_data` | always |
 ///
 /// # Which of these can ever be live here
 ///
@@ -201,10 +200,10 @@ fn strip_ns(kind: &str) -> &str {
 /// rather than on every icon draw) — and neither `map_color`,
 /// `firework_explosion` nor `custom_model_data`, so those three are reported
 /// [`TintProvenance::Unmodeled`] and resolve to the definition's `default`.
-/// `team` needs a `LivingEntity` holder that an item icon does not have —
-/// vanilla itself takes the default when `owner == null`
-/// (`TeamColor.calculate`), so [`TintProvenance::Default`] is the honest label
-/// there rather than `Unmodeled`.
+/// `team` needs a holder entity that an item icon does not have —
+/// vanilla itself takes the default when there is no holder, so
+/// [`TintProvenance::Default`] is the honest label there rather than
+/// `Unmodeled`.
 ///
 /// **Modeled is not the same as drawn — or rather, it was not.**
 /// `lodestone_shell::hud::item_icon::sprite_layer_tint` used to resolve every
@@ -220,8 +219,8 @@ fn strip_ns(kind: &str) -> &str {
 /// both `None`, which is the honest answer there, not a shortfall.
 ///
 /// **`minecraft:spawn_egg` is deliberately absent, and that is not an
-/// omission.** 26.2 has no spawn-egg tint source: `SpawnEggItem`'s whole class
-/// body has no colour fields,
+/// omission.** 26.2 has no spawn-egg tint source at all: the spawn-egg item's
+/// definition carries no colour fields anywhere in the source,
 /// `assets/minecraft/items/creeper_spawn_egg.json` carries no `tints` array, and
 /// the two historical background/highlight colours are now baked as pixels into
 /// per-mob textures. There is no integer to resolve.
@@ -238,24 +237,24 @@ pub fn resolve(source: &TintSource, ctx: &ItemTintContext<'_>) -> Option<Resolve
     };
 
     match strip_ns(&source.kind) {
-        // `Constant`'s canonical constructor forces alpha, so
-        // `calculate` is opaque regardless of what the JSON said.
+        // The constant tint source forces alpha at construction, so its
+        // result is opaque regardless of what the JSON said.
         "constant" => tint(opaque(default?), TintProvenance::Default),
 
         // The one source this build can answer from live state.
-        // `DyedItemColor.getOrDefault`: present →
-        // `ARGB.opaque(rgb())`, absent → the raw default *unmasked*.
+        // Present → forced opaque over the raw colour; absent → the raw
+        // default *unmasked*.
         "dye" => match ctx.components.and_then(|c| c.dyed_color) {
             // `dyed_color` is the raw wire int (see `ItemComponents::dyed_color`),
-            // and `DyedItemColor.rgb()` is used directly, so mask to 24 bits
+            // and vanilla uses it directly as an RGB value, so mask to 24 bits
             // before forcing alpha rather than trusting the wire's top byte.
             Some(rgb) => tint(opaque(rgb & 0x00FF_FFFF), TintProvenance::Component),
             None => tint(default?, TintProvenance::Default),
         },
 
-        // `GrassColorSource.calculate` → `GrassColor.get(temperature, downfall)`.
-        // Reads no component. The colormap PNG is opaque in vanilla, and our
-        // `Colormap` drops alpha on load, so force it.
+        // The grass tint source samples the pack's grass colormap by climate
+        // (temperature, downfall). Reads no component. The colormap PNG is
+        // opaque in vanilla, and our `Colormap` drops alpha on load, so force it.
         "grass" => {
             let [temperature, downfall] = source.grass.unwrap_or(defaults::GRASS_CLIMATE);
             match ctx.grass_colormap {
@@ -272,12 +271,12 @@ pub fn resolve(source: &TintSource, ctx: &ItemTintContext<'_>) -> Option<Resolve
             }
         }
 
-        // `Firework.calculate`: no `firework_explosion` → the raw default, *not*
-        // opaque'd. We do not model that component.
+        // The firework tint source: no `firework_explosion` → the raw
+        // default, *not* opaque'd. We do not model that component.
         "firework" => tint(default?, TintProvenance::Unmodeled),
 
-        // `Potion.calculate`: `ARGB.opaque(contents.getColorOr(defaultColor))`
-        // when present, `ARGB.opaque(defaultColor)` when absent — both forced.
+        // The potion tint source: the mixed potion colour when present,
+        // otherwise the definition's default — both forced opaque.
         // `potion_color` is already opaque by construction
         // (`lodestone_data::potion::potion_color` forces alpha itself), so no
         // second `opaque()` call is needed on the `Some` branch.
@@ -286,14 +285,15 @@ pub fn resolve(source: &TintSource, ctx: &ItemTintContext<'_>) -> Option<Resolve
             None => tint(opaque(default?), TintProvenance::Default),
         },
 
-        // `MapColor.calculate`: `ARGB.opaque(...)` on both branches.
+        // The map-colour tint source forces alpha opaque on both branches.
         "map_color" => tint(opaque(default?), TintProvenance::Unmodeled),
 
-        // `TeamColor.calculate`. An item icon has no holder, and vanilla takes the
-        // default in exactly that case, so this is `Default`, not `Unmodeled`.
+        // The team tint source. An item icon has no holder, and vanilla takes
+        // the default in exactly that case, so this is `Default`, not
+        // `Unmodeled`.
         "team" => tint(opaque(default?), TintProvenance::Default),
 
-        // `CustomModelDataSource.calculate`: `ARGB.opaque(defaultColor)` when the
+        // The custom-model-data tint source forces alpha opaque when the
         // component is absent or the index is out of range.
         "custom_model_data" => tint(opaque(default?), TintProvenance::Unmodeled),
 
@@ -327,13 +327,12 @@ pub fn is_known(kind: &str) -> bool {
     )
 }
 
-/// `ARGB.colorFromFloat(1.0, r, g, b)`, the `[r, g, b]`
-/// float-triple alternative that `ExtraCodecs.RGB_COLOR_CODEC`
-/// accepts wherever an item tint takes an int.
+/// The `[r, g, b]` float-triple alternative that the codec
+/// accepts wherever an item tint takes an int, matching vanilla's own
+/// full-alpha conversion from a float triple.
 ///
-/// The per-channel conversion is `ARGB.as8BitChannel` = `Mth.floor(v * 255.0)`
-/// — **floor, not round**, so `0.5` is `127` and not
-/// `128`. Alpha is `floor(1.0 * 255) = 255`.
+/// The per-channel conversion floors rather than rounds, so `0.5` is `127`
+/// and not `128`. Alpha is `floor(1.0 * 255) = 255`.
 ///
 /// No vanilla item definition uses this form; it exists for resource packs.
 #[must_use]
@@ -359,16 +358,16 @@ mod tests {
     /// of the 26.2 sources rather than against anything this crate computes.
     #[test]
     fn jar_default_constants_match_the_decompiled_values() {
-        // `PotionContents.BASE_POTION_COLOR = -13083194`.
+        // The potion base tint constant: -13083194.
         assert_eq!(defaults::POTION_BASE as i32, -13_083_194);
         assert_eq!(defaults::POTION_SOURCE, defaults::POTION_BASE);
-        // `MapItemColor.DEFAULT`: `new MapItemColor(4603950)`, opaque'd.
+        // The map tint source's default constant, opaque'd: 4603950.
         assert_eq!(defaults::MAP & 0x00FF_FFFF, 4_603_950);
-        // `DyedItemColor.LEATHER_COLOR = -6265536`.
+        // The dye tint source's leather-colour constant: -6265536.
         assert_eq!(defaults::LEATHER as i32, -6_265_536);
-        // `Firework`'s no-argument default: `-7697782`.
+        // The firework tint source's no-argument default: -7697782.
         assert_eq!(defaults::FIREWORK as i32, -7_697_782);
-        // `GrassColor.get` / `ColorMapColorUtil.get`'s out-of-range fallback: `-65281`.
+        // The grass colormap sampler's out-of-range fallback: -65281.
         assert_eq!(defaults::GRASS_COLORMAP_FALLBACK as i32, -65_281);
     }
 
@@ -425,7 +424,7 @@ mod tests {
     }
 
     /// `firework` is the one unmodeled source whose fallback is **not** opaque'd
-    /// (`Firework.calculate` returns `this.defaultColor` bare). A blanket
+    /// (the firework tint source returns its default colour bare). A blanket
     /// `opaque()` here would be indistinguishable for vanilla's own default,
     /// which already has alpha `0xFF` — so the discriminating input is a
     /// default with a zero top byte.
@@ -504,7 +503,7 @@ mod tests {
         assert!(!is_known("minecraft:some_future_tint"));
     }
 
-    /// All eight of `ItemTintSources.bootstrap`'s registrations are known, and
+    /// All eight of vanilla's registered tint source ids are known, and
     /// the count is asserted so adding a ninth to [`is_known`] without adding a
     /// `resolve` arm (or vice versa) shows up here.
     #[test]
@@ -519,7 +518,7 @@ mod tests {
             "minecraft:team",
             "minecraft:custom_model_data",
         ];
-        assert_eq!(ids.len(), 8, "ItemTintSources.bootstrap registers eight");
+        assert_eq!(ids.len(), 8, "vanilla registers eight tint source ids");
         for id in ids {
             assert!(is_known(id), "{id}");
             // Every one of them resolves to *something* given a default and,
@@ -567,8 +566,9 @@ mod tests {
         assert!(resolve(&s, &ItemTintContext::default()).is_none());
     }
 
-    /// `ARGB.as8BitChannel` floors. `0.5 * 255 = 127.5` → `127`, not `128`; a
-    /// `round()` implementation passes a `1.0`/`0.0` test and fails this one.
+    /// Vanilla's float-to-byte channel conversion floors. `0.5 * 255 = 127.5`
+    /// → `127`, not `128`; a `round()` implementation passes a `1.0`/`0.0`
+    /// test and fails this one.
     #[test]
     fn color_from_float_floors_like_as_8_bit_channel() {
         assert_eq!(color_from_float(1.0, 1.0, 1.0), -1); // 0xFFFFFFFF

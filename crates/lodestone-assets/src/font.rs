@@ -17,7 +17,7 @@
 //! gated by a [`FontFilter`] on [`FontOption`]s (e.g. "force unicode font"):
 //! - `bitmap` — a PNG grid; a glyph's advance is derived from the **rightmost
 //!   non-transparent column** of its cell, not the cell width (verified against
-//!   `BitmapProvider.getActualGlyphWidth` in the 26.2 client).
+//!   the 26.2 client's own bitmap-glyph width resolution).
 //! - `space` — explicit per-codepoint advances (this is how the space character
 //!   gets its width; its ascii cell is blank).
 //! - `reference` — includes another font's providers in place.
@@ -28,8 +28,8 @@
 //!   against 2,414 from the three bitmap sheets, which is why every codepoint
 //!   outside those sheets used to draw the missing-glyph box.
 //! - `ttf` — a TrueType/OpenType face, rasterised here with [`fontdue`]. Ported
-//!   from `TrueTypeGlyphProviderDefinition`/`TrueTypeGlyphProvider` in the 26.2
-//!   client: every codepoint the face's own `cmap` covers (minus `skip`) gets a
+//!   from the 26.2 client's own TrueType glyph-provider implementation: every
+//!   codepoint the face's own `cmap` covers (minus `skip`) gets a
 //!   [`TtfGlyph`], rendered at `pixelsPerEm = round(size * oversample)` the same
 //!   way vanilla sets FreeType's pixel size, with `shift` applied as a plain
 //!   post-hoc bearing offset (`+shiftX` horizontally, `-shiftY` vertically —
@@ -72,10 +72,10 @@ pub const MISSING_ADVANCE: f32 = 6.0;
 /// exactly. These are *render constants*, not per-pack data — the asset side
 /// exposes them by name so the shell/renderer don't hardcode magic numbers that
 /// silently drift from vanilla. All values are in logical (GUI) pixels and match
-/// `net.minecraft.client.gui.Font` in the 26.2 client.
+/// the 26.2 client's own text-measurement implementation.
 pub mod metrics {
-    /// Baseline-to-baseline line height (`Font.lineHeight`). Chat, tab list and
-    /// tooltips advance by this per line.
+    /// Baseline-to-baseline line height. Chat, tab list and tooltips advance by
+    /// this per line.
     pub const LINE_HEIGHT: f32 = 9.0;
     /// Drop-shadow offset: the shadow copy is drawn `+1` px right and down.
     pub const SHADOW_OFFSET: f32 = 1.0;
@@ -85,42 +85,41 @@ pub mod metrics {
     /// Bold extra advance: bold text advances `+1` px per glyph (the glyph is
     /// also drawn a second time offset by this to thicken it).
     pub const BOLD_OFFSET: f32 = 1.0;
-    /// Italic shear intercept: `BakedSheetGlyph.shearTop`/`shearBottom`
-    /// are both `1.0F - 0.25F * v`, where `v`
-    /// is a glyph edge's logical-pixel offset from the line's top (the same
-    /// quantity [`super::GlyphRaster::top`] returns for the glyph's top edge).
-    /// This is the `1.0F` term; [`ITALIC_SHEAR_SLOPE`] is the `0.25F` term. For
-    /// the ascii sheet (`up = 0`, `down = 8`) that resolves to the top edge
-    /// shifting `+1` px and the bottom edge shifting `-1` px — a 2 px lean
-    /// across an 8 px-tall glyph, not a 1 px one.
+    /// Italic shear intercept: a glyph's top and bottom edges are each sheared
+    /// by `1.0F - 0.25F * v`, where `v` is that edge's logical-pixel offset
+    /// from the line's top (the same quantity [`super::GlyphRaster::top`]
+    /// returns for the glyph's top edge). This is the `1.0F` term;
+    /// [`ITALIC_SHEAR_SLOPE`] is the `0.25F` term. For the ascii sheet
+    /// (`up = 0`, `down = 8`) that resolves to the top edge shifting `+1` px
+    /// and the bottom edge shifting `-1` px — a 2 px lean across an 8 px-tall
+    /// glyph, not a 1 px one.
     pub const ITALIC_SHEAR: f32 = 1.0;
-    /// Italic shear slope: the `0.25F` multiplying `v` in
-    /// `BakedSheetGlyph.shearTop`/`shearBottom`.
-    /// A row at logical-pixel offset `v` from the line's top shears by
+    /// Italic shear slope: the `0.25F` multiplying `v` in the shear formula
+    /// above. A row at logical-pixel offset `v` from the line's top shears by
     /// `ITALIC_SHEAR - ITALIC_SHEAR_SLOPE * v`.
     pub const ITALIC_SHEAR_SLOPE: f32 = 0.25;
     /// Strikethrough bar: a 1 px-tall bar whose **bottom** edge sits this many
-    /// logical px below the line's top (`Font.PreparedTextBuilder.accept`'s
-    /// `y + 4.5F - 1.0F` .. `y + 4.5F`).
+    /// logical px below the line's top (the text-layout pass draws it from
+    /// `y + 4.5F - 1.0F` to `y + 4.5F`).
     pub const STRIKETHROUGH_Y: f32 = 4.5;
     /// Underline bar: a 1 px-tall bar whose **bottom** edge sits this many
-    /// logical px below the line's top (`Font.PreparedTextBuilder.accept`'s
-    /// `y + 9.0F - 1.0F` .. `y + 9.0F`).
+    /// logical px below the line's top (the text-layout pass draws it from
+    /// `y + 9.0F - 1.0F` to `y + 9.0F`).
     pub const UNDERLINE_Y: f32 = 9.0;
-    /// Thickness of the underline/strikethrough bar, in logical px
-    /// (`Font.PreparedTextBuilder.accept`: the bar spans exactly `1.0F`).
+    /// Thickness of the underline/strikethrough bar, in logical px (the
+    /// text-layout pass draws the bar exactly `1.0F` tall).
     pub const EFFECT_THICKNESS: f32 = 1.0;
     /// The underline/strikethrough bar for the **first** glyph of a run starts
-    /// this many logical px to the left of that glyph's pen position
-    /// (`Font.PreparedTextBuilder.accept`'s `effectX0 = position == 0 ? this.x - 1.0F : this.x`).
-    /// Every later glyph's bar starts exactly at its own pen position.
+    /// this many logical px to the left of that glyph's pen position (the
+    /// text-layout pass starts the bar at `this.x - 1.0F` only when
+    /// `position == 0`). Every later glyph's bar starts exactly at its own
+    /// pen position.
     pub const EFFECT_LEAD_IN: f32 = 1.0;
     /// The bearing-top a glyph is measured against when placing its bitmap:
-    /// `GlyphBitmap.getTop() == 7.0 - bearingTop`, and a bitmap glyph's
+    /// the glyph's top edge is `7.0 - bearingTop`, and a bitmap glyph's
     /// `bearingTop` is its provider's `ascent`. So the ascii sheet (`ascent: 7`)
     /// puts its 8×8 cell flush with the line's top edge, and the accented sheet
-    /// (`ascent: 10`) hangs 3 px above it. Straight from
-    /// `com.mojang.blaze3d.font.GlyphBitmap` in the 26.2 client.
+    /// (`ascent: 10`) hangs 3 px above it.
     pub const BEARING_TOP_BASE: f32 = 7.0;
 }
 
@@ -187,8 +186,8 @@ impl FontFilter {
     }
 
     /// Returns this filter with `override_with`'s conditions layered on top
-    /// (matching vanilla's `mergeFilters`, where the referencing font's filter
-    /// overrides the referenced provider's on conflict).
+    /// (the referencing font's filter overrides the referenced provider's own
+    /// condition on conflict, matching vanilla's own filter-merge rule).
     fn with_override(&self, override_with: &FontFilter) -> FontFilter {
         let mut conditions = self.conditions.clone();
         for (k, v) in &override_with.conditions {

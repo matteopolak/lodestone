@@ -113,8 +113,8 @@ fn baking_is_deterministic() {
     }
 }
 
-/// The size-variant mobs must actually carry vanilla's baked-in
-/// `MeshTransformer.scaling`, not just reuse the base mesh. Cave spider is
+/// The size-variant mobs must actually carry vanilla's baked-in mesh scale
+/// transform, not just reuse the base mesh. Cave spider is
 /// spider baked at 0.7; every baked vertex must equal `0.7 * spider_vertex +
 /// (0, y_offset/16, 0)` where `y_offset = 24.016 * (1 - 0.7)`. If the scale were
 /// forgotten the two would be identical and this fails (0.7 != 1).
@@ -932,8 +932,8 @@ type PosedVertex = [i64; 5];
 /// draft of `a_y_flip_of_the_arrow_rig_moves_no_geometry` compare noise.
 ///
 /// `flip_y` inserts a `scale(1, -1, 1)` between the placement and the model, which
-/// is what reusing `LivingEntityRenderer`'s flip would do to a rig authored `+Y`
-/// up.
+/// is what reusing vanilla's living-entity render flip (used to draw an
+/// upside-down entity) would do to a rig authored `+Y` up.
 fn posed_parts(model: &EntityModelDef, flip_y: bool) -> Vec<(String, Vec<PosedVertex>)> {
     let sign = if flip_y { -1.0 } else { 1.0 };
     let flip = Affine {

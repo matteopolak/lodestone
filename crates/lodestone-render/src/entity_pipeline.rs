@@ -386,17 +386,16 @@ pub struct FlameQuad {
     /// The four corners, in winding order.
     pub vertices: [FlameVertex; 4],
     /// `true` selects the right half of the combined flame texture
-    /// (`fire_1`), `false` the left half (`fire_0`) —
-    /// `FlameFeatureRenderer.java:45`'s `ss % 2 == 0 ? fire1 : fire2` (vanilla
-    /// names its *first* alternate `fire1` for the sprite `ModelBakery.FIRE_0`
-    /// resolves to — the naming looks swapped at a glance and is not; `fire1`
-    /// the local variable and `FIRE_0` the sprite are the same texture).
+    /// (`fire_1`), `false` the left half (`fire_0`) — matching vanilla's own
+    /// alternating selection between its two fire sprites. Vanilla's naming
+    /// for this looks swapped at a glance and is not: the variable it names
+    /// for its *first* alternate and the sprite constant it resolves to name
+    /// the same texture, just under different labels.
     pub fire_1: bool,
 }
 
-/// Vertical size of one flame quad in scaled local units
-/// (`FlameFeatureRenderer.java:58-59`'s `1.4`), and simultaneously the step
-/// `yo`/`h` advance by per quad (`:60-61`) — vanilla reuses one literal for
+/// Vertical size of one flame quad in scaled local units, and simultaneously
+/// the step `yo`/`h` advance by per quad — vanilla reuses one literal for
 /// both, so consecutive quads overlap by `1.4 - 0.45 = 0.95` rather than
 /// tiling edge to edge.
 const FLAME_QUAD_HEIGHT: f32 = 1.4;
@@ -405,46 +404,44 @@ const FLAME_INITIAL_HALF_WIDTH: f32 = 0.5;
 const FLAME_WIDTH_DECAY: f32 = 0.9;
 const FLAME_Z_STEP: f32 = 0.03;
 const FLAME_SCALE_FACTOR: f32 = 1.4;
-/// A safety cap absent from vanilla's own unguarded `while` loop
-/// (`FlameFeatureRenderer.java:44`): a pathological `(width, height)` pair —
+/// A safety cap absent from vanilla's own unguarded `while` loop: a
+/// pathological `(width, height)` pair —
 /// zero width, or a height orders of magnitude beyond any real vanilla entity
 /// — must produce a bounded mesh rather than an unbounded allocation. No real
 /// `lodestone_data::entity_dimensions` entry comes close to needing this many
 /// quads (the tallest, the ender dragon at height 8, needs single digits).
 const MAX_FLAME_QUADS: usize = 64;
 
-/// Vanilla's `FlameFeatureRenderer.prepare` (see [`FlameQuad`]'s doc for the
+/// Vanilla's own mob-fire billboard rule (see [`FlameQuad`]'s doc for the
 /// full derivation), for an entity whose **base** hitbox is `width × height`
 /// blocks (`lodestone_data::entity_dimensions::base_dimensions` — vanilla's
-/// `state.boundingBoxWidth`/`boundingBoxHeight`, `EntityRenderer.java:168-169`,
-/// i.e. `Entity.getBbWidth()`/`getBbHeight()`, not this crate's own baked mesh
+/// own entity bounding-box width/height, not this crate's own baked mesh
 /// AABB).
 ///
 /// Empty for a non-positive `width` (nothing to scale by) or an already
 /// non-positive `height` — both degenerate inputs vanilla's own loop would
-/// simply not enter (`while (h > 0.0F)`) — and capped at
-/// [`MAX_FLAME_QUADS`] for anything else.
+/// simply not enter — and capped at [`MAX_FLAME_QUADS`] for anything else.
 #[must_use]
 pub fn flame_quads(width: f32, height: f32) -> Vec<FlameQuad> {
     if !(width > 0.0) || !(height > 0.0) {
         return Vec::new();
     }
-    let s = width * FLAME_SCALE_FACTOR; // `:32`
-    let h_initial = height / s; // `:36`
-    // The pose-level push-back applied once, before any quad — `:39`. Vanilla
+    let s = width * FLAME_SCALE_FACTOR;
+    let h_initial = height / s;
+    // The pose-level push-back applied once, before any quad. Vanilla
     // truncates toward zero (an `int` cast on a positive float), matching
     // `as i32` here.
     let base_z = 0.3 - (h_initial as i32) as f32 * 0.02;
 
     let mut quads = Vec::with_capacity(8);
     let mut h = h_initial;
-    let mut r = FLAME_INITIAL_HALF_WIDTH; // `:34`
-    let mut yo = 0.0f32; // `:37`
-    let mut zo = 0.0f32; // `:40`, the loop-local component added to `base_z`
+    let mut r = FLAME_INITIAL_HALF_WIDTH;
+    let mut yo = 0.0f32;
+    let mut zo = 0.0f32; // the loop-local component added to `base_z`
     let mut ss: u32 = 0;
     while h > 0.0 && quads.len() < MAX_FLAME_QUADS {
-        let fire_1 = ss % 2 != 0; // `:45`
-        let flip = (ss / 2) % 2 == 0; // `:50`
+        let fire_1 = ss % 2 != 0;
+        let flip = (ss / 2) % 2 == 0;
         // At `+r` (right edge): `u0` unflipped, `u1` flipped. At `-r` (left
         // edge): the opposite. See `FlameQuad::fire_1`'s doc for why vanilla's
         // baseline (unflipped) orientation is itself already mirrored.
@@ -453,11 +450,11 @@ pub fn flame_quads(width: f32, height: f32) -> Vec<FlameQuad> {
         let u_right = half_base + u_right * 0.5;
         let u_left = half_base + u_left * 0.5;
         let z = base_z + zo;
-        let y0 = -yo; // bottom, `:56-57`
-        let y1 = FLAME_QUAD_HEIGHT - yo; // top, `:58-59`
+        let y0 = -yo; // bottom
+        let y1 = FLAME_QUAD_HEIGHT - yo; // top
         // Bottom vertices sample `v1` (bottom of the frame cell, local 1.0),
         // top vertices sample `v0` (top of the frame cell, local 0.0) —
-        // `:56-59`'s vertex argument order, carried into `FlameVertex::uv`'s
+        // vanilla's own vertex argument order, carried into `FlameVertex::uv`'s
         // `v_local` convention.
         quads.push(FlameQuad {
             vertices: [
@@ -480,27 +477,27 @@ pub fn flame_quads(width: f32, height: f32) -> Vec<FlameQuad> {
             ],
             fire_1,
         });
-        h -= FLAME_STEP; // `:60`
-        yo -= FLAME_STEP; // `:61`
-        r *= FLAME_WIDTH_DECAY; // `:62`
-        zo -= FLAME_Z_STEP; // `:63`
+        h -= FLAME_STEP;
+        yo -= FLAME_STEP;
+        r *= FLAME_WIDTH_DECAY;
+        zo -= FLAME_Z_STEP;
         ss += 1;
     }
     quads
 }
 
-/// The camera-yaw billboard a flame is rotated by — vanilla's
-/// `Mth.rotationAroundAxis(Mth.Y_AXIS, camera.orientation, …)`
-/// (`EntityRenderDispatcher.java:164`), reduced to a matrix.
+/// The camera-yaw billboard a flame is rotated by — a reduction to a matrix of
+/// vanilla's own axis-rotation helper applied to the camera's Y axis and
+/// orientation.
 ///
 /// # The sign is not free, and reasoning it away is how it shipped wrong
 ///
-/// `rotationAroundAxis` is a swing/twist decomposition: it keeps `(0, q.y, 0,
-/// q.w)` and normalises, which for `Camera.setRotation`'s
-/// `rotationYXZ(PI - yaw, -pitch, 0)` is exactly `Ry(PI - yaw)` — the pitch term
-/// contributes nothing after the projection, so this takes a yaw and not a whole
-/// camera. Hence the `PI -` here: **not** `Ry(yaw)`, and **not** `Ry(-yaw)`
-/// either. The two differ by a further half turn.
+/// Vanilla's helper is a swing/twist decomposition: it keeps the rotation's Y
+/// and W components and normalises, which for the camera's own rotation order
+/// (yaw first, negated pitch, then roll) reduces to exactly `Ry(PI - yaw)` —
+/// the pitch term contributes nothing after the projection, so this takes a
+/// yaw and not a whole camera. Hence the `PI -` here: **not** `Ry(yaw)`, and
+/// **not** `Ry(-yaw)` either. The two differ by a further half turn.
 ///
 /// An earlier version of this pass used `Ry(yaw)` and argued the sign could not
 /// matter because entity draws are double-sided (`cull_mode: None`), so a flat
@@ -521,27 +518,25 @@ pub fn flame_billboard_rotation(camera_yaw_deg: f32) -> glam::Mat4 {
     glam::Mat4::from_rotation_y(core::f32::consts::PI - camera_yaw_deg.to_radians())
 }
 
-/// The uniform scale a flame is drawn at — vanilla's
-/// `s = state.boundingBoxWidth * 1.4` (`FlameFeatureRenderer.java:32`).
+/// The uniform scale a flame is drawn at — vanilla's own
+/// `s = boundingBoxWidth * 1.4`.
 ///
-/// `bb_width` is the entity's **own** hitbox width, not its type's: vanilla reads
-/// `EntityRenderState.boundingBoxWidth`, which is `Entity.getBbWidth()` after
-/// `getDimensions().scale(getAgeScale())`, so a baby's is half its type's. That
-/// is the whole of the baby-flame fix — see [`flame_instance_matrix`].
+/// `bb_width` is the entity's **own** hitbox width, not its type's: vanilla
+/// reads the render state's own bounding-box width, which already has the
+/// per-entity age scale folded in, so a baby's is half its type's. That is
+/// the whole of the baby-flame fix — see [`flame_instance_matrix`].
 #[must_use]
 pub fn flame_scale(bb_width: f32) -> f32 {
     bb_width * FLAME_SCALE_FACTOR
 }
 
 /// The model→world matrix for one flame instance:
-/// `translate(feet) · scale(s) · billboard`, matching
-/// `FlameFeatureRenderer.prepare`'s own `pose.scale(s, s, s)` then
-/// `pose.rotate(rotation)` order.
+/// `translate(feet) · scale(s) · billboard`, matching vanilla's own
+/// scale-then-rotate pose order.
 ///
 /// `bb_width` is the entity's own hitbox width (see [`flame_scale`]). The
 /// per-quad push-back `0.3 - (int)h * 0.02` is already inside the baked
-/// geometry, so vanilla's third step (`pose.translate(0, 0, …)`) has no
-/// counterpart here.
+/// geometry, so vanilla's further translate step has no counterpart here.
 ///
 /// # Why the size is per **instance** and the mesh is per **type**
 ///
@@ -607,10 +602,9 @@ pub fn flame_mesh(width: f32, height: f32) -> (Vec<ModelVertex>, Vec<u32>) {
 /// matrix and the current animation frame — nothing else.
 ///
 /// Deliberately **not** [`EntityInstanceRaw`]: flame carries no per-instance
-/// light (vanilla forces full-bright block light, `LightCoordsUtil.withBlock(
-/// state.lightCoords, 15)`, `FlameFeatureRenderer.java:42`), no tint (a flat
-/// vertex colour `-1`, `:71`) and no hurt/creeper overlay (fire is not a mob
-/// layer vanilla's `OverlayTexture` ever touches) — carrying three unused
+/// light (vanilla forces full-bright block light), no tint (a flat vertex
+/// colour) and no hurt/creeper overlay (fire is not a mob layer vanilla's
+/// overlay lookup ever touches) — carrying three unused
 /// attributes per instance for a value that is *always* the same constant
 /// would be pure waste, and would invite a future caller to wire a tint that
 /// vanilla's own flame never has.
@@ -618,12 +612,11 @@ pub fn flame_mesh(width: f32, height: f32) -> (Vec<ModelVertex>, Vec<u32>) {
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct FlameInstanceRaw {
     /// The model→world matrix, column-major — feet position composed with the
-    /// camera-yaw-only billboard rotation
-    /// (`Mth.rotationAroundAxis(Mth.Y_AXIS, camera.orientation, …)`,
-    /// `EntityRenderDispatcher.java:163`). Building that rotation is the
-    /// caller's job (it needs the camera, which this crate's pure geometry
-    /// functions deliberately do not take) — see `docs/entity-rendering.md`'s
-    /// "Mob fire" section.
+    /// camera-yaw-only billboard rotation, built from vanilla's own axis-
+    /// rotation helper applied to the camera's Y axis and orientation.
+    /// Building that rotation is the caller's job (it needs the camera, which
+    /// this crate's pure geometry functions deliberately do not take) — see
+    /// `docs/entity-rendering.md`'s "Mob fire" section.
     pub model: [[f32; 4]; 4],
     /// Which of the 32 stacked rows in the combined flame texture is current
     /// this frame — the same value for every flame instance drawn in one
@@ -685,14 +678,15 @@ impl FlameInstanceRaw {
     }
 }
 
-/// Derives vanilla's `OverlayTexture` alpha byte from a creeper's white-flash
-/// progress (`0.0..=1.0`, [`crate::entity_anim::creeper_white_overlay_progress`]).
+/// Derives vanilla's own overlay-lookup alpha byte from a creeper's
+/// white-flash progress (`0.0..=1.0`, [`crate::entity_anim::creeper_white_overlay_progress`]).
 ///
-/// Transcribed from the decompiled 26.2 client's `OverlayTexture` constructor:
-/// the white row (`y >= 8`) at column `x` holds alpha
-/// `(1.0 - x / 15.0 * 0.75) * 255.0`, and `OverlayTexture.u(progress)` selects
-/// `x = (int)(progress * 15.0)` — so this is that same two-step quantise then
-/// derive, not a continuous formula in `progress`. The quantisation matters:
+/// Transcribed from the decompiled 26.2 client's own overlay-lookup
+/// construction: the white row (`y >= 8`) at column `x` holds alpha
+/// `(1.0 - x / 15.0 * 0.75) * 255.0`, and vanilla's own column-selection
+/// function picks `x = (int)(progress * 15.0)` — so this is that same
+/// two-step quantise then derive, not a continuous formula in `progress`.
+/// The quantisation matters:
 /// vanilla's overlay is a **16-column lookup texture**, not a shader-computed
 /// gradient, so a real client's alpha visibly steps between 15 discrete levels
 /// rather than fading continuously, and reproducing that stepping (rather than

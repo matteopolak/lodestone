@@ -40,24 +40,11 @@ pub struct JoinGame {
     pub reduced_debug_info: bool,
 }
 
-/// Clientbound `chat` packet.
-///
-/// # Architectural note
-///
-/// The message is a **JSON string**, not the modern NBT text component. The
-/// shared [`lodestone_model::Text::from_json`] front-end parses it into the same
-/// format-agnostic tree that modern NBT chat decodes to.
-///
-/// Wire layout: string message (JSON), signed byte position (`0` chat, `1`
-/// system, `2` action bar / game info).
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:chat", state = Play, bound = Client)]
-pub struct ClientboundChat {
-    /// JSON-encoded chat component.
-    pub message: String,
-    /// Chat slot: `0` chat, `1` system, `2` action bar.
-    pub position: i8,
-}
+// `ClientboundChat` is byte-identical to v340's (measured), shared via
+// `lodestone-protocol-common` ranged 47..=340 -- v735 (1.16) added a
+// `sender: Uuid` field, so it is not in this range. See
+// `packets::chat`'s module docs.
+pub use lodestone_protocol_common::packets::chat::ClientboundChat;
 
 /// Serverbound `chat` packet.
 ///

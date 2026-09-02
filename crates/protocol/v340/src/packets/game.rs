@@ -41,37 +41,15 @@ pub struct JoinGame {
     pub reduced_debug_info: bool,
 }
 
-/// Clientbound `chat` packet.
-///
-/// # Architectural note
-///
-/// The message is a **JSON string**, not the modern NBT text component. The
-/// shared [`lodestone_model::Text::from_json`] front-end parses it into the same
-/// format-agnostic tree that modern NBT chat decodes to.
-///
-/// Wire layout: string message (JSON), signed byte position (`0` chat, `1`
-/// system, `2` action bar / game info).
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:chat", state = Play, bound = Client)]
-pub struct ClientboundChat {
-    /// JSON-encoded chat component.
-    pub message: String,
-    /// Chat slot: `0` chat, `1` system, `2` action bar.
-    pub position: i8,
-}
+// `ClientboundChat` is byte-identical to v47's (measured), shared via
+// `lodestone-protocol-common` ranged 47..=340 -- v735 (1.16) added a
+// `sender: Uuid` field, so it is not in this range.
+pub use lodestone_protocol_common::packets::chat::ClientboundChat;
 
-/// Serverbound `chat` packet.
-///
-/// Wire layout: a single string (max 100 chars). A message beginning with `/`
-/// is treated by the server as a command; 1.8 has no separate command packet.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:chat", state = Play, bound = Server)]
-pub struct ServerboundChat {
-    /// Message text (or `/command`), at most 256 characters (1.11+ raised this
-    /// from the 100-character 1.8 limit).
-    #[mc(max = 256)]
-    pub message: String,
-}
+// `ServerboundChat` is byte-identical to v735's (measured), shared via
+// `lodestone-protocol-common` ranged 340..=754 -- v47/1.8 capped the message
+// at 100 characters, not 256. See `packets::chat`'s module docs.
+pub use lodestone_protocol_common::packets::chat::ServerboundChat;
 
 /// Clientbound `position` (player position and look) packet.
 ///
@@ -177,19 +155,10 @@ pub use lodestone_protocol_common::packets::movement::{
     ServerboundLook, ServerboundPosition, ServerboundPositionLook,
 };
 
-/// Serverbound `arm_animation` (swing arm) packet.
-///
-/// Unlike 1.8 (protocol 47), where this packet is empty, 1.9+ carries which
-/// hand swung as a VarInt (`0` = main, `1` = off). This per-version divergence
-/// is why the swing encoding lives in each version crate rather than a shared
-/// one.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:arm_animation", state = Play, bound = Server)]
-pub struct ServerboundArmAnimation {
-    /// Hand that swung: `0` = main hand, `1` = off hand.
-    #[mc(varint)]
-    pub hand: i32,
-}
+// `ServerboundArmAnimation` is byte-identical to v735's (measured), shared
+// via `lodestone-protocol-common` ranged 340..=754 -- 1.8 has no hand field
+// at all. See `packets::chat`'s module docs.
+pub use lodestone_protocol_common::packets::chat::ServerboundArmAnimation;
 
 pub use lodestone_protocol_common::packets::movement::ServerboundFlying;
 

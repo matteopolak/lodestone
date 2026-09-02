@@ -6,9 +6,8 @@
 //! step and is intentionally left to the atlas-baking layer". This is that
 //! layer — armour trims (`assets/minecraft/atlases/armor_trims.json`, see
 //! [`crate::trim`]) are the concrete consumer, ported directly from
-//! `PalettedPermutations.java`/`NativeImage.mappedCopy` in
-//! `.cache/mc/26.2/client-src/net/minecraft/client/renderer/texture/atlas/
-//! sources/PalettedPermutations.java`.
+//! vanilla's own palette-swap pixel-copy implementation for this
+//! atlas-source kind.
 //!
 //! # The algorithm, and why it is not a stitch
 //!
@@ -47,8 +46,9 @@ pub struct PaletteBakeReport {
     pub loaded: usize,
     /// The source's own reference `palette_key` failed to load or decode —
     /// fatal for *every* sprite this source would have produced (vanilla's
-    /// `paletteKeySupplier` failure propagates into every permutation's
-    /// mapping), recorded once here rather than once per sprite.
+    /// own reference-palette lookup failure propagates into every
+    /// permutation's mapping), recorded once here rather than once per
+    /// sprite.
     pub reference_palette_error: Option<String>,
     /// Base textures the source named that were not found in any pack
     /// (`texture id: path`).
@@ -57,7 +57,7 @@ pub struct PaletteBakeReport {
     pub decode_errors: Vec<String>,
     /// Permutation palettes that failed to load, decode, or whose entry
     /// count disagreed with the reference palette (`suffix: reason`) —
-    /// vanilla's `PalettedSpriteSupplier.get()` catches exactly this and
+    /// vanilla's own per-permutation sprite getter catches exactly this and
     /// skips the one sprite, so it is per-sprite here too, not fatal.
     pub palette_errors: Vec<String>,
 }
@@ -164,10 +164,9 @@ fn load_palette(manager: &ResourceManager, loc: &ResourceLocation) -> Result<Vec
     Ok(image.rgba.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect())
 }
 
-/// The pixel transform itself: `PalettedPermutations.createPaletteMapping`
-/// (the `rgb -> replacement` lookup table) composed with
-/// `NativeImage.mappedCopy` (applying it per pixel), reproduced byte for
-/// byte.
+/// The pixel transform itself: vanilla's per-permutation lookup-table
+/// construction (the `rgb -> replacement` mapping) composed with its
+/// per-pixel apply step, reproduced byte for byte.
 ///
 /// `reference` and `target` are read positionally — index `i` of `reference`
 /// maps to index `i` of `target` — and must be the same length (a debug
@@ -175,29 +174,29 @@ fn load_palette(manager: &ResourceManager, loc: &ResourceLocation) -> Result<Vec
 /// calls this with mismatched lengths, having already checked and reported
 /// it).
 ///
-/// Per pixel, straight off `createPaletteMapping`/the lambda it returns:
+/// Per pixel, straight off vanilla's lookup-table construction and the
+/// per-pixel apply it returns:
 /// - A reference-palette entry whose own alpha is `0` is skipped when
-///   building the lookup table (`ARGB.alpha(key) != 0`) — it can never be
-///   matched, even by a pixel with the exact same, fully-transparent colour.
-///   A duplicate RGB among the *remaining* entries has the later index win
-///   (a plain `HashMap::put` overwrite), which this reproduces with a linear
-///   table rather than a `[u8; 3]`-keyed map — real palettes are 8-16 entries,
-///   so the O(n) lookup costs nothing measurable and needs no `Hash` impl on
-///   a raw byte triple.
-/// - A base pixel with alpha `0` passes through completely unchanged
-///   (`if (pixelAlpha == 0) return pixel;`), *before* any lookup — so a
-///   transparent pixel that happens to share an RGB with a real palette entry
-///   is never touched.
+///   building the lookup table (its alpha channel is checked and excluded) —
+///   it can never be matched, even by a pixel with the exact same,
+///   fully-transparent colour. A duplicate RGB among the *remaining* entries
+///   has the later index win (a plain map-overwrite), which this reproduces
+///   with a linear table rather than a `[u8; 3]`-keyed map — real palettes
+///   are 8-16 entries, so the O(n) lookup costs nothing measurable and needs
+///   no `Hash` impl on a raw byte triple.
+/// - A base pixel with alpha `0` passes through completely unchanged,
+///   *before* any lookup — so a transparent pixel that happens to share an
+///   RGB with a real palette entry is never touched.
 /// - A base pixel whose RGB matches a lookup entry gets that entry's RGB,
-///   with alpha `pixel.alpha * entry.alpha / 255` (integer division, matching
-///   Java's `int` arithmetic).
-/// - A base pixel whose RGB matches **no** lookup entry is `ARGB.opaque` of
-///   itself as the substitute value, and multiplying that through the same
-///   formula (`alpha * 255 / 255`) recovers the original alpha exactly — so
-///   an unmapped pixel is, byte for byte, a pass-through. This matters for
-///   any anti-aliased or stray colour a pattern texture might carry outside
-///   the eight reference greys (none of the ones measured here do, but the
-///   fallback is real vanilla behaviour, not a guess).
+///   with alpha `pixel.alpha * entry.alpha / 255` (integer division,
+///   truncating rather than rounding).
+/// - A base pixel whose RGB matches **no** lookup entry is treated as fully
+///   opaque of itself as the substitute value, and multiplying that through
+///   the same formula (`alpha * 255 / 255`) recovers the original alpha
+///   exactly — so an unmapped pixel is, byte for byte, a pass-through. This
+///   matters for any anti-aliased or stray colour a pattern texture might
+///   carry outside the eight reference greys (none of the ones measured here
+///   do, but the fallback is real vanilla behaviour, not a guess).
 #[must_use]
 pub fn recolor_by_palette(base_rgba: &[u8], reference: &[[u8; 4]], target: &[[u8; 4]]) -> Vec<u8> {
     debug_assert_eq!(

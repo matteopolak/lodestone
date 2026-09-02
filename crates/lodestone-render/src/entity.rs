@@ -1041,7 +1041,7 @@ pub(crate) fn push_part_quads(
 }
 
 /// The world placement transform for a standing mob, matching vanilla's
-/// `LivingEntityRenderer` pose-stack order exactly (see the module docs).
+/// living-entity pose-stack order exactly (see the module docs).
 ///
 /// `feet` is the entity's world position (its feet, as the protocol reports it),
 /// `body_yaw_deg` its body yaw in degrees (Minecraft convention: `0` faces `+Z`),
@@ -1054,7 +1054,7 @@ pub fn entity_model_matrix(feet: Vec3, body_yaw_deg: f32, scale: f32) -> Mat4 {
 }
 
 /// [`entity_model_matrix`] with the **death fall-over** — vanilla's
-/// `LivingEntityRenderer.setupRotations` `Axis.ZP` term, in degrees, from
+/// living-entity pose-stack setup rotation's Z-axis term, in degrees, from
 /// [`death_fall_over_degrees`](crate::entity_anim::death_fall_over_degrees).
 ///
 /// # The roll's position in the product is the whole of this function
@@ -1063,10 +1063,10 @@ pub fn entity_model_matrix(feet: Vec3, body_yaw_deg: f32, scale: f32) -> Mat4 {
 /// vanilla's pose stack puts it:
 ///
 /// ```text
-///   setupRotations:  mulPose(YP.rotationDegrees(180 - bodyRot))   // `rotate`
-///                    mulPose(ZP.rotationDegrees(fall * 90))       // this term
-///   render:          scale(-1, -1, 1)                             // `flip_scale`
-///                    translate(0, -1.501, 0)                      // `lift`
+///   setup rotations:  rotate about Y by (180 - bodyRot)          // `rotate`
+///                     rotate about Z by (fall * 90)               // this term
+///   render:           scale(-1, -1, 1)                            // `flip_scale`
+///                     translate(0, -1.501, 0)                     // `lift`
 /// ```
 ///
 /// Two consequences that a "just multiply a Z rotation on" reading gets wrong:
@@ -1104,44 +1104,43 @@ pub fn dying_entity_model_matrix(
 /// The vertical bob and extra spin a **non-living vehicle** rig needs in place
 /// of [`MODEL_FEET_OFFSET`], keyed by model name — the second switch beside
 /// [`projectile_pitch_offset_deg`] that decides which of three placements a
-/// corpus model gets. `None` for every model that really is a
-/// `LivingEntityRenderer` (every mob, the player, and — despite the name —
-/// `armor_stand`, which extends `LivingEntity` in vanilla and keeps the
+/// corpus model gets. `None` for every model that really is drawn through the
+/// living-entity renderer (every mob, the player, and — despite the name —
+/// `armor_stand`, which is a living entity in vanilla and keeps the
 /// 1.501 lift).
 ///
 /// Read from the 26.2 decompile, not inferred:
 ///
-/// * `boat`/`chest_boat`/`raft`/`chest_raft` — `AbstractBoatRenderer.submit`
-///   (`AbstractBoatRenderer.java:24-43`) does `translate(0, 0.375, 0)`,
-///   `rotateY(180 - yRot)`, `scale(-1, -1, 1)`, **then a fixed
-///   `rotateY(90)`** — `AbstractBoatRenderer extends EntityRenderer`, not
-///   `LivingEntityRenderer`, so there is no 1.501 lift at all, and the model
-///   (hull length along local `+X`, matching `BoatModel`'s own pivots) needs
-///   that trailing spin to face the right way once the yaw and flip are
-///   applied. Dropping it would leave every boat floating at the right
-///   height but broadside to its heading.
-/// * `minecart` — `AbstractMinecartRenderer.submit` /
-///   `newRender`/`oldRender` (`AbstractMinecartRenderer.java:37-98`) also
-///   does a `0.375` bob before its own `scale(-1, -1, 1)` and no lift. Vanilla
-///   composes the cart's yaw as a bare `rotateY(yRot)` (no `180 -`, no rail
-///   curve tracking, both because this engine has no per-tick rail-curve
-///   state to feed it) rather than the mob convention this crate already
-///   applies elsewhere; reusing the existing `180 - yaw` term here rather
-///   than porting that difference keeps the change scoped to the lift bug
-///   this function exists to fix, so the extra spin is `0.0` (an exact
-///   identity) rather than a second unverified rotation formula.
+/// * `boat`/`chest_boat`/`raft`/`chest_raft` — the boat renderer's submit
+///   step does `translate(0, 0.375, 0)`, `rotateY(180 - yRot)`,
+///   `scale(-1, -1, 1)`, **then a fixed `rotateY(90)`** — a boat is drawn
+///   through the plain entity renderer, not the living-entity one, so there
+///   is no 1.501 lift at all, and the model (hull length along local `+X`,
+///   matching the boat model's own pivots) needs that trailing spin to face
+///   the right way once the yaw and flip are applied. Dropping it would
+///   leave every boat floating at the right height but broadside to its
+///   heading.
+/// * `minecart` — the minecart renderer's submit step also does a `0.375`
+///   bob before its own `scale(-1, -1, 1)` and no lift. Vanilla composes the
+///   cart's yaw as a bare `rotateY(yRot)` (no `180 -`, no rail curve
+///   tracking, both because this engine has no per-tick rail-curve state to
+///   feed it) rather than the mob convention this crate already applies
+///   elsewhere; reusing the existing `180 - yaw` term here rather than
+///   porting that difference keeps the change scoped to the lift bug this
+///   function exists to fix, so the extra spin is `0.0` (an exact identity)
+///   rather than a second unverified rotation formula.
 ///
-/// `end_crystal` is deliberately **not** in this table: `EndCrystalRenderer`
-/// has no `scale(-1, -1, 1)` flip at all (`EndCrystalRenderer.java:27-36`), so
-/// it is not a small variation on this placement the way the vehicles are —
-/// fixing it needs its own investigation into whether the corpus geometry was
-/// even authored for the flipped frame, not a table entry here.
+/// `end_crystal` is deliberately **not** in this table: its renderer has no
+/// `scale(-1, -1, 1)` flip at all, so it is not a small variation on this
+/// placement the way the vehicles are — fixing it needs its own
+/// investigation into whether the corpus geometry was even authored for the
+/// flipped frame, not a table entry here.
 #[must_use]
 pub fn non_living_vehicle_placement(model_name: &str) -> Option<(f32, f32)> {
     match model_name {
         // `"boat_water_patch"` joins this arm rather than getting its own:
-        // `AbstractBoatRenderer.submit` calls `submitTypeAdditions` (the
-        // water-patch submit) **inside the same `pushPose`/`popPose` block**
+        // the boat renderer's submit step submits the water-patch geometry
+        // **inside the same pushed pose-stack block**
         // as the main model, after the identical bob/rotate/flip/spin
         // sequence — so the patch's placement transform is not merely
         // *similar* to the boat's, it is the same pose-stack state the boat
@@ -1177,7 +1176,7 @@ pub fn non_living_vehicle_placement(model_name: &str) -> Option<(f32, f32)> {
         // orientation — tolerable only because its three slabs make it symmetric
         // under any quarter turn. The bob is real and is kept.
         "shulker_bullet" => Some((0.15, 0.0)),
-        // `WindChargeRenderer.submit` applies neither a flip nor a rotation —
+        // The wind charge's renderer applies neither a flip nor a rotation —
         // the dispatcher's bare translate is all it gets, so vanilla's box union
         // never turns to face travel direction, only its (unported) internal
         // counter-spin moves. There is no "translate only" placement in this
@@ -1220,23 +1219,24 @@ pub fn non_living_vehicle_matrix(
 /// This is the one switch that decides which of the two placements a corpus
 /// model gets, so it is also the thing that would put every arrow 1.5 blocks
 /// **above** where it belongs and mirrored if it returned `None` by mistake — see
-/// [`projectile_model_matrix`] for why the offset points *up* and not down, which
-/// is the direction issue #380's own notes had backwards. It is keyed on the
-/// *model name*, not the entity type path, because that is what
-/// [`EntityModelSet`] already keys everything else by, and because vanilla's own
-/// distinction is which renderer *class* draws the type:
+/// [`projectile_model_matrix`] for why the offset points *up* and not down,
+/// which is a direction that was initially recorded backwards. It is keyed on
+/// the *model name*, not the entity type path, because that is what
+/// [`EntityModelSet`] already keys everything else by, and because vanilla's
+/// own distinction is which renderer *type* draws the entity:
 ///
-/// * `arrow`, `spectral_arrow` — `ArrowRenderer` (via `TippableArrowRenderer` /
-///   `SpectralArrowRenderer`). Pitch about `Axis.ZP` with **no** offset:
-///   `ArrowModel`'s shaft already lies along `+X`.
-/// * `trident` — `ThrownTridentRenderer`, which is `Axis.ZP.rotationDegrees(xRot
-///   + 90)` (`ThrownTridentRenderer.java:31`). `TridentModel`'s pole lies along
-///   `Y` with the spikes at negative `Y`; the `+90°` is exactly what rotates that
-///   axis onto the arrow's `+X`, so one matrix serves both rigs and the whole
-///   difference between them is this number.
+/// * `arrow`, `spectral_arrow` — a shared arrow renderer (used by both the
+///   tippable and spectral arrow variants). Pitch about the Z axis with
+///   **no** offset: the arrow model's shaft already lies along `+X`.
+/// * `trident` — the thrown-trident renderer applies a Z-axis rotation of
+///   `xRot + 90`. The trident model's pole lies along `Y` with the spikes at
+///   negative `Y`; the `+90°` is exactly what rotates that axis onto the
+///   arrow's `+X`, so one matrix serves both rigs and the whole difference
+///   between them is this number.
 ///
-/// Every other model — every mob, the player, and the block-entity rigs — is a
-/// `LivingEntityRenderer` (or a block entity) and returns `None`.
+/// Every other model — every mob, the player, and the block-entity rigs — is
+/// drawn through the living-entity renderer (or a block entity) and returns
+/// `None`.
 #[must_use]
 pub fn projectile_pitch_offset_deg(model_name: &str) -> Option<f32> {
     match model_name {
@@ -1258,22 +1258,22 @@ pub fn projectile_pitch_offset_deg(model_name: &str) -> Option<f32> {
     }
 }
 
-/// The world placement transform for a **projectile**, matching
-/// `ArrowRenderer.submit`'s pose-stack order (`ArrowRenderer.java:23-25`).
+/// The world placement transform for a **projectile**, matching vanilla's
+/// arrow-renderer submit step's pose-stack order.
 ///
 /// ```text
-///   translate(pos)                       // EntityRenderDispatcher
-///   rotateY(yRot - 90°)                  // ArrowRenderer.submit
-///   rotateZ(xRot + pitch_offset)         // ArrowRenderer.submit — ZP, not XP
+///   translate(pos)                       // move to the entity's position
+///   rotateY(yRot - 90°)                  // face travel direction
+///   rotateZ(xRot + pitch_offset)         // pitch about Z, not X
 /// ```
 ///
 /// # Why this is not [`entity_model_matrix`] with a pitch bolted on
 ///
-/// `ArrowRenderer extends EntityRenderer`, **not** `LivingEntityRenderer`
-/// (`ArrowRenderer.java:14`). `EntityRenderer.java` contains no `scale(` call at
-/// all; the `scale(-1, -1, 1)` and the `translate(0, -1.501, 0)` that
-/// [`entity_model_matrix`] carries are both `LivingEntityRenderer.java:85` and
-/// `:87`. So a projectile gets **neither**, and there is consequently no flip
+/// A projectile is drawn through the plain entity renderer, **not** the
+/// living-entity one. The plain entity renderer applies no scale at all; the
+/// `scale(-1, -1, 1)` and the `translate(0, -1.501, 0)` that
+/// [`entity_model_matrix`] carries both belong to the living-entity renderer
+/// alone. So a projectile gets **neither**, and there is consequently no flip
 /// here: the projectile meshes in
 /// [`entity_models`](lodestone_assets::entity_models) are authored `+Y` **up**
 /// rather than in the mob rigs' `Y`-down frame.
@@ -1281,8 +1281,8 @@ pub fn projectile_pitch_offset_deg(model_name: &str) -> Option<f32> {
 /// Reusing the mob matrix would draw every arrow [`MODEL_FEET_OFFSET`] = 1.501
 /// blocks **above** its reported position, and pointing along a reflected axis.
 /// Note the direction: the lift is applied *before* the `scale(-1, -1, 1)`, so
-/// `-1.501` comes back out as `+1.501` — issue #380's own notes said "below", and
-/// so did the first draft of the test that now pins it
+/// `-1.501` comes back out as `+1.501` — an earlier note here said "below",
+/// and so did the first draft of the test that now pins it
 /// (`reusing_the_mob_matrix_would_lift_an_arrow_and_reverse_it`). Either way it
 /// reads as a texture bug rather than a placement bug, which is why it is worth
 /// the separate function.
@@ -1291,10 +1291,10 @@ pub fn projectile_pitch_offset_deg(model_name: &str) -> Option<f32> {
 ///
 /// `pos` is the entity's world position, `yaw_deg` its `yRot` and `pitch_deg` its
 /// `xRot` — both as the server reports them, both derived by vanilla from
-/// `atan2` on the projectile's own velocity (`AbstractArrow.java:243-252`,
-/// `Projectile.shoot`), which is *not* the yaw convention a mob's body uses:
-/// `Projectile.shoot` sets `yRot = atan2(mx, mz)`, so a projectile fired by a
-/// player looking at yaw `Y` carries `yRot = -Y`. `Ry(yRot - 90°)` maps model
+/// `atan2` on the projectile's own velocity when it is shot, which is *not*
+/// the yaw convention a mob's body uses: vanilla's shoot step sets
+/// `yRot = atan2(mx, mz)`, so a projectile fired by a player looking at yaw
+/// `Y` carries `yRot = -Y`. `Ry(yRot - 90°)` maps model
 /// `+X` to `(sin yRot, 0, cos yRot)`, which is exactly that motion direction —
 /// the two conventions agree only because both halves are taken from vanilla
 /// together.
@@ -1375,7 +1375,7 @@ impl EntityInstance {
 
     /// [`new`](Self::new) with the two per-entity animation states that are neither
     /// placement nor skeletal pose: a creeper's **swell** fraction (vanilla's
-    /// `Creeper.getSwelling(partialTick)`) and a dying entity's **`death_time`**
+    /// per-tick swelling progress) and a dying entity's **`death_time`**
     /// (`deathTime + partialTicks`, `0.0` while alive).
     ///
     /// A separate constructor rather than two more arguments on [`new`](Self::new),
@@ -1726,9 +1726,9 @@ impl EntityModelSet {
     ///
     /// `yaw_deg`/`pitch_deg` are the entity's own reported rotation. For a
     /// projectile those are vanilla's velocity-derived `yRot`/`xRot`
-    /// (`AbstractArrow.java:243-252` recomputes them from `atan2` on
-    /// `deltaMovement` every tick and the server broadcasts the result), *not* a
-    /// body yaw and a head pitch — the two use different conventions and
+    /// (recomputed from `atan2` on the projectile's own velocity every tick,
+    /// and the server broadcasts the result), *not* a body yaw and a head
+    /// pitch — the two use different conventions and
     /// [`projectile_model_matrix`] documents the one it expects.
     #[must_use]
     pub fn resolve_posed(
@@ -1818,9 +1818,8 @@ impl EntityModelSet {
     /// Every other `resolve*` here derives its placement from `(feet, yaw,
     /// scale)` under vanilla's ordinary entity convention. That is the wrong
     /// shape for a mob drawn *inside* another transform chain — the mob
-    /// spawner's miniature display entity, `SpawnerRenderer.
-    /// submitEntityInSpawner`, which is vanilla's own pose stack (translate,
-    /// spin, tilt, shrink) with `EntityRenderDispatcher.submit` handing the
+    /// spawner's miniature display entity, whose renderer builds vanilla's
+    /// own pose stack (translate, spin, tilt, shrink) and then hands the
     /// entity's *own* renderer that already-transformed stack, rather than a
     /// `(feet, yaw)` pair. [`crate::spawner::spawner_display_outer_matrix`]
     /// builds that outer chain; the caller composes it with
@@ -2018,16 +2017,16 @@ pub fn plan_entities(instances: &[EntityInstance], frustum: &Frustum) -> EntityF
 // # Two measured deviations from vanilla, both sub-texel
 //
 // Reusing the wearer's pivot rather than the armour model's own means a rig
-// whose pivots differ from `HumanoidModel`'s gets its armour at *its* pivot,
-// not at vanilla's:
+// whose pivots differ from the plain humanoid model's gets its armour at
+// *its* pivot, not at vanilla's:
 //
 // * `skeleton`/`stray`/`wither_skeleton` put their legs at `x = ±2.0` where
-//   `HumanoidModel` has `±1.9`, so skeleton leg armour sits 0.1 texel
+//   the humanoid model has `±1.9`, so skeleton leg armour sits 0.1 texel
 //   (0.00625 blocks) further out than vanilla draws it.
-// * `player_slim`'s arms pivot 0.5 texel lower than the wide rig's, and vanilla
-//   bakes only *one* player armour set (`PlayerModel.createArmorMeshSet` takes
-//   no slim flag and adds only empty sleeve/pants/jacket nodes), so a slim
-//   player's sleeves get armour 0.5 texel (0.03 blocks) low.
+// * `player_slim`'s arms pivot 0.5 texel lower than the wide rig's, and
+//   vanilla bakes only *one* player armour set (its armour-mesh-set builder
+//   takes no slim flag and adds only empty sleeve/pants/jacket nodes), so a
+//   slim player's sleeves get armour 0.5 texel (0.03 blocks) low.
 //
 // Both are deliberate: following the visible limb is worth more than matching
 // vanilla's pivot to a thirtieth of a block, and the alternative — posing a
@@ -2163,7 +2162,7 @@ impl Default for ArmourModelSet {
 
 impl ArmourModelSet {
     /// Bake all four slot meshes, in [`ArmourSlot::ALL`] order — which is
-    /// `HumanoidArmorLayer.submit`'s own submit order, so a caller that walks
+    /// vanilla's own armour-layer submit order, so a caller that walks
     /// [`iter`](Self::iter) draws in vanilla's sequence.
     #[must_use]
     pub fn load() -> Self {
@@ -2428,29 +2427,29 @@ impl CapeMesh {
 }
 
 /// The per-frame cape placement, relative to the wearer's **body** part
-/// transform: translate to the pivot `PlayerCapeModel.createCapeLayer` gives
-/// it (`(0, 0, 2)` model texels), then rotate.
+/// transform: translate to the pivot vanilla's cape-layer builder gives it
+/// (`(0, 0, 2)` model texels), then rotate.
 ///
-/// `lean`/`lean2`/`flap` are vanilla's `AvatarRenderState.capeLean`/
-/// `capeLean2`/`capeFlap` in **degrees** — see
+/// `lean`/`lean2`/`flap` are vanilla's per-frame cape-lean, cape-lean2 and
+/// cape-flap values, in **degrees** — see
 /// `lodestone_shell::entities::cape_sway` for how those three are derived
 /// from the lagged "cloak" position each frame.
 ///
-/// # The rotation, derived from `ModelPart.rotateBy`
+/// # The rotation, derived from a rotate-onto-existing-pose composition
 ///
-/// `PlayerCapeModel.setupAnim` does not set a rotation, it **composes** one
-/// onto the cape's existing pose (`ModelPart.rotateBy`, `26.2`):
+/// Vanilla's per-frame animation step does not set a rotation on the cape, it
+/// **composes** one onto the cape's existing pose:
 ///
-/// ```java
-/// Matrix3f oldRotation = new Matrix3f().rotationZYX(this.zRot, this.yRot, this.xRot);
-/// Matrix3f newRotation = oldRotation.rotate(rotation);
+/// ```text
+/// old_rotation = rotationZYX(zRot, yRot, xRot)
+/// new_rotation = old_rotation.rotate(rotation)
 /// ```
 ///
-/// i.e. `new = old * rotation` (`Matrix3f.rotate`/`Quaternionf.rotateX/Y/Z`
-/// all post-multiply). The cape's `old` rotation is the static pose
-/// `createCapeLayer` gives it, `Ry(pi)` (it hangs facing backward), and the
-/// `rotation` argument is itself built by chained `rotateY/X/Z` calls —
-/// each one *also* a post-multiply — so:
+/// i.e. `new = old * rotation` (the underlying rotation composition always
+/// post-multiplies). The cape's `old` rotation is the static pose the model
+/// builder gives it, `Ry(pi)` (it hangs facing backward), and the `rotation`
+/// argument is itself built by chained rotate-Y/X/Z calls — each one *also* a
+/// post-multiply — so:
 ///
 /// ```text
 /// rotation = Ry(-pi) * Rx(theta_x) * Rz(theta_z) * Ry(theta_y2)
@@ -2465,8 +2464,8 @@ impl CapeMesh {
 /// baking `Ry(pi)` here would double it instead of cancelling it.
 ///
 /// `theta_x = 6 + lean/2 + flap`, `theta_z = lean2/2`,
-/// `theta_y2 = 180 - lean2/2`, all degrees, straight out of
-/// `PlayerCapeModel.setupAnim`.
+/// `theta_y2 = 180 - lean2/2`, all degrees, straight out of vanilla's
+/// per-frame cape animation step.
 #[must_use]
 pub fn cape_local_rotation(lean: f32, lean2: f32, flap: f32) -> Mat4 {
     let theta_x = (6.0 + lean / 2.0 + flap).to_radians();
@@ -2478,7 +2477,7 @@ pub fn cape_local_rotation(lean: f32, lean2: f32, flap: f32) -> Mat4 {
 }
 
 // ---------------------------------------------------------------------------
-// The elytra (`ElytraModel`/`WingsLayer`)
+// The elytra
 // ---------------------------------------------------------------------------
 //
 // The same "second mesh posed off the wearer's already-animated
@@ -2497,11 +2496,12 @@ pub fn cape_local_rotation(lean: f32, lean2: f32, flap: f32) -> Mat4 {
 //    the piece's `equipment/<asset>.json` declares a `wings` layer at all —
 //    which is why a diamond chestplate, whose asset declares `humanoid` and
 //    `humanoid_leggings` and no `wings`, draws nothing here.
-//  * **`WingsLayer.submit` translates the whole layer `+0.125` on Z** before
-//    anything else, to clear the wearer's own body. That is 0.125 *blocks*
-//    (the pose stack is in blocks at layer level; `ModelPart.render` is what
-//    divides texels by 16), i.e. 2 texels — numerically the same as the cape's
-//    `z = 2` pivot, and a different quantity with a different origin.
+//  * **The elytra layer's submit step translates the whole layer `+0.125` on
+//    Z** before anything else, to clear the wearer's own body. That is 0.125
+//    *blocks* (the pose stack is in blocks at layer level; the underlying
+//    part-render step is what divides texels by 16), i.e. 2 texels —
+//    numerically the same as the cape's `z = 2` pivot, and a different
+//    quantity with a different origin.
 
 /// The elytra's baked mesh: two parts, `"left_wing"` and `"right_wing"`, in
 /// the wearer's **body-pivot-local** space.
@@ -2546,8 +2546,8 @@ impl ElytraWing {
         }
     }
 
-    /// The wing pivot's X in **model texels** (`ElytraModel.createLayer`'s
-    /// `PartPose.offsetAndRotation(±5, 0, 0, …)`).
+    /// The wing pivot's X in **model texels** (vanilla's elytra model builder
+    /// offsets each wing part by `±5, 0, 0`).
     #[must_use]
     pub const fn pivot_x(self) -> f32 {
         match self {
@@ -2611,11 +2611,11 @@ impl ElytraMesh {
     }
 }
 
-/// `ElytraAnimationState`'s resting rotation triple `(x_rot, y_rot, z_rot)`
-/// in radians — the target it lerps toward when the wearer is neither
-/// fall-flying nor crouching, `(PI/12, 0, -PI/12)`.
+/// Vanilla's elytra animation state's resting rotation triple
+/// `(x_rot, y_rot, z_rot)` in radians — the target it lerps toward when the
+/// wearer is neither fall-flying nor crouching, `(PI/12, 0, -PI/12)`.
 ///
-/// This is also `ElytraModel.createLayer`'s authored pose, which is why it is
+/// This is also the elytra model's authored rest pose, which is why it is
 /// what a standing player's wings look like. A caller that keeps no animation
 /// state at all can pass this straight to [`elytra_wing_transform`] and get
 /// the correct wings for every wearer who is standing, walking or running —
@@ -2630,43 +2630,44 @@ pub fn elytra_rest_rotations() -> (f32, f32, f32) {
 }
 
 /// The per-tick *target* `(x_rot, y_rot, z_rot)` an elytra's animation state
-/// lerps toward — `ElytraAnimationState.tick`'s three-way branch, in radians.
+/// lerps toward — vanilla's per-tick elytra-state update's three-way branch,
+/// in radians.
 ///
 /// `motion` is the wearer's delta movement in blocks per tick. Only its
 /// **normalised Y** is read, and only when it is negative: a steeper dive
 /// folds the wings back further, which is the whole visual point of the
 /// gliding pose.
 ///
-/// This is the pure half of `ElytraAnimationState`. The impure half is two
-/// lerped triples (`rot*` and `rot*Old`) advanced once per game tick by
-/// `current += (target - current) * ` [`ELYTRA_ROTATION_LERP`] and read back
-/// interpolated by partial ticks — that state belongs wherever entity ticks
-/// live, not here, exactly as `cape_sway`'s lagged cloak position does.
+/// This is the pure half of vanilla's elytra animation state. The impure half
+/// is two lerped triples (`rot*` and `rot*Old`) advanced once per game tick
+/// by `current += (target - current) * ` [`ELYTRA_ROTATION_LERP`] and read
+/// back interpolated by partial ticks — that state belongs wherever entity
+/// ticks live, not here, exactly as `cape_sway`'s lagged cloak position does.
 ///
 /// # Precedence
 ///
-/// Fall-flying wins over crouching, not the other way round: vanilla's
-/// `isFallFlying()` is the first branch, and a player can be both.
+/// Fall-flying wins over crouching, not the other way round: vanilla checks
+/// fall-flying first, and a player can be both.
 #[must_use]
 pub fn elytra_target_rotations(fall_flying: bool, crouching: bool, motion: Vec3) -> (f32, f32, f32) {
     use std::f32::consts::PI;
     if fall_flying {
         // `ratio = 1 - (-normalize(motion).y)^1.5` while descending, else 1.
-        // Computed in f64 because vanilla's is: `Vec3` is a double vector and
-        // `Math.pow` is a double call, and the exponent is fractional, so the
-        // f32 round trip is not free.
+        // Computed in f64 because vanilla's own vector type is
+        // double-precision and its pow call operates in double too, and the
+        // exponent is fractional, so the f32 round trip is not free.
         let ratio = if motion.y < 0.0 {
             let len = f64::from(motion.x).hypot(f64::from(motion.y)).hypot(f64::from(motion.z));
-            // `Vec3.normalize` returns ZERO for a zero-length vector, whose
-            // `y` is 0 and so leaves `ratio` at 1 — matching the guard rather
-            // than dividing by zero.
+            // Vanilla's vector normalize returns ZERO for a zero-length
+            // vector, whose `y` is 0 and so leaves `ratio` at 1 — matching
+            // the guard rather than dividing by zero.
             let ny = if len < 1.0e-4 { 0.0 } else { f64::from(motion.y) / len };
             1.0 - (-ny).max(0.0).powf(1.5)
         } else {
             1.0
         };
         let ratio = ratio as f32;
-        // `Mth.lerp(delta, start, end)` is `start + delta * (end - start)`.
+        // Vanilla's lerp helper: `start + delta * (end - start)`.
         let lerp = |start: f32, end: f32| start + ratio * (end - start);
         (
             lerp(PI / 12.0, PI / 9.0),
@@ -2683,12 +2684,12 @@ pub fn elytra_target_rotations(fall_flying: bool, crouching: bool, motion: Vec3)
     }
 }
 
-/// The per-tick approach rate in `ElytraAnimationState.tick`
+/// The per-tick approach rate in vanilla's per-tick elytra-state update
 /// (`rot += (target - rot) * 0.3`).
 pub const ELYTRA_ROTATION_LERP: f32 = 0.3;
 
-/// The wearer's crouching wing `y` offset in **model texels** —
-/// `ElytraModel.setupAnim`'s `state.isCrouching ? 3.0F : 0.0F`, which it
+/// The wearer's crouching wing `y` offset in **model texels** — vanilla's
+/// per-frame elytra animation step's `isCrouching ? 3.0F : 0.0F`, which it
 /// assigns to *both* wings.
 #[must_use]
 pub const fn elytra_wing_y(crouching: bool) -> f32 {
@@ -2709,20 +2710,21 @@ pub const fn elytra_wing_y(crouching: bool) -> f32 {
 /// T(0, 0, 0.125) * T(pivot_x/16, y/16, 0) * Rz(z) * Ry(y) * Rx(x)
 /// ```
 ///
-/// * The leading translate is `WingsLayer.submit`'s
-///   `poseStack.translate(0, 0, 0.125)`, applied to the layer as a whole and
-///   therefore **outside** the wing's own pivot. In blocks.
+/// * The leading translate is the elytra layer's own submit-step translate
+///   of `(0, 0, 0.125)`, applied to the layer as a whole and therefore
+///   **outside** the wing's own pivot. In blocks.
 /// * `T(pivot_x/16, y/16, 0)` is the wing's pivot: `x` is authored and
-///   constant (`±5` texels), `y` is assigned per frame by `setupAnim` and is
-///   `3` texels only while crouching. `z` is `0`.
-/// * The rotation order is `Rz * Ry * Rx`, matching JOML's
-///   `rotationZYX(zRot, yRot, xRot)` that `ModelPart.translateAndRotate`
-///   uses — not the `Rx * Rz * Ry` the cape ends up with, which is a
-///   *composed* quaternion chain rather than a part pose.
+///   constant (`±5` texels), `y` is assigned per frame by the per-frame
+///   animation step and is `3` texels only while crouching. `z` is `0`.
+/// * The rotation order is `Rz * Ry * Rx`, matching vanilla's own
+///   translate-and-rotate part composition — not the `Rx * Rz * Ry` the cape
+///   ends up with, which is a *composed* quaternion chain rather than a part
+///   pose.
 ///
 /// # The right wing
 ///
-/// `setupAnim` gives it `yRot = -left.yRot` and `zRot = -left.zRot`, and
+/// Vanilla's per-frame animation step gives it `yRot = -left.yRot` and
+/// `zRot = -left.zRot`, and
 /// leaves `xRot` and `y` shared. Two of three negated, and it is the two that
 /// are *not* negated that make a "just mirror everything" version wrong: a
 /// mirrored `xRot` pitches one wing up and the other down.
@@ -2753,8 +2755,8 @@ pub fn elytra_wing_transform(
 /// empty when this item is not humanoid armour, or is armour for a *different*
 /// slot, or its material declares no layers for this slot's layer type.
 ///
-/// The slot equality check is `HumanoidArmorLayer.shouldRender`'s
-/// `equippable.slot() == slot` (`HumanoidArmorLayer.java:42-44`): a plugin can
+/// The slot equality check is vanilla's own armour-layer render gate: a
+/// helmet's declared slot must equal the slot it is worn in, so a plugin can
 /// put a helmet in the boots slot, and vanilla draws nothing rather than
 /// drawing a helmet around the ankles.
 #[must_use]
@@ -2765,8 +2767,9 @@ pub fn armour_layers(slot: ArmourSlot, item_path: &str) -> &'static [ArmourLayer
     }
 }
 
-/// The gamma-space RGB a layer multiplies its texel by:
-/// `Dyeable.colorWhenUndyed` for a dyeable layer, white for any other.
+/// The gamma-space RGB a layer multiplies its texel by: vanilla's
+/// dyeable-layer "colour when undyed" for a dyeable layer, white for any
+/// other.
 ///
 /// This is [`armour_layer_tint_with_dye`] with the stack's own
 /// `minecraft:dyed_color` **absent** — kept as a zero-argument convenience
@@ -2782,49 +2785,46 @@ pub fn armour_layer_tint(layer: &ArmourLayer) -> [u8; 3] {
 /// The gamma-space RGB a layer multiplies its texel by, given the wearer
 /// stack's own `minecraft:dyed_color` component if it decoded one.
 ///
-/// This is `EquipmentLayerRenderer.getColorForLayer`
-/// (`EquipmentLayerRenderer.java:113-121`), transcribed exactly:
+/// This is vanilla's own per-layer colour resolution, transcribed exactly:
 ///
-/// ```java
-/// private static int getColorForLayer(Layer layer, int dyeColor) {
-///    Optional<Dyeable> dyeable = layer.dyeable();
-///    if (dyeable.isPresent()) {
-///       int colorWhenUndyed = dyeable.get().colorWhenUndyed().map(ARGB::opaque).orElse(0);
-///       return dyeColor != 0 ? dyeColor : colorWhenUndyed;
+/// ```text
+/// fn color_for_layer(layer, dye_color) -> color {
+///    if let Some(dyeable) = layer.dyeable() {
+///       let color_when_undyed = dyeable.color_when_undyed().map(opaque).unwrap_or(0);
+///       if dye_color != 0 { dye_color } else { color_when_undyed }
 ///    } else {
-///       return -1;
+///       WHITE // no tint
 ///    }
 /// }
 /// ```
 ///
-/// where `dyeColor` is `DyedItemColor.getOrDefault(itemStack, 0)`
-/// (`DyedItemColor.java:27-30`): `ARGB.opaque(component.rgb())` if the stack
-/// carries the component, `0` (not `colorWhenUndyed` — that fallback lives
-/// here, one call up) if it does not.
+/// where `dye_color` is the stack's dyed-color component, opacity-forced, if
+/// present, or `0` (not `color_when_undyed` — that fallback lives here, one
+/// call up) if it does not carry one.
 ///
 /// A non-dyeable layer (`layer.dye` is [`None`]) ignores `dyed_color`
-/// entirely and returns white (`-1` is `0xFFFFFFFF`, opaque white, i.e. "no
-/// tint") — matching the `else` branch above, which never reads `dyeColor`.
+/// entirely and returns white (opaque white, i.e. "no tint") — matching the
+/// non-dyeable branch above, which never reads `dye_color`.
 ///
 /// **A leather piece dyed pure black (`0x000000`) is indistinguishable from
 /// an undyed one**, and this is vanilla's own behaviour, not a port bug:
-/// `ARGB.opaque` only forces the alpha byte, so a `0x000000` dye still reads
-/// as `dyeColor == 0` and the `dyeColor != 0 ? dyeColor : colorWhenUndyed`
-/// ternary falls through to [`UNDYED_LEATHER_RGB`](lodestone_assets::equipment::UNDYED_LEATHER_RGB)
+/// forcing opacity only touches the alpha byte, so a `0x000000` dye still
+/// reads as `dye_color == 0` and the `dye_color != 0 ? dye_color :
+/// color_when_undyed` fallback falls through to
+/// [`UNDYED_LEATHER_RGB`](lodestone_assets::equipment::UNDYED_LEATHER_RGB)
 /// exactly as if the component were absent. `dyed_color_zero_reads_as_undyed`
 /// pins this so a future "fix" that special-cases black does not quietly
 /// diverge from the game it is porting.
 #[must_use]
 pub fn armour_layer_tint_with_dye(layer: &ArmourLayer, dyed_color: Option<u32>) -> [u8; 3] {
     let Some(undyed) = layer.dye else {
-        // `dyeable.isPresent()` false: vanilla returns `-1` unconditionally,
-        // never consulting `dyeColor`.
+        // The layer is not dyeable: vanilla returns opaque white
+        // unconditionally, never consulting the dye colour.
         return [255, 255, 255];
     };
-    // `DyedItemColor.getOrDefault(itemStack, 0)`: `ARGB.opaque` sets only the
-    // alpha byte, so the low 24 bits of `dyed_color` are already the RGB
-    // vanilla reads. `0` (component absent, or present-but-black) falls
-    // through to `colorWhenUndyed`.
+    // Vanilla's dyed-color read forces only the alpha byte, so the low 24
+    // bits of `dyed_color` are already the RGB vanilla reads. `0` (component
+    // absent, or present-but-black) falls through to the undyed colour.
     match dyed_color.filter(|&rgb| rgb & 0x00FF_FFFF != 0) {
         Some(rgb) => [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8],
         None => undyed,
@@ -2843,18 +2843,19 @@ pub fn armour_layer_tint_with_dye(layer: &ArmourLayer, dyed_color: Option<u32>) 
 // [`ModelPipeline`](crate::ModelPipeline) rather than the entity pipeline.
 //
 // This section owns the *placement*: where in the world that geometry goes, and
-// how it bobs and spins. Transcribed from 26.2's `ItemEntityRenderer.submit`:
+// how it bobs and spins. Transcribed from the 26.2 client's dropped-item
+// submit step:
 //
 // ```text
-//   AABB box     = state.item.getModelBoundingBox()      // the GROUND-posed model
+//   box          = the item's ground-posed model bounding box
 //   minOffsetY   = -box.minY + 0.0625
 //   bob          = sin(ageInTicks / 10 + bobOffs) * 0.1 + 0.1
 //   translate(0, bob + minOffsetY, 0)
-//   mulPose(Axis.YP.rotation(getSpin(ageInTicks, bobOffs)))   // radians
+//   rotateY(getSpin(ageInTicks, bobOffs))   // radians
 //   // then the item is drawn under its display.ground transform
 // ```
 //
-// and `ItemEntity.getSpin(age, bobOffs) = age / 20 + bobOffs`.
+// and `getSpin(age, bobOffs) = age / 20 + bobOffs`.
 //
 // # The winding invariant, stated for a *world* pose
 //
@@ -2874,12 +2875,12 @@ pub fn armour_layer_tint_with_dye(layer: &ArmourLayer, dyed_color: Option<u32>) 
 // convincingly in a screenshot. `dropped_item_pose_preserves_winding` derives
 // the reference sign from the camera rather than hardcoding either answer.
 
-/// Vanilla's `ItemEntityRenderer.ITEM_MIN_HOVER_HEIGHT`: how far the lowest
-/// point of the posed model floats above the entity's own position, in blocks.
+/// Vanilla's dropped-item renderer constant for how far the lowest point of
+/// the posed model floats above the entity's own position, in blocks.
 pub const ITEM_MIN_HOVER_HEIGHT: f32 = 0.0625;
 
-/// Vanilla's `ItemEntityRenderer.FLAT_ITEM_DEPTH_THRESHOLD`: a posed model
-/// thinner than this in `z` is treated as a flat sprite and a stack of them is
+/// Vanilla's dropped-item renderer constant: a posed model thinner than this
+/// in `z` is treated as a flat sprite and a stack of them is
 /// fanned along `z` rather than jittered in three axes.
 pub const FLAT_ITEM_DEPTH_THRESHOLD: f32 = 0.0625;
 
@@ -2990,7 +2991,7 @@ pub fn item_bob_height(age_ticks: f32, bob_offset: f32) -> f32 {
         + ITEM_BOB_AMPLITUDE
 }
 
-/// Vanilla's `ItemEntity.getSpin`: the item's yaw in **radians** at `age_ticks`.
+/// Vanilla's dropped-item spin function: the item's yaw in **radians** at `age_ticks`.
 #[must_use]
 pub fn item_spin_radians(age_ticks: f32, bob_offset: f32) -> f32 {
     age_ticks / ITEM_SPIN_TICKS_PER_RADIAN + bob_offset
@@ -2999,7 +3000,7 @@ pub fn item_spin_radians(age_ticks: f32, bob_offset: f32) -> f32 {
 /// The model-space `y` extent of `quads` once posed by `ground`, as
 /// `(min_y, max_y)`. `(0, 0)` for an empty quad list.
 ///
-/// This is vanilla's `state.item.getModelBoundingBox()` for the `y` axis: it is
+/// This is vanilla's posed-model bounding box for the `y` axis: it is
 /// measured on the **posed** model, which is why it cannot be a constant — a
 /// scaled-down cube and a full-size one hover differently.
 #[must_use]
@@ -3019,8 +3020,8 @@ pub fn posed_item_y_extent(quads: &[BakedQuad], ground: &DisplayTransform) -> (f
 
 /// The posed model's `z` extent, the mirror of [`posed_item_y_extent`].
 ///
-/// This is the input to vanilla's flat-versus-solid branch in
-/// `ItemEntityRenderer.submitMultipleFromCount`: a model whose depth exceeds
+/// This is the input to vanilla's flat-versus-solid branch in its
+/// multi-copy item-cluster submit step: a model whose depth exceeds
 /// [`FLAT_ITEM_DEPTH_THRESHOLD`] is a block-ish thing whose extra stack copies
 /// jitter in all three axes, while a flat sprite instead fans its copies evenly
 /// along `z`. Measured on the *posed* model for the same reason the `y` version
@@ -3040,8 +3041,8 @@ pub fn posed_item_z_extent(quads: &[BakedQuad], ground: &DisplayTransform) -> (f
     if min > max { (0.0, 0.0) } else { (min, max) }
 }
 
-/// How many copies of a stack vanilla draws — `ItemClusterRenderState
-/// .getRenderedAmount`: 1, then 2 above 1, 3 above 16, 4 above 32, 5 above 48.
+/// How many copies of a stack vanilla draws — its item-cluster render-state
+/// count: 1, then 2 above 1, 3 above 16, 4 above 32, 5 above 48.
 #[must_use]
 pub fn rendered_amount(count: u32) -> u32 {
     match count {
@@ -3056,8 +3057,8 @@ pub fn rendered_amount(count: u32) -> u32 {
 /// Per-copy scatter for a stack's extra copies, in the idiom
 /// [`item_bob_offset`] set.
 ///
-/// Vanilla seeds this from a `RandomSource` keyed on `Item.getId(item) +
-/// damageValue`, which we cannot observe. So this hashes `(entity_id, copy)` for
+/// Vanilla seeds this from a random source keyed on the item's registry id
+/// plus its damage value, which we cannot observe. So this hashes `(entity_id, copy)` for
 /// the same *property* — no two drops and no two copies scatter in lockstep —
 /// rather than chasing bytes we have no way to reproduce. `copy == 0` is exactly
 /// zero, matching vanilla's unperturbed first `submit`.
@@ -3083,15 +3084,16 @@ pub fn item_cluster_jitter(entity_id: i32, copy: u32, extent: f32) -> Vec3 {
     Vec3::new(axis(0x1656_67B1), axis(0x27D4_EB2F), axis(0x1656_67B5))
 }
 
-/// Vanilla's `minOffsetY`: the lift that puts the posed model's lowest point
-/// exactly [`ITEM_MIN_HOVER_HEIGHT`] above the entity's own position.
+/// Vanilla's lowest-point offset: the lift that puts the posed model's
+/// lowest point exactly [`ITEM_MIN_HOVER_HEIGHT`] above the entity's own
+/// position.
 #[must_use]
 pub fn item_hover_lift(quads: &[BakedQuad], ground: &DisplayTransform) -> f32 {
     -posed_item_y_extent(quads, ground).0 + ITEM_MIN_HOVER_HEIGHT
 }
 
-/// The world placement matrix for a dropped item, matching
-/// `ItemEntityRenderer.submit`'s pose-stack order exactly:
+/// The world placement matrix for a dropped item, matching vanilla's
+/// dropped-item submit step's pose-stack order exactly:
 ///
 /// ```text
 /// T(position) · T(0, bob + hover_lift, 0) · Ry(spin) · display_matrix(ground)
@@ -3150,18 +3152,18 @@ pub fn dropped_item_mesh(
     mesh_item_quads_with_light(quads, pose, gui_light, light)
 }
 
-/// `VaultClientData.ROTATION_SPEED`: degrees per client tick the display item
-/// spins, unbounded (`updateDisplayItemSpin` calls `Mth.wrapDegrees` before
-/// storing it, but `Axis.YP.rotationDegrees` is periodic mod 360, so the
+/// Vanilla's vault display-item rotation speed: degrees per client tick the
+/// display item spins, unbounded (vanilla wraps the stored angle before
+/// storing it, but the rotation applied from it is periodic mod 360, so the
 /// unwrapped running total below is the same rotation and needs no wrap).
 pub const VAULT_SPIN_DEGREES_PER_TICK: f32 = 10.0;
 
-/// Vanilla's `VaultClientData.updateDisplayItemSpin`, evaluated at a
-/// continuous tick: `Mth.rotLerp(partialTick, previousSpin, currentSpin)`
-/// where `currentSpin = previousSpin + 10°` every tick, which for a constant
-/// per-tick step is exactly the unwrapped linear form below (`rotLerp`'s
-/// shortest-path wrap only matters when the two ends are more than 180° apart,
-/// and adjacent ticks here are always exactly 10° apart).
+/// Vanilla's per-tick vault display-item spin update, evaluated at a
+/// continuous tick: a shortest-path rotation lerp between the previous and
+/// current spin, where `currentSpin = previousSpin + 10°` every tick, which
+/// for a constant per-tick step is exactly the unwrapped linear form below
+/// (the shortest-path wrap only matters when the two ends are more than 180°
+/// apart, and adjacent ticks here are always exactly 10° apart).
 ///
 /// # A deliberate simplification: tied to absolute world time, not per-vault age
 ///
@@ -3179,18 +3181,18 @@ pub fn vault_spin_degrees(game_time: i64, partial_tick: f32) -> f32 {
 }
 
 /// The world placement matrix for one copy of a vault's floating display-item
-/// cluster, matching `VaultRenderer.submit`'s pose stack —
+/// cluster, matching vanilla's vault-renderer submit step's pose stack —
 ///
 /// ```text
 /// T(block_pos) · T(0.5, 0.4, 0.5) · Ry(spin) · T(offset) · display_matrix(ground)
 /// ```
 ///
-/// — composed with `ItemEntityRenderer.renderMultipleFromCount`'s per-copy
-/// translate (`offset`, zero for the first copy) and the item's own
+/// — composed with vanilla's own per-copy translate for a multi-copy item
+/// cluster (`offset`, zero for the first copy) and the item's own
 /// `display.ground` transform on the right, the same composition
 /// [`dropped_item_matrix`] uses for the identical reason: vanilla applies the
-/// display transform *inside* `ItemStackRenderState.submit`, after every pose
-/// this function's caller pushes.
+/// display transform *inside* its item render-state submit step, after every
+/// pose this function's caller pushes.
 #[must_use]
 pub fn vault_display_item_matrix(
     block_pos: Vec3,
@@ -3228,18 +3230,18 @@ pub fn vault_display_item_mesh(
 /// same model-pipeline draw [`dropped_item_mesh`] feeds.
 ///
 /// The placement is [`campfire_item_matrix`](crate::block_entity::campfire_item_matrix)
-/// — a pure port of `CampfireRenderer.submit`'s pose stack — composed with the
-/// item's own `display.fixed` on the right, because that is where vanilla applies
-/// the `ItemTransform`: `ItemStackRenderState.LayerRenderState.submit` calls
-/// `applyTransform` *after* the renderer's own pushes. Composing it on the left
-/// instead would rotate the campfire's corner offset by the item's display
-/// rotation, which for a food sprite (`fixed` is a `180°` Y turn on most of them)
-/// mirrors all four items into the wrong corners while still looking like four
-/// items on a campfire.
+/// — a pure port of vanilla's campfire-renderer submit step's pose stack —
+/// composed with the item's own `display.fixed` on the right, because that is
+/// where vanilla applies the item transform: its item render-state submit
+/// step applies it *after* the renderer's own pushes. Composing it on the
+/// left instead would rotate the campfire's corner offset by the item's
+/// display rotation, which for a food sprite (`fixed` is a `180°` Y turn on
+/// most of them) mirrors all four items into the wrong corners while still
+/// looking like four items on a campfire.
 ///
-/// `fixed` is `display.get(DisplaySlot::Fixed)` — vanilla resolves a campfire's
-/// stack in `ItemDisplayContext.FIXED`, the item-frame context, **not** `GROUND`.
-/// That is the one thing this does not share with the drop path.
+/// `fixed` is `display.get(DisplaySlot::Fixed)` — vanilla resolves a
+/// campfire's stack in the item-frame display context, **not** the ground
+/// one. That is the one thing this does not share with the drop path.
 #[must_use]
 pub fn campfire_item_mesh(
     quads: &[BakedQuad],
@@ -3260,23 +3262,22 @@ pub fn campfire_item_mesh(
 ///
 /// The placement is
 /// [`shelf_slot_matrix`](crate::block_entity::shelf_slot_matrix) —
-/// ported from `ShelfRenderer.submitItem`'s pose stack up to its final
-/// translate — composed with **two** further transforms this function alone
-/// can supply, both requiring the item's own baked quads:
+/// ported from vanilla's shelf-renderer item-submit pose stack up to its
+/// final translate — composed with **two** further transforms this function
+/// alone can supply, both requiring the item's own baked quads:
 ///
-/// 1. The bounding-box correction (`offsetY` in the real jar):
+/// 1. The bounding-box correction (a vertical offset in the real jar):
 ///    `-box.minY`, plus `-(box.maxY - box.minY) / 2` when the shelf is
-///    *not* aligned to the bottom. `box` is `ItemStackRenderState
-///    .getModelBoundingBox()` — the item's extents *after* its own
-///    `ItemDisplayContext.ON_SHELF` transform, which is exactly what
-///    [`posed_item_y_extent`] measures. Applied as a translate **inside**
-///    the `0.25×` scale [`shelf_slot_matrix`] already applied (vanilla calls
-///    `poseStack.translate` after `poseStack.scale`), which is why this is a
-///    right-hand factor rather than folded into that function's own
-///    world-space translate.
+///    *not* aligned to the bottom. `box` is the item's posed-model bounding
+///    box — the item's extents *after* its own on-shelf display-context
+///    transform, which is exactly what [`posed_item_y_extent`] measures.
+///    Applied as a translate **inside** the `0.25×` scale
+///    [`shelf_slot_matrix`] already applied (vanilla translates after it
+///    scales), which is why this is a right-hand factor rather than folded
+///    into that function's own world-space translate.
 /// 2. The item's own `display.on_shelf` transform, composed on the right for
 ///    the same reason [`campfire_item_mesh`] composes there: vanilla applies
-///    it *inside* `ItemStackRenderState.submit`, after every pose the
+///    it *inside* its item render-state submit step, after every pose the
 ///    renderer itself pushes.
 #[must_use]
 pub fn shelf_item_mesh(
@@ -3305,10 +3306,11 @@ pub fn shelf_item_mesh(
 ///
 /// The placement is
 /// [`brushable_item_matrix`](crate::block_entity::brushable_item_matrix) —
-/// ported from `BrushableBlockRenderer.submit`'s pose stack — composed with
-/// the item's own `display.fixed` on the right, for the identical reason
-/// [`campfire_item_mesh`] composes there: `BrushableBlockRenderer.extractRenderState`
-/// resolves the item in `ItemDisplayContext.FIXED`, not `GROUND`.
+/// ported from vanilla's brushable-block renderer submit step's pose stack —
+/// composed with the item's own `display.fixed` on the right, for the
+/// identical reason [`campfire_item_mesh`] composes there: vanilla's
+/// brushable-block render-state extraction resolves the item in the
+/// item-frame display context, not the ground one.
 #[must_use]
 pub fn brushable_item_mesh(
     quads: &[BakedQuad],
@@ -3343,26 +3345,26 @@ pub(crate) fn mesh_item_quads_with_light(
 }
 
 // ---------------------------------------------------------------------------
-// Thrown item projectiles: vanilla's `ThrownItemRenderer`
+// Thrown item projectiles
 // ---------------------------------------------------------------------------
 //
 // A snowball is not a cuboid rig and not a dropped item either: it is the item's
 // *own* model, posed by `display.ground`, turned to face the camera, and drawn at
 // the entity's position with no bob, no spin and no hover lift. Transcribed from
-// 26.2's `client/renderer/entity/ThrownItemRenderer.java`, whose whole `submit` is
+// the 26.2 client's thrown-item renderer, whose whole submit step is
 //
 // ```text
 // poseStack.scale(scale, scale, scale);
 // poseStack.mulPose(camera.orientation);
-// state.item.submit(...)                  // resolved in ItemDisplayContext.GROUND
+// state.item.submit(...)                  // resolved in the ground display context
 // ```
 //
 // with the entity's position already on the pose stack by the dispatcher. The
-// `GROUND` context is why [`ground_transform`] is shared with the drop path rather
-// than duplicated: `extractRenderState` calls
-// `updateForNonLiving(state.item, entity.getItem(), ItemDisplayContext.GROUND, entity)`.
+// ground context is why [`ground_transform`] is shared with the drop path
+// rather than duplicated: vanilla's render-state extraction for a thrown item
+// resolves the item's display in that same ground context.
 
-/// One entity type's [`ThrownItemRenderer`] registration: which item's model to
+/// One entity type's thrown-item-renderer registration: which item's model to
 /// draw, at what scale, and whether the renderer forces full-bright block light.
 ///
 /// The `scale` and `full_bright` columns are **not** uniform, and reading them as
@@ -3373,17 +3375,17 @@ pub(crate) fn mesh_item_quads_with_light(
 pub struct ThrownItem {
     /// The item id whose baked geometry to draw, e.g. `"minecraft:snowball"`.
     ///
-    /// This is vanilla's `getDefaultItem()`. It is only the *fallback*: the
-    /// entity's real stack rides entity metadata (`DATA_ITEM_STACK`, the same
-    /// `ITEM_STACK` serializer a dropped item uses), and a caller that has it
+    /// This is vanilla's default-item fallback. It is only the *fallback*: the
+    /// entity's real stack rides entity metadata (the same item-stack
+    /// metadata field a dropped item uses), and a caller that has it
     /// should prefer it — a dispenser-fired arrow-of-harming analogue for
     /// potions is exactly the case where the two differ.
     pub item: &'static str,
-    /// Vanilla's `ThrownItemRenderer.scale`, applied *before* the billboard
+    /// Vanilla's thrown-item-renderer scale, applied *before* the billboard
     /// rotation.
     pub scale: f32,
-    /// Vanilla's `fullBright`, which overrides `getBlockLightLevel` to `15`.
-    /// A fireball glows; a snowball does not.
+    /// Vanilla's full-bright flag, which overrides the block light level to
+    /// `15`. A fireball glows; a snowball does not.
     pub full_bright: bool,
 }
 

@@ -469,24 +469,25 @@ impl Default for BoatHurt {
     }
 }
 
-/// `AbstractBoatRenderer.submit`'s hull roll, in degrees:
-/// `sin(hurtTime) * hurtTime * damageTime / 10 * hurtDir`, about the model's
+/// Vanilla's boat/minecart hull roll, in degrees:
+/// `sin(time) * time * damage / 10 * dir`, about the model's
 /// local X axis, and exactly `0.0` while the hurt clock is not running.
 ///
 /// Three things about the formula are easy to get wrong and each is visible:
 ///
 /// * **`sin` takes the hurt clock in radians, not degrees.** Vanilla passes
-///   `Mth.sin(hurt)` with `hurt` in ticks, so the boat swings through rather
+///   the hurt clock straight into its quantised sine lookup with no unit
+///   conversion, so the boat swings through rather
 ///   more than one full period over the ten ticks — that oscillation *is* the
 ///   animation. Converting to degrees first gives a monotonic lean that never
 ///   comes back.
-/// * **The `hurtTime` factor appears twice**, once inside the sine and once as a
+/// * **The hurt-clock factor appears twice**, once inside the sine and once as a
 ///   linear multiplier, so the swing decays as the clock runs out instead of
 ///   ending abruptly.
-/// * **`hurtDir` multiplies the result**, so an unreported direction of `0`
+/// * **The direction multiplies the result**, so an unreported direction of `0`
 ///   silences the whole thing. See [`BoatHurt::dir`].
 ///
-/// `Mth.sin` is vanilla's quantised lookup table rather than the library sine;
+/// Vanilla's sine is a quantised lookup table rather than the library sine;
 /// this uses [`lodestone_physics::mth::sin`] for that reason, since the
 /// difference is real at the poles and this argument sweeps a whole period.
 #[must_use]
@@ -500,73 +501,80 @@ pub fn boat_hurt_roll_degrees(hurt: BoatHurt) -> f32 {
 /// The per-entity animation state a [`Skeleton`] poses from, already
 /// interpolated for the frame.
 ///
-/// This mirrors the subset of vanilla's `LivingEntityRenderState` that we track;
+/// This mirrors the subset of vanilla's per-entity render state that we track;
 /// it is deliberately a plain value type so posing is a pure function and can be
 /// unit-tested without a GPU, a world or a clock.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct AnimInput {
-    /// Head yaw **relative to the body**, in degrees (vanilla `netHeadYaw`).
+    /// Head yaw **relative to the body**, in degrees, matching vanilla's own
+    /// per-frame value of the same meaning.
     pub head_yaw_deg: f32,
-    /// Head pitch in degrees, positive looking down (vanilla `headPitch`).
+    /// Head pitch in degrees, positive looking down, matching vanilla's own
+    /// per-frame value of the same meaning.
     pub head_pitch_deg: f32,
-    /// Accumulated walk-cycle phase (`walkAnimationPos`).
+    /// Accumulated walk-cycle phase, matching vanilla's own counter of the
+    /// same meaning.
     pub limb_swing: f32,
-    /// Walk-cycle amplitude in `0..=1` (`walkAnimationSpeed`).
+    /// Walk-cycle amplitude in `0..=1`, matching vanilla's own counter of the
+    /// same meaning.
     pub limb_swing_amount: f32,
-    /// Attack-swing progress in `0..=1` (`attackTime`); `0` means not swinging.
+    /// Attack-swing progress in `0..=1`; `0` means not swinging, matching
+    /// vanilla's own counter of the same meaning.
     pub attack_anim: f32,
-    /// Continuous age in ticks, driving idle bob (`ageInTicks`).
+    /// Continuous age in ticks, driving idle bob, matching vanilla's own
+    /// counter of the same meaning.
     pub age_ticks: f32,
-    /// Vanilla's `LivingEntityRenderState.isAggressive` (`Mob.isAggressive`),
-    /// which raises a zombie's arms from `-PI/2.25` to `-PI/1.5`.
+    /// Vanilla's aggressive-mob flag, which raises a zombie's arms from
+    /// `-PI/2.25` to `-PI/1.5`.
     ///
-    /// It rides bit `0x04` of `Mob.DATA_MOB_FLAGS_ID` — a *separate* byte from
+    /// It rides bit `0x04` of a mob's own metadata flags byte — a *separate* byte from
     /// the shared entity flags, at its own metadata index (15 in 26.2, confirmed
     /// against a jar dump rather than counted). An earlier note here called it a
     /// shared-flags bit; it is not, and looking for it at index 0 would find the
     /// unrelated unused bit there.
     ///
     /// **This used to be hardcoded `false` at every call site**, which made both
-    /// consumers of it dead code: the zombie arm lift here, and (once #57 landed
-    /// the pose machinery) the skeleton bow draw, which vanilla selects from this
-    /// flag and *not* from the using-item bit. Issue #379 decoded the byte;
+    /// consumers of it dead code: the zombie arm lift here, and (once the pose
+    /// machinery landed) the skeleton bow draw, which vanilla selects from this
+    /// flag and *not* from the using-item bit. The byte is now decoded;
     /// `lodestone_shell::entities::render_anim` now feeds it from a `MobState`
     /// component. A `false` here still means exactly what it says — the pose an
     /// idle or merely-walking mob is in.
     pub aggressive: bool,
-    /// How the arms are held for the item in use, if any (issue #57).
+    /// How the arms are held for the item in use, if any.
     ///
-    /// Vanilla's `HumanoidModel.ArmPose`, reduced to the poses this build
+    /// Vanilla's own arm-pose enumeration, reduced to the poses this build
     /// actually draws — see [`ArmPose`].
     pub arm_pose: ArmPose,
     /// Which hand holds the item [`arm_pose`](Self::arm_pose) describes.
     ///
     /// `false` is the main hand, which for every rig we draw is the right arm.
-    /// Vanilla threads this as `AnimationUtils`' `holdingInRightArm` and as
-    /// `HumanoidModel.setupAnim`'s `mainHandUsed == rightHanded` fork; it decides
-    /// which arm *holds* and which arm *pulls*, so getting it wrong mirrors the
-    /// pose rather than breaking it — a bow drawn with the wrong arm still looks
-    /// like a bow draw, which is why it is a named field rather than an
-    /// assumption.
+    /// Vanilla threads this as a shared "holding in right arm" helper and as
+    /// the base humanoid pose-setup's main-hand-used-equals-right-handed fork;
+    /// it decides which arm *holds* and which arm *pulls*, so getting it wrong
+    /// mirrors the pose rather than breaking it — a bow drawn with the wrong
+    /// arm still looks like a bow draw, which is why it is a named field
+    /// rather than an assumption.
     pub arm_pose_left_hand: bool,
-    /// Vanilla's `HumanoidRenderState.isCrouching`, i.e. `Entity.isCrouching()`
-    /// — `hasPose(Pose.CROUCHING)` (`Entity.java:2711-2713`).
+    /// Vanilla's crouching render flag, derived from whether the entity
+    /// currently holds the crouching pose.
     ///
-    /// **Not the shift-key flag.** `isShiftKeyDown()` is shared-flags bit `0x02`
-    /// and `isCrouching()` is the pose at metadata index 6; holding shift while a
-    /// standing box does not fit gives you the former without the latter. Both are
-    /// decoded in this workspace, so a consumer that reaches for the flag because
-    /// it is closer to hand is choosing the wrong one.
+    /// **Not the shift-key flag.** The raw "shift key down" bit is a separate
+    /// shared-flags bit `0x02`, and the crouching pose is a value at metadata
+    /// index 6; holding shift while a standing box does not fit gives you the
+    /// former without the latter. Both are decoded in this workspace, so a
+    /// consumer that reaches for the flag because it is closer to hand is
+    /// choosing the wrong one.
     ///
     /// Drives [`Skeleton::pose`]'s [`AnimFamily::Humanoid`] crouch branch — the
     /// forward body pitch, the lowered head, and the legs stepping back — which
     /// vanilla applies *after* the attack swing and *before* the idle arm bob.
     pub crouching: bool,
-    /// Vanilla's `HumanoidRenderState.isPassenger`, i.e. `Entity.isPassenger()`
-    /// — riding any vehicle (boat, minecart, horse, …), not a `Pose` variant.
-    /// There is no `Pose.SITTING` for a mounted rider: `Player.updatePlayerPose`
-    /// has no riding case, so this has to be threaded in as its own bit rather
-    /// than read off [`Self::crouching`]'s pose accessor.
+    /// Vanilla's own passenger flag — riding any vehicle (boat, minecart,
+    /// horse, …), not a value of the entity's pose enumeration.
+    /// There is no sitting pose for a mounted rider: vanilla's pose-update
+    /// logic has no riding case, so this has to be threaded in as its own bit
+    /// rather than read off [`Self::crouching`]'s pose accessor.
     ///
     /// Drives [`Skeleton::pose`]'s [`AnimFamily::Humanoid`] passenger branch —
     /// the folded knees and the arms dropped to rest on them — which vanilla
@@ -574,33 +582,33 @@ pub struct AnimInput {
     /// still take the item pose on top rather than being pinned to the sit
     /// rotation.
     pub is_passenger: bool,
-    /// `LivingEntityRenderState.swimAmount`, i.e. `LivingEntity.getSwimAmount`
-    /// interpolated for this frame — a `0..1` ramp toward the swim pose, `0.0`
-    /// for every entity that has never reported [`Pose.SWIMMING`]. Mirrors
+    /// Vanilla's own per-frame swim-amount value, interpolated for this frame
+    /// — a `0..1` ramp toward the swim pose, `0.0` for every entity that has
+    /// never reported the swimming pose. Mirrors
     /// [`crate::entity_anim::AnimInput::crouching`]'s shape: a wire this build
     /// already carries end to end (`crate::entities::SwimRamp`/`tick_swim_ramp`
     /// on the shell side), just not into this struct until now.
     ///
     /// Drives [`Skeleton::pose`]'s [`AnimFamily::Humanoid`] swim branch —
-    /// `HumanoidModel.setupAnim`'s two `swimAmount > 0.0F` clauses: the head
+    /// the base humanoid pose-setup's two swim-amount-positive clauses: the head
     /// pitching toward `-PI/4` and the arm-over-arm stroke plus leg flutter.
     /// This is the **limb-level** swim animation and is a different thing from
     /// the whole-body prone rotation `apply_swim_rotation` in
     /// `lodestone_shell::gpu::entity_passes` already applies — that ports
-    /// `AvatarRenderer.setupRotations`'s player-only body pitch, gated on
+    /// vanilla's player-only body-pitch rule, gated on
     /// `type_path` at its call site; this field's branch is the base
-    /// `HumanoidModel.setupAnim` clause and applies to every [`AnimFamily::Humanoid`]
+    /// humanoid pose-setup clause and applies to every [`AnimFamily::Humanoid`]
     /// rig with nonzero `swim_amount`, remote mobs included, with no type gate
     /// of its own — vanilla runs it unconditionally for every renderer whose
-    /// model extends `HumanoidModel`.
+    /// model is a humanoid rig.
     pub swim_amount: f32,
     /// An armour stand's six part rotations, in degrees — `Some` for **every**
     /// armour stand, `None` for everything else.
     ///
     /// # This is not "an optional extra pose", it is the whole animation
     ///
-    /// Vanilla's `ArmorStandArmorModel.setupAnim` calls the humanoid
-    /// `super.setupAnim` — head tracking, walk cycle, crouch, item pose, attack
+    /// Vanilla's armour-stand pose-setup calls the base humanoid pose-setup
+    /// — head tracking, walk cycle, crouch, item pose, attack
     /// swing, idle bob — and then **assigns** `head`, `body`, both arms and both
     /// legs from these six values. Everything the base pass computed for those
     /// joints is discarded. [`Skeleton::setup_anim`] does the same, in the same
@@ -614,7 +622,7 @@ pub struct AnimInput {
     /// player, with any held item swinging off the same arm. The honest default
     /// for a stand nobody has posed is
     /// [`ArmorStandPose::VANILLA_DEFAULT`](lodestone_model::ArmorStandPose::VANILLA_DEFAULT),
-    /// which is the pose `ArmorStand`'s own `defineId` calls register — arms and
+    /// which is the pose vanilla's own metadata defaults register — arms and
     /// legs slightly splayed, not zeroed.
     ///
     /// # Why the walk cycle is computed and then discarded rather than skipped
@@ -631,7 +639,7 @@ pub struct AnimInput {
     /// this crate does take the skip, where the discarded terms provably have no
     /// such residue.
     pub armor_stand_pose: Option<lodestone_model::ArmorStandPose>,
-    /// A vehicle's rocking state (`VehicleEntity`'s hurt triple), [`BoatHurt::REST`]
+    /// A vehicle's rocking state (vanilla's hurt triple), [`BoatHurt::REST`]
     /// for every entity that is not a boat, raft or minecart. Read by the boat
     /// placement, never by [`Skeleton::pose`] — see [`BoatHurt`].
     pub boat_hurt: BoatHurt,
