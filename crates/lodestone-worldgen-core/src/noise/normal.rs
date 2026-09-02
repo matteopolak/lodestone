@@ -1,7 +1,7 @@
 //! `NormalNoise` — two `PerlinNoise` stacks combined into the normalised noise
 //! the density-function system consumes.
 //!
-//! Reproduces `net.minecraft.world.level.levelgen.synth.NormalNoise` (new-init
+//! Reproduces vanilla's own normal-noise class (new-init
 //! path): two Perlin stacks built back-to-back from the same source, the second
 //! sampled at a slightly offset frequency, scaled by a deviation-based factor.
 
@@ -40,8 +40,8 @@ impl NormalNoise {
         }
     }
 
-    /// `NormalNoise.createLegacyNetherBiome` — the `useNewInitialization = false`
-    /// arm (`NormalNoise.java:26-28`, `:41-47`).
+    /// Vanilla's own legacy-nether-biome constructor — the `useNewInitialization = false`
+    /// arm.
     ///
     /// The **only** two noises in the game that take it are
     /// `minecraft:nether/temperature` and `minecraft:nether/vegetation`, and

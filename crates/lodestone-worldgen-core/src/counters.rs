@@ -291,7 +291,7 @@ pub struct Snapshot {
     /// Chunks whose `structure_starts` really ran (bumped inside the store slot's
     /// once-guard, so a cache hit does not count).
     ///
-    /// This is the closure-size counter for issue #514's stage 0a, and it is the
+    /// This is the closure-size counter for the structure engine's stage 0a, and it is the
     /// one that explains why a cold column touches far more chunks than the 5×5
     /// pre-ore closure: `pre_ore` reads `structure_refs`, which walks
     /// `REFS_RADIUS` = 8 chunks in every direction.

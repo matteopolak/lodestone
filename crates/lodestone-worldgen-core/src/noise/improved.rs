@@ -1,6 +1,6 @@
 //! `ImprovedNoise` — a single 3D Perlin (improved) noise octave.
 //!
-//! Reproduces `net.minecraft.world.level.levelgen.synth.ImprovedNoise`: three
+//! Reproduces vanilla's own improved-noise class: three
 //! `nextDouble`-derived offsets, a Fisher–Yates permutation of `0..256` drawn
 //! from the source, and the gradient-dot / trilinear-smoothstep sample. Only the
 //! non-derivative `noise(x, y, z)` path (the one terrain uses) is implemented.
@@ -55,7 +55,7 @@
 //! evaluator semantically observable, not merely awkward. Full numbers in
 //! `docs/worldgen-simd-kernels.md`.
 //!
-//! The trilinear reduction that follows keeps vanilla's `Mth.lerp3` nesting
+//! The trilinear reduction that follows keeps vanilla's own three-axis lerp nesting
 //! exactly. Only *sibling* nodes at the same level of that fixed tree share a
 //! vector (4 lerps, then 2, then a scalar root); the tree's shape is untouched.
 //! A horizontal add across the eight corners would be a different summation
@@ -79,7 +79,7 @@ use std::simd::prelude::*;
 use crate::math::{floor, lerp, smoothstep};
 use crate::rng::RandomSource;
 
-/// The 16 gradient vectors (`SimplexNoise.GRADIENT`), exactly as vanilla lists
+/// The 16 gradient vectors (vanilla's own gradient table), exactly as vanilla lists
 /// them.
 ///
 /// **Test-only, and that is the point.** The lanes read the transposed
@@ -223,9 +223,9 @@ impl ImprovedNoise {
     }
 
     /// The eight gradient dot products of one lattice cell, then vanilla's
-    /// `Mth.lerp3` reduction over them.
+    /// own three-axis lerp reduction over them.
     ///
-    /// Lane order is vanilla's `lerp3` argument order —
+    /// Lane order is vanilla's own three-axis lerp argument order —
     /// `d000, d100, d010, d110, d001, d101, d011, d111` — so the reduction below
     /// is a direct transcription of the nesting `lerp3`/`lerp2` spell out, with
     /// siblings sharing a vector. See the module doc for why this is
@@ -324,7 +324,7 @@ mod tests {
     }
 
     /// An independent, deliberately naive scalar transcription of vanilla's
-    /// `ImprovedNoise.sampleAndLerp`, written from the algorithm rather than from
+    /// own sample-and-lerp routine, written from the algorithm rather than from
     /// [`ImprovedNoise::sample_and_lerp`], used **only** as a bit-equality oracle.
     ///
     /// This is not a production scalar twin — nothing outside this test module can

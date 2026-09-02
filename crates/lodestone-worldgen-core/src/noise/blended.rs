@@ -1,7 +1,7 @@
 //! `BlendedNoise` (`old_blended_noise`) — the legacy 3D terrain noise still used
 //! by the overworld `base_3d_noise` density function.
 //!
-//! Reproduces `net.minecraft.world.level.levelgen.synth.BlendedNoise`: three
+//! Reproduces vanilla's own blended-noise class: three
 //! legacy-init Perlin stacks (two 16-octave limit noises and one 8-octave main
 //! noise) combined with the vanilla smear/blend loop.
 

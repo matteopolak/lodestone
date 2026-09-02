@@ -10,15 +10,15 @@
 //! Point evaluation matches vanilla's `SinglePointContext` *value-wise*: no
 //! marker wrapper ever changes *what* is computed, only how many times. **All
 //! five marker kinds are now transparent here**, which is byte-for-byte what the
-//! raw, uninstantiated `DensityFunctions.Marker.compute`
-//! (`DensityFunctions.java:793-797`) does — `return this.wrapped.compute(context);`
+//! raw, uninstantiated marker's own compute routine
+//! does — `return this.wrapped.compute(context);`
 //! and nothing else. `cache_2d` was the one exception until §12.132 measured its
 //! hit rate at **0.12%**; see `## Caching`.
 //!
 //! ## Caching
 //!
 //! Vanilla only gives these markers real caching behaviour when a tree is
-//! wrapped by `NoiseChunk::wrap` (`NoiseChunk.java:374-407`), which swaps each
+//! wrapped by `NoiseChunk::wrap`, which swaps each
 //! marker for a `NoiseChunk`-private class carrying real cache state. This
 //! evaluator has no `NoiseChunk` instance and is never wrapped that way — it
 //! is vanilla's `SinglePointContext` path (`preliminary_surface_level`'s
@@ -26,7 +26,7 @@
 //! `preliminary_surface_level`) — so "what would vanilla's wrapped version
 //! cache here" has to be answered per node kind, not assumed uniformly:
 //!
-//! * **`cache_2d`** (`NoiseChunk.Cache2D`, `NoiseChunk.java:531-569`) marks a
+//! * **`cache_2d`** (vanilla's own `NoiseChunk.Cache2D` inner class) marks a
 //!   subtree whose value is a pure function of `(x, z)`, and it is now
 //!   **transparent** — the `Mutex`-backed single-slot last-`(x, z)` memo it
 //!   carried from `d68e0a5` until §12.132 is gone. It is worth keeping *why*,
@@ -34,7 +34,7 @@
 //!   the second one caught the first going stale:
 //!
 //!   The memo was added for `preliminarySurfaceLevel`'s own `cache2d(offset)` /
-//!   `cache2d(factor)` wrapping (`NoiseRouterData.java:489-490`), which sits
+//!   `cache2d(factor)` wrapping, which sits
 //!   directly above `find_top_surface`'s per-`y` scan, and a criterion paired
 //!   comparison measured **−4.4% (95% CI −6.0%..−2.7%, p < 0.05)** on `column()`'s
 //!   median. That was true when written. §12.132 counted the outcome of every
@@ -59,7 +59,7 @@
 //!   memoise at all, and every `cache_2d` in 26.2's shipped data wraps an
 //!   xz-only subtree — and the 45-column/5-seed dump is byte-identical across the
 //!   change.
-//! * **`flat_cache`** (`NoiseChunk.FlatCache`, `NoiseChunk.java:673-716`)
+//! * **`flat_cache`** (vanilla's own `NoiseChunk.FlatCache` inner class)
 //!   marks the *same kind* of `(x, z)`-only boundary as `cache_2d` — vanilla's
 //!   `overworld/continents.json` / `overworld/erosion.json` /
 //!   `overworld/ridges.json` are each literally `flat_cache(shifted_noise(...,
@@ -86,7 +86,7 @@
 //!   ignoring where each kind is actually called from, would have shipped a
 //!   net regression — the concrete instance of "measure, don't assume" this
 //!   module's evidence standard exists for.
-//! * **`interpolated`** (`NoiseChunk.NoiseInterpolator`, `NoiseChunk.java:735+`)
+//! * **`interpolated`** (vanilla's own `NoiseChunk.NoiseInterpolator` inner class)
 //!   marks a *different* boundary: vanilla only gives it real behaviour
 //!   (trilinear interpolation between 4×8×4 cell corners) when driven by
 //!   `NoiseChunk`'s own cell-filling loop state (`cellStartBlockY`,
@@ -95,21 +95,21 @@
 //!   reimplements correctly and separately for the shape stage. Caching this
 //!   node here (by whatever key) would be simulating the wrong machinery, not
 //!   a slower version of the right one, so it stays transparent.
-//! * **`cache_once`** and **`cache_all_in_cell`** (`NoiseChunk.CacheOnce`/
-//!   `CacheAllInCell`, `NoiseChunk.java:571-644`) both explicitly check
+//! * **`cache_once`** and **`cache_all_in_cell`** (vanilla's own `NoiseChunk.CacheOnce`/
+//!   `CacheAllInCell` inner classes) both explicitly check
 //!   `context != NoiseChunk.this` and fall through to a plain, uncached
 //!   `wrapped.compute(context)` whenever that holds — which is *always* true
 //!   for a `SinglePointContext`, the only context this evaluator ever
 //!   constructs. So even inside a real, wrapped `NoiseChunk`, these two are
 //!   transparent for exactly the call shape used here; vanilla itself never
 //!   caches them off the cell-filling loop. Concretely: `cache_once` wraps
-//!   `sloped_cheese` (`NoiseRouterData.java:342`), a genuinely 3-D function —
+//!   `sloped_cheese`, a genuinely 3-D function —
 //!   caching it by `(x, z)` alone the way `cache_2d` is cached above would
 //!   silently return a stale value for a different `y` at the same `(x, z)`,
 //!   which is exactly the "both slower and wrong" trap of treating every
 //!   marker as one generic memo.
-//! * **`blend_density`** (`NoiseChunk.BlendDensity`) only gets real behaviour
-//!   when `!blender.isEmpty()` (`NoiseChunk.java:392-393`); with no blender
+//! * **`blend_density`** (vanilla's own `NoiseChunk.BlendDensity` inner class) only gets real behaviour
+//!   when `!blender.isEmpty()`; with no blender
 //!   this crate ever constructs, it is `wrapped` unchanged in vanilla too, so
 //!   transparent is the correct — not merely unimplemented — behaviour.
 //!
@@ -146,7 +146,7 @@ pub trait Resolver {
     /// Loads noise parameters by id (e.g. `"minecraft:continentalness"`).
     fn noise(&self, id: &str) -> NoiseParams;
 
-    /// The overworld multi-noise biome parameter table (issue #405), as the
+    /// The overworld multi-noise biome parameter table, as the
     /// JSON array [`crate::biome::parse_table`] expects. Default: an empty
     /// array, meaning "no real biome variety supplied" —
     /// [`crate::overworld::OverworldGenerator`] falls back to its fixed
@@ -202,7 +202,7 @@ pub trait Resolver {
     }
 
     /// The five per-block-state predicates vanilla's `freeze_top_layer`
-    /// (`TOP_LAYER_MODIFICATION`, issue #404's U2) needs, as the JSON document
+    /// (`TOP_LAYER_MODIFICATION`) needs, as the JSON document
     /// [`crate::feature::top_layer::SnowSupport::parse`] expects:
     ///
     /// ```json
@@ -242,7 +242,7 @@ pub trait Resolver {
     }
 
     /// Every `worldgen/structure_set/*.json` id this resolver can serve, e.g.
-    /// `["minecraft:villages", "minecraft:shipwrecks", …]` (issue #514's S1).
+    /// `["minecraft:villages", "minecraft:shipwrecks", …]`.
     ///
     /// This is the *entry point* to the whole structure engine: vanilla's
     /// `ChunkGeneratorStructureState.createForNormal` iterates the structure-set
@@ -286,7 +286,7 @@ pub trait Resolver {
     }
 
     /// `structure/<path>.nbt` — one NBT **structure template**, as the raw file
-    /// bytes (issue #514's S2). `minecraft:shipwreck/with_mast` means
+    /// bytes. `minecraft:shipwreck/with_mast` means
     /// `assets/structure/shipwreck/with_mast.nbt`.
     ///
     /// Returned **exactly as shipped**, gzip wrapper included:
@@ -304,7 +304,7 @@ pub trait Resolver {
     }
 
     /// `worldgen/template_pool/<name>.json` — one **jigsaw template pool**
-    /// (`{fallback, elements: [{element, weight}]}`, issue #514's S4).
+    /// (`{fallback, elements: [{element, weight}]}`).
     ///
     /// The third entry point to the structure engine, after
     /// [`structure_set_ids`](Self::structure_set_ids) and
@@ -1098,9 +1098,8 @@ impl<'a> Builder<'a> {
         Self::with_algorithm(seed, crate::rng::Algorithm::Xoroshiro, resolver)
     }
 
-    /// Creates a builder for `seed` on an explicit RNG family — the
-    /// `settings.getRandomSource().newInstance(seed).forkPositional()` of
-    /// `RandomState.java:36`.
+    /// Creates a builder for `seed` on an explicit RNG family — vanilla's own
+    /// `settings.getRandomSource().newInstance(seed).forkPositional()`.
     ///
     /// Use [`crate::rng::Algorithm::from_settings`] to read the flag rather than
     /// deciding per dimension at the call site.
@@ -1135,7 +1134,7 @@ impl<'a> Builder<'a> {
 
     fn instantiate_noise(&self, id: &str) -> NormalNoise {
         let params = self.resolver.noise(id);
-        // `RandomState.NoiseWiringHelper.visitNoise` (`RandomState.java:53-65`)
+        // Vanilla's own noise-wiring helper's visit-noise routine
         // branches on the noise *id*, before `getOrCreateNoise` is ever reached,
         // and does so regardless of `legacy_random_source` — so this fork is not
         // conditional on `self.algorithm`. `newLegacyInstance(n)` is
@@ -1176,7 +1175,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The RNG family this builder was created with — the `useLegacyInit` of
-    /// `RandomState.java:41`. Exposed so a dimension pipeline can assert it read
+    /// vanilla's own random-state class. Exposed so a dimension pipeline can assert it read
     /// its own settings rather than inheriting the Overworld default.
     #[must_use]
     pub fn algorithm(&self) -> crate::rng::Algorithm {
@@ -1184,7 +1183,7 @@ impl<'a> Builder<'a> {
     }
 
     fn instantiate_blended(&self, node: &Value) -> BlendedNoise {
-        // `RandomState.java:70-73`: `useLegacyInit ? newLegacyInstance(0L)
+        // Vanilla's own random-state class: `useLegacyInit ? newLegacyInstance(0L)
         // : random.fromHashOf("terrain")`. Both `old_blended_noise` dimensions
         // (Nether, End) take the first arm, on the raw world seed.
         let mut src = if self.algorithm.is_legacy() {
@@ -1322,7 +1321,7 @@ impl<'a> Builder<'a> {
             }
             // `MapCodec.unit(new EndIslandDensityFunction(0L))` — the document
             // carries no arguments at all and always deserialises with seed 0;
-            // `RandomState.java:74` substitutes the raw world seed afterwards,
+            // vanilla's own random-state class substitutes the raw world seed afterwards,
             // which is `self.seed` and *not* a positional fork.
             "end_islands" => Density::EndIslands(std::sync::Arc::clone(
                 self.end_islands.get_or_init(|| {

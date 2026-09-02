@@ -1,20 +1,20 @@
-//! `PerlinSimplexNoise` — `net.minecraft.world.level.levelgen.synth
-//! .PerlinSimplexNoise`, the multi-octave wrapper over
+//! `PerlinSimplexNoise` — vanilla's own multi-octave wrapper class of the same
+//! name, over
 //! [`super::simplex::SimplexNoise`], plus the two `Biome` climate noise fields
 //! `freeze_top_layer` reads.
 //!
 //! [`super::simplex`] already ports the *single-octave* reduction of this class
-//! (`Biome.BIOME_INFO_NOISE`, octave set `[0]`, where the frequency and value
+//! (vanilla's own biome-info-noise constant, octave set `[0]`, where the frequency and value
 //! factors both collapse to 1). That reduction is not enough for
-//! `Biome.TemperatureModifier.FROZEN`, whose `FROZEN_TEMPERATURE_NOISE` is
-//! `new PerlinSimplexNoise(new WorldgenRandom(new LegacyRandomSource(3456L)),
-//! ImmutableList.of(-2, -1, 0))` (`Biome.java:62-64`) — three octaves, with
+//! vanilla's own FROZEN temperature-modifier variant, whose `FROZEN_TEMPERATURE_NOISE` is
+//! vanilla's own construction seeded from a legacy random source with seed
+//! `3456L` and octave set `[-2, -1, 0]` — three octaves, with
 //! per-octave input and value factors. So this module ports the real wrapper.
 //!
 //! # Scope: `highFreqOctaves == 0` only
 //!
 //! `PerlinSimplexNoise`'s constructor has a second half
-//! (`PerlinSimplexNoise.java:47-58`) that only runs when the octave set contains
+//! in vanilla that only runs when the octave set contains
 //! a **positive** octave: it derives a second seed from
 //! `zeroOctave.getValue(zeroOctave.xo, zeroOctave.yo, zeroOctave.zo)` and builds
 //! the high-frequency levels from it. Both climate fields in `Biome` have
@@ -40,7 +40,7 @@ use crate::rng::{LegacyRandomSource, RandomSource};
 
 use super::simplex::SimplexNoise;
 
-/// `net.minecraft.world.level.levelgen.synth.PerlinSimplexNoise`, restricted to
+/// Vanilla's own `PerlinSimplexNoise` class, restricted to
 /// octave sets whose largest octave is `0` (see the module doc).
 #[derive(Debug, Clone)]
 pub struct PerlinSimplexNoise {
@@ -140,22 +140,21 @@ impl PerlinSimplexNoise {
 /// The three `Biome` noise fields the `freeze_top_layer` temperature path reads,
 /// built once (see the module doc for why not per call).
 ///
-/// Vanilla holds all three as `static final` singletons on `Biome`
-/// (`Biome.java:61-65`); each is a pure function of a fixed seed, so building
+/// Vanilla holds all three as `static final` singletons on its own biome
+/// class; each is a pure function of a fixed seed, so building
 /// them per generator is value-identical and keeps this engine free of shared
 /// mutable state.
 #[derive(Debug, Clone)]
 pub struct ClimateNoise {
     /// `Biome.TEMPERATURE_NOISE` — `LegacyRandomSource(1234L)`, octaves `[0]`.
-    /// Read by `Biome.getHeightAdjustedTemperature` above `seaLevel + 17`
-    /// (`Biome.java:116`).
+    /// Read by vanilla's own height-adjusted-temperature accessor above `seaLevel + 17`.
     temperature: PerlinSimplexNoise,
     /// `Biome.FROZEN_TEMPERATURE_NOISE` — `LegacyRandomSource(3456L)`, octaves
-    /// `[-2, -1, 0]`. Read only by `TemperatureModifier.FROZEN`
-    /// (`Biome.java:398`), i.e. only in `frozen_ocean`/`deep_frozen_ocean`.
+    /// `[-2, -1, 0]`. Read only by vanilla's own FROZEN temperature-modifier
+    /// variant, i.e. only in `frozen_ocean`/`deep_frozen_ocean`.
     frozen_temperature: PerlinSimplexNoise,
     /// `Biome.BIOME_INFO_NOISE` — `LegacyRandomSource(2345L)`, octaves `[0]`.
-    /// Read twice by `TemperatureModifier.FROZEN` (`Biome.java:399,403`). This
+    /// Read twice by vanilla's own FROZEN temperature-modifier variant. This
     /// is the same field [`super::simplex::biome_info_noise_value`] exposes as a
     /// free function for `crate::feature::vegetation`; held here as an instance
     /// so the frozen path pays for it once rather than per sample.

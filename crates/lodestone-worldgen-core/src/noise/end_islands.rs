@@ -6,9 +6,10 @@
 //! here as a standalone, independently testable primitive rather than inside
 //! `density/`. It is a `SimpleFunction`: no children, no arguments, and the JSON is
 //! literally `{"type": "minecraft:end_islands"}` — the codec is
-//! `MapCodec.unit(new EndIslandDensityFunction(0L))`, so the document always
+//! vanilla's own unit map-codec over its end-island density function constructed
+//! with seed `0L`, so the document always
 //! deserialises with seed 0 and `RandomState` substitutes the real world seed
-//! afterwards (`RandomState.java:74`).
+//! afterwards.
 //!
 //! It appears **twice** in 26.2's data, not once: inline as
 //! `noise_settings/end.json`'s `erosion` channel (wrapped in `cache_2d`), and
@@ -30,8 +31,9 @@
 //!
 //! # Its seeding does not consult `legacy_random_source`
 //!
-//! Worth stating because the obvious guess is wrong: `EndIslandDensityFunction`
-//! always constructs `new LegacyRandomSource(seed)` (`DensityFunctions.java:498`)
+//! Worth stating because the obvious guess is wrong: vanilla's own end-island
+//! density function
+//! always constructs a legacy random source from `seed`
 //! **regardless** of the dimension's RNG-family flag. It happens that the End sets
 //! the flag too, but that is a coincidence — this constructor would be the LCG
 //! either way.
@@ -81,7 +83,7 @@ pub struct EndIslandNoise {
 }
 
 impl EndIslandNoise {
-    /// `new EndIslandDensityFunction(seed)` (`DensityFunctions.java:496-503`).
+    /// Vanilla's own end-island density function constructor.
     #[must_use]
     pub fn new(seed: i64) -> Self {
         let mut random = LegacyRandomSource::new(seed);
