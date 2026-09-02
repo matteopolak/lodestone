@@ -87,8 +87,9 @@ carries the resulting mutation intent back out, drained by the host like
 reader and consults a block roughly once every 500 ticks, so pre-feeding it
 would cost far more than it saves. Most goal rows that look
 block-perception-gated actually need a larger mechanism: a host-computed
-*candidate block position* (the `MoveToBlockGoal` shape) for a skeleton's
-sun-flee spot, a zombie's turtle-egg attack, and a rabbit's garden raid, plus
+*candidate block position* (the shape a goal that walks toward a target
+block needs) for a skeleton's sun-flee spot, a zombie's turtle-egg attack,
+and a rabbit's garden raid, plus
 block-state properties and destroy intents on top. Only sheep grazing and
 half of the rabbit's powder-snow climb are closed by `block_cues` alone.
 Every jar tick constant on `EatBlockGoal` is **halved in practice**: a goal

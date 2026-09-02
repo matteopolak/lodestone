@@ -29,22 +29,22 @@ the palette once, scan palette **indices**) measures **38.7 µs/column, 54× che
 one run inside that range). The interim fix is still O(blocks) per column per tick: every
 resident column's index grid is re-walked 20×/s to reach a decision that almost never changes.
 
-**Vanilla's mechanism, read from the record definition** (`.cache/mc/26.2/src/.../chunk/LevelChunkSection.java`):
+**Vanilla's mechanism, read from the record definition in `.cache/mc/26.2/`:**
 
-- Four `short` counters per section: `nonEmptyBlockCount`, `fluidCount`, `tickingBlockCount`,
-  `tickingFluidCount`.
-- `setBlockState` maintains all four incrementally: decrement for the previous state
-  if it ticked, increment for the new one. No other mutation path exists — every block write in
-  vanilla funnels through this one method.
-- `recalcBlockCounts` recomputes all four with one palette-aware counting pass; it is
-  called by the constructor that adopts an existing `PalettedContainer` (the
+- Four `short` counters per section: a non-empty block count, a fluid count, a ticking-block
+  count, and a ticking-fluid count.
+- The single per-block write path maintains all four incrementally: decrement for the previous
+  state if it ticked, increment for the new one. No other mutation path exists — every block write
+  in vanilla funnels through this one method.
+- A recount pass recomputes all four with one palette-aware counting pass; it is
+  called by the constructor that adopts an existing, already-populated block container (the
   deserialization path). The empty-section constructor does **not** recalc — zero
   counters are correct for an empty section. The copy constructor copies the counters.
-- `isRandomlyTicking()` is `isRandomlyTickingBlocks() || isRandomlyTickingFluids()` —
-  **blocks OR fluids**, not blocks alone. The driver, `ServerLevel::tickChunk`, gates
-  each section's `tickSpeed` position draws on that OR. The only vanilla fluid whose
-  `isRandomlyTicking()` is true is **lava** (`LavaFluid.isRandomlyTicking` overrides to `true`;
-  `Fluid.isRandomlyTicking` defaults `false`; `WaterFluid` never overrides). See "Fluids" below for why
+- A section's overall ticking flag is the OR of its block-ticking and fluid-ticking flags —
+  **blocks OR fluids**, not blocks alone. Vanilla's own chunk-tick driver gates
+  each section's tick-speed position draws on that OR. The only vanilla fluid that ticks at all
+  is **lava** (its own ticking flag is the one override that returns `true`; the base fluid type
+  defaults to `false` and water never overrides it). See "Fluids" below for why
   this matters and why the fluid counter is still out of scope.
 
 **Finding, not assumption: `ChunkColumn` has no per-section structure.**
@@ -87,8 +87,8 @@ Maintenance, mirroring vanilla site-for-site:
 
 | vanilla site | ours | mechanism |
 |---|---|---|
-| `setBlockState` ±1 | `ChunkColumn::set_block` | read `old_id` before writing; if `palette_ticking[old] != palette_ticking[new]`, `±1` on `section_ticking[y_local / 16]` |
-| ctor adopting a container → `recalcBlockCounts` | `ChunkColumn::from_generated` | one O(cells) counting pass (`recalc_ticking_counts`, kept as a named production function exactly as vanilla keeps `recalcBlockCounts`) |
+| the single block-write method, ±1 | `ChunkColumn::set_block` | read `old_id` before writing; if `palette_ticking[old] != palette_ticking[new]`, `±1` on `section_ticking[y_local / 16]` |
+| ctor adopting a container → its recount pass | `ChunkColumn::from_generated` | one O(cells) counting pass (`recalc_ticking_counts`, kept as a named production function exactly as vanilla keeps its own recount method) |
 | empty-section ctor, no recalc | `ChunkColumn::new` | all-air ⇒ all-zero counters, correct by construction |
 | copy ctor copies counters | `#[derive(Clone)]` | free |
 | (no vanilla analogue) | `intern` | classify each **new** palette entry once as it is appended: `palette_ticking.push(is_randomly_ticking(name))` |
@@ -348,7 +348,7 @@ already records the null-that-carried-no-evidence incident).
 ## Verified vs. assumed
 
 Verified against the tree/jar this session: the vanilla counter mechanism and its four call
-sites (read from `LevelChunkSection.java` directly, including the blocks-OR-fluids gate the
+sites (read from the record definition directly, including the blocks-OR-fluids gate the
 briefing's summary omitted); lava as the only ticking fluid; `ChunkColumn`'s flat, private,
 append-only representation; the full mutation census above (every `ChunkSource::set_block`
 impl body read); the region-load path building through `set_block`; `bdf93a28`'s numbers
@@ -375,9 +375,9 @@ Checked rather than inherited, per the briefing's own request:
 2. **"View fills in 6.27 s"** — the record says **6.3–6.9 s across runs**; 6.27 s is at best
    one run's value. Immaterial to the plan; corrected because a single-run timing quoted as
    *the* number is the exact timing-vs-counter trap CLAUDE.md documents.
-3. **The vanilla mechanism** — correct that `tickingBlockCount` is maintained in
-   `setBlockState` and read as an integer compare, but incomplete in one way that matters for
-   scoping: the section gate `isRandomlyTicking()` is blocks **OR fluids**, so "the fluid
+3. **The vanilla mechanism** — correct that the ticking-block counter is maintained in
+   the single block-write method and read as an integer compare, but incomplete in one way that
+   matters for scoping: the section's overall ticking gate is blocks **OR fluids**, so "the fluid
    counter is a separate optional feature" understates the coupling — a future fluid tick
    changes the *same* gate this plan's consumer reads (handled above by marking the boundary
    in code).
