@@ -1,20 +1,19 @@
-//! The powder-snow freezing mechanic (`Entity.DATA_TICKS_FROZEN` /
-//! `InsideBlockEffectType.FREEZE` / `LivingEntity.aiStep`'s freezing block).
-//! Issue #212.
+//! The powder-snow freezing mechanic (vanilla's own frozen-ticks entity data /
+//! its own "freeze" inside-block effect / its own per-tick AI step's freezing
+//! block).
 //!
-//! Vanilla's rule (`InsideBlockEffectType.java:6-11`,
-//! `LivingEntity.java:3139-3151`):
+//! Vanilla's rule, described rather than transcribed:
 //!
 //! ```text
-//! every tick the swept segment finds powder snow (checkInsideBlocks):
-//!   setIsInPowderSnow(true);
-//!   ticksFrozen = min(ticksRequiredToFreeze, ticksFrozen + 1);   // 140 cap
+//! every tick the swept segment finds powder snow:
+//!   mark "in powder snow";
+//!   advance the frozen-ticks counter toward its cap (140);
 //!
 //! end of tick, unconditionally:
-//!   if (!isInPowderSnow) ticksFrozen = max(0, ticksFrozen - 2);
+//!   if not in powder snow, decay the frozen-ticks counter by 2;
 //!
 //! every 40th tick:
-//!   if (isFullyFrozen()) hurt(FREEZE, 1.0F);
+//!   if fully frozen, apply freeze damage;
 //! ```
 //!
 //! These tests predict the exact tick counts rather than asserting a direction
@@ -42,7 +41,8 @@ impl CollisionView for PowderSnowColumn {
 
     // Real powder snow also reports a stuck multiplier — included so the
     // flying-vs-not control below exercises the actual two-callback shape
-    // `PowderSnowBlock.entityInside` has, not a simplified stand-in.
+    // vanilla's own powder-snow "entity inside" hook has, not a simplified
+    // stand-in.
     fn stuck_multiplier(&self, x: i32, y: i32, z: i32) -> Option<Vec3d> {
         if self.is_powder_snow(x, y, z) {
             Some(Vec3d::new(0.9, 1.5, 0.9))
@@ -146,12 +146,13 @@ fn should_apply_freeze_damage_fires_only_fully_frozen_on_the_40th_tick() {
 #[test]
 fn freezing_is_not_suppressed_by_flying_even_though_the_stuck_drag_is() {
     // Two competing hypotheses:
-    //   A (wrong): freezing is gated on `!flying` the same way the
-    //      stuck-multiplier slowdown is (`Player.makeStuckInBlock`'s override) —
-    //      predicts frozen_ticks == 0 for the flying player after standing in
-    //      powder snow.
-    //   B (right, per `InsideBlockEffectType.FREEZE` carrying no flying
-    //      conjunct): frozen_ticks climbs identically whether flying or not.
+    //   A (wrong): freezing is gated on "not flying" the same way the
+    //      stuck-multiplier slowdown is (vanilla's own player override of its
+    //      "make stuck in block" step) — predicts frozen_ticks == 0 for the
+    //      flying player after standing in powder snow.
+    //   B (right, per vanilla's own "freeze" inside-block effect carrying no
+    //      flying conjunct): frozen_ticks climbs identically whether flying or
+    //      not.
     // Measured, not just signed: both players must show the *same* frozen_ticks
     // count after the same number of ticks, while their stuck_speed_multiplier
     // differs — proving this isn't a case of the flying gate having failed to

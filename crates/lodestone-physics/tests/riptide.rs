@@ -1,18 +1,18 @@
-//! The riptide-trident impulse and spin-attack pose — issue #208.
+//! The riptide-trident impulse and spin-attack pose.
 //!
-//! `TridentItem.releaseUsing` (`TridentItem.java:88-104`):
+//! Vanilla's own trident-release step, described rather than transcribed:
 //!
 //! ```text
-//! xd = -sin(yRot * pi/180) * cos(xRot * pi/180)
-//! yd = -sin(xRot * pi/180)
-//! zd = cos(yRot * pi/180) * cos(xRot * pi/180)
+//! xd = -sin(yaw * pi/180) * cos(pitch * pi/180)
+//! yd = -sin(pitch * pi/180)
+//! zd = cos(yaw * pi/180) * cos(pitch * pi/180)
 //! dist = sqrt(xd*xd + yd*yd + zd*zd)
 //! push(xd * strength/dist, yd * strength/dist, zd * strength/dist)
-//! startAutoSpinAttack(20, 8.0F, itemStack)
-//! if (onGround) move(SELF, (0, 1.1999999, 0))
+//! start a 20-tick auto-spin-attack, with an 8.0 attack-damage override
+//! if on ground: move up by 1.1999999 blocks
 //! ```
 //!
-//! `pose.rs` documents vanilla's `getDesiredPose` order as `SLEEPING >
+//! `pose.rs` documents vanilla's own "desired pose" order as `SLEEPING >
 //! SWIMMING > FALL_FLYING > SPIN_ATTACK > CROUCHING/STANDING`; these tests also
 //! pin `apply_riptide`'s pose side effect against that order.
 
@@ -51,7 +51,7 @@ fn facing_due_south_level_pushes_purely_along_z_by_the_strength() {
 
 #[test]
 fn the_impulse_is_additive_not_a_replacement() {
-    // `Entity.push` adds to the existing velocity (`Entity.java:1919-1924`); a
+    // Vanilla's own entity-push step adds to the existing velocity; a
     // player already moving must have that motion carried forward, not
     // overwritten.
     let world = Empty;
@@ -100,7 +100,7 @@ fn the_spin_attack_pose_wins_over_standing_and_crouching_but_not_fall_flying() {
     let world = Empty;
     let profile = PhysicsProfile::mc_1_21();
 
-    // Below FALL_FLYING/SWIMMING in vanilla's `getDesiredPose` priority, but
+    // Below FALL_FLYING/SWIMMING in vanilla's own "desired pose" priority, but
     // above CROUCHING/STANDING: a sneaking, non-gliding, mid-spin player must
     // show SPIN_ATTACK, not CROUCHING.
     let mut spinning = PlayerState::at(Vec3d::new(0.5, 60.0, 0.5), 0.0);
@@ -175,7 +175,7 @@ fn on_ground_the_launch_also_pops_the_player_up_by_1_2_blocks() {
 }
 
 /// The strength ladder, read out of the enchantment's own data file rather than
-/// recollected — issue #208's driver has to resolve a *level* into the `strength`
+/// recollected — a driver has to resolve a *level* into the `strength`
 /// every test above passes in by hand, and getting the per-level term wrong is
 /// worth a full block per tick at Riptide III.
 ///
@@ -198,7 +198,7 @@ fn the_riptide_strength_ladder_matches_the_enchantment_data() {
     assert_eq!(
         riptide_spin_attack_strength(0),
         0.0,
-        "no Riptide is exactly the `> 0.0F` test TridentItem.releaseUsing gates on"
+        "no Riptide is exactly the `> 0.0F` test vanilla's own trident-release step gates on"
     );
     assert_eq!(riptide_spin_attack_strength(1), 1.5);
     assert_eq!(riptide_spin_attack_strength(2), 2.25);
@@ -217,9 +217,9 @@ fn the_riptide_strength_ladder_matches_the_enchantment_data() {
 
 /// A riptide launch enters the spin-attack pose, and it lapses on its own.
 ///
-/// `startAutoSpinAttack(20, …)` and `LivingEntity.aiStep`'s unconditional
-/// `if (autoSpinAttackTicks > 0) autoSpinAttackTicks--`
-/// (`LivingEntity.java:3158-3159`) — 20 ticks, exactly one second, then the pose
+/// Vanilla's own start-auto-spin-attack step and its own per-tick AI step's
+/// unconditional countdown of the auto-spin-attack ticker — 20 ticks, exactly
+/// one second, then the pose
 /// is released. Predicted count, not "it eventually stops".
 #[test]
 fn the_spin_attack_lasts_exactly_twenty_ticks() {

@@ -1,16 +1,16 @@
-//! The glide **state machine** — `Player.tryToStartFallFlying` and the half of
-//! `LivingEntity.updateFallFlying` that ends a glide (issue #206).
+//! The glide **state machine** — vanilla's own "try to start fall flying" step
+//! and the half of its own "update fall flying" step that ends a glide.
 //!
 //! The glide *maths* (`tick_elytra`/`update_fall_flying_movement`) has its own
-//! golden traces; this file is about the flag those traces take as given, which
-//! nothing in this tree set before #206. Record definitions:
+//! golden traces; this file is about the flag those traces take as given.
+//! Record definitions, described rather than transcribed:
 //!
 //! ```text
-//! Player.java:1463-1470   if (!isFallFlying() && canGlide() && !isInWater()) startFallFlying();
-//! Player.java:1428-1430   canGlide() = !abilities.flying && super.canGlide()
-//! LivingEntity.java:3205  canGlide() = !onGround && !isPassenger && !hasEffect(LEVITATION)
-//!                                      && any slot holds a glider
-//! LivingEntity.java:3183  updateFallFlying(): if (!canGlide()) setSharedFlag(7, false)
+//! start:  if not already fall-flying, and can glide, and not in water: start fall-flying
+//! can-glide (player): not flying, and the base can-glide check
+//! can-glide (base):   not on ground, not a passenger, no Levitation effect,
+//!                      and any slot holds a glider
+//! end:    every tick, if not can-glide: clear the fall-flying flag
 //! ```
 
 use lodestone_physics::{
@@ -29,9 +29,9 @@ fn a_glider_in_the_air_starts_gliding_and_reports_it() {
     let mut state = airborne();
     assert!(
         try_start_fall_flying(&mut state, true, false),
-        "the return value is the bit `LocalPlayer.aiStep` turns into one \
-         START_FALL_FLYING command; a silent start would leave the server \
-         simulating a falling player"
+        "the return value is the bit vanilla's own client-side per-tick \
+         update turns into one START_FALL_FLYING command; a silent start \
+         would leave the server simulating a falling player"
     );
     assert!(state.fall_flying);
 }
@@ -104,8 +104,8 @@ fn a_glide_in_progress_survives_the_air() {
         "the control for `landing_ends_the_glide`: a stop condition that fired \
          unconditionally would pass that test and break every glide"
     );
-    // Losing the elytra mid-air ends it, though — `canGlide` re-reads equipment
-    // every tick.
+    // Losing the elytra mid-air ends it, though — vanilla's own can-glide
+    // check re-reads equipment every tick.
     update_fall_flying(&mut state, false);
     assert!(!state.fall_flying);
 }
