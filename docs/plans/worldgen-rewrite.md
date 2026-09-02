@@ -63,11 +63,12 @@ Measured or directly cited defects, not adjectives. Cites are to the tree at `43
   implemented as memoised *point queries* (8 corner lookups through `RefCell`-guarded per-slot
   caches per block) where vanilla prefills each cell once. **Corrected (`08f5d98a`, DESIGN.md
   §12.101): the arithmetic was already right and this paragraph previously prescribed the wrong
-  fix.** Vanilla has *two* interpolation orders — `Mth.lerp3` (X-inner) under `fillingCell`, and
-  the incremental `advanceCellX`/`updateForY` chain (Y-inner) — different IEEE 754 expressions,
-  and the block field only ever sees the first, because `NoiseChunk.java` wraps
+  fix.** Vanilla has *two* interpolation orders — a plain trilinear lerp (X-inner) under its
+  cell-filling mode, and
+  an incremental per-axis-advance chain (Y-inner) — different IEEE 754 expressions,
+  and the block field only ever sees the first, because vanilla's own noise-chunk source wraps
   `final_density` in a code-only `cache_all_in_cell` whose cache is prefilled under
-  `fillingCell == true`. `chunk.rs` implements exactly that; its module doc claimed the opposite
+  cell-filling mode. `chunk.rs` implements exactly that; its module doc claimed the opposite
   (now fixed, with a standing inverted guard). The defect here is the per-block *lookup cost*,
   not the nesting: branchy dispatch + pointer-chasing + hash-or-index lookups per block, where
   vanilla pays a sliding lerp over a prefilled cell.
@@ -116,9 +117,9 @@ engine's *semantics*.
    `Vec` of components addressed by index — children are indices, not `Box`es — with per-chunk
    evaluation state (interpolator planes, flat-cache tables, cell caches) in reusable buffers owned
    by a per-chunk scratch object, not `RefCell`s inside the sampler. Evaluation fills each cell's
-   corner lattice once and interpolates in **`Mth.lerp3`'s X-inner order — the order
+   corner lattice once and interpolates in **vanilla's own plain-trilinear X-inner order — the order
    `cache_all_in_cell` selects for the block field (`08f5d98a`, §12.101) — never the
-   `advanceCellX`/`updateForY` incremental chain**, which is a different IEEE 754 expression:
+   incremental per-axis-advance chain**, which is a different IEEE 754 expression:
    measured, the two nestings differ on 60,300 of 393,216 blocks, and swapping them takes
    `chunk_parity` from 98,304/98,304 to 90,563/98,304. (PumpkinMC independently converged on the
    cell-fill shape; see Q2.)
@@ -176,7 +177,7 @@ both validates the D1–D3 diagnosis and means SIMD is headroom Pumpkin left on 
 - **Biome search: vanilla's tree, not a rewrite.** Pumpkin's `BiomeTree` is **generated from the
   real game data's node structure** (not re-derived by its own splitting heuristic), searched with
   vanilla's exact branch-and-bound pruning plus a thread-local last-result node used to seed
-  `best_dist` — vanilla's own `RTree.lastResult` locality trick. Climate sampling is RNG-free and
+  `best_dist` — vanilla's own last-result-caching locality trick on its climate R-tree. Climate sampling is RNG-free and
   pure, so search strategy is a pure-speed question. Direct blueprint for U9.
 - **Per-wrapper isolation fixtures**: Pumpkin tests individual wrapper types (`CellCache`-only,
   interpolator-only) against captured vanilla chunk dumps, not just end-to-end output — a fixture
@@ -193,7 +194,7 @@ both validates the D1–D3 diagnosis and means SIMD is headroom Pumpkin left on 
   compiling JSON → flat typed IR **once per generator construction**, which we already half-do;
   the defect was never "JSON is parsed" but "the IR is a boxed tree walked per block".
 - **Any of its actual placement/feature behaviour as an oracle.** The confirmed divergence map,
-  from its own sources: coral (`coral_claw.rs` — vanilla's `Util.shuffle` skipped, a random
+  from its own sources: coral (`coral_claw.rs` — vanilla's own shuffle skipped, a random
   direction draw replaced by a constant), tree decorators (`attached_to_logs.rs` — positions
   unshuffled, direction hardcoded to `[0]`), and **surface rules knowingly ~1% off** — Pumpkin's
   own test asserts `mismatches <= 1060` post-surface against a vanilla dump where raw noise
@@ -580,7 +581,7 @@ acceptance is always counters and gates — never a profile, never a bare durati
 | U1 | Benchmark harness: counters + C_ss/C_cold + calibration | `benches/`, `src/` counter hooks, `docs/benchmark-harness.md` | — | M | none |
 | U2 | Release baseline + profile on embedded data; publish per-stage µs + counters; re-negotiate targets | bench-results, this doc, DESIGN §12 entry | U1 | S | none |
 | U3 | Numeric ids: interned `u16` states through dense_grid/carver/ore/top-layer; `String` only at serve boundary | `dense_grid.rs`, `carver/`, `feature/mod.rs`, `feature/top_layer.rs`, `overworld.rs` | U1 | L | none (representation) |
-| U4 | Flattened density engine + vanilla cell-fill (`Mth.lerp3` order — §12.101, **not** the incremental walk) + per-chunk scratch (kills D1, D3) — order fix landed `08f5d98a`; remainder re-scoped in **#490** | new `engine/` (in the U16 core crate), then `density/`, `aquifer/`, `overworld/fill.rs` cutover | U1, U16 | L | none (no RNG in density) |
+| U4 | Flattened density engine + vanilla cell-fill (its own plain-trilinear order — §12.101, **not** the incremental walk) + per-chunk scratch (kills D1, D3) — order fix landed `08f5d98a`; remainder re-scoped in **#490** | new `engine/` (in the U16 core crate), then `density/`, `aquifer/`, `overworld/fill.rs` cutover | U1, U16 | L | none (no RNG in density) |
 | U5 | `std::simd` noise kernels behind U4's batched fill API | `noise/`, `src/engine/` | U4, U2 profile | M | none (position-lane only) |
 | U6 | Staged sharded store replacing both mutex caches; drivers unchanged — **landed** `34202a21` | `overworld/store.rs`, `overworld/mod.rs` | U3, U16 | L | **must not** — byte-identical gate (held) |
 | U7 | In-place region decoration view; delete stitch copies + `RegionGrid`/`VegGrid` re-seeding | `feature/mod.rs`, `feature/vegetation.rs`, `overworld.rs` | U3, U6 | M | **must not** — same driver order |
@@ -623,10 +624,10 @@ reproduce this otherwise.
   the gate. Evidence adds: steady-state String-allocation counter == 0.
 - **U4**: the semantic subtleties the interpreter hides — `Mul`'s `v1 == 0.0` short-circuit,
   `interpolated`-inside-corner transparency (`interpolate=false`), `flat_cache`'s forced `y=0`,
-  `cache_once`/`cache_2d` scoping — and above all the interpolation order: the block field is
-  `Mth.lerp3` under a code-only `cache_all_in_cell` (§12.101). Evidence adds:
+  `cache_once`/`cache_2d` scoping — and above all the interpolation order: the block field uses
+  vanilla's own plain-trilinear lerp under a code-only `cache_all_in_cell` (§12.101). Evidence adds:
   `DensityChunkOracle` fixtures bit-exact **for component functions only — the oracle itself
-  drives the incremental `advanceCellX`/`updateForY` chain (its own source, lines 76–83), so it
+  drives the incremental per-axis-advance chain (its own source), so it
   is *not* authoritative for the block field's interpolation order**; that gate is `chunk_parity`
   (98,304/98,304) plus the standing inverted guard landed in `08f5d98a`. Whole chunks
   byte-identical to old sampler at ≥3 seeds, corner-eval counter == predicted lattice.
@@ -716,7 +717,7 @@ walking the `noise_settings` JSON, and the marker that selects the block field's
 arithmetic — `cache_all_in_cell` — appears **nowhere in 26.2's worldgen JSON** (0 hits across
 both the bundled corpus and the jar's own `data/minecraft/worldgen/`, with a working detector:
 the `minecraft:interpolated` control hits 2 and 8). Vanilla applies it in code,
-`NoiseChunk.java`. This is the same class as CLAUDE.md's `registries.json` trap: an
+in its own noise-chunk source. This is the same class as CLAUDE.md's `registries.json` trap: an
 authoritative source answering a *neighbouring* question. A data census cannot see evaluation
 order; only the decompiled call path can.
 
@@ -736,13 +737,13 @@ order; only the decompiled call path can.
 | world_preset / flat presets | 7 / 9 | 7 / 9 | complete (was 0/0; `6c6c0e10`) |
 
 **The chunk-status pipeline — the scheduling contract, and a structures prerequisite.**
-Vanilla's progression (read from `chunk/status/ChunkStatus.java`): `EMPTY → STRUCTURE_STARTS →
+Vanilla's progression (read from its own chunk-generation-status enum): `EMPTY → STRUCTURE_STARTS →
 STRUCTURE_REFERENCES → BIOMES → NOISE → SURFACE → CARVERS → FEATURES → INITIALIZE_LIGHT → LIGHT →
 SPAWN → FULL`. Structure starts run **before** noise so the beardifier can consult them during
 fill. U6's staged store is the natural home: its stage enum grows toward this contract, and doing
 so is a **prerequisite of group S**, not a detail inside it (phase S0 below). [engine]
 
-**Heightmaps as persisted artefacts.** Vanilla maintains six (`Heightmap.java`):
+**Heightmaps as persisted artefacts.** Vanilla maintains six kinds:
 `WORLD_SURFACE_WG` / `OCEAN_FLOOR_WG` (worldgen-time) and `WORLD_SURFACE`, `OCEAN_FLOOR`,
 `MOTION_BLOCKING`, `MOTION_BLOCKING_NO_LEAVES` (persisted/sent). Our engine computes one ad-hoc
 solid-top array. Load-bearing twice already: #437's gate reads vanilla's own `WORLD_SURFACE`,
