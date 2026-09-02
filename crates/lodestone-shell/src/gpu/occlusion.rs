@@ -15,7 +15,7 @@
 //! # The cadence, and why the frustum is not in it
 //!
 //! Vanilla re-walks when the camera crosses an **8-block cell** on any axis or
-//! when the graph changes (`SectionOcclusionGraph.invalidateIfNeeded`), and
+//! when the graph changes (its own invalidate-if-needed check), and
 //! applies the frustum *per frame* over the cached reachable set rather than
 //! inside the walk. [`OcclusionCache`] is that: keyed on
 //! `(camera 8-block cell, graph generation)`, so turning on the spot re-walks

@@ -7,16 +7,16 @@
 //!
 //! # Two pipelines, one shader, ported from vanilla's own two `RenderType`s
 //!
-//! `BeaconRenderer.submitBeaconBeam` submits through
-//! `RenderTypes.beaconBeam(texture, translucent)` **twice** per section — once
+//! Vanilla's own beacon-renderer submit-beam routine submits through
+//! its own beacon-beam render-type lookup **twice** per section — once
 //! `false` (the solid inner core) and once `true` (the outer glow) — and the
-//! two resolve to genuinely different pipelines in
-//! `RenderPipelines.BEACON_BEAM_OPAQUE`/`BEACON_BEAM_TRANSLUCENT`:
+//! two resolve to genuinely different pipelines, its own opaque and
+//! translucent beacon-beam pipelines:
 //!
-//! | | `BEACON_BEAM_OPAQUE` (solid) | `BEACON_BEAM_TRANSLUCENT` (glow) |
+//! | | opaque beam pipeline (solid) | translucent beam pipeline (glow) |
 //! |---|---|---|
-//! | blend | `ColorTargetState.DEFAULT` — `Optional.empty()`, i.e. **no blending at all** (an opaque overwrite; the texture's own alpha never reaches the framebuffer) | `BlendFunction.TRANSLUCENT` |
-//! | depth write | `true` (`DepthStencilState.DEFAULT`) | `false` |
+//! | blend | vanilla's own default colour-target state — `Optional.empty()`, i.e. **no blending at all** (an opaque overwrite; the texture's own alpha never reaches the framebuffer) | vanilla's own translucent blend function |
+//! | depth write | `true` (vanilla's own default depth-stencil state) | `false` |
 //! | depth compare | `GREATER_THAN_OR_EQUAL`, which this reversed-Z engine spells [`lodestone_render::DEPTH_COMPARE_NEARER_OR_EQUAL`] with no sign flip | same |
 //!
 //! So the solid core is drawn like ordinary opaque geometry (it still writes

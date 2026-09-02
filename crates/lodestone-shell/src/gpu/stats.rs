@@ -184,7 +184,7 @@ pub struct RenderStats {
     ///
     /// Its own counter for the reason [`item_drops_drawn`](Self::item_drops_drawn)
     /// has one, plus one specific to maps: a map whose colour grid is entirely
-    /// `MapColor.NONE` draws a fully transparent quad, so "the map is unexplored"
+    /// vanilla's own "no colour" map-colour value draws a fully transparent quad, so "the map is unexplored"
     /// and "the map never reached the pipeline" are the same number of visible
     /// pixels. This counter separates them.
     pub filled_maps_drawn: usize,
@@ -426,7 +426,7 @@ pub struct RenderStats {
     /// Whether the confusion overlay drew this frame — not
     /// first-person-gated, keyed on `ScreenEffects::nausea_intensity > 0.0`
     /// **and** `ScreenEffects::portal_intensity <= 0.0` (portal takes
-    /// priority — `Hud.java`).
+    /// priority — vanilla's own HUD class).
     pub confusion_overlay_drawn: bool,
     /// Whether the portal overlay drew this frame — not
     /// first-person-gated, keyed on `ScreenEffects::portal_intensity > 0.0`.

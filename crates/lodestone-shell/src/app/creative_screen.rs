@@ -34,13 +34,13 @@ impl WindowApp {
     ///
     /// # The creative signal
     ///
-    /// `Sim::has_infinite_materials` — `Abilities.instabuild` off
+    /// `Sim::has_infinite_materials` — vanilla's own creative-abilities flag off
     /// `PLAYER_ABILITIES`, the same field the anvil and enchanting screens
     /// already gate on. **This is not `GameMode::Creative`**, and the difference
     /// is real: `ServerGameMode` is an ECS component with no shell reader
     /// (`lodestone-ecs/src/session.rs`), and vanilla itself opens this screen off
-    /// `player.hasInfiniteMaterials()` in `Minecraft.openInventory`
-    /// (`Minecraft.java`'s `gameMode.hasInfiniteItems()` branch), not off the
+    /// its own infinite-materials check in its own open-inventory routine
+    /// (its own game-mode has-infinite-items branch), not off the
     /// game-mode enum. So `instabuild` is the *right* signal here rather than a
     /// stand-in — but note a server that grants `instabuild` in another mode
     /// would get this screen, which is exactly what vanilla does too.
