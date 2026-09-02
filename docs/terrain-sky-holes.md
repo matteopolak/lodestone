@@ -471,30 +471,127 @@ that is a claim about the whole **neighbourhood** a filter reaches, not about
 the sprite. The section below it — measuring 1,269 sprites' alpha histograms —
 is still correct and was never the weak link. The gutter is.
 
-Two things it missed, one of them measured in this file:
+What it missed: a sprite that is genuinely `Cutout`-classified **is**
+alpha-tested, and `sample_rgss` blends four sub-texel taps across **two**
+adjacent mip levels, so its filtered alpha slides continuously with the camera
+and crosses the threshold; `sample_nearest`'s `snap_uv` locks the sample to the
+texel lattice and removes exactly that sliding term — which is what that
+function's own comment says it is for. The 911/309/49 histogram names the
+sprites it names correctly, but the same section records a second scanner
+putting 517 sprites in `Cutout`, so the population of alpha-tested quads in a
+real scene is larger than "no ordinary building block" suggests.
 
-* At `mipmapLevels = 0` the gutter beside every sprite was **transparent
-  black**, so a fully opaque sprite's filtered alpha did fall, at every face
-  edge. See the section below.
-* Even with a sound gutter, a sprite that is genuinely `Cutout`-classified is
-  alpha-tested, and `sample_rgss` blends four sub-texel taps across **two**
-  adjacent mip levels, so its filtered alpha slides continuously with the camera
-  and crosses the threshold; `sample_nearest`'s `snap_uv` locks the sample to
-  the texel lattice and removes exactly that sliding term — which is what that
-  function's own comment says it is for. The 911/309/49 histogram names the
-  sprites it names correctly, but the same section records a second scanner
-  putting 517 sprites in `Cutout`, so the population of alpha-tested quads in a
-  real scene is larger than "no ordinary building block" suggests.
+A second candidate was offered here and is now **withdrawn**: the transparent
+gutter described further down only exists at `mipmapLevels = 0`, and the owner's
+slider has been on `4` throughout. That path never ran on the machine that
+reported this, so it explains neither the pinpricks nor anything else he saw.
 
-Which of the two was the owner's is not established here, and the honest way to
-settle it is to ask what his **Mipmap Levels** slider was on — it was moved to
-`0` for an earlier experiment.
+## The grey grid was the terrain **magnification** filter
+
+The owner's second report, after the sampling default changed: *"For blocks
+farther away from me I see a grid pattern on them (for walls, floors, etc.) and
+they're always GREY. The lines start thin close to me, and get thicker as they
+get farther, up until some amount, then stay the same."* It is gone, and this
+section is the corrected account of why — corrected because the first version of
+it named the wrong cause with a full measurement attached, which is the most
+expensive kind of wrong.
+
+### The argument that was wrong, and the exact word that did it
+
+The mag-filter change was landed here as vanilla parity and written up as
+explicitly **not** the cause, on this reasoning: *"`mag_filter` is consulted only
+when the level of detail is `<= 0`, which is magnification, and the reported
+artefact is strictly a minification one (`farther away`, `disappears as I get
+close`). The two regimes are disjoint."*
+
+The first half is right. The second half silently equates **magnification** with
+**close**, and they are not the same thing. Magnification is one screen pixel per
+*texel*, not per block, and a block face is sixteen texels across. At this
+fixture's 1600x1200 and 70 degrees the focal length is 857 px, so a block face
+subtends 16 screen pixels — the crossover — at about **48 blocks**. Everything
+nearer than that is magnified. On the owner's HiDPI display the entire near and
+middle distance of the scene, walls and floors included, is in the regime I had
+written off as "close".
+
+So "farther away" in a report is a statement about blocks, and `<= 0` is a
+statement about texels, and the whole error is in reading one as the other.
+
+### Measured, both arms run
+
+The same fixture rendered twice at `mipmapLevels = 4`, differing only in the
+terrain sampler's `mag_filter`. Head-on wall, camera level with it, 1600x1200:
+
+| distance | px per block | px per texel | regime | pixels changed | max delta |
+|---|---|---|---|---|---|
+| 8 | 107.1 | 6.69 | magnified | 15.5% | 12 |
+| 16 | 53.6 | 3.35 | magnified | 29.9% | 13 |
+| 24 | 35.7 | 2.23 | magnified | 42.0% | 13 |
+| 32 | 26.8 | 1.67 | magnified | 53.9% | 13 |
+| 48 | 17.9 | 1.12 | magnified | 65.2% | 13 |
+| 64 | 13.4 | 0.84 | **minified** | **0.00%** | **0** |
+| 96 | 8.9 | 0.56 | **minified** | **0.00%** | **0** |
+
+Two things in that table are the finding. The affected share **grows
+monotonically with distance**, 15.5% to 65.2%, which is the report's *"start thin
+close to me, and get thicker as they get farther"*. And it goes to **byte-identical**
+the moment the surface crosses into minification, which is *"up until some amount,
+then stay the same"* — past the crossover `min_filter` takes over, and that was
+already `Linear` on both arms.
+
+The difference is keyed to **texel** boundaries, not block boundaries. Mean
+absolute difference binned by phase at 16 blocks: by texel phase `0.58 0.71 1.69
+1.31 0.58 0.58 0.57 0.58` — a 2.9x peak at the texel edge — against by block phase
+`0.83 0.91 0.88 0.84 0.78 0.72 0.90 0.72`, flat to 1.26x. That is `snap_uv`
+appearing and disappearing: its whole mechanism is to rescale the sub-texel offset
+by screen-pixels-per-texel and clamp, giving point sampling with a **one-pixel
+anti-aliased ramp at each texel edge**, and against a `Nearest` sampler that
+rescale is a no-op because moving a coordinate inside a texel cannot change a point
+fetch. Without it every texel edge on every magnified face is a hard step: a 16x16
+lattice on each block, sharpening as px-per-texel falls toward 1.
+
+**What is not established**: no fixture here reproduces the owner's grid as
+*grey* specifically. The blocks he named are the grey building set, and an
+aliased lattice on a grey texture is grey, but that is an explanation offered
+rather than measured. What is measured is that this change moves exactly the
+regime he described, with exactly the distance trend he described, at exactly the
+lattice spacing he described.
+
+### Why the attribution is this and not something else
+
+The owner tested one build containing four commits. Taking them in turn:
+
+* **`mipmapLevels = 0`'s invented chain** — the cause this section originally
+  named. **It was not active on his machine**: his Mipmap Levels slider has been
+  on `4` throughout and the suggestion to move it to `0` was never applied. The
+  measurement below says the same thing on its own terms — every one of the 164
+  bad gutter texels is at `mipmapLevels = 0`, and 1 through 4 are clean at 300 of
+  300. A defect that cannot fire cannot be the fix.
+* **Everything else in the same commit** — at `mipmapLevels = 4` there is
+  nothing else. `min_filter` and `mipmap_filter` were already `Linear` and are
+  untouched (they appear as context lines in the diff, not as changes), and
+  `atlas_mip_levels`' edit is a pure re-indentation on the `mip_count() > 1`
+  path, so the uploaded chain is byte-identical at every setting from 1 to 4.
+  `mag_filter` is the entire behavioural delta.
+* **The reversed-Z conversion and the map depth diagnostic** — they touch
+  `camera.rs`, depth state, and depth declarations in shaders, and no texture
+  sampling at all. A depth change cannot produce or remove a difference keyed to
+  *texel* phase.
+* **The resource-pack loading-screen change** — a load-ordering fix, and the
+  owner is playing with the server's pack declined.
+
+That is elimination plus one positive measurement, which is stronger than either
+alone but is still not the owner seeing it switch. **`LODESTONE_TERRAIN_MAG_FILTER`
+exists so it can be**: `nearest` restores the pre-fix sampler live, `linear` (or
+unset) is vanilla's and the default. If the grid comes back under `nearest` and
+goes under `linear`, on his machine, in his world, the attribution is closed.
 
 ## `mipmapLevels = 0` uploaded eleven invented levels with an unwritten gutter
 
-A shipped defect, found by dumping the texels the GPU actually receives rather
-than reasoning about the generator, and the cause of the grey grid the owner
-reported after the filtering change landed.
+**A real defect, really fixed, and *not* the owner's reported artefact.** It is
+recorded here on its own merits and deliberately not as the explanation for
+anything a player has reported: his slider was on `4`, and this path only runs at
+`0`. Kept because the setting is one position on a slider anybody can move, and
+because the measurement is good evidence — about this bug.
 
 `AtlasBuilder` only produces a pyramid when `with_mip_levels` was asked for a
 non-zero depth, so at `mipmapLevels = 0` the `Atlas` carries one level.
@@ -516,21 +613,24 @@ Measured beside `block/stone` in the real jar-built atlas at `mipmapLevels = 0`:
 sprites and every uploaded level, **164 of 465** probed gutter texels failed to
 replicate their sprite's own edge — 47 of them fully transparent, the other 117
 opaque but belonging to some other sprite. **Every one of the 164 is at
-`mipmapLevels = 0`**; 1 through 4 are clean, which is what localises it.
+`mipmapLevels = 0`**; 1 through 4 are clean at 300 of 300, which is both what
+localises the bug and what rules it out as anyone's live symptom.
 
-That is the reported artefact, in all three of its details. The lines are
-**grey** because a foreign texel at a deep invented level is an average of
-unrelated block textures, and a transparent one drags the fragment toward black.
-They are at **every block boundary on opaque blocks** because it is the gutter,
-not alpha, that is wrong. And the thickness **saturates** because the
+Had it ever been selected it would have looked much like the grey grid, which is
+exactly why it was mis-attributed: the lines would be grey because a foreign
+texel at a deep invented level is an average of unrelated block textures, they
+would be at every block boundary on opaque blocks because it is the gutter rather
+than alpha that is wrong, and the thickness would saturate because the
 contaminated share of a face is half a texel out of `16 >> level` — 3% at level
-0, 6%, 12.5%, 25%, 50% at level 4 — so it grows as the level climbs with
-distance and then stops when the level clamps at the top of the chain.
+0, 25% at level 3, 50% at level 4 — growing as the level climbs with distance and
+then stopping when the level clamps. **A mechanism that predicts the symptom is
+not thereby the cause**; the missing question was the cheap one, which is whether
+the code path ran at all on the machine that reported it.
 
 The fix is vanilla's own arithmetic: `TextureAtlas.createTexture(width, height,
-mipLevel)` asks for `mipLevel + 1` levels, so `mipmapLevels = 0` is **one**
-level and no mip chain at all. `atlas_mip_levels` now returns exactly the levels
-the atlas carries and never invents any; `generate_isolated_mips` stays for
+mipLevel)` asks for `mipLevel + 1` levels, so `mipmapLevels = 0` is **one** level
+and no mip chain at all. `atlas_mip_levels` now returns exactly the levels the
+atlas carries and never invents any; `generate_isolated_mips` stays for
 `GpuAtlas::from_rgba`, whose callers are synthetic atlases with no asset pyramid
 to consume.
 
@@ -543,16 +643,15 @@ restores the fallback, it reports `[(0, 11), (1, 2), (2, 3), (3, 4), (4, 5)]`
 against the expected counts and names all 164 gutter mismatches; restored, 300
 of 300 texels agree.
 
-Note what this says about the `mipmapLevels = 0` **experiment** itself: it was
-proposed here as a way to separate mip/gutter causes from UV or geometry ones,
-and it was not a clean control — that setting has its own severe defect. Any
-observation taken under it before this fix is about the fallback path, not about
-the shipped chain.
+Note also what this says about the `mipmapLevels = 0` **experiment** proposed
+earlier in this file as a way to separate mip/gutter causes from UV or geometry
+ones: it was never a clean control, because that setting had its own severe
+defect. It was, as it turns out, never run either.
 
-### The terrain mag filter is now vanilla's, and it is *not* the grey grid
+### The terrain sampler, stated once
 
-`GpuAtlas`'s sampler used `mag_filter: Nearest` for every consumer. Vanilla
-keeps **two** samplers over the same block atlas: `TextureAtlas`'s own is
+`GpuAtlas`'s sampler used `mag_filter: Nearest` for every consumer. Vanilla keeps
+**two** samplers over the same block atlas: `TextureAtlas`'s own is
 `getClampToEdge(FilterMode.NEAREST)`, which is right for a GUI, item or particle
 sheet, but `LevelRenderer` builds a separate `chunkLayerSampler` as
 `createSampler(CLAMP_TO_EDGE, CLAMP_TO_EDGE, LINEAR, LINEAR, maxAnisotropy,
@@ -562,22 +661,11 @@ is not a preference, it is which of the two samplers a draw uses.
 `lodestone-shell`'s `gpu::state` take it, and the particle sheet beside them
 deliberately does not.
 
-This was recorded here as "deliberately not changed" while the default sampling
-path was `sample_rgss`. It stopped being cosmetic when the default became
-`sample_nearest`, because that function's entire mechanism is `snap_uv` — it
-moves the sample *within* a texel, rescaling the sub-texel offset by
-screen-pixels-per-texel and clamping, to get point sampling with a one-pixel
-anti-aliased ramp at each texel edge. Against a `Nearest` sampler that rescale
-is a **no-op**: moving a coordinate inside a texel cannot change a point fetch.
-So we shipped vanilla's `NONE` mode with its defining function inert over half
-its range.
-
-**It does not explain the grey grid**, and it was worth checking rather than
-assuming: `mag_filter` is consulted only when the level of detail is `<= 0`,
-which is magnification, and the reported artefact is strictly a minification one
-("farther away", "disappears as I get close"). The two regimes are disjoint. Its
-symptom is the opposite one — hard, aliased texel edges on *near* terrain where
-vanilla has a one-pixel ramp.
+It stopped being cosmetic the moment the default sampling path became
+`sample_nearest`, because that function's entire mechanism is `snap_uv`, and
+`snap_uv` needs a `Linear` sampler to mean anything at all. We had shipped
+vanilla's `NONE` mode with its defining function inert over the whole magnified
+range — which, per the table above, is most of what a player is looking at.
 
 ### Still divergent, deliberately not changed here
 
@@ -620,11 +708,19 @@ than changed alongside an unrelated fix.
   proves the setting reaches the atlas terrain is actually sampled from.
 * `cutoutLeaves` reaches the mesher as `mesh_snapshot_models`'s third argument
   and decides whether leaves carry `ModelVertex::cutout_bypass`.
+* Two live switches exist for attributing a terrain sampling report without a
+  rebuild, both read once per process and both defaulting to vanilla:
+  `LODESTONE_TEXTURE_FILTERING=none|rgss` picks `model.wgsl`'s sampling path
+  (`model_pipeline::TextureFiltering`), and
+  `LODESTONE_TERRAIN_MAG_FILTER=linear|nearest` picks the terrain atlas
+  sampler's magnification filter (`texture::terrain_mag_filter`). Anything
+  unrecognised is the default; a typo must not stop the game starting.
 
 ## Dependencies
 
 * `lodestone-render` — `cull.rs` (`within_view_distance`), `model_pipeline.rs`
-  (`TextureFiltering`), `texture.rs` (`atlas_mip_levels`, `GpuAtlas::from_atlas_terrain`),
+  (`TextureFiltering`), `texture.rs` (`atlas_mip_levels`, `GpuAtlas::from_atlas_terrain`,
+  `terrain_mag_filter`),
   `block_models.rs` (`BlockModels::sprite_layer`), `models.rs`
   (`ModelSectionView::quad_layer`, `mesh_models_layers`), `shaders/model.wgsl`.
 * `lodestone-assets` — `atlas.rs` (`AtlasBuilder::build`'s level-0 blit) and

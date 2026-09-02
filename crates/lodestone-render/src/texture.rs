@@ -620,8 +620,41 @@ impl GpuAtlas {
             atlas.width,
             atlas.height,
             &mips,
-            wgpu::FilterMode::Linear,
+            terrain_mag_filter(),
         )
+    }
+}
+
+/// The magnification filter [`GpuAtlas::from_atlas_terrain`] builds its sampler
+/// with. Vanilla's is `LINEAR` and so is the default here; the environment
+/// variable exists so the previous `Nearest` can be put back **live**, without
+/// a rebuild, to settle attribution against a real session.
+///
+/// ```text
+/// LODESTONE_TERRAIN_MAG_FILTER=nearest    # the pre-fix sampler
+/// LODESTONE_TERRAIN_MAG_FILTER=linear     # vanilla's, and the default
+/// ```
+///
+/// Read once per process, like `model_pipeline::TextureFiltering::selected`,
+/// because the sampler is built when the atlas is uploaded. Anything
+/// unrecognised is the default rather than an error: it is a diagnostic switch
+/// and a typo must not stop the game starting.
+#[must_use]
+pub fn terrain_mag_filter() -> wgpu::FilterMode {
+    static SELECTED: std::sync::OnceLock<wgpu::FilterMode> = std::sync::OnceLock::new();
+    *SELECTED.get_or_init(|| {
+        terrain_mag_filter_from(std::env::var("LODESTONE_TERRAIN_MAG_FILTER").ok().as_deref())
+    })
+}
+
+/// [`terrain_mag_filter`]'s parse, split out so it is testable: the caching
+/// reader above resolves a process-wide variable once, so a test that called it
+/// would fix the value for every other test in the same binary.
+#[must_use]
+pub fn terrain_mag_filter_from(value: Option<&str>) -> wgpu::FilterMode {
+    match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("nearest") => wgpu::FilterMode::Nearest,
+        _ => wgpu::FilterMode::Linear,
     }
 }
 
@@ -808,6 +841,32 @@ mod tests {
         // Both are single-digit MB; neither dominates the decision.
         assert!(array < 4 * 1024 * 1024, "array {array}");
         assert!(atlas < 4 * 1024 * 1024, "atlas {atlas}");
+    }
+
+    /// Vanilla's `chunkLayerSampler` is `LINEAR` for both filters, so `LINEAR`
+    /// is the default and anything unrecognised resolves to it rather than
+    /// panicking — this is a diagnostic switch, and a typo must not stop the
+    /// game starting.
+    #[test]
+    fn terrain_mag_filter_defaults_to_vanillas_linear_and_only_nearest_opts_out() {
+        assert_eq!(terrain_mag_filter_from(None), wgpu::FilterMode::Linear);
+        assert_eq!(
+            terrain_mag_filter_from(Some("linear")),
+            wgpu::FilterMode::Linear
+        );
+        assert_eq!(
+            terrain_mag_filter_from(Some("nearest")),
+            wgpu::FilterMode::Nearest
+        );
+        assert_eq!(
+            terrain_mag_filter_from(Some("  NEAREST ")),
+            wgpu::FilterMode::Nearest
+        );
+        assert_eq!(terrain_mag_filter_from(Some("")), wgpu::FilterMode::Linear);
+        assert_eq!(
+            terrain_mag_filter_from(Some("bilinear")),
+            wgpu::FilterMode::Linear
+        );
     }
 
     #[test]
