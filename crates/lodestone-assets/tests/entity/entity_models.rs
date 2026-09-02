@@ -1,8 +1,8 @@
 //! Whole-corpus tests for the hand-ported entity model library.
 //!
 //! Entity models are vanilla Java code, not data, so each mesh here is
-//! transcribed by hand from the decompiled 26.2 client
-//! (`net/minecraft/client/model/...`). These tests assert the structural
+//! transcribed by hand from the decompiled 26.2 client's own model package.
+//! These tests assert the structural
 //! invariants that a transposed axis, a wrong texel offset, or a wrong sheet
 //! size would break, plus determinism. The *external authority* check (each
 //! model's sheet size against the real texture PNG in `client.jar`) lives in
