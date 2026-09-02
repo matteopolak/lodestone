@@ -1,4 +1,4 @@
-//! Version-free composition glue for issue #295: resolves per-biome carver
+//! Version-free composition glue for this change: resolves per-biome carver
 //! lists, per-biome ore-feature lists, and block-tag closures from a
 //! [`Resolver`], for [`crate::overworld::OverworldGenerator`] to consume when
 //! composing carvers/features into the served chunk. Holds no data of its
@@ -64,7 +64,7 @@ pub fn resolve_block_tag(
 ///
 /// Empty if [`Resolver::biome_document`] has no data for `biome` — a biome
 /// genuinely absent from the resolver's data carves nothing, matching the
-/// pre-#295 behaviour for a `Resolver` that never implemented this method.
+/// earlier behaviour for a `Resolver` that never implemented this method.
 #[must_use]
 pub fn build_biome_carvers(resolver: &dyn Resolver, biome: &str) -> Vec<CarverConfig> {
     let doc = resolver.biome_document(biome);
@@ -114,7 +114,7 @@ pub fn build_biome_ores(resolver: &dyn Resolver, biome: &str) -> Vec<PlacedOre> 
         let configured = resolver.configured_feature(cf_id);
         if configured.get("type").and_then(Value::as_str) != Some("minecraft:ore") {
             // Vegetation/other feature kinds in the same step are not yet
-            // ported (epic #404 Phase 3) — skipped, but the loop index above
+            // ported — skipped, but the loop index above
             // still advances, keeping every later ore's `index` correct.
             continue;
         }
@@ -128,7 +128,7 @@ pub fn build_biome_ores(resolver: &dyn Resolver, biome: &str) -> Vec<PlacedOre> 
 }
 
 /// Resolves one biome's `VEGETAL_DECORATION` decoration step
-/// (`features[`[`crate::feature::STEP_VEGETAL_DECORATION`]`]`, issue #406)
+/// (`features[`[`crate::feature::STEP_VEGETAL_DECORATION`]`]`, this change)
 /// into `(raw step index, resolved PlacedRef)` pairs — the same "preserve
 /// the raw position" convention [`build_biome_ores`] establishes, so
 /// [`crate::feature::vegetation::apply_vegetal_decoration_step`]'s
@@ -168,7 +168,7 @@ pub fn build_biome_vegetation(
     out
 }
 
-/// Issue #513: every decoration step the [`crate::feature::vegetation`] engine
+/// Every decoration step the [`crate::feature::vegetation`] engine
 /// drives, not just `VEGETAL_DECORATION`.
 ///
 /// Returns `(step, raw index within that step, resolved feature)` in **step
@@ -239,9 +239,10 @@ pub const DRIVEN_STEPS: &[i32] = &[
 ];
 
 /// Whether a biome document lists `minecraft:freeze_top_layer` in its
-/// `TOP_LAYER_MODIFICATION` step (issue #404's U2).
+/// `TOP_LAYER_MODIFICATION` step.
 ///
-/// In vanilla 26.2 **every** biome does — `BiomeDefaultFeatures.java:413` adds it
+/// In vanilla 26.2 **every** biome does — vanilla's own default per-biome
+/// feature registration adds it
 /// from a shared tail, so the step self-gates on temperature rather than on
 /// biome membership, and `docs/plans/worldgen-parity.md`'s census row 6i verified
 /// that across `assets/worldgen/biome/*.json`. This function exists anyway

@@ -18,7 +18,7 @@
 //! (stone) with one of the surface rule's result states, whose canonical form
 //! is supplied by the caller (version data, exactly like the block registry).
 //!
-//! # This seam speaks [`StateId`], not `String` (issue #501, U21)
+//! # This seam speaks [`StateId`], not `String`
 //!
 //! Every block-state that crosses this engine's boundary is an **interned
 //! [`StateId`]**, resolved once at construction. Before U21 the `pre` callback
@@ -55,7 +55,7 @@
 //! # Parity discipline
 //!
 //! The oracle (`scripts/worldgen-oracle/SurfaceOracle.java`) drives vanilla's
-//! *own* compiled `doFill` + `buildSurface` and dumps both columns; the test
+//! *own* compiled surface-building pass and dumps both columns; the test
 //! compares block-for-block over the whole chunk and names the divergent
 //! `x,y,z`. No Mojang source is transliterated — this is written from the
 //! documented algorithm and checked against the running server (plan §11).
@@ -186,7 +186,7 @@ pub type BlockCanon = HashMap<String, String>;
 /// a context).
 enum Cond {
     AbovePreliminarySurface,
-    /// `biome` — issue #405 made this a per-column runtime check
+    /// `biome` — this change made this a per-column runtime check
     /// (`ctx.biome` membership) rather than a build-time constant, since a
     /// generator run no longer has one fixed biome for its whole life. The
     /// list is the rule's raw `biome_is` set, exactly as written in JSON.
@@ -236,7 +236,7 @@ enum Rule {
     /// Runs `then` only when `cond` holds.
     Condition(Cond, Box<Rule>),
     /// Badlands/eroded_badlands/wooded_badlands' banded-terracotta rule
-    /// (`SurfaceRules.bandlands()` — `context.system::getBand`, issue #405's
+    /// (`SurfaceRules.bandlands()` — `context.system::getBand`, this change's
     /// carried-over gap, closed here). Unconditional and parameterless in
     /// vanilla's own DSL (`SurfaceRules.Bandlands` is a zero-field enum
     /// singleton), so the [`BandBlocks`] payload is built once at parse time
@@ -307,9 +307,8 @@ impl BandBlocks {
         // `y` ranges over this engine's own `min_y..min_y+gen_depth` (as low
         // as vanilla's `-64`) and `offset` is a noise sample scaled by 4, so
         // `y + offset + len` is always positive in practice — matching why
-        // vanilla adds `clayBands.length` here at all (`SurfaceSystem.java`'s
-        // own `% this.clayBands.length` line) rather than needing a true
-        // Euclidean modulo.
+        // vanilla adds the clay-bands length here at all rather than needing
+        // a true Euclidean modulo.
         let index = (y + offset + len) % len;
         // A `Copy` out of a pre-interned table. This line was
         // `self.clay_bands[index as usize].clone()`.
@@ -325,14 +324,14 @@ impl BandBlocks {
 /// The seven result blocks (`minecraft:terracotta` and six
 /// `minecraft:*_terracotta` dye variants) are hardcoded here rather than
 /// routed through [`BlockCanon`]/[`canonical_from_block_json`] because
-/// `SurfaceRules.bandlands()`'s JSON node carries no `result_state` at all
+/// vanilla's own `minecraft:bandlands` rule JSON node carries no `result_state` at all
 /// (it is `{"type": "minecraft:bandlands"}`, nothing else — vanilla's own
-/// `SurfaceRules.Bandlands` enum has zero fields), so
+/// rule type has zero fields), so
 /// [`identity_canon`](crate::surface::identity_canon)'s walk of the
 /// `surface_rule` tree never sees these block names and has no key for them.
 /// Confirmed property-less at 26.2 by `docs/worldgen-parity.md`'s own
 /// measured oracle output, which names them bare (`orange_terracotta`, not
-/// `orange_terracotta[...]`) in the pre-#295 badlands gap breakdown.
+/// `orange_terracotta[...]`) in the earlier badlands gap breakdown.
 fn generate_bands<R: RandomSource>(random: &mut R) -> Vec<String> {
     let mut clay_bands = vec!["minecraft:terracotta".to_string(); CLAY_BANDS_LEN];
 
@@ -403,7 +402,7 @@ struct Ctx<'a> {
     water_height: i32,
     stone_depth_above: i32,
     stone_depth_below: i32,
-    /// This column's biome id (issue #405) — consulted by [`Cond::BiomeIs`],
+    /// This column's biome id — consulted by [`Cond::BiomeIs`],
     /// which only ever *compares* it.
     ///
     /// **Borrowed, not owned** (U21). It was a `String`, and both producers had
@@ -445,7 +444,7 @@ impl SurfaceSystem {
     /// noises and derive random factories exactly as `RandomState` does.
     /// `canon` resolves result-state partial keys to full canonical strings.
     ///
-    /// Unlike before issue #405, this takes **no biome** — a generator run no
+    /// Unlike before this change, this takes **no biome** — a generator run no
     /// longer has one fixed biome for its whole life, so `biome`/
     /// `cold_enough_to_snow` moved from build-time constants here to
     /// per-column runtime inputs on [`build_surface`](Self::build_surface)/
@@ -576,7 +575,7 @@ impl SurfaceSystem {
     ///   this method applies that clamp itself, so `pre` is never asked.
     /// * `heightmap` yields `WORLD_SURFACE_WG` at local `(x, z)`.
     /// * `biome_at` yields `(biome id, cold_enough_to_snow)` at local `(x, z)`
-    ///   (issue #405) — called once per column, not per block, so a caller
+    ///   — called once per column, not per block, so a caller
     ///   whose biome varies at quart (not block) resolution can cheaply
     ///   return the same pair for every `(x, z)` in one 4×4 cell. The id is
     ///   **borrowed** from the caller's own biome table (U21).
@@ -739,7 +738,7 @@ impl SurfaceSystem {
     /// # Why this still returns an owned `String` (U21)
     ///
     /// The carver seam (`crate::carver`'s `top_material: &dyn Fn(..) ->
-    /// Option<String>`) is outside issue #501's scope and was left untouched,
+    /// Option<String>`) is outside this change's scope and was left untouched,
     /// so this method resolves its id back to a name at the boundary. That is
     /// **allocation-neutral, by construction**: the pre-U21 body allocated one
     /// `String` for the biome and one for the matched state, and this one

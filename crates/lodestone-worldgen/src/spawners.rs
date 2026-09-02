@@ -1,5 +1,5 @@
-//! Biome mob-spawn settings — `MobSpawnSettings`'s `spawners` and `spawn_costs`
-//! (issue #518, part 1 only).
+//! Biome mob-spawn settings — vanilla's per-biome `spawners` and `spawn_costs`
+//!.
 //!
 //! ## What it is
 //!
@@ -12,10 +12,10 @@
 //!
 //! ## This is deliberately only the parse
 //!
-//! Issue #518 has four parts and this is part 1. There is **no `SPAWN`
-//! generation step here**, and that is not an oversight — see the sizing comment
-//! on the issue. The three unported parts need things that live outside this
-//! crate: `SpawnPlacements.checkSpawnRules(…, CHUNK_GENERATION)`
+//! The SPAWN generation work has four parts and this is part 1. There is
+//! **no `SPAWN` generation step here**, and that is not an oversight: the
+//! three unported parts need things that live
+//! outside this crate: vanilla's own chunk-generation spawn-rule check
 //! (`crates/lodestone-entity/src/spawn.rs`), an entity slot on the served chunk,
 //! and entity persistence, which does not exist anywhere yet. A `SPAWN` stage
 //! built on top of this today would place mobs from a light level the server
@@ -46,28 +46,27 @@
 //!   [`TemperatureModifier::parse`](crate::feature::top_layer::TemperatureModifier::parse)
 //!   does: a silently-dropped category is a whole missing mob class, and it
 //!   would read as a subtle spawn-rate residual instead of a missing port.
-//! * The weights are **`WeightedList` weights, not a `SpawnerData` field.**
-//!   `MobSpawnSettings.SpawnerData` is `record SpawnerData(EntityType<?> type,
-//!   int minCount, int maxCount)`
-//!   (`MobSpawnSettings.java:108`) and the `weight` key belongs to the
-//!   `WeightedList.codec` wrapper one level out (`MobSpawnSettings.java:33`).
+//! * The weights are **list weights, not a field of the per-entry record.**
+//!   Vanilla's own spawner-entry record carries only the entity type and
+//!   min/max count, and the `weight` key belongs to the weighted-list
+//!   wrapper one level out.
 //!   [`SpawnerEntry`] flattens the two because nothing here needs the
 //!   distinction, but a port of vanilla's weighted pick must read
 //!   [`SpawnerEntry::weight`] as the *list* weight.
 //!
 //! ## Two vanilla behaviours deliberately not modelled, both named
 //!
-//! * **`SpawnerData`'s compact constructor rewrites a `MISC`-category entity
-//!   type to `EntityTypes.PIG`** (`MobSpawnSettings.java:123-125`). Reproducing
-//!   it needs an entity-type -> `MobCategory` table, which this crate does not
+//! * **Vanilla's own per-entry record construction rewrites a
+//!   `MISC`-category entity type to the pig entity type.** Reproducing
+//!   it needs an entity-type -> category table, which this crate does not
 //!   have and should not grow (it belongs with `lodestone-entity`). It is also
 //!   **unreachable from 26.2's own data**: measured across all 66 bundled biome
 //!   documents, the `misc` list is empty in every one of them (`ambient` 54,
 //!   `creature` 43, `monster` 63, `underground_water_creature` 53,
 //!   `water_ambient` 13, `water_creature` 11, `axolotls` 1, `misc` **0**). A
 //!   consumer that gains a category table should apply the rewrite there.
-//! * **`ExtraCodecs.POSITIVE_INT` and the `minCount <= maxCount` validation**
-//!   (`MobSpawnSettings.java:112-121`) are not enforced. These are embedded,
+//! * **Vanilla's own positive-integer and `minCount <= maxCount` validation**
+//!   is not enforced. These are embedded,
 //!   generated assets, so a violation is a build-time defect rather than
 //!   untrusted input, and the same convention every other parser in this crate
 //!   follows.
@@ -80,9 +79,9 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-/// `net.minecraft.world.entity.MobCategory` (`MobCategory.java:7-14`), in
-/// declaration order — which is also `MobCategory.CODEC`'s key order and the
-/// order `Util.makeEnumMap` iterates, so a consumer that must match vanilla's
+/// Vanilla's own mob-category enum, in
+/// declaration order — which is also its own encoded key order and the
+/// order its per-category iteration follows, so a consumer that must match vanilla's
 /// per-category iteration can rely on [`MobCategory::ALL`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MobCategory {
@@ -133,8 +132,8 @@ impl MobCategory {
         }
     }
 
-    /// `MobCategory`'s per-category concurrent-mob cap (the `max` field,
-    /// `MobCategory.java:17`). `MISC` is `-1`, i.e. uncapped — vanilla's own
+    /// Vanilla's own per-category concurrent-mob cap (the `max` field).
+    /// `MISC` is `-1`, i.e. uncapped — vanilla's own
     /// sentinel, kept rather than mapped to an `Option` so the value a consumer
     /// compares against is byte-for-byte the one in the jar.
     #[must_use]
@@ -181,8 +180,7 @@ pub struct SpawnerEntry {
     pub max_count: i32,
 }
 
-/// `MobSpawnSettings.MobSpawnCost` — `record MobSpawnCost(double energyBudget,
-/// double charge)` (`MobSpawnSettings.java:101`).
+/// Vanilla's own spawn-cost record, holding an energy budget and a charge.
 ///
 /// Field order in the record is `(energyBudget, charge)` while the JSON keys are
 /// alphabetical (`charge` first). Both are read by name, so the order is inert
@@ -414,7 +412,7 @@ mod tests {
         assert_eq!(parsed.spawn_cost("minecraft:ghast"), None);
     }
 
-    /// The `max` column, against `MobCategory.java`'s own constructor arguments.
+    /// The `max` column, against vanilla's own per-category constructor arguments.
     #[test]
     fn per_category_caps_match_the_jar() {
         assert_eq!(MobCategory::Monster.max_instances(), 70);
