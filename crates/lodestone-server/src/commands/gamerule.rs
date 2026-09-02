@@ -1,4 +1,4 @@
-//! `/gamerule` — one literal per rule, exactly as `GameRuleCommand` does.
+//! `/gamerule` — one literal per rule, exactly as the real command does.
 //!
 //! # Why one literal per rule rather than one string argument
 //!
@@ -9,27 +9,25 @@
 //!   integer with a declared range; `keep_inventory` takes a boolean. One
 //!   argument node cannot be both, so the type check would move into the
 //!   executor — after the tree already accepted the input, which is precisely
-//!   the layering vanilla avoids by giving each rule its own subtree with its
-//!   own `ArgumentType` (`GameRules.java`'s `registerBoolean`/`registerInteger`
-//!   each carry the `ArgumentType` the command node uses).
+//!   the layering the real command avoids by giving each rule its own
+//!   subtree with its own argument type, declared alongside the rule itself.
 //! * **Suggestions.** A rule name is a closed set. One literal per rule means
 //!   `CommandTree::suggest` offers exactly the valid names, for free, and a value
 //!   slot offers `true`/`false` where that is what it takes.
 //!
-//! # Two literals per rule, matching vanilla
+//! # Two literals per rule, matching the real command
 //!
-//! `GameRuleCommand.register` (`.cache/mc/26.2/src`) visits each rule and calls
-//! `buildRuleArguments` **twice** — once against `Commands.literal(gameRule.id())`
-//! (the bare name, e.g. `keep_inventory`) and once against
-//! `Commands.literal(gameRule.getIdentifier().toString())` (the namespaced form,
-//! `minecraft:keep_inventory`) — each an independently-built, structurally
-//! identical subtree hung off the same `/gamerule` root. Neither call site reads
-//! the literal's own text back: `queryRule`/`setRule` both report through
-//! `gameRule.id()`, which is always the bare name regardless of which literal a
-//! player typed. [`register`] below mirrors that shape exactly:
-//! [`register_rule_literal`] is called once per name, and the *set/query*
-//! closures it builds always capture `spec.name` (never the literal string),
-//! matching vanilla's own indifference to which spelling triggered them.
+//! The real registration walks each rule and builds its argument subtree
+//! **twice** — once against the bare name (e.g. `keep_inventory`) and once
+//! against the namespaced form (`minecraft:keep_inventory`) — each an
+//! independently-built, structurally identical subtree hung off the same
+//! `/gamerule` root. Neither call site reads the literal's own text back:
+//! the query/set handlers both report through the rule's bare id, regardless
+//! of which literal a player typed. [`register`] below mirrors that shape
+//! exactly: [`register_rule_literal`] is called once per name, and the
+//! *set/query* closures it builds always capture `spec.name` (never the
+//! literal string), matching the real command's own indifference to which
+//! spelling triggered them.
 //!
 //! `crates/protocol/v770/tests/builtin_command_parity.rs`'s
 //! `gamerule_has_every_rule_subtree_right_and_every_literal_too` is the parity
@@ -42,7 +40,7 @@ use lodestone_command::{BoolArgument, IntegerArgument};
 use super::registrar::Registrar;
 use crate::game_rules::{GAME_RULES, GameRuleValue};
 
-/// Vanilla gates `/gamerule` at `Commands.LEVEL_GAMEMASTERS` (2).
+/// The real rule gates `/gamerule` at the game-masters permission level (2).
 const GAMERULE_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {
@@ -65,10 +63,10 @@ pub(super) fn register(registrar: &mut Registrar) {
 
 /// One rule's full subtree (query + `value` argument), hung off `literal_name`
 /// — either `spec.name` or its `minecraft:`-prefixed alias. Every executor
-/// closure built here captures `spec.name`, **not** `literal_name`: vanilla's
-/// `queryRule`/`setRule` report through `gameRule.id()` regardless of which of
-/// the two literals a player actually typed, and `GameRules::get_rule`/
-/// `set_rule` are keyed on the bare name.
+/// closure built here captures `spec.name`, **not** `literal_name`: the real
+/// query/set handlers report through the rule's own bare id regardless of
+/// which of the two literals a player actually typed, and
+/// `GameRules::get_rule`/`set_rule` are keyed on the bare name.
 fn register_rule_literal(
     registrar: &mut Registrar,
     gamerule: lodestone_command::NodeId,

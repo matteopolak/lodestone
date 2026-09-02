@@ -1,16 +1,16 @@
-//! `/gamemode`, from `GameModeCommand.java` — not from memory.
+//! `/gamemode` — not from memory.
 //!
-//! # The tree, as vanilla declares it
+//! # The tree, as the real command declares it
 //!
 //! ```text
-//! literal("gamemode").requires(COMMANDS_GAMEMASTER)
-//!   └─ argument("gamemode", GameModeArgument.gameMode())   [executable: self]
-//!        └─ argument("target", EntityArgument.players())    [executable]
+//! literal("gamemode").requires(game-masters permission)
+//!   └─ argument("gamemode", a game mode)   [executable: self]
+//!        └─ argument("target", players only)    [executable]
 //! ```
 //!
 //! Confirmed against the captured 26.2 tree
 //! (`crates/protocol/v770/tests/fixtures/command_tree_creative.hex`, nodes 23 /
-//! 148 / 484): the root literal is non-executable and `FLAG_RESTRICTED`; the mode
+//! 148 / 484): the root literal is non-executable and restricted; the mode
 //! node is `minecraft:gamemode` (registry id 42, no payload) and executable; the
 //! target node is `minecraft:entity` with `single: false, players_only: true` and
 //! executable. **One parser node, not four literals** — the four-literal shape is
@@ -20,7 +20,7 @@
 //!
 //! The optional trailing `<target>` is *two executable nodes*, not one node with
 //! an optional parameter. Both attach to one body, and the shallow one supplies
-//! the default (`Collections.singleton(getPlayerOrException())`) explicitly. The
+//! the default (the caller, as a one-element set) explicitly. The
 //! wire tree must show both nodes executable, which is exactly what the fixture
 //! shows and what the parity gate asserts — an `Option`-shaped design would
 //! transmit one.
@@ -33,8 +33,8 @@ use super::registrar::{Ctx, Registrar};
 use super::source::PlayerCandidate;
 use super::CommandResult;
 
-/// `GameModeCommand.PERMISSION_CHECK` is `Permissions.COMMANDS_GAMEMASTER`,
-/// which is level 2 in 26.2's numeric model (`Commands.LEVEL_GAMEMASTERS`).
+/// The real permission check for this command is the game-masters
+/// permission, which is level 2 in 26.2's numeric model.
 const GAMEMODE_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {
@@ -75,9 +75,9 @@ fn self_selector() -> lodestone_command_mc::EntitySelector {
     }
 }
 
-/// `GameModeCommand.setMode` + `logGamemodeChange`.
+/// The real set-mode-and-log-change rule.
 ///
-/// The feedback split is vanilla's: changing your *own* mode says
+/// The feedback split is the real rule's: changing your *own* mode says
 /// `commands.gamemode.success.self`, changing someone else's says
 /// `…success.other` to the caller **and** `gameMode.changed` to the target — the
 /// second of which is the reason a directed effect queue exists at all.
@@ -89,12 +89,12 @@ fn set_mode(ctx: &mut Ctx<'_>, mode: GameMode, targets: &[PlayerCandidate]) -> C
         if Some(target.uuid) == caller {
             ctx.send_success(format!("Set own game mode to {}", mode_name(mode)));
         } else {
-            // `sendCommandFeedback` gates only the *target*'s notification, not
-            // the caller's confirmation (`logGamemodeChange`'s own `if`).
+            // The real command-feedback game rule gates only the *target*'s
+            // notification, not the caller's confirmation.
             //
             // Read by name rather than through a typed accessor because
             // `crate::game_rules` has none for this rule; `unwrap_or(true)`
-            // matches the rule's vanilla default (`GameRules.java`).
+            // matches the rule's real default.
             let feedback_on = ctx
                 .world
                 .rules
