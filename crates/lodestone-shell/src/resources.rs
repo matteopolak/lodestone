@@ -229,7 +229,8 @@ impl BlockResources {
         // `lang/en_us.json` (a handful of custom keys for its own items or
         // fonts) must not blank out the ~7,000 vanilla keys underneath it.
         // See `Language::merged_from_stack`'s own doc for the vanilla record
-        // this reproduces (`ClientLanguage.loadFrom`/`getResourceStack`) and
+        // this reproduces (vanilla's own client-language load and its
+        // resource-stack lookup) and
         // the symptom a single-winner read produced: a raw translation key
         // like `container.crafting` reaching the screen instead of the word.
         // A missing file on every layer just disables translation rather
@@ -323,8 +324,8 @@ pub(crate) fn open_vanilla_pack_stack() -> Option<ResourceManager> {
 
 /// Lays the currently selected user packs on top of the built-in pack.
 ///
-/// `builtin` is the bottom of the stack — vanilla's own `Pack.Position.BOTTOM`
-/// fixed-position built-in pack, which is why the
+/// `builtin` is the bottom of the stack — vanilla's own fixed-bottom-position
+/// built-in pack, which is why the
 /// Resource Packs screen can never move or remove it.
 fn build_pack_stack(builtin: Box<dyn ResourceSource>) -> ResourceManager {
     let mut sources: Vec<Box<dyn ResourceSource>> = vec![builtin];
@@ -378,12 +379,13 @@ pub enum PackKind {
 #[derive(Debug, Clone)]
 pub struct DiscoveredPack {
     /// Vanilla's own pack id: `"file/<filename>"`
-    /// (`FolderRepositorySource.createDiscoveredFilePackInfo`). This is what is
+    /// (vanilla's own folder-repository-source discovered-file-pack-info
+    /// builder). This is what is
     /// persisted in `resource_packs.json`, so renaming the file on disk
     /// deselects the pack — exactly as it does in vanilla.
     pub id: String,
     /// The display title: the bare filename, as
-    /// `Component.literal(nameFromPath(content))`.
+    /// a literal component built from the path.
     pub title: String,
     /// The `pack.mcmeta` description, flattened to plain text.
     pub description: String,
@@ -404,7 +406,7 @@ pub struct DiscoveredPack {
 /// Fail-open at every level: an unreadable folder yields an empty list, and an
 /// entry that will not open (a corrupt zip, a directory with no `pack.mcmeta`)
 /// is skipped with a warning rather than failing the scan. That mirrors
-/// `FolderRepositorySource.loadPacks`, which logs and continues.
+/// vanilla's own folder-repository-source pack loading, which logs and continues.
 #[must_use]
 pub fn scan_resource_packs() -> Vec<DiscoveredPack> {
     scan_resource_packs_in(&resource_packs_dir())
@@ -442,7 +444,7 @@ pub fn scan_resource_packs_in(dir: &Path) -> Vec<DiscoveredPack> {
         };
         // A directory with no `pack.mcmeta` is not a pack — it is a stray
         // folder. A zip without one is a stray archive. Vanilla's own
-        // `Pack.readMetaAndCreate` returns null in both cases and the entry is
+        // read-meta-and-create returns null in both cases and the entry is
         // dropped, which is what the `?` here reproduces.
         let Some(meta_bytes) = source.read("pack.mcmeta") else {
             tracing::debug!(target: "assets", "{}: no pack.mcmeta, not a resource pack", path.display());
@@ -834,7 +836,7 @@ fn load_persisted_selection() -> Vec<String> {
 #[must_use]
 fn selected_pack_sources() -> Vec<Box<dyn ResourceSource>> {
     // The live server pack, if any, always goes first — highest priority,
-    // matching vanilla's own `Pack.Position.TOP` for a downloaded pack. It
+    // matching vanilla's own fixed-top-position for a downloaded pack. It
     // is never part of `selected`/`scan_resource_packs`: a server pack does
     // not live in the packs folder and is not player-toggleable from the
     // local Resource Packs screen, the same way vanilla's own
@@ -953,7 +955,7 @@ pub fn load_entity_variant_textures()
     // listing. They are not a variant axis — `player_wide`/`player_slim` carry a
     // `Fixed` texture, so `entity_variant_sheet_dirs` does not name their
     // directories — but they are consumed through this same by-reference map: a
-    // player with no declared skin resolves `DefaultPlayerSkin.get(uuid)` and the
+    // player with no declared skin resolves vanilla's own default-player-skin lookup and the
     // draw binds that sheet by name. Without these entries every such player falls
     // through to the model's own sheet and the whole hash pick collapses onto Steve
     // and Alex.
@@ -1112,8 +1114,8 @@ pub fn load_block_entity_textures()
 /// The recipe book's **panel background**, which is the one piece of its art
 /// vanilla does not put through the sprite atlas.
 ///
-/// `RecipeBookComponent.java` declares it as a raw texture path
-/// (`RECIPE_BOOK_LOCATION = "textures/gui/recipe_book.png"`) and `:305` blits a
+/// Vanilla's own recipe-book component declares it as a raw texture path
+/// (`RECIPE_BOOK_LOCATION = "textures/gui/recipe_book.png"`) and blits a
 /// `147×166` window at `(1, 1)` out of the `256×256` sheet. Everything else the
 /// book draws — the toggle button, tabs, filter, page arrows and recipe slots —
 /// lives under `gui/sprites/recipe_book/**` and so is already in
@@ -1850,8 +1852,8 @@ fn recipe_entry_id(path: &str, kind: &str) -> Option<lodestone_model::Identifier
 
 /// Merges **every pack layer's own copy** of an item-tag document at `path`
 /// into one synthesized `{"values": [...]}` document, the shape
-/// `TagLoader.load` requires: it iterates
-/// `lister.listMatchingResourceStacks(resourceManager)` — every layer that
+/// vanilla's own tag-loader load requires: it iterates
+/// its own matching-resource-stacks lister — every layer that
 /// carries the path, lowest priority first — accumulating each layer's
 /// `values` and honouring its own `"replace"` flag (`true` resets the
 /// accumulated list before appending that layer's own entries; the default,
@@ -1862,8 +1864,8 @@ fn recipe_entry_id(path: &str, kind: &str) -> Option<lodestone_model::Identifier
 /// vanilla plank** from the tag instead of adding to it.
 ///
 /// A layer whose bytes are not valid UTF-8/JSON, or whose document has no
-/// `values` array, is skipped — matching `TagLoader.load`'s own
-/// `catch (Exception e) { LOGGER.error(...); }` per-entry tolerance — so one
+/// `values` array, is skipped — matching vanilla's own tag-loader load's own
+/// per-entry error-and-continue tolerance — so one
 /// malformed layer never blanks out the layers around it. Returns `None`
 /// only when no layer at all could be read.
 fn merged_tag_json(manager: &ResourceManager, path: &str) -> Option<String> {
@@ -2032,7 +2034,7 @@ mod tests {
 
     /// `"replace": true` on the higher-priority layer must reset the
     /// accumulated list rather than append to it — the other half of
-    /// `TagFile.replace()`'s contract, and the case a pure-append
+    /// vanilla's own tag-file replace contract, and the case a pure-append
     /// implementation would get backwards.
     #[test]
     fn merged_tag_json_honours_a_replacing_overlay() {
@@ -2186,7 +2188,7 @@ mod tests {
         );
 
         // It must be **first** (highest priority) even when a local
-        // selection is also present — vanilla's own `Pack.Position.TOP` for
+        // selection is also present — vanilla's own fixed-top-position for
         // a downloaded pack.
         set_selected_packs(vec!["some-local-pack".to_string()]);
         let sources = selected_pack_sources();
