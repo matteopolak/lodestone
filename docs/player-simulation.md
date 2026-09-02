@@ -37,7 +37,7 @@ real protection is that depletion never reaches zero food there.
 
 ### Drowning
 
-`PlayerVitals::tick(eye_in_water)` mirrors `Entity.baseTick`'s water-breath
+`PlayerVitals::tick(eye_in_water)` mirrors vanilla's own base per-tick entity update's water-breath
 block: `-1` air/tick submerged, `+4`/tick refill capped at
 `MAX_AIR_SUPPLY = 300`; at `<= -20` air resets to `0` and deals `2.0`
 (`DROWN_DAMAGE`) straight to health, no armour model. Fully submerged, a
