@@ -11,10 +11,10 @@
 //!
 //! An external integration test rather than a unit test inside
 //! `lodestone-server::server`, and that's load-bearing, not a style choice:
-//! `lodestone-v770` has a *normal* dependency on `lodestone-server` for the
+//! `lodestone-v26-2` has a *normal* dependency on `lodestone-server` for the
 //! `ServerProtocol` trait, so adding it as a *dev*-dependency for a unit test
 //! would make this crate's own lib-test compilation and the copy
-//! `lodestone-v770` links against two different instantiations of the same
+//! `lodestone-v26-2` links against two different instantiations of the same
 //! trait (measured: `V770ServerProtocol: ServerProtocol` reported
 //! unimplemented against the crate's own trait). An external test binary
 //! depends on this crate exactly once, normally, so the self-reference never

@@ -129,7 +129,7 @@ pub(crate) fn is_water(name: &str) -> bool {
 /// with air for a block name the generated table does not carry.
 ///
 /// The **single** definition of that fallback on this side of the seam, and
-/// deliberately the same function `lodestone-v770`'s `resolve_state_id` is now a
+/// deliberately the same function `lodestone-v26-2`'s `resolve_state_id` is now a
 /// one-line wrapper around — the reason a palette resolved here and a state
 /// string resolved at the encoder cannot disagree about what a bare block name
 /// means. Two test helpers had hand-duplicated an *older* version of that
@@ -198,7 +198,7 @@ pub struct ChunkColumn {
     ///
     /// 26.2 is the one canonical internal version (#343) and `lodestone-data` is
     /// deliberately outside the protocol-family feature seam, so holding a
-    /// numeric id here is not a version-seam crossing: no `lodestone-v770`
+    /// numeric id here is not a version-seam crossing: no `lodestone-v26-2`
     /// dependency is implied, and `cargo check -p lodestone-shell
     /// --no-default-features` still passes.
     palette_state_ids: Vec<u32>,

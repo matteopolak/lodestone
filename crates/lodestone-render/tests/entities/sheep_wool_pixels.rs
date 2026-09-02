@@ -508,7 +508,7 @@ fn woolly_sheep_differs_from_sheared_and_the_dye_tint_reaches_the_shader() {
 /// for a sheep spawn that carries no wool byte on the wire at all — vanilla's
 /// own accessor default (`Sheep.defineSynchedData`:
 /// `entityData.define(DATA_WOOL_ID, (byte)0)`). This crate cannot see that
-/// decode seam (`lodestone-render` depends on neither `lodestone-v770` nor
+/// decode seam (`lodestone-render` depends on neither `lodestone-v26-2` nor
 /// the shell's snapshot fold), so what belongs here is the other half of the
 /// chain the fix depends on: that colour ordinal `0` is a real, visible wool
 /// colour at the asset/render layer, not a sentinel for "nothing to draw".

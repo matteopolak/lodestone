@@ -144,7 +144,7 @@
 //! (`biome_state_at`, no default — see that method's own doc for why a
 //! defaulted version would be exactly the island-generating wrapper shape
 //! this crate has already been burned by), forwarded through all ~63
-//! implementors across `lodestone-server`, `lodestone-v770`'s and
+//! implementors across `lodestone-server`, `lodestone-v26-2`'s and
 //! `lodestone-event-logger`'s own test doubles. [`lodestone_command_mc::BiomeArg`]
 //! is a bare id, no tag support — the same v1 reduction `BlockArg` already
 //! makes — validated against a new hand-listed 66-entry census in

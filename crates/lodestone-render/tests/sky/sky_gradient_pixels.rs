@@ -1193,7 +1193,7 @@ fn control_disabled_void_fog_leaves_the_world_bottom_bright() {
 /// These are **inputs**, never expected outputs, exactly like [`DAY_SKY`]: this
 /// gate asks whether a distinct `sky_color` reaches distinct disc pixels at the
 /// right value, and the value's *authority* is a different gate.
-/// `lodestone-v770`'s `registry_data`/`live_registry_data` tests are what check
+/// `lodestone-v26-2`'s `registry_data`/`live_registry_data` tests are what check
 /// our decode against Mojang's own
 /// `client-src/data/minecraft/worldgen/biome/*.json`, parsed at test time.
 ///

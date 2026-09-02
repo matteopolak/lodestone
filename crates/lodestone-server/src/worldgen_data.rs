@@ -15,7 +15,7 @@
 //! fit — not as a style preference, as a hard `cargo` cycle:
 //! `crates/protocol/v770/Cargo.toml` already depends on `lodestone-server`
 //! (`V770ServerProtocol` implements [`crate::protocol::ServerProtocol`]), so
-//! `lodestone-server` depending back on `lodestone-v770` for its worldgen
+//! `lodestone-server` depending back on `lodestone-v26-2` for its worldgen
 //! data would be the reverse edge of an existing dependency — cargo refuses
 //! a cycle outright, regardless of feature-gating it as optional. This data
 //! is the same category of thing `lodestone-data`'s own extraction already

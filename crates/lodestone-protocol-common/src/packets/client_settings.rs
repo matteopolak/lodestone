@@ -14,11 +14,14 @@
 //! to a single flags byte.
 //!
 //! [`Settings`] and [`ResourcePackReceive`] are shared only between v1-9 and
-//! v1-14 (declared `#[mc(protocols = "340..=754")]`): 1.8's `Settings`
+//! v1-14 (declared `#[mc(protocols = "110..=754")]`): 1.8's `Settings`
 //! (called `Settings` there too, but a different shape) has no `main_hand`
-//! and a signed-byte `chat_flags` rather than a varint, and its
-//! `resource_pack_receive` carries a leading pack-hash string this era's
-//! does not.
+//! and a signed-byte `chat_flags` rather than a varint, and 1.8's
+//! `resource_pack_receive` has a different result vocabulary. The lower
+//! bound is 110 (not 340) because v1-9 is an era crate serving 110, 210, 316
+//! and 340; [`Settings`] is byte-identical across all four, while
+//! [`ResourcePackReceive`] lost its leading pack-hash string in 1.10 and
+//! carries that as an `until = 110` field rather than a second struct.
 //!
 //! Note: `packets::game::ClientSettings` (a *different* struct, also
 //! declaring `#[mc(name = "minecraft:settings", ...)]`) is identical across
@@ -74,7 +77,7 @@ pub struct PlayerAbilities {
 /// flags, bool chat colors, unsigned-byte displayed skin parts, varint main
 /// hand.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:settings", state = Play, bound = Server, protocols = "340..=754")]
+#[mc(name = "minecraft:settings", state = Play, bound = Server, protocols = "110..=754")]
 pub struct Settings {
     /// Client locale, such as `en_us` (at most 16 characters).
     #[mc(max = 16)]
@@ -94,18 +97,24 @@ pub struct Settings {
 }
 
 /// Serverbound `resource_pack_receive` -- the client reports the outcome of
-/// a server-pushed resource pack. Shared only 340..=754 -- see the module
+/// a server-pushed resource pack. Shared only 110..=754 -- see the module
 /// docs.
 ///
-/// Wire layout: varint result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+/// Wire layout at 110: string hash, then varint result. From 210 on the
+/// server matches the report against the pack it pushed rather than against
+/// an echoed hash, so only the result remains.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(
     name = "minecraft:resource_pack_receive",
     state = Play,
     bound = Server,
-    protocols = "340..=754"
+    protocols = "110..=754"
 )]
 pub struct ResourcePackReceive {
+    /// Echo of the pushed pack's hash. Protocol 110 only; empty and unsent
+    /// from 210 on.
+    #[mc(until = 110, max = 40)]
+    pub hash: String,
     /// Outcome: `0` loaded, `1` declined, `2` failed download, `3` accepted.
     #[mc(varint)]
     pub result: i32,

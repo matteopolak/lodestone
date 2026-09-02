@@ -1191,7 +1191,7 @@ fn taming_publishes_hearts_on_success_and_smoke_on_failure() {
 ///
 /// Index 18 is a `BYTE` for `TamableAnimal.DATA_FLAGS_ID`, `AbstractHorse.DATA_ID_FLAGS`,
 /// `Sheep.DATA_WOOL_ID` and `Shulker.DATA_COLOR_ID` (checked against the committed
-/// jar dump by `lodestone-v770`'s own `index_eighteen_tests`), and the tame bit is
+/// jar dump by `lodestone-v26-2`'s own `index_eighteen_tests`), and the tame bit is
 /// `0x04` on a tamable against `FLAG_TAME = 2` on a horse. One shared "tamed"
 /// variant would compile, encode, and put an **unnamed** bit on whichever species it
 /// was not written for — so that animal reads as untamed with a well-formed packet on
