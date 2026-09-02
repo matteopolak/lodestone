@@ -490,7 +490,7 @@ registration).
 Goals (from its own goal registration) — `4 ZombieAttackTurtleEggGoal(1.0, 3)`, `8 LookAtPlayerGoal(Player, 8.0F)`,
 `8 RandomLookAroundGoal`, `2 SpearUseGoal(1.0, 1.0, 10.0F, 2.0F)`, `3 ZombieAttackGoal(1.0, false)`,
 `6 MoveThroughVillageGoal(1.0, true, 4)`, `7 WaterAvoidingRandomStrollGoal(1.0)`. Targets, same
-registration — `1 HurtByTargetGoal.setAlertOthers(ZombifiedPiglin)`, `2 NearestAttackableTargetGoal(Player, true)`,
+registration — `1 HurtByTargetGoal(alert-others: ZombifiedPiglin)`, `2 NearestAttackableTargetGoal(Player, true)`,
 `3 (AbstractVillager, false)`, `3 (IronGolem, true)`, `5 (Turtle, 10, …)`.
 
 **Creeper**: swell threshold 30 ticks, explosion radius 3 (both plain fields),
@@ -540,7 +540,7 @@ doc comment) uses 3/15; this table previously quoted the unhalved literals.
 
 **Zombified piglin**: movement speed 0.23 (from its own attribute registration);
 anger duration is a random 20-39 seconds (a plain field); alert-others vertical range is 10 blocks (a plain field);
-its alert-others hook is called from its own goal registration; `1 HurtByTargetGoal.setAlertOthers()` (also from its own goal registration).
+its alert-others hook is called from its own goal registration; `1 HurtByTargetGoal(alert-others)` (also from its own goal registration).
 
 **Bee**: anger duration is a random 20-39 seconds (a plain field);
 goals (from its own goal registration) — `0 BeeAttackGoal(1.4F, true)`, `2 BreedGoal(1.0)`,
@@ -551,7 +551,7 @@ gates death; roll condition `distanceToSqr < 4.0`.
 (from its own attribute registration); tamed max health 40.0, untamed 8.0 (also from attribute
 registration). Goals (from its own goal registration); targets,
 same registration — `1 OwnerHurtByTargetGoal`, `2 OwnerHurtTargetGoal`,
-`3 HurtByTargetGoal.setAlertOthers()`, `6 FollowOwnerGoal(1.0, 10.0F, 2.0F)` at goal priority 6.
+`3 HurtByTargetGoal(alert-others)`, `6 FollowOwnerGoal(1.0, 10.0F, 2.0F)` at goal priority 6.
 
 **Breeding**: age gained after a successful breed is 6000 ticks (a plain field, on the shared
 animal-breeding base); love mode lasts 600 ticks from breed-start; love decrements with a particle

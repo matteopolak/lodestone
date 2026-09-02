@@ -57,7 +57,7 @@ real design and implementation work.
 **#207 closed.** `SimMob` now carries real health, `Defenses` and a `HurtCooldown`,
 seeded from `lodestone_entity::attribute::default_attributes` (real per-type data —
 a spawned zombie starts at the actual `max_health` 20 / `attack_damage` 3 / `armor` 2
-from `Zombie.createAttributes()`, not an invented number). `NavigatingMob::attack`
+from vanilla's own per-species attribute registration, not an invented number). `NavigatingMob::attack`
 still only records the *intent* to strike (it has no entity identity, only a `Vec3`),
 so `SimMob::attack_target_id` was added alongside the existing `Vec3` target and
 `MobSim::tick` resolves each tick's connected attacks into a real

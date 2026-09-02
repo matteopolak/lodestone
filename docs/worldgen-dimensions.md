@@ -20,7 +20,8 @@ which switches vanilla's **entire** noise stack to the legacy LCG family rather 
 per-dimension constructor argument (`density::Builder::with_algorithm`) rather than a generic
 parameter threaded through every stage; the Overworld's own output is unchanged and byte-identical
 across the change. Both dimensions also set `aquifers_enabled: false`, which is a bypass rather than
-new logic — vanilla's disabled aquifer is just `density > 0 ? solid : globalFluid.at(y)` — and both
+new logic — vanilla's disabled aquifer is just: solid where `density > 0`, else the global fluid
+pick at that height — and both
 their noise settings feed a cell geometry derived from `size_horizontal`/`size_vertical` rather than
 the Overworld's hardcoded 4-wide/8-tall assumption (the End's `2, 1` gives an **8-wide/4-tall** cell,
 the transpose of the Overworld/Nether's `1, 2`).
