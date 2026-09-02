@@ -1,46 +1,44 @@
-//! The World Creation screen — vanilla's `CreateWorldScreen`,
+//! The World Creation screen — vanilla's own world-creation screen,
 //! reached from [`super::world_select`]'s "Create New World" button, which
-//! issue #397 deliberately left present-and-disabled for this issue to build.
+//! was deliberately left present-and-disabled until this screen was built.
 //!
-//! ## Tabs (issue #564/#567)
+//! ## Tabs
 //!
 //! This screen used to be one flat hand-placed list, with a module doc arguing
-//! at length that vanilla's three `GridLayoutTab`s (`GameTab`/`WorldTab`/
-//! `MoreTab`, `CreateWorldScreen.java`) were not worth building to hold a
-//! handful of fields that get real support. Issue #567 is the owner saying
-//! otherwise: *"the UI is wrong — we need it to match the real vanilla UI for
-//! it (which has tabs, etc.)"* — and by the time that issue was filed, #564 had
-//! already landed the tab widget itself for Statistics (`widget.rs`'s
+//! at length that vanilla's three grid-layout tabs (Game/World/More) were not
+//! worth building to hold a handful of fields that get real support. The
+//! owner disagreed: the UI needed to match real vanilla's tabbed layout —
+//! and by then the tab widget itself had already landed for Statistics
+//! (`widget.rs`'s
 //! `TAB_SPRITES`/`tab_underline_colour`/`tab_label_dy`, `layout.rs`'s
 //! `tab_bar_geometry`/`tab_bar_row_rect`, `render/frame.rs`'s `MenuRow::tab` +
 //! [`super::render::TabEntryView`], `render/draw.rs`'s `draw_tab`). This screen
-//! is that widget's **second** consumer, exactly as #564 asked for: one widget,
-//! two screens, rather than two bespoke tab strips that could drift apart.
+//! is that widget's **second** consumer: one widget, two screens, rather than
+//! two bespoke tab strips that could drift apart.
 //!
 //! Vanilla's three tabs, and where each field landed:
 //!
 //! - **Game** (`createWorld.tab.game.title`): [`NAME_FIELD`], [`GAME_MODE_ROW`],
-//!   [`DIFFICULTY_ROW`], [`ALLOW_CHEATS_ROW`] — vanilla's `GameTab` also has an
-//!   Experiments button here, but only `if (!SharedConstants.getCurrentVersion().stable())`
-//!   (`CreateWorldScreen.java`'s `GameTab` constructor) — absent on a stable
-//!   release, which is what this client models, so there is nothing missing
+//!   [`DIFFICULTY_ROW`], [`ALLOW_CHEATS_ROW`] — vanilla's own Game tab also has an
+//!   Experiments button here, but only on an unstable version — absent on a
+//!   stable release, which is what this client models, so there is nothing missing
 //!   here even though [`EXPERIMENTS_ROW`] now exists (it lives on More,
 //!   below, matching vanilla's own always-present copy of the button).
 //! - **World** (`createWorld.tab.world.title`): [`SEED_FIELD`],
 //!   [`WORLD_TYPE_ROW`], [`STRUCTURES_ROW`], [`BONUS_CHEST_ROW`] — vanilla's
-//!   `WorldTab` also has a "Customize Type" button this client has no
+//!   own World tab also has a "Customize Type" button this client has no
 //!   preset-editor screen for, left absent the same way. [`WORLD_TYPE_ROW`]
-//!   itself (issue #519's UI half) is real — cycles all seven bundled
-//!   presets and collects the choice — and since issue #592's item 1,
+//!   itself is real — cycles all seven bundled
+//!   presets and collects the choice — and
 //!   selecting `Normal`/`LargeBiomes`/`Amplified` reaches the served world;
 //!   the other four remain decorative. See [`WorldTypePreset`]'s own doc for
 //!   exactly which is which and why.
-//! - **More** (`createWorld.tab.more.title`): vanilla's `MoreTab` is three
-//!   buttons, in this order — Game Rules, Experiments, Data Packs
-//!   (`MoreTab`'s constructor). All three now have real models
+//! - **More** (`createWorld.tab.more.title`): vanilla's own More tab is three
+//!   buttons, in this order — Game Rules, Experiments, Data Packs. All three
+//!   now have real models
 //!   ([`GAME_RULES_ROW`]/[`GameRulesEditor`] and
-//!   [`DATA_PACKS_ROW`]/[`DataPacksEditor`], both issue #592;
-//!   [`EXPERIMENTS_ROW`]/[`ExperimentsEditor`], issue #693).
+//!   [`DATA_PACKS_ROW`]/[`DataPacksEditor`], and
+//!   [`EXPERIMENTS_ROW`]/[`ExperimentsEditor`]).
 //!   [`ExperimentsEditor`]'s collected choice reaches disk now too:
 //!   [`WorldCreationConfig::experiments`] is written into the freshly created
 //!   world's `level.dat` as vanilla's own `enabled_features` field
@@ -51,13 +49,12 @@
 //!   own doc). What is still unbuilt is the *engine* half: nothing reads
 //!   `enabled_features` back to gate the trade-rebalance/redstone/minecart
 //!   behaviours themselves, matching vanilla's own scope for a stable-channel
-//!   client (`GameTab`'s copy of this button, per its own note above, is
+//!   client (the Game tab's copy of this button, per its own note above, is
 //!   simply absent — there is no in-game surface for those behaviours to
 //!   reach yet either). The tab itself is real regardless: selectable, its
 //!   own real [`TabEntryView`](super::render::TabEntryView), never disabled
 //!   for having an unbuilt feature under it — unlike Statistics's Items/Mobs,
-//!   which vanilla disables **because the underlying list is empty**
-//!   (`StatsScreen.setTabActiveStateAndTooltip`). Nothing here is
+//!   which vanilla disables **because the underlying list is empty**. Nothing here is
 //!   data-driven-empty; disabling the tab for it would misrepresent that as
 //!   vanilla's own behaviour.
 //! - [`ONLINE_MODE_ROW`] has no vanilla tab at all — see its own doc on why it
@@ -66,9 +63,8 @@
 //!   kind to World's own "how does this world generate/behave" fields than to
 //!   Game's account-permission fields.
 //!
-//! **Not ported: per-tab keyboard focus order.** Vanilla's `MenuTabBar` is
-//! itself focusable, in tab-order group 0 ahead of the content
-//! (`CreateWorldScreen`'s own `GROUP_BOTTOM = 1` on the footer), so a keyboard
+//! **Not ported: per-tab keyboard focus order.** Vanilla's own tab-bar widget is
+//! itself focusable, in tab-order group 0 ahead of the content, so a keyboard
 //! player can Tab onto the bar and use Left/Right to switch tabs — the same
 //! divergence `stats.rs`'s own focus test already documents for Statistics's
 //! bar. This screen's tab bar is fully **clickable** (all three tabs switch
@@ -98,7 +94,7 @@
 //!   [`super::world_select`]'s search field and [`super::nav::EditForm`]
 //!   already use), cycling Game Mode/Difficulty and toggling Structures/
 //!   Bonus Chest/Allow Cheats (real, in-memory [`WorldCreationConfig`]
-//!   state), the Hardcore→Hard difficulty lock (`GameTab.java`'s own
+//!   state), the Hardcore→Hard difficulty lock (vanilla's own Game-tab
 //!   rule: selecting Hardcore forces and disables the difficulty cycle), and
 //!   switching between Game/World/More by clicking the tab bar.
 //! - **Wired since — the seed.** This section used to say "nothing
@@ -107,12 +103,12 @@
 //!   [`CreateWorldOutcome::Create`] into `MenuAction::Singleplayer(Some(config))`,
 //!   and `app.rs`'s `begin_singleplayer` resolves `config.seed` through
 //!   `resolve_launch_seed`/`parse_seed` — vanilla's own
-//!   `WorldOptions.parseSeed`/`randomSeed` rule (trim, a valid `i64` literal
-//!   used verbatim, free text hashed with Java's `String.hashCode`, empty
+//!   seed-parsing rule (trim, a valid `i64` literal
+//!   used verbatim, free text hashed with a string hash, empty
 //!   means fresh random) — into the `i64`
 //!   `lodestone_server::worldgen_data::overworld_chunk_source(seed)` wants,
 //!   in place of `BUNDLED_WORLD.seed`.
-//! - **Wired since — Online Mode.** Not vanilla (no `CreateWorldScreen`
+//! - **Wired since — Online Mode.** Not vanilla (no vanilla screen
 //!   control ties online-mode to a per-world setting in the real game), and
 //!   the one field on this struct that is not merely collected: `true` makes
 //!   `begin_singleplayer` open the new world to LAN immediately, with the
@@ -125,15 +121,14 @@
 //!   real, but nothing downstream reads any of them: they need deeper
 //!   session-setup wiring (server-side initial state) than the seed's
 //!   one-parameter threading, and are left as documented follow-up.
-//! - **Wired since issue #592's items 1 and 2 — all seven world types.**
-//!   Cycles all seven bundled presets for real (issue #519's generator half
+//! - **Wired — all seven world types.**
+//!   Cycles all seven bundled presets for real (the world-generator half
 //!   landed all seven; this is their UI), and choosing any of them now
 //!   reaches the served world. `Normal`/`LargeBiomes`/`Amplified` go through
 //!   `WorldTypePreset::backend_world_type`; `SingleBiomeSurface`/`Flat`/
 //!   `FlatAllDimensions`/`DebugAllBlockStates` go through `net.rs`'s
 //!   `preset_chunk_source`, once `crates/lodestone-server/src/lib.rs`
-//!   re-exported their entry points (item 2's blocker, landed on `main`
-//!   ahead of this pass). `begin_singleplayer` (`app/session.rs`) reads the
+//!   re-exported their entry points. `begin_singleplayer` (`app/session.rs`) reads the
 //!   chosen [`WorldTypePreset`] from `WorldCreationConfig` for a
 //!   **`Created`** launch only (same rule as `seed`), threads the preset
 //!   itself through `launch_singleplayer`/`launch_open_to_lan_online`
@@ -196,12 +191,12 @@ pub const NAME_LABEL: &str = "World Name";
 /// `selectWorld.newWorld` — the default value, not a hint.
 pub const DEFAULT_NAME: &str = "New World";
 /// `selectWorld.enterSeed` — the seed field's own visible label, drawn above
-/// it exactly like [`NAME_LABEL`] (`CreateWorldScreen.java`, via
-/// `CommonLayouts.labeledElement`).
+/// it exactly like [`NAME_LABEL`], through vanilla's own labeled-element
+/// layout helper.
 pub const SEED_LABEL: &str = "Seed for the world generator";
-/// `selectWorld.seedInfo` — the seed field's `EditBox.hint` ghost text,
-/// shown only while the box is empty and unfocused
-/// (`CreateWorldScreen.java`). Not a second permanent label; see
+/// `selectWorld.seedInfo` — the seed field's own hint ghost text,
+/// shown only while the box is empty and unfocused.
+/// Not a second permanent label; see
 /// [`frame`]'s own doc on the notice this constant used to also feed.
 pub const SEED_INFO: &str = "Leave blank for a random seed";
 /// `selectWorld.gameMode` / `selectWorld.mapFeatures` / `options.difficulty`
@@ -217,12 +212,11 @@ pub const ALLOW_CHEATS_LABEL: &str = "Allow Cheats";
 /// [`WorldCreationConfig::online_mode`] for what this actually does.
 pub const ONLINE_MODE_LABEL: &str = "Online Mode (Open to LAN)";
 /// `selectWorld.create`, reused verbatim for this screen's own submit button
-/// — vanilla uses the same string for both (`CreateWorldScreen.java`'s
-/// `createButton`).
+/// — vanilla uses the same string for both.
 pub const CREATE_LABEL: &str = "Create New World";
 pub const CANCEL_LABEL: &str = "Cancel";
 /// `selectWorld.mapType` — vanilla's own label for the World Type cycle
-/// button (`WorldTab.java`'s `typeButton`, `CreateWorldScreen.java`).
+/// button.
 pub const WORLD_TYPE_LABEL: &str = "World Type";
 /// `createWorld.customize.gameRules.title`-adjacent — vanilla's More tab
 /// button that opens `WorldCreationGameRulesScreen`.
@@ -269,20 +263,20 @@ fn content_rows_for_tab(tab: usize) -> &'static [usize] {
             BONUS_CHEST_ROW,
             ONLINE_MODE_ROW,
         ],
-        // Vanilla's own `MoreTab` button order (`CreateWorldScreen.java`):
+        // Vanilla's own More-tab button order:
         // Game Rules, Experiments, **then** Data Packs.
         MORE_TAB => &[GAME_RULES_ROW, EXPERIMENTS_ROW, DATA_PACKS_ROW],
         _ => &[],
     }
 }
 
-/// `WorldCreationUiState.WorldTypeEntry`/`WorldPreset`, narrowed to the seven
-/// bundled `world_preset/*.json` documents (issue #519's generator half) —
+/// Vanilla's own world-type entry/preset list, narrowed to the seven
+/// bundled `world_preset/*.json` documents (generator half) —
 /// vanilla's own preset list has a customizable "Buffet"/`FLAT`-family branch
 /// this client does not model, so this enum is the seven fixed presets rather
 /// than an open list.
 ///
-/// ## Backend wiring — all seven, now (issue #592's items 1 and 2)
+/// ## Backend wiring — all seven, now
 ///
 /// [`Self::caption`] is real for all seven (`generator.minecraft.*`,
 /// verbatim), and **selecting any of the seven now reaches a real, distinct
@@ -290,19 +284,17 @@ fn content_rows_for_tab(tab: usize) -> &'static [usize] {
 /// change it" table for exactly which entry point each preset needs.
 ///
 /// - [`Self::Normal`]/[`Self::LargeBiomes`]/[`Self::Amplified`] go through
-///   [`Self::backend_world_type`] and `overworld_chunk_source_of_type`
-///   (issue #592's item 1) — see that method's own doc.
+///   [`Self::backend_world_type`] and `overworld_chunk_source_of_type` — see
+///   that method's own doc.
 /// - [`Self::SingleBiomeSurface`]/[`Self::Flat`]/[`Self::FlatAllDimensions`]/
 ///   [`Self::DebugAllBlockStates`] go through `net.rs`'s
 ///   `preset_chunk_source`, which calls `single_biome_chunk_source`/
-///   `flat_chunk_source`/`debug_chunk_source` directly (issue #592's item 2,
-///   unblocked once `crates/lodestone-server/src/lib.rs` re-exported those
-///   entry points — landed on `main` ahead of this pass, so the item is
-///   simply the shell-side threading now). `SingleBiomeSurface` always uses
+///   `flat_chunk_source`/`debug_chunk_source` directly, once
+///   `crates/lodestone-server/src/lib.rs` re-exported those
+///   entry points. `SingleBiomeSurface` always uses
 ///   `world_preset_single_biome_default_biome()` (`minecraft:plains`) rather
-///   than a player-chosen biome — there is no UI for that choice yet, see
-///   the issue's own note on why vanilla's own `WorldTab` does not expose it
-///   directly either.
+///   than a player-chosen biome — there is no UI for that choice yet, and
+///   vanilla's own World tab does not expose it directly either.
 ///
 /// In every case, `begin_singleplayer` (`app/session.rs`) reads the chosen
 /// [`WorldTypePreset`] from `WorldCreationConfig` for a **`Created`** launch
@@ -363,7 +355,7 @@ impl WorldTypePreset {
     /// silently falling back to [`Self::Normal`] — see this type's own doc.
     ///
     /// `true` for all seven, now that `net.rs`'s `preset_chunk_source` covers
-    /// every variant (issue #592's items 1 and 2). Kept as a named predicate
+    /// every variant (items 1 and 2). Kept as a named predicate
     /// rather than deleted: a caller that wants to warn about a decorative
     /// choice should still ask this rather than assume, so a preset added
     /// later without its own `preset_chunk_source` arm has somewhere to
@@ -375,7 +367,7 @@ impl WorldTypePreset {
 
     /// The `lodestone_server::WorldType` this preset resolves to, for the
     /// three presets shaped as one — `net.rs`'s `preset_chunk_source` is the
-    /// full seven-way mapping now (issue #592's item 2); this is the narrower
+    /// full seven-way mapping now; this is the narrower
     /// three-way piece it delegates to for
     /// [`Self::Normal`]/[`Self::LargeBiomes`]/[`Self::Amplified`].
     /// [`Self::SingleBiomeSurface`]/[`Self::Flat`]/[`Self::FlatAllDimensions`]/
@@ -399,10 +391,10 @@ impl WorldTypePreset {
     }
 }
 
-/// `WorldCreationUiState.SelectedGameMode`, narrowed to the three a player
-/// actually picks from this button (`GameTab.java`'s own cycle — `DEBUG`,
-/// vanilla's fourth value, is not offered here; `SelectedGameMode.java`'s
-/// own caption for it is literally "spectator", which is not a serious
+/// Vanilla's own selected-game-mode set, narrowed to the three a player
+/// actually picks from this button (vanilla's own Game-tab cycle — `DEBUG`,
+/// vanilla's fourth value, is not offered here; its own caption for it is
+/// literally "spectator", which is not a serious
 /// creation-time choice and this button does not cycle to it, matching the
 /// real client).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -464,11 +456,11 @@ fn next_difficulty(d: WorldDifficulty) -> WorldDifficulty {
 pub struct WorldCreationConfig {
     pub name: String,
     /// The typed seed text, verbatim — empty means "random", matching
-    /// vanilla's own `WorldOptions.defaultWithRandomSeed()` branch
+    /// vanilla's own random-seed default branch
     /// (`selectWorld.seedInfo`). Parsing an empty/non-numeric seed into an
     /// actual `i64` is the consuming patch's job (see the module docs), not
     /// this screen's: vanilla itself accepts non-numeric seed text and
-    /// hashes it (`WorldOptions.java`'s own `parseSeed`), which this menu
+    /// hashes it with its own seed-parsing routine, which this menu
     /// layer has no reason to reimplement ahead of a consumer that needs it.
     pub seed: String,
     /// **Decorative for every value** — see [`WorldTypePreset`]'s own doc for
@@ -480,7 +472,7 @@ pub struct WorldCreationConfig {
     pub generate_structures: bool,
     pub bonus_chest: bool,
     pub allow_cheats: bool,
-    /// **Wired, not decorative** (issue #273's shell-side control) — unlike
+    /// **Wired, not decorative** (shell-side control) — unlike
     /// every other field on this struct: `true` makes `app.rs`'s
     /// `begin_singleplayer` open this world to LAN on an OS-assigned port
     /// *immediately*, with the real RSA/AES handshake and session-server
@@ -499,7 +491,7 @@ pub struct WorldCreationConfig {
     /// online mode — that path calls `IntegratedServer::publish`, which has
     /// no online-mode parameter.
     pub online_mode: bool,
-    /// Game rules that differ from their vanilla default (issue #592's More
+    /// Game rules that differ from their vanilla default (More
     /// tab), collected from [`CreateWorldNav`]'s own [`GameRulesEditor`] when
     /// Create is pressed. Sent to the freshly-created singleplayer server as
     /// [`lodestone_model::action::ClientAction::SetGameRules`] once the
@@ -507,8 +499,8 @@ pub struct WorldCreationConfig {
     /// Empty for a world whose rules were never touched, which sends nothing
     /// rather than a no-op packet.
     pub game_rules: Vec<(lodestone_model::ResourceKey, String)>,
-    /// Extra data packs selected beyond the always-active Vanilla one (issue
-    /// #592's More tab), as the ids [`DataPacksEditor::selected_ids`] reports
+    /// Extra data packs selected beyond the always-active Vanilla one (the
+    /// More tab), as the ids [`DataPacksEditor::selected_ids`] reports
     /// — collected from [`CreateWorldNav`]'s own [`DataPacksEditor`] when
     /// Create is pressed. **Fully decorative**: this crate has no data-pack
     /// loader at all (no recipe/loot-table/tag override machinery to apply
@@ -521,12 +513,12 @@ pub struct WorldCreationConfig {
     /// world that never had any extra pack selected, same "send nothing
     /// rather than a no-op" rule [`Self::game_rules`] uses.
     pub data_packs: Vec<String>,
-    /// Feature flags the player turned on (issue #693's Experiments half), as
+    /// Feature flags the player turned on (Experiments half), as
     /// [`ExperimentFlag::id`] strings — collected from [`CreateWorldNav`]'s
     /// own [`ExperimentsEditor`] when Create is pressed, the exact
     /// `Vec<String>` shape [`Self::data_packs`] takes. Unlike that field,
     /// this one reaches disk: vanilla's own
-    /// `WorldDataConfiguration.enabledFeatures` is written into a freshly
+    /// enabled-features field is written into a freshly
     /// created world's `level.dat` at creation time — it is never a network
     /// packet, unlike [`Self::game_rules`] — and `crate::saves::create_world_in`
     /// writes it there, through
@@ -539,8 +531,8 @@ pub struct WorldCreationConfig {
     /// unbuilt: nothing downstream reads `enabled_features` back to make the
     /// three flags actually change engine behaviour — that is real gameplay
     /// work, not a wiring gap. Empty for a world that never had any
-    /// experiment turned on, matching `FeatureFlags.DEFAULT_FLAGS ==
-    /// VANILLA_SET`, and writes nothing extra to `level.dat` in that case.
+    /// experiment turned on, matching vanilla's own default (empty) feature
+    /// set, and writes nothing extra to `level.dat` in that case.
     pub experiments: Vec<String>,
 }
 
@@ -551,12 +543,10 @@ impl Default for WorldCreationConfig {
             seed: String::new(),
             world_type: WorldTypePreset::default(),
             game_mode: WorldGameMode::default(),
-            // `Difficulty.NORMAL` — `WorldCreationUiState.java`.
+            // Vanilla's own default difficulty.
             difficulty: WorldDifficulty::Normal,
-            // `WorldOptions`' own defaults — `generateStructures` true,
-            // `generateBonusChest` false (`WorldCreationUiState.java`
-            // reads these off `settings.options()`, whose defaults are
-            // vanilla's `WorldOptions.defaultWithRandomSeed()`).
+            // Vanilla's own world-options defaults — generate-structures true,
+            // generate-bonus-chest false.
             generate_structures: true,
             bonus_chest: false,
             allow_cheats: false,
@@ -581,13 +571,13 @@ pub const ONLINE_MODE_ROW: usize = 7;
 pub const WORLD_TYPE_ROW: usize = 8;
 pub const CREATE_ROW: usize = 9;
 pub const CANCEL_ROW: usize = 10;
-/// More tab's first row (issue #592's Game Rules half): opens the
+/// More tab's first row (Game Rules half): opens the
 /// scrollable rule editor — see [`CreateWorldMode::GameRules`].
 pub const GAME_RULES_ROW: usize = 11;
-/// More tab's second row (issue #592's Data Packs half): opens the pack
+/// More tab's second row (Data Packs half): opens the pack
 /// selector — see [`CreateWorldMode::DataPacks`].
 pub const DATA_PACKS_ROW: usize = 12;
-/// More tab's third row (issue #693's Experiments half): opens the
+/// More tab's third row (Experiments half): opens the
 /// feature-flag toggle list — see [`CreateWorldMode::Experiments`].
 pub const EXPERIMENTS_ROW: usize = 13;
 const ROW_COUNT: usize = 14;
@@ -616,7 +606,7 @@ pub fn row_slot(row: usize) -> Slot {
     // crossing the divider.
     const TOP: f32 = layout::TAB_BAR_HEIGHT + 16.0;
     const ROW_H: f32 = 24.0;
-    // World now has one more row than Game (five vs. four, since #519's
+    // World now has one more row than Game (five vs. four, since the
     // world-type selector landed on World only), so the two tabs' local
     // indices no longer line up 1:1 the way they did when every row paired
     // with exactly one sibling. Named per-tab instead of paired, still one
@@ -770,10 +760,10 @@ pub struct CreateWorldNav {
     focus: FocusSet,
     config: WorldCreationConfig,
     /// Which of [`TAB_LABELS`] is currently showing. Starts at
-    /// [`GAME_TAB`] — vanilla's own `MenuTabBar.builder(..).addTabs(GameTab,
-    /// WorldTab, MoreTab)` order, and the tab `CreateWorldScreen.
-    /// setInitialFocus` would land on if it ran (it does not — see the
-    /// module docs on why keyboard tab-order is not ported).
+    /// [`GAME_TAB`] — vanilla's own Game/World/More tab-bar order, and the
+    /// tab vanilla's own initial-focus routine would land on if it ran (it
+    /// does not — see the module docs on why keyboard tab-order is not
+    /// ported).
     active_tab: usize,
     /// Which button row the mouse is over, if any — separate from keyboard
     /// focus for [`super::nav::EditForm::hovered`]'s exact reason (this
@@ -781,7 +771,7 @@ pub struct CreateWorldNav {
     /// Carries a **focus id**, not a frame-row index — see the module docs'
     /// "two index spaces" section.
     ///
-    /// **This is the whole of issue #567's reported hover bug**, fixed before
+    /// **This is the whole of reported hover bug**, fixed before
     /// the tabs half: `CreateWorld` already reaches
     /// [`super::render::stamp_canvas_facts`] through `render::frame_for`'s own
     /// `frame.map` — every screen's frame does, unconditionally, unless its
@@ -794,7 +784,7 @@ pub struct CreateWorldNav {
     /// was `false` for every row, every frame — no outline, ever, regardless
     /// of where the mouse was.
     hovered: Option<usize>,
-    /// Which sub-screen is showing (issue #592's Game Rules half) — `Tabs` is
+    /// Which sub-screen is showing (Game Rules half) — `Tabs` is
     /// the ordinary Game/World/More view this whole module used to be;
     /// `GameRules` replaces it with [`GAME_RULES_ROW`]'s own scrollable rule
     /// list. Not part of [`Self::active_tab`]: switching tabs while the rule
@@ -828,7 +818,7 @@ fn button(row: usize, label: impl Into<String>) -> Widget {
 
 impl CreateWorldNav {
     /// A fresh screen at vanilla's own defaults — called every time the
-    /// screen is opened (`CreateWorldScreen.openFresh`'s own state, not
+    /// screen is opened (vanilla's own "open fresh" state, not
     /// resumed from a previous visit), matching every other "reset on entry"
     /// screen in this tree.
     #[must_use]
@@ -984,7 +974,7 @@ impl CreateWorldNav {
     }
 
     /// Difficulty is locked to Hard and its own row inactive while Hardcore
-    /// is selected — `GameTab.java`'s own rule (selecting Hardcore forces
+    /// is selected — vanilla's own Game-tab rule (selecting Hardcore forces
     /// and disables the difficulty cycle; every other mode leaves it live) —
     /// **and** while a tab other than Game is showing, folded into the same
     /// flag rather than a second field: both are "can this row take focus or
@@ -1016,8 +1006,8 @@ impl CreateWorldNav {
     /// direct call should still be inert rather than panic). Clears any
     /// button hover (the hovered row is about to disappear from the frame)
     /// and moves keyboard focus onto the new tab's first field, mirroring
-    /// vanilla's own tab switch (`TabManager.setCurrentTab`, which calls
-    /// `setInitialFocus` on the new tab) — or clears focus entirely on
+    /// vanilla's own tab switch (which sets initial focus on the new tab) —
+    /// or clears focus entirely on
     /// [`MORE_TAB`], which has nothing to focus.
     fn switch_tab(&mut self, tab: usize) {
         if tab >= TAB_LABELS.len() || tab == self.active_tab {
@@ -1198,10 +1188,9 @@ impl CreateWorldNav {
 
     /// A click on frame row `row` (an index into `frame(..).rows` — see the
     /// module docs). Mirrors
-    /// [`super::world_select::WorldSelectNav::click_row`]'s own reasoning
-    /// (#391's shape): a click focuses a field, presses a button, or — new
-    /// for issue #567 — switches the active tab, and none of those is "hover
-    /// then Enter".
+    /// [`super::world_select::WorldSelectNav::click_row`]'s own reasoning: a
+    /// click focuses a field, presses a button, or switches the active tab,
+    /// and none of those is "hover then Enter".
     pub fn click_row(&mut self, row: usize) -> CreateWorldOutcome {
         if self.mode == CreateWorldMode::GameRules {
             if self.game_rules.click_row(row) {
@@ -1245,7 +1234,7 @@ impl CreateWorldNav {
 
     /// One key, routed through the same `Escape` → field → navigation →
     /// screen order [`super::nav::EditForm::handle_key`] already documents
-    /// and cites `Screen.keyPressed`'s own order for. Tab traversal stays
+    /// and cites vanilla's own key-handling order for. Tab traversal stays
     /// within the showing tab's own fields plus the always-active footer —
     /// see [`Self::sync_tab_visibility`]'s own doc on why that needs no
     /// special case here: [`FocusSet`] already skips an inactive widget.
@@ -1256,7 +1245,7 @@ impl CreateWorldNav {
         // narrowed to this screen's one extra level. Edits already live on
         // `self.game_rules` the moment a button is clicked (there is no
         // separate discard-on-cancel path here, unlike vanilla's own
-        // `AbstractGameRulesScreen.closeAndDiscardChanges` — a disclosed
+        // game-rules screen's close-and-discard routine — a disclosed
         // simplification, not a missed case).
         if self.mode == CreateWorldMode::GameRules {
             if key == MenuKey::Escape {
@@ -1319,8 +1308,8 @@ fn toggle_label(caption: &str, on: bool) -> String {
 ///
 /// ## No separate title label — the same call `stats.rs` already made
 ///
-/// Vanilla draws no heading above `CreateWorldScreen`'s tab bar either — the
-/// bar's own background (`CreateWorldScreen.TAB_HEADER_BACKGROUND`) *is* the
+/// Vanilla draws no heading above this screen's tab bar either — the
+/// bar's own background *is* the
 /// header, exactly as `stats.rs`'s own doc explains for the same widget. This
 /// used to draw `"Create New World"` as a centred label at `dy: 12`, which is
 /// the vanilla string for the *button* that opens this screen
@@ -1403,8 +1392,8 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     let hovered = nav.hovered().and_then(|id| nav.frame_row_for_focus_id(id));
 
     let mut labels = Vec::new();
-    // `CommonLayouts.labeledElement` draws a real, visible label above each
-    // field in vanilla (`CreateWorldScreen.java`) — only the active tab's own
+    // Vanilla's own labeled-element layout helper draws a real, visible label
+    // above each field — only the active tab's own
     // field label(s) are emitted, matching the row itself only being emitted
     // for the active tab.
     if active_tab == GAME_TAB {
@@ -1423,7 +1412,7 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
         // (`selectWorld.enterSeed`, "Seed for the world generator"). This
         // used to be missing entirely: only the *hint* text
         // (`SEED_INFO`/`selectWorld.seedInfo`) was drawn, and as a permanent
-        // notice rather than vanilla's `EditBox.hint` ghost text — see the
+        // notice rather than vanilla's own hint ghost text — see the
         // `notice` doc below.
         labels.push(MenuLabel {
             text: SEED_LABEL.to_string(),
@@ -1439,7 +1428,7 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     MenuFrame {
         rows,
         selected,
-        // Issue #567: this used to be left at its `..Default::default()` of
+        // This used to be left at its `..Default::default()` of
         // `None` unconditionally — nothing on this screen ever recorded which
         // row the mouse was over (see `CreateWorldNav::hovered`'s own doc) —
         // so `render::draw_widget`'s `widget.hovered` was `false` for every
@@ -1448,7 +1437,7 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
         vanilla: true,
         labels,
         // No `notice` here. Vanilla shows `SEED_INFO` in exactly one place —
-        // `seedEdit.setHint(SEED_EMPTY_HINT)` (`CreateWorldScreen.java`),
+        // its own seed-field hint —
         // ghost text drawn only while the box is empty and unfocused.
         // `CreateWorldNav::new` already sets `seed.hint`, so a permanent
         // notice here would draw the same string vanilla only ever shows
@@ -1457,7 +1446,7 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     }
 }
 
-// -- Game Rules sub-screen (issue #592's More tab) ---------------------------
+// -- Game Rules sub-screen (More tab) ---------------------------
 //
 // Vanilla's `WorldCreationGameRulesScreen` is a per-type widget (a checkbox
 // for a boolean rule, a free-text `EditBox` for an integer one) over a
@@ -1863,7 +1852,7 @@ fn game_rules_frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     }
 }
 
-// -- Data Packs sub-screen (issue #592's More tab) ---------------------------
+// -- Data Packs sub-screen (More tab) ---------------------------
 //
 // Vanilla's Data Packs button opens the same `PackSelectionScreen` widget as
 // the standalone Resource Packs screen (`super::packs`), pointed at a
@@ -2220,10 +2209,9 @@ fn data_packs_frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
 }
 
 /// The three real vanilla feature flags a 26.2 world can enable
-/// (`FeatureFlags.java`'s own three `builder.createVanilla(...)` calls
-/// beyond the always-on `vanilla` flag, which carries no UI at all — issue
-/// #693's Experiments half). `WorldDataConfiguration`'s own
-/// `enabledFeatures` field is exactly this set, written into a freshly
+/// (vanilla's own three registered experimental flags, beyond the always-on
+/// `vanilla` flag, which carries no UI at all). Vanilla's own
+/// enabled-features field is exactly this set, written into a freshly
 /// created world's `level.dat`, never sent over any network packet — see
 /// [`WorldCreationConfig::experiments`]'s own doc for where that write
 /// actually happens and what is still unbuilt past it.
@@ -2238,9 +2226,9 @@ impl ExperimentFlag {
     pub const ALL: [ExperimentFlag; 3] =
         [Self::TradeRebalance, Self::RedstoneExperiments, Self::MinecartImprovements];
 
-    /// The bare registration id (`FeatureFlags.java`'s own
-    /// `builder.createVanilla("...")` argument, no `minecraft:` namespace) —
-    /// `WorldDataConfiguration`'s own wire/NBT shape for `enabled_features`.
+    /// The bare registration id (vanilla's own flag-registration argument,
+    /// no `minecraft:` namespace) —
+    /// vanilla's own wire/NBT shape for `enabled_features`.
     #[must_use]
     pub fn id(self) -> &'static str {
         match self {
@@ -2277,7 +2265,7 @@ struct ExperimentRow {
 /// ([`ExperimentFlag::ALL`]), so there is no scan, and — four rows total,
 /// always fewer than fit on screen — no scroll state either, unlike
 /// [`DataPacksEditor`]/[`GameRulesEditor`]. Every flag defaults off,
-/// matching `FeatureFlags.DEFAULT_FLAGS == VANILLA_SET` (no experimental
+/// matching vanilla's own default feature set (no experimental
 /// flag is on by default).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExperimentsEditor {
@@ -2614,8 +2602,8 @@ mod tests {
 
     #[test]
     fn a_click_acts_on_the_row_it_landed_on_and_nothing_else() {
-        // #391's shape, on this screen too: clicking Structures must not
-        // touch Bonus Chest.
+        // The same failure shape as a prior click-routing defect, on this
+        // screen too: clicking Structures must not touch Bonus Chest.
         let mut nav = CreateWorldNav::new();
         nav.click_focus(STRUCTURES_ROW);
         assert!(!nav.config().generate_structures);
@@ -2668,8 +2656,8 @@ mod tests {
 
     #[test]
     fn both_fields_get_their_own_vanilla_label_on_their_own_tab_and_the_seed_hint_is_not_duplicated() {
-        // `CreateWorldScreen.java` wraps each field in
-        // `CommonLayouts.labeledElement` — a real, drawn label, not
+        // Vanilla's own screen wraps each field in its labeled-element
+        // layout helper — a real, drawn label, not
         // narration. Each is present on its own tab, and **absent** on the
         // other — the control that catches a label emitted unconditionally
         // regardless of which tab is showing.
@@ -2697,7 +2685,7 @@ mod tests {
         );
         // `SEED_INFO` must appear as the box's own hint, and *not* also as a
         // second, permanent label/notice — vanilla shows it in exactly one
-        // place (`EditBox.hint`, conditional on empty+unfocused).
+        // place (its own hint field, conditional on empty+unfocused).
         assert_eq!(nav.widgets.seed.hint.as_deref(), Some(SEED_INFO));
         assert!(
             !f.labels.iter().any(|l| l.text == SEED_INFO),
@@ -2752,7 +2740,7 @@ mod tests {
         );
     }
 
-    // -- the tab bar (issues #564/#567) --------------------------------------
+    // -- the tab bar --------------------------------------
 
     #[test]
     fn the_frame_carries_three_real_clickable_tab_rows() {
@@ -2792,8 +2780,8 @@ mod tests {
         assert_eq!(
             f.rows.len(),
             TAB_LABELS.len() + 5,
-            "More has three content rows (Game Rules and Data Packs, issue \
-             #592; Experiments, issue #693) plus the tab bar and the footer"
+            "More has three content rows (Game Rules, Data Packs and \
+             Experiments) plus the tab bar and the footer"
         );
 
         // Clicking the tab already showing is a no-op, not a crash and not a
@@ -2818,7 +2806,7 @@ mod tests {
             nav.focused(),
             Some(GAME_RULES_ROW),
             "More's first (and only) field, the Game Rules button, takes focus \
-             (issue #592 — this tab used to have nothing at all)"
+             (this tab used to have nothing at all)"
         );
 
         nav.click_row(GAME_TAB);
@@ -2924,7 +2912,7 @@ mod tests {
     }
 
     /// Every button row (not the two fields) must be able to report hover —
-    /// a gap here is exactly how issue #567 shipped: `hover_row` existed on
+    /// a gap here is exactly how this shipped once before: `hover_row` existed on
     /// `EditForm` and on other screens, but `CreateWorldNav` had no such
     /// method at all, so no row on this screen could ever be hovered.
     /// Collected across all seven and asserted once (not `assert!` inside the
@@ -2953,7 +2941,7 @@ mod tests {
         assert!(offenders.is_empty(), "rows that did not record hover: {offenders:?}");
     }
 
-    // -- world type (issue #519's UI half) -----------------------------------
+    // -- world type (UI half) -----------------------------------
 
     #[test]
     fn world_type_defaults_to_normal_and_cycles_through_all_seven() {
@@ -2979,7 +2967,7 @@ mod tests {
         // Used to assert exactly the three presets needing no
         // `lodestone-server` change (`overworld_chunk_source_of_type` already
         // `pub` at that crate's root) reported true and the other four
-        // reported false. Issue #592's item 2 closed that gap: `lib.rs` now
+        // reported false. A later change closed that gap: `lib.rs` now
         // re-exports `single_biome_chunk_source`/`flat_chunk_source`/
         // `debug_chunk_source` and `net.rs`'s `preset_chunk_source` covers
         // all seven, so `is_backend_wired` is unconditionally `true` — see
@@ -3040,7 +3028,7 @@ mod tests {
         );
     }
 
-    // -- Game Rules sub-screen (issue #592's More tab) -----------------------
+    // -- Game Rules sub-screen (More tab) -----------------------
 
     fn rule_index(name: &str) -> usize {
         GAME_RULES
@@ -3178,7 +3166,7 @@ mod tests {
         );
     }
 
-    // -- Data Packs sub-screen (issue #592's More tab) -----------------------
+    // -- Data Packs sub-screen (More tab) -----------------------
 
     /// A [`crate::resources::DiscoveredPack`] fixture — mirrors
     /// `packs::tests::pack`, so a test never touches the real filesystem: the
@@ -3353,7 +3341,7 @@ mod tests {
         );
     }
 
-    // -- Issue #693: Experiments --------------------------------------------
+    // -- Experiments --------------------------------------------
 
     #[test]
     fn an_untouched_experiments_screen_sends_nothing_on_create() {
