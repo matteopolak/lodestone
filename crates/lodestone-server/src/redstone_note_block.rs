@@ -5,8 +5,7 @@
 //!
 //! # What it is
 //!
-//! Three independent pieces of vanilla's `NoteBlock`
-//! (`.cache/mc/26.2/src/net/minecraft/world/level/block/NoteBlock.java`):
+//! Three independent pieces of vanilla's own note-block:
 //!
 //! 1. **Instrument selection** ([`instrument_for_note_block`]) — which of the
 //!    27 [`Instrument`] values a note block plays, decided by the block
@@ -68,8 +67,8 @@ use crate::redstone::{base_name, get_bool_property, get_u32_property, with_prope
 
 pub const NOTE_BLOCK: &str = "minecraft:note_block";
 
-/// `NoteBlockInstrument`, all 27 registrations
-/// (`NoteBlockInstrument.java:9-35`), in declaration order. The discriminant
+/// `NoteBlockInstrument`, all 27 registrations, vanilla's own enum
+/// in declaration order. The discriminant
 /// is never read for anything numeric here — [`Self::works_above_note_block`]
 /// is the one behavioural difference this module needs.
 ///
@@ -173,7 +172,7 @@ impl Instrument {
 }
 
 /// `BlockState.instrument()`'s per-block table, for exactly the blocks this
-/// module has verified against `Blocks.java`'s own `.instrument(...)`
+/// module has verified against vanilla's own block registration table's `.instrument(...)`
 /// registrations: the 9 single-block overrides plus the 7 head blocks (heads
 /// only, since a wall-mounted skull cannot be placed *on top of* a note block
 /// in the first place) plus the small `SNARE` family (7 blocks — sand/gravel
@@ -226,7 +225,7 @@ pub fn block_instrument(block: &str) -> Instrument {
     }
 }
 
-/// `NoteBlock.setInstrument` (`NoteBlock.java:54-63`) — the block directly
+/// Vanilla's own `NoteBlock.setInstrument` — the block directly
 /// above wins if its instrument `worksAboveNoteBlock` (a mob head sitting on
 /// top), otherwise the block below is read, with its own
 /// `worksAboveNoteBlock` guarded back to [`Instrument::Harp`] (vanilla's
@@ -250,7 +249,7 @@ pub fn instrument_for_note_block(above: &str, below: &str) -> Instrument {
 pub struct NeighborReaction {
     /// The state to write — `POWERED` flipped to match `has_signal`.
     pub new_state: String,
-    /// Vanilla's `playNote` gate (`NoteBlock.java:101-106`): fire only on the
+    /// Vanilla's own `playNote` gate: fire only on the
     /// *rising* edge, and only when the instrument works standing on its own
     /// (a mob head) or the cell directly above is air. A note block buried
     /// under a solid block stays silent even while it dutifully tracks
@@ -258,7 +257,7 @@ pub struct NeighborReaction {
     pub play_pulse: bool,
 }
 
-/// `NoteBlock.neighborChanged` (`NoteBlock.java:87-99`). `has_signal` is
+/// Vanilla's own `NoteBlock.neighborChanged`. `has_signal` is
 /// vanilla's `level.hasNeighborSignal(pos)` — the caller supplies
 /// `crate::redstone::best_neighbor_signal(lookup, pos, false) > 0`, exactly
 /// the expression `crate::random_tick`'s hopper `ENABLED` arm already
@@ -318,8 +317,8 @@ pub fn played_pulse_on_transition(from: &str, to: &str, above_is_air: bool) -> b
 /// The `NOTE` property's 25 values (`0..=24`, `BlockStateProperties.NOTE`).
 const NOTE_COUNT: u32 = 25;
 
-/// `BlockState.cycle(NOTE)` as `NoteBlock.useWithoutItem` calls it
-/// (`NoteBlock.java:126`) — advance the pitch by one semitone, wrapping `24`
+/// `BlockState.cycle(NOTE)` as vanilla's own empty-hand-use handler calls it
+/// — advance the pitch by one semitone, wrapping `24`
 /// back to `0`. `None` when `state` is not a note block.
 ///
 /// Called from `hand_use::hand_use`'s note-block arm, the right-click
@@ -370,7 +369,7 @@ mod tests {
     use super::*;
 
     /// The nine single-block overrides, each pinned against the exact
-    /// `Blocks.java` registration line — a magnitude check, not merely
+    /// vanilla registration line in its own block registration table — a magnitude check, not merely
     /// "changed", per this crate's own evidence standard.
     #[test]
     fn the_nine_single_block_overrides_match_their_jar_registrations() {

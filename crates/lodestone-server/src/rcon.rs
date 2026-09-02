@@ -13,7 +13,7 @@
 //! Each frame is `[length i32 LE][request id i32 LE][packet type i32 LE]
 //! [payload][0x00 0x00]`, where `length` counts the body *after* itself (so it
 //! is `4 + 4 + payload.len() + 2`). The per-connection flow mirrors vanilla's
-//! `RconClient` (`net/minecraft/server/rcon/thread/RconClient.java`):
+//! own rcon client thread:
 //!
 //! * a `TYPE_AUTH` (3) frame carrying the right password answers with
 //!   `TYPE_AUTH_RESPONSE` (2) echoing the request id and an empty payload, and
@@ -120,7 +120,7 @@ const TYPE_AUTH: i32 = 3;
 const TYPE_COMMAND: i32 = 2;
 const TYPE_AUTH_RESPONSE: i32 = 2;
 const TYPE_RESPONSE: i32 = 0;
-/// The request id vanilla answers auth failure with (`RconClient.java:121`).
+/// The request id vanilla answers auth failure with (its own rcon client).
 const AUTH_FAILURE_ID: i32 = -1;
 /// Vanilla's per-frame response cap (`RconClient.sendCmdResponse`).
 const MAX_RESPONSE_CHARS: usize = 4096;
@@ -310,7 +310,7 @@ async fn handle_connection(stream: TcpStream, config: &RconConfig) -> std::io::R
     while let Some(frame) = read_frame(&mut stream).await? {
         match frame.packet_type {
             TYPE_AUTH => {
-                // Vanilla (`RconClient.java:79-90`): an empty password never
+                // Vanilla's own rcon client: an empty password never
                 // matches, and a failed attempt de-authenticates a connection
                 // that had previously succeeded.
                 let ok = !frame.payload.is_empty() && frame.payload == config.password;
@@ -330,7 +330,7 @@ async fn handle_connection(stream: TcpStream, config: &RconConfig) -> std::io::R
                 write_response(&mut stream, frame.id, &join_response(&response)).await?;
             }
             other => {
-                // Vanilla's default arm (`RconClient.java:92`): the packet
+                // Vanilla's default arm (its own rcon client): the packet
                 // type, in hex.
                 write_response(
                     &mut stream,

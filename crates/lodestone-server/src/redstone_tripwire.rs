@@ -7,7 +7,7 @@
 //!
 //! # What it is
 //!
-//! `TripWireHookBlock.calculateState` (`TripWireHookBlock.java:108-194`) —
+//! Vanilla's own `TripWireHookBlock.calculateState` —
 //! the up-to-41-cell scan along a hook's `FACING` that decides whether it has
 //! found a matching hook facing back at it (`attached`), and whether the
 //! string between them is armed and reporting powered (`powered`). Both
@@ -136,7 +136,7 @@ pub struct CalculatedState {
     pub powered: bool,
 }
 
-/// `TripWireHookBlock.calculateState` (`TripWireHookBlock.java:108-194`),
+/// Vanilla's own `TripWireHookBlock.calculateState`,
 /// minus the sound/game-event pair (`emitState`) and the mid-call
 /// self-removal branch — see this module's own doc comment for both.
 ///
@@ -202,7 +202,7 @@ where
     });
 
     // `if (wasAttached != attached) { for (i = 1; i < receiverPos; i++) ... }`
-    // (`TripWireHookBlock.java:181-192`) — **both** the outer gate (only when
+    // (vanilla's own hook-state calculation) — **both** the outer gate (only when
     // `attached` actually flipped) and the range (`1..receiverPos`, empty
     // whenever no receiver was found at all) are load-bearing; either one
     // missing turns a no-op recheck into a spurious rewrite of every wire
@@ -239,7 +239,7 @@ fn hook_state(facing: Direction, attached: bool, powered: bool) -> String {
     )
 }
 
-/// `TripWireBlock.updateSource` (`TripWireBlock.java:124-141`) — from a wire
+/// Vanilla's own `TripWireBlock.updateSource` — from a wire
 /// segment at `pos`, scan **south and west only** (vanilla's own fixed pair;
 /// the opposite two directions are covered because a hook facing this wire
 /// runs its *own* [`calculate_state`] scan toward it) for a hook whose
@@ -280,9 +280,9 @@ where
 }
 
 /// [`find_controlling_hooks`] with `POWERED` forced to `true` on the wire
-/// state passed to each found hook — `TripWireBlock
-/// ::affectNeighborsAfterRemoval`'s `state.setValue(POWERED, true)`
-/// (`TripWireBlock.java:110`), the "the string just broke" instantaneous
+/// state passed to each found hook — vanilla's own `TripWireBlock
+/// ::affectNeighborsAfterRemoval`'s `state.setValue(POWERED, true)`,
+/// the "the string just broke" instantaneous
 /// pulse. Called from `crate::random_tick::react_at_removal`, which
 /// `crate::server::destroy_block` reaches through
 /// `crate::server::propagate_removal_with_entities` — the block-removal hook
