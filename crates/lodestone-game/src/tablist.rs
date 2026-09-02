@@ -501,7 +501,7 @@ mod fold_tests {
         assert!(entry.listed);
     }
 
-    /// Issue #62's merge rule, and the one that has a user-visible failure mode:
+    /// The merge rule with a user-visible failure mode if it regresses:
     /// a latency-only delta carries `properties: None` and **must not clear** the
     /// skin. `Some(vec![])` is the different case — an offline-mode server saying
     /// the profile genuinely has none.

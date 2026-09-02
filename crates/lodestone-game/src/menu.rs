@@ -1950,7 +1950,7 @@ mod tests {
         assert_eq!(count_at(&menu, 36), None, "not the hotbar");
     }
 
-    /// The regression this change fixes. Vanilla reaches the auto-equip branches
+    /// The regression this test guards against. Vanilla reaches the auto-equip branches
     /// from *every* source slot at or after 9, which includes menu slot 45, the
     /// off-hand: a helmet stashed in the off-hand shift-clicks up onto the head.
     /// Testing for an equip target only inside the `9..36` / `36..45` arms let
