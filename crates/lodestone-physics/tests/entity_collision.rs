@@ -1,10 +1,12 @@
 //! The **hard** half of entity interaction: entity boxes participating in
-//! `Entity.collide`'s sweep, and the entity term of `CollisionGetter.noCollision`.
+//! vanilla's own "collide" sweep, and the entity term of its own "no
+//! collision" check.
 //!
 //! Separate from `golden.rs` because none of it is reachable from a golden trace:
-//! `getEntityCollisions` filters on `Entity.canBeCollidedWith`, which **no player
-//! and no mob overrides** in 26.2 (`Entity.java:2381` returns `false` and
-//! `LivingEntity` inherits it). Only `AbstractBoat`, `Shulker` and `HappyGhast`
+//! vanilla's own nearby-entity-collisions query filters on its own "can be
+//! collided with" check, which **no player and no mob overrides** in 26.2
+//! (the base entity type returns `false` and the living-entity type inherits
+//! it). Only a boat, a shulker and a happy ghast
 //! do. So the entity collider list is empty for every scenario a two-player or
 //! player-plus-mob trace can express, and these gates use hand-derived
 //! expectations instead — each paired with the empty-slice control that must give
@@ -60,8 +62,8 @@ impl CollisionView for FloorAndLowCeiling {
     }
 }
 
-/// A boat-shaped collidable entity: `1.375 × 0.5625`, `canBeCollidedWith` true
-/// (`AbstractBoat.java:119`), sitting on the floor at `(x, 1.0, z)`.
+/// A boat-shaped collidable entity: `1.375 × 0.5625`, vanilla's own "can be
+/// collided with" check true, sitting on the floor at `(x, 1.0, z)`.
 fn boat(x: f64, z: f64) -> NearbyEntity {
     let half = 1.375 / 2.0;
     let mut e = NearbyEntity::living(
@@ -78,8 +80,9 @@ fn player_box(x: f64, y: f64, z: f64) -> Aabb {
     EntityDimensions::PLAYER.bounding_box(Vec3d::new(x, y, z))
 }
 
-/// A shulker-shaped collidable entity: `1.0 × 1.0`, `canBeCollidedWith` =
-/// `isAlive()` (`Shulker.java:470`) and `isPushable()` inherited as `false`. Tall
+/// A shulker-shaped collidable entity: `1.0 × 1.0`, vanilla's own "can be
+/// collided with" check is its own "is alive" check, and its own "is
+/// pushable" check inherited as `false`. Tall
 /// enough that the 0.6 auto-step cannot mount it, which is what makes it the right
 /// fixture for "an entity that actually blocks you".
 fn shulker(x: f64, z: f64) -> NearbyEntity {
@@ -134,9 +137,10 @@ fn a_collidable_entity_stops_horizontal_movement_and_the_control_walks_through_i
 
 #[test]
 fn auto_step_mounts_a_collidable_entity_the_way_it_mounts_a_slab() {
-    // Entity colliders are passed to `collectCandidateStepUpHeights`
-    // (`Entity.java:1158-1160`), so a boat deck at 0.5625 is a step candidate under
-    // the 0.6 step height — you walk up onto the boat rather than into it.
+    // Entity colliders are passed to vanilla's own "collect candidate
+    // step-up heights" step, so a boat deck at 0.5625 is a step candidate
+    // under the 0.6 step height — you walk up onto the boat rather than into
+    // it.
     let view = Floor(6);
     let bb = player_box(0.5, 1.0, 0.5);
     let mut colliders = Vec::new();
@@ -249,8 +253,8 @@ fn move_entity_with_an_empty_collider_slice_is_bit_identical_to_move_entity() {
 
 #[test]
 fn the_pose_fit_gate_needs_both_terms_and_a_mob_contributes_to_neither() {
-    // `Player.canPlayerFitWithinBlocksAndEntitiesWhen` (`Player.java:373-375`) is
-    // `noCollision(this, dims(pose).makeBoundingBox(position).deflate(1.0E-7))`,
+    // Vanilla's own block-and-entity fit check is its own "no collision"
+    // check applied to the pose's own bounding box deflated by 1.0E-7,
     // i.e. blocks AND entities. Reproduce its exact box for both poses in a
     // one-block gap.
     let view = FloorAndLowCeiling;
@@ -263,8 +267,8 @@ fn the_pose_fit_gate_needs_both_terms_and_a_mob_contributes_to_neither() {
         .bounding_box(feet)
         .inflate(-1.0E-7);
 
-    // Drift guard: these two boxes are hand-derived from Avatar.POSES and
-    // Player.java:374, and `lodestone_physics::pose` now ships the same
+    // Drift guard: these two boxes are hand-derived from vanilla's own pose
+    // table, and `lodestone_physics::pose` now ships the same
     // construction. If the shipped one ever changes shape, this is where it shows.
     assert_eq!(standing, lodestone_physics::Pose::Standing.fit_box(feet));
     assert_eq!(swimming, lodestone_physics::Pose::Swimming.fit_box(feet));
@@ -279,7 +283,7 @@ fn the_pose_fit_gate_needs_both_terms_and_a_mob_contributes_to_neither() {
     );
 
     // A mob standing in the same cell changes nothing: it is pushable, not
-    // collidable, so `getEntityCollisions` skips it and the swimmer still fits.
+    // collidable, so vanilla's own nearby-entity-collisions query skips it and the swimmer still fits.
     // This is why the swimming-hitbox work is *not* blocked on entity collision:
     // its entity term is vacuous for every player and every mob.
     let mob = NearbyEntity::living(feet, EntityDimensions::PLAYER.bounding_box(feet));
@@ -292,7 +296,7 @@ fn the_pose_fit_gate_needs_both_terms_and_a_mob_contributes_to_neither() {
     // of case where the entity term changes the answer.
     let mut shulker = mob;
     shulker.collidable = true;
-    shulker.pushable = false; // Shulker inherits Entity.isPushable() == false
+    shulker.pushable = false; // the shulker inherits the base "is pushable" check == false
     assert!(
         !no_collision_among_entities(&view, swimming, &[shulker]),
         "a shulker is a collider and must veto the pose"
@@ -305,9 +309,9 @@ fn the_pose_fit_gate_needs_both_terms_and_a_mob_contributes_to_neither() {
 
 #[test]
 fn a_same_vehicle_passenger_is_neither_a_collider_nor_a_pusher() {
-    // `Entity.canCollideWith` (`Entity.java:2377-2379`) ends in
-    // `!this.isPassengerOfSameVehicle(entity)`, so two riders of one boat do not
-    // clip through the boat's own occupants.
+    // Vanilla's own "can collide with" check ends in its own "is passenger
+    // of same vehicle" check negated, so two riders of one boat do not clip
+    // through the boat's own occupants.
     let feet = Vec3d::new(0.5, 1.0, 0.5);
     let probe = player_box(0.5, 1.0, 0.5);
     let mut rider = NearbyEntity::living(feet, EntityDimensions::PLAYER.bounding_box(feet));
@@ -316,6 +320,6 @@ fn a_same_vehicle_passenger_is_neither_a_collider_nor_a_pusher() {
     rider.same_vehicle = true;
     assert!(
         no_entity_collision(probe, &[rider]),
-        "isPassengerOfSameVehicle must drop the collider"
+        "vanilla's own \"is passenger of same vehicle\" check must drop the collider"
     );
 }
