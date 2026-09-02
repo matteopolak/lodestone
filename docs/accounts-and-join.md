@@ -91,7 +91,7 @@ known live-server hazard — see the root project rules).
 ### Join readiness: the loading-screen gate
 
 The loading screen clears only when **two** independent conditions are both satisfied: the
-terrain rule (the player's own chunk column has arrived — vanilla's own `WaitingForPlayerChunk`
+terrain rule (the player's own chunk column has arrived — vanilla's own wait-for-player-chunk
 rule) and the asset rule (no server-pushed resource pack is still downloading or waiting to be
 applied to the block atlas). Both are measured from one shared clock, the moment the client
 enters `ConnectPhase::LoadingTerrain`, with vanilla's own 30-second `CLIENT_WAIT_TIMEOUT` — a

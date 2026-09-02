@@ -14,7 +14,7 @@ pack stack, and the diagnostic env vars for a pack author's font.
 
 ### The wire and the decision
 
-`ClientboundResourcePackPushPacket`/`Pop` decode into `ClientEvent::ResourcePackPushed`/
+The resource-pack push/pop packets decode into `ClientEvent::ResourcePackPushed`/
 `Popped` and are answered directly inside the net thread's own connection
 loop, not through the ordinary `forward`/`Sim::poll_net` path every other
 event takes — because responding may need to *do* something (spawn a
