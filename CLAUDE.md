@@ -215,6 +215,9 @@ section to annotating it.
   unconditional and the sprint bonus gated" rather than a method name. Behaviour, constants and
   measurements are all still welcome — it is the *identifiers* that go. Our own types keep their
   names even where they coincide (`BlockPos`, `ItemStack`, `ResourceLocation` are ours).
+  **Scoped to Mojang's code only** (owner's ruling): third-party APIs we interoperate with keep their
+  names — Bukkit/Paper especially, since a compatibility surface cannot be documented without naming
+  it — as do the JDK, our own `oracle-java/` harnesses, and any path a tool or test actually reads.
 
 **AI-ingested artifacts are size-capped.** `CLAUDE.md` is auto-loaded into every agent's context, so it
 is budgeted like code: a pre-commit hook (`.githooks/pre-commit`, installed by `just install-hooks`)
