@@ -247,6 +247,16 @@ collision downstream keep the un-backed-off value, so releasing shift
 mid-hold launches at full speed. World-border collision is the one
 unmodelled term of the block/entity/border triple this check consults.
 
+The 0.25-block correction check itself is purely horizontal — the vertical
+component is always zeroed before the comparison, so no fall of any speed
+ever trips it on that account alone. `crates/lodestone-shell/tests/live/
+live_edge_back_off_rubber_band.rs` is the live confirmation of both halves
+against the survival oracle: sneaking at a real built ledge produces zero
+adopted `TeleportPlayer`s (`Sim::teleport_count` stays flat), and an ordinary
+fall whose per-tick vertical delta exceeds the threshold produces zero as
+well, contrasted against an RCON `tp`'s own teleport, which the same counter
+does register — the control proving the counter can move at all.
+
 ### Component sets
 
 Player, session/HUD and generic-entity state all live as `bevy_ecs`
