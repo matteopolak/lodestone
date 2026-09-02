@@ -49,7 +49,7 @@ struct Origin {
     section_origin: vec4<f32>,
 };
 
-// Vanilla's `Options.chunkSectionFadeInTime` shipped default (`Options.java`,
+// Vanilla's shipped chunk-section fade-in time (
 // range 0.0..=2.0 seconds). This client has no video-settings UI to expose
 // the option yet, so it is hardcoded exactly like `BRIGHTNESS_FACTOR` below --
 // and must move with `lodestone_render::SECTION_FADE_DURATION_SECS`, the same
@@ -114,7 +114,7 @@ fn not_gamma_vec3(c: vec3<f32>) -> vec3<f32> {
     return c * (max_scaled / max_component);
 }
 
-// `Options.gamma`'s default (0.5, `Options.java:900`), which `lightmap.fsh`
+// the shipped gamma default (0.5), which vanilla's own lightmap pass
 // consumes as `BrightnessFactor`. Hardcoded because this client has no
 // brightness setting yet; 0.0 is vanilla's `Moody`, 1.0 its `Bright`.
 const BRIGHTNESS_FACTOR: f32 = 0.5;
@@ -143,7 +143,7 @@ const BLOCK_FACTOR: f32 = 1.4;
 // doc for the full derivation and the JVM-oracle verification. `SKY_LIGHT_COLOR`
 // and `SKY_LIGHT_FACTOR` share identical keyframe ticks with no easing, so
 // `t = clamp((1 - sky_darken) / 0.76, 0, 1)` recovers the same interpolation
-// parameter, and `lerp_byte` is `Mth.lerpInt`'s floor -- a `round` here is off
+// parameter, and `lerp_byte` floors, as vanilla's integer lerp does -- a `round` here is off
 // by one byte on roughly half of all ticks.
 fn lerp_byte(t: f32, byte_from: f32, byte_to: f32) -> f32 {
     return (byte_from + floor(t * (byte_to - byte_from))) / 255.0;
@@ -301,7 +301,7 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 }
 
 // Vanilla `terrain.fsh`'s `sampleNearest`, the *default* terrain sample in
-// 26.2 (`TextureFilteringMethod.NONE`, `Options.java`'s shipped value, is the
+// 26.2 (no texture filtering, the shipped value, is the
 // `UseRgss == 0` branch of that shader's `main`). It is not a plain
 // `textureSample`, and the difference is the whole point:
 //
@@ -579,7 +579,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // shade above, because vanilla's is: `fog.glsl`'s `apply_fog` does
     // `mix(inColor.rgb, fogColor.rgb, fogValue)` on `terrain.fsh`'s
     // `texture * vertexColor`, which are raw non-colour-managed bytes, and
-    // `FogColor` is `ARGB.vector4fFromARGB32(...)`, i.e. bytes over 255.
+    // `FogColor` is an ARGB word unpacked to a vector, i.e. bytes over 255.
     //
     // This used to mix in linear light, and it is exactly the failure the
     // comment above warns about — one line later, on the same value. It is a
