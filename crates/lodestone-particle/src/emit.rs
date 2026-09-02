@@ -8,8 +8,8 @@
 //!
 //! # Block shapes come from the caller
 //!
-//! Vanilla reads `BlockState.getShape` (the **outline** shape, the one the
-//! selection box traces) rather than the collision shape. The two differ for a
+//! Vanilla reads its own block-state outline-shape accessor (the **outline**
+//! shape, the one the selection box traces) rather than the collision shape. The two differ for a
 //! meaningful set of blocks: `short_grass` has a small outline and *no*
 //! collision at all, so driving a break burst from collision geometry would emit
 //! nothing when a player breaks grass — one of the most common actions there is.
@@ -53,7 +53,7 @@ pub const FULL_CUBE: Aabb = Aabb {
     max_z: 1.0,
 };
 
-/// `new TerrainParticle(...)` — one fragment of a block.
+/// Vanilla's own terrain-particle constructor — one fragment of a block.
 ///
 /// `tint` is the block's colour multiplier at this position (grass and foliage
 /// are biome-tinted; everything else is white). Vanilla starts every terrain
@@ -61,7 +61,7 @@ pub const FULL_CUBE: Aabb = Aabb {
 /// fragments always look slightly darker than the block they came from.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `TerrainParticle` constructor argument for argument"
+    reason = "mirrors vanilla's own terrain-particle constructor argument for argument"
 )]
 #[must_use]
 pub fn terrain_particle(
@@ -86,7 +86,7 @@ pub fn terrain_particle(
     p
 }
 
-/// `ClientLevel.addDestroyBlockEffect` — the burst when a block is destroyed.
+/// Vanilla's own "add destroy block effect" step — the burst when a block is destroyed.
 ///
 /// Vanilla subdivides the block's outline shape at a density of `0.25`, with a
 /// floor of two samples per axis, and emits one fragment per cell moving
@@ -105,7 +105,7 @@ pub fn destroy_block_effect(
     tint: [f32; 3],
     shape: &[Aabb],
 ) {
-    /// `double density = 0.25` in `addDestroyBlockEffect`.
+    /// `double density = 0.25` in vanilla's own "add destroy block effect" step.
     const DENSITY: f64 = 0.25;
 
     let (bx, by, bz) = block;
@@ -143,7 +143,8 @@ pub fn destroy_block_effect(
     }
 }
 
-/// `Math.max(2, Mth.ceil(width / density))`.
+/// Vanilla's own subdivision-count formula: at least 2, else vanilla's own
+/// quantized ceiling of `width / density`.
 fn subdivisions(width: f64, density: f64) -> i32 {
     #[expect(
         clippy::cast_possible_truncation,
@@ -158,7 +159,7 @@ fn midpoint(i: i32, count: i32) -> f64 {
     (f64::from(i) + 0.5) / f64::from(count)
 }
 
-/// `ClientLevel.addBreakingBlockEffect` — the single fragment that pops off the
+/// Vanilla's own "add breaking block effect" step — the single fragment that pops off the
 /// face a player is currently mining.
 ///
 /// Vanilla emits one of these every few ticks while a dig is in progress, which
@@ -205,14 +206,14 @@ pub fn breaking_block_effect(
     }
 
     let mut p = terrain_particle(xp, yp, zp, 0.0, 0.0, 0.0, state, tint, engine.rng());
-    // `.setPower(0.2F).scale(0.6F)` — a mining chip is slower and smaller than a
+    // Vanilla's own "set power" step at `0.2F` then a `0.6F` scale — a mining chip is slower and smaller than a
     // destruction fragment.
     p.set_power(0.2);
     p.scale(0.6);
     engine.add(p);
 }
 
-/// `TerrainParticle.Provider` — the wire-driven `minecraft:block` particle.
+/// Vanilla's own terrain-particle provider — the wire-driven `minecraft:block` particle.
 ///
 /// The plain provider: a [`terrain_particle`] built from the packet's own
 /// position and velocity, with nothing overridden afterwards. This is *not* the
@@ -232,8 +233,8 @@ pub fn block_fragment(
     engine.add(p);
 }
 
-/// `TerrainParticle.CrumblingProvider` (`minecraft:block_crumble`) — the flecks
-/// a creaking heart and a trial-spawner ejection shed off a block.
+/// Vanilla's own terrain-particle crumbling provider (`minecraft:block_crumble`)
+/// — the flecks a creaking heart and a trial-spawner ejection shed off a block.
 ///
 /// A [`terrain_particle`] whose velocity is then **discarded entirely** and
 /// whose lifetime is re-rolled short: `setParticleSpeed(0, 0, 0)` and
@@ -258,7 +259,7 @@ pub fn block_crumble(
     engine.add(p);
 }
 
-/// `TerrainParticle.DustPillarProvider` (`minecraft:dust_pillar`) — the column a
+/// Vanilla's own terrain-particle dust-pillar provider (`minecraft:dust_pillar`) — the column a
 /// mace's smash attack throws up out of the ground it lands on.
 ///
 /// A [`terrain_particle`] whose velocity is replaced by
@@ -284,15 +285,15 @@ pub fn dust_pillar(
     engine.add(p);
 }
 
-/// `BlockMarker.Provider` (`minecraft:block_marker`) — the ghost block a light
+/// Vanilla's own block-marker provider (`minecraft:block_marker`) — the ghost block a light
 /// block or a barrier shows while you hold its item.
 ///
-/// The only member of the `BlockParticleOption` family that is **not** a
-/// `TerrainParticle`, and every one of its four constructor lines is a
+/// The only member of the block-particle-option family that is **not** a
+/// vanilla terrain particle, and every one of its four constructor lines is a
 /// departure from one: it takes the block's *whole* particle sprite rather than
 /// a random quarter, it is untinted (no `0.6` grey, no tint-source multiply),
 /// it has `gravity = 0`, `hasPhysics = false` and no velocity, and its
-/// `getQuadSize` returns a flat `0.5F` for its whole 80-tick life.
+/// its own quad-size accessor returns a flat `0.5F` for its whole 80-tick life.
 ///
 /// That last one is why this carries [`Behaviour::Plain`] rather than a variant
 /// of its own: `Plain`'s size is `quad_size` unchanged, so setting the field to
@@ -313,7 +314,7 @@ pub fn block_marker(engine: &mut ParticleEngine, pos: [f64; 3], state: u32) {
     engine.add(p);
 }
 
-/// `FallingDustParticle.Provider` (`minecraft:falling_dust`) — the trickle under
+/// Vanilla's own falling-dust-particle provider (`minecraft:falling_dust`) — the trickle under
 /// an unsupported sand, gravel or concrete-powder column.
 ///
 /// Textured from [`Sheet::Generic`] and **tinted** from the block, which is the
@@ -322,7 +323,7 @@ pub fn block_marker(engine: &mut ParticleEngine, pos: [f64; 3], state: u32) {
 /// all of the block's identity in its colour.
 ///
 /// `tint` is that colour, already resolved by the caller. Vanilla resolves it
-/// through a three-step chain — `FallingBlock.getDustColor`, else the block's
+/// through a three-step chain — vanilla's own falling-block dust-color accessor, else the block's
 /// tint source, else `state.getMapColor(level, pos).col` — and this client has
 /// data for the middle step only, so an untinted block arrives here as white
 /// rather than as its map colour. See `docs/particle-catalogue.md`; the visible
@@ -367,20 +368,21 @@ pub fn falling_dust(engine: &mut ParticleEngine, pos: [f64; 3], tint: [f32; 3]) 
     engine.add(p);
 }
 
-/// `new BreakingItemParticle(...)` — one crumb of an item.
+/// Vanilla's own breaking-item particle constructor — one crumb of an item.
 ///
 /// The same shape as [`terrain_particle`] and deliberately so: vanilla's
-/// `BreakingItemParticle` and `TerrainParticle` have **byte-identical**
-/// `getU0`/`getU1`/`getV0`/`getV1` overrides (a quarter sub-sprite at
+/// own breaking-item particle and its terrain particle have **byte-identical**
+/// its own U0/U1/V0/V1 accessor overrides (a quarter sub-sprite at
 /// `(uo + 1) / 4 .. uo / 4`, `uo`/`vo` each `random.nextFloat() * 3.0F`), the same
 /// `gravity = 1.0F` and the same `quadSize /= 2.0F`, so [`Behaviour::Terrain`]
 /// describes both. Only the sprite source and the absence of a `0.6` grey differ:
 /// an item crumb is drawn at full brightness.
 ///
-/// # The velocity is *not* `setPower`
+/// # The velocity is *not* vanilla's own "set power" step
 ///
-/// `BreakingItemParticle`'s public constructor chains to the zero-velocity one and
-/// then does `xd *= 0.1F; … xd += xa;`, a **plain multiply of all three
+/// Vanilla's own breaking-item particle's public constructor chains to the
+/// zero-velocity one and then does `xd *= 0.1F; … xd += xa;`, a **plain multiply
+/// of all three
 /// components** followed by an add.
 /// [`Particle::set_power`](crate::Particle::set_power) is the wrong tool: it
 /// deliberately preserves [`Particle::with_velocity`](crate::Particle::with_velocity)'s
@@ -417,12 +419,12 @@ pub fn item_particle(
     p
 }
 
-/// `LivingEntity.spawnItemParticles(itemStack, count)` — the crumbs that fly from
-/// an entity's mouth while it eats, and the same burst `breakItem` throws when a
-/// tool snaps.
+/// Vanilla's own "spawn item particles" step — the crumbs that fly from
+/// an entity's mouth while it eats, and the same burst vanilla's own "break item"
+/// step throws when a tool snaps.
 ///
 /// `count` is **5** per periodic emission while consuming and **16** on the final
-/// bite (`ItemStack.onUseTick` and `Consumable.onConsume` respectively); it is a
+/// bite (vanilla's own item "on use tick" and "on consume" steps respectively); it is a
 /// parameter because those are the two call sites and neither number belongs here.
 ///
 /// # Everything is in the entity's own facing frame
@@ -439,7 +441,7 @@ pub fn item_particle(
 /// which is where a mouth is.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors `spawnItemParticles` plus the eye position and facing it reads off the entity"
+    reason = "mirrors vanilla's own \"spawn item particles\" step plus the eye position and facing it reads off the entity"
 )]
 pub fn spawn_item_particles(
     engine: &mut ParticleEngine,
@@ -469,7 +471,7 @@ pub fn spawn_item_particles(
             let rng = engine.rng();
             // `double y1 = -nextFloat() * 0.6 - 0.3;`
             // `new Vec3((nextFloat() - 0.5) * 0.3, y1, 0.6)` — note vanilla draws
-            // `y1` *before* the horizontal jitter, so the two `nextFloat()` calls
+            // `y1` *before* the horizontal jitter, so the two RNG draws
             // are in that order and swapping them desynchronises the sequence.
             let y1 = (-f64::from(rng.next_f32())).mul_add(0.6, -0.3);
             let p = ((f64::from(rng.next_f32()) - 0.5) * 0.3, y1, 0.6);
@@ -492,25 +494,25 @@ pub fn spawn_item_particles(
     }
 }
 
-/// `Vec3.xRot(radians)`.
+/// Vanilla's own vector X-rotation.
 fn x_rot((x, y, z): (f64, f64, f64), radians: f32) -> (f64, f64, f64) {
     let (cos, sin) = (f64::from(radians.cos()), f64::from(radians.sin()));
     (x, y * cos + z * sin, z * cos - y * sin)
 }
 
-/// `Vec3.yRot(radians)`.
+/// Vanilla's own vector Y-rotation.
 fn y_rot((x, y, z): (f64, f64, f64), radians: f32) -> (f64, f64, f64) {
     let (cos, sin) = (f64::from(radians.cos()), f64::from(radians.sin()));
     (x * cos + z * sin, y, z * cos - x * sin)
 }
 
-/// `CritParticle` — the sparkle on a critical hit.
+/// Vanilla's own crit particle — the sparkle on a critical hit.
 pub fn crit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let p = crit_particle(engine, x, y, z, xa, ya, za, Sheet::CriticalHit);
     engine.add(p);
 }
 
-/// `CritParticle.MagicProvider` (`ParticleTypes.ENCHANTED_HIT`) — the sparkle
+/// Vanilla's own crit-particle magic provider (`minecraft:enchanted_hit`) — the sparkle
 /// an enchanted weapon throws instead of the plain white crit.
 ///
 /// The same constructor as [`crit`] over [`Sheet::EnchantedHit`]'s own texture,
@@ -526,7 +528,7 @@ pub fn enchanted_hit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f6
     engine.add(p);
 }
 
-/// `CritParticle.DamageIndicatorProvider` (`ParticleTypes.DAMAGE_INDICATOR`) —
+/// Vanilla's own crit-particle damage-indicator provider (`minecraft:damage_indicator`) —
 /// the mote thrown by a hit that actually dealt damage.
 ///
 /// Two provider-level differences from [`crit`], both easy to lose: the
@@ -549,14 +551,14 @@ pub fn damage_indicator(
     engine.add(p);
 }
 
-/// The `CritParticle` constructor, shared by its three providers.
+/// Vanilla's own crit-particle constructor, shared by its three providers.
 ///
 /// Returned rather than added so each provider can apply its own
 /// post-construction tint or lifetime before the particle goes live — the same
-/// split vanilla gets for free by returning the object from `createParticle`.
+/// split vanilla gets for free by returning the object from its own "create particle" step.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `CritParticle` constructor argument for argument, plus the sheet \
+    reason = "mirrors vanilla's own crit-particle constructor argument for argument, plus the sheet \
               its own particle definition names"
 )]
 fn crit_particle(
@@ -602,7 +604,7 @@ fn crit_particle(
     p
 }
 
-/// The parameters `BaseAshSmokeParticle`'s constructor takes, which is what
+/// The parameters vanilla's own base ash/smoke particle's constructor takes, which is what
 /// separates its five subclasses from one another.
 ///
 /// Vanilla's base takes eight of these positionally after the coordinates, so a
@@ -615,22 +617,23 @@ pub struct AshSmokeParams {
     /// `dirX/dirY/dirZ` — per-axis damping applied to the *scattered* velocity
     /// before the caller's own is added. Negative flips that axis.
     pub dir: [f32; 3],
-    /// `colorRandom` — the greyscale tint is `nextFloat() * colorRandom`, so
-    /// `0.0` means black before any `setColor` the subclass applies.
+    /// Vanilla's own "color random" field — the greyscale tint is
+    /// `nextFloat() * colorRandom`, so `0.0` means black before any color
+    /// override the subclass applies.
     pub colour_random: f32,
-    /// `maxLifetime` — the numerator of `(int)(maxLifetime / (nextFloat() * 0.8
+    /// Vanilla's own "max lifetime" field — the numerator of `(int)(maxLifetime / (nextFloat() * 0.8
     /// + 0.2) * scale)`.
     pub max_lifetime: i32,
     /// `gravity`. Negative rises.
     pub gravity: f32,
-    /// `hasPhysics` — smoke collides, ash does not.
+    /// Vanilla's own "has physics" field — smoke collides, ash does not.
     pub has_physics: bool,
 }
 
-/// `BaseAshSmokeParticle`'s constructor, shared by `smoke`, `large_smoke`,
-/// `ash`, `white_ash` and `white_smoke`.
+/// Vanilla's own base ash/smoke particle's constructor, shared by `smoke`,
+/// `large_smoke`, `ash`, `white_ash` and `white_smoke`.
 ///
-/// `setSpriteFromAge` runs at the end of the constructor, before the first
+/// Vanilla's own "set sprite from age" step runs at the end of the constructor, before the first
 /// tick, which is why the sprite is re-stamped here rather than left on frame
 /// zero.
 pub fn base_ash_smoke(
@@ -670,11 +673,11 @@ pub fn base_ash_smoke(
     p
 }
 
-/// `SmokeParticle` — `BaseAshSmokeParticle` with smoke's parameters
+/// Vanilla's own smoke particle — the base ash/smoke particle with smoke's parameters
 /// (`0.3` colour jitter, 8-tick base lifetime, `-0.1` gravity so it rises).
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `SmokeParticle` constructor argument for argument"
+    reason = "mirrors vanilla's own smoke-particle constructor argument for argument"
 )]
 pub fn smoke(
     engine: &mut ParticleEngine,
@@ -703,10 +706,10 @@ pub fn smoke(
     engine.add(p);
 }
 
-/// `WhiteSmokeParticle` — smoke's parameters exactly, over a fixed lilac-grey
-/// tint (`0xBAB1C2`) rather than the greyscale draw.
+/// Vanilla's own white-smoke particle — smoke's parameters exactly, over a
+/// fixed lilac-grey tint (`0xBAB1C2`) rather than the greyscale draw.
 ///
-/// The `colorRandom` draw still happens (it is inside the base constructor) and
+/// The color-random draw still happens (it is inside the base constructor) and
 /// is then overwritten, so the RNG stream length matches vanilla's.
 pub fn white_smoke(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let mut p = base_ash_smoke(
@@ -727,12 +730,13 @@ pub fn white_smoke(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64,
     engine.add(p);
 }
 
-/// `AshParticle` — the black flakes drifting down through the soul sand valley.
+/// Vanilla's own ash particle — the black flakes drifting down through the soul sand valley.
 ///
 /// Three sign-level differences from [`smoke`], each a lone number in vanilla's
-/// positional argument list: `dirY` is **negative** (the scattered vertical
-/// component is inverted), `gravity` is **positive** `0.1` so it falls rather
-/// than rises, and `hasPhysics` is **false** so it drifts through the terrain.
+/// positional argument list: the vertical scatter direction is **negative**
+/// (the scattered vertical component is inverted), gravity is **positive**
+/// `0.1` so it falls rather than rises, and collision is **off** so it drifts
+/// through the terrain.
 /// Its sheet is [`Sheet::Generic0`], a single frame — `ash.json` names one
 /// texture, so ash does not animate at all.
 pub fn ash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
@@ -753,10 +757,10 @@ pub fn ash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     engine.add(p);
 }
 
-/// `WhiteAshParticle` — the basalt delta's pale drift.
+/// Vanilla's own white-ash particle — the basalt delta's pale drift.
 ///
-/// `AshParticle`'s shape with a far gentler `0.0125` gravity, a `colorRandom`
-/// of **zero** (so the greyscale draw yields black and the fixed tint below is
+/// Vanilla's own ash particle's shape with a far gentler `0.0125` gravity, a
+/// color-random field of **zero** (so the greyscale draw yields black and the fixed tint below is
 /// the whole colour), and a provider-supplied initial velocity: three products
 /// of two `nextFloat()`s each, all negative, so the flakes always drift down
 /// and toward `-x`/`-z`.
@@ -783,12 +787,12 @@ pub fn white_ash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     engine.add(p);
 }
 
-/// `0xBAB1C2` as `[f32; 3]` — the tint `WhiteAshParticle` and
-/// `WhiteSmokeParticle` both declare as `COLOR_RGB24 = 12235202` and then
+/// `0xBAB1C2` as `[f32; 3]` — the tint vanilla's own white-ash and
+/// white-smoke particles both declare as their own packed-RGB constant and then
 /// unpack channel by channel (`186, 177, 194`).
 const ASH_WHITE: [f32; 3] = [186.0 / 255.0, 177.0 / 255.0, 194.0 / 255.0];
 
-/// `FlameParticle` — a `RisingParticle` that ignores collision.
+/// Vanilla's own flame particle — a rising particle that ignores collision.
 pub fn flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
     let rng = engine.rng();
     let mut p = Particle::with_velocity(
@@ -828,7 +832,7 @@ pub fn flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f
     engine.add(p);
 }
 
-/// `BubbleParticle` — rises through water and pops the instant it leaves.
+/// Vanilla's own bubble particle — rises through water and pops the instant it leaves.
 pub fn bubble(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let rng = engine.rng();
     let mut p = Particle::new(
@@ -856,7 +860,7 @@ pub fn bubble(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: 
     engine.add(p);
 }
 
-/// `SplashParticle` — a `WaterDropParticle` launched by something entering water.
+/// Vanilla's own splash particle — a water-drop particle launched by something entering water.
 pub fn splash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let rng = engine.rng();
     let mut p = Particle::with_velocity(
@@ -872,7 +876,7 @@ pub fn splash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: 
         },
         rng,
     );
-    // `WaterDropParticle`'s constructor.
+    // Vanilla's own water-drop particle's constructor.
     p.xd *= f64::from(0.3_f32);
     p.zd *= f64::from(0.3_f32);
     p.yd = f64::from(rng_next(engine).mul_add(0.2, 0.1));
@@ -883,7 +887,7 @@ pub fn splash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: 
     )]
     let lifetime = (f64::from(8.0_f32) / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
     p.lifetime = lifetime;
-    // `SplashParticle` overrides gravity and, for purely horizontal input,
+    // Vanilla's own splash particle overrides gravity and, for purely horizontal input,
     // replaces the velocity outright so the drop arcs upward.
     p.gravity = 0.04;
     if ya == 0.0 && (xa != 0.0 || za != 0.0) {
@@ -912,26 +916,24 @@ fn rng_next(engine: &mut ParticleEngine) -> f32 {
     engine.rng().next_f32()
 }
 
-/// `AttackSweepParticle` — the arc thrown by a sweeping melee hit.
+/// Vanilla's own attack-sweep particle — the arc thrown by a sweeping melee hit.
 ///
-/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/AttackSweepParticle.java`:
-/// no `move()` call at all (stationary for its whole life — see
+/// From vanilla's own attack-sweep particle constructor (26.2 decompile):
+/// no move step call at all (stationary for its whole life — see
 /// [`crate::Particle::tick_sweep_attack`]), full-bright, 4-tick lifetime, a
 /// grey tint drawn once (`nextFloat() * 0.6F + 0.4F`), and
 /// `quadSize = 1.0F - (float) size * 0.5F`.
 ///
-/// `size` is the constructor's own `xAux` parameter — but the one real
-/// vanilla call site
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/player/Player.java:1191`,
-/// `serverLevel.sendParticles(ParticleTypes.SWEEP_ATTACK, x, y, z, 0, dx, 0.0,
-/// dz, 0.0)`) sends `count == 0` with `maxSpeed == 0.0F`, and
-/// `ClientPacketListener.handleParticleEvent`'s `count == 0` branch computes
-/// `xAux = maxSpeed * xDist`, so the value that actually reaches this
+/// `size` is the constructor's own auxiliary-X parameter — but the one real
+/// vanilla call site (the player's own attack step, sending the sweep-attack
+/// particle with count `0` and max speed `0.0F`) means the client's own
+/// particle-event handler's `count == 0` branch computes the auxiliary value
+/// as `maxSpeed * xDist`, so the value that actually reaches this
 /// constructor in real play is always `0.0`, regardless of `dx` — i.e.
 /// `quadSize` is always `1.0` in practice. Taking `size` as a parameter
 /// anyway (rather than hardcoding that) keeps this a faithful transcription
 /// of the Java constructor for any future caller (a datapack or `/particle`
-/// invocation can still pass a nonzero `xAux`).
+/// invocation can still pass a nonzero auxiliary value).
 pub fn sweep_attack(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size: f32) {
     let rng = engine.rng();
     let mut p = Particle::new(
@@ -952,11 +954,11 @@ pub fn sweep_attack(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size: f
     engine.add(p);
 }
 
-/// `NoteParticle` — the coloured chime above a played note block.
+/// Vanilla's own note particle — the coloured chime above a played note block.
 ///
-/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/NoteParticle.java`:
+/// From vanilla's own note particle constructor (26.2 decompile):
 /// zero initial velocity, `friction = 0.66F`,
-/// `speedUpWhenYMotionIsBlocked = true`, `yd += 0.2`, a fixed `lifetime = 6`
+/// speed-up-when-Y-motion-is-blocked = true, `yd += 0.2`, a fixed `lifetime = 6`
 /// (overwriting whatever the base constructor's lifetime draw produced), and
 /// `quadSize *= 1.5F`. The RGB formula reads a note-block "colour" in `[0,
 /// 1)` (vanilla passes `note / 24.0`, the tuned-pitch index over its 24-note
@@ -987,13 +989,12 @@ pub fn note(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, color: f64) {
     engine.add(p);
 }
 
-/// The shared `HeartParticle` constructor body
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/particle/HeartParticle.java`):
-/// zero initial velocity, `speedUpWhenYMotionIsBlocked = true`,
+/// Vanilla's own heart-particle constructor body (26.2 decompile):
+/// zero initial velocity, speed-up-when-Y-motion-is-blocked = true,
 /// `friction = 0.86F`, `yd += 0.1`, `quadSize *= 1.5F`, `lifetime = 16`,
 /// `hasPhysics = false`. [`heart`] and [`angry_villager`] are its two
 /// registered providers — same class, different sprite and vertical offset
-/// at the emit site (the `+ 0.5` in `AngryVillagerProvider.createParticle`).
+/// at the emit site (the `+ 0.5` its own angry-villager provider applies).
 fn heart_particle(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, sheet: Sheet) -> Particle {
     let rng = engine.rng();
     let mut p = Particle::new(
@@ -1013,14 +1014,14 @@ fn heart_particle(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, sheet: Sh
     p
 }
 
-/// `HeartParticle.Provider` — breeding hearts (`ParticleTypes.HEART`).
+/// Vanilla's own heart-particle provider — breeding hearts (`minecraft:heart`).
 pub fn heart(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     let p = heart_particle(engine, x, y, z, Sheet::Heart);
     engine.add(p);
 }
 
-/// `HeartParticle.AngryVillagerProvider` — the villager "angry" icon
-/// (`ParticleTypes.ANGRY_VILLAGER`). Same physics as [`heart`], a different
+/// Vanilla's own heart-particle angry-villager provider — the villager "angry" icon
+/// (`minecraft:angry_villager`). Same physics as [`heart`], a different
 /// sprite (`particle/angry`, not `particle/heart`), and vanilla raises the
 /// spawn point by `0.5` at the call site rather than in the particle class —
 /// reproduced here since this function *is* that call site.
@@ -1029,24 +1030,23 @@ pub fn angry_villager(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     engine.add(p);
 }
 
-/// `SuspendedTownParticle.HappyVillagerProvider` — the villager "happy" icon
-/// (`ParticleTypes.HAPPY_VILLAGER`).
+/// Vanilla's own suspended-town-decoration particle's happy-villager
+/// provider — the villager "happy" icon (`minecraft:happy_villager`).
 ///
-/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/SuspendedTownParticle.java`:
-/// a jittered-velocity construction (vanilla's `super(level, x, y, z, xa, ya,
-/// za, sprite)` — the same `Particle(level, x, y, z, xa, ya, za)` shape
+/// From vanilla's own suspended-town-decoration particle constructor (26.2
+/// decompile): a jittered-velocity construction (the same shape
 /// [`Particle::with_velocity`] already reproduces) followed by a dim grey
 /// tint (`nextFloat() * 0.1F + 0.2F`), a `0.02`×`0.02` box, a
 /// `nextFloat() * 0.6F + 0.5F` quad-size jitter, the velocity damped to a
 /// hundredth, and `lifetime = (int)(20.0 / (nextFloat() * 0.8F + 0.2F))`.
-/// `HappyVillagerProvider` itself then calls `setColor(1, 1, 1)`, which is
-/// redundant here since white is this crate's own particle default.
+/// Its own happy-villager provider itself then sets the colour to white,
+/// which is redundant here since white is this crate's own particle default.
 pub fn happy_villager(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let p = suspended_town(engine, x, y, z, xa, ya, za, Sheet::Glint);
     engine.add(p);
 }
 
-/// `SuspendedTownParticle` — the ambient-speck family: the villager mood icons,
+/// Vanilla's own suspended-town-decoration particle — the ambient-speck family: the villager mood icons,
 /// `mycelium`'s brown motes, a composter's white puff, an `egg_crack`, and a
 /// dolphin's speed trail.
 ///
@@ -1056,7 +1056,7 @@ pub fn happy_villager(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f
 /// ones that read as dust — so the sheet is a parameter, as always.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `SuspendedTownParticle` constructor argument for argument, plus \
+    reason = "mirrors vanilla's own suspended-town-decoration particle constructor argument for argument, plus \
               the sheet its provider supplies"
 )]
 pub fn suspended_town(
@@ -1098,7 +1098,7 @@ pub fn suspended_town(
     p
 }
 
-/// `SuspendedTownParticle.Provider` (`ParticleTypes.MYCELIUM`) — the brown
+/// Vanilla's own suspended-town-decoration particle provider (`minecraft:mycelium`) — the brown
 /// motes drifting off a mycelium block. No tint override, so the constructor's
 /// own dim grey (`nextFloat() * 0.1 + 0.2`) stands.
 pub fn mycelium(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
@@ -1106,7 +1106,7 @@ pub fn mycelium(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya
     engine.add(p);
 }
 
-/// `SuspendedTownParticle.ComposterFillProvider` — the puff when a composter
+/// Vanilla's own suspended-town-decoration particle composter-fill provider — the puff when a composter
 /// takes an item. White, and far shorter-lived than its siblings:
 /// `3 + nextInt(5)` ticks against the constructor's ~20–100.
 pub fn composter(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
@@ -1116,7 +1116,7 @@ pub fn composter(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, y
     engine.add(p);
 }
 
-/// `SuspendedTownParticle.EggCrackProvider` — the flecks off a hatching turtle
+/// Vanilla's own suspended-town-decoration particle egg-crack provider — the flecks off a hatching turtle
 /// egg. The constructor's grey replaced by white, and nothing else.
 pub fn egg_crack(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let mut p = suspended_town(engine, x, y, z, xa, ya, za, Sheet::Glint);
@@ -1124,7 +1124,7 @@ pub fn egg_crack(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, y
     engine.add(p);
 }
 
-/// `SuspendedTownParticle.DolphinSpeedProvider` — the blue trail behind a
+/// Vanilla's own suspended-town-decoration particle dolphin-speed provider — the blue trail behind a
 /// player riding Dolphin's Grace.
 ///
 /// A per-particle **alpha** draw (`1 - nextFloat() * 0.7`) as well as a tint, so
@@ -1138,7 +1138,7 @@ pub fn dolphin(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya:
     engine.add(p);
 }
 
-/// `SuspendedParticle` — the *other* ambient-speck class, and not a variant of
+/// Vanilla's own suspended particle — the *other* ambient-speck class, and not a variant of
 /// [`suspended_town`] despite the name.
 ///
 /// Four differences that matter: it is spawned **`0.125` blocks below** the
@@ -1181,7 +1181,7 @@ pub fn suspended(
     p
 }
 
-/// `SuspendedParticle.UnderwaterProvider` — the pale motes suspended in ocean
+/// Vanilla's own suspended-particle underwater provider — the pale motes suspended in ocean
 /// water. The **zero-velocity** constructor, so it hangs exactly where it
 /// spawned.
 pub fn underwater(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
@@ -1190,7 +1190,7 @@ pub fn underwater(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     engine.add(p);
 }
 
-/// `SuspendedParticle.CrimsonSporeProvider` — the pink drift of a crimson
+/// Vanilla's own suspended-particle crimson-spore provider — the pink drift of a crimson
 /// forest. Its velocity is three gaussians at wildly different scales: `1e-6`
 /// horizontally against `1e-4` vertically, i.e. essentially a slow vertical
 /// wander with no lateral motion at all.
@@ -1202,7 +1202,7 @@ pub fn crimson_spore(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     engine.add(p);
 }
 
-/// `SuspendedParticle.WarpedSporeProvider` — the blue drift of a warped forest.
+/// Vanilla's own suspended-particle warped-spore provider — the blue drift of a warped forest.
 /// Purely vertical (`nextFloat() * -1.9 * nextFloat() * 0.1`, always downward)
 /// and a tenth of a crimson spore's collision box.
 pub fn warped_spore(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
@@ -1214,10 +1214,10 @@ pub fn warped_spore(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     engine.add(p);
 }
 
-/// `SuspendedParticle.SporeBlossomAirProvider` — the green motes hanging under
+/// Vanilla's own suspended-particle spore-blossom-air provider — the green motes hanging under
 /// a spore blossom.
 ///
-/// **This is a `SuspendedParticle`, not a `DripParticle`.** It shares
+/// **This is a suspended particle, not a drip particle.** It shares
 /// `drip_fall`'s *texture* with `falling_spore_blossom` and nothing else: it
 /// hangs in the air rather than falling to a splash, its lifetime is a flat
 /// `500..=1000` ticks rather than a `64 / nextFloat` draw, and it carries a
@@ -1232,20 +1232,20 @@ pub fn spore_blossom_air(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     engine.add(p);
 }
 
-/// `ExplodeParticle` — the puff a mob leaves when it dies, a spawner throws
+/// Vanilla's own explode particle — the puff a mob leaves when it dies, a spawner throws
 /// when it spawns, and an animal throws when it breeds (`poof`); and a llama's
 /// `spit`.
 ///
 /// [`Behaviour::Animated`] rather than [`Behaviour::AshSmoke`]: this class
 /// advances its sheet by age like the ash-smoke family but does **not**
-/// override `getQuadSize`, so a puff is full size from its first frame.
+/// override its own quad-size accessor, so a puff is full size from its first frame.
 ///
 /// Its quad size is `0.1 * (nextFloat() * nextFloat() * 6 + 1)` — a *product*
 /// of two draws, which biases the distribution hard towards small puffs with an
 /// occasional large one, unlike the uniform jitters elsewhere in this file.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `ExplodeParticle` constructor argument for argument, plus its sheet"
+    reason = "mirrors vanilla's own explode-particle constructor argument for argument, plus its sheet"
 )]
 pub fn explode(
     engine: &mut ParticleEngine,
@@ -1282,14 +1282,14 @@ pub fn explode(
     p
 }
 
-/// `ExplodeParticle.Provider` (`ParticleTypes.POOF`) — the death, breeding and
+/// Vanilla's own explode-particle provider (`minecraft:poof`) — the death, breeding and
 /// spawn puff, and one of the most frequently spawned particles in the game.
 pub fn poof(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let p = explode(engine, x, y, z, xa, ya, za, Sheet::Generic);
     engine.add(p);
 }
 
-/// `SpitParticle` — `ExplodeParticle` with `gravity = 0.5F` instead of `-0.1F`,
+/// Vanilla's own spit particle — the explode particle with `gravity = 0.5F` instead of `-0.1F`,
 /// so a llama's spit arcs down rather than drifting up. One number, opposite
 /// sign, six times the magnitude.
 pub fn spit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
@@ -1298,7 +1298,7 @@ pub fn spit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f6
     engine.add(p);
 }
 
-/// `PlayerCloudParticle` — the `cloud` puff (an area-effect cloud, a dolphin's
+/// Vanilla's own player-cloud particle — the `cloud` puff (an area-effect cloud, a dolphin's
 /// wake, a thrown potion's burst) and, tinted green, a panda's `sneeze`.
 ///
 /// Two numbers set it apart from the smoke family it superficially resembles:
@@ -1353,13 +1353,13 @@ fn player_cloud(
     p
 }
 
-/// `PlayerCloudParticle.Provider` (`ParticleTypes.CLOUD`).
+/// Vanilla's own player-cloud-particle provider (`minecraft:cloud`).
 pub fn cloud(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let p = player_cloud(engine, (x, y, z), (xa, ya, za));
     engine.add(p);
 }
 
-/// `PlayerCloudParticle.SneezeProvider` — a baby panda's sneeze. The same puff
+/// Vanilla's own player-cloud-particle sneeze provider — a baby panda's sneeze. The same puff
 /// tinted green and dropped to `0.4` alpha.
 pub fn sneeze(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let mut p = player_cloud(engine, (x, y, z), (xa, ya, za));
@@ -1368,7 +1368,7 @@ pub fn sneeze(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: 
     engine.add(p);
 }
 
-/// `LavaParticle` — the popping embers over a lava surface.
+/// Vanilla's own lava particle — the popping embers over a lava surface.
 ///
 /// Its **vertical velocity is not the caller's**: the constructor damps all
 /// three axes to `0.8` and then overwrites `yd` outright with
@@ -1407,11 +1407,11 @@ pub fn lava(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     engine.add(p);
 }
 
-/// `SquidInkParticle` — a squid's ink cloud (`squid_ink`) and a glow squid's
+/// Vanilla's own squid-ink particle — a squid's ink cloud (`squid_ink`) and a glow squid's
 /// (`glow_squid_ink`).
 ///
 /// Note the lifetime: `(int)(quadSize * 12.0F / (nextFloat() * 0.8F + 0.2F))`
-/// with `quadSize` **already fixed at `0.5`**, so the numerator is `6.0` and no
+/// with the quad-size field **already fixed at `0.5`**, so the numerator is `6.0` and no
 /// random size draw feeds it — unlike every other lifetime in this file, this
 /// one is not scaled by a jittered size. `glow_squid_ink`'s only difference is
 /// the tint, and it is a translucent one (`alpha 0.6` in the packed colour)
@@ -1454,22 +1454,22 @@ fn squid_ink_particle(
     engine.add(p);
 }
 
-/// `SquidInkParticle.Provider` — plain black ink (`0xFF000000`).
+/// Vanilla's own squid-ink-particle provider — plain black ink (`0xFF000000`).
 pub fn squid_ink(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     squid_ink_particle(engine, (x, y, z), (xa, ya, za), [0.0, 0.0, 0.0], 1.0);
 }
 
-/// `SquidInkParticle.GlowInkProvider` — `ARGB.colorFromFloat(1.0F, 0.2F, 0.8F,
-/// 0.6F)`, i.e. **alpha 1.0** with an `(0.2, 0.8, 0.6)` teal, not the
-/// alpha-0.6 reading the argument order invites. `colorFromFloat` takes
-/// `(alpha, red, green, blue)`.
+/// Vanilla's own squid-ink-particle glow-ink provider — its own packed-colour
+/// constructor called `(1.0F, 0.2F, 0.8F, 0.6F)`, i.e. **alpha 1.0** with an
+/// `(0.2, 0.8, 0.6)` teal, not the alpha-0.6 reading the argument order
+/// invites. That constructor takes `(alpha, red, green, blue)`.
 pub fn glow_squid_ink(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     squid_ink_particle(engine, (x, y, z), (xa, ya, za), [0.2, 0.8, 0.6], 1.0);
 }
 
-/// `SculkChargePopParticle` — the burst when a sculk charge finishes spreading.
+/// Vanilla's own sculk-charge-pop particle — the burst when a sculk charge finishes spreading.
 ///
-/// `ExplodeParticle`'s tick shape ([`Behaviour::Animated`]) over its own
+/// Vanilla's own explode particle's tick shape ([`Behaviour::Animated`]) over its own
 /// four-frame sheet, but **translucent** rather than opaque — which is the whole
 /// reason that behaviour carries its layer as a field. `scale(1.0F)` is a no-op
 /// on the quad and resets the collision box to the default `0.2`, and the
@@ -1516,7 +1516,7 @@ pub fn sculk_charge_pop(
 }
 
 /// One standard-normal draw, for the providers whose velocity vanilla takes
-/// from `RandomSource.nextGaussian()`.
+/// from its own random-source's Gaussian accessor.
 ///
 /// A Box–Muller transform over the engine's own stream rather than a second
 /// `java.util.Random` reimplementation, for the reason this crate's `JavaRandom`
@@ -1528,13 +1528,13 @@ fn gaussian(engine: &mut ParticleEngine) -> f64 {
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
-/// `SpellParticle.WitchProvider` — the purple motes above a drinking witch
-/// (`ParticleTypes.WITCH`).
+/// Vanilla's own spell-particle witch provider — the purple motes above a
+/// drinking witch (`minecraft:witch`).
 ///
-/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/SpellParticle.java`:
+/// From vanilla's own spell-particle constructor (26.2 decompile):
 /// the constructor jitters its *own* horizontal velocity from a
-/// process-wide static `RandomSource` (`SpellParticle.RANDOM`) rather than
-/// the per-particle stream every other emitter in this crate draws from —
+/// process-wide static random source (its own class-level constant) rather
+/// than the per-particle stream every other emitter in this crate draws from —
 /// drawn from this engine's RNG instead, since particle-burst randomness is
 /// disclosed as not needing bit-exact replay (see
 /// [`crate::Particles::spawn_particles`]'s module docs in the shell for the
@@ -1544,11 +1544,11 @@ fn gaussian(engine: &mut ParticleEngine) -> f64 {
 /// not the ones just fed into the velocity jitter — a further `xd`/`zd`
 /// damp to a tenth when both were exactly zero. `quadSize *= 0.75F`,
 /// `lifetime = (int)(8.0 / (nextFloat() * 0.8F + 0.2F))`, `hasPhysics =
-/// false`. `WitchProvider` then sets the colour: `nextFloat() * 0.5F +
+/// false`. The witch provider then sets the colour: `nextFloat() * 0.5F +
 /// 0.35F` brightness times `(1, 0, 1)` — magenta, never green.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `SpellParticle` constructor argument for argument"
+    reason = "mirrors vanilla's own spell-particle constructor argument for argument"
 )]
 pub fn witch(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let mut p = spell_particle(engine, x, y, z, xa, ya, za, Sheet::Spell);
@@ -1557,27 +1557,28 @@ pub fn witch(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f
     engine.add(p);
 }
 
-/// `SpellParticle` over an arbitrary sheet and a fixed tint — the shared shape
+/// Vanilla's own spell particle over an arbitrary sheet and a fixed tint — the shared shape
 /// behind `effect`, `entity_effect`, `instant_effect`, `infested`, `raid_omen`
 /// and `trial_omen`.
 ///
-/// Vanilla registers six registry types against `SpellParticle`, over **four
-/// different sheets**: `EFFECT`/`ENTITY_EFFECT` name `effect_7…0`,
-/// `INSTANT_EFFECT`/`WITCH` name `spell_7…0`, and `INFESTED`/`RAID_OMEN`/
-/// `TRIAL_OMEN` each name a single texture of their own. The class does not
-/// decide the sheet; the type's own `particles/<name>.json` does, which is why
-/// this takes one.
+/// Vanilla registers six registry types against its own spell particle, over **four
+/// different sheets**: `minecraft:effect`/`minecraft:entity_effect` name `effect_7…0`,
+/// `minecraft:instant_effect`/`minecraft:witch` name `spell_7…0`, and
+/// `minecraft:infested`/`minecraft:raid_omen`/`minecraft:trial_omen` each name
+/// a single texture of their own. The provider does not decide the sheet; the
+/// type's own `particles/<name>.json` does, which is why this takes one.
 ///
-/// `colour` is the provider's `setColor` call. This entry point is the one for
-/// the three types registered against `SpellParticle.Provider`, which take a
-/// bare `SimpleParticleType` and therefore never colour themselves at all:
+/// `colour` is the provider's own "set color" call. This entry point is the
+/// one for the three types registered against vanilla's own spell-particle
+/// provider, which take a bare simple-particle-type and therefore never
+/// colour themselves at all:
 /// `infested`, `raid_omen` and `trial_omen`, whose sprites are already tinted
 /// in the texture. The three payload-carrying types have their own entry
 /// points — [`spell_instant`] and [`spell_mob_effect`] — because their tint is
 /// a wire field rather than a caller's constant.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `SpellParticle` constructor argument for argument, plus the sheet \
+    reason = "mirrors vanilla's own spell-particle constructor argument for argument, plus the sheet \
               and tint its provider supplies"
 )]
 pub fn spell(
@@ -1596,11 +1597,11 @@ pub fn spell(
     engine.add(p);
 }
 
-/// `SpellParticle.InstantProvider` — `effect` and `instant_effect`, whose
-/// `SpellParticleOption` names both a tint and a velocity multiplier.
+/// Vanilla's own spell-particle instant provider — `effect` and
+/// `instant_effect`, whose own particle-option type names both a tint and a velocity multiplier.
 ///
-/// The provider is `setColor(getRed, getGreen, getBlue)` followed by
-/// `setPower(getPower)`, in that order. `setPower` scales `xd`/`zd` and
+/// The provider is its own "set color" step followed by
+/// its own "set power" step, in that order. "Set power" scales `xd`/`zd` and
 /// rescales `yd` about the `0.1` upward bias the base constructor applied, so
 /// it must run **after** [`spell_particle`]'s own `yd *= 0.2F` damp rather than
 /// being folded into the velocity the caller passes — a power applied to the
@@ -1611,8 +1612,8 @@ pub fn spell(
 /// [`spell`].
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `SpellParticle` constructor argument for argument, plus the sheet \
-              and the two `SpellParticleOption` fields its provider applies"
+    reason = "mirrors vanilla's own spell-particle constructor argument for argument, plus the sheet \
+              and the two particle-option fields its provider applies"
 )]
 pub fn spell_instant(
     engine: &mut ParticleEngine,
@@ -1632,20 +1633,21 @@ pub fn spell_instant(
     engine.add(p);
 }
 
-/// `SpellParticle.MobEffectProvider` — `entity_effect`, whose
-/// `ColorParticleOption` is a four-component ARGB word.
+/// Vanilla's own spell-particle mob-effect provider — `entity_effect`, whose
+/// own colour particle-option type is a four-component ARGB word.
 ///
-/// `setColor` then `setAlpha`. The alpha is the part it is easiest to drop:
-/// vanilla's own `MobEffectProvider` is the only `SpellParticle` provider that
-/// sets one, and an ambient mob-effect mote is drawn part-transparent by
-/// design. `SpellParticle.setAlpha` also records the value as `originalAlpha`
-/// and its `tick` lerps back towards it — that lerp only ever has something to
-/// do when `isCloseToScopingPlayer()` has forced the alpha to zero (a spyglass
+/// Its own "set color" step then its own "set alpha" step. The alpha is the
+/// part it is easiest to drop: vanilla's own mob-effect provider is the only
+/// spell-particle provider that sets one, and an ambient mob-effect mote is
+/// drawn part-transparent by design. Vanilla's own "set alpha" step also
+/// records the value as its own original-alpha field and its own per-tick
+/// step lerps back towards it — that lerp only ever has something to do when
+/// its own "is close to scoping player" check has forced the alpha to zero (a spyglass
 /// held in first person), which this crate does not model, so holding the
 /// alpha fixed is the same result rather than an approximation.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `SpellParticle` constructor argument for argument, plus the sheet \
+    reason = "mirrors vanilla's own spell-particle constructor argument for argument, plus the sheet \
               and the ARGB word its provider applies"
 )]
 pub fn spell_mob_effect(
@@ -1665,10 +1667,10 @@ pub fn spell_mob_effect(
     engine.add(p);
 }
 
-/// The `SpellParticle` constructor itself, shared by its four providers.
+/// Vanilla's own spell-particle constructor itself, shared by its four providers.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `SpellParticle` constructor argument for argument, plus its sheet"
+    reason = "mirrors vanilla's own spell-particle constructor argument for argument, plus its sheet"
 )]
 fn spell_particle(
     engine: &mut ParticleEngine,
@@ -1718,18 +1720,18 @@ fn spell_particle(
     p
 }
 
-/// `TotemParticle` — the burst when a totem of undying saves its holder
-/// (`ParticleTypes.TOTEM_OF_UNDYING`).
+/// Vanilla's own totem particle — the burst when a totem of undying saves its
+/// holder (`minecraft:totem_of_undying`).
 ///
-/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/TotemParticle.java`:
-/// extends `SimpleAnimatedParticle` (`friction = 0.91F` overridden
+/// From vanilla's own totem particle (26.2 decompile):
+/// extends its own simple-animated particle (`friction = 0.91F` overridden
 /// immediately back down to `0.6F`, `gravity = 1.25F`), takes its velocity
 /// **directly** from the caller with no jitter at all (`xd = xa` etc.),
 /// `quadSize *= 0.75F`, `lifetime = 60 + nextInt(12)`, and a 1-in-4 chance of
 /// a "golden" tint (`0.6..0.8, 0.6..0.9, 0..0.2`) versus the usual "green"
 /// one (`0.1..0.3, 0.4..0.7, 0..0.2`) — both branches draw exactly three
 /// `nextFloat()`s, so the RNG stream length does not depend on which
-/// branch is taken. No `setFadeColor`, so only alpha fades
+/// branch is taken. No fade colour is set, so only alpha fades
 /// ([`Behaviour::SimpleAnimated`]'s existing `fade: None` path already
 /// covers this exactly).
 pub fn totem_of_undying(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
@@ -1774,18 +1776,17 @@ pub fn totem_of_undying(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa:
     engine.add(p);
 }
 
-/// `HugeExplosionSeedParticle.Provider` — `ParticleTypes.EXPLOSION_EMITTER`,
-/// the particle a `ClientboundExplodePacket`'s `explosionParticle` field
-/// almost always names (`Level.java:593,619,645`).
+/// Vanilla's own huge-explosion-seed-particle provider —
+/// `minecraft:explosion_emitter`, the particle a server-side explode
+/// packet's own explosion-particle field almost always names.
 ///
-/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/
-/// HugeExplosionSeedParticle.java`: `super(level, x, y, z, 0.0, 0.0, 0.0)` —
-/// the zero-velocity `Particle(level, x, y, z, xa, ya, za)` constructor, the
+/// From vanilla's own huge-explosion-seed particle constructor (26.2
+/// decompile): the zero-velocity base constructor, the
 /// same shape [`Particle::with_velocity`] already reproduces for every other
 /// emitter — then a hardcoded `lifetime = 8` that **overwrites** whatever the
 /// base constructor's own lifetime draw produced (matching how [`note`]/
 /// [`heart_particle`] overwrite theirs). The particle itself is never drawn
-/// (`NoRenderParticle`); it exists purely to schedule
+/// (vanilla's own non-rendering-particle base); it exists purely to schedule
 /// [`Behaviour::HugeExplosionSeed`]'s per-tick follow-up spawns — see
 /// [`Particle::tick_huge_explosion_seed`] for that schedule.
 pub fn explosion_emitter(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
@@ -1797,7 +1798,7 @@ pub fn explosion_emitter(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
         0.0,
         0.0,
         0.0,
-        // Never sampled — `NoRenderParticle` is excluded from `extract`
+        // Never sampled — vanilla's own non-rendering-particle base is excluded from `extract`
         // before any sprite lookup happens — but every `Particle` needs a
         // `SpriteSource`, so this names the sheet its own follow-ups use
         // rather than an arbitrary placeholder.
@@ -1812,20 +1813,20 @@ pub fn explosion_emitter(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     engine.add(p);
 }
 
-/// `HugeExplosionParticle.Provider` — `ParticleTypes.EXPLOSION`. Spawned
-/// directly by a real vanilla packet only rarely (`ServerExplosion`'s
-/// small/large split can choose it), but far more often as
+/// Vanilla's own huge-explosion-particle provider — `minecraft:explosion`. Spawned
+/// directly by a real vanilla packet only rarely (vanilla's own server-side
+/// explosion logic's small/large split can choose it), but far more often as
 /// [`explosion_emitter`]'s own six-per-tick follow-up, via
 /// [`ParticleEngine::tick`].
 ///
-/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/
-/// HugeExplosionParticle.java`: zero-velocity construction, then
+/// From vanilla's own huge-explosion particle (26.2 decompile):
+/// zero-velocity construction, then
 /// `lifetime = 6 + random.nextInt(4)` (range `[6, 10)`), a grey tint
 /// (`random.nextFloat() * 0.6F + 0.4F`, same value on every channel — one
 /// draw, not three), and `quadSize = 2.0F * (1.0F - size * 0.5F)` — `size`
 /// being this function's own `size` parameter, vanilla's constructor
 /// argument (the seed's `age / lifetime` ratio when called from there, or
-/// the network `xAux` when called directly from a packet). No override on
+/// the network aux-X value when called directly from a packet). No override on
 /// gravity, friction or collision, so the particle just sits at its spawn
 /// point for its whole life — vanilla's constructor never touches those
 /// fields either.
@@ -1866,11 +1867,11 @@ pub fn huge_explosion(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size:
     engine.add(p);
 }
 
-/// `WaterDropParticle` — the splash a raindrop makes where it lands, and the
-/// base class [`splash`]'s `SplashParticle` extends.
+/// Vanilla's own water-drop particle — the splash a raindrop makes where it
+/// lands, and the base class [`splash`]'s own splash particle extends.
 ///
-/// **This is not the falling rain.** The streaks are `WeatherEffectRenderer`'s
-/// textured columns, which live in the renderer and never become particles;
+/// **This is not the falling rain.** The streaks are vanilla's own
+/// weather-effect renderer's textured columns, which live in the renderer and never become particles;
 /// this is the pop on impact, which the server sends as `minecraft:rain`.
 ///
 /// The one number that separates it from [`splash`] is `gravity`: `0.06` here
@@ -1904,7 +1905,7 @@ pub fn rain(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     let lifetime = (f64::from(8.0_f32) / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
     p.lifetime = lifetime;
     p.behaviour = Behaviour::WaterDrop;
-    // `WaterDropParticle.Provider` draws its frame from the sheet
+    // Vanilla's own water-drop-particle provider draws its frame from the sheet
     // (`sprite.get(random)`), exactly as the splash provider does.
     let frame = engine.rng().next_i32_bound(i32::from(Sheet::Splash.frame_count()));
     #[expect(
@@ -1921,7 +1922,7 @@ pub fn rain(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     engine.add(p);
 }
 
-/// `BubbleColumnUpParticle` — a soul-sand column's rising bubble.
+/// Vanilla's own bubble-column-up particle — a soul-sand column's rising bubble.
 ///
 /// The negative `gravity` is what lifts it: the shared tick's
 /// `yd -= 0.04 * gravity` becomes an upward term. Flipping the sign and adding
@@ -1964,7 +1965,7 @@ pub fn bubble_column_up(
     engine.add(p);
 }
 
-/// `WaterCurrentDownParticle` — a magma-block column's sinking, spiralling
+/// Vanilla's own downward water-current particle — a magma-block column's sinking, spiralling
 /// bubble.
 ///
 /// `has_physics = false`, so it passes through geometry and only the water test
@@ -1999,7 +2000,7 @@ pub fn current_down(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
     engine.add(p);
 }
 
-/// `SnowflakeParticle` — a powder-snow cauldron's and a snow golem's flakes.
+/// Vanilla's own snowflake particle — a powder-snow cauldron's and a snow golem's flakes.
 ///
 /// `friction = 1.0` is deliberate and load-bearing: the per-axis damping in
 /// [`Behaviour::Snowflake`]'s tick is the *whole* of this particle's drag, so
@@ -2032,7 +2033,7 @@ pub fn snowflake(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, y
     )]
     let lifetime = (f64::from(16.0_f32) / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
     p.lifetime = lifetime + 2;
-    // `SnowflakeParticle.Provider` tints every flake the same pale blue.
+    // Vanilla's own snowflake-particle provider tints every flake the same pale blue.
     p.colour = [0.923, 0.964, 0.999];
     p.behaviour = Behaviour::Snowflake;
     p.sprite = SpriteSource::Sheet {
@@ -2042,16 +2043,16 @@ pub fn snowflake(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, y
     engine.add(p);
 }
 
-/// `DustPlumeParticle` — the puff a block dropped into a decorated pot throws
-/// up, and the one brushing a suspicious block makes.
+/// Vanilla's own dust-plume particle — the puff a block dropped into a
+/// decorated pot throws up, and the one brushing a suspicious block makes.
 ///
-/// A `BaseAshSmokeParticle` whose colour the subclass **overwrites**: the base
+/// Vanilla's own base ash/smoke particle whose colour the subclass **overwrites**: the base
 /// constructor's grey draw still happens (so the RNG stream matches) and its
 /// result is discarded in favour of `0xBAB1C2` shifted down by a second draw.
 /// `ya` is biased `+0.15` before the base sees it, which is the whole of the
 /// plume's initial lift.
 pub fn dust_plume(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
-    /// `DustPlumeParticle.COLOR_RGB24`.
+    /// Vanilla's own dust-plume particle's packed-RGB constant.
     const COLOUR_RGB24: u32 = 12_235_202;
 
     let mut p = base_ash_smoke(
@@ -2078,7 +2079,7 @@ pub fn dust_plume(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, 
     engine.add(p);
 }
 
-/// `WakeParticle` — the expanding ring a fishing bobber leaves on the water,
+/// Vanilla's own wake particle — the expanding ring a fishing bobber leaves on the water,
 /// which the server sends as `minecraft:fishing`.
 ///
 /// Every one of the base constructor's velocity terms is drawn and then
@@ -2122,7 +2123,7 @@ pub fn fishing(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya:
     engine.add(p);
 }
 
-/// `BubblePopParticle` — the five-frame burst a column's bubble makes as it
+/// Vanilla's own bubble-pop particle — the five-frame burst a column's bubble makes as it
 /// breaks the surface.
 pub fn bubble_pop(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let rng = engine.rng();
@@ -2157,9 +2158,9 @@ pub fn bubble_pop(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, 
 /// and does not swirl, and it is the only one with a zero start velocity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LeafParams {
-    /// `fallAcceleration`.
+    /// Vanilla's own "fall acceleration" field.
     pub fall_acceleration: f32,
-    /// `sideAcceleration`, i.e. `windBig`.
+    /// Vanilla's own "side acceleration" field, i.e. its own "wind big" field.
     pub side_acceleration: f32,
     /// Whether the swirl term is enabled.
     pub swirl: bool,
@@ -2174,7 +2175,7 @@ pub struct LeafParams {
 }
 
 impl LeafParams {
-    /// `FallingLeavesParticle.CherryProvider` —
+    /// Vanilla's own falling-leaves-particle cherry provider —
     /// `(0.25, 2.0, swirl=false, flowAway=true, 1.0, 0.0)`.
     #[must_use]
     pub const fn cherry() -> Self {
@@ -2189,7 +2190,7 @@ impl LeafParams {
         }
     }
 
-    /// `FallingLeavesParticle.PaleOakProvider` —
+    /// Vanilla's own falling-leaves-particle pale-oak provider —
     /// `(0.07, 10.0, swirl=true, flowAway=false, 2.0, 0.021)`.
     #[must_use]
     pub const fn pale_oak() -> Self {
@@ -2204,7 +2205,7 @@ impl LeafParams {
         }
     }
 
-    /// `FallingLeavesParticle.TintedLeavesProvider` — the pale-oak constants
+    /// Vanilla's own falling-leaves-particle tinted-leaves provider — the pale-oak constants
     /// exactly, on the untinted `leaf_N` sheet and with a wire colour.
     #[must_use]
     pub const fn tinted() -> Self {
@@ -2215,17 +2216,18 @@ impl LeafParams {
     }
 }
 
-/// `FallingLeavesParticle` — the drifting leaves under a cherry or pale-oak
+/// Vanilla's own falling-leaves particle — the drifting leaves under a cherry or pale-oak
 /// canopy, and the tinted variant a resource pack can colour.
 ///
-/// `colour` is `None` for the two `SimpleParticleType` variants and `Some` for
-/// `tinted_leaves`, whose provider calls `setColor` from its
-/// `ColorParticleOption` payload.
+/// `colour` is `None` for the two simple particle-type variants and `Some` for
+/// `tinted_leaves`, whose provider calls its own "set color" step from its
+/// own colour particle-option payload.
 ///
 /// The draw order is Java's: the provider picks the sprite first, then the base
-/// constructor runs, then the two instance-field initialisers
-/// (`rotSpeed`, `spinAcceleration`) — which in Java execute **after**
-/// `super(...)` — then the constructor body's size and flow draws.
+/// constructor runs, then the two instance-field initialisers (vanilla's own
+/// rotation-speed and spin-acceleration fields) — which in Java execute
+/// **after** the superclass constructor — then the constructor body's size
+/// and flow draws.
 pub fn falling_leaves(
     engine: &mut ParticleEngine,
     x: f64,
@@ -2234,7 +2236,7 @@ pub fn falling_leaves(
     params: LeafParams,
     colour: Option<[f32; 3]>,
 ) {
-    /// `FallingLeavesParticle.ACCELERATION_SCALE`.
+    /// Vanilla's own falling-leaves particle's acceleration-scale constant.
     const ACCELERATION_SCALE: f32 = 0.0025;
 
     // `this.sprites.get(random)` in the provider, before the constructor.
@@ -2273,8 +2275,8 @@ pub fn falling_leaves(
     p.friction = 1.0;
     p.yd = f64::from(-params.start_velocity);
     let particle_random = rng_next(engine);
-    // `Math.cos`/`Math.sin` on a `double` — the library trig, not `Mth`'s
-    // table, because vanilla itself calls `Math` here.
+    // Java's own `Math.cos`/`Math.sin` on a `double` — the library trig, not
+    // vanilla's quantized table, because vanilla itself calls the library here.
     let radians = f64::from(particle_random * 60.0).to_radians();
     let xa_flow_scale = radians.cos() * f64::from(params.side_acceleration);
     let za_flow_scale = radians.sin() * f64::from(params.side_acceleration);
@@ -2295,7 +2297,7 @@ pub fn falling_leaves(
     engine.add(p);
 }
 
-/// `FireflyParticle` — the firefly bush's drifting mote.
+/// Vanilla's own firefly particle — the firefly bush's drifting mote.
 ///
 /// The provider builds the velocity itself rather than passing the packet's
 /// through: `x` and `z` are `0.5 - nextDouble()` regardless of what the server
@@ -2333,12 +2335,12 @@ pub fn firefly(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, ya: f64) {
     engine.add(p);
 }
 
-/// `BreakingItemParticle`'s **four**-argument constructor — the one
+/// Vanilla's own breaking-item particle's **four**-argument constructor — the one
 /// `item_slime`, `item_cobweb` and `item_snowball` reach.
 ///
-/// Those three are `SimpleParticleType`s with no wire payload at all: each
-/// provider hardcodes its own item (`Items.SLIME_BALL`, `Items.COBWEB`,
-/// `Items.SNOWBALL`) and calls this constructor, so the shell supplies the
+/// Those three are simple particle types with no wire payload at all: each
+/// provider hardcodes its own item (`minecraft:slime_ball`, `minecraft:cobweb`,
+/// `minecraft:snowball`) and calls this constructor, so the shell supplies the
 /// registry id and nothing comes off the wire.
 ///
 /// **Not [`item_particle`]**, which is the seven-argument sibling: that one
@@ -2365,11 +2367,11 @@ pub fn item_burst_particle(
     p
 }
 
-/// `FireworkParticles.OverlayParticle` — the white bloom a firework star paints
+/// Vanilla's own firework-particles overlay particle — the white bloom a firework star paints
 /// over its own burst, which the server sends as `minecraft:flash`.
 ///
-/// Its `colour` and `alpha` both come off the wire as a `ColorParticleOption`,
-/// and its size and alpha are then functions of age alone — see
+/// Its `colour` and `alpha` both come off the wire as a colour-carrying
+/// particle option, and its size and alpha are then functions of age alone — see
 /// [`Behaviour::FireworkFlash`], whose curves start *negative* by design.
 pub fn flash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, colour: [f32; 4]) {
     let rng = engine.rng();
@@ -2404,7 +2406,7 @@ mod tests {
     const STONE: u32 = 1;
     const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
 
-    /// The counts here come from the **formula in `addDestroyBlockEffect`**
+    /// The counts here come from the **formula in vanilla's own "add destroy block effect" step**
     /// (`max(2, ceil(width / 0.25))` per axis), not from running this code: a
     /// full cube is `4 × 4 × 4` and a bottom slab is `4 × 2 × 4`.
     #[test]
@@ -2544,7 +2546,7 @@ mod tests {
         let mut engine = ParticleEngine::seeded(6);
         crit(&mut engine, 0.0, 64.0, 0.0, 0.0, 0.0, 0.0);
         let p = &engine.particles()[0];
-        assert!(!p.has_physics, "CritParticle sets hasPhysics = false");
+        assert!(!p.has_physics, "vanilla's own crit particle sets hasPhysics = false");
         assert!(p.lifetime >= 1, "lifetime is floored at 1");
         // `nextFloat() * 0.3F + 0.6F` is bounded by the formula, not by us.
         for c in p.colour {
@@ -2560,7 +2562,7 @@ mod tests {
         assert!(p.gravity < 0.0, "smoke must have negative gravity to rise");
         assert!(
             p.speed_up_when_y_blocked,
-            "smoke sets speedUpWhenYMotionIsBlocked"
+            "smoke sets its own speed-up-when-Y-motion-is-blocked flag"
         );
         assert!(matches!(p.behaviour, Behaviour::AshSmoke));
     }
@@ -2591,7 +2593,7 @@ mod tests {
         assert_ne!(burst(1234), burst(1235));
     }
 
-    /// The sweep-attack particle (#12's split-out remainder): exactly the
+    /// The sweep-attack particle: exactly the
     /// vanilla shape, not merely "a particle appeared". Lifetime and light
     /// coords are exact constants in the Java source, not RNG-derived, so
     /// they are asserted exactly rather than as a range.
@@ -2601,7 +2603,7 @@ mod tests {
         sweep_attack(&mut engine, 0.0, 64.0, 0.0, 0.0);
         assert_eq!(engine.len(), 1, "sweep_attack must spawn exactly one quad");
         let p = &engine.particles()[0];
-        assert_eq!(p.lifetime, 4, "AttackSweepParticle.lifetime = 4, hardcoded");
+        assert_eq!(p.lifetime, 4, "vanilla's own attack-sweep particle's lifetime = 4, hardcoded");
         assert!(matches!(p.behaviour, Behaviour::SweepAttack));
         assert!(matches!(
             p.sprite,
@@ -2648,8 +2650,8 @@ mod tests {
         assert!(engine.is_empty(), "sweep_attack must be removed on tick 4");
     }
 
-    /// `NoteParticle`'s colour formula is exact and external
-    /// (`NoteParticle.java`'s three phase-shifted sines), so the expected
+    /// Vanilla's own note particle's colour formula is exact and external
+    /// (its own three phase-shifted sines), so the expected
     /// value is computed independently here from the same formula rather than
     /// merely checking "some colour resulted".
     #[test]
@@ -2657,7 +2659,7 @@ mod tests {
         let mut engine = ParticleEngine::seeded(1);
         note(&mut engine, 0.0, 64.0, 0.0, 0.5);
         let p = &engine.particles()[0];
-        assert_eq!(p.lifetime, 6, "NoteParticle hardcodes lifetime = 6");
+        assert_eq!(p.lifetime, 6, "vanilla's own note particle hardcodes lifetime = 6");
         assert!(p.speed_up_when_y_blocked);
         let c = 0.5_f32;
         let tau = std::f32::consts::TAU;
@@ -2671,7 +2673,7 @@ mod tests {
         }
     }
 
-    /// `HeartParticle` is physics-free with a fixed 16-tick life — both
+    /// Vanilla's own heart particle is physics-free with a fixed 16-tick life — both
     /// `heart` (breeding) and `angry_villager` share this constructor;
     /// `angry_villager` additionally raises the spawn point by 0.5 and uses a
     /// different sprite, which this test also pins.
@@ -2683,8 +2685,8 @@ mod tests {
         let particles = engine.particles();
         assert_eq!(particles.len(), 2);
         for p in particles {
-            assert!(!p.has_physics, "HeartParticle sets hasPhysics = false");
-            assert_eq!(p.lifetime, 16, "HeartParticle hardcodes lifetime = 16");
+            assert!(!p.has_physics, "vanilla's own heart particle sets hasPhysics = false");
+            assert_eq!(p.lifetime, 16, "vanilla's own heart particle hardcodes lifetime = 16");
             assert!(matches!(p.behaviour, Behaviour::Heart));
         }
         assert!(matches!(
@@ -2712,8 +2714,8 @@ mod tests {
         );
     }
 
-    /// `SuspendedTownParticle`'s tick is a `lifetime`-countdown with no
-    /// collision, not the usual `age`-increment: this pins that the particle
+    /// Vanilla's own suspended-town particle's tick is a `lifetime`-countdown
+    /// with no collision, not the usual `age`-increment: this pins that the particle
     /// survives exactly `lifetime` ticks of movement (not `lifetime + 1` or
     /// `lifetime - 1`, the two off-by-one variants a literal `age`-based
     /// rewrite would produce) and that it moves through solid geometry
@@ -2768,12 +2770,12 @@ mod tests {
         );
     }
 
-    /// `SpellParticle.WitchProvider` always tints magenta (`(1, 0, 1)` scaled
-    /// by a shared brightness) — green is structurally impossible from this
+    /// Vanilla's own spell-particle witch provider always tints magenta (`(1, 0, 1)`
+    /// scaled by a shared brightness) — green is structurally impossible from this
     /// formula, which is the exact property that distinguishes "witch" from
-    /// the green-tinted mob-effect variants of the same Java class (neither
-    /// of which this pass builds, since they need `ColorParticleOption`
-    /// decode).
+    /// the green-tinted mob-effect variants of the same particle family (neither
+    /// of which this pass builds, since they need a colour-carrying particle
+    /// option decode).
     #[test]
     fn witch_particles_are_always_magenta_never_green() {
         let mut engine = ParticleEngine::seeded(4);
@@ -2781,7 +2783,7 @@ mod tests {
             witch(&mut engine, 0.0, 64.0, 0.0, 0.0, 0.0, 0.0);
         }
         for p in engine.particles() {
-            assert!(!p.has_physics, "SpellParticle sets hasPhysics = false");
+            assert!(!p.has_physics, "vanilla's own spell particle sets hasPhysics = false");
             assert!(matches!(p.behaviour, Behaviour::Spell));
             assert_eq!(p.colour[1], 0.0, "witch's green channel must be exactly 0");
             assert!(
@@ -2796,7 +2798,7 @@ mod tests {
         }
     }
 
-    /// `TotemParticle`'s lifetime is `60 + nextInt(12)`, bounded to
+    /// Vanilla's own totem particle's lifetime is `60 + nextInt(12)`, bounded to
     /// `[60, 72)`, and it takes its velocity **directly** from the caller
     /// with no jitter — unlike almost every other emitter in this module.
     #[test]
@@ -2816,10 +2818,10 @@ mod tests {
     }
 
     /// `firework`'s lifetime is `48 + nextInt(12)`, bounded to `[48, 60)`,
-    /// takes its velocity directly with no jitter (the same `TotemParticle`
+    /// takes its velocity directly with no jitter (the same vanilla totem-particle
     /// shape [`totem_of_undying_lifetime_is_bounded_and_velocity_is_unjittered`]
     /// pins), and — unlike totem — leaves colour at the base white and sets
-    /// `alpha = 0.99` (`SparkProvider.createParticle`'s own line), never `1.0`.
+    /// `alpha = 0.99` (vanilla's own firework spark provider's own line), never `1.0`.
     #[test]
     fn firework_lifetime_is_bounded_velocity_is_unjittered_and_alpha_is_099() {
         let mut engine = ParticleEngine::seeded(7);
@@ -2833,8 +2835,8 @@ mod tests {
         assert!((p.xd - 0.4).abs() < 1e-12, "xd must equal the raw input");
         assert!((p.yd - -0.1).abs() < 1e-12, "yd must equal the raw input");
         assert!((p.zd - 0.6).abs() < 1e-12, "zd must equal the raw input");
-        assert_eq!(p.colour, [1.0, 1.0, 1.0], "SparkParticle never calls setColor");
-        assert!((p.alpha - 0.99).abs() < 1e-6, "SparkProvider sets alpha to 0.99, not 1.0");
+        assert_eq!(p.colour, [1.0, 1.0, 1.0], "vanilla's own spark particle never sets a custom colour");
+        assert!((p.alpha - 0.99).abs() < 1e-6, "vanilla's own spark provider sets alpha to 0.99, not 1.0");
         assert!(matches!(p.behaviour, Behaviour::SimpleAnimated { fade: None }));
         assert!(
             matches!(p.sprite, SpriteSource::Sheet { sheet: Sheet::Spark, .. }),
@@ -2880,16 +2882,16 @@ mod tests {
         assert!(goldens > 0, "the ~25% golden branch never fired in 200 draws");
     }
 
-    /// `HugeExplosionSeedParticle` is a `NoRenderParticle`, and it hardcodes
-    /// `lifetime = 8` — overwriting the base constructor's own RNG-drawn
-    /// lifetime, exactly the way `note`/`heart_particle` overwrite theirs.
+    /// Vanilla's own huge-explosion-seed particle is a non-rendering particle,
+    /// and it hardcodes `lifetime = 8` — overwriting the base constructor's own
+    /// RNG-drawn lifetime, exactly the way `note`/`heart_particle` overwrite theirs.
     #[test]
     fn explosion_emitter_is_a_fixed_eight_tick_seed() {
         let mut engine = ParticleEngine::seeded(200);
         explosion_emitter(&mut engine, 0.0, 64.0, 0.0);
         assert_eq!(engine.len(), 1);
         let p = &engine.particles()[0];
-        assert_eq!(p.lifetime, 8, "HugeExplosionSeedParticle hardcodes lifetime = 8");
+        assert_eq!(p.lifetime, 8, "vanilla's own huge-explosion-seed particle hardcodes lifetime = 8");
         assert!(matches!(p.behaviour, Behaviour::HugeExplosionSeed));
     }
 
@@ -2985,8 +2987,8 @@ mod tests {
         }
     }
 
-    /// `HugeExplosionParticle`'s own exact formulas, computed independently
-    /// here from the Java source rather than read off the implementation:
+    /// Vanilla's own huge-explosion particle's own exact formulas, computed
+    /// independently here from the Java source rather than read off the implementation:
     /// `lifetime` in `[6, 10)`, colour bounded by `nextFloat()*0.6+0.4` with
     /// all three channels equal (one draw, not three), full-bright, opaque,
     /// and `quadSize` the exact `2.0 - size` value for `size = 0.5` (the
@@ -3068,14 +3070,15 @@ mod tests {
             out.len(),
             1,
             "exactly one quad expected: the crit. The seed (NoRenderParticle) must \
-             contribute none, even though it is still alive in the engine"
+             contribute none, even though it is still alive in the engine — the seed is
+             vanilla's own non-rendering placeholder particle"
         );
     }
 
-    /// `HugeExplosionParticle.getLightCoords` hardcodes vanilla's
-    /// `15728880` (`FULL_BRIGHT`), independently of the world light sampler —
-    /// mirrors `self_lit_particles_ignore_the_light_sampler_entirely` in
-    /// `lib.rs`'s own test module for `SimpleAnimated`/`SweepAttack`.
+    /// Vanilla's own huge-explosion particle's light-coordinate accessor hardcodes
+    /// its own `15728880` full-bright constant, independently of the world light
+    /// sampler — mirrors `self_lit_particles_ignore_the_light_sampler_entirely` in
+    /// `lib.rs`'s own test module for the simple-animated and sweep-attack particles.
     #[test]
     fn huge_explosion_is_full_bright_regardless_of_world_light() {
         let mut engine = ParticleEngine::seeded(205);
@@ -3185,8 +3188,8 @@ mod tests {
     /// This is the property the previous one-shot emitter could not have: it
     /// spawned whichever phase the packet named, with a hardcoded lifetime, and
     /// removed it. A cave ceiling grew drips that hung and blinked out. The
-    /// chain lives in `DripParticle.tick`, not in any spawn site, so nothing
-    /// upstream could have supplied it.
+    /// chain lives in vanilla's own drip particle's own tick step, not in any
+    /// spawn site, so nothing upstream could have supplied it.
     ///
     /// The three counts asserted here are the discriminating ones: a hang that
     /// merely dies leaves **zero** particles, a hang that spawns a fall leaves
@@ -3217,7 +3220,7 @@ mod tests {
         let hang = &e.particles()[0];
         assert_eq!(
             hang.lifetime, 40,
-            "`DripHangParticle` sets a flat 40, not the `64 / nextFloat` draw the \
+            "vanilla's own drip-hang particle sets a flat 40, not the `64 / nextFloat` draw the \
              one-shot emitter used"
         );
         assert_eq!(hang.behaviour, Behaviour::Drip { kind: DripKind::Water, phase: DripPhase::Hang });
@@ -3248,8 +3251,8 @@ mod tests {
         }
         assert!(
             landed.is_some(),
-            "a falling water drip must land as a `splash` (a `WaterDropParticle`) \
-             within its {fall_lifetime}-tick lifetime"
+            "a falling water drip must land as a `splash` (vanilla's own water-drop \
+             particle) within its {fall_lifetime}-tick lifetime"
         );
         assert!(
             !e.particles()
@@ -3262,10 +3265,10 @@ mod tests {
     /// A lava drip cools from white-hot to exactly the lava tint over its 40
     /// hanging ticks.
     ///
-    /// `CoolingDripHangParticle` is two constants — `g = 16 / (elapsed + 16)`
+    /// Vanilla's own cooling-drip-hang particle is two constants — `g = 16 / (elapsed + 16)`
     /// and `b = 4 / (elapsed + 8)` — and the check that they are transcribed
-    /// right is that after 40 ticks they arrive on `LavaFallProvider`'s
-    /// **independently specified** `setColor(1.0F, 0.2857143F, 0.083333336F)`.
+    /// right is that after 40 ticks they arrive on vanilla's own drip-particle
+    /// lava-fall provider's **independently specified** `setColor(1.0F, 0.2857143F, 0.083333336F)`.
     /// That is an outside expectation rather than a restatement: nothing in the
     /// cooling formula mentions the falling phase's colour, and two different
     /// vanilla methods have to agree for this to hold.
@@ -3302,15 +3305,16 @@ mod tests {
         // removes the drip, handing off to the falling phase — so the arrival
         // value is the last thing the hanging particle ever holds. Asserting the
         // identity rather than reading it off a corpse: the point is that
-        // `CoolingDripHangParticle`'s two constants and `LavaFallProvider`'s
-        // `setColor` are transcribed from two different vanilla methods that
-        // never mention each other, and they have to meet.
+        // vanilla's own cooling-drip-hang particle's two constants and vanilla's
+        // own drip-particle lava-fall provider's own colour setter are transcribed
+        // from two different vanilla methods that never mention each other, and
+        // they have to meet.
         let arrival = [1.0_f32, 16.0 / 56.0, 4.0 / 48.0];
         let lava_fall = [1.0_f32, 0.285_714_3, 0.083_333_336];
         assert!(
             (arrival[1] - lava_fall[1]).abs() < 1e-6 && (arrival[2] - lava_fall[2]).abs() < 1e-6,
-            "the cooling ramp must arrive on `LavaFallProvider`'s tint: {arrival:?} vs \
-             {lava_fall:?}"
+            "the cooling ramp must arrive on vanilla's own lava-fall provider's tint: \
+             {arrival:?} vs {lava_fall:?}"
         );
     }
 
@@ -3318,9 +3322,10 @@ mod tests {
     ///
     /// This is the whole of the `Animated` vs `AshSmoke` distinction, and the
     /// two hypotheses are computed here rather than asserted as a direction:
-    /// `ExplodeParticle` has no `getQuadSize` override, so its size at age 0 is
-    /// the constructor's own draw, while `BaseAshSmokeParticle`'s override
-    /// multiplies by `clamp(age / lifetime * 32, 0, 1)` — which at age 0 is
+    /// vanilla's own explode particle has no size-at-age override, so its size
+    /// at age 0 is the constructor's own draw, while vanilla's own base
+    /// ash-smoke particle's override multiplies by `clamp(age / lifetime * 32, 0, 1)`
+    /// — which at age 0 is
     /// exactly **zero**. Borrowing the wrong behaviour therefore makes every
     /// poof invisible on spawn and swell in over its first thirty-second, and
     /// nothing about the particle count or its sprite would show it.
@@ -3361,8 +3366,9 @@ mod tests {
     ///
     /// The two differ by the sign of one number in vanilla's positional
     /// argument list (`gravity` `0.1F` against `-0.1F`) plus the sign of a
-    /// second (`dirY`), which is exactly the transposition-shaped mistake
-    /// `AshSmokeParams` exists to make unspellable. Asserting the sign of
+    /// second (the vertical scatter direction), which is exactly the
+    /// transposition-shaped mistake [`AshSmokeParams`] exists to make
+    /// unspellable. Asserting the sign of
     /// `gravity` rather than an observed drift keeps this independent of how
     /// many ticks a fixture happens to run.
     #[test]
@@ -3373,8 +3379,9 @@ mod tests {
         let (a, w) = (&e.particles()[0], &e.particles()[1]);
         assert!(a.gravity > 0.0 && !a.has_physics, "ash: {} {}", a.gravity, a.has_physics);
         assert!(w.gravity < 0.0 && w.has_physics, "white smoke: {} {}", w.gravity, w.has_physics);
-        // `colorRandom` is 0.5 for ash and the fixed `0xBAB1C2` for white
-        // smoke, so the two are never the same grey by accident.
+        // Vanilla's own "color random" field is 0.5 for ash and the fixed
+        // `0xBAB1C2` for white smoke, so the two are never the same grey by
+        // accident.
         assert_eq!(w.colour, [186.0 / 255.0, 177.0 / 255.0, 194.0 / 255.0]);
         assert!(a.colour[0] < 0.5, "ash tint is `nextFloat() * 0.5`: {:?}", a.colour);
         assert_eq!(
@@ -3387,9 +3394,9 @@ mod tests {
     /// `spore_blossom_air` hangs for hundreds of ticks; it is not a drip.
     ///
     /// It shares `drip_fall`'s texture with `falling_spore_blossom` and was
-    /// wired as a `DripParticle` on the strength of that. The discriminating
-    /// measurement is the lifetime: `SuspendedParticle.SporeBlossomAirProvider`
-    /// draws a flat `500..=1000`, while `DripParticle`'s is
+    /// wired as vanilla's own drip particle on the strength of that. The discriminating
+    /// measurement is the lifetime: vanilla's own suspended-particle spore-blossom-air
+    /// provider draws a flat `500..=1000`, while the drip particle's is
     /// `(int)(64 / (nextFloat() * 0.8 + 0.2))`, whose **maximum** is 320 — so
     /// the two ranges do not overlap at all and a single sample separates them.
     #[test]
@@ -3537,12 +3544,12 @@ mod tests {
 // Ambient and environmental types
 // ---------------------------------------------------------------------------
 //
-// Vanilla's `RisingParticle` is the shared base for `flame`, `soul_fire_flame`
-// and `soul`, and its whole constructor is the four lines [`rising`] transcribes.
-// `flame` above predates it and keeps its own copy; everything below goes through
-// this one.
+// Vanilla's own rising-particle class is the shared base for `flame`,
+// `soul_fire_flame` and `soul`, and its whole constructor is the four lines
+// [`rising`] transcribes. `flame` above predates it and keeps its own copy;
+// everything below goes through this one.
 
-/// `RisingParticle`'s constructor: `friction = 0.96`, the requested velocity with
+/// Vanilla's own rising-particle constructor: `friction = 0.96`, the requested velocity with
 /// a 1% scatter, a ±0.05 positional jitter and a `8 / (rand*0.8 + 0.2) + 4`
 /// lifetime.
 ///
@@ -3583,17 +3590,18 @@ fn rising(
     p
 }
 
-/// `SOUL_FIRE_FLAME` — `FlameParticle.Provider` over the `soul_fire_flame`
-/// sprite, so the physics are `flame`'s exactly and only the sheet differs.
+/// `minecraft:soul_fire_flame` — vanilla's own flame-particle provider over the
+/// `soul_fire_flame` sprite, so the physics are `flame`'s exactly and only the
+/// sheet differs.
 pub fn soul_fire_flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
     let mut p = rising(engine, x, y, z, xd, yd, zd, Sheet::SoulFireFlame);
     p.behaviour = Behaviour::Flame;
     engine.add(p);
 }
 
-/// `COPPER_FIRE_FLAME` — `FlameParticle.Provider` again, over
-/// [`Sheet::CopperFireFlame`]'s own texture. Three registry types share that
-/// one provider across three different sheets; the class never decides.
+/// `minecraft:copper_fire_flame` — vanilla's own flame-particle provider again,
+/// over [`Sheet::CopperFireFlame`]'s own texture. Three registry types share
+/// that one provider across three different sheets; the provider never decides.
 pub fn copper_fire_flame(
     engine: &mut ParticleEngine,
     x: f64,
@@ -3608,8 +3616,8 @@ pub fn copper_fire_flame(
     engine.add(p);
 }
 
-/// `FlameParticle.SmallFlameProvider` (`ParticleTypes.SMALL_FLAME`) — a candle
-/// flame. `flame`'s sheet and physics with a single `scale(0.5F)`.
+/// Vanilla's own flame-particle small-flame provider (`minecraft:small_flame`) —
+/// a candle flame. `flame`'s sheet and physics with a single `scale(0.5F)`.
 ///
 /// `scale` shrinks the **collision box as well as** the quad
 /// (`setSize(0.2 * scale, 0.2 * scale)`), which is why it is one call rather
@@ -3622,34 +3630,36 @@ pub fn small_flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64,
     engine.add(p);
 }
 
-/// `SoulParticle` — a rising, sheet-animated mote, 1.5× scale and translucent.
+/// Vanilla's own soul particle — a rising, sheet-animated mote, 1.5× scale and
+/// translucent.
 ///
 /// [`Behaviour::AshSmoke`] is the right behaviour despite the name: what that
 /// variant *does* is "ordinary physics, advance the sheet by age", which is
-/// `SoulParticle.tick`'s `super.tick(); setSpriteFromAge(sprites);` verbatim.
-/// Unlike `flame` it does **not** override `move`, so a soul mote collides.
+/// vanilla's own soul-particle tick step's own `super.tick(); setSpriteFromAge(sprites);`
+/// verbatim. Unlike `flame` it does **not** override its move step, so a soul mote
+/// collides.
 pub fn soul(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
     soul_over(engine, x, y, z, xd, yd, zd, Sheet::Soul);
 }
 
-/// `SoulParticle.EmissiveProvider` (`ParticleTypes.SCULK_SOUL`) — the mote a
-/// sculk catalyst throws.
+/// Vanilla's own soul-particle emissive provider (`minecraft:sculk_soul`) — the
+/// mote a sculk catalyst throws.
 ///
-/// The same class as [`soul`] over **its own sheet**: `sculk_soul.json` names
+/// The same constructor as [`soul`] over **its own sheet**: `sculk_soul.json` names
 /// `sculk_soul_0`…`sculk_soul_10`, not `soul_N`, and only the eleven-frame
-/// count coincides. The provider's other two acts — `setAlpha(1.0)` and
-/// `isGlowing = true` — are respectively already the constructor's value and
-/// the `LightCoordsUtil.withBlock(…, 15)` boost this crate does not model
-/// (see `ParticleEngine::extract`'s light arm, which records that omission for
+/// count coincides. The provider's other two acts — setting alpha to `1.0`
+/// and marking it glowing — are respectively already the constructor's value
+/// and a fixed-brightness light boost this crate does not model (see
+/// `ParticleEngine::extract`'s light arm, which records that omission for
 /// the whole family rather than per emitter).
 pub fn sculk_soul(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
     soul_over(engine, x, y, z, xd, yd, zd, Sheet::SculkSoul);
 }
 
-/// `SoulParticle`'s constructor, over whichever sheet the registry type names.
+/// Vanilla's own soul particle's constructor, over whichever sheet the registry type names.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `SoulParticle` constructor argument for argument, plus its sheet"
+    reason = "mirrors vanilla's own soul-particle constructor argument for argument, plus its sheet"
 )]
 fn soul_over(
     engine: &mut ParticleEngine,
@@ -3672,13 +3682,13 @@ fn soul_over(
     engine.add(p);
 }
 
-/// `PortalParticle` — the nether-portal / ender shimmer.
+/// Vanilla's own portal particle — the nether-portal / ender shimmer.
 ///
 /// `xd/yd/zd` here are an **amplitude**, not a velocity: [`Behaviour::Portal`]
 /// recomputes the position from [`Particle::spawn`] every tick and never damps
 /// them. The caller passes the offset the mote should converge *from*, which for
-/// a portal block is a unit-normal-distributed offset and for
-/// `EnderMan`/chorus-fruit teleports is the distance travelled.
+/// a portal block is a unit-normal-distributed offset and for an
+/// enderman's/chorus-fruit teleports is the distance travelled.
 pub fn portal(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
     let rng = engine.rng();
     let mut p = Particle::new(
@@ -3705,13 +3715,13 @@ pub fn portal(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: 
     engine.add(p);
 }
 
-/// `CampfireSmokeParticle` — the tall column over a campfire.
+/// Vanilla's own campfire-smoke particle — the tall column over a campfire.
 ///
 /// `signal` picks between the two lifetimes, and they are far apart on purpose:
 /// `rand(50) + 80` cosy against `rand(50) + 280` signal, which is the whole
-/// reason a signal fire's plume reaches above the treeline. Both providers use
-/// `SpriteSet.get(random)` once per particle rather than pinning the first
-/// `big_smoke` sprite; their alpha differs too (`0.9` cosy, `0.95` signal).
+/// reason a signal fire's plume reaches above the treeline. Both providers draw
+/// a random frame from the sprite set once per particle rather than pinning the
+/// first `big_smoke` sprite; their alpha differs too (`0.9` cosy, `0.95` signal).
 pub fn campfire_smoke(
     engine: &mut ParticleEngine,
     x: f64,
@@ -3752,8 +3762,9 @@ pub fn campfire_smoke(
     engine.add(p);
 }
 
-/// `EndRodParticle` — a `SimpleAnimatedParticle` at `gravity = 0.0125` that fades
-/// toward `0xF2E9C9` and, like the flame, passes through the block it sits on.
+/// Vanilla's own end-rod particle — a simple-animated particle at
+/// `gravity = 0.0125` that fades toward `0xF2E9C9` and, like the flame, passes
+/// through the block it sits on.
 pub fn end_rod(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let rng = engine.rng();
     let mut p = Particle::new(
@@ -3774,12 +3785,12 @@ pub fn end_rod(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya:
     p.quad_size *= 0.75;
     p.lifetime = 60 + engine.rng().next_i32_bound(12);
     // `has_physics = false` rather than `Behaviour::Flame`: vanilla overrides
-    // `move` to skip collision but keeps the ordinary base tick, and the `Flame`
-    // behaviour would take flame's own quad-size curve with it.
+    // its own move step to skip collision but keeps the ordinary base tick, and
+    // the `Flame` behaviour would take flame's own quad-size curve with it.
     p.has_physics = false;
     p.behaviour = Behaviour::SimpleAnimated {
-        // `setFadeColor(15916745)` == `0xF2D9C9`, split the way
-        // `SimpleAnimatedParticle.setFadeColor` splits it: each channel `/ 255`.
+        // vanilla's own fade-colour setter is passed `15916745` == `0xF2D9C9`,
+        // split the way it splits it: each channel `/ 255`.
         fade: Some([0xF2 as f32 / 255.0, 0xDE as f32 / 255.0, 0xC9 as f32 / 255.0]),
     };
     p.sprite = SpriteSource::Sheet {
@@ -3789,25 +3800,25 @@ pub fn end_rod(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya:
     engine.add(p);
 }
 
-/// `GlowParticle` — the shared base for five registry types, all over
-/// `particle/glow`: `electric_spark`, `glow` (the glow squid's shimmer),
+/// Vanilla's own glow particle — the shared base for five registry types, all
+/// over `particle/glow`: `electric_spark`, `glow` (the glow squid's shimmer),
 /// `scrape`, `wax_on` and `wax_off`.
 ///
-/// Vanilla's own `ParticleResources` registration is the only thing that says
+/// Vanilla's own particle-resource registration is the only thing that says
 /// so. `electric_spark`/`glow` were previously emitted here by an
-/// approximation that took `FireworkParticles.SparkParticle`'s shape
+/// approximation that took vanilla's own firework spark particle's shape
 /// (`friction 0.9`, a `8 + nextInt(4)` lifetime, no tint, collision left on) —
 /// close enough to look right in isolation and wrong in every constant:
-/// `GlowParticle` uses `friction 0.96`, `speedUpWhenYMotionIsBlocked`,
-/// `hasPhysics = false`, and a per-provider tint and lifetime that differ by an
-/// order of magnitude between them (2–3 ticks for an electric spark against
-/// 10–39 for a scrape).
+/// vanilla's own glow particle uses `friction 0.96`, its own speed-up-when-Y-blocked
+/// flag, `hasPhysics = false`, and a per-provider tint and lifetime that differ
+/// by an order of magnitude between them (2–3 ticks for an electric spark
+/// against 10–39 for a scrape).
 ///
 /// Returned rather than added so each provider can set its own speed, tint and
 /// lifetime — which for this family is the *whole* difference between the five.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `GlowParticle` constructor argument for argument, plus its sheet"
+    reason = "mirrors vanilla's own glow-particle constructor argument for argument, plus its sheet"
 )]
 pub fn glow_particle(
     engine: &mut ParticleEngine,
@@ -3826,14 +3837,15 @@ pub fn glow_particle(
     p.speed_up_when_y_blocked = true;
     p.quad_size *= 0.75;
     p.has_physics = false;
-    // `particle/glow` is a single frame, so `setSpriteFromAge` is a no-op —
-    // the behaviour is still `Animated` because the *class* advances its sheet,
-    // and a resource pack is free to give `glow.json` more than one frame.
+    // `particle/glow` is a single frame, so vanilla's own sprite-from-age step
+    // is a no-op — the behaviour is still `Animated` because the particle
+    // still advances its sheet, and a resource pack is free to give
+    // `glow.json` more than one frame.
     p.behaviour = Behaviour::Animated { layer: Layer::Opaque };
     p
 }
 
-/// `GlowParticle.ElectricSparkProvider` — the arc a lightning rod throws.
+/// Vanilla's own glow-particle electric-spark provider — the arc a lightning rod throws.
 ///
 /// The shortest-lived particle in this family by a wide margin: `nextInt(2) + 2`,
 /// i.e. two or three ticks. Its velocity is the packet's, scaled to a quarter,
@@ -3848,14 +3860,14 @@ pub fn electric_spark(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f
     engine.add(p);
 }
 
-/// `GlowParticle.GlowSquidProvider` (`ParticleTypes.GLOW`) — the shimmer around
-/// a glow squid.
+/// Vanilla's own glow-particle glow-squid provider (`minecraft:glow`) — the
+/// shimmer around a glow squid.
 ///
 /// The one provider in this family that does *not* assign its velocity: it feeds
 /// `0.5 - nextDouble()` horizontally into the constructor's own scatter, damps
 /// `yd` to a fifth, and damps `xd`/`zd` a further tenth when the caller asked
-/// for no horizontal motion — the same shape `SpellParticle` uses, tested
-/// against the **original** arguments rather than the jittered ones.
+/// for no horizontal motion — the same shape vanilla's own spell particle uses,
+/// tested against the **original** arguments rather than the jittered ones.
 ///
 /// Its tint is a coin flip between two greens, drawn from a `nextBoolean()`, so
 /// a school of them reads as two populations rather than one colour.
@@ -3882,7 +3894,7 @@ pub fn glow_squid(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, 
 
 /// The three copper-oxidation sparkles: `scrape`, `wax_on` and `wax_off`.
 ///
-/// All `GlowParticle` with a `nextInt(30) + 10` lifetime and a `0.01` speed
+/// All vanilla's own glow particle with a `nextInt(30) + 10` lifetime and a `0.01` speed
 /// factor; they differ only in tint and in whether the horizontal speed is
 /// halved. `scrape` flips a coin between two teals (the oxide it removed);
 /// `wax_on` is honey-orange and `wax_off` the same pale white as an electric
@@ -3904,8 +3916,8 @@ fn copper_sparkle(
     engine.add(p);
 }
 
-/// `GlowParticle.ScrapeProvider` — an axe stripping oxidation off copper.
-/// Full horizontal speed, unlike its two wax siblings.
+/// Vanilla's own glow-particle scrape provider — an axe stripping oxidation off
+/// copper. Full horizontal speed, unlike its two wax siblings.
 pub fn scrape(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let colour = if engine.rng().next_bool() {
         [0.29, 0.58, 0.51]
@@ -3915,37 +3927,37 @@ pub fn scrape(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: 
     copper_sparkle(engine, (x, y, z), (xa, ya, za), colour, false);
 }
 
-/// `GlowParticle.WaxOnProvider` — honeycomb applied to copper.
+/// Vanilla's own glow-particle wax-on provider — honeycomb applied to copper.
 pub fn wax_on(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     copper_sparkle(engine, (x, y, z), (xa, ya, za), [0.91, 0.55, 0.08], true);
 }
 
-/// `GlowParticle.WaxOffProvider` — an axe removing that wax.
+/// Vanilla's own glow-particle wax-off provider — an axe removing that wax.
 pub fn wax_off(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     copper_sparkle(engine, (x, y, z), (xa, ya, za), [1.0, 0.9, 1.0], true);
 }
 
-/// `FireworkParticles.SparkParticle` via `SparkProvider` — `ParticleTypes.FIREWORK`,
-/// the plain wire-spawned spark (not the rocket-explosion burst, which is a
-/// client-side-only `Starter`/`NoRenderParticle` this client never receives
-/// as a wire particle at all).
+/// Vanilla's own firework spark particle, spawned via its own plain provider —
+/// `minecraft:firework`, the plain wire-spawned spark (not the rocket-explosion
+/// burst, which is a client-side-only starter/non-rendering particle this
+/// client never receives as a wire particle at all).
 ///
-/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/FireworkParticles.java`:
-/// `SparkParticle`'s constructor is `super(level, x, y, z, sprites, 0.1F)` —
-/// `SimpleAnimatedParticle`'s third-from-last parameter is **gravity**, not a
-/// size scale (confirmed against `SimpleAnimatedParticle.java`'s own
+/// From vanilla's own firework-particle source (26.2 decompile): the spark's
+/// constructor chains to the simple-animated base constructor with a fixed
+/// `0.1F` — that base constructor's third-from-last parameter is **gravity**,
+/// not a size scale (confirmed against the simple-animated particle's own
 /// constructor, which the [`totem_of_undying`] doc already reads the same
 /// way), and that base constructor also hardcodes `friction = 0.91F`
-/// unconditionally — `SparkParticle` never overrides either back down the way
-/// [`totem_of_undying`]'s `TotemParticle` does. Velocity is taken **directly**
-/// from the caller with no jitter (`xd = xa` etc., matching `TotemParticle`
-/// again), `quadSize *= 0.75F`, `lifetime = 48 + nextInt(12)`, no colour set
-/// (stays the base white), and `SparkProvider.createParticle` — the only
-/// creation path a plain `SimpleParticleType` particle reaches — sets
+/// unconditionally — the spark particle never overrides either back down the
+/// way [`totem_of_undying`]'s totem particle does. Velocity is taken
+/// **directly** from the caller with no jitter (`xd = xa` etc., matching the
+/// totem particle again), `quadSize *= 0.75F`, `lifetime = 48 + nextInt(12)`,
+/// no colour set (stays the base white), and the plain provider's own creation
+/// method — the only creation path a plain particle type reaches — sets
 /// `alpha = 0.99F` on every instance. `trail`/`twinkle` both default `false`
 /// and are never set here; they only matter for the child sparks a rocket's
-/// own `Starter` spawns from its `tick()`, which is a different, client-only
-/// production path this emitter does not model.
+/// own starter spawns from its own tick step, which is a different,
+/// client-only production path this emitter does not model.
 pub fn firework(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let rng = engine.rng();
     let mut p = Particle::new(
@@ -3975,33 +3987,35 @@ pub fn firework(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya
     engine.add(p);
 }
 
-/// `DragonBreathParticle` — the cloud an ender dragon's breath attack and a
-/// lingering potion leave creeping across the ground
-/// (`ParticleTypes.DRAGON_BREATH`).
+/// Vanilla's own dragon-breath particle — the cloud an ender dragon's breath
+/// attack and a lingering potion leave creeping across the ground
+/// (`minecraft:dragon_breath`).
 ///
-/// The three velocity words are used **directly**: this class chains to
-/// `SingleQuadParticle`'s *no-velocity* constructor and then assigns
-/// `xd`/`yd`/`zd` itself, so unlike most emitters here nothing jitters,
-/// normalises or rescales them. `power` is `PowerParticleOption::getPower`,
-/// applied by the provider as `Particle.setPower` — which rescales `yd` about
-/// the `0.1` bias even though this constructor never added one, because
-/// `setPower` is a base-class method and does not know that.
+/// The three velocity words are used **directly**: this class chains to a
+/// no-velocity base constructor and then assigns `xd`/`yd`/`zd` itself, so
+/// unlike most emitters here nothing jitters, normalises or rescales them.
+/// `power` is the particle option's own power accessor, applied by the
+/// provider as vanilla's own particle base class's power setter — which
+/// rescales `yd` about the `0.1` bias even though this constructor never
+/// added one, because that setter is a base-class method and does not know
+/// that.
 ///
 /// The tint is drawn per particle out of a narrow purple band and is **not**
-/// wire-controlled: `Mth.nextFloat(random, 0.7176471F, 0.8745098F)` for red,
-/// the same call with `0.0F` for *both* bounds for green (a real draw, not a
+/// wire-controlled: vanilla's own bounded-random-float helper called with
+/// `(random, 0.7176471F, 0.8745098F)` for red, the same call with `0.0F` for
+/// *both* bounds for green (a real draw, not a
 /// constant — omitting it desynchronises every later number in the stream),
 /// and `0.8235294F..0.9764706F` for blue. Its only payload is the power, which
-/// is why `dragon_breath` is a `PowerParticleOption` and not a
-/// `SpellParticleOption`.
+/// is why `dragon_breath` carries a power-only particle option and not the
+/// full colour-carrying spell-particle option.
 ///
 /// `friction = 0.96F`, `quadSize *= 0.75F`,
 /// `lifetime = (int)(20.0 / (nextFloat() * 0.8 + 0.2))`, `hasPhysics = false`.
 /// See [`Behaviour::DragonBreath`] for the tick, which is a full override.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `DragonBreathParticle` constructor argument for argument, plus the \
-              power its provider reads off the options"
+    reason = "mirrors vanilla's own dragon-breath particle constructor argument for argument, \
+              plus the power its provider reads off the options"
 )]
 pub fn dragon_breath(
     engine: &mut ParticleEngine,
@@ -4013,7 +4027,7 @@ pub fn dragon_breath(
     za: f64,
     power: f32,
 ) {
-    /// `Mth.nextFloat(RandomSource, float, float)` — `nextFloat() * (max - min)
+    /// Vanilla's own bounded-random-float helper — `nextFloat() * (max - min)
     /// + min`, which draws even when the two bounds are equal.
     fn next_float_in(engine: &mut ParticleEngine, min: f32, max: f32) -> f32 {
         rng_next(engine).mul_add(max - min, min)
@@ -4049,28 +4063,28 @@ pub fn dragon_breath(
     engine.add(p);
 }
 
-/// `SculkChargeParticle` — the mote a spreading sculk charge leaves behind
-/// (`ParticleTypes.SCULK_CHARGE`).
+/// Vanilla's own sculk-charge particle — the mote a spreading sculk charge
+/// leaves behind (`minecraft:sculk_charge`).
 ///
 /// Its own emitter rather than an [`animated_ambient`] call, because three of
 /// the things its provider does are not that function's shape: the roll comes
-/// off the wire (`SculkChargeParticleOptions::roll`, which is what makes a
+/// off the wire (the particle option's own roll field, which is what makes a
 /// charge's motes lie along the direction it is spreading instead of all
 /// sharing one orientation), the lifetime is a per-particle draw
 /// (`random.nextInt(12) + 8`) rather than a constant, and the provider
-/// overwrites the jittered velocity outright with `setParticleSpeed` — so the
-/// packet's three velocity words really are the velocity here, unlike in the
-/// base constructor that scattered them.
+/// overwrites the jittered velocity outright with its own particle-speed
+/// setter — so the packet's three velocity words really are the velocity
+/// here, unlike in the base constructor that scattered them.
 ///
 /// `scale(1.5F)`, `friction = 0.96F`, `hasPhysics = false`, `setAlpha(1.0F)`.
-/// `getLightCoords` is `LightCoordsUtil.withBlock(super…, 15)` — a *boost* of
-/// the sampled world light rather than a bare full-bright constant, which this
-/// crate does not model for any behaviour, so a charge in the dark comes out
-/// dimmer than vanilla and never brighter.
+/// Its light-coordinate accessor applies a *boost* of 15 over the sampled
+/// world light rather than a bare full-bright constant, which this crate does
+/// not model for any behaviour, so a charge in the dark comes out dimmer than
+/// vanilla and never brighter.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `SculkChargeParticle` constructor argument for argument, plus the \
-              roll its provider reads off the options"
+    reason = "mirrors vanilla's own sculk-charge particle constructor argument for argument, \
+              plus the roll its provider reads off the options"
 )]
 pub fn sculk_charge(
     engine: &mut ParticleEngine,
@@ -4098,7 +4112,7 @@ pub fn sculk_charge(
     p.scale(1.5);
     p.has_physics = false;
     p.alpha = 1.0;
-    // `setParticleSpeed(xAux, yAux, zAux)` — the provider discards the
+    // Vanilla's own particle-speed setter — the provider discards the
     // jitter `with_velocity` just applied and installs the packet's own words.
     p.xd = xa;
     p.yd = ya;
@@ -4106,10 +4120,10 @@ pub fn sculk_charge(
     p.roll = roll;
     p.o_roll = roll;
     p.lifetime = engine.rng().next_i32_bound(12) + 8;
-    // `Animated`, not `AshSmoke`: `SculkChargeParticle` overrides neither
-    // `getQuadSize` nor `getLayer`'s default in the way `BaseAshSmokeParticle`
-    // does, so borrowing `AshSmoke` here would add a `* 32` fade-in the class
-    // does not have — and its layer is `TRANSLUCENT`.
+    // `Animated`, not `AshSmoke`: vanilla's own sculk-charge particle overrides
+    // neither its size-at-age nor its render-layer default the way vanilla's
+    // own base ash-smoke particle does, so borrowing `AshSmoke` here would add
+    // a `* 32` fade-in it does not have — and its layer is `TRANSLUCENT`.
     p.behaviour = Behaviour::Animated {
         layer: Layer::Translucent,
     };
@@ -4120,12 +4134,13 @@ pub fn sculk_charge(
     engine.add(p);
 }
 
-/// An animated ambient sheet with ordinary physics — `GUST`, `SMALL_GUST` and
-/// `SONIC_BOOM`, which differ from each other in sheet, scale and lifetime
-/// rather than in tick shape.
+/// An animated ambient sheet with ordinary physics — `minecraft:gust`,
+/// `minecraft:small_gust` and `minecraft:sonic_boom`, which differ from each
+/// other in sheet, scale and lifetime rather than in tick shape.
 ///
 /// [`Behaviour::AshSmoke`] again for [`soul`]'s reason: it means "advance the
-/// sheet by age", which is all `setSpriteFromAge` in each of these classes does.
+/// sheet by age", which is all vanilla's own sprite-from-age step does in each
+/// of these particles.
 pub fn animated_ambient(
     engine: &mut ParticleEngine,
     x: f64,
@@ -4155,10 +4170,10 @@ pub fn animated_ambient(
     engine.add(p);
 }
 
-/// `FlyTowardsPositionParticle` — the enchanting-table glyphs (`enchant`, over
-/// [`Sheet::Enchant`]'s twenty-six Standard Galactic letters) and the conduit's
-/// homing mote (`nautilus`). Vanilla's `EnchantProvider` and `NautilusProvider`
-/// are byte-identical apart from the sprite set.
+/// Vanilla's own fly-towards-position particle — the enchanting-table glyphs
+/// (`enchant`, over [`Sheet::Enchant`]'s twenty-six Standard Galactic letters)
+/// and the conduit's homing mote (`nautilus`). Vanilla's own enchant and
+/// nautilus providers are byte-identical apart from the sprite set.
 ///
 /// `xd/yd/zd` are an **offset**, not a velocity: the caller passes the point the
 /// mote should fly *from*, relative to `x/y/z`, and the constructor immediately
@@ -4171,8 +4186,8 @@ pub fn animated_ambient(
 /// different letters rather than the whole shelf spelling the same one.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the `FlyTowardsPositionParticle` constructor argument for argument, \
-              plus the sheet its provider supplies"
+    reason = "mirrors vanilla's own fly-towards-position particle constructor argument for \
+              argument, plus the sheet its provider supplies"
 )]
 pub fn fly_towards_position(
     engine: &mut ParticleEngine,
@@ -4218,17 +4233,17 @@ pub fn fly_towards_position(
     engine.add(p);
 }
 
-/// A `DripParticle` — one particle of the hang → fall → land chain.
+/// Vanilla's own drip particle — one particle of the hang → fall → land chain.
 ///
 /// Every difference between vanilla's seventeen drip registry types is in the
-/// table below: `DripParticle` itself is one constructor and one `tick`, and the
-/// four "subclasses" are two hook methods. Reading it as seventeen classes is
-/// what makes this look like seventeen ports.
+/// table below: vanilla's own drip particle itself is one constructor and one
+/// tick step, and the four "subclasses" are two hook methods. Reading it as
+/// seventeen classes is what makes this look like seventeen ports.
 ///
 /// `vel` is inherited from the previous phase (a hanging drip hands its own
 /// velocity to the falling one; a falling one hands zero to the landing one) and
-/// is zero for the phase the server itself asked for, which is
-/// `DripParticle`'s own zero-velocity constructor.
+/// is zero for the phase the server itself asked for, which is vanilla's own
+/// drip particle's own zero-velocity constructor.
 ///
 /// **`gravity` here is applied raw, not through the base tick's `0.04` scale**
 /// — see [`crate::Particle::tick_drip`] — which is why a hanging drip's value
@@ -4261,22 +4276,23 @@ pub fn drip(
     let varying = |n: f64| (n / spread) as i32;
 
     let (gravity, lifetime, colour) = match (kind, phase) {
-        // `DripHangParticle` sets `gravity *= 0.02F` on the base `0.06F` and a
-        // flat 40-tick lifetime; the honey and obsidian providers then multiply
-        // by a further `0.01F` and raise it to 100.
+        // Vanilla's own drip-hang particle sets `gravity *= 0.02F` on the base
+        // `0.06F` and a flat 40-tick lifetime; the honey and obsidian providers
+        // then multiply by a further `0.01F` and raise it to 100.
         (DripKind::Water | DripKind::DripstoneWater, DripPhase::Hang) => {
             (0.0012, 40, WATER_DRIP)
         }
         // The lava hanging phase's colour is recomputed every tick by
-        // `CoolingDripHangParticle`; this is only its first frame, white-hot.
+        // vanilla's own cooling-drip-hang particle; this is only its first
+        // frame, white-hot.
         (DripKind::Lava | DripKind::DripstoneLava, DripPhase::Hang) => {
             (0.0012, 40, [1.0, 1.0, 0.5])
         }
         (DripKind::Honey, DripPhase::Hang) => (0.000_012, 100, [0.622, 0.508, 0.082]),
         (DripKind::ObsidianTear, DripPhase::Hang) => (0.000_012, 100, OBSIDIAN_TEAR),
 
-        // `FallAndLandParticle`'s own `lifetime = (int)(64.0 / …)`, with the
-        // base `0.06F` gravity unless the provider overrides it.
+        // Vanilla's own fall-and-land particle's own `lifetime = (int)(64.0 / …)`,
+        // with the base `0.06F` gravity unless the provider overrides it.
         (DripKind::Water | DripKind::DripstoneWater, DripPhase::Fall) => {
             (0.06, varying(64.0), WATER_DRIP)
         }
@@ -4286,8 +4302,8 @@ pub fn drip(
         (DripKind::Honey, DripPhase::Fall) => (0.01, varying(64.0), [0.582, 0.448, 0.082]),
         (DripKind::ObsidianTear, DripPhase::Fall) => (0.01, varying(64.0), OBSIDIAN_TEAR),
         (DripKind::Nectar, DripPhase::Fall) => (0.007, varying(16.0), [0.92, 0.782, 0.72]),
-        // `Mth.randomBetween(random, 0.1F, 0.9F)` rather than the shared
-        // `nextFloat() * 0.8 + 0.2` — a *wider* spread with the same midpoint,
+        // Vanilla's own bounded-random-float helper called with `(random, 0.1F, 0.9F)`
+        // rather than the shared `nextFloat() * 0.8 + 0.2` — a *wider* spread with the same midpoint,
         // so a spore blossom's fall lasts anywhere from 71 to 640 ticks against
         // a nectar drip's 17 to 80.
         (DripKind::SporeBlossom, DripPhase::Fall) => {
@@ -4296,10 +4312,10 @@ pub fn drip(
             (0.005, lifetime, [0.32, 0.5, 0.22])
         }
 
-        // `DripLandParticle`, whose numerator is the one thing that differs
-        // between the three kinds that have a landing phase: 16 for lava, 128
-        // for honey (a honey splat lingers eight times as long), 28 for an
-        // obsidian tear.
+        // Vanilla's own drip-land particle, whose numerator is the one thing
+        // that differs between the three kinds that have a landing phase: 16
+        // for lava, 128 for honey (a honey splat lingers eight times as long),
+        // 28 for an obsidian tear.
         (DripKind::Lava | DripKind::DripstoneLava, DripPhase::Land) => {
             (0.06, varying(16.0), LAVA_DRIP)
         }
@@ -4329,35 +4345,36 @@ pub fn drip(
     engine.add(p);
 }
 
-/// `DripParticle.WaterHangProvider`'s tint — vanilla sets water drips to
-/// `0.2F, 0.3F, 1.0F` rather than the biome water colour, so a cave drip reads
-/// blue everywhere including in swamp water.
+/// Vanilla's own drip-particle water-hang provider's tint — vanilla sets water
+/// drips to `0.2F, 0.3F, 1.0F` rather than the biome water colour, so a cave
+/// drip reads blue everywhere including in swamp water.
 const WATER_DRIP: [f32; 3] = [0.2, 0.3, 1.0];
 
-/// `DripParticle.LavaFallProvider`'s tint, `1.0F, 0.2857143F, 0.083333336F` —
-/// and also exactly where [`crate::Particle::tick_drip`]'s cooling ramp arrives
-/// after 40 ticks, which is the check that the two constants in that formula are
+/// Vanilla's own drip-particle lava-fall provider's tint,
+/// `1.0F, 0.2857143F, 0.083333336F` — and also exactly where
+/// [`crate::Particle::tick_drip`]'s cooling ramp arrives after 40 ticks,
+/// which is the check that the two constants in that formula are
 /// transcribed right.
 const LAVA_DRIP: [f32; 3] = [1.0, 0.285_714_3, 0.083_333_336];
 
-/// `DripParticle.ObsidianTear*Provider`'s tint, `0.51171875F, 0.03125F,
-/// 0.890625F`. All three phases share it, and all three are `isGlowing`.
+/// Vanilla's own drip-particle obsidian-tear providers' shared tint,
+/// `0.51171875F, 0.03125F, 0.890625F`. All three phases share it, and all
+/// three are marked glowing.
 const OBSIDIAN_TEAR: [f32; 3] = [0.511_718_75, 0.031_25, 0.890_625];
 
-/// `DustParticleBase.randomizeColor` — a fresh `nextFloat` draw per call, so
-/// three calls (r, g, b) each consume their own random number even though
-/// `baseFactor` is shared across all three.
+/// Vanilla's own dust-particle-base colour randomizer — a fresh `nextFloat`
+/// draw per call, so three calls (r, g, b) each consume their own random
+/// number even though the base brightness factor is shared across all three.
 fn randomize_dust_channel(engine: &mut ParticleEngine, channel: f32, base_factor: f32) -> f32 {
     rng_next(engine).mul_add(0.2, 0.8) * channel * base_factor
 }
 
-/// Shared `DustParticleBase` constructor body — the physics and sizing every
-/// `minecraft:dust`-family particle has in common
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/particle/DustParticleBase.java`).
-/// `color` starts at `SingleQuadParticle`'s draw-quad-size point (already run
-/// by [`Particle::with_velocity`]), matching the constructor order: `super(...)`
-/// runs the velocity jitter and quad-size draw, *then* `xd/yd/zd *= 0.1`,
-/// *then* the lifetime redraw below.
+/// Shared dust-particle-base constructor body (26.2 decompile) — the physics
+/// and sizing every `minecraft:dust`-family particle has in common.
+/// `color` starts at the shared single-quad particle base class's
+/// draw-quad-size point (already run by [`Particle::with_velocity`]),
+/// matching the constructor order: `super(...)` runs the velocity jitter and
+/// quad-size draw, *then* `xd/yd/zd *= 0.1`, *then* the lifetime redraw below.
 fn dust_particle(
     engine: &mut ParticleEngine,
     x: f64,
@@ -4404,14 +4421,15 @@ fn dust_particle(
     p
 }
 
-/// `DustParticle.Provider` (`ParticleTypes.DUST`, the wire particle
+/// Vanilla's own dust-particle provider (`minecraft:dust`, the wire particle
 /// `minecraft:dust` decodes into).
 ///
-/// `color` is `DustParticleOptions::getColor()` — the packed RGB24 already
-/// unpacked to `[0, 1]` components — and `scale` its `ScalableParticleOptionsBase`
-/// scale. The colour is randomised once here (`DustParticle`'s constructor
-/// body, which runs *after* `DustParticleBase`'s) and held for the particle's
-/// whole life; see [`dust_color_transition`] for the sibling that doesn't.
+/// `color` is the dust particle option's own colour accessor — the packed
+/// RGB24 already unpacked to `[0, 1]` components — and `scale` its shared
+/// scalable-particle-option scale. The colour is randomised once here
+/// (vanilla's own dust particle's constructor body, which runs *after* its
+/// base class's) and held for the particle's whole life; see
+/// [`dust_color_transition`] for the sibling that doesn't.
 pub fn dust(
     engine: &mut ParticleEngine,
     x: f64,
@@ -4434,8 +4452,8 @@ pub fn dust(
     engine.add(p);
 }
 
-/// `DustColorTransitionParticle.Provider` (`ParticleTypes.DUST_COLOR_TRANSITION`,
-/// `minecraft:dust_color_transition` — the sculk-sensor/sculk-shrieker particle).
+/// Vanilla's own dust-color-transition particle provider
+/// (`minecraft:dust_color_transition` — the sculk-sensor/sculk-shrieker particle).
 ///
 /// Same physics as [`dust`]; the colour lerps from `from_color` to `to_color`
 /// over the particle's life instead of staying fixed — see
