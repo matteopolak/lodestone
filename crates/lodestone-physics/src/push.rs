@@ -241,22 +241,22 @@ impl NearbyEntity {
     }
 }
 
-/// Our own side of the push gates — the handful of `this.*` calls
-/// `Entity.push(Entity)` and `pushableBy` make on the entity being pushed.
+/// Our own side of the push gates — the handful of `this.*` calls vanilla's
+/// own entity push and pushable-by selector make on the entity being pushed.
 ///
 /// Deliberately **not** `Default`: `alive` must be `true` for an ordinary player
 /// and `bool::default()` is `false`, so a derived `Default` would silently produce
 /// a corpse that no push can move. Use [`Self::LIVING_PLAYER`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushSelf {
-    /// `Entity.isAlive()`.
+    /// Vanilla's own "is alive" check.
     pub alive: bool,
-    /// `Entity.isSpectator()`. Vetoes `isPushable()` *and*, via
-    /// `Player.tick`'s `noPhysics = isSpectator()` (`Player.java:233`), the whole
-    /// of `Entity.push(Entity)`.
+    /// Vanilla's own "is spectator" check. Vetoes `isPushable()` *and*, via
+    /// vanilla's own per-tick player update setting no-physics to match
+    /// spectator state, the whole of vanilla's own entity push.
     pub spectator: bool,
-    /// `Entity.isVehicle()` — we are being ridden, so we absorb rather than
-    /// receive.
+    /// Vanilla's own "is vehicle" check — we are being ridden, so we absorb
+    /// rather than receive.
     pub is_vehicle: bool,
     /// Our team's `CollisionRule`.
     pub collision_rule: CollisionRule,
@@ -273,9 +273,9 @@ impl PushSelf {
     };
 }
 
-/// `Entity.push(Entity)`'s horizontal vector (`Entity.java:1885-1900`), computed
-/// once per pair and *before* either receive gate. `None` is vanilla's
-/// `dd < 0.01F` early exit — the pair is too concentric to have a direction.
+/// Vanilla's own entity-push horizontal vector, computed once per pair and
+/// *before* either receive gate. `None` is vanilla's `dd < 0.01F` early
+/// exit — the pair is too concentric to have a direction.
 ///
 /// `self_pos` is `this.position()`, `other_pos` is `entity.position()`, and the
 /// returned vector points **from us toward them**: we receive its negation, they
@@ -348,9 +348,9 @@ pub fn pair_push_vector(self_pos: Vec3d, other_pos: Vec3d) -> Option<Vec3d> {
     Some(Vec3d::new(xa, 0.0, za))
 }
 
-/// Whether a pair is admitted at all — the conjunction of
-/// `EntitySelector.pushableBy(pusher)` applied to us as the pushee, the box test
-/// `Level.getEntities` performs, and `Entity.push(Entity)`'s own two guards.
+/// Whether a pair is admitted at all — the conjunction of vanilla's own
+/// pushable-by selector applied to us as the pushee, the box test vanilla's
+/// own entity query performs, and vanilla's own entity-push's two guards.
 ///
 /// `self_pushable` is our resolved `isPushable()` (including the `onClimbable`
 /// term, which needs a world view and so is resolved by the caller — see
@@ -362,30 +362,31 @@ fn pair_admitted(
     self_rule: CollisionRule,
     other: &NearbyEntity,
 ) -> bool {
-    // `Level.getEntities(pusher, pusher.getBoundingBox(), …)`: strict box
-    // intersection with **no epsilon inflation**. `getEntityCollisions` inflates
-    // its query by 1.0E-7 and this one does not; keep them distinct.
+    // Vanilla's own entity query: strict box intersection with **no epsilon
+    // inflation**. The entity-collisions query inflates its query by 1.0E-7
+    // and this one does not; keep them distinct.
     if !self_box.intersects(&other.bounding_box) {
         return false;
     }
-    // This mixed snapshot also carries hard colliders. Only entities whose own
-    // tick runs `LivingEntity.pushEntities()` may enter this crowd pass.
+    // This mixed snapshot also carries hard colliders. Only entities whose
+    // own tick runs vanilla's own crowd-push pass may enter this crowd pass.
     if !other.pushes_players {
         return false;
     }
-    // `EntitySelector.NO_SPECTATORS` on the pushee (us) and, via `noPhysics`, on
-    // a spectating pusher.
+    // Vanilla's own "no spectators" filter on the pushee (us) and, via
+    // `noPhysics`, on a spectating pusher.
     if self_no_physics || other.no_physics {
         return false;
     }
-    // `Entity.push`: `!this.isPassengerOfSameVehicle(entity)`.
+    // Vanilla's own entity push: `!this.isPassengerOfSameVehicle(entity)`.
     if other.same_vehicle {
         return false;
     }
-    // `pushableBy`: `if (!input.isPushable()) return false;` — the *pushee*'s
-    // pushability is a list-membership condition, not just a receive gate. It is
-    // therefore checked twice in vanilla and the second check is redundant; kept
-    // here so the two call sites read like the source.
+    // Vanilla's own pushable-by selector: `if (!input.isPushable()) return
+    // false;` — the *pushee*'s pushability is a list-membership condition,
+    // not just a receive gate. It is therefore checked twice in vanilla and
+    // the second check is redundant; kept here so the two call sites read
+    // like the source.
     if !self_pushable {
         return false;
     }
@@ -394,10 +395,10 @@ fn pair_admitted(
 
 /// The shared crowd pass, accumulating **onto** `velocity` one push at a time.
 ///
-/// Vanilla adds each push separately (`setDeltaMovement(getDeltaMovement().add(…))`
-/// per pair, `Entity.java:1921`), so summing the impulses first and adding once
-/// would be a different `f64` rounding in a crowd of two or more. Both public
-/// entry points route through here so there is exactly one accumulation order in
+/// Vanilla adds each push separately, so summing the impulses first and
+/// adding once would be a different `f64` rounding in a crowd of two or
+/// more. Both public entry points route through here so there is exactly
+/// one accumulation order in
 /// the crate: [`apply_entity_push`] hands it the real velocity, and
 /// [`entity_push_impulse`] hands it a zero, which reproduces the same sequence of
 /// adds with an offset of zero.
@@ -409,7 +410,7 @@ fn accumulate_pushes(
     self_pushable: bool,
     nearby: &[NearbyEntity],
 ) {
-    // `Player.tick`: `noPhysics = isSpectator()`.
+    // Vanilla's own per-tick player update: `noPhysics = isSpectator()`.
     let self_no_physics = self_flags.spectator;
     for other in nearby {
         if !pair_admitted(
@@ -428,8 +429,8 @@ fn accumulate_pushes(
         if self_flags.is_vehicle || !self_pushable {
             continue;
         }
-        // `Entity.push(double,double,double)` drops a non-finite impulse whole,
-        // all three components together (`Entity.java:1920`).
+        // Vanilla's own entity push drops a non-finite impulse whole, all
+        // three components together.
         if !v.x.is_finite() || !v.z.is_finite() {
             continue;
         }
@@ -437,9 +438,9 @@ fn accumulate_pushes(
     }
 }
 
-/// The total impulse the local entity receives this tick from
-/// `LivingEntity.pushEntities` — vanilla's whole crowd pass, from the pushee's
-/// point of view.
+/// The total impulse the local entity receives this tick from vanilla's own
+/// crowd-push pass — vanilla's whole crowd pass, from the pushee's point of
+/// view.
 ///
 /// `self_pushable` is the resolved `isPushable()`; `self_box` is our
 /// `getBoundingBox()`; `nearby` is every entity whose box could overlap ours.
@@ -470,8 +471,8 @@ pub fn entity_push_impulse(
     impulse
 }
 
-/// The **other** half of the same symmetric pair: the impulse `other` receives
-/// from `Entity.push(Entity)` (`Entity.java:1905-1907`).
+/// The **other** half of the same symmetric pair: the impulse `other`
+/// receives from vanilla's own entity push.
 ///
 /// A client does not own remote entities' velocities — the server does, and their
 /// positions arrive interpolated — so this exists for a caller that *simulates* an
@@ -507,14 +508,14 @@ pub fn reciprocal_push_impulse(
     v
 }
 
-/// `LivingEntity.isPushable()` (`LivingEntity.java:3366`) for the local entity:
+/// Vanilla's own "is pushable" check for the local entity:
 /// `isAlive() && !isSpectator() && !onClimbable()`.
 ///
 /// The `onClimbable` term is why this needs a [`CollisionView`]: it is
-/// `LivingEntity.onClimbable`, the climbable tag at the entity's **feet block
-/// position**, the same query [`crate::entity::travel_in_air`] already makes. A
-/// player on a ladder is immovable — hold a ladder in a mob crush and nothing
-/// shoves you off it.
+/// vanilla's own "on climbable" check, the climbable tag at the entity's
+/// **feet block position**, the same query [`crate::entity::travel_in_air`]
+/// already makes. A player on a ladder is immovable — hold a ladder in a
+/// mob crush and nothing shoves you off it.
 #[must_use]
 pub fn self_is_pushable(flags: PushSelf, position: Vec3d, view: &dyn CollisionView) -> bool {
     flags.alive
@@ -526,13 +527,15 @@ pub fn self_is_pushable(flags: PushSelf, position: Vec3d, view: &dyn CollisionVi
         )
 }
 
-/// Applies one tick of `LivingEntity.pushEntities` to a [`crate::player::PlayerState`].
+/// Applies one tick of vanilla's own crowd-push pass to a
+/// [`crate::player::PlayerState`].
 ///
-/// **Call this at the very end of a tick, after [`crate::player::tick`].** Vanilla
-/// runs `pushEntities` at `LivingEntity.java:3163`, after `travel` at `:3130`, so
-/// the impulse lands on the velocity that the *next* tick integrates and never on
-/// this tick's movement. Calling it before the travel dispatch advances the push by
-/// a full tick and is observable within two ticks.
+/// **Call this at the very end of a tick, after [`crate::player::tick`].**
+/// Vanilla runs its crowd-push pass at the end of its per-tick player
+/// update, after travel, so the impulse lands on the velocity that the
+/// *next* tick integrates and never on this tick's movement. Calling it
+/// before the travel dispatch advances the push by a full tick and is
+/// observable within two ticks.
 pub fn apply_entity_push(
     state: &mut crate::player::PlayerState,
     view: &dyn CollisionView,
@@ -556,23 +559,23 @@ pub fn apply_entity_push(
     );
 }
 
-/// `EntityGetter.getEntityCollisions(source, testArea)` (`EntityGetter.java:54-72`)
-/// — the entity boxes that participate in a movement sweep, appended to `out`.
+/// Vanilla's own entity-collisions query — the entity boxes that
+/// participate in a movement sweep, appended to `out`.
 ///
 /// Three details are ported rather than tidied:
 ///
-/// * the degenerate-box bail is on `AABB.getSize()`, the **mean edge length**, not
-///   a volume — `< 1.0E-7` returns nothing at all;
+/// * the degenerate-box bail is on vanilla's own box "get size", the **mean
+///   edge length**, not a volume — `< 1.0E-7` returns nothing at all;
 /// * the query box is `testArea.inflate(1.0E-7)`, an inflation the *push* pair test
 ///   pointedly does not have;
-/// * the predicate is `NO_SPECTATORS.and(source::canCollideWith)`, i.e.
-///   `other.canBeCollidedWith(us) && !us.isPassengerOfSameVehicle(other)`. It is
-///   [`NearbyEntity::collidable`] and **not** [`NearbyEntity::pushable`]; a mob
-///   contributes nothing here no matter how solid it looks.
+/// * the predicate is vanilla's own "no spectators, and can collide with"
+///   check, i.e. `other.canBeCollidedWith(us) && !us.isPassengerOfSameVehicle(other)`.
+///   It is [`NearbyEntity::collidable`] and **not** [`NearbyEntity::pushable`];
+///   a mob contributes nothing here no matter how solid it looks.
 ///
-/// The boxes are appended verbatim — vanilla's `Shapes.create(entity.getBoundingBox())`
-/// is a single-box shape, so the per-box sweep in [`crate::collision`] is exact for
-/// it with no voxel-shape machinery.
+/// The boxes are appended verbatim — vanilla's own single-box shape
+/// construction over an entity's bounding box, so the per-box sweep in
+/// [`crate::collision`] is exact for it with no voxel-shape machinery.
 pub fn entity_collision_boxes(test_area: Aabb, nearby: &[NearbyEntity], out: &mut Vec<Aabb>) {
     if test_area.size() < 1.0E-7 {
         return;
@@ -588,8 +591,8 @@ pub fn entity_collision_boxes(test_area: Aabb, nearby: &[NearbyEntity], out: &mu
     }
 }
 
-/// `CollisionGetter.noEntityCollision(entity, aabb)` (`CollisionGetter.java:69-71`)
-/// — `getEntityCollisions(...).isEmpty()`.
+/// Vanilla's own "no entity collision" check —
+/// `getEntityCollisions(...).isEmpty()`.
 #[must_use]
 pub fn no_entity_collision(test_area: Aabb, nearby: &[NearbyEntity]) -> bool {
     let mut boxes = Vec::new();
@@ -597,13 +600,14 @@ pub fn no_entity_collision(test_area: Aabb, nearby: &[NearbyEntity]) -> bool {
     boxes.is_empty()
 }
 
-/// `CollisionGetter.noCollision(entity, aabb)` (`CollisionGetter.java:51-53`) —
+/// Vanilla's own "no collision" check —
 /// `noBlockCollision && noEntityCollision && noBorderCollision`.
 ///
-/// This is the predicate `Player.canPlayerFitWithinBlocksAndEntitiesWhen`
-/// (`Player.java:373-375`) applies to a `deflate(1.0E-7)`d pose box, and the one
-/// `Player.canFallAtLeast` applies to its downward probe. [`no_collision`] remains
-/// the block-only form for callers with no entity snapshot.
+/// This is the predicate vanilla's own "can player fit within blocks and
+/// entities" check applies to a `deflate(1.0E-7)`d pose box, and the one
+/// vanilla's own "can fall at least" check applies to its downward probe.
+/// [`no_collision`] remains the block-only form for callers with no entity
+/// snapshot.
 ///
 /// **`noBorderCollision` is still unmodelled** — this engine has no world border,
 /// so a box the border would block reads as free. That is a pre-existing gap, now
@@ -646,7 +650,7 @@ mod tests {
 
     #[test]
     fn the_normaliser_is_sqrt_of_abs_max_not_sqrt_of_the_squared_length() {
-        // Hand-decoded from Entity.java:1885-1900. dx and dz are the *literal*
+        // Hand-decoded from the jar. dx and dz are the *literal*
         // subtractions, not the decimals they look like: 0.65 - 0.5 is
         // 0.15000000000000002, and using 0.15 here would make this test wrong in the
         // last bits while still passing every inequality below.
@@ -676,7 +680,8 @@ mod tests {
 
     #[test]
     fn the_magnitude_rises_to_a_plateau_and_never_falls_off() {
-        // The measured shape of `Entity.push`, which is NOT a distance falloff:
+        // The measured shape of vanilla's own entity push, which is NOT a
+        // distance falloff:
         //   |push| = 0.05f * min(sqrt(absMax), 1) * |d / absMax|,  |d/absMax| in [1, √2]
         // On a single axis that is exactly `0.05f * min(sqrt(m), 1)` — increasing in
         // m up to 1.0, then flat forever.
@@ -753,13 +758,15 @@ mod tests {
     fn a_non_finite_separation_is_rejected_the_way_java_rejects_it() {
         // `if (dd >= 0.01F)` skips its block on NaN. A `dd < 0.01F` reject would
         // *not* — `NaN < x` is false — and would emit a NaN impulse, which then
-        // poisons the position permanently. `Mth.absMax` propagates the NaN because
-        // `Math.max` does; Rust's `f64::max` does not, hence `mth::java_max_f64`.
+        // poisons the position permanently. Vanilla's own "abs max" propagates
+        // the NaN because Java's own `max` does; Rust's `f64::max` does not,
+        // hence `mth::java_max_f64`.
         assert!(mth::abs_max(f64::NAN, 0.5).is_nan());
         assert!(pair_push_vector(Vec3d::ZERO, Vec3d::new(f64::NAN, 0.0, 0.5)).is_none());
         assert!(pair_push_vector(Vec3d::ZERO, Vec3d::new(0.5, 0.0, f64::NAN)).is_none());
-        // Infinities do clear the gate (`inf >= 0.01f`), and `Entity.push`'s own
-        // `Double.isFinite` guard is what drops the resulting impulse.
+        // Infinities do clear the gate (`inf >= 0.01f`), and vanilla's own
+        // entity push's `Double.isFinite` guard is what drops the resulting
+        // impulse.
         let us = Vec3d::new(0.5, 1.0, 0.5);
         let mut huge =
             NearbyEntity::living(Vec3d::new(f64::INFINITY, 1.0, 0.5), body(0.65, 1.0, 0.5));
