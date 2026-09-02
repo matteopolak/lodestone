@@ -385,6 +385,31 @@ mod tests {
     /// mesh `z`. The `0.25` is a quarter block — the head cuboid is
     /// `[-4, -8, -4] + [8, 8, 8]` in sixteenths (`entity.rs`'s `player_model`),
     /// so `±4/16` is exactly its front and back faces.
+    /// Is `a` the depth of a surface **nearer the eye** than `b`?
+    ///
+    /// Derived from the real [`Camera`] rather than written as `a < b`, because
+    /// which end of `[0, 1]` the near plane sits at is a property of
+    /// [`Camera::projection_matrix`] and it has changed once already: the
+    /// projection is reversed-Z, so nearer is *greater*. Three assertions below
+    /// depend on this and all three read as obviously correct written the wrong
+    /// way round.
+    fn nearer(a: f32, b: f32) -> bool {
+        let camera = Camera {
+            position: Vec3::new(0.0, 0.0, 4.0),
+            yaw: 180.0,
+            ..Camera::default()
+        };
+        let vp = camera.view_projection();
+        let close = clip_depth(vp, Vec3::new(0.0, 0.0, 1.0));
+        let distant = clip_depth(vp, Vec3::ZERO);
+        assert_ne!(
+            close, distant,
+            "premise: two points a block apart projected to one depth, so this \
+             module cannot tell which way is toward the eye"
+        );
+        if close > distant { a > b } else { a < b }
+    }
+
     #[test]
     fn the_face_is_nearer_than_the_back_of_the_head_in_both_arms() {
         // A point in the middle of the head, on the front face and on the back
@@ -407,7 +432,7 @@ mod tests {
         let world_front = clip_depth(world, front);
         let world_back = clip_depth(world, back);
         assert!(
-            world_front < world_back,
+            nearer(world_front, world_back),
             "premise-false control: this world camera does not even see the face \
              nearer than the back of the head (front {world_front}, back {world_back}), \
              so it cannot be the outside arm for the GUI claim"
@@ -423,7 +448,7 @@ mod tests {
         let gui_front = clip_depth(gui, front);
         let gui_back = clip_depth(gui, back);
         assert!(
-            gui_front < gui_back,
+            nearer(gui_front, gui_back),
             "the inventory avatar must show its face, not the inside of the back of \
              its skull: front depth {gui_front}, back depth {gui_back}"
         );
@@ -433,7 +458,7 @@ mod tests {
         let wrong_front = clip_depth(wrong, front);
         let wrong_back = clip_depth(wrong, back);
         assert!(
-            wrong_front > wrong_back,
+            nearer(wrong_back, wrong_front),
             "the control must put the back of the head in front, or this gate is \
              insensitive to the z flip: front {wrong_front}, back {wrong_back}"
         );

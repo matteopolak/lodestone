@@ -58,12 +58,15 @@
 //! # Distance is the axis, because the defect is precision-dependent
 //!
 //! A single close-up frame is precisely the gate that passes while the bug
-//! ships: through this renderer's **forward** `[0,1]` depth, one ULP of the
-//! depth buffer is worth `2.44e-06` blocks of world separation at 2 blocks and
-//! `1.55e-04` blocks at 16 — a **64x** swing, because the worth of a ULP grows
-//! as the square of the distance. (Measured for `near = 0.05`, `far =
+//! ships: through the **forward** `[0,1]` depth this renderer used to have, one
+//! ULP of the depth buffer was worth `2.44e-06` blocks of world separation at 2
+//! blocks and `1.55e-04` at 16 — a **64x** swing, because the worth of a ULP
+//! grew as the square of the distance. (Measured for `near = 0.05`, `far =
 //! far_for_render_distance(12)`, against reversed-Z's `5.96e-08`..`4.77e-07`
-//! over the same span; see `EntityPipeline::shadow_pipeline`'s doc.) A shadow
+//! over the same span; see `EntityPipeline::shadow_pipeline`'s doc.) The
+//! projection is reversed-Z now, so the right-hand figures are what ships — but
+//! the subject here is a decal placed at **exactly zero** separation, which no
+//! amount of precision resolves, so the sweep is unchanged. A shadow
 //! piece only ever exists within 16 blocks of the camera — `pow = (1 -
 //! distSq / 256) * strength` must be positive — so [`SUBJECTS`] spans that
 //! whole reachable range rather than a comfortable corner of it.
@@ -495,9 +498,10 @@ fn the_ground_shadow_decal_wins_the_depth_test_at_every_distance() {
 
 /// The sign of the ground shadow's polygon offset, asserted without a GPU.
 ///
-/// `[0, 1]` depth means **lower is nearer**, so pulling a decal toward the
-/// camera is a *negative* bias — the opposite of vanilla's reversed-Z, where
-/// the same intent is spelled positive. Getting this backwards does not soften
+/// Which sign pulls toward the camera is a property of the projection, so it is
+/// **derived** from a real `Camera` here rather than written down. Under this
+/// renderer's reversed-Z depth nearer is *greater*, so the bias is positive —
+/// the same spelling vanilla uses. Getting this backwards does not soften
 /// the artefact, it inverts the fix: the decal is pushed behind the ground it
 /// sits on and disappears altogether. That failure mode reads exactly like
 /// "entity shadows were never wired", which is the report this feature was
@@ -512,15 +516,31 @@ fn the_ground_shadow_decal_wins_the_depth_test_at_every_distance() {
 #[test]
 fn the_ground_shadow_bias_pulls_toward_the_camera() {
     let bias = lodestone_render::entity_pipeline::SHADOW_DEPTH_BIAS;
-    assert!(
-        bias.constant < 0,
-        "SHADOW_DEPTH_BIAS.constant is {}; under this renderer's [0,1] depth a decal is \
-         pulled toward the camera by a NEGATIVE constant. A positive one pushes the ground \
-         shadow behind the ground and it vanishes.",
+    // Ask the real projection which way "toward the camera" is, so this gate
+    // survives a change of depth convention by failing on the *bias* rather than
+    // by certifying a decal buried in the ground.
+    let camera = lodestone_render::Camera {
+        position: glam::Vec3::new(0.0, 0.0, 4.0),
+        yaw: 180.0,
+        ..lodestone_render::Camera::default()
+    };
+    let depth = |z: f32| {
+        let c = camera.view_projection() * glam::Vec4::new(0.0, 0.0, z, 1.0);
+        c.z / c.w
+    };
+    assert_ne!(depth(1.0), depth(0.0), "premise: the projection is degenerate in z");
+    let toward_camera = if depth(1.0) > depth(0.0) { 1.0_f32 } else { -1.0 };
+    assert_eq!(
+        bias.constant.signum() as f32,
+        toward_camera,
+        "SHADOW_DEPTH_BIAS.constant is {}; under this renderer's depth a decal is \
+         pulled toward the camera by a constant of sign {toward_camera}. The other \
+         sign pushes the ground shadow behind the ground and it vanishes.",
         bias.constant
     );
-    assert!(
-        bias.slope_scale < 0.0,
+    assert_eq!(
+        bias.slope_scale.signum(),
+        toward_camera,
         "SHADOW_DEPTH_BIAS.slope_scale is {}; it must share the constant's sign, or a decal \
          seen at a grazing angle is pushed back exactly where the depth gradient across a \
          pixel is largest and the pull is needed most.",

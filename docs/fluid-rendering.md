@@ -326,8 +326,10 @@ jar's** `grass_block`, not on a hand-written view.
   emits too, so there is no cull to add and adding one deletes water that should be
   visible above the step. Flicker means two coplanar surfaces whose depth
   separation has collapsed below what `Depth32Float` can represent at that
-  distance; go to `FLUID_DEPTH_NUDGE` in `shaders/fluid.wgsl` and
-  `fluid_coplanar_depth_gate.rs`, not to `mesh_fluids`. Note also that the symptom
+  distance; go to `fluid_coplanar_depth_gate.rs` and to `Camera::projection_matrix`,
+  not to `mesh_fluids`. Note the gate now measures the geometric inset **alone** —
+  the shader adds no depth offset — so a failure there means the projection
+  changed, not that a constant drifted. Note also that the symptom
   is *not* nondeterminism — the same camera renders the same frame — so a
   repeated-draw determinism gate cannot see it; what moves is the camera.
 - **Gotcha: self-cell questions answered from neighbours are a *family*, and two
@@ -522,42 +524,55 @@ hid are worth more than the fix:
     that difference cannot produce this artefact: the contest is against an opaque
     face already in the depth buffer either way.
   - **The depth comparison is already correct.** `ModelPipeline`'s translucent
-    variant uses `Less` on purpose, and with the water sitting behind the block
-    face that is the arm that rejects it. `LessEqual` would be worse here, not
-    better — it resolves a tie in the water's favour.
+    variant uses the strict `DEPTH_COMPARE_NEARER` on purpose, and with the water
+    sitting behind the block face that is the arm that rejects it. Admitting an
+    exact tie would be worse here, not better — it resolves the tie in the
+    water's favour.
 
-  The cause is the third one, **genuine depth precision**, and it is measurable
-  rather than a hypothesis. Vanilla spends its `0.001` inset in a reversed-Z depth
-  buffer, where relative precision barely changes with distance. Ours is `[0,1]`
-  DirectX-style `Depth32Float` (`camera.rs`, `DESIGN.md` §7), which spends nearly
-  the whole float32 mantissa within a few blocks of the near plane. Measured
-  through the real `Camera::view_projection`, 0.001 blocks is worth **210 float32
-  ULPs of depth at 2 blocks, 12 at 8, 4 at 16, 2 at 24, 1 at 32, 0 at 64, and −1
-  at 128** — the separation collapses and then inverts. Once the gap is a ULP or
-  two, which surface wins at a given pixel is decided by whatever rounding the
-  rasterizer produces for two coplanar quads of *different shapes* (the water face
-  spans the whole square, the stair's own face only its bottom half), and it
-  re-rounds when the camera moves. That is the flicker, and it is why the report
-  was "swapping rapidly" while moving.
+  The cause was the third one, **genuine depth precision**. Vanilla spends its
+  `0.001` inset in a reversed-Z depth buffer, where relative precision barely
+  changes with distance; this renderer's was `[0,1]` DirectX-style **forward**
+  `Depth32Float`, which spends nearly the whole float32 mantissa within a few
+  blocks of the near plane. Measured through the real `Camera::view_projection`
+  at the time, 0.001 blocks was worth **210 float32 ULPs of depth at 2 blocks, 12
+  at 8, 4 at 16, 2 at 24, 1 at 32, 0 at 64, and −1 at 128** — the separation
+  collapsed and then inverted. Once the gap is a ULP or two, which surface wins at
+  a given pixel is decided by whatever rounding the rasterizer produces for two
+  coplanar quads of *different shapes* (the water face spans the whole square, the
+  stair's own face only its bottom half), and it re-rounds when the camera moves.
+  That is the flicker, and it is why the report was "swapping rapidly" while
+  moving.
 
-  A world-space inset cannot fix this, because the broken thing is the mapping
-  from world distance to depth. `shaders/fluid.wgsl`'s `FLUID_DEPTH_NUDGE` does:
-  `out.clip.z += FLUID_DEPTH_NUDGE * out.clip.w`, which is a constant offset in
-  *window* depth after the perspective divide, so the ULP count is bounded from
-  below across the whole depth range independent of distance. `2^-21` is exactly
-  8 ULPs at any depth in `[0.5, 1)`; positive is away from the camera under our
-  convention, the direction the inset already meant. The residual is measured and
-  bounded the other way too: relative to the surface's own distance the push is
-  0.05% at 2 blocks, 0.09% at 128 and 0.5% at 512 blocks, so water within about
-  three blocks of an opaque surface behind it *could* lose the depth test at the
-  very edge of a 32-chunk render distance. That is a deliberate trade against a
-  z-fight at 30–130 blocks, where players are.
+  ### The fix was the projection, and the nudge is gone with it
+
+  A world-space inset could not fix that, because the broken thing was the mapping
+  from world distance to depth, so `shaders/fluid.wgsl` carried a `FLUID_DEPTH_NUDGE`
+  — a constant `2^-21` offset in *window* depth, added as `out.clip.z += nudge *
+  out.clip.w`, which bounded the ULP count from below independent of distance.
+
+  `Camera::projection_matrix` is now **reversed-Z** (`docs/camera.md`), and the
+  same inset is worth **6,707 ULP at 2 blocks, 1,678 at 8, 838 at 16, 209 at 64,
+  53 at 256 and 26 at 512** — the furthest a 32-chunk render distance draws —
+  against the gate's floor of 4. So the geometry alone carries it, and the shader
+  now adjusts no depth at all.
+
+  Removing the nudge was not tidying. A constant window-depth offset is
+  *relatively* larger the smaller the depth value is, and reversed-Z depth shrinks
+  with distance, so the same `2^-21` that cost 0.001 blocks of backward push at
+  arm's length would cost about **2.5 blocks at 512** — pushing a distant ocean
+  surface toward its own sea floor to fix a z-fight that no longer exists.
+  `model_pipeline`'s `the_fluid_shader_adjusts_no_depth` is the guard that stops
+  it coming back; `cargo check` never compiles a shader and no pixel gate can see
+  a small constant depth offset.
 
   - `crates/lodestone-render/tests/fluid_coplanar_depth_gate.rs` is the gate. Its
     expected values come from IEEE-754 ULP spacing and the real projection, not
     from a blend prediction — deliberately, because an exact composited byte
     through `ALPHA_BLENDING` cannot be predicted on this backend. Both controls
-    are executed and were **observed failing** on the pre-fix code.
+    are executed. `control_the_forward_projection_does_collapse_as_the_camera_moves`
+    is the observed-failing arm: it runs the identical sweep through a
+    transcription of the forward projection this renderer used to have and
+    requires it to find distances below the floor (it finds 564 of 609).
   - **A repeated-draw determinism gate would have been vacuous here**, and that is
     worth remembering: a z-fight is not frame-to-frame nondeterminism. The
     rasterizer is deterministic, so the same scene from the same camera renders

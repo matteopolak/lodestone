@@ -48,12 +48,11 @@
 //! crumbling`). Only `writeDepth` differs between the two: sign text is
 //! `true` (a nearer line of text must occlude a farther one, and the board
 //! itself, the way any opaque geometry does), the crack overlay is `false`
-//! (it is a decal and must never occlude anything). Vanilla is reversed-Z;
-//! this project's depth is `[0,1]` DirectX-style
-//! (`CLAUDE.md`'s rendering constraints), so `GREATER_THAN_OR_EQUAL` flips to
-//! [`wgpu::CompareFunction::LessEqual`] and the bias flips sign —
-//! `constant: -10, slope_scale: -1.0`, identical to `crack_pipeline.rs`'s
-//! port of the same two Java constants.
+//! (it is a decal and must never occlude anything). This renderer's depth is
+//! reversed-Z like vanilla's, so `GREATER_THAN_OR_EQUAL` is
+//! [`lodestone_render::DEPTH_COMPARE_NEARER_OR_EQUAL`] and the bias is
+//! transcribed with **no** sign flip — `constant: 10, slope_scale: 1.0`,
+//! identical to `crack_pipeline.rs`'s port of the same two Java constants.
 //!
 //! Lodestone emits opaque ink-run rectangles, not vanilla's alpha-masked
 //! glyph textures. Drawing the expanded rectangles underneath the ink would
@@ -162,7 +161,7 @@ use glam::Vec3;
 use lodestone_assets::font::RasterFont;
 use lodestone_model::text::{TextColor, TextSpan, TextStyle};
 use lodestone_render::{
-    CAMERA_DEPTH_BIAS, DEPTH_FORMAT, SignKind, SignOrientation, SignSpawn, sign_outline_color,
+    CAMERA_DEPTH_BIAS, DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT, SignKind, SignOrientation, SignSpawn, sign_outline_color,
     sign_side_color, sign_text_transform,
 };
 use lodestone_world::{SignSide, SignTextSpan};
@@ -549,17 +548,19 @@ const BEHIND_EYE_SLACK: f32 = 1.0;
 ///
 /// See `docs/coplanar-overlay-depth.md` for the vanilla pipelines this pair is
 /// ported from, and for what each half of a polygon offset is measured to be
-/// worth on this renderer's forward depth buffer.
+/// worth on this renderer's depth buffer.
 const SIGN_OUTLINE_DEPTH_BIAS: wgpu::DepthBiasState = CAMERA_DEPTH_BIAS;
 
 /// The ordinary ink's depth state — vanilla's `Font.DisplayMode.POLYGON_OFFSET`
 /// half, whose pipeline declares a scale factor of `1` and a constant of `10`.
 ///
-/// Twice [`CAMERA_DEPTH_BIAS`] rather than exactly one step, because vanilla
-/// spends that offset in a reversed-Z buffer whose relative precision barely
-/// moves with distance and ours does not. The doubling is this renderer's
-/// compensation and is confirmed working on plain sign text; it is *not* a
-/// transcription of vanilla's numbers, which are one step.
+/// Twice [`CAMERA_DEPTH_BIAS`] rather than exactly one step. The doubling was
+/// added as compensation for a **forward** `[0,1]` depth buffer, whose relative
+/// precision collapsed with distance where vanilla's reversed-Z buffer's does
+/// not — and this renderer's projection is now reversed-Z, so that reason is
+/// gone. It is kept because it is confirmed working on plain sign text and
+/// reducing it is a behaviour change with no measurement behind it yet, not
+/// because it is a transcription: vanilla's numbers are one step.
 const SIGN_GLYPH_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
     constant: 2 * CAMERA_DEPTH_BIAS.constant,
     slope_scale: 2.0 * CAMERA_DEPTH_BIAS.slope_scale,
@@ -878,7 +879,7 @@ fn build_pipeline(
             // `writeDepth = true` in vanilla's own
             // `TEXT_POLYGON_OFFSET` record — see the module doc.
             depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
             stencil: wgpu::StencilState::default(),
             bias,
         }),
@@ -1737,8 +1738,18 @@ mod tests {
         // The assertions below were right; only the reason was wrong, which is
         // why nothing ever failed.
         assert_eq!(SIGN_OUTLINE_DEPTH_BIAS, CAMERA_DEPTH_BIAS);
+        // "Nearer the eye" is a larger constant under reversed-Z, so state it
+        // as magnitude-in-the-toward-eye-direction rather than as an ordering of
+        // signed integers: written as `<` this passed unchanged through the
+        // conversion while asserting the ink sat *behind* the outline.
+        assert_eq!(
+            SIGN_GLYPH_DEPTH_BIAS.constant.signum(),
+            CAMERA_DEPTH_BIAS.constant.signum(),
+            "the ink must be offset in the same direction as every other \
+             toward-the-eye bias in the tree"
+        );
         assert!(
-            SIGN_GLYPH_DEPTH_BIAS.constant < SIGN_OUTLINE_DEPTH_BIAS.constant,
+            SIGN_GLYPH_DEPTH_BIAS.constant.abs() > SIGN_OUTLINE_DEPTH_BIAS.constant.abs(),
             "the polygon-offset ink must sit nearer the eye than the outline it \
              is drawn over; both are on one world plane, so this bias is the \
              only thing that orders them"
@@ -1771,10 +1782,18 @@ mod tests {
                 < 1.0e-6,
             "the ink's slope offset must be twice the outline's"
         );
-        // Both halves are negative — toward the eye — so "half" is genuinely
-        // less separation from the board and not merely a different sign.
-        assert!(SIGN_OUTLINE_DEPTH_BIAS.constant < 0);
-        assert!(SIGN_OUTLINE_DEPTH_BIAS.slope_scale < 0.0);
+        // Both halves carry the toward-the-eye sign, so "half" is genuinely
+        // less separation from the board and not merely a different sign. The
+        // reference sign is `CAMERA_DEPTH_BIAS`, which `lodestone-render`
+        // derives from the projection itself rather than restating.
+        assert_eq!(
+            SIGN_OUTLINE_DEPTH_BIAS.constant.signum(),
+            CAMERA_DEPTH_BIAS.constant.signum()
+        );
+        assert_eq!(
+            SIGN_OUTLINE_DEPTH_BIAS.slope_scale.signum(),
+            CAMERA_DEPTH_BIAS.slope_scale.signum()
+        );
         // The probe is inert unless a live run asks for it, and when it is
         // inert the plane is exactly the shipped constant.
         assert_eq!(

@@ -41,7 +41,7 @@ recognise.
 
 Every sky pipeline sets `depth_stencil: None` and runs with **no depth
 attachment**. This is deliberate and worth preserving: our depth is `[0,1]`
-DirectX-style rather than vanilla's reversed-Z, so every ported depth comparison
+reversed-Z like vanilla's, so a ported depth comparison
 flips sign. Having nothing to flip is worth more than having it right.
 
 #### The sky pass's clear colour *is* the world below the horizon

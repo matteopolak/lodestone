@@ -226,16 +226,20 @@ at 40°: **389** glyph px with the panel against **438** without, restored to
 per-pixel scatter across the whole block, not a clean edge, which is why it
 reads as "the text is broken at some angles" rather than as a depth bug.
 
-**How little room there actually is, measured.** That 0.00025-block separation, expressed in ULPs of
-the stored `f32` through this renderer's `Depth32Float` and **forward** `[0,1]` projection (near
-`0.05`, far `512`): **53** at 2 blocks, **9** at 5, **3** at 8, **2** at 10, **1** at 14, **1** at 20,
-**0** at 64 — bit-identical. Through vanilla's *reversed*-Z it never falls below **53**. So the bias
-is the only thing separating the two planes past about ten blocks, and the consequence generalises
-past this pass: **any ported sub-millimetre depth separation is unresolvable here at ordinary viewing
-distance**, because reversed-Z is the arrangement that makes vanilla's constants work and this
-renderer does not have it. Pinned as an exact per-distance curve in `lodestone_render::display`'s own
-tests, with the reversed-Z column as the control — computed straight from the two planes, not as
-`1.0 - forward`, which inherits the forward value's rounding and reads `0` ULPs.
+**How little room there used to be, measured.** That 0.00025-block separation, expressed in ULPs of
+the stored `f32` through `Depth32Float` and the **forward** `[0,1]` projection this renderer then had
+(near `0.05`, far `512`): **53** at 2 blocks, **9** at 5, **3** at 8, **2** at 10, **1** at 14, **1**
+at 20, **0** at 64 — bit-identical. Through a *reversed*-Z projection it never falls below **53**.
+That was the measurement that made the case for converting, and `Camera::projection_matrix` is
+reversed-Z now, so the right-hand column is what ships and the separation holds at every distance.
+
+Two things survive the conversion. The per-distance curve is still pinned in
+`lodestone_render::display`'s own tests, with **both** columns computed straight from the two planes
+rather than as `1.0 - forward`, which would inherit the forward value's rounding and read `0` ULPs.
+And the reason this pass has a biased glyph pipeline at all is unaffected: a `text_display` is
+visible from **both** sides, so vanilla's own geometric shadow offset moves the glyph *away* from an
+eye looking at its back regardless of how much depth precision there is. That is a geometry argument,
+not a precision one.
 
 `text_display_pixels.rs` cannot see this and never could: it asserts only
 that more than 100 non-sky pixels land in the entity's rect, which the panel

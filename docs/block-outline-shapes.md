@@ -242,12 +242,12 @@ pass's shader was already at 0.6 — more opaque, not less. Left unchanged.
 **Depth setup needs one renderer-specific addition.** Vanilla's `LINES` pipeline
 (`RenderPipelines.java:565`, the one the hit outline actually uses — not the
 `LINES_DEPTH_BIAS` variant at `:572`) uses `DepthStencilState.DEFAULT`:
-`GREATER_THAN_OR_EQUAL`, **zero** bias. Per `CLAUDE.md`'s reversed-Z note, that is
-this engine's `LessEqual`. The screen-space ribbon and terrain mesh do not share a
-vertex-generation path, however, so the inclusive predicate still ties at oblique
-angles. `OutlineRenderer` keeps the selected shape's exact world boundary and uses
-the shared camera-facing polygon bias (`slope = -1`, `constant = -10`) to resolve
-that tie in ULPs. A `PAD = 0.002` world-space expansion was removed: its projection
+`GREATER_THAN_OR_EQUAL`, **zero** bias. This engine is reversed-Z too, so that is
+`DEPTH_COMPARE_NEARER_OR_EQUAL` with no sign flip. The screen-space ribbon and
+terrain mesh do not share a vertex-generation path, however, so the inclusive
+predicate still ties at oblique angles. `OutlineRenderer` keeps the selected
+shape's exact world boundary and uses the shared camera-facing polygon bias
+(`slope = 1`, `constant = 10`) to resolve that tie in ULPs. A `PAD = 0.002` world-space expansion was removed: its projection
 changes as an oblique camera moves, so a constant-pixel ribbon appeared to breathe
 even though its shader width was stable.
 

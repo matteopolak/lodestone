@@ -69,7 +69,7 @@ geometry beyond the chunk-derived inner band, no caves or overhangs at distance.
 - **`flate2` is already a `lodestone-server` dependency** (zlib-rs backed) and that crate
   compiles for wasm32 — the entropy-coding backend needs no new dependency and no new
   wasm hazard class.
-- **Depth is `[0,1]` DirectX-style, not reversed-Z**, and the terrain compare is
+- **Depth is reversed-Z `[0,1]`, the same sense as vanilla**, and the terrain compare is
   `LessEqual`; a vanilla-positive depth bias is negative here.
 - **Tint and shade multiply in gamma space** (`srgb_to_linear(linear_to_srgb(rgb) * tint * shade)`;
   `crates/lodestone-render/src/biome_tint.rs` is the tint source). A far tier that bakes

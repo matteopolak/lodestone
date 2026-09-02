@@ -4,7 +4,7 @@
 //! half) landed with no render consumer; this module is the brokered hunk
 //! that document names, mirroring [`super::debug_lines`] file-for-file the
 //! way its own doc asks for.
-use lodestone_render::DEPTH_FORMAT;
+use lodestone_render::{DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 
 /// One instance of a camera-facing world-space billboard quad — the render
 /// half of [`lodestone_ecs::PluginBillboard`]. A separate, `bytemuck`-friendly
@@ -227,7 +227,7 @@ impl PluginBillboardRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

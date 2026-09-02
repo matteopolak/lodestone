@@ -242,7 +242,7 @@ function of the fragment alpha on this Metal backend does not apply. The composi
 byte here *is* exactly predictable.
 
 **`CompareOp.EQUAL` is the one ported depth comparison that does not flip.** Our
-depth is `[0,1]` DirectX-style rather than vanilla's reversed-Z, so every ported
+depth is reversed-Z like vanilla's, so no ported
 `GREATER_THAN_OR_EQUAL` becomes `LessEqual` and every positive depth bias becomes
 negative. Equality is orientation-independent, so `EQUAL` ports across unchanged.
 

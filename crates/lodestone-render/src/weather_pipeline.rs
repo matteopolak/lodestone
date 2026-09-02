@@ -25,9 +25,9 @@
 //!
 //! Vanilla's `WEATHER_NO_DEPTH_WRITE` is
 //! `DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, false)`
-//! (`RenderPipelines.java:635-640`). Vanilla uses reversed-Z; this renderer uses
-//! DirectX-style `[0, 1]` depth, so the port is `LessEqual` — see `CLAUDE.md`'s
-//! rendering constraints. `Less` would also *look* right (rain is never coplanar
+//! (`RenderPipelines.java`). This renderer is reversed-Z like vanilla, so the
+//! port is [`lodestone_render::DEPTH_COMPARE_NEARER_OR_EQUAL`] with no sign
+//! flip. A strict "nearer wins" would also *look* right (rain is never coplanar
 //! with terrain, so the `Equal` half never decides anything here); `LessEqual` is
 //! used because it is the faithful mapping and a future coplanar case should
 //! behave as vanilla does.
@@ -258,9 +258,8 @@ impl WeatherRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth_format,
                 depth_write_enabled: Some(false),
-                // Vanilla's GREATER_THAN_OR_EQUAL under reversed-Z; see the
-                // module doc.
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                // Vanilla's GREATER_THAN_OR_EQUAL; see the module doc.
+                depth_compare: Some(crate::block::DEPTH_COMPARE_NEARER_OR_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

@@ -59,9 +59,9 @@
 //! `RenderPipelines.TEXT_POLYGON_OFFSET`:
 //! `new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`.
 //! The two numeric constants are the same polygon offset `gpu/sign_text.rs`
-//! already ports, and the same sign flip applies (vanilla is reversed-Z,
-//! this project's depth is `[0,1]`), giving [`TEXT_POLYGON_OFFSET`] —
-//! `constant: -10, slope_scale: -1.0` — on the **shadow** pipeline and no
+//! already ports, and no sign flip applies — this renderer is reversed-Z like
+//! vanilla — giving [`TEXT_POLYGON_OFFSET`] —
+//! `constant: 10, slope_scale: 1.0` — on the **shadow** pipeline and no
 //! bias at all on the background one. The ink pipeline takes
 //! [`GLYPH_POLYGON_OFFSET`], which is that same offset counted **twice**,
 //! for the reason in the next section. Straight alpha blending
@@ -119,12 +119,14 @@
 //!   with it out.
 //! - **It is under a ULP where it matters anyway.** `0.00075 · scale` blocks
 //!   is three times the panel-versus-ink separation the sweep in
-//!   `tests/world_text_over_geometry_pixels.rs` already measures at between
-//!   6.7 and 0.56 `f32` ULP of a forward `[0,1]` `Depth32Float`. Vanilla can
-//!   spend a separation that small because reversed-Z has orders of magnitude
-//!   more precision at every distance; this renderer cannot. That is
-//!   `CLAUDE.md`'s measured rule about ported sub-millimetre depth
-//!   separations, arriving at this pass.
+//!   `tests/world_text_over_geometry_pixels.rs` measured at between 6.7 and
+//!   0.56 `f32` ULP when this renderer used a **forward** `[0,1]`
+//!   `Depth32Float`. Reversed-Z has since restored two to three orders of
+//!   magnitude of that separation, so the "under a ULP" half of this argument
+//!   no longer holds; the geometric argument in the bullet above — that the
+//!   offset moves a two-sided glyph *away* from an eye looking at its back —
+//!   is unaffected and is on its own sufficient. Re-measure before spending the
+//!   constant again.
 //!
 //! What replaces it is a **polygon offset**: the shadow keeps vanilla's own
 //! `TEXT_POLYGON_OFFSET` and the ink takes [`GLYPH_POLYGON_OFFSET`], which is
@@ -285,7 +287,7 @@ use lodestone_render::display::{
     text_background_color, text_glyph_color, text_glyph_transform,
 };
 use lodestone_render::sign::TEXT_LINE_HEIGHT;
-use lodestone_render::{Camera, DEPTH_FORMAT};
+use lodestone_render::{Camera, DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 
 use crate::display_entities::{DisplayDraw, TEXT_DISPLAY_TYPE_PATH};
 
@@ -308,17 +310,21 @@ const MAX_DISPLAY_TEXT_VERTICES: usize = 40_000;
 /// `Font` shadows chat and every other piece of text.
 const FLAG_SHADOW: u8 = 1;
 
-/// `RenderPipelines.TEXT_POLYGON_OFFSET`'s own polygon offset, sign-flipped
-/// for this project's forward `[0,1]` depth: vanilla's
+/// `RenderPipelines.TEXT_POLYGON_OFFSET`'s own polygon offset, transcribed with
+/// **no** sign flip: vanilla's
 /// `new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`
-/// pulls *toward* the camera with positive constants under reversed-Z, and
-/// toward the camera with negative ones here.
+/// pulls *toward* the camera with positive constants under reversed-Z, and this
+/// renderer's projection is reversed-Z too.
 ///
 /// One step of this is what every glyph and every glyph shadow gets, so text
 /// lying flush against a block face wins against it rather than tying.
+///
+/// This is the same pair [`lodestone_render::CAMERA_DEPTH_BIAS`] carries, kept
+/// as its own constant because this pass doubles it below and the world pass
+/// does not.
 const TEXT_POLYGON_OFFSET: wgpu::DepthBiasState = wgpu::DepthBiasState {
-    constant: -10,
-    slope_scale: -1.0,
+    constant: 10,
+    slope_scale: 1.0,
     clamp: 0.0,
 };
 
@@ -590,7 +596,7 @@ fn build_pipelines(
     let tested = |write: bool, bias: wgpu::DepthBiasState| wgpu::DepthStencilState {
         format: DEPTH_FORMAT,
         depth_write_enabled: Some(write),
-        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
         stencil: wgpu::StencilState::default(),
         bias,
     };

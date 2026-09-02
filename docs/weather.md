@@ -234,8 +234,9 @@ Gotchas beyond the three above:
   shows through walls) and must not write depth (or overlapping columns punch holes
   in each other). Vanilla uses a dedicated `WEATHER_TARGET` because it feeds a
   transparency-sorting chain we do not have.
-* **Depth compare is `LessEqual`, flipped from vanilla's `GREATER_THAN_OR_EQUAL`** —
-  we use DirectX-style `[0, 1]` depth, not reversed-Z.
+* **Depth compare is `DEPTH_COMPARE_NEARER_OR_EQUAL`, transcribed unflipped from
+  vanilla's `GREATER_THAN_OR_EQUAL`** — we use reversed-Z `[0, 1]` depth, the same
+  sense vanilla does.
 * **Two bind groups only** (camera, texture). That is why the per-column light term is
   resolved on the CPU instead of binding a lightmap as vanilla does: the model shader
   is already at wgpu's 4-group floor and headroom is worth keeping.

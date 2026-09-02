@@ -21,12 +21,12 @@
 //!
 //! `ENTITY_SOLID` (`RenderPipelines.java:232`), `ENTITY_CUTOUT`
 //! (`:245`), `ENTITY_CUTOUT_CULL` (`:238`) and `ENTITY_TRANSLUCENT` (`:274`)
-//! all inherit it — none of them overrides `withDepthStencilState`. Vanilla is
-//! reversed-Z and this engine is `[0,1]` DirectX-style, so
-//! `GREATER_THAN_OR_EQUAL` translates to `CompareFunction::LessEqual` here (the
-//! standing translation in `CLAUDE.md`). The base pipeline shipped `Less`, which
-//! is the one value that is *not* vanilla: coincident geometry resolves to the
-//! **first** draw instead of the last.
+//! all inherit it — none of them overrides `withDepthStencilState`. This engine
+//! is reversed-Z like vanilla, so `GREATER_THAN_OR_EQUAL` is
+//! `DEPTH_COMPARE_NEARER_OR_EQUAL` here with no sign flip. The base pipeline
+//! shipped the **strict** comparison, which is the one value that is *not*
+//! vanilla: coincident geometry resolves to the **first** draw instead of the
+//! last.
 //!
 //! Note the record's field order while reading that transcription: it is
 //! `(depthTest, writeDepth, depthBiasScaleFactor, depthBiasConstant)`, so a
@@ -325,7 +325,7 @@ fn render(gpu: &Gpu, draws: &[(f32, [u8; 3])]) -> Vec<u8> {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &depth.view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Clear(lodestone_render::DEPTH_CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,

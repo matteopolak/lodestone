@@ -1222,12 +1222,12 @@ prepare` emits it at `piece.relativeY() + shapeBelow().bounds().minY`, and the
 only blocks reaching it are the ones `isCollisionShapeFullBlock` accepted,
 whose bounds are the unit cube. Zero separation, and vanilla's `ENTITY_SHADOW`
 uses the two-argument `DepthStencilState`, so it carries no bias either.
-Vanilla can afford that because it is reversed-Z. This renderer's forward
-`[0,1]` depth cannot. Measured (`near = 0.05`, `far =
-far_for_render_distance(12)`, `Depth32Float`), one ULP of the depth buffer is
+Vanilla can afford that because it is reversed-Z, and **this renderer used not
+to be**. Measured while it was forward `[0,1]` (`near = 0.05`, `far =
+far_for_render_distance(12)`, `Depth32Float`), one ULP of the depth buffer was
 worth, in blocks of world separation:
 
-| distance | forward `[0,1]` (here) | reversed-Z (vanilla) |
+| distance | forward `[0,1]` (as shipped then) | reversed-Z (vanilla, and now here) |
 |---|---|---|
 | 2 blocks | `2.44e-06` | `5.96e-08` |
 | 8 blocks | `3.84e-05` | `2.38e-07` |
@@ -1235,14 +1235,21 @@ worth, in blocks of world separation:
 
 16 blocks is the whole reach of the feature — `pow = (1 - distSq / 256) *
 strength` must be positive — so that is the full range, not a slice of it.
-The *shape* of the left column is the finding: a ULP's worth grows as the
+The *shape* of the left column was the finding: a ULP's worth grew as the
 **square** of the distance, a 64x swing across the feature's own reach, so no
-fixed world-space lift can work. Anything large enough to resolve at 16 blocks
-visibly floats the decal at 2; anything discreet at 2 is unresolvable at 16.
+fixed world-space lift could work. Anything large enough to resolve at 16 blocks
+visibly floated the decal at 2; anything discreet at 2 was unresolvable at 16.
+
+`Camera::projection_matrix` is now reversed-Z (`docs/camera.md`), so the right
+column is what ships and the argument against a fixed world lift no longer
+holds on precision grounds. The polygon offset stays: it is exactly zero
+separation the shadow is fighting, which no clearance of any size and no
+precision resolves. This paragraph is the reason the divergence exists, not a
+live measurement — re-take it before quoting the left column again.
 
 `EntityPipeline::SHADOW_DEPTH_BIAS` is a polygon offset instead, which does not
 have that shape: for a floating-point depth format the offset unit is one ULP
-of the *primitive's own* depth, so `constant: -10` is ten ULPs wherever the
+of the *primitive's own* depth, so `constant: 10` is ten ULPs wherever the
 piece happens to be — `4.5e-05` blocks of pull at 2 blocks, `2.96e-03` at 16,
 and never more, because the feature's own distance cutoff bounds it. Negative
 because `[0,1]` depth puts *nearer* at *lower*; this is the same translation

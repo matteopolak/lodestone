@@ -254,7 +254,7 @@ fn render(gpu: &Gpu, models: &BlockModels, mesh: &ModelMesh, cam: &Camera) -> Ve
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Clear(lodestone_render::DEPTH_CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -648,7 +648,7 @@ fn the_pre_fix_build_draws_exactly_nothing() {
 
 #[test]
 #[ignore = "requires a GPU adapter and a fetched vanilla client.jar; run explicitly"]
-fn a_world_drop_pose_is_positive_and_the_composition_is_negative() {
+fn a_world_drop_pose_is_positive_and_the_composition_inherits_the_camera() {
     let gpu = setup();
     let models = build_models();
     let geometry = item_geometry(&models);
@@ -664,12 +664,17 @@ fn a_world_drop_pose_is_positive_and_the_composition_is_negative() {
     println!("  det(drop pose)            = {:+.6e}", pose.determinant());
     println!("  det(view_projection*pose) = {:+.6e}", (vp * pose).determinant());
 
-    // The camera's own sign is a *measurement*, not an assumption: glam's DirectX
-    // right-handed perspective happens to be orientation-reversing, and the whole
-    // trap is that "positive" sounds like the safe answer.
+    // The camera's own sign is deliberately not asserted. It follows from which
+    // end of `[0, 1]` the near plane sits at — negative under a forward
+    // projection, positive under this renderer's reversed-Z one, because
+    // mirroring the clip `z` axis flips a 4x4 determinant — and it is not what
+    // the rasterizer reads, which is projected `x`/`y` alone. All that is needed
+    // is that it be non-degenerate, so the relative claims below have a
+    // reference. Asserting it as a polarity is the trap this test's own title
+    // used to fall into.
     assert!(
-        vp.determinant() < 0.0,
-        "the reference camera is expected to be orientation-reversing; got {:+e}",
+        vp.determinant().abs() > 1.0e-9,
+        "the reference camera's projection is degenerate; got {:+e}",
         vp.determinant()
     );
     // A world pose is *left*-multiplied by that camera, exactly like a terrain
@@ -677,8 +682,8 @@ fn a_world_drop_pose_is_positive_and_the_composition_is_negative() {
     assert!(
         pose.determinant() > 0.0,
         "a world-space drop pose must be POSITIVE (translation, Y rotation, positive uniform \
-         scale); got {:+e}. The GUI rule — that `gui_ortho * gui_item_pose` is NEGATIVE — is a \
-         statement about the composed matrix and inverts here",
+         scale); got {:+e}. The GUI rule — that `gui_ortho * gui_item_pose` matches the camera's \
+         own sign — is a statement about the composed matrix and inverts here",
         pose.determinant()
     );
     assert_eq!(

@@ -13,11 +13,11 @@
 //! * **Normal pass** (`RenderPipelines.TEXT`, via `WORLD_TEXT_SNIPPET`):
 //!   `DepthStencilState.DEFAULT = new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true)`
 //!   (`DepthStencilState.java`) — depth-tested **and depth-written**.
-//!   Vanilla's reversed-Z convention makes "closer" `GREATER_THAN_OR_EQUAL`;
-//!   ours is `[0,1]` DirectX-style (`docs/`/`CLAUDE.md`'s rendering
-//!   constraints), so the *sign flips* to [`wgpu::CompareFunction::LessEqual`]
-//!   with `depth_write_enabled: true` — the same flip `gpu/outline.rs` and
-//!   `gpu/debug_lines.rs` already apply, just with write turned **on** here
+//!   Vanilla's reversed-Z convention makes "closer" `GREATER_THAN_OR_EQUAL`,
+//!   and this renderer is reversed-Z too, so the port is
+//!   [`lodestone_render::DEPTH_COMPARE_NEARER_OR_EQUAL`] with **no** sign flip,
+//!   and `depth_write_enabled: true` — the same comparison `gpu/outline.rs` and
+//!   `gpu/debug_lines.rs` use, just with write turned **on** here
 //!   (a nearer tag's glyphs must win over a farther, overlapping one, exactly
 //!   as vanilla's write-enabled pass does).
 //! * **See-through pass** (`RenderPipelines.TEXT_SEE_THROUGH`):
@@ -186,7 +186,7 @@ use lodestone_assets::font::{FontLoader, FontOptions, GlyphRaster, MISSING_ADVAN
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
 use lodestone_model::text::{FontId, Text, TextColor, TextSpan};
 use lodestone_render::entity::camera_orientation;
-use lodestone_render::{Camera, DEPTH_FORMAT};
+use lodestone_render::{Camera, DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 
 use crate::entities::EntityDraw;
 
@@ -1113,7 +1113,7 @@ fn build_pipelines(
         Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),

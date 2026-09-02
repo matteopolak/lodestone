@@ -437,9 +437,7 @@ fn a_live_servers_sign_text_reaches_pixels() {
 /// against an empty world, so **no gate in this tree has ever put a sign's own
 /// board in the depth buffer underneath its text**.
 ///
-/// The separation is small and this project's depth is forward `[0, 1]` rather
-/// than vanilla's reversed-Z, which spends float exponent where depth needs
-/// it: `template_sign_rot_0`'s board spans `z ∈ [7.33333, 8.66667]/16` and
+/// The separation is small: `template_sign_rot_0`'s board spans `z ∈ [7.33333, 8.66667]/16` and
 /// `StandingSignRenderer.TEXT_OFFSET` puts the text plane at
 /// `0.5 + 0.046666667`, i.e. **0.005 blocks** — 5 mm — in front of the front
 /// face. So this arm renders the live sign over the live world's own meshed

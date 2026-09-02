@@ -43,6 +43,35 @@ use crate::vertex::PackedVertex;
 /// Depth format used by the block pass.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// The value a depth attachment clears to, under this renderer's **reversed-Z**
+/// projection: the far plane, which is `0.0`.
+///
+/// Every `LoadOp::Clear` on a depth attachment must use this rather than a
+/// literal, because the literal is the half of a reversed-Z conversion that
+/// compiles, validates and silently discards the entire frame — a pass clearing
+/// to `1.0` under a `Greater` comparison rejects every fragment and draws
+/// nothing at all. See [`Camera::projection_matrix`](crate::Camera::projection_matrix).
+pub const DEPTH_CLEAR: f32 = 0.0;
+
+/// "Strictly nearer wins" — vanilla's `GREATER_THAN`, and what a forward `[0,1]`
+/// buffer spells `Less`.
+///
+/// Reversed-Z puts the near plane at `1.0`, so *nearer* is *greater*. Named
+/// after the property rather than the operator so a reader does not have to
+/// re-derive the direction at each pipeline.
+pub const DEPTH_COMPARE_NEARER: wgpu::CompareFunction = wgpu::CompareFunction::Greater;
+
+/// "Nearer or exactly tied wins" — vanilla's `GREATER_THAN_OR_EQUAL`, which is
+/// its `DepthStencilState.DEFAULT`, and what a forward `[0,1]` buffer spells
+/// `LessEqual`.
+///
+/// The `Equal` half is load-bearing wherever a model places two elements at
+/// identical coordinates and relies on the later one winning — a grass block's
+/// tinted overlay is the standing example. Substituting
+/// [`DEPTH_COMPARE_NEARER`] there loses every such quad.
+pub const DEPTH_COMPARE_NEARER_OR_EQUAL: wgpu::CompareFunction =
+    wgpu::CompareFunction::GreaterEqual;
+
 /// `view_proj` plus the world-space origin of the section being drawn, in one
 /// non-dynamic uniform.
 ///
@@ -321,7 +350,7 @@ impl BlockPipeline {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(!translucent),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                depth_compare: Some(DEPTH_COMPARE_NEARER),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

@@ -210,10 +210,13 @@ each is attached to its specific issue too, but they recur:
   bind group validates on an 8-group adapter and is a startup crash on a 4-group one. Check
   the *limit*, not the adapter, before adding a group for any new effect (glint, tint,
   overlays).
-- **Depth is `[0,1]` DirectX-style, not vanilla's reversed-Z.** Every ported depth comparison
-  and bias flips sign.
-- **The GUI winding invariant is negative**, derived from `Camera::view_projection()`'s own
-  sign — do not assert a polarity from a screenshot that happens to look right.
+- **Depth is reversed-Z `[0,1]`, the same sense as vanilla.** A ported depth comparison
+  and bias transcribes with **no** sign flip, a depth attachment clears to
+  `lodestone_render::DEPTH_CLEAR` (`0.0`), and nearer is *greater*.
+- **The GUI winding invariant is an agreement, not a polarity**: `sign(det(gui_ortho *
+  gui_item_pose))` must equal `sign(det(Camera::view_projection()))`, derived from a real
+  camera. The absolute sign follows the depth direction and is positive under reversed-Z;
+  do not assert it from a screenshot that happens to look right.
 - **Vanilla is not colour-managed**: tint and shade multiply in gamma space. Every new tint
   path filed above (glint, potion/spawn-egg tint, banner patterns, fire/hurt/underwater
   overlays) must follow `srgb_to_linear(linear_to_srgb(rgb) * tint * shade)`, not the linear

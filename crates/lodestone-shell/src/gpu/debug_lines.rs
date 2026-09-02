@@ -2,7 +2,7 @@
 //! channel) and the polled source that feeds it.
 use std::cell::{Cell, RefCell};
 
-use lodestone_render::DEPTH_FORMAT;
+use lodestone_render::{DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 
 /// One coloured vertex of a world-space debug line segment — the render half
 /// of `lodestone_ecs::player::DebugLine` (`docs/plugin-api.md`'s
@@ -591,7 +591,7 @@ impl DebugLineRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

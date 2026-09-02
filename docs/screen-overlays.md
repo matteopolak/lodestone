@@ -52,7 +52,7 @@ Both `ScreenEffectRenderer::draw_underwater`/`draw_fire` open their **own**
 render pass with `LoadOp::Load`, never `Clear` — they run after the world,
 entities and the first-person hand, and must not erase them. No depth
 attachment either, for the same reason `sky_pipeline.rs` gives: this
-project's depth is `[0,1]` DirectX-style, not vanilla's reversed-Z, and a
+project's depth is reversed-Z like vanilla's, and a
 pass that takes no depth attachment cannot get a comparison sign backwards
 because there is no comparison.
 

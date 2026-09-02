@@ -45,7 +45,7 @@
 //!    overlay must win over the element beneath it**. Unrelated to light, found
 //!    while auditing why grass looked wrong, and real: `grass_block` bakes 10
 //!    quads, 4 of them tinted `#overlay` faces sitting at exactly the base
-//!    cube's coordinates. A strict `CompareFunction::Less` rejects all four.
+//!    cube's coordinates. A strict "nearer wins" comparison rejects all four.
 //! 3. [`unlit_faces_reach_vanillas_ambient_floor_and_not_the_retired_ramps`] —
 //!    the retired ramp's `0.2` floor is **gone**, replaced by vanilla's own
 //!    `AmbientColor` floor of `0.0935` rather than by pure black, on real baked
@@ -385,7 +385,7 @@ fn render_frame(
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Clear(lodestone_render::DEPTH_CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -626,8 +626,11 @@ fn render_coplanar(
 /// (the biome-tinted grass mask, emitted second, at the **same** `from`/`to`).
 ///
 /// Vanilla draws both and the overlay wins, because vanilla's terrain depth
-/// function is `LEQUAL`. [`ModelPipeline`] uses `CompareFunction::Less`, under
-/// which the second of two exactly-coplanar quads can never pass.
+/// function admits an exact tie (`GREATER_THAN_OR_EQUAL`). This renderer is
+/// reversed-Z too, so the faithful port is
+/// [`lodestone_render::DEPTH_COMPARE_NEARER_OR_EQUAL`]; under a **strict**
+/// comparison the second of two exactly-coplanar quads can never pass, which is
+/// the failure this gate exists to catch.
 #[test]
 #[ignore = "requires a GPU adapter and a fetched vanilla client.jar; run explicitly"]
 fn the_grass_block_side_overlay_survives_the_depth_test() {
@@ -703,8 +706,8 @@ fn the_grass_block_side_overlay_survives_the_depth_test() {
     );
     println!("  both, in baked order rgb={both_c:?}  G/R={:.3}", gr(both_c));
     println!(
-        "  vanilla (GEQUAL under reversed-Z == our LessEqual) predicts the overlay wins; a \
-         strict `CompareFunction::Less` predicts the base wins"
+        "  vanilla's GREATER_THAN_OR_EQUAL, which this reversed-Z renderer shares, predicts \
+         the overlay wins; a strict nearer-wins comparison predicts the base wins"
     );
 
     // The control that makes the measurement legible: the two textures must be
@@ -721,11 +724,11 @@ fn the_grass_block_side_overlay_survives_the_depth_test() {
         (gr(both_c) - gr(overlay_c)).abs() < 0.05,
         "the tinted #overlay must be what a grass block's side shows, but the composite reads \
          G/R {:.3} against the overlay's {:.3} and the bare #side's {:.3}. That is the overlay \
-         being rejected by a strict `CompareFunction::Less`: vanilla's terrain depth comparison \
-         is `GREATER_THAN_OR_EQUAL` under reversed-Z (26.2 `DepthStencilState.DEFAULT`), i.e. \
-         `LessEqual` in our [0,1] depth space, and grass_block.json places both elements at \
-         exactly [0,0,0]..[16,16,16], so the second is coplanar with the first and can never \
-         pass a strict `Less`",
+         being rejected by a strict nearer-wins comparison: vanilla's terrain depth comparison \
+         is `GREATER_THAN_OR_EQUAL` (26.2 `DepthStencilState.DEFAULT`), which this reversed-Z \
+         renderer spells `DEPTH_COMPARE_NEARER_OR_EQUAL`, and grass_block.json places both \
+         elements at exactly [0,0,0]..[16,16,16], so the second is coplanar with the first and \
+         can never pass a strict comparison",
         gr(both_c),
         gr(overlay_c),
         gr(base_c)

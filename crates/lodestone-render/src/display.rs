@@ -594,10 +594,11 @@ mod tests {
     /// [`text_glyph_transform`]'s `0.025` scale turns into **0.00025 blocks**.
     /// Vanilla resolves that comfortably because its depth buffer is
     /// *reversed*-Z float, where precision is concentrated at distance. This
-    /// project's is `Depth32Float` with a forward `[0, 1]` projection
-    /// (`crate::DEPTH_FORMAT`, `Camera::view_projection`), which is the
-    /// opposite arrangement: almost the whole mantissa is spent between the
-    /// near plane and a few blocks out.
+    /// project's was `Depth32Float` with a **forward** `[0, 1]` projection —
+    /// the opposite arrangement, almost the whole mantissa spent between the
+    /// near plane and a few blocks out — and this measurement is what made the
+    /// case for converting it. `Camera::projection_matrix` is reversed-Z now,
+    /// so the control column below is the one that ships.
     ///
     /// The separation is asserted in **ULPs of the stored `f32`**, at
     /// vanilla's own near plane and this camera's default far plane, and the
@@ -608,14 +609,20 @@ mod tests {
     /// across an oblique quad moves either plane), and **0 at 64**, where the
     /// panel and the ink are bit-identical.
     ///
-    /// The reversed-Z column is the control, computed straight from the
-    /// projection rather than as `1.0 - forward` (which would inherit the
-    /// forward value's rounding and measure nothing): the identical geometry
-    /// through the arrangement vanilla actually uses never falls below 53
-    /// ULPs. If this renderer ever switches to reversed-Z, this test goes red
-    /// and should be deleted along with the workaround it documents.
+    /// Both columns are computed straight from their own two planes rather
+    /// than one from the other as `1.0 - forward` (which would inherit the
+    /// forward value's rounding and measure nothing): through the arrangement
+    /// vanilla actually uses the identical geometry never falls below 53 ULPs.
+    ///
+    /// The third arm is what keeps this from becoming a museum piece. It takes
+    /// the same separation through the **real** [`Camera::view_projection`] and
+    /// requires it to track the reversed column and **not** the forward one, so
+    /// the file states which convention ships rather than merely recording that
+    /// two are possible. A previous version of this doc said the test would go
+    /// red if the projection were converted; it would not have, because neither
+    /// column read the production matrix.
     #[test]
-    fn the_panel_and_the_ink_collapse_to_one_depth_value_with_distance() {
+    fn the_panel_and_the_ink_hold_their_separation_under_the_shipped_projection() {
         /// `Camera::PROJECTION_Z_NEAR`.
         const NEAR: f32 = 0.05;
         /// `Camera::default().far`.
@@ -664,6 +671,54 @@ mod tests {
                 (20.0, 1),
                 (64.0, 0),
             ],
+        );
+
+        // The shipped arm. `Camera::view_projection` must agree with the
+        // reversed column and disagree with the forward one — at 64 blocks the
+        // two hypotheses are 0 and 53+ ULP apart, so no tolerance could satisfy
+        // both.
+        let camera = crate::Camera {
+            position: glam::Vec3::new(0.0, 0.0, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            near: NEAR,
+            far: FAR,
+            ..crate::Camera::default()
+        };
+        let shipped = |d: f32| {
+            let clip = camera.view_projection() * glam::Vec4::new(0.0, 0.0, d, 1.0);
+            clip.z / clip.w
+        };
+        let mut thin = Vec::new();
+        for distance in [2.0_f32, 5.0, 8.0, 10.0, 14.0, 20.0, 64.0] {
+            let nearer = distance - SEPARATION;
+            let live = ulps_apart(shipped(distance), shipped(nearer));
+            let control = ulps_apart(reversed(distance), reversed(nearer));
+            // Within a factor of two of the closed form: the two differ only by
+            // `f32` rounding and by where each lands inside its binade.
+            if live * 2 < control || live > control * 2 {
+                thin.push(format!(
+                    "  at {distance} blocks the shipped projection measures \
+                     {live} ULP against the reversed-Z closed form's {control}"
+                ));
+            }
+            // And the two hypotheses are distinguishable at this distance: the
+            // forward column must fall *outside* the same factor-of-two window
+            // the shipped arm is required to sit inside. Stated as a non-overlap
+            // rather than as a floor, because a floor here would be a threshold
+            // copied from the answer.
+            let before = ulps_apart(forward(distance), forward(nearer));
+            assert!(
+                before * 2 < control || before > control * 2,
+                "at {distance} blocks the forward projection's {before} ULP is \
+                 within a factor of two of the reversed-Z {control}, so this arm \
+                 cannot tell the two conventions apart"
+            );
+        }
+        assert!(
+            thin.is_empty(),
+            "the shipped projection does not track the reversed-Z closed form:\n{}",
+            thin.join("\n")
         );
     }
 }

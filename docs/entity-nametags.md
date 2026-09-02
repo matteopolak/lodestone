@@ -162,8 +162,8 @@ Reconciled against `.cache/mc/26.2/client-src`'s
 | see-through | `Optional.empty()` — no depth attachment at all (`RenderPipelines.TEXT_SEE_THROUGH`) | `CompareFunction::Always`, `depth_write_enabled: false` |
 
 The normal-pass sign flip is the same one every other depth-tested pass in
-this codebase applies: our depth is `[0,1]` DirectX-style, not vanilla's
-reversed-Z, so "closer or equal" flips from `GREATER_THAN_OR_EQUAL` to
+this codebase applies: our depth is reversed-Z like vanilla's, so "closer or
+equal" transcribes from `GREATER_THAN_OR_EQUAL` to
 `LessEqual`.
 
 **The see-through row is not a straight port.** Vanilla's abstraction lets a
@@ -233,7 +233,7 @@ test cannot separate plate from glyphs regardless. Submission order does it,
 and `LessEqual` passes the resulting tie. Porting the offset faithfully would
 also be inert — through the `0.025` text scale it is `0.00025` blocks, which
 is 0–2 ULP of `Depth32Float` at any real viewing distance under this
-project's forward `[0,1]` projection (see `docs/shaders.md`).
+project's reversed `[0,1]` projection (see `docs/shaders.md`).
 
 The colour is black at `Options.getBackgroundOpacity(0.25F)`. That accessor
 returns its **fallback** `0.25` unless `backgroundForChatOnly` is turned off,

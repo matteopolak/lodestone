@@ -81,7 +81,9 @@ use std::{cell::RefCell, ops::Range};
 
 use wgpu::util::DeviceExt;
 
-use crate::block::{CameraUniform, DEPTH_FORMAT};
+use crate::block::{
+    CameraUniform, DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT,
+};
 use crate::entity::EntityMesh;
 use crate::model_pipeline::CAMERA_DEPTH_BIAS;
 use crate::models::ModelVertex;
@@ -1488,17 +1490,19 @@ impl EntityPipeline {
             // render type is built from `ENTITY_SNIPPET`, which pins
             // `DepthStencilState.DEFAULT` (`RenderPipelines.java:49-56`), and that
             // is `(GREATER_THAN_OR_EQUAL, writeDepth = true)`
-            // (`DepthStencilState.java:5-6`) — `LessEqual` under this engine's
-            // `[0,1]` DirectX-style depth. `ENTITY_SOLID` (`:232`),
+            // (`DepthStencilState.java`) — `DEPTH_COMPARE_NEARER_OR_EQUAL` here,
+            // transcribed unflipped because this engine is reversed-Z too.
+            // `ENTITY_SOLID` (`:232`),
             // `ENTITY_CUTOUT` (`:245`), `ENTITY_CUTOUT_CULL` (`:238`) and
             // `ENTITY_TRANSLUCENT` (`:274`) all inherit it; none overrides
             // `withDepthStencilState`.
             //
-            // This was `Less` until `entity_depth_coincident_pixels.rs` existed to
-            // prove the change safe — see that gate's module docs for the measured
+            // This was the strict comparison until
+            // `entity_depth_coincident_pixels.rs` existed to prove the change
+            // safe — see that gate's module docs for the measured
             // before/after (coincident red-then-blue read `[189, 0, 0]`, i.e. the
             // *first* draw winning, with blue covering 0 of 16384 pixels).
-            wgpu::CompareFunction::LessEqual,
+            DEPTH_COMPARE_NEARER_OR_EQUAL,
             None,
             true,
             "vs_main",
@@ -1524,12 +1528,13 @@ impl EntityPipeline {
     /// no second set of uploads, and there is no reliance on wgpu deduplicating
     /// two structurally identical layout descriptors.
     ///
-    /// # Why `LessEqual`, and why it is no longer only here
+    /// # Why the tie-admitting comparison, and why it is no longer only here
     ///
     /// Vanilla's own entity depth state is
     /// `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, writeDepth = true)`
-    /// (`DepthStencilState.java:6`), which under this engine's `[0,1]`
-    /// DirectX-style depth — vanilla is reversed-Z — is `LessEqual`.
+    /// (`DepthStencilState.java`), which is
+    /// [`DEPTH_COMPARE_NEARER_OR_EQUAL`](crate::DEPTH_COMPARE_NEARER_OR_EQUAL)
+    /// here — this engine is reversed-Z too, so nothing flips.
     ///
     /// This doc used to say the base pipeline "uses `Less`, so it is the one that
     /// departs from vanilla; that is left alone here rather than 'fixed', because
@@ -1537,7 +1542,7 @@ impl EntityPipeline {
     /// this change has no pixel gate to prove that safe." Both halves were true
     /// when written. Issue #21 built the missing gate
     /// (`entity_depth_coincident_pixels.rs`) and then made the change, so
-    /// [`Self::new`] is now `LessEqual` too and this pipeline is depth-identical
+    /// [`Self::new`] admits the tie too and this pipeline is depth-identical
     /// to it. It survives as a separate pipeline for its label and its blend
     /// state, not for its depth compare — if the two ever need to diverge again,
     /// this is where it happens.
@@ -1562,7 +1567,7 @@ impl EntityPipeline {
             &self.camera_layout,
             &self.texture_layout,
             "lodestone-entity-armour",
-            wgpu::CompareFunction::LessEqual,
+            DEPTH_COMPARE_NEARER_OR_EQUAL,
             None,
             true,
             "vs_main",
@@ -1624,17 +1629,17 @@ impl EntityPipeline {
     /// depth compare, and the blend/depth-write pair is what makes this pipeline
     /// distinct.
     ///
-    /// `LessEqual`, not `Less`: the flag base and every mask layer share the
-    /// same depth per vanilla's coincident-geometry draw, the same reasoning
-    /// [`armour_pipeline`](Self::armour_pipeline)'s own doc gives for leather's
-    /// coplanar base/overlay pair — under `Less` every mask layer after the
-    /// first would fail the depth test against the base it is coincident
-    /// with and never draw at all.
+    /// The tie-admitting comparison, not the strict one: the flag base and every
+    /// mask layer share the same depth per vanilla's coincident-geometry draw,
+    /// the same reasoning [`armour_pipeline`](Self::armour_pipeline)'s own doc
+    /// gives for leather's coplanar base/overlay pair — under a strict
+    /// comparison every mask layer after the first would fail the depth test
+    /// against the base it is coincident with and never draw at all.
     ///
-    /// Per `CLAUDE.md`: depth here is `[0,1]` DirectX-style, not vanilla's
-    /// reversed-Z, so vanilla's `GREATER_THAN_OR_EQUAL` is this engine's
-    /// `LessEqual` — already accounted for above, not a separate flip to
-    /// apply on top.
+    /// Depth here is reversed-Z `[0,1]` like vanilla's, so
+    /// `GREATER_THAN_OR_EQUAL` is
+    /// [`DEPTH_COMPARE_NEARER_OR_EQUAL`](crate::DEPTH_COMPARE_NEARER_OR_EQUAL)
+    /// with no flip at all.
     ///
     /// **Step C, landed**: this now binds `entity.wgsl`'s `fs_main_no_cutout`
     /// entry point rather than `fs_main`. The alpha-cutout `discard` in
@@ -1656,7 +1661,7 @@ impl EntityPipeline {
             &self.camera_layout,
             &self.texture_layout,
             "lodestone-entity-banner-layer",
-            wgpu::CompareFunction::LessEqual,
+            DEPTH_COMPARE_NEARER_OR_EQUAL,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
             "vs_main",
@@ -1709,7 +1714,7 @@ impl EntityPipeline {
             &self.camera_layout,
             &self.texture_layout,
             "lodestone-entity-flame",
-            wgpu::CompareFunction::LessEqual,
+            DEPTH_COMPARE_NEARER_OR_EQUAL,
             None,
             true,
             "vs_main_flame",
@@ -1771,7 +1776,7 @@ impl EntityPipeline {
             &self.camera_layout,
             &self.texture_layout,
             "lodestone-entity-orb",
-            wgpu::CompareFunction::LessEqual,
+            DEPTH_COMPARE_NEARER_OR_EQUAL,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             true,
             "vs_main",
@@ -1819,7 +1824,7 @@ impl EntityPipeline {
             &self.camera_layout,
             &self.texture_layout,
             "lodestone-entity-water-mask",
-            wgpu::CompareFunction::LessEqual,
+            DEPTH_COMPARE_NEARER_OR_EQUAL,
             None,
             true,
             "vs_main",
@@ -1855,10 +1860,9 @@ impl EntityPipeline {
     ///
     /// (`RenderPipelines.java:203-219`, read directly from
     /// `.cache/mc/26.2/client-src`). `CompareOp.EQUAL` has no "direction" to
-    /// flip under this engine's `[0,1]` DirectX-style depth — unlike
-    /// `GREATER_THAN_OR_EQUAL`/`LessEqual` elsewhere in this file, equality
-    /// is its own mirror image, so `CompareFunction::Equal` is not a
-    /// translation, it is the same predicate. `depth_write_enabled: false`
+    /// flip under any depth convention: equality is its own mirror image, so
+    /// `CompareFunction::Equal` is not a translation, it is the same
+    /// predicate. `depth_write_enabled: false`
     /// carries over unchanged for the same reason.
     ///
     /// **Every one of 26.2's 18 trim patterns has `"decal": false`**
@@ -1927,11 +1931,11 @@ impl EntityPipeline {
     ///
     /// `.cache/mc/26.2/client-src/net/minecraft/client/renderer/RenderPipelines.java`:
     /// `ColorTargetState(BlendFunction.TRANSLUCENT)`,
-    /// `DepthStencilState(GREATER_THAN_OR_EQUAL, writeDepth = false)`. Under this
-    /// engine's `[0,1]` DirectX-style depth (vanilla is reversed-Z, per
-    /// `CLAUDE.md`), `GREATER_THAN_OR_EQUAL` is `LessEqual` — the same
-    /// translation every other pipeline in this file applies. `writeDepth =
-    /// false` carries straight through: a shadow is a flat decal painted onto
+    /// `DepthStencilState(GREATER_THAN_OR_EQUAL, writeDepth = false)`. This
+    /// engine is reversed-Z like vanilla, so `GREATER_THAN_OR_EQUAL` is
+    /// [`DEPTH_COMPARE_NEARER_OR_EQUAL`](crate::DEPTH_COMPARE_NEARER_OR_EQUAL)
+    /// with no flip — the same transcription every other pipeline in this file
+    /// makes. `writeDepth = false` carries straight through: a shadow is a flat decal painted onto
     /// the ground that already wrote its own depth, so writing again would only
     /// invite it to z-fight whatever draws after it at the same depth.
     ///
@@ -1952,42 +1956,45 @@ impl EntityPipeline {
     /// construction: `ShadowFeatureRenderer.prepare` emits its quad at
     /// `piece.relativeY() + shapeBelow().bounds().minY`, and the only blocks
     /// that reach it are the ones `isCollisionShapeFullBlock` accepted, whose
-    /// bounds are the unit cube. Zero separation. Vanilla can afford that
-    /// because it is **reversed-Z**, which spends float exponent exactly where
-    /// a depth buffer needs it; this renderer's forward `[0, 1]` depth cannot.
+    /// bounds are the unit cube. **Zero separation**, which is the part no
+    /// amount of depth precision helps with: a polygon offset is the only
+    /// mechanism that can order two exactly coincident surfaces without moving
+    /// the geometry.
     ///
-    /// Measured, `near = 0.05`, `far = far_for_render_distance(12)`,
-    /// `Depth32Float` — what **one ULP of the depth buffer is worth in blocks
-    /// of world separation**, over the whole range a shadow can physically
-    /// occupy (`pow = (1 - distSq / 256) * strength` must be positive, so a
-    /// piece never exists past 16 blocks):
+    /// The measurement that originally motivated it was about precision, and it
+    /// is kept because it is why a world-space lift was ruled out. Taken while
+    /// this renderer was **forward** `[0,1]` — `near = 0.05`, `far =
+    /// far_for_render_distance(12)`, `Depth32Float` — what one ULP of the depth
+    /// buffer was worth in blocks of world separation, over the whole range a
+    /// shadow can physically occupy (`pow = (1 - distSq / 256) * strength` must
+    /// be positive, so a piece never exists past 16 blocks):
     ///
-    /// | distance | forward `[0,1]` (here) | reversed-Z (vanilla) |
+    /// | distance | forward `[0,1]` (as shipped then) | reversed-Z (vanilla, and now here) |
     /// |---|---|---|
     /// | 2 blocks  | `2.44e-06` | `5.96e-08` |
     /// | 8 blocks  | `3.84e-05` | `2.38e-07` |
     /// | 16 blocks | `1.55e-04` | `4.77e-07` |
     ///
-    /// The **shape** of that column is the point, not its magnitude: here a
-    /// ULP's worth grows as the *square* of the distance — a 64x swing across
-    /// the shadow's own reach — while under reversed-Z it grows linearly and
-    /// stays three orders of magnitude finer throughout. So a fixed world-space
-    /// lift cannot be the fix: any value large enough to resolve at 16 blocks
-    /// visibly floats the decal at 2, and any value discreet enough at 2 blocks
-    /// is unresolvable at 16. That is `CLAUDE.md`'s measured rule about ported
-    /// sub-millimetre depth separations, arriving at this pass.
+    /// The **shape** of the left column was the point: a ULP's worth grew as
+    /// the *square* of the distance — a 64x swing across the shadow's own reach
+    /// — so no fixed world-space lift could work, since any value large enough
+    /// to resolve at 16 blocks visibly floated the decal at 2. This renderer's
+    /// projection is reversed-Z now, so the right column is what ships and that
+    /// particular argument no longer applies; the zero-separation argument
+    /// above does, and it is the one that keeps the offset.
     ///
     /// A **polygon offset** does not have that shape. For a floating-point
     /// depth format the offset unit is `r = 2^(exponent(z) - 23)` — one ULP of
-    /// the primitive's *own* depth — so `constant: -10` is ten ULPs wherever
-    /// the piece happens to be, which is `4.5e-05` blocks of pull at 2 blocks
-    /// and `2.96e-03` at 16, and never more than that because the shadow's own
-    /// distance cutoff bounds it. Scale-adaptive by construction rather than a
-    /// constant tuned at one distance. The sign is negative for the same reason
+    /// the primitive's *own* depth — so `constant: 10` is ten ULPs wherever the
+    /// piece happens to be. Scale-adaptive by construction rather than a
+    /// constant tuned at one distance. The sign is positive for the same reason
     /// [`crate::crack_pipeline`] documents at length for the block-breaking
     /// decal, which is this repo's existing shipped solution to the identical
-    /// problem: vanilla's reversed-Z pulls toward the camera with a *positive*
-    /// bias, and `[0, 1]` depth pulls toward the camera with a negative one.
+    /// problem: reversed-Z depth pulls toward the camera with a *positive*
+    /// bias, and this renderer and vanilla agree on that. (The per-distance
+    /// block figures that used to sit here were computed against the forward
+    /// projection and are no longer right; the invariant that survives is
+    /// "ten ULPs of the primitive's own depth, wherever it is".)
     ///
     /// Honest about what was and was not observed: across twelve headless
     /// configurations spanning distance, world-coordinate magnitude, far plane,
@@ -1997,7 +2004,7 @@ impl EntityPipeline {
     /// *different* shader modules emitting bit-identical clip `z` for
     /// bit-identical world positions, which nothing in this tree enforces and
     /// no test can pin; one fused multiply-add chosen differently in either
-    /// shader breaks it, and the table above says there is no precision left to
+    /// shader breaks it, and coincident geometry has no precision left to
     /// absorb that. The offset removes the tie instead of relying on it.
     #[must_use]
     pub fn shadow_pipeline(
@@ -2042,7 +2049,7 @@ impl EntityPipeline {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 // Ten ULPs of the piece's own depth toward the camera, so a
                 // decal that is exactly coplanar with the ground wins the
@@ -2256,7 +2263,7 @@ const fn player_skin_pipeline_contract() -> PlayerSkinPipelineContract {
         blends: true,
         // `ENTITY_TRANSLUCENT` inherits ENTITY_SNIPPET's DEFAULT depth state.
         depth_writes: true,
-        depth_compare: wgpu::CompareFunction::LessEqual,
+        depth_compare: DEPTH_COMPARE_NEARER_OR_EQUAL,
     }
 }
 
@@ -2274,7 +2281,7 @@ mod tests {
         assert_eq!(contract.alpha_cutout, 0.1);
         assert!(contract.blends);
         assert!(contract.depth_writes);
-        assert_eq!(contract.depth_compare, wgpu::CompareFunction::LessEqual);
+        assert_eq!(contract.depth_compare, DEPTH_COMPARE_NEARER_OR_EQUAL);
         assert!(
             ENTITY_WGSL.contains("fn fs_main_player_skin")
                 && ENTITY_WGSL.contains("if (tex_col.a < 0.1)"),

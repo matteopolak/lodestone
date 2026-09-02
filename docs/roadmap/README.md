@@ -79,9 +79,10 @@ These are not style notes. Each one has cost real work, and they are recorded in
 - **The model shader is at wgpu's 4-bind-group floor.** A fifth group validates on an
   adapter reporting 8 and is a startup crash on any adapter reporting 4. Check the
   *limit*, not the adapter.
-- **Depth is `[0,1]`, not vanilla's reversed-Z**, so every ported comparison and bias
-  flips sign. **Vanilla is not colour-managed**, so tint and shade multiply in *gamma*
-  space.
+- **Depth is reversed-Z `[0,1]`, the same sense as vanilla**, so a ported comparison and
+  bias transcribe with **no** sign flip and a depth attachment clears to
+  `lodestone_render::DEPTH_CLEAR` (`0.0`). **Vanilla is not colour-managed**, so tint and
+  shade multiply in *gamma* space.
 - **Staleness is the most common defect in the written record** — seven instances in one
   session, and one stale sentence of mine was copied into four issues as their shared
   root cause and misdirected all four. Grep for the producer across the whole tree, not

@@ -25,22 +25,27 @@
 //!
 //! # What the two arms found
 //!
-//! [`the_raw_ink_board_standoff_is_exhausted_at_range_so_the_polygon_offset_carries_it`]
+//! [`the_raw_ink_board_standoff_holds_a_real_separation_at_every_admitted_distance`]
 //! is arithmetic and needs no GPU. The ink plane sits `0.005` blocks in front
-//! of the board face, and through this project's **forward** `[0,1]` depth
-//! that is 262 ULPs of `Depth32Float` at 4 blocks and **1 ULP at 48 and
-//! beyond**. Two exactly parallel planes one representable step apart is the
-//! textbook recipe for the reported symptom, because a parallel pair flips
-//! *whole* rather than speckling.
+//! of the board face. Through the **forward** `[0,1]` depth this renderer used
+//! to have, that was 262 ULPs of `Depth32Float` at 4 blocks and **1 ULP at 48
+//! and beyond** — two exactly parallel planes one representable step apart,
+//! which is the textbook recipe for the reported symptom, because a parallel
+//! pair flips *whole* rather than speckling.
 //!
-//! [`sign_text_is_stably_present_across_distance_and_camera_motion`] then
-//! renders it and **excludes** that hypothesis: the ink holds at a constant
-//! 657 px at every one of the seven distances and every sub-block camera
-//! displacement. `TEXT_POLYGON_OFFSET`'s `constant: -10` bias is ten ULPs at
-//! the fragment's own exponent, and it really does carry the ordering the
-//! geometry stopped carrying. So the arithmetic arm is a *pinned finding*
-//! rather than a bug report — it records that the offset is load-bearing and
-//! that the `0.005`-block standoff must never be read as headroom.
+//! `Camera::projection_matrix` is **reversed-Z** now (`docs/camera.md`), and
+//! the same standoff holds hundreds to thousands of ULP across the whole
+//! admitted range. The arithmetic arm asserts that against a bracket derived
+//! from the projection's algebra, and computes the forward figure alongside it
+//! as the control, so the two conventions are demonstrably distinguishable.
+//!
+//! [`sign_text_is_stably_present_across_distance_and_camera_motion`] renders
+//! it: the ink holds at a constant 657 px at every one of the seven distances
+//! and every sub-block camera displacement. That was true while the geometry
+//! had collapsed — `TEXT_POLYGON_OFFSET` was carrying the ordering on its own —
+//! and it is true now for the ordinary reason. The offset stays as a tiebreak
+//! for a rasterizer interpolating two differently-shaped coplanar quads; what
+//! it no longer is is the only separation there is.
 //!
 //! The mechanism that *does* fit the report is the sign-text pass's fixed
 //! vertex budget; that is measured and gated in `gpu/sign_text.rs`'s own test
@@ -52,9 +57,9 @@
 //! sub-pixel and *no* pixel gate could measure it either way. The field of
 //! view is therefore narrowed as the camera retreats, keeping the sign's
 //! projected size roughly constant. **The depth question is untouched by
-//! this**: `z_ndc = f(n - d) / (d(n - f))` depends only on `near`, `far` and
-//! the distance, never on the field of view, so every ULP figure above holds
-//! exactly as written. What the narrow lens buys is only the ability to
+//! this**: window depth depends only on `near`, `far` and the distance, never
+//! on the field of view, so every ULP figure above holds exactly as written
+//! under either convention. What the narrow lens buys is only the ability to
 //! *see* the answer. The constant 657 px across all seven distances is that
 //! compensation working, not a frozen render.
 //!
@@ -154,7 +159,12 @@ const JITTERS: [f32; 6] = [0.0, 0.0137, 0.0411, 0.1073, 0.2531, 0.4909];
 /// favour only by luck. The measurement below asserts the standoff **does**
 /// decay to this by [`BIAS_LOAD_BEARING_DISTANCE`]; see that gate's doc for
 /// why that is the finding rather than the bug.
-const RAW_SEPARATION_EXHAUSTED_ULPS: u32 = 2;
+const RAW_SEPARATION_EXHAUSTED_ULPS: i64 = 2;
+
+/// The floor the standoff must now clear at every admitted distance: the same
+/// 4 ULP `fluid_coplanar_depth_gate` uses, below which a rasterizer
+/// interpolating two differently-shaped coplanar quads can round either way.
+const RAW_SEPARATION_FLOOR_ULPS: i64 = 4;
 
 /// The distance by which the raw standoff is exhausted. Well inside
 /// `block_entities::VIEW_DISTANCE`, so it is a range real play spends time
@@ -476,6 +486,55 @@ fn ulps_between(a: f32, b: f32) -> u32 {
     a.to_bits().abs_diff(b.to_bits())
 }
 
+/// The ULP separation a clearance of `c` blocks must produce at `distance`
+/// under the shipped reversed-Z projection, as an inclusive bracket.
+///
+/// Derived on paper from the depth function `D(d) = near · (far - d) /
+/// ((far - near) · d)`: the relative separation two surfaces `c` apart have is
+/// `c · far / (d · (far - d))`, and IEEE-754 puts `value / ulp(value)` in
+/// `[2^23, 2^24)` for any positive float. The factor-of-two width is the binade
+/// sawtooth, not slack; the 2% margin absorbs the first-order truncation.
+///
+/// Nothing here reads the projection matrix, so this is a prediction rather
+/// than a restatement of what the run happens to print.
+fn predicted_ulp_bracket(distance: f32, clearance: f32) -> (i64, i64) {
+    let camera = camera_facing_sign(distance, 0.0);
+    let (near, far) = (f64::from(camera.near), f64::from(camera.far));
+    let d = f64::from(distance);
+    let relative = f64::from(clearance) * far / (d * (far - d));
+    (
+        (relative * f64::from(1u32 << 23) * 0.98).floor() as i64,
+        (relative * f64::from(1u32 << 24) * 1.02).ceil() as i64,
+    )
+}
+
+/// The same ink/board separation through the **forward** `[0,1]` projection
+/// this renderer used to carry — the before column and the control.
+///
+/// Transcribed from the standard DirectX right-handed perspective (`zz =
+/// -far/(far - near)`, `tz = -near·far/(far - near)`, `zw = -1`) rather than
+/// from `lodestone-render`, so it stays an outside reference now that the
+/// production projection has changed. The view half is the real
+/// [`Camera::view_matrix`], which the depth direction does not touch.
+fn forward_ulps_between_ink_and_board(distance: f32, separation: f32) -> u32 {
+    let camera = camera_facing_sign(distance, 0.0);
+    let h = 1.0 / (0.5 * camera.fov_y_degrees.to_radians()).tan();
+    let range_inv = 1.0 / (camera.far - camera.near);
+    let projection = glam::Mat4::from_cols(
+        glam::Vec4::new(h / camera.aspect, 0.0, 0.0, 0.0),
+        glam::Vec4::new(0.0, h, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, -camera.far * range_inv, -1.0),
+        glam::Vec4::new(0.0, 0.0, -camera.near * camera.far * range_inv, 0.0),
+    );
+    let vp = projection * camera.view_matrix();
+    let (ink_p, board_p) = ink_and_board_points(separation);
+    let depth = |p: glam::Vec3| {
+        let c = vp * glam::Vec4::new(p.x, p.y, p.z, 1.0);
+        c.z / c.w
+    };
+    ulps_between(depth(board_p), depth(ink_p))
+}
+
 /// **The measurement, no GPU required — and the reason the polygon offset in
 /// `gpu/sign_text.rs` is not optional.**
 ///
@@ -486,27 +545,28 @@ fn ulps_between(a: f32, b: f32) -> u32 {
 /// expectation; the ULP count is IEEE-754 arithmetic on whatever depth the
 /// real [`Camera::view_projection`] produces.
 ///
-/// Through this project's **forward** `[0,1]` depth that standoff decays
-/// fast — measured here at 262 ULPs at 4 blocks, 65 at 8, 15 at 16, 7 at 24,
-/// 5 at 32 and **1 at 48 and beyond**. Vanilla's reversed-Z would keep it
-/// comfortable at every one of those ranges; ours spends its float exponent
-/// at the near plane instead (`CLAUDE.md`'s rendering constraints).
+/// This file was written against a **forward** `[0,1]` projection, under which
+/// the standoff decayed fast — measured then at 262 ULPs at 4 blocks, 65 at 8,
+/// 15 at 16, 7 at 24, 5 at 32 and **1 at 48 and beyond** — and the gate's job
+/// was to pin that the polygon offset, not the geometry, was carrying the
+/// ordering past about 40 blocks. It said in as many words that if the
+/// projection ever moved to reversed-Z the gate should be *rewritten rather
+/// than satisfied*. It has, so it is.
 ///
-/// **This is a finding, not a failure.** The sibling pixel arm below renders
-/// the same sign over the same board at all seven distances and measures the
-/// ink holding at a constant 657 px, so the `TEXT_POLYGON_OFFSET` bias
-/// (`constant: -10`, i.e. ten ULPs at the fragment's own exponent) really
-/// does carry the ordering the geometry stopped carrying. What this gate
-/// pins is that **it has to**: anyone who removes the bias, or who reads the
-/// `0.005`-block standoff as headroom, is relying on a separation that is
-/// one representable step wide over most of the sign's admitted range.
+/// The claim now is the opposite one and it is still a magnitude: the standoff
+/// must hold a **real** separation at every admitted distance, and the bracket
+/// it is required to land in is computed from the projection's own algebra
+/// ([`predicted_ulp_bracket`]) rather than from the numbers printed by the run.
+/// The wrong hypothesis — the forward projection's collapse — is evaluated in
+/// the same run and required to fall outside that bracket, so the two are
+/// distinguishable rather than merely different.
 ///
-/// It is a *magnitude* claim rather than a direction: the wrong hypothesis
-/// ("the standoff is comfortable, the pass could do without the offset")
-/// predicts a healthy count at every range, and both are computed in the
-/// same run.
+/// `TEXT_POLYGON_OFFSET` stays, and is still doing something: it is the
+/// tiebreak for a rasterizer interpolating two differently-shaped coplanar
+/// quads, which is what a polygon offset is for. What it is no longer is the
+/// only thing standing between a sign's ink and its board.
 #[test]
-fn the_raw_ink_board_standoff_is_exhausted_at_range_so_the_polygon_offset_carries_it() {
+fn the_raw_ink_board_standoff_holds_a_real_separation_at_every_admitted_distance() {
     let separation = TEXT_OFFSET_LOCAL_Z - BOARD_FRONT_FACE_LOCAL_Z;
     assert!(
         (separation - 0.005).abs() < 1e-6,
@@ -530,33 +590,53 @@ fn the_raw_ink_board_standoff_is_exhausted_at_range_so_the_polygon_offset_carrie
         table.push((distance, ulps));
     }
 
-    // Monotone decay: a separation that grew with distance would mean the
-    // depth convention had changed under this file and every sentence above
-    // it needs re-reading.
-    for pair in table.windows(2) {
-        let [(near, near_ulps), (far, far_ulps)] = [pair[0], pair[1]];
-        assert!(
-            far_ulps <= near_ulps,
-            "the ink/board depth separation grew from {near_ulps} ULPs at {near} \
-             blocks to {far_ulps} at {far}. That cannot happen under a forward \
-             [0,1] projection, so the projection has changed — re-read this \
-             file's premise before trusting any other sign gate."
-        );
+    // Every distance must land inside the bracket the reversed-Z depth function
+    // predicts, and every distance must clear the rounding floor. Collected
+    // rather than asserted in the loop, so a failure prints the whole sweep.
+    let mut failures = Vec::new();
+    for &(distance, ulps) in &table {
+        let (low, high) = predicted_ulp_bracket(distance, separation);
+        if !(low..=high).contains(&i64::from(ulps)) {
+            failures.push(format!(
+                "  at {distance} blocks the standoff measures {ulps} ULP, outside \
+                 the {low}..={high} predicted from the reversed-Z depth function"
+            ));
+        }
+        if i64::from(ulps) < RAW_SEPARATION_FLOOR_ULPS {
+            failures.push(format!(
+                "  at {distance} blocks the standoff is {ulps} ULP, below the \
+                 {RAW_SEPARATION_FLOOR_ULPS} a rasterizer can round across"
+            ));
+        }
     }
-
-    let (_, at_range) = table
-        .iter()
-        .copied()
-        .find(|(d, _)| (*d - BIAS_LOAD_BEARING_DISTANCE).abs() < f32::EPSILON)
-        .expect("DISTANCES must contain BIAS_LOAD_BEARING_DISTANCE");
     assert!(
-        at_range <= RAW_SEPARATION_EXHAUSTED_ULPS,
-        "the raw ink/board standoff measures {at_range} ULPs at \
-         {BIAS_LOAD_BEARING_DISTANCE} blocks, above the {RAW_SEPARATION_EXHAUSTED_ULPS} \
-         this file was written against. If the projection moved to reversed-Z, that \
-         is an improvement and this gate and its module doc should be rewritten \
-         rather than satisfied — the sign pass would then have real geometric \
-         headroom for the first time."
+        failures.is_empty(),
+        "the sign's ink/board standoff no longer holds:\n{}",
+        failures.join("\n")
+    );
+
+    // The discriminating half: what the **forward** projection this replaced
+    // would have measured at the range the bias used to be load-bearing at, and
+    // that it falls outside the reversed prediction there. Without this the
+    // sweep above could be passing on any projection at all.
+    let before = forward_ulps_between_ink_and_board(BIAS_LOAD_BEARING_DISTANCE, separation);
+    let (low, high) = predicted_ulp_bracket(BIAS_LOAD_BEARING_DISTANCE, separation);
+    println!(
+        "  at {BIAS_LOAD_BEARING_DISTANCE} blocks: reversed-Z predicts {low}..={high} ULP; \
+         the forward projection this replaced measured {before}"
+    );
+    assert!(
+        i64::from(before) <= RAW_SEPARATION_EXHAUSTED_ULPS,
+        "control failed: the forward reference measured {before} ULP at \
+         {BIAS_LOAD_BEARING_DISTANCE} blocks, but this file's whole premise is \
+         that it was exhausted (<= {RAW_SEPARATION_EXHAUSTED_ULPS}) there — so \
+         the reference is not the projection this renderer used to have"
+    );
+    assert!(
+        !(low..=high).contains(&i64::from(before)),
+        "control failed: the forward projection's {before} ULP falls inside the \
+         {low}..={high} predicted for reversed-Z, so this gate cannot tell the \
+         two conventions apart"
     );
 }
 

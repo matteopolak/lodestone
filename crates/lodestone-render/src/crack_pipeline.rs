@@ -35,7 +35,7 @@
 
 use wgpu::util::DeviceExt;
 
-use crate::block::DEPTH_FORMAT;
+use crate::block::{DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 use crate::crack::{CrackMesh, CrackVertex};
 use crate::model_pipeline::CAMERA_DEPTH_BIAS;
 use crate::texture::GpuAtlas;
@@ -202,7 +202,7 @@ impl CrackPipeline {
                 // Never occlude — the crack is a decal over already-drawn faces.
                 depth_write_enabled: Some(false),
                 // Allow the crack to be coplanar with the face it decorates.
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 // Polygon offset: pull the crack toward the camera so it wins the
                 // depth test against the coplanar block face instead of z-fighting.
@@ -217,9 +217,9 @@ impl CrackPipeline {
                 // backwards from the constructor call alone). Vanilla is
                 // reversed-Z (GREATER_THAN_OR_EQUAL, higher = nearer), so a
                 // positive bias there pulls toward the camera; this project's
-                // depth is standard `[0,1]` (LessEqual, lower = nearer, see
-                // `camera.rs` and `DESIGN.md` §7), so "toward the camera" is the
-                // sign-flipped bias: constant=-10, slope=-1.0.
+                // depth is reversed-Z too (see `camera.rs`), so "toward the
+                // camera" is the same sign: constant=10, slope=1.0, transcribed
+                // rather than translated.
                 bias: CAMERA_DEPTH_BIAS,
             }),
             multisample: wgpu::MultisampleState::default(),
