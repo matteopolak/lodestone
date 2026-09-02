@@ -3,12 +3,10 @@
 //!
 //! ## What it is
 //!
-//! Vanilla's dedicated server refuses to start at all until the operator has
-//! opened `eula.txt` and flipped `eula=false` to `eula=true` by hand — see
-//! `Eula.java` in this repo's own pinned 26.2 decompile
-//! (`.cache/mc/26.2/src/net/minecraft/server/Eula.java`), which this module's
-//! [`Gate`] mirrors mechanically: same file, same single boolean key, same
-//! "absent or false refuses" rule.
+//! The real dedicated server refuses to start at all until the operator has
+//! opened `eula.txt` and flipped `eula=false` to `eula=true` by hand, which
+//! this module's [`Gate`] mirrors mechanically: same file, same single
+//! boolean key, same "absent or false refuses" rule.
 //!
 //! ## The wording, and why it says what it says
 //!
@@ -35,10 +33,10 @@
 //! [`Gate::check`] reads `eula.txt`, exactly as
 //! [`crate::properties::RawProperties`] would (`eula=true`/`eula=false`,
 //! case-insensitive, default `false` if the key is missing) — a full
-//! `RawProperties` parse would work too, but vanilla's own file is a single
+//! `RawProperties` parse would work too, but the real file is a single
 //! key, so this reads it directly rather than pulling in the ordering
 //! machinery a one-key file does not need. A missing file is written fresh
-//! (mirroring `Eula.saveDefaults`) and reads as "not accepted", never as an
+//! (mirroring the real save-defaults rule) and reads as "not accepted", never as an
 //! error — a server directory that has never been started must refuse to
 //! start, not crash.
 //!
@@ -48,9 +46,9 @@
 //! in this module needs to change, since `check`/`agreed`/`write_template`
 //! all treat it as an opaque string. Do not weaken [`Gate::check`] to accept
 //! a missing file as agreement — that is the one property this gate exists
-//! to enforce, and vanilla's own `Eula` does not either
-//! (`SharedConstants.IS_RUNNING_IN_IDE` is a JVM-only escape hatch this port
-//! has no equivalent of and should not invent one for).
+//! to enforce, and the real rule does not either (its own "running from an
+//! IDE" escape hatch is a JVM-only mechanism this port has no equivalent of
+//! and should not invent one for).
 //!
 //! ## Configuration
 //!
@@ -78,7 +76,7 @@ pub const NOTICE: &str =
 /// Whether `eula.txt` at `path` says `eula=true`.
 ///
 /// Returns `Ok(false)` (never an error) for a missing or unreadable file —
-/// same shape as vanilla's own `Eula.readFile`, whose `catch` arm logs and
+/// same shape as the real read-file rule, whose failure handler logs and
 /// treats the failure as "not agreed" rather than propagating.
 ///
 /// # Errors
@@ -96,9 +94,9 @@ pub fn check(path: &Path) -> std::io::Result<bool> {
     }
 }
 
-/// `Boolean.parseBoolean(properties.getProperty("eula", "false"))`: the value
-/// of the `eula` key, case-insensitively `true`, defaulting to `false` when
-/// the key is absent — including when the whole file is absent or empty.
+/// The value of the `eula` key, parsed case-insensitively as `true`,
+/// defaulting to `false` when the key is absent — including when the whole
+/// file is absent or empty.
 fn agreed(text: &str) -> bool {
     for line in text.lines() {
         let trimmed = line.trim_start();
