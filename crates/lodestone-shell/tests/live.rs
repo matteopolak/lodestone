@@ -15,6 +15,8 @@ mod live_death_respawn;
 mod live_dig_place;
 #[path = "live/live_dropped_item.rs"]
 mod live_dropped_item;
+#[path = "live/live_edge_back_off_rubber_band.rs"]
+mod live_edge_back_off_rubber_band;
 #[path = "live/live_entity_light_time_of_day.rs"]
 mod live_entity_light_time_of_day;
 #[path = "live/live_entity_render.rs"]
