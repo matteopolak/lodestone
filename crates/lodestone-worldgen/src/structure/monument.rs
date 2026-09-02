@@ -1,23 +1,24 @@
-//! **Ocean monument** — `OceanMonumentStructure` + `OceanMonumentPieces`, the
-//! fixed 58×23×58 building plus its `RoomDefinition` grid graph.
+//! **Ocean monument** — the piece generator and the whole room grid, the
+//! fixed 58×23×58 building plus its room-definition grid graph.
 //!
 //! # What it is
 //!
-//! A port of vanilla's third and last piece-placement engine in this crate,
+//! An implementation of the third and last piece-placement engine in this crate,
 //! and the one that is neither a jigsaw pool graph nor
-//! [`super::stronghold`]'s weighted-table tree: `OceanMonumentStructure`
-//! places exactly **one** [`StructurePiece`] — `MonumentBuilding` — and that
-//! single Java object internally builds a fixed-size room *grid* (5×3×5
-//! cells, `RoomDefinition.index = y*25 + z*5 + x`), threads a doubly-linked
+//! [`super::stronghold`]'s weighted-table tree: the ocean monument's own
+//! piece generator
+//! places exactly **one** [`StructurePiece`] — the monument building — and that
+//! single unit internally builds a fixed-size room *grid* (5×3×5
+//! cells, room index `y*25 + z*5 + x`), threads a doubly-linked
 //! connection graph through it, then fits each unclaimed cell against seven
-//! ordered [`MonumentRoomFitter`](#fitters)s to decide whether it is a plain
+//! ordered room fitters (see below) to decide whether it is a plain
 //! room or merges with a neighbour into a double-wide/tall/deep one. This
-//! module ports that whole graph plus the fixed core (entry, core, both
+//! module implements that whole graph plus the fixed core (entry, core, both
 //! wings, the roof penthouse) and the shell that ties them together
 //! (moat, pillars, entrance, walls, roof).
 //!
 //! Unlike [`super::stronghold`], every generated room here shares **one**
-//! coordinate space: vanilla's `generateWaterBox`/`generateBoxOnFillOnly`
+//! coordinate space: the two water/fill box helpers
 //! read blocks a room's own earlier calls (or the shell's initial flood)
 //! already wrote. See [`Canvas`] for how that read-back is reproduced
 //! without a real per-chunk world.
@@ -26,10 +27,10 @@
 //!
 //! ```text
 //! generate(cx, cz, seed, ctx):
-//!     random = structure_random(seed, cx, cz)          <- context.random()
+//!     random = structure_random(seed, cx, cz)          <- the structure's own stream
 //!     west, north = cx*16 - 29, cz*16 - 29
-//!     direction = Facing::random(random)                <- one nextInt(4)
-//!     shell = makeBoundingBox(west, 39, north, direction, 58, 23, 58)
+//!     direction = Facing::random(random)                <- one draw bounded by 4
+//!     shell = make_bounding_box(west, 39, north, direction, 58, 23, 58)
 //!
 //!     (arena, room_defs, source, core) = generate_room_graph(random)
 //!         <- builds the 46-cell grid, connects neighbours, splices in the
@@ -37,70 +38,71 @@
 //!            per shuffled cell (never disconnecting a cell from `source`)
 //!     selected = select_rooms(arena, room_defs, random)
 //!         <- the 7-fitter cascade, claiming cells as it goes; only
-//!            `FitSimpleRoom` draws random (mainDesign, one nextInt(3))
+//!            the simple-room fitter draws random (main_design, one draw bounded by 3)
 //!
 //!     resolve blocks: shell, then entry, core, every selected room, then
-//!         left wing, right wing, penthouse — matching vanilla's own
-//!         postProcess order (shell's own writes complete before any child
+//!         left wing, right wing, penthouse — matching the reference
+//!         block-writing pass's own order (shell's own writes complete before any child
 //!         reads them; children never read each other).
 //! ```
 //!
 //! # How to change it
 //!
-//! * **Every piece shares one `direction`.** Vanilla's `MonumentBuilding`
-//!   constructor passes the *same* `Direction` to itself and to every child
+//! * **Every piece shares one `direction`.** The monument building's own
+//!   constructor passes the *same* direction to itself and to every child
 //!   piece's constructor — there is no per-room rotation, only one rigid
 //!   whole. [`Piece::world_pos`] is therefore identical across every piece
-//!   type in this module (the same `getWorldX/Y/Z` switch [`super::stronghold`]
+//!   type in this module (the same local-to-world switch [`super::stronghold`]
 //!   already ported once), the difference is only which `box_` it carries.
-//! * **`RoomDefinition` is an arena, not a Java object graph.** Every
+//! * **The room definition is an arena, not a linked object graph.** Every
 //!   `connections[dir]` pointer becomes an `Option<usize>` index into one
 //!   `Vec<RoomDef>` built by [`generate_room_graph`]; `set_connection` writes
-//!   both directions in one call, matching `RoomDefinition.setConnection`'s
-//!   own two-sided write.
-//! * **The pre-shuffle order is load-bearing.** `Util.shuffle` swaps against
+//!   both directions in one call, matching a faithful two-sided connection
+//!   write.
+//! * **The pre-shuffle order is load-bearing.** The shuffle swaps against
 //!   the list's *current* positions, so the same random draws over a
 //!   differently-ordered input produce a different permutation.
 //!   [`generate_room_graph`] walks the grid in ascending `index` order
-//!   (`y`, then `z`, then `x` — the same nesting `getRoomIndex` encodes) to
-//!   match `for (RoomDefinition definition : roomGrid)`'s flat-array walk
+//!   (`y`, then `z`, then `x` — the same nesting the room index encodes) to
+//!   match a flat-array walk over the room grid
 //!   before appending roof/left-wing/right-wing *after* the shuffle+close
-//!   pass, exactly where vanilla appends them.
-//! * **The closing loop's `&&` short-circuits, and it costs a `scanIndex`.**
-//!   `definition.findSource(scanIndex++) && definition.connections[f]
-//!   .findSource(scanIndex++)` skips the second draw (and its `scanIndex`
+//!   pass, exactly where a faithful implementation appends them.
+//! * **The closing loop's `&&` short-circuits, and it costs a `scan_index`.**
+//!   A find-source check on this cell, and-then a find-source check on its
+//!   connected neighbour, skips the second draw (and its `scan_index`
 //!   bump) entirely when the first call returns `false`. [`close_openings`]
 //!   preserves that shape rather than always advancing by two.
-//! * **`FitDoubleZRoom.create`'s neighbour reassignment is unreachable.**
-//!   Its own `fits` already requires `hasOpening[NORTH] &&
-//!   !connections[NORTH].claimed`, so the `else` branch that would swap the
+//! * **The double-deep room fitter's own neighbour reassignment is unreachable.**
+//!   Its own fits-check already requires an opening to the north and
+//!   an unclaimed northern neighbour, so the `else` branch that would swap the
 //!   anchor to the `SOUTH` neighbour can never run. Ported as a comment, not
 //!   as dead code, for the same reason [`super::stronghold`] transcribes
-//!   vanilla's own short-circuit shapes literally.
+//!   the reference's own short-circuit shapes literally.
 //!
 //! # Deviations
 //!
-//! * **`postProcess`'s `RandomSource` is not derived from the world seed.**
-//!   `ChunkGenerator.applyBiomeDecoration` seeds it from
-//!   `RandomSupport.generateUniqueSeed()` — real entropy, regenerated every
+//! * **The block-writing walk's random is not derived from the world seed.**
+//!   A faithful implementation's decoration-pass random seeds it from
+//!   real entropy, regenerated every
 //!   time a chunk decorates, with **no** relationship to the seed that picks
-//!   `mainDesign` or the room graph. So `SimpleRoom`'s `centerPillar` coin
-//!   flip and `SimpleTopRoom`'s sponge scatter have no "vanilla answer" a
+//!   `main_design` or the room graph. So the simple room's centre-pillar coin
+//!   flip and the simple top room's sponge scatter have no single deterministic answer a
 //!   fixed seed could reproduce — there is no ground truth to match, only a
-//!   requirement that *our* engine stay deterministic. This port threads the
+//!   requirement that *our* engine stay deterministic. This implementation threads the
 //!   **same** seeded stream construction used (`structure_random`) through
 //!   both phases rather than inventing a second unseeded source, so the same
 //!   world seed always yields the same monument. Ledgered as
 //!   `monument:postprocess_random_unseeded`.
-//! * **Entity spawning is absent.** `OceanMonumentPenthouse` and
-//!   `OceanMonumentWingRoom`'s design-0 variant each call `spawnElder`,
+//! * **Entity spawning is absent.** The penthouse and
+//!   the wing room's design-0 variant each call for an elder guardian spawn,
 //!   matching the `coded:worldgen_entities` gap [`super::stronghold`]'s
 //!   portal-room spawner and [`super::coded`]'s swamp hut witch/cat are
 //!   already ledgered under: this engine has no worldgen-time entity driver
 //!   yet.
-//! * **`skipAir` is not honoured**, for the same reason
+//! * **The "only overwrite non-air" flag is not honoured**, for the same reason
 //!   [`super::stronghold`] documents under `stronghold:skip_air_shell`: every
-//!   `generateBox` call here passes vanilla's own `skipAir = false`, so no
+//!   box-generation call here passes `skip_air = false` in a faithful
+//!   implementation, so no
 //!   caller needed the flag in the first place — this is not actually a gap.
 //!
 //! # Dependencies
@@ -128,8 +130,8 @@ const GOLD_BLOCK: &str = "minecraft:gold_block";
 const WATER: &str = "minecraft:water";
 const AIR: &str = "minecraft:air";
 
-/// `Direction.get3DDataValue()` ordinals: `DOWN(0) UP(1) NORTH(2) SOUTH(3)
-/// WEST(4) EAST(5)`, read from `Direction.java`'s own constructor order —
+/// The six-direction 3D data-value ordinals: `DOWN(0) UP(1) NORTH(2) SOUTH(3)
+/// WEST(4) EAST(5)` — a fixed, standard ordinal order,
 /// not derivable from [`Facing`], which only carries the four horizontals.
 const DOWN: usize = 0;
 const UP: usize = 1;
@@ -139,14 +141,14 @@ const WEST: usize = 4;
 const EAST: usize = 5;
 const ALL_DIRS: [usize; 6] = [DOWN, UP, NORTH, SOUTH, WEST, EAST];
 
-/// `Direction.getOpposite()` — vanilla's constructor pairs each direction
+/// The opposite direction — each direction pairs
 /// with its opposite one index apart (`DOWN`/`UP`, `NORTH`/`SOUTH`,
 /// `WEST`/`EAST`), so opposite is `d ^ 1`.
 const fn opposite(d: usize) -> usize {
     d ^ 1
 }
 
-/// `Direction`'s `(stepX, stepY, stepZ)` `Vec3i`.
+/// A direction's `(stepX, stepY, stepZ)` unit vector.
 const fn step(d: usize) -> (i32, i32, i32) {
     match d {
         DOWN => (0, -1, 0),
@@ -159,13 +161,13 @@ const fn step(d: usize) -> (i32, i32, i32) {
     }
 }
 
-/// `getRoomIndex(x, y, z)`.
+/// The room grid's flat index for `(x, y, z)`.
 const fn room_index(x: i32, y: i32, z: i32) -> i32 {
     y * 25 + z * 5 + x
 }
 
-/// `OceanMonumentPieces.RoomDefinition`, as an arena node — see the module
-/// doc's "arena, not a Java object graph" note.
+/// A room definition, as an arena node — see the module
+/// doc's "arena, not a linked object graph" note.
 #[derive(Debug, Clone)]
 struct RoomDef {
     /// The grid index (`0..46`) or a special id (`1001` left wing, `1002`
@@ -195,27 +197,27 @@ impl RoomDef {
         self.index >= 75
     }
 
-    /// `countOpenings()`.
+    /// The number of open connections this room has.
     fn count_openings(&self) -> i32 {
         self.has_opening.iter().filter(|open| **open).count() as i32
     }
 }
 
-/// `RoomDefinition.setConnection` — writes both sides of the edge in one call.
+/// Writes both sides of the edge in one call.
 fn set_connection(arena: &mut [RoomDef], a: usize, dir: usize, b: usize) {
     arena[a].connections[dir] = Some(b);
     arena[b].connections[opposite(dir)] = Some(a);
 }
 
-/// `RoomDefinition.updateOpenings`.
+/// Refreshes a room's opening flags from its live connections.
 fn update_openings(def: &mut RoomDef) {
     for i in 0..6 {
         def.has_opening[i] = def.connections[i].is_some();
     }
 }
 
-/// `RoomDefinition.findSource` — a DFS to `isSource`, marking visited nodes
-/// with `scanIndex` so the traversal terminates on the grid's cycles.
+/// A DFS to a source room, marking visited nodes
+/// with `scan_index` so the traversal terminates on the grid's cycles.
 fn find_source(arena: &mut [RoomDef], idx: usize, scan_index: i32) -> bool {
     if arena[idx].is_source {
         return true;
@@ -232,8 +234,8 @@ fn find_source(arena: &mut [RoomDef], idx: usize, scan_index: i32) -> bool {
     false
 }
 
-/// `Util.shuffle` — top-down Fisher-Yates, `for (i = size; i > 1; i--) swap(i
-/// - 1, random.nextInt(i))`.
+/// A top-down Fisher-Yates shuffle: `for (i = size; i > 1; i--) swap(i
+/// - 1, random.next_int_bounded(i))`.
 fn shuffle<R: RandomSource>(list: &mut [usize], random: &mut R) {
     let mut i = list.len();
     while i > 1 {
@@ -243,9 +245,9 @@ fn shuffle<R: RandomSource>(list: &mut [usize], random: &mut R) {
     }
 }
 
-/// `MonumentBuilding.generateRoomGraph`, minus the final three
-/// `roomDefs.add(...)` calls (the caller appends roof/wings after selecting
-/// rooms, matching vanilla's own statement order in the constructor).
+/// The monument building's own room-graph generator, minus the final three
+/// room-definition appends (the caller appends roof/wings after selecting
+/// rooms, matching a faithful implementation's own statement order in the constructor).
 ///
 /// Returns `(arena, room_defs, source_idx, core_idx, roof_idx, left_wing_idx,
 /// right_wing_idx)`.
@@ -317,9 +319,9 @@ fn generate_room_graph<R: RandomSource>(
     arena[left_wing_idx].claimed = true;
     arena[right_wing_idx].claimed = true;
     arena[source_idx].is_source = true;
-    // `this.sourceRoom.claimed = true;` — set by `MonumentBuilding`'s own
-    // constructor immediately after `generateRoomGraph` returns, not inside
-    // the Java method itself; done here instead since nothing observes the
+    // Set by the monument building's own
+    // constructor immediately after room-graph generation returns, not inside
+    // the room-graph generator itself; done here instead since nothing observes the
     // difference (it costs no RNG) and every caller of this function needs
     // it before `select_rooms` runs. Its absence let the entry room's own
     // cell be re-selected as an ordinary grid room — caught by
@@ -382,8 +384,9 @@ fn close_openings<R: RandomSource>(arena: &mut [RoomDef], room_defs: &[usize], r
             arena[neighbor].has_opening[of] = false;
             let s1 = scan_index;
             scan_index += 1;
-            // The `&&` short-circuits in vanilla: the second `findSource` (and
-            // its `scanIndex` draw) never runs when the first is `false`.
+            // The `&&` short-circuits in a faithful implementation: the second
+            // find-source check (and
+            // its own scan-index bump) never runs when the first is `false`.
             let closed = find_source(arena, idx, s1) && {
                 let s2 = scan_index;
                 scan_index += 1;
@@ -451,7 +454,7 @@ struct RoomPiece {
     anchor: usize,
 }
 
-/// `FitDoubleXYRoom`.
+/// The double-wide-and-tall room fitter.
 fn try_double_xy(arena: &mut [RoomDef], idx: usize) -> bool {
     if !arena[idx].has_opening[EAST] {
         return false;
@@ -481,7 +484,7 @@ fn try_double_xy(arena: &mut [RoomDef], idx: usize) -> bool {
     true
 }
 
-/// `FitDoubleYZRoom`.
+/// The double-tall-and-deep room fitter.
 fn try_double_yz(arena: &mut [RoomDef], idx: usize) -> bool {
     if !arena[idx].has_opening[NORTH] {
         return false;
@@ -511,8 +514,8 @@ fn try_double_yz(arena: &mut [RoomDef], idx: usize) -> bool {
     true
 }
 
-/// `FitDoubleZRoom`. Its own `create()` has an `else` branch that would
-/// retarget the anchor to the `SOUTH` neighbour — unreachable given `fits()`'s
+/// The double-deep room fitter. Its own reference `create()` has an `else` branch that would
+/// retarget the anchor to the `SOUTH` neighbour — unreachable given the fits-check's
 /// own precondition, see the module doc.
 fn try_double_z(arena: &mut [RoomDef], idx: usize) -> bool {
     if !arena[idx].has_opening[NORTH] {
@@ -527,7 +530,7 @@ fn try_double_z(arena: &mut [RoomDef], idx: usize) -> bool {
     true
 }
 
-/// `FitDoubleXRoom`.
+/// The double-wide room fitter.
 fn try_double_x(arena: &mut [RoomDef], idx: usize) -> bool {
     if !arena[idx].has_opening[EAST] {
         return false;
@@ -541,7 +544,7 @@ fn try_double_x(arena: &mut [RoomDef], idx: usize) -> bool {
     true
 }
 
-/// `FitDoubleYRoom`.
+/// The double-tall room fitter.
 fn try_double_y(arena: &mut [RoomDef], idx: usize) -> bool {
     if !arena[idx].has_opening[UP] {
         return false;
@@ -555,7 +558,7 @@ fn try_double_y(arena: &mut [RoomDef], idx: usize) -> bool {
     true
 }
 
-/// `FitSimpleTopRoom.fits` — no `create()` claim beyond `definition.claimed`,
+/// The simple-top-room fitter's own fits-check — no `create()` claim beyond `definition.claimed`,
 /// applied by the caller alongside every other fitter.
 fn fits_simple_top(arena: &[RoomDef], idx: usize) -> bool {
     !arena[idx].has_opening[WEST]
@@ -565,8 +568,8 @@ fn fits_simple_top(arena: &[RoomDef], idx: usize) -> bool {
         && !arena[idx].has_opening[UP]
 }
 
-/// The `for (definition : roomDefinitions) { if (!claimed && !special) { for
-/// (fitter : fitters) ... } }` loop, fitter list order:
+/// The room-selection cascade over every unclaimed, non-special room
+/// definition, fitter list order:
 /// `[DoubleXY, DoubleYZ, DoubleZ, DoubleX, DoubleY, SimpleTop, Simple]`.
 fn select_rooms<R: RandomSource>(arena: &mut [RoomDef], room_defs: &[usize], random: &mut R) -> Vec<RoomPiece> {
     let mut out = Vec::new();
@@ -599,7 +602,7 @@ fn select_rooms<R: RandomSource>(arena: &mut [RoomDef], room_defs: &[usize], ran
             out.push(RoomPiece { kind: RoomKind::SimpleTop, anchor: idx });
             continue;
         }
-        // `FitSimpleRoom.fits` always returns true — the cascade's fallback.
+        // The simple-room fitter's own fits-check always returns true — the cascade's fallback.
         arena[idx].claimed = true;
         let main_design = random.next_int_bounded(3);
         out.push(RoomPiece { kind: RoomKind::Simple { main_design }, anchor: idx });
@@ -607,9 +610,9 @@ fn select_rooms<R: RandomSource>(arena: &mut [RoomDef], room_defs: &[usize], ran
     out
 }
 
-/// `(mirror, rotation)` — `StructurePiece.setOrientation`'s table, the same
+/// `(mirror, rotation)` — the orientation transform's table, the same
 /// one [`super::stronghold::Node::transform`] and [`super::coded::Facing`]'s
-/// own private copy carry, ported a third time because the helper is not
+/// own private copy carry, implemented a third time because the helper is not
 /// `pub`.
 fn transform(orientation: Facing) -> (Mirror, Rotation) {
     match orientation {
@@ -620,7 +623,7 @@ fn transform(orientation: Facing) -> (Mirror, Rotation) {
     }
 }
 
-/// `StructurePiece.makeBoundingBox(x, y, z, direction, width, height,
+/// Constructs a box from `(x, y, z, direction, width, height,
 /// depth)` — anchored at an explicit corner, no offset.
 fn make_bounding_box_simple(x: i32, y: i32, z: i32, direction: Facing, width: i32, height: i32, depth: i32) -> BoundingBox {
     if direction.is_z_axis() {
@@ -636,11 +639,11 @@ fn make_bounding_box_simple(x: i32, y: i32, z: i32, direction: Facing, width: i3
     }
 }
 
-/// `OceanMonumentPiece.makeBoundingBox(orientation, roomDefinition,
+/// A monument piece's own box construction from `(orientation, roomDefinition,
 /// roomWidth, roomHeight, roomDepth)` — the grid-index-to-box formula,
 /// anchored near the world origin; [`generate`] translates the result by
-/// `shell.world_pos(9, 0, 22)` afterwards, matching vanilla's own
-/// `child.getBoundingBox().move(offset)`.
+/// `shell.world_pos(9, 0, 22)` afterwards, matching a faithful implementation's own
+/// post-construction box translate.
 fn room_bounding_box(index: i32, direction: Facing, room_width: i32, room_height: i32, room_depth: i32) -> BoundingBox {
     let room_x = index % 5;
     let room_z = (index / 5) % 5;
@@ -662,8 +665,8 @@ fn translate(bb: BoundingBox, offset: [i32; 3]) -> BoundingBox {
     }
 }
 
-/// One piece's fixed geometry — `this.boundingBox` plus `this.orientation`,
-/// which every `OceanMonumentPiece` in one monument shares (see the module
+/// One piece's fixed geometry — its bounding box plus its orientation,
+/// which every monument piece in one monument shares (see the module
 /// doc's "every piece shares one `direction`" note).
 #[derive(Debug, Clone, Copy)]
 struct Piece {
@@ -672,7 +675,7 @@ struct Piece {
 }
 
 impl Piece {
-    /// `getWorldX(x, z)`.
+    /// The local-to-world X transform.
     fn world_x(&self, x: i32, z: i32) -> i32 {
         match self.orientation {
             Facing::North | Facing::South => self.box_.min[0] + x,
@@ -681,12 +684,12 @@ impl Piece {
         }
     }
 
-    /// `getWorldY(y)`.
+    /// The local-to-world Y transform.
     fn world_y(&self, y: i32) -> i32 {
         y + self.box_.min[1]
     }
 
-    /// `getWorldZ(x, z)`.
+    /// The local-to-world Z transform.
     fn world_z(&self, x: i32, z: i32) -> i32 {
         match self.orientation {
             Facing::North => self.box_.max[2] - z,
@@ -695,23 +698,24 @@ impl Piece {
         }
     }
 
-    /// `getWorldPos(x, y, z)`.
+    /// The local-to-world position transform.
     fn world_pos(&self, x: i32, y: i32, z: i32) -> [i32; 3] {
         [self.world_x(x, z), self.world_y(y), self.world_z(x, z)]
     }
 }
 
 /// One piece's block canvas: a local write log keyed by **local** `(x, y,
-/// z)`, standing in for vanilla's `WorldGenLevel.getBlockState` reads.
+/// z)`, standing in for a real block-state read from the world.
 ///
 /// # Why a local map is enough — no shared cross-piece canvas
 ///
-/// `generateWaterBox`/`generateBoxOnFillOnly` are the only reads in this
+/// The two water/fill box helpers are the only reads in this
 /// whole piece family, and every call site reads a cell **this same piece**
 /// (or, for the shell, the piece's own initial flood) wrote moments earlier —
 /// never a cell a *different* piece wrote. The shell's initial
-/// `generateWaterBox(0, 0, waterHeight, 58, 58)` floods the entire building
-/// footprint before any child's `postProcess` runs in vanilla, and that
+/// water-box flood floods the entire building
+/// footprint before any child's block-writing walk runs in a faithful
+/// implementation, and that
 /// flood is a pure function of `(sea_level, world_y)` — no real terrain
 /// dependency — so [`Self::flood_default`] reproduces it exactly for any
 /// cell a room's own canvas has not yet written, without needing the shell's
@@ -734,8 +738,8 @@ impl<'a> Canvas<'a> {
     }
 
     /// The implicit flood state for a cell this canvas has not written yet —
-    /// `getWorldY(y) >= level.getSeaLevel()` ? air : water, matching the
-    /// branch inside vanilla's own `generateWaterBox`.
+    /// world Y at or above sea level ? air : water, matching the
+    /// branch inside a faithful water-box helper.
     fn flood_default(&self, y: i32) -> BlockState {
         if self.piece.world_y(y) >= self.ctx.sea_level() {
             BlockState::of(AIR)
@@ -776,9 +780,9 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// `generateWaterBox` — air above sea level, water at or below, except a
-    /// cell already `FILL_BLOCK` (water) is left untouched (`FILL_KEEP`'s
-    /// ice variants never occur pre-surface, so water is the only member
+    /// A water/air flood box — air above sea level, water at or below, except a
+    /// cell already water is left untouched (an ice variant of "keep as-is"
+    /// never occurs pre-surface, so water is the only member
     /// that can appear here).
     #[allow(clippy::too_many_arguments)]
     fn generate_water_box(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32) {
@@ -800,8 +804,8 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// `generateBoxOnFillOnly` — overwrite only cells still `FILL_BLOCK`
-    /// (still water, i.e. never touched by a wall since the initial flood),
+    /// A fill-only box — overwrite only cells still holding the initial flood
+    /// state (still water, i.e. never touched by a wall since the initial flood),
     /// used to seal a ceiling/wall where a connection was closed.
     #[allow(clippy::too_many_arguments)]
     fn generate_box_on_fill_only(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32, target: &BlockState) {
@@ -817,7 +821,8 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// `generateDefaultFloor(xOff, zOff, downOpening)`.
+    /// A room's default floor, offset by `(x_off, z_off)`, with an optional
+    /// downward-connection opening cut into it.
     fn generate_default_floor(&mut self, x_off: i32, z_off: i32, down_opening: bool) {
         let gray = BlockState::of(BASE_GRAY);
         let light = BlockState::of(BASE_LIGHT);
@@ -835,7 +840,7 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// `fillColumnDown` — the one read of real terrain shape, through
+    /// Writes downward from `start_y` — the one read of real terrain shape, through
     /// [`StartContext::is_replaceable_at`].
     fn fill_column_down(&mut self, state: &BlockState, x: i32, start_y: i32, z: i32) {
         let floor = self.ctx.min_y() + 1;
@@ -860,7 +865,7 @@ impl<'a> Canvas<'a> {
             extra_placements: Vec::new(),
             blocks: Some(std::sync::Arc::new(self.blocks)),
             loot: Vec::new(),
-            // `Beardifier.java:75`'s `else` branch, matching every other
+            // The beardifier's fallback branch, matching every other
             // coded piece in this crate: `minecraft:ocean_monument`'s
             // `terrain_adaptation` is `none`.
             beard: None,
@@ -870,13 +875,13 @@ impl<'a> Canvas<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// The shell: `MonumentBuilding.postProcess` minus every `chunkIntersects`
+// The shell: the monument building's own block-writing walk minus every chunk-intersects
 // guard (a per-chunk optimisation with nothing to guard here — this module
 // resolves the whole structure eagerly and lets `structure_place_stage`
 // clip it, exactly as every other coded piece in this crate does).
 // ---------------------------------------------------------------------------
 
-/// `MonumentBuilding.generateWing(isFlipped, xoff, ...)`.
+/// The monument building's own wing generator, offset by `xoff`, optionally flipped.
 fn generate_wing(c: &mut Canvas, is_flipped: bool, xoff: i32) {
     let light = BlockState::of(BASE_LIGHT);
     let gray = BlockState::of(BASE_GRAY);
@@ -919,7 +924,7 @@ fn generate_wing(c: &mut Canvas, is_flipped: bool, xoff: i32) {
     c.generate_box(xoff + 12, 1, 11, xoff + 12, 7, 13, &gray, &gray);
 }
 
-/// `MonumentBuilding.generateEntranceArchs`.
+/// The monument building's own entrance-arches generator.
 fn generate_entrance_archs(c: &mut Canvas) {
     let light = BlockState::of(BASE_LIGHT);
     let gray = BlockState::of(BASE_GRAY);
@@ -941,7 +946,7 @@ fn generate_entrance_archs(c: &mut Canvas) {
     }
 }
 
-/// `MonumentBuilding.generateEntranceWall`.
+/// The monument building's own entrance-wall generator.
 fn generate_entrance_wall(c: &mut Canvas) {
     let gray = BlockState::of(BASE_GRAY);
     let light = BlockState::of(BASE_LIGHT);
@@ -997,7 +1002,7 @@ fn generate_entrance_wall(c: &mut Canvas) {
     c.generate_water_box(35, 1, 21, 35, 2, 21);
 }
 
-/// `MonumentBuilding.generateRoofPiece`.
+/// The monument building's own roof-piece generator.
 fn generate_roof_piece(c: &mut Canvas) {
     let gray = BlockState::of(BASE_GRAY);
     let light = BlockState::of(BASE_LIGHT);
@@ -1033,7 +1038,7 @@ fn generate_roof_piece(c: &mut Canvas) {
     c.generate_box(30, 21, 28, 30, 21, 29, &gray, &gray);
 }
 
-/// `MonumentBuilding.generateLowerWall`.
+/// The monument building's own lower-wall generator.
 fn generate_lower_wall(c: &mut Canvas) {
     let gray = BlockState::of(BASE_GRAY);
     let light = BlockState::of(BASE_LIGHT);
@@ -1078,7 +1083,7 @@ fn generate_lower_wall(c: &mut Canvas) {
     }
 }
 
-/// `MonumentBuilding.generateMiddleWall`.
+/// The monument building's own middle-wall generator.
 fn generate_middle_wall(c: &mut Canvas) {
     let gray = BlockState::of(BASE_GRAY);
     let light = BlockState::of(BASE_LIGHT);
@@ -1134,7 +1139,7 @@ fn generate_middle_wall(c: &mut Canvas) {
     c.generate_box(14, 8, 44, 43, 8, 53, &gray, &gray);
 }
 
-/// `MonumentBuilding.generateUpperWall`.
+/// The monument building's own upper-wall generator.
 fn generate_upper_wall(c: &mut Canvas) {
     let gray = BlockState::of(BASE_GRAY);
     let light = BlockState::of(BASE_LIGHT);
@@ -1178,8 +1183,8 @@ fn generate_upper_wall(c: &mut Canvas) {
     }
 }
 
-/// `MonumentBuilding.postProcess` — the shell blocks only (the `childPieces`
-/// loop at the end is what [`generate`] does by resolving every other piece
+/// The monument building's own block-writing walk — the shell blocks only (the
+/// child-pieces loop at the end is what [`generate`] does by resolving every other piece
 /// separately, in the same order).
 fn build_shell(piece: &Piece, ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(piece, ctx);
@@ -1229,11 +1234,11 @@ fn build_shell(piece: &Piece, ctx: &dyn StartContext) -> StructurePiece {
 
 // ---------------------------------------------------------------------------
 // Grid rooms. Every function below reads `arena` for the anchor's own
-// `connections`/`has_opening`, exactly as vanilla's `postProcess` reads
-// `this.roomDefinition` and its immediate neighbours.
+// `connections`/`has_opening`, exactly as a faithful block-writing walk reads
+// its own room definition and its immediate neighbours.
 // ---------------------------------------------------------------------------
 
-/// `OceanMonumentEntryRoom.postProcess`.
+/// The entry room's own block-writing walk.
 fn build_entry_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(piece, ctx);
     let light = BlockState::of(BASE_LIGHT);
@@ -1259,7 +1264,7 @@ fn build_entry_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &dyn S
     c.finish(RoomKind::Entry.piece_id(), 1)
 }
 
-/// `OceanMonumentCoreRoom.postProcess`.
+/// The core room's own block-writing walk.
 fn build_core_room(piece: &Piece, ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(piece, ctx);
     let gray = BlockState::of(BASE_GRAY);
@@ -1330,7 +1335,7 @@ fn build_core_room(piece: &Piece, ctx: &dyn StartContext) -> StructurePiece {
     c.finish(RoomKind::Core.piece_id(), 1)
 }
 
-/// `OceanMonumentDoubleXRoom.postProcess`. `west = this.roomDefinition`,
+/// The double-wide room's own block-writing walk. `west = this.roomDefinition`,
 /// `east = west.connections[EAST]`.
 fn build_double_x_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(piece, ctx);
@@ -1387,7 +1392,7 @@ fn build_double_x_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &dy
     c.finish(RoomKind::DoubleX.piece_id(), 1)
 }
 
-/// `OceanMonumentDoubleXYRoom.postProcess`.
+/// The double-wide-and-tall room's own block-writing walk.
 fn build_double_xy_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(piece, ctx);
     let light = BlockState::of(BASE_LIGHT);
@@ -1480,7 +1485,7 @@ fn build_double_xy_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &d
     c.finish(RoomKind::DoubleXy.piece_id(), 1)
 }
 
-/// `OceanMonumentDoubleYRoom.postProcess`.
+/// The double-tall room's own block-writing walk.
 fn build_double_y_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(piece, ctx);
     let light = BlockState::of(BASE_LIGHT);
@@ -1553,7 +1558,7 @@ fn build_double_y_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &dy
     c.finish(RoomKind::DoubleY.piece_id(), 1)
 }
 
-/// `OceanMonumentDoubleYZRoom.postProcess`. `south = this.roomDefinition`,
+/// The double-tall-and-deep room's own block-writing walk. `south = this.roomDefinition`,
 /// `north = south.connections[NORTH]`.
 fn build_double_yz_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(piece, ctx);
@@ -1641,7 +1646,7 @@ fn build_double_yz_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &d
     c.finish(RoomKind::DoubleYz.piece_id(), 1)
 }
 
-/// `OceanMonumentDoubleZRoom.postProcess`. `south = this.roomDefinition`,
+/// The double-deep room's own block-writing walk. `south = this.roomDefinition`,
 /// `north = south.connections[NORTH]`.
 fn build_double_z_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(piece, ctx);
@@ -1719,7 +1724,7 @@ fn build_double_z_room(piece: &Piece, anchor: usize, arena: &[RoomDef], ctx: &dy
     c.finish(RoomKind::DoubleZ.piece_id(), 1)
 }
 
-/// `OceanMonumentSimpleRoom.postProcess`.
+/// The simple room's own block-writing walk.
 fn build_simple_room<R: RandomSource>(
     piece: &Piece,
     anchor: usize,
@@ -1740,8 +1745,8 @@ fn build_simple_room<R: RandomSource>(
     if def.connections[UP].is_none() {
         c.generate_box_on_fill_only(1, 4, 1, 6, 4, 6, &gray);
     }
-    // `centerPillar`'s `&&` short-circuits: `random.nextBoolean()` is drawn
-    // only when `mainDesign != 0`, matching vanilla exactly (the `random`
+    // The centre-pillar flag's `&&` short-circuits: the boolean draw is drawn
+    // only when `main_design != 0`, matching a faithful implementation exactly (the `random`
     // stream position depends on this).
     let center_pillar = main_design != 0
         && random.next_bool()
@@ -1880,7 +1885,7 @@ fn build_simple_room<R: RandomSource>(
     c.finish(RoomKind::Simple { main_design }.piece_id(), 1)
 }
 
-/// `OceanMonumentSimpleTopRoom.postProcess`.
+/// The simple top room's own block-writing walk.
 fn build_simple_top_room<R: RandomSource>(
     piece: &Piece,
     anchor: usize,
@@ -1929,9 +1934,9 @@ fn build_simple_top_room<R: RandomSource>(
     c.finish(RoomKind::SimpleTop.piece_id(), 1)
 }
 
-/// `OceanMonumentWingRoom.postProcess`. `mainDesign = randomValue & 1`,
-/// resolved by [`generate`] from the single `wingRandom = random.nextInt()`
-/// draw. `spawnElder` (the design-0 elder guardian) is skipped — see the
+/// The wing room's own block-writing walk. `main_design = randomValue & 1`,
+/// resolved by [`generate`] from the single `wing_random` draw. The design-0
+/// elder guardian spawn is skipped — see the
 /// module doc's entity-spawning deviation.
 fn build_wing_room(piece: Piece, main_design: i32, ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(&piece, ctx);
@@ -2019,7 +2024,7 @@ fn build_wing_room(piece: Piece, main_design: i32, ctx: &dyn StartContext) -> St
     c.finish("minecraft:omwr", 1)
 }
 
-/// `OceanMonumentPenthouse.postProcess`. `spawnElder` is skipped — see the
+/// The penthouse's own block-writing walk. The elder guardian spawn is skipped — see the
 /// module doc's entity-spawning deviation.
 fn build_penthouse(piece: Piece, ctx: &dyn StartContext) -> StructurePiece {
     let mut c = Canvas::new(&piece, ctx);
@@ -2066,12 +2071,12 @@ fn build_penthouse(piece: Piece, ctx: &dyn StartContext) -> StructurePiece {
     c.generate_box(8, 0, 10, 8, 2, 10, &light, &light);
     c.generate_box(6, -1, 7, 7, -1, 8, &black, &black);
     c.generate_water_box(6, -1, 3, 7, -1, 4);
-    // `spawnElder(6, 1, 6)` — ledgered, see the module doc.
+    // The elder guardian spawn at (6, 1, 6) — ledgered, see the module doc.
     c.finish("minecraft:ompenthouse", 1)
 }
 
-/// `OceanMonumentStructure.generatePieces` → `MonumentBuilding`'s whole
-/// constructor and `postProcess`, flattened into one piece per Java object
+/// The ocean monument's piece generator — the whole
+/// constructor and block-writing walk, flattened into one piece per room unit
 /// (shell, entry, core, every grid room, both wings, the penthouse) — see
 /// the module doc for why that flattening is sound here.
 #[must_use]
@@ -2088,9 +2093,9 @@ pub fn generate(cx: i32, cz: i32, seed: i64, ctx: &dyn StartContext) -> Vec<Stru
     let (mut arena, room_defs, source_idx, core_idx, _roof_idx, _left_wing_idx, _right_wing_idx) = generate_room_graph(&mut random);
     let selected = select_rooms(&mut arena, &room_defs, &mut random);
 
-    // `BlockPos offset = this.getWorldPos(9, 0, 22)` — every grid-room box
+    // The shell's own world position at local (9, 0, 22) — every grid-room box
     // below is anchored near the origin by `room_bounding_box` and then
-    // moved by this same offset, matching `child.getBoundingBox().move(offset)`.
+    // moved by this same offset, matching a faithful post-construction box translate.
     let offset = shell.world_pos(9, 0, 22);
 
     let entry_piece = Piece {
@@ -2121,13 +2126,13 @@ pub fn generate(cx: i32, cz: i32, seed: i64, ctx: &dyn StartContext) -> Vec<Stru
         .collect();
 
     // Wings and the penthouse sit in world space directly, via the shell's
-    // own `getWorldPos` — no `offset`-translate step, matching vanilla's
-    // `BoundingBox.fromCorners(this.getWorldPos(...), this.getWorldPos(...))`.
+    // own local-to-world transform — no `offset`-translate step, matching a
+    // faithful implementation's box built directly from two world positions.
     let left_wing_box = BoundingBox::from_corners(shell.world_pos(1, 1, 1), shell.world_pos(23, 8, 21));
     let right_wing_box = BoundingBox::from_corners(shell.world_pos(34, 1, 1), shell.world_pos(56, 8, 21));
     let penthouse_box = BoundingBox::from_corners(shell.world_pos(22, 13, 22), shell.world_pos(35, 17, 35));
-    // `int wingRandom = random.nextInt();` — one draw; `leftWing` gets it
-    // as-is, `rightWing` gets the post-incremented value.
+    // One integer draw; the left wing gets it
+    // as-is, the right wing gets the post-incremented value.
     let wing_random = random.next_int();
     let left_wing_design = wing_random & 1;
     let right_wing_design = wing_random.wrapping_add(1) & 1;
@@ -2158,8 +2163,8 @@ pub fn generate(cx: i32, cz: i32, seed: i64, ctx: &dyn StartContext) -> Vec<Stru
     out
 }
 
-/// Dispatches a selected grid room to its `postProcess` port. `SimpleRoom`
-/// and `SimpleTopRoom` are the only kinds that draw from `random` here — see
+/// Dispatches a selected grid room to its block-writing walk. The simple room
+/// and the simple top room are the only kinds that draw from `random` here — see
 /// the module doc's `monument:postprocess_random_unseeded` deviation for why
 /// this continues the construction-time stream rather than a fresh one.
 fn build_room_piece<R: RandomSource>(
@@ -2202,8 +2207,8 @@ mod tests {
 
     const SEEDS: [i64; 6] = [1, 2, -195_764_831, 999_999, 42, 8675309];
 
-    /// `generate` never returns an empty list — `MonumentBuilding`'s
-    /// constructor is unconditional, matching [`StructureKind::validity`]'s
+    /// `generate` never returns an empty list — the monument building's
+    /// own construction is unconditional, matching [`StructureKind::validity`]'s
     /// `Valid`-when-non-empty treatment of this kind.
     #[test]
     fn every_seed_produces_a_non_empty_piece_list() {
@@ -2245,7 +2250,7 @@ mod tests {
         assert!(mismatches.is_empty(), "{mismatches:?}");
     }
 
-    /// `RoomDefinition.setConnection` writes both sides of an edge — a
+    /// [`set_connection`] writes both sides of an edge — a
     /// one-sided write here would mean `find_source`/`fits` read a stale
     /// `None` from the far side.
     #[test]
@@ -2266,7 +2271,7 @@ mod tests {
     }
 
     /// `close_openings` never disconnects a cell from the source room — every
-    /// one of vanilla's own `findSource` checks guarantees this at
+    /// one of its own find-source checks guarantees this at
     /// construction time; this test recomputes reachability independently,
     /// over the **final** `has_opening` state, as a control.
     #[test]
@@ -2324,7 +2329,7 @@ mod tests {
             }
             // Every grid cell (46 of them, `room_defs`'s own length) must be
             // `claimed` after selection — a cell nobody's fitter claimed
-            // would mean the cascade's fallback (`FitSimpleRoom`, which
+            // would mean the cascade's fallback (the simple room fitter, which
             // always fits) failed to run.
             assert_eq!(room_defs.len(), 46, "seed {seed}: grid cell count drifted");
             for &idx in &room_defs {
@@ -2380,7 +2385,7 @@ mod tests {
         }
     }
 
-    /// Every piece's id is one of the twelve registered `StructurePieceType`s
+    /// Every piece's id is one of the twelve registered structure-piece types
     /// this module knows about — a stray id would mean a `RoomKind` variant's
     /// `piece_id()` drifted from the dispatch in [`build_room_piece`].
     #[test]
