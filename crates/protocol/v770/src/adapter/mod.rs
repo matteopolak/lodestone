@@ -5,9 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use lodestone_core::{
-    Ctx, Decode, Encode, Reader, Writer, plain_text_from_nbt_component, read_network_nbt,
-};
+use lodestone_core::{Ctx, Decode, Encode, Reader, Writer, read_network_nbt};
 // The wire-shaped, decode-target command tree. Deliberately *not*
 // `lodestone-command`'s arena/`dyn ArgumentType` construction API — see
 // `lodestone_model::command_tree`'s module doc for why the two stay separate.

@@ -1251,17 +1251,15 @@ impl V735Adapter {
             let mut suggestions = Vec::with_capacity(count.min(reader.remaining()));
             for _ in 0..count {
                 let text = reader.string(32_767).map_err(dec_err)?;
-                // Known, tracked lossy flatten (issue #656; pinned by
-                // `tab_complete_reply_tooltip_hex_colour_is_lost_to_the_legacy_string_flatten`
-                // in this crate's own test suite): the tooltip is a real JSON text
-                // component and protocol 754 (1.16.5) postdates 1.16's hex-colour
-                // introduction, so it can carry a `TextColor::Rgb` this flatten has
-                // no legacy code for and silently drops. Not fixable here alone —
-                // `CommandSuggestionEntry::tooltip`'s `String` type would need
-                // widening in `lodestone-model`, plus every protocol crate's
-                // construction site and shell consumer updated to match.
+                // The tooltip is a real JSON text component, and protocol 754
+                // (1.16.5) postdates 1.16's hex-colour introduction, so it can
+                // carry a `TextColor::Rgb` — keep it as a real `Text` rather
+                // than flattening through `Text::to_legacy_string`, which has
+                // no legacy code for a hex colour and would silently drop it
+                // (see that method's own doc for why this is the one call
+                // shape it forbids).
                 let tooltip = if reader.bool().map_err(dec_err)? {
-                    Some(Text::from_json(&reader.string(32_767).map_err(dec_err)?).to_legacy_string())
+                    Some(Text::from_json(&reader.string(32_767).map_err(dec_err)?))
                 } else {
                     None
                 };

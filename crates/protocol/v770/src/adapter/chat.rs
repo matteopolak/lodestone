@@ -593,8 +593,11 @@ fn decode_command_tree(payload: &[u8]) -> Result<CommandTree, AdapterError> {
 /// `ClientboundCommandSuggestionsPacket.STREAM_CODEC`: three VarInts (`id`,
 /// `start`, `length`) then a list of `Entry(String text, Optional<Component>
 /// tooltip)`. The tooltip uses `TRUSTED_OPTIONAL_STREAM_CODEC` — a `bool`
-/// presence byte followed by a network-NBT component when set — and is reduced
-/// to plain text here, matching [`CommandSuggestionEntry::tooltip`]'s own doc.
+/// presence byte followed by a network-NBT component when set — and is kept
+/// as a real [`Text`] via `Text::from_nbt`, the same route every other styled
+/// component in this file uses, matching [`CommandSuggestionEntry::tooltip`]'s
+/// own doc: a plain-text flatten here would silently drop a hex colour
+/// (`TextColor::Rgb`) a tooltip can legitimately carry.
 fn decode_command_suggestions(payload: &[u8]) -> Result<CommandSuggestionsResponse, AdapterError> {
     let mut reader = Reader::new(payload);
     let id = reader.var_i32().map_err(dec_err)?;
@@ -606,7 +609,7 @@ fn decode_command_suggestions(payload: &[u8]) -> Result<CommandSuggestionsRespon
         let text = reader.string(32767).map_err(dec_err)?;
         let tooltip = if reader.bool().map_err(dec_err)? {
             let component = read_network_nbt(&mut reader).map_err(dec_err)?;
-            Some(plain_text_from_nbt_component(&component))
+            Some(Text::from_nbt(&component))
         } else {
             None
         };
