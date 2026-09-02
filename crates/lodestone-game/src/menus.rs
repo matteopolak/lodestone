@@ -45,8 +45,7 @@ use crate::{
 /// containers, so a generic container's content length is `container_size + 36`.
 const PLAYER_INVENTORY_PORTION: usize = 36;
 
-/// The window id every **plugin-opened**, purely local menu carries (issue
-/// #145).
+/// The window id every **plugin-opened**, purely local menu carries.
 ///
 /// `i32::MIN`, and the value matters. A local menu has no server-side container,
 /// so its id must be one a server can never legitimately allocate *and* one that
@@ -71,7 +70,7 @@ pub struct OpenMenu {
     /// progress, as `(property_id, value)`.
     data: Vec<(i32, i32)>,
     /// Whether this screen was opened by a plugin rather than by a server
-    /// `open_screen` (issue #145).
+    /// `open_screen`.
     ///
     /// The authority for "must nothing about this reach the wire". A `bool`
     /// rather than deriving it from `window_id` so the two can be cross-checked,
@@ -99,10 +98,10 @@ struct PendingOpen {
 
 /// The player's inventory plus at most one open container.
 ///
-/// # One inventory, one owner (issue #373)
+/// # One inventory, one owner
 ///
-/// Vanilla has a single `Inventory`; `InventoryMenu`'s slots and every
-/// `AbstractContainerMenu`'s player-section slots are all `Slot(inventory, i, …)`
+/// Vanilla has a single `Inventory`; the player-inventory menu's slots and every
+/// container menu's player-section slots are all references into it
 /// **references into it**, which is why a shift-click inside a crafting table
 /// updates the HUD hotbar for free. Two owned [`Menu`]s cannot share a
 /// `Container` in Rust, so the aliasing is modelled as ownership that *moves*:
@@ -162,7 +161,9 @@ impl Menus {
     /// the *container's* menu, so `&self.player.menu()` would hand out a window-0
     /// menu whose player section is an empty husk. Returning a clone lets this
     /// reinstall the live inventory, so a caller cannot obtain a stale — or
-    /// blank — hotbar no matter which screen is up. That is issue #373: the HUD
+    /// blank — hotbar no matter which screen is up. This is exactly the
+    /// aliasing bug this menu's own single-ownership model exists to close:
+    /// the HUD
     /// read window 0's copy, a quick-move mutated the container's copy, and the
     /// row never changed.
     ///
@@ -254,8 +255,7 @@ impl Menus {
         self.opened.as_ref().map_or(&[], |o| o.data.as_slice())
     }
 
-    /// Whether the open screen was opened by a plugin rather than by the server
-    /// (issue #145).
+    /// Whether the open screen was opened by a plugin rather than by the server.
     ///
     /// **Every wire-facing consumer must check this before sending anything about
     /// the open menu.** A local menu has no server-side container, so a
@@ -268,7 +268,7 @@ impl Menus {
     }
 
     /// Opens a **local** menu — one a plugin supplied, with no server container
-    /// behind it. `Bukkit.createInventory` + `Player.openInventory` (issue #145).
+    /// behind it. `Bukkit.createInventory` + `Player.openInventory`.
     ///
     /// # Why this cannot go through `apply`
     ///
@@ -295,7 +295,7 @@ impl Menus {
     ///
     /// # It takes the player inventory, like every other open
     ///
-    /// Issue #373's invariant holds for local menus too: the one player inventory
+    /// The single-owner invariant above holds for local menus too: the one player inventory
     /// moves into this menu while it is open and is reclaimed on close. That is
     /// what makes the 27 + 9 rows drawn underneath a plugin's screen the real
     /// inventory rather than an empty husk, and what makes shift-clicking out of a
@@ -447,7 +447,7 @@ impl Menus {
     }
 
     /// Hands the one player inventory to the open container's menu, so its
-    /// player rows and the HUD hotbar are the **same storage** (issue #373).
+    /// player rows and the HUD hotbar are the **same storage**.
     ///
     /// Called exactly once per container open, from [`ensure_open`](Self::ensure_open),
     /// *before* the server's `container_set_content` is reconciled into it — so
@@ -525,7 +525,7 @@ impl Menus {
             // `!o.local` is belt-and-braces against the id check: a local menu's
             // id is `i32::MIN`, which no server allocates, but a server-sourced
             // packet must be unable to write into a plugin's screen even if one
-            // somehow arrived with that id. Issue #145.
+            // somehow arrived with that id.
             .filter(|o| !o.local && o.window_id == window_id)
             .map(|o| &mut o.menu)
     }
@@ -647,14 +647,14 @@ impl Menus {
     /// It therefore writes **`predicted` and `confirmed` alike**, via
     /// [`ClientMenu::set_player_native`], because the server performs the *same*
     /// mutation on its own inventory without telling us
-    /// (`ServerGamePacketListenerImpl.java:1303-1314` — `player.drop(…)`, then
-    /// `return`). Predicting only into `predicted` would leave `confirmed`
+    /// (vanilla's own server-side drop-item packet handler calls `player.drop(…)`, then
+    /// returns without a reply). Predicting only into `predicted` would leave `confirmed`
     /// permanently one item richer than the server, so the next full
     /// `container_set_content` would diff as a *visible correction* that never
     /// actually happened. Prediction here means "we know what the server did",
     /// not "we are guessing ahead of a reply".
     ///
-    /// Routing goes through [`Self::inventory_owner_mut`] for issue #373's
+    /// Routing goes through [`Self::inventory_owner_mut`] for the same single-owner
     /// reason: while a container screen is open the one player inventory is owned
     /// by the *container's* menu and window 0's copy is an empty husk, so writing
     /// `self.player` would land the removal in a menu nothing draws.
@@ -700,11 +700,11 @@ impl Menus {
 ///
 /// # Why everything else is `generic`, and what that costs
 ///
-/// Vanilla overrides `quickMoveStack` per menu class, so in principle every
+/// Vanilla overrides its own quick-move step per menu class, so in principle every
 /// `minecraft:menu` registry entry could need its own arm. In practice most of
 /// them are the *same* override with a different constant:
-/// `ChestMenu.java:94-109`, `HopperMenu.java:36-58`, `DispenserMenu.java:45-70`
-/// and `ShulkerBoxMenu.java:40-62` are line-for-line identical modulo the
+/// vanilla's own chest, hopper, dispenser
+/// and shulker-box quick-move steps are line-for-line identical modulo the
 /// container size, which is exactly what [`Menu::generic`] implements. That one
 /// arm correctly covers chests, barrels, ender chests, every `generic_9xN`,
 /// hoppers, dispensers, droppers and shulker boxes.
@@ -712,12 +712,12 @@ impl Menus {
 /// Two families are genuinely different and are **knowingly** left on the
 /// generic order:
 ///
-/// * `AbstractFurnaceMenu.java:87-133` routes by *item kind*: smeltables to slot
+/// * Vanilla's own furnace-family quick-move step routes by *item kind*: smeltables to slot
 ///   0, fuel to slot 1, and only otherwise the main↔hotbar hop. Both predicates
 ///   (`canSmelt` → the cooking-recipe input set, `isFuel` → the fuel-value
 ///   registry) are server data this tree does not have. Modelling the structure
 ///   without them would just move the guess.
-/// * `BrewingStandMenu.java:63-99` does the same for blaze powder, brewing
+/// * Vanilla's own brewing-stand quick-move step does the same for blaze powder, brewing
 ///   ingredients and potions.
 ///
 /// The cost is bounded and self-correcting: a shift-click in a furnace predicts
@@ -732,8 +732,8 @@ impl Menus {
 /// Carry the extra routing as a descriptor on [`Menu`], the way
 /// [`CraftLayout`](crate::menu::CraftLayout) already is.
 ///
-/// The anvil, grindstone, smithing table and enchanting table (issues #253,
-/// #254, #255) are four more cases of exactly this: [`Menu::item_combiner`]
+/// The anvil, grindstone, smithing table and enchanting table
+/// are four more cases of exactly this: [`Menu::item_combiner`]
 /// and [`Menu::enchanting_table`] both still build on [`Menu::generic`] and
 /// stay `MenuKind::Generic`. `container_size` is checked alongside
 /// `menu_type` for the same reason [`is_crafting`] checks `10`: if the server
@@ -741,7 +741,7 @@ impl Menus {
 /// (whose slot count *does* match the packet) beats building a menu that
 /// contradicts what was actually sent.
 ///
-/// Issue #28 ("container screens: the whole family") added the furnace
+/// A later change ("container screens: the whole family") added the furnace
 /// family, the brewing stand, the loom, the stonecutter, the cartography
 /// table and the dispenser/dropper on top of that same pattern —
 /// [`Menu::furnace`], [`Menu::brewing_stand`], [`Menu::loom`],
@@ -756,15 +756,15 @@ impl Menus {
 /// they are the same "accept anything, let the server's `container_set_slot`
 /// correct a wrong guess" order already established above.
 ///
-/// The beacon (also part of issue #28's family) is no longer in that list:
+/// The beacon (also part of that same family) is no longer in that list:
 /// [`Menu::beacon`] builds the real `BeaconMenu` shape, and its
 /// primary/secondary power buttons and confirm/cancel controls — not menu
 /// slots, driven off `container_data` and screen-local selection state — are
-/// `lodestone-shell`'s `container::beacon` module's job (issue #613's
+/// `lodestone-shell`'s `container::beacon` module's job (the
 /// `SetBeaconEffects` remainder).
 ///
 /// The villager's trade list is no longer in that list: [`Menu::merchant`]
-/// builds the real `MerchantMenu` shape (issue #245's UI half), and the trade
+/// builds the real `MerchantMenu` shape, and the trade
 /// *offers* themselves — the seven-row scrollable list, not menu slots at all
 /// — arrive separately as [`crate::trades::TradeOffers`] and are drawn by
 /// `lodestone_shell::container::merchant`.
@@ -782,7 +782,7 @@ fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
         (Some("grindstone"), 3) => Menu::item_combiner(3, 2, SpecialLayout::Grindstone),
         (Some("smithing"), 4) => Menu::item_combiner(4, 3, SpecialLayout::Smithing),
         (Some("enchantment"), 2) => Menu::enchanting_table(),
-        // The furnace family (issue #28): three menu types, one shape.
+        // The furnace family: three menu types, one shape.
         // `Menu::furnace` takes the layout so the background art (the only
         // thing that differs between them) can still be told apart.
         (Some("furnace"), 3) => Menu::furnace(SpecialLayout::Furnace),
@@ -796,15 +796,16 @@ fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
         // `SpecialLayout::Dispenser`'s doc comment for why there is no
         // separate dropper case.
         (Some("generic_3x3"), 9) => Menu::dispenser(),
-        // Not one of #28's own named containers — found while documenting
+        // Not documented among the same named containers as the furnace
+        // family — found while documenting
         // it (see `SpecialLayout::Hopper`'s doc comment).
         (Some("hopper"), 5) => Menu::hopper(),
-        // The merchant/trading screen (#245's UI half). `container_size == 3`
+        // The merchant/trading screen. `container_size == 3`
         // matches `MerchantMenu`'s two payment slots plus its take-only
         // result — see `Menu::merchant`'s doc comment for what is and is not
         // modelled.
         (Some("merchant"), 3) => Menu::merchant(),
-        // The beacon screen (issue #613's `SetBeaconEffects` remainder).
+        // The beacon screen (the `SetBeaconEffects` remainder).
         // `container_size == 1` matches `BeaconMenu`'s one payment slot
         // (`BeaconMenu.SLOT_COUNT`).
         (Some("beacon"), 1) => Menu::beacon(),
@@ -958,7 +959,7 @@ mod tests {
         );
     }
 
-    /// `build_menu` (#253-#255) must key the anvil, grindstone, smithing table
+    /// `build_menu` must key the anvil, grindstone, smithing table
     /// and enchanting table off the wire `menu_type`, not just fall through to
     /// a plain [`Menu::generic`] the way every other unmodelled screen still
     /// does. Checked through the real `ScreenOpened` → `ContainerContent`
@@ -1037,7 +1038,7 @@ mod tests {
     }
 
     /// `build_menu` must select [`Menu::merchant`] for a real
-    /// `minecraft:merchant` open (issue #245's UI half), checked through the
+    /// `minecraft:merchant` open, checked through the
     /// same `ScreenOpened` -> `ContainerContent` path as the item-combiner
     /// screens above — not by calling `Menu::merchant` directly, so this
     /// proves the *dispatch*, not just the constructor. This is the "real
