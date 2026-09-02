@@ -1465,8 +1465,8 @@ pub enum ServerBound {
     /// client-encode side), unlike [`ChatCommand`](Self::ChatCommand), which
     /// has the slash stripped by the *different* packet that carries it.
     /// `crate::server`'s consumer strips it before consulting
-    /// [`crate::ServerCommands::suggest`], mirroring vanilla's
-    /// `ServerGamePacketListenerImpl.handleCustomCommandSuggestions`, which
+    /// [`crate::ServerCommands::suggest`], mirroring vanilla's own
+    /// custom-command-suggestions handler, which
     /// skips exactly one leading `/` off its `StringReader` before parsing.
     CommandSuggestion {
         /// Transaction id, echoed back verbatim in the response so the client
@@ -1495,10 +1495,10 @@ pub enum ServerBound {
     },
     /// The client typed a new name into an open anvil's name field
     /// (`ServerboundRenameItemPacket`). Vanilla's own handler
-    /// (`ServerGamePacketListenerImpl.handleRenameItem`) reads this only when
+    /// (its own rename-item handler) reads this only when
     /// `player.containerMenu instanceof AnvilMenu` — see `crate::server`'s
     /// consumer for that same gate. The text is carried raw; filtering and the
-    /// 50-character cap are `AnvilMenu.setItemName`'s own `validateName`,
+    /// 50-character cap are vanilla's own anvil-menu item-name setter's own `validateName`,
     /// ported to [`crate::anvil::validate_rename`] rather than done here, so a
     /// rejected rename is indistinguishable from one this crate chose not to
     /// decode.
@@ -1510,10 +1510,10 @@ pub enum ServerBound {
     /// (`ServerboundPickItemFromBlockPacket`). Vanilla's client sends this
     /// unconditionally on every pick against a block hit — there is no
     /// client-side prediction of which of the three pick-block outcomes
-    /// applies (`Minecraft.pickBlockOrEntity` → `MultiPlayerGameMode
-    /// ::handlePickItemFromBlock` does nothing but forward the packet); the
+    /// applies (vanilla's own client-side pick-block-or-entity routine →
+    /// its own multiplayer-game-mode pick-item-from-block handler does nothing but forward the packet); the
     /// whole hotbar-select/swap/create decision is server-authoritative, in
-    /// `ServerGamePacketListenerImpl::handlePickItemFromBlock` →
+    /// vanilla's own pick-item-from-block handler →
     /// `tryPickItem`. See `crate::server`'s consumer for that three-way split.
     PickItemFromBlock {
         /// The targeted block position.
@@ -1533,7 +1533,7 @@ pub enum ServerBound {
         /// The targeted entity's network id.
         entity_id: i32,
         /// `hasControlDown()`. For an entity this also gates
-        /// `FetchProfileCommand.printForAvatar` on a game-master avatar in
+        /// vanilla's own fetch-profile-command print-for-avatar routine on a game-master avatar in
         /// vanilla — not modelled here (no game-master command channel), so
         /// this crate's consumer uses it only for the block-entity NBT case,
         /// which does not apply to an entity target at all; carried for wire
@@ -1542,10 +1542,10 @@ pub enum ServerBound {
     },
     /// The client pressed a data-driven button in an open menu
     /// (`ServerboundContainerButtonClickPacket`). Only `EnchantmentMenu` reads
-    /// this in vanilla (`ServerGamePacketListenerImpl.handleContainerButtonClick`
-    /// → `AbstractContainerMenu.clickMenuButton`) — every other menu's
+    /// this in vanilla (its own container-button-click handler
+    /// → its own container-menu click-menu-button routine) — every other menu's
     /// `clickMenuButton` override is the default `false`. `button_id` is
-    /// `EnchantmentMenu.clickMenuButton`'s **slot index** (`0..3`), not a cost;
+    /// vanilla's own enchantment-menu click-menu-button routine's **slot index** (`0..3`), not a cost;
     /// the cost is that slot's own entry in the table's three
     /// `container_set_data` properties, re-derived server-side rather than
     /// trusted from the client.
