@@ -452,12 +452,13 @@ pub(crate) const RENDER_DISTANCE_APPLY_DELAY: Duration = Duration::from_millis(6
 /// than anywhere downstream.
 const PRECISE_SCROLL_SCALE: f64 = 0.1;
 
-/// One winit scroll event as the **notch count** vanilla's `yoffset` carries.
+/// One winit scroll event as the **notch count** vanilla's own scroll-callback
+/// parameter carries.
 ///
 /// The two delta kinds are different units and were being read as the same one:
 /// `LineDelta` is already notches, but `PixelDelta` is raw points, and a trackpad
 /// event carrying `p.y == 12.0` was arriving as *twelve* notches. Downstream that
-/// is `12 * scrollRate()` — 144 px of a settings list in one event, which is the
+/// is twelve times the scroll-rate option — 144 px of a settings list in one event, which is the
 /// owner's "scrolling is a fixed jump" report, and twelve hotbar slots for the
 /// same flick.
 ///

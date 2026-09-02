@@ -14,9 +14,9 @@
 //! # The blend function is the whole look
 //!
 //! Vanilla's own lightning render pipeline carries its own lightning blend
-//! function,
-//! and that blend function is `(BlendFactor.SRC_ALPHA, BlendFactor.ONE)`
-//! — **additive, scaled by the source alpha**. Nothing else in this workspace
+//! function, and that blend function is **additive, scaled by the source
+//! alpha** — source-alpha times source, plus one times destination, on both
+//! colour and alpha. Nothing else in this workspace
 //! uses that pair: `glint_blend()` is `(Src, One)` colour with `(Zero, One)`
 //! alpha and its own doc warns that reaching for a stock `ADDITIVE` is wrong.
 //!
@@ -30,11 +30,11 @@
 //!
 //! # Depth, culling and the 128-block height
 //!
-//! Depth-tested and depth-writing (vanilla's own default depth-stencil state, whose
-//! `GREATER_THAN_OR_EQUAL` becomes this engine's `LessEqual` per `CLAUDE.md`'s
-//! reversed-Z rule), and `cull_mode: None` — a bolt is a hollow tube a player
-//! can stand inside, and vanilla's own `affectedByCulling` returns `false` for
-//! it.
+//! Depth-tested and depth-writing (vanilla's own default depth-stencil state,
+//! whose "nearer-or-equal passes" sense becomes this engine's `LessEqual`
+//! under this workspace's reversed-Z rule), and `cull_mode: None` — a bolt is
+//! a hollow tube a player can stand inside, and vanilla's own culling check
+//! answers false for it.
 //!
 //! That last point is not only about back faces: a bolt spans **128 blocks**
 //! upward from the strike, and `lodestone_data::entity_dimensions` records
@@ -146,7 +146,8 @@ impl LightningBoltRenderer {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
-                    // Vanilla's own lightning blend function = `(SRC_ALPHA, ONE)`. See the
+                    // Vanilla's own lightning blend function: source-alpha times
+                    // source, plus one times destination. See the
                     // module doc: this is what turns four dim blue-grey shells
                     // into a white bolt, and a stock `ALPHA_BLENDING` here
                     // draws the same geometry looking flat and grey.
@@ -169,7 +170,7 @@ impl LightningBoltRenderer {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 // A hollow tube the player can stand inside; vanilla's own
-                // `affectedByCulling` is false for the same subject.
+                // culling check is false for the same subject.
                 cull_mode: None,
                 ..Default::default()
             },

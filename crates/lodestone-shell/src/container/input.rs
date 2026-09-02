@@ -11,8 +11,8 @@ use super::layout::MenuHit;
 
 /// Which mouse button a menu gesture used.
 ///
-/// `Pick` is vanilla's `keyPickItem` (middle-click by default), which only does
-/// anything with infinite materials.
+/// `Pick` is vanilla's own creative pick-block gesture (middle-click by
+/// default), which only does anything with infinite materials.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuButton {
     /// Primary / left.
@@ -89,7 +89,7 @@ pub struct MenuContext {
 /// slot" right-drag most players use to fill a crafting grid.
 ///
 /// The empty-cursor half *is* sent on press (`PICKUP` / `QUICK_MOVE` / `CLONE`),
-/// and vanilla's `skipNextRelease` then suppresses the release, which is what
+/// and vanilla's own skip-next-release flag then suppresses the release, which is what
 /// [`skip_next_release`](Self::press) models.
 ///
 /// Ordering contract: [`press`](Self::press), then zero or more
@@ -172,8 +172,8 @@ impl MenuInput {
             return Vec::new();
         }
 
-        // Inside the panel but not over a slot: vanilla's `slotId` stays -1 and the
-        // whole branch is skipped. Deliberately *not* a drop.
+        // Inside the panel but not over a slot: vanilla's own slot-index field
+        // stays -1 and the whole branch is skipped. Deliberately *not* a drop.
         let slot = match hit {
             MenuHit::Slot(i) => i as i32,
             MenuHit::Outside => OUTSIDE_SLOT,
@@ -286,7 +286,7 @@ impl MenuInput {
     /// The in-progress paint, for the on-screen preview: the drag type
     /// ([`drag_type`]) and the slots painted so far, in paint order.
     ///
-    /// This is vanilla's `quickCraftSlots` / `quickCraftingType` pair, read by
+    /// This is vanilla's own painted-slot-set-and-drag-type pair, read by
     /// vanilla's own per-slot extract routine to draw the provisional
     /// per-cell stack. `None` when no drag is armed.
     #[must_use]
