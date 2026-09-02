@@ -23,6 +23,33 @@
 #[path = "generated/packet_ids.rs"]
 pub mod packet_ids;
 
+/// Generated authoritative packet id table for protocol 110 (Minecraft
+/// 1.9.4), the opening release of this era.
+///
+/// Same provenance as [`packet_ids`]: `minecraft-data`'s
+/// `vendor/minecraft-data/data/pc/1.9.4/protocol.json`. Selected at adapter
+/// construction, never referenced by name from a packet arm.
+#[path = "generated/packet_ids_110.rs"]
+pub mod packet_ids_110;
+
+/// Generated authoritative packet id table for protocol 210 (Minecraft
+/// 1.10.2).
+///
+/// `minecraft-data` ships 1.10.2's `protocol.json` under its `1.10`
+/// directory (both declare protocol 210); `gen-packet-ids` resolves that
+/// same-major fallback itself.
+#[path = "generated/packet_ids_210.rs"]
+pub mod packet_ids_210;
+
+/// Generated authoritative packet id table for protocol 316 (Minecraft
+/// 1.11.2).
+///
+/// `minecraft-data` ships the shapes under its `1.11` directory (protocol
+/// 315); the ids are unchanged between the two point releases, which the
+/// committed 1.11.2 capture in `tests/captures/` independently confirms.
+#[path = "generated/packet_ids_316.rs"]
+pub mod packet_ids_316;
+
 /// Generated entity-type id→name tables for protocol 340.
 ///
 /// Like `packet_ids`, these are generated from the community `minecraft-data`
