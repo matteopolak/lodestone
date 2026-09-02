@@ -116,9 +116,10 @@ switcher itself is behind the gate.
 
 
 `offline.json` (beside `profiles.json`/`servers.json`) stores exactly one field, the username;
-the UUID is never stored, only derived, reproducing Java's
-`UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(UTF_8))` — an MD5 of the name bytes
-alone, version nibble forced to 3, **not** a namespaced `Uuid::new_v3`, which hashes different
+the UUID is never stored, only derived: an MD5 over the UTF-8 bytes of the literal
+`OfflinePlayer:` followed by the username, with the version nibble forced to 3 and the variant
+bits to RFC 4122. That is a **name-based UUID over those bytes alone**, and specifically **not**
+a namespaced `Uuid::new_v3`, which prepends a namespace and so hashes different
 bytes and would still look like a stable, plausible UUID. This matters because our own
 integrated server, unlike vanilla, echoes back whatever UUID the client presents rather than
 deriving one from the username — so a stable derived UUID is what lets a singleplayer save be
