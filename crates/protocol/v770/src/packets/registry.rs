@@ -5,7 +5,7 @@
 //!
 //! During Configuration the server sends one `registry_data` packet **per
 //! synchronized registry** — measured 29 on the creative oracle, matching
-//! `RegistryDataLoader::SYNCHRONIZED_REGISTRIES` exactly. This
+//! vanilla's own synchronized-registries list exactly. This
 //! client used to drop every one of them on the floor, so anything the server
 //! declares by registry rather than by name had to be hardcoded: chunk column
 //! heights, sky light, the day/night clock.
@@ -14,8 +14,8 @@
 //! guessed name:
 //!
 //! * The biome registry arrives as **`minecraft:worldgen/biome`**, not
-//!   `minecraft:biome` — `Registries.BIOME`'s own key carries the `worldgen/`
-//!   prefix.
+//!   `minecraft:biome` — vanilla's own biome registry key carries the
+//!   `worldgen/` prefix.
 //! * `minecraft:dimension_type` entries arrive **alphabetically**:
 //!   `overworld`, `overworld_caves`, `the_end`, `the_nether` — so holder ids are
 //!   `0, 1, 2, 3` in that order and `the_nether` is **3**, not 1. Never assume a
@@ -23,8 +23,8 @@
 //!
 //! # Wire format
 //!
-//! From `ClientboundRegistryDataPacket.STREAM_CODEC` (behavioural reference
-//! only, never transliterated):
+//! From vanilla's own clientbound registry-data packet stream codec
+//! (behavioural reference only, never transliterated):
 //!
 //! ```text
 //! registry : Identifier                     -- e.g. "minecraft:dimension_type"
@@ -43,10 +43,11 @@
 //!
 //! # `data` is an `Option`, and for us it is always `Some`
 //!
-//! `RegistrySynchronization::packRegistry` elides an entry's contents when the
+//! Vanilla's own registry pack-sync routine elides an entry's contents when the
 //! entry came from a data pack the client said it already knows
-//! (`canSkipContents`). Our join replies to `select_known_packs` with an **empty**
-//! list (`V770Adapter::handle_configuration`), so `clientKnownPacks` is empty
+//! (its own can-skip-contents check). Our join replies to `select_known_packs` with an **empty**
+//! list (`V770Adapter::handle_configuration`), so vanilla's own
+//! notion of packs the client already knows is empty
 //! server-side and nothing is ever elided — every entry we receive carries full
 //! NBT. Measured on the creative oracle: 4 of 4 `dimension_type` entries and 2 of
 //! 2 `world_clock` entries carried data (see `tests/live_registry_data.rs`).
@@ -147,7 +148,8 @@ impl Decode for RegistryData {
 /// Add a field here when something reads it, not before.
 ///
 /// `attributes` is no longer fully in that list: it is a generic, many-keyed
-/// `EnvironmentAttributeMap` (fog colour, ambient sounds, bed rules, dripstone
+/// attribute map (vanilla's own environment-attributes structure; fog colour,
+/// ambient sounds, bed rules, dripstone
 /// particles, …) and only one key of it — `minecraft:visual/ambient_light_color`
 /// — has a consumer, so only that one key is lifted out (see
 /// [`Self::ambient_light_color`]). The rest of the compound stays in the raw
@@ -156,7 +158,7 @@ impl Decode for RegistryData {
 /// # Two field names that are *not* what older records say
 ///
 /// * The key is **`has_skylight`**, one word — not `has_sky_light`. Vanilla's
-///   accessor is `hasSkyLight()` but the codec field is `has_skylight`, so code
+///   accessor uses a different name than the codec field, which is `has_skylight`, so code
 ///   ported from the accessor name silently finds nothing.
 /// * There is **no `bed_works`** and no `respawn_anchor_works` in 26.2. They
 ///   moved into `attributes` as `minecraft:gameplay/bed_rule` and
@@ -165,13 +167,15 @@ impl Decode for RegistryData {
 ///   Anything written before 26.2 that lists `bed_works` as a dimension-type
 ///   field is describing an older game.
 ///
-/// Also note `has_fixed_time` is a **bool** here (`Codec.BOOL.optionalFieldOf`),
+/// Also note `has_fixed_time` is a **bool** here (vanilla's own optional
+/// bool-field codec),
 /// not the pre-26.2 `Optional<Long> fixed_time`. It gates
-/// `Level::isDarkOutside`/`isNight`; nothing in this client reads it yet, but it
+/// vanilla's own dark-outside/night checks; nothing in this client reads it yet, but it
 /// is one byte and it is the field a future "the Nether has no night" fix needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DimensionType {
-    /// Whether this dimension's time of day is fixed (`Level::hasFixedTime`).
+    /// Whether this dimension's time of day is fixed (vanilla's own
+    /// has-fixed-time check).
     /// Absent on the wire means `false`.
     pub has_fixed_time: bool,
     /// Whether columns in this dimension carry sky light at all.
@@ -185,7 +189,7 @@ pub struct DimensionType {
     /// Whether the ender dragon fight runs here.
     pub has_ender_dragon_fight: bool,
     /// Movement scale relative to the overworld — `8.0` in the Nether. Used for
-    /// portal coordinate translation (`DimensionType::getTeleportationScale`).
+    /// portal coordinate translation (vanilla's own teleportation-scale getter).
     pub coordinate_scale: f64,
     /// Lowest world-`y` a column stores (`-64` overworld, `0` Nether/End).
     pub min_y: i32,
@@ -201,11 +205,11 @@ pub struct DimensionType {
     pub ambient_light: f32,
     /// `attributes`' `minecraft:visual/ambient_light_color`, packed `0xRRGGBB` —
     /// the colour `lightmap.fsh` seeds its accumulator with before either light
-    /// half is added (`Lightmap.render` via `LightmapRenderStateExtractor.
-    /// extract`, reading `EnvironmentAttributes.AMBIENT_LIGHT_COLOR`). **Not**
+    /// half is added (vanilla's own lightmap-render state extractor reads this
+    /// from its own environment-attributes table). **Not**
     /// the same quantity as [`Self::ambient_light`] above, which only ever
-    /// blends a *lerp fraction* into `Lightmap.getBrightness` and is not what
-    /// the GPU lightmap texture actually uses.
+    /// blends a *lerp fraction* into vanilla's own lightmap-brightness
+    /// calculation and is not what the GPU lightmap texture actually uses.
     ///
     /// Grey `0x0a0a0a` in the overworld, warm brown `0x302821` in the Nether,
     /// sage `0x3f473f` in the End (`.cache/mc/26.2/client-src/data/minecraft/
@@ -283,7 +287,8 @@ impl DimensionType {
 /// to decide rain versus snow per biome, plus `downfall` for a future
 /// `lodestone_assets::BiomeTint` implementor.
 ///
-/// Read from `Biome.ClimateSettings.CODEC` (`Biome.java`), the same
+/// Read from vanilla's own biome climate-settings codec (confirmed against
+/// the decompiled 26.2 biome source), the same
 /// top-level compound `has_precipitation`/`temperature`/`downfall` live in —
 /// **not** under `attributes` like [`biome_sky_color`]'s field. This is a
 /// **data-pack** registry like the rest of the biome table: a pack can change
@@ -293,7 +298,8 @@ impl DimensionType {
 ///
 /// `temperature_modifier` (`"none"`/`"frozen"`) and the per-block height
 /// falloff above `sea_level + 17` are both real inputs to vanilla's exact
-/// `getHeightAdjustedTemperature` (`Biome.java`) and neither is decoded
+/// height-adjusted-temperature calculation (confirmed against the decompiled
+/// biome source) and neither is decoded
 /// here — this is the same documented approximation
 /// `docs/worldgen-biomes.md`'s `cold_enough_to_snow` gotcha already describes
 /// for the *server*-side climate table, carried over to the client-side one
@@ -306,7 +312,8 @@ pub struct BiomeClimate {
     pub has_precipitation: bool,
     /// `temperature`, declared (not height-adjusted). `>= 0.15` is rain,
     /// otherwise snow, when `has_precipitation` is `true`
-    /// (`Biome.warmEnoughToRain`, `Biome.java`).
+    /// (vanilla's own warm-enough-to-rain threshold, confirmed against the
+    /// decompiled biome source).
     pub temperature: f32,
     /// `downfall`, `0.0..=1.0`. Feeds the grass/foliage colormap sample
     /// alongside `temperature`; not consulted for precipitation.
@@ -389,7 +396,7 @@ impl ClientRegistries {
     pub const WORLD_CLOCK: &'static str = "minecraft:world_clock";
     /// Registry id of the biome registry.
     ///
-    /// **`minecraft:worldgen/biome`, not `minecraft:biome`** — `Registries.BIOME`'s
+    /// **`minecraft:worldgen/biome`, not `minecraft:biome`** — vanilla's own biome registry key's
     /// key carries the `worldgen/` prefix, and a lookup by the guessed short name
     /// silently finds nothing. See this module's header.
     pub const BIOME: &'static str = "minecraft:worldgen/biome";
@@ -494,8 +501,8 @@ impl ClientRegistries {
     }
 
     /// Every biome's `minecraft:visual/sky_color` in registry order, packed
-    /// `0x00RR_GGBB` in **sRGB bytes** (the space vanilla's `ARGB.multiply`
-    /// works in — never linearise before the day/night multiply, see
+    /// `0x00RR_GGBB` in **sRGB bytes** (the space vanilla's own colour-multiply
+    /// helper works in — never linearise before the day/night multiply, see
     /// `lodestone_render::SkyFrame`).
     ///
     /// Index `i` is holder id `i`, which is exactly the integer a chunk
@@ -567,15 +574,16 @@ impl ClientRegistries {
 ///
 /// # The tag is a string, and there are two shapes of it
 ///
-/// `EnvironmentAttributes.SKY_COLOR` is `AttributeTypes.RGB_COLOR`, whose value
-/// codec is `ExtraCodecs.STRING_RGB_COLOR` —
-/// `withAlternative(hexColor(6), RGB_COLOR_CODEC)`. Vanilla *encodes* through
+/// Vanilla's own sky-color attribute is registered with its own
+/// string-or-rgb-color codec — an alternative-of (hex-color-string,
+/// int-rgb-color). Vanilla *encodes* through
 /// the first alternative, so what actually arrives is the NBT string
 /// `"#78a7ff"`, not an int; the int form is accepted anyway because it is a
 /// legal alternative a data pack may author.
 ///
-/// The second shape is the modifier form. `EnvironmentAttributeMap.Entry` is
-/// `Codec.either(valueCodec, fullCodec)`: a plain `override` collapses to the
+/// The second shape is the modifier form. Vanilla's own environment-attribute
+/// map entry is
+/// an either-codec (valueCodec, fullCodec): a plain `override` collapses to the
 /// bare value, but any other modifier serialises as
 /// `{ modifier: "…", argument: <value> }`. No vanilla biome uses a modifier for
 /// `sky_color` (`swamp`'s `water_fog_end_distance` is the shape's only vanilla
@@ -603,9 +611,10 @@ fn biome_sky_color(value: &Nbt) -> Option<u32> {
 
 /// `DimensionType::ambient_light_color`'s decode: `attributes` →
 /// `minecraft:visual/ambient_light_color`, same shape as [`biome_sky_color`]
-/// (`AttributeTypes.RGB_COLOR` is `ExtraCodecs.STRING_RGB_COLOR` for every
-/// user of it, not just biomes) — a hex string on the wire, an int or the
-/// `{ modifier, argument }` form both legal for a data pack to author.
+/// (vanilla's own rgb-color attribute type shares its string-or-int codec
+/// with every user of it, not just biomes) — a hex string on the wire, an
+/// int or the `{ modifier, argument }` form both legal for a data pack to
+/// author.
 ///
 /// Confirmed against a real captured `dimension_type` payload
 /// (`tests/fixtures/registry_data_dimension_type.hex`): the Nether's entry
@@ -626,8 +635,8 @@ fn dimension_ambient_light_color(fields: &[(String, Nbt)]) -> Option<u32> {
     }
 }
 
-/// Parses vanilla's `hexColor(6)` form: a leading `#` and exactly six hex
-/// digits. Both requirements are vanilla's own (`ExtraCodecs.hexColor`), so
+/// Parses vanilla's own six-digit hex-color form: a leading `#` and exactly
+/// six hex digits. Both requirements are vanilla's own, so
 /// anything else is a value we should decline rather than guess at.
 fn parse_hex_rgb(text: &str) -> Option<u32> {
     let digits = text.strip_prefix('#')?;
