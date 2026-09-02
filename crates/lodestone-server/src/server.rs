@@ -11297,7 +11297,7 @@ where
             .await?;
         }
         ServerBound::DifficultyChanged { difficulty } => {
-            // `ServerGamePacketListenerImpl.handleChangeDifficulty`'s own gate:
+            // Vanilla's own change-difficulty handler's own gate:
             // `Permissions.COMMANDS_GAMEMASTER` (level 2) or the singleplayer
             // owner. `commands.permission_level` already *is* that check —
             // `AccessLists::command_permission_level` resolves to the real op
@@ -11322,15 +11322,15 @@ where
             apply_difficulty_change(conn, proto, state, world).await?;
         }
         ServerBound::DifficultyLockChanged { locked } => {
-            // Same gate as `DifficultyChanged` above — vanilla's
-            // `handleLockDifficulty` checks the identical permission.
+            // Same gate as `DifficultyChanged` above — vanilla's own
+            // lock-difficulty handler checks the identical permission.
             if commands.permission_level >= COMMANDS_GAMEMASTER_LEVEL {
                 world.set_difficulty_locked(locked);
             }
             apply_difficulty_change(conn, proto, state, world).await?;
         }
         ServerBound::GameRuleChanged { entries } => {
-            // `ServerGamePacketListenerImpl.handleSetGameRule`'s own gate —
+            // Vanilla's own set-game-rule handler's own gate —
             // see `DifficultyChanged`'s own comment above for why
             // `commands.permission_level` is the right check to reuse. A
             // refused request sets nothing, so `apply_game_rule_changed`'s own
@@ -11344,7 +11344,7 @@ where
             apply_game_rule_changed(conn, proto, state, world, entries).await?;
         }
         ServerBound::CarriedItemChanged { slot } => {
-            // `ServerGamePacketListenerImpl.handleSetCarriedItem` calls
+            // Vanilla's own set-carried-item handler calls
             // `player.stopUsingItem()` before it moves the selection, so switching
             // off a half-eaten steak cancels the bite rather than letting it
             // complete against whatever is in the slot now. `finish_consuming` also
@@ -11493,8 +11493,8 @@ where
             }
         }
         ServerBound::ContainerClosed { window_id } => {
-            // Vanilla's `ServerPlayer.doCloseContainer` → `AbstractContainerMenu
-            // ::removed`: the cursor and any crafting grid go back to the player,
+            // Vanilla's own do-close-container → container-menu removed chain:
+            // the cursor and any crafting grid go back to the player,
             // and what does not fit hits the floor. Dropping them silently would
             // delete items every time a player closed a menu mid-drag.
             //
@@ -11512,7 +11512,7 @@ where
             inventory.click_state_mut().reset();
             // Issue #692: the same "menu-owned scratch state, cleared on
             // `removed`" shape as the crafting grid and workstation cells
-            // above — `AbstractContainerMenu.selectedBundleItemIndex` is a
+            // above — vanilla's own container-menu selected-bundle-item-index is a
             // field on the menu instance itself, so it does not survive past
             // the menu that set it.
             inventory.clear_selected_bundle_items();
@@ -11522,7 +11522,7 @@ where
                     spilled.push(leftover);
                 }
             }
-            // `BeaconMenu.removed`: the payment slot is dropped straight to
+            // Vanilla's own beacon-menu removed routine: the payment slot is dropped straight to
             // the floor — `player.drop(itemStack, false)` — **not** merged
             // into the inventory the way the crafting-grid/workstation
             // return above is, and unlike those two, a beacon's own slot is
@@ -11540,8 +11540,8 @@ where
             }
             spawn_dropped_stacks(mobs, *player_pos, *player_rot, drops_rng, spilled);
             if open_container.as_ref().is_some_and(|open| open.window_id == window_id) {
-                // Furnace XP, paid out **on close** rather than per cook — vanilla's
-                // `AbstractFurnaceBlockEntity.awardUsedRecipesAndPopExperience`,
+                // Furnace XP, paid out **on close** rather than per cook — vanilla's own
+                // furnace-block-entity award-used-recipes-and-pop-experience routine,
                 // which the player's `stopUsing` reaches. `Furnace::take_recipes_used`
                 // has banked the smelts since the last drain and had no caller at
                 // all; this is it.
