@@ -62,7 +62,7 @@ fn parse_mood(biome: &str, v: &serde_json::Value) -> Mood {
                 key.as_str(),
                 "sound" | "tick_delay" | "block_search_extent" | "offset"
             ),
-            "{biome}: unexpected key `{key}` in mood — AmbientMoodSettings.java:9 \
+            "{biome}: unexpected key `{key}` in mood — vanilla's own mood-settings record \
              declares exactly four"
         );
     }
@@ -137,11 +137,12 @@ fn parse_all() -> BTreeMap<String, Parsed> {
         for key in o.keys() {
             assert!(
                 matches!(key.as_str(), "loop" | "mood" | "additions"),
-                "{name}: unexpected key `{key}` — AmbientSounds.java:11 declares three"
+                "{name}: unexpected key `{key}` — vanilla's own ambient-sounds record declares three"
             );
         }
 
-        // `additions` uses a compact list codec (`AmbientSounds.CODEC`), so it is
+        // `additions` uses a compact list codec (vanilla's own ambient-sounds
+        // codec), so it is
         // either a single object or an array. Both shapes must be accepted; real 26.2
         // data uses the single-object form, and assuming an array would panic.
         let additions = match o.get("additions") {
@@ -305,7 +306,7 @@ fn every_biome_mood_reuses_the_legacy_cave_geometry() {
         assert_eq!(
             (mood.tick_delay, mood.block_search_extent, mood.offset),
             (LEGACY_TICK_DELAY, LEGACY_SEARCH_EXTENT, LEGACY_OFFSET),
-            "{name}: mood geometry diverges from AmbientMoodSettings.java:19"
+            "{name}: mood geometry diverges from vanilla's own mood-settings record"
         );
         assert_eq!(mood.sound, format!("ambient.{name}.mood"));
 

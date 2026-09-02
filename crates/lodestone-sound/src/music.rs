@@ -19,23 +19,23 @@
 //!
 //! 26.2 restructured this relative to older versions, and the restructure is the
 //! thing most likely to be got wrong from memory: **music is no longer read off
-//! the biome directly**. `Minecraft.getSituationalMusic`
+//! the biome directly**. vanilla's own situational-music selection
 //! asks the camera's *environment-attribute probe*
-//! for `EnvironmentAttributes.BACKGROUND_MUSIC`
+//! for vanilla's own background-music environment attribute
 //! (registered as `audio/background_music`),
 //! and that attribute's value is a [`BackgroundMusic`] record with three optional
 //! slots. So a biome contributes music by *setting an attribute*, and the
 //! selection between the slots is [`BackgroundMusic::select`].
 //!
-//! The order in `getSituationalMusic` is:
+//! The order in vanilla's own situational-music selection is:
 //!
 //! 1. A screen's own `getBackgroundMusic()`, if any — this wins outright.
 //! 2. Otherwise, if there is a player: `END_BOSS` when the dimension is the End
 //!    *and* the boss overlay wants music; else the probed
-//!    `BackgroundMusic.select(isCreative, isUnderwater)`, which may be `None`.
+//!    vanilla's own background-music selection with the creative/underwater flags, which may be `None`.
 //! 3. Otherwise (no player — the title screen): [`musics::MENU`].
 //!
-//! `isCreative` is **`instabuild && mayfly`**, in `Minecraft.getSituationalMusic`, not
+//! `isCreative` is **`instabuild && mayfly`**, in vanilla's own situational-music selection, not
 //! "gamemode == creative"; that distinction is why it is a separate flag on
 //! [`MusicSituation`] rather than a gamemode enum.
 //!
@@ -46,18 +46,18 @@
 //!
 //! | music | min | max | replaces | cite |
 //! |---|---|---|---|---|
-//! | `MENU` | 20 | 600 | yes | `Musics.MENU` |
-//! | `CREATIVE` | 12000 | 24000 | no | `Musics.CREATIVE` |
-//! | `CREDITS` | 0 | 0 | yes | `Musics.CREDITS` |
-//! | `END_BOSS` | 0 | 0 | yes | `Musics.END_BOSS` |
-//! | `END` | 6000 | 24000 | yes | `Musics.END` |
-//! | `UNDER_WATER` | 12000 | 24000 | no | `Musics.UNDER_WATER`, via `Musics.createGameMusic` |
-//! | `GAME` | 12000 | 24000 | no | `Musics.GAME`, via `Musics.createGameMusic` |
+//! | `MENU` | 20 | 600 | yes | vanilla's own MENU music constant |
+//! | `CREATIVE` | 12000 | 24000 | no | vanilla's own CREATIVE music constant |
+//! | `CREDITS` | 0 | 0 | yes | vanilla's own CREDITS music constant |
+//! | `END_BOSS` | 0 | 0 | yes | vanilla's own END_BOSS music constant |
+//! | `END` | 6000 | 24000 | yes | vanilla's own END music constant |
+//! | `UNDER_WATER` | 12000 | 24000 | no | vanilla's own UNDER_WATER music constant, via vanilla's own game-music helper |
+//! | `GAME` | 12000 | 24000 | no | vanilla's own GAME music constant, via vanilla's own game-music helper |
 //!
 //! and the scheduler's own: [`STARTING_DELAY`] is 100 ticks
-//! (`MusicManager.STARTING_DELAY`, and `nextSongDelay` is initialised to it in the
+//! (vanilla's own starting-delay constant, and `nextSongDelay` is initialised to it in the
 //! field declaration); [`MusicFrequency`] converts *minutes* to ticks as
-//! `minutes * 1200` in `MusicManager.MusicFrequency`'s constructor, giving
+//! `minutes * 1200` in vanilla's own frequency enum's constructor, giving
 //! 24000 / 12000 / 0 ticks.
 //!
 //! # A missing track is silence, not a panic and not a stall
@@ -68,11 +68,11 @@
 //! that has to be an ordinary outcome rather than an error path.
 //!
 //! It is, and pleasingly it is *vanilla's own* outcome rather than a bespoke
-//! degradation. `MusicManager.startPlaying` assigns
+//! degradation. vanilla's own start-playing routine assigns
 //! `currentMusic` **before** playing and switches on the result: `STARTED` shows
 //! the now-playing toast, `STARTED_SILENTLY` does not — and either way
 //! `nextSongDelay` becomes `Integer.MAX_VALUE`. On the following tick the
-//! `!isActive(currentMusic)` branch of `MusicManager.tick` clears `currentMusic` and recomputes
+//! `!isActive(currentMusic)` branch of vanilla's own tick routine clears `currentMusic` and recomputes
 //! the delay from [`MusicFrequency::next_song_delay`]. So a track that does not
 //! start behaves exactly like a track that finished instantly: the manager
 //! re-arms a normal 12000..=24000-tick countdown and tries again later.
@@ -87,24 +87,24 @@ use std::borrow::Cow;
 
 use lodestone_audio::JavaRandom;
 
-/// `MusicManager.STARTING_DELAY`. Also the initial value
-/// of the `nextSongDelay` field, the floor `MusicManager.tick` applies when
-/// nothing is selected, the flat delay `MusicManager.MusicFrequency.getNextSongDelay`
-/// returns for `CONSTANT`, and the `+ 100` `MusicManager.stopPlaying` adds
+/// vanilla's own starting-delay constant. Also the initial value
+/// of the `nextSongDelay` field, the floor vanilla's own tick routine applies when
+/// nothing is selected, the flat delay vanilla's own frequency-based next-song-delay computation
+/// returns for `CONSTANT`, and the `+ 100` vanilla's own stop-playing routine adds
 /// when music is stopped explicitly.
 pub const STARTING_DELAY: i32 = 100;
 
-/// `Musics.TEN_MINUTES` — the min delay every `Musics.createGameMusic` track uses.
+/// vanilla's own ten-minute constant — the min delay every vanilla's own game-music helper track uses.
 pub const GAME_MUSIC_MIN_DELAY: i32 = 12_000;
 
-/// `Musics.TWENTY_MINUTES` — the max delay every `Musics.createGameMusic` track uses.
+/// vanilla's own twenty-minute constant — the max delay every vanilla's own game-music helper track uses.
 pub const GAME_MUSIC_MAX_DELAY: i32 = 24_000;
 
-/// Ticks per minute, the conversion `MusicManager.MusicFrequency`'s constructor
+/// Ticks per minute, the conversion vanilla's own frequency enum's constructor
 /// applies to its minutes-valued setting. 20 ticks/s * 60 s.
 pub const TICKS_PER_MINUTE: i32 = 1_200;
 
-/// One music track and its scheduling parameters — vanilla's `Music` record.
+/// One music track and its scheduling parameters — vanilla's own music record.
 ///
 /// `sound` is the **event key path with the namespace stripped** (`music.menu`,
 /// not `minecraft:music.menu`), because that is what
@@ -158,7 +158,7 @@ impl Music {
         }
     }
 
-    /// `Musics.createGameMusic`: 12000..=24000 ticks,
+    /// vanilla's own game-music helper: 12000..=24000 ticks,
     /// non-replacing. Every biome's `default` slot is one of these, which is why
     /// the generated table's delays are all identical.
     pub const fn game(sound: &'static str) -> Self {
@@ -170,7 +170,7 @@ impl Music {
         &self.sound
     }
 
-    /// `MusicManager.canReplace`: this track may cut
+    /// vanilla's own can-replace check: this track may cut
     /// off `current` only if it is flagged replacing **and** is not the same
     /// track. The second half is what stops `MENU` (which *is* replacing)
     /// restarting itself every tick on the title screen.
@@ -179,31 +179,30 @@ impl Music {
     }
 }
 
-/// Vanilla's `Musics` table. Every value is transcribed with
+/// Vanilla's own music table. Every value is transcribed with
 /// its source constant cited alongside it.
 pub mod musics {
     use super::Music;
 
-    /// `Musics.MENU`. `20..=600`, replacing.
+    /// vanilla's own MENU music constant. `20..=600`, replacing.
     pub const MENU: Music = Music::of("music.menu", 20, 600, true);
-    /// `Musics.CREATIVE`. `12000..=24000`, non-replacing.
+    /// vanilla's own CREATIVE music constant. `12000..=24000`, non-replacing.
     pub const CREATIVE: Music = Music::of("music.creative", 12_000, 24_000, false);
-    /// `Musics.CREDITS`. `0..=0`, replacing.
+    /// vanilla's own CREDITS music constant. `0..=0`, replacing.
     pub const CREDITS: Music = Music::of("music.credits", 0, 0, true);
-    /// `Musics.END_BOSS`. `0..=0`, replacing. The event is
-    /// `music.dragon` (`SoundEvents.MUSIC_DRAGON`), not `music.end_boss`.
+    /// vanilla's own END_BOSS music constant. `0..=0`, replacing. The event is
+    /// `music.dragon` (vanilla's own dragon-music sound event), not `music.end_boss`.
     pub const END_BOSS: Music = Music::of("music.dragon", 0, 0, true);
-    /// `Musics.END`. `6000..=24000`, replacing. Note the min
+    /// vanilla's own END music constant. `6000..=24000`, replacing. Note the min
     /// is `FIVE_MINUTES`, not the game tracks' `TEN_MINUTES`.
     pub const END: Music = Music::of("music.end", 6_000, 24_000, true);
-    /// `Musics.UNDER_WATER`, via `Musics.createGameMusic`.
+    /// vanilla's own UNDER_WATER music constant, via vanilla's own game-music helper.
     pub const UNDER_WATER: Music = Music::game("music.under_water");
-    /// `Musics.GAME`, via `Musics.createGameMusic`.
+    /// vanilla's own GAME music constant, via vanilla's own game-music helper.
     pub const GAME: Music = Music::game("music.game");
 }
 
-/// The three-slot music set an environment attribute carries — vanilla's
-/// `BackgroundMusic` record.
+/// The three-slot music set an environment attribute carries — vanilla's own background-music record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackgroundMusic {
     /// Played when neither of the more specific slots applies.
@@ -215,7 +214,7 @@ pub struct BackgroundMusic {
 }
 
 impl BackgroundMusic {
-    /// `BackgroundMusic.EMPTY` — the attribute's
+    /// vanilla's own empty background-music constant — the attribute's
     /// default value, and what `pale_garden` sets explicitly to have no music at
     /// all.
     pub const EMPTY: Self = Self {
@@ -224,10 +223,10 @@ impl BackgroundMusic {
         underwater: None,
     };
 
-    /// `BackgroundMusic.OVERWORLD`: `GAME` as the
+    /// vanilla's own OVERWORLD background-music constant: `GAME` as the
     /// default, `CREATIVE` in creative, no underwater track. The ocean/river
-    /// biomes use `OVERWORLD.withUnderwater(UNDER_WATER)`
-    /// (`OverworldBiomes.baseOcean` and `.river`).
+    /// biomes use the overworld background music with an underwater override
+    /// (vanilla's own base-ocean and river music setters).
     pub fn overworld() -> Self {
         Self {
             default: Some(musics::GAME),
@@ -236,7 +235,7 @@ impl BackgroundMusic {
         }
     }
 
-    /// `BackgroundMusic.withUnderwater`.
+    /// vanilla's own with-underwater constructor.
     #[must_use]
     pub fn with_underwater(mut self, underwater: Music) -> Self {
         self.underwater = Some(underwater);
@@ -248,7 +247,7 @@ impl BackgroundMusic {
         self.default.is_none() && self.creative.is_none() && self.underwater.is_none()
     }
 
-    /// `BackgroundMusic.select`.
+    /// vanilla's own background-music selection.
     ///
     /// **Underwater outranks creative**, and each specific slot falls back to
     /// `default` only when *absent* — a present-but-different slot wins. Getting
@@ -265,16 +264,16 @@ impl BackgroundMusic {
     }
 }
 
-/// `MusicManager.MusicFrequency` — the
+/// Vanilla's own music-frequency enum — the
 /// "Music Frequency" option, which caps how long the manager will wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MusicFrequency {
-    /// 20 minutes (`MusicManager.MusicFrequency.DEFAULT`) — the default.
+    /// 20 minutes (vanilla's own DEFAULT frequency constant) — the default.
     #[default]
     Default,
-    /// 10 minutes (`MusicManager.MusicFrequency.FREQUENT`).
+    /// 10 minutes (vanilla's own FREQUENT frequency constant).
     Frequent,
-    /// 0 minutes (`MusicManager.MusicFrequency.CONSTANT`) — but see
+    /// 0 minutes (vanilla's own CONSTANT frequency constant) — but see
     /// [`MusicFrequency::next_song_delay`]: it returns a flat
     /// [`STARTING_DELAY`], not zero.
     Constant,
@@ -285,7 +284,7 @@ impl MusicFrequency {
     pub const ALL: [Self; 3] = [Self::Default, Self::Frequent, Self::Constant];
 
     /// The option's value in *minutes*, as declared on
-    /// `MusicManager.MusicFrequency`'s `DEFAULT`/`FREQUENT`/`CONSTANT` constants.
+    /// vanilla's own frequency enum's `DEFAULT`/`FREQUENT`/`CONSTANT` constants.
     pub const fn minutes(self) -> i32 {
         match self {
             Self::Default => 20,
@@ -295,12 +294,12 @@ impl MusicFrequency {
     }
 
     /// `maxFrequency`, in ticks: `minutes * 1200`, computed in
-    /// `MusicManager.MusicFrequency`'s constructor. 24000 / 12000 / 0.
+    /// vanilla's own frequency enum's constructor. 24000 / 12000 / 0.
     pub const fn max_frequency(self) -> i32 {
         self.minutes() * TICKS_PER_MINUTE
     }
 
-    /// `MusicManager.MusicFrequency.getNextSongDelay`.
+    /// vanilla's own frequency-based next-song-delay computation.
     ///
     /// Three distinct behaviours, and the first two are easy to lose:
     ///
@@ -309,7 +308,7 @@ impl MusicFrequency {
     /// * `Constant` → a flat [`STARTING_DELAY`], *ignoring* both the track's
     ///   delays and its own `max_frequency()` of 0. A literal reading of
     ///   "0 minutes" would give 0 and restart music every tick.
-    /// * otherwise → `Mth.nextInt(rng, min(min_delay, cap), min(max_delay, cap))`,
+    /// * otherwise → vanilla's own inclusive-bounded random-int draw over `[min(min_delay, cap), min(max_delay, cap)]`,
     ///   inclusive at both ends.
     pub fn next_song_delay(self, music: Option<&Music>, rng: &mut JavaRandom) -> i32 {
         let Some(music) = music else {
@@ -323,7 +322,7 @@ impl MusicFrequency {
     }
 }
 
-/// `Mth.nextInt(RandomSource, int, int)`. **Inclusive at
+/// Vanilla's own inclusive-bounded random-int draw. **Inclusive at
 /// both ends**, and it returns `min` unchanged when `min >= max` rather than
 /// panicking, which is what keeps the `0..=0` tracks (`CREDITS`, `END_BOSS`) from
 /// calling `next_i32_bound(1)`… and more importantly what keeps a `0`-width range
@@ -335,7 +334,7 @@ pub fn next_int(rng: &mut JavaRandom, min_inclusive: i32, max_inclusive: i32) ->
     rng.next_i32_bound(max_inclusive - min_inclusive + 1) + min_inclusive
 }
 
-/// Everything `Minecraft.getSituationalMusic` and `Minecraft.getMusicVolume` read,
+/// Everything vanilla's own situational-music selection and vanilla's own music-volume selection read,
 /// gathered by the caller once per tick.
 ///
 /// Deliberately a plain data struct with no world access: the shell resolves the
@@ -344,28 +343,28 @@ pub fn next_int(rng: &mut JavaRandom, min_inclusive: i32, max_inclusive: i32) ->
 /// this module hermetically testable and stops it growing a `Level`.
 #[derive(Debug, Clone)]
 pub struct MusicSituation<'a> {
-    /// `Screen.getBackgroundMusic()` for the open screen, if it has one. Wins
+    /// vanilla's own screen background-music accessor for the open screen, if it has one. Wins
     /// outright over everything else, and also forces
-    /// the music volume to 1.0 — both in `Minecraft.getSituationalMusic` and
-    /// `Minecraft.getMusicVolume` respectively.
+    /// the music volume to 1.0 — both in vanilla's own situational-music selection and
+    /// vanilla's own music-volume selection respectively.
     pub screen_music: Option<&'a Music>,
     /// Whether there is a local player at all. `false` is the title screen, which
-    /// yields [`musics::MENU`] in `Minecraft.getSituationalMusic`.
+    /// yields [`musics::MENU`] in vanilla's own situational-music selection.
     pub in_world: bool,
-    /// Dimension is the End **and** `BossHealthOverlay.shouldPlayMusic()`, checked
-    /// in `Minecraft.getSituationalMusic`.
+    /// Dimension is the End **and** vanilla's own boss-health-overlay music-eligibility check, checked
+    /// in vanilla's own situational-music selection.
     pub end_boss_active: bool,
     /// The probed `audio/background_music` attribute value at the camera.
     pub background_music: &'a BackgroundMusic,
-    /// `instabuild && mayfly`, in `Minecraft.getSituationalMusic` — *not* a gamemode check.
+    /// `instabuild && mayfly`, in vanilla's own situational-music selection — *not* a gamemode check.
     pub creative: bool,
-    /// `player.isUnderWater()`, read in `Minecraft.getSituationalMusic`.
+    /// vanilla's own underwater check on the player, read in vanilla's own situational-music selection.
     pub underwater: bool,
     /// The probed `audio/music_volume` attribute (default 1.0). `pale_garden`
     /// sets it to 0.0, which fades music out rather than muting it abruptly.
     pub music_volume: f32,
     /// Whether a level-loading screen is up; vanilla refuses to *start* a track
-    /// while one is, in `MusicManager.tick`.
+    /// while one is, in vanilla's own tick routine.
     pub level_loading: bool,
 }
 
@@ -385,7 +384,7 @@ impl Default for MusicSituation<'_> {
 }
 
 impl MusicSituation<'_> {
-    /// `Minecraft.getSituationalMusic`.
+    /// vanilla's own situational-music selection.
     ///
     /// Returns a clone rather than a borrow because the screen/menu answers are
     /// `'static` constants while the biome answer borrows from
@@ -406,7 +405,7 @@ impl MusicSituation<'_> {
             .cloned()
     }
 
-    /// `Minecraft.getMusicVolume`: a screen that
+    /// vanilla's own music-volume selection: a screen that
     /// supplies its own music forces full volume, overriding the biome's
     /// `audio/music_volume`.
     pub fn effective_music_volume(&self) -> f32 {
@@ -419,7 +418,7 @@ impl MusicSituation<'_> {
 }
 
 /// What happened when a [`MusicSink`] was asked to start a track — vanilla's
-/// `SoundManager.play` result, narrowed to the two cases `MusicManager.startPlaying`
+/// vanilla's own sound-manager play routine result, narrowed to the two cases vanilla's own start-playing routine
 /// switches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MusicStart {
@@ -451,12 +450,12 @@ pub trait MusicSink {
     fn is_active(&self) -> bool;
 
     /// Set the music bus's runtime gain, for the volume fade — vanilla's
-    /// `MusicManager.fadePlaying` calling `updateCategoryVolume(SoundSource.MUSIC, gain)`.
+    /// vanilla's own fade-playing routine calling vanilla's own category-volume update for the music bus.
     fn set_music_gain(&mut self, gain: f32);
 }
 
-/// `MusicManager`, minus the toast and the
-/// `SoundManager` — a countdown plus "what is currently playing".
+/// Vanilla's own music manager, minus the toast and the
+/// sound manager — a countdown plus "what is currently playing".
 ///
 /// # How to change it
 ///
@@ -473,20 +472,20 @@ pub trait MusicSink {
 #[derive(Debug)]
 pub struct MusicManager {
     /// The sound key of the track last handed to the sink, cleared once the sink
-    /// reports it inactive. Mirrors vanilla's `currentMusic` instance.
+    /// reports it inactive. Mirrors vanilla's own currentMusic instance.
     current: Option<Cow<'static, str>>,
     /// Ticks until the next track starts. Counts down only while nothing is
     /// playing.
     next_song_delay: i32,
     /// The "Music Frequency" option.
     frequency: MusicFrequency,
-    /// The fading music-bus gain — vanilla's `MusicManager.currentGain` field.
+    /// The fading music-bus gain — vanilla's vanilla's own current-gain field field.
     current_gain: f32,
 }
 
 impl MusicManager {
     /// A manager in its start-of-process state: nothing playing, and
-    /// [`STARTING_DELAY`] ticks on the clock, matching vanilla's `nextSongDelay`
+    /// [`STARTING_DELAY`] ticks on the clock, matching vanilla's own nextSongDelay
     /// field initializer.
     pub fn new(frequency: MusicFrequency) -> Self {
         Self {
@@ -518,7 +517,7 @@ impl MusicManager {
         self.frequency
     }
 
-    /// `MusicManager.setMinutesBetweenSongs`:
+    /// vanilla's own minutes-between-songs setter:
     /// changing the option re-arms the countdown immediately.
     pub fn set_frequency(
         &mut self,
@@ -531,7 +530,7 @@ impl MusicManager {
             frequency.next_song_delay(situation.situational_music().as_ref(), rng);
     }
 
-    /// `MusicManager.tick`. Call once per client tick.
+    /// vanilla's own tick routine. Call once per client tick.
     pub fn tick(
         &mut self,
         situation: &MusicSituation<'_>,
@@ -547,7 +546,7 @@ impl MusicManager {
         }
 
         let Some(music) = situation.situational_music() else {
-            // `MusicManager.tick`'s `music == null` branch — a floor, not an assignment:
+            // vanilla's own tick routine's `music == null` branch — a floor, not an assignment:
             // an already-shorter countdown is pushed back out to STARTING_DELAY, a
             // longer one is left alone.
             self.next_song_delay = self.next_song_delay.max(STARTING_DELAY);
@@ -555,12 +554,12 @@ impl MusicManager {
         };
 
         if let Some(current) = self.current.clone() {
-            // `MusicManager.tick`'s `canReplace` branch.
+            // vanilla's own tick routine's `canReplace` branch.
             if music.can_replace(&current) {
                 sink.stop();
                 self.next_song_delay = next_int(rng, 0, music.min_delay / 2);
             }
-            // `MusicManager.tick`'s `!isActive` branch — reached in the same tick as
+            // vanilla's own tick routine's `!isActive` branch — reached in the same tick as
             // the branch above, by design.
             if !sink.is_active() {
                 self.current = None;
@@ -570,10 +569,10 @@ impl MusicManager {
             }
         }
 
-        // `MusicManager.tick`'s `Math.min(nextSongDelay, music.maxDelay())`.
+        // vanilla's own tick routine's `Math.min(nextSongDelay, music.maxDelay())`.
         self.next_song_delay = self.next_song_delay.min(music.max_delay);
 
-        // `MusicManager.tick`'s trailing `if` — the decrement happens *only* when we
+        // vanilla's own tick routine's trailing `if` — the decrement happens *only* when we
         // are otherwise ready to start, so a playing track does not burn the countdown.
         if self.current.is_none() && !situation.level_loading {
             self.next_song_delay -= 1;
@@ -583,7 +582,7 @@ impl MusicManager {
         }
     }
 
-    /// `MusicManager.startPlaying`.
+    /// vanilla's own start-playing routine.
     ///
     /// `current` is set from the *requested* track regardless of the sink's
     /// answer, exactly as vanilla assigns `currentMusic` before consulting
@@ -596,7 +595,7 @@ impl MusicManager {
         started
     }
 
-    /// `MusicManager.stopPlaying()`. Note the
+    /// vanilla's own stop-playing routine. Note the
     /// `+ STARTING_DELAY` on top of the frequency draw — stopping deliberately
     /// waits longer than a track simply ending.
     pub fn stop_playing(
@@ -615,7 +614,7 @@ impl MusicManager {
             + STARTING_DELAY;
     }
 
-    /// `MusicManager.fadePlaying`. Returns whether
+    /// vanilla's own fade-playing routine. Returns whether
     /// the caller should carry on with the rest of the tick.
     ///
     /// Asymmetric on purpose: fading **up** is a small additive step

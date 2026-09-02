@@ -46,7 +46,7 @@ fn cave_ambience_comes_from_the_dimension_and_nether_biomes_override_it() {
         assert_eq!(
             (mood.tick_delay, mood.block_search_extent, mood.sound_position_offset),
             (6_000, 8, 2.0),
-            "{dim}: AmbientMoodSettings.java:19"
+            "{dim}: vanilla's own mood-settings record"
         );
         assert!(d.loop_sound.is_none(), "{dim} has no ambient loop");
         assert!(d.additions.is_empty(), "{dim} has no additions");
