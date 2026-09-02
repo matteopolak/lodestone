@@ -14851,8 +14851,8 @@ mod vibration_substrate_tests {
 }
 
 /// Issue #232: the elder guardian's mining-fatigue aura,
-/// `ElderGuardian.customServerAiStep` calling
-/// `MobEffectUtil.addEffectToPlayersAround`.
+/// vanilla's own elder-guardian AI step calling
+/// its own "add effect to players around" helper.
 #[cfg(test)]
 mod elder_guardian_mining_fatigue_tests {
     use super::*;
@@ -14884,7 +14884,7 @@ mod elder_guardian_mining_fatigue_tests {
     }
 
     /// `(tickCount + getId()) % 1200 == 0`, with `tick_count` standing in for
-    /// `Entity.tickCount` (see [`ELDER_GUARDIAN_EFFECT_INTERVAL`]'s own doc).
+    /// vanilla's own generic tick-count field (see [`ELDER_GUARDIAN_EFFECT_INTERVAL`]'s own doc).
     /// A freshly spawned elder guardian gets id `1`, so the trigger tick is
     /// `1200 - 1 = 1199`; [`MobSim::tick`] reads `self.tick_count` *before*
     /// incrementing it, so seeding `set_tick_count(1199)` and ticking once is
@@ -14920,7 +14920,7 @@ mod elder_guardian_mining_fatigue_tests {
     }
 
     /// The same setup, moved just past `EFFECT_RADIUS` — the spherical
-    /// `Vec3.closerThan` cut, not a box.
+    /// distance cut, not a box.
     #[test]
     fn a_player_beyond_fifty_blocks_is_not_pulsed() {
         let world = flat_world();
@@ -14967,7 +14967,7 @@ mod elder_guardian_mining_fatigue_tests {
     }
 
     /// An ordinary guardian (not elder) must never pulse — the aura is
-    /// `ElderGuardian`-only in vanilla; `Guardian.customServerAiStep` has no
+    /// elder-guardian-only in vanilla; the ordinary guardian's own AI step has no
     /// such call.
     #[test]
     fn an_ordinary_guardian_never_pulses() {
@@ -14993,7 +14993,7 @@ mod elder_guardian_mining_fatigue_tests {
     }
 
     /// The magnitude gate: the constants a driver applies must match
-    /// `ElderGuardian`'s own `EFFECT_DURATION`/`EFFECT_AMPLIFIER` fields, not
+    /// vanilla's own elder-guardian effect-duration/effect-amplifier fields, not
     /// a plausible-looking round number.
     #[test]
     fn effect_constants_match_the_jar() {
@@ -15003,7 +15003,7 @@ mod elder_guardian_mining_fatigue_tests {
     }
 }
 
-/// Issue #230's own remainder: `Goat.finalizeSpawn`'s pre-broken-horn roll,
+/// Issue #230's own remainder: vanilla's own goat spawn-finalization's pre-broken-horn roll,
 /// and the metadata field ([`crate::protocol::MetadataField::GoatHorns`])
 /// that reaches the client — wired end to end through a real
 /// `MobSim::spawn_species` call, the same not-an-island bar every other
@@ -15026,7 +15026,7 @@ mod goat_horn_tests {
 
     /// **Real arithmetic, not merely "sometimes true"**: over a large sample,
     /// the fraction of goats spawned missing a horn must land near
-    /// `Goat.finalizeSpawn`'s own `0.1` roll — bounded generously (5%–15%
+    /// vanilla's own goat spawn-finalization's own `0.1` roll — bounded generously (5%–15%
     /// over 2,000 trials) since this crate's `SpawnRng` is not a
     /// bit-identical port of `java.util.Random` (a disclosed approximation
     /// already established elsewhere in this crate, e.g. `raid::bonus_spawns`).
