@@ -5,11 +5,9 @@
 //!
 //! # What this is
 //!
-//! A port of `PrimedTnt`
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/item/PrimedTnt.java`) plus
-//! its ignition producers, read out of `TntBlock`
-//! (`.cache/mc/26.2/src/net/minecraft/world/level/block/TntBlock.java`) and
-//! `FireBlock`'s `checkBurnOut`:
+//! A port of vanilla's own primed-TNT entity plus
+//! its ignition producers, read out of vanilla's own TNT block and
+//! the fire block's `checkBurnOut`:
 //!
 //! * **Redstone** — `TntBlock::onPlace`/`neighborChanged`, both `if
 //!   (level.hasNeighborSignal(pos) && prime(...)) level.removeBlock(...)`.

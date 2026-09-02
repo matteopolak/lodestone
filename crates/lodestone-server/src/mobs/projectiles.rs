@@ -16,7 +16,7 @@ use crate::redstone_target::HitAxis;
 
 use super::{ChunkWorld, MobSim, ProjectileMeta, ProjectileBlockHit};
 
-/// `Ghast.java`'s own `explosionPower` field default (`private int
+/// Vanilla's own ghast `explosionPower` field default (`private int
 /// explosionPower = 1`, `DEFAULT_EXPLOSION_POWER`). No producer in this sim
 /// overrides it yet — no "Happy Ghast" variant, no `ExplosionPower` NBT
 /// round-trip — so every fireball explodes at this one figure.

@@ -26,9 +26,9 @@
 //! # Where the numbers come from
 //!
 //! [`FOODS`] is a transcription of the three-way join vanilla spreads over
-//! `Foods.java` (the `nutrition`/`saturationModifier`/`alwaysEdible` triple),
-//! `Items.java` (which item carries which `Foods` constant, and which
-//! `Consumables` constant overrides the default) and `Consumables.java` (the
+//! its own food-properties table (the `nutrition`/`saturationModifier`/`alwaysEdible` triple),
+//! its own item registrations (which item carries which food constant, and which
+//! consumable constant overrides the default) and its own consumables table (the
 //! `consumeSeconds`, default `1.6F`). No census in this repo carries the
 //! `minecraft:food` or `minecraft:consumable` component — they are *prototype*
 //! components, never on the wire — so the record definition is the source, and
@@ -38,7 +38,7 @@
 //! already carries `Equippable.slot()` and `allowedEntities.isEmpty()` from a JVM
 //! dump. It deliberately does **not** carry `swappable`, which is the one field
 //! arm 2 is gated on, so [`UNSWAPPABLE`] names the nine items whose registration
-//! sets it false — read straight off `Items.java`, and a set that small because
+//! sets it false — read straight off vanilla's own item registration table, and a set that small because
 //! `Equippable.Builder`'s default is `true`.
 //!
 //! # How to change it
@@ -255,7 +255,7 @@ pub(crate) fn swap_with_equipment_slot(
 /// The nine items whose registration sets `Equippable.swappable` to `false`, so
 /// `Item.use` falls straight past arm 2 for them.
 ///
-/// Read off `Items.java`: `CARVED_PUMPKIN`'s explicit
+/// Read off vanilla's own item registration table: `CARVED_PUMPKIN`'s explicit
 /// `Equippable.builder(HEAD).setSwappable(false)`, the seven
 /// `equippableUnswappable(EquipmentSlot.HEAD)` mob heads, and `SHIELD`'s
 /// `equippableUnswappable(EquipmentSlot.OFFHAND)`. Sorted, for
@@ -274,9 +274,9 @@ static UNSWAPPABLE: &[&str] = &[
 
 /// Every food item in 26.2, sorted by registry name.
 ///
-/// The triple comes from `Foods.java`, the item→constant join from `Items.java`,
-/// and `use_ticks` from `Consumables.java` — `DEFAULT_CONSUME_TICKS` unless the
-/// item's registration names a `Consumables` constant that overrides
+/// The triple comes from vanilla's own food-properties table, the item→constant join from vanilla's own item registrations,
+/// and `use_ticks` from vanilla's own consumables table — `DEFAULT_CONSUME_TICKS` unless the
+/// item's registration names a consumables constant that overrides
 /// `consumeSeconds`, which in 26.2 is only `HONEY_BOTTLE` (`2.0F`) and
 /// `DRIED_KELP` (`0.8F`).
 ///
@@ -353,8 +353,8 @@ static FOODS: &[(&str, Food)] = &[
 /// The item [`try_pick_item`] should receive for a middle-click on the block
 /// whose canonical state string is `block_state` (bare `"minecraft:stone"` or
 /// with properties, `"minecraft:oak_stairs[facing=east,...]"` — only the base
-/// name matters). This is `BlockState.getCloneItemStack`'s **default** arm
-/// (`new ItemStack(this.asItem())`, `BlockBehaviour.java`); see
+/// name matters). This is vanilla's own clone-item-stack getter's **default** arm
+/// (`new ItemStack(this.asItem())`); see
 /// [`lodestone_data::block_items::item_for_block`]'s own doc comment for the
 /// per-block `getCloneItemStack` overrides (crops, flower pots, banners,
 /// beehives, ...) this does not model.
@@ -565,11 +565,11 @@ mod tests {
             }
         }
         assert!(offenders.is_empty(), "{offenders:#?}");
-        // `Items.java` carries exactly 40 `.food(` registrations in 26.2.
+        // Vanilla's own item registration table carries exactly 40 `.food(` registrations in 26.2.
         assert_eq!(FOODS.len(), 40, "the join lost or gained a food");
     }
 
-    /// The values, against `Foods.java` read directly. Chosen so a
+    /// The values, against vanilla's own food-properties table read directly. Chosen so a
     /// transposition of `nutrition` and `saturation_modifier` cannot survive:
     /// every pair here is distinct, and cooked beef's 8/0.8 is deliberately
     /// *not* one of them — a 1.2 modifier next to a nutrition of 4 is.

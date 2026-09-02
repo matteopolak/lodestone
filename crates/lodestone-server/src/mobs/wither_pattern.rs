@@ -1,6 +1,5 @@
-//! The wither's summon-structure block-pattern match — vanilla
-//! `WitherSkullBlock.checkSpawn`/`getOrCreateWitherFull`
-//! (`.cache/mc/26.2/src/net/minecraft/world/level/block/WitherSkullBlock.java`).
+//! The wither's summon-structure block-pattern match — vanilla's own
+//! wither-skull block's check-spawn/get-or-create-full-pattern routines.
 //!
 //! Deliberately **not** built by generalising `golem::GolemCell` (a closed,
 //! four-variant enum keyed to the two golem patterns) — a fifth/sixth variant
@@ -10,8 +9,8 @@
 //! search over a `dist × dist × dist` cube, all 24 `(forwards, up)`
 //! orientations, `translate`/`consumed` in the pattern's own local frame) is
 //! copied from `golem::find_golem_pattern`/`GolemPatternMatch` rather than
-//! shared through a generic, because `BlockPatternBuilder`'s real engine
-//! (`.../level/block/state/pattern/BlockPattern.java`) is itself duplicated
+//! shared through a generic, because vanilla's own block-pattern-builder
+//! engine is itself duplicated
 //! per call site in vanilla too — there is no shared vanilla abstraction this
 //! port would be dropping by not factoring one out here.
 

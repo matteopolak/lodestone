@@ -9,8 +9,8 @@
 //! - [`ReputationEventType`] plus [`apply_reputation_event`] — vanilla
 //!   `Villager.onReputationEventFrom`, the *only* place gossip is actually
 //!   written from an event rather than transferred between villagers. Every
-//!   arm is transcribed from that method's own four-branch `if`/`else if`
-//!   chain (`.cache/mc/26.2/src/net/minecraft/world/entity/npc/villager/Villager.java`).
+//!   arm is transcribed from vanilla's own villager entity's four-branch `if`/`else if`
+//!   chain for it.
 //! - [`update_special_prices`] — vanilla `Villager.updateSpecialPrices`, the
 //!   formula that turns a reputation score (and an optional Hero of the
 //!   Village amplifier) into calls against
@@ -20,8 +20,8 @@
 //!
 //! # How it works
 //!
-//! [`ReputationEventType`] mirrors vanilla's `ReputationEventType` registry
-//! entries (`.../ai/village/ReputationEventType.java`) as a plain enum — this
+//! [`ReputationEventType`] mirrors vanilla's own reputation-event-type registry
+//! entries as a plain enum — this
 //! crate has no runtime registry of open-ended event types, and the five
 //! vanilla constants are the total set any caller here can produce.
 //! [`apply_reputation_event`] applies **only** the four
@@ -79,7 +79,7 @@
 //!   limits for this change).
 //! - **Iron-golem aggression toward a low-reputation player** (named in
 //!   issue #246's own body) has no evidenced vanilla mechanism in
-//!   `.cache/mc/26.2/src/net/minecraft/world/entity/animal/golem/IronGolem.java`
+//!   vanilla's own iron-golem entity
 //!   tying golem targeting to `GossipContainer`/reputation at all — nothing
 //!   there reads gossip. Inventing a golem-targeting rule with no jar
 //!   citation would be exactly the kind of un-evidenced port this repo's own
@@ -90,8 +90,7 @@ use crate::villager_trade::OfferState;
 
 use super::gossip::{GossipContainer, GossipType};
 
-/// `ReputationEventType` — vanilla's five registered event kinds
-/// (`.../ai/village/ReputationEventType.java`).
+/// `ReputationEventType` — vanilla's five registered event kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReputationEventType {
     ZombieVillagerCured,

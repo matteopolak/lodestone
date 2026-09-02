@@ -7,8 +7,8 @@ use lodestone_model::{BlockPos, ResourceKey, Vec3};
 use super::{ChunkWorld, MobSim};
 
 /// One cell of a golem-construction block pattern, in the pattern's own
-/// local `(right, down, forward)` axes — vanilla `BlockPattern`'s frame
-/// (`level/block/state/pattern/BlockPattern.java`), where `(0, 0, 0)` is the
+/// local `(right, down, forward)` axes — vanilla's own block-pattern frame,
+/// where `(0, 0, 0)` is the
 /// anchor cell `find` requires to land exactly on the placed pumpkin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GolemCell {

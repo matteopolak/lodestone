@@ -47,9 +47,9 @@ use lodestone_model::{Identifier, Vec3};
 ///   attribute. The census is scale-1 by construction, so `SCALE` is folded here
 ///   (caller-side), never baked into the table.
 /// - **`max_up_step`** comes from the *resolved* `STEP_HEIGHT` attribute
-///   (post-modifier-fold), **not** the census geometry. Vanilla
-///   `Entity.maxUpStep()` returns `getAttributeValue(STEP_HEIGHT)`
-///   (`LivingEntity.java:3976`); sourcing it from static geometry would silently
+///   (post-modifier-fold), **not** the census geometry. Vanilla's own
+///   max-up-step getter returns `getAttributeValue(STEP_HEIGHT)`;
+///   sourcing it from static geometry would silently
 ///   disagree with the pathfinder the moment any modifier existed. The `as f32`
 ///   is that call site's `(float)` cast.
 ///
@@ -135,7 +135,7 @@ pub use lodestone_entity::spawn::MobCategory;
 /// # Provenance
 ///
 /// Extracted from the pinned 26.2 decompile by splitting
-/// `net.minecraft.world.entity.EntityTypes` on its `EntityTypeIds.` registrations
+/// vanilla's own entity-type registration table on its per-entity registrations
 /// and keeping every block containing `notInPeaceful()`: 38 hits, all
 /// `MobCategory.MONSTER`, zero of them ambiguous. `notInPeaceful` has exactly one
 /// other occurrence in the whole tree — the builder method's own definition — so

@@ -5,7 +5,7 @@
 //!
 //! # What it is
 //!
-//! [`AngerLevel`] is vanilla's `AngerLevel` (`Warden.java`'s own nested
+//! [`AngerLevel`] is vanilla's own `AngerLevel` (its own warden entity's nested
 //! enum) — `Calm`/`Agitated`/`Angry`, bucketed from a `0..=150` anger score
 //! by [`AngerLevel::from_anger`]. [`MobSim::resolve_warden_anger`] is the
 //! per-tick consumer: it counts down a fresh spawn's emerge window, decays
@@ -69,7 +69,7 @@
 //! cooldown or the 3-block melee-only window past 15/20 blocks are).
 //!
 //! **A citation this module used to carry was wrong, and is worth recording
-//! rather than quietly dropping.** `Warden.java` declares
+//! rather than quietly dropping.** Vanilla's own warden entity declares
 //! `TIME_TO_USE_MELEE_UNTIL_SONIC_BOOM = 200`, and an earlier pass cited it
 //! here as sonic boom's trigger. Grepping the whole decompiled 26.2 tree
 //! (`.cache/mc/26.2/src/`) for that identifier finds exactly the one
@@ -80,7 +80,7 @@
 //! module now implements.
 //!
 //! **`Digging` is now built too — the ambiguity this module used to
-//! disclose is resolved.** `Warden.java`'s `Digging` behavior does not just
+//! disclose is resolved.** Vanilla's own warden entity's `Digging` behavior does not just
 //! play an animation — `Digging.stop` calls
 //! `body.remove(Entity.RemovalReason.DISCARDED)`, i.e. a digging warden
 //! **despawns outright**, after [`DIGGING_DURATION_TICKS`] with `Pose::DIGGING`
@@ -89,7 +89,7 @@
 //! (`ImmutableSet.of(ROAR_TARGET absent, DIG_COOLDOWN absent)` in
 //! `WardenAi::initDiggingActivity`) depends on `MemoryModuleType.DIG_COOLDOWN`'s
 //! *initial* state, which an earlier pass could not pin down from
-//! `Warden.java` alone (`WardenAi.setDigCooldown`'s own `hasMemoryValue`
+//! the warden entity alone (its own AI's dig-cooldown setter has a `hasMemoryValue`
 //! guard only *refreshes* an already-present cooldown). The actual answer
 //! was one field away: `Warden.finalizeSpawn` unconditionally calls
 //! `this.getBrain().setMemoryWithExpiry(MemoryModuleType.DIG_COOLDOWN,
@@ -186,7 +186,7 @@ pub const MELEE_RANGE_SQR: f64 = 9.0;
 pub const EMERGE_DURATION_TICKS: i32 = 134;
 
 /// `Pose.EMERGING.id()` and `Pose.DIGGING.id()` — the real jar ordinals
-/// (`net.minecraft.world.entity.Pose`), not guessed: `STANDING` through
+/// (vanilla's own pose enum), not guessed: `STANDING` through
 /// `DYING` fill `0..=7`, then `CROAKING`/`USING_TONGUE` take `8`/`9` for the
 /// frog before `SITTING` at `10` and `ROARING`/`SNIFFING` at `11`/`12`, so
 /// the warden's own two poses land at `13`/`14`.

@@ -42,7 +42,7 @@
 //!
 //! # NBT and the entity `id` derivation
 //!
-//! `SpawnData`'s NBT shape (`net.minecraft.world.level.SpawnData`) is
+//! Vanilla's own spawn-data NBT shape is
 //! `{entity: {id: "minecraft:...", ...}, custom_spawn_rules?: {...},
 //! equipment?: {...}}`; `SpawnPotentials` is a `WeightedList<SpawnData>`, i.e. a
 //! list of `{data: <SpawnData>, weight: <non-negative int>}` compounds

@@ -1,8 +1,7 @@
 //! `MobSim`'s fishing-bobber slice — cast, the bob/bite/hook state machine,
 //! the fish/junk/treasure loot roll, and reeling in a real item entity.
-//! Issue #257. Ported from `FishingHook.java`/`FishingRodItem.java`
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/projectile/FishingHook.java`,
-//! `.../world/item/FishingRodItem.java`) and the three
+//! Issue #257. Ported from vanilla's own fishing-hook entity and fishing-rod item,
+//! and the three
 //! `data/minecraft/loot_table/gameplay/fishing{,/fish,/junk,/treasure}.json`
 //! tables, which this file transcribes exactly (weights, quality, item ids).
 //!
