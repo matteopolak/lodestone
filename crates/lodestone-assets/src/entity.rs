@@ -15,9 +15,9 @@
 //! # The seam
 //!
 //! This module owns the **version-free primitive**: the cube unwrap (faithful to
-//! `ModelPart.Cube` in the decompiled 26.2 client) and the part-hierarchy
+//! vanilla's own model-part cube type in the decompiled 26.2 client) and the part-hierarchy
 //! transform (translate by `pivot/16`, then `rotationZYX(zRot, yRot, xRot)`, then
-//! scale — exactly `ModelPart.translateAndRotate`). A version crate supplies the
+//! scale — exactly vanilla's own translate-and-rotate step). A version crate supplies the
 //! per-mob [`EntityModelDef`] data; [`bake_entity`] turns it into posed,
 //! UV-mapped [`EntityQuad`]s the renderer can upload. The renderer poses parts at
 //! runtime (walk cycles etc.) by adjusting each [`PartPose`] before baking, or by
@@ -60,7 +60,7 @@ const FACE_ORDER: [Direction; 6] = [
 ];
 
 /// A single box within a part, unwrapped onto the entity's texture sheet exactly
-/// as vanilla's `CubeDefinition`/`ModelPart.Cube` does.
+/// as vanilla's own cube-definition/model-part-cube types do.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CubeDef {
     /// Box origin `(minX, minY, minZ)` in model texels, relative to the part
@@ -160,8 +160,8 @@ impl PartPose {
         }
     }
 
-    /// Returns the pose with a uniform per-axis scale — vanilla's
-    /// `PartPose.scaled(float)`.
+    /// Returns the pose with a uniform per-axis scale — vanilla's own
+    /// per-part scale step.
     ///
     /// A *part* scale, not a cube grow: it multiplies everything under the
     /// part, children included, and is applied after the rotation by
@@ -274,20 +274,20 @@ pub enum EntityVariant {
     /// in `entity_models.rs`, which is intentionally *not* routed through
     /// `EntityTexture`/`ByVariant` because that shape only carries one path.
     HorseColor(HorseColor),
-    /// A llama or trader llama's wool colour (`Llama.Variant`).
+    /// A llama or trader llama's wool colour (vanilla's own llama variant field).
     Llama(LlamaColor),
-    /// A cat's breed (`CatVariant`/`CatVariants.java`).
+    /// A cat's breed (vanilla's own cat-variant registry).
     Cat(CatCoat),
     /// A wolf's breed and tame/angry state, combined: vanilla's own
-    /// `Wolf.getTexture()` resolves both together to one texture path, so
+    /// texture-resolution query resolves both together to one texture path, so
     /// they are one axis here rather than two independent ones.
     Wolf {
-        /// The breed (`WolfVariant`/`WolfVariants.java`).
+        /// The breed (vanilla's own wolf-variant registry).
         coat: WolfCoat,
         /// Wild, tame, or (tamed-and-)angry — each breed ships one file per state.
         state: WolfState,
     },
-    /// A parrot's plumage colour (`Parrot.Variant`).
+    /// A parrot's plumage colour (vanilla's own parrot variant field).
     Parrot(ParrotColor),
     /// A mooshroom's mushroom colour (`MushroomCow.Variant`), reusing the
     /// plain cow mesh — an independent axis from `Temperature`, since a
@@ -306,7 +306,7 @@ pub enum Temperature {
     Warm,
 }
 
-/// A horse's base coat colour (`Horse.Variant`, `HorseRenderer.java`). Ordered
+/// A horse's base coat colour (vanilla's own horse variant field and renderer). Ordered
 /// as vanilla's own `id` field, not alphabetically.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HorseColor {
@@ -326,7 +326,7 @@ pub enum HorseColor {
     DarkBrown,
 }
 
-/// A horse's independent markings overlay (`Markings.java`). Not part of
+/// A horse's independent markings overlay (vanilla's own markings enum). Not part of
 /// [`EntityVariant`] — see the note on [`EntityVariant::HorseColor`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HorseMarkings {
@@ -342,7 +342,7 @@ pub enum HorseMarkings {
     BlackDots,
 }
 
-/// A llama/trader llama's wool colour (`Llama.Variant`, `LlamaRenderer.java`).
+/// A llama/trader llama's wool colour (vanilla's own llama variant field and renderer).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LlamaColor {
     /// `entity/llama/llama_creamy`, vanilla's `DEFAULT`.
@@ -355,7 +355,7 @@ pub enum LlamaColor {
     Gray,
 }
 
-/// A cat's breed (`CatVariants.java`). Ordered as vanilla registers them.
+/// A cat's breed (vanilla's own cat-variant registry). Ordered as vanilla registers them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CatCoat {
     /// `entity/cat/cat_tabby`, vanilla's default breed.
@@ -382,7 +382,7 @@ pub enum CatCoat {
     AllBlack,
 }
 
-/// A wolf's breed (`WolfVariants.java`). Ordered as vanilla registers them.
+/// A wolf's breed (vanilla's own wolf-variant registry). Ordered as vanilla registers them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WolfCoat {
     /// `entity/wolf/wolf`, vanilla's default breed (`WolfVariants.DEFAULT`).
@@ -405,7 +405,7 @@ pub enum WolfCoat {
     Striped,
 }
 
-/// A wolf's wild/tame/angry state (`Wolf.getTexture()`); each breed ships one
+/// A wolf's wild/tame/angry state (vanilla's own texture-resolution query); each breed ships one
 /// texture file per state (`<breed>`, `<breed>_tame`, `<breed>_angry`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WolfState {
@@ -529,7 +529,7 @@ impl Affine {
     };
 
     /// The local transform for a part pose: `translate(pivot/16) ∘ rotZYX ∘ scale`,
-    /// matching `ModelPart.translateAndRotate`.
+    /// matching vanilla's own translate-and-rotate step.
     #[must_use]
     pub fn of_pose(pose: &PartPose) -> Affine {
         part_transform(pose)
@@ -570,7 +570,7 @@ impl Affine {
 }
 
 /// Builds the local transform for a part: translate(pivot/16) ∘ rotZYX ∘ scale,
-/// matching `ModelPart.translateAndRotate`.
+/// matching vanilla's own translate-and-rotate step.
 fn part_transform(pose: &PartPose) -> Affine {
     // Rotation R = Rz * Ry * Rx (JOML rotationZYX), so a vector is rotated X, then
     // Y, then Z.
@@ -612,7 +612,7 @@ fn mat_mul(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
 /// *no* transform applied — not even the part's own pose. The renderer is
 /// expected to rebuild the transform chain itself each frame from [`rest`]
 /// (adjusted by whatever animation it applies) and [`parent`], which is exactly
-/// what vanilla's `ModelPart.render` does. Baking the rest pose in would freeze
+/// what vanilla's own model-part render step does. Baking the rest pose in would freeze
 /// the very joints an animator needs to move.
 ///
 /// [`rest`]: BakedPart::rest
@@ -697,7 +697,7 @@ fn bake_part(part: &PartDef, parent: Affine, tw: f32, th: f32, out: &mut Vec<Ent
     }
 }
 
-/// Emits the visible faces of one box, faithful to `ModelPart.Cube`.
+/// Emits the visible faces of one box, faithful to vanilla's own model-part cube type.
 fn bake_cube(cube: &CubeDef, world: &Affine, tw: f32, th: f32, out: &mut Vec<EntityQuad>) {
     let [ox, oy, oz] = cube.origin;
     let [w, h, d] = cube.size;
@@ -714,7 +714,7 @@ fn bake_cube(cube: &CubeDef, world: &Affine, tw: f32, th: f32, out: &mut Vec<Ent
         std::mem::swap(&mut min_x, &mut max_x);
     }
 
-    // Eight corners in model texels (named as in ModelPart.Cube: t = near z=min,
+    // Eight corners in model texels (named as in vanilla's own model-part cube type: t = near z=min,
     // l = far z=max).
     let t0 = [min_x, min_y, min_z];
     let t1 = [max_x, min_y, min_z];
@@ -830,7 +830,7 @@ pub const PLAYER_OVERLAY_INFLATION: f32 = 0.25;
 /// where the head cube itself is already grown).
 pub const PLAYER_HAT_OVERLAY_INFLATION: f32 = 0.5;
 
-/// The vanilla player model (`net/minecraft/client/model/player/PlayerModel`)
+/// The vanilla player model (its own client-side player model class)
 /// on a 64×64 sheet, as the concrete case that exercises the whole primitive:
 /// pivots, overlay layers (`grow`), and the wide-vs-slim arm variants.
 ///
@@ -871,13 +871,13 @@ pub fn player_model(slim: bool) -> EntityModelDef {
 
     // Arms differ between wide and slim — in **two** numbers, not one.
     //
-    // `PlayerModel.createMesh` (26.2) replaces the arms wholesale rather than
-    // narrowing them in place:
+    // Vanilla's own player-mesh construction (26.2) replaces the arms wholesale rather than
+    // narrowing them in place, with box origin/size (in texels) of:
     //
     // ```text
-    // slim  right_arm: addBox(-2, -2, -2, 3, 12, 4)   left_arm: addBox(-1, -2, -2, 3, 12, 4)
-    // wide  right_arm: addBox(-3, -2, -2, 4, 12, 4)   left_arm: addBox(-1, -2, -2, 4, 12, 4)
-    //       ^ from HumanoidModel.createMesh
+    // slim  right_arm: origin (-2, -2, -2) size (3, 12, 4)   left_arm: origin (-1, -2, -2) size (3, 12, 4)
+    // wide  right_arm: origin (-3, -2, -2) size (4, 12, 4)   left_arm: origin (-1, -2, -2) size (4, 12, 4)
+    //       ^ from vanilla's own base humanoid-mesh construction
     // ```
     //
     // The **left** arm keeps origin `-1` in both, so narrowing alone is right
@@ -952,25 +952,25 @@ pub fn player_model(slim: bool) -> EntityModelDef {
     }
 }
 
-/// The player's cape overlay (`PlayerCapeModel.createCapeLayer`, 26.2): a
+/// The player's cape overlay (vanilla's own cape-layer mesh construction, 26.2): a
 /// single 10×16×1 box hanging off the **body** pivot, on its own 64×64 sheet
 /// (the model's declared unwrap size, not the cape PNG's real 64×32 —
-/// `LayerDefinition.create(mesh, 64, 64)` says so explicitly even though the
+/// vanilla's own mesh-definition construction says so explicitly even though the
 /// texture itself is shorter).
 ///
-/// Vanilla nests this under a `PlayerModel.createMesh` copy and clears every
-/// other cube (`root.clearRecursively()`), so the only shared coordinate frame
+/// Vanilla nests this under a copy of its own player-mesh construction and clears every
+/// other cube, so the only shared coordinate frame
 /// that matters is the **body pivot** — reproduced here as a bare identity
 /// `"body"` part, matching [`player_model`]'s own `body` pose exactly, so a
 /// caller can pair this mesh's `"cape"` part against the wearer's `"body"`
 /// part transform the same way armour pairs against named body parts.
 ///
-/// The cube itself is baked **without** `PlayerCapeModel`'s static
-/// `PartPose.offsetAndRotation(0, 0, 2, 0, PI, 0)` rotation folded in — only
-/// the `z = 2` translation. That rotation is not lost: `CapeLayer`/
-/// `PlayerCapeModel.setupAnim` immediately calls `cape.rotateBy(new
-/// Quaternionf().rotateY(-PI)...)`, and composing `oldRotation.rotate(newQuat)`
-/// (`ModelPart.rotateBy`) makes the static `Ry(PI)` and the quaternion's
+/// The cube itself is baked **without** vanilla's own static
+/// offset-and-rotation rotation folded in — only
+/// the `z = 2` translation. That rotation is not lost: vanilla's own
+/// cape-layer per-frame pose step immediately composes an inverse rotation onto it, and composing
+/// the old rotation with that new one
+/// makes the static `Ry(PI)` and the quaternion's
 /// leading `Ry(-PI)` term cancel exactly — the two are inverses on the same
 /// axis. What survives is `Rx(theta_x) * Rz(theta_z) * Ry(theta_y2)`, which is
 /// exactly what `lodestone_render::entity::cape_local_rotation` computes at
@@ -998,19 +998,20 @@ pub fn player_cape_model() -> EntityModelDef {
 /// `{"texture": "minecraft:elytra", "use_player_texture": true}`.
 ///
 /// This is a bare constant rather than an [`crate::equipment::ArmourLayerType`]
-/// variant on purpose. `wings` is a real `EquipmentClientInfo.LayerType`, but
+/// variant on purpose. `wings` is a real vanilla equipment-layer-type value, but
 /// adding it to that enum would widen the *armour* layer-type space that
 /// `armour_layers` and the trim sprite id are keyed on, and an elytra has
 /// neither armour layers nor a trim. One texture, one constant.
 ///
 /// `use_player_texture` is what lets a player's own cape (or a dedicated
-/// elytra texture) replace this — `WingsLayer.getPlayerElytraTexture` prefers
+/// elytra texture) replace this — vanilla's own wings-layer player-elytra-texture
+/// query prefers
 /// `skin.elytra()`, then `skin.cape()` when the cape is shown, and falls back
 /// to this. [`crate::skin::ProfileTextures`] already parses both URLs.
 pub const ELYTRA_TEXTURE_PATH: &str =
     "assets/minecraft/textures/entity/equipment/wings/elytra.png";
 
-/// The elytra's wings (`ElytraModel.createLayer`, 26.2): two 10x20x2 boxes
+/// The elytra's wings (vanilla's own elytra-model layer construction, 26.2): two 10x20x2 boxes
 /// inflated by 1.0, sharing one `(22, 0)` unwrap on a **64x32** sheet, hung
 /// off the wearer's **body** pivot.
 ///
@@ -1021,22 +1022,24 @@ pub const ELYTRA_TEXTURE_PATH: &str =
 ///
 /// # Why no rotation is baked, and why that is *not* the cape's reason
 ///
-/// `createLayer` gives each wing a static
-/// `PartPose.offsetAndRotation(±5, 0, 0, PI/12, 0, ∓PI/12)`, and only the
+/// Vanilla's own layer construction gives each wing a static
+/// offset-and-rotation of `(±5, 0, 0, PI/12, 0, ∓PI/12)`, and only the
 /// **offset** is reproduced here. The cape drops its static rotation because
-/// `setupAnim` *composes* an inverse onto it and the two cancel; this model
+/// its own per-frame pose step *composes* an inverse onto it and the two cancel; this model
 /// drops its static rotation for the opposite mechanical reason —
-/// `ElytraModel.setupAnim` **assigns** `xRot`/`yRot`/`zRot` outright
-/// (`this.leftWing.xRot = state.elytraRotX;`), so the authored rotation is
+/// vanilla's own elytra-model per-frame pose step **assigns** its per-axis
+/// rotation fields outright, so the authored rotation is
 /// overwritten on every frame that runs and is never composed with anything.
 ///
 /// The two conclusions coincide and the reasons do not, which is worth
 /// stating: a reader who ports this by analogy with the cape gets the right
-/// answer for the wrong reason, and would then get `y` wrong — `setupAnim`
+/// answer for the wrong reason, and would then get `y` wrong — vanilla's own
+/// per-frame pose step
 /// also assigns `y` (3.0 when crouching, 0.0 otherwise) while leaving `x` and
 /// `z` alone, so the `±5` **must** be baked and the `y` **must not** be.
 ///
-/// The rest-pose angles are not lost either: `ElytraAnimationState`'s
+/// The rest-pose angles are not lost either: vanilla's own elytra animation
+/// state's
 /// not-flying, not-crouching target is `(PI/12, 0, -PI/12)`, the same triple,
 /// which is why a standing player's wings look like the authored pose. See
 /// `lodestone_render::entity::elytra_rest_rotations`.
@@ -1083,9 +1086,10 @@ mod player_model_tests {
         None
     }
 
-    /// Every arm box in **both** rigs, against `PlayerModel.createMesh`'s own
+    /// Every arm box in **both** rigs, against vanilla's own player-mesh
+    /// construction's own
     /// literals (26.2, with the wide right arm coming from
-    /// `HumanoidModel.createMesh`).
+    /// vanilla's own base humanoid-mesh construction).
     ///
     /// The load-bearing row is the **slim right arm's origin, `-2` and not
     /// `-3`**: the left arm keeps origin `-1` in both rigs, so "slim just

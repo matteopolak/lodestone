@@ -181,7 +181,8 @@ fn md5(input: &[u8]) -> [u8; 16] {
     out
 }
 
-/// Reproduce `UUID.nameUUIDFromBytes(("OfflinePlayer:"+name).getBytes(UTF_8))`,
+/// Reproduce the standard name-based UUID (v3, MD5) of the UTF-8 bytes of
+/// `"OfflinePlayer:" + name`,
 /// the UUID the server assigns an offline-mode player's entity and broadcasts to
 /// every other client. B matches A by *this* UUID rather than by position, which
 /// is immune to the mob knockback / other-player position noise a shared

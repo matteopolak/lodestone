@@ -10,8 +10,8 @@
 //! visible thickness. `builtin/entity` items (chests, shulker boxes, banners…)
 //! are drawn by a dedicated entity renderer and carry no bakeable geometry here.
 //!
-//! This is faithful to `net/minecraft/client/resources/model/cuboid/
-//! ItemModelGenerator` in the decompiled 26.2 client. Output is GPU-free CPU data
+//! This is faithful to vanilla's own item-model generator, in the decompiled
+//! 26.2 client. Output is GPU-free CPU data
 //! ([`ItemQuad`]); positions are world units (texels / 16).
 
 use crate::model::Direction;

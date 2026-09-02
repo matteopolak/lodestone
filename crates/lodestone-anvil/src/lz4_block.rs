@@ -1,16 +1,17 @@
-//! The `net.jpountz.lz4.LZ4BlockOutputStream` / `LZ4BlockInputStream` framing.
+//! The vendored lz4 block-stream framing (a third-party library, not vanilla's
+//! own code).
 //!
 //! `.mca` files saved with `region-file-compression=lz4` in `server.properties`
 //! wrap each chunk's compressed payload in this format — **not** the standard
 //! LZ4 frame format, and not raw LZ4 blocks either. It comes from a
-//! third-party library (`net.jpountz.lz4`, shaded here as
+//! third-party library (shaded here as
 //! `at.yawk.lz4:lz4-java:1.10.1` —
 //! `.cache/mc/26.2/libraries/at/yawk/lz4/lz4-java/1.10.1/lz4-java-1.10.1.jar`),
 //! so there is no decompiled Minecraft source to cite a `file:line` against.
 //! The layout below was instead read directly out of that jar's own
-//! `LZ4BlockOutputStream.class` constant pool and `<clinit>` bytecode (a class
+//! compiled output-stream class's constant pool and static-initializer bytecode (a class
 //! file parsed by hand with a throwaway Python script — no JVM was available
-//! in this environment to run `javap`), which is why every constant here is a
+//! in this environment to run a disassembler), which is why every constant here is a
 //! measured value, not a recollection:
 //!
 //! - `MAGIC` = the 8 ASCII bytes `"LZ4Block"` (reconstructed from the
@@ -40,12 +41,12 @@
 //! storing raw when compression doesn't shrink the block) |
 //!
 //! A stream is a sequence of blocks, terminated by one final block whose
-//! `original_length` is 0 (the EOS marker `LZ4BlockOutputStream.finish()`
+//! `original_length` is 0 (the EOS marker the library's own stream-finish step
 //! writes).
 //!
 //! **A gap this doc corrects rather than hides**: an earlier version of
 //! this writer OR'd a `compressionLevel` value into the token's low nibble
-//! (guessing `32 - Integer.numberOfLeadingZeros(blockSize - 1)`, by analogy
+//! (guessing "32 minus the count of leading zero bits in `blockSize - 1`", by analogy
 //! with a formula seen in other lz4-java-derived code). That guess was
 //! wrong in a way a test caught immediately: for the default 64 KiB block
 //! size it computes 16, which does not fit in 4 bits and overflowed into
@@ -81,7 +82,7 @@ const HEADER_LENGTH: usize = 21;
 const COMPRESSION_METHOD_RAW: u8 = 0x10;
 const COMPRESSION_METHOD_LZ4: u8 = 0x20;
 const DEFAULT_SEED: u32 = 0x9747_B28C;
-/// `LZ4BlockOutputStream`'s default single-`OutputStream`-argument
+/// The library's own default single-argument
 /// constructor block size (`1 << 16`, per the library's own
 /// `DEFAULT_BLOCK_SIZE`). Only used by our writer — a reader has no need for
 /// it, since each block declares its own lengths.
@@ -110,7 +111,7 @@ pub fn decode(mut input: &[u8]) -> Result<Vec<u8>> {
         let checksum = u32::from_le_bytes(input[17..21].try_into().unwrap());
 
         if original_length == 0 {
-            // EOS marker: `LZ4BlockOutputStream.finish()` writes a
+            // EOS marker: the library's own stream-finish step writes a
             // zero-original-length block and no payload.
             return Ok(out);
         }
@@ -164,7 +165,7 @@ pub fn decode(mut input: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Encodes `data` into an `LZ4Block`-framed stream, matching
-/// `LZ4BlockOutputStream`'s single-`OutputStream`-argument constructor
+/// the library's own single-argument constructor
 /// (default block size, LZ4-compressed unless a block fails to shrink).
 pub fn encode(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -181,7 +182,7 @@ pub fn encode(data: &[u8]) -> Vec<u8> {
 
 /// Splits `data` into `block_size`-sized chunks. Unlike `slice::chunks`, an
 /// empty input still yields exactly one (empty) chunk, matching
-/// `LZ4BlockOutputStream`'s behaviour of writing a single empty compressed
+/// the library's own behaviour of writing a single empty compressed
 /// block before its EOS marker when `write` is never called with data.
 fn chunk_or_empty(data: &[u8], block_size: usize) -> Vec<&[u8]> {
     if data.is_empty() {

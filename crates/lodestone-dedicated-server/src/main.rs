@@ -351,7 +351,7 @@ fn server_directory() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// `WorldOptions.randomSeed()`'s own shape: a fresh, opaque `i64` with no
+/// Vanilla's own random-world-seed generation shape: a fresh, opaque `i64` with no
 /// algorithm callers may rely on. `RandomState`'s per-process random key
 /// (rather than a clock read) — this binary is native-only anyway, but
 /// matching `lodestone-shell`'s own `random_seed` keeps the two hosting paths
