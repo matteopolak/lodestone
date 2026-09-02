@@ -1,6 +1,6 @@
 //! Fluid **flow currents** — the horizontal push a moving fluid applies to an
-//! entity standing in it (`Entity.updateFluidInteraction` →
-//! `EntityFluidInteraction.update`/`applyCurrentTo` and `FlowingFluid.getFlow`).
+//! entity standing in it (vanilla's own fluid-interaction update step → its
+//! own tracker update/apply-current steps and its own flow-vector step).
 //!
 //! This is the part of fluid movement that the coarse "fully submerged" hooks in
 //! [`crate::collision::CollisionView`] (`is_water`/`is_lava`) deliberately do not
@@ -13,14 +13,14 @@
 //! Vanilla mixes `float` and `double` here on purpose and the server sees the
 //! result, so the widths are reproduced exactly:
 //!
-//! * `FluidState.getOwnHeight()` = `amount / 9.0F` is **`float`**; the flow
-//!   `distance` (`thisHeight - neighbourHeight`, and the `- 0.8888889F` downflow
-//!   term) is computed in `float`.
-//! * `direction.getStepX() * distance` is `int * float` → **`float`**, then
-//!   accumulated into a **`double`** `flowX`/`flowZ`.
-//! * `Vec3.normalize()` compares `length` against the `float` literal `1.0E-5F`
-//!   widened to `double` — [`crate::geometry::Vec3d::normalize`] already does
-//!   this.
+//! * Vanilla's own "get own height" formula (`amount / 9.0F`) is **`float`**;
+//!   the flow `distance` (this cell's height minus the neighbour's, and the
+//!   `- 0.8888889F` downflow term) is computed in `float`.
+//! * a direction's step multiplied by the distance is `int * float` →
+//!   **`float`**, then accumulated into a **`double`** `flow_x`/`flow_z`.
+//! * Vanilla's own vector-normalize step compares `length` against the
+//!   `float` literal `1.0E-5F` widened to `double` —
+//!   [`crate::geometry::Vec3d::normalize`] already does this.
 //! * The tracker `height`, the accumulated current, the `1/count` average and
 //!   the `0.014`/`0.0023…` push scales are all **`double`**.
 //!
@@ -28,9 +28,9 @@
 //!
 //! The common horizontal-flow case (a source or flowing column beside a lower or
 //! empty neighbour) is modelled exactly, including the empty-neighbour *downflow*
-//! branch (`0.8888889F`) and the `FALLING` downward jet. The push accumulates and
-//! applies with vanilla's player-specific `1/count` averaging, the sub-`0.4`
-//! height taper, and the `0.0045` minimum-impulse floor.
+//! branch (`0.8888889F`) and the "falling" downward jet. The push accumulates
+//! and applies with vanilla's player-specific `1/count` averaging, the
+//! sub-`0.4` height taper, and the `0.0045` minimum-impulse floor.
 
 use crate::collision::CollisionView;
 use crate::geometry::Vec3d;
@@ -47,31 +47,31 @@ pub enum FluidKind {
 }
 
 /// The fluid occupying a single block cell, mirroring the parts of
-/// `net.minecraft.world.level.material.FluidState` that flow currents need.
+/// vanilla's own fluid-state record that flow currents need.
 ///
-/// `amount` is `FluidState.getAmount()`: **8** for a source, **1..=7** for
-/// flowing fluid (higher = deeper). `falling` is the `FALLING` fluid property
-/// (fluid pouring straight down).
+/// `amount` is vanilla's own get-amount accessor: **8** for a source,
+/// **1..=7** for flowing fluid (higher = deeper). `falling` is vanilla's own
+/// "falling" fluid property (fluid pouring straight down).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FluidCell {
     /// Water or lava.
     pub kind: FluidKind,
-    /// `FluidState.getAmount()` in `1..=8` (source = 8).
+    /// Vanilla's own get-amount accessor, in `1..=8` (source = 8).
     pub amount: u8,
-    /// The `FALLING` fluid property.
+    /// Vanilla's own "falling" fluid property.
     pub falling: bool,
 }
 
 impl FluidCell {
-    /// `FlowingFluid.getOwnHeight()` = `amount / 9.0F` (a **`float`**). Source
-    /// (`amount == 8`) → `0.8888889` (`8/9`).
+    /// Vanilla's own "get own height" formula: `amount / 9.0F` (a
+    /// **`float`**). Source (`amount == 8`) → `0.8888889` (`8/9`).
     #[must_use]
     pub fn own_height(self) -> f32 {
         f32::from(self.amount) / 9.0f32
     }
 }
 
-/// A horizontal direction, iterated in `Direction.Plane.HORIZONTAL` order
+/// A horizontal direction, iterated in vanilla's own horizontal-plane order
 /// (`NORTH, EAST, SOUTH, WEST`) so the `float`→`double` flow accumulation matches
 /// vanilla's summation order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +87,7 @@ pub enum HorizontalDir {
 }
 
 impl HorizontalDir {
-    /// `Direction.Plane.HORIZONTAL` iteration order.
+    /// Vanilla's own horizontal-plane iteration order.
     pub const ALL: [HorizontalDir; 4] = [
         HorizontalDir::North,
         HorizontalDir::East,
@@ -95,7 +95,7 @@ impl HorizontalDir {
         HorizontalDir::West,
     ];
 
-    /// `direction.getStepX()`.
+    /// Vanilla's own per-direction X-step accessor.
     #[must_use]
     pub const fn step_x(self) -> i32 {
         match self {
@@ -105,7 +105,7 @@ impl HorizontalDir {
         }
     }
 
-    /// `direction.getStepZ()`.
+    /// Vanilla's own per-direction Z-step accessor.
     #[must_use]
     pub const fn step_z(self) -> i32 {
         match self {
@@ -116,7 +116,8 @@ impl HorizontalDir {
     }
 }
 
-/// `FlowingFluid.affectsFlow(neighbour)` = `neighbour.isEmpty() || sameType`.
+/// Vanilla's own "affects flow" check: the neighbour is empty, or holds the
+/// *same* fluid.
 ///
 /// A neighbouring cell affects the flow only if it is empty or holds the *same*
 /// fluid; a different fluid (lava beside water) does not.
@@ -127,8 +128,9 @@ fn affects_flow(neighbour: Option<FluidCell>, kind: FluidKind) -> bool {
     }
 }
 
-/// `FluidState.getOwnHeight()` for a neighbour cell, treating a different fluid
-/// as absent. Only called after [`affects_flow`], so `Some` implies same kind.
+/// Vanilla's own "get own height" formula for a neighbour cell, treating a
+/// different fluid as absent. Only called after [`affects_flow`], so `Some`
+/// implies same kind.
 fn neighbour_own_height(neighbour: Option<FluidCell>, kind: FluidKind) -> f32 {
     match neighbour {
         Some(n) if n.kind == kind => n.own_height(),
@@ -136,8 +138,8 @@ fn neighbour_own_height(neighbour: Option<FluidCell>, kind: FluidKind) -> f32 {
     }
 }
 
-/// `FlowingFluid.getFlow(level, pos, fluidState)` — the unit flow direction of
-/// the fluid at `(x, y, z)`.
+/// Vanilla's own "get flow" step — the unit flow direction of the fluid at
+/// `(x, y, z)`.
 ///
 /// Scans the four horizontal neighbours: a neighbour that is lower (or empty
 /// over a drop) pulls the flow toward it. The result is **normalized** (a unit
@@ -200,10 +202,10 @@ pub fn get_flow(view: &dyn CollisionView, x: i32, y: i32, z: i32, cell: FluidCel
 }
 
 /// Accumulated current over the cells an entity's fluid-interaction box touches,
-/// mirroring `EntityFluidInteraction.Tracker` for a single fluid kind.
+/// mirroring vanilla's own fluid-interaction tracker for a single fluid kind.
 #[derive(Debug, Clone, Copy)]
 struct Tracker {
-    /// `Math.max(fluidTop - entityY, height)` across cells — the submersion
+    /// The max of `fluid_top - entity_y` across cells — the submersion
     /// depth, which tapers the current below `0.4`.
     height: f64,
     accumulated: Vec3d,
@@ -220,30 +222,34 @@ impl Tracker {
     }
 }
 
-/// `Entity.updateFluidInteraction` for one fluid `kind`: scans the entity's
-/// fluid-interaction box (`boundingBox.deflate(0.001)`), accumulates the current,
-/// and applies it to `state.velocity` (`addDeltaMovement`).
+/// Vanilla's own fluid-interaction update step for one fluid `kind`: scans the
+/// entity's fluid-interaction box (its own bounding box deflated by `0.001`),
+/// accumulates the current, and applies it to `state.velocity` (vanilla's own
+/// velocity-add step).
 ///
-/// Called at the **start** of the in-fluid tick, before the `aiStep` velocity
-/// snap-to-zero, because vanilla runs `updateFluidInteraction` in `baseTick`,
-/// ahead of `aiStep`/`travel` within the same tick. `push_scale` is `0.014` for
-/// water and `0.0023333333333333335` (overworld) / `0.007` (nether) for lava.
+/// Called at the **start** of the in-fluid tick, before the AI-step velocity
+/// snap-to-zero, because vanilla runs its own fluid-interaction update step
+/// in its own base per-tick step, ahead of the AI step / travel step within
+/// the same tick. `push_scale` is `0.014` for water and
+/// `0.0023333333333333335` (overworld) / `0.007` (nether) for lava.
 ///
-/// The `entityY` used for the depth is the **un-deflated** box minimum
-/// (`getBoundingBox().minY`), while the loop bounds and the `fluidTop >= minY`
-/// gate use the deflated box — reproduced exactly.
+/// The `entity_y` used for the depth is the **un-deflated** box minimum
+/// (vanilla's own bounding-box accessor's minimum Y), while the loop bounds
+/// and the `fluid_top >= min_y` gate use the deflated box — reproduced
+/// exactly.
 ///
 /// # Scope
 ///
 /// [`crate::player::tick_water`]/[`crate::player::tick_lava`] invoke this from the
 /// in-fluid travel branch, which the caller selects via the coarse
 /// [`CollisionView::is_water`]/[`CollisionView::is_lava`] dispatch. Vanilla
-/// couples the two the same way — `updateFluidInteraction` sets `isInWater`, and
-/// `travel` picks the water branch iff `isInWater` — so a submerged or swimming
-/// player (the prioritised case) is pushed exactly. A player only *grazing*
-/// flowing water, where the coarse dispatch and vanilla's deflated box scan
-/// disagree on "in water" by a tick, inherits that existing approximation; a
-/// mismatch would surface as a server correction, which the live gates watch for.
+/// couples the two the same way — its own fluid-interaction update step sets
+/// its own in-water flag, and its own travel step picks the water branch iff
+/// that flag is set — so a submerged or swimming player (the prioritised
+/// case) is pushed exactly. A player only *grazing* flowing water, where the
+/// coarse dispatch and vanilla's deflated box scan disagree on "in water" by
+/// a tick, inherits that existing approximation; a mismatch would surface as
+/// a server correction, which the live gates watch for.
 pub fn apply_fluid_push(
     state: &mut crate::player::PlayerState,
     view: &dyn CollisionView,
@@ -252,7 +258,7 @@ pub fn apply_fluid_push(
     profile: &crate::profile::PhysicsProfile,
 ) {
     let bb = state.bounding_box(profile);
-    // getFluidInteractionBox() = boundingBox.deflate(0.001).
+    // Vanilla's own fluid-interaction-box accessor: bounding box deflated by 0.001.
     let d = 0.001;
     let box_min_x = bb.min_x + d;
     let box_min_y = bb.min_y + d;
@@ -281,7 +287,8 @@ pub fn apply_fluid_push(
                 if fluid.kind != kind {
                     continue;
                 }
-                // getHeight() = hasSameAbove ? 1.0F : getOwnHeight().
+                // Vanilla's own get-height accessor: 1.0F if the same fluid
+                // sits directly above, else its own get-own-height formula.
                 let same_above = view
                     .fluid_at(x, y + 1, z)
                     .is_some_and(|above| above.kind == kind);
@@ -309,7 +316,7 @@ pub fn apply_fluid_push(
     apply_current_to(state, &tracker, push_scale);
 }
 
-/// `EntityFluidInteraction.Tracker.applyCurrentTo` for a `Player`.
+/// Vanilla's own tracker's apply-current-to step, for a player.
 fn apply_current_to(state: &mut crate::player::PlayerState, tracker: &Tracker, scale: f64) {
     if tracker.count == 0 || tracker.accumulated.length_sqr() < f64::from(1.0e-5f32) {
         return;
