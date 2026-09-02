@@ -8,10 +8,10 @@
 //! (`decode(encode(x)) == x`, the closed loop) or needs a live container. This one
 //! needs neither. `.cache/mc/survival/world` is a world a real vanilla server
 //! generated and lit, and each `minecraft:full` chunk's sections carry vanilla's
-//! own `SkyLight`/`BlockLight` byte arrays — computed by vanilla's
-//! `SkyLightEngine`/`BlockLightEngine`, stored *independently* of the
-//! `block_states` containers we read the terrain from. So the blocks are the input
-//! and the light is the expected answer, and neither came from us.
+//! own `SkyLight`/`BlockLight` byte arrays — computed by the real server's own
+//! light propagation, stored *independently* of the `block_states` containers
+//! we read the terrain from. So the blocks are the input and the light is the
+//! expected answer, and neither came from us.
 //!
 //! # The input has to discriminate, and most chunks do not
 //!
@@ -41,8 +41,9 @@
 //!   resolved and the seam residual `compute_column_light`'s isolated form leaves
 //!   is not in these numbers.
 //! * A light section vanilla **omitted** asserts nothing (vanilla drops an
-//!   all-zero `DataLayer`), so it is skipped and counted. `sections_skipped` being
-//!   large would silently shrink the survey, which is why it is printed.
+//!   all-zero section's light array entirely rather than storing it), so it
+//!   is skipped and counted. `sections_skipped` being large would silently
+//!   shrink the survey, which is why it is printed.
 //! * Vanilla lights a 3×3 of its own with *its* neighbours loaded, two chunks out.
 //!   Ours cannot see two chunks out — but it does not need to: light decays at
 //!   least one level per block and 15 < 16, so no source two chunks away reaches
@@ -174,8 +175,8 @@ fn palette_entry_state_id(entry: &Nbt) -> Option<u32> {
     lodestone_data::block_states::state_id(&canonical)
 }
 
-/// Vanilla's **non-spanning** `SimpleBitStorage` read: `64 / bits` entries per
-/// long, no entry straddling a long boundary.
+/// Vanilla's own **non-spanning** packed-long bit read: `64 / bits` entries
+/// per long, no entry straddling a long boundary.
 ///
 /// Getting this wrong is invisible for every palette of 16 or fewer entries,
 /// because 4 bits divides 64 evenly — the same trap
@@ -298,8 +299,8 @@ fn decode_chunk(nbt: &Nbt) -> Option<(VanillaChunk, usize)> {
                     .collect();
                 match field(container, "data") {
                     Some(Nbt::LongArray(data)) => {
-                        // `max(4, ceil_log2(len))`, vanilla's own
-                        // `PalettedContainer` bit width for a chunk section.
+                        // `max(4, ceil_log2(len))`, vanilla's own bits-per-entry
+                        // rule for a chunk section's packed palette.
                         let bits = 4.max(u32::BITS - (palette.len() as u32 - 1).leading_zeros());
                         for (i, pi) in unpack_non_spanning(data, 4096, bits).into_iter().enumerate()
                         {
@@ -336,9 +337,9 @@ fn decode_chunk(nbt: &Nbt) -> Option<(VanillaChunk, usize)> {
             } else {
                 vanilla_light.block_mut(s)
             };
-            // Vanilla's `DataLayer` nibble order is `y << 8 | z << 4 | x`, the
-            // same order `NibbleArray::index` produces, so the byte array copies
-            // straight across nibble for nibble.
+            // Vanilla's own light-array nibble order is `y << 8 | z << 4 | x`,
+            // the same order `NibbleArray::index` produces, so the byte array
+            // copies straight across nibble for nibble.
             for i in 0..NibbleArray::LEN {
                 #[expect(
                     clippy::cast_sign_loss,
@@ -650,7 +651,7 @@ impl Survey {
 
 /// Diffs one computed [`ColumnLight`] against vanilla's, accumulating into
 /// `survey`. Light sections vanilla omitted are counted and skipped: an absent
-/// `DataLayer` is not an assertion of zero.
+/// stored light array is not an assertion of zero.
 fn survey_column(survey: &mut Survey, centre: &VanillaChunk, ours: &ColumnLight) {
     let (cx, cz) = (centre.cx, centre.cz);
     let theirs = &centre.vanilla_light;
@@ -768,8 +769,8 @@ fn computed_light_matches_the_light_a_real_26_2_server_wrote() {
          laterally-varying cells across {chunks} chunks. A purely vertical propagator \
          would agree with vanilla on such input, so this survey would prove nothing."
     );
-    // Vanilla materialises a `DataLayer` only where light is non-trivial — measured
-    // over `r.0.0.mca`: 2 to 7 `SkyLight` sections and 0 to 10 `BlockLight`
+    // Vanilla materialises a section's stored light array only where light is
+    // non-trivial — measured over `r.0.0.mca`: 2 to 7 `SkyLight` sections and 0 to 10 `BlockLight`
     // sections per `minecraft:full` chunk, out of 26 possible. So this survey's
     // scope is vanilla's own transition band, not the whole column, and the floor
     // has to be derived from that rather than from the column height: two sky
@@ -913,7 +914,7 @@ fn the_oracle_world_really_carries_vanilla_computed_light() {
 //
 // Everything above judges `compute_column_light*` — the from-scratch compute the
 // *server* runs. `lodestone_world::relight` is a different engine: the client's
-// own bounded-box `LightEngine.checkBlock`, which recomputes a 31-cell box around
+// own bounded-box incremental repair, which recomputes a 31-cell box around
 // a changed block and writes the diff back into stored light. Nothing judged it
 // against anything outside itself, and its own suite cannot: `client_relight.rs`
 // builds a synthetic room, seeds the light with `compute_column_light`, and then
@@ -927,26 +928,28 @@ fn the_oracle_world_really_carries_vanilla_computed_light() {
 // that was an unenforced sentence.
 
 /// Resolves the sections vanilla left out of the save into the values vanilla's
-/// own engine reports for them, transcribed from `SkyLightSectionStorage`'s
-/// `getLightValue` and `createDataLayer` (see `docs/lighting.md`).
+/// own engine reports for them (see `docs/lighting.md`).
 ///
 /// **An omitted section is not one state, it is two**, and conflating them is
-/// what makes this fixture measure itself instead of the engine. `DataLayer` has
-/// a lazy `defaultValue` and `isEmpty()` is `data == null && defaultValue == 0`,
-/// so `SerializableChunkData` skips a section either because its layer was
-/// genuinely all-zero (sealed rock) **or** because the light engine holds no
-/// layer for it at all (well above the terrain, where the engine answers `15`
-/// without materialising anything). The first is darkness, the second is full
+/// what makes this fixture measure itself instead of the engine. A section's
+/// stored light array carries a lazy per-column default value, and vanilla
+/// treats the section as having no stored array at all whenever both its
+/// actual data is unset *and* that default is zero — so a section can be
+/// skipped for either of two unrelated reasons: its layer was genuinely
+/// all-zero (sealed rock) **or** the light engine holds no layer for it at
+/// all (well above the terrain, where the engine answers `15` without
+/// materialising anything). The first is darkness, the second is full
 /// daylight, and the NBT spells them identically.
 ///
 /// Vanilla's rule, in the same three cases this function has:
 ///
 /// * a section with a layer is that layer;
-/// * a section with **no layer above it** is `15` — it is at or above
-///   `topSections`, so `getLightValue` short-circuits;
-/// * a section with a layer above it repeats that layer's `y == 0` row
-///   (`repeatFirstLayer`, reached through `getLightValue`'s walk up to the first
-///   non-null layer with the block `y` flattened away).
+/// * a section with **no layer above it** is `15` — it is at or above the
+///   highest section any layer was ever built for, so the lookup
+///   short-circuits;
+/// * a section with a layer above it repeats that layer's `y == 0` row (a
+///   walk up to the first non-null layer above it, with the block `y`
+///   flattened away).
 ///
 /// The first version of this function mapped every omitted section to
 /// `Uniform(0)`, which blacked out the entire sky above the terrain: the survey
@@ -1283,9 +1286,9 @@ fn absent_sky_stays_missing(saved: &ColumnLight) -> ColumnLight {
 /// The engine itself is exact — the gate above recomputes 690k cells of a real
 /// vanilla-lit world and moves not one sky cell. This one changes exactly one
 /// thing about its *input*, leaving the sections vanilla omitted from the save as
-/// `Missing` instead of resolving them the way vanilla's own
-/// `SkyLightSectionStorage.getLightValue` does, and the same no-op relight then
-/// rewrites tens of thousands of cells **brighter**.
+/// `Missing` instead of resolving them the way vanilla's own light lookup does,
+/// and the same no-op relight then rewrites tens of thousands of cells
+/// **brighter**.
 ///
 /// So this is the shape of the reported defect — a block broken with no light
 /// around it making the surroundings bright — expressed as a property of the

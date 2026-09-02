@@ -104,20 +104,21 @@ pub struct PhysicsProfile {
     /// Ground-acceleration constant (`0.21600002F`).
     pub ground_accel: f32,
     /// The airborne input speed for a **non**-flying entity that is *not*
-    /// sprinting (`0.02F`) — `LivingEntity.getFlyingSpeed()`'s unridden value and
-    /// the `else` arm of `Player.getFlyingSpeed()`
-    /// (`Player.java:1974-1980`).
+    /// sprinting (`0.02F`) — vanilla's unridden, non-sprinting value for this
+    /// case.
     ///
     /// **This is not the creative-flight speed**, despite the name, which is
-    /// vanilla's (`getFlyingSpeed` is the airborne substitute for `getSpeed()`
-    /// in `getFrictionInfluencedSpeed`, and predates creative flight sharing the
-    /// word). Creative flight's speed is `Abilities.flyingSpeed`, default
-    /// `0.05F`, and arrives per-player on [`crate::PlayerState::flying_speed`]
-    /// because the server can change it at runtime. Reusing this field for
-    /// flight would fly at 40% of vanilla's speed and look merely "a bit slow".
+    /// vanilla's: the name comes from an airborne substitute speed vanilla uses
+    /// in place of an entity's normal ground speed when computing
+    /// friction-influenced movement, and predates creative flight sharing the
+    /// word "flying". Creative flight's speed is a separate per-player value,
+    /// default `0.05F`, and arrives per-player on
+    /// [`crate::PlayerState::flying_speed`] because the server can change it at
+    /// runtime. Reusing this field for flight would fly at 40% of vanilla's
+    /// speed and look merely "a bit slow".
     pub flying_speed: f32,
     /// The airborne input speed for a non-flying entity that **is** sprinting
-    /// (`0.025999999F`, `Player.java:1978`).
+    /// (`0.025999999F`, vanilla's exact value for this case).
     ///
     /// Written out as the exact literal vanilla uses rather than `0.026`: the
     /// two differ (`0.026F` is `0.026000000536441803`, this is

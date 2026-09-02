@@ -2,52 +2,46 @@
 //! region file's sector data (and the analogous, always-gzip wrapping of
 //! `level.dat`).
 //!
-//! Scheme ids, cited from
-//! `.cache/mc/26.2/src/net/minecraft/world/level/chunk/storage/RegionFileVersion.java`:
+//! Four scheme ids exist:
 //!
-//! | id | name | `RegionFileVersion` field |
+//! | id | name | notes |
 //! |---|---|---|
-//! | 1 | gzip | `VERSION_GZIP` |
-//! | 2 | zlib (`deflate`) | `VERSION_DEFLATE`, **the default** |
-//! | 3 | uncompressed | `VERSION_NONE` |
-//! | 4 | LZ4 | `VERSION_LZ4` |
+//! | 1 | gzip | |
+//! | 2 | zlib (`deflate`) | **the default** |
+//! | 3 | uncompressed | |
+//! | 4 | LZ4 | |
 //!
 //! `server.properties`' `region-file-compression` key selects the scheme a
-//! server *writes* (`DedicatedServerProperties.regionFileComression`'s
-//! initializer: `this.get("region-file-compression", "deflate")` — deflate
-//! is the default there too), and this repo's three live oracles
-//! (`.cache/mc/{creative,terrain,survival}/server.properties`) all leave it
-//! at that default. So every real `.mca` this crate has been tested against
-//! uses scheme 2 — **not** 4. This corrects an assumption in the issue that
-//! prompted this crate: LZ4 is an available scheme, not "the variant modern
-//! versions write" by default. See `lz4_block.rs`'s module doc for the
-//! consequence: the LZ4 codec exists and round-trips against itself, but has
-//! no real-file evidence behind it, unlike the other three.
+//! server *writes* (defaulting to deflate), and this repo's three live
+//! oracles (`.cache/mc/{creative,terrain,survival}/server.properties`) all
+//! leave it at that default. So every real `.mca` this crate has been tested
+//! against uses scheme 2 — **not** 4. This corrects an assumption in the
+//! issue that prompted this crate: LZ4 is an available scheme, not "the
+//! variant modern versions write" by default. See `lz4_block.rs`'s module
+//! doc for the consequence: the LZ4 codec exists and round-trips against
+//! itself, but has no real-file evidence behind it, unlike the other three.
 //!
-//! A reader must accept whichever scheme id a chunk was written with
-//! (`RegionFileVersion.fromId`, called from `RegionFile.createChunkInputStream`)
-//! — a region file can mix schemes across chunks if `region-file-compression`
+//! A reader must accept whichever scheme id a chunk was written with — a
+//! region file can mix schemes across chunks if `region-file-compression`
 //! changed mid-life, since each chunk carries its own id.
 
 use crate::{Error, Result};
 use std::io::Read;
 
 /// One of the four compression schemes a chunk payload (or `level.dat`) may
-/// be wrapped in. Custom compression (scheme id 127,
-/// `RegionFileVersion.VERSION_CUSTOM`) exists in vanilla only as a
-/// forward-compatibility placeholder that immediately errors on decode
-/// (`RegionFile.createChunkInputStream`'s `VERSION_CUSTOM` branch, `readUTF`
-/// + "Unrecognized custom compression"), so it is deliberately not modelled
-/// as a variant here — see
+/// be wrapped in. Custom compression (scheme id 127) exists only as a
+/// forward-compatibility placeholder that a real save immediately errors on
+/// decoding (an "unrecognized custom compression" failure, reading a length-
+/// prefixed name string it then refuses to honour), so it is deliberately
+/// not modelled as a variant here — see
 /// [`Error::UnsupportedCompressionScheme`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionScheme {
     /// Scheme id 1. Always used for `level.dat`; available but not default
     /// for region-file chunks.
     Gzip,
-    /// Scheme id 2. The default for region-file chunks
-    /// (`RegionFileVersion.DEFAULT`) and the only scheme any real file this
-    /// crate has read actually uses.
+    /// Scheme id 2. The default for region-file chunks, and the only scheme
+    /// any real file this crate has read actually uses.
     Zlib,
     /// Scheme id 3. Stores the chunk NBT with no compression at all.
     Uncompressed,
@@ -58,8 +52,9 @@ pub enum CompressionScheme {
 
 impl CompressionScheme {
     /// Maps a scheme id byte (as stored on disk) to a scheme, or `None` for
-    /// an id vanilla does not treat as decodable data (0, the "chunk absent"
-    /// sentinel, and 127, `VERSION_CUSTOM`, both handled by the caller).
+    /// an id that is not decodable data on its own (0, the "chunk absent"
+    /// sentinel, and 127, the reserved "custom compression" placeholder,
+    /// both handled by the caller).
     #[must_use]
     pub fn from_id(id: u8) -> Option<Self> {
         match id {
@@ -145,8 +140,9 @@ mod tests {
 
     #[test]
     fn scheme_zero_and_custom_are_unmapped() {
-        // 0 is the "chunk not present" sentinel and 127 is VERSION_CUSTOM —
-        // neither is a scheme this type represents.
+        // 0 is the "chunk not present" sentinel and 127 is the reserved
+        // "custom compression" placeholder — neither is a scheme this type
+        // represents.
         assert_eq!(CompressionScheme::from_id(0), None);
         assert_eq!(CompressionScheme::from_id(127), None);
     }

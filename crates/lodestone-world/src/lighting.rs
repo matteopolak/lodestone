@@ -8,27 +8,26 @@
 //! that for us — singleplayer and worldgen — but it is the sole source of truth
 //! there, so a placeholder that merely *looks* lit is a silent bug.
 //!
-//! # Algorithm (read out of 26.2, not memory)
+//! # Algorithm
 //!
-//! Both layers share one propagation rule, taken from
-//! `net/minecraft/world/level/lighting/{LightEngine,BlockLightEngine,SkyLightEngine}`:
-//! a cell at level `l` lifts a neighbour to `l - opacity(neighbour)`, where
-//! `opacity = max(1, lightDampening(neighbour))` (`LightEngine.getOpacity`), and
-//! only when that is an improvement. Processed in descending level order (the
-//! 15-bucket queue vanilla uses), one pass settles every cell at its maximum.
+//! Both layers share one propagation rule: a cell at level `l` lifts a
+//! neighbour to `l - opacity(neighbour)`, where `opacity = max(1, dampening)`
+//! for that neighbour, and only when that is an improvement. Processed in
+//! descending level order (a 15-bucket queue), one pass settles every cell at
+//! its maximum.
 //!
 //! The two layers differ only in their *sources*:
 //!
-//! * **Block light** seeds every cell whose block emits (`getLightEmission`) at
-//!   that emission level.
+//! * **Block light** seeds every cell whose block emits light, at that
+//!   emission level.
 //! * **Sky light** seeds every cell open to the sky at `15`. "Open" is the whole
 //!   vertical column from the top down to — but not including — the first block
-//!   that dampens light at all (`ChunkSkyLightSources.isEdgeOccluded`, whose
-//!   scalar case is `dampening != 0`). This is *why* sky light appears to fall
-//!   vertically without attenuating: it is not a special vertical rule, it is
-//!   that every open cell is itself a full-strength source. Horizontal spread
-//!   (under an overhang, into a cave mouth) then decays by the ordinary rule —
-//!   the vertical/horizontal asymmetry that guessing gets wrong.
+//!   that dampens light at all (nonzero dampening). This is *why* sky light
+//!   appears to fall vertically without attenuating: it is not a special
+//!   vertical rule, it is that every open cell is itself a full-strength
+//!   source. Horizontal spread (under an overhang, into a cave mouth) then
+//!   decays by the ordinary rule — the vertical/horizontal asymmetry that
+//!   guessing gets wrong.
 //!
 //! `dampening` and `emission` come from an injected [`LightProperties`], so this
 //! crate stays version- and registry-free: the value crate or the client hands
@@ -68,14 +67,14 @@ use crate::section::ChunkSection;
 /// shulker, differ.
 pub trait LightProperties {
     /// How much light the state removes as light passes *into* it, `0..=15`
-    /// (vanilla's `lightDampening`). Air and fully transparent blocks are `0`;
-    /// full solids are `15`. The engine applies `max(1, ·)` itself, so even a
-    /// `0`-dampening block still costs one level to cross — return the raw
-    /// dampening here, not the stepped opacity.
+    /// (vanilla's own light-dampening value). Air and fully transparent
+    /// blocks are `0`; full solids are `15`. The engine applies `max(1, ·)`
+    /// itself, so even a `0`-dampening block still costs one level to cross
+    /// — return the raw dampening here, not the stepped opacity.
     fn opacity(&self, state: u32) -> u8;
 
-    /// How much light the state emits, `0..=15` (vanilla's `getLightEmission`).
-    /// Non-emitters return `0`.
+    /// How much light the state emits, `0..=15` (vanilla's own light-emission
+    /// value). Non-emitters return `0`.
     fn emission(&self, state: u32) -> u8;
 }
 
@@ -667,7 +666,7 @@ mod tests {
     const GLASS: u32 = 2; // transparent but present (dampening 0)
     const TORCH: u32 = 3; // emits 14, transparent
     const WATER: u32 = 4; // dampening 1
-    // Vanilla's leaves are `lightDampening = 1` (`lodestone_data::light_props`'s
+    // Vanilla's leaves have a light dampening of 1 (`lodestone_data::light_props`'s
     // own stated scale: air and glass 0, water/ice/leaves 1, a full solid 15), so
     // this is `WATER`'s dampening under a name that reads as a tree canopy where
     // one is what the scene means.

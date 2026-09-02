@@ -31,23 +31,20 @@
 //! that greps `level.dat` for a seed and finds nothing, will conclude the seed
 //! is unpersisted rather than that it moved.
 //!
-//! Where it moved, cited against `.cache/mc/26.2/src/`:
+//! Where it moved:
 //!
-//! - `LevelStorageSource.writeWorldGenSettings` calls the generic
-//!   `writeSavedData(worldFolder, ops, WorldGenSettings.TYPE,
-//!   WorldGenSettings.CODEC, …)`.
-//! - `LevelStorageSource.writeSavedData` wraps the codec
-//!   output as `fullTag.put("data", encoded)`, adds `DataVersion`, and writes
-//!   it with `NbtIo.writeCompressed` (gzip, like `level.dat`) to
-//!   `type.id().withSuffix(".dat").resolveAgainst(worldFolder.resolve("data"))`
-//!   — i.e. **`<world>/data/minecraft/world_gen_settings.dat`**, confirmed
-//!   present on disk in all three 26.2 oracle worlds above.
-//! - The read side is `LevelStorageSource.readExistingSavedData(…,
-//!   WorldGenSettings.TYPE)`, and **vanilla's own fallback when that file is
-//!   unreadable regenerates the world with a fresh random seed**: it logs
-//!   "Unable to read or access the world gen settings file! Falling back to
-//!   the default settings with a random world seed" and builds
-//!   `WorldOptions.defaultWithRandomSeed()`.
+//! - The generic per-file-type save routine wraps the codec's encoded output
+//!   in an outer compound under a lowercase `"data"` key, adds `DataVersion`,
+//!   and writes the whole thing gzip-compressed (like `level.dat`) to a path
+//!   built from the file type's own resource-location id resolved against
+//!   the world folder's `data` directory — i.e.
+//!   **`<world>/data/minecraft/world_gen_settings.dat`**, confirmed present
+//!   on disk in all three 26.2 oracle worlds above.
+//! - **Vanilla's own fallback when that file is unreadable regenerates the
+//!   world with a fresh random seed**: it logs "Unable to read or access the
+//!   world gen settings file! Falling back to the default settings with a
+//!   random world seed" and builds a default options value with a freshly
+//!   rolled seed.
 //!
 //! # The layout, verified byte-by-byte
 //!
@@ -76,15 +73,16 @@
 //!   models none of its contents.
 //! - **[`WorldGenSettings::from_seed`] writes no `dimensions` compound**, so a
 //!   world *this* code creates from scratch is not one vanilla could open —
-//!   `WorldGenSettings.CODEC` would reject it and fall back to a random seed.
-//!   That is a named gap, not an oversight: a Lodestone world is already
-//!   missing player data and block entities, so vanilla-openability is not a
-//!   property it has to defend. The direction that **is** defended, and gated
-//!   against a checked-in real vanilla file, is *reading* a seed vanilla wrote.
+//!   the real decode path would reject it for a missing required field and
+//!   fall back to a random seed. That is a named gap, not an oversight: a
+//!   Lodestone world is already missing player data and block entities, so
+//!   vanilla-openability is not a property it has to defend. The direction
+//!   that **is** defended, and gated against a checked-in real vanilla file,
+//!   is *reading* a seed vanilla wrote.
 //! - **Always gzip**, never zlib — same as `level.dat`, unlike the default
 //!   region-chunk scheme. See [`crate::level_dat`]'s doc for that trap.
-//! - The write is **not** atomic here (vanilla's own `NbtIo.writeCompressed` is
-//!   not either). Losing this file costs the seed, which is why
+//! - The write is **not** atomic here (a real save's own write of this file
+//!   is not either). Losing this file costs the seed, which is why
 //!   [`crate::region_source`-style](crate) callers should write it once at
 //!   world creation and then leave it alone rather than rewriting per save.
 //!

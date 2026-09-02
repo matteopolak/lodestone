@@ -1,5 +1,6 @@
 # Authoritative 26.2 collision shapes, extracted from the real server via
-# ShapeOracle.java (BlockState.getCollisionShape). One line per distinct shape
+# ShapeOracle.java (each block state's own collision-shape query). One line per
+# distinct shape
 # for a curated set of physics-relevant blocks (per-block capped). Format:
 #   <name> <example_state_id> <nboxes> [minX minY minZ maxX maxY maxZ bits]*
 # Coordinates are raw big-endian f64 bit patterns (hex) for bit-exactness.

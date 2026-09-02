@@ -1,6 +1,5 @@
-//! Attack knockback: `LivingEntity.knockback` (`.cache/mc/26.2/src/net/minecraft/
-//! world/entity/LivingEntity.java:1641-1663`) — the velocity impulse a landed
-//! melee hit applies to its target.
+//! Attack knockback: the velocity impulse a landed melee hit applies to its
+//! target.
 //!
 //! # Where this fits, and why it is a pure function
 //!
@@ -12,7 +11,7 @@
 //! same way [`lodestone_entity::apply_reductions`] takes an already-resolved
 //! [`lodestone_entity::Defenses`]. Composing that `power` from a weapon's
 //! `ATTACK_KNOCKBACK` attribute, the Knockback enchantment and the sprint-hit
-//! `+0.5F` bonus (`Player.java:964-969,987-989`) is the caller's job — this
+//! `+0.5F` bonus is the caller's job — this
 //! module does not read attributes, items or enchantments, matching how
 //! `apply_reductions` does not read an inventory.
 //!
@@ -34,7 +33,7 @@
 //! that dispatch has a correct, ready-to-call primitive rather than a second
 //! reason to invent one under time pressure.
 //!
-//! Contrast with [`crate::push`]'s soft crowd push (`Entity.push`, an
+//! Contrast with [`crate::push`]'s soft crowd push (an
 //! **additive**, always-on, both-directions nudge with no attack involved) and
 //! with `lodestone_entity::explosion::{knockback_power, knockback_direction}`
 //! (an explosion's radial scalar/direction, also currently uncalled — see that
@@ -43,8 +42,7 @@
 
 use crate::geometry::Vec3d;
 
-/// `LivingEntity.knockback(power, xd, zd, source, damage, comesFromEffect)`
-/// (`LivingEntity.java:1641-1658`), restricted to the velocity mechanic — the
+/// Vanilla's knockback velocity mechanic, restricted to just that — the
 /// caller has already resolved `power` (attribute + enchantment + sprint bonus,
 /// pre-multiplied by nothing) and `knockback_resistance` (the target's
 /// `minecraft:knockback_resistance` attribute value, `0.0..=1.0`).
@@ -57,8 +55,8 @@ use crate::geometry::Vec3d;
 /// does not exist yet either.
 ///
 /// `jitter` supplies vanilla's `random.nextDouble() - random.nextDouble()`
-/// pairs for the degenerate-direction fallback (`LivingEntity.java:1647-1650`):
-/// each call must return one such difference for `x` and one for `z`. It is
+/// pairs for the degenerate-direction fallback: each call must return one such
+/// difference for `x` and one for `z`. It is
 /// looped exactly as vanilla loops, so a caller whose first jitter is itself
 /// degenerate is asked again — see
 /// [`knockback_loops_the_jitter_until_a_non_degenerate_direction_lands`]. Real
@@ -104,11 +102,10 @@ pub fn knockback_impulse(
 }
 
 /// The horizontal push direction a melee attack uses: the **attacker's
-/// facing**, not the vector toward the target
-/// (`Player.causeExtraKnockback`/`LivingEntity.doHurtTarget`,
-/// `Player.java:1134-1135`: `Mth.sin(yRot * (Math.PI/180))`,
-/// `-Mth.cos(yRot * (Math.PI/180))`). `yaw_degrees` is the attacker's body
-/// yaw at the moment the hit landed.
+/// facing**, not the vector toward the target — vanilla derives it as
+/// `sin(yRot * (Math.PI/180))`, `-cos(yRot * (Math.PI/180))` using its own
+/// quantized trigonometry, where `yRot` is the attacker's body yaw at the
+/// moment the hit landed. `yaw_degrees` is that same value.
 ///
 /// This is a real, load-bearing detail worth calling out explicitly: standing
 /// still and hitting a target behind you still knocks it away from *your*
@@ -119,8 +116,8 @@ pub fn attack_direction(yaw_degrees: f32) -> (f64, f64) {
     // `(float) (Math.PI / 180.0)` — the same deg->rad cast-then-multiply
     // vanilla's own yaw conversions use (see `crate::player`'s
     // `real_x_rot`/`real_y_rot`), not `f32::to_radians`'s own constant, so this
-    // widens to `f64` from the identical `f32` product Java computes before
-    // `Mth.sin(double)`/`Mth.cos(double)` widen it further.
+    // widens to `f64` from the identical `f32` product vanilla computes before
+    // its own quantized sin/cos widen it further.
     let deg_to_rad = (core::f64::consts::PI / 180.0) as f32;
     let rad = f64::from(yaw_degrees * deg_to_rad);
     (f64::from(crate::mth::sin(rad)), -f64::from(crate::mth::cos(rad)))

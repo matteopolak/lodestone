@@ -2,8 +2,9 @@
 //!
 //! A heightmap stores, for each of the 16×16 columns in a chunk, a height in
 //! `0..=world_height` using the same non-straddling bit packing as block
-//! containers (vanilla builds them on a `SimpleBitStorage`, so the layout and
-//! straddling rule are identical to [`PackedArray`]). The bit width is derived
+//! containers (vanilla builds them on the same non-spanning packed-long
+//! storage, so the layout and straddling rule are identical to
+//! [`PackedArray`]). The bit width is derived
 //! from the world height: `ceil(log2(world_height + 1))`.
 //!
 //! # Version-specific framing

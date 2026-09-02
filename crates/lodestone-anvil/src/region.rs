@@ -2,97 +2,80 @@
 //!
 //! This module is deliberately generic over what NBT tree a chunk holds — it
 //! reads and writes "an arbitrary NBT blob at a given chunk coordinate", so
-//! the exact same code works unchanged for entity storage
-//! (`EntityStorage.java`'s separate `entities/` region files) once that
-//! lands; nothing here parses a chunk's own schema (`SerializableChunkData.java`,
-//! a different problem for a different module).
+//! the exact same code works unchanged for entity storage (a separate
+//! `entities/` region file set, keyed the same way) once that lands; nothing
+//! here parses a chunk's own schema (a different problem for a different
+//! module).
 //!
-//! # The container, cited against `.cache/mc/26.2/src/`
+//! # The container format
 //!
-//! `net/minecraft/world/level/chunk/storage/RegionFile.java`:
-//!
-//! - Each `.mca` file holds a 32×32 grid of chunks (`RegionFileStorage.getRegionFile`'s
-//!   filename `r.<regionX>.<regionZ>.mca`), one region covering chunk
-//!   coordinates `[regionX*32, regionX*32+31] × [regionZ*32, regionZ*32+31]`
-//!   — `ChunkPos.getRegionX`/`getRegionLocalX`
-//!   (`x >> 5` / `x & 31`; both operations are exact in Rust's two's
-//!   complement `i32` too, including for negative coordinates).
-//! - An 8192-byte (`SECTOR_BYTES * 2`, the `RegionFile.header` field) header: 1024
-//!   big-endian `i32` **location** entries (the `offsets` field),
-//!   then 1024 big-endian `i32` **timestamp** entries (the `timestamps`
-//!   field), indexed by `localX + localZ*32`
-//!   (`getOffsetIndex`).
-//! - A location entry packs `sectorNumber << 8 | sectorCount`
-//!   (`packSectorOffset`/`getSectorNumber`/`getNumSectors`);
-//!   `0` means "chunk not present" (`CHUNK_NOT_PRESENT`)
-//!   — **not** "corrupt". An all-zero header is a
-//!   legal, empty region file.
-//! - A "sector" is 4096 bytes (`SECTOR_BYTES`); sectors
-//!   0 and 1 are always the header (`usedSectors.force(0, 2)`, in
-//!   `RegionFile`'s constructor), so no chunk payload's `sectorNumber` is ever `<
-//!   2`.
-//! - At `sectorNumber * 4096`: a 5-byte chunk header (`CHUNK_HEADER_SIZE`)
-//!   — a big-endian `i32` `length`, then one
-//!   compression-scheme byte (see `compression.rs`) — followed by
-//!   `length - 1` bytes of (still-)compressed payload
-//!   (`getChunkDataInputStream`; the `- 1`/`+ 1`
-//!   asymmetry is because `length` counts the scheme byte too:
-//!   `ChunkBuffer.close`).
-//! - If the scheme byte has bit `0x80` set (`EXTERNAL_STREAM_FLAG`, tested by
-//!   `isExternalStreamChunk`), the payload is not inline: the true
-//!   scheme is `versionId & !0x80` (`getExternalChunkVersion`)
-//!   and the compressed bytes live in a sibling
-//!   `c.<chunkX>.<chunkZ>.mcc` file (`EXTERNAL_FILE_EXTENSION`,
-//!   `getExternalChunkPath`) with **no**
-//!   envelope of its own — just the raw compressed bytes
-//!   (`writeToExternalFile`/`createExternalChunkInputStream`). This triggers
-//!   once a chunk needs `>= 256` sectors (`EXTERNAL_CHUNK_THRESHOLD`, tested
-//!   in `RegionFile.write`),
-//!   i.e. roughly a 1 MiB compressed payload — large enough that no test
-//!   fixture in this crate exercises it; the write side is implemented from
-//!   the source above but is unverified beyond its own round-trip test.
-//! - `RegionBitmap` (`RegionBitmap.java`) is vanilla's sector allocator: a
-//!   first-fit scan from sector 0 for the first run of `size` consecutive
-//!   free sectors (`RegionBitmap.allocate`). The writer below
-//!   implements the same first-fit-from-zero policy, so a region built here
-//!   in ascending chunk order packs identically to how vanilla would if it
-//!   wrote the same chunks in the same order — see
-//!   `tests/region_container.rs` for a sector-offset prediction that checks
-//!   this, though note it predicts *our own* allocator's output, which is a
-//!   self-consistency check, not evidence of vanilla byte-for-byte parity
-//!   (nothing here has been checked against vanilla's actual sector
-//!   placement on a real multi-chunk file).
-//! - `RegionFile.close`/`padToFullSector` pads
-//!   the file to a whole number of sectors; the writer here does the
-//!   equivalent by construction (every write is sector-aligned already).
+//! - Each `.mca` file holds a 32×32 grid of chunks, filename
+//!   `r.<regionX>.<regionZ>.mca`, one region covering chunk coordinates
+//!   `[regionX*32, regionX*32+31] × [regionZ*32, regionZ*32+31]` — the region
+//!   coordinate is `x >> 5` and the position within it is `x & 31` (both
+//!   operations are exact in Rust's two's complement `i32` too, including
+//!   for negative coordinates).
+//! - An 8192-byte header (`SECTOR_BYTES * 2`): 1024 big-endian `i32`
+//!   **location** entries, then 1024 big-endian `i32` **timestamp** entries,
+//!   indexed by `localX + localZ*32`.
+//! - A location entry packs `sectorNumber << 8 | sectorCount`; `0` means
+//!   "chunk not present" — **not** "corrupt". An all-zero header is a legal,
+//!   empty region file.
+//! - A "sector" is 4096 bytes (`SECTOR_BYTES`); sectors 0 and 1 are always
+//!   the header, so no chunk payload's sector number is ever `< 2`.
+//! - At `sectorNumber * 4096`: a 5-byte chunk header (`CHUNK_HEADER_SIZE`) —
+//!   a big-endian `i32` `length`, then one compression-scheme byte (see
+//!   `compression.rs`) — followed by `length - 1` bytes of (still-)compressed
+//!   payload (the `- 1`/`+ 1` asymmetry is because `length` counts the
+//!   scheme byte too).
+//! - If the scheme byte has bit `0x80` set (`EXTERNAL_STREAM_FLAG`), the
+//!   payload is not inline: the true scheme is `versionId & !0x80` and the
+//!   compressed bytes live in a sibling `c.<chunkX>.<chunkZ>.mcc` file with
+//!   **no** envelope of its own — just the raw compressed bytes. This
+//!   triggers once a chunk needs `>= 256` sectors
+//!   (`EXTERNAL_CHUNK_THRESHOLD_SECTORS`), i.e. roughly a 1 MiB compressed
+//!   payload — large enough that no test fixture in this crate exercises it;
+//!   the write side is implemented from a real save's own on-disk layout but
+//!   is unverified beyond its own round-trip test.
+//! - The sector allocator is a first-fit scan from sector 0 for the first run
+//!   of `size` consecutive free sectors. The writer below implements the
+//!   same first-fit-from-zero policy, so a region built here in ascending
+//!   chunk order packs identically to how a real save would if it wrote the
+//!   same chunks in the same order — see `tests/region_container.rs` for a
+//!   sector-offset prediction that checks this, though note it predicts
+//!   *our own* allocator's output, which is a self-consistency check, not
+//!   evidence of byte-for-byte parity with a real save (nothing here has
+//!   been checked against a real save's actual sector placement on a
+//!   multi-chunk file).
+//! - Closing pads the file to a whole number of sectors; the writer here
+//!   does the equivalent by construction (every write is sector-aligned
+//!   already).
 
 use crate::{CompressionScheme, Error, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Bytes per sector (`RegionFile.SECTOR_BYTES`).
+/// Bytes per sector.
 pub const SECTOR_BYTES: usize = 4096;
-/// Sectors reserved for the header (`RegionFile`'s constructor: `usedSectors.force(0, 2)`).
+/// Sectors reserved for the header.
 pub const HEADER_SECTORS: usize = 2;
 /// Header size in bytes: 1024 location `i32`s + 1024 timestamp `i32`s.
 pub const HEADER_BYTES: usize = SECTOR_BYTES * HEADER_SECTORS;
-/// Chunks per region file side (`RegionFile.getOffsetIndex`: `localZ * 32`).
+/// Chunks per region file side.
 pub const CHUNKS_PER_SIDE: usize = 32;
 /// Location/timestamp table entry count.
 const TABLE_ENTRIES: usize = CHUNKS_PER_SIDE * CHUNKS_PER_SIDE;
-/// The 4-byte length prefix + 1-byte compression-scheme byte
-/// (`RegionFile.CHUNK_HEADER_SIZE`).
+/// The 4-byte length prefix + 1-byte compression-scheme byte.
 const CHUNK_HEADER_SIZE: usize = 5;
-/// `RegionFile.EXTERNAL_STREAM_FLAG`.
+/// High bit of the chunk-header compression-scheme byte, marking a chunk
+/// whose payload is stored externally rather than inline.
 const EXTERNAL_STREAM_FLAG: u8 = 0x80;
-/// `RegionFile.EXTERNAL_CHUNK_THRESHOLD`: a chunk
-/// needing this many sectors or more is stored in a sibling `.mcc` file
-/// instead.
+/// A chunk needing this many sectors or more is stored in a sibling `.mcc`
+/// file instead.
 const EXTERNAL_CHUNK_THRESHOLD_SECTORS: usize = 256;
 
 /// Derives `(regionX, regionZ, localX, localZ)` from an absolute chunk
-/// coordinate, matching `ChunkPos.getRegionX`/`getRegionLocalX`:
-/// `coord >> 5` and `coord & 31`.
+/// coordinate: `coord >> 5` and `coord & 31`.
 #[must_use]
 pub fn region_and_local(chunk_x: i32, chunk_z: i32) -> (i32, i32, u8, u8) {
     (
@@ -176,15 +159,14 @@ impl RegionFile {
     /// Parses `bytes` as a region file's raw on-disk contents.
     ///
     /// An empty input is treated as a brand-new, never-saved region — legal
-    /// and chunk-less, matching vanilla's own header initialization when
-    /// `RegionFile`'s constructor opens a file that doesn't exist yet
-    /// (`this.file.read(...)` returning `-1`, which skips the whole
-    /// sanitation loop and leaves every location/timestamp at its
-    /// zero-initialized default). A **nonzero** length shorter than the
-    /// full 8192-byte header is different: vanilla's own constructor warns
-    /// about this case (`"has truncated header"`) rather than accepting it,
-    /// so this is the one input this parser rejects outright instead of
-    /// degrading gracefully.
+    /// and chunk-less, matching how a real save initializes its header when
+    /// opening a region file that doesn't exist yet (there is nothing to
+    /// read, so the whole sanitation pass below is skipped and every
+    /// location/timestamp is left at its zero-initialized default). A
+    /// **nonzero** length shorter than the full 8192-byte header is
+    /// different: a real save treats this as a truncated, warning-worthy
+    /// header rather than accepting it, so this is the one input this
+    /// parser rejects outright instead of degrading gracefully.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         Self::parse_owned(bytes.to_vec())
     }
@@ -221,18 +203,16 @@ impl RegionFile {
             *slot = read_be_u32(&bytes, SECTOR_BYTES + i * 4);
         }
 
-        // Mirror `RegionFile`'s own constructor-time sanitation: a location
-        // entry whose sector overlaps
-        // the header, whose sector count is 0, or whose sector range runs
-        // past the end of the file is treated as "chunk not present" rather
-        // than trusted as-is. Vanilla does this once at open time rather
-        // than per-read, and only zeroes the *location* — timestamps are
-        // left untouched, matching `RegionFile.java`'s own
-        // `this.offsets.put(i, 0)` (no corresponding `timestamps.put`).
-        // Without this, a hand-corrupted or foreign file with a location
-        // entry pointing into the header itself would have
-        // `read_chunk_raw` misinterpret header bytes as chunk data instead
-        // of cleanly reporting the chunk absent.
+        // Mirror the sanitation a real save performs once at open time: a
+        // location entry whose sector overlaps the header, whose sector
+        // count is 0, or whose sector range runs past the end of the file is
+        // treated as "chunk not present" rather than trusted as-is. This
+        // happens once at open time rather than per-read, and only zeroes
+        // the *location* — timestamps are left untouched. Without this, a
+        // hand-corrupted or foreign file with a location entry pointing
+        // into the header itself would have `read_chunk_raw` misinterpret
+        // header bytes as chunk data instead of cleanly reporting the chunk
+        // absent.
         for location in &mut locations {
             if *location == 0 {
                 continue;
@@ -270,8 +250,7 @@ impl RegionFile {
         Ok(self.locations[idx] != 0)
     }
 
-    /// The chunk's timestamp (epoch seconds, vanilla's `RegionFile.getTimestamp`),
-    /// if present.
+    /// The chunk's timestamp (epoch seconds), if present.
     pub fn timestamp(&self, local_x: u8, local_z: u8) -> Result<Option<u32>> {
         let idx = offset_index(local_x, local_z)?;
         if self.locations[idx] == 0 {
@@ -368,10 +347,10 @@ impl RegionFile {
     }
 
     /// As [`Self::read_chunk_nbt_bytes`], but resolves an external chunk by
-    /// reading `<external_dir>/c.<chunk_x>.<chunk_z>.mcc` — vanilla's own
-    /// naming (`RegionFile.getExternalChunkPath`), where
-    /// `chunk_x`/`chunk_z` are **absolute** chunk coordinates, not the
-    /// region-local ones this file's location table is indexed by.
+    /// reading `<external_dir>/c.<chunk_x>.<chunk_z>.mcc` — the same
+    /// external-file naming a real save uses, where `chunk_x`/`chunk_z` are
+    /// **absolute** chunk coordinates, not the region-local ones this
+    /// file's location table is indexed by.
     pub fn read_chunk_nbt_bytes_resolving_external(
         &self,
         local_x: u8,
@@ -435,11 +414,11 @@ pub struct BuiltRegion {
 
 /// Builds a region file from a set of already-compressed chunk payloads.
 ///
-/// Sector allocation is first-fit from sector 2 onward (the same policy as
-/// vanilla's `RegionBitmap.allocate`), scanning
-/// chunks in the order given — pass chunks in ascending `(region-local
-/// index)` order for a deterministic, minimal-size layout; any order
-/// produces a valid file, just not necessarily the most compact one.
+/// Sector allocation is first-fit from sector 2 onward (the same policy a
+/// real save's own sector allocator uses), scanning chunks in the order
+/// given — pass chunks in ascending `(region-local index)` order for a
+/// deterministic, minimal-size layout; any order produces a valid file, just
+/// not necessarily the most compact one.
 ///
 /// All of `entries` must belong to the same region (same `chunk_x >> 5,
 /// chunk_z >> 5`); this is a container-format primitive, not a
@@ -461,7 +440,7 @@ pub fn build_region(entries: &[ChunkToWrite]) -> Result<BuiltRegion> {
 
         if needed >= EXTERNAL_CHUNK_THRESHOLD_SECTORS {
             // Oversized: a one-sector stub in the region file, real bytes
-            // externalized (`RegionFile.write`'s oversized-chunk branch).
+            // externalized.
             let sector_number = used_sectors as u32;
             let mut stub = vec![0u8; SECTOR_BYTES];
             stub[0..4].copy_from_slice(&1u32.to_be_bytes());
@@ -552,8 +531,8 @@ mod tests {
     #[test]
     fn truncated_nonzero_header_is_rejected() {
         // The corrupt-input control for header parsing: a file that exists
-        // but is shorter than the 8192-byte header is what vanilla's own
-        // constructor warns about, distinct from the
+        // but is shorter than the 8192-byte header is a truncated header
+        // (a real save warns about exactly this case), distinct from the
         // zero-length "never saved" case just above, which must NOT error.
         let err = RegionFile::parse(&[0u8; 100]).expect_err("truncated header must error");
         assert!(matches!(err, Error::TruncatedRegionHeader { available: 100 }));
@@ -570,11 +549,10 @@ mod tests {
 
     #[test]
     fn region_and_local_matches_chunk_pos_formula() {
-        // Predicted from `ChunkPos.getRegionX`/`getRegionLocalX` (`x >> 5`,
-        // `x & 31`), not measured against any file — a pure arithmetic check
-        // that negative
-        // coordinates floor rather than truncate, which is where a naive
-        // `%`-based reimplementation would diverge from Java's `&`.
+        // Predicted from the `x >> 5`/`x & 31` formula, not measured against
+        // any file — a pure arithmetic check that negative coordinates
+        // floor rather than truncate, which is where a naive `%`-based
+        // reimplementation would diverge from a bitwise `&`.
         assert_eq!(region_and_local(0, 0), (0, 0, 0, 0));
         assert_eq!(region_and_local(31, 31), (0, 0, 31, 31));
         assert_eq!(region_and_local(32, 32), (1, 1, 0, 0));
@@ -697,8 +675,8 @@ mod tests {
             .expect("builds");
         let mut corrupt = built.bytes;
         let scheme_byte = 2 * SECTOR_BYTES + 4;
-        // 127 is `RegionFileVersion.VERSION_CUSTOM` — a real, reserved id
-        // that this crate deliberately does not implement (see
+        // 127 is a real, reserved compression-scheme id (the "custom"
+        // scheme) that this crate deliberately does not implement (see
         // `compression.rs`'s doc); 99 is not a real id at all. Either way,
         // this must be a clean error, not a panic or a silent
         // misinterpretation of the bytes as some other scheme.
@@ -750,10 +728,10 @@ mod tests {
 
     #[test]
     fn a_location_entry_pointing_into_the_header_degrades_to_absent() {
-        // Mirrors `RegionFile`'s own constructor-time sanitation: a header whose
-        // location table claims sector 1 (inside the header itself, which
-        // is always sectors 0-1) must be treated as "not present", not
-        // trusted and misread as chunk data. Control: chunk (1,0) is a
+        // Mirrors the sanitation a real save performs at open time: a header
+        // whose location table claims sector 1 (inside the header itself,
+        // which is always sectors 0-1) must be treated as "not present",
+        // not trusted and misread as chunk data. Control: chunk (1,0) is a
         // genuine, untouched chunk in the same file and must still read
         // fine — proving this is the corrupt entry being degraded, not the
         // whole file failing closed.
