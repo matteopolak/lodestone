@@ -53,7 +53,8 @@ pub fn get_seed(x: i32, y: i32, z: i32) -> i64 {
 /// bit-exact parity must respect draw *order*: every method that advances the
 /// generator does so in the same sequence vanilla uses.
 pub trait RandomSource {
-    /// The positional factory this source forks into (`forkPositional`).
+    /// The positional factory this source forks into (vanilla's own
+    /// fork-positional call).
     type Positional: PositionalRandomFactory;
     /// Forks an independent positional factory from the current state, exactly
     /// as `RandomSource.forkPositional()`.
@@ -80,7 +81,7 @@ pub trait RandomSource {
     fn next_double(&mut self) -> f64;
     /// Next standard-normal `f64` (Marsaglia polar, with vanilla's cached pair).
     fn next_gaussian(&mut self) -> f64;
-    /// `consumeCount(rounds)` — advances the generator, discarding output. The
+    /// Vanilla's own consume-count call — advances the generator, discarding output. The
     /// draw shape differs by family (xoroshiro discards `nextLong`s, the LCG
     /// discards `nextInt`s), so it lives on the trait.
     fn consume_count(&mut self, rounds: u32);
@@ -121,7 +122,8 @@ impl<R: RandomSource> WorldgenRandom<R> {
         Self { inner, count: 0 }
     }
 
-    /// Number of `next(bits)` draws performed (mirrors `getCount`).
+    /// Number of `next(bits)` draws performed (mirrors vanilla's own
+    /// get-count query).
     #[must_use]
     pub fn count(&self) -> u32 {
         self.count
@@ -353,7 +355,7 @@ mod tests {
     /// **Not a JVM run** — there is no JDK on this machine and the oracles run under
     /// Apple `container`, which was more setup than this warranted. They come from
     /// an independent transcription of `java.util.Random` plus the
-    /// `seedSlimeChunk` expression in **Python**, where integers are arbitrary
+    /// vanilla's own slime-chunk-seed expression in **Python**, where integers are arbitrary
     /// precision and every 32-bit wrap therefore had to be written out explicitly
     /// rather than happening for free. That is weaker than a captured JVM dump
     /// (same author, so a shared misreading of the spec survives), and stronger than

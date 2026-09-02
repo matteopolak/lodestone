@@ -40,7 +40,7 @@ impl BlendedNoise {
         }
     }
 
-    /// Builds from a freshly-seeded source (the `withNewRandom` path), consuming
+    /// Builds from a freshly-seeded source (vanilla's own "with new random" path), consuming
     /// the min, max, then main noise stacks in order.
     pub fn new<R: RandomSource>(
         random: &mut R,

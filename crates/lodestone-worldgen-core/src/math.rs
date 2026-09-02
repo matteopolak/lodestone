@@ -98,7 +98,8 @@ pub fn ceil(v: f64) -> i32 {
 /// [`f64::round`] — Rust rounds half *away from zero*
 /// (`(-0.5_f64).round() == -1.0`), vanilla rounds half *up*
 /// (`Math.round(-0.5) == 0`), and this repo has no existing helper for the
-/// difference (`SurfaceSystem.getBand`'s `clayBandsOffsetNoise` rounding is
+/// difference (vanilla's own band-lookup routine's own clay-bands-offset-noise
+/// rounding is
 /// this crate's first use of `Math.round`). The two formulas agree
 /// everywhere except exactly on a `.5` boundary, which a continuous noise
 /// sample hits with probability zero in practice — reproduced anyway,
@@ -113,10 +114,12 @@ pub fn round(v: f64) -> i32 {
 /// # Why this exists rather than `powf`/`powi`
 ///
 /// Vanilla writes `Math.pow(2.0, k)` with an integer `k` in four places that
-/// feed terrain — vanilla's own Perlin-noise class's `lowestFreqInputFactor` /
-/// `lowestFreqValueFactor` and its own multi-octave simplex-noise class's
-/// `highestFreq*` twins. **`java.lang.Math.pow` is specified only to within 1
-/// ulp**, and `lowestFreqInputFactor` multiplies the noise *input* coordinate,
+/// feed terrain — vanilla's own Perlin-noise class's own lowest-frequency
+/// input/value factor fields
+/// and its own multi-octave simplex-noise class's
+/// own highest-frequency twin fields. **`java.lang.Math.pow` is specified
+/// only to within 1
+/// ulp**, and the lowest-frequency input factor multiplies the noise *input* coordinate,
 /// so a last-place difference there is not a rounding curiosity: it moves every
 /// sample position in that octave. The same is true of Rust's side —
 /// `f64::powi` is not specified to be exactly rounded either, and expands to a
