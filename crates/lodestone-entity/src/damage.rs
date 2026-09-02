@@ -5,9 +5,9 @@
 //! enchantment protection, then absorption hearts, then health. Reorder any two
 //! and you get a number that is close enough to look right and wrong enough to
 //! matter (a diamond-armour player surviving a hit they should not, or dying to
-//! one they should tank). The formulas here are `CombatRules` and
-//! `LivingEntity.actuallyHurt`, reproduced by behaviour and pinned with
-//! known-value tests.
+//! one they should tank). The formulas here reproduce vanilla's combat-math
+//! reduction pipeline and its living-entity hurt sequence by behaviour, pinned
+//! with known-value tests.
 //!
 //! One thing is deliberately **not** here:
 //!   * **Knockback impulse.** `impl-physics` builds the knockback velocity from
@@ -34,10 +34,9 @@
 //! # Status: the formula is live-verified, the *feed* is not
 //!
 //! `apply_reductions`/`damage_after_armor`/`damage_after_protection` are
-//! cross-checked term-for-term against `CombatRules.getDamageAfterAbsorb`/
-//! `getDamageAfterMagicAbsorb` (`.cache/mc/26.2/src/net/minecraft/world/
-//! damagesource/CombatRules.java`, the whole file is 39 lines) and, beyond
-//! that, **live-verified against a real running vanilla 26.2 server**: a pig
+//! cross-checked term-for-term against vanilla's own post-armour and
+//! post-magic-absorb damage formulas (a 39-line decompiled source file) and,
+//! beyond that, **live-verified against a real running vanilla 26.2 server**: a pig
 //! force-equipped with a full diamond armour set (`armor_formula_lands_on_
 //! the_toughness_hypothesis_not_the_flat_one`'s doc comment has the exact
 //! RCON transcript) took **3.0** damage from a raw 10.0 hit, matching this
@@ -56,10 +55,10 @@
 //!     this crate that carries per-item armour/toughness/enchantment-level
 //!     stats for combat purposes (the ECS `EntityEquipment` component that
 //!     does exist is cosmetic-rendering-only). Building this needs, at
-//!     minimum: per-material armour/toughness constants (`.cache/mc/26.2/
-//!     src/net/minecraft/world/item/equipment/ArmorMaterials.java` has the
-//!     real vanilla table) and a per-entity equipped-item slot model — a
-//!     prerequisite feature, not a `damage.rs` change.
+//!     minimum: per-material armour/toughness constants (vanilla's own
+//!     per-material armour table, in the decompiled source) and a per-entity
+//!     equipped-item slot model — a prerequisite feature, not a `damage.rs`
+//!     change.
 //!   * **`knockback_resistance` reducing an incoming melee push.** No melee
 //!     knockback impulse is computed anywhere in this workspace at all (only
 //!     `explosion::knockback_power` exists, for blasts) — `knockback_
@@ -78,8 +77,8 @@
 use lodestone_data::damage_types::{DamageType, DamageTypeTag};
 
 /// Per-hit flags derived from the damage source's type tags. Each one switches
-/// off a stage of the pipeline, matching the `DamageTypeTags` checks in
-/// `LivingEntity`.
+/// off a stage of the pipeline, matching vanilla's own damage-type-tag checks
+/// on a living entity taking damage.
 ///
 /// Build these with [`DamageFlags::for_damage_type`] rather than by hand.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -100,20 +99,20 @@ impl DamageFlags {
     /// Derives the per-hit flags from a real `minecraft:damage_type` and its
     /// resolved tag memberships — the seam this struct was shaped for.
     ///
-    /// Each field is one `DamageTypeTags` query, matching the vanilla checks
+    /// Each field is one damage-type-tag query, matching the vanilla checks
     /// one-for-one:
     ///
     /// | field | vanilla check |
     /// |---|---|
-    /// | `bypasses_armor` | `LivingEntity.getDamageAfterArmorAbsorb` |
-    /// | `bypasses_effects` | `LivingEntity.getDamageAfterMagicAbsorb` |
-    /// | `bypasses_resistance` | `LivingEntity.getDamageAfterMagicAbsorb` |
-    /// | `bypasses_enchantments` | `LivingEntity.getDamageAfterMagicAbsorb` |
-    /// | `bypasses_cooldown` | `LivingEntity.hurtServer` |
+    /// | `bypasses_armor` | armour-absorb stage |
+    /// | `bypasses_effects` | both Resistance and enchantment-protection stages |
+    /// | `bypasses_resistance` | the Resistance-effect stage |
+    /// | `bypasses_enchantments` | the enchantment-protection stage |
+    /// | `bypasses_cooldown` | the invulnerability-frame gate |
     ///
-    /// Note `bypasses_cooldown` is **empty** in vanilla 26.2 — the tag is
-    /// declared in `DamageTypeTags` and gates the i-frame window, but no
-    /// damage type opts into it. So this always yields `bypasses_cooldown: false`
+    /// Note `bypasses_cooldown` is **empty** in vanilla 26.2 — the tag exists
+    /// and gates the i-frame window, but no damage type opts into it. So this
+    /// always yields `bypasses_cooldown: false`
     /// for a vanilla type, which is correct rather than unimplemented. A caller
     /// that needs to force a hit past the i-frame gate (fall damage in
     /// `lodestone-server` deliberately does) must set it explicitly and say why.
@@ -140,15 +139,15 @@ impl DamageFlags {
     }
 }
 
-/// Maximum armour points that count (`CombatRules.MAX_ARMOR`).
+/// Maximum armour points that count.
 pub const MAX_ARMOR: f32 = 20.0;
-/// Armour protection divider (`CombatRules.ARMOR_PROTECTION_DIVIDER`).
+/// Armour protection divider.
 pub const ARMOR_PROTECTION_DIVIDER: f32 = 25.0;
 /// The invulnerability window a full hit sets, in ticks.
 pub const INVULNERABILITY_TICKS: i32 = 20;
 
-/// Damage after armour absorption, `CombatRules.getDamageAfterAbsorb` — the
-/// toughness-aware armour formula. `enchant_effectiveness` is the weapon's
+/// Damage after armour absorption — the toughness-aware armour formula.
+/// `enchant_effectiveness` is the weapon's
 /// armour-effectiveness multiplier in `0.0..=1.0` (1.0 = no piercing).
 #[must_use]
 pub fn damage_after_armor(
@@ -173,7 +172,7 @@ pub fn damage_after_resistance(damage: f32, amplifier: i32) -> f32 {
     (damage * absorb as f32 / 25.0).max(0.0)
 }
 
-/// Damage after enchantment protection, `CombatRules.getDamageAfterMagicAbsorb`.
+/// Damage after enchantment protection.
 /// `protection` is the summed enchantment protection value (EPF-derived), capped
 /// at 20.
 #[must_use]
@@ -227,7 +226,7 @@ pub struct DamageOutcome {
 
 /// Runs the full reduction pipeline in vanilla order: armour → Resistance →
 /// enchantment protection → absorption. Returns how much reaches health and how
-/// the absorption pool changed (`LivingEntity.actuallyHurt`).
+/// the absorption pool changed.
 #[must_use]
 pub fn apply_reductions(damage: f32, defenses: &Defenses, flags: DamageFlags) -> DamageOutcome {
     let mut dmg = damage;
@@ -262,8 +261,7 @@ pub fn apply_reductions(damage: f32, defenses: &Defenses, flags: DamageFlags) ->
     }
 }
 
-/// The per-entity invulnerability-frame state that gates rapid re-hits
-/// (`invulnerableTime` / `lastHurt`).
+/// The per-entity invulnerability-frame state that gates rapid re-hits.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct HurtCooldown {
     /// Ticks of invulnerability remaining.
@@ -293,7 +291,8 @@ impl HurtCooldown {
     }
 
     /// Applies the vanilla i-frame gate for an incoming `damage` (this is the
-    /// *raw* damage compared before reductions, exactly as `LivingEntity.hurt`).
+    /// *raw* damage compared before reductions, exactly as vanilla's own
+    /// entry point for a living entity taking a hit does).
     /// Mutates the cooldown and returns what should happen.
     pub fn on_hurt(&mut self, damage: f32, flags: DamageFlags) -> HurtDecision {
         if self.invulnerable_time > 10 && !flags.bypasses_cooldown {
