@@ -3000,7 +3000,7 @@ impl<'w> SimMob<'w> {
         }
         // Same "unconditional, so the reset reaches the client too" shape as
         // the warden arm above — a camel that has just stood up must send
-        // `Pose.STANDING` (`0`), not merely stop sending `Pose.SITTING`.
+        // the standing pose (`0`), not merely stop sending the sitting pose.
         if self.entity_type.path() == "camel" {
             metadata.push(MetadataField::Pose(if self.camel_sitting {
                 CAMEL_POSE_SITTING
@@ -5398,7 +5398,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// This villager's summed reputation toward `player` (issue #246) —
-    /// `Villager.getPlayerReputation`. `0` for a non-villager mob or an
+    /// vanilla's own "get player reputation" getter. `0` for a non-villager mob or an
     /// untracked player, matching
     /// [`villager::gossip::GossipContainer::reputation`]'s own default.
     #[must_use]
@@ -5449,21 +5449,20 @@ impl<'w> MobSim<'w> {
         // because that call is what evaluates `can_use`.
         //
         // `no_action_time` ages *before* the feed, not after the goals, because
-        // that is vanilla's own order: `Mob.serverAiStep()` opens with
-        // `this.noActionTime++` and only then ticks the selectors
-        // (`.cache/mc/26.2/src/net/minecraft/world/entity/Mob.java:715-717`), so
+        // that is vanilla's own order: its own server AI step opens with
+        // an unconditional increment and only then ticks the selectors, so
         // a goal sees the already-incremented value. Getting this backwards
         // costs exactly one tick of idle time — small, invisible to any
         // `cargo check`, and caught here only because
         // `no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record`
         // asserts the two readings are *equal* rather than merely both climbing.
         //
-        // The reset half of vanilla `Mob.checkDespawn` runs *before* that
-        // increment, because that is where `ServerLevel` puts it: it calls
-        // `entity.checkDespawn()` every tick immediately before `entity.tick()`
-        // (`.cache/mc/26.2/src/net/minecraft/server/level/ServerLevel.java:426-431`),
-        // and `checkDespawn` is the **only** thing in vanilla that ever clears
-        // `noActionTime` (`Mob.java:704-711`). So a mob standing next to a
+        // The reset half of vanilla's own "check despawn" step runs *before* that
+        // increment, because that is where the world's own per-entity tick
+        // driver puts it: it calls
+        // the despawn check every tick immediately before the entity's own tick,
+        // and that despawn check is the **only** thing in vanilla that ever clears
+        // the no-action-time field. So a mob standing next to a
         // player reads `1` here, never `2`.
         //
         // # Why this loop exists at all (the bug it fixes)
@@ -5475,7 +5474,7 @@ impl<'w> MobSim<'w> {
         // function's own doc comment discloses). So `no_action_time` was
         // monotonic for the whole life of a world, and crossed
         // `RandomStrollGoal`'s idle throttle of `100`
-        // (`ai/goal/RandomStrollGoal.java:43`, our `goals.rs`'s
+        // (vanilla's own random-stroll goal's own idle-time check, our `goals.rs`'s
         // `no_action_time() >= 100` early return) after five seconds — after
         // which **no mob could ever stroll again**, which is why demo mobs
         // reached a connected client and then stood still forever
@@ -5521,16 +5520,17 @@ impl<'w> MobSim<'w> {
             // Player proximity is the **only** reset condition here, and
             // deliberately *not* vanilla's other one.
             //
-            // `Mob.checkDespawn`'s `else` branch does clear the timer every tick
-            // for a mob that requires persistence (`Mob.java:710-711`), keyed on
-            // `isPersistenceRequired() || requiresCustomPersistence()`. Keying
+            // Vanilla's own "check despawn" step's `else` branch does clear the timer every tick
+            // for a mob that requires persistence, keyed on
+            // its own "is persistence required or requires custom persistence"
+            // check. Keying
             // this off `SimMob::persistent` would look like a faithful port and
             // would not be one, because that flag carries a **wider** meaning
             // here than vanilla's: `spawn_species` sets it from `!hostile`, so
             // every passive animal is `persistent` in this crate. Vanilla animals
-            // are not `isPersistenceRequired` — they opt out of distance
-            // despawning through `Animal.removeWhenFarAway() == false`
-            // (`animal/Animal.java:128`), which `checkDespawn` consults for
+            // are not persistence-required — they opt out of distance
+            // despawning through their own "removes when far away" override returning false,
+            // which the despawn check consults for
             // *discarding* and never for the timer. Only a name-tagged or
             // summoned mob takes vanilla's `else` branch.
             //
@@ -5555,8 +5555,8 @@ impl<'w> MobSim<'w> {
                 m.no_action_time = 0;
             }
             m.no_action_time = m.no_action_time.saturating_add(1);
-            // `ShoulderRidingEntity.tick`'s own unconditional
-            // `rideCooldownCounter++`, mirrored the same way `no_action_time`
+            // Vanilla's own shoulder-riding per-tick update's own unconditional
+            // ride-cooldown-counter increment, mirrored the same way `no_action_time`
             // is above.
             m.shoulder_dismount_ticks = m.shoulder_dismount_ticks.saturating_add(1);
         }
@@ -5591,7 +5591,7 @@ impl<'w> MobSim<'w> {
         // without an extra borrow of `self` the loop already avoids for the
         // others.
         let mut mining_fatigue: Vec<MiningFatigueAura> = Vec::new();
-        // `ZombifiedPiglin.maybeAlertOthers`, resolved the same way
+        // Vanilla's own zombified-piglin alert-others call, resolved the same way
         // `hits`/`bred` are: accumulated into a local while `self.mobs` is
         // mutably borrowed for the per-mob loop below, then applied to the
         // rest of `self.mobs` in a second pass afterwards. Each entry is
@@ -5599,8 +5599,8 @@ impl<'w> MobSim<'w> {
         // `piglin_alert_ticks`'s own doc comment for the mechanism and the
         // disclosed target-position approximation.
         let mut piglin_alerts: Vec<(Vec3, Vec3)> = Vec::new();
-        // Issue #229: `Cat.CatRelaxOnOwnerGoal.stop`'s morning-gift request,
-        // and `LandOnOwnersShoulderGoal.tick`'s shoulder-mount request — both
+        // Issue #229: `CatRelaxOnOwnerGoal`'s own "stop" handler's morning-gift request,
+        // and `LandOnOwnersShoulderGoal`'s own per-tick shoulder-mount request — both
         // drained per mob the same way `bred`/`grazes` are (own mob id, since
         // resolving either needs a second look at `self.mobs`/`self.players`
         // after the per-mob loop releases its borrow).
@@ -5640,7 +5640,7 @@ impl<'w> MobSim<'w> {
             if m.rider.is_none() {
                 m.mob.tick(&mut m.goals);
             }
-            // Vanilla `Mob.baseTick`'s ambient-sound roll runs every tick a
+            // Vanilla's own generic per-tick base update's ambient-sound roll runs every tick a
             // mob is alive, independent of any goal — see
             // `roll_ambient_sound`'s own doc.
             if m.health > 0.0 {
@@ -5648,11 +5648,11 @@ impl<'w> MobSim<'w> {
                     ambient_sounds.push(effect);
                 }
             }
-            // `ZombifiedPiglin.customServerAiStep`'s private `maybeAlertOthers`
+            // Vanilla's own zombified-piglin AI step's private alert-others call
             // — see `piglin_alert_ticks`'s own doc comment for the mechanism.
             // `attack_target()` doubles as "current live target position" per
             // that same disclosed approximation (this seam has no entity
-            // reference to resolve a byte-exact `getTarget()` from).
+            // reference to resolve a byte-exact live-target getter from).
             if m.health > 0.0 && m.entity_type.path() == "zombified_piglin" {
                 match m.mob.attack_target() {
                     Some(_) if m.piglin_alert_ticks < 0 => {
@@ -5699,9 +5699,9 @@ impl<'w> MobSim<'w> {
                     m.allay_duplication_cooldown -= 1;
                 }
             }
-            // `Camel.tick`'s forced stand-in-water rule, then
+            // Vanilla's own camel per-tick update's forced stand-in-water rule, then
             // `camel_random_sitting`'s own approximation of
-            // `CamelAi.RandomSitting` — see both functions' own docs. Only
+            // vanilla's own random-sitting camel behaviour — see both functions' own docs. Only
             // one of the two ever fires in a tick: entering water always
             // wins over the random toggle, matching vanilla checking
             // `isInWater()` unconditionally before `RandomSitting` even gets
@@ -5713,7 +5713,7 @@ impl<'w> MobSim<'w> {
                 } else {
                     camel_random_sitting(m, tick_count);
                 }
-                // `Camel.tick`'s `if (dashCooldown > 0) dashCooldown--` —
+                // Vanilla's own camel per-tick update's dash-cooldown decrement —
                 // same "a corpse's fields are frozen, not ticked" gate as
                 // every other per-mob timer in this loop.
                 if m.camel_dash_cooldown > 0 {
@@ -5721,30 +5721,31 @@ impl<'w> MobSim<'w> {
                 }
             }
             let new_attacks = m.mob.take_new_attacks();
-            // Issue #233: `Bee.doHurtTarget` — the sting connects the instant
+            // Issue #233: vanilla's own bee melee-hit handler — the sting connects the instant
             // this mob's own attack fires (this codebase has no separate
             // "swing missed" outcome, matching the fidelity every other
             // consumer of `take_new_attacks` already assumes). `stung_at` is
             // sticky (only the *first* sting matters) and clearing `anger`
-            // here is vanilla's `stopBeingAngry()`, called from the same
+            // here is vanilla's own "stop being angry" call, called from the same
             // method — see `SimMob::stung_at`'s own doc comment for why this
             // is what stops the bee re-acquiring a target without a second
-            // `!hasStung()` guard on the goal itself.
+            // "has not stung" guard on the goal itself.
             if !new_attacks.is_empty() && m.stung_at.is_none() && m.entity_type.path() == "bee" {
                 m.stung_at = Some(tick_count);
                 m.anger = None;
             }
             for target_pos in new_attacks {
                 // Carry the attacker's own position too, so the victim can
-                // retaliate: vanilla's `hurt` sets `lastHurtByMob` from the
-                // damage source's attacker (`LivingEntity.java:1358`), which is
+                // retaliate: vanilla's own generic hurt handler sets its own
+                // "last hurt by mob" field from the
+                // damage source's attacker, which is
                 // what `HurtByTargetGoal` reads. Before #441 this tuple was
                 // `(target, damage)` only, so a mob struck by another mob had
                 // no way to learn who hit it and `HurtByTargetGoal` could never
                 // fire even once the perception seam existed.
                 hits.push((m.attack_target_id, target_pos, m.attack_damage, m.position()));
             }
-            // Issue #233: `Bee.customServerAiStep`'s self-destruct roll — see
+            // Issue #233: vanilla's own bee AI step's self-destruct roll — see
             // `bee_sting_death_roll`'s own doc comment for the exact formula
             // and its two derived bounds (certainly alive at sting+1,
             // certainly dead by sting+1200).
@@ -5794,10 +5795,10 @@ impl<'w> MobSim<'w> {
             for amount in m.mob.take_self_damage() {
                 self_damage.push((m.id, amount));
             }
-            // Issue #244: `Villager.maybeDecayGossip`'s 24000-tick cadence.
+            // Issue #244: vanilla's own villager gossip-decay step's 24000-tick cadence.
             // `None` -> `Some(tick_count)` is the "just record the timestamp,
             // do not decay yet" first-call branch vanilla's own
-            // `lastGossipDecayTime == 0L` check takes.
+            // zero-timestamp check takes.
             if m.entity_type.path() == "villager" {
                 match m.last_gossip_decay_tick {
                     None => m.last_gossip_decay_tick = Some(tick_count),
@@ -5808,7 +5809,7 @@ impl<'w> MobSim<'w> {
                     Some(_) => {}
                 }
             }
-            // Issue #247: `ZombieVillager.tick`'s conversion countdown.
+            // Issue #247: vanilla's own zombie-villager per-tick update's conversion countdown.
             if m.entity_type.path() == "zombie_villager"
                 && let Some(mut state) = m.conversion
             {
@@ -5820,7 +5821,7 @@ impl<'w> MobSim<'w> {
                 );
                 state.remaining_ticks -= progress;
                 if state.remaining_ticks <= 0 {
-                    // `ZombieVillager.finishConversion`: profession, level and
+                    // Vanilla's own zombie-villager "finish conversion" step: profession, level and
                     // xp are already generic `SimMob` fields carried on this
                     // same struct, so becoming a villager needs no explicit
                     // copy of them — only the species-derived combat stats
@@ -5843,7 +5844,8 @@ impl<'w> MobSim<'w> {
                             starter,
                         );
                     }
-                    // `villager.addEffect(new MobEffectInstance(NAUSEA, 200, 0))`
+                    // Vanilla's own generic add-effect call with nausea, 200
+                    // ticks, amplifier 0
                     // — the "confusion" state the issue's own body names; a real
                     // timed effect, not cosmetic-only text, so a caller reading
                     // `SimMob::effects()` right after conversion actually finds
@@ -5865,10 +5867,10 @@ impl<'w> MobSim<'w> {
                     m.conversion = Some(state);
                 }
             }
-            // Issue #232: `ElderGuardian.customServerAiStep`'s periodic
+            // Issue #232: vanilla's own elder-guardian AI step's periodic
             // mining-fatigue pulse. See `ELDER_GUARDIAN_EFFECT_INTERVAL`'s own
             // doc for why `tick_count` stands in for vanilla's per-entity
-            // `Entity.tickCount`.
+            // generic tick-count field.
             if m.entity_type.path() == "elder_guardian"
                 && tick_count.wrapping_add(m.id as u64) % ELDER_GUARDIAN_EFFECT_INTERVAL == 0
             {
@@ -5890,10 +5892,10 @@ impl<'w> MobSim<'w> {
         self.pending_grazes.extend(grazes);
         self.pending_ambient_sounds.extend(ambient_sounds);
         self.pending_mining_fatigue.extend(mining_fatigue);
-        // `ZombifiedPiglin.maybeAlertOthers`'s propagation half, resolved now
+        // Vanilla's own zombified-piglin alert-others call's propagation half, resolved now
         // that the per-mob loop's mutable borrow on an individual `SimMob`
         // has ended — same box `alert_species("zombified_piglin")` already
-        // sizes for the one-shot `HurtByTargetGoal.alertOthers` path, and the
+        // sizes for the one-shot "alert others of the same owner" goal path, and the
         // same "already holding a live grudge is not redirected" gate
         // `MobSim::attack`'s own pack-alert census uses.
         if let Some((box_xz, box_y, _)) = alert_species("zombified_piglin") {
@@ -5957,9 +5959,9 @@ impl<'w> MobSim<'w> {
                     raw_damage,
                     attacker_pos,
                 });
-                // `Wolf.OwnerHurtByTargetGoal`: a tamed pet retaliates against
-                // whatever just hurt its owner, reading `owner.
-                // getLastHurtByMob()` on the *owner's* own `LivingEntity` —
+                // Vanilla's own "owner hurt by" retaliation goal: a tamed pet retaliates against
+                // whatever just hurt its owner, reading the owner's
+                // own "last hurt by mob" field on the *owner's* own living-entity state —
                 // same field vanilla's `HurtByTargetGoal` reads off a mob
                 // itself, recorded on the player instead. The seam carries no
                 // entity identity (see `MobController::owner_position`'s own
@@ -5977,10 +5979,10 @@ impl<'w> MobSim<'w> {
             }
         }
         // Issue #458, primitive 4: self-inflicted damage — the bee's sting
-        // self-destruct (`animal/Bee.java:374-379`). `damage_self` only
+        // self-destruct. `damage_self` only
         // records the intent; health lives here, so it is applied through the
         // same pipeline a melee hit uses (i-frames and armour reductions
-        // included, matching vanilla's `hurtServer`). Resolved before the
+        // included, matching vanilla's own generic hurt handler). Resolved before the
         // retain below, so a mob that kills itself leaves the sim in the same
         // tick, exactly as a fatal melee hit does.
         for (id, amount) in self_damage {
