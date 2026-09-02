@@ -202,6 +202,23 @@ pub struct ChunkColumn {
     /// dependency is implied, and `cargo check -p lodestone-shell
     /// --no-default-features` still passes.
     palette_state_ids: Vec<u32>,
+    /// `palette_reaction[id] == crate::redstone_graph::classify(&palette[id])`
+    /// — which family, if any, a neighbour notification landing on a cell
+    /// holding `palette[id]` dispatches to. The third per-palette-entry
+    /// derived table, sound for exactly the reason
+    /// [`palette_ticking`](Self::palette_ticking) is, and maintained in the
+    /// same two places.
+    ///
+    /// **This is what makes redstone dispatch cost an array index.**
+    /// `crate::random_tick::react_to_notification` used to open every
+    /// notification by cloning the cell's state string and then running up
+    /// to fifteen `base_name`-plus-`strcmp` family predicates over it, before
+    /// deciding — for the large majority of notifications — that the cell
+    /// reacts to nothing. Classifying the *palette* instead makes that one
+    /// index into this table. See `crate::redstone_graph`'s module doc for
+    /// why a palette-derived table has no staleness class, and
+    /// `docs/redstone-execution.md` for the measured split.
+    palette_reaction: Vec<crate::redstone_graph::ReactionClass>,
     /// How many cells in each implicit 16-row window hold a randomly-ticking
     /// state — vanilla's `LevelChunkSection.tickingBlockCount`
     /// (`LevelChunkSection.java:16`), one entry per section, `len =
@@ -327,6 +344,11 @@ impl ChunkColumn {
             // regenerated table that renumbered air must not silently desync
             // this from the real registry id.
             palette_state_ids: vec![resolve_palette_state_id(AIR)],
+            // Third derived table, same append-time contract: air
+            // reacts to nothing, but it is classified rather than
+            // assumed so the one place a class is decided stays
+            // `redstone_graph::classify`.
+            palette_reaction: vec![crate::redstone_graph::classify(AIR)],
             section_ticking: vec![0u16; (height as usize).div_ceil(SECTION_ROWS)],
             biome_quarts: std::array::from_fn(|_| DEFAULT_BIOME.to_string()),
             biome_palette: vec![DEFAULT_BIOME.to_string()],
@@ -404,6 +426,7 @@ impl ChunkColumn {
             // constructor (`LevelChunkSection.java:33`).
             palette_ticking: Vec::new(),
             palette_state_ids: Vec::new(),
+            palette_reaction: Vec::new(),
             section_ticking: Vec::new(),
             biome_quarts,
             biome_palette,
@@ -739,6 +762,14 @@ impl ChunkColumn {
             .iter()
             .map(|state| resolve_palette_state_id(state))
             .collect();
+        // And the third, for the same reason: this constructor adopts a
+        // palette `intern` never saw, so the append-time classification in
+        // `intern` cannot have run for any of its entries.
+        self.palette_reaction = self
+            .palette
+            .iter()
+            .map(|state| crate::redstone_graph::classify(state))
+            .collect();
         let sections = (self.height as usize).div_ceil(SECTION_ROWS);
         let mut counts = vec![0u16; sections];
         for s in 0..sections {
@@ -774,6 +805,11 @@ impl ChunkColumn {
         // the protocol encoder can index it 98,304 times without ever seeing a
         // string. See `palette_state_ids`.
         self.palette_state_ids.push(resolve_palette_state_id(name));
+        // And the third: classify which redstone family (if any) a neighbour
+        // notification landing on this state dispatches to, so the dispatch
+        // itself never evaluates a string predicate. See
+        // `crate::redstone_graph`.
+        self.palette_reaction.push(crate::redstone_graph::classify(name));
         debug_assert_eq!(
             self.palette.len(),
             self.palette_ticking.len(),
@@ -783,6 +819,11 @@ impl ChunkColumn {
             self.palette.len(),
             self.palette_state_ids.len(),
             "palette and its resolved state ids must stay the same length"
+        );
+        debug_assert_eq!(
+            self.palette.len(),
+            self.palette_reaction.len(),
+            "palette and its reaction classification must stay the same length"
         );
         (self.palette.len() - 1) as u16
     }
@@ -900,6 +941,25 @@ impl ChunkColumn {
             return lodestone_data::block_states::air_state_id();
         }
         self.palette_state_ids[self.blocks.get(x, y_local, z) as usize]
+    }
+
+    /// Which redstone family, if any, a neighbour notification landing at a
+    /// local `(x, z)` in `0..16` and world `y` dispatches to. Out-of-range Y
+    /// is air's class, exactly as [`block_state`](Self::block_state) returns
+    /// `"minecraft:air"`.
+    ///
+    /// Two array indexes and a range check: no string allocation, no
+    /// `base_name` split, no `strcmp`. The classification happened once per
+    /// palette entry — see
+    /// [`palette_reaction`](Self::palette_reaction) and
+    /// [`crate::redstone_graph`].
+    #[must_use]
+    pub(crate) fn reaction_class(&self, x: i32, y: i32, z: i32) -> crate::redstone_graph::ReactionClass {
+        let y_local = y - self.min_y;
+        if !(0..self.height).contains(&y_local) {
+            return crate::redstone_graph::ReactionClass::Inert;
+        }
+        self.palette_reaction[self.blocks.get(x, y_local, z) as usize]
     }
 
     /// This column's palette resolved to global 26.2 block-state ids, parallel to

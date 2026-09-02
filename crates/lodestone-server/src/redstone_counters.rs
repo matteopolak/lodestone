@@ -103,6 +103,19 @@ pub const REACTION_KIND_NAMES: [&str; REACTION_KIND_COUNT] =
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Snapshot {
     pub notifications_issued: u64,
+    /// Every notification bucketed by the
+    /// [`crate::redstone_graph::ReactionClass`] of the cell it landed on,
+    /// bumped at the same hook as [`Snapshot::notifications_issued`] and
+    /// therefore summing to it exactly.
+    ///
+    /// This is the counter the execution-model rework is measured with.
+    /// [`ReactionClass::Inert`](crate::redstone_graph::ReactionClass::Inert)
+    /// is the interesting bucket: those notifications reach a cell that
+    /// reacts to nothing, and before the palette-derived classification
+    /// landed each one of them cost a heap-allocated copy of the cell's
+    /// state string plus a full run of all fifteen family predicates before
+    /// concluding exactly that.
+    pub notifications_by_class: [u64; crate::redstone_graph::CLASS_COUNT],
     pub reactions_dispatched: [u64; REACTION_KIND_COUNT],
     pub cell_reads: u64,
     pub state_parses: u64,
@@ -119,6 +132,46 @@ impl Snapshot {
     #[must_use]
     pub fn reactions_total(&self) -> u64 {
         self.reactions_dispatched.iter().sum()
+    }
+
+    /// Notifications that landed on a cell reacting to nothing.
+    #[must_use]
+    pub fn inert_notifications(&self) -> u64 {
+        self.notifications_by_class[crate::redstone_graph::ReactionClass::Inert.index()]
+    }
+
+    /// The number of **string family predicates** the pre-classification
+    /// dispatch chain would have evaluated for this same set of
+    /// notifications: each one ran the chain from the top until its class's
+    /// arm matched, and an inert cell ran every arm.
+    ///
+    /// Derived arithmetic over
+    /// [`notifications_by_class`](Snapshot::notifications_by_class) and
+    /// [`ReactionClass::chain_probes`](crate::redstone_graph::ReactionClass::chain_probes),
+    /// **not** an instrument: it exists so the cost the classification
+    /// removes can be quoted as an exact count rather than as a duration on
+    /// a machine running other work. `chain_probes` is pinned against the
+    /// dispatch site's real arm order by `redstone_graph`'s own gate, which
+    /// is what makes this arithmetic checkable rather than asserted.
+    #[must_use]
+    pub fn chain_probes_avoided(&self) -> u64 {
+        (0..crate::redstone_graph::CLASS_COUNT)
+            .map(|i| {
+                let class = crate::redstone_graph::ReactionClass::from_index(i);
+                self.notifications_by_class[i] * class.chain_probes()
+            })
+            .sum()
+    }
+
+    /// The number of block-state **string clones** the pre-classification
+    /// dispatch performed at its entry: one per notification, unconditional,
+    /// before any family had been decided. After the classification only a
+    /// non-inert notification clones, so the saving is
+    /// [`inert_notifications`](Snapshot::inert_notifications) and the
+    /// remainder is [`reactions_total`](Snapshot::reactions_total)-shaped.
+    #[must_use]
+    pub fn dispatch_state_clones_avoided(&self) -> u64 {
+        self.inert_notifications()
     }
 }
 
@@ -161,6 +214,14 @@ pub(crate) fn bump_notification() {
 #[inline]
 pub(crate) fn bump_reaction(kind: ReactionKind) {
     imp::bump_reaction(kind);
+}
+
+/// Buckets one notification by the class of the cell it landed on. Called
+/// from the same place as [`bump_notification`], immediately after the
+/// classification is read, so the two always agree.
+#[inline]
+pub(crate) fn bump_notification_class(class: crate::redstone_graph::ReactionClass) {
+    imp::bump_notification_class(class);
 }
 
 #[inline]
@@ -217,6 +278,7 @@ mod imp {
 
     struct Counters {
         notifications_issued: AtomicU64,
+        notifications_by_class: [AtomicU64; crate::redstone_graph::CLASS_COUNT],
         reactions_dispatched: [AtomicU64; REACTION_KIND_COUNT],
         cell_reads: AtomicU64,
         state_parses: AtomicU64,
@@ -229,6 +291,7 @@ mod imp {
 
     static C: Counters = Counters {
         notifications_issued: AtomicU64::new(0),
+        notifications_by_class: [const { AtomicU64::new(0) }; crate::redstone_graph::CLASS_COUNT],
         reactions_dispatched: [const { AtomicU64::new(0) }; REACTION_KIND_COUNT],
         cell_reads: AtomicU64::new(0),
         state_parses: AtomicU64::new(0),
@@ -262,6 +325,11 @@ mod imp {
     #[inline]
     pub fn bump_reaction(kind: ReactionKind) {
         bump(&C.reactions_dispatched[kind as usize]);
+    }
+
+    #[inline]
+    pub fn bump_notification_class(class: crate::redstone_graph::ReactionClass) {
+        bump(&C.notifications_by_class[class.index()]);
     }
 
     #[inline]
@@ -312,6 +380,9 @@ mod imp {
 
     pub fn reset() {
         C.notifications_issued.store(0, Relaxed);
+        for slot in &C.notifications_by_class {
+            slot.store(0, Relaxed);
+        }
         for slot in &C.reactions_dispatched {
             slot.store(0, Relaxed);
         }
@@ -328,6 +399,7 @@ mod imp {
     pub fn snapshot() -> Snapshot {
         Snapshot {
             notifications_issued: C.notifications_issued.load(Relaxed),
+            notifications_by_class: std::array::from_fn(|i| C.notifications_by_class[i].load(Relaxed)),
             reactions_dispatched: std::array::from_fn(|i| C.reactions_dispatched[i].load(Relaxed)),
             cell_reads: C.cell_reads.load(Relaxed),
             state_parses: C.state_parses.load(Relaxed),
@@ -348,6 +420,8 @@ mod imp {
     pub fn bump_notification() {}
     #[inline(always)]
     pub fn bump_reaction(_kind: ReactionKind) {}
+    #[inline(always)]
+    pub fn bump_notification_class(_class: crate::redstone_graph::ReactionClass) {}
     #[inline(always)]
     pub fn bump_cell_read() {}
     #[inline(always)]
@@ -643,6 +717,142 @@ mod tests {
             snap.cell_reads as f64 / snap.notifications_issued as f64,
             snap.state_parses as f64 / snap.notifications_issued as f64,
             snap.signal_queries as f64 / snap.notifications_issued as f64,
+        );
+    }
+
+    /// **The execution-model rework's own measurement**, on the same 15-cell
+    /// run the cost-split test above uses, plus a repeater, an observer and
+    /// a comparator so more than one class is populated.
+    ///
+    /// Two things are asserted rather than recorded, and both are
+    /// cross-checks between counters bumped from *different* places — which
+    /// is the point, because a histogram that agreed with itself would prove
+    /// nothing:
+    ///
+    /// 1. `notifications_by_class` sums to `notifications_issued`. Those two
+    ///    are bumped at the same hook, so a mismatch means the class read
+    ///    and the notification count disagree about what a notification is.
+    /// 2. **Each family's class bucket equals that family's own
+    ///    `reactions_dispatched` count.** The bucket is decided by the
+    ///    *palette-derived table* before dispatch; the reaction counter is
+    ///    bumped *inside the arm's body* after the guard has already
+    ///    matched. They are the same number if and only if the
+    ///    classification agrees with the arm the dispatch actually took —
+    ///    a live, per-notification differential between the table and the
+    ///    dispatch, running on every fixture in this module, complementing
+    ///    `redstone_graph`'s exhaustive-but-static gate over the state
+    ///    table.
+    ///
+    /// The savings figures are **recorded, not gated**: they are properties
+    /// of this fixture's shape, not invariants, and pinning them would be a
+    /// round number chosen as an expectation. Run with
+    /// `--features redstone-counters -- --test-threads=1 --nocapture` — see
+    /// this module's `reset()` doc for why any other thread setting makes
+    /// the reading a hypothesis about contamination.
+    #[test]
+    fn the_class_histogram_agrees_with_what_the_dispatch_actually_ran() {
+        use crate::redstone_graph::{ReactionClass, CLASS_COUNT, CLASS_NAMES};
+
+        const RUN_LEN: i32 = 15;
+        let mut column = column_with_floor();
+        column.set_block(0, Y, ROW_Z, &redstone_torch::set_standing_lit(true));
+        for x in 1..=RUN_LEN {
+            column.set_block(x, Y, ROW_Z, &redstone_wire::set_power(0));
+        }
+        // A second row of non-dust families beside the run, so the histogram
+        // has more than two populated buckets and assertion 2 below is
+        // exercised for more than one class. Placed one row over (`ROW_Z +
+        // 2`) so it neither feeds nor is fed by the run — this measures
+        // dispatch classification, not a bigger circuit.
+        column.set_block(4, Y, ROW_Z + 2, "minecraft:repeater[delay=1,facing=north,locked=false,powered=false]");
+        column.set_block(6, Y, ROW_Z + 2, "minecraft:observer[facing=north,powered=false]");
+        column.set_block(8, Y, ROW_Z + 2, "minecraft:comparator[facing=north,mode=compare,powered=false]");
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset();
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let mut events = propagate_and_react(&mut column, 0, 0, 1, Y, ROW_Z, &mut block_ticks, NOW);
+        // Drive the second row too, so its three families really dispatch.
+        for x in [4, 6, 8] {
+            events.extend(propagate_and_react(
+                &mut column,
+                0,
+                0,
+                x,
+                Y,
+                ROW_Z + 2,
+                &mut block_ticks,
+                NOW,
+            ));
+        }
+        let snap = snapshot();
+
+        // PREMISE: the run must actually settle, or this measures an aborted
+        // cascade instead of a contraption.
+        assert!(!events.is_empty(), "PREMISE FAILED: the fixture must change something");
+        assert!(snap.notifications_issued > 0, "PREMISE FAILED: {snap:?}");
+
+        // 1. The histogram partitions the notifications exactly.
+        let bucketed: u64 = snap.notifications_by_class.iter().sum();
+        assert_eq!(
+            bucketed, snap.notifications_issued,
+            "the per-class histogram ({bucketed}) must sum to notifications_issued ({}) — they              are bumped at the same hook, so a difference means the class read and the              notification count disagree about what a notification is",
+            snap.notifications_issued
+        );
+
+        // 2. Table-decided class == arm-observed dispatch, per family. Every
+        //    family below bumps its `ReactionKind` unconditionally as the
+        //    first statement of its arm, so the two counts coincide exactly
+        //    when the classification is right.
+        let pairs = [
+            (ReactionClass::Wire, ReactionKind::Dust),
+            (ReactionClass::Torch, ReactionKind::Torch),
+            (ReactionClass::Repeater, ReactionKind::Repeater),
+            (ReactionClass::Comparator, ReactionKind::Comparator),
+            (ReactionClass::Observer, ReactionKind::Observer),
+        ];
+        // Collected, not asserted in the loop: an `assert!` inside the loop
+        // proves one arm and leaves the other four arguments rather than
+        // observations.
+        let mut disagreements = Vec::new();
+        for (class, kind) in pairs {
+            let by_class = snap.notifications_by_class[class.index()];
+            let by_arm = snap.reactions_dispatched[kind as usize];
+            if by_class != by_arm {
+                disagreements.push((class.name(), by_class, by_arm));
+            }
+        }
+        assert!(
+            disagreements.is_empty(),
+            "the palette-derived classification and the arm that actually ran disagree              (family, classified, dispatched): {disagreements:?} -- full snapshot {snap:?}"
+        );
+
+        // PREMISE for assertion 2: at least two distinct families must have
+        // actually dispatched, or the loop above compared zeros to zeros and
+        // is vacuous.
+        let families_seen = pairs
+            .iter()
+            .filter(|(class, _)| snap.notifications_by_class[class.index()] > 0)
+            .count();
+        assert!(
+            families_seen >= 2,
+            "PREMISE FAILED: only {families_seen} family class(es) were populated, so the              table-vs-dispatch comparison above compared zeros: {snap:?}"
+        );
+
+        // Recorded, not gated.
+        let histogram: Vec<String> = (0..CLASS_COUNT)
+            .filter(|i| snap.notifications_by_class[*i] > 0)
+            .map(|i| format!("{}={}", CLASS_NAMES[i], snap.notifications_by_class[i]))
+            .collect();
+        eprintln!(
+            "reaction-class histogram over {} notifications: [{}] -- inert={} ({:.1}% of all              notifications), string family predicates avoided={} ({:.2}/notification),              block-state string clones avoided={}",
+            snap.notifications_issued,
+            histogram.join(" "),
+            snap.inert_notifications(),
+            100.0 * snap.inert_notifications() as f64 / snap.notifications_issued as f64,
+            snap.chain_probes_avoided(),
+            snap.chain_probes_avoided() as f64 / snap.notifications_issued as f64,
+            snap.dispatch_state_clones_avoided(),
         );
     }
 }
