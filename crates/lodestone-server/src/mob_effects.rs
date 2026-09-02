@@ -22,14 +22,13 @@
 //!
 //! ## The periodic tick is a shift, and at high amplifiers it fires every tick
 //!
-//! Every periodic effect is `shouldApplyEffectTickThisTick(tickCount, amplifier)`
-//! plus `applyEffectTick`. The interval is a **right shift by the amplifier**, and
-//! the guard is the part that gets dropped:
-//!
-//! ```java
-//! int interval = 25 >> amplification;
-//! return interval > 0 ? tickCount % interval == 0 : true;
-//! ```
+//! Every periodic effect's real tick gate computes an interval and asks
+//! whether the tick count is a multiple of it. The interval is a **right shift
+//! by the amplifier**, and the guard is the part that gets dropped: with a
+//! base interval of `25`, the real interval is `25 >> amplifier`, and the tick
+//! fires when that interval is positive **and** the tick count is divisible by
+//! it, or unconditionally — every tick — once the interval has shifted down to
+//! zero.
 //!
 //! So once the shift reaches zero the effect applies **every tick**, not never. For
 //! poison (`25`) that is amplifier 5; for wither (`40`) amplifier 6; for

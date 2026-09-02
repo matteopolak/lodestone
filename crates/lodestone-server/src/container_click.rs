@@ -956,16 +956,11 @@ pub fn do_click_with(
         }
         // THROW — Q (one) or ctrl-Q (the whole stack), cursor must be empty.
         //
-        // Vanilla (`AbstractContainerMenu.doClick`'s `THROW` arm):
-        // ```java
-        // int amount = buttonNum == 0 ? 1 : slot.getItem().getCount();
-        // itemStack = slot.safeTake(amount, MAX, player); player.drop(itemStack, true);
-        // if (buttonNum == 1) {
-        //    while (!itemStack.isEmpty() && ItemStack.isSameItem(slot.getItem(), itemStack)) {
-        //       itemStack = slot.safeTake(amount, MAX, player); player.drop(itemStack, true);
-        //    }
-        // }
-        // ```
+        // The real THROW click arm, transcribed as the rule it implements:
+        // take `amount` from the slot (`1` for a plain Q, the slot's full
+        // count for ctrl-Q) and drop it. For ctrl-Q **only**, repeat the
+        // same take-and-drop for as long as the slot is non-empty and still
+        // holds the same item — the same fixed `amount` every iteration.
         // `amount` is fixed at the *first* read of the slot's count and reused for
         // every iteration — for an ordinary stack the slot empties on the first take
         // and the loop condition fails immediately, but for a take-only result slot
@@ -1418,24 +1413,21 @@ fn take_result(
     resync_result(layout, slots, recipe);
 }
 
-/// `QUICK_MOVE`: `quickMoveStack`, then vanilla's own **repeat loop**.
+/// `QUICK_MOVE`: the quick-move-stack transfer, then the real **repeat loop**.
 ///
-/// `AbstractContainerMenu.doClick`'s `QUICK_MOVE` arm is
-///
-/// ```java
-/// ItemStack clicked = this.quickMoveStack(player, slotIndex);
-/// while (!clicked.isEmpty() && ItemStack.isSameItem(this.getSlot(slotIndex).getItem(), clicked)) {
-///    clicked = this.quickMoveStack(player, slotIndex);
-/// }
-/// ```
+/// The real QUICK_MOVE click arm, transcribed as the rule it implements:
+/// run the quick-move transfer for the slot once, then keep re-running it
+/// for as long as the result is non-empty and the slot still holds the same
+/// item it started with.
 ///
 /// For every slot but a crafting result that loop runs once — the slot is empty or
 /// unchanged the second time round. For the **result** slot it is the whole of
 /// "shift-click crafts until the grid runs out": each round consumes one of every
-/// grid cell, `slotsChanged` refills the result with the same item, and the condition
+/// grid cell, the slot-changed hook refills the result with the same item, and the
+/// condition
 /// holds again. It ends when the grid can no longer produce that item (nothing to
-/// refill with) or the inventory has no room (nothing moves, so `quickMoveStack`
-/// returns EMPTY).
+/// refill with) or the inventory has no room (nothing moves, so the transfer
+/// returns an empty stack).
 ///
 /// Without a [`ResultRecipe`] the result slot never refills and this is one craft,
 /// which is [`do_click`]'s documented recipe-free behaviour.

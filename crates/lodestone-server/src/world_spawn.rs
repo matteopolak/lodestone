@@ -61,10 +61,9 @@ pub(crate) struct WorldSpawn {
 }
 
 /// A player's per-player respawn point — the bed they last slept in, the
-/// tracking half. Vanilla stores this per player as
-/// `ServerPlayer.RespawnConfig` (a `RespawnData` plus a `forced` flag) and
-/// consults it on death before falling back to the level spawn
-/// (`ServerPlayer.findRespawnPositionAndUseSpawnBlock`, `PlayerList.respawn`).
+/// tracking half. The real per-player state stores this alongside a
+/// force-set flag and consults it on death before falling back to the level
+/// spawn.
 ///
 /// Position only for now: vanilla also records the facing at bed-entry time
 /// and spawns the player with it, but this crate's bed interaction is the
@@ -78,20 +77,13 @@ pub(crate) struct RespawnPoint {
     pub pos: BlockPos,
 }
 
-/// Vanilla's `ChunkGenerator.getSpawnHeight`:
-///
-/// ```java
-/// public int getSpawnHeight(final LevelHeightAccessor heightAccessor) {
-///    return 64;
-/// }
-/// ```
-///
-/// A literal `64`, and `NoiseBasedChunkGenerator` does **not** override it — only
-/// `FlatLevelSource` does — so this is the value in force for the overworld this
-/// crate serves. `MinecraftServer.setInitialSpawn` reads it, keeps it because
-/// `64 >= level.getMinY()`, and pre-seeds the world spawn at `offset(8, 64, 8)`;
-/// the `WORLD_SURFACE` heightmap branch beside it is dead code for any noise
-/// generator.
+/// The real chunk generator's spawn-height query for a noise-based world answers
+/// a literal `64` unconditionally — only the superflat generator overrides it
+/// with something else. The world's initial-spawn setup reads that literal,
+/// keeps it because it sits at or above the world's minimum build height, and
+/// pre-seeds the world spawn eight blocks in from the chunk origin at that
+/// height; a surface-heightmap branch beside it in the real logic is dead code
+/// for any noise generator, since the literal always short-circuits it.
 ///
 /// # Why a literal is the right answer and a surface query is not
 ///
@@ -106,26 +98,27 @@ const GENERATOR_SPAWN_HEIGHT: i32 = 64;
 /// position `(lx, lz)` in `[0..16)`, or `None` when the column is invalid
 /// there.
 ///
-/// This is vanilla's `PlayerSpawnFinder.getLevelRespawnPos`, simplified to
-/// what a [`ChunkColumn`] can answer — it has no persisted heightmaps, so the
-/// top-of-column scan below is the `MOTION_BLOCKING` heightmap query's
+/// This is the real per-column initial-spawn search, simplified to what a
+/// [`ChunkColumn`] can answer — it has no persisted heightmaps, so the
+/// top-of-column scan below is the "motion-blocking" heightmap query's
 /// analogue:
 ///
 /// 1. Scan downward from the top of the column.
 /// 2. A fluid encountered before any solid block (an ocean column, or a lava
-///    lake) aborts the candidate — vanilla's `break` on a non-empty fluid
-///    state, which yields `null`.
+///    lake) aborts the candidate — the real search stops on the first
+///    non-empty fluid state and reports no valid position for the column.
 /// 3. The first solid block from the top is the surface; return one block
-///    above it (`return pos.above().immutable()`), the feet position.
+///    above it, the feet position.
 /// 4. A column with no solid block at all (air/void world) is `None`.
 ///
-/// The two tests are vanilla's own, and **not** [`is_air_or_fluid`]'s negation,
-/// which is what this function used until the measurement in DESIGN.md §12.129:
+/// The two tests reproduce the real predicates exactly, and are **not**
+/// [`is_air_or_fluid`]'s negation, which is what this function used until the
+/// measurement in DESIGN.md §12.129:
 ///
-/// | vanilla expression | here |
+/// | the real predicate | here |
 /// |---|---|
-/// | `!blockState.getFluidState().isEmpty()` | [`spawn_has_fluid_state`] |
-/// | `Block.isFaceFull(state.getCollisionShape(…), UP)` | [`spawn_face_full_up`] |
+/// | fluid state at the position is non-empty | [`spawn_has_fluid_state`] |
+/// | the block's collision shape fully covers the up face | [`spawn_face_full_up`] |
 ///
 /// The old form's justification was a *stale* `worldgen_data` scope note ("no
 /// vegetation at surface"). The generator now places `short_grass`,
@@ -138,12 +131,12 @@ const GENERATOR_SPAWN_HEIGHT: i32 = 64;
 /// spawn (leaves are genuinely face-full) stays faithful rather than being
 /// "fixed" into a divergence.
 ///
-/// The vanilla pre-check in `getLevelRespawnPos` — the `WORLD_SURFACE` /
-/// `MOTION_BLOCKING` / `OCEAN_FLOOR` heightmap comparison — is deliberately not
-/// reproduced: it is
-/// an early-out over three persisted heightmaps a [`ChunkColumn`] does not
-/// carry, and the loop below reaches the same verdict for the case it exists to
-/// catch (a water column aborts on the fluid test before any ground is found).
+/// The real search's pre-check — a comparison across the world-surface,
+/// motion-blocking and ocean-floor heightmaps — is deliberately not
+/// reproduced: it is an early-out over three persisted heightmaps a
+/// [`ChunkColumn`] does not carry, and the loop below reaches the same verdict
+/// for the case it exists to catch (a water column aborts on the fluid test
+/// before any ground is found).
 fn get_level_respawn_pos(column: &ChunkColumn, lx: i32, lz: i32) -> Option<i32> {
     let top_y = column.min_y + column.height - 1;
     for y in (column.min_y..=top_y).rev() {
@@ -502,14 +495,15 @@ fn bed_facing_steps(state: &str) -> Option<(i32, i32)> {
     }
 }
 
-/// Whether a player can stand at `pos` — the reduction of
-/// `DismountHelper.findSafeDismountLocation` this crate can actually answer.
+/// Whether a player can stand at `pos` — the reduction of the real safe-dismount
+/// search this crate can actually answer.
 ///
-/// Vanilla walks the player's collision shape against the level and additionally
-/// rejects "dangerous" blocks (fire, lava, magma, a cactus) on its first pass.
-/// This crate has no player AABB sweep, so the test is the two facts the census
-/// does carry: **two** clear cells of body room (a player is 1.8 blocks tall, so
-/// the cell above matters), standing on something whose up-face is full.
+/// The real search walks the player's collision shape against the level and
+/// additionally rejects "dangerous" blocks (fire, lava, magma, a cactus) on its
+/// first pass. This crate has no player AABB sweep, so the test is the two facts
+/// the census does carry: **two** clear cells of body room (a player is 1.8
+/// blocks tall, so the cell above matters), standing on something whose up-face
+/// is full.
 ///
 /// Fail-closed on both halves, which is the safe direction here: an unrecognised
 /// block is not somewhere the search will place a player, so it moves on to the
@@ -524,34 +518,32 @@ fn is_standable<S: ChunkSource + ?Sized>(source: &S, pos: BlockPos) -> bool {
 /// Resolves a stored per-player [`RespawnPoint`] into the position a death should
 /// return the player to, or `None` if the point is no longer usable.
 ///
-/// This is `ServerPlayer.findRespawnAndUseSpawnBlock`'s bed branch, and the
+/// This is the real per-player respawn resolution's bed branch, and the
 /// `None` arm is the load-bearing half rather than an error case:
 ///
-/// ```java
-/// BlockState blockState = level.getBlockState(pos);
-/// if (block instanceof BedBlock && …canSetSpawn(level)) {
-///    return BedBlock.findStandUpPosition(EntityTypes.PLAYER, level, pos, blockState.getValue(FACING), yaw)
-///       .map(p -> RespawnPosAngle.of(p, pos, 0.0F));
-/// }
-/// if (!forced) { return Optional.empty(); }
-/// ```
+/// 1. Re-read the block state at the stored position.
+/// 2. If it is still a bed and the dimension allows setting spawn there, search
+///    for a stand-up position beside it, using the bed's stored facing and the
+///    sleeper's yaw, and return that position paired with a zero angle.
+/// 3. Otherwise, if the point was not force-set, report no usable point at all.
 ///
 /// So the block at the stored position is **re-read at death time**, not trusted
-/// from when it was set: a bed that has since been broken yields `Optional.empty()`,
-/// vanilla sends `NO_RESPAWN_BLOCK_AVAILABLE`, and the player lands at the world
-/// spawn. Storing the point at set time and never re-validating it would respawn a
-/// player inside whatever replaced their bed. That is the whole reason this
-/// function takes the source rather than just the point.
+/// from when it was set: a bed that has since been broken yields no usable point,
+/// and the player lands at the world spawn instead. Storing the point at set time
+/// and never re-validating it would respawn a player inside whatever replaced
+/// their bed. That is the whole reason this function takes the source rather
+/// than just the point.
 ///
-/// The candidate walk is vanilla's [`BED_STAND_UP_OFFSETS`] in vanilla's own
-/// order, with [`is_standable`] standing in for `DismountHelper` — see its doc for
-/// what that costs. Vanilla's second, `checkDangerous = false` pass over the same
-/// offsets is not reproduced: the only difference between the two passes is the
-/// danger check, which `is_standable` does not model, so a second pass would test
-/// exactly the same predicate and find exactly the same answer.
+/// The candidate walk is the real [`BED_STAND_UP_OFFSETS`] in the real order,
+/// with [`is_standable`] standing in for the real safe-dismount search — see its
+/// doc for what that costs. The real second pass over the same offsets, with the
+/// "dangerous block" rejection turned off, is not reproduced: the only
+/// difference between the two passes is that danger check, which `is_standable`
+/// does not model, so a second pass would test exactly the same predicate and
+/// find exactly the same answer.
 ///
-/// The returned position is the cell's centre in x/z, its floor in y — vanilla's
-/// `DismountHelper` returns a `Vec3` at the block's centre-bottom.
+/// The returned position is the cell's centre in x/z, its floor in y — the real
+/// safe-dismount search returns a point at the block's centre-bottom.
 pub(crate) fn resolve_bed_respawn<S: ChunkSource + ?Sized>(
     source: &S,
     point: RespawnPoint,
@@ -559,17 +551,18 @@ pub(crate) fn resolve_bed_respawn<S: ChunkSource + ?Sized>(
     let bed = point.pos;
     let state = source.block_state(bed.x, bed.y, bed.z);
     if !is_bed_block(&state) {
-        // The bed is gone. Vanilla's `Optional.empty()`.
+        // The bed is gone — no usable point.
         return None;
     }
     // A bed with no readable `facing` cannot have its offsets resolved; treat the
     // head/foot axis as north-south, which is the default state's own facing, so
     // the walk still happens rather than the point being silently discarded.
     let (fx, fz) = bed_facing_steps(&state).unwrap_or((0, -1));
-    // `side` is `forward.getClockWise()` — vanilla picks between it and its
-    // opposite using the sleeper's yaw, which this crate does not record at bed
-    // entry (see [`RespawnPoint`]'s own doc). The clockwise choice is taken, which
-    // only decides *which* side of the bed a player wakes on.
+    // `side` is the forward direction rotated 90 degrees clockwise — the real
+    // search picks between it and its opposite using the sleeper's yaw, which
+    // this crate does not record at bed entry (see [`RespawnPoint`]'s own doc).
+    // The clockwise choice is taken, which only decides *which* side of the bed
+    // a player wakes on.
     let (sx, sz) = (-fz, fx);
     for (forward_steps, side_steps) in BED_STAND_UP_OFFSETS {
         let candidate = BlockPos::new(

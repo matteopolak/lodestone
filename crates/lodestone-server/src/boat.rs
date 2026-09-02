@@ -1,4 +1,5 @@
-//! Placing a boat — `BoatItem.use`, its raytrace, and the vehicle it creates.
+//! Placing a boat — the real boat item's use handler, its raytrace, and the
+//! vehicle it creates.
 //!
 //! # What it is
 //!
@@ -15,43 +16,37 @@
 //! # A boat is not a mob, and that is the whole reason this is its own module
 //!
 //! An earlier attempt at this deliberately stopped rather than route a boat
-//! through `MobSim::spawn_species`, and the reasoning is worth keeping: a boat has
-//! no attributes, no goals and no AI, so giving it a mob's component set produces
-//! a boat that *wanders*. It also must stop being server-driven the moment a
-//! player sits in it — `Entity.isClientAuthoritative()` delegates to the
-//! controlling passenger and `Player.isClientAuthoritative()` is `true` — so an
+//! through the general mob-spawning path, and the reasoning is worth keeping: a
+//! boat has no attributes, no goals and no AI, so giving it a mob's component
+//! set produces a boat that *wanders*. It also must stop being server-driven the
+//! moment a player sits in it — an entity defers authority to its controlling
+//! passenger, and a player passenger is always client-authoritative — so an
 //! unridden boat needs server-side buoyancy and a ridden one must accept the
 //! client's `MoveVehicle`. Both live on the vehicle registry, not here.
 //!
 //! # The raytrace, which is the part that is easy to get almost right
 //!
-//! `BoatItem.use` does **not** place relative to the clicked block. It runs its
-//! own raytrace and puts the boat at the exact hit **point**:
+//! The real boat item's use handler does **not** place relative to the clicked
+//! block. It runs its own raytrace and puts the boat at the exact hit **point**:
 //!
-//! ```java
-//! HitResult hitResult = getPlayerPOVHitResult(level, player, ClipContext.Fluid.ANY);
-//! if (hitResult.getType() == HitResult.Type.MISS) return InteractionResult.PASS;
-//! ...
-//! boat.setInitialPos(location.x, location.y, location.z);
-//! boat.setYRot(player.getYRot());
-//! if (!level.noCollision(boat, boat.getBoundingBox())) return InteractionResult.FAIL;
-//! ```
+//! 1. Cast the player's eye-to-reach ray with a clip context that accepts any
+//!    fluid. A miss returns "pass" — nothing consumed, nothing created.
+//! 2. Take the hit location as-is and set it as the new boat's initial position,
+//!    and the boat's yaw to the player's own yaw.
+//! 3. If the boat's bounding box at that position collides with the world,
+//!    return "fail" instead of placing it.
 //!
-//! and `Item.getPlayerPOVHitResult` is
-//!
-//! ```java
-//! Vec3 from = player.getEyePosition();
-//! Vec3 to = from.add(player.calculateViewVector(player.getXRot(), player.getYRot())
-//!                          .scale(player.blockInteractionRange()));
-//! return level.clip(new ClipContext(from, to, ClipContext.Block.OUTLINE, fluid, player));
-//! ```
+//! and the underlying point-of-view raytrace itself is: start at the player's
+//! eye, extend along the view vector derived from the player's pitch and yaw,
+//! scaled by their block interaction range, and clip that segment against the
+//! world using block **outline** shapes (not colliders) plus that same
+//! any-fluid acceptance.
 //!
 //! Three consequences, each of which a "one block toward the player" rule gets
 //! wrong:
 //!
-//! * **The clip picks up fluids.** `ClipContext.Fluid.ANY` is
-//!   `state -> !state.isEmpty()`, and the fluid's shape is
-//!   `box(0, 0, 0, 1, height, 1)` where `height` is `1.0` when the same fluid is
+//! * **The clip picks up fluids.** Accepting any non-empty fluid state means the
+//!   fluid's shape — `box(0, 0, 0, 1, height, 1)` where `height` is `1.0` when the same fluid is
 //!   directly above and `amount / 9.0` otherwise. So a boat aimed at open water
 //!   lands on the surface at `y + 0.888…`, not at `y + 1.0` and not on the
 //!   seabed. This is why a boat can be placed on water *and* on land by one rule.
@@ -68,9 +63,9 @@
 //!
 //! # The item → entity derivation
 //!
-//! Every one of `Items.java`'s twenty `new BoatItem(EntityTypes.X, …)`
-//! registrations pairs `ItemIds.Y` with `EntityTypes.Y` for the *same* `Y`,
-//! irregular names included — `bamboo_raft` and `bamboo_chest_raft` carry no
+//! Every one of the real item registry's twenty boat-item registrations pairs
+//! the item id with the entity type id for the *same* name, irregular names
+//! included — `bamboo_raft` and `bamboo_chest_raft` carry no
 //! `_boat` suffix at all, and the chest boats are a second axis on top of the
 //! wood species. So the derivation is "the item id **is** the entity type id",
 //! validated against [`lodestone_data::entity_types`] and against the committed
@@ -88,19 +83,19 @@
 //!   `JAR_BOAT_ITEMS` so the count gate stays honest.
 //! * **The obstruction test** is deliberately the boat's own box against block
 //!   *collision* shapes ([`crate::spawn_egg`]'s resolution helper is the shared
-//!   pattern). Vanilla's `noCollision(boat, box)` also excludes other entities,
+//!   pattern). The real world-collision check also excludes other entities,
 //!   which this crate has no world-wide entity query for at this seam — a boat can
 //!   therefore be placed overlapping a mob. Documented, small, and visible only as
 //!   two things briefly sharing a cell.
 //! * **The client half is here.** Our shell's `Sim::use_item_live` now falls
 //!   through from a missed/fluid-only crosshair ray to the generic `USE_ITEM`,
-//!   the way vanilla's `Minecraft.startUseItem` does — the client-side gap this
+//!   the way the real client's use-item entry point does — the client-side gap this
 //!   note used to describe (a boat aimed at land never reaching this module) is
 //!   closed. `ServerBound::UseItemOn` (a block-target right-click) still carries
 //!   no boat handling of its own; every placement, land or water, goes through
 //!   `ServerBound::UseItem` → [`apply_boat_item`], because the crosshair ray
 //!   ignores fluids and treats land beyond the clicked block's face the same
-//!   way vanilla's own `getPlayerPOVHitResult` does for this item.
+//!   way the real point-of-view raytrace does for this item.
 //!
 //! # Dependencies
 //!
@@ -113,21 +108,19 @@
 use lodestone_data::{block_states, collision_shapes, entity_types, outline_shapes};
 use lodestone_model::{BlockPos, ResourceKey, Vec3};
 
-/// `EntityType.OAK_BOAT`'s width — every boat, chest boat and raft in 26.2 shares
+/// Every boat's width — every boat, chest boat and raft in 26.2 shares
 /// `1.375 × 0.5625` (`lodestone_data::entity_dimensions`).
 pub const BOAT_WIDTH: f64 = 1.375;
 
 /// The shared boat height, `0.5625`.
 pub const BOAT_HEIGHT: f64 = 0.5625;
 
-/// `Player.DEFAULT_BLOCK_INTERACTION_RANGE` — the base value of
-/// `Attributes.BLOCK_INTERACTION_RANGE`, which is what
-/// `Item.getPlayerPOVHitResult` scales the view vector by.
+/// The default block-interaction reach attribute's base value, which is what
+/// the point-of-view raytrace scales the view vector by.
 pub const BLOCK_INTERACTION_RANGE: f64 = 4.5;
 
-/// `ServerPlayer.CREATIVE_BLOCK_INTERACTION_RANGE_MODIFIER` — the
-/// `minecraft:creative_mode_block_range` `ADD_VALUE` modifier a creative player
-/// carries, so creative reach is `5.0` rather than `4.5`.
+/// The additive `minecraft:creative_mode_block_range` attribute modifier a
+/// creative player carries, so creative reach is `5.0` rather than `4.5`.
 ///
 /// Worth stating rather than folding in: a gate written at 4.5 for both modes
 /// passes for a hit inside 4.5 and cannot see the difference at all.
@@ -175,40 +168,40 @@ fn is_boat_item_path(path: &str) -> bool {
     path.ends_with("_boat") || path == "bamboo_raft" || path == "bamboo_chest_raft"
 }
 
-/// One hit from [`clip`] — vanilla's `BlockHitResult` reduced to the two facts
-/// `BoatItem.use` reads off it.
+/// One hit from [`clip`] — the real block-hit result reduced to the two facts
+/// the boat item's use handler reads off it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClipHit {
-    /// `BlockHitResult.getLocation()` — the exact point on the surface, which is
-    /// what `setInitialPos` receives. **Not** snapped to a cell.
+    /// The exact point on the surface, which is what the boat's initial position
+    /// receives. **Not** snapped to a cell.
     pub position: Vec3,
     /// The cell whose shape was hit, carried for diagnostics and for a caller
     /// that wants to know which block it landed on.
     pub cell: BlockPos,
 }
 
-/// `BlockGetter.clip` with `ClipContext.Block.OUTLINE` and
-/// `ClipContext.Fluid.ANY`, or `None` for vanilla's `Type.MISS`.
+/// A block-outline-and-any-fluid raycast, or `None` for a miss.
 ///
 /// `from`/`to` are the eye and the eye plus `view * reach`.
 ///
-/// # The traversal is vanilla's, not a resampling
+/// # The traversal reproduces the real one, not a resampling
 ///
-/// `BlockGetter.traverseBlocks` is an exact voxel DDA: both endpoints are nudged
-/// inward by `Mth.lerp(-1.0E-7, …)`, the first cell is tested before any step,
-/// and the loop advances whichever axis' next boundary is nearest until all three
-/// parameters exceed `1.0`. A fixed-step resampler (the shape
-/// [`crate::mobs`]' projectile ray uses, quarter-block spacing) is fine for
-/// "does this segment cross a solid cell" and **wrong** here: the answer needed is
-/// the first *surface* along the ray to within float precision, and a boat placed
-/// a quarter block out sits visibly inside the shoreline.
+/// The real block-traversal is an exact voxel DDA: both endpoints are nudged
+/// inward by a tenth-of-a-micron linear interpolation toward each other, the
+/// first cell is tested before any step, and the loop advances whichever axis'
+/// next boundary is nearest until all three parameters exceed `1.0`. A
+/// fixed-step resampler (the shape [`crate::mobs`]' projectile ray uses,
+/// quarter-block spacing) is fine for "does this segment cross a solid cell" and
+/// **wrong** here: the answer needed is the first *surface* along the ray to
+/// within float precision, and a boat placed a quarter block out sits visibly
+/// inside the shoreline.
 ///
 /// # What is not modelled
 ///
-/// `clipWithInteractionOverride` refines the hit's **`Direction`** from the
-/// block's interaction shape and leaves the location untouched, and this returns
-/// no direction — `BoatItem.use` reads only `getLocation()`. Adding the face
-/// later needs `lodestone_data::outline_shapes::interaction_boxes`.
+/// A later refinement step derives the hit's **face direction** from the
+/// block's interaction shape and leaves the location untouched, and this
+/// returns no direction — the boat item's use handler reads only the location.
+/// Adding the face later needs `lodestone_data::outline_shapes::interaction_boxes`.
 #[must_use]
 pub fn clip(from: Vec3, to: Vec3, block_state: &dyn Fn(i32, i32, i32) -> String) -> Option<ClipHit> {
     if (from.x - to.x).abs() < f64::EPSILON
@@ -217,7 +210,7 @@ pub fn clip(from: Vec3, to: Vec3, block_state: &dyn Fn(i32, i32, i32) -> String)
     {
         return None;
     }
-    // `Mth.lerp(-1.0E-7, a, b)` is `a - 1e-7 * (b - a)`: both endpoints move
+    // The real nudge is `a - 1e-7 * (b - a)`: both endpoints move
     // *outward* along the segment by a tenth of a micron. Faithful because the
     // nudge is what decides which cell a ray grazing a boundary starts in.
     let nudge = 1.0e-7;
@@ -261,7 +254,7 @@ pub fn clip(from: Vec3, to: Vec3, block_state: &dyn Fn(i32, i32, i32) -> String)
         delta(step_y, dy),
         delta(step_z, dz),
     );
-    // `Mth.frac(x)` is `x - floor(x)`, always in `[0, 1)`.
+    // The real fractional part is `x - floor(x)`, always in `[0, 1)`.
     let frac = |v: f64| v - v.floor();
     let first = |step: i32, delta: f64, start: f64| {
         delta
@@ -299,8 +292,8 @@ pub fn clip(from: Vec3, to: Vec3, block_state: &dyn Fn(i32, i32, i32) -> String)
 }
 
 /// One cell of [`clip`]'s traversal: the nearer of the block outline's hit and
-/// the fluid shape's, matching `BlockGetter.clip`'s own
-/// `blockDistanceSquared <= liquidDistanceSquared ? blockResult : liquidResult`.
+/// the fluid shape's, matching the real clip's own tie rule — on an equal
+/// squared distance, the block result wins over the liquid result.
 fn clip_cell(
     cell: BlockPos,
     from: Vec3,
@@ -325,13 +318,13 @@ fn clip_cell(
     let fluid_t = fluid_surface_height(&state, block_state, cell).and_then(|height| {
         clip_box(from, to, cell, [0.0, 0.0, 0.0], [1.0, height, 1.0])
     });
-    // Vanilla's own comparison is `blockDistanceSquared <= liquidDistanceSquared`,
-    // i.e. a tie goes to the **block**. That collapses to a plain `min` here
-    // because the only thing this returns is the location, and on a tie the two
-    // locations are the same point — the tie is real (a waterlogged slab's outline
-    // top and its fluid top are both 1.0 under water) and the two answers differ
-    // only in the `Direction`, which this does not carry. If a face is ever added,
-    // the `<=` has to come back.
+    // The real comparison is a squared-distance tie going to the **block**.
+    // That collapses to a plain `min` here because the only thing this returns
+    // is the location, and on a tie the two locations are the same point — the
+    // tie is real (a waterlogged slab's outline top and its fluid top are both
+    // 1.0 under water) and the two answers differ only in the hit face, which
+    // this does not carry. If a face is ever added, the tie rule has to come
+    // back.
     let t = match (block_t, fluid_t) {
         (Some(block), Some(fluid)) => block.min(fluid),
         (Some(block), None) => block,
@@ -348,21 +341,22 @@ fn clip_cell(
     })
 }
 
-/// `AABB.clip`'s `getDirection`/`clipPoint` pair, returning only the parameter
+/// The real AABB-clip face/entry-point pair, returning only the parameter
 /// `s` of the entry crossing.
 ///
 /// `min`/`max` are block-local; `cell` offsets them. `s` is required to be
 /// **strictly** greater than zero and below the running best, and the other two
-/// axes are bounded with vanilla's own `1.0E-7` slack — a ray exactly along a
+/// axes are bounded with the real `1.0E-7` slack — a ray exactly along a
 /// shared face must still hit.
 ///
-/// A start point *inside* the shape yields `None` here, and vanilla handles that
-/// case one level up in `VoxelShape.clip`: it nudges the start forward by
-/// `0.001` of the segment, and if that lands inside the shape returns a hit at
-/// that nudged point with `inside = true`. [`clip_cell`] does not reproduce the
-/// inside branch, so a player whose *eye* is submerged places the boat on the
-/// first surface ahead rather than at their own eye. Stated because it is a real
-/// divergence and only reachable while swimming.
+/// A start point *inside* the shape yields `None` here, and the real search
+/// handles that case one level up, over the whole voxel shape rather than one
+/// box: it nudges the start forward by `0.001` of the segment, and if that
+/// lands inside the shape returns a hit at that nudged point flagged as an
+/// inside hit. [`clip_cell`] does not reproduce the inside branch, so a player
+/// whose *eye* is submerged places the boat on the first surface ahead rather
+/// than at their own eye. Stated because it is a real divergence and only
+/// reachable while swimming.
 fn clip_box(from: Vec3, to: Vec3, cell: BlockPos, min: [f64; 3], max: [f64; 3]) -> Option<f64> {
     let d = [to.x - from.x, to.y - from.y, to.z - from.z];
     let origin = [from.x, from.y, from.z];
@@ -371,8 +365,9 @@ fn clip_box(from: Vec3, to: Vec3, cell: BlockPos, min: [f64; 3], max: [f64; 3]) 
     let hi = [base[0] + max[0], base[1] + max[1], base[2] + max[2]];
     let mut best = 1.0f64;
     let mut found = false;
-    // Vanilla tests the three axes in x, y, z order, each against the *near*
-    // plane for a positive component and the *far* plane for a negative one.
+    // The real test walks the three axes in x, y, z order, each against the
+    // *near* plane for a positive component and the *far* plane for a negative
+    // one.
     for axis in 0..3 {
         let (b, c) = ((axis + 1) % 3, (axis + 2) % 3);
         let plane = if d[axis] > 1.0e-7 {
@@ -402,15 +397,15 @@ fn clip_box(from: Vec3, to: Vec3, cell: BlockPos, min: [f64; 3], max: [f64; 3]) 
 /// The top of the fluid shape in `cell`, block-local, or `None` when the cell
 /// holds no fluid.
 ///
-/// `FlowingFluid.getShape` is
-/// `box(0, 0, 0, 1, getHeight(level, pos), 1)`, and `getHeight` is
-/// `hasSameAbove ? 1.0 : getOwnHeight()` where `getOwnHeight` is `amount / 9.0`.
-/// So a water source under air tops out at `0.888…` and one under more water at
-/// `1.0` — and that difference is exactly the boat's resting height on the
-/// surface, so it is the value the placement rule most depends on.
+/// The real fluid shape is `box(0, 0, 0, 1, height, 1)`, where `height` is
+/// `1.0` when the same fluid sits directly above, and otherwise the fluid's own
+/// height, `amount / 9.0`. So a water source under air tops out at `0.888…` and
+/// one under more water at `1.0` — and that difference is exactly the boat's
+/// resting height on the surface, so it is the value the placement rule most
+/// depends on.
 ///
-/// (`getShape`'s own `getAmount() == 9` fast path is unreachable for water and
-/// lava, whose maximum amount is 8, and would give the same `1.0` anyway.)
+/// (The real shape's own "amount equals 9" fast path is unreachable for water
+/// and lava, whose maximum amount is 8, and would give the same `1.0` anyway.)
 fn fluid_surface_height(
     state: &str,
     block_state: &dyn Fn(i32, i32, i32) -> String,
@@ -450,7 +445,7 @@ fn collision_boxes_for(state: &str) -> &'static [collision_shapes::Aabb] {
 pub enum BoatUse {
     /// Not a boat item. The caller continues to whatever it would have done.
     NotABoat,
-    /// A boat item, and vanilla's `use` returns `PASS`/`FAIL`: the raytrace
+    /// A boat item, and the real handler returns "pass" or "fail": the raytrace
     /// missed everything, or the boat's box would overlap a block. **The stack is
     /// not consumed.**
     Refused,
@@ -458,25 +453,26 @@ pub enum BoatUse {
     Place {
         /// The entity type the item names — identical to the item id.
         entity_type: ResourceKey,
-        /// `setInitialPos(location)`: the raytrace's own hit point, un-snapped.
+        /// The raytrace's own hit point, un-snapped, used as the new boat's
+        /// initial position.
         position: Vec3,
-        /// `setYRot(player.getYRot())` — the placing player's yaw, in degrees.
+        /// The placing player's own yaw, in degrees.
         yaw: f32,
     },
 }
 
-/// `BoatItem.use`, as a decision.
+/// The real boat item's use handler, as a decision.
 ///
-/// `eye` is `player.getEyePosition()` (feet plus the eye height, which the caller
+/// `eye` is the player's eye position (feet plus the eye height, which the caller
 /// has and this does not), `yaw`/`pitch` the player's rotation in degrees, and
 /// `reach` [`block_interaction_range`] for their game mode.
 ///
 /// # What is deliberately not modelled
 ///
-/// The `EntitySelector.CAN_BE_PICKED` sweep near the top of `use` — vanilla
-/// returns `PASS` when the player's own eye is inside a pickable entity's
-/// inflated box, so that a boat is not placed while you stand inside another
-/// one. This crate has no world-wide entity query at this seam. Its absence is
+/// The pickable-entity sweep near the top of the real handler — the real
+/// handler returns "pass" when the player's own eye is inside a pickable
+/// entity's inflated box, so that a boat is not placed while you stand inside
+/// another one. This crate has no world-wide entity query at this seam. Its absence is
 /// visible only as being able to place a boat while already sitting in one, and
 /// closing it needs [`crate::mobs::MobSim`] to expose an entity-box query.
 #[must_use]
@@ -510,12 +506,12 @@ pub fn use_boat_item(
         eye.y + view.y * reach,
         eye.z + view.z * reach,
     );
-    // `HitResult.Type.MISS` → `PASS`. Nothing is consumed and nothing is created;
+    // A ray miss maps to "pass". Nothing is consumed and nothing is created;
     // this is the arm that fires when you right-click at the sky.
     let Some(hit) = clip(eye, to, block_state) else {
         return BoatUse::Refused;
     };
-    // `!level.noCollision(boat, boat.getBoundingBox())` → `FAIL`.
+    // A collision with the world maps to "fail".
     if boat_box_is_obstructed(hit.position, block_state) {
         return BoatUse::Refused;
     }
@@ -526,10 +522,10 @@ pub fn use_boat_item(
     }
 }
 
-/// `!level.noCollision(boat, boat.getBoundingBox())` for a boat whose feet are at
-/// `position`.
+/// Whether the world collides with a boat's bounding box for a boat whose feet
+/// are at `position`.
 ///
-/// The box is `EntityDimensions.makeBoundingBox`: centred horizontally on the
+/// The box is built the real way: centred horizontally on the
 /// position, sitting on it vertically. Every cell the box spans is tested against
 /// its collision boxes, and the overlap test uses a `1.0E-7` epsilon so a boat
 /// resting exactly on a surface is not "inside" it — the whole point of placing
@@ -579,9 +575,9 @@ pub fn boat_box_is_obstructed(
     false
 }
 
-/// `Entity.calculateViewVector(xRot, yRot)`, in `f64`.
+/// The real player view-vector derivation, in `f64`.
 ///
-/// Vanilla computes this through `Mth`'s `float` sine table, which
+/// The real computation goes through a quantized `float` sine table, which
 /// [`lodestone_physics`]'s player path reproduces bit-for-bit because a
 /// divergence there compounds over a movement tick. Here it only aims a
 /// single-use ray whose result is immediately quantised by the clip's own `1e-7`
@@ -601,11 +597,12 @@ fn view_vector(yaw: f32, pitch: f32) -> Vec3 {
 pub enum BoatApplied {
     /// Not a boat item.
     NotABoat,
-    /// Vanilla `PASS`/`FAIL`: nothing created, **stack not consumed**.
+    /// "Pass" or "fail": nothing created, **stack not consumed**.
     Refused,
     /// The boat exists in the sim and will stream to every viewer on the next
-    /// snapshot diff. The caller now consumes one from the stack — vanilla's
-    /// `itemStack.consume(1, player)`, which happens *after* `addFreshEntity`.
+    /// snapshot diff. The caller now consumes one from the stack — the real
+    /// handler consumes the item from the stack only *after* the entity is
+    /// actually added to the world.
     Placed {
         /// The new entity's network id.
         entity_id: i32,
@@ -655,8 +652,8 @@ pub fn apply_boat_item(
 mod tests {
     use super::*;
 
-    /// Every `new BoatItem(EntityTypes.X, …)` registration in the pinned 26.2
-    /// decompile's `Items.java`, extracted as `(ItemIds.Y, EntityTypes.Y)` pairs
+    /// Every boat-item registration in the pinned 26.2 decompile's real item
+    /// registry, extracted as (item id, entity type id) pairs
     /// and committed here so the gate does not need `.cache/` present. All twenty
     /// pair a name with **itself**, which is what makes the derivation exact.
     static JAR_BOAT_ITEMS: [&str; 20] = [
@@ -703,7 +700,7 @@ mod tests {
         assert_eq!(
             JAR_BOAT_ITEMS.len(),
             20,
-            "Items.java carries exactly 20 BoatItem registrations in 26.2"
+            "the real item registry carries exactly 20 boat item registrations in 26.2"
         );
     }
 
@@ -759,7 +756,7 @@ mod tests {
 
     /// The top of a water source with air above, **as an `f32`**.
     ///
-    /// `FlowingFluid.getOwnHeight` is `getAmount() / 9.0F` — a *float* divide,
+    /// The real fluid's own height is its fluid amount divided by `9.0F` — a *float* divide,
     /// widened to `double` only when the shape is built. So the surface is
     /// `0.88888889…`, not `0.888888888…`: predicting the exact `f64` value of 8/9
     /// fails by 6.6e-9, which is far outside any tolerance worth using and reads

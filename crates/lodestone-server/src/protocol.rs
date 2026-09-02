@@ -2780,18 +2780,12 @@ pub trait ServerProtocol: Send + Sync {
     /// # Why this exists, and why nothing else does the job
     ///
     /// Health reaching `0.0` is *not* what opens the death screen, in vanilla or
-    /// here. `ClientPacketListener.handleSetHealth`
-    /// (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/ClientPacketListener.java:1235-1240`)
-    /// only calls `hurtTo`/`setFoodLevel`/`setSaturation`; the screen comes from
-    /// `handlePlayerCombatKill` at `:1845-1855`:
-    ///
-    /// ```java
-    /// if (this.minecraft.player.shouldShowDeathScreen()) {
-    ///    this.minecraft.gui.setScreen(new DeathScreen(packet.message(), …));
-    /// } else {
-    ///    this.minecraft.player.respawn();
-    /// }
-    /// ```
+    /// here. The client's ordinary health update handler only applies the new
+    /// health, food and saturation values; it does not touch the screen stack. A
+    /// separate, later handler is the one that raises the death screen — it checks
+    /// whether the player is configured to show one at all, and either opens the
+    /// death screen carrying the kill message or, if the screen is suppressed,
+    /// respawns the player immediately instead.
     ///
     /// So a server that only sends `set_health(0.0)` leaves a real client — and
     /// this workspace's own client, whose `Screen::Death` and `death_frame` are
@@ -2800,10 +2794,9 @@ pub trait ServerProtocol: Send + Sync {
     /// as a server hang, which is how it was reported.
     ///
     /// `player_entity_id` is the *victim's* entity id (the client discards it, but
-    /// it is on the wire). `message` is the localized death message, vanilla's
-    /// `DamageSource.getLocalizedDeathMessage` (`DamageSource.java:71-86`):
-    /// `Component.translatable("death.attack." + msgId, victimName)` when nothing
-    /// living gets the kill credit.
+    /// it is on the wire). `message` is the localized death message: the
+    /// `death.attack.<id>` translation key for the damage source, formatted with
+    /// the victim's name, used when nothing living gets the kill credit.
     ///
     /// The default emits nothing, so a protocol without death support need not
     /// override it — and its client simply never gets a death screen, which is a
