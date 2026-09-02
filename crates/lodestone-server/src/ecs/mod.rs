@@ -50,7 +50,7 @@
 //!
 //! * **Phase 0 is deliberately shallow. It is not, however, an island.** The
 //!   distinction matters and it is the one thing to preserve when extending
-//!   this. `WindowApp.ecs` on the client (issue [#37]) is an `App` that is
+//!   this. `WindowApp.ecs` on the client is an `App` that is
 //!   constructed and never has a schedule run against it — "an inert scaffold
 //!   nothing reads", open to this day. The only structural difference here is
 //!   [`ServerTickWitness`]: production runs [`ServerBoot`], one registered

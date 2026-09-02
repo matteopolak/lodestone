@@ -133,7 +133,7 @@ async fn the_production_integrated_server_runs_a_registered_system() {
         server.server_tick_count(),
         Some(1),
         "production must build a server World and run ServerBoot against it exactly once; \
-         Some(0) means Phase 0 is an island (issue #37's shape), None means the World is no \
+         Some(0) means Phase 0 is an island (registered but never run), None means the World is no \
          longer constructed in production at all — see docs/server-ecs-phase0.md"
     );
 }

@@ -1,6 +1,6 @@
 //! Bridges a plugin's [`lodestone_worldgen::generator::ChunkGenerator`] into a
-//! real [`ChunkSource`] — issue #132's decision made concrete, and the seam
-//! #134's dimension registration and #136's structure placement both build
+//! real [`ChunkSource`] — a decision made concrete, and the seam
+//! dimension registration and structure placement both build
 //! on. See `docs/plugin-worldgen-api.md` for the full design.
 //!
 //! # Why this file, not a method on `ChunkGenerator` itself
@@ -68,7 +68,7 @@ impl PluginChunkSource {
         let grid = self.generator.generate(cx, cz);
         let mut column = ChunkColumn::new(min_y, height);
         let biome = self.generator.biome();
-        // Two separate biome answers this column carries (issue #512): the
+        // Two separate biome answers this column carries: the
         // 2-D "surface" quarts `biome_state`/`biome_quarts()` read, and the
         // full 3-D grid `biome_state_at`/`ChunkSource::biome_state_at` read.
         // A generator with one uniform biome fills both the same way, so

@@ -56,7 +56,7 @@ pub(super) fn census_to_pathfinding_type(pt: CensusPathType) -> PathType {
 /// Delegates straight to [`lodestone_data::block_states::state_id`]. This used
 /// to build and query its own 32,366-entry `HashMap<String, u32>` — one
 /// `String` allocation per state at first use, one SipHash per lookup — added
-/// for [`crate::block_drops`]'s correct-tool gate (issue #539). `lodestone-data`
+/// for [`crate::block_drops`]'s correct-tool gate. `lodestone-data`
 /// now carries the forward index itself (a block-major sorted-span lookup,
 /// `O(log 1196)` plus a scan bounded by that one block's own state count), so
 /// building a second copy of the same map in this crate was exactly the
