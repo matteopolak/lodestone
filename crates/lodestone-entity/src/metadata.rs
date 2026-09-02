@@ -278,19 +278,19 @@ pub enum UsedHand {
 ///
 /// # Why this is not folded into [`SharedEntityFlags`]
 ///
-/// They are two distinct synced fields. Vanilla's base `Entity` defines the
-/// shared-flags byte; `LivingEntity` defines a second byte of its own, and only
-/// living entities have it. Merging them would mean inventing an index that does
-/// not exist and would make `on_fire()` and `using_item()` readable off the same
-/// value, which they are not.
+/// They are two distinct synced fields. Vanilla's base entity type defines the
+/// shared-flags byte; the living-entity type defines a second byte of its own, and
+/// only living entities have it. Merging them would mean inventing an index that
+/// does not exist and would make `on_fire()` and `using_item()` readable off the
+/// same value, which they are not.
 ///
 /// # The absent field: how far the item is drawn
 ///
 /// Bit 0 says an item is *in use*; it does **not** say for how long, and vanilla
-/// **does not sync `useItemRemaining` at all**. The client starts its own
-/// countdown when the bit flips on — `LivingEntity.onSyncedDataUpdated` sets
-/// `useItemRemaining = useItem.getUseDuration(this)` on the client side only —
-/// and decrements it locally each tick. So a consumer that wants a *draw
+/// **does not sync the remaining use-duration at all**. The client starts its own
+/// countdown when the bit flips on — computing the duration itself, client-side
+/// only, from the item and entity — and decrements it locally each tick. So a
+/// consumer that wants a *draw
 /// fraction* must keep its own per-entity tick counter seeded from this bit's
 /// rising edge; there is no wire field to read it from, and waiting for one is
 /// waiting for a packet that is never sent.
@@ -313,14 +313,14 @@ impl LivingEntityFlags {
 
     /// Whether the entity is currently using (holding down) an item.
     ///
-    /// `LivingEntity.isUsingItem` is `(flags & 1) > 0`.
+    /// Bit 0, `(flags & 1) > 0`.
     #[must_use]
     pub const fn using_item(self) -> bool {
         self.bits & Self::USING_ITEM != 0
     }
 
     /// Which hand the item is being used with. Meaningful only while
-    /// [`using_item`](Self::using_item); vanilla's `getUsedItemHand` reads the bit
+    /// [`using_item`](Self::using_item); vanilla reads the hand bit
     /// unconditionally, but the hand of an entity that is not using anything is
     /// not a fact about anything.
     #[must_use]
@@ -334,9 +334,9 @@ impl LivingEntityFlags {
 
     /// Whether the entity is in a riptide spin attack.
     ///
-    /// This is `LivingEntity.isAutoSpinAttack` — `(flags & 4) != 0` — and is in
-    /// this byte rather than the pose enum, which also has a `SPIN_ATTACK` value.
-    /// The two are set together by vanilla but are separate wire fields.
+    /// Bit 2, `(flags & 4) != 0`, and is in this byte rather than the pose enum,
+    /// which also has a `SPIN_ATTACK` value. The two are set together by vanilla
+    /// but are separate wire fields.
     #[must_use]
     pub const fn spin_attack(self) -> bool {
         self.bits & Self::SPIN_ATTACK != 0
@@ -344,32 +344,33 @@ impl LivingEntityFlags {
 }
 
 /// The bit meanings inside the **mob** flags byte — a *third* distinct byte, at a
-/// third metadata index, declared by vanilla's `Mob` rather than by `Entity`
-/// ([`SharedEntityFlags`]) or `LivingEntity` ([`LivingEntityFlags`]).
+/// third metadata index, declared for mob-type entities rather than for the base
+/// entity ([`SharedEntityFlags`]) or the living-entity byte ([`LivingEntityFlags`]).
 ///
 /// # Why a client needs this, and why the using-item bit is not a substitute
 ///
 /// [`aggressive`](Self::aggressive) is what makes a **mob** hold a weapon pose.
-/// Vanilla's mob renderers read `Mob.isAggressive()` directly:
-/// `AbstractSkeletonRenderer.getArmPose` returns `BOW_AND_ARROW` for
-/// `isAggressive() && mainHandItem.is(BOW)`, `DrownedRenderer` returns
-/// `THROW_TRIDENT` on the same test with a trident, and
-/// `AnimationUtils.animateZombieArms` takes it as a parameter and lifts the arms
-/// further when it is set.
+/// Vanilla's mob renderers read the aggressive bit directly: a skeleton-family
+/// renderer picks a bow-and-arrow arm pose when aggressive and holding a bow, a
+/// drowned renderer picks a trident-throwing pose on the same test with a
+/// trident, and the shared zombie-arm animation takes it as a parameter and
+/// lifts the arms further when it is set.
 ///
 /// The using-item bit in [`LivingEntityFlags`] is a *player* mechanism, driven by
-/// `startUsingItem`. A skeleton shooting at you never sets it — its attack goal
-/// calls `performRangedAttack` without ever entering the item-use state — so a
-/// client that decodes only that bit leaves every mob permanently in the rest
-/// pose while looking, at the wire level, entirely correct.
+/// the item-use state a player enters while holding down use. A skeleton
+/// shooting at you never sets it — its ranged-attack goal fires without ever
+/// entering that state — so a client that decodes only that bit leaves every mob
+/// permanently in the rest pose while looking, at the wire level, entirely
+/// correct.
 ///
 /// # This byte's index collides with an armour stand's, and *living* is too weak
 ///
-/// `Mob.DATA_MOB_FLAGS_ID` is metadata index 15, `BYTE`, and so is
-/// `ArmorStand.DATA_CLIENT_FLAGS` — where the same `0x04` means "show arms". An
-/// armour stand is a `LivingEntity`, so an is-living guard does not separate them;
-/// the version adapter must establish `Mob`. A `None` mob-flags byte therefore
-/// means "not known to be mob flags" and must be read as *not aggressive*.
+/// The mob-flags field and an armour stand's client-flags field share metadata
+/// index 15, `BYTE`, where the same `0x04` means "show arms". An armour stand is
+/// a living entity, so an is-living guard does not separate them; the version
+/// adapter must establish the concrete entity is a mob. A `None` mob-flags byte
+/// therefore means "not known to be mob flags" and must be read as *not
+/// aggressive*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MobFlags {
     /// The raw byte value.
@@ -387,7 +388,7 @@ impl MobFlags {
         Self { bits }
     }
 
-    /// Whether the mob's AI is disabled (`Mob.isNoAi`).
+    /// Whether the mob's AI is disabled.
     ///
     /// Not consumed by rendering, and modelled anyway because the alternative is a
     /// bare `0x04` mask with no name for the bits either side of it.
@@ -396,11 +397,11 @@ impl MobFlags {
         self.bits & Self::NO_AI != 0
     }
 
-    /// Whether the mob is left-handed (`Mob.isLeftHanded`).
+    /// Whether the mob is left-handed.
     ///
-    /// Vanilla's `Mob.getMainArm()` returns `LEFT` when this is set, which flips
-    /// which arm every arm pose applies to. Consumed end to end: it folds into
-    /// `MobState::left_handed` and threads through `EntityDraw::main_arm_left`,
+    /// Vanilla treats this as flipping which arm counts as the "main" one, which
+    /// flips which arm every arm pose applies to. Consumed end to end: it folds
+    /// into `MobState::left_handed` and threads through `EntityDraw::main_arm_left`,
     /// then gets XORed against the held-hand bit in `arm_pose_for`'s two pose
     /// paths and in the `EquipmentSlot`-to-`Arm` mappings the entity and
     /// world-item draw passes use.
@@ -409,7 +410,7 @@ impl MobFlags {
         self.bits & Self::LEFT_HANDED != 0
     }
 
-    /// Whether the mob is aggressive — `Mob.isAggressive`, `(flags & 4) != 0`.
+    /// Whether the mob is aggressive — `(flags & 4) != 0`.
     ///
     /// "Aggressive" is vanilla's own name for it and it is set by the ranged and
     /// melee attack goals while a target is being engaged, so it is closer to
@@ -420,11 +421,11 @@ impl MobFlags {
     }
 }
 
-/// The bit meanings inside `ArmorStand.DATA_CLIENT_FLAGS` — the byte that shares
-/// [`MobFlags`]'s metadata index (15) on 26.2, `BYTE`-for-`BYTE`, with
-/// unrelated bit meanings. `0x04` is `showArms` here and `aggressive` in
+/// The bit meanings inside an armour stand's client-flags byte — the byte that
+/// shares [`MobFlags`]'s metadata index (15) on 26.2, `BYTE`-for-`BYTE`, with
+/// unrelated bit meanings. `0x04` means "show arms" here and "aggressive" in
 /// [`MobFlags`]; a version adapter that cannot establish the concrete entity is
-/// an `ArmorStand` must withhold this byte entirely rather than guess (see
+/// an armour stand must withhold this byte entirely rather than guess (see
 /// [`MobFlags`]'s own doc for why the index collides and why `is_living` cannot
 /// resolve it).
 ///
@@ -461,16 +462,16 @@ impl ArmorStandFlags {
         Self { bits }
     }
 
-    /// `ArmorStand.isSmall()` — `(flags & 1) != 0`. Halves the model scale and
+    /// Whether the stand is small — `(flags & 1) != 0`. Halves the model scale and
     /// the arm/leg pose geometry vanilla applies.
     #[must_use]
     pub const fn small(self) -> bool {
         self.bits & Self::SMALL != 0
     }
 
-    /// `ArmorStand.showArms()` — `(flags & 4) != 0`. Without it a stand draws
-    /// no arms at all, which is vanilla's own default (a bare torso/legs); this
-    /// is the *other* `0x04` bit at this wire index, unrelated to
+    /// Whether the stand shows arms — `(flags & 4) != 0`. Without it a stand
+    /// draws no arms at all, which is vanilla's own default (a bare torso/legs);
+    /// this is the *other* `0x04` bit at this wire index, unrelated to
     /// [`MobFlags::aggressive`].
     #[must_use]
     pub const fn show_arms(self) -> bool {
@@ -478,18 +479,17 @@ impl ArmorStandFlags {
     }
 
     /// Whether the base plate is hidden — `(flags & 8) != 0`. Named after the
-    /// wire bit and the NBT tag that sets it (`ArmorStand.java` saves it as
-    /// `"NoBasePlate"`), **not** after vanilla's own `showBasePlate()` accessor,
-    /// which reads the same bit inverted (`(flags & 8) == 0`); this method's
-    /// polarity matches the bit, not that accessor's name.
+    /// wire bit and the save-format tag that sets it (`"NoBasePlate"`), **not**
+    /// after vanilla's own "show base plate" accessor, which reads the same bit
+    /// inverted (`(flags & 8) == 0`); this method's polarity matches the bit, not
+    /// that accessor's name.
     #[must_use]
     pub const fn no_base_plate(self) -> bool {
         self.bits & Self::NO_BASEPLATE != 0
     }
 
-    /// `ArmorStand.isMarker()` — `(flags & 16) != 0`. A marker stand has no
-    /// hitbox and ignores piston pushes (`ArmorStand.getPistonPushReaction`);
-    /// most "hologram" setups set this alongside
+    /// Whether the stand is a marker — `(flags & 16) != 0`. A marker stand has no
+    /// hitbox and ignores piston pushes; most "hologram" setups set this alongside
     /// [`SharedEntityFlags::invisible`] so nothing about the stand can be hit
     /// or collided with, only its floating name tag remains.
     #[must_use]
