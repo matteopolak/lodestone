@@ -12,8 +12,7 @@
 //! ## Ground truth, not a guess
 //!
 //! Every key name and every default value here is transcribed from
-//! `DedicatedServerProperties.java` in this repo's own pinned 26.2 decompile
-//! (`.cache/mc/26.2/src/net/minecraft/server/dedicated/`), not from an older
+//! vanilla's own dedicated-server-properties record in this repo's own pinned 26.2 decompile, not from an older
 //! Minecraft version's documentation. Two things that transcription caught
 //! that an assumption would not have:
 //!
@@ -248,7 +247,7 @@ fn set_entry(entries: &mut Vec<(String, String)>, key: String, value: String) {
 /// vanilla's real key set and real defaults, alphabetically ordered exactly
 /// as `.cache/mc/26.2/server.properties` (and every vanilla-written file) is
 /// — see this module's own doc comment on why that ordering and every value
-/// below is transcribed from `DedicatedServerProperties.java`, not assumed.
+/// below is transcribed from vanilla's own dedicated-server-properties record, not assumed.
 #[must_use]
 pub fn default_raw() -> RawProperties {
     let mut raw = RawProperties::new();
@@ -258,8 +257,8 @@ pub fn default_raw() -> RawProperties {
     raw
 }
 
-/// `(key, default)` pairs, in `DedicatedServerProperties.java`'s own
-/// declaration order (which is also the real file's alphabetical order).
+/// `(key, default)` pairs, in vanilla's own dedicated-server-properties
+/// record's declaration order (which is also the real file's alphabetical order).
 /// `management-server-secret` here is `""` rather than vanilla's randomly
 /// generated `SecurityConfig.generateSecretKey()` — this crate implements no
 /// management server to protect with it, so a fixed empty default is honest

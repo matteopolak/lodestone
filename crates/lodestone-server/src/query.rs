@@ -17,8 +17,8 @@
 //! The protocol is deliberately **not** Minecraft-version-specific, so nothing
 //! here names a protocol number or a packet id — the same "stat" language
 //! GameSpy used for Quake and Unreal servers. Every wire detail below is
-//! hand-expanded from vanilla's own `QueryThreadGs4`/`NetworkDataOutputStream`/
-//! `PktUtils` (`.cache/mc/26.2/src/net/minecraft/server/rcon/`) rather than
+//! hand-expanded from vanilla's own query-thread, network-data-output-stream
+//! and packet-utility helpers rather than
 //! inferred from a description, because an earlier version of this module got
 //! several of these details wrong in a way `decode(encode(x)) == x` could not
 //! catch — see "Corrected against the real protocol" below.
