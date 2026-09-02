@@ -21,7 +21,8 @@
 //! temperature, downfall, the three colormap overrides, the water colour, the
 //! grass modifier — **except** the swamp modifier's noise term
 //! ([`BiomeTint::grass_modifier_noise`](lodestone_assets::tint::BiomeTint::grass_modifier_noise)),
-//! which stays at the trait's default `0.0`. Porting `Biome.BIOME_INFO_NOISE`
+//! which stays at the trait's default `0.0`. Porting vanilla's own biome-info
+//! noise sampler
 //! (a Perlin sampler) would pull a worldgen-noise dependency into a render
 //! crate for one biome's two-tone patchiness (`swamp`/`mangrove_swamp`'s dark
 //! patches — `GrassColorModifier::Swamp`'s `< -0.1` branch, see
@@ -200,12 +201,13 @@ impl<F: Fn(BlockPos) -> Option<&'static str>> BiomeTint for NamedBiomeTint<F> {
 /// at world position `(x, y, z)`.
 ///
 /// Mirrors vanilla's own two-layer split exactly:
-/// * one point: `Colormaps::resolve` is `ColorResolver.getColor`
-///   (`Biome.getGrassColor`/`getFoliageColor`/`getDryFoliageColor`/
-///   `getWaterColor`) — the colormap sample (or override) plus the grass
+/// * one point: `Colormaps::resolve` is vanilla's own per-kind colour-resolver
+///   callback
+///   (vanilla's own per-biome grass/foliage/dry-foliage/water colour
+///   accessors) — the colormap sample (or override) plus the grass
 ///   modifier, all evaluated at *that* sample's own biome;
-/// * the box: [`blend_box`] wraps it exactly like `ClientLevel.
-///   calculateBlockTint` (`ClientLevel`'s own decompiled source) wraps the resolver —
+/// * the box: [`blend_box`] wraps it exactly like vanilla's own client-level
+///   block-tint calculation (client-level's own decompiled source) wraps the resolver —
 ///   a `(2*radius+1)²` average of the *resolved* colour, sampled at fixed `y`
 ///   across `x`±radius, `z`±radius, with vanilla's own per-channel integer
 ///   (floor) division. `radius` should be
