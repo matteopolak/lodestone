@@ -564,7 +564,7 @@ pub enum MetadataField {
     /// claimant in the jar dump (`entity_data_index_jvm.txt`), so no species
     /// switch is needed to disambiguate it the way index 8 or 18 need one.
     ///
-    /// The raw `Pose` ordinal (`net.minecraft.world.entity.Pose.id()`), not a
+    /// The raw `Pose` ordinal (vanilla's own pose-id getter), not a
     /// version-free enum — this crate has no general per-mob pose model yet
     /// (issue #459's warden dig/emerge is the first producer), so the id is
     /// carried through verbatim rather than inventing a vocabulary for the
@@ -746,8 +746,7 @@ pub enum ServerBound {
     },
     /// The client asked for the server-list status (mirrors
     /// `ServerboundStatusRequestPacket`, whose body is *empty* —
-    /// `StreamCodec.unit(INSTANCE)`,
-    /// `net/minecraft/network/protocol/status/ServerboundStatusRequestPacket.java:10`).
+    /// vanilla's own `StreamCodec.unit(INSTANCE)`).
     ///
     /// This is the very first thing a real client sends after a handshake whose
     /// `next_state` was Status, i.e. when a player adds our server to their
@@ -755,15 +754,13 @@ pub enum ServerBound {
     /// [`ServerProtocol::encode_status_response`].
     StatusRequest,
     /// The client asked us to echo a clock reading so it can compute latency
-    /// (mirrors `ServerboundPingRequestPacket`: a single big-endian `long`,
-    /// `net/minecraft/network/protocol/ping/ServerboundPingRequestPacket.java:19`).
+    /// (mirrors `ServerboundPingRequestPacket`: a single big-endian `long`).
     ///
     /// Sent in the Status phase immediately after
     /// [`ServerBound::StatusRequest`]; the loop answers with
     /// [`ServerProtocol::encode_pong_response`] carrying `time` unchanged and
     /// then terminates the connection, exactly as vanilla's own
-    /// `ServerStatusPacketListenerImpl.handlePingRequest` does
-    /// (`net/minecraft/server/network/ServerStatusPacketListenerImpl.java:44-47`).
+    /// status-phase ping-request handler does.
     PingRequest {
         /// The client's local clock reading, echoed back verbatim. Vanilla
         /// treats this as opaque — it is the *client* that subtracts it from
@@ -996,8 +993,7 @@ pub enum ServerBound {
     CarriedItemChanged {
         /// The newly selected hotbar slot. The protocol decoder validates
         /// `0..HOTBAR_SIZE` before producing this variant (mirroring
-        /// vanilla's `Inventory.isHotbarSlot` guard,
-        /// `Inventory.java:70-76`); an out-of-range wire value decodes to
+        /// vanilla's own is-hotbar-slot guard); an out-of-range wire value decodes to
         /// [`Ignored`](Self::Ignored) instead.
         slot: u8,
     },
@@ -1188,8 +1184,8 @@ pub enum ServerBound {
     },
     /// A spectator clicking a player's name in the tab list
     /// (`ServerboundTeleportToEntityPacket`), asking to be moved to that
-    /// player's position. Vanilla's `handleTeleportToEntityPacket`
-    /// (`ServerGamePacketListenerImpl.java`) resolves the uuid against every
+    /// player's position. Vanilla's own teleport-to-entity handler
+    /// resolves the uuid against every
     /// loaded level's entities and teleports on the first hit, gated on
     /// `player.isSpectator()`.
     ///
@@ -1287,15 +1283,14 @@ pub enum ServerBound {
     /// [`PlayerInventory::apply_menu_slot_change`](crate::inventory::PlayerInventory::apply_menu_slot_change)'s
     /// own doc comment for the table — because vanilla's
     /// `handleSetCreativeModeSlot` writes through the identical
-    /// `player.inventoryMenu.getSlot(slotNum)` indexing
-    /// (`ServerGamePacketListenerImpl.java:2038`). This crate has no
+    /// `player.inventoryMenu.getSlot(slotNum)` indexing. This crate has no
     /// creative-mode/game-mode model to gate on (`hasInfiniteMaterials()` in
     /// vanilla), matching the permission-check omission
     /// [`DifficultyChanged`](Self::DifficultyChanged)'s own doc comment
     /// already documents for this crate's singleplayer-only shape.
     CreativeModeSlotSet {
         /// Wire slot index. Vanilla only ever writes for `1..=45`
-        /// (`validSlot`, `ServerGamePacketListenerImpl.java:2035`); `0`
+        /// (its own `validSlot` check); `0`
         /// (crafting output) and negative values (vanilla's "drop into the
         /// world" case, `packet.slotNum() < 0`) are decoded but never
         /// recognised by
@@ -1888,28 +1883,26 @@ pub trait ServerProtocol: Send + Sync {
 
     /// Encodes the server-list status reply to a [`ServerBound::StatusRequest`]
     /// (vanilla `ClientboundStatusResponsePacket`, whose whole body is one
-    /// length-prefixed JSON document — `ByteBufCodecs.lenientJson(32767)`,
-    /// `net/minecraft/network/protocol/status/ClientboundStatusResponsePacket.java:16`).
+    /// length-prefixed JSON document — vanilla's own `ByteBufCodecs.lenientJson(32767)`).
     ///
     /// The parameters are deliberately scalars rather than a struct: everything
     /// here is version-free, but the two fields vanilla's own `ServerStatus`
     /// also carries — `version.name` and `version.protocol` — are *not*, so the
     /// implementor fills those from its own protocol number, exactly as
-    /// vanilla's `ServerStatus.Version.current()` does
-    /// (`status/ServerStatus.java:71-74`). This crate must never name a
+    /// vanilla's own status-version constructor does. This crate must never name a
     /// protocol number, so it cannot pass them in.
     ///
     /// * `description` — the MOTD, serialized as a text component.
     /// * `players_online` / `players_max` — vanilla's `players.online` /
-    ///   `players.max` (`status/ServerStatus.java:52-60`).
+    ///   `players.max`.
     /// * `sample` — `players.sample`, a list of `(uuid, name)` pairs
-    ///   (`NameAndId`, `server/players/NameAndId.java:11-13`). Empty is legal
+    ///   (vanilla's own name-and-id record). Empty is legal
     ///   and is what vanilla sends when the sample is disabled.
     /// * `favicon_png` — raw PNG bytes, which the implementor base64-encodes
-    ///   behind vanilla's mandatory `data:image/png;base64,` prefix
-    ///   (`status/ServerStatus.java:36`). `None` omits the field entirely.
+    ///   behind vanilla's mandatory `data:image/png;base64,` prefix.
+    ///   `None` omits the field entirely.
     /// * `enforces_secure_chat` — vanilla's `enforcesSecureChat`, default
-    ///   `false` (`status/ServerStatus.java:30`).
+    ///   `false`.
     ///
     /// The default emits nothing, so a protocol with no status support behaves
     /// exactly as it did before this method existed.
@@ -1941,8 +1934,8 @@ pub trait ServerProtocol: Send + Sync {
     ///
     /// | phase | vanilla packet | reason encoded as |
     /// |---|---|---|
-    /// | Login | `ClientboundLoginDisconnectPacket` | **JSON string** (`ByteBufCodecs.lenientJson(262144)`, `login/ClientboundLoginDisconnectPacket.java:18`) |
-    /// | Configuration | `ClientboundDisconnectPacket` | **NBT** (`TRUSTED_CONTEXT_FREE_STREAM_CODEC`, `common/ClientboundDisconnectPacket.java:11-12`) |
+    /// | Login | `ClientboundLoginDisconnectPacket` | **JSON string** (vanilla's own `ByteBufCodecs.lenientJson(262144)`) |
+    /// | Configuration | `ClientboundDisconnectPacket` | **NBT** (vanilla's own `TRUSTED_CONTEXT_FREE_STREAM_CODEC`) |
     /// | Play | `ClientboundDisconnectPacket` | **NBT**, same codec |
     ///
     /// Login is the odd one out for historical reasons — the login phase predates
@@ -1966,8 +1959,7 @@ pub trait ServerProtocol: Send + Sync {
 
     /// Encodes the reply to a [`ServerBound::PingRequest`] (vanilla
     /// `ClientboundPongResponsePacket`: the same single big-endian `long`,
-    /// echoed unchanged —
-    /// `net/minecraft/network/protocol/ping/ClientboundPongResponsePacket.java:14-19`).
+    /// echoed unchanged).
     ///
     /// The default emits nothing.
     fn encode_pong_response(&self, time: i64) -> ServerDirective {
@@ -2284,7 +2276,7 @@ pub trait ServerProtocol: Send + Sync {
     /// Encodes vanilla's `ClientboundEntityEventPacket` — one raw per-entity-type
     /// status byte, `ServerLevel.broadcastEntityEvent`'s whole payload.
     ///
-    /// `event` is a `net.minecraft.world.entity.EntityEvent` constant, and the
+    /// `event` is vanilla's own `EntityEvent` constant, and the
     /// values are **not** a registry: they are reused across entity types, so the
     /// same byte means different things on different species. The ones this crate
     /// sends today, read off `EntityEvent`:
@@ -2405,9 +2397,8 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes a `BOSS_EVENT` `ADD` operation — vanilla
-    /// `ClientboundBossEventPacket.createAddPacket`
-    /// (`.cache/mc/26.2/src/net/minecraft/network/protocol/game/ClientboundBossEventPacket.java`).
+    /// Encodes a `BOSS_EVENT` `ADD` operation — vanilla's own
+    /// boss-event-packet add-packet constructor.
     /// `id` is the bar's own id (see [`BossBarSnapshot::id`]), `name` its title,
     /// `progress` its `[0.0, 1.0]` fill.
     ///
@@ -2453,8 +2444,8 @@ pub trait ServerProtocol: Send + Sync {
     /// `ClientPacketListener.createEntityFromPacket` logs
     /// `"Server attempted to add player prior to sending player info"` and
     /// returns `null`, so the entity is never added to the level
-    /// (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/
-    /// ClientPacketListener.java:591-604`). [`crate::players::PlayerListStreamer`]
+    /// (the real client's own packet-listener logs this and bails).
+    /// [`crate::players::PlayerListStreamer`]
     /// is the one caller and `crate::server`'s streaming pass emits its
     /// directives **before** the entity diff for exactly that reason.
     ///
@@ -3116,14 +3107,13 @@ pub trait ServerProtocol: Send + Sync {
 
     /// Encodes the clientbound `initialize_border` packet (vanilla
     /// `ClientboundInitializeBorderPacket`, wire id 43 in 26.2) — the border
-    /// state a player is told about on join, sent by `PlayerList.sendLevelInfo`
-    /// **before** the time sync and spawn-position packets (`PlayerList.java:
-    /// 648-663`). The default emits nothing.
+    /// state a player is told about on join, sent by vanilla's own
+    /// per-player level-info send routine
+    /// **before** the time sync and spawn-position packets. The default emits nothing.
     ///
     /// Passed the whole [`WorldBorder`](crate::border::WorldBorder) because
     /// the packet's `old_size`/`new_size`/`lerp_time` triple is exactly the
-    /// extent's `size`/`lerp_target`/`lerp_time` readout
-    /// (`ClientboundInitializeBorderPacket.java:35-38`), and its
+    /// extent's `size`/`lerp_target`/`lerp_time` readout, and its
     /// `absolute_max_size`/`warning_blocks`/`warning_time` are flat fields —
     /// the encoder should not have to re-derive that mapping from primitives.
     fn encode_initialize_border(&self, border: &crate::border::WorldBorder) -> ServerDirective {
@@ -3144,7 +3134,7 @@ pub trait ServerProtocol: Send + Sync {
     /// resize delta a border shrink/grow broadcasts, carrying `old_size`,
     /// `new_size` and the lerp time in **milliseconds**. Vanilla writes
     /// `border.getLerpTime()` — remaining server **ticks** — directly
-    /// (`ClientboundSetBorderLerpSizePacket.java:20`, no ×50), but this crate's
+    /// (no ×50), but this crate's
     /// client decodes the field as `lerp_time_ms` and interpolates on wall-clock
     /// (`lodestone-game::worldborder`'s `BorderExtent::Moving`), so the caller
     /// converts ticks → ms (`* 50`) before calling and this method writes the ms

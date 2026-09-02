@@ -17,7 +17,7 @@
 //! Three pieces, in dependency order.
 //!
 //! **1. [`push_reaction`] and [`is_pushable`].** `PushReaction` is per block, from
-//! `Blocks.java`'s own `pushReaction(...)` calls — 200 `DESTROY`, 11 `BLOCK`, 16
+//! vanilla's own block registration table's `pushReaction(...)` calls — 200 `DESTROY`, 11 `BLOCK`, 16
 //! `PUSH_ONLY` (the glazed terracottas), everything else `NORMAL` by default. The
 //! four hard-coded exceptions in `PistonBaseBlock.isPushable` (obsidian, crying
 //! obsidian, respawn anchor, reinforced deepslate) are exceptions *there*, not
@@ -1171,7 +1171,7 @@ mod tests {
     }
 
     /// The push-reaction table is sorted (both name lists are binary-searched) and
-    /// carries the counts `Blocks.java` actually declares. A table that silently
+    /// carries the counts vanilla's own block registration table actually declares. A table that silently
     /// lost rows makes a piston eat a torch it should stop at.
     #[test]
     fn push_reaction_table_matches_blocks_java() {

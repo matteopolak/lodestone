@@ -50,7 +50,7 @@
 //! ## How to change it, and the gotchas
 //!
 //! * **The species table is a record transcription, not a guess.** Every row
-//!   comes from `SpawnPlacements.java`'s registration plus the `check*SpawnRules`
+//!   comes from vanilla's own spawn-placement registration plus the `check*SpawnRules`
 //!   body it names; the block-tag rows come from
 //!   `data/minecraft/tags/block/*_spawnable_on.json`. If you add a species,
 //!   read its predicate — the families genuinely differ (a wolf wants
@@ -107,16 +107,16 @@ pub const LIGHT_TTL_TICKS: u64 = 200;
 const MIN_PLAYER_DIST_SQR: f64 = 576.0;
 
 /// `BiomeTags.ALLOWS_SURFACE_SLIME_SPAWNS`, flattened —
-/// `BiomeTagsProvider.java:266` adds exactly `swamp` and `mangrove_swamp` and
+/// vanilla's own biome-tag provider adds exactly `swamp` and `mangrove_swamp` and
 /// nothing else, so the tag is two names rather than a lookup.
 const SURFACE_SLIME_BIOMES: &[&str] = &["minecraft:swamp", "minecraft:mangrove_swamp"];
 
-/// `DimensionType.MOON_BRIGHTNESS_PER_PHASE` (`DimensionType.java:57`), indexed
+/// Vanilla's own `DimensionType.MOON_BRIGHTNESS_PER_PHASE`, indexed
 /// by `MoonPhase.index()`.
 const MOON_BRIGHTNESS_PER_PHASE: [f32; 8] = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75];
 
-/// `Slime.checkSlimeSpawnRules`' slime-chunk ceiling: the slime-chunk arm only
-/// fires strictly below this Y (`Slime.java:94`).
+/// Vanilla's own slime spawn-rules check's slime-chunk ceiling: the slime-chunk arm only
+/// fires strictly below this Y.
 const SLIME_CHUNK_MAX_Y: i32 = 40;
 
 /// How a species is positioned relative to the candidate block —
@@ -193,7 +193,7 @@ pub enum Chance {
 pub enum Special {
     /// No special arm: the [`SpawnRule`] fields are the whole predicate.
     None,
-    /// `Slime.checkSlimeSpawnRules` (`Slime.java:73-99`) — see
+    /// Vanilla's own slime spawn-rules check — see
     /// [`NaturalSpawner::slime_permits`].
     Slime,
 }
@@ -962,9 +962,9 @@ impl NaturalSpawner {
 
     /// The moon-phase `SURFACE_SLIME_SPAWN_CHANCE` at the current `day_time`.
     ///
-    /// `EnvironmentAttributes.SURFACE_SLIME_SPAWN_CHANCE` (`EnvironmentAttributes.java:144`)
+    /// Vanilla's own `EnvironmentAttributes.SURFACE_SLIME_SPAWN_CHANCE`
     /// defaults to **`0.0`** and is raised by exactly one modifier track:
-    /// `Timelines.MOON`'s (`Timelines.java:168-175`), a `FloatModifier.MAXIMUM`
+    /// vanilla's own moon timeline, a `FloatModifier.MAXIMUM`
     /// keyframed `CONSTANT` (so a step function, not a ramp) at each phase start to
     /// `MOON_BRIGHTNESS_PER_PHASE[phase] * 0.5`. `max(0.0, that)` is `that`, so the
     /// whole attribute reduces to this expression.
@@ -983,7 +983,7 @@ impl NaturalSpawner {
         MOON_BRIGHTNESS_PER_PHASE[phase] * 0.5
     }
 
-    /// `Slime.checkSlimeSpawnRules` (`Slime.java:73-99`), minus the two clauses
+    /// Vanilla's own slime spawn-rules check, minus the two clauses
     /// that belong to the caller.
     ///
     /// Vanilla's body is **two alternatives in sequence**, and the sequence is
@@ -1410,8 +1410,8 @@ mod tests {
 
     /// `SURFACE_SLIME_SPAWN_CHANCE` across a full lunar month, against
     /// `DimensionType.MOON_BRIGHTNESS_PER_PHASE * 0.5` expanded by hand from the
-    /// record — the expected values come from `DimensionType.java:57` and
-    /// `Timelines.java:168-175`, not from this module.
+    /// record — the expected values come from vanilla's own dimension-type
+    /// constant and moon timeline, not from this module.
     #[test]
     fn surface_slime_chance_follows_the_moon() {
         let expected = [0.5f32, 0.375, 0.25, 0.125, 0.0, 0.125, 0.25, 0.375];
