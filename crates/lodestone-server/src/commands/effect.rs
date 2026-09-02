@@ -53,11 +53,11 @@ pub enum Effect {
     /// Send the player a system-chat line — the `gameMode.changed` notification
     /// a target receives when *someone else* changes their mode.
     Message(String),
-    /// Apply a status effect (`/effect give`) — issue #259's producer.
+    /// Apply a status effect (`/effect give`).
     ///
     /// `duration` is in **ticks**, already multiplied out from the command's seconds
-    /// argument, and [`crate::mob_effects::INFINITE_DURATION`] is vanilla's default
-    /// for the two-argument form. `amplifier` is zero-based: `0` is level I.
+    /// argument, and [`crate::mob_effects::INFINITE_DURATION`] is the real
+    /// default for the two-argument form. `amplifier` is zero-based: `0` is level I.
     ApplyEffect {
         /// A namespaced effect id, e.g. `minecraft:poison`.
         effect: String,
@@ -67,15 +67,15 @@ pub enum Effect {
     /// Remove one status effect, or every one (`/effect clear`).
     ///
     /// `None` is the clear-everything form. A `Some` naming an effect the target does
-    /// not have is a no-op rather than an error, matching vanilla's own return of `0`
+    /// not have is a no-op rather than an error, matching the real rule's own return of `0`
     /// affected entities.
     ClearEffects {
         effect: Option<String>,
     },
-    /// Set health to zero and run the death sequence — `/kill`
-    /// (`Entity.kill()` → `hurtServer(damageSources().genericKill(), MAX_VALUE)`).
+    /// Set health to zero and run the death sequence — `/kill`, a hit for
+    /// the maximum representable amount through the generic-kill damage type.
     Kill,
-    /// `/experience add` — vanilla's `giveExperiencePoints`/`giveExperienceLevels`,
+    /// `/experience add` — the real give-experience-points/give-experience-levels rule,
     /// `levels` selecting which.
     GiveExperience {
         levels: bool,
@@ -90,9 +90,9 @@ pub enum Effect {
         amount: i32,
     },
     /// `/clear` — remove items from the target's own inventory (hotbar, main
-    /// storage, armour and the off-hand — `Inventory.clearOrCountMatchingItems`'s
+    /// storage, armour and the off-hand — the real clear-or-count rule's
     /// own scope). `item` is a canonical id filter (`None` clears everything);
-    /// `max_count` caps how many stacks' worth are removed (`None` is vanilla's
+    /// `max_count` caps how many stacks' worth are removed (`None` is the real
     /// "no cap" `-1`).
     ClearInventory {
         item: Option<String>,

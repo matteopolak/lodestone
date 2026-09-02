@@ -1,13 +1,13 @@
-//! The NBT command-storage engine (issue #48's remainder) — vanilla's
-//! `CommandStorage`, behind [`NbtStorageHandle`]. `/data storage` and
-//! `/execute if`/`unless data storage` are its two consumers.
+//! The NBT command-storage engine — the real command-storage record, behind
+//! [`NbtStorageHandle`]. `/data storage` and `/execute if`/`unless data
+//! storage` are its two consumers.
 //!
 //! # What it is, and what it deliberately is not
 //!
-//! Vanilla's `/data` has three targets — `storage`, `entity`, `block` — and
+//! The real `/data` has three targets — `storage`, `entity`, `block` — and
 //! this crate builds only the first. `storage` is a free-standing per-id NBT
-//! compound with no owner in the world at all (`CommandStorage`'s own
-//! backing is a `Map<ResourceLocation, CompoundTag>`, not attached to
+//! compound with no owner in the world at all (the real command storage's own
+//! backing is a resource-location-keyed compound map, not attached to
 //! anything), so it needs nothing this crate lacks. `entity`/`block` would
 //! need a command-reachable, mutable NBT view of a *live* entity or block
 //! entity — a real subsystem this crate has nowhere (see
@@ -34,9 +34,9 @@
 //! `NbtPathArg`'s v1 grammar (dotted compound keys only, no array index, no
 //! filter compound — see that type's own doc) is what [`get`](NbtStorageHandle::get)/
 //! [`remove`](NbtStorageHandle::remove) walk; [`merge`](NbtStorageHandle::merge)
-//! is vanilla's own `CompoundTag.merge`: recurse when both sides hold a
+//! is the real compound-merge rule: recurse when both sides hold a
 //! compound at the same key, overwrite otherwise. [`set`](NbtStorageHandle::set)
-//! is the other vanilla primitive, `NbtPathArgument.NbtPath.set` —
+//! is the other real primitive, the NBT-path set operation —
 //! `/execute store data storage`'s own write, which creates every
 //! intermediate compound `path` needs rather than requiring the caller to
 //! shape one.
@@ -73,9 +73,9 @@ impl NbtStorageHandle {
         f(&mut self.0.lock().expect("nbt storage lock poisoned"))
     }
 
-    /// `CommandStorage.get(id).getOrCreateTag()` read side — the whole
+    /// The real command-storage read side — the whole
     /// compound for an id that has never been written comes back as an
-    /// empty one, matching vanilla's own "created on first read or write"
+    /// empty one, matching the real "created on first read or write"
     /// posture, rather than an error.
     #[must_use]
     pub fn get(&self, id: &str, path: &[String]) -> Option<SnbtValue> {
@@ -85,7 +85,7 @@ impl NbtStorageHandle {
         })
     }
 
-    /// `CommandStorage.set` — `CompoundTag.merge`'d into whatever this id
+    /// The real command-storage set rule — merged into whatever this id
     /// already held (created empty if this is the first write).
     pub fn merge(&self, id: &str, incoming: Vec<(String, SnbtValue)>) {
         self.with(|store| {
@@ -94,14 +94,13 @@ impl NbtStorageHandle {
         });
     }
 
-    /// `NbtPathArgument.NbtPath.set` — overwrites the single value at `path`
+    /// The real NBT-path set rule — overwrites the single value at `path`
     /// (creating it, and every intermediate compound `path` walks through
     /// that does not exist yet, exactly like [`merge`](Self::merge) creates
     /// the id itself). Unlike `merge`, a non-compound value sitting where an
     /// intermediate segment needs a compound is replaced outright rather than
-    /// merged into — `/execute store data storage`'s only caller, and vanilla
-    /// itself does the same (`CompoundTag.getCompoundOrEmpty` /
-    /// `NbtPathArgument.NbtPath.set`'s own `getOrCreateTag`-then-overwrite
+    /// merged into — `/execute store data storage`'s only caller, and the
+    /// real rule itself does the same (a get-or-create-then-overwrite
     /// walk). A path of `[]` (structurally unreachable — [`lodestone_command_mc::NbtPathArg`]
     /// requires at least one segment) is a no-op rather than a panic.
     pub fn set(&self, id: &str, path: &[String], value: SnbtValue) {
@@ -113,8 +112,9 @@ impl NbtStorageHandle {
 
     /// Removes the value at `path`. Returns whether anything was actually
     /// removed — a `remove` on an id or path that was never set is a no-op,
-    /// not an error (matching `NbtPathArgument.NbtPath.remove`'s own count,
-    /// which `DataCommand`'s `remove` handler reports back as "how many").
+    /// not an error (matching the real NBT-path remove rule's own count,
+    /// which the real data command's `remove` handler reports back as "how
+    /// many").
     pub fn remove(&self, id: &str, path: &[String]) -> bool {
         self.with(|store| match store.get_mut(id) {
             Some(root) => remove_path(root, path),
@@ -170,7 +170,7 @@ fn set_path(root: &mut Vec<(String, SnbtValue)>, path: &[String], value: SnbtVal
     }
 }
 
-/// `CompoundTag.merge`: for each incoming key, recurse if **both** sides are
+/// The real compound-merge rule: for each incoming key, recurse if **both** sides are
 /// compounds at that key, otherwise the incoming value replaces whatever was
 /// there (a list, a scalar, or nothing).
 fn merge_compound(target: &mut Vec<(String, SnbtValue)>, incoming: Vec<(String, SnbtValue)>) {
