@@ -170,10 +170,11 @@ impl Default for DisplayTransform {
 /// One of vanilla's `display` slots — the *context* an item model is being drawn
 /// in, which selects which [`DisplayTransform`] poses it.
 ///
-/// Mirrors `net.minecraft.world.item.ItemDisplayContext`, and
-/// [`json_name`](Self::json_name) is that enum's `getSerializedName()`. The
+/// Mirrors vanilla's own item-display-context enum, and
+/// [`json_name`](Self::json_name) is that enum's own "get serialized name"
+/// accessor. The
 /// `NONE` variant is deliberately absent: it has no `display` key and vanilla's
-/// `ItemTransforms.getTransform` answers it with `NO_TRANSFORM`, which is what
+/// own "get transform" accessor answers it with `NO_TRANSFORM`, which is what
 /// [`DisplayTransforms::get`] returns for any undeclared slot anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DisplaySlot {
@@ -193,7 +194,7 @@ pub enum DisplaySlot {
     Ground,
     /// `fixed` — an item frame.
     Fixed,
-    /// `on_shelf` — 26.2's shelf block (vanilla's `fixedFromBottom`).
+    /// `on_shelf` — 26.2's shelf block (vanilla's own "fixed from bottom" variant).
     OnShelf,
 }
 
@@ -247,7 +248,7 @@ impl DisplaySlot {
     /// declares no left-hand variant, or `None` for a slot that is not a
     /// left-hand one.
     ///
-    /// This is vanilla's `ItemTransforms.Deserializer`, which does exactly this
+    /// This is vanilla's own item-transforms deserializer, which does exactly this
     /// substitution while reading one model's `display` object. It matters in
     /// practice: neither `block/block` nor `item/generated` declares
     /// `thirdperson_lefthand`, so without the fallback every block and every
@@ -277,8 +278,8 @@ impl DisplaySlot {
 ///
 /// [`declared`](Self::declared) reports only what the model's parent chain
 /// actually wrote down; [`get`](Self::get) applies the left-hand fallback and
-/// then defaults to the identity transform, mirroring vanilla's
-/// `ItemTransform.NO_TRANSFORM`. Prefer `get` for drawing and `declared` when
+/// then defaults to the identity transform, mirroring vanilla's own
+/// item-transform "no transform" constant. Prefer `get` for drawing and `declared` when
 /// you need to know whether the data was really there — for instance to decide
 /// whether a fallback constant is still being relied on.
 ///
@@ -640,8 +641,8 @@ impl ResolvedModel {
     /// with the left-hand fallback applied on lookup.
     ///
     /// [`display`](Self::display) is merged **per slot** down the parent chain
-    /// (child overrides parent), which is what vanilla's
-    /// `ResolvedModel.findTopTransform` does — it walks the chain once per slot
+    /// (child overrides parent), which is what vanilla's own
+    /// resolved-model "find top transform" step does — it walks the chain once per slot
     /// rather than taking one ancestor's whole `display` object. Getting that
     /// wrong would give `item/handheld` (which declares only the four hand
     /// slots) no `ground` transform at all, instead of inheriting

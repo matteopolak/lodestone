@@ -8,7 +8,7 @@
 //! renderer. This module joins the two and emits a GPU-free [`ItemIcon`] the
 //! renderer consumes.
 //!
-//! The three drawable shapes, faithful to `net/minecraft/client/renderer/item`
+//! The three drawable shapes, faithful to vanilla's own item-renderer package
 //! in the decompiled 26.2 client:
 //!
 //! * **Sprite** — the `builtin/generated` path, ~97% of items. A stack of item-
@@ -234,9 +234,9 @@ impl ItemPropertyContext for DefaultItemContext {
 }
 
 /// The `select` property naming which of vanilla's nine drawing contexts is
-/// being rendered — `ItemDisplayContext`, whose serialised names are exactly
-/// [`DisplaySlot::json_name`]'s (verified against
-/// `net/minecraft/world/item/ItemDisplayContext.java`, whose `NONE` is the only
+/// being rendered — vanilla's own item-display-context enum, whose serialised names are exactly
+/// [`DisplaySlot::json_name`]'s (verified against the decompiled 26.2 tree,
+/// whose `NONE` is the only
 /// value with no `DisplaySlot`).
 pub const DISPLAY_CONTEXT_PROPERTY: &str = "minecraft:display_context";
 

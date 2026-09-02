@@ -207,7 +207,7 @@ impl TextureMeta {
     /// the `animation` section has an invalid shape.
     pub fn parse(bytes: &[u8]) -> Result<Self, TextureError> {
         // Lenient about *trailing* content, strict about the value — vanilla's
-        // `GsonHelper.parse` reads one value off a `JsonReader` and never
+        // own JSON-helper parse step reads one value off a `JsonReader` and never
         // asserts end-of-document, so a pack whose `.mcmeta` carries a stray
         // extra closing brace renders normally in the real client. Rejecting it
         // here costs the whole texture, not just its animation, because

@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn a_reference_entry_with_zero_alpha_can_never_be_matched() {
         // A pixel whose RGB equals a *transparent* reference slot must not be
-        // recoloured — `ARGB.alpha(key) != 0` excludes it from the lookup
+        // recoloured — vanilla's own ARGB-alpha extraction `!= 0` excludes it from the lookup
         // table entirely, so it falls to the "unmapped" pass-through even
         // though its colour is technically "in" the reference image.
         let reference = vec![px(10, 20, 30, 0), px(224, 224, 224, 255)];

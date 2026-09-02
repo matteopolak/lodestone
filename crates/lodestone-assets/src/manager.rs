@@ -37,20 +37,21 @@ impl ResourceManager {
     /// user put on top simply overrides nothing. Both directions are attested,
     /// from the record definitions rather than a summary of a call site:
     ///
-    /// - `FallbackResourceManager.getResource` walks `for (int i =
+    /// - Vanilla's own fallback resource-manager "get resource" accessor walks `for (int i =
     ///   fallbacks.size() - 1; i >= 0; i--)`,
-    ///   and `pushInternal` appends — so the **last** pack handed to
-    ///   `MultiPackResourceManager` wins. That is [`Self::new`]'s order, and
+    ///   and its own "push internal" step appends — so the **last** pack handed to
+    ///   its own multi-pack resource manager wins. That is [`Self::new`]'s order, and
     ///   [`Self::read`]'s own `.iter().rev()` matches it exactly.
-    /// - `PackSelectionModel`'s constructor does
+    /// - Vanilla's own pack-selection-model constructor does
     ///   `this.selected = Lists.newArrayList(repository.getSelectedPacks());
     ///   Collections.reverse(this.selected);`,
-    ///   and its `commit` (via `updateRepoSelectedList`) reverses back — so the
+    ///   and its own commit step (via its own "update repo selected list" step)
+    ///   reverses back — so the
     ///   **first** row of the Selected column is the last pack in the stack,
     ///   i.e. the winner.
     ///
-    /// Vanilla's built-in pack is `Pack.Position.BOTTOM` with a fixed position,
-    /// which `Position.insert` places at index 0 of the repository order —
+    /// Vanilla's built-in pack is at a fixed bottom position,
+    /// which its own position-insert step places at index 0 of the repository order —
     /// the bottom row of the UI column and the bottom of
     /// the stack, consistently.
     ///
@@ -90,9 +91,9 @@ impl ResourceManager {
     /// the shape a *merge* needs, as opposed to [`Self::read`]'s single
     /// winner-takes-all.
     ///
-    /// Vanilla's own `ResourceManager.getResourceStack` returns exactly this
+    /// Vanilla's own resource-manager "get resource stack" accessor returns exactly this
     /// (every pack layer that carries the path, not just the top one), and
-    /// `ClientLanguage.loadFrom` is why the distinction matters: a language
+    /// its own client-language "load from" step is why the distinction matters: a language
     /// file is not one pack's file replacing another's, it is every pack's
     /// file layered key-by-key, later (higher-priority) packs overriding
     /// individual keys. A pack that ships a `lang/en_us.json` defining only

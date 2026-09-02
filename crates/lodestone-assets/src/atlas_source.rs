@@ -138,7 +138,7 @@ impl AtlasDefinition {
     /// it will produce. `unknown` sources contribute nothing.
     ///
     /// When two sources name the same sprite id, the **later** source wins —
-    /// `SpriteSourceList.list`'s own `Output.add` is a plain
+    /// vanilla's own sprite-source-list "list" step's own output-add step is a plain
     /// `Map<Identifier, …>.put`, so a source later in [`Self::sources`]
     /// (whether a second entry in one file, or a higher-priority pack's
     /// descriptor appended by [`Self::load_stacked`]) silently replaces an
@@ -162,11 +162,11 @@ impl AtlasDefinition {
 
     /// Loads and merges **every pack layer's own copy** of an
     /// `atlases/<id>.json` descriptor at `atlas_path`, the shape
-    /// `SpriteSourceList.load` requires: it iterates
-    /// `resourceManager.getResourceStack(resourceId)` — every pack that
+    /// vanilla's own sprite-source-list "load" step requires: it iterates
+    /// its own resource-manager "get resource stack" accessor — every pack that
     /// carries the path, lowest priority first — parsing each layer and
     /// accumulating their sources into one combined list, rather than
-    /// `ResourceManager.getResource`'s single winner. A pack that ships its
+    /// its own resource-manager "get resource" single-winner accessor. A pack that ships its
     /// own `atlases/armor_trims.json` (or `banner_patterns.json`,
     /// `shield_patterns.json`, …) therefore **extends** the source list
     /// underneath it — most commonly the jar's own `directory`/
