@@ -12004,7 +12004,7 @@ where
                     // own snap branch) — nothing left for this arm to do.
                     crate::mobs::LeashOutcome::Detached { .. } => None,
                     // Not leashable, no lead in hand, out of range, or already
-                    // someone else's: vanilla's `Entity.interact` returns
+                    // someone else's: vanilla's own entity interact routine returns
                     // `PASS` here and falls through to `mobInteract`, so this
                     // does too — the taming chain below, unchanged.
                     crate::mobs::LeashOutcome::Refused => Some(mobs.with(|sim| {
@@ -12043,7 +12043,7 @@ where
                     // which vanilla's own client treats as replacing the menu.
                     *open_merchant = Some(OpenMerchant { entity_id });
                 }
-                // `AbstractHorse.doPlayerRide`: `interact_horse`'s empty-handed arm
+                // Vanilla's own abstract-horse do-player-ride routine: `interact_horse`'s empty-handed arm
                 // on a tamed adult already recorded the mount in `MobSim` (its own
                 // doc names this exact send as the caller's cue) — this is the
                 // client's only way to learn it is aboard, the same
@@ -12057,7 +12057,7 @@ where
                     .await?;
                 }
                 // Vanilla consumes through `usePlayerItem`, a no-op in creative
-                // (`Player.hasInfiniteMaterials`). A sit toggle is
+                // (vanilla's own has-infinite-materials check). A sit toggle is
                 // `InteractionResult.SUCCESS.withoutItem()` and consumes nothing,
                 // which `InteractOutcome::consumes_item` already encodes.
                 //
@@ -12094,9 +12094,9 @@ where
         // existed in the protocol crates with no server model behind it, so a
         // player could draw a bow and nothing was ever created.
         ServerBound::UseItem { hand, yaw, pitch } => {
-            // **`BoatItem.use` first, because it is an override rather than an
-            // arm.** `BoatItem` replaces `Item.use` wholesale, exactly as
-            // `BowItem`/`SnowballItem` do, so it belongs on the disjoint-set side of
+            // **the boat item's own use routine first, because it is an override rather than an
+            // arm.** It replaces vanilla's own item-use routine wholesale, exactly as
+            // the bow/snowball items' own use routines do, so it belongs on the disjoint-set side of
             // the dispatch alongside `launch_intent` and ahead of the eat/equip
             // chain. A boat is neither food nor equippable, so the order is
             // unobservable today — it is written this way so it stays right if one
@@ -12234,7 +12234,7 @@ where
         }
         ServerBound::ReleaseUseItem => {
             // A release *before* the consume clock ran out cancels it with no food
-            // applied — `LivingEntity.releaseUsingItem`, which for a consumable is
+            // applied — vanilla's own release-using-item routine, which for a consumable is
             // `stopUsingItem` and nothing else. This is the arm a player hits
             // constantly and the one most easily forgotten.
             *item_in_use = None;
@@ -12247,7 +12247,7 @@ where
                     *game_mode,
                     draw,
                 );
-                // `Player.attack`'s exhaustion is charged on a melee swing; a bow
+                // Vanilla's own attack routine's exhaustion is charged on a melee swing; a bow
                 // shot has no exhaustion cost in vanilla, so nothing is charged
                 // here. Recorded because its absence otherwise reads as an
                 // oversight next to the `Attack` arm two branches down.
@@ -12283,7 +12283,7 @@ where
             }
         }
         // The steering half. The client owns the boat it rides
-        // (`Player.isClientAuthoritative()`), so this is not a request to be
+        // (vanilla's own is-client-authoritative check), so this is not a request to be
         // validated — it is the authoritative report, and the server's job is to
         // write it down so the boat's snapshot moves and every other viewer's
         // `move_entity` diff follows.
@@ -12306,7 +12306,7 @@ where
             // (`mount_mob` and `mount_vehicle` are separate "one map's worry"
             // occupancy rules — see `mount_mob`'s own doc), so trying the mob map
             // only when the vehicle map refused is exact rather than a guess:
-            // vanilla's `Player.isClientAuthoritative()` does not distinguish a
+            // vanilla's own is-client-authoritative check does not distinguish a
             // boat from a horse, and this is the one wire packet both share.
             mobs.with(|sim| {
                 if sim
@@ -12328,7 +12328,7 @@ where
         }
         ServerBound::PlayerInput { sprint, shift, jump } => {
             *sprinting = sprint;
-            // `Camel.onPlayerJump`: `isSaddled() && dashCooldown <= 0 &&
+            // Vanilla's own camel on-player-jump routine: `isSaddled() && dashCooldown <= 0 &&
             // onGround()`. This crate has no saddle-equip model at all (the
             // whole horse family already boards without one — see
             // `MobSim::mount_mob`'s own doc) and no `onGround` for a
@@ -12343,7 +12343,7 @@ where
             if jump {
                 mobs.with(|sim| sim.trigger_camel_dash(player_entity_id));
             }
-            // `Player.rideTick`: `!level.isClientSide && wantsToStopRiding() &&
+            // Vanilla's own player ride-tick routine: `!level.isClientSide && wantsToStopRiding() &&
             // isPassenger()` → `stopRiding()`, where `wantsToStopRiding()` is
             // exactly `isShiftKeyDown()` — tested every tick a passenger is
             // aboard, not on a press-edge. This dismounts on every *received*
@@ -12352,7 +12352,7 @@ where
             // hazard: `lodestone_controller::ecs::send_player_input` only queues
             // this packet when the input actually changes (`LastPlayerInput`'s
             // own edge check — real vanilla resends on change too,
-            // `LocalPlayer.tick`'s `!lastSentInput.equals(...)`), so a received
+            // vanilla's own local-player tick routine's `!lastSentInput.equals(...)`), so a received
             // `shift: true` already *is* the rising edge here, not a level held
             // across many packets. And even a literal level check would be safe:
             // `mount_vehicle`'s own `using_secondary_action` gate (and the
@@ -12384,12 +12384,12 @@ where
                     }
                 });
                 if let Some((vehicle_id, dismount_position)) = dismounted {
-                    // `Entity.stopRiding`'s own wire consequence — the vehicle's
+                    // Vanilla's own stop-riding routine's own wire consequence — the vehicle's
                     // whole (now empty) passenger list, the same `SET_PASSENGERS`
                     // handoff every mount arm above uses to announce boarding.
                     apply(conn, state, proto.encode_set_passengers(vehicle_id, &[])).await?;
                     if let Some(position) = dismount_position {
-                        // `LivingEntity.removeVehicle`: the server applies the
+                        // Vanilla's own remove-vehicle routine: the server applies the
                         // vehicle's dismount location and the client receives
                         // that authoritative position in the same transition.
                         // Updating the connection-local mirror first keeps the
