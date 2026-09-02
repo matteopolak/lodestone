@@ -125,9 +125,11 @@ const KNOWN_UNPRODUCED: &[(&str, &str)] = &[
     ),
     // `StartRidingJump` left this list when `lodestone_ecs::vehicle::charge_riding_jump`
     // became its producer. `StopRidingJump` is a different case and will never
-    // leave: it exists in `ServerboundPlayerCommandPacket.Action` and **the vanilla
-    // client never sends it** — `LocalPlayer` has only `sendRidingJump`, and
-    // `AbstractHorse.handleStopJump` is an empty method. So this is not a missing
+    // leave: it exists in vanilla's own serverbound-player-command action enum
+    // and **the vanilla
+    // client never sends it** — vanilla's own local player only has a
+    // "send riding jump" call, and
+    // vanilla's own horse-base "handle stop jump" is an empty method. So this is not a missing
     // producer waiting on a screen; the correct number of producers is zero.
     (
         "PlayerCommand::StopRidingJump",

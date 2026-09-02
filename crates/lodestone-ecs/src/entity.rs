@@ -138,10 +138,11 @@ pub struct Pose(pub EntityPose);
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct Health(pub f32);
 
-/// Ticks remaining in the current hurt-flash window — vanilla's `hurtTime`
-/// countdown. `LivingEntity.handleDamageEvent` (folding
+/// Ticks remaining in the current hurt-flash window — vanilla's own
+/// hurt-time
+/// countdown. Vanilla's own damage-event handler (folding
 /// [`lodestone_model::ClientEvent::EntityDamaged`]) and
-/// `LivingEntity.animateHurt` (folding
+/// vanilla's own hurt-animation call (folding
 /// [`lodestone_model::ClientEvent::EntityHurtAnimation`]) both reset the
 /// identical pair of fields — `hurtDuration = 10; hurtTime = hurtDuration;` —
 /// so one countdown here covers both reports. [`crate::ingest::tick_hurt_time`]
@@ -167,8 +168,9 @@ pub struct HurtTime(pub u32);
 ///
 /// # Present-at-zero is a state, and it is the tick death is announced
 ///
-/// Inserted as `DeathTime(0)`, not `DeathTime(1)`. Vanilla's `deathTime` is still
-/// `0` at the instant `die()` runs and only reaches `1` on the *next*
+/// Inserted as `DeathTime(0)`, not `DeathTime(1)`. Vanilla's own death-time
+/// field is still
+/// `0` at the instant its own `die()` runs and only reaches `1` on the *next*
 /// `tickDeath()`, and both consumers of the field test `deathTime > 0`
 /// (`LivingEntityRenderer`'s red overlay and its fall-over rotation). So the first
 /// tick of death draws upright, and the killing blow's own [`HurtTime`] is what
@@ -232,9 +234,9 @@ pub struct FallingBlockState(pub u32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectileOwner(pub i32);
 
-/// A **remote** entity's arm-swing progress — vanilla's `LivingEntity`
-/// `swingTime`/`swinging`/`attackAnim`/`oAttackAnim`, folded from
-/// `ClientboundAnimatePacket`'s `SWING_MAIN_HAND` action (id `0`) by
+/// A **remote** entity's arm-swing progress — vanilla's own living-entity
+/// swing-time/swinging/attack-anim/previous-attack-anim fields, folded from
+/// its own animate packet's `SWING_MAIN_HAND` action (id `0`) by
 /// [`crate::ingest::apply_entity_animation`] and advanced once per tick by
 /// [`crate::ingest::tick_entity_swing`].
 ///
@@ -263,10 +265,10 @@ pub struct AttackSwing {
     swing_time: i32,
     swinging: bool,
     swing_duration: i32,
-    /// Current tick's swing progress, `0.0..=1.0` — vanilla's `attackAnim`.
+    /// Current tick's swing progress, `0.0..=1.0` — vanilla's own attack-anim field.
     pub attack_anim: f32,
     /// Previous tick's swing progress, for [`Self::attack_anim_lerp`]'s
-    /// forward-wrapped interpolation — vanilla's `oAttackAnim`.
+    /// forward-wrapped interpolation — vanilla's own previous-attack-anim field.
     pub o_attack_anim: f32,
 }
 
@@ -325,19 +327,22 @@ impl AttackSwing {
 ///
 /// # The server does not send the counter, so we keep our own
 ///
-/// `LivingEntity`'s synced flags byte carries only a **boolean**: bit 0 is "an
-/// item is in use", bit 1 is which hand. `useItemRemaining` is *never* synced.
-/// Vanilla's own client does exactly what this type does — `LivingEntity.onSyncedDataUpdated`
+/// Vanilla's own living-entity synced flags byte carries only a **boolean**: bit 0 is "an
+/// item is in use", bit 1 is which hand. Vanilla's own "use item remaining"
+/// field is *never* synced.
+/// Vanilla's own client does exactly what this type does — its own
+/// synced-data-updated handler
 /// seeds its countdown the moment the bit flips
 /// on, and ticks it locally.
 ///
 /// # Counting up, not down
 ///
-/// Vanilla counts `useItemRemaining` **down** from `getUseDuration`, then derives
-/// `LivingEntity.getTicksUsingItem() = duration - remaining` — and
-/// `getTicksUsingItem` is what every pose and every draw-power formula actually
+/// Vanilla counts its own "use item remaining" field **down** from its own
+/// use-duration query, then derives
+/// its own "ticks using item" query as `duration - remaining` — and
+/// that query is what every pose and every draw-power formula actually
 /// reads. So [`ticks`](Self::ticks) counts **up** from zero, which is that same
-/// quantity without needing `getUseDuration`. That matters: the duration is a
+/// quantity without needing the use-duration query. That matters: the duration is a
 /// per-item value (`72000` for a bow, so "remaining" would be a number no pose
 /// uses) and for a crossbow it depends on the Quick Charge enchantment level.
 /// Counting up removes an item-data lookup from the hot path *and* removes a
@@ -384,7 +389,7 @@ impl ItemUse {
     }
 
     /// One tick's advance. Only counts while in use, and **saturates** rather
-    /// than wrapping: a bow's `getUseDuration` is `72000` ticks (an hour), so an
+    /// than wrapping: a bow's use-duration query is `72000` ticks (an hour), so an
     /// entity left holding one is a real, reachable input, and a `u32` wrap would
     /// snap a fully-drawn bow back to slack.
     pub fn tick(&mut self) {
@@ -409,8 +414,8 @@ impl ItemUse {
 /// # Why it has no tick counter
 ///
 /// A bow draw's *fraction* has to be counted locally because vanilla never syncs
-/// it. Aggressive has no fraction: `AbstractSkeletonRenderer` maps it straight to
-/// `BOW_AND_ARROW`, which is a fixed pose, and `animateZombieArms` maps it to one
+/// it. Aggressive has no fraction: vanilla's own skeleton-base renderer maps it straight to
+/// `BOW_AND_ARROW`, which is a fixed pose, and vanilla's own zombie-arm animation maps it to one
 /// of two constants. So this is a plain latched boolean and `IngestSet::Apply`'s
 /// `Commands::insert` (which *replaces* the component) is the right shape for it,
 /// unlike `ItemUse`.
@@ -491,7 +496,7 @@ pub struct ArmorStandFlags {
 /// [`lodestone_model::ArmorStandPose::merged`] is that operation, and
 /// [`lodestone_model::ArmorStandPose::VANILLA_DEFAULT`] is what the merge starts
 /// from for a stand seen for the first time — which is not the zero pose, since
-/// vanilla's own `defineId` calls give the arms and legs an authored splay.
+/// vanilla's own metadata-field-default calls give the arms and legs an authored splay.
 ///
 /// # Why a consumer must not treat this component's absence as "no pose"
 ///
@@ -829,7 +834,7 @@ pub struct DisplayItemContext(pub u8);
 /// variant rather than only the one whose renderer prompted the port.
 ///
 /// A consumer that draws with it replaces the *sampled* lightmap outright,
-/// which is `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` — the
+/// which is vanilla's own display-renderer sky-light/block-light queries — the
 /// hologram is lit by its own declared brightness rather than by the block it
 /// stands in.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]

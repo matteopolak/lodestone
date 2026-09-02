@@ -23,7 +23,8 @@
 //!   bare numeric op level of earlier versions. Read from the
 //!   26.2 jar's own permissions package:
 //!   `PermissionLevel` is a five-variant enum (`ALL`=0, `MODERATORS`=1,
-//!   `GAMEMASTERS`=2, `ADMINS`=3, `OWNERS`=4) with `isEqualOrHigherThan`;
+//!   `GAMEMASTERS`=2, `ADMINS`=3, `OWNERS`=4) with an "is equal or higher
+//!   than" comparison;
 //!   `Permission` is a sum of `Atom(Identifier)` and
 //!   `HasCommandLevel(PermissionLevel)`; `PermissionSet` is the
 //!   `hasPermission(Permission) -> boolean` interface with `NO_PERMISSIONS`,

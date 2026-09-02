@@ -83,7 +83,8 @@
 //! different rule, and each needs state this crate does not hold:
 //!
 //! * vanilla's own abstract-horse override adds
-//!   `(0, 0.15·standAnim, −0.7·standAnim)` while the horse rears — `standAnimO`
+//!   `(0, 0.15·standAnim, −0.7·standAnim)` while the horse rears — its own
+//!   "stand anim" field
 //!   is a client-side animation clock with no wire field.
 //! * vanilla's own strider override adds `0.12·cos(walkPos·1.5)·2·min(0.25, walkSpeed)`
 //!   — the walk-animation bob, which is *explicitly* client-cosmetic (the server
@@ -142,7 +143,7 @@ pub const PLAYER_VEHICLE_ATTACHMENT_Y: f64 = 0.6;
 /// Vec3(0, rideHeight(dimensions), offset)
 /// ```
 ///
-/// `rideHeight` is `height / 3.0` for boats and chest boats
+/// Vanilla's own ride-height override is `height / 3.0` for boats and chest boats
 /// (vanilla's own boat and chest-boat ride-height overrides, the second repeating
 /// the first) and `height × 0.8888889` for rafts
 /// and chest rafts (vanilla's own raft and chest-raft ride-height overrides,
@@ -429,10 +430,11 @@ mod tests {
     #[test]
     fn an_undeclared_type_uses_vanillas_at_height_fallback() {
         // Vanilla's own STRIDER entity-type declaration: strider is `sized(0.9F, 1.7F)` and declares no
-        // `passengerAttachments`, so vanilla itself uses `(0, 1.7, 0)`.
+        // passenger-attachments override, so vanilla itself uses `(0, 1.7, 0)`.
         let local = passenger_attachment_local("strider", 1.7, 0);
         // Tolerance is f32-sized, not f64-sized, and that is not slack: the height
-        // crosses an `f32` boundary in `EntityBaseDimensions` before the seat maths
+        // crosses an `f32` boundary in vanilla's own entity-base-dimensions type
+        // before the seat maths
         // widens it to `f64`, so `1.7f32 as f64` is 1.700_000_047_683_715_8. A
         // `1e-9` bound here — which the vertical-attachment test above can afford
         // because 1.443_75 is f32-exact — is tighter than the type can represent and
@@ -443,7 +445,7 @@ mod tests {
             "strider fallback {} (f32-widened 1.7 is 1.700_000_047_683_715_8)",
             local.y
         );
-        // And the wrong-but-plausible neighbour: `defaultEyeHeight`'s 0.85 factor
+        // And the wrong-but-plausible neighbour: vanilla's own default-eye-height's 0.85 factor
         // would give 1.445. Predicting both is the point.
         assert!(
             (local.y - 1.7 * 0.85).abs() > 0.2,

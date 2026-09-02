@@ -507,8 +507,9 @@ pub struct ServerDimension(pub Option<DimensionId>);
 /// it comes straight off the login/respawn packet. It is folded into the same
 /// component because it arrives on the same event, changes on exactly the same
 /// edges, and every consumer that wants one wants the other: vanilla keeps
-/// both in `ClientLevelData` side by side, where `voidDarknessOnsetRange()`
-/// reads `isFlat` and the void-fog span reads the dimension type's `min_y`.
+/// both in its own client-level-data side by side, where its own
+/// void-darkness-onset-range query
+/// reads its own "is flat" flag and the void-fog span reads the dimension type's `min_y`.
 /// It is deliberately **not** a field of [`DimensionTypeInfo`], which is a
 /// decode of one registry entry and must stay one-sourced.
 #[derive(Component, Debug, Clone, Default, PartialEq)]

@@ -71,8 +71,8 @@ const KNOWN_DIRECT_SEND_FILES: &[&str] = &[
     // there is nothing for a filter to police.
     "lodestone-shell/src/app/session.rs",
     // The anvil rename box's responder — `ClientAction::RenameItem`, one site in the
-    // `KeyOutcome::AnvilRename` arm. Vanilla's `EditBox::setResponder` fires
-    // `onNameChanged` after **every** keystroke, and `ActionQueue` drains only inside
+    // `KeyOutcome::AnvilRename` arm. Vanilla's own text-box responder callback fires
+    // on a name-changed event after **every** keystroke, and `ActionQueue` drains only inside
     // the tick loop, so queuing it would let the container click that takes the result
     // overtake the rename that names it. Same justification as the two
     // `container_input.rs` sites above, which this arm is the keyboard half of.
