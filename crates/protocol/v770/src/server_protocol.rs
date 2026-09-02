@@ -158,11 +158,12 @@ const OVERWORLD_SEA_LEVEL: i32 = 63;
 /// other entity's cosmetic bubble state.
 const LOCAL_PLAYER_ENTITY_ID: i32 = 1;
 
-/// `Entity`'s `DATA_AIR_SUPPLY_ID` metadata index (`Entity.java`,
+/// The base entity class's own air-supply metadata index (confirmed
+/// against the decompiled base entity source,
 /// verified index `1` — see `crates/protocol/v770/src/packets/metadata.rs`'s
 /// `IDX_AIR_SUPPLY` doc comment) and the `INT` serializer it is registered
 /// under
-/// (`EntityDataSerializers` registration order; that module's `SER_INT`).
+/// (vanilla's own metadata-serializer registration order; that module's `SER_INT`).
 /// Both constants are private to that module, so this hand-encoder restates
 /// their values rather than importing them — the same "no existing struct to
 /// reuse `Encode` from" situation `encode_chunk_cache_center_body` and
@@ -174,8 +175,8 @@ const METADATA_SER_INT: i32 = 1;
 /// `EOF_MARKER`).
 const METADATA_EOF: u8 = 0xFF;
 
-/// `Creeper.DATA_SWELL_DIR` (`Creeper.java`) and `Creeper.DATA_IS_IGNITED`
-/// (`Creeper.java`) metadata indices plus the `BOOLEAN` serializer id,
+/// The creeper class's own swell-direction and ignited metadata
+/// accessors (confirmed against the decompiled creeper source) plus the `BOOLEAN` serializer id,
 /// restated for the same reason [`METADATA_IDX_AIR_SUPPLY`] restates
 /// `IDX_AIR_SUPPLY`: `crates/protocol/v770/src/packets/metadata.rs`'s own
 /// `IDX_CREEPER_SWELL_DIR`/`IDX_CREEPER_IGNITED`/`SER_BOOLEAN` are private to
@@ -881,11 +882,12 @@ fn block_registry_id_by_name(name: &str) -> Option<i32> {
     })
 }
 
-/// Resolves a [`StatKey`] to the pair of VarInts `Stat.STREAM_CODEC` writes: the
+/// Resolves a [`StatKey`] to the pair of VarInts vanilla's own stat stream
+/// codec writes: the
 /// `minecraft:stat_type` registry id, then the value's id in whichever registry
 /// that type dispatches on.
 ///
-/// The four value registries come straight from `Stats.java`: `mined` is
+/// The four value registries come straight from vanilla's own stats source: `mined` is
 /// `BLOCK`, the five item counters are `ITEM`, the two kill counters are
 /// `ENTITY_TYPE`, and `custom` is `CUSTOM_STAT`. Getting that mapping wrong is
 /// invisible — every id resolves to *something* in the wrong registry, and the
@@ -939,13 +941,14 @@ mod slot_display {
     pub const COMPOSITE: i32 = 10;
 }
 
-/// `minecraft:recipe_display` registry ids, in `RecipeDisplays.bootstrap`'s order.
+/// `minecraft:recipe_display` registry ids, in vanilla's own recipe-displays
+/// datagen bootstrap routine's order.
 mod recipe_display {
     pub const CRAFTING_SHAPELESS: i32 = 0;
     pub const CRAFTING_SHAPED: i32 = 1;
 }
 
-/// `minecraft:recipe_book_category` ids, in `RecipeBookCategories.java`'s
+/// `minecraft:recipe_book_category` ids, in vanilla's own recipe-book-categories
 /// registration order. Only the crafting book's four are reachable from the
 /// bundled corpus; the furnace/stonecutter/smithing entries are listed so the
 /// numbering is checkable against the source rather than trusted.
@@ -1311,10 +1314,11 @@ fn decode_container_click(payload: &[u8]) -> Option<ServerBound> {
 ///
 /// Deliberately **not** the same shape as [`read_hashed_stack`]: that one has
 /// a leading presence bool and puts the item id before the count
-/// (`HashedStack.ActualItem.STREAM_CODEC`); this one has no presence bool at
+/// (vanilla's own hashed-stack actual-item stream codec); this one has no
+/// presence bool at
 /// all — a `count` of zero or less *is* the absence marker
-/// (`ItemStack.createOptionalStreamCodec`, verified against
-/// `.cache/mc/26.2/src/net/minecraft/world/item/ItemStack.java`) — and puts
+/// (vanilla's own optional-item-stack-codec factory, verified against
+/// the decompiled 26.2 item-stack source) — and puts
 /// the count first. Conflating the two would silently misalign every byte
 /// that follows.
 ///
@@ -1909,8 +1913,8 @@ fn encode_custom_payload_body(channel: &ResourceKey, data: &[u8]) -> Vec<u8> {
 /// `V770Adapter`'s `nbt_reason_text` reads this with `read_network_nbt` +
 /// `Text::from_nbt`, and that decoder has been validated against real servers'
 /// disconnect packets. Field names follow vanilla's own component codecs —
-/// `Codec.STRING.fieldOf("translate")` and the optional `"fallback"` beside it
-/// (`network/chat/contents/TranslatableContents.java`).
+/// a string field named `"translate"` and the optional `"fallback"` beside it
+/// (confirmed against the decompiled translatable-contents source).
 fn text_to_nbt(text: &Text) -> Nbt {
     let mut fields: Vec<(String, Nbt)> = Vec::new();
     match &text.content {
@@ -1962,10 +1966,11 @@ fn encode_component_nbt(text: &Text) -> Vec<u8> {
 /// The JSON twin of [`text_to_nbt`], for the **login**-phase disconnect only.
 ///
 /// The login phase predates NBT components on the wire, so
-/// `ClientboundLoginDisconnectPacket` still carries its reason as a
-/// length-prefixed JSON string (`ByteBufCodecs.lenientJson(262144)`,
-/// `login/ClientboundLoginDisconnectPacket.java`) while the Configuration and
-/// Play `ClientboundDisconnectPacket` carries NBT. Writing NBT in the login phase
+/// vanilla's own clientbound login-disconnect packet still carries its
+/// reason as a
+/// length-prefixed JSON string (its own lenient-JSON stream codec, capped at
+/// 262144) while the Configuration and
+/// Play clientbound disconnect packet carries NBT. Writing NBT in the login phase
 /// produces a packet a real client cannot parse, which is the single easiest
 /// mistake to make here — hence two functions rather than one, with the same
 /// field names and the same deliberate omissions (see [`text_to_nbt`]'s scope
@@ -2014,10 +2019,10 @@ fn text_to_json(text: &Text) -> serde_json::Value {
 ///
 /// Hand-rolled for the same reason that decoder is: it is a dozen lines, and
 /// vanilla's favicon field is the only thing in this file that needs base64 at
-/// all (`ServerStatus.Favicon`'s codec is literally
-/// `Base64.getEncoder().encode(...)` behind a fixed prefix —
-/// `status/ServerStatus.java`). Standard alphabet, not base64url: vanilla
-/// uses `java.util.Base64.getEncoder()`, which is the `+`/`/` variant.
+/// all (vanilla's own server-status favicon codec is literally a standard
+/// base64 encode behind a fixed prefix, confirmed against the decompiled
+/// 26.2 source). Standard alphabet, not base64url: vanilla
+/// uses the JDK's standard encoder, which is the `+`/`/` variant.
 fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -2040,8 +2045,8 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// Serializes vanilla's `ServerStatus` document
-/// (`status/ServerStatus.java`) into the JSON body of a
+/// Serializes vanilla's own server-status document
+/// (confirmed against the decompiled 26.2 source) into the JSON body of a
 /// `status_response` packet.
 ///
 /// Field-by-field against that record's codec, in vanilla's own declaration
@@ -2097,10 +2102,10 @@ fn encode_status_response_body(
         serde_json::json!({
             "max": players_max,
             "online": players_online,
-            // `NameAndId.CODEC` keys these `id` and `name`, and writes the
-            // uuid through `UUIDUtil.STRING_CODEC` — the hyphenated string
+            // Vanilla's own name-and-id codec keys these `id` and `name`, and writes the
+            // uuid through its own string-form UUID codec — the hyphenated string
             // form, not the two-longs array a *packet* field would use
-            // (`server/players/NameAndId.java`).
+            // (confirmed against the decompiled name-and-id record source).
             "sample": sample
                 .iter()
                 .map(|(id, name)| serde_json::json!({ "id": id.to_string(), "name": name }))
@@ -2432,12 +2437,13 @@ fn encode_container_slot_body(
 }
 
 /// Hand-written encoder for the clientbound `container_set_data` packet
-/// (`ClientboundContainerSetDataPacket`), mirroring the decode side exactly
+/// (vanilla's own clientbound container-set-data packet), mirroring the
+/// decode side exactly
 /// (`V770Adapter::handle_play`'s `CONTAINER_SET_DATA` arm): VarInt container
 /// id, then the property index and its value as two big-endian `short`s
-/// (`FriendlyByteBuf.writeContainerId` for the first field only — `id`/
-/// `value` are plain `writeShort` calls, per
-/// `ClientboundContainerSetDataPacket.java`).
+/// (vanilla's own container-id writer for the first field only — `id`/
+/// `value` are plain `writeShort` calls, confirmed against the decompiled
+/// 26.2 source).
 fn encode_container_data_body(window_id: i32, property: i32, value: i32) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(window_id);
@@ -3452,8 +3458,9 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // `ServerboundPlayerActionPacket.Action`, read off the enum's own
-            // declaration order in 26.2 (`ServerboundPlayerActionPacket.java`)
+            // Vanilla's own serverbound player-action packet's action enum,
+            // read off the enum's own
+            // declaration order in 26.2 (confirmed against the decompiled source)
             // rather than guessed: START_DESTROY_BLOCK, ABORT_DESTROY_BLOCK,
             // STOP_DESTROY_BLOCK, **DROP_ALL_ITEMS, DROP_ITEM**, RELEASE_USE_ITEM,
             // SWAP_ITEM_WITH_OFFHAND, STAB. Note 3 is the *whole stack* and 4 is
@@ -3561,8 +3568,9 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // `ServerboundPlayerInputPacket`: a single flags byte
-            // (`Input.STREAM_CODEC`, `Input.java`) — bit `0x40` is `sprint`,
+            // Vanilla's own serverbound player-input packet: a single flags byte
+            // (its own `Input` stream codec, confirmed against the decompiled
+            // source) — bit `0x40` is `sprint`,
             // bit `0x20` is `shift`, and bit `0x10` is `jump`, the three
             // flags `ServerBound::PlayerInput` carries (see its own doc
             // comment for why the rest are decoded off the wire here and
@@ -3621,8 +3629,8 @@ impl ServerProtocol for V770ServerProtocol {
             State::Play if packet_id == play::serverbound::SET_CARRIED_ITEM => {
                 match decode_full::<SetCarriedItem>(payload).and_then(|p| u8::try_from(p.slot).ok())
                 {
-                    // Mirrors vanilla's `Inventory.isHotbarSlot` guard
-                    // (`Inventory.java`) at the decode boundary, per
+                    // Mirrors vanilla's own hotbar-slot check
+                    // (confirmed against the decompiled inventory source) at the decode boundary, per
                     // `ServerBound::CarriedItemChanged`'s own doc comment.
                     Some(slot) if slot < HOTBAR_SIZE => ServerBound::CarriedItemChanged { slot },
                     _ => ServerBound::Ignored,
@@ -3892,18 +3900,22 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // `ServerboundSetCreativeModeSlotPacket`: big-endian `i16` slot
-            // (`ByteBufCodecs.SHORT`), then an [`read_optional_item_stack`]
-            // item (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`) — see that
+            // Vanilla's own serverbound set-creative-mode-slot packet:
+            // big-endian `i16` slot
+            // (vanilla's own fixed-width `SHORT` codec), then an
+            // [`read_optional_item_stack`]
+            // item (vanilla's own untrusted-optional item-stack stream codec)
+            // — see that
             // helper's doc comment for why it is not the same shape as
             // [`read_hashed_stack`]. Field order and both codecs read
-            // straight off `ServerboundSetCreativeModeSlotPacket.java`'s
-            // `STREAM_CODEC` composite, not off our own encoder.
+            // straight off vanilla's own set-creative-mode-slot packet's
+            // composite stream codec, not off our own encoder.
             //
             // This lifts into [`ServerBound::CreativeModeSlotSet`], whose
             // consumer (`apply_creative_mode_slot_set`) writes through
             // `PlayerInventory::apply_menu_slot_change`. Vanilla's own
-            // `validSlot`/`drop` split (`ServerGamePacketListenerImpl.java`,
+            // valid-slot/drop split (confirmed against the decompiled server
+            // packet-listener source,
             // `1..=45` accepted, `< 0` meaning "drop into the world") is left
             // to that consumer rather than filtered here, so the variant
             // carries the raw wire slot — see its doc comment.
@@ -4019,7 +4031,7 @@ impl ServerProtocol for V770ServerProtocol {
             // anvil's rename field is the only consumer
             // (`ServerBound::RenameItem`'s own doc comment) —
             // `crate::server`'s handler gates on an open `AnvilMenu` the same
-            // way `ServerGamePacketListenerImpl.handleRenameItem` does.
+            // way vanilla's own server-side rename-item handler does.
             State::Play if packet_id == play::serverbound::RENAME_ITEM => {
                 match decode_full::<RenameItem>(payload) {
                     Some(RenameItem { name }) => ServerBound::RenameItem { name },
@@ -4175,8 +4187,8 @@ impl ServerProtocol for V770ServerProtocol {
             // states — see that arm's own comment), so this reuses
             // `ServerBound::PingRequest` rather than adding a second variant.
             // `dispatch_play_packet` answers it with `encode_pong_response`,
-            // matching `ServerGamePacketListenerImpl.handlePingRequest`
-            // (`this.connection.send(new ClientboundPongResponsePacket(packet.getTime()))`)
+            // matching vanilla's own server-side ping-request handler
+            // (it replies with the clientbound pong-response packet, echoing the time)
             // exactly — the Status arm additionally closes the connection, which
             // this one must not do.
             State::Play if packet_id == play::serverbound::PING_REQUEST => {
@@ -4234,14 +4246,15 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // `ServerboundClientCommandPacket`: a single `readEnum` VarInt
+            // Vanilla's own serverbound client-command packet: a single
+            // `readEnum` VarInt
             // ordinal over `Action { PERFORM_RESPAWN, REQUEST_STATS,
             // REQUEST_GAMERULE_VALUES }` —
-            // `ServerboundClientCommandPacket.java`'s whole body, read
+            // its whole body, read
             // straight off the decompiled source rather than off our own
             // encoder. The ordinal is passed through unmapped; its consumer
             // (`apply_client_command`) mirrors
-            // `ServerGamePacketListenerImpl::handleClientCommand`, including
+            // vanilla's own server-side client-command handler, including
             // that method's `getHealth() > 0.0F → return` respawn guard, and
             // treats `REQUEST_STATS` as a documented no-op.
             //
@@ -4547,9 +4560,10 @@ impl ServerProtocol for V770ServerProtocol {
     }
 
     fn encode_pong_response(&self, time: i64) -> ServerDirective {
-        // `ClientboundPongResponsePacket` is a single big-endian `long`
-        // (`ping/ClientboundPongResponsePacket.java`), byte-identical to
-        // the `ServerboundPingRequestPacket` it answers — which is why the
+        // Vanilla's own clientbound pong-response packet is a single
+        // big-endian `long`
+        // (confirmed against the decompiled 26.2 source), byte-identical to
+        // the serverbound ping-request packet it answers — which is why the
         // client-side `PingRequest` struct is the right thing to encode here
         // rather than a second one-field mirror of it.
         send(status::clientbound::PONG_RESPONSE, &PingRequest { time })
@@ -4705,9 +4719,9 @@ impl ServerProtocol for V770ServerProtocol {
         ]
     }
 
-    /// `ClientboundGameEventPacket(CHANGE_GAME_MODE, id)` — event code `3`,
-    /// whose `f32` parameter is the `GameType` id
-    /// (`ClientboundGameEventPacket.java`'s own `CHANGE_GAME_MODE`).
+    /// Vanilla's own clientbound game-event packet with the change-game-mode
+    /// event code `3`, whose `f32` parameter is the `GameType` id
+    /// (confirmed against the decompiled 26.2 source).
     fn encode_game_mode(&self, mode: GameMode) -> ServerDirective {
         send(
             play::clientbound::GAME_EVENT,
@@ -5455,9 +5469,9 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundBossEventPacket.createAddPacket`'s `ADD` operation
-    /// (`.cache/mc/26.2/src/net/minecraft/network/protocol/game/ClientboundBossEventPacket.java`,
-    /// `AddOperation.write`), read for wire order rather than transcribed from
+    /// Vanilla's own clientbound boss-event packet's add-packet factory's
+    /// `ADD` operation (confirmed against the decompiled 26.2 source,
+    /// its own add-operation writer), read for wire order rather than transcribed from
     /// the constructor: UUID, operation type (`ADD` = `0`, a `VarInt` —
     /// `writeEnum` writes the ordinal), then the `AddOperation` payload —
     /// network-NBT `name`, `f32` progress, color `VarInt`, overlay `VarInt`,
@@ -5517,10 +5531,10 @@ impl ServerProtocol for V770ServerProtocol {
 
     /// The other half of "our server cannot tell a client that
     /// anything is ... exploding" — `crate::adapter::decode_explode`'s own
-    /// doc comment names the exact `ClientboundExplodePacket` field order
-    /// this mirrors (`.cache/mc/26.2/src/net/minecraft/network/protocol/game/ClientboundExplodePacket.java`):
+    /// doc comment names the exact clientbound explosion packet field order
+    /// this mirrors (confirmed against the decompiled 26.2 source):
     /// `center: Vec3` (three big-endian `f64`s), `radius: f32`,
-    /// `blockCount: i32` (a **plain** `ByteBufCodecs.INT`, not a VarInt —
+    /// `blockCount: i32` (a **plain** fixed-width `INT` codec, not a VarInt —
     /// verified against that same decompiled record, not guessed from the
     /// decoder's own `reader.i32()` call, which would be the
     /// "our decoder validates our encoder" trap this crate's evidence
@@ -5528,8 +5542,9 @@ impl ServerProtocol for V770ServerProtocol {
     /// presence flag, no `Vec3` following since this crate applies no
     /// knockback here), `explosionParticle` (a VarInt registry id — always
     /// [`PARTICLE_ID_EXPLOSION_EMITTER`], matching every real detonation:
-    /// `Creeper.explodeCreeper` and every other vanilla explosion source use
-    /// `ParticleTypes.EXPLOSION_EMITTER`, never the plain `EXPLOSION` id
+    /// vanilla's own creeper-explosion routine and every other vanilla
+    /// explosion source use
+    /// the explosion-emitter particle type, never the plain `EXPLOSION` id
     /// `decode_explode` also accepts), `explosionSound` (a `Holder<SoundEvent>`
     /// — see below), then `blockParticles: WeightedList<ExplosionParticleInfo>`
     /// (a VarInt-prefixed list, always empty here: this crate tracks no
@@ -5539,11 +5554,12 @@ impl ServerProtocol for V770ServerProtocol {
     ///
     /// `explosionSound` is encoded as a real registry **reference**, not the
     /// direct/literal-name path `read_sound_holder`'s decode side also
-    /// accepts: verified against `ByteBufCodecs.holder`'s own encode arm
-    /// (`.cache/mc/26.2/src/net/minecraft/network/codec/ByteBufCodecs.java`),
-    /// which writes `registryId + 1` for a `Holder.Kind::REFERENCE` — exactly
-    /// what a real vanilla server sends for `SoundEvents.GENERIC_EXPLODE` (a
-    /// registered constant, never a `Holder::direct`). The registry id is
+    /// accepts: verified against vanilla's own registry-holder codec's encode
+    /// arm (confirmed against the decompiled codec source),
+    /// which writes `registryId + 1` for a reference-kind holder — exactly
+    /// what a real vanilla server sends for its own generic-explode sound
+    /// constant (a
+    /// registered constant, never a direct/inline holder). The registry id is
     /// resolved by name via [`lodestone_data::sound_events::sound_event_name`]
     /// (the same reverse-by-name-scan idiom [`stone_id`]/[`air_id`] above
     /// already establish for block states) rather than hand-picking a
@@ -5551,13 +5567,16 @@ impl ServerProtocol for V770ServerProtocol {
     /// desync this from the real registry id.
     ///
     /// Every creeper detonation — charged or not — uses
-    /// `minecraft:entity.generic.explode`: `Creeper.explodeCreeper`
-    /// (`Creeper.java`) only varies `explosionMultiplier` (radius,
-    /// `2.0F` when `isPowered()`, else `1.0F`) before calling `Level`'s
+    /// `minecraft:entity.generic.explode`: vanilla's own creeper-explosion
+    /// routine
+    /// only varies its explosion multiplier (radius,
+    /// `2.0F` when powered, else `1.0F`) before calling the level's own
     /// six-argument `explode` overload, and **every** overload up to the
     /// twelve-argument one this crate's own creeper path effectively mirrors
-    /// defaults `explosionSound` to `SoundEvents.GENERIC_EXPLODE`
-    /// unconditionally (`Level.java`) — there is no powered-creeper
+    /// defaults `explosionSound` to vanilla's own generic-explode sound
+    /// constant
+    /// unconditionally (confirmed against the decompiled level source) — there
+    /// is no powered-creeper
     /// sound variant to pick between. This crate has no charged-creeper
     /// producer today either way ([`lodestone_server::MobSim::take_detonations`]'s
     /// only source is [`lodestone_server::SwellGoal`]/`ignite()`, neither of
@@ -5870,10 +5889,10 @@ impl ServerProtocol for V770ServerProtocol {
     /// [`encode_system_chat`]: the client side only ever *decodes* this packet, and
     /// that decoder is the mirror-side specification —
     /// `V770Adapter::handle_play`'s `PLAYER_COMBAT_KILL` arm reads exactly a VarInt
-    /// player id followed by `read_network_nbt`, matching
-    /// `ClientboundPlayerCombatKillPacket`'s own
-    /// `VarInt.STREAM_CODEC` + `ComponentSerialization.TRUSTED_STREAM_CODEC`
-    /// (`.cache/mc/26.2/client-src/net/minecraft/network/protocol/game/ClientboundPlayerCombatKillPacket.java`).
+    /// player id followed by `read_network_nbt`, matching vanilla's own
+    /// clientbound player-combat-kill packet's own
+    /// VarInt stream codec plus its trusted component-serialization stream
+    /// codec (confirmed against the decompiled 26.2 client source).
     fn encode_player_combat_kill(&self, player_entity_id: i32, message: &Text) -> ServerDirective {
         let mut w = Writer::default();
         w.var_i32(player_entity_id);
@@ -5946,9 +5965,9 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundAnimatePacket.write`: `writeVarInt` then a **plain,
-    /// unsigned byte** (`writeByte`, not a VarInt) — see
-    /// `ClientboundAnimatePacket.java`, whose own `id`/`action` fields this
+    /// Vanilla's own clientbound animate packet writer: `writeVarInt` then a
+    /// **plain, unsigned byte** (`writeByte`, not a VarInt) — confirmed
+    /// against the decompiled 26.2 source, whose own `id`/`action` fields this
     /// mirrors field-for-field. `ServerBound::Swing`'s own doc comment names
     /// the consumer this drives.
     fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
@@ -5961,8 +5980,9 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundSetCameraPacket.write`: a single `writeVarInt` — the
-    /// smallest possible wire body, matching `ClientboundSetCameraPacket.java`.
+    /// Vanilla's own clientbound set-camera packet writer: a single
+    /// `writeVarInt` — the smallest possible wire body, matching the
+    /// decompiled 26.2 source.
     /// `ServerBound::SpectatorAction`'s own doc comment names the consumer.
     fn encode_set_camera(&self, entity_id: i32) -> ServerDirective {
         let mut w = Writer::default();
@@ -7000,9 +7020,9 @@ mod block_edit_tests {
     }
 
     /// Pins `encode_block_update`'s wire layout end to end: packed `BlockPos`
-    /// then a VarInt state id, nothing else — the shape
-    /// `ClientboundBlockUpdatePacket.STREAM_CODEC` specifies
-    /// (`ClientboundBlockUpdatePacket.java`).
+    /// then a VarInt state id, nothing else — the shape vanilla's own
+    /// clientbound block-update packet's own stream codec specifies
+    /// (confirmed against the decompiled 26.2 source).
     #[test]
     fn encode_block_update_wire_layout() {
         let proto = V770ServerProtocol;
@@ -7139,7 +7159,8 @@ mod block_edit_tests {
 
     /// Pins `encode_game_event`'s wire layout end to end: one unsigned byte
     /// event id, then a big-endian `f32` param, nothing else — the shape
-    /// `ClientboundGameEventPacket` writes (`ClientboundGameEventPacket.java`)
+    /// vanilla's own clientbound game-event packet writes (confirmed against
+    /// the decompiled 26.2 source)
     /// and the shape this crate's own `GameEvent` decode reads back. The param
     /// is pinned to a non-integral value (`0.5`) so a big-endian `f32` that
     /// somehow slid a byte cannot alias the integer `0`.
@@ -7420,20 +7441,22 @@ mod inventory_decode_tests {
     // Every byte below is hand-derived from sources **outside this crate**, so
     // no `decode(encode(x))` symmetry can satisfy them:
     //
-    // - `ServerboundSetCreativeModeSlotPacket.java`'s `STREAM_CODEC`:
-    //   `ByteBufCodecs.SHORT` then `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`.
-    //   `ByteBufCodecs.SHORT` is `ByteBuf::writeShort`, i.e. big-endian `i16`.
-    // - `ServerboundClientCommandPacket.java`'s whole body is one
-    //   `writeEnum`, and `FriendlyByteBuf::writeEnum` is
-    //   `writeVarInt(value.ordinal())`, over
+    // - Vanilla's own serverbound set-creative-mode-slot packet's composite
+    //   stream codec:
+    //   its own fixed-width `SHORT` codec then its own untrusted-optional
+    //   item-stack stream codec.
+    //   The `SHORT` codec is a plain big-endian `i16` write.
+    // - Vanilla's own serverbound client-command packet's whole body is one
+    //   plain enum-ordinal write, i.e. a VarInt of the ordinal, over
     //   `Action { PERFORM_RESPAWN, REQUEST_STATS, REQUEST_GAMERULE_VALUES }`.
     // - `minecraft:cobblestone`'s item protocol id `62` is read from Mojang's
     //   own `generated/reports/registries.json`, the authoritative generator
     //   output — not from our registry tables.
-    // - The menu-slot number `36` is `InventoryMenu`'s first hotbar slot,
-    //   which vanilla's own `ServerGamePacketListenerImpl.handleSetCreativeModeSlot`
-    //   accepts as `validSlot` (`1..=45`) and writes via
-    //   `player.inventoryMenu.getSlot(36)`.
+    // - The menu-slot number `36` is vanilla's own inventory-menu's first
+    //   hotbar slot,
+    //   which vanilla's own server-side set-creative-mode-slot handler
+    //   accepts as a valid slot (`1..=45`) and writes via that menu's own
+    //   slot lookup.
 
     /// A creative-mode palette write of a full stack into the first hotbar
     /// slot, decoded from bytes laid out by hand against vanilla's own
@@ -9035,8 +9058,8 @@ mod end_crystal_index_tests {
 }
 
 /// `BOSS_EVENT`'s three operations this crate emits, checked against
-/// `ClientboundBossEventPacket`'s own `write` method
-/// (`.cache/mc/26.2/src/net/minecraft/network/protocol/game/ClientboundBossEventPacket.java`)
+/// vanilla's own clientbound boss-event packet's own `write` method
+/// (confirmed against the decompiled 26.2 source)
 /// rather than its constructors — see `encode_boss_event_add`'s own doc for
 /// why the field order there differs from a naive transcription.
 #[cfg(test)]
