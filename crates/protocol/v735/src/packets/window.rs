@@ -1,11 +1,26 @@
 //! Inventory / window packets for protocol 754 (Minecraft 1.16.5).
 //!
-//! These carry the [`Slot`](super::slot::Slot) item type and are all ordinary
-//! derived structs.
+//! `CloseWindow`, `EnchantItem`, `HeldItemSlot`, `ServerboundCloseWindow`
+//! and `ServerboundHeldItemSlot` carry no `Slot` field and are byte-identical
+//! to v47's and v340's own definitions (measured), so they now live in
+//! `lodestone-protocol-common` and are re-exported below.
+//!
+//! `OpenWindow`, `SetSlot`, `WindowItems`, `WindowClick` and
+//! `SetCreativeSlot` stay defined **here**: 1.14 replaced `OpenWindow`'s
+//! whole shape (a flat `(varint window id, varint menu type, chat title)`
+//! triple, no slot count, no horse special case), and the other four embed
+//! this crate's own post-1.13-flattening `Slot`, which is a different wire
+//! type from the pre-1.13 `Slot` v47/v340 share -- see
+//! `lodestone-protocol-common`'s `packets::slot` and `packets::window`
+//! module docs.
 
 use lodestone_macros::{Decode, Encode, Packet};
 
 use super::slot::Slot;
+
+pub use lodestone_protocol_common::packets::window::{
+    CloseWindow, EnchantItem, HeldItemSlot, ServerboundCloseWindow, ServerboundHeldItemSlot,
+};
 
 /// Clientbound `open_window` — asks the client to open a container window.
 ///
@@ -56,23 +71,6 @@ pub struct SetSlot {
     pub item: Slot,
 }
 
-/// Clientbound `held_item_slot` — the server sets the player's selected hotbar
-/// slot.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:held_item_slot", state = Play, bound = Client)]
-pub struct HeldItemSlot {
-    /// Selected hotbar index (`0..=8`).
-    pub slot: i8,
-}
-
-/// Clientbound `close_window` — the server forces a window closed.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:close_window", state = Play, bound = Client)]
-pub struct CloseWindow {
-    /// Window handle id being closed.
-    pub window_id: u8,
-}
-
 /// Serverbound `window_click` — the player clicks a slot.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:window_click", state = Play, bound = Server)]
@@ -89,39 +87,6 @@ pub struct WindowClick {
     pub mode: i8,
     /// The item that was in the clicked slot (for the server to verify).
     pub item: Slot,
-}
-
-/// Serverbound `close_window` — the player closes a window.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:close_window", state = Play, bound = Server)]
-pub struct ServerboundCloseWindow {
-    /// Window handle id being closed.
-    pub window_id: u8,
-}
-
-/// Serverbound `held_item_slot` — the player changes hotbar selection.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:held_item_slot", state = Play, bound = Server)]
-pub struct ServerboundHeldItemSlot {
-    /// Newly selected hotbar index (`0..=8`).
-    pub slot: i16,
-}
-
-/// Serverbound `enchant_item` — the player clicks a non-slot menu button, such
-/// as an enchanting-table option or a lectern page turn.
-///
-/// 1.8 through 1.16 share this exact `{windowId, button}` shape, so the model's
-/// `ContainerButtonClick { window_id, button_id }` maps onto it directly with no
-/// item registry or transaction id involved.
-///
-/// Wire layout: signed-byte window id, signed-byte button.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:enchant_item", state = Play, bound = Server)]
-pub struct EnchantItem {
-    /// Open window handle id.
-    pub window_id: i8,
-    /// Button id defined by the open menu type.
-    pub button: i8,
 }
 
 /// Serverbound `set_creative_slot` — the creative-mode client sets a slot's item
