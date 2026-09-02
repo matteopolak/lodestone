@@ -25,7 +25,7 @@
 //!
 //! This module used to conclude the paragraph above with "so this doesn't change
 //! the cost story", and [`nearest_biome`] used to carry the same claim as a
-//! reason for declining vanilla's `RTree`: *"a few thousand squared-distance
+//! reason for declining vanilla's own spatial-index search structure: *"a few thousand squared-distance
 //! comparisons per quart column is already fast"*. **Both were true when written
 //! and are false in composition**, which is why they survived review — nothing
 //! about them looks stale.
@@ -42,7 +42,7 @@
 //! calls the tree.
 //!
 //! Unit 9 is the fix, in two independent halves: [`tree`] ports vanilla's
-//! `Climate.RTree` (so a search stops being O(table_len)), and [`memo`]
+//! own spatial-index search structure (so a search stops being O(table_len)), and [`memo`]
 //! memoises the per-source-chunk answer (so 289 searches per chunk become the
 //! window's newly-entered strip).
 //!
@@ -60,7 +60,7 @@
 //!
 //! The disagreement is exclusively about **which of several tied rows** to take;
 //! neither search ever finds a different nearest *distance*. [`tree`]'s module doc
-//! traces that, and why vanilla's `lastResult` carry-over is the one part of its
+//! traces that, and why vanilla's own last-result carry-over is the one part of its
 //! search that cannot be reproduced here.
 //!
 //! # The y = 0 trap
@@ -101,7 +101,7 @@
 //! # Three biomes this port could not surface, until now
 //!
 //! `minecraft:badlands`, `minecraft:eroded_badlands` and
-//! `minecraft:wooded_badlands` all reach `SurfaceRules.Bandlands` in the
+//! `minecraft:wooded_badlands` all reach vanilla's own bandlands surface rule in the
 //! overworld surface rule tree (confirmed by walking the JSON: both
 //! `bandlands` nodes sit under a `condition{biome_is:[badlands,
 //! eroded_badlands, wooded_badlands]}` guard, nothing else). Vanilla's
@@ -123,10 +123,10 @@
 //! [`UNSUPPORTED_SURFACE_BIOMES`] itself is kept (not deleted): it is a
 //! public item another crate imports by name (see its own doc comment).
 //!
-//! **Not ported by this increment**: `SurfaceSystem.erodedBadlandsExtension`
+//! **Not ported by this increment**: vanilla's own eroded-badlands extension
 //! (the separate stone-pillar height extension unconditionally applied to
-//! every `eroded_badlands` column, unrelated to `getBand`'s terracotta
-//! banding) and `frozenOceanExtension` (a different biome pair entirely).
+//! every `eroded_badlands` column, unrelated to the band lookup's terracotta
+//! banding) and vanilla's own frozen-ocean extension (a different biome pair entirely).
 //! Neither is reachable through `Rule::Bandlands`, and un-filtering the
 //! three names above does not require either — see
 //! `docs/worldgen-parity.md` for what was and wasn't measured here.
@@ -142,7 +142,7 @@ pub(crate) mod memo;
 mod tree;
 
 /// The three biomes [`usable_overworld_table`] used to exclude before
-/// `SurfaceSystem.getBand` was ported — see the module doc's "Three biomes
+/// vanilla's own band lookup was ported — see the module doc's "Three biomes
 /// this port could not surface, until now" section. The name is now a
 /// historical artifact, not a current filter: kept (rather than deleted or
 /// renamed) because `lodestone_server::worldgen_data`'s
@@ -157,7 +157,8 @@ pub const UNSUPPORTED_SURFACE_BIOMES: [&str; 3] = [
     "minecraft:wooded_badlands",
 ];
 
-/// One climate axis's quantized `[min, max]` span — `Climate.Parameter`'s
+/// One climate axis's quantized `[min, max]` span — vanilla's own climate
+/// parameter's
 /// internal representation (`(coord * 10000.0f) as i64`, already applied
 /// before this type is ever constructed; see [`quantize_coord`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +168,7 @@ pub struct Parameter {
 }
 
 impl Parameter {
-    /// `Climate.Parameter.distance(long)`.
+    /// Vanilla's own climate-parameter distance calculation.
     #[must_use]
     fn distance(&self, target: i64) -> i64 {
         let above = target - self.max;
@@ -180,9 +181,9 @@ impl Parameter {
 /// (temperature, humidity, continentalness, erosion, depth, weirdness,
 /// offset). `offset` is stored as a degenerate `[o, o]` span so it folds into
 /// the same generic distance formula as the other six — exactly what
-/// `Climate.ParameterPoint.parameterSpace()` does internally (it appends
+/// vanilla's own climate parameter-point space construction does internally (it appends
 /// `Parameter(offset, offset)` as element 7 before handing the array to the
-/// RTree/brute-force search), so this is not a simplification, it is the
+/// spatial-index/brute-force search), so this is not a simplification, it is the
 /// same representation vanilla uses.
 #[derive(Debug, Clone)]
 pub struct BiomeParameterPoint {
@@ -192,7 +193,7 @@ pub struct BiomeParameterPoint {
 }
 
 impl BiomeParameterPoint {
-    /// `Climate.ParameterPoint.fitness(TargetPoint)`. `target`'s 7th slot
+    /// Vanilla's own climate parameter-point fitness calculation against a target point. `target`'s 7th slot
     /// (offset) is always `0` for a real climate sample — only a biome's own
     /// parameter point ever carries a nonzero offset span.
     #[must_use]
@@ -206,10 +207,11 @@ impl BiomeParameterPoint {
     }
 }
 
-/// Quantizes a climate coordinate exactly as `Climate.quantizeCoord` does:
+/// Quantizes a climate coordinate exactly as vanilla's own coordinate
+/// quantization does:
 /// `(long)(coord * 10000.0F)`. The multiplication happens in **`f32`**
 /// precision in vanilla (the value is cast to `float` before this point, in
-/// `Climate.Sampler.sample`'s `(float)this.temperature.compute(context)`), so
+/// its climate sampler's own per-axis compute-then-cast-to-float step), so
 /// this casts to `f32` first — not a `f64` quantization rounded afterward —
 /// to reproduce the exact same truncation vanilla gets.
 #[must_use]
@@ -234,7 +236,7 @@ pub fn quantize_coord(v: f64) -> i64 {
 /// the measurement the tree is judged by.
 ///
 /// Matches vanilla's tie-break exactly: ties keep the **earlier** table entry
-/// (`if (fitness < bestFitness)`, strict `<`), so `table`'s order must match the
+/// (a strict `<` comparison against the best fitness so far, never `<=`), so `table`'s order must match the
 /// oracle dump's order — [`parse_table`] preserves JSON array order for exactly
 /// this reason.
 ///
@@ -324,7 +326,7 @@ impl BiomeTable {
     }
 
     /// The nearest biome's table row, via vanilla's own indexed search
-    /// (`Climate.ParameterList.findValue`) with no `lastResult` seeding — the
+    /// (its parameter-list value lookup) with no cached-last-result seeding — the
     /// fresh-instance answer. Always at the same minimum squared distance as
     /// [`nearest_row_brute_force`]; the *row* differs from it wherever two rows tie
     /// on that distance. See [`tree`]'s module doc.
@@ -408,8 +410,8 @@ impl BiomeTable {
     }
 
     /// Vanilla's search with an explicit `candidate` standing in for its
-    /// `ThreadLocal` `lastResult`. **Not the production path** — production always
-    /// searches unseeded (see [`tree`]'s module doc for why `lastResult` is
+    /// thread-local cached last result. **Not the production path** — production always
+    /// searches unseeded (see [`tree`]'s module doc for why that cached seed is
     /// deliberately not reproduced). Exposed so a gate can demonstrate that a
     /// tying seed really does change the returned row.
     #[must_use]
@@ -454,7 +456,7 @@ impl IntoIterator for BiomeTable {
 /// `BiomeOracle`'s `table` mode. Schema: a JSON array of 14-element rows,
 /// `[tMin,tMax,hMin,hMax,cMin,cMax,eMin,eMax,dMin,dMax,wMin,wMax,offset,"biome"]`
 /// — the same order [`BiomeParameterPoint::params`] uses, and the raw
-/// quantized `long`s Java's own `Climate.Parameter` carries internally (not
+/// quantized `long`s vanilla's own climate parameter carries internally (not
 /// re-derived from decimal floats), so parsing never round-trips through a
 /// second float parse.
 ///
@@ -506,7 +508,7 @@ pub fn parse_table(value: &Value) -> Vec<BiomeParameterPoint> {
 }
 
 /// Used to drop [`UNSUPPORTED_SURFACE_BIOMES`] from a parsed table before
-/// `SurfaceSystem.getBand` was ported (`crate::surface::Rule::Bandlands`) —
+/// vanilla's own band lookup was ported (`crate::surface::Rule::Bandlands`) —
 /// see the module doc's "Three biomes this port could not surface, until
 /// now" section. Still a pass-through in the sense that matters: every biome in
 /// the parsed table, including the three formerly-excluded badlands variants, is
@@ -545,10 +547,11 @@ pub fn parse_temperatures(value: &Value) -> HashMap<String, f32> {
         .collect()
 }
 
-/// Approximates `Biome.warmEnoughToRain`/`coldEnoughToSnow`'s `< 0.15`
+/// Approximates vanilla's own "warm enough to rain"/"cold enough to snow"'s `< 0.15`
 /// threshold from the biome's *declared* `temperature` field, ignoring the
-/// per-block height adjustment (`Biome.getHeightAdjustedTemperature`, a noise
-/// + `(y - seaLevel - 17) * 0.05/40` correction above `seaLevel + 17`) and any
+/// per-block height adjustment (vanilla's own height-adjusted-temperature
+/// calculation, a noise
+/// + `(y - sea_level - 17) * 0.05/40` correction above `sea_level + 17`) and any
 /// `temperature_modifier` (e.g. `frozen`, which lowers the effective value
 /// for a handful of ocean biomes). This is not a new simplification: before
 /// this module existed, `cold_enough_to_snow` was already a single fixed
@@ -596,7 +599,7 @@ impl ClimateSampler {
         }
     }
 
-    /// `Climate.Sampler.sample`'s quantized target, at an exact block
+    /// Vanilla's own climate sampler's quantized target, at an exact block
     /// position (the caller is responsible for quart-aligning `x`/`z` and
     /// picking `y`; see the module doc's "y = 0 trap" section for why `y`
     /// must be the column's own surface height, not a constant). The 7th
@@ -703,9 +706,9 @@ mod tests {
     }
 
     /// `usable_overworld_table` used to filter `UNSUPPORTED_SURFACE_BIOMES`
-    /// out because `SurfaceSystem.getBand` (`crate::surface::Rule::Bandlands`)
+    /// out because vanilla's own band lookup (`crate::surface::Rule::Bandlands`)
     /// was unported and would panic if a column ever resolved to one of the
-    /// three. Now that `getBand` is ported, the exclusion is gone — this test
+    /// three. Now that the band lookup is ported, the exclusion is gone — this test
     /// used to assert the *old* filtering behaviour (named
     /// `usable_table_excludes_the_three_unported_badlands_variants`); it now
     /// asserts the opposite, as a real control rather than a renamed no-op:

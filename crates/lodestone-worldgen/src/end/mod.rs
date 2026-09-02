@@ -1,13 +1,13 @@
-//! The End: `TheEndBiomeSource` and [`EndGenerator`], the third dimension this
+//! The End: vanilla's own End biome source and [`EndGenerator`], the third dimension this
 //! engine produces real terrain for.
 //!
 //! # What it is
 //!
-//! [`EndBiomeSource`] is the complete port of vanilla's `TheEndBiomeSource`
-//! (`TheEndBiomeSource.java:60-81`) — the End's whole biome layout, and it works
+//! [`EndBiomeSource`] is the complete port of vanilla's own End biome source
+//! (its whole biome-layout logic) — the End's whole biome layout, and it works
 //! without the density interpreter, because the only thing it samples is
 //! the router's `erosion` channel and for the End that channel is exactly
-//! `cache_2d(end_islands)` (`NoiseRouterData.java:433,443`; confirmed against the
+//! `cache_2d(end_islands)` (confirmed against the
 //! bundled `noise_settings/end.json`, whose `erosion` is literally
 //! `{"type": "minecraft:cache_2d", "argument": {"type": "minecraft:end_islands"}}`).
 //! So it is built straight on [`crate::noise::EndIslandNoise`].
@@ -32,7 +32,8 @@
 //! * **The central island's furniture — partially closed.** Obsidian pillars,
 //!   the exit portal, the gateway and the dragon are structure/entity work,
 //!   and three of the four are *not worldgen at all* despite looking like it:
-//!   `EndPodiumFeature` is never registered in `Feature.java`, the pillars and
+//!   vanilla's own end-podium feature type is never registered in the game's
+//!   feature registry, the pillars and
 //!   the end platform each have a gameplay placer as well as a worldgen one,
 //!   and only `end_gateway_return` (rarity 700 in `end_highlands`) is reached
 //!   from a biome document. [`spikes::end_spikes_for_seed`] (the ten obsidian
@@ -63,23 +64,23 @@
 //!
 //! Two details that are easy to get wrong and are load-bearing:
 //!
-//! * **The sample position is not the quart's own block position.** Vanilla builds
-//!   `weirdBlockX = (chunkX * 2 + 1) * 8`, i.e. `chunkX * 16 + 8` — the *chunk
-//!   centre*, so all 16 quarts of a chunk share one erosion sample. The variable is
-//!   called `weird` in the decompiled source for a reason; sampling at the quart
+//! * **The sample position is not the quart's own block position.** Vanilla
+//!   computes the sample block x as `(chunk_x * 2 + 1) * 8`, i.e.
+//!   `chunk_x * 16 + 8` — the *chunk centre*, so all 16 quarts of a chunk
+//!   share one erosion sample; sampling at the quart
 //!   would give a finer-grained and wrong biome map.
 //! * **The 4096 gate is `i64`** and matches `end_islands`' own centre hole exactly,
 //!   which is why `the_end` covers precisely the region that can never carry an
 //!   island.
 //!
-//! `blockY` is passed to the erosion sample and never read (the channel is
+//! The block y coordinate is passed to the erosion sample and never read (the channel is
 //! `cache_2d`, i.e. xz-only), so End biomes are y-invariant just as the Nether's
 //! are.
 //!
 //! # How to change it
 //!
-//! The five biome ids are **not** data: `TheEndBiomeSource` serialises to an empty
-//! object and its five holders come from the registry (`TheEndBiomeSource.java:14-23`),
+//! The five biome ids are **not** data: vanilla's own End biome source serialises to an empty
+//! object and its five holders come from the registry,
 //! so they are constants here too rather than a resolver lookup.
 //!
 //! **There is no End block oracle anywhere**, and that bounds what any gate here can
@@ -131,7 +132,7 @@ pub const END_BARRENS: &str = "minecraft:end_barrens";
 /// uses.
 const MAIN_ISLAND_CHUNKS_SQUARED: i64 = 4096;
 
-/// `TheEndBiomeSource`.
+/// Vanilla's own End biome source.
 #[derive(Debug, Clone)]
 pub struct EndBiomeSource {
     islands: EndIslandNoise,
@@ -324,7 +325,7 @@ impl EndGenerator {
     /// [`Resolver`] carrying the End's density functions and noises.
     ///
     /// Takes **no** biome parameter table, unlike the Nether: the End's biome layout
-    /// is `TheEndBiomeSource`, which serialises to an empty object, so there is
+    /// is vanilla's own End biome source, which serialises to an empty object, so there is
     /// nothing for a resolver to supply and nothing that can be misconfigured. That
     /// is also why there is no equivalent of the Nether's empty-table panic.
     ///
@@ -603,7 +604,7 @@ mod tests {
     /// the ladder re-derived from the density function directly — which is the
     /// independent construction, not a restatement: it reads
     /// [`EndIslandNoise::compute`] at the same position and applies the four
-    /// constants transcribed from `TheEndBiomeSource.java` by hand.
+    /// constants transcribed from vanilla's own End biome source by hand.
     #[test]
     fn the_threshold_ladder_matches_the_erosion_value() {
         let source = EndBiomeSource::new(42);
