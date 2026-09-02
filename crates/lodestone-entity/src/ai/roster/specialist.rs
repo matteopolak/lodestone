@@ -424,12 +424,12 @@ pub static ELDER_GUARDIAN: &[Registration] = &[
 /// and it is worth paying: a ghast is a flying mob and ground strolling is not
 /// a degraded version of flying, it is a different animal.
 ///
-/// * **`Ghast.RandomFloatAroundGoal`** at 5 and **`Ghast.GhastLookGoal`** at 7
+/// * **Vanilla's own random-float-around goal** at 5 and **its own ghast look goal** at 7
 ///   both drive vanilla's own ghast move-control, a free-flight controller with no
 ///   pathfinding. `NavigatingMob` is ground-based A\*; there is no flying
 ///   navigation seam at all, so these are not approximations waiting on a
 ///   constant, they are waiting on a navigator.
-/// * **`Ghast.GhastShootFireballGoal`** at 7 is now real —
+/// * **Vanilla's own ghast fireball-attack goal** at 7 is now real —
 ///   [`super::ranged::ghast_fireball`], a port of vanilla's own per-tick update
 ///   (charge to 20 ticks, launch a
 ///   [`LargeFireball`](crate::ai::mob::ProjectileKind::LargeFireball), reset to

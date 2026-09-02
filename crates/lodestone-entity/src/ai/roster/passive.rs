@@ -391,9 +391,9 @@ pub static PARROT: &[Registration] = &[
     Registration::goal(2, "FollowOwnerGoal", parrot_follow_owner),
     // Vanilla's own parrot-wander goal — a flying variant of
     // random-stroll. Our `RandomStrollGoal` drives ground A*; a parrot's
-    // `FlyingPathNavigation` picks candidate points in the air, which this
-    // seam has no equivalent search for (same class of gap `Bee.BeeWanderGoal`
-    // is `Missing` for in the neutral family).
+    // own flying-path navigation picks candidate points in the air, which this
+    // seam has no equivalent search for (same class of gap the bee's own
+    // wander goal is `Missing` for in the neutral family).
     Registration::missing(Selector::Goal, 2, "Parrot.ParrotWanderGoal"),
     // Vanilla's own land-on-shoulder goal — shoulder riding. `Coverage::Modelled`
     // now: see [`LandOnOwnersShoulderGoal`]'s own doc for the

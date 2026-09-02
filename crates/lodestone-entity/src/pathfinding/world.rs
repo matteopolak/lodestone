@@ -124,7 +124,7 @@ impl Aabb {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlockCues {
     /// The block is in `#minecraft:edible_for_sheep`
-    /// (`BlockTags.EDIBLE_FOR_SHEEP`) — what a sheep grazes when it is standing
+    /// (vanilla's own edible-for-sheep block tag) — what a sheep grazes when it is standing
     /// *in* it (`short_grass` and friends), consumed by
     /// `EatBlockGoal`'s `IS_EDIBLE` field.
     pub edible_for_sheep: bool,

@@ -115,7 +115,7 @@ struct Run {
     ///
     /// Both are needed to *predict* how far the mob should then travel:
     /// `NearestAttackableTargetGoal` throttles its search to one tick in
-    /// `random_interval` (vanilla's `NearestAttackableTargetGoal.DEFAULT_RANDOM_INTERVAL = 10`),
+    /// `random_interval` (vanilla's own default random-interval constant, `10`),
     /// so a fixed fraction of the whole
     /// run is not a prediction, it is a guess with a tolerance.
     acquired_at: Option<(usize, f64)>,

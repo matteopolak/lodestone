@@ -49,7 +49,7 @@
 //! # How to change it
 //!
 //! Add a species by reading its own `populateDefaultEquipmentSlots` override in
-//! `.cache/mc/26.2/src/net/minecraft/world/entity/`: note whether it calls
+//! the decompiled 26.2 source: note whether it calls
 //! `super` (meaning it gets [`base_armor_roll`] first) and transcribe whatever
 //! it does after that in the same call order the roll functions read RNG in,
 //! since a reordered pair of `next_f32`/`next_int` calls changes what a fixed
@@ -146,7 +146,7 @@ impl EquipmentSlots {
     }
 }
 
-/// `Mob.EQUIPMENT_POPULATION_ORDER`.
+/// Vanilla's own equipment population order.
 const EQUIPMENT_POPULATION_ORDER: [EquipmentSlot; 4] = [
     EquipmentSlot::Head,
     EquipmentSlot::Chest,

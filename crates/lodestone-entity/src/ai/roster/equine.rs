@@ -24,7 +24,7 @@
 //!
 //! # Known gaps, all disclosed as `Missing` rows
 //!
-//! * **`RunAroundLikeCrazyGoal` and `AbstractHorse.MountPanicGoal`** both
+//! * **Vanilla's own run-around-like-crazy goal and its own mount-panic goal** both
 //!   require an existing passenger to run at all (vanilla's own eligibility
 //!   check reads whether the mob is a ridden vehicle), and this table has no way to express "only
 //!   while ridden". The tame roll they gate is already ported directly as

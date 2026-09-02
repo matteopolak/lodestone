@@ -70,7 +70,7 @@ impl Aabb {
 /// Implemented against the version crate's collision world.
 pub trait RayView {
     /// Returns `true` if the segment from `from` to `to` is unobstructed by any
-    /// block with collision (`ClipContext.Block.COLLIDER`, fluids ignored).
+    /// block with collision (vanilla's own explosion-clip collision context, fluids ignored).
     fn is_clear(&self, from: Vec3, to: Vec3) -> bool;
 }
 

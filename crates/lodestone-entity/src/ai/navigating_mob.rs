@@ -101,7 +101,7 @@ pub const DEFAULT_FOLLOW_RANGE: f64 = 16.0;
 /// acquires at `2.0`.
 pub const MIN_TARGET_VISIBILITY_DISTANCE: f64 = 2.0;
 
-/// Vanilla `LivingEntity.DEFAULT_BASE_GRAVITY` (`0.08`): the downward
+/// Vanilla's own default base-gravity constant (`0.08`): the downward
 /// acceleration [`advance`](NavigatingMob::advance) integrates each tick a
 /// waypoint sits below the mob, so a drop the pathfinder allowed (see
 /// [`crate::pathfinding::MobShape::max_up_step`]'s sibling, the fall-limit
@@ -112,7 +112,7 @@ pub const MIN_TARGET_VISIBILITY_DISTANCE: f64 = 2.0;
 /// to actually be over the drop — the reported "phases through the ground".
 pub const FALL_GRAVITY_PER_TICK: f64 = 0.08;
 
-/// Vanilla `LivingEntity.BASE_VERTICAL_AIR_DRAG` (`0.98`): the per-tick decay
+/// Vanilla's own base-vertical-air-drag constant (`0.98`): the per-tick decay
 /// [`advance`](NavigatingMob::advance) applies to the stored fall speed
 /// between ticks. Paired with [`FALL_GRAVITY_PER_TICK`], the two converge to
 /// vanilla's real terminal velocity (`-3.92` blocks/tick), though a path-driven
@@ -473,10 +473,10 @@ pub struct NavigatingMob<'w> {
     /// Separate from [`owner`](Self::owner) rather than derived from it: a tamed
     /// pet whose owner has logged out still *is* tame, so deriving tameness from
     /// a resolved owner position would un-tame every pet whenever its owner left
-    /// the player list. `SitWhenOrderedToGoal`'s `!isTame()` arm and
-    /// `Wolf.WolfAvoidEntityGoal`'s `!wolf.isTame()` guard both read this.
+    /// the player list. `SitWhenOrderedToGoal`'s untamed-guard arm and
+    /// the wolf's own avoid-entity goal's untamed guard both read this.
     tame: bool,
-    /// Host injection point: vanilla `TamableAnimal.orderedToSit`, the persisted
+    /// Host injection point: vanilla's own sit-order flag, the persisted
     /// *intent* an owner's right-click toggles. Drives
     /// [`MobController::is_ordered_to_sit`].
     ordered_to_sit: bool,
@@ -497,7 +497,7 @@ pub struct NavigatingMob<'w> {
     /// Host injection point, refreshed once per tick: the nearest bed-foot
     /// candidate, or `None`. Drives [`MobController::cat_bed_target`].
     cat_bed_target: Option<Vec3>,
-    /// The lying **pose** — vanilla `Cat.DATA_LIES`, written by
+    /// The lying **pose** — vanilla's own cat lying-pose data flag, written by
     /// [`CatLieOnBedGoal`](super::goals::CatLieOnBedGoal) through
     /// [`MobController::set_lying`], and read back by the host to publish
     /// that flag.

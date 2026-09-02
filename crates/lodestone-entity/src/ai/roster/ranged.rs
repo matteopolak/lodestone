@@ -436,7 +436,7 @@ impl Goal for RangedAttackGoal {
 #[derive(Debug)]
 pub struct BlazeFireballGoal {
     speed: f64,
-    /// `Attributes.FOLLOW_RANGE`, `48.0` for a blaze (vanilla's own blaze attribute builder).
+    /// Vanilla's own follow-range attribute, `48.0` for a blaze (vanilla's own blaze attribute builder).
     follow_range: f64,
     attack_step: i32,
     attack_time: i32,
@@ -871,7 +871,7 @@ pub static WITCH: &[Registration] = &[
 /// The crossbow row is [`crossbow_attack`]; read its doc comment for what is exact
 /// (the projectile and its launch speed) and what is a stand-in (the charge-state
 /// machine, replaced by a fixed interval). The inherited
-/// `PatrollingMonster.LongDistancePatrolGoal` row is [`patrol_goal`] — the one
+/// vanilla's own long-distance-patrol goal row is [`patrol_goal`] — the one
 /// row in the inherited chain that is real rather than raid machinery, because
 /// it is patrol machinery instead; `docs/pillager-patrols.md` has the full
 /// account, including what the goal itself does not port.
@@ -892,11 +892,11 @@ pub static PILLAGER: &[Registration] = &[
     Registration::missing(Selector::Goal, 5, "Raider.RaiderCelebration"),
     // -- the pillager's own --
     Registration::goal(0, "FloatGoal", float_goal),
-    // `AvoidEntityGoal<Creaking>` (vanilla's own pillager registration). Ours resolves the avoided species
+    // Vanilla's own pillager avoid-creaking goal. Ours resolves the avoided species
     // through the host's own feed, the same route the creeper's cat/ocelot
     // avoidance takes.
     Registration::goal(1, "AvoidEntityGoal", avoid_entity),
-    // `Raider.HoldGroundAttackGoal` — the raid-wave "stand and fight at the
+    // Vanilla's own hold-ground-attack goal — the raid-wave "stand and fight at the
     // village bell" behaviour. Raid machinery again.
     Registration::missing(Selector::Goal, 2, "Raider.HoldGroundAttackGoal"),
     Registration::goal(3, "RangedCrossbowAttackGoal", crossbow_attack),
