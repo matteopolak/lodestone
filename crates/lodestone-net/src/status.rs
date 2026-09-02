@@ -67,8 +67,8 @@ pub struct ServerStatus {
     pub max: Option<u32>,
     /// Online players' names, from `players.sample[]`, in server order.
     ///
-    /// Vanilla shows these in the row's "who's online" tooltip
-    /// (`ServerSelectionList.java:410,430`). A server that omits the sample —
+    /// Vanilla shows these in the server list row's "who's online" tooltip.
+    /// A server that omits the sample —
     /// which is legal and common — leaves this empty rather than failing the
     /// status, the same tolerance as every other field here.
     pub sample: Vec<PlayerSample>,
@@ -163,13 +163,13 @@ pub fn parse_status_json(json: &str, latency_ms: Option<u64>) -> Result<ServerSt
 
 /// Decodes one `players.sample[]` entry, or `None` if it is unusable.
 ///
-/// Vanilla's `NameAndId` codec demands both `id` and `name`
-/// (`server/players/NameAndId.java:11-13`); real servers are looser, and one
-/// malformed entry must not blank a whole row any more than a broken favicon
-/// does, so an entry missing either field is skipped, not fatal. The `id` is
-/// kept as the raw string rather than parsed to a UUID: the list only ever
-/// displays names, and comparing an id against the all-zero anonymous profile
-/// (`MinecraftServer.ANONYMOUS_PLAYER_PROFILE`) is tooltip shaping, not decode.
+/// Vanilla's player-sample codec demands both `id` and `name`; real servers
+/// are looser, and one malformed entry must not blank a whole row any more
+/// than a broken favicon does, so an entry missing either field is skipped,
+/// not fatal. The `id` is kept as the raw string rather than parsed to a
+/// UUID: the list only ever displays names, and comparing an id against the
+/// all-zero anonymous-profile UUID vanilla uses as a placeholder is tooltip
+/// shaping, not decode.
 #[must_use]
 fn player_sample(v: &serde_json::Value) -> Option<PlayerSample> {
     let obj = v.as_object()?;
