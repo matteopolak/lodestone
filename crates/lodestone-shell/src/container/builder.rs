@@ -155,7 +155,7 @@ impl<'a> Builder<'a> {
 
     /// One of vanilla's two container labels: the **proportional** font when one
     /// is attached, and **no drop shadow** either way — the trailing `false` in
-    /// `AbstractContainerScreen.java`'s `graphics.text` calls. Every
+    /// vanilla's own container-screen text-draw calls. Every
     /// other text surface in this crate is shadowed, which is why this needs its
     /// own entry point rather than reusing `VanillaFont::draw`.
     ///

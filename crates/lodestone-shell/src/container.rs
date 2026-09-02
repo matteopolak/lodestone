@@ -53,7 +53,7 @@ pub mod enchant;
 pub(crate) mod builder;
 mod creative;
 /// Vanilla's creative-inventory tab contents — a hand-transcription
-/// of the decompiled `CreativeModeTabs.java`, cross-checked against
+/// of vanilla's own decompiled creative-tab declarations, cross-checked against
 /// `lodestone-data`'s real item registry. Read by [`creative`], the screen that
 /// draws it.
 mod creative_items;
@@ -128,7 +128,7 @@ const SLOT: f32 = 18.0;
 const CELL: f32 = 16.0;
 
 /// The hover highlight's two sprite ids, from
-/// `AbstractContainerScreen.java`. Blitted at
+/// vanilla's own container-screen rendering. Blitted at
 /// `(slot.x - 4, slot.y - 4, 24, 24)` (`:155`, `:161`) — one *behind* the slot's
 /// item and one *in front of* it, which is the whole reason there are two.
 pub const SLOT_HIGHLIGHT_BACK: &str = "container/slot_highlight_back";
@@ -146,8 +146,8 @@ const HIGHLIGHT: f32 = 24.0;
 const HIGHLIGHT_INSET: f32 = 4.0;
 
 /// The furnace family's two progress sprites, one pair per
-/// texture — `AbstractFurnaceScreen.java` takes them as constructor
-/// parameters, and `FurnaceScreen`/`BlastFurnaceScreen`/`SmokerScreen` each
+/// texture — vanilla's own abstract furnace-screen base takes them as constructor
+/// parameters, and the furnace/blast-furnace/smoker screens each
 /// supply their own rather than sharing one id.
 const FURNACE_LIT_PROGRESS: &str = "container/furnace/lit_progress";
 const FURNACE_BURN_PROGRESS: &str = "container/furnace/burn_progress";
@@ -169,14 +169,14 @@ const BEACON_BUTTON_DISABLED: &str = "container/beacon/button_disabled";
 const BEACON_CONFIRM: &str = "container/beacon/confirm";
 const BEACON_CANCEL: &str = "container/beacon/cancel";
 
-/// The brewing stand's three progress sprites,
-/// `BrewingStandScreen.java`.
+/// The brewing stand's three progress sprites, from
+/// vanilla's own brewing-stand screen rendering.
 const BREWING_FUEL_LENGTH: &str = "container/brewing_stand/fuel_length";
 const BREWING_BREW_PROGRESS: &str = "container/brewing_stand/brew_progress";
 const BREWING_BUBBLES: &str = "container/brewing_stand/bubbles";
 
 /// The merchant screen's own sprites (that fix's UI half),
-/// `MerchantScreen.java`. The experience-bar trio and the scroller pair
+/// from vanilla's own merchant-screen rendering. The experience-bar trio and the scroller pair
 /// are not drawn yet — see `container::merchant`'s module doc for what is
 /// modelled and what is a named gap.
 const MERCHANT_OUT_OF_STOCK: &str = "container/villager/out_of_stock";

@@ -227,8 +227,8 @@ fn hit(x: f32, y: f32, r: Rect) -> bool {
 }
 
 /// Resolves a **local widget-pixel** point to the pattern index it hits, if
-/// any — `LoomScreen.mouseClicked`'s own nested loop, `start_row`-relative,
-/// bounded by `pattern_count` (`LoomMenu.getSelectablePatterns().size()`):
+/// any — vanilla's own loom-screen click handling's own nested loop, `start_row`-relative,
+/// bounded by `pattern_count` (vanilla's own selectable-patterns count):
 /// a partially-filled last row must not accept a click past the real pattern
 /// count even though its cell rect exists, the same guard
 /// [`super::stonecutter::hit_test_local`] carries.
