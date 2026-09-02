@@ -70,7 +70,7 @@
 //!
 //! That group's light is not the raw sample either:
 //! `SubmitNodeCollection.submitNameTag` passes
-//! `LightCoordsUtil.lightCoordsWithEmission(lightCoords, 2)` for the
+//! vanilla's own light-coords-with-emission helper applied to `(lightCoords, 2)` for the
 //! non-discrete case — both halves floored at 2 — and the raw coords for the
 //! discrete (sneaking) one, which is a second thing that submission carries
 //! and the see-through one does not. [`WorldTextLight`] turns the resulting
@@ -130,29 +130,29 @@
 //!
 //! * **Distance cutoff**: `64.0` blocks, squared-distance compared against
 //!   camera-to-*feet* (`EntityRenderer.extractNameTags`'s default
-//!   `nameTagDistance` argument, `EntityRenderer.java`, tested at
-//!   `EntityRenderer.java`).
+//!   `nameTagDistance` argument, vanilla's own entity renderer, tested at
+//!   vanilla's own entity renderer).
 //! * **Anchor**: `feet.y + base_height * scale + 0.5`. The `+0.5` is
-//!   `SubmitNodeCollection.java`'s `nameTagAttachment.y + 0.5`; the
+//!   vanilla's own submit-node collection's `nameTagAttachment.y + 0.5`; the
 //!   `base_height` term is `EntityAttachment.NAME_TAG`'s fallback point,
 //!   `AT_HEIGHT = (width, height) -> (0, height, 0)`
-//!   (`EntityAttachment.java`, `:25`) — the entity's own hitbox height,
+//!   (vanilla's own entity-attachment declarations, `:25`) — the entity's own hitbox height,
 //!   from the real jar-derived census (`lodestone_data::entity_dimensions`),
 //!   not a guess. Some vanilla types override this attachment point (a
 //!   sitting cat, a sleeping villager); that per-type override table is not
 //!   ported — every entity here uses the `AT_HEIGHT` fallback, which is what
 //!   the overwhelming majority of named entities (players, standard mobs)
 //!   actually get.
-//! * **Sneaking suppression**: `Entity.isDiscrete()` gates the see-through
-//!   pass off (`SubmitNodeCollection.java`/`:118`) — resolved once, at
+//! * **Sneaking suppression**: vanilla's own is-discrete check gates the see-through
+//!   pass off (vanilla's own submit-node collection) — resolved once, at
 //!   `net::entity_snapshot`'s boundary, as [`crate::entities::NameTag::see_through`].
 //!
 //! # What is deliberately not built
 //!
 //! * **Per-frame packed-light modulation.** Vanilla forces near-full
 //!   brightness for the normal pass
-//!   (`LightCoordsUtil.lightCoordsWithEmission(lightCoords, 2)`,
-//!   `SubmitNodeCollection.java`) specifically so a nametag stays legible
+//!   (vanilla's own light-coords-with-emission helper applied to `(lightCoords, 2)`,
+//!   vanilla's own submit-node collection) specifically so a nametag stays legible
 //!   in the dark — this renderer draws plain full-bright white unconditionally,
 //!   which is a close approximation of that emission override rather than a
 //!   divergence from it.
@@ -281,7 +281,7 @@ pub(super) fn tinted(color: [f32; 4], tint: [f32; 3]) -> [f32; 4] {
 }
 
 /// Vanilla's per-name-tag world scale
-/// (`SubmitNodeCollection.java`: `poseStack.scale(0.025F, -0.025F, 0.025F)`)
+/// (vanilla's own submit-node collection: `poseStack.scale(0.025F, -0.025F, 0.025F)`)
 /// — one logical text pixel is this many world blocks.
 const PX_SCALE: f32 = 0.025;
 
@@ -313,8 +313,8 @@ const NORMAL_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const SEE_THROUGH_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 129.0 / 255.0];
 
 /// The background plate's packed ARGB: black at
-/// `Options.getBackgroundOpacity(0.25F)`, which resolves to its `0.25`
-/// fallback on an unconfigured client — `ARGB.color(0.25F, -16777216)` =
+/// vanilla's own get-background-opacity accessor applied to `0.25F`, which resolves to its `0.25`
+/// fallback on an unconfigured client — vanilla's own ARGB-color helper applied to `(0.25F, -16777216)` =
 /// `as8BitChannel(0.25) << 24` = `64 << 24`. See the module doc for why the
 /// option is not read here, and for the linear-blend divergence this value
 /// is *not* responsible for.
@@ -355,7 +355,7 @@ pub(super) struct StyledRect {
     pub(super) h: f32,
     pub(super) color: [f32; 4],
     /// How far this rect would be displaced by one step of vanilla's 8×
-    /// text outline — `GlyphInfo.getShadowOffset()` for a run of glyph ink
+    /// text outline — vanilla's own glyph-info shadow-offset accessor for a run of glyph ink
     /// (1 px for a sheet glyph, 0.5 for a unihex one), and **`0.0` for an
     /// underline/strikethrough bar or a background plate**, because
     /// `Font.prepare8xTextOutline` ends in `outlineOutput.discardEffects()`
@@ -490,9 +490,10 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
 /// string — it supplies one only as the *fallback* for a span whose colour is
 /// unspecified (`base_rgb`, always opaque white for both of today's callers:
 /// vanilla hardcodes white as the base tint for both nametags
-/// and `text_display` (`TextDisplayRenderer.submitInner`'s
+/// and `text_display` (vanilla's own text-display renderer's submit-inner
+/// routine's
 /// `textOpacity << 24 | 16777215`), and only a real per-span [`TextColor`]
-/// overrides it — see `Font.java::getTextColor`, which is exactly this
+/// overrides it — see vanilla's own get-text-color accessor, which is exactly this
 /// function's `resolved_rgb`).
 ///
 /// Alpha is deliberately **not** threaded through here (every [`StyledRect`]
@@ -504,7 +505,7 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
 /// of the same span list. Callers multiply their own alpha onto
 /// [`StyledRect::color`]'s existing `1.0` when building vertices.
 ///
-/// Bold widens the **advance** (`GlyphInfo.getAdvance(bold)`, `Font.java`),
+/// Bold widens the **advance** (vanilla's own glyph-info advance accessor at bold weight),
 /// which is why a styled line's width cannot be measured by a plain
 /// per-codepoint advance walk: a bold run measures
 /// wider than the same codepoints unstyled, and a caller that centres a
@@ -513,7 +514,7 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
 /// doc for the alignment defect this was written to close.
 ///
 /// Underline/strikethrough are emitted **per glyph**, matching
-/// `Font.java::accept`'s own unconditional per-glyph effect bar (including
+/// vanilla's own font rendering's own unconditional per-glyph effect bar (including
 /// for whitespace) rather than one bar merged across a run — simpler to keep
 /// obviously correct against the source, at the cost of more (touching,
 /// visually identical) rects. `§k` obfuscation is not implemented: it needs
@@ -586,7 +587,7 @@ where
                 .as_ref()
                 .map_or_else(|| raster.advance(cp).unwrap_or(MISSING_ADVANCE), GlyphRaster::advance);
             let bold_extra = raster.font().bold_offset(cp);
-            // `GlyphInfo.getShadowOffset()` — carried onto every ink rect this
+            // vanilla's own glyph-info shadow-offset accessor — carried onto every ink rect this
             // glyph emits so a consumer can reproduce vanilla's 8× outline
             // without re-resolving the glyph. Half a pixel for unihex, one for
             // everything else, per glyph rather than per font.
@@ -650,7 +651,7 @@ where
             }
 
             if underlined || strikethrough {
-                // `Font.java`: `effectX0 = position == 0 ? x - 1.0F : x` —
+                // Vanilla's own font rendering: `effectX0 = position == 0 ? x - 1.0F : x` —
                 // `position` counts glyphs across the *whole* line, not per
                 // span, so this must survive the span boundary above.
                 let effect_x0 = if position == 0 {
@@ -691,7 +692,7 @@ where
     (rects, cursor)
 }
 
-/// `BakedSheetGlyph.shearTop`/`shearBottom` (`BakedSheetGlyph.java`, both
+/// `BakedSheetGlyph.shearTop`/`shearBottom` (vanilla's own baked-sheet-glyph type, both
 /// `1.0F - 0.25F * v`) evaluated at one texel row's own local `v` — the same
 /// per-row shear `hud/vanilla_font.rs::draw_ink` already applies, transcribed
 /// here rather than called cross-module for the same "small, self-contained"
@@ -723,7 +724,7 @@ fn entity_base_height(type_path: &str) -> f32 {
 /// world space, billboarded with the frame's shared `right`/`up` basis —
 /// every nametag this frame shares the same basis, matching vanilla's single
 /// `camera.orientation` applied identically to each
-/// (`SubmitNodeCollection.java`: `poseStack.mulPose(camera.orientation)`,
+/// (vanilla's own submit-node collection: `poseStack.mulPose(camera.orientation)`,
 /// *before* any per-entity translation).
 ///
 /// No culling is configured on either pipeline (`cull_mode: None`, `wgpu`'s
@@ -841,7 +842,7 @@ fn push_entity_quads(
     // its model.
     //
     // The **normal** group's non-discrete submission takes
-    // `LightCoordsUtil.lightCoordsWithEmission(lightCoords, 2)`, which floors
+    // vanilla's own light-coords-with-emission helper applied to `(lightCoords, 2)`, which floors
     // *both* halves at 2, so an unoccluded name never goes fully black in a
     // pitch-dark cave. The discrete (sneaking) submission takes the raw
     // coords. See-through gets no tint at all — see `see_through_tint` below.
@@ -890,9 +891,10 @@ fn push_entity_quads(
         }
     };
 
-    // No drop shadow, in either branch: `NameTagFeatureRenderer.prepareText`
-    // calls `Font.prepareText(..., drawShadow = false, ...)`, and
-    // `Font.PreparedTextBuilder.getShadowColor` returns a fully transparent
+    // No drop shadow, in either branch: vanilla's own name-tag feature
+    // renderer's prepare-text routine
+    // calls its own font's prepare-text call with `drawShadow = false`, and
+    // its own prepared-text-builder's get-shadow-color accessor returns a fully transparent
     // `0` for a style carrying no explicit shadow colour when that flag is
     // clear, so vanilla emits no shadow renderable at all. The plate is what
     // separates a nametag from the world behind it; this pass used to draw a
@@ -1613,7 +1615,7 @@ mod tests {
     /// `entity_type_id_parts`'s linear `strip_prefix` scan. The expected
     /// heights come from `crates/lodestone-data/tests/support/
     /// entity_dimensions_jvm.txt` (a real 26.2 server's own
-    /// `EntityType.getHeight()` dump), an outside source, not from this
+    /// vanilla's own entity-type get-height accessor dump), an outside source, not from this
     /// table round-tripping against itself.
     ///
     /// `chicken` and `enderman` are chosen because they are far apart both
@@ -1865,7 +1867,7 @@ mod tests {
     /// **The bold control**, same fixture: a bold run must draw its ink
     /// *twice* (`BakedSheetGlyph.renderChar`'s second, offset pass — see
     /// [`layout_styled_ink_runs`]'s doc) and must measure a wider advance
-    /// (`GlyphInfo.getAdvance(bold)`) than the identical codepoint unstyled —
+    /// (vanilla's own glyph-info advance accessor at bold weight) than the identical codepoint unstyled —
     /// the exact width difference `gpu/display_text.rs`'s alignment fix
     /// depends on.
     #[test]
