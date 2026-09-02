@@ -7,9 +7,9 @@
 //! # Data provenance
 //!
 //! `tests/support/outline_shape_jvm.txt` is an authoritative dump produced by
-//! booting the real 26.2 server and reading `BlockStateBase.getShape` and
-//! `BlockStateBase.getInteractionShape` for every one of the 32,366 registered
-//! states (`OutlineShapeOracle.java`, walking `Block.BLOCK_STATE_REGISTRY`).
+//! booting the real 26.2 server and reading vanilla's own outline-shape and
+//! interaction-shape accessors for every one of the 32,366 registered
+//! states (`OutlineShapeOracle.java`, walking vanilla's own block-state registry).
 //!
 //! Vanilla shapes are **code**-defined, not property-derived: `blocks.json` has
 //! no geometry at all, and `vendor/minecraft-data` has no 26.x data (and was
@@ -21,15 +21,15 @@
 //!
 //! # Why this is not the collision census
 //!
-//! Three vanilla getters, three defaults, three different answers:
+//! Three vanilla accessors, three defaults, three different answers:
 //!
-//! * `getShape` (the outline) defaults to `Shapes.block()`
-//!   (`BlockBehaviour.getShape`);
-//! * `getCollisionShape` defaults to
+//! * the outline-shape accessor defaults to a full cube
+//!   (vanilla's own block-behaviour base class's own accessor);
+//! * the collision-shape accessor defaults to
 //!   `hasCollision ? state.getShape(…) : Shapes.empty()`
-//!   (`BlockBehaviour.getCollisionShape`);
-//! * `getInteractionShape` defaults to `Shapes.empty()`
-//!   (`BlockBehaviour.getInteractionShape`).
+//!   (same base class);
+//! * the interaction-shape accessor defaults to empty
+//!   (same base class).
 //!
 //! [`outline_differs_from_collision_for_half_of_all_states`] measures the
 //! divergence against the committed collision table: 16,484 of 32,366 states
@@ -39,7 +39,7 @@
 //! # Dump format
 //!
 //! De-duplicated **in the dumper** (by exact `Double.doubleToRawLongBits` list
-//! identity, computed in the JVM) so the anchor is 422 KB and can be committed
+//! identity — standard Java library, computed in the JVM) so the anchor is 422 KB and can be committed
 //! rather than living in a gitignored scratch file like `shape_java.txt`:
 //!
 //! ```text
@@ -318,14 +318,14 @@ fn generate(dump: &Dump) -> String {
         &mut out,
         count,
         "OUTLINE",
-        "outline (`BlockStateBase.getShape`)",
+        "outline (vanilla's own outline-shape accessor)",
         (0..count).map(|state| dump.outline(state)),
     );
     emit_family(
         &mut out,
         count,
         "INTERACTION",
-        "interaction (`BlockStateBase.getInteractionShape`)",
+        "interaction (vanilla's own interaction-shape accessor)",
         (0..count).map(|state| dump.interaction(state)),
     );
 
@@ -624,10 +624,10 @@ fn only_box(boxes: &[lodestone_model::BlockAabb]) -> [f32; 6] {
 
 const FULL_CUBE: [f32; 6] = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
-/// `AirBlock.getShape` → `Shapes.empty()`, and
-/// `LiquidBlock.getShape` → `Shapes.empty()`. This
+/// Vanilla's own air-block outline-shape accessor → empty, and
+/// its own liquid-block outline-shape accessor → empty. This
 /// is why block picking cannot be "the cell is not air": *fluids* are empty too,
-/// and vanilla runs the pick with `Fluid.NONE`.
+/// and vanilla runs the pick with a no-fluid clip mode.
 #[test]
 fn air_and_fluids_have_an_empty_outline() {
     for name in [
@@ -647,10 +647,10 @@ fn air_and_fluids_have_an_empty_outline() {
     }
 }
 
-/// `KelpBlock`'s shape is `Block.column(16.0, 0.0, 9.0)` (`KelpBlock.SHAPE`)
-/// and `Block.column(sizeXZ, minY, maxY)` is
+/// Kelp's shape is a `column(16.0, 0.0, 9.0)`
+/// and vanilla's own column-shape helper's `(sizeXZ, minY, maxY)` is
 /// `box(8 - sizeXZ/2, minY, 8 - sizeXZ/2, 8 + sizeXZ/2, maxY, 8 + sizeXZ/2)` in
-/// sixteenths (`Block.column`), i.e. `[0, 0, 0, 1, 9/16, 1]`. Non-empty,
+/// sixteenths, i.e. `[0, 0, 0, 1, 9/16, 1]`. Non-empty,
 /// which is what makes kelp targetable and breakable — and its collision shape is
 /// empty, which is why the collision table cannot answer this.
 #[test]
@@ -670,8 +670,8 @@ fn kelp_outlines_to_nine_sixteenths_and_collides_with_nothing() {
     }
 }
 
-/// `SeagrassBlock`'s shape is `Block.column(12.0, 0.0, 12.0)`
-/// (`SeagrassBlock.SHAPE`) → `[2/16, 0, 2/16, 14/16, 12/16, 14/16]`.
+/// Seagrass's shape is a `column(12.0, 0.0, 12.0)`
+/// → `[2/16, 0, 2/16, 14/16, 12/16, 14/16]`.
 #[test]
 fn seagrass_outlines_to_twelve_sixteenths_inset() {
     let id = first_id_named("minecraft:seagrass");
@@ -682,8 +682,9 @@ fn seagrass_outlines_to_twelve_sixteenths_inset() {
     );
 }
 
-/// `WebBlock` overrides no shape getter at all, so cobweb inherits
-/// `getShape`'s `Shapes.block()` default while `noCollission()` empties its
+/// The cobweb block overrides no shape getter at all, so cobweb inherits
+/// the outline-shape accessor's full-cube default while its own "no collision"
+/// marker empties its
 /// collision shape. The cleanest single demonstration that the two censuses are
 /// not interchangeable.
 #[test]
@@ -702,9 +703,8 @@ fn cobweb_outlines_to_a_full_cube_and_collides_with_nothing() {
     );
 }
 
-/// `SlabBlock`'s shapes are `column(16, 0, 8)` / `column(16, 8, 16)` /
-/// `Shapes.block()` for BOTTOM / TOP / DOUBLE (`SlabBlock.SHAPE_BOTTOM`,
-/// `SlabBlock.SHAPE_TOP`, `SlabBlock.getShape`).
+/// A slab's shapes are `column(16, 0, 8)` / `column(16, 8, 16)` /
+/// a full cube for BOTTOM / TOP / DOUBLE.
 /// This is the shape the current unit-cube selection box gets visibly wrong.
 #[test]
 fn slabs_outline_to_a_half_block() {
@@ -735,12 +735,12 @@ fn slabs_outline_to_a_half_block() {
 }
 
 /// Walls build their outline with `makeShapes(16.0F, 14.0F)` and their collision
-/// with `makeShapes(24.0F, 24.0F)` (`WallBlock`'s constructor), so a wall's outline
+/// with `makeShapes(24.0F, 24.0F)` (the wall block's own constructor), so a wall's outline
 /// tops out at `y = 1.0` while its collision reaches `y = 1.5`. Using the
 /// collision shape for selection would draw the box half a block above the wall.
 ///
 /// And the two states per wall with `up=false` and all four sides `NONE` fold to
-/// `Shapes.empty()` (`WallBlock.makeShapes`); because that shape function ignores
+/// empty (vanilla's own wall-shape-building helper); because that shape function ignores
 /// `WATERLOGGED` it is exactly two states, waterlogged and not.
 #[test]
 fn wall_outlines_stop_at_one_while_collision_reaches_one_and_a_half() {
@@ -767,10 +767,10 @@ fn wall_outlines_stop_at_one_while_collision_reaches_one_and_a_half() {
     );
 }
 
-/// `LightBlock.getShape` is
+/// Vanilla's own light-block outline-shape accessor is
 /// `context.isHoldingItem(Items.LIGHT) ? Shapes.block() : Shapes.empty()`,
 /// and the census dumps every shape with
-/// `CollisionContext.empty()`. So the table's answer for `minecraft:light` is
+/// an empty collision context. So the table's answer for `minecraft:light` is
 /// **empty** — the correct not-holding-a-light answer, and a genuine limit of a
 /// context-free table. Pinned so nobody "fixes" it to a cube.
 #[test]
@@ -782,7 +782,7 @@ fn light_blocks_outline_to_nothing_because_the_census_holds_no_item() {
         );
     }
     // `barrier`, by contrast, really is a full cube with no context involved —
-    // so "invisible" is not the discriminator, `isHoldingItem` is.
+    // so "invisible" is not the discriminator, the holding-item check is.
     assert_eq!(
         only_box(
             outline_shapes::outline_boxes(first_id_named("minecraft:barrier")).expect("resolves")
@@ -801,8 +801,8 @@ fn light_blocks_outline_to_nothing_because_the_census_holds_no_item() {
     );
 }
 
-/// `getInteractionShape` defaults to `Shapes.empty()`
-/// (`BlockBehaviour.getInteractionShape`) and only four block families override it in
+/// Vanilla's own interaction-shape accessor defaults to empty
+/// and only four block families override it in
 /// 26.2. Pinned as a completeness statement: if a fifth appears, this fails and
 /// the docs' claim about which blocks refine their hit face gets updated.
 #[test]
