@@ -105,12 +105,12 @@ impl World {
     fn add_slime(&mut self, x: i32, y: i32, z: i32) {
         self.slime.insert((x, y, z));
     }
-    /// A `BubbleColumnBlock` cell. `drag_down` is the `DRAG_DOWN` property: `true`
-    /// for a magma-block drain, `false` for a soul-sand lift.
+    /// A vanilla bubble-column block cell. `drag_down` is its own "drag down"
+    /// property: `true` for a magma-block drain, `false` for a soul-sand lift.
     ///
     /// **Also registers the cell as water**, mirroring `gen_golden.py`'s
-    /// `add_bubble_column`. Not a convenience: `BubbleColumnBlock.getFluidState`
-    /// returns `Fluids.WATER.getSource(false)` (`BubbleColumnBlock.java:73-75`), so
+    /// `add_bubble_column`. Not a convenience: vanilla's own bubble-column
+    /// block's fluid-state accessor returns a water source, so
     /// in vanilla a bubble column *is* a full water source cell. That is what makes
     /// the in-water branch dispatch, and what makes the cell above a column read as
     /// "not open air" so the inside impulse pair is selected. A dry bubble column is
@@ -245,16 +245,16 @@ fn walk_flat_matches_golden() {
     });
 }
 
-/// `MOVEMENT_SPEED` attribute-driven walk speed (issue #193). Every other
+/// Movement-speed attribute-driven walk speed. Every other
 /// scenario in this file runs `PlayerState::movement_speed` at its `None`
 /// default, so regenerating `golden_traces.rs` with only the `gen_golden.py`
 /// refactor (`player_speed` reading an override) produced a byte-for-byte
 /// zero diff across all 42 pre-existing consts — nothing exercised the
 /// injected-attribute path at all. This is the scenario that does: a
-/// Speed-II-shaped fold of the player's own `0.1F` `MOVEMENT_SPEED` base
-/// (`Player.java:209`) through `AttributeInstance.calculateValue`'s
+/// Speed-II-shaped fold of the player's own `0.1F` movement-speed attribute
+/// base through vanilla's own attribute-value-calculation step's
 /// multiplicative stage (`base * (1 + amount)`, `amount = 0.2F * 2` for
-/// amplifier 1 — `LivingEntity.java:154-157`), injected via
+/// amplifier 1 — vanilla's own sprinting speed-modifier constant), injected via
 /// [`PlayerState::with_movement_speed`] exactly as the entity layer would
 /// after folding a real `update_attributes` snapshot.
 #[test]
@@ -276,11 +276,11 @@ fn walk_speed_ii_matches_golden() {
     );
 }
 
-/// # This trace moved in #191, and the movement is the evidence
+/// # This trace moved when the flying-speed fix landed, and the movement is the evidence
 ///
-/// The airborne branch of `getFrictionInfluencedSpeed` returns
-/// `Player.getFlyingSpeed()`, whose **non**-flying arm is sprint-dependent
-/// (`isSprinting() ? 0.025999999F : 0.02F`, `Player.java:1978`). Both this crate and
+/// The airborne branch of vanilla's own friction-influenced speed step
+/// returns its own flying-speed accessor, whose **non**-flying arm is
+/// sprint-dependent (`isSprinting() ? 0.025999999F : 0.02F`). Both this crate and
 /// `gen_golden.py` returned a flat `0.02F`, so every airborne tick of a sprint-jump
 /// accelerated 30% short — and the two ports agreed with each other while both
 /// disagreed with the jar, which is the whole reason "a self-authored oracle
@@ -361,9 +361,9 @@ fn slab_step_matches_golden() {
     });
 }
 
-/// Auto-jump (#201): walking forward on the ground into a 1-block step arms the
-/// vanilla detector (`LocalPlayer.updateAutoJump`, `LocalPlayer.java:1001-1097`),
-/// and the next tick spends the deferred `autoJumpTime` as a forced jump that
+/// Auto-jump: walking forward on the ground into a 1-block step arms the
+/// vanilla detector (its own client-side auto-jump update),
+/// and the next tick spends the deferred auto-jump timer as a forced jump that
 /// carries the player onto the step. The control (option off) stays pinned at
 /// the step — the 0.6 auto-step cannot mount a 1.0 rise, so without the jump
 /// nothing lifts the player.
@@ -433,8 +433,8 @@ fn auto_jump_does_not_fire_on_a_half_slab() {
     assert!(!jumped, "a half-slab must be auto-stepped, not auto-jumped");
 }
 
-/// The `!isStayingOnGroundSurface()` gate (`LocalPlayer.java:1121`, where it is
-/// `isShiftKeyDown()`, `Player.java:300-302`): a sneaking player never
+/// Vanilla's own "is staying on ground surface" check negated (which is the
+/// raw shift key for a player): a sneaking player never
 /// auto-jumps, even straight into a step.
 #[test]
 fn auto_jump_is_suppressed_while_sneaking() {
@@ -715,10 +715,10 @@ fn swim_sprint_matches_golden() {
 fn swim_look_down_dives_matches_golden() {
     // Identical fixture and input to `swim_sprint_matches_golden`, but pitch =
     // 60 (looking steeply down: lookAngleY = -sin(60 deg) ~= -0.866, past the
-    // -0.2 threshold, so the steeper 0.085 multiplier applies, `Player.java:
-    // 1408`). Issue #59: looking down while swimming did not make the player
-    // descend, because `Player.travel`'s look-descent term
-    // (`Player.java:1401-1415`) was never ported into `tick_water`. This test
+    // -0.2 threshold, so the steeper 0.085 multiplier applies). Looking down
+    // while swimming did not make the player
+    // descend, because vanilla's own swim look-descent term
+    // was never ported into `tick_water`. This test
     // is the regression signal for that fix.
     let mut world = World::default();
     for y in 80..=100 {
@@ -744,8 +744,8 @@ fn swim_look_down_dives_matches_golden() {
             using_item: None,
         },
     );
-    // Tick 0 is still STANDING in both traces (`updateSwimming` reads the
-    // *previous* tick's `isSprinting`, so the swim pose cannot appear before
+    // Tick 0 is still STANDING in both traces (vanilla's own swimming-state
+    // update reads the *previous* tick's sprinting flag, so the swim pose cannot appear before
     // tick 2's dispatch, i.e. golden index 1) -- so the first tick where the
     // pitch-0 control (`GOLDEN_SWIM_SPRINT`) and this one could possibly
     // differ is index 1, and that is exactly where they must.
@@ -776,12 +776,12 @@ fn swim_look_down_dives_matches_golden() {
 fn swim_surface_look_up_no_pulldown_matches_golden() {
     // At the surface (a 10-block pool, world y 80.0..90.0): the swim box
     // (feet 89.5, height 0.6) sits inside the topmost water block, but
-    // `BlockPos.containing(x, y + 1.0 - 0.1, z)` = floor(89.5 + 0.9) = 90,
-    // which is air -- so `headSubmerged` is false. Looking up (pitch = -60,
+    // a block-position floor of (x, y + 1.0 - 0.1, z) = floor(89.5 + 0.9) = 90,
+    // which is air -- so the head-submerged flag is false. Looking up (pitch = -60,
     // lookAngleY ~= +0.866) makes every term of `lookAngleY <= 0.0 ||
-    // jumping || headSubmerged` false, so the descent term never fires. Since
+    // jumping || head_submerged` false, so the descent term never fires. Since
     // sprint-swimming also suppresses buoyancy
-    // (`getFluidFallingAdjustedMovement`'s `!sprinting` guard) and there is no
+    // (vanilla's own falling-adjusted fluid movement step's `!sprinting` guard) and there is no
     // vertical input, nothing moves the player vertically at all: a flat line
     // at y = 89.5, vy = 0.0, for all 30 ticks.
     //
@@ -789,8 +789,8 @@ fn swim_surface_look_up_no_pulldown_matches_golden() {
     // 0), exactly like `elytra_gap_glide_matches_golden` seeds `FallFlying`:
     // naturally *entering* swimming here would need the eye submerged under
     // the STANDING 1.62 eye height, which this 10-block-deep pool cannot
-    // provide, and `updateSwimming` reads the *previous* tick's `sprinting`,
-    // so that must be seeded too or tick 1 would immediately undo the pose.
+    // provide, and vanilla's own swimming-state update reads the *previous*
+    // tick's sprinting flag, so that must be seeded too or tick 1 would immediately undo the pose.
     let mut world = World::default();
     for y in 80..90 {
         for x in -2..=2 {
@@ -877,8 +877,8 @@ fn swim_surface_look_down_control_matches_golden() {
 
 #[test]
 fn water_current_push_matches_golden() {
-    // Fluid flow-current push (`Entity.updateFluidInteraction` /
-    // `FlowingFluid.getFlow`). The player is submerged in a horizontal water
+    // Fluid flow-current push (vanilla's own fluid-interaction update step /
+    // its own "get flow" step). The player is submerged in a horizontal water
     // gradient — source columns (amount 8) at x<=0, shallower flowing water
     // (amount 5) at x>0 — producing a steady eastward current. Sustained over
     // 100 ticks so a regression in the accumulation drifts visibly, matching the
@@ -1167,7 +1167,7 @@ fn elytra_diagonal_yaw_matches_golden() {
 }
 
 // ---------------------------------------------------------------------------
-// `Player.maybeBackOffFromEdge` — the sneak-at-a-ledge back-off.
+// Vanilla's own edge-back-off step — the sneak-at-a-ledge back-off.
 //
 // The three traces below come from the same independent Python oracle as every
 // other trace in this file, and are replayed bit-for-bit. See
@@ -1412,13 +1412,13 @@ fn entity_push_wide_plateau_matches_golden() {
 #[test]
 fn entity_push_flush_control_is_inert() {
     // WORLD CONTROL for both traces above: identical fixture, the neighbour placed
-    // so its -X face sits *exactly* on the player's +X face. `AABB.intersects` is
-    // strict `min < max`, so a flush contact is not an overlap and no push happens.
+    // so its -X face sits *exactly* on the player's +X face. Vanilla's own
+    // box-intersection check is strict `min < max`, so a flush contact is not an overlap and no push happens.
     //
     // This is the control that proves the two positive traces measure the push
     // rather than something else in the fixture, and it is also the only assertion
     // in the file that would catch the push pair test acquiring the `1.0E-7`
-    // inflation that belongs to `getEntityCollisions` alone.
+    // inflation that belongs to vanilla's own nearby-entity-collisions query alone.
     let world = World::flat_floor(4);
     let state = grounded(0.5, 1.0, 0.5);
     let flush_x = 0.5 + f64::from(0.6_f32) / 2.0 + 0.6 / 2.0;
@@ -1463,12 +1463,12 @@ fn entity_push_flush_control_is_inert() {
 }
 
 // ---------------------------------------------------------------------------
-// `Player.updatePlayerPose` — pose-dependent dimensions and the fit gate.
+// Vanilla's own pose-update step — pose-dependent dimensions and the fit gate.
 //
 // Counted, not assumed (the generator was instrumented to record every pose it
 // committed, per scenario). Of the 32 pre-existing traces: 19 never run the machine
-// at all, because `tick_air`/`tick_water`/`tick_elytra` are `travel`, not
-// `Player.tick`; 11 run it and only ever hold STANDING; and exactly two hold a
+// at all, because `tick_air`/`tick_water`/`tick_elytra` are the travel step, not
+// vanilla's own per-tick player update; 11 run it and only ever hold STANDING; and exactly two hold a
 // smaller box — `slime_bounce_sneak` crouches on a flat slime floor with nothing
 // above head height, and `swim_sprint` swims in a 5×5×21 water shaft with no solid
 // blocks at all, so in both the shorter top face intersects the same empty set of
@@ -1598,7 +1598,7 @@ fn swim_gap_tunnel_matches_golden() {
 #[test]
 fn swim_gap_blocked_control_is_the_world_control() {
     // WORLD CONTROL for the trace above: identical fixture, sprint released, so
-    // `updateSwimming` never fires, the pose stays STANDING and the 1.8-high box
+    // vanilla's own swimming-state update never fires, the pose stays STANDING and the 1.8-high box
     // jams on the tunnel ceiling. Without this, "the swimmer got through" could
     // just as well mean the fixture has no ceiling.
     let world = water_tunnel(30, 2);
@@ -1675,12 +1675,12 @@ fn stand_low_corridor_control_is_the_world_control() {
 #[test]
 fn crouch_release_stays_crouched_matches_golden() {
     // THE FIT-GATE FALLBACK, end to end. Shift is released on tick 60, deep inside
-    // the corridor: `getDesiredPose()` says STANDING, the gate refuses it, and the
+    // the corridor: vanilla's own "desired pose" step says STANDING, the gate refuses it, and the
     // second arm keeps CROUCHING while the walk speed goes to full.
     //
     // A naive `pose = sneak ? CROUCHING : STANDING` port grows the box into the
     // slab on tick 60 and jams — vanilla has no recovery for a *player* whose box
-    // grows (`Entity.refreshDimensions` excludes both clients and `Player`), so
+    // grows (vanilla's own dimensions-refresh step excludes both clients and players), so
     // the gate is the only thing standing between this and a clipped player.
     let world = low_corridor(40, 2);
     let state = grounded_facing(0.5, 1.0, 0.5, -90.0);
@@ -1732,11 +1732,11 @@ fn crouch_release_stays_crouched_matches_golden() {
 
 #[test]
 fn elytra_gap_glide_matches_golden() {
-    // `Pose.FALL_FLYING` is the same `0.6 × 0.6` record as `Pose.SWIMMING`
-    // (`Avatar.java:27-28`), so a glider fits a one-block gap too. The pose is
+    // Vanilla's own fall-flying pose is the same `0.6 × 0.6` record as its
+    // own swimming pose, so a glider fits a one-block gap too. The pose is
     // *seeded*: a glider arriving at a tunnel has been fall-flying for many ticks,
     // and starting it STANDING at 0.9 blocks/tick would jam it on the ceiling
-    // before the first `updatePlayerPose` could run.
+    // before the first call to vanilla's own pose-update step could run.
     let mut world = World::default();
     for x in -8..=80 {
         for z in -2..=2 {
@@ -1760,7 +1760,7 @@ fn elytra_gap_glide_matches_golden() {
     let x = f64::from_bits(GOLDEN_ELYTRA_GAP_GLIDE.last().unwrap().pos[0]);
     assert!(x > 30.0, "the glider did not get down the tunnel (x = {x})");
     // The dry tunnel is what makes this FALL_FLYING and not SWIMMING: swimming
-    // comes first in `getDesiredPose`, so a wet fixture would prove nothing about
+    // comes first in vanilla's own "desired pose" step, so a wet fixture would prove nothing about
     // the fall-flying arm.
     let profile = PhysicsProfile::mc_1_21();
     let mut s = grounded_facing(0.5, 1.0, 0.5, -90.0).with_pose(Pose::FallFlying);
@@ -1774,16 +1774,16 @@ fn elytra_gap_glide_matches_golden() {
 }
 
 // ---------------------------------------------------------------------------
-// Bubble columns (issue #199) — `BubbleColumnBlock.entityInside`
+// Bubble columns — vanilla's own bubble-column block's "entity inside" hook
 // ---------------------------------------------------------------------------
 
 /// The shaft `gen_golden.py`'s `bubble_column_world` builds: a solid base at
 /// `floor_y`, bubble column up to `column_top`, plain water above to `water_top_y`.
 ///
 /// The base block is solid and nothing more. Vanilla resolves soul sand versus
-/// magma once, at block-update time, into the `DRAG_DOWN` boolean
-/// (`BubbleColumnBlock.getColumnState`), and the entity-side impulse never looks
-/// below the column — so `drag_down` is the *whole* of the base's contribution and
+/// magma once, at block-update time, into its own "drag down" boolean
+/// (its own bubble-column-block column-state accessor), and the entity-side
+/// impulse never looks below the column — so `drag_down` is the *whole* of the base's contribution and
 /// there is deliberately no soul-sand/magma block here to get wrong.
 fn bubble_column_world(drag_down: bool, column_top: i32, water_top_y: i32, floor_y: i32) -> World {
     let mut w = World::default();
@@ -1797,12 +1797,12 @@ fn bubble_column_world(drag_down: bool, column_top: i32, water_top_y: i32, floor
     w
 }
 
-/// Soul-sand lift, `onInsideBubbleColumn`'s `min(0.7, vy + 0.06)`.
+/// Soul-sand lift, vanilla's own inside-bubble-column handler's `min(0.7, vy + 0.06)`.
 ///
 /// Anti-vacuity: the player must actually *rise*, and the terminal velocity must
 /// reach the clamp exactly. A trace that merely sank slowly would still pass a
 /// bit-comparison against an oracle that shared the bug, so the sign and the clamp
-/// are asserted against literals hand-derived from `Entity.java:2893`.
+/// are asserted against literals hand-derived from the decompile.
 #[test]
 fn bubble_column_up_matches_golden() {
     let world = bubble_column_world(false, 160, 165, 79);
@@ -1883,8 +1883,8 @@ fn bubble_column_water_control_matches_golden() {
         "the control must be the same length to be comparable"
     );
     // **Tick 0's position is identical in both, and that is the correct answer.**
-    // `applyEffectsFromBlocks` runs *after* `travel()` (`LivingEntity.java:3130`
-    // then `:3134`), so the first tick's move happens before any impulse exists and
+    // Vanilla's own "apply effects from blocks" step runs *after* its own
+    // travel step, so the first tick's move happens before any impulse exists and
     // the divergence appears in tick 0's **velocity** and tick 1's position. This
     // assertion was first written as "all 50 positions differ" and measured 49 —
     // the one exception is this ordering, not a missing impulse.
@@ -1921,7 +1921,7 @@ fn bubble_column_water_control_matches_golden() {
     );
 }
 
-/// Magma drain, `onInsideBubbleColumn`'s `max(-0.3, vy - 0.03)`.
+/// Magma drain, vanilla's own inside-bubble-column handler's `max(-0.3, vy - 0.03)`.
 ///
 /// The clamp is the discriminator: unassisted sinking in water tops out far slower
 /// than `0.3`/tick (the control above reaches `-0.025` in fifty ticks), so a trace
@@ -1960,8 +1960,9 @@ fn bubble_column_down_matches_golden() {
     }
 }
 
-/// The **other** branch: `onAboveBubbleColumn`'s `min(1.8, vy + 0.1)`, selected when
-/// `BubbleColumnBlock.entityInside` finds open air over the cell.
+/// The **other** branch: vanilla's own above-bubble-column handler's
+/// `min(1.8, vy + 0.1)`, selected when vanilla's own bubble-column block's
+/// "entity inside" hook finds open air over the cell.
 ///
 /// The proof that the strong branch actually fired is that the trace exceeds `0.7`
 /// — the inside clamp, which no amount of the inside impulse can pass. It reaches
