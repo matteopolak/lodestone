@@ -1,6 +1,6 @@
 //! Hermetic tests for protocol 776 item-stack **data-component** decoding.
 //!
-//! The wire shape of a non-empty stack (26.2 `ItemStack.OPTIONAL_STREAM_CODEC`)
+//! The wire shape of a non-empty stack (26.2 `vanilla's own item stack's own optional stream codec`)
 //! is `count VarInt`, `item id VarInt`, then a `DataComponentPatch`:
 //! `added VarInt`, `removed VarInt`, then the added components as
 //! `(type id VarInt, payload)` pairs and the removed components as bare
@@ -173,7 +173,7 @@ fn decodes_modeled_components() {
     assert!(!item.components.has_unmodeled);
 }
 
-/// `CustomModelData.STREAM_CODEC` starts with its numeric float list. A current
+/// `vanilla's own custom model data's own stream codec` starts with its numeric float list. A current
 /// server pack's `minecraft:range_dispatch` reads index zero of that list, so a
 /// metadata-tagged diamond sword must preserve the number rather than merely
 /// consume the component for wire alignment.
@@ -278,7 +278,7 @@ fn tolerates_an_unmodeled_component() {
 /// both `HolderSet<Block>` shapes and the independently-optional speed and
 /// correct-for-drops fields.
 ///
-/// Wire shape (26.2 `Tool.STREAM_CODEC`): a VarInt-counted rule list, then an
+/// Wire shape (26.2 `vanilla's own tool's own stream codec`): a VarInt-counted rule list, then an
 /// f32 default speed, a VarInt damage-per-block, and a bool
 /// can-destroy-in-creative. Each rule is a `HolderSet<Block>` — VarInt `0` then
 /// an identifier for a tag, else `n + 1` followed by `n` **bare** VarInt registry
@@ -288,7 +288,7 @@ fn tolerates_an_unmodeled_component() {
 /// # Only the set size is offset by one
 ///
 /// This test first wrote each holder as `registry id + 1`, by analogy with
-/// `ByteBufCodecs.holder`, and passed — because the decoder had made the same
+/// `vanilla's own byte buf codecs's own holder`, and passed — because the decoder had made the same
 /// assumption and the two cancelled. `holderSet` uses `holderRegistry` instead,
 /// which writes the id **as-is**; the captured
 /// `tests/fixtures/tool_component_explicit.hex` spells `minecraft:stone`
@@ -485,8 +485,8 @@ fn replays_the_captured_plain_pickaxe_fixture() {
 
 /// `minecraft:pot_decorations` decodes its four sherds into the right four faces.
 ///
-/// Wire shape (26.2 `PotDecorations.STREAM_CODEC` =
-/// `ByteBufCodecs.registry(Registries.ITEM).apply(ByteBufCodecs.list(4))`): a
+/// Wire shape (26.2 `vanilla's own pot decorations's own stream codec` =
+/// `vanilla's own byte buf codecs's own registry(vanilla's own registries's own item).apply(vanilla's own byte buf codecs's own list(4))`): a
 /// VarInt element count then that many **bare** item registry ids. The record's
 /// field order is `back`, `left`, `right`, `front`.
 ///
@@ -503,14 +503,14 @@ fn decodes_pot_decorations_into_the_right_four_faces() {
     patch.var_i32(1); // one added component
     patch.var_i32(0); // none removed
     patch.var_i32(component_id("minecraft:pot_decorations"));
-    patch.var_i32(4); // ByteBufCodecs.list(4) element count
+    patch.var_i32(4); // vanilla's own byte buf codecs's own list(4) element count
     for sherd in [
         "minecraft:angler_pottery_sherd",  // back
         "minecraft:blade_pottery_sherd",   // left
         "minecraft:howl_pottery_sherd",    // right
         "minecraft:snort_pottery_sherd",   // front
     ] {
-        // `ByteBufCodecs.registry` is `idMapper`: the bare id, no `+1` and no
+        // `vanilla's own byte buf codecs's own registry` is `idMapper`: the bare id, no `+1` and no
         // `0` sentinel. `minecraft:trim`'s holders two arms over *are* offset,
         // which is exactly the confusion this spells out.
         patch.var_i32(item_id(sherd).expect("known sherd item"));
@@ -555,13 +555,13 @@ fn decodes_pot_decorations_into_the_right_four_faces() {
     );
 }
 
-/// Appends `minecraft:profile`'s wire payload (`ResolvableProfile.STREAM_CODEC`)
+/// Appends `minecraft:profile`'s wire payload (`vanilla's own resolvable profile's own stream codec`)
 /// to `patch`: the identity half — either a full `GameProfile` (`name`/`id`
 /// both `Some`) or a `Partial` (either independently `None`) — followed by an
-/// always-present, four-field `PlayerSkin.Patch` tail.
+/// always-present, four-field `vanilla's own player skin's own patch` tail.
 ///
 /// `model_slim` is `None` for "no model override" and `Some(slim)` for one —
-/// exercising the double-optional trap (`PlayerModelType.STREAM_CODEC.apply
+/// exercising the double-optional trap (`vanilla's own player model type's own stream codec's own apply
 /// (optional)`, a presence bool wrapping another bool) at least once, since
 /// getting that one wrong misaligns nothing *inside* this component (there is
 /// nothing after it to misread within the same field) but would misread the
@@ -610,7 +610,7 @@ fn write_profile(
             None => patch.bool(false),
         }
     }
-    // PlayerSkin.Patch: body/cape/elytra optional Identifiers, then an
+    // vanilla's own player skin's own patch: body/cape/elytra optional Identifiers, then an
     // optional PlayerModelType.
     match body_texture {
         Some(t) => {
@@ -750,8 +750,8 @@ fn a_player_head_with_a_profile_no_longer_truncates_the_container() {
 /// `minecraft:brick` on a face means an *undecorated* face, and a short list's
 /// missing tail means the same.
 ///
-/// Both are `PotDecorations::getItem`: `item == Items.BRICK ?
-/// Optional.empty() : Optional.of(item)`, and `i >= sherds.size()` for the tail.
+/// Both are `PotDecorations::getItem`: `item == vanilla's own items's own brick ?
+/// an empty optional() : a present optional(item)`, and `i >= sherds.size()` for the tail.
 /// A vanilla server always writes four elements (`ordered()` builds a
 /// four-element list unconditionally), so the short form is the case only a
 /// hand-built payload reaches — which is why it is pinned here rather than left
@@ -822,7 +822,7 @@ fn a_brick_face_and_a_short_list_both_decode_as_undecorated() {
 /// aligned — the general risk with any component whose payload is not
 /// length-prefixed.
 ///
-/// Wire shape (`PotionContents.STREAM_CODEC`): `Optional<Holder<Potion>>`,
+/// Wire shape (`vanilla's own potion contents's own stream codec`): `Optional<Holder<Potion>>`,
 /// `Optional<Integer>`, `List<MobEffectInstance>`, `Optional<String>`. This
 /// stack references `minecraft:swiftness` by holder id with no custom colour and
 /// no custom effects, so the expected colour is exactly what
@@ -930,7 +930,7 @@ fn custom_color_wins_and_a_recursive_hidden_effect_does_not_misalign_the_reader(
 /// `adventure/craft_decorated_pot_using_only_sherds` with exactly this icon — so
 /// any server that has sent an advancement tree hits this. The icon is an
 /// `ItemStackTemplate`, whose fields are item-then-count (the reverse of
-/// `ItemStack.OPTIONAL_STREAM_CODEC`) and which turns an incomplete patch into a
+/// `vanilla's own item stack's own optional stream codec`) and which turns an incomplete patch into a
 /// **fatal** decode error rather than a partial stack, so before this component
 /// was modeled the whole packet was dropped.
 ///
@@ -1074,7 +1074,7 @@ fn retains_modeled_components_before_an_unmodeled_one() {
 // `minecraft:repairable` / `minecraft:equippable`
 // ---------------------------------------------------------------------------
 
-/// `minecraft:repairable` is one `HolderSet<Item>` (`Repairable.STREAM_CODEC`).
+/// `minecraft:repairable` is one `HolderSet<Item>` (`vanilla's own repairable's own stream codec`).
 /// Its direct form has the usual `count + 1` discriminator but **bare** item
 /// ids; the following custom name is the alignment witness. Before this reader
 /// consumed repairable, an enchanted-golden-apple-like patch stopped at id 33
@@ -1109,7 +1109,7 @@ fn repairable_direct_holder_set_keeps_the_following_component_aligned() {
 /// prototype `Body` slot with `OffHand`, then leaves both a modeled component
 /// in its own patch and a pairwise-distinct trailing stack readable.
 ///
-/// `Equippable.STREAM_CODEC` is deliberately exercised field-for-field:
+/// `vanilla's own equippable's own stream codec` is deliberately exercised field-for-field:
 /// `EquipmentSlot`'s idMapper id 5 (`OffHand`, distinct from enum ordinal 1),
 /// a direct `equipSound` with a fixed range, present asset and overlay ids, a
 /// present tag-backed entity HolderSet, five non-uniform booleans, and a
@@ -1148,7 +1148,7 @@ fn equippable_patch_overrides_slot_and_consumes_all_wire_fields() {
     patch.bool(true); // canBeSheared
 
     // shearingSound: Holder<SoundEvent> reference arm. A reference to registry
-    // id 16 is encoded as 17 because ByteBufCodecs.holder reserves 0 for direct.
+    // id 16 is encoded as 17 because vanilla's own byte buf codecs's own holder reserves 0 for direct.
     patch.var_i32(17);
 
     patch.var_i32(component_id("minecraft:custom_name"));
@@ -1190,7 +1190,7 @@ fn equippable_patch_overrides_slot_and_consumes_all_wire_fields() {
 // ---------------------------------------------------------------------------
 
 /// Writes one `ItemStackTemplate` (`item_id`, `count`, then an *empty* nested
-/// `DataComponentPatch`) — the shape `BundleContents.STREAM_CODEC`'s per-entry
+/// `DataComponentPatch`) — the shape `vanilla's own bundle contents's own stream codec`'s per-entry
 /// codec expects for a contained stack with no components of its own.
 fn write_item_stack_template(w: &mut Writer, item: &str, count: i32) {
     w.var_i32(item_id(item).expect("known item"));
@@ -1260,7 +1260,7 @@ fn decodes_bundle_contents_including_a_nested_bundle() {
 }
 
 /// An unmodeled component inside a *contained* stack is exactly as
-/// unrecoverable as one at the top level — `ItemStackTemplate.STREAM_CODEC`'s
+/// unrecoverable as one at the top level — `vanilla's own item stack template's own stream codec`'s
 /// nested `DataComponentPatch` carries no length prefix either — so it stops
 /// the bundle list, flags the outer stack `has_unmodeled`, and (like every
 /// other unmodeled-component case in this file) drops the rest of the packet
@@ -1324,7 +1324,7 @@ fn an_unmodeled_component_inside_a_bundled_item_degrades_gracefully() {
 /// and the expected bytes are written out by hand here rather than taken from
 /// our own writer: root tag id `0x0a`, then a `TAG_Int` field named `"id"`, then
 /// `TAG_End`. The nameless root is the property worth pinning — the derived
-/// stream codec is `FriendlyByteBuf.writeNbt`, which writes no root name, so a
+/// stream codec is `vanilla's own friendly byte buf's own write nbt`, which writes no root name, so a
 /// reader expecting the *named* form would consume the `0x00 0x02` length of the
 /// first field's name as a root name and misalign everything after it.
 #[test]

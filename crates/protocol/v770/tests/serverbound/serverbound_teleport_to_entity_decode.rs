@@ -3,9 +3,8 @@
 //! `serverbound_ping_spectator.rs`'s `teleport_to_entity_is_a_raw_sixteen_byte_uuid`,
 //! which only proves the encode side.
 //!
-//! Layout verified independently against 26.2's
-//! `ServerboundTeleportToEntityPacket` (`.cache/mc/26.2/src/net/minecraft/
-//! network/protocol/game/ServerboundTeleportToEntityPacket.java`): a single
+//! Layout verified independently against 26.2's own serverbound
+//! teleport-to-entity packet (confirmed against the decompiled 26.2 source): a single
 //! raw 16-byte UUID, no VarInt length prefix and no wrapping optional — the
 //! same layout `serverbound_ping_spectator.rs` already hand-verified for the
 //! encoder, reused here from the wire side rather than copied from this

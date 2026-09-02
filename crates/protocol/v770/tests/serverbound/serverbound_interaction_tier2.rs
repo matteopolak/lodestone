@@ -231,7 +231,7 @@ fn set_command_block_packs_flags_and_mode() {
     want.extend_from_slice(&pack_block_pos(5, 6, 7).to_be_bytes());
     want.extend_from_slice(&varint(6));
     want.extend_from_slice(b"say hi");
-    want.extend_from_slice(&varint(1)); // Mode.AUTO
+    want.extend_from_slice(&varint(1)); // vanilla's own command-block mode: auto
     want.push(0x01 | 0x04); // track_output | automatic
     assert_eq!(bytes, want);
 }

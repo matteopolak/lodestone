@@ -35,7 +35,7 @@
 //! misreading (see the `restituteMovementAfterCollisions` near-miss, plan
 //! §12.31). This gate removes that ceiling: the **server itself** is the
 //! authority. Vanilla runs its own movement validation
-//! (`ServerGamePacketListenerImpl.handleMovePlayer`) and, whenever the position
+//! (`vanilla's own server game packet listener impl's own handle move player`) and, whenever the position
 //! a client reports disagrees with what the server re-simulates, it sends a
 //! `player_position` (a *corrective teleport*) to snap the client back. So
 //! "we walked for N ticks and received zero corrective teleports" is the server
@@ -197,7 +197,7 @@ async fn accept_teleport(conn: &mut Connection<TcpStream>, id: i32) {
 
 /// Sends a `move_player_pos_rot`: three doubles, yaw+pitch floats, then a flags
 /// byte (bit0 = on_ground, bit1 = horizontal_collision), exactly as vanilla's
-/// `LocalPlayer.sendPosition` does when both position and rotation are dirty.
+/// `vanilla's own local player's own send position` does when both position and rotation are dirty.
 async fn send_move(
     conn: &mut Connection<TcpStream>,
     pos: Vec3d,
@@ -494,7 +494,7 @@ async fn server_does_not_correct_a_walking_player() {
         using_item: None,
     };
 
-    // Vanilla's send-cadence state (LocalPlayer.sendPosition).
+    // Vanilla's send-cadence state (vanilla's own local player's own send position).
     let mut last_sent = player.position;
     let mut position_reminder: u32 = 0;
 

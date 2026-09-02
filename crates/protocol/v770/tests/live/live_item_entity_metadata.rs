@@ -390,7 +390,7 @@ async fn dropped_item_metadata_carries_its_item() {
          {id:\"minecraft:diamond\",count:1} with no data components.\n\
          \n\
          ..        VarInt entity id (session-scoped; not compared)\n\
-         08        metadata index 8 = ItemEntity.DATA_ITEM\n\
+         08        metadata index 8 = vanilla's own item entity's own item\n\
          07        serializer 7 = ITEM_STACK\n\
          01        VarInt stack count = 1\n\
          9e 07     VarInt item registry id 926 = minecraft:diamond\n\
@@ -443,7 +443,7 @@ async fn unmodeled_component_still_yields_the_item() {
          components:{\"minecraft:repair_cost\":7}}.\n\
          \n\
          ..        VarInt entity id (session-scoped; not compared)\n\
-         08        metadata index 8 = ItemEntity.DATA_ITEM\n\
+         08        metadata index 8 = vanilla's own item entity's own item\n\
          07        serializer 7 = ITEM_STACK\n\
          01        VarInt stack count = 1\n\
          c6 07     VarInt item registry id 966 = minecraft:diamond_pickaxe\n\

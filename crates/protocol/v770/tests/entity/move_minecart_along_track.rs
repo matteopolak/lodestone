@@ -3,7 +3,7 @@
 //! longer sends ordinary `move_entity_*` packets for cart entities).
 //!
 //! The golden byte vector is hand-built from the wire specification —
-//! `ClientboundMoveMinecartPacket`/`NewMinecartBehavior.MinecartStep` in the
+//! `ClientboundMoveMinecartPacket`/`vanilla's own new minecart behavior's own minecart step` in the
 //! 26.2 decompiled Mojang source — not round-tripped through this crate's own
 //! encoder, so a self-consistent misreading cannot pass silently. Every test
 //! asserts zero trailing bytes via `ensure_empty`.
@@ -44,8 +44,8 @@ fn var_i32(value: i32) -> Vec<u8> {
     out
 }
 
-/// Encodes one `MinecartStep`: `Vec3.STREAM_CODEC` position (3 f64 BE),
-/// `Vec3.STREAM_CODEC` movement (3 f64 BE), `ROTATION_BYTE` yaw, `ROTATION_BYTE`
+/// Encodes one `MinecartStep`: `vanilla's own vec3's own stream codec` position (3 f64 BE),
+/// `vanilla's own vec3's own stream codec` movement (3 f64 BE), `ROTATION_BYTE` yaw, `ROTATION_BYTE`
 /// pitch, `f32` weight — in that field order.
 fn step(pos: (f64, f64, f64), vel: (f64, f64, f64), yaw_byte: i8, pitch_byte: i8, weight: f32) -> Vec<u8> {
     let mut out = Vec::new();

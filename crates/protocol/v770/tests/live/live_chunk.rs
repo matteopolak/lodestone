@@ -360,7 +360,7 @@ async fn decodes_real_chunks_from_live_server() {
 //   * a protocol-776 `LightProperties` — block-state id → (opacity, emission).
 //     Only a version crate can supply this: the id numbering is 776-specific.
 //   * a real server's decoded `ColumnLight`. Every `level_chunk_with_light`
-//     carries the column's light and the adapter stores it on `LoadedChunk.light`.
+//     carries the column's light and the adapter stores it on `vanilla's own loaded chunk's own light`.
 //
 // So the oracle is hosted here rather than in lodestone-world, which has neither.
 // ============================================================================
@@ -528,7 +528,7 @@ async fn computed_light_matches_server_oracle_on_flat_world() {
     }
 
     // Collect chunks. Light rides along in level_chunk_with_light and the adapter
-    // stores it on LoadedChunk.light; we ACK batches via `apply` exactly as the
+    // stores it on vanilla's own loaded chunk's own light; we ACK batches via `apply` exactly as the
     // main test does, so delivery does not stall.
     let mut chunks = 0usize;
     let overall = Duration::from_secs(60);

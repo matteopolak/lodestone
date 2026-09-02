@@ -52,7 +52,7 @@ fn encode_chunk_packet(x: i32, z: i32, shape: &ChunkShape, bottom_blocks: &[u32]
 }
 
 /// A `forget_level_chunk` body is a single packed long: `x` in the low 32 bits,
-/// `z` in the high 32 (`ChunkPos.pack`, verified against 26.2 source).
+/// `z` in the high 32 (`vanilla's own chunk pos's own pack`, verified against 26.2 source).
 fn encode_forget_packet(x: i32, z: i32) -> Vec<u8> {
     let packed = (x as u32 as i64) | ((z as u32 as i64) << 32);
     let mut w = Writer::default();

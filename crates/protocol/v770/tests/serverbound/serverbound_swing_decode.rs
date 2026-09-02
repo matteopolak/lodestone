@@ -1,9 +1,8 @@
 //! Hermetic byte-exact test for `V770ServerProtocol::decode`'s `SWING` arm.
 //!
-//! Layout verified independently against 26.2's `ServerboundSwingPacket`
-//! (`.cache/mc/26.2/src/net/minecraft/network/protocol/game/
-//! ServerboundSwingPacket.java`): a single VarInt `InteractionHand` ordinal
-//! (`0` main hand, `1` off hand), read via `FriendlyByteBuf::readEnum`. Both
+//! Layout verified independently against 26.2's own serverbound swing packet
+//! (confirmed against the decompiled 26.2 source): a single VarInt `InteractionHand` ordinal
+//! (`0` main hand, `1` off hand), read via vanilla's own enum reader. Both
 //! ordinals fit in one VarInt byte, so the wire body here is one byte.
 
 use lodestone_server::{ServerBound, ServerProtocol};

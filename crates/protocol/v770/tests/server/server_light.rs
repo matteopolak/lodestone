@@ -259,7 +259,7 @@ struct Expectation {
 /// Two shapes, both predicted from vanilla's own rule:
 ///
 /// * the first air cell above the highest dampening block in a column is open to
-///   the sky (`ChunkSkyLightSources.isEdgeOccluded`'s scalar case is
+///   the sky (`vanilla's own chunk sky light sources's own is edge occluded`'s scalar case is
 ///   `dampening != 0`), so its sky light is exactly `15`;
 /// * a cell with 17 blocks of continuous dampening-15 material directly above it
 ///   and dampening-15 material 16 blocks out on all four horizontal sides cannot

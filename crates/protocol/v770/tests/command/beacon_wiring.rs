@@ -4,7 +4,7 @@
 //! effect application needs to actually put a buff icon on a client's HUD.
 //!
 //! Serverbound bytes are hand-built from the wire spec
-//! (`MobEffect.STREAM_CODEC` is a direct, 0-based registry VarInt — verified
+//! (`vanilla's own mob effect's own stream codec` is a direct, 0-based registry VarInt — verified
 //! against the committed `MOB_EFFECT_NAMES` table, not assumed). Clientbound
 //! bytes go through the real, independently written
 //! [`V770Adapter::handle_packet`] — the same "two independent

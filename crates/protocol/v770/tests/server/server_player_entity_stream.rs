@@ -28,8 +28,8 @@
 //! against a number sourced outside our code is what closes that.
 //!
 //! The player-info ordering requirement comes from the jar too, and it is not a
-//! nicety: `ClientPacketListener.createEntityFromPacket`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/ClientPacketListener.java`)
+//! nicety: vanilla's own client-side create-entity-from-packet routine
+//! (confirmed against the decompiled 26.2 client source)
 //! returns `null` for a `PLAYER`-typed spawn whose uuid has no `PlayerInfo`,
 //! logging *"Server attempted to add player prior to sending player info"* —
 //! the entity is never added to the level. A server that streamed a
@@ -451,10 +451,10 @@ async fn two_connections_see_each_other_as_player_entities() {
     // generator: on two of four probe seeds the whole ±5 box is ocean, the fallback
     // fires, and `-63` is *inside the bedrock floor* — the player is buried in the
     // dark, which reads as a server hang. `world_spawn::GENERATOR_SPAWN_HEIGHT` is
-    // now vanilla's own `ChunkGenerator.getSpawnHeight`
-    // (`.cache/mc/26.2/src/net/minecraft/world/level/chunk/ChunkGenerator.java`,
+    // now vanilla's own chunk-generator get-spawn-height constant
+    // (confirmed against the decompiled 26.2 chunk-generator source,
     // a literal `64` that `NoiseBasedChunkGenerator` does not override), which is
-    // what `MinecraftServer.setInitialSpawn` pre-seeds the world spawn with. See
+    // what vanilla's own server's own set-initial-spawn routine pre-seeds the world spawn with. See
     // DESIGN.md §12.129.
     //
     // Derived from the jar plus `find_initial_spawn`'s contract, not read off the
@@ -526,7 +526,7 @@ async fn two_connections_see_each_other_as_player_entities() {
         })
         .expect(
             "B must receive a player_info_update carrying A's uuid — without it a real \
-             client discards A's ADD_ENTITY entirely (ClientPacketListener.java)",
+             client discards A's ADD_ENTITY entirely (vanilla's own client packet listener's own java)",
         );
     let first_spawn = b_join
         .iter()

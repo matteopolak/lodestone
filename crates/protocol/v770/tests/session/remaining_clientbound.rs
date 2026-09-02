@@ -288,7 +288,7 @@ fn game_test_highlight_pos_is_two_packed_positions() {
 
 // ---- the zero-byte packets -------------------------------------------------
 
-/// Both of these are `StreamCodec.unit`, and a non-empty body means the id table
+/// Both of these are `vanilla's own stream codec's own unit`, and a non-empty body means the id table
 /// is wrong rather than that the packet grew a field — so the emptiness check is
 /// load-bearing and gets a control.
 #[test]
@@ -461,7 +461,7 @@ fn a_waypoint_decodes_all_four_position_precisions() {
     assert_eq!(
         waypoint.position,
         WaypointPosition::Exact(BlockPos { x: 1, y: 2, z: 3 }),
-        "Vec3i.STREAM_CODEC is three plain ByteBufCodecs.VAR_INTs -- *not* zigzag, \
+        "vanilla's own vec3i's own stream codec is three plain vanilla's own byte buf codecs's own var in ts -- *not* zigzag, \
          which an earlier draft of this test assumed and the decoder correctly did not"
     );
 
@@ -508,7 +508,7 @@ fn a_waypoint_can_be_identified_by_uuid() {
 
 // ---- dialogs ---------------------------------------------------------------
 
-/// **Trap.** `ByteBufCodecs.holder` is off by one: `0` means an inline value
+/// **Trap.** `vanilla's own byte buf codecs's own holder` is off by one: `0` means an inline value
 /// follows, `n > 0` means registry id `n - 1`. Reading the raw VarInt as the id
 /// would reference the wrong dialog every time — and, worse, would read `0` as
 /// "dialog 0" and then leave the inline blob as trailing bytes.
@@ -568,9 +568,9 @@ fn test_instance_block_status_has_an_optional_size() {
 // there is no way to skip one without decoding it. That is why none of them could
 // land before the walker existed.
 //
-// `SlotDisplay` ids used below (`SlotDisplays.java` registration order):
+// `SlotDisplay` ids used below (`vanilla's own slot displays's own java` registration order):
 //   0 empty, 1 any_fuel, 4 item, 6 tag, 9 with_remainder, 10 composite.
-// `RecipeDisplay` ids (`RecipeDisplays.java`): 0 shapeless, 1 shaped, 3 stonecutter.
+// `RecipeDisplay` ids (`vanilla's own recipe displays's own java`): 0 shapeless, 1 shaped, 3 stonecutter.
 
 /// A `SlotDisplay` of kind `item` holding item registry id `id`.
 fn item_display(id: u8) -> Vec<u8> {

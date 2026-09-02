@@ -106,7 +106,7 @@ fn the_payload_carrying_parsers_decode_to_their_known_vanilla_values() {
         parsers.len()
     );
 
-    // `/time set <time>` uses `TimeArgument.time()` — a plain `int` minimum of
+    // `/time set <time>` uses `vanilla's own time argument's own time()` — a plain `int` minimum of
     // 0, with no flags byte. Reading it as a flags-byte-prefixed pair (the shape
     // every *other* numeric parser has) would consume the wrong width and
     // desync; this asserts the exact value, not merely that a `Time` exists.

@@ -24,7 +24,7 @@ fn nbt_string(text: &str) -> Vec<u8> {
     out
 }
 
-/// A VarInt-prefixed UTF-8 string (`FriendlyByteBuf.writeUtf`).
+/// A VarInt-prefixed UTF-8 string (`vanilla's own friendly byte buf's own write utf`).
 fn mc_string(text: &str) -> Vec<u8> {
     let mut out = var_i32(text.len() as i32);
     out.extend_from_slice(text.as_bytes());
@@ -48,7 +48,7 @@ fn var_i32(value: i32) -> Vec<u8> {
     out
 }
 
-/// A registry-reference `ChatType.Bound`: a non-zero holder VarInt (`id + 1`),
+/// A registry-reference `vanilla's own chat type's own bound`: a non-zero holder VarInt (`id + 1`),
 /// a trusted NBT name component, and an absent optional target name.
 fn chat_type_bound(sender_name: &str) -> Vec<u8> {
     let mut out = var_i32(1); // holder id 0 -> wire value 1 (registry ref, no inline body)
@@ -116,7 +116,7 @@ fn player_chat(
 ) -> Vec<u8> {
     let mut out = var_i32(global_index);
     out.extend_from_slice(&[0u8; 16]); // sender UUID — nil, pinned in the decode test below
-    out.extend_from_slice(&var_i32(3)); // index (SignedMessageLink.index)
+    out.extend_from_slice(&var_i32(3)); // index (vanilla's own signed message link's own index)
     match signature {
         Some(sig) => {
             out.push(0x01);
@@ -184,7 +184,7 @@ fn player_chat_signed_surfaces_ack_info() {
             // The fields this fix stopped discarding — each pinned to the
             // exact (pairwise-distinct) value `player_chat`/`signed_body`
             // wrote, not merely asserted non-zero.
-            assert_eq!(*message_index, 3, "SignedMessageLink.index");
+            assert_eq!(*message_index, 3, "vanilla's own signed message link's own index");
             assert_eq!(*timestamp_millis, 1_700_000_000_123);
             assert_eq!(*salt, 99_887_766);
             assert_eq!(raw_content, "hello world", "the signed body's raw content");
@@ -436,7 +436,7 @@ fn send_signed_chat_not_encoded_outside_play() {
 /// `ClientAction::AnnounceChatSession` must encode `chat_session_update`'s
 /// field order exactly: session UUID, expiry (epoch millis), then the
 /// varint-length-prefixed public key and key signature — mirroring
-/// `RemoteChatSession.Data.write`. Public key and key signature are given
+/// `vanilla's own remote chat session's own data's own write`. Public key and key signature are given
 /// different lengths and different bytes so a transposition of the two
 /// varint-prefixed blocks would be visible.
 #[test]

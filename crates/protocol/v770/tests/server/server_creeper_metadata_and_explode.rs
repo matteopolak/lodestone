@@ -23,7 +23,7 @@
 //! 2. **The wire-format claims are cross-checked against Mojang's own
 //!    decompiled source**, not just against what our own decoder accepts —
 //!    see `encode_explode`'s own doc comment for the `ClientboundExplodePacket`
-//!    field order and the `ByteBufCodecs.holder` registry-reference encoding
+//!    field order and the `vanilla's own byte buf codecs's own holder` registry-reference encoding
 //!    it cites directly.
 //!
 //! # What this proves, concretely
@@ -32,7 +32,7 @@
 //!   production entry point `crate::tick::run_tick_loop` drives every real
 //!   server tick — produces, through our own encoder, a `SET_ENTITY_DATA`
 //!   payload that the real client decodes to `creeper_swell_dir == Some(1)`
-//!   on the very first tick, matching `Creeper.java`'s
+//!   on the very first tick, matching `vanilla's own creeper's own java`'s
 //!   `this.swellDir = 1` and the live-captured assertion in
 //!   `tests/live_creeper_explosion.rs`.
 //! - The same creeper's fuse reaching `MAX_SWELL` (tick 30) makes
@@ -60,7 +60,7 @@ fn rk(name: &str) -> ResourceKey {
     name.parse().expect("valid resource key")
 }
 
-/// Vanilla `Creeper.MAX_SWELL` (`Creeper.java`) — the tick the fuse
+/// Vanilla `vanilla's own creeper's own max swell` (`vanilla's own creeper's own java`) — the tick the fuse
 /// completes and `explodeCreeper` fires. Restated as a literal rather than
 /// imported from `lodestone_entity::ai::MAX_SWELL` because this crate has no
 /// dependency on `lodestone-entity` to add for one constant; already pinned
@@ -197,7 +197,7 @@ fn our_own_server_encodes_a_creepers_swell_and_detonation_byte_accurately_for_th
         swell_dir_first_seen,
         Some(1),
         "an ignited creeper's tick() sets swellDir to 1 on its very first tick \
-         (Creeper.java) — our own server must encode that same value"
+         (vanilla's own creeper's own java) — our own server must encode that same value"
     );
 
     // -- detonation tick: predicted exactly, not merely "eventually".

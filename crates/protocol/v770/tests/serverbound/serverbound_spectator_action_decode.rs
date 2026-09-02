@@ -1,10 +1,9 @@
 //! Hermetic byte-exact test for `V770ServerProtocol::decode`'s
 //! `SPECTATOR_ACTION` arm.
 //!
-//! Layout verified independently against 26.2's
-//! `ServerboundSpectatorActionPacket` (`.cache/mc/26.2/src/net/minecraft/
-//! network/protocol/game/ServerboundSpectatorActionPacket.java`): a single
-//! `ByteBufCodecs.OPTIONAL_VAR_INT` — an offset-encoded VarInt where `0`
+//! Layout verified independently against 26.2's own serverbound
+//! spectator-action packet (confirmed against the decompiled 26.2 source): a single
+//! `vanilla's own byte buf codecs's own var int` — an offset-encoded VarInt where `0`
 //! means "absent" and a present id `i` is written as `i + 1`. This is the
 //! *opposite* convention from a bool-prefixed `Option`, which is exactly why
 //! this arm hand-decodes rather than deriving.

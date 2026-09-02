@@ -285,7 +285,7 @@ async fn a_real_server_sends_a_command_tree_and_answers_a_suggestion_request() {
          real vanilla 26.2 server (flat creative oracle, :25570) in Play state.\n\
          Payload only — no packet-length or packet-id prefix.\n\
          \n\
-         NOT byte-stable across captures: `ClientboundCommandsPacket.enumerateNodes`\n\
+         NOT byte-stable across captures: `vanilla's own clientbound commands packet's own enumerate nodes`\n\
          orders nodes by a BFS over a hash map, and the joining player's permission\n\
          level decides which nodes are sent at all. The hermetic siblings therefore\n\
          assert *structure and completion behaviour*, never a byte count.\n\

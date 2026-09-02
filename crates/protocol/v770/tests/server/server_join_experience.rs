@@ -5,7 +5,7 @@
 //!
 //! Reported as *"the XP bar never appears"*, and confirmed missing **in survival as
 //! well as creative** — which is what ruled out the obvious explanation. Vanilla does
-//! hide the bar in creative, but it does so *client-side* (`Player.hasExperience`)
+//! hide the bar in creative, but it does so *client-side* (`vanilla's own player's own has experience`)
 //! and still sends the packet; a server-side game-mode gate was never the cause.
 //!
 //! The cause was a missing producer. `ServerProtocol::encode_set_experience` and its
@@ -20,7 +20,7 @@
 //! The 26.2 decompile, read as a record definition rather than as a call site — the
 //! distinction matters more here than usual:
 //!
-//! * **That it is sent at join at all**: `ServerPlayer.doTick` sends whenever
+//! * **That it is sent at join at all**: `vanilla's own server player's own do tick` sends whenever
 //!   `this.totalExperience != this.lastSentExp`, and `lastSentExp` is initialised to
 //!   `-99999999`. So the comparison is true on the first tick after any join, even
 //!   for a player with zero experience.
@@ -72,7 +72,7 @@ const FRESH: (f32, i32, i32) = (0.0, 0, 0);
 
 /// The seeded rejoin state: 1557 lifetime points.
 ///
-/// Derived from `Player.getXpNeededForNextLevel`, not from a run and not from a
+/// Derived from `vanilla's own player's own get xp needed for next level`, not from a run and not from a
 /// memorable round number — the running sum of the curve is 1507 at level 31, so 1557
 /// leaves 50 points against level 31's own cost of `112 + 1*9 = 121`. Every one of the
 /// three numbers is different and none is 0 or 1, which is what makes a transposition
@@ -259,7 +259,7 @@ async fn a_survival_join_sends_the_experience_bar() {
 }
 
 /// And in creative, for the same reason the report singled it out: vanilla hides the
-/// bar client-side via `Player.hasExperience` but its **server** still sends the
+/// bar client-side via `vanilla's own player's own has experience` but its **server** still sends the
 /// packet, so a server-side game-mode gate would be a divergence.
 ///
 /// A separate test rather than a loop over both modes so a failure names the mode.
@@ -310,7 +310,7 @@ async fn a_creative_join_sends_the_experience_bar_too() {
         sent.len(),
         1,
         "creative is not a reason to withhold the packet: vanilla's hasExperience \
-         check is in the client's HUD, not in ServerPlayer.doTick"
+         check is in the client's HUD, not in vanilla's own server player's own do tick"
     );
     assert_eq!(sent[0], FRESH, "same fresh-player values as survival");
 }

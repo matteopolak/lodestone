@@ -1,6 +1,6 @@
 //! **The wire shape of the two animation packets the integrated server had no
 //! encoder for at all**: `hurt_animation` (the camera damage tilt and the red
-//! hurt flash) and `entity_event` byte 3 (`LivingEntity.die`'s fall-over).
+//! hurt flash) and `entity_event` byte 3 (`vanilla's own living entity's own die`'s fall-over).
 //!
 //! # Where the expected values come from
 //!
@@ -15,8 +15,8 @@
 //! # The error each gate is actually pointed at
 //!
 //! The two packets have the **same two logical fields in the same order at
-//! different widths**, which is the trap: `ClientboundHurtAnimationPacket.write`
-//! is `writeVarInt` + `writeFloat` while `ClientboundEntityEventPacket.write` is
+//! different widths**, which is the trap: `vanilla's own clientbound hurt animation packet's own write`
+//! is `writeVarInt` + `writeFloat` while `vanilla's own clientbound entity event packet's own write` is
 //! `writeInt` + `writeByte`. Porting either from its field list rather than from
 //! `write` yields something that looks right and desynchronises the stream. So
 //! both gates assert the **payload length** as well as the bytes, because that is
@@ -107,7 +107,7 @@ fn hurt_animation_encodes_a_varint_id_then_a_float_yaw() {
 ///
 /// `DEATH` is read from the named constant rather than written as `3`, so the
 /// number is checked in one place (`entity_event::DEATH`, transcribed from
-/// `EntityEvent.DEATH`) instead of once per call site.
+/// `vanilla's own entity event's own death`) instead of once per call site.
 #[test]
 fn entity_event_encodes_a_fixed_width_id_then_the_status_byte() {
     let proto = V770ServerProtocol;
@@ -197,7 +197,7 @@ fn every_named_status_byte_reaches_the_wire_unchanged() {
             entity_event::IN_LOVE_HEARTS
         ),
         (3, 6, 7, 18),
-        "EntityEvent.DEATH/TAMING_FAILED/TAMING_SUCCEEDED/IN_LOVE_HEARTS. Note \
+        "vanilla's own entity event's own death/TAMING_FAILED/TAMING_SUCCEEDED/IN_LOVE_HEARTS. Note \
          IN_LOVE_HEARTS is 18, not LOVE_HEARTS (12) which is the villager's"
     );
 }

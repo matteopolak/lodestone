@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! 9f e3 01   VarInt entity id (session-scoped; not compared)
-//! 08         metadata index 8 = ItemEntity.DATA_ITEM
+//! 08         metadata index 8 = vanilla's own item entity's own item
 //! 07         serializer 7 = ITEM_STACK
 //! 01         VarInt stack count = 1
 //! 9e 07      VarInt item registry id 926 = minecraft:diamond
@@ -30,7 +30,7 @@
 //!
 //! The index itself has a **second**, independent outside source: the
 //! `EntityDataIndexOracle` dump already in the tree
-//! (`tests/support/entity_data_index_jvm.txt` — `8 ItemEntity.DATA_ITEM 7
+//! (`tests/support/entity_data_index_jvm.txt` — `8 vanilla's own item entity's own item 7
 //! ITEM_STACK`), produced by booting the real 26.2 server headlessly. Index 8 is
 //! the most contended index in that dump (nineteen claimants), and see
 //! `server_protocol.rs`'s `METADATA_IDX_ITEM_ENTITY_ITEM` for why the separating
@@ -39,7 +39,7 @@
 //! # Why this is the packet that decides whether a drop is *visible*
 //!
 //! A client draws nothing for an item entity whose stack it has not been told:
-//! vanilla's `ItemEntityRenderer.submit` returns early on
+//! vanilla's `vanilla's own item entity renderer's own submit` returns early on
 //! `state.item.isEmpty()`, and this project's own client does the same. Before
 //! this was fixed, our server sent `EntitySnapshot::metadata: Vec::new()` for every drop,
 //! so a broken block spawned a real item entity that fell, merged and could be
@@ -200,7 +200,7 @@ fn an_empty_field_list_sends_no_packet_which_is_the_pre_537_behaviour() {
     );
 }
 
-/// A count-0 drop encodes as the *empty* stack (`ItemStack.OPTIONAL_STREAM_CODEC`
+/// A count-0 drop encodes as the *empty* stack (`vanilla's own item stack's own optional stream codec`
 /// writes a bare VarInt `0` and no id), which is what vanilla sends for an item
 /// entity whose stack was emptied — and what a client renders as nothing.
 ///
@@ -238,8 +238,8 @@ fn an_item_field_composes_with_the_other_fields_in_one_list() {
     assert_eq!(
         metadata_list(&payload),
         &[
-            0x10, 0x01, 0x01, // index 16 = Creeper.DATA_SWELL_DIR, INT (1), value 1
-            0x08, 0x07, 0x01, 0x9e, 0x07, 0x00, 0x00, // index 8 = ItemEntity.DATA_ITEM
+            0x10, 0x01, 0x01, // index 16 = vanilla's own creeper's own swell dir, INT (1), value 1
+            0x08, 0x07, 0x01, 0x9e, 0x07, 0x00, 0x00, // index 8 = vanilla's own item entity's own item
             0xff,
         ],
     );

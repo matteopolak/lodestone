@@ -38,7 +38,7 @@ fn encode_encryption_request_matches_vanillas_hello_wire_shape() {
         .expect("hello payload must decode with zero trailing bytes");
 
     // Vanilla's own server-id is always the empty string
-    // (`ServerLoginPacketListenerImpl.serverId`).
+    // (`vanilla's own server login packet listener impl's own server id`).
     assert_eq!(request.server_id, "");
     assert_eq!(request.public_key, public_key);
     assert_eq!(request.challenge, verify_token);

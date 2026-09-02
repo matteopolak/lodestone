@@ -68,7 +68,7 @@
 //! Reporting a position is only half of it: the position has to be somewhere the
 //! mobs are. `v770`'s `begin_play` teleports a joining client to a hardcoded
 //! `(8, ~64, 8)` (spawn Y is meant to be terrain-derived via
-//! `PlayerSpawnFinder.getLevelRespawnPos`, matching
+//! `vanilla's own player spawn finder's own get level respawn pos`, matching
 //! the `spawn_x`/`spawn_y`/`spawn_z` literals it must agree with), and there is
 //! no terrain-derived spawn anywhere in the server. This gate's floor used to be
 //! at y=0 inside a world of `-64..=63`, so the reported player sat **100 blocks
@@ -88,7 +88,7 @@
 //! The hardcoded spawn altitude is a real defect in its own right — on normal
 //! terrain, whose surface is nearer y=64, it puts every joining player in the air
 //! by construction — but it is a separate defect, now fixed: spawn Y
-//! comes from `PlayerSpawnFinder.getLevelRespawnPos` and `begin_play_at` carries
+//! comes from `vanilla's own player spawn finder's own get level respawn pos` and `begin_play_at` carries
 //! the terrain-derived position through the protocol seam.
 
 use std::time::Duration;

@@ -9,11 +9,10 @@
 //! were all unit-tested; `docs/death-screen.md` describes the whole thing. What
 //! did not exist was any server that sent the packet that raises it. Our server
 //! sent `set_health(0.0)` and stopped there, and **`set_health` does not open the
-//! death screen** — not here, and not in vanilla, whose
-//! `ClientPacketListener.handleSetHealth`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/ClientPacketListener.java`)
+//! death screen** — not here, and not in vanilla, whose own client-side
+//! set-health handler (confirmed against the decompiled 26.2 client source)
 //! calls only `hurtTo`/`setFoodLevel`/`setSaturation`. The screen comes from
-//! `handlePlayerCombatKill` at `:1845-1855`.
+//! vanilla's own client-side player-combat-kill handler.
 //!
 //! So the observable symptom was a player pinned at zero hearts with no screen,
 //! no respawn button and no way out — which is how the owner reported it: the
@@ -27,7 +26,7 @@
 //!   `crate::packet_ids` — `player_combat_kill` is `68` and `respawn` is `82`.
 //! * **The wire layout** is `ClientboundPlayerCombatKillPacket`'s own record
 //!   (`record (int playerId, Component message)`, a VarInt id then
-//!   `ComponentSerialization.TRUSTED_STREAM_CODEC`), hand-built into
+//!   `vanilla's own component serialization's own trusted stream codec`), hand-built into
 //!   [`golden_combat_kill_body`] rather than obtained from the encoder under
 //!   test.
 //! * **The semantics** come from [`V770Adapter`], which is an *independently
@@ -73,17 +72,17 @@ mod common;
 use common::unique_username;
 
 /// Full health, from `V770ServerProtocol::begin_play_at`'s fresh-spawn
-/// `SetHealth` and vanilla's `Attributes.MAX_HEALTH` default.
+/// `SetHealth` and vanilla's `vanilla's own attributes's own max health` default.
 const MAX_HEALTH: f32 = 20.0;
 
-/// Vanilla's `Attributes.SAFE_FALL_DISTANCE` default. Written here rather than
+/// Vanilla's `vanilla's own attributes's own safe fall distance` default. Written here rather than
 /// imported so the predicted health below is derived from the vanilla constant
 /// and not from `lodestone_server::fall`'s copy of it.
 const SAFE_FALL_DISTANCE: f64 = 3.0;
 
 /// The exact damage a fall of `blocks` deals, from
-/// `LivingEntity.calculateFallDamage`/`calculateFallPower`
-/// (`LivingEntity.java`): `floor((d + 1e-6 - safe) * 1.0 * 1.0)`.
+/// `vanilla's own living entity's own calculate fall damage`/`calculateFallPower`
+/// (`vanilla's own living entity's own java`): `floor((d + 1e-6 - safe) * 1.0 * 1.0)`.
 fn fall_damage(blocks: f64) -> f32 {
     let raw = (blocks + 1.0e-6 - SAFE_FALL_DISTANCE).floor();
     if raw > 0.0 { raw as f32 } else { 0.0 }
@@ -137,7 +136,7 @@ fn hello_bytes(name: &str, uuid: Uuid) -> Vec<u8> {
 }
 
 /// Hand-written serverbound `move_player_pos`: `f64`×3 then the flags byte,
-/// per `ServerboundMovePlayerPacket.Pos`. `on_ground` is bit `0x01`.
+/// per `vanilla's own serverbound move player packet's own pos`. `on_ground` is bit `0x01`.
 fn pos_bytes(x: f64, y: f64, z: f64, on_ground: bool) -> Vec<u8> {
     let mut w = Writer::default();
     w.f64(x);

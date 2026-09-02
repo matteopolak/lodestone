@@ -243,8 +243,8 @@ fn the_comparison_fails_when_the_subtrees_differ() {
 ///
 /// **We expose one rule vanilla's tree does not: `max_minecart_speed`.** Not a
 /// version skew — it is `registerInteger("max_minecart_speed", …,
-/// FeatureFlagSet.of(FeatureFlags.MINECART_IMPROVEMENTS))`
-/// (`GameRules.java`), i.e. gated behind an **experimental feature flag**
+/// vanilla's own feature flag set's own of(vanilla's own feature flags's own minecart improvements))`
+/// (`vanilla's own game rules's own java`), i.e. gated behind an **experimental feature flag**
 /// the oracle world does not enable, so vanilla legitimately omits it from the
 /// tree it sends. Our `GAME_RULES` carries no feature-flag concept and therefore
 /// offers it unconditionally. That is the honest description of the gap and it is
@@ -252,7 +252,7 @@ fn the_comparison_fails_when_the_subtrees_differ() {
 ///
 /// **Vanilla's own two-literals-per-rule shape is now matched.**
 /// `commands::gamerule::register_rule_literal` builds both `keep_inventory`
-/// *and* `minecraft:keep_inventory` (`GameRuleCommand.register`'s own
+/// *and* `minecraft:keep_inventory` (`vanilla's own game rule command's own register`'s own
 /// `unqualified`/`qualified` pair, `.cache/mc/26.2/src`), so the child count
 /// is a plain `theirs == (ours - FEATURE_FLAGGED_RULES) * 2` no longer — it is
 /// `theirs == (ours - FEATURE_FLAGGED_RULES * 2)`, both sides counting **all**
@@ -272,7 +272,7 @@ fn gamerule_has_every_rule_subtree_right_and_every_literal_too() {
 
     let ours_children = ours.node(our_root).expect("node").children.len();
     let theirs_children = theirs.node(their_root).expect("node").children.len();
-    /// `max_minecart_speed`, behind `FeatureFlags.MINECART_IMPROVEMENTS` —
+    /// `max_minecart_speed`, behind `vanilla's own feature flags's own minecart improvements` —
     /// counted once per spelling (bare + namespaced), since both sides now
     /// register both literals for every rule they carry at all.
     const FEATURE_FLAGGED_LITERALS: usize = 2;

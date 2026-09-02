@@ -16,7 +16,7 @@ use lodestone_v770::V770Adapter;
 use lodestone_v770::packet_ids::play;
 use lodestone_world::World;
 
-/// Independently packs block coordinates the way vanilla `BlockPos.asLong`
+/// Independently packs block coordinates the way vanilla `vanilla's own block pos's own as long`
 /// does: `x` in the high 26 bits, `z` in the middle 26 bits, `y` in the low 12.
 fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
     let x = (i64::from(x)) & 0x3FF_FFFF;
@@ -140,10 +140,10 @@ fn game_event_rain_and_thunder_levels_are_surfaced() {
 
 #[test]
 fn game_event_win_game_emits_win_game_event() {
-    // WIN_GAME is event code 4 (`ClientboundGameEventPacket.java`,
-    // `WIN_GAME = new ClientboundGameEventPacket.Type(4)`), the packet vanilla
+    // WIN_GAME is event code 4 (`vanilla's own clientbound game event packet's own java`,
+    // `WIN_GAME = new vanilla's own clientbound game event packet's own type(4)`), the packet vanilla
     // sends on exiting the End through the exit portal
-    // (`ClientPacketListener.java` always opens `WinScreen(true, ..)`
+    // (`vanilla's own client packet listener's own java` always opens `WinScreen(true, ..)`
     // regardless of `param` — see `ClientEvent::WinGame`'s own doc for why the
     // event therefore carries no fields).
     let adapter = V770Adapter::new();
@@ -158,7 +158,7 @@ fn game_event_win_game_emits_win_game_event() {
 #[test]
 fn game_event_unhandled_code_consumes_bytes_without_directive() {
     let adapter = V770Adapter::new();
-    // DEMO_EVENT (5, `ClientboundGameEventPacket.java`) is fully decoded
+    // DEMO_EVENT (5, `vanilla's own clientbound game event packet's own java`) is fully decoded
     // but produces no canonical event — unlike WIN_GAME (4), which now does
     // (see `game_event_win_game_emits_win_game_event` above).
     let directives = handle(

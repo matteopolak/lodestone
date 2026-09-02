@@ -1,8 +1,8 @@
 //! **The experience orb's one synchronised field, on the wire.**
 //!
-//! An orb tells a client exactly one thing about itself: `ExperienceOrb.DATA_VALUE`.
+//! An orb tells a client exactly one thing about itself: `vanilla's own experience orb's own value`.
 //! `ExperienceOrbRenderer` picks one of eleven sprite frames from
-//! `ExperienceOrb.getIcon`, which buckets that value — so an orb whose value never
+//! `vanilla's own experience orb's own get icon`, which buckets that value — so an orb whose value never
 //! arrives draws frame 0, the smallest, whatever it is worth. `defineSynchedData`
 //! registers `DATA_VALUE` and nothing else, and `ExperienceOrb` does not override
 //! `getAddEntityPacket`, so entity metadata is the *only* channel; there is no object
@@ -15,18 +15,18 @@
 //! 26.2 server and reflecting over every `EntityDataAccessor`:
 //!
 //! ```text
-//! 8 ExperienceOrb.DATA_VALUE 1 INT
+//! 8 vanilla's own experience orb's own value 1 INT
 //! ```
 //!
 //! Index `8`, serializer id `1`. Neither number is hand-counted — CLAUDE.md records two
-//! shipped bugs (`Sheep.DATA_WOOL_ID`, `Horse.DATA_ID_TYPE_VARIANT`) from counting
+//! shipped bugs (`vanilla's own sheep's own wool`, `vanilla's own horse's own id type variant`) from counting
 //! `defineId` calls by eye, which is what that dump exists to prevent.
 //!
 //! # The index-8 collision this file is really about
 //!
 //! Index 8 is the most crowded index in the dump — nineteen claimants. Two of them are
-//! produced by this server: `ItemEntity.DATA_ITEM` (serializer `7`, `ITEM_STACK`) and
-//! `ExperienceOrb.DATA_VALUE` (serializer `1`, `INT`). The encoder cannot tell them
+//! produced by this server: `vanilla's own item entity's own item` (serializer `7`, `ITEM_STACK`) and
+//! `vanilla's own experience orb's own value` (serializer `1`, `INT`). The encoder cannot tell them
 //! apart from the index, only from the `MetadataField` variant it was handed — so the
 //! guard is on the *producer*: `MobSim::snapshots` builds `Item` in its item loop and
 //! `ExperienceOrbValue` in its orb loop, and never crosses them.
@@ -41,10 +41,10 @@ use lodestone_server::{MetadataField, MobSim, ServerDirective, ServerProtocol};
 use lodestone_v770::V770ServerProtocol;
 use lodestone_v770::packet_ids::play;
 
-/// The index and serializer id the JVM dump reports for `ExperienceOrb.DATA_VALUE`.
+/// The index and serializer id the JVM dump reports for `vanilla's own experience orb's own value`.
 const ORB_VALUE_INDEX: u8 = 8;
 const SERIALIZER_INT: u8 = 1;
-/// `ItemEntity.DATA_ITEM`'s serializer, at the same index — the collision.
+/// `vanilla's own item entity's own item`'s serializer, at the same index — the collision.
 const SERIALIZER_ITEM_STACK: u8 = 7;
 /// `metadata.rs`' `EOF_MARKER`, which terminates every field list.
 const METADATA_EOF: u8 = 0xFF;

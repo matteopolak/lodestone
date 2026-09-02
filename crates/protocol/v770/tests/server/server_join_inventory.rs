@@ -22,14 +22,14 @@
 //! | claim | vanilla source |
 //! |---|---|
 //! | the packet is `container_set_content`, not `set_player_inventory` | `AbstractContainerMenu::sendAllDataToRemote` → `ServerPlayer`'s `ContainerSynchronizer::sendInitialData`, which constructs `ClientboundContainerSetContentPacket` |
-//! | window id `0` | `ClientPacketListener.handleContainerContent`'s `containerId == 0` arm routes to `player.inventoryMenu` |
+//! | window id `0` | `vanilla's own client packet listener's own handle container content`'s `containerId == 0` arm routes to `player.inventoryMenu` |
 //! | 46 slots, and which index is which | `InventoryMenu`: result `0`, 2×2 grid `1..=4`, armour `5..=8` **head→feet**, main storage `9..=35`, hotbar `36..=44`, off-hand `45` |
 //! | state id `1` on the first send | `sendInitialData` passes `container.incrementStateId()`, and `incrementStateId` is `(stateId + 1) & 32767` from a `0` start |
-//! | it is sent last on the join | `PlayerList.placeNewPlayer` calls `initInventoryMenu()` after the teleport, the player-info adds and `sendLevelInfo` |
+//! | it is sent last on the join | `vanilla's own player list's own place new player` calls `initInventoryMenu()` after the teleport, the player-info adds and `sendLevelInfo` |
 //!
 //! `ClientboundSetPlayerInventoryPacket` is the packet this is *not*: it is a
 //! single-slot record, `(int slot, ItemStack contents)`, whose only vanilla producer
-//! is `Inventory.createInventoryUpdatePacket` acknowledging one pickup. It carries
+//! is `vanilla's own inventory's own create inventory update packet` acknowledging one pickup. It carries
 //! no slot list and no cursor, so it cannot express a snapshot at all.
 //!
 //! # Why the inventory is seeded through the real player store
