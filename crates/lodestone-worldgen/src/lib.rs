@@ -43,6 +43,7 @@ pub mod dense_grid;
 pub mod end;
 pub mod feature;
 pub mod flat;
+pub mod generator;
 pub mod interner;
 pub mod nether;
 pub mod overworld;
