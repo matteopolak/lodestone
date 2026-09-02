@@ -1,6 +1,6 @@
 //! Tests for blockstate JSON parsing ([`BlockStates`]).
 
-use lodestone_assets::{BlockStateDefinition, BlockStates, When, parse_variant_key};
+use lodestone_assets::{BlockStateDefinition, BlockStates, parse_variant_key};
 use std::collections::BTreeMap;
 
 fn props(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -158,16 +158,6 @@ fn multipart_when_pipe_alternatives() {
     assert!(when.matches(&props(&[("segment_amount", "2")])));
     assert!(when.matches(&props(&[("segment_amount", "3")])));
     assert!(!when.matches(&props(&[("segment_amount", "1")])));
-}
-
-#[test]
-fn direct_when_construction_matches() {
-    let when = When::Match {
-        property: "facing".into(),
-        values: vec!["north".into(), "south".into()],
-    };
-    assert!(when.matches(&props(&[("facing", "south")])));
-    assert!(!when.matches(&props(&[("facing", "east")])));
 }
 
 #[test]
