@@ -9,7 +9,7 @@
 /// Number of block states (ids are `0..STATE_COUNT`).
 pub const STATE_COUNT: u32 = 32366;
 
-/// Per-state `Block.isFaceFull(state.getCollisionShape(empty, ZERO), Direction.UP)`, packed one bit per
+/// Per-state `vanilla's own block's own is face full(state.getCollisionShape(empty, ZERO), vanilla's own direction's own up)`, packed one bit per
 /// state: bit `id % 8` of byte `id / 8`. 6359 of 32366 states are set.
 pub static FACE_FULL_UP: [u8; 4046] = [
     0xfe, 0xff, 0xff, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0xc0, 0xff,
@@ -525,7 +525,7 @@ pub static HAS_FLUID_STATE: [u8; 4046] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// Per-state `state.getFluidState().is(Fluids.WATER) && block instanceof LiquidBlock`, packed one bit per
+/// Per-state `state.getFluidState().is(vanilla's own fluids's own water) && block instanceof LiquidBlock`, packed one bit per
 /// state: bit `id % 8` of byte `id / 8`. 1 of 32366 states are set.
 pub static IS_WATER_SOURCE_LIQUID_BLOCK: [u8; 4046] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -783,7 +783,7 @@ pub static IS_WATER_SOURCE_LIQUID_BLOCK: [u8; 4046] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// Per-state `state.hasProperty(BlockStateProperties.SNOWY)`, packed one bit per
+/// Per-state `state.hasProperty(vanilla's own block state properties's own snowy)`, packed one bit per
 /// state: bit `id % 8` of byte `id / 8`. 6 of 32366 states are set.
 pub static HAS_SNOWY_PROPERTY: [u8; 4046] = [
     0x00, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

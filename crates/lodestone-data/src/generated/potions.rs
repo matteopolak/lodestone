@@ -4,17 +4,19 @@
 // xtask gen-registries (see xtask/src/lib.rs::default_registry_specs) does not yet
 // support this registry key, so this table was produced by hand from the same
 // registries.json source of truth the other generated registry tables use, in the
-// same shape. minecraft:potion is a fixed, built-in registry (`BuiltInRegistries.POTION`,
+// same shape. minecraft:potion is a fixed, built-in registry (vanilla's own
+// built-in-registries potion table,
 // unlike minecraft:enchantment, which is data-driven and has no entry in
 // registries.json at all), so a static table is valid here.
 //! Generated potion id->name table for protocol 776 (Minecraft 26.2).
 //!
-//! `PotionContents`' `potion` field (`Potion.STREAM_CODEC` = `ByteBufCodecs
-//! .holderRegistry(Registries.POTION)`) carries a Holder<Potion> as a bare VarInt
+//! `PotionContents`' `potion` field (vanilla's own potion stream codec, a
+//! holder-registry codec over the potion registry) carries a Holder<Potion> as a bare VarInt
 //! registry id — the same 0-based, non-inline shape as `minecraft:mob_effect`. This
-//! order also matches `Potions.java`'s own field declaration order (confirmed by a
-//! side-by-side read), which is what `CreativeModeTabs.generatePotionEffectTypes`
-//! iterates via `HolderLookup::listElements`.
+//! order also matches vanilla's own potion-definitions declaration order (confirmed by a
+//! side-by-side read), which is what vanilla's own creative-tab potion-effect
+//! generator
+//! iterates via its own holder-lookup element listing.
 
 /// Number of potion entries (network ids are `0..POTION_COUNT`).
 pub const POTION_COUNT: u32 = 46;

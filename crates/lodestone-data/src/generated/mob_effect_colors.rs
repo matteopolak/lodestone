@@ -8,13 +8,13 @@
 //!
 //! Each entry is `MobEffect`'s (or a subclass's) constructor colour argument, in the
 //! same `minecraft:*` order as [`crate::generated_mob_effects::MOB_EFFECT_NAMES`] — index
-//! `i` here is that table's `MOB_EFFECT_NAMES[i]`'s own colour. This is `MobEffect.color`,
-//! read by `MobEffect.getColor()`, which `PotionContents.getColorOptional` (via
-//! `MobEffectInstance.getEffect().value().getColor()`) weights by amplifier to mix a
+//! `i` here is that table's `MOB_EFFECT_NAMES[i]`'s own colour. This is `vanilla's own mob effect's own color`,
+//! read by `vanilla's own mob effect's own get color()`, which `vanilla's own potion contents's own get color optional` (via
+//! `vanilla's own mob effect instance's own get effect().value().getColor()`) weights by amplifier to mix a
 //! potion's tint. It is not a network value — nothing sends it — so there is no wire
 //! codec to cross-check it against; the decompiled constructor call is the only source.
 
-/// `MobEffect.color`, opaque ARGB (`0xFF______`), indexed exactly as
+/// `vanilla's own mob effect's own color`, opaque ARGB (`0xFF______`), indexed exactly as
 /// [`crate::generated_mob_effects::MOB_EFFECT_NAMES`].
 pub static MOB_EFFECT_COLORS: [u32; crate::generated_mob_effects::MOB_EFFECT_COUNT as usize] = [
     0xFF_33EBFF, // speed

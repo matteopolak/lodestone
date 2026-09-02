@@ -5,7 +5,7 @@
 // BY HAND. Regenerate with LODESTONE_REGEN=1 (see the test module docs).
 //! Generated per-entity-type push census for protocol 776 (Minecraft 26.2),
 //! indexed by network entity-type registry id. `true` means an entity of that
-//! type can shove the local player through vanilla `LivingEntity.pushEntities()`.
+//! type can shove the local player through vanilla `vanilla's own living entity's own push entities()`.
 //! Default-deny: see [`crate::entity_census`] for the reduction and its citations.
 
 /// Number of entity types (network ids are `0..TYPE_COUNT`).
@@ -28,7 +28,7 @@ pub static ENTITY_PUSHES_PLAYERS: [bool; 158] = [
     false, // 12 minecraft:birch_boat — Boat (not a LivingEntity)
     false, // 13 minecraft:birch_chest_boat — ChestBoat (not a LivingEntity)
     true,  // 14 minecraft:blaze — Blaze pushEntities=LivingEntity doPush=LivingEntity
-    false, // 15 minecraft:block_display — Display.BlockDisplay (not a LivingEntity)
+    false, // 15 minecraft:block_display — vanilla's own display's own block display (not a LivingEntity)
     true,  // 16 minecraft:bogged — Bogged pushEntities=LivingEntity doPush=LivingEntity
     true,  // 17 minecraft:breeze — Breeze pushEntities=LivingEntity doPush=LivingEntity
     false, // 18 minecraft:breeze_wind_charge — BreezeWindCharge (not a LivingEntity)
@@ -85,7 +85,7 @@ pub static ENTITY_PUSHES_PLAYERS: [bool; 158] = [
     false, // 69 minecraft:interaction — Interaction (not a LivingEntity)
     true,  // 70 minecraft:iron_golem — IronGolem pushEntities=LivingEntity doPush=IronGolem
     false, // 71 minecraft:item — ItemEntity (not a LivingEntity)
-    false, // 72 minecraft:item_display — Display.ItemDisplay (not a LivingEntity)
+    false, // 72 minecraft:item_display — vanilla's own display's own item display (not a LivingEntity)
     false, // 73 minecraft:item_frame — ItemFrame (not a LivingEntity)
     false, // 74 minecraft:jungle_boat — Boat (not a LivingEntity)
     false, // 75 minecraft:jungle_chest_boat — ChestBoat (not a LivingEntity)
@@ -145,7 +145,7 @@ pub static ENTITY_PUSHES_PLAYERS: [bool; 158] = [
     true,  // 129 minecraft:strider — Strider pushEntities=LivingEntity doPush=LivingEntity
     true,  // 130 minecraft:sulfur_cube — SulfurCube pushEntities=LivingEntity doPush=SulfurCube
     true,  // 131 minecraft:tadpole — Tadpole pushEntities=LivingEntity doPush=LivingEntity
-    false, // 132 minecraft:text_display — Display.TextDisplay (not a LivingEntity)
+    false, // 132 minecraft:text_display — vanilla's own display's own text display (not a LivingEntity)
     false, // 133 minecraft:tnt — PrimedTnt (not a LivingEntity)
     false, // 134 minecraft:tnt_minecart — MinecartTNT (not a LivingEntity)
     true,  // 135 minecraft:trader_llama — TraderLlama pushEntities=LivingEntity doPush=LivingEntity
@@ -190,7 +190,7 @@ pub static ENTITY_CAN_BE_COLLIDED_WITH: [bool; 158] = [
     true,  // 12 minecraft:birch_boat — Boat
     true,  // 13 minecraft:birch_chest_boat — ChestBoat
     false, // 14 minecraft:blaze — Blaze
-    false, // 15 minecraft:block_display — Display.BlockDisplay
+    false, // 15 minecraft:block_display — vanilla's own display's own block display
     false, // 16 minecraft:bogged — Bogged
     false, // 17 minecraft:breeze — Breeze
     false, // 18 minecraft:breeze_wind_charge — BreezeWindCharge
@@ -247,7 +247,7 @@ pub static ENTITY_CAN_BE_COLLIDED_WITH: [bool; 158] = [
     false, // 69 minecraft:interaction — Interaction
     false, // 70 minecraft:iron_golem — IronGolem
     false, // 71 minecraft:item — ItemEntity
-    false, // 72 minecraft:item_display — Display.ItemDisplay
+    false, // 72 minecraft:item_display — vanilla's own display's own item display
     false, // 73 minecraft:item_frame — ItemFrame
     true,  // 74 minecraft:jungle_boat — Boat
     true,  // 75 minecraft:jungle_chest_boat — ChestBoat
@@ -307,7 +307,7 @@ pub static ENTITY_CAN_BE_COLLIDED_WITH: [bool; 158] = [
     false, // 129 minecraft:strider — Strider
     false, // 130 minecraft:sulfur_cube — SulfurCube
     false, // 131 minecraft:tadpole — Tadpole
-    false, // 132 minecraft:text_display — Display.TextDisplay
+    false, // 132 minecraft:text_display — vanilla's own display's own text display
     false, // 133 minecraft:tnt — PrimedTnt
     false, // 134 minecraft:tnt_minecart — MinecartTNT
     false, // 135 minecraft:trader_llama — TraderLlama
@@ -353,7 +353,7 @@ pub static ENTITY_IS_LIVING: [bool; 158] = [
     false, // 12 minecraft:birch_boat — Boat
     false, // 13 minecraft:birch_chest_boat — ChestBoat
     true,  // 14 minecraft:blaze — Blaze
-    false, // 15 minecraft:block_display — Display.BlockDisplay
+    false, // 15 minecraft:block_display — vanilla's own display's own block display
     true,  // 16 minecraft:bogged — Bogged
     true,  // 17 minecraft:breeze — Breeze
     false, // 18 minecraft:breeze_wind_charge — BreezeWindCharge
@@ -410,7 +410,7 @@ pub static ENTITY_IS_LIVING: [bool; 158] = [
     false, // 69 minecraft:interaction — Interaction
     true,  // 70 minecraft:iron_golem — IronGolem
     false, // 71 minecraft:item — ItemEntity
-    false, // 72 minecraft:item_display — Display.ItemDisplay
+    false, // 72 minecraft:item_display — vanilla's own display's own item display
     false, // 73 minecraft:item_frame — ItemFrame
     false, // 74 minecraft:jungle_boat — Boat
     false, // 75 minecraft:jungle_chest_boat — ChestBoat
@@ -470,7 +470,7 @@ pub static ENTITY_IS_LIVING: [bool; 158] = [
     true,  // 129 minecraft:strider — Strider
     true,  // 130 minecraft:sulfur_cube — SulfurCube
     true,  // 131 minecraft:tadpole — Tadpole
-    false, // 132 minecraft:text_display — Display.TextDisplay
+    false, // 132 minecraft:text_display — vanilla's own display's own text display
     false, // 133 minecraft:tnt — PrimedTnt
     false, // 134 minecraft:tnt_minecart — MinecartTNT
     true,  // 135 minecraft:trader_llama — TraderLlama
@@ -515,7 +515,7 @@ pub static ENTITY_IS_MOB: [bool; 158] = [
     false, // 12 minecraft:birch_boat — Boat
     false, // 13 minecraft:birch_chest_boat — ChestBoat
     true,  // 14 minecraft:blaze — Blaze
-    false, // 15 minecraft:block_display — Display.BlockDisplay
+    false, // 15 minecraft:block_display — vanilla's own display's own block display
     true,  // 16 minecraft:bogged — Bogged
     true,  // 17 minecraft:breeze — Breeze
     false, // 18 minecraft:breeze_wind_charge — BreezeWindCharge
@@ -572,7 +572,7 @@ pub static ENTITY_IS_MOB: [bool; 158] = [
     false, // 69 minecraft:interaction — Interaction
     true,  // 70 minecraft:iron_golem — IronGolem
     false, // 71 minecraft:item — ItemEntity
-    false, // 72 minecraft:item_display — Display.ItemDisplay
+    false, // 72 minecraft:item_display — vanilla's own display's own item display
     false, // 73 minecraft:item_frame — ItemFrame
     false, // 74 minecraft:jungle_boat — Boat
     false, // 75 minecraft:jungle_chest_boat — ChestBoat
@@ -632,7 +632,7 @@ pub static ENTITY_IS_MOB: [bool; 158] = [
     true,  // 129 minecraft:strider — Strider
     true,  // 130 minecraft:sulfur_cube — SulfurCube
     true,  // 131 minecraft:tadpole — Tadpole
-    false, // 132 minecraft:text_display — Display.TextDisplay
+    false, // 132 minecraft:text_display — vanilla's own display's own text display
     false, // 133 minecraft:tnt — PrimedTnt
     false, // 134 minecraft:tnt_minecart — MinecartTNT
     true,  // 135 minecraft:trader_llama — TraderLlama
