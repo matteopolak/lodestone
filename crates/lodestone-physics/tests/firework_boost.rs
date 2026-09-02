@@ -1,4 +1,4 @@
-//! The elytra firework-rocket glide boost — issue #206.
+//! The elytra firework-rocket glide boost.
 //!
 //! Vanilla's own firework-rocket per-tick step's attached-to-a-glider branch:
 //!

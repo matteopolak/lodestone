@@ -1,4 +1,4 @@
-//! Pose-fit-gate cost (issue #78 epic, sub-issue #124): the swim/crouch
+//! Pose-fit-gate cost: the swim/crouch
 //! box-fit veto, [`can_player_fit_within_blocks_when`] — a real collision-
 //! shape query against the world, run every pose transition attempt and,
 //! per `docs/pose-dimensions.md`, potentially every tick while a player is

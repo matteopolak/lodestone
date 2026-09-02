@@ -1,4 +1,4 @@
-//! Per-tick movement integration cost (issue #78 epic, sub-issue #115):
+//! Per-tick movement integration cost:
 //! [`lodestone_physics::player::tick`], the real function every entity runs
 //! once per tick, 20 Hz, with zero measured baseline before this bench.
 //!
@@ -6,7 +6,7 @@
 //! (both real, already-ported code paths — `travel_and_check_inside_blocks`
 //! dispatches to `travel_in_air` for both, differing only in whether the
 //! floor stops the fall) as *different* scenes rather than one blended
-//! number, since #115 explicitly asks these to be treated as distinct costs.
+//! number, since these are treated as distinct costs.
 //! Swimming (`docs/swimming.md`'s fixed-tick timing) needs a water-tagged
 //! `CollisionView`, which this bench's minimal fixture does not model —
 //! documented as a gap below rather than faked with a `CollisionView` that
