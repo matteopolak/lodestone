@@ -3,7 +3,7 @@
 //!
 //! ## What it is
 //!
-//! `client/gui/screens/ConfirmScreen.java`, as far as this shell's frame model
+//! Vanilla's own confirm-screen rendering, as far as this shell's frame model
 //! goes. That is what
 //! made it exist, and the reason is worth stating before the mechanics, because
 //! it is the whole design:
@@ -23,7 +23,7 @@
 //!   `SelectWorldScreen` pins Delete to a footer band. So a second click where
 //!   the first one landed hits **nothing**;
 //! - **nothing is focused when this screen opens.** Vanilla's `ConfirmScreen.init`
-//!   (`:45-56`) calls no `setInitialFocus`, unlike `SelectWorldScreen.java`,
+//!   (`:45-56`) calls no `setInitialFocus`, unlike its own select-world screen rendering,
 //!   so Enter immediately after opening presses nothing. Reproducing that is both
 //!   faithful *and* the safe direction: a held Enter cannot roll through the
 //!   confirmation.
@@ -34,9 +34,9 @@
 //!
 //! ## How it works
 //!
-//! [`confirm_block`] arranges vanilla's own tree — `LinearLayout.vertical()
-//! .spacing(8)` holding a title `StringWidget`, the message, and a
-//! `LinearLayout.horizontal().spacing(4)` of two `Button.DEFAULT_WIDTH` buttons
+//! [`confirm_block`] arranges vanilla's own tree — a vertical linear layout
+//! at spacing 8 holding a title `StringWidget`, the message, and a
+//! horizontal linear layout at spacing 4 of two `Button.DEFAULT_WIDTH` buttons
 //! with `paddingTop(16)` — and
 //! `FrameLayout.centerInRectangle`s it in the canvas (`:59-62`). Every leaf is
 //! then read back as a [`ConfirmPlacement`], which [`Origin::Confirm`] resolves,
@@ -84,7 +84,7 @@ use super::widget::{self, LayoutElement, Widget};
 /// `selectWorld.deleteQuestion` (`en_us.json`) — the title line.
 pub const DELETE_QUESTION: &str = "Are you sure you want to delete this world?";
 /// `selectWorld.deleteWarning` (`en_us.json`), whose `%s` is the world's
-/// **display** name — `LevelSummary.getLevelName()`, not the folder.
+/// **display** name — vanilla's own level-summary get-level-name accessor, not the folder.
 pub const DELETE_WARNING: &str = "'%s' will be lost forever! (A long time!)";
 /// `selectWorld.deleteButton` — vanilla's affirmative label here is **"Delete"**,
 /// not `gui.yes`. The wording is part of the
@@ -93,10 +93,10 @@ pub const DELETE_BUTTON: &str = "Delete";
 /// `CommonComponents.GUI_CANCEL` = `gui.cancel` (`:635`).
 pub const CANCEL_BUTTON: &str = "Cancel";
 
-/// `LinearLayout.vertical().spacing(8)`, and the same 8
+/// Vanilla's own vertical linear layout at spacing 8, and the same 8
 /// on the message-to-buttons gap.
 const BLOCK_SPACING: i32 = 8;
-/// `LinearLayout.horizontal().spacing(4)` for the button row (`:51`).
+/// Vanilla's own horizontal linear layout at spacing 4 for the button row (`:51`).
 const BUTTON_SPACING: i32 = 4;
 /// `buttonLayout.defaultCellSetting().paddingTop(16)` (`:52`).
 const BUTTON_PADDING_TOP: i32 = 16;
@@ -159,8 +159,8 @@ fn confirm_rects(width: f32, height: f32) -> Vec<(f32, f32, f32, f32)> {
     root.add_child(string_widget());
     // `this.addMessage()` (`:49`) — one reserved line, see the module doc.
     root.add_child(string_widget());
-    // `LinearLayout buttonLayout = this.layout.addChild(LinearLayout.horizontal()
-    // .spacing(4)); buttonLayout.defaultCellSetting().paddingTop(16);` (`:51-52`)
+    // Vanilla's own button layout: a horizontal linear layout at spacing 4
+    // added as a child, with its default cell setting padded 16 on top (`:51-52`).
     let mut buttons = LinearLayout::horizontal().spacing(BUTTON_SPACING);
     for _ in 0..ROW_COUNT {
         buttons.add_child_settings(
@@ -176,7 +176,8 @@ fn confirm_rects(width: f32, height: f32) -> Vec<(f32, f32, f32, f32)> {
     }
     root.add_child(Box::new(buttons));
     root.arrange_elements();
-    // `FrameLayout.centerInRectangle(this.layout, this.getRectangle())` (`:61`).
+    // Vanilla's own center-in-rectangle frame-layout helper applied to
+    // `(this.layout, this.getRectangle())` (`:61`).
     layout::align_in_rectangle(&mut root, 0.0, 0.0, width, height, 0.5, 0.5);
     layout::widget_rects(&root)
 }
@@ -245,7 +246,7 @@ pub enum ConfirmRequest {
     DeleteWorld {
         /// The folder under the saves root.
         dir_name: String,
-        /// `LevelSummary.getLevelName()`, for the message.
+        /// vanilla's own level-summary get-level-name accessor, for the message.
         display_name: String,
     },
 }
@@ -736,7 +737,7 @@ mod tests {
     /// The block is vanilla's own tree, and the arithmetic is hand-derived from
     /// the Java rather than read back out of the layout.
     ///
-    /// `LinearLayout.vertical().spacing(8)` over a 9 px title, a 9 px message and
+    /// Vanilla's own vertical linear layout at spacing 8 over a 9 px title, a 9 px message and
     /// a button row of two 150 px buttons 4 px apart with `paddingTop(16)`:
     ///
     /// - width  = `2 * 150 + 4` = **304** (the title and message cells are
