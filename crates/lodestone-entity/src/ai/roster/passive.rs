@@ -357,11 +357,11 @@ pub static CAT: &[Registration] = &[
     Registration::goal(10, "BreedGoal", breed_0_8),
     Registration::goal(11, "WaterAvoidingRandomStrollGoal", cat_stroll),
     Registration::goal(12, "LookAtPlayerGoal(Player)", look_at_player_10),
-    // `NonTameRandomTargetGoal<>(this, Rabbit.class, false, null)` —
+    // Vanilla's own untamed-random-target goal for rabbits —
     // an untamed cat hunting a random nearby rabbit. Unrelated to ownership;
     // no goal type here models a random-same-class target search.
     Registration::missing(Selector::Target, 1, "NonTameRandomTargetGoal(Rabbit)"),
-    // `NonTameRandomTargetGoal<>(this, Turtle.class, false, Turtle.BABY_ON_LAND_SELECTOR)`
+    // Vanilla's own untamed-random-target goal for baby turtles on land
     // — same gap as the row above, narrowed to baby turtles on land.
     Registration::missing(Selector::Target, 1, "NonTameRandomTargetGoal(Turtle)"),
 ];

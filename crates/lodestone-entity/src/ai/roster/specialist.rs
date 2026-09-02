@@ -349,16 +349,16 @@ pub fn elder_guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 ///   equivalent feed making `nearest_player` return a guardian, so installing a
 ///   second instance of our goal would duplicate the `Player` row rather than add
 ///   this one.
-/// * **The target row** at 1 is `LivingEntity.class` filtered by
+/// * **The target row** at 1 is filtered by
 ///   vanilla's own guardian attack-target selector — `Player`, `Squid` or `Axolotl`, further
 ///   than 3 blocks. Ours resolves to the nearest player, which is the selector's
 ///   first case; the squid and axolotl cases and the 3-block floor are the
 ///   disclosed narrowing every `nearest_attackable_target` row in this roster
 ///   shares.
 ///
-/// One row is modelled with a deviation worth naming: vanilla's stroll is
-/// `RandomStrollGoal(this, 1.0, 80)` with `setFlags(MOVE, LOOK)` applied in
-/// `registerGoals`. Ours takes no interval (so the 80-tick — and the elder's
+/// One row is modelled with a deviation worth naming: vanilla's own guardian
+/// stroll goal sets an 80-tick interval and applies extra look/move flags in
+/// its own goal registration. Ours takes no interval (so the 80-tick — and the elder's
 /// 400-tick, set in `ElderGuardian`'s constructor — pause between wanders is not
 /// modelled) and claims
 /// `{MOVE}` only. The flag half is the same class of conservative deviation
