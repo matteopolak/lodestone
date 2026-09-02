@@ -12,6 +12,10 @@ lodestone-core = { workspace = true }
 lodestone-data = { workspace = true }
 lodestone-macros = { workspace = true }
 lodestone-model = { workspace = true }
+# Packet definitions measured byte-identical (wire shape and codec) to their
+# v47/v340 counterparts; see that crate's module docs for which packets and
+# their protocol ranges.
+lodestone-protocol-common = { workspace = true }
 lodestone-world = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

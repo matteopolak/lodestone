@@ -21,6 +21,10 @@ lodestone-core = { workspace = true }
 # way `lodestone-v340`'s adapter does.
 lodestone-data = { workspace = true }
 lodestone-macros = { workspace = true }
+# Packet definitions measured byte-identical (wire shape and codec) to their
+# v340/v735 counterparts; see that crate's module docs for which packets and
+# their protocol ranges.
+lodestone-protocol-common = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-world = { workspace = true }
 tracing = { workspace = true }
