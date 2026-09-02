@@ -1,4 +1,4 @@
-//! The vibration substrate (issue #459's step 2): a world-event type and the
+//! The vibration substrate: a world-event type and the
 //! warden-listenable set, deliberately independent of both the Brain module
 //! and the [`ai`](crate::ai) goal system.
 //!
@@ -27,12 +27,12 @@
 //! reads: the nearest posted vibration within a radius, filtered to the
 //! events a warden can hear. There is no travel delay, no line-of-sight
 //! occlusion and no per-event "distance" attenuation here — vanilla's own
-//! `VibrationSystem.Ticker` walks the vibration toward the listener over
+//! vibration-ticking step walks the vibration toward the listener over
 //! several ticks and can be blocked by intervening blocks; this substrate
 //! answers "audible this instant, unobstructed" instead, a disclosed
 //! simplification for a first pass rather than a silent one. Muffling and
 //! travel time are natural follow-ups once something actually consumes this
-//! substrate's output (issue #459's own step 3, not built here).
+//! substrate's output (not built here).
 //!
 //! # How to change it
 //!
@@ -133,18 +133,17 @@ impl VibrationEvent {
 pub struct PostedVibration {
     pub position: Vec3,
     pub event: VibrationEvent,
-    /// `GameEvent.Context.sourceEntity()` — the host's own entity id for
-    /// whoever caused the event, if the producer knows one. Issue #459's
-    /// step 3 (`Warden.VibrationUser.onReceiveVibration`'s
-    /// `increaseAngerAt(sourceEntity)`) is this field's reason to exist: a
+    /// Vanilla's own vibration-context source entity — the host's own entity id for
+    /// whoever caused the event, if the producer knows one. This
+    /// field's reason to exist is vanilla's own warden anger-on-vibration step: a
     /// listener cannot get angry at *something* without an identity to be
     /// angry at. `None` for a producer with no natural source (there is
     /// none yet — every producer today sets this).
     pub source: Option<i32>,
 }
 
-/// `Warden.VibrationUser.getListenerRadius` — the warden's own fixed
-/// listening radius. Vanilla's `VibrationSystem.Ticker` actually walks the
+/// Vanilla's own warden listener radius — a fixed
+/// listening radius. Vanilla's own vibration-ticking step actually walks the
 /// signal toward the listener at a fixed speed over several ticks and can be
 /// blocked by intervening blocks; this substrate's first pass treats
 /// anything within this radius as immediately, unconditionally audible — see
@@ -183,8 +182,7 @@ pub fn is_vibration_listener(species: &str) -> bool {
     species == "warden"
 }
 
-/// `Allay.VibrationUser.VIBRATION_EVENT_LISTENER_RANGE` — the allay's own
-/// listener radius, coincidentally the same figure as
+/// Vanilla's own allay listener radius, coincidentally the same figure as
 /// [`WARDEN_LISTENER_RADIUS`] but a separate constant on purpose: the two
 /// species' listening ranges are independent jar values that happen to
 /// agree, not one shared figure (see `DESIGN.md`'s own warning about a
@@ -193,7 +191,7 @@ pub const ALLAY_LISTENER_RADIUS: f64 = 16.0;
 
 /// The nearest [`VibrationEvent::NoteBlockPlay`] within `radius` blocks of
 /// `origin` — an allay's own listener shape
-/// (`Allay.VibrationUser.getListenableEvents`'s `GameEventTags.ALLAY_CAN_LISTEN`,
+/// (vanilla's own allay listenable-events tag,
 /// which this crate's tag subset does not carry a second name for, since
 /// `NoteBlockPlay` is its only member this substrate produces). A second,
 /// narrower sibling of [`nearest_listenable`] rather than a generalisation
@@ -226,9 +224,8 @@ fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
 mod tests {
     use super::*;
 
-    /// Transcribed directly from
-    /// `.cache/mc/26.2/src/data/minecraft/tags/game_event/warden_can_listen.json`
-    /// plus the one member its nested `#minecraft:shrieker_can_listen`
+    /// Transcribed directly from vanilla's own `warden_can_listen` game-event
+    /// tag definition, plus the one member its nested `#minecraft:shrieker_can_listen`
     /// reference adds — the outside source [`VibrationEvent`] must not
     /// silently drift from. `resonate_1..15` and `shriek` are excluded on
     /// purpose (see the enum's own doc), so this list is the tag's members
