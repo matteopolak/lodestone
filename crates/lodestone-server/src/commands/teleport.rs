@@ -1,14 +1,13 @@
-//! `/tp`/`/teleport`, from `TeleportCommand.java` — the mechanism this
-//! command needed was a reusable post-join teleport encoder
-//! ([`crate::ServerProtocol::encode_teleport`]), not new command-tree
-//! machinery: the existing directed-[`Effect`] outbox already reaches any
-//! connected player, so this is the same shape `/kill` and `/gamemode
-//! <target>` already use.
+//! `/tp`/`/teleport` — the mechanism this command needed was a reusable
+//! post-join teleport encoder ([`crate::ServerProtocol::encode_teleport`]),
+//! not new command-tree machinery: the existing directed-[`Effect`] outbox
+//! already reaches any connected player, so this is the same shape `/kill`
+//! and `/gamemode <target>` already use.
 //!
 //! # `/tp` and `/teleport` are two independently-built trees, not a redirect
 //!
-//! Vanilla registers `teleport` fully and then redirects `tp` to it
-//! (`Commands::redirect`). [`super::registrar::Registrar::redirect`] had **no
+//! The real command tree registers `teleport` fully and then redirects `tp`
+//! to it. [`super::registrar::Registrar::redirect`] had **no
 //! production caller at the time this command was written** — every built-in
 //! here was a plain, self-contained tree — and this command was not the place
 //! to be the first: a redirect changes which node the dispatch walk's
@@ -22,44 +21,41 @@
 //!
 //! # `<location>` resolves against the **command source**, never the target
 //!
-//! `Vec3Argument.getCoordinates(c, "location")` is resolved by
-//! `Coordinates.getPosition(CommandSourceStack source)` — the issuer's own
+//! The real `<location>` argument resolves against the issuer's own
 //! position and rotation, not any of `<targets>`'s. So `/tp Steve ~5 ~ ~`
 //! moves Steve five blocks from *the operator's* position, not Steve's own —
 //! surprising in English, exactly what the record specifies, and why
 //! `resolve_location` below takes `ctx.source`, never a target.
 //!
-//! # `<rotation>` is two plain floats, not `minecraft:rotation`
+//! # `<rotation>` is two plain floats, not the real rotation parser
 //!
 //! Same documented approximation `crate::commands::world_spawn_commands` makes
 //! for `/setworldspawn`'s angle: `lodestone-command-mc` has no `RotationArg`
-//! parser yet, so this splits vanilla's one `~`-capable two-component argument
+//! parser yet, so this splits the real one `~`-capable two-component argument
 //! into two absolute `brigadier:float` nodes (`yaw`, `pitch`). Relative
 //! rotation (`/tp @s ~ ~45`) is therefore not supported — a real gap, not a
 //! silent one.
 //!
 //! # Facing preservation is resolved at *application* time, not here
 //!
-//! When no rotation is given, the target keeps its own current facing —
-//! vanilla's `entity.getYRot()`/`getXRot()`. This crate's
-//! [`crate::commands::source::PlayerCandidate`] carries a position but no
-//! rotation (see that module's own doc for why), so an executor cannot look
-//! it up. [`Effect::Teleport`]'s `yaw`/`pitch` are therefore `Option<f32>`,
-//! and `None` is resolved by whichever connection actually applies the
-//! effect — its own for a self-teleport, the target's own connection for a
-//! directed one — because that is the only place a live `player_rot` for
-//! that specific player is ever in scope. The same reasoning, and the same
-//! gap, applies to `/tp <targets> <destination>`: vanilla copies the
-//! destination's rotation too (`performTeleport`'s `destination.getYRot()`),
-//! and this crate cannot read a `PlayerCandidate`'s rotation any more than it
-//! can a target's — so the entity-destination form preserves the *target's
-//! own* facing instead, a documented approximation rather than the vanilla
-//! copy.
+//! When no rotation is given, the target keeps its own current facing. This
+//! crate's [`crate::commands::source::PlayerCandidate`] carries a position
+//! but no rotation (see that module's own doc for why), so an executor
+//! cannot look it up. [`Effect::Teleport`]'s `yaw`/`pitch` are therefore
+//! `Option<f32>`, and `None` is resolved by whichever connection actually
+//! applies the effect — its own for a self-teleport, the target's own
+//! connection for a directed one — because that is the only place a live
+//! `player_rot` for that specific player is ever in scope. The same
+//! reasoning, and the same gap, applies to `/tp <targets> <destination>`:
+//! the real command copies the destination's rotation too, and this crate
+//! cannot read a `PlayerCandidate`'s rotation any more than it can a
+//! target's — so the entity-destination form preserves the *target's own*
+//! facing instead, a documented approximation rather than the real copy.
 //!
 //! # There is no bare, `@s`-free `/tp <entity>` self-form
 //!
-//! Vanilla's own tree has `<location>`, `<destination>` and `<targets>` as
-//! three *simultaneous* argument children of `teleport`, and disambiguating
+//! The real command tree has `<location>`, `<destination>` and `<targets>`
+//! as three *simultaneous* argument children of `teleport`, and disambiguating
 //! `/tp Steve` (self, to the player named Steve — the bare `<destination>`
 //! path) from `/tp Steve ~5 ~ ~` (move Steve — `<targets>` then `<location>`)
 //! needs exactly the backtracking `lodestone_command::CommandTree::parse`'s
@@ -80,7 +76,7 @@
 //! with an entity selector" position, and self-to-entity is reached through
 //! it with an explicit `@s` (`/tp @s Steve`), which is unambiguous — `@s` is
 //! never a bare name, so it cannot collide with `<location>`'s numeric/`~`/
-//! `^` grammar either. A real, disclosed reduction from vanilla's own tree,
+//! `^` grammar either. A real, disclosed reduction from the real tree,
 //! not a silent one; `/tp <location>` (also bare, self, but numeric-first so
 //! it never competes with an entity selector) is unaffected.
 
@@ -92,7 +88,7 @@ use super::registrar::{Ctx, Registrar};
 use super::source::PlayerCandidate;
 use super::CommandResult;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const TELEPORT_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {
@@ -159,28 +155,28 @@ fn register_tree(registrar: &mut Registrar, root: lodestone_command::NodeId, nam
     });
 }
 
-/// The caller's own uuid, or vanilla's console refusal.
+/// The caller's own uuid, or the real console refusal.
 fn self_uuid(ctx: &Ctx<'_>) -> Result<uuid::Uuid, String> {
     ctx.source.uuid().ok_or_else(|| "That command can only be used by a player".to_string())
 }
 
-/// One entity from a selector, or vanilla's `NO_ENTITIES_FOUND` shape.
+/// One entity from a selector, or the real "no entities found" shape.
 fn resolve_one(ctx: &Ctx<'_>, selector: &EntitySelector) -> Result<PlayerCandidate, String> {
     let candidates = ctx.resolve(selector)?;
     candidates.into_iter().next().ok_or_else(|| "No entity was found".to_string())
 }
 
-/// `Vec3Argument.getCoordinates(c, "location")`'s resolution:
-/// [`Coordinates::resolve`] against the **command source**'s own position and
-/// rotation — see this module's doc for why it is never a target's.
+/// The real `<location>` argument's resolution: [`Coordinates::resolve`]
+/// against the **command source**'s own position and rotation — see this
+/// module's doc for why it is never a target's.
 fn resolve_location(ctx: &Ctx<'_>, coords: Coordinates) -> (f64, f64, f64) {
     let origin = (ctx.source.position.x, ctx.source.position.y, ctx.source.position.z);
     let rotation = (ctx.source.rotation.yaw, ctx.source.rotation.pitch);
     coords.resolve(origin, rotation)
 }
 
-/// Queues [`Effect::Teleport`] for every resolved target and reports vanilla's
-/// single/multiple split.
+/// Queues [`Effect::Teleport`] for every resolved target and reports the
+/// real single/multiple split.
 fn teleport_targets(
     ctx: &mut Ctx<'_>,
     selector: &EntitySelector,
