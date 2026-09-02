@@ -291,7 +291,7 @@ fn aabb(min: [f32; 3], max: [f32; 3]) -> BlockAabb {
 /// `face_fully_covered` on shapes written out by hand from vanilla's own record,
 /// including the case a single-box reduction cannot answer.
 ///
-/// The `StairBlock.SHAPE_STRAIGHT` union is `Block.column(16, 0, 8)` (the bottom
+/// Vanilla's straight-stair shape union is `Block.column(16, 0, 8)` (the bottom
 /// slab) or'd with a half-cell step; neither box covers a side face on its own,
 /// and their union covers exactly one. A predicate that required one box — which
 /// is what `full_footprint_y_range` does for the *neighbour* test — answers "not
