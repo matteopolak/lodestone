@@ -1021,7 +1021,8 @@ where
     }))
 }
 
-/// Moves a player through an End portal — `EndPortalBlock.getPortalDestination`'s
+/// Moves a player through an End portal — vanilla's own end-portal-block
+/// "get portal destination" step's
 /// `fromEnd == false` arm, the End's counterpart to [`travel_through_portal`].
 ///
 /// **Deliberately not a generalisation of [`travel_through_portal`].** An End
@@ -1148,12 +1149,12 @@ where
 /// Per-connection view-streaming bookkeeping: which chunk columns has this
 /// connection been sent, and around which chunk column.
 ///
-/// Mirrors vanilla's `ChunkMap`/`ChunkTrackingView`
-/// (`ChunkMap.java:1110-1132`'s `updateChunkTracking`/`applyChunkTrackingView`,
-/// `ChunkTrackingView.java`'s `difference`), simplified to the same square
+/// Mirrors vanilla's own chunk-map/chunk-tracking-view machinery
+/// (its own "update chunk tracking"/"apply chunk tracking view" steps,
+/// its own tracking-view "difference" helper), simplified to the same square
 /// window `serve_connection`'s own initial view already uses
 /// (`[-view_radius, view_radius]²`) rather than vanilla's rounded
-/// `ChunkTrackingView.Positioned::contains` (a buffered Euclidean-distance
+/// positioned-tracking-view "contains" check (a buffered Euclidean-distance
 /// test). Keeping the join-time and move-time shapes identical is what stops
 /// a live connection from immediately forgetting chunks it only just
 /// finished sending at join; matching vanilla's exact circular shape is not
@@ -1175,7 +1176,7 @@ struct ViewTracker {
     radius: i32,
     /// The largest radius this connection is **permitted** to reach, and the
     /// ceiling [`set_view_radius`](Self::set_view_radius) clamps a client
-    /// request to — vanilla's `ChunkMap.java:826`,
+    /// request to — vanilla's own chunk-map clamp,
     /// `Mth.clamp(player.requestedViewDistance(), 2, this.serverViewDistance)`.
     ///
     /// **Issue #545: this is a second field precisely because it is a second
@@ -1306,11 +1307,10 @@ impl ViewTracker {
     /// that bring the client's tracked chunks back in sync — and returning
     /// nothing at all if `(cx, cz)` is still the tracked center (the same
     /// "did the 2D chunk position actually change" guard
-    /// `ChunkMap::updateChunkTracking` applies before touching the view at
+    /// vanilla's own "update chunk tracking" step applies before touching the view at
     /// all).
     ///
-    /// Order mirrors vanilla's `applyChunkTrackingView`
-    /// (`ChunkMap.java:1122-1132`): the cache-center update is sent first
+    /// Order mirrors vanilla's own "apply chunk tracking view" step: the cache-center update is sent first
     /// (unconditionally, since by this point the center *did* change —
     /// vanilla additionally guards this send on the center changing, which
     /// is already implied here), then every column that left the window is
