@@ -12,9 +12,9 @@
 //! [`crate::attribute`] already models vanilla's arithmetic exactly —
 //! [`Modifier`], [`Operation`], the `AddValue` → `AddMultipliedBase` →
 //! `AddMultipliedTotal` fold, and the per-attribute clamp. Vanilla's own
-//! equipment stats are *nothing but* attribute modifiers
-//! (`ArmorMaterial.createAttributes`, `ToolMaterial.createSwordAttributes`), so
-//! this module emits [`Modifier`]s into an [`AttributeMap`] and lets that fold
+//! equipment stats are *nothing but* attribute modifiers — every armour
+//! material and every weapon's tool tier publishes its numbers this same
+//! way — so this module emits [`Modifier`]s into an [`AttributeMap`] and lets that fold
 //! decide the value. There is no parallel "equipment stats" arithmetic to keep
 //! in step, and a future source of modifiers (an attribute-flavoured status
 //! effect, a `/attribute` command, an enchantment) lands in the same map.
@@ -27,8 +27,8 @@
 //!   is keyed by id: two helmets cannot stack, and a sword replacing an axe
 //!   overwrites rather than accumulates, which is the vanilla behaviour and falls
 //!   out of using the real ids.
-//! * **The base value is the wearer's, not the item's.** A player's
-//!   `attack_damage` base is `1.0` (`Player.createAttributes`), while the
+//! * **The base value is the wearer's, not the item's.** A player's own base
+//!   `attack_damage` is `1.0`, while the
 //!   attribute registry's own default is `2.0` — so a diamond sword's `+6.0`
 //!   modifier reads as `7.0` on a player and `8.0` on anything that took the
 //!   registry default. [`player_attributes`] exists to make that distinction
@@ -39,20 +39,19 @@
 //! Every constant below is read out of the 26.2 jar's own record definitions,
 //! never a community table:
 //!
-//! * `ArmorMaterials` — the eight materials, each
-//!   `ArmorMaterial(durability, makeDefense(boots, legs, chest, helm, body),
-//!   enchantmentValue, equipSound, toughness, knockbackResistance, …)`. Note the
-//!   `makeDefense` argument order is **boots first**, which is the opposite of
-//!   how the pieces are usually listed, and transcribing it head-first silently
-//!   swaps a helmet's `1` with a boot's `3`.
-//! * `ToolMaterial` — `attackDamageBonus` per tier, and the
-//!   `attackDamageBaseline + bonus` sum that `createSwordAttributes` /
-//!   `createToolAttributes` actually publish. The published modifier is the
+//! * The eight armour materials, each publishing a durability, a per-piece
+//!   defence value constructed **boots first, then legs, chest, helmet, body**,
+//!   an enchantment value, an equip sound, a toughness and a knockback
+//!   resistance. Note the defence-value argument order is **boots first**,
+//!   which is the opposite of how the pieces are usually listed, and
+//!   transcribing it head-first silently swaps a helmet's `1` with a boot's `3`.
+//! * Each tool tier's own attack-damage bonus, and the baseline-plus-bonus sum
+//!   that a sword or tool actually publishes. The published modifier is the
 //!   **sum**, so a diamond sword is `3.0 + 3.0`, not `3.0`.
-//! * `Items` — each weapon's own `attackDamageBaseline` (a sword is `3.0`, an axe
-//!   is per-tier, a shovel `1.5`, a pickaxe `1.0`, a hoe *negative* on several
-//!   tiers), plus `TridentItem.createAttributes`' flat `8.0` and
-//!   `MaceItem.createAttributes`' flat `5.0`, which are not tier-derived at all.
+//! * Each weapon's own attack-damage baseline (a sword is `3.0`, an axe is
+//!   per-tier, a shovel `1.5`, a pickaxe `1.0`, a hoe *negative* on several
+//!   tiers), plus the trident's flat `8.0` and the mace's flat `5.0`, which are
+//!   not tier-derived at all.
 //!
 //! # How to change it
 //!
@@ -62,8 +61,8 @@
 //! [`apply_equipment`] and out of [`AttributeMap::value`] with no other edit.
 //!
 //! The gotcha is the slot check. A modifier only applies in the slot vanilla
-//! publishes it for (`EquipmentSlotGroup.MAINHAND` for a weapon, the piece's own
-//! slot for armour), so [`ItemModifier::slot`] is load-bearing: without it a
+//! publishes it for (the main hand for a weapon, the piece's own slot for
+//! armour), so [`ItemModifier::slot`] is load-bearing: without it a
 //! sword in the off-hand or a helmet sitting in the hotbar would add its damage
 //! or armour anyway. That is exactly the bug shape "held" versus "worn" invites,
 //! and it is why [`apply_equipment`] takes `(slot, item)` pairs rather than a
@@ -82,10 +81,10 @@ use std::str::FromStr;
 
 /// The equipment slots that carry combat-relevant attribute modifiers.
 ///
-/// A subset of vanilla's `EquipmentSlot`: `BODY` and `SADDLE` are mount
-/// equipment with no player inventory slot, and nothing in this workspace
-/// equips them, so admitting them here would be an unreachable arm rather than
-/// coverage.
+/// A subset of vanilla's own equipment-slot set: the body-armour and saddle
+/// slots are mount equipment with no player inventory slot, and nothing in
+/// this workspace equips them, so admitting them here would be an unreachable
+/// arm rather than coverage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EquipmentSlot {
     /// The selected hotbar item — the only slot a weapon's damage counts in.
@@ -113,9 +112,10 @@ impl EquipmentSlot {
 
 /// One attribute modifier an item publishes, and the slot it publishes it for.
 ///
-/// Mirrors one `ItemAttributeModifiers.Entry`: the modifier plus its
-/// `EquipmentSlotGroup`. Every vanilla entry this module models targets exactly
-/// one slot, so `slot` is a single value rather than a group.
+/// Mirrors one entry of vanilla's own item-attribute-modifiers component: the
+/// modifier plus the slot group it applies in. Every vanilla entry this module
+/// models targets exactly one slot, so `slot` is a single value rather than a
+/// group.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ItemModifier {
     /// The slot the item must occupy for this modifier to count.
@@ -130,17 +130,17 @@ pub struct ItemModifier {
     pub operation: Operation,
 }
 
-/// Per-material armour numbers, exactly the `ArmorMaterial` record's fields this
-/// module needs.
+/// Per-material armour numbers, exactly the fields vanilla's own armour-material
+/// record needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ArmorMaterial {
-    /// `makeDefense`'s helmet argument.
+    /// The helmet defence value.
     helmet: f64,
-    /// `makeDefense`'s chest argument.
+    /// The chestplate defence value.
     chestplate: f64,
-    /// `makeDefense`'s legs argument.
+    /// The leggings defence value.
     leggings: f64,
-    /// `makeDefense`'s boots argument.
+    /// The boots defence value.
     boots: f64,
     /// Per-piece `armor_toughness`.
     toughness: f64,
@@ -148,7 +148,7 @@ struct ArmorMaterial {
     knockback_resistance: f64,
 }
 
-/// `ArmorMaterials.LEATHER`: `makeDefense(1, 2, 3, 1, 3)`, toughness `0.0`.
+/// Leather: defence values `(boots 1, legs 2, chest 3, helm 1)`, toughness `0.0`.
 const LEATHER: ArmorMaterial = ArmorMaterial {
     helmet: 1.0,
     chestplate: 3.0,
@@ -157,7 +157,7 @@ const LEATHER: ArmorMaterial = ArmorMaterial {
     toughness: 0.0,
     knockback_resistance: 0.0,
 };
-/// `ArmorMaterials.COPPER`: `makeDefense(1, 3, 4, 2, 4)`.
+/// Copper: defence values `(boots 1, legs 3, chest 4, helm 2)`.
 const COPPER_ARMOR: ArmorMaterial = ArmorMaterial {
     helmet: 2.0,
     chestplate: 4.0,
@@ -166,7 +166,7 @@ const COPPER_ARMOR: ArmorMaterial = ArmorMaterial {
     toughness: 0.0,
     knockback_resistance: 0.0,
 };
-/// `ArmorMaterials.CHAINMAIL`: `makeDefense(1, 4, 5, 2, 4)`.
+/// Chainmail: defence values `(boots 1, legs 4, chest 5, helm 2)`.
 const CHAINMAIL: ArmorMaterial = ArmorMaterial {
     helmet: 2.0,
     chestplate: 5.0,
@@ -175,7 +175,7 @@ const CHAINMAIL: ArmorMaterial = ArmorMaterial {
     toughness: 0.0,
     knockback_resistance: 0.0,
 };
-/// `ArmorMaterials.IRON`: `makeDefense(2, 5, 6, 2, 5)`.
+/// Iron: defence values `(boots 2, legs 5, chest 6, helm 2)`.
 const IRON_ARMOR: ArmorMaterial = ArmorMaterial {
     helmet: 2.0,
     chestplate: 6.0,
@@ -184,7 +184,7 @@ const IRON_ARMOR: ArmorMaterial = ArmorMaterial {
     toughness: 0.0,
     knockback_resistance: 0.0,
 };
-/// `ArmorMaterials.GOLD`: `makeDefense(1, 3, 5, 2, 7)`.
+/// Gold: defence values `(boots 1, legs 3, chest 5, helm 2)`.
 const GOLD_ARMOR: ArmorMaterial = ArmorMaterial {
     helmet: 2.0,
     chestplate: 5.0,
@@ -193,7 +193,7 @@ const GOLD_ARMOR: ArmorMaterial = ArmorMaterial {
     toughness: 0.0,
     knockback_resistance: 0.0,
 };
-/// `ArmorMaterials.DIAMOND`: `makeDefense(3, 6, 8, 3, 11)`, toughness `2.0`.
+/// Diamond: defence values `(boots 3, legs 6, chest 8, helm 3)`, toughness `2.0`.
 const DIAMOND_ARMOR: ArmorMaterial = ArmorMaterial {
     helmet: 3.0,
     chestplate: 8.0,
@@ -202,8 +202,8 @@ const DIAMOND_ARMOR: ArmorMaterial = ArmorMaterial {
     toughness: 2.0,
     knockback_resistance: 0.0,
 };
-/// `ArmorMaterials.NETHERITE`: `makeDefense(3, 6, 8, 3, 19)`, toughness `3.0`,
-/// knockback resistance `0.1` — the only material with a non-zero one.
+/// Netherite: defence values `(boots 3, legs 6, chest 8, helm 3)`, toughness
+/// `3.0`, knockback resistance `0.1` — the only material with a non-zero one.
 const NETHERITE_ARMOR: ArmorMaterial = ArmorMaterial {
     helmet: 3.0,
     chestplate: 8.0,
@@ -212,8 +212,8 @@ const NETHERITE_ARMOR: ArmorMaterial = ArmorMaterial {
     toughness: 3.0,
     knockback_resistance: 0.1,
 };
-/// `ArmorMaterials.TURTLE_SCUTE`: `makeDefense(2, 5, 6, 2, 5)`. Only the helmet
-/// exists as an item.
+/// Turtle scute: defence values `(boots 2, legs 5, chest 6, helm 2)`. Only the
+/// helmet exists as an item.
 const TURTLE_SCUTE: ArmorMaterial = ArmorMaterial {
     helmet: 2.0,
     chestplate: 6.0,
@@ -264,7 +264,7 @@ const fn defense_for(material: ArmorMaterial, slot: EquipmentSlot) -> f64 {
     }
 }
 
-/// Vanilla's `armor.<type name>` modifier id for a slot (`ArmorType.getName`).
+/// Vanilla's `armor.<type name>` modifier id for a slot.
 const fn armor_modifier_id(slot: EquipmentSlot) -> &'static str {
     match slot {
         EquipmentSlot::Head => "armor.helmet",
@@ -275,10 +275,10 @@ const fn armor_modifier_id(slot: EquipmentSlot) -> &'static str {
     }
 }
 
-/// `Item.BASE_ATTACK_DAMAGE_ID`, the id every weapon's damage modifier carries.
+/// Vanilla's own stable id, the one every weapon's damage modifier carries.
 pub const BASE_ATTACK_DAMAGE_ID: &str = "base_attack_damage";
 
-/// The published `ATTACK_DAMAGE` modifier amount for a weapon item id, if it is
+/// The published attack-damage modifier amount for a weapon item id, if it is
 /// one — already `attackDamageBaseline + material.attackDamageBonus()`, which is
 /// the value vanilla actually puts in the component.
 ///
@@ -297,7 +297,7 @@ pub fn weapon_attack_damage(path: &str) -> Option<f64> {
         return Some(flat);
     }
     let (material, kind) = path.rsplit_once('_')?;
-    // `ToolMaterial.attackDamageBonus`, in the record's own order.
+    // Each tool tier's own attack-damage bonus, in vanilla's own order.
     let bonus = match material {
         "wooden" => 0.0,
         "stone" | "copper" => 1.0,
@@ -307,9 +307,9 @@ pub fn weapon_attack_damage(path: &str) -> Option<f64> {
         "golden" => 0.0,
         _ => return None,
     };
-    // `Items`' own per-item `attackDamageBaseline`. A sword is a flat 3.0 across
-    // every tier; the others are per-tier, and a hoe's is negative on four of
-    // them, so this cannot be collapsed into one number per kind.
+    // Each item's own per-item attack-damage baseline. A sword is a flat 3.0
+    // across every tier; the others are per-tier, and a hoe's is negative on
+    // four of them, so this cannot be collapsed into one number per kind.
     let baseline = match (kind, material) {
         ("sword", _) => 3.0,
         ("shovel", _) => 1.5,
@@ -328,8 +328,8 @@ pub fn weapon_attack_damage(path: &str) -> Option<f64> {
 }
 
 /// The two weapons whose attack damage is a flat literal rather than
-/// tier-derived: `TridentItem.createAttributes` publishes `8.0` and
-/// `MaceItem.createAttributes` publishes `5.0`, neither through `ToolMaterial`.
+/// tier-derived: the trident publishes `8.0` and the mace publishes `5.0`,
+/// neither one derived from a tool tier.
 fn trident_or_mace(path: &str) -> Option<f64> {
     match path {
         "trident" => Some(8.0),
@@ -348,8 +348,7 @@ pub fn item_modifiers(path: &str) -> Vec<ItemModifier> {
     if let Some((material, slot)) = armor_piece(path) {
         let id = armor_modifier_id(slot);
         // Vanilla emits ARMOR and ARMOR_TOUGHNESS unconditionally and
-        // KNOCKBACK_RESISTANCE only when non-zero (`ArmorMaterial.java`'s
-        // `if (this.knockbackResistance > 0.0F)`). Reproduced, because an
+        // KNOCKBACK_RESISTANCE only when non-zero. Reproduced, because an
         // explicit `0.0` modifier is observable through `modifier_count`.
         let mut out = vec![
             ItemModifier {
@@ -421,7 +420,7 @@ where
 /// A player's own base attributes, before equipment.
 ///
 /// The one value that must not be taken from the attribute registry:
-/// `Player.createAttributes` sets `ATTACK_DAMAGE` to **`1.0`**, while
+/// vanilla's own player base attributes set attack damage to **`1.0`**, while
 /// [`crate::attribute::default_def`]'s registry default for the same attribute
 /// is `2.0`. Every mob in the game gets its base from its own species table, so
 /// the registry default is never a player's, and a bare-hand punch reading `2.0`
@@ -435,7 +434,7 @@ pub fn player_attributes() -> AttributeMap {
     attrs
 }
 
-/// `Player.createAttributes`' `add(Attributes.ATTACK_DAMAGE, 1.0)`.
+/// A player's own base attack damage, before any equipment.
 pub const PLAYER_BASE_ATTACK_DAMAGE: f64 = 1.0;
 
 /// Reads a bare attribute path out of `attrs`, falling back to `0.0` when the
@@ -537,8 +536,9 @@ mod tests {
     ///
     /// This is a magnitude check, not a "did it go up" one. The pieces are
     /// `3 + 8 + 6 + 3`, and the plausible wrong transcription — reading
-    /// `makeDefense`'s arguments head-first instead of boots-first, which its
-    /// own signature invites — swaps helmet with boots and leggings with
+    /// vanilla's defence-value arguments head-first instead of boots-first,
+    /// which their own declared order invites — swaps helmet with boots and
+    /// leggings with
     /// chestplate. That mis-read yields `1 + 6 + 8 + 3 = 18`... which is why
     /// the assertion below pins the *individual* pieces too: the swapped total
     /// for diamond happens to be close, and only the per-piece values separate
@@ -569,7 +569,7 @@ mod tests {
     }
 
     /// Iron is the case where the boots-first mis-read is *visible in the
-    /// total*: `makeDefense(2, 5, 6, 2, 5)` read head-first gives helmet 2,
+    /// total*: the raw values `(2, 5, 6, 2, 5)` read head-first give helmet 2,
     /// chest 5, legs 6, boots 2 — a per-piece swap of legs and chest that the
     /// total (15 either way) cannot see. So this asserts the two pieces that
     /// differ, and evaluates the wrong hypothesis explicitly so the inputs
@@ -578,7 +578,7 @@ mod tests {
     fn iron_pieces_land_on_the_boots_first_reading_not_the_head_first_one() {
         let chest = player_combat_stats(vec![(EquipmentSlot::Chest, "iron_chestplate")]);
         let legs = player_combat_stats(vec![(EquipmentSlot::Legs, "iron_leggings")]);
-        // Correct: `makeDefense(boots=2, legs=5, chest=6, helm=2, body=5)`.
+        // Correct: boots=2, legs=5, chest=6, helm=2, body=5.
         assert!((chest.defenses.armor - 6.0).abs() < 1e-6, "chest {}", chest.defenses.armor);
         assert!((legs.defenses.armor - 5.0).abs() < 1e-6, "legs {}", legs.defenses.armor);
         // The wrong hypothesis, computed rather than described: head-first
@@ -592,9 +592,9 @@ mod tests {
     /// A real sword does more damage than a fist, and lands on the exact
     /// vanilla number rather than merely being larger.
     ///
-    /// Bare hand is `1.0` (`Player.createAttributes`); a diamond sword adds
-    /// `attackDamageBaseline 3.0 + ToolMaterial.DIAMOND.attackDamageBonus 3.0`,
-    /// so `7.0`. The two competing wrong hypotheses are both evaluated here:
+    /// Bare hand is `1.0` (a player's own base attack damage); a diamond sword
+    /// adds a `3.0` baseline plus the diamond tier's `3.0` bonus, so `7.0`.
+    /// The two competing wrong hypotheses are both evaluated here:
     /// forgetting the material bonus gives `4.0`, and taking the attribute
     /// registry's `2.0` base instead of the player's `1.0` gives `8.0`. All
     /// three answers differ, so the input is not one where they coincide.
