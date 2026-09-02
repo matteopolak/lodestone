@@ -1,4 +1,4 @@
-//! Issue #373: the HUD hotbar and an open container's player rows must be the
+//! The HUD hotbar and an open container's player rows must be the
 //! **same** player inventory.
 //!
 //! # What was measured, and why these tests look like this
@@ -31,10 +31,10 @@
 //! `docs/container-clicks.md` documents — never by writing a slot directly.
 //!
 //! Expected landing slots are hand-derived from 26.2, not from this port:
-//! `ChestMenu.quickMoveStack` moves a container stack with
+//! vanilla's own chest quick-move step moves a container stack with
 //! `moveItemStackTo(stack, containerSize, slots.size(), true)`
-//! (`ChestMenu.java:94-109`) and `CraftingMenu` moves the result with
-//! `moveItemStackTo(stack, 10, 46, true)` (`CraftingMenu.java:107-152`); the
+//! and its own crafting-table quick-move step moves the result with
+//! `moveItemStackTo(stack, 10, 46, true)`; the
 //! trailing `true` is `reverseDirection`, so both fill from the **last** menu
 //! slot backwards. The last slot of either menu is the ninth hotbar cell, native
 //! index 8.
@@ -141,7 +141,8 @@ fn crafting_result_quick_moved_to_the_hotbar_is_visible_to_the_hud() {
     assert_eq!(
         menus.player().player_native(LAST_HOTBAR_NATIVE),
         Some(&game("minecraft:torch", 4)),
-        "the HUD's hotbar view must see the crafted stack; before #373 it saw None"
+        "the HUD's hotbar view must see the crafted stack; before the single-owner \
+         inventory fix it saw None"
     );
 }
 
@@ -182,7 +183,8 @@ fn the_hotbar_still_has_it_after_the_screen_closes() {
     );
 }
 
-/// The other direction, and the second question issue #373 asked: a window-0
+/// The other direction, and the second question the single-owner-inventory fix
+/// asked: a window-0
 /// `container_set_slot` arriving **while another window is open** must reach the
 /// one inventory, so the open container's own player rows show it too.
 ///
