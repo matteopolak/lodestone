@@ -9,7 +9,7 @@
 //! # Why the shell owns sprite resolution
 //!
 //! A [`SpriteSource::BlockState`] names a block state, not a texture. Turning it
-//! into UVs needs the baked model set — vanilla's `BakedModel.particleIcon()`,
+//! into UVs needs the baked model set — vanilla's own baked-model particle-icon accessor,
 //! which is the model's `#particle` variable and is emphatically **not** the
 //! texture of any of its faces (`grass_block` declares `block/dirt`). Only the
 //! shell holds both the engine and the atlas, so the join happens here.
@@ -63,7 +63,7 @@ use wgpu::util::DeviceExt;
 ///
 /// Two unrelated uses, and only one of them is a real vanilla value.
 /// `infested`, `raid_omen` and `trial_omen` are registered against
-/// `SpellParticle.Provider`, which takes a bare `SimpleParticleType` and never
+/// vanilla's own spell-particle provider, which takes a bare `SimpleParticleType` and never
 /// calls `setColor` at all — white *is* their colour, and their sprites carry
 /// the tint. `effect`, `entity_effect` and `instant_effect` reach it only on
 /// the fallback arms, where a connection's protocol family gave this client no
@@ -199,9 +199,9 @@ pub struct Particles {
     /// Per-block-state particle **tint** multiplier, indexed by state id and
     /// aligned with `state_uv`. `[1.0; 3]` for an untinted state.
     ///
-    /// This exists because vanilla's `TerrainParticle` does not multiply its
-    /// `0.6` grey by white — it multiplies by
-    /// `blockColors.getTintSource(state, 0).colorAsTerrainParticle(…)`. The
+    /// This exists because vanilla's own terrain-particle type does not multiply its
+    /// `0.6` grey by white — it multiplies by the block's own tint source, resolved
+    /// through the same per-block-state colour lookup its foliage/water tinting uses. The
     /// blocks that have such a source are exactly the ones whose sprites are
     /// **greyscale in the atlas** (`grass`, `fern`, the leaves, `sugar_cane`,
     /// `redstone_dust_*`), so dropping the tint does not merely desaturate their
@@ -360,7 +360,7 @@ impl Particles {
         self.last
     }
 
-    /// Emit vanilla's block-destruction burst — `ClientLevel.addDestroyBlockEffect`.
+    /// Emit vanilla's block-destruction burst — vanilla's own client-level add-destroy-block-effect.
     ///
     /// The shape is passed in rather than queried because vanilla reads the
     /// block's *outline* shape, not its collision shape, and the two differ for
@@ -384,11 +384,11 @@ impl Particles {
     }
 
     /// Emit the single fragment vanilla throws each time a mining hit lands on a
-    /// face — `ClientLevel.addBreakingBlockEffect`.
+    /// face — vanilla's own client-level add-breaking-block-effect.
     ///
     /// `tint` is an extra multiplier on top of the state's own particle tint,
     /// exactly as in [`destroy_block`](Self::destroy_block): the two emitters
-    /// both construct a `TerrainParticle`, so they must tint identically or a
+    /// both construct vanilla's own terrain particle, so they must tint identically or a
     /// block's mining flecks and its final burst come out different colours.
     pub fn breaking_block(&mut self, block: [i32; 3], state: u32, tint: [f32; 3], face: emit::Face) {
         let tint = self.state_tint_of(state, tint);
@@ -402,9 +402,9 @@ impl Particles {
         );
     }
 
-    /// `extra` multiplied by `state`'s own particle tint — the
-    /// `rCol *= tintSource.colorAsTerrainParticle(state, level, pos)` step of
-    /// vanilla's `TerrainParticle` constructor.
+    /// `extra` multiplied by `state`'s own particle tint — the same
+    /// tint-source-multiply step of
+    /// vanilla's own terrain-particle constructor.
     ///
     /// # Why this is folded in here rather than passed by the caller
     ///
@@ -442,7 +442,7 @@ impl Particles {
             .count()
     }
 
-    /// Vanilla's `ClientPacketListener.handleParticleEvent` — the general
+    /// Vanilla's own client-side particle-event handling — the general
     /// `LEVEL_PARTICLES` packet path, as opposed to the `LevelEvent` 2001
     /// shortcut [`Self::destroy_block`] covers. Spawns `count` particles of
     /// `kind` (the particle type's namespace-stripped path, e.g. `"flame"`)
@@ -520,7 +520,7 @@ impl Particles {
     }
 
     /// Dispatches one particle to the emitter matching `kind`. Mirrors
-    /// `Level.addParticle`'s per-type dispatch, narrowed to the sheet
+    /// vanilla's own add-particle per-type dispatch, narrowed to the sheet
     /// particles [`lodestone_particle::emit`] implements today.
     fn spawn_one(&mut self, kind: &str, pos: [f64; 3], vel: [f64; 3], options: ParticleOptions) {
         let [x, y, z] = pos;
@@ -548,7 +548,7 @@ impl Particles {
                 let size = xa as f32;
                 emit::sweep_attack(&mut self.engine, x, y, z, size);
             }
-            // The `CritParticle` family. All three share one constructor and
+            // Vanilla's own crit-particle family. All three share one constructor and
             // differ only in sheet plus a provider-level tweak; see
             // `emit::crit_particle`'s callers. `enchanted_hit` is the one this
             // client's own sprite table already knew about and nothing emitted
@@ -556,12 +556,12 @@ impl Particles {
             // and unreachable since the sheet enum was written.
             "enchanted_hit" => emit::enchanted_hit(&mut self.engine, x, y, z, xa, ya, za),
             "damage_indicator" => emit::damage_indicator(&mut self.engine, x, y, z, xa, ya, za),
-            // The `SpellParticle` family, over the four sheets vanilla's own
+            // Vanilla's own spell-particle family, over the four sheets vanilla's own
             // `particles/*.json` assign it. `witch` (below) is the fifth
             // member; it draws its tint from the RNG rather than from a
             // provider constant, so it keeps its own emitter.
             //
-            // `effect`/`instant_effect` carry a `SpellParticleOption` (an RGB
+            // `effect`/`instant_effect` carry vanilla's own spell-particle option (an RGB
             // word plus a velocity multiplier) and `entity_effect` a
             // `ColorParticleOption` (an ARGB word). Those payloads are the
             // *whole* of a potion particle's colour — the class has no palette
@@ -590,7 +590,7 @@ impl Particles {
                 _ => {
                     tracing::debug!(
                         target: "particles",
-                        "effect particle with no SpellParticleOption payload; \
+                        "effect particle with no spell-particle-option payload; \
                          drawing an untinted white mote"
                     );
                     emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::Effect, WHITE);
@@ -614,7 +614,7 @@ impl Particles {
                 _ => {
                     tracing::debug!(
                         target: "particles",
-                        "instant_effect particle with no SpellParticleOption payload; \
+                        "instant_effect particle with no spell-particle-option payload; \
                          drawing an untinted white mote"
                     );
                     emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::Spell, WHITE);
@@ -652,7 +652,7 @@ impl Particles {
             "trial_omen" => {
                 emit::spell(&mut self.engine, x, y, z, xa, ya, za, Sheet::TrialOmen, WHITE);
             }
-            // `FlyTowardsPositionParticle`'s two argument-identical providers.
+            // Vanilla's own fly-towards-position particle's two argument-identical providers.
             // The wire's three velocity words are an **offset** for these, not a
             // velocity — see `emit::fly_towards_position`.
             "enchant" => {
@@ -667,18 +667,19 @@ impl Particles {
             "happy_villager" => emit::happy_villager(&mut self.engine, x, y, z, xa, ya, za),
             "witch" => emit::witch(&mut self.engine, x, y, z, xa, ya, za),
             "totem_of_undying" => emit::totem_of_undying(&mut self.engine, x, y, z, xa, ya, za),
-            // `ParticleTypes.EXPLOSION_EMITTER`/`EXPLOSION`.
+            // `minecraft:explosion_emitter`/`minecraft:explosion`.
             // Correction the doc for these two carried until this pass: they
             // are **not** blocked on the shared `ParticleOptions` decoder
             // (`docs/particle-catalogue.md`'s "explosion_emitter"/"explosion"
-            // section) — both are argument-less `SimpleParticleType`s, and
+            // section) — both are argument-less particle types with no encoded
+            // fields, and
             // `decode_explode` already recognises their registry ids. What
             // was missing was exactly this arm plus the `Sheet`/`Behaviour`
             // pair in `lodestone_particle`, not a decoder.
             //
-            // `explosion_emitter` (the seed vanilla's own `explode` packet
-            // actually names — `Level.java`) ignores every
-            // positional argument here: `HugeExplosionSeedParticle`'s
+            // `explosion_emitter` (the seed vanilla's own explosion packet
+            // actually names) ignores every
+            // positional argument here: vanilla's own explosion-seed particle
             // constructor reads none. `explosion` reuses `xa` as the
             // constructor's `size` parameter, the same repurposing
             // `sweep_attack` above already does for its own `size`.
@@ -698,11 +699,11 @@ impl Particles {
             // three velocity words are exactly what the wire sent and nothing
             // needs the `ParticleOptions` decoder. Several *also* have a
             // client-predicted emitter — see `Sim::tick_ambient_particles` —
-            // because vanilla spawns them from `Block.animateTick` rather than
+            // because vanilla spawns them from its own per-block animate-tick rather than
             // over the network; a type can legitimately have both.
             "soul" => emit::soul(&mut self.engine, x, y, z, xa, ya, za),
             "soul_fire_flame" => emit::soul_fire_flame(&mut self.engine, x, y, z, xa, ya, za),
-            // `reverse_portal` shares `PortalParticle` and differs only in the
+            // `reverse_portal` shares vanilla's own portal-particle implementation and differs only in the
             // sign the *caller* gives the offset, which the wire already carries.
             "portal" | "reverse_portal" => emit::portal(&mut self.engine, x, y, z, xa, ya, za),
             "campfire_cosy_smoke" => {
@@ -712,8 +713,8 @@ impl Particles {
                 emit::campfire_smoke(&mut self.engine, x, y, z, xa, ya, za, true);
             }
             "end_rod" => emit::end_rod(&mut self.engine, x, y, z, xa, ya, za),
-            // The `GlowParticle` family, all five over `particle/glow`. These
-            // two shared one approximation of `FireworkParticles.SparkParticle`
+            // Vanilla's own glow-particle family, all five over `particle/glow`. These
+            // two shared one approximation of its own firework spark particle
             // until this pass — a plausible-looking spark with the wrong
             // friction, the wrong lifetime, no tint and collision left on, and
             // `glow`'s own provider (a glow squid's two-population shimmer)
@@ -723,8 +724,8 @@ impl Particles {
             "scrape" => emit::scrape(&mut self.engine, x, y, z, xa, ya, za),
             "wax_on" => emit::wax_on(&mut self.engine, x, y, z, xa, ya, za),
             "wax_off" => emit::wax_off(&mut self.engine, x, y, z, xa, ya, za),
-            // `FlameParticle.Provider`'s other two registry types, and
-            // `SmallFlameProvider`. Each names its own sheet; the shared
+            // Vanilla's own flame-particle provider's other two registry types, and
+            // its own small-flame provider. Each names its own sheet; the shared
             // provider decides nothing.
             "copper_fire_flame" => {
                 emit::copper_fire_flame(&mut self.engine, x, y, z, xa, ya, za);
@@ -732,11 +733,11 @@ impl Particles {
             "small_flame" => emit::small_flame(&mut self.engine, x, y, z, xa, ya, za),
             "sculk_soul" => emit::sculk_soul(&mut self.engine, x, y, z, xa, ya, za),
             "sculk_charge_pop" => emit::sculk_charge_pop(&mut self.engine, x, y, z, xa, ya, za),
-            // `PlayerCloudParticle`'s two providers. An area-effect cloud's
+            // Vanilla's own player-cloud-particle's two providers. An area-effect cloud's
             // puff and a panda's sneeze.
             "cloud" => emit::cloud(&mut self.engine, x, y, z, xa, ya, za),
             "sneeze" => emit::sneeze(&mut self.engine, x, y, z, xa, ya, za),
-            // `LavaParticle` reads none of the three velocity words: its
+            // Vanilla's own lava-particle reads none of the three velocity words: its
             // constructor damps them to 0.8 and then overwrites `yd` outright,
             // so every pop launches upward whatever the packet said. It is also
             // the only particle here that spawns a *different* type as it
@@ -744,15 +745,15 @@ impl Particles {
             "lava" => emit::lava(&mut self.engine, x, y, z),
             "squid_ink" => emit::squid_ink(&mut self.engine, x, y, z, xa, ya, za),
             "glow_squid_ink" => emit::glow_squid_ink(&mut self.engine, x, y, z, xa, ya, za),
-            // `FireworkParticles.SparkParticle` via `SparkProvider` -- the plain
+            // Vanilla's own firework spark particle via its own spark provider -- the plain
             // wire particle a `LEVEL_PARTICLES` packet can name directly, not the
-            // rocket-explosion burst a `Starter`/`NoRenderParticle` spawns
+            // rocket-explosion burst its own starter/no-render particle spawns
             // client-side (never sent over the wire at all). See
             // `docs/particle-catalogue.md`'s "Correction" entry for why this was
             // never blocked on the `ParticleOptions` decoder the way it first
-            // looked: `ParticleTypes.FIREWORK` is a `SimpleParticleType`.
+            // looked: vanilla's own firework particle type is a `SimpleParticleType`.
             "firework" => emit::firework(&mut self.engine, x, y, z, xa, ya, za),
-            // `DragonBreathParticle` — a dragon's breath attack and, far more
+            // Vanilla's own dragon-breath particle — a dragon's breath attack and, far more
             // commonly, every lingering potion cloud. Its `PowerParticleOption`
             // is a velocity multiplier and nothing else; the purple is drawn
             // per particle inside the emitter, so a missing payload costs
@@ -793,7 +794,8 @@ impl Particles {
             "gust" => {
                 emit::animated_ambient(&mut self.engine, x, y, z, 0.0, 0.0, 0.0, Sheet::Gust, 3.0, 12)
             }
-            // `Sheet::SmallGust`, not `Sheet::Gust`: `GustParticle.SmallProvider`
+            // `Sheet::SmallGust`, not `Sheet::Gust`: vanilla's own small-gust
+            // provider
             // shares the class but `small_gust.json` names `small_gust_0`…`_6`,
             // seven frames of its own. Pointed at `Gust` this sampled the wrong
             // texture and indexed a twelve-frame sequence it does not have.
@@ -815,7 +817,7 @@ impl Particles {
             // without ever falling.
             //
             // These take no velocity from the packet by design: vanilla's
-            // providers all use `DripParticle`'s zero-velocity constructor, and
+            // providers all use vanilla's own drip-particle's zero-velocity constructor, and
             // the only velocity a drip ever has is the one its hanging phase
             // hands to its falling phase.
             "dripping_water" => self.drip(DripKind::Water, DripPhase::Hang, pos),
@@ -840,14 +842,14 @@ impl Particles {
             "falling_dripstone_lava" => self.drip(DripKind::DripstoneLava, DripPhase::Fall, pos),
             "falling_spore_blossom" => self.drip(DripKind::SporeBlossom, DripPhase::Fall, pos),
             // `spore_blossom_air` used to sit in this drip block, and it is
-            // not a `DripParticle` at all — `SuspendedParticle.
+            // not a drip particle at all — vanilla's own suspended-particle.
             // SporeBlossomAirProvider`, which shares `drip_fall`'s *texture*
             // with `falling_spore_blossom` and nothing else. It hangs rather
             // than falling, and its lifetime is a flat 500..=1000 ticks against
             // the drip's own draw, so as a drip it vanished far too fast.
             "spore_blossom_air" => emit::spore_blossom_air(&mut self.engine, x, y, z),
 
-            // -- The `SuspendedParticle` biome drift ----------------
+            // -- Vanilla's own suspended-particle biome drift ----------------
             //
             // Four types over one class. Each supplies its own velocity inside
             // the emitter (vanilla's providers draw it, rather than taking it
@@ -923,12 +925,12 @@ impl Particles {
             // -- The `BlockParticleOption` family ------------------
             //
             // One wire payload, five providers. The payload is shared and the
-            // *behaviour* is not: three build a `TerrainParticle` (differing in
+            // *behaviour* is not: three build vanilla's own terrain particle (differing in
             // speed and lifetime), one a physics-free marker quad, one a
             // sheet-textured mote wearing the block's colour rather than its
             // texture. Every arm goes through `block_state_payload`, which is
             // where the `isAir`/`moving_piston` refusal lives — vanilla's
-            // `createTerrainParticle` returns `null` for those and a fragment of
+            // vanilla's own create-terrain-particle returns `null` for those and a fragment of
             // air is a fragment of nothing.
             "block" => {
                 if let Some(state) = self.block_state_payload(kind, options) {
@@ -948,7 +950,7 @@ impl Particles {
                     emit::dust_pillar(&mut self.engine, pos, vel, state, tint);
                 }
             }
-            // No tint: `BlockMarker`'s constructor never touches `rCol`, so a
+            // No tint: vanilla's own block-marker constructor never touches `rCol`, so a
             // marker over grass is the grass sprite at full brightness, not the
             // `0.6`-grey-times-biome-tint a fragment of it would be.
             "block_marker" => {
@@ -1018,7 +1020,7 @@ impl Particles {
             },
 
             "firefly" => emit::firefly(&mut self.engine, x, y, z, ya),
-            // `FireworkParticles.FlashProvider` reads all four ARGB components:
+            // Vanilla's own firework flash provider reads all four ARGB components:
             // the alpha byte is a real field here, not padding, and dropping it
             // makes every firework flash fully opaque.
             "flash" => match options {
@@ -1058,8 +1060,9 @@ impl Particles {
     /// logged rather than asserted for the same reason every other payload arm
     /// here logs.
     ///
-    /// The second is vanilla's own: `createTerrainParticle` returns `null` for
-    /// air and for `moving_piston`, and `FallingDustParticle.Provider` refuses
+    /// The second is vanilla's own: its own create-terrain-particle returns `null` for
+    /// air and for `moving_piston`, and vanilla's own falling-dust-particle
+    /// provider refuses
     /// an invisible-render-shape state. Air is the one that matters — a
     /// `LevelEvent`-adjacent producer that reads a block *after* it has been
     /// removed sends the air state, and without this test the client spends a
@@ -1124,25 +1127,24 @@ impl Particles {
     /// phase, pos, [0.0; 3])` calls: the zero velocity is the *whole* of what
     /// this adds, and spelling it seventeen times is seventeen chances to pass
     /// the packet's velocity words instead. Vanilla's providers all use
-    /// `DripParticle`'s zero-velocity constructor; the only velocity a drip ever
+    /// its own drip-particle's zero-velocity constructor; the only velocity a drip ever
     /// carries is the one its hanging phase hands on when it lets go.
     fn drip(&mut self, kind: DripKind, phase: DripPhase, pos: [f64; 3]) {
         emit::drip(&mut self.engine, kind, phase, pos, [0.0; 3]);
     }
 
-    /// Vanilla's `ClientLevel.calculateParticleLevel` folded together with
-    /// `doAddParticle`'s `particleLevel != MINIMAL` test — `true` to spawn.
+    /// Vanilla's own client-level particle-level calculation folded together with
+    /// its own add-particle "particle level not minimal" test — `true` to spawn.
     ///
     /// Transcribed rather than approximated, because the two halves are not
     /// separable: the fold is what makes `DECREASED` a *probability* rather
     /// than a second fixed budget.
     ///
-    /// ```text
-    /// level = options.particles
-    /// if always_show && level == MINIMAL && rand(10) == 0 { level = DECREASED }
-    /// if level == DECREASED && rand(3) == 0 { level = MINIMAL }
-    /// spawn if level != MINIMAL
-    /// ```
+    /// The level starts at the option's own setting; if always-show is set and
+    /// the level is minimal, a one-in-ten roll promotes it to decreased; then,
+    /// independently, a one-in-three roll on a decreased level demotes it back
+    /// to minimal. The particle spawns whenever the resulting level is not
+    /// minimal.
     ///
     /// So `All` always spawns, `Decreased` spawns two times in three, and
     /// `Minimal` spawns only via the always-show reprieve — `(1/10) x (2/3)`,
@@ -1152,7 +1154,7 @@ impl Particles {
     /// on a 26.2 connection, threaded through `ClientEvent::Particles` and
     /// `NetUpdate::Particles` to `net_apply.rs`'s arm. It is `false` on every
     /// legacy family because the field does not exist on their particle
-    /// packets, which is the same value vanilla's own `addParticle` overload
+    /// packets, which is the same value vanilla's own particle-spawn overload
     /// passes, not an unported one.
     ///
     /// Note the reprieve is a *probability*, not an exemption: an always-show
@@ -1162,7 +1164,8 @@ impl Particles {
     ///
     /// Draws from the particle engine's own `JavaRandom`, which is
     /// `java.util.Random`-compatible, so `next_i32_bound` is vanilla's
-    /// `nextInt` exactly. Not the same *stream* as vanilla's `level.random`,
+    /// `nextInt` exactly. Not the same *stream* as vanilla's own per-level
+    /// random source,
     /// which does not matter: nothing observes particle randomness across the
     /// wire.
     pub fn particle_level_permits(
@@ -1539,7 +1542,7 @@ impl ParticleRenderer {
         // One deliberate deviation: vanilla's opaque pipeline has no blending at
         // all, and this one keeps `ALPHA_BLENDING`. `Behaviour::layer()` assigns
         // every `Terrain` particle to `Layer::Opaque` unconditionally, where
-        // vanilla's `Layer.bySprite` consults the sprite's own transparency and
+        // vanilla's own by-sprite layer selection consults the sprite's own transparency and
         // sends a translucent block texture to `TRANSLUCENT_TERRAIN` instead. So
         // a broken glass or ice block reaches this pipeline here and would not
         // in vanilla, and a non-blending pipeline would draw it as opaque
@@ -1798,7 +1801,7 @@ impl ParticleRenderer {
     /// water. No-op when the last [`prepare`](Self::prepare) produced no opaque
     /// instances.
     ///
-    /// This is vanilla's `solid` submission of the particle group: block-break
+    /// This is vanilla's own opaque-layer submission of the particle group: block-break
     /// debris, crits, flame, bubbles and the rest of [`Layer::Opaque`] go in
     /// here, with depth write on, so the water surface blends over the ones
     /// beneath it and depth-rejects over the ones in front of it. See
@@ -1819,7 +1822,7 @@ impl ParticleRenderer {
     }
 
     /// Record the **translucent-layer** draw, which runs after translucent
-    /// water as vanilla's `afterTerrain` phase does. No-op when the last
+    /// water as vanilla's own after-terrain draw phase does. No-op when the last
     /// [`prepare`](Self::prepare) produced no translucent instances.
     /// Returns the number of instances submitted, for the reason
     /// [`draw_opaque`](Self::draw_opaque) documents.
@@ -1957,7 +1960,7 @@ mod tests {
             // below), so it would fail this loop's `drawn == 1` assertion for
             // a reason that has nothing to do with dispatch being broken.
             ("explosion", [0.0, 0.0, 0.0]),
-            // `firework` (`FireworkParticles.SparkParticle`/`SparkProvider`):
+            // `firework` (vanilla's own firework spark particle/provider):
             // the dispatch arm this module was missing while `emit::firework`
             // itself already existed -- see `docs/particle-catalogue.md`'s
             // "Correction" entry. `count == 1` here (like every other case in
@@ -1965,8 +1968,8 @@ mod tests {
             // velocity from `gaussian() * max_speed` with `max_speed == 0.0`,
             // so this proves reachability, not a specific spark velocity.
             ("firework", [0.3, 0.1, -0.2]),
-            // The `CritParticle` and `SpellParticle` families, and the two
-            // `FlyTowardsPositionParticle` types.
+            // Vanilla's own crit-particle and spell-particle families, and the two
+            // fly-towards-position particle types.
             ("enchanted_hit", [0.0, 0.0, 0.0]),
             ("damage_indicator", [0.0, 0.0, 0.0]),
             ("effect", [0.0, 0.0, 0.0]),
@@ -1977,7 +1980,7 @@ mod tests {
             ("trial_omen", [0.0, 0.0, 0.0]),
             ("enchant", [0.4, 0.7, -0.3]),
             ("nautilus", [0.4, 0.7, -0.3]),
-            // The ambient/biome family: `SuspendedParticle`,
+            // The ambient/biome family: vanilla's own suspended particle,
             // `SuspendedTownParticle`, the rest of `BaseAshSmokeParticle`, and
             // `ExplodeParticle`.
             ("spore_blossom_air", [0.0, 0.0, 0.0]),
@@ -1993,7 +1996,7 @@ mod tests {
             ("white_smoke", [0.0, 0.0, 0.0]),
             ("poof", [0.0, 0.0, 0.0]),
             ("spit", [0.0, 0.0, 0.0]),
-            // The `GlowParticle` family and the flame/soul siblings.
+            // Vanilla's own glow-particle family and the flame/soul siblings.
             ("electric_spark", [0.0, 0.0, 0.0]),
             ("glow", [0.0, 0.0, 0.0]),
             ("scrape", [0.0, 0.0, 0.0]),
@@ -2020,7 +2023,7 @@ mod tests {
             ("dripping_dripstone_lava", [0.0, 0.0, 0.0]),
             ("falling_dripstone_lava", [0.0, 0.0, 0.0]),
             ("falling_spore_blossom", [0.0, 0.0, 0.0]),
-            // `PlayerCloudParticle`, `LavaParticle`, `SquidInkParticle` and the
+            // Vanilla's own player-cloud, lava, squid-ink particles and the
             // sculk-charge burst.
             ("cloud", [0.0, 0.0, 0.0]),
             ("sneeze", [0.0, 0.0, 0.0]),
@@ -2385,13 +2388,13 @@ mod tests {
         );
     }
 
-    /// Each type in the `CritParticle`/`SpellParticle`/`FlyTowardsPosition`
+    /// Each type in vanilla's own crit-particle/spell-particle/fly-towards-position
     /// families must sample the sheet **its own `particles/<name>.json` names**,
     /// not the one its Java class's better-known sibling uses.
     ///
     /// Vanilla assigns sheets per registry type, never per class: six types
-    /// share `SpellParticle` across four different sheets, and the damage
-    /// indicator is a `CritParticle` that does *not* share the crit sprite.
+    /// share vanilla's own spell-particle across four different sheets, and the damage
+    /// indicator is vanilla's own crit particle that does *not* share the crit sprite.
     /// Deriving the sheet from the class is the mistake that would put
     /// `spell_N` texels on a potion mote and leave `Sheet::Effect` dead a
     /// second time — and it is invisible at the draw site, since every wrong
@@ -2417,7 +2420,7 @@ mod tests {
             ("instant_effect", Sheet::Spell),
             ("witch", Sheet::Spell),
             // Single-texture sheets of their own, despite sharing
-            // `SpellParticle` with the four above.
+            // vanilla's own spell-particle with the four above.
             ("infested", Sheet::Infested),
             ("raid_omen", Sheet::RaidOmen),
             ("trial_omen", Sheet::TrialOmen),
@@ -2649,7 +2652,7 @@ mod tests {
             0x22 as f32 / 255.0,
             0x33 as f32 / 255.0,
         ];
-        // `SpellParticleOption`: RGB24 then an f32 power. Power 1.0 here so
+        // Vanilla's own spell-particle option: RGB24 then an f32 power. Power 1.0 here so
         // this gate measures only the tint; `spell_instant`'s velocity
         // multiplier has its own gate below.
         let mut spell_options = Vec::new();
@@ -2660,7 +2663,7 @@ mod tests {
             let particle = spawn_from_wire(id, &spell_options);
             assert_eq!(
                 particle.colour, want_rgb,
-                "{name}'s SpellParticleOption colour must reach the particle, \
+                "{name}'s spell-particle-option colour must reach the particle, \
                  not the white default"
             );
         }
@@ -2689,11 +2692,11 @@ mod tests {
         );
     }
 
-    /// `SpellParticleOption`'s second field, on the one input where the right
+    /// Vanilla's own spell-particle option's second field, on the one input where the right
     /// formula and the plausible wrong one give different answers regardless of
     /// what the RNG drew.
     ///
-    /// `Particle.setPower` is `xd *= p; yd = (yd - 0.1) * p + 0.1; zd *= p` --
+    /// Vanilla's own particle set-power is `xd *= p; yd = (yd - 0.1) * p + 0.1; zd *= p` --
     /// it rescales the vertical component **about** the `0.1` upward bias the
     /// base constructor added, rather than multiplying it. At `power = 0.0`
     /// the correct formula lands on exactly `(0, 0.1, 0)` while a naive
@@ -2784,13 +2787,13 @@ mod tests {
         );
     }
 
-    /// `PowerParticleOption` reaching `Particle.setPower`, on the same
+    /// `PowerParticleOption` reaching vanilla's own particle set-power, on the same
     /// deterministic input the `effect` gate uses and for the same reason: at
     /// `power = 0.0` the correct formula lands on exactly `(0, 0.1, 0)` and the
     /// plausible wrong one (`yd *= power`) on `(0, 0, 0)`.
     ///
     /// `dragon_breath` is the sharper of the two subjects, because unlike
-    /// `SpellParticle` its constructor assigns the packet's velocity words
+    /// vanilla's own spell particle its constructor assigns the packet's velocity words
     /// **directly** — no jitter, no `0.1` bias — so the `+ 0.1` that survives
     /// here can only have come from `setPower` itself.
     #[test]
@@ -2997,7 +3000,7 @@ mod tests {
     /// Vanilla's `count == 0` special case: exactly **one** particle, at the
     /// *exact* position (no positional jitter), whose velocity is
     /// `max_speed * offset` per axis — confirmed against
-    /// `ClientPacketListener.handleParticleEvent` in the 26.2 client sources.
+    /// vanilla's own client-side particle-event handling in the 26.2 client sources.
     /// This is the case an implementation that reads "count" as "how many to
     /// spawn" gets silently wrong by spawning zero.
     #[test]
@@ -3014,7 +3017,7 @@ mod tests {
         let particles = p.engine.particles();
         assert_eq!(particles.len(), 1, "count == 0 means exactly one particle");
         let particle = &particles[0];
-        // `FlameParticle`'s constructor adds its own small (< 0.05 per axis)
+        // vanilla's own flame-particle's constructor adds its own small (< 0.05 per axis)
         // positional jitter on top of whatever position it is constructed
         // at, so "no positional jitter" is checked as "close to `pos`", not
         // bit-exact — the property under test is that `spawn_particles`
@@ -3029,7 +3032,7 @@ mod tests {
             particle.y,
             particle.z
         );
-        // `FlameParticle`'s constructor almost entirely discards the seeded
+        // vanilla's own flame-particle's constructor almost entirely discards the seeded
         // scatter component (a `* 0.01` damp) and replaces it with the
         // requested velocity, so the resulting `xd`/`yd`/`zd` should track
         // `max_speed * offset` closely rather than the request being ignored.
@@ -3203,17 +3206,17 @@ mod tests {
     /// each one is the constant that a copy of the *neighbouring* arm would get
     /// wrong: `block_marker` alone has no gravity, no physics and a flat quad
     /// size; `block_crumble` alone discards the packet's velocity outright;
-    /// `block`/`block_crumble`/`dust_pillar` alone carry `TerrainParticle`'s
+    /// `block`/`block_crumble`/`dust_pillar` alone carry vanilla's own terrain particle's
     /// `0.6` grey.
     #[test]
     fn the_block_particle_family_differs_in_every_constant_that_separates_them() {
         let mut p = resolvable();
         let block = spawn_block_particle(&mut p, "block", [0.0, 0.0, 0.0]);
-        assert_eq!(block.gravity, 1.0, "TerrainParticle sets gravity = 1.0F");
+        assert_eq!(block.gravity, 1.0, "vanilla's own terrain particle sets gravity = 1.0F");
         assert_eq!(
             block.colour,
             [0.6, 0.6, 0.6],
-            "TerrainParticle starts at a 0.6 grey; an untinted block keeps it exactly"
+            "vanilla's own terrain particle starts at a 0.6 grey; an untinted block keeps it exactly"
         );
         assert!(block.has_physics, "a block fragment collides");
         assert!(
@@ -3230,26 +3233,26 @@ mod tests {
         assert_eq!(
             [crumble.xd, crumble.yd, crumble.zd],
             [0.0, 0.0, 0.0],
-            "CrumblingProvider discards the constructed velocity entirely"
+            "vanilla's own crumbling provider discards the constructed velocity entirely"
         );
 
-        // `BlockMarker`: gravity 0, no physics, no tint, and `getQuadSize`
+        // Vanilla's own block-marker particle: gravity 0, no physics, no tint, and `getQuadSize`
         // returning a flat `0.5F`. The quad size is asserted at age 0, where the
         // `* 32` fade-in every other member of this family's neighbours use
         // would read 0.0 — the one sample that separates a constant from a ramp.
         let mut p = resolvable();
         let marker = spawn_block_particle(&mut p, "block_marker", [1.0, 1.0, 1.0]);
-        assert_eq!(marker.gravity, 0.0, "BlockMarker sets gravity = 0.0F");
-        assert!(!marker.has_physics, "BlockMarker sets hasPhysics = false");
+        assert_eq!(marker.gravity, 0.0, "vanilla's own block marker sets gravity = 0.0F");
+        assert!(!marker.has_physics, "vanilla's own block marker sets hasPhysics = false");
         assert_eq!(
             marker.colour,
             [1.0, 1.0, 1.0],
-            "BlockMarker never touches rCol — it is not a TerrainParticle"
+            "vanilla's own block marker never touches rCol — it is not a terrain particle"
         );
         assert_eq!(
             marker.quad_size(0.0),
             0.5,
-            "BlockMarker.getQuadSize returns a flat 0.5F; a `* 32` fade-in ramp \
+            "vanilla's own block-marker quad-size accessor returns a flat 0.5F; a `* 32` fade-in ramp \
              would read 0.0 at age 0"
         );
         assert_eq!(
@@ -3258,7 +3261,7 @@ mod tests {
             "a flat size does not move with the partial tick"
         );
 
-        // `FallingDustParticle` carries the block's colour and nothing of its
+        // Vanilla's own falling-dust particle carries the block's colour and nothing of its
         // texture, and its quad size is the `* 32` ramp — the exact opposite of
         // the marker above, which is why the two are asserted against each other.
         let mut p = resolvable();
@@ -3271,7 +3274,7 @@ mod tests {
         assert_eq!(
             dust.quad_size(0.0),
             0.0,
-            "FallingDustParticle.getQuadSize is the `* 32` fade-in, which is 0 at age 0"
+            "vanilla's own falling-dust quad-size accessor is the `* 32` fade-in, which is 0 at age 0"
         );
         assert!(
             dust.quad_size(0.0) < dust.quad_size(1.0),
@@ -3283,7 +3286,7 @@ mod tests {
     /// that is where all of the block's identity lives for this one type.
     ///
     /// The tint is deliberately neither grey nor white: an arm that transposed
-    /// two channels, or that dropped the tint for `TerrainParticle`'s `0.6`
+    /// two channels, or that dropped the tint for vanilla's own terrain particle's `0.6`
     /// grey, passes against `[1.0; 3]` and fails here.
     #[test]
     fn falling_dust_wears_the_block_tint_as_its_colour() {
@@ -3300,7 +3303,7 @@ mod tests {
         );
 
         // The control: the same tint must *not* reach a terrain-family member
-        // undivided, because those multiply it into `TerrainParticle`'s 0.6.
+        // undivided, because those multiply it into vanilla's own terrain particle's 0.6.
         let mut p = resolvable();
         let mut table = vec![[1.0f32; 3]; state as usize + 1];
         table[state as usize] = tint;
@@ -3309,7 +3312,7 @@ mod tests {
         assert_eq!(
             block.colour,
             [0.6 * tint[0], 0.6 * tint[1], 0.6 * tint[2]],
-            "a block fragment is the tint times TerrainParticle's 0.6 grey"
+            "a block fragment is the tint times vanilla's own terrain particle's 0.6 grey"
         );
     }
 
@@ -3342,18 +3345,18 @@ mod tests {
             floor: Option<i32>,
         }
         let cases = [
-            // `Particle(level, …)`'s own `(int)(4.0F / (nextFloat() * 0.9F +
-            // 0.1F))`, untouched by TerrainParticle.Provider. A copy of
+            // Vanilla's own base particle constructor's own `(int)(4.0F / (nextFloat() * 0.9F +
+            // 0.1F))`, untouched by its own terrain-particle provider. A copy of
             // `block_crumble`'s `nextInt(10) + 1` would top out at 10.
             Case { kind: "block", interval: [4, 40], floor: Some(11) },
-            // `CrumblingProvider`: `setLifetime(random.nextInt(10) + 1)`.
+            // Vanilla's own crumbling provider: `setLifetime(random.nextInt(10) + 1)`.
             // Dropping the `+ 1` gives [0, 9]; both ends are asserted.
             Case { kind: "block_crumble", interval: [1, 10], floor: None },
-            // `DustPillarProvider`: `setLifetime(random.nextInt(20) + 20)`.
+            // Vanilla's own dust-pillar provider: `setLifetime(random.nextInt(20) + 20)`.
             Case { kind: "dust_pillar", interval: [20, 39], floor: None },
-            // `BlockMarker`: a flat `this.lifetime = 80`.
+            // Vanilla's own block-marker particle: a flat `this.lifetime = 80`.
             Case { kind: "block_marker", interval: [80, 80], floor: None },
-            // `FallingDustParticle`: base `(int)(32.0 / (nextFloat() * 0.8 +
+            // Vanilla's own falling-dust particle: base `(int)(32.0 / (nextFloat() * 0.8 +
             // 0.2))` in [32, 160], then `(int) max(base * 0.9F, 1.0F)` in
             // [28, 144]. Dropping the `* 0.9` leaves the base interval, whose
             // upper half this containment check excludes; 144 itself needs
@@ -3401,7 +3404,7 @@ mod tests {
         }
     }
 
-    /// `DustPillarProvider`'s vertical velocity is the packet's own `ya`
+    /// vanilla's own dust-pillar provider's vertical velocity is the packet's own `ya`
     /// **plus** a gaussian, not a gaussian alone.
     ///
     /// That additive base is the whole reason a mace smash throws a column
@@ -3447,7 +3450,7 @@ mod tests {
         );
     }
 
-    /// `FallingDustParticle.tick` falls by a **raw** `0.003` per tick and
+    /// Vanilla's own falling-dust particle tick falls by a **raw** `0.003` per tick and
     /// clamps at `-0.14`, and neither number goes through `gravity`.
     ///
     /// Both hypotheses are computed from outside constants. The correct one
@@ -3524,14 +3527,14 @@ mod tests {
         assert_eq!(
             yd,
             f64::from(-0.14_f32),
-            "60 ticks of a raw 0.003 fall is -0.18 unclamped; FallingDustParticle \
+            "60 ticks of a raw 0.003 fall is -0.18 unclamped; vanilla's own falling-dust particle \
              holds it at -0.14, and the `gravity` reading would be at -0.0072"
         );
     }
 
     /// The two refusals, each with a control proving the detector fires.
     ///
-    /// Air is vanilla's own (`createTerrainParticle` returns `null` for it), and
+    /// Air is vanilla's own (its own create-terrain-particle returns `null` for it), and
     /// a missing payload is ours. Both are silent drops, so without the control
     /// arm below an emitter that spawned *nothing at all* would satisfy them.
     #[test]
@@ -3550,7 +3553,7 @@ mod tests {
             assert_eq!(
                 p.engine.particles().len(),
                 0,
-                "{kind:?} must refuse the air state, as createTerrainParticle does"
+                "{kind:?} must refuse the air state, as vanilla's own create-terrain-particle does"
             );
 
             let mut p = resolvable();
@@ -3599,7 +3602,7 @@ mod tests {
 
         // The shade now travels in its own instance lane instead of being folded
         // into `colour`, so these read it directly rather than dividing out the
-        // 0.6 `TerrainParticle` scales the block colour by in its constructor.
+        // 0.6 vanilla's own terrain particle scales the block colour by in its constructor.
         // Full bright must be exactly 1.0 — `apply_brightness_option` is the
         // identity at 1.0, which is what keeps every full-bright path in the tree
         // byte-identical.
@@ -3619,14 +3622,14 @@ mod tests {
         // other light.
         assert!(
             (p.instances[0].colour[0] - 0.6).abs() < 1e-5,
-            "instance colour {} is not `TerrainParticle`'s bare 0.6 tint — the light \
+            "instance colour {} is not vanilla's own terrain particle's bare 0.6 tint — the light \
              term is being premultiplied into it again, which is the gamma-space bug",
             p.instances[0].colour[0]
         );
 
         // Block light 0, sky light 0. `get_brightness(0)` is 0, but vanilla seeds
-        // the accumulator with `AmbientColor` — `0x0A0A0A` in the overworld, per
-        // `DimensionTypes.java` — so an unlit particle is not black either: it
+        // the accumulator with its own per-dimension ambient color — `0x0A0A0A`
+        // in the overworld — so an unlit particle is not black either: it
         // reads 0.0935 once `notGamma` is mixed in. The retired ramp floored it at
         // 0.2, which is still the floor that fix named; the correct replacement
         // is a *smaller* floor, not none.
@@ -3687,7 +3690,7 @@ mod tests {
     /// This is the hermetic half of `tests/break_particle_tint.rs` (which judges
     /// the same thing against the real vanilla atlas): here the table is
     /// installed directly, so the assertion is on the *wiring* —
-    /// `state_tint_of`'s multiply reaching `TerrainParticle`'s colour — with no
+    /// `state_tint_of`'s multiply reaching vanilla's own terrain particle's colour — with no
     /// dependency on which blocks vanilla happens to tint.
     #[test]
     fn a_states_particle_tint_reaches_the_emitted_fragments() {
@@ -4028,7 +4031,7 @@ mod tests {
         particles.animate_block([2, 64, 18], campfire_state(true));
         assert!(
             particles.engine.particles().is_empty(),
-            "26.2 owns the main plume in CampfireBlockEntity::particleTick"
+            "26.2 owns the main plume in its own campfire-block-entity particle tick"
         );
     }
 }
@@ -4036,7 +4039,7 @@ mod tests {
 /// How many random block positions the ambient emitter samples per tick, and how
 /// far from the eye it looks.
 ///
-/// Vanilla's `ClientLevel.animateTick` draws **667** positions in a ±16 box twice
+/// Vanilla's own client-level animate-tick draws **667** positions in a ±16 box twice
 /// per tick, i.e. ~1.9% of the 33³ volume. `128` in a ±8 box is ~2.6% of 17³ —
 /// the same *density* at a fraction of the cost, which is the number that decides
 /// how often a given torch flickers. Dropping the density is what makes torches
@@ -4050,9 +4053,11 @@ const AMBIENT_RANGE: i32 = 8;
 impl Particles {
     /// Tick the main plume for every loaded lit campfire block entity.
     ///
-    /// Minecraft 26.2 runs this from `CampfireBlockEntity::particleTick`, once
+    /// Minecraft 26.2 runs this from its own campfire-block-entity particle
+    /// tick, once
     /// per client simulation tick. Each source has an independent 11% chance
-    /// to emit a burst of two or three particles. `CampfireBlock::animateTick`
+    /// to emit a burst of two or three particles. Its own campfire-block
+    /// animate-tick
     /// owns only the occasional lava fleck and crackle sound, so putting this
     /// in [`Self::ambient_tick`] both misses campfires outside that random scan
     /// and gives sampled ones the wrong probability.
@@ -4090,13 +4095,13 @@ impl Particles {
         }
     }
 
-    /// Emit this tick's **client-predicted** ambient particles — vanilla's
-    /// `Block.animateTick`, which is not on the wire at all.
+    /// Emit this tick's **client-predicted** ambient particles — vanilla's own
+    /// per-block animate-tick, which is not on the wire at all.
     ///
     /// # Why this cannot be a server-event consumer
     ///
     /// A torch's flame, a nether portal's shimmer and an end rod's sparkle are
-    /// spawned by `ClientLevel.animateTick` walking random nearby positions and
+    /// spawned by vanilla's own client-level animate-tick walking random nearby positions and
     /// calling each block's own `animateTick`. **No packet carries them**, so a
     /// client that only consumed `LEVEL_PARTICLES` would show a torch-lit room
     /// with no flames however complete its dispatch table was. That is the shape
@@ -4159,7 +4164,7 @@ impl Particles {
             f64::from(block[2]),
         ];
         match name.strip_prefix("minecraft:").unwrap_or(name) {
-            // `TorchBlock.animateTick`: one flame and one smoke at the flame's
+            // Vanilla's own torch-block animate-tick: one flame and one smoke at the flame's
             // own position, which for a wall torch is offset *away* from the wall
             // it hangs on. Using the block centre for both puts the flame inside
             // the wall.
@@ -4180,9 +4185,9 @@ impl Particles {
                     emit::flame(&mut self.engine, x, y, z, 0.0, 0.0, 0.0);
                 }
             }
-            // `NetherPortalBlock.animateTick`: four motes per tick at random
+            // Vanilla's own nether-portal-block animate-tick: four motes per tick at random
             // points inside the block, drifting on a signed offset — which for
-            // `PortalParticle` is the *amplitude* it converges from, not a speed.
+            // vanilla's own portal particle is the *amplitude* it converges from, not a speed.
             "nether_portal" | "end_gateway" => {
                 for _ in 0..4 {
                     let rng = self.engine.rng();
@@ -4207,7 +4212,7 @@ impl Particles {
                     );
                 }
             }
-            // `EndRodBlock.animateTick`: one sparkle just off the rod's tip,
+            // Vanilla's own end-rod-block animate-tick: one sparkle just off the rod's tip,
             // along whatever axis it points.
             "end_rod" => {
                 let (dx, dy, dz) = match prop("facing") {
