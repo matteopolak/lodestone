@@ -10,7 +10,7 @@
 //! low-level velocity mechanic, taking an already-resolved `power` scalar the
 //! same way [`lodestone_entity::apply_reductions`] takes an already-resolved
 //! [`lodestone_entity::Defenses`]. Composing that `power` from a weapon's
-//! `ATTACK_KNOCKBACK` attribute, the Knockback enchantment and the sprint-hit
+//! attack-knockback attribute, the Knockback enchantment and the sprint-hit
 //! `+0.5F` bonus is the caller's job — this
 //! module does not read attributes, items or enchantments, matching how
 //! `apply_reductions` does not read an inventory.
@@ -23,12 +23,12 @@
 //! variant at all, so a connected player's melee attack packet is never
 //! decoded into a damage event server-side — `SimMob::apply_damage`
 //! (`crates/lodestone-server/src/mobs.rs`) is reached today only by AI-driven
-//! `MeleeAttackGoal` hits (mob-on-mob) and by [`lodestone_entity::explosion`],
+//! melee-attack-goal hits (mob-on-mob) and by [`lodestone_entity::explosion`],
 //! never by a player's own swing. Building that dispatch is a materially
 //! larger, cross-crate change (`protocol.rs`'s `ServerBound` enum, the v770
 //! serverbound decode, and `integrated.rs`'s routing) than this single
 //! function, and those files were contended/in-flight at the time this was
-//! written — see the combat census posted to issue #12. This function is
+//! written — see the combat census posted to the issue tracker. This function is
 //! placed here, tested against the jar's own formula, so that whoever builds
 //! that dispatch has a correct, ready-to-call primitive rather than a second
 //! reason to invent one under time pressure.
@@ -64,9 +64,9 @@ use crate::geometry::Vec3d;
 /// exact same horizontal position; ordinary callers with a real facing never
 /// invoke `jitter` at all.
 ///
-/// Returns the target's new velocity (vanilla mutates `deltaMovement` in
-/// place; this crate's callers already thread velocity through as a value,
-/// matching [`crate::entity::EntityMotion`]).
+/// Returns the target's new velocity (vanilla mutates its own velocity
+/// field in place; this crate's callers already thread velocity through as
+/// a value, matching [`crate::entity::EntityMotion`]).
 #[must_use]
 pub fn knockback_impulse(
     velocity: Vec3d,
@@ -103,8 +103,8 @@ pub fn knockback_impulse(
 
 /// The horizontal push direction a melee attack uses: the **attacker's
 /// facing**, not the vector toward the target — vanilla derives it as
-/// `sin(yRot * (Math.PI/180))`, `-cos(yRot * (Math.PI/180))` using its own
-/// quantized trigonometry, where `yRot` is the attacker's body yaw at the
+/// `sin(yaw * (Math.PI/180))`, `-cos(yaw * (Math.PI/180))` using its own
+/// quantized trigonometry, where `yaw` is the attacker's body yaw at the
 /// moment the hit landed. `yaw_degrees` is that same value.
 ///
 /// This is a real, load-bearing detail worth calling out explicitly: standing
@@ -223,7 +223,7 @@ mod tests {
     /// unconditionally. This is the negative control that distinguishes a
     /// `while` from an `if`: an `if`-shaped bug would use the degenerate
     /// `(0,0,0)` direction, `normalize()` it to `ZERO`, and produce a
-    /// `deltaVector` of `(0,0,0)` — i.e. it would look like `zero_power_is_a_no_op`
+    /// delta-vector of `(0,0,0)` — i.e. it would look like `zero_power_is_a_no_op`
     /// above even though `power > 0.0`, silently dropping the hit's knockback.
     #[test]
     fn knockback_loops_the_jitter_until_a_non_degenerate_direction_lands() {
