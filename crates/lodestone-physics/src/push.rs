@@ -1,31 +1,31 @@
-//! Entity-versus-entity interaction: the **soft push** (`Entity.push(Entity)`
-//! driven by `LivingEntity.pushEntities`) and the **hard-collision** half of
-//! `CollisionGetter.noCollision` (`Level.getEntityCollisions`).
+//! Entity-versus-entity interaction: the **soft push** (vanilla's own entity
+//! push, driven by its crowd-push pass) and the **hard-collision** half of
+//! vanilla's own no-collision check (querying entity collisions from the
+//! level).
 //!
 //! These are two different mechanisms gated by two different predicates, and the
 //! most consequential thing to know before touching this file is which entities
 //! each one actually applies to in 26.2.
 //!
-//! # `isPushable` and `canBeCollidedWith` are not two spellings of one idea
+//! # "is pushable" and "can be collided with" are not two spellings of one idea
 //!
-//! | | predicate | reached through | default | `LivingEntity` |
+//! | | predicate | reached through | default | living entity |
 //! |---|---|---|---|---|
-//! | **push** (soft, velocity) | `Entity.isPushable()` (`Entity.java:2031`) | `EntitySelector.pushableBy` → `Level.getPushableEntities` → `LivingEntity.pushEntities` (`:3222`) | `false` | **overridden** (`:3366`): `isAlive() && !isSpectator() && !onClimbable()` |
-//! | **collide** (hard, blocks movement) | `Entity.canBeCollidedWith(other)` (`Entity.java:2381`) | `Entity.canCollideWith` → `EntityGetter.getEntityCollisions` (`:54`) → `Entity.collide` / `noCollision` | `false` | **not overridden** |
+//! | **push** (soft, velocity) | vanilla's own "is pushable" check | vanilla's own pushable-by selector → the level's pushable-entities query → the crowd-push pass | `false` | **overridden**: `isAlive() && !isSpectator() && !onClimbable()` |
+//! | **collide** (hard, blocks movement) | vanilla's own "can be collided with" check | vanilla's own "can collide with" → the level's entity-collisions query → collide / no-collision | `false` | **not overridden** |
 //!
 //! So a player or a mob is *pushable* and **not** *collidable*. Two players walk
 //! through each other and shove each other apart; they never clip. Exhaustively,
-//! the only overrides of `canBeCollidedWith` in the whole 26.2 tree are:
+//! the only overrides of "can be collided with" in the whole 26.2 tree are:
 //!
-//! * `AbstractBoat` — `true` unconditionally (`AbstractBoat.java:119`), and it also
-//!   overrides `canCollideWith` to `canVehicleCollide`, which admits a *pushable*
-//!   entity as a collider even when that entity is not itself collidable
-//!   (`:114-116`) — that is the "you stand on a boat" case, and it is exactly the
-//!   asymmetry that makes these two predicates impossible to merge;
-//! * `Shulker` — `isAlive()` (`Shulker.java:470`);
-//! * `HappyGhast` — a state machine over baby/vehicle/still-timeout, with a
-//!   client-only clause admitting a player standing on its back
-//!   (`HappyGhast.java:576-586`).
+//! * the boat family — `true` unconditionally, and it also overrides "can
+//!   collide with" to admit a *pushable* entity as a collider even when that
+//!   entity is not itself collidable — that is the "you stand on a boat"
+//!   case, and it is exactly the asymmetry that makes these two predicates
+//!   impossible to merge;
+//! * the shulker — alive;
+//! * the happy ghast — a state machine over baby/vehicle/still-timeout, with
+//!   a client-only clause admitting a player standing on its back.
 //!
 //! **This corrects a common framing.** "Players and mobs pass straight through
 //! each other" is not a Lodestone defect; it is vanilla. What is missing here is
@@ -34,21 +34,21 @@
 //!
 //! # Who moves, and how vanilla dodges the ordering problem
 //!
-//! `Entity.push(Entity)` (`Entity.java:1882-1911`) is **symmetric**: it computes
-//! one horizontal vector from the two positions and hands `-v` to `this` and `+v`
-//! to `entity`, each gated independently on `!isVehicle() && isPushable()`. A
-//! ridden entity (`isVehicle()`) absorbs the shove and passes it to nobody.
+//! Vanilla's own entity push is **symmetric**: it computes one horizontal
+//! vector from the two positions and hands `-v` to `this` and `+v` to the
+//! other entity, each gated independently on `!isVehicle() && isPushable()`.
+//! A ridden entity (`isVehicle()`) absorbs the shove and passes it to
+//! nobody.
 //!
 //! Naive pairwise separation has a real ordering dependency, and vanilla's answer
-//! is not a tie-break rule — it is that **nothing moves during the pass**. The push
-//! is added to `deltaMovement` (`Entity.push(double,double,double)` →
-//! `setDeltaMovement(getDeltaMovement().add(…))`, `:1919-1924`), positions are read
-//! and never written, and `pushEntities` runs at the *end* of `aiStep`
-//! (`LivingEntity.java:3163`) — after `travel` (`:3130`) has already moved
-//! everything for this tick. So the impulses a given entity receives in one tick
-//! are a **set computed from a frozen snapshot of positions**, and summing a set is
-//! order-independent. There is no relaxation loop, no penetration-depth solve, and
-//! no "iterate in entity-id order".
+//! is not a tie-break rule — it is that **nothing moves during the pass**. The
+//! push is added to velocity, positions are read and never written, and the
+//! crowd-push pass runs at the *end* of the per-tick player/mob update —
+//! after travel has already moved everything for this tick. So the impulses
+//! a given entity receives in one tick are a **set computed from a frozen
+//! snapshot of positions**, and summing a set is order-independent. There
+//! is no relaxation loop, no penetration-depth solve, and no "iterate in
+//! entity-id order".
 //!
 //! The residue is that `+` on `f64` is not associative, so a crowd of two or more
 //! pushers can land on a different last bit depending on tick order — a bound of
@@ -59,44 +59,45 @@
 //! # There is no per-entity push cap
 //!
 //! Worth stating because it is widely believed: nothing limits how many entities
-//! push one entity in a tick. `pushEntities` iterates the whole list. What the
-//! `MAX_ENTITY_CRAMMING` game rule does (`LivingEntity.java:3226-3239`) is deal
-//! **6.0 cramming damage**, on `ServerLevel` only, with a `random.nextInt(4) == 0`
-//! probability gate — damage, not a movement clamp, and invisible to a client's
-//! physics. Crowd behaviour is limited by the `0.05F` per-pair magnitude and by
-//! drag, not by a counter.
+//! push one entity in a tick. Vanilla's own crowd-push pass iterates the
+//! whole list. What the crowd-damage game rule does is deal **6.0 cramming
+//! damage**, server-side only, with a random one-in-four probability gate —
+//! damage, not a movement clamp, and invisible to a client's physics. Crowd
+//! behaviour is limited by the `0.05F` per-pair magnitude and by drag, not
+//! by a counter.
 //!
 //! # What a client actually experiences
 //!
-//! `EntitySelector.pushableBy` has a clause that changes the whole shape of the
-//! port (`EntitySelector.java:41`):
+//! Vanilla's own pushable-by selector has a clause that changes the whole
+//! shape of the port:
 //!
-//! ```java
+//! ```text
 //! if (!entity.level().isClientSide() || input instanceof Player player && player.isLocalPlayer()) { … } else { return false; }
 //! ```
 //!
 //! `entity` is the *pusher*, `input` the *pushee*. On a client, the only admissible
 //! pushee is the local player. Therefore:
 //!
-//! * the local player's own `pushEntities` finds **nothing** (the candidate list
-//!   excludes itself, and no other candidate is the local player), so a vanilla
-//!   client never initiates a push;
-//! * every push the local player feels arrives from some *other* entity's `aiStep`
-//!   — which the client does run, unconditionally, for remote entities
-//!   (`LivingEntity.tick` → `aiStep`, `:2795`; the `travel` call inside is gated on
-//!   `isEffectiveAi()` but `pushEntities` is not). `RemotePlayer` makes this
-//!   unmistakable: its `aiStep` override
-//!   (`client-src/net/minecraft/client/player/RemotePlayer.java:43-69`) discards the
-//!   entire `LivingEntity` body and keeps interpolation, swing/bob timers and
-//!   **`this.pushEntities()`** — on the client, a remote player's whole physics
-//!   contribution *is* shoving the local player;
-//! * because `Entity.push(Entity)` is symmetric, iterating *our* neighbours and
-//!   applying the receive-half to ourselves reproduces that exactly — the pair test
-//!   (`box.intersects(box)`) and the magnitude are both symmetric.
+//! * the local player's own crowd-push pass finds **nothing** (the
+//!   candidate list excludes itself, and no other candidate is the local
+//!   player), so a vanilla client never initiates a push;
+//! * every push the local player feels arrives from some *other* entity's
+//!   per-tick update — which the client does run, unconditionally, for
+//!   remote entities (the travel call inside is gated on being
+//!   effectively-AI-controlled, but the crowd-push call is not). Vanilla's
+//!   own remote-player entity makes this unmistakable: its per-tick update
+//!   override discards the entire living-entity body and keeps
+//!   interpolation, swing/bob timers and **the crowd-push call itself** —
+//!   on the client, a remote player's whole physics contribution *is*
+//!   shoving the local player;
+//! * because vanilla's own entity push is symmetric, iterating *our*
+//!   neighbours and applying the receive-half to ourselves reproduces that
+//!   exactly — the pair test (`box.intersects(box)`) and the magnitude are
+//!   both symmetric.
 //!
 //! One measured consequence to record rather than to "fix": the **server applies
 //! the impulse twice per pair per tick and the client once**. On a server both
-//! sides' `pushEntities` run and each calls the symmetric `Entity.push`, so the
+//! sides' crowd-push passes run and each calls the symmetric push, so the
 //! player is shoved by its own pass *and* by the mob's; on a client only the mob's
 //! pass qualifies. That is vanilla client behaviour, so a client that models `2×`
 //! would be the one out of step with its peers. It also does not itself trip the
@@ -115,37 +116,36 @@ use crate::collision::{CollisionView, no_collision};
 use crate::geometry::{Aabb, Vec3d};
 use crate::mth;
 
-/// `dd >= 0.01F` in `Entity.push(Entity)` (`Entity.java:1888`) — a `float`
+/// Vanilla's own entity-push separation gate: `dd >= 0.01F` — a `float`
 /// literal compared against a `double`, so the real threshold is the widened
 /// `0.01f`, `0.009999999776482582…`, and **not** `0.01`.
 const MIN_SEPARATION: f64 = 0.01_f32 as f64;
 
-/// `xa *= 0.05F` (`Entity.java:1899-1900`) — likewise a widened `float`, so the
-/// real scale is `0.05000000074505806…`. Writing `0.05` here is a silent
-/// last-bits divergence on every push.
+/// Vanilla's own entity-push scale: `xa *= 0.05F` — likewise a widened
+/// `float`, so the real scale is `0.05000000074505806…`. Writing `0.05` here
+/// is a silent last-bits divergence on every push.
 const PUSH_SCALE: f64 = 0.05_f32 as f64;
 
-/// `Team.CollisionRule` — the scoreboard-team gate on pushing
-/// (`EntitySelector.pushableBy`, `EntitySelector.java:29-56`).
+/// Vanilla's own scoreboard-team collision rule — the team gate on pushing.
 ///
 /// An entity with no team resolves to [`Self::Always`], which is why that is the
 /// [`Default`]: a vanilla server with no scoreboard teams gives every pair
 /// `(Always, Always, not allied)` and the gate is transparent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CollisionRule {
-    /// `ALWAYS` — and the resolved value for a team-less entity.
+    /// Vanilla's own default — and the resolved value for a team-less entity.
     #[default]
     Always,
-    /// `NEVER` — vetoes the pair from either side.
+    /// Vetoes the pair from either side.
     Never,
-    /// `PUSH_OWN_TEAM` — pushes allies only.
+    /// Pushes allies only.
     PushOwnTeam,
-    /// `PUSH_OTHER_TEAMS` — pushes non-allies only.
+    /// Pushes non-allies only.
     PushOtherTeams,
 }
 
-/// The team half of `EntitySelector.pushableBy` (`EntitySelector.java:43-53`),
-/// with `own` the *pusher*'s rule and `theirs` the *pushee*'s.
+/// The team half of vanilla's own pushable-by selector, with `own` the
+/// *pusher*'s rule and `theirs` the *pushee*'s.
 ///
 /// Ported literally, including Java's operator precedence in the final line
 /// (`a != X && b != X || sameTeam` groups as `(a != X && b != X) || sameTeam`) and
@@ -168,47 +168,48 @@ pub fn team_allows_push(own: CollisionRule, theirs: CollisionRule, same_team: bo
 ///
 /// Every field is one named vanilla call, so a producer can be checked against the
 /// source field by field rather than by intent. Nothing here is derived from
-/// anything else here: in particular [`Self::position`] is `Entity.position()` and
-/// is *not* recoverable from [`Self::bounding_box`] — the push direction reads
-/// `getX()`/`getZ()` while the pair test reads the box, and conflating them would
-/// be a guess about an entity whose box is offset from its position.
+/// anything else here: in particular [`Self::position`] is vanilla's own feet
+/// position and is *not* recoverable from [`Self::bounding_box`] — the push
+/// direction reads `getX()`/`getZ()` while the pair test reads the box, and
+/// conflating them would be a guess about an entity whose box is offset from
+/// its position.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NearbyEntity {
-    /// `Entity.position()` — feet centre. Only `x` and `z` are read (the push is
-    /// horizontal-only); `y` is carried so a caller need not strip it.
+    /// Vanilla's own feet-centre position. Only `x` and `z` are read (the
+    /// push is horizontal-only); `y` is carried so a caller need not strip it.
     pub position: Vec3d,
-    /// `Entity.getBoundingBox()`, world space. Drives the pair test and, for a
-    /// collidable entity, *is* the collider handed to the movement sweep.
+    /// Vanilla's own world-space bounding box. Drives the pair test and, for
+    /// a collidable entity, *is* the collider handed to the movement sweep.
     pub bounding_box: Aabb,
-    /// `Entity.isPushable()`. For a `LivingEntity` that is
-    /// `isAlive() && !isSpectator() && !onClimbable()` (`LivingEntity.java:3366`)
-    /// — note the **ladder veto**: a mob on a ladder neither pushes nor is pushed.
-    /// `false` for the `Entity` base class, so an arrow, an item or an armour
-    /// stand (`ArmorStand.java:169`) never participates.
+    /// Vanilla's own "is pushable" check. For a living entity that is
+    /// `isAlive() && !isSpectator() && !onClimbable()` — note the **ladder
+    /// veto**: a mob on a ladder neither pushes nor is pushed. `false` for
+    /// the base entity type, so an arrow, an item or an armour stand never
+    /// participates.
     pub pushable: bool,
-    /// Whether this entity is a producer for `LivingEntity.pushEntities()`.
+    /// Whether this entity is a producer for vanilla's own crowd-push pass.
     ///
-    /// This differs from [`Self::pushable`], which is the *receiver* predicate
-    /// `Entity.isPushable()`. A boat is neither a crowd-push producer nor a
-    /// pushable living entity, but it can still be present in this mixed
-    /// snapshot because [`Self::collidable`] is true.
+    /// This differs from [`Self::pushable`], which is the *receiver*
+    /// predicate. A boat is neither a crowd-push producer nor a pushable
+    /// living entity, but it can still be present in this mixed snapshot
+    /// because [`Self::collidable`] is true.
     pub pushes_players: bool,
-    /// `Entity.canBeCollidedWith(us)` — hard collision. `false` for players and
-    /// every mob; `true` only for boats, shulkers and (conditionally) happy
-    /// ghasts. See this module's header table.
+    /// Vanilla's own "can be collided with" check — hard collision. `false`
+    /// for players and every mob; `true` only for boats, shulkers and
+    /// (conditionally) happy ghasts. See this module's header table.
     pub collidable: bool,
-    /// `Entity.isVehicle()` — has at least one passenger. Vetoes *receiving* a
-    /// push (`Entity.java:1905`) but not being a collider.
+    /// Vanilla's own "is vehicle" check — has at least one passenger. Vetoes
+    /// *receiving* a push but not being a collider.
     pub is_vehicle: bool,
-    /// `Entity.noPhysics`. Vetoes the whole pair from either side
-    /// (`Entity.java:1884`). A spectating player has it set every tick
-    /// (`Player.java:233`).
+    /// Vanilla's own "no physics" flag. Vetoes the whole pair from either
+    /// side. A spectating player has it set every tick.
     pub no_physics: bool,
-    /// `Entity.isSpectator()` — `EntitySelector.NO_SPECTATORS`, applied to the
-    /// pushee by `pushableBy` and to the collider by `getEntityCollisions`.
+    /// Vanilla's own "is spectator" check — applied to the pushee by the
+    /// pushable-by selector and to the collider by the entity-collisions
+    /// query.
     pub spectator: bool,
-    /// `us.isPassengerOfSameVehicle(it)` — two passengers of one boat neither
-    /// push nor collide (`Entity.java:1883`, `Entity.java:2378`).
+    /// Vanilla's own "is passenger of same vehicle" check — two passengers
+    /// of one boat neither push nor collide.
     pub same_vehicle: bool,
     /// This entity's team `CollisionRule`; [`CollisionRule::Always`] when it has
     /// no team.
