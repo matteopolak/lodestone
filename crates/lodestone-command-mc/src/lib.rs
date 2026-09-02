@@ -178,8 +178,8 @@ impl McArg for LongArgument {
 
 /// `brigadier:float`.
 ///
-/// Absent bounds are `±f32::MAX` on the wire, not `±inf`: `FloatArgumentInfo`
-/// writes a flags byte plus only the bounds that are *present*, and the decode
+/// Absent bounds are `±f32::MAX` on the wire, not `±inf`: vanilla's own
+/// float-argument info writes a flags byte plus only the bounds that are *present*, and the decode
 /// substitutes `-f32::MAX`/`f32::MAX` for the missing ones. This crate's parser
 /// defaults to `±inf`, so the two must be reconciled here rather than left to
 /// look equivalent — an unbounded float projected as `inf` would not match a
@@ -217,7 +217,7 @@ impl McArg for BoolArgument {
     }
 }
 
-/// `brigadier:string`, carrying its `StringType` ordinal.
+/// `brigadier:string`, carrying its string-type ordinal.
 impl McArg for StringArgument {
     type Value = String;
 

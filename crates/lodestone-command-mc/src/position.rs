@@ -69,9 +69,9 @@ pub struct Coordinates {
     /// `true` when the three came from `^` — the components are (**left**, up,
     /// forward) in the caller's facing frame rather than in world axes.
     ///
-    /// **Left, not right.** `LocalCoordinates` is
-    /// `record LocalCoordinates(double left, double up, double forwards)` and
-    /// its basis vector is `forwards.cross(up).scale(-1.0)`. A port that reads
+    /// **Left, not right.** Vanilla's own local-coordinates type stores its
+    /// three components in the order (left, up, forwards), and derives its
+    /// left basis vector as `forwards.cross(up).scale(-1.0)`. A port that reads
     /// the first component as "right" is sign-flipped on one axis only, which
     /// looks plausible in every test that only moves forward.
     pub local: bool,
@@ -398,8 +398,8 @@ mod tests {
     /// The local basis, checked at a rotation where the answer is exact.
     ///
     /// Minecraft's yaw 0 faces +Z ("south"), so `^0 ^0 ^5` must be five blocks in
-    /// +Z. The first component is **left** — `LocalCoordinates(left, up,
-    /// forwards)` — and left of +Z is +X, which is the *opposite* of what a
+    /// +Z. The first component is **left** — vanilla's own local-coordinates
+    /// order is (left, up, forwards) — and left of +Z is +X, which is the *opposite* of what a
     /// reading of it as "right" predicts. Both hypotheses are computed here and
     /// the assertion lands on exactly one; the first run of this test landed on
     /// the wrong one and the jar record settled it.

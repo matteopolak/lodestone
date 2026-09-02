@@ -26,7 +26,7 @@ pub enum FunctionRef {
     Tag(ResourceKey),
 }
 
-/// `FunctionArgument` — `minecraft:function`.
+/// Vanilla's own function argument type — `minecraft:function`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FunctionArg;
 

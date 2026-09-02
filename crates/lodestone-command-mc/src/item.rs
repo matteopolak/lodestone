@@ -61,8 +61,9 @@ impl ItemInput {
         ItemStack::new(self.item.clone(), count)
     }
 
-    /// `count` items split into whole stacks, largest first — `GiveCommand`'s
-    /// own `while (remaining > 0) { size = min(maxStackSize, remaining); … }`.
+    /// `count` items split into whole stacks, largest first — vanilla's own
+    /// give command's own loop: while remaining stock is positive, take a
+    /// stack sized to the smaller of the max stack size and what remains.
     ///
     /// A count of `0` yields no stacks, which is why the tree's `count` argument
     /// is `integer(1)` rather than `integer(0)`.

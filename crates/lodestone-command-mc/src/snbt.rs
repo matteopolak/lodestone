@@ -69,9 +69,10 @@ pub enum SnbtValue {
     ByteArray(Vec<i8>),
     IntArray(Vec<i32>),
     LongArray(Vec<i64>),
-    /// Insertion order preserved — vanilla's own `CompoundTag` is
-    /// insertion-ordered too (`LinkedHashMap`), and preserving it is free
-    /// here and occasionally load-bearing for round-trip display.
+    /// Insertion order preserved — vanilla's own NBT compound tag is
+    /// insertion-ordered too (backed by an order-preserving hash map), and
+    /// preserving it is free here and occasionally load-bearing for
+    /// round-trip display.
     Compound(Vec<(String, SnbtValue)>),
 }
 

@@ -39,8 +39,9 @@ impl ArgumentType for GameModeArg {
             Some((_, mode)) => Ok(ParsedValue::dynamic(*mode)),
             None => {
                 reader.set_cursor(start);
-                // `argument.gamemode.invalid` is a `DynamicCommandExceptionType`
-                // over the offending text; `InvalidBool` is the closest shape
+                // `argument.gamemode.invalid` is one of vanilla's own dynamic
+                // command-exception types, over the offending text;
+                // `InvalidBool` is the closest shape
                 // `lodestone-command`'s Brigadier-aligned `ParseErrorKind` has
                 // for "found this, expected one of a closed set" — the same
                 // reuse `ChoicesArgument` already makes, and deliberately not a
