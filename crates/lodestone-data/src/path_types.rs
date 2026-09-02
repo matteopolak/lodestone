@@ -2,7 +2,7 @@
 //!
 //! Land navigation classifies each block state into a [`PathType`] — open,
 //! blocked, water, lava, fence, closed door, rail, damaging, … — via vanilla's
-//! `WalkNodeEvaluator.getPathTypeFromState`. This is the version-free seam
+//! own walk-node-evaluator "get path type from state" step. This is the version-free seam
 //! ([`lodestone_model::PathTypeRegistry`]); the table itself is 26.2 game data
 //! generated from a headless-server dump and lives here in this data crate
 //! rather than in `lodestone-v770` — which is exactly what lets
@@ -14,15 +14,15 @@
 //!
 //! The classification is *not* derivable from `blocks.json`: it depends on block
 //! tags (`FENCES`, `WALLS`, `TRAPDOORS`, `SPELEOTHEMS`), fluid tags
-//! (`WATER`/`LAVA`), `instanceof` (`DoorBlock`, `BaseRailBlock`,
-//! `LeavesBlock`, `FenceGateBlock`) and `isPathfindable`. So, exactly like the
+//! (`WATER`/`LAVA`), block-class instance checks (door, base-rail,
+//! leaves, fence-gate blocks) and an "is pathfindable" check. So, exactly like the
 //! collision-shape table, the only authoritative source is the game itself.
 //!
 //! The table is generated from a dump produced by
 //! `oracle-java/PathTypeOracle.java`, which boots the real 26.2 server, **loads
-//! the vanilla data pack tags** (a `Bootstrap` alone leaves tag sets empty,
+//! the vanilla data pack tags** (a bare bootstrap alone leaves tag sets empty,
 //! which silently mis-classifies fences/walls/trapdoors/water/lava), then calls
-//! `getPathTypeFromState` for every one of the 32,366 states. "Boot the jar and
+//! vanilla's own "get path type from state" step for every one of the 32,366 states. "Boot the jar and
 //! ask it" is the preferred data source over stale community datasets.
 //!
 //! Only the *base* per-state path types are produced here. A pathfinder adds

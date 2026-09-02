@@ -4,7 +4,7 @@
 //! the set of axis-aligned boxes a block occupies, in block-local coordinates
 //! (`0.0..1.0` per axis, though fences/walls reach `y = 1.5`). This is not in
 //! `blocks.json` — that report is block *properties* only; vanilla collision is
-//! **code**-defined (`Block.getCollisionShape`, often neighbour-state-dependent
+//! **code**-defined (vanilla's own "get collision shape" accessor, often neighbour-state-dependent
 //! for stairs/fences/walls/panes). So there is no property-derived shortcut: the
 //! only authoritative source is the game itself.
 //!

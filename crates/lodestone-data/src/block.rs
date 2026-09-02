@@ -130,7 +130,7 @@ impl Block {
         Some(table::BLOCKS_BY_REGISTRY_ID[ids[slot] as usize])
     }
 
-    /// This block's `defaultBlockState()`, as a validated [`StateId`].
+    /// This block's own default-block-state, as a validated [`StateId`].
     ///
     /// Total, and O(1). The default is *not* the block's lowest state id — it
     /// differs for 661 of the 797 multi-state blocks — so this reads the

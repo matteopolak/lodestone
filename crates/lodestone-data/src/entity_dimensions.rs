@@ -11,9 +11,9 @@
 //! # Data source: interrogate the real jar, not `minecraft-data`
 //!
 //! The table is generated from an authoritative dump produced by booting the
-//! real 26.2 server headlessly (`SharedConstants::tryDetectVersion` +
-//! `Bootstrap::bootStrap`) and reading `EntityType.getWidth()/getHeight()` — the
-//! base `EntityDimensions` at scale 1 — for every registered type. That dump is
+//! real 26.2 server headlessly and reading vanilla's own entity-type
+//! width/height accessors — the
+//! base entity-dimensions record at scale 1 — for every registered type. That dump is
 //! version-exact. `vendor/minecraft-data` measured stale/incomplete for 26.2 on
 //! collision shapes (newest pc entry 1.21.11; ~92% state coverage, 30 blocks
 //! missing by name), and there is no reason to assume its entity table is
@@ -27,7 +27,7 @@
 //! static per-type constants:
 //!
 //! * `step_height` — the resolved `STEP_HEIGHT` attribute *after* the modifier
-//!   fold (vanilla `Entity.maxUpStep()`). Baking a static value here would
+//!   fold (vanilla's own "max up step" accessor). Baking a static value here would
 //!   silently disagree with the pathfinder the moment a modifier exists.
 //! * `scale` — the `SCALE` attribute multiplies the box; the caller applies it
 //!   *before* building its own dimension struct. The census is never scaled.
