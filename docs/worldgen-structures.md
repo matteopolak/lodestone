@@ -46,7 +46,8 @@ block-writing helper all draw in a fixed sequence and count. Getting a fan-out, 
 a weight-expansion, or which side of a biome-filter check a draw sits on wrong desyncs everything
 downstream in that chunk (and, for shared streams, in that structure) while still producing a
 structure that looks plausible. Grid-cell math is floor division (`div_euclid`), not truncating,
-and `QuartPos.fromBlock` is `>> 2`, not `/ 4` — both common transcription mistakes here.
+and vanilla's own block-to-quart conversion is `>> 2`, not `/ 4` — both common transcription
+mistakes here.
 
 **Piece generation is lazy in vanilla and must stay lazy for most structures.** A candidate that
 fails its biome-position filter must consume no RNG, or every later structure at that seed moves.
