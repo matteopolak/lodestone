@@ -1247,12 +1247,13 @@ pub struct ShadowVertex {
     pub position: [f32; 3],
     /// UV into `textures/misc/shadow.png`, computed per-piece from the
     /// piece's position relative to the casting entity and the entity's own
-    /// shadow radius — `ShadowFeatureRenderer.prepare`'s
+    /// shadow radius — vanilla's shadow-feature renderer's prepare function's
     /// `-x / 2.0 / radius + 0.5` (and the `z` sibling), transcribed on the
     /// Rust side in `lodestone_shell`'s `prepare_shadows`.
     pub uv: [f32; 2],
     /// This piece's own opacity, already folding in vanilla's
-    /// `powerAtDepth * 0.5 * Lightmap.getBrightness(...)` and the
+    /// `powerAtDepth * 0.5 * Lightmap.getBrightness(...)` (vanilla's own
+    /// lightmap brightness function) and the
     /// `Mth.clamp(.., 0.0, 1.0)` around it.
     pub alpha: f32,
 }
@@ -1477,9 +1478,10 @@ impl EntityPipeline {
             "lodestone-entity",
             // Vanilla's own value, translated (issue #21). Every 26.2 entity
             // render type is built from `ENTITY_SNIPPET`, which pins
-            // `DepthStencilState.DEFAULT` (`RenderPipelines.java:49-56`), and that
+            // `DepthStencilState.DEFAULT` (vanilla's render-pipeline registration
+            // table), and that
             // is `(GREATER_THAN_OR_EQUAL, writeDepth = true)`
-            // (`DepthStencilState.java`) — `DEPTH_COMPARE_NEARER_OR_EQUAL` here,
+            // (vanilla's depth-stencil-state declaration) — `DEPTH_COMPARE_NEARER_OR_EQUAL` here,
             // transcribed unflipped because this engine is reversed-Z too.
             // `ENTITY_SOLID` (`:232`),
             // `ENTITY_CUTOUT` (`:245`), `ENTITY_CUTOUT_CULL` (`:238`) and
@@ -1521,7 +1523,7 @@ impl EntityPipeline {
     ///
     /// Vanilla's own entity depth state is
     /// `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, writeDepth = true)`
-    /// (`DepthStencilState.java`), which is
+    /// (vanilla's depth-stencil-state declaration), which is
     /// [`DEPTH_COMPARE_NEARER_OR_EQUAL`](crate::DEPTH_COMPARE_NEARER_OR_EQUAL)
     /// here — this engine is reversed-Z too, so nothing flips.
     ///
@@ -1602,7 +1604,8 @@ impl EntityPipeline {
     /// A third render pipeline over this pipeline's own bind-group layouts,
     /// for banner mask layers (issue #174 step B).
     ///
-    /// Vanilla's `RenderPipelines.BANNER_PATTERN` (`RenderPipelines.java:311-318`)
+    /// Vanilla's `RenderPipelines.BANNER_PATTERN` (its render-pipeline
+    /// registration table)
     /// draws the flag opaque, then each pattern mask layer **translucent, at
     /// equal depth, with depth write off and no alpha cutout** — layers stack
     /// visually rather than z-fighting or punching holes in each other.
@@ -1675,8 +1678,8 @@ impl EntityPipeline {
     /// `LessEqual` (vanilla's `DepthStencilState.DEFAULT`,
     /// `GREATER_THAN_OR_EQUAL` under this engine's `[0,1]` depth), depth write
     /// on. Vanilla's own flame render type
-    /// (`RenderTypes.entityCutoutCull`, `.cache/mc/26.2/client-src/net/
-    /// minecraft/client/renderer/rendertype/RenderTypes.java:429`) inherits
+    /// (`RenderTypes.entityCutoutCull`, 26.2's decompiled render-type
+    /// registration table) inherits
     /// `ENTITY_SNIPPET`'s `DepthStencilState.DEFAULT` like every other entity
     /// render type — there is no separate depth state to translate here, only
     /// the fixed cutout/blend spelled out below.
@@ -1684,7 +1687,7 @@ impl EntityPipeline {
     /// `blend: None` (cutout, not translucent) and a dedicated
     /// `"fs_main_flame"` entry point are the load-bearing divergence from
     /// [`Self::new`]: vanilla's `ENTITY_CUTOUT_CULL` pipeline
-    /// (`RenderPipelines.java:238-243`) is `ALPHA_CUTOUT` at `0.1`, not the
+    /// (its render-pipeline registration table) is `ALPHA_CUTOUT` at `0.1`, not the
     /// `ALPHA_BLENDING` translucency this doc's own brief initially assumed —
     /// see `fs_main_flame`'s doc in `entity.wgsl` for the corrected threshold
     /// and for why the flame fragment skips `shade_entity`'s two-light
@@ -1780,8 +1783,8 @@ impl EntityPipeline {
     /// water through the bottom").
     ///
     /// Vanilla's `RenderPipelines.WATER_MASK`
-    /// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/
-    /// RenderPipelines.java`): `DepthStencilState.DEFAULT` (this engine's
+    /// (26.2's decompiled render-pipeline registration
+    /// table): `DepthStencilState.DEFAULT` (this engine's
     /// `LessEqual`, same translation every sibling here applies) with
     /// `ColorTargetState(…, writeMask = 0)` — a normal depth-tested,
     /// depth-writing draw whose fragment output never reaches the
@@ -1839,7 +1842,8 @@ impl EntityPipeline {
     ///
     /// # Why a *third* depth mode, and why it is almost never selected
     ///
-    /// `TrimPattern.decal()` (`ArmorTrim.java` → `Sheets.armorTrimsSheet`)
+    /// `TrimPattern.decal()` (vanilla's armour-trim class routing through its
+    /// armour-trims-sheet function)
     /// forks the render type vanilla submits a trim through:
     ///
     /// | `decal` | vanilla pipeline | this engine |
@@ -1847,8 +1851,8 @@ impl EntityPipeline {
     /// | `false` | `ARMOR_CUTOUT_NO_CULL` — `ENTITY_SNIPPET`'s own default | [`armour_pipeline`](Self::armour_pipeline) (identical: no override) |
     /// | `true` | `ARMOR_DECAL_CUTOUT_NO_CULL` — `CompareOp.EQUAL, writeDepth=false` | **here** |
     ///
-    /// (`RenderPipelines.java:203-219`, read directly from
-    /// `.cache/mc/26.2/client-src`). `CompareOp.EQUAL` has no "direction" to
+    /// (vanilla's render-pipeline registration table, read directly from
+    /// its 26.2 decompiled source). `CompareOp.EQUAL` has no "direction" to
     /// flip under any depth convention: equality is its own mirror image, so
     /// `CompareFunction::Equal` is not a translation, it is the same
     /// predicate. `depth_write_enabled: false`
@@ -1861,7 +1865,8 @@ impl EntityPipeline {
     /// through [`armour_pipeline`](Self::armour_pipeline), and this pipeline
     /// is exercised by no vanilla content — it still has to exist, because
     /// `decal` is genuine per-pattern registry data (a resource pack, or a
-    /// future vanilla release, can set it), and `Sheets.armorTrimsSheet`'s
+    /// future vanilla release, can set it), and vanilla's armour-trims-sheet
+    /// function's
     /// fork is a real one, not a simplification this engine is free to
     /// collapse to "always the cutout pipeline".
     ///
@@ -1906,7 +1911,7 @@ impl EntityPipeline {
     /// mesh to instance — each piece is a *unique* quad, positioned, sized and
     /// coloured freshly on the CPU every frame from the ground scan
     /// (`lodestone_shell`'s `prepare_shadows`), exactly the way vanilla's own
-    /// `VertexConsumer`-based `ShadowFeatureRenderer` builds it. So this pipeline
+    /// `VertexConsumer`-based shadow-feature renderer builds it. So this pipeline
     /// takes a single plain (non-instanced) [`ShadowVertex`] buffer, the same
     /// shape a debug-line or block-outline draw already uses elsewhere in this
     /// engine — see that call site's doc for the precedent.
@@ -1918,7 +1923,7 @@ impl EntityPipeline {
     ///
     /// # State, from vanilla's own `RenderPipelines.ENTITY_SHADOW`
     ///
-    /// `.cache/mc/26.2/client-src/net/minecraft/client/renderer/RenderPipelines.java`:
+    /// 26.2's decompiled render-pipeline registration table:
     /// `ColorTargetState(BlendFunction.TRANSLUCENT)`,
     /// `DepthStencilState(GREATER_THAN_OR_EQUAL, writeDepth = false)`. This
     /// engine is reversed-Z like vanilla, so `GREATER_THAN_OR_EQUAL` is
@@ -1942,7 +1947,7 @@ impl EntityPipeline {
     /// ground."* Vanilla's `ENTITY_SHADOW` uses the two-argument
     /// `DepthStencilState`, so it has **no** depth bias at all — and a shadow
     /// piece is placed *exactly* coplanar with the ground it sits on, by
-    /// construction: `ShadowFeatureRenderer.prepare` emits its quad at
+    /// construction: vanilla's shadow-feature renderer's prepare function emits its quad at
     /// `piece.relativeY() + shapeBelow().bounds().minY`, and the only blocks
     /// that reach it are the ones `isCollisionShapeFullBlock` accepted, whose
     /// bounds are the unit cube. **Zero separation**, which is the part no
@@ -2176,7 +2181,7 @@ impl EntityCameraUniform {
     ///
     /// So sampling world light correctly — which `52f109f` did — cannot darken a
     /// mob at night, because the sampled byte is the same byte. Vanilla darkens
-    /// purely client-side, in `LightTexture.updateLightTexture`, by scaling the
+    /// purely client-side, in its light-texture update function, by scaling the
     /// sky contribution by `Level.getSkyDarken(partialTick) * 0.95 + 0.05`.
     /// `crate::entity::sky_darken_for_time_of_day` is that curve.
     ///
@@ -2411,7 +2416,7 @@ mod tests {
 
         // Overlay alone: RGB bits untouched (still opaque white), alpha byte set
         // to vanilla's 178 (`-1291911168`'s alpha channel, `OverlayTexture`'s red
-        // row, `LivingEntityRenderer.java:281`).
+        // row, vanilla's living-entity renderer).
         let hurt = EntityInstanceRaw::new(m, 0).with_hurt_overlay(true);
         assert_eq!(hurt.tint & 0x00FF_FFFF, NO_TINT);
         assert_eq!((hurt.tint >> 24) & 0xFF, HURT_OVERLAY_ALPHA_BYTE);
@@ -2635,7 +2640,7 @@ mod tests {
     /// A zombie's real `(width, height)` from
     /// `lodestone_data::entity_dimensions::base_dimensions` (verified against
     /// the generated table directly: index 151, `(0.6, 1.95)`). Predicted by
-    /// hand-simulating `FlameFeatureRenderer.prepare` in Python before writing
+    /// hand-simulating vanilla's flame-feature renderer's prepare function in Python before writing
     /// this Rust: **6** quads, `s = 0.84`, first quad half-width `0.42` world
     /// blocks, last (6th) quad half-width `0.2952 * 0.84 ≈ 0.248` world
     /// blocks, top edge of the stack at `3.65 * 0.84 ≈ 3.066` world blocks
@@ -2903,7 +2908,7 @@ mod tests {
     }
 
     /// [`FlameQuad::fire_1`] must alternate starting from `fire_0`
-    /// (`FlameFeatureRenderer.java:45`'s `ss % 2 == 0 ? fire1 : fire2`, and
+    /// (vanilla's flame-feature renderer's `ss % 2 == 0 ? fire1 : fire2`, and
     /// `fire1` names `ModelBakery.FIRE_0` — see that field's own doc for why
     /// the naming looks swapped and is not).
     #[test]
