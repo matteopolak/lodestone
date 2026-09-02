@@ -5,7 +5,7 @@
 //! Vanilla's title screen background is **not** a world render and not a scrolling
 //! image: it is a unit cube, textured with a six-face cubemap, viewed from the
 //! inside through an 85° perspective, tilted 10° down and yawed slowly. The whole
-//! thing is `CubeMap.java` + `Panorama.java` + `panorama.{vsh,fsh}`, all four of
+//! thing is vanilla's own cube-map type + its own panorama type + `panorama.{vsh,fsh}`, all four of
 //! which are short, and this module is their port.
 //!
 //! [`PanoramaFaces`] is the CPU half (decode + stack the six PNGs) and
@@ -23,7 +23,7 @@
 //!    ([`FACE_SUFFIXES`]) — **not** `0..5`. Layer `n` of a cubemap is
 //!    `+X, -X, +Y, -Y, +Z, -Z`, so `panorama_1` is +X and `panorama_0` is +Z.
 //! 2. **Each face is flipped vertically** as it is stacked
-//!    (`copyRect(…, swapX = false, swapY = true)`, `CubeMapTexture.java`;
+//!    (`copyRect(…, swapX = false, swapY = true)`, vanilla's own cube-map-texture type;
 //!    `swapY` writes source row `y` to target row `h-1-y`).
 //! 3. **The sampler is Linear**, from `TextureMetadataSection(blur = true, …)`
 //!   . Almost every other menu texture in this repo is
@@ -32,12 +32,12 @@
 //!    vertices, 6 quads ([`CUBE_QUADS`]). The fragment stage samples by
 //!    *direction*, using the object-space position verbatim.
 //! 5. **The projection is perspective**, FOV 85° vertical, near 0.05, far 10.0
-//!    (`CubeMap.java`; `Projection` feeds `fov` to JOML's `setPerspective`,
+//!    (vanilla's own cube-map type; `Projection` feeds `fov` to JOML's `setPerspective`,
 //!    whose first argument is `fovy`).
 //! 6. **The model-view is `rotationX(PI)` then `rotateX(10°)` then
 //!    `rotateY(spin)`**, where the 10° comes from
-//!    `GuiRenderer.java`'s `cubeMap.render(10.0F, spin)` and `spin` is the
-//!    **negated** accumulator (`Panorama.java` passes `-this.spin`).
+//!    vanilla's own gui-renderer's `cubeMap.render(10.0F, spin)` call and `spin` is the
+//!    **negated** accumulator (vanilla's own panorama type passes `-this.spin`).
 //!
 //! Spin accumulates as `wrapDegrees(spin + realtimeDeltaTicks * panoramaSpeed *
 //! 0.1)`. Note *realtime* delta ticks: the title screen
@@ -92,8 +92,8 @@ use crate::platform::Instant;
 use glam::Mat4;
 use lodestone_assets::Image;
 
-/// In-pack path prefix of the cubemap — `GuiRenderer.java`'s
-/// `Identifier.withDefaultNamespace("textures/gui/title/background/panorama")`,
+/// In-pack path prefix of the cubemap — vanilla's own gui-renderer builds
+/// this default-namespaced path,
 /// which `CubeMapTexture` then suffixes.
 pub const PANORAMA_BASE: &str = "assets/minecraft/textures/gui/title/background/panorama";
 
@@ -117,10 +117,10 @@ pub const FOV_DEGREES: f32 = 85.0;
 pub const Z_NEAR: f32 = 0.05;
 /// Far plane — `CubeMap.PROJECTION_Z_FAR`.
 pub const Z_FAR: f32 = 10.0;
-/// Downward tilt applied before the yaw — `GuiRenderer.java` passes `10.0F`
+/// Downward tilt applied before the yaw — vanilla's own gui-renderer passes `10.0F`
 /// as `CubeMap.render`'s `rotXInDegrees`.
 pub const TILT_DEGREES: f32 = 10.0;
-/// Degrees of yaw per tick at speed 1.0 — `Panorama.java`'s `delta * 0.1F`.
+/// Degrees of yaw per tick at speed 1.0 — vanilla's own panorama type's `delta * 0.1F`.
 pub const SPIN_DEGREES_PER_TICK: f32 = 0.1;
 /// `panoramaSpeed`'s default — vanilla's `Options::panoramaSpeed` field, a
 /// `UnitDouble` constructed with `1.0`.
@@ -223,7 +223,7 @@ pub const CUBE_VERTEX_COUNT: usize = 36;
 
 /// The cube as a triangle list, using vanilla's own quad→triangle split.
 ///
-/// `RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS)` emits
+/// Vanilla's own sequential-buffer helper for the quads primitive topology emits
 /// `0, 1, 2, 2, 3, 0` per quad, and `CubeMap.render` draws 36 indices over the 24
 /// vertices. Expanding to 36 vertices here costs 144 bytes and removes the index
 /// buffer entirely.
@@ -359,7 +359,7 @@ pub fn assemble(faces: &[Image; 6]) -> Result<PanoramaFaces, String> {
         if face.width != size || face.height != size {
             return Err(format!(
                 "panorama face {} is {}x{} but face {} is {size}x{size}; \
-                 vanilla requires every side to match (CubeMapTexture.java)",
+                 vanilla requires every side to match (its own cube-map-texture type)",
                 FACE_SUFFIXES[index], face.width, face.height, FACE_SUFFIXES[0]
             ));
         }
@@ -780,7 +780,7 @@ impl PanoramaRenderer {
     /// composites `menu_background.png` over, and `0.0` on the title screen,
     /// whose `extractBackground` override is empty.
     pub fn prepare(&self, queue: &wgpu::Queue, width: u32, height: u32, dim: f32) {
-        // `-self.spin`: `Panorama.java` hands `CubeMap.render` the negated
+        // `-self.spin`: vanilla's own panorama type hands `CubeMap.render` the negated
         // accumulator, and `view_projection` takes the value at that call site.
         let vp = view_projection(width, height, -self.spin);
         let data = PanoramaUniform {

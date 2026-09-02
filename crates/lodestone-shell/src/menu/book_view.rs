@@ -28,7 +28,7 @@
 //!   three things — the wrapped page text, the `book.pageIndicator` line and
 //!   a Done button. The title, the `book.byAuthor` line and the
 //!   `book.generation.<n>` line are `WrittenBookContent.addToTooltip`'s and
-//!   `ItemStack.getCustomName()`'s, i.e. the *item tooltip*, which is where
+//!   vanilla's own get-custom-name accessor's, i.e. the *item tooltip*, which is where
 //!   they now appear (`crate::container::tooltip`). Adding a header here
 //!   would be this shell inventing a screen vanilla does not have.
 //! - **No `textures/gui/book.png` background.** The same simplification
