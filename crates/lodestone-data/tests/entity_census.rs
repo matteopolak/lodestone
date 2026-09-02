@@ -428,7 +428,8 @@ fn generate(rows: &[Row]) -> String {
     // The raw `mob` column, likewise unreduced — and a *third* distinct fact.
     // The mob class is where its own mob-flags field (metadata index 15, the aggressive bit)
     // is declared, and index 15 is *also* the armour-stand entity class's own client-flags field and
-    // a display entity's own billboard-render-constraints field, all three `BYTE`. An armour
+    // a display entity's own billboard-render-constraints field, all three the same
+    // single-byte metadata type. An armour
     // stand's `0x04` is "show arms" where a mob's is "aggressive", so an
     // is-*living* guard is not enough for index 15 the way it is for index 8:
     // an armour stand is living. See `tests/support/entity_data_index_jvm.txt` in
@@ -545,7 +546,7 @@ fn is_mob_is_strictly_narrower_than_is_living_and_the_gap_is_named() {
     // The whole reason a third column exists. Metadata index 15 is
     // the mob class's own mob-flags field on a mob and the armour-stand entity
     // class's own client-flags field on an
-    // armour stand, both `BYTE` — and bit `0x04` is "aggressive" on one and "show
+    // armour stand, both the same single-byte metadata type — and bit `0x04` is "aggressive" on one and "show
     // arms" on the other. An armour stand is a living entity, so unlike index 8 the
     // is-living guard does **not** resolve this one, and reading `is_living` as an
     // is-mob test would make every armour stand with arms report itself as an

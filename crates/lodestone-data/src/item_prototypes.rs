@@ -21,7 +21,7 @@
 //!   an "is equippable in slot" check on the holding entity, which is
 //!   `slot == equippable.slot() && canUseSlot(…) && equippable.canBeEquippedBy(…)`.
 //!   With no component, the only slot that
-//!   accepts anything is `MAINHAND` — **no armour is equippable by any click
+//!   accepts anything is the main-hand slot — **no armour is equippable by any click
 //!   type**.
 //! * **`minecraft:max_stack_size`** — vanilla's own item-instance "get max
 //!   stack size" accessor is

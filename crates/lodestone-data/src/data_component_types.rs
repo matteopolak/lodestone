@@ -1,6 +1,6 @@
 //! Public data-component-type id→identifier resolution for protocol 776.
 //!
-//! An item stack's `DataComponentPatch` names each added or removed component by
+//! An item stack's wire-format component patch names each added or removed component by
 //! a `minecraft:data_component_type` registry id (a VarInt). The id→name
 //! mapping is generated from Mojang's own `registries.json` for 26.2, the one
 //! canonical internal version, so it lives here in this data crate

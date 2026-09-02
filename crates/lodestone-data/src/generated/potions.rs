@@ -10,8 +10,9 @@
 // registries.json at all), so a static table is valid here.
 //! Generated potion id->name table for protocol 776 (Minecraft 26.2).
 //!
-//! `PotionContents`' `potion` field (vanilla's own potion stream codec, a
-//! holder-registry codec over the potion registry) carries a Holder<Potion> as a bare VarInt
+//! Vanilla's own potion-contents component's own `potion` field (its own potion
+//! stream codec, a holder-registry codec over the potion registry) carries its
+//! potion holder as a bare VarInt
 //! registry id — the same 0-based, non-inline shape as `minecraft:mob_effect`. This
 //! order also matches vanilla's own potion-definitions declaration order (confirmed by a
 //! side-by-side read), which is what vanilla's own creative-tab potion-effect

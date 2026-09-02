@@ -1256,7 +1256,7 @@ fn collect_tag_files(
 
 /// Resolves one tag's `values` to block registry ids, following nested `#tag`
 /// references and honouring `{"id": …, "required": false}` entries the way
-/// `TagLoader` does.
+/// vanilla's own tag loader does.
 fn resolve_tag(
     raw: &BTreeMap<String, serde_json::Value>,
     ids: &BTreeMap<&str, u16>,

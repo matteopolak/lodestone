@@ -289,7 +289,7 @@ pub static BLOCK_TAGS: [(&str, &[u16]); BLOCK_TAG_COUNT] = [
 ];
 
 /// Items whose *prototype* component map carries `minecraft:tool`, sorted by
-/// item name. This is what a clientbound `DataComponentPatch` is a delta
+/// item name. This is what a clientbound component patch is a delta
 /// against: a plain vanilla pickaxe sends an empty patch, so without this table
 /// it would mine at bare-hand speed.
 pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [

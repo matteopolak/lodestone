@@ -32,12 +32,12 @@
 //!
 //! # Selection: pool order, not vanilla's seeded RNG
 //!
-//! A real `TradeSet` draws `amount` trades **at random**, without
+//! A real trade set draws `amount` trades **at random**, without
 //! replacement (every one of these `trade_set/*/level_*.json` records omits
 //! `allow_duplicates`, whose codec default is `false`), from its tag's
-//! resolved pool, seeded per-position through vanilla's `RandomSequence`
-//! (`WorldGenRandom` keyed by `random_sequence` + world seed) — a whole RNG
-//! subsystem this crate has no port of. [`pool_for`] hands back the *whole*
+//! resolved pool, seeded per-position through vanilla's own random-sequence
+//! system (a deterministic world-gen RNG keyed by `random_sequence` + world
+//! seed) — a whole RNG subsystem this crate has no port of. [`pool_for`] hands back the *whole*
 //! resolved pool plus the tag's own `amount`, in the tag's declared order,
 //! and leaves the actual pick to the caller. Every number in the table below
 //! is the real jar value; only the *subset* a villager ends up offering will
@@ -57,7 +57,7 @@
 //! own `values` list) — there is no separate "smith" profession, and no
 //! caller needs to know the table is composed this way.
 
-/// One `VillagerTrade` record: what a villager wants (one or two items) for
+/// One villager-trade record: what a villager wants (one or two items) for
 /// what it gives, and the record's own use/xp limits.
 ///
 /// No `Eq`/`Hash`: [`price_multiplier`](Self::price_multiplier) is an `f32`.
@@ -3239,7 +3239,7 @@ const WEAPONSMITH_LEVEL_4: &[TradeRecord] = &[
 ];
 
 // weaponsmith level 5: no portable trades in the resolved tag (all 1 record(s) use given_item_modifiers: ['weaponsmith/5/emerald_enchanted_diamond_sword']).
-/// The pool a profession/level's own `TradeSet` draws from, plus the tag's
+/// The pool a profession/level's own trade set draws from, plus the tag's
 /// declared `amount` — `None` for a `(profession, level)` with no portable
 /// pool: an unrecognised profession path, `level` outside `1..=5`, or a
 /// level whose entire resolved tag is `given_item_modifiers`-only (see this

@@ -13,8 +13,8 @@
 //! # Data source: interrogate the real jar, not `minecraft-data`
 //!
 //! The classification is *not* derivable from `blocks.json`: it depends on block
-//! tags (`FENCES`, `WALLS`, `TRAPDOORS`, `SPELEOTHEMS`), fluid tags
-//! (`WATER`/`LAVA`), block-class instance checks (door, base-rail,
+//! tags (fences, walls, trapdoors, speleothems), fluid tags
+//! (water/lava), block-class instance checks (door, base-rail,
 //! leaves, fence-gate blocks) and an "is pathfindable" check. So, exactly like the
 //! collision-shape table, the only authoritative source is the game itself.
 //!

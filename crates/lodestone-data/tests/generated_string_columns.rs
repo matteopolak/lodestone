@@ -71,7 +71,7 @@ const ALLOWED: &[(&str, &str, Kind, &str)] = &[
     ("menus.rs", "MENU_NAMES", CanonicalNames, "the minecraft:menu registry"),
     ("mob_effects.rs", "MOB_EFFECT_NAMES", CanonicalNames, "the minecraft:mob_effect registry"),
     ("particle_types.rs", "PARTICLE_TYPE_NAMES", CanonicalNames, "the minecraft:particle_type registry"),
-    ("potion_effect_keys.rs", "POTION_EFFECT_KEYS", CrossReference, "Potion.name() collapses every long_/strong_ variant of one potion onto the same key (e.g. swiftness/long_swiftness/strong_swiftness -> \"swiftness\"); keys into the same minecraft:potion path space POTION_NAMES already carries, just many-to-one"),
+    ("potion_effect_keys.rs", "POTION_EFFECT_KEYS", CrossReference, "vanilla's own potion-name accessor collapses every long_/strong_ variant of one potion onto the same key (e.g. swiftness/long_swiftness/strong_swiftness -> \"swiftness\"); keys into the same minecraft:potion path space POTION_NAMES already carries, just many-to-one"),
     ("potions.rs", "POTION_NAMES", CanonicalNames, "the minecraft:potion registry"),
     ("sound_events.rs", "SOUND_EVENT_ENTRIES", DuplicateNames, "carries the sound name again alongside its range; the name half duplicates SOUND_EVENT_NAMES"),
     ("sound_events.rs", "SOUND_EVENT_NAMES", CanonicalNames, "the minecraft:sound_event registry"),

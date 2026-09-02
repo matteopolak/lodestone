@@ -8,12 +8,13 @@
 // level, max level), never for a network id.
 //! Generated enchantment census for protocol 776 (Minecraft 26.2).
 //!
-//! Ordered alphabetically by registry path, matching
-//! `SimpleJsonResourceReloadListener`'s `vanilla's own resource manager's own list resources` (a sorted
-//! `TreeMap<ResourceLocation, Resource>`), which is what feeds the
-//! `HolderLookup<Enchantment>` `vanilla's own creative mode tabs's own generate enchantment book types only max level`
-//! iterates via `listElements`. Each entry is one `data/minecraft/enchantment/*.json`
-//! file's own `min_level`/`max_level` fields.
+//! Ordered alphabetically by registry path, matching vanilla's own
+//! JSON-reload listener's resource-manager scan (a sorted map from resource
+//! location to resource), which is what feeds the per-enchantment registry
+//! lookup vanilla's own creative-tab generation iterates over when it builds
+//! max-level-only enchanted books. Each entry is one
+//! `data/minecraft/enchantment/*.json` file's own `min_level`/`max_level`
+//! fields.
 
 /// Number of enchantment entries.
 pub const ENCHANTMENT_COUNT: u32 = 43;
