@@ -49,12 +49,21 @@ which is part of the format this software interoperates with and cannot be renam
 breaking compatibility. Prose usage (docs, code comments citing vanilla behaviour by symbol) is
 a second, much smaller category, and is a deliberate, standing project convention — see
 `CLAUDE.md`'s "Cite symbols, never line numbers" section — not something this doc changes. The
-highest-attention category is the smallest: literal, user-visible UI strings in
-`crates/lodestone-shell` that were not just descriptive but mirrored Mojang's own copy —
-`"Copyright Mojang AB. Do not distribute!"` and `"Minecraft {version}"` on the title screen, a
-`"Minecraft Realms"` button, a resource-pack description, and telemetry/sign-in screen text
-close to vanilla's own wording. These are filed as an issue rather than edited here; see "How
-to change it".
+highest-attention category was the smallest: literal, user-visible UI strings in
+`crates/lodestone-shell` that were not just descriptive but mirrored Mojang's own copy. The
+owner's decision on each: the `"Minecraft Realms"` button label and the
+advancement titles (`"Minecraft: Trial(s) Edition"`, `"Minecraft"`) stay — the button names a
+real feature by its real name, and the advancement titles are the game's own data, so changing
+them would be a fidelity bug rather than an attribution fix. Everything else in that finding
+was reworded to Lodestone's own copy: the title screen's `"Copyright Mojang AB. Do not
+distribute!"` (an instruction not to distribute that made no sense for our own build) and its
+`"Minecraft {version} (Lodestone {version})"` version line, the "Add Server" hint text, the
+built-in resource-pack description, the telemetry-consent body text (which now also drops the
+`go.microsoft.com` Privacy Statement link and button — it existed only to disclose a data
+pipeline this client does not have), the sign-in failure message for an account with no
+Minecraft profile, and an options tooltip naming "the Mojang Studios loading screen".
+`"Sign in with Microsoft"`, `"Microsoft account"`, and `"Contacting Microsoft..."` were kept —
+those describe the actual Microsoft OAuth flow this client performs, not vanilla's copy.
 
 ## How to change it
 
@@ -65,11 +74,11 @@ license's own attribution requirements (MIT and Apache-2.0 both require the lice
 copyright notice to travel with a distributed binary; GPL-3.0 additionally imposes copyleft
 obligations on the combined work) are met before merging.
 
-**The UI-string findings are not fixed by this doc.** They are user-visible product-copy
-choices (do we call the "Realms" feature the same name Mojang does; do we reproduce Mojang's
-own copyright line), not something an audit should silently edit — see the filed issue for the
-specific file/line list and let the owner decide scope, in line with the file-ownership split
-this audit worked under.
+**The UI-string findings were fixed by a deliberate, owner-decided pass, not silently by the
+audit itself** — see the paragraph above for what changed and what was kept. If a future audit
+finds a new instance of Lodestone's own UI copy mirroring Mojang's wording, file it the same
+way: list the exact string and location, and let the owner decide keep/reword/drop per string
+rather than editing in the audit pass.
 
 **The `.java`-oracle finding is a standing invariant, not a one-time result.** Any new
 `oracle-java/*.java` file should keep calling into the real jar rather than reproducing a

@@ -1087,7 +1087,11 @@ impl Cell {
 /// *not* here is provably not one of these, rather than merely uncounted.
 /// Every `OptionInstance` on this tree that carries a tooltip, keyed by
 /// [`OptionSpec::accessor`], with the text verbatim from
-/// `assets/minecraft/lang/en_us.json`.
+/// `assets/minecraft/lang/en_us.json` — with one deliberate exception:
+/// `darkMojangStudiosBackground`'s tooltip is Lodestone's own functional
+/// description of the setting rather than vanilla's text, which names
+/// "the Mojang Studios loading screen". The accessor name
+/// itself is kept, for the reason given below.
 ///
 /// ## Why a side table and not a field on `OptionSpec`
 ///
@@ -1125,7 +1129,7 @@ const OPTION_TOOLTIPS: &[(&str, &str)] = &[
     ("chunkSectionFadeInTime", "How long in seconds chunks should fade in when they're first rendered, if at all."),
     ("cutoutLeaves", "Allows you to see through gaps in leaves. Disabling improves performance."),
     ("damageTiltStrength", "The amount of camera shake caused by being hurt."),
-    ("darkMojangStudiosBackground", "Changes the Mojang Studios loading screen background color to black."),
+    ("darkMojangStudiosBackground", "Changes the loading screen's background behind the logo to black."),
     ("darknessEffectScale", "Controls how much the Darkness effect pulses when a Warden or Sculk Shrieker gives it to you."),
     ("fovEffectScale", "Controls how much the field of view can change with gameplay effects."),
     ("glintSpeed", "Controls how fast the visual glint shimmers across enchanted items."),
