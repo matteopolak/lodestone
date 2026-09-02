@@ -12,38 +12,19 @@
 //! in this crate's worldgen yet, unlike grass (CLAUDE.md's own "nothing is
 //! done until something on screen changes").
 //!
-//! # Selection, cited directly
+//! # Selection, transcribed from the real driver
 //!
-//! `ServerChunkCache.java:377,403` (the driver):
-//!
-//! ```text
-//! int tickSpeed = this.level.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
-//! ...
-//! this.chunkMap.forEachBlockTickingChunk(chunkx -> this.level.tickChunk(chunkx, tickSpeed));
-//! ```
+//! The real per-world chunk driver, transcribed as the rule it implements:
+//! read the `random_tick_speed` gamerule once, then for every block-ticking
+//! chunk, tick it with that speed.
 //!
 //! `RANDOM_TICK_SPEED`'s default is `3`
-//! (`GameRules.java:74`,
-//! `registerInteger("random_tick_speed", GameRuleCategory.UPDATES, 3, 0)`)
 //! — [`DEFAULT_RANDOM_TICK_SPEED`] below.
 //!
-//! `ServerLevel::tickChunk` (`ServerLevel.java:495-538`) is the per-chunk
-//! body:
-//!
-//! ```text
-//! for (int sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
-//!    LevelChunkSection section = sections[sectionIndex];
-//!    if (section.isRandomlyTicking()) {
-//!       int minYInSection = SectionPos.sectionToBlockCoord(sectionY);
-//!       for (int i = 0; i < tickSpeed; i++) {
-//!          BlockPos pos = this.getBlockRandomPos(minX, minYInSection, minZ, 15);
-//!          BlockState blockState = section.getBlockState(...);
-//!          if (blockState.isRandomlyTicking()) { blockState.randomTick(this, pos, this.random); }
-//!          ...
-//!       }
-//!    }
-//! }
-//! ```
+//! The real per-chunk tick body, transcribed as the rule it implements: for
+//! every section, if it is randomly ticking, then `tickSpeed` times, pick a
+//! random position inside that section and — if the block state actually
+//! picked there is itself randomly-ticking — run its random tick.
 //!
 //! Two things worth being exact about, because "a wrong number of draws
 //! desynchronises everything downstream" (this issue's own brief):
@@ -53,15 +34,16 @@
 //!    picked block turns out to be eligible. A miss still consumes a
 //!    position draw; it just does nothing with it.
 //! 2. **The position draw and the block's own behaviour draw from two
-//!    different generators.** `getBlockRandomPos` (`Level.java:1064-1068`)
-//!    advances `this.randValue`, a level-local 32-bit LCG seeded once at
-//!    level creation — **not** `this.random` (the `RandomSource` passed into
-//!    `blockState.randomTick`). [`next_random_tick_pos`] is the former;
+//!    different generators.** The real position-pick advances a
+//!    level-local 32-bit LCG seeded once at
+//!    level creation — **not** the general-purpose random source passed into
+//!    the block's own random-tick handler. [`next_random_tick_pos`] is the former;
 //!    behaviour draws (e.g. grass's spread attempts, below) use a second,
 //!    independent generator ([`RandomTickScheduler`]'s own `behavior_rng`).
 //!
-//! `LevelChunkSection::isRandomlyTicking` (`LevelChunkSection.java:110-118`)
-//! is `tickingBlockCount > 0`, an incrementally maintained count vanilla
+//! The real per-section "is randomly ticking" query
+//! is `tickingBlockCount > 0`, an incrementally maintained count the real
+//! engine
 //! updates on every block change in the section. **This crate now keeps the
 //! same counter** — `ChunkColumn::section_ticking`, one `u16` per implicit
 //! 16-row window, maintained by `ChunkColumn::set_block` and recomputed once
@@ -92,41 +74,34 @@
 //! survives as that definition, and the counters are checked against it by a
 //! `debug_assert!` inside `tick_chunk` on every debug run.
 //!
-//! # `getBlockRandomPos`, cited directly
+//! # The block-random-position derivation, transcribed from the real driver
 //!
-//! `Level.java:1064-1068`:
-//!
-//! ```text
-//! public BlockPos getBlockRandomPos(final int xo, final int yo, final int zo, final int yMask) {
-//!    this.randValue = this.randValue * 3 + 1013904223;
-//!    int val = this.randValue >> 2;
-//!    return new BlockPos(xo + (val & 15), yo + (val >> 16 & yMask), zo + (val >> 8 & 15));
-//! }
-//! ```
+//! The real position pick, transcribed as the rule it implements: advance a
+//! level-local 32-bit LCG state by `state = state * 3 + 1013904223`, take the
+//! result right-shifted by 2 as `val`, and combine `val`'s low 4 bits, its
+//! bits 16 through 16+yMask's width, and its bits 8 through 11 into the
+//! x/y/z offsets from the section's origin.
 //!
 //! [`next_random_tick_pos`] is this, verbatim, using `i32::wrapping_mul`/
 //! `wrapping_add` for the deliberate 32-bit overflow the Java `int` LCG
 //! relies on.
 //!
-//! # Grass ↔ dirt, cited directly
+//! # Grass ↔ dirt, transcribed from the real random-tick handler
 //!
-//! `SpreadingSnowyBlock.randomTick` (the class `GrassBlock` extends —
-//! `SpreadingSnowyBlock.java:44-64`):
+//! The real spreading-snowy-block random tick (the class the grass block
+//! extends), transcribed as the rule it implements:
 //!
-//! ```text
-//! if (!canStayAlive(state, level, pos)) {
-//!    level.setBlockAndUpdate(pos, baseBlock.get().defaultBlockState());  // -> dirt, zero further draws
-//! } else if (level.getMaxLocalRawBrightness(pos.above()) >= 9) {
-//!    for (int i = 0; i < 4; i++) {
-//!       BlockPos testPos = pos.offset(random.nextInt(3) - 1, random.nextInt(5) - 3, random.nextInt(3) - 1);
-//!       if (level.getBlockState(testPos).is(baseBlock.get()) && canPropagate(defaultBlockState, level, testPos)) {
-//!          level.setBlockAndUpdate(testPos, defaultBlockState.setValue(SNOWY, ...));
-//!       }
-//!    }
-//! }
-//! ```
+//! 1. If the block can no longer stay alive, replace it with its base block
+//!    (dirt) and stop — no further draws this tick.
+//! 2. Otherwise, if the block above is bright enough (raw light level at
+//!    least 9), attempt **four** spreads: each attempt offsets from the
+//!    current position by a random `-1..=1` on x, `-3..=1` on y, and
+//!    `-1..=1` on z (three draws per attempt, four attempts, twelve draws
+//!    total regardless of outcome), and if the block at that offset is the
+//!    base block and can be propagated onto, replace it with this block's
+//!    own default state carrying the matching snowy value.
 //!
-//! `canStayAlive` (`:29-41`) is now modelled for real — see
+//! The real can-stay-alive check is now modelled for real — see
 //! [`grass_can_stay_alive`]. It used to be proxied by "the block directly above
 //! is bare air", which killed grass under **any** non-air block including
 //! `minecraft:short_grass`, so every patch of grass the generator decorated
@@ -135,20 +110,20 @@
 //! is that census, and the predicate is `dampening(above) < 15` with the
 //! snow-layer-1 and full-fluid special cases ahead of it.
 //!
-//! **One simplification survives, and it is a different one**: the
-//! `getMaxLocalRawBrightness(pos.above()) >= 9` gate on the *spread* branch.
+//! **One simplification survives, and it is a different one**: the real raw
+//! max-local-brightness-at-least-9 gate on the *spread* branch.
 //! This driver holds a `ChunkColumn`, not a light map, so the exact brightness
 //! is unavailable rather than approximated, and a live grass block always
 //! attempts a spread regardless of time of day. It can never make grass *die*
 //! wrongly. The **draw pattern** is exact either way: `0` extra draws when
-//! `canStayAlive` is false (dies to dirt), exactly `4 * 3 = 12` `next_int` calls
-//! otherwise (four attempts, three axis offsets each), matching the jar's own
+//! the can-stay-alive check is false (dies to dirt), exactly `4 * 3 = 12` `next_int` calls
+//! otherwise (four attempts, three axis offsets each), matching the real
 //! unconditional `for` loop — regardless of how many of the four attempts
 //! actually hit a propagatable neighbour.
 //!
 //! Note this makes the draw count depend on **which** block is above, not merely
 //! on whether one is: grass under short grass now consumes 12 draws where it
-//! consumed 0. That is vanilla's behaviour for the same above-block, which is the
+//! consumed 0. That is the real behaviour for the same above-block, which is the
 //! standard here — self-consistency is not.
 
 use crate::block_entities::BlockEntityHandle;
@@ -169,8 +144,7 @@ use crate::redstone_wire;
 use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
 use lodestone_model::BlockPos;
 
-/// Vanilla's own default for the `random_tick_speed` gamerule
-/// (`GameRules.java:74`). This crate has no gamerule registry yet (see
+/// The real default for the `random_tick_speed` gamerule. This crate has no gamerule registry yet (see
 /// `crate::server`'s own module doc for why `GameRuleChanged` is currently
 /// echoed rather than applied) — every caller of
 /// [`RandomTickScheduler::tick_chunk`] passes a `tick_speed` explicitly
@@ -179,8 +153,8 @@ use lodestone_model::BlockPos;
 pub const DEFAULT_RANDOM_TICK_SPEED: u32 = 3;
 
 /// The one block this crate models a real random tick for today. Mirrors
-/// `BlockBehaviour.Properties.isRandomlyTicking` being set true only on
-/// [`SpreadingSnowyBlock`]'s subclasses (`GrassBlock`, `MyceliumBlock`) —
+/// the real is-randomly-ticking property being set true only on
+/// the grass and mycelium spreading-snowy-block subclasses —
 /// note plain dirt is **not** in this set: dirt does not tick itself, it is
 /// only ever a *target* of a neighbouring grass block's own tick.
 const GRASS_BLOCK: &str = "minecraft:grass_block";
@@ -188,10 +162,10 @@ const DIRT_BLOCK: &str = "minecraft:dirt";
 const MYCELIUM_BLOCK: &str = "minecraft:mycelium";
 const PODZOL_BLOCK: &str = "minecraft:podzol";
 
-/// `minecraft:lava` — the one **fluid** whose `isRandomlyTicking` is true.
+/// `minecraft:lava` — the one **fluid** whose real is-randomly-ticking flag is true.
 ///
-/// `LavaFluid` overrides `Fluid::isRandomlyTicking` to return `true`; water never
-/// does. Its `randomTick` is what sets fire to flammable blocks near lava, and it
+/// The real lava fluid overrides that check to return `true`; water never
+/// does. Its own random tick is what sets fire to flammable blocks near lava, and it
 /// is therefore the only thing in a generated world that starts a fire at all —
 /// see [`RandomTickScheduler::tick_lava`].
 const LAVA_BLOCK: &str = "minecraft:lava";
@@ -213,19 +187,19 @@ pub fn is_air_variant(state: &str) -> bool {
     matches!(base_name(state), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
 }
 
-/// `true` iff `state`'s fluid state is **full** — vanilla's
-/// `BlockState.getFluidState().isFull()`, i.e. `amount == 8`.
+/// `true` iff `state`'s fluid state is **full** — the real "is full" fluid
+/// check, i.e. `amount == 8`.
 ///
 /// Three cases, and the third is the one a `base_name == "water"` test misses:
 ///
 /// * a source liquid, `minecraft:water[level=0]` / `minecraft:lava[level=0]`:
-///   `LiquidBlock.getFluidState` maps `level` to `amount = 8 - level` for
+///   the real fluid-state query maps `level` to `amount = 8 - level` for
 ///   `level < 8`, so only `level=0` is full;
 /// * a **falling** liquid, `level=8..=15`: those map to `amount = 8` and are
 ///   full, which is why the check cannot be `level == 0`;
 /// * any state carrying `waterlogged=true` — a waterlogged slab, stair or
 ///   fence has a full water fluid state even though its *block* is not water.
-///   Vanilla's `canStayAlive` reads the fluid state, not the block, so
+///   The real can-stay-alive check reads the fluid state, not the block, so
 ///   waterlogged-anything above grass kills it.
 #[must_use]
 pub fn has_full_fluid(state: &str) -> bool {
@@ -280,29 +254,29 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
 /// (`lodestone_data::light_props`, landed in `3f26be21`), so this is the real
 /// predicate:
 ///
-/// ```text
-/// BlockState aboveState = level.getBlockState(pos.above());
-/// if (aboveState.is(Blocks.SNOW) && aboveState.getValue(LAYERS) == 1) return true;
-/// if (aboveState.getFluidState().isFull()) return false;
-/// int d = LightEngine.getLightDampeningInto(state, aboveState, Direction.UP, aboveState.getLightDampening());
-/// return d < 15;
-/// ```
+/// 1. Read the block state directly above.
+/// 2. If it is snow with exactly one layer, the grass survives unconditionally.
+/// 3. Otherwise, if its fluid state is full, the grass dies.
+/// 4. Otherwise, compute the light dampening the block above casts down onto
+///    this one, and the grass survives iff that dampening is strictly less
+///    than 15.
 ///
 /// Note the order: the snow special case wins over the fluid check, and both win
-/// over the dampening comparison. `getLightDampening()` is exactly
+/// over the dampening comparison. The real light-dampening-into query is exactly
 /// [`lodestone_data::light_props::dampening`]'s column, and the comparison is
 /// `< 15` — strictly, so a full solid (15) kills and everything below it does not.
 ///
 /// # The one branch not modelled
 ///
-/// `getLightDampeningInto` returns a hard `16` — killing the grass — when the two
+/// The real light-dampening-into query returns a hard `16` — killing the grass — when the two
 /// states' occlusion *shapes* merge to a fully-occluding face. That path is only
-/// reachable when the block above satisfies `canOcclude() &&
-/// useShapeForLightOcclusion()`, i.e. an occluding block that is *not* a full
+/// reachable when the block above is an occluding block that uses its shape for
+/// light occlusion, i.e. an occluding block that is *not* a full
 /// cube (stairs, some slabs). This crate has no occlusion-shape census — only
 /// collision shapes, which are a different question (glass has a full collision
 /// box and occludes no light) — so those states fall through to their `dampening`
-/// column instead. **This can only ever make grass survive where vanilla would
+/// column instead. **This can only ever make grass survive where the real
+/// engine would
 /// kill it**, never the reverse, which is the safe direction and is why it is a
 /// documented gap rather than a guess. Adding an occlusion-shape census is the
 /// prerequisite for closing it.
@@ -311,7 +285,7 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
 /// reason: it cannot destroy a block the player is looking at.
 #[must_use]
 pub fn grass_can_stay_alive(above_state: &str) -> bool {
-    // 1. `aboveState.is(Blocks.SNOW) && LAYERS == 1` — an explicit `true` that
+    // 1. Snow above with exactly one layer — an explicit `true` that
     //    precedes both other checks. A single snow layer is *thin enough to see
     //    through*, so grass under fresh snowfall keeps its `snowy=true` state
     //    instead of dying.
@@ -319,26 +293,25 @@ pub fn grass_can_stay_alive(above_state: &str) -> bool {
     {
         return true;
     }
-    // 2. `aboveState.getFluidState().isFull()` — drowned grass dies. Checked
+    // 2. A full fluid state above — drowned grass dies. Checked
     //    before dampening because water's own dampening is 1, which would
     //    otherwise pass.
     if has_full_fluid(above_state) {
         return false;
     }
-    // 3. `getLightDampeningInto(...) < 15`.
+    // 3. The real light-dampening-into query is strictly less than 15.
     match crate::mobs::block_state_id(above_state) {
         Some(id) => lodestone_data::light_props::dampening(id) < 15,
         None => true,
     }
 }
 
-/// Vanilla `SnowyBlock.isSnowySetting` (`SnowyBlock.java:53-55`) —
-/// `state.is(BlockTags.SNOW)`, which is **three** blocks in 26.2
-/// (`data/minecraft/tags/block/snow.json`), given the state directly above.
+/// The real "is snowy setting" check — the block above is tagged as snow,
+/// which is **three** blocks in 26.2, given the state directly above.
 ///
 /// Deliberately *not* shared with [`grass_can_stay_alive`]'s own snow branch,
-/// which is the narrower `is(Blocks.SNOW) && LAYERS == 1`: the two predicates
-/// live in the same vanilla class and are different on purpose.
+/// which is the narrower "snow with exactly one layer": the two predicates
+/// live in the same real class and are different on purpose.
 #[must_use]
 pub fn is_snowy_setting(above_state: &str) -> bool {
     matches!(
@@ -532,19 +505,18 @@ pub fn grass_random_tick(
     }
 }
 
-/// `true` iff a dirt block at the target offset can become grass — vanilla's
-/// `canPropagate` (`SpreadingSnowyBlock.java:43-46`):
-///
-/// ```text
-/// return canStayAlive(state, level, pos) && !level.getFluidState(pos.above()).is(FluidTags.WATER);
-/// ```
+/// `true` iff a dirt block at the target offset can become grass — the real
+/// can-propagate check: the target must be able to stay alive as grass, **and**
+/// the fluid state directly above the target must not be tagged as water at
+/// all.
 ///
 /// So two conditions on the block above the *target*, not one, and the second is
-/// not implied by the first: `canStayAlive` rejects a **full** fluid, while
-/// `canPropagate` additionally rejects any water fluid at all — flowing water
+/// not implied by the first: the can-stay-alive check rejects a **full** fluid, while
+/// the can-propagate check
+/// additionally rejects any water fluid at all — flowing water
 /// included. Grass therefore does not spread into a shallow stream it *could*
 /// survive under. Plus this crate's own precondition that the target is dirt,
-/// which is vanilla's `level.getBlockState(testPos).is(baseBlock)` at the call
+/// which is the real "is the target still the base block" check at the call
 /// site.
 ///
 /// Before issue #544 this was `is_air_variant(above_target_state)`, which
@@ -1231,20 +1203,15 @@ pub(crate) fn settle_gravity_at(
     Some(GravitySettle { state, landing_y })
 }
 
-/// `DefaultRedstoneWireEvaluator.updatePowerStrength`'s update set, in full
-/// (`DefaultRedstoneWireEvaluator.java:27-37`):
-///
-/// ```text
-/// Set<BlockPos> toUpdate = Sets.newHashSet();
-/// toUpdate.add(pos);
-/// for (Direction direction : Direction.values()) { toUpdate.add(pos.relative(direction)); }
-/// for (BlockPos blockPos : toUpdate) { level.updateNeighborsAt(blockPos, this.wireBlock); }
-/// ```
+/// The real default redstone-wire evaluator's power-strength update set, in
+/// full: the set of centres to update is the wire's own position plus all six
+/// of its neighbours, deduplicated; then every centre in that set gets a full
+/// six-direction neighbor-update fan-out.
 ///
 /// Seven *centres* — the wire's own position and each of its six neighbours —
-/// each of which gets a full six-direction `updateNeighborsAt` fan-out, so 42
-/// notifications with duplicates among them. Vanilla really does issue the
-/// duplicates; the `HashSet` dedupes the centres, not the notifications.
+/// each of which gets a full six-direction neighbor-update fan-out, so 42
+/// notifications with duplicates among them. The real engine really does issue the
+/// duplicates; the dedup only applies to the centres, not the notifications.
 ///
 /// # Why the second layer is not a corner case
 ///
