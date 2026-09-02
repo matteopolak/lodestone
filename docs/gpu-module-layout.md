@@ -1,192 +1,130 @@
-# `gpu/` module layout
+# `gpu/` module layout and shader conventions
 
 ## What it is
 
-`crates/lodestone-shell/src/gpu.rs` was a single ~5,300-line file carrying eight
-distinct render responsibilities (block outline, debug lines, per-frame stats,
-terrain storage, the entity pass, the polled per-frame "sources", the
-first-person hand pass, and `RenderState` itself, the coordinator). Issue #359
-split it into `gpu.rs` (the root, unchanged in role) plus a `gpu/` folder of
-submodules. This is a pure reorganisation — no rendering behaviour changed, and
-no test file was edited.
+How `crates/lodestone-shell`'s render coordinator (`RenderState`) is split across
+`gpu.rs` and a `gpu/` folder of submodules, plus the convention every WGSL shader in
+the workspace follows: one `.wgsl` file per pipeline, pulled in with `include_str!`,
+never inlined as a Rust string literal.
 
 ## How it works
 
-A **second** pass (2026-08-04) took the root from 4,746 lines to 442 by moving
-`RenderState`'s own `impl` surface out too, for the same reason as the first:
-`gpu.rs` is named in `CLAUDE.md` as one of the repo's usual clobbering victims,
-and several agents per session were queueing behind it. Also a pure move — 0
-code lines added, 0 lost, verified by a line-set gate over whole `use`
-statements; the only non-`use`/`mod` change was nine `pub(super)` prefixes.
-
 ### The root
 
-- `crates/lodestone-shell/src/gpu.rs` (442 lines) — the module doc, the `mod`
-  declarations and `pub use` re-exports, the three consts (`SKY_COLOR`,
-  `FOG_START_FRACTION`, `DEFAULT_RENDER_DISTANCE_CHUNKS`), the `RenderState`
-  **struct definition**, and the small items shared across several
-  submodules: the six armour/wool/flame batch-accumulator structs,
-  `humanoid_armour_slot`, `transparent_placeholder_atlas` and the
-  `#[cfg(test)] sky_clear_bytes` reference helper.
-  **These live in the root deliberately** — a private item in `gpu` is visible
-  to every descendant, so keeping them here avoided ~20 `pub(super)`
-  annotations and, more importantly, keeps the batch structs' *fields*
-  annotation-free.
+`crates/lodestone-shell/src/gpu.rs` holds only what has to be visible crate-wide: the
+module doc, `mod`/`pub use` declarations, the three top-level consts (`SKY_COLOR`,
+`FOG_START_FRACTION`, `DEFAULT_RENDER_DISTANCE_CHUNKS`), the `RenderState` **struct
+definition**, and a handful of items several submodules share (the armour/wool/flame
+batch-accumulator structs, `humanoid_armour_slot`, `transparent_placeholder_atlas`, a
+`#[cfg(test)]` sky-colour reference helper). These stay in the root because a private
+item there is visible to every descendant module — moving a shared struct down into
+one submodule would force `pub(super)` on it *and* on every field a sibling module
+reads, which is real annotation cost for no benefit.
 
 ### `RenderState`'s own `impl` surface, one file per seam
 
-Multiple inherent `impl RenderState` blocks in one crate are fine, so each of
-these opens its own. Private methods stay private where their only caller is in
-the same file; the nine that a sibling calls are `pub(super)`.
+Rust allows multiple inherent `impl RenderState` blocks in one crate, so each concern
+gets its own file. A method whose only caller lives in the same file stays private;
+one a sibling needs is `pub(super)` (visible to the whole `gpu` subtree, not just the
+immediate parent — Rust privacy is about module-tree descendance, not file location).
 
-- `gpu/state.rs` (932 lines) — `RenderState::new`, plus the install/setter seam:
-  the fog and clear colour (`set_fog`, `set_clear_color`, `fog_with_clock`),
-  the optional passes (`install_sky`, `install_screen_effects`,
-  `install_weather`, `install_particle_sheet_atlas`) and every polled source
-  setter. Note several sources **must be re-installed every frame** because
-  their value is partial-tick interpolated — each method's own doc says which.
-- `gpu/sections.rs` (263 lines) — section residency for both terrain paths
-  (`upload_section`, `upload_packed_section`, `remove_section`), `resize`,
-  `update_animation`, and the read-only borrows the HUD's 3-D item pass shares
-  (`model_atlas_view`, `model_palette_buffer`, `depth_view`, …).
-- `gpu/frame.rs` (855 lines) — the frame graph: the four public `render*` entry
-  points and the single `render_inner` they funnel into. **Submission order is
-  the load-bearing thing in this file**, not any individual draw; see its module
-  doc for the two rules that account for most of it.
-- `gpu/world_items.rs` (352 lines) — `prepare_item_geometry`,
-  `merge_thrown_item`, `merge_held_items`: dropped items, projectile
-  billboards and items in mobs' hands, all *item models* through the model
-  pipeline rather than cuboid rigs through the entity pipeline.
-- `gpu/entity_passes.rs` (654 lines) — `prepare_entities`, `prepare_armour`,
-  `prepare_wool`, `prepare_flame`, `prepare_block_entities`: every per-entity
-  layer, all resolving off the *same* resolver and `AnimInput` so a layer can
-  never be posed off a pose the body pass did not draw.
-- `gpu/tests.rs` (487 lines) — the hermetic gates (no wgpu adapter).
-- `gpu/pixel_gates.rs` (965 lines) — the `#[ignore]`d GPU gates that render a
-  frame and read pixels back.
+| file | owns |
+|---|---|
+| `gpu/state.rs` | `RenderState::new` and the install/setter seam — fog and clear colour, the optional passes (sky, screen effects, weather, particle atlas), and every per-frame "source" setter. Several sources must be **re-installed every frame** because their value is partial-tick interpolated; each setter's own doc says which. |
+| `gpu/sections.rs` | section residency for both terrain paths (upload/remove/resize/animate), plus the read-only borrows the HUD's 3-D item pass shares. |
+| `gpu/frame.rs` | the frame graph — the public `render*` entry points funnelling into `render_inner`. **Submission order is load-bearing** here, not any individual draw; opaque-vs-translucent ordering is not a matter of taste. |
+| `gpu/world_items.rs` | dropped items, projectile billboards, items in mobs' hands — item models through the model pipeline, not the entity pipeline. |
+| `gpu/entity_passes.rs` | every per-entity layer (entities, armour, wool, flame, block entities), all resolving off the same resolver and pose input so a layer can never draw off a pose the body pass didn't. |
+| `gpu/tests.rs` / `gpu/pixel_gates.rs` | hermetic gates (no adapter) and `#[ignore]`d GPU pixel gates respectively. |
 
-### Per-pass resources (the first split, issue #359)
+Per-pass resources, split out earlier and unchanged in shape:
 
-- `gpu/outline.rs` — `CrackTarget` and `OutlineRenderer` (the mining-target
-  wireframe pass, its own pipeline and shader).
-- `gpu/debug_lines.rs` — `DebugLineVertex`, `debug_line_vertices`,
-  `DebugLineRenderer` and `DebugLinesSource` (the world-space debug-line pass
-  plugins install lines through).
-- `gpu/stats.rs` — `RenderStats`, the per-frame counters surfaced to the debug
-  overlay.
-- `gpu/terrain.rs` — `SectionGpu` (packed/demo path), `ModelSectionGpu`,
-  `SectionOriginArena` and `ModelRenderer` (the live-vanilla model path's
-  shared-camera-uniform storage — see `docs/section-camera-uniform.md`).
-- `gpu/entities.rs` — `EntityRenderer`: the mob pipeline, humanoid armour
-  layers, the sheep wool layer, and the texture-loading helpers
-  (`load_humanoid_armour_textures`, `entity_texture_from_image`,
-  `synthetic_entity_texture`, `model_tint`).
-- `gpu/sources.rs` — every polled per-frame "source" this render module
-  cannot wire itself: `EntityLightSource`, `SkyDarkenSource`,
-  `TimeOfDaySource`, `ThirdPersonBodyState`/`ThirdPersonBodySource`,
-  `OutlineShapeSource`, `HandSwingSource`, `MainHandSource`.
-- `gpu/first_person.rs` — `FirstPersonHand`/`FirstPersonArm` and the
-  first-person hand pass: `prepare_first_person_hand`, `hand_light`,
-  `write_hand_camera`, and `draw_first_person_hand` (the render-pass
-  recording, extracted out of `render_inner` as a same-behaviour method move).
-- `gpu/nametag.rs` — `NameTagRenderer` (issue #100): the billboarded
-  entity/player nametag pass, its own two-pipeline shader (a depth-tested
-  normal draw plus a depth-testless see-through draw), and the world-space
-  glyph-quad layout that reuses `lodestone_assets::font::RasterFont` directly
-  rather than `hud/vanilla_font.rs` (see that file's module doc for why). See
-  `docs/entity-nametags.md`.
-- `gpu/block_entities.rs` — `BlockEntityRenderer`/`BlockEntityDrawBatch` (issue
-  #23): the chest/skull/bell rigs no block model covers. Reuses the **entity**
-  pipeline on purpose rather than adding a fifth bind group — see its module
-  doc and the 4-group note below.
-- `gpu/sign_text.rs` — `SignTextRenderer`: world-space sign text, reusing
-  `gpu/nametag.rs`'s `layout_styled_ink_runs`/`load_font` and the same
-  `shaders/nametag.wgsl`. A sign's *board* is real terrain and draws through
-  the ordinary terrain pass; this only paints the text on it.
-- `gpu/screen_effects.rs` — `ScreenEffects`, the per-frame underwater/fire/
-  pumpkin/spyglass/freeze/portal/confusion overlay input. Deliberately a plain
-  per-call argument, **not** a source — see its module doc for the distinction.
+- `gpu/outline.rs` — the mining-target wireframe pass.
+- `gpu/debug_lines.rs` — world-space debug lines.
+- `gpu/stats.rs` — `RenderStats`, the F3 counters.
+- `gpu/terrain.rs` — packed/demo section storage and the live-vanilla model path's
+  shared-camera-uniform arena (see `docs/terrain-rendering.md`).
+- `gpu/entities.rs` — the mob pipeline, armour layers, wool, texture loading.
+- `gpu/sources.rs` — every polled per-frame source the render module can't wire
+  itself (entity light, sky darken, time of day, third-person body pose, hand swing,
+  main hand).
+- `gpu/first_person.rs` — the first-person hand pass.
+- `gpu/nametag.rs` — billboarded nametags, its own two-pipeline shader.
+- `gpu/block_entities.rs` — chest/skull/bell rigs, reusing the entity pipeline rather
+  than adding a fifth bind group.
+- `gpu/sign_text.rs` — world-space sign text, sharing `gpu/nametag.rs`'s glyph layout
+  and shader. A sign's board is ordinary terrain; this pass only paints the ink.
+- `gpu/screen_effects.rs` — the underwater/fire/pumpkin/spyglass/freeze/portal/
+  confusion overlay input, deliberately a plain per-call argument rather than a
+  polled source (see that file's module doc for the distinction).
+
+### Shader files
+
+Every crate that owns a pipeline keeps its shaders under `src/shaders/*.wgsl`,
+pulled in with `include_str!` next to the pipeline that owns the const:
+
+```rust
+const MODEL_WGSL: &str = include_str!("shaders/model.wgsl");
+```
+
+`include_str!` resolves relative to the file containing the macro, so a module in a
+subdirectory needs a `../shaders/...` path. `lodestone-render` and `lodestone-shell`
+each own about a dozen files; several are byte-identical across HUD/menu/container/
+effects call sites, kept as separate consts rather than merged because sharing one
+file couples pipelines that are currently independent — that is a design decision for
+whoever owns those passes, not a cleanup.
+
+Two per-crate tests (`wgsl_valid.rs`, no GPU needed, ~0.02s) run every `.wgsl` file
+through naga's WGSL front end and validator — the same front end `wgpu` itself runs.
+This exists because `cargo check` never compiles a shader at any feature setting; the
+first thing that reads the WGSL text is `create_shader_module`, which only runs
+inside an `#[ignore]`d GPU gate. The test also fails on any `@vertex`/`@fragment`
+found under a crate's `src/**/*.rs`, which is what stops a shader being inlined back
+into Rust. It cannot catch a bind-group or `@location` mismatch between the shader
+and its pipeline — only a real GPU pixel gate can.
 
 ## How to change it, and the gotchas
 
-- **Where does a new method go?** Follow the caller. A method whose only caller
-  is in the same file stays private; one a sibling calls needs `pub(super)`.
-  If you are adding a whole new pass, it wants its own `gpu/<pass>.rs` for the
-  resources and an arm in `gpu/frame.rs`'s `render_inner` for the draw — and
-  read `render_inner`'s module doc on submission order *before* choosing where
-  in it to put the draw, because opaque-vs-translucent ordering is not a matter
-  of taste.
-- **Adding a field to `RenderState` touches two files** — the struct in `gpu.rs`
-  and the initialiser in `gpu/state.rs`'s `new`. That is the one edit the split
-  did not make cheaper; it is still two small files rather than one 4,700-line
-  one.
-- **Module-tree privacy, not file privacy.** These are all children of `gpu`
-  (declared with `mod outline;` etc. in `gpu.rs`), so a private item in
-  `gpu::terrain` is *not* visible to `gpu.rs` — Rust privacy only extends to
-  **descendants** of the defining module. Items `RenderState`'s own methods
-  touch directly (fields, small helper fns) are marked `pub(super)`, which
-  grants visibility to the whole `gpu` subtree, not just the immediate parent.
-  Conversely, `RenderState`'s own fields need no annotation at all: they are
-  plain private, and every submodule (`gpu::terrain`, `gpu::entities`, …) is a
-  descendant of `gpu`, so they can already see them.
-  **The corollary is worth stating because it is what kept the second split
-  small: a shared item is cheapest in the root.** Moving the batch-accumulator
-  structs down into `gpu/entity_passes.rs` would have forced `pub(super)` on
-  each of them *and on every one of their fields*, because `render_inner` in
-  `gpu/frame.rs` reads those fields. Left in the root they need nothing.
-- **`#[cfg(test)]` helpers shared by two test modules also belong in the root.**
-  `sky_clear_bytes` is the sky reference both `gpu/tests.rs` and
-  `gpu/pixel_gates.rs` classify silhouette pixels against. It sits in `gpu.rs`
-  under `#[cfg(test)]` so `use super::*` reaches it from both, with no
-  visibility annotation and no duplicated constant — and its own doc records
-  that it was hardcoded twice before and *both* copies went stale.
-- **Public API surface is unchanged.** Every item that used to be reachable as
-  `crate::gpu::Foo` (from `sim.rs`, `app.rs`, etc.) still is, via `pub use` at
-  the top of `gpu.rs`. Do not remove those re-exports without checking
-  `crate::gpu::` usages elsewhere in the shell first.
-- **`ModelRenderer` and `SectionGpu`/`ModelSectionGpu` have no separate
-  constructor** — they are built with a struct literal directly inside
-  `RenderState::new` (in the root), so *every* field has to be `pub(super)`,
-  not just the ones a getter would expose. `EntityRenderer`, by contrast, has
-  its own `::new`, so only the fields `RenderState`'s other methods reach into
-  directly are `pub(super)`.
-- **The first-person hand pass split real code, not just declarations.** The
-  render-pass-recording block that used to sit inline in `render_inner`
-  (matching on `FirstPersonHand::Item`/`Arm` and issuing the draw calls) is
-  now `RenderState::draw_first_person_hand` in `gpu/first_person.rs`, called
-  from `render_inner` (now in `gpu/frame.rs`). This was a pure extract-method
-  move — same pass descriptor, same draw order, same conditional `Load` on the
-  block pass elsewhere in `render_inner` (untouched). If you need to change what
-  the hand pass draws, this is the method to edit; if you need to change
-  *whether* it runs, that is still gated in `gpu/frame.rs` around the call site.
-- **The 4-bind-group-floor comment lives with `ModelRenderer`/entity code that
-  the constraint actually applies to** (`gpu/terrain.rs`, `gpu/entities.rs`),
-  not in the root — check there before adding a fifth bind group anywhere in
-  the model or entity shaders.
-- **The old "never put a double quote in a WGSL shader" rule no longer applies
-  here, and this bullet used to say it did.** That rule existed because shaders
-  were inlined in Rust raw strings, where a `"` terminated the string and rustc
-  then parsed the WGSL *and the prose* as code. Shaders now live in `.wgsl`
-  files under `src/shaders/`, pulled in with `include_str!`, and
-  `no_wgsl_is_inlined_in_rust_sources` fails on any `@vertex`/`@fragment` under
-  a crate's `src/`. A `"` in a `.wgsl` comment is legal and inert — measured,
-  not assumed. Write shader comments normally; see `docs/shaders.md` and
-  `CLAUDE.md`.
-- **No file in this module carries a path-sensitive macro**, which is why the
-  second split could move code between directory levels freely. `include_str!`
-  resolves relative to the *containing file*, so a shader handle moved from
-  `src/gpu.rs` into `src/gpu/frame.rs` would silently change which path it
-  looks for. Verified absent before the move (`include_str!`, `include_bytes!`,
-  `file!`, `#[path]`); if you add one, keep it in the file whose directory the
-  path is written against.
+- **Where does a new method go?** Follow the caller. A whole new pass wants its own
+  `gpu/<pass>.rs` for its resources plus an arm in `gpu/frame.rs`'s `render_inner` for
+  the draw — read that file's module doc on submission order before choosing where in
+  it to place the draw.
+- **Adding a field to `RenderState` touches two files**: the struct in `gpu.rs` and
+  the initialiser in `gpu/state.rs::new`.
+- **Public API is unchanged by the split** — every item reachable as `crate::gpu::Foo`
+  still is, via `pub use` at the top of `gpu.rs`. Do not remove a re-export without
+  checking `crate::gpu::` usages elsewhere first.
+- **`ModelRenderer`/`SectionGpu`/`ModelSectionGpu` have no separate constructor** —
+  they are built with a struct literal inside `RenderState::new` in the root, so every
+  field needs `pub(super)`. `EntityRenderer` has its own `::new`, so only the fields
+  `RenderState`'s other methods reach into directly need it.
+- **No file in `gpu/` carries a path-sensitive macro** (`include_str!`, `include_bytes!`,
+  `file!`, `#[path]`) apart from each pipeline's own shader include, which resolves
+  relative to *that* file. Keep it that way — code can move between directory levels
+  freely only while that holds.
+- **Write a new shader as its own `.wgsl` file, never inline in Rust** — not even
+  "just for a quick test". `no_wgsl_is_inlined_in_rust_sources` fails on any
+  `@vertex`/`@fragment` under a crate's `src/`. A `"` inside a `.wgsl` comment is
+  legal and inert (WGSL's lexer just skips the comment); that used to be a real trap
+  when shaders were Rust raw strings, where one stray quote in a comment terminated
+  the Rust literal and rustc parsed the remaining shader text and English prose as
+  code. Run `cargo test -p <crate> --test wgsl_valid` after adding a file — fastest
+  way to catch a typo before building the pipeline.
+- **The model shader's 4-bind-group floor, the reversed-Z depth convention, the GUI
+  winding sign, gamma-space tint/shade, the sRGB-swapchain-view requirement, the
+  `LineList`-on-HiDPI trap, borrowed-GPU-resource re-attachment, and `ALPHA_BLENDING`
+  unpredictability are cross-cutting renderer constraints, not specific to this
+  module** — see `docs/architecture.md`'s "Hard renderer constraints" for the one
+  copy of that list; do not duplicate it here.
 
 ## Configuration
 
-None specific to the split — same `wgpu`/`lodestone-render` dependencies as
-before, just distributed across files.
+None specific to either the module split or the shader convention — same
+`wgpu`/`lodestone-render` dependencies as before, just distributed across files.
 
 ## Dependencies
 
-Same as the original `gpu.rs`: `wgpu`, `lodestone-render`, `lodestone-assets`,
-`lodestone-model`, `glam`, plus this crate's own `entities`, `mesher`,
-`particles`, `resources` modules.
+- `wgpu`, `lodestone-render`, `lodestone-assets`, `lodestone-model`, `glam`, plus
+  this crate's own `entities`, `mesher`, `particles`, `resources` modules.
+- `wgpu::naga` (re-exported by `wgpu` on native targets, not a direct dependency of
+  either rendering crate) for the shader-validity tests.

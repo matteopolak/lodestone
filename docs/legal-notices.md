@@ -33,8 +33,8 @@ of that class was ever added and later deleted.
 **2. Are any third-party Rust Minecraft projects a dependency, or a source of copied code?**
 No dependency: neither `azalea`, `ferrumc`, nor `Pumpkin` appears in any tracked `Cargo.toml`
 or `Cargo.lock` in this workspace. All three are cited *by name*, as design references, in code
-comments and in `docs/` — `azalea` (MIT) heavily in `crates/lodestone-ecs` and
-`docs/bevy-migration.md`, `ferrumc` (MIT) once in `DESIGN.md`, and `Pumpkin` (**GPL-3.0**, the
+comments and in `docs/` — `azalea` (MIT) heavily in `crates/lodestone-ecs` and its own design
+docs, `ferrumc` (MIT) as a design reference in `docs/architecture.md`, and `Pumpkin` (**GPL-3.0**, the
 one copyleft license among the three) in `docs/plans/worldgen-rewrite.md`, which records reading
 Pumpkin's source at a pinned commit and recommends adopting several of its *engineering shapes*
 for a not-yet-written worldgen rewrite. See `NOTICE` for the specifics and the licenses. No

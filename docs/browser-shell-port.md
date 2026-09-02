@@ -2,108 +2,24 @@
 
 ## What it is
 
-The work of making `web/` run the **real `lodestone-shell`** — the same menu, the
-same `Sim`, the same renderer the native binary uses — instead of a separate
-feasibility-spike application with its own `main`. This document is the hazard
-census that the port is driven from: for each way the shell depends on an operating
-system, which files are involved, what was actually *measured* about the hazard, and
-the chosen disposition (**gate**, **replace with a seam**, or **delete the need**).
+The wasm32 target: `web/` runs the real `lodestone-shell` — the same menu, `Sim`, and renderer
+the native binary uses — fetching `client.jar` and `blocks.json` at startup instead of reading
+them off a filesystem. This document is the hazard census the port is driven from: for each way
+the shell depends on an operating system, what was measured about the hazard and the chosen
+disposition (**gate**, **replace with a seam**, or **delete the need**), plus the confinement
+guards that keep a fixed hazard from creeping back in.
 
-Read [`scripts/wasm-check.sh`](../scripts/wasm-check.sh)'s header first — it is the
-best writeup in the repo on why "compiles for wasm" and "works on wasm" are
-different questions. This document corrects two claims in it (see
-[What the record got wrong](#what-the-record-got-wrong)).
+Read `scripts/wasm-check.sh`'s header first — it explains why "compiles for wasm" and "works on
+wasm" are different questions; this doc corrects two of its claims (see "What the record got
+wrong" below).
 
-## Status
+## How it works
 
-**The browser reaches the real title screen.** `web/` fetches `client.jar` (37.4 MiB)
-and `blocks.json` (6.5 MiB), installs them through `platform::assets`, starts
-`lodestone-shell`, and draws the actual menu — Singleplayer / Multiplayer / Minecraft
-Realms / Options / Quit Game, the Accounts button, and
-`Minecraft 26.2 (Lodestone 0.1.0)` — in the real vanilla font out of the fetched jar.
-Verified by loading the page: a screenshot, plus a console with no errors after startup.
-Real glyphs rather than the fixed-width stand-in is itself the evidence that collapsing
-the four duplicate jar lookups into `resources::vanilla_manager` was necessary and not
-tidiness.
+### The measurement that reorders the whole census
 
-`web/` is now a thin launcher: the spike application — its own `main`, camera, HUD,
-chunk fixture and trimmed pack, ~1,200 lines — is deleted.
-
-Every menu screen works, input works, and **Create New World reaches the Play state
-against an in-memory integrated server** — measured in the page:
-
-```
-creating an in-memory browser world (nothing is written to disk; lost when the tab closes)
-starting the integrated server (singleplayer) seed=1638668955722967429 view_radius=9
-join chunks: 9 columns inline, 352 deferred to the play loop, 10 rings, window 4
-Configuration -> Play: 0ms total
-```
-
-**Update (issue #636): the join no longer stalls, and the play loop now has one real
-timer.** Two things were wrong, not one, and they were fixed separately:
-
-1. `35f4800b` stopped the join/streaming burst itself from blocking the tab
-   (`generate_columns_offloaded`/`generate_and_encode_columns_offloaded` had zero
-   `.await` points on wasm32 and `map_columns_parallel`'s multi-column branch
-   **traps** there via `std::thread::scope`). Verified live in this session: a fresh
-   world's 352 deferred join columns stream and mesh to completion, and `Configuration
-   -> Play` reaches the world.
-2. `crate::server::serve_play`'s wasm32 arm was, until #636, a bare
-   `while let Some(packet) = conn.read_packet().await? { .. }` with **no timer arm at
-   all** — not because the join stalled, but because `tokio::time` (`Instant`/`sleep`/
-   `interval`) **compiles for `wasm32-unknown-unknown` and then hangs on its first
-   poll** rather than merely tolling early, so it was simply never reachable. Every
-   timed system riding one of the native loop's four `tokio::time::interval_at` timers
-   (`keep_alive_tick`/`time_sync_tick`/`vitals_tick`/`container_sync_tick`) had
-   therefore never run in the browser: no air-supply/drowning tick, no border damage,
-   no burning, no status-effect tick, no hunger, no finishing an in-progress eat/drink.
-   `crates/lodestone-server/src/browser_timer.rs`'s `BrowserInterval` is the fix — a
-   `tokio::time::interval_at`-alike built on a real browser macrotask
-   (`window.setTimeout`, the same primitive `crate::chunk::yield_to_browser` already
-   used for the join yield, never a microtask), with `Delay` missed-tick semantics
-   (never `Burst` — see that module's doc for why `Burst` is actively dangerous for a
-   timer racing a socket read). `server::wasm_vitals_tick` is what now rides it:
-   air-supply/drowning, world-border damage, burning, status effects, hunger, and
-   finishing an eat/drink. **Still not wired**, and named rather than silent: the
-   periodic player save (no filesystem on this target regardless), the
-   deferred-past-`StopDestroy` block-break continuation (its own precondition,
-   `PendingBreak::start_tick`, is unconditionally `None` on this target for an
-   unrelated reason and needs a second change), hostile-mob melee damage against the
-   player and portal travel (both need `crate::tick::run_tick_loop`'s mob AI or
-   dimension-switch plumbing, neither of which exists on this target yet — see
-   [Open work](#open-work) item 1, revised below).
-
-Two of the four originally-reported symptoms (item drops, worldgen-stalls-past-spawn)
-were separate islands with their own root causes and are covered by earlier fixes,
-not this one — see issue #636's own history. This update's scope was specifically the
-missing periodic driver and the systems that were `#[cfg(not(target_arch =
-"wasm32"))]`-gated for want of one.
-
-## Where the port started
-
-`web/` was, by its own README, "an isolated feasibility spike": its own Cargo
-workspace, its own `main`, **no `lodestone-shell` dependency at all**, and zero
-references to the menu or the title screen. It rendered a committed fixture of real
-`level_chunk_with_light` bytes through the real `v770` parser plus an in-process
-singleplayer probe. That is why the browser showed a "demo world" and no main menu:
-not staleness, but the shell never having been wired in. The engine half was already
-proven on wasm32 — `lodestone-{render,assets,net,world,data,core,controller,client,server,worldgen,model}`
-and `lodestone-v770` all build and run in a browser.
-
-`web/` is deliberately its own workspace, outside the root `crates/lodestone-*`
-members glob, so `cargo check --workspace` has never covered it. Keep that.
-
-Two parts of the shell were **already** wasm-aware before this port began, which
-the brief for the work did not know: `net.rs`, `app/session.rs`, `app/launch.rs` and
-`app/menus.rs` carried `cfg(not(target_arch = "wasm32"))` gates, and `audio.rs`
-carried a whole-module `#![cfg(not(target_arch = "wasm32"))]`.
-
-## The measurement that reorders the whole census
-
-The hazard families are usually described as one group: calls that compile for
-`wasm32-unknown-unknown` and "die at runtime". **They are not one group.** Measured
-by compiling each call into a `cdylib` with `panic = "abort"` and executing it in a
-real wasm VM (`node`, `WebAssembly.instantiate`):
+Hazard calls that compile for `wasm32-unknown-unknown` and "die at runtime" are usually
+described as one group. **They are not.** Measured by compiling each call into a `cdylib` with
+`panic = "abort"` and executing it in a real wasm VM:
 
 | call | `wasm32-unknown-unknown` behaviour |
 |---|---|
@@ -112,451 +28,184 @@ real wasm VM (`node`, `WebAssembly.instantiate`):
 | `std::time::SystemTime::now()` | **traps** |
 | `std::thread::spawn` | **traps** |
 
-The `Err` is real, not a coincidence of optimisation: the compiled module contains
-the `unsupported` platform layer's literal string `operation not supported on this
-platform` and no panic path, and the executed probe returned the `Unsupported`
-discriminant.
+This splits the census in two:
 
-This splits the census in two, and the split is the useful part:
+- **Crash-class**: the clock pair and threads. One reached call kills the tab; these had to be
+  fixed before anything could run at all.
+- **Degradation-class**: `std::fs`. Nearly every filesystem call site already discards its
+  error, so on wasm it resolves to "no options file", "no saves", "no pack" — honest absence,
+  the same path a native machine with no `HOME` would take. A correctness/UX problem, not a
+  crash, fixable incrementally.
 
-* **Crash-class**: the clock pair and threads. One reached call kills the tab. These
-  had to be fixed before anything could run at all.
-* **Degradation-class**: `std::fs`. Every one of the shell's ~51 production `fs`
-  call sites already discards its error (`.ok()?`, `let Ok(..) else`,
-  `map_err(...)`), so on wasm they resolve to "no options file", "no saves", "no
-  pack" — *honest absence*, arrived at through the same code path a native machine
-  with no `HOME` would take. That is a correctness and UX problem, not a crash, and
-  it can be fixed incrementally.
+`SystemTime::now()` is crash-class and, before this census, appeared in no hazard list anywhere
+in the repo — it had several production call sites (clock-derived seeds, UI blink timers, a
+recipe-toast clock), each of which would abort the tab, and a green wasm32 `cargo check` gave
+zero evidence about any of them: referencing an existing symbol compiles fine on wasm right up
+until it is called.
 
-**`SystemTime::now()` is crash-class and appears in no hazard list anywhere in the
-repo.** The shell had 8 production sites (clock-derived seeds, the chat caret blink,
-glint phase, the recipe-toast clock); each would have aborted the tab.
+### Crash-class hazards and their seam
 
-## Census
+| hazard | disposition |
+|---|---|
+| `Instant::now()` / `Instant` in struct fields | replaced with a seam: `crate::platform::Instant` |
+| `SystemTime::now()` | replaced with a seam: `crate::platform::epoch_duration` |
+| `std::thread::spawn` | gated per call site (sign-in workers, mesher worker pool, network) |
+| `tokio::time::{sleep,timeout}` | gated with the native-only workers that use them |
+| blocking `Runtime::new` + `block_on` | gated — a browser main thread cannot block |
 
-Counts are production call sites — `#[cfg(test)] mod tests` bodies excluded, since
-they are not in a wasm `--lib` build. Cite symbols, not lines.
+The clock seam now lives in `lodestone-time`, a shared crate absorbing what used to be three
+independently-grown copies of the same idea in `lodestone-shell`, `lodestone-net`, and
+`lodestone-particle`. `crate::platform` is a **re-export, not a wrapper, with no `cfg` fork
+inside the shell** — the non-wasm arm is `pub use std::time::*`, so `platform::Instant` *is*
+`std::time::Instant` on native, provably no behaviour change. The browser arm is `web_time`, not
+a hand-rolled `performance.now()` newtype: `winit`'s own wasm arm already types
+`ControlFlow::WaitUntil` as `web_time::Instant`, so a private newtype would not type-check
+against it, and `web_time` was already in the dependency graph via `winit`. Before reaching for
+a portability shim, check whether a crate already in the graph is the type the platform layer
+above you already speaks.
 
-### Crash-class
+### Dependency-class hazards
 
-| hazard | production sites | disposition |
-|---|---|---|
-| `Instant::now()` / `Instant` in struct fields | 30 sites, 16 files | **replaced with a seam**: `crate::platform::Instant` |
-| `SystemTime::now()` | 8 sites | **replaced with a seam**: `crate::platform::epoch_duration` |
-| `std::thread::spawn` | `mesher.rs` (worker pool), `net.rs`, `menu/status.rs`, `menu/accounts.rs`, `remote_skins.rs`, `worldgen.rs` (legacy, unreached) | **gated** so far; `mesher.rs` is the one that still needs a single-threaded arm — see [Open work](#open-work) |
-| `tokio::time::{sleep,timeout}` | `menu/accounts.rs`, `net.rs` | **gated** with the sign-in workers |
-| blocking `Runtime::new` + `block_on` | `menu/accounts.rs`, `menu/status.rs`, `net.rs`, `remote_skins.rs` | **gated**: a browser main thread cannot block |
-
-**Update: the seam now lives in its own crate.** `crate::platform::Instant`
-and `crate::platform::epoch_duration` are unchanged in name and behaviour, but
-`crate::platform` is now a two-line re-export of `lodestone-time`, which absorbed this
-module's clock content plus two improvised copies of the identical seam that had grown
-independently in `lodestone-net` and `lodestone-particle`. The reasoning below is kept
-as the historical record of *why* the seam looks the way it does — see
-`docs/portable-clock.md` and `crates/lodestone-time/src/lib.rs`'s crate docs for the
-current, crate-level source of truth.
-
-**A green wasm32 compile hid five of those `SystemTime::now()` sites, and that is the
-single most useful thing in this document.** `cargo check -p lodestone-shell
---target wasm32-unknown-unknown` reached exit 0 while the chat-caret blink (which
-runs every frame chat is open), both glint-phase clocks, the audio seed in `Sim`
-construction and the screenshot timestamp were all still calling it. Each would have
-killed the tab. They were found by the confinement guards below, *not* by the
-compiler, on a tree that was already green — so treat "it compiles for wasm" as
-carrying no information at all about this hazard family.
-
-`crate::platform` is the seam module. It is a **re-export, not a wrapper, and with no
-`cfg` fork at all** — `web_time`'s non-wasm arm is `pub use std::time::*`, so
-`crate::platform::Instant` *is* `std::time::Instant` on native: the same type, not a
-newtype over it, and provably no behaviour change. The practical consequence is what
-made the port tractable: **any crate with an `Instant` in a public signature can
-switch to `web_time::Instant` as a no-op on native, and no call site needs a `cfg`.**
-That is how `Sim::tick_music`/`tick_ambience` and the shell's `music`/`ambient`
-`advance` came to take one clock type instead of two behind a gate.
-
-The browser clock is **`web_time`, not a hand-rolled `performance.now()` newtype**,
-and that is worth knowing before you reach for one: `winit`'s wasm arm types
-`ControlFlow::WaitUntil` as `web_time::Instant`, so `app::pacing` does not
-type-check against any other clock type. The first attempt here *was* a private
-`f64`-millisecond newtype and the compiler rejected it —
-*"`browser::Instant` and `web_time::time::instant::Instant` have similar names, but
-are actually distinct types"*. `web-time` was already in the graph
-(`winit 0.30.13 -> web-time 1.1.0`), so it also costs the bundle nothing. **Generalise
-this: before writing a portability shim, check whether a crate already in the graph
-is the one the platform layer above you already speaks.** A shim that is merely
-*equivalent* to the neighbouring crate's type is not interchangeable with it.
-
-### Dependency-class
-
-These do not compile at all, so `cargo check --target wasm32-unknown-unknown` sees
-them. One was a hard blocker for the entire graph:
+These do not compile at all, so a plain `cargo check --target wasm32-unknown-unknown` sees them:
 
 | dependency | problem | disposition |
 |---|---|---|
-| `tokio` with `net` | pulls `mio`, whose wasm32 arm is a **`compile_error!`** — 36 errors, and *nothing else in the graph* failed before it was split | **gated**: wasm gets `io-util, rt, macros, sync, time`, mirroring `lodestone-net`/`-server`/`-client` |
-| `tracing-subscriber`, `tracing-chrome` | write to stderr and to a file | **gated**; the browser installs `console_log` in `web/` |
-| `pollster` | `block_on` on the browser main thread | **gated**; `spawn_local` is the wasm arm |
-| `memory-stats` | `task_info`/`/proc` | **replaced**: see below |
-| `lodestone-anvil` | `std::fs`-based region/`level.dat` codecs | **gated** |
-| `reqwest` | no blocking client in a browser | **gated** with the sign-in workers |
-| `lodestone-auth` | *appeared* native-only | **not gated** — see below |
-
-Two of these are worth their own note because the obvious call was wrong.
-
-**`lodestone-auth` must stay an unconditional dependency.** The first attempt gated
-it by analogy with `lodestone-client`'s edge. That was wrong: the crate is already
-target-split internally and compiles clean for wasm32, exposing its device-free
-half. Its `metadata` (the `profiles.json` roster) and `paths` modules were gated
-only because the whole native block had been written as one unit — they are `serde`
-+ `uuid` + `PathBuf` with no HTTP client, no keychain and no runtime. The account
-switcher's *UI state* is built out of `AccountProfile`/`AccountsMetadata`
-throughout, so gating the **types** rather than the **sign-in flow that needs a
-network** cost 27 errors across five shell files for want of two plain structs.
-Those two modules are now ungated at `lodestone-auth`; `login`/`flow`/`store`/
-`texture` stay native-only.
-
-**`memory-stats` was replaced, not stubbed, and the reason is specific to this
-function.** `hud::process_rss_bytes` exists because it *used* to return a flat 0 on
-macOS, and a zero-reading gauge is worse than none (§12) — so a browser arm
-returning 0 would have reintroduced exactly the defect the function was written to
-fix. wasm has a real analogue: `core::arch::wasm32::memory_size(0)` × 64 KiB is the
-module's linear memory, which is the whole of its heap. Read it as a high-water
-mark — linear memory never shrinks after a `memory.grow`, whereas RSS can fall.
+| `tokio` with `net` | pulls `mio`, whose wasm32 arm is a hard `compile_error!` | gated: wasm gets `io-util, rt, macros, sync, time` only |
+| `tracing-subscriber`, `tracing-chrome` | write to stderr/a file | gated; the browser installs `console_log` |
+| `pollster` | blocks the browser main thread | gated; `spawn_local` is the wasm arm |
+| `memory-stats` | reads `/proc`/`task_info` | replaced: `core::arch::wasm32::memory_size(0)` as a high-water-mark proxy for RSS |
+| `lodestone-anvil` | `std::fs`-based region/`level.dat` codecs | gated |
+| `reqwest` | no blocking client in a browser | gated with the sign-in workers |
+| `lodestone-auth` | looked native-only, is not | **not gated** — its `metadata`/`paths` modules are plain `serde`/`uuid`/`PathBuf` with no HTTP client or keychain, and the account switcher's UI state needs them; only `login`/`flow`/`store`/`texture` stay native-only |
 
 ### Degradation-class (`std::fs`), by subsystem
 
-| subsystem | files | disposition |
-|---|---|---|
-| **Assets** (jar, `blocks.json`) | `resources.rs` | **replaced with a seam**: `platform::assets` |
-| **Options** (`options.json`) | `config.rs` | **not yet done** — see [Open work](#open-work) |
-| **Saves** (`level.dat`) | `saves.rs` | **gated**, refusing explicitly |
-| **Resource packs** | `resources.rs` | **deleted the need** |
-| **Server list**, **offline identity**, **social** | `menu/servers.rs`, `offline_identity.rs`, `menu/social.rs` | **left to degrade** (reads yield `Err`, so: empty list, fresh offline id) |
-| **Screenshots** | `screenshot.rs` | native-only path, unreached in a browser |
-| **Sound object store** | `asset_objects.rs` | unreached — the audio engine that calls it cannot exist |
+| subsystem | disposition |
+|---|---|
+| Assets (jar, `blocks.json`) | replaced with a seam: `platform::assets` |
+| Options (`options.json`) | not yet done |
+| Saves (`level.dat`) | gated, refusing explicitly |
+| Resource packs | the need was deleted, not met — see below |
+| Server list, offline identity, social | left to degrade (an `Err` read yields an empty list / fresh offline id) |
+| Screenshots, sound object store | unreached — the subsystem that calls them cannot exist in a browser |
 
-**Assets are the seam that matters**, and the observation that makes it cheap is
-that *only the byte acquisition differs*. `lodestone-assets`' `ResourceSource` is a
-**synchronous, byte-based** trait and `ZipSource::from_bytes` builds a fully
-in-memory pack; `lodestone-render`'s `BlocksJsonRegistry::from_slice` is likewise
-ungated (only the *path*-taking `blocks_json_registry` wrapper is native-only, and
-it is confined to its own gated file). So the browser crosses the filesystem wall
-**once**, asynchronously, at the byte source, and every parser, atlas builder and
-model baker downstream runs unchanged. `platform::assets` is a `OnceLock<Bundle>`
-holding `client_jar` and `blocks_report` bytes; `web/` `fetch`es them and calls
-`install` before starting the app, and `resources::Assets::try_vanilla` reads them
-back. It is process-wide rather than threaded through `Config` because the consumers
-are ~20 lazily-called `load_*` functions that each independently re-resolve the pack
-root today — matching `SELECTED_PACKS`, which is a process-wide `RwLock` for the
-same reason. `install` reports a second call as an error rather than ignoring it,
-because the symptom of ignoring it is a world rendered from the wrong pack with
-nothing in the log.
-
-**Resource packs are the one place the need was deleted rather than met.** A
-user-selected pack is a file the user picked off their disk; `DirectorySource` and
-`ZipSource::open` are both native-only, and `scan_resource_packs` cannot enumerate
-one either. Browser packs would arrive as bytes through a file input, i.e. through
-`platform::assets`, not through `open_pack_source`. That path is therefore
-*unreachable* in a browser, not merely unsupported.
+**Assets are the seam that matters**, because only the byte *acquisition* differs — every
+parser, atlas builder, and model baker downstream is already synchronous and byte-based
+(`ResourceSource`, `BlocksJsonRegistry::from_slice`). `platform::assets` is a process-wide
+`OnceLock<Bundle>` holding the fetched jar/report bytes; `web/` fetches them and installs the
+bundle before starting the app. **Resource packs are the one place the need was deleted rather
+than met**: a user-selected pack is a file off the user's own disk, and enumerating one needs a
+directory listing this target cannot do at all — a browser pack would have to arrive through a
+file input and the existing byte-source seam, not through the native open-pack path, which is
+simply unreachable here.
 
 ### Subsystems with no browser implementation
 
-Each is gated with an **explicit, self-describing refusal** rather than a silent
-no-op, because a row that silently shows nothing is indistinguishable from a
-subsystem that is broken.
+Each is gated with an **explicit, self-describing refusal** rather than a silent no-op, because
+a UI row that silently shows nothing is indistinguishable from a subsystem that is broken:
+audio (needs an `AudioWorklet` sink; the mixer itself is already wasm-clean), Microsoft sign-in
+(needs a real HTTP client, OS keychain, and a loopback listener — browser accounts are
+offline-identity only), server-list ping (needs an async probe over a relay, since a page cannot
+open a raw `TcpStream`), remote player skins (blocked on porting the authlib host-allowlist that
+guards the fetch, not merely swapping the HTTP client), and screenshots (would need to trigger a
+download instead of a disk write). Audio's gate is an **uninhabited type**
+(`pub enum ShellAudio {}`) rather than a stub with do-nothing methods — a stub is a reachable
+value that silently produces nothing, which is exactly the shape that makes a subsystem look
+wired while doing nothing; an uninhabited type makes that a compile-time impossibility.
+`open_in_browser` is the one capability a browser does *better*: handing a URL to the platform
+browser is `window.open`, a real implementation, called from inside a user gesture so a popup
+blocker does not eat it.
 
-| subsystem | why, and what a real browser version needs |
-|---|---|
-| **Audio** | `lodestone_sound::AudioEngine` wraps a `cpal` sink. `lodestone-audio`'s mixer is already wasm-clean; what is missing is an `AudioWorklet` sink to drive it. |
-| **Microsoft sign-in** | Device-code and loopback flows need a real HTTP client, an OS keychain, a loopback listener and a blocking runtime. Browser accounts are offline-identity only. |
-| **Server-list ping** | `lodestone_net::server_status` opens a raw `TcpStream`, which a page cannot do. Needs an `async` probe over the `ws-web` relay — a different function, not a shim over this one. |
-| **Remote player skins** | `lodestone_auth::texture::fetch_texture` carries authlib's `TextureUrlChecker` host allow list and is `reqwest`-based. Reimplementing the GET over `web_sys::fetch` without porting that allow list would drop the only security check in the path, **so the allow list has to move first**. |
-| **Screenshots** | `key.screenshot` writes a PNG to disk; a browser would trigger a download. |
+### Confinement guards: turning a fixed hazard into a permanent one
 
-**Audio's gate is an uninhabited type, and that shape is worth reusing.**
-`crate::audio` was `#![cfg(not(target_arch = "wasm32"))]` wholesale, which deleted
-the module on wasm and took thirteen call sites with it — most of them naming
-nothing device-backed at all, just `subtitles::SubtitleCaption` and the pure
-`music`/`ambient` selection arithmetic. Those submodules now stay, and `ShellAudio`
-is a cfg fork whose browser arm is an **empty enum** (`pub enum ShellAudio {}`) with
-every method present and every body `match *self {}`. `from_env()` returns `None` —
-the exact path native takes with no asset store or no output device — and every
-consumer already reads `Option<ShellAudio>`. The point is that this is **not a
-stub**: a stub is a reachable value whose methods do nothing, which is precisely how
-a subsystem comes to look wired while producing nothing. An uninhabited type makes
-"browser audio silently pretends to work" a compile-time impossibility rather than
-something to remember.
+`cfg(target_arch = "wasm32")` does not turn a hazard into a compile error — it only removes
+existing native entry points, so a brand-new ungated `Instant::now()` sails straight through.
+What actually catches this class is `wasm-check.sh`'s **confinement guards**: the owning crate
+confines a hazard to one gated file, and the script greps for the banned symbol everywhere else
+in that crate, failing and naming the offending site. `lodestone-shell` carries confinement
+rules banning `std::time::Instant`/`std::time::SystemTime::now` outside `platform.rs` — banning
+the full `std::time::` *path* rather than a bare `Instant::now(` spelling, since every real call
+site now reads `crate::platform::Instant::now()` and a bare-spelling rule could never go green.
+The guard skips comment lines, since a call site explaining *why* it avoids the trapping form
+would otherwise itself trip the rule it is documenting. `cargo xtask wasm-check`'s own parity
+test parses `wasm-check.sh`'s rule tables directly and diffs them field by field, rather than
+comparing against a hand-copied list — a hard-coded label list previously let the two tools
+drift silently until the xtask version was missing eight of the script's seventeen rules.
+**A guard whose detector cannot fail is decorative**: run the control on any new rule by
+planting a real (non-comment) violation in a non-allowlisted file and confirming the rule
+reports it, before trusting a green run — `xtask`'s
+`every_confinement_rule_fires_under_a_planted_violation` does this mechanically for every rule
+on every `cargo test -p xtask` run.
 
-**`open_in_browser` is the one capability a browser does *better*.** Handing a URL
-to the platform's browser is the platform's whole job, so the wasm arm is
-`window.open(url, "_blank")` — a real implementation. It is only called from a key
-handler, i.e. inside a user gesture, which is what stops a popup blocker eating it.
+## How to change it, and the gotchas
 
-## How the guards work, and how to add one
-
-`cfg(target_arch = "wasm32")` **does not turn a hazard into a compile error.** It
-only removes the existing native entry points, so *referencing* a removed symbol
-fails to compile while a brand-new ungated `fs::read` or `Instant::now()` sails
-straight through. A Cargo feature is weaker still, because unification lets any
-consumer re-enable it.
-
-What catches this class is `wasm-check.sh`'s **confinement guards**: the owning
-crate confines a hazard to one gated file, and the script greps for the banned
-symbol everywhere *else* in that crate and fails, naming `file:line`. Extend that
-table; do not invent a parallel mechanism. A rule for a crate that still calls the
-symbol in ungated code goes red for everyone, so **confine first, then add the
-guard**.
-
-`lodestone-shell` is in both the script's and xtask's compile lists, and has three
-rules (the `thread::spawn` one is described further down):
-
-| rule | bans | allowlist |
-|---|---|---|
-| `lodestone-shell instant-confinement` | `std::time::Instant` | `platform.rs` |
-| `lodestone-shell systemtime-confinement` | `std::time::SystemTime::now` | `platform.rs` |
-
-Three things about their shape are deliberate, and each was arrived at the hard way:
-
-* **They ban the `std::time::` *paths*, not the bare `Instant::now(` spelling.** The
-  shell's 30 call sites now read `crate::platform::Instant::now()`, so a
-  `Instant::now(` pattern matches every one of them and the rule could never go
-  green. The path is what separates a trapping call from a portable one.
-* **The allowlist is `platform.rs` alone** — the strongest form, matching
-  `lodestone-audio time-confinement`'s empty one. `tests.rs` was in it briefly.
-  Removing it meant converting 19 test-only sites in `net.rs`,
-  `menu/render/tests.rs` and `sim/tests.rs`; test code cannot crash a browser, but
-  `platform::Instant` *is* `std::time::Instant` on native, so the conversion cost
-  nothing and turned "the shell never names the trapping clock" from a promise into
-  something one grep decides.
-* **The `SystemTime` rule names `::now` and the `Instant` one does not**, and that
-  asymmetry is deliberate rather than an oversight. `screenshot.rs` takes a
-  `now: SystemTime` *parameter* and reads `SystemTime::UNIX_EPOCH` — the type and the
-  constant, never the trapping call — so banning the bare `std::time::SystemTime`
-  path here would go red on a file that cannot trap. The clock rules in the other five
-  crates *do* ban the bare path, because none of them has a legitimate reason to name
-  the type at all. Pattern width follows what the crate legitimately needs, not a
-  house style.
-* **The guard mechanism now skips comment lines.** Every one of these confinements
-  deserves a sentence at its call site saying *"not `SystemTime::now()`, because it
-  traps"*, and a guard that fires on its own documentation trains people to delete
-  the documentation. A hazard inside a comment cannot execute, so no rule is
-  weakened — the same reasoning that made a `"` legal inside a `.wgsl` comment.
-
-**Run the control on any rule you add.** Plant a real (non-comment) call in a
-non-allowlisted file, confirm the rule reports `FAIL` naming `file:line`, then
-restore by `cp` from an md5-checked backup. A confinement rule is an assertion of an
-absence, and it is worth exactly as much as the evidence that it would have fired.
-
-That control is now **mechanical and permanent** rather than a habit:
-`xtask`'s `every_confinement_rule_fires_under_a_planted_violation` plants a probe file
-in the directory each rule scans, requires the scan to report it *by path*, and removes
-it. It runs in `cargo test -p xtask`, so a rule that cannot fail is a red test. Use
-`scripts/wasm-check.sh --confinement-only` to run just the greps in seconds, with no
-cargo build and no `trunk`.
-
-### Two ways a guard reported PASS without running, both now mechanically impossible
-
-Both were measured, and neither was visible by reading the rule table:
-
-* **Five rules' greps never executed.** The script's rule rows are `|`-separated, and
-  the five clock rules spelled a BRE alternation `std::time::\(Instant\|SystemTime\)` —
-  whose `\|` *is* the field separator. `IFS='|' read` truncated the pattern to
-  `std::time::\(Instant\`, grep exited 2 (*"trailing backslash"* on BSD grep,
-  *"parentheses not balanced"* elsewhere), and the `|| true` that swallows grep's
-  no-match exit 1 swallowed the **error** too. An empty result reads as "nothing
-  leaked". The other twelve rules were correct only because no pattern happened to
-  contain a `|`.
-
-  Fixed three ways, in increasing generality: grep's exit status is read and `>= 2` is
-  a hard FAIL printing grep's own stderr; every row is validated to split into exactly
-  four fields before use; and the five alternation rules are split into one rule per
-  hazard, so **every pattern in the table is a literal substring** — which also makes
-  it dialect-independent, since BSD, GNU and ugrep disagree about BRE alternation.
-* **`cargo xtask wasm-check`, the implementation CI actually runs, enforced eight
-  fewer rules than the script it claimed parity with** — all three `lodestone-shell`
-  rules and all five clock rules were absent, and `lodestone-shell` was missing from
-  its compile list. Its parity test hard-coded a list of nine labels, so it kept
-  passing as the script grew to seventeen. A gate that compares a table against a copy
-  of itself cannot tell you a third table exists.
-
-  The parity test now **parses** `scripts/wasm-check.sh`'s `CRATES` and
-  `CONFINEMENT_RULES` arrays and compares field by field, so drift in either direction
-  is red, and a `|` in any pattern fails it as well.
-
-The reusable shape: **a check whose detector errored has measured nothing, and must
-say so.** Wherever a guard maps "no findings" and "could not look" onto the same value,
-that guard is one typo away from being decorative.
+- **A confinement guard only covers the crate it names, and the browser links roughly fifteen.**
+  A hazard three dependency layers down (a RNG seed calling `SystemTime::now()` inside an
+  unrelated engine crate) killed the tab with every `lodestone-shell` rule green, because that
+  crate was not in `wasm-check.sh`'s list at all. Every crate the browser links wants the clock
+  rules; check the crate list itself is complete, not only that its rules pass.
+- **A green wasm32 compile or a green `wasm-check` proves nothing about the browser actually
+  running.** Both are a compile pass plus static greps; the only evidence that counts is loading
+  the page and watching it reach a title screen, then a world.
+- **`cargo check` stopping at a failing dependency reports zero errors for the crate after it**,
+  which reads exactly like that crate being clean when it was never actually compiled — in a
+  shared checkout where a sibling crate is mid-edit, attribute the errors before believing the
+  silence.
+- **`web/` is its own Cargo workspace** (its own lockfile, outside the root members glob), so
+  neither `cargo check --workspace` nor `just check` ever covers it; `just wasm-check` (via
+  `trunk`) is the only thing that does, and it catches wasm-bindgen-level breaks plain `rustc`
+  would not.
+- **`cargo check` cannot see a doctest.** A `///` example naming a native-only backend crate
+  directly, rather than the portable `crate::platform` wrapper, fails only `cargo test -p
+  lodestone-shell --doc` while every other check stays green.
+- **A green title screen is not evidence the colour is right.** The WebGPU backend's surface
+  capability list never includes an sRGB format at all (unlike native, where one is sorted
+  first), so a swapchain configured off `get_default_config`'s first entry renders every linear
+  shader output with no EOTF applied — uniformly darker, world and menus alike, since they share
+  one swapchain. Fixed by reinterpreting the swapchain texture through an explicit sRGB *view*
+  format rather than trusting the physical format `get_default_config` picks.
+- **Bundle size is dominated by generated data, not code.** Roughly three quarters of the
+  shipped binary is jar-derived static tables (`lodestone-data`'s generated block/path/outline
+  censuses, a trig lookup table, the pre-Flattening bridge table) compiled directly into the
+  binary rather than fetched at runtime. `opt-level`/`lto` act on code, which is not where the
+  size is; the durable fix is moving those tables behind the same fetch seam `client.jar`
+  already uses, and the same tables inflate the native binary too, unnoticed only because
+  nobody has had a reason to measure it there.
 
 ## Configuration
 
 | knob | effect |
 |---|---|
-| `web/Trunk.toml` `[serve] headers` | COOP/COEP, so the page is cross-origin isolated under standalone `trunk serve`. `lodestone-web-server` (`web/server/`) sets the identical two headers itself. |
-| `LODESTONE_WEB_LISTEN` | `just run-wasm`'s listen address for the page **and** `/relay` (one port); default `127.0.0.1:8080`. Set to `127.0.0.1:0` for an OS-assigned port. |
-| `LODESTONE_RELAY_TARGET` | the real Minecraft server `/relay` bridges to; default `127.0.0.1:25565`. |
-| `just wasm-size` | fails above **1,600,000 B** gzip. |
-| `web/[profile.release]` | `opt-level = "z"`, fat LTO, one codegen unit, `panic = "abort"`, `strip`. **`panic = "abort"` is why a trap is fatal rather than recoverable.** |
+| `web/Trunk.toml` `[serve] headers` | COOP/COEP, cross-origin isolation under `trunk serve` |
+| `LODESTONE_WEB_LISTEN` | `just run-wasm`'s listen address for the page and `/relay` |
+| `LODESTONE_RELAY_TARGET` | the real Minecraft server `/relay` bridges to |
+| `just wasm-size` | fails above a fixed gzip byte ceiling |
+| `web/[profile.release]` | `opt-level = "z"`, fat LTO, one codegen unit, `panic = "abort"`, strip — `panic = "abort"` is why a trap is fatal rather than recoverable |
 
 ## Dependencies
 
-`web-time` (the clock, already present via `winit`), `wasm-bindgen`,
-`wasm-bindgen-futures` (the `spawn_local` executor), `js-sys`, `web-sys`
-(`Window`/`Document`/`HtmlCanvasElement`/`Performance`/`Storage`) — all in
-`lodestone-shell`'s `cfg(target_arch = "wasm32")` target section.
+`web-time` (via `winit`), `wasm-bindgen`, `wasm-bindgen-futures` (`spawn_local`), `js-sys`,
+`web-sys` (`Window`/`Document`/`HtmlCanvasElement`/`Performance`/`Storage`), all confined to
+`lodestone-shell`'s `cfg(target_arch = "wasm32")` target section. `lodestone-time` supplies the
+clock seam; `lodestone-render`'s `target.rs` owns the swapchain sRGB-view decision.
 
 ## Open work
 
-In rough dependency order.
-
-1. ~~The server's tokio timers.~~ **Partially done (issue #636).** `server.rs`'s own
-   per-connection periodic driver now has a wasm32 seam
-   (`crate::browser_timer::BrowserInterval`) and rides it for air-supply/drowning,
-   border damage, burning, status effects and hunger — see [Status](#status). What is
-   NOT done: `tick.rs`'s `run_tick_loop` (mob AI, scheduled/random block ticks,
-   weather cycle, the periodic block-entity tick) is still entirely
-   `#[cfg(not(target_arch = "wasm32"))]` and has no browser counterpart at all, so a
-   browser singleplayer world still has no mob AI, no crop growth, no fluid flow tick,
-   no scheduled redstone, and no weather cycle. That is the "genuinely large piece of
-   work" issue #636 named as out of scope for the timer fix itself — it needs the
-   world-tick loop ported to the same `BrowserInterval` primitive (or an equivalent),
-   not just the per-connection one this update wired. Note `lodestone-client` already
-   discovered the underlying hazard independently — it logs *"read_timeout is
-   unsupported on wasm32 (no runtime timer); ignoring"*.
-2. **Bundle size.** Measured and attributed; see [Bundle size](#bundle-size). Its cause
-   is generated static tables, which is a whole-project question rather than a wasm one,
-   so it is deliberately not being acted on here.
-3. ~~The panorama does not draw.~~ **Fixed.** `client.jar` only ever carried its
-   1×1 grey stub for each face — the real 1024×1024 art is a separate,
-   content-addressed asset-object the jar routing fix above did not reach, since
-   `crate::asset_objects::AssetObjectStore` is plain `std::fs` with no wasm32
-   arm. `web/Trunk.toml`'s `post_build` hook now resolves those six objects out
-   of a local `.cache/mc/<version>` store at build time (via
-   `web/scripts/stage_panorama.py`) and stages them as flat `panorama_0.png`..
-   `panorama_5.png`; `web/src/main.rs`'s `fetch_panorama_faces` fetches whichever
-   exist (best-effort — a missing face is not fatal, it just falls back to the
-   jar stub as it always did) and `resources::load_panorama`'s wasm32 arm feeds
-   them to `menu::panorama::load` through a new `ObjectBytesSource` trait
-   (`crate::asset_objects::ObjectBytesSource`), the seam that lets a
-   filesystem-free build hand in pre-fetched bytes where native hands in a real
-   `AssetObjectStore`. Verified live: `loaded the title-screen panorama cubemap
-   from the asset-object store face=1024` in the browser console, and the
-   rotating night-sky panorama on screen instead of a flat backdrop.
-4. **Silent refusals.** `saves::create_world`'s browser refusal is now unreachable from
-   the menu (the in-memory path replaced it), but the world-list screen still swallows a
-   `set_error` without showing it on the path that produced one.
-
-## Bundle size
-
-Measured with the whole shell linked in, and **the ceiling has not been moved**:
-
-| | bytes | |
-|---|---|---|
-| raw | 10,476,414 | |
-| **gzip** | **3,766,970** | **enforced; ceiling 1,600,000 → FAIL at 2.35×** |
-| brotli | 3,222,830 | real wire cost |
-| *baseline before the shell* | *882,220 gzip* | *so the shell added +2,884,750 B gzip* |
-
-Attribution, from `twiggy top` on a build made once with
-`CARGO_PROFILE_RELEASE_STRIP=false`:
-
-**`.rodata` is 8,004,211 B — 61.4% of the unstripped binary and ~76% of the 10.47 MB
-shipped one.** It is not code, and it is *not* `include_str!` — lib-only `include_`
-sites total 1.2 MB raw, and the multi-megabyte ones that show up in a naive grep are
-all `tests/support/**` JVM oracle fixtures that never link into `lodestone-web`. It is
-**generated static tables**:
-
-| source | size |
-|---|---|
-| `lodestone-data/src/generated/` (whole directory) | ~4.9 MB of Rust |
-| — `block_states.rs` | 1,426,724 B |
-| — `path_types.rs` | 713,210 B |
-| — `outline_shapes.rs` | 428,382 B |
-| — `block_entity_types.rs` | 305,194 B |
-| — `item_prototypes.rs` | 256,749 B |
-| `lodestone-physics/src/sin_table.rs` | 819,881 B |
-| `lodestone-canonical/src/generated/flattening.rs` | 369,419 B |
-
-So the browser bundle is roughly **three quarters jar-derived game data compiled into
-the binary**. The next unit is to move those corpora behind the fetch seam
-`client.jar` already uses — `platform::assets` exists precisely for "this data is not
-code, acquire it at runtime" — not to raise a number. Note what that implies for
-*native* too: the same tables are in the desktop binary, where nobody has had a reason
-to notice.
-
-Do not reach for `opt-level` or `lto` first. They act on code, and code is the quarter
-that is not the problem.
-
-## Gotchas
-
-* **`cargo check` stopping at a failing dependency reports zero errors for your
-  crate, and that is not a pass.** This bit during the port: a run showed "5 errors,
-  all in `lodestone-server/src/mobs.rs`" and *nothing* in `lodestone-shell`, which
-  reads exactly like the shell being clean. It was not checked at all — cargo never
-  got to it. In a shared checkout where siblings are mid-edit, **attribute the
-  errors before believing the silence**, and confirm your crate was actually
-  compiled.
-* **`web/` has its own `Cargo.lock` and its own workspace.** `just check` and
-  `cargo check --workspace` will never cover it. `just wasm-check` builds it through
-  `trunk` — which is deliberate, because that catches a wasm-bindgen-level break
-  that `rustc` alone would not.
-* **`cargo check` cannot see a doctest, so add `cargo test -p lodestone-shell --doc`
-  to your loop for this work specifically.** A target-split is the same shape of
-  change as a crate rename: it moves which dependency resolves on which target, and a
-  `///` fenced example naming the backend crate directly (`web_time`, say) rather than
-  the portable wrapper will fail on the host while all three `check` recipes stay
-  green. Prefer referring to `crate::platform` in examples — if callers should not
-  name the backend, neither should the docs.
-* **A confinement guard only covers the crate it names, and the browser reaches
-  about fifteen.** This cost the last hour of the port. `cargo check --target
-  wasm32-unknown-unknown` was exit 0, all three `lodestone-shell` rules PASSed, and the
-  tab still died on `time not implemented on this platform` — from three crates down:
-  `Sim::build` → `Particles::new` → `ParticleEngine::new()` →
-  `JavaRandom::from_entropy()` → `SystemTime::now()`. `lodestone-particle` is not even in
-  `wasm-check.sh`'s crate list. **Every crate in that list wants the clock rules, and the
-  ones not in the list want to be.** Until then: run the page.
-* **A green `wasm-check` does not prove the browser runs.** It is a compile pass
-  plus greps. The only evidence that counts is the page reaching the title screen
-  and then a world.
-* **`just check-seam`** (`cargo check -p lodestone-shell --no-default-features`) is
-  the only thing proving the shell compiles with *no* protocol family, and a large
-  `cfg` refactor is exactly what breaks it. Run it often.
-* **A green title screen is not evidence the *colour* is right.** The whole browser
-  presentation — world and every menu alike, since they share one swapchain — came
-  out uniformly darker than native. Root cause: `SurfaceTarget::new`
-  (`crates/lodestone-render/src/target.rs`) configures the swapchain from
-  `wgpu::Surface::get_default_config`, which just takes `get_capabilities().formats
-  [0]`. On native, wgpu-core's own `surface_get_capabilities` sorts sRGB formats
-  first, so `formats[0]` is already `Bgra8UnormSrgb` there. **The WebGPU backend's
-  `get_capabilities` never lists an sRGB format at all** — `wgpu`'s own
-  `WebSurface::get_capabilities` hardcodes `[Rgba8Unorm, Bgra8Unorm, (Rgba16Float)]`,
-  because a browser canvas structurally cannot be configured with an
-  `*UnormSrgb` format (verified live: `navigator.gpu.getPreferredCanvasFormat()`
-  reports `"bgra8unorm"` in this exact build). So the terrain/GUI shaders' linear
-  output reached the compositor with no EOTF applied, everywhere. Fixed by
-  reinterpreting the swapchain texture through an sRGB *view* — `config
-  .view_formats` plus an explicit format on every acquired frame's
-  `TextureViewDescriptor` — which is the mechanism the WebGPU spec provides for
-  exactly this; `SurfaceTarget::format()` now reports that view format rather than
-  the physical (always non-sRGB, on web) swapchain format, since that is what every
-  pipeline is built against. See `target.rs`'s `choose_view_format` and its two
-  format-decision tests (one shaped like each backend's capability ordering) —
-  pinning an exact composited byte is not reliable on this backend (see this
-  repo's rendering-constraints notes on `ALPHA_BLENDING`), so the gate asserts the
-  *decision*, not a pixel.
+The server's own per-connection periodic driver (keep-alive, air supply, world-border damage,
+burning, status effects, hunger) has a working browser timer seam
+(`crate::browser_timer::BrowserInterval`, built on `window.setTimeout` with `Delay` missed-tick
+semantics — never `Burst`, which races a timer against a socket read). **Not yet ported to the
+same seam**: the world tick loop itself (mob AI, scheduled/random block ticks, weather, periodic
+block-entity ticks) is still entirely native-only, so a browser singleplayer world has no mob
+AI, crop growth, fluid flow, scheduled redstone, or weather. Also open: the options file has no
+wasm persistence seam yet, and one world-list error path swallows a failure without surfacing it
+to the UI.
 
 ## What the record got wrong
 
-Kept because the corrections cost more to rediscover than to write down.
-
-* **`scripts/wasm-check.sh`'s header lists `std::fs::*` first among calls that
-  "compile for wasm32 and only die at RUNTIME".** Measured and executed: `std::fs`
-  returns `Err(Unsupported)` and does not trap. The three that do trap are
-  `Instant::now`, `SystemTime::now` and `std::thread::spawn`. Grouping them hid the
-  fact that the clock was the emergency and `fs` was not.
-* **`SystemTime::now()` appears in no hazard list in the repo**, and is crash-class.
-* **The shell was described as having no wasm gating.** `net.rs`, `app/session.rs`,
-  `app/launch.rs`, `app/menus.rs` and `audio.rs` already had it.
-* **"20 files use `std::fs`" overstates the work by ~4x.** Most of those counts are
-  inside `#[cfg(test)] mod tests`, which a wasm `--lib` build never compiles: 51
-  production call sites, not 200+.
-* **`lodestone-auth` looked native-only and is not.** See above.
+Kept because the corrections cost more to rediscover than to write down: `std::fs::*` does not
+trap (only the clock pair and thread spawn do, and grouping them together hid which one was the
+real emergency); `SystemTime::now()` appeared in no hazard list anywhere in the repo despite
+being crash-class; the shell already had some wasm gating (`net.rs`, `app/session.rs`,
+`app/launch.rs`, `app/menus.rs`, `audio.rs`) before this port began; and `lodestone-auth` looked
+native-only by analogy with `lodestone-client` and was not.

@@ -1,330 +1,213 @@
-# Standalone dedicated server
+# The integrated and dedicated server
 
 ## What it is
 
-`lodestone-dedicated-server` is a new, thin binary crate — its produced
-binary is named `lodestone-server` — that runs `lodestone-server` headless: no
-client, no renderer, no windowing crate in the graph. Drop it into a
-directory and run it; it reads `server.properties` and `eula.txt` from that
-directory (writing vanilla-shaped defaults on a first run, exactly like
-vanilla's own `server.jar`), enforces ops/whitelist/bans, opens a persistent,
-autosaving world, hosts it over real TCP, takes commands on stdin, and saves
-and closes the world cleanly on `stop` or a shutdown signal.
-
-`lodestone-server` itself stays a library — it already has no `[[bin]]` and
-still does not need one. See "How to change it" for why the binary lives in
-its own crate instead.
+`IntegratedServer` (`crates/lodestone-server/src/integrated.rs`) is the one server implementation
+Lodestone has, and singleplayer, open-to-LAN, and the standalone `lodestone-dedicated-server`
+binary are all the same code path over a different transport: an in-memory duplex for
+singleplayer, a real `TcpListener` for LAN and dedicated hosting. Everything downstream of the
+socket — login, the tick loop, chunk streaming, commands — is byte-identical code regardless of
+which one is running.
 
 ## How it works
 
-### The binary's dependency graph, measured
+### One server, three transports
 
-```
-$ cargo tree -p lodestone-dedicated-server
-```
+| deployment | transport | who calls it |
+|---|---|---|
+| singleplayer | `tokio::io::DuplexStream`, same process | `lodestone-shell`'s `net.rs`, on the net thread, with no extra synchronization |
+| open-to-LAN | real TCP, same process as the playing host | the pause-menu "Open to LAN" button → `IntegratedServer::publish`, added to an already-running world in place (no world reopen, no rejoin) |
+| dedicated server | real TCP, headless | `lodestone-dedicated-server`, a thin binary crate with no client/render/GPU crate anywhere in its dependency graph |
 
-The graph pulls in `lodestone-server`, `lodestone-registry` with its `v770`
-feature (26.2 is the only family that implements `ServerProtocol` — see the
-repo's own `CLAUDE.md` on why `Family`/`ServerFamily` are different tables),
-`lodestone-auth` (the
-crypto-provider install online-mode's TLS call needs), `reqwest` (the same
-HTTP client `OnlineModeConfig` already required), and `tokio`/`tracing`/
-`tracing-subscriber`. **No `lodestone-shell`, no `lodestone-render`, no GPU or
-windowing crate anywhere in the tree** — `cargo tree` was run and read, not
-assumed, before this doc was written.
+`lodestone-registry` is the only crate allowed to name a version crate; the shell/binary ask it
+for `server_protocol_for_protocol(protocol)` rather than naming `V770ServerProtocol` directly, so a
+version-free build (`--no-default-features`) still compiles and correctly reports "no servable
+family" instead of silently refusing every join. Only `v770` (protocol 776, MC 26.2) implements
+`ServerProtocol` today — joinable and hostable are different sets.
 
-`lodestone-server` itself already compiles for `wasm32-unknown-unknown` as
-part of the browser bundle (see its own `Cargo.toml`), which is the actual
-reason the binary is a separate crate rather than a `[[bin]]` target added
-there: a binary target needing `tokio`'s `rt-multi-thread`/`signal` and a
-real `TcpListener` would need `cfg`-gating out of a *library* crate's build
-graph for one target, which is exactly the class of thing this repo's own
-wasm-hazard record says goes stale silently. A separate crate needs no gate
-at all — nothing in the browser bundle or `lodestone-shell` depends on it, so
-it is never even considered for a wasm32 build.
+### The tick loop
 
-#### Why the registry rather than the version crate
+A real 20Hz clock, independent of client traffic, driving the mob simulation and every registered
+block entity. It is spawned exactly **once per world** — never per-connection, since spawning it
+per accepted connection multiplies world speed by connection count (a physics bug that reads as
+"mobs too fast," not as a loop-count bug). Overrun handling is ported from vanilla: a 2-second
+overload threshold and a 15-second warning re-fire interval, both derived from the 50ms tick
+period. Small backlogs are absorbed for free (the wake-up resolves immediately once already late);
+only once behind by more than 2 seconds does the loop give up on the remaining backlog, log a
+rate-limited warning, and jump its clock forward without replaying it. MSPT/TPS accounting keeps a
+100-sample rolling window (matching vanilla's own `tickTimesNanos`) and derives TPS as
+`1000 / mspt_avg.max(50.0)`, so it never reports above 20 even when ticks are comfortably fast.
 
-This crate originally depended on `lodestone-v770` and constructed
-`V770ServerProtocol` by name, which is the shortest path to the only family
-that can be hosted. `cargo xtask check-isolation` fails on it, and correctly:
-a *required* edge from a crate outside `crates/protocol/` to a version crate
-is precisely what makes that family undeletable, and the invariant is that a
-family stays deletable as its folder plus a manifest line. `lodestone-registry`
-is the one crate exempted from that rule, through optional feature-gated edges.
+Four other timers (keep-alive, time-sync, vitals, container-sync) stay per-connection rather than
+folding into this loop — they read or write one player's own tracked state, not world state, so
+unifying them would misname a per-connection concern as a world one. The organizing rule: anything
+two connections must agree on, or that must keep advancing with nobody connected, is *simulation*
+and belongs to the world tick; anything reconstructible from (authoritative state × one
+connection's own cursor) is *replication* and belongs to the connection task.
 
-So `main` asks `lodestone_registry::server_protocol_for_protocol` for the
-highest protocol in `supported_protocols()` that actually answers — a family
-whose *client* adapter is compiled in need not implement `ServerProtocol` —
-and never spells a family name. `None` is a real product state, reported and
-exited on, not an error to route around: a build with no servable family
-cannot host anything and must say so rather than starting and refusing every
-join. `check-deletable v770` reports the crate cleanly deletable again.
+### Server-side ECS
 
-#### `tokio::signal::unix` is a Windows compile error, not a degradation
+`lodestone-server` links `bevy_ecs` (via `lodestone-ecs`) so server-side plugins get the same
+intent doctrine client-side plugins already have, matching Bukkit/Spigot's own precedent of
+implementing core server functionality through the plugin surface itself. `bevy_ecs` is pinned
+without the `multi_threaded` feature workspace-wide, so `World::run_schedule` is a plain
+synchronous call on the tick task — there is no second runtime or thread pool for tokio to
+reconcile with, and the tick loop's structure (spawn once, `sleep_until`-driven, unchanged call
+site) does not change.
 
-The shutdown loop below races `Ctrl-C` against SIGTERM, and
-`tokio::signal::unix` is `#![cfg(unix)]` *inside tokio*. Naming it
-unconditionally is therefore `E0433: cannot find 'unix' in 'signal'` on
-Windows — a hard build failure for the whole crate, which the CI matrix's
-Windows leg caught and no `cargo check` on a Mac or Linux box can. The Windows
-arm is `tokio::signal::windows::ctrl_shutdown`, the genuine analogue: the OS
-raises it as the machine shuts down, which is the same "flush now" event a
-supervisor's SIGTERM is. Windows has no way for one process to *send* it to
-another, so `taskkill /F` still cannot be made graceful; that is an OS
-property, not something the loop can fix.
+The server owns its own `World`, entirely separate from the client's: they have contradictory
+clock policies (the client forgives lost time past a cap; the server must keep advancing and only
+forgives past vanilla's 2-second threshold), singleplayer is already structurally multiplayer (a
+real duplex carries real protocol bytes, so a shared `World` would let a client-side plugin read
+state that would not exist against a real remote server), and the two `World`s hold differently
+keyed, differently versioned representations of the world. The server's `World` needs no lock at
+all — it is owned outright by the tick task, and every connection task only enqueues proposals and
+reads published snapshots rather than reaching into it directly, which is a strictly simpler
+arrangement than the client's shared-`World` lock discipline. This also opens an adjudication
+window a plugin can veto from (a protection plugin blocking a break, an economy plugin taxing a
+transaction) that an inline connection-task mutation never could — packet application inside a
+scheduled system, rather than in-place, is the whole point.
 
-### Startup sequence
+### Login: compression, then encryption, then online-mode verification
 
-`main.rs` in `crates/lodestone-dedicated-server/src/main.rs` is orchestration
-only. In order:
+Ordering here is load-bearing. On a real join, `V770ServerProtocol::login_success` sends
+`LOGIN_COMPRESSION` (threshold 256, matching vanilla's default) uncompressed, flips the connection's
+codec to compressed framing, and only then sends `LOGIN_FINISHED` compressed — reversing that order
+produces a frame the other side cannot parse. When online mode is configured, encryption negotiates
+first: the server generates a fresh RSA keypair and a verify token per connection (vanilla caches
+one keypair for the process; this crate's protocol implementors are stateless, so there is no shared
+keypair to cache), sends an `EncryptionRequest`, and on the matching response RSA-decrypts the
+verify-token echo and the shared secret, enables AES-128-CFB8 encryption on the connection
+**before** anything else is sent, computes the server-id hash, and checks it against Mojang's
+session server (`lodestone_auth::has_joined`). A verified profile's `id`/`name` — not the client's
+self-reported ones — is what `login_success` uses; a rejected or unreachable session server
+disconnects with vanilla's own `unverified_username`/`authservers_down` reasons, kept as distinct
+errors since an outage and a genuine identity mismatch are different problems to see in a log.
+Singleplayer never reads online-mode configuration at all and can never authenticate; only
+open-to-LAN and dedicated hosting can turn it on, and turning it on needs a real `reqwest::Client`
+plumbed to `OnlineModeConfig::new` — nothing constructs one automatically.
 
-1. Resolve the server directory (`argv[1]`, default `.`), creating it if
-   missing.
-2. `lodestone_server::eula::check` — refuse and exit `1` (after writing the
-   template if the file is missing) unless `eula=true`.
-3. `lodestone_server::ServerProperties::load_or_create` — parse
-   `server.properties`, or write vanilla's own defaults there first.
-4. `AccessHandle::load` the four ops/whitelist/ban JSON files from the server
-   root (not the world directory — same layout vanilla uses), then apply
-   `white-list`/`max-players` onto it.
-5. Resolve the seed (`level-seed`, or a fresh random one) and the world type
-   (`level-type`), and open the world with
-   `IntegratedServer::open_persistent_with_mobs` — the same constructor
-   `lodestone-shell`'s own "Open to LAN for a persistent singleplayer world"
-   path already uses, reused rather than a new one built for this crate.
-6. Drop the constructor's in-memory "local connection" duplex end unread —
-   this binary is headless, so nothing ever calls `LoginStart` on it, and its
-   connection task observes an immediate EOF and returns, same as any client
-   that connects and disconnects before logging in.
-7. Set the world's default game mode and difficulty from `server.properties`.
-8. `IntegratedServer::publish_with_config` — bind `server-ip:server-port` and
-   thread real `access`/`online_mode` configuration through (see
-   "`PublishConfig`" below).
-9. `IntegratedServer::start_rcon` if `enable-rcon=true` and a non-empty
-   `rcon.password` is set.
-10. Read stdin lines as console commands (`lodestone_server::console::run`),
-    racing `Ctrl-C`/SIGTERM (`CTRL_SHUTDOWN` on Windows — see above); `stop`,
-    `Ctrl-C` or a termination signal all break the
-    loop into `IntegratedServer::shutdown().await`, which flushes the world
-    (region files, `level.dat`, entities, POI) before the process exits.
+**A load-bearing identity gotcha applies regardless of online mode**: offline mode derives a
+player's account UUID from their username, not from any UUID the client claims. Two connections
+(or two test runs) sharing a username therefore share exactly one persisted player file on disk.
 
-### `PublishConfig` — the access-control/online-mode gap this closed
+### Game modes, status, and disconnect
 
-`IntegratedServer::publish` (the call that adds a TCP listener to an
-already-running persistent world — the exact shape a dedicated server needs)
-used to hardcode every accepted connection to `CommandDispatch::none()` and
-`AccessHandle::default()`, with **no `online_mode` parameter at all**. That
-was a real island, not a deliberate simplification: `crate::access` and
-`OnlineModeConfig` existed and were already wired into
-`IntegratedServer::open_to_lan`'s own accept loop, but `publish`'s accept
-loop — the one path that adds a socket to a *persistent* world — never
-consulted either. A world hosted this way could not be whitelisted, could not
-enforce a ban, and could not require online-mode authentication no matter
-what a caller configured, because nothing carried that configuration to the
-listener.
+A game-mode change is always **two** clientbound packets sent together — a game-event telling the
+client what mode it's in, and an abilities packet telling it whether it may fly/instabuild; flight
+permission lives only in the second one, so sending one without the other leaves a client that
+thinks it's in creative but cannot fly. Per-mode consequences (instant break, no drops, no fall/
+border/drowning damage) are each gated at their own call site rather than taught to a shared
+"is this mode special" helper. The join mode is not currently persisted or configurable — every
+connection joins survival and switches via `/gamemode` or the F3 menu.
 
-`IntegratedServer::publish_with_config` (`crates/lodestone-server/src/integrated.rs`)
-is the fix: `publish` is now a thin wrapper calling it with
-`PublishConfig::default()`, which reproduces `publish`'s previous behaviour
-exactly — so `lodestone-shell`'s own two-argument call site is unaffected.
-The dedicated server binary is the first caller that passes a real
-`PublishConfig`.
+A status-ping (server-list) request gets a JSON status document (MOTD, player cap, version,
+protocol, optional favicon) plus a pong reply carrying the client's own echoed timestamp; the
+server closes after a second status request or after answering a ping, matching vanilla. Player
+count is honestly reported as `0` — a status request lands on its own connection with no visibility
+into what other connections are serving, and closing that gap needs a shared, cross-connection
+counter this crate does not have yet.
 
-### The stdin console
+A disconnect reason is encoded differently by phase: a **JSON string** during Login (the phase
+predates NBT chat components on the wire) and an **NBT** chat component during Configuration/Play.
+Two producers exist end-to-end today: a keep-alive timeout, and a refused username (matching
+vanilla's name-validity check, but explained rather than a silent socket close) — an offline-mode
+identity gotcha above is exactly why an invalid name matters, since a name with control characters
+would otherwise reach storage.
 
-`lodestone_server::console::run` (`crates/lodestone-server/src/console.rs`) is
-a two-line adapter over `crate::rcon` — it builds a throwaway `RconConfig`
-(its `addr`/`password` fields are never read; nothing here binds a socket)
-and calls `crate::rcon::run_console_command`, which is
-`crate::rcon::run_command_as` (the RCON handler's own body, generalised over
-the caller's identity so it is not duplicated) under identity `"Server"` at
-permission level 4 — vanilla's own dedicated-server console identity,
-distinct from RCON's `"Rcon"`. The built-in command tree
-(`crate::commands::ServerCommands`) runs first; a root it does not own falls
-through to the host `CommandDispatch` sink, same ordering RCON and in-game
-chat already use.
+### Resource packs, plugin channels, session liveness
 
-`IntegratedServer::players()` is a new accessor (same shape as the existing
-`mobs()`/`world_state()`) that hands back the world's real, shared
-`PlayerRegistry` — before it existed, neither RCON nor this console had any
-way to reach a dedicated server's real connections, so `/list`/`/say`/a
-targeted `/gamemode <player>` would have seen an empty registry regardless of
-who was actually connected.
+A resource pack push (URL, SHA-1, required flag, optional prompt) is published into a feed and
+drained on the same 50ms timer that also drains block/explosion/plugin-channel/chat traffic; a
+required pack's accept/decline behavior is entirely client-side. Plugin messaging (`custom_payload`)
+is a registry of channels the server is interested in plus a per-connection record of what a client
+announced support for; an unregistered channel is a silent drop on both sides, matching vanilla's
+own `DiscardedPayload` fallback, and a server-to-client broadcast is a bounded, cursor-based queue so
+a slow connection loses overflow rather than stalling everyone else.
 
-## `server.properties`
+A served session (singleplayer or LAN) additionally needs three things a static, timeless
+connection would not: **keep-alive** (a 15-second challenge; an unanswered previous challenge
+disconnects rather than piling up — matching vanilla's actual ~15s worst case, not "interval +
+timeout"), a **periodic time-of-day broadcast** (once at join to anchor the clock, then every second
+game-time-only, mirroring vanilla's once-a-second resync), and **view streaming** (`ViewTracker`
+recenters the streamed chunk window whenever the player's column changes, sending forgets for what
+left and batches for what entered — a square window rather than vanilla's exact circular one, kept
+deliberately consistent between the join-time and steady-state code paths). A live render-distance
+change resizes the window around its existing center against a separate ceiling (`max_radius`) from
+where it started (`radius`); the ceiling differs by deployment — a generous cap for singleplayer's
+own slider, the host's configured radius for LAN. None of this runs on `wasm32`, where there is no
+timer driver to initiate a challenge or a periodic broadcast (inbound-driven behavior, like echoing
+a keep-alive or streaming on movement, still works).
 
-Real vanilla key names and real vanilla default *values*, transcribed from
-this repo's own pinned 26.2 decompile
-(`.cache/mc/26.2/src/net/minecraft/server/dedicated/DedicatedServerProperties.java`),
-not from memory or an older Minecraft version — see
-`crates/lodestone-server/src/properties.rs`'s own doc comment for the two
-things that transcription caught that an assumption would not have:
-**there is no `pvp` key in 26.2** (confirmed against both the decompile and
-the real, vanilla-written `.cache/mc/26.2/server.properties` this repo's own
-oracles already run against — neither has `pvp`/`allow-nether`/
-`spawn-monsters`/`spawn-npcs`/`spawn-animals`), and **`online-mode`'s real
-default is `true`**.
+### Open-to-LAN and the dedicated server specifically
 
-All 71 real keys round-trip (unknown/unmodelled keys included, in their
-original position) through `RawProperties`; only the subset below is typed
-and read by the dedicated-hosting path.
+`IntegratedServer::publish` adds a second accept loop to an **already-running** world rather than
+reopening it — the earlier behavior reopened the world from scratch on every LAN publish, which
+looked like a fresh loading screen for a button vanilla treats as invisible when nothing changes.
+`LanConfig` is the whole surface: view radius, RCON, the query listener, LAN discovery
+(a one-way UDP broadcast so the world appears in a nearby client's list unprompted), online mode,
+commands, resource packs, and plugin channels — each defaults off, and a caller opts in per field
+rather than `bind` growing parameters. Per-connection tick-driven feeds (block ticks, explosions,
+effects) need their own fan-out for LAN specifically, since an append-and-drain-all feed can only
+have one consumer safely; each LAN connection gets its own feed pair fed by a relay that drains the
+tick loop's hub and republishes.
 
-### Implemented — reaches a real consumer
+The dedicated-server binary (`lodestone-dedicated-server`) is a separate crate specifically so a
+`tokio`-dependent, TCP-binding `[[bin]]` never has to be `cfg`-gated out of `lodestone-server`
+itself, which also compiles for `wasm32` as part of the browser bundle. It reads real vanilla
+`server.properties` key names and defaults (transcribed from the 26.2 decompile, not memory or an
+older version — notably, 26.2 has no `pvp` key, and `online-mode` really does default to `true`);
+71 real keys round-trip whether or not this crate's hosting path consumes them. Live gotchas: the
+status-ping MOTD is hardcoded regardless of what `server.properties` says; `level-type=minecraft:flat`
+falls back to a normal overworld with a warning, since the flat generator's JSON settings aren't
+parsed; and the query listener isn't started on this path even though the machinery exists and is
+proven on the LAN path. `simulation-distance`/tick-area radius is clamped to a measured-safe
+constant well below vanilla's own default, because this crate's tick loop still regenerates its
+whole tick area from source every tick (there is no loaded-chunk ticket-driven set yet) — raising
+the cap without that landing first reproduces real tick-loop overload.
 
-| key | consumer |
-|---|---|
-| `level-seed` | `WorldOptions.parseSeed` (numeric, else Java `String::hashCode` via `lodestone_worldgen::hash::java_string_hash`, else random) |
-| `level-name` | the world's subdirectory under the server root |
-| `level-type` | `minecraft:normal`/`large_biomes`/`amplified` map to a real `WorldType`; anything else (**including `minecraft:flat`**) falls back to normal with a logged warning — see "Accepted, partially implemented" below |
-| `gamemode` | `WorldStateHandle::set_default_game_mode` |
-| `difficulty` | `WorldStateHandle::set_difficulty` |
-| `max-players` | `AccessLists::set_max_players` — enforced at join (`AccessLists::may_join`) |
-| `online-mode` | `PublishConfig::online_mode` → real RSA/AES-128-CFB8 handshake + session-server verification (see "Online-mode" below) |
-| `view-distance` | `open_persistent_with_mobs`'s `view_radius` |
-| `simulation-distance` | the tick/mob-simulation area radius — **clamped**, see "A real, measured limit" below |
-| `server-port` / `server-ip` | the TCP address `publish_with_config` binds |
-| `white-list` | `AccessHandle::set_whitelist_enabled` |
-| `enable-rcon` / `rcon.port` / `rcon.password` | gates `IntegratedServer::start_rcon` |
-
-### Accepted, partially implemented
-
-- **`motd`** — parsed and preserved, but **the live status-ping reply is
-  hardcoded** to `crate::server::STATUS_MOTD` ("A Lodestone Server") deep
-  inside `serve_connection_inner`, one constant shared by every
-  `serve_connection_with_*` wrapper (~50 call sites across `src/` and
-  `tests/`). Threading a real value through was out of scope for this pass —
-  wiring it needs a parameter added to that whole family of functions, which
-  is a real, contained follow-up, not a design change.
-- **`level-type=minecraft:flat`** — needs `generator-settings`' JSON, which
-  this properties reader does not parse; falls back to a normal overworld
-  with a logged warning rather than silently building the wrong terrain.
-- **`enable-query` / `query.port`** — parsed and preserved; `publish_with_config`
-  does not start a GameSpy4/UT3 query listener (unlike `open_to_lan`, which
-  does). A real follow-up, not a design decision: the machinery
-  (`crate::query::QueryServer`) already exists and is already proven in
-  `open_to_lan`'s own accept loop.
-
-### Accepted and ignored — parsed, preserved on save, no consumer
-
-`accepts-transfers`, `allow-flight`, `broadcast-console-to-ops`,
-`broadcast-rcon-to-ops`, `bug-report-link`, `chat-spam-threshold-seconds`,
-`command-spam-threshold-seconds`, `enable-code-of-conduct`,
-`enable-jmx-monitoring`, `enable-status`, `enforce-secure-profile`,
-`enforce-whitelist`, `entity-broadcast-range-percentage`, `force-gamemode`,
-`function-permission-level`, `generate-structures`, `generator-settings`,
-`hardcore`, `hide-online-players`, `initial-disabled-packs`,
-`initial-enabled-packs`, `log-ips`, `management-server-*` (six keys — no
-management server exists in this codebase), `max-chained-neighbor-updates`,
-`max-tick-time`, `max-world-size`, `network-compression-threshold`,
-`op-permission-level`, `pause-when-empty-seconds`, `player-idle-timeout`,
-`prevent-proxy-connections`, `rate-limit`, `region-file-compression`,
-`require-resource-pack`, `resource-pack*` (four keys), `spawn-protection`
-(parsed; **no spawn-protection enforcement exists in this crate at all** —
-a fresh world's spawn is not protected from any player), `status-heartbeat-interval`,
-`sync-chunk-writes`, `text-filtering-*` (two keys), `use-native-transport`.
-
-### A real, measured limit: `simulation-distance`
-
-Vanilla's own default (`simulation-distance=10`, a 21×21 = 441-column tick
-area) was tried first, unclamped, against this crate's debug build, and the
-tick loop fell behind without recovering — `"Can't keep up!"` at 143 ticks
-behind within 10 seconds of boot, climbing to 1591 ticks (79.5 s) before the
-process was killed. `crate::integrated`'s own `LAN_TICK_RADIUS` constant
-already documents exactly this cost ("widening it costs a full generator run
-per chunk per tick") and keeps LAN hosting at radius 2 (25 columns) for that
-reason — pending issue #289's loaded-chunk ticket-driven set, which this
-crate's tick-loop architecture does not have yet. `MAX_SIM_RADIUS` in
-`crates/lodestone-dedicated-server/src/main.rs` mirrors that established,
-load-tested number rather than trusting vanilla's default against an
-architecture not yet built for it: `simulation-distance` is honoured only
-**downward** from that cap.
-
-## Online-mode
-
-**The server side already existed and already worked before this change** —
-`OnlineModeConfig`/`serve_connection_with_online_mode` implement the real
-RSA/AES-128-CFB8 handshake and the `hasJoinedServer`-equivalent session-server
-check (`lodestone_auth::has_joined`), landed for issue #273. What it lacked
-was a reachable caller for a dedicated server: `IntegratedServer::open_in_memory*`
-never read it at all (singleplayer cannot authenticate by construction, and
-still cannot), and `publish` — the call a persistent, hosted world needs —
-took no `online_mode` parameter whatsoever. `PublishConfig::online_mode` is
-that reachable caller. `online-mode=true` in `server.properties` now installs
-a real `OnlineModeConfig` (after `lodestone_auth::install_crypto_provider`,
-the same one-time step `lodestone-auth`'s own login path requires before its
-first `reqwest` TLS call) into `publish_with_config`.
-
-## `eula.txt`
-
-Mirrors vanilla's own `Eula.java` mechanically: a single `eula=<bool>` key,
-`true`/`false` case-insensitively, default `false` (including when the file
-or the key is missing). Absent or `false` refuses to start (writing the
-template first if the file did not exist) and exits with status `1`; `true`
-proceeds.
-
-**The wording was an open question; it is decided now.**
-`crate::eula::NOTICE` points the operator at Mojang's own EULA
-(`https://aka.ms/MinecraftEULA`) as the terms governing *operating* a
-Minecraft-compatible server — reasoning: Mojang's EULA governs Mojang's
-software and Lodestone is a from-scratch reimplementation, not obviously
-bound by an agreement written for their binary (this repository's own
-`docs/legal-notices.md` and non-affiliation disclaimer exist for exactly
-that reason), but an operator running this dedicated server is still
-joining Mojang's ecosystem, over which Mojang does assert their EULA and
-commercial-usage guidelines regardless of whose server binary is involved.
-The notice text says so plainly — pointing at the EULA without claiming
-Lodestone is Mojang's software or is affiliated with Mojang — and separately
-notes that Lodestone itself is provided under its own open-source license.
-See `crate::eula`'s own module doc for the full reasoning.
-
-## A real, measured persistence gap
-
-A freshly generated chunk column — one nobody has ever placed or broken a
-block in — is **not** flushed to disk by `IntegratedServer::shutdown()`.
-Measured: a fresh world, 25 columns generated for the mob-seed area, `stop`
-issued immediately after boot — `world saved on shutdown: 0 chunk columns`
-(the crate's own `tracing::debug!` line), and `world/dimensions/minecraft/overworld/region/`
-exists but is empty. Entities and POI *do* save correctly on the same
-shutdown (`entities saved on shutdown: 12 of 12` in the same run). This is
-existing `crate::region_source`/`ChunkStore` dirty-tracking behaviour, not
-something this binary introduced — terrain generation is deterministic from
-the seed, so a restart regenerates identical shape, but it means **any
-generation-time side effect that is not itself re-derived deterministically
-(rolled structure loot, for one) is lost on a restart with no player having
-ever visited**. Worth a follow-up in `crate::region_source`/`crate::chunk_store`,
-not something this doc's own binary can fix from the outside.
+A freshly generated, never-visited chunk column is **not** flushed to disk on shutdown. Terrain
+regenerates identically from the seed on restart, so this is invisible for ordinary play, but any
+generation-time side effect that is not itself deterministic (rolled structure loot, for one) is
+lost if the world is stopped before a player ever visits.
 
 ## How to change it
 
-- **A new `server.properties` key**: add a field to `ServerProperties`
-  (`crates/lodestone-server/src/properties.rs`), read it in
-  `ServerProperties::from_raw`, and add its default (copied from the
-  decompile, not memory) to `DEFAULTS`. Say in this doc which bucket
-  (implemented / accepted-and-partial / accepted-and-ignored) it lands in —
-  the module itself only parses, it does not grade its own keys.
-- **Wiring a currently-ignored key**: find its bucket above and follow the
-  pointer; most of them (`enable-query`, `spawn-protection`) name the exact
-  gap and the exact existing machinery (or lack of it) to close it with.
-- **The EULA wording**: a `crate::eula::NOTICE`-only edit if it ever needs to
-  change again — see "eula.txt" above for the reasoning behind the current
-  text.
-- **Loosening `MAX_SIM_RADIUS`**: only after `crate::tick`'s loaded-chunk
-  ticket-driven set (issue #289) replaces the fixed-radius tick area this
-  crate still has everywhere (`LAN_TICK_RADIUS` included) — raising the
-  constant without that landing reproduces the measured overload above.
+- **Adding a `server.properties` key**: add a field to `ServerProperties`, read it in
+  `ServerProperties::from_raw`, and give it a default copied from the decompile rather than memory.
+- **A new per-connection timer or cache**: ask "does any other connection need to agree with this?"
+  first. If yes, it belongs in the server `World`/tick loop as simulation state; if no, the
+  connection task is where it belongs.
+- **Adding an ECS `Resource` a plugin will order against**: it must be genuinely `'static`-owned
+  (`Send + Sync + 'static`), the same constraint the client-side plugin doctrine already enforces.
+- **Do not install the client's `CorePlugin` on the server's `App`** — it inserts a frame clock and
+  a render-driven schedule chain that are both meaningless server-side; the server needs its own
+  core plugin.
+- **Adding a `ServerProtocol` seam method**: give it a safe default (`ServerDirective::None`) so a
+  protocol family without support for the new behavior degrades to "sends nothing" rather than
+  failing to compile, and remember to forward it through the `Box<dyn ServerProtocol>` blanket impl
+  — a missing forward is not a compile error, it silently answers with the trait default.
+- **Loosening the simulation-distance cap**: only after a loaded-chunk ticket-driven tick area
+  replaces the fixed-radius one this crate still has everywhere.
+- **Windows has no process-to-process SIGTERM equivalent** — the shutdown loop reacts to the OS's
+  own native shutdown notification there instead of racing a Unix signal.
 
 ## Configuration
 
-- `server.properties` and `eula.txt` in the server's root directory (the
-  binary's `argv[1]`, default `.`).
-- `ops.json`/`whitelist.json`/`banned-players.json`/`banned-ips.json`, also
-  at the server root — vanilla's own layout.
-- `RUST_LOG` (via `tracing_subscriber::EnvFilter`), default `info`.
+- `server.properties` and `eula.txt` at the server root (dedicated server only); `ops.json`/
+  `whitelist.json`/`banned-players.json`/`banned-ips.json` alongside them, vanilla's own layout.
+- `LanConfig` — the open-to-LAN/publish surface (view radius, RCON, query, discovery, online mode,
+  commands, resource packs, plugin channels); defaults are the offline, minimal-surface behavior.
+- Tick-loop constants (`TICK_PERIOD`, the 100-sample MSPT window, the derived overload/warning
+  thresholds) and session-liveness constants (`KEEP_ALIVE_INTERVAL` = 15s, `TIME_SYNC_INTERVAL` = 1s)
+  are compile-time constants in `lodestone-server`, not runtime settings.
+- `RUST_LOG` via `tracing_subscriber::EnvFilter` (dedicated server), default `info`.
 
 ## Dependencies
 
-`lodestone-server`, `lodestone-registry` (feature `v770`), `lodestone-auth`, `reqwest`, `tokio`
-(`rt-multi-thread`, `net`, `signal`, `io-std`, `time`, `sync`, `macros`),
-`tracing`, `tracing-subscriber`. No client, renderer, GPU, or windowing
-crate — see "How it works" for the measured `cargo tree`.
+`lodestone-server` (the shared implementation), `lodestone-registry` (feature-gated `v770`, the
+only crate allowed to name a version family), `lodestone-ecs`/`bevy_app`/`bevy_ecs` (server-side
+plugin scheduling, no `multi_threaded`), `lodestone-auth` + `reqwest` (online-mode session-server
+verification), `lodestone-net` (the shared connection/codec seam), `tokio` (`time`, `net`, `signal`,
+native only). The dedicated-server binary adds nothing render-, GPU-, or window-shaped to that
+graph.

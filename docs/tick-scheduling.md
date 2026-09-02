@@ -1,456 +1,163 @@
-# Random ticks, scheduled ticks, and neighbour-update propagation
-
-Issues [#307](https://github.com/matteopolak/lodestone/issues/307) (random-tick
-scheduler) and [#308](https://github.com/matteopolak/lodestone/issues/308)
-(scheduled-tick queue and neighbour-update propagation) — the foundation layer
-every block-tick feature (crop/sapling growth/leaf decay #310, gravity blocks
-#311, fluid flow #309, fire spread #312, the redstone family #314-#322)
-builds on. [#310](https://github.com/matteopolak/lodestone/issues/310) and
-[#311](https://github.com/matteopolak/lodestone/issues/311) have since landed
-on top of this foundation — see their own sections below.
+# Tick scheduling: random ticks, scheduled ticks, block entities, and profiling
 
 ## What it is
 
-Five modules in `crates/lodestone-server/src/`, each a generic, vanilla-shaped
-primitive with its own test suite, wired into `tick::run_tick_loop`:
-
-- [`random_tick.rs`](../crates/lodestone-server/src/random_tick.rs) —
-  [`RandomTickScheduler`] replicates `ServerLevel::tickChunk`'s block
-  selection (`ServerLevel.java`) and the position-pick LCG
-  (`Level.getBlockRandomPos`, `Level.java`) exactly, and dispatches
-  every randomly-ticking block family this crate models to its own handler:
-  grass turning to dirt when the block above fully dampens light or drowns it,
-  and dirt turning to grass when adjacent to a live grass block
-  (`SpreadingSnowyBlock.randomTick`, `SpreadingSnowyBlock.java`) directly
-  in this module, plus crop
-  growth/sapling growth/leaf decay in
-  [`growth_tick.rs`](../crates/lodestone-server/src/growth_tick.rs).
-- [`scheduled_tick.rs`](../crates/lodestone-server/src/scheduled_tick.rs) —
-  the scheduled-tick queue, first half. [`ScheduledTickQueue<T>`] mirrors vanilla's
-  `LevelTicks`/`LevelChunkTicks`/`ScheduledTick` drain order (trigger tick,
-  then priority, then insertion order).
-- [`neighbor_update.rs`](../crates/lodestone-server/src/neighbor_update.rs) —
-  the scheduled-tick queue, second half. [`NeighborPropagator`] mirrors
-  `NeighborUpdater.UPDATE_ORDER` and `CollectingNeighborUpdater`'s
-  depth-first cascade semantics — the "vanilla update-order quirks" the
-  gravity-block work refers to. This now has a real production caller — see
-  below.
-- [`growth_tick.rs`](../crates/lodestone-server/src/growth_tick.rs) —
-  Crop growth (`CropBlock.randomTick`, `CropBlock.java`, with
-  beetroot's own extra gate, `BeetrootBlock.java`), sapling growth
-  (`SaplingBlock.java`, the real stage-0→1 cycle only — see its own
-  section below for why the tree-growth half is a named gap), and leaf decay
-  (`LeavesBlock.java`), all dispatched from `random_tick.rs`.
-- [`gravity_tick.rs`](../crates/lodestone-server/src/gravity_tick.rs) —
-  Sand/gravel settling once unsupported (`FallingBlock.java`),
-  triggered through `NeighborPropagator`'s first real production call — see
-  its own section below for the two named deviations this landing accepts.
+The foundation every per-block-tick feature (crop growth, gravity blocks, fluid flow, fire spread,
+the redstone family) is built on: a vanilla-shaped random-tick scheduler, a scheduled-tick queue for
+"run again in N ticks" behavior, and a neighbor-update propagator with vanilla's own ordering and
+cascade shape. It also covers how block-entity ticking is bounded to chunks that are actually
+resident rather than scanning an ever-growing registry unconditionally, and the instrumentation
+used to measure where the tick loop's and the world generator's own time actually goes.
 
 ## How it works
 
 ### Random ticks
 
-The real selection, cited directly from the decompiled 26.2 jar
-(`.cache/mc/26.2/src/`):
-
-- **How many picks, and where.** `ServerChunkCache::tickChunks`:
-  `int tickSpeed = this.level.getGameRules().get(GameRules.RANDOM_TICK_SPEED);`
-  then `this.chunkMap.forEachBlockTickingChunk(chunkx -> this.level.tickChunk(chunkx, tickSpeed))`.
-  `RANDOM_TICK_SPEED`'s default is `3` (`GameRules.java`) —
-  [`DEFAULT_RANDOM_TICK_SPEED`].
-- **Per-section loop.** `ServerLevel::tickChunk` (`ServerLevel.java`):
-  for every 16-block section with `section.isRandomlyTicking()` true
-  (`tickingBlockCount > 0`, `LevelChunkSection.java`), draw
-  `tickSpeed` positions, **unconditionally** — a miss still consumes a draw.
-- **Two independent generators.** `getBlockRandomPos`
-  (`Level.java`) advances `this.randValue`, a level-local 32-bit LCG
-  — **not** `this.random`, which is what a block's own `randomTick` draws
-  from. [`next_random_tick_pos`] is the LCG, bit-for-bit; [`RandomTickScheduler`]
-  keeps a second, independent generator (`SpawnRng`, this crate's existing
-  deterministic RNG from `mob_spawn.rs`) for behaviour draws.
-- **Section eligibility.** `LevelChunkSection::isRandomlyTicking` is
-  `tickingBlockCount > 0`, an incrementally maintained counter, and **this crate
-  now keeps the same one**: `ChunkColumn::section_ticking`, a `u16` per implicit
-  16-row window, maintained in `ChunkColumn::set_block` (`±1` when the leaving
-  and arriving states differ in classification) and recomputed once per adopted
-  grid by `recalc_ticking_counts`. `ChunkColumn` still has no per-section
-  *struct* — sections are 16-row windows of one flat grid — so the counter is a
-  per-column vector rather than a field on a section object.
-  [`RandomTickScheduler::tick_chunk`] reads it with one integer compare.
-
-  It was a per-block scan until this counter replaced it. That scan ran the **string**
-  predicate on all 4096 blocks of every section, of every column, every tick;
-  `sample(1)` put **97.6%** of the integrated server's tick thread in it and
-  chunk delivery starved so badly that rings 5–8 of a 289-column view never
-  arrived (`mesh-fill-rate.md`).
-
-  **Get the budget arithmetic's multiplier right if you requote it.** This loop
-  iterates `tick_area`, *not* the streamed view: `tick_area` is `mob_area`
-  (`integrated.rs`'s `open_in_memory_with_mobs_using`) at radius `view_radius.clamp(1, 3)`
-  (`net.rs`'s `run_async`), a
-  7×7 square — **49 columns**, which the same function's doc comment also states. At the
-  measured 2.108 ms/column that is **103 ms per 50 ms tick, 2.07× over budget**
-  against a `50 / 2.108 = 23.7`-column headroom. Earlier records (including
-  `bdf93a28`'s commit message and, until this change, `mesh-fill-rate.md`)
-  multiplied by the 361-column view and reported 761 ms / 15.2×; those two
-  numbers are wrong and must not be requoted. The starvation conclusion is not
-  affected — 49 still exceeds 23.7.
-
-  Two properties keep the counter honest, and both
-  are gated in `crates/lodestone-server/tests/random_tick_section_counters.rs`:
-  the counters equal an independent recount at every step of a mutation storm
-  and across an NBT round trip, and the O(1) decision leaves the position LCG on
-  the exact sequence the definitional scan would have (draw **order and count**
-  is the spec, not just the resulting world). A `debug_assert!` inside
-  `tick_chunk` re-checks the decision against that scan on every debug run.
-
-  Two gotchas if you touch it. **Decrement with `-=` behind a `debug_assert!`,
-  never `saturating_sub`** — saturation hides exactly the maintenance bug the
-  counter exists to prevent. And the counters are **derived state, never
-  serialized**: `chunk_nbt` does not write them, so widening
-  [`is_randomly_ticking`] cannot strand a stale persisted count.
-- **Fluids are out of scope, deliberately.** Vanilla's section gate is
-  `isRandomlyTickingBlocks() || isRandomlyTickingFluids()`, and lava is the one
-  fluid that ticks (`LavaFluid.java` overrides `Fluid.java`). This crate
-  models no fluid random ticks, so a `tickingFluidCount` today would have zero
-  producers and zero consumers. The disclosed consequence: our LCG position
-  stream is not vanilla-comparable for a section whose only ticking content is
-  lava. A comment at the gate site in `tick_chunk` says what a future lava
-  handler must add; see `docs/plans/random-tick-counter.md` §"Fluids".
-- **Grass ↔ dirt**, cited from `SpreadingSnowyBlock.randomTick`
-  (`SpreadingSnowyBlock.java`): not `canStayAlive` → convert to dirt,
-  zero further draws. `canStayAlive` **and**
-  `getMaxLocalRawBrightness(pos.above()) >= 9` → four spread attempts, three
-  `nextInt` draws each (offset `x/y/z`), regardless of hits.
-
-  `canStayAlive` is now the **real predicate**, in this
-  order: snow with `LAYERS == 1` → alive; a **full** fluid state above → dead;
-  otherwise `getLightDampeningInto(...) < 15`, which for two full-cube states is
-  the above block's own `getLightDampening()` —
-  `lodestone_data::light_props::dampening`'s column exactly.
-
-  It used to be proxied by **"the block directly above is bare air"**, and that
-  proxy was a **shipped, owner-visible bug**: `minecraft:short_grass` is non-air,
-  vanilla's own vegetation step places short grass on top of grass blocks, so
-  every decorated grass patch turned to dirt on its first random tick. The proxy
-  existed because there was no dampening census; `light_props` (landed
-  `3f26be21`) is that census. Generation was innocent — `feature/top_layer.rs`
-  and `feature/vegetation/` place `grass_block` with `short_grass` above it, as
-  vanilla does.
-
-  **A different simplification survives**: the
-  `getMaxLocalRawBrightness(pos.above()) >= 9` gate on the *spread* branch. The
-  driver holds a `ChunkColumn`, not a light map, so a live grass block always
-  attempts a spread regardless of time of day. It can never make grass die
-  wrongly.
-
-  Two consequences worth stating, because both are the kind of thing a
-  self-consistent test hides:
-
-  - **The draw count now depends on which block is above, not merely whether one
-    is.** Grass under short grass consumes 12 behaviour draws where it consumed
-    0. That is vanilla's count *for the same above-block*, which is the standard;
-    self-consistency is not.
-  - **One branch of `getLightDampeningInto` is not modelled**: its hard `16` when
-    the two states' *occlusion shapes* merge to a fully-occluding face, reachable
-    only for an occluding non-full-cube above (stairs, some slabs). This crate has
-    no occlusion-shape census — collision shapes are a different question (glass
-    has a full collision box and occludes no light) — so those fall through to
-    their `dampening` column. That can only make grass **survive** where vanilla
-    kills it, never the reverse.
+Each server tick, a fixed number of random positions is drawn per eligible 16-row section, exactly
+matching vanilla's own selection and its position-generating LCG (a level-local generator distinct
+from the one used for a block's own random behavior once a position is picked). Section eligibility
+— whether a section has any randomly-ticking block at all — is tracked as a maintained running
+count updated incrementally as blocks change, rather than answered by scanning all 4,096 cells of
+every section on every tick; the earlier scanning approach measured as the overwhelming majority of
+the tick thread's time and was the direct cause of chunk delivery starving during a join. The
+handlers that actually run for a drawn position (grass turning to dirt or vice versa, crop and
+sapling growth, leaf decay) are transcribed from each block's own real predicate rather than
+approximated — an earlier "is the block above bare air" proxy for grass survival was a shipped,
+owner-visible bug, because real decorative surface cover like short grass is not air but has no
+collision either, so every decorated grass patch silently died on its first random tick.
 
 ### Scheduled ticks
 
-`ServerLevel` keeps two `LevelTicks`, block before fluid
-(`ServerLevel::tick`):
+Two queues, block before fluid, drained every world tick in that fixed order: every entry whose
+trigger tick has arrived, in (trigger tick, priority, insertion order), with the whole due set
+collected before any of its callbacks run — so a tick scheduled while processing this tick's batch
+cannot itself run in the same batch. A second schedule for a position/kind pair already pending is
+a silent no-op, matching vanilla's own dedup behavior for the same case.
 
-```text
-this.blockTicks.tick(tick, 65536, this::tickBlock);
-this.fluidTicks.tick(tick, 65536, this::tickFluid);
-```
+### Neighbor-update propagation
 
-`65536` is `MAX_SCHEDULED_TICKS_PER_TICK` (`ServerLevel.java`).
-[`ScheduledTickQueue<T>`] is the single-container reduction of vanilla's
-per-chunk `LevelTicks`/`LevelChunkTicks` split (this crate has no per-chunk
-tick-container registry yet — see the module's own doc comment for why that
-reduction is faithful, not invented). `drain_due(current_tick, max)`:
+A fixed visitation order (west, east, down, up, north, south) and a depth-first cascade: notifying
+one neighbor whose own state change triggers further notifications resolves that whole sub-cascade
+before the next sibling direction is ever notified, capped by a maximum chain length. Gravity blocks
+(sand and gravel settling once unsupported) and the redstone family (dust, torches, repeaters,
+comparators, observers) are both real production consumers of this exact mechanism and inherit its
+ordering guarantee unchanged. A notification that would land outside the currently-ticked chunk's
+own footprint is silently skipped for now — a known, deliberately-accepted limitation shared by
+every consumer of this primitive, not something each new consumer needs to solve separately.
 
-1. Drains every entry with `trigger_tick <= current_tick`, in
-   `(trigger_tick, priority, sub_tick_order)` order — `TickPriority`'s seven
-   variants are declared in the same order as vanilla's `-3..3` enum so
-   Rust's derived `Ord` matches Java's `Enum::compareTo` for free.
-2. Returns the whole `Vec` **before** the caller runs any callback — a tick
-   scheduled while processing entry `N` cannot appear in entries `N+1..`
-   of this same `Vec`, mirroring `LevelTicks::tick`'s own collect-then-run
-   split.
-3. A second `schedule` for a `(pos, kind)` pair already pending is a silent
-   no-op — vanilla's own `ticksPerPosition` dedup
-   (`LevelChunkTicks.java`).
+### A self-deadlock the scheduled-tick queue's own lock made possible
 
-`tick::run_tick_loop` drains `block_ticks` then `fluid_ticks`, every world
-tick, in that order — **nothing schedules into either queue yet**. Stated
-plainly: this half of the scheduled-tick work is a tested, correctly-ordered island until a
-block behaviour (fluid flow, gravity blocks, redstone)
-calls `schedule`. It is not a *silent* island — `run_tick_loop`'s own doc
-comment says so, and the queues are drained (proving the order holds) every
-tick regardless of whether anything is in them.
+**Holding a lock across a call into a subsystem that can call back into the very same lock is a
+self-deadlock waiting for the right input, and this queue had exactly that shape.** The tick loop
+holds the scheduled-tick queues behind one lock for the whole span of a tick that reads and mutates
+the world — and on a persistent world, reading the world can trigger loading a chunk from disk,
+which restores that chunk's own previously-saved pending ticks back into the very same queue
+structure. Restoring used to try to take the identical, non-reentrant lock a second time from
+inside the first acquisition, which parks the tick thread on itself permanently: total,
+deterministic, and reached the moment a world tick first touched any column that already existed on
+disk with a pending tick recorded — with no error, no disconnect, and no panic, just a client stuck
+loading forever. The fix stages a loaded chunk's restored ticks behind a **second**, separate lock,
+merged into the real queues only from inside the original lock's own held region — with a fixed
+lock order (the live queues' lock always taken before the staging lock, never the reverse) so
+nothing can re-derive the original deadlock through a different call path. A brand-new world never
+exercised this at all, which is why every gate built against a fresh or in-memory world stayed green
+regardless — the discriminating input is specifically a **saved** chunk that also carries a pending
+tick, and every existing test happened to use worlds with neither.
 
-### Neighbour-update propagation
+### Block-entity ticking is gated by residency, not by distance
 
-`NeighborUpdater.UPDATE_ORDER` (`NeighborUpdater.java`): **west, east,
-down, up, north, south** — [`UPDATE_ORDER`], verbatim. The propagation shape
-is vanilla's `CollectingNeighborUpdater` (`CollectingNeighborUpdater.java`):
-depth-first, not breadth-first. Notifying `west` and having that block's own
-state change cascade into further notifications means every one of those
-(and anything *they* cascade into) resolves **before `east` is ever
-notified**. [`NeighborPropagator::propagate`] is that same algorithm as an
-explicit stack, capped by `max_chained` (vanilla's
-`maxChainedNeighborUpdates`).
+Block entities (hoppers foremost, since only that kind actually probes world state each tick) used
+to be ticked from one flat, ever-growing registry scanned unconditionally at full rate regardless of
+where any player was. The originally suspected mechanism — that ticking gets slower the farther a
+player walks from spawn — turned out to be false; distance itself is flat, since a single far-away
+block entity only ever costs one real chunk-generation call for the whole session, not one per tick.
+The real mechanism was a hard capacity threshold: as the registry's set of distinct block-entity-
+bearing chunks grows past the chunk cache's own size, a cyclic scan through a bounded cache
+eventually touches every entry between two visits to the same one, so the miss rate jumps from
+effectively zero to effectively total once that threshold is crossed — turning an otherwise-cheap
+per-tick scan into hundreds of full chunk regenerations every single tick. The fix ties each
+block entity's tick to whether its own chunk is actually resident in the cache right now (a plain,
+non-generating lookup, deliberately not one that extends that chunk's own residency just for being
+checked — a lookup must not buy a column life it did not otherwise earn) and skips ticking it
+entirely when it is not, mirroring vanilla's own behavior of only ticking block entities belonging
+to a currently loaded chunk. The registry itself still has **no eviction of its own entries** — a
+block entity's simulated state must be able to keep advancing the moment its chunk becomes resident
+again, exactly as if it had never left, which is a different property from whether it gets ticked on
+any given pass.
 
-**Gravity blocks are
-`NeighborPropagator`'s first real production caller.** Every mutation
-`crate::random_tick::RandomTickScheduler::tick_randomly_ticking_block` makes
-(grass↔dirt, crop growth, sapling growth, leaf decay — above) now
-calls `NeighborPropagator::propagate` on the mutated position, mirroring
-vanilla's own `setBlockAndUpdate` always notifying neighbours after a
-change. The one reaction modeled today is a sand/gravel block settling once
-its support disappears (`crate::gravity_tick`, cited from
-`FallingBlock.java`); a settled block's old position is re-notified from
-directly above so a stacked column of gravity blocks collapses one at a
-time, depth-first — the exact cascade shape this primitive exists to
-provide. See `crate::gravity_tick`'s own module doc for the full citation
-and, importantly, the **two named deviations** this landing accepts rather
-than leaving gravity blocks a further island: no `FallingBlockEntity` (the
-block moves directly, one computed step, not a smoothly-animated entity —
-this crate has no free-entity-simulation seam for a temporary block-shaped
-entity), and no 2-tick scheduled delay (the settle runs synchronously inside
-`propagate`'s own notify closure, because `ScheduledTickQueue`'s drain
-dispatch lives in `tick.rs`, a file this landing's task brief did not permit
-editing directly — see that module doc for the exact brokered-edit note).
-**The trigger surface is still narrower than vanilla's**: it fires only when
-one of `crate::random_tick`'s own mutations happens to be adjacent to an
-unsupported gravity block, not on every block change in the world — the far
-more common vanilla trigger (a player mining the block below a sand column)
-is `server.rs`'s block-break handling, which does not call `propagate` yet
-and was off-limits to this task. **Redstone dust,
-torches, repeaters, comparators, and observers are real consumers of this
-exact call site** — see [`docs/redstone.md`](./redstone.md) — inheriting the
-depth-first ordering guarantee unchanged. Pistons and the remaining
-redstone children have not landed.
+### Profiling the tick loop and world generation
 
-## What actually reaches a client today
+Two independent, per-phase/per-stage timing instruments exist for finding where time actually goes,
+built specifically to capture the **tail** of a distribution (a worst window, not just an average)
+after this repo's own history of a real timeout being misdiagnosed from a mean that hid the one slow
+window that mattered. The tick loop is split into a small number of coarse phases at boundaries
+chosen specifically to avoid adding a timing checkpoint inside the one region that already holds the
+scheduled-tick lock across a large span of code — only one phase covers that whole region, since it
+is also the only phase that can trigger a real chunk generation mid-tick and is therefore the one
+most likely to show a real stall. World generation is profiled per internal stage (shape, carving,
+ore placement, vegetation, and so on) as percentiles across a batch of columns, bypassing the
+generator's own internal caches so every profiled column pays its full, uncached cost rather than
+some columns landing on a cache hit that makes a stage look artificially cheap. Both instruments are
+validated with a control that must read as exactly zero (an idle world under a paused, deterministic
+clock, where nothing measured could possibly do any real work) rather than merely "small", since a
+duration-based instrument has no other way to prove its own boundary isn't leaking time from
+somewhere it shouldn't.
 
-Per this repo's own rule ("nothing is done until something on screen
-changes"), here is exactly what does and does not:
+**Which stage dominates world generation depends entirely on which real-world condition is being
+measured, and the two conditions give different, equally correct answers.** Generating a whole
+cold, never-before-touched region is dominated by decoration (trees, grass, and similar
+placement-heavy work); generating one more column at the edge of an already-explored area — the
+condition an ordinary walking player actually produces almost all the time — is instead dominated by
+ore placement, because decoration's own cost is largely a function of neighboring context that a
+steady-state column has usually already paid for. An optimization effort aimed at ordinary play
+should be judged against the steady-state condition, not the cold-region one, even though the
+cold-region number is the more dramatic-looking figure.
 
-- **Random ticks are real, not simulated on a throwaway copy.**
-  `IntegratedServer::open_in_memory_with_mobs` now wraps its `source`
-  (the `ChunkSource` the connection actually serves chunks from) in an `Arc`
-  and shares **the same instance** with the tick loop — not the separate,
-  intentionally-unshared `world_source` mob pathing uses (see that
-  constructor's own doc comment for why those two stay distinct). Every
-  grass ↔ dirt conversion calls `ChunkSource::set_block` on that shared
-  instance and publishes the change through [`BlockTickFeed`], which
-  `serve_play`'s existing `container_sync_tick` timer (the same one that
-  already forwards block-entity registry changes with no packet driving
-  them) drains and forwards as `encode_block_update` packets.
-- **Crop growth, sapling growth, and leaf decay reach a client through
-  the exact same path, with zero changes to `tick.rs` or `server.rs`.**
-  `RandomTickScheduler::tick_chunk`'s caller already forwards whatever `Vec`
-  it returns, one block-state string at a time, regardless of which family
-  produced it — so extending the dispatch inside `random_tick.rs` (a file
-  this landing owns) was sufficient. **Unlike grass, nothing in this crate's
-  worldgen places crops, saplings, or leaves naturally** (`crate::chunk`'s own
-  module doc: no vegetation at all), so today's demonstration is
-  `ChunkColumn`-level (a block placed directly into the shared source ticks
-  and mutates exactly like grass does), not a fully natural in-terrain one.
-- **Gravity blocks reach a client the same way, and are additionally
-  the first real caller of `NeighborPropagator`.** Sand and gravel are
-  genuinely placed by this crate's worldgen (`crates/lodestone-worldgen/src/surface/mod.rs`'s
-  own module doc: "sand near water, gravel on the ocean floor"), so this is
-  the first block family in this landing where the *material* occurs
-  naturally — but the *trigger* (a neighbour notification) still does not
-  fire from anything a player does yet, only from this crate's own
-  random-tick mutations landing next to an unsupported gravity block. See
-  `crate::gravity_tick`'s module doc for that scope note in full, including
-  the two named deviations (no `FallingBlockEntity`, no 2-tick delay).
-- **The block-tick queue has real producers now** — redstone
-  torches/repeaters/comparators/observers schedule delayed rechecks into it
-  from `propagate_and_react`, and `tick::run_tick_loop`'s drain dispatches
-  each one to its own family's `run_scheduled_tick`. See
-  [`docs/redstone.md`](./redstone.md). The **fluid**-tick queue is still an
-  acknowledged island — nothing calls `schedule` on it. Fluid flow and
-  fire are its next candidates.
-- **`tick_area` is a small, fixed chunk range** — the same
-  `(cx_range, cz_range)` `open_in_memory_with_mobs` already threads through
-  as `mob_area`, reused rather than adding a second "which chunks are
-  loaded" concept (this crate has none — see `chunk.rs`'s own module doc).
-  Every chunk in it is re-fetched via `ChunkSource::column` **every tick**;
-  for an unedited column this re-runs the generator, a real, documented
-  performance gap for anything wider than a handful of chunks.
+## How to change it
 
-## How to change it, and the gotchas
-
-- **The queues are shared, not `run_tick_loop` locals — and `run_tick_loop`
-  holds their lock across a section that reads the world. Nothing may take that
-  lock from inside a `ChunkSource` call.** `tick::run_tick_loop` takes
-  `scheduled: crate::region_source::ScheduledTickHandle` (the in-memory
-  constructor passes `ScheduledTickHandle::default()`,
-  `IntegratedServer::open_persistent_with_mobs` passes
-  `persistent.scheduled_ticks()`), stores the clock with
-  `scheduled.set_game_tick(game_tick)`, and wraps its whole scheduled-tick and
-  random-tick section in one `scheduled.with(|queues| { … })` binding
-  `let block_ticks = &mut queues.block; let fluid_ticks = &mut queues.fluid;`
-  so every use site inside is textually unchanged. Persistence rides
-  `chunk_nbt::SavedTick` for the schema, gated by
-  `tests/scheduled_tick_persistence.rs` and
-  `tests/chunk_extras_vanilla_oracle.rs`.
-
-  **The gotcha that cost the owner every saved world.** That `with` region calls
-  `world.column`, `world.block_state` and `world.set_block`, and on a persistent
-  world those reach `region_source::RegionChunkSource::load`, which restores the
-  loaded chunk's saved ticks. Restoring used to take the same
-  `std::sync::Mutex` — which is not reentrant — so the tick thread parked on its
-  own lock. Total, deterministic, and reached the first time a world tick touched
-  a column that exists on disk; the join wedged before its first chunk batch, and
-  the client sat at "Loading terrain 1/4000" and then in a void with **no error,
-  no disconnect and no panic**. A chunk load now hands its ticks to
-  `ScheduledTickHandle::stage` behind a *separate* mutex, carrying absolute
-  trigger ticks already rebased by the loader, and `with` merges them before it
-  runs its closure — so no reader can see a staged-but-unscheduled queue, and the
-  deferral cannot move when a restored tick fires. **Lock order is always `queues`
-  then `staged`; never the reverse.** Anything else that wants to schedule from
-  inside a `ChunkSource` call must stage too, not lock.
-
-  A brand-new world never reached it (`load` returns before touching the handle
-  when the chunk is not on disk, and `restore` returns early for a chunk with no
-  ticks), which is why every singleplayer terrain gate in the tree — all of which
-  open an in-memory or brand-new world — stayed green. The gate that can see it
-  is `tests/saved_world_ticks_from_inside_the_queue_lock.rs`: a saved chunk
-  carrying one block and one fluid tick, read from inside `with` on a spawned
-  thread with a bounded `recv_timeout` so the deadlock *fails* instead of hanging.
-
-  Two further things to know. `with` hands over both queues in one **synchronous**
-  closure on purpose: a closure cannot contain an `.await`, so the compiler — not
-  a reviewer — guarantees the `MutexGuard` is never held across a suspension
-  point, which would make the tick task non-`Send`. And the game tick must come
-  from *this* counter and not be re-derived: a second clock here is the same class
-  of bug in a new place, where `SET_TIME` decoded and really did darken the sky
-  with every link in the wire green while the value was wall-clock
-  elapsed-since-join.
-- **`ChunkColumn`'s `block_state`/`set_block` take LOCAL x/z; every tick
-  handler is handed ABSOLUTE x/z plus `min_x`/`min_z` to convert with.** Mixing
-  the two was a shipped bug: grass propagation bounds-checked the local `tlz` and
-  then passed the absolute `tz` to `block_state`. The guard reads as present
-  and correct — the defect is the argument passed *after* it. `index` is
-  `((y_local * 16 + z) * 16 + x)` with a `debug_assert` on `z`, so an absolute
-  `z` panics only in a debug build; in the release build that actually ships it
-  silently aliases onto local `(x, y + cz, z)`, `cz` y-levels too high, and
-  grass still spreads — just not from where it should. **Test any coordinate
-  handling at a chunk with a non-zero `min_z`**: at chunk `(0, 0)` local and
-  absolute coincide, so the obvious fixture structurally cannot fail. The gates
-  are `random_tick.rs`'s `grass_spreads_at_a_chunk_whose_local_and_absolute_z_differ`
-  and `an_absolute_z_misread_would_convert_a_non_dirt_block_at_the_correct_coordinate`,
-  both at chunk `(2, 3)`, and both fail in *both* profiles if the mix-up returns.
-- **Adding a new randomly-ticking block**: extend [`is_randomly_ticking`] and
-  add a branch to `RandomTickScheduler::tick_randomly_ticking_block`'s
-  dispatch (grass lives directly in this module; crop/sapling/leaf logic
-  lives in `growth_tick.rs` and is called from a `tick_*_block` sibling —
-  follow whichever of those two shapes your new block is closer to).
-- **Adding a real scheduled-tick producer**: call
-  `ScheduledTickQueue::schedule` from wherever a block decides "run again in
-  N ticks" (vanilla's own `level.scheduleTick`). The queue does not care what
-  `T` is — this crate keys it by canonical block-state-name `String` to match
-  `ChunkColumn`'s own representation, not by a `Block`/`Fluid` registry
-  object like vanilla, since this crate has no such registry. **Still
-  nothing calls this** — `tick_randomly_ticking_block`'s gravity settle
-  (below) runs synchronously instead, specifically because this queue's own
-  drain dispatch lives in the brokered `tick.rs`; a landing that *can* edit
-  `tick.rs` should prefer scheduling a real delayed tick over another
-  synchronous settle.
-- **Adding a real neighbour-update producer**: call
-  `NeighborPropagator::propagate` with a `notify` closure that mutates the
-  world and returns any further single-target notifications that mutation
-  itself triggers — do **not** call `propagate` recursively from inside
-  `notify`; the propagator's own stack already handles cascading, and a
-  second nested call would double-count `max_chained`.
-  `RandomTickScheduler::tick_randomly_ticking_block`'s own call
-  (`propagate_and_react`, `random_tick.rs` — renamed from
-  `propagate_and_settle_gravity` once redstone became a second real
-  reaction; see [`docs/redstone.md`](./redstone.md)) is the worked example:
-  it is called once per mutated position, with a `notify` closure that
-  dispatches to whichever reaction's predicates match (gravity settle first,
-  then dust/torch/diode/observer) and, on a settle, returns a single
-  `Direction::Down` re-notification of the vacated position's old neighbour
-  above it — that one extra `Notification` is what makes a stacked column of
-  gravity blocks collapse one at a time within the *same* `propagate` call,
-  rather than needing a second call per block in the stack.
-- **Adding another neighbour-update reaction**: extend `propagate_and_react`'s
-  `notify` closure dispatch (the same function gravity/redstone both already
-  extend, per the "don't generalize before a second case" reasoning
-  `is_randomly_ticking`'s own history already gives, now exercised a second
-  time going from one reaction to four) — the call site, the depth-first
-  ordering, and the cross-chunk-neighbour limitation below are all already
-  handled; only the reaction itself is new work.
-- **The cross-chunk-neighbour gap is real and applies to gravity and
-  redstone alike**: a neighbour notification landing outside the ticked
-  column's 16×16 footprint is silently skipped (`propagate_and_react`'s own
-  bounds check) — the identical limitation `tick_grass_block`'s own spread
-  already accepts, for the identical reason (`tick_chunk` has no
-  neighbouring-column access). A gravity block, or a redstone wire/diode,
-  one block-column away from the mutation that should have triggered it
-  will not react until a real per-tick multi-column cache exists (see
-  "widening `tick_area`" below).
-- **Widening `tick_area` beyond a handful of chunks**: add a real per-tick
-  column cache first (`OverworldChunkSource`'s `edits` map only helps
-  already-edited columns); this landing deliberately did not build one,
-  since this landing's job is the scheduler, not chunk-loading infrastructure.
-- **If you make per-position light available to the driver**: replace the
-  remaining `can_stay_alive`-doubles-as-brightness use in `grass_random_tick`
-  with a real `getMaxLocalRawBrightness(pos.above()) >= 9` check. The draw
-  pattern (12 draws in the live branch) does not change, only which positions
-  qualify. `canStayAlive` itself no longer needs anything — it reads
-  `lodestone_data::light_props::dampening`.
-- **If you add an occlusion-shape census**: close `getLightDampeningInto`'s
-  merged-face `16` branch in `grass_can_stay_alive`. Do **not** substitute
-  `collision_shapes` for it; they answer a different question.
+- **Adding a new randomly-ticking block**: extend the per-block dispatch and the section-eligibility
+  classification together — a block that's added to one but not the other either never ticks or is
+  drawn for but never handled.
+- **Adding a real scheduled-tick producer**: call the scheduling primitive from wherever a block
+  decides "run again in N ticks", the same way vanilla's own tick-scheduling call works; it does not
+  care what value type it schedules.
+- **Adding a real neighbor-update producer**: call the propagator once per mutated position with a
+  callback that performs the mutation and returns any further single-target notifications that
+  mutation itself triggers — never call the propagator recursively from inside that callback, since
+  its own explicit stack already handles cascading and a nested call would double-count the chain
+  limit.
+- **Widening the area that gets ticked at all**: this needs a real per-tick, multi-column terrain
+  cache first; the current tick area is deliberately small and reuses the same fixed radius the mob
+  simulation already tracks, rather than introducing a second "which chunks are loaded" concept.
+- **Never let a lock guarding one of these queues be held across a suspension point or a second,
+  independent acquisition of itself** — see the self-deadlock note above; stage-and-merge, don't
+  nest the same lock.
+- **Do not give the block-entity registry an eviction path tied to chunk-cache eviction** — a cache
+  eviction is not the same event as "this world state no longer exists," and conflating them would
+  silently stop a block entity's simulated state from resuming correctly once its chunk becomes
+  resident again.
+- **Adding a new tick-loop phase or worldgen stage to the profiler**: keep the boundary at a clean
+  section transition outside any held lock, and keep the instrument's own zero-cost idle-world
+  control passing — a boundary that accidentally spans part of the wait between ticks, or leaks a
+  previous tick's timestamp forward, will not read as exactly zero anymore.
 
 ## Configuration
 
-- [`DEFAULT_RANDOM_TICK_SPEED`] (`3`) — vanilla's `random_tick_speed`
-  gamerule default (`GameRules.java`). This crate has no gamerule
-  registry (`server.rs`'s own module doc explains why `GameRuleChanged` is
-  currently echoed, not applied), so `run_tick_loop` passes this constant
-  directly rather than reading a rule.
-- `tick::RANDOM_TICK_POSITION_SEED` / `RANDOM_TICK_BEHAVIOR_SEED` — fixed
-  literals seeding [`RandomTickScheduler`]'s two generators. Vanilla seeds its
-  position LCG from an arbitrary thread-local draw at level creation; this
-  crate has no per-world seed store to draw a "real" one from yet.
-- `tick::MAX_SCHEDULED_TICKS_PER_TICK` (`65536`) — vanilla's
-  `ServerLevel.MAX_SCHEDULED_TICKS_PER_TICK` (`ServerLevel.java`).
-- `NeighborPropagator::max_chained` — per-call cap, `None` for unbounded
-  (test-only; a live world should always cap it).
+- The random-tick draw count per section is vanilla's own game-rule default; this crate has no live
+  game-rule registry backing it yet, so it is a fixed constant rather than something read live.
+- The scheduled-tick queues' own per-tick processing cap and the neighbor-update chain-length cap
+  are both transcriptions of vanilla's own constants.
+- The tick-loop profiler's soft "over budget" threshold is one shared constant across every phase,
+  deliberately coarse rather than separately tuned per phase, since no loaded-server measurement
+  yet justifies three different numbers.
+- The block-entity residency check has no separate configuration; it simply reads whatever bound
+  the underlying chunk cache is already configured with (see `docs/chunk-lifecycle.md`).
 
 ## Dependencies
 
-- `crate::chunk::{ChunkColumn, ChunkSource}` — random ticks read and mutate
-  through this seam.
-- `crate::mob_spawn::SpawnRng` — reused as the random-tick behaviour
-  generator rather than adding a second hand-rolled PRNG to this crate.
-- `lodestone_model::BlockPos` — the position type `neighbor_update.rs`'s
-  `Direction::relative` operates on.
-- `tracing` — the neighbour-update propagator's "too many chained updates"
-  log, same dependency `tick.rs`'s own overload warning already uses.
-
-[`RandomTickScheduler`]: ../crates/lodestone-server/src/random_tick.rs
-[`RandomTickScheduler::tick_chunk`]: ../crates/lodestone-server/src/random_tick.rs
-[`next_random_tick_pos`]: ../crates/lodestone-server/src/random_tick.rs
-[`grass_random_tick`]: ../crates/lodestone-server/src/random_tick.rs
-[`is_air_variant`]: ../crates/lodestone-server/src/random_tick.rs
-[`is_randomly_ticking`]: ../crates/lodestone-server/src/random_tick.rs
-[`DEFAULT_RANDOM_TICK_SPEED`]: ../crates/lodestone-server/src/random_tick.rs
-[`ScheduledTickQueue<T>`]: ../crates/lodestone-server/src/scheduled_tick.rs
-[`NeighborPropagator`]: ../crates/lodestone-server/src/neighbor_update.rs
-[`NeighborPropagator::propagate`]: ../crates/lodestone-server/src/neighbor_update.rs
-[`UPDATE_ORDER`]: ../crates/lodestone-server/src/neighbor_update.rs
-[`BlockTickFeed`]: ../crates/lodestone-server/src/tick.rs
+- The chunk source/store seam for random ticks' world reads and for the block-entity residency
+  check (see `docs/chunk-lifecycle.md`).
+- The persistence layer for saving and restoring scheduled ticks across a world reopen (see
+  `docs/world-persistence.md`).
+- The world generator, profiled directly by the worldgen half of the instrumentation described
+  above; unmodified by any of this.
