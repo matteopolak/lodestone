@@ -7097,7 +7097,7 @@ impl<'w> MobSim<'w> {
             let seed = i64::from(self.zombie_conversion_rng.next_int(i32::MAX));
             if let Some(mob) = self.mobs.iter_mut().find(|m| m.id == mob_id) {
                 mob.effects.remove("minecraft:weakness");
-                // `Math.min(difficulty.getId() - 1, 0)`: `0` on Easy/Normal/Hard
+                // Vanilla's own difficulty-minus-one-clamped-to-zero formula: `0` on Easy/Normal/Hard
                 // (ids 1-3), and this crate tracks no live difficulty integer
                 // for a zombie villager's own amplifier calc — see this
                 // module's `conversion` doc for the disclosed simplification.
@@ -7259,7 +7259,7 @@ impl<'w> MobSim<'w> {
         }
 
         // Untamed. The taming item is checked first and it is **not** the food
-        // tag for the wolf: `Items.BONE`.
+        // tag for the wolf: the bone item.
         if item.is_some_and(|i| items.contains(&i)) {
             // Vanilla's own wolf interaction override's "is not angry" guard. The cat and the
             // parrot have no such gate, and `anger` is `None` for them anyway,
@@ -7402,9 +7402,9 @@ impl<'w> MobSim<'w> {
         true
     }
 
-    /// `RunAroundLikeCrazyGoal.tick`'s tame roll for the horse family:
-    /// `random.nextInt(getMaxTemper()) < getTemper()`, and on failure
-    /// `modifyTemper(5)` plus `makeMad()`.
+    /// Vanilla's own "run around like crazy" goal's per-tick tame roll for the horse family:
+    /// a bounded-int-under-max-temper draw, tested against the current temper, and on failure
+    /// a `+5` temper modification plus its own "make mad" call.
     ///
     /// # The one disclosed deviation, and why it is not silent
     ///
@@ -7437,7 +7437,8 @@ impl<'w> MobSim<'w> {
         let success = self.tame_rng.next_int(max_temper) < temper;
         let mob = self.get_mut(mob_id).expect("checked above");
         if success {
-            // `tameWithName`: `setOwner` + `setTamed(true)`. Note it does **not**
+            // Vanilla's own "tame with name" call: sets owner plus the tame
+            // flag. Note it does **not**
             // order the horse to sit — horses have no sitting pose at all.
             mob.tame(MobOwner::Player(actor.uuid));
             InteractOutcome::Tamed
@@ -7451,10 +7452,9 @@ impl<'w> MobSim<'w> {
     /// Turns each drained [`NavigatingMob::take_bred`] event into a real child
     /// mob and applies vanilla's post-breeding cooldown to **both** parents.
     ///
-    /// Vanilla `Animal.finalizeSpawnChildFromBreeding`
-    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/animal/Animal.java:225-228`)
-    /// does three things: `setAge(PARENT_AGE_AFTER_BREEDING)` on both parents,
-    /// `resetLove()` on both, and spawns the child. `NavigatingMob::breed` can
+    /// Vanilla's own post-breeding child-finalization step
+    /// does three things: sets the post-breeding age cooldown on both parents,
+    /// resets love on both, and spawns the child. `NavigatingMob::breed` can
     /// only do the love reset on the mob that ran the goal — it has no notion
     /// of the partner or of creating an entity — so the other two are here.
     ///
@@ -7462,7 +7462,8 @@ impl<'w> MobSim<'w> {
     /// `breed()` has already cleared the breeder's love state, so "the other
     /// mob still in love" is not a usable key. It uses proximity instead —
     /// vanilla only breeds when the pair is within
-    /// [`BREED_DISTANCE_SQR`](BREED_DISTANCE_SQR) (`ai/goal/BreedGoal.java:57`),
+    /// [`BREED_DISTANCE_SQR`](BREED_DISTANCE_SQR) (the breeding goal's own
+    /// squared-distance check),
     /// so the nearest same-species adult inside that radius *is* the partner.
     fn resolve_breeding(&mut self, bred: Vec<(i32, Vec3, ResourceKey)>) {
         if bred.is_empty() {
@@ -7510,13 +7511,13 @@ impl<'w> MobSim<'w> {
             let child = self.spawn_species(species, breeder_pos);
             child.set_age(BABY_START_AGE);
 
-            // `finalizeSpawnChildFromBreeding`'s last statement:
-            // `if (gameRules.get(MOB_DROPS)) addFreshEntity(new ExperienceOrb(…,
-            // random.nextInt(7) + 1))`.
+            // Vanilla's own post-breeding child-finalization step's last statement:
+            // if the `mob_drops` gamerule is set, spawn an experience orb worth
+            // a bounded-int-under-7-plus-1 draw.
             //
             // **Constructed, not awarded**, and the distinction is visible:
-            // `ExperienceOrb.award` splits an amount into denominations and tries
-            // `tryMergeToExisting` first, whereas breeding builds one orb with
+            // vanilla's own orb-award helper splits an amount into denominations and tries
+            // its own merge-to-existing step first, whereas breeding builds one orb with
             // one value directly. Routing this through `award_experience` would
             // let a second mating in the same spot silently fold into the first
             // orb, so `spawn_orb` is the right call even though the values are
@@ -7575,23 +7576,24 @@ impl<'w> MobSim<'w> {
     }
 
     /// Records the hurt or death sound **and animation** for a hit that landed on
-    /// mob `id` — vanilla's `LivingEntity.hurt`/`die` playing
-    /// `getHurtSound()`/`getDeathSound()`, plus the `broadcastDamageEvent` /
-    /// `broadcastEntityEvent(this, (byte)3)` those two methods send alongside.
+    /// mob `id` — vanilla's own generic hurt/die handlers playing
+    /// their own hurt-sound/death-sound getters, plus the damage-event/entity-status-3
+    /// broadcasts those two methods send alongside.
     ///
     /// Called from every funnel that applies damage rather than from
     /// [`SimMob::apply_damage`] itself, because the queue lives on the sim and
     /// `apply_damage` holds only the one mob. `applied <= 0.0` (a hit fully
     /// swallowed by i-frames or absorption) is silent *and* invisible, matching
-    /// vanilla's own `hurtServer` returning before either broadcast — the guard is
-    /// `tookFullDamage` there and the same `applied > 0.0` here.
+    /// vanilla's own generic hurt handler returning before either broadcast — the guard is
+    /// its own "took full damage" check there and the same `applied > 0.0` here.
     ///
     /// **Must be called before the end-of-tick `retain`**, or a killing blow
     /// finds no mob to read the species and position from and dies silently.
     ///
     /// # Why the sound and the animation share one entry point
     ///
-    /// They share a *cause*. Vanilla emits both from inside `hurtServer`/`die`
+    /// They share a *cause*. Vanilla emits both from inside its own generic
+    /// hurt/die handlers
     /// under the same guard, so splitting them into two recorders here would give
     /// two chances for one damage funnel to be taught about one of them and not
     /// the other — which is exactly how the animation came to be missing while
@@ -7603,12 +7605,13 @@ impl<'w> MobSim<'w> {
         let Some(mob) = self.mobs.iter_mut().find(|m| m.id == id) else {
             return;
         };
-        // Vanilla `Mob.playHurtSound` calls `resetAmbientSoundTime()` before
+        // Vanilla's own "play hurt sound" step calls its own ambient-sound-time
+        // reset before
         // playing the hurt sound itself, so a mob that just yelped in pain
         // does not also roll an idle vocalisation on the very next tick.
         mob.ambient_sound_time = -AMBIENT_SOUND_INTERVAL;
         // Hurt *and* death on a killing blow, in that order, because vanilla sends
-        // both: `hurtServer` broadcasts the damage event and only then calls `die`,
+        // both: its own generic hurt handler broadcasts the damage event and only then calls die,
         // which broadcasts byte 3. The client needs the flash to have started for
         // the tip-over to look like a death rather than a teleport.
         self.pending_animations
@@ -7645,20 +7648,21 @@ impl<'w> MobSim<'w> {
     ///
     /// # What the consumer owes vanilla
     ///
-    /// Per `ai/goal/EatBlockGoal.java:59-80`, with `mobGriefing` on:
+    /// Per vanilla's own "eat block" goal, with `mobGriefing` on:
     ///
     /// * [`EatenBlock::AtFeet`] → destroy the block at that cell, **no drops**
-    ///   (`destroyBlock(pos, false)`).
+    ///   (its own destroy-block call with drops disabled).
     /// * [`EatenBlock::Below`] → set the cell one down to `minecraft:dirt`, plus
     ///   level event `2001` for the break particles.
     ///
-    /// And the part worth not re-deriving: vanilla calls `mob.ate()` **even when
+    /// And the part worth not re-deriving: vanilla calls its own "ate" hook **even when
     /// `mobGriefing` suppresses the block change**, so the wool-regrowth effect
     /// and the world mutation are separable — the gamerule check belongs on the
     /// consumer, never in the goal.
     ///
     /// Nothing drains this yet, which is the honest state: #238's remaining half
-    /// is `Sheep.ate()`'s wool regrowth (`setSheared(false)` + `ageUp(60)`), which
+    /// is vanilla's own sheep "ate" hook's wool regrowth (unshears it, then ages
+    /// it up 60 ticks), which
     /// is entity metadata on the wire.
     pub fn take_grazes(&mut self) -> Vec<(BlockPos, EatenBlock)> {
         std::mem::take(&mut self.pending_grazes)
