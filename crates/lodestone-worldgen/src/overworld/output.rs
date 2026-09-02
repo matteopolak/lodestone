@@ -508,7 +508,8 @@ impl GeneratedColumn {
         self.motion_blocking.as_ref()
     }
 
-    /// The world Y `Heightmap.getFirstAvailable(MOTION_BLOCKING, lx, lz)` would
+    /// The world Y vanilla's own heightmap "first available" lookup at
+    /// `(MOTION_BLOCKING, lx, lz)` would
     /// return for one column: the first **free** Y above the topmost
     /// motion-blocking-or-fluid block, or `min_y` for a column with none.
     ///

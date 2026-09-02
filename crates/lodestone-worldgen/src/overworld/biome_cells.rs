@@ -3,11 +3,11 @@
 //!
 //! ## What it is
 //!
-//! [`BiomeCells`] is one biome id per `QuartPos` cell of a served column —
+//! [`BiomeCells`] is one biome id per quart-position cell of a served column —
 //! `16 × (height / 4)` of them, 1,536 for the standard 384-block overworld
 //! column, against the 16 the generator used to produce. That is what
-//! `MultiNoiseBiomeSource.getNoiseBiome(x, y, z)` answers and what
-//! `LevelChunkSection`'s biome container holds, which is why the wire format has
+//! vanilla's own multi-noise biome lookup at `(x, y, z)` answers and what
+//! vanilla's own level-chunk-section's biome container holds, which is why the wire format has
 //! a per-section biome palette at all.
 //!
 //! ## Why it matters beyond fidelity
@@ -54,7 +54,7 @@
 //! that a column's climate targets vary smoothly in Y — not a coarser grid, which
 //! would put the cave biomes back out of reach.
 
-/// One biome id per `QuartPos` cell of a column. See the module doc.
+/// One biome id per quart-position cell of a column. See the module doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BiomeCells {
     /// Distinct biome ids, in first-use order. Index 0 is always present.

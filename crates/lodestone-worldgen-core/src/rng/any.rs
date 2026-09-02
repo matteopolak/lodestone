@@ -1,9 +1,9 @@
-//! `WorldgenRandom.Algorithm` — the runtime choice between the two families.
+//! Vanilla's own worldgen-random algorithm choice — the runtime choice between the two families.
 //!
 //! Every dimension's `noise_settings` carries `legacy_random_source`, and
 //! vanilla switches the **whole** noise stack on it
-//! (`NoiseGeneratorSettings.getRandomSource()` →
-//! `RandomState`'s `settings.getRandomSource().newInstance(seed).forkPositional()`).
+//! (vanilla's own noise-generator-settings random-source accessor →
+//! vanilla's own per-world random-state holder forking that source's new instance positional).
 //! The Overworld leaves the flag out (xoroshiro); `nether.json` and `end.json`
 //! both set it true, so both dimensions seed *every* named noise, the surface
 //! system's `vertical_gradient` factories and the aquifer/ore factories from the
@@ -24,8 +24,9 @@
 //! ## Gotcha
 //!
 //! The two families' `from_seed` are **not** the same operation and must not be
-//! unified: `LegacyPositionalRandomFactory.fromSeed(seed)` discards its own seed
-//! and returns `new LegacyRandomSource(seed)`, while the xoroshiro one XORs the
+//! unified: vanilla's own legacy positional-random-factory's from-seed
+//! constructor discards its own seed
+//! and returns a fresh legacy random source built from that seed, while the xoroshiro one XORs the
 //! seed into both halves of its 128-bit state. Each arm delegates to its own
 //! concrete impl for exactly that reason.
 
@@ -34,18 +35,18 @@ use super::{
     XoroshiroPositionalFactory, XoroshiroRandomSource,
 };
 
-/// `WorldgenRandom.Algorithm` — which family a dimension's noise stack uses.
+/// Vanilla's own worldgen-random algorithm choice — which family a dimension's noise stack uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Algorithm {
-    /// `WorldgenRandom.Algorithm.LEGACY` — the `java.util.Random` LCG. Selected
+    /// Vanilla's own legacy algorithm variant — the `java.util.Random` LCG. Selected
     /// by `legacy_random_source: true` (the Nether and the End).
     Legacy,
-    /// `WorldgenRandom.Algorithm.XOROSHIRO` — the 1.18+ default (the Overworld).
+    /// Vanilla's own xoroshiro algorithm variant — the 1.18+ default (the Overworld).
     Xoroshiro,
 }
 
 impl Algorithm {
-    /// `NoiseGeneratorSettings.getRandomSource()` — reads the flag the way
+    /// Vanilla's own noise-generator-settings random-source accessor — reads the flag the way
     /// vanilla does, defaulting to xoroshiro when the key is absent.
     #[must_use]
     pub fn from_legacy_flag(legacy_random_source: bool) -> Self {
@@ -67,14 +68,14 @@ impl Algorithm {
         )
     }
 
-    /// Whether this is the legacy family — the question `RandomState`'s
-    /// vanilla's own "use legacy init" flag asks when it decides how to seed `BlendedNoise`.
+    /// Whether this is the legacy family — the question vanilla's own
+    /// per-world random-state holder's "use legacy init" flag asks when it decides how to seed its blended-noise source.
     #[must_use]
     pub fn is_legacy(self) -> bool {
         matches!(self, Self::Legacy)
     }
 
-    /// `Algorithm.newInstance(seed)`.
+    /// Vanilla's own algorithm-to-instance constructor at `(seed)`.
     #[must_use]
     pub fn new_instance(self, seed: i64) -> AnyRandomSource {
         match self {
@@ -83,7 +84,7 @@ impl Algorithm {
         }
     }
 
-    /// `newInstance(seed).forkPositional()` — `RandomState.random`.
+    /// Vanilla's own new-instance-then-fork-positional derivation — its per-world random-state holder's root random field.
     #[must_use]
     pub fn root_positional(self, seed: i64) -> AnyPositionalFactory {
         self.new_instance(seed).fork_positional()
@@ -105,9 +106,9 @@ pub enum AnyRandomSource {
 /// Either family's positional factory. `Copy`, like both of its variants.
 #[derive(Debug, Clone, Copy)]
 pub enum AnyPositionalFactory {
-    /// `LegacyPositionalRandomFactory`.
+    /// Vanilla's own legacy positional-random-factory.
     Legacy(LegacyPositionalFactory),
-    /// `XoroshiroPositionalRandomFactory`.
+    /// Vanilla's own xoroshiro positional-random-factory.
     Xoroshiro(XoroshiroPositionalFactory),
 }
 

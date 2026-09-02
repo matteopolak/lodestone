@@ -9,41 +9,41 @@
 //!
 //! ## What vanilla does (and this reproduces)
 //!
-//! `ChunkGenerator.applyBiomeDecoration` derives a per-chunk `decorationSeed`
-//! (`WorldgenRandom.setDecorationSeed`), then for each generation *step* and each
+//! Vanilla's own biome-decoration application derives a per-chunk `decorationSeed`
+//! (its own set-decoration-seed step), then for each generation *step* and each
 //! feature within it (in a globally-sorted order that, for a single biome, is the
-//! biome's own list order) reseeds the RNG with `setFeatureSeed(decorationSeed,
-//! featureIndexInStep, stepIndex)` and places that feature. **Each feature
+//! biome's own list order) reseeds the RNG with its own per-feature seed derivation over
+//! `(decorationSeed, featureIndexInStep, stepIndex)` and places that feature. **Each feature
 //! reseeds independently**, so features are RNG-isolated from one another — a bug
 //! in one cannot desynchronise the next.
 //!
 //! Within one placed feature, vanilla composes *placement modifiers* as a lazy
-//! `Stream` pipeline: `Stream.of(origin)` flat-mapped through each modifier in
-//! turn, terminating in `feature.place` per surviving position. Java's `flatMap`
+//! stream pipeline: the origin flat-mapped through each modifier in
+//! turn, terminating in a feature-place call per surviving position. Vanilla's own flat-map
 //! is depth-first, so the draw order is: modifier 0 emits its positions (drawing
 //! as it goes), then for *each* of those, modifier 1 runs fully (including the
-//! eventual `place`), and so on. [`place_ore_feature`] reproduces that exact
+//! eventual place call), and so on. [`place_ore_feature`] reproduces that exact
 //! nesting with a recursion, keeping every modifier a separate composable unit
 //! (no fused loops).
 //!
 //! ## Ore placement RNG order (per emitted position)
 //!
-//! `OreFeature.place` draws, in order: `nextFloat()` (blob direction),
+//! Vanilla's own ore-feature place draws, in order: `nextFloat()` (blob direction),
 //! `nextInt(3)`, `nextInt(3)` (the two y-endpoints). It then reads the
 //! `OCEAN_FLOOR_WG` heightmap around the origin (no draws); **only if** some probe
-//! is at/below the blob does it proceed to `doPlace`, which draws `nextDouble()`
-//! once per `i in 0..size` (the blob radii). `canPlaceOre` draws nothing for a
+//! is at/below the blob does it proceed to its own inner place step, which draws `nextDouble()`
+//! once per `i in 0..size` (the blob radii). Vanilla's own "can place ore" check draws nothing for a
 //! *non-buried* ore (`discard_chance_on_air_exposure == 0` makes
-//! `shouldSkipAirCheck` short-circuit true), but a **buried** ore
+//! its own "should skip air check" short-circuit true), but a **buried** ore
 //! (`0 < discard < 1`, e.g. `ore_gold_buried`, `ore_coal_buried`) draws a single
-//! `nextFloat()` in `shouldSkipAirCheck` for *each candidate position whose block
+//! `nextFloat()` in that "should skip air check" step for *each candidate position whose block
 //! matches a target tag* — so its per-feature draw count is position-dependent.
 //! `discard >= 1` (e.g. `ore_diamond_buried`) draws nothing and places only when
 //! fully enclosed. The `tag_match` `RuleTest` itself never draws.
 //!
-//! Note the deliberate float typing: the blob *centres* use `java.lang.Math.sin`
-//! /`cos` (real `f64` transcendentals), while the per-step *radius* uses
-//! `Mth.sin` (the 65536-entry table, [`crate::math::sin`]). Getting these
+//! Note the deliberate float typing: the blob *centres* use the standard
+//! library's real `sin`/`cos` (real `f64` transcendentals), while the per-step *radius* uses
+//! vanilla's own math-helper sine (the 65536-entry table, [`crate::math::sin`]). Getting these
 //! swapped produces a plausible-but-wrong world, which is why the oracle compares
 //! whole-chunk block output rather than sampled positions.
 
@@ -170,7 +170,7 @@ pub enum IntProvider {
     /// cacti/sugar-cane increment). Additive: nothing before that
     /// increment constructs this variant.
     BiasedToBottom { min: i32, max: i32 },
-    /// `net.minecraft.util.valueproviders.TrapezoidInt`, the REAL
+    /// Vanilla's own trapezoid int provider, the REAL
     /// (two-draw, triangular) sample — not the `Uniform` approximation
     /// `crate::feature::vegetation::try_parse_int_provider` used to fold
     /// this into. That approximation preserved mean and support but not
@@ -229,10 +229,10 @@ impl IntProvider {
             IntProvider::Uniform { min, max } => {
                 math::random_between_inclusive(random, *min, *max)
             }
-            // `WeightedList.getRandom`: walk in declared order, subtracting a
+            // Vanilla's own weighted-list random pick: walk in declared order, subtracting a
             // `nextInt(totalWeight)` draw until it goes negative — the entry
             // it goes negative on is the pick. Matches
-            // `net.minecraft.util.random.SimpleWeightedRandomList`'s walk
+            // vanilla's own simple-weighted-random-list's walk
             // order exactly (declaration order, not sorted).
             IntProvider::WeightedList(entries) => {
                 let total: i32 = entries.iter().map(|(_, w)| *w).sum();
@@ -245,14 +245,14 @@ impl IntProvider {
                 }
                 entries.last().map_or(0, |(v, _)| *v)
             }
-            // `BiasedToBottomInt.sample`: `minInclusive + nextInt(nextInt(maxInclusive
+            // Vanilla's own biased-to-bottom int provider's sample: `minInclusive + nextInt(nextInt(maxInclusive
             // - minInclusive + 1) + 1)` — two nested, dependent draws, not one.
             IntProvider::BiasedToBottom { min, max } => {
                 let n = *max - *min + 1;
                 let inner = random.next_int_bounded(n);
                 min + random.next_int_bounded(inner + 1)
             }
-            // `TrapezoidInt.sample`, ported exactly (see this variant's own
+            // Vanilla's own trapezoid int provider's sample, ported exactly (see this variant's own
             // doc comment for why the draw COUNT matters, not just the
             // resulting distribution's shape).
             IntProvider::Trapezoid { min, max, plateau } => {
@@ -274,7 +274,7 @@ impl IntProvider {
     }
 }
 
-/// `net.minecraft.world.level.levelgen.heightproviders.HeightProvider`
+/// Vanilla's own height-provider type
 /// (uniform + trapezoid — the two the overworld ores use).
 #[derive(Clone, Copy, Debug)]
 pub enum HeightProvider {
@@ -287,7 +287,7 @@ pub enum HeightProvider {
         max: VerticalAnchor,
         plateau: i32,
     },
-    /// `VeryBiasedToBottomHeight` — three chained `Mth.nextInt` draws, not one.
+    /// Vanilla's own very-biased-to-bottom height provider — three chained bounded-int draws, not one.
     /// Added by this change because two bundled placed features use it in a
     /// *decoration* step (nothing in the ore step does, which is why
     /// [`HeightProvider::parse`]'s `panic!` never fired on it).
@@ -338,8 +338,8 @@ impl HeightProvider {
         }
     }
 
-    /// Mirrors `UniformHeight.sample` / `TrapezoidHeight.sample`, including their
-    /// exact `Mth.randomBetweenInclusive` draw counts.
+    /// Mirrors vanilla's own uniform-height/trapezoid-height sample methods, including their
+    /// exact random-between-inclusive draw counts.
     pub(crate) fn sample<R: RandomSource>(
         &self,
         random: &mut R,
@@ -385,7 +385,7 @@ impl HeightProvider {
     }
 }
 
-/// `net.minecraft.world.level.levelgen.placement.PlacementModifier` (ore subset).
+/// Vanilla's own placement-modifier type (ore subset).
 /// Kept as separate composable variants — vanilla's structure, not a fused loop.
 #[derive(Clone, Debug)]
 pub enum Placement {
@@ -411,7 +411,7 @@ impl Placement {
         }
     }
 
-    /// `PlacementModifier.getPositions`: emit the positions this modifier
+    /// Vanilla's own placement-modifier get-positions: emit the positions this modifier
     /// produces for one incoming position, drawing RNG exactly as vanilla does.
     ///
     /// Returns an [`OrePositions`] rather than a `Vec<BlockPos>`; see that
@@ -429,7 +429,7 @@ impl Placement {
                 OrePositions::Repeat(pos, n)
             }
             Placement::RarityFilter(chance) => {
-                // RarityFilter.shouldPlace: nextFloat() < 1/chance.
+                // Vanilla's own rarity-filter "should place": nextFloat() < 1/chance.
                 if random.next_float() < 1.0 / *chance as f32 {
                     OrePositions::One(pos)
                 } else {
@@ -449,7 +449,7 @@ impl Placement {
                     z: pos.z,
                 })
             }
-            // BiomeFilter for a single-biome world always keeps the position and
+            // Vanilla's own biome filter for a single-biome world always keeps the position and
             // draws nothing (topFeature is in the biome by construction).
             Placement::Biome => OrePositions::One(pos),
         }
@@ -510,7 +510,7 @@ pub enum OrePositions {
     Repeat(BlockPos, i32),
 }
 
-/// `net.minecraft.world.level.levelgen.structure.templatesystem.RuleTest` (the
+/// Vanilla's own rule-test type (the
 /// two predicates overworld ores use).
 #[derive(Clone, Debug)]
 pub enum RuleTest {
@@ -529,7 +529,7 @@ impl RuleTest {
     }
 }
 
-/// One `OreConfiguration.TargetBlockState`: the block to place and the test the
+/// One vanilla ore-configuration target-block-state: the block to place and the test the
 /// existing block must pass.
 #[derive(Clone, Debug)]
 pub struct OreTarget {
@@ -538,7 +538,7 @@ pub struct OreTarget {
     pub target: RuleTest,
 }
 
-/// `net.minecraft.world.level.levelgen.feature.configurations.OreConfiguration`.
+/// Vanilla's own ore-configuration type.
 #[derive(Clone, Debug)]
 pub struct OreConfig {
     pub size: i32,
@@ -792,16 +792,16 @@ pub struct OreInput<'a> {
     /// tests writes against this pair, not `chunk_x`/`chunk_z` — the whole
     /// point of the 3×3 driver is that a source chunk other than the centre
     /// can still produce a write that lands in the centre (vanilla's real
-    /// `blockStateWriteRadius(1)` at the FEATURES stage, `ChunkPyramid.java:32-35`).
+    /// one-chunk-into-neighbours write spill at the FEATURES stage).
     pub center_x: i32,
     pub center_z: i32,
     pub min_y: i32,
     pub height: i32,
-    /// `getMinGenY` / `getGenDepth` for `VerticalAnchor` resolution.
+    /// Vanilla's own min-gen-y / gen-depth accessors for `VerticalAnchor` resolution.
     pub min_gen_y: i32,
     pub gen_depth: i32,
     /// `OCEAN_FLOOR_WG` heightmap across the whole driven 3×3 region, as
-    /// `level.getHeight` returns it, keyed by centre-relative local
+    /// vanilla's own level height-lookup returns it, keyed by centre-relative local
     /// `(x, z) ∈ [`[`REGION_MIN`]`,`[`REGION_MAX`]`)` (see
     /// [`OreInput::region_local`] for probes landing outside that range).
     pub ocean_floor_wg: &'a RegionHeights,
@@ -921,12 +921,12 @@ pub fn apply_ore_step<R: RandomSource>(
 
 /// The real vanilla 3×3 neighbourhood driver for one CENTRE chunk.
 ///
-/// Vanilla's `blockStateWriteRadius(1)` at the FEATURES generation stage
-/// (`ChunkPyramid.java:32-35`) means a NEIGHBOUR chunk's own ore decoration
-/// (its own origin, its own `decorationSeed` — `ChunkGenerator
-/// .applyBiomeDecoration` is called once per chunk, using that chunk's own
+/// Vanilla's own one-chunk-into-neighbours write spill at the FEATURES generation stage
+/// means a NEIGHBOUR chunk's own ore decoration
+/// (its own origin, its own `decorationSeed` — vanilla's own
+/// biome-decoration application is called once per chunk, using that chunk's own
 /// seed) can legitimately spill blocks into the centre. This runs the full
-/// `UNDERGROUND_ORES` step for each of the 9 chunks in `center ± 1`, in turn
+/// underground-ore decoration step for each of the 9 chunks in `center ± 1`, in turn
 /// (`dx` outer `-1..=1`, `dz` inner `-1..=1`, matching
 /// `crate::carver::apply_carvers`'s own source-chunk loop convention — a
 /// fixed, documented iteration order, not a claim this matches real-world
@@ -985,7 +985,7 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
 /// ore list (this change's ore-composition increment): `ores_for_source(x, z)`
 /// is called once per of the 9 source chunks (their own chunk coordinates,
 /// not centre-relative) and must return that source's own biome's
-/// `UNDERGROUND_ORES` list — vanilla's `ChunkGenerator.applyBiomeDecoration`
+/// underground-ore list — vanilla's own biome-decoration application
 /// resolves the decorating biome per chunk, so a neighbour in a different
 /// biome to the centre places (and RNG-consumes) a different feature list,
 /// not the centre's own. [`apply_ore_step_3x3`] is the fixed-list special
@@ -1043,7 +1043,7 @@ pub fn decoration_seed<R: RandomSource>(
     random.set_decoration_seed(seed, origin_x, origin_z)
 }
 
-/// Reproduce `PlacedFeature.placeWithContext`'s depth-first modifier pipeline for
+/// Reproduce vanilla's own placed-feature place-with-context's depth-first modifier pipeline for
 /// one ore feature, calling [`place_ore_feature`] at each surviving position.
 fn place_placed_feature<R: RandomSource>(
     random: &mut R,
@@ -1095,10 +1095,11 @@ fn place_placed_feature<R: RandomSource>(
     );
 }
 
-/// `OreFeature.place` + `doPlace` for a single origin. Writes into `working`
+/// Vanilla's own ore-feature place plus its inner place step, for a single
+/// origin. Writes into `working`
 /// at region-local coordinates (centre-relative, clamped beyond the driven
 /// 3×3 neighbourhood — see [`OreInput::region_local`]), so a write can land
-/// in a neighbour chunk exactly as vanilla's real `blockStateWriteRadius(1)`
+/// in a neighbour chunk exactly as vanilla's real one-chunk-into-neighbours
 /// spill does; the caller decides which of those matter (only the CENTRE's
 /// own 16×16 is fixture-comparable — see [`OreInput::in_center`]).
 pub fn place_ore_feature<R: RandomSource>(
@@ -1249,7 +1250,7 @@ fn do_place<R: RandomSource>(
         }
     }
 
-    // `OreFeature.doPlace`'s `BitSet` of already-tested positions. Vanilla keys
+    // Vanilla's own ore-feature inner place step's bit-set of already-tested positions. Vanilla keys
     // it by a flat index into the blob's own box; until U15 this was a
     // `HashSet<(i32, i32, i32)>`, which meant a SipHash per candidate position
     // plus a chain of `RawTable::reserve_rehash` calls as it grew — measured
@@ -1471,7 +1472,7 @@ const TARGET_CACHE_SLOTS: usize = 16;
 /// matching targets, and therefore the `should_skip_air_check` draw sequence, is
 /// bit-for-bit what the name-based loop produced. **That is the whole correctness
 /// argument and it is why the mask is a bitmask rather than a "first match"
-/// index:** `canPlaceOre` can refuse a matching target and vanilla then continues
+/// index:** vanilla's own "can place ore" check can refuse a matching target and vanilla then continues
 /// to the *next* matching one, drawing again.
 ///
 /// # How to change it, and the trap
@@ -1552,7 +1553,7 @@ impl TargetCache {
     }
 }
 
-/// `TargetBlockState.target.test` for every target of `config` against the block
+/// Vanilla's own target-block-state test for every target of `config` against the block
 /// state named `name`, as a bitmask over target index.
 ///
 /// This is the original `try_place_ore` body's inner test, moved out verbatim so
@@ -1653,7 +1654,7 @@ fn try_place_ore<R: RandomSource>(
     }
 }
 
-/// `OreFeature.shouldSkipAirCheck`. Draws a single `nextFloat` iff
+/// Vanilla's own ore-feature "should skip air check". Draws a single `nextFloat` iff
 /// `0 < chance < 1`; the endpoints short-circuit with no draw.
 fn should_skip_air_check<R: RandomSource>(random: &mut R, chance: f32) -> bool {
     if chance <= 0.0 {
@@ -1665,7 +1666,7 @@ fn should_skip_air_check<R: RandomSource>(random: &mut R, chance: f32) -> bool {
     }
 }
 
-/// `Feature.isAdjacentToAir` over the six `Direction` neighbours. Reads the
+/// Vanilla's own "is adjacent to air" check over the six direction neighbours. Reads the
 /// live working grid across the whole driven 3×3 region (clamped beyond it —
 /// see `OreInput::region_local`), so a read just outside the centre sees the
 /// real neighbour terrain (or an in-flight write from an earlier source
