@@ -28,6 +28,8 @@ use lodestone_core::Nbt;
 use lodestone_model::{ConnectionState, Directive, VersionAdapter};
 use lodestone_world::{BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, WorldSink};
 
+pub mod differential;
+
 /// A [`WorldSink`] that discards every terrain call. Fuzz targets only care
 /// whether decoding panics, not what it decoded to, so every write is a
 /// no-op — mirrors the `NullSink` pattern already used by
