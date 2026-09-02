@@ -90,7 +90,7 @@ never be bit-exact until they exist.
 
 **The instrument exists — extend it, don't reinvent it.** `crates/lodestone-worldgen-parity` is the
 whole-chunk gate: `ComposedChunkOracle.java` boots the real 26.2 server, drives vanilla's *own*
-`NoiseBasedChunkGenerator` methods, and dumps full 16×384×16 stage snapshots into a committed
+generator methods directly, and dumps full 16×384×16 stage snapshots into a committed
 run-length-encoded fixture; `tests/chunk_parity.rs` asserts measured ceilings/floors per (chunk,
 stage) with **no wildcard arm**, and its negative controls are run, not described
 (`control_mutate_one_block_is_caught`, `control_self_diff_is_exact`, `fixtures_are_non_vacuous`).

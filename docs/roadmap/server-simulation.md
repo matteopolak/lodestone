@@ -18,7 +18,7 @@ This file is the *why this order*; the 46 issues below are the units. See
 Worth internalising before estimating any of this: worldgen (noise router, density, carvers, surface,
 aquifer, ore features) is bit-exact against JVM oracles; so are collision shapes (32,366 states),
 hardness, entity dimensions, and block physics constants. A generated `path_types.rs` dumped from
-`WalkNodeEvaluator` exists as groundwork for pathfinding (not this doc's concern, but it means the
+vanilla's own pathfinding-node evaluator exists as groundwork for pathfinding (not this doc's concern, but it means the
 mob-AI side isn't starting from zero either). `lodestone-server` exists as a real crate with a working
 tokio target-split, an in-memory *and* TCP transport behind the same connection loop
 (`crates/lodestone-server/src/integrated.rs`), and a real (if currently unwired) v770 server protocol

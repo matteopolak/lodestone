@@ -105,5 +105,5 @@ item rather than rediscovered.
 The foundations that already exist are unusually strong for a project at this stage, and
 they are the reason the estimate is a roadmap rather than a wish: worldgen (noise router,
 density, carvers, surface, aquifer, ore features), collision shapes for all 32,366 block
-states, hardness, entity dimensions, block physics constants, a `WalkNodeEvaluator`-dumped
-`path_types.rs`, and player movement — all **bit-exact against JVM oracles**.
+states, hardness, entity dimensions, block physics constants, a `path_types.rs` dumped from
+vanilla's own pathfinding-node evaluator, and player movement — all **bit-exact against JVM oracles**.

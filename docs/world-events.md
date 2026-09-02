@@ -14,7 +14,8 @@ boss fights. All of it lives in `lodestone-server`, with a thin render-side cons
 
 The server owns weather entirely and sends four `GAME_EVENT` codes —
 `START_RAINING`/`STOP_RAINING`/`RAIN_LEVEL_CHANGE`/`THUNDER_LEVEL_CHANGE` — carrying
-two scalars in `0.0..=1.0` (rain level, thunder level). `ServerLevel.advanceWeatherCycle`
+two scalars in `0.0..=1.0` (rain level, thunder level). Vanilla's own weather-cycle
+advance
 ramps the rain level by ±0.01 per tick, so the client folds updates into a shared cell
 (`net::WeatherCell`, two atomics) rather than queuing them — latest wins, never queue,
 the same shape as `net::SharedHandle`. `WeatherTracker::state()` is read once per frame
@@ -26,9 +27,9 @@ an `ADD_ENTITY` for `lightning_bolt` bumping a sequence number.
 Rain vs. snow is decided per column from the block's biome climate
 (`has_precipitation`/`temperature`/`downfall`, decoded off `registry_data` into
 `ClientEvent::BiomeClimates`) against vanilla's threshold: height-adjusted temperature
-`>= 0.15` is rain, below is snow (`Biome.warmEnoughToRain`). `isRaining`/`isThundering`
+`>= 0.15` is rain, below is snow (vanilla's own warm-enough-to-rain check). `isRaining`/`isThundering`
 are `rain > 0.2`/`thunder > 0.9`; the effective thunder level used everywhere is
-`raw_thunder × rain` (`Level.getThunderLevel`), never the raw wire value alone.
+`raw_thunder × rain` (vanilla's own effective-thunder-level accessor), never the raw wire value alone.
 
 Rain/snow droplets, fog/sky/lightmap darkening and the lightning flash all reach
 pixels. Not reaching pixels: rain ambience sound (no play hook on `Sim`'s audio), the
@@ -45,12 +46,12 @@ linear light pulls every factor toward 1.0 and washes the image out.
 
 ### Lightning
 
-`should_attempt_strike` (`ServerLevel.tickThunder`'s outer gate) is checked once per
+`should_attempt_strike` (vanilla's own per-tick-thunder outer gate) is checked once per
 ticking chunk per tick, gated on `weather.thundering` before the per-chunk loop runs.
 `find_lightning_target_around` picks a nearby lightning rod if one exists, otherwise a
 random living/sky-visible entity in a column, otherwise the terrain heightmap. A
 decided strike spawns a live bolt (life/flash countdown ported from
-`LightningBolt.tick`) streamed as `minecraft:lightning_bolt` with empty metadata
+vanilla's own per-tick bolt update) streamed as `minecraft:lightning_bolt` with empty metadata
 (vanilla's own `defineSynchedData` is empty), reaching the client's existing spawn arm
 that drives the sky flash above.
 
@@ -111,21 +112,21 @@ trigger chain is real end to end: a `minecraft:bad_omen` carrier within 64 block
 occupied `#village` POI is converted to `minecraft:raid_omen` at the same amplifier
 (`absorb_raid_omen`, clamped `1..=5`); on Raid Omen's last tick,
 `MobSim::create_or_extend_raid` averages the occupied POIs into a centre and either
-extends an ongoing raid within 96 blocks (vanilla's `getRaidAt` radius) or starts a new
+extends an ongoing raid within 96 blocks (vanilla's own raid-lookup radius) or starts a new
 one. The occupied-POI signal currently only sees claimed villager beds (an in-memory,
 session-only ledger) — job sites and the meeting bell aren't a live query yet, so a
 village with claimed workstations but no claimed bed won't trigger a raid. Granting
 Bad Omen from an ominous bottle isn't modelled, so a raid today needs a debug
 `/effect give`.
 
-Wave counts are copied verbatim from `Raid.getNumGroups` (Peaceful 0 / Easy 3 / Normal
-5 / Hard 7) and `RaiderType.spawnsPerWaveBeforeBonus`: pillager `[0, 4, 3, 3, 4, 4, 4,
+Wave counts are copied verbatim from vanilla's own wave-group-count formula (Peaceful 0 / Easy 3 / Normal
+5 / Hard 7) and its own per-raider-type spawns-per-wave-before-bonus table: pillager `[0, 4, 3, 3, 4, 4, 4,
 2]`, vindicator `[0, 0, 2, 0, 1, 4, 2, 5]`, indexed by wave, plus a difficulty-scaled
 bonus roll (`nextInt(2)` Easy, flat `1` Normal, flat `2` Hard, then `nextInt(bonus +
 1)`). Each wave clears on live health checks, advances on a 300-tick cooldown, and
 reaches Victory with vanilla's 40-tick post-clear delay. Only pillagers and
 vindicators spawn — no other raider species exist in this crate's roster.
-`Raid.RaidStatus.LOSS` (the village section-distance tracker) is not ported, so a raid
+Vanilla's own raid-loss status (needing the village section-distance tracker) is not ported, so a raid
 can only reach Ongoing or Victory; the 48000-tick (40-minute) overall timeout is
 ported, so an abandoned raid still stops being tracked. The boss bar reuses the
 existing `BOSS_EVENT` path; its progress is wave count, not vanilla's living-raider
