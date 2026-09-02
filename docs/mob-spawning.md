@@ -39,9 +39,10 @@ within ~10 s rather than instantly). An unlit column returns `None`, meaning **d
 never "treat as dark" — that would turn the budget into a spawn-rate multiplier.
 
 **Slime chunks** are the one predicate that's two alternatives rather than a conjunction: a
-swamp-surface arm (`swamp`/`mangrove_swamp`, `50 < y < 70`, `nextFloat() < surfaceSlimeSpawnChance`
-then a light draw) and a slime-chunk arm (`seedSlimeChunk(cx, cz, worldSeed, 987234911).nextInt(10)
-== 0`, `y < 40`, plus an unconditional `nextInt(10) == 0` consumed even in an ordinary chunk).
+swamp-surface arm (`swamp`/`mangrove_swamp`, `50 < y < 70`, a random draw under the moon-phase
+surface-slime chance, then a light draw) and a slime-chunk arm (a chunk-and-seed-derived random
+stream, mixed with the constant `987234911`, drawing one in ten; `y < 40`; plus an unconditional
+one-in-ten draw consumed even in an ordinary chunk).
 `SURFACE_SLIME_SPAWN_CHANCE` is a moon-phase attribute, not a constant — `0.0` at new moon (the
 surface arm can't fire) up to `0.5` at full moon. Two seeds reach the spawner: a fixed
 `NATURAL_SPAWN_SEED` literal for the spawn stream, and the real world-gen seed for
@@ -66,11 +67,12 @@ documents: 795 spawner entries, non-empty in `monster` (63 biomes), `ambient` (5
 `axolotls` (1), `misc` (0); `spawn_costs` non-empty in 5 (all Nether).
 
 `MobCategory::parse` panics on an unknown key rather than dropping it silently. `weight` belongs
-to the outer `WeightedList` wrapper, not vanilla's `SpawnerData` record, though this table
+to the outer weighted-list wrapper, not to vanilla's per-entry spawner record, though this table
 flattens the two; fields are read by name, so record order versus the JSON's alphabetical keys is
-inert. Not modelled: `SpawnerData`'s `MISC`→`PIG` rewrite (unreachable anyway, since every 26.2
-`misc` list is empty) and count validation (embedded generated assets, so a violation would be a
-build defect). Use `MobCategory::ALL` for declaration order, not incidental map order.
+inert. Not modelled: vanilla's own rewrite of an empty `misc` category into a plain pig spawn
+(unreachable anyway, since every 26.2 `misc` list is empty) and count validation (embedded generated
+assets, so a violation would be a build defect). Use `MobCategory::ALL` for declaration order, not
+incidental map order.
 
 This is data, not a runtime spawner — the chunk-generation `SPAWN` stage, light/ground
 re-validation, and an entity-persistence decision are separate, larger work, mostly because most
@@ -78,8 +80,8 @@ re-validation, and an entity-persistence decision are separate, larger work, mos
 
 ### Spawn equipment
 
-`lodestone_entity::spawn_equipment` ports `Mob.populateDefaultEquipmentSlots` and its overrides,
-one function per species family:
+`lodestone_entity::spawn_equipment` ports vanilla's own default-equipment-slot logic and its
+per-species overrides, one function per species family:
 
 | species | calls `super`? | own addition |
 |---|---|---|
@@ -91,7 +93,7 @@ one function per species family:
 | pillager | no | unconditional crossbow |
 
 `base_armor_roll`: `0.15 * special_multiplier` chance of any armour, an `armor_type` in `0..=5`
-(`nextInt(3)` plus up to three `+1` bumps at 10.87% each), then a walk over
+(a roll among three base values, plus up to three `+1` bumps at 10.87% each), then a walk over
 `[Head, Chest, Legs, Feet]` stopping at the first slot filled (10% Hard / 25% otherwise chance),
 never overwriting an occupied slot. `EquipRandom` is the RNG seam so this crate stays free of a
 concrete RNG type. The drowned's trident goal is gated at *runtime* on holding a trident rather
@@ -99,7 +101,7 @@ than by conditional registration (`MobController::main_hand_item()` plus
 `RangedAttackGoal::with_required_main_hand("trident")`). `MobSim::spawn_species` rolls equipment on
 its own `equipment_rng` stream (`EQUIPMENT_ROLL_SEED`), isolated from despawn/orb/tame streams so
 one roll can't shift another's outcome. Not modelled: enchanted spawn gear (no enchantment model
-exists at all) and equipment surviving save/load (no equipment NBT); `Items.IRON_SPEAR` has no
+exists at all) and equipment surviving save/load (no equipment NBT); the iron spear has no
 entry in `equipment::weapon_attack_damage` (a combat-stats gap, not an equipping one).
 
 ### Species-aware spawning
@@ -111,21 +113,21 @@ census plus `SCALE`/`STEP_HEIGHT`, falling back to `MobShape::land(0.6, 1.95)` f
 species), and `is_hostile_species` (a coarse classifier deciding only spawn category and despawn
 persistence — per-species goal sets belong to `lodestone_entity::ai::roster`). `species_shape`
 also sets `can_open_doors`/`can_float`/`malus_overrides` per species from that species' own
-constructor or `finalizeSpawn`; before this every mob used `MobShape::land`'s defaults
+spawn-time setup; before this every mob used `MobShape::land`'s defaults
 (no door-opening, no floating, no fire/lava/water aversion) unconditionally. `is_hostile_species`
 is checked against a jar-cited table so an unclassified roster species fails loudly rather than
 defaulting silently.
 
-**Movement speed is not read as blocks/tick directly.** Vanilla's `Mob.setSpeed` sets both the
-per-tick speed scale *and* the forward-input magnitude a mob's move vector multiplies, so real
-per-tick thrust is the *square* of `speedModifier * movement_speed`, converging under friction
+**Movement speed is not read as blocks/tick directly.** Vanilla's own speed-setting logic sets both
+the per-tick speed scale *and* the forward-input magnitude a mob's move vector multiplies, so real
+per-tick thrust is the *square* of the speed modifier times `movement_speed`, converging under friction
 (ground `0.6`, air drag `0.91`) to `requested_speed² / (1 - 0.6 * 0.91)`. `ai_ground_speed`
 implements that conversion for the kinematic follower's `step_per_tick`; roster goals still
 receive the *unconverted* attribute. Checked live: a zombie (`0.23`) chasing a stationary villager
 measured ≈0.118 blocks/tick against a predicted `0.1165` — the unconverted attribute is roughly
 double either figure, matching a long-standing "mobs move too fast" report.
 
-Also resolved per tick from a real `DifficultyInstance`: the zombie family's door-breaking coin
+Also resolved per tick from the world's real difficulty state: the zombie family's door-breaking coin
 flip (rolled once at spawn, preserved across baby/adult shape changes) and its Hard-only
 reinforcement call (randomized per mob at spawn, rolled on a landed hit, resolved through a
 simplified 50-candidate placement search). Not modelled: the "leader zombie" bonus that can also
@@ -133,9 +135,9 @@ force door-breaking or boost stats.
 
 ### Spawn eggs
 
-`spawn_egg.rs` answers three questions in vanilla's order (`SpawnEggItem.useOn`): **which entity**
+`spawn_egg.rs` answers three questions in vanilla's own click-handling order: **which entity**
 (`entity_type_for_egg` strips the `_spawn_egg` suffix and requires a real `entity_types` entry —
-checked against all 88 vanilla `registerSpawnEgg` pairs, zero mismatches, refusing rather than
+checked against all 88 vanilla egg-to-entity pairs, zero mismatches, refusing rather than
 naming something nothing can render); **where** (the clicked cell if empty of collision, else the
 neighbour across the clicked face; sub-cell height `y_offset` is `max(0.0, top)` for a side click
 and `max(-1.0, top)` for a top click, where `top` is the highest collision surface found — a

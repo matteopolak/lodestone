@@ -39,9 +39,9 @@ jar priorities kept verbatim. `goals_for` emits every target-selector row
 ahead of every goal-selector row, reproducing vanilla's tick order (a target
 acquired this tick is visible to a movement goal the same tick).
 `GoalSelector::add` returns a `GoalId`; `remove(id, mob)` stops a running goal
-(firing its `stop` hook) and drops it — needed for vanilla's runtime goal
-swap (`AbstractSkeleton.reassessWeaponGoal()` swaps melee/bow goals when the
-held item changes), which a per-`Flag` `disable` can't express.
+(firing its `stop` hook) and drops it — needed for a runtime goal swap some
+mobs do (a skeleton switches between its melee and bow goals when the held
+item changes), which a per-`Flag` `disable` can't express.
 
 ### Target acquisition (brain-based mobs)
 
@@ -54,7 +54,8 @@ a disjunctive sibling to `add_activity` — an activity becomes eligible when
 registers `Activity::PANIC` ahead of `IDLE` this way, on
 `[(HURT_BY, present), (NEAREST_HOSTILE, present)]`, because this crate's
 `Behavior` trait deliberately has no seam for a behaviour to reach into its
-own `Brain` the way vanilla's `VillagerPanicTrigger` does. The flee target is
+own `Brain` the way vanilla's own panic-trigger behaviour does, reaching
+straight into the brain from inside the behaviour itself. The flee target is
 a random land position rather than directed away from the threat, and no
 goal on this perception seam checks line of sight.
 
@@ -71,7 +72,7 @@ is the sim's per-mob counter; `avoid_threat` reads the mob census plus an
 `avoided_species` table; `nearest_player`/`temptation` come from
 `MobSim::set_players`, fed by `server.rs`'s `PlayerMoved` handler.
 
-Ordering inside `MobSim::tick` matches vanilla's `Mob.serverAiStep()`:
+Ordering inside `MobSim::tick` matches vanilla's own per-tick AI step order:
 `no_action_time` ages for every mob **before** `feed_perception` runs (a
 read-then-apply two-pass, since one mob's threat/partner/parent decision
 depends on every other mob), before goals tick. `tempt_food` (which item
@@ -90,21 +91,21 @@ block-perception-gated actually need a larger mechanism: a host-computed
 sun-flee spot, a zombie's turtle-egg attack, and a rabbit's garden raid, plus
 block-state properties and destroy intents on top. Only sheep grazing and
 half of the rabbit's powder-snow climb are closed by `block_cues` alone.
-Every jar tick constant on `EatBlockGoal` is **halved in practice**
-(`Goal.adjustedTickDelay`, for a goal that doesn't override
-`requiresUpdateEveryTick`): the jar's `1000`/`50`/`40`/`4` are 500/25/20/2
-ticks.
+Every jar tick constant on `EatBlockGoal` is **halved in practice**: a goal
+that doesn't override its own per-tick update cadence is throttled to run
+roughly every other tick by a shared default, and this goal doesn't override
+it — so the jar's `1000`/`50`/`40`/`4` are 500/25/20/2 ticks.
 
 ### Neutral roster (anger/aggro)
 
-Enderman, zombified piglin, bee and wolf implement vanilla's `NeutralMob`,
-sharing an anger duration uniform on **[400, 780] ticks inclusive**, stored
+Enderman, zombified piglin, bee and wolf share vanilla's neutral-mob anger
+model, an anger duration uniform on **[400, 780] ticks inclusive**, stored
 as an **absolute game-time deadline** rather than a countdown
 (`SimMob::anger` holds `{ end_time, target }`, so a paused or stepped tick
 loop can't desync it) — started alongside `note_hurt` in `MobSim::attack`,
 cleared by `feed_perception` once the deadline passes.
 
-Three species chain `.setAlertOthers()` onto `HurtByTargetGoal`, alerting
+Three species chain an alert-others behaviour onto `HurtByTargetGoal`, alerting
 same-species mobs with no current target inside a box (flat vertical
 half-extent **10** for all three; XZ half-extent 35 for zombified piglin via
 `FOLLOW_RANGE`, 16 for wolf/bee). The zombified piglin also has a **second,
@@ -135,15 +136,15 @@ a host drains them once per tick, resolving each into a real
 `ProjectileRegistry` entry via `MobSim::spawn_projectile`. Three goal shapes:
 a 20-tick-draw bow attack, a no-draw interval-lerp generic ranged attack, and
 the blaze's burst-of-three fireball (6 ticks apart, 60-tick wind-up, 100-tick
-pause, melees under 2 blocks). Launch velocity follows vanilla's
-`Projectile.getMovementToShoot`: arrows, tridents, snowballs and potions
+pause, melees under 2 blocks). Launch velocity follows vanilla's own
+projectile-aiming formula: arrows, tridents, snowballs and potions
 launch at power **1.6** plus an arc lift; small fireballs launch at power
 **0.1** with **no** arc lift and accelerate in flight instead.
 
 Skeleton-family species register through `hostile_melee`'s shared table, not
 here, because the weapon choice is decided by equipment — a bow is handed
 out unconditionally, making the melee fallback unreachable for every subtype
-except `WitherSkeleton`, which overrides the equipment instead. The
+except the wither skeleton, which overrides its equipment instead. The
 drowned's trident row is deliberately left `Missing`: only a minority of
 drowned hold a trident and this repo has no inventory model to key off of.
 
@@ -163,7 +164,8 @@ Descent is gravity-accelerated and lands exactly on `waypoint_y`, resetting
 `fall_speed`; a jump's ascent hands off into this same branch once its speed
 crosses back to non-negative — there is no separate jump state machine, only
 the sign of `fall_speed`. A jump only ever starts from rest, matching
-vanilla's `MoveControl` staying in its `JUMPING` operation until grounded.
+vanilla's own approach: its movement controller stays in jump mode until
+the mob lands.
 
 ### Tick drivers
 
@@ -209,7 +211,7 @@ start (`1`) is unchanged for hermetic tests.
 - **Goal roster**: adding a species touches one file — add its path to the owning family's species list
   and an arm to its lookup. Cite the jar directly, never a neighbouring species' table; a priority or
   speed multiplier copied from a similar-looking species is a common, hard-to-notice mistake.
-  `registerGoals` is not always one method in vanilla — a subclass may split it or add rows before
+  Vanilla's own goal registration is not always one method — a subclass may split it or add rows before
   calling its parent, so check every registration site in the source, not just the obvious one. Test
   goals against the real controller, not a perception stub that overrides every method — a stub can make
   a goal that never actually fires in production look green. Use goal handles rather than captured
@@ -276,7 +278,7 @@ start (`1`) is unchanged for hermetic tests.
   ownership, ticks the registries, and owns the live-wiring loop.
 - `crates/protocol/v770` — the entity encoders, and the entity-type registry
   ranged attacks validate projectile kinds against.
-- `.cache/mc/26.2/src/net/minecraft/world/entity/` — the authority for every
+- `.cache/mc/26.2/` — the pinned decompile and authority for every
   priority, speed multiplier, range and timing cited here.
 - Related: [`docs/autonomous-navigation.md`](./autonomous-navigation.md)
   (pathfinding), [`docs/combat.md`](./combat.md) (attack resolution and
