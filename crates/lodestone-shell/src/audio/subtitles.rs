@@ -12,7 +12,7 @@
 //!
 //! # Two things vanilla does that are easy to get backwards
 //!
-//! **It fades brightness, not alpha.** `SubtitleOverlay.java` lerps the text's
+//! **It fades brightness, not alpha.** Vanilla's own subtitle overlay lerps the text's
 //! RGB from `255` down to `75` over the display window and leaves alpha at `255`
 //! throughout, while the background stays at a constant opacity. Fading alpha
 //! instead makes an old caption translucent over the world rather than grey on its
@@ -26,7 +26,7 @@
 //! # The one deliberate simplification
 //!
 //! Vanilla also drops a caption whose sound is further away than that sound's own
-//! attenuation range (`Subtitle.isAudibleFrom`). We do not carry the resolved
+//! attenuation range (vanilla's own subtitle audibility check). We do not carry the resolved
 //! range out to the caption hook — `ShellAudio::play_sound` knows the event name
 //! and position, not the entry's `attenuation_distance` — so every caption here is
 //! treated as audible. In practice the two agree: the sound was actually submitted
@@ -62,7 +62,7 @@ struct PlayedAt {
 /// One caption text plus every recent position its sound played at.
 ///
 /// The position *list* rather than one position is vanilla's own shape
-/// (`Subtitle.playedAt`): the arrow points at whichever instance is **closest to
+/// (vanilla's own subtitle keeps a played-at position list): the arrow points at whichever instance is **closest to
 /// the listener**, so a footstep on both sides of you points at the near one.
 #[derive(Debug, Clone)]
 struct Subtitle {
@@ -107,8 +107,8 @@ impl SubtitleQueue {
     /// Record that `text`'s sound just played at `pos`.
     ///
     /// Refreshes an existing row when the text already appears, replacing any
-    /// entry at the identical position first — `Subtitle.refresh`
-    ///, which is what stops a looping sound at a
+    /// entry at the identical position first — vanilla's own subtitle refresh
+    /// does the same, which is what stops a looping sound at a
     /// fixed point growing an unbounded position list.
     pub fn push(&mut self, text: &str, pos: Vec3, now_ms: u64) {
         if let Some(existing) = self.subtitles.iter_mut().find(|s| s.text == text) {
@@ -156,7 +156,8 @@ impl SubtitleQueue {
         self.subtitles
             .iter()
             .filter_map(|s| {
-                // The closest recent play, `Subtitle.getClosest` — both the arrow
+                // The closest recent play, matching vanilla's own closest-instance
+                // lookup — both the arrow
                 // direction and the fade clock come from that one instance, so
                 // they can never describe two different plays.
                 let closest = s.played_at.iter().min_by(|a, b| {

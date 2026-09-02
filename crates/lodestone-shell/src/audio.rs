@@ -138,7 +138,7 @@ pub(crate) mod ambient;
 pub(crate) mod music;
 pub(crate) mod subtitles;
 
-/// Wall-clock milliseconds for the caption clock — vanilla's `Util.getMillis()`,
+/// Wall-clock milliseconds for the caption clock — vanilla's own epoch-millis clock,
 /// the same origin `gpu/glint.rs` and `app::recipe_toast_now_ms` use, so a caption
 /// ages against the same clock every other timed overlay does.
 ///
@@ -353,9 +353,9 @@ impl ShellAudio {
         }
     }
 
-    /// Plays a **head-relative** one-shot sound — vanilla's
-    /// `SimpleSoundInstance.forUI` shape (`ui.button.click` and anything else
-    /// vanilla marks `RELATIVE`/`Attenuation.NONE`): no distance falloff, no
+    /// Plays a **head-relative** one-shot sound — vanilla's own
+    /// UI-sound shape (`ui.button.click` and anything else
+    /// vanilla marks relative with no attenuation): no distance falloff, no
     /// panning, audible identically everywhere. No position argument at all,
     /// unlike [`play_sound`](Self::play_sound) — see
     /// [`lodestone_sound::AudioEngine::play_relative_sound`] for why a position
@@ -413,8 +413,8 @@ impl ShellAudio {
     /// the "resolved but dropped" gap this call site used to have is closed
     /// there, not here.
     pub fn start_music(&mut self, music: &Music) -> MusicStart {
-        // Seed 0: vanilla's own music path uses `SimpleSoundInstance.forMusic`,
-        // which takes no seed and so leaves the weighted pick on its default.
+        // Seed 0: vanilla's own music-sound trigger takes no seed and so
+        // leaves the weighted pick on its default.
         match self.engine.start_music(music.sound(), 0) {
             Ok(start) => start,
             Err(e) => {
@@ -439,7 +439,7 @@ impl ShellAudio {
     }
 
     /// Sets the `Music` bus's runtime gain — the `MusicSink::set_music_gain`
-    /// half, driving `MusicManager.fadePlaying`'s crossfade.
+    /// half, driving vanilla's own music-manager crossfade.
     pub fn set_music_gain(&self, gain: f32) {
         self.engine.set_music_gain(gain);
     }
@@ -1188,7 +1188,7 @@ impl ShellAudio {
     }
 
     /// Sets the `Music` bus's runtime gain — the `MusicSink::set_music_gain`
-    /// half, driving `MusicManager.fadePlaying`'s crossfade.
+    /// half, driving vanilla's own music-manager crossfade.
     pub fn set_music_gain(&self, gain: f32) {
         AUDIO_STATE.with(|cell| {
             if let Some(state) = cell.borrow().as_ref() {
@@ -1203,8 +1203,8 @@ impl ShellAudio {
 
     /// Start an ambient **loop** voice at `volume`, returning its handle —
     /// identical contract to native's [`start_loop`](Self::start_loop):
-    /// forces `looping`/`relative`, same as vanilla's
-    /// `BiomeAmbientSoundsHandler.LoopSoundInstance`.
+    /// forces `looping`/`relative`, same as vanilla's own
+    /// biome ambient-sounds loop-sound instance.
     pub fn start_loop(&mut self, name: &str, volume: f32) -> Option<lodestone_sound::PlayHandle> {
         AUDIO_STATE.with(|cell| {
             let mut guard = cell.borrow_mut();
