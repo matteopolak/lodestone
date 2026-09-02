@@ -1,5 +1,5 @@
 //! The 66 `minecraft:worldgen/biome` ids shipped as 26.2's own base data —
-//! `/execute if biome`'s census (issue #48's remainder).
+//! `/execute if biome`'s census.
 //!
 //! # Why this is a hand-listed array, not a generated table
 //!
