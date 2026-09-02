@@ -1,4 +1,4 @@
-//! Bit-exact re-implementations of the `net.minecraft.util.Mth` helpers that
+//! Bit-exact re-implementations of vanilla's own math helpers that
 //! Minecraft's movement code actually calls.
 //!
 //! These deliberately mirror vanilla's *exact* arithmetic — including its
@@ -9,22 +9,23 @@
 //!
 //! # Sine table
 //!
-//! `Mth.sin` is not `Math.sin`: it is a 65,536-entry `float` lookup table built
-//! as `sin[i] = (float)Math.sin(i / 10430.378350470453)` (see `Mth.java` lines
-//! 34–39 in the 26.2 reference source). The table is generated once and checked
-//! in as [`sin_table`](crate::sin_table); it is **not** built at runtime. To
-//! regenerate it, evaluate that expression for `i in 0..65536`, widen each
-//! result to `f32`, and emit the raw bit patterns.
+//! Vanilla's own sine function is **not** the standard-library `sin`: it is a
+//! 65,536-entry `float` lookup table built as
+//! `sin[i] = (float)Math.sin(i / 10430.378350470453)`. The table is generated
+//! once and checked in as [`sin_table`](crate::sin_table); it is **not** built
+//! at runtime. To regenerate it, evaluate that expression for `i in 0..65536`,
+//! widen each result to `f32`, and emit the raw bit patterns.
 //!
 //! The table is validated **element-wise against the real JVM** rather than by
-//! any hash: `oracle-java/SinOracle.java` dumps the JVM's `float` bits and the
-//! `sin_table_matches_jvm_reference` test diffs all 65,536 entries against the
-//! checked-in reference. This is strictly stronger than a checksum (it names the
-//! offending index on failure) and needs no non-recomputable magic constant.
+//! any hash: `oracle-java/SinOracle.java` (this crate's own oracle harness)
+//! dumps the JVM's `float` bits and the `sin_table_matches_jvm_reference` test
+//! diffs all 65,536 entries against the checked-in reference. This is
+//! strictly stronger than a checksum (it names the offending index on
+//! failure) and needs no non-recomputable magic constant.
 
 use crate::sin_table::SIN_TABLE_BITS;
 
-/// `Mth.SIN_SCALE` — the quantization constant for the sine table.
+/// Vanilla's own quantization constant for the sine table.
 pub const SIN_SCALE: f64 = 10430.378350470453;
 
 /// Lazily-materialised sine table as `f32` values, reconstructed from the
@@ -41,7 +42,7 @@ fn sin_table() -> &'static [f32; 65536] {
     })
 }
 
-/// `Mth.sin(double)` — table lookup, **not** `f64::sin`.
+/// Vanilla's own sine: a quantized table lookup, **not** `f64::sin`.
 ///
 /// Mirrors `SIN[(int)((long)(i * SIN_SCALE) & 65535L)]`.
 #[must_use]
@@ -50,7 +51,7 @@ pub fn sin(i: f64) -> f32 {
     sin_table()[idx]
 }
 
-/// `Mth.cos(double)` — table lookup offset by a quarter turn.
+/// Vanilla's own cosine: the same quantized table, offset by a quarter turn.
 ///
 /// Mirrors `SIN[(int)((long)(i * SIN_SCALE + 16384.0) & 65535L)]`.
 #[must_use]
@@ -59,25 +60,25 @@ pub fn cos(i: f64) -> f32 {
     sin_table()[idx]
 }
 
-/// `Mth.floor(double)` → `(int)Math.floor(v)`.
+/// Vanilla's own `floor`: `(int)Math.floor(v)`.
 #[must_use]
 pub fn floor(v: f64) -> i32 {
     v.floor() as i32
 }
 
-/// `Mth.lfloor(double)` → `(long)Math.floor(v)`.
+/// Vanilla's own `lfloor`: `(long)Math.floor(v)`.
 #[must_use]
 pub fn lfloor(v: f64) -> i64 {
     v.floor() as i64
 }
 
-/// `Mth.ceil(double)` → `(int)Math.ceil(v)`.
+/// Vanilla's own `ceil`: `(int)Math.ceil(v)`.
 #[must_use]
 pub fn ceil(v: f64) -> i32 {
     v.ceil() as i32
 }
 
-/// `java.lang.Math.min(double, double)`: propagates `NaN`, unlike Rust's
+/// Java's own floating-point `min`: propagates `NaN`, unlike Rust's
 /// `f64::min` which returns the non-`NaN` operand.
 #[must_use]
 pub fn java_min_f64(a: f64, b: f64) -> f64 {
@@ -88,7 +89,7 @@ pub fn java_min_f64(a: f64, b: f64) -> f64 {
     }
 }
 
-/// `java.lang.Math.min(float, float)`.
+/// Java's own floating-point `min`, `float` width.
 #[must_use]
 pub fn java_min_f32(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
@@ -98,7 +99,7 @@ pub fn java_min_f32(a: f32, b: f32) -> f32 {
     }
 }
 
-/// `java.lang.Math.max(double, double)`: propagates `NaN`, unlike Rust's
+/// Java's own floating-point `max`: propagates `NaN`, unlike Rust's
 /// `f64::max` which returns the non-`NaN` operand.
 #[must_use]
 pub fn java_max_f64(a: f64, b: f64) -> f64 {
@@ -109,25 +110,26 @@ pub fn java_max_f64(a: f64, b: f64) -> f64 {
     }
 }
 
-/// `Mth.absMax(double, double)` (`Mth.java:134-136`) —
-/// `Math.max(Math.abs(a), Math.abs(b))`, i.e. the **larger magnitude of the two
-/// components**, not the length of the vector they form.
+/// Vanilla's own "abs max": `Math.max(Math.abs(a), Math.abs(b))`, i.e. the
+/// **larger magnitude of the two components**, not the length of the vector
+/// they form.
 ///
-/// The distinction is the whole story of `Entity.push(Entity)`, which normalises
-/// its horizontal separation by `sqrt(absMax(dx, dz))` where a reader expects
-/// `sqrt(dx*dx + dz*dz)`. For `(0.15, 0.08)` those are `0.3873…` and `0.4123…` —
-/// a 6% error in the push direction *and* magnitude, on every pair, every tick.
-/// Routed through [`java_max_f64`] so a `NaN` component poisons the result the way
-/// Java's does (which is what makes `Entity.push`'s `dd >= 0.01F` gate reject it).
+/// The distinction is the whole story of vanilla's own entity-push step,
+/// which normalises its horizontal separation by `sqrt(absMax(dx, dz))` where
+/// a reader expects `sqrt(dx*dx + dz*dz)`. For `(0.15, 0.08)` those are
+/// `0.3873…` and `0.4123…` — a 6% error in the push direction *and*
+/// magnitude, on every pair, every tick. Routed through [`java_max_f64`] so a
+/// `NaN` component poisons the result the way Java's does (which is what
+/// makes vanilla's own entity-push `dd >= 0.01F` gate reject it).
 #[must_use]
 pub fn abs_max(a: f64, b: f64) -> f64 {
     java_max_f64(a.abs(), b.abs())
 }
 
-/// `Mth.clamp(double, double, double)`.
+/// Vanilla's own clamp.
 ///
 /// Note vanilla's asymmetric form: `value < min ? min : Math.min(value, max)`.
-/// This matters at `NaN` and negative-zero edges (Java's `Math.min` propagates
+/// This matters at `NaN` and negative-zero edges (Java's own `min` propagates
 /// `NaN`), so we reproduce it exactly rather than using `f64::clamp`.
 #[must_use]
 pub fn clamp_f64(value: f64, min: f64, max: f64) -> f64 {
@@ -138,7 +140,7 @@ pub fn clamp_f64(value: f64, min: f64, max: f64) -> f64 {
     }
 }
 
-/// `Mth.clamp(float, float, float)`.
+/// Vanilla's own clamp, `float` width.
 #[must_use]
 pub fn clamp_f32(value: f32, min: f32, max: f32) -> f32 {
     if value < min {
@@ -148,7 +150,7 @@ pub fn clamp_f32(value: f32, min: f32, max: f32) -> f32 {
     }
 }
 
-/// `Mth.lerp(double, double, double)` → `p0 + alpha * (p1 - p0)`.
+/// Vanilla's own `lerp`: `p0 + alpha * (p1 - p0)`.
 ///
 /// Kept in vanilla's expression order; do not algebraically simplify.
 #[must_use]
@@ -156,13 +158,13 @@ pub fn lerp_f64(alpha: f64, p0: f64, p1: f64) -> f64 {
     p0 + alpha * (p1 - p0)
 }
 
-/// `Mth.lerp(float, float, float)` → `p0 + alpha * (p1 - p0)`.
+/// Vanilla's own `lerp`, `float` width: `p0 + alpha * (p1 - p0)`.
 #[must_use]
 pub fn lerp_f32(alpha: f32, p0: f32, p1: f32) -> f32 {
     p0 + alpha * (p1 - p0)
 }
 
-/// `Mth.wrapDegrees(double)`.
+/// Vanilla's own `wrapDegrees`.
 #[must_use]
 pub fn wrap_degrees_f64(angle: f64) -> f64 {
     let mut a = angle % 360.0;
@@ -175,7 +177,7 @@ pub fn wrap_degrees_f64(angle: f64) -> f64 {
     a
 }
 
-/// `Mth.wrapDegrees(float)`.
+/// Vanilla's own `wrapDegrees`, `float` width.
 #[must_use]
 pub fn wrap_degrees_f32(angle: f32) -> f32 {
     let mut a = angle % 360.0;
@@ -188,23 +190,24 @@ pub fn wrap_degrees_f32(angle: f32) -> f32 {
     a
 }
 
-/// `Mth.square(double)`.
+/// Vanilla's own `square`.
 #[must_use]
 pub fn square_f64(v: f64) -> f64 {
     v * v
 }
 
-/// `computeModifiedFriction` from `LivingEntity` (line 515): a private helper
-/// used by air-drag and block-friction modifiers.
+/// Vanilla's own "compute modified friction": a private helper used by
+/// air-drag and block-friction modifiers.
 ///
-/// `Mth.clamp(1.0F - (1.0F - friction) * modifier, 0.0F, 1.0F)` — all in `f32`.
+/// Clamps `1.0F - (1.0F - friction) * modifier` to `[0.0F, 1.0F]` — all in
+/// `f32`.
 #[must_use]
 pub fn compute_modified_friction(friction: f32, modifier: f32) -> f32 {
     clamp_f32(1.0 - (1.0 - friction) * modifier, 0.0, 1.0)
 }
 
 /// `org.joml.Math.invsqrt(float)` — the float inverse square root that
-/// `Mth.invSqrt(float)` delegates to (`Mth.java:440-442`).
+/// vanilla's own inverse-square-root helper delegates to.
 ///
 /// **Not** the Quake-style magic-constant Newton iterate: JOML 1.10.8 (the
 /// version 26.2 ships in `libraries/org/joml/joml/1.10.8`) compiles
@@ -224,26 +227,27 @@ pub fn compute_modified_friction(friction: f32, modifier: f32) -> f32 {
 /// divergence of up to ~0.17% from the reference, verified by disassembling
 /// `Math.class` from the 26.2 cache.
 ///
-/// The only consumer is the client's own steering (`LocalPlayer.updateAutoJump`
-/// normalises its look-ahead direction through it), so a divergence could never
-/// be seen by the server's anti-cheat — but the `LocalPlayer` is the reference
-/// for client-side movement, and a wrong look-ahead changes *when* auto-jump
-/// fires, so the bits are reproduced exactly. All three widths (`f64::sqrt` is
-/// IEEE-754 correctly rounded, like `Math.sqrt`; both roundings are
-/// round-to-nearest-even, like `f2d`/`d2f`) match the JVM, so this is exact.
+/// The only consumer is the client's own steering (vanilla's own auto-jump
+/// detector normalises its look-ahead direction through it), so a divergence
+/// could never be seen by the server's anti-cheat — but that client-side
+/// player logic is the reference for client-side movement, and a wrong
+/// look-ahead changes *when* auto-jump fires, so the bits are reproduced
+/// exactly. All three widths (`f64::sqrt` is IEEE-754 correctly rounded, like
+/// `Math.sqrt`; both roundings are round-to-nearest-even, like `f2d`/`d2f`)
+/// match the JVM, so this is exact.
 #[must_use]
 pub fn inv_sqrt_f32(x: f32) -> f32 {
     1.0_f32 / (f64::from(x).sqrt() as f32)
 }
 
-/// `Math.signum(double)` — **not** Rust's [`f64::signum`].
+/// Java's own `signum` — **not** Rust's [`f64::signum`].
 ///
 /// The two disagree on zero, which is the whole reason this exists. Java returns
 /// *the argument itself* for `±0.0` (so `signum(0.0) == 0.0` and
 /// `signum(-0.0) == -0.0`), whereas Rust's `f64::signum` returns `1.0` for `0.0`
-/// and `-1.0` for `-0.0`. `Player.maybeBackOffFromEdge` computes its step as
-/// `Math.signum(deltaX) * 0.05`, so on a zero component Rust's version would
-/// manufacture a `±0.05` step out of nothing.
+/// and `-1.0` for `-0.0`. Vanilla's own sneak-at-a-ledge back-off computes
+/// its step as `Math.signum(deltaX) * 0.05`, so on a zero component Rust's
+/// version would manufacture a `±0.05` step out of nothing.
 ///
 /// It happens to be harmless *there* — the step is only read inside a
 /// `while (deltaX != 0.0)` loop, which a zero component never enters — but the
@@ -337,8 +341,8 @@ mod tests {
 
     #[test]
     fn inv_sqrt_matches_joml_reference_bits() {
-        // Authoritative regression guard: `Mth.invSqrt(float)` delegates to
-        // `org.joml.Math.invsqrt(float)` (Mth.java:440-442), which JOML 1.10.8
+        // Authoritative regression guard: vanilla's own inverse-square-root
+        // helper delegates to `org.joml.Math.invsqrt(float)`, which JOML 1.10.8
         // compiles to `1.0f / (float)Math.sqrt((double)x)` — NOT a magic-constant
         // Newton iterate. These raw `Float.floatToRawIntBits` values were dumped
         // by running the actual `joml-1.10.8.jar` from the 26.2 cache
