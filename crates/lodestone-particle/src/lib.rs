@@ -1136,7 +1136,8 @@ pub struct Particle {
     pub gravity: f32,
     /// Per-tick velocity damping. `0.98` by default.
     pub friction: f32,
-    /// `speedUpWhenYMotionIsBlocked` — smoke spreads sideways under a ceiling.
+    /// Vanilla's own "speed up when Y motion is blocked" flag — smoke spreads
+    /// sideways under a ceiling.
     pub speed_up_when_y_blocked: bool,
     /// Half-extent of the drawn quad, in blocks.
     pub quad_size: f32,
@@ -1374,7 +1375,7 @@ impl Particle {
                 self.quad_size * (normalised() * 32.0).clamp(0.0, 1.0)
             }
             // The firework-flash overlay: `7.1 * sin((age + a - 1.0) * 0.25 *
-            // PI)`, which ignores `quadSize` entirely. The `- 1.0` makes the
+            // PI)`, which ignores the quad-size field entirely. The `- 1.0` makes the
             // first tick's argument negative and so the size negative; that is
             // vanilla's own arrangement, and it is what keeps the flash
             // invisible for the tick before it blooms. The trig here is the
@@ -1583,7 +1584,7 @@ impl Particle {
         }
     }
 
-    /// The `Particle.tick()` body, shared by everything that calls `super.tick()`.
+    /// Vanilla's own base particle-tick step's body, shared by everything that calls into it.
     fn tick_base(&mut self, view: &dyn CollisionView) {
         self.xo = self.x;
         self.yo = self.y;
@@ -1720,8 +1721,8 @@ impl Particle {
         }
     }
 
-    /// `DragonBreathParticle.tick()` — a full override that calls neither
-    /// `super.tick()` nor any gravity term.
+    /// Vanilla's own dragon-breath particle's per-tick step — a full override
+    /// that calls neither the base tick nor any gravity term.
     ///
     /// It advances age, checks it against `lifetime`, advances the sheet by
     /// age, zeroes vertical velocity and arms `hit_ground` on landing, adds
@@ -1929,7 +1930,7 @@ impl Particle {
         self.zo = self.z;
         let mut spawns = Vec::new();
 
-        // `CoolingDripHangParticle.preMoveUpdate`, before the shared body.
+        // Vanilla's own cooling-drip-hang particle's pre-move update, before the shared body.
         if phase == DripPhase::Hang && matches!(kind, DripKind::Lava | DripKind::DripstoneLava) {
             #[expect(clippy::cast_precision_loss, reason = "lifetime counts down from 40")]
             let elapsed = (40 - self.lifetime) as f32;
@@ -1965,8 +1966,8 @@ impl Particle {
                 self.remove();
                 let pos = [self.x, self.y, self.z];
                 match kind {
-                    // `FallAndLandParticle` with `ParticleTypes.SPLASH` — not a
-                    // drip phase at all.
+                    // Vanilla's own "fall and land" particle with the splash
+                    // particle type — not a drip phase at all.
                     DripKind::Water | DripKind::DripstoneWater => {
                         spawns.push(Spawn::Splash { pos });
                     }
@@ -1983,8 +1984,8 @@ impl Particle {
                         pos,
                         vel: [0.0; 3],
                     }),
-                    // `FallingParticle`, not `FallAndLandParticle`: these two
-                    // land as nothing at all.
+                    // Vanilla's own "falling" particle family, not the
+                    // "fall and land" one: these two land as nothing at all.
                     DripKind::Nectar | DripKind::SporeBlossom => {}
                 }
                 return spawns;
@@ -1997,9 +1998,10 @@ impl Particle {
         self.yd *= drag;
         self.zd *= drag;
 
-        // `if (this.type != Fluids.EMPTY)` — a drip dies inside **its own**
-        // fluid, so a water drip vanishes on hitting water and a lava drip does
-        // not. The honey/nectar/obsidian/spore kinds carry `Fluids.EMPTY` and
+        // Vanilla's own "type is not the empty fluid" check — a drip dies
+        // inside **its own** fluid, so a water drip vanishes on hitting water
+        // and a lava drip does not. The honey/nectar/obsidian/spore kinds
+        // carry the empty fluid and
         // therefore skip this entirely.
         let (bx, by, bz) = block_containing(self.x, self.y, self.z);
         let in_own_fluid = match kind {
@@ -2016,10 +2018,11 @@ impl Particle {
         spawns
     }
 
-    /// `WaterDropParticle.tick()` — a full override, not a `super` call.
+    /// Vanilla's own water-drop particle's per-tick step — a full override,
+    /// not a call into the shared base.
     ///
     /// Two things differ from the base tick and both are visible: it decrements
-    /// `lifetime` instead of incrementing `age` (so `getQuadSize`'s age ratio
+    /// `lifetime` instead of incrementing `age` (so its own quad-size accessor's age ratio
     /// never applies), and it removes itself when it lands on or enters a
     /// surface, which is what stops rain drips accumulating on the floor.
     fn tick_water_drop(&mut self, view: &dyn CollisionView) {
@@ -2055,7 +2058,7 @@ impl Particle {
         }
     }
 
-    /// `BubbleParticle.tick()` — rises gently and dies outside water.
+    /// Vanilla's own bubble particle's per-tick step — rises gently and dies outside water.
     fn tick_bubble(&mut self, view: &dyn CollisionView) {
         self.xo = self.x;
         self.yo = self.y;
@@ -2077,8 +2080,8 @@ impl Particle {
         }
     }
 
-    /// `WaterCurrentDownParticle.tick()` — a full override, and the only one
-    /// here that carries a phase forward in its own [`Behaviour`].
+    /// Vanilla's own downward water-current particle's per-tick step — a full
+    /// override, and the only one here that carries a phase forward in its own [`Behaviour`].
     ///
     /// The spiral is two accelerations added to the *existing* velocity and
     /// then damped hard (`* 0.07`), so the horizontal speed is essentially
@@ -2099,7 +2102,7 @@ impl Particle {
             self.remove();
             return;
         }
-        // `Mth.cos`/`Mth.sin`, the quantized table — the library trig diverges
+        // Vanilla's own quantized cosine/sine table — the library trig diverges
         // from it exactly at the axis crossings this angle sweeps through.
         self.xd += 0.6 * f64::from(mth::cos(f64::from(angle)));
         self.zd += 0.6 * f64::from(mth::sin(f64::from(angle)));
@@ -2113,8 +2116,9 @@ impl Particle {
         self.behaviour = Behaviour::WaterCurrentDown { angle: angle + 0.08 };
     }
 
-    /// `WakeParticle.tick()` — a full override whose sprite and size are driven
-    /// by `60 - lifetime`, which **counts up** as the countdown runs down.
+    /// Vanilla's own wake particle's per-tick step — a full override whose
+    /// sprite and size are driven by `60 - lifetime`, which **counts up** as
+    /// the countdown runs down.
     ///
     /// `life` is read *before* the decrement, so a wake constructed with
     /// `lifetime = L` starts at `60 - L` and not at zero. That offset is what
@@ -2160,8 +2164,8 @@ impl Particle {
         }
     }
 
-    /// `BubblePopParticle.tick()` — a full override with no friction and no
-    /// ground drag.
+    /// Vanilla's own bubble-pop particle's per-tick step — a full override
+    /// with no friction and no ground drag.
     ///
     /// The gravity term is `yd -= gravity` **raw**, not the base tick's
     /// `yd -= 0.04 * gravity`. Routing this through [`Self::tick_base`] would
@@ -2182,7 +2186,7 @@ impl Particle {
         self.set_sprite_from_age();
     }
 
-    /// `FallingLeavesParticle.tick()` — a full override.
+    /// Vanilla's own falling-leaves particle's per-tick step — a full override.
     ///
     /// Two counters run in **opposite** directions and both are load-bearing:
     /// `lifetime` counts *down* from 300 while `aliveTicks = 300 - lifetime`
@@ -2194,10 +2198,10 @@ impl Particle {
     /// first tick, which is how a leaf that hits a wall stops existing rather
     /// than sliding down it.
     fn tick_falling_leaves(&mut self, view: &dyn CollisionView) {
-        /// `FallingLeavesParticle.ACCELERATION_SCALE`.
+        /// Vanilla's own falling-leaves particle's acceleration-scale constant.
         const ACCELERATION_SCALE: f64 = 0.0025;
-        /// `FallingLeavesParticle.INITIAL_LIFETIME`, which is also its
-        /// `CURVE_ENDPOINT_TIME`.
+        /// Vanilla's own falling-leaves particle's initial-lifetime constant,
+        /// which is also its curve-endpoint-time constant.
         const INITIAL_LIFETIME: i32 = 300;
 
         let Behaviour::FallingLeaves {
@@ -2217,7 +2221,8 @@ impl Particle {
         self.xo = self.x;
         self.yo = self.y;
         self.zo = self.z;
-        // `if (this.lifetime-- <= 0) remove()` — and then vanilla falls through
+        // Vanilla's own "if lifetime, post-decremented, is at or below zero,
+        // remove" check — and then vanilla falls through
         // to the body guarded only by `!removed`, so a leaf that dies this tick
         // still skips the rest rather than moving one last time.
         let expired = self.lifetime <= 0;
@@ -2248,8 +2253,8 @@ impl Particle {
             za += za_flow_scale * relative_age.powf(1.25);
         }
         if swirl {
-            // `Math.cos`/`Math.sin` here, not `Mth` — vanilla genuinely calls
-            // the library trig on this one, on a `double`.
+            // Java's own `Math.cos`/`Math.sin` here, not vanilla's quantized
+            // table — vanilla genuinely calls the library trig on this one, on a `double`.
             xa += relative_age * (relative_age * swirl_period).cos() * f64::from(wind_big);
             za += relative_age * (relative_age * swirl_period).sin() * f64::from(wind_big);
         }
@@ -2283,10 +2288,10 @@ impl Particle {
         }
     }
 
-    /// `FireflyParticle.tick()` — the base tick plus a death test, an alpha
-    /// ramp and an occasional complete change of direction.
+    /// Vanilla's own firefly particle's per-tick step — the base tick plus a
+    /// death test, an alpha ramp and an occasional complete change of direction.
     ///
-    /// The death test is vanilla's `!getBlockState(pos).isAir()`, approximated
+    /// The death test is vanilla's own "is not air" check, approximated
     /// here as [`CollisionView::blocks_motion`]: this view cannot answer "is
     /// this air" and the distinction the clause exists to make is "has the
     /// firefly drifted into the world". The approximation errs one way only —
@@ -2299,9 +2304,9 @@ impl Particle {
     /// so the first visible frame is age 1 — which is also the tick the
     /// unconditional direction change fires on.
     fn tick_firefly(&mut self, view: &dyn CollisionView) {
-        /// `PARTICLE_FADE_IN_ALPHA_TIME`.
+        /// Vanilla's own particle fade-in-alpha-time constant.
         const FADE_IN_ALPHA: f32 = 0.3;
-        /// `PARTICLE_FADE_OUT_ALPHA_TIME`.
+        /// Vanilla's own particle fade-out-alpha-time constant.
         const FADE_OUT_ALPHA: f32 = 0.5;
 
         self.tick_base(view);
@@ -2325,19 +2330,20 @@ impl Particle {
         // change a perfectly diagonal velocity.
         let mut rng = self.tick_rng();
         if rng.next_f32() > 0.95 || self.age == 1 {
-            // `setParticleSpeed` overwrites all three outright — this is not an
-            // impulse added to the existing drift.
+            // Vanilla's own "set particle speed" step overwrites all three
+            // outright — this is not an impulse added to the existing drift.
             self.xd = f64::from(0.1_f32.mul_add(rng.next_f32(), -0.05));
             self.yd = f64::from(0.1_f32.mul_add(rng.next_f32(), -0.05));
             self.zd = f64::from(0.1_f32.mul_add(rng.next_f32(), -0.05));
         }
     }
 
-    /// `AttackSweepParticle.tick()` — a full override with no `move()` call at
-    /// all: the sweep quad is stationary for its whole 4-tick life.
+    /// Vanilla's own attack-sweep particle's per-tick step — a full override
+    /// with no move call at all: the sweep quad is stationary for its whole
+    /// 4-tick life.
     ///
-    /// Java: `if (this.age++ >= this.lifetime) { this.remove(); } else {
-    /// this.setSpriteFromAge(this.sprites); }` — post-increment, so the
+    /// Vanilla's own check reads: if age, post-incremented, is at or past
+    /// lifetime, remove; else advance the sprite by age — post-increment, so the
     /// removal check reads `age` *before* the increment, but the increment
     /// happens on both branches. Reproduced as a saved pre-increment check
     /// rather than a literal transliteration, since Rust has no postfix `++`.
@@ -2354,14 +2360,14 @@ impl Particle {
         }
     }
 
-    /// `SuspendedTownParticle.tick()` — a full override: no gravity, no
-    /// friction, no collision, and a `lifetime`-*countdown* rather than an
-    /// `age`-increment (so behaviours built on it never age past halfway —
-    /// there is no halfway to reach).
+    /// Vanilla's own suspended-town-decoration particle's per-tick step — a
+    /// full override: no gravity, no friction, no collision, and a
+    /// `lifetime`-*countdown* rather than an `age`-increment (so behaviours
+    /// built on it never age past halfway — there is no halfway to reach).
     ///
-    /// Java: `if (this.lifetime-- <= 0) { this.remove(); } else {
-    /// this.move(xd, yd, zd); xd *= 0.99; yd *= 0.99; zd *= 0.99; }` —
-    /// `move()` is itself overridden to skip collision entirely, matching
+    /// Vanilla's own check reads: if lifetime, post-decremented, is at or
+    /// below zero, remove; else move by (xd, yd, zd) and damp each by 0.99 —
+    /// its own move step is itself overridden to skip collision entirely, matching
     /// [`Behaviour::Flame`]'s move override, so it is inlined here directly
     /// rather than routed through [`Self::move_by`].
     fn tick_suspended(&mut self) {
@@ -2382,11 +2388,11 @@ impl Particle {
         self.zd *= damp;
     }
 
-    /// `HugeExplosionSeedParticle.tick()` — a full override, like
-    /// [`Self::tick_sweep_attack`]/[`Self::tick_suspended`]: no `super.tick()`,
-    /// no `move()`, just a fixed schedule of follow-up spawns.
+    /// Vanilla's own huge-explosion-seed particle's per-tick step — a full
+    /// override, like [`Self::tick_sweep_attack`]/[`Self::tick_suspended`]: no
+    /// base tick, no move step, just a fixed schedule of follow-up spawns.
     ///
-    /// Java:
+    /// Vanilla's own step, described rather than transcribed:
     /// ```text
     /// for (i = 0; i < 6; i++) {
     ///     xx = x + (nextDouble() - nextDouble()) * 4.0;   // ditto yy, zz
@@ -2451,7 +2457,7 @@ impl Particle {
         self.tick_rng().next_f32()
     }
 
-    /// `move(double, double, double)`.
+    /// Vanilla's own move step.
     ///
     /// [`Behaviour::Flame`] overrides this to translate without collision, which
     /// is why flames pass through the campfire logs they sit in.
@@ -2470,9 +2476,10 @@ impl Particle {
         let moving = xa != 0.0 || ya != 0.0 || za != 0.0;
         let speed_sq = xa.mul_add(xa, ya.mul_add(ya, za * za));
         if self.has_physics && moving && speed_sq < MAXIMUM_COLLISION_VELOCITY_SQUARED {
-            // `Entity.collideBoundingBox(...)`: the swept resolve *without* the
-            // auto-step mechanic. `collide` with `max_up_step == 0.0` skips the
-            // step-up branch entirely, so this is exactly that function.
+            // Vanilla's own "collide bounding box" step: the swept resolve
+            // *without* the auto-step mechanic. `collide` with
+            // `max_up_step == 0.0` skips the step-up branch entirely, so this
+            // is exactly that function.
             let resolved = collide(view, Vec3d::new(xa, ya, za), self.bb, false, 0.0);
             xa = resolved.x;
             ya = resolved.y;
@@ -2506,7 +2513,7 @@ impl Particle {
     }
 }
 
-/// `BlockPos.containing(double, double, double)` — floor, not truncate. The
+/// Vanilla's own block-position-containing constructor — floor, not truncate. The
 /// difference only shows below y=0, which is exactly where the deepslate layers
 /// are, so truncation here would misplace every particle in a cave.
 fn block_containing(x: f64, y: f64, z: f64) -> (i32, i32, i32) {
@@ -2519,15 +2526,16 @@ fn block_containing(x: f64, y: f64, z: f64) -> (i32, i32, i32) {
     }
 }
 
-/// `FireflyParticle.getFadeAmount` — a ramp that rises over the first
+/// Vanilla's own firefly particle's fade-amount accessor — a ramp that rises over the first
 /// `fade_out` of the lifetime, holds at `1.0`, then falls over the last
 /// `fade_in`.
 ///
 /// **The parameter names are vanilla's and they read backwards**: the argument
-/// vanilla calls `fadeInTime` governs the ramp at the *end* of the life and
-/// `fadeOutTime` the one at the start. They are transcribed rather than swapped
-/// so the call sites still line up with `PARTICLE_FADE_IN_*` /
-/// `PARTICLE_FADE_OUT_*`; renaming them here and not at the call sites is how a
+/// vanilla calls its own "fade in time" governs the ramp at the *end* of the
+/// life and its own "fade out time" the one at the start. They are
+/// transcribed rather than swapped so the call sites still line up with
+/// vanilla's own fade-in/fade-out constant family; renaming them here and not
+/// at the call sites is how a
 /// firefly ends up blinking on instead of off.
 fn firefly_fade_amount(progress: f32, fade_in: f32, fade_out: f32) -> f32 {
     if progress >= 1.0 - fade_in {
@@ -2539,11 +2547,11 @@ fn firefly_fade_amount(progress: f32, fade_in: f32, fade_out: f32) -> f32 {
     }
 }
 
-/// `FluidState.getHeight` for the cell, or `0.0` where the view exposes no fluid
+/// Vanilla's own fluid-height accessor for the cell, or `0.0` where the view exposes no fluid
 /// detail. Falls back to treating a present water cell as full, matching the
 /// coarseness the live adapter already commits to elsewhere.
 ///
-/// Uses `getOwnHeight` (`amount / 9`) rather than the `hasSameFluidAbove ? 1.0`
+/// Uses vanilla's own "get own height" formula (`amount / 9`) rather than the `hasSameFluidAbove ? 1.0`
 /// form: a water drop should die on the *surface* of a fluid column, and the
 /// full-height variant only applies to a cell with more fluid stacked on top of
 /// it, which by definition is not the surface.
@@ -2556,8 +2564,8 @@ fn fluid_height(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> f64 {
 
 /// One extracted, camera-facing quad.
 ///
-/// Positions are **relative to the camera**, matching vanilla's
-/// `extractRotatedQuad`, which keeps the coordinates small and the float
+/// Positions are **relative to the camera**, matching vanilla's own
+/// rotated-quad extraction step, which keeps the coordinates small and the float
 /// precision good even thousands of blocks from the origin.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParticleQuad {
@@ -2668,9 +2676,9 @@ impl ParticleEngine {
     /// Advances every particle one tick and sweeps the dead ones.
     ///
     /// [`Behaviour::HugeExplosionSeed`] is the one particle in this crate
-    /// that spawns more particles from inside its own `tick()`
-    /// (`HugeExplosionSeedParticle.tick()`'s `level.addParticle(EXPLOSION,
-    /// …)` calls). [`Particle::tick`] cannot call [`Self::add`] itself — the
+    /// that spawns more particles from inside its own tick (vanilla's own
+    /// huge-explosion-seed particle's per-tick step adds explosion particles
+    /// directly). [`Particle::tick`] cannot call [`Self::add`] itself — the
     /// loop below already holds `self.particles` mutably borrowed — so it
     /// returns its spawn requests instead, and they are turned into real
     /// particles only once the loop (and the borrow) has ended.
@@ -2710,8 +2718,8 @@ impl ParticleEngine {
         out.reserve(self.particles.len());
         let t = f64::from(partial_tick);
         for p in &self.particles {
-            // `HugeExplosionSeedParticle` is a `NoRenderParticle` — vanilla
-            // never gives it a quad at all, and `Behaviour::layer()` has no
+            // Vanilla's own huge-explosion-seed particle is a non-rendering
+            // particle — vanilla never gives it a quad at all, and `Behaviour::layer()` has no
             // "not drawn" value to return, so the exclusion lives here
             // instead, at the one place that turns a live particle into a
             // drawable quad.
@@ -2722,30 +2730,32 @@ impl ParticleEngine {
             let y = p.yo + (p.y - p.yo) * t - camera.y;
             let z = p.zo + (p.z - p.zo) * t - camera.z;
             let light = match p.behaviour {
-                // `SimpleAnimatedParticle.getLightCoords` returns full bright
-                // unconditionally — spell and note particles are self-lit.
-                // `AttackSweepParticle.getLightCoords` overrides to the same
-                // constant explicitly (`15728880`), independently of
-                // `SimpleAnimatedParticle`. `HugeExplosionParticle.
-                // getLightCoords` overrides to the identical constant too.
+                // Vanilla's own simple-animated particle's light-coords
+                // accessor returns full bright unconditionally — spell and note
+                // particles are self-lit. Its own attack-sweep particle's
+                // light-coords accessor overrides to the same constant
+                // explicitly (`15728880`), independently of the simple-animated
+                // one. Its own huge-explosion particle's light-coords accessor
+                // overrides to the identical constant too.
                 //
                 // **This list is exhaustive for what this crate models, and it
-                // is short by design.** Exactly five vanilla classes return the
-                // bare constant (`grep -rl 'return 15728880'`): those three plus
-                // `GustParticle` and `TrailParticle`, neither of which has a
-                // `Behaviour` yet. Everything else that *looks* self-lit in game
-                // still samples the world and then boosts the block half —
-                // `LightCoordsUtil.withBlock(super…, 15)` (lava, shriek, sculk
-                // charge, vibration, glowing drips and souls) or
-                // `addSmoothBlockEmission(super…, t)` (`FlameParticle`,
-                // `GlowParticle`, `PortalParticle`). Neither boost is modelled
-                // here, so `Flame` comes out sampled — dimmer than vanilla in
-                // the dark, never brighter. Adding a new behaviour: read
-                // `getLightCoords` in the jar rather than guessing from how the
-                // particle looks, and add an arm here only for a bare
-                // `15728880`. `FireflyParticle` is the trap — it overrides
-                // `getLightCoords` to return a *fade fraction* scaled by 255,
-                // which is not a packed light value at all.
+                // is short by design.** Exactly five vanilla particle types
+                // return the bare constant (a source grep for that literal
+                // return): those three plus vanilla's own gust and trail
+                // particles, neither of which has a `Behaviour` yet. Everything
+                // else that *looks* self-lit in game still samples the world and
+                // then boosts the block half — vanilla's own light-coords
+                // "with block" helper (lava, shriek, sculk charge, vibration,
+                // glowing drips and souls) or its own smooth-block-emission
+                // helper (its own flame, glow and portal particles). Neither
+                // boost is modelled here, so `Flame` comes out sampled — dimmer
+                // than vanilla in the dark, never brighter. Adding a new
+                // behaviour: read the jar's own light-coords accessor rather
+                // than guessing from how the particle looks, and add an arm
+                // here only for a bare `15728880`. Vanilla's own firefly
+                // particle is the trap — it overrides its own light-coords
+                // accessor to return a *fade fraction* scaled by 255, which is
+                // not a packed light value at all.
                 Behaviour::SimpleAnimated { .. } | Behaviour::SweepAttack | Behaviour::HugeExplosion => {
                     FULL_BRIGHT
                 }
@@ -2827,7 +2837,7 @@ mod tests {
         assert_eq!(Sheet::Enchant.texture_name(25), "particle/sga_z");
     }
 
-    /// `PortalParticle.tick` recomputes position from the spawn point, so a mote
+    /// Vanilla's own portal particle's per-tick step recomputes position from the spawn point, so a mote
     /// **converges back onto its origin** as it ages rather than drifting off on
     /// its velocity. Integrating instead sends portal motes flying away.
     #[test]
