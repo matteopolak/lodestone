@@ -68,11 +68,12 @@ pub(crate) const HUD_MARGIN: f32 = 6.0;
 /// moment this changed — which is the argument for one name rather than three.
 pub const HOTBAR_MARGIN: f32 = 0.0;
 
-/// `Hud.extractPlayerHealth`'s `yLineBase`, as a distance up from the bottom of
-/// the screen: `int yLineBase = graphics.guiHeight() - 39`.
+/// Vanilla's own vitals-cluster baseline y-coordinate, as a distance up from the bottom of
+/// the screen: it is the canvas height minus 39.
 ///
-/// This is the hearts row's top *and* the hunger row's top (`extractFood` is
-/// passed `yLineBase` unchanged), and every other row in the cluster is derived
+/// This is the hearts row's top *and* the hunger row's top (vanilla's own
+/// food-row extraction is
+/// passed that baseline unchanged), and every other row in the cluster is derived
 /// from it — see [`vitals_line_base`].
 ///
 /// **It is unconditional in vanilla.** It does not move for the XP bar, the game
@@ -83,7 +84,7 @@ pub const HOTBAR_MARGIN: f32 = 0.0;
 const VITALS_LINE_BASE_FROM_BOTTOM: f32 = 39.0;
 
 /// The vitals cluster's baseline row (hearts and hunger) for a canvas `canvas_h`
-/// logical pixels tall — `Hud.extractPlayerHealth`'s `yLineBase`.
+/// logical pixels tall — vanilla's own vitals-cluster baseline y-coordinate.
 ///
 /// Public because the air-row pixel gate derives its screen rect from it. That
 /// gate's own history is why: it hardcoded `lh - 39.0` once, which silently
@@ -94,8 +95,9 @@ pub fn vitals_line_base(canvas_h: f32) -> f32 {
     canvas_h - VITALS_LINE_BASE_FROM_BOTTOM
 }
 
-/// The vertical pitch between two rows of the vitals cluster — the `10` in
-/// vanilla's `yLineArmor = yLineBase - … - 10` and `yLineAir = yLineBase - 10`.
+/// The vertical pitch between two rows of the vitals cluster — the `10` vanilla's
+/// own armour-row and air-row y-coordinates each subtract from the baseline
+/// (the armour row also subtracting further rows' worth of pitch above that).
 ///
 /// Written as the 9 px icon plus a 1 px gap, which is what it is, so the icon
 /// size and the pitch cannot drift apart.
@@ -329,21 +331,21 @@ const TAB_INK_SPECTATOR: [f32; 4] = [1.0, 1.0, 1.0, 0x90 as f32 / 255.0];
 pub struct TabPanel {
     /// Number of columns the rows are split into.
     pub cols: usize,
-    /// Rows **per column** — vanilla's `rows`, which is also the stride the
+    /// Rows **per column** — vanilla's own row count, which is also the stride the
     /// `col = i / rows` / `row = i % rows` pair indexes with.
     pub rows: usize,
     /// One column's width.
     pub slot_w: f32,
-    /// Left edge of column 0 — vanilla's `xxo`.
+    /// Left edge of column 0 — vanilla's own column-origin x-coordinate.
     pub x: f32,
-    /// Top of the **rows** block, after any header — vanilla's `yyo` at the point
-    /// the row loop starts.
+    /// Top of the **rows** block, after any header — vanilla's own row-origin
+    /// y-coordinate at the point the row loop starts.
     pub rows_top: f32,
     /// Top of the header block, or `rows_top` when there is no header.
     pub header_top: f32,
     /// Top of the footer block. Only meaningful when there is a footer.
     pub footer_top: f32,
-    /// The widest thing on screen — vanilla's `maxLineWidth`, which is the row
+    /// The widest thing on screen — vanilla's own max-line-width value, which is the row
     /// block's own width *widened* by any header or footer line that overflows
     /// it. Every plate spans this, centred on the screen.
     pub max_line_width: f32,
@@ -416,13 +418,14 @@ impl TabPanel {
         }
     }
 
-    /// Left edge of a plate — `screenWidth / 2 - maxLineWidth / 2 - 1`.
+    /// Left edge of a plate — half the screen width, minus half the max line
+    /// width, minus one.
     pub fn plate_x(&self) -> f32 {
         (self.screen_w * 0.5).floor() - (self.max_line_width * 0.5).floor() - 1.0
     }
 
-    /// A plate's width. Vanilla's `fill` runs to
-    /// `screenWidth / 2 + maxLineWidth / 2 + 1`, so this is that minus
+    /// A plate's width. Vanilla's own fill draw runs to
+    /// half the screen width plus half the max line width plus one, so this is that minus
     /// [`plate_x`](Self::plate_x).
     pub fn plate_w(&self) -> f32 {
         (self.screen_w * 0.5).floor() + (self.max_line_width * 0.5).floor() + 1.0 - self.plate_x()
@@ -650,8 +653,8 @@ pub struct DebugStats {
     /// The dimension the local player is in, as the server named it —
     /// `minecraft:overworld`, `minecraft:the_nether`, or a data pack's own id.
     ///
-    /// The last line of vanilla's `position` group is
-    /// `minecraft.level.dimension().identifier() + " FC: " + chunks.size()`, and
+    /// The last line of vanilla's own position debug group is the dimension
+    /// identifier followed by the loaded-chunk count, and
     /// this is its identifier half. Read from the local player's
     /// `lodestone_ecs::session::ServerDimension` component in `sim/step.rs`, so
     /// it follows a portal trip: that fold updates on `Respawned` as well as
@@ -734,7 +737,7 @@ pub struct ProfilerChart {
 /// cannot depend on `app`'s private `PhaseSummary` type directly, so
 /// `app::redraw` copies the fields across) plus nothing else: no colour here,
 /// because colour is assigned by wedge *position* at draw time
-/// (`hud::PROFILER_CHART_COLORS`), matching vanilla's own `getPreferredColor`
+/// (`hud::PROFILER_CHART_COLORS`), matching vanilla's own preferred-colour lookup
 /// hashing a section's identity rather than storing a colour on the model.
 #[derive(Debug, Clone, Copy)]
 pub struct ProfilerChartSlice {
@@ -1125,13 +1128,13 @@ impl DebugStats {
                 self.occlusion_walks
             ),
             String::new(),
-            // Vanilla's `memory` group is `DebugEntryMemory`'s three JVM heap
+            // Vanilla's own memory group is three JVM heap
             // lines (`Mem:`, `Allocation rate:`, `Allocated:`) plus
-            // `DebugEntryDetailedMemory`'s heap/non-heap pair. All five are JVM
+            // a heap/non-heap pair from a more detailed variant. All five are JVM
             // facts and none has an analogue here, so the group is rebuilt from
             // the three real numbers this process can measure. `Mem:` keeps
-            // vanilla's prefix but drops its `%2d%%` — that percentage is
-            // `used / maxMemory` and there is no `-Xmx` to divide by.
+            // vanilla's prefix but drops its trailing percentage — that percentage is
+            // used memory over the JVM's configured heap ceiling and there is no such ceiling to divide by.
             format!("Mem: {} MiB (RSS)", self.rss_bytes / (1024 * 1024)),
             format!("World: {} KiB", self.world_bytes / 1024),
             // `Mesh VRAM live/reserved`: the first is the spans handed out to
@@ -1149,7 +1152,7 @@ impl DebugStats {
             ),
         ]);
         if !self.adapter.is_empty() {
-            // Vanilla's `system` group — `DebugEntrySystemSpecs` — is `Java:`,
+            // Vanilla's own system group is `Java:`,
             // `CPU:`, `Display:`, the device name and the backend/driver pair.
             // The first is dropped as a JVM fact; the rest of this block is the
             // adapter, its backend and its reported limits, which are true of
@@ -1759,7 +1762,7 @@ pub struct HudFrame<'a> {
     pub recipe_toast: Option<RecipeToastView>,
     /// The advancement-completion toast, `Some` while one is inside
     /// its 5000 ms window. Drawn in the same top-right slot as
-    /// [`Self::recipe_toast`] — vanilla's `ToastManager` stacks them, and this
+    /// [`Self::recipe_toast`] — vanilla's own toast manager stacks them, and this
     /// client only ever has one queue live at a time.
     pub advancement_toast: Option<AdvancementToastView>,
 }
@@ -2049,7 +2052,7 @@ impl Default for ChatDisplayOptions {
 /// `0.0..=1.0` `chatWidth` option onto `40.0..=320.0` **screen** pixels — the
 /// same logical-canvas unit [`crate::menu::render::logical_canvas`] returns
 /// (see [`HudGeometry::build_inner`]'s own doc on why that canvas *is*
-/// vanilla's `guiScaledWidth`/`Height`), so this is directly comparable to
+/// vanilla's own scaled GUI width/height), so this is directly comparable to
 /// `Builder::w` with no further conversion.
 #[must_use]
 pub fn chat_width_px(pct: f32) -> f32 {
@@ -2065,9 +2068,9 @@ pub fn chat_height_px(pct: f32) -> f32 {
 }
 
 /// The scale factor every chat draw — scrollback, input line, suggestion popup
-/// — multiplies its geometry by: vanilla's `chatScale` option alone
-/// (`ChatComponent.getScale`, `ChatComponent.java`), matching
-/// `ChatComponent.extractRenderState`'s `pose.scale(scale, scale)` with no
+/// — multiplies its geometry by: vanilla's own chat-scale option alone,
+/// matching vanilla's own chat-widget render-state extraction, which applies
+/// that scale uniformly to both axes with no
 /// further HUD-side factor.
 ///
 /// A free function rather than a local `let` because
@@ -2079,7 +2082,7 @@ pub fn chat_pose_scale(opts: ChatDisplayOptions) -> f32 {
 }
 
 /// The top of the chat input line's glyph row, in logical-canvas pixels —
-/// vanilla's `EditBox` at `this.height - 12`.
+/// vanilla's own text-input widget, at twelve pixels above its own bottom edge.
 ///
 /// Shared by the input draw and [`suggestion_layout`] for the reason that whole
 /// function exists: the popup is placed *relative to this line*, so a second
@@ -2109,10 +2112,10 @@ pub fn chat_input_top(canvas_h: f32, pose_scale: f32) -> f32 {
 /// `input_y` while the box was open) is what silently made the vanilla gap
 /// disappear, since that coupling forces the newest row flush against the
 /// input strip's own top edge regardless of what `40` says. Used unconditionally,
-/// open or closed, for the same reason — vanilla's `chatBottom` does not
-/// change with `displayMode` either.
+/// open or closed, for the same reason — vanilla's own chat-bottom coordinate does not
+/// change with the chat's own open/closed display mode either.
 ///
-/// At the vanilla-default `chatScale` of `1.0` this is simply `canvas_h -
+/// At the vanilla-default chat-scale option of `1.0` this is simply `canvas_h -
 /// 40.0`: a fixed, real 40 logical-canvas-pixel headroom above wherever the
 /// input box happens to sit, not a restated `0`.
 #[must_use]
@@ -2581,8 +2584,9 @@ impl HudGeometry {
         //
         // `opts` is [`ChatDisplayOptions`] — see that type for the vanilla
         // field each knob reproduces. `chat_pose_scale` is vanilla's own
-        // `chatScale` option alone, exactly as `ChatComponent.extractRenderState`
-        // applies it (`pose.scale(scale, scale)`, `ChatComponent.java`) — no
+        // chat-scale option alone, exactly as vanilla's own chat-widget
+        // render-state extraction
+        // applies it, scaling both axes uniformly — no
         // further HUD-side factor. Called through the free function rather than
         // recomputed inline so this draw and [`HudRenderer::suggestion_layout`]'s
         // pointer hit-test (called from outside this function) cannot resolve
@@ -2683,7 +2687,7 @@ impl HudGeometry {
                     }
                 }
             }
-            // No leading `>` — vanilla's `ChatScreen`/`EditBox` draws no
+            // No leading `>` — vanilla's own chat-screen input widget draws no
             // prompt glyph at all, just the typed text and a caret.
             // The typed line itself is always plain (input filters `§`), so a
             // flat, non-legacy draw is right, and at **full** opacity — vanilla
@@ -2750,20 +2754,22 @@ impl HudGeometry {
             // suggestion ghost once the line is full, matching vanilla rather
             // than overlapping the last few glyphs.
             //
-            // `cursor_x` is vanilla's `cursorX`, which is `drawX` *after* the
-            // first half of the text has been drawn: `drawX = textX`, then
-            // `drawX += font.width(half) + 1` where `half` is the text **before
-            // the caret** — not the whole value, which is the second half of the
-            // same bug. Then `if (insert) { cursorX--; }`.
+            // `cursor_x` is vanilla's own cursor-x coordinate, which is the running
+            // draw cursor *after* the
+            // first half of the text has been drawn: it starts at the text
+            // origin, then advances by the width of the text **before
+            // the caret**, plus one — not the whole value, which is the second half of the
+            // same bug. It then steps back one pixel when the caret is in insert mode.
             //
             // The `+ 1` gap is conditional in vanilla, not unconditional:
-            // `drawX += font.width(charSequence) + 1;` sits *inside*
-            // `if (!displayed.isEmpty())` (`EditBox.extractWidgetRenderState`),
+            // that trailing pixel is only added inside vanilla's own
+            // non-empty-visible-text guard, in its own widget render-state
+            // extraction,
             // and the guard is on the whole visible slice rather than on the
-            // half — so an empty line reserves no pixel at all and `cursorX`
+            // half — so an empty line reserves no pixel at all and the cursor
             // stays at the text origin, while a caret at position 0 of a
             // *non*-empty line reserves the pixel and then hands it straight
-            // back through `insert`. `text_width("")` is already `0.0`, but
+            // back through the insert-mode step-back. `text_width("")` is already `0.0`, but
             // adding `chat_pose_scale` unconditionally would still reserve a
             // pixel vanilla does not for the empty case, so the `is_empty` guard
             // matters even though the width term alone would not have.
@@ -2830,7 +2836,7 @@ impl HudGeometry {
                 }
             }
         }
-        // The scrollback stacks upward from here — vanilla's own `chatBottom`
+        // The scrollback stacks upward from here — vanilla's own chat-bottom coordinate
         // (see [`chat_bottom`]'s doc), unconditional on whether the box is
         // open. This used to be `input_y - INPUT_STRIP_PAD * chat_pose_scale`
         // while open, which coupled the scrollback's anchor to the input
@@ -3197,7 +3203,7 @@ impl HudGeometry {
             // This used to yield a `vitals_base` the pip rows stacked off, so an XP
             // bar and its level number pushed the hearts up. Both branches now
             // agree with [`sprite_vitals`] and take [`vitals_line_base`] instead —
-            // vanilla's `yLineBase` does not move for the XP bar, and having the
+            // vanilla's own line-base y-coordinate does not move for the XP bar, and having the
             // two paths disagree about that was the reason the air-row gate could
             // not derive one rect for both.
             if let Some((level, progress)) = frame.xp.filter(|_| frame.can_hurt_player) {
@@ -3229,7 +3235,7 @@ impl HudGeometry {
                 }
             }
 
-            // Health / food pip rows, on vanilla's own `yLineBase` — see
+            // Health / food pip rows, on vanilla's own line-base y-coordinate — see
             // [`vitals_line_base`]. Each row is 10 pips of 2 units; a pip lights the
             // moment any of its two units is present (a deliberate simplification —
             // no half-pip art yet).
@@ -3368,12 +3374,14 @@ impl HudGeometry {
         // was a flat 2x on top of vanilla's own factor. See
         // `docs/hud-text-scale.md`.
         //
-        // `guiHeight - 72`, absolute, the way the held-item name below already
-        // reads its own `guiHeight - 59`: `extractOverlayMessage` translates the
-        // pose to `(guiWidth / 2, guiHeight - 68)` and then draws at `y = -4`, and
+        // GUI height minus 72, absolute, the way the held-item name below already
+        // reads its own GUI-height-minus-59: vanilla's own overlay-message
+        // extraction translates the
+        // pose to horizontal centre, GUI-height-minus-68, and then draws four
+        // pixels further up, and
         // it takes no game-mode or vitals-row branch of any kind. This used to
         // hang off `bars_y`, which meant it moved with the vitals cluster — so
-        // correcting `yLineBase` above would otherwise have dragged it a further
+        // correcting the baseline above would otherwise have dragged it a further
         // 3 px away from vanilla rather than leaving it alone.
         //
         // Not ported: `textWithBackdrop`'s translucent panel behind the glyphs.
@@ -3922,7 +3930,7 @@ pub fn recipe_toast_rect(canvas_w: f32, visible_portion: f32) -> (f32, f32, f32,
 /// flat fill when no GUI atlas is attached — the same jar-less degradation
 /// every other element in this module uses, and the reason a coverage gate can
 /// run headless.
-/// Vanilla's `SubtitleOverlay` layout constants, all in logical GUI pixels.
+/// Vanilla's own subtitle-overlay layout constants, all in logical GUI pixels.
 mod subtitle_layout {
     /// The row's text height; `halfHeight` is the integer half of it.
     pub(super) const ROW_H: f32 = 9.0;
@@ -4397,7 +4405,7 @@ fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) {
 struct HudAnim {
     /// Vanilla's heart-row `blink`.
     heart_blink: bool,
-    /// Vanilla's `displayHealth` — the "ghost" heart
+    /// Vanilla's own displayed-health field — the "ghost" heart
     /// overlay's total. Equal to the current health while idle.
     display_health: i32,
     /// The wall-tick index this frame resolved to (see `hud/anim::wall_tick`)
@@ -4492,7 +4500,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // gap, and `ContextualBar.top` is `guiScaledHeight - MARGIN_BOTTOM - HEIGHT`
     // — i.e. the bar sits *2px* above the
     // hotbar sprite, not 4. `hy` is already this cluster's hotbar-top in the
-    // same logical-pixel space vanilla's `guiHeight` is in, so subtracting from
+    // same logical-pixel space vanilla's own GUI-height value is in, so subtracting from
     // it (rather than restating an absolute `b.h`-based constant) is what keeps
     // this correct if the cluster's own bottom margin ever changes — the same
     // "derive from the expression the draw uses" rule the XP number below now
@@ -4506,7 +4514,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     //
     // The bar no longer feeds anything else's placement. It used to raise a
     // `cluster_top` that the hearts row stacked off, which made the hearts move
-    // depending on whether the player had XP — vanilla's `yLineBase` is a
+    // depending on whether the player had XP — vanilla's own vitals-cluster baseline is a
     // constant (see [`VITALS_LINE_BASE_FROM_BOTTOM`]) and takes no such branch.
     //
     // This is `ContextualBar::top(window)` — `guiScaledHeight - 24 - 5` —
@@ -4619,13 +4627,13 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // Hearts (health) left, hunger right, one row above the cluster. Each icon
     // is 9x9 native, stepped 8px (vanilla spacing); a container/empty backing is
     // drawn first, then a full or half overlay per two points.
-    // All three rows sit behind vanilla's single `canHurtPlayer()` gate on
-    // `extractPlayerHealth` — hearts, hunger and the bubble row are drawn by that one
+    // All three rows sit behind vanilla's own single can-hurt-player gate on
+    // its player-health extraction — hearts, hunger and the bubble row are drawn by that one
     // call, so creative and spectator show none of them. See
     // [`HudFrame::can_hurt_player`].
     let icon = 9.0;
     let step = 8.0;
-    // `yLineBase`, from vanilla's own expression rather than by stacking upward
+    // The vitals-cluster baseline, from vanilla's own expression rather than by stacking upward
     // from the hotbar. See [`vitals_line_base`]: this used to be
     // `cluster_top - icon - 4.0`, and `cluster_top` moved with the XP bar, so the
     // hearts landed on two different rows depending on the player's game mode and
@@ -4633,9 +4641,10 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     let row_y = vitals_line_base(b.h);
 
     // The armour row, one 10px line **above** the hearts and sharing their left
-    // anchor — `extractArmor`'s `xo = xLeft + i * 8` against the hearts' own
-    // `xLeft`, and `yLineArmor = yLineBase - (numHealthRows - 1) * healthRowHeight
-    // - 10`.
+    // anchor — vanilla's own armour-row x-coordinate stepping identically to the
+    // hearts' own left anchor, and its y-coordinate subtracting a further row's
+    // worth of pitch (times however many health rows there are) plus ten from the
+    // baseline.
     //
     // `numHealthRows` is `ceil((maxHealth + absorption) / 2 / 10)`, i.e. **1** for
     // every player with vanilla's 20 max health and no absorption, which collapses
@@ -4647,9 +4656,9 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // two fields exist. [`VITALS_ROW_PITCH`] is that 10, shared with the air row
     // below so the two cannot drift apart.
     //
-    // Drawn *before* the hearts because vanilla's `extractArmor` call precedes
-    // `extractHearts`, and left as a separate `if` rather than folded into the
-    // hearts' block because vanilla gates it on `armor > 0` alone — a player with
+    // Drawn *before* the hearts because vanilla's own armour extraction call precedes
+    // its hearts extraction, and left as a separate `if` rather than folded into the
+    // hearts' block because vanilla gates it on armour being positive alone — a player with
     // armour and no health packet yet still has an armour row.
     if frame.can_hurt_player
         && let Some(armour) = frame.armour
@@ -4743,33 +4752,33 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     }
 
     // Air bubbles, one row above hearts/hunger, on the same right edge
-    // (`hx + hw`) the hunger row uses — vanilla's shared `xRight`.
+    // (`hx + hw`) the hunger row uses — vanilla's own shared right anchor.
     //
-    // # `yLineBase - 10` is the whole answer, and reading only
-    // # `extractPlayerHealth` says otherwise
+    // # The baseline minus ten is the whole answer, and reading only
+    // # vanilla's player-health extraction alone says otherwise
     //
     // Three terms, and the third cancels the second. Hand-expanded from the
     // 26.2 source for a player with no mounted vehicle, `H == guiHeight`:
     //
     // | step | in | out |
     // |---|---|---|
-    // | `extractPlayerHealth`: `yLineAir = yLineBase - 10` | `H-39` | `H-49` |
-    // | `if (vehicleHearts == 0) { extractFood(…); yLineAir -= 10; }` | `H-49` | `H-59` |
-    // | `extractAirBubbles` → `getAirBubbleYLine(0, H-59)` | `H-59` | **`H-49`** |
+    // | vanilla's own player-health extraction sets the air row's y-coordinate to the baseline minus ten | `H-39` | `H-49` |
+    // | when there is no vehicle, its food extraction runs and the air row's y-coordinate steps back a further ten | `H-49` | `H-59` |
+    // | vanilla's own air-bubble extraction then resolves the final y-line from a zero vehicle-heart count and that value | `H-59` | **`H-49`** |
     //
-    // The last row is the one that is easy to miss: `getAirBubbleYLine` computes
-    // `rowOffset = getVisibleVehicleHeartRows(hearts) - 1`, and
-    // `getVisibleVehicleHeartRows(0)` is `ceil(0 / 10.0) == 0`, so `rowOffset` is
-    // **-1** and `yLineAir - rowOffset * 10` *adds* the ten straight back. The
+    // The last row is the one that is easy to miss: that final resolution computes
+    // a row offset as one less than however many vehicle-heart rows are visible, and
+    // zero vehicle hearts round up to zero such rows, so the offset is
+    // **-1** and subtracting ten times a negative offset *adds* the ten straight back. The
     // second subtraction is real but unobservable without a vehicle; its purpose
-    // is the mounted case, where no food row draws (`vehicleHearts != 0`) and a
-    // 20-heart mount gives `rowOffset == 1`, moving the bubbles up to `H-59` to
+    // is the mounted case, where no food row draws (a real vehicle heart count) and a
+    // 20-heart mount gives an offset of one, moving the bubbles up to `H-59` to
     // clear the vehicle-health row that replaced the food.
     //
-    // So the bubbles share a line with the armour row — armour on the left
-    // (`xLeft`), bubbles on the right (`xRight`) — which is what vanilla looks
-    // like. A "correction" to `yLineBase - 20` reads as obviously right from
-    // `extractPlayerHealth` alone and is wrong; this table is here so the next
+    // So the bubbles share a line with the armour row — armour on the left,
+    // bubbles on the right — which is what vanilla looks
+    // like. A "correction" to the baseline minus twenty reads as obviously right from
+    // vanilla's player-health extraction alone and is wrong; this table is here so the next
     // person re-derives it rather than re-deciding it.
     //
     // Mounted vehicles are not modelled (`HudFrame` carries no vehicle), so the
@@ -8285,8 +8294,8 @@ mod tests {
         assert!((cy - h * 0.5).abs() < 0.01, "crosshair should stay y-centred");
     }
 
-    /// The same shape one GUI-scale step up: vanilla's `calculateScale` picks 3
-    /// for a 1280x720 framebuffer at `AUTO_GUI_SCALE` (height-bound:
+    /// The same shape one GUI-scale step up: vanilla's own scale-calculation picks 3
+    /// for a 1280x720 framebuffer at its automatic GUI-scale setting (height-bound:
     /// `720/(3+1) < 240`, `720/(3+0) >= 240` at the previous step — see
     /// `calculate_gui_scale`'s own doc), so every logical-pixel constant this
     /// draw site uses should come out scaled by exactly 3, including the
@@ -8659,7 +8668,7 @@ mod tests {
 
     /// Regression gate for the player report's third defect: `hud.rs` used to
     /// draw `format!("> {input}_")` unconditionally, so a `>` prompt appeared
-    /// that vanilla's own `ChatScreen`/`EditBox` never draws. An empty input
+    /// that vanilla's own chat-screen input widget never draws. An empty input
     /// with the caret off must therefore draw *nothing* beyond its background
     /// strip, and turning the caret on must add exactly one `_` glyph — a
     /// negative control (caret off) plus a positive one (caret on) rather than
@@ -9189,8 +9198,8 @@ mod tests {
         // at `b.w == 640`, so uncapped here). With no `VanillaFont` attached,
         // `Builder::legacy_width` falls back to `item_icon::text_w`:
         // `(GLYPH_W + 1) * scale` per char, and the chat pose scale is
-        // vanilla's `chatScale` alone (`chat_pose_scale`,
-        // `ChatComponent.getScale`), `1.0` at the default, so each `a` costs
+        // vanilla's own chat-scale option alone (`chat_pose_scale`,
+        // vanilla's own scale getter), `1.0` at the default, so each `a` costs
         // `6 * 1.0 == 6`px. `floor(320 / 6) == 53` fit the first row; the
         // remaining `70 - 53 == 17` spill to a second — two rows.
         //
@@ -9211,7 +9220,7 @@ mod tests {
             geo.vertex_count(),
             5880 + 2 * 6,
             "expected exactly two wrapped rows' worth of geometry at vanilla's \
-             chatScale-only pose (one row would be 5880 + 6, three — the \
+             chat-scale-only pose (one row would be 5880 + 6, three — the \
              deleted ad-hoc 2× pitch's prediction — would be 5880 + 18)"
         );
     }
@@ -9839,10 +9848,10 @@ mod tests {
         };
         // Pairwise-distinct RGB triples, per this repo's own fixture rule —
         // a transposition or a fallback-to-base cannot hide behind a shared
-        // value. Vanilla's `red` and `gray` are hand-transcribed from
-        // `TextColor.java`'s `named("red", 16733525)` / `named("gray",
-        // 11184810)` rather than read back through `TextColor::rgb()`,
-        // which would make this `decode(encode(x)) == x`.
+        // value. Vanilla's own named `red` and `gray` chat colours are
+        // hand-transcribed from their packed RGB integers (16733525 and
+        // 11184810 respectively) rather than read back through
+        // `TextColor::rgb()`, which would make this `decode(encode(x)) == x`.
         let expected = [
             ("hex", (0x1a_u8, 0x2b_u8, 0x3c_u8)),
             ("inline §c", (0xff_u8, 0x55_u8, 0x55_u8)),
@@ -10482,7 +10491,7 @@ mod tests {
     }
 
     /// A header or footer wider than the row block **widens the plates**, and a
-    /// narrow one does not shrink them — vanilla's `maxLineWidth` starts at the
+    /// narrow one does not shrink them — vanilla's own max-line-width value starts at the
     /// block width and only ever takes a `max`.
     #[test]
     fn a_wide_banner_widens_the_plate_and_a_narrow_one_leaves_it_alone() {
@@ -11849,7 +11858,7 @@ mod tests {
         // is identical to this physical target and no scale multiplication
         // enters the picture here at all. `sprite_vitals` draws hearts at their
         // native 9×9 size (no more hardcoded ×2 — see its own doc comment), the
-        // first at `xLeft == guiWidth/2 - 91` on vanilla's own `yLineBase`.
+        // first at `xLeft == guiWidth/2 - 91` on vanilla's own vitals-cluster baseline.
         //
         // **`y0` was the hardcoded `h - 19`, and that was correct for the wrong
         // reason.** The hearts used to be stacked upward from a `cluster_top`
