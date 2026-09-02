@@ -98,10 +98,10 @@ pub struct PlayerCtx {
     /// Whether the player may drop items.
     pub can_drop: bool,
     /// The currently selected hotbar slot (0–8), a native player-inventory
-    /// index — vanilla `Inventory.selected` (`Inventory.java:57`). Consulted by
+    /// index — vanilla's own selected-slot field. Consulted by
     /// the swap-overflow path's give-back-to-inventory scan, which tries this
-    /// slot before the off-hand and before the general scan (`Inventory.
-    /// getSlotWithRemainingSpace`, `Inventory.java:224-240`). Defaults to `0`,
+    /// slot before the off-hand and before the general scan (vanilla's own
+    /// slot-with-remaining-space search). Defaults to `0`,
     /// which is also every production caller's current value — nothing yet
     /// reads the live selected hotbar slot into a `PlayerCtx` (see
     /// `lodestone-shell`'s `app.rs::send_menu_click`, which hardcodes
@@ -162,8 +162,8 @@ pub struct QuickCraftCell {
     /// amount this cell takes off the cursor.
     pub existing: i32,
     /// Whether [`count`](Self::count) was cut by the cell's cap. Vanilla draws a
-    /// clamped preview count in **yellow** (`AbstractContainerScreen.java:212-215`),
-    /// which is the whole reason this flag is carried out rather than recomputed.
+    /// clamped preview count in **yellow** (vanilla's own container-screen
+    /// extract-slot step), which is the whole reason this flag is carried out rather than recomputed.
     pub clamped: bool,
 }
 
@@ -391,11 +391,11 @@ impl Menu {
                         let placed = source.split(cap);
                         self.set_slot_item(index, Some(placed));
                         // Vanilla's `source` here is the *live* object backing
-                        // `inventory.getItem(buttonNum)` — `ItemStack.split`
-                        // (`ItemStack.java:327-332`) calls `this.shrink(...)`,
+                        // its own inventory-item lookup — vanilla's own stack-split
+                        // step calls `this.shrink(...)`,
                         // mutating it in place, so by the time
-                        // `inventory.add(targetItemStack)` runs
-                        // (`AbstractContainerMenu.java:498`) the native slot
+                        // its own inventory-add step runs
+                        // the native slot
                         // already shows the reduced remainder and can absorb the
                         // overflow via a same-slot merge. Our `ItemStack` isn't
                         // aliased, so the native slot must be written back
@@ -596,9 +596,10 @@ impl Menu {
     /// more items than cells painted so far (a creative `CLONE` drag ignores that
     /// last part).
     ///
-    /// Vanilla writes these three conditions twice — server-side in `doClick`'s
-    /// `ADD` arm (`AbstractContainerMenu.java:354-357`) and client-side in
-    /// `AbstractContainerScreen.shouldAddSlotToQuickCraft` (`:554-561`) — and it
+    /// Vanilla writes these three conditions twice — server-side in its own
+    /// click-handler's
+    /// `ADD` arm and client-side in
+    /// its own should-add-slot-to-quick-craft step — and it
     /// matters a great deal that they agree, because **the screen's paint set is
     /// the divisor for the preview and the menu's is the divisor for the
     /// distribution** (see [`quick_craft_plan`](Self::quick_craft_plan)). Two
@@ -663,11 +664,12 @@ impl Menu {
     /// What a drag would put in each painted cell if it were released now.
     ///
     /// **This is the single source of the split arithmetic.** Both the release
-    /// path ([`finish_quick_craft`](Self::finish_quick_craft), vanilla
-    /// `AbstractContainerMenu.java:377-390`) and the container screen's live
-    /// preview (vanilla `AbstractContainerScreen.extractSlot`, `:202-222`) go
+    /// path ([`finish_quick_craft`](Self::finish_quick_craft), vanilla's
+    /// own quick-craft commit step) and the container screen's live
+    /// preview (vanilla's own extract-slot step) go
     /// through it. Vanilla itself has the formula written out twice, in those two
-    /// places plus a third time in `recalculateQuickCraftRemaining` (`:248-267`);
+    /// places plus a third time in its own recalculate-quick-craft-remaining
+    /// step;
     /// keeping one copy here is what makes "the preview equals the outcome" a
     /// property of the code rather than a thing a test hopes for.
     ///
@@ -755,7 +757,7 @@ impl Menu {
     }
 
     /// Whether the drag's **end** would fill `index`, mirroring
-    /// `AbstractContainerMenu.java:379-383`. Note `>=` here where
+    /// vanilla's own quick-craft commit step. Note `>=` here where
     /// [`can_drag_place`](Self::can_drag_place)'s paint-time check has `>`: at
     /// paint time the slot is not yet in the set, at end time it is.
     ///
@@ -848,16 +850,16 @@ impl Menu {
     /// off-hand), returning whether it was fully absorbed. Used by swap
     /// overflow.
     ///
-    /// Mirrors vanilla `Inventory.add`/`addResource`/`getSlotWithRemainingSpace`/
-    /// `getFreeSlot` (`Inventory.java:195-240`, `:251-302`). Each iteration picks
-    /// **one** target slot via `getSlotWithRemainingSpace`'s priority — the
+    /// Mirrors vanilla's own inventory add/add-resource/slot-with-remaining-space/
+    /// free-slot steps. Each iteration picks
+    /// **one** target slot via vanilla's own slot-with-remaining-space priority — the
     /// *selected* hotbar slot first, then the off-hand (native
     /// [`OFFHAND_NATIVE`]), then a merge-only linear scan across natives
     /// `0..36` — and only when *none* of those already hold a mergeable stack
-    /// does it fall back to `getFreeSlot`, the first **empty** slot in `0..36`.
+    /// does it fall back to vanilla's own free-slot search, the first **empty** slot in `0..36`.
     /// The off-hand is never used as an empty-slot fallback: vanilla's
-    /// `getFreeSlot` scans only `this.items`, which it sizes at exactly 36
-    /// (`Inventory.java:56`); slot 40 only ever participates via the merge
+    /// own free-slot search scans only its own item list, which it sizes at exactly 36;
+    /// slot 40 only ever participates via the merge
     /// check. The loop re-derives the target from scratch every pass (as
     /// vanilla's `add` does by calling `addResource` repeatedly) so a stack
     /// bigger than one cap can spread across several slots.

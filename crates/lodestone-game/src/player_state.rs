@@ -409,22 +409,12 @@ impl ActionBar {
     }
 }
 
-/// The held-item name highlight above the hotbar (issue #126): vanilla's
-/// `Hud.toolHighlightTimer`, driven from `Hud.tick()`
-/// (`Hud.java:1190-1203` in the 26.2 client):
-///
-/// ```java
-/// ItemStack selected = this.minecraft.player.getInventory().getSelectedItem();
-/// if (selected.isEmpty()) {
-///     this.toolHighlightTimer = 0;
-/// } else if (this.lastToolHighlight.isEmpty()
-///     || !selected.is(this.lastToolHighlight.getItem())
-///     || !selected.getHoverName().equals(this.lastToolHighlight.getHoverName())) {
-///     this.toolHighlightTimer = (int)(40.0 * this.minecraft.options.notificationDisplayTime().get());
-/// } else if (this.toolHighlightTimer > 0) {
-///     this.toolHighlightTimer--;
-/// }
-/// ```
+/// The held-item name highlight above the hotbar: vanilla's
+/// own tool-highlight timer, driven from its own per-tick HUD update: an
+/// empty selection zeroes the timer; a selection that differs from the
+/// last-highlighted item by identity or by hover name resets the timer to
+/// `40 * notificationDisplayTime`; otherwise a running timer just counts
+/// down.
 ///
 /// Two things fall out of that which are easy to get wrong by guessing
 /// instead of reading it:
@@ -438,7 +428,7 @@ impl ActionBar {
 ///   restarts it. [`tick`](Self::tick) takes the already-resolved identity
 ///   (item id + hover name) for exactly this reason: the caller does the
 ///   name resolution once, this type only compares.
-/// * **There is no fade-*in*.** `alpha` (`Hud.java:639`,
+/// * **There is no fade-*in*.** `alpha` (vanilla's own alpha formula,
 ///   `(int)(toolHighlightTimer * 256.0F / 10.0F)`, clamped to 255) is at
 ///   maximum for any `toolHighlightTimer >= 10` — i.e. the whole hold phase —
 ///   and only ramps down across the *last* 10 ticks before hitting zero. The
@@ -459,12 +449,12 @@ pub struct HeldItemHighlight {
 
 impl HeldItemHighlight {
     /// The timer length in ticks at the default `notificationDisplayTime`
-    /// option value of `1.0` (`Hud.java:1197`,
+    /// option value of `1.0` (vanilla's own formula,
     /// `(int)(40.0 * notificationDisplayTime)`). The option itself is not
     /// modelled here — see the module-level gap this leaves.
     pub const TIMER_TICKS: i32 = 40;
     /// Ticks over which the label fades out once the timer starts expiring
-    /// (`Hud.java:639`'s divisor).
+    /// (vanilla's own alpha formula's divisor).
     pub const FADE_TICKS: f32 = 10.0;
 
     /// A new, hidden highlight.
@@ -720,7 +710,7 @@ mod fold_tests {
         let mut hi = HeldItemHighlight::new();
         assert_eq!(hi.alpha(), 0.0);
         hi.tick(Some((&item("diamond_sword"), "Diamond Sword")));
-        // `Hud.java:639`: alpha is at maximum for the whole hold phase, not
+        // Vanilla's own alpha formula: alpha is at maximum for the whole hold phase, not
         // ramped up from zero — the "magnitude" check CLAUDE.md's evidence
         // rules ask for, not just "alpha > 0".
         assert_eq!(hi.alpha(), 1.0);
@@ -767,7 +757,7 @@ mod fold_tests {
     #[test]
     fn reselecting_the_same_item_does_not_restart_the_timer() {
         // Two slots holding identical dirt: switching between them must not
-        // re-trigger the animation (`Hud.java:1194-1196`'s `is()` +
+        // re-trigger the animation (vanilla's own item-identity plus
         // hover-name equality check) — only the *timer counting down* should
         // be observed, not a reset back to full duration.
         let mut hi = HeldItemHighlight::new();
@@ -795,7 +785,7 @@ mod fold_tests {
 
     #[test]
     fn a_rename_with_the_same_item_type_restarts_the_timer() {
-        // `Hud.java:1196`: hover-name equality, not just item-type equality —
+        // Vanilla's own retrigger check: hover-name equality, not just item-type equality —
         // an anvil rename (same item id) must still restart the animation.
         let mut hi = HeldItemHighlight::new();
         hi.tick(Some((&item("diamond_sword"), "Diamond Sword")));
@@ -821,7 +811,7 @@ mod fold_tests {
     fn alpha_ramps_linearly_over_the_final_ten_ticks() {
         // Predicts the exact value at a specific tick (CLAUDE.md's *magnitude*
         // species: assert the number, not just that it decreased).
-        // `Hud.java:639`: `alpha = timer * 256 / 10`, clamped to 255, then
+        // Vanilla's own alpha formula: `alpha = timer * 256 / 10`, clamped to 255, then
         // this type normalises to `0.0..=1.0` by dividing by 255.
         let mut hi = HeldItemHighlight::new();
         hi.tick(Some((&item("stone"), "Stone")));
