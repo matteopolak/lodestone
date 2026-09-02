@@ -9,7 +9,7 @@
 //! `crates/protocol/v770/tests/world_border.rs`, and then reached **nothing** —
 //! `lodestone_model::event::route` returned `Route::NOWHERE` for every one of
 //! them. They were the largest single cluster in `docs/event-routing.md`'s island
-//! list, and epic #340 (`docs/plans/world-state.md` §B2) is the consumer side.
+//! list, and `docs/plans/world-state.md` §B2 is the consumer side.
 //!
 //! # How it works
 //!
@@ -23,8 +23,8 @@
 //!
 //! The interesting property, and the one worth stating because it is easy to get
 //! backwards: **vanilla does not clamp the centre when it is set. It clamps the
-//! edges when they are read** (`WorldBorder.java:353-384`; the plan records this
-//! at `docs/plans/world-state.md:110-126`). So `apply` stores whatever the server
+//! edges when they are read** (the plan records this
+//! at `docs/plans/world-state.md`). So `apply` stores whatever the server
 //! sent, and [`WorldBorder::min_x`] and its three siblings do the clamping. A
 //! fold that clamped on write would disagree with vanilla for any centre beyond
 //! ±[`MAX_CENTER_COORDINATE`], and would do so invisibly.
@@ -52,14 +52,14 @@
 //! * [`MAX_SIZE`] is `5.999997E7` in 26.2 and was `5.9999968E7` in 1.21. The two
 //!   differ in the seventh significant figure, so a stale value looks right.
 //! * [`DEFAULT_WARNING_TIME`] is **300**, not the `15` the field initializer
-//!   shows. `WorldBorder.java:33` says 15, `Settings.DEFAULT` (`:459`) says 300,
-//!   and `applyInitialSettings` (`:284-299`) always overwrites — and
-//!   `ServerLevel.getWorldBorder()` always calls it (`ServerLevel.java:1455`).
+//!   shows. Vanilla's own field initializer says 15, its own settings default says 300,
+//!   and its own initial-settings-apply step always overwrites — and
+//!   the level's own world-border accessor always calls it.
 //!   The 15 is dead code. Do not "correct" this back.
 //!
 //! `damage_per_block` (0.2) and the 5.0 safe zone are **not** modelled here, and
 //! that is not an omission: vanilla never sends either to the client
-//! (`PlayerList.java:268-275` registers no listener for them), so a client-side
+//! (vanilla's own player-list registers no listener for them), so a client-side
 //! copy would be a guess dressed as state.
 //!
 //! # Dependencies
@@ -69,26 +69,25 @@
 
 use lodestone_model::event::ClientEvent;
 
-/// The largest diameter a border may take, `WorldBorder.java:22`.
+/// The largest diameter a border may take, vanilla's own max-size constant.
 ///
 /// 26.2's value. 1.21 had `5.9999968E7`; see the module docs.
 pub const MAX_SIZE: f64 = 5.999_997E7;
 
 /// The magnitude each border edge is clamped to when read,
-/// `WorldBorder.java:23`.
+/// vanilla's own max-center-coordinate constant.
 pub const MAX_CENTER_COORDINATE: f64 = 2.999_998_4E7;
 
-/// Vanilla's default warning distance in blocks, `WorldBorder.java:34`.
+/// Vanilla's default warning distance in blocks.
 pub const DEFAULT_WARNING_BLOCKS: i32 = 5;
 
-/// Vanilla's *effective* default warning delay in seconds — `Settings.DEFAULT`
-/// at `WorldBorder.java:459`, not the dead `15` at `:33`. See the module docs.
+/// Vanilla's *effective* default warning delay in seconds — vanilla's own
+/// settings default, not the dead `15` field initializer. See the module docs.
 pub const DEFAULT_WARNING_TIME: i32 = 300;
 
 /// How the border's diameter behaves over time.
 ///
-/// Mirrors vanilla's `StaticBorderExtent` / `MovingBorderExtent` split
-/// (`WorldBorder.java:330-`).
+/// Mirrors vanilla's own static/moving border-extent split.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BorderExtent {
     /// A fixed diameter.
@@ -113,7 +112,7 @@ pub enum BorderExtent {
 impl BorderExtent {
     /// The diameter this extent reports at monotonic time `now_secs`.
     ///
-    /// Vanilla's `MovingBorderExtent.getSize()`: `t = elapsed / duration`, then
+    /// Vanilla's own moving-extent size getter: `t = elapsed / duration`, then
     /// `t < 1 ? lerp(t, from, to) : to`. A non-positive `duration_ms` therefore
     /// snaps to `to` — in vanilla by way of a division by zero producing an
     /// infinite `t`, here by an explicit guard, which is the same answer without
@@ -144,7 +143,7 @@ impl BorderExtent {
                 } else if t <= 0.0 {
                     from
                 } else {
-                    // `Mth.lerp(delta, start, end)`.
+                    // vanilla's own linear-interpolation helper.
                     from + t * (to - from)
                 }
             }
@@ -266,7 +265,7 @@ impl WorldBorder {
         }
     }
 
-    /// Vanilla's `lerpSizeBetween` (`WorldBorder.java:195`): equal endpoints
+    /// Vanilla's own lerp-size-between step: equal endpoints
     /// collapse to a static extent rather than a degenerate resize.
     fn extent_for_lerp(old_size: f64, new_size: f64, lerp_time_ms: i64) -> BorderExtent {
         if (old_size - new_size).abs() < f64::EPSILON {
@@ -315,7 +314,7 @@ impl WorldBorder {
 
     /// West edge at `now_secs`, clamped to ±[`MAX_CENTER_COORDINATE`].
     ///
-    /// The clamp is at read time, matching `WorldBorder.java:353-384`. See the
+    /// The clamp is at read time, matching vanilla's own edge accessors. See the
     /// module docs for why that matters.
     #[must_use]
     pub fn min_x(&self, now_secs: f64) -> f64 {
@@ -347,7 +346,7 @@ impl WorldBorder {
     /// Shortest distance from `(x, z)` to the nearest border edge at
     /// `now_secs`; negative when outside.
     ///
-    /// Vanilla's `getDistanceToBorder` (`WorldBorder.java`), which is what the
+    /// Vanilla's own distance-to-border step, which is what the
     /// warning overlay's opacity and the server's damage tick both read.
     #[must_use]
     pub fn distance_to_border(&self, x: f64, z: f64, now_secs: f64) -> f64 {
@@ -369,17 +368,17 @@ impl WorldBorder {
 mod tests {
     use super::*;
 
-    /// The expected values here come from `.cache/mc/26.2/src/`'s own literals,
-    /// transcribed in `docs/plans/world-state.md:110-126` — outside this code,
+    /// The expected values here come from the 26.2 decompile's own literals,
+    /// transcribed in `docs/plans/world-state.md` — outside this code,
     /// which is what `CLAUDE.md`'s evidence standard requires. A
     /// `decode(encode(x))` pair over our own defaults would prove nothing.
     #[test]
     fn defaults_match_vanillas_effective_settings() {
         let b = WorldBorder::default();
-        assert_eq!(b.warning_blocks, 5, "WorldBorder.java:34");
+        assert_eq!(b.warning_blocks, 5, "vanilla's own default-warning-blocks constant");
         assert_eq!(
             b.warning_time, 300,
-            "Settings.DEFAULT at WorldBorder.java:459 — not the dead 15 at :33"
+            "vanilla's own effective settings default — not the dead 15 field initializer"
         );
         assert!(!b.initialized);
         assert_eq!(b.absolute_max_size, None);
