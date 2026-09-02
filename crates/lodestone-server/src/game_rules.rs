@@ -31,8 +31,8 @@
 //!
 //! # The identifiers are snake_case in 26.2, and this is the trap
 //!
-//! Every rule was renamed. `.cache/mc/26.2/src/net/minecraft/world/level/`
-//! `gamerules/GameRules.java:24-92` is the authoritative list and it reads
+//! Every rule was renamed. Vanilla's own game-rule registration table
+//! is the authoritative list and it reads
 //! `random_tick_speed`, not `randomTickSpeed`; `spawn_mobs`, not
 //! `doMobSpawning`; `keep_inventory`, not `keepInventory`; `immediate_respawn`,
 //! not `doImmediateRespawn`. Three renames are worse than a rename, because the
@@ -61,7 +61,7 @@
 //!
 //! * **Adding a rule vanilla has and this table lacks:** add a [`GameRuleSpec`]
 //!   to [`GAME_RULES`], copying the default (and, for an integer, the `min`/`max`)
-//!   from `GameRules.java`'s own `registerBoolean`/`registerInteger` call. Do not
+//!   from vanilla's own boolean/integer rule-registration call. Do not
 //!   guess a default: `game_rule_defaults_match_the_jar` pins every one of them
 //!   against a transcription of that file, so a guessed value fails there rather
 //!   than silently shipping.
@@ -90,8 +90,8 @@ use std::sync::{Arc, Mutex};
 
 /// A rule's value, in the two shapes 26.2 actually has.
 ///
-/// `GameRules.java` registers exactly two types (`registerBoolean`,
-/// `registerInteger`); there is no float, string or enum rule, so this is a
+/// Vanilla's own registration table declares exactly two types (boolean,
+/// integer); there is no float, string or enum rule, so this is a
 /// closed set rather than a lossy simplification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameRuleValue {
@@ -237,9 +237,9 @@ impl std::error::Error for GameRuleError {}
 
 /// Every game rule 26.2 has, with its real identifier and default.
 ///
-/// Transcribed from `.cache/mc/26.2/src/net/minecraft/world/level/gamerules/`
-/// `GameRules.java:24-92` — the `registerBoolean`/`registerInteger` calls, in
-/// that file's own order. The defaults are pinned by
+/// Transcribed from vanilla's own game-rule registration table — the
+/// boolean/integer registration calls, in
+/// that table's own order. The defaults are pinned by
 /// `game_rule_defaults_match_the_jar`, so this is a table with an external
 /// oracle rather than a list someone remembered.
 ///
@@ -560,7 +560,7 @@ impl GameRules {
     ///
     /// `u32`, not `i32`, because that is what `tick_chunk` takes. The cast is
     /// lossless in one direction only, and it is safe here for a reason worth
-    /// stating: the rule's own `min` is `0` (`GameRules.java:74`,
+    /// stating: the rule's own `min` is `0` (vanilla's own registration:
     /// `integer("random_tick_speed", ..., 3, 0)`), so [`GameRules::set`] has
     /// already rejected every negative value. The `max(0)` is a second layer,
     /// not the primary one.
@@ -688,8 +688,8 @@ mod tests {
     use super::*;
 
     /// The external oracle for [`GAME_RULES`]: every identifier, type and
-    /// default, transcribed a second time from
-    /// `.cache/mc/26.2/src/net/minecraft/world/level/gamerules/GameRules.java:24-92`
+    /// default, transcribed a second time from vanilla's own game-rule
+    /// registration table
     /// as `(identifier, serialized default)`.
     ///
     /// This is a *second* transcription on purpose. It is not

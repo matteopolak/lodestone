@@ -24,7 +24,7 @@
 //! | fence gate | `FenceGateBlock.useWithoutItem` (`:143-159`) | cycle `open`, and re-face toward the player when opening |
 //! | lever | `LeverBlock.useWithoutItem` (`:63-76`) → `pull` | cycle `powered` |
 //! | button | `ButtonBlock.useWithoutItem` (`:86-95`) → `press` | set `powered = true`, schedule a release |
-//! | note block | `NoteBlock.useWithoutItem` (`NoteBlock.java:126`) → `changePitch` | cycle `note`, wrapping `24` back to `0` |
+//! | note block | vanilla's own empty-hand-use handler → `changePitch` | cycle `note`, wrapping `24` back to `0` |
 //!
 //! **`open` alone, not `open` *and* `powered`.** [`crate::redstone_openable`]'s
 //! `with_open_and_powered` writes both, because for the redstone path they move
@@ -34,7 +34,7 @@
 //!
 //! **Iron cannot be opened by hand.** `BlockSetType`'s first boolean field is
 //! `canOpenByHand`, and it is `false` for exactly two sets, `iron` and `gold`
-//! (`BlockSetType.java:11-13` for the field order; the `false` values are on the
+//! (vanilla's own block-set-type registration lists this field first; the `false` values are on the
 //! `iron` and `gold` registrations). Only iron has a door and a trapdoor, so
 //! `minecraft:iron_door` and `minecraft:iron_trapdoor` are the two blocks a hand
 //! click must refuse. Copper doors *can* be opened by hand — copper's own
@@ -61,8 +61,8 @@ use crate::redstone::with_property;
 /// already use. `tick::run_tick_loop`'s drain dispatches on it.
 pub const TICK_BUTTON: &str = "lodestone:button_release";
 
-/// `ButtonBlock`'s `ticksToStayPressed` for the stone family — `Blocks.java`'s
-/// `new ButtonBlock(BlockSetType.STONE, 20, p)`. Also the value for
+/// The button's own ticks-to-stay-pressed for the stone family — vanilla's own block
+/// registration: `new ButtonBlock(BlockSetType.STONE, 20, p)`. Also the value for
 /// `polished_blackstone_button`, which registers against the **stone** set.
 pub const STONE_BUTTON_TICKS: u64 = 20;
 

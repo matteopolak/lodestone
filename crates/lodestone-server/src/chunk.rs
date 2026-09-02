@@ -220,8 +220,8 @@ pub struct ChunkColumn {
     /// `docs/redstone-execution.md` for the measured split.
     palette_reaction: Vec<crate::redstone_graph::ReactionClass>,
     /// How many cells in each implicit 16-row window hold a randomly-ticking
-    /// state — vanilla's `LevelChunkSection.tickingBlockCount`
-    /// (`LevelChunkSection.java:16`), one entry per section, `len =
+    /// state — vanilla's own per-section ticking-block counter,
+    /// one entry per section, `len =
     /// height.div_ceil(16)`.
     ///
     /// `u16` for the same reason vanilla uses `short`: a section holds at most
@@ -333,9 +333,8 @@ impl ChunkColumn {
             blocks: SectionedBlocks::new_air(height),
             // All-air, so every section count is zero and every palette entry
             // is classified — correct by construction with no counting pass,
-            // exactly like vanilla's empty-section constructor
-            // (`LevelChunkSection.java:36-39`), which likewise does not call
-            // `recalcBlockCounts`. The one classification is still routed
+            // exactly like vanilla's own empty-section constructor,
+            // which likewise does not run the block-count recalculation. The one classification is still routed
             // through the predicate rather than hardcoded `false`, so the
             // table cannot drift from the definition.
             palette_ticking: vec![crate::random_tick::is_randomly_ticking(AIR)],
@@ -421,9 +420,9 @@ impl ChunkColumn {
             // Placeholders: this constructor *adopts* an already-populated
             // grid, so the counters cannot be right by construction the way
             // `new`'s all-air ones are. `recalc_ticking_counts` below is the
-            // one counting pass in the crate — vanilla's
-            // `recalcBlockCounts`, called from exactly the analogous
-            // constructor (`LevelChunkSection.java:33`).
+            // one counting pass in the crate — vanilla's own block-count
+            // recalculation, called from exactly the analogous
+            // constructor.
             palette_ticking: Vec::new(),
             palette_state_ids: Vec::new(),
             palette_reaction: Vec::new(),
@@ -735,8 +734,8 @@ impl ChunkColumn {
         y_local as usize / SECTION_ROWS
     }
 
-    /// Recomputes both derived ticking tables from scratch — vanilla's
-    /// `LevelChunkSection.recalcBlockCounts` (`LevelChunkSection.java:122-153`),
+    /// Recomputes both derived ticking tables from scratch — vanilla's own
+    /// block-count recalculation,
     /// kept as a named production function for the same reason vanilla keeps
     /// it: exactly one constructor needs it (the one that *adopts* an
     /// already-populated grid), and naming it says so.
@@ -1117,9 +1116,9 @@ impl ChunkColumn {
         self.blocks.heap_bytes()
     }
 
-    /// `LevelChunkSection::isRandomlyTicking`'s boolean for the 16-row window
-    /// whose lowest row is world `section_min_y` — `tickingBlockCount > 0`
-    /// (`LevelChunkSection.java:110-112`).
+    /// Vanilla's own is-randomly-ticking boolean for the 16-row window
+    /// whose lowest row is world `section_min_y` — the per-section ticking
+    /// counter being greater than zero.
     ///
     /// **O(1): one integer compare.** This is the whole point of the counters;
     /// `crate::random_tick` used to reach the identical boolean by scanning up

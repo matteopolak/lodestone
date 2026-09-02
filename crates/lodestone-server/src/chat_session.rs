@@ -8,8 +8,8 @@
 //! plus the chain position this server tracks against it. [`decide`] is the
 //! policy: given an incoming `chat` packet and (if any) the sender's
 //! announced session, it decides whether the message should be broadcast,
-//! mirroring `SignedMessageChain.Decoder`/`SignedMessageChain.Decoder.unsigned`
-//! (`.cache/mc/26.2/src/net/minecraft/network/chat/SignedMessageChain.java`).
+//! mirroring vanilla's own signed-and-unsigned decode paths for the message
+//! chain.
 //!
 //! ## What is deliberately not built here
 //!

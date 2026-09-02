@@ -402,15 +402,15 @@ impl BlockEntity {
     /// Two of the four kinds answer `None`, for two different reasons —
     /// stated here rather than left to be discovered by a missing
     /// `open_screen`:
-    /// * **[`Composter`] has no vanilla menu at all.** `ComposterBlock`'s own
-    ///   `useItemOn`/`useWithoutItem` add or empty one item per click
-    ///   directly against the block entity — there is no `AbstractContainerMenu`
-    ///   subclass for it anywhere in `.cache/mc/26.2/src/net/minecraft/world/inventory/`,
+    /// * **[`Composter`] has no vanilla menu at all.** Vanilla's own composter
+    ///   block handles a right-click and empty-hand-use by adding or emptying
+    ///   one item per click directly against the block entity — there is no
+    ///   container-menu subclass for it in vanilla's decompiled source at all,
     ///   unlike every other block entity here. A right-click on a composter is
     ///   therefore never a "screen" question at all; it needs its own
     ///   serverbound handling, not this module's.
-    /// * **[`BrewingStand`] has a real vanilla menu (`BrewingStandMenu`,
-    ///   5 slots: 3 potion bottles + ingredient + fuel) but this crate cannot
+    /// * **[`BrewingStand`] has a real vanilla menu
+    ///   (5 slots: 3 potion bottles + ingredient + fuel) but this crate cannot
     ///   open it yet**, because its slots are not [`ItemStack`]s —
     ///   `docs/block-entities.md`'s second named gap: "the brewing stand's
     ///   `Bottle` is not a real `ItemStack`" (no potion-contents component
@@ -453,16 +453,15 @@ impl BlockEntity {
             // answers, not a menu.
             | BlockEntity::Sign(_) => None,
             BlockEntity::Beacon(_) => Some("minecraft:beacon"),
-            // `MenuType.CRAFTER_3x3`'s own registry key
-            // (`.cache/mc/26.2/src`'s `MenuType.java`).
+            // Vanilla's own menu-type registry key for the 3x3 crafter.
             BlockEntity::Crafter { .. } => Some("minecraft:crafter_3x3"),
         }
     }
 
     /// This entity's own container slots, in vanilla menu order — the
-    /// furnace's `[input, fuel, output]` (`AbstractFurnaceMenu.java:63-65`,
-    /// `INGREDIENT_SLOT`/`FUEL_SLOT`/`RESULT_SLOT` = `0`/`1`/`2`) or the
-    /// hopper's 5 flat slots (`HopperMenu.java:23-24`). Empty for a variant
+    /// furnace's `[input, fuel, output]` (vanilla's own furnace-menu constants
+    /// put ingredient/fuel/result at slots `0`/`1`/`2`) or the
+    /// hopper's 5 flat slots. Empty for a variant
     /// with [`menu_name`](Self::menu_name) `None` — nothing should ever call
     /// this for one, but an empty list is the honest answer if something
     /// does, not a panic.
@@ -561,11 +560,10 @@ impl BlockEntity {
     }
 
     /// This entity's menu-local `container_set_data` properties, in vanilla
-    /// property-index order — the furnace's four burn/cook timers
-    /// (`Furnace::container_data`'s own doc comment cites
-    /// `AbstractFurnaceBlockEntity`'s `ContainerData` at `:66-104`). Empty for
-    /// every other kind: the hopper's `HopperMenu` has no `ContainerData` at
-    /// all (`HopperMenu.java` never calls `addDataSlots`), and composter/
+    /// property-index order — the furnace's four burn/cook timers (see
+    /// [`Furnace::container_data`]'s own doc comment for the property
+    /// indices). Empty for every other kind: the hopper's menu registers no
+    /// such data slots at all, and composter/
     /// brewing-stand are excluded for the same reasons
     /// [`menu_name`](Self::menu_name) gives.
     #[must_use]
@@ -970,9 +968,9 @@ impl BlockEntityRegistry {
         // Issue #321: the redstone lock. `enabled` is read from the block state
         // the caller supplies rather than recomputed here, because the block
         // state *is* vanilla's source of truth for it —
-        // `HopperBlock.checkPoweredState` (`HopperBlock.java:125-130`) writes
+        // vanilla's own powered-state check writes
         // `ENABLED` on every neighbour change and on placement, and
-        // `HopperBlockEntity` then simply obeys it. This registry has no world
+        // the hopper block entity then simply obeys it. This registry has no world
         // access to compute `hasNeighborSignal` itself, and needs none.
         hopper.tick(
             enabled,

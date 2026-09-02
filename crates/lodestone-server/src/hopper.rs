@@ -3,8 +3,7 @@
 //!
 //! # Where the truth comes from
 //!
-//! `.cache/mc/26.2/src/net/minecraft/world/level/block/entity/
-//! HopperBlockEntity.java`.
+//! Vanilla's own hopper block entity.
 //!
 //! * `HOPPER_CONTAINER_SIZE = 5` (`:33`) — [`HOPPER_SIZE`].
 //! * The cooldown is **not** the declared `MOVE_ITEM_SPEED = 8` constant
@@ -71,7 +70,7 @@
 //! * **The chained-hopper tick-skip** (`skipTickCount`, above) — needs
 //!   cross-hopper same-tick ordering this crate's tick loop does not
 //!   establish yet; [`Hopper::tick`] always uses the full 8-tick cooldown.
-//! * **Hopper minecarts** (`MinecartHopper.java`) — a different entity
+//! * **Hopper minecarts** (vanilla's own separate minecart-hopper entity) — a different entity
 //!   entirely (no cooldown field, `isGridAligned() == false`); out of scope
 //!   for a block entity issue.
 

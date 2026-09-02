@@ -1,7 +1,5 @@
-//! The fight controller — a port of `EnderDragonFight`
-//! (`.cache/mc/26.2/src/net/minecraft/world/level/dimension/end/EnderDragonFight.java`)
-//! and `DragonRespawnStage`
-//! (`.../world/level/dimension/end/DragonRespawnStage.java`): the
+//! The fight controller — a port of vanilla's own end-dimension fight
+//! controller and its respawn-stage enum: the
 //! "dragon already defeated" persisted flag, the scan for an existing
 //! crystal/dragon/portal on world load, the boss-bar *value* (not the wire
 //! packet — see the module doc below), the exit-portal block geometry, and
@@ -224,9 +222,8 @@ pub fn set_dragon_killed(state: &mut FightState) -> DeathOutcome {
     }
 }
 
-/// `EndPodiumFeature.place`, ported clause for clause
-/// (`.cache/mc/26.2/src/net/minecraft/world/level/levelgen/feature/EndPodiumFeature.java`).
-/// `origin` is `EndPodiumFeature.getLocation` — the podium block, one below
+/// Vanilla's own end-podium feature placement, ported clause for clause.
+/// `origin` is its own location getter — the podium block, one below
 /// the portal floor. `active` selects the killed-dragon (portal open,
 /// column above cleared) vs. not-yet-killed (portal floor solid, column
 /// unexcavated) variant, matching vanilla's `active` constructor flag.
@@ -366,11 +363,10 @@ pub fn gateway_position(gateway: i32) -> BlockPos {
     BlockPos::new((96.0 * angle.cos()).floor() as i32, 75, (96.0 * angle.sin()).floor() as i32)
 }
 
-/// `EndGatewayFeature.place`, ported clause for clause
-/// (`.cache/mc/26.2/src/net/minecraft/world/level/levelgen/feature/EndGatewayFeature.java`)
+/// Vanilla's own end-gateway feature placement, ported clause for clause,
 /// for the `END_GATEWAY_DELAYED` configured feature
-/// (`EndGatewayConfiguration.delayedExitSearch()`: no known exit, `exact =
-/// false`) — the only variant `EnderDragonFight.spawnNewGateway` ever places.
+/// (its delayed-exit-search configuration: no known exit, `exact =
+/// false`) — the only variant vanilla's own new-gateway spawn routine ever places.
 /// Writes a 3×5×3 box around `pos`: the centre column is
 /// `minecraft:end_gateway` (with **no exit position set** — see this
 /// function's own "What this does not attempt" note), a bedrock frame runs

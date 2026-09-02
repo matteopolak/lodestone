@@ -71,12 +71,12 @@ pub enum WorldEffect {
         /// event's variants. A constant would make every play identical.
         seed: i64,
     },
-    /// Vanilla `ClientboundLevelEventPacket` — one of the numbered composite
-    /// effects in `LevelEvent.java`, several of which (notably
+    /// Vanilla's own level-event packet — one of the numbered composite
+    /// effects vanilla's own level-event table lists, several of which (notably
     /// [`PARTICLES_DESTROY_BLOCK`]) are a sound *and* a particle burst in a
     /// single packet.
     LevelEvent {
-        /// The `LevelEvent.java` constant.
+        /// The vanilla level-event constant.
         event: i32,
         /// Block position the effect happens at.
         pos: BlockPos,
@@ -154,8 +154,7 @@ pub enum WorldEffect {
     },
 }
 
-/// `LevelEvent.PARTICLES_DESTROY_BLOCK`
-/// (`.cache/mc/26.2/src/net/minecraft/world/level/block/LevelEvent.java:56`).
+/// Vanilla's own `PARTICLES_DESTROY_BLOCK` level-event constant.
 ///
 /// The one level event worth knowing by heart: its `data` is a **block-state
 /// id**, and the client's handler plays the block's break sound *and* spawns its
@@ -163,16 +162,16 @@ pub enum WorldEffect {
 /// sound packet, which is why breaking a block needs one effect rather than two.
 pub const PARTICLES_DESTROY_BLOCK: i32 = 2001;
 
-/// `LevelEvent.COMPOSTER_FILL` (`LevelEvent.java:47`). `data` is `1` when the
-/// insert raised the composter's level (`ComposterBlock`'s own
-/// `level.levelEvent(LevelEvent.COMPOSTER_FILL, pos, success ? 1 : 0)`).
+/// Vanilla's own `COMPOSTER_FILL` level-event constant. `data` is `1` when the
+/// insert raised the composter's level (vanilla's own composter block
+/// fires this event with `data` set to whether the level actually rose).
 pub const COMPOSTER_FILL: i32 = 1500;
 
-/// `LevelEvent.SOUND_BREWING_STAND_BREW` (`LevelEvent.java:36`). `data` unused.
+/// Vanilla's own `SOUND_BREWING_STAND_BREW` level-event constant. `data` unused.
 pub const SOUND_BREWING_STAND_BREW: i32 = 1035;
 
-/// `LevelEvent.SOUND_ZOMBIE_CONVERTED` (`LevelEvent.java:23`) — vanilla's
-/// `ZombieVillager.finishConversion` fires this (`data` unused) the instant a
+/// Vanilla's own `SOUND_ZOMBIE_CONVERTED` level-event constant — vanilla's
+/// own conversion-finish routine fires this (`data` unused) the instant a
 /// cured zombie villager becomes a real villager (issue #247).
 pub const SOUND_ZOMBIE_CONVERTED: i32 = 1027;
 
@@ -337,10 +336,9 @@ pub fn block_destroyed(pos: BlockPos, state: &str) -> Option<WorldEffect> {
     })
 }
 
-/// The place sound for `state` at `pos` — vanilla's
-/// `BlockItem.place`/`Block.setPlacedBy` pair, which plays
-/// `soundType.getPlaceSound()` at `(volume + 1) / 2` and `pitch * 0.8`
-/// (`BlockItem.java`'s `SoundType`-derived call).
+/// The place sound for `state` at `pos` — vanilla's own
+/// item-place/block-placed-by pair, which plays
+/// `soundType.getPlaceSound()` at `(volume + 1) / 2` and `pitch * 0.8`.
 #[must_use]
 pub fn block_placed(pos: BlockPos, state: &str, seed: i64) -> Option<WorldEffect> {
     let id = crate::mobs::block_state_id_or_default(state)?;
@@ -359,11 +357,11 @@ pub fn block_placed(pos: BlockPos, state: &str, seed: i64) -> Option<WorldEffect
 /// The open/close sound for a door, trapdoor or fence gate whose state went
 /// from `from` to `to`, or `None` if that pair is not an open/close toggle.
 ///
-/// `DoorBlock.playSound` (`DoorBlock.java:247-248`) is a real
+/// Vanilla's own door play-sound routine is a real
 /// `level.playSound(…, SoundSource.BLOCKS, 1.0F, random.nextFloat() * 0.1F +
 /// 0.9F)` — **not** a level event, which is the thing worth checking before
-/// reaching for a `LevelEvent.SOUND_*` constant. `TrapDoorBlock.playSound`
-/// (`:118-121`) and `FenceGateBlock` (`:158`) are the same shape.
+/// reaching for a `SOUND_*` level-event constant. The trapdoor's own play-sound routine
+/// and the fence gate's are the same shape.
 ///
 /// The sound *name* is derived from the block id and validated (module doc):
 /// `minecraft:iron_door` has its own event, the modern woods

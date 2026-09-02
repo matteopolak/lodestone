@@ -1,6 +1,7 @@
 //! Command blocks (`minecraft:command_block`/`chain_command_block`/
 //! `repeating_command_block`) — the data model and pure tick semantics ported
-//! from `CommandBlockEntity.java`/`BaseCommandBlock.java`/`CommandBlock.java`,
+//! from vanilla's own command-block entity, base command-block state and
+//! command-block behaviour,
 //! the second half of issue #48's remainder.
 //!
 //! # What this closes, and what it does not
@@ -137,12 +138,12 @@ pub fn facing(state: &str) -> Direction {
     get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North)
 }
 
-/// The persistent state of one command block — `BaseCommandBlock`'s own
-/// fields plus `CommandBlockEntity`'s `powered`/`auto`/`conditionMet`, which
-/// `saveAdditional`/`loadAdditional` both fold into the same NBT compound
-/// vanilla does. Field-for-field against `BaseCommandBlock.java`, not a
+/// The persistent state of one command block — vanilla's own base
+/// command-block fields plus its block entity's `powered`/`auto`/`conditionMet`, which
+/// its own save/load routines both fold into the same NBT compound
+/// vanilla does. Field-for-field against vanilla's own base command block, not a
 /// paraphrase: `lastExecution`/`updateLastExecution` exist because
-/// `performCommand` refuses to run twice in the same game tick
+/// vanilla's own command-execution routine refuses to run twice in the same game tick
 /// (`level.getGameTime() == this.lastExecution`), which matters the moment a
 /// chain or a redstone pulse could otherwise re-trigger a block already run
 /// this tick.
@@ -399,10 +400,10 @@ pub fn ticks_after_schedule(pos: BlockPos) -> Vec<ScheduledTick<String>> {
     pending.drain_due(u64::MAX, usize::MAX)
 }
 
-/// `Direction.toYRot()` — the yaw a command block's `CommandSourceStack`
-/// faces, for `^`-relative coordinates in its own command. Vertical
-/// directions have no vanilla y-rotation (`Direction.java`'s own
-/// `IllegalStateException`); `0.0` is a documented fallback rather than a
+/// Vanilla's own direction-to-yaw conversion — the yaw a command block's
+/// command source faces, for `^`-relative coordinates in its own command. Vertical
+/// directions have no vanilla y-rotation (vanilla's own conversion throws
+/// there); `0.0` is a documented fallback rather than a
 /// port of that panic, since a command block can legally face up or down and
 /// this crate's source construction must stay total.
 #[must_use]
