@@ -153,7 +153,7 @@ impl ServerProtocol for WatchingProtocol {
 /// The cover is the load-bearing part, and the first version of this fixture got it
 /// wrong: grass with *air* above it survives, so the tick loop published nothing and
 /// the precondition assertion below fired on the first run. Vanilla's
-/// `GrassBlock.canBeGrass` kills grass under a light-blocking block, which is what
+/// own grass can-be-grass check kills grass under a light-blocking block, which is what
 /// `dampening` 15 above it means — see `random_tick`'s own table.
 ///
 /// **The light-relevant case is a torch destroyed by water, not this.** Grass↔dirt

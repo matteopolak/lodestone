@@ -217,7 +217,7 @@ fn darkness_spawns_monsters_and_light_suppresses_them() {
 ///
 /// The claim is about *proposal*, not eviction: `MobSim::remove_monsters` is not
 /// called here at all, so a monster reaching this census is one
-/// `SpawnPlacements.checkSpawnRules` let through. That distinction is the whole
+/// vanilla's own spawn-placement rule check let through. That distinction is the whole
 /// point — with only the eviction half, a monster still existed for one tick, long
 /// enough for the tick loop to publish it and a client to be sent `ADD_ENTITY`
 /// followed by `REMOVE_ENTITIES`, so monsters blinked on Peaceful.

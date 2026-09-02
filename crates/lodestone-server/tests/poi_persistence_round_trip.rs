@@ -75,7 +75,7 @@ fn a_portal_index_round_trips_through_the_poi_store() {
     let nether_records = poi_records_for_index(&index, Dimension::Nether);
     assert_eq!(overworld_records.len(), overworld_cells.len());
     assert_eq!(nether_records.len(), nether_cells.len());
-    // A portal record is never claimable — `PoiTypes.NETHER_PORTAL` registers
+    // A portal record is never claimable — vanilla's own nether-portal POI-type registration
     // `maxTickets 0` — so every converted record starts fully "occupied" in
     // the ticket sense, which is correct: it is not a workstation.
     for record in overworld_records.iter().chain(nether_records.iter()) {

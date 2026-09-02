@@ -46,7 +46,7 @@
 //! # What this deliberately does not do
 //!
 //! - **One discrete shove, not vanilla's continuous per-tick sweep.**
-//!   `PistonMovingBlockEntity.moveCollidedEntities` interpolates the moving
+//!   Vanilla's own moving-piston block entity's collided-entities routine interpolates the moving
 //!   block's shape across the whole 2-tick animation and translates an
 //!   entity by exactly as much of that sweep as it overlaps, every tick.
 //!   This crate's own move is already a one-step world write animated only
@@ -291,7 +291,7 @@ mod tests {
         // really is empty for `moving_piston` — proving the fix's whole
         // premise (see `collision_top`'s own doc for why: the census was
         // dumped with no block entity present, and vanilla's own
-        // `MovingPistonBlock.getCollisionShape` returns `Shapes.empty()` in
+        // its own moving-piston block's collision-shape getter returns `Shapes.empty()` in
         // exactly that case).
         let state_id = lodestone_data::block_states::state_id(&moving).expect("a real 26.2 state");
         let boxes = lodestone_data::collision_shapes::collision_boxes(state_id).expect("a known state id");

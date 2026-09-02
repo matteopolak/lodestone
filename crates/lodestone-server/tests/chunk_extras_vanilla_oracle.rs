@@ -194,7 +194,7 @@ fn vanilla_p_is_the_priority_value_and_the_ordinal_would_be_a_different_priority
         assert_eq!(tick_priority_from_value(value), priority);
     }
 
-    // `TickPriority.byValue`'s own out-of-range clamp.
+    // Vanilla's own by-value lookup's out-of-range clamp.
     assert_eq!(tick_priority_from_value(-99), TickPriority::ExtremelyHigh);
     assert_eq!(tick_priority_from_value(99), TickPriority::ExtremelyLow);
 }
