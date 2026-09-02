@@ -24,6 +24,13 @@ syn = { workspace = true, features = ["visit"] }
 # guard to name a file:line for a planted violation, the same way
 # `scan_confinement_dir` already does for its grep-based rules.
 proc-macro2 = { workspace = true, features = ["span-locations"] }
+# `protocol-dup`'s struct/function/dispatch-arm normalisation tokenizes a
+# cloned (attribute-stripped) `syn` item via `ToTokens::to_token_stream`
+# rather than hand-stripping comments from source text -- proc-macro2's own
+# lexer already discards comments correctly during parsing, which a
+# text-based strip cannot promise (see this crate's own note on
+# `&'static str` opening what looks like an unterminated char literal).
+quote = { workspace = true }
 # `world-coverage` enumerates its three populations from the real 26.2
 # registries rather than from a transcription of them, and resolves the entity
 # rig corpus by asking the corpus. Both crates are leaf-ish and version-free
