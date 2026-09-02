@@ -3,7 +3,7 @@
 //!
 //! Vanilla's `CreativeModeInventoryScreen`, whose contents come from
 //! [`super::creative_items::CREATIVE_TABS`] — the hand-transcribed
-//! `CreativeModeTabs.java` table that landed ahead of this screen.
+//! vanilla creative-tab declarations table that landed ahead of this screen.
 //!
 //! # Why this is not a `MenuKind`
 //!
@@ -284,9 +284,9 @@ pub fn creative_tab_title_key(index: usize) -> Option<&'static str> {
 /// `tab.isAlignedRight()`.
 ///
 /// Derived from the column rather than stored: in 26.2 `alignedRight()` is
-/// called on exactly the four tabs in columns 5 and 6 (`CreativeModeTabs.java`
-/// `:1000`, `:1022`, `:1584`, `:1631`), both rows. Re-check this against a newer
-/// `CreativeModeTabs.java` if the strip ever grows an eighth column.
+/// called on exactly the four tabs in columns 5 and 6 (vanilla's own creative-tab
+/// declarations), both rows. Re-check this against a newer
+/// version of those declarations if the strip ever grows an eighth column.
 fn aligned_right(tab: &CreativeTab) -> bool {
     tab.column >= 5
 }
@@ -1168,7 +1168,7 @@ pub enum CreativeEffect {
     ClearInventory,
 }
 
-/// Vanilla's `Inventory.setItem(buttonNum, …)` target for a `SWAP` click, as a
+/// Vanilla's own native-inventory set-item target for a `SWAP` click, as a
 /// **window-0 menu index**.
 ///
 /// Vanilla's `buttonNum` here is a *native inventory* index — `0..=8` is the hotbar
@@ -1403,7 +1403,7 @@ mod tests {
 
     /// Two creative-menu potion entries whose expected colours are computed
     /// independently by [`lodestone_data::potion::potion_color`] from
-    /// `MobEffects.java`'s own constants, and land far apart from each other and
+    /// vanilla's own mob-effect colour constants, and land far apart from each other and
     /// from the water-bottle control — the discriminating pair, and the magnitude
     /// check the module doc for `DESIGN.md`'s evidence standards calls for.
     #[test]
@@ -1490,7 +1490,7 @@ mod tests {
 
     #[test]
     fn every_tab_strip_position_is_unique() {
-        // Vanilla's own `CreativeModeTabs.validate()` invariant, applied to the
+        // Vanilla's own creative-tab-table validation invariant, applied to the
         // rects this screen actually draws rather than to the table's fields.
         let layout = creative_layout(&CreativeState::default(), 0, 2, 1280, 720);
         for (i, a) in layout.tabs.iter().enumerate() {
@@ -1566,7 +1566,7 @@ mod tests {
     }
 
     /// The three stack limits every count assertion below is measured against, read off
-    /// `Items.java`'s own `Item.Properties` rather than assumed.
+    /// vanilla's own item-registration declarations rather than assumed.
     ///
     /// **`minecraft:bucket` stacks to 16 in 26.2**, not 1 — `registerItem(ItemIds.BUCKET,
     /// … new Item.Properties().stacksTo(16))`. It is `water_bucket`/`lava_bucket`/
@@ -1865,7 +1865,7 @@ mod tests {
     }
 
     /// Vanilla's own `selectTab` coordinates
-    /// (`CreativeModeInventoryScreen.java`'s `SlotWrapper` loop), transcribed
+    /// (vanilla's own creative-inventory screen's slot-wrapper loop), transcribed
     /// against the panel origin: armour at menu indices `5..=8`
     /// (`x = 54 + col * 54, y = 6 + row * 27`), off-hand at `45` (`35, 20`).
     #[test]
