@@ -24,8 +24,8 @@ const SERVER_LIST_HEADER_H: f32 = 33.0;
 /// The same call's footer band: 60, because this screen's footer is two rows of
 /// buttons rather than one.
 pub(super) const SERVER_LIST_FOOTER_H: f32 = 60.0;
-/// `LinearLayout.vertical().spacing(4)` and both
-/// `LinearLayout.horizontal().spacing(4)` rows (`:64,66,67`).
+/// Vanilla's own vertical linear layout at spacing 4 and both
+/// horizontal linear layout at spacing 4 rows (`:64,66,67`).
 const SERVER_LIST_FOOTER_SPACING: i32 = 4;
 /// `JoinMultiplayerScreen.TOP_ROW_BUTTON_WIDTH` (`:28`) — Join Server / Direct
 /// Connection / Add Server.
@@ -41,7 +41,7 @@ const SERVER_LIST_LOWER_BUTTON_W: f32 = 74.0;
 /// turn a row index into a pixel top, and a second copy of `36.0` in `nav.rs`
 /// is exactly how the draw and the hit-test drift apart.
 pub const SERVER_LIST_ITEM_H: f32 = 36.0;
-/// `ServerSelectionList.getRowWidth()` — a
+/// Vanilla's own server-selection list's get-row-width accessor — a
 /// 305 px override of `AbstractSelectionList`'s 220.
 pub(super) const SERVER_LIST_ROW_W: f32 = 305.0;
 /// `AbstractSelectionList.Entry.CONTENT_PADDING`.
@@ -75,7 +75,7 @@ pub(super) const SERVER_ENTRY_MOTD_LINES: usize = 2;
 /// its own literal, not the content padding.
 pub(super) const SERVER_ENTRY_MOTD_INSET: f32 = SERVER_ENTRY_ICON + 2.0;
 /// A `StringWidget`'s height, which is what the title header is
-/// (`StringWidget.java`, `HeaderAndFooterLayout.addTitleHeader`).
+/// (vanilla's own string-widget type, `HeaderAndFooterLayout.addTitleHeader`).
 const SERVER_LIST_TITLE_H: f32 = 9.0;
 
 /// The MOTD and status colour, `-8355712`.
@@ -163,8 +163,8 @@ fn server_list_layout(width: f32, height: f32) -> layout::HeaderAndFooterLayout 
     let content_height = root.content_height();
     root.add_to_contents(Box::new(layout::SpacerElement::new(width, content_height)));
 
-    // `LinearLayout footer = this.layout.addToFooter(LinearLayout.vertical().spacing(4));`
-    // `footer.defaultCellSetting().alignHorizontallyCenter();` (`:64-65`) — the
+    // Vanilla's own footer layout: a vertical linear layout at spacing 4, added
+    // to the footer, with its default cell setting horizontally centred (`:64-65`) — the
     // *live* baseline, so both rows inherit the centring.
     let mut footer = layout::LinearLayout::vertical().spacing(SERVER_LIST_FOOTER_SPACING);
     {
@@ -388,7 +388,7 @@ pub fn server_row_visible(index: usize, height: f32, scroll: f32) -> bool {
 }
 
 /// Rows guaranteed visible at [`crate::config::MIN_SCALED_HEIGHT`] (vanilla's
-/// `Window.java`), so scroll-into-view (keyboard) and the wheel's fallback
+/// own gui-scale calculation), so scroll-into-view (keyboard) and the wheel's fallback
 /// clamp are correct at every canvas and merely conservative at a larger one —
 /// the same trade `options::LIST_WINDOW_PX` and `accounts::VISIBLE_ROWS` make,
 /// for the same reason named on [`server_row_visible`]: this pipeline has no
