@@ -1303,8 +1303,8 @@ pub fn plan_auto_fill(
 /// decodes neither — confirmed by grepping the packet-id constants
 /// (`RECIPE_BOOK_ADD`/`RECIPE_BOOK_REMOVE`) against `adapter.rs`, zero hits —
 /// nor is there a `ClientEvent` variant for them in `lodestone-model` to
-/// decode *into*. Both are outside this change's owned files (`crates/
-/// protocol/**` is off-limits to this change; see `docs/crafting.md`).
+/// decode *into*. Both are out of scope here (`crates/
+/// protocol/**` is a separate crate from this one; see `docs/crafting.md`).
 ///
 /// Until that lands, [`is_unlocked`](Self::is_unlocked) reports every recipe
 /// as unlocked (see its own doc comment) so the browsable panel shows the
