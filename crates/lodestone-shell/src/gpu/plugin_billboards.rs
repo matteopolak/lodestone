@@ -1,5 +1,5 @@
-//! The world-space plugin-billboard pass — the render half of issue #161
-//! (`docs/plugin-api.md`'s `ExtractSet::Debug` billboard channel), and the
+//! The world-space plugin-billboard pass — the render half of
+//! `docs/plugin-api.md`'s `ExtractSet::Debug` billboard channel, and the
 //! polled source that feeds it. `lodestone_ecs::plugin_draw` (the ECS/API
 //! half) landed with no render consumer; this module is the brokered hunk
 //! that document names, mirroring [`super::debug_lines`] file-for-file the
@@ -112,8 +112,9 @@ struct PluginBillboardCamera {
     up: [f32; 4],
 }
 
-/// Draws a plugin's world-space billboards — the render half of issue #161
-/// (`docs/plugin-api.md`). A dedicated pipeline entirely outside the model
+/// Draws a plugin's world-space billboards — the render half of the plugin
+/// draw channel documented in
+/// `docs/plugin-api.md`. A dedicated pipeline entirely outside the model
 /// shader's four bind groups (camera / atlas / palette / anim), so this
 /// addition has no bearing on the 4-bind-group floor `CLAUDE.md` warns about:
 /// group 0 is this pass's own camera uniform, group 1 its own texture +

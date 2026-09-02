@@ -50,7 +50,7 @@ pub const DEFAULT_PORT: u16 = 25565;
 pub const MAX_NAME_CHARS: usize = 48;
 
 /// This server's resource-pack policy — vanilla's
-/// `ServerData.ServerPackStatus` (`client/multiplayer/ServerData.java`),
+/// own server-pack-status enum,
 /// declared `ENABLED, DISABLED, PROMPT` in that order (the order
 /// `CycleButton` cycles forward through, and the order [`Self::cycle`]
 /// mirrors).
@@ -68,7 +68,7 @@ pub enum ServerPackPolicy {
     /// An optional pushed pack is declined with no prompt. A **required**
     /// pack still prompts — vanilla will not silently disconnect a player
     /// who never set an opinion on this particular pack
-    /// (`ClientCommonPacketListenerImpl.handleResourcePackPush`'s own
+    /// (vanilla's own server-side resource-pack-push handler's own
     /// condition: `status != PROMPT && (!required || status != DISABLED)`
     /// is the auto-apply path, so `DISABLED` only takes it when the pack is
     /// *not* required).
@@ -281,7 +281,7 @@ impl ServerList {
 
     /// Exchanges two entries, returning whether it applied.
     ///
-    /// This is vanilla's `ServerList.swap` (`client/multiplayer/ServerList.java`),
+    /// This is vanilla's own server-list swap routine,
     /// which is what the list row's move-up/move-down icons call
     ///. Both indices must be in range: a
     /// partially-applied reorder would silently drop an entry, and the caller is
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(
             data_dir(),
             lodestone_auth::paths::data_dir(),
-            "the shell must not carry its own platform lookup — see issue #67"
+            "the shell must not carry its own platform lookup"
         );
         assert!(servers_path().ends_with("servers.json"));
         assert!(servers_path().starts_with(data_dir()));
