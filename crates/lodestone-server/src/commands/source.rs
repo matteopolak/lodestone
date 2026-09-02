@@ -1,10 +1,11 @@
-//! [`CommandSource`] — vanilla's `CommandSourceStack`, minus the server handle
-//! — and the resolution of an [`EntitySelector`] against a player roster.
+//! [`CommandSource`] — the real command-source-stack shape, minus the server
+//! handle — and the resolution of an [`EntitySelector`] against a player
+//! roster.
 //!
 //! # What is here and what is deliberately not
 //!
-//! `CommandSourceStack` carries a `MinecraftServer`, a `ServerLevel` and an
-//! `Entity`. None of those can enter this crate: `lodestone-server` depends on
+//! The real command source carries a server handle, a level, and an entity.
+//! None of those can enter this crate: `lodestone-server` depends on
 //! neither `lodestone-ecs` nor a version crate (see [`crate::command`]'s module
 //! doc for the measured cost), and the browser bundle links this crate.
 //!
@@ -17,8 +18,8 @@
 //!
 //! # Selector resolution lives here, not in `lodestone-command-mc`
 //!
-//! The split mirrors vanilla's own: `EntitySelectorParser` produces the AST,
-//! `EntitySelector.findEntities(CommandSourceStack)` resolves it. Resolution
+//! The split mirrors the real one: a selector parser produces the AST, and
+//! resolving it against a command source is a separate step. Resolution
 //! needs a roster and a caller position, which the grammar crate must not know
 //! about — and keeping the AST inert is what lets [`resolve_players`] be tested
 //! against a hand-built roster with no world at all.
@@ -27,11 +28,11 @@ use lodestone_command_mc::{EntitySelector, SelectorOrder, SelectorPredicate};
 use lodestone_model::{GameMode, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
-/// Which point on an entity a `^`-local coordinate or a `facing` resolves from
-/// (`EntityAnchorArgument.Anchor`).
+/// Which point on an entity a `^`-local coordinate or a `facing` resolves
+/// from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EntityAnchor {
-    /// `feet` — the entity's own position. Vanilla's default.
+    /// `feet` — the entity's own position. The real default.
     #[default]
     Feet,
     /// `eyes` — the position plus the eye height.
@@ -42,8 +43,8 @@ pub enum EntityAnchor {
 ///
 /// `None` on [`CommandSource`] is the console (RCON): a command source with a
 /// position and a permission level but no body, which is why `/gamemode
-/// creative` with no target fails for RCON exactly as it does in vanilla
-/// (`getPlayerOrException`).
+/// creative` with no target fails for RCON exactly as it does for the real
+/// command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEntity {
     /// The profile uuid — the outbox key, and the identity the wire echoed at
@@ -139,12 +140,12 @@ pub struct PlayerCandidate {
     /// read from.
     pub rotation: Rotation,
     pub game_mode: GameMode,
-    /// `Player.experienceLevel`, the same "republished on every mutation"
+    /// The player's experience level, the same "republished on every mutation"
     /// mirror `game_mode` already is — see [`crate::players::PlayerRegistry::set_experience`].
     pub xp_level: i32,
-    /// Points *within the current level* — `Mth.floor(experienceProgress *
-    /// getXpNeededForNextLevel())`, `ExperienceCommand.java`'s own `POINTS`
-    /// query formula, **not** the lifetime total
+    /// Points *within the current level* — `floor(experienceProgress *
+    /// xp_needed_for_next_level)`, the real `/xp query … points` query
+    /// formula, **not** the lifetime total
     /// [`crate::experience::PlayerExperience::total`] tracks. `/xp query …
     /// points` is the only reader.
     pub xp_points: i32,
@@ -152,10 +153,10 @@ pub struct PlayerCandidate {
 
 /// Why a selector matched nothing, or could not be resolved.
 ///
-/// Distinguished because vanilla distinguishes them: `NO_PLAYERS_FOUND`
-/// ("argument.entity.notfound.player") is a different message from
-/// `getPlayerOrException`'s "you must be a player", and a command that reported
-/// "no players found" to the console would be actively misleading.
+/// Distinguished because the real command distinguishes them: "no players
+/// found" is a different message from "you must be a player", and a command
+/// that reported "no players found" to the console would be actively
+/// misleading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectorError {
     /// `@s` (or an implicit self target) from a source with no entity.
@@ -176,10 +177,10 @@ impl std::fmt::Display for SelectorError {
     }
 }
 
-/// `EntitySelector.findPlayers` — the AST plus a roster and a caller, to a
-/// player list.
+/// The real selector-resolution rule — the AST plus a roster and a caller,
+/// to a player list.
 ///
-/// The order of operations is vanilla's and each step matters:
+/// The order of operations is the real rule's and each step matters:
 ///
 /// 1. `@s` short-circuits to the caller (`currentEntity`), still subject to the
 ///    predicates — `@s[gamemode=creative]` legitimately matches nobody.
@@ -201,7 +202,7 @@ pub fn resolve_players(
     shuffle: &dyn Fn(usize) -> Vec<usize>,
     // `scores=` resolution: `(holder, objective) -> score`, `None` for either
     // an unknown objective or a holder with no score on a known one — both
-    // read as "the predicate fails", matching `EntitySelectorOptions.SCORES`.
+    // read as "the predicate fails", matching the real `scores=` resolution.
     // A closure rather than a `&ScoreboardHandle` because this crate must stay
     // ignorant of the scoreboard's storage shape (the module doc's "grammar
     // here, resolution there" split), and so a test can supply a hand-built
@@ -331,15 +332,15 @@ fn matches_predicates(
         // (which is a real possibility — a dead player stays connected on the
         // death screen) has one place to change.
         SelectorPredicate::Alive => true,
-        // `EntitySelectorOptions.SCORES`: every named objective must resolve
+        // The real `scores=` predicate: every named objective must resolve
         // to a score for this holder, and that score must fall in range. A
         // holder with no score on a known objective, or an objective this
         // scoreboard has never seen, both come back `None` from `score` and
-        // both refuse the match — vanilla does not distinguish them either.
+        // both refuse the match — the real rule does not distinguish them either.
         SelectorPredicate::Scores(entries) => entries.iter().all(|(objective, range)| {
             score(&candidate.username, objective).is_some_and(|value| range.matches(value))
         }),
-        // `EntitySelectorOptions.registerTeam`: compare the holder's team
+        // The real `team=` predicate: compare the holder's team
         // name (`""` when on no team) against `name` directly — see
         // `SelectorPredicate::Team`'s own doc for why there is no `Option`
         // three-way to model here.
@@ -350,9 +351,9 @@ fn matches_predicates(
 /// `distance=` and `dx`/`dy`/`dz`.
 ///
 /// The two are different shapes, not two spellings of one: `distance` is a
-/// radius in blocks and `dx dy dz` is an axis-aligned **box** whose far corner is
-/// `+1.0` past the delta (`EntitySelectorParser.createAabb`), which is why
-/// `dx=0` still selects the caller's own block column rather than nothing.
+/// radius in blocks and `dx dy dz` is an axis-aligned **box** whose far corner
+/// is `+1.0` past the delta, which is why `dx=0` still selects the caller's
+/// own block column rather than nothing.
 fn matches_region(
     candidate: &PlayerCandidate,
     selector: &EntitySelector,
