@@ -2516,8 +2516,8 @@ mod tests {
     /// added to the coordinate list for exactly that reason, so
     /// `badlands_cells > 0` below is asserted, not merely hoped for.
     ///
-    /// The predicted value set is not "some badlands block": `SurfaceSystem
-    /// .generateBands` (`.cache/mc/26.2/src/net/minecraft/world/level/levelgen/SurfaceSystem.java:286-316`)
+    /// The predicted value set is not "some badlands block": vanilla's own `SurfaceSystem
+    /// .generateBands` (lines 286-316 of its decompiled source)
     /// and this port's `generate_bands`
     /// (`crates/lodestone-worldgen/src/surface/mod.rs:170-209`) can only ever
     /// emit exactly these seven blocks: base `minecraft:terracotta`
@@ -2528,7 +2528,7 @@ mod tests {
     /// `minecraft:white_terracotta` (java:303-304, rust:197) and
     /// `minecraft:light_gray_terracotta` (java:306/310, rust:199/202) — no
     /// other block can ever come back from `Rule::Bandlands`/`getBand`
-    /// (`SurfaceSystem.java:332-334`). These are the only blocks this test's
+    /// (vanilla's own `SurfaceSystem`, lines 332-334). These are the only blocks this test's
     /// terracotta scan can match, so a false positive from an unrelated
     /// block is not possible.
     #[test]
@@ -2591,7 +2591,7 @@ mod tests {
             band_hits > 0,
             "found {badlands_cells} badlands cell(s) across {} columns but none carried any of \
              the 7 possible terracotta band blocks — SurfaceSystem.getBand \
-             (SurfaceSystem.java:332-334) / Rule::Bandlands is not reaching them",
+             (vanilla's own SurfaceSystem, lines 332-334) / Rule::Bandlands is not reaching them",
             12 * 12 + 1
         );
     }

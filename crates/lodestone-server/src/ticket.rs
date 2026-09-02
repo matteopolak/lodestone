@@ -11,28 +11,27 @@
 //!
 //! # How it works
 //!
-//! Ported in shape, not transliterated, from vanilla's
-//! `.cache/mc/26.2/src/net/minecraft/server/level/{TicketType,Ticket,
-//! DistanceManager,ChunkTracker}.java` and
-//! `.cache/mc/26.2/src/net/minecraft/world/level/TicketStorage.java`, plus
-//! `world/level/chunk/status/ChunkStatus.java` for the status pipeline and
-//! `server/level/ChunkLevel.java` for the level arithmetic:
+//! Ported in shape, not transliterated, from vanilla's own
+//! ticket-type, ticket, distance-manager and chunk-tracker types, its own
+//! ticket-storage type, plus
+//! its own chunk-status pipeline and
+//! its own chunk-level arithmetic:
 //!
 //! * A [`TicketType`] is `(timeout_ticks, flags)`. The five flags
 //!   (`FLAG_PERSIST`/`FLAG_LOADING`/`FLAG_SIMULATION`/
 //!   `FLAG_KEEP_DIMENSION_ACTIVE`/`FLAG_CAN_EXPIRE_IF_UNLOADED`) and the nine
 //!   registered constants in [`ticket_type`] are transcribed from
-//!   `TicketType.java` — the table in the plan doc is the citation for every
+//!   vanilla's own `TicketType` — the table in the plan doc is the citation for every
 //!   literal below.
 //! * A [`Ticket`] carries a **level**, not a radius: `add_ticket_with_radius`
-//!   (`TicketStorage.java`) stores exactly **one** ticket at the centre chunk,
+//!   (vanilla's own ticket-storage type) stores exactly **one** ticket at the centre chunk,
 //!   level `FULL_CHUNK_LEVEL - radius`. There is no per-chunk fan-out at
 //!   insertion time.
 //! * The level reaches neighbouring chunks through [`TicketStore::propagate`],
 //!   a **from-scratch min-fixed-point recompute**: effective level at `p` is
 //!   `min` over every active ticket `t` of `t.level + chebyshev(t.pos, p)`,
 //!   which is `ChunkTracker::computeLevelFromNeighbor == fromLevel + 1`
-//!   (`ChunkTracker.java`) unrolled to a direct distance. Vanilla's own
+//!   (vanilla's own chunk-tracker type) unrolled to a direct distance. Vanilla's own
 //!   `DynamicGraphMinFixedPoint` is incremental for a chunk count this crate
 //!   does not have yet; recomputing per tick is correct and far simpler, and
 //!   the BFS radius is bounded by `MAX_LEVEL - ticket.level` per ticket, so it
@@ -55,7 +54,7 @@
 //!   there is exactly one state transition this crate can express:
 //!   `Empty -> Full`. [`ChunkStatus::from_level`] is that whole pipeline.
 //! * **`RADIUS_AROUND_FULL_CHUNK` is `0`, not vanilla's runtime-computed value**
-//!   (at least 8, driven by `STRUCTURE_STARTS@8` in `ChunkPyramid.java`).
+//!   (at least 8, driven by `STRUCTURE_STARTS@8` in vanilla's own chunk-pyramid type).
 //!   Consequently [`MAX_LEVEL`] is `33`, not vanilla's `33 + n`. **Do not
 //!   "fix" this to match vanilla's literal** — the extra radius exists there to
 //!   generate neighbours far enough ahead that a later status step's
@@ -75,7 +74,7 @@
 //!   ticket to disk; every [`TicketStore`] is rebuilt fresh at world open. A
 //!   `FORCED` ticket (the `/forceload` case) therefore does not yet survive a
 //!   restart — a real, named gap, not an oversight.
-//! * **No per-status neighbour requirements** (`ChunkPyramid.java`'s
+//! * **No per-status neighbour requirements** (vanilla's own chunk-pyramid type's
 //!   `STRUCTURE_STARTS@8`, `BIOMES@1`, `blockStateWriteRadius(1)` on
 //!   `FEATURES`). These describe *why* vanilla needs extra radius around a
 //!   status target; with one transition there is nothing for them to gate.
@@ -106,8 +105,8 @@
 //! No env vars or flags. The vanilla constants ([`FULL_CHUNK_LEVEL`],
 //! [`ENTITY_TICKING_LEVEL`], the [`ticket_type`] table) are the only tunables,
 //! and they are transcriptions, not knobs — changing one means re-deriving it
-//! from `.cache/mc/26.2/src/net/minecraft/server/level/ChunkLevel.java` or
-//! `TicketType.java`, not picking a new number.
+//! from vanilla's own `ChunkLevel` or
+//! `TicketType`, not picking a new number.
 //!
 //! # Dependencies
 //!
@@ -122,13 +121,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Vanilla's `ChunkLevel.FULL_CHUNK_LEVEL` — the level at and below which a
-/// chunk is fully generated and loaded (`ChunkLevel.java`).
+/// chunk is fully generated and loaded (vanilla's own `ChunkLevel`).
 pub const FULL_CHUNK_LEVEL: i32 = 33;
-/// Vanilla's `ChunkLevel.BLOCK_TICKING_LEVEL` (`ChunkLevel.java`). Unused by
+/// Vanilla's `ChunkLevel.BLOCK_TICKING_LEVEL` (its own `ChunkLevel`). Unused by
 /// [`ChunkStatus`]'s two-state simplification, kept for the doc trail and for
 /// a future status split.
 pub const BLOCK_TICKING_LEVEL: i32 = 32;
-/// Vanilla's `ChunkLevel.ENTITY_TICKING_LEVEL` (`ChunkLevel.java`) — the level
+/// Vanilla's `ChunkLevel.ENTITY_TICKING_LEVEL` (its own `ChunkLevel`) — the level
 /// at and below which a chunk simulates.
 pub const ENTITY_TICKING_LEVEL: i32 = 31;
 /// Vanilla's `ChunkLevel.MAX_LEVEL` is `FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK`.
@@ -155,8 +154,8 @@ pub enum ChunkStatus {
 }
 
 impl ChunkStatus {
-    /// `Full` iff `level <= MAX_LEVEL` — vanilla's `ChunkLevel.isLoaded`
-    /// (`ChunkLevel.java`), which `ChunkMap` uses directly to decide whether a
+    /// `Full` iff `level <= MAX_LEVEL` — vanilla's own `ChunkLevel.isLoaded`,
+    /// which `ChunkMap` uses directly to decide whether a
     /// chunk belongs in `toDrop`.
     #[must_use]
     pub const fn from_level(level: i32) -> Self {
@@ -168,7 +167,7 @@ impl ChunkStatus {
     }
 }
 
-// Flag bits, transcribed from `TicketType.java`'s five `boolean` fields packed
+// Flag bits, transcribed from vanilla's own `TicketType`'s five `boolean` fields packed
 // into one byte here rather than five struct fields — the type stays `Copy`
 // and fits a `HashMap` value cheaply.
 const FLAG_PERSIST: u8 = 1;
@@ -177,7 +176,7 @@ const FLAG_SIMULATION: u8 = 4;
 const FLAG_KEEP_DIMENSION_ACTIVE: u8 = 8;
 const FLAG_CAN_EXPIRE_IF_UNLOADED: u8 = 16;
 
-/// `record TicketType(long timeout, int flags)` (`TicketType.java`). `timeout`
+/// `record TicketType(long timeout, int flags)` (vanilla's own `TicketType`). `timeout`
 /// is in ticks; `0` means "does not expire from [`TicketStore::purge_stale`]
 /// alone" (vanilla's own convention — a `FLAG_PERSIST` ticket is removed only
 /// explicitly).
@@ -198,7 +197,7 @@ impl TicketType {
     }
 }
 
-/// The nine registered ticket types, transcribed from `TicketType.java`'s own
+/// The nine registered ticket types, transcribed from vanilla's own `TicketType`'s own
 /// fields — timeout and flags exactly as that file states them.
 pub mod ticket_type {
     use super::{
@@ -207,7 +206,7 @@ pub mod ticket_type {
     };
 
     /// Timeout 20, flags 2 (loading only). Loads terrain for a joining player
-    /// before their entity exists — `PrepareSpawnTask.java`'s
+    /// before their entity exists — vanilla's own spawn-preparation task's
     /// `addTicketAndLoadWithRadius`, radius 3.
     pub const PLAYER_SPAWN: TicketType = TicketType {
         timeout: 20,
@@ -259,8 +258,8 @@ pub mod ticket_type {
     };
 }
 
-/// The radius `PLAYER_SPAWN` is granted at — `PrepareSpawnTask.java:140`'s
-/// `addTicketAndLoadWithRadius` call, the same citation `PLAYER_SPAWN`'s own
+/// The radius `PLAYER_SPAWN` is granted at — vanilla's own spawn-preparation
+/// task's `addTicketAndLoadWithRadius` call, the same citation `PLAYER_SPAWN`'s own
 /// doc comment above already carries. Named here rather than left a literal
 /// at each grant site, since [`crate::server`]'s join arm and
 /// [`ticket_type::PLAYER_SPAWN`]'s own doc both need to agree on it.
@@ -538,7 +537,7 @@ impl TicketStore {
 
     /// Every currently-resident position, ordered nearest-level-first — the
     /// answer to "priority is the ticket level" (`ChunkTaskDispatcher.submit`,
-    /// `TicketType.java`): a caller driving generation off this list visits
+    /// vanilla's own `TicketType`): a caller driving generation off this list visits
     /// the chunks vanilla's own priority queue would visit first, first.
     #[must_use]
     pub fn resident_positions_by_level(&self) -> Vec<(i32, i32)> {
@@ -721,7 +720,7 @@ mod tests {
     use super::*;
 
     /// Property 1 from `docs/plans/chunk-lifecycle.md` U4, transcribed by hand
-    /// from `ChunkLevel.java`/`TicketStorage.java` rather than derived from
+    /// from vanilla's own `ChunkLevel`/`TicketStorage` types rather than derived from
     /// this module's own code (the `decode(encode(x)) == x` trap this repo's
     /// evidence standards forbid).
     #[test]
