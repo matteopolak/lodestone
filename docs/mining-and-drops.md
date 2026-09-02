@@ -13,7 +13,7 @@ generated structures' pre-filled chests.
 ### Tool mining speed
 
 `crates/lodestone-data/src/tool.rs::mining(held, state_id) -> Option<ToolMining>`
-is vanilla's `ItemStack.getDestroySpeed` + `Player.hasCorrectToolForDrops`.
+is vanilla's own destroy-speed lookup plus its correct-tool-for-drops check.
 The obvious approach — decode `minecraft:tool` off the wire and evaluate it —
 is not enough, because most tools never carry it: a vanilla pickaxe's
 `minecraft:tool` lives in its **prototype** component map (an empty
@@ -32,7 +32,7 @@ walked.
 
 `evaluate` replays vanilla exactly: walk rules in order, first match wins
 **independently** for speed and for correct-for-drops (a rule denying drops
-does not stop the speed search), falling back to `Tool.defaultMiningSpeed`
+does not stop the speed search), falling back to vanilla's own default mining speed
 and to `!requires_correct_tool || correct.unwrap_or(false)`. The bare-hand
 case is that same formula with no rules: `speed: 1.0, correct_tool:
 !requires_correct_tool` — see [`docs/blocks.md`](./blocks.md) for why feeding
@@ -99,8 +99,8 @@ vertically never do.
 
 **Correct-tool is not a loot condition.** `drops_are_allowed` —
 `!requires_correct_tool || is_correct_tool` — gates whether `drop_block_loot`
-is even called, mirroring vanilla's `hasCorrectToolForDrops` check in
-`ServerPlayerGameMode.destroyBlock`. Folding it into the roll itself would be
+is even called, mirroring vanilla's own correct-tool-for-drops check in
+its own block-destroy entry point. Folding it into the roll itself would be
 wrong twice: the roll's RNG draws would still consume stream entries for the
 next break, and a table with no explicit tool condition would still be
 consulted. This computation is the *same* flag mining-speed's `correct_tool`
@@ -129,7 +129,7 @@ fill), so player-only rare drops and Looting bonuses never apply yet.
 `crates/lodestone-server/src/loot.rs` parses Mojang's real datapack loot-table
 JSON and rolls it with the server's own deterministic RNG — the "empty loot
 context" #337 asked for: no entity, no level, no explosion, `luck = 0`.
-Rolling replays `LootPool.addRandomItems` exactly: each pool's conditions
+Rolling replays vanilla's own pool-rolling routine exactly: each pool's conditions
 gate whether it rolls at all, a roll expands the entry tree (an
 `alternatives` stops at its first satisfied child; `group`/`sequence` expand
 every child), weights are summed and a `nextInt(totalWeight)` picks the leaf,
@@ -152,7 +152,8 @@ now separately reports conditions that are recognised but not evaluated,
 specifically because the parse-only gate could not have caught this.
 
 **A present tool changes the RNG stream even at enchantment level 0**, and
-this is the single easiest thing here to get wrong — `ApplyBonusCount.run`
+this is the single easiest thing here to get wrong — vanilla's own bonus-count
+function
 guards on `tool != null`, not on `level > 0`. The commonly-quoted
 restatement of `ore_drops` as `count * max(1, nextInt(level + 2))` is
 arithmetically right and **draw-count wrong**: it draws even at level 0,
