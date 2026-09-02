@@ -1,15 +1,16 @@
 //! The player's active status effects: the HUD's own top-right overlay, and
-//! the model layer for the column `EffectsInInventory` draws beside the
+//! the model layer for the column vanilla's own inventory-effects widget
+//! draws beside the
 //! player-inventory panel.
 //!
 //! ## Two surfaces, one state, and they are not the same widget
 //!
 //! | | HUD overlay | inventory column |
 //! |---|---|---|
-//! | vanilla | `Hud.extractEffects` | `EffectsInInventory` |
+//! | vanilla | vanilla's own HUD effects-extract routine | vanilla's own inventory-effects widget |
 //! | shown when | no screen, or a screen whose `showsActiveEffects()` is false | the player's own inventory only |
 //! | filters `show_icon` | **yes** | **no** — `getActiveEffects()` is used whole |
-//! | text | none at all | translated name plus `MobEffectUtil.formatDuration` |
+//! | text | none at all | translated name plus vanilla's own effect-duration formatter |
 //! | drawn by | `hud.rs`'s geometry builder, from [`hud_icons`] | `container::geometry`'s `draw_effect_column` |
 //!
 //! The split of *responsibility* is the part worth knowing: everything from
@@ -25,7 +26,7 @@
 //!
 //! ## The HUD overlay
 //!
-//! [`HudEffectIcon`]/[`hud_icons`] are the model for `Hud.extractEffects`, and
+//! [`HudEffectIcon`]/[`hud_icons`] are the model for vanilla's own HUD effects-extract routine, and
 //! it is now a port rather than a stand-in: a `24x24` background sprite and an
 //! `18x18` icon per effect, two rows (beneficial above, harmful below), **no
 //! text at all**, and a flashing icon alpha inside the last 200 ticks.
@@ -57,13 +58,13 @@
 
 use lodestone_game::effect::{ActiveEffects, StatusEffect};
 
-/// `Hud.EFFECT_BACKGROUND_SPRITE` — the overlay's plate behind a non-ambient
+/// vanilla's own HUD effect-background sprite — the overlay's plate behind a non-ambient
 /// effect. **Not** the inventory column's
 /// [`EFFECT_BACKGROUND_SPRITE`]: that one is
 /// `container/inventory/effect_background`, a nine-sliced widget of a
 /// different size. Two widgets, two sprites, and the pack ships both.
 pub const HUD_EFFECT_BACKGROUND_SPRITE: &str = "hud/effect_background";
-/// `Hud.EFFECT_BACKGROUND_AMBIENT_SPRITE` — the beacon/aura plate.
+/// vanilla's own HUD ambient-effect-background sprite — the beacon/aura plate.
 pub const HUD_EFFECT_BACKGROUND_AMBIENT_SPRITE: &str = "hud/effect_background_ambient";
 /// The side length the background sprite is blitted at (`24, 24`).
 pub const HUD_EFFECT_BACKGROUND_SIZE: f32 = 24.0;
@@ -82,7 +83,7 @@ pub const HUD_EFFECT_ROW_DROP: f32 = 26.0;
 /// flashes.
 const HUD_EFFECT_FLASH_TICKS: i32 = 200;
 
-/// One icon of `Hud.extractEffects`' top-right overlay, resolved but not yet
+/// One icon of vanilla's own HUD effects-extract routine' top-right overlay, resolved but not yet
 /// positioned — the layout is two counters and a subtraction, and it belongs
 /// where the canvas width is known (`hud.rs`'s geometry builder).
 ///
@@ -104,7 +105,7 @@ pub struct HudEffectIcon {
     pub beneficial: bool,
 }
 
-/// Fold the active effects into `Hud.extractEffects`' icon list.
+/// Fold the active effects into vanilla's own HUD effects-extract routine' icon list.
 ///
 /// Two differences from [`inventory_rows`], both vanilla's:
 ///
@@ -135,7 +136,7 @@ pub fn hud_icons(fx: &ActiveEffects) -> Vec<HudEffectIcon> {
         .collect()
 }
 
-/// The alpha `Hud.extractEffects` blits an effect's icon with.
+/// The alpha vanilla's own HUD effects-extract routine blits an effect's icon with.
 ///
 /// `1.0` unless the effect is non-ambient and `endsWithin(200)`, in which case
 /// it is vanilla's flash:
@@ -174,7 +175,7 @@ pub fn hud_icon_alpha(e: &StatusEffect) -> f32 {
 
 /// `MobEffect.isBeneficial()` — `category == MobEffectCategory.BENEFICIAL`.
 ///
-/// Transcribed from `MobEffects.java`'s own per-effect category argument (see
+/// Transcribed from vanilla's own mob-effects registration class's own per-effect category argument (see
 /// `docs/inventory-potion-effects.md`), which is the only place it is stated: it is a
 /// constructor argument, so it appears in no generated registry dump. Note
 /// **`NEUTRAL` is not beneficial** — `glowing`, `bad_omen`, `trial_omen` and
@@ -268,36 +269,36 @@ pub(crate) fn tint_for(path: &str) -> [f32; 3] {
     [chan(0), chan(8), chan(16)]
 }
 
-/// `EffectsInInventory.ICON_SIZE` — the effect icon's side length, and the
+/// vanilla's own effects-widget icon size — the effect icon's side length, and the
 /// size the `mob_effect/<id>` sprite is blitted at.
 pub const INV_ICON_SIZE: f32 = 18.0;
-/// `EffectsInInventory.SPACING` — the icon's inset from the widget's own
+/// vanilla's own effects-widget spacing — the icon's inset from the widget's own
 /// top-left corner, and the trailing padding in the background's width.
 pub const INV_SPACING: f32 = 7.0;
-/// `EffectsInInventory.TEXT_X_OFFSET` — where the name/duration column starts,
+/// vanilla's own effects-widget text x-offset — where the name/duration column starts,
 /// relative to the widget's left edge.
 pub const INV_TEXT_X_OFFSET: f32 = 32.0;
-/// `EffectsInInventory.SPRITE_SQUARE_SIZE` — the background widget's fixed
+/// vanilla's own effects-widget sprite square size — the background widget's fixed
 /// height, and the compact (icon-only) width used when there is no room for
 /// text.
 pub const INV_BACKGROUND: f32 = 32.0;
-/// `EffectsInInventory.extractRenderState`'s `yStep` when five or fewer
+/// vanilla's own effects-widget render-state extract routine's `yStep` when five or fewer
 /// effects are showing.
 const INV_Y_STEP: f32 = 33.0;
-/// `EffectsInInventory.extractRenderState`'s crowded-column span (`132`),
+/// vanilla's own effects-widget render-state extract routine's crowded-column span (`132`),
 /// divided by `count - 1` once more than five effects are active so the
 /// column still fits the panel's height instead of running off the bottom.
 const INV_CROWDED_SPAN: f32 = 132.0;
 
-/// `EffectsInInventory.EFFECT_BACKGROUND_SPRITE` — the nine-sliced widget
+/// vanilla's own effects-widget background sprite — the nine-sliced widget
 /// behind a non-ambient effect row.
 pub const EFFECT_BACKGROUND_SPRITE: &str = "container/inventory/effect_background";
-/// `EffectsInInventory.EFFECT_BACKGROUND_AMBIENT_SPRITE` — the same widget for
+/// vanilla's own effects-widget ambient background sprite — the same widget for
 /// a beacon/conduit (ambient) effect.
 pub const EFFECT_BACKGROUND_AMBIENT_SPRITE: &str =
     "container/inventory/effect_background_ambient";
 
-/// `Hud.getMobEffectSprite`: an effect's icon sprite id is its registry id
+/// vanilla's own get-mob-effect-sprite routine: an effect's icon sprite id is its registry id
 /// prefixed with `mob_effect/`. The art is **not** under `gui/sprites/**` —
 /// `assets/minecraft/atlases/gui.json` declares a second source directory
 /// (`{"type": "directory", "prefix": "mob_effect/", "source": "mob_effect"}`),
@@ -309,9 +310,9 @@ pub fn mob_effect_sprite(path: &str) -> String {
 }
 
 /// One row of the player-inventory effect column, resolved exactly as
-/// `EffectsInInventory.extractEffects` resolves it: a real sprite id, the
+/// vanilla's own effects-widget extract-effects routine resolves it: a real sprite id, the
 /// **translated** display name with its level suffix, and
-/// `MobEffectUtil.formatDuration`'s string.
+/// vanilla's own effect-duration formatter's string.
 ///
 /// This is the model layer for the widget. It deliberately carries no colour:
 /// vanilla draws a real icon, so a tint derived from the id would be a
@@ -328,13 +329,13 @@ pub struct InventoryEffectRow {
     /// `MobEffectUtil.formatDuration(effect, 1.0, 20.0)`: `mm:ss`, `hh:mm:ss`
     /// past an hour, or the translated `effect.duration.infinite` (`∞`).
     pub duration: String,
-    /// `MobEffectInstance.isAmbient` — selects the ambient background sprite.
+    /// vanilla's own effect-instance ambient flag — selects the ambient background sprite.
     pub ambient: bool,
 }
 
 /// The game's fixed tick rate, which is what
 /// `Level.tickRateManager().tickrate()` reports for an ordinary world and what
-/// `StringUtil.formatTickDuration` divides by. A server running
+/// vanilla's own tick-duration formatter divides by. A server running
 /// `/tick rate` would report something else; this client has no
 /// `TickRateManager`, so the constant is the honest value rather than a
 /// placeholder.
@@ -356,7 +357,7 @@ fn effect_display_name(
     translate(&key).unwrap_or(key)
 }
 
-/// `EffectsInInventory.getEffectName`: the display name, plus a space and
+/// vanilla's own effects-widget get-effect-name routine: the display name, plus a space and
 /// `enchantment.level.<amplifier + 1>` when the amplifier is `1..=9`.
 ///
 /// The bound is vanilla's: amplifier `0` shows no suffix at all (level I is
@@ -412,7 +413,7 @@ fn effect_color(path: &str) -> Option<u32> {
     lodestone_data::mob_effects::mob_effect_color(id)
 }
 
-/// `MobEffectInstance.compareTo` — the order
+/// vanilla's own effect-instance comparator — the order
 /// `Ordering.natural().sortedCopy(activeEffects)` puts the column in.
 ///
 /// Two branches, and which one applies depends on the pair: while either
@@ -421,7 +422,7 @@ fn effect_color(path: &str) -> Option<u32> {
 /// shorter duration, then colour. Otherwise (both long and both ambient) only
 /// ambience and colour are compared.
 fn natural_order(a: &StatusEffect, b: &StatusEffect) -> std::cmp::Ordering {
-    /// `MobEffectInstance.compareTo`'s `updateCutOff`.
+    /// vanilla's own effect-instance comparator's `updateCutOff`.
     const UPDATE_CUT_OFF: i32 = 32147;
     // `isInfiniteDuration()` is `duration == -1`, so an infinite effect's raw
     // `getDuration()` is `-1` and therefore *is* `<= 32147` — the first branch
@@ -447,7 +448,7 @@ fn natural_order(a: &StatusEffect, b: &StatusEffect) -> std::cmp::Ordering {
 /// `&|_| None` yields raw keys, which is the jar-less degradation every other
 /// translated surface in this crate takes — not a design choice about naming.
 ///
-/// Unlike the HUD's own top-right overlay, `EffectsInInventory` does **not**
+/// Unlike the HUD's own top-right overlay, vanilla's own inventory-effects widget does **not**
 /// filter on `showIcon`: `getActiveEffects()` is used whole, so a
 /// `show_icon = false` effect still occupies a row here.
 #[must_use]
@@ -469,7 +470,7 @@ pub fn inventory_rows(
 }
 
 /// Where the inventory effect column starts, and how much width it has to
-/// work with — `EffectsInInventory.canSeeEffects`/`extractRenderState`
+/// work with — vanilla's own effects-widget can-see-effects check/`extractRenderState`
 /// (`26.2`): `x0 = leftPos + imageWidth + 2`, `availableWidth = screenWidth -
 /// x0`. Real 26.2 source, read directly — **not** the older
 /// `EffectRenderingInventoryScreen` shape some descriptions of this feature
@@ -478,20 +479,21 @@ pub fn inventory_rows(
 /// recipe-book-shifted layout, untouched by whether any effect is active) —
 /// it only decides whether there is *already* enough free canvas beside the
 /// panel to draw into. A panel-shifting "make room" step does not exist in
-/// this version's `EffectsInInventory`/`InventoryScreen`, so this port does
+/// this version's vanilla, either in the inventory-effects widget or the
+/// inventory screen itself, so this port does
 /// not add one either.
 #[must_use]
 pub fn inventory_column_x0(panel_x: f32, panel_width: f32) -> f32 {
     panel_x + panel_width + 2.0
 }
 
-/// `EffectsInInventory.canSeeEffects`: `availableWidth >= 32`.
+/// vanilla's own effects-widget can-see-effects check: `availableWidth >= 32`.
 #[must_use]
 pub fn inventory_can_see_effects(available_width: f32) -> bool {
     available_width >= INV_BACKGROUND
 }
 
-/// `EffectsInInventory.extractRenderState`'s `maxWidth`:
+/// vanilla's own effects-widget render-state extract routine's `maxWidth`:
 /// `availableWidth >= 120 ? availableWidth - 7 : 32`.
 #[must_use]
 pub fn inventory_max_width(available_width: f32) -> f32 {
@@ -502,7 +504,7 @@ pub fn inventory_max_width(available_width: f32) -> f32 {
     }
 }
 
-/// `EffectsInInventory.extractRenderState`'s `yStep`: `33` for five or fewer
+/// vanilla's own effects-widget render-state extract routine's `yStep`: `33` for five or fewer
 /// active effects, `132 / (count - 1)` above that so a crowded column still
 /// fits between `topPos` and the bottom of the panel instead of overflowing.
 #[must_use]
@@ -514,7 +516,7 @@ pub fn inventory_y_step(count: usize) -> f32 {
     }
 }
 
-/// `EffectsInInventory.extractBackground`'s `textureWidth`:
+/// vanilla's own effects-widget background extract routine's `textureWidth`:
 /// `min(maxTextureWidth, max(32 + width(name) + 7, 32 + width(duration) + 7))`.
 ///
 /// `width` is the caller's own font metric, so this stays font-agnostic — the
@@ -649,7 +651,7 @@ mod tests {
     /// `MobEffectCategory` fact (`harmful` on each tooltip entry). Two tables
     /// stating one thing is a drift hazard, so they are checked against each
     /// other rather than left to agree by luck — and the expectation for each
-    /// is the *other* table, both transcribed from `MobEffects.java`.
+    /// is the *other* table, both transcribed from vanilla's own mob-effects registration class.
     #[test]
     fn the_potion_table_agrees_about_harmfulness() {
         let mut checked = 0usize;
@@ -785,7 +787,7 @@ mod tests {
     /// The keys this widget asks the language table for, recorded rather than
     /// assumed. `effect.minecraft.<path>` is `MobEffect.getDisplayName()`'s
     /// `descriptionId` and `enchantment.level.<amplifier + 1>` is
-    /// `EffectsInInventory.getEffectName`'s numeral — asking for anything else
+    /// vanilla's own effects-widget get-effect-name routine's numeral — asking for anything else
     /// (or asking for nothing, which is what drew `speed` on screen) is the
     /// reported bug.
     #[test]
@@ -819,7 +821,7 @@ mod tests {
         assert_eq!(rows[0].name, "effect.minecraft.speed enchantment.level.2");
     }
 
-    /// `EffectsInInventory.getEffectName`'s amplifier bound, at both edges.
+    /// vanilla's own effects-widget get-effect-name routine's amplifier bound, at both edges.
     /// Amplifier `0` is level I and shows no numeral; `9` is the last one with
     /// an `enchantment.level.*` key; `10` has none and so shows none either.
     ///
@@ -851,7 +853,7 @@ mod tests {
         );
     }
 
-    /// `StringUtil.formatTickDuration`: `mm:ss`, widening to `hh:mm:ss` only
+    /// vanilla's own tick-duration formatter: `mm:ss`, widening to `hh:mm:ss` only
     /// once a whole hour is present, and floor-dividing rather than rounding.
     ///
     /// The values are re-derived from the tick count rather than reached for
@@ -874,7 +876,7 @@ mod tests {
         );
     }
 
-    /// `MobEffectUtil.formatDuration`'s infinite branch: the translated
+    /// vanilla's own effect-duration formatter's infinite branch: the translated
     /// `effect.duration.infinite`, never a clock reading.
     #[test]
     fn an_infinite_effect_shows_the_infinity_string() {
@@ -938,7 +940,7 @@ mod tests {
         );
     }
 
-    /// `EffectsInInventory` uses `getActiveEffects()` whole — unlike the HUD's
+    /// vanilla's own inventory-effects widget uses `getActiveEffects()` whole — unlike the HUD's
     /// own overlay, it does **not** filter on `showIcon`. Stated as an
     /// assertion because the two surfaces sit in this same module and share a
     /// state source, so the difference is easy to unify by accident.
