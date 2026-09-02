@@ -8711,7 +8711,7 @@ fn apply_container_clicked<P: ServerProtocol>(
     // `ServerboundSelectBundleItemPacket`'s last claim for this menu slot —
     // `container_click::pickup`'s own `tryItemClickBehaviourOverride`
     // right-click-extract branch reads this to pick which nested item comes
-    // out, exactly as `AbstractContainerMenu.selectedBundleItemIndex` does.
+    // out, exactly as vanilla's own container-menu selected-bundle-item-index field does.
     let selected_bundle = |slot: usize| inventory.selected_bundle_item(slot);
     let selected_bundle: Option<SelectedBundleIndex<'_>> = Some(&selected_bundle);
     let dropped = do_click_with(
@@ -8945,13 +8945,13 @@ fn apply_workstation_clicked<P: ServerProtocol>(
     let recipe = |grid_cells: &[Option<ItemStack>]| {
         workstation_result(station, grid_cells, creative, rename.as_deref(), selected_recipe_index, hooks)
     };
-    // `AnvilMenu.mayPickup`: `(player.hasInfiniteMaterials() ||
+    // Vanilla's own anvil-menu may-pickup gate: `(player.hasInfiniteMaterials() ||
     // player.experienceLevel >= this.cost.get()) && this.cost.get() > 0`.
     // `this.cost` is `crate::anvil::compute`'s own `cost` field, re-derived
     // from the pre-click cells and pending rename — never stored, the same
     // "recompute rather than cache" choice `workstation_result` above already
     // makes. `Grindstone`/`Smithing` pass `None`: neither's vanilla result
-    // slot overrides `mayPickup` (`GrindstoneMenu`'s anonymous result `Slot`
+    // slot overrides `mayPickup` (its own grindstone-menu anonymous result `Slot`
     // only overrides `mayPlace`/`onTake`; `SmithingMenu` inherits
     // `ItemCombinerMenu`'s own default-true `mayPickup`).
     let anvil_cost = crate::anvil::compute(
@@ -9113,13 +9113,14 @@ fn apply_enchanting_clicked<P: ServerProtocol>(
     )
 }
 
-/// [`ServerBound::RenameItem`]'s consumer — `AnvilMenu.setItemName`, reached
-/// the same way `ServerGamePacketListenerImpl.handleRenameItem` gates it:
+/// [`ServerBound::RenameItem`]'s consumer — vanilla's own anvil-menu
+/// item-name setter, reached
+/// the same way its own rename-item handler gates it:
 /// only when an anvil is currently open (no `window_id` on the wire to check
 /// further — the real packet does not carry one either).
 ///
 /// Returns the directives to resend (the refreshed content, then the
-/// `cost` data slot — `AnvilMenu`'s own single `DataSlot`) once the rename
+/// `cost` data slot — vanilla's own anvil-menu single `DataSlot`) once the rename
 /// actually changed something; `Vec::new()` for a rejected/no-op rename or
 /// when no anvil is open, matching `setItemName`'s own `validatedName !=
 /// this.itemName` early return.
@@ -9161,13 +9162,13 @@ fn apply_rename_item<P: ServerProtocol>(
     ]
 }
 
-/// [`ServerBound::EditBook`]'s consumer — `ServerGamePacketListenerImpl
-/// .updateBookContents`/`.signBook`, reached the same way `handleEditBook`
+/// [`ServerBound::EditBook`]'s consumer — vanilla's own update-book-contents/
+/// sign-book handlers, reached the same way its own edit-book handler
 /// gates it: `slot` must be a hotbar index or the off-hand (vanilla's
 /// `Inventory.isHotbarSlot(slot) || slot == 40`), and the item sitting there
 /// must be a `minecraft:writable_book` — vanilla's `carried.has(DataComponents
 /// .WRITABLE_BOOK_CONTENT)` gate, which is always true for that item because
-/// `Items.WRITABLE_BOOK` registers the component as a **prototype default**
+/// vanilla's own item registration for writable books registers the component as a **prototype default**
 /// (`WritableBookContent.EMPTY`), not only after a first edit. This crate has
 /// no general item-prototype default-component census to reproduce that
 /// distinction (see `ItemComponents`'s own doc on *effective* vs. *patch*
@@ -9226,12 +9227,12 @@ fn apply_edit_book(
     Some((native, item))
 }
 
-/// [`ServerBound::SetBeacon`]'s consumer — `BeaconMenu.updateEffects`,
-/// reached the same way `handleSetBeaconPacket` gates it: only while a
+/// [`ServerBound::SetBeacon`]'s consumer — vanilla's own beacon-menu
+/// update-effects routine, reached the same way its own set-beacon-packet handler gates it: only while a
 /// beacon is currently open (vanilla's own `containerMenu instanceof
 /// BeaconMenu` check).
 ///
-/// `levels` is **not** re-derived here — `BeaconMenu.getLevels()` reads the
+/// `levels` is **not** re-derived here — vanilla's own beacon-menu levels getter reads the
 /// block entity's own tracked field, last refreshed when the menu opened
 /// (see `BeaconData::levels`'s own doc), the same snapshot vanilla's real
 /// `ContainerData` would hold between its own 80-tick background
@@ -9303,7 +9304,7 @@ fn apply_set_beacon<P: ServerProtocol>(
 }
 
 /// [`ServerBound::ContainerButtonClick`]'s consumer —
-/// `EnchantmentMenu.clickMenuButton`. `slot` (`button_id`, `0..3`) selects
+/// vanilla's own enchantment-menu click-menu-button routine. `slot` (`button_id`, `0..3`) selects
 /// which of the three offers; the lapis price is `slot + 1` and the XP price
 /// is that slot's own [`crate::enchanting::table_costs`] entry, both
 /// re-derived here rather than trusted from the client.
@@ -9311,7 +9312,7 @@ fn apply_set_beacon<P: ServerProtocol>(
 /// `fresh_seed` is a pre-drawn `[0, i32::MAX)` roll from the caller's own
 /// `SpawnRng` — the same "pre-drawn value" shape `apply_use_item_on`'s
 /// composter `roll` already uses — only consumed when the enchant actually
-/// succeeds, matching `Player.onEnchantmentPerformed`'s own reroll.
+/// succeeds, matching vanilla's own on-enchantment-performed routine's own reroll.
 ///
 /// Returns the directives to send (the XP update, if any levels were spent,
 /// then the refreshed menu content) or `Vec::new()` when the click is
@@ -9336,7 +9337,7 @@ fn apply_container_button_click<P: ServerProtocol>(
     }
     // Issue #150: the loom and stonecutter share this same packet
     // (`ContainerButtonClick`) but neither shape nor pricing in common with
-    // the enchanting table below — `LoomMenu`/`StonecutterMenu.clickMenuButton`
+    // the enchanting table below — vanilla's own loom-menu/stonecutter-menu click-menu-button routines
     // both just pick an offer, with no lapis or XP cost at all. See
     // `apply_workstation_button_click`'s own doc.
     if let MenuKind::ItemCombiner { station: station @ (Station::Loom | Station::Stonecutter), .. } = tracked.shape {
