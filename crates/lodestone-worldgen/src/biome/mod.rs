@@ -1,22 +1,23 @@
-//! Multi-noise overworld biome assignment (issue #405).
+//! Multi-noise overworld biome assignment.
 //!
 //! Vanilla assigns each column's biome by evaluating six climate density
 //! functions (temperature, humidity, continentalness, erosion, depth,
 //! weirdness — already computed by the same, already-JVM-proven [`Density`]
 //! interpreter [`crate::overworld`] uses for shape) and finding the nearest
-//! point, by squared distance, in a ~7.6k-row `(ParameterPoint, Biome)` table
-//! (`net/minecraft/world/level/biome/Climate.java`,
-//! `MultiNoiseBiomeSourceParameterList`). This module is that search plus the
+//! point, by squared distance, in a ~7.6k-row (parameter point, biome) table
+//! (vanilla's own multi-noise biome parameter list). This module is that
+//! search plus the
 //! quantization glue; the table itself is **data**, not code (see below).
 //!
 //! # The table is bigger than expected — measured, not assumed
 //!
-//! The scoping plan estimated "~700 rows" from `OverworldBiomeBuilder.java`'s
+//! The scoping plan estimated "~700 rows" from vanilla's own overworld biome
+//! builder's
 //! nested-loop structure. The oracle dump
 //! (`scripts/worldgen-oracle/BiomeOracle.java`, mode `table`) says **7594**.
 //! The finding that made this cheap still holds — no part of the 1124-line
 //! builder needed transliterating, only its resolved output, reachable with
-//! zero bootstrap via `MultiNoiseBiomeSourceParameterList.knownPresets()` —
+//! zero bootstrap via vanilla's own known-presets accessor —
 //! but the row count itself was a guess from reading Java control flow, not a
 //! measurement, and the guess was off by 10x.
 //!
@@ -45,7 +46,7 @@
 //! memoises the per-source-chunk answer (so 289 searches per chunk become the
 //! window's newly-entered strip).
 //!
-//! # And the tree is also the *answer* (owner ruling on #492)
+//! # And the tree is also the *answer* (the owner's R-tree ruling)
 //!
 //! The first landing of Unit 9 made the tree deliberately result-identical to
 //! [`nearest_biome`], on the reasoning that the old engine was the JVM-proven
@@ -92,7 +93,7 @@
 //! scoped to what Phase 1 needs to be observable and testable — "the biome a
 //! player sees while exploring the surface" — and is *cheaper*, not just
 //! simpler, than full 3-D: caves are not composed into
-//! [`crate::overworld::OverworldGenerator`] yet (issue #295 / Phase 2), so
+//! [`crate::overworld::OverworldGenerator`] yet (this change / Phase 2), so
 //! there is no cave volume for a vertically-varying biome to describe today.
 //! Revisiting this is the natural first step of Phase 2, once caves exist to
 //! carry `dripstone_caves`/`lush_caves`/`deep_dark` into.
@@ -104,11 +105,11 @@
 //! overworld surface rule tree (confirmed by walking the JSON: both
 //! `bandlands` nodes sit under a `condition{biome_is:[badlands,
 //! eroded_badlands, wooded_badlands]}` guard, nothing else). Vanilla's
-//! `Bandlands` rule delegates to `SurfaceSystem.getBand` — **now ported**
-//! (`crate::surface`'s `Rule::Bandlands`/`BandBlocks`/`generate_bands`, issue
-//! #295's carried-over gap): its own noise (`clay_bands_offset`) and the
-//! banded-terracotta-column generator (`SurfaceSystem.java:332+`,
-//! `generateBands`/`makeBands`/`getBand`) are reproduced from the documented
+//! `Bandlands` rule delegates to vanilla's own band-lookup routine —
+//! **now ported**
+//! (`crate::surface`'s `Rule::Bandlands`/`BandBlocks`/`generate_bands`, an
+//! earlier carried-over gap): its own noise (`clay_bands_offset`) and the
+//! banded-terracotta-column generator are reproduced from the documented
 //! algorithm, checked against the running server.
 //!
 //! Before this module existed those three biomes were unreachable (the world
@@ -217,10 +218,10 @@ pub fn quantize_coord(v: f64) -> i64 {
 }
 
 /// The table row of the nearest biome by squared climate distance —
-/// `Climate.ParameterList.findValueBruteForce` (`Climate.java:182`), vanilla's
-/// own un-optimized reference search, sitting next to the `RTree` it also ships.
+/// vanilla's own brute-force parameter-list search — its
+/// own un-optimized reference search, sitting next to the R-tree it also ships.
 ///
-/// **Not the production path, and since #492 not the target either.** Production
+/// **Not the production path, and since the R-tree ruling not the target either.** Production
 /// goes through [`BiomeTable::nearest_row`], which reproduces vanilla's own
 /// indexed search — and vanilla calls the tree, so the tree is the answer. This
 /// stays as the independent implementation that proves the tree finds the same
@@ -397,7 +398,7 @@ impl BiomeTable {
         self.tree.perturb_node_span(node);
     }
 
-    /// `(row, squared distance)` of the selected leaf. Exposed because since #492
+    /// `(row, squared distance)` of the selected leaf. Exposed because since the R-tree ruling
     /// the *distance* claim and the *row* claim have different strengths: the
     /// distance always matches [`nearest_row_brute_force`], the row matches it only
     /// where no tie exists. See [`tree`]'s module doc.
@@ -563,8 +564,8 @@ pub fn cold_enough_to_snow(temperatures: &HashMap<String, f32>, biome: &str) -> 
 /// Evaluates the six named climate channels (`noise_router.{temperature,
 /// vegetation, continents, erosion, depth, ridges}` — `vegetation` is
 /// vanilla's field name for humidity, `ridges` for weirdness) at a block
-/// position, quantizing exactly as `Climate.Sampler.sample`/`Climate.target`
-/// do. Built once per generator (like [`crate::overworld::OverworldGenerator`]'s
+/// position, quantizing exactly as vanilla's own climate sampling and target
+/// derivation do. Built once per generator (like [`crate::overworld::OverworldGenerator`]'s
 /// `final_density`), reusing the same [`Density`] interpreter that
 /// `region_parity`'s whole-region test already proves bit-exact against the
 /// JVM for these exact six outputs (`RegionOracle.java` dumps

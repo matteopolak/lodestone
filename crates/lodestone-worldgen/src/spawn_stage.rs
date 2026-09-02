@@ -1,11 +1,8 @@
-//! Issue #518 part 2: the `SPAWN` generation stage — vanilla's
-//! `ChunkStatus.SPAWN` (`ChunkStatusTasks::generateSpawn` ->
-//! `ChunkGenerator.spawnOriginalMobs` -> `NaturalSpawner
-//! .spawnMobsForChunkGeneration`), reduced to `MobCategory.CREATURE`: the
-//! category the issue's own scope names ("the biome list to draw from is
-//! `spawners.creature` only") and the one vanilla's chunk-generation call
-//! actually drives (`NaturalSpawner.spawnMobsForChunkGeneration`'s own body
-//! only ever asks for `MobCategory.CREATURE`; every other category spawns
+//! The SPAWN generation stage's part 2 — vanilla's own chunk-generation-time
+//! mob spawn pass, reduced to the `CREATURE` category: the biome list this
+//! stage draws from is `spawners.creature` only, and it is the one
+//! category vanilla's own chunk-generation call actually drives (its body
+//! only ever asks for the `CREATURE` category; every other category spawns
 //! through the tick-driven `NATURAL` reason instead, which
 //! `lodestone_server::natural_spawn::NaturalSpawner` already covers).
 //!
@@ -14,14 +11,15 @@
 //! One weighted species pick plus one pack, drawn once per chunk from
 //! [`crate::spawners::BiomeSpawners::for_category`]`(`[`MobCategory::Creature`]`)`
 //! at a single random position inside the chunk — vanilla's own per-chunk
-//! shape (`getRandomPosWithin` plus a weighted `SpawnerData` pick), reduced to
+//! shape (a random position within the chunk plus a weighted per-entry
+//! pick), reduced to
 //! one attempt rather than vanilla's bounded retry loop. See "Deliberately not
 //! vanilla-exact" below for what that trades away.
 //!
 //! ## What this stage does NOT decide
 //!
 //! Placement legality (light, Y-band, solid ground —
-//! `SpawnPlacements.checkSpawnRules`) is not evaluated here: this crate has no
+//! vanilla's own spawn-rule check) is not evaluated here: this crate has no
 //! light engine, and [`crate::spawners`]'s own module doc already flags a
 //! placement port built on isolated-column data as the *world* species of
 //! vacuous test `CLAUDE.md` warns about (a wrong light input would pass its
@@ -37,8 +35,8 @@
 //!
 //! ## Deliberately not vanilla-exact, and named rather than hidden
 //!
-//! * **One attempt, not vanilla's retry loop.** `spawnMobsForChunkGeneration`
-//!   can place more than one group per chunk; this places at most one. A
+//! * **One attempt, not vanilla's retry loop.** Vanilla's own
+//!   chunk-generation spawn pass can place more than one group per chunk; this places at most one. A
 //!   ship-fast scope cut, not a parity claim.
 //! * **The RNG stream is real per-chunk determinism, not vanilla's exact draw
 //!   order.** Seeded via [`WorldgenRandom::set_decoration_seed`] — the same
@@ -46,7 +44,7 @@
 //!   `UNDERGROUND_ORES` — so the same `(seed, cx, cz)` always proposes the
 //!   same candidate, which is what makes a fresh world's animal placement
 //!   reproducible across restarts. It is not vanilla's own
-//!   `WorldgenRandom`/`EntitySpawnReason.CHUNK_GENERATION` call sequence.
+//!   chunk-generation-spawn RNG call sequence.
 //! * **A group's wander offset clamps back into its own 16×16 chunk.** Vanilla
 //!   wanders up to ±5 blocks from the anchor with no such fence, because it
 //!   can read a neighbour column. This stage only ever sees the chunk it is

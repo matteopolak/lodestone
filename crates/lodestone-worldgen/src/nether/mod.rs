@@ -44,7 +44,7 @@
 //! horizontal quart instead of once per 4×4×4 cell. `nether_biomes_do_not_vary_with_y`
 //! in `tests/nether_gen.rs` is the gate on that, and it is the reason
 //! [`NetherColumn`] carries 16 biomes rather than 128 — **do not copy this shape
-//! into a dimension whose climate has a real depth channel**; issue #512 is the
+//! into a dimension whose climate has a real depth channel**; this change is the
 //! record of what broadcasting a biome vertically costs when it is not.
 //!
 //! ## Structures are here, and they were the island this generator shipped with
@@ -355,8 +355,9 @@ impl NetherGenerator {
                 .or_insert_with(|| crate::compose::build_biome_carvers(resolver, &point.biome));
         }
 
-        // Issue #514's dimension half. Filtered by `possible_biomes` because
-        // vanilla filters (`ChunkGeneratorStructureState.createForNormal`), which
+        // Structure placement's dimension half. Filtered by `possible_biomes`
+        // because vanilla filters the same way when building per-dimension
+        // structure state, which
         // here means the registry parses `nether_complexes`, `nether_fossils` and
         // `ruined_portals` and loads only `bastion`'s pool graph — not every
         // village's. `is_empty()` → `None`, so a fixture resolver is unaffected.
