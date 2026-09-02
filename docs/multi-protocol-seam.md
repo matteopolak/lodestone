@@ -46,7 +46,8 @@ Package and feature names (`lodestone-v1-8`, feature `v1-8`; and the same patter
 `v1-14`, `v26-2`) are named for the *era-start* Minecraft version each family covers, not for a
 protocol number — a deliberate move away from an earlier scheme where the suffix was the exact
 (or, for two of the four, the *lowest*) protocol number the family implemented. Each crate spans
-a whole wire era (`v1-9` already covers 1.9.4 through 1.12.2 and is due to absorb more), and the
+a whole wire era (`v1-9` really does serve all four of 1.9.4, 1.10.2, 1.11.2 and 1.12.2 —
+protocols 110, 210, 316 and 340; see [`protocol-1-9-era.md`](./protocol-1-9-era.md)), and the
 Minecraft version reads at a glance in a way a bare protocol number does not.
 
 The directory a family lives in (`crates/versions/1.8`, `crates/versions/1.9`,
@@ -71,7 +72,7 @@ because `lodestone-world`'s `PalettedContainer` is version-free and accepts any 
   block-state id at all. `decode_column` passes every cell through
   `lodestone-canonical`'s `canonical::resolve_composite_or_air`, resolved **per cell** (1.8 has
   no palette to translate once).
-- **`v1-9` (1.12.2, pre-Flattening)**: the wire carries the same `id:meta` shape, but resolution
+- **`v1-9` (1.9.4–1.12.2, pre-Flattening)**: the wire carries the same `id:meta` shape, but resolution
   goes through a **generated flattening table** (`lodestone-canonical`'s
   `flattening::lookup`, built and verified against the real 1.13.2 server jar's own
   `DataFixerUpper` — the same conversion vanilla itself runs to upgrade a pre-1.13 world) and

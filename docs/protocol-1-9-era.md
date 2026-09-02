@@ -1,0 +1,117 @@
+# The 1.9 era crate: one family, four protocols
+
+## What it is
+
+`crates/versions/1.9` (package `lodestone-v1-9`) is the first *era* crate in this repo: one
+family serving Minecraft 1.9.4, 1.10.2, 1.11.2 and 1.12.2 — protocols 110, 210, 316 and 340 —
+from a single adapter, four generated packet-id tables, and nine explicitly-carried shape
+deltas, rather than four copies of a family. It is the calibration case for
+[`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md): the
+same four versions cost ~336 hand-written source lines *each* under the copy-forward scheme this
+replaces, and the marginal cost of the fourth is now about twenty.
+
+## How it works
+
+### Protocol selection
+
+`PROTOCOLS` lists all four. `adapter_for(protocol)` constructs a `V340Adapter` that stores that
+protocol and, resolved once at construction, a `&'static PacketIds` — a struct holding the id of
+every packet the adapter names plus that protocol's whole clientbound `ENTRIES` slice.
+`V340Adapter::ctx()` builds the `Ctx { version }` every codec call reads, so a
+`#[mc(since)]`/`#[mc(until)]` predicate and a `#[mc(protocols = "a..=b")]` precondition both see
+the negotiated protocol rather than a constant.
+
+The indirection is the point. Each generated table is its own module, so a
+`play::serverbound::BLOCK_DIG` path can only ever mean one protocol's id; nothing outside the
+`packet_ids_from!` macro may name a generated module. 1.12 inserted four clientbound and three
+serverbound packets into the middle of the tables, shifting everything above them: `update_health`
+is id **62** at 110/210/316 and **65** at 340. The committed test for that is
+`update_health_dispatches_on_each_protocols_own_id`, and it was watched failing first — with one
+shared 340 table, a protocol-110 adapter handed id 62 emitted `EntityVelocity { entity_id: 65 }`.
+No error, a plausible event, the wrong packet.
+
+Dispatch is one `lodestone_core::dispatch::Table` per protocol, cached in a four-slot array of
+`OnceLock`s indexed the same way `ids_for` resolves a table. A handler or `IGNORED` entry may
+declare a `ProtocolRange`; `Table::build` skips one whose range excludes the protocol it is
+building for and demands one whose range includes it, which is what lets a single handler list
+serve tables with different contents.
+
+### The nine shape deltas, and which mechanism carries each
+
+Measured from `minecraft-data`'s `protocol.json` with named types inlined. **Do not collapse the
+primitive aliases when re-deriving this** — `varint`, `i64`, `u8` and `f32` all resolve to the
+string `"native"`, and inlining that away hides every retype. A first pass that did so reported
+six changes and missed `keep_alive` entirely.
+
+| packet | changed at | delta | carried by |
+|---|---|---|---|
+| `resource_pack_receive` | 210 | leading pack-hash string dropped | `#[mc(until = 110)]` field |
+| `named_sound_effect`, `sound_effect` | 210 | pitch `u8` → `f32` | second struct |
+| `collect` | 316 | stack-size VarInt added | `#[mc(since = 316)]` field |
+| `spawn_entity_living` | 316 | mob type `u8` → VarInt | second struct |
+| `title` | 316 | action-bar inserted as action `2` | normalised in the arm |
+| `block_place` | 316 | cursor `i8`×3 → `f32`×3 | second struct |
+| `keep_alive` (both directions) | 340 | id VarInt → `i64` | second struct |
+| entity-metadata type table | 340 | NBT joins as type 13 | version gate in the codec |
+
+The split is not stylistic. A **field appearing or disappearing** is exactly what the derive's
+`since`/`until` predicates express, and those deltas live on the shared definition in
+`lodestone-protocol-common`, whose ranges widen to `110..=754`. A **retype** cannot be an
+attribute: reading eight bytes where one to five were sent does not fail, it consumes the next
+packet's header, and every later packet in the stream is then garbage. Those get a second struct
+with its own `#[mc(protocols)]` range and an explicit branch on `self.protocol`.
+
+The metadata gate is a real check rather than a comment: encoding an NBT metadata value below
+340 errors, and decoding type 13 below 340 errors instead of consuming the rest of the packet as
+a plausible NBT read.
+
+### Captures
+
+`tests/captures/join_{1_9_4,1_10_2,1_11_2}.txt` are clientbound bytes from real servers, and
+`tests/capture_join.rs` holds both the `#[ignore]`d recorder that made them and the hermetic
+replay that consumes them. See [`the captures' own README`](../crates/versions/1.9/tests/captures/README.md)
+for the format and the caps. They are the authority these three protocols otherwise lack: no
+Mojang data generator exists before 1.13, and `minecraft-data` is a cross-check, not a source of
+truth.
+
+They found a defect on first use. `play_world_border` had picked up `play_title`'s new action
+renumbering — both arms opened with the same three lines — and a real action-3 body decoded with
+38 trailing bytes. Nothing else in the suite could see it.
+
+They also fix the pre-1.10 sound pitch scale by measurement. Asking a 1.9.4 server for pitch 1.5
+and 0.5 put **94** and **31** on the wire: `pitch * 63`, truncated. A scale of 62 would give
+93/31 and 64 would give 96/32, so the *pair* separates all three where neither value does alone.
+1.10.2 and 1.11.2 put `3fc00000` and `3f000000` — exact floats — which is the committed
+differential: the byte era must never reproduce 1.5 exactly, the float era must always.
+
+## How to change it
+
+- **Adding a fifth protocol to this era** (there is none left; this is the shape for the next
+  era): generate its table with `cargo run -p xtask -- gen-packet-ids --source minecraft-data`,
+  add a `PROTOCOL_*` const, a `PROTOCOLS` entry, an `IDS_*` static, an `ids_for` arm, a
+  `play_dispatch_table` slot, a `minecraft_versions` entry, and a `MEMBERS` row plus a recorder
+  and a replay test. Then record a capture and let the replay tell you which shapes moved.
+- **Never widen a `#[mc(protocols)]` range without a capture from the protocol it now claims.**
+  That is the plan's one guard against inheritance-by-range, and the reason the three captures
+  are part of this work rather than a follow-up.
+- **The adapter type is still called `V340Adapter`** even though it serves four protocols.
+  Renaming it touches ~150 references across the family's own tests and `lodestone-fuzz`; it is
+  worth doing, but not inside a change that also moves the wire.
+- `minecraft-data` ships 1.10.2's shapes under its `1.10` directory and 1.11.2's under `1.11`;
+  `gen-packet-ids` resolves that same-major fallback itself, so pass the real version and
+  protocol.
+
+## Configuration
+
+None new. The era is selected by the existing `v1-9` feature on `lodestone-registry`; the
+registry reads `PROTOCOLS` from the crate, so all four protocols became resolvable without a
+registry edit. Oracle ports live in `scripts/live-oracles/legacy.sh` and are read from there by
+`tests/capture_join.rs`'s `MEMBERS` table.
+
+## Dependencies
+
+`lodestone-core` (`Ctx`, `ProtocolRange`, `dispatch::{Table, Handler, IGNORED}`),
+`lodestone-macros` (`since`/`until`/`protocols`), `lodestone-protocol-common` (the shared packet
+definitions whose ranges this work widened), `lodestone-canonical`, `lodestone-world`,
+`lodestone-data`. Recording needs Apple `container` and
+[`scripts/live-oracles/legacy.sh`](../scripts/live-oracles/legacy.sh); replay needs nothing.
