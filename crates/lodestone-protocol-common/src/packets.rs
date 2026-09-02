@@ -5,4 +5,5 @@ pub mod login;
 pub mod player_info;
 pub mod position;
 pub mod slot;
+pub mod window;
 pub mod status;
