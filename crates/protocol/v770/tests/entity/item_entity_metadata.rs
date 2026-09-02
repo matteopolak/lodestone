@@ -33,9 +33,9 @@ use lodestone_v770::packet_ids::play;
 use lodestone_v770::packets::metadata::{TrackedEntity, read_entity_metadata};
 use lodestone_world::World;
 
-const DIAMOND_FIXTURE: &str = include_str!("fixtures/item_entity_metadata_diamond.hex");
+const DIAMOND_FIXTURE: &str = include_str!("../fixtures/item_entity_metadata_diamond.hex");
 const UNMODELED_FIXTURE: &str =
-    include_str!("fixtures/item_entity_metadata_unmodeled_component.hex");
+    include_str!("../fixtures/item_entity_metadata_unmodeled_component.hex");
 
 /// Parses the reviewable hex-text fixture format: `#` comment lines carrying the
 /// capture's provenance and byte-by-byte annotation, then whitespace-separated
