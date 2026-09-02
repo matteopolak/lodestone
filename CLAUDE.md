@@ -14,7 +14,8 @@ detail is in [`docs/`](./docs/README.md). Open work is in
 ## Protocol families
 
 Four client protocol families exist, each a workspace member under `crates/versions/` behind a
-`lodestone-registry` feature: `v1-8` (1.8.9), `v1-9` (1.12.2), `v1-14`, `v26-2` (protocol 776 / MC 26.2).
+`lodestone-registry` feature: `v1-8` (1.8.9), `v1-9` (1.9.4-1.12.2), `v1-14` (1.14.4-1.16.5),
+`v26-2` (protocol 776 / MC 26.2).
 Each folder is named for the *era-start* Minecraft version it covers (e.g. `crates/versions/1.8`), which
 is neither its package/feature suffix (`lodestone-v1-8`, feature `v1-8`) nor a protocol number — ask
 `VersionAdapter::supports`, never the folder or the feature name.
@@ -24,8 +25,8 @@ is neither its package/feature suffix (`lodestone-v1-8`, feature `v1-8`) nor a p
   its feature.
 - **Only `v26-2` implements `ServerProtocol`**, so 26.2 is the only version we can *host*. Joining and
   hosting are different sets; `lodestone-registry` keeps `Family` and `ServerFamily` as two tables.
-- **`v1-14` speaks protocol 754** (1.16.5), same as every family: none of the four's folders, packages, or
-  features are their protocol number.
+- **A family may speak several protocols**: `v1-9` serves 110/210/316/340 and `v1-14` serves
+  498/578/754. No folder, package or feature name is a protocol number.
 
 New gameplay work targets `v26-2` unless an issue says otherwise.
 
