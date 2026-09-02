@@ -95,8 +95,9 @@ use crate::redstone::{base_name, direction_from_str, get_str_property};
 pub(crate) enum SupportKind {
     /// `pos.below()`.
     Below,
-    /// `pos.relative(FACING.getOpposite())` — the wall the block is stuck to.
-    /// `FACING` may be vertical (an amethyst cluster grows off a ceiling).
+    /// The cell opposite the block's own facing direction — the wall the block
+    /// is stuck to. The facing may be vertical (an amethyst cluster grows off a
+    /// ceiling).
     AttachedFacing,
     /// The `face`/`facing` mount, negated: `face=floor` → below,
     /// `face=ceiling` → above, `face=wall` → the wall the `facing` points
@@ -159,8 +160,8 @@ pub(crate) fn requirement(pos: BlockPos, state: &str) -> Option<Requirement> {
             Some(Requirement::Supported(if hanging { above } else { below }))
         }
         SupportKind::AttachedFacing => {
-            // `pos.relative(FACING.getOpposite())`. A state naming no `facing`
-            // is not a legal wall variant, so there is nothing to check.
+            // The cell opposite the block's own facing direction. A state naming no
+            // `facing` is not a legal wall variant, so there is nothing to check.
             let facing = direction_from_str(get_str_property(state, "facing")?);
             Some(Requirement::Supported(facing.opposite().relative(pos)))
         }

@@ -309,8 +309,8 @@ impl HurtDirection {
 /// What changed on one [`PlayerVitals::tick`] call, so the caller knows which
 /// client-bound packets (if any) are worth sending. Both fields can be set on
 /// the same tick — the tick that crosses the drowning threshold changes air
-/// (reset to `0`) *and* deals damage in the same step, exactly as vanilla's
-/// `setAirSupply(0)` immediately followed by `hurtServer` does.
+/// (reset to `0`) *and* deals damage in the same step, exactly as vanilla's own
+/// air-supply reset immediately followed by its hurt rule does.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct VitalsTick {
     /// `Some(new_air)` when air supply changed this tick.
@@ -643,13 +643,13 @@ impl PlayerVitals {
     /// `PlayerList::respawn` this module can model, per this module's own
     /// "Death/respawn... out of scope" doc note above: no corpse, no
     /// teleport, no dimension change, just the health/air a real respawn
-    /// *does* reset (`Player`'s fresh-entity defaults, the same ones
+    /// *does* reset (vanilla's own fresh-entity defaults, the same ones
     /// [`Default`](Self::default) already establishes for a brand-new
-    /// connection). Issue #270's `ServerBound::ClientCommand { action: 0 }`
+    /// connection). The `ServerBound::ClientCommand { action: 0 }`
     /// consumer (`crate::server::apply_client_command`) is the only caller,
     /// and only once [`health`](Self::health) has actually reached `0.0` —
-    /// mirroring vanilla's own `handleClientCommand` guard
-    /// (`this.player.getHealth() > 0.0F` → early return).
+    /// mirroring vanilla's own client-command handler's guard
+    /// (health above zero → early return).
     pub fn respawn(&mut self) {
         *self = Self::default();
     }
@@ -1223,7 +1223,7 @@ mod tests {
     /// test time, so the expected value comes from the jar and not from a
     /// transcription of it.
     ///
-    /// This is the gate that caught `outsideBorder`: the first version of
+    /// This is the gate that caught the `outsideBorder` message id: the first version of
     /// `message_id` returned `outside_border` (snake_case, matching the file
     /// name), which is a translation key no language file carries, and an unknown
     /// key renders as itself — so the wrong message would have shipped looking
@@ -1505,8 +1505,9 @@ mod tests {
     fn pure_roll_is_exactly_zero_degrees() {
         assert_eq!(HurtDirection::PURE_ROLL.yaw_degrees(), 0.0);
         // A victim hit from their own position has no direction either — the
-        // `atan2(0, 0)` case vanilla's `indicateDamage` reaches for a source with
-        // no `getSourcePosition`, whose only non-zero term is `-yRot`. Stated so
+        // `atan2(0, 0)` case vanilla's own hurt-direction rule reaches for a source
+        // with no source position, whose only non-zero term is the negated body
+        // yaw. Stated so
         // the difference from `PURE_ROLL` is on the record: they are **not** the
         // same value at a non-zero yaw, which is exactly why the directionless
         // sites pass the constant rather than calling `from_source` with a zero

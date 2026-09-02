@@ -33,17 +33,17 @@
 //! | Peaceful short-circuit | returns `0.0` immediately | the first `if` |
 //! | base scale | starts at `0.75` | `let mut scale = 0.75` |
 //! | global (world-age) ramp | `clamp((total - 72000) / 1440000, 0, 1) * 0.25` | `global_scale` |
-//! | fold into scale | `scale += globalScale` | `scale += global_scale` |
-//! | local (inhabited-time) ramp, hard-vs-not coefficient | `clamp(local / 3600000, 0, 1) * (isHard ? 1.0 : 0.75)` | first `local_scale +=` |
-//! | moon term, clamped by `globalScale` **not** `1.0` | `clamp(moonBrightness * 0.25, 0, globalScale)` | second `local_scale +=` |
-//! | Easy halves the local scale | `if (base == EASY) localScale *= 0.5` | the `if base == Difficulty::Easy` |
-//! | fold and scale by difficulty id | `return base.getId() * scale` | final line |
+//! | fold into scale | `scale += global_scale` | `scale += global_scale` |
+//! | local (inhabited-time) ramp, hard-vs-not coefficient | `clamp(local / 3600000, 0, 1) * (is_hard ? 1.0 : 0.75)` | first `local_scale +=` |
+//! | moon term, clamped by the global scale **not** `1.0` | `clamp(moon_brightness * 0.25, 0, global_scale)` | second `local_scale +=` |
+//! | Easy halves the local scale | `if (base == EASY) local_scale *= 0.5` | the `if base == Difficulty::Easy` |
+//! | fold and scale by difficulty id | `return base_id * scale` | final line |
 //!
 //! The moon clause is the one easy to get wrong: it is clamped against
-//! **`globalScale`**, a value that only reaches `0.25` once `totalGameTime`
-//! has climbed past the `72_000`-tick offset, **not** against `1.0`. Early in
-//! a fresh world `globalScale` is `0.0`, so a full moon (`moonBrightness ==
-//! 1.0`) contributes **nothing** — [`regional_difficulty_moon_term_is_capped_by_global_scale_not_by_one`]
+//! **the global scale**, a value that only reaches `0.25` once the total game
+//! time has climbed past the `72_000`-tick offset, **not** against `1.0`. Early in
+//! a fresh world the global scale is `0.0`, so a full moon (moon brightness ==
+//! `1.0`) contributes **nothing** — [`regional_difficulty_moon_term_is_capped_by_global_scale_not_by_one`]
 //! is the test that would fail if that upper bound were written as `1.0`
 //! instead.
 //!
@@ -258,8 +258,8 @@ mod tests {
     use super::*;
 
     /// Hand-derived from an independent `numpy.float32` transcription of
-    /// `calculateDifficulty` (not from this module), reproducing Java's `f32`
-    /// arithmetic step for step. Each case is picked to be non-round and,
+    /// the real calculate-difficulty rule (not from this module), reproducing
+    /// vanilla's `f32` arithmetic step for step. Each case is picked to be non-round and,
     /// where a clause could plausibly be implemented two ways, to land on a
     /// value only the correct clause produces.
     #[test]
@@ -362,7 +362,7 @@ mod tests {
     /// The discriminating case for the hard-vs-not local coefficient: Normal
     /// and Hard at identical, non-saturating local time must differ by
     /// exactly the `0.75` vs `1.0` coefficient (scaled by each difficulty's
-    /// own `getId`), not merely "Hard is bigger" (which the `* getId()` term
+    /// own numeric id), not merely "Hard is bigger" (which the id-scaling term
     /// alone would already guarantee and so would not isolate the clause).
     #[test]
     fn hard_uses_the_full_local_coefficient_normal_does_not() {
@@ -376,8 +376,8 @@ mod tests {
         assert!((hard.effective_difficulty() - 3.75).abs() < 1e-4, "got {}", hard.effective_difficulty());
     }
 
-    /// `getSpecialMultiplier`'s three arms, at values that land inside each
-    /// one rather than exactly on a boundary (so the test is not itself an
+    /// The real special-multiplier rule's three arms, at values that land inside
+    /// each one rather than exactly on a boundary (so the test is not itself an
     /// instance of the coincident-threshold trap).
     #[test]
     fn special_multiplier_matches_the_three_arms() {
@@ -394,7 +394,8 @@ mod tests {
         assert_eq!(saturated_hard.special_multiplier(), 1.0);
     }
 
-    /// `isHard`'s `>=` against `isHarderThan`'s strict `>`, at a value picked
+    /// The real is-hard rule's `>=` against the real is-harder-than rule's
+    /// strict `>`, at a value picked
     /// to be near but not on the Hard boundary (`3.0`) so the two predicates'
     /// difference is visible: `is_harder_than(3.0)` must be false at exactly
     /// the boundary the way `>` always is, while a Hard-difficulty instance
