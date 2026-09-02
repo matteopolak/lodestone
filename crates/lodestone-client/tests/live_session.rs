@@ -29,7 +29,7 @@
 //!      exactly that mistake. Finding: on this server/version the terminal
 //!      `flying` kick is *unreachable* through the public movement API — the
 //!      server's position-correction path fires first, re-grounding us each tick
-//!      and resetting `aboveGroundTickCount` before it hits the limit. The control
+//!      and resetting vanilla's own above-ground tick counter before it hits the limit. The control
 //!      asserts the correction storm instead (100+ corrective teleports), which is
 //!      the same server-authored signal certifying the positive gate's Property 3.
 //!
@@ -568,7 +568,7 @@ async fn connect_once(
 }
 
 /// Joins and returns a session that is ready to move: alive (not an inherited
-/// corpse), past the server's `clientLoadedTimeoutTimer` (so movement is no
+/// corpse), past the server's own client-loaded timeout timer (so movement is no
 /// longer silently rejected), and standing in a verified-clean runway.
 ///
 /// Retries the whole join (fresh connection + username) up to `MAX_JOIN_ATTEMPTS`
@@ -922,10 +922,12 @@ async fn suppressing_chunk_ack_starves_streaming() {
 /// vacuous.
 ///
 /// A note on what this does and does not reach. Vanilla has a terminal `flying`
-/// kick (`aboveGroundTickCount` → `getMaximumFlyingTicks`, ~80 ticks) for a client
+/// kick (its own above-ground tick counter against its own maximum-flying-ticks
+/// limit, ~80 ticks) for a client
 /// the server believes is hovering unsupported. When the correction-storm mode
 /// fires we do **not** reach that terminal kick through the public movement API:
-/// each correction re-grounds us, resetting `aboveGroundTickCount` before it hits
+/// each correction re-grounds us, resetting vanilla's own above-ground tick
+/// counter before it hits
 /// the limit, so `flying` never triggers and the two protections are mutually
 /// exclusive. That is itself a finding. If a future server/version ever lets the
 /// position stand and fires `flying` instead, this test surfaces that category too

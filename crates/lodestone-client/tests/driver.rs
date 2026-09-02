@@ -708,7 +708,7 @@ async fn ping_auto_responds_and_surfaces() {
 
 /// A `Ping` reply is unconditional — there is no policy that suppresses it the
 /// way `KeepAlivePolicy::Manual` suppresses the keep-alive response, matching
-/// vanilla's `handlePing` having no equivalent gate. Without the driver's arm
+/// vanilla's own ping handler having no equivalent gate. Without the driver's arm
 /// in `Driver::emit`, this test would see no packet at all and the read below
 /// would hang (it has no timeout, unlike the manual-keep-alive test's, so a
 /// real neuter run needs a `tokio::time::timeout` wrapped around it first).
@@ -896,8 +896,8 @@ async fn death_manual_does_not_respawn() {
     drop(handle);
 }
 
-/// Automatic client-loaded signal. Vanilla's `ServerGamePacketListenerImpl`
-/// silently ignores our movement until its `clientLoadedTimeoutTimer` (~60
+/// Automatic client-loaded signal. Vanilla's own player-packet-listener
+/// silently ignores our movement until its own client-loaded timeout timer (~60
 /// ticks) expires, unless the client zeroes it early with `player_loaded`. The
 /// driver must send it on its own — otherwise every session's first ~3 s of
 /// movement is discarded and a gate that measures movement in that window
@@ -1325,7 +1325,7 @@ async fn brand_announced_on_entering_configuration() {
 /// Signed-chat acknowledgement, tick trigger. Servers disconnect a client at
 /// 4096 unacknowledged signed messages; draining that list requires actually
 /// transmitting the acknowledgement offset. This proves the *tick* flush
-/// (vanilla's `sendChatAcknowledgement`): pending signed chats are acknowledged
+/// (vanilla's own chat-acknowledgement send on tick): pending signed chats are acknowledged
 /// when the next server heartbeat (keep-alive) arrives. It also pins three
 /// semantics that are silent when wrong:
 ///   - a **filtered** message (`was_shown = false`) still burns an offset,
@@ -1599,7 +1599,8 @@ async fn incoming_signed_chat_is_verified_against_the_announced_public_key() {
     drop(handle);
 }
 
-/// Signed-chat acknowledgement, burst trigger. Vanilla's `markMessageAsProcessed`
+/// Signed-chat acknowledgement, burst trigger. Vanilla's own
+/// message-processed marker
 /// sends a standalone acknowledgement the moment more than 64 messages are
 /// pending, without waiting for a tick — the safety valve for a burst arriving
 /// faster than the heartbeat. This drives 65 distinct-signature chats in a single

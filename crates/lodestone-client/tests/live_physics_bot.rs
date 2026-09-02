@@ -37,8 +37,9 @@
 //! ## The validation window (ground-truth, not a guess)
 //!
 //! The 26.2 server does **not** validate movement immediately after join. Its
-//! `ServerGamePacketListenerImpl` gates `handleMovePlayer` on `hasClientLoaded()`,
-//! which is `clientLoadedTimeoutTimer <= 0`; the constructor seeds that timer to
+//! own player-packet-listener gates its own movement handler on a
+//! "has client loaded" check,
+//! which is its own client-loaded timeout timer being `<= 0`; the constructor seeds that timer to
 //! `CLIENT_LOADED_TIMEOUT_TIME = 60` ticks and decrements it once per tick, so
 //! the server *silently ignores* our movement for the first ~60 ticks (~3 s)
 //! unless the client sends `player_loaded` to zero it early. The driver now
@@ -238,7 +239,7 @@ async fn join_with_clean_lane(server: &ServerAddress) -> Option<Joined> {
     }
 
     // The driver auto-sends `player_loaded` on the first placement teleport,
-    // zeroing the server's `clientLoadedTimeoutTimer` before `position()` (waited
+    // zeroing the server's own client-loaded timeout timer before `position()` (waited
     // on above) is known — so movement is validated from here on and there is no
     // client-load window left to wait out. The impossible-move control at the end
     // of the test *verifies* validation is live.

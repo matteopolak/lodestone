@@ -59,7 +59,7 @@ impl RespawnPolicy {
 /// Policy controlling whether the driver announces client-readiness to the
 /// server after joining or respawning.
 ///
-/// Vanilla's server seeds a short (~60-tick, ~3 s) `clientLoadedTimeoutTimer`
+/// Vanilla's server seeds a short (~60-tick, ~3 s) client-loaded timeout timer
 /// after join **and** after respawn and silently ignores the player's movement
 /// packets until it elapses — unless the client zeroes it early by sending
 /// `player_loaded`. A client that never sends it has its movement discarded for
