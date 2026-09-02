@@ -32,6 +32,7 @@ use lodestone_render::{
     entity::{Arm, hand_transform},
 };
 
+#[path = "../gate_harness/mod.rs"]
 mod gate_harness;
 use gate_harness::{require_blocks_report, require_client_jar};
 
