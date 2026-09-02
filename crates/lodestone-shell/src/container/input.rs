@@ -44,10 +44,10 @@ impl MenuButton {
 }
 
 /// A **keyboard** action an open container screen turns into a click, from
-/// vanilla `AbstractContainerScreen.keyPressed` (`:495-501`).
+/// vanilla's own container-screen key-press handler.
 ///
-/// The hotbar/off-hand `SWAP` half of that method (`checkHotbarKeyPressed`,
-/// `:506-522`) is deliberately *not* here: it already goes out through
+/// The hotbar/off-hand `SWAP` half of that method (its own hotbar-key
+/// intercept) is deliberately *not* here: it already goes out through
 /// `app.rs`'s `KeyOutcome::ContainerSwap` (commit `43692c5`) with vanilla's own
 /// two state guards. What was missing is everything below that call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,9 +79,9 @@ pub struct MenuContext {
 /// This is the piece between [`hit_test`] and
 /// [`Menus::click`](lodestone_game::menus::Menus::click), and it exists as a state
 /// machine rather than a `fn(hit) -> Click` because **vanilla does not send a
-/// click on mouse-down when the cursor is loaded**. Read
-/// `AbstractContainerScreen.mouseClicked`: with a non-empty carried stack it only
-/// sets `isQuickCrafting` and sends *nothing*; the packet goes out on
+/// click on mouse-down when the cursor is loaded**. Read vanilla's own mouse-click
+/// handler: with a non-empty carried stack it only
+/// sets its quick-crafting flag and sends *nothing*; the packet goes out on
 /// `mouseReleased`, as either a plain `PICKUP` (if the mouse never moved onto a
 /// slot) or the `QUICK_CRAFT` start/add…/end sequence (if it did). A naive
 /// press-to-`PICKUP` mapper looks right for every single-slot interaction and
@@ -106,10 +106,10 @@ pub struct MenuInput {
     last_slot: Option<usize>,
     /// The pending release should gather (`PICKUP_ALL`) instead.
     double_click: bool,
-    /// Mirrors vanilla `AbstractContainerScreen.lastQuickMoved`: the stack
+    /// Mirrors vanilla's own last-quick-moved field: the stack
     /// held by the slot a `QUICK_MOVE` click was just sent for, or `None` for
-    /// vanilla's `ItemStack.EMPTY`. Set at both the sites vanilla sets it —
-    /// `:312` in [`press`](Self::press) and `:426` in [`release`](Self::release)
+    /// vanilla's own empty-stack sentinel. Set at both the sites vanilla sets it —
+    /// in [`press`](Self::press) and in [`release`](Self::release)
     /// — and read by the shift+double-click gather in `release`, which moves
     /// every slot matching *this* stack rather than gathering onto the
     /// cursor.
@@ -127,9 +127,9 @@ impl MenuInput {
     ///
     /// This used to say "while this is true the screen should draw the drag
     /// preview rather than a hover highlight." **That is not what vanilla does.**
-    /// `extractSlotHighlightBack`/`Front` (`AbstractContainerScreen.java`)
-    /// are gated on `hoveredSlot != null && hoveredSlot.isHighlightable()` and on
-    /// nothing else — not on `isQuickCrafting` — so the highlight and the drag
+    /// Vanilla's own slot-highlight extract routines
+    /// are gated on a non-null, highlightable hovered slot and on
+    /// nothing else — not on its own quick-crafting flag — so the highlight and the drag
     /// preview are drawn *together* mid-drag, and `build_inner` does the same.
     /// The two are independent, and treating them as exclusive would have made
     /// the highlight vanish the moment the player picked anything up.
@@ -145,7 +145,7 @@ impl MenuInput {
     /// same slot twice it arms the gather that fires on release.
     ///
     /// `menu` is read only to capture `last_quick_moved` off the slot about to
-    /// be quick-moved (vanilla `AbstractContainerScreen.java`) — it does
+    /// be quick-moved (vanilla's own container-screen press handler) — it does
     /// not otherwise change what this method sends.
     pub fn press(
         &mut self,
@@ -189,14 +189,14 @@ impl MenuInput {
         self.skip_next_release = true;
         // `quickKey` in vanilla: a shift-click on a real slot. Captured before
         // the `if` chain below because vanilla's own assignment
-        // (`AbstractContainerScreen.java`) happens as a side effect of
+        // happens as a side effect of
         // computing this same condition, and `cloning` takes priority over it
         // there (the two are mutually exclusive `if`/`else` arms, not just
         // independent conditions).
         let quick_key = !cloning && shift && slot != OUTSIDE_SLOT;
         if quick_key {
-            // An empty slot records vanilla's `ItemStack.EMPTY`, modelled here
-            // as `None`.
+            // An empty slot records vanilla's own empty-stack sentinel,
+            // modelled here as `None`.
             self.last_quick_moved = match hit {
                 MenuHit::Slot(i) => menu.slot_item(i).cloned(),
                 _ => None,
@@ -224,17 +224,13 @@ impl MenuInput {
     /// The cursor moved to `hit` with the button still down. Records a painted
     /// slot; never emits.
     ///
-    /// Mirrors vanilla `AbstractContainerScreen.mouseDragged` (`:361-370`),
-    /// whose paint site is gated on `shouldAddSlotToQuickCraft` (`:554-561`):
-    ///
-    /// ```java
-    /// return this.isQuickCrafting
-    ///    && !carried.isEmpty()
-    ///    && (carried.getCount() > this.quickCraftSlots.size() || this.quickCraftingType == 2)
-    ///    && AbstractContainerMenu.canItemQuickReplace(slot, carried, true)
-    ///    && slot.mayPlace(carried)
-    ///    && this.menu.canDragTo(slot);
-    /// ```
+    /// Mirrors vanilla's own container-screen mouse-drag handler,
+    /// whose paint site is gated on a "should add slot to quick-craft" check:
+    /// quick-crafting must be active, the carried stack non-empty, either the
+    /// carried count exceeds the painted-slot count or the drag type is the
+    /// single-item kind, the slot must accept a quick-replace of the carried
+    /// stack, the slot must allow placing it, and the menu must allow
+    /// dragging onto it.
     ///
     /// # This filter is load-bearing, and its absence was that fix part 1
     ///
@@ -252,8 +248,8 @@ impl MenuInput {
     /// fails `mayPlace` — recorded the slot here, sent the drag sequence, and
     /// the machine then dropped the `ADD` at `can_drag_place` and committed
     /// nothing at `END`. The plain `PICKUP` that vanilla would have sent, and
-    /// with it `Menu::do_pickup`'s cursor-merge arm (vanilla
-    /// `AbstractContainerMenu`'s matching arm), never went out. The reported
+    /// with it `Menu::do_pickup`'s cursor-merge arm (vanilla's own
+    /// matching arm), never went out. The reported
     /// symptom was "taking from a crafting output onto a matching cursor does
     /// nothing"; the arm that does the merge was present and correct the whole
     /// time, one layer below the one that was broken.
@@ -262,7 +258,7 @@ impl MenuInput {
     /// which is why it read as intermittent from play rather than absolute.
     ///
     /// `canDragTo` is `true` for every menu this client models (vanilla
-    /// overrides it only in `HorseInventoryMenu`), so it is not restated here.
+    /// overrides it only for its horse-inventory menu), so it is not restated here.
     pub fn dragged(&mut self, hit: MenuHit, menu: &Menu) {
         let MenuHit::Slot(i) = hit else {
             return;
@@ -291,7 +287,7 @@ impl MenuInput {
     /// ([`drag_type`]) and the slots painted so far, in paint order.
     ///
     /// This is vanilla's `quickCraftSlots` / `quickCraftingType` pair, read by
-    /// `AbstractContainerScreen.extractSlot` (`:202-222`) to draw the provisional
+    /// vanilla's own per-slot extract routine to draw the provisional
     /// per-cell stack. `None` when no drag is armed.
     #[must_use]
     pub fn drag_paint(&self) -> Option<(i32, &[usize])> {
@@ -306,7 +302,7 @@ impl MenuInput {
     /// supplies the slots to sweep — see [`gather_shift_matches`](Self::gather_shift_matches)
     /// — and also captures `last_quick_moved` for the plain shift-click path,
     /// at the second of the two sites vanilla sets it
-    /// (`AbstractContainerScreen.java`; the first is [`press`](Self::press)).
+    /// (its own release handler; the first is [`press`](Self::press)).
     pub fn release(
         &mut self,
         hit: MenuHit,
@@ -328,7 +324,7 @@ impl MenuInput {
 
         if gather && button == MenuButton::Left {
             if let MenuHit::Slot(i) = hit {
-                // `AbstractContainerScreen.java`: the whole gather branch
+                // Vanilla's own release handler: the whole gather branch
                 // (both this and the shift variant below) is gated on
                 // `menu.canTakeItemForPickAll(ItemStack.EMPTY, slot)`. Every
                 // result-bearing menu overrides that to exclude its own
@@ -380,7 +376,7 @@ impl MenuInput {
             MenuHit::Panel => return Vec::new(),
         };
         let clone_click = button == MenuButton::Pick && ctx.creative;
-        // `AbstractContainerScreen.java`: the second `lastQuickMoved`
+        // Vanilla's own release handler: the second `lastQuickMoved`
         // site, inside the (non-clone) loaded-cursor release path — mirrored
         // in `press` for the empty-cursor press path.
         let quick_key = !clone_click && shift && slot != OUTSIDE_SLOT;
@@ -419,34 +415,28 @@ impl MenuInput {
     /// machine's whole `THROW`-from-a-slot branch could not run in the real
     /// game. `Q` inside an inventory did nothing.
     ///
-    /// Vanilla, `AbstractContainerScreen.keyPressed` (`:495-501`):
-    ///
-    /// ```java
-    /// if (this.hoveredSlot != null && this.hoveredSlot.hasItem()) {
-    ///    if (this.minecraft.options.keyPickItem.matches(event)) {
-    ///       this.slotClicked(this.hoveredSlot, this.hoveredSlot.index, 0, ContainerInput.CLONE);
-    ///    } else if (this.minecraft.options.keyDrop.matches(event)) {
-    ///       this.slotClicked(this.hoveredSlot, this.hoveredSlot.index, event.hasControlDown() ? 1 : 0, ContainerInput.THROW);
-    ///    }
-    /// }
-    /// ```
+    /// Vanilla's own container-screen key-press handler: when the hovered slot
+    /// has an item, a pick-item key press sends a `CLONE` on that slot,
+    /// otherwise a drop key press sends a `THROW` on it (Control held selects
+    /// drop-stack over drop-one) — and nothing happens for any other key or
+    /// an unhovered/empty slot.
     ///
     /// Three things about that are easy to get wrong, and all three are
     /// transcribed rather than reasoned about:
     ///
     /// * **The gate is "the slot has an item", not "the cursor is empty."**
-    ///   Unlike `checkHotbarKeyPressed` (`:507`), this branch does not consult
-    ///   the carried stack at all — `doClick`'s own `getCarried().isEmpty()`
-    ///   guard (`AbstractContainerMenu.java`) is what makes a loaded-cursor
+    ///   Unlike its own hotbar-key intercept, this branch does not consult
+    ///   the carried stack at all — vanilla's own click-dispatch empty-cursor
+    ///   guard is what makes a loaded-cursor
     ///   `THROW` a no-op, one layer down. Adding a `cursor_loaded` check here
     ///   would suppress a packet vanilla sends, which is a desync in the
     ///   direction nothing corrects: the server would never see it.
     /// * **`PickItem` is *not* gated on infinite materials here**, where
     ///   [`press`](Self::press) gates its middle-click equivalent on
-    ///   `ctx.creative`. The two are not inconsistent: `mouseClicked` (`:285`)
-    ///   uses `hasInfiniteMaterials` to decide *which mouse button means clone*,
-    ///   while the permission itself lives in `doClick`'s CLONE arm
-    ///   (`AbstractContainerMenu.java`, `&& player.hasInfiniteMaterials()`).
+    ///   `ctx.creative`. The two are not inconsistent: vanilla's own
+    ///   mouse-click handler
+    ///   uses the infinite-materials check to decide *which mouse button means clone*,
+    ///   while the permission itself lives in its own click-dispatch CLONE arm.
     ///   A key has no such ambiguity, so vanilla sends it in survival too and
     ///   lets the menu drop it.
     /// * **`else if`, not two `if`s.** A key bound to both actions clones only.
@@ -476,7 +466,7 @@ impl MenuInput {
         }]
     }
 
-    /// `AbstractContainerScreen.java`: shift+double-click does not
+    /// Vanilla's own release handler: shift+double-click does not
     /// gather onto the cursor — it sends one `QUICK_MOVE` per slot that is in
     /// the **same backing container** as the double-clicked slot, may be
     /// picked up, is non-empty, and matches `last_quick_moved`
