@@ -342,10 +342,10 @@ mod tests {
 
     #[test]
     fn get_seed_matches_known_origin() {
-        // Mth.getSeed(0,0,0) == 0 (0*0*.. == 0, >>16 == 0).
+        // the seed-mixing function at (0,0,0) reduces to 0*0*.. == 0, >>16 == 0.
         assert_eq!(get_seed(0, 0, 0), 0);
     }
-    /// Issue #515. `is_slime_chunk` is a pure function of `(chunk_x, chunk_z,
+    /// `is_slime_chunk` is a pure function of `(chunk_x, chunk_z,
     /// seed)`, so this is element-wise and exact — not a match count and not a
     /// "roughly 10%" statistic, which would be the *magnitude* species of vacuous
     /// test.

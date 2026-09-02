@@ -103,7 +103,7 @@ pub enum Stage {
     Vegetation = 7,
     TopLayer = 8,
     Intern = 9,
-    /// Issue #514's structure stages (`structure_starts`, `structure_place`).
+    /// Structure-generation stages (`structure_starts`, `structure_place`).
     ///
     /// **Not one of "the ten stages"** and deliberately has no `StageTimes`
     /// field: it runs *above* `pre_ore` (starts/refs) and *inside* it (placement),
