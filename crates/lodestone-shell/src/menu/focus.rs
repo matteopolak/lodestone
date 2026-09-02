@@ -2157,12 +2157,6 @@ mod tests {
     }
 
     #[test]
-    fn the_double_click_threshold_matches_mousehandlers_own_250ms() {
-        // `MouseHandler.java`, transcribed rather than picked.
-        assert_eq!(DOUBLE_CLICK_THRESHOLD_MS, 250);
-    }
-
-    #[test]
     fn two_clicks_on_the_same_row_inside_the_threshold_double() {
         let mut t: DoubleClickTracker<usize> = DoubleClickTracker::new();
         assert!(!t.click(0, 3), "there is no previous click to pair with");

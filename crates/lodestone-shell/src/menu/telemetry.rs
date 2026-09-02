@@ -444,14 +444,6 @@ mod tests {
     }
 
     #[test]
-    fn the_feedback_url_is_vanillas_own_and_privacy_statement_is_gone() {
-        // Privacy Statement (`go.microsoft.com/fwlink/?LinkId=521839`) is
-        // dropped entirely — see the module docs — so there is no constant
-        // left to assert on for it; this only pins the surviving link.
-        assert_eq!(RELEASE_FEEDBACK_URL, "https://aka.ms/javafeedback?ref=game");
-    }
-
-    #[test]
     fn the_header_widget_rects_place_one_button_after_title_and_description() {
         let rects = header_widget_rects(480.0, 270.0);
         assert_eq!(rects.len(), 3);

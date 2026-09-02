@@ -468,27 +468,4 @@ mod tests {
         );
     }
 
-    /// A neuter proving the previous test actually discriminates: if the
-    /// encoder swapped two adjacent lines, this must fail. Run by hand rather
-    /// than left in the suite — see the module's own verification notes.
-    #[test]
-    fn transposed_lines_would_be_caught() {
-        let mut state = SignEditState::new(open());
-        for (i, text) in ["alpha", "bravo", "charlie", "delta"].iter().enumerate() {
-            state.set_active_line(i);
-            for ch in text.chars() {
-                state.handle_char(ch);
-            }
-        }
-        let submit = state.to_submit();
-        // Simulate the transposition bug directly on the submit struct, the
-        // way a wire-order mistake would produce it.
-        let mut swapped = submit.clone();
-        swapped.lines.swap(0, 1);
-        assert_ne!(
-            submit, swapped,
-            "swapping two lines must change the submitted value — otherwise \
-             a transposition bug would be silently unobservable"
-        );
-    }
 }

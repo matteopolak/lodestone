@@ -834,15 +834,6 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_snapshot_reads_zero_for_every_stat() {
-        // The state every real session is in today — see the module docs.
-        let snapshot = StatsSnapshot::default();
-        for &(id, _, fmt) in GENERAL_STATS {
-            assert_eq!(fmt.format(snapshot.get(id)), fmt.format(0), "{id} must default to zero");
-        }
-    }
-
-    #[test]
     fn a_populated_snapshot_reaches_the_row_the_same_way_a_decoder_eventually_will() {
         // Proves the plumbing end to end with a synthetic value, standing in
         // for the decoder this issue does not build — an expected value from

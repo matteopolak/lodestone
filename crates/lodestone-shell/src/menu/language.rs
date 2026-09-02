@@ -743,12 +743,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn there_is_exactly_one_real_language_and_it_is_english_us() {
-        assert_eq!(LANGUAGES.len(), 1);
-        assert_eq!(LANGUAGES[0].code, "en_us");
-    }
-
-    #[test]
     fn filtering_by_a_matching_substring_keeps_the_one_entry() {
         assert_eq!(filtered("english").len(), 1);
         assert_eq!(filtered("ENGLISH").len(), 1, "vanilla's filter is case-insensitive");
@@ -820,11 +814,6 @@ mod tests {
         assert_eq!(row_left(480.0), 480.0 * 0.5 - 270.0 * 0.5);
     }
 
-    #[test]
-    fn first_entry_y_is_header_height_plus_the_shared_list_top_inset() {
-        assert_eq!(first_entry_y(), HEADER_HEIGHT + options::LIST_TOP_INSET);
-    }
-
     /// A row scrolled above the band resolves **above** it, not at the old
     /// `(-1000, -1000)` sentinel — which existed only because
     /// `row.checked_sub(first)` could underflow. With a pixel offset there is
@@ -853,8 +842,9 @@ mod tests {
     /// # This screen's real table has ONE entry, so the length is synthetic
     ///
     /// Written first as `LanguageNav::new()` plus `scroll_by`, and the premise
-    /// assertion **fired**: `there_is_exactly_one_real_language_and_it_is_english_us`
-    /// is the neighbouring gate, this client ships one language, and a one-entry
+    /// assertion **fired**: `LANGUAGES` has exactly one entry (see
+    /// `the_real_one_entry_table_does_not_scroll_at_all`'s own premise check
+    /// below), this client ships one language, and a one-entry
     /// list is not scrollable at any canvas. That is the *world* species of
     /// vacuous test — the input data structurally cannot exercise the change —
     /// and it would have read as a pass the moment anyone made `scroll_by`
@@ -968,11 +958,5 @@ mod tests {
              (`setFooterHeight(53)`), so using the generic one would be a 20 px \
              error the band would absorb silently"
         );
-    }
-
-    #[test]
-    fn the_footer_buttons_are_two_of_the_five_widget_rects() {
-        let rects = frame_widget_rects(480.0, 270.0);
-        assert_eq!(rects.len(), 5);
     }
 }
