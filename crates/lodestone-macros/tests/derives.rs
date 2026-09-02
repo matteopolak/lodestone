@@ -1,4 +1,6 @@
-use lodestone_core::{Bound, Ctx, Decode, Encode, Error, Packet, Reader, State, Writer};
+use lodestone_core::{
+    Bound, Ctx, Decode, Encode, Error, Packet, ProtocolRange, Reader, State, Writer,
+};
 use lodestone_macros::{Decode, Encode, Packet};
 
 fn encode_to_vec<T: Encode>(value: &T, version: i32) -> lodestone_core::Result<Vec<u8>> {
@@ -146,6 +148,17 @@ enum VarIntEnum {
 #[mc(name = "minecraft:keep_alive", state = Play, bound = Server)]
 struct KeepAlive;
 
+#[derive(Debug, PartialEq, Encode, Decode, Packet)]
+#[mc(
+    name = "minecraft:ranged_packet",
+    state = Play,
+    bound = Client,
+    protocols = "47..=754"
+)]
+struct RangedPacket {
+    value: u8,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PaletteKind {
     Blocks,
@@ -276,6 +289,7 @@ mod alternate_core {
         const NAME: &'static str;
         const STATE: State;
         const BOUND: Bound;
+        const PROTOCOLS: ProtocolRange;
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -286,6 +300,18 @@ mod alternate_core {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Bound {
         Client,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ProtocolRange {
+        pub start: i32,
+        pub end: i32,
+    }
+
+    impl ProtocolRange {
+        pub const fn new(start: i32, end: i32) -> Self {
+            Self { start, end }
+        }
     }
 }
 
@@ -757,6 +783,72 @@ fn packet_derive_exposes_metadata() {
     assert_eq!(<KeepAlive as Packet>::NAME, "minecraft:keep_alive");
     assert_eq!(<KeepAlive as Packet>::STATE, State::Play);
     assert_eq!(<KeepAlive as Packet>::BOUND, Bound::Server);
+    // No #[mc(protocols = ...)] was declared: this is every packet in
+    // crates/protocol/* today, and it must default to "no restriction"
+    // rather than some narrower guess.
+    assert_eq!(<KeepAlive as Packet>::PROTOCOLS, ProtocolRange::ALL);
+}
+
+#[test]
+fn container_protocol_range_is_surfaced_on_packet() {
+    assert_eq!(
+        <RangedPacket as Packet>::PROTOCOLS,
+        ProtocolRange::new(47, 754)
+    );
+}
+
+#[test]
+fn container_protocol_range_accepts_versions_inside_it() {
+    // 47 and 754 are the declared endpoints themselves (inclusive), 340 is
+    // strictly interior -- three points, not one, so an off-by-one at
+    // either edge would be caught.
+    for version in [47, 340, 754] {
+        let value = RangedPacket { value: 9 };
+        let bytes = encode_to_vec(&value, version).unwrap();
+        assert_eq!(bytes, vec![9]);
+        assert_eq!(
+            decode_from_slice::<RangedPacket>(&bytes, version).unwrap(),
+            value
+        );
+    }
+}
+
+#[test]
+fn negative_control_protocol_range_rejects_excluded_version_on_encode() {
+    // 776 is outside the declared 47..=754 range: encode must fail with a
+    // named error instead of silently producing bytes for a version this
+    // definition was never reviewed against.
+    let value = RangedPacket { value: 9 };
+    assert_eq!(
+        encode_to_vec(&value, 776),
+        Err(Error::PacketOutOfProtocolRange {
+            name: "RangedPacket",
+            version: 776,
+            range: ProtocolRange::new(47, 754),
+        })
+    );
+    // Below the range fails the same way.
+    assert_eq!(
+        encode_to_vec(&value, 5),
+        Err(Error::PacketOutOfProtocolRange {
+            name: "RangedPacket",
+            version: 5,
+            range: ProtocolRange::new(47, 754),
+        })
+    );
+}
+
+#[test]
+fn negative_control_protocol_range_rejects_excluded_version_on_decode() {
+    let mut reader = Reader::new(&[9_u8][..]);
+    assert_eq!(
+        RangedPacket::decode(&mut reader, Ctx { version: 776 }),
+        Err(Error::PacketOutOfProtocolRange {
+            name: "RangedPacket",
+            version: 776,
+            range: ProtocolRange::new(47, 754),
+        })
+    );
 }
 
 #[test]
@@ -1008,5 +1100,9 @@ fn crate_path_can_retarget_generated_impls() {
     assert_eq!(
         <RetargetedUnit as alternate_core::Packet>::BOUND,
         alternate_core::Bound::Client
+    );
+    assert_eq!(
+        <RetargetedUnit as alternate_core::Packet>::PROTOCOLS,
+        alternate_core::ProtocolRange::new(i32::MIN, i32::MAX)
     );
 }

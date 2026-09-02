@@ -25,6 +25,16 @@
 //! `#[mc(nbt)]` on `Vec<u8>` fields captures one raw named-NBT value. Decode
 //! validates the tag with `read_named_nbt` and stores the exact consumed bytes;
 //! encode validates and replays those bytes.
+//!
+//! `#[mc(protocols = "a..=b")]` on a container declares the inclusive protocol
+//! range that definition covers, surfaced as `Packet::PROTOCOLS`. Unlike
+//! field-level `since`/`until` (an in-range delta), this is a hard boundary:
+//! `Encode`/`Decode` check `ctx.version` against the range before touching a
+//! single byte, so a call outside the declared range fails loudly with
+//! `Error::PacketOutOfProtocolRange` instead of silently producing bytes for
+//! a version the definition was never reviewed against. Omitting the
+//! attribute means "no declared restriction" (`ProtocolRange::ALL`), which is
+//! every packet definition today.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
@@ -68,6 +78,7 @@ struct ContainerAttr {
     packet_name: Option<LitStr>,
     packet_state: Option<Ident>,
     packet_bound: Option<Ident>,
+    protocols: Option<(i32, i32)>,
 }
 
 impl Default for ContainerAttr {
@@ -80,6 +91,7 @@ impl Default for ContainerAttr {
             packet_name: None,
             packet_state: None,
             packet_bound: None,
+            protocols: None,
         }
     }
 }
@@ -234,6 +246,7 @@ fn expand_encode(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let ident = &input.ident;
     let generics = add_trait_bounds(input.generics.clone(), crate_path, parse_quote!(Encode));
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let protocol_guard = protocol_range_guard(crate_path, ident, container.protocols);
 
     let body = match &input.data {
         Data::Struct(data) => encode_struct_body(crate_path, data, container.bits.as_ref())?,
@@ -249,6 +262,7 @@ fn expand_encode(input: &DeriveInput) -> syn::Result<TokenStream2> {
     Ok(quote! {
         impl #impl_generics #crate_path::Encode for #ident #ty_generics #where_clause {
             fn encode(&self, w: &mut #crate_path::Writer, ctx: #crate_path::Ctx) -> #crate_path::Result<()> {
+                #protocol_guard
                 #body
                 Ok(())
             }
@@ -262,6 +276,7 @@ fn expand_decode(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let ident = &input.ident;
     let generics = add_trait_bounds(input.generics.clone(), crate_path, parse_quote!(Decode));
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let protocol_guard = protocol_range_guard(crate_path, ident, container.protocols);
 
     let body = match &input.data {
         Data::Struct(data) => decode_struct_body(
@@ -294,6 +309,7 @@ fn expand_decode(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     ctx: #crate_path::Ctx,
                     decode_ctx: &#decode_context,
                 ) -> #crate_path::Result<Self> {
+                    #protocol_guard
                     #body
                 }
             }
@@ -303,10 +319,33 @@ fn expand_decode(input: &DeriveInput) -> syn::Result<TokenStream2> {
     Ok(quote! {
         impl #impl_generics #crate_path::Decode for #ident #ty_generics #where_clause {
             fn decode(r: &mut #crate_path::Reader<'_>, ctx: #crate_path::Ctx) -> #crate_path::Result<Self> {
+                #protocol_guard
                 #body
             }
         }
     })
+}
+
+/// Emits the `ctx.version` guard for a container's `#[mc(protocols = ...)]`
+/// range, or nothing when the attribute is absent (today's default: every
+/// existing packet definition, unrestricted).
+fn protocol_range_guard(
+    crate_path: &Path,
+    ident: &Ident,
+    protocols: Option<(i32, i32)>,
+) -> TokenStream2 {
+    let Some((start, end)) = protocols else {
+        return TokenStream2::new();
+    };
+    quote! {
+        if ctx.version < #start || ctx.version > #end {
+            return ::core::result::Result::Err(#crate_path::Error::PacketOutOfProtocolRange {
+                name: ::core::stringify!(#ident),
+                version: ctx.version,
+                range: #crate_path::ProtocolRange::new(#start, #end),
+            });
+        }
+    }
 }
 
 fn expand_packet(input: &DeriveInput) -> syn::Result<TokenStream2> {
@@ -328,12 +367,15 @@ fn expand_packet(input: &DeriveInput) -> syn::Result<TokenStream2> {
     validate_packet_state(&state)?;
     validate_packet_bound(&bound)?;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let (protocols_start, protocols_end) = container.protocols.unwrap_or((i32::MIN, i32::MAX));
 
     Ok(quote! {
         impl #impl_generics #crate_path::Packet for #ident #ty_generics #where_clause {
             const NAME: &'static str = #name;
             const STATE: #crate_path::State = #crate_path::State::#state;
             const BOUND: #crate_path::Bound = #crate_path::Bound::#bound;
+            const PROTOCOLS: #crate_path::ProtocolRange =
+                #crate_path::ProtocolRange::new(#protocols_start, #protocols_end);
         }
     })
 }
@@ -1566,12 +1608,48 @@ fn parse_container_attrs(attrs: &[Attribute]) -> syn::Result<ContainerAttr> {
             } else if meta.path.is_ident("bound") {
                 out.packet_bound = Some(meta.value()?.parse()?);
                 Ok(())
+            } else if meta.path.is_ident("protocols") {
+                let lit: LitStr = meta.value()?.parse()?;
+                out.protocols = Some(parse_protocol_range(&lit)?);
+                Ok(())
             } else {
                 Err(syn::Error::new_spanned(meta.path, "unknown #[mc(...)] container attribute"))
             }
         })?;
     }
     Ok(out)
+}
+
+/// Parses `#[mc(protocols = "start..=end")]`'s string form into an
+/// inclusive `(start, end)` pair.
+fn parse_protocol_range(lit: &LitStr) -> syn::Result<(i32, i32)> {
+    let value = lit.value();
+    let Some((start, end)) = value.split_once("..=") else {
+        return Err(syn::Error::new(
+            lit.span(),
+            "#[mc(protocols = ...)] expects \"start..=end\", e.g. \"47..=754\"",
+        ));
+    };
+    let start = start.trim();
+    let end = end.trim();
+    let start_value: i32 = start.parse().map_err(|_| {
+        syn::Error::new(
+            lit.span(),
+            format!("invalid protocol range start {start:?}"),
+        )
+    })?;
+    let end_value: i32 = end.parse().map_err(|_| {
+        syn::Error::new(lit.span(), format!("invalid protocol range end {end:?}"))
+    })?;
+    if start_value > end_value {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!(
+                "#[mc(protocols = ...)] start {start_value} must be <= end {end_value}"
+            ),
+        ));
+    }
+    Ok((start_value, end_value))
 }
 
 fn parse_field_attrs(attrs: &[Attribute]) -> syn::Result<FieldAttr> {
