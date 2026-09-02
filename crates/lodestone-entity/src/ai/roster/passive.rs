@@ -186,7 +186,7 @@ pub static PIG: &[Registration] = &[
     Registration::goal(1, "PanicGoal", panic_1_25),
     // Vanilla puts a pig's `BreedGoal` at 3, not 2 — nothing occupies 2.
     Registration::goal(3, "BreedGoal", breed_1_0),
-    // `TemptGoal(this, 1.2, i -> i.is(Items.CARROT_ON_A_STICK), false)`. A
+    // Vanilla's own carrot-on-a-stick tempt goal. A
     // separate registration from the food one below, and a separate item: the
     // server's `tempt_food` feed resolves the `pig_food` **tag** only, so
     // steering a pig with a carrot on a stick is not modelled. It is also the
@@ -240,7 +240,7 @@ pub static CHICKEN: &[Registration] = &[
 /// Adding them as rows would make the cited line range a lie.
 pub static RABBIT: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
-    // `ClimbOnTopOfPowderSnowGoal(this, this.level())`. The *cue* half
+    // Vanilla's own climb-on-powder-snow goal. The *cue* half
     // is now answerable — `MobController::block_cues_*` could carry
     // "the block above is powder snow or has empty collision" — but the goal
     // also gates on `isInPowderSnow`/`wasInPowderSnow`, which no physics here
@@ -324,29 +324,29 @@ pub static CAT: &[Registration] = &[
     Registration::goal(1, "TamableAnimal.TamableAnimalPanicGoal", cat_panic_1_5),
     Registration::goal(2, "SitWhenOrderedToGoal", sit_when_ordered),
     // Vanilla's own cat relax-on-owner goal — lies down near a sleeping owner and may
-    // leave a morning gift on waking. `Coverage::Modelled` now (issue #229) —
+    // leave a morning gift on waking. `Coverage::Modelled` now —
     // see [`CatRelaxOnOwnerGoal`]'s own doc for the disclosed simplifications
     // (bed-foot position, same-species exclusion, and the host-side gift
     // roll).
     Registration::goal(3, "Cat.CatRelaxOnOwnerGoal", cat_relax_on_owner),
-    // `this.temptGoal = new Cat.CatTemptGoal(this, 0.6, i -> i.is(ItemTags.CAT_FOOD), true)`,
-    // added at priority 4. The `canScare` third argument
+    // Vanilla's own cat tempt goal,
+    // added at priority 4. Vanilla's own scare argument
     // (fleeing a sudden nearby sprinting player) is not modelled — our
     // `TemptGoal` has no scare state, same simplification as every other
     // `TemptGoal` row in this roster.
     Registration::goal(4, "Cat.CatTemptGoal(CAT_FOOD)", cat_tempt_0_6),
-    // `CatLieOnBedGoal(this, 1.1, 8)` — a `MoveToBlockGoal` that hunts
+    // Vanilla's own cat bed-hunt goal — a `MoveToBlockGoal` that hunts
     // beds in an 8-block radius. The candidate bed position is host-computed
     // (`MobController::cat_bed_target`, `docs/mob-block-perception.md`'s own
     // guidance for a goal that needs to search a neighbourhood) rather than
     // searched in-goal.
     Registration::goal(5, "CatLieOnBedGoal", cat_lie_on_bed_1_1),
     Registration::goal(6, "FollowOwnerGoal", cat_follow_owner),
-    // `CatSitOnBlockGoal(this, 0.8)` — hunts chests and lit furnaces to
+    // Vanilla's own cat perch-hunt goal — hunts chests and lit furnaces to
     // perch on, same host-computed-candidate shape as `CatLieOnBedGoal` above
     // (`MobController::cat_sit_target`).
     Registration::goal(7, "CatSitOnBlockGoal", cat_sit_on_block_0_8),
-    // `LeapAtTargetGoal(this, 0.3F)` — pounces at its own attack
+    // Vanilla's own leap-at-target goal — pounces at its own attack
     // target. No goal type here models a leap.
     Registration::missing(Selector::Goal, 8, "LeapAtTargetGoal"),
     // `OcelotAttackGoal(this)` — an untamed cat's own chicken-stalking
@@ -395,15 +395,15 @@ pub static PARROT: &[Registration] = &[
     // seam has no equivalent search for (same class of gap `Bee.BeeWanderGoal`
     // is `Missing` for in the neutral family).
     Registration::missing(Selector::Goal, 2, "Parrot.ParrotWanderGoal"),
-    // `LandOnOwnersShoulderGoal(this)` — shoulder riding. `Coverage::Modelled`
-    // now (issue #229): see [`LandOnOwnersShoulderGoal`]'s own doc for the
+    // Vanilla's own land-on-shoulder goal — shoulder riding. `Coverage::Modelled`
+    // now: see [`LandOnOwnersShoulderGoal`]'s own doc for the
     // disclosed owner-physical-state simplifications. Landing despawns the
     // parrot mob entity on the host side (vanilla discards it too — see
     // vanilla's own shoulder-mount setter); no client-visible perched
     // pose is rendered, since that is a player-model render layer this
     // crate's seam has no way to reach.
     Registration::goal(3, "LandOnOwnersShoulderGoal", parrot_land_on_shoulder),
-    // `FollowMobGoal(this, 1.0, 3.0F, 7.0F)` — a tame, non-sitting
+    // Vanilla's own follow-mob goal — a tame, non-sitting
     // parrot follows the nearest *other mob* it can imitate. No goal type here
     // models following an arbitrary nearby mob rather than the owner.
     Registration::missing(Selector::Goal, 3, "FollowMobGoal"),
@@ -416,76 +416,76 @@ pub static PARROT: &[Registration] = &[
 // next to the citation. `Registration.build` must be a plain `fn` item, so a
 // parameterised closure is not an option.
 
-/// `PanicGoal(this, 2.0)` — cow (vanilla's own cow registration). The fastest
+/// The cow's panic speed factor, `2.0`, from vanilla's own cow registration. The fastest
 /// panic in this family.
 fn panic_2_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(PanicGoal::new(ctx.speed * 2.0))
 }
 
-/// `PanicGoal(this, 1.25)` — sheep (vanilla's own sheep registration) and pig
+/// The panic speed factor `1.25` — sheep (vanilla's own sheep registration) and pig
 /// (vanilla's own pig registration).
 fn panic_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(PanicGoal::new(ctx.speed * 1.25))
 }
 
-/// `PanicGoal(this, 1.4)` — chicken (vanilla's own chicken registration).
+/// The chicken's panic speed factor, `1.4`, from vanilla's own chicken registration.
 fn panic_1_4(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(PanicGoal::new(ctx.speed * 1.4))
 }
 
-/// `TemptGoal(this, 1.25, …)` — cow (vanilla's own cow registration).
+/// The cow's tempt speed factor, `1.25`, from vanilla's own cow registration.
 fn tempt_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(TemptGoal::new(ctx.speed * 1.25))
 }
 
-/// `TemptGoal(this, 1.1, …)` — sheep (vanilla's own sheep registration).
+/// The sheep's tempt speed factor, `1.1`, from vanilla's own sheep registration.
 fn tempt_1_1(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(TemptGoal::new(ctx.speed * 1.1))
 }
 
-/// `TemptGoal(this, 1.2, …)` — pig (vanilla's own pig registration).
+/// The pig's tempt speed factor, `1.2`, from vanilla's own pig registration.
 fn tempt_1_2(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(TemptGoal::new(ctx.speed * 1.2))
 }
 
-/// `TemptGoal(this, 1.0, …)` — chicken (vanilla's own chicken registration).
+/// The chicken's tempt speed factor, `1.0`, from vanilla's own chicken registration.
 fn tempt_1_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(TemptGoal::new(ctx.speed))
 }
 
-/// `Rabbit.RabbitPanicGoal(this, 2.2)` — rabbit
+/// The rabbit's own panic goal, speed factor `2.2`
 /// (vanilla's own rabbit registration). The fastest panic in the family; a cow's
 /// `2.0` is next.
 ///
-/// `RabbitPanicGoal` is a `PanicGoal` subclass whose only addition is
+/// Vanilla's rabbit-specific panic goal is a `PanicGoal` subclass whose only addition is
 /// setting the jump control while fleeing, so the speed argument is the whole of
 /// what our `PanicGoal` models and the subclass is not a separate gap.
 fn panic_2_2(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(PanicGoal::new(ctx.speed * 2.2))
 }
 
-/// `BreedGoal(this, 0.8)` — rabbit (vanilla's own rabbit registration) and cat
+/// The breed speed factor `0.8` — rabbit (vanilla's own rabbit registration) and cat
 /// (vanilla's own cat registration), the two species in this family whose breed
 /// speed is not `1.0`, which is why neither can use the shared [`breed_1_0`].
 fn breed_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(BreedGoal::new(ctx.speed * 0.8))
 }
 
-/// `WaterAvoidingRandomStrollGoal(this, 0.6)` — rabbit
+/// The rabbit's stroll speed factor, `0.6`
 /// (vanilla's own rabbit registration), against the `1.0` every other farm animal
 /// registers, so the shared [`stroll`] would be wrong by a factor of 1.67.
 fn stroll_0_6(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RandomStrollGoal::new(ctx.speed * 0.6))
 }
 
-/// `LookAtPlayerGoal(this, Player.class, 10.0F)` — rabbit
+/// The rabbit's look-at-player distance, `10.0`
 /// (vanilla's own rabbit registration), the only non-`6.0F` look distance in this
 /// family, so [`look_at_player_6`] does not apply.
 fn look_at_player_10(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(LookAtPlayerGoal::new(10.0, LOOK_PROBABILITY))
 }
 
-/// `Rabbit.RabbitAvoidEntityGoal<>(this, Player.class, 8.0F, 2.2, 2.2)` — rabbit
+/// The rabbit's own avoid-player goal, radius `8.0`, walk and sprint speed factor `2.2`
 /// (vanilla's own rabbit registration).
 ///
 /// Vanilla's fourth and fifth arguments are the walk and sprint tiers, and a
@@ -505,18 +505,18 @@ fn rabbit_avoid_player(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(AvoidEntityGoal::new(8.0, ctx.speed * 2.2))
 }
 
-/// `FollowParentGoal(this, 1.25)` — cow (vanilla's own cow registration).
+/// The cow's follow-parent speed factor, `1.25`, from vanilla's own cow registration.
 fn follow_parent_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FollowParentGoal::new(ctx.speed * 1.25))
 }
 
-/// `FollowParentGoal(this, 1.1)` — sheep, pig
+/// The follow-parent speed factor `1.1` — sheep, pig
 /// and chicken (each in their own goal registration).
 fn follow_parent_1_1(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FollowParentGoal::new(ctx.speed * 1.1))
 }
 
-/// `EatBlockGoal(this)` — sheep only, no arguments.
+/// Vanilla's own eat-block goal — sheep only, no arguments.
 /// Its predicate reads the block at and below the mob through
 /// `MobController::block_cues_*`; a host whose `PathWorld` does not
 /// classify blocks leaves it inert rather than wrong.
@@ -526,8 +526,8 @@ fn eat_block(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 
 // -- cat and parrot builders --------------------------------------------------
 
-/// `TamableAnimal.TamableAnimalPanicGoal(1.5)` — cat (vanilla's own cat registration).
-/// The same multiplier and the same vanilla class as the wolf's row in
+/// The cat's panic speed factor, `1.5`, from vanilla's own cat registration.
+/// The same multiplier and the same vanilla goal type as the wolf's row in
 /// `neutral::WOLF`, but no shared builder: a `Registration` table is a `const`,
 /// so `build` must be a plain `fn` item, and the two live in different family
 /// modules by construction (see this module's "How to change it").
@@ -535,28 +535,28 @@ fn cat_panic_1_5(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(PanicGoal::new(ctx.speed * 1.5))
 }
 
-/// `Cat.CatTemptGoal(this, 0.6, …)` — cat (vanilla's own cat registration).
+/// The cat's tempt speed factor, `0.6`, from vanilla's own cat registration.
 fn cat_tempt_0_6(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(TemptGoal::new(ctx.speed * 0.6))
 }
 
-/// `FollowOwnerGoal(this, 1.0, 10.0F, 5.0F)` — cat (vanilla's own cat registration).
+/// The cat's own follow-owner distances, `(10.0, 5.0)`, from vanilla's own cat registration.
 /// A cat stops five blocks out, against the wolf's two.
 fn cat_follow_owner(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FollowOwnerGoal::new(ctx.speed, 10.0, 5.0))
 }
 
-/// `CatSitOnBlockGoal(this, 0.8)` — cat (vanilla's own cat registration).
+/// The cat's perch-hunt speed factor, `0.8`, from vanilla's own cat registration.
 fn cat_sit_on_block_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(CatSitOnBlockGoal::new(ctx.speed * 0.8))
 }
 
-/// `CatLieOnBedGoal(this, 1.1, 8)` — cat (vanilla's own cat registration).
+/// The cat's bed-hunt speed factor, `1.1`, and search radius, `8`, from vanilla's own cat registration.
 fn cat_lie_on_bed_1_1(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(CatLieOnBedGoal::new(ctx.speed * 1.1))
 }
 
-/// `new Cat.CatRelaxOnOwnerGoal(this)` — cat (vanilla's own cat registration). No
+/// The cat's own relax-on-owner goal, from vanilla's own cat registration. No
 /// constructor speed argument in the jar (the goal's own `moveTo` calls
 /// hardcode `1.1F`); `ctx.speed` still scales it, matching every other
 /// builder here, since `1.1F` is itself a `speedModifier` multiplier on the
@@ -565,7 +565,7 @@ fn cat_relax_on_owner(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(CatRelaxOnOwnerGoal::new(ctx.speed * 1.1))
 }
 
-/// `WaterAvoidingRandomStrollGoal(this, 0.8, 1.0000001E-5F)` — cat
+/// The cat's stroll speed factor, `0.8`, and its near-zero wander probability
 /// (vanilla's own cat registration). The probability argument is the reciprocal
 /// of [`RandomStrollGoal::with_interval`]'s tick count: `1 / 1.0000001E-5 ≈
 /// 100_000`, so a cat only picks a new wander target roughly once every
@@ -576,20 +576,20 @@ fn cat_stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RandomStrollGoal::new(ctx.speed * 0.8).with_interval(100_000))
 }
 
-/// `TamableAnimal.TamableAnimalPanicGoal(1.25)` — parrot
+/// The parrot's panic speed factor, `1.25`
 /// (vanilla's own parrot registration).
 fn parrot_panic_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(PanicGoal::new(ctx.speed * 1.25))
 }
 
-/// `FollowOwnerGoal(this, 1.0, 5.0F, 1.0F)` — parrot
+/// The parrot's own follow-owner distances, `(5.0, 1.0)`
 /// (vanilla's own parrot registration). The tightest follow distances in the
 /// tameable set — a parrot stays close.
 fn parrot_follow_owner(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FollowOwnerGoal::new(ctx.speed, 5.0, 1.0))
 }
 
-/// `new LandOnOwnersShoulderGoal(this)` — parrot (vanilla's own parrot registration). No
+/// The parrot's own land-on-shoulder goal (vanilla's own parrot registration). No
 /// constructor arguments in the jar at all.
 fn parrot_land_on_shoulder(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(LandOnOwnersShoulderGoal::new())
