@@ -7206,7 +7206,7 @@ impl<'w> MobSim<'w> {
         outcome
     }
 
-    /// `Wolf`/`Cat`/`Parrot.mobInteract` — the `TamableAnimal` chain.
+    /// Vanilla's own wolf/cat/parrot interaction overrides — the tameable-animal chain.
     fn interact_tamable(
         &mut self,
         mob_id: i32,
@@ -7228,15 +7228,15 @@ impl<'w> MobSim<'w> {
         };
 
         if mob.is_tame() {
-            // `isOwnedBy(player)` — a tame animal ignores everyone but its owner.
+            // Vanilla's own "is owned by" check — a tame animal ignores everyone but its owner.
             // Vanilla's cat wraps its whole body in this check and the wolf
             // repeats it per arm; the effect is the same.
             if mob.owner_uuid() != Some(actor.uuid) {
                 return InteractOutcome::Pass;
             }
-            // `Wolf.mobInteract`'s first arm: `isFood(stack) && getHealth() <
-            // getMaxHealth()` → `feed`. **Before** the breeding arm, which is
-            // reached only through `super.mobInteract`.
+            // Vanilla's own wolf interaction override's first arm: is-food and
+            // health-below-max → feed. **Before** the breeding arm, which is
+            // reached only through its parent's generic interaction.
             let is_food = item.is_some_and(|i| species::breeding_food(species).contains(&i));
             if is_food && mob.health() < mob.max_health() {
                 let heal = species::tame_feed_heal(species);
@@ -7244,12 +7244,12 @@ impl<'w> MobSim<'w> {
                 mob.heal(heal);
                 return InteractOutcome::Fed;
             }
-            // `super.mobInteract` → `Animal.mobInteract`'s love arm.
+            // Its parent's generic animal interaction's love arm.
             if is_food && self.try_set_in_love(mob_id) {
                 return InteractOutcome::InLove;
             }
-            // `if (!interactionResult.consumesAction() && isOwnedBy(player))` →
-            // `setOrderedToSit(!isOrderedToSit())`. The *last* arm, so anything
+            // Vanilla's own "did not consume the action, and is owned by the
+            // player" check flips the sitting order. The *last* arm, so anything
             // above it suppresses the toggle — which is why an owner feeding a
             // hurt pet does not also sit it down.
             let mob = self.get_mut(mob_id).expect("checked above");
@@ -7261,19 +7261,20 @@ impl<'w> MobSim<'w> {
         // Untamed. The taming item is checked first and it is **not** the food
         // tag for the wolf: `Items.BONE`.
         if item.is_some_and(|i| items.contains(&i)) {
-            // `Wolf.mobInteract`'s `!this.isAngry()` guard. The cat and the
+            // Vanilla's own wolf interaction override's "is not angry" guard. The cat and the
             // parrot have no such gate, and `anger` is `None` for them anyway,
             // so this is one condition rather than a per-species branch.
             if self.get(mob_id).is_some_and(|m| m.anger.is_some()) {
                 return InteractOutcome::Pass;
             }
-            // `tryToTame`: one `nextInt(one_in)` draw, success on exactly `0`.
+            // Vanilla's own "try to tame" step: one bounded-int draw, success on exactly `0`.
             let success = self.tame_rng.next_int(one_in) == 0;
             let mob = self.get_mut(mob_id).expect("checked above");
             if success {
                 mob.tame(MobOwner::Player(actor.uuid));
-                // `navigation.stop(); setTarget(null);` then, for the wolf and
-                // the cat only, `setOrderedToSit(true)`.
+                // Vanilla's own navigation-stop plus target-clear, then, for
+                // the wolf and
+                // the cat only, its own sit-order setter.
                 mob.set_attack_target(None);
                 mob.set_attack_target_id(None);
                 if sit_on_success {
@@ -7284,7 +7285,7 @@ impl<'w> MobSim<'w> {
             return InteractOutcome::TameFailed;
         }
 
-        // Still `super.mobInteract` → `Animal.mobInteract`: an **untamed** wolf
+        // Still its parent's generic animal interaction: an **untamed** wolf
         // fed meat really does fall in love in vanilla, because the bone check
         // above did not match and the chain continues.
         if item.is_some_and(|i| species::breeding_food(species).contains(&i))
@@ -7295,7 +7296,7 @@ impl<'w> MobSim<'w> {
         InteractOutcome::Pass
     }
 
-    /// `AbstractHorse.mobInteract` → `handleEating`.
+    /// Vanilla's own horse-family interaction override → its own "handle eating" step.
     ///
     /// The horse family's whole mechanism is a persisted counter, so this arm
     /// makes **no** tame roll: feeding raises `Temper` and nothing else. The roll
@@ -7309,13 +7310,14 @@ impl<'w> MobSim<'w> {
         max_temper: i32,
     ) -> InteractOutcome {
         let Some(item) = item else {
-            // An empty-handed right-click is `doPlayerRide` — vanilla's only
+            // An empty-handed right-click is vanilla's own mount-ride call — vanilla's only
             // route to the tame roll (on an untamed horse; see
             // `attempt_horse_tame`'s doc for the one disclosed deviation) and,
             // now that a passenger model exists, to actually boarding a tamed
             // one. A baby is excluded exactly as vanilla's own
-            // `isVehicle() || isBaby()` guard at the top of `mobInteract`
-            // routes it to `Animal.mobInteract` instead, which has no
+            // "is a vehicle, or is a baby" guard at the top of its interaction
+            // override
+            // routes it to its parent's generic animal interaction instead, which has no
             // empty-handed arm at all.
             let Some(mob) = self.get(mob_id) else {
                 return InteractOutcome::Pass;
@@ -7333,8 +7335,9 @@ impl<'w> MobSim<'w> {
             };
         };
 
-        // `handleEating`'s arms in order: heal, ageUp, love, temper. Love is
-        // gated on `isTamed() && getAge() == 0 && !isInLove()` and only the two
+        // Vanilla's own "handle eating" step's arms in order: heal, age-up,
+        // love, temper. Love is
+        // gated on tamed, age exactly zero, and not already in love, and only the two
         // gold items reach it.
         let mut used = false;
         if species::horse_breeding_items(item)
@@ -7365,7 +7368,7 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// `Animal.mobInteract` for a species with no taming at all — the cow, sheep,
+    /// Vanilla's own generic animal interaction for a species with no taming at all — the cow, sheep,
     /// pig, chicken and rabbit route, and the only thing feeding them does.
     fn interact_animal(
         &mut self,
@@ -7381,8 +7384,8 @@ impl<'w> MobSim<'w> {
         InteractOutcome::Pass
     }
 
-    /// `Animal.mobInteract`'s love arm as a single testable condition:
-    /// `getAge() == 0 && canFallInLove()`, then `setInLove`.
+    /// Vanilla's own generic animal interaction's love arm as a single testable condition:
+    /// age exactly zero and can-fall-in-love, then its own "set in love" call.
     ///
     /// **`age == 0` exactly**, not `!is_baby()`. The two differ on a parent
     /// inside its post-breeding cooldown, whose age is a positive countdown: it
