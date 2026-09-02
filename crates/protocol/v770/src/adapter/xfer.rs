@@ -56,7 +56,7 @@
 //!
 //! Vanilla's client applies a teleport, sends `ACCEPT_TELEPORTATION` and sends a
 //! `move_player_pos_rot` at the *new* pose, all in one call on one thread
-//! (`ClientPacketListener.handleMovePlayer` — transcribed in
+//! (`vanilla's own client packet listener's own handle move player` — transcribed in
 //! `docs/transfer-tracing.md`).
 //! Ours cannot: the accept is written by the driver the instant the packet
 //! decodes, while the pose only reaches the simulation a channel hop and a frame
@@ -64,7 +64,7 @@
 //! pose it currently holds. A `Move` built before the teleport was applied but
 //! written after the accept therefore claims a pre-teleport position at a moment
 //! the server has already cleared `awaitingPositionFromClient` — which is the
-//! one input `ServerGamePacketListenerImpl.handleMovePlayer` answers with
+//! one input `vanilla's own server game packet listener impl's own handle move player` answers with
 //! *"moved wrongly!"* and a corrective teleport.
 //!
 //! [`super::V770Adapter::select_move_packet`] therefore reports

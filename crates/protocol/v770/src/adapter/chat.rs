@@ -280,7 +280,7 @@ fn read_filter_mask(reader: &mut Reader<'_>) -> Result<bool, AdapterError> {
     }
 }
 
-/// Consumes a `ChatType.Bound`: a `Holder<ChatType>`, a trusted NBT name
+/// Consumes a `vanilla's own chat type's own bound`: a `Holder<ChatType>`, a trusted NBT name
 /// component, and an optional trusted NBT target-name component.
 ///
 /// The holder is a VarInt: `0` would introduce an inline chat-type definition
@@ -448,7 +448,7 @@ fn read_argument_parser(
             };
             ArgumentParser::String(kind)
         }
-        // `EntityArgument.Info`: bit 0 `single`, bit 1 `playersOnly`.
+        // `vanilla's own entity argument's own info`: bit 0 `single`, bit 1 `playersOnly`.
         6 => {
             let flags = reader.u8().map_err(dec_err)?;
             ArgumentParser::Entity {
@@ -456,7 +456,7 @@ fn read_argument_parser(
                 players_only: flags & 2 != 0,
             }
         }
-        // `ScoreHolderArgument.Info`: bit 0 `multiple`.
+        // `vanilla's own score holder argument's own info`: bit 0 `multiple`.
         31 => {
             let flags = reader.u8().map_err(dec_err)?;
             ArgumentParser::ScoreHolder {
@@ -489,7 +489,7 @@ fn read_argument_parser(
     Ok(Some(parser))
 }
 
-/// Reads one `ClientboundCommandsPacket.Entry`: `readNode`'s exact order —
+/// Reads one `vanilla's own clientbound commands packet's own entry`: `readNode`'s exact order —
 /// flags byte, VarInt child-index array, the redirect index when
 /// `FLAG_REDIRECT` is set, then the type-dependent stub.
 fn read_command_node(
@@ -592,7 +592,7 @@ fn decode_command_tree(payload: &[u8]) -> Result<CommandTree, AdapterError> {
 /// Decodes a `minecraft:command_suggestions` payload (clientbound id 15) into a
 /// [`CommandSuggestionsResponse`].
 ///
-/// `ClientboundCommandSuggestionsPacket.STREAM_CODEC`: three VarInts (`id`,
+/// `vanilla's own clientbound command suggestions packet's own stream codec`: three VarInts (`id`,
 /// `start`, `length`) then a list of `Entry(String text, Optional<Component>
 /// tooltip)`. The tooltip uses `TRUSTED_OPTIONAL_STREAM_CODEC` — a `bool`
 /// presence byte followed by a network-NBT component when set — and is kept

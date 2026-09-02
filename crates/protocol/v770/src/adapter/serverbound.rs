@@ -268,7 +268,7 @@ fn encode_set_beacon(
 
 /// Encodes the serverbound `spectator_action` packet body
 /// (vanilla's own serverbound spectator-action packet): a single VarInt using
-/// `ByteBufCodecs.OPTIONAL_VAR_INT`'s offset encoding, **not** the common
+/// `vanilla's own byte buf codecs's own var int`'s offset encoding, **not** the common
 /// bool-then-value optional shape — `0` means "not spectating an entity"
 /// and a present id `i` is written as `i + 1`. This must be hand-written
 /// rather than a derived `Option<i32>` field, since a naive bool-prefixed
@@ -543,7 +543,7 @@ fn encode_custom_click_action(id: &ResourceKey, payload: &[u8]) -> Result<Vec<u8
     Ok(w.into_vec())
 }
 
-/// Maps a [`ResourcePackResponseKind`] to `ServerboundResourcePackPacket.Action`'s
+/// Maps a [`ResourcePackResponseKind`] to `vanilla's own serverbound resource pack packet's own action`'s
 /// ordinal, matching its declared enum order.
 fn resource_pack_response_ordinal(kind: ResourcePackResponseKind) -> i32 {
     match kind {
@@ -558,7 +558,7 @@ fn resource_pack_response_ordinal(kind: ResourcePackResponseKind) -> i32 {
     }
 }
 
-/// Maps a [`CommandBlockMode`] to `CommandBlockEntity.Mode`'s ordinal
+/// Maps a [`CommandBlockMode`] to `vanilla's own command block entity's own mode`'s ordinal
 /// (`0` sequence, `1` auto, `2` redstone).
 fn command_block_mode_ordinal(mode: CommandBlockMode) -> i32 {
     match mode {

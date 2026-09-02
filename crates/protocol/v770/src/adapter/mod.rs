@@ -186,7 +186,7 @@ pub struct V770Adapter {
 ///
 /// 26.2's `set_time` is `(gameTime, Map<Holder<WorldClock>, ClockNetworkState>)`,
 /// and the map is **empty in almost every packet**: the once-a-second
-/// `MinecraftServer::forceGameTimeSynchronization` sends `Map.of()`, while
+/// `MinecraftServer::forceGameTimeSynchronization` sends `an empty/literal map()`, while
 /// `ServerClockManager::modifyClock` sends a one-entry map only when a clock
 /// changes and `createFullSyncPacket` sends the full map once, at join. So a
 /// stateless adapter has no day time to report for 19 packets out of 20, and the

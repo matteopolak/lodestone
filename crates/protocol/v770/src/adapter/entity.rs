@@ -494,13 +494,13 @@ fn handle_add_entity(
     Ok(directives)
 }
 
-/// `EntityTypes.PAINTING`'s registry key — the type whose default variant is
+/// `vanilla's own entity types's own painting`'s registry key — the type whose default variant is
 /// synthesized at spawn, above.
 const PAINTING_TYPE: &str = "minecraft:painting";
-/// `EntityTypes.FALLING_BLOCK`'s registry key — one of the two entity types
+/// `vanilla's own entity types's own falling block`'s registry key — one of the two entity types
 /// whose `ADD_ENTITY` Object Data field this adapter interprets.
 const FALLING_BLOCK_TYPE: &str = "minecraft:falling_block";
-/// `EntityTypes.FISHING_BOBBER`'s registry key — the other. Its Object Data is
+/// `vanilla's own entity types's own fishing bobber`'s registry key — the other. Its Object Data is
 /// the caster's entity id, not a block state; see the arm that reads it.
 const FISHING_BOBBER_TYPE: &str = "minecraft:fishing_bobber";
 /// Decodes `remove_entities` (a VarInt-length list of VarInt ids) into a removal
@@ -617,11 +617,11 @@ fn handle_set_entity_motion(payload: &[u8]) -> Result<Vec<Directive>, AdapterErr
 }
 
 /// Decodes `move_minecart_along_track`: a VarInt entity id followed by a
-/// VarInt-counted list of `NewMinecartBehavior.MinecartStep` lerp steps, each
+/// VarInt-counted list of `vanilla's own new minecart behavior's own minecart step` lerp steps, each
 /// `(Vec3 position, Vec3 movement, ROTATION_BYTE yRot, ROTATION_BYTE xRot,
 /// f32 weight)` in that order — verified against
-/// `NewMinecartBehavior.MinecartStep.STREAM_CODEC` in 26.2 decompiled source.
-/// `Vec3.STREAM_CODEC` is three big-endian f64s (matching every other
+/// `vanilla's own new minecart behavior's own minecart step's own stream codec` in 26.2 decompiled source.
+/// `vanilla's own vec3's own stream codec` is three big-endian f64s (matching every other
 /// absolute-position decode in this adapter); `ROTATION_BYTE` is the same
 /// signed-byte-angle encoding [`unpack_degrees`] already inverts for
 /// `rotate_head`/`move_entity_*`.

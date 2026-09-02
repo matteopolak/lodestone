@@ -61,7 +61,7 @@ fn unpack(value: u64) -> f64 {
     quantised * 2.0 / 32766.0 - 1.0
 }
 
-/// Converts a signed-byte angle to degrees, matching `Mth.unpackDegrees`.
+/// Converts a signed-byte angle to degrees, matching `vanilla's own mth's own unpack degrees`.
 ///
 /// The full circle is 256 steps, so a byte of `64` is 90°.
 #[must_use]
@@ -70,7 +70,7 @@ pub fn unpack_degrees(packed: i8) -> f32 {
 }
 
 /// Converts a degree angle to vanilla's signed-byte wire form, the exact
-/// inverse of [`unpack_degrees`] (`Mth.packDegrees`): the full circle is 256
+/// inverse of [`unpack_degrees`] (`vanilla's own mth's own pack degrees`): the full circle is 256
 /// steps, and the result wraps modulo 360° the same way the byte itself does.
 #[must_use]
 pub fn pack_degrees(degrees: f32) -> i8 {

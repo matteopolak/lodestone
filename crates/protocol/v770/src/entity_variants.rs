@@ -66,7 +66,7 @@ const TEMPERATURE: &[&str] = &["minecraft:temperate", "minecraft:warm", "minecra
 /// `minecraft:zombie_nautilus_variant`: only `temperate`, `warm` in 26.2.
 const ZOMBIE_NAUTILUS: &[&str] = &["minecraft:temperate", "minecraft:warm"];
 
-/// `minecraft:villager_type`, in registration order (`VillagerType.bootstrap`).
+/// `minecraft:villager_type`, in registration order (`vanilla's own villager type's own bootstrap`).
 const VILLAGER_TYPE: &[&str] = &[
     "minecraft:desert",
     "minecraft:jungle",
@@ -78,7 +78,7 @@ const VILLAGER_TYPE: &[&str] = &[
 ];
 
 /// `minecraft:villager_profession`, in registration order
-/// (`VillagerProfession.bootstrap`); `none` is id 0.
+/// (`vanilla's own villager profession's own bootstrap`); `none` is id 0.
 const VILLAGER_PROFESSION: &[&str] = &[
     "minecraft:none",
     "minecraft:armorer",
@@ -102,7 +102,7 @@ const VILLAGER_PROFESSION: &[&str] = &[
 ///
 /// # The order is alphabetical, and that is measured rather than assumed
 ///
-/// It would be natural to transcribe `PaintingVariants.bootstrap`'s
+/// It would be natural to transcribe `vanilla's own painting variants's own bootstrap`'s
 /// registration order, and that is **wrong**: painting variants are a data-pack
 /// registry loaded from `data/minecraft/painting_variant/*.json` through the
 /// resource manager, which lists keys sorted. Decoding the repo's own captured

@@ -8,7 +8,7 @@
 //! `ClientboundPlayerInfoUpdatePacket` (behavioural reference only).
 //!
 //! The `EnumSet` is serialised as a fixed bit set of `ceil(N/8)` bytes
-//! (`FriendlyByteBuf.writeFixedBitSet`); with the eight actions below that is a
+//! (`vanilla's own friendly byte buf's own write fixed bit set`); with the eight actions below that is a
 //! single byte, bit `i` (LSB-first) selecting action ordinal `i`.
 //!
 //! `UPDATE_LIST_ORDER` and `UPDATE_HAT` are now kept, not discarded: they
@@ -42,7 +42,7 @@ const MAX_NAME: usize = 16;
 const MAX_PROP_NAME: usize = 64;
 const MAX_PROP_VALUE: usize = 32_767;
 const MAX_PROP_SIGNATURE: usize = 1_024;
-/// `ByteBufCodecs.GAME_PROFILE_PROPERTIES` caps the property count at 16.
+/// `vanilla's own byte buf codecs's own game profile properties` caps the property count at 16.
 const MAX_PROPERTIES: i32 = 16;
 
 /// One decoded tab-list entry. Each optional field is `Some` exactly when its
@@ -80,7 +80,7 @@ pub struct PlayerInfoEntry {
     /// `Some(None)` would be indistinguishable from "action absent" here, so
     /// (matching every other action in this struct) `None` means the
     /// `INITIALIZE_CHAT` bit was not set in this particular update; vanilla's
-    /// own field is `Optional<RemoteChatSession.Data>` because a player can
+    /// own field is `Optional<vanilla's own remote chat session's own data>` because a player can
     /// announce "no session" explicitly (the nullability boolean on the wire
     /// reads `false`) — that inner case is folded into this same `None` since
     /// no caller here needs to tell "never announced" from "announced empty"
@@ -106,7 +106,7 @@ pub struct ProfileProperty {
     pub signature: Option<String>,
 }
 
-/// A player's announced chat-signing session (`RemoteChatSession.Data`):
+/// A player's announced chat-signing session (`vanilla's own remote chat session's own data`):
 /// their session UUID and Mojang-issued public key, as broadcast by
 /// `INITIALIZE_CHAT`.
 ///
@@ -118,20 +118,20 @@ pub struct ProfileProperty {
 /// `adapter::player`'s `PLAYER_INFO_UPDATE` arm), and `lodestone_client`'s
 /// driver looks it up there to verify a signed `PLAYER_CHAT` message's
 /// signature. What is still missing is the fuller per-sender chain validator
-/// vanilla's own `RemoteChatSession`/`SignedMessageChain.Decoder` runs —
+/// vanilla's own `RemoteChatSession`/`vanilla's own signed message chain's own decoder` runs —
 /// link-index ordering and expiry are not enforced here, only the RSA check
 /// itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteChatSessionData {
     /// This player's chat-session UUID.
     pub session_id: Uuid,
-    /// Public-key expiry, epoch milliseconds (`ProfilePublicKey.Data.expiresAt`,
+    /// Public-key expiry, epoch milliseconds (`vanilla's own profile public key's own data's own expires at`,
     /// `readInstant` = epoch millis).
     pub expires_at: i64,
     /// DER-encoded (X.509 `SubjectPublicKeyInfo`) RSA public key, verbatim.
     pub public_key: Vec<u8>,
     /// Mojang's signature over `public_key` (`signature_v2` on the wire —
-    /// `ProfilePublicKey.Data`'s codec field name — not independently verified
+    /// `vanilla's own profile public key's own data`'s codec field name — not independently verified
     /// by this client; only the server checks it against Mojang's own key).
     pub key_signature: Vec<u8>,
 }
@@ -152,9 +152,9 @@ fn read_byte_array(r: &mut Reader<'_>) -> Result<Vec<u8>> {
     Ok(r.bytes(len as usize)?.to_vec())
 }
 
-/// Reads an optional `RemoteChatSession.Data` (`INITIALIZE_CHAT`): a
+/// Reads an optional `vanilla's own remote chat session's own data` (`INITIALIZE_CHAT`): a
 /// nullability boolean, then, when present, the session UUID and a
-/// `ProfilePublicKey.Data` (an instant, the public key, and its signature).
+/// `vanilla's own profile public key's own data` (an instant, the public key, and its signature).
 ///
 /// **Used to discard every field here** (`skip_byte_array`/`skip_chat_session`,
 /// before this fix) — the session UUID, expiry and public key were read off
