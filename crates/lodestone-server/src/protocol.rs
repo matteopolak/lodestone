@@ -2276,7 +2276,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes vanilla's `ClientboundEntityEventPacket` — one raw per-entity-type
-    /// status byte, `ServerLevel.broadcastEntityEvent`'s whole payload.
+    /// status byte, vanilla's own level broadcast-entity-event routine's whole payload.
     ///
     /// `event` is vanilla's own `EntityEvent` constant, and the
     /// values are **not** a registry: they are reused across entity types, so the
@@ -2285,13 +2285,13 @@ pub trait ServerProtocol: Send + Sync {
     ///
     /// | byte | constant | meaning |
     /// |---|---|---|
-    /// | 3 | `DEATH` | `LivingEntity.die`'s broadcast — the fall-over animation |
+    /// | 3 | `DEATH` | vanilla's own entity-die routine's broadcast — the fall-over animation |
     /// | 6 | `TAMING_FAILED` | smoke puff |
     /// | 7 | `TAMING_SUCCEEDED` | hearts |
     /// | 18 | `IN_LOVE_HEARTS` | breeding hearts |
     ///
     /// **Note the wire shape**: the entity id is a plain big-endian `int`, *not* a
-    /// VarInt — `ClientboundEntityEventPacket.write` is `writeInt` then
+    /// VarInt — vanilla's own entity-event-packet writer is `writeInt` then
     /// `writeByte`, one of the few remaining fixed-width ids in play. Porting from
     /// the field list rather than from `write` would give the same two fields in
     /// the same order at the wrong widths, which desynchronises the stream instead
@@ -2311,7 +2311,7 @@ pub trait ServerProtocol: Send + Sync {
 
     /// Encodes vanilla's `ClientboundCommandSuggestionsPacket` (id 15) — the
     /// answer to a `ServerboundCommandSuggestionPacket` (`ServerBound::CommandSuggestion`),
-    /// `ServerGamePacketListenerImpl.handleCustomCommandSuggestions`'s reply.
+    /// vanilla's own custom-command-suggestions handler's reply.
     ///
     /// `response.id` echoes the request's transaction id verbatim; `start`/`length`
     /// name the byte range of the *request's* command text the suggestions
@@ -2330,8 +2330,8 @@ pub trait ServerProtocol: Send + Sync {
     /// Encodes vanilla's `ClientboundSetPassengersPacket` — the packet that makes
     /// a player *be* in a boat.
     ///
-    /// `ServerEntity.sendPairingData` sends it on spawn and
-    /// `Entity.startRiding`/`stopRiding` re-send it on every change, always as the
+    /// vanilla's own server-entity send-pairing-data routine sends it on spawn and
+    /// its own `startRiding`/`stopRiding` re-send it on every change, always as the
     /// vehicle's **whole** passenger list rather than a delta: dismounting is this
     /// packet with an empty list, which is why `passenger_ids` is a slice and not an
     /// `Option`.
@@ -2361,7 +2361,7 @@ pub trait ServerProtocol: Send + Sync {
     /// which draws the rope between a leashed mob and its holder (issue #236).
     /// `source_id` is the leashed entity; `target_id` is `None` for a detach
     /// (vanilla's own sentinel: `write` sends the holder's id or `0` when there
-    /// is none, `Leashable.dropLeash`/`removeLeash`'s
+    /// is none, vanilla's own leashable drop-leash/remove-leash routines'
     /// `new ClientboundSetEntityLinkPacket(entity, null)`) and `Some` for an
     /// attach, carrying the holder's own wire entity id (a player or another
     /// leashed mob — see [`EntitySnapshot::leash_link`] for how each resolves).
