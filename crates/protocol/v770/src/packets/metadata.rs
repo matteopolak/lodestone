@@ -16,7 +16,7 @@
 //!   check (or a bogus follow-on index) catches it.
 //! * **The index table.** Which *index* a semantic field (health, custom name,
 //!   baby, …) sits at is assigned by vanilla's class hierarchy
-//!   (`Entity` → `LivingEntity` → `Mob` → `AgeableMob` → …). Those indices are
+//!   (base entity → living entity → mob → ageable mob → …). Those indices are
 //!   26.2-specific and are resolved here into the version-free
 //!   [`EntityMetadataUpdate`] the rest of the client consumes.
 //!
@@ -89,29 +89,29 @@ const MAX_STRING: usize = 32_767;
 const MAX_ATTRIBUTES: usize = 128;
 
 // --- 26.2 metadata index constants (class-hierarchy assignment order) --------
-// Entity: 0 shared-flags, 1 air, 2 custom-name, 3 custom-name-visible,
-// 4 silent, 5 no-gravity, 6 pose, 7 ticks-frozen.
-// LivingEntity: 8 living-flags, 9 health, 10 effect-particles, 11 effect-
-// ambience, 12 arrow-count, 13 stinger-count, 14 sleeping-pos.
-// Mob: 15 mob-flags. AgeableMob: 16 baby.
+// Base entity class: 0 shared-flags, 1 air, 2 custom-name, 3
+// custom-name-visible, 4 silent, 5 no-gravity, 6 pose, 7 ticks-frozen.
+// Living-entity class: 8 living-flags, 9 health, 10 effect-particles, 11
+// effect-ambience, 12 arrow-count, 13 stinger-count, 14 sleeping-pos.
+// Mob class: 15 mob-flags. Ageable-mob class: 16 baby.
 const IDX_SHARED_FLAGS: u8 = 0;
-// `Entity`'s second `defineId` call (`Entity.java`, right after
-// `DATA_SHARED_FLAGS_ID` at :260 and right before `DATA_CUSTOM_NAME` at :269)
-// — `SynchedEntityData.defineId` assigns ids by a class-static counter in
-// declaration order, so this is index 1, verified against the jar's own
-// source rather than trusted from a briefing.
+// The base entity class's second accessor-registration call (right after
+// the shared-flags accessor and right before the custom-name one)
+// — vanilla's own tracked-data accessor registration assigns ids by a
+// class-static counter in declaration order, so this is index 1, verified
+// against the jar's own source rather than trusted from a briefing.
 const IDX_AIR_SUPPLY: u8 = 1;
 const IDX_CUSTOM_NAME: u8 = 2;
 const IDX_CUSTOM_NAME_VISIBLE: u8 = 3;
 const IDX_POSE: u8 = 6;
-/// `LivingEntity.DATA_LIVING_ENTITY_FLAGS`, the first
+/// the living-entity class's own living-entity-flags accessor, the first
 /// `defineId` in `LivingEntity` and therefore index 8 — the byte carrying
 /// using-item / off-hand / spin-attack.
 ///
 /// **This index is ambiguous and needs the entity's concrete type.** It is also
-/// where `AbstractArrow.ID_FLAGS` lands (`Projectile`
+/// where the abstract-arrow class's own flags accessor lands (`Projectile`
 /// declares no synched data of its own, so the arrow's first field is index 8
-/// too), and both are `EntityDataSerializers.BYTE`. So the serializer cannot
+/// too), and both are vanilla's own metadata-serializer registry's own byte accessor. So the serializer cannot
 /// disambiguate them the way it does for an item stack, and an arrow's crit bit
 /// (`0x01`) is bit-identical to the using-item bit. Only surfaced when the caller
 /// says the entity is a `LivingEntity`; see `read_entity_metadata`'s `living`
@@ -119,10 +119,11 @@ const IDX_POSE: u8 = 6;
 /// projectiles, but that one does self-identify by serializer and is handled
 /// before the index match.
 const IDX_LIVING_FLAGS: u8 = 8;
-/// `ExperienceOrb.DATA_VALUE`, `ExperienceOrb`'s only `defineId` and therefore
+/// the experience-orb class's own value accessor, its only accessor-registration
+/// call and therefore
 /// index 8 — an `INT`, how much XP *one* absorption of this orb pays. The client
-/// needs it for nothing but the sprite: `ExperienceOrbRenderer.extractRenderState`
-/// reads `entity.getIcon()`, and `getIcon` is a **bucketed** lookup on this value
+/// needs it for nothing but the sprite: vanilla's own experience-orb render-state
+/// extractor reads the entity's icon lookup, which is a **bucketed** lookup on this value
 /// (see `lodestone_render::entity::experience_orb_icon`).
 ///
 /// # A third claimant on index 8, and the serializer cannot separate it either
@@ -130,10 +131,10 @@ const IDX_LIVING_FLAGS: u8 = 8;
 /// Index 8 already carries two ambiguities this module resolves ([`IDX_LIVING_FLAGS`]'s
 /// `BYTE` pair, and the self-identifying `ITEM_STACK`). This is a *third*, and the
 /// jar dump (`tests/support/entity_data_index_jvm.txt`) lists five `INT` claimants
-/// at index 8: `ExperienceOrb.DATA_VALUE`, `PrimedTnt.DATA_FUSE_ID`,
-/// `FishingHook.DATA_HOOKED_ENTITY`, `VehicleEntity.DATA_ID_HURT` and
-/// `Display.DATA_TRANSFORMATION_INTERPOLATION_START_DELTA_TICKS_ID`. All five are
-/// `EntityDataSerializers.INT`, so — exactly as for the byte pair — the serializer
+/// at index 8: the experience-orb class's own value accessor, the primed-tnt class's own fuse accessor,
+/// the fishing-hook class's own hooked-entity accessor, the vehicle-entity class's own id-hurt accessor and
+/// the display class's own transformation-interpolation-start-delta-ticks accessor. All five are
+/// vanilla's own metadata-serializer registry's own int accessor, so — exactly as for the byte pair — the serializer
 /// tells you nothing and only the concrete entity type does. Hence the
 /// [`MetadataClass::ExperienceOrb`] guard: ungated, a primed TNT's fuse countdown
 /// would arrive as an orb value and pick an orb sprite for it.
@@ -143,22 +144,23 @@ const IDX_LIVING_FLAGS: u8 = 8;
 /// class is the only thing that separates them.
 const IDX_EXPERIENCE_ORB_VALUE: u8 = 8;
 const IDX_HEALTH: u8 = 9;
-/// `Mob.DATA_MOB_FLAGS_ID`, `Mob`'s **only** `defineId` and
+/// the mob class's own mob-flags accessor, the mob class's **only**
+/// accessor-registration call and
 /// therefore index 15 — the byte carrying no-AI `0x01` / left-handed `0x02` /
-/// **aggressive `0x04`** (`Mob.setAggressive`/`Mob.isAggressive`). Aggressive is what makes a
-/// skeleton draw its bow: vanilla's mob renderers read `isAggressive()`, *not*
+/// **aggressive `0x04`** (vanilla's own aggressive getter/setter). Aggressive is what makes a
+/// skeleton draw its bow: vanilla's mob renderers read its own aggressive check, *not*
 /// the using-item bit at index 8, which is a player mechanism.
 ///
 /// # This index is ambiguous too, and `living` is **not** a strong enough guard
 ///
 /// The jar dump (`tests/support/entity_data_index_jvm.txt`) reports three
-/// claimants on index 15, all `EntityDataSerializers.BYTE`:
+/// claimants on index 15, all vanilla's own metadata-serializer registry's own byte accessor:
 ///
 /// | owner | field | `0x04` |
 /// |---|---|---|
 /// | `Mob` | `DATA_MOB_FLAGS_ID` | aggressive |
 /// | `ArmorStand` | `DATA_CLIENT_FLAGS` | show arms |
-/// | `Display` | `DATA_BILLBOARD_RENDER_CONSTRAINTS_ID` | an enum ordinal |
+/// | the display class | its own billboard-render-constraints accessor | an enum ordinal |
 ///
 /// Index 8's collision was between a living entity and a non-living one, so
 /// `is_living` resolved it. **`ArmorStand` is a `LivingEntity`**, so the same
@@ -174,11 +176,12 @@ const IDX_BABY: u8 = 16;
 //
 // **Both of these were off by one until the jar was asked.** They were counted
 // by hand as "Sheep's first field, so 17" and "AbstractHorse's flags at 17, so
-// the variant int is 18", and the count missed `AgeableMob.AGE_LOCKED` — a
-// second accessor on `AgeableMob`, at index 17, right after `DATA_BABY_ID` at 16.
+// the variant int is 18", and the count missed the ageable-mob class's own age-locked accessor — a
+// second accessor on the ageable-mob class, at index 17, right after its own
+// baby accessor at 16.
 // The real values, from `tests/support/entity_data_index_jvm.txt`:
-// `Sheep.DATA_WOOL_ID` is **18** and `Horse.DATA_ID_TYPE_VARIANT` is **19**
-// (`AbstractHorse.DATA_ID_FLAGS` occupies 18).
+// the sheep class's own wool accessor is **18** and the horse class's own id-type-variant accessor is **19**
+// (the abstract-horse class's own id-flags accessor occupies 18).
 //
 // Nothing caught it, and the reason is instructive: the encoders in this
 // module's tests push the *same constants*, so `decode(encode(x)) == x` held
@@ -201,47 +204,55 @@ const IDX_BABY: u8 = 16;
 const IDX_SHEEP_WOOL: u8 = 18;
 const IDX_HORSE_VARIANT: u8 = 19;
 /// Index 18's other `BYTE` claimants (besides [`IDX_SHEEP_WOOL`]'s Sheep and the
-/// creeper's `BOOLEAN` at the same index): `TamableAnimal.DATA_FLAGS_ID` and
-/// `AbstractHorse.DATA_ID_FLAGS`. The bit differs between the two —
-/// `TamableAnimal.isTame()` is `0x04`, `AbstractHorse.isTamed()` is `0x02` —
+/// creeper's `BOOLEAN` at the same index): the tameable-animal class's own
+/// flags accessor and the abstract-horse class's own flags accessor. The bit
+/// differs between the two — the tameable-animal class's own tame check
+/// reads `0x04`, the abstract-horse class's own tamed check reads `0x02` —
 /// which is why the decode arm below switches on [`MetadataClass::Tamable`]
 /// vs. [`MetadataClass::Horse`] rather than reading one shared "tamed" bit;
 /// see `crates/lodestone-server/src/protocol.rs`'s `MetadataField::TamableFlags`/
 /// `HorseFlags` doc comment for the server-side encode side of the same split.
 const IDX_TAMABLE_OR_HORSE_FLAGS: u8 = 18;
 
-/// `Creeper.DATA_SWELL_DIR` (`Creeper.java`), `Creeper`'s first `defineId`
-/// and therefore index 16 — `Monster` (its superclass) declares none of its
-/// own, so the count runs `Entity`(0-7) → `LivingEntity`(8-14) → `Mob`(15) →
-/// `Creeper`(16-18) directly, with no `AgeableMob` in between (a creeper is
-/// not ageable). Verified against `tests/support/entity_data_index_jvm.txt`,
-/// not hand-counted — see that file's own warning about what hand-counting
-/// this exact shape (a class with no `Ageable` in its chain) has cost before.
+/// The creeper class's own swell-direction accessor (confirmed against the
+/// decompiled creeper source), the creeper class's first
+/// accessor-registration call and therefore index 16 — the monster base
+/// class (its superclass) declares none of its own, so the count runs the
+/// base entity class (0-7) → living-entity class (8-14) → mob class (15) →
+/// creeper class (16-18) directly, with no ageable-mob class in between (a
+/// creeper is not ageable). Verified against
+/// `tests/support/entity_data_index_jvm.txt`, not hand-counted — see that
+/// file's own warning about what hand-counting this exact shape (a class
+/// with no ageable class in its chain) has cost before.
 ///
 /// An `INT`, `-1` or `1`: which way `swell` is currently moving, integrated
-/// **client-side** every tick exactly as the server does (`Creeper.java`,
-/// `this.swell += swellDir`) — only the direction is synced, never the
-/// counter itself. See [`crate::adapter`]'s per-tick fuse integration and
+/// **client-side** every tick exactly as the server does (confirmed against
+/// the decompiled creeper source's own swell-integration step) — only the
+/// direction is synced, never the counter itself. See [`crate::adapter`]'s
+/// per-tick fuse integration and
 /// `lodestone_render::entity_anim::pose_swelling`'s docs for why that split
 /// exists.
 const IDX_CREEPER_SWELL_DIR: u8 = 16;
-/// `Creeper.DATA_IS_POWERED` (`Creeper.java`), index 17 — a `BOOLEAN`, set
-/// once by `thunderHit` (`Creeper.java`) and never cleared. Doubles the
-/// explosion radius (`Creeper.java`) and gates the charged-creeper skull
+/// The creeper class's own powered accessor (confirmed against the
+/// decompiled creeper source), index 17 — a `BOOLEAN`, set
+/// once by its own lightning-strike handler and never cleared. Doubles the
+/// explosion radius and gates the charged-creeper skull
 /// drop; not consumed by rendering yet.
 const IDX_CREEPER_POWERED: u8 = 17;
-/// `Creeper.DATA_IS_IGNITED` (`Creeper.java`), index 18 — a `BOOLEAN`, set
-/// once by `ignite()` (flint-and-steel or fire-charge, `Creeper.java`) and
-/// never cleared. Distinct from a **non**-ignited swell (the `SwellGoal`
-/// proximity case, which moves `swell_dir` without ever setting this):
+/// The creeper class's own ignited accessor (confirmed against the
+/// decompiled creeper source), index 18 — a `BOOLEAN`, set
+/// once by its own ignite routine (flint-and-steel or fire-charge) and
+/// never cleared. Distinct from a **non**-ignited swell (the proximity-goal
+/// case, which moves `swell_dir` without ever setting this):
 /// `ignited` alone would miss a creeper that swells because a player got
 /// close and then backs off before detonation, since that path only ever
-/// touches `DATA_SWELL_DIR`.
+/// touches the swell-direction accessor.
 const IDX_CREEPER_IGNITED: u8 = 18;
 
-/// `ArmorStand.DATA_HEAD_POSE` (`ArmorStand.java`), index 16 — the first of six
-/// consecutive `ROTATIONS` accessors, `DATA_HEAD_POSE` through
-/// `DATA_RIGHT_LEG_POSE` at 16-21, each an `(x, y, z)` triple of Euler degrees.
+/// The armor-stand class's own head-pose accessor (confirmed against the
+/// decompiled armor-stand source), index 16 — the first of six
+/// consecutive rotation accessors, head-pose through
+/// right-leg-pose at 16-21, each an `(x, y, z)` triple of Euler degrees.
 ///
 /// # Why these six carry no class guard where index 16's `INT` needs two
 ///
@@ -259,86 +270,93 @@ const IDX_CREEPER_IGNITED: u8 = 18;
 ///
 /// # Why decoding these is load bearing rather than cosmetic
 ///
-/// `ArmorStandArmorModel.setupAnim` calls the humanoid `super.setupAnim` —
+/// Vanilla's own armor-stand armor model's animation setup calls the
+/// humanoid base class's own animation setup —
 /// walk cycle, idle bob and all — and then **assigns** all six part rotations
 /// from these values. Vanilla computes the swing and throws it away. Dropping
 /// these six therefore does not make a stand look neutral; it leaves the walk
 /// cycle in place, so a stand carried by a moving contraption swings its arms
 /// like a running player, and an item in its hand swings with them.
 const IDX_ARMOR_STAND_HEAD_POSE: u8 = 16;
-/// `ArmorStand.DATA_BODY_POSE`, index 17. See [`IDX_ARMOR_STAND_HEAD_POSE`].
+/// the armor-stand class's own body-pose accessor, index 17. See [`IDX_ARMOR_STAND_HEAD_POSE`].
 const IDX_ARMOR_STAND_BODY_POSE: u8 = 17;
-/// `ArmorStand.DATA_LEFT_ARM_POSE`, index 18. See [`IDX_ARMOR_STAND_HEAD_POSE`].
+/// the armor-stand class's own left-arm-pose accessor, index 18. See [`IDX_ARMOR_STAND_HEAD_POSE`].
 const IDX_ARMOR_STAND_LEFT_ARM_POSE: u8 = 18;
-/// `ArmorStand.DATA_RIGHT_ARM_POSE`, index 19. See [`IDX_ARMOR_STAND_HEAD_POSE`].
+/// the armor-stand class's own right-arm-pose accessor, index 19. See [`IDX_ARMOR_STAND_HEAD_POSE`].
 const IDX_ARMOR_STAND_RIGHT_ARM_POSE: u8 = 19;
-/// `ArmorStand.DATA_LEFT_LEG_POSE`, index 20. See [`IDX_ARMOR_STAND_HEAD_POSE`].
+/// the armor-stand class's own left-leg-pose accessor, index 20. See [`IDX_ARMOR_STAND_HEAD_POSE`].
 const IDX_ARMOR_STAND_LEFT_LEG_POSE: u8 = 20;
-/// `ArmorStand.DATA_RIGHT_LEG_POSE`, index 21. See [`IDX_ARMOR_STAND_HEAD_POSE`].
+/// the armor-stand class's own right-leg-pose accessor, index 21. See [`IDX_ARMOR_STAND_HEAD_POSE`].
 const IDX_ARMOR_STAND_RIGHT_LEG_POSE: u8 = 21;
 
-/// `EnderDragon.DATA_PHASE` (`EnderDragon.java`), `EnderDragon`'s first
-/// `defineId` and therefore index 16 by the same class-hierarchy count as
-/// [`IDX_CREEPER_SWELL_DIR`] (`Entity`(0-7) → `LivingEntity`(8-14) →
-/// `Mob`(15) → `EnderDragon`(16), no `AgeableMob`). An `INT`: the current
-/// vanilla `EnderDragonPhase` id (holding pattern / strafing / sitting /
+/// The ender-dragon class's own phase accessor (confirmed against the
+/// decompiled ender-dragon source), the ender-dragon class's first
+/// accessor-registration call and therefore index 16 by the same
+/// class-hierarchy count as [`IDX_CREEPER_SWELL_DIR`] (base entity class
+/// (0-7) → living-entity class (8-14) → mob class (15) → ender-dragon class
+/// (16), no ageable-mob class). An `INT`: the current
+/// vanilla dragon-phase id (holding pattern / strafing / sitting /
 /// dying / …) — see `tests/support/entity_data_index_jvm.txt` for the five
 /// other `INT` claimants at this index this module's own
 /// [`MetadataClass::Dragon`] guard exists to exclude.
 const IDX_DRAGON_PHASE: u8 = 16;
-/// `EndCrystal.DATA_BEAM_TARGET` (`EndCrystal.java`), index 8 — an
+/// The end-crystal class's own beam-target accessor (confirmed against the
+/// decompiled end-crystal source), index 8 — an
 /// `OPTIONAL_BLOCK_POS`. Self-identifying **at this index** (no other index-8
 /// claimant in the jar dump is `OPTIONAL_BLOCK_POS`), but the serializer is
 /// **not** globally self-identifying: the same serializer is also
-/// `LivingEntity.SLEEPING_POS_ID` at index 14 and `Creaking.HOME_POS` at
+/// the living-entity class's own sleeping-pos accessor at index 14 and the creaking class's own home-pos accessor at
 /// index 19, so the decode arm below still keys on this index rather than the
 /// bare `Value::OptBlockPos` shape.
 const IDX_CRYSTAL_BEAM_TARGET: u8 = 8;
-/// `EndCrystal.DATA_SHOW_BOTTOM` (`EndCrystal.java`), index 9 — a `BOOLEAN`,
-/// one of three claimants at that index (`AreaEffectCloud.DATA_WAITING`,
-/// `FishingHook.DATA_BITING` are the other two), hence the
+/// The end-crystal class's own show-bottom accessor (confirmed against the
+/// decompiled end-crystal source), index 9 — a `BOOLEAN`,
+/// one of three claimants at that index (the area-effect-cloud class's own waiting accessor,
+/// the fishing-hook class's own biting accessor are the other two), hence the
 /// [`MetadataClass::EndCrystal`] guard.
 const IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
-/// `ItemFrame.DATA_ROTATION` (`ItemFrame.java`), index 10 — an `INT` carrying
+/// The item-frame class's own rotation accessor (confirmed against the
+/// decompiled item-frame source), index 10 — an `INT` carrying
 /// `0..8`, the eighth-turns the framed stack is rotated by.
 ///
 /// **Index 10, three `INT` claimants** in the committed jar dump
 /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
-/// `Display.DATA_POS_ROT_INTERPOLATION_DURATION_ID`, `ItemFrame.DATA_ROTATION`
+/// the display class's own pos-rot-interpolation-duration accessor, the item-frame class's own rotation accessor
 /// and — under `FLOAT`, so not actually a collision — `VehicleEntity
 /// .DATA_ID_DAMAGE`. No census column separates a frame from a display entity
 /// (neither is living, neither is a mob), so this is gated on
 /// [`MetadataClass::ItemFrame`].
 ///
-/// Note the frame's *own* fields start at 9, not 8: `HangingEntity
-/// .DATA_DIRECTION` takes index 8, which this decoder consumes for alignment
+/// Note the frame's *own* fields start at 9, not 8: the hanging-entity
+/// class's own direction accessor takes index 8, which this decoder
+/// consumes for alignment
 /// (`SER_DIRECTION`) and does not surface — the direction is recoverable from
-/// the yaw/pitch `ItemFrame.setDirection` derives from it and puts on every
+/// the yaw/pitch vanilla's own item-frame direction setter derives from it and puts on every
 /// spawn and move packet.
 const IDX_ITEM_FRAME_ROTATION: u8 = 10;
 
-/// `VehicleEntity.DATA_ID_HURT`, index 8 — the hurt clock every boat, raft and
+/// the vehicle-entity class's own id-hurt accessor, index 8 — the hurt clock every boat, raft and
 /// minecart carries. `hurtServer` sets it to `10` and the vehicle's own tick
 /// counts it back down, so it arrives as ten separate metadata packets per hit.
 ///
 /// **Index 8, five `INT` claimants** in the committed jar dump
 /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
-/// `ExperienceOrb.DATA_VALUE`, `PrimedTnt.DATA_FUSE_ID`,
-/// `FishingHook.DATA_HOOKED_ENTITY`, `Display`'s interpolation start delta and
+/// the experience-orb class's own value accessor, the primed-tnt class's own fuse accessor,
+/// the fishing-hook class's own hooked-entity accessor, the display class's interpolation start delta and
 /// this. None of the five is a `LivingEntity`, so neither the `living` nor the
 /// `mob` census column separates them and only [`MetadataClass::Vehicle`] can.
 const IDX_VEHICLE_HURT_TIME: u8 = 8;
-/// `VehicleEntity.DATA_ID_HURTDIR`, index 9 — `+1`/`-1`, negated on every hit
+/// the vehicle-entity class's own id-hurtdir accessor, index 9 — `+1`/`-1`, negated on every hit
 /// so consecutive punches rock the hull the opposite way. Its
 /// `defineSynchedData` default is `1`, **not** `0`, which matters: a consumer
 /// that treats an unreported direction as `0` multiplies the whole rock angle
 /// by zero and draws nothing.
 ///
 /// **Index 9, two `INT` claimants** in the jar dump: this and
-/// `Display.DATA_TRANSFORMATION_INTERPOLATION_DURATION_ID`. Guarded on
+/// the display class's own transformation-interpolation-duration accessor. Guarded on
 /// [`MetadataClass::Vehicle`] for the same reason as its sibling above.
 const IDX_VEHICLE_HURT_DIR: u8 = 9;
-/// `VehicleEntity.DATA_ID_DAMAGE`, index 10 — accumulated damage × 10, decayed
+/// the vehicle-entity class's own id-damage accessor, index 10 — accumulated damage × 10, decayed
 /// by `1.0` per tick, and the amplitude of the rock.
 ///
 /// **Index 10's only `FLOAT` claimant** in the jar dump, so the serializer
@@ -348,93 +366,94 @@ const IDX_VEHICLE_HURT_DIR: u8 = 9;
 /// have to be re-audited the next time a `FLOAT` lands at this index.
 const IDX_VEHICLE_DAMAGE: u8 = 10;
 
-/// `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET`, index 9 — an
+/// the firework-rocket class's own attached-to-target accessor, index 9 — an
 /// `OPTIONAL_UNSIGNED_INT`.
 ///
 /// Self-identifying by `(index, serializer)` and so **unguarded**: the jar dump
 /// has four `OPTIONAL_UNSIGNED_INT` claimants and the other three
-/// (`Frog.DATA_TONGUE_TARGET_ID`, the player's two shoulder parrots) sit at
+/// (the frog class's own tongue-target accessor, the player's two shoulder parrots) sit at
 /// indices 19 and 20. Present means the rocket is riding a gliding player, and
-/// `FireworkRocketEntity.shouldRender` returns false for that case — it is the
+/// vanilla's own firework-rocket render-gate check returns false for that case — it is the
 /// elytra boost, not a shot rocket.
 const IDX_FIREWORK_ATTACHED: u8 = 9;
 
-/// `FireworkRocketEntity.DATA_SHOT_AT_ANGLE`, index 10 — a `BOOLEAN`, and the
+/// the firework-rocket class's own shot-at-angle accessor, index 10 — a `BOOLEAN`, and the
 /// one firework field that **does** need a class guard.
 ///
 /// Index 10's `BOOLEAN` has three claimants in the jar dump:
-/// `AbstractArrow.IN_GROUND`, `Interaction.DATA_RESPONSE_ID` and this. None of
+/// the abstract-arrow class's own in-ground accessor, the interaction class's own response accessor and this. None of
 /// the three is a `LivingEntity`, so neither the `living` nor the `mob` census
 /// separates them — this is the case `MetadataClass::FireworkRocket` exists
 /// for. Ungated, an arrow stuck in the ground would report itself as fired from
 /// a crossbow.
 const IDX_FIREWORK_SHOT_AT_ANGLE: u8 = 10;
 
-/// `Display.DATA_TRANSLATION_ID` (`Display.java`), index 11 — a `VECTOR3`.
+/// The display class's own translation accessor (confirmed against the
+/// decompiled display source), index 11 — a `VECTOR3`.
 /// Self-identifying: no other claimant at index 11 in the 26.2 jar dump uses
 /// that serializer (see `EntityMetadataUpdate::display_translation`'s doc in
 /// `lodestone-model` for the full argument), so this needs no class guard.
 const IDX_DISPLAY_TRANSLATION: u8 = 11;
-/// `Display.DATA_SCALE_ID`, index 12 — a `VECTOR3`, self-identifying for the
+/// the display class's own scale accessor, index 12 — a `VECTOR3`, self-identifying for the
 /// same reason as [`IDX_DISPLAY_TRANSLATION`].
 const IDX_DISPLAY_SCALE: u8 = 12;
-/// `Display.DATA_RIGHT_ROTATION_ID`, index 13 — a `QUATERNION`,
+/// the display class's own right-rotation accessor, index 13 — a `QUATERNION`,
 /// self-identifying: no other claimant at index 13 uses that serializer.
-/// Applied **after** scale (`Transformation.compose`).
+/// Applied **after** scale (vanilla's own transformation-compose helper).
 const IDX_DISPLAY_RIGHT_ROTATION: u8 = 13;
-/// `Display.DATA_LEFT_ROTATION_ID`, index 14 — a `QUATERNION`,
+/// the display class's own left-rotation accessor, index 14 — a `QUATERNION`,
 /// self-identifying for the same reason as [`IDX_DISPLAY_RIGHT_ROTATION`].
 /// Applied **before** scale.
 const IDX_DISPLAY_LEFT_ROTATION: u8 = 14;
-/// `Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`, index 15 — a `BYTE`.
+/// the display class's own billboard-render-constraints accessor, index 15 — a `BYTE`.
 ///
 /// **This index is ambiguous and does need a class guard**, unlike the four
 /// translation/scale/rotation fields above: it is the same wire index as
-/// [`IDX_MOB_FLAGS`] (`Mob.DATA_MOB_FLAGS_ID`) and
-/// `ArmorStand.DATA_CLIENT_FLAGS`, all three `BYTE`. Gated on
+/// [`IDX_MOB_FLAGS`] (the mob class's own mob-flags accessor) and
+/// the armor-stand class's own client-flags accessor, all three `BYTE`. Gated on
 /// [`is_display_class`] rather than a single `MetadataClass` variant because
-/// all three `Display` subtypes carry this exact field at this exact index.
+/// all three display subtypes carry this exact field at this exact index.
 const IDX_DISPLAY_BILLBOARD: u8 = 15;
-/// `Display.DATA_BRIGHTNESS_OVERRIDE_ID`, index 16 — an `INT` carrying
-/// `Brightness.pack()`'s `block << 4 | sky << 20`, or `-1` for "no override".
+/// the display class's own brightness-override accessor, index 16 — an `INT` carrying
+/// vanilla's own brightness-pack helper's `block << 4 | sky << 20`, or `-1` for "no override".
 ///
 /// **Ambiguous, and gated on [`is_display_class`].** The committed jar dump
-/// lists six `INT` claimants at index 16 — `Creeper.DATA_SWELL_DIR`
-/// ([`IDX_CREEPER_SWELL_DIR`]), `EnderDragon.DATA_PHASE`
-/// ([`IDX_DRAGON_PHASE`]), `Phantom.ID_SIZE`, `Warden.CLIENT_ANGER_LEVEL`,
-/// `WitherBoss.DATA_TARGET_A` and this one. None of the other five is a
-/// `Display` subtype, so the *whole-family* guard separates them; a
+/// lists six `INT` claimants at index 16 — the creeper class's own swell-dir accessor
+/// ([`IDX_CREEPER_SWELL_DIR`]), the ender-dragon class's own phase accessor
+/// ([`IDX_DRAGON_PHASE`]), the phantom class's own size accessor, the warden class's own client-anger-level accessor,
+/// the wither-boss class's own target-a accessor and this one. None of the other five is a
+/// display subtype, so the *whole-family* guard separates them; a
 /// per-subtype guard would need three arms for one field declared once on the
 /// base class.
 const IDX_DISPLAY_BRIGHTNESS: u8 = 16;
-/// The per-variant payload every `Display` subtype carries at index 23:
-/// `Display.BlockDisplay.DATA_BLOCK_STATE_ID` (`BLOCK_STATE`),
-/// `Display.ItemDisplay.DATA_ITEM_STACK_ID` (`ITEM_STACK`, self-identifying
+/// The per-variant payload every display subtype carries at index 23:
+/// `the block-display class's own block-state accessor (`BLOCK_STATE`),
+/// `the item-display class's own item-stack accessor (`ITEM_STACK`, self-identifying
 /// and handled before the index match — see [`read_entity_metadata`]'s early
-/// return), or `Display.TextDisplay.DATA_TEXT_ID` (`COMPONENT`).
+/// return), or `the text-display class's own text accessor (`COMPONENT`).
 ///
-/// **Only the block-state arm needs a class guard.** `Cat.DATA_COLLAR_COLOR`
+/// **Only the block-state arm needs a class guard.** the cat class's own collar-color accessor
 /// is the other `INT`-shaped claimant at this index (block-state ids decode
 /// to a plain integer, same shape as any other `INT`), so an ungated arm
 /// would read a cat's dye ordinal as a block-state id. The `COMPONENT` arm
-/// carries a guard too, for consistency with every other `Display` field in
+/// carries a guard too, for consistency with every other display field in
 /// this module, though the jar dump shows no real collision at this index.
 const IDX_DISPLAY_VARIANT_PAYLOAD: u8 = 23;
-/// The per-variant *second* payload every `Display` subtype but `BlockDisplay`
-/// carries at index 24: `Display.ItemDisplay.DATA_ITEM_DISPLAY_ID` (`BYTE`,
-/// the `ItemDisplayContext` ordinal) or `Display.TextDisplay.DATA_LINE_WIDTH_ID`
+/// The per-variant *second* payload every display subtype but the block-display class
+/// carries at index 24: `the item-display class's own item-display accessor (`BYTE`,
+/// vanilla's own item-display-context ordinal) or the text-display class's own line-width accessor
 /// (`INT`, the wrap width in pixels). Self-identifying by value shape (no
 /// other claimant at index 24 in the jar dump is a bare `BYTE` or `INT`), but
 /// guarded by class anyway for the same consistency reason as
 /// [`IDX_DISPLAY_VARIANT_PAYLOAD`]'s `COMPONENT` arm.
 const IDX_DISPLAY_VARIANT_EXTRA: u8 = 24;
-/// `Display.TextDisplay.DATA_BACKGROUND_COLOR_ID`, index 25 — a packed ARGB
+/// `the text-display class's own background-color accessor, index 25 — a packed ARGB
 /// `INT`. The sole claimant of this index in the jar dump.
 const IDX_TEXT_BACKGROUND_COLOR: u8 = 25;
-/// `Display.TextDisplay.DATA_TEXT_OPACITY_ID`, index 26 — a `BYTE`. The sole
+/// `the text-display class's own text-opacity accessor, index 26 — a `BYTE`. The sole
 /// claimant of this index in the jar dump.
 const IDX_TEXT_OPACITY: u8 = 26;
-/// `Display.TextDisplay.DATA_STYLE_FLAGS_ID`, index 27 — a `BYTE`. The sole
+/// `the text-display class's own style-flags accessor, index 27 — a `BYTE`. The sole
 /// claimant of this index in the jar dump.
 const IDX_TEXT_STYLE_FLAGS: u8 = 27;
 
@@ -455,89 +474,92 @@ const IDX_TEXT_STYLE_FLAGS: u8 = 27;
 /// [`Creeper`](Self::Creeper) is here for the same structural reason, not a
 /// cosmetic variant: indices 16-18 are `Creeper`'s own fields, and every one of
 /// them is claimed by several *other* mobs' unrelated `INT`/`BOOLEAN` fields at
-/// the same index (`Display.DATA_BRIGHTNESS_OVERRIDE_ID`, `EnderDragon.DATA_PHASE`
-/// and `Warden.CLIENT_ANGER_LEVEL` are all `INT` at 16; `EnderMan.DATA_CREEPY` and
-/// `Witch.DATA_USING_ITEM` are both `BOOLEAN` at 17 — see
+/// the same index (the display class's own brightness-override accessor, the ender-dragon class's own phase accessor
+/// and the warden class's own client-anger-level accessor are all `INT` at 16; the enderman class's own creepy accessor and
+/// the witch class's own using-item accessor are both `BOOLEAN` at 17 — see
 /// `tests/support/entity_data_index_jvm.txt`). Without this guard a warden's
 /// anger level would decode as a creeper's swell direction on any client that
 /// also tracks wardens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataClass {
     Sheep,
-    /// Any `AbstractHorse` subclass — `Horse`, `Donkey`, `Mule`, `Llama`,
-    /// `TraderLlama`, `SkeletonHorse`, `ZombieHorse`, `Camel` — not just plain
-    /// `Horse`. It gates two unrelated `AbstractHorse`-family fields that
+    /// Any horse-family subclass — horse, donkey, mule, llama,
+    /// trader llama, skeleton horse, zombie horse, camel — not just plain
+    /// horse. It gates two unrelated horse-family fields that
     /// happen to sit at different indices:
     ///
-    /// * index 19's `INT` (`Horse.DATA_ID_TYPE_VARIANT`, colour + markings) —
+    /// * index 19's `INT` (the horse class's own id-type-variant accessor, colour + markings) —
     ///   only `Horse` itself ever emits an `INT` there, so the [`Value::Int`]
     ///   pattern on that arm already excludes every other equine even though
     ///   they share this class.
-    /// * index 18's `BYTE` (`AbstractHorse.DATA_ID_FLAGS`, `FLAG_TAME = 0x02`)
+    /// * index 18's `BYTE` (the abstract-horse class's own id-flags accessor, its
+    ///   own tame bit at `0x02`)
     ///   — genuinely shared by the whole family, which is why the class covers
-    ///   all of it rather than just `Horse`.
+    ///   all of it rather than just the plain horse subclass.
     Horse,
     Creeper,
-    /// Not a cosmetic variant either: `ExperienceOrb.DATA_VALUE` is an `INT` at
+    /// Not a cosmetic variant either: the experience-orb class's own value accessor is an `INT` at
     /// index 8, an index five unrelated `INT` fields also claim. See
     /// [`IDX_EXPERIENCE_ORB_VALUE`].
     ExperienceOrb,
-    /// A `TamableAnimal` subclass — `Wolf`, `Cat`, `Parrot` (via
-    /// `ShoulderRidingEntity`), `Nautilus`/`ZombieNautilus` (via
-    /// `AbstractNautilus`) — the other `BYTE` claimant of index 18
-    /// (`TamableAnimal.DATA_FLAGS_ID`: `isTame` is `0x04`, `isInSittingPose`
+    /// A tameable-animal subclass — wolf, cat, parrot (via a shared
+    /// shoulder-riding base class), nautilus/zombie-nautilus (via a shared
+    /// abstract-nautilus base class) — the other `BYTE` claimant of index 18
+    /// (the tameable-animal class's own flags accessor: its own tame check is
+    /// `0x04`, its own sitting-pose check
     /// is `0x01`). A **different** bit from [`Horse`](Self::Horse)'s
-    /// `FLAG_TAME = 0x02` at the same index — see [`IDX_TAMABLE_OR_HORSE_FLAGS`]
+    /// own tame bit at `0x02` at the same index — see [`IDX_TAMABLE_OR_HORSE_FLAGS`]
     /// for why a single shared "tamed" field would misread one family or the
     /// other.
     Tamable,
-    /// `EnderDragon` — gates index 16's `INT` against the five other unrelated
+    /// The ender-dragon class — gates index 16's `INT` against the five other unrelated
     /// `INT` claimants at that index. See [`IDX_DRAGON_PHASE`].
     Dragon,
-    /// `EndCrystal` — gates index 9's `BOOLEAN` against
-    /// `AreaEffectCloud.DATA_WAITING`/`FishingHook.DATA_BITING`, the other two
+    /// The end-crystal class — gates index 9's `BOOLEAN` against
+    /// the area-effect-cloud class's own waiting accessor/the fishing-hook class's own biting accessor, the other two
     /// claimants at that index. See [`IDX_CRYSTAL_SHOW_BOTTOM`]. (Index 8's
     /// `OPTIONAL_BLOCK_POS` beam target does not need this class — see
     /// [`IDX_CRYSTAL_BEAM_TARGET`]'s own doc for why the index alone already
     /// disambiguates it.)
     EndCrystal,
-    /// `ArmorStand` — gates index 15's `BYTE` against `Mob.DATA_MOB_FLAGS_ID`,
+    /// The armor-stand class — gates index 15's `BYTE` against the mob class's own mob-flags accessor,
     /// the other claimant at that index (see [`IDX_MOB_FLAGS`]). Unlike the
     /// `Sheep`/`Horse`/`Tamable` variant classes, this is not a cosmetic
     /// appearance — it is the small/show-arms/no-base-plate/marker byte a
     /// "hologram" (an invisible, nametagged armour stand) needs alongside the
     /// shared-flags invisible bit and the custom-name pair.
     ArmorStand,
-    /// `Display.TextDisplay` — gates index 23's `COMPONENT` (the text itself)
+    /// The display class's text-display subclass — gates index 23's `COMPONENT` (the text itself)
     /// and 24-27 (line width, background colour, opacity, style flags), none
     /// of which any other entity type carries at those indices in the 26.2
-    /// jar dump. Kept as its own variant rather than a shared `Display`
+    /// jar dump. Kept as its own variant rather than a shared display
     /// variant because indices 23/24 decode to a genuinely different shape
     /// per subtype — see [`ItemDisplay`](Self::ItemDisplay)/
     /// [`BlockDisplay`](Self::BlockDisplay).
     TextDisplay,
-    /// `Display.ItemDisplay` — gates index 24's `BYTE` (`ItemDisplayContext`
-    /// ordinal). Index 23's item stack needs no class guard: it is
+    /// The display class's item-display subclass — gates index 24's `BYTE`
+    /// (vanilla's own item-display-context enum ordinal). Index 23's item
+    /// stack needs no class guard: it is
     /// self-identifying by the `ITEM_STACK` serializer, handled before the
     /// index match ever runs (see [`read_entity_metadata`]'s early return).
     ItemDisplay,
-    /// `Display.BlockDisplay` — gates index 23's `BLOCK_STATE` against
-    /// `Cat.DATA_COLLAR_COLOR`, the other `INT`-shaped claimant at that index
+    /// The display class's block-display subclass — gates index 23's `BLOCK_STATE` against
+    /// the cat class's own collar-color accessor, the other `INT`-shaped claimant at that index
     /// (see [`IDX_DISPLAY_VARIANT_PAYLOAD`]'s doc).
     BlockDisplay,
-    /// `ItemFrame`/`GlowItemFrame` — gates index 10's `INT`
-    /// (`ItemFrame.DATA_ROTATION`) against the other `INT` claimants at that
+    /// The item-frame class and its glowing subclass — gates index 10's `INT`
+    /// (the item-frame class's own rotation accessor) against the other `INT` claimants at that
     /// index. See [`IDX_ITEM_FRAME_ROTATION`].
     ///
-    /// A frame's *stack* needs no class: `ItemFrame.DATA_ITEM` is an
+    /// A frame's *stack* needs no class: the item-frame class's own item accessor is an
     /// `ITEM_STACK` and is therefore self-identifying by serializer, handled
     /// before the index match runs — which is why a chest in a frame already
     /// drew while its rotation did not.
     ItemFrame,
-    /// `FireworkRocketEntity`, gating its **shot-at-angle** bit alone.
+    /// The firework-rocket class, gating its **shot-at-angle** bit alone.
     ///
     /// Needed because index 10's `BOOLEAN` has three claimants in the jar dump
-    /// — `AbstractArrow.IN_GROUND`, `Interaction.DATA_RESPONSE_ID` and this —
+    /// — the abstract-arrow class's own in-ground accessor, the interaction class's own response accessor and this —
     /// and neither the `living`/`mob` census nor the serializer separates them:
     /// none of the three is living. Ungated, an arrow that has stuck into the
     /// ground would report itself as a crossbow-fired rocket.
@@ -546,12 +568,13 @@ pub enum MetadataClass {
     /// self-identifying by `ITEM_STACK`, and index 9's `OPTIONAL_UNSIGNED_INT`
     /// has exactly one claimant *at that index* in the dump.
     FireworkRocket,
-    /// Any vanilla `VehicleEntity` — every boat, chest boat, raft, chest raft
+    /// Any vanilla vehicle-family entity — every boat, chest boat, raft, chest raft
     /// and minecart. Gates the hurt/hurt-dir/damage triple at indices 8/9/10,
     /// which is what makes a punched boat rock.
     ///
     /// A *family* rather than one type, like [`Horse`](Self::Horse): the three
-    /// fields are declared on `VehicleEntity` itself, so every subclass carries
+    /// fields are declared on the vehicle-entity base class itself, so every
+    /// subclass carries
     /// them at the same indices, and gating on `oak_boat` alone would leave the
     /// other nineteen boat types and all seven minecarts stranded. The suffix
     /// rules in [`metadata_class`] are what enumerate the family — the entity
@@ -585,7 +608,7 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         "minecraft:block_display" => Some(MetadataClass::BlockDisplay),
         "minecraft:item_frame" | "minecraft:glow_item_frame" => Some(MetadataClass::ItemFrame),
         "minecraft:firework_rocket" => Some(MetadataClass::FireworkRocket),
-        // Every `VehicleEntity` subclass, by suffix rather than by name. The
+        // Every vehicle-entity subclass, by suffix rather than by name. The
         // twenty boat types are nine wood species x (boat, chest boat) plus
         // `bamboo_raft`/`bamboo_chest_raft`, and the seven minecarts all end in
         // `minecart` -- so three suffixes cover the family where twenty-seven
@@ -597,7 +620,7 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
     }
 }
 
-/// Whether `entity_type` is a vanilla `VehicleEntity` subclass — see
+/// Whether `entity_type` is a vanilla vehicle-entity subclass — see
 /// [`MetadataClass::Vehicle`].
 fn is_vehicle_type(entity_type: &str) -> bool {
     entity_type.ends_with("_boat")
@@ -605,7 +628,7 @@ fn is_vehicle_type(entity_type: &str) -> bool {
         || entity_type.ends_with("minecart")
 }
 
-/// Whether `class` is one of the three `Display` subtypes — the gate for the
+/// Whether `class` is one of the three display subtypes — the gate for the
 /// fields every subtype shares (billboard mode; translation/scale/rotation
 /// are self-identifying by value shape and need no such gate, see
 /// [`EntityMetadataUpdate::display_translation`](lodestone_model::EntityMetadataUpdate::display_translation)'s
@@ -627,9 +650,9 @@ fn is_display_class(class: Option<MetadataClass>) -> bool {
 /// * [`class`](Self::class) — the sheep/horse variant indices (17/18), which other
 ///   mobs reuse for unrelated fields.
 /// * [`living`](Self::living) — whether index 8's byte is
-///   `LivingEntity.DATA_LIVING_ENTITY_FLAGS` or `AbstractArrow.ID_FLAGS`.
-/// * [`mob`](Self::mob) — whether index 15's byte is `Mob.DATA_MOB_FLAGS_ID` or
-///   `ArmorStand.DATA_CLIENT_FLAGS`.
+///   the living-entity class's own living-entity-flags accessor or the abstract-arrow class's own flags accessor.
+/// * [`mob`](Self::mob) — whether index 15's byte is the mob class's own mob-flags accessor or
+///   the armor-stand class's own client-flags accessor.
 ///
 /// # Why this does not grow the tracked set to every entity
 ///
@@ -682,8 +705,8 @@ const SER_STRING: i32 = 4;
 const SER_COMPONENT: i32 = 5;
 const SER_OPTIONAL_COMPONENT: i32 = 6;
 const SER_ITEM_STACK: i32 = 7;
-/// `EntityDataSerializers.PAINTING_VARIANT`. One claimant in the whole 26.2
-/// dump — `Painting.DATA_PAINTING_VARIANT_ID` — which is why the value it
+/// vanilla's own metadata-serializer registry's own painting-variant accessor. One claimant in the whole 26.2
+/// dump — the painting class's own painting-variant accessor — which is why the value it
 /// produces needs no index or class guard.
 const SER_PAINTING_VARIANT: i32 = 34;
 const SER_BOOLEAN: i32 = 8;
@@ -727,7 +750,7 @@ enum Value {
     /// A decoded `OPTIONAL_BLOCK_POS` value — `None` for vanilla's own
     /// "cleared"/absent sentinel. Surfaced for [`IDX_CRYSTAL_BEAM_TARGET`]
     /// alone; the other two claimants of this serializer
-    /// (`LivingEntity.SLEEPING_POS_ID`, `Creaking.HOME_POS`) decode to this
+    /// (the living-entity class's own sleeping-pos accessor, the creaking class's own home-pos accessor) decode to this
     /// same shape but are filtered out by index at the call site, not here —
     /// see that constant's own doc for why the serializer alone cannot do it.
     OptBlockPos(Option<BlockPos>),
@@ -739,18 +762,18 @@ enum Value {
     /// jar dump, so no class guard gates the arms that read it; see
     /// [`IDX_ARMOR_STAND_HEAD_POSE`].
     Rotations(Vec3f),
-    /// A decoded `VECTOR3` — `Display.DATA_TRANSLATION_ID`/`DATA_SCALE_ID`,
+    /// A decoded `VECTOR3` — the display class's own translation accessor/`DATA_SCALE_ID`,
     /// the only claimants of that serializer in the 26.2 jar dump. See
     /// [`IDX_DISPLAY_TRANSLATION`]/[`IDX_DISPLAY_SCALE`].
     Vector3(Vec3f),
-    /// A decoded `QUATERNION` — `Display.DATA_LEFT_ROTATION_ID`/
+    /// A decoded `QUATERNION` — the display class's own left-rotation accessor/
     /// `DATA_RIGHT_ROTATION_ID`, the only claimants of that serializer. See
     /// [`IDX_DISPLAY_LEFT_ROTATION`]/[`IDX_DISPLAY_RIGHT_ROTATION`].
     Quaternion(Quat),
     /// A decoded `COMPONENT` (not the `OPTIONAL_COMPONENT` [`OptText`](Self::OptText)
     /// already carries), styled the same way `OptText` is. Surfaced for
-    /// `Display.TextDisplay.DATA_TEXT_ID` alone; the other `COMPONENT`
-    /// claimant in the jar dump (`MinecartCommandBlock.DATA_ID_LAST_OUTPUT`,
+    /// `the text-display class's own text accessor alone; the other `COMPONENT`
+    /// claimant in the jar dump (the command-block-minecart class's own id-last-output accessor,
     /// a different index) is filtered out by index at the call site, not
     /// here — same pattern as [`OptBlockPos`](Self::OptBlockPos).
     Text(Text),
@@ -821,7 +844,7 @@ fn pose_from_id(id: u32) -> EntityPose {
     }
 }
 
-/// Unpacks a vanilla `BlockPos.asLong` value into canonical block coordinates:
+/// Unpacks vanilla's own packed block-position long value into canonical block coordinates:
 /// `x` in the high 26 bits, `z` in the middle 26 bits, `y` in the low 12
 /// bits, each two's-complement. A local duplicate of `adapter::unpack_block_pos`/
 /// `server_protocol::unpack_block_pos` — both are private to their own
@@ -879,9 +902,9 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             reader.string(MAX_STRING)?;
             Value::Consumed
         }
-        // Surfaced as a styled component for `Display.TextDisplay.DATA_TEXT_ID`
-        // — every other `COMPONENT` claimant (`MinecartCommandBlock`'s last
-        // output) is filtered out by index at the call site, matching
+        // Surfaced as a styled component for the text-display class's own text accessor
+        // — every other `COMPONENT` claimant (the command-block-minecart
+        // class's own last-output accessor) is filtered out by index at the call site, matching
         // `OPTIONAL_BLOCK_POS`'s pattern. See [`Value::Text`].
         //
         // `Text::from_nbt` rather than `plain_text_from_nbt_component`: the
@@ -900,7 +923,7 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             }
         }
         SER_BOOLEAN => Value::Bool(reader.bool()?),
-        // An armour stand's six pose accessors, `ArmorStand.DATA_HEAD_POSE`
+        // An armour stand's six pose accessors, the armor-stand class's own head-pose accessor
         // through `DATA_RIGHT_LEG_POSE` (indices 16-21) — each an `(x, y, z)`
         // triple of Euler **degrees**. They are the *only* claimants of this
         // serializer in the jar dump, so the value shape alone identifies the
@@ -936,7 +959,7 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             reader.var_i32()?;
             Value::Consumed
         }
-        // `FriendlyByteBuf.writeOptionalUnsignedInt`: `0` is empty and any other
+        // Vanilla's own optional-unsigned-int writer: `0` is empty and any other
         // value is `n + 1`. A negative wire value is not representable as an
         // entity id and reads as empty rather than wrapping into a plausible
         // one.
@@ -948,10 +971,10 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
         // `Value::Int` (the same shape any other `INT` field decodes to)
         // rather than a dedicated variant, since nothing about the wire
         // representation is special. Its only surfaced claimant is
-        // `Display.BlockDisplay.DATA_BLOCK_STATE_ID` at index 23, gated on
+        // `the block-display class's own block-state accessor at index 23, gated on
         // [`MetadataClass::BlockDisplay`] in the caller because index 23 also
-        // carries `Cat.DATA_COLLAR_COLOR`, an unrelated `INT` — see
-        // [`IDX_DISPLAY_VARIANT_PAYLOAD`]. `PrimedTnt.DATA_BLOCK_STATE_ID`
+        // carries the cat class's own collar-color accessor, an unrelated `INT` — see
+        // [`IDX_DISPLAY_VARIANT_PAYLOAD`]. the primed-tnt class's own block-state accessor
         // (index 9) uses this same serializer and is intentionally left
         // unsurfaced (no arm claims `(9, Value::Int(_))`), matching this
         // module's existing "decoded for alignment but not surfaced" pattern.
@@ -1017,7 +1040,7 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             }
             Value::Consumed
         }
-        // `Display.DATA_TRANSLATION_ID`/`DATA_SCALE_ID` — the only claimants
+        // the display class's own translation accessor/`DATA_SCALE_ID` — the only claimants
         // of this serializer in the jar dump, so no index/class filtering is
         // needed here; the caller's `(index, Value::Vector3(_))` match arms
         // still key on the index to tell translation from scale.
@@ -1027,9 +1050,9 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             let z = reader.f32()?;
             Value::Vector3(Vec3f::new(x, y, z))
         }
-        // `Display.DATA_LEFT_ROTATION_ID`/`DATA_RIGHT_ROTATION_ID` — the only
+        // the display class's own left-rotation accessor/`DATA_RIGHT_ROTATION_ID` — the only
         // claimants of this serializer. Wire order is `x, y, z, w`
-        // (`FriendlyByteBuf.readQuaternion`: `new Quaternionf(x, y, z, w)`),
+        // (vanilla's own quaternion reader constructs it as `(x, y, z, w)`),
         // matching `Quat::new`'s own field order exactly.
         SER_QUATERNION => {
             let x = reader.f32()?;
@@ -1130,7 +1153,7 @@ pub fn read_entity_metadata(
             // `0x04` for "show arms". See `IDX_MOB_FLAGS`. Ungated, every armour
             // stand with arms would report itself aggressive.
             (IDX_MOB_FLAGS, Value::Byte(b)) if mob => md.mob_flags = Some(b as u8),
-            // The *other* claimant of index 15: `ArmorStand.DATA_CLIENT_FLAGS`,
+            // The *other* claimant of index 15: the armor-stand class's own client-flags accessor,
             // gated on `class` rather than `mob` because `mob` is exactly what
             // this claimant is not — see `IDX_MOB_FLAGS`'s doc. This is the byte
             // a "hologram" (an invisible, nametagged armour stand) needs for its
@@ -1171,7 +1194,7 @@ pub fn read_entity_metadata(
             }
             // A creeper's fuse direction (-1 idle/retreating, 1 counting up to
             // detonation). Guarded on class: index 16 is an `INT` on several other
-            // mobs too (`Display`, `EnderDragon`, `Phantom`, `Warden`, `WitherBoss`
+            // mobs too (the display, ender-dragon, phantom, warden and wither-boss classes
             // — see `IDX_CREEPER_SWELL_DIR`'s doc), none of which mean a creeper's
             // swell.
             (IDX_CREEPER_SWELL_DIR, Value::Int(v)) if class == Some(MetadataClass::Creeper) => {
@@ -1189,7 +1212,7 @@ pub fn read_entity_metadata(
             (IDX_CREEPER_IGNITED, Value::Bool(b)) if class == Some(MetadataClass::Creeper) => {
                 md.creeper_ignited = Some(b);
             }
-            // `TamableAnimal.DATA_FLAGS_ID`: `isTame` is `0x04`, `isInSittingPose`
+            // the tameable-animal class's own flags accessor: `isTame` is `0x04`, `isInSittingPose`
             // is `0x01`. Guarded on class because index 18's `BYTE` is also the
             // sheep's wool byte and the horse family's own (differently-bitted)
             // flags, just above and below.
@@ -1198,32 +1221,32 @@ pub fn read_entity_metadata(
                 md.tamed = Some(byte & 0x04 != 0);
                 md.sitting = Some(byte & 0x01 != 0);
             }
-            // `AbstractHorse.DATA_ID_FLAGS`, `FLAG_TAME = 0x02` — a *different*
+            // the abstract-horse class's own id-flags accessor, `FLAG_TAME = 0x02` — a *different*
             // bit from the tamable-animal arm above, at the same index. See
             // [`IDX_TAMABLE_OR_HORSE_FLAGS`].
             (IDX_TAMABLE_OR_HORSE_FLAGS, Value::Byte(b)) if class == Some(MetadataClass::Horse) => {
                 md.tamed = Some((b as u8) & 0x02 != 0);
             }
-            // `EnderDragon.DATA_PHASE`. Guarded on class: index 16 is an `INT`
+            // the ender-dragon class's own phase accessor. Guarded on class: index 16 is an `INT`
             // on five other unrelated mobs too — see [`IDX_DRAGON_PHASE`].
             (IDX_DRAGON_PHASE, Value::Int(v)) if class == Some(MetadataClass::Dragon) => {
                 md.dragon_phase = Some(v);
             }
-            // `EndCrystal.DATA_SHOW_BOTTOM`. Guarded on class: index 9 is a
+            // the end-crystal class's own show-bottom accessor. Guarded on class: index 9 is a
             // `BOOLEAN` on two other unrelated entities too — see
             // [`IDX_CRYSTAL_SHOW_BOTTOM`].
             (IDX_CRYSTAL_SHOW_BOTTOM, Value::Bool(b)) if class == Some(MetadataClass::EndCrystal) => {
                 md.crystal_show_bottom = Some(b);
             }
-            // `ItemFrame.DATA_ROTATION`. Guarded on class: index 10's `INT` is
-            // also a `Display`'s interpolation duration — see
+            // the item-frame class's own rotation accessor. Guarded on class: index 10's `INT` is
+            // also a display's interpolation duration — see
             // [`IDX_ITEM_FRAME_ROTATION`]. Masked to `0..8` here rather than at
-            // the consumer, matching `ItemFrame.setRotation`'s own `% 8`; a
+            // the consumer, matching vanilla's own item-frame rotation setter's own `% 8`; a
             // negative or out-of-range int is a datapack, not a rotation.
             (IDX_ITEM_FRAME_ROTATION, Value::Int(v)) if class == Some(MetadataClass::ItemFrame) => {
                 md.item_frame_rotation = Some((v.rem_euclid(8)) as u8);
             }
-            // `VehicleEntity`'s hurt triple -- the whole of what makes a punched
+            // The vehicle-entity class's own hurt triple -- the whole of what makes a punched
             // boat rock. All three are class-gated; see [`IDX_VEHICLE_HURT_TIME`]
             // for the five-claimant collision at index 8 that no census column
             // can separate.
@@ -1277,13 +1300,13 @@ pub fn read_entity_metadata(
             (IDX_ARMOR_STAND_RIGHT_LEG_POSE, Value::Rotations(r)) => {
                 md.armor_stand_pose.right_leg = Some(r);
             }
-            // `EndCrystal.DATA_BEAM_TARGET`. No class guard: the index already
+            // the end-crystal class's own beam-target accessor. No class guard: the index already
             // disambiguates (see [`IDX_CRYSTAL_BEAM_TARGET`]'s own doc for why
             // the bare serializer could not).
             (IDX_CRYSTAL_BEAM_TARGET, Value::OptBlockPos(pos)) => {
                 md.crystal_beam_target = Reported::Reported(pos);
             }
-            // `Display.DATA_TRANSLATION_ID`/`DATA_SCALE_ID`/
+            // the display class's own translation accessor/`DATA_SCALE_ID`/
             // `DATA_LEFT_ROTATION_ID`/`DATA_RIGHT_ROTATION_ID`. No class guard:
             // the `VECTOR3`/`QUATERNION` value shape already disambiguates —
             // see [`IDX_DISPLAY_TRANSLATION`]'s doc.
@@ -1291,13 +1314,13 @@ pub fn read_entity_metadata(
             (IDX_DISPLAY_SCALE, Value::Vector3(v)) => md.display_scale = Some(v),
             (IDX_DISPLAY_LEFT_ROTATION, Value::Quaternion(q)) => md.display_left_rotation = Some(q),
             (IDX_DISPLAY_RIGHT_ROTATION, Value::Quaternion(q)) => md.display_right_rotation = Some(q),
-            // `Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`. Guarded on
-            // [`is_display_class`]: index 15's `BYTE` is also `Mob.DATA_MOB_FLAGS_ID`
-            // and `ArmorStand.DATA_CLIENT_FLAGS` — see [`IDX_DISPLAY_BILLBOARD`].
+            // the display class's own billboard-render-constraints accessor. Guarded on
+            // [`is_display_class`]: index 15's `BYTE` is also the mob class's own mob-flags accessor
+            // and the armor-stand class's own client-flags accessor — see [`IDX_DISPLAY_BILLBOARD`].
             (IDX_DISPLAY_BILLBOARD, Value::Byte(b)) if is_display_class(class) => {
                 md.display_billboard = Some(b as u8);
             }
-            // `Display.DATA_BRIGHTNESS_OVERRIDE_ID`. Guarded on
+            // the display class's own brightness-override accessor. Guarded on
             // [`is_display_class`] for the reason [`IDX_DISPLAY_BRIGHTNESS`]
             // gives: five other unrelated entities put an `INT` at index 16.
             // Surfaced packed, sentinel and all — the consumer needs to tell
@@ -1306,35 +1329,35 @@ pub fn read_entity_metadata(
             (IDX_DISPLAY_BRIGHTNESS, Value::Int(v)) if is_display_class(class) => {
                 md.display_brightness_override = Some(v);
             }
-            // `Display.BlockDisplay.DATA_BLOCK_STATE_ID`. Guarded on class: index
-            // 23 is also `Cat.DATA_COLLAR_COLOR`, an unrelated `INT` — see
+            // `the block-display class's own block-state accessor. Guarded on class: index
+            // 23 is also the cat class's own collar-color accessor, an unrelated `INT` — see
             // [`IDX_DISPLAY_VARIANT_PAYLOAD`].
             (IDX_DISPLAY_VARIANT_PAYLOAD, Value::Int(v)) if class == Some(MetadataClass::BlockDisplay) => {
                 md.display_block_state = Some(v as u32);
             }
-            // `Display.TextDisplay.DATA_TEXT_ID`.
+            // `the text-display class's own text accessor.
             (IDX_DISPLAY_VARIANT_PAYLOAD, Value::Text(text)) if class == Some(MetadataClass::TextDisplay) => {
                 md.display_text = Reported::Reported(Some(text));
             }
-            // `Display.ItemDisplay.DATA_ITEM_DISPLAY_ID` — the `ItemDisplayContext`
-            // ordinal this item poses in.
+            // The item-display class's own item-display accessor — vanilla's own
+            // item-display-context ordinal this item poses in.
             (IDX_DISPLAY_VARIANT_EXTRA, Value::Byte(b)) if class == Some(MetadataClass::ItemDisplay) => {
                 md.display_item_context = Some(b as u8);
             }
-            // `Display.TextDisplay.DATA_LINE_WIDTH_ID`.
+            // `the text-display class's own line-width accessor.
             (IDX_DISPLAY_VARIANT_EXTRA, Value::Int(v)) if class == Some(MetadataClass::TextDisplay) => {
                 md.display_line_width = Some(v);
             }
-            // `Display.TextDisplay.DATA_BACKGROUND_COLOR_ID`. Sole claimant of
+            // `the text-display class's own background-color accessor. Sole claimant of
             // this index in the jar dump — see [`IDX_TEXT_BACKGROUND_COLOR`].
             (IDX_TEXT_BACKGROUND_COLOR, Value::Int(v)) if class == Some(MetadataClass::TextDisplay) => {
                 md.display_background_color = Some(v);
             }
-            // `Display.TextDisplay.DATA_TEXT_OPACITY_ID`.
+            // `the text-display class's own text-opacity accessor.
             (IDX_TEXT_OPACITY, Value::Byte(b)) if class == Some(MetadataClass::TextDisplay) => {
                 md.display_text_opacity = Some(b);
             }
-            // `Display.TextDisplay.DATA_STYLE_FLAGS_ID`.
+            // `the text-display class's own style-flags accessor.
             (IDX_TEXT_STYLE_FLAGS, Value::Byte(b)) if class == Some(MetadataClass::TextDisplay) => {
                 md.display_text_style_flags = Some(b as u8);
             }
@@ -1616,8 +1639,9 @@ mod tests {
         w.into_vec()
     }
 
-    /// `Display.defineSynchedData` assigns the right quaternion before the
-    /// left one (indices 13 then 14). Keep the indices literal here rather
+    /// Vanilla's own display-class accessor registration assigns the right
+    /// quaternion before the left one (indices 13 then 14). Keep the indices
+    /// literal here rather
     /// than routing through the constants under test: a swapped pair would
     /// otherwise make producer and assertion agree while every transformed
     /// `text_display` rotates its panel away from its glyphs.
@@ -1626,12 +1650,12 @@ mod tests {
         let right = [0.1f32, 0.2, 0.3, 0.4];
         let left = [0.5f32, 0.6, 0.7, 0.8];
         let mut bytes = Vec::new();
-        bytes.push(13); // Display.DATA_RIGHT_ROTATION_ID
+        bytes.push(13); // the display class's own right-rotation accessor
         bytes.extend(varint(SER_QUATERNION));
         for component in right {
             bytes.extend(component.to_be_bytes());
         }
-        bytes.push(14); // Display.DATA_LEFT_ROTATION_ID
+        bytes.push(14); // the display class's own left-rotation accessor
         bytes.extend(varint(SER_QUATERNION));
         for component in left {
             bytes.extend(component.to_be_bytes());
@@ -1825,7 +1849,7 @@ mod tests {
     /// which is generated from Mojang's own `registries.json`.
     ///
     /// The discriminating half is the trailing field: index 23's `Int` arm is
-    /// gated on `BlockDisplay`, so an `ItemDisplay` subject proves the stack
+    /// gated on the block-display class, so an item-display subject proves the stack
     /// took the early return rather than falling into the block-state arm, and
     /// the following index-24 byte proves the reader stayed aligned.
     #[test]
@@ -1844,7 +1868,7 @@ mod tests {
         // decode failure here rather than as a silently truncated list.
         bytes.push(IDX_DISPLAY_VARIANT_EXTRA);
         bytes.extend(varint(SER_BYTE));
-        bytes.push(8); // ItemDisplayContext.FIXED
+        bytes.push(8); // vanilla's own item-display-context enum's fixed value
         bytes.push(EOF_MARKER);
 
         let mut reader = Reader::new(&bytes);
@@ -1878,7 +1902,7 @@ mod tests {
     }
 
     /// Index 16's `INT` is a display's brightness override **only** for a
-    /// `Display` subtype; for anything else it is consumed for alignment and
+    /// display subtype; for anything else it is consumed for alignment and
     /// deliberately not surfaced.
     ///
     /// The three arms are the whole point, and the third is what a "does it
@@ -1886,7 +1910,7 @@ mod tests {
     ///
     /// * an `item_display` surfaces it, and surfaces *only* it;
     /// * a **creeper** — a real index-16 `INT` claimant
-    ///   (`Creeper.DATA_SWELL_DIR`) whose premise
+    ///   (the creeper class's own swell-dir accessor) whose premise
     ///   `the_jar_dump_contains_the_collisions_the_guards_exist_for` already
     ///   asserts — surfaces its own field and **not** the brightness, so the
     ///   guard is doing work rather than being decorative;
@@ -1933,7 +1957,7 @@ mod tests {
         assert_eq!(md.dragon_phase, None);
 
         // The control, and its premise is a real collision rather than an
-        // invented one: `Creeper.DATA_SWELL_DIR` is an `INT` at index 16 in the
+        // invented one: the creeper class's own swell-dir accessor is an `INT` at index 16 in the
         // committed jar dump.
         let mut reader = Reader::new(&bytes);
         let control = read_entity_metadata(&mut reader, a_creeper())
@@ -1974,9 +1998,9 @@ mod tests {
     }
 
     /// The premise of the arm above, read off the committed jar dump rather
-    /// than hand-counted: `Display.DATA_BRIGHTNESS_OVERRIDE_ID` really is index
+    /// than hand-counted: the display class's own brightness-override accessor really is index
     /// 16 as an `INT`, and it really does share that index with five unrelated
-    /// `INT`s, none of them a `Display`.
+    /// `INT`s, none of them a display.
     ///
     /// Named individually rather than counted, matching
     /// `the_jar_dump_contains_the_collisions_the_guards_exist_for`: a dump that
@@ -2014,8 +2038,9 @@ mod tests {
     }
 
     /// Index 1, `INT`, decodes to `air_supply` — the field this seam exists to
-    /// close (`docs/sky-and-air-bubbles.md`). Verified against `Entity.java`'s
-    /// `defineId` declaration order, not assumed.
+    /// close (`docs/sky-and-air-bubbles.md`). Verified against the decompiled
+    /// base entity class's own accessor-registration declaration order, not
+    /// assumed.
     #[test]
     fn decodes_air_supply_at_index_1() {
         let mut bytes = Vec::new();
@@ -2033,7 +2058,7 @@ mod tests {
 
     /// Index 8, `BYTE`, on a **living** entity decodes to `living_flags` — the
     /// using-item bitfield behind a bow draw. Index verified against
-    /// `LivingEntity.DATA_LIVING_ENTITY_FLAGS` being `LivingEntity`'s first
+    /// the living-entity class's own living-entity-flags accessor being `LivingEntity`'s first
     /// `defineId`, not assumed from a summary.
     #[test]
     fn decodes_living_flags_at_index_8_for_a_living_entity() {
@@ -2056,7 +2081,7 @@ mod tests {
     }
 
     /// **The control for the guard, and it must fail without it.** The identical
-    /// bytes on a non-living entity are `AbstractArrow.ID_FLAGS` — bit `0x01` is
+    /// bytes on a non-living entity are the abstract-arrow class's own flags accessor — bit `0x01` is
     /// the arrow's *crit* flag, not "using an item". The byte is still consumed
     /// (the list stays aligned and the terminator is reached) but must not be
     /// surfaced.
@@ -2190,9 +2215,11 @@ mod tests {
 
     /// The guard, and the reason it is `mob` rather than `living`.
     ///
-    /// An **armour stand** is a `LivingEntity`, so `living` does not exclude it —
-    /// and its own index-15 `BYTE` uses `0x04` for `CLIENT_FLAG_SHOW_ARMS`
-    /// (`ArmorStand.java`). An armour stand with arms is the ordinary
+    /// An **armour stand** is a living-entity subclass, so `living` does not
+    /// exclude it —
+    /// and its own index-15 `BYTE` uses `0x04` for its own show-arms flag
+    /// (confirmed against the decompiled armor-stand source). An armour
+    /// stand with arms is the ordinary
     /// decorative case, so a `living`-gated decode would report a large fraction
     /// of all armour stands as aggressive mobs and, holding a bow, draw it.
     ///
@@ -2335,7 +2362,7 @@ mod tests {
     #[test]
     fn an_int_at_a_pose_index_never_surfaces_as_a_pose() {
         let mut bytes = Vec::new();
-        bytes.push(IDX_ARMOR_STAND_HEAD_POSE); // 16 — also Creeper.DATA_SWELL_DIR
+        bytes.push(IDX_ARMOR_STAND_HEAD_POSE); // 16 — also the creeper class's own swell-dir accessor
         bytes.extend(varint(SER_INT));
         bytes.extend(varint(1));
         bytes.push(EOF_MARKER);
@@ -2502,7 +2529,7 @@ mod tests {
     #[test]
     fn empty_item_stack_clears_the_field_and_stays_aligned() {
         let mut bytes = Vec::new();
-        bytes.push(8); // ItemEntity.DATA_ITEM
+        bytes.push(8); // the item-entity class's own item accessor
         bytes.extend(varint(SER_ITEM_STACK));
         bytes.extend(varint(0)); // count 0 = the empty stack
         bytes.push(IDX_HEALTH);
@@ -2544,7 +2571,7 @@ mod tests {
 
     /// The same byte at index 18 with no sheep context (or a different class) must
     /// NOT be raised — index 18 aliases unrelated byte fields on other mobs
-    /// (`AbstractHorse.DATA_ID_FLAGS` occupies it).
+    /// (the abstract-horse class's own id-flags accessor occupies it).
     #[test]
     fn wool_index_without_sheep_class_is_not_raised() {
         let mut bytes = Vec::new();
@@ -2632,10 +2659,10 @@ mod tests {
         assert_eq!(md.creeper_ignited, Some(true));
     }
 
-    /// The idle default: `swell_dir == -1` (`Creeper.java`,
-    /// `entityData.define(DATA_SWELL_DIR, -1)`), `powered`/`ignited` both
-    /// `false`. A real server never puts these on the wire for an ordinary
-    /// spawn (`SynchedEntityData` only sends non-default values — the same
+    /// The idle default: `swell_dir == -1` (confirmed against the decompiled
+    /// creeper source's own accessor-registration default), `powered`/`ignited`
+    /// both `false`. A real server never puts these on the wire for an ordinary
+    /// spawn (vanilla's own tracked-data mechanism only sends non-default values — the same
     /// mechanism the sheep-wool fix's module docs describe), so this is what
     /// `handle_add_entity`'s synthesized default must produce, not what a real
     /// packet carries.
@@ -2655,7 +2682,7 @@ mod tests {
     }
 
     /// **The control, and it must fail without the class guard.** Index 16's
-    /// `INT` is also `Warden.CLIENT_ANGER_LEVEL` — bit-identical serializer, no
+    /// `INT` is also the warden class's own client-anger-level accessor — bit-identical serializer, no
     /// other signal distinguishes them. Without `if class ==
     /// Some(MetadataClass::Creeper)` this test fails: a warden's anger level
     /// would decode as `creeper_swell_dir`, and every warden in render distance
@@ -2687,8 +2714,8 @@ mod tests {
     }
 
     /// The same control for the two `BOOLEAN` fields (17 powered, 18 ignited),
-    /// which collide with `Witch.DATA_USING_ITEM`/`EnderMan.DATA_CREEPY` (17)
-    /// and `Turtle.HAS_EGG`/`Ocelot.DATA_TRUSTING` (18) among others.
+    /// which collide with the witch class's own using-item accessor/the enderman class's own creepy accessor (17)
+    /// and the turtle class's own has-egg accessor/the ocelot class's own trusting accessor (18) among others.
     #[test]
     fn indices_17_and_18_without_creeper_class_are_consumed_but_not_surfaced() {
         let mut bytes = Vec::new();
@@ -2742,7 +2769,7 @@ mod tests {
     }
 
     /// **The control, and it must fail without the class guard.** Index 16's
-    /// `INT` is also `Warden.CLIENT_ANGER_LEVEL`/`Creeper.DATA_SWELL_DIR`/etc
+    /// `INT` is also the warden class's own client-anger-level accessor/the creeper class's own swell-dir accessor/etc
     /// — bit-identical serializer, no other signal distinguishes them. A
     /// following field proves alignment survived the unmatched value.
     #[test]
@@ -2788,8 +2815,8 @@ mod tests {
         assert_eq!(md.crystal_show_bottom, Some(false));
     }
 
-    /// **The control**: index 9's `BOOLEAN` is also `AreaEffectCloud.DATA_WAITING`
-    /// and `FishingHook.DATA_BITING`. Without the class guard this would
+    /// **The control**: index 9's `BOOLEAN` is also the area-effect-cloud class's own waiting accessor
+    /// and the fishing-hook class's own biting accessor. Without the class guard this would
     /// surface as `crystal_show_bottom` for any mob.
     #[test]
     fn crystal_show_bottom_without_end_crystal_class_is_consumed_but_not_surfaced() {
@@ -2922,7 +2949,7 @@ mod tests {
     /// mapping matches `Value::Villager` by *serializer* alone, not by index (see
     /// its `(_, Value::Villager { .. })` arm), so this test would pass at any
     /// index. It is still set to the real one rather than an arbitrary value:
-    /// `Villager.DATA_VILLAGER_DATA` is index **19** per the committed
+    /// the villager class's own villager-data accessor is index **19** per the committed
     /// `EntityDataIndexOracle` dump (`tests/support/entity_data_index_jvm.txt`),
     /// not 17 — a prior guess this fixture used to encode, now corrected so a
     /// reader copying this test as a template for the server-side encode arm
@@ -2930,7 +2957,7 @@ mod tests {
     #[test]
     fn villager_data_raises_villager_variant() {
         let mut bytes = Vec::new();
-        bytes.push(19); // Villager.DATA_VILLAGER_DATA (oracle-verified)
+        bytes.push(19); // the villager class's own villager-data accessor (oracle-verified)
         bytes.extend(varint(SER_VILLAGER_DATA));
         bytes.extend(varint(4)); // type wire → id 3 → savanna
         bytes.extend(varint(6)); // profession wire → id 5 → farmer
@@ -2951,7 +2978,7 @@ mod tests {
         );
     }
 
-    /// `TamableAnimal.DATA_FLAGS_ID`'s two bits (`0x04` tame, `0x01` sitting) at
+    /// the tameable-animal class's own flags accessor's two bits (`0x04` tame, `0x01` sitting) at
     /// index 18, guarded on [`MetadataClass::Tamable`]. Pairwise-distinct byte
     /// (`0x05` = both bits set, not the same as either alone) so a bit-position
     /// transposition between `tamed`/`sitting` cannot survive.
@@ -2989,7 +3016,7 @@ mod tests {
         assert_eq!(md.sitting, Some(false));
     }
 
-    /// `AbstractHorse.DATA_ID_FLAGS`'s `FLAG_TAME = 0x02`, guarded on
+    /// the abstract-horse class's own id-flags accessor's `FLAG_TAME = 0x02`, guarded on
     /// [`MetadataClass::Horse`] — a **different** bit from the tamable-animal
     /// arm above at the same index. `0x02` set alone (not `0x04`) is exactly
     /// the byte that would read as "untamed" under a shared-bit
@@ -3001,7 +3028,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.push(18);
         bytes.extend(varint(SER_BYTE));
-        bytes.push(0x02); // AbstractHorse.FLAG_TAME
+        bytes.push(0x02); // the abstract-horse class's own flag-tame accessor
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
         let md = read_entity_metadata(&mut reader, a_horse())
@@ -3172,12 +3199,13 @@ mod tests {
     // The `IDX_*` constants, anchored to the jar
     // -----------------------------------------------------------------------
 
-    /// Every `EntityDataAccessor` in 26.2, dumped from a headless server and
+    /// Every tracked-data accessor in 26.2, dumped from a headless server and
     /// sorted by index so collisions are adjacent lines. See
     /// `oracle-java/EntityDataIndexOracle.java`.
     ///
     /// This exists because every `IDX_*` above is a **hand count** over
-    /// `SynchedEntityData.defineId`'s per-hierarchy declaration-order counter —
+    /// vanilla's own tracked-data accessor registration's per-hierarchy
+    /// declaration-order counter —
     /// exactly the kind of expected value `CLAUDE.md` requires to come from
     /// outside the code under test. Two of them were wrong (see
     /// [`IDX_SHEEP_WOOL`]).
@@ -3227,7 +3255,7 @@ mod tests {
         }
     }
 
-    /// `VehicleEntity`'s hurt triple decodes only for a vehicle — and the
+    /// The vehicle-entity class's hurt triple decodes only for a vehicle — and the
     /// control is the point, because index 8's `INT` is an experience orb's XP
     /// value under a different class and index 9's is a display entity's
     /// interpolation duration.
@@ -3286,7 +3314,7 @@ mod tests {
         );
     }
 
-    /// Every `VehicleEntity` subclass has to reach [`MetadataClass::Vehicle`],
+    /// Every vehicle-entity subclass has to reach [`MetadataClass::Vehicle`],
     /// not just the one boat someone tested with. The rafts are the trap: they
     /// carry no `_boat` suffix at all.
     #[test]
@@ -3493,7 +3521,7 @@ mod tests {
     /// attached flag only for the empty/present distinction.
     ///
     /// The control is the point: index 10's `BOOLEAN` is also
-    /// `AbstractArrow.IN_GROUND`, so the same bytes fed with a non-firework
+    /// the abstract-arrow class's own in-ground accessor, so the same bytes fed with a non-firework
     /// subject must consume the byte for alignment and surface nothing. Without
     /// the class guard an arrow stuck in the ground would report itself as
     /// crossbow-fired and be spun onto a flight axis it does not have.
@@ -3573,10 +3601,10 @@ mod tests {
     /// `SER_ITEM_STACK` relies on.
     ///
     /// Two claims, both against the dump rather than against this decoder:
-    /// serializer 34 is claimed by `Painting.DATA_PAINTING_VARIANT_ID` alone,
+    /// serializer 34 is claimed by the painting class's own painting-variant accessor alone,
     /// and it sits at index **9** — which nothing here depends on, and which is
     /// asserted anyway so the fact stays checked. It would be easy to assume 8,
-    /// since that is where `HangingEntity.DATA_DIRECTION` sits and `Painting`
+    /// since that is where the hanging-entity class's own direction accessor sits and `Painting`
     /// extends it.
     #[test]
     fn painting_variant_is_the_only_claimant_of_its_serializer() {
@@ -3658,7 +3686,7 @@ mod tests {
         }
 
         // Index 8's *third* collision, and the premise of the `ExperienceOrb` class
-        // guard: `ExperienceOrb.DATA_VALUE` shares the index with four unrelated
+        // guard: the experience-orb class's own value accessor shares the index with four unrelated
         // `INT`s, so neither the serializer nor the `living`/`mob` census can
         // separate them. Named individually rather than counted, so a dump that
         // dropped one of them fails here rather than weakening the guard silently.
@@ -3683,8 +3711,8 @@ mod tests {
             );
         }
 
-        // Index 16 is `Creeper.DATA_SWELL_DIR` *and* an unrelated `INT` on at
-        // least `Warden.CLIENT_ANGER_LEVEL` — the `Creeper` class guard's premise
+        // Index 16 is the creeper class's own swell-dir accessor *and* an unrelated `INT` on at
+        // least the warden class's own client-anger-level accessor — the `Creeper` class guard's premise
         // for `index_16_without_creeper_class_is_consumed_but_not_surfaced`.
         let at_16 = dump_claimants(16);
         for owner in ["Creeper.DATA_SWELL_DIR", "Warden.CLIENT_ANGER_LEVEL"] {
@@ -3695,7 +3723,7 @@ mod tests {
             );
         }
 
-        // Indices 17 and 18 are `Creeper.DATA_IS_POWERED`/`DATA_IS_IGNITED` *and*
+        // Indices 17 and 18 are the creeper class's own is-powered accessor/`DATA_IS_IGNITED` *and*
         // unrelated `BOOLEAN`s on other mobs.
         let at_17 = dump_claimants(17);
         for owner in ["Creeper.DATA_IS_POWERED", "Witch.DATA_USING_ITEM"] {
@@ -3713,9 +3741,9 @@ mod tests {
         }
 
         // The `Tamable`/`Horse` class guard's own premise: index 18's `BYTE` has
-        // *four* claimants (`Sheep.DATA_WOOL_ID` already covered above via the
+        // *four* claimants (the sheep class's own wool accessor already covered above via the
         // `Sheep` class), and the two the tame-flag arms exist for are
-        // `TamableAnimal.DATA_FLAGS_ID` and `AbstractHorse.DATA_ID_FLAGS` — a
+        // the tameable-animal class's own flags accessor and the abstract-horse class's own id-flags accessor — a
         // wolf and a horse never coexist as the same concrete type, so this is
         // the same species-mutual-exclusion shape as the sheep/creeper pair
         // above, not a real ambiguity once the class is known.
