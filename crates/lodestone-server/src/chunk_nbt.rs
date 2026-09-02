@@ -698,20 +698,18 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
 // Block entities and scheduled ticks (issue #468's remaining half)
 // ---------------------------------------------------------------------------
 
-/// One pending scheduled tick as it sits **on disk**, mirroring vanilla's
-/// `net.minecraft.world.ticks.SavedTick` record
-/// (`SavedTick.java:13`, `record SavedTick<T>(T type, BlockPos pos, int delay,
-/// TickPriority priority)`).
+/// One pending scheduled tick as it sits **on disk**, mirroring the real
+/// per-tick save-data record: a type, a position, a relative delay, and a
+/// priority.
 ///
 /// Deliberately a different type from [`crate::scheduled_tick::ScheduledTick`],
-/// exactly as it is in the jar, because the two disagree about the one field
+/// exactly as it is in the real engine, because the two disagree about the one field
 /// that matters: a live tick carries an **absolute** `trigger_tick`, a saved
-/// one carries a **relative, signed** `delay`. Vanilla converts with
-/// `SavedTick::unpack` (`SavedTick.java:52`):
-///
-/// ```text
-/// return new ScheduledTick<>(this.type, this.pos, currentTick + this.delay, this.priority, currentSubTick);
-/// ```
+/// one carries a **relative, signed** `delay`. The real engine converts with
+/// its own unpack step, transcribed as the rule it implements: rebuild the
+/// live tick record with the same type, position and priority, but with the
+/// trigger tick computed as the current game time plus the saved delay, and
+/// the sub-tick order taken from the current counter.
 ///
 /// so a load is `trigger_tick = game_time_at_load + delay` and **`delay` is
 /// routinely negative** — see [`Self::delay`].
@@ -719,16 +717,16 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
 pub struct SavedTick {
     /// Absolute block position.
     pub pos: (i32, i32, i32),
-    /// The block or fluid id being ticked — vanilla's `i` field.
+    /// The block or fluid id being ticked — the real save format's `i` field.
     pub kind: String,
-    /// Ticks from the game time **at save** until this tick is due, vanilla's
-    /// `t`.
+    /// Ticks from the game time **at save** until this tick is due, the real
+    /// save format's `t` field.
     ///
     /// **Signed, and negative in real worlds.** Measured across 22,488 real
-    /// vanilla chunks with an independent parser: 1,584 of 133,051 saved ticks
+    /// chunks with an independent parser: 1,584 of 133,051 saved ticks
     /// carry a negative delay, the extreme being `-1046` for an overdue birch
     /// leaves decay and `-33` for an overdue lava tick. A world is saved
-    /// mid-tick with a backlog and vanilla simply records how overdue each
+    /// mid-tick with a backlog and the real engine simply records how overdue each
     /// entry already was, so an unsigned field here panics or wraps on an
     /// ordinary survival world.
     pub delay: i32,
