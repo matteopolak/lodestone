@@ -10,7 +10,7 @@
 //! the composter's bone-meal extraction), and `apply_block_action`'s
 //! `StopDestroy` arm, which set the block to air and dropped **nothing**.
 //!
-//! This module is the glue plus the two pieces of vanilla behaviour neither
+//! This module is the glue plus the two pieces of real behaviour neither
 //! side had: which loot table a block state resolves to, and where/how fast the
 //! resulting item entity appears.
 //!
@@ -21,7 +21,7 @@
 //!    (`minecraft:blocks/stone`).
 //! 2. [`drop_block_loot`] looks that table up in the [`crate::LootTableSet`],
 //!    rolls it, and turns each resulting [`ItemStack`] into a [`PoppedItem`]
-//!    carrying the position and velocity vanilla's `Block.popResource` would
+//!    carrying the position and velocity the real "pop resource" step would
 //!    have given it.
 //! 3. The caller (`server.rs`'s `StopDestroy`) hands each [`PoppedItem`] to
 //!    [`crate::MobSim::spawn_item`], which is already ticked every server tick
@@ -30,30 +30,30 @@
 //! 4. [`is_within_pickup_range`] is the other end: the geometry that decides
 //!    whether a player standing here collects an item entity there.
 //!
-//! # `popResource`'s draw order *is* the specification
+//! # The real "pop resource" step's draw order *is* the specification
 //!
-//! From `Block.popResource` (`.cache/mc/26.2/src/net/minecraft/world/level/
-//! block/Block.java:412-419`) and the `ItemEntity` constructor it calls
-//! (`world/entity/item/ItemEntity.java:61-66`), in order:
+//! From the real "pop resource" step and the item entity constructor it
+//! calls, in order:
 //!
-//! ```text
-//! double halfHeight = EntityTypes.ITEM.getHeight() / 2.0;       // 0.25 / 2
-//! double x = pos.getX() + 0.5 + Mth.nextDouble(random, -0.25, 0.25);
-//! double y = pos.getY() + 0.5 + Mth.nextDouble(random, -0.25, 0.25) - halfHeight;
-//! double z = pos.getZ() + 0.5 + Mth.nextDouble(random, -0.25, 0.25);
-//! …
-//! this.setDeltaMovement(this.random.nextDouble() * 0.2 - 0.1, 0.2, this.random.nextDouble() * 0.2 - 0.1);
-//! ```
+//! 1. Compute the item entity's half-height (its own registered height
+//!    divided by 2 — `0.25 / 2`).
+//! 2. Draw `x` as the block's centre x plus a uniform offset in `-0.25..0.25`.
+//! 3. Draw `y` as the block's centre y plus a uniform offset in `-0.25..0.25`,
+//!    minus the half-height.
+//! 4. Draw `z` as the block's centre z plus a uniform offset in `-0.25..0.25`.
+//! 5. … (item-stack construction, no further draws) …
+//! 6. Set the delta movement to `(draw * 0.2 - 0.1, 0.2, draw * 0.2 - 0.1)` —
+//!    two more uniform `0.0..1.0` draws for the horizontal components, and a
+//!    constant `0.2` vertical component.
 //!
 //! **Five draws, in the order x, y, z, vx, vz** — `vy` is the constant `0.2`
 //! and consumes nothing. A port that draws `vy` too, or that draws the velocity
 //! before the position, produces a statistically identical cloud of items and
-//! desyncs from vanilla for any given seed. That is why
+//! desyncs from the real engine for any given seed. That is why
 //! [`pop_resource_placement`] takes the RNG and makes the five draws itself
 //! rather than accepting an offset from a caller.
 //!
-//! Note `EntityTypes.ITEM` is `.sized(0.25F, 0.25F)`
-//! (`world/entity/EntityTypes.java:558-566`), so `halfHeight` is `0.125` — the
+//! Note the real item entity type is sized `0.25` × `0.25`, so `halfHeight` is `0.125` — the
 //! item entity's *feet* sit an eighth of a block below the block centre, which
 //! is what centres its 0.25-tall box on the centre. This is a real position, not
 //! a rounding detail: get the sign wrong and every drop spawns *above* centre.
@@ -341,18 +341,18 @@ pub fn dropped_item_velocity(rng: &mut SpawnRng) -> Vec3 {
 pub const THROWN_PICKUP_DELAY_TICKS: i16 = 40;
 
 /// How far below eye level a thrown stack leaves the player's hand —
-/// `createItemStackToDrop`'s `this.getEyeY() - 0.3F`.
+/// the real create-item-stack-to-drop derivation's eye height minus `0.3F`.
 pub const THROW_HAND_DROP: f64 = 0.3;
 
 /// The forward impulse of a player throw, before the random spread —
-/// `createItemStackToDrop`'s `0.3F`, applied to the look vector.
+/// the real create-item-stack-to-drop derivation's `0.3F`, applied to the look vector.
 const THROW_POWER: f64 = 0.3;
 
 /// Peak of the random horizontal spread cone, `0.02F * random.nextFloat()`.
 const THROW_SPREAD: f64 = 0.02;
 
 /// Constant lift added to a throw on top of the look vector's vertical
-/// component — `+ 0.1F` in `createItemStackToDrop`.
+/// component — `+ 0.1F` in the real create-item-stack-to-drop derivation.
 const THROW_LIFT: f64 = 0.1;
 
 /// Amplitude of the throw's vertical jitter,
@@ -361,15 +361,14 @@ const THROW_LIFT: f64 = 0.1;
 /// numbers, not one.
 const THROW_VERTICAL_JITTER: f64 = 0.1;
 
-/// The velocity vanilla gives a stack a player throws out of their hand — `Q` /
-/// `Ctrl+Q`, i.e. `LivingEntity.createItemStackToDrop`'s `randomly == false`
-/// branch (26.2 `LivingEntity.java:3455-3465`):
+/// The velocity the real engine gives a stack a player throws out of their
+/// hand — `Q` /
+/// `Ctrl+Q`, i.e. the real create-item-stack-to-drop derivation's
+/// non-random-scatter branch:
 ///
-/// ```text
-/// vx = -sin(yaw)·cos(pitch)·0.3 + cos(dir)·spread
-/// vy = -sin(pitch)·0.3 + 0.1 + (r₁ − r₂)·0.1
-/// vz =  cos(yaw)·cos(pitch)·0.3 + sin(dir)·spread
-/// ```
+/// `vx = -sin(yaw)·cos(pitch)·0.3 + cos(dir)·spread`,
+/// `vy = -sin(pitch)·0.3 + 0.1 + (r₁ − r₂)·0.1`,
+/// `vz =  cos(yaw)·cos(pitch)·0.3 + sin(dir)·spread`
 ///
 /// with `dir = r₃·2π` and `spread = 0.02·r₄`. Angles are degrees on the wire and
 /// radians here, and the leading minus on `x` is Minecraft's yaw convention
@@ -1022,18 +1021,10 @@ mod tests {
     /// **`ore_drops`, predicted from the record body rather than a restatement of
     /// it.**
     ///
-    /// `ApplyBonusCount.OreDrops.calculateNewCount`
-    /// (`…/functions/ApplyBonusCount.java`) is:
-    ///
-    /// ```text
-    /// if (level > 0) {
-    ///    int bonus = random.nextInt(level + 2) - 1;
-    ///    if (bonus < 0) bonus = 0;
-    ///    return count * (bonus + 1);
-    /// } else {
-    ///    return count;
-    /// }
-    /// ```
+    /// The real ore-drops bonus-count function, transcribed as the rule it
+    /// implements: with a positive level, draw once with bound `level + 2`,
+    /// subtract 1, clamp negative results to 0, and multiply the count by
+    /// that plus 1; with a non-positive level, the count is unchanged.
     ///
     /// so with `count = 1` the multiplier is `max(nextInt(level + 2), 1)` and the
     /// **support** is exactly `1..=level+1` with `P(1) = 2/(level+2)` and
