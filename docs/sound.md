@@ -39,7 +39,7 @@ silent even though every stage above existed and worked:
    the walk on failure — otherwise a typo hides behind a working default.
 
 **Which sounds are audible follows one rule**: whether vanilla's server
-passes an *excluded* player to `Level.playSound`. Broadcast-to-all sounds
+passes an *excluded* player to its own play-sound call. Broadcast-to-all sounds
 (mob idle/hurt/death, chest lids, item pickup, another player's placements,
 cascading block breaks via `LEVEL_EVENT` 2001, explosions via a dedicated
 packet) all play. **Your own** placement/mining/footstep sounds are
@@ -150,7 +150,7 @@ and the spacing slowly drifts.
 ### Situational music selection
 
 26.2 does **not** read music off the biome directly (older tutorials
-describe the pre-restructure shape) — `Minecraft.getSituationalMusic` probes
+describe the pre-restructure shape) — vanilla's own situational-music selector probes
 the camera's environment-attribute system for `BACKGROUND_MUSIC`, and a biome
 contributes by *setting that attribute*. Selection order: the open screen's
 own music wins outright; otherwise, with a player, `END_BOSS` in the End (if
@@ -186,7 +186,8 @@ the full corpus fetched — the warped forest plays no music in real vanilla
 either. The biome table distinguishing "no row" (falls back to the overworld
 default) from "a present, empty row" (`pale_garden` — genuinely no music,
 not a fallback) is generated from the same biome JSON already bundled for
-worldgen, cross-checked against the decompiled `Musics.java` so a wrong dump
+worldgen, cross-checked against vanilla's own biome-music registration in the decompiled source
+so a wrong dump
 cannot launder itself through a regenerated table.
 
 ## How to change it, and the gotchas
