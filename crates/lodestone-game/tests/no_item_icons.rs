@@ -1,12 +1,11 @@
-//! The empty-slot sprites a menu declares (issue #376, the data half).
+//! The empty-slot sprites a menu declares.
 //!
 //! Vanilla draws a placeholder in an empty armour or off-hand slot via
-//! `Slot.getNoItemIcon`, which every screen reads *off the slot* rather than
+//! its own no-item-icon getter, which every screen reads *off the slot* rather than
 //! deriving from the slot's position. This file asserts the declarations, and —
 //! more usefully — asserts the two things a positional shortcut would get wrong.
 //!
-//! Expected values hand-read from
-//! `.cache/mc/26.2/src/net/minecraft/world/inventory/InventoryMenu.java:20-73`,
+//! Expected values hand-read from the 26.2 decompile,
 //! not from our own output.
 
 use lodestone_game::menu::{

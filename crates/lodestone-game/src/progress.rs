@@ -254,7 +254,7 @@ impl Statistics {
     }
 
     /// Folds a [`ClientEvent::StatisticsAwarded`], returning whether the event
-    /// belonged here (issue #26).
+    /// belonged here.
     ///
     /// This is the `apply(&ClientEvent)` shape every other session store uses, so
     /// `lodestone_ecs::session` can register it like the rest; [`Self::apply`]

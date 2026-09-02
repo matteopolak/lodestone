@@ -231,7 +231,7 @@ fn push_arg(args: &[Text], index: usize, children: &mut Vec<Text>) {
 /// should call" doc — already has no `click`/`hover` left by the time it
 /// reaches a draw call. `interactive_spans` walks the tree itself instead,
 /// treating `click`/`hover` as inheritable exactly the way vanilla's own
-/// `Style` does: `Style.applyTo` (`Style.java`, `.cache/mc/26.2`) folds
+/// style-apply step folds
 /// `clickEvent`/`hoverEvent` into the same "child wins if set, else inherit
 /// the parent's" rule as colour and every format flag. Nothing here is a
 /// second decode — this module's own [`resolve`] already documents that

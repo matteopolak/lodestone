@@ -1,4 +1,4 @@
-//! Villager and wandering-trader offers (issue #26).
+//! Villager and wandering-trader offers.
 //!
 //! ## What it is
 //!

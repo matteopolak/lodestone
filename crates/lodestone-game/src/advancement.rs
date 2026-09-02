@@ -1,4 +1,4 @@
-//! The advancement tree and the local player's progress on it (issue #167).
+//! The advancement tree and the local player's progress on it.
 //!
 //! ## What it is
 //!

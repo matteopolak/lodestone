@@ -1,4 +1,4 @@
-//! Server debug feeds and NBT query replies (issue #26).
+//! Server debug feeds and NBT query replies.
 //!
 //! ## What it is
 //!
