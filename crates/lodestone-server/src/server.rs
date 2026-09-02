@@ -11842,7 +11842,7 @@ where
         }
         ServerBound::Attack { entity_id } => {
             apply_attack(mobs, *player_pos, *sprinting, inventory, entity_id, player_uuid);
-            // `Player.attack`'s `causeFoodExhaustion(0.1F)`, charged on the swing
+            // Vanilla's own attack routine's `causeFoodExhaustion(0.1F)`, charged on the swing
             // rather than on a hit that landed — vanilla charges it inside `attack`
             // after the damage call, unconditionally for a living target.
             if !Abilities::for_mode(*game_mode).invulnerable {
@@ -11867,13 +11867,13 @@ where
             if hand == 0 {
                 // **Boarding a boat, and it has to be ahead of `MobSim::interact`.**
                 // A boat is not a mob: `interact`'s whole chain is
-                // `TamableAnimal`/`AbstractHorse`/`Animal.mobInteract` and has no arm
+                // vanilla's own tamable-animal/abstract-horse/animal mob-interact routines and has no arm
                 // for one, so a right-click on a boat reached the taming code, fell
                 // through to `Pass`, and did nothing at all — `SET_PASSENGERS` had no
                 // producer anywhere in the tree.
                 //
                 // `using_secondary_action` is `player.isSecondaryUseActive()`, which
-                // `AbstractBoat.interact` really does consult: sneak-clicking a boat
+                // vanilla's own abstract-boat interact routine really does consult: sneak-clicking a boat
                 // must *not* board it. This is the first reader of that field, whose
                 // own doc comment said "nothing reads it yet".
                 if mobs.with(|sim| sim.vehicle_type(entity_id).is_some()) {
@@ -11882,7 +11882,7 @@ where
                     });
                     if boarded {
                         // The vehicle's **whole** passenger list, which is how
-                        // vanilla always sends it — `Entity.startRiding` re-broadcasts
+                        // vanilla always sends it — vanilla's own start-riding routine re-broadcasts
                         // the list rather than a delta. Without this packet the client
                         // has no way to know it is aboard and
                         // `lodestone_ecs::vehicle::tick_controlled_vehicle` never
@@ -11891,7 +11891,7 @@ where
                         // `LOCAL_PLAYER_ENTITY_ID`, not `player_entity_id`: this goes
                         // straight to `conn`, this connection's own socket, and the
                         // client only recognises itself among the passengers under
-                        // the constant its own `GameLogin.entity_id` claimed — see
+                        // the constant its own login entity-id field claimed — see
                         // `publish_health`'s call sites for the same rule.
                         // `sim.mount_vehicle` above still records the real
                         // `player_entity_id`, which is what a *future* multi-connection
@@ -11914,7 +11914,7 @@ where
                 // through to `Pass` and do nothing.
                 if let Some(kind) = mobs.with(|sim| sim.minecart_kind(entity_id)) {
                     if kind.is_furnace() {
-                        // `MinecartFurnace.interact` — `addFuel` on coal/charcoal,
+                        // Vanilla's own minecart-furnace interact routine — `addFuel` on coal/charcoal,
                         // `itemStack.consume(1, player)` only on success.
                         let held = inventory.selected_item().map(|stack| stack.item.to_string());
                         if let Some(item) = held {
@@ -11940,7 +11940,7 @@ where
                             }
                         }
                     } else if kind.is_rideable() && !using_secondary_action {
-                        // `Minecart.interact` — `player.startRiding(this)`, the
+                        // Vanilla's own minecart interact routine — `player.startRiding(this)`, the
                         // same `SET_PASSENGERS` handoff the boat arm above uses.
                         let boarded = mobs.with(|sim| sim.mount_minecart(entity_id, player_entity_id));
                         if boarded {
@@ -11959,9 +11959,9 @@ where
                     return Ok(());
                 }
                 let held = inventory.selected_item().map(|stack| stack.item.clone());
-                // Issue #236: vanilla `Mob.interact` runs
+                // Issue #236: vanilla's own mob interact routine runs
                 // `checkAndHandleImportantInteractions` then `super.interact`
-                // (`Entity.interact`'s two leash branches — detach-if-mine,
+                // (vanilla's own entity interact routine's two leash branches — detach-if-mine,
                 // attach-if-holding-a-lead) **before** `mobInteract`'s taming
                 // chain, and a consuming leash branch short-circuits the rest
                 // (`Mob.interact`: `if (superReaction != PASS) return
