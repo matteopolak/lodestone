@@ -226,6 +226,15 @@ pub struct WorldStateHandle {
     /// `teams`/`nbt_storage` for the identical reason. See
     /// `crate::commands::stopwatch_store`'s module doc.
     stopwatches: crate::commands::stopwatch_store::StopwatchHandle,
+    /// This world's plugin-facing crafting-station (anvil/grindstone/
+    /// smithing/loom/stonecutter) result hooks (issue #150), a sibling of
+    /// `state`/`scoreboard`/`teams`/`nbt_storage`/`stopwatches` for the
+    /// identical reason: `WorldStateHandle` is already threaded to
+    /// `crate::server::dispatch_play_packet`, which is where every one of
+    /// those packets is handled, so riding here reaches it with no new
+    /// parameter added to the `serve_connection*` wrappers. See
+    /// `crate::plugin_crafting`'s own module doc.
+    crafting_hooks: crate::plugin_crafting::CraftingStationHooks,
 }
 
 impl WorldStateHandle {
@@ -285,6 +294,14 @@ impl WorldStateHandle {
     #[must_use]
     pub fn stopwatches(&self) -> &crate::commands::stopwatch_store::StopwatchHandle {
         &self.stopwatches
+    }
+
+    /// This world's crafting-station plugin hooks — see [`Self`]'s own field
+    /// doc for why a station evaluation reaches it through here rather than
+    /// through a registry of its own.
+    #[must_use]
+    pub fn crafting_hooks(&self) -> &crate::plugin_crafting::CraftingStationHooks {
+        &self.crafting_hooks
     }
 
     /// Whether this handle and `other` name the same store — for the sharing

@@ -4759,6 +4759,7 @@ async fn open_workstation_screen<T, P>(
     next_window_id: &mut i32,
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
+    hooks: &crate::plugin_crafting::CraftingStationHooks,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -4779,7 +4780,7 @@ where
     .await?;
 
     let cells: Vec<Option<ItemStack>> = inventory.workstation().map(<[_]>::to_vec).unwrap_or_default();
-    let items = read_workstation_menu(&layout, inventory, &cells, station, false);
+    let items = read_workstation_menu(&layout, inventory, &cells, station, false, hooks);
 
     let mut opened = OpenContainer {
         window_id,
@@ -6845,6 +6846,11 @@ async fn apply_use_item_on<T, P, S>(
     // and every click acted on the selected hotbar slot only, so a shulker
     // box (or anything else) held in the off hand could never be placed.
     hand: u8,
+    // Issue #150. Only the narrow crafting-station hook registry, not the
+    // whole `WorldStateHandle` — see `difficulty`'s own comment above for why
+    // this function takes the scalar/handle it actually needs rather than a
+    // handle that would invite a second, unrelated read.
+    hooks: &crate::plugin_crafting::CraftingStationHooks,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -6951,6 +6957,7 @@ where
             next_window_id,
             open_container,
             container_sync,
+            hooks,
         )
         .await;
     }
@@ -8596,6 +8603,10 @@ fn apply_container_clicked<P: ServerProtocol>(
     claimed_cursor: Option<&ItemStack>,
     creative: bool,
     xp_level: i32,
+    // Issue #150. The narrow crafting-station hook registry — see
+    // `apply_use_item_on`'s own `hooks` comment for why this is a targeted
+    // handle rather than the whole `WorldStateHandle`.
+    hooks: &crate::plugin_crafting::CraftingStationHooks,
 ) -> (Option<ServerDirective>, Vec<ItemStack>) {
     // Which menu, and where its non-player slots live.
     let mut open = open_container;
@@ -8626,6 +8637,7 @@ fn apply_container_clicked<P: ServerProtocol>(
                 creative,
                 station,
                 xp_level,
+                hooks,
             );
         }
         let is_enchanting = open
@@ -8824,6 +8836,7 @@ fn read_workstation_menu(
     cells: &[Option<ItemStack>],
     station: Station,
     creative: bool,
+    hooks: &crate::plugin_crafting::CraftingStationHooks,
 ) -> Vec<Option<ItemStack>> {
     let result = workstation_result(
         station,
@@ -8831,6 +8844,7 @@ fn read_workstation_menu(
         creative,
         inventory.pending_rename(),
         inventory.selected_recipe_index(),
+        hooks,
     );
     layout
         .iter()
@@ -8851,21 +8865,39 @@ fn read_workstation_menu(
 /// ([`PlayerInventory::selected_recipe_index`]) — every other station
 /// ignores whichever of the two it does not use, the same "the other
 /// stations ignore it" shape `rename` already had before `selected` existed.
+///
+/// `hooks` is issue #150's plugin seam: the vanilla result computed above is
+/// the *input* to [`CraftingStationHooks::evaluate`], never the final
+/// answer, so a plugin can allow, deny or replace it — see
+/// `crate::plugin_crafting`'s own module doc for why this single function is
+/// the right choke point.
 fn workstation_result(
     station: Station,
     cells: &[Option<ItemStack>],
     creative: bool,
     rename: Option<&str>,
     selected: Option<i32>,
+    hooks: &crate::plugin_crafting::CraftingStationHooks,
 ) -> Option<ItemStack> {
     let get = |i: usize| cells.get(i).and_then(Option::as_ref);
-    match station {
+    let computed = match station {
         Station::Anvil => crate::anvil::compute(get(0), get(1), rename, creative).result,
         Station::Grindstone => crate::anvil::grindstone_result(get(0), get(1)),
         Station::Smithing => crate::smithing::compute(get(0), get(1), get(2)),
         Station::Loom => crate::loom::result(get(0), get(1), get(2), selected),
         Station::Stonecutter => crate::stonecutting::result(get(0), selected),
+    };
+    if hooks.is_empty() {
+        // The common, zero-plugin case: skip building `StationInputs` (which
+        // would otherwise clone every input cell on every menu read) at all.
+        return computed;
     }
+    let inputs = crate::plugin_crafting::StationInputs {
+        station,
+        cells: cells.to_vec(),
+        computed: computed.clone(),
+    };
+    hooks.evaluate(&inputs, computed)
 }
 
 /// [`apply_container_clicked`]'s `MenuKind::ItemCombiner` branch: the anvil,
@@ -8893,16 +8925,17 @@ fn apply_workstation_clicked<P: ServerProtocol>(
     creative: bool,
     station: Station,
     xp_level: i32,
+    hooks: &crate::plugin_crafting::CraftingStationHooks,
 ) -> (Option<ServerDirective>, Vec<ItemStack>) {
     let layout = MenuLayout::item_combiner(station);
     let cells: Vec<Option<ItemStack>> = inventory.workstation().map(<[_]>::to_vec).unwrap_or_default();
     let rename = inventory.pending_rename().map(str::to_owned);
     let selected_recipe_index = inventory.selected_recipe_index();
-    let mut slots = read_workstation_menu(&layout, inventory, &cells, station, creative);
+    let mut slots = read_workstation_menu(&layout, inventory, &cells, station, creative, hooks);
     let before = slots.clone();
     let mut state = inventory.click_state().clone();
     let recipe = |grid_cells: &[Option<ItemStack>]| {
-        workstation_result(station, grid_cells, creative, rename.as_deref(), selected_recipe_index)
+        workstation_result(station, grid_cells, creative, rename.as_deref(), selected_recipe_index, hooks)
     };
     // `AnvilMenu.mayPickup`: `(player.hasInfiniteMaterials() ||
     // player.experienceLevel >= this.cost.get()) && this.cost.get() > 0`.
@@ -8969,7 +9002,7 @@ fn apply_workstation_clicked<P: ServerProtocol>(
         *ws = new_cells.clone();
     }
 
-    let derived = read_workstation_menu(&layout, inventory, &new_cells, station, creative);
+    let derived = read_workstation_menu(&layout, inventory, &new_cells, station, creative, hooks);
 
     let cursor = inventory.click_state().carried.clone();
     let mut agrees = cursor.as_ref() == claimed_cursor;
@@ -9088,6 +9121,7 @@ fn apply_rename_item<P: ServerProtocol>(
     tracked: Option<&mut OpenContainer>,
     name: &str,
     creative: bool,
+    hooks: &crate::plugin_crafting::CraftingStationHooks,
 ) -> Vec<ServerDirective> {
     let Some(tracked) = tracked else { return Vec::new() };
     if !matches!(tracked.shape, MenuKind::ItemCombiner { station: Station::Anvil, .. }) {
@@ -9109,7 +9143,7 @@ fn apply_rename_item<P: ServerProtocol>(
         creative,
     );
     let layout = MenuLayout::item_combiner(Station::Anvil);
-    let items = read_workstation_menu(&layout, inventory, &cells, Station::Anvil, creative);
+    let items = read_workstation_menu(&layout, inventory, &cells, Station::Anvil, creative, hooks);
     let state_id = tracked.next_state_id();
     vec![
         proto.encode_container_content(tracked.window_id, state_id, &items, inventory.click_state().carried.as_ref()),
@@ -9286,6 +9320,7 @@ fn apply_container_button_click<P: ServerProtocol>(
     experience: &mut crate::experience::PlayerExperience,
     creative: bool,
     fresh_seed: i64,
+    hooks: &crate::plugin_crafting::CraftingStationHooks,
 ) -> Vec<ServerDirective> {
     let Some(tracked) = tracked else { return Vec::new() };
     if tracked.window_id != window_id {
@@ -9297,7 +9332,7 @@ fn apply_container_button_click<P: ServerProtocol>(
     // both just pick an offer, with no lapis or XP cost at all. See
     // `apply_workstation_button_click`'s own doc.
     if let MenuKind::ItemCombiner { station: station @ (Station::Loom | Station::Stonecutter), .. } = tracked.shape {
-        return apply_workstation_button_click(proto, inventory, tracked, station, button_id, creative);
+        return apply_workstation_button_click(proto, inventory, tracked, station, button_id, creative, hooks);
     }
     if tracked.shape != MenuKind::Enchanting {
         return Vec::new();
@@ -9399,6 +9434,7 @@ fn apply_workstation_button_click<P: ServerProtocol>(
     station: Station,
     button_id: i32,
     creative: bool,
+    hooks: &crate::plugin_crafting::CraftingStationHooks,
 ) -> Vec<ServerDirective> {
     if station == Station::Stonecutter && inventory.selected_recipe_index() == Some(button_id) {
         return Vec::new();
@@ -9414,7 +9450,7 @@ fn apply_workstation_button_click<P: ServerProtocol>(
     if usize::try_from(button_id).is_ok_and(|index| index < offer_count) {
         inventory.set_selected_recipe_index(Some(button_id));
     }
-    let items = read_workstation_menu(&layout, inventory, &cells, station, creative);
+    let items = read_workstation_menu(&layout, inventory, &cells, station, creative, hooks);
     let state_id = tracked.next_state_id();
     vec![proto.encode_container_content(tracked.window_id, state_id, &items, inventory.click_state().carried.as_ref())]
 }
@@ -11247,6 +11283,7 @@ where
                 *game_mode,
                 enchant_seed_roll,
                 hand,
+                world.crafting_hooks(),
             )
             .await?;
         }
@@ -11355,6 +11392,7 @@ where
                 carried_item.as_ref(),
                 *game_mode == GameMode::Creative,
                 experience.level(),
+                world.crafting_hooks(),
             );
             spawn_dropped_stacks(mobs, *player_pos, *player_rot, drops_rng, dropped);
 
@@ -11621,7 +11659,7 @@ where
         // `apply_rename_item`'s own doc for the gate and what gets resent.
         ServerBound::RenameItem { name } => {
             let creative = *game_mode == GameMode::Creative;
-            for directive in apply_rename_item(proto, inventory, open_container.as_mut(), &name, creative) {
+            for directive in apply_rename_item(proto, inventory, open_container.as_mut(), &name, creative, world.crafting_hooks()) {
                 apply(conn, state, directive).await?;
             }
         }
@@ -11760,6 +11798,7 @@ where
                 experience,
                 creative,
                 fresh_seed,
+                world.crafting_hooks(),
             );
             // A no-op when the click was refused (`experience` untouched, so
             // this resends the same level/points it already holds) — cheaper
@@ -17249,6 +17288,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         assert_eq!(inventory.native(9), None);
         assert_eq!(
@@ -17268,6 +17308,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         assert_eq!(inventory.native(4), Some(&stack("minecraft:stone", 4)));
         assert!(inventory.click_state().carried.is_none());
@@ -17309,6 +17350,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
 
         assert_eq!(
@@ -17343,6 +17385,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         assert_eq!(inventory.native(9), None, "the claim must not be stored");
         assert!(dropped.is_empty());
@@ -17366,6 +17409,7 @@ mod tests {
             Some(&stack("minecraft:stone", 1)),
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         assert_eq!(correction, None, "an honest prediction needs no correction");
     }
@@ -17392,6 +17436,7 @@ mod tests {
                 None,
                 false,
                 i32::MAX,
+                &crate::plugin_crafting::CraftingStationHooks::default(),
             );
         }
         assert_eq!(
@@ -17412,6 +17457,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         assert_eq!(
             inventory
@@ -17463,6 +17509,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
 
         let carried = inventory.click_state().carried.as_ref().expect("the repaired pickaxe must be on the cursor");
@@ -17542,6 +17589,7 @@ mod tests {
                 None,
                 false,
                 0,
+                &crate::plugin_crafting::CraftingStationHooks::default(),
             );
             assert!(
                 inventory.click_state().carried.is_none(),
@@ -17570,6 +17618,7 @@ mod tests {
                 None,
                 false,
                 cost,
+                &crate::plugin_crafting::CraftingStationHooks::default(),
             );
             assert!(
                 inventory.click_state().carried.is_some(),
@@ -17595,6 +17644,7 @@ mod tests {
                 None,
                 true,
                 0,
+                &crate::plugin_crafting::CraftingStationHooks::default(),
             );
             assert!(
                 inventory.click_state().carried.is_some(),
@@ -17641,6 +17691,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
 
         let carried = inventory.click_state().carried.as_ref().expect("must take the renamed sword");
@@ -17692,6 +17743,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
 
         let carried = inventory.click_state().carried.as_ref().expect("must take a plain sword back");
@@ -17734,6 +17786,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
 
         let carried = inventory.click_state().carried.as_ref().expect("must take the upgraded sword");
@@ -17762,7 +17815,14 @@ mod tests {
             state_id: 0,
         };
 
-        let directives = apply_rename_item(&ContainerTagProto, &mut inventory, Some(&mut open), "Excalibur", false);
+        let directives = apply_rename_item(
+            &ContainerTagProto,
+            &mut inventory,
+            Some(&mut open),
+            "Excalibur",
+            false,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
+        );
         assert_eq!(directives.len(), 2, "the refreshed content, then the cost data slot");
         assert_eq!(inventory.pending_rename(), Some("Excalibur"));
         match &directives[1] {
@@ -17773,7 +17833,14 @@ mod tests {
             other => panic!("expected a Send directive, got {other:?}"),
         }
 
-        let again = apply_rename_item(&ContainerTagProto, &mut inventory, Some(&mut open), "Excalibur", false);
+        let again = apply_rename_item(
+            &ContainerTagProto,
+            &mut inventory,
+            Some(&mut open),
+            "Excalibur",
+            false,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
+        );
         assert!(again.is_empty(), "an unchanged name must not resend anything");
     }
 
@@ -17843,6 +17910,7 @@ mod tests {
             &mut experience,
             false,
             999,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
 
         assert!(!directives.is_empty(), "a successful enchant must resend the menu");
@@ -17870,6 +17938,7 @@ mod tests {
             &mut experience,
             false,
             1,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         assert!(refused.is_empty(), "an out-of-range button id must be refused");
     }
@@ -17932,6 +18001,7 @@ mod tests {
             &mut crate::experience::PlayerExperience::default(),
             false,
             0,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         assert!(!directives.is_empty(), "a valid selection must resend the menu");
         assert_eq!(inventory.selected_recipe_index(), Some(1));
@@ -17950,6 +18020,7 @@ mod tests {
             None,
             false,
             0,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
 
         let taken = inventory
@@ -18003,6 +18074,7 @@ mod tests {
             None,
             false,
             0,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
 
         let taken = inventory.click_state().carried.as_ref().expect("the take must produce a result");
@@ -18022,6 +18094,208 @@ mod tests {
             cells[2].as_ref().map(|s| s.count),
             Some(1),
             "the pattern item must survive the take, so it can stamp a second banner"
+        );
+    }
+
+    /// Two test-local stand-ins reproducing `lodestone-crafting-warden`'s
+    /// real `SmithingSwordBan`/`AnvilBlessing` logic exactly, kept local
+    /// rather than a dev-dependency on that crate.
+    ///
+    /// A dev-dependency depending back on this crate would compile this
+    /// crate's own `--lib` unit-test binary *twice* — once as the unit
+    /// under test, once through the plugin's normal dependency edge — which
+    /// produces two incompatible `CraftingStationHooks` types sharing one
+    /// name (`error[E0308]: mismatched types … multiple different versions
+    /// of crate lodestone_server in the dependency graph`). An integration
+    /// test under `tests/*.rs` would avoid that (it links this crate's lib
+    /// once, normally), but `apply_container_clicked`/
+    /// `apply_workstation_clicked`/`apply_container_button_click`/
+    /// `apply_rename_item` are module-private, so a test proving they
+    /// consult a registered hook can only live inside this module. The
+    /// external crate's own unit tests call `on_prepare` directly to prove
+    /// its logic; these two prove the opposite half — that production
+    /// actually asks the question — by driving the real dispatch below.
+    struct WiringProofDenySwordUpgrade;
+    impl crate::plugin_crafting::CraftingStationHook for WiringProofDenySwordUpgrade {
+        fn on_prepare(&self, inputs: &crate::plugin_crafting::StationInputs) -> crate::plugin_crafting::StationVerdict {
+            if inputs.station != Station::Smithing {
+                return crate::plugin_crafting::StationVerdict::Allow;
+            }
+            let base = inputs.cells.get(1).and_then(Option::as_ref);
+            if base.is_some_and(|item| item.item.to_string() == "minecraft:diamond_sword") {
+                crate::plugin_crafting::StationVerdict::Deny
+            } else {
+                crate::plugin_crafting::StationVerdict::Allow
+            }
+        }
+    }
+
+    struct WiringProofBlessAnvilName;
+    impl crate::plugin_crafting::CraftingStationHook for WiringProofBlessAnvilName {
+        fn on_prepare(&self, inputs: &crate::plugin_crafting::StationInputs) -> crate::plugin_crafting::StationVerdict {
+            if inputs.station != Station::Anvil {
+                return crate::plugin_crafting::StationVerdict::Allow;
+            }
+            let Some(computed) = inputs.computed.clone() else {
+                return crate::plugin_crafting::StationVerdict::Allow;
+            };
+            let Some(name) = computed.components.custom_name.clone() else {
+                return crate::plugin_crafting::StationVerdict::Allow;
+            };
+            let plain = name.to_plain_string();
+            if plain.starts_with("[Blessed] ") {
+                return crate::plugin_crafting::StationVerdict::Allow;
+            }
+            let mut blessed = computed;
+            blessed.components.custom_name = Some(lodestone_model::text::Text::literal(format!("[Blessed] {plain}")));
+            crate::plugin_crafting::StationVerdict::Replace(blessed)
+        }
+    }
+
+    /// Issue #150's plugin seam, end to end through the real production
+    /// dispatch: [`WiringProofDenySwordUpgrade`] — reproducing
+    /// `lodestone-crafting-warden`'s real, shipped `SmithingSwordBan` logic,
+    /// registered exactly the way a host would register a plugin's hook,
+    /// never called directly — vetoes one specific netherite upgrade by
+    /// driving the *actual* `apply_container_clicked` →
+    /// `apply_workstation_clicked` → `workstation_result` chain a player's
+    /// own smithing-table click goes through. A test calling `on_prepare`
+    /// directly (as `lodestone-crafting-warden`'s own unit tests do, for its
+    /// logic) would be the closed loop `CLAUDE.md` warns about: it would
+    /// prove the hook's answer is correct, never that production asks it
+    /// the question.
+    #[test]
+    fn a_registered_plugin_hook_vetoes_one_smithing_upgrade_and_allows_a_sibling_one() {
+        let hooks = crate::plugin_crafting::CraftingStationHooks::new();
+        hooks.register(0, std::sync::Arc::new(WiringProofDenySwordUpgrade));
+        let block_entities = BlockEntityHandle::new();
+
+        let mut denied = PlayerInventory::new();
+        denied.open_workstation(3);
+        if let Some(ws) = denied.workstation_mut() {
+            ws[0] = Some(stack("minecraft:netherite_upgrade_smithing_template", 1));
+            ws[1] = Some(stack("minecraft:diamond_sword", 1));
+            ws[2] = Some(stack("minecraft:netherite_ingot", 1));
+        }
+        let mut open_denied = OpenContainer {
+            window_id: 20,
+            pos: BlockPos::new(0, 0, 0),
+            shape: MenuKind::ItemCombiner { inputs: 3, station: Station::Smithing },
+            container_size: 4,
+            state_id: 0,
+        };
+        apply_container_clicked(
+            &ContainerTagProto,
+            &mut denied,
+            &block_entities,
+            Some(&mut open_denied),
+            20,
+            // Slot `inputs` (3) is the result slot.
+            Click { slot: 3, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
+            0,
+            &hooks,
+        );
+        assert!(
+            denied.click_state().carried.is_none(),
+            "the registered SmithingSwordBan hook must veto the sword upgrade, so nothing is taken"
+        );
+        let denied_cells = denied.workstation().expect("still open");
+        assert!(denied_cells[1].is_some(), "a denied take must leave the base item in place");
+
+        // Positive control, the same dispatch with a pickaxe base instead of
+        // a sword: this must succeed, proving the veto is scoped to the one
+        // named item rather than blocking every smithing take.
+        let mut allowed = PlayerInventory::new();
+        allowed.open_workstation(3);
+        if let Some(ws) = allowed.workstation_mut() {
+            ws[0] = Some(stack("minecraft:netherite_upgrade_smithing_template", 1));
+            ws[1] = Some(stack("minecraft:diamond_pickaxe", 1));
+            ws[2] = Some(stack("minecraft:netherite_ingot", 1));
+        }
+        let mut open_allowed = OpenContainer {
+            window_id: 21,
+            pos: BlockPos::new(0, 0, 0),
+            shape: MenuKind::ItemCombiner { inputs: 3, station: Station::Smithing },
+            container_size: 4,
+            state_id: 0,
+        };
+        apply_container_clicked(
+            &ContainerTagProto,
+            &mut allowed,
+            &block_entities,
+            Some(&mut open_allowed),
+            21,
+            Click { slot: 3, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
+            0,
+            &hooks,
+        );
+        let taken = allowed
+            .click_state()
+            .carried
+            .as_ref()
+            .expect("the pickaxe upgrade must be allowed through unchanged");
+        assert_eq!(taken.item.to_string(), "minecraft:netherite_pickaxe");
+    }
+
+    /// Issue #150's plugin seam, the `Replace` half: [`WiringProofBlessAnvilName`]
+    /// — reproducing `lodestone-crafting-warden`'s real, shipped
+    /// `AnvilBlessing` logic — tweaks a real anvil rename's result, driven
+    /// through the actual `apply_rename_item` → `apply_container_clicked` →
+    /// `apply_workstation_clicked` → `workstation_result` chain, exactly the
+    /// packets a real `RenameItem` then a real take produce, never a
+    /// hand-rolled shortcut.
+    #[test]
+    fn a_registered_plugin_hook_blesses_a_real_anvil_rename_take() {
+        let hooks = crate::plugin_crafting::CraftingStationHooks::new();
+        hooks.register(0, std::sync::Arc::new(WiringProofBlessAnvilName));
+
+        let mut inventory = PlayerInventory::new();
+        inventory.open_workstation(2);
+        if let Some(ws) = inventory.workstation_mut() {
+            ws[0] = Some(stack("minecraft:diamond_sword", 1));
+        }
+        let mut open = OpenContainer {
+            window_id: 22,
+            pos: BlockPos::new(0, 0, 0),
+            shape: MenuKind::ItemCombiner { inputs: 2, station: Station::Anvil },
+            container_size: 3,
+            state_id: 0,
+        };
+
+        apply_rename_item(&ContainerTagProto, &mut inventory, Some(&mut open), "Excalibur", false, &hooks);
+        assert_eq!(inventory.pending_rename(), Some("Excalibur"));
+
+        let block_entities = BlockEntityHandle::new();
+        apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            Some(&mut open),
+            22,
+            // Slot `inputs` (2) is the result slot.
+            Click { slot: 2, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
+            i32::MAX,
+            &hooks,
+        );
+        let taken = inventory
+            .click_state()
+            .carried
+            .as_ref()
+            .expect("the rename take must succeed");
+        let name = taken.components.custom_name.as_ref().expect("still named");
+        assert_eq!(
+            name.to_plain_string(),
+            "[Blessed] Excalibur",
+            "the registered AnvilBlessing hook must have tweaked the real rename result"
         );
     }
 
@@ -18050,6 +18324,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         assert_eq!(inventory.native(9), None);
 
@@ -18065,6 +18340,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         let furnace_fuel = block_entities.with(|reg| match reg.get(pos) {
             Some(BlockEntity::Furnace(f)) => f.fuel().cloned(),
@@ -18230,6 +18506,7 @@ mod tests {
                 None,
                 false,
                 i32::MAX,
+                &crate::plugin_crafting::CraftingStationHooks::default(),
             );
         }
         assert_eq!(
@@ -18284,6 +18561,7 @@ mod tests {
                     .as_ref(),
                 false,
                 i32::MAX,
+                &crate::plugin_crafting::CraftingStationHooks::default(),
             );
             assert!(
                 matches!(&correction, Some(ServerDirective::Send { packet_id, .. }) if *packet_id == CONTENT),
@@ -18308,6 +18586,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         assert!(dropped.is_empty());
         assert_eq!(
@@ -18346,6 +18625,7 @@ mod tests {
             Some(&stack("minecraft:crafting_table", 1)),
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         assert_eq!(
             correction, None,
@@ -18396,6 +18676,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
         assert!(dropped.is_empty(), "36 empty slots have room for 8 chests");
         let chests: u32 = (0..crate::inventory::PLAYER_NATIVE_SIZE)
@@ -18443,6 +18724,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
 
         assert!(dropped.is_empty());
@@ -18490,6 +18772,7 @@ mod tests {
             None,
             false,
             i32::MAX,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
         );
 
         let furnace_input = block_entities.with(|reg| match reg.get(pos) {
