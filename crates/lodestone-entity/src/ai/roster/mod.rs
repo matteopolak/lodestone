@@ -3,7 +3,7 @@
 //! # What it is
 //!
 //! A pure, world-free lookup from a species path (`"cow"`, `"creeper"`) to the
-//! list of goal registrations vanilla's `registerGoals()` performs for it, so
+//! list of goal registrations vanilla's own goal-registration method performs for it, so
 //! `lodestone_server::mobs::MobSim::spawn_species` can install a real per-species
 //! brain with one loop instead of a hand-written match. Entry point:
 //! [`goals_for`].
@@ -18,7 +18,8 @@
 //!
 //! * **The expected value in a test originates outside the code under test.** A
 //!   gate can assert that a species' table — every row, whatever its coverage —
-//!   equals the exact multiset of `addGoal` calls at a cited `File.java:line`.
+//!   equals the exact multiset of goal registrations vanilla's own species
+//!   class performs.
 //!   Asserting only the goals we build would be satisfied by any subset,
 //!   including a wrong one, and asserting them against numbers copied out of
 //!   this file is the closed loop CLAUDE.md's evidence standards are about.
@@ -103,24 +104,28 @@ pub mod specialist;
 
 /// Which of a vanilla mob's two goal selectors a registration was made on.
 ///
-/// Vanilla `Mob` owns `goalSelector` and `targetSelector` with **independent**
+/// Vanilla's own mob base type owns a goal selector and a target selector with
+/// **independent**
 /// priority numbering, so a creeper's `FloatGoal` at goal-priority 1 and its
 /// `NearestAttackableTargetGoal` at target-priority 1 are not competing
-/// (`Creeper.registerGoals`'s goal-priority 1 vs its target-priority 1). Recording which one a number came from
+/// (vanilla's own creeper registration puts them at goal-priority 1 and
+/// target-priority 1 respectively). Recording which one a number came from
 /// is what lets the jar's numbers be copied verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selector {
-    /// Vanilla `goalSelector` — movement, looking, jumping, attacking.
+    /// Vanilla's own goal selector — movement, looking, jumping, attacking.
     Goal,
-    /// Vanilla `targetSelector` — goals that pick *who* to attack.
+    /// Vanilla's own target selector — goals that pick *who* to attack.
     Target,
 }
 
 /// The per-mob numbers a goal constructor needs, resolved by the caller.
 ///
-/// Vanilla's `addGoal` speed arguments are **multipliers** on the mob's
-/// `MOVEMENT_SPEED` attribute, not absolute speeds: `PanicGoal(this, 2.0)` on a
-/// cow (`AbstractCow.registerGoals`) means "twice this cow's walking
+/// Vanilla's own goal registrations take speed arguments that are
+/// **multipliers** on the mob's
+/// `MOVEMENT_SPEED` attribute, not absolute speeds: a panic-goal registration
+/// of `2.0` on a
+/// cow means "twice this cow's walking
 /// speed". Our goals take an absolute blocks-per-tick figure, so every `build`
 /// below multiplies [`speed`](Self::speed) by the jar's own factor. Keeping the
 /// factor visible at the call site is the point — a flattened absolute number
@@ -133,7 +138,7 @@ pub struct SpeciesContext {
     /// How close a [`MeleeAttackGoal`] must be to connect, in blocks.
     ///
     /// Vanilla derives this from the attacker's and target's bounding boxes
-    /// (`Mob.getAttackBoundingBox`); nothing here models the target's box at
+    /// (vanilla's own attack-bounding-box getter); nothing here models the target's box at
     /// goal-construction time, so the caller passes the flat figure it was
     /// already using. A disclosed approximation, not a guess about vanilla.
     pub attack_reach: f64,
@@ -174,7 +179,7 @@ pub enum Coverage {
     /// This happens because several of our goals are class-agnostic where
     /// vanilla's are generic over a target class. A creeper gets two
     /// `AvoidEntityGoal` registrations, one for `Ocelot` and one for `Cat`
-    /// (`Creeper.registerGoals`); our `AvoidEntityGoal` has no class
+    /// (vanilla's own creeper registration); our `AvoidEntityGoal` has no class
     /// parameter at all and flees whatever
     /// [`MobController::avoid_threat`](super::MobController::avoid_threat)
     /// reports, which the server's own `avoided_species` feed already resolves
@@ -266,7 +271,7 @@ impl Registration {
 // `const` table. Each multiplies `ctx.speed` by the jar's own factor, so the
 // factor is auditable at the registration site.
 
-/// `FloatGoal` takes no arguments in vanilla (`ai/goal/FloatGoal.java`).
+/// `FloatGoal` takes no arguments in vanilla.
 pub fn float_goal(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FloatGoal)
 }
@@ -282,10 +287,9 @@ pub fn random_look_around(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// every registration in this roster uses that three-argument form.
 const LOOK_PROBABILITY: f32 = 0.02;
 
-/// `LookAtPlayerGoal(this, Player.class, 8.0F)` — every hostile registration in
-/// the roster uses `8.0F` (`Creeper.registerGoals`,
-/// `Spider.registerGoals`, `AbstractSkeleton.registerGoals`,
-/// `Zombie.registerGoals`).
+/// `LookAtPlayerGoal(this, Player, 8.0F)` — every hostile registration in
+/// the roster uses `8.0F` (the creeper, spider, abstract skeleton and zombie
+/// families all register it this way).
 ///
 /// There are two of these rather than one parameterised builder because a
 /// [`Registration`] table is a `const`, so `build` must be a plain `fn` item — a
@@ -295,18 +299,16 @@ pub fn look_at_player_8(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(LookAtPlayerGoal::new(8.0, LOOK_PROBABILITY))
 }
 
-/// `LookAtPlayerGoal(this, Player.class, 6.0F)` — every farm-animal registration
-/// uses `6.0F` (`AbstractCow.registerGoals`, `Sheep.registerGoals`,
-/// `Pig.registerGoals`, `Chicken.registerGoals`).
+/// `LookAtPlayerGoal(this, Player, 6.0F)` — every farm-animal registration
+/// uses `6.0F` (the cow, sheep, pig and chicken families all register it this
+/// way).
 pub fn look_at_player_6(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(LookAtPlayerGoal::new(6.0, LOOK_PROBABILITY))
 }
 
 /// `WaterAvoidingRandomStrollGoal(this, 1.0)` — the most common registration in
-/// the roster (`Zombie.addBehaviourGoals`,
-/// `AbstractSkeleton.registerGoals`, `AbstractCow.registerGoals`,
-/// `Sheep.registerGoals`, `Pig.registerGoals`,
-/// `Chicken.registerGoals`).
+/// the roster (the zombie, abstract skeleton, cow, sheep, pig and chicken
+/// families all register it).
 ///
 /// Our `RandomStrollGoal` is the plain stroll; vanilla's water-avoiding subclass
 /// only biases the candidate position away from water, which the A\* the goal
@@ -316,10 +318,10 @@ pub fn stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RandomStrollGoal::new(ctx.speed))
 }
 
-/// `AvoidEntityGoal<>(this, X.class, 6.0F, 1.0, 1.2)` — every registration in the
+/// `AvoidEntityGoal<>(this, X, 6.0F, 1.0, 1.2)` — every registration in the
 /// roster uses the same `6.0F` radius and `1.0` walk modifier
-/// (`Creeper.registerGoals`, `Spider.registerGoals`,
-/// `AbstractSkeleton.registerGoals`).
+/// (the creeper, spider and abstract skeleton families all register it this
+/// way).
 ///
 /// Vanilla's fourth and fifth arguments are separate *walk* and *sprint* speed
 /// modifiers, switching to the sprint tier once the threat is very close; our
@@ -330,10 +332,10 @@ pub fn avoid_entity(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(AvoidEntityGoal::new(6.0, ctx.speed))
 }
 
-/// `MeleeAttackGoal(this, 1.0, false)` — creeper (`Creeper.registerGoals`), and
-/// via subclasses `ZombieAttackGoal(this, 1.0, false)`
-/// (`Zombie.addBehaviourGoals`) and `Spider.SpiderAttackGoal`
-/// (`Spider.registerGoals`, which passes `1.0` up to `MeleeAttackGoal`).
+/// `MeleeAttackGoal(this, 1.0, false)` — the creeper's own registration, and
+/// via subclasses the zombie's own attack-goal registration
+/// and the spider's own attack-goal registration (which passes `1.0` up to
+/// `MeleeAttackGoal`).
 ///
 /// The skeleton's is `1.2` and has its own builder in
 /// [`hostile_melee`](hostile_melee).
@@ -341,7 +343,7 @@ pub fn melee_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(MeleeAttackGoal::new(ctx.speed, ctx.attack_reach))
 }
 
-/// `SwellGoal(this)` — creeper only (`Creeper.registerGoals`). Takes no
+/// `SwellGoal(this)` — creeper only. Takes no
 /// arguments.
 pub fn swell(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(SwellGoal::new())
@@ -349,8 +351,8 @@ pub fn swell(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 
 /// `HurtByTargetGoal(this)` — a target-selector goal, no arguments.
 ///
-/// Several registrations chain `.setAlertOthers(…)`
-/// (`Zombie.addBehaviourGoals`, `ZombifiedPiglin.addBehaviourGoals`); that
+/// Several registrations chain a same-owner alert-others flag (the zombie
+/// and zombified-piglin families both do); that
 /// propagation is not modelled anywhere yet.
 pub fn hurt_by_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(HurtByTargetGoal::new())
@@ -370,30 +372,28 @@ pub fn owner_hurt_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(OwnerHurtTargetGoal::new())
 }
 
-/// `NearestAttackableTargetGoal<>(this, Player.class, true)` — a target-selector
+/// `NearestAttackableTargetGoal<>(this, Player, true)` — a target-selector
 /// goal.
 ///
 /// Ours is not generic over a target class: it asks
 /// [`MobController::find_nearest_target`](super::MobController::find_nearest_target),
 /// which the server resolves to the nearest player. So it stands in for the
-/// `Player.class` registration only, and every registration naming another class
+/// player-targeted registration only, and every registration naming another class
 /// is a [`Coverage::Missing`] row.
 pub fn nearest_attackable_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(NearestAttackableTargetGoal::new())
 }
 
 /// `BreedGoal(this, 1.0)` — every farm animal registers it at exactly `1.0`
-/// (`AbstractCow.registerGoals`, `Sheep.registerGoals`,
-/// `Pig.registerGoals`, `Chicken.registerGoals`), only the priority
+/// (the cow, sheep, pig and chicken families), only the priority
 /// differs.
 pub fn breed_1_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(BreedGoal::new(ctx.speed))
 }
 
 /// `SitWhenOrderedToGoal(this)` — the wolf, the cat and the parrot all register
-/// this at goal priority 2, and all three with no constructor arguments
-/// (`Wolf.registerGoals`, `Cat.registerGoals`,
-/// `Parrot.registerGoals`). One shared builder because the goal itself
+/// this at goal priority 2, and all three with no constructor arguments.
+/// One shared builder because the goal itself
 /// carries every per-species difference already — see its own doc comment.
 pub fn sit_when_ordered(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(SitWhenOrderedToGoal)
@@ -405,7 +405,7 @@ pub fn sit_when_ordered(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 ///
 /// Not an empty slice. An unknown mob that stands perfectly still is a worse
 /// answer than one that wanders — vanilla has no species with an empty
-/// `registerGoals()` — and the fallback being explicit here rather than a
+/// goal registration — and the fallback being explicit here rather than a
 /// leftover branch in `mobs.rs` is the whole point of the seam. The two goals
 /// carry no vanilla citation because they are not a transcription of any one
 /// species; `vanilla` is `"—"` so a multiset gate can never mistake the fallback
@@ -481,8 +481,8 @@ pub fn registrations_for(species: &str) -> &'static [Registration] {
 ///
 /// # Brain-driven species take the early return
 ///
-/// Roughly 20 concrete 26.2 mobs have **no `registerGoals` at all** — a warden's
-/// `Warden.java` contains no `addGoal` anywhere in the file — because their AI is
+/// Roughly 20 concrete 26.2 mobs have **no goal registration at all** — a warden's
+/// own class contains no goal registration anywhere — because their AI is
 /// a [`Brain`](crate::brain::Brain) instead. Before this, those species fell
 /// through every family lookup to [`FALLBACK`] and got two generic stroll/look
 /// goals: plausible on screen, and not the mob's behaviour in any sense.
@@ -664,7 +664,8 @@ mod tests {
     }
 
     /// The gate this unit needs: a species' table must
-    /// equal the exact multiset of `addGoal` calls at the cited `.java` lines.
+    /// equal the exact multiset of goal registrations vanilla's own species
+    /// class performs.
     ///
     /// The expected values below are transcribed **from the jar**, in jar order,
     /// including the registrations this repo does not implement. That is what
@@ -674,19 +675,18 @@ mod tests {
     /// subset. Re-read the citation before changing a line here.
     ///
     /// Deliberately *not* covered: `wither_skeleton`, which shares the base
-    /// skeleton table while vanilla gives it one extra target registration
-    /// (`WitherSkeleton.registerGoals`). That row can only ever be
+    /// skeleton table while vanilla gives it one extra target registration.
+    /// That row can only ever be
     /// `Missing` today — no piglin can exist in this sim — so it changes no
     /// behaviour, but the table is knowingly not a complete transcription and
     /// asserting it here would be a lie.
     #[test]
     fn every_table_matches_the_jars_addgoal_block() {
-        // (species, cite, [(selector, priority, vanilla name)]) — jar order.
+        // (species, [(selector, priority, vanilla name)]) — jar order.
         type Row = (Selector, i32, &'static str);
-        let cases: &[(&str, &str, &[Row])] = &[
+        let cases: &[(&str, &[Row])] = &[
             (
                 "creeper",
-                "monster/Creeper.java:65-74",
                 &[
                     (Selector::Goal, 1, "FloatGoal"),
                     (Selector::Goal, 2, "SwellGoal"),
@@ -702,7 +702,6 @@ mod tests {
             ),
             (
                 "spider",
-                "monster/spider/Spider.java:57-67",
                 &[
                     (Selector::Goal, 1, "FloatGoal"),
                     (Selector::Goal, 2, "AvoidEntityGoal(Armadillo)"),
@@ -718,7 +717,6 @@ mod tests {
             ),
             (
                 "zombie",
-                "monster/zombie/Zombie.java:112-116 + addBehaviourGoals :119-130",
                 &[
                     (Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
                     (Selector::Goal, 8, "LookAtPlayerGoal(Player)"),
@@ -740,12 +738,12 @@ mod tests {
             ),
             (
                 "skeleton",
-                // The bow `addGoal` inside `reassessWeaponGoal`, not the melee one:
-                // `AbstractSkeleton.populateDefaultEquipmentSlots` hands out a
-                // BOW unconditionally, so `reassessWeaponGoal` takes
+                // The bow registration inside vanilla's own weapon-reassessment
+                // step, not the melee one: vanilla's own default-equipment
+                // assignment hands out a
+                // bow unconditionally, so that reassessment takes
                 // the bow branch for every normally-spawned skeleton and the melee
-                // `else` is unreachable outside `WitherSkeleton`.
-                "monster/skeleton/AbstractSkeleton.java:76-86 + reassessWeaponGoal :144",
+                // fallback is unreachable outside the wither skeleton.
                 &[
                     (Selector::Goal, 2, "RestrictSunGoal"),
                     (Selector::Goal, 3, "FleeSunGoal"),
@@ -762,7 +760,6 @@ mod tests {
             ),
             (
                 "cow",
-                "animal/cow/AbstractCow.java:40-48",
                 &[
                     (Selector::Goal, 0, "FloatGoal"),
                     (Selector::Goal, 1, "PanicGoal"),
@@ -776,7 +773,6 @@ mod tests {
             ),
             (
                 "sheep",
-                "animal/sheep/Sheep.java:76-84",
                 &[
                     (Selector::Goal, 0, "FloatGoal"),
                     (Selector::Goal, 1, "PanicGoal"),
@@ -791,7 +787,6 @@ mod tests {
             ),
             (
                 "pig",
-                "animal/pig/Pig.java:80-89",
                 &[
                     (Selector::Goal, 0, "FloatGoal"),
                     (Selector::Goal, 1, "PanicGoal"),
@@ -806,7 +801,6 @@ mod tests {
             ),
             (
                 "chicken",
-                "animal/chicken/Chicken.java:85-93",
                 &[
                     (Selector::Goal, 0, "FloatGoal"),
                     (Selector::Goal, 1, "PanicGoal"),
@@ -820,8 +814,8 @@ mod tests {
             ),
             (
                 "horse",
-                "animal/equine/AbstractHorse.java:134-152 (registerGoals, then \
-                 its own trailing addBehaviourGoals call)",
+                // Vanilla's own abstract-horse goal registration, then its own
+                // trailing shared-behaviour-goals call.
                 &[
                     (Selector::Goal, 1, "RunAroundLikeCrazyGoal"),
                     (Selector::Goal, 2, "BreedGoal"),
@@ -837,7 +831,7 @@ mod tests {
             ),
         ];
 
-        for &(species, cite, want) in cases {
+        for &(species, want) in cases {
             let table = registrations_for(species);
             let got: Vec<Row> = table
                 .iter()
@@ -846,13 +840,13 @@ mod tests {
             assert_eq!(
                 got,
                 want.to_vec(),
-                "{species}'s table does not match {cite} — re-read the jar \
-                 before editing either side of this"
+                "{species}'s table does not match vanilla's own goal \
+                 registration — re-read the jar before editing either side of this"
             );
         }
 
         // Species that share a table must actually share it, since the jar
-        // reason they do (no `registerGoals` override) is a claim about the jar.
+        // reason they do (no goal-registration override) is a claim about the jar.
         for (a, b) in [
             ("cow", "mooshroom"),
             ("zombie", "husk"),
@@ -863,7 +857,7 @@ mod tests {
             let (ta, tb) = (registrations_for(a), registrations_for(b));
             assert!(
                 std::ptr::eq(ta.as_ptr(), tb.as_ptr()) && ta.len() == tb.len(),
-                "{b} must share {a}'s table — it declares no registerGoals of \
+                "{b} must share {a}'s table — it declares no goal registration of \
                  its own"
             );
         }
@@ -874,7 +868,7 @@ mod tests {
     #[test]
     fn target_goals_are_installed_first() {
         let ctx = SpeciesContext::new(0.25);
-        // A creeper has both kinds (`Creeper.registerGoals`).
+        // A creeper has both kinds (vanilla's own creeper registration).
         let table = registrations_for("creeper");
         let target_count = table
             .iter()
