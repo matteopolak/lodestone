@@ -36,7 +36,7 @@ impl CommandTree {
     /// among them, which only differs from "first success wins" when a
     /// single node has more than one *argument* child that both accept the
     /// same text. None of this crate's tests, nor any tree its three named
-    /// consumers are expected to build (#46, #48, #118), do that.
+    /// consumers are expected to build, do that.
     ///
     /// A matched node followed by more input must be followed by exactly one
     /// `' '` (Brigadier's `ARGUMENT_SEPARATOR_CHAR`), which is then consumed;
@@ -47,7 +47,7 @@ impl CommandTree {
         self.parse_filtered(input, &AllowAll)
     }
 
-    /// [`CommandTree::parse`], with per-node permission gating (issue #122).
+    /// [`CommandTree::parse`], with per-node permission gating.
     ///
     /// A node whose [`crate::Node::permission`] `filter` rejects is treated as
     /// absent, together with its whole subtree — vanilla's

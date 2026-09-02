@@ -58,15 +58,16 @@ pub enum ParseErrorKind {
     /// crate doc's "known simplifications" section and `tests/brigadier_spec.rs`.
     RedirectCycle,
     /// A token matched a node the [`crate::PermissionFilter`] denied, and
-    /// nothing else in that position could take it (issue #122).
+    /// nothing else in that position could take it.
     ///
     /// Deliberately distinct from [`ParseErrorKind::UnknownCommand`]: Bukkit
     /// answers a permission-gated command with "you do not have permission",
     /// so a caller needs to be able to tell "no such command" from "not
     /// yours". Note this has **no** counterpart in Brigadier's
     /// `BuiltInExceptions` — vanilla never needs it, because a node the sender
-    /// cannot use was already pruned out of the tree they were sent
-    /// (`Commands.fillUsableCommands`), so by the time text arrives the node
+    /// cannot use was already pruned out of the tree they were sent by
+    /// vanilla's own usable-command-tree builder, so by the time text
+    /// arrives the node
     /// genuinely does not exist for them. We keep one tree and gate at parse
     /// time, so we need the distinction upstream does not.
     ///

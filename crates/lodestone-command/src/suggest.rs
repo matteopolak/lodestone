@@ -29,7 +29,7 @@ impl CommandTree {
         self.suggest_filtered(input, &AllowAll)
     }
 
-    /// [`CommandTree::suggest`], with per-node permission gating (issue #122).
+    /// [`CommandTree::suggest`], with per-node permission gating.
     ///
     /// A node the filter denies is **silently absent** from the results, and so
     /// is everything beneath it — the player is told nothing about a branch
