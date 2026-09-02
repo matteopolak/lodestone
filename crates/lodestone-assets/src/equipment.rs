@@ -18,14 +18,12 @@
 //! # The two inflations (this is the detail ports get wrong)
 //!
 //! Vanilla bakes the humanoid armour mesh set **twice**, at two different
-//! `CubeDeformation`s, and hands the *inner* one to the legs slot only
-//! (`LayerDefinitions`'s `OUTER_ARMOR_DEFORMATION`/`INNER_ARMOR_DEFORMATION`,
-//! consumed by `HumanoidModel.createArmorMeshSet`):
+//! cube-deformation amounts, and hands the *inner* one to the legs slot only
+//! (vanilla's own outer/inner armour-deformation constants,
+//! consumed by its own armour-mesh-set construction step):
 //!
-//! ```text
-//! OUTER_ARMOR_DEFORMATION = new CubeDeformation(1.0F)   // head, chest, feet
-//! INNER_ARMOR_DEFORMATION = new CubeDeformation(0.5F)   // legs
-//! ```
+//! roughly, an outer deformation of `1.0F` for head, chest, feet, and an inner
+//! deformation of `0.5F` for legs.
 //!
 //! A single-inflation port makes leggings clip through the chestplate that has
 //! to sit outside them — leggings are the piece drawn *closest* to the body, and
@@ -34,15 +32,16 @@
 //! There are two further per-cube adjustments on top of the slot inflation, both
 //! read from source rather than eyeballed:
 //!
-//! * **legs are `-0.1` texels thinner than their slot** — `HumanoidModel.createBaseArmorMesh`
-//!   re-adds `right_leg`/`left_leg` with `g.extend(-0.1F)`
-//!   (the constant is `HumanoidModel.LEGGINGS_OVERLAY_SCALE`).
+//! * **legs are `-0.1` texels thinner than their slot** — vanilla's own
+//!   base-armor-mesh construction step
+//!   re-adds `right_leg`/`left_leg` with an extra `-0.1F` of deformation
+//!   (vanilla's own leggings-overlay-scale constant).
 //!   So the *effective* inflations are: head `1.0`, chest `1.0`, legs-slot legs
 //!   `0.4`, legs-slot body `0.5`, feet `0.9`.
 //! * **the helmet keeps `head`'s `hat` child at `+0.5`** — the head slot uses
-//!   `retainPartsAndChildren({"head"})`, which retains a part *with its
-//!   children*, and `hat` is authored at `g.extend(0.5F)` in
-//!   `HumanoidModel.createMesh`. Measured against 26.2's own sheets, the texels
+//!   vanilla's own retain-parts-and-children helper, which retains a part *with its
+//!   children*, and `hat` is authored at an extra `0.5F` of deformation in
+//!   vanilla's own base mesh construction. Measured against 26.2's own sheets, the texels
 //!   that cube unwraps onto (`x ∈ [32, 64)`, `y ∈ [0, 16)` of a 64×32 armour
 //!   sheet) are **fully transparent in all nine humanoid armour textures**, so
 //!   it contributes zero pixels — it is kept because vanilla keeps it, not
@@ -52,14 +51,15 @@
 //!
 //! An armour item does not name its texture. It carries
 //! `minecraft:equippable`, whose `assetId` is a key into the
-//! `equipment_asset` registry (`Equippable`, `ArmorMaterials`), and
+//! `equipment_asset` registry, and
 //! the client reads `assets/<ns>/equipment/<asset>.json` for a per-**layer-type**
-//! list of texture layers. `EquipmentClientInfo.getTextureLocation` then builds
+//! list of texture layers. Vanilla's own equipment-texture-location query then builds
 //! `textures/entity/equipment/<layer_type>/<texture>.png`.
 //!
 //! **`assetId` is not on the wire and not in the item-prototype census** (see
 //! `docs/item-prototypes.md`: only `equippable.slot()` is carried), so the
-//! item → asset mapping is a table here, transcribed from `ArmorMaterials`.
+//! item → asset mapping is a table here, transcribed from vanilla's own
+//! per-material armour-item registrations.
 //! [`ARMOUR_ITEMS`] is that table and it is closed over 26.2: the
 //! `humanoid_armour_items_cover_every_material` test walks it against
 //! [`ARMOUR_ASSETS`].
@@ -71,9 +71,9 @@
 //! and an untinted `*_overlay` detail layer drawn over it. Measured on 26.2's
 //! `humanoid/leather.png`: 589 of its 660 opaque texels are exactly grey, so a
 //! port that skips the tint renders leather armour as pale iron.
-//! [`UNDYED_LEATHER_RGB`] is `Dyeable.colorWhenUndyed` (`-6265536` in
+//! [`UNDYED_LEATHER_RGB`] is vanilla's own dyeable-item default undyed color (`-6265536` in
 //! `equipment/leather.json`, i.e. `0xFF_A0_65_40`) and is what
-//! `EquipmentLayerRenderer.getColorForLayer` falls back to when the stack
+//! vanilla's own equipment-layer-renderer per-layer color query falls back to when the stack
 //! carries no `minecraft:dyed_color`.
 //!
 //! The colour is **gamma-space sRGB bytes**, because that is the space vanilla
@@ -85,28 +85,28 @@
 use crate::entity::{Deformation, EntityModelDef, PartDef};
 use crate::entity_models::humanoid_root;
 
-/// `LayerDefinitions.OUTER_ARMOR_DEFORMATION` — `new CubeDeformation(1.0F)`,
+/// Vanilla's own outer-armor-deformation constant — a deformation of `1.0F`,
 /// used for the head, chest and feet slots.
 pub const OUTER_ARMOUR_INFLATION: f32 = 1.0;
 
-/// `LayerDefinitions.INNER_ARMOR_DEFORMATION` — `new CubeDeformation(0.5F)`,
+/// Vanilla's own inner-armor-deformation constant — a deformation of `0.5F`,
 /// used for the **legs slot only**.
 ///
 /// This is the value a single-inflation port loses, and losing it is what makes
 /// leggings clip through the chestplate.
 pub const INNER_ARMOUR_INFLATION: f32 = 0.5;
 
-/// `HumanoidModel.LEGGINGS_OVERLAY_SCALE` — the extra `-0.1F` every armour
+/// Vanilla's own leggings-overlay-scale constant — the extra `-0.1F` every armour
 /// mesh's *legs* carry relative to their slot inflation, applied in
-/// `HumanoidModel.createBaseArmorMesh`.
+/// vanilla's own base-armor-mesh construction step.
 pub const LEGGINGS_OVERLAY_INFLATION: f32 = -0.1;
 
-/// `HumanoidModel.HAT_OVERLAY_SCALE` — the helmet's `hat` child sits `+0.5`
-/// texels outside the head cube, in `HumanoidModel.createMesh`.
+/// Vanilla's own hat-overlay-scale constant — the helmet's `hat` child sits `+0.5`
+/// texels outside the head cube, in vanilla's own base mesh construction.
 pub const HAT_OVERLAY_INFLATION: f32 = 0.5;
 
 /// Armour sheets are **64×32**, not the 64×64 a modern player skin uses
-/// (`LayerDefinitions.createRoots` — `LayerDefinition.create(mesh, 64, 32)`).
+/// (vanilla's own mesh-roots construction — a mesh definition declared at 64×32).
 ///
 /// Getting this wrong halves every V coordinate and paints the legs with the
 /// head's pixels, which looks like a texture-resolution bug rather than a mesh
@@ -143,7 +143,7 @@ pub enum ArmourSlot {
 }
 
 impl ArmourSlot {
-    /// All four slots, in `HumanoidArmorLayer.submit`'s own draw order
+    /// All four slots, in vanilla's own humanoid-armor-layer submit step's own draw order
     /// (chest, legs, feet, head).
     ///
     /// The order matters for coplanar layers: it is the order vanilla submits
@@ -155,11 +155,11 @@ impl ArmourSlot {
         ArmourSlot::Head,
     ];
 
-    /// The slot's `CubeDeformation`: [`INNER_ARMOUR_INFLATION`] for
+    /// The slot's cube deformation: [`INNER_ARMOUR_INFLATION`] for
     /// [`Legs`](Self::Legs), [`OUTER_ARMOUR_INFLATION`] for the rest.
     ///
-    /// `HumanoidModel.createArmorMeshSet` picks
-    /// `innerDeformation` for the legs mesh and `outerDeformation` for head,
+    /// Vanilla's own armor-mesh-set construction step picks
+    /// the inner deformation for the legs mesh and the outer deformation for head,
     /// chest and feet.
     #[must_use]
     pub const fn inflation(self) -> f32 {
@@ -171,9 +171,9 @@ impl ArmourSlot {
 
     /// Which texture layer type paints this slot.
     ///
-    /// `HumanoidArmorLayer.usesInnerModel` is `slot == LEGS`, and the layer type
-    /// follows it: leggings read `humanoid_leggings`, everything else `humanoid`
-    /// (`HumanoidArmorLayer.usesInnerModel`). Baby rigs use a third type,
+    /// Vanilla's own uses-inner-model check is `slot == LEGS`, and the layer type
+    /// follows it: leggings read `humanoid_leggings`, everything else `humanoid`.
+    /// Baby rigs use a third type,
     /// `humanoid_baby`, which this crate does not model — see
     /// [`ArmourLayerType`].
     #[must_use]
@@ -190,9 +190,10 @@ impl ArmourSlot {
     /// posed by looking each name up in the wearer's own skeleton and reusing
     /// that part's already-animated matrix, so the names have to collide.
     ///
-    /// Transcribed from `HumanoidModel.ADULT_ARMOR_PARTS_PER_SLOT`
-    /// (`HumanoidModel.ADULT_ARMOR_PARTS_PER_SLOT`'s own initializer), with `head`'s `hat` child added because the
-    /// head slot uses `retainPartsAndChildren` rather than `retainExactParts`.
+    /// Transcribed from vanilla's own adult-armor-parts-per-slot table
+    /// (its own initializer), with `head`'s `hat` child added because the
+    /// head slot uses vanilla's own retain-parts-and-children helper rather than
+    /// its exact-parts variant.
     #[must_use]
     pub const fn part_names(self) -> &'static [&'static str] {
         match self {
@@ -372,12 +373,13 @@ pub const ARMOUR_ASSETS: &[ArmourAsset] = &[
 ];
 
 /// `(item path, slot, equipment asset id)` for every item vanilla draws through
-/// `HumanoidArmorLayer` in 26.2.
+/// its own humanoid-armor-layer in 26.2.
 ///
 /// # Why this is a table and not derived
 ///
-/// The mapping is `Item` → `Equippable.assetId()`, set in `ArmorMaterials`
-/// (`ArmorMaterials.java`) and baked into the item's prototype component map.
+/// The mapping is `Item` → equippable asset id, set in vanilla's own
+/// per-material armour-item registrations
+/// and baked into the item's prototype component map.
 /// It is never sent — a clientbound `/give diamond_helmet` arrives with an
 /// **empty** component patch — and the committed prototype census carries only
 /// `equippable.slot()`, not the asset id (`docs/item-prototypes.md`, "Only the
@@ -386,11 +388,13 @@ pub const ARMOUR_ASSETS: &[ArmourAsset] = &[
 /// # Why every humanoid-slot item is *not* here
 ///
 /// 26.2 has 38 items in a `HUMANOID_ARMOR` slot; only these 29 have an
-/// `assetId`, and `HumanoidArmorLayer.shouldRender` requires one.
+/// asset id, and vanilla's own humanoid-armor-layer should-render check requires one.
 /// The other nine are drawn by other layers
-/// entirely: `carved_pumpkin` and the seven skulls by `CustomHeadLayer` (a block
-/// or skull model on the head, not an armour mesh), and `elytra` by `WingsLayer`
-/// with its own `ElytraModel`. Listing them here would draw a *helmet-shaped*
+/// entirely: `carved_pumpkin` and the seven skulls by vanilla's own custom-head
+/// layer (a block
+/// or skull model on the head, not an armour mesh), and `elytra` by vanilla's
+/// own wings layer
+/// with its own elytra model. Listing them here would draw a *helmet-shaped*
 /// pumpkin.
 pub const ARMOUR_ITEMS: &[(&str, ArmourSlot, &str)] = &[
     ("turtle_helmet", ArmourSlot::Head, "turtle_scute"),
@@ -438,8 +442,9 @@ pub fn armour_asset(id: &str) -> Option<&'static ArmourAsset> {
 ///
 /// The slot returned is the item's *own* declared slot. A caller should compare
 /// it against the slot the server actually put the item in and draw only on a
-/// match — that is `HumanoidArmorLayer.shouldRender`'s `equippable.slot() ==
-/// slot` test, and it is what stops a helmet
+/// match — that is vanilla's own humanoid-armor-layer should-render check's
+/// slot-equality
+/// test, and it is what stops a helmet
 /// dropped into a boots slot by a plugin from rendering as a boot.
 #[must_use]
 pub fn armour_item(item_path: &str) -> Option<(ArmourSlot, &'static ArmourAsset)> {
@@ -499,14 +504,14 @@ fn clear_subtree(part: &mut PartDef) {
     }
 }
 
-/// `HumanoidModel.createBaseArmorMesh(g)`: the
+/// Vanilla's own base-armor-mesh construction step, `g`: the
 /// shared humanoid mesh at inflation `g`, with **both legs re-added at
 /// `g.extend(-0.1)`**.
 ///
 /// The leg override is not cosmetic. Without it the boots' leg cubes and the
 /// leggings' leg cubes sit at exactly the slot inflation, and boots (outer,
 /// `1.0`) then swallow the leggings (inner, `0.5`) wherever the two overlap at
-/// the ankle. `-0.1` is `LEGGINGS_OVERLAY_SCALE`.
+/// the ankle. `-0.1` is vanilla's own leggings-overlay-scale constant.
 fn base_armour_root(inflation: f32) -> PartDef {
     let mut root = humanoid_root(inflation);
     let leg_grow = Deformation::uniform(inflation + LEGGINGS_OVERLAY_INFLATION);
@@ -524,9 +529,9 @@ fn base_armour_root(inflation: f32) -> PartDef {
 /// [`inflation`](ArmourSlot::inflation), pruned to the slot's parts, on a
 /// **64×32** sheet.
 ///
-/// Mirrors `HumanoidModel.createArmorMeshSet`
+/// Mirrors vanilla's own armor-mesh-set construction step
 /// one slot at a time. The four results are the `ArmorModelSet` record vanilla
-/// hands to `HumanoidArmorLayer`.
+/// hands to its own humanoid-armor-layer.
 #[must_use]
 pub fn humanoid_armour_model(slot: ArmourSlot) -> EntityModelDef {
     let mut root = base_armour_root(slot.inflation());
@@ -568,28 +573,29 @@ mod tests {
 
     /// The z-fighting this whole module exists to avoid, made an executable
     /// assertion rather than a doc claim: vanilla's own named constants for
-    /// the player skin's second layer (`HumanoidModel.OVERLAY_SCALE = 0.25F`,
-    /// `HAT_OVERLAY_SCALE = 0.5F`) and for worn armour
-    /// (`LayerDefinitions.OUTER_ARMOR_DEFORMATION = 1.0F`,
-    /// `INNER_ARMOR_DEFORMATION = 0.5F`) must never collapse to the same
+    /// the player skin's second layer (its own overlay-scale constant of
+    /// `0.25F`,
+    /// its own hat-overlay-scale constant of `0.5F`) and for worn armour
+    /// (its own outer-armor-deformation constant of `1.0F`,
+    /// its own inner-armor-deformation constant of `0.5F`) must never collapse to the same
     /// number, on any slot pairing a player can actually wear at once.
     ///
     /// A gate comparing only this crate's two constants against each other
     /// would prove nothing about vanilla — both sides here are independently
-    /// named vanilla fields, transcribed from two different classes
-    /// (`HumanoidModel` and `LayerDefinitions`), not derived from one
+    /// named vanilla fields, transcribed from two different classes,
+    /// not derived from one
     /// another.
     #[test]
     fn player_overlay_and_armour_inflations_differ() {
         use crate::entity::{PLAYER_HAT_OVERLAY_INFLATION, PLAYER_OVERLAY_INFLATION};
 
-        assert_eq!(PLAYER_OVERLAY_INFLATION, 0.25, "HumanoidModel.OVERLAY_SCALE");
+        assert_eq!(PLAYER_OVERLAY_INFLATION, 0.25, "vanilla's own overlay-scale constant");
         assert_eq!(
             PLAYER_HAT_OVERLAY_INFLATION, 0.5,
-            "HumanoidModel.HAT_OVERLAY_SCALE"
+            "vanilla's own hat-overlay-scale constant"
         );
-        assert_eq!(OUTER_ARMOUR_INFLATION, 1.0, "LayerDefinitions.OUTER_ARMOR_DEFORMATION");
-        assert_eq!(INNER_ARMOUR_INFLATION, 0.5, "LayerDefinitions.INNER_ARMOR_DEFORMATION");
+        assert_eq!(OUTER_ARMOUR_INFLATION, 1.0, "vanilla's own outer-armor-deformation constant");
+        assert_eq!(INNER_ARMOUR_INFLATION, 0.5, "vanilla's own inner-armor-deformation constant");
 
         // jacket/sleeves/pants vs every armour slot a player wears over them.
         for armour in [OUTER_ARMOUR_INFLATION, INNER_ARMOUR_INFLATION] {
@@ -787,7 +793,7 @@ mod tests {
         ] {
             assert!(
                 armour_item(path).is_none(),
-                "{path} is drawn by CustomHeadLayer/WingsLayer, not HumanoidArmorLayer"
+                "{path} is drawn by vanilla's own custom-head/wings layer, not its own humanoid-armor layer"
             );
         }
     }
