@@ -54,7 +54,7 @@ pub(super) const PACK_DESC_DY: f32 = 12.0;
 const PACK_TEXT_MAX_W: f32 = 157.0;
 /// `descriptionWidget.setMaxRows(2)` (`:127`).
 const PACK_DESC_ROWS: usize = 2;
-/// The description's colour: `Style.EMPTY.withColor(-8355712)` (`:125,152`) —
+/// The description's colour: vanilla's own empty style with color -8355712 (`:125,152`) —
 /// `0x808080`, vanilla's flat mid-grey, not this pass's own [`FG_DIM`].
 pub(super) const PACK_ENTRY_DIM: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
 /// The selected row's interior, `-16777216` — opaque black inside the 1 px
@@ -1067,7 +1067,7 @@ fn draw_server_entry(
 
 /// Draws the multiplayer list's "who's online" tooltip — vanilla's
 /// `DefaultTooltipPositioner`-positioned `TooltipRenderUtil` box
-/// (`DefaultTooltipPositioner.java`, `TooltipRenderUtil.java`), which this
+/// (its own default-tooltip-positioner type, its own tooltip-render-util helper), which this
 /// pipeline has no sprite path for, so it draws the two sprites' *visible*
 /// pixels as flat quads instead.
 ///
@@ -1653,8 +1653,8 @@ fn draw_pack_entry(
 /// to write positions *to*.
 ///
 /// Mirrors `AbstractButton.extractDefaultSprite` +
-/// `Button.Plain.extractContents` (`AbstractButton.java`,
-/// `Button.java`) and, for icons,
+/// `Button.Plain.extractContents` (vanilla's own abstract-button base,
+/// its own button type) and, for icons,
 /// `SpriteIconButton.CenteredIcon.extractContents`.
 /// **`server_scroll_list` is gone.** It rebuilt the multiplayer list's geometry per
 /// frame for the scrollbar, and it was the by-name call that made this file's
@@ -1770,7 +1770,8 @@ fn draw_widget(
     // hovered, which is why a greyed-out button under the cursor still looks
     // greyed out. The rule lives in `menu::widget`; this only asks.
     //
-    // A slider asks a *different* question — `AbstractSliderButton.getSprite()`
+    // A slider asks a *different* question — vanilla's own abstract slider
+    // button's get-sprite accessor
     // passes `isActive()` and `isFocused()` alone, so hovering one does not
     // highlight it. Both predicates live on
     // `Widget`; neither is re-derived here.
@@ -1846,7 +1847,7 @@ fn draw_widget(
     let colour = widget.message_colour();
     // `extractScrollingStringOverContents(output, message, 2)` →
     // `acceptScrollingWithDefaultCenter(msg, x+2, x+w-2, y, y+h)`
-    // (`AbstractButton.java`, `AbstractWidget.java`), whose centre
+    // (vanilla's own abstract-button base, its own abstract-widget base), whose centre
     // is `(left + right) / 2` and whose top is
     // `(top + bottom - lineHeight) / 2 + 1`.
     let (left, right) = widget.content_span();

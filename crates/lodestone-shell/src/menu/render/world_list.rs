@@ -26,7 +26,7 @@ const WORLD_SELECT_HEADER_H: f32 = 8.0 + 9.0 + 8.0 + 20.0 + 4.0;
 /// apart measure 44, so the band carries 16 px of slack, which the footer
 /// `FrameLayout`'s inherited `align(0.5, 0.5)` splits 8/8.
 const WORLD_SELECT_FOOTER_H: f32 = 60.0;
-/// `LinearLayout.vertical().spacing(4)` in the header and `.rowSpacing(4)` in
+/// Vanilla's own vertical linear layout at spacing 4 in the header and `.rowSpacing(4)` in
 /// the footer grid — the same 4 either way.
 const WORLD_SELECT_SPACING: i32 = 4;
 /// `new GridLayout().columnSpacing(8)`.
@@ -46,7 +46,7 @@ const WORLD_SELECT_SMALL_BTN_W: f32 = 71.0;
 /// A `StringWidget`'s height: `StringWidget(message, font)` delegates to
 /// `this(0, 0, font.width(...), 9, ...)`.
 const STRING_WIDGET_H: f32 = 9.0;
-/// `WorldSelectionList.getRowWidth()` — a
+/// Vanilla's own world-selection list's get-row-width accessor — a
 /// 270 px override of `AbstractSelectionList`'s own 220 (`:389-391`).
 pub(super) const WORLD_LIST_ROW_W: f32 = 270.0;
 /// The list's `itemHeight`: the last argument of
@@ -121,8 +121,8 @@ fn world_select_layout(width: f32, height: f32) -> layout::HeaderAndFooterLayout
         WORLD_SELECT_FOOTER_H,
     );
 
-    // `LinearLayout header = this.layout.addToHeader(LinearLayout.vertical().spacing(4));`
-    // `header.defaultCellSetting().alignHorizontallyCenter();` (`:46-47`)
+    // Vanilla's own header layout: a vertical linear layout at spacing 4, added
+    // to the header, with its default cell setting horizontally centred (`:46-47`).
     let mut header = layout::LinearLayout::vertical().spacing(WORLD_SELECT_SPACING);
     {
         let baseline = header.default_cell_setting();
@@ -505,7 +505,8 @@ pub fn world_list_icon_rect(index: usize, width: f32, scroll: f32) -> (f32, f32,
     (cx, cy, WORLD_LIST_ICON, WORLD_LIST_ICON)
 }
 
-/// `Component.literal(levelIdAndDate).withColor(-8355712)`
+/// Vanilla's own literal-component construction for `levelIdAndDate`,
+/// coloured `-8355712`
 /// (`WorldSelectionList`'s `WorldListEntry`) and the same colour merged onto the
 /// info line — `0xFF808080`, i.e. mid grey.
 ///

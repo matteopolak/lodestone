@@ -305,12 +305,12 @@ pub enum Arrow {
 /// Two fields, for [`WorldEntryView`]'s reason: everything else a pack row draws
 /// is already a [`MenuRow`] field. Both of these say what the **hover overlay**
 /// over the 32×32 icon is — vanilla's `transferable_list/select` /
-/// `unselect` sprites, drawn only when `PackEntry.showHoverOverlay()`
+/// `unselect` sprites, drawn only when its own show-hover-overlay check passes
 /// — and neither is derivable from the
 /// row: which column a pack is in is the screen's fact, not the row's.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PackEntryView {
-    /// `PackSelectionModel.Entry.canSelect()` — this row is in **Available**, so
+    /// Vanilla's own pack-selection-model entry's can-select check — this row is in **Available**, so
     /// activating it moves the pack into Selected.
     pub can_select: bool,
     /// `canUnselect()` — this row is a removable **Selected** entry. False for
@@ -346,8 +346,9 @@ pub struct TabEntryView {
     /// tab row from the same bar carries the same value; a screen with three
     /// tabs stamps `3` onto all three of its `TabEntryView`s.
     pub count: usize,
-    /// Whether this is the tab currently showing — `TabManager.getCurrentTab()
-    /// == this.tab` (`TabButton.isSelected`, `TabButton.java`).
+    /// Whether this is the tab currently showing — vanilla's own tab-manager
+    /// get-current-tab accessor
+    /// == this.tab (its own tab-button's is-selected check, in its own tab-button type).
     ///
     /// A different question from [`MenuFrame::selected`], which on every other
     /// screen carries the **keyboard-focused** row: Statistics's tab bar has no
@@ -372,7 +373,8 @@ pub struct WorldEntryView {
     /// The row's index in the **filtered** list, which is what
     /// [`world_list_row_rect`] positions from.
     pub index: usize,
-    /// Whether this is `WorldSelectionList.getSelectedOpt()`'s entry, which gets
+    /// Whether this is vanilla's own world-selection list's get-selected-opt
+    /// accessor's entry, which gets
     /// `AbstractSelectionList.extractItem`'s 1 px outline plus black interior.
     ///
     /// A different question from [`MenuFrame::selected`], which on this screen
@@ -825,7 +827,7 @@ pub struct MenuFrame<'a> {
 
 /// Vanilla's `LevelLoadingScreen` progress bar, as a frame primitive.
 ///
-/// Geometry is transcribed from `LevelLoadingScreen.java`: `PROGRESS_BAR_WIDTH =
+/// Geometry is transcribed from vanilla's own level-loading screen rendering: `PROGRESS_BAR_WIDTH =
 /// 200`, two pixels tall, black background, filled to `round(progress * 200)` in
 /// green, horizontally centred. `dy` is measured from the screen centre so the
 /// bar sits under the phase label the same way vanilla's sits under its text.
