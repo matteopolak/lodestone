@@ -177,7 +177,7 @@ impl WindowApp {
         // side needs no such guard — it is already a no-op off `Screen::Death`.
         //
         // `doImmediateRespawn` (`SessionGameRules` island) forks
-        // this: vanilla's `ClientPacketListener.handleRespawn` never puts the
+        // this: vanilla's own respawn-packet handling never puts the
         // death screen up at all when the rule is on, it respawns on the spot.
         // That is the rule's entire user-visible meaning, and it is the reason
         // the fold had a reader worth writing — `SessionGameRules` was folded,
@@ -781,9 +781,9 @@ impl WindowApp {
         });
     }
 
-    /// Arm and service the deferred Render Distance commit — vanilla's
-    /// `OptionInstance.OptionInstanceSliderButton` `delayedApplyAt` /
-    /// `applyUnsavedValue` pair (`OptionInstance.java, 429-435`).
+    /// Arm and service the deferred Render Distance commit — vanilla's own
+    /// slider-option delayed-apply mechanism: a deadline armed on each change,
+    /// and an apply pass that commits the pending value once the deadline passes.
     ///
     /// Called once per frame from `app/redraw.rs`. The deadline is **re-armed by
     /// every change**, so a drag that crosses ten values commits once, 600 ms
@@ -815,9 +815,9 @@ impl WindowApp {
         // the "the slider appears to do nothing" report with one symptom fixed.
         self.config.render_distance = wanted;
         self.sim.config.render_distance = wanted;
-        // The server side. Vanilla's `Options.broadcastOptions` sends
-        // `ServerboundClientInformationPacket` whenever an option in it changes,
-        // and `viewDistance` is in it — without this the server keeps streaming
+        // The server side. Vanilla's own client-options broadcast sends
+        // a client-information packet whenever an option in it changes,
+        // and view distance is in it — without this the server keeps streaming
         // the square we asked for at join and the extra rings simply never
         // arrive, so fog and the far plane would open onto empty space.
         //
@@ -861,7 +861,7 @@ impl WindowApp {
     /// `ChunkStore`, a fresh tick loop, and the local player rejoining over
     /// loopback like a stranger — a real loading screen for a button that is
     /// supposed to be invisible if you are not the one joining. Vanilla's own
-    /// `Minecraft.getSingleplayerServer().publishServer` adds a listener to
+    /// publish-to-LAN handling adds a listener to
     /// the world already running; nothing about it is torn down. This now does
     /// the same: `NetClient::publish_to_lan` asks the net thread to call
     /// `IntegratedServer::publish` on the handle it already holds, so every
@@ -870,7 +870,7 @@ impl WindowApp {
     /// method's own doc comment for what state a publish-time joiner shares.
     ///
     /// `0` — an OS-assigned port — rather than a fixed one:
-    /// vanilla's `/publish` defaults to `HttpUtil.getAvailablePort()`, and the
+    /// vanilla's `/publish` defaults to asking the OS for any free port, and the
     /// actual bound port comes back through `NetUpdate::LanOpened`, which
     /// `Sim::apply` already turns into the "Local game hosted on port N" chat
     /// line — unchanged by this fix, since it already read the *reported*
@@ -917,8 +917,8 @@ impl WindowApp {
     /// since `226ac517`) could never fire.
     ///
     /// **Coming back always lands in Creative, never in whatever you left.**
-    /// Vanilla reads `gameMode.getPreviousPlayerMode()` and falls back to
-    /// `GameType.CREATIVE` with `firstNonNull`; this client tracks no previous
+    /// Vanilla reads the previous player mode and falls back to
+    /// Creative when there is none; this client tracks no previous
     /// mode, so it takes that fallback every time. The server is authoritative
     /// either way — it answers with the mode it applied plus fresh abilities — so
     /// the worst case is one extra chord, not a desync.
@@ -941,7 +941,7 @@ impl WindowApp {
     /// Vanilla's `key.debug.switchGameMode` (F3+F4), cycling instead of opening a
     /// radial picker.
     ///
-    /// `KeyboardHandler.java` shows a `GameModeSwitcherScreen` — a
+    /// Vanilla's own debug-key handling shows a game-mode switcher screen — a
     /// four-slot hover picker with its own hotbar-style art. Cycling is the
     /// honest subset: it reaches every mode with the same chord and needs no new
     /// screen, and a player holding F3 and tapping F4 four times sees exactly the
@@ -1098,7 +1098,7 @@ impl WindowApp {
         //
         // **Plus one, and the `+ 1` is not slack — it is the buffer ring the
         // mesher's invariant requires.** Vanilla's own server tracks
-        // `center + viewDistance + 1` (`ChunkTrackingView.java, 96`), and it has
+        // the view distance plus one ring around the center, and it has
         // to: a section is only meshed once all its neighbours are resident, so the
         // outermost ring of a radius-`n` stream permanently lacks a neighbour and
         // **never draws**. Streaming exactly `render_distance` made singleplayer
@@ -1260,10 +1260,10 @@ impl WindowApp {
             let sky_clock = net_handle;
             let continuous_time_of_day = ContinuousTimeOfDay::new();
             // Weather rides *this* lane rather than getting one of its own.
-            // `EnvironmentAttributes.SKY_LIGHT_FACTOR` is a single attribute in
+            // The sky-light factor is a single attribute in
             // vanilla too: the time-of-day curve is its base and
-            // `WeatherAttributes`' two layers modify it
-            // (`WeatherAttributes.java`, `:30`), so a separate uniform would be
+            // vanilla's own weather-attribute layers modify it
+            // on top, so a separate uniform would be
             // a second writer of one value and the two would drift. This is the
             // exact `sky_darken` `lodestone_render::light`'s module doc derives,
             // and terrain, mobs and the first-person arm all read it through the

@@ -47,7 +47,7 @@ pub(super) struct RecipePanelState {
     pub(super) restored_type: Option<lodestone_model::RecipeBookType>,
 }
 
-/// `searchBox.setMaxLength(50)`.
+/// Vanilla's own recipe-book search box caps its length at 50.
 pub(super) const RECIPE_SEARCH_MAX_LEN: usize = 50;
 
 /// Wall-clock milliseconds for the recipe-toast window.

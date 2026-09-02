@@ -78,7 +78,7 @@ impl WindowApp {
         self.frame_profile.begin_frame(frame_start);
         // Issue #613's `PingRequest` remainder — see `WindowApp::last_ping_request`'s
         // own doc for why this is gated on F3 rather than sent every tick the
-        // way vanilla's ungated `PingDebugMonitor.tick` is. `send_ping_request`
+        // way vanilla's own ungated debug-overlay ping monitor is. `send_ping_request`
         // itself is best-effort (a closed session drops it silently), so this
         // needs no separate "are we connected" check.
         if should_send_ping_request(self.show_debug, self.last_ping_request, frame_start) {
@@ -553,9 +553,10 @@ impl WindowApp {
         let hand_swing = self.sim.hand_swing_progress();
         render.set_hand_swing_source(move || hand_swing);
 
-        // The eating/drinking bob — `ItemInHandRenderer.applyEatTransform`. Installed
+        // The eating/drinking bob — vanilla's own held-item eat-transform. Installed
         // here, next to the swing, because it has the identical partial-tick
-        // requirement: the value is `getUseItemRemainingTicks() - frameInterp + 1`,
+        // requirement: the value is the remaining use ticks minus the frame's
+        // partial-tick interpolation plus one,
         // so a one-shot install would freeze the item mid-bite forever. `None` off a
         // consume, which is the plain held-item pose.
         //
@@ -913,7 +914,7 @@ impl WindowApp {
             render.set_spawner_source(f);
         }
 
-        // `GameRenderer.bobHurt` — the damage tilt and the death roll, as an
+        // Vanilla's own damage-bob transform — the damage tilt and the death roll, as an
         // eye-space matrix multiplied into every world view-projection.
         //
         // This is the hop that had been missing, and the reason it was missing is
@@ -954,8 +955,8 @@ impl WindowApp {
         // had zero production callers, so every frame drew FANCY whatever the
         // player chose — the FAST quad path was pixel-gated and unreachable.
         render.set_cloud_status(self.nav.options().cloud_status);
-        // The connected dimension's own skybox — vanilla's
-        // `DimensionType.skybox()`, and the half of "the Nether renders under the
+        // The connected dimension's own skybox — vanilla's own
+        // per-dimension skybox selector, and the half of "the Nether renders under the
         // overworld sky" that a fog colour cannot fix. `set_fog`/`set_clear_color`
         // below already pick the Nether's red haze; this is what stops the sun, the
         // moon, the star field and the cloud deck drawing over it.
@@ -1005,8 +1006,8 @@ impl WindowApp {
                     let thunder = w.thunder_level();
                     let flashing = w.flashing();
                     // Vanilla's layer order: the flash tint is added by
-                    // `ClientLevel.addEnvironmentAttributeLayers` and the weather
-                    // darkening by `WeatherAttributes.addBuiltinLayers` on top, so
+                    // its own environment-attribute layering and the weather
+                    // darkening on top of that, so
                     // a bolt during a storm brightens a sky that is *then* darkened
                     // — not the other way round, which would wash the flash out.
                     let sky = lodestone_render::weather_darken_linear(
@@ -1052,7 +1053,7 @@ impl WindowApp {
         // In-world music, beside the listener update because both are "audio
         // follows the frame we actually drew".
         //
-        // The three inputs are the ones `Minecraft.java` uses, and two of
+        // The three inputs are the ones vanilla's own client uses, and two of
         // them are easy to get wrong: `creative` is `instabuild && mayfly` and not
         // a gamemode check (`Sim::music_creative`), and `underwater` is
         // water-specific rather than any fluid (`Sim::music_underwater`).
@@ -1221,7 +1222,7 @@ impl WindowApp {
         //
         // Matched on the item id rather than on
         // `minecraft:equippable.camera_overlay`, which is what vanilla actually
-        // keys on (`Hud.extractCameraOverlays`, `Hud.java`). That is a
+        // keys on in its own camera-overlay extraction. That is a
         // deliberate narrowing and it matches `ScreenEffects::wearing_pumpkin`'s
         // own doc: carved pumpkin is the only item shipping with that component
         // field set, so the general per-item lookup would have exactly one entry.
@@ -1246,8 +1247,8 @@ impl WindowApp {
             tick,
             wearing_pumpkin,
             freeze_percent,
-            // `Player.isScoping()` is `isUsingItem() && getUseItem().is(Items.
-            // SPYGLASS)`. Both halves: `Sim::
+            // Vanilla's own scoping check is "using an item" and "that item is a
+            // spyglass". Both halves: `Sim::
             // using_item()` (the two-line accessor issue #154 was waiting
             // on) and `held_for_scoping`, the same item id already computed
             // above for the first-person hand pass.
@@ -1587,9 +1588,9 @@ impl WindowApp {
             .iter()
             .map(|(spans, _)| spans.iter().map(|s| s.text.as_str()).collect::<String>())
             .collect();
-        // Reproduces `ChatComponent.addMessageToDisplayQueue`'s "a new
+        // Reproduces vanilla's own chat-message-queue "a new
         // message while scrolled does not jump the view" behaviour, and
-        // `ChatScreen.removed`'s `resetChatScroll()` when closed — see
+        // its own chat-screen close handling resetting the scroll when closed — see
         // `ChatScroll::sync`'s own doc for why both live in one call here
         // rather than a separate close hook.
         self.chat_input
@@ -1765,10 +1766,8 @@ impl WindowApp {
         // draw also picks the underscore-vs-bar shape from this, so an unset
         // field would keep both halves of that bug.
         hud_frame.chat_cursor = chat_open.then(|| self.chat_input.cursor_position());
-        // Vanilla blinks the text cursor on a 300 ms half-period:
-        // `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS == 300` and
-        // `isCursorVisible(ms) == (ms / 300) % 2 == 0`
-        // (`.cache/mc/26.2/client-src/.../TextCursorUtils.java`). The
+        // Vanilla blinks the text cursor on a 300 ms half-period: visible
+        // whenever the wall-clock millisecond count divided by 300 is even. The
         // phase has to come from wall time rather than the tick clock, because
         // the caret keeps blinking while the game is paused.
         // `crate::platform::epoch_duration`, not `SystemTime::now()`: the latter
@@ -1819,8 +1818,8 @@ impl WindowApp {
         hud_frame.can_hurt_player = can_hurt_player;
         hud_frame.health = health;
         // The armour row. `Sim::armour_value` is `floor(minecraft:armor)` off the
-        // local player's folded attribute snapshot — vanilla's
-        // `LivingEntity.getArmorValue()` — so equipment reaches the bar the way it
+        // local player's folded attribute snapshot — matching vanilla's own
+        // armor-value accessor — so equipment reaches the bar the way it
         // reaches any other attribute, as a server `update_attributes` push, and
         // there is no per-item table anywhere in the chain. Without this line the
         // whole row is an island: `HudFrame::armour` defaults to `None`, both draw
@@ -1897,10 +1896,9 @@ impl WindowApp {
         );
         self.frame_profile.mark_hud(HudSubphase::HudDraw, Instant::now());
         // The container overlay draws **after** the HUD (issue #51/#61): vanilla's
-        // `Gui.render` draws the HUD unconditionally behind any world-following
+        // own HUD draw pass draws the HUD unconditionally behind any world-following
         // screen (`hud_follows_world` above), and the screen then paints its own
-        // translucent background over it (`Screen.java`,
-        // `AbstractContainerScreen::isInGameUi`) — the dim is draw order, not a
+        // translucent background over it (vanilla's own in-game-UI check) — the dim is draw order, not a
         // per-element alpha. Drawing this block before the HUD (as it used to)
         // meant the HUD painted back over the container's dim every frame and the
         // hotbar never actually looked dimmed behind an open chest. Both this pass
@@ -1909,7 +1907,7 @@ impl WindowApp {
         // two relative to each other is safe — see `docs/container-screen.md`.
         // The creative-inventory screen **replaces** the player's
         // inventory screen rather than overlaying it, exactly as vanilla's
-        // `Minecraft.openInventory` picks one screen or the other. So it is
+        // own open-inventory logic picks one screen or the other. So it is
         // resolved before the container block below and short-circuits it — two
         // panels drawn over each other is what an overlay would give.
         if creative_open {
@@ -1955,7 +1953,7 @@ impl WindowApp {
             // the raw key on screen. See `container::menu_title`.
             //
             // The merchant screen composes a level badge into the title
-            // itself (`MerchantScreen.extractLabels`) rather than merely
+            // itself (vanilla's own merchant-screen label extraction) rather than merely
             // moving the anchor — `container::merchant_title` is the whole
             // reason `menu_type_title_anchor` no longer excludes it. Keyed
             // off `open.menu.special_layout()`, not the wire `menu_type`
@@ -1993,9 +1991,9 @@ impl WindowApp {
             (None, String::new())
         };
         if container_menu.is_some() && !creative_open {
-            // `playerInventoryTitle` through the same language table. A local
+            // The player-inventory title through the same language table. A local
             // constant here is not the #52 defect class repeating: vanilla reads
-            // it from `Inventory.getDisplayName()`, itself the client-side
+            // it from its own inventory display-name accessor, itself the client-side
             // constant `translatable("container.inventory")`
             //, so there is no server component to resolve.
             let inventory_label =
@@ -2006,7 +2004,7 @@ impl WindowApp {
             // what gates it on the screen actually being a merchant.
             let trades_label = crate::container::merchant_trades_label(self.sim.translator().as_ref());
             // The anvil rename box's current value.
-            // `AnvilRenameState::sync` is vanilla's `slotChanged`: it resets
+            // `AnvilRenameState::sync` is vanilla's own slot-changed handling: it resets
             // `self.anvil_rename` to the input slot's own hover name whenever
             // that slot's identity changes, and otherwise leaves whatever the
             // player has typed alone (`KeyOutcome::AnvilRename` in
@@ -2023,8 +2021,8 @@ impl WindowApp {
                 // *editable* text field and is later compared for equality
                 // against the item's own name to decide whether a rename is
                 // real (`AnvilRenameState::resolve_rename`) — vanilla's own
-                // `AnvilScreen.onNameChanged` seeds and compares against
-                // `ItemStack.getHoverName().getString()`, the plain-text
+                // anvil-screen name-change handling seeds and compares against
+                // the item's plain-text hover name, the plain-text
                 // accessor with no `§` codes at all, not the legacy-coded
                 // string `styled_hover_name` would give an edit box nowhere
                 // to render.
@@ -2081,11 +2079,12 @@ impl WindowApp {
             // in physical pixels — the same space `hit_test` and the menu layout
             // use (see the `cursor` field). Without this the stack is built but
             // never positioned, and nothing draws.
-            // The status-effect column beside the panel (`EffectsInInventory`).
+            // The status-effect column beside the panel (vanilla's
+            // effects-in-inventory display).
             // Only the local player's own inventory shows it — vanilla builds
-            // an `EffectsInInventory` in `InventoryScreen` and
-            // `CreativeModeInventoryScreen` only, and every other screen's
-            // `Screen.showsActiveEffects()` is `false`; a chest or furnace
+            // this column in its own inventory screen and
+            // creative-inventory screen only, and every other screen
+            // declines to show active effects; a chest or furnace
             // menu resolves a different `MenuKind` and gets an empty slice.
             //
             // Resolved **here**, where the language table is, rather than at
@@ -2121,11 +2120,11 @@ impl WindowApp {
                 .with_cursor(Some([self.cursor.0, self.cursor.1]))
                 // The hovered slot's tooltip. This is the *only* caller that
                 // enables it, which is deliberate — see `ContainerFrame::tooltips`
-                // — and the flag it passes is vanilla's persisted
-                // `advancedItemTooltips`, toggled by F3+H.
+                // — and the flag it passes is vanilla's own persisted
+                // advanced-item-tooltips option, toggled by F3+H.
                 .with_tooltips(self.nav.advanced_item_tooltips())
                 // An open recipe book moves the panel right (vanilla's
-                // `updateScreenPosition`). `container_input`'s hit-test passes the
+                // own screen-position update). `container_input`'s hit-test passes the
                 // same flag through `hit_test_with_book` — the two must agree.
                 .with_book_open(self.recipe_panel.open)
                 // …and the panel **consumes the pointer** over itself, so no slot
@@ -2260,8 +2259,8 @@ impl WindowApp {
                         w,
                         h,
                         // The hover tooltip vanilla draws over a recipe button
-                        // (`RecipeBookPage.extractTooltip`). The same cursor and
-                        // the same persisted `advancedItemTooltips` flag the
+                        // (vanilla's own recipe-book-page tooltip extraction). The same cursor and
+                        // the same persisted advanced-item-tooltips flag the
                         // container's own slot tooltip above uses, so the two can
                         // never disagree about which lines an identical stack
                         // shows — and `hover_blocked` above already stops the
@@ -2708,7 +2707,7 @@ impl WindowApp {
         benchmark_target_fps(&self.config, ordinary)
     }
 
-    /// Vanilla's `options.vsync` (`Options.java`, default `true`).
+    /// Vanilla's own persisted vsync option (default `true`).
     /// Polled every presented frame rather than pushed on toggle — see
     /// `docs/frame-pacing.md` and the deleted `unlock_framerate` debug knob
     /// this reuses the exact reasoning (and the exact `SurfaceTarget` API) of.
@@ -2797,18 +2796,18 @@ mod ping_request_tests {
     }
 }
 
-/// `Screen.showsActiveEffects()` — whether the screen currently open is drawing
-/// the player's status effects itself, in which case `Hud.extractEffects` draws
-/// none.
+/// Vanilla's own screen-level check for whether the screen currently open is drawing
+/// the player's status effects itself, in which case the HUD's own effects
+/// extraction draws none.
 ///
-/// Only `InventoryScreen` overrides it, and its answer is
-/// `EffectsInInventory.canSeeEffects()`: is there already `>= 32` px of canvas
+/// Only the ordinary inventory screen overrides it, and its answer is
+/// whether there is already `>= 32` px of canvas
 /// to the right of the panel? So the same three inputs the column's own draw
 /// uses — the panel origin, its width, and the recipe-book shift — decide this,
 /// and they are read the same way here rather than approximated, because the two
 /// answers disagreeing means either two copies of the effects on screen or none.
 ///
-/// The creative screen is excluded: vanilla's `CreativeModeInventoryScreen` does
+/// The creative screen is excluded: vanilla's own creative-inventory screen does
 /// show the column, but this client does not route that screen through the
 /// container frame yet, so suppressing the overlay there would leave the effects
 /// nowhere.

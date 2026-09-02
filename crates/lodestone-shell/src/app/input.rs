@@ -4,8 +4,8 @@
 
 use super::*;
 
-/// The clipboard `KeyOutcome::CopyLocation` writes to — vanilla's
-/// `KeyboardHandler.setClipboard`, called from `keyDebugCopyLocation`.
+/// The clipboard `KeyOutcome::CopyLocation` writes to — vanilla's own
+/// debug copy-location key writes to the same OS clipboard.
 ///
 /// The same fork [`crate::menu::edit_box`]'s own `clipboard_seam` module
 /// doc describes (`CLAUDE.md`'s "test that performs an OS-level side effect"
@@ -66,9 +66,9 @@ pub(crate) struct KeyGate {
     /// The debug modifier (F3) is currently held, so the next `B`/`G` is a
     /// **chord** rather than a plain key — That fix.
     ///
-    /// Vanilla models this as a second `KeyMapping`, `keyDebugModifier`, bound to
-    /// the *same* keysym as `keyDebugOverlay`, plus the
-    /// `modifierAndOverlayIsSame` bookkeeping in `KeyboardHandler`. Here it is a
+    /// Vanilla models this as a second key binding for the debug modifier, bound to
+    /// the *same* keysym as the debug-overlay binding, plus bookkeeping in the
+    /// keyboard handler to track whether the two share a key. Here it is a
     /// gate flag rather than a bindable action, so it lands in `resolve_key`
     /// where every other input decision already lives instead of behind a driver
     /// `match` arm this function's tests cannot see.
@@ -76,9 +76,9 @@ pub(crate) struct KeyGate {
     /// The recipe book's search box has keyboard focus
     /// (`RecipePanelState::search_focused`), so it owns every key except Escape.
     ///
-    /// Vanilla's `RecipeBookComponent.keyPressed` (`:437`):
-    /// `else if (this.searchBox.isFocused() && this.searchBox.isVisible() &&
-    /// !event.isEscape()) { return true; }` — a focused box swallows the key
+    /// Vanilla's recipe-book key handling swallows every key while its search
+    /// box is focused and visible, as long as the key is not Escape — a
+    /// focused box swallows the key
     /// whether or not the box wanted it, which is what stops a hotbar number key
     /// selecting a slot while you are typing `stone`.
     ///
@@ -92,24 +92,25 @@ pub(crate) struct KeyGate {
     pub recipe_search: bool,
     /// The creative screen's search box has focus — the same
     /// swallow-everything-but-Escape rule as [`recipe_search`](Self::recipe_search),
-    /// and for the same vanilla reason: `CreativeModeInventoryScreen.keyPressed`
-    /// (`:428`) returns `true` for any key while the box is focused and visible
+    /// and for the same vanilla reason: the creative screen's key handling
+    /// swallows any key while the box is focused and visible
     /// and the event is not Escape.
     ///
-    /// Vanilla is *stronger* here than for the recipe book — it calls
-    /// `setCanLoseFocus(false)` on entering the search tab (`:610`), so the box
+    /// Vanilla is *stronger* here than for the recipe book — it marks the box
+    /// unable to lose focus on entering the search tab, so the box
     /// cannot be unfocused by clicking elsewhere. `CreativeState::select_tab`
     /// mirrors that.
     pub creative_search: bool,
     /// The anvil's rename box has focus — the same swallow-everything-but-
     /// the-container-close rule [`recipe_search`](Self::recipe_search)/
     /// [`creative_search`](Self::creative_search) have, and for the same
-    /// vanilla reason: `AnvilScreen.keyPressed` routes every key to
-    /// `this.name` first and only falls to `super.keyPressed` (the ordinary
-    /// container swallow) when the box itself declines
-    /// (`!this.name.keyPressed(event) && !this.name.canConsumeInput()`).
+    /// vanilla reason: the anvil screen's key handling routes every key to
+    /// its rename box first and only falls through to the ordinary
+    /// container swallow when the box itself declines the key and has
+    /// nothing left to consume.
     ///
-    /// `setCanLoseFocus(false)` (`AnvilScreen.subInit`) is vanilla's version
+    /// Marking the rename box unable to lose focus, on opening the anvil
+    /// screen, is vanilla's version
     /// of the same "always focused while relevant" property
     /// [`creative_search`](Self::creative_search)'s doc names — this box is
     /// active whenever the anvil screen is open **and** its input slot (slot
@@ -153,7 +154,7 @@ pub(crate) enum KeyOutcome {
     /// [`InputAction::DebugShowChunkBorders`].
     ToggleChunkBorders,
     /// Shift+F3 — the profiler pie chart's own visibility toggle. Not a
-    /// vanilla `KeyMapping` (vanilla has no chart of its own to toggle
+    /// vanilla key binding (vanilla has no chart of its own to toggle
     /// separately from the F3 overlay); `docs/frame-profiling.md` records why
     /// this chord rather than a bindable action.
     ToggleProfilerChart,
@@ -191,15 +192,15 @@ pub(crate) enum KeyOutcome {
     /// F3+H — vanilla's `key.debug.showAdvancedTooltips`.
     ///
     /// Unlike its two siblings above this does **not** toggle a render flag: it
-    /// flips a *persisted option*, `Options.advancedItemTooltips`
-    ///, which is what `ItemStack.getTooltipLines` consults
-    /// through `TooltipFlag.Default.ADVANCED`. So the driver's arm writes it
+    /// flips a *persisted option*, the advanced-item-tooltips flag,
+    /// which is what vanilla's tooltip-line building consults
+    /// to decide how much detail to show. So the driver's arm writes it
     /// through `MenuNav` (which owns `Options` and persists eagerly) rather than
     /// into an `AtomicBool` — see
     /// [`crate::config::Options::advanced_item_tooltips`].
     ToggleAdvancedTooltips,
-    /// F3+P — vanilla's `key.debug.focusPause`
-    /// (`Options.pauseOnLostFocus`).
+    /// F3+P — vanilla's `key.debug.focusPause`, the persisted
+    /// pause-on-lost-focus option.
     TogglePauseOnLostFocus,
     /// F3+C — vanilla's `key.debug.copyLocation`: copy a `/execute in <dim>
     /// run tp @s x y z yaw pitch` command for the local player to the
@@ -209,10 +210,10 @@ pub(crate) enum KeyOutcome {
     ///
     /// **No payload**, and the two things it does not carry are deliberate,
     /// both recorded in `docs/keybindings.md`'s "Screenshot" section: vanilla's
-    /// Ctrl-held panorama variant is gated behind
-    /// `SharedConstants.DEBUG_PANORAMA_SCREENSHOT`, which ships `false`, so a
+    /// Ctrl-held panorama variant is gated behind a build-time debug flag
+    /// that ships off, so a
     /// player's Ctrl+F2 is byte-identical to a plain F2; and vanilla's
-    /// screen-independence (`Minecraft.handleGlobalKeyPress`) is not modelled
+    /// screen-independent global key handling is not modelled
     /// here, because this `resolve_key` swallows every key behind `gate.menu`
     /// before any action arm runs — exactly as it already does for
     /// `key.debug.overlay`.
@@ -238,8 +239,7 @@ pub(crate) enum KeyOutcome {
     /// A `ContainerInput::SWAP` against the **hovered** slot while a container
     /// screen is open: vanilla's number keys and `key.swapOffhand`, which do
     /// *not* change the selected hotbar slot while a screen is up
-    /// (`AbstractContainerScreen.checkHotbarKeyPressed`,
-    /// `AbstractContainerScreen.java`).
+    /// (vanilla's container-screen hotbar-swap key handling).
     ///
     /// `button` is the wire button number: `0..=8` for a hotbar key, `40` for the
     /// off-hand key. It is carried raw rather than as an enum because that is
@@ -260,8 +260,8 @@ pub(crate) enum KeyOutcome {
     ///
     /// | context | mechanism |
     /// |---|---|
-    /// | screen open, slot hovered | container click, `ClickType.SWAP`, button `40` |
-    /// | no screen, normal play | `ServerboundPlayerActionPacket` / `SWAP_ITEM_WITH_OFFHAND` |
+    /// | screen open, slot hovered | container click, off-hand swap click type, button `40` |
+    /// | no screen, normal play | a server-bound player-action packet requesting the swap |
     ///
     /// The gameplay one carries **no slot**: it is a bare action, and the server
     /// exchanges main hand for off hand itself
@@ -269,16 +269,16 @@ pub(crate) enum KeyOutcome {
     /// no payload — there is nothing to hit-test and nothing to address, which
     /// is exactly what distinguishes it from `ContainerSwap`.
     ///
-    /// Vanilla's one guard is `!player.isSpectator()`
+    /// Vanilla's one guard is that the player must not be a spectator
     ///. That is session state rather than key state,
     /// so like `ContainerSwap`'s two guards it lives at the driver's `match` arm.
     SwapOffhand,
     /// A `ContainerInput::Throw` against the **hovered** slot while a
     /// container screen is open — vanilla's `key.drop` inside
-    /// `AbstractContainerScreen.keyPressed`
+    /// its container-screen key handling
     ///, gated there on
-    /// `hoveredSlot != null && hoveredSlot.hasItem()` — **not** an empty
-    /// cursor, which `doClick` applies itself once the click reaches it
+    /// a hovered slot that holds an item — **not** an empty
+    /// cursor, which the click itself applies once it reaches the container
     ///. `ctrl` selects drop-**stack**
     /// (button `1`) over drop-one (button `0`), the only thing the modifier
     /// changes; carried here rather than read at the driver arm because
@@ -286,19 +286,19 @@ pub(crate) enum KeyOutcome {
     /// [`InputAction::Drop`]'s docs).
     ContainerDrop { ctrl: bool },
     /// `key.drop` pressed with **no screen open** — vanilla's own
-    /// `Minecraft.handleKeybinds` drop path. A
+    /// client-side key-handling drop path. A
     /// different mechanism from [`Self::ContainerDrop`], the same split
     /// [`Self::SwapOffhand`] makes against [`Self::ContainerSwap`]: this one
     /// carries no slot, only which of `ClientAction::DropSelectedItem`/
     /// `DropSelectedItemStack` `ctrl` selects.
     Drop { ctrl: bool },
     /// `key.pickItem` pressed with **no screen open** — vanilla's
-    /// `Minecraft.pickBlockOrEntity`. `ctrl` is
-    /// `hasControlDown()`, forwarded as `include_data` on whichever
+    /// pick-block-or-entity handling. `ctrl` is
+    /// the control-key modifier, forwarded as `include_data` on whichever
     /// `ClientAction` fires, exactly the same carry-it-here split
     /// [`Self::Drop`] makes.
     PickItem { ctrl: bool },
-    /// `key.pickItem` pressed with a container screen open — `ClickType::CLONE`
+    /// `key.pickItem` pressed with a container screen open — vanilla's clone click
     /// against the hovered slot. No
     /// payload: unlike [`Self::ContainerDrop`], this click has no
     /// modifier-selected variant.
@@ -397,7 +397,7 @@ fn profiler_chart_digit(code: KeyCode) -> Option<Option<usize>> {
 /// only the keybind chain needs a `KeyCode` to match against.
 ///
 /// `ctrl` is whether Control is currently held — vanilla's own
-/// `Screen.hasControlDown()`/`hasControlDown()`, read by the driver off a
+/// screen-level control-key check, read by the driver off a
 /// tracked modifier state (mirroring `shift_held`) rather than off this event,
 /// since Control and `key.drop` are two different physical keys. It decides
 /// nothing except which of [`KeyOutcome::ContainerDrop`]/[`KeyOutcome::Drop`]'s
@@ -445,15 +445,15 @@ pub(crate) fn resolve_key(
         Some(KeyOutcome::CreativeSearch)
     } else if gate.anvil_rename_active && pressed {
         // Same position and the same reason as the two boxes above —
-        // matches `AnvilScreen.keyPressed`'s own order exactly: `isEscape()`
+        // matches vanilla's anvil-screen key handling order exactly: Escape
         // (→ `Pause`, above) is checked before the box, and every other key
-        // reaches `this.name` before the ordinary container swallow gets a
+        // reaches the rename box before the ordinary container swallow gets a
         // chance to drop it.
         Some(KeyOutcome::AnvilRename)
     } else if gate.container_open && pressed {
-        // Vanilla's order, from `AbstractContainerScreen.keyPressed`
+        // Vanilla's order, from its container-screen key handling
         //: the inventory binding closes
-        // the screen first, then `checkHotbarKeyPressed` tries the off-hand key
+        // the screen first, then the hotbar-swap key handling tries the off-hand key
         // and then the nine hotbar keys. Anything else is swallowed — hence
         // `None`, not a fall-through, so no gameplay binding fires behind an open
         // inventory.
@@ -466,7 +466,7 @@ pub(crate) fn resolve_key(
         // now-deleted `key.lodestone.toggleFly` squatted on), never by the click
         // path — `Click::offhand_swap` and `do_swap`'s `button == 40` arm were
         // already in place and tested. Asked **before** the hotbar keys, matching
-        // `checkHotbarKeyPressed`'s own order, so rebinding the off-hand key onto
+        // the hotbar-swap key handling's own order, so rebinding the off-hand key onto
         // a number key swaps with slot `40` rather than that number's slot.
         if binds.is(InputAction::Inventory, code) {
             Some(KeyOutcome::CloseContainer)
@@ -478,16 +478,16 @@ pub(crate) fn resolve_key(
             Some(KeyOutcome::ContainerSwap { button: slot as i32 })
         } else if binds.is(InputAction::PickItem, code) {
             // Before the `Drop` arm below, matching vanilla's own
-            // `keyPickItem`-then-`keyDrop` order in
-            // `AbstractContainerScreen.keyPressed` (`:495-501`). The
+            // pick-item-then-drop order in vanilla's container-screen key
+            // handler. The
             // hovered-slot gate lives in `MenuInput::key_pressed`, so a miss
             // resolves here and produces zero clicks downstream, exactly as the
             // `Drop` arm's own comment describes.
             Some(KeyOutcome::ContainerPickItem)
         } else if binds.is(InputAction::Drop, code) {
-            // Vanilla checks this *after* `checkHotbarKeyPressed` returns,
-            // not folded into it — `AbstractContainerScreen.java` is
-            // two separate `if`s, one wrapping `checkHotbarKeyPressed` and a
+            // Vanilla checks this *after* the hotbar-swap key handling returns,
+            // not folded into it — vanilla's container-screen key handler is
+            // two separate `if`s, one wrapping the hotbar-swap check and a
             // second, independent one for pick/drop. The hovered-slot-has-item
             // gate itself lives in `MenuInput::key_pressed`, not here, so a
             // miss (empty slot, no slot at all) resolves to this outcome and
@@ -510,9 +510,8 @@ pub(crate) fn resolve_key(
         Some(KeyOutcome::PluginConsumed)
     } else if binds.is(InputAction::DebugOverlay, code) {
         // **Both edges**, and the toggle has moved to the release — that fix's
-        // chords. Vanilla's own rule is
-        // `keyDebugModifier.setDown(!didDebugAction)` at
-        // `KeyboardHandler.java`: releasing F3 toggles the overlay only
+        // chords. Vanilla's own rule is that releasing the debug-modifier key
+        // toggles the overlay only
         // if no chord fired while it was held. Toggling on the *press* (what
         // this did before) makes F3+B both open the overlay and toggle
         // hitboxes, which is why the modifier cannot just be a held flag with
@@ -520,8 +519,8 @@ pub(crate) fn resolve_key(
         Some(KeyOutcome::DebugModifier(pressed))
     } else if gate.debug_held && pressed && binds.is(InputAction::DebugShowHitboxes, code) {
         // `key.debug.showHitboxes`. Table-driven, not a literal `KeyCode::KeyB`:
-        // vanilla declares this a `Category.DEBUG` `KeyMapping` and dispatches
-        // it through `KeyMapping::matches` — see `InputAction::DebugShowHitboxes`.
+        // vanilla declares this a debug-category key binding and dispatches
+        // it through its own key-matching logic — see `InputAction::DebugShowHitboxes`.
         // The `gate.debug_held` conjunct stays, because the F3 *modifier* is a
         // gate flag here rather than an eighth bindable action.
         Some(KeyOutcome::ToggleHitboxes)
@@ -536,7 +535,7 @@ pub(crate) fn resolve_key(
         // way the shift-click swallow above reads "is a shift modifier
         // down" rather than a single rebindable key; see
         // [`KeyOutcome::ToggleProfilerChart`]'s doc for why this is not a
-        // vanilla `KeyMapping`.
+        // vanilla key binding.
         Some(KeyOutcome::ToggleProfilerChart)
     } else if gate.debug_held && pressed && let Some(digit) = profiler_chart_digit(code) {
         // The profiler chart's own number-row navigation — see
@@ -552,7 +551,7 @@ pub(crate) fn resolve_key(
     } else if gate.debug_held && pressed && binds.is(InputAction::DebugShowAdvancedTooltips, code) {
         // `key.debug.showAdvancedTooltips` — table-driven, as above. **Not gated on
         // `gate.gameplay`**, the same as its two siblings: F3 chords are debug
-        // instruments and vanilla's `KeyboardHandler.handleDebugKeys` runs
+        // instruments and vanilla's own debug-key handling runs
         // regardless of the open screen — which matters more for this one than
         // for the others, because the thing it changes is only *visible* with a
         // container screen open.
@@ -611,17 +610,17 @@ pub(crate) fn resolve_key(
         // mechanism — see [`KeyOutcome::SwapOffhand`].
         //
         // **Placed after the hotbar keys, unlike the container arm, and that
-        // asymmetry is vanilla's own.** `Minecraft.handleKeybinds` asks
-        // `keyHotbarSlots` at `:1873` and `keySwapOffhand` at `:1900`;
-        // `AbstractContainerScreen.checkHotbarKeyPressed` asks the off-hand key
+        // asymmetry is vanilla's own.** Vanilla's client-side key handling asks
+        // the hotbar-slot keys before the off-hand-swap key;
+        // its container-screen hotbar-swap key handling asks the off-hand key
         // *first*. Both orders only matter once someone rebinds the off-hand key
         // onto a number key, and matching each context's own source is cheaper
         // than picking one and being wrong in half the cases.
         Some(KeyOutcome::SwapOffhand)
     } else if binds.is(InputAction::Drop, code) && pressed && gate.gameplay {
-        // `Minecraft.handleKeybinds` asks `keyDrop` (`:1907`) immediately
-        // after `keySwapOffhand` (`:1900`) and before `keyAttack`/`keyUse`
-        // (`:1913+`) — matched here for the same reason the off-hand arm's
+        // Vanilla's client-side key handling asks the drop key immediately
+        // after the off-hand-swap key and before the attack/use keys
+        // — matched here for the same reason the off-hand arm's
         // own doc gives: the two orders (this one and the container arm's)
         // only diverge once someone rebinds one action onto another's key.
         Some(KeyOutcome::Drop { ctrl })
@@ -635,7 +634,7 @@ pub(crate) fn resolve_key(
         // matter here too, not just on press — see `KeyOutcome::Use`'s docs.
         Some(KeyOutcome::Use(pressed))
     } else if binds.is(InputAction::PickItem, code) && pressed && gate.gameplay {
-        // Press-only: vanilla's `pickBlockOrEntity` is a one-shot, unlike
+        // Press-only: vanilla's pick-block-or-entity handling is a one-shot, unlike
         // attack/use whose release edge also matters. Reachable by keyboard only
         // once `key.pickItem` is rebound off its default middle mouse button;
         // the mouse path in the button handler is what fires out of the box.
@@ -649,9 +648,9 @@ pub(crate) fn resolve_key(
     }
 }
 
-/// Vanilla's `KeyboardHandler.decorateDebugComponent`/`debugFeedback`: every
+/// Vanilla's debug-key feedback: every
 /// F3 chord that changes something prints a `[Debug]: <message>` line to
-/// chat, with the prefix bold and `ChatFormatting.YELLOW`.
+/// chat, with the prefix bold and yellow.
 ///
 /// `YELLOW` is a legacy-representable colour — `TextColor::legacy_code()`
 /// returns `Some` for it — so this needs no
@@ -666,7 +665,7 @@ pub(crate) fn resolve_key(
 /// one. So the colour reaches a vertex without this function, or its caller,
 /// touching a span directly.
 ///
-/// Vanilla has a red `debugWarningComponent` sibling for the failure paths
+/// Vanilla has a red warning-feedback sibling for the failure paths
 /// (no-permission errors); every chord ported here either always succeeds or
 /// has no failure path we can detect client-side (see
 /// `docs/keybindings.md`), so only the yellow feedback path exists — add the
@@ -678,7 +677,7 @@ pub(crate) fn debug_feedback(message: impl std::fmt::Display) -> String {
 
 /// The `"<label>: shown"`/`"<label>: hidden"` shape three chords share —
 /// `debug.show_hitboxes.on`/`.off`, `debug.chunk_boundaries.on`/`.off` and
-/// `debug.advanced_tooltips.on`/`.off` (`KeyboardHandler.debugFeedbackTranslated`).
+/// `debug.advanced_tooltips.on`/`.off` (vanilla's own translated debug feedback).
 /// Pure so `debug_feedback`'s driver call sites and this module's own tests
 /// share one source of the exact vanilla wording, rather than each arm in
 /// `app/lifecycle.rs` spelling the strings out separately.
@@ -698,8 +697,8 @@ pub(crate) fn debug_enabled_feedback(label: &str, now: bool) -> String {
     ))
 }
 
-/// `KeyboardHandler.keyDebugCopyLocation`'s `String.format`
-///: `/execute in %s run tp @s %.2f %.2f %.2f %.2f
+/// Vanilla's debug copy-location key formats
+/// `/execute in %s run tp @s %.2f %.2f %.2f %.2f
 /// %.2f`, the dimension identifier then x/y/z/yaw/pitch each to two decimal
 /// places. Pure so `KeyOutcome::CopyLocation`'s driver arm and this module's
 /// own test share the exact format rather than the test re-deriving it from
@@ -725,21 +724,14 @@ pub(crate) fn copy_location_command(
 ///
 /// # No local prediction, and that is the vanilla behaviour rather than a shortcut
 ///
-/// `Minecraft.handleKeybinds` is the entire client
-/// half of this feature:
-///
-/// ```text
-/// while (this.options.keySwapOffhand.consumeClick()) {
-///    if (!this.player.isSpectator()) {
-///       this.getConnection().send(new ServerboundPlayerActionPacket(
-///          Action.SWAP_ITEM_WITH_OFFHAND, BlockPos.ZERO, Direction.DOWN));
-///    }
-/// }
-/// ```
+/// Vanilla's whole client-side handling of this key, each frame the key
+/// binding registers a click, is: if the player is not a spectator, send a
+/// single server-bound player-action packet requesting the off-hand swap.
+/// That is the entire client half of this feature.
 ///
 /// No `Inventory` mutation, no animation, no prediction. The swap happens
-/// **server-side only** (`ServerGamePacketListenerImpl.java` does the
-/// three-way exchange plus `stopUsingItem`), and the client learns the result
+/// **server-side only** (the server does the
+/// three-way exchange plus stopping any in-progress item use), and the client learns the result
 /// from the ordinary inventory-sync packets that follow.
 ///
 /// This is why that fix's round-trip worry does not apply here the way it does
@@ -753,9 +745,9 @@ pub(crate) fn copy_location_command(
 ///
 /// # The one guard
 ///
-/// `!player.isSpectator()`. A spectator has no inventory to swap and vanilla
+/// A spectator has no inventory to swap and vanilla
 /// declines to send at all — so the packet never reaches a server that would
-/// silently drop it (the server re-checks, `:1295`). Reading the mode as
+/// silently drop it (the server re-checks independently). Reading the mode as
 /// `Option` and treating unknown as *not* a spectator matches the rest of the
 /// shell: before login there is no mode, and refusing input until one arrives
 /// would be a worse default than sending a packet no server is listening for.
@@ -775,20 +767,19 @@ pub(crate) fn offhand_swap_action(
 ///
 /// # The one guard
 ///
-/// `!player.isSpectator()`, the exact same guard
+/// The exact same guard
 /// `offhand_swap_action` applies and for the same reason: a spectator has
 /// nothing to drop, vanilla declines to send at all, and the server re-checks
-/// regardless (`ServerGamePacketListenerImpl`'s handling of
-/// `Action.DROP_ITEM`/`DROP_ALL_ITEMS` no-ops for a spectator same as any
+/// regardless (the drop-item and drop-all-items actions no-op for a spectator same as any
 /// other player action). An unknown mode (before login) is treated as *not*
 /// spectator, matching `offhand_swap_action`'s own default.
 ///
 /// # `ctrl` selects the wire action, not a client-side stack split
 ///
-/// Vanilla's `Player.drop(boolean dropStack)` chooses between dropping one
+/// Vanilla's drop handling chooses between dropping one
 /// item and the whole stack **client-side**, mutating the local inventory as
-/// part of the drop and then sending whichever `ServerboundPlayerActionPacket`
-/// action matches. This shell has no client-side inventory mutation for the
+/// part of the drop and then sending whichever server-bound player-action
+/// packet action matches. This shell has no client-side inventory mutation for the
 /// hotbar outside the container-click predictor (see `send_offhand_swap`'s
 /// own note on the same gap), so `ctrl` selects the wire action directly —
 /// `DropSelectedItemStack` for `true`, `DropSelectedItem` for `false` — and the
@@ -1197,7 +1188,8 @@ mod chat_editing {
     }
 
     /// Word motion extends a selection under Shift exactly as a plain arrow
-    /// does — `moveCursorTo(pos, event.hasShiftDown())`, one shared argument.
+    /// does — vanilla's own cursor-move call takes the shift-held state as one
+    /// shared argument.
     #[test]
     fn shift_with_the_edit_modifier_selects_a_whole_word() {
         let mut line = Line::new("hello world");

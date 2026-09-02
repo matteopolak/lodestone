@@ -11,11 +11,10 @@ use super::*;
 /// Vanilla's cap on how many 20 Hz client ticks a single update may run.
 ///
 /// Read from the decompiled 26.2 client, not guessed:
-/// vanilla's own client class declares
-/// `private static final int MAX_TICKS_PER_UPDATE = 10;` and applies it
-/// as `for (int i = 0; i < Math.min(10, ticksToDo); i++)`. Note *where* the cap
-/// lives: `DeltaTracker.Timer::advanceGameTime` returns the full uncapped tick
-/// count and keeps the sub-tick residual, and `runTick` then simply **runs at
+/// vanilla's own client declares this cap as a constant `10` and applies it
+/// by running at most that many ticks per update loop. Note *where* the cap
+/// lives: vanilla's own delta-time tracker returns the full uncapped tick
+/// count and keeps the sub-tick residual, and the per-frame update then simply **runs at
 /// most ten of them and drops the rest**. Missed real time is discarded, never
 /// replayed — which is the whole point.
 ///
@@ -110,33 +109,31 @@ pub(crate) struct FrameStep {
 /// onto `now` — otherwise coming back from a two-minute alt-tab would present a
 /// burst of catch-up frames, which is the same mistake as replaying catch-up
 /// ticks.
-/// Vanilla's `FramerateLimitTracker` AFK thresholds
-/// (`FramerateLimitTracker.java`'s `AFK_THRESHOLD_MS`/`LONG_AFK_THRESHOLD_MS`),
+/// Vanilla's own framerate-limit tracker's AFK thresholds,
 /// in seconds — how long since the last real key/mouse input before the
 /// framerate cap tightens. Only consulted when `inactivityFpsLimit == Afk`;
 /// see [`effective_target_fps`].
 pub(crate) const AFK_THRESHOLD_SECS: f64 = 60.0;
 /// See [`AFK_THRESHOLD_SECS`].
 pub(crate) const LONG_AFK_THRESHOLD_SECS: f64 = 600.0;
-/// Vanilla's `FramerateLimitTracker.SHORT_AFK_LIMIT`/... — actually named
-/// `AFK_LIMIT`/`LONG_AFK_LIMIT` in `FramerateLimitTracker.java`.
+/// Vanilla's own short/long AFK framerate caps.
 pub(crate) const AFK_FPS: u32 = 30;
 /// See [`AFK_FPS`].
 pub(crate) const LONG_AFK_FPS: u32 = 10;
 
-/// Vanilla's `FramerateLimitTracker::getFramerateLimit`'s AFK half
-///, minus the `WINDOW_ICONIFIED`/
-/// `OUT_OF_LEVEL_MENU` branches: this pacer already throttles an
+/// Vanilla's own framerate-limit computation's AFK half
+///, minus the minimized-window/
+/// out-of-level-menu branches: this pacer already throttles an
 /// occluded/unfocused window unconditionally (the module doc's table
-/// predates `framerateLimit`), so those two vanilla branches are subsumed by
+/// predates the persisted framerate-limit option), so those two vanilla branches are subsumed by
 /// a mechanism this client had before the option existed. What is new here
 /// is the AFK clock, gated on `inactivityFpsLimit == Afk` exactly as vanilla
-/// gates its own (`Minimized` never reduces for idle input — only for window
+/// gates its own (a minimized window never reduces for idle input — only for window
 /// state, which the pacer already covers).
 ///
 /// `raw_limit` is the persisted `framerate_limit` (`10..=260`, `260` = the
-/// `UNLIMITED_FRAMERATE_CUTOFF` sentinel `Options.java` never applies the
-/// limiter past — `Minecraft.java`'s `if (framerateLimit < 260)`).
+/// unlimited-framerate sentinel vanilla never applies the
+/// limiter past).
 /// Returns `None` for "no cap at all", so a focused window with the row left
 /// at Unlimited and not AFK still lets vsync/the compositor pace it exactly
 /// as before this option existed.
@@ -191,20 +188,20 @@ pub(crate) struct FramePacer {
     /// presented rate does not drift below the target.
     next_render: Instant,
     /// The last time [`Self::record_input`] saw a real key/mouse event —
-    /// vanilla's `FramerateLimitTracker::onInputReceived`'s clock. Feeds
+    /// vanilla's own framerate-limit tracker's input clock. Feeds
     /// [`effective_target_fps`]'s AFK half through [`Self::idle_secs`].
     last_input: Instant,
     focused: bool,
     occluded: bool,
     /// Presented frames counted in the current one-second window — vanilla's
-    /// `Minecraft.frames`. See [`Self::record_presented_frame`].
+    /// own presented-frame counter. See [`Self::record_presented_frame`].
     frame_count: u32,
     /// The start of the current counting window — vanilla's
-    /// `Minecraft.lastTime`. Advanced by whole [`FPS_WINDOW`]s so window
+    /// own window-start clock. Advanced by whole [`FPS_WINDOW`]s so window
     /// boundaries never drift with rounding.
     fps_window_start: Instant,
     /// The presented-frame count for the last **completed** window —
-    /// vanilla's static `Minecraft.fps`. `0` until one full window has
+    /// vanilla's own static reported-fps value. `0` until one full window has
     /// elapsed since [`Self::new`]. Unlike a reciprocal of a per-iteration
     /// `dt`, this cannot report a rate the loop's actual presentation never
     /// produced: it is a count of things that really happened, not a
@@ -332,12 +329,12 @@ impl FramePacer {
     /// return (a menu screen owning the whole frame, GPU state not yet ready)
     /// must not count.
     ///
-    /// Ported from vanilla's own run-tick's `fpsUpdate` block:
+    /// Ported from vanilla's own per-frame fps-update block:
     /// vanilla does not take a reciprocal of a frame time at all. It
-    /// increments a counter (`this.frames++`) once per presented frame and,
+    /// increments a counter once per presented frame and,
     /// whenever wall-clock time has crossed a one-second boundary since the
-    /// last report (`Util.getMillis() >= this.lastTime + 1000L`), publishes
-    /// that counter as `fps` and starts a new window. That is structurally
+    /// last report, publishes
+    /// that counter as the reported fps and starts a new window. That is structurally
     /// immune to the class of bug this method exists to fix: a rate derived
     /// from counting real events in real time cannot report a number those
     /// events never produced, whereas `1.0 / dt` reports whatever the loop's
@@ -345,8 +342,8 @@ impl FramePacer {
     /// event loop iterate far more often than it presents, is the interval
     /// between iterations, not between presented frames.
     ///
-    /// The `while` mirrors vanilla's `for (...; Util.getMillis() >=
-    /// this.lastTime + 1000L; this.frames = 0)`: a stall longer than one
+    /// The `while` mirrors vanilla's own window-rollover loop, which resets
+    /// its frame counter each time it fires: a stall longer than one
     /// window reports the frames actually presented in the first completed
     /// window, then `0` for every further window the stall spans, exactly as
     /// vanilla's loop re-triggers its own condition with `frames` reset.
@@ -360,7 +357,7 @@ impl FramePacer {
     }
 
     /// The presented-frame count for the last completed one-second window —
-    /// vanilla's static `Minecraft.fps`, read by [`WindowApp::redraw`] for the
+    /// vanilla's own static reported-fps value, read by [`WindowApp::redraw`] for the
     /// debug overlay. See [`Self::record_presented_frame`].
     pub(crate) fn fps(&self) -> u32 {
         self.reported_fps
@@ -440,7 +437,7 @@ mod tests {
         // window boundary is counted (`frame_count += 1`) *before* the
         // boundary check, so it is attributed to whichever window's report
         // fires on that same call — occasionally the just-elapsed window
-        // rather than the new one. That is `Minecraft.runTick`'s own
+        // rather than the new one. That is vanilla's own per-frame tick
         // ordering, not a defect in this port.
         let fps = pacer.fps();
         assert!(

@@ -350,8 +350,8 @@ mod chat_click_dispatch {
     }
 }
 
-/// `WorldOptions.parseSeed`: a valid `i64` literal is used
-/// verbatim (vanilla tries `Long.parseLong` first), whitespace is
+/// Vanilla's own seed parsing: a valid `i64` literal is used
+/// verbatim (vanilla tries a plain long parse first), whitespace is
 /// trimmed, and non-numeric text falls back to the Java hash — not a new
 /// rule, just `parse_seed` calling straight through to the constant test
 /// above.
@@ -368,7 +368,7 @@ fn parse_seed_follows_vanillas_own_rule() {
     );
 }
 
-/// An empty seed means "random" (`WorldOptions.defaultWithRandomSeed`) —
+/// An empty seed means "random" (vanilla's own random-seed default) —
 /// asserted by absence of a fixed answer, the only honest assertion for
 /// "random": two draws must not collide (astronomically unlikely for a
 /// real `i64` random source, impossible for a constant-returning bug).
@@ -1122,7 +1122,7 @@ fn effective_target_fps_matches_vanillas_framerate_limit_tracker() {
         Some(120)
     );
     // `Minimized` never reduces for idle input, however long — only `Afk`
-    // does (`FramerateLimitTracker.java`'s own gate).
+    // does (vanilla's own framerate-limit-tracker gate).
     assert_eq!(
         effective_target_fps(120, InactivityFpsLimit::Minimized, 10_000.0),
         Some(120)
@@ -1482,7 +1482,7 @@ mod menu_key_shortcut_conversion {
     }
 
     /// Cmd+Shift+A is not select-all in vanilla either
-    /// (`InputWithModifiers.isSelectAll`'s `!hasShiftDown()` guard) — and must
+    /// (vanilla's own select-all check requires shift to be up) — and must
     /// not fall through to typing `a` alongside doing nothing, matching
     /// `focus::KeyEvent::is_edit_shortcut`'s own guard.
     #[test]
@@ -1575,7 +1575,7 @@ fn default_playing_expectations() -> Vec<(KeyCode, KeyOutcome)> {
         (KeyCode::F5, KeyOutcome::TogglePerspective),
         // Issue #197: F3 is now the debug *modifier*, reporting both edges; the
         // overlay toggle happens on the release when no chord fired (see
-        // `resolve_key`, and vanilla `KeyboardHandler.java`).
+        // `resolve_key`, and vanilla's own keyboard handling).
         (KeyCode::F3, KeyOutcome::DebugModifier(true)),
         (KeyCode::Escape, KeyOutcome::Pause),
         (KeyCode::Digit1, KeyOutcome::SelectSlot(0)),
@@ -1748,9 +1748,9 @@ fn the_inventory_key_closes_a_container_and_escape_pauses_instead() {
 /// Issue #378 part 3. Vanilla's `1`–`9` **do not** change the selected hotbar
 /// slot while a container screen is open; they issue a `ContainerInput::SWAP`
 /// with that hotbar index against the hovered slot
-/// (`AbstractContainerScreen.checkHotbarKeyPressed`,
-/// `AbstractContainerScreen.java`, and the number keys are handled in
-/// `Minecraft.handleKeybinds` only when `screen == null`).
+/// (vanilla's own container-screen hotbar-swap key handling,
+/// and the number keys are handled in
+/// vanilla's client-side key handling only when no screen is open).
 ///
 /// Before this they fell into the container arm's swallow: they neither
 /// selected a slot — correct — nor swapped, which is the gap.
@@ -1810,7 +1810,7 @@ fn the_number_keys_swap_with_the_hovered_slot_instead_of_selecting_one() {
 
 /// The off-hand key's container half (issues #378 part 3 / #382).
 ///
-/// `key.swapOffhand` defaults to `F` (`Options.java`, GLFW keysym 70).
+/// `key.swapOffhand` defaults to `F` (vanilla's own default keymap, GLFW keysym 70).
 /// It could not be added while `key.lodestone.toggleFly` squatted on `F`;
 /// #382 deleted that binding, and this is the assertion that the freed key
 /// actually reaches `Click::offhand_swap` rather than merely existing in
@@ -1903,8 +1903,7 @@ fn the_offhand_key_in_the_world_sends_the_swap_action_to_the_wire() {
 }
 
 /// **The spectator control**, and the one guard vanilla actually applies
-/// (`Minecraft.java`, re-checked server-side at
-/// `ServerGamePacketListenerImpl.java`).
+/// (vanilla's own client-side check, re-checked server-side too).
 ///
 /// Watched failing: with the `Spectator` arm removed,
 /// `offhand_swap_action(Spectator)` returns the action and the first
@@ -1966,13 +1965,13 @@ fn q_drops_one_while_playing_and_ctrl_q_drops_the_stack() {
         resolve_ctrl(playing(), KeyCode::KeyQ, true),
         Some(KeyOutcome::Drop { ctrl: true })
     );
-    // A release does nothing — vanilla's `keyDrop.consumeClick()` only
+    // A release does nothing — vanilla's own key-click consumption only
     // ever fires on the down edge.
     assert_eq!(resolve(playing(), KeyCode::KeyQ, false), None);
 }
 
-/// The container half — vanilla's `AbstractContainerScreen.keyPressed`
-/// (`:495-501`) reached through `resolve_key`'s `container_open` arm.
+/// The container half — vanilla's own container-screen key handling
+/// reached through `resolve_key`'s `container_open` arm.
 #[test]
 fn q_issues_a_container_drop_while_a_container_is_open() {
     let gate = KeyGate {
@@ -2340,12 +2339,12 @@ fn the_pause_and_copy_location_chords_need_the_debug_modifier() {
 }
 
 /// The exact vanilla wording `debug_shown_feedback`/`debug_enabled_feedback`
-/// produce, predicted from `KeyboardHandler.java`'s `debugFeedbackTranslated`
+/// produce, predicted from vanilla's own translated-debug-feedback
 /// call sites and the `en_us.json` strings they resolve
 /// (`debug.show_hitboxes.on`/`.off`, `debug.chunk_boundaries.on`/`.off`,
 /// `debug.advanced_tooltips.on`/`.off`, `debug.pause_focus.on`/`.off`) —
 /// not the round number, the exact byte string including the legacy `§`
-/// codes `decorateDebugComponent` applies (`§e` yellow, `§l` bold, `§r`
+/// codes vanilla's own debug feedback decoration applies (`§e` yellow, `§l` bold, `§r`
 /// reset before the un-styled body).
 #[test]
 fn debug_feedback_helpers_match_vanillas_exact_wording_and_legacy_codes() {
@@ -2413,8 +2412,8 @@ fn debug_feedback_expands_to_a_bold_yellow_prefix_span_and_a_plain_body_span() {
 }
 
 /// `KeyOutcome::CopyLocation`'s exact wire format, predicted from
-/// `KeyboardHandler.java`'s `String.format(Locale.ROOT, "/execute in %s run
-/// tp @s %.2f %.2f %.2f %.2f %.2f", ...)` — not the round number, and every
+/// vanilla's own debug copy-location format string ("/execute in %s run
+/// tp @s %.2f %.2f %.2f %.2f %.2f") — not the round number, and every
 /// numeric field pairwise-distinct (`CLAUDE.md`'s transposition rule) so a
 /// swapped x/y/z or yaw/pitch fails here rather than round-tripping silently.
 #[test]
@@ -2645,7 +2644,7 @@ fn the_mouse_path_resolves_the_default_attack_and_use_buttons() {
         Some(InputAction::Use)
     );
     // Middle **is** a gameplay binding now: `key.pickItem` defaults to
-    // `Type.MOUSE, 2`, so it is the primary route for
+    // the middle mouse button, so it is the primary route for
     // pick-item rather than a rebound one. This assertion previously read
     // `None`, which was correct only while pick-item did not exist — the
     // premise went stale when the binding landed, not the code.
@@ -3012,7 +3011,7 @@ fn drive_ui_from_session_opens_credits_on_the_real_win_game_event() {
     assert_eq!(
         app.ui.screen(),
         crate::menu::Screen::Credits,
-        "the real WIN_GAME event (GAME_EVENT code 4, ClientPacketListener.java) \
+        "the real WIN_GAME event (GAME_EVENT code 4, vanilla's own game-event packet handling) \
          must open the credits screen"
     );
 }
@@ -3145,10 +3144,11 @@ fn accepting_a_resource_pack_prompt_does_not_reopen_it_before_the_net_thread_cat
 /// The expected precipitation per sampled column is computed **here**,
 /// independently of both `ShellWeatherProbe` and `lodestone_render::
 /// weather` — the raw climate is pulled straight off the `BiomeClimateCell`
-/// and vanilla's own threshold is applied by hand, quoted from the
-/// decompiled source rather than from this crate's constant:
-/// `Biome.java`, `return this.getTemperature(pos, seaLevel) >= 0.15F;`
-/// (`warmEnoughToRain`, called from `getPrecipitationAt` at `:108`). A
+/// and vanilla's own threshold is applied by hand, taken from the
+/// decompiled source's behaviour rather than from this crate's constant:
+/// vanilla's own warm-enough-to-rain check returns true when the
+/// height-adjusted temperature is at least 0.15, and that check is what
+/// vanilla's own precipitation-at-position resolve calls. A
 /// wrong threshold in either implementation would show up as a mismatch
 /// against this independently-computed expectation rather than agreeing
 /// with itself — the `decode(encode(x)) == x` trap `CLAUDE.md` warns
@@ -3296,8 +3296,8 @@ async fn live_precipitation_matches_vanillas_own_threshold_for_real_biomes() {
 
         // Independent re-derivation, not a call to `lodestone_render::
         // weather`: vanilla's own height falloff
-        // (`Biome.getHeightAdjustedTemperature`, `Biome.java`)
-        // and its own rain/snow threshold (`Biome.java`, `0.15F`).
+        // (its own height-adjusted-temperature computation)
+        // and its own rain/snow threshold (`0.15F`).
         let above = (y - crate::worldgen::SEA_LEVEL) as f32;
         let adjusted = if above > 0.0 {
             temperature - above * 0.05 / 40.0
@@ -3871,7 +3871,7 @@ fn server_initiated_container_close_returns_to_gameplay_not_the_player_inventory
 
     // The exact expected UI state, not merely "the container screen is
     // gone": `active_container_menu` is `None` (**no** screen), matching
-    // vanilla's unconditional `Minecraft.gui.setScreen(null)` — not the
+    // vanilla's unconditional close-to-no-screen — not the
     // player's own inventory, which is what the bug showed instead
     // (`active_container_menu`'s window-0 fallback firing off a stale
     // `Screen::Container` the close never reset).
@@ -4240,7 +4240,7 @@ const CB_FB_H: u32 = 400;
 /// Asking `row_rect` where a row is and then clicking there would be
 /// `decode(encode(x)) == x`: it passes for any self-consistent geometry,
 /// including one that draws the buttons off-screen. These are computed from
-/// `AbstractCommandBlockEditScreen.java`'s own arithmetic — Done sits
+/// vanilla's own command-block-edit-screen layout arithmetic — Done sits
 /// at `width/2 - 4 - 150`, Cancel at `width/2 + 4`, both `150x20`
 /// at `height/4 + 120 + 12`, and the mode row at `width/2 - 154`,
 /// `100x20`, `y = 165`.
@@ -4279,7 +4279,7 @@ fn clicking_a_command_block_row_at_its_own_coordinates_activates_that_row() {
          `false`, which is why every click on it was silently dropped"
     );
 
-    // `AbstractCommandBlockEditScreen.java` — the footer anchor is
+    // Vanilla's own command-block-edit-screen layout — the footer anchor is
     // `(width/2, height/4 + 120 + 12)` and the buttons are `150x20`.
     let anchor_x = (CB_FB_W as f32 / 2.0).floor();
     let footer_y = (CB_FB_H as f32 / 4.0).floor() + 132.0;
@@ -4487,11 +4487,12 @@ const LIST_FB_H: u32 = 479;
 /// The *Join Server* button's rect, hand-derived from vanilla's own numbers.
 ///
 /// Nothing in here is read back out of our arranged layout — that is the point.
-/// `JoinMultiplayerScreen.init` builds `new HeaderAndFooterLayout(this, 33, 60)`
-/// and fills the footer with `LinearLayout.vertical().spacing(4)` holding two
-/// `LinearLayout.horizontal().spacing(4)` rows: three `TOP_ROW_BUTTON_WIDTH`
-/// (100) buttons, then four `LOWER_ROW_BUTTON_WIDTH` (74) ones. Every button is
-/// `Button.DEFAULT_HEIGHT` (20) tall, and `HeaderAndFooterLayout`'s footer frame
+/// Vanilla's own multiplayer-screen init builds a header-and-footer layout with
+/// a 33 px header and a 60 px footer,
+/// and fills the footer with a vertical stack (4 px spacing) holding two
+/// horizontal rows (4 px spacing): three 100 px-wide
+/// buttons, then four 74 px-wide ones. Every button is
+/// 20 px tall, and the footer frame
 /// aligns its child at `(0.5, 0.5)`.
 ///
 /// So: the child column measures `3*100 + 2*4 == 308` wide (the lower row is
@@ -4517,16 +4518,16 @@ fn join_server_rect() -> (f32, f32, f32, f32) {
     )
 }
 
-/// `new HeaderAndFooterLayout(this, 33, 60)`'s footer height, and the same value
+/// Vanilla's own header-and-footer layout's footer height, and the same value
 /// `server_row_visible` subtracts from the canvas to find the list's bottom.
 const SERVER_LIST_FOOTER_H_VANILLA: f32 = 60.0;
-/// The same call's header height, which is where the content band starts (the
+/// The same layout's header height, which is where the content band starts (the
 /// content frame is clamped up against the footer, so it never gets the 30 px
 /// preferred gap on this screen).
 const SERVER_LIST_HEADER_H_VANILLA: f32 = 33.0;
-/// `new ServerSelectionList(…, 36)`'s `itemHeight`.
+/// Vanilla's own server-selection list row height.
 const SERVER_LIST_ITEM_H_VANILLA: f32 = 36.0;
-/// `AbstractSelectionList.getFirstEntryY() = getY() + 2`.
+/// Vanilla's own selection-list first-entry offset: the list's own y plus 2.
 const SERVER_LIST_FIRST_ENTRY_Y_VANILLA: f32 = 2.0;
 
 /// A `WindowApp` on the multiplayer screen with `n` servers in the list, added
@@ -5108,14 +5109,14 @@ fn closed_f3_does_not_call_the_map_debug_gather() {
 /// vanilla 26.2**, and this client used to hardcode them.
 ///
 /// Checked in the jar rather than assumed, because the received wisdom (and
-/// this repo's own comments) said the opposite. `Options.java` declares
-/// `keyDebugShowHitboxes`, `keyDebugShowChunkBorders`,
-/// `keyDebugShowAdvancedTooltips`, `keyDebugSpectate`,
-/// `keyDebugSwitchGameMode`, `keyDebugFocusPause` and `keyDebugCopyLocation`
-/// as `Category.DEBUG` `KeyMapping`s, collects them in `debugKeys` and folds
-/// that array into `keyMappings` — the one vanilla persists and the Controls
-/// screen lists — and `KeyboardHandler.handleDebugKeys` asks every one of them
-/// `matches(event)`. So `code == KeyCode::KeyG` in `resolve_key` was the
+/// this repo's own comments) said the opposite. Vanilla's own persisted
+/// options declare all seven F3-chord actions (show hitboxes, show chunk
+/// borders, show advanced tooltips, spectate, switch game mode, focus pause,
+/// and copy location)
+/// as ordinary debug-category key bindings, collects them into its own debug-keys
+/// list and folds that array into the full key-binding list — the one vanilla persists and the Controls
+/// screen lists — and vanilla's own debug-key handling asks every one of them
+/// whether it matches the event. So `code == KeyCode::KeyG` in `resolve_key` was the
 /// divergence, not the table.
 ///
 /// Driven exactly like
