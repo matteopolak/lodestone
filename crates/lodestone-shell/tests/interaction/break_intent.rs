@@ -58,7 +58,7 @@ const STONE: u32 = 1;
 
 /// Real, oracle-confirmed jar constants (`docs/tool-mining.md`'s reference
 /// table, `crates/lodestone-data/tests/tools.rs`): vanilla stone's hardness is
-/// `1.5` (`Blocks.java`, cross-checked against the committed hardness census
+/// `1.5` (`Blocks`'s own decompiled source, cross-checked against the committed hardness census
 /// in `block-break-timing.md`), and a diamond pickaxe's `speed 8.0,
 /// correct_tool true` on it is the exact row that table pins at **6 ticks** —
 /// `per_tick = 8.0 / 1.5 / 30.0 ≈ 0.1778`, and replaying

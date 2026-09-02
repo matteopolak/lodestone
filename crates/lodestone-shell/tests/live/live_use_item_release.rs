@@ -237,7 +237,7 @@ fn a_bow_drawn_at_an_entity_and_released_fires_an_arrow() {
 
     // **Not** "does an arrow entity still exist": a normal (non-piercing)
     // arrow that hits and damages something is `discard()`ed by
-    // `AbstractArrow.onHitEntity` (`.cache/mc/26.2/src/…/AbstractArrow.java`)
+    // `AbstractArrow.onHitEntity` (vanilla's decompiled abstract-arrow source, 26.2)
     // within the same tick it lands, and the pig sits only ~2 blocks away —
     // well under one full tick of flight at a fully-drawn bow's velocity. An
     // arrow-presence poll raced that discard and always lost, which is

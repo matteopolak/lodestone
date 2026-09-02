@@ -874,7 +874,7 @@ fn the_real_panorama_paints_a_non_uniform_sky_where_the_backdrop_is_flat() {
 #[test]
 fn ten_seconds_of_real_time_turns_the_panorama_twenty_degrees() {
     // Predicted from constants that originate in vanilla, not read off the code:
-    // `Panorama.java` is 0.1 deg per realtime tick at `panoramaSpeed` 1.0, and
+    // `Panorama`'s own decompiled source is 0.1 deg per realtime tick at `panoramaSpeed` 1.0, and
     // a tick is 1/20 s, so 10 s is 10 * 20 * 1.0 * 0.1 = 20 deg. The plausible
     // wrong hypothesis — treating the delta as *seconds* rather than ticks — would
     // give 1 deg, which this band excludes by a factor of twenty.

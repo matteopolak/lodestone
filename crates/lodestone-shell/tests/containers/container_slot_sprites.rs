@@ -32,7 +32,7 @@ use lodestone_game::menu::{
     EMPTY_ARMOR_SLOT_LEGGINGS, EMPTY_ARMOR_SLOT_SHIELD,
 };
 
-/// The highlight pair, from `AbstractContainerScreen.java`.
+/// The highlight pair, from `AbstractContainerScreen`'s own decompiled source.
 const HIGHLIGHT_BACK: &str = "container/slot_highlight_back";
 const HIGHLIGHT_FRONT: &str = "container/slot_highlight_front";
 
@@ -46,7 +46,7 @@ fn issue_376s_sprites_are_already_in_the_gui_atlas() {
 
     let mut failures: Vec<String> = Vec::new();
 
-    // The five the player screen declares, all 16x16 (`InventoryMenu.java`).
+    // The five the player screen declares, all 16x16 (`InventoryMenu`'s own decompiled source).
     for id in [
         EMPTY_ARMOR_SLOT_HELMET,
         EMPTY_ARMOR_SLOT_CHESTPLATE,

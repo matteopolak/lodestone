@@ -777,8 +777,7 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
 /// `assets/minecraft/items/player_head.json` puts a *second* transformation
 /// (`translation: [0.5, 0, 0.5]` plus a 180°-about-X rotation) on the
 /// `minecraft:special` model node itself (`SpecialModelWrapper.Unbaked.bake`,
-/// `.cache/mc/26.2/client-src/net/minecraft/client/renderer/item/
-/// SpecialModelWrapper.java`) — carried today by `ItemModelNode::Special`'s
+/// vanilla's decompiled special-model-wrapper source, 26.2) — carried today by `ItemModelNode::Special`'s
 /// `transformation` field and composed by [`special_pose_and_extent`] via
 /// `lodestone_render::compose_special_node_transform`, the same call
 /// `push_special_icon` makes. Before that field existed this gate's own doc

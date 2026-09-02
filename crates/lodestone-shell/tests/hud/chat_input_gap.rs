@@ -12,7 +12,7 @@
 //! one pixel of rounding. That is not what vanilla does.
 //!
 //! `ChatComponent.extractRenderState`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/gui/components/ChatComponent.java`)
+//! (vanilla's decompiled chat-component source, 26.2)
 //! computes `final int chatBottom = Mth.floor((screenHeight - 40) / scale);`
 //! as one expression, **before** it ever branches on `displayMode.foreground`
 //! (open vs. closed) and with no reference anywhere to where the `EditBox`

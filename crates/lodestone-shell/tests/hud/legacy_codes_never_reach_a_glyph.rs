@@ -69,7 +69,7 @@ const LITERAL: &str = "chi";
 /// The visible text `CODED` must reduce to.
 const PLAIN: &str = "hi";
 
-/// Vanilla's `red`, `TextColor.java`'s `named("red", 16733525)` — the colour `§c`
+/// Vanilla's `red`, `TextColor`'s own decompiled source's `named("red", 16733525)` — the colour `§c`
 /// names, hand-transcribed rather than read back from our own table.
 const RED: (u8, u8, u8) = (0xff, 0x55, 0x55);
 
