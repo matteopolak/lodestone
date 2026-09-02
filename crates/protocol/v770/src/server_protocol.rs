@@ -144,7 +144,7 @@ use crate::packets::login::{
 /// (`encode_game_login_rest`); it is one above the overworld generator's water
 /// surface of 62, matching vanilla's own off-by-one convention for the field
 /// (`ClientboundLoginPacket`'s `seaLevel` is `level.getSeaLevel()`, which is
-/// `NoiseGeneratorSettings.seaLevel() + 1` for the purposes this client uses it
+/// vanilla's own noise-generator settings's own sea level() + 1` for the purposes this client uses it
 /// for). Kept as the pre-existing constant rather than "corrected" here: changing
 /// what the join packet says is a separate, wider change than adding a respawn.
 const OVERWORLD_SEA_LEVEL: i32 = 63;
@@ -183,14 +183,14 @@ const METADATA_EOF: u8 = 0xFF;
 /// that module. **Not hand-counted** — verified against the
 /// `EntityDataIndexOracle` dump already in the tree
 /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`:
-/// `16 Creeper.DATA_SWELL_DIR 1 INT`; also `18 Creeper.DATA_IS_IGNITED 8
+/// `16 the creeper class's own swell-dir accessor 1 INT`; also `18 the creeper class's own is-ignited accessor 8
 /// BOOLEAN`), the same dump that module's own decode-side constants cite and
 /// whose doc comment records the two shipped off-by-one bugs
-/// (`Sheep.DATA_WOOL_ID`, `Horse.DATA_ID_TYPE_VARIANT`) hand-counting produced
+/// (the sheep class's own wool accessor, the horse class's own type-variant accessor) hand-counting produced
 /// before it existed.
 ///
-/// Index 16 also collides with `Display.DATA_BRIGHTNESS_OVERRIDE_ID`,
-/// `EnderDragon.DATA_PHASE` and `Warden.CLIENT_ANGER_LEVEL` (all `INT`), and
+/// Index 16 also collides with the display class's own brightness-override accessor,
+/// the ender-dragon class's own phase accessor and the warden class's own client-anger-level accessor (all `INT`), and
 /// index 18 with several unrelated `BOOLEAN`/other-typed fields on other
 /// mobs (see that same file's own doc comment for the full list) — but
 /// unlike `metadata.rs`'s decode side, this *encoder* never needs a class
@@ -204,13 +204,13 @@ const METADATA_IDX_CREEPER_SWELL_DIR: u8 = 16;
 const METADATA_IDX_CREEPER_IGNITED: u8 = 18;
 const METADATA_SER_BOOLEAN: i32 = 8;
 
-/// `ItemEntity.DATA_ITEM`'s metadata index and the `ITEM_STACK` serializer id
+/// the item-entity class's own item accessor's metadata index and the `ITEM_STACK` serializer id
 /// it is registered under.
 ///
 /// **Not hand-counted.** Both numbers are read straight off the
 /// `EntityDataIndexOracle` dump in the tree
 /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`:
-/// `8 ItemEntity.DATA_ITEM 7 ITEM_STACK`), and the same two bytes appear in a
+/// `8 the item-entity class's own item accessor 7 ITEM_STACK`), and the same two bytes appear in a
 /// packet captured off a real vanilla 26.2 server
 /// (`tests/fixtures/item_entity_metadata_diamond.hex`: `08 07 …`), so there are
 /// two independent outside sources agreeing.
@@ -219,9 +219,9 @@ const METADATA_SER_BOOLEAN: i32 = 8;
 /// nor `is_mob`
 ///
 /// Index 8 is the single most crowded index in the dump — **nineteen** claimants,
-/// including `LivingEntity.DATA_LIVING_ENTITY_FLAGS` (`BYTE`),
-/// `AbstractArrow.ID_FLAGS` (`BYTE`), `ExperienceOrb.DATA_VALUE` (`INT`),
-/// `PrimedTnt.DATA_FUSE_ID` (`INT`) and six other `ITEM_STACK` fields
+/// including the living-entity class's own living-entity-flags accessor (`BYTE`),
+/// the abstract-arrow class's own flags accessor (`BYTE`), the experience-orb class's own value accessor (`INT`),
+/// the primed-tnt class's own fuse accessor (`INT`) and six other `ITEM_STACK` fields
 /// (`EyeOfEnder`, `Fireball`, `FireworkRocketEntity`, `OminousItemSpawner`,
 /// `ThrowableItemProjectile`, plus `ItemEntity` itself). CLAUDE.md's rule is that
 /// the census column you need depends on which classes actually collide, and
@@ -245,11 +245,11 @@ const METADATA_SER_BOOLEAN: i32 = 8;
 const METADATA_IDX_ITEM_ENTITY_ITEM: u8 = 8;
 const METADATA_SER_ITEM_STACK: i32 = 7;
 
-/// `ExperienceOrb.DATA_VALUE`'s metadata index — **also 8**, with the `INT` serializer
+/// the experience-orb class's own value accessor's metadata index — **also 8**, with the `INT` serializer
 /// [`METADATA_SER_INT`] already names.
 ///
 /// Read off the same dump line-for-line as [`METADATA_IDX_ITEM_ENTITY_ITEM`]
-/// (`tests/support/entity_data_index_jvm.txt`: `8 ExperienceOrb.DATA_VALUE 1 INT`), and
+/// (`tests/support/entity_data_index_jvm.txt`: `8 the experience-orb class's own value accessor 1 INT`), and
 /// deliberately a *separate constant* with the same value rather than a reuse of that
 /// one: they are two different fields that happen to collide, and a single shared
 /// constant would make a future change to either silently move the other.
@@ -259,13 +259,13 @@ const METADATA_SER_ITEM_STACK: i32 = 7;
 /// [`MetadataField::ExperienceOrbValue`] in its orb loop alone.
 const METADATA_IDX_EXPERIENCE_ORB_VALUE: u8 = 8;
 
-/// `TamableAnimal.DATA_FLAGS_ID`'s metadata index, and the `BYTE` serializer id.
+/// the tameable-animal class's own flags accessor's metadata index, and the `BYTE` serializer id.
 ///
 /// Read off `tests/support/entity_data_index_jvm.txt`
-/// (`18 TamableAnimal.DATA_FLAGS_ID 0 BYTE`). **Index 18 is the most crowded index
+/// (`18 the tameable-animal class's own flags accessor 0 BYTE`). **Index 18 is the most crowded index
 /// in the game** — 37 claimants in that dump, four of them `BYTE`:
-/// `TamableAnimal.DATA_FLAGS_ID`, `AbstractHorse.DATA_ID_FLAGS`,
-/// `Sheep.DATA_WOOL_ID` and `Shulker.DATA_COLOR_ID`. It is also
+/// the tameable-animal class's own flags accessor, the abstract-horse class's own flags accessor,
+/// the sheep class's own wool accessor and the shulker class's own color accessor. It is also
 /// [`METADATA_IDX_CREEPER_IGNITED`]'s index under the `BOOLEAN` serializer.
 ///
 /// Nothing on the wire distinguishes them, and no `entity_census` column separates
@@ -275,7 +275,7 @@ const METADATA_IDX_EXPERIENCE_ORB_VALUE: u8 = 8;
 const METADATA_IDX_TAMABLE_FLAGS: u8 = 18;
 const METADATA_SER_BYTE: i32 = 0;
 
-/// `AbstractHorse.DATA_ID_FLAGS`'s metadata index — **also 18**, also `BYTE`.
+/// the abstract-horse class's own flags accessor's metadata index — **also 18**, also `BYTE`.
 ///
 /// A separate constant with the same value rather than a reuse of
 /// [`METADATA_IDX_TAMABLE_FLAGS`], for the reason
@@ -286,47 +286,47 @@ const METADATA_SER_BYTE: i32 = 0;
 /// than one field with two names.
 const METADATA_IDX_HORSE_FLAGS: u8 = 18;
 
-/// `AgeableMob.DATA_BABY_ID`, index 16 — a `BOOLEAN`. Matches the decode
+/// the ageable-mob class's own baby accessor, index 16 — a `BOOLEAN`. Matches the decode
 /// side's `IDX_BABY` in `crates/protocol/v770/src/packets/metadata.rs`.
 const METADATA_IDX_BABY: u8 = 16;
-/// `Villager.DATA_VILLAGER_DATA` — index 19, serializer `VILLAGER_DATA` (18).
+/// the villager class's own villager-data accessor — index 19, serializer `VILLAGER_DATA` (18).
 /// Both numbers are off the committed jar dump
-/// (`tests/support/entity_data_index_jvm.txt`: `19 Villager.DATA_VILLAGER_DATA
+/// (`tests/support/entity_data_index_jvm.txt`: `19 the villager class's own villager-data accessor
 /// 18 VILLAGER_DATA`), matching `crates/protocol/v770/src/packets/metadata.rs`'s
 /// decode-side `SER_VILLAGER_DATA` constant exactly — this is the same field,
 /// the other direction.
 const METADATA_IDX_VILLAGER_DATA: u8 = 19;
 const METADATA_SER_VILLAGER_DATA: i32 = 18;
 
-/// `PrimedTnt.DATA_FUSE_ID` — index 8, serializer `INT` (1). Off the same jar
+/// the primed-tnt class's own fuse accessor — index 8, serializer `INT` (1). Off the same jar
 /// dump line the decode side's `IDX_EXPERIENCE_ORB_VALUE` doc cites
-/// (`tests/support/entity_data_index_jvm.txt`: `8 PrimedTnt.DATA_FUSE_ID 1
+/// (`tests/support/entity_data_index_jvm.txt`: `8 the primed-tnt class's own fuse accessor 1
 /// INT`), one of index 8's five `INT`/`ITEM_STACK` claimants — see
 /// `MetadataField::TntFuse`'s own doc for the full list.
 const METADATA_IDX_TNT_FUSE: u8 = 8;
 
-/// `MinecartFurnace.DATA_ID_FUEL` — index 13, serializer `BOOLEAN` (8). The
+/// the furnace-minecart class's own fuel accessor — index 13, serializer `BOOLEAN` (8). The
 /// jar dump's other index-13 claimant, `MinecartCommandBlock
 /// .DATA_ID_COMMAND_NAME`, is a `STRING`; see `MetadataField::MinecartFuel`'s
 /// own doc for why the producer alone disambiguates them.
 const METADATA_IDX_MINECART_FUEL: u8 = 13;
 
-/// `AbstractBoat.DATA_ID_PADDLE_LEFT` — index 11, serializer `BOOLEAN` (8).
+/// the abstract-boat class's own paddle-left accessor — index 11, serializer `BOOLEAN` (8).
 /// The jar dump's other index-11 claimants (`tests/support/entity_data_index_jvm.txt`)
-/// are `AbstractMinecart.DATA_ID_CUSTOM_DISPLAY_BLOCK` (`OPTIONAL_BLOCK_STATE`),
-/// `Arrow.ID_EFFECT_COLOR` (`INT`), `Display.DATA_TRANSLATION_ID` (`VECTOR3`)
-/// and `ThrownTrident.ID_LOYALTY` (`BYTE`) — none share the `BOOLEAN`
-/// serializer except `LivingEntity.DATA_EFFECT_AMBIENCE_ID`; see
+/// are the abstract-minecart class's own custom-display-block accessor (`OPTIONAL_BLOCK_STATE`),
+/// the arrow class's own effect-color accessor (`INT`), the display class's own translation accessor (`VECTOR3`)
+/// and the thrown-trident class's own loyalty accessor (`BYTE`) — none share the `BOOLEAN`
+/// serializer except the living-entity class's own effect-ambience accessor; see
 /// `MetadataField::BoatPaddles`'s own doc for why the producer alone
 /// disambiguates the two.
 const METADATA_IDX_BOAT_PADDLE_LEFT: u8 = 11;
 
-/// `AbstractBoat.DATA_ID_PADDLE_RIGHT` — index 12, serializer `BOOLEAN` (8).
-/// The jar dump's other index-12 `BOOLEAN` claimant is `ThrownTrident.ID_FOIL`;
+/// the abstract-boat class's own paddle-right accessor — index 12, serializer `BOOLEAN` (8).
+/// The jar dump's other index-12 `BOOLEAN` claimant is the thrown-trident class's own foil accessor;
 /// see [`METADATA_IDX_BOAT_PADDLE_LEFT`].
 const METADATA_IDX_BOAT_PADDLE_RIGHT: u8 = 12;
 
-/// `VehicleEntity.DATA_ID_HURT`/`DATA_ID_HURTDIR`/`DATA_ID_DAMAGE` — indices 8,
+/// the vehicle-entity class's own hurt accessor/`DATA_ID_HURTDIR`/`DATA_ID_DAMAGE` — indices 8,
 /// 9 and 10, serializers `INT` (1), `INT` (1) and `FLOAT` (3). Read off the jar
 /// dump (`tests/support/entity_data_index_jvm.txt`), which lists five `INT`
 /// claimants at index 8 and two at index 9, none of them a `LivingEntity`; see
@@ -337,35 +337,35 @@ const METADATA_IDX_VEHICLE_HURT_TIME: u8 = 8;
 const METADATA_IDX_VEHICLE_HURT_DIR: u8 = 9;
 /// See [`METADATA_IDX_VEHICLE_HURT_TIME`].
 const METADATA_IDX_VEHICLE_DAMAGE: u8 = 10;
-/// `EntityDataSerializers.FLOAT`'s registration id, restated here for
+/// vanilla's own metadata-serializer registry's own float accessor's registration id, restated here for
 /// [`METADATA_IDX_AIR_SUPPLY`]'s stated reason.
 const METADATA_SER_FLOAT: i32 = 3;
 
-/// `EnderDragon.DATA_PHASE` — index 16, serializer `INT` (1). Off the jar
-/// dump (`tests/support/entity_data_index_jvm.txt`: `16 EnderDragon.DATA_PHASE
+/// the ender-dragon class's own phase accessor — index 16, serializer `INT` (1). Off the jar
+/// dump (`tests/support/entity_data_index_jvm.txt`: `16 the ender-dragon class's own phase accessor
 /// 1 INT`), one of six `INT` claimants at index 16 alongside
 /// [`METADATA_IDX_BABY`]'s `BOOLEAN` neighbours — see
 /// `MetadataField::DragonPhase`'s own doc for the full list. The producer
 /// (`MobSim::push_dragon_snapshots`, the sole caller) disambiguates.
 const METADATA_IDX_DRAGON_PHASE: u8 = 16;
 
-/// `EndCrystal.DATA_BEAM_TARGET` — index 8, serializer `OPTIONAL_BLOCK_POS`
-/// (11). Off the jar dump (`8 EndCrystal.DATA_BEAM_TARGET 11
+/// the end-crystal class's own beam-target accessor — index 8, serializer `OPTIONAL_BLOCK_POS`
+/// (11). Off the jar dump (`8 the end-crystal class's own beam-target accessor 11
 /// OPTIONAL_BLOCK_POS`) — the only index-8 claimant with this serializer, so
 /// no producer guard is needed the way [`METADATA_IDX_TNT_FUSE`]'s `INT`
 /// siblings need one.
 const METADATA_IDX_CRYSTAL_BEAM_TARGET: u8 = 8;
 const METADATA_SER_OPTIONAL_BLOCK_POS: i32 = 11;
 
-/// `EndCrystal.DATA_SHOW_BOTTOM` — index 9, serializer `BOOLEAN` (8). Off the
-/// jar dump (`9 EndCrystal.DATA_SHOW_BOTTOM 8 BOOLEAN`), one of three
+/// the end-crystal class's own show-bottom accessor — index 9, serializer `BOOLEAN` (8). Off the
+/// jar dump (`9 the end-crystal class's own show-bottom accessor 8 BOOLEAN`), one of three
 /// `BOOLEAN` claimants at index 9 — see `MetadataField::CrystalShowBottom`'s
 /// own doc for the other two. The producer
 /// (`MobSim::push_end_crystal_snapshots`, the sole caller) disambiguates.
 const METADATA_IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
 
-/// `Entity.DATA_POSE` — index 6, serializer `POSE` (20). Off the jar dump
-/// (`tests/support/entity_data_index_jvm.txt`: `6 Entity.DATA_POSE 20
+/// the base entity class's own pose accessor — index 6, serializer `POSE` (20). Off the jar dump
+/// (`tests/support/entity_data_index_jvm.txt`: `6 the base entity class's own pose accessor 20
 /// POSE`), the **only** claimant at this index — see
 /// `MetadataField::Pose`'s own doc for why that means no species switch is
 /// needed here, unlike every other index in this file. `METADATA_SER_POSE`
@@ -374,55 +374,55 @@ const METADATA_IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
 const METADATA_IDX_POSE: u8 = 6;
 const METADATA_SER_POSE: i32 = 20;
 
-/// `WitherBoss.DATA_ID_INV` — index 19, serializer `INT` (1). Off the jar
-/// dump (`tests/support/entity_data_index_jvm.txt`: `19 WitherBoss.DATA_ID_INV
+/// the wither-boss class's own inv accessor — index 19, serializer `INT` (1). Off the jar
+/// dump (`tests/support/entity_data_index_jvm.txt`: `19 the wither-boss class's own inv accessor
 /// 1 INT`), one of six `INT` claimants at index 19 — see
 /// `MetadataField::WitherInvulnerableTicks`'s own doc for the full list. The
 /// producer (`MobSim::push_wither_snapshots`, the sole caller) disambiguates,
 /// exactly as [`METADATA_IDX_DRAGON_PHASE`] does for its own index.
 const METADATA_IDX_WITHER_INVULNERABLE_TICKS: u8 = 19;
 
-/// `Goat.DATA_HAS_LEFT_HORN` — index 19, serializer `BOOLEAN` (8). Off the
+/// the goat class's own has-left-horn accessor — index 19, serializer `BOOLEAN` (8). Off the
 /// jar dump (`tests/support/entity_data_index_jvm.txt`: `19
-/// Goat.DATA_HAS_LEFT_HORN 8 BOOLEAN`) — see `MetadataField::GoatHorns`'s own
+/// the goat class's own has-left-horn accessor 8 BOOLEAN`) — see `MetadataField::GoatHorns`'s own
 /// doc for the full claimant list at this index. The producer
 /// (`SimMob::snapshot`'s `"goat"` arm, the sole caller) disambiguates,
 /// exactly as [`METADATA_IDX_WITHER_INVULNERABLE_TICKS`] does for its own
 /// index.
 const METADATA_IDX_GOAT_HAS_LEFT_HORN: u8 = 19;
 
-/// `Goat.DATA_HAS_RIGHT_HORN` — index 20, serializer `BOOLEAN` (8). Off the
+/// the goat class's own has-right-horn accessor — index 20, serializer `BOOLEAN` (8). Off the
 /// jar dump (`tests/support/entity_data_index_jvm.txt`: `20
-/// Goat.DATA_HAS_RIGHT_HORN 8 BOOLEAN`). See
+/// the goat class's own has-right-horn accessor 8 BOOLEAN`). See
 /// [`METADATA_IDX_GOAT_HAS_LEFT_HORN`]'s own doc.
 const METADATA_IDX_GOAT_HAS_RIGHT_HORN: u8 = 20;
 
-/// `Axolotl.DATA_PLAYING_DEAD` — index 19, serializer `BOOLEAN` (8). Off the
+/// the axolotl class's own playing-dead accessor — index 19, serializer `BOOLEAN` (8). Off the
 /// jar dump (`tests/support/entity_data_index_jvm.txt`: `19
-/// Axolotl.DATA_PLAYING_DEAD 8 BOOLEAN`) — one of the `BOOLEAN` claimants
+/// the axolotl class's own playing-dead accessor 8 BOOLEAN`) — one of the `BOOLEAN` claimants
 /// [`METADATA_IDX_GOAT_HAS_LEFT_HORN`]'s own doc already names at this
 /// index. The producer (`SimMob::snapshot`'s `"axolotl"` arm, the sole
 /// caller) disambiguates, exactly as that constant's own doc describes for
 /// its pair.
 const METADATA_IDX_AXOLOTL_PLAYING_DEAD: u8 = 19;
 
-/// `Camel.DASH` — index 19, serializer `BOOLEAN` (8). Off the jar dump
-/// (`tests/support/entity_data_index_jvm.txt`: `19 Camel.DASH 8 BOOLEAN`) —
+/// the camel class's own dash accessor — index 19, serializer `BOOLEAN` (8). Off the jar dump
+/// (`tests/support/entity_data_index_jvm.txt`: `19 the camel class's own dash accessor 8 BOOLEAN`) —
 /// one of the `BOOLEAN` claimants [`METADATA_IDX_GOAT_HAS_LEFT_HORN`]'s own
 /// doc already names at this index. The producer (`SimMob::snapshot`'s
 /// `"camel"` arm, the sole caller) disambiguates, exactly as that constant's
 /// own doc describes for its pair.
 const METADATA_IDX_CAMEL_DASH: u8 = 19;
 
-/// `Sniffer.DATA_STATE` — index 18, serializer `SNIFFER_STATE` (35). Off the
-/// jar dump (`tests/support/entity_data_index_jvm.txt`: `18 Sniffer.DATA_STATE
+/// the sniffer class's own state accessor — index 18, serializer `SNIFFER_STATE` (35). Off the
+/// jar dump (`tests/support/entity_data_index_jvm.txt`: `18 the sniffer class's own state accessor
 /// 35 SNIFFER_STATE`). Unlike every other `MetadataField` index constant in
 /// this file, `35` is not a reused generic serializer — it is a real, distinct
-/// `EntityDataSerializer` (`EntityDataSerializers.SNIFFER_STATE`, id 35 in
+/// `EntityDataSerializer` (vanilla's own metadata-serializer registry's own sniffer-state accessor, id 35 in
 /// the jar's own registration order), so the wire value is a plain VarInt
 /// enum ordinal, the same shape [`METADATA_SER_POSE`] already uses. The
 /// producer (`SimMob::snapshot`'s `"sniffer"` arm, the sole caller)
-/// disambiguates index 18 from `Armadillo.ARMADILLO_STATE`'s own claim on
+/// disambiguates index 18 from the armadillo class's own armadillo-state accessor's own claim on
 /// the same index (serializer 36, a different type — the wire's own
 /// serializer-id field is what actually separates the two, not species
 /// alone).
@@ -473,15 +473,15 @@ fn air_id() -> u32 {
     lodestone_data::block_states::air_state_id()
 }
 
-/// `ParticleTypes.EXPLOSION_EMITTER`'s network registry id, restated for the
+/// vanilla's own particle-type registry's own explosion-emitter accessor's network registry id, restated for the
 /// same reason [`METADATA_IDX_AIR_SUPPLY`] restates its decode-side sibling:
 /// `crate::adapter`'s own `PARTICLE_ID_EXPLOSION_EMITTER` is private to that
-/// module. Every real vanilla explosion source (`Creeper.explodeCreeper`,
+/// module. Every real vanilla explosion source (the creeper class's own explode creeper,
 /// TNT, beds, respawn anchors) sends this id, never the plain `EXPLOSION`
 /// id `decode_explode` also accepts as a simpler-to-decode alternative.
 const PARTICLE_ID_EXPLOSION_EMITTER: i32 = 29;
 
-/// The `EnumSet<ClientboundPlayerInfoUpdatePacket.Action>` bit set
+/// The `EnumSet<vanilla's own clientbound player-info-update packet's own action>` bit set
 /// [`V770ServerProtocol::encode_player_info_add`] sends: `ADD_PLAYER` (ordinal
 /// 0), `UPDATE_GAME_MODE` (2), `UPDATE_LISTED` (3), `UPDATE_LATENCY` (4).
 ///
@@ -500,7 +500,7 @@ const PLAYER_INFO_ADD_ACTIONS: u8 = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 4);
 const JOIN_GAME_MODE: i32 = 0;
 
 /// The `minecraft:sound_event` registry id for
-/// `minecraft:entity.generic.explode` (`SoundEvents.GENERIC_EXPLODE`),
+/// `minecraft:entity.generic.explode` (vanilla's own sound-events registry's own generic-explode accessor),
 /// resolved by name the same way [`stone_id`]/[`air_id`] resolve block
 /// states — bounded by [`SOUND_EVENT_COUNT`] so a name this table has never
 /// had (a stale or ahead-of-version generated table) fails loudly here
@@ -508,7 +508,7 @@ const JOIN_GAME_MODE: i32 = 0;
 /// to build the `Holder<SoundEvent>` **registry-reference** encoding a real
 /// vanilla server sends for this sound — see that method's own doc comment
 /// for why that is the byte-accurate choice, verified against
-/// `ByteBufCodecs.holder`'s decompiled encode arm, not the decoder's own
+/// vanilla's own codec library's own holder's decompiled encode arm, not the decoder's own
 /// (weaker) direct-literal-name path.
 fn explosion_sound_registry_id() -> i32 {
     (0..lodestone_data::sound_events::SOUND_EVENT_COUNT as i32)
@@ -521,7 +521,7 @@ fn explosion_sound_registry_id() -> i32 {
 
 /// The fixed-point scale for `sound` packet positions: coordinates go on the
 /// wire as `(int)(block * 8)`, so each unit is `1/8` of a block. Vanilla's
-/// `ClientboundSoundPacket.LOCATION_ACCURACY`; restated here for the same reason
+/// vanilla's own clientbound sound packet's own location-accuracy accessor; restated here for the same reason
 /// [`PARTICLE_ID_EXPLOSION_EMITTER`] is — [`crate::adapter`]'s own copy is
 /// private to that module.
 const SOUND_POSITION_SCALE: f64 = 8.0;
@@ -671,7 +671,7 @@ fn resolve_biome_id(name: &str) -> u32 {
     }) as u32
 }
 
-/// `ClientboundGameEventPacket.CHANGE_GAME_MODE`'s own event code.
+/// vanilla's own clientbound game-event packet's own change-game-mode accessor's own event code.
 const GAME_EVENT_CHANGE_GAME_MODE: u8 = 3;
 
 /// Resolves a canonical block-state string ([`ServerChunkColumn`]'s own
@@ -705,7 +705,7 @@ fn resolve_state_id(state: &str) -> u32 {
     lodestone_data::block_states::state_id(state).unwrap_or_else(air_id)
 }
 
-/// Unpacks vanilla's `BlockPos.asLong` form (the inverse of
+/// Unpacks vanilla's vanilla's own block-position type's own as long form (the inverse of
 /// [`pack_block_pos`]): `x` in the high 26 bits, `z` in the middle 26 bits,
 /// `y` in the low 12 bits, each sign-extended back out via a
 /// left-then-arithmetic-right shift pair. Mirrors `V770Adapter`'s own private
@@ -720,7 +720,7 @@ fn unpack_block_pos(packed: i64) -> BlockPos {
     BlockPos::new(x, y, z)
 }
 
-/// Maps `Direction.get3DDataValue` (`0` down … `5` east) back to a
+/// Maps vanilla's own direction enum's own get3 d data value (`0` down … `5` east) back to a
 /// [`BlockFace`] — the inverse of `V770Adapter`'s own `face_ordinal`. Any
 /// value outside `0..=5` (a malformed packet) falls back to `East` rather
 /// than panicking; the resulting `ServerBound` still carries a valid
@@ -738,10 +738,10 @@ fn face_from_ordinal(ordinal: i32) -> BlockFace {
 }
 
 /// Maps a wire difficulty ordinal (`0` peaceful … `3` hard,
-/// `Difficulty.STREAM_CODEC`) to [`Difficulty`], mirroring `V770Adapter`'s
+/// vanilla's own difficulty enum's own stream codec) to [`Difficulty`], mirroring `V770Adapter`'s
 /// own `CHANGE_DIFFICULTY` decode (`adapter/player.rs`, the clientbound direction of
 /// the same wire concept): an out-of-range id decodes to `None` rather than
-/// vanilla's `ByIdMap.OutOfBoundsStrategy::WRAP` silently aliasing it to a
+/// vanilla's vanilla's own id-map helper's own out of bounds strategy::WRAP` silently aliasing it to a
 /// different difficulty — a malformed packet drops (`ServerBound::Ignored`),
 /// it does not misreport.
 fn difficulty_from_ordinal(ordinal: i32) -> Option<Difficulty> {
@@ -924,8 +924,8 @@ fn stat_wire_ids(key: &StatKey) -> Option<(i32, i32)> {
     Some((type_id, value_id))
 }
 
-/// `minecraft:slot_display` registry ids, in `SlotDisplays.bootstrap`'s
-/// registration order — the dispatch key `SlotDisplay.STREAM_CODEC` writes before
+/// `minecraft:slot_display` registry ids, in vanilla's own slot-displays registration's own bootstrap's
+/// registration order — the dispatch key vanilla's own slot-display type's own stream codec writes before
 /// each variant's own body.
 ///
 /// Registration order **is** the id assignment for a `registerSimple` registry, so
@@ -968,7 +968,7 @@ const RECIPE_BOOK_CATEGORIES: &[&str] = &[
     "campfire",
 ];
 
-/// Writes one `SlotDisplay.STREAM_CODEC` value: the registry dispatch id, then the
+/// Writes one vanilla's own slot-display type's own stream codec value: the registry dispatch id, then the
 /// variant body.
 ///
 /// An `item`/`item_stack` naming an id the 26.2 item census does not know degrades
@@ -988,9 +988,9 @@ fn write_slot_display(w: &mut Writer, display: &ServerSlotDisplay) {
         ServerSlotDisplay::Stack { item, count } => match item_id(&item.to_string()) {
             Some(id) => {
                 w.var_i32(slot_display::ITEM_STACK);
-                // `ItemStackTemplate.STREAM_CODEC` is item, **then** count, then
+                // vanilla's own item-stack-template codec's own stream codec is item, **then** count, then
                 // the component patch — the opposite field order from
-                // `ItemStack.OPTIONAL_STREAM_CODEC`, which leads with the count.
+                // vanilla's own item-stack type's own optional-stream-codec accessor, which leads with the count.
                 // Transcribing one from the other is the mistake to avoid here.
                 w.var_i32(id);
                 w.var_i32(*count);
@@ -1013,7 +1013,7 @@ fn write_slot_display(w: &mut Writer, display: &ServerSlotDisplay) {
     }
 }
 
-/// Writes one `RecipeDisplay.STREAM_CODEC` value: dispatch id, the type's own
+/// Writes one vanilla's own recipe-display type's own stream codec value: dispatch id, the type's own
 /// fields, then `result` and `craftingStation` (in that order, for every type).
 fn write_recipe_display(w: &mut Writer, display: &ServerRecipeDisplay) {
     let station = ServerSlotDisplay::Item(
@@ -1060,7 +1060,7 @@ fn write_recipe_display(w: &mut Writer, display: &ServerRecipeDisplay) {
 /// `recipe_book_category` registry id, and `Optional<List<Ingredient>>` where an
 /// `Ingredient` is a `HolderSet<Item>`.
 ///
-/// **The `HolderSet` encoding is the subtle part.** `ByteBufCodecs.holderSet`
+/// **The `HolderSet` encoding is the subtle part.** vanilla's own codec library's own holder set
 /// writes a VarInt that is `0` for "a tag follows" and `n + 1` for "a list of `n`
 /// direct entries follows". We always write the direct-list form (the ingredient
 /// items are already resolved server-side), so every count here is `len + 1` — an
@@ -1219,7 +1219,7 @@ fn decode_custom_payload(payload: &[u8]) -> Option<ServerBound> {
 }
 
 /// Decodes one serverbound container-click item written as a `HashedStack`
-/// (`ByteBufCodecs.optional(HashedStack.ActualItem.STREAM_CODEC)`), the
+/// (vanilla's own codec library's own optional(vanilla's own hashed-stack shape's own actual item.STREAM_CODEC)`), the
 /// inverse of the client-side encoder of the same name
 /// (`crate::adapter::write_hashed_stack`): a bool presence flag, then, only
 /// if present, the item registry id (VarInt), the count (VarInt), and two
@@ -1306,7 +1306,7 @@ fn decode_container_click(payload: &[u8]) -> Option<ServerBound> {
 }
 
 /// Reads a serverbound `set_creative_mode_slot` item
-/// (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`, the inverse of the
+/// (vanilla's own item-stack type's own optional-untrusted-stream-codec accessor, the inverse of the
 /// client-side encoder `crate::adapter::write_optional_item_stack`): a VarInt
 /// count where `<= 0` means empty, otherwise the item registry id as a
 /// VarInt, then an empty `DataComponentPatch` (two VarInt `0`s, added then
@@ -1345,7 +1345,7 @@ fn read_optional_item_stack(r: &mut Reader) -> Option<Option<ItemStack>> {
 }
 
 /// Reads one serverbound `set_beacon` mob-effect slot
-/// (`ByteBufCodecs.optional(MobEffect.STREAM_CODEC)`, the inverse of
+/// (vanilla's own codec library's own optional(vanilla's own mob-effect type's own stream codec)`, the inverse of
 /// `crate::adapter::write_optional_mob_effect`): a bool presence flag, then,
 /// only if present, the effect's `minecraft:mob_effect` registry id as a
 /// direct VarInt.
@@ -1361,7 +1361,7 @@ fn read_optional_mob_effect(r: &mut Reader) -> Option<Option<&'static str>> {
     Some(Some(mob_effect_name(id)?))
 }
 
-/// Packs a block position into vanilla's `BlockPos.asLong` form: `x` in the
+/// Packs a block position into vanilla's vanilla's own block-position type's own as long form: `x` in the
 /// high 26 bits, `z` in the middle 26 bits, `y` in the low 12 bits.
 fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
     ((i64::from(x) & 0x3FF_FFFF) << 38)
@@ -1410,7 +1410,7 @@ fn encode_chunk_cache_center_body(cx: i32, cz: i32) -> Vec<u8> {
 
 /// Hand-written encoder for the clientbound `forget_level_chunk` packet: a
 /// single packed `i64` — `x` in the low 32 bits, `z` in the high 32 — mirroring
-/// vanilla's `ChunkPos.pack` exactly as `V770Adapter::handle_play`'s
+/// vanilla's vanilla's own chunk-position type's own pack exactly as `V770Adapter::handle_play`'s
 /// `FORGET_LEVEL_CHUNK` decode arm already reads it (`adapter/chunk.rs`, the
 /// `packed as i32` / `(packed >> 32) as i32` pair).
 fn encode_forget_chunk_body(cx: i32, cz: i32) -> Vec<u8> {
@@ -1422,9 +1422,9 @@ fn encode_forget_chunk_body(cx: i32, cz: i32) -> Vec<u8> {
 
 /// Hand-written encoder for the clientbound `block_update` packet: a packed
 /// `BlockPos` long ([`pack_block_pos`]) followed by a VarInt block-state
-/// registry id — mirrors `ClientboundBlockUpdatePacket.STREAM_CODEC`
-/// (`BlockPos.STREAM_CODEC` composed with `ByteBufCodecs.idMapper(Block
-/// .BLOCK_STATE_REGISTRY)`, `ClientboundBlockUpdatePacket.STREAM_CODEC`) and
+/// registry id — mirrors vanilla's own clientbound block-update packet's own stream codec
+/// (vanilla's own block-position type's own stream codec composed with vanilla's own codec library's own id mapper(Block
+/// .BLOCK_STATE_REGISTRY)`, vanilla's own clientbound block-update packet's own stream codec) and
 /// this crate's own decode of the same packet in `V770Adapter::handle_play`'s
 /// `BLOCK_UPDATE` arm (`adapter/chunk.rs`), which reads the identical
 /// packed-i64-then-VarInt shape.
@@ -1439,7 +1439,7 @@ fn encode_block_update_body(x: i32, y: i32, z: i32, state_id: u32) -> Vec<u8> {
 /// the small keyed world-state channel vanilla uses for weather transitions.
 /// Wire layout: an unsigned byte event id, then a big-endian `f32` param —
 /// exactly `ClientboundGameEventPacket`'s `writeByte(event) + writeFloat(param)`
-/// (`ClientboundGameEventPacket.STREAM_CODEC`), and exactly the shape
+/// (vanilla's own clientbound game-event packet's own stream codec), and exactly the shape
 /// `packets::game::GameEvent`'s `Decode` impl reads back on this crate's own
 /// client side (`V770Adapter`'s `GAME_EVENT` arm, `adapter/chunk.rs`).
 fn game_event_body(kind: u8, value: f32) -> Vec<u8> {
@@ -1502,7 +1502,7 @@ fn encode_set_time_body(game_time: i64, day_time: Option<i64>) -> Vec<u8> {
 ///
 /// | parsers | payload |
 /// |---|---|
-/// | the four Brigadier numerics | `ArgumentUtils.createNumberFlags` byte (bit 0 min, bit 1 max) then only the **present** bounds |
+/// | the four Brigadier numerics | vanilla's own argument-utils helper's own create number flags byte (bit 0 min, bit 1 max) then only the **present** bounds |
 /// | `brigadier:string` | `writeEnum`, i.e. a VarInt `StringType` ordinal |
 /// | `minecraft:entity` | one flags byte, bit 0 `single`, bit 1 `playersOnly` |
 /// | `minecraft:score_holder` | one flags byte, bit 0 `multiple` |
@@ -1511,14 +1511,14 @@ fn encode_set_time_body(game_time: i64, day_time: Option<i64>) -> Vec<u8> {
 /// | everything else | nothing at all (`SingletonArgumentInfo::serializeToNetwork` is empty) |
 ///
 /// A bound is *absent* exactly when it equals its type's sentinel — vanilla's own
-/// test is `template.min != Integer.MIN_VALUE` and, for the floating types,
-/// `!= -Float.MAX_VALUE` / `Float.MAX_VALUE`. So the flags byte is derived here
+/// test is `template.min != the JDK's own integer type's own min-value accessor and, for the floating types,
+/// `!= -the JDK's own float type's own max-value accessor / the JDK's own float type's own max-value accessor. So the flags byte is derived here
 /// from the same comparison rather than from a separate "has bound" field, which
 /// is what keeps it in step with the decoder's mirror-image reconstruction.
 fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
-    /// `ArgumentUtils.NUMBER_FLAG_MIN`.
+    /// vanilla's own argument-utils helper's own number-flag-min accessor.
     const HAS_MIN: u8 = 1;
-    /// `ArgumentUtils.NUMBER_FLAG_MAX`.
+    /// vanilla's own argument-utils helper's own number-flag-max accessor.
     const HAS_MAX: u8 = 2;
 
     match parser {
@@ -1665,7 +1665,7 @@ fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
     }
 }
 
-/// Writes one `ClientboundCommandsPacket.Entry`: `Entry::write`'s exact order —
+/// Writes one vanilla's own clientbound commands packet's own entry: `Entry::write`'s exact order —
 /// the flags byte, the child-index array (`writeVarIntArray`, so a VarInt count
 /// then VarInt elements), the redirect index **only** when `FLAG_REDIRECT` is
 /// set, then the type-dependent stub.
@@ -1678,7 +1678,7 @@ fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
 /// A [`NodeKind::Unrecognized`] node is written as a **root-type** entry, keeping
 /// its children, redirect and executable bit. That is not a fallback invented
 /// here: it is what a client already does with such a node, since
-/// `ClientboundCommandsPacket.read` returns a null stub and `NodeResolver.resolve`
+/// vanilla's own clientbound commands packet's own read returns a null stub and vanilla's own command-node resolver's own resolve
 /// builds a bare `RootCommandNode` for it. Re-encoding it as an argument is
 /// impossible anyway — a node that failed to decode carries neither a name nor a
 /// payload.
@@ -1759,7 +1759,7 @@ fn encode_commands_body(tree: &WireCommandTree) -> Vec<u8> {
 
 /// Encodes a whole `minecraft:command_suggestions` payload (clientbound id 15).
 ///
-/// `ClientboundCommandSuggestionsPacket.STREAM_CODEC` (mirrored from the
+/// vanilla's own clientbound command-suggestions packet's own stream codec (mirrored from the
 /// decode side in `V770Adapter::decode_command_suggestions`, which this crate's
 /// own client half uses to read a *real* server's reply): three VarInts (`id`,
 /// `start`, `length`), then a list of `Entry(String text, Optional<Component>
@@ -1869,7 +1869,7 @@ fn command_suggestion_tooltip_nbt(text: &Text) -> Nbt {
 /// existing struct because it is currently only ever *decoded* (see
 /// `V770Adapter::handle_play`'s `SYSTEM_CHAT` arm). Wire layout (mirrors the
 /// decode side exactly): a network-form NBT text component (root tag id +
-/// payload, no root name — vanilla's `ComponentSerialization.TRUSTED_STREAM_CODEC`),
+/// payload, no root name — vanilla's vanilla's own component-serialization helper's own trusted-stream-codec accessor),
 /// then a big-endian `bool` overlay flag (`false` selects normal chat history,
 /// `true` the action-bar overlay).
 fn encode_system_chat(message: &str, overlay: bool) -> Vec<u8> {
@@ -2054,18 +2054,18 @@ fn base64_encode(bytes: &[u8]) -> String {
 ///
 /// | JSON key | vanilla source | notes |
 /// |---|---|---|
-/// | `description` | `ComponentSerialization.CODEC` | written as `{"text": …}` |
-/// | `players` | `Players.CODEC` (`:53-60`) | `max`, `online`, `sample` |
-/// | `version` | `Version.CODEC` (`:64-69`) | `name`, `protocol` |
-/// | `favicon` | `Favicon.CODEC` (`:37-49`) | `data:image/png;base64,…` |
-/// | `enforcesSecureChat` | `Codec.BOOL` (`:30`) | omitted when `false` |
+/// | `description` | vanilla's own component-serialization helper's own codec accessor | written as `{"text": …}` |
+/// | `players` | vanilla's own status-response players record's own codec accessor (`:53-60`) | `max`, `online`, `sample` |
+/// | `version` | vanilla's own status-response version record's own codec accessor (`:64-69`) | `name`, `protocol` |
+/// | `favicon` | vanilla's own favicon codec holder's own codec accessor (`:37-49`) | `data:image/png;base64,…` |
+/// | `enforcesSecureChat` | vanilla's own codec type's own bool accessor (`:30`) | omitted when `false` |
 ///
 /// Two deliberate choices about *omission*, both licensed by that codec rather
 /// than guessed. `players`, `version`, `favicon` and `enforcesSecureChat` are
 /// each `lenientOptionalFieldOf`, so a missing key is legal — but `players` and
 /// `version` are what a client's server-list row actually renders, so they are
 /// always written. `favicon` is omitted entirely when there is no icon (an
-/// empty-string favicon is *not* legal: `Favicon.CODEC` errors with
+/// empty-string favicon is *not* legal: vanilla's own favicon codec holder's own codec accessor errors with
 /// `"Unknown format"` on anything lacking the prefix, `:38-40`), and
 /// `enforcesSecureChat` is omitted when `false` because that is its declared
 /// default (`:30`) and vanilla's own encoder drops defaulted optional fields.
@@ -2077,7 +2077,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 /// the string `"Lodestone survival test world"` with no wrapper. `Component`'s
 /// serializer collapses a plain literal that way. This function deliberately
 /// does *not* match that, because both forms decode
-/// (`ComponentSerialization.CODEC` accepts either, and our own client-side
+/// (vanilla's own component-serialization helper's own codec accessor accepts either, and our own client-side
 /// `lodestone_net::status::parse_status_json` has gates for both) and the object
 /// form is unambiguous for a MOTD that happens to look like a number, `true`, or
 /// `null` — which the bare-string form would still encode correctly but which is
@@ -2135,7 +2135,7 @@ fn encode_status_response_body(
     w.into_vec()
 }
 
-/// Writes one `ItemStack.OPTIONAL_STREAM_CODEC` value (used by both
+/// Writes one vanilla's own item-stack type's own optional-stream-codec accessor value (used by both
 /// `container_set_content`'s list/carried entries and `container_set_slot`'s
 /// single item): a VarInt count (`<= 0` is the empty stack), then, only if
 /// non-empty, the item registry id as a VarInt and an empty
@@ -2145,7 +2145,7 @@ fn encode_status_response_body(
 /// (the serverbound `set_creative_mode_slot` encoder), restated here rather
 /// than imported: that function is private to its own module, and there is
 /// no shared `pub(crate)` export for it. Both directions genuinely share the same
-/// wire shape (`ItemStack.OPTIONAL_STREAM_CODEC` is the same stream codec
+/// wire shape (vanilla's own item-stack type's own optional-stream-codec accessor is the same stream codec
 /// constant either way), so this restatement is the same "no existing struct
 /// to derive `Encode` from" situation `encode_system_chat` is already in, not
 /// a new inconsistency. An item whose canonical key has no entry in the
@@ -2191,7 +2191,7 @@ fn component_type_id(name: &str) -> Option<i32> {
 }
 
 /// Writes an item stack's outbound `DataComponentPatch` — the tail of
-/// `ItemStack.OPTIONAL_STREAM_CODEC` this function's caller writes for
+/// vanilla's own item-stack type's own optional-stream-codec accessor this function's caller writes for
 /// `container_set_slot`/`container_set_content`/`merchant_offers`: a VarInt
 /// added-component count, that many `(type id, payload)` entries, then a
 /// VarInt removed-component count.
@@ -2212,7 +2212,7 @@ fn component_type_id(name: &str) -> Option<i32> {
 fn write_item_component_patch(w: &mut Writer, components: &ItemComponents) {
     let count = i32::from(components.writable_book_content.is_some())
         + i32::from(components.written_book_content.is_some());
-    // `DataComponentPatch.STREAM_CODEC`'s own `encode`/`decode` (verified
+    // vanilla's own data-component-patch type's own stream codec's own `encode`/`decode` (verified
     // against the jar): **both** counts are written up front — `positiveCount`
     // then `negativeCount` — before a single entry follows, not
     // added-count/entries/removed-count. Writing the removed count after the
@@ -2233,7 +2233,7 @@ fn write_item_component_patch(w: &mut Writer, components: &ItemComponents) {
 }
 
 /// One added `minecraft:writable_book_content` entry: the component type id,
-/// then `WritableBookContent.STREAM_CODEC`'s payload — a VarInt page count,
+/// then vanilla's own writable-book-content type's own stream codec's payload — a VarInt page count,
 /// then per page a `Filterable<String>` (the raw string, then `false` for
 /// "no filtered alternate"; this crate runs no chat-filtering service, the
 /// same call the decode-side reader in `adapter/inventory.rs` makes for the
@@ -2248,7 +2248,7 @@ fn write_writable_book_content_entry(w: &mut Writer, pages: &[String]) {
 }
 
 /// One added `minecraft:written_book_content` entry:
-/// `WrittenBookContent.STREAM_CODEC`'s composite order exactly — title as a
+/// vanilla's own written-book-content type's own stream codec's composite order exactly — title as a
 /// `Filterable<String>`, plain `author` string, VarInt `generation`, a
 /// VarInt-counted list of `Filterable<Component>` pages (each
 /// [`written_book_page_nbt`] then a `false` filtered-alternate flag), then
@@ -2296,8 +2296,8 @@ fn written_book_page_nbt(text: &Text) -> Nbt {
 /// (`ClientboundOpenScreenPacket`), which has no existing struct because it
 /// is currently only ever *decoded* (see `V770Adapter::decode_open_screen`,
 /// the exact mirror of this wire layout). Wire layout: VarInt container id
-/// (`ByteBufCodecs.CONTAINER_ID`), VarInt `minecraft:menu` registry id
-/// (`ByteBufCodecs.registry(Registries.MENU)` — a plain, non-holder registry
+/// (vanilla's own codec library's own container accessor), VarInt `minecraft:menu` registry id
+/// (vanilla's own codec library's own registry(vanilla's own registry-key holder's own menu accessor)` — a plain, non-holder registry
 /// id, the same as `decode_open_screen`'s own `menu_name` lookup), then the
 /// title as a network-form NBT text component — the identical plain-string
 /// shape [`encode_system_chat`] already writes.
@@ -2397,7 +2397,7 @@ fn encode_open_screen_body(window_id: i32, menu_registry_id: i32, title: &str) -
 /// because it is currently only ever *decoded* (see
 /// `V770Adapter::handle_play`'s `CONTAINER_SET_CONTENT` arm, the exact mirror
 /// of this wire layout). Wire layout: VarInt container id, VarInt state id,
-/// then `ItemStack.OPTIONAL_LIST_STREAM_CODEC` (a VarInt count followed by
+/// then vanilla's own item-stack type's own optional-list-stream-codec accessor (a VarInt count followed by
 /// that many [`write_optional_item_stack`] entries), then the carried/cursor
 /// stack as one more [`write_optional_item_stack`].
 fn encode_container_content_body(
@@ -3352,7 +3352,7 @@ impl ServerProtocol for V770ServerProtocol {
             // it, so our server was invisible in a real client's multiplayer
             // list — the client sends `status_request`, waits, and gives up.
             //
-            // `ServerboundStatusRequestPacket` is `StreamCodec.unit(INSTANCE)`: the body is
+            // `ServerboundStatusRequestPacket` is vanilla's own stream-codec type's own unit(INSTANCE)`: the body is
             // genuinely empty, so an empty payload is the *correct* decode, not
             // a truncation. `decode_full` on a zero-field struct would be an
             // equivalent way to say this; the explicit emptiness check is
@@ -3422,7 +3422,7 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             // All four serverbound movement packets are lifted.
-            // Vanilla's `LocalPlayer.sendPosition` sends exactly *one* of
+            // Vanilla's vanilla's own client-side local-player class's own send position sends exactly *one* of
             // them per tick, choosing on which of position/look is dirty, so
             // dropping any one of the four is not a redundancy — it is a
             // hole in a partition. `MOVE_PLAYER_POS_ROT` in particular used
@@ -3577,7 +3577,7 @@ impl ServerProtocol for V770ServerProtocol {
             // then dropped rather than threaded further). `jump` used to be
             // one of those dropped flags — the exact "a value the decoder
             // reads off the wire and discards at the decode site" shape —
-            // until camel dash needed it: `Camel.onPlayerJump` is this bit's
+            // until camel dash needed it: the camel class's own on player jump is this bit's
             // whole trigger.
             State::Play if packet_id == play::serverbound::PLAYER_INPUT => {
                 let mut r = Reader::new(payload);
@@ -3640,8 +3640,8 @@ impl ServerProtocol for V770ServerProtocol {
                 decode_container_click(payload).unwrap_or(ServerBound::Ignored)
             }
             // `ServerboundContainerClosePacket`: a single VarInt container id
-            // (`FriendlyByteBuf.writeContainerId`, the same plain-VarInt
-            // `ByteBufCodecs.CONTAINER_ID` codec `decode_container_click`
+            // (vanilla's own buffer-writer helper's own write container id, the same plain-VarInt
+            // vanilla's own codec library's own container accessor codec `decode_container_click`
             // already reads for its own window id). No existing struct to
             // decode through — this is the smallest possible packet, so a
             // hand-written read is simpler than adding a one-field struct.
@@ -3689,7 +3689,7 @@ impl ServerProtocol for V770ServerProtocol {
             }
             // `SERVERBOUND_ABILITY_FLAG_FLYING` is decoded so the value is
             // ready the moment a consumer exists; the flag itself is the one
-            // vanilla actually reads server-side (`Abilities.flying` echo).
+            // vanilla actually reads server-side (vanilla's own player-abilities record's own flying echo).
             State::Play if packet_id == play::serverbound::PLAYER_ABILITIES => {
                 let _ = decode_full::<ServerboundPlayerAbilities>(payload)
                     .map(|p| p.flags & SERVERBOUND_ABILITY_FLAG_FLYING != 0);
@@ -3745,7 +3745,7 @@ impl ServerProtocol for V770ServerProtocol {
             //
             // `ServerboundInteractPacket`: VarInt target entity id, VarInt
             // `InteractionHand` ordinal, a low-precision `Vec3` location
-            // (`Vec3.LP_STREAM_CODEC` — the same codec
+            // (vanilla's own `Vec3` type's own lp-stream-codec accessor — the same codec
             // [`read_lp_vec3`](crate::packets::entity::read_lp_vec3) already
             // decodes and unit-tests for entity velocity), then a trailing
             // boolean for the secondary-action (shift) modifier. 26.2 split
@@ -3756,7 +3756,7 @@ impl ServerProtocol for V770ServerProtocol {
             // interaction model at all yet.
             // `ServerboundInteractPacket`: VarInt target entity id, VarInt
             // `InteractionHand` ordinal, a low-precision `Vec3` location
-            // (`Vec3.LP_STREAM_CODEC`), then a trailing boolean for the
+            // (vanilla's own `Vec3` type's own lp-stream-codec accessor), then a trailing boolean for the
             // secondary-action (shift) modifier. 26.2 split the old combined
             // interact/attack packet in two (see `ServerBound::Attack`'s own doc
             // comment); this is the right-click half, and its consumer is
@@ -3817,7 +3817,7 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             // `ServerboundSpectatorActionPacket`: a single VarInt using
-            // `ByteBufCodecs.OPTIONAL_VAR_INT`'s offset encoding (`0` = no
+            // vanilla's own codec library's own optional-var-int accessor's offset encoding (`0` = no
             // target, a present id `i` written as `i + 1`) — the exact
             // inverse of `crate::adapter::encode_spectator_action`, which
             // already documents why this must be hand-decoded rather than a
@@ -3936,7 +3936,7 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // `recipe` is a `RecipeDisplayId.index` — an opaque
+            // `recipe` is a vanilla's own recipe-display-id type's own index — an opaque
             // position in the book the *server* handed out, not a recipe name; see
             // `ServerBound::RecipePlaced`'s own doc comment.
             State::Play if packet_id == play::serverbound::PLACE_RECIPE => {
@@ -4060,10 +4060,10 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             // Issue #692: this used to decode-and-discard. Wire-invisible on
-            // the *clientbound* direction (`BundleContents.STREAM_CODEC`
+            // the *clientbound* direction (vanilla's own bundle-contents component's own stream codec
             // always reconstructs `selectedItem = -1`), but server-side
             // load-bearing — `crate::server`'s consumer stores it for
-            // `BundleContents.Mutable::removeOne`'s next right-click-extract.
+            // vanilla's own bundle-contents component's own mutable::removeOne`'s next right-click-extract.
             State::Play if packet_id == play::serverbound::BUNDLE_ITEM_SELECTED => {
                 match decode_full::<SelectBundleItem>(payload) {
                     Some(SelectBundleItem { slot_id, selected_item_index }) => {
@@ -4120,7 +4120,7 @@ impl ServerProtocol for V770ServerProtocol {
             }
             // `ServerboundCustomClickActionPacket`: an identifier, then a
             // length-prefixed optional NBT tag
-            // (`ByteBufCodecs.lengthPrefixed(65536)` wraps
+            // (vanilla's own codec library's own length prefixed(65536)` wraps
             // `optionalTagCodec` with an outer VarInt byte-length) — the tag
             // contents are never interpreted server-side for any known
             // click-action id, so only the outer shape (identifier, VarInt
@@ -4167,7 +4167,7 @@ impl ServerProtocol for V770ServerProtocol {
             // Deliberately left undecoded (falls through to the wildcard
             // below), unlike the rest of this issue's family:
             // `TEST_INSTANCE_BLOCK_ACTION`'s body
-            // (`TestInstanceBlockEntity.Data.STREAM_CODEC`) is a nested
+            // (vanilla's own test-instance block-entity class's own data.STREAM_CODEC`) is a nested
             // `Optional<ResourceKey>`/`Vec3i`/`Rotation`/`Status`/
             // `Optional<...>` composite this crate has no codec support for
             // yet, and — like its sibling `SET_TEST_BLOCK` above — it
@@ -4198,7 +4198,7 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             // `ServerboundPongPacket`: vanilla's own handler
-            // (`ServerCommonPacketListenerImpl.handlePong`) is a genuine empty
+            // (vanilla's own server-side common packet listener's own handle pong) is a genuine empty
             // method — this reply exists as a hook point for server mods, not
             // for anything vanilla itself consumes, so decoding it and staying
             // `Ignored` matches vanilla's own no-op rather than stranding a
@@ -4293,7 +4293,7 @@ impl ServerProtocol for V770ServerProtocol {
             // `ChatCommandSigned` — sent instead of the plain `chat_command`
             // only when the client's command contains an argument the
             // server's `COMMANDS` tree declared signable
-            // (`ArgumentSignatures.signCommand`). This server never declares
+            // (vanilla's own argument-signatures helper's own sign command). This server never declares
             // any argument signable (`ServerBound::ChatCommand`'s own doc
             // comment), so no real client sends this form today, but it is
             // decoded and routed through the same
@@ -4336,7 +4336,7 @@ impl ServerProtocol for V770ServerProtocol {
             // Its field order matches `ServerboundChatPacket`'s own
             // constructor (26.2): `readUtf(256)`, `readInstant()`,
             // `readLong()` salt, `readNullable(MessageSignature::read)`, then
-            // `LastSeenMessages.Update` (a VarInt offset, a fixed 20-bit bit
+            // vanilla's own last-seen-messages record's own update (a VarInt offset, a fixed 20-bit bit
             // set in 3 bytes, and a checksum byte).
             //
             // `decode_full`, not a partial read: the trailing acknowledgement
@@ -4432,7 +4432,7 @@ impl ServerProtocol for V770ServerProtocol {
             //   cross-check a hand-decode against, and no cookie this crate
             //   ever sets to receive a response about.
             // - `DEBUG_SUBSCRIPTION_REQUEST`: its body is a
-            //   registry-keyed (`Registries.DEBUG_SUBSCRIPTION`) set with no
+            //   registry-keyed (vanilla's own registry-key holder's own debug-subscription accessor) set with no
             //   VarInt-id table in this crate to resolve against — an F3
             //   debug-sample-graph subscription with no gameplay effect,
             //   the same "low priority, file for completeness" packet this
@@ -4443,7 +4443,7 @@ impl ServerProtocol for V770ServerProtocol {
 
     // Mirrors vanilla's own
     // `this.connection.send(new ClientboundHelloPacket("", pubKey, challenge, true))`
-    // (`ServerLoginPacketListenerImpl.handleHello`) exactly — empty server-id,
+    // (vanilla's own server-side login packet listener's own handle hello) exactly — empty server-id,
     // the caller's keypair/token, and `should_authenticate` fixed `true`
     // (vanilla never constructs this packet with `false`; encryption without
     // session-server verification is not a real wire state).
@@ -4575,7 +4575,7 @@ impl ServerProtocol for V770ServerProtocol {
         // (`SynchronizeRegistriesTask`): `select_known_packs` (requesting
         // zero packs — this server ships no datapacks), then one
         // `registry_data` per synchronized registry (all 29 —
-        // `RegistryDataLoader.SYNCHRONIZED_REGISTRIES`, read off the
+        // vanilla's own registry-data loader's own synchronized-registries accessor, read off the
         // decompiled source rather than `registries.json`, which omits
         // `dimension_type`/`world_clock` entirely because both are
         // data-pack-loaded), then `update_tags`. The server loop sends
@@ -4686,7 +4686,7 @@ impl ServerProtocol for V770ServerProtocol {
             send(play::clientbound::LOGIN, &login),
             // The world border is the first world state a joining player is
             // told about, before the time sync and spawn position — vanilla's
-            // `PlayerList.sendLevelInfo` order.
+            // vanilla's own server-side player-list class's own send level info order.
             // A full-size static default today; the live border's state lands
             // here when the world loop owns a shared `WorldBorder` (see
             // `crate::border`'s module doc, shape B).
@@ -4734,7 +4734,7 @@ impl ServerProtocol for V770ServerProtocol {
 
     /// `ClientboundPlayerAbilitiesPacket` — the flags byte then flying and
     /// walking speed. `may_build` has **no wire bit**: vanilla's
-    /// `Abilities.mayBuild` is server-side only and is not in the packet
+    /// vanilla's own player-abilities record's own may build is server-side only and is not in the packet
     /// (`ServerboundPlayerAbilitiesPacket`/`ClientboundPlayerAbilitiesPacket`
     /// carry the four `ABILITY_FLAG_*` bits and nothing more), so it is
     /// deliberately dropped here rather than folded into a spare bit.
@@ -4858,7 +4858,7 @@ impl ServerProtocol for V770ServerProtocol {
         // mirror-side specification. Wire layout (`ClientboundResourcePackPushPacket`):
         // a raw 16-byte uuid, a VarInt-prefixed UTF-8 url, a VarInt-prefixed
         // UTF-8 SHA-1 hash (vanilla caps it at 40 chars via
-        // `ByteBufCodecs.stringUtf8(40)`), a bool `required` flag, then — only
+        // vanilla's own codec library's own string utf8(40)`), a bool `required` flag, then — only
         // if present — a network-NBT chat component prompt, exactly the
         // `write_network_nbt` path `encode_component_nbt` uses for a disconnect
         // reason. Both decode arms (`configuration` and `play`) read this with
@@ -4972,7 +4972,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundHurtAnimationPacket.write`: a **VarInt** id then an IEEE-754
+    /// vanilla's own clientbound hurt-animation packet's own write: a **VarInt** id then an IEEE-754
     /// `float` yaw — the exact shape this crate's own `HURT_ANIMATION` decode arm
     /// reads back into `ClientEvent::EntityHurtAnimation`.
     ///
@@ -4989,7 +4989,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundEntityEventPacket.write`: `writeInt` then `writeByte` — a
+    /// vanilla's own clientbound entity-event packet's own write: `writeInt` then `writeByte` — a
     /// **plain big-endian `i32`**, not a VarInt, matching this crate's own
     /// `ENTITY_EVENT` decode arm (whose comment already flags the same thing from
     /// the reading side).
@@ -5022,17 +5022,17 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundSetPassengersPacket.write`: `writeVarInt(vehicle)` then
+    /// vanilla's own clientbound set-passengers packet's own write: `writeVarInt(vehicle)` then
     /// `writeVarIntArray(passengers)`.
     ///
     /// `writeVarIntArray` is a VarInt length followed by that many bare VarInts —
-    /// **not** `ByteBufCodecs.VAR_INT.apply(list())`, which would be the same bytes
+    /// **not** vanilla's own codec library's own var-int accessor.apply(list())`, which would be the same bytes
     /// by coincidence today and is a different codec. This crate's own
     /// `SET_PASSENGERS` *decode* arm in `crate::adapter` reads exactly this shape by
     /// hand and says so, so the two halves agree by construction.
     ///
     /// An empty `passenger_ids` is the dismount, and is a legal, meaningful frame:
-    /// `Entity.stopRiding` re-sends the vehicle's now-empty list.
+    /// the base entity class's own stop riding re-sends the vehicle's now-empty list.
     fn encode_set_passengers(&self, vehicle_id: i32, passenger_ids: &[i32]) -> ServerDirective {
         let mut w = Writer::default();
         w.var_i32(vehicle_id);
@@ -5046,7 +5046,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundSetEntityLinkPacket.write`: `writeInt(sourceId)` then
+    /// vanilla's own clientbound set-entity-link packet's own write: `writeInt(sourceId)` then
     /// `writeInt(destId)` — both **plain big-endian `i32`s**, not VarInts.
     /// Ported from `write`/`read` rather than the constructor or the field
     /// declaration, per this crate's own rule for a record whose fields share a
@@ -5058,7 +5058,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// coincide" is not a reason to weaken the general habit.
     ///
     /// `target_id` is `None` for vanilla's own `destId == 0` sentinel
-    /// (`Leashable.dropLeash`/`removeLeash` pass a `null` `destEntity`, which the
+    /// (vanilla's own leashable interface's own drop leash/`removeLeash` pass a `null` `destEntity`, which the
     /// constructor turns into `0` before `write` ever runs) — a real client never
     /// has an entity id `0` to confuse this with; `LOCAL_PLAYER_ENTITY_ID` is `1`.
     fn encode_set_entity_link(&self, source_id: i32, target_id: Option<i32>) -> ServerDirective {
@@ -5143,7 +5143,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// Encodes air-supply as a one-field `SET_ENTITY_DATA` metadata update for
     /// [`LOCAL_PLAYER_ENTITY_ID`] — the same wire packet a mob's cosmetic
     /// metadata would use, restricted to the single `DATA_AIR_SUPPLY_ID`
-    /// field vanilla's own `Entity.setAirSupply` sync would send. Hand-written
+    /// field vanilla's own the base entity class's own set air supply sync would send. Hand-written
     /// (no existing struct to derive `Encode` from — see this module's own
     /// doc comment on why that is the right call here) but byte-accurate
     /// against `crates/protocol/v770/src/packets/metadata.rs`'s
@@ -5231,7 +5231,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.u8(METADATA_IDX_ITEM_ENTITY_ITEM);
                     w.var_i32(METADATA_SER_ITEM_STACK);
                     // The `ITEM_STACK` serializer's payload is
-                    // `ItemStack.OPTIONAL_STREAM_CODEC` — the same VarInt
+                    // vanilla's own item-stack type's own optional-stream-codec accessor — the same VarInt
                     // count / VarInt registry id / empty `DataComponentPatch`
                     // shape [`write_optional_item_stack`] already writes for
                     // container slots, so this reuses it rather than restating
@@ -5242,11 +5242,11 @@ impl ServerProtocol for V770ServerProtocol {
                 }
                 MetadataField::ExperienceOrbValue { value } => {
                     // Index 8 again, and the *serializer* is what distinguishes this
-                    // from the arm above: `ExperienceOrb.DATA_VALUE` is an `INT` where
-                    // `ItemEntity.DATA_ITEM` is an `ITEM_STACK`. Both numbers come off
+                    // from the arm above: the experience-orb class's own value accessor is an `INT` where
+                    // the item-entity class's own item accessor is an `ITEM_STACK`. Both numbers come off
                     // the `EntityDataIndexOracle` dump in the tree
                     // (`tests/support/entity_data_index_jvm.txt`: `8
-                    // ExperienceOrb.DATA_VALUE 1 INT`) rather than being hand-counted,
+                    // the experience-orb class's own value accessor 1 INT`) rather than being hand-counted,
                     // and the producer guard is the same as `Item`'s: only
                     // `MobSim::snapshots`' orb loop builds this variant, so every one
                     // that arrives here belongs to a `minecraft:experience_orb`.
@@ -5255,7 +5255,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(*value);
                 }
                 MetadataField::TamableFlags { tame, sitting } => {
-                    // `TamableAnimal.isInSittingPose` is `& 1`, `isTame` is `& 4`.
+                    // the tameable-animal class's own is in sitting pose is `& 1`, `isTame` is `& 4`.
                     // Both read off `TamableAnimal`'s own accessors, not from a
                     // flag-name table: the enum there has no names, only the two
                     // masks, and inventing an ordering (0x01, 0x02, 0x04, …) would
@@ -5272,7 +5272,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.i8(byte);
                 }
                 MetadataField::HorseFlags { tame } => {
-                    // `AbstractHorse.FLAG_TAME = 2` — deliberately a *different* bit
+                    // the abstract-horse class's own flag-tame accessor = 2` — deliberately a *different* bit
                     // from the arm above at the *same* index. See
                     // [`METADATA_IDX_HORSE_FLAGS`].
                     let mut byte = 0i8;
@@ -5314,7 +5314,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(*level);
                 }
                 MetadataField::TntFuse(fuse) => {
-                    // `PrimedTnt.DATA_FUSE_ID` — index 8 again, and the
+                    // the primed-tnt class's own fuse accessor — index 8 again, and the
                     // *producer* is what disambiguates it from `Item`'s
                     // `ITEM_STACK` and `ExperienceOrbValue`'s own `INT` at the
                     // same index: only `MobSim::snapshots`' TNT loop ever
@@ -5326,7 +5326,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(*fuse);
                 }
                 MetadataField::MinecartFuel(lit) => {
-                    // `MinecartFurnace.DATA_ID_FUEL` — index 13; only
+                    // the furnace-minecart class's own fuel accessor — index 13; only
                     // `MobSim::snapshots`' furnace-minecart arm ever builds
                     // this variant. See its own doc comment for the
                     // `MinecartCommandBlock` claimant this never collides
@@ -5336,7 +5336,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.bool(*lit);
                 }
                 MetadataField::BoatPaddles { left, right } => {
-                    // `AbstractBoat.DATA_ID_PADDLE_LEFT`/`RIGHT` — indices
+                    // the abstract-boat class's own paddle-left accessor/`RIGHT` — indices
                     // 11/12, the same two-fields-one-arm shape
                     // `GoatHorns` above already uses. Only
                     // `MobSim::snapshots`' vehicle loop ever builds this
@@ -5368,7 +5368,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.f32(*damage);
                 }
                 MetadataField::DragonPhase(phase) => {
-                    // `EnderDragon.DATA_PHASE` — index 16; only
+                    // the ender-dragon class's own phase accessor — index 16; only
                     // `MobSim::push_dragon_snapshots` ever builds this
                     // variant. See `METADATA_IDX_DRAGON_PHASE`'s own doc for
                     // the five other `INT` claimants this never collides with
@@ -5378,7 +5378,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(*phase);
                 }
                 MetadataField::WitherInvulnerableTicks(ticks) => {
-                    // `WitherBoss.DATA_ID_INV` — index 19; only
+                    // the wither-boss class's own inv accessor — index 19; only
                     // `MobSim::push_wither_snapshots` ever builds this
                     // variant. See `METADATA_IDX_WITHER_INVULNERABLE_TICKS`'s
                     // own doc for the five other `INT` claimants this never
@@ -5388,7 +5388,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(*ticks);
                 }
                 MetadataField::GoatHorns { has_left, has_right } => {
-                    // `Goat.DATA_HAS_LEFT_HORN`/`DATA_HAS_RIGHT_HORN` — indices
+                    // the goat class's own has-left-horn accessor/`DATA_HAS_RIGHT_HORN` — indices
                     // 19/20; only `SimMob::snapshot`'s `"goat"` arm ever
                     // builds this variant. See `METADATA_IDX_GOAT_HAS_LEFT_HORN`'s
                     // own doc for the claimants this never collides with in
@@ -5401,7 +5401,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.bool(*has_right);
                 }
                 MetadataField::PlayingDead(playing_dead) => {
-                    // `Axolotl.DATA_PLAYING_DEAD` — index 19; only
+                    // the axolotl class's own playing-dead accessor — index 19; only
                     // `MobSim::snapshots`' `"axolotl"` arm ever builds this
                     // variant. See `METADATA_IDX_AXOLOTL_PLAYING_DEAD`'s own
                     // doc for the claimants this never collides with in
@@ -5411,7 +5411,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.bool(*playing_dead);
                 }
                 MetadataField::Dash(is_dashing) => {
-                    // `Camel.DASH` — index 19; only `SimMob::snapshot`'s
+                    // the camel class's own dash accessor — index 19; only `SimMob::snapshot`'s
                     // `"camel"` arm ever builds this variant. See
                     // `METADATA_IDX_CAMEL_DASH`'s own doc for the claimants
                     // this never collides with in practice.
@@ -5420,7 +5420,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.bool(*is_dashing);
                 }
                 MetadataField::SnifferState(state) => {
-                    // `Sniffer.DATA_STATE` — index 18; only
+                    // the sniffer class's own state accessor — index 18; only
                     // `SimMob::snapshot`'s `"sniffer"` arm ever builds this
                     // variant. See `METADATA_IDX_SNIFFER_STATE`'s own doc
                     // for the same-index `ARMADILLO_STATE` claimant this
@@ -5430,7 +5430,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(i32::from(*state));
                 }
                 MetadataField::CrystalBeamTarget(target) => {
-                    // `EndCrystal.DATA_BEAM_TARGET` — index 8,
+                    // the end-crystal class's own beam-target accessor — index 8,
                     // `OPTIONAL_BLOCK_POS`: a presence bool, then (if present)
                     // the packed-long block position `pack_block_pos` already
                     // writes for every other block-position field in this
@@ -5451,7 +5451,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(*id as i32);
                 }
                 MetadataField::CrystalShowBottom(show) => {
-                    // `EndCrystal.DATA_SHOW_BOTTOM` — index 9; only
+                    // the end-crystal class's own show-bottom accessor — index 9; only
                     // `MobSim::push_end_crystal_snapshots` ever builds this
                     // variant. See `METADATA_IDX_CRYSTAL_SHOW_BOTTOM`'s own
                     // doc for the other two `BOOLEAN` claimants this never
@@ -5479,7 +5479,7 @@ impl ServerProtocol for V770ServerProtocol {
     ///
     /// Color and overlay are hardcoded to `PINK`/`PROGRESS` (both ordinal `0`)
     /// and the flags byte to `0b110` (`playMusic | createWorldFog`, no
-    /// `darkenScreen`) — `EnderDragonFight.init`'s own
+    /// `darkenScreen`) — vanilla's own ender-dragon-fight class's own init's own
     /// `new ServerBossEvent(id, EVENT_DISPLAY_NAME, PINK, PROGRESS)` followed
     /// by `.setPlayBossMusic(true).setCreateWorldFog(true)` — the one producer
     /// this crate has today (`lodestone_server::BossBarSnapshot`'s own doc). A
@@ -5489,11 +5489,11 @@ impl ServerProtocol for V770ServerProtocol {
     fn encode_boss_event_add(&self, id: Uuid, name: &Text, progress: f32) -> ServerDirective {
         let mut w = Writer::default();
         w.uuid(id);
-        w.var_i32(0); // OperationType.ADD
+        w.var_i32(0); // vanilla's own boss-event operation-type add ordinal
         w.bytes(&encode_component_nbt(name));
         w.f32(progress);
-        w.var_i32(0); // BossBarColor.PINK
-        w.var_i32(0); // BossBarOverlay.PROGRESS
+        w.var_i32(0); // vanilla's own boss-bar color enum's pink ordinal
+        w.var_i32(0); // vanilla's own boss-bar overlay enum's progress ordinal
         w.u8(0b110); // playMusic | createWorldFog, not darkenScreen
         ServerDirective::Send {
             packet_id: play::clientbound::BOSS_EVENT,
@@ -5501,14 +5501,14 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundBossEventPacket.createUpdateProgressPacket`'s
+    /// vanilla's own clientbound boss-event packet's own create update progress packet's
     /// `UPDATE_PROGRESS` operation (operation type `2`): UUID, type, one
     /// `f32`. See [`encode_boss_event_add`](Self::encode_boss_event_add)'s doc
     /// for the citation this mirrors.
     fn encode_boss_event_update_progress(&self, id: Uuid, progress: f32) -> ServerDirective {
         let mut w = Writer::default();
         w.uuid(id);
-        w.var_i32(2); // OperationType.UPDATE_PROGRESS
+        w.var_i32(2); // vanilla's own boss-event operation-type update-progress ordinal
         w.f32(progress);
         ServerDirective::Send {
             packet_id: play::clientbound::BOSS_EVENT,
@@ -5516,13 +5516,13 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundBossEventPacket.createRemovePacket`'s `REMOVE` operation
+    /// vanilla's own clientbound boss-event packet's own create remove packet's `REMOVE` operation
     /// (operation type `1`): UUID, type, no payload at all
     /// (`REMOVE_OPERATION.write` is an empty method).
     fn encode_boss_event_remove(&self, id: Uuid) -> ServerDirective {
         let mut w = Writer::default();
         w.uuid(id);
-        w.var_i32(1); // OperationType.REMOVE
+        w.var_i32(1); // vanilla's own boss-event operation-type remove ordinal
         ServerDirective::Send {
             packet_id: play::clientbound::BOSS_EVENT,
             payload: w.into_vec(),
@@ -5588,8 +5588,8 @@ impl ServerProtocol for V770ServerProtocol {
     /// [`PARTICLE_ID_EXPLOSION_EMITTER`] is likewise the real choice, not an
     /// arbitrary pick between the two ids `decode_explode` accepts:
     /// `ServerLevel::explode` selects `largeExplosionParticles`
-    /// (`ParticleTypes.EXPLOSION_EMITTER`) whenever `ServerExplosion::isSmall`
-    /// is false (`ServerExplosion.isSmall`: `radius < 2.0F ||
+    /// (vanilla's own particle-type registry's own explosion-emitter accessor) whenever `ServerExplosion::isSmall`
+    /// is false (vanilla's own server-side explosion class's own is small: `radius < 2.0F ||
     /// !interactsWithBlocks()`), and a creeper's `CREEPER_EXPLOSION_RADIUS`
     /// (`3.0`) is `>= 2.0` with block-interaction enabled under default game
     /// rules — the only configuration this crate's `MobSim` models — so
@@ -5603,7 +5603,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// specification for this packet, written independently of this encoder and
     /// gated in `tests/player_list.rs`): a fixed bit set of `ceil(8/8) = 1`
     /// byte with bit `i` selecting action ordinal `i`
-    /// (`FriendlyByteBuf.writeFixedBitSet`), a VarInt entry count, then per
+    /// (vanilla's own buffer-writer helper's own write fixed bit set), a VarInt entry count, then per
     /// entry the profile uuid followed by the fields for each set bit **in
     /// action ordinal order**.
     ///
@@ -5615,7 +5615,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// `UPDATE_LATENCY` — because those are the four `lodestone-server` has any
     /// value for. The bitmask exists precisely so a subset is legal, and the
     /// client merges per action
-    /// (`ClientPacketListener.handlePlayerInfoUpdate`, `:2011-2020`).
+    /// (vanilla's own client-side packet listener's own handle player info update, `:2011-2020`).
     ///
     /// `ADD_PLAYER` is the one that is **not** optional: it is the only action
     /// that carries a `GameProfile`, so it is the only one that creates the
@@ -5908,7 +5908,7 @@ impl ServerProtocol for V770ServerProtocol {
     ///
     /// `data_to_keep` is `0`. `ClientboundRespawnPacket` defines
     /// `KEEP_ATTRIBUTE_MODIFIERS = 0x01` and `KEEP_ENTITY_DATA = 0x02`, and a real
-    /// **death** respawn keeps neither — `PlayerList.respawn` passes the combined
+    /// **death** respawn keeps neither — vanilla's own server-side player-list class's own respawn passes the combined
     /// `KEEP_ALL_DATA` only for a dimension change. `0` is what makes the client
     /// rebuild its player state, which is the whole point of the packet.
     ///
@@ -5933,7 +5933,7 @@ impl ServerProtocol for V770ServerProtocol {
         };
         vec![
             send(play::clientbound::RESPAWN, &respawn),
-            // The placement teleport. `PlayerList.respawn` moves the rebuilt
+            // The placement teleport. vanilla's own server-side player-list class's own respawn moves the rebuilt
             // player entity itself; over the wire that is the same
             // `player_position` packet `begin_play_at` sends at join, so the two
             // paths agree by construction rather than by coincidence.
@@ -5941,7 +5941,7 @@ impl ServerProtocol for V770ServerProtocol {
                 packet_id: play::clientbound::PLAYER_POSITION,
                 payload: encode_player_position_teleport(0, spawn.x, spawn.y, spawn.z, 0.0, 0.0),
             },
-            // Vanilla's `PlayerList.respawn` also re-sends the player's health,
+            // Vanilla's vanilla's own server-side player-list class's own respawn also re-sends the player's health,
             // and the client's `Vitals` component is fed by `set_health` alone —
             // without this the HUD would keep showing the zero hearts it was left
             // on. `crate::server::apply_client_command` sends the authoritative
@@ -6011,7 +6011,7 @@ impl ServerProtocol for V770ServerProtocol {
     ///
     /// # `data_to_keep` is `KEEP_ALL_DATA`, and `sea_level` follows the dimension
     ///
-    /// `PlayerList.respawn` passes `KEEP_ATTRIBUTE_MODIFIERS | KEEP_ENTITY_DATA` for
+    /// vanilla's own server-side player-list class's own respawn passes `KEEP_ATTRIBUTE_MODIFIERS | KEEP_ENTITY_DATA` for
     /// a dimension change, which is what keeps the arriving player's inventory, XP
     /// and health rather than rebuilding them. `sea_level` is the destination's, not
     /// the overworld's: the Nether's is 32 (`noise_settings/nether.json`'s
@@ -6037,7 +6037,7 @@ impl ServerProtocol for V770ServerProtocol {
             last_death_location: None,
             portal_cooldown: 0,
             sea_level: sea_level_for_dimension(dimension),
-            // `ClientboundRespawnPacket.KEEP_ALL_DATA`.
+            // vanilla's own clientbound respawn packet's own keep-all-data accessor.
             data_to_keep: 0x03,
         };
         vec![
@@ -6544,7 +6544,7 @@ mod block_edit_tests {
     /// The two packets a game-mode change writes, byte-exact. The flags byte is
     /// the whole reason creative flight works or does not: `0x0D` is
     /// `invulnerable | can_fly | instabuild`, and `flying` is deliberately
-    /// **not** set for creative (`GameType.updatePlayerAbilities` sets it only
+    /// **not** set for creative (vanilla's own game-type enum's own update player abilities sets it only
     /// for spectator). A fully-connected wire carrying the wrong byte here looks
     /// identical to a correct one from every coverage angle.
     #[test]
@@ -7050,7 +7050,7 @@ mod block_edit_tests {
     /// uses — packed i64, VarInt type id, network NBT, `ensure_empty` — so the
     /// expectation for the *layout* comes from the reader that has to consume real
     /// server bytes, not from this encoder. The record's field names and tag types
-    /// come from `PistonMovingBlockEntity.saveAdditional` and are gated in
+    /// come from vanilla's own piston moving block-entity class's own save additional and are gated in
     /// `lodestone_server::block_entities`.
     ///
     /// The two packets are asserted in the order the server's own drain emits them
@@ -7268,7 +7268,7 @@ mod world_admin_tests {
 
     /// Pins `encode_change_difficulty`'s wire layout: VarInt difficulty
     /// ordinal, then a bool locked flag, nothing else
-    /// (`ClientboundChangeDifficultyPacket.STREAM_CODEC`).
+    /// (vanilla's own clientbound change-difficulty packet's own stream codec).
     #[test]
     fn encode_change_difficulty_wire_layout() {
         let proto = V770ServerProtocol;
@@ -7472,7 +7472,7 @@ mod inventory_decode_tests {
     fn decode_set_creative_mode_slot_from_hand_built_vanilla_bytes() {
         let proto = V770ServerProtocol;
         let body = [
-            0x00, 0x24, // ByteBufCodecs.SHORT: big-endian i16 36
+            0x00, 0x24, // vanilla's own fixed-width SHORT codec: big-endian i16 36
             0x40, // optional-stack count, VarInt 64
             0x3E, // item id, VarInt 62 = minecraft:cobblestone
             0x00, // added components, VarInt 0
@@ -7488,7 +7488,7 @@ mod inventory_decode_tests {
         );
     }
 
-    /// The clear-a-slot case: `ItemStack.createOptionalStreamCodec` uses a
+    /// The clear-a-slot case: vanilla's own item-stack type's own create optional stream codec uses a
     /// `count` of zero as the absence marker rather than a leading presence
     /// bool (see [`read_optional_item_stack`]'s doc comment), so an empty
     /// write is three bytes with no item id at all. A decoder that expected a
@@ -8097,7 +8097,7 @@ mod border_wire_tests {
     }
 
     /// The join broadcast (`encode_initialize_border`), against the field
-    /// order of `ClientboundInitializeBorderPacket.write`: two `f64` centre
+    /// order of vanilla's own clientbound initialize-border packet's own write: two `f64` centre
     /// coords, `old_size`, `new_size`, then VarLong lerp time and three
     /// VarInts. A static border carries `old_size == new_size` and lerp time
     /// `0`.
@@ -8212,7 +8212,7 @@ mod vehicle_wire_tests {
     use super::*;
     use lodestone_core::State;
 
-    /// `ClientboundSetPassengersPacket.write` — a VarInt vehicle id then
+    /// vanilla's own clientbound set-passengers packet's own write — a VarInt vehicle id then
     /// `writeVarIntArray`.
     ///
     /// The ids are **pairwise distinct and none is a small ordinal** (`517`, `41`,
@@ -8222,7 +8222,7 @@ mod vehicle_wire_tests {
     /// and the visible symptom would be a boat riding a player.
     ///
     /// The length prefix is asserted separately from the elements for the same
-    /// reason: `writeVarIntArray` is not `ByteBufCodecs.VAR_INT.apply(list())`, and
+    /// reason: `writeVarIntArray` is not vanilla's own codec library's own var-int accessor.apply(list())`, and
     /// the two are only accidentally the same bytes.
     #[test]
     fn set_passengers_writes_the_vehicle_then_a_varint_array() {
@@ -8659,7 +8659,7 @@ mod index_thirteen_tests {
     }
 
     /// **The premise the producer-based disambiguation depends on**: index
-    /// 13's other real claimant, `MinecartCommandBlock.DATA_ID_COMMAND_NAME`,
+    /// 13's other real claimant, the command-block-minecart class's own command-name accessor,
     /// really is a *different* serializer (`STRING`, not `BOOLEAN`). If a
     /// future jar ever made it a `BOOLEAN` too, this gate — not a silent wire
     /// collision discovered later — is what would catch it.
@@ -8752,7 +8752,7 @@ mod index_sixteen_tests {
     }
 
     /// **The collision that makes the producer-side species switch load-bearing,
-    /// asserted rather than described.** `Creeper.DATA_SWELL_DIR` shares index 16
+    /// asserted rather than described.** the creeper class's own swell-dir accessor shares index 16
     /// with the baby accessors above but is an `INT`, not a `BOOLEAN` — so a
     /// `MetadataField::Baby` built for a creeper would put a boolean where the
     /// swell direction belongs, and `MobSim::snapshot` never emitting `Baby` for
@@ -8826,7 +8826,7 @@ mod index_sixteen_dragon_tests {
         panic!("{owner_field} is not in the jar dump — read the dump before changing the constant")
     }
 
-    /// `EnderDragon.DATA_PHASE` really is index 16 under the `INT` serializer
+    /// the ender-dragon class's own phase accessor really is index 16 under the `INT` serializer
     /// this encoder writes.
     #[test]
     fn dragon_phase_index_matches_the_jar_dump() {
@@ -9183,7 +9183,7 @@ mod play_ping_request_tests {
     }
 
     /// `ServerboundPongPacket`'s vanilla handler
-    /// (`ServerCommonPacketListenerImpl.handlePong`) is a genuine empty
+    /// (vanilla's own server-side common packet listener's own handle pong) is a genuine empty
     /// method, so producing no `ServerBound` variant here is the
     /// behaviour-matching outcome, not a stranded packet — pinned so a
     /// future change does not "fix" this into a variant nothing should
@@ -9191,7 +9191,7 @@ mod play_ping_request_tests {
     #[test]
     fn decode_play_pong_is_deliberately_ignored() {
         let proto = V770ServerProtocol;
-        // `Pong.id`: a raw big-endian 32-bit id, distinct from
+        // vanilla's own pong-response record's own id: a raw big-endian 32-bit id, distinct from
         // `KeepAlive`'s 64-bit one (see `packets::common::Pong`'s own doc
         // comment) — not a VarInt.
         let body = 42i32.to_be_bytes().to_vec();
@@ -9202,7 +9202,7 @@ mod play_ping_request_tests {
     }
 }
 
-/// `Goat.DATA_HAS_LEFT_HORN`/`DATA_HAS_RIGHT_HORN` at indices 19/20 — the
+/// the goat class's own has-left-horn accessor/`DATA_HAS_RIGHT_HORN` at indices 19/20 — the
 /// same census-premise-plus-encode-exactness shape `index_thirteen_tests`
 /// already uses for its own claimed index.
 #[cfg(test)]
@@ -9273,7 +9273,7 @@ mod goat_horns_tests {
     }
 }
 
-/// `Axolotl.DATA_PLAYING_DEAD` at index 19 — the same census-premise-plus-
+/// the axolotl class's own playing-dead accessor at index 19 — the same census-premise-plus-
 /// encode-exactness shape [`goat_horns_tests`] already uses for its own
 /// claimed index.
 #[cfg(test)]
@@ -9327,7 +9327,7 @@ mod axolotl_playing_dead_tests {
     }
 }
 
-/// `Camel.DASH` at index 19 — the same census-premise-plus-encode-exactness
+/// the camel class's own dash accessor at index 19 — the same census-premise-plus-encode-exactness
 /// shape [`goat_horns_tests`] already uses for its own claimed index.
 #[cfg(test)]
 mod camel_dash_tests {
@@ -9380,10 +9380,10 @@ mod camel_dash_tests {
     }
 }
 
-/// `Sniffer.DATA_STATE` at index 18, serializer 35 — the same census-
+/// the sniffer class's own state accessor at index 18, serializer 35 — the same census-
 /// premise-plus-encode-exactness shape [`goat_horns_tests`] already uses for
 /// its own claimed index, plus a check that the wire value is the real
-/// `Sniffer.State` ordinal rather than a crate-local renumbering.
+/// the sniffer class's own state ordinal rather than a crate-local renumbering.
 #[cfg(test)]
 mod sniffer_state_tests {
     use lodestone_core::Reader;
@@ -9418,7 +9418,7 @@ mod sniffer_state_tests {
         assert_eq!(serializer_name, "SNIFFER_STATE");
     }
 
-    /// The same index also claims `Armadillo.ARMADILLO_STATE` under a
+    /// The same index also claims the armadillo class's own armadillo-state accessor under a
     /// *different* serializer id — the tell that species alone cannot
     /// disambiguate this index and the serializer id is load-bearing.
     #[test]
@@ -9440,7 +9440,7 @@ mod sniffer_state_tests {
         assert_eq!(r.var_i32().expect("entity id"), 11);
         assert_eq!(r.u8().expect("index"), METADATA_IDX_SNIFFER_STATE);
         assert_eq!(r.var_i32().expect("serializer"), METADATA_SER_SNIFFER_STATE);
-        // `5` is `Sniffer.State.DIGGING`'s real ordinal, not `0`/`1` — a
+        // `5` is the sniffer class's own state.DIGGING`'s real ordinal, not `0`/`1` — a
         // wrong-serializer or off-by-one bug would still pass a `true`/`false`
         // shaped assertion, so this pins the actual integer.
         assert_eq!(r.var_i32().expect("state ordinal"), 5);
