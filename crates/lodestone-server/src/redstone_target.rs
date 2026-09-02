@@ -6,13 +6,13 @@
 //! `crate::redstone::own_signal`/`is_signal_source` already read a target's
 //! analog `power` property (landed alongside tripwire hook and detector rail —
 //! see that module's own doc comment). This module is the producer: vanilla's
-//! `TargetBlock.getRedstoneStrength` (a projectile hit's distance from centre
-//! turned into `1..=15`) and `TargetBlock.tick` (the decay back to `0`).
+//! real get-redstone-strength rule (a projectile hit's distance from centre
+//! turned into `1..=15`) and its real per-tick rule (the decay back to `0`).
 //!
-//! # What this needs of the execution model (for issue #548's incremental
+//! # What this needs of the execution model (for an incremental
 //! rework)
 //!
-//! * **Trigger**: a projectile hitting the block (`TargetBlock.onProjectileHit`).
+//! * **Trigger**: a projectile hitting the block (vanilla's real on-projectile-hit rule).
 //!   [`apply_hit`] itself stays a pure function, called from one named place —
 //!   `crate::mobs::MobSim::resolve_projectile_impacts` is the producer
 //!   (`mobs/projectiles.rs`'s `block_entry`, the exact per-axis slab test
@@ -33,9 +33,9 @@
 //! * **Scheduled tick**: yes, one-shot, `TickPriority::Normal`, at a duration
 //!   that depends on *what* hit it (20 ticks for an arrow, 8 for anything
 //!   else — [`activation_duration`]) — mirroring vanilla's own
-//!   `ACTIVATION_TICKS_ARROWS`/`ACTIVATION_TICKS_OTHER`. A second hit while a
+//!   activation-ticks-for-arrows/activation-ticks-for-other constants. A second hit while a
 //!   decay is already pending does not reschedule or change the displayed
-//!   power (`updateRedstoneOutput`'s `hasScheduledTick` guard, threaded
+//!   power (vanilla's real update-redstone-output rule's own "already scheduled" guard, threaded
 //!   through [`apply_hit`]'s `has_pending_decay` parameter) — the engine must
 //!   expose "is a tick of this kind already queued at this position" for that
 //!   guard to be checkable at all, which is exactly what
@@ -44,9 +44,9 @@
 //! * **Reads state another device can change the same tick**: no — a target's
 //!   own `power` property is written only by [`apply_hit`] and
 //!   [`run_scheduled_tick`], both keyed to this block's own position.
-//! * **Ordering**: none of vanilla's `UPDATE_ORDER` quirks apply; a target's
-//!   `power` write is a plain `setBlock` with no directional fan-out beyond
-//!   the standard one.
+//! * **Ordering**: none of vanilla's own neighbour-update-order quirks apply; a
+//!   target's `power` write is a plain set-block with no directional fan-out
+//!   beyond the standard one.
 
 use crate::redstone::{analog_power, base_name, with_property};
 
@@ -56,7 +56,7 @@ pub const TARGET: &str = "minecraft:target";
 /// `ScheduledTickQueue<String>`.
 pub const TICK_TARGET_DECAY: &str = "redstone:target_decay";
 
-/// `Direction.Axis` narrowed to the three values [`redstone_strength`] needs —
+/// Vanilla's own three-axis type, narrowed to the values [`redstone_strength`] needs —
 /// which axis the hit **face** lies on, not which way the projectile was
 /// travelling.
 ///
@@ -69,9 +69,9 @@ pub enum HitAxis {
     Z,
 }
 
-/// `TargetBlock.getRedstoneStrength` (`TargetBlock.java:61-77`), given the
+/// The real get-redstone-strength rule, given the
 /// axis of the hit face and the hit point's position within the cell
-/// (`Mth.frac(hitLocation.{x,y,z})`, i.e. already reduced to `[0, 1)`).
+/// (already reduced to `[0, 1)`).
 ///
 /// The two fractional coordinates **not** on the hit axis measure how far off
 /// centre the hit landed (`0.0` = dead centre of that face, `0.5` = the
@@ -92,7 +92,7 @@ pub fn redstone_strength(hit_axis: HitAxis, frac_x: f64, frac_y: f64, frac_z: f6
     (scaled.ceil() as i64).max(1).min(15) as u8
 }
 
-/// `TargetBlock.ACTIVATION_TICKS_ARROWS` (20) / `ACTIVATION_TICKS_OTHER` (8) —
+/// Vanilla's own activation-ticks-for-arrows (20) / activation-ticks-for-other (8) —
 /// how long [`apply_hit`]'s written power stays up before
 /// [`run_scheduled_tick`] decays it back to `0`.
 #[must_use]
@@ -113,17 +113,17 @@ pub struct HitOutcome {
     pub delay: u32,
 }
 
-/// `TargetBlock.updateRedstoneOutput` + `setOutputPower`
-/// (`TargetBlock.java:51-59,79-82`) — `state` must already be a
+/// The real update-redstone-output rule plus its own set-output-power step
+/// — `state` must already be a
 /// `minecraft:target` (checked by [`crate::redstone::is_target`] upstream;
 /// this function trusts its caller the same way every other `run_*`/`apply_*`
 /// function in this family does).
 ///
-/// `has_pending_decay` is vanilla's `level.getBlockTicks().hasScheduledTick(pos,
-/// state.getBlock())` — the caller answers it from
+/// `has_pending_decay` is vanilla's own "already has a scheduled block tick"
+/// read — the caller answers it from
 /// `ScheduledTickQueue::has_scheduled(pos, TICK_TARGET_DECAY)`. When true, the
 /// hit still counts for advancement/stat purposes (vanilla returns
-/// `redstoneStrength` from `updateRedstoneOutput` either way) but the block's
+/// the redstone strength from the update-redstone-output rule either way) but the block's
 /// own `power` is left untouched and no new decay is scheduled — this
 /// function returns `None` in that case since a caller only wanted to know
 /// "how to change the world", not the advancement side-channel.
@@ -138,7 +138,7 @@ pub fn apply_hit(state: &str, strength: u8, is_arrow: bool, has_pending_decay: b
     })
 }
 
-/// `TargetBlock.tick` (`TargetBlock.java:85-89`) — decay `power` to `0` if it
+/// The real per-tick rule — decay `power` to `0` if it
 /// is not already. `None` when there is nothing to change (mirrors every
 /// other `run_scheduled_tick` in this family returning `None` for "no
 /// mutation").
