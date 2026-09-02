@@ -5,7 +5,7 @@
 //! outward-facing double-chest halves and transparent lantern models replacing
 //! the only opaque layer of their wall.
 
-const HUD_SCENE: &str = include_str!("../../../scripts/screenshot-scenes/05-hud.txt");
+const HUD_SCENE: &str = include_str!("../../../../scripts/screenshot-scenes/05-hud.txt");
 
 fn has_command(command: &str) -> bool {
     HUD_SCENE

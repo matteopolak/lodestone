@@ -6,7 +6,7 @@
 
 #[test]
 fn showcase_exercises_every_requested_render_path() {
-    let scene = include_str!("../../../scripts/benchmark-scenes/showcase.txt");
+    let scene = include_str!("../../../../scripts/benchmark-scenes/showcase.txt");
     for required in [
         "_sign[",
         "player_head",
