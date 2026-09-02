@@ -1,4 +1,4 @@
-//! Version-free interpreter for vanilla's `SurfaceRules` / `SurfaceSystem`.
+//! Version-free interpreter for vanilla's surface-rule system.
 //!
 //! This is the stage that turns the post-aquifer density field (a column of
 //! stone / water / lava / air) into recognisable terrain — grass over dirt over
@@ -10,11 +10,11 @@
 //! # What it consumes
 //!
 //! [`SurfaceSystem::build_surface`] takes the **pre-surface column** (the
-//! aquifer-filled block field, exactly what vanilla's `NoiseChunk` +
-//! `NoiseBasedChunkGenerator.doFill` produce) and the `WORLD_SURFACE_WG`
-//! heightmap, and reproduces vanilla's `SurfaceSystem.buildSurface` scan
+//! aquifer-filled block field, exactly what vanilla's noise-chunk sampler
+//! and its fill pass produce) and the `WORLD_SURFACE_WG`
+//! heightmap, and reproduces vanilla's own surface-building scan
 //! block-for-block. The pre-surface states are taken as given (so the engine
-//! needs no block registry): a rule only ever *replaces* a `defaultBlock`
+//! needs no block registry): a rule only ever *replaces* the default block
 //! (stone) with one of the surface rule's result states, whose canonical form
 //! is supplied by the caller (version data, exactly like the block registry).
 //!
@@ -39,9 +39,9 @@
 //!   matters beyond allocation: `4307b59` is this repo's scar for putting many
 //!   concurrent generator calls on one shared cache line.
 //! * **`Rule::Bandlands`' "computed" name is a table subscript.**
-//!   `SurfaceSystem.getBand` looked like the blocker — it *computes* which
+//!   Vanilla's own band lookup looked like the blocker — it *computes* which
 //!   block it returns rather than selecting a static one — but the set it
-//!   computes over is `SurfaceSystem.clayBands`, exactly [`CLAY_BANDS_LEN`]
+//!   computes over is vanilla's own clay-bands table, exactly [`CLAY_BANDS_LEN`]
 //!   entries drawn from the [`BAND_BLOCK_NAMES`] seven. So the whole band set
 //!   is known once per world seed and pre-interned into `Vec<StateId>` by
 //!   [`RuleParser::bandlands`], which also *asserts* the finiteness rather
@@ -99,7 +99,7 @@ const NO_WATER: i32 = i32::MIN;
 /// impose a total order of its own and say so.
 pub type SurfaceDiff = FastMap<(i32, i32, i32), StateId>;
 
-/// Which of vanilla's three `buildSurface` classes a pre-surface block is in.
+/// Which of vanilla's three surface-building classes a pre-surface block is in.
 ///
 /// The scan branches on this and nothing else about the block's identity, so
 /// carrying it beside the id (see [`PreState`]) is what lets the pre-surface
@@ -107,9 +107,9 @@ pub type SurfaceDiff = FastMap<(i32, i32, i32), StateId>;
 /// answer these three questions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreClass {
-    /// `BlockState.isAir()`.
+    /// Vanilla's own "is this state air" check.
     Air,
-    /// `!FluidState.isEmpty()` — water or lava, at any property set.
+    /// Vanilla's own "is this state a non-empty fluid" check — water or lava, at any property set.
     Fluid,
     /// Neither: vanilla's implicit "stone" case, `!isAir && fluid.isEmpty()`.
     Stone,
@@ -182,7 +182,7 @@ pub fn class_of_name(name: &str) -> PreClass {
 /// lines. Keeping this out of the engine preserves the version-free split.
 pub type BlockCanon = HashMap<String, String>;
 
-/// A parsed surface-rule condition (`SurfaceRules.ConditionSource` applied to
+/// A parsed surface-rule condition (vanilla's condition-source tree applied to
 /// a context).
 enum Cond {
     AbovePreliminarySurface,
@@ -224,7 +224,7 @@ enum Cond {
     },
 }
 
-/// A parsed surface rule (`SurfaceRules.RuleSource`).
+/// A parsed surface rule (vanilla's rule-source tree).
 enum Rule {
     /// Emits a fully-canonical block state, interned at parse time (U21) so a
     /// match is a `u16` copy rather than a `String` clone. This arm was
@@ -236,25 +236,26 @@ enum Rule {
     /// Runs `then` only when `cond` holds.
     Condition(Cond, Box<Rule>),
     /// Badlands/eroded_badlands/wooded_badlands' banded-terracotta rule
-    /// (`SurfaceRules.bandlands()` — `context.system::getBand`, this change's
+    /// (vanilla's bandlands rule, whose logic delegates to its surface
+    /// system's own band lookup, this change's
     /// carried-over gap, closed here). Unconditional and parameterless in
-    /// vanilla's own DSL (`SurfaceRules.Bandlands` is a zero-field enum
+    /// vanilla's own DSL (its bandlands rule is a zero-field enum
     /// singleton), so the [`BandBlocks`] payload is built once at parse time
     /// from the generator's own seed, not from anything in the JSON node —
     /// see [`RuleParser::bandlands`].
     Bandlands(Box<BandBlocks>),
 }
 
-/// `SurfaceSystem.getBand`'s own state: the 192-entry clay-band table plus
+/// Vanilla's own band-lookup state: the 192-entry clay-band table plus
 /// the noise that perturbs which entry a given `y` lands on.
 ///
 /// Built once per world seed ([`RuleParser::bandlands`]), not per column or
-/// per block — matching vanilla, where `SurfaceSystem.clayBands` is an
+/// per block — matching vanilla, where the clay-bands table is an
 /// instance field generated once in the constructor
-/// (`SurfaceSystem.generateBands`), never touched again after `new
-/// SurfaceSystem(...)` returns.
+/// (by vanilla's own one-time band-table build), never touched again after
+/// construction.
 struct BandBlocks {
-    /// `SurfaceSystem.clayBands` — always exactly
+    /// Vanilla's own clay-bands table — always exactly
     /// [`CLAY_BANDS_LEN`] entries long, each the **interned id** of a full
     /// canonical block string (these seven blocks carry no properties at 26.2
     /// — see [`generate_bands`]'s doc comment — so no [`BlockCanon`] lookup is
@@ -264,17 +265,17 @@ struct BandBlocks {
     /// whole reason `Bandlands` was not the blocker it looked like: see the
     /// module doc's third bullet.
     clay_bands: Vec<StateId>,
-    /// `SurfaceSystem.clayBandsOffsetNoise` (`minecraft:clay_bands_offset`).
+    /// Vanilla's own clay-bands offset noise (`minecraft:clay_bands_offset`).
     offset_noise: NormalNoise,
 }
 
-/// `SurfaceSystem.clayBands.length` — vanilla's own hardcoded table size
-/// (`SurfaceSystem.generateBands`'s `new BlockState[192]`), not derived from
+/// Vanilla's own hardcoded clay-bands table size
+/// (its one-time band-table build allocates exactly 192 entries), not derived from
 /// anything version-supplied.
 const CLAY_BANDS_LEN: usize = 192;
 
 /// Every block [`generate_bands`] can write into the clay-band table, and
-/// therefore the *entire* value set `SurfaceSystem.getBand` can return.
+/// therefore the *entire* value set vanilla's own band lookup can return.
 ///
 /// This list is what makes `Rule::Bandlands` pre-internable: the band index is
 /// computed per block, but the thing indexed is drawn from these seven names,
@@ -293,9 +294,10 @@ const BAND_BLOCK_NAMES: [&str; 7] = [
 ];
 
 impl BandBlocks {
-    /// `SurfaceSystem.getBand(worldX, y, worldZ)`. Never returns `None` —
-    /// vanilla's own `Bandlands` rule (`context.system::getBand`) is a bare
-    /// `SurfaceRule` function reference with no condition wrapped around it,
+    /// Vanilla's own band lookup at `(world_x, y, world_z)`. Never returns `None` —
+    /// vanilla's own bandlands rule (delegating to this same lookup on its
+    /// context's surface system) is a bare
+    /// rule function reference with no condition wrapped around it,
     /// so every call that reaches [`Rule::Bandlands`] gets a real block back.
     fn get_band(&self, world_x: i32, y: i32, world_z: i32) -> StateId {
         let offset = round(
@@ -316,8 +318,9 @@ impl BandBlocks {
     }
 }
 
-/// `SurfaceSystem.generateBands(RandomSource)` — the one-time table build.
-/// `random` must be `noiseRandom.fromHashOf("minecraft:clay_bands")`
+/// Vanilla's own one-time clay-bands table build.
+/// `random` must be the noise random's positional factory forked from the
+/// hash of `"minecraft:clay_bands"`
 /// ([`RuleParser::bandlands`]), matching vanilla's own derivation exactly
 /// (a *positional* factory's `from_hash_of`, not any per-block draw).
 ///
@@ -335,12 +338,12 @@ impl BandBlocks {
 fn generate_bands<R: RandomSource>(random: &mut R) -> Vec<String> {
     let mut clay_bands = vec!["minecraft:terracotta".to_string(); CLAY_BANDS_LEN];
 
-    // `for (int i = 0; i < clayBands.length; i++) { i += random.nextInt(5) + 1; ... }`
-    // — the for-loop's own `i++` still fires every iteration *in addition to*
-    // the body's `i +=`, so each step advances `i` by `nextInt(5) + 2`, not
-    // `+ 1`. Translated as an explicit `while` with both increments spelled
-    // out so that trap can't silently drop the `+ 1` a naive `for i in ...`
-    // rewrite would.
+    // Vanilla's own loop is a C-style `for` over the table whose header still
+    // fires its own `i++` every iteration *in addition to* the body's own
+    // `i += (bounded random draw over [0,5)) + 1`, so each step actually
+    // advances `i` by that draw plus 2, not plus 1. Translated as an explicit
+    // `while` with both increments spelled out so that trap can't silently
+    // drop the `+ 1` a naive `for i in ...` rewrite would.
     let len = CLAY_BANDS_LEN as i32;
     let mut i: i32 = 0;
     while i < len {
@@ -373,8 +376,9 @@ fn generate_bands<R: RandomSource>(random: &mut R) -> Vec<String> {
     clay_bands
 }
 
-/// `SurfaceSystem.makeBands` — scatters `bandCount` runs of `state`, each
-/// `baseWidth..baseWidth+3` entries wide, at independently random starts.
+/// Vanilla's own band-scattering routine — scatters a random count of runs
+/// of `state`, each `base_width..base_width+3` entries wide, at independently
+/// random starts.
 /// Plain `for` loops in the original (no self-modifying index), so this is a
 /// direct, non-tricky translation unlike [`generate_bands`]'s first loop.
 fn make_bands<R: RandomSource>(random: &mut R, clay_bands: &mut [String], base_width: i32, state: &str) {
@@ -391,7 +395,7 @@ fn make_bands<R: RandomSource>(random: &mut R, clay_bands: &mut [String], base_w
     }
 }
 
-/// Per-column / per-Y scan state mirroring `SurfaceRules.Context`.
+/// Per-column / per-Y scan state mirroring vanilla's own surface-rule scan context.
 struct Ctx<'a> {
     block_x: i32,
     block_z: i32,
@@ -411,7 +415,7 @@ struct Ctx<'a> {
     /// call on the carver path. Neither clone bought anything — the biome table
     /// this borrows from outlives the scan in both cases.
     biome: &'a str,
-    /// This column's biome's `coldEnoughToSnow` answer — consulted by
+    /// This column's biome's "cold enough to snow" answer — consulted by
     /// [`Cond::Temperature`]. See [`crate::biome::cold_enough_to_snow`].
     cold_enough_to_snow: bool,
 }
@@ -422,8 +426,8 @@ struct Ctx<'a> {
 pub struct SurfaceSystem {
     min_y: i32,
     gen_depth: i32,
-    /// The settings' `default_block`, interned — the `old == this.defaultBlock`
-    /// guard is now a `u16` compare rather than a string compare.
+    /// The settings' `default_block`, interned — vanilla's own
+    /// "is this the default block" guard is now a `u16` compare rather than a string compare.
     default_block: StateId,
     /// The table every id in this system was issued by. Held so
     /// [`Self::top_material`] can still hand a `String` to the carver seam,
@@ -441,7 +445,8 @@ pub struct SurfaceSystem {
 impl SurfaceSystem {
     /// Builds the interpreter for `settings` (a `noise_settings` JSON value)
     /// using `builder` (already seeded with the same seed) to instantiate
-    /// noises and derive random factories exactly as `RandomState` does.
+    /// noises and derive random factories exactly as vanilla's own
+    /// per-world random-state holder does.
     /// `canon` resolves result-state partial keys to full canonical strings.
     ///
     /// Unlike before this change, this takes **no biome** — a generator run no
@@ -496,7 +501,7 @@ impl SurfaceSystem {
         }
     }
 
-    /// `SurfaceSystem.getSurfaceDepth(x, z)`.
+    /// Vanilla's own surface-depth lookup at `(x, z)`.
     fn surface_depth(&self, x: i32, z: i32) -> i32 {
         let noise = self
             .surface_noise
@@ -505,21 +510,22 @@ impl SurfaceSystem {
         (noise * 2.75 + 3.0 + extra) as i32
     }
 
-    /// `SurfaceSystem.getSurfaceSecondary(x, z)`.
+    /// Vanilla's own secondary surface-noise lookup at `(x, z)`.
     fn surface_secondary(&self, x: i32, z: i32) -> f64 {
         self.surface_secondary_noise
             .get_value(f64::from(x), 0.0, f64::from(z))
     }
 
-    /// `NoiseChunk.preliminarySurfaceLevel(sampleX, sampleZ)`.
+    /// Vanilla's own preliminary-surface-level lookup at `(sample_x, sample_z)`.
     fn preliminary_surface_level(&self, sample_x: i32, sample_z: i32) -> i32 {
-        // QuartPos.toBlock(QuartPos.fromBlock(v)) == (v >> 2) << 2.
+        // Vanilla's quart<->block conversion round-trip collapses to
+        // (v >> 2) << 2.
         let qx = (sample_x >> 2) << 2;
         let qz = (sample_z >> 2) << 2;
         floor(self.prelim.compute(DfContext::new(qx, 0, qz)))
     }
 
-    /// `SurfaceRules.Context.getMinSurfaceLevel()`.
+    /// Vanilla's own scan-context minimum-surface-level lookup.
     ///
     /// Used by [`Self::top_material`], which queries one arbitrary position at a
     /// time (carvers), so it computes its own corner cell fresh. [`Self::build_surface`]
@@ -567,7 +573,7 @@ impl SurfaceSystem {
         level + surface_depth - 8
     }
 
-    /// Reproduces `SurfaceSystem.buildSurface` for one 16×16 chunk.
+    /// Reproduces vanilla's own surface-building scan for one 16×16 chunk.
     ///
     /// * `pre` yields the pre-surface (aquifer-filled) block at local
     ///   `(x, y, z)` (`x, z` in `0..16`, `y` a world Y) as a [`PreState`] —
@@ -965,10 +971,12 @@ impl RuleParser<'_, '_> {
     /// Builds [`BandBlocks`] for a `"minecraft:bandlands"` rule node — once
     /// per occurrence of that node in the `surface_rule` tree at parse time
     /// (there is exactly one in vanilla's real `overworld.json`), matching
-    /// `SurfaceSystem`'s constructor calling `generateBands` exactly once
+    /// vanilla's own generator constructor calling its one-time band-table
+    /// build exactly once
     /// per world. `self.builder.positional_factory()` is the same `master`
-    /// factory [`SurfaceSystem::new`] itself stores (`RandomState.random`,
-    /// i.e. vanilla's `noiseRandom`) — see this module's own `master` field
+    /// factory [`SurfaceSystem::new`] itself stores (vanilla's own
+    /// generator-wide random-state field, i.e. what vanilla calls its noise
+    /// random) — see this module's own `master` field
     /// doc for why that identity holds.
     /// U21 added the interning of the finished table, and the two assertions
     /// that make "the band set is finite" a checked claim rather than an
@@ -986,7 +994,7 @@ impl RuleParser<'_, '_> {
         assert_eq!(
             names.len(),
             CLAY_BANDS_LEN,
-            "generate_bands must produce exactly SurfaceSystem.clayBands.length entries"
+            "generate_bands must produce exactly vanilla's clay-bands table length in entries"
         );
         if let Some(unknown) = names
             .iter()
@@ -1081,7 +1089,7 @@ impl RuleParser<'_, '_> {
         }
     }
 
-    /// `VerticalAnchor.resolveY(WorldGenerationContext)`.
+    /// Vanilla's own vertical-anchor resolution against the world-generation context.
     fn resolve_anchor(&self, node: &Value) -> i32 {
         if let Some(y) = node["absolute"].as_i64() {
             y as i32

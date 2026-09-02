@@ -12,15 +12,16 @@
 //!
 //! # Composed pipeline, and vanilla's own order
 //!
-//! `NoiseBasedChunkGenerator`'s real order is `fillFromNoise` (shape + the real
-//! aquifer, the aquifer participating *inside* fill rather than after it) ->
-//! per-quart biome resolution -> `buildSurface` -> `applyCarvers` -> feature
-//! decoration. [`column`](Self::column) reproduces that order exactly:
+//! Vanilla's real order is: fill (shape + the real aquifer, the aquifer
+//! participating *inside* fill rather than after it) -> per-quart biome
+//! resolution -> surface building -> carving -> feature decoration.
+//! [`column`](Self::column) reproduces that order exactly:
 //!
 //! 1. **Fill** — [`AquiferSystem::block_at`] evaluates the interpolated
 //!    `final_density` field *and* the real aquifer's barrier/floodedness/
-//!    spread/lava routing together (`computeSubstance`), the same code
-//!    `aquifer_parity` proves block-for-block against the JVM. This replaces
+//!    spread/lava routing together (vanilla's combined substance
+//!    computation), the same code `aquifer_parity` proves block-for-block
+//!    against the JVM. This replaces
 //!    the sea-level-only fluid approximation this generator used before the
 //!    real aquifer landed: underground water/lava pockets now come from the
 //!    real aquifer, not just
@@ -32,7 +33,7 @@
 //!    same landing, now consuming the real aquifer's fill instead of the approximation.
 //! 4. **Carve** — [`crate::carver::apply_carvers`] over a materialised
 //!    world-keyed block grid, replicating vanilla's real per-source-chunk
-//!    `carverBiome` resolution (each of the 17×17 source chunks in the carve
+//!    per-source-chunk carver-biome resolution (each of the 17×17 source chunks in the carve
 //!    neighbourhood gets its own biome — and therefore its own carver list —
 //!    sampled at that source chunk's quart corner and `y = 0`, **not** its
 //!    surface height; carver selection is a different question from surface
@@ -40,14 +41,14 @@
 //!
 //! 5. **Ore features** — [`Self::ore_stage`] runs
 //!    [`crate::feature::apply_ore_step_3x3_per_source`], vanilla's real 3×3
-//!    neighbourhood `UNDERGROUND_ORES` driver: each of the 9 chunks in
+//!    neighbourhood underground-ore decoration driver: each of the 9 chunks in
 //!    `center ± 1` gets its own full pre-ore pipeline (stages 1-4 above,
 //!    via [`Self::pre_ore_stage`]) and its own biome-resolved ore list (the
 //!    same per-source-chunk convention [`Self::biome_for_carver_source`]
 //!    already uses for carvers), and every one of the 9 passes writes into
 //!    one shared region grid before the centre 16×16 is folded back in —
-//!    matching vanilla's real `blockStateWriteRadius(1)` spill, not an
-//!    approximation of it.
+//!    matching vanilla's real spill of block writes one chunk into each
+//!    neighbour, not an approximation of it.
 //!
 //! This landed after an architecture review found that `FeatureOracle.java`
 //! — the oracle `feature_parity` validates the ore *engine* against —
@@ -75,7 +76,7 @@
 //! badlands (see "Badlands" below), so composing ores there places the
 //! *wrong* biome's ore list, not merely an incomplete one — confirmed
 //! directly by a whole missing ore type (`badlands.json`'s
-//! `UNDERGROUND_ORES` step names `minecraft:ore_gold_extra`, badlands' bonus
+//! underground-ore step names `minecraft:ore_gold_extra`, badlands' bonus
 //! gold vein, which no substitute biome's list contains).
 //!
 //! **Everything listed above is composed.** This paragraph twice carried a
@@ -174,8 +175,8 @@
 //! `minecraft:badlands`/`eroded_badlands`/`wooded_badlands` used to be
 //! excluded from the searchable biome table
 //! (`crate::biome::usable_overworld_table`) because their surface rule
-//! reached an unported `SurfaceSystem.getBand` subsystem that would panic.
-//! `getBand` is now ported (`crate::surface::Rule::Bandlands`) and the
+//! reached an unported band-lookup subsystem that would panic. That
+//! band lookup is now ported (`crate::surface::Rule::Bandlands`) and the
 //! exclusion is removed (`usable_overworld_table` is a pass-through), so a
 //! column can resolve to any of the three real names again — which means
 //! the per-source-chunk carver biome and ore biome (both driven through the
@@ -317,7 +318,7 @@ const COLUMN_CLOSURE_RADIUS: i32 = 2;
 /// Structure placement's S1 added one upstream edge: [`OverworldGenerator::pre_ore_stage`]
 /// reads `structure_refs_stage` for its own chunk, and that stage walks
 /// `structure_starts_stage` over [`structures::REFS_RADIUS`] = 8 chunks in every
-/// direction (vanilla's `createReferences` range). Compose that with the 5×5
+/// direction (vanilla's structure-reference-gathering range). Compose that with the 5×5
 /// pre-ore closure and **one `column()` call touches 21×21 = 441 store entries,
 /// not 25**.
 ///
@@ -414,9 +415,10 @@ pub struct OverworldGenerator {
     default_block: String,
     default_fluid: String,
     /// Vanilla hardcodes lava as the aquifer's second fluid regardless of the
-    /// dimension's configured `default_fluid` (`Aquifer.FluidStatus` built
-    /// from `Blocks.LAVA.defaultBlockState()`, not from `NoiseGeneratorSettings`)
-    /// — not a simplification, this is vanilla's own behaviour.
+    /// dimension's configured `default_fluid` (the aquifer's fluid-status
+    /// type is built from the game's fixed lava block state, not from the
+    /// noise-generator settings) — not a simplification, this is vanilla's
+    /// own behaviour.
     default_lava: String,
     /// The three `default_*` strings above as [`PreState`]s — interned id plus
     /// air/fluid/stone class — resolved once here.
@@ -440,7 +442,7 @@ pub struct OverworldGenerator {
     default_block_pre: crate::surface::PreState,
     default_fluid_pre: crate::surface::PreState,
     default_lava_pre: crate::surface::PreState,
-    /// The biome (and its `coldEnoughToSnow` answer) used for every column
+    /// The biome (and its "cold enough to snow" answer) used for every column
     /// when [`Self::dynamic_biome`] is `None` — i.e. exactly the whole-world
     /// behaviour this generator had before this change, kept as the fallback
     /// a [`Resolver`] with no biome data still gets.
@@ -463,7 +465,7 @@ pub struct OverworldGenerator {
     /// name the [`Resolver`]'s biome-parameter table (or the fallback biome)
     /// can produce — see `crate::compose::build_biome_carvers`.
     carvers_by_biome: HashMap<String, Vec<CarverConfig>>,
-    /// Per-biome `UNDERGROUND_ORES` list, resolved the same way
+    /// Per-biome underground-ore decoration-step list, resolved the same way
     /// and at the same time as `carvers_by_biome` — see
     /// `crate::compose::build_biome_ores`. Empty (whole map) when the
     /// resolver supplies no biome documents with an ore step, in which case
@@ -843,8 +845,8 @@ impl OverworldGenerator {
         &self.spawners_by_biome
     }
 
-    /// `MultiNoiseBiomeSource.getNoiseBiome(qx, qy, qz)` at an arbitrary quart
-    /// cell, sampled fresh rather than read out of a generated chunk.
+    /// Vanilla's multi-noise biome lookup at an arbitrary quart cell (qx, qy,
+    /// qz), sampled fresh rather than read out of a generated chunk.
     ///
     /// Needed by the structure stages, which run before any chunk exists.
     /// [`Self::biome_cells_stage`] resolves the same question for a whole chunk's
@@ -911,11 +913,11 @@ impl OverworldGenerator {
 
     /// Whether `(cx, cz)` is a slime chunk for **this generator's**
     /// seed — vanilla's own slime-chunk RNG seeding, followed by a
-    /// `nextInt(10) == 0` roll.
+    /// "roll a bounded random int in `[0, 10)` and require it to be 0" check.
     ///
     /// A method on the generator rather than a bare function so a caller never has
     /// to know the world seed to ask; the derivation itself is
-    /// [`crate::rng::is_slime_chunk`], beside the three other `WorldgenRandom` seed
+    /// [`crate::rng::is_slime_chunk`], beside the three other worldgen-RNG seed
     /// derivations, and is unit-tested element-wise against an independently
     /// transcribed lattice.
     ///
@@ -1027,7 +1029,7 @@ impl OverworldGenerator {
     ///
     /// Factored out of [`Self::column`] so [`Self::ore_stage`]
     /// can call it again for each of the 8 neighbour chunks in the ore
-    /// driver's 3×3 neighbourhood: vanilla's real `blockStateWriteRadius(1)`
+    /// driver's 3×3 neighbourhood: vanilla's real one-chunk-into-neighbours
     /// ore spill (`FeatureOracle.java`'s own doc comment,
     /// `docs/worldgen-parity.md`'s "known gap" section) depends on each
     /// neighbour's own real post-carve terrain and heightmap, not an
@@ -1040,9 +1042,9 @@ impl OverworldGenerator {
     /// That distinction matters: an earlier version of this same idea in the JVM
     /// oracle this crate is proven against (`FeatureOracle.java`) *did* clamp
     /// reads to a bounded region, aliasing two distinct chunk coordinates onto
-    /// one memoised value, and vanilla's own `BulkSectionAccess` then tried to
-    /// lock the same `LevelChunkSection`'s non-reentrant semaphore twice within
-    /// one placement and hung forever (see `docs/worldgen-parity.md`'s "Known
+    /// one memoised value, and vanilla's own bulk section-access cache then
+    /// tried to lock the same chunk section's non-reentrant semaphore twice
+    /// within one placement and hung forever (see `docs/worldgen-parity.md`'s "Known
     /// gap" section on the 3×3 driver). This engine has no such semaphore, but
     /// the aliasing shape — two logically distinct chunks sharing one cached
     /// answer — is exactly what an exact-coordinate key rules out, and

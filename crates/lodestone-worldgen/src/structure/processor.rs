@@ -3,17 +3,17 @@
 //!
 //! # What it is
 //!
-//! The `StructureProcessor` kinds the structures wired here actually name:
-//! `BlockIgnoreProcessor` (drop air / structure blocks), `BlockRotProcessor`
-//! (integrity — the reason a ruin is a ruin), `RuleProcessor` (match-and-replace
-//! block states), `ProtectedBlockProcessor`, `JigsawReplacementProcessor` (a
-//! jigsaw block becomes its own `final_state`) and `GravityProcessor` (a
+//! Vanilla's own structure-processor kinds the structures wired here actually name:
+//! its block-ignore processor (drop air / structure blocks), its block-rot processor
+//! (integrity — the reason a ruin is a ruin), its rule processor (match-and-replace
+//! block states), its protected-block processor, its jigsaw-replacement processor (a
+//! jigsaw block becomes its own `final_state`) and its gravity processor (a
 //! `terrain_matching` pool element's blocks follow the surface).
 //!
 //! # How it works
 //!
 //! Every processor that needs randomness derives it from the block's **absolute
-//! position**: `RandomSource.create(Mth.getSeed(pos))`, a fresh legacy LCG per
+//! position**: a fresh legacy-RNG source seeded from a position-derived hash, a fresh legacy LCG per
 //! block. There is no shared stream, so no draw order to preserve across chunks —
 //! which is the whole reason integrity survives our per-chunk pipeline. Getting
 //! this wrong (a per-piece stream) would make the same shipwreck rot differently
@@ -31,13 +31,13 @@
 //! # How to change it
 //!
 //! * `Processor::process` returning `None` means **drop this block**, exactly as
-//!   vanilla's `@Nullable StructureBlockInfo` does. It is not an error path.
+//!   vanilla's own nullable block-info return does. It is not an error path.
 //! * A new `processor_type` belongs in [`ProcessorList::parse`](super::pool::ProcessorList),
 //!   and anything it does not cover must be named in
 //!   [`super::StructureRegistry::unsupported`] — the ledger, not a silent skip.
 //! * **`capped` is the one processor that is not per-block** ([`Processor::Capped`]).
-//!   It runs in `finalizeProcessing`, over the **whole** processed list, and its
-//!   `evaluatesEntirePieceState` flips vanilla's `processOnlyInCurrentChunk` off —
+//!   It runs in vanilla's own finalize-processing step, over the **whole** processed list, and its
+//!   "evaluates entire piece state" flag flips vanilla's own "process only in current chunk" flag off —
 //!   so a piece carrying one is processed over its entire footprint and only
 //!   clipped at write time. That is not an optimisation detail: the shuffled index
 //!   walk is over the full list, so clipping first would put a different number of
@@ -81,7 +81,7 @@ impl WorldRead for DenseBlockGrid {
 /// matches but changes nothing consumes an index without consuming the cap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessedBlock {
-    /// The **absolute** world position. A `GravityProcessor` rewrites this.
+    /// The **absolute** world position. Vanilla's own gravity processor rewrites this.
     pub pos: [i32; 3],
     /// The state, still unrotated (`mirror().rotate()` happens after the chain).
     pub state: BlockState,
@@ -90,10 +90,10 @@ pub struct ProcessedBlock {
 /// Everything a processor can see besides the block itself.
 #[allow(missing_debug_implementations)]
 pub struct ProcessCtx<'a> {
-    /// `templateRelativePos` — the block's unrotated, template-local position.
-    /// `GravityProcessor` reads its `delta` from this and nothing else does.
+    /// Vanilla's own template-relative position — the block's unrotated, template-local position.
+    /// Vanilla's own gravity processor reads its `delta` from this and nothing else does.
     pub local: [i32; 3],
-    /// `referencePos` — `StructureStart.placeInChunk`'s
+    /// Vanilla's own reference position — its structure-start place-in-chunk step's
     /// `(centre.x, pieces[0].box.minY, centre.z)`, where `centre` is the **first**
     /// piece's box centre. A whole-*start* fact, not a per-piece one, which is why
     /// it arrives here rather than living in [`super::template::PlaceSettings`].
@@ -108,7 +108,7 @@ pub struct ProcessCtx<'a> {
 /// A `RuleTest` — the input or location half of a [`ProcessorRule`].
 #[derive(Debug, Clone)]
 pub enum RuleTest {
-    /// `always_true`. Note vanilla overrides `testAgainstWorldState` to return
+    /// `always_true`. Note vanilla overrides its world-state test to return
     /// true **without** consulting the state or drawing — so an `always_true`
     /// location predicate costs no draw, and adding one would shift every later
     /// rule's roll.
@@ -146,7 +146,7 @@ impl RuleTest {
         }
     }
 
-    /// `testAgainstWorldState(level, pos, random)` — the same predicate against
+    /// Vanilla's own world-state test at `(level, pos, random)` — the same predicate against
     /// the world's own state, with `always_true`'s no-draw short circuit.
     fn test_world(&self, world: &dyn WorldRead, pos: [i32; 3], random: &mut LegacyRandomSource) -> bool {
         if matches!(self, Self::AlwaysTrue) {
@@ -157,21 +157,21 @@ impl RuleTest {
     }
 }
 
-/// A `Direction.Axis`, for [`PosTest::AxisAlignedLinear`].
+/// Vanilla's own direction-axis enum, for [`PosTest::AxisAlignedLinear`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
     /// `x`.
     X,
-    /// `y` — `AxisAlignedLinearPosTest`'s default, and the only one bundled.
+    /// `y` — vanilla's own axis-aligned-linear position test's default, and the only one bundled.
     Y,
     /// `z`.
     Z,
 }
 
-/// A `PosRuleTest` — the third and last predicate of a [`ProcessorRule`].
+/// Vanilla's own position rule test — the third and last predicate of a [`ProcessorRule`].
 #[derive(Debug, Clone, Copy)]
 pub enum PosTest {
-    /// `always_true` (`PosAlwaysTrueTest`). **Costs no draw**, which is why an
+    /// `always_true` (vanilla's own always-true position test). **Costs no draw**, which is why an
     /// absent `position_predicate` and a present one are not interchangeable.
     AlwaysTrue,
     /// `axis_aligned_linear_pos` — one `nextFloat()` against a chance that ramps
@@ -195,7 +195,7 @@ pub enum PosTest {
 }
 
 impl PosTest {
-    /// `test(inTemplatePos, worldPos, worldReference, random)`.
+    /// Vanilla's own position-test at `(in_template_pos, world_pos, world_reference, random)`.
     ///
     /// The distance is taken along **one** axis only (vanilla multiplies each
     /// component by that axis' unit step and sums the absolute values, which zeroes
@@ -234,7 +234,7 @@ impl PosTest {
     }
 }
 
-/// `Mth.clampedLerp(factor, min, max)` — **factor first**, which is the opposite
+/// Vanilla's own clamped-lerp at `(factor, min, max)` — **factor first**, which is the opposite
 /// of the `lerp(start, end, t)` spelling most APIs use and would silently produce
 /// a constant chance if read the other way round.
 fn clamped_lerp(factor: f32, min: f32, max: f32) -> f32 {
@@ -267,12 +267,12 @@ pub struct ProcessorRule {
     pub output: BlockState,
 }
 
-/// Per-column surface heights over a rectangle, precomputed for a
-/// `GravityProcessor`.
+/// Per-column surface heights over a rectangle, precomputed for
+/// vanilla's own gravity processor.
 ///
 /// # Why this is precomputed and not sampled
 ///
-/// Vanilla's `GravityProcessor` calls `level.getHeight(WORLD_SURFACE_WG, x, z)` at
+/// Vanilla's own gravity processor calls its own heightmap lookup at `WORLD_SURFACE_WG`, `(x, z)` at
 /// placement time, i.e. against the *decorating chunk's* heightmap. Our pipeline
 /// places one piece independently in each chunk it spans, so sampling there would
 /// give a piece two different surfaces on two sides of a chunk border and shear it
@@ -333,39 +333,39 @@ impl ColumnHeights {
 /// A processor in a piece's chain.
 #[derive(Debug, Clone)]
 pub enum Processor {
-    /// `BlockIgnoreProcessor` — drop a block whose id is in the list.
+    /// Vanilla's own block-ignore processor — drop a block whose id is in the list.
     ///
     /// The most load-bearing processor in the whole unit: `STRUCTURE_AND_AIR`
     /// drops the template's air, which is why a shipwreck's hull keeps the sand
     /// it is buried in instead of being cleared to an air box.
     BlockIgnore(Vec<String>),
-    /// `BlockRotProcessor` — keep a block only when
-    /// `random.nextFloat() <= integrity`, optionally restricted to a
+    /// Vanilla's own block-rot processor — keep a block only when
+    /// a random float draw is `<= integrity`, optionally restricted to a
     /// `rottable_blocks` set.
     BlockRot {
         /// `rottable_blocks`, resolved to block ids. `None` means "every block is
         /// rottable", which is **not** the same as an empty set: an empty set
-        /// would rot nothing, and vanilla's `Optional.empty()` rots everything.
+        /// would rot nothing, and vanilla's own "absent means every block" default rots everything.
         rottable: Option<Arc<HashSet<String>>>,
         /// `integrity`, `0.0..=1.0`.
         integrity: f32,
     },
-    /// `RuleProcessor` — first matching rule replaces the state. One
+    /// Vanilla's own rule processor — first matching rule replaces the state. One
     /// position-seeded LCG is shared by every rule test for one block, in order.
     Rule(Vec<ProcessorRule>),
-    /// `ProtectedBlockProcessor` — drop the template's block when the world
+    /// Vanilla's own protected-block processor — drop the template's block when the world
     /// already holds one of `cannot_replace` there.
     ProtectedBlocks(Arc<HashSet<String>>),
-    /// `JigsawReplacementProcessor` — a jigsaw block becomes the `final_state`
+    /// Vanilla's own jigsaw-replacement processor — a jigsaw block becomes the `final_state`
     /// from its own `nbt`, or is dropped when that is `structure_void`.
     ///
     /// Not optional: without it every placed village keeps its jigsaw blocks,
     /// which are `#minecraft:jigsaw`-textured command blocks in the middle of
     /// every wall.
     JigsawReplacement,
-    /// `GravityProcessor(heightmap, offset)` — move the block to
+    /// Vanilla's own gravity processor at `(heightmap, offset)` — move the block to
     /// `height(x, z) + offset + localY`. Carried by every `terrain_matching` pool
-    /// element (`StructureTemplatePool.Projection.TERRAIN_MATCHING`), which is what
+    /// element (vanilla's own terrain-matching pool-element projection), which is what
     /// makes a village street follow a hillside.
     Gravity {
         /// The precomputed surface, see [`ColumnHeights`].
@@ -373,12 +373,12 @@ pub enum Processor {
         /// `offset` — `-1` for the projection's own processor.
         offset: i32,
     },
-    /// `CappedProcessor(delegate, limit)` — apply `delegate` to at most `limit`
+    /// Vanilla's own capped processor at `(delegate, limit)` — apply `delegate` to at most `limit`
     /// blocks of the piece, chosen by a shuffled walk over **every** index of the
     /// processed list.
     ///
     /// The one processor here that is not a per-block function, and the only one
-    /// whose `evaluatesEntirePieceState` is true. Three properties are the
+    /// whose "evaluates entire piece state" flag is true. Three properties are the
     /// specification:
     ///
     /// * the walk is over the *whole* piece, so it must not be clipped to a chunk
@@ -395,21 +395,21 @@ pub enum Processor {
         /// `limit`, as the constant it always is in the bundled data.
         limit: i32,
     },
-    /// `BlockAgeProcessor(mossiness)` — ruined portals' decay: stone/stone-bricks
+    /// Vanilla's own block-age processor at `(mossiness)` — ruined portals' decay: stone/stone-bricks
     /// crack or moss over, stairs/slabs/walls moss, obsidian occasionally chills
     /// to crying obsidian. Five independent `state.is(...)` arms, each its own
     /// roll; see [`Self::process`] for the per-arm probabilities, transcribed from
-    /// `BlockAgeProcessor.processBlock`.
+    /// vanilla's own block-age processor's per-block logic.
     BlockAge {
         /// `mossiness` — the structure `Setup`'s own field, not a constant.
         mossiness: f32,
     },
-    /// `LavaSubmergedBlockProcessor` — a block placed where the *pre-structure*
+    /// Vanilla's own lava-submerged-block processor — a block placed where the *pre-structure*
     /// world already held lava, and whose own shape is not a full cube (a stair,
     /// a slab, a wall run), is put back to full lava instead of leaving a
     /// part-block poking out of a lava pool.
     LavaSubmerged,
-    /// `BlackstoneReplaceProcessor.INSTANCE` — the nether-side ruined-portal
+    /// Vanilla's own blackstone-replace processor singleton — the nether-side ruined-portal
     /// variant's stone-to-blackstone swap. Unconditional per block (no roll), and
     /// carries `facing`/`half`/`type` across the replacement when the source had
     /// them. Bundled with the overworld sets too (`replace_with_blackstone`
@@ -421,7 +421,7 @@ pub enum Processor {
 }
 
 impl Processor {
-    /// `processBlock` — the block to place, or `None` to drop it.
+    /// Vanilla's own per-block process step — the block to place, or `None` to drop it.
     #[must_use]
     pub fn process(&self, ctx: &ProcessCtx<'_>, block: ProcessedBlock) -> Option<ProcessedBlock> {
         match self {
@@ -498,8 +498,9 @@ impl Processor {
                     state: block.state,
                 })
             }
-            // `CappedProcessor.processBlock` is `StructureProcessor`'s default —
-            // the identity. All of its work is in `finalizeProcessing`, which is
+            // Vanilla's own capped processor's per-block step is the structure
+            // processor base type's default — the identity. All of its work is
+            // in vanilla's own finalize-processing step, which is
             // [`Self::finalize`].
             Self::Capped { .. } => Some(block),
             Self::BlockAge { mossiness } => {
@@ -553,9 +554,9 @@ impl Processor {
         }
     }
 
-    /// `evaluatesEntirePieceState()` — true only for [`Self::Capped`].
+    /// Vanilla's own "evaluates entire piece state" flag — true only for [`Self::Capped`].
     ///
-    /// The flag vanilla's `processBlockInfos` reads to decide whether to build the
+    /// The flag vanilla's own block-info processing step reads to decide whether to build the
     /// block list for the whole piece or only for the decorating chunk. It is not a
     /// performance switch: the capped walk indexes the list, so a shorter list is a
     /// different structure.
@@ -564,12 +565,13 @@ impl Processor {
         matches!(self, Self::Capped { .. })
     }
 
-    /// `finalizeProcessing(level, position, referencePos, original, processed,
-    /// settings)` — a no-op for every processor except [`Self::Capped`].
+    /// Vanilla's own finalize-processing step at `(level, position, referencePos,
+    /// original, processed, settings)` — a no-op for every processor except [`Self::Capped`].
     ///
     /// Rewrites `processed` in place. `originals` carries each surviving block's
     /// template-local position and `nbt`, which is what the delegate's
-    /// `templateRelativePos` argument is (vanilla passes `originalBlockInfo.pos()`,
+    /// own template-relative-position argument is (vanilla passes the original
+    /// block info's own position,
     /// and the *original* list holds template-local positions while the processed
     /// list holds world ones — reading the wrong one is a silent divergence for
     /// every position-sensitive delegate).
@@ -585,19 +587,22 @@ impl Processor {
         let Self::Capped { delegate, limit } = self else {
             return;
         };
-        // `this.limit.maxInclusive() != 0 && !processedBlockInfoList.isEmpty()`.
+        // Vanilla's own guard: the limit's max-inclusive bound is nonzero and the
+        // processed block-info list is non-empty.
         if *limit == 0 || processed.is_empty() || originals.len() != processed.len() {
             return;
         }
-        // `RandomSource.createThreadLocalInstance(level.getSeed()).forkPositional().at(position)`.
-        // `SingleThreadedRandomSource` is bit-identical to `LegacyRandomSource` —
+        // Vanilla's own derivation: a thread-local random instance seeded from
+        // the level's own seed, forked positional, then re-seeded at `position`.
+        // Vanilla's own single-threaded random source is bit-identical to
+        // `LegacyRandomSource` —
         // same LCG, same `next(bits)` — and it forks into the *same*
-        // `LegacyPositionalRandomFactory`, so the derivation is exactly this.
+        // legacy positional-factory shape, so the derivation is exactly this.
         let mut random = LegacyRandomSource::new(seed)
             .fork_positional()
             .at(position[0], position[1], position[2]);
-        // `ConstantInt.sample` draws nothing; see the variant doc for why nothing
-        // else is accepted.
+        // Vanilla's own constant-int sampler draws nothing; see the variant doc
+        // for why nothing else is accepted.
         let max_to_replace = (*limit).min(i32::try_from(processed.len()).unwrap_or(i32::MAX));
         if max_to_replace < 1 {
             return;
@@ -625,7 +630,7 @@ impl Processor {
         }
     }
 
-    /// `BlockIgnoreProcessor.STRUCTURE_AND_AIR`.
+    /// Vanilla's own block-ignore processor's bundled "structure and air" instance.
     #[must_use]
     pub fn structure_and_air() -> Self {
         Self::BlockIgnore(vec![
@@ -634,18 +639,18 @@ impl Processor {
         ])
     }
 
-    /// `BlockIgnoreProcessor.STRUCTURE_BLOCK`.
+    /// Vanilla's own block-ignore processor's bundled "structure block" instance.
     #[must_use]
     pub fn structure_block() -> Self {
         Self::BlockIgnore(vec!["minecraft:structure_block".to_string()])
     }
 }
 
-/// `BlockAgeProcessor.maybeReplaceFullStoneBlock` — stone/stone-bricks/chiseled
+/// Vanilla's own block-age processor's "maybe replace full stone block" step — stone/stone-bricks/chiseled
 /// crack or moss. **Both** candidate arrays are built unconditionally before the
-/// mossiness roll picks one, exactly as `NON_MOSSY_REPLACEMENTS`/
-/// `MOSSY_REPLACEMENTS`'s local-array construction does in Java (the
-/// non-mossy branch's own `getRandomFacingStairs` call still draws two values
+/// mossiness roll picks one, exactly as vanilla's own non-mossy/mossy
+/// replacement arrays' local-array construction does in Java (the
+/// non-mossy branch's own random-facing-stairs call still draws two values
 /// even when the mossy branch is the one that ends up chosen) — so the draw
 /// order here is `[full-block roll] [non-mossy stairs facing] [non-mossy stairs
 /// half] [mossy stairs facing] [mossy stairs half] [mossiness roll] [array
@@ -666,10 +671,10 @@ fn block_age_full_stone(random: &mut LegacyRandomSource, mossiness: f32) -> Opti
     Some(pick_mossy_or_not(random, mossiness, &non_mossy, &mossy))
 }
 
-/// `BlockAgeProcessor.maybeReplaceStairs` — a stairs block either stays, or
+/// Vanilla's own block-age processor's "maybe replace stairs" step — a stairs block either stays, or
 /// becomes one of two non-mossy slabs or a mossy stairs/slab pair. The mossy
-/// stairs replacement copies `blockState`'s own properties
-/// (`withPropertiesOf`) rather than drawing a fresh facing — stairs and
+/// stairs replacement copies the source block state's own properties
+/// (vanilla's own "with properties of" copy) rather than drawing a fresh facing — stairs and
 /// mossy-stairs are the same block class, so every property the source has a
 /// value for exists on the target too.
 fn block_age_stairs(state: &BlockState, random: &mut LegacyRandomSource, mossiness: f32) -> Option<BlockState> {
@@ -686,7 +691,8 @@ fn block_age_stairs(state: &BlockState, random: &mut LegacyRandomSource, mossine
     Some(pick_mossy_or_not(random, mossiness, &non_mossy, &mossy))
 }
 
-/// `BlockAgeProcessor.maybeReplaceSlab`/`maybeReplaceWall` — one roll, `state`'s
+/// Vanilla's own block-age processor's "maybe replace slab"/"maybe replace
+/// wall" steps — one roll, `state`'s
 /// own properties carried onto the mossy block of the same class.
 fn block_age_mossy(state: &BlockState, new_name: &str) -> BlockState {
     let mut moss = state.clone();
@@ -708,9 +714,10 @@ fn random_facing_stairs(random: &mut LegacyRandomSource, name: &str) -> BlockSta
     BlockState::parse(&format!("{name}[facing={facing},half={half}]"))
 }
 
-/// `getRandomBlock(random, nonMossyBlocks, mossyBlocks)` — one `nextFloat()`
-/// against `mossiness`, then one `nextInt(2)` over whichever two-element array
-/// was picked.
+/// Vanilla's own random-block picker at `(random, non_mossy_blocks,
+/// mossy_blocks)` — one bounded float draw
+/// against `mossiness`, then one bounded-int-over-2 draw over whichever
+/// two-element array was picked.
 fn pick_mossy_or_not(
     random: &mut LegacyRandomSource,
     mossiness: f32,
@@ -722,7 +729,7 @@ fn pick_mossy_or_not(
     chosen[index].clone()
 }
 
-/// `state.is(BlockTags.STAIRS)` / `SLABS` / `WALLS`, approximated by naming
+/// Vanilla's own stairs/slabs/walls tag membership checks, approximated by naming
 /// convention rather than a real tag table (this crate has none) — exact for
 /// every vanilla stairs/slab/wall id, which is the whole domain
 /// [`Processor::BlockAge`] is ever handed (a ruined-portal template's palette).
@@ -736,13 +743,13 @@ fn is_wall(name: &str) -> bool {
     name.ends_with("_wall")
 }
 
-/// `Block.isShapeFullBlock(state.getShape(...))`, approximated with a denylist
+/// Vanilla's own "is this state's shape a full block" check, approximated with a denylist
 /// of block-id substrings that are never a full cube — this crate has no
 /// collision-shape table (that lives in `lodestone-data`, which worldgen does
 /// not depend on). Exact for every full-cube id [`Processor::LavaSubmerged`]
 /// can be handed by the processor chain ahead of it (stone/stone-bricks
 /// variants, obsidian, gold block, netherrack, magma block) and approximate
-/// only at the handful of partial shapes a `RuleProcessor`/[`Processor::BlockAge`]
+/// only at the handful of partial shapes vanilla's own rule processor/[`Processor::BlockAge`]
 /// upstream of this one can introduce (stairs, slabs, walls, bars).
 fn is_probably_full_cube(name: &str) -> bool {
     const NOT_FULL: &[&str] = &[
@@ -756,7 +763,7 @@ fn is_probably_full_cube(name: &str) -> bool {
     !NOT_FULL.iter().any(|s| name.contains(s))
 }
 
-/// `BlackstoneReplaceProcessor`'s replacement map — a stone-family block id to
+/// Vanilla's own blackstone-replace processor's replacement map — a stone-family block id to
 /// its blackstone counterpart. `None` for anything not in vanilla's table,
 /// which the processor keeps unchanged.
 fn blackstone_replacement(name: &str) -> Option<&'static str> {
@@ -783,8 +790,8 @@ fn blackstone_replacement(name: &str) -> Option<&'static str> {
     })
 }
 
-/// `Util.toShuffledList(IntStream.range(0, n), random)` — the **int** overload,
-/// whose swap is `result.set(i - 1, result.set(swapTo, result.getInt(i - 1)))`.
+/// Vanilla's own shuffle-a-range-to-a-list helper at `(0..n, random)` — the **int** overload,
+/// whose swap is a list swap between the current index minus one and the drawn swap target.
 ///
 /// That nested `set` is a swap, so this is the same downward Fisher–Yates as
 /// [`super::pool::shuffle`] and costs `max(0, n - 1)` draws. Written out rather
@@ -1152,7 +1159,7 @@ mod tests {
         assert_eq!(none, before);
     }
 
-    /// `BlockAgeProcessor` at `mossiness=0.0` never produces a mossy variant —
+    /// Vanilla's own block-age processor at `mossiness=0.0` never produces a mossy variant —
     /// the discriminating end of the probability range, not a plausible middle
     /// value. Also the negative-space case: `minecraft:diorite` matches none of
     /// the five `state.is(...)` arms and must pass through untouched.
@@ -1239,7 +1246,7 @@ mod tests {
         }
     }
 
-    /// `LavaSubmergedBlockProcessor`: a non-full shape placed where the
+    /// Vanilla's own lava-submerged-block processor: a non-full shape placed where the
     /// pre-structure world held lava goes back to lava; a full block, or a
     /// non-lava world, is untouched.
     #[test]
@@ -1267,7 +1274,7 @@ mod tests {
         assert_eq!(stairs_over_air.state.name, "minecraft:stone_brick_stairs");
     }
 
-    /// `BlackstoneReplaceProcessor`: named table entries swap and carry
+    /// Vanilla's own blackstone-replace processor: named table entries swap and carry
     /// `facing`/`half`/`type`; anything else, including a block with no entry,
     /// passes through.
     #[test]
@@ -1297,7 +1304,7 @@ mod tests {
         assert_eq!(untouched.state.name, "minecraft:oak_planks");
     }
 
-    /// `Util.toShuffledList`'s int overload is a permutation and costs `n - 1`
+    /// Vanilla's own shuffle-a-range-to-a-list helper's int overload is a permutation and costs `n - 1`
     /// draws, matched against a hand-expanded downward Fisher–Yates.
     #[test]
     fn shuffled_indices_is_the_downward_fisher_yates() {

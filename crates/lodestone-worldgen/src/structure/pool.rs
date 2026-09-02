@@ -1,10 +1,10 @@
-//! Jigsaw **template pools** and processor lists — the data half of issue #514's
+//! Jigsaw **template pools** and processor lists — the data half of this change's
 //! S4.
 //!
 //! # What it is
 //!
-//! A port of vanilla's `StructureTemplatePool` + `StructurePoolElement` +
-//! `StructureProcessorList`: the 188 `worldgen/template_pool/*.json` and 40
+//! A port of vanilla's own template-pool + pool-element +
+//! processor-list types: the 188 `worldgen/template_pool/*.json` and 40
 //! `worldgen/processor_list/*.json` documents decoded into [`TemplatePool`]s of
 //! [`PoolElement`]s that [`super::jigsaw`] assembles. This module answers
 //! "what can attach here, and how does it place itself"; `jigsaw` answers
@@ -22,16 +22,17 @@
 //!
 //! Two vanilla shapes are load-bearing and easy to miss:
 //!
-//! * **The element list is weight-expanded.** `StructureTemplatePool`'s
+//! * **The element list is weight-expanded.** Vanilla's own template-pool
 //!   constructor pushes each element `weight` times into `templates`, and *that*
-//!   list is what `getRandomTemplate` indexes and `getShuffledTemplates` shuffles.
+//!   list is what vanilla's own random-template lookup indexes and its own
+//!   shuffled-templates accessor shuffles.
 //!   `village/plains/town_centers` has weights `50,50,50,50,1,1,1,1`, so its
 //!   expanded list is 204 entries and one shuffle of it consumes **203** draws.
 //!   Shuffling the 8 raw entries instead would consume 7 and desynchronise every
 //!   subsequent draw in the structure.
 //! * **A `terrain_matching` projection carries a processor**:
-//!   `Projection.TERRAIN_MATCHING`'s own list is
-//!   `[GravityProcessor(WORLD_SURFACE_WG, -1)]`, appended *after* the element's
+//!   vanilla's own terrain-matching projection's own list is
+//!   `[gravity processor(WORLD_SURFACE_WG, -1)]`, appended *after* the element's
 //!   own processors. That single entry is what makes a village street follow a
 //!   hillside, and a projection treated as a mere flag places every street flat.
 //!
@@ -44,7 +45,7 @@
 //!   silently treat as `always_true` still *consumes no draw*, so every later rule
 //!   in that list rolls a different number and the structure is quietly wrong
 //!   rather than loudly absent.
-//! * `getMaxSize` is only read by the expansion hack, and it is cached per pool
+//! * Vanilla's own max-size accessor is only read by the expansion hack, and it is cached per pool
 //!   exactly as vanilla caches it, because it walks every element's box.
 //!
 //! # Dependencies
@@ -195,8 +196,9 @@ impl PoolElement {
         }
     }
 
-    /// `getShuffledJigsawBlocks(manager, position, rotation, random)` — the
-    /// template's jigsaw blocks, `Util.shuffle`d then **stably** sorted by
+    /// Vanilla's own shuffled-jigsaw-blocks accessor at `(manager, position,
+    /// rotation, random)` — the
+    /// template's jigsaw blocks, shuffled via vanilla's own shuffle then **stably** sorted by
     /// descending `selection_priority`.
     ///
     /// Both steps are the specification. The shuffle's draw count is
@@ -228,8 +230,8 @@ impl PoolElement {
             return blocks;
         }
         shuffle(&mut blocks, random);
-        // `Comparator.comparingInt(selectionPriority).reversed()` through
-        // `List.sort`, which is stable — so equal priorities keep the shuffled
+        // Vanilla's own descending-priority comparator through a stable sort —
+        // so equal priorities keep the shuffled
         // order, and an unstable sort here would be a silent divergence.
         blocks.sort_by_key(|b| -b.selection_priority);
         blocks
@@ -258,10 +260,11 @@ impl PoolElement {
     }
 }
 
-/// `Util.shuffle(list, random)` — Fisher–Yates walked **downward** from the end.
+/// Vanilla's own list-shuffle at `(list, random)` — Fisher–Yates walked **downward** from the end.
 ///
-/// The direction and the bound are both the specification: `for (int i = size; i
-/// > 1; i--) swapTo = random.nextInt(i)`. An upward Fisher–Yates draws the same
+/// The direction and the bound are both the specification: vanilla's own loop
+/// counts down from `size` while above 1, drawing a bounded swap target below
+/// the current count on each step. An upward Fisher–Yates draws the same
 /// *number* of values in a different order and produces a different permutation.
 pub fn shuffle<T, R: RandomSource>(list: &mut [T], random: &mut R) {
     let size = i32::try_from(list.len()).unwrap_or(0);
@@ -303,15 +306,15 @@ impl TemplatePool {
         Arc::clone(&self.expanded[index])
     }
 
-    /// `getShuffledTemplates(random)` — `Util.shuffledCopy` of the expanded list.
+    /// Vanilla's own shuffled-templates accessor — vanilla's own shuffled-copy of the expanded list.
     pub fn shuffled_templates<R: RandomSource>(&self, random: &mut R) -> Vec<Arc<PoolElement>> {
         let mut copy: Vec<Arc<PoolElement>> = self.expanded.clone();
         shuffle(&mut copy, random);
         copy
     }
 
-    /// `getMaxSize(manager)` — the tallest non-empty element's Y span at
-    /// `(ZERO, Rotation.NONE)`. Only the expansion hack reads it.
+    /// Vanilla's own max-size accessor — the tallest non-empty element's Y span at
+    /// the zero position with no rotation. Only the expansion hack reads it.
     #[must_use]
     pub fn max_size(&self) -> i32 {
         *self.max_size.get_or_init(|| {
@@ -790,7 +793,7 @@ fn parse_state(value: &Value) -> BlockState {
 }
 
 /// The `PlaceSettings` one pool element places itself with, assembled in
-/// `SinglePoolElement.getSettings`' order.
+/// vanilla's own single-pool-element settings accessor's order.
 ///
 /// The order is the specification: an ignore processor that ran *after* the
 /// jigsaw replacement would see `final_state` rather than `minecraft:jigsaw`, and
@@ -821,9 +824,10 @@ pub fn place_settings(
         other => (None, false, other.projection(), None),
     };
     if legacy {
-        // `LegacySinglePoolElement.getSettings` pops `STRUCTURE_BLOCK` and adds
-        // `STRUCTURE_AND_AIR` — and adds it *after* `JigsawReplacementProcessor`,
-        // because `popProcessor`/`addProcessor` run on the already-built list.
+        // Vanilla's own legacy single-pool-element settings accessor pops the
+        // structure-block ignore entry and adds
+        // the structure-and-air one — and adds it *after* the jigsaw-replacement processor,
+        // because that pop/add pair runs on the already-built list.
         processors.push(Processor::JigsawReplacement);
         processors.push(Processor::structure_and_air());
     } else {
@@ -855,9 +859,9 @@ mod tests {
     use super::*;
     use lodestone_worldgen_core::rng::{LegacyRandomSource, WorldgenRandom};
 
-    /// `Util.shuffle` walks **down** from the end, and its draw count is
+    /// Vanilla's own list-shuffle walks **down** from the end, and its draw count is
     /// `max(0, n - 1)`. Both halves are asserted against a hand-expanded trace of
-    /// `for (int i = size; i > 1; i--)` on a fresh legacy LCG.
+    /// vanilla's own downward-counting loop on a fresh legacy LCG.
     #[test]
     fn shuffle_matches_utils_downward_fisher_yates() {
         // Hand-expanded: seed 0, size 4 → draws nextInt(4), nextInt(3), nextInt(2).
