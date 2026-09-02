@@ -1743,10 +1743,10 @@ impl MobController for NavigatingMob<'_> {
         self.main_hand.as_deref()
     }
 
-    /// Vanilla `NearestAttackableTargetGoal::findTarget` for the `Player.class`
-    /// registration: `level.getNearestPlayer(targetConditions, mob, …)`,
+    /// Vanilla's own target-acquisition search for the player-targeting
+    /// registration: its own nearest-player search,
     /// whose range cut
-    /// is `TargetingConditions::test` — a full 3-D
+    /// is its own targeting-conditions test — a full 3-D
     /// `distanceToSqr` against `max(range * visibility, 2.0)`, with `range` =
     /// `TargetGoal::getFollowDistance` = the `FOLLOW_RANGE` attribute.
     ///
@@ -3829,8 +3829,7 @@ mod tests {
         assert_ne!(
             target_a, target_b,
             "different seeds at the same position must produce different stroll \
-             targets; otherwise two mobs of the same species act in lockstep \
-             (issue #463)"
+             targets; otherwise two mobs of the same species act in lockstep"
         );
     }
 
