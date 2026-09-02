@@ -1,0 +1,42 @@
+# A reference plugin exercising all three worldgen plugin seams in one
+# place (issues #132, #134, #136): a custom `ChunkGenerator` (a checkerboard
+# void world), registered as a custom dimension through `DimensionRegistry`,
+# that also places a real structure template both at generation time and
+# live/post-generation. See `docs/plugin-worldgen-api.md`.
+[package]
+name = "lodestone-void-world"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `lodestone_worldgen::generator::ChunkGenerator`, `DenseBlockGrid`, and the
+# structure template placement primitive this plugin's generator calls
+# directly. Path, not a workspace alias — matching how `lodestone-server`
+# itself spells this dependency (neither crate has a `[workspace.dependencies]`
+# entry; both are deep-tree crates other crates reach by relative path).
+lodestone-worldgen = { path = "../../lodestone-worldgen" }
+# `DimensionRegistry`/`PluginDimension`/`DimensionProperties`,
+# `place_structure_live`, and `ChunkSource` — the server-side seam issue
+# #132's `ChunkGenerator` bridges into. Same path-dependency reasoning as
+# above.
+lodestone-server = { path = "../../lodestone-server" }
+
+[dev-dependencies]
+# The real end-to-end gate: a genuine `IntegratedServer` plus a real,
+# wire-decoding `lodestone-client` prove the registered dimension's terrain
+# and both structure placements reach a joined client — not a test that
+# calls this crate's own generator function directly (`CLAUDE.md`'s "closed
+# loop" trap).
+lodestone-client = { workspace = true }
+lodestone-v770 = { workspace = true }
+lodestone-model = { workspace = true }
+# Resolves `"minecraft:stone"`-style canonical states to the numeric ids
+# `ClientHandle::block_at` reports, for the assertion side of the gate —
+# the same reason `lodestone-autopilot`'s dev-dependency on it exists.
+lodestone-data = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }

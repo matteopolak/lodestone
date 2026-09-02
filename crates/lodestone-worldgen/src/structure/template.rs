@@ -706,6 +706,29 @@ impl StructureTemplate {
         }
     }
 
+    /// Builds a template directly from a size, a single palette, and a list
+    /// of `(position, palette index)` pairs — no NBT decode in the loop.
+    ///
+    /// For a plugin constructing a structure programmatically rather than
+    /// shipping a `.nbt` file (issue #136's other origin for a template,
+    /// alongside [`Self::parse`]), and for tests that want a template with a
+    /// known, hand-written shape. Every block gets no attached `nbt`
+    /// compound — a plugin that needs a data marker (a jigsaw block, a
+    /// chest's loot table reference) should build one from `.nbt` bytes via
+    /// [`Self::parse`] instead, since [`BlockNbt`] has no public constructor
+    /// of its own.
+    #[must_use]
+    pub fn from_blocks(size: [i32; 3], palette: Vec<BlockState>, blocks: Vec<([i32; 3], u16)>) -> Self {
+        Self {
+            size,
+            palettes: vec![palette],
+            blocks: blocks
+                .into_iter()
+                .map(|(pos, state)| TemplateBlock { pos, state, nbt: None })
+                .collect(),
+        }
+    }
+
     /// `getSize()`.
     #[must_use]
     pub fn size(&self) -> [i32; 3] {
