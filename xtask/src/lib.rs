@@ -150,6 +150,16 @@ pub struct PacketEntry {
     pub name: String,
     pub protocol_id: i32,
     pub const_ident: String,
+    /// The packet's canonical (Mojang) resource name, when known.
+    ///
+    /// Always `Some(name)` for a Mojang-sourced report: Mojang's own report
+    /// names already are canonical. For a minecraft-data-sourced report this
+    /// is `Some` only when [`minecraft_data_canonical_alias`] has a verified
+    /// mapping for `name`, and `None` otherwise -- an unverified guess would
+    /// be worse than an absent one, and every legacy table already works
+    /// today without this field. This is the join key later multi-version
+    /// stages use to line up a legacy packet with its v770 equivalent.
+    pub canonical_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -237,6 +247,11 @@ pub fn parse_packet_report(
                 entries.push(PacketEntry {
                     state,
                     bound,
+                    // Mojang's report is the canonical name source, so a
+                    // Mojang-sourced entry is trivially its own canonical
+                    // name -- no lookup needed, unlike the minecraft-data
+                    // path below.
+                    canonical_name: Some(name.to_owned()),
                     name: name.to_owned(),
                     protocol_id,
                     const_ident: sanitize_packet_const_name(name),
@@ -327,10 +342,13 @@ pub fn parse_minecraft_data_report(
                     format!("parse packet id {hex_id:?} in {state_key}/{bound_key}")
                 })?;
                 let namespaced = format!("minecraft:{name}");
+                let canonical_name =
+                    minecraft_data_canonical_alias(&namespaced).map(str::to_owned);
                 entries.push(PacketEntry {
                     state,
                     bound,
                     const_ident: sanitize_packet_const_name(&namespaced),
+                    canonical_name,
                     name: namespaced,
                     protocol_id,
                 });
@@ -352,6 +370,39 @@ pub fn parse_minecraft_data_report(
         protocol_version,
         entries,
     })
+}
+
+/// Verified minecraft-data name -> canonical (Mojang 26.2) name aliases.
+///
+/// Empty today: cross-referencing a legacy protocol's minecraft-data names
+/// against Mojang's own report requires either a Mojang `--reports` run
+/// against that old server jar, or a captured-bytes comparison against a
+/// modern client -- real oracle work this stage deliberately does not
+/// fabricate (see `docs/plans/multi-version-protocol-dedup.md`'s namespace
+/// problem: v735 and v770 agree on only 7 of 88 `ENTRIES` names as plain
+/// strings, so nothing here can be guessed from spelling). Each verified
+/// pair is a one-line addition to this table; nothing else in the generator
+/// needs to change to pick it up -- see [`minecraft_data_canonical_alias`]
+/// and [`resolve_canonical_alias`].
+const MINECRAFT_DATA_CANONICAL_ALIASES: &[(&str, &str)] = &[];
+
+/// Looks up `name` (an already-namespaced minecraft-data packet name) in
+/// [`MINECRAFT_DATA_CANONICAL_ALIASES`].
+#[must_use]
+fn minecraft_data_canonical_alias(name: &str) -> Option<&'static str> {
+    resolve_canonical_alias(MINECRAFT_DATA_CANONICAL_ALIASES, name)
+}
+
+/// Pure lookup an alias table by exact name match, kept separate from
+/// [`MINECRAFT_DATA_CANONICAL_ALIASES`] so the lookup logic itself is
+/// testable against a synthetic table without depending on that table ever
+/// being non-empty.
+#[must_use]
+fn resolve_canonical_alias<'a>(table: &[(&str, &'a str)], name: &str) -> Option<&'a str> {
+    table
+        .iter()
+        .find(|(from, _)| *from == name)
+        .map(|(_, to)| *to)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -765,6 +816,35 @@ pub fn generate_packet_ids_source(report: &PacketReport) -> Result<String> {
             source.push_str("    }\n");
         }
         source.push_str("}\n");
+    }
+
+    // The canonical-name join column deliverable 3 adds: for every entry
+    // whose canonical (Mojang) name is known -- always true for a
+    // Mojang-sourced report, only for a verified alias on a
+    // minecraft-data-sourced one -- record the (source name, canonical name)
+    // pair so a later stage can join a legacy table against v770's without
+    // guessing at spelling. Self-referential pairs (a Mojang-sourced report
+    // naming itself) are included too, so the table has one uniform shape
+    // regardless of source.
+    let canonical_pairs: Vec<(&str, &str)> = report
+        .all_entries()
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .canonical_name
+                .as_deref()
+                .map(|canonical| (entry.name.as_str(), canonical))
+        })
+        .collect();
+    source.push('\n');
+    if canonical_pairs.is_empty() {
+        source.push_str("pub static CANONICAL_NAMES: &[(&str, &str)] = &[];\n");
+    } else {
+        source.push_str("pub static CANONICAL_NAMES: &[(&str, &str)] = &[\n");
+        for (name, canonical) in &canonical_pairs {
+            writeln!(source, "    ({name:?}, {canonical:?}),")?;
+        }
+        source.push_str("];\n");
     }
 
     source.push_str(
@@ -14097,5 +14177,81 @@ v1 = ["dep:lodestone-v1"]
   }}
 }}"#
         )
+    }
+
+    #[test]
+    fn mojang_sourced_entries_are_their_own_canonical_name() -> Result<()> {
+        // Mojang's own report names already are canonical: every entry from
+        // this source should self-alias, with no lookup involved.
+        let packet_report_json = r#"{
+            "configuration": {"clientbound": {}, "serverbound": {}},
+            "handshake": {"serverbound": {"minecraft:intention": {"protocol_id": 0}}},
+            "login": {"clientbound": {}, "serverbound": {}},
+            "play": {
+                "clientbound": {"minecraft:set_health": {"protocol_id": 5}},
+                "serverbound": {}
+            },
+            "status": {"clientbound": {}, "serverbound": {}}
+        }"#;
+        let report = parse_packet_report(packet_report_json, "test", 999)?;
+        for entry in report.all_entries() {
+            assert_eq!(entry.canonical_name.as_deref(), Some(entry.name.as_str()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn minecraft_data_sourced_entries_default_to_no_canonical_name() -> Result<()> {
+        // MINECRAFT_DATA_CANONICAL_ALIASES is empty today (no fabricated
+        // guesses), so a minecraft-data-sourced entry must come back with
+        // canonical_name: None rather than inventing a mapping.
+        let json = minecraft_data_protocol_fixture("count");
+        let report = parse_minecraft_data_report(&json, "1.8.8", 47)?;
+        let entry = report
+            .entries(PacketState::Play, PacketBound::Clientbound)
+            .find(|entry| entry.name == "minecraft:map_chunk")
+            .expect("fixture declares minecraft:map_chunk");
+        assert_eq!(entry.canonical_name, None);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_canonical_alias_matches_by_exact_name_only() {
+        // Pairwise-distinct entries so a transposition between the "from"
+        // and "to" columns, or between two table rows, cannot survive
+        // unnoticed.
+        let table: &[(&str, &str)] = &[
+            ("minecraft:named_entity_spawn", "minecraft:add_entity"),
+            ("minecraft:update_health", "minecraft:set_health"),
+        ];
+        assert_eq!(
+            resolve_canonical_alias(table, "minecraft:named_entity_spawn"),
+            Some("minecraft:add_entity")
+        );
+        assert_eq!(
+            resolve_canonical_alias(table, "minecraft:update_health"),
+            Some("minecraft:set_health")
+        );
+        assert_eq!(resolve_canonical_alias(table, "minecraft:unmapped"), None);
+    }
+
+    #[test]
+    fn generate_packet_ids_source_emits_canonical_names_table() -> Result<()> {
+        let packet_report_json = r#"{
+            "configuration": {"clientbound": {}, "serverbound": {}},
+            "handshake": {"serverbound": {"minecraft:intention": {"protocol_id": 0}}},
+            "login": {"clientbound": {}, "serverbound": {}},
+            "play": {
+                "clientbound": {"minecraft:set_health": {"protocol_id": 5}},
+                "serverbound": {}
+            },
+            "status": {"clientbound": {}, "serverbound": {}}
+        }"#;
+        let report = parse_packet_report(packet_report_json, "test", 999)?;
+        let generated = generate_packet_ids_source(&report)?;
+        assert!(generated.contains("pub static CANONICAL_NAMES"));
+        assert!(generated.contains(r#"("minecraft:set_health", "minecraft:set_health")"#));
+        assert!(generated.contains(r#"("minecraft:intention", "minecraft:intention")"#));
+        Ok(())
     }
 }
