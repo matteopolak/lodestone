@@ -349,7 +349,7 @@ fn every_serverbound_variant_is_constructed_by_decode() {
         declared.len()
     );
 
-    let constructed = constructed_variants(include_str!("../src/server_protocol.rs"));
+    let constructed = constructed_variants(include_str!("../../src/server_protocol.rs"));
     assert!(
         constructed.contains("Ignored") && constructed.contains("Handshake"),
         "the construction scanner found neither `Ignored` nor `Handshake` inside `fn decode` \
