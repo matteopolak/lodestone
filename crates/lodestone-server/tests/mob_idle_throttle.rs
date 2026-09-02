@@ -5,20 +5,19 @@
 //! # What was broken
 //!
 //! [`MobSim::tick`] increments every mob's `no_action_time` each tick, mirroring
-//! vanilla `Mob.serverAiStep`'s `noActionTime++`
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/Mob.java:717`). Nothing in
+//! vanilla `Mob.serverAiStep`'s `noActionTime++`. Nothing in
 //! production ever *reset* it: the reset lived only in
 //! [`MobSim::despawn_pass`], which has zero production callers
 //! (`crate::tick::run_tick_loop` is handed no player position). So the counter
 //! was monotonic for a world's whole life and crossed `RandomStrollGoal`'s idle
-//! throttle of 100 (`ai/goal/RandomStrollGoal.java:43`) after five seconds,
+//! throttle of 100 (vanilla's own `RandomStrollGoal`) after five seconds,
 //! after which no mob could stroll again — ever.
 //!
 //! Vanilla clears it every tick from `Mob.checkDespawn`, which `ServerLevel`
 //! calls immediately before the entity's own tick
-//! (`server/level/ServerLevel.java:426-431`), for a persistent mob
+//! (vanilla's own `ServerLevel`), for a persistent mob
 //! unconditionally and for any other mob within its category's immune radius of
-//! a player (`Mob.java:704-711`).
+//! a player (vanilla's own `Mob`).
 //!
 //! # Why the throttle was fatal rather than merely slow
 //!
@@ -86,7 +85,7 @@ const STROLL_MOB_ID: i32 = 3;
 const EXPECTED_FIRST_STROLL_TICK: usize = 147;
 
 /// `RandomStrollGoal`'s idle throttle: `goals.rs`'s `no_action_time() >= 100`
-/// early return, itself vanilla's `ai/goal/RandomStrollGoal.java:43`. Restated
+/// early return, itself vanilla's own `RandomStrollGoal`. Restated
 /// here because it is the number the control's whole premise rests on.
 const IDLE_THROTTLE_TICKS: usize = 100;
 
@@ -203,7 +202,7 @@ fn a_player_nearby_clears_the_idle_throttle_every_tick_and_the_mob_strolls() {
         near.peak_no_action_time, 1,
         "with a player 2 blocks away, vanilla clears noActionTime every tick and \
          serverAiStep re-increments it to exactly 1 before the goals run \
-         (Mob.java:704-711 then :717); a higher peak means the reset is missing \
+         (vanilla's own checkDespawn then serverAiStep); a higher peak means the reset is missing \
          or runs in the wrong order"
     );
     assert_eq!(
@@ -259,14 +258,14 @@ fn no_player_is_the_control() {
 
 /// **The `persistent` flag must not open the throttle**, even though vanilla's
 /// `checkDespawn` has a persistence branch that would
-/// (`Mob.java:710-711`'s `else`, keyed on `isPersistenceRequired`).
+/// (vanilla's own `checkDespawn`'s `else`, keyed on `isPersistenceRequired`).
 ///
 /// This gate exists because the fix's first draft *did* include that branch, and
 /// it is a trap rather than an obvious error: the port looks faithful line for
 /// line. `SimMob::persistent` is simply a wider flag than vanilla's —
 /// `MobSim::spawn_species` sets it from `!hostile`, so every passive animal
 /// carries it, whereas a vanilla animal is despawn-exempt through
-/// `Animal.removeWhenFarAway() == false` (`animal/Animal.java:128`) and is *not*
+/// `Animal.removeWhenFarAway() == false` (vanilla's own `Animal`) and is *not*
 /// `isPersistenceRequired`. Honouring the branch here would have handed every cow
 /// and sheep a permanently open idle throttle with no player in the world.
 ///

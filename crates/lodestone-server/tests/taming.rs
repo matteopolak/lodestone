@@ -508,7 +508,7 @@ fn a_tamed_wolf_sits_when_ordered_and_walks_to_its_owner_when_not() {
 /// reported gap: cat and parrot were tameable and ownable with no roster
 /// entry at all, so a tamed one could be owned and would never sit or follow.
 ///
-/// `FollowOwnerGoal(1.0, 10.0F, 5.0F)` (`animal/feline/Cat.java:113`): a cat
+/// `FollowOwnerGoal(1.0, 10.0F, 5.0F)` (vanilla's own cat goal registration): a cat
 /// stops **five** blocks out, not the wolf's two, so the final-position band
 /// below is what actually discriminates "the cat's own row" from "a copy of
 /// the wolf's row" — a `> sat_at.x + 2.0` check alone would pass either way.
@@ -557,7 +557,7 @@ fn a_tamed_cat_sits_when_ordered_and_walks_to_its_owner_when_not() {
     assert!(
         (3.5..7.5).contains(&final_gap),
         "a standing cat must close toward its owner and stop near its own \
-         5-block stop distance (`Cat.java:113`) — not the wolf's 2, and not \
+         5-block stop distance (vanilla's own cat goal registration) — not the wolf's 2, and not \
          zero (no stop at all); it ended {final_gap} blocks out (moved {} -> \
          {})",
         sat_at.x,
@@ -569,7 +569,7 @@ fn a_tamed_cat_sits_when_ordered_and_walks_to_its_owner_when_not() {
 /// deliberately does *not* auto-sit (`docs/taming-and-breeding.md` §2), which
 /// this gate asserts as its own explicit step rather than assuming it from
 /// the cat/wolf pattern. `FollowOwnerGoal(1.0, 5.0F, 1.0F)`
-/// (`animal/parrot/Parrot.java:167`) is the tightest follow distance in the
+/// (vanilla's own parrot goal registration) is the tightest follow distance in the
 /// tameable set, which the final-position band below is chosen to separate
 /// from both the wolf's and the cat's.
 #[test]
@@ -594,7 +594,7 @@ fn a_tamed_parrot_does_not_auto_sit_but_can_still_be_ordered_to_and_follows_tigh
     );
 
     // Right-click again, empty-handed: `interact_tamable`'s last arm, the
-    // sit toggle — present because `Parrot.java:166` really does register
+    // sit toggle — present because vanilla's own parrot goal registration really does register
     // `SitWhenOrderedToGoal`, only the auto-sit-on-tame side effect is
     // parrot-specific. Removing the roster row for "the parrot doesn't sit"
     // would make this assertion fail.
@@ -621,7 +621,7 @@ fn a_tamed_parrot_does_not_auto_sit_but_can_still_be_ordered_to_and_follows_tigh
     );
 
     sim.get_mut(parrot).expect("alive").set_ordered_to_sit(false);
-    // `Parrot.java:162-171` also registers `LookAtPlayerGoal(Player)` at
+    // Vanilla's own parrot goal registration also registers `LookAtPlayerGoal(Player)` at
     // priority 1 — strictly outranking `FollowOwnerGoal`'s priority 2 — and
     // both claim the LOOK flag (`FollowOwnerGoal` alongside MOVE, so it keeps
     // facing its owner while walking). `GoalSelector::update` evicts a
@@ -653,7 +653,7 @@ fn a_tamed_parrot_does_not_auto_sit_but_can_still_be_ordered_to_and_follows_tigh
     assert!(
         (0.25..3.5).contains(&final_gap),
         "a standing parrot must close to near its own 1-block stop distance \
-         (`Parrot.java:167`) — clearly tighter than the cat's 5 or the \
+         (vanilla's own parrot goal registration) — clearly tighter than the cat's 5 or the \
          wolf's 2; it ended {final_gap} blocks out (moved {} -> {})",
         sat_at.x,
         followed_to.x

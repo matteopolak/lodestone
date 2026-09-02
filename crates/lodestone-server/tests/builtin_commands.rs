@@ -699,7 +699,7 @@ fn gamerule_writes_the_store_it_is_handed_including_the_production_world_state()
     let players = roster();
     let alice = source(1, "alice");
 
-    // Vanilla's default is 3 (`GameRules.java:74`), predicted rather than read
+    // Vanilla's default is 3 (its own game-rules registration table), predicted rather than read
     // back, so a store that answered whatever it was last told would fail here.
     let world_state = lodestone_server::world_state::WorldStateHandle::new();
     assert_eq!(world_state.random_tick_speed(), 3);

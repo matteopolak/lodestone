@@ -306,14 +306,14 @@ fn one_item_tempts_a_pig_and_not_a_cow_through_the_same_spawn_path() {
 ///
 /// It also gates the priority *renumbering*. The baseline this replaced put
 /// `SwellGoal` at a private `-1` to outrank a `MeleeAttackGoal` at `2`; the
-/// roster uses vanilla's own `2` and `4` (`monster/Creeper.java:66`, `:69`). If
+/// roster uses vanilla's own `2` and `4` (its own creeper goal registration). If
 /// the two numbers were transcribed in the wrong order, melee would hold MOVE and
 /// the creeper would never swell.
 #[test]
 fn only_a_creeper_swells_and_vanillas_priority_order_is_preserved() {
     let world = pen();
     let mut sim = MobSim::new(&world);
-    // Within `SwellGoal`'s 9.0 squared proximity (`ai/goal/SwellGoal.java:20`).
+    // Within `SwellGoal`'s 9.0 squared proximity (vanilla's own `SwellGoal`).
     let target = Vec3::new(2.0, 0.0, 0.0);
     let creeper = sim
         .spawn_species(rk("minecraft:creeper"), Vec3::new(0.0, 0.0, 0.0))
@@ -343,7 +343,7 @@ fn only_a_creeper_swells_and_vanillas_priority_order_is_preserved() {
         creeper_swelled,
         "a creeper spawned through spawn_species must get SwellGoal from the \
          roster and start swelling with a target 2 blocks away. If this fails \
-         with the cow assertion below passing, check that Creeper.java's goal \
+         with the cow assertion below passing, check that vanilla's own creeper goal \
          priority 2 (Swell) is still lower than 4 (Melee) in the table — a \
          MeleeAttackGoal holding MOVE prevents the swell"
     );

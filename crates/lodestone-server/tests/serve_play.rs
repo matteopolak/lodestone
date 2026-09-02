@@ -684,7 +684,7 @@ async fn drive_login_and_join(
         .expect("finish configuration");
 
     // The join-time full clock sync precedes chunk streaming, mirroring
-    // vanilla's `PlayerList.sendLevelInfo` (`PlayerList.java:648-651`).
+    // vanilla's own `PlayerList.sendLevelInfo`.
     let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
     assert_eq!(
         id, SET_TIME_S2C,
@@ -1809,7 +1809,7 @@ async fn request_game_rule_values_replies_even_with_no_rules_set() {
 /// and an unknown key is *rejected* rather than stored.
 ///
 /// The camelCase name is the load-bearing half. 26.2 renamed every rule
-/// (`GameRules.java:24-92`), so `randomTickSpeed` is not a rule any more — and the
+/// (vanilla's own game-rules registration table), so `randomTickSpeed` is not a rule any more — and the
 /// old store kept every `(String, String)` verbatim, so it was accepted, echoed
 /// back to the client, and then never read by anything, because the reader asks for
 /// `random_tick_speed`. The player saw their rule confirmed and no behaviour
@@ -3731,8 +3731,8 @@ async fn a_start_action_alone_pops_a_one_shot_flower_but_not_stone() {
 ///
 /// This is what #531 broke. That commit refused a shortfall outright, but
 /// vanilla's shortfall branch arms `hasDelayedDestroy` and keeps accruing
-/// progress in `ServerPlayerGameMode.tick` until the block is fully earned
-/// (`ServerPlayerGameMode.java:229-234`). A local integrated server reads both
+/// progress in `ServerPlayerGameMode.tick` until the block is fully earned.
+/// A local integrated server reads both
 /// packets off one buffer, so *every* non-instant block took the shortfall path
 /// and nothing but flowers could be broken at all.
 ///

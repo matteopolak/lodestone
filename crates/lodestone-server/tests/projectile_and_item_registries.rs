@@ -38,8 +38,7 @@ fn rk(s: &str) -> ResourceKey {
     ResourceKey::from_str(s).expect("valid resource key")
 }
 
-/// `AbstractArrow.tick` (`.cache/mc/26.2/src/net/minecraft/world/entity/
-/// projectile/arrow/AbstractArrow.java`): in air, **move -> drag
+/// Vanilla's own `AbstractArrow.tick`: in air, **move -> drag
 /// (`AbstractArrow.getAirDrag` = `0.99`) -> gravity**
 /// (`AbstractArrow.getDefaultGravity` = `0.05`). `Projectile::arrow` already encodes this order and
 /// these constants (that is `lodestone-entity`'s own, already-verified half);

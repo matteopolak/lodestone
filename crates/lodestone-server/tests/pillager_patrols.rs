@@ -167,7 +167,7 @@ fn night_time_spawns_nothing() {
 }
 
 /// Difficulty scales the group size — `ceil(effectiveDifficulty) + 1`
-/// (`PatrolSpawner.java:40`). This is a *value* prediction across three
+/// (vanilla's own `PatrolSpawner`). This is a *value* prediction across three
 /// difficulties, not a "more mobs on harder difficulty" direction check: the
 /// exact size at each one is what separates a correct table from a plausible
 /// one (`docs/pillager-patrols.md` §4 has the disclosed approximation this
