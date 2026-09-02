@@ -72,7 +72,7 @@ import com.mojang.datafixers.Dynamic;
  * {@code oak_wood}/{@code spruce_wood}/... — separate, unrelated rename fixes
  * chained later in the same world-upgrade pipeline that this program
  * does not chase down (out of scope for this task; see the doc's "What
- * wiring `v340` would need" section).
+ * wiring `v1-9` would need" section).
  *
  * <p>It is also, by vanilla's own design, unable to resolve some blocks at
  * all from id:meta alone — flower pots (contents live in the pot's

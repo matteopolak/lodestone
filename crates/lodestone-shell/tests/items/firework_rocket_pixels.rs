@@ -13,7 +13,7 @@
 //! `EntityDraw::firework` -> `merge_firework_rocket` -> pixels. It installs its
 //! own `EntityDraw`, so it says nothing about the producer — that the wire's
 //! `DATA_SHOT_AT_ANGLE` and `DATA_ATTACHED_TO_TARGET` really land in that field
-//! is `crates/protocol/v770`'s question, and the decode gates there cover it
+//! is `crates/versions/26.2`'s question, and the decode gates there cover it
 //! separately.
 //!
 //! # Three arms, and why the first alone is not enough

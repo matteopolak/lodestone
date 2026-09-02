@@ -46,7 +46,7 @@ prose — several worldgen claims in this repo's own files are stale (see §"sta
 | 6h | `FLUID_SPRINGS` (`spring_water`, `spring_lava`) | **absent** | in every biome's list |
 | 6i | `TOP_LAYER_MODIFICATION` (`freeze_top_layer` — snow layers + ice) | **ported + composed, bit-exact at 4 fixtures** | U2, closed. `top_layer_parity` (in `lodestone-server/src/worldgen_data.rs`) loads vanilla's own post-vegetation field and requires the same writes at the same coordinates: snowy_plains 250 snow + 250 `snowy` flips, frozen_ocean 36 ice + 0 snow, windswept_hills 115 snow, desert 0. Plus 1,024 columns of `MOTION_BLOCKING` heightmap against vanilla's own heightmap query. Four controls run and observed. See [`worldgen-freeze-top-layer.md`](../worldgen-biomes.md) |
 | 7 | structures proper (`structure_starts`/`structure_references` statuses + jigsaw assembly) | **absent entirely** | tracked as "do not start implementation"; no Rust module; data exists (34 `structure`, 20 `structure_set`, 188 `template_pool`, 40 `processor_list` JSON) |
-| 8 | `initialize_light` / `light`; heightmaps | **absent from the served wire** | `encode_column_body`, `crates/protocol/v770/src/server_protocol.rs`: heightmaps sent empty, light all-`Missing` — documented gap; client relights locally |
+| 8 | `initialize_light` / `light`; heightmaps | **absent from the served wire** | `encode_column_body`, `crates/versions/26.2/src/server_protocol.rs`: heightmaps sent empty, light all-`Missing` — documented gap; client relights locally |
 | 9 | `spawn` (initial mob generation, `disable_mob_generation`) | **absent from generation** | runtime spawning is `crates/lodestone-server/src/natural_spawn.rs` (a different mechanism, currently another agent's file) |
 | — | old-chunk blending (vanilla's own region blender, its below-zero retrogen pass, and its per-status biome/noise generation calls) | **absent, deliberately out of scope** | only matters for worlds imported from older versions |
 
@@ -151,7 +151,7 @@ test**, (3) engine port, (4) composed gate with a measured floor and a control t
 
 **What the owner asked for is a generator-constructor seam, not a data-file seam.** Pre-1.18
 worldgen is code-driven (different engine, not different JSON), so "generation for other versions"
-can never be "swap the JSON bundle" — a future v340 generator is a second engine behind a common
+can never be "swap the JSON bundle" — a future v1-9 generator is a second engine behind a common
 trait. That trait already exists: `lodestone_server::ChunkSource` (`crates/lodestone-server/src/chunk.rs` —
 `OverworldChunkSource` is the 26.2 implementation). The selection idiom already exists too:
 `lodestone-registry`'s `SERVER_FAMILIES` table (`crates/lodestone-registry/src/lib.rs`),
@@ -165,13 +165,13 @@ never by name.
   sets, exactly the `Family`/`ServerFamily` argument). The shell keeps asking by protocol number;
   `None` means "no world generation for this version" — surfaced, never routed around.
 - Move `crates/lodestone-server/assets/worldgen/` + the `build.rs` embedding + `EmbeddedResolver`
-  into `crates/protocol/v770`. This is the seam issue's own prescription, and it survives the
+  into `crates/versions/26.2`. This is the seam issue's own prescription, and it survives the
   canonical-census-vs-behavior-data check already established for this repo:
   `lodestone-data` holds the *canonical censuses* of the one internal version, but
-  per-version **behavior** data (like v340's flattening table) lives in its family crate — worldgen
+  per-version **behavior** data (like v1-9's flattening table) lives in its family crate — worldgen
   JSON is behavior data the owner explicitly wants selectable. Note the seam issue's original pointer,
-  "mirror lodestone-v770's existing registry data mechanism", is stale — that mechanism has since
-  moved to `lodestone-data`; the thing to mirror is v340's in-family table pattern plus
+  "mirror lodestone-v26-2's existing registry data mechanism", is stale — that mechanism has since
+  moved to `lodestone-data`; the thing to mirror is v1-9's in-family table pattern plus
   `lodestone-server`'s existing `build.rs` embedding, relocated.
 - `lodestone-server` loses its unconditional 26.2 dependency and keeps only the version-free
   `ChunkSource`/`OverworldGenerator` plumbing. The architectural gate is a new required check
@@ -181,7 +181,7 @@ never by name.
 - `lodestone-worldgen` (the engine) does not move and does not change: it is already version-free
   by construction (data arrives through `Resolver`).
 
-**Cost:** ~90 asset files + `build.rs` relocated; one registry field + one v770 entry; threading
+**Cost:** ~90 asset files + `build.rs` relocated; one registry field + one v26-2 entry; threading
 the constructed `ChunkSource` through `integrated.rs`/`server.rs` (both currently owned by other
 agents — sequence after they land); one new health-check line. **Not built now:** any second
 generator. The seam is done when a grep for `assets/worldgen` in `lodestone-server` returns
@@ -205,7 +205,7 @@ the `mobs/` module in `lodestone-server` are **owned by other agents at the time
 | U5 vegetation gap burn-down | `multiface_growth` (every biome), fancy/giant trunk placers, `fallen_tree` | `feature/vegetation.rs`, `vegetation_parity.rs`, `VegetationOracle.java`, `KNOWN_VEGETATION_GAPS` | one agent only — all in one file |
 | U6 ocean vegetation | kelp, seagrass, sea_pickle, coral (3 kinds) | `feature/ocean.rs` (new) | same overworld.rs hook |
 | U7 3-D biomes | per-quart-cube climate sampling; a port of vanilla's own climate R-tree with its brute-force nearest-point search as its own in-tree control | `biome.rs`, `BiomeOracle.java` | perf gate from U9 before landing |
-| U8 seam | §4 as written | `worldgen_data.rs`, `assets/worldgen/` move, v770 additions, registry field | `integrated.rs`/`server.rs` owners; lib.rs broker |
+| U8 seam | §4 as written | `worldgen_data.rs`, `assets/worldgen/` move, v26-2 additions, registry field | `integrated.rs`/`server.rs` owners; lib.rs broker |
 | U9 benches | `StageTimes` extended past its current 4 fields (shape/fluid_heightmap/surface/intern — it predates carve/ore/vegetation entirely); persisted split; RD 8/16/32 sweep with peak RSS via `lodestone-allocbench`'s `/usr/bin/time -l` pattern | `benches/generation.rs`, `column_timed`/`StageTimes` in overworld.rs (small brokered touch) | — |
 | S1..Sn structures | placement grid first (deterministic, `/locate`-checkable), then jigsaw/template/terrain-adaptation as separate units | new `crates/lodestone-worldgen/src/structure/` (or sibling crate) | after U1–U7; unblocks the structures work |
 
@@ -252,7 +252,7 @@ Predictions to verify (the *predict-then-measure* discipline, not direction-only
 3. **Underground biome-dependent content is unmeasurable** until U7 — there is no 3-D biome for a
    gate to compare.
 4. **Wire parity ≠ block parity**: served chunks carry empty heightmaps and `Missing` light
-   (`encode_column_body`, `crates/protocol/v770/src/server_protocol.rs`), and fluids lack the `level` property. Real gaps, tracked, not
+   (`encode_column_body`, `crates/versions/26.2/src/server_protocol.rs`), and fluids lack the `level` property. Real gaps, tracked, not
    part of block-field parity numbers.
 5. **Two measured savanna residuals with unknown mechanism** (11 leaf-distance cells, 1
    `short_grass` cell) stand as open findings — report-shaped, not bug-to-route-around-shaped.
@@ -272,7 +272,7 @@ reusable; the driver was not.
   should fix the comment in passing.
 - `overworld.rs`'s perf section still says a neighbour cache was "not attempted" — superseded by
   `6509a97` (`pre_ore_cache`) a few hundred lines below.
-- The seam issue's "mirror v770's registry-data mechanism" pointer predates that mechanism's later
+- The seam issue's "mirror v26-2's registry-data mechanism" pointer predates that mechanism's later
   move to `lodestone-data` (§4).
 - `worldgen-plan.md` §0/§3 describe carvers/aquifer/features as "not composed" — true at writing,
   closed since. That doc is kept as the historical argument; this plan is the

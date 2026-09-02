@@ -143,7 +143,7 @@ pub fn is_living(id: i32) -> Option<bool> {
 /// bow, draw it. Hence a third column rather than a reuse of the second.
 ///
 /// The collision was read off the real game, not reasoned about: see
-/// `crates/protocol/v770/tests/support/entity_data_index_jvm.txt`, which dumps
+/// `crates/versions/26.2/tests/support/entity_data_index_jvm.txt`, which dumps
 /// every metadata field in the game sorted by index so collisions are
 /// adjacent lines.
 #[must_use]

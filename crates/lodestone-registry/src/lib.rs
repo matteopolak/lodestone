@@ -8,7 +8,7 @@
 //! # Why this crate is allowed to name versions
 //!
 //! The project's hard rule is that dropping a version means deleting a single
-//! `crates/protocol/<version>` folder. To keep that true while still having
+//! `crates/versions/<version>` folder. To keep that true while still having
 //! *somewhere* that knows about concrete versions, this crate:
 //!
 //! - depends on each version family only through an **optional, feature-gated**
@@ -77,7 +77,7 @@ pub mod version_table;
 /// in, so this table cannot drift from the adapter it resolves to.
 #[derive(Clone, Copy)]
 struct Family {
-    /// Human-readable family label, e.g. `"v47"`.
+    /// Human-readable family label, e.g. `"v1-8"`.
     label: &'static str,
     /// Every protocol number this family handles. Borrowed from the family
     /// crate's own `PROTOCOLS`; never restated here.
@@ -104,39 +104,39 @@ impl std::fmt::Debug for Family {
 /// default build with no family features is empty. Each entry is gated so that
 /// deleting a family's folder (and its feature) removes exactly one line here.
 const FAMILIES: &[Family] = &[
-    #[cfg(feature = "v47")]
+    #[cfg(feature = "v1-8")]
     Family {
-        label: "v47",
-        protocols: lodestone_v47::PROTOCOLS,
-        make: |protocol| Box::new(lodestone_v47::adapter_for(protocol)),
+        label: "v1-8",
+        protocols: lodestone_v1_8::PROTOCOLS,
+        make: |protocol| Box::new(lodestone_v1_8::adapter_for(protocol)),
     },
-    #[cfg(feature = "v770")]
+    #[cfg(feature = "v26-2")]
     Family {
-        label: "v770",
-        // v770 has no `PROTOCOLS`/`adapter_for` yet, so its coverage is spelled
+        label: "v26-2",
+        // v26-2 has no `PROTOCOLS`/`adapter_for` yet, so its coverage is spelled
         // from its own `PROTOCOL` const and the negotiated number is discarded.
-        // Sound, not a shortcut deferred: v770 is single-protocol (776, the
+        // Sound, not a shortcut deferred: v26-2 is single-protocol (776, the
         // canonical version and the only `ServerProtocol`), so there is nothing
         // for it to select between, and #343's plan keeps it single-protocol
         // deliberately to keep the hosting seam simple. Give it the pair when
         // it ever gains a second revision.
-        protocols: &[lodestone_v770::PROTOCOL],
-        make: |_protocol| Box::new(lodestone_v770::adapter()),
+        protocols: &[lodestone_v26_2::PROTOCOL],
+        make: |_protocol| Box::new(lodestone_v26_2::adapter()),
     },
-    #[cfg(feature = "v340")]
+    #[cfg(feature = "v1-9")]
     Family {
-        label: "v340",
-        protocols: lodestone_v340::PROTOCOLS,
-        make: |protocol| Box::new(lodestone_v340::adapter_for(protocol)),
+        label: "v1-9",
+        protocols: lodestone_v1_9::PROTOCOLS,
+        make: |protocol| Box::new(lodestone_v1_9::adapter_for(protocol)),
     },
-    #[cfg(feature = "v735")]
+    #[cfg(feature = "v1-14")]
     Family {
-        label: "v735",
+        label: "v1-14",
         // 754, not 735 — the folder name is not the protocol number for this
         // one family. Reading it from the crate rather than typing it is why
         // that cannot be got wrong here.
-        protocols: lodestone_v735::PROTOCOLS,
-        make: |protocol| Box::new(lodestone_v735::adapter_for(protocol)),
+        protocols: lodestone_v1_14::PROTOCOLS,
+        make: |protocol| Box::new(lodestone_v1_14::adapter_for(protocol)),
     },
 ];
 
@@ -192,13 +192,13 @@ struct PhysicsFamily {
 /// one place that says which of the two each family gets, and it is
 /// deliberately not a 1:1 fit for two of them:
 ///
-/// - **`v47` (1.8.9) → `mc_1_8`.** Exact family match — this is the profile
+/// - **`v1-8` (1.8.9) → `mc_1_8`.** Exact family match — this is the profile
 ///   the movement core was ported and golden-traced against for that era.
-/// - **`v770` (26.2) → `mc_1_21`.** Exact family match, and the only mapping
+/// - **`v26-2` (26.2) → `mc_1_21`.** Exact family match, and the only mapping
 ///   that mattered before this table existed: every production construction
 ///   site hardcoded `mc_1_21()` unconditionally, which happened to be correct
-///   only because `v770` was the only family ever actually joined.
-/// - **`v340` (1.12.2) and `v735` (protocol 754, 1.16.5) → `mc_1_21`, as an
+///   only because `v26-2` was the only family ever actually joined.
+/// - **`v1-9` (1.12.2) and `v1-14` (protocol 754, 1.16.5) → `mc_1_21`, as an
 ///   approximation, not a validated fit.** Neither vanilla era is a clean
 ///   match for either profile: both post-date the 1.9 input-pipeline rewrite
 ///   ([`InputModel::UnitSquareProjection`], which `mc_1_21` selects and
@@ -211,28 +211,28 @@ struct PhysicsFamily {
 ///   still the nearer pick: the input model is live on *every* tick a player
 ///   takes, while the fluid model only diverges while actually in a fluid, so
 ///   getting the input pipeline structurally right dominates. Treat movement
-///   through v340/v735 as "the modern profile, unvalidated for this era" —
-///   not as bit-exact parity — until a v340/v735-specific profile is ported
+///   through v1-9/v1-14 as "the modern profile, unvalidated for this era" —
+///   not as bit-exact parity — until a v1-9/v1-14-specific profile is ported
 ///   and golden-traced the way `mc_1_8` was.
 const PHYSICS_FAMILIES: &[PhysicsFamily] = &[
-    #[cfg(feature = "v47")]
+    #[cfg(feature = "v1-8")]
     PhysicsFamily {
-        protocols: lodestone_v47::PROTOCOLS,
+        protocols: lodestone_v1_8::PROTOCOLS,
         profile: lodestone_physics::PhysicsProfile::mc_1_8,
     },
-    #[cfg(feature = "v770")]
+    #[cfg(feature = "v26-2")]
     PhysicsFamily {
-        protocols: &[lodestone_v770::PROTOCOL],
+        protocols: &[lodestone_v26_2::PROTOCOL],
         profile: lodestone_physics::PhysicsProfile::mc_1_21,
     },
-    #[cfg(feature = "v340")]
+    #[cfg(feature = "v1-9")]
     PhysicsFamily {
-        protocols: lodestone_v340::PROTOCOLS,
+        protocols: lodestone_v1_9::PROTOCOLS,
         profile: lodestone_physics::PhysicsProfile::mc_1_21,
     },
-    #[cfg(feature = "v735")]
+    #[cfg(feature = "v1-14")]
     PhysicsFamily {
-        protocols: lodestone_v735::PROTOCOLS,
+        protocols: lodestone_v1_14::PROTOCOLS,
         profile: lodestone_physics::PhysicsProfile::mc_1_21,
     },
 ];
@@ -265,12 +265,12 @@ pub fn physics_profile_for_protocol(protocol: i32) -> lodestone_physics::Physics
 /// Separate from [`Family`] rather than a field on it, because the two sets are
 /// not the same: a family can have a `VersionAdapter` (so the client can *join*
 /// that version) and no `ServerProtocol` (so we cannot *host* it). Today only
-/// `v770` implements the server side, and a fused table would have had to carry
+/// `v26-2` implements the server side, and a fused table would have had to carry
 /// an `Option` that is `None` for three of four entries and mean "this family
 /// cannot be hosted" — which reads as an oversight rather than a fact.
 #[derive(Clone, Copy)]
 struct ServerFamily {
-    /// Human-readable family label, e.g. `"v770"`. Same value as the matching
+    /// Human-readable family label, e.g. `"v26-2"`. Same value as the matching
     /// [`Family::label`].
     label: &'static str,
     /// Whether this family handles a given protocol number. Delegates to the
@@ -297,11 +297,11 @@ impl std::fmt::Debug for ServerFamily {
 /// Gated exactly as [`FAMILIES`] is: deleting a family's folder removes one line
 /// here too.
 const SERVER_FAMILIES: &[ServerFamily] = &[
-    #[cfg(feature = "v770")]
+    #[cfg(feature = "v26-2")]
     ServerFamily {
-        label: "v770",
-        supports: |protocol| lodestone_v770::adapter().supports(protocol),
-        make: || Box::new(lodestone_v770::V770ServerProtocol),
+        label: "v26-2",
+        supports: |protocol| lodestone_v26_2::adapter().supports(protocol),
+        make: || Box::new(lodestone_v26_2::V770ServerProtocol),
     },
 ];
 
@@ -369,10 +369,10 @@ mod tests {
         // keeps the default build version-free. Feature-enabled behaviour is
         // covered by the client's live tests, which turn a family on.
         if cfg!(not(any(
-            feature = "v47",
-            feature = "v770",
-            feature = "v340",
-            feature = "v735"
+            feature = "v1-8",
+            feature = "v26-2",
+            feature = "v1-9",
+            feature = "v1-14"
         ))) {
             assert!(compiled_families().is_empty());
             assert!(adapter_for_protocol(47).is_none());
@@ -395,19 +395,19 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "v47")]
+    #[cfg(feature = "v1-8")]
     #[test]
     fn resolves_v47_when_enabled() {
-        let adapter = adapter_for_protocol(47).expect("v47 family compiled in");
+        let adapter = adapter_for_protocol(47).expect("v1-8 family compiled in");
         assert!(adapter.supports(47));
         assert!(supported_protocols().contains(&47));
-        assert!(compiled_families().contains(&"v47"));
+        assert!(compiled_families().contains(&"v1-8"));
     }
 
-    /// `v47` is 1.8.9, the one family with an exact-match [`PhysicsProfile`]
+    /// `v1-8` is 1.8.9, the one family with an exact-match [`PhysicsProfile`]
     /// (`mc_1_8`) — see [`PHYSICS_FAMILIES`]'s doc comment for why the other
     /// three families do not get this.
-    #[cfg(feature = "v47")]
+    #[cfg(feature = "v1-8")]
     #[test]
     fn v47_maps_to_the_1_8_physics_profile() {
         assert_eq!(
@@ -416,18 +416,18 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "v770")]
+    #[cfg(feature = "v26-2")]
     #[test]
     fn resolves_v770_when_enabled() {
-        let adapter = adapter_for_protocol(776).expect("v770 family compiled in");
+        let adapter = adapter_for_protocol(776).expect("v26-2 family compiled in");
         assert!(adapter.supports(776));
         assert!(supported_protocols().contains(&776));
     }
 
-    /// `v770` (26.2) is the other exact-match family, and the only one that
+    /// `v26-2` (26.2) is the other exact-match family, and the only one that
     /// mattered before this table existed — every production site hardcoded
     /// this exact constant unconditionally.
-    #[cfg(feature = "v770")]
+    #[cfg(feature = "v26-2")]
     #[test]
     fn v770_maps_to_the_modern_physics_profile() {
         assert_eq!(
@@ -444,37 +444,37 @@ mod tests {
     /// written protocol list to drift.
     ///
     /// That a *joined session* comes out the other end is
-    /// `crates/protocol/v770/tests/singleplayer_seam.rs`, which drives this
+    /// `crates/versions/26.2/tests/singleplayer_seam.rs`, which drives this
     /// function's real return value into a real `IntegratedServer`. Nothing here
     /// can see that, because a registry test cannot tell a working protocol from
     /// a boxed one whose methods all fall through to the trait defaults.
-    #[cfg(feature = "v770")]
+    #[cfg(feature = "v26-2")]
     #[test]
     fn resolves_the_v770_server_protocol_when_enabled() {
         assert!(server_protocol_for_protocol(776).is_some());
-        assert!(compiled_server_families().contains(&"v770"));
+        assert!(compiled_server_families().contains(&"v26-2"));
         // The same protocol the client adapter claims, and nothing else: a
-        // number no family supports must be `None` even with v770 compiled in,
+        // number no family supports must be `None` even with v26-2 compiled in,
         // or `find` is matching unconditionally.
         assert!(server_protocol_for_protocol(776 + 1).is_none());
     }
 
-    #[cfg(feature = "v735")]
+    #[cfg(feature = "v1-14")]
     #[test]
     fn resolves_v735_when_enabled() {
-        let adapter = adapter_for_protocol(754).expect("v735 family compiled in");
+        let adapter = adapter_for_protocol(754).expect("v1-14 family compiled in");
         assert!(adapter.supports(754));
         assert!(supported_protocols().contains(&754));
-        assert!(compiled_families().contains(&"v735"));
+        assert!(compiled_families().contains(&"v1-14"));
     }
 
-    /// `v735` speaks protocol 754 (1.16.5) — the folder name is not the
+    /// `v1-14` speaks protocol 754 (1.16.5) — the folder name is not the
     /// protocol number, so this resolves through the real adapter's number,
     /// never the crate's. 1.16.5 gets `mc_1_21` as the nearer of the two
     /// available profiles, **not** as a validated fit — see
     /// [`PHYSICS_FAMILIES`]'s doc comment for what is and is not actually
     /// checked here.
-    #[cfg(feature = "v735")]
+    #[cfg(feature = "v1-14")]
     #[test]
     fn v735_maps_to_the_modern_physics_profile_as_an_approximation() {
         assert_eq!(
@@ -483,14 +483,14 @@ mod tests {
         );
     }
 
-    /// `v340` (1.12.2) gets the same approximate mapping as `v735`, for the
+    /// `v1-9` (1.12.2) gets the same approximate mapping as `v1-14`, for the
     /// same reason: post-1.9 input model, pre-Update-Aquatic fluids, and
     /// neither of the two available profiles is a validated fit — see
     /// [`PHYSICS_FAMILIES`]'s doc comment.
-    #[cfg(feature = "v340")]
+    #[cfg(feature = "v1-9")]
     #[test]
     fn v340_maps_to_the_modern_physics_profile_as_an_approximation() {
-        let adapter = adapter_for_protocol(340).expect("v340 family compiled in");
+        let adapter = adapter_for_protocol(340).expect("v1-9 family compiled in");
         assert!(adapter.supports(340));
         assert_eq!(
             physics_profile_for_protocol(340),

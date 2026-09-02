@@ -6,7 +6,7 @@
 //! by exactly those. That id → (block, properties) mapping is generated data
 //! specific to 26.2, the one canonical internal version. It is a
 //! game-data census, not wire-format code, so it lives here in this data
-//! crate rather than in `lodestone-v770` or in the fully
+//! crate rather than in `lodestone-v26-2` or in the fully
 //! version-free `lodestone-model`.
 //!
 //! # Memory design
@@ -295,7 +295,7 @@ fn block_index(name: &str) -> Option<u16> {
 ///
 /// Every caller that needs a "nothing here" / unresolvable-state fallback wants
 /// this. It used to be a 32,366-row scan per call in
-/// `lodestone-v770`'s `server_protocol.rs`.
+/// `lodestone-v26-2`'s `server_protocol.rs`.
 ///
 /// # Panics
 /// Panics if the generated table has no `minecraft:air` state (a corrupt table,
@@ -339,7 +339,7 @@ pub fn air_state_id() -> u32 {
 ///
 /// # The default state is *not* the lowest id, and assuming it was caused three bugs
 ///
-/// This logic used to live in `lodestone-v770`'s `server_protocol.rs` and, before
+/// This logic used to live in `lodestone-v26-2`'s `server_protocol.rs` and, before
 /// `43a6e030`, fell back to the **lowest** id sharing the name — right for water
 /// (`86`, `level=0`) and lava (`102`), wrong for 661 of the 797 multi-state
 /// blocks. Three shipped consequences: bare `minecraft:grass_block` resolved to
@@ -506,7 +506,7 @@ mod tests {
     /// lowest id sharing the block's name.
     ///
     /// Redstone dust is the case that shipped wrong. Before `state_id`
-    /// existed, `lodestone-v770`'s hand-rolled scan fell back to the lowest
+    /// existed, `lodestone-v26-2`'s hand-rolled scan fell back to the lowest
     /// id sharing a block name whenever the caller's property set did not
     /// exactly match a real state — which, for a block this server only ever
     /// partially describes (`minecraft:redstone_wire[power=N]`, never the

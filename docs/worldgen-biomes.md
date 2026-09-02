@@ -110,6 +110,6 @@ changes. `gen-counters` (default off) is required for the biome-search and cache
 `lodestone-worldgen-core`'s `density`/`counters`; `lodestone-worldgen`'s `biome`, `surface`,
 `overworld::{biome_cells, veins}`, `feature::top_layer`; `lodestone_data::{snow_support,
 block_solidity}` for the freeze-layer per-block facts; `lodestone-server`'s `EmbeddedResolver` for the
-bundled 26.2 data and the served biome quart grid (`ChunkColumn::biome_state`); `protocol/v770`'s
+bundled 26.2 data and the served biome quart grid (`ChunkColumn::biome_state`); `protocol/v26-2`'s
 `server_protocol::build_world_column` for the wire biome container. Oracle provenance:
 `scripts/worldgen-oracle/{BiomeOracle,TopLayerOracle}.java`, both run via `scripts/worldgen-oracle/run.sh`.

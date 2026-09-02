@@ -66,7 +66,7 @@
 //! `spawner`/`melon`/`nether_portal`/`oak_wood`. See
 //! `docs/protocol-340-flattening-table.md` for the full list and the
 //! `minecraft-data` cross-check that surfaced it. **A block's resolved
-//! `name` here should not be assumed to already match `lodestone-v770`'s
+//! `name` here should not be assumed to already match `lodestone-v26-2`'s
 //! (26.2) naming without going through the same rename layer vanilla does —
 //! wiring this table to the canonical censuses is exactly the follow-up work
 //! this task does not attempt (see the doc's wiring section).**

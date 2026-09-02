@@ -3,7 +3,7 @@
 //!
 //! # What it is
 //!
-//! Two layers, both extracted here from `lodestone-v340` so that *every*
+//! Two layers, both extracted here from `lodestone-v1-9` so that *every*
 //! pre-1.13 protocol family can share one copy
 //! instead of each carrying its own:
 //!
@@ -30,7 +30,7 @@
 //! independently and multiplies the regeneration cost by four.
 //!
 //! This does not weaken per-family deletability, the reason the copy was
-//! originally denied to `v47`: deletability applies to *families*, and
+//! originally denied to `v1-8`: deletability applies to *families*, and
 //! deleting one is still its folder plus its dependency line and feature line
 //! in `lodestone-registry` (`cargo xtask check-deletable <vNNN>` verifies
 //! exactly that). Shared game data living in a shared crate has precedent in

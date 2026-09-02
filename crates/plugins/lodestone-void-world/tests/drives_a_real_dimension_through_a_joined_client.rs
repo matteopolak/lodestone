@@ -2,7 +2,7 @@
 //! `IntegratedServer`, serving a `PluginChunkSource` obtained purely through
 //! `DimensionRegistry::chunk_source` (never by constructing the generator's
 //! own type directly), joined by a real, wire-decoding `lodestone-client`
-//! running the real [`V770Adapter`](lodestone_v770::adapter::V770Adapter).
+//! running the real [`V770Adapter`](lodestone_v26_2::adapter::V770Adapter).
 //!
 //! This is deliberately not a test that calls
 //! [`lodestone_void_world::CheckerboardVoidGenerator::generate`] and asserts
@@ -26,8 +26,8 @@ use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
 use lodestone_model::BlockPos;
 use lodestone_server::plugin_dimension::DimensionRegistry;
 use lodestone_server::{IntegratedServer, NoEntities};
-use lodestone_v770::V770ServerProtocol;
-use lodestone_v770::adapter;
+use lodestone_v26_2::V770ServerProtocol;
+use lodestone_v26_2::adapter;
 use lodestone_void_world::{DIMENSION_KEY, FLOOR_Y};
 use uuid::Uuid;
 

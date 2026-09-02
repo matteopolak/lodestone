@@ -12,7 +12,7 @@
 //! source, none hypothetical):
 //!   1. Chunk delivery halts after 10 unacknowledged batches
 //!      (vanilla's own max-unacknowledged-batches constant) unless the client sends
-//!      `chunk_batch_received`. The v770 adapter now acks batches, so healthy
+//!      `chunk_batch_received`. The v26-2 adapter now acks batches, so healthy
 //!      streaming continues past that cliff — this gate proves it does, and the
 //!      `suppressing_chunk_ack_starves_streaming` negative control proves the
 //!      assertion is falsifiable by turning the ack back off. (Finding worth
@@ -63,7 +63,7 @@
 //! container serving a *different* world on `:25567`, not the `:25565` server
 //! under test — using it would be a silent wrong-server oracle.)
 //!
-//! Gated behind the `live-v770` feature AND `#[ignore]`. Per the live-test
+//! Gated behind the `live-v26-2` feature AND `#[ignore]`. Per the live-test
 //! convention a missing precondition is a FAILURE, not a silent skip: if the
 //! server is unreachable the test panics loudly with the address to start, and
 //! if built in debug it panics telling you to use `--release` (a debug build's
@@ -71,9 +71,9 @@
 //! moving client — see `require_release_build`). Run with:
 //!
 //! ```text
-//! cargo test --release -p lodestone-client --features live-v770 --test live_session -- --ignored --nocapture
+//! cargo test --release -p lodestone-client --features live-v26-2 --test live_session -- --ignored --nocapture
 //! ```
-#![cfg(feature = "live-v770")]
+#![cfg(feature = "live-v26-2")]
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -93,7 +93,7 @@ use common::unique_username;
 
 const SERVER_HOST: &str = "127.0.0.1";
 const SERVER_PORT: u16 = 25565;
-/// v770 family protocol; obtained via the registry so the client never names a
+/// v26-2 family protocol; obtained via the registry so the client never names a
 /// concrete version crate.
 const PROTOCOL: i32 = 776;
 
@@ -167,7 +167,7 @@ enum Filter {
 /// **without any version-specific knowledge**.
 ///
 /// The discriminator is purely structural on the model's `Directive` enum. In
-/// `Play`, the v770 adapter emits exactly two shapes of `Directive::Send` from
+/// `Play`, the v26-2 adapter emits exactly two shapes of `Directive::Send` from
 /// `handle_packet`: a teleport-accept, which is *always* bundled with an
 /// `Emit(TeleportPlayer)`, and the chunk-batch ack, which travels *alone* (no
 /// `Emit`). So "in `Play`, a `handle_packet` batch whose only content is
@@ -495,7 +495,7 @@ fn require_release_build() {
         panic!(
             "this live gate requires a release build — a debug build's chunk decode starves the \
              driver task and the server rubber-band-storms a moving client. Re-run with \
-             `--release`, e.g. `cargo test --release -p lodestone-client --features live-v770 \
+             `--release`, e.g. `cargo test --release -p lodestone-client --features live-v26-2 \
              --test live_session -- --ignored --nocapture`"
         );
     }
@@ -538,7 +538,7 @@ async fn connect_once(
         uuid: Uuid::new_v4(),
     };
     let mut adapter = lodestone_registry::adapter_for_protocol(PROTOCOL)
-        .expect("v770 family compiled into the registry via the live-v770 feature");
+        .expect("v26-2 family compiled into the registry via the live-v26-2 feature");
     if filter != Filter::PassThrough {
         adapter = FilterAdapter::wrap(adapter, filter);
     }

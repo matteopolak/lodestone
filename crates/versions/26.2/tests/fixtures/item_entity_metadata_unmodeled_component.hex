@@ -1,0 +1,32 @@
+# Captured from vanilla 26.2 (protocol 776) survival oracle.
+# Packet: clientbound set_entity_data for a `/summon item` drop of
+# {id:"minecraft:diamond_pickaxe",count:1,
+# components:{"minecraft:repair_cost":7}}.
+#
+# ..        VarInt entity id (session-scoped; not compared)
+# 08        metadata index 8 = ItemEntity.DATA_ITEM
+# 07        serializer 7 = ITEM_STACK
+# 01        VarInt stack count = 1
+# c6 07     VarInt item registry id 966 = minecraft:diamond_pickaxe
+# 01        DataComponentPatch: 1 added
+# 00        DataComponentPatch: 0 removed
+# 13        component type id 19 = minecraft:repair_cost
+# 07        its payload: ByteBufCodecs.VAR_INT, so one byte
+# ff        end-of-list sentinel
+#
+# repair_cost was UNMODELED when this was captured, and the three
+# abandonment gates in tests/item_entity_metadata.rs used it as their
+# unmodeled component. It is decoded now (a bare VarInt), so those
+# gates rewrite this one type-id byte to a component that is still
+# unmodeled — see `with_unmodeled_component`, which asserts both ids
+# are one-byte VarInts so no offset here moves. The capture as-is is
+# now a *complete*-decode gate instead, and it is the outside source
+# for the width: consume no bytes and `07` reads as a metadata index,
+# consume two and the `ff` terminator is eaten.
+#
+# The reason a component cannot simply be skipped, for the abandoning
+# arm: a clientbound patch length-prefixes neither itself nor its
+# components, so an unmodeled one ends the decode in place. Reading
+# on would take `07` as a metadata index and `ff` as a truncated
+# serializer VarInt — a plausible-looking misparse.
+a1 e4 01 08 07 01 c6 07 01 00 13 07 ff

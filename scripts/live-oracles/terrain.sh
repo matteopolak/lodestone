@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Start (or restart) the normal-terrain 26.2 light oracle used by
-# `crates/protocol/v770/tests/live_terrain_light.rs`.
+# `crates/versions/26.2/tests/live_terrain_light.rs`.
 #
 # Unlike the flat creative oracle on :25570, this world is `minecraft:normal`
 # (hills, caves, overhangs, trees) so the light diff exercises horizontal decay

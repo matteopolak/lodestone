@@ -8,10 +8,10 @@
 //!
 //! [`LoginSuccess`] is **not** in that set. 1.8 through 1.15 (protocols 47
 //! and 340) send the profile UUID as a dashed string; 1.16 (protocol 754,
-//! this crate's v735) switched to the 128-bit binary form the modern client
+//! this crate's v1-14) switched to the 128-bit binary form the modern client
 //! uses. Same packet name, same position in the login flow, genuinely
 //! different wire type -- so `LoginSuccess` here is declared
-//! `#[mc(protocols = "47..=340")]` and v735 keeps its own binary-UUID
+//! `#[mc(protocols = "47..=340")]` and v1-14 keeps its own binary-UUID
 //! version, matching the project's "separate structs where a field's type
 //! changes" rule.
 

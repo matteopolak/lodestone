@@ -1,0 +1,256 @@
+[package]
+name = "lodestone-v26-2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-core = { workspace = true }
+lodestone-macros = { workspace = true }
+lodestone-model = { workspace = true }
+# The version-free chat-acknowledgement layer (issue #286): `MessageSignature`
+# and `MessageSignatureCache` let this adapter resolve and repopulate the packed
+# signed-chat cache ids that `PLAYER_CHAT`'s last-seen list and `delete_chat`
+# both index into.
+lodestone-game = { workspace = true }
+lodestone-world = { workspace = true }
+# The canonical 26.2 game-data censuses (issue #361): block collision, entity
+# dimensions, hardness, item prototypes, ... — everything under the old
+# `generated/` that wasn't `packet_ids.rs`. `adapter.rs`'s `VersionAdapter`
+# impl delegates to these tables directly.
+lodestone-data = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+# `decode_explode`'s pitch: the `explode` packet carries no pitch (vanilla
+# rolls it client-side in its own explosion handler), so decoding
+# it faithfully means rolling the same die here.
+rand = { workspace = true }
+# Promoted from a dev-dependency to a production one by issue #277: the
+# `status_response` packet's entire body is a JSON document
+# (vanilla's own lenient-JSON stream codec, capped at 32767), so
+# `V770ServerProtocol`'s server-list
+# reply has to *emit* JSON, not just read it in tests. Building it with a real
+# serializer rather than `format!` is what makes a MOTD containing a quote,
+# backslash, or newline encode correctly — the same reason `lodestone-net`
+# parses the other direction with serde_json instead of hand-scanning.
+serde_json = { workspace = true }
+# Direct path dep (not a workspace alias) so the addition stays inside this
+# crate's manifest — this is the `V770ServerProtocol` seam: it implements the
+# version-free `lodestone_server::ServerProtocol` trait so `lodestone-server`
+# can drive a real vanilla 26.2 wire format instead of the stand-in test
+# double. Production code; `check-isolation` allows a version crate to depend
+# on a version-free crate (only the reverse direction is forbidden).
+lodestone-server = { path = "../../lodestone-server" }
+
+# **Not used by any code in this crate — this edge exists only to turn a feature
+# on**, and it is the same trick `web/Cargo.toml` already documents, moved one
+# level down to where it actually belongs.
+#
+# `getrandom` 0.2 has a hard `compile_error!` on `wasm*-unknown-unknown` unless
+# its `js` feature is on, and it reaches this crate three levels down:
+# `lodestone-v26-2` -> `rand` 0.8 -> `rand_core` 0.6 -> `getrandom` 0.2. Neither
+# `rand` nor `rand_core` can enable it, so `web/` did — which fixed the *browser
+# bundle* and left `cargo build -p lodestone-v26-2 --target
+# wasm32-unknown-unknown` red, because that build never sees `web/`'s manifest.
+# `web/` is its own workspace, outside the root `members` glob. So the v26-2 row of
+# `cargo xtask wasm-check` failed permanently, in `getrandom/src/lib.rs` with no
+# mention of Lodestone at all, and a check that can never pass gets ignored
+# rather than fixed. Declaring it here makes the row winnable and makes the
+# browser bundle's own feature no longer depend on `web/` remembering.
+#
+# Target-gated, not unconditional, and that is the whole reason it is safe here:
+# a native build of this crate — which is every build anyone runs today — does
+# not get the edge at all, so it cannot silently pick up the browser RNG backend.
+# `web/`'s own copy is now redundant but harmless (feature unification unions
+# them); it is left alone because that file is not this crate's to edit.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+lodestone-net = { workspace = true }
+lodestone-testsupport = { workspace = true }
+# `test-util` for `#[tokio::test(start_paused = true)]` + time-auto-advance,
+# used by `tests/server_liveness.rs` to observe the keep-alive interval and
+# time-of-day broadcast against the real client without a real wall-clock
+# wait — same precedent as `lodestone-net`'s and `lodestone-server`'s own
+# dev-dependency.
+tokio = { workspace = true, features = ["test-util"] }
+# Test-only: the real client talking to our real `V770ServerProtocol` over the
+# in-memory transport, proving the join sequence end-to-end without a socket.
+lodestone-client = { workspace = true }
+# Test-only, and the *production* path for singleplayer (issue #287):
+# `tests/singleplayer_seam.rs` resolves a protocol **number** through
+# `lodestone_registry::server_protocol_for_protocol` and serves the resulting
+# `Box<dyn ServerProtocol>`, which is exactly what `lodestone-shell` does and
+# what `tests/server_liveness.rs` — naming `V770ServerProtocol` directly —
+# cannot cover. `features = ["v26-2"]` here rather than via a crate feature, for
+# `lodestone-entity`'s reason: a crate feature cannot reference a
+# dev-dependency. The resulting v26-2 -> registry -> v26-2 edge is a
+# dev-dependency cycle, which cargo allows and which already exists in this
+# workspace through `lodestone-entity`.
+lodestone-registry = { workspace = true, features = ["v26-2"] }
+# Direct path dep (not a workspace alias) so the addition stays inside this
+# crate's manifest — feeds the density-router `Density` the server integration
+# test needs to build a `WorldgenChunkSource`, mirroring the same fixture-driven
+# setup `lodestone-server`'s own tests use. Test-only.
+lodestone-worldgen = { path = "../../lodestone-worldgen" }
+# Direct path dep (not a workspace alias) so the addition stays inside this
+# crate's manifest — the live physics gate drives the version-free
+# `lodestone-physics` engine to walk a player and asserts the real server never
+# corrects us. Test-only; production code never depends on physics.
+lodestone-physics = { path = "../../lodestone-physics" }
+# Test-only, and it must stay that way: `lodestone-ecs` is where the plugin
+# `CommandRegistry`, `dispatch` and `Permissions` live, and issues #48/#464
+# exist precisely because `lodestone-server` must never link it (see
+# `lodestone-server/src/command.rs`'s module doc). `tests/command_wire_path.rs`
+# stands in for the real host — the crate that legitimately links both — and
+# drives a real `chat_command` frame from the real client through the real
+# `V770ServerProtocol` into the real registry. Putting the gate here rather
+# than in `lodestone-server` is what keeps that dependency out of the crate
+# under test, in its dev-dependencies as much as its normal ones. No cycle:
+# `cargo tree -p lodestone-ecs --edges normal` contains zero
+# `lodestone-server`/`lodestone-v26-2`/`lodestone-registry` edges.
+lodestone-ecs = { workspace = true }
+# The `App`/`Plugin` scaffolding `PluginCommandsPlugin` installs into, and the
+# `World` the registry dispatches against. Same versions `lodestone-server`
+# already builds against through `[workspace.dependencies]`.
+bevy_app = { workspace = true }
+bevy_ecs = { workspace = true }
+# Direct dependency (not a workspace alias), per the harness decision in
+# `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU/no-socket benches use
+# criterion. `default-features = false` + only `cargo_bench_support`: the
+# default feature set pulls in `plotters` and `rayon`, neither needed here —
+# see the matching note in `lodestone-worldgen/Cargo.toml`. Dev-only.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "chunk_light_decode"
+harness = false
+
+[[bench]]
+name = "palette_expansion"
+harness = false
+
+[[bench]]
+name = "nbt_decode"
+harness = false
+
+[[bench]]
+name = "registry_decode"
+harness = false
+
+[features]
+# Enables the white-box live acceptance tests (`live_chunk`, `live_respawn`)
+# that join a real vanilla 26.2 server at the packet level. Off by default and
+# additionally `#[ignore]`d so `cargo test -p lodestone-v26-2` stays hermetic.
+# These live here rather than in `lodestone-client` because they name this
+# crate's concrete `packets::chunk` types — coupling a shared crate must not
+# express (see `cargo run -p xtask -- check-isolation`).
+live-chunk = []
+
+# Enables the live block-light oracle (`live_block_light`): joins the flat
+# creative 26.2 oracle (game :25570, RCON :25571), places a glowstone in mid-air
+# via `/setblock`, then judges our light engine's *emission/decay* path against
+# the block light the server itself relights and sends back. A `minecraft:flat`
+# world is used deliberately — block light is 0 everywhere except our source, so
+# a single in-column glowstone is a clean single-source oracle our engine must
+# match cell-for-cell. Distinct from `live-chunk` (which targets the flat :25565
+# world and exercises only sky light). Off by default and `#[ignore]`d so
+# `cargo test -p lodestone-v26-2` stays hermetic.
+live-block-light = []
+
+# Enables the live real-terrain light oracle (`live_terrain_light`): joins a
+# normal-generation 26.2 server (game :25580) — hills, caves, overhangs, trees —
+# and diffs our neighbour-aware light compute against the light the server baked
+# into every chunk. Where `live-block-light`/`live-chunk` run on a `minecraft:flat`
+# world (a *vacuous world* for light: no horizontal gradient), this one exercises
+# the horizontal-decay path and section seams, guards non-vacuity with a
+# horizontal-gradient floor, and asserts `interior_disagreements == 0`. Start the
+# oracle with `scripts/live-oracles/terrain.sh`. Off by default and `#[ignore]`d
+# so `cargo test -p lodestone-v26-2` stays hermetic.
+live-terrain-light = []
+
+# Enables the live physics gate (`live_physics`): joins the real 26.2 server,
+# walks a player driven by `lodestone-physics`, and asserts the server sends
+# **zero** corrective `player_position` teleports after the spawn sync — the
+# server itself asserting our physics matches vanilla. Off by default and
+# `#[ignore]`d so `cargo test -p lodestone-v26-2` stays hermetic.
+live-physics = []
+
+# Enables the live item-component gate (`live_item_components`): joins the real
+# survival 26.2 server (game :25565, RCON :25566), RCON-`give`s the joined player
+# a `diamond_pickaxe` carrying a custom name, damage, and an enchantment, then
+# asserts the resulting `container_set_slot`/`container_set_content` decodes with
+# those components intact and the session stays alive. This is the case a
+# self-round-trip provably cannot catch: our own encoder and decoder could share
+# a wrong understanding of the component-patch wire and still agree. Off by
+# default and `#[ignore]`d so `cargo test -p lodestone-v26-2` stays hermetic.
+live-item = []
+
+# Enables the live `minecraft:tool` gate (`live_tool_component`): joins the real
+# survival 26.2 server (game :25565, RCON :25566) and captures the raw
+# `container_set_slot` bytes the *server* authored for (a) a plain
+# `/item replace … diamond_pickaxe` and (b) one carrying an explicit
+# `minecraft:tool`. Those bytes are checked in under `tests/fixtures/` and
+# replayed by the hermetic `item_components` sibling, so the tool decoder is
+# never validated against bytes our own encoder produced. Capture (a) is the
+# load-bearing one: it is what proves a vanilla pickaxe sends an **empty** patch,
+# and therefore that the wire decode alone cannot make a pickaxe dig faster. Off
+# by default and `#[ignore]`d so `cargo test -p lodestone-v26-2` stays hermetic.
+live-tool = []
+
+# Enables the live command-tree gate (`live_command_tree`, issue #470): joins the
+# flat creative 26.2 oracle (game :25570), captures the raw `minecraft:commands`
+# payload the *server* authored, then sends a real serverbound
+# `command_suggestion` and captures the reply. Both are checked in under
+# `tests/fixtures/` and replayed by the hermetic `command_tree` sibling here and
+# by `lodestone-shell`'s `command_tree_completion` gate — so tab completion is
+# validated against a tree vanilla built, never one our own encoder produced. Off
+# by default and `#[ignore]`d so `cargo test -p lodestone-v26-2` stays hermetic.
+live-commands = []
+
+# Enables the live item-entity gate (`live_item_entity_metadata`): joins the
+# real survival 26.2 server (game :25565, RCON :25566), `/summon`s a dropped
+# item, and captures the raw `set_entity_data` payload the *server* authored for
+# it. Those bytes are checked in under `tests/fixtures/` and replayed by the
+# hermetic `item_entity_metadata` test, so the decoder is never validated
+# against bytes our own encoder produced. This gate re-captures and asserts the
+# fixtures still match the live wire. Off by default and `#[ignore]`d so
+# `cargo test -p lodestone-v26-2` stays hermetic.
+live-item-entity = []
+
+# Enables the live creeper-explosion gate (`live_creeper_explosion`): joins the
+# real vanilla 26.2 survival oracle (game :25565, RCON :25566), summons a
+# pre-ignited creeper, and captures the real `set_entity_data` (fuse
+# direction/powered/ignited) and `explode` packets it sends — then replays
+# both through the public adapter seam. Off by default and `#[ignore]`d so
+# `cargo test -p lodestone-v26-2` stays hermetic.
+live-creeper-explosion = []
+
+# Enables the live `level_event` 2001 gate (`live_destroy_block_event`): joins
+# the flat creative 26.2 oracle (game :25570, RCON :25571), stands a torch on a
+# block, pulls the block out over RCON, and captures the `PARTICLES_DESTROY_BLOCK`
+# frame the *server* authored for the resulting cascade. The `data` field is
+# hand-decoded from the captured bytes and cross-checked against the generated
+# `Block.BLOCK_STATE_REGISTRY` census, so the block-state id that break particles
+# take their texture from is never validated against our own encoder. A cascade
+# rather than a punch is deliberate: a punched block has a second, locally-driven
+# particle emitter that masks a wrong id. Off by default and `#[ignore]`d so
+# `cargo test -p lodestone-v26-2` stays hermetic.
+live-destroy-block = []
+
+# Enables the live `registry_data` gate (`live_registry_data`, issue #288): joins
+# the flat creative 26.2 oracle (game :25570) and captures the raw
+# `registry_data` payloads the *server* authored for `minecraft:dimension_type`
+# and `minecraft:world_clock`. Those bytes are checked in under `tests/fixtures/`
+# and replayed by the hermetic `registry_data` sibling; the decoded *content* is
+# then checked against Mojang's own shipped data files
+# (`.cache/mc/26.2/client-src/data/minecraft/dimension_type/*.json`), which is an
+# oracle outside this tree entirely. Note `generated/reports/registries.json`
+# does **not** list either registry — both are data-pack registries — so it is
+# the wrong cross-check despite being the obvious one. Off by default and
+# `#[ignore]`d so `cargo test -p lodestone-v26-2` stays hermetic.
+live-registry = []

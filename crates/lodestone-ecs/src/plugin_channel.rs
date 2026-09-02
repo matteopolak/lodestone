@@ -79,7 +79,7 @@
 //! (`docs/bevy-migration.md` §6). The shell's `Sim` drains that queue after
 //! every `GameTick`, so a payload written this tick is on the wire this tick;
 //! nothing here touches a socket or a version crate. Before this existed,
-//! `SendCustomPayload` had **no producer in the workspace at all**: the `v770`
+//! `SendCustomPayload` had **no producer in the workspace at all**: the `v26-2`
 //! encoder arm for it was reachable only from outside the tree via
 //! `ClientHandle::send_action` (see `docs/plugin-channels.md`).
 //!

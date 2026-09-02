@@ -74,7 +74,7 @@ pub const DEFAULT_SWING_DURATION: i32 = 6;
 /// # Nothing feeds the effect arguments today
 ///
 /// Both are `None` at every call site in this workspace, because **no local
-/// mob-effect state is reachable**: the v770 adapter decodes
+/// mob-effect state is reachable**: the v26-2 adapter decodes
 /// `update_mob_effect` and `lodestone-shell` forwards it as
 /// `NetUpdate::EffectApplied`, but nothing folds it into a per-entity effect set
 /// that a swing (or a dig) can query. `lodestone_game::mining::BreakInputs` has

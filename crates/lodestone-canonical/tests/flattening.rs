@@ -1,7 +1,7 @@
 //! Generator + drift guard + ambiguous-case regression tests for the
 //! `id:meta` -> modern block-state table (`src/flattening.rs`,
 //! `src/generated/flattening.rs`). Modelled directly on
-//! `crates/protocol/v770/tests/hardness.rs`'s generate-or-assert pattern.
+//! `crates/versions/26.2/tests/hardness.rs`'s generate-or-assert pattern.
 //!
 //! # Data provenance
 //!
@@ -164,7 +164,7 @@ fn generate(rows: &[DumpSlot]) -> String {
         .collect();
 
     // De-duplicate distinct (name, properties) pairs, numbered in ascending
-    // slot order (same scheme as v770's hardness/collision-shape tables).
+    // slot order (same scheme as v26-2's hardness/collision-shape tables).
     let mut entry_index: BTreeMap<(String, Vec<PropPair>), usize> = BTreeMap::new();
     let mut distinct: Vec<(String, Vec<PropPair>)> = Vec::new();
     let mut slot_entry: Vec<Option<usize>> = Vec::with_capacity(classified.len());

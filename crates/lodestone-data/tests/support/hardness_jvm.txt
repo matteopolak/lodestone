@@ -4,7 +4,7 @@
 # BlockState.getDestroySpeed(null, BlockPos.ZERO) and
 # BlockState.requiresCorrectToolForDrops() for every registered state (walking
 # Block.BLOCK_STATE_REGISTRY). Generator:
-# crates/protocol/v770/oracle-java/HardnessOracle.java, run via the
+# crates/versions/26.2/oracle-java/HardnessOracle.java, run via the
 # temurin:25-jdk Docker classpath (see tests/hardness.rs docs).
 #
 # One line per state, ascending global state id:

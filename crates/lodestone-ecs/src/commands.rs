@@ -73,7 +73,7 @@
 //! first; an unknown direct root calls [`dispatch`] as the authenticated player,
 //! while a terminal `/execute ... run <plugin>` carries its rewritten entity,
 //! position, rotation, dimension, anchor and permission level into
-//! [`CommandSource::contextual`]. The v770 wire gate drives both forms through
+//! [`CommandSource::contextual`]. The v26-2 wire gate drives both forms through
 //! a real client/server pair and verifies `store result` and `store success`.
 //!
 //! This is intentionally **not** a general network-plugin host. Open-to-LAN

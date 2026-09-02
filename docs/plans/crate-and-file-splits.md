@@ -8,7 +8,7 @@ here runs many agents concurrently against a single shared checkout with no per-
 large file is a throughput problem: it is a lock. Every verdict below is backed by a commit-level
 measurement of who actually edits what, and the plan carries the migration method, the ordering, and a
 full enumeration of the path-shaped instruments a split would silently blind. Written 2026-08-14
-against a verified tree; the `protocol/v770/src/adapter.rs` split (`d983d0e7`..`5ac277f8`) is the
+against a verified tree; the `protocol/v26-2/src/adapter.rs` split (`d983d0e7`..`5ac277f8`) is the
 precedent, including its warning.
 
 ---
@@ -25,7 +25,7 @@ Two windows, both from `git log --name-only` and counted with a program rather t
 | `crates/lodestone-server/src/mobs.rs` | 48 | 3.5% |
 
 Of the 105 commits touching `server.rs`, only **11** touch nothing else in the repo. Its top
-co-editors are `lodestone-server/src/lib.rs` (42), `protocol/v770/src/server_protocol.rs` (39),
+co-editors are `lodestone-server/src/lib.rs` (42), `protocol/v26-2/src/server_protocol.rs` (39),
 `lodestone-server/src/protocol.rs` (39), `tests/serve_play.rs` (24), `integrated.rs` (22),
 `mobs.rs` (17), `tick.rs` (17).
 
@@ -49,7 +49,7 @@ That table is the whole argument. `menu/` and the GUI set are **half self-contai
 `sim`/`net`/`app` core are not. A split follows the 44–48% column, not the line count.
 
 **Last 7 days, most-touched files** (for the file-level verdicts): `server.rs` 64,
-`shell/app/redraw.rs` 46, `server/lib.rs` 36, `v770/server_protocol.rs` 32, `shell/hud.rs` 26,
+`shell/app/redraw.rs` 46, `server/lib.rs` 36, `v26-2/server_protocol.rs` 32, `shell/hud.rs` 26,
 `server/protocol.rs` 25, `server/mobs.rs` 25, `shell/gpu.rs` 20, `shell/menu/nav.rs` 18.
 
 Note `app/redraw.rs` at 46 touches in 7 days — it is only 1,485 lines and never appeared in the
@@ -245,7 +245,7 @@ named contributor is `lodestone-data/src/generated/` at ~4.9 MB of Rust. Those t
 through lookup functions, so LTO keeps them live regardless of which crate they sit in. **The bundle
 is a data-shape problem and a crate boundary cannot move it.**
 
-### 4. `crates/protocol/v770/src/server_protocol.rs` — 7,282 lines — **SPLIT LATER**
+### 4. `crates/versions/26.2/src/server_protocol.rs` — 7,282 lines — **SPLIT LATER**
 
 32 commits in 7 days and 39 co-edits with `server.rs` — genuinely hot, and the adapter method applies
 essentially unchanged (it is the serverbound mirror of the file that was just split). It is *later*
@@ -253,7 +253,7 @@ only because it contends with the same work `server.rs` does: the two are edited
 splitting both at once puts two refactors in the path of one feature stream.
 
 **Its own trap:** `cargo xtask connectedness` reads this exact path (`classify_serverbound_decode` on
-`crates/protocol/<family>/src/server_protocol.rs`) and `check-deletable`/`conformance` test for its
+`crates/versions/<family>/src/server_protocol.rs`) and `check-deletable`/`conformance` test for its
 existence to decide whether a family implements `ServerProtocol` at all. Teach the instrument the
 directory form *before* the split, exactly as was done for `adapter/`.
 
@@ -323,13 +323,13 @@ Four tracks. Within a crate the work serialises (a broken lib blinds every test 
 across crates it does not.
 
 ```
-Track B  mobs.rs  ──►  Track A  server.rs  ──►  (Track D  v770/server_protocol.rs)
+Track B  mobs.rs  ──►  Track A  server.rs  ──►  (Track D  v26-2/server_protocol.rs)
 Track C  lodestone-gui                                   ── fully concurrent with all of the above
 Track E  instrument fixes  ── must LAND BEFORE Track A and Track D
 ```
 
 1. **Track E first, and it is small.** Teach `cargo xtask connectedness` the directory form for
-   `crates/lodestone-server/src/server.rs` and for `crates/protocol/*/src/server_protocol.rs`, the
+   `crates/lodestone-server/src/server.rs` and for `crates/versions/*/src/server_protocol.rs`, the
    same way `adapter_source_paths` already accepts either a flat `src/adapter.rs` or a
    `src/adapter/` rooted at `mod.rs`. Land it, and record the instrument's output at that sha as the
    baseline. **Nothing in Track A or D may start before this.**
@@ -338,7 +338,7 @@ Track E  instrument fixes  ── must LAND BEFORE Track A and Track D
 3. **Track A — `server.rs`.** After B, same crate. This is the high-value one.
 4. **Track C — `lodestone-gui`.** Different crate, different agents, runs start-to-finish alongside
    B and A. Its own internal order is given below.
-5. **Track D — `v770/server_protocol.rs`.** After A, because the two files are co-edited 39 times in
+5. **Track D — `v26-2/server_protocol.rs`.** After A, because the two files are co-edited 39 times in
    14 days and running both refactors at once puts two moving targets in one feature's path.
 
 Later, and only after C lands: **Track F**, splitting `menu/nav.rs` by screen family inside the new
@@ -410,7 +410,7 @@ stops applying:
 ## What would break
 
 This is the section the adapter split paid for. That refactor was verified thoroughly and still
-**silently blinded `cargo xtask connectedness`**, which reported the whole v770 family as `SKIPPED`
+**silently blinded `cargo xtask connectedness`**, which reported the whole v26-2 family as `SKIPPED`
 with exit 0 because the scanner hardcoded a flat `src/adapter.rs`. Every item below is the same shape.
 
 ### Path-shaped instruments
@@ -419,7 +419,7 @@ with exit 0 because the scanner hardcoded a flat `src/adapter.rs`. Every item be
 |---|---|---|---|
 | `cargo xtask connectedness` | `crates/lodestone-server/src/server.rs` as the serverbound **second hop**, joined by `serverbound_variant_is_connected` | if the file becomes `server/mod.rs`, `dispatch_path.exists()` is false and every serverbound packet is reported **UNCLASSIFIED** with the reason "server.rs is absent" | **soft — a degraded report, not a failure** |
 | `cargo xtask connectedness` | as above | if `server.rs` still exists but the `ServerBound::` arms move to a sibling, every variant reads as **STRANDED** | loud, but *wrong* — it looks like a real regression |
-| `cargo xtask connectedness` | `crates/protocol/<family>/src/server_protocol.rs` in `classify_serverbound_decode` | Track D breaks it identically | soft |
+| `cargo xtask connectedness` | `crates/versions/<family>/src/server_protocol.rs` in `classify_serverbound_decode` | Track D breaks it identically | soft |
 | `cargo xtask check-deletable` / `conformance` | tests for `src/server_protocol.rs`'s existence to decide whether a family implements `ServerProtocol` | Track D makes a family look like it does not implement it | soft |
 | `cargo xtask check-connected` | reachability from shipped `bin`/`cdylib` roots, plus `xtask/check-connected.toml` | a new crate with no dependant **fails** until wired | loud (use it as the control) |
 | `scripts/wasm-check.sh` `WASM_CRATES` **and** `xtask`'s copy | an explicit crate list | a new crate is **not compiled for wasm32** unless added to both | **silent** |
@@ -463,7 +463,7 @@ one and not the other fails loudly. That is the one guard in this list that alre
 - **`web/Cargo.toml` needs no dependency edit.** It depends only on `lodestone-shell` and states that
   everything else arrives transitively. Its `Cargo.lock` will change.
 - **`default-members = ["crates/lodestone-shell"]`** stays correct.
-- **`check-isolation` and `check-deletable` are keyed on `crates/protocol/`**, so Tracks A, B and C do
+- **`check-isolation` and `check-deletable` are keyed on `crates/versions/`**, so Tracks A, B and C do
   not touch them. Track D does.
 
 ---

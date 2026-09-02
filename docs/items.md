@@ -51,7 +51,7 @@ returns `DecodedStack::{Complete, Partial}(Option<ItemStack>)`, never a bare
 let one list caller (merchant offers) ignore the flag and read the interior
 of an undecoded component as the next offer's fields.
 
-`read_component_patch` (`crates/protocol/v770/src/adapter/inventory.rs`)
+`read_component_patch` (`crates/versions/26.2/src/adapter/inventory.rs`)
 covers 109 of 111 types. `can_place_on`/`can_break` are deferred deliberately:
 their predicate is a second, independently-registered dispatch that can
 recurse into itself with no length prefix anywhere to fall back on — a
@@ -80,7 +80,7 @@ broke armour equip slots (only `MAINHAND` accepted anything), stack-size
 prediction (everything read 64), and stacking (two damaged swords merged). A
 1,537-row table dumped from the real 26.2 server
 (`ItemPrototypeOracle.java` → `crates/lodestone-data/tests/support/item_prototype_jvm.txt`,
-regenerated with `LODESTONE_REGEN=1 cargo test -p lodestone-v770 --test
+regenerated with `LODESTONE_REGEN=1 cargo test -p lodestone-v26-2 --test
 item_prototypes committed_table_matches_dump -- --ignored --nocapture`) is
 indexed by registry id and exposed via `prototype_by_id`/`prototype`/
 `VersionAdapter::item_prototype`. `read_component_patch` seeds the three
@@ -246,4 +246,4 @@ generated census (`item_prototypes`, `data_component_types`, `items`);
 `lodestone-assets` for `item_model`/`icon`/`bake`; `lodestone-ecs::entity::ItemUse`
 for local held-item use state; `web-time` (the sole dependency of
 `lodestone-time`). No component-decode path names a protocol version outside
-`crates/protocol/`.
+`crates/versions/`.

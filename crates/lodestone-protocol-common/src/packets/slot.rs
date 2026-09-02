@@ -1,12 +1,12 @@
 //! The pre-1.13 `slot` wire type -- a single inventory item stack.
 //!
-//! Shared only between v47 and v340 (protocols 47 and 340) -- **not** with
-//! v735. Measured: `cargo xtask protocol-dup`'s struct-identity scan reports
-//! `Slot` as a same-named type in all three families, but v735's variant has
+//! Shared only between v1-8 and v1-9 (protocols 47 and 340) -- **not** with
+//! v1-14. Measured: `cargo xtask protocol-dup`'s struct-identity scan reports
+//! `Slot` as a same-named type in all three families, but v1-14's variant has
 //! genuinely different fields (`id: i32` with no `damage`, versus `id: i16`
 //! plus `damage: i16` here) because the 1.13 flattening removed the
 //! `(blockId, meta)` split entirely. That divergence *is* visible to the
-//! struct scan (the field lists differ), so v735 was correctly excluded from
+//! struct scan (the field lists differ), so v1-14 was correctly excluded from
 //! the "identical" pairing there -- unlike `Position` (see that module's
 //! docs), this one is not a false positive, just confirmation that the
 //! pre-1.13/post-1.13 line really is where sharing stops.

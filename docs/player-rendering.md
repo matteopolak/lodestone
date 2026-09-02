@@ -194,7 +194,7 @@ No feature flags gate any of this — each surface draws whenever its data is pr
   equipment/dye/trim carry), `sim.rs`/`camera_rig.rs` (third-person body and camera), `gpu.rs`
   (per-frame prepare/draw passes).
 - `lodestone-ecs` — the armour stand pose component and its per-accessor merge.
-- `lodestone-v770` — the only protocol family decoding armour-stand poses, dye and trim; legacy
+- `lodestone-v26-2` — the only protocol family decoding armour-stand poses, dye and trim; legacy
   families render stands and armour without them.
 - [`entity-rendering.md`](./entity-rendering.md) — the general resolve/cull/pose/upload pipeline
   every surface in this doc layers over.

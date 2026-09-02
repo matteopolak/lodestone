@@ -11,7 +11,7 @@
 //! whenever blocks are added. Per this crate's central rule, such data lives in
 //! a version crate, never in the version-free layers. So this module defines
 //! only the **trait** that every version crate must satisfy; the table that
-//! implements it is generated elsewhere (e.g. a `v770` crate from
+//! implements it is generated elsewhere (e.g. a `v26-2` crate from
 //! `reports/blocks.json`). Version-free consumers — the asset baker in
 //! particular — depend on this trait and stay ignorant of any one version's
 //! numbering.

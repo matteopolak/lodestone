@@ -229,7 +229,7 @@ component insert/remove.
 
 **Recommendation: wasmtime + the component model, WIT-defined ABI, `wit-bindgen` for Rust guests.**
 
-- **Wasmtime** is actively maintained (v47.0.3, released 2026-07-31 —
+- **Wasmtime** is actively maintained (v1-8.0.3, released 2026-07-31 —
   [releases](https://github.com/bytecodealliance/wasmtime/releases)), is the reference
   implementation of the component model
   ([component-model.bytecodealliance.org](https://component-model.bytecodealliance.org/running-components/wasmtime.html)),

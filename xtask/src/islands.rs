@@ -166,7 +166,7 @@ struct FieldDef {
 /// Derives whose macro-generated code genuinely reads (or fills in) every
 /// field, through code this scanner never sees because it never expands
 /// macros. `Encode`/`Decode` are the load-bearing case: essentially every
-/// struct under `crates/protocol/*/src/packets/` derives one or both of
+/// struct under `crates/versions/*/src/packets/` derives one or both of
 /// them, because that derive *is* what makes it a wire packet -- the
 /// generated `encode` reads every field to serialize it, the generated
 /// `decode` writes every field from the wire. A "zero production readers"
@@ -386,7 +386,7 @@ fn expr_is_default_like(expr: &Expr) -> bool {
 /// arbitrary type's `::new()` is not safe to assume is "the default" just
 /// because it takes no arguments -- measured false positive in this
 /// workspace, `ChunkBatchSizeCalculator::new()`
-/// (`crates/protocol/v770/src/adapter/mod.rs`) is a fully-initialized,
+/// (`crates/versions/26.2/src/adapter/mod.rs`) is a fully-initialized,
 /// meaningful calculator, not a placeholder, and treating any bare `::new()`
 /// as default-like flagged `ChunkBatchState::calculator` as "every
 /// production assignment is default" when it has exactly one assignment
@@ -633,7 +633,7 @@ impl<'a, 'ast> Visit<'ast> for Collector<'a> {
         // function by a *string literal* inside an attribute's token tree
         // rather than by an identifier path, which is invisible to every
         // visitor above -- `decode_heightmaps`, `decode_block_entities` and
-        // `decode_light` in `crates/protocol/v770/src/packets/chunk.rs` are
+        // `decode_light` in `crates/versions/26.2/src/packets/chunk.rs` are
         // exactly this shape. Treat any string literal token appearing
         // inside an attribute as a possible reference by its literal text.
         // False-positive risk is low (an unrelated string attribute would
@@ -687,7 +687,7 @@ impl<'a, 'ast> Visit<'ast> for Collector<'a> {
         // `Expr::Binary` rather than a distinct node, so a counter/
         // accumulator field only ever mutated this way -- exactly
         // `MovementSendState::position_reminder`
-        // (`crates/protocol/v770/src/adapter/mod.rs`), reset to `0` at
+        // (`crates/versions/26.2/src/adapter/mod.rs`), reset to `0` at
         // construction and incremented with `state.position_reminder += 1`
         // every call -- had no assignment site in `default_assigns` at all,
         // so its one real `= 0` reset site made it read as "every
@@ -1545,7 +1545,7 @@ mod tests {
         Ok(())
     }
 
-    /// The other real false positive found in `crates/protocol/v770/src/
+    /// The other real false positive found in `crates/versions/26.2/src/
     /// adapter/mod.rs`: `MovementSendState::position_reminder` is reset to
     /// `0` at construction and every 20-tick send, but *counted up* to that
     /// point with `position_reminder += 1` -- a compound assignment, which
@@ -1587,7 +1587,7 @@ mod tests {
         Ok(())
     }
 
-    /// `ChunkBatchSizeCalculator::new()` in `crates/protocol/v770/src/
+    /// `ChunkBatchSizeCalculator::new()` in `crates/versions/26.2/src/
     /// adapter/mod.rs` is a fully-initialized, meaningful value, not a
     /// placeholder -- treating every zero-arg `T::new()` as "the default"
     /// (matching `Vec::new()`, `String::new()`, ...) flagged it as
@@ -1656,7 +1656,7 @@ mod tests {
     }
 
     /// The false positive this repo actually has: every wire packet under
-    /// `crates/protocol/*/src/packets/` derives `Encode`/`Decode`, and the
+    /// `crates/versions/*/src/packets/` derives `Encode`/`Decode`, and the
     /// generated `encode`/`decode` genuinely reads/writes every field
     /// through code this scanner never expands. Without the exclusion this
     /// guards, a struct's fields would show as "zero production readers"
@@ -1691,7 +1691,7 @@ mod tests {
     }
 
     /// The other real false positive this repo has, found the same way as
-    /// the `Encode`/`Decode` one above: `crates/protocol/v770/src/adapter/
+    /// the `Encode`/`Decode` one above: `crates/versions/26.2/src/adapter/
     /// scoreboard.rs` passes `map_number_format` to `.map(...)` and
     /// `dec_err` to `.map_err(...)` -- a bare function *value*, never a
     /// literal `f(...)` call. Before `visit_expr_path` this scanner
@@ -1717,7 +1717,7 @@ mod tests {
         Ok(())
     }
 
-    /// `crates/protocol/v770/src/packets/chunk.rs` names its decoder
+    /// `crates/versions/26.2/src/packets/chunk.rs` names its decoder
     /// functions by string inside `#[mc(decode_with = "decode_heightmaps")]`
     /// -- a shape no identifier-based visitor sees at all, since the
     /// reference is a string literal, not a path.

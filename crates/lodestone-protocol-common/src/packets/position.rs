@@ -1,26 +1,26 @@
 //! The pre-1.14 packed block `position` wire type, and the two packets that
 //! embed it.
 //!
-//! # Why this is shared only 47..=340, not with v735
+//! # Why this is shared only 47..=340, not with v1-14
 //!
 //! `cargo xtask protocol-dup`'s struct-identity scan reports `Position` (and
 //! `BlockDig`/`SpawnPosition`, which embed it) as identical across all three
 //! legacy families -- but that scan compares only a struct's own field list,
 //! never a hand-written `Encode`/`Decode` impl beside it. Diffed by hand:
-//! v735's packed-position codec genuinely differs. 1.8 through 1.13
+//! v1-14's packed-position codec genuinely differs. 1.8 through 1.13
 //! (protocols 47 and 340) pack `x(26) | y(12) | z(26)` from the most
 //! significant bit down (y in the middle); 1.14+ (protocol 754, this crate's
-//! v735) repacks to `x(26) | z(26) | y(12)` (y in the low bits). Same
+//! v1-14) repacks to `x(26) | z(26) | y(12)` (y in the low bits). Same
 //! newtype shape, same field name in every crate, **incompatible bytes on
 //! the wire**. This is a measured instance of the class CLAUDE.md calls out
 //! generally: a naive detector sees a matching field list and misses a
 //! divergent implementation behind it.
 //!
-//! So `Position`, `BlockDig` and `SpawnPosition` are shared only between v47
-//! and v340. `Position` has no `Packet` derive (it is a field type embedded
+//! So `Position`, `BlockDig` and `SpawnPosition` are shared only between v1-8
+//! and v1-9. `Position` has no `Packet` derive (it is a field type embedded
 //! in other packets, not a packet itself) so it has no
 //! `#[mc(protocols = ...)]` to enforce this -- this doc comment is the only
-//! place the range is recorded, and v735 must keep (and does keep) its own
+//! place the range is recorded, and v1-14 must keep (and does keep) its own
 //! incompatible `Position` type rather than importing this one.
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Result, Writer};
@@ -42,7 +42,7 @@ const Z_MASK: i64 = (1 << Z_BITS) - 1;
 ///
 /// The pre-1.14 layout is `x(26) | y(12) | z(26)` from the most significant
 /// bit down, i.e. y occupies the middle bits. This differs from the 1.14+
-/// layout, which packs `x(26) | z(26) | y(12)` -- v735 (protocol 754) keeps
+/// layout, which packs `x(26) | z(26) | y(12)` -- v1-14 (protocol 754) keeps
 /// its own copy of this function with that later layout; see the module
 /// docs for why the two cannot share one definition.
 #[must_use]

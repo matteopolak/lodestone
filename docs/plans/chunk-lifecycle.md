@@ -361,7 +361,7 @@ with no duplication. Two consequences the plan did not anticipate:
   only the *name* `serve_connection`, not any type.** So the new `serve_connection_shared` /
   `serve_connection_with_mob_events_shared` entry points are `pub(crate)`, and #293 required **no
   `lib.rs` patch and no public API change at all**. The brokered choke point was never touched, and
-  no `crates/protocol/v770/tests/*` call site changed. The only public-surface change is a widened
+  no `crates/versions/26.2/tests/*` call site changed. The only public-surface change is a widened
   bound (`S: ChunkSource` → `+ 'static`), which every real implementor already satisfied.
 - **The `Borrowed` arm turned out to be an asset, not debt.** It is #293's permanent negative control
   — `chunk.rs`'s gate drives the blocking path as its second arm and requires it to starve a timer

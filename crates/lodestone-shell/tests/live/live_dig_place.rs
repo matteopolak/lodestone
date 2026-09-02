@@ -12,7 +12,7 @@
 //! was lying.
 //!
 //! Two prerequisites made the desync invisible even after routing the packets:
-//!   1. The v770 adapter applied server `block_update`/`section_blocks_update` to
+//!   1. The v26-2 adapter applied server `block_update`/`section_blocks_update` to
 //!      the client world but emitted **no re-mesh event**, so a server-confirmed
 //!      break/place was applied-but-never-drawn (the "chunk only renders when I
 //!      break something" symptom). Fixed alongside this gate.

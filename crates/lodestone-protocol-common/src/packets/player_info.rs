@@ -3,8 +3,8 @@
 //! Byte-identical across every protocol these three crates cover (47, 340,
 //! 754): diffed field by field against `vendor/minecraft-data`'s
 //! `pc/1.8/protocol.json` and `pc/1.12.2/protocol.json` `packet_player_info`
-//! type, and the v735 (1.16.5, protocol 754) crate's own hand-written
-//! `Decode` impl was byte-for-byte identical to v340's before this move
+//! type, and the v1-14 (1.16.5, protocol 754) crate's own hand-written
+//! `Decode` impl was byte-for-byte identical to v1-9's before this move
 //! (only doc comments and a test-only `CTX` constant differed). Unlike
 //! 26.2's split `player_info_update`/`player_info_remove` pair (an
 //! action-*bitmask* per entry), this era has a single `player_info` packet

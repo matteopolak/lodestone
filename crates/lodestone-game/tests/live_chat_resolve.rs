@@ -91,7 +91,7 @@ fn load_real_en_us() -> Language {
 async fn death_message_resolves_against_real_language_pack() {
     println!("=== LIVE CHAT RESOLUTION (protocol 776, survival :25565) ===");
 
-    // Surface a fatal "adapter rejected packet" (a v770 decode gap) rather than a
+    // Surface a fatal "adapter rejected packet" (a v26-2 decode gap) rather than a
     // silent event-stream close, as in the other live oracles.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -123,7 +123,7 @@ async fn death_message_resolves_against_real_language_pack() {
         uuid: Uuid::new_v4(),
     };
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via lodestone-client/live-v770");
+        .expect("v26-2 family compiled into the registry via lodestone-client/live-v26-2");
 
     let (mut handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()

@@ -149,7 +149,7 @@ pub trait McArg: ArgumentType + Sized + 'static {
     ///
     /// `None` for everything in this crate today, and that is a measurement
     /// rather than a default: the captured 26.2 tree
-    /// (`crates/protocol/v770/tests/fixtures/command_tree_creative.hex`) has no
+    /// (`crates/versions/26.2/tests/fixtures/command_tree_creative.hex`) has no
     /// suggestion provider on any node of `/gamemode` or `/give` — vanilla
     /// leaves `minecraft:gamemode`, `minecraft:entity` and
     /// `minecraft:item_stack` to their own client-side default suggestions.

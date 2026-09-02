@@ -88,12 +88,12 @@
 //!
 //! [`BlockEntity`](crate::BlockEntity)'s own module doc says the NBT *schema*
 //! is version-specific and "belongs to a version crate" — true in principle,
-//! but `crates/protocol/v770/src/server_protocol.rs` was another agent's
+//! but `crates/versions/26.2/src/server_protocol.rs` was another agent's
 //! in-flight work for the whole of this session (see `CLAUDE.md`'s
 //! file-ownership notes), so this parse lives here instead, pragmatically,
 //! against the crate this task was granted outright. If a second protocol
 //! version is ever added, this module is the one that would need to move or
-//! branch on it — nothing about its *shape* assumes v770-only, but its field
+//! branch on it — nothing about its *shape* assumes v26-2-only, but its field
 //! names are only checked against the real 26.2 codec above.
 
 use lodestone_core::Nbt;

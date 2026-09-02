@@ -30,11 +30,11 @@
 //!   variant at all**, so those two can never cross regardless of decoding.
 //! * **No version adapter emits any entity event.** The only constructors of
 //!   `ClientEvent::Entity*` in the whole workspace live in
-//!   `lodestone-client/tests/read_model.rs`'s `FakeAdapter`. `v47` and `v340`
+//!   `lodestone-client/tests/read_model.rs`'s `FakeAdapter`. `v1-8` and `v1-9`
 //!   ship real `entity.rs` + `metadata.rs` decoders that nothing invokes
-//!   (correct-but-never-called, exactly like the old chunk decoder); `v770`
+//!   (correct-but-never-called, exactly like the old chunk decoder); `v26-2`
 //!   — the version this oracle speaks — has neither decoder.
-//! * `v770`'s `handle_play` is an if-chain over eight packet ids (login,
+//! * `v26-2`'s `handle_play` is an if-chain over eight packet ids (login,
 //!   keep-alive, disconnect, system-chat, set-health, combat-kill, chunk,
 //!   forget-chunk). `ADD_ENTITY`, `SET_ENTITY_DATA` (metadata),
 //!   `UPDATE_ATTRIBUTES`, `MOVE_ENTITY_*`, `TELEPORT_ENTITY`,
@@ -47,7 +47,7 @@
 //!
 //! So on a live 26.2 server `entities()` is *always empty*; a spawned mob is
 //! invisible to every consumer. This test encodes the behaviour the seam must
-//! have. It fails now (the gap) and turns green the day `v770` decodes the
+//! have. It fails now (the gap) and turns green the day `v26-2` decodes the
 //! entity packets and an adapter emits the events — at which point it is the
 //! standing regression gate.
 //!
@@ -182,7 +182,7 @@ async fn spawned_mob_crosses_the_client_public_api() {
     };
     let username = profile.username.clone();
     let adapter = lodestone_registry::adapter_for_protocol(PROTOCOL_26_2)
-        .expect("v770 family compiled in via the dev-dependency feature");
+        .expect("v26-2 family compiled in via the dev-dependency feature");
 
     let (handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()
@@ -233,7 +233,7 @@ async fn spawned_mob_crosses_the_client_public_api() {
     // server really holds it. Same chunk as the player => inside entity-tracking
     // range => the server WILL send an ADD_ENTITY for it.
     //
-    // Player position comes from RCON, not `handle.position()`: v770 does not
+    // Player position comes from RCON, not `handle.position()`: v26-2 does not
     // emit `TeleportPlayer` either, so the read-model's position never populates
     // on 26.2 — itself part of the same `handle_play` gap.
     let (server_pig_count, px, py, pz) = tokio::task::spawn_blocking(move || {
@@ -379,7 +379,7 @@ async fn spawned_mob_crosses_the_client_public_api() {
          handle.entities() after 8s:      {entities_len} entries {entities_dbg}\n\
          EntitySpawned events observed:    {spawned_len}\n\
          event variants seen on stream:    {histogram_dbg}\n\
-         --> v770 handle_play decodes login/keepalive/chat/health/combat/chunk only;\n\
+         --> v26-2 handle_play decodes login/keepalive/chat/health/combat/chunk only;\n\
              ADD_ENTITY/SET_ENTITY_DATA/UPDATE_ATTRIBUTES/MOVE_ENTITY_*/TELEPORT_ENTITY/\n\
              SET_ENTITY_MOTION/REMOVE_ENTITIES fall through to Ok(Vec::new()) undecoded.\n\
          This assertion is the acceptance gate; it goes green once the seam is wired.\n",
@@ -446,7 +446,7 @@ async fn entity_metadata_and_attributes_cross_the_client_public_api() {
     };
     let username = profile.username.clone();
     let adapter = lodestone_registry::adapter_for_protocol(PROTOCOL_26_2)
-        .expect("v770 family compiled in via the dev-dependency feature");
+        .expect("v26-2 family compiled in via the dev-dependency feature");
 
     let (handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()

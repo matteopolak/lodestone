@@ -49,7 +49,7 @@
 //!
 //! **Every correction, and every residual gap, moves the table toward darker or
 //! more-occluding — never brighter.** That is deliberate and load-bearing:
-//! `crates/protocol/v770/tests/live_terrain_light.rs` proves the engine against a
+//! `crates/versions/26.2/tests/live_terrain_light.rs` proves the engine against a
 //! real vanilla server by asserting we never produce light the server does not,
 //! precisely because a props shortfall cannot fake that direction. A table that
 //! could over-light would destroy that argument. The known residual gaps are all
@@ -121,7 +121,7 @@ fn committed_path() -> PathBuf {
 /// `git worktree` does not have it, and a non-`#[ignore]`d test that read it
 /// would fail there while passing on the machine that wrote it. (Caught exactly
 /// that way: these two tests were green in the main checkout and red in a
-/// detached verification worktree.) `crates/protocol/v770/tests/live_terrain_light.rs`
+/// detached verification worktree.) `crates/versions/26.2/tests/live_terrain_light.rs`
 /// gets away with reading `vendor/` directly only because it is both
 /// feature-gated and `#[ignore]`d. Committing the extract is the same external
 /// anchor the sibling generators use (`support/*_jvm.txt`).

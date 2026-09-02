@@ -18,7 +18,7 @@
 //! version of this file closed only the narrower half of the gap: a
 //! tint-multiply over the plain flag mesh, base colour only, no loom
 //! patterns. That is now the real thing — `minecraft:banner_patterns` decodes
-//! for an item stack (`crates/protocol/v770`), `rig.flag` draws **untinted**,
+//! for an item stack (`crates/versions/26.2`), `rig.flag` draws **untinted**,
 //! and `RenderState::prepare_special_hand` issues a second, translucent
 //! pattern-layer pass over the same flag geometry the world's block-entity
 //! banner renderer uses (`banner_layer_pipeline`) — see
@@ -282,7 +282,7 @@ fn non_sky_rgb(pixels: &[u8], sky: [u8; 3]) -> Vec<(u32, [u8; 3])> {
 /// Pixel gate: a held banner draws its **loom patterns**, not just its base
 /// colour — the half `banner_item_rig`'s doc names as still missing after the
 /// tint-multiply landing, closed by decoding `minecraft:banner_patterns` for
-/// an item stack (`crates/protocol/v770`) and a real translucent
+/// an item stack (`crates/versions/26.2`) and a real translucent
 /// pattern-layer pass over the flag (`RenderState::prepare_special_hand`,
 /// mirroring the world block-entity pass's `banner_layer_pipeline`).
 ///

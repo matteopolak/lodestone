@@ -1114,7 +1114,7 @@ fn a_custom_head_skin_draws_its_own_sheet_in_a_container_slot() {
 
     // A real custom head: a full profile carrying a signed `textures` property,
     // the exact shape `ClientboundContainerSetContent` delivers for a
-    // server-placed decorative head. `lodestone-v770`'s own
+    // server-placed decorative head. `lodestone-v26-2`'s own
     // `decodes_a_full_profile_with_signed_textures` pins that this is what
     // arrives off the wire, so the fixture is the wire's shape rather than one
     // invented here — and the payload declares a real `SKIN` entry, because a

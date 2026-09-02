@@ -110,7 +110,7 @@ different `#[test]` functions' `println!`s). The harness work below is choosing 
 and retrofitting these, not starting from zero.
 
 **Update:** the harness decision below is now implemented for two crates —
-`lodestone-worldgen` (`benches/generation.rs`, closing #84/#85) and `lodestone-v770`
+`lodestone-worldgen` (`benches/generation.rs`, closing #84/#85) and `lodestone-v26-2`
 (`benches/{chunk_light_decode,nbt_decode,registry_decode}.rs`, closing the protocol
 decode benches under #137/#142/#146). See
 [`../benchmark-harness.md`](../render-benchmarks.md) for how it actually works, how to
@@ -130,7 +130,7 @@ harness-shape decision when that sub-issue is picked up, not automatically inher
   flow gives local before/after comparison for free. Its dependency tree
   (`itertools`, `regex`, `walkdir`, and `plotters` unless disabled) needs checking against
   this workspace's `--all-features`/wasm-neutral constraints before any crate adopts it.
-  **Checked for `lodestone-worldgen` and `lodestone-v770`**: both add it as a
+  **Checked for `lodestone-worldgen` and `lodestone-v26-2`**: both add it as a
   `default-features = false, features = ["cargo_bench_support"]` dev-dependency, which
   excludes `plotters`/`rayon`/`itertools`/`regex`/`walkdir` entirely — dev-only, so it
   does not touch either crate's wasm-facing lib build. See
@@ -149,7 +149,7 @@ harness-shape decision when that sub-issue is picked up, not automatically inher
   metric never needs a schema change. Machine, build profile and scene configuration
   travel with every number, per the evidence standard below — a number without them is
   not comparable across runs or across machines. **Implemented** as
-  `benches/support.rs`'s `record()` in both `lodestone-worldgen` and `lodestone-v770`;
+  `benches/support.rs`'s `record()` in both `lodestone-worldgen` and `lodestone-v26-2`;
   see [`../benchmark-harness.md`](../render-benchmarks.md) for the exact shape and why
   the file is duplicated rather than shared.
 - **Profiling**: the `samply` + `debug = 2` + `threadCPUDelta`-weighting workflow that

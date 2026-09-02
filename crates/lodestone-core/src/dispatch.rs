@@ -51,7 +51,7 @@ impl<T> Handler<T> {
 
 /// One entry on a family's declared-ignore list: a packet name paired with
 /// *why* no handler translates it (e.g. `"server-only debug packet"`, or
-/// `"v770 has this; backport"`). The all-caps name mirrors the per-family
+/// `"v26-2 has this; backport"`). The all-caps name mirrors the per-family
 /// `static IGNORED: &[dispatch::IGNORED]` table this type is meant to
 /// populate.
 #[derive(Debug, Clone, Copy)]

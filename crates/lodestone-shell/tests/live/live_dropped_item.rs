@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! /summon item → ADD_ENTITY + SET_ENTITY_DATA
-//!   → v770 metadata decode (index 8, SER_ITEM_STACK)
+//!   → v26-2 metadata decode (index 8, SER_ITEM_STACK)
 //!   → EntityMetadataUpdate::item → EntityView::item
 //!   → NetClient::entities()  (type_path == "item", item == Some(..))
 //!   → apply_view (ingest components) → EntityInterpolator → EntityDraw

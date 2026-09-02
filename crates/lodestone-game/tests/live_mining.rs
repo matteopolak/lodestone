@@ -4,7 +4,7 @@
 //! Mining did not exist anywhere in the workspace until `mining.rs`; this gate is
 //! what proves the new state machine is not an island. The whole path runs
 //! through the public client:
-//!   1. `ClientBuilder::connect()` — the real transport + v770 adapter (resolved
+//!   1. `ClientBuilder::connect()` — the real transport + v26-2 adapter (resolved
 //!      through the registry; `lodestone-game` still names no version crate).
 //!   2. Drive the **actual** [`Mining`] predictor tick-by-tick and lower its
 //!      emitted [`ClientAction::BlockAction`] START / STOP onto the wire through
@@ -28,10 +28,10 @@
 //! ## The diamond-pickaxe contrast is proven hermetically, not here — a real bug
 //!
 //! The brief asks to contrast stone bare-handed vs a diamond pickaxe. Doing that
-//! *live* is blocked by a genuine v770 decode gap that this gate surfaced: on
+//! *live* is blocked by a genuine v26-2 decode gap that this gate surfaced: on
 //! `/item replace ... diamond_pickaxe`, the server syncs the slot with
 //! `container_set_slot` (packet 20) carrying the pickaxe *with a data-component
-//! patch*, and v770's `read_item_stack` refuses any component patch (it needs a
+//! patch*, and v26-2's `read_item_stack` refuses any component patch (it needs a
 //! bespoke codec per component type). The driver treats that decode error as
 //! fatal, so equipping any tool crashes the session:
 //!
@@ -47,7 +47,7 @@
 //! modeled components, and on the first unmodeled one sets `has_unmodeled`,
 //! warns, and returns `complete == false`, dropping the rest of that packet
 //! rather than tearing down the connection ("the packet is dropped past this
-//! point, not fatal", `v770/src/adapter.rs`). **Equipping a tool no longer
+//! point, not fatal", `v26-2/src/adapter.rs`). **Equipping a tool no longer
 //! crashes the session.**
 //!
 //! This note misled an agent on 2026-07-28 into reporting tool speed as
@@ -243,7 +243,7 @@ async fn block_breaking_round_trips_through_client() {
     println!("=== LIVE BLOCK-BREAKING (protocol 776, survival :25565) ===");
 
     // Surface the driver's internal tracing (notably a fatal "adapter rejected
-    // packet" with its packet id) so a decode failure in the v770 adapter is
+    // packet" with its packet id) so a decode failure in the v26-2 adapter is
     // visible rather than a silent event-stream close.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -265,7 +265,7 @@ async fn block_breaking_round_trips_through_client() {
         uuid: Uuid::new_v4(),
     };
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via lodestone-client/live-v770");
+        .expect("v26-2 family compiled into the registry via lodestone-client/live-v26-2");
 
     let (mut handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()
@@ -442,7 +442,7 @@ async fn block_breaking_round_trips_through_client() {
     // vs a diamond pickaxe. We drive this dig **bare-handed on purpose**: a real
     // server, on `/item replace ... diamond_pickaxe`, immediately syncs the hotbar
     // slot with `container_set_slot` (packet 20) carrying the pickaxe as a full
-    // `ItemStack` *with a data-component patch*. v770's item decoder refuses any
+    // `ItemStack` *with a data-component patch*. v26-2's item decoder refuses any
     // component patch (`adapter.rs` `read_item_stack`: decoding one needs a bespoke
     // codec for each of 111 component types), and the client driver treats an
     // adapter decode error as fatal (`driver.rs`: "adapter rejected packet"), so
@@ -454,8 +454,8 @@ async fn block_breaking_round_trips_through_client() {
     //             data components; component patches are not yet supported
     //     packet_id=20 [container_set_slot]
     //
-    // That is a real v770 decode gap (any equipped tool crashes the client), owned
-    // by impl-v770 — not a mining bug. The *tool-speed* half of the formula is
+    // That is a real v26-2 decode gap (any equipped tool crashes the client), owned
+    // by impl-v26-2 — not a mining bug. The *tool-speed* half of the formula is
     // therefore proven **hermetically** in `mining.rs` (diamond pickaxe = 6 ticks
     // vs bare hand = 151 ticks on the same stone), and the live gate proves the
     // half that needs no component-bearing item: a real bare-handed break lands on

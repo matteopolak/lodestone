@@ -281,7 +281,7 @@ different packet than a real vanilla client would see.
 
 - `lodestone_model::{ClientAction::InteractEntity, EntityInteraction,
   DropSelectedItem, DropSelectedItemStack, UseItem, ReleaseUseItem}` and the
-  v770 adapter's encoders for all of them.
+  v26-2 adapter's encoders for all of them.
 - `lodestone_ecs::entity::{Position, EntityKind, HurtTime, DeathTime,
   Attributes}`, `lodestone_ecs::player::{PhysicsState, AttackStrengthTicker}`.
 - `lodestone_entity::{attribute, equipment, damage::{apply_reductions,

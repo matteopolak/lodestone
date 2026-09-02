@@ -14,7 +14,7 @@
 //!
 //! No corpus seed is bundled here beyond libFuzzer's own empty start: the
 //! packet decoders above already carry the real vanilla-capture corpus
-//! (`crates/lodestone-fuzz/tests/fixtures`, `crates/protocol/v770/tests/
+//! (`crates/lodestone-fuzz/tests/fixtures`, `crates/versions/26.2/tests/
 //! fixtures`), which is a stronger source of "real" NBT bytes than anything
 //! this target could construct standalone — a human wanting a head start can
 //! seed `fuzz/corpus/nbt_decode/` from those `.hex` fixtures directly (parse

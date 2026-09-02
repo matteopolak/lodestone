@@ -1299,7 +1299,7 @@ pub fn plan_auto_fill(
 /// "new" (unseen — vanilla's highlight squeeze animation and toast).
 ///
 /// **Nothing populates this yet.** The server signal is vanilla's own
-/// `recipe_book_add`/`recipe_book_remove` packets, and `crates/protocol/v770/src/adapter.rs`
+/// `recipe_book_add`/`recipe_book_remove` packets, and `crates/versions/26.2/src/adapter.rs`
 /// decodes neither — confirmed by grepping the packet-id constants
 /// (`RECIPE_BOOK_ADD`/`RECIPE_BOOK_REMOVE`) against `adapter.rs`, zero hits —
 /// nor is there a `ClientEvent` variant for them in `lodestone-model` to

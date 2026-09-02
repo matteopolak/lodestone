@@ -38,7 +38,7 @@
 //! # How to change it, and the one gotcha
 //!
 //! **Every gap in this table darkens or occludes; none brightens.** Keep it that
-//! way. `crates/protocol/v770/tests/live_terrain_light.rs` judges our light engine
+//! way. `crates/versions/26.2/tests/live_terrain_light.rs` judges our light engine
 //! against a real vanilla server by asserting we never produce *more* light than
 //! it does, and that claim is sound only because a props shortfall cannot fake it.
 //! A "fix" that guesses an emission upward — or that drops the `lit=false`
@@ -61,7 +61,7 @@
 //! # Dependencies
 //!
 //! None beyond [`crate::generated_light_props`]. Consumers:
-//! `lodestone-v770`'s `V770ServerProtocol` (the integrated server's chunk
+//! `lodestone-v26-2`'s `V770ServerProtocol` (the integrated server's chunk
 //! encoder) and any host wiring `lodestone_world::LightProperties`.
 
 use crate::generated_light_props as table;

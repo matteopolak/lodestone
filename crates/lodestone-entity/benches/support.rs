@@ -2,7 +2,7 @@
 //! Deliberately small and self-contained (not a crate, not a workspace
 //! dependency) — per the harness scope in `docs/roadmap/benchmarks.md`,
 //! creating a new shared crate is out of scope for this pass, and duplicating
-//! ~100 lines four times (worldgen, v770, world, entity — otherwise
+//! ~100 lines four times (worldgen, v26-2, world, entity — otherwise
 //! byte-for-byte identical) is cheaper than the coordination cost of a
 //! shared crate mid-epic. If a fifth bench site needs this, promoting it to a
 //! real crate is the right move then — see the harness patch note in the

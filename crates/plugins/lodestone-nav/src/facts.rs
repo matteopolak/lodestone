@@ -210,7 +210,7 @@ impl FactsTable {
     /// Resolve every state id the census answers for.
     ///
     /// The census exposes no length, so the scan runs until [`CENSUS_GAP_RUN`]
-    /// consecutive ids answer neither `collision` nor `name` — which for v770
+    /// consecutive ids answer neither `collision` nor `name` — which for v26-2
     /// terminates at 32,366 — and is capped at [`CENSUS_CEILING`] regardless.
     #[must_use]
     pub fn build(census: &dyn BlockCensus) -> Self {

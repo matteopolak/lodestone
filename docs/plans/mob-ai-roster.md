@@ -184,8 +184,8 @@ that chain in mind.
 1. **#425 is landed and its "what is still missing" section is fully stale.** Commit `7cf02e8`
    shipped both encoders, and the first is *generic*, not another hardcoded arm:
    `encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField])`, and `encode_explode(&self, centre, radius)`
-   (both in `crates/protocol/v770/src/server_protocol.rs`, packet id `play::clientbound::EXPLODE`). Gated by
-   `crates/protocol/v770/tests/server_creeper_metadata_and_explode.rs`. A creeper's swell **and**
+   (both in `crates/versions/26.2/src/server_protocol.rs`, packet id `play::clientbound::EXPLODE`). Gated by
+   `crates/versions/26.2/tests/server_creeper_metadata_and_explode.rs`. A creeper's swell **and**
    its detonation already reach a real client. Every later unit that needs per-entity metadata on
    the wire should use `encode_set_entity_data`, not build a new encoder.
 2. **#228's `randomTickSpeed` trap is stale.** It says grazing is blocked because random ticks have
@@ -214,7 +214,7 @@ that chain in mind.
    (fields `max_block_light`/`y_range`/`needs_solid_below`, `permits`) +
    `SpawnSample` + `trait SpawnEnvironment` (all in `crates/lodestone-entity/src/spawn.rs`).
 5. **`EntityDataIndexOracle.java` is not in `scripts/`.** It is at
-   `crates/protocol/v770/oracle-java/EntityDataIndexOracle.java`. (`scripts/` holds only the twelve
+   `crates/versions/26.2/oracle-java/EntityDataIndexOracle.java`. (`scripts/` holds only the twelve
    worldgen oracles.) The dispatch brief for this plan said `scripts/`; that was wrong.
 6. **This section previously found two independent `MobCategory` types and two `check_despawn`
    functions, unnamed as a fork.** **That has since been resolved for the type, though not the
@@ -579,7 +579,7 @@ Wolf 10.0F, Monster 4.0F, all speed 2.2/2.2) and `RaidGardenGoal` at 5.
 
 ## 5. Metadata rule for every unit that touches it
 
-**Never hand-count an index.** Run `crates/protocol/v770/oracle-java/EntityDataIndexOracle.java`
+**Never hand-count an index.** Run `crates/versions/26.2/oracle-java/EntityDataIndexOracle.java`
 (*not* `scripts/`, §1.3 item 5), which dumps every synced metadata field sorted by index so collisions
 land on adjacent lines. Hand counting has already shipped two bugs — the sheep's wool-colour index and
 the horse's type-variant index, each off by one, both having missed a shared ageable-mob lock flag; every
@@ -600,7 +600,7 @@ keyed by network entity-type id, `TYPE_COUNT = 158`):
   A display entity also claims index 15 as a single byte.
 
 Do not assume the previous collision's guard generalises. Use `encode_set_entity_data`
-(`crates/protocol/v770/src/server_protocol.rs`) rather than adding another single-purpose encoder.
+(`crates/versions/26.2/src/server_protocol.rs`) rather than adding another single-purpose encoder.
 
 ---
 

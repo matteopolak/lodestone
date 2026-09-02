@@ -5,7 +5,7 @@
 //! Vanilla keys these on the entity *type* via `EntityDimensions`, and the
 //! values shifted across the 1.9/1.14 pose refactors (a standing zombie was
 //! `1.8` tall and is now `1.95`), so this is **26.2 game data** and lives here
-//! in this data crate rather than in `lodestone-v770` — a
+//! in this data crate rather than in `lodestone-v26-2` — a
 //! version-free consumer needs no protocol dependency to read it.
 //!
 //! # Data source: interrogate the real jar, not `minecraft-data`

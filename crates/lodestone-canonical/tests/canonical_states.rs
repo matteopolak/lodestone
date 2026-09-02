@@ -28,7 +28,7 @@
 //!    index `canonical::resolve` uses, and would agree with any two symmetric
 //!    misunderstandings.
 //! 3. **The naive value** is `(old_block_id << 4) | meta`, the packed legacy
-//!    composite that `v47` and `v735` park in the palette raw today. The
+//!    composite that `v1-8` and `v1-14` park in the palette raw today. The
 //!    control below asserts it names a *different block* in 26.2 for every
 //!    pair here — which is what makes the primary assertions non-vacuous.
 //!
@@ -163,7 +163,7 @@ const PREDICTED: &[Predicted] = &[
 ];
 
 /// The packed legacy composite id, exactly as it appears on a pre-1.13 wire
-/// and exactly what `v47`/`v735` currently store in the palette unchanged.
+/// and exactly what `v1-8`/`v1-14` currently store in the palette unchanged.
 fn naive_packed(old_block_id: u8, meta: u8) -> u32 {
     (u32::from(old_block_id) << 4) | u32::from(meta)
 }
@@ -280,7 +280,7 @@ fn canonical_resolve_matches_the_predicted_26_2_state_id() {
 
 /// **The negative control.** Every assertion above is worthless if the naive
 /// packed composite id happened to land on the same 26.2 state — the failure
-/// mode `v47` and `v735` are in today would then be invisible. This asserts
+/// mode `v1-8` and `v1-14` are in today would then be invisible. This asserts
 /// the two answers are not merely different numbers but name *different
 /// blocks*, and prints both sides so a future failure is diagnosable.
 #[test]

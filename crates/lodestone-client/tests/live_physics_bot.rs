@@ -2,17 +2,17 @@
 //! `lodestone-client`'s public `ClientHandle` surface against a real vanilla
 //! 26.2 server, and prove the server *validates and accepts* the walk.
 //!
-//! Gated behind the `live-v770` feature AND `#[ignore]`, so the default
+//! Gated behind the `live-v26-2` feature AND `#[ignore]`, so the default
 //! `cargo test` stays hermetic and version-free. Run it against a real server
 //! (offline mode, flat world) on `127.0.0.1:25565` with:
 //!
 //! ```text
-//! cargo test -p lodestone-client --features live-v770 --test live_physics_bot -- --ignored --nocapture
+//! cargo test -p lodestone-client --features live-v26-2 --test live_physics_bot -- --ignored --nocapture
 //! ```
 //!
 //! # What this gate proves, and what it deliberately does not
 //!
-//! Its sibling `crates/protocol/v770/tests/live_physics.rs` is the **white-box
+//! Its sibling `crates/versions/26.2/tests/live_physics.rs` is the **white-box
 //! arithmetic gate**: it hand-builds `move_player_pos_rot` packets and proves
 //! the engine reproduces vanilla's float/double physics bit-for-bit across
 //! hundreds of ticks with zero corrections. That test owns the *arithmetic*
@@ -61,7 +61,7 @@
 //! the position read-back proves the client's own movement primitive advances,
 //! which is exactly the gap left open in `live_bot.rs` (walk observed, never
 //! asserted).
-#![cfg(feature = "live-v770")]
+#![cfg(feature = "live-v26-2")]
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -165,7 +165,7 @@ async fn join_with_clean_lane(server: &ServerAddress) -> Option<Joined> {
         uuid: Uuid::new_v4(),
     };
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via the live-v770 feature");
+        .expect("v26-2 family compiled into the registry via the live-v26-2 feature");
 
     let (handle, mut events) = ClientBuilder::new(server.clone(), profile, adapter)
         .connect()

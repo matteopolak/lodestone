@@ -173,6 +173,6 @@ one axis at a time — see `gpu/maps.rs`'s own module doc for the full switch li
 * `lodestone-ecs` — the per-entity components these producers read (`FireworkFlags`, `PaintingVariant`,
   `ItemFrameRotation`, `Display*`), folded by `ingest::apply_entity_metadata`/`apply_display_metadata`.
 * `lodestone-game::maps` — the map colour store (`MapStore`/`MapState`), independent of any render code.
-* `crates/protocol/v770` — the metadata decodes and class guards for every field named above.
+* `crates/versions/26.2` — the metadata decodes and class guards for every field named above.
 * `lodestone-shell`'s `gpu/` submodules — `entity_passes.rs`, `world_items.rs`, `moving_blocks.rs`,
   `maps.rs`, `lightning_bolt.rs`, `display_text.rs` each own one subsystem's actual draw call.

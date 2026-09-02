@@ -2,11 +2,11 @@
 # packet id) carrying a `minecraft:brand` payload from an unmodified server.
 #
 # PROVENANCE. Hand-derived from the 26.2 wire specification, matching the
-# convention `crates/protocol/v770/tests/clientbound_backlog.rs:9-12` states for
+# convention `crates/versions/26.2/tests/clientbound_backlog.rs:9-12` states for
 # this exact packet ("Golden byte vectors are hand-built from the wire
 # specification (26.2 decompiled Mojang source), not round-tripped through this
 # crate's own encoder, so a self-consistent misreading cannot pass silently").
-# It is deliberately NOT produced by `lodestone_v770`'s own encoder, and no test
+# It is deliberately NOT produced by `lodestone_v26_2`'s own encoder, and no test
 # in this crate encodes anything — so `decode(encode(x)) == x` cannot be what
 # makes the gate pass.
 #

@@ -4,7 +4,7 @@
 //! [`ServerboundCloseWindow`] and [`ServerboundHeldItemSlot`] carry no
 //! [`Slot`](super::slot::Slot) field and are byte-identical across every
 //! protocol these three crates cover (47, 340, 754) -- measured, and
-//! confirmed by reading v735's own definitions, which match field for
+//! confirmed by reading v1-14's own definitions, which match field for
 //! field. No `#[mc(protocols = ...)]` is declared; they keep the derive's
 //! default `ProtocolRange::ALL`.
 //!
@@ -15,9 +15,9 @@
 //! A struct whose own field list is textually identical across all three
 //! families (as these are, per the naive scan) still inherits its embedded
 //! type's narrower range; `OpenWindow` additionally has a genuinely
-//! different field list at v735 on top of that (1.14 replaced the whole
+//! different field list at v1-14 on top of that (1.14 replaced the whole
 //! packet shape). So all five are declared `#[mc(protocols = "47..=340")]`
-//! and v735 keeps its own local versions.
+//! and v1-14 keeps its own local versions.
 
 use lodestone_macros::{Decode, Encode, Packet};
 

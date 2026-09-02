@@ -20,10 +20,10 @@
 //! `Respawn` (play serverbound is ~9/69); it never confirms the initial
 //! teleport / signals "player loaded", so the server keeps the connection in a
 //! pre-spawn state that receives world data but is not in the world for command
-//! targeting. That is a `lodestone-client`/v770 seam gap, out of this crate's
+//! targeting. That is a `lodestone-client`/v26-2 seam gap, out of this crate's
 //! scope — so the gate triggers on **server-pushed sounds** instead, which the
 //! reference raw-socket test
-//! (`lodestone-v770::sound_from_real_server_decodes_with_zero_trailing_bytes`)
+//! (`lodestone-v26-2::sound_from_real_server_decodes_with_zero_trailing_bytes`)
 //! proves arrive within a fraction of a second of a join.
 //!
 //! # Anti-vacuity
@@ -52,10 +52,10 @@
 //!
 //! Run:
 //! ```text
-//! cargo test -p lodestone-sound --features live-v770 --test live_sound_gate \
+//! cargo test -p lodestone-sound --features live-v26-2 --test live_sound_gate \
 //!   -- --ignored --nocapture
 //! ```
-#![cfg(feature = "live-v770")]
+#![cfg(feature = "live-v26-2")]
 
 use std::collections::HashMap;
 use std::fmt;
@@ -237,7 +237,7 @@ async fn live_sound_packet_crosses_the_public_api_and_reaches_the_mixer() {
         uuid: Uuid::new_v4(),
     };
     let adapter = lodestone_registry::adapter_for_protocol(PROTOCOL_776)
-        .expect("v770 family compiled via the live-v770 feature");
+        .expect("v26-2 family compiled via the live-v26-2 feature");
     let (handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()
         .await

@@ -369,7 +369,7 @@ fn blocks_report_path() -> Option<PathBuf> {
 }
 
 /// A test-support [`BlockStateRegistry`] loaded from Mojang's data-generator
-/// `blocks.json`. This mirrors what a version crate (`v770`) will eventually own;
+/// `blocks.json`. This mirrors what a version crate (`v26-2`) will eventually own;
 /// we build it here only so bake coverage can be measured offline. The real
 /// generated table is produced elsewhere — this test never writes it.
 #[derive(Debug)]

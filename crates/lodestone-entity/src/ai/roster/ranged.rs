@@ -1504,7 +1504,7 @@ mod tests {
     ///
     /// This is not pedantry about strings. `encode_add_entity_body` resolves the
     /// type with `entity_type_id(name).unwrap_or(0)`
-    /// (`lodestone_v770::server_protocol::encode_add_entity_body`), and id `0` is a
+    /// (`lodestone_v26_2::server_protocol::encode_add_entity_body`), and id `0` is a
     /// real entity — so a typo here does not fail, it silently streams **the
     /// wrong entity** to the client, which renders it happily. There is no error
     /// anywhere in that path.

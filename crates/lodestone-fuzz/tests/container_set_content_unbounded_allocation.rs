@@ -11,13 +11,13 @@
 //!
 //! ## Original bug, for context
 //!
-//! Bug found by `fuzz/fuzz_targets/v770_clientbound_decode.rs` (this
+//! Bug found by `fuzz/fuzz_targets/v26_2_clientbound_decode.rs` (this
 //! repo's first libFuzzer target): a **9-byte** `CONTAINER_SET_CONTENT`
 //! (play clientbound packet id 18) payload from a hostile or merely broken
 //! server crashed any connecting lodestone client with an out-of-memory
 //! abort, before a single item was decoded.
 //!
-//! `crates/protocol/v770/src/adapter/inventory.rs`'s hand-rolled
+//! `crates/versions/26.2/src/adapter/inventory.rs`'s hand-rolled
 //! `CONTAINER_SET_CONTENT` decode arm used to read:
 //!
 //! ```text
@@ -71,12 +71,12 @@
 // binary/process, so two files each declaring `#[global_allocator]` cannot
 // conflict with each other or with `src/lib.rs`.
 #![allow(unsafe_code)]
-#![cfg(feature = "v770")]
+#![cfg(feature = "v26-2")]
 
 use lodestone_core::Writer;
 use lodestone_fuzz::{Family, decode_clientbound};
 use lodestone_model::ConnectionState;
-use lodestone_v770::packet_ids::play;
+use lodestone_v26_2::packet_ids::play;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 

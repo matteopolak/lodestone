@@ -18,7 +18,7 @@
 //! `ClientEvent::TimeChanged::time_of_day`, and that field was carrying the
 //! monotonic **world age** rather than the day clock: 26.2's `set_time` mostly
 //! ships an empty clock map (`MinecraftServer::forceGameTimeSynchronization`,
-//! about once a second), and the v770 adapter used to fall back to `game_time`
+//! about once a second), and the v26-2 adapter used to fall back to `game_time`
 //! for those. So `sky_darken` was a **session constant** — permanently whatever
 //! hour `age % 24000` happened to name. On a long-lived world that lands in
 //! daylight it is permanently `1.0`: full-bright terrain and daytime mobs at

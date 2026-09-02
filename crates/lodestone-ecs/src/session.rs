@@ -119,7 +119,7 @@ pub struct SessionTabList(pub lodestone_game::tablist::TabList);
 /// warning distance and warning delay.
 ///
 /// All six `ClientEvent::WorldBorder*` variants were islands: decoded, covered by
-/// `crates/protocol/v770/tests/world_border.rs`, and routed
+/// `crates/versions/26.2/tests/world_border.rs`, and routed
 /// `Route::NOWHERE`. They were the largest single cluster in
 /// `docs/event-routing.md`'s list. [`lodestone_game::worldborder::WorldBorder`] is
 /// the fold; this is the component, and [`apply_world_border`] the system.
@@ -402,7 +402,7 @@ pub struct ServerDifficulty(pub Option<(Difficulty, bool)>);
 /// # Why this exists at all: it was a complete island
 ///
 /// `ClientEvent::AbilitiesChanged` was decoded correctly in
-/// `lodestone_v770::adapter::V770Adapter::handle_play_player`, unit-tested at the protocol layer,
+/// `lodestone_v26_2::adapter::V770Adapter::handle_play_player`, unit-tested at the protocol layer,
 /// round-tripped in `lodestone-model`'s own tests — and consumed **nowhere**.
 /// `grep -c AbilitiesChanged` returned `0` in both this crate's `ingest.rs` and
 /// the shell's `sim.rs`. That is the exact defect class `CLAUDE.md` §1 names, and
@@ -2232,7 +2232,7 @@ mod tests {
     /// `azalea-client/src/client.rs`); an error is right here because the
     /// invariant is the point of the stage, not a diagnostic.
     ///
-    /// The `AbilitiesChanged` routing control. The decode has been correct since v770 landed and
+    /// The `AbilitiesChanged` routing control. The decode has been correct since v26-2 landed and
     /// the event still reached **nothing**, because `SharedState::apply` forwards
     /// only what `ingest::handles_event` or [`handles_event`] lists. This pair —
     /// "someone claims it, and it is the right someone" — is the check that has

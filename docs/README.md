@@ -193,7 +193,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   sensitivity, wheel sensitivity, axis inversion, hold-vs-toggle sneak/sprint, and the
   sprint food gate.
 - [Legacy movement packet selection](./legacy-movement-packet-selection.md) — The
-  v47 (Minecraft 1.8.9), v340 (1.12.2), and v735 (1.16.5) protocol adapters select a
+  v1-8 (Minecraft 1.8.9), v1-9 (1.12.2), and v1-14 (1.16.5) protocol adapters select a
   serverbound movement packet from the pose actually last transmitted on that
   connection. This keeps the controller's per-tick `ClientAction::Move` producer
   independent from each protocol's wire cadence.
@@ -237,7 +237,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `crates/lodestone-server/src/natural_spawn.rs`, with entity-side timing state in
   `crates/lodestone-entity/src/ai/navigating_mob.rs`.
 - [The multi-protocol seam: version crates, canonicalisation, and framing](./multi-protocol-seam.md) —
-  How `crates/protocol/vNNN` family crates are structured and named, how the registry
+  How `crates/versions/vNNN` family crates are structured and named, how the registry
   resolves a negotiated protocol number to the right adapter, how each pre-26.2 family
   translates its own wire block-state representation into the canonical 26.2
   block-state space, the reference table of protocol/data-version numbers this project
@@ -336,7 +336,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   a family's clientbound dispatch be checked at construction time instead of falling
   through a silent `_ =>` arm. Landed as Stage 1 of the multi-version protocol dedup
   plan (`docs/plans/multi-version-protocol-dedup.md`): the macro attribute and the
-  dispatch builder, with no `crates/protocol/*` family converted to use either yet.
+  dispatch builder, with no `crates/versions/*` family converted to use either yet.
 - [Redstone execution model](./redstone-execution.md) — How a redstone change
   actually gets *executed* — what wakes up, what it costs, and why. This is the
   layer underneath `docs/redstone.md`'s per-device behaviour: the
@@ -628,7 +628,7 @@ of these caught the *brief* being wrong rather than the code.
   measurement of who actually edits what, and the plan carries the migration method,
   the ordering, and a full enumeration of the path-shaped instruments a split would
   silently blind. Written 2026-08-14 against a verified tree; the
-  `protocol/v770/src/adapter.rs` split (`d983d0e7`..`5ac277f8`) is the precedent,
+  `protocol/v26-2/src/adapter.rs` split (`d983d0e7`..`5ac277f8`) is the precedent,
   including its warning.
 - [Distant terrain LOD (the rd-512 mesh tier)](./plans/distant-terrain-lod.md) — A
   design and staged implementation plan for a Distant Horizons-class far-terrain tier:
@@ -655,7 +655,7 @@ of these caught the *brief* being wrong rather than the code.
   plan sequences a perception-and-driver spine ahead of every species unit.
 - [Multi-version protocol dedup: wire eras, a shared packet library, and version-ranged definitions](./plans/multi-version-protocol-dedup.md) —
   A staged plan to stop paying the full per-family cost for each of the twelve
-  protocol versions still to come. Today every `crates/protocol/vNNN` crate is a
+  protocol versions still to come. Today every `crates/versions/vNNN` crate is a
   near-copy of its neighbour — measured here, at `16b72257`, as **0 byte-identical
   files but 54–61 of ~80 packet structs identical, 65–70% of adapter dispatch-arm
   lines identical or near-identical between adjacent legacy families, and 42% of

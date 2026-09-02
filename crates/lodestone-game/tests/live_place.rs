@@ -6,7 +6,7 @@
 //! proves nothing, because the whole point is that the *server* is authoritative
 //! and may refuse. So every assertion here reads the **server's** block over RCON.
 //! The whole path runs through the public client:
-//!   1. `ClientBuilder::connect()` — the real transport + v770 adapter (resolved
+//!   1. `ClientBuilder::connect()` — the real transport + v26-2 adapter (resolved
 //!      through the registry; `lodestone-game` still names no version crate).
 //!   2. Drive the **actual** [`Placement`] machine and lower its emitted
 //!      [`ClientAction::UseItemOn`] onto the wire through `ClientHandle::send_action`
@@ -37,7 +37,7 @@
 //!   tolerates the first few dropped attempts.
 //! - **The player's held item is the server's source of truth.** We seed
 //!   `weapon.mainhand` with a plain `minecraft:stone` (zero data components, so
-//!   the v770 item decoder handles it cleanly) and the server places *that*.
+//!   the v26-2 item decoder handles it cleanly) and the server places *that*.
 //!
 //! ## Run it
 //!
@@ -156,7 +156,7 @@ async fn block_placement_round_trips_through_client() {
         uuid: Uuid::new_v4(),
     };
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via lodestone-client/live-v770");
+        .expect("v26-2 family compiled into the registry via lodestone-client/live-v26-2");
 
     let (mut handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()
@@ -221,7 +221,7 @@ async fn block_placement_round_trips_through_client() {
     }
 
     // Give the player a plain stone block in the main hand — zero data components,
-    // so the v770 item decoder handles the resulting container_set_slot cleanly.
+    // so the v26-2 item decoder handles the resulting container_set_slot cleanly.
     println!(
         "  RCON give     -> {:?}",
         rcon.cmd(&format!(

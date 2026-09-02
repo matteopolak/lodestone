@@ -17,7 +17,7 @@
 //! own encoder produced, and `decode(encode(x)) == x` is satisfied by two
 //! symmetric misunderstandings — the failure mode `CLAUDE.md`'s evidence
 //! standards exist to prevent. `tests/reaches_a_plugin_from_captured_bytes.rs`
-//! runs the committed capture through the real `v770` adapter.
+//! runs the committed capture through the real `v26-2` adapter.
 //!
 //! Note this is the *clientbound* half. The outbound `minecraft:brand` our
 //! client announces on entering Configuration is a different, already-wired path
@@ -27,7 +27,7 @@
 //! # How it works
 //!
 //! ```text
-//!   server bytes ──▶ v770 adapter ──▶ ClientEvent::CustomPayload
+//!   server bytes ──▶ v26-2 adapter ──▶ ClientEvent::CustomPayload
 //!                                          │
 //!                            SharedState::apply's game-event bus
 //!                                          │
@@ -66,7 +66,7 @@
 //!
 //! `lodestone-ecs` for the plugin API, plus `bevy_ecs`/`bevy_app` directly
 //! because the derives emit absolute `bevy_ecs::` paths. **No protocol family**
-//! — the plugin is version-free; `lodestone-v770` is a dev-dependency of the
+//! — the plugin is version-free; `lodestone-v26-2` is a dev-dependency of the
 //! gate only.
 
 use lodestone_ecs::app::{App, Plugin};

@@ -4,7 +4,7 @@
 //! downstream: nothing in `lodestone-world` interprets its `u32` entries (see
 //! its module docs — "opaque non-negative integer ids"), but every consumer
 //! actually wired into a live world today (the mesher's `BlockAtlas`,
-//! collision) is built from the 26.2 registry specifically, so a `v340` chunk
+//! collision) is built from the 26.2 registry specifically, so a `v1-9` chunk
 //! has to land in that same space to render or collide correctly rather than
 //! silently mismatching a registry nothing warned it about.
 //!
@@ -127,7 +127,7 @@ pub fn resolve(old_block_id: u8, meta: u8) -> CanonicalBlockState {
 /// vanilla block value fits in 12 bits by construction, so a larger one means
 /// desync, a modded id space, or a hostile sender — not a block any caller
 /// should render as *something*. Callers turn it into whatever rejection
-/// their own error type spells (`v340`'s chunk decode fails the packet).
+/// their own error type spells (`v1-9`'s chunk decode fails the packet).
 ///
 /// This lives here rather than in a family crate because the 12-bit rule is a
 /// property of the *era*, not of one protocol: 1.7.10 through 1.12.2 all pack
@@ -196,7 +196,7 @@ fn build_slot_table() -> [CanonicalBlockState; SLOT_COUNT] {
 /// the `id -> (name, properties)` direction (see its module docs on why: the
 /// mesher/asset baker only ever need forward lookups); this is the reverse
 /// index this crate's translation direction needs, built the same way
-/// `lodestone-render`'s `BlockAtlas` and `v770`'s `resolve_state_id` build
+/// `lodestone-render`'s `BlockAtlas` and `v26-2`'s `resolve_state_id` build
 /// theirs (iterate `0..STATE_COUNT` once).
 fn canonical_reverse_index() -> HashMap<(&'static str, Vec<(&'static str, &'static str)>), u32> {
     let mut index = HashMap::with_capacity(block_states::STATE_COUNT as usize);
@@ -453,7 +453,7 @@ pub struct FallbackTally {
     /// Blocks substituted because identity needs block-entity/neighbour data
     /// this crate does not decode (flower pots, skulls, double-plant upper
     /// halves — see the consuming family's chunk module, e.g.
-    /// `lodestone_v340::packets::chunk`, for why block entities are consumed
+    /// `lodestone_v1_9::packets::chunk`, for why block entities are consumed
     /// but not retained there).
     pub requires_additional_context: u32,
     /// Blocks substituted because the pair is out of the table's bounds:
@@ -523,7 +523,7 @@ pub fn resolve_or_air(old_block_id: u8, meta: u8, tally: &mut FallbackTally) -> 
 /// with no palette (1.8's `map_chunk`), where a single out-of-range value must
 /// not cost the whole column. A wire that carries composites in a *palette*
 /// (1.9–1.12.2) should instead reject the packet, because a bad palette entry
-/// means the index stream itself is suspect — see `lodestone_v340`'s
+/// means the index stream itself is suspect — see `lodestone_v1_9`'s
 /// `packets::chunk::legacy_id_meta`, which calls [`split_composite`] directly
 /// and fails on [`None`].
 #[must_use]

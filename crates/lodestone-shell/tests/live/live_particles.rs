@@ -5,7 +5,7 @@
 //! ## The bug this reproduces
 //!
 //! `LEVEL_PARTICLES` decoded all the way to `ClientEvent::Particles`
-//! (`crates/protocol/v770/src/adapter.rs`) and then went nowhere:
+//! (`crates/versions/26.2/src/adapter.rs`) and then went nowhere:
 //! `grep -rn "ClientEvent::Particles" crates/lodestone-shell/src/` returned
 //! zero hits. `/particle minecraft:flame` over RCON acknowledged on the
 //! server and drew nothing client-side; the HUD's `particles=D/A+Unres`

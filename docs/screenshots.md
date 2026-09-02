@@ -129,5 +129,5 @@ resource pack selection — and never writes that selection back to disk.
 - The vanilla assets under `.cache/mc/26.2` (or `LODESTONE_ASSETS`) — without them
   `Sim` falls back to the demo path and would capture the procedural palette
   instead of the real game.
-- `--features live` (compiles `v770` into the registry).
+- `--features live` (compiles `v26-2` into the registry).
 - `lodestone_testsupport::RconClient`, `lodestone::screenshot::encode_png`.

@@ -4,7 +4,7 @@
 //! `minecraft:item` registry by id. The registry id→name mapping is generated
 //! from Mojang's own `registries.json` for 26.2, the one canonical internal
 //! version, so it lives here in this data crate rather than in
-//! `lodestone-v770` — it is a game-data census, not wire-format
+//! `lodestone-v26-2` — it is a game-data census, not wire-format
 //! code.
 
 pub use crate::generated_items::ITEM_COUNT;

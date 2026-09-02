@@ -22,7 +22,7 @@
 //!
 //! # The trap this exists to close, stated precisely
 //!
-//! `crates/protocol/v770/src/server_protocol.rs`'s `encode_add_entity_body` does:
+//! `crates/versions/26.2/src/server_protocol.rs`'s `encode_add_entity_body` does:
 //!
 //! ```text
 //! let type_id = entity_type_id(&entity.entity_type.to_string()).unwrap_or(0);

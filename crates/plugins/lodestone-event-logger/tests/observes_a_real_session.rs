@@ -67,7 +67,7 @@ use lodestone_ecs::parking_lot::RwLock;
 use lodestone_event_logger::{EventLog, EventLoggerPlugin};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 
-/// Protocol 776 — MC 26.2, the `v770` family. The **only** family that
+/// Protocol 776 — MC 26.2, the `v26-2` family. The **only** family that
 /// implements `ServerProtocol`, so it is the only one that can sit on the far
 /// end of this connection (`CLAUDE.md`: "joining and hosting are different
 /// sets").
@@ -192,9 +192,9 @@ fn compose(logger: Option<EventLoggerPlugin>) -> (lodestone_ecs::EcsHandle, Enti
 /// Returns the oracle sequence. The caller asserts the plugin's log against it.
 async fn run_session(ecs: &lodestone_ecs::EcsHandle, session: Entity) -> Vec<ClientEvent> {
     let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
-        .expect("the v770 feature is enabled in this crate's dev-dependencies");
+        .expect("the v26-2 feature is enabled in this crate's dev-dependencies");
     let adapter = lodestone_registry::adapter_for_protocol(PROTOCOL)
-        .expect("the v770 feature is enabled in this crate's dev-dependencies");
+        .expect("the v26-2 feature is enabled in this crate's dev-dependencies");
 
     // `view_radius` 0: one column. Enough to reach Play; nothing here reads
     // terrain.

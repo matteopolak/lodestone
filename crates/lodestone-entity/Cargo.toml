@@ -35,10 +35,10 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # packets cross the seam. Test-only — none of this reaches the crate's own
 # dependency graph, so the default build stays version-free. Version selection
 # goes through the registry; this crate never names a concrete version crate in
-# its `src/`. The `v770` family is enabled here (not via a crate feature, which
+# its `src/`. The `v26-2` family is enabled here (not via a crate feature, which
 # cannot reference dev-dependencies) so the ignored live test compiles on demand.
 lodestone-client = { workspace = true }
-lodestone-registry = { workspace = true, features = ["v770"] }
+lodestone-registry = { workspace = true, features = ["v26-2"] }
 tokio = { workspace = true }
 
 [[bench]]

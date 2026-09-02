@@ -1,12 +1,12 @@
 //! Legacy (pre-1.19 signing) chat packets.
 //!
-//! [`ClientboundChat`] is shared only between v47 and v340 (protocols 47 and
-//! 340): 1.16 (v735, protocol 754) added a `sender: Uuid` field, so it is
-//! declared `#[mc(protocols = "47..=340")]` and v735 keeps its own
+//! [`ClientboundChat`] is shared only between v1-8 and v1-9 (protocols 47 and
+//! 340): 1.16 (v1-14, protocol 754) added a `sender: Uuid` field, so it is
+//! declared `#[mc(protocols = "47..=340")]` and v1-14 keeps its own
 //! three-field version.
 //!
 //! [`ServerboundChat`] and [`ServerboundArmAnimation`] are shared only
-//! between v340 and v735 (declared `#[mc(protocols = "340..=754")]`): 1.8
+//! between v1-9 and v1-14 (declared `#[mc(protocols = "340..=754")]`): 1.8
 //! capped the chat message at 100 characters (1.11+ raised it to 256), and
 //! 1.8 has no separate arm-swing hand field at all (added with the 1.9
 //! off-hand).

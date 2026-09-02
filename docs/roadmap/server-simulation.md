@@ -21,8 +21,8 @@ hardness, entity dimensions, and block physics constants. A generated `path_type
 vanilla's own pathfinding-node evaluator exists as groundwork for pathfinding (not this doc's concern, but it means the
 mob-AI side isn't starting from zero either). `lodestone-server` exists as a real crate with a working
 tokio target-split, an in-memory *and* TCP transport behind the same connection loop
-(`crates/lodestone-server/src/integrated.rs`), and a real (if currently unwired) v770 server protocol
-implementation (`V770ServerProtocol` in `crates/protocol/v770/src/server_protocol.rs`). NBT has a complete, tested
+(`crates/lodestone-server/src/integrated.rs`), and a real (if currently unwired) v26-2 server protocol
+implementation (`V770ServerProtocol` in `crates/versions/26.2/src/server_protocol.rs`). NBT has a complete, tested
 reader/writer in `crates/lodestone-core/src/lib.rs`. None of this is a green-field project.
 
 What is *not* in place, confirmed by whole-tree search rather than assumed: Anvil region-file
@@ -178,11 +178,11 @@ verification method.
 
 Confirmed built-and-tested-but-zero-consumer code, labelled `island` on the relevant issue:
 
-- **`V770ServerProtocol`** (`crates/protocol/v770/src/server_protocol.rs`) — a real protocol-776
+- **`V770ServerProtocol`** (`crates/versions/26.2/src/server_protocol.rs`) — a real protocol-776
   server implementation, exercised only by its own crate's tests. [#287](https://github.com/matteopolak/lodestone/issues/287).
 - **Carvers and ore-feature placement** (`crates/lodestone-worldgen/src/carver/`, `src/feature/mod.rs`) —
   JVM-parity-tested, never composed into `OverworldGenerator`. [#295](https://github.com/matteopolak/lodestone/issues/295).
-- **`GameRulesChanged`** (decoded from `GAME_RULE_VALUES` in the v770 adapter) — decoded, lowered, and
+- **`GameRulesChanged`** (decoded from `GAME_RULE_VALUES` in the v26-2 adapter) — decoded, lowered, and
   dropped with no consumer; the serverbound `SET_GAME_RULE` is unhandled entirely.
   [#327](https://github.com/matteopolak/lodestone/issues/327).
 
@@ -193,7 +193,7 @@ rather than here — noted for completeness since this doc's own research trippe
   consumers) — [#213](https://github.com/matteopolak/lodestone/issues/213).
 - `MobSim`'s `!Send` `Goal` trait blocking it from the real entity-streaming path
   (`SharedSnapshotSource`'s own doc comment in
-  `crates/protocol/v770/tests/entity_streaming_live.rs` documents this explicitly) —
+  `crates/versions/26.2/tests/entity_streaming_live.rs` documents this explicitly) —
   [#217](https://github.com/matteopolak/lodestone/issues/217) covers the consequence (mob positions
   never reach a client); the root cause is a `Send` bound on `lodestone_entity::ai::Goal`, flagged
   separately as a background task rather than filed here since fixing it means touching entity-AI code

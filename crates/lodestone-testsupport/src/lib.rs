@@ -16,11 +16,11 @@ use lodestone_core::Writer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Per-family wire quirks for the hermetic `spawn_entity`/`spawn_entity_living`
-/// fixtures shared by `v340` and `v735`'s `tests/entity.rs`.
+/// fixtures shared by `v1-9` and `v1-14`'s `tests/entity.rs`.
 ///
 /// Those two test files are structurally identical seam tests (see each
 /// file's own doc comment on why they are nonetheless *not* unified with
-/// v47's) — comment-stripped, the only difference is six literals: three
+/// v1-8's) — comment-stripped, the only difference is six literals: three
 /// per-family entity-type wire ids (creeper, arrow, boat), the width of
 /// `spawn_entity`'s object-type field (a signed byte pre-1.13, a varint from
 /// 1.13 on — `spawn_entity_living`'s mob-type field is a varint in *both*
@@ -31,8 +31,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// rule that a six-literal delta is a fixture table, not a reason to
 /// template the test body.
 ///
-/// Only `v340` and `v735` use this; `v47`'s `tests/entity.rs` is deliberately
-/// independent (see its own doc comment) and `v770`'s entity wire shape is
+/// Only `v1-9` and `v1-14` use this; `v1-8`'s `tests/entity.rs` is deliberately
+/// independent (see its own doc comment) and `v26-2`'s entity wire shape is
 /// unrelated to either, so neither participates here.
 #[derive(Debug, Clone, Copy)]
 pub struct EntitySpawnWireFixture {

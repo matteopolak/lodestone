@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Start (or restart) a real vanilla 1.12.2 (protocol 340) oracle, for
-# verifying `lodestone-v340`'s chunk decode + flattening-table canonicalisation
+# verifying `lodestone-v1-9`'s chunk decode + flattening-table canonicalisation
 # against a genuine pre-Flattening server rather than only against fixtures
 # derived from this project's own encoder — see
 # docs/protocol-340-canonical-bridge.md for why that distinction matters and

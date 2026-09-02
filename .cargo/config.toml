@@ -18,7 +18,7 @@ rustflags = ["-Z", "threads=8"]
 
 # Cranelift for debug builds only. Measured 2026-08-15/16 across seven crates in
 # isolated target dirs: 2.0x-7.3x less wall time than LLVM, with the largest wins on the
-# protocol families (v735 7.3x, v340 4.6x) and 2.4x on both lodestone-v770 and
+# protocol families (v1-14 7.3x, v1-9 4.6x) and 2.4x on both lodestone-v26-2 and
 # lodestone-shell. See docs/compile-times.md for the full table and the measurement
 # discipline behind it.
 #

@@ -61,15 +61,15 @@ lodestone-net = { workspace = true }
 # end, so every observed event originates outside this crate entirely.
 # A path dependency rather than `workspace = true`: `lodestone-server` has no
 # `[workspace.dependencies]` entry, and every crate that needs it (the shell,
-# `lodestone-registry`, `lodestone-v770`) names it by path for that reason.
+# `lodestone-registry`, `lodestone-v26-2`) names it by path for that reason.
 lodestone-server = { path = "../../lodestone-server" }
 # The **real** 26.2 wire format, via the designated aggregator rather than by
-# naming `lodestone-v770` directly. A hand-rolled stand-in protocol pair (the
+# naming `lodestone-v26-2` directly. A hand-rolled stand-in protocol pair (the
 # shape `lodestone-server/tests/client_integration.rs` uses) would be ~300 lines
 # of test-owned codec; this is two constructor calls and is what production
 # actually runs. The version-lock is the documented cost, paid in tests only —
 # same bargain `lodestone-autopilot`'s `lodestone-data` dev-dependency records.
-lodestone-registry = { workspace = true, features = ["v770"] }
+lodestone-registry = { workspace = true, features = ["v26-2"] }
 # `PlayerState`, the one argument `lodestone_app::spawn_session` takes.
 lodestone-physics = { workspace = true }
 tokio = { workspace = true }

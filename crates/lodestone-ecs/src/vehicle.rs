@@ -10,7 +10,7 @@
 //! wire was therefore stuck behind one missing thing: a local simulation.
 //!
 //! `ClientAction::MoveVehicle` and `ClientAction::PaddleBoat` were already
-//! encoded byte-exactly by the v770 adapter with **zero producers** — the same
+//! encoded byte-exactly by the v26-2 adapter with **zero producers** — the same
 //! shape as `ClientAction::SetFlying`, which got this client kicked for flying.
 //! [`send_vehicle_actions`] is the producer.
 //!

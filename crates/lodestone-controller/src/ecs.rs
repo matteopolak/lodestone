@@ -185,11 +185,11 @@ pub fn tick_sprint_window(mut input: ResMut<RawInput>) {
 /// (position) or at all (rotation), or forces one `Pos` every 20 ticks
 /// regardless (`positionReminder`); an idle player with no on-ground/
 /// collision transition sends *nothing at all* on the other ~19 ticks out of
-/// 20. `crates/protocol/v770/src/adapter/mod.rs`'s `select_move_packet` is a
+/// 20. `crates/versions/26.2/src/adapter/mod.rs`'s `select_move_packet` is a
 /// verified, tested port of that exact algorithm
-/// (`crates/protocol/v770/tests/movement_selection.rs`), so pushing one
+/// (`crates/versions/26.2/tests/movement_selection.rs`), so pushing one
 /// `ClientAction::Move` here every tick does **not** put one packet on the
-/// wire every tick for v770 — it is what keeps that downstream dirty-tracker
+/// wire every tick for v26-2 — it is what keeps that downstream dirty-tracker
 /// correctly clocked, since its own `positionReminder`-style counter only
 /// advances when it is invoked, exactly mirroring `sendPosition()` being
 /// called every real tick in vanilla. Removing this per-tick push (rather
@@ -198,9 +198,9 @@ pub fn tick_sprint_window(mut input: ResMut<RawInput>) {
 /// periodic resync, not fix anything.
 ///
 /// The legacy adapters make the same distinction, with deliberately different
-/// family rules. v47 tracks the last pose and periodically refreshes it, but
+/// family rules. v1-8 tracks the last pose and periodically refreshes it, but
 /// still emits its base `flying` packet on every otherwise-idle tick; that is
-/// vanilla 1.8 behavior. v340 and v735 throttle idle movement, emitting
+/// vanilla 1.8 behavior. v1-9 and v1-14 throttle idle movement, emitting
 /// `flying` only for an on-ground transition and otherwise staying quiet
 /// until their periodic position reminder expires. The controller must still
 /// invoke every family every tick: each adapter owns and advances the

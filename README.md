@@ -54,21 +54,21 @@ Two different questions — which versions we can **join**, and which we can **h
 
 | Family | Protocol | Minecraft | Join | Host | Clientbound decoded | Serverbound encoded |
 |---|---|---|---|---|---|---|
-| `v47`  | 47  | 1.8.9  | yes | no  | 59/74   | 21/26 |
-| `v340` | 340 | 1.12.2 | yes | no  | 62/80   | 24/33 |
-| `v735` | 754 | 1.16.5 | yes | no  | 54/92   | 25/48 |
-| `v770` | 776 | 26.2   | yes | yes | **141/141** | 68/69 |
+| `v1-8`  | 47  | 1.8.9  | yes | no  | 59/74   | 21/26 |
+| `v1-9` | 340 | 1.12.2 | yes | no  | 62/80   | 24/33 |
+| `v1-14` | 754 | 1.16.5 | yes | no  | 54/92   | 25/48 |
+| `v26-2` | 776 | 26.2   | yes | yes | **141/141** | 68/69 |
 
-Hosting additionally needs the serverbound direction decoded: `v770` decodes **66/69** and
+Hosting additionally needs the serverbound direction decoded: `v26-2` decodes **66/69** and
 connects **47/69** to real behaviour, with 19 decoded packets still landing only on an
 ignored arm.
 
 Counts are produced by `cargo xtask connectedness`, which walks each family's packet-id
-tables — run it rather than trusting this table, which is a snapshot. Note `v735` speaks
+tables — run it rather than trusting this table, which is a snapshot. Note `v1-14` speaks
 protocol **754**, not 735; the folder name is not the protocol number, so ask
 `VersionAdapter::supports` rather than deriving it.
 
-Only `v770` implements the server side, so 26.2 is the only version we can host. Legacy
+Only `v26-2` implements the server side, so 26.2 is the only version we can host. Legacy
 families map their packets into the canonical 26.2 world model, so the renderer and
 simulation are version-agnostic.
 

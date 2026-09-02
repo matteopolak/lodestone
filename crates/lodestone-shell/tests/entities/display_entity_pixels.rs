@@ -15,7 +15,7 @@
 //! (`display_entities::extract_display_draws`) off metadata decoded from the
 //! wire. That half is gated separately and in two places — `display_entities`'s
 //! own extract tests for components → snapshot, and
-//! `lodestone_v770::packets::metadata`'s `an_item_displays_stack_arrives_at_index_23…`
+//! `lodestone_v26_2::packets::metadata`'s `an_item_displays_stack_arrives_at_index_23…`
 //! and `index_16_int_is_a_brightness_override_only_for_a_display` for wire →
 //! metadata. This repo has shipped three fixes in one day with a passing pixel
 //! gate and a still-broken game for exactly the gap this paragraph names, so

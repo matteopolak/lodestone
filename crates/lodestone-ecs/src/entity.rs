@@ -451,7 +451,7 @@ pub struct MobState {
 /// comes from *the other claimant* of the exact same metadata index (15), the
 /// same serializer (`BYTE`), and unrelated bit meanings — `0x04` is
 /// the is-aggressive query in [`MobState`] and the show-arms query here. The
-/// v770 adapter withholds one or the other depending on which concrete type it
+/// v26-2 adapter withholds one or the other depending on which concrete type it
 /// established (armour stand vs. mob), so at most one of
 /// [`MobState`]/[`ArmorStandFlags`] is ever present on a given entity — they are
 /// not two views of the same fact, they are two different facts that happen to
@@ -523,7 +523,7 @@ pub struct Baby(pub bool);
 /// Whether the entity is tamed — vanilla's own tameable-animal flags
 /// metadata index, bit 2
 /// ([`lodestone_model::event::EntityMetadataUpdate::tamed`]), decoded by the
-/// v770 adapter and, until this component existed, dropped on the floor: the
+/// v26-2 adapter and, until this component existed, dropped on the floor: the
 /// wire carried the bit end to end and nothing folded it into per-entity
 /// state, so the shell's draw call site had no source to read.
 ///

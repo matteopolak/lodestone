@@ -750,7 +750,7 @@ async fn ping_answered_regardless_of_keep_alive_policy() {
 /// false-negative shape `docs/event-routing.md` already documents for `Ping`
 /// (also `Route::NOWHERE`, also answered here, also currently mis-flagged as
 /// unconsumed by that same doc's prose). This is the regression gate the
-/// existing wiring never had: the v770 round-trip test in
+/// existing wiring never had: the v26-2 round-trip test in
 /// `resource_pack_push.rs` sends the reply by calling `send_action` by hand,
 /// so it cannot tell an automatic answer from a manual one. This test never
 /// calls `send_action`.

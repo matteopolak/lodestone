@@ -30,17 +30,17 @@ lodestone-world = { workspace = true }
 # workspace's version aggregation point. It is not. The lint's *own* soft/hard
 # split is the mechanism intended for this case, so this crate uses it and stays
 # a surfaced warning rather than a silenced violation.
-lodestone-v47 = { workspace = true, optional = true }
-lodestone-v340 = { workspace = true, optional = true }
-lodestone-v735 = { workspace = true, optional = true }
-lodestone-v770 = { workspace = true, optional = true }
+lodestone-v1-8 = { workspace = true, optional = true }
+lodestone-v1-9 = { workspace = true, optional = true }
+lodestone-v1-14 = { workspace = true, optional = true }
+lodestone-v26-2 = { workspace = true, optional = true }
 # Issue #282's own body names this crate's frame-level codec directly
 # (`MAX_PACKET_LEN`/`MAX_DECOMPRESSED_LEN`/`MAX_LENGTH_VARINT_BYTES` in
 # `codec.rs`) as already bounds-checked "per manual reading" — exactly the
 # claim this harness exists to turn into a measurement instead.
 lodestone-net = { workspace = true }
 uuid = { workspace = true }
-# Direct path dep (not a workspace alias), matching `lodestone-v770`'s own
+# Direct path dep (not a workspace alias), matching `lodestone-v26-2`'s own
 # convention for this same crate: `lodestone-server` is not in
 # `[workspace.dependencies]`, so every consumer spells the path itself. Used
 # only to fuzz `V770ServerProtocol::decode` (issue #282's serverbound half —
@@ -72,11 +72,11 @@ lodestone-testsupport = { workspace = true, optional = true }
 #
 # Deleting a family stays: delete its folder, then delete its `dep:` line above,
 # its line here, and its name from `default`.
-default = ["v47", "v340", "v735", "v770"]
-v47 = ["dep:lodestone-v47"]
-v340 = ["dep:lodestone-v340"]
-v735 = ["dep:lodestone-v735"]
-v770 = ["dep:lodestone-v770"]
+default = ["v1-8", "v1-9", "v1-14", "v26-2"]
+v1-8 = ["dep:lodestone-v1-8"]
+v1-9 = ["dep:lodestone-v1-9"]
+v1-14 = ["dep:lodestone-v1-14"]
+v26-2 = ["dep:lodestone-v26-2"]
 # Track B's `differential::rcon::RconOracle` (issue #549). Off by default and
 # not folded into `default`, unlike the four family features above: those
 # gate *deletability*, this gates an actual network-reaching dependency edge

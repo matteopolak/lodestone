@@ -73,10 +73,10 @@ brokering; **blocked(X)** = do not dispatch until X.
 | BENCH | #90 #91 #92 #97 #99 #106 #128 #133 #151 #160 | bench harness crates, `xtask` bench code | now | L (3–5/sitting) | fifth-harness-crate pattern (`c7f6f1c`) |
 | XTASK | #431 #432 #446 #447 | `xtask/`, CI config, `scripts/` | now | M | xtask scanner toolkit |
 | DOCS-SMALL | #40 #43 #44 #448 | `docs/*.md`, doc comments | now | M | docs-only labels |
-| PROTO-CLIENT | #26 #294 #421 #304 | `crates/protocol/v770/src/` client adapter (NOT `server_protocol.rs` — in flight) | soft | L (5–8 packets/sitting) | per-packet decode→event→fold pattern; `ebc3b7d` triage lists the 32 |
-| LEGACY-V340 | #349 residue | `crates/protocol/v340/` | now | L | `multi-version-protocol.md`; canonical bridge exists |
-| LEGACY-V47 | #345 residue | `crates/protocol/v47/` | now | L | same plan; needs flattening bridge |
-| LEGACY-V735 | #353 residue | `crates/protocol/v735/` | now | L | same plan |
+| PROTO-CLIENT | #26 #294 #421 #304 | `crates/versions/26.2/src/` client adapter (NOT `server_protocol.rs` — in flight) | soft | L (5–8 packets/sitting) | per-packet decode→event→fold pattern; `ebc3b7d` triage lists the 32 |
+| LEGACY-V340 | #349 residue | `crates/versions/1.9/` | now | L | `multi-version-protocol.md`; canonical bridge exists |
+| LEGACY-V47 | #345 residue | `crates/versions/1.8/` | now | L | same plan; needs flattening bridge |
+| LEGACY-V735 | #353 residue | `crates/versions/1.14/` | now | L | same plan |
 | MOBAI-1 | #226 hostile melee | `lodestone-entity/src/ai/` species goal files | now | M | perception spine landed (#441, `7630386`, `2a4da25`) |
 | MOBAI-2 | #228 passive herd | disjoint species files, same crate | soft (shared `GoalSelector`, read-only) | M | same spine |
 | PARTICLES | #178, #182 residue (2/8) | `lodestone-particle/`, `shell/src/particles.rs` | now | M (8–12 types/sitting) | transcription pattern from `09c9356` |
@@ -92,7 +92,7 @@ brokering; **blocked(X)** = do not dispatch until X.
 | WASM-PLUGIN | #172 #173 #175 #176 | new crates under `crates/plugins/` | now | L | greenfield; settle #173 ABI first |
 | PLUGIN-DESIGN | #101 #141 #156 #165 #166 #168 #169 #177 #181 | `docs/plans/`, `docs/plugin-api.md` | now | L (3–4 docs/sitting) | design questions, docs-only; Fable-grade |
 | PLUGIN-INTENTS | #422 | `crates/plugins/`, game intent types | now | S | `b435dea` PlaceIntent is the template |
-| CMDBLOCK | #442 | BE NBT decode (v770 client side) + interact trigger + `menu/command_block.rs` | soft | M | screen already exists; two wiring gaps named in the issue |
+| CMDBLOCK | #442 | BE NBT decode (v26-2 client side) + interact trigger + `menu/command_block.rs` | soft | M | screen already exists; two wiring gaps named in the issue |
 | SKINS-A | #62 own-skin half | auth fetch, entity texture override | now | M | other-players half is blocked(#438) |
 | WORLDGEN | #428 residue, #407, #404 residue | `lodestone-worldgen` per `worldgen-parity.md` | soft (savanna work in flight) | XL lane | plan has the unit split |
 
@@ -137,8 +137,8 @@ at a time, brokered by the orchestrator, with per-phase mapping from `server-ecs
 
 1. SWEEP (no files)
 2. BENCH (bench crates, xtask)
-3. PROTO-CLIENT (v770 client adapter)
-4. LEGACY-V340 (v340 crate)
+3. PROTO-CLIENT (v26-2 client adapter)
+4. LEGACY-V340 (v1-9 crate)
 5. MOBAI-1 (#226, entity AI hostile files)
 6. MOBAI-2 (#228, entity AI passive files)
 7. MENU-SCROLL (#445, menu/*)

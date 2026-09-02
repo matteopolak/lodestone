@@ -34,7 +34,7 @@ necessary but not sufficient for those types.
 
 Several registry types carry a real payload beyond position/velocity (a colour, a block state, a power
 scalar) via vanilla's `ParticleOptions` codecs. `decode_particle_options`
-(`crates/protocol/v770/src/adapter/chunk.rs`) is the shared decoder for these, matched on the
+(`crates/versions/26.2/src/adapter/chunk.rs`) is the shared decoder for these, matched on the
 **fully-namespaced** registry name (`"minecraft:dust"`, not `"dust"` — matching the stripped path
 silently decodes nothing). A type with no payload resolves to `ParticleOptions::None`, which is correct
 for the large majority of registry entries (a bare `SimpleParticleType`), not a placeholder.
@@ -117,7 +117,7 @@ palette (correct, since the demo palette has no colormaps or tinted blocks).
   particle atlas.
 * `lodestone-render` — `block_models.rs`'s per-state particle UV/tint tables, shared with the ordinary
   block mesher.
-* `crates/protocol/v770` — `decode_particle_options`, the `LEVEL_PARTICLES` and block-destroy (`2001`)
+* `crates/versions/26.2` — `decode_particle_options`, the `LEVEL_PARTICLES` and block-destroy (`2001`)
   decodes that feed both the generic dispatch and the break-particle path.
 * `lodestone-shell` — `particles.rs` (dispatch, tint join, GPU instances) and `interact.rs`/`sim.rs` (the
   break-particle emit sites, including local prediction for the player's own break).

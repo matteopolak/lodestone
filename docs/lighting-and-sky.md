@@ -321,7 +321,7 @@ frames instead of stalling one.
 - `lodestone_render::models`/`block_models` — the AO/smooth-light corner math and
   the per-state census accessors.
 - `lodestone_data::shade_brightness` — the jar-dumped AO occluder census.
-- `crates/protocol/v770` — `DayClock`, the `set_time`/registry decode that resolves
+- `crates/versions/26.2` — `DayClock`, the `set_time`/registry decode that resolves
   the day clock and dimension-type attributes.
 - `lodestone_world::relight`/`LightProperties` (injected — the engine holds no block
   registry itself) and `lodestone_data::light_props` for the live 26.2 census.

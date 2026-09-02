@@ -2,7 +2,7 @@
 //! handshake a `Directive::BeginEncryption` describes — before
 //! this crate's `driver.rs` grew a `BeginEncryption` arm, this directive fell
 //! into the "ignoring unknown directive variant" catch-all and the crypto
-//! never ran at all. `crates/protocol/v770/tests/join_flow.rs` already proved
+//! never ran at all. `crates/versions/26.2/tests/join_flow.rs` already proved
 //! the *adapter* side (`hello_begins_encryption_passing_through_the_request`,
 //! `build_encryption_response_frames_the_key_packet`); this proves the
 //! *driver* actually calls that adapter and does the RSA/AES work in between.
@@ -51,7 +51,7 @@ const POST_ENCRYPT_TRIGGER: i32 = 0x03;
 
 /// A minimal adapter that, on `TRIGGER`, hands back a `BeginEncryption`
 /// directive carrying a real (test-generated) RSA public key, and frames
-/// `build_encryption_response` the same way the real v770 adapter's test
+/// `build_encryption_response` the same way the real v26-2 adapter's test
 /// (`build_encryption_response_frames_the_key_packet`) pins: two
 /// length-prefixed byte arrays, secret then token.
 #[derive(Debug)]

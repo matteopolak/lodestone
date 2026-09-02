@@ -19,7 +19,7 @@
 //!    `bits_per_entry` in `{0 (single), 4, 5, 6, 7, 8, 15}` and
 //!    [`PaletteKind::biomes`] only `{0, 1, 2, 3, 6}` — every other class in the
 //!    generic table is dead code for both kinds actually used in this repo
-//!    (confirmed by `crates/protocol/v770/src/packets/chunk.rs`, which builds
+//!    (confirmed by `crates/versions/26.2/src/packets/chunk.rs`, which builds
 //!    both with their un-widened defaults).
 //! 2. **The palette-length distribution.** `Storage::Indirect`'s
 //!    `palette: Vec<u32>` is the allocation with *no* class and *no* length
@@ -321,7 +321,7 @@ fn measure_real_terrain_pool_footprint() {
     }
 
     // Structural finding, independent of any terrain sample: this codebase's
-    // two `PaletteKind`s (verified against `crates/protocol/v770/src/packets/
+    // two `PaletteKind`s (verified against `crates/versions/26.2/src/packets/
     // chunk.rs`, which builds both with their un-widened defaults) can only
     // ever *reach* a subset of bit widths. Block: indirect 4..=8, direct 15.
     // Biome: indirect 1..=3, direct 6. Compute which byte classes that

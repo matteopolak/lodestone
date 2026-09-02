@@ -49,7 +49,7 @@ components it already decodes.
 
 ### `lodestone-canonical`: the shared pre-Flattening bridge
 
-Every pre-1.13 protocol family (`v47`, `v340`, and any future one below protocol 404) maps
+Every pre-1.13 protocol family (`v1-8`, `v1-9`, and any future one below protocol 404) maps
 its own wire block representation through this one shared crate rather than each carrying a
 private copy of a large generated table. Two modules in series:
 
@@ -71,8 +71,8 @@ so it stays visible rather than silent. One table serves every pre-1.13 version 
 dumped table upgrades *1.12.2-space* ids and older versions' ids are a strict subset (ids
 were only ever added), so the per-version difference is only which slots are populated. This
 crate is shared game data, not a protocol family, and names none in
-`lodestone-registry` — see `docs/multi-protocol-seam.md` for how `v47`/`v340`/`v735` each use
-their own canonicalisation path (`v735` is post-Flattening and needs a different,
+`lodestone-registry` — see `docs/multi-protocol-seam.md` for how `v1-8`/`v1-9`/`v1-14` each use
+their own canonicalisation path (`v1-14` is post-Flattening and needs a different,
 per-family baked table instead, since 1.16.5 already speaks a flat state-id space).
 
 ### Registry types: generated enums instead of strings
@@ -111,7 +111,7 @@ Owns roughly twenty generated 26.2 game-data tables — block states, hardness, 
 shapes, block solidity, item prototypes, entity census/dimensions, tools, sound events,
 particle types, menus, data component types, and more — split from the protocol crate
 because they describe **the game**, not the wire format (`packet_ids` is the one table that
-stayed behind, in `v770`, for exactly that reason). Each table has three parts: a generated
+stayed behind, in `v26-2`, for exactly that reason). Each table has three parts: a generated
 `src/generated/*.rs` raw rodata file (never hand-edited), a hand-written `src/*.rs` lookup API
 returning `lodestone-model` types, and a dump program under `oracle-java/` that produces the
 data it is regenerated from. Two provenance shapes: **registry-report tables**
@@ -125,13 +125,13 @@ entity coverage, for instance, is recovered from vanilla's own per-type state-va
 rather than
 by constructing a live `BlockEntity`).
 
-`lodestone-v770`'s adapter delegates every data-shaped `VersionAdapter` trait method
+`lodestone-v26-2`'s adapter delegates every data-shaped `VersionAdapter` trait method
 (`block_hardness`, `block_collision`, `item_prototype`, `entity_dimensions`, and similar)
 straight into this crate, one line each — the seam `lodestone-shell`/`lodestone-physics`
-already used before the split and still use unchanged. A version crate other than `v770`
+already used before the split and still use unchanged. A version crate other than `v26-2`
 needing one of these tables is a different question from this crate becoming version-generic:
 per the canonical-internal-version design, 26.2 is the one canonical version and these are
-that version's data; `v47`/`v340`/`v735` keep their own *translation* tables for their own
+that version's data; `v1-8`/`v1-9`/`v1-14` keep their own *translation* tables for their own
 protocol, which is not a second copy of the canonical census.
 
 ## How to change it, and the gotchas
@@ -172,7 +172,7 @@ protocol, which is not a second copy of the canonical census.
 
 - `lodestone-model` for every public type these lookup APIs return (`BlockAabb`, `PathType`,
   `DimensionTypeInfo`, `Identifier`, and the rest); `lodestone-data` depends on nothing else.
-- `lodestone-canonical` depends only on `lodestone-data`, consumed by `v47`/`v340` today.
+- `lodestone-canonical` depends only on `lodestone-data`, consumed by `v1-8`/`v1-9` today.
 - `lodestone-ecs`/`lodestone-client`/`lodestone-shell` as the consumers of the typed
   `dimension_type`/`world_clock` registry data (chunk geometry, sky-light default, day clock).
 - `.cache/mc/26.2/{generated/reports,client-src}` and the 1.13.2 server jar (gitignored,

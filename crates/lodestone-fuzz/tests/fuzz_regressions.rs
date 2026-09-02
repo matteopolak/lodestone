@@ -26,15 +26,15 @@
 //! every assertion below is about *refusal*: an `AdapterError::Decode`, and
 //! **zero** writes reaching the world sink.
 
-// This file drives `lodestone_v340` directly, so it exists only in a build that
+// This file drives `lodestone_v1_9` directly, so it exists only in a build that
 // compiles that family in. On by default; see the crate manifest's `[features]`.
-#![cfg(feature = "v340")]
+#![cfg(feature = "v1-9")]
 
 use std::sync::{Arc, Mutex};
 
 use lodestone_core::Nbt;
 use lodestone_model::{AdapterError, ConnectionState, VersionAdapter};
-use lodestone_v340::packet_ids::play;
+use lodestone_v1_9::packet_ids::play;
 use lodestone_world::{
     BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, WorldSink,
 };
@@ -91,7 +91,7 @@ impl WorldSink for RecordingSink {
 /// The committed #450 payload, byte for byte.
 fn overflow_payload() -> Vec<u8> {
     let path =
-        lodestone_fuzz::regression_fixture_path("v340_multi_block_change_chunk_overflow.hex");
+        lodestone_fuzz::regression_fixture_path("v1_9_multi_block_change_chunk_overflow.hex");
     let bytes = lodestone_fuzz::read_hex_fixture(&path);
     assert_eq!(
         bytes,
@@ -119,7 +119,7 @@ fn decode_multi_block_change(payload: &[u8]) -> (Result<(), String>, Vec<(i32, i
     let outcome = {
         let mut sink = sink.clone();
         lodestone_fuzz::catch(move || {
-            let adapter = lodestone_v340::V340Adapter::default();
+            let adapter = lodestone_v1_9::V340Adapter::default();
             adapter
                 .handle_packet(
                     &mut sink,

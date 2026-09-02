@@ -3,13 +3,13 @@
 //! `live_click.rs`, `live_container.rs` and `live_reconcile.rs` all prove the
 //! click machine agrees with the server — but every one of them *hand-drives the
 //! wire* using `lodestone-core`/`lodestone-net` plus locally-declared packet-id
-//! constants, deliberately bypassing the v770 adapter and `ClientHandle`. That
+//! constants, deliberately bypassing the v26-2 adapter and `ClientHandle`. That
 //! is the §12.24 shape the brief names directly: a click machine proven against
 //! the server, but never through the *real client*. This test closes that gap
 //! for the **encodable** serverbound inventory actions.
 //!
 //! The whole path is exercised through the public client:
-//!   1. `ClientBuilder::connect()` — the real transport + v770 adapter (resolved
+//!   1. `ClientBuilder::connect()` — the real transport + v26-2 adapter (resolved
 //!      through the registry; `lodestone-game` still names no version crate).
 //!   2. **Clientbound half.** Seed a known held item over RCON, then read it back
 //!      by folding the real `ClientEvent::ContainerContent`/`ContainerSlot`
@@ -28,7 +28,7 @@
 //!   oracle for our *own* action — the server's own NBT, read over RCON, is the
 //!   authority. (This is exactly why the hand-rolled tests force a resync with a
 //!   stale-state_id `container_click`, which we cannot use here — `container_click`
-//!   is `Unsupported` in v770.)
+//!   is `Unsupported` in v26-2.)
 //! - **The load gate.** Player actions are dropped until `hasClientLoaded()`; the
 //!   real driver never sends `player_loaded` and no `ClientAction` triggers it, so
 //!   the server auto-loads us only after ~60 ticks (~3s). Every drop before that is
@@ -38,10 +38,10 @@
 //!
 //! 26.2's `container_click` encodes each slot as a `HashedStack` — a numeric
 //! item-registry id plus a CRC32 hash of the component patch — which the
-//! count-only canonical `ItemStack` cannot reproduce, so v770 returns
+//! count-only canonical `ItemStack` cannot reproduce, so v26-2 returns
 //! `Unsupported` for `ContainerClick` (and `SetCreativeModeSlot`). The 10
 //! container-click types therefore *cannot* be driven through the real client
-//! yet; that is a model+v770 blocker documented in the accompanying report. The
+//! yet; that is a model+v26-2 blocker documented in the accompanying report. The
 //! `player_action` drops carry **no item payload** (the server reads the held
 //! slot itself), so they *are* encodable and give a genuine
 //! predict→act→server-authority round trip through the real client today.
@@ -217,7 +217,7 @@ async fn inventory_mutation_round_trips_through_client() {
         uuid: Uuid::new_v4(),
     };
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via lodestone-client/live-v770");
+        .expect("v26-2 family compiled into the registry via lodestone-client/live-v26-2");
 
     let (mut handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()
@@ -499,8 +499,8 @@ async fn inventory_mutation_round_trips_through_client() {
 /// `ClientHandle`, and confirmed against the server's authoritative NBT.
 ///
 /// This is a strictly stronger gate than `DropSelectedItem` above: it exercises
-/// the `ContainerClick` encode path (the v770 `HashedStack` + `state_id` seam that
-/// was `Unsupported` until impl-v770 landed it), not just a player-action drop.
+/// the `ContainerClick` encode path (the v26-2 `HashedStack` + `state_id` seam that
+/// was `Unsupported` until impl-v26-2 landed it), not just a player-action drop.
 ///
 /// What it proves: a left-click Pickup on the seeded hotbar slot moves the whole
 /// stack into the cursor, so the server empties `Inventory[Slot:0]`, matching the
@@ -531,7 +531,7 @@ async fn container_click_pickup_round_trips_through_client() {
         uuid: Uuid::new_v4(),
     };
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via lodestone-client/live-v770");
+        .expect("v26-2 family compiled into the registry via lodestone-client/live-v26-2");
 
     let (mut handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()

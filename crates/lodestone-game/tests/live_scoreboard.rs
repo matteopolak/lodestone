@@ -5,8 +5,8 @@
 //! alone: it drives `/scoreboard`, `/team` and `/bossbar` over RCON against a
 //! live 26.2 server, then asserts the values are readable through the client's
 //! **public API** — [`ClientHandle::scoreboard()`] and
-//! [`ClientHandle::boss_bars()`] — not through the v770 decoder. The whole path
-//! is exercised: v770 decodes `set_objective`/`set_display_objective`/
+//! [`ClientHandle::boss_bars()`] — not through the v26-2 decoder. The whole path
+//! is exercised: v26-2 decodes `set_objective`/`set_display_objective`/
 //! `set_score`/`set_player_team`/`boss_event`, the adapter lifts each into a
 //! canonical `ClientEvent`, the client folds it into its read-model, and the
 //! public accessors return it. A misparse anywhere shows up as a missing or
@@ -87,7 +87,7 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
 
     // Version selection through the registry; `lodestone-game` names no version.
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via lodestone-client/live-v770");
+        .expect("v26-2 family compiled into the registry via lodestone-client/live-v26-2");
 
     let (mut handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()

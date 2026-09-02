@@ -32,7 +32,7 @@ window = ["dep:winit"]
 # no wire type: it connects, waits for chunks, and reads `Arc<ChunkSection>`
 # snapshots back through `ClientHandle::sections_at`. This proves the whole path
 # (live server -> client -> world -> mesher -> pixels) rather than a chunk the
-# test hand-decoded, and keeps v770 deletable via its folder plus the registry's
+# test hand-decoded, and keeps v26-2 deletable via its folder plus the registry's
 # one feature line.
 live-chunk-gate = ["dep:lodestone-client", "dep:lodestone-registry", "dep:tokio", "dep:uuid"]
 
@@ -72,7 +72,7 @@ winit = { workspace = true, optional = true }
 # the registry (the sanctioned version aggregator), so this crate names no
 # version crate directly and `check-isolation` stays clean.
 lodestone-client = { workspace = true, optional = true }
-lodestone-registry = { workspace = true, optional = true, features = ["v770"] }
+lodestone-registry = { workspace = true, optional = true, features = ["v26-2"] }
 tokio = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 

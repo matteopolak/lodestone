@@ -39,7 +39,7 @@
 //! # Datapack-retagged blocks
 //!
 //! Block tags are *synced* to the client (`update_tags`), decoded in
-//! `crates/protocol/v770/src/adapter.rs`'s own update-tags decode step for both the
+//! `crates/versions/26.2/src/adapter.rs`'s own update-tags decode step for both the
 //! Configuration and Play states — vanilla sends the same wire shape in
 //! either. The decoded `minecraft:block` registry's tag map is installed here
 //! with [`set_block_tag_overrides`] and consulted by [`block_tag_members`],
@@ -143,7 +143,7 @@ fn block_tag_overrides() -> &'static RwLock<Option<HashMap<String, Vec<u16>>>> {
 /// [`block_tag_members`]'s `minecraft:block` registry lookups, replacing
 /// whatever the previous `update_tags` — or nothing — had installed.
 ///
-/// Called from `crates/protocol/v770/src/adapter.rs`'s `decode_update_tags`
+/// Called from `crates/versions/26.2/src/adapter.rs`'s `decode_update_tags`
 /// once per decoded packet that names the `minecraft:block` registry; see the
 /// module docs for why the replacement is whole-table and process-wide.
 pub fn set_block_tag_overrides(tags: HashMap<String, Vec<u16>>) {

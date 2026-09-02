@@ -78,17 +78,17 @@ wasm-bindgen-futures = { workspace = true }
 
 [features]
 # Enables the high-level live-join test that joins a real vanilla server using the
-# v770 protocol adapter, resolved through the registry. Off by default so the
+# v26-2 protocol adapter, resolved through the registry. Off by default so the
 # default build stays version-free and hermetic.
-live-v770 = ["lodestone-registry/v770"]
+live-v26-2 = ["lodestone-registry/v26-2"]
 # Enables the high-level live-join test that joins a real 1.8.x server using the
-# v47 protocol adapter, resolved through the registry. Off by default for the
-# same reason as `live-v770`.
-live-v47 = ["lodestone-registry/v47"]
+# v1-8 protocol adapter, resolved through the registry. Off by default for the
+# same reason as `live-v26-2`.
+live-v1-8 = ["lodestone-registry/v1-8"]
 # Enables the high-level live-join test that joins a real 1.12.2 server using the
-# v340 protocol adapter, resolved through the registry. Off by default for the
-# same reason as `live-v770`.
-live-v340 = ["lodestone-registry/v340"]
+# v1-9 protocol adapter, resolved through the registry. Off by default for the
+# same reason as `live-v26-2`.
+live-v1-9 = ["lodestone-registry/v1-9"]
 # The white-box chunk/respawn decode tests moved into the version crate whose
 # concrete packet types they name (see that crate's `live-chunk` feature). This
 # client no longer references any protocol version except through the registry.
@@ -96,7 +96,7 @@ live-v340 = ["lodestone-registry/v340"]
 # chat components from both a 1.8 (JSON) and a modern (NBT) server, plus a live
 # join-message equivalence test. Both families are resolved through the registry,
 # so this feature names no concrete version crate.
-capture-text-oracle = ["lodestone-registry/v47", "lodestone-registry/v770"]
+capture-text-oracle = ["lodestone-registry/v1-8", "lodestone-registry/v26-2"]
 
 [dev-dependencies]
 tokio = { workspace = true }

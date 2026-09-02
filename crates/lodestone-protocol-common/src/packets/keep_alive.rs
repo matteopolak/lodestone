@@ -1,8 +1,8 @@
-//! The `keep_alive` challenge/response pair, shared between v340 and v735
+//! The `keep_alive` challenge/response pair, shared between v1-9 and v1-14
 //! (protocols 340 and 754) only.
 //!
-//! 1.8 (v47, protocol 47) sent the id as a **varint**; 1.9+ widened it to a
-//! fixed 64-bit integer, which is why this is not shared with v47. Declared
+//! 1.8 (v1-8, protocol 47) sent the id as a **varint**; 1.9+ widened it to a
+//! fixed 64-bit integer, which is why this is not shared with v1-8. Declared
 //! `#[mc(protocols = "340..=754")]`.
 
 use lodestone_macros::{Decode, Encode, Packet};

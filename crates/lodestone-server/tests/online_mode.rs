@@ -31,10 +31,10 @@ use lodestone_server::{
     ServeSummary, ServerError, TicketStoreHandle, access::AccessHandle,
     serve_connection_with_online_mode, world_state::WorldStateHandle,
 };
-use lodestone_v770::V770ServerProtocol;
-use lodestone_v770::packet_ids::{handshaking, login};
-use lodestone_v770::packets::handshake::Intention;
-use lodestone_v770::packets::login::{EncryptionRequest, EncryptionResponse, LoginFinished, LoginHello};
+use lodestone_v26_2::V770ServerProtocol;
+use lodestone_v26_2::packet_ids::{handshaking, login};
+use lodestone_v26_2::packets::handshake::Intention;
+use lodestone_v26_2::packets::login::{EncryptionRequest, EncryptionResponse, LoginFinished, LoginHello};
 use uuid::Uuid;
 
 const CTX: Ctx = Ctx { version: 776 };

@@ -470,7 +470,7 @@ pub fn sprinting_modifier_id() -> Identifier {
 
 /// Builds a foldable [`AttributeInstance`] from a wire-shaped
 /// [`EntityAttributeSnapshot`] — the shape vanilla's own attribute-update packet
-/// decodes to (see `lodestone_v770::packets::metadata::read_update_attributes`).
+/// decodes to (see `lodestone_v26_2::packets::metadata::read_update_attributes`).
 ///
 /// The wire snapshot carries only `base` and `modifiers`; it has no min/max
 /// range (vanilla never sends its own ranged-attribute bounds over the network —
@@ -483,7 +483,7 @@ pub fn sprinting_modifier_id() -> Identifier {
 /// A modifier whose wire `operation` byte is not `0`/`1`/`2` is dropped
 /// rather than rejecting the whole snapshot, matching the adapter's
 /// per-packet error tolerance one layer down
-/// (`v770::adapter::handle_update_attributes`'s own "swallow and skip" policy) —
+/// (`v26-2::adapter::handle_update_attributes`'s own "swallow and skip" policy) —
 /// there is no such id in a real 26.2 server, but a malformed one should not
 /// panic a client that already decoded the packet successfully.
 #[must_use]
