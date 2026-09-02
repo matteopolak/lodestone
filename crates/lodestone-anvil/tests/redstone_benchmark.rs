@@ -2,10 +2,10 @@
 //! contraption into the **real production tick loop**
 //! (`lodestone_server::IntegratedServer::open_in_memory_with_mobs`, the same
 //! constructor a live singleplayer world runs) and reports where its
-//! per-tick cost goes. Built for issue #548 (the incrementally-invalidated
-//! redstone dependency graph), which is gated on exactly this measurement —
-//! a previous agent correctly refused to rewrite the execution model without
-//! a number attributing cost to neighbour scanning.
+//! per-tick cost goes. Built to gate the incrementally-invalidated redstone
+//! dependency graph work on exactly this measurement — a previous agent
+//! correctly refused to rewrite the execution model without a number
+//! attributing cost to neighbour scanning.
 //!
 //! # What it measures, and what it does not
 //!
@@ -34,7 +34,8 @@
 //!   doc table — and it is a counter, so it means the same thing regardless
 //!   of how busy this machine is. Reported per elapsed tick (a rate, derived
 //!   from [`IntegratedServer::server_tick_count`]'s own before/after delta,
-//!   not from wall-clock time), which is the number #548 actually needs.
+//!   not from wall-clock time), which is the number the dependency-graph
+//!   work actually needs.
 //!
 //! # Loading, and what it does *not* reproduce
 //!
@@ -83,7 +84,8 @@
 //! every entry naming a block this crate schedules a recheck for (repeater,
 //! comparator, torch, observer) as a **second measurement phase**, after the
 //! steady-state one — see "Findings" in `docs/redstone-benchmark-harness.md`
-//! for the real numbers this produced and what they settle for issue #548.
+//! for the real numbers this produced and what they settle for the
+//! dependency-graph work.
 //!
 //! `TickPhase`/`PhaseStats`/`WorstPhaseWindow`/`TICK_PHASE_NAMES` remain
 //! unexported: `redstone_counters` already isolates the redstone-specific
@@ -388,7 +390,8 @@ fn pending_ticks_for_reinjection(
 /// tick loop for [`TICK_WINDOW`], and prints a report line. Returns nothing
 /// — this is a benchmark harness, not an assertion; see this module's own
 /// doc for why (there is no outside expectation to assert redstone-cascade
-/// counts against yet, which is exactly the gap issue #548 is open on).
+/// counts against yet, which is exactly the gap the dependency-graph work
+/// is open on).
 async fn run_one(fixture: &LoadedFixture) {
     let LoadedFixture { name, schematic } = fixture;
     let Some((min_x, max_x, min_y, max_y, min_z, max_z)) = bounds(&schematic.blocks) else {
@@ -508,9 +511,9 @@ async fn run_one(fixture: &LoadedFixture) {
     // ticks against the now-settled world, and measure again — see this
     // module's own doc, "Brokered hunks" (now landed in `lodestone-server`),
     // and `docs/redstone-benchmark-harness.md`'s findings for why the
-    // steady-state numbers above are a genuine floor, not the number issue
-    // #548 needs: an inert contraption cannot exercise the neighbour-scan
-    // cost a dependency graph would actually replace.
+    // steady-state numbers above are a genuine floor, not the number the
+    // dependency-graph work needs: an inert contraption cannot exercise the
+    // neighbour-scan cost a dependency graph would actually replace.
     let reinject = pending_ticks_for_reinjection(&schematic.pending_block_ticks, origin_x, origin_z, floor_top_y, min_y);
     let skipped = schematic.pending_block_ticks.len() - reinject.len();
     println!(
