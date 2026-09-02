@@ -1,5 +1,5 @@
-//! A humanoid skull's second skin layer — `SkullModel.createHumanoidHeadLayer`'s
-//! `"hat"` overlay.
+//! A humanoid skull's second skin layer — the model's `"hat"` overlay child
+//! part, built alongside the base head.
 //!
 //! # Scope
 //!
@@ -122,12 +122,12 @@ fn the_hat_is_inflated_a_quarter_texel_clear_of_the_head() {
 
 /// The hat is a child *of* the head, not a sibling.
 ///
-/// `createHumanoidHeadLayer` calls `root.getChild("head").addOrReplaceChild`,
-/// so the overlay inherits the head's pose. `SkullModel.setupAnim` rotates
-/// `head` by the block's yaw and pitch; a sibling hat would keep its own
-/// orientation and slide off a rotated skull. Nothing about the rest pose
-/// distinguishes the two — both are `PartPose.ZERO` — so this is only
-/// observable in the parent link.
+/// The model builds the hat as a child added onto the head part, so the
+/// overlay inherits the head's pose: the pose function rotates `head` by the
+/// block's yaw and pitch, and a sibling hat would keep its own orientation and
+/// slide off a rotated skull. Nothing about the rest pose distinguishes the
+/// two — both start at the identity pose — so this is only observable in the
+/// parent link.
 #[test]
 fn the_hat_is_parented_to_the_head() {
     let mesh = mesh_for(SKULL_HUMANOID);

@@ -9,9 +9,10 @@
 //!    corpus; a stale alias in `entity::canonical_model_name` routed the type
 //!    path `drowned` to the zombie entry, so the wrong geometry *and* the wrong
 //!    texture reached the GPU.
-//! 2. A **zombie's arms hung at its sides**. Vanilla's
-//!    `AnimationUtils.animateZombieArms` holds them out in front
-//!    unconditionally; the port had only `HumanoidModel.setupAnim`.
+//! 2. A **zombie's arms hung at its sides**. Vanilla holds a zombie's arms out
+//!    in front unconditionally, as an override on top of the ordinary humanoid
+//!    pose function; the port had only the base humanoid pose and never
+//!    applied the zombie-specific override.
 //!
 //! Both are silent under every mesh and matrix test that existed, because both
 //! produce a perfectly well-formed mob — just the wrong one. Only pixels
