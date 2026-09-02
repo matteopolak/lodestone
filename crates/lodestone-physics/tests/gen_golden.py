@@ -24,7 +24,7 @@ def f32(x):
     return struct.unpack("f", struct.pack("f", float(x)))[0]
 
 
-# ---- Mth sine LUT (same construction as vanilla Mth.SIN) --------------------
+# ---- Sine lookup table (same construction as vanilla's sine LUT) ----------
 SIN_SCALE = 10430.378350470453
 _SIN = [f32(math.sin(i / SIN_SCALE)) for i in range(65536)]
 
@@ -45,12 +45,12 @@ def mth_ceil(v):
     return math.ceil(v)
 
 
-# `Direction.Plane.HORIZONTAL` order: NORTH(-Z), EAST(+X), SOUTH(+Z), WEST(-X).
+# Horizontal direction order: NORTH(-Z), EAST(+X), SOUTH(+Z), WEST(-X).
 HORIZONTAL = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 
 
 def vec_normalize(v):
-    # Vec3.normalize(): compare length against the float literal 1.0E-5F widened.
+    # Vector normalize: compare length against the float literal 1.0E-5F widened.
     d = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
     if d < float(f32(1.0e-5)):
         return [0.0, 0.0, 0.0]
@@ -58,12 +58,12 @@ def vec_normalize(v):
 
 
 def own_height(amount):
-    # FlowingFluid.getOwnHeight() = amount / 9.0F (float).
+    # A fluid cell's own height: amount / 9.0F (float).
     return f32(f32(amount) / f32(9.0))
 
 
 def affects_flow(cell, kind):
-    # FlowingFluid.affectsFlow(): empty neighbour or same fluid type.
+    # Whether a neighbour cell affects flow: empty neighbour or same fluid type.
     return cell is None or cell[0] == kind
 
 
@@ -74,7 +74,7 @@ def neighbour_own_height(cell, kind):
 
 
 def get_flow(world, x, y, z, cell):
-    # FlowingFluid.getFlow(level, pos, fluidState). See Rust `fluid::get_flow`.
+    # Computing a fluid cell's flow vector. See Rust `fluid::get_flow`.
     kind = cell[0]
     this_height = own_height(cell[1])
     flow_x = 0.0
@@ -110,7 +110,8 @@ def get_flow(world, x, y, z, cell):
 
 
 def apply_fluid_push(world, s, kind, scale):
-    # Entity.updateFluidInteraction -> EntityFluidInteraction.update/applyCurrentTo.
+    # The fluid current push: scans the entity's box for matching fluid cells,
+    # averages their flow, and applies it as an impulse.
     bb = bounding_box(s)
     d = 0.001
     box_min_x, box_min_y, box_min_z = bb[0] + d, bb[1] + d, bb[2] + d
@@ -179,9 +180,9 @@ class Profile:
     air_drag_modifier = f32(1.0)
     friction_modifier = f32(1.0)
     ground_accel = f32(0.21600002)
-    # `Player.getFlyingSpeed()`'s non-flying arms (`Player.java:1974-1980`).
-    # `flying_speed` is the NOT-sprinting one; the sprinting one is a separate
-    # literal and is emphatically not 0.026.
+    # The two non-flying "flying speed" arms. `flying_speed` is the
+    # NOT-sprinting one; the sprinting one is a separate literal and is
+    # emphatically not 0.026.
     flying_speed = f32(0.02)
     airborne_sprint_speed = f32(0.025999999)
     jump_power = f32(0.42)
@@ -210,19 +211,18 @@ class World:
         self.jumpf = {}      # (x,y,z) -> jump factor (honey 0.5)
         self.speedf = {}     # (x,y,z) -> speed factor (soul sand / honey 0.4)
         self.fluids = {}     # (x,y,z) -> ("water"|"lava", amount 1..8, falling)
-        self.bubble = {}     # (x,y,z) -> drag_down bool (BubbleColumnBlock DRAG_DOWN)
+        self.bubble = {}     # (x,y,z) -> drag_down bool (the column's drag-down flag)
 
     def add_bubble_column(self, x, y, z, drag_down):
-        # BubbleColumnBlock. `drag_down=True` is the magma-block drain, `False` the
+        # A bubble column cell. `drag_down=True` is the magma-block drain, `False` the
         # soul-sand lift; the two states are 15294/15295 in the 26.2 palette.
         #
-        # Registers the cell as WATER as well, and that is not a convenience: the
-        # block's own getFluidState returns `Fluids.WATER.getSource(false)`
-        # (BubbleColumnBlock.java:73-75), so a bubble column IS a full water source
-        # cell in vanilla -- it is what makes you swim in one, and what makes the
-        # cell above a column read as "not open air" so the inside branch is taken.
-        # Coupling them here means no scenario can build a dry bubble column, which
-        # vanilla cannot represent.
+        # Registers the cell as WATER as well, and that is not a convenience: a
+        # bubble column block's own fluid state is a full water source, so a bubble
+        # column IS a full water source cell in vanilla -- it is what makes you swim
+        # in one, and what makes the cell above a column read as "not open air" so
+        # the inside branch is taken. Coupling them here means no scenario can build
+        # a dry bubble column, which vanilla cannot represent.
         self.bubble[(x, y, z)] = bool(drag_down)
         self.water.add((x, y, z))
         return self
@@ -235,7 +235,7 @@ class World:
         return self
 
     def bounce_restitution(self, x, y, z):
-        # Slime = 1.0F; player (LivingEntity) does not get the non-living *0.8.
+        # Slime = 1.0F; a player does not get the non-living entity's *0.8.
         return f32(1.0) if (x, y, z) in self.slime else f32(0.0)
 
     def set_jump_factor(self, x, y, z, v):
@@ -487,42 +487,42 @@ class State:
         self.slow_falling = False
         self.dolphins_grace = False
         self.jump_boost = None   # None or amplifier (0-based)
-        # Entity.fallDistance (a double since 26.2). Read only by the airborne
-        # branch of Player.isAboveGround. This oracle maintains it the same way the
-        # Rust port does: checkFallDamage's accumulation + grounded reset, the
-        # water reset, the lava halving, the climbable reset, the Slow
-        # Falling/Levitation reset and the elytra checkFallDistanceAccumulation
-        # clamp -- see accumulate_fall_distance() and
-        # check_fall_distance_accumulation() below. NOT modelled (matching the
-        # Rust port, which has no equivalent state): creative flight (no flying
-        # here), riding/vehicles (no riding here), the
-        # movementLength>=1.0 clip-through reset (needs a world raycast this
-        # oracle's World has no equivalent of), and teleport resets (this oracle
-        # has no teleport primitive; scenarios that want one must zero this field
-        # by hand at the seam, exactly like the Rust port's `reset_fall_distance`).
-        # The stuck-in-block reset (makeStuckInBlock) is additionally unmodelled
-        # HERE ONLY: this oracle's do_move has no stuck-speed-multiplier concept
-        # at all (no scenario needs one), unlike the Rust port, which already
-        # tracks it for `tests/stuck_movement.rs` and rides the reset along.
+        # The entity's fall distance (a double since 26.2). Read only by the
+        # airborne branch of the above-ground check. This oracle maintains it the
+        # same way the Rust port does: the fall-damage accumulation + grounded
+        # reset, the water reset, the lava halving, the climbable reset, the Slow
+        # Falling/Levitation reset and the elytra fall-distance-accumulation clamp
+        # -- see accumulate_fall_distance() and check_fall_distance_accumulation()
+        # below. NOT modelled (matching the Rust port, which has no equivalent
+        # state): creative flight (no flying here), riding/vehicles (no riding
+        # here), the movement-length >= 1.0 clip-through reset (needs a world
+        # raycast this oracle's World has no equivalent of), and teleport resets
+        # (this oracle has no teleport primitive; scenarios that want one must
+        # zero this field by hand at the seam, exactly like the Rust port's
+        # `reset_fall_distance`). The stuck-in-block reset is additionally
+        # unmodelled HERE ONLY: this oracle's do_move has no stuck-speed-multiplier
+        # concept at all (no scenario needs one), unlike the Rust port, which
+        # already tracks it for `tests/stuck_movement.rs` and rides the reset
+        # along.
         self.fall_distance = 0.0
-        # Entity.getPose(). Decided at the END of Player.tick by
+        # The entity's pose. Decided at the END of the tick by
         # update_player_pose(); the box this tick's movement collides with is
         # therefore last tick's pose. Scenarios may seed it.
         self.pose = "standing"
-        # Entity.isSwimming() -- Entity.updateSwimming's sprint-swim flag, which
-        # getDesiredPose reads. NOT "in water".
+        # Whether the entity is swimming -- the swimming update's sprint-swim
+        # flag, which desired_pose reads. NOT "in water".
         self.swimming = False
 
 
-# ---- Poses (Avatar.POSES, Avatar.java:24-37) --------------------------------
+# ---- Poses (the ordered pose table) --------------------------------
 # name -> (width, height, eyeHeight), all `float` literals in vanilla, so all
 # widened through f32 here. Only 1.5F is exactly representable: (double)0.6F is
 # 0.6000000238418579 and (double)1.8F is 1.7999999523162842, which is why the
 # box is built from these entries and never from a decimal.
 #
-# Step height is deliberately absent: it is the STEP_HEIGHT attribute
-# (Entity.maxUpStep), not part of the EntityDimensions record, so a crouching
-# player still steps 0.6.
+# Step height is deliberately absent: it is a separate per-entity attribute,
+# not part of the pose's dimension record, so a crouching player still steps
+# 0.6.
 POSES = {
     "standing": (f32(0.6), f32(1.8), f32(1.62)),
     "crouching": (f32(0.6), f32(1.5), f32(1.27)),
@@ -532,8 +532,8 @@ POSES = {
 
 
 def bounding_box(s, pose=None):
-    # EntityDimensions.makeBoundingBox: minY is the FEET, so a pose change only
-    # moves the top face -- it never displaces the player.
+    # Building the bounding box from a pose's dimensions: minY is the FEET, so
+    # a pose change only moves the top face -- it never displaces the player.
     width, height, _ = POSES[pose if pose is not None else s.pose]
     half = width / 2.0
     return (s.pos[0] - half, s.pos[1], s.pos[2] - half,
@@ -545,12 +545,12 @@ def eye_height(s):
 
 
 def player_speed(s):
-    # `LivingEntity.getSpeed()` -- Rust's `effective_speed`. An injected
-    # `movement_speed` (the entity layer's folded MOVEMENT_SPEED attribute,
-    # issue #193) wins verbatim, `(float)`-cast, exactly like the `Some(v)`
-    # arm of Rust `effective_speed`; only with no override does this fall
-    # back to the standalone base+sprint arithmetic `Player.createAttributes`
-    # would otherwise need a real AttributeMap for.
+    # The player's effective movement speed -- Rust's `effective_speed`. An
+    # injected `movement_speed` (the entity layer's folded MOVEMENT_SPEED
+    # attribute, issue #193) wins verbatim, `(float)`-cast, exactly like the
+    # `Some(v)` arm of Rust `effective_speed`; only with no override does this
+    # fall back to the standalone base+sprint arithmetic that would otherwise
+    # need a real attribute map for.
     if s.movement_speed is not None:
         return f32(s.movement_speed)
     base = float(P.base_movement_speed)
@@ -635,9 +635,9 @@ def restitute(world, s, delta, resolved, xcol, zcol, vcol, vbelow, suppress_boun
 
 
 def no_collision(world, box):
-    """CollisionGetter.noBlockCollision — the block half of noCollision(entity, box).
+    """The block half of a combined entity/block collision check.
 
-    Strict min<max overlap, matching Shapes.joinIsNotEmpty(.., AND) for box shapes,
+    Strict min<max overlap, matching the box-shape intersection test used for collision,
     so a flush contact is not a collision. Entity and world-border collisions are
     out of scope for both ports.
     """
@@ -650,7 +650,7 @@ def no_collision(world, box):
 
 
 def can_fall_at_least(bb, delta_x, delta_z, min_height, world):
-    """Player.canFallAtLeast (Player.java:935-950).
+    """Whether the player can fall at least N blocks below the given position.
 
     X/Z are inset by 1e-7; the bottom is pushed 1e-7 *down* and the top sits
     exactly at the feet plane. Association is left-to-right as in the source.
@@ -667,7 +667,7 @@ def can_fall_at_least(bb, delta_x, delta_z, min_height, world):
 
 
 def is_above_ground(bb, on_ground, fall_distance, max_down_step, world):
-    """Player.isAboveGround (Player.java:931-933)."""
+    """Whether the player counts as above ground for the edge-back-off check."""
     return on_ground or (
         fall_distance < max_down_step
         and not can_fall_at_least(bb, 0.0, 0.0, max_down_step - fall_distance, world)
@@ -682,11 +682,11 @@ def java_signum(v):
 
 
 def maybe_back_off_from_edge(world, s, delta, staying_on_ground_surface):
-    """Player.maybeBackOffFromEdge (Player.java:880-927).
+    """The sneak edge back-off: keeps a sneaking player from walking off a ledge.
 
-    maxDownStep is maxUpStep() -- the resolved STEP_HEIGHT attribute (default
-    0.6), not a literal. The `!abilities.flying` and mover-type conjuncts hold by
-    construction: this oracle has no creative flight and no piston mover.
+    maxDownStep is the resolved step-height attribute (default 0.6), not a
+    literal. The "not flying" and mover-type conjuncts hold by construction:
+    this oracle has no creative flight and no piston mover.
     """
     bb = bounding_box(s)
     max_down_step = float(P.step_height)
@@ -731,14 +731,13 @@ def maybe_back_off_from_edge(world, s, delta, staying_on_ground_surface):
 
 def do_move(world, s, delta, suppress_bounce=False, staying_on_ground_surface=False):
     bb = bounding_box(s)
-    # Entity.java:743 -- inside move(), after the stuck multiplier and before
-    # collide(). It rewrites the *local* candidate delta only: vanilla never calls
-    # setDeltaMovement here, so the deltaMovement field keeps its un-backed-off
-    # value. restituteMovementAfterCollisions reads that field
-    # (Entity.java:808-810), and when restitution does not run the field is simply
-    # left alone -- so `pre` below, not `delta`, is the velocity that survives.
-    # The collision flags and the position-commit guard DO use the backed-off delta
-    # (Entity.java:766-767, :746).
+    # Inside the move step, after the stuck multiplier and before collision
+    # resolution. It rewrites the *local* candidate delta only: vanilla never
+    # updates the velocity field here, so the velocity keeps its un-backed-off
+    # value. The post-collision restitution step reads that field, and when
+    # restitution does not run the field is simply left alone -- so `pre` below,
+    # not `delta`, is the velocity that survives. The collision flags and the
+    # position-commit guard DO use the backed-off delta.
     pre = list(delta)
     delta = maybe_back_off_from_edge(world, s, list(delta), staying_on_ground_surface)
     resolved = collide(world, tuple(delta), bb, s.on_ground, float(P.step_height))
@@ -762,7 +761,7 @@ def do_move(world, s, delta, suppress_bounce=False, staying_on_ground_surface=Fa
     else:
         s.vel = [pre[0], pre[1], pre[2]]
     # block speed factor (soul sand / honey), applied last as in move().
-    # blockPosition() (floor of feet) first; fall to the block below only if 1.0.
+    # The floor of the feet position first; fall to the block below only if 1.0.
     bx, by, bz = mth_floor(s.pos[0]), mth_floor(s.pos[1]), mth_floor(s.pos[2])
     sf = float(world.speed_factor(bx, by, bz))
     if sf == 1.0:
@@ -774,19 +773,18 @@ def do_move(world, s, delta, suppress_bounce=False, staying_on_ground_surface=Fa
 
 
 def clamp_f64(value, lo, hi):
-    # Mth.clamp(double, double, double): value < min ? min : Math.min(value, max)
+    # A three-argument clamp: below min gives min, otherwise the lesser of value and max.
     if value < lo:
         return lo
     return min(value, hi)
 
 
 def accumulate_fall_distance(s, ya, in_water):
-    # Entity.checkFallDamage(ya, onGround, ...), restricted to the accumulation
-    # and grounded reset (Entity.java:1564-1582). `ya` is the actual Y position
-    # delta the move achieved this tick (`movement.y`), not the pre-move
-    # velocity. Note the `(float)` truncation of the `double` ya *before* the
-    # subtraction into the `double` field -- this is vanilla's, not an
-    # approximation.
+    # The fall-damage accumulation step, restricted to the accumulation and
+    # grounded reset. `ya` is the actual Y position delta the move achieved
+    # this tick (the resolved vertical movement), not the pre-move velocity.
+    # Note the `(float)` truncation of the `double` ya *before* the subtraction
+    # into the `double` field -- this is vanilla's, not an approximation.
     if not in_water and ya < 0.0:
         s.fall_distance -= float(f32(ya))
     if s.on_ground:
@@ -794,9 +792,9 @@ def accumulate_fall_distance(s, ya, in_water):
 
 
 def check_fall_distance_accumulation(s):
-    # Entity.checkFallDistanceAccumulation() (Entity.java:2904-2908), called only
-    # from LivingEntity.updateFallFlying, itself only reached if isFallFlying(),
-    # ahead of the Slow Falling/Levitation reset and travel() -- so this reads
+    # The fall-distance accumulation clamp, called only from the elytra
+    # fall-flying update, itself only reached while fall-flying, ahead of the
+    # Slow Falling/Levitation reset and the travel dispatch -- so this reads
     # s.vel as it stood at the END of the PREVIOUS tick.
     if s.vel[1] > -0.5 and s.fall_distance > 1.0:
         s.fall_distance = 1.0
@@ -870,15 +868,15 @@ def tick_air(world, s, forward, strafe, jump, sneak, sprint):
         else:
             speed = player_speed(s)
     else:
-        # `getFrictionInfluencedSpeed`'s airborne branch returns
-        # `getFlyingSpeed()`, and `Player`'s override is **sprint-dependent**
-        # (`Player.java:1974-1980`). This oracle read a flat `P.flying_speed`
-        # here, matching the Rust's own defect exactly — two ports sharing an
-        # author agreeing with each other and both disagreeing with the jar,
+        # The friction-influenced speed's airborne branch returns the flying
+        # speed, and the player's flying-speed override is
+        # **sprint-dependent**. This oracle read a flat `P.flying_speed` here,
+        # matching the Rust's own defect exactly — two ports sharing an author
+        # agreeing with each other and both disagreeing with the real client,
         # which is why `sprint_jump`'s golden encoded the wrong airborne
-        # acceleration for as long as it existed. Creative flight is not modelled
-        # in this oracle; only the non-flying arms are, which is all any existing
-        # trace can reach.
+        # acceleration for as long as it existed. Creative flight is not
+        # modelled in this oracle; only the non-flying arms are, which is all
+        # any existing trace can reach.
         speed = P.airborne_sprint_speed if s.sprinting else P.flying_speed
     ax, ay, az = input_vector(xxa, zza, speed, s.yaw)
     s.vel[0] += ax
@@ -886,15 +884,15 @@ def tick_air(world, s, forward, strafe, jump, sneak, sprint):
     s.vel[2] += az
     climbing = world.is_climbable(math.floor(s.pos[0]), math.floor(s.pos[1]), math.floor(s.pos[2]))
     if climbing:
-        # LivingEntity.handleOnClimbable's resetFallDistance() (LivingEntity.java:
-        # 2693-2695), evaluated once pre-move and reused for the velocity clamp
-        # below, exactly as the Rust port does. Only travelInAir reaches
-        # handleOnClimbable, so this is tick_air-only.
+        # The climbable fall-distance reset, evaluated once pre-move and reused
+        # for the velocity clamp below, exactly as the Rust port does. Only the
+        # air-travel path reaches the climbable handling, so this is
+        # tick_air-only.
         s.fall_distance = 0.0
         s.vel = handle_on_climbable(s.vel, sneak)
     old_y = s.pos[1]
     do_move(world, s, s.vel, sneak, staying_on_ground_surface=sneak)
-    # Entity.move()'s checkFallDamage call (Entity.java:783-784). Not water on
+    # The move step's fall-damage accumulation call. Not water on
     # this path.
     accumulate_fall_distance(s, s.pos[1] - old_y, False)
     mvx, mvy, mvz = s.vel
@@ -946,10 +944,10 @@ def fluid_falling_adjusted_movement(base_gravity, is_falling, sprinting, mv):
 
 
 def tick_water(world, s, forward, strafe, jump, sneak, sprint):
-    # updateFluidInteraction's `if (inWater) resetFallDistance()` (Entity.java:
-    # 1658-1659). This function is only reached when the per-tick fluid summary
-    # already said in_water(), matching vanilla's predicate deciding both this
-    # reset and the travelInFluid dispatch.
+    # The fluid-interaction fall-distance reset: fired whenever in water. This
+    # function is only reached when the per-tick fluid summary already said
+    # in_water(), matching vanilla's predicate deciding both this reset and
+    # the in-fluid travel dispatch.
     s.fall_distance = 0.0
     apply_fluid_push(world, s, "water", 0.014)
     if s.no_jump_delay > 0:
@@ -967,16 +965,16 @@ def tick_water(world, s, forward, strafe, jump, sneak, sprint):
         s.vel[1] += float(f32(0.04))
     else:
         s.no_jump_delay = 0
-    # Player.travel (Player.java:1401-1415): while swimming, blend vertical
-    # velocity toward the look angle's Y component. This runs in Player.travel,
-    # which wraps LivingEntity.travel -> travelInFluid -> travelInWater (i.e.
-    # the rest of this function), so it lands here -- before travelInWater's own
-    # physics below ever reads deltaMovement.y -- not after.
+    # While swimming, blend vertical velocity toward the look angle's Y
+    # component. This runs as part of the player's travel dispatch, which
+    # wraps the general travel -> in-fluid travel -> in-water travel chain
+    # (i.e. the rest of this function), so it lands here -- before the
+    # in-water physics below ever reads the vertical velocity -- not after.
     #
     # multiplier is 0.085 when looking notably down (lookAngleY < -0.2), else
-    # 0.06; both read directly off Player.java:1408. The blend itself only
-    # applies when looking level-or-down, holding jump, or still submerged at
-    # roughly head height (BlockPos.containing(x, y + 1.0 - 0.1, z), any fluid).
+    # 0.06; both are vanilla's own literals. The blend itself only applies
+    # when looking level-or-down, holding jump, or still submerged at roughly
+    # head height (the floor of x, y + 1.0 - 0.1, z, any fluid).
     if s.swimming:
         look = calculate_view_vector(s.pitch, s.yaw)
         look_angle_y = look[1]
@@ -1005,7 +1003,7 @@ def tick_water(world, s, forward, strafe, jump, sneak, sprint):
     s.vel[2] += az
     old_y = s.pos[1]
     do_move(world, s, s.vel, sneak, staying_on_ground_surface=sneak)
-    # Entity.move()'s checkFallDamage call. in_water=True: the reset above already
+    # The move step's fall-damage accumulation call. in_water=True: the reset above already
     # zeroed fall_distance for this whole tick, so this is only reachable for its
     # grounded-reset half.
     accumulate_fall_distance(s, s.pos[1] - old_y, True)
@@ -1034,7 +1032,7 @@ def is_in_lava(world, s):
 
 
 def fluid_jump_threshold(eye_h):
-    # Entity.getFluidJumpThreshold(): getEyeHeight() < 0.4 ? 0.0 : 0.4.
+    # The fluid-jump threshold: 0.0 when eye height is below 0.4, else 0.4.
     return 0.0 if eye_h < 0.4 else 0.4
 
 
@@ -1052,7 +1050,7 @@ def fluid_kind_at(world, x, y, z):
 
 
 def fluid_cell_height(world, x, y, z, kind):
-    # FluidState.getHeight(): hasSameAbove ? 1.0F : own_height(amount/9.0F).
+    # A fluid cell's height: 1.0F when the same fluid is directly above, else own_height(amount/9.0F).
     # A coarse presence-only cell (no fine `fluid_at` entry) is treated as a
     # full cell, matching Rust `fluid_state::cell_height`'s `None => 1.0F`.
     cell = world.fluid_at(x, y, z)
@@ -1064,10 +1062,10 @@ def fluid_cell_height(world, x, y, z, kind):
 
 
 def fluid_reach_height(world, s, kind):
-    # Entity.getFluidHeight(tag): max(fluidTop - feetY) over the deflated
-    # box's cells holding `kind`. Mirrors Rust `fluid_state::compute_fluid_state`'s
-    # per-fluid reach (the eye-in-fluid half is unused by travelInLava, so it is
-    # not ported here).
+    # The reach height for a fluid kind: max(fluidTop - feetY) over the
+    # deflated box's cells holding `kind`. Mirrors Rust
+    # `fluid_state::compute_fluid_state`'s per-fluid reach (the eye-in-fluid
+    # half is unused by the in-lava travel path, so it is not ported here).
     bb = bounding_box(s)
     d = 0.001
     x0 = mth_floor(bb[0] + d)
@@ -1094,10 +1092,10 @@ def fluid_reach_height(world, s, kind):
 
 
 def tick_lava(world, s, forward, strafe, jump, sneak, sprint):
-    # baseTick's `if (isInLava()) fallDistance *= 0.5;` (Entity.java:555-557).
-    # This function is only reached when the per-tick fluid summary already said
-    # in_lava(), matching vanilla's predicate deciding both this halving and the
-    # travelInLava dispatch.
+    # The base tick's lava fall-distance halving: `if (in lava) fall_distance
+    # *= 0.5;`. This function is only reached when the per-tick fluid summary
+    # already said in_lava(), matching vanilla's predicate deciding both this
+    # halving and the in-lava travel dispatch.
     s.fall_distance *= 0.5
     apply_fluid_push(world, s, "lava", 0.0023333333333333335)
     if s.no_jump_delay > 0:
@@ -1115,11 +1113,11 @@ def tick_lava(world, s, forward, strafe, jump, sneak, sprint):
         s.vel[1] += float(f32(0.04))
     else:
         s.no_jump_delay = 0
-    # `isFalling`/`baseGravity` are read here, at the top of `travelInFluid`
-    # (LivingEntity.java:2495-2497) -- after the (simplified) jump block above
-    # has already altered velocity, before moveRelative adds this tick's input
-    # acceleration. `effective_gravity` folds in the Slow Falling clamp exactly
-    # as `tick_water` above computes it; lava shares the same `travelInFluid`
+    # `is_falling`/`base_gravity` are read here, at the top of the in-fluid
+    # travel step -- after the (simplified) jump block above has already
+    # altered velocity, before the input acceleration for this tick is added.
+    # `effective_gravity` folds in the Slow Falling clamp exactly as
+    # `tick_water` above computes it; lava shares the same in-fluid travel
     # call site, so it must apply the same clamp.
     is_falling = s.vel[1] <= 0.0
     base_gravity = effective_gravity(float(P.gravity), is_falling, s.slow_falling)
@@ -1129,12 +1127,11 @@ def tick_lava(world, s, forward, strafe, jump, sneak, sprint):
     s.vel[2] += az
     old_y = s.pos[1]
     do_move(world, s, s.vel, sneak, staying_on_ground_surface=sneak)
-    # Entity.move()'s checkFallDamage call. Not water on this path.
+    # The move step's fall-damage accumulation call. Not water on this path.
     accumulate_fall_distance(s, s.pos[1] - old_y, False)
-    # isInShallowFluid(LAVA) (LivingEntity.java:2542-2548): shallow gets the
-    # same buoyant falling-adjustment water always gets, on top of a
-    # Y-asymmetric multiply(0.5, 0.8, 0.5); deep gets a flat scale(0.5) with
-    # no adjustment at all.
+    # The shallow-lava check: shallow gets the same buoyant
+    # falling-adjustment water always gets, on top of a Y-asymmetric scale of
+    # (0.5, 0.8, 0.5); deep gets a flat scale of 0.5 with no adjustment at all.
     threshold = fluid_jump_threshold(eye_height(s))
     lava_height = fluid_reach_height(world, s, "lava")
     if lava_height <= threshold:
@@ -1147,8 +1144,8 @@ def tick_lava(world, s, forward, strafe, jump, sneak, sprint):
 
 
 def calculate_view_vector(pitch, yaw):
-    # Entity.calculateViewVector: LUT (float) trig, components rounded to float
-    # then widened to double by the Vec3 constructor.
+    # The look/view vector: LUT (float) trig, components rounded to float then
+    # widened to double by the vector constructor.
     real_x_rot = f32(f32(pitch) * f32(math.pi / 180.0))
     real_y_rot = f32(-f32(yaw) * f32(math.pi / 180.0))
     y_cos = mth_cos(real_y_rot)
@@ -1159,8 +1156,9 @@ def calculate_view_vector(pitch, yaw):
 
 
 def update_fall_flying_movement(s, mx, my, mz):
-    # LivingEntity.updateFallFlyingMovement. Note the two trig sources: the look
-    # vector uses Mth (LUT/float) while liftForce/lean use java.lang.Math (double).
+    # The elytra fall-flying movement update. Note the two trig sources: the
+    # look vector uses the LUT (float) sine table while liftForce/lean use
+    # java.lang.Math (double).
     look = calculate_view_vector(s.pitch, s.yaw)
     lean_angle = f32(f32(s.pitch) * f32(math.pi / 180.0))
     look_hor_len = math.sqrt(look[0] * look[0] + look[2] * look[2])
@@ -1186,8 +1184,8 @@ def update_fall_flying_movement(s, mx, my, mz):
 
 
 def tick_elytra(world, s, sneak=False):
-    # travelFallFlying client path: aiStep velocity collapse, elytra update,
-    # then move() with collision. WASD input is ignored during elytra flight.
+    # The fall-flying client path: velocity collapse, elytra update,
+    # then the move step with collision. WASD input is ignored during elytra flight.
     if s.no_jump_delay > 0:
         s.no_jump_delay -= 1
     dx, dy, dz = s.vel
@@ -1200,7 +1198,7 @@ def tick_elytra(world, s, sneak=False):
     old_y = s.pos[1]
     do_move(world, s, list(s.vel), suppress_bounce=False,
             staying_on_ground_surface=sneak)
-    # Entity.move()'s checkFallDamage call. Not water on this path.
+    # The move step's fall-damage accumulation call. Not water on this path.
     accumulate_fall_distance(s, s.pos[1] - old_y, False)
 
 
@@ -1209,10 +1207,11 @@ POSE_FIT_DEFLATION = 1.0e-7
 
 
 def water_top(world, x, y, z):
-    """fluidBottom + FluidState.getHeight, as EntityFluidInteraction.update reads it.
+    """The fluid cell's top surface: fluidBottom + fluid height, as the fluid
+    interaction update reads it.
 
-    FlowingFluid.getHeight returns 1.0F when the cell above holds the same fluid,
-    else getOwnHeight() = amount/9F. A presence-only `add_water` cell carries no
+    A fluid's height returns 1.0F when the cell above holds the same fluid,
+    else amount/9F. A presence-only `add_water` cell carries no
     level, so the whole cell counts as fluid -- the coarse stance both ports take.
     """
     cell = world.fluid_at(x, y, z)
@@ -1222,7 +1221,7 @@ def water_top(world, x, y, z):
 
 
 def is_eye_in_water(world, s):
-    """isEyeInFluid(WATER) -- EntityFluidInteraction.update's `eyesInside`.
+    """Whether the eye is in water -- the fluid interaction update's eye-inside check.
 
     The sweep is bounded by the entity's *box*, so this is exactly where a
     0.6-high box with a 1.62 eye would answer False while fully submerged: the
@@ -1250,13 +1249,14 @@ def is_eye_in_water(world, s):
 
 
 def update_swimming(world, s):
-    """Entity.updateSwimming (Entity.java:1644-1652).
+    """Whether the entity is swimming, updated once per tick.
 
-    isSprinting() is read from the flag the PREVIOUS tick's aiStep set, because
-    baseTick runs before aiStep -- so `s.sprinting`, never this tick's input.
-    Entering needs isUnderWater() (= wasEyeInWater && isInWater) AND water at the
-    feet block; staying only needs sprinting and isInWater, which is what lets you
-    keep swimming as you break the surface. No passenger state in this oracle.
+    Sprinting is read from the flag the PREVIOUS tick's per-tick update set,
+    because the base tick runs before that update -- so `s.sprinting`, never
+    this tick's input. Entering needs the eye having been underwater the
+    previous tick AND being in water now AND water at the feet block; staying
+    only needs sprinting and being in water, which is what lets you keep
+    swimming as you break the surface. No passenger state in this oracle.
     """
     if s.swimming:
         s.swimming = s.sprinting and is_in_water(world, s)
@@ -1267,12 +1267,12 @@ def update_swimming(world, s):
 
 
 def can_player_fit_when(world, s, pose):
-    """Player.canPlayerFitWithinBlocksAndEntitiesWhen (Player.java:373-375):
-    noCollision(this, dims(pose).makeBoundingBox(position).deflate(1.0E-7)).
+    """Whether the player fits within blocks and entities for a given pose:
+    no-collision against the pose's bounding box, deflated by 1.0E-7.
 
-    Block half only. getEntityCollisions filters on canBeCollidedWith, which no
-    player and no mob overrides, so for these fixtures the entity term is
-    vacuously true.
+    Block half only. The entity-collision filter excludes anything that
+    cannot be collided with, which no player and no mob overrides, so for
+    these fixtures the entity term is vacuously true.
     """
     b = bounding_box(s, pose)
     d = POSE_FIT_DEFLATION
@@ -1281,11 +1281,11 @@ def can_player_fit_when(world, s, pose):
 
 
 def desired_pose(s, sneak):
-    """Player.getDesiredPose (Player.java:359-371).
+    """The player's desired pose for this tick.
 
-    SLEEPING and SPIN_ATTACK have no state here. The crouch term is the raw shift
-    key (isShiftKeyDown), not isCrouching -- which is derived from the pose and
-    would be circular.
+    SLEEPING and SPIN_ATTACK have no state here. The crouch term is the raw
+    shift key, not a derived "is crouching" flag -- which is derived from the
+    pose and would be circular.
     """
     if s.swimming:
         return "swimming"
@@ -1297,14 +1297,14 @@ def desired_pose(s, sneak):
 
 
 def update_player_pose(world, s, sneak):
-    """Player.updatePlayerPose (Player.java:343-357), the LAST statement of
-    Player.tick.
+    """Updates the player's pose for this tick -- the LAST statement of the
+    per-tick update.
 
-    Note the outer guard: if not even the swimming box fits, setPose is never
-    called and the pose is left exactly as it was. And note that the desired pose
-    is VETOED rather than applied -- there is no recovery for a player whose box
-    grows into a ceiling, because refreshDimensions' fudgePositionAfterSizeChange
-    excludes both clients and Players (Entity.java:3403-3408).
+    Note the outer guard: if not even the swimming box fits, the pose is never
+    set and is left exactly as it was. And note that the desired pose is
+    VETOED rather than applied -- there is no recovery for a player whose box
+    grows into a ceiling, because the size-change recovery vanilla otherwise
+    performs explicitly excludes both clients and Players.
     """
     if not can_player_fit_when(world, s, "swimming"):
         return
@@ -1319,21 +1319,21 @@ def update_player_pose(world, s, sneak):
 
 
 def cell_is_open_air(world, x, y, z):
-    """BubbleColumnBlock.entityInside's `nothingAbove`
-    (BubbleColumnBlock.java:58): the state above has an empty collision shape AND
-    an empty fluid state. Only true for real air."""
+    """The bubble column block's "nothing above" check: the state above has
+    an empty collision shape AND an empty fluid state. Only true for real
+    air."""
     out = []
     world.collision_boxes(x, y, z, out)
     return (not out) and not world.is_water(x, y, z) and not world.is_lava(x, y, z)
 
 
 def apply_bubble_column(world, s):
-    """BubbleColumnBlock.entityInside -> Entity.onInsideBubbleColumn /
-    onAboveBubbleColumn (Entity.java:2851-2898).
+    """The bubble column's per-tick velocity impulse, for both the inside and
+    above-column cases.
 
-    Reached from applyEffectsFromBlocks, which LivingEntity.aiStep calls AFTER
-    travel() (LivingEntity.java:3130 then :3134) -- so the impulse this applies is
-    integrated on the NEXT tick, not this one.
+    Reached from the block-effects step, which the per-tick update calls AFTER
+    the travel dispatch -- so the impulse this applies is integrated on the
+    NEXT tick, not this one.
 
                     | drag=False (soul sand)  | drag=True (magma)
         inside      | min(0.7, vy + 0.06)     | max(-0.3, vy - 0.03)
@@ -1341,20 +1341,17 @@ def apply_bubble_column(world, s):
 
     All four are double arithmetic against double literals -- no f32 anywhere.
 
-    ONE IMPULSE PER CELL. checkInsideBlocks visits each intersected block position
-    once (deduped by position) and BubbleColumnBlock applies its impulse
-    immediately in the callback rather than deferring it to the
-    InsideBlockEffectApplier, so a 1.8-high standing player spans two cells and
-    takes two impulses per tick. The clamp is what makes that converge instead of
-    running away.
+    ONE IMPULSE PER CELL. The inside-blocks check visits each intersected
+    block position once (deduped by position) and the bubble column applies
+    its impulse immediately rather than deferring it, so a 1.8-high standing
+    player spans two cells and takes two impulses per tick. The clamp is what
+    makes that converge instead of running away.
 
-    resetFallDistance() rides along on the INSIDE branch only (Entity.java:2897);
-    the above branch sends particles instead and leaves fall distance alone
-    (:2865).
+    The fall-distance reset rides along on the INSIDE branch only; the above
+    branch sends particles instead and leaves fall distance alone.
 
-    Player.onInsideBubbleColumn/onAboveBubbleColumn additionally skip the whole
-    thing when abilities.flying (Player.java:310-321); vacuously true here, as
-    this oracle has no flight.
+    The bubble-column effect additionally skips the whole thing when flying;
+    vacuously true here, as this oracle has no flight.
     """
     bb = bounding_box(s)
     minx = mth_floor(bb[0] + 1.0e-5)
@@ -1384,20 +1381,21 @@ def apply_bubble_column(world, s):
 
 
 def travel_dispatch(world, s, forward, strafe, jump, sneak, sprint):
-    """Everything super.tick() does to the motion: baseTick's swim summary, then
-    LivingEntity.travel's fluid/elytra/air dispatch. Excludes the pose, which is
-    Player.tick's own last statement -- and therefore runs AFTER pushEntities."""
-    # Entity.baseTick -> updateSwimming, before travel reads isInWater.
+    """Everything the base per-tick update does to the motion: the base tick's
+    swim summary, then the fluid/elytra/air travel dispatch. Excludes the pose,
+    which is the player tick's own last statement -- and therefore runs AFTER
+    the entity-push step."""
+    # The base tick's swimming update, before travel reads whether in water.
     update_swimming(world, s)
-    # LivingEntity.aiStep: `if (isFallFlying()) updateFallFlying();`
-    # (LivingEntity.java:3117-3119), checkFallDistanceAccumulation's only call
-    # site for a player. Before the Slow Falling/Levitation check and travel(),
-    # on s.vel as it stood at the end of the PREVIOUS tick.
+    # `if fall_flying: update_fall_flying();` -- the fall-distance-accumulation
+    # clamp's only call site for a player. Before the Slow Falling/Levitation
+    # check and the travel dispatch, on s.vel as it stood at the end of the
+    # PREVIOUS tick.
     if s.fall_flying:
         check_fall_distance_accumulation(s)
-    # LivingEntity.aiStep: `if (hasEffect(SLOW_FALLING) || hasEffect(LEVITATION))
-    # resetFallDistance();` (LivingEntity.java:3123-3125), unconditionally before
-    # the travel() dispatch below, regardless of which path it picks.
+    # `if (has Slow Falling or Levitation) reset_fall_distance();`,
+    # unconditionally before the travel dispatch below, regardless of which
+    # path it picks.
     if s.slow_falling or s.levitation is not None:
         s.fall_distance = 0.0
     if is_in_water(world, s):
@@ -1408,11 +1406,10 @@ def travel_dispatch(world, s, forward, strafe, jump, sneak, sprint):
         tick_elytra(world, s, sneak)
     else:
         tick_air(world, s, forward, strafe, jump, sneak, sprint)
-    # LivingEntity.aiStep's applyEffectsFromBlocks() (LivingEntity.java:3134),
-    # right after the travel() dispatch above (:3130) and before pushEntities()
-    # (:3163). The Rust port calls update_stuck_multiplier here too; this oracle
-    # models no stuck-in-block (see State.fall_distance's note), so only the bubble
-    # column is here.
+    # The block-effects step, right after the travel dispatch above and before
+    # the entity-push step. The Rust port calls update_stuck_multiplier here
+    # too; this oracle models no stuck-in-block (see State.fall_distance's
+    # note), so only the bubble column is here.
     apply_bubble_column(world, s)
 
 
@@ -1426,12 +1423,12 @@ PUSH_SCALE = float(f32(0.05))       # `xa *= 0.05F`, widened: 0.0500000007450580
 
 
 class Neighbour:
-    """A nearby entity, as LivingEntity.pushEntities sees it.
+    """A nearby entity, as the entity-push step sees it.
 
-    Only the fields the push rule reads: position (Entity.getX/getZ), the bounding
-    box (the pair test), Entity.isPushable() and Entity.isVehicle(). Stationary --
-    this oracle does not simulate the neighbour's own motion, matching a NoAI lure
-    on a live server.
+    Only the fields the push rule reads: position, the bounding box (the pair
+    test), whether it is pushable and whether it is a vehicle. Stationary --
+    this oracle does not simulate the neighbour's own motion, matching a NoAI
+    lure on a live server.
     """
 
     def __init__(self, x, y, z, width=0.6, height=1.8, pushable=True, vehicle=False):
@@ -1443,10 +1440,10 @@ class Neighbour:
 
 
 def boxes_intersect(a, b):
-    """AABB.intersects (AABB.java:245-247): strict, so flush contact is not overlap.
+    """Box intersection: strict, so flush contact is not overlap.
 
-    Note there is NO epsilon inflation here. getEntityCollisions inflates its query
-    by 1e-7; Level.getEntities (which getPushableEntities uses) does not.
+    Note there is NO epsilon inflation here. The entity-collision query
+    inflates by 1e-7; the plain entity-lookup the push rule uses does not.
     """
     return (a[0] < b[3] and a[3] > b[0]
             and a[1] < b[4] and a[4] > b[1]
@@ -1454,18 +1451,20 @@ def boxes_intersect(a, b):
 
 
 def abs_max(a, b):
-    """Mth.absMax(double,double) = max(|a|, |b|) -- the larger COMPONENT, not the
-    length of the vector. Entity.push normalises by sqrt of this."""
+    """The larger-magnitude component: max(|a|, |b|) -- the larger COMPONENT,
+    not the length of the vector. The entity-push step normalises by sqrt of
+    this."""
     return max(abs(a), abs(b))
 
 
 def push_entities(s, neighbours, pushable_self=True, self_vehicle=False):
-    """LivingEntity.pushEntities (:3222) -> Entity.push(Entity) (Entity.java:1882).
+    """The entity-push step: nearby entities shove each other apart.
 
-    Runs at the END of aiStep, after travel, so it only affects the next tick.
-    Symmetric in vanilla; this oracle applies the receive half to the player, which
-    is the only half a client owns. No cap on the number of pushers: MAX_ENTITY_
-    CRAMMING deals damage on the server, it does not clamp movement.
+    Runs at the END of the per-tick update, after travel, so it only affects
+    the next tick. Symmetric in vanilla; this oracle applies the receive half
+    to the player, which is the only half a client owns. No cap on the number
+    of pushers: entity cramming deals damage on the server, it does not clamp
+    movement.
     """
     bb = bounding_box(s)
     for n in neighbours:
@@ -1495,9 +1494,10 @@ def push_entities(s, neighbours, pushable_self=True, self_vehicle=False):
 
 def tick_with_push(world, s, forward, strafe, jump, sneak, sprint, neighbours,
                    pushable_self=True):
-    # pushEntities is the tail of aiStep, INSIDE super.tick(), so it runs before
-    # updatePlayerPose -- and that order is observable, because the push's pair
-    # test reads getBoundingBox(), which the pose sizes.
+    # The entity-push step is the tail of the per-tick update, INSIDE the base
+    # tick, so it runs before the pose update -- and that order is observable,
+    # because the push's pair test reads the bounding box, which the pose
+    # sizes.
     travel_dispatch(world, s, forward, strafe, jump, sneak, sprint)
     push_entities(s, neighbours, pushable_self=pushable_self)
     update_player_pose(world, s, sneak)
@@ -1542,17 +1542,14 @@ def scenario_walk_speed_ii():
     # look-descent port (see this file's own history).
     #
     # The value is a Speed-II-shaped fold of the *player's own* MOVEMENT_SPEED
-    # base (`Player.createAttributes().add(MOVEMENT_SPEED, 0.1F)`,
-    # `Player.java:209` -- not the generic `RangedAttribute` default of 0.7,
-    # `Attributes.java`) with `MobEffects.SPEED`'s `ADD_MULTIPLIED_TOTAL`
-    # modifier (`+0.2F` per level, amplifier 1 = Speed II ->
-    # `0.2F * (1 + 1) = 0.4`, `LivingEntity.java:154-157` /
-    # `AttributeModifier.create`), folded through
-    # `AttributeInstance.calculateValue`'s multiplicative stage:
-    # `result = base * (1 + amount)`. Deliberately not sprinting, so this
-    # scenario isolates the attribute path from the separate sprint modifier
-    # `player_speed` still applies on top when no override is present --
-    # `tests/movement_speed.rs`'s pure control is what exercises both at once.
+    # base (0.1F -- not the generic ranged-attribute default of 0.7) with the
+    # Speed effect's multiplicative-total modifier (+0.2F per level, amplifier
+    # 1 = Speed II -> `0.2F * (1 + 1) = 0.4`), folded through the attribute
+    # system's multiplicative stage: `result = base * (1 + amount)`.
+    # Deliberately not sprinting, so this scenario isolates the attribute path
+    # from the separate sprint modifier `player_speed` still applies on top
+    # when no override is present -- `tests/movement_speed.rs`'s pure control
+    # is what exercises both at once.
     w = flat_floor()
     s = State(0.5, 1.0, 0.5, 0.0)
     s.on_ground = True
@@ -1624,9 +1621,10 @@ def scenario_slab_step():
 
 def scenario_water_sink():
     # A deep water column (x=0, z=0) with a solid floor far below. Player starts
-    # fully submerged and sinks with no input, exercising travelInWater and the
-    # -0.003 slow-sink clamp via getFluidFallingAdjustedMovement. Dispatched
-    # through `tick` so the in-water branch is selected each tick.
+    # fully submerged and sinks with no input, exercising the in-water travel
+    # path and the -0.003 slow-sink clamp via the fluid falling-adjusted
+    # movement. Dispatched through `tick` so the in-water branch is selected
+    # each tick.
     w = World()
     for y in range(80, 101):
         w.add_water(0, y, 0)
@@ -1719,9 +1717,10 @@ def scenario_blue_ice_slide():
 
 
 def scenario_lava_sink():
-    # Deep lava column, no input. Exercises travelInLava's deep branch:
-    # moveRelative(0.02) → move → scale(0.5) → -baseGravity/4. Different constants
-    # AND a different branch from water (no 0.8/0.9 slow-down, no -0.003 clamp).
+    # Deep lava column, no input. Exercises the in-lava travel path's deep
+    # branch: apply 0.02 input acceleration → move → scale(0.5) →
+    # -base_gravity/4. Different constants AND a different branch from water
+    # (no 0.8/0.9 slow-down, no -0.003 clamp).
     w = World()
     for y in range(80, 101):
         w.add_lava(0, y, 0)
@@ -1737,9 +1736,10 @@ def scenario_lava_sink():
 def scenario_lava_shallow():
     # Shallow lava puddle: fine-level cell (amount 3 -> own_height 3/9 = 0.333,
     # below the 0.4 jump threshold) resting on solid ground, one block deep only.
-    # Exercises travelInLava's SHALLOW branch: multiply(0.5, 0.8, 0.5) then
-    # getFluidFallingAdjustedMovement -- a Y-asymmetric scale plus the buoyant
-    # falling-adjustment that deep lava (scenario_lava_sink) never applies. The
+    # Exercises the in-lava travel path's SHALLOW branch: scale by
+    # (0.5, 0.8, 0.5) then apply the fluid falling-adjusted movement -- a
+    # Y-asymmetric scale plus the buoyant falling-adjustment that deep lava
+    # (scenario_lava_sink) never applies. The
     # player's box bottom sits exactly on the puddle's floor for the whole
     # trace, so lava_height stays 0.333 <= 0.4 on every tick -- this scenario
     # never crosses into the deep arm, the same way lava_sink's full column
@@ -1776,8 +1776,8 @@ def scenario_levitation():
 
 
 def scenario_slow_falling_water():
-    # THE satisfying test: Slow Falling reduces getEffectiveGravity() to 0.01
-    # while descending, so baseGravity/16 = 0.000625 != 0.005 and the otherwise
+    # THE satisfying test: Slow Falling reduces the effective gravity to 0.01
+    # while descending, so base_gravity/16 = 0.000625 != 0.005 and the otherwise
     # provably-dead -0.003 slow-sink clamp *fires*. Submerged, no input.
     w = World()
     for y in range(80, 101):
@@ -1793,9 +1793,10 @@ def scenario_slow_falling_water():
 
 
 def scenario_swim_sprint():
-    # Sprint-swimming with forward input: this is the swimming branch of
-    # travelInWater (slowDown = 0.9F because sprinting), which the vertical-only
-    # water_sink scenario never exercised. Confirms horizontal swim propulsion.
+    # Sprint-swimming with forward input: this is the swimming branch of the
+    # in-water travel path (slow_down = 0.9F because sprinting), which the
+    # vertical-only water_sink scenario never exercised. Confirms horizontal
+    # swim propulsion.
     w = World()
     for y in range(80, 101):
         for x in range(-2, 3):
@@ -1814,10 +1815,10 @@ def scenario_swim_look_down_dives():
     # steeply down: lookAngleY = -sin(60 deg) ~= -0.866, well past the -0.2
     # threshold, so the steeper 0.085 multiplier applies). Issue #59: looking
     # down while swimming did not make the player descend, because the
-    # look-descent term (Player.java:1401-1415) was never ported. Paired with
-    # scenario_swim_sprint (pitch 0) as the control -- both share sprint +
-    # forward input and the same deep pool, so any difference in the vertical
-    # trace is the look-angle term and nothing else.
+    # look-descent term was never ported. Paired with scenario_swim_sprint
+    # (pitch 0) as the control -- both share sprint + forward input and the
+    # same deep pool, so any difference in the vertical trace is the
+    # look-angle term and nothing else.
     w = World()
     for y in range(80, 101):
         for x in range(-2, 3):
@@ -1854,7 +1855,7 @@ def swim_surface_state(pitch_degrees):
     # reason: naturally *entering* swimming needs the eye submerged under the
     # STANDING 1.62 eye height, which this shallow pool cannot provide.
     #
-    # Crucially, BlockPos.containing(x, y + 1.0 - 0.1, z) = floor(89.5 + 0.9)
+    # Crucially, floor(x), floor(y + 1.0 - 0.1), floor(z) = floor(89.5 + 0.9)
     # = floor(90.4) = 90, and block (x, 90, z) is air -- so `head_submerged`
     # is False here, which is what lets the look-angle sign (not just its
     # magnitude) gate the descent term.
@@ -1862,8 +1863,9 @@ def swim_surface_state(pitch_degrees):
     s.pitch = f32(pitch_degrees)
     s.pose = "swimming"
     s.swimming = True
-    # `update_swimming` reads the PREVIOUS tick's `sprinting` (baseTick runs
-    # before aiStep), so this must be pre-seeded too, or dispatching through
+    # `update_swimming` reads the PREVIOUS tick's `sprinting` (the base tick
+    # runs before the per-tick update), so this must be pre-seeded too, or
+    # dispatching through
     # the full `tick()` on tick 1 would immediately read the fresh `State`'s
     # default `sprinting = False` and undo the seeded swim pose before either
     # scenario gets to exercise it.
@@ -1875,10 +1877,10 @@ def scenario_swim_surface_look_up_no_pulldown():
     # Looking up (pitch -60 => lookAngleY = -sin(-60 deg) ~= +0.866) at the
     # surface with the head clear of the water (head_submerged False, see
     # swim_surface_state) and not jumping: `lookAngleY <= 0.0 || jumping ||
-    # headSubmerged` is false on every term, so Player.travel's descent blend
-    # never fires. Whatever vertical motion happens is buoyancy alone
-    # (getFluidFallingAdjustedMovement) -- this is the gate itself, not just
-    # the multiplier, and it is what lets a swimmer stop descending by
+    # head_submerged` is false on every term, so the swim travel's descent
+    # blend never fires. Whatever vertical motion happens is buoyancy alone
+    # (the fluid falling-adjusted movement) -- this is the gate itself, not
+    # just the multiplier, and it is what lets a swimmer stop descending by
     # looking up instead of being dragged back down regardless of where they
     # are looking.
     w = swim_surface_world()
@@ -1908,10 +1910,11 @@ def scenario_swim_surface_look_down_control():
 
 def scenario_soul_sand_walk():
     # Synthetic soul-sand-like floor: a full collision cube carrying a block
-    # speed factor of 0.4. The player rests at y=1.0, so blockPosition() (0,1,0)
-    # is air (1.0) and getBlockSpeedFactor falls through to the block below
-    # (0,0,0)=0.4 -- exercising the here==1.0 fallback branch that no other
-    # scenario hits, plus the multiply(f,1,f) applied at the end of move().
+    # speed factor of 0.4. The player rests at y=1.0, so the feet block
+    # (0,1,0) is air (1.0) and the block-speed-factor lookup falls through to
+    # the block below (0,0,0)=0.4 -- exercising the here==1.0 fallback branch
+    # that no other scenario hits, plus the (f,1,f) scale applied at the end
+    # of the move step.
     w = flat_floor(r=8)
     for x in range(-8, 9):
         for z in range(-8, 9):
@@ -1926,8 +1929,8 @@ def scenario_soul_sand_walk():
 
 
 def scenario_jump_boost():
-    # Jump Boost II (amplifier 1): getJumpBoostPower() = 0.1F*(1+1) = 0.2F added
-    # to the jump velocity as a separate float term. Repeated auto-jumps.
+    # Jump Boost II (amplifier 1): the jump-boost power is 0.1F*(1+1) = 0.2F,
+    # added to the jump velocity as a separate float term. Repeated auto-jumps.
     w = flat_floor()
     s = State(0.5, 1.0, 0.5, 0.0)
     s.on_ground = True
@@ -1941,8 +1944,8 @@ def scenario_jump_boost():
 
 def scenario_honey_jump():
     # Synthetic honey-like floor: full collision cube with jump factor 0.5.
-    # getBlockJumpFactor() returns 0.5 (feet block is air=1.0 -> falls to the
-    # block below), scaling jump velocity to 0.42*0.5 = 0.21F.
+    # The block-jump-factor lookup returns 0.5 (feet block is air=1.0 -> falls
+    # to the block below), scaling jump velocity to 0.42*0.5 = 0.21F.
     w = flat_floor()
     for x in range(-4, 5):
         for z in range(-4, 5):
@@ -1958,7 +1961,7 @@ def scenario_honey_jump():
 
 def scenario_slime_bounce():
     # Slime floor (bounce_restitution 1.0). Player free-falls from y=6 onto it
-    # and bounces: restituteMovementAfterCollisions reverses vy through the
+    # and bounces: the post-collision restitution step reverses vy through the
     # block-bounciness branch. Long enough to see several decaying bounces.
     w = flat_floor()
     for x in range(-4, 5):
@@ -1973,7 +1976,7 @@ def scenario_slime_bounce():
 
 
 def scenario_slime_bounce_sneak():
-    # Same slime floor, but the player holds sneak on landing. isSuppressingBounce
+    # Same slime floor, but the player holds sneak on landing. Sneaking
     # both zeroes the base restitution and vetoes the block-bounce branch, so the
     # player lands and rests (vy -> 0) instead of bouncing.
     w = flat_floor()
@@ -2021,7 +2024,7 @@ def scenario_elytra_dive():
 
 def scenario_elytra_climb():
     # Elytra, pitch -23 deg (nose-up). Exercises the `leanAngle < 0` branch:
-    # -Mth.sin(leanAngle) > 0, adding convert*3.2 lift plus a backward
+    # -sin(leanAngle) > 0, adding convert*3.2 lift plus a backward
     # horizontal component. The pump-up-then-stall arc.
     w = World()
     s = State(0.5, 100.0, 0.5, 0.0)
@@ -2055,11 +2058,12 @@ def scenario_elytra_diagonal_yaw():
 def scenario_water_current_push():
     # Sustained fluid-current push. The player is submerged in a horizontal water
     # gradient: source columns (amount 8) at x<=0 and shallower flowing water
-    # (amount 5) at x>0 create a steady eastward current via FlowingFluid.getFlow.
-    # Exercises the full push path (box scan, neighbour heights, player 1/count
+    # (amount 5) at x>0 create a steady eastward current via the fluid flow
+    # calculation. Exercises the full push path (box scan, neighbour heights,
+    # player 1/count
     # averaging, the 0.014 scale, the 0.0045 minimum-impulse floor when at rest)
     # accumulating against water drag over 100 ticks. Dispatched through `tick`,
-    # so the in-water branch and the baseTick push run each tick. Sustained so a
+    # so the in-water branch and the base-tick push run each tick. Sustained so a
     # counter-style regression in the accumulation would diverge visibly.
     w = World()
     for x in range(-2, 12):
@@ -2147,7 +2151,7 @@ def scenario_entity_push_shove():
     # sqrt(absMax) rather than the vector length, a "normalise the separation"
     # reading of the source lands 6% off on both axes from tick 1.
     #
-    # The push runs at the END of the tick (aiStep :3163, after travel :3130), so
+    # The push runs at the END of the tick (after the travel dispatch), so
     # the impulse is integrated on the following tick. The player slides away, the
     # separation grows, and the push cuts out the moment the boxes stop strictly
     # overlapping -- so the trace contains the gate opening AND closing, plus the
@@ -2189,9 +2193,9 @@ def scenario_entity_push_wide_plateau():
 
 def scenario_entity_push_flush_control():
     # WORLD CONTROL for the two above. Same flat floor, same neighbour size, placed
-    # so its -X face lands *exactly* on the player's +X face. AABB.intersects is
-    # strict `min < max`, so a flush contact is not an overlap and
-    # getPushableEntities returns nothing -- the player must not move at all, on any
+    # so its -X face lands *exactly* on the player's +X face. Box intersection is
+    # strict `min < max`, so a flush contact is not an overlap and the
+    # pushable-entity lookup returns nothing -- the player must not move at all, on any
     # axis, for 120 ticks.
     #
     # The flush X is derived, not written down, and that is not fussiness: the
@@ -2200,7 +2204,7 @@ def scenario_entity_push_flush_control():
     # draft of this scenario did.
     #
     # If this trace shows motion, the pair test has acquired an epsilon it must not
-    # have: getEntityCollisions inflates its query by 1e-7, the push pair test does
+    # have: the entity-collision query inflates by 1e-7, the push pair test does
     # not, and mixing them up is the easy mistake here. If the two scenarios above
     # ALSO showed no motion, the fixture would be dead -- which is what makes this
     # a control rather than a duplicate.
@@ -2224,9 +2228,10 @@ def water_tunnel(x_end=30, r=2):
     is exactly one block: the 0.6-high swimming box clears it by 0.4 and the
     1.8-high standing box cannot enter at all. The pool is three blocks deep and
     open above, so a player at y = 1.0 there is submerged past the standing eye
-    (1.62) -- which is what updateSwimming needs to *enter* the swim pose. Once
-    entered it is sustained by sprinting + isInWater alone, which is what carries
-    it into the tunnel where the eye would otherwise be out of water.
+    (1.62) -- which is what the swimming update needs to *enter* the swim pose.
+    Once entered it is sustained by sprinting + being in water alone, which is
+    what carries it into the tunnel where the eye would otherwise be out of
+    water.
     """
     w = World()
     for x in range(-8, x_end + 1):
@@ -2245,7 +2250,7 @@ def low_corridor(x_end=40, r=2):
     """A corridor with 1.5 blocks of headroom: a TOP SLAB ceiling at y = 2, whose
     world box is 2.5..3.0, over a floor whose top face is y = 1.0.
 
-    1.5 is the crouch box's exact height (Avatar.CROUCH_BB_HEIGHT), and (double)1.5F
+    1.5 is the crouch box's exact height, and (double)1.5F
     is exact, so the crouch box's top lands *precisely* on the slab's underside.
     The strict `min < max` overlap test (and collide()'s 1e-7 epsilon) admit that
     flush contact; the 1.8-high standing box is refused. x <= 0 is open sky so a
@@ -2262,9 +2267,9 @@ def low_corridor(x_end=40, r=2):
 
 def scenario_swim_gap_tunnel():
     # THE defect this work exists for: sprint-swim out of an open pool into a
-    # one-block gap. Ticks 1-2 are still STANDING (updateSwimming reads the
-    # PREVIOUS tick's isSprinting, so the flag cannot be set before tick 2, and
-    # updatePlayerPose runs after that), which is well before the player reaches
+    # one-block gap. Ticks 1-2 are still STANDING (the swimming update reads the
+    # PREVIOUS tick's sprint flag, so it cannot be set before tick 2, and the
+    # pose update runs after that), which is well before the player reaches
     # the tunnel mouth at x = 0.7. From tick 3 the box is 0.6 tall and the swimmer
     # passes under a ceiling that the standing box stops dead against.
     w = water_tunnel()
@@ -2324,14 +2329,14 @@ def scenario_stand_low_corridor_control():
 
 def scenario_crouch_release_stays_crouched():
     # THE FIT-GATE FALLBACK. Sneak in for 60 ticks, then release shift while
-    # under the slab. getDesiredPose says STANDING; canPlayerFitWithinBlocksAnd-
-    # EntitiesWhen(STANDING) is false, so the second arm keeps CROUCHING and the
+    # under the slab. The desired pose says STANDING; whether the player fits
+    # as STANDING is false, so the second arm keeps CROUCHING and the
     # player accelerates to full walking speed with a 1.5-high box.
     #
     # A naive `pose = sneak ? CROUCHING : STANDING` port grows the box into the
-    # slab on tick 60 -- and vanilla has NO recovery for that, because
-    # refreshDimensions' fudgePositionAfterSizeChange excludes clients and Players
-    # (Entity.java:3403-3408). So the naive port jams here instead of speeding up.
+    # slab on tick 60 -- and vanilla has NO recovery for that, because the
+    # size-change recovery vanilla otherwise performs explicitly excludes
+    # clients and Players. So the naive port jams here instead of speeding up.
     w = low_corridor()
     s = State(0.5, 1.0, 0.5, -90.0)
     s.on_ground = True
@@ -2343,14 +2348,14 @@ def scenario_crouch_release_stays_crouched():
 
 
 def scenario_elytra_gap_glide():
-    # Pose.FALL_FLYING is the same 0.6 x 0.6 record as Pose.SWIMMING
-    # (Avatar.java:27-28), so an elytra glider also fits a one-block gap. The pose
+    # FALL_FLYING is the same 0.6 x 0.6 record as SWIMMING, so an elytra
+    # glider also fits a one-block gap. The pose
     # is SEEDED here rather than grown into: a glider arriving at a tunnel has been
     # fall-flying for many ticks already, and starting it STANDING at 0.9 blocks/tick
     # would jam it on the ceiling before the first updatePlayerPose could run.
     #
     # The tunnel is dry (no water), so this reaches FALL_FLYING and not SWIMMING --
-    # the branch order in getDesiredPose puts swimming first.
+    # the branch order in the desired-pose selection puts swimming first.
     w = World()
     for x in range(-8, 81):
         for z in range(-2, 3):
@@ -2374,10 +2379,9 @@ def bubble_column_world(drag_down, column_top, water_top_y, floor_y=79):
 
     `floor_y` is the base block -- soul sand for a push-up column, magma for a
     drain. It is SOLID and nothing more: the base's identity is resolved by vanilla
-    once at block-update time into the DRAG_DOWN boolean
-    (BubbleColumnBlock.getColumnState), and the entity-side impulse code never looks
-    below the column. So there is deliberately no soul-sand/magma distinction in
-    this world beyond `drag_down` itself.
+    once at block-update time into the drag-down boolean, and the entity-side
+    impulse code never looks below the column. So there is deliberately no
+    soul-sand/magma distinction in this world beyond `drag_down` itself.
     """
     w = World()
     w.add_solid(0, floor_y, 0)
@@ -2441,8 +2445,8 @@ def scenario_bubble_column_down():
 
 def scenario_bubble_column_surface_launch():
     # The OTHER branch: a push-up column whose top cell has real air above it, so
-    # BubbleColumnBlock.entityInside's `nothingAbove` is true and the entity takes
-    # onAboveBubbleColumn's min(1.8, vy + 0.1) instead of the inside pair.
+    # the "nothing above" check is true and the entity takes the above-column
+    # min(1.8, vy + 0.1) instead of the inside pair.
     #
     # The column tops out at y=90 with air from y=91, so as the player rises the
     # occupied cells straddle the boundary: the upper cell takes the ABOVE pair and
