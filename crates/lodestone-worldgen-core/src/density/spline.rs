@@ -1,6 +1,6 @@
 //! Cubic spline evaluation for the `spline` density function.
 //!
-//! Reproduces `net.minecraft.util.CubicSpline` — all arithmetic in `f32`, exactly
+//! Reproduces vanilla's own cubic-spline class — all arithmetic in `f32`, exactly
 //! as vanilla (the coordinate value is cast to `float` before sampling and every
 //! interpolation is single-precision).
 
@@ -105,7 +105,7 @@ impl Spline {
 }
 
 fn find_interval_start(points: &[SplinePoint], input: f32) -> i32 {
-    // Mth.binarySearch(0, n, i -> input < locations[i]) - 1
+    // vanilla's own binarySearch(0, n, i -> input < locations[i]) - 1
     let mut first = points.len();
     for (i, p) in points.iter().enumerate() {
         if input < p.location {

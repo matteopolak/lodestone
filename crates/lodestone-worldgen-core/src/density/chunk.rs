@@ -1,10 +1,10 @@
 //! `NoiseChunk`-equivalent block-field sampling.
 //!
 //! The density-function interpreter in [`super`] evaluates the *raw* noise
-//! router at a point (vanilla's `SinglePointContext`), which is what the router
+//! router at a point (vanilla's own single-point context), which is what the router
 //! parity tests prove. But the real server does **not** write that point field
 //! to blocks. Vanilla wraps the router in a `NoiseChunk`
-//! (`net.minecraft.world.level.levelgen.NoiseChunk`) which changes two node
+//! (its own noise-chunk class) which changes two node
 //! kinds:
 //!
 //! * **`interpolated`** samples its wrapped function only at the corners of a
@@ -49,7 +49,7 @@
 //! `NoiseChunk`, because the driver loop (`selectCellYZ` → `updateForY` →
 //! `updateForX` → `updateForZ`) is visibly feeding the *second*. The resolution
 //! is two levels removed from the interpolator: `NoiseChunk`'s constructor
-//! (`NoiseChunk.java:157-160`) does not read the router's `final_density`
+//! does not read the router's `final_density`
 //! directly, it wraps it —
 //!
 //! ```text
@@ -77,7 +77,7 @@
 //!
 //! No Mojang source is transliterated: the algorithm is derived from the
 //! observable per-block field and cross-checked against a JVM oracle
-//! (`scripts/worldgen-oracle/DensityChunkOracle.java`).
+//! (our own `scripts/worldgen-oracle/DensityChunkOracle.java` harness).
 
 use std::cell::RefCell;
 

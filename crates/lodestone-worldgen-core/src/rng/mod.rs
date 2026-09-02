@@ -49,7 +49,7 @@ pub fn get_seed(x: i32, y: i32, z: i32) -> i64 {
 
 /// The shared surface of a vanilla random source.
 ///
-/// Method semantics mirror `net.minecraft.util.RandomSource`. Callers that need
+/// Method semantics mirror vanilla's own random-source interface. Callers that need
 /// bit-exact parity must respect draw *order*: every method that advances the
 /// generator does so in the same sequence vanilla uses.
 pub trait RandomSource {
@@ -88,7 +88,7 @@ pub trait RandomSource {
 
 /// A factory that derives independent generators keyed by position or name.
 ///
-/// Mirrors `net.minecraft.world.level.levelgen.PositionalRandomFactory`.
+/// Mirrors vanilla's own positional-random-factory interface.
 pub trait PositionalRandomFactory {
     /// The concrete generator this factory produces.
     type Source: RandomSource;
@@ -160,10 +160,10 @@ impl<R: RandomSource> WorldgenRandom<R> {
     }
 
     /// `setLargeFeatureWithSalt(seed, x, z, blend)` — the seed derivation every
-    /// structure-set placement decision is made against (issue #514's S1).
+    /// structure-set placement decision is made against.
     ///
-    /// Transcribed from the record definition,
-    /// `.cache/mc/26.2/src/net/minecraft/world/level/levelgen/WorldgenRandom.java:66-69`,
+    /// Transcribed from the record definition in vanilla's own worldgen-random
+    /// class,
     /// not from a call site:
     ///
     /// ```text
@@ -197,7 +197,7 @@ impl<R: RandomSource> WorldgenRandom<R> {
     }
 }
 
-/// `WorldgenRandom.seedSlimeChunk(x, z, seed, salt)` — issue #515.
+/// Vanilla's own worldgen-random slime-chunk seeding routine, `seedSlimeChunk(x, z, seed, salt)`.
 ///
 /// A free function rather than a method because vanilla's is `static` and needs no
 /// carrier state: it derives a fresh [`LegacyRandomSource`]
@@ -237,7 +237,7 @@ pub fn seed_slime_chunk(x: i32, z: i32, seed: i64, salt: i64) -> LegacyRandomSou
     LegacyRandomSource::new(mixed)
 }
 
-/// `Slime.checkSlimeSpawnRules`' slime-chunk salt (`Slime.java:93`).
+/// Vanilla's own slime-spawn-rules check's slime-chunk salt.
 pub const SLIME_CHUNK_SALT: i64 = 987_234_911;
 
 /// Whether `(chunk_x, chunk_z)` is a slime chunk for `seed` — a **pure function**

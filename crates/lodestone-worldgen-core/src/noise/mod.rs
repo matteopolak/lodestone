@@ -1,5 +1,5 @@
 //! Perlin/normal noise synthesis, version-free and bit-exact against vanilla's
-//! `net.minecraft.world.level.levelgen.synth` package.
+//! vanilla's own noise-synthesis package.
 
 pub mod blended;
 pub mod end_islands;

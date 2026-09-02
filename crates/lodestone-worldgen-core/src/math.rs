@@ -1,4 +1,4 @@
-//! `net.minecraft.util.Mth` helpers needed by the noise stack, reproduced from
+//! Vanilla's own math-helper functions needed by the noise stack, reproduced from
 //! their published one-line definitions. Kept separate so the noise code reads
 //! like the reference and float semantics stay obvious.
 
@@ -113,8 +113,8 @@ pub fn round(v: f64) -> i32 {
 /// # Why this exists rather than `powf`/`powi`
 ///
 /// Vanilla writes `Math.pow(2.0, k)` with an integer `k` in four places that
-/// feed terrain — `PerlinNoise.java:127-128`'s `lowestFreqInputFactor` /
-/// `lowestFreqValueFactor` and `PerlinSimplexNoise.java:60-61`'s
+/// feed terrain — vanilla's own Perlin-noise class's `lowestFreqInputFactor` /
+/// `lowestFreqValueFactor` and its own multi-octave simplex-noise class's
 /// `highestFreq*` twins. **`java.lang.Math.pow` is specified only to within 1
 /// ulp**, and `lowestFreqInputFactor` multiplies the noise *input* coordinate,
 /// so a last-place difference there is not a rounding curiosity: it moves every

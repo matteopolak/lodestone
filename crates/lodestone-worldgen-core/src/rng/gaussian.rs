@@ -7,7 +7,7 @@
 //!
 //! ## The one 1-ulp exposure in this crate's numerics, and its blast radius
 //!
-//! `MarsagliaPolarGaussian.java:34` is
+//! Vanilla's own Marsaglia-polar Gaussian sampler is
 //! `Math.sqrt(-2.0 * Math.log(radiusSquared) / radiusSquared)`. `Math.sqrt` is
 //! correctly rounded and therefore exact, but **`Math.log` is specified only to
 //! within 1 ulp** — and it is `Math`, not `StrictMath`, so *vanilla's own*

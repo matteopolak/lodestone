@@ -1,20 +1,21 @@
-//! `SimplexNoise` — `net.minecraft.world.level.levelgen.synth.SimplexNoise`,
+//! `SimplexNoise` — vanilla's own simplex-noise class,
 //! the 2-D-only subset [`crate::feature::vegetation`] needs for
-//! `Biome.BIOME_INFO_NOISE` (grass/flower density,
-//! `NoiseThresholdCountPlacement`'s `flowerNoise`). This is a **different**
+//! vanilla's own biome-info-noise constant (grass/flower density,
+//! vanilla's own noise-threshold-count placement's `flowerNoise`). This is a **different**
 //! noise primitive from [`super::normal::NormalNoise`]/[`super::perlin::PerlinNoise`]
 //! (which back the density-function router) — vanilla keeps them as separate
 //! classes with unrelated gradient tables, and so does this port.
 //!
-//! `Biome.BIOME_INFO_NOISE` is `new PerlinSimplexNoise(new WorldgenRandom(new
-//! LegacyRandomSource(2345L)), ImmutableList.of(0))` — a single-octave (`[0]`)
-//! `PerlinSimplexNoise`. For a single octave at index 0, `PerlinSimplexNoise`'s
+//! Vanilla's own biome-info-noise constant is constructed as a multi-octave
+//! wrapper seeded from a legacy random source with seed `2345L` and a single
+//! octave index `[0]` — a single-octave wrapper. For a single octave at
+//! index 0, that wrapper's
 //! own frequency/value scaling collapses to identity (`factor = 2^0 = 1`,
-//! `valueFactor = 1/(2^1-1) = 1`), so `PerlinSimplexNoise::getValue(x, y,
+//! `valueFactor = 1/(2^1-1) = 1`), so its value at `(x, y,
 //! false)` for this exact construction is bit-identical to
 //! `SimplexNoise::getValue(x, y)` on the single wrapped octave — this module
 //! ports only that reduced (and only ever needed) shape, not the general
-//! multi-octave `PerlinSimplexNoise` wrapper.
+//! multi-octave wrapper.
 
 use crate::rng::RandomSource;
 
@@ -49,7 +50,7 @@ pub struct SimplexNoise {
 }
 
 impl SimplexNoise {
-    /// `new SimplexNoise(RandomSource)`: draws `xo`/`yo`/`zo` (three
+    /// Vanilla's own constructor: draws `xo`/`yo`/`zo` (three
     /// `nextDouble`s, discarded here — [`crate::feature::vegetation`] only
     /// ever calls the `useNoiseStart = false` overload, which never reads
     /// them) then Fisher-Yates shuffles the identity permutation `0..256`
@@ -97,7 +98,7 @@ impl SimplexNoise {
         }
     }
 
-    /// `SimplexNoise.getValue(xin, yin)` (the 2-D overload).
+    /// Vanilla's own `SimplexNoise::getValue(xin, yin)` (the 2-D overload).
     #[must_use]
     pub fn get_value(&self, xin: f64, yin: f64) -> f64 {
         let s = (xin + yin) * F2;
@@ -125,7 +126,7 @@ impl SimplexNoise {
     }
 }
 
-/// `Biome.BIOME_INFO_NOISE.getValue(x, z, false)` — a fresh
+/// Vanilla's own biome-info-noise value at `(x, z, false)` — a fresh
 /// [`crate::rng::LegacyRandomSource`] seeded `2345` each call. Vanilla keeps
 /// this as a `static final` singleton; constructing it fresh per call is
 /// value-identical (it is a pure function of the fixed seed) and avoids

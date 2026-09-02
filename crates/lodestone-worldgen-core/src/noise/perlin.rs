@@ -1,6 +1,6 @@
 //! `PerlinNoise` — a stack of `ImprovedNoise` octaves.
 //!
-//! Reproduces `net.minecraft.world.level.levelgen.synth.PerlinNoise` with the
+//! Reproduces vanilla's own Perlin-noise class with the
 //! `useNewInitialization = true` path used by the modern noise router: each
 //! octave is seeded from `positional.fromHashOf("octave_" + octave)`.
 
@@ -80,7 +80,7 @@ impl PerlinNoise {
     ///
     /// Same constructor arm as [`Self::create_legacy_for_blended_noise`]; the
     /// difference is only that the octave set arrives as amplitudes rather than
-    /// as a range (`PerlinNoise.java:34-37`). Reached from
+    /// as a range (vanilla's own Perlin-noise constructor). Reached from
     /// [`crate::noise::NormalNoise::create_legacy_nether_biome`], which is the
     /// only caller vanilla has.
     ///
