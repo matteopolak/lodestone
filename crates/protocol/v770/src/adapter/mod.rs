@@ -478,7 +478,7 @@ impl V770Adapter {
     /// Chooses which `move_player_*` packet, if any, this tick's movement
     /// produces, and updates the send-tracking state accordingly.
     ///
-    /// Mirrors vanilla's `LocalPlayer.sendPosition()` exactly (see
+    /// Mirrors vanilla's own client-side position-send tick exactly (see
     /// `ServerboundMovePlayerPacket` for the wire shapes it selects between):
     /// position is "dirty" when the squared distance from the last **sent**
     /// position exceeds `(2e-4)²`, or every 20 ticks regardless of movement
@@ -741,7 +741,8 @@ fn decode_full<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
     Ok(value)
 }
 
-/// Unpacks a vanilla `BlockPos.asLong` value into canonical block coordinates.
+/// Unpacks vanilla's own packed block-position long value into canonical
+/// block coordinates.
 ///
 /// The packing places `x` in the high 26 bits, `z` in the middle 26 bits, and
 /// `y` in the low 12 bits, each stored as a two's-complement signed field.
@@ -937,16 +938,16 @@ impl VersionAdapter for V770Adapter {
         // and the block-state→block-registry map — is 26.2 game data homed in
         // `lodestone-data`; the registry seam reaches it through
         // here so a version-free consumer never names v770 or the data crate
-        // directly. The returned `correct_tool` is already
-        // `Player.hasCorrectToolForDrops`, block requirement folded in, so the
-        // caller has nothing left to invert.
+        // directly. The returned `correct_tool` is already the equivalent of
+        // vanilla's own correct-tool-for-drops check, block requirement
+        // folded in, so the caller has nothing left to invert.
         lodestone_data::tool::mining(held, state_id)
     }
 
     fn block_collision(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
         // The per-block-state collision census is 26.2 game data homed in
-        // `lodestone-data` (dumped from the real 26.2 server's
-        // `Block.BLOCK_STATE_REGISTRY`); the registry seam reaches it through
+        // `lodestone-data` (dumped from the real 26.2 server's own
+        // block-state registry); the registry seam reaches it through
         // here so a version-free consumer never names v770 or the data crate
         // directly. Zero-copy: `collision_shapes::Aabb` *is* `BlockAabb`, so
         // this hands back the rodata slice itself.
@@ -962,8 +963,9 @@ impl VersionAdapter for V770Adapter {
     }
 
     fn block_outline(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
-        // `BlockStateBase.getShape` — the shape `Entity.pick` clips against, and
-        // a third thing beside collision and fluid presence. 26.2 game data
+        // Vanilla's own block-state outline shape — the shape its entity-pick
+        // routine clips against, and a third thing beside collision and fluid
+        // presence. 26.2 game data
         // homed in `lodestone-data`; zero-copy out of rodata. See
         // `lodestone_data::outline_shapes` for why half of all states disagree
         // with `block_collision`.
@@ -971,9 +973,9 @@ impl VersionAdapter for V770Adapter {
     }
 
     fn block_interaction(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
-        // `BlockStateBase.getInteractionShape` — empty for all but four block
-        // families, and a *face* refinement on top of the outline hit rather than
-        // a clip target of its own.
+        // Vanilla's own block-state interaction shape — empty for all but four
+        // block families, and a *face* refinement on top of the outline hit
+        // rather than a clip target of its own.
         lodestone_data::outline_shapes::interaction_boxes(state_id)
     }
 
@@ -990,11 +992,13 @@ impl VersionAdapter for V770Adapter {
     }
 
     fn block_blocks_motion(&self, state_id: u32) -> Option<bool> {
-        // `BlockState.blocksMotion()`, dumped per state rather than derived from
-        // `block_collision`: `calculateSolid`'s first three branches
-        // (`forceSolidOn` on 237 blocks, `forceSolidOff` on 8, and a null shape
-        // cache on the 23 `dynamicShape()` blocks) are invisible to any shape
-        // table, and skipping them is wrong for 2,618 of 32,366 states. One bit
+        // Vanilla's own block-state motion-blocking flag, dumped per state
+        // rather than derived from `block_collision`: vanilla's own
+        // solidity-calculation routine's first three branches
+        // (a forced-solid override on 237 blocks, a forced-non-solid override
+        // on 8, and a null shape cache on the 23 dynamic-shape blocks) are
+        // invisible to any shape table, and skipping them is wrong for 2,618
+        // of 32,366 states. One bit
         // out of rodata. See `lodestone_data::block_solidity`.
         lodestone_data::block_solidity::blocks_motion(state_id)
     }

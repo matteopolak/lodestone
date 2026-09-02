@@ -3,8 +3,9 @@
 //! `adapter.rs`.
 use super::*;
 
-/// Packs block coordinates into a vanilla `BlockPos.asLong` value: `x` in bits
-/// 38–63, `z` in bits 12–37, `y` in bits 0–11, each a signed field.
+/// Packs block coordinates into vanilla's own packed block-position long
+/// value: `x` in bits 38–63, `z` in bits 12–37, `y` in bits 0–11, each a
+/// signed field.
 fn pack_block_pos(pos: BlockPos) -> i64 {
     ((i64::from(pos.x) & 0x3FF_FFFF) << 38)
         | ((i64::from(pos.z) & 0x3FF_FFFF) << 12)
@@ -19,7 +20,8 @@ fn hand_ordinal(hand: Hand) -> i32 {
     }
 }
 
-/// Maps a block face to `Direction.get3DDataValue` (`0` down … `5` east).
+/// Maps a block face to vanilla's own direction data-value ordinal (`0`
+/// down … `5` east).
 fn face_ordinal(face: BlockFace) -> i32 {
     match face {
         BlockFace::Down => 0,
@@ -31,7 +33,7 @@ fn face_ordinal(face: BlockFace) -> i32 {
     }
 }
 
-/// Writes a `Vec3` using vanilla's `LpVec3` low-precision quantised codec: a
+/// Writes a `Vec3` using vanilla's own low-precision quantised position codec: a
 /// single `0` byte for the (near-)zero vector, otherwise a packed 48-bit buffer
 /// (two bytes plus a big-endian int) carrying three 15-bit components and a
 /// 2-bit scale, with an optional trailing scale varint when the scale overflows.
@@ -43,7 +45,7 @@ fn write_lp_vec3(w: &mut Writer, x: f64, y: f64, z: f64) {
             v.clamp(-1.717_986_918_3E10, 1.717_986_918_3E10)
         }
     }
-    // Vanilla `Math.round`, i.e. floor(a + 0.5); the argument is always >= 0.
+    // Vanilla's own rounding helper, i.e. floor(a + 0.5); the argument is always >= 0.
     fn pack(v: f64) -> i64 {
         ((v * 0.5 + 0.5) * 32766.0 + 0.5).floor() as i64
     }
@@ -71,7 +73,7 @@ fn write_lp_vec3(w: &mut Writer, x: f64, y: f64, z: f64) {
 }
 
 /// Encodes a serverbound `interact` payload: VarInt entity id, VarInt hand,
-/// `LpVec3` location, then the secondary-action bool. `location` is `None` for a
+/// low-precision quantised location, then the secondary-action bool. `location` is `None` for a
 /// plain interact, which vanilla encodes as the zero vector (a single `0` byte).
 fn encode_interact(entity_id: i32, hand: Hand, location: Option<Vec3>, sneaking: bool) -> Vec<u8> {
     let mut w = Writer::default();
@@ -88,7 +90,7 @@ fn encode_interact(entity_id: i32, hand: Hand, location: Option<Vec3>, sneaking:
 }
 
 /// Maps a container click mode to `ContainerInput`'s ordinal
-/// (`ByteBufCodecs.idMapper`, a direct VarInt id: `0` pickup … `6` pickup_all).
+/// (vanilla's own id-mapper codec, a direct VarInt id: `0` pickup … `6` pickup_all).
 fn container_input_ordinal(click_type: ContainerClickType) -> i32 {
     match click_type {
         ContainerClickType::Pickup => 0,
@@ -103,11 +105,11 @@ fn container_input_ordinal(click_type: ContainerClickType) -> i32 {
 
 /// Encodes the serverbound `container_click` packet body.
 ///
-/// Wire layout (`ServerboundContainerClickPacket`): VarInt container id, VarInt
+/// Wire layout (vanilla's own serverbound container-click packet): VarInt container id, VarInt
 /// state id, big-endian `short` slot, big-endian `byte` button,
 /// `ContainerInput` ordinal (VarInt), a changed-slots map (VarInt entry count,
-/// then per entry a big-endian `short` slot key and a `HashedStack` value),
-/// then the carried cursor stack, also a `HashedStack`. Map iteration order is
+/// then per entry a big-endian `short` slot key and a hashed-stack value),
+/// then the carried cursor stack, also a hashed stack. Map iteration order is
 /// not semantically significant (vanilla holds it in a hash map), so the
 /// model's `Vec` order is used as-is.
 fn encode_container_click(
@@ -145,7 +147,7 @@ fn encode_container_click(
     Ok(w.into_vec())
 }
 
-/// Maps the canonical [`GameMode`] to vanilla's `GameType` id, the inverse of
+/// Maps the canonical [`GameMode`] to vanilla's own game-type id, the inverse of
 /// [`game_mode_from_ordinal`].
 pub(crate) fn game_mode_to_ordinal(mode: GameMode) -> i32 {
     match mode {
@@ -156,9 +158,9 @@ pub(crate) fn game_mode_to_ordinal(mode: GameMode) -> i32 {
     }
 }
 
-/// Maps the canonical [`RecipeBookType`] to vanilla's `RecipeBookType` ordinal,
-/// as written by `FriendlyByteBuf.writeEnum` in
-/// `ServerboundRecipeBookChangeSettingsPacket`.
+/// Maps the canonical [`RecipeBookType`] to vanilla's own `RecipeBookType`
+/// ordinal, as written by vanilla's clientbound recipe-book
+/// change-settings packet's own enum writer.
 fn recipe_book_type_to_ordinal(book_type: RecipeBookType) -> i32 {
     match book_type {
         RecipeBookType::Crafting => 0,
@@ -177,9 +179,10 @@ fn item_registry_id(stack: &ItemStack) -> Result<i32, AdapterError> {
 }
 
 /// Writes a serverbound `set_creative_mode_slot` item
-/// (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`): a VarInt count (`<= 0` is the
-/// empty stack), then, only if non-empty, the item registry id as a VarInt and
-/// an empty `DataComponentPatch` (VarInt `0` added, VarInt `0` removed).
+/// (vanilla's own untrusted-optional item-stack stream codec): a VarInt
+/// count (`<= 0` is the empty stack), then, only if non-empty, the item
+/// registry id as a VarInt and an empty component patch (VarInt `0` added,
+/// VarInt `0` removed).
 ///
 /// Note: an [`ItemStack`] can now carry decoded components, but this serverbound
 /// encoder deliberately writes the **empty** patch and does not re-serialise
@@ -202,11 +205,11 @@ fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) -> Result
     Ok(())
 }
 
-/// Writes a serverbound container-click item as a `HashedStack`
-/// (`ByteBufCodecs.optional(HashedStack.ActualItem.STREAM_CODEC)`): a bool
-/// presence flag, then, only if present, the item registry id as a VarInt, the
-/// count as a VarInt, and an empty `HashedPatchMap` (VarInt `0` added, VarInt
-/// `0` removed).
+/// Writes a serverbound container-click item as vanilla's own hashed-stack
+/// shape (an optional-value codec over its own actual-item stream codec): a
+/// bool presence flag, then, only if present, the item registry id as a
+/// VarInt, the count as a VarInt, and an empty hashed patch map (VarInt `0`
+/// added, VarInt `0` removed).
 ///
 /// The canonical [`ItemStack`] carries no components, so the patch is always
 /// empty — the only shape this model can produce, and the common case for a
@@ -229,10 +232,11 @@ fn write_hashed_stack(w: &mut Writer, item: Option<&ItemStack>) -> Result<(), Ad
 }
 
 /// Writes an `Optional<Holder<MobEffect>>` for the serverbound `set_beacon`
-/// packet (`ByteBufCodecs.optional(MobEffect.STREAM_CODEC)`): a bool presence
-/// flag, then, only if present, the effect's `minecraft:mob_effect` registry
-/// id as a direct VarInt (`holderRegistry`, unlike the sound-holder codec, has
-/// no inline-definition escape id).
+/// packet (vanilla's own optional-value codec over its mob-effect stream
+/// codec): a bool presence flag, then, only if present, the effect's
+/// `minecraft:mob_effect` registry id as a direct VarInt (vanilla's own
+/// holder-registry codec, unlike the sound-holder codec, has no
+/// inline-definition escape id).
 fn write_optional_mob_effect(
     w: &mut Writer,
     effect: Option<&ResourceKey>,
@@ -263,7 +267,7 @@ fn encode_set_beacon(
 }
 
 /// Encodes the serverbound `spectator_action` packet body
-/// (`ServerboundSpectatorActionPacket`): a single VarInt using
+/// (vanilla's own serverbound spectator-action packet): a single VarInt using
 /// `ByteBufCodecs.OPTIONAL_VAR_INT`'s offset encoding, **not** the common
 /// bool-then-value optional shape — `0` means "not spectating an entity"
 /// and a present id `i` is written as `i + 1`. This must be hand-written
@@ -277,10 +281,11 @@ fn encode_spectator_action(target_entity_id: Option<i32>) -> Result<Vec<u8>, Ada
 }
 
 /// Encodes the serverbound `seen_advancements` packet body
-/// (`ServerboundSeenAdvancementsPacket`): a VarInt `Action` ordinal
-/// (`OPENED_TAB` = 0, `CLOSED_SCREEN` = 1, via `FriendlyByteBuf.writeEnum`),
+/// (vanilla's own seen-advancements packet): a VarInt `Action` ordinal
+/// (`OPENED_TAB` = 0, `CLOSED_SCREEN` = 1, via vanilla's own enum writer),
 /// followed *only when opening a tab* by that tab's `minecraft:*` identifier
-/// string (`writeIdentifier` = `writeUtf(id.toString())`). Closing writes
+/// string (vanilla's own identifier writer, a plain UTF-8 string write).
+/// Closing writes
 /// nothing further — the identifier's presence depends on the ordinal, so
 /// this can't be a plain derived struct.
 fn encode_seen_advancements(tab: Option<&ResourceKey>) -> Result<Vec<u8>, AdapterError> {
@@ -311,9 +316,9 @@ fn encode_seen_advancements(tab: Option<&ResourceKey>) -> Result<Vec<u8>, Adapte
 // * `custom_click_action`'s payload is **double-framed** — a VarInt byte length
 //   wrapping an optional-NBT body.
 
-/// Maps a [`Difficulty`] to `Difficulty.getId()`, which is what
-/// `ByteBufCodecs.idMapper(Difficulty::byId, Difficulty::getId)` writes — the
-/// declared enum order, `PEACEFUL` first.
+/// Maps a [`Difficulty`] to vanilla's own difficulty id getter, which is
+/// what vanilla's own id-mapper codec writes — the declared enum order,
+/// `PEACEFUL` first.
 fn difficulty_id(difficulty: Difficulty) -> i32 {
     match difficulty {
         Difficulty::Peaceful => 0,
@@ -324,7 +329,7 @@ fn difficulty_id(difficulty: Difficulty) -> i32 {
 }
 
 /// `Rotation`'s wire id, from its own declared order
-/// (`net/minecraft/world/level/block/Rotation.java`).
+/// (confirmed against the decompiled 26.2 block-rotation source).
 fn structure_rotation_id(rotation: StructureRotation) -> i32 {
     match rotation {
         StructureRotation::None => 0,
@@ -352,7 +357,7 @@ fn encode_set_game_rules(entries: &[(ResourceKey, String)]) -> Result<Vec<u8>, A
 }
 
 /// Encodes the serverbound `set_structure_block` body
-/// (`ServerboundSetStructureBlockPacket.write`).
+/// (vanilla's own structure-block packet writer).
 ///
 /// **Two traps, both invisible to a round trip against ourselves.** `offset` and
 /// `size` are six `writeByte`s, not a `Vec3i`'s three VarInts each — vanilla
@@ -410,7 +415,7 @@ fn encode_set_structure_block(
 }
 
 /// Encodes the serverbound `set_jigsaw_block` body
-/// (`ServerboundSetJigsawBlockPacket.write`).
+/// (vanilla's own jigsaw-block packet writer).
 ///
 /// The trap is `joint`: vanilla writes `joint.getSerializedName()`, a UTF string,
 /// and falls back to `ALIGNED` for anything it cannot parse. An encoder that
@@ -441,7 +446,8 @@ fn encode_set_jigsaw_block(
 }
 
 /// Encodes the serverbound `test_instance_block_action` body
-/// (`ServerboundTestInstanceBlockActionPacket` + `TestInstanceBlockEntity.Data`).
+/// (vanilla's own test-instance-block-action packet plus its block-entity
+/// data record).
 fn encode_test_instance_block_action(
     pos: BlockPos,
     action: TestInstanceAction,
@@ -514,7 +520,7 @@ fn encode_debug_subscription_request(
 }
 
 /// Encodes the serverbound `custom_click_action` body
-/// (`ServerboundCustomClickActionPacket`).
+/// (vanilla's own custom-click-action packet).
 ///
 /// **Double-framed.** The codec is
 /// `optionalTagCodec(...).apply(lengthPrefixed(65536))`: an outer VarInt *byte
@@ -946,7 +952,8 @@ impl V770Adapter {
             }
             // The general case `SendBrand` above is vanilla's one
             // built-in instance of. `custom_payload`'s wire body is just
-            // channel + raw bytes (`ClientboundCustomPayloadPacket`'s
+            // channel + raw bytes (vanilla's own clientbound custom-payload
+            // packet's
             // `DiscardedPayload`, mirrored on the serverbound side), so this
             // needs no dedicated packet struct — `BrandPayload`'s two-string
             // shape doesn't fit arbitrary bytes, but `send` only needs an
@@ -1346,7 +1353,7 @@ impl V770Adapter {
                 show_bounding_box,
                 strict,
             } if state == ConnectionState::Play => {
-                // `ServerboundSetStructureBlockPacket.write`'s flag bits, in the
+                // Vanilla's own structure-block packet writer's flag bits, in the
                 // order the read side unpacks them.
                 let flags = u8::from(*ignore_entities)
                     | (u8::from(*show_air) << 1)

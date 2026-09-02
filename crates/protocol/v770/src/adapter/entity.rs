@@ -246,7 +246,7 @@ impl V770Adapter {
 }
 
 /// Decodes `damage_event`: entity id, a `minecraft:damage_type` registry id
-/// (`ByteBufCodecs.holderRegistry`, a plain VarInt — carried raw, see
+/// (vanilla's own holder-registry codec, a plain VarInt — carried raw, see
 /// [`ClientEvent::EntityDamaged`] for why), then the cause/direct entity ids
 /// each wire-encoded as `id + 1` (so `0` means "none", decoded here back to
 /// `-1` via `varint - 1` to match vanilla's own `readOptionalEntityId`), and
@@ -316,10 +316,10 @@ fn handle_add_entity(
     let yaw = reader.i8().map_err(dec_err)?;
     let head_yaw = reader.i8().map_err(dec_err)?;
     // The **Object Data** field: one trailing VarInt whose meaning is decided
-    // entirely by the entity type, read in that type's own `recreateFromPacket`.
-    // Most types ignore it; `FallingBlockEntity`'s is
-    // `this.blockState = Block.stateById(packet.getData())`, resolved below once
-    // the type is known.
+    // entirely by the entity type, read in that type's own client-side
+    // spawn-packet reconstruction. Most types ignore it; the falling-block
+    // entity's own reconstruction resolves it through the block-state
+    // registry's id lookup, resolved below once the type is known.
     let data = reader.var_i32().map_err(dec_err)?;
     reader.ensure_empty().map_err(dec_err)?;
 
@@ -370,11 +370,12 @@ fn handle_add_entity(
         }),
     ];
 
-    // Vanilla's `SynchedEntityData` only ever puts a field on the wire when it
-    // differs from the accessor's own default (`DataItem.isSetToDefault`,
-    // `SynchedEntityData.getNonDefaultValues` — the only source `ServerEntity`
-    // ever feeds a spawn's initial `set_entity_data`; see
-    // `Sheep.defineSynchedData`: `entityData.define(DATA_WOOL_ID, (byte)0)`).
+    // Vanilla's own tracked-entity-data mechanism only ever puts a field on
+    // the wire when it differs from the accessor's own default (its own
+    // non-default-value filter — the only source the server-side entity
+    // wrapper ever feeds a spawn's initial `set_entity_data`; see the sheep
+    // class's own accessor registration, whose wool index defaults to byte
+    // `0`).
     // A naturally white, unsheared sheep (colour ordinal 0, sheared bit unset —
     // exactly byte `0`) therefore never puts index 18 on the wire at all, not
     // just at spawn: `read_entity_metadata` never sees the byte, `variant` stays
@@ -405,8 +406,8 @@ fn handle_add_entity(
     }
 
     // Same synthesis, same reason, for a creeper's three fields
-    // (`Creeper.java`: `entityData.define(DATA_SWELL_DIR, -1)` /
-    // `DATA_IS_POWERED, false` / `DATA_IS_IGNITED, false`). An ordinary,
+    // (confirmed against the decompiled creeper source's own metadata-index
+    // defaults: swell dir `-1` / powered `false` / ignited `false`). An ordinary,
     // uncharged, unlit creeper is *entirely* at its accessors' defaults, so a
     // real spawn's initial `set_entity_data` never mentions any of the three —
     // without this, a fresh creeper's `creeper_swell_dir` stays `None` forever
@@ -424,19 +425,20 @@ fn handle_add_entity(
         }));
     }
 
-    // Same synthesis, same reason, for a painting's variant. `Painting`'s
-    // accessor defaults to `VariantUtils.getAny(registry)` — the registry's
-    // *first* entry, which for the vanilla `painting_variant` registry is
-    // `minecraft:alban` (the registry is loaded from data files and so is in
-    // sorted key order; see `entity_variants::PAINTING`). A painting hung with
-    // that variant is therefore entirely at its accessors' defaults and puts
-    // **no** index-9 field on the wire, so without this it would draw nothing
-    // at all while every other painting drew fine — the most confusing possible
-    // failure, because 50 of the 51 would work.
+    // Same synthesis, same reason, for a painting's variant. The painting
+    // class's own accessor defaults to vanilla's own any-entry-from-registry
+    // helper — the registry's *first* entry, which for the vanilla
+    // `painting_variant` registry is `minecraft:alban` (the registry is
+    // loaded from data files and so is in sorted key order; see
+    // `entity_variants::PAINTING`). A painting hung with that variant is
+    // therefore entirely at its accessors' defaults and puts **no** index-9
+    // field on the wire, so without this it would draw nothing at all while
+    // every other painting drew fine — the most confusing possible failure,
+    // because 50 of the 51 would work.
     //
     // Note there is nothing to synthesize for the painting's *facing*:
-    // `HangingEntity.setDirection` writes it into the entity's ordinary yaw,
-    // which `EntitySpawned` above already carries.
+    // vanilla's own hanging-entity direction setter writes it into the
+    // entity's ordinary yaw, which `EntitySpawned` above already carries.
     if name == PAINTING_TYPE {
         directives.push(Directive::Emit(ClientEvent::EntityMetadataUpdated {
             entity_id,
@@ -448,10 +450,11 @@ fn handle_add_entity(
         }));
     }
 
-    // `FallingBlockEntity.recreateFromPacket`: the Object Data field read above is
-    // `Block.getId(blockState)` and is the **only** place the imitated state
-    // appears on the wire — `defineSynchedData` registers `DATA_START_POS` alone,
-    // so no `set_entity_data` ever carries it. A consumer that never learns it
+    // Vanilla's own falling-block spawn-packet reconstruction: the Object
+    // Data field read above is the block-state registry's own id lookup and
+    // is the **only** place the imitated state appears on the wire — its own
+    // accessor registration defines `DATA_START_POS` alone, so no
+    // `set_entity_data` ever carries it. A consumer that never learns it
     // draws whatever state id `0` happens to be, with nothing logged.
     //
     // Emitted after `EntitySpawned` so a consumer keyed on the entity id always
@@ -459,13 +462,14 @@ fn handle_add_entity(
     // spawn: the field means something different for every type that reads it
     // (a display block, an item-frame rotation), and one event that claimed to
     // carry "a block state" for all of them would be wrong for most.
-    // `FishingHook.getAddEntityPacket` puts the caster's entity id in the same
-    // Object Data field — `owner == null ? this.getId() : owner.getId()`, so it
-    // is never the `0` a bare `Projectile` would write for an ownerless shot.
-    // Nothing else carries it: `FishingHook.defineSynchedData` registers only
-    // `DATA_HOOKED_ENTITY` and `DATA_BITING`, so a client that drops this field
-    // has no way to learn where the line is anchored and can only draw the
-    // bobber floating unattached.
+    // Vanilla's own fishing-hook spawn-packet builder puts the caster's
+    // entity id in the same Object Data field — the owner's entity id, or
+    // this entity's own id when ownerless, so it is never the `0` a bare
+    // projectile would write for an ownerless shot. Nothing else carries it:
+    // the fishing hook's own accessor registration defines only
+    // `DATA_HOOKED_ENTITY` and `DATA_BITING`, so a client that drops this
+    // field has no way to learn where the line is anchored and can only draw
+    // the bobber floating unattached.
     //
     // Guarded on the type for the reason the falling block's arm below is: this
     // one VarInt means something different for every type that reads it.

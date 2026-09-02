@@ -267,8 +267,8 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::PLAYER_COMBAT_ENTER {
-            // `ClientboundPlayerCombatEnterPacket` is a singleton with no
-            // fields (`StreamCodec.unit`).
+            // Vanilla's clientbound player-combat-enter packet is a singleton
+            // with no fields (its own unit stream codec).
             let reader = Reader::new(payload);
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::Emit(ClientEvent::PlayerCombatEntered)]);
@@ -359,7 +359,7 @@ fn read_look_anchor(reader: &mut Reader<'_>) -> Result<LookAnchor, AdapterError>
     }
 }
 
-/// Lowers a `Relative` bit set (see `net.minecraft.world.entity.Relative`) to
+/// Lowers vanilla's own `Relative` bit set to
 /// the canonical [`TeleportFlags`]. Bits: X=0, Y=1, Z=2, Y_ROT=3, X_ROT=4.
 fn teleport_flags(value: i32) -> TeleportFlags {
     TeleportFlags {
