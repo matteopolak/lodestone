@@ -9,7 +9,7 @@
 //!
 //! Where two readings of a clause would agree at the obvious input, the input is
 //! moved. A boat accelerating forward for **one** tick from rest is `0.04` under
-//! the correct order, under accelerate-then-drag, and under a wrong `invFriction`
+//! the correct order, under accelerate-then-drag, and under a wrong drag factor
 //! — so the forward gate runs five ticks, by which point the three hypotheses are
 //! 0.163804 / 0.147420 / 0.040000 apart.
 
@@ -20,7 +20,7 @@ use lodestone_physics::vehicle::{
 };
 use lodestone_physics::{Aabb, CollisionView, EntityDimensions, EntityMotion, FluidCell, FluidKind, PhysicsProfile, Vec3d};
 
-/// `EntityTypes.java`'s `sized(1.375F, 0.5625F)`, shared by the whole boat family.
+/// Vanilla's own boat entity-type size (`1.375F, 0.5625F`), shared by the whole boat family.
 const BOAT_WIDTH: f32 = 1.375;
 const BOAT_HEIGHT: f32 = 0.5625;
 
@@ -28,9 +28,9 @@ const BOAT_HEIGHT: f32 = 0.5625;
 ///
 /// `surface_y` is the first **non**-water layer, so the topmost water cell is
 /// `surface_y - 1` and — because its neighbour above is not water — reports
-/// `getOwnHeight()` rather than a full block. That is the case a real ocean
-/// surface is in, and the `8/9` it yields is load-bearing for every `waterLevel`
-/// below.
+/// vanilla's own "get own height" formula rather than a full block. That is
+/// the case a real ocean surface is in, and the `8/9` it yields is
+/// load-bearing for every water-level value below.
 #[derive(Debug)]
 struct Ocean {
     surface_y: i32,
@@ -50,8 +50,8 @@ impl CollisionView for Ocean {
     }
 }
 
-/// Nothing at all: no blocks, no fluid. `getGroundFriction` divides by a zero
-/// count here, so its `NaN` fails `friction > 0.0F` and the boat is `IN_AIR`.
+/// Nothing at all: no blocks, no fluid. Vanilla's own "get ground friction"
+/// step divides by a zero count here, so its `NaN` fails `friction > 0.0F` and the boat is `IN_AIR`.
 #[derive(Debug)]
 struct Void;
 
@@ -60,19 +60,20 @@ impl CollisionView for Void {
 }
 
 /// Solid ground everywhere below `surface_y`, no fluid at all, and every block
-/// reporting vanilla's ordinary `Block.getFriction` of `0.6`.
+/// reporting vanilla's ordinary block-friction accessor of `0.6`.
 ///
 /// This is the world a beached boat is in, and until this gate existed the whole
 /// vehicle corpus had **no** view with a collision box in it: `Ocean` and `Void`
-/// both return no boxes, so `getGroundFriction` divided by a zero count in every
-/// existing test and `ON_LAND` was unreachable by construction.
+/// both return no boxes, so vanilla's own "get ground friction" step divided
+/// by a zero count in every existing test and `ON_LAND` was unreachable by
+/// construction.
 #[derive(Debug)]
 struct Ground {
     surface_y: i32,
 }
 
-/// `Block.getFriction`'s default, which every block but ice, packed ice, blue
-/// ice and slime reports.
+/// Vanilla's own block-friction accessor's default, which every block but
+/// ice, packed ice, blue ice and slime reports.
 const DEFAULT_BLOCK_FRICTION: f32 = 0.6;
 
 impl CollisionView for Ground {
@@ -104,13 +105,13 @@ fn boat_dims() -> EntityDimensions {
     EntityDimensions::new(BOAT_WIDTH, BOAT_HEIGHT, 0.6)
 }
 
-/// `AbstractBoat.controlBoat`'s forward acceleration, at the precision the source
-/// actually has: `0.04F` widened into a `double` multiply, **not** `0.04_f64`.
+/// Vanilla's own control-boat step's forward acceleration, at the precision
+/// the source actually has: `0.04F` widened into a `double` multiply, **not** `0.04_f64`.
 fn forward_accel() -> f64 {
     f64::from(0.04_f32)
 }
 
-/// `floatBoat`'s `IN_WATER` drag, likewise a `float` in vanilla.
+/// Vanilla's own float-boat step's `IN_WATER` drag, likewise a `float` in vanilla.
 fn water_inv_friction() -> f64 {
     f64::from(0.9_f32)
 }
@@ -118,8 +119,9 @@ fn water_inv_friction() -> f64 {
 /// Five ticks of forward input on open water, against the exact recurrence the
 /// two vanilla methods compose to.
 ///
-/// `floatBoat` drags **first** (`movement.x * invFriction`) and `controlBoat` adds
-/// the impulse **after**, so the horizontal recurrence is
+/// Vanilla's own float-boat step drags **first** (`movement.x` times the drag
+/// factor) and its own control-boat step adds the impulse **after**, so the
+/// horizontal recurrence is
 /// `v ← v · 0.9 + 0.04` and not `(v + 0.04) · 0.9`. Both are plausible readings of
 /// "a boat has drag and accelerates", both give 0.04 after one tick, and they
 /// separate by 11% after five.
@@ -166,7 +168,7 @@ fn a_boat_accelerating_forward_on_water_follows_the_drag_then_impulse_recurrence
     }
 
     // 0.163804 under the real order, 0.147420 under accelerate-then-drag, and
-    // 0.040000 if `invFriction` stayed at its `0.05F` initialiser (a status the
+    // 0.040000 if the drag factor stayed at its `0.05F` initialiser (a status the
     // match failed to claim).
     assert!(
         (motion.velocity.z - correct).abs() < 1e-12,
@@ -189,7 +191,7 @@ fn a_boat_accelerating_forward_on_water_follows_the_drag_then_impulse_recurrence
     );
 }
 
-/// The three-clause conjunct in `controlBoat`'s turning bonus.
+/// The three-clause conjunct in vanilla's own control-boat step's turning bonus.
 ///
 /// `if (inputRight != inputLeft && !inputUp && !inputDown) acceleration += 0.005F`
 /// — implementing only the first clause gives a forward *turn* `0.045`, which is
@@ -254,7 +256,7 @@ fn the_turning_bonus_is_suppressed_while_moving_forward() {
          cannot see the missing conjuncts"
     );
 
-    // And the impulse is applied along the **new** yaw: `setYRot` runs between the
+    // And the impulse is applied along the **new** yaw: vanilla's own yaw setter runs between the
     // bonus and the forward acceleration, so a boat that starts turning this tick
     // already moves in the direction it turned to. At yaw 1 degree the sideways
     // component is `sin(-1 deg) * 0.04` = -0.000698; at yaw 0 it is exactly zero.
@@ -272,9 +274,10 @@ fn the_turning_bonus_is_suppressed_while_moving_forward() {
 
 /// A boat's gravity is `0.04`, not the living `0.08`.
 ///
-/// `AbstractBoat.getDefaultGravity()` overrides `Entity`'s, and nothing drags the
-/// vertical velocity on the way down (`floatBoat` scales x and z only, and a boat
-/// never calls `travel`), so three ticks of free fall is exactly `-0.12` and
+/// Vanilla's own boat default-gravity accessor overrides the base entity's,
+/// and nothing drags the vertical velocity on the way down (vanilla's own
+/// float-boat step scales x and z only, and a boat never runs the ordinary
+/// travel step), so three ticks of free fall is exactly `-0.12` and
 /// linear — which is also how the gate tells `0.04` from a profile lookup that
 /// would give `-0.24`.
 #[test]
@@ -335,7 +338,7 @@ fn a_boat_in_air_falls_at_its_own_gravity_and_the_fall_is_linear() {
 
 /// The buoyancy term, at the one input where a wrong divisor is visible.
 ///
-/// `buoyancy = (waterLevel - y) / bbHeight`, then
+/// `buoyancy = (water_level - y) / bb_height`, then
 /// `y' = (y + buoyancy * (0.04 / 0.65)) * 0.75`. Three constants, and the *whole*
 /// expression is predicted here — including the `0.75` damping, which a reading
 /// that stops at the impulse would drop.
@@ -357,9 +360,10 @@ fn the_first_tick_of_buoyancy_lands_on_the_predicted_value() {
         &profile,
     );
 
-    // `FluidState.getHeight` for a source cell whose neighbour above is not water
-    // is `getOwnHeight()` = `amount / 9.0F` = `8/9`, and `checkInWater` computes
-    // the surface as a **float** add before widening.
+    // Vanilla's own fluid-height accessor for a source cell whose neighbour
+    // above is not water is its own "get own height" formula = `amount /
+    // 9.0F` = `8/9`, and vanilla's own "check in water" step computes the
+    // surface as a **float** add before widening.
     let surface = f64::from(63.0_f32 + 8.0_f32 / 9.0_f32);
     let buoyancy = (surface - feet) / f64::from(BOAT_HEIGHT);
     let expected =
@@ -378,12 +382,12 @@ fn the_first_tick_of_buoyancy_lands_on_the_predicted_value() {
     );
     assert!(
         (state.water_level - surface).abs() < 1e-9,
-        "waterLevel was {}, expected the 8/9 surface {surface}",
+        "the water-level field was {}, expected the 8/9 surface {surface}",
         state.water_level
     );
 }
 
-/// `setPaddleState(inputRight && !inputLeft || inputUp, inputLeft && !inputRight || inputUp)`.
+/// Vanilla's own set-paddle-state step: `(inputRight && !inputLeft || inputUp, inputLeft && !inputRight || inputUp)`.
 ///
 /// **The left paddle animates on the *right* key**, and a transposition of two
 /// adjacent booleans survives every round trip through our own encoder. So each
@@ -462,7 +466,7 @@ fn the_horse_jump_ramp_peaks_at_ten_ticks_and_then_decays() {
     assert!((jump_riding_scale(9) - jump_riding_scale(11)).abs() < 1e-6);
 }
 
-/// `PlayerRideableJumping.getPlayerJumpPendingScale`: the floor is **0.4**, not
+/// Vanilla's own "get player jump pending scale" step: the floor is **0.4**, not
 /// zero, and the ceiling clamps at a boost of 90 rather than 100.
 #[test]
 fn the_jump_boost_byte_maps_onto_a_scale_with_a_floor_of_four_tenths() {
@@ -476,7 +480,7 @@ fn the_jump_boost_byte_maps_onto_a_scale_with_a_floor_of_four_tenths() {
     assert!((player_jump_pending_scale(100) - 1.0).abs() < 1e-6);
 }
 
-/// `AbstractHorse.getRiddenInput`'s three clauses, each at an input where it is
+/// Vanilla's own horse "get ridden input" step's three clauses, each at an input where it is
 /// the only one doing anything.
 #[test]
 fn a_horse_halves_sideways_input_and_quarters_reverse() {
@@ -501,9 +505,9 @@ fn a_horse_halves_sideways_input_and_quarters_reverse() {
 /// **`AbstractHorse`'s rule is not universal**, and this is the gate for the
 /// override that makes a pig un-steerable.
 ///
-/// `Pig.getRiddenInput` and `Strider.getRiddenInput` both return a bare
-/// `new Vec3(0.0, 0.0, 1.0)` and never look at the controller, so no key input
-/// reaches them. The wrong hypothesis — reading `AbstractHorse`'s rule for the
+/// Vanilla's own pig and strider "get ridden input" steps both return a bare
+/// forward-only vector and never look at the controller, so no key input
+/// reaches them. The wrong hypothesis — reading the horse family's rule for the
 /// whole family — is computed alongside, because at a forward-only input the two
 /// **agree** and only a sideways or reverse input separates them.
 #[test]
@@ -534,7 +538,7 @@ fn a_pig_and_a_strider_ignore_their_riders_keys_entirely() {
     }
 }
 
-/// `getRiddenSpeed`'s three arms, predicted from the literals.
+/// Vanilla's own "get ridden speed" step's three arms, predicted from the literals.
 ///
 /// The pig scale (`0.225`) and the strider's (`0.55`) are the reason reading one
 /// rule for the family is not a rounding error: at the same attribute a pig moves
@@ -585,13 +589,13 @@ fn the_ridden_speed_scales_differ_by_family() {
     );
 }
 
-/// `AbstractBoat.clampRotation`: ±105° of the boat's heading, on the **wrapped**
+/// Vanilla's own clamp-rotation step: ±105° of the boat's heading, on the **wrapped**
 /// difference.
 #[test]
 fn a_boat_clamps_its_riders_yaw_to_a_window_around_its_own_heading() {
     // Inside the window: untouched.
     assert!((clamp_rider_yaw(50.0, 0.0) - 50.0).abs() < 1e-6);
-    // Outside: `wrapDegrees(200 - 0)` is **-160**, not 200, so the clamp pulls the
+    // Outside: vanilla's own degree-wrapping step applied to `200 - 0` is **-160**, not 200, so the clamp pulls the
     // rider to -105 and the returned yaw is `200 + (-105 - -160)` = 255. Reading
     // the difference unwrapped would clamp to +105 and give 105 — the opposite
     // direction, and a plausible-looking number.
@@ -618,7 +622,7 @@ fn a_boat_clamps_its_riders_yaw_to_a_window_around_its_own_heading() {
 /// `getWaterLevelAbove() - bbHeight + 0.101` and kills the vertical velocity.
 ///
 /// This is the clause that makes a dropped boat *land* on the surface rather than
-/// bobbing up through it over several ticks, and it is an edge on `oldStatus` — so
+/// bobbing up through it over several ticks, and it is an edge on the previous-status field — so
 /// it needs two ticks to observe, not one.
 #[test]
 fn a_boat_falling_into_water_snaps_to_the_surface_and_stops_descending() {
@@ -626,7 +630,7 @@ fn a_boat_falling_into_water_snaps_to_the_surface_and_stops_descending() {
     // Tick one in the void establishes `oldStatus = IN_AIR` and one tick of fall.
     // The start height is chosen so the *next* tick's floor sits below the 8/9
     // surface at 63.888889 — 63.92 minus one tick of 0.04 gravity is 63.88, and
-    // `checkInWater`'s test is a strict `bb.minY < surface`, so a boat that ends
+    // vanilla's own "check in water" step's test is a strict `bb.minY < surface`, so a boat that ends
     // the tick at 63.89 is still classified IN_AIR and this gate would measure
     // nothing.
     let mut motion = EntityMotion::at(Vec3d::new(0.5, 63.92, 0.5));
@@ -643,7 +647,7 @@ fn a_boat_falling_into_water_snaps_to_the_surface_and_stops_descending() {
     );
     assert_eq!(state.status, Some(BoatStatus::InAir), "premise check");
 
-    // Tick two, now over water. `getWaterLevelAbove` scans from the roof upward
+    // Tick two, now over water. Vanilla's own "get water level above" step scans from the roof upward
     // for the first layer that is not full water; with the surface at y = 64 the
     // roof already sits in air, so the first non-full layer is the roof's own and
     // its water height is 0 — giving `64 - 0.5625 + 0.101`.
@@ -663,7 +667,7 @@ fn a_boat_falling_into_water_snaps_to_the_surface_and_stops_descending() {
         Some(BoatStatus::InWater),
         "the entry branch reclassifies unconditionally, whether or not the snap fit"
     );
-    // `getWaterLevelAbove` scans upward from the roof (which is already in air at
+    // Vanilla's own "get water level above" step scans upward from the roof (which is already in air at
     // y = 64) for the first layer that is not full water; that layer's own water
     // height is 0, so the answer is a flat 64.0 and the target is
     // `64 - 0.5625 + 0.101`. Predicted exactly rather than as a direction.
@@ -689,7 +693,8 @@ fn a_boat_falling_into_water_snaps_to_the_surface_and_stops_descending() {
     );
     assert!(
         state.last_yd.abs() < 1e-9,
-        "…and lastYd with it, or the next getWaterLevelAbove scans a widened range"
+        "…and its own last-vertical-speed field with it, or the next call to \
+         vanilla's own \"get water level above\" step scans a widened range"
     );
 }
 
@@ -699,8 +704,9 @@ fn a_boat_falling_into_water_snaps_to_the_surface_and_stops_descending() {
 ///
 /// # The two hypotheses, and why they are far apart
 ///
-/// `floatBoat`'s `invFriction` is `landFriction` on `ON_LAND` and `0.9F` on
-/// `IN_AIR` — and `IN_AIR`'s `0.9` is the *same number* `IN_WATER` uses, so a
+/// Vanilla's own float-boat step's drag factor is its own land-friction field
+/// on `ON_LAND` and `0.9F` on `IN_AIR` — and `IN_AIR`'s `0.9` is the *same
+/// number* `IN_WATER` uses, so a
 /// classification that falls through to `IN_AIR` produces a boat that behaves
 /// exactly as if it were afloat. That is the owner-reported symptom ("riding a
 /// boat on land keeps it super fast, as if I'm in the water") and it is not a
@@ -708,7 +714,7 @@ fn a_boat_falling_into_water_snaps_to_the_surface_and_stops_descending() {
 /// `v <- v * 0.6 + 0.04` and `v <- v * 0.9 + 0.04`, separate by a factor of
 /// about 1.7, and the terminal speeds by a factor of four.
 ///
-/// The cause was a double block offset in `getGroundFriction`'s probe: the boxes
+/// The cause was a double block offset in vanilla's own "get ground friction" step's probe: the boxes
 /// `CollisionView::collision_boxes` yields are already world-space, and offsetting
 /// them again by `(x, y, z)` put every candidate at roughly twice its height,
 /// where nothing can meet a 1 mm slab under the hull. The touch count stayed `0`,
@@ -727,9 +733,10 @@ fn a_boat_on_ground_classifies_on_land_and_drags_with_that_blocks_friction() {
         ..BoatInput::default()
     };
 
-    // Both recurrences derived here from the vanilla constants, not from the code
-    // under test: `floatBoat` drags first and `controlBoat` adds the impulse
-    // after, so `v <- v * invFriction + accel` under either classification.
+    // Both recurrences derived here from the vanilla constants, not from the
+    // code under test: vanilla's own float-boat step drags first and its own
+    // control-boat step adds the impulse after, so `v <- v * drag_factor +
+    // accel` under either classification.
     let accel = forward_accel();
     let mut on_land = 0.0_f64;
     let mut in_air = 0.0_f64;
@@ -752,19 +759,21 @@ fn a_boat_on_ground_classifies_on_land_and_drags_with_that_blocks_friction() {
             state.status,
             Some(BoatStatus::OnLand),
             "tick {tick}: a boat resting on solid ground must classify ON_LAND; it \
-             classified {:?}, and IN_AIR's own invFriction is water's 0.9",
+             classified {:?}, and IN_AIR's own drag factor is water's 0.9",
             state.status
         );
         // Read **after** the tick, so this is the post-halving value:
-        // `getStatus` latches `landFriction = getGroundFriction()` and
-        // `floatBoat` then uses it and halves it, because a player is aboard.
-        // The halving is not cumulative across ticks -- the next `getStatus`
-        // re-latches the block's own `0.6` -- so the *drag* is `0.6` every tick
+        // vanilla's own "get status" step latches its own land-friction field
+        // from its own "get ground friction" step, and its own float-boat step
+        // then uses it and halves it, because a player is aboard.
+        // The halving is not cumulative across ticks -- the next call to
+        // vanilla's own "get status" step re-latches the block's own `0.6` --
+        // so the *drag* is `0.6` every tick
         // and only this residue is halved. Asserting `0.6` here would be
         // asserting the wrong side of that order.
         assert!(
             (state.land_friction - DEFAULT_BLOCK_FRICTION / 2.0).abs() < 1e-6,
-            "tick {tick}: landFriction must latch the block's own 0.6 and then \
+            "tick {tick}: the land-friction field must latch the block's own 0.6 and then \
              halve for the player aboard, got {}",
             state.land_friction
         );
@@ -773,8 +782,9 @@ fn a_boat_on_ground_classifies_on_land_and_drags_with_that_blocks_friction() {
     // 0.0954... on land against 0.163804 in air/water -- the wrong hypothesis is
     // 1.7x the right one here, and four times it at terminal speed.
     // `1e-6`, not the water gate's `1e-12`, and the difference is real rather
-    // than slack: water's `invFriction` is the literal `0.9F`, while land's is an
-    // `f32` **mean** -- `getGroundFriction` sums `0.6F` over however many cells
+    // than slack: water's drag factor is the literal `0.9F`, while land's is
+    // an `f32` **mean** -- vanilla's own "get ground friction" step sums
+    // `0.6F` over however many cells
     // the hull touches and divides by an `int` count -- so its exact value
     // depends on the summation order and lands about `1e-7` off a clean `0.6`.
     // The two hypotheses here are `0.07` apart, so this tolerance is still five
