@@ -3,29 +3,28 @@
 //!
 //! # Why gating by mob type is mandatory, not a nicety
 //!
-//! 1.8's DataWatcher indices are reused across unrelated classes exactly like
-//! every later version's `EntityDataAccessor` registry is — index 12 is
-//! `EntityAgeable`'s clamped baby byte (`-1`/`0`/`1`) for the animal family
-//! *and*, completely independently, `EntityZombie`'s plain boolean baby byte
-//! (`0`/`1`) for the undead family. Interpreting index 12 the same way for
-//! both would read a zombie's `1` (baby) as an ageable "adult" (only negative
-//! means baby there), and an ageable animal's `-1` would never occur on a
-//! zombie at all — the two encodings are different, not just the semantics.
-//! A per-mob-type [`MobProfile`] is how this module avoids that trap.
+//! 1.8's index-keyed metadata list reuses indices across unrelated mob
+//! families exactly like every later version's keyed metadata registry
+//! does — index 12 is the animal family's clamped baby byte (`-1`/`0`/`1`)
+//! *and*, completely independently, the undead family's plain boolean baby
+//! byte (`0`/`1`). Interpreting index 12 the same way for both would read a
+//! zombie's `1` (baby) as an animal-family "adult" (only negative means baby
+//! there), and an animal's `-1` would never occur on a zombie at all — the
+//! two encodings are different, not just the semantics. A per-mob-type
+//! [`MobProfile`] is how this module avoids that trap.
 //!
 //! # Evidence
 //!
 //! 1.8 predates Mojang's data generator and `minecraft-data`'s `pc/1.8`
 //! bundle carries no per-index metadata schema (checked: `entities.json` has
-//! only id/name/category, nothing about the DataWatcher). The decompile
+//! only id/name/category, nothing about the per-index layout). The decompile
 //! under `.cache/mc/26.2` is the *wrong version* — 1.8's indices are not
-//! 26.2's. The source used here is Spigot/CraftBukkit's deobfuscated 1.8.8
-//! (`v1_8_R3`) NMS source (`net.minecraft.server.v1_8_R3.Entity`,
-//! `.EntityLiving`, `.EntityInsentient`, `.EntityAgeable`,
-//! `.EntityTameableAnimal`, and each concrete mob class), which is a real,
-//! class-named decompile of the exact historical build rather than a
-//! transcription — `DataWatcher.addObject`/`.watch`/`.getByte` call sites
-//! name both the index and the field it backs directly.
+//! 26.2's. The source used here is a deobfuscated 1.8.8 server-side
+//! decompile of the base entity class and its living/mob/ageable/tameable
+//! subclasses, plus each concrete mob class — a real, class-named decompile
+//! of the exact historical build rather than a transcription, whose
+//! index-registration call sites name both the index and the field it backs
+//! directly.
 //!
 //! Every index below was then **independently cross-checked against a real
 //! vanilla 1.8.9 server**: `/summon` with explicit NBT (`IsBaby:1`,
@@ -39,13 +38,12 @@
 //! `byte & 0x10` = sheared) and the zombie-vs-ageable baby encoding
 //! difference the module doc above describes. Also confirmed live, and
 //! important for *not* replicating a v770-only workaround: 1.8's
-//! `spawn_entity_living` always carries **every** registered DataWatcher
-//! entry, defaults included (`DataWatcher.a(PacketDataSerializer)` iterates
-//! every entry unconditionally, unlike the incremental packet's
-//! `DataWatcher.b()`, which filters to dirty ones only) — a freshly spawned
-//! white unsheared sheep really does carry an explicit index-16 `0` on the
-//! wire, confirmed live. So unlike 26.2's adapter, **no default-value
-//! synthesis is needed here** for spawn.
+//! `spawn_entity_living` always carries **every** registered metadata entry,
+//! defaults included (the full-list encoder iterates every entry
+//! unconditionally, unlike the incremental packet's encoder, which filters
+//! to dirty ones only) — a freshly spawned white unsheared sheep really does
+//! carry an explicit index-16 `0` on the wire, confirmed live. So unlike
+//! 26.2's adapter, **no default-value synthesis is needed here** for spawn.
 //!
 //! # What is deliberately left out
 //!
@@ -92,46 +90,46 @@ use lodestone_model::{EntityMetadataUpdate, EntityVariant, Reported, Text};
 use crate::packets::metadata::{EntityMetadata, MetadataEntry, MetadataValue};
 
 // ---------------------------------------------------------------------------
-// `Entity` / `EntityLiving` / `EntityInsentient` base indices.
+// Base-entity / living / mob indices.
 //
 // Every 1.8 mob-spawn type (all 34 entries in `entity_types::MOB_TYPES`)
-// extends this exact chain — `Entity` -> `EntityLiving` -> `EntityInsentient`
-// — so these indices carry the same meaning for every mob and need no
-// per-type gating. Confirmed against the `Entity.java`/`EntityLiving.java`/
-// `EntityInsentient.java` DataWatcher registrations and live spawn captures.
+// extends this exact base-entity -> living -> mob class chain — so these
+// indices carry the same meaning for every mob and need no per-type gating.
+// Confirmed against the base entity, living-entity and mob class's index
+// registrations and live spawn captures.
 // ---------------------------------------------------------------------------
 
-/// `Entity`'s shared flags byte: on-fire / crouched / (unused) / sprinting /
-/// using-item / invisible.
+/// The base entity class's shared flags byte: on-fire / crouched / (unused) /
+/// sprinting / using-item / invisible.
 const IDX_ENTITY_FLAGS: u8 = 0;
-/// `Entity`'s air-supply short.
+/// The base entity class's air-supply short.
 const IDX_AIR: u8 = 1;
-/// `Entity`'s custom-name string (empty when unset).
+/// The base entity class's custom-name string (empty when unset).
 const IDX_CUSTOM_NAME: u8 = 2;
-/// `Entity`'s custom-name-visible byte.
+/// The base entity class's custom-name-visible byte.
 const IDX_CUSTOM_NAME_VISIBLE: u8 = 3;
-/// `EntityLiving`'s health float.
+/// The living-entity class's health float.
 const IDX_HEALTH: u8 = 6;
-/// `EntityInsentient`'s No-AI byte (`0` = has AI, non-zero = `/summon
+/// The mob class's No-AI byte (`0` = has AI, non-zero = `/summon
 /// {NoAI:1}`).
 const IDX_NO_AI: u8 = 15;
 
-/// 1.8 `Entity` flags bit: on fire.
+/// 1.8 base-entity flags bit: on fire.
 const ENTITY_ON_FIRE: u8 = 0x01;
-/// 1.8 `Entity` flags bit: crouched / sneaking.
+/// 1.8 base-entity flags bit: crouched / sneaking.
 const ENTITY_CROUCHED: u8 = 0x02;
-/// 1.8 `Entity` flags bit: sprinting.
+/// 1.8 base-entity flags bit: sprinting.
 const ENTITY_SPRINTING: u8 = 0x08;
-/// 1.8 `Entity` flags bit: eating / drinking / blocking (`EntityHuman.a`,
-/// set/cleared around the active-item field) — this is 1.8's using-item bit,
-/// but it lives in the *shared* flags byte, unlike modern versions where
-/// using-item moved to `LivingEntity`'s own byte. Translated below into
-/// [`EntityMetadataUpdate::living_flags`], never into
+/// 1.8 base-entity flags bit: eating / drinking / blocking (set/cleared
+/// around the player class's active-item field) — this is 1.8's using-item
+/// bit, but it lives in the *shared* flags byte, unlike modern versions
+/// where using-item moved to the living-entity's own byte. Translated below
+/// into [`EntityMetadataUpdate::living_flags`], never into
 /// [`EntityMetadataUpdate::flags`] — **not** a passthrough, because this bit
 /// position (`0x10`) means `SWIMMING` in the canonical shared-flags byte, an
 /// entirely different modern concept 1.8 does not have.
 const ENTITY_USING_ITEM: u8 = 0x10;
-/// 1.8 `Entity` flags bit: invisible.
+/// 1.8 base-entity flags bit: invisible.
 const ENTITY_INVISIBLE: u8 = 0x20;
 
 /// Canonical `SharedEntityFlags` bit: on fire (`lodestone_entity::metadata`).
@@ -152,49 +150,49 @@ const MOB_NO_AI: u8 = 0x01;
 const MOB_AGGRESSIVE: u8 = 0x04;
 
 // ---------------------------------------------------------------------------
-// Class-specific indices. Each constant's doc names the concrete class it
-// was read from and confirmed on.
+// Class-specific indices. Each constant's doc names the concrete mob family
+// it was read from and confirmed on.
 // ---------------------------------------------------------------------------
 
-/// `EntityAgeable`'s clamped age byte (`-1` = baby, `0`/`1` = adult), shared
-/// by every animal-family type plus `EntityVillager` (which extends
-/// `EntityAgeable` directly rather than `EntityAnimal`).
+/// The animal-family class's clamped age byte (`-1` = baby, `0`/`1` =
+/// adult), shared by every animal-family type plus the villager class
+/// (which extends the same ageable class directly rather than the plain
+/// animal class).
 const IDX_AGEABLE_AGE: u8 = 12;
 
-/// `EntityTameableAnimal`'s flags byte: bit `0x01` sitting, bit `0x04` tamed.
-/// Wolf and ozelot share this index and these two bits exactly.
+/// The tameable-animal class's flags byte: bit `0x01` sitting, bit `0x04`
+/// tamed. Wolf and ozelot share this index and these two bits exactly.
 const IDX_TAMEABLE_FLAGS: u8 = 16;
 const TAMEABLE_SITTING: u8 = 0x01;
 const TAMEABLE_TAMED: u8 = 0x04;
 
-/// `EntitySheep`'s dyed-wool byte: low nibble is the dye ordinal (`0..=15`),
-/// bit `0x10` is sheared.
+/// The sheep class's dyed-wool byte: low nibble is the dye ordinal
+/// (`0..=15`), bit `0x10` is sheared.
 const IDX_SHEEP_WOOL: u8 = 16;
 const SHEEP_SHEARED: u8 = 0x10;
 const SHEEP_COLOR_MASK: u8 = 0x0F;
 
-/// `EntityZombie`'s baby byte — a **plain boolean** (`getByte(12) == 1`),
-/// unlike `EntityAgeable`'s clamped sign byte at the same index. Shared by
-/// `EntityPigZombie` (extends `EntityZombie`) but **not** `EntityGiantZombie`
-/// (extends `EntityMonster` directly — confirmed by class declaration, not
-/// assumed from the name).
+/// The zombie class's baby byte — a **plain boolean** (index 12 equal to
+/// `1`), unlike the animal-family class's clamped sign byte at the same
+/// index. Shared by the zombie-pigman class (extends the zombie class) but
+/// **not** the giant class (extends the monster base class directly —
+/// confirmed by class declaration, not assumed from the name).
 const IDX_ZOMBIE_BABY: u8 = 12;
 
-/// `EntityCreeper`'s swell-direction byte (`-1` idle, `1` counting up).
+/// The creeper class's swell-direction byte (`-1` idle, `1` counting up).
 const IDX_CREEPER_STATE: u8 = 16;
-/// `EntityCreeper`'s powered byte.
+/// The creeper class's powered byte.
 const IDX_CREEPER_POWERED: u8 = 17;
-/// `EntityCreeper`'s ignited byte.
+/// The creeper class's ignited byte.
 const IDX_CREEPER_IGNITED: u8 = 18;
 
-/// `EntityWitch`'s aggressive byte.
+/// The witch class's aggressive byte.
 const IDX_WITCH_AGGRESSIVE: u8 = 21;
 
-/// Which extra, class-specific fields (beyond the universal `Entity` /
-/// `EntityLiving` / `EntityInsentient` base) a mob type's metadata list may
-/// carry. Selected by [`profile_for`] from the mob's canonical type string,
-/// never guessed from the index alone — see the module doc's collision
-/// warning.
+/// Which extra, class-specific fields (beyond the universal base-entity /
+/// living-entity / mob base) a mob type's metadata list may carry. Selected
+/// by [`profile_for`] from the mob's canonical type string, never guessed
+/// from the index alone — see the module doc's collision warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MobProfile {
     /// Nothing beyond the universal base (e.g. skeleton, spider, enderman,
@@ -202,32 +200,32 @@ enum MobProfile {
     /// but none of them are raised into the canonical fold; see the module
     /// doc's "deliberately left out" section).
     Base,
-    /// `EntityAgeable`'s age byte only (pig, cow, chicken, mushroom cow,
-    /// rabbit, horse, villager).
+    /// The animal-family class's age byte only (pig, cow, chicken, mushroom
+    /// cow, rabbit, horse, villager).
     Ageable,
-    /// Ageable plus `EntityTameableAnimal`'s tamed/sitting bits (wolf,
+    /// Ageable plus the tameable-animal class's tamed/sitting bits (wolf,
     /// ozelot).
     Tameable,
-    /// Ageable plus `EntitySheep`'s dyed-wool byte.
+    /// Ageable plus the sheep class's dyed-wool byte.
     Sheep,
-    /// `EntityZombie`'s boolean baby byte (zombie, zombie pigman).
+    /// The zombie class's boolean baby byte (zombie, zombie pigman).
     ZombieBaby,
-    /// `EntityCreeper`'s state/powered/ignited trio.
+    /// The creeper class's state/powered/ignited trio.
     Creeper,
-    /// `EntityWitch`'s aggressive byte.
+    /// The witch class's aggressive byte.
     Witch,
 }
 
 /// Resolves a 1.8 canonical mob-type identifier (as produced by
 /// [`crate::entity_types::mob_type_name`]) to the extra metadata fields its
-/// class carries, per the Spigot `v1_8_R3` class hierarchy:
+/// class carries, per the historical server-side class hierarchy:
 ///
 /// ```text
-/// Entity -> EntityLiving -> EntityInsentient -> EntityCreature
-///   -> EntityAgeable -> EntityAnimal -> {pig, cow, chicken, sheep, rabbit, horse, ...}
-///                                    -> EntityTameableAnimal -> {wolf, ozelot}
-///   -> EntityAgeable -> EntityVillager
-///   -> EntityMonster -> {creeper, zombie, witch, skeleton, spider, ...}
+/// base entity -> living entity -> mob -> creature
+///   -> ageable -> animal -> {pig, cow, chicken, sheep, rabbit, horse, ...}
+///                        -> tameable animal -> {wolf, ozelot}
+///   -> ageable -> villager
+///   -> monster -> {creeper, zombie, witch, skeleton, spider, ...}
 /// ```
 ///
 /// A type not named here (including `minecraft:mob`/`minecraft:monster`,
@@ -521,7 +519,7 @@ mod tests {
 
     #[test]
     fn zombie_baby_uses_the_boolean_encoding_not_the_ageable_sign() {
-        // Same index (12) as EntityAgeable, but zombie's own boolean scheme:
+        // Same index (12) as the animal-family class, but zombie's own boolean scheme:
         // `1` is baby, and unlike Ageable a negative value never occurs.
         let baby = entries(&[(IDX_ZOMBIE_BABY, MetadataValue::Byte(1))]);
         assert_eq!(fold(Some("minecraft:zombie"), &baby).baby, Some(true));
@@ -529,18 +527,18 @@ mod tests {
         let adult = entries(&[(IDX_ZOMBIE_BABY, MetadataValue::Byte(0))]);
         assert_eq!(fold(Some("minecraft:zombie"), &adult).baby, Some(false));
 
-        // pig_zombie shares EntityZombie's own baby encoding.
+        // pig_zombie shares the zombie class's own baby encoding.
         assert_eq!(
             fold(Some("minecraft:pig_zombie"), &baby).baby,
             Some(true),
-            "pig_zombie inherits EntityZombie's baby byte"
+            "pig_zombie inherits the zombie class's baby byte"
         );
     }
 
     #[test]
     fn giant_does_not_inherit_zombie_baby_despite_the_name() {
-        // EntityGiantZombie extends EntityMonster directly (verified against
-        // the class declaration), NOT EntityZombie, so it must not read
+        // The giant class extends the monster base class directly (verified
+        // against the class declaration), NOT the zombie class, so it must not read
         // index 12 as a baby flag even though one is present on the wire.
         let md = entries(&[(IDX_ZOMBIE_BABY, MetadataValue::Byte(1))]);
         assert_eq!(fold(Some("minecraft:giant"), &md).baby, None);
