@@ -7,9 +7,10 @@
 //! # Data provenance
 //!
 //! `tests/support/item_prototype_jvm.txt` is an authoritative dump produced by
-//! booting the real 26.2 server and reading `Item.components()` for every one of
+//! booting the real 26.2 server and reading vanilla's own item "get components"
+//! accessor for every one of
 //! the 1,537 registered items (`ItemPrototypeOracle.java`, walking
-//! `BuiltInRegistries.ITEM`).
+//! vanilla's own item registry).
 //!
 //! These three components are **prototype** components: a clientbound
 //! `ItemStack` carries only the `DataComponentPatch` — the delta from the item's
@@ -80,15 +81,16 @@ struct Row {
     max_stack_size: u32,
     max_damage: Option<u32>,
     has_damage: bool,
-    /// `Equippable.slot().getSerializedName()`, or `None`.
+    /// Vanilla's own equippable component's slot field, serialized name form, or `None`.
     equip_slot: Option<String>,
     /// The raw `allowedEntities` column: `-` (any), `#tag` or `=a,b`.
     allowed_entities: String,
 }
 
-/// Maps vanilla's `EquipmentSlot.getSerializedName()` to the model enum.
+/// Maps vanilla's own equipment-slot enum's serialized-name accessor to the model enum.
 ///
-/// The names come from `EquipmentSlot`'s own enum-constant constructor arguments;
+/// The names come from vanilla's own equipment-slot enum's own enum-constant
+/// constructor arguments;
 /// an unknown one is a hard failure rather than a
 /// silent `None`, because "this item is not equippable" and "this build does not
 /// know that slot" must not look the same.
@@ -356,12 +358,12 @@ fn out_of_range_ids_are_none() {
     assert!(item_prototypes::prototype("minecraft:not_an_item").is_none());
 }
 
-/// `ItemStack.isDamageableItem` is `has(MAX_DAMAGE) && !has(UNBREAKABLE) &&
+/// Vanilla's own "is damageable item" check is `has(MAX_DAMAGE) && !has(UNBREAKABLE) &&
 /// has(DAMAGE)` — three components, not one. This
 /// pins that the first and third always agree in 26.2's prototypes, which is why
 /// [`lodestone_model::ItemPrototype`] carries only `max_damage`. If a future
 /// version separates them, this fails instead of the model quietly answering
-/// `isDamageableItem` wrong.
+/// "is damageable item" wrong.
 #[test]
 fn max_damage_and_damage_components_always_agree() {
     let rows = parse_dump(DUMP);
@@ -405,9 +407,9 @@ fn armour_declares_its_slot() {
 }
 
 /// `EquipmentSlot::Body` is animal armour and is **not** the chest slot. Vanilla
-/// gates humanoid armour on `EquipmentSlot.Type.HUMANOID_ARMOR`
-/// (`InventoryMenu.quickMoveStack`), which covers FEET/LEGS/CHEST/HEAD and excludes
-/// BODY (`EquipmentSlot`'s enum constants). A consumer that folds `"body"` into `Chest`
+/// gates humanoid armour on its own equipment-slot-type "humanoid armor" constant
+/// (its own inventory-menu "quick move stack" step), which covers FEET/LEGS/CHEST/HEAD and excludes
+/// BODY (vanilla's own equipment-slot enum's constants). A consumer that folds `"body"` into `Chest`
 /// makes wolf armour and horse armour placeable in a player's chestplate slot —
 /// this test is the record of which items would do it.
 #[test]
@@ -435,7 +437,7 @@ fn animal_armour_is_body_not_chest() {
     assert!(!saddle.equippable_by_any_entity);
 
     // Every entity-restricted item in 26.2 is in a non-humanoid slot, which is
-    // what lets `ItemPrototype` omit the `allowedEntities` set: the slot check
+    // what lets `ItemPrototype` omit the allowed-entities set: the slot check
     // already excludes it from any player armour slot. If a *humanoid*-slot item
     // ever gains a restriction, this fails and the set has to be carried.
     let rows = parse_dump(DUMP);
@@ -497,7 +499,8 @@ fn per_item_stack_caps_are_not_all_64() {
     );
 }
 
-/// `max_damage` gates `isDamageableItem` and therefore `isStackable`: without it
+/// `max_damage` gates vanilla's own "is damageable item" check and therefore its
+/// own "is stackable" check: without it
 /// two swords merge. These are the durabilities that stop that.
 #[test]
 fn damageable_items_carry_their_durability() {
