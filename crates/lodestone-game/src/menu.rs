@@ -48,7 +48,7 @@ pub enum MenuKind {
 /// A `menu_type`-specific slot **position** (and, in `lodestone-shell`,
 /// background art) descriptor, for the handful of screens whose panel isn't
 /// [`MenuKind::Generic`]'s plain left-to-right grid — the anvil, grindstone,
-/// smithing table and enchanting table (issues #253-#255).
+/// smithing table and enchanting table.
 ///
 /// Carried on [`Menu`] rather than in [`MenuKind`], for the same reason
 /// [`CraftLayout`] is: [`MenuKind`] is matched exhaustively in
@@ -72,75 +72,70 @@ pub enum SpecialLayout {
     Smithing,
     /// `EnchantmentMenu`: slots at `(15,47)`, `(35,47)`.
     Enchanting,
-    /// `FurnaceMenu` (wire `menu_type` `furnace`): ingredient `(56,17)`, fuel
-    /// `(56,53)`, result `(116,35)` — `FurnaceMenu.java` (via
-    /// `AbstractFurnaceMenu.java:63-65`). A separate variant from
+    /// Vanilla's own furnace menu (wire `menu_type` `furnace`): ingredient `(56,17)`, fuel
+    /// `(56,53)`, result `(116,35)`. A separate variant from
     /// [`BlastFurnace`](Self::BlastFurnace)/[`Smoker`](Self::Smoker) purely
     /// for the background sheet: all three share these exact slot
-    /// coordinates (`AbstractFurnaceMenu` is the common constructor), but
+    /// coordinates (a shared base class provides the common constructor), but
     /// `furnace.png`/`blast_furnace.png`/`smoker.png` are three different
-    /// textures with three differently-named progress sprites
-    /// (issue #28).
+    /// textures with three differently-named progress sprites.
     Furnace,
-    /// `BlastFurnaceMenu` (wire `menu_type` `blast_furnace`). Same three slot
+    /// Vanilla's own blast-furnace menu (wire `menu_type` `blast_furnace`). Same three slot
     /// coordinates as [`Furnace`](Self::Furnace); see its doc comment for why
     /// this is still a separate variant.
     BlastFurnace,
-    /// `SmokerMenu` (wire `menu_type` `smoker`). Same three slot coordinates
+    /// Vanilla's own smoker menu (wire `menu_type` `smoker`). Same three slot coordinates
     /// as [`Furnace`](Self::Furnace); see its doc comment for why this is
     /// still a separate variant.
     Smoker,
-    /// `BrewingStandMenu`: potion slots `(56,51)`, `(79,58)`, `(102,51)`,
-    /// ingredient `(79,17)`, fuel `(17,17)` — `BrewingStandMenu.java:48-52`.
+    /// Vanilla's own brewing-stand menu: potion slots `(56,51)`, `(79,58)`, `(102,51)`,
+    /// ingredient `(79,17)`, fuel `(17,17)`.
     Brewing,
-    /// `LoomMenu`: banner `(13,26)`, dye `(33,26)`, pattern `(23,45)`, result
-    /// `(143,57)` — `LoomMenu.java`. **Stale, corrected**: this used to say
+    /// Vanilla's own loom menu: banner `(13,26)`, dye `(33,26)`, pattern `(23,45)`, result
+    /// `(143,57)`. **Stale, corrected**: this used to say
     /// the pattern-selection button grid was unmodelled, needing a banner
     /// pattern registry and a `ContainerButtonClick` producer this tree
     /// lacked. Both now exist — `lodestone-server`'s `loom` module computes
     /// real results and `lodestone-shell`'s `container::loom` is the click
     /// surface; see `docs/container-station-widgets.md`.
     Loom,
-    /// `StonecutterMenu`: input `(20,33)`, result `(143,33)` —
-    /// `StonecutterMenu.java`. **Stale, corrected**: this used to say the
+    /// Vanilla's own stonecutter menu: input `(20,33)`, result `(143,33)`.
+    /// **Stale, corrected**: this used to say the
     /// recipe-selection scroll list was unmodelled, needing server-only
     /// recipe data this tree lacked. It now loads through the same
     /// jar-sourced `RecipeBook` the crafting recipe book uses, and
     /// `lodestone-shell`'s `container::stonecutter` is the click surface;
     /// see `docs/container-station-widgets.md`.
     Stonecutter,
-    /// `CartographyTableMenu`: map `(15,15)`, additional `(15,52)`, result
-    /// `(145,39)` — `CartographyTableMenu.java:49-61`.
+    /// Vanilla's own cartography-table menu: map `(15,15)`, additional `(15,52)`, result
+    /// `(145,39)`.
     Cartography,
-    /// `DispenserMenu` (wire `menu_type` `generic_3x3`, shared by the
+    /// Vanilla's own dispenser menu (wire `menu_type` `generic_3x3`, shared by the
     /// dispenser **and** the dropper — vanilla ships no `dropper.png` or
-    /// `DropperScreen`; `MenuScreens.java:82` registers `GENERIC_3x3` to
-    /// `DispenserScreen` alone): a 3×3 grid at `(62,17)`, step `18` —
-    /// `DispenserMenu.java:26,30-37`.
+    /// its own dropper screen; its own screen-registration table maps
+    /// `GENERIC_3x3` to
+    /// the dispenser screen alone): a 3×3 grid at `(62,17)`, step `18`.
     Dispenser,
-    /// `HopperMenu`: five slots in a row at `(44,20)`, step `18` —
-    /// `HopperMenu.java:24`. Not one of the container types issue #28's own
-    /// body names, but found while fixing the doc that (incorrectly) claimed
-    /// this one had nowhere to go: `HopperScreen` is a real, *shorter*
-    /// screen — `imageHeight = 133`, not `166`
-    /// (`HopperScreen.java:15`, via `super(menu, inventory, title, 176,
-    /// 133)`) — so a hopper drawing `generic_54`'s ordinary chest sheet was
-    /// exactly this issue's own class of defect: a plausible but wrong
+    /// Vanilla's own hopper menu: five slots in a row at `(44,20)`, step `18`.
+    /// Found while fixing a doc that (incorrectly) claimed
+    /// this one had nowhere to go: vanilla's own hopper screen is a real, *shorter*
+    /// screen — `imageHeight = 133`, not `166` — so a hopper drawing `generic_54`'s ordinary chest sheet was
+    /// exactly the same class of defect: a plausible but wrong
     /// screen, not a missing one.
     Hopper,
-    /// `MerchantMenu`: payment slots `(136,37)`, `(162,37)`, take-only result
-    /// `(220,37)` — `MerchantMenu.java:42-45`. The **only** special layout
+    /// Vanilla's own merchant menu: payment slots `(136,37)`, `(162,37)`, take-only result
+    /// `(220,37)`. The **only** special layout
     /// whose player-inventory section is not at `x = 8`:
-    /// `MerchantMenu.java:45`'s `addStandardInventorySlots(inventory, 108,
-    /// 84)` starts it at `x = 108`, and the panel itself is `276` wide, not
-    /// `176` (`MerchantScreen.java:57`). The trade **list** — seven scrollable
+    /// vanilla's own inventory-slot placement step
+    /// starts it at `x = 108`, and the panel itself is `276` wide, not
+    /// `176`. The trade **list** — seven scrollable
     /// rows of cost/result icons that are not menu slots at all, vanilla's own
     /// `ItemStack`s rendered as "fake items" — is not part of this layout;
     /// see `lodestone_shell::container::merchant`.
     Merchant,
-    /// `BeaconMenu`: one payment slot at `(136,110)`, panel `230×219`
-    /// (`BeaconMenu.java:50-53`) — `addStandardInventorySlots(inventory, 36,
-    /// 137)` puts the player section at `x = 36` rather than the usual `8`,
+    /// Vanilla's own beacon menu: one payment slot at `(136,110)`, panel `230×219`
+    /// — its own inventory-slot placement step
+    /// puts the player section at `x = 36` rather than the usual `8`,
     /// the second special layout (after [`Merchant`](Self::Merchant)) whose
     /// player section is not left-aligned. The primary/secondary power
     /// buttons and the confirm/cancel controls are not menu slots at all —
@@ -188,15 +183,14 @@ impl CraftLayout {
 /// Native size of the player inventory container (hotbar+main+armour+offhand).
 pub const PLAYER_NATIVE_SIZE: usize = 41;
 /// Menu index of the 2×2 crafting result on the player's own inventory screen
-/// (vanilla `InventoryMenu.RESULT_SLOT`).
+/// (vanilla's own player-inventory result-slot constant).
 pub const PLAYER_RESULT_SLOT: usize = 0;
 /// Native index of the off-hand slot within the player inventory.
 pub const OFFHAND_NATIVE: usize = 40;
 /// Sentinel slot index for a click outside any slot (drop).
 pub const OUTSIDE_SLOT: i32 = -999;
 
-/// The empty-slot sprites the player inventory declares, from
-/// `InventoryMenu.java:29-33`.
+/// The empty-slot sprites the player inventory declares.
 ///
 /// **These are the 26.2 identifiers, and they are not what the pre-1.21.2 name
 /// suggests.** `EMPTY_ARMOR_SLOT_HELMET` is the *Java constant's* name; its value
@@ -217,10 +211,10 @@ pub const EMPTY_ARMOR_SLOT_LEGGINGS: &str = "container/slot/leggings";
 /// See [`EMPTY_ARMOR_SLOT_HELMET`].
 pub const EMPTY_ARMOR_SLOT_BOOTS: &str = "container/slot/boots";
 /// See [`EMPTY_ARMOR_SLOT_HELMET`]. The off-hand slot, whose anonymous subclass
-/// overrides `getNoItemIcon` (`InventoryMenu.java:68-72`).
+/// overrides vanilla's own no-item-icon getter.
 pub const EMPTY_ARMOR_SLOT_SHIELD: &str = "container/slot/shield";
-/// The enchanting table's lapis slot empty-icon (`EnchantmentMenu.java:33`,
-/// `EMPTY_SLOT_LAPIS_LAZULI`). See [`EMPTY_ARMOR_SLOT_HELMET`] for why this is
+/// The enchanting table's lapis slot empty-icon, vanilla's own
+/// `EMPTY_SLOT_LAPIS_LAZULI`. See [`EMPTY_ARMOR_SLOT_HELMET`] for why this is
 /// a constant rather than inferred from the slot index.
 pub const EMPTY_SLOT_LAPIS_LAZULI: &str = "container/slot/lapis_lazuli";
 
@@ -281,7 +275,7 @@ impl Menu {
             slots.push(Slot::normal(0, native)); // 36..=44 hotbar
         }
         // 45 offhand. Vanilla builds this as a plain `Slot` with an anonymous
-        // subclass overriding `getNoItemIcon` (`InventoryMenu.java:64-73`); the
+        // subclass overriding its own no-item-icon getter; the
         // shield sprite is the whole of that override.
         slots.push(
             Slot::of(0, OFFHAND_NATIVE, SlotKind::Offhand)
@@ -310,7 +304,7 @@ impl Menu {
     /// Builds a crafting-table menu: a take-only result slot, a `width × height`
     /// input grid, then the player's main storage and hotbar.
     ///
-    /// Vanilla's `CraftingMenu` is `0` result, `1..=9` grid, `10..=36` main,
+    /// Vanilla's own crafting-table menu is `0` result, `1..=9` grid, `10..=36` main,
     /// `37..=45` hotbar — **positionally identical** to
     /// [`generic`](Self::generic) with a container size of `1 + width * height`,
     /// which is why the [`MenuKind`] stays `Generic`: the size a
@@ -431,11 +425,10 @@ impl Menu {
     }
 
     /// Builds the enchanting table menu: an item slot, a lapis-only currency
-    /// slot, then the player's main storage and hotbar
-    /// (`EnchantmentMenu.java:55-72`). Positionally identical to
+    /// slot, then the player's main storage and hotbar.
+    /// Positionally identical to
     /// [`generic`](Self::generic) with a container size of 2 — confirmed
-    /// against `EnchantmentMenu.quickMoveStack`'s own `moveItemStackTo(stack,
-    /// 2, 38, true)` — so [`MenuKind`] stays `Generic` here too; there is no
+    /// against vanilla's own quick-move step for this menu — so [`MenuKind`] stays `Generic` here too; there is no
     /// take-only result slot to mark, only a placement restriction on slot 1.
     ///
     /// The three enchantment **costs**, the level-requirement clues and the
@@ -457,10 +450,10 @@ impl Menu {
     /// [`SpecialLayout::Furnace`]/[`SpecialLayout::BlastFurnace`]/
     /// [`SpecialLayout::Smoker`] — all three are the same three slots, only
     /// the background art differs): ingredient, fuel, then a take-only
-    /// result slot at menu index 2 (`AbstractFurnaceMenu.java:63-65`),
+    /// result slot at menu index 2,
     /// followed by the player's main storage and hotbar.
     ///
-    /// The fuel/smeltable routing `AbstractFurnaceMenu.quickMoveStack` does
+    /// The fuel/smeltable routing vanilla's own furnace-family quick-move step does
     /// by item kind is deliberately not modelled — see
     /// [`crate::menus::build_menu`]'s doc comment ("two families are
     /// genuinely different and are knowingly left on the generic order").
@@ -486,9 +479,9 @@ impl Menu {
 
     /// Builds the brewing stand menu: three potion slots (`0..3`), an
     /// ingredient slot (`3`), a fuel slot (`4`), then the player's main
-    /// storage and hotbar (`BrewingStandMenu.java:48-54`).
+    /// storage and hotbar.
     ///
-    /// `BrewingStandMenu.quickMoveStack` routes by item kind (blaze
+    /// Vanilla's own brewing-stand quick-move step routes by item kind (blaze
     /// powder/ingredient/potion), which is the same "genuinely different,
     /// left on generic order" gap [`furnace`](Self::furnace) and
     /// [`crate::menus::build_menu`]'s doc comment both name — it needs the
@@ -505,7 +498,7 @@ impl Menu {
 
     /// Builds the loom menu: banner (`0`), dye (`1`), pattern (`2`), then a
     /// take-only result slot (`3`), then the player's main storage and
-    /// hotbar (`LoomMenu.java`).
+    /// hotbar.
     ///
     /// **Stale, corrected**: this used to say the banner-pattern selection
     /// grid was not modelled here at all. That was true when written and is
@@ -527,10 +520,9 @@ impl Menu {
     }
 
     /// Builds the stonecutter menu: an input slot (`0`) and a take-only
-    /// result slot (`1`), then the player's main storage and hotbar
-    /// (`StonecutterMenu.java:54-56`).
+    /// result slot (`1`), then the player's main storage and hotbar.
     ///
-    /// The recipe-selection scroll list (`StonecutterMenu.clickMenuButton`)
+    /// The recipe-selection scroll list (vanilla's own menu-button click handler)
     /// is not modelled — see [`SpecialLayout::Stonecutter`]'s doc comment.
     #[must_use]
     pub fn stonecutter() -> Self {
@@ -544,8 +536,7 @@ impl Menu {
 
     /// Builds the cartography table menu: a map slot (`0`), an additional
     /// (paper/map/glass-pane) slot (`1`), then a take-only result slot
-    /// (`2`), then the player's main storage and hotbar
-    /// (`CartographyTableMenu.java:49-89`).
+    /// (`2`), then the player's main storage and hotbar.
     #[must_use]
     pub fn cartography_table() -> Self {
         let mut menu = Self::generic(3);
@@ -557,9 +548,9 @@ impl Menu {
     }
 
     /// Builds a dispenser/dropper menu: a 3×3 grid (`0..9`), then the
-    /// player's main storage and hotbar (`DispenserMenu.java:26-37`).
+    /// player's main storage and hotbar.
     /// Mechanically identical to [`generic`](Self::generic) — no slot kind
-    /// changes, `DispenserMenu.quickMoveStack` is the same "container then
+    /// changes, vanilla's own dispenser quick-move step is the same "container then
     /// player" shape [`crate::menus::build_menu`]'s doc comment already
     /// attributes to `quick_move_generic` — this exists purely to attach
     /// [`SpecialLayout::Dispenser`] so the 3×3 grid draws as a square
@@ -572,8 +563,8 @@ impl Menu {
     }
 
     /// Builds a hopper menu: five slots in a row (`0..5`), then the player's
-    /// main storage and hotbar (`HopperMenu.java:24,27`). Mechanically
-    /// identical to [`generic`](Self::generic) — `HopperMenu.quickMoveStack`
+    /// main storage and hotbar. Mechanically
+    /// identical to [`generic`](Self::generic) — vanilla's own hopper quick-move step
     /// is the same container-then-player shape
     /// [`crate::menus::build_menu`]'s doc comment already attributes to
     /// `quick_move_generic` — this exists purely to attach
@@ -587,15 +578,14 @@ impl Menu {
     }
 
     /// Builds the merchant/trading menu: two payment slots (`0`, `1`), then a
-    /// take-only result slot (`2`), then the player's main storage and hotbar
-    /// (`MerchantMenu.java:42-45`).
+    /// take-only result slot (`2`), then the player's main storage and hotbar.
     ///
-    /// `MerchantMenu.quickMoveStack` is genuinely different from
+    /// Vanilla's own merchant quick-move step is genuinely different from
     /// [`quick_move_generic`](Self::quick_move_generic) — the result slot
     /// (`slotIndex == 2`) empties into the player inventory the same way, but
     /// the two payment slots (`0`, `1`) move to the player inventory
-    /// **forwards**, not backwards, and `MerchantMenu.java:171-216`'s
-    /// `tryMoveItems` (auto-filling the payment slots from the player's own
+    /// **forwards**, not backwards, and vanilla's own trade-item-move step
+    /// (auto-filling the payment slots from the player's own
     /// inventory when a trade row is selected) is not modelled at all — it
     /// needs the offer list, which lives on [`crate::trades::TradeOffers`], not
     /// on this menu. Left on the generic "container then player" order for the
@@ -614,17 +604,18 @@ impl Menu {
     }
 
     /// Builds the beacon menu: a single payment slot (`0`), then the
-    /// player's main storage and hotbar (`BeaconMenu.java:41-54`).
+    /// player's main storage and hotbar.
     ///
-    /// `PaymentSlot.mayPlace`'s `ItemTags.BEACON_PAYMENT_ITEMS` restriction is
+    /// Vanilla's own beacon payment-slot placement restriction (the beacon-payment
+    /// item tag) is
     /// not modelled — the same "accept anything, let the server's own
     /// `container_set_slot` correct a wrong guess" convention
     /// [`Self::item_combiner`]'s doc comment already applies to the anvil,
     /// grindstone and smithing table. The slot is not marked
     /// [`SlotKind::Output`] either: unlike those three, the payment slot both
     /// accepts an item (a placement) and later loses it (consumed by a
-    /// successful `SET_BEACON`, `BeaconMenu.updateEffects`'s own
-    /// `paymentSlot.remove(1)`) — never a take-only result.
+    /// successful `SET_BEACON`, vanilla's own effect-update step's own
+    /// payment-slot removal) — never a take-only result.
     #[must_use]
     pub fn beacon() -> Self {
         let mut menu = Self::generic(1);
@@ -680,9 +671,9 @@ impl Menu {
 
     /// The menu-slot range holding the player's **main storage and hotbar**
     /// only — never armour or off-hand, matching vanilla's own recipe-book
-    /// placement (`PlaceRecipeHelper.calculatePlacementFor` walks
-    /// `Inventory.items`, the 36 main+hotbar slots, never
-    /// `Inventory.armor`/`offhand`). `None` for a [`MenuKind`] this crate
+    /// placement (its own place-recipe helper walks
+    /// the 36 main+hotbar slots, never the armour or off-hand slots).
+    /// `None` for a [`MenuKind`] this crate
     /// does not (yet) know an inventory range for.
     fn inventory_slot_range(&self) -> Option<std::ops::Range<usize>> {
         match self.kind {
@@ -696,7 +687,7 @@ impl Menu {
         }
     }
 
-    /// Computes an auto-fill plan (issue #163, "click recipe to auto-fill")
+    /// Computes an auto-fill plan ("click recipe to auto-fill")
     /// for `recipe` against this menu's crafting grid — a crafting table's
     /// grid via [`craft_layout`](Self::craft_layout), or a furnace-family
     /// menu's single ingredient slot (menu index `0`) via
@@ -856,42 +847,35 @@ impl Menu {
     ///
     /// # Why this exists, and why it is a *prediction*
     ///
-    /// Port of `Inventory.removeFromSelected`
-    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/player/Inventory.java:527-530`):
-    ///
-    /// ```java
-    /// public ItemStack removeFromSelected(final boolean all) {
-    ///    ItemStack selectedItem = this.getSelectedItem();
-    ///    return selectedItem.isEmpty() ? ItemStack.EMPTY : this.removeItem(this.selected, all ? selectedItem.getCount() : 1);
-    /// }
-    /// ```
-    ///
-    /// which lowers through `Inventory.removeItem` (`:332-346`) →
-    /// `ContainerHelper.removeItem` (`ContainerHelper.java:13-15`) →
-    /// [`ItemStack::split`] — hence the `split` below rather than a hand-rolled
-    /// decrement. Note `ContainerHelper.removeItem` guards `count > 0`, which is
+    /// Port of vanilla's own selected-item removal step: if the selected
+    /// stack is empty, do nothing; otherwise remove either the whole stack
+    /// (`all == true`) or a single item from it, returning what was removed.
+    /// That step lowers through vanilla's own inventory-remove and
+    /// container-helper remove steps to a plain stack split — hence the
+    /// `split` below rather than a hand-rolled
+    /// decrement. Note vanilla's own container-helper remove step guards `count > 0`, which is
     /// why `all == true` on an already-empty slot cannot produce a phantom
     /// removal: the empty check above it returns first.
     ///
     /// **The dropped-item entity is not ours to make.** Vanilla's client calls
-    /// this from `LocalPlayer.drop`
-    /// (`.cache/mc/26.2/client-src/net/minecraft/client/player/LocalPlayer.java:314-319`),
+    /// this from its own local-player drop step,
     /// which names the result `prediction` and then sends only a bare
-    /// `ServerboundPlayerActionPacket(DROP_ITEM | DROP_ALL_ITEMS, …)`. The server
-    /// (`ServerGamePacketListenerImpl.java:1303-1314`) calls `player.drop(…)` and
+    /// drop-item server-bound action packet. The server
+    /// handles that action and
     /// **sends no slot update back**, so this local mutation is the *only* thing
     /// that will ever change the count the hotbar draws. Without it the count is
     /// stale forever, not merely late — which is the bug this closes.
     ///
     /// The return value exists because vanilla's does, and it is used for exactly
-    /// one thing there: `LocalPlayer.drop` returns `!prediction.isEmpty()` and
-    /// `Minecraft.java:1907-1911` swings the arm only when it is `true`. Nothing
+    /// one thing there: vanilla's own local-player drop step returns whether the
+    /// prediction was non-empty and
+    /// its own render loop swings the arm only when it is `true`. Nothing
     /// downstream needs the stack itself — the item entity is spawned by the
     /// server and arrives as an ordinary entity-spawn packet.
     pub fn remove_from_selected(&mut self, selected: usize, all: bool) -> Option<ItemStack> {
         let container = self.player_container;
-        // `getSelectedItem().isEmpty()` — an out-of-range index reads as empty
-        // too, matching `ContainerHelper.removeItem`'s own bounds guard.
+        // An out-of-range index reads as empty
+        // too, matching vanilla's own container-helper remove step's bounds guard.
         let Some(stack) = self.containers[container].get(selected) else {
             return None;
         };
@@ -902,8 +886,8 @@ impl Menu {
         let mut stack = stack.clone();
         let removed = stack.split(count);
         // `set` normalises a zero-count remainder to `None`: vanilla leaves a
-        // `count == 0` `ItemStack` in the list and relies on `isEmpty()`
-        // everywhere downstream, which `Option` models directly.
+        // `count == 0` `ItemStack` in the list and relies on its own
+        // emptiness check everywhere downstream, which `Option` models directly.
         self.containers[container].set(selected, normalize_opt(Some(stack)));
         crate::item::normalize(removed)
     }
@@ -950,8 +934,8 @@ impl Menu {
     /// models the aliasing as **single ownership that moves**: opening a
     /// container hands the inventory to the container's menu, closing it hands
     /// it back. The point is that at no instant do two copies exist, so there
-    /// is nothing to keep in sync and nothing that can diverge — see issue
-    /// #373, where the two copies were the whole bug.
+    /// is nothing to keep in sync and nothing that can diverge — the two
+    /// copies desyncing was once the whole bug here.
     ///
     /// The menu left behind is a husk with respect to its player section: its
     /// slots still resolve, they just read an empty container. Do not read them
@@ -993,8 +977,9 @@ impl Menu {
             .map_or(0, |slot| slot.effective_max(stack))
     }
 
-    /// Vanilla `Slot.onTake`, run after **every** successful removal from a
-    /// slot. Only the crafting result slot has behaviour: `ResultSlot.onTake`
+    /// Vanilla's own post-take slot hook, run after **every** successful removal from a
+    /// slot. Only the crafting result slot has behaviour: vanilla's own
+    /// result-slot take hook
     /// removes exactly one item from every occupied grid cell.
     ///
     /// Without this, taking a result leaves the grid full — the ingredients are
@@ -1004,23 +989,22 @@ impl Menu {
     /// makes *taking* it cost something.
     ///
     /// The consumption is deliberately **recipe-free**: vanilla walks the
-    /// positioned craft input and calls `removeItem(cell, 1)` on each non-empty
+    /// positioned craft input and removes one item from each non-empty
     /// cell, which needs no knowledge of which recipe matched.
     ///
     /// What *is* skipped is the **remainder** pass — the one that leaves an empty
     /// bucket behind after crafting a cake. Note that this is *not* skipped
-    /// because it needs the recipe: `ResultSlot.getRemainingItems` only consults
-    /// the recipe on a `ServerLevel`, and on the client falls through to
-    /// `CraftingRecipe.defaultCraftingReminder`, which is a plain per-item lookup
-    /// (`Item.getCraftingRemainder()`). It is skipped because **we have no
+    /// because it needs the recipe: vanilla's own remaining-items step only consults
+    /// the recipe on the server, and on the client falls through to
+    /// a plain per-item crafting-remainder lookup. It is skipped because **we have no
     /// crafting-remainder table** for 26.2's items yet, and inventing one would
     /// be a guess. Until there is one, a remainder-bearing ingredient mispredicts
     /// its cell for one round trip and the server corrects it with a
     /// `container_set_slot`; only ~10 items in the game have a remainder.
     ///
-    /// The call sites mirror vanilla's exactly: `doClick`'s pickup and
-    /// same-item-pull branches, `Slot.safeTake` (our throw), the swap take, and
-    /// the tail of `quickMoveStack`. The both-occupied swap branch also calls it
+    /// The call sites mirror vanilla's exactly: the click handler's pickup and
+    /// same-item-pull branches, the safe-take throw path, the swap take, and
+    /// the tail of the quick-move step. The both-occupied swap branch also calls it
     /// in vanilla, but is gated on `mayPlace`, which an output slot always
     /// fails, so it can never fire there.
     pub(crate) fn on_take(&mut self, menu_index: usize) {
@@ -1041,32 +1025,29 @@ impl Menu {
     }
 
     /// Moves a stack into the `[start, end)` menu-slot range, merging into
-    /// matching stacks first then filling empties, mirroring vanilla
-    /// `AbstractContainerMenu.moveItemStackTo`
-    /// (`AbstractContainerMenu.java:636-697`).
+    /// matching stacks first then filling empties, mirroring vanilla's
+    /// own stack-move-to step.
     ///
     /// `moving` is drained in place. Returns whether anything changed.
     ///
     /// Three details are transcribed deliberately and all three look like bugs:
     ///
     /// * **The merge pass does not consult `mayPlace`; only the empty-slot pass
-    ///   does.** Compare `AbstractContainerMenu.java:647` (no check) with `:682`
-    ///   (`target.isEmpty() && slot.mayPlace(itemStack)`). So a shift-click may
+    ///   does.** So a shift-click may
     ///   *top up* an existing stack in a slot that would refuse the same item
     ///   arriving into an empty cell. Adding the symmetric check "for
     ///   consistency" changes observable behaviour and desynchronises from the
     ///   server.
-    /// * **The merge pass is gated on `moving.isStackable()`** (`:645`), not on
+    /// * **The merge pass is gated on `moving.isStackable()`**, not on
     ///   the per-slot cap. An unstackable item skips merging entirely and goes
     ///   straight to the first empty slot.
-    /// * **The merge cap is measured against the stack already in the slot**
-    ///   (`slot.getMaxStackSize(target)`, `:650`), while the empty-slot cap is
-    ///   measured against the incoming stack (`slot.getMaxStackSize(itemStack)`,
-    ///   `:683`). They agree whenever the two are the same item, which the merge
+    /// * **The merge cap is measured against the stack already in the slot**,
+    ///   while the empty-slot cap is
+    ///   measured against the incoming stack. They agree whenever the two are the same item, which the merge
     ///   pass has already established, so this is only a difference in what the
     ///   code *says* — but it is what the source says.
     ///
-    /// The empty-slot pass stops after **one** placement (`break` at `:687`),
+    /// The empty-slot pass stops after **one** placement,
     /// which is why a caller that must move more than one stack's worth loops.
     pub fn move_item_stack_to(
         &mut self,
@@ -1167,20 +1148,20 @@ impl Menu {
         Some(template)
     }
 
-    /// Quick-move for a plain container, mirroring vanilla `ChestMenu`
-    /// (`ChestMenu.java:94-109`): container slots go out to the player
+    /// Quick-move for a plain container, mirroring vanilla's own chest
+    /// quick-move step: container slots go out to the player
     /// inventory **backwards** (hotbar first), player slots come in forwards.
     ///
     /// This one order covers more of the game than its name suggests.
-    /// `HopperMenu.java:36-58` and `DispenserMenu.java:45-70` are the same
-    /// three lines with a different constant, and `ShulkerBoxMenu.java:40-62`
+    /// The hopper's and dispenser's own quick-move steps are the same
+    /// three lines with a different constant, and the shulker box's own step
     /// likewise — so chests, barrels, ender chests, every `generic_9xN`,
     /// hoppers, dispensers, droppers and shulker boxes all share it.
     ///
     /// What it does **not** cover is the menus that route by *item kind* rather
-    /// than by region: `AbstractFurnaceMenu.java:87-133` sends smeltables to
+    /// than by region: vanilla's own furnace-family quick-move step sends smeltables to
     /// slot 0 and fuel to slot 1 before falling back to the main↔hotbar hop,
-    /// and `BrewingStandMenu.java:63-99` does the same for blaze powder,
+    /// and its own brewing-stand step does the same for blaze powder,
     /// ingredients and potions. Neither is modelled: both need a data table we
     /// do not have (the fuel-value registry and the cooking-recipe input set),
     /// and inventing one would be a guess. A furnace therefore predicts a
@@ -1203,8 +1184,8 @@ impl Menu {
         }
     }
 
-    /// Quick-move for a crafting-table menu, mirroring vanilla `CraftingMenu`
-    /// (`CraftingMenu.java:107-152`):
+    /// Quick-move for a crafting-table menu, mirroring vanilla's own
+    /// crafting-table quick-move step:
     ///
     /// * result slot → player inventory, **filling from the back**;
     /// * grid cell → player inventory, forwards;
@@ -1218,8 +1199,9 @@ impl Menu {
     /// and silently wrong the moment that slot kind is lost.
     ///
     /// This is where a crafting table and the player's own 2×2 genuinely
-    /// diverge, and the difference is not cosmetic: `CraftingMenu` tries the
-    /// grid first (`CraftingMenu.java:123`), so shift-clicking planks in a
+    /// diverge, and the difference is not cosmetic: vanilla's own crafting-table
+    /// quick-move step tries the
+    /// grid first, so shift-clicking planks in a
     /// crafting table *loads the grid*. `InventoryMenu` has no such branch —
     /// shift-clicking in the player screen never fills the 2×2 — so
     /// [`quick_move_player`](Self::quick_move_player) must not grow one.
@@ -1250,8 +1232,8 @@ impl Menu {
         }
     }
 
-    /// Quick-move for the player's own inventory screen, mirroring vanilla
-    /// `InventoryMenu.quickMoveStack` (`InventoryMenu.java:100-152`).
+    /// Quick-move for the player's own inventory screen, mirroring vanilla's
+    /// own player-inventory quick-move step.
     ///
     /// The branch **chain** is the specification, not the region list, and its
     /// order is the part that is easy to get wrong. Vanilla's chain is:
@@ -1306,17 +1288,16 @@ impl Menu {
 
     /// Returns the menu-slot index of the empty armour/off-hand slot a stack
     /// should auto-equip into, i.e. vanilla's branches 4 and 5 of
-    /// `InventoryMenu.quickMoveStack` (`InventoryMenu.java:120-128`).
+    /// its own player-inventory quick-move step.
     ///
-    /// Vanilla derives the position from `player.getEquipmentSlotForItem`, which
-    /// is `itemStack.get(DataComponents.EQUIPPABLE).slot()`
-    /// (`LivingEntity.java:3881-3884`), and maps it to a menu index as
+    /// Vanilla derives the position from its own item-to-equipment-slot
+    /// resolver, which reads the item's own equippable component's slot,
+    /// and maps it to a menu index as
     /// `8 - eqSlot.getIndex()` — head 3 → 5, chest 2 → 6, legs 1 → 7, feet 0 → 8
     /// — with the off-hand at 45. That is the mapping below.
     ///
     /// One thing this deliberately does **not** do: vanilla gates branch 4 on
-    /// `eqSlot.getType() == EquipmentSlot.Type.HUMANOID_ARMOR`
-    /// (`InventoryMenu.java:120`), which excludes `BODY` — wolf and horse
+    /// the equipment slot's type being humanoid armour, which excludes `BODY` — wolf and horse
     /// armour. [`crate::container::EquipmentSlot::from_name`] deliberately
     /// leaves `"body"` unmatched (falling through to `None`) rather than
     /// folding it into [`Chest`](EquipmentSlot::Chest), so a wolf/horse-armour
@@ -1373,7 +1354,7 @@ impl Menu {
     }
 
     /// The slots this menu has accumulated from `ADD` packets during a drag —
-    /// vanilla's `AbstractContainerMenu.quickcraftSlots`.
+    /// vanilla's own quick-craft accumulator field.
     ///
     /// Public so the **screen's** paint set can be checked against it: the two
     /// are grown independently (see [`can_drag_place_at`](Self::can_drag_place_at))
@@ -1387,25 +1368,24 @@ impl Menu {
 
     /// Records a slot painted by an in-progress drag, **de-duplicating**.
     ///
-    /// Vanilla's accumulator is `Set<Slot> quickcraftSlots = Sets.newHashSet()`
-    /// (`AbstractContainerMenu.java:62`) and the paint site is a bare
-    /// `.add(slot)` (`:358`), so dragging back and forth across one slot records
-    /// it once. That set's `size()` is then the divisor for an even split
-    /// (`:386`), so a `Vec` that pushed duplicates would divide by too large a
+    /// Vanilla's accumulator is a hash set and the paint site is a bare
+    /// insert, so dragging back and forth across one slot records
+    /// it once. That set's size is then the divisor for an even split,
+    /// so a `Vec` that pushed duplicates would divide by too large a
     /// number and under-fill every slot — the classic off-by-N. The order is
     /// kept insertion-stable here where vanilla's is a hash order; that is safe
     /// because the per-slot amount is `count / size`, a constant, and the loop
-    /// never mutates the cursor it reads (`:378`), so no ordering is observable.
+    /// never mutates the cursor it reads, so no ordering is observable.
     pub(crate) fn push_quick_craft_slot(&mut self, menu_index: usize) {
         if !self.quick_craft_slots.contains(&menu_index) {
             self.quick_craft_slots.push(menu_index);
         }
     }
 
-    /// Vanilla `resetQuickCraft` (`AbstractContainerMenu.java:718-721`): clears
+    /// Vanilla's own quick-craft reset step: clears
     /// the status and the painted set, but deliberately **not**
     /// `quick_craft_type`, which the single-slot degradation path reads back
-    /// after the reset (`:364-365`).
+    /// after the reset.
     pub(crate) fn reset_quick_craft(&mut self) {
         self.quick_craft_status = 0;
         self.quick_craft_slots.clear();
@@ -1416,8 +1396,8 @@ impl Slot {
     fn armor(container: usize, index: usize, eq: EquipmentSlot) -> Self {
         let mut slot = Slot::of(container, index, SlotKind::Armor(eq));
         slot.max_stack_size = 1;
-        // Vanilla's `InventoryMenu.TEXTURE_EMPTY_SLOTS` map (`:34-43`), passed to
-        // `ArmorSlot`'s constructor and returned by its `getNoItemIcon`.
+        // Vanilla's own empty-slot-texture map, passed to
+        // its own armour-slot constructor and returned by its no-item-icon getter.
         slot.no_item_icon = Some(match eq {
             EquipmentSlot::Head => EMPTY_ARMOR_SLOT_HELMET,
             EquipmentSlot::Chest => EMPTY_ARMOR_SLOT_CHESTPLATE,
@@ -1455,8 +1435,8 @@ fn normalize_opt(stack: Option<ItemStack>) -> Option<ItemStack> {
 /// way rather than being satisfied vacuously by a menu that simply refuses
 /// everything.
 ///
-/// Every expected value is hand-derived from the 26.2 decompile under
-/// `.cache/mc/26.2/src/net/minecraft/world/inventory/`, cited per test. None is
+/// Every expected value is hand-derived from the 26.2 decompile, cited per
+/// test. None is
 /// derived by running our own implementation.
 #[cfg(test)]
 mod tests {
@@ -1530,7 +1510,7 @@ mod tests {
 
     // --- QUICK_CRAFT: drags that must reset and commit nothing ---
 
-    /// `AbstractContainerMenu.java:337-339`. The header sequence is checked
+    /// Vanilla's own quick-craft header-check step. The header sequence is checked
     /// against the *previous* status: `(expected != 1 || header != 2) &&
     /// expected != header` resets. A bare `END` arrives with `expected == 0` and
     /// `header == 2`, so `(true || false) && (0 != 2)` holds and the drag is
@@ -1567,7 +1547,7 @@ mod tests {
         assert_eq!(carried_count(&menu), None);
     }
 
-    /// `AbstractContainerMenu.java:400-401`: *any* non-`QUICK_CRAFT` click while
+    /// Vanilla's own click-dispatch step: *any* non-`QUICK_CRAFT` click while
     /// a drag is armed takes the `else if (this.quickcraftStatus != 0)` branch,
     /// which resets and falls out of `doClick` entirely. So the interrupting
     /// click is **also** swallowed — it does not pick anything up — and the
@@ -1616,7 +1596,7 @@ mod tests {
         assert_eq!(carried_count(&menu), Some(8));
     }
 
-    /// `AbstractContainerMenu.java:341-342`: an empty cursor at any stage resets
+    /// Vanilla's own drag-start step: an empty cursor at any stage resets
     /// the drag. The paint stage therefore cannot record slots against nothing,
     /// and the commit cannot invent items.
     #[test]
@@ -1627,7 +1607,7 @@ mod tests {
         assert_eq!(total_items(&menu), 0);
     }
 
-    /// `AbstractContainerMenu.java:356` (paint) and `:382` (commit). The paint
+    /// Vanilla's own drag paint and commit steps. The paint
     /// guard is `carried.getCount() > quickcraftSlots.size()` — strictly greater
     /// — so a cursor of 2 can only ever paint 2 slots: the third `ADD` sees
     /// `2 > 2` and is dropped. The even split is then over 2, not 3.
@@ -1647,7 +1627,7 @@ mod tests {
         assert_eq!(total_items(&menu), 2, "a drag conserves items exactly");
     }
 
-    /// `AbstractContainerMenu.java:386`. The per-slot amount is clamped by
+    /// Vanilla's own drag commit step. The per-slot amount is clamped by
     /// `min(source.getMaxStackSize(), slot.getMaxStackSize(source))` **after**
     /// adding what the slot already holds, and the shortfall stays on the
     /// cursor. Slot 0 starts at 62 of a 64 cap, so it can only take 2 of its
@@ -1667,7 +1647,7 @@ mod tests {
         assert_eq!(total_items(&menu), 72);
     }
 
-    /// `AbstractContainerMenu.java:62` — the painted accumulator is a
+    /// Vanilla's own painted-accumulator field — a
     /// `HashSet`, so a slot dragged over twice counts once. With `[0, 1, 0, 1]`
     /// the divisor must be 2, not 4: 8 items becomes 4 each, not 2 each.
     #[test]
@@ -1680,8 +1660,8 @@ mod tests {
         assert_eq!(carried_count(&menu), None);
     }
 
-    /// `AbstractContainerMenu.java:345` → `isValidQuickcraftType`
-    /// (`:715-716`): type 2 requires `player.hasInfiniteMaterials()`, so a
+    /// Vanilla's own quick-craft-type validity check: type 2 requires
+    /// `player.hasInfiniteMaterials()`, so a
     /// middle-drag in survival resets at the START stage and commits nothing.
     #[test]
     fn clone_drag_resets_in_survival() {
@@ -1704,7 +1684,7 @@ mod tests {
         assert_eq!(count_at(&menu, 1), Some(64));
     }
 
-    /// `canItemQuickReplace` (`AbstractContainerMenu.java:722-727`) is applied at
+    /// Vanilla's own quick-replace eligibility check is applied at
     /// both the paint and commit stages, and it refuses an occupied slot holding
     /// a different item. Slot 1 holds dirt, so it is never painted and the split
     /// is over the two remaining slots.
@@ -1724,9 +1704,9 @@ mod tests {
         assert_eq!(carried_count(&menu), Some(1));
     }
 
-    /// The result slot rejects placement (`ResultSlot.mayPlace` returns `false`,
-    /// `ResultSlot.java:24-27`), and both drag stages test `slot.mayPlace`
-    /// (`:355`, `:381`). A drag across a crafting grid that clips the result
+    /// The result slot rejects placement (vanilla's own result-slot placement
+    /// check always returns `false`), and both drag stages test `slot.mayPlace`.
+    /// A drag across a crafting grid that clips the result
     /// slot must skip it and divide over the grid cells only.
     #[test]
     fn drag_never_paints_the_result_slot() {
@@ -1742,10 +1722,10 @@ mod tests {
 
     // --- Merging: refused for differing components ---
 
-    /// `AbstractContainerMenu.java:452` gates the deposit on
-    /// `ItemStack.isSameItemSameComponents(clicked, carried)`. Two stacks of the
-    /// same item with different components must **swap**, not merge — the
-    /// `:455` branch — so neither count changes and the identities exchange.
+    /// Vanilla's own click-deposit step gates the deposit on the two
+    /// stacks being the same item with the same components. Two stacks of the
+    /// same item with different components must **swap**, not merge —
+    /// so neither count changes and the identities exchange.
     #[test]
     fn pickup_refuses_to_merge_stacks_with_differing_components() {
         let mut menu = Menu::generic(27);
@@ -1778,8 +1758,8 @@ mod tests {
         assert_eq!(carried_count(&menu), None);
     }
 
-    /// `moveItemStackTo`'s merge pass tests the same predicate
-    /// (`AbstractContainerMenu.java:648`), so a shift-click must not stack a
+    /// Vanilla's own stack-move-to merge pass tests the same predicate,
+    /// so a shift-click must not stack a
     /// named item onto a plain one either. It falls through to the empty-slot
     /// pass and lands in the first free cell instead.
     #[test]
@@ -1823,7 +1803,7 @@ mod tests {
 
     // --- PICKUP_ALL: the maxed-slot skip ---
 
-    /// `AbstractContainerMenu.java:541-548`. The gather runs **two** passes over
+    /// Vanilla's own pick-all gather step. It runs **two** passes over
     /// the slot list, and pass 0 skips any slot whose stack is already at its
     /// own max (`itemStack.getCount() != itemStack.getMaxStackSize()`). So a
     /// full stack is only drawn from once every partial one has been consumed.
@@ -1874,16 +1854,15 @@ mod tests {
         assert_eq!(count_at(&menu, 1), Some(30), "slot 1 was never needed");
     }
 
-    /// `AbstractContainerMenu.java:544` requires
+    /// Vanilla's own pick-all eligibility check requires
     /// `this.canTakeItemForPickAll(carried, target)`, which every result-bearing
-    /// menu overrides to exclude its own result container — `CraftingMenu.java:156`,
-    /// `InventoryMenu.java:164`, `SmithingMenu.java:129`, `StonecutterMenu.java:175`
-    /// and `CartographyTableMenu.java:144` all carry the identical
+    /// menu overrides to exclude its own result container — every one of
+    /// them carries the identical
     /// `target.container != this.resultSlots` line.
     ///
     /// Vacuuming the result slot would craft an item the player never asked for
     /// *and* silently charge the grid for it, because taking from the result runs
-    /// `ResultSlot.onTake` (`ResultSlot.java:87`).
+    /// vanilla's own result-slot take hook.
     #[test]
     fn pickup_all_never_drains_the_crafting_result() {
         let mut menu = Menu::crafting(3, 3);
@@ -1916,7 +1895,8 @@ mod tests {
 
     // --- QUICK_MOVE ordering, per menu ---
 
-    /// `ChestMenu.java:99` moves container contents out with `backwards = true`,
+    /// Vanilla's own chest quick-move step moves container contents out with
+    /// `backwards = true`,
     /// so a chest empties into the **hotbar** (the tail of the menu slot list)
     /// before the main storage rows. Getting the flag wrong is invisible in an
     /// empty inventory and obvious to a player.
@@ -1930,7 +1910,7 @@ mod tests {
         assert_eq!(count_at(&menu, 27), None, "main storage is untouched");
     }
 
-    /// `CraftingMenu.java:123`: a shift-click from the player rows of a crafting
+    /// Vanilla's own crafting-table quick-move step: a shift-click from the player rows of a crafting
     /// table tries the **grid** (`1..10`) first, and only falls back to the
     /// main↔hotbar hop if the grid takes nothing.
     #[test]
@@ -1943,8 +1923,8 @@ mod tests {
         assert_eq!(count_at(&menu, hotbar), None);
     }
 
-    /// `InventoryMenu` has **no** such branch: its chain
-    /// (`InventoryMenu.java:100-152`) never targets the 2×2 grid, so the same
+    /// Vanilla's own player-inventory quick-move step has **no** such branch: its chain
+    /// never targets the 2×2 grid, so the same
     /// gesture on the player's own screen does the main↔hotbar hop instead.
     /// This is the negative control for the test above — the two menus must not
     /// share one implementation.
@@ -1957,8 +1937,8 @@ mod tests {
         assert_eq!(count_at(&menu, 9), Some(1), "it goes to main storage");
     }
 
-    /// Branches 4 and 5 of `InventoryMenu.quickMoveStack`
-    /// (`InventoryMenu.java:120-128`) precede the main↔hotbar hop, so a helmet
+    /// Branches 4 and 5 of vanilla's own player-inventory quick-move step
+    /// precede the main↔hotbar hop, so a helmet
     /// in main storage equips rather than moving to the hotbar.
     #[test]
     fn shift_click_equips_armour_before_trying_the_hotbar() {
@@ -2009,9 +1989,8 @@ mod tests {
         assert_eq!(count_at(&menu, 45), None);
     }
 
-    /// `Slot.mayPlace` for an armour slot is
-    /// `owner.isEquippableInSlot(stack, slot)` (`ArmorSlot.java:44-47`), which is
-    /// `slot == equippable.slot()` (`LivingEntity.java:3886-3891`). A chestplate
+    /// Vanilla's own armour-slot placement check is
+    /// `slot == equippable.slot()`. A chestplate
     /// must not enter the head slot, by any route — here the direct place.
     #[test]
     fn armour_slot_refuses_the_wrong_equipment_position() {
@@ -2085,8 +2064,8 @@ mod tests {
     /// The control the old suite could not express, and the one that would have
     /// caught `"chest" | "body"`.
     ///
-    /// `wolf_armor` is genuinely `body`, and vanilla's humanoid-armour gate
-    /// (`EquipmentSlot.Type.HUMANOID_ARMOR`) excludes `BODY`. If `body` is ever
+    /// `wolf_armor` is genuinely `body`, and vanilla's own humanoid-armour gate
+    /// excludes `BODY`. If `body` is ever
     /// folded into `Chest` again, this fails while every positive test above
     /// keeps passing.
     #[test]
@@ -2117,15 +2096,14 @@ mod tests {
             "wolf armour must not be wearable as a chestplate"
         );
     }
-    /// `AbstractContainerMenu.java:493-506`: number-key swapping a bigger stack
+    /// Vanilla's own number-key swap step: swapping a bigger stack
     /// onto a slot whose cap is smaller than the incoming count splits the
     /// overflow into the slot and pushes the slot's *previous* contents back
-    /// into the inventory via `inventory.add` (`:498`).
+    /// into the inventory via `inventory.add`.
     ///
     /// The subtlety is aliasing: vanilla's `source` is the *same object* as
-    /// `inventory.getItem(buttonNum)` (`Inventory.getItem`,
-    /// `Inventory.java:437-440`, returns the live list element, not a copy), and
-    /// `ItemStack.split` (`ItemStack.java:327-332`) mutates that object in place
+    /// its own live inventory-item lookup (returns the live list element, not a
+    /// copy), and vanilla's own stack-split step mutates that object in place
     /// via `shrink`. So by the time `inventory.add` runs, the hotbar slot the
     /// swap came from *already* shows its reduced remainder — and a same-item
     /// displaced stack merges back into it rather than taking a fresh slot.
@@ -2159,7 +2137,7 @@ mod tests {
 
     /// The control: with room to spare (cap not exceeded), the ordinary
     /// no-overflow swap path is unaffected by the reordering above — source and
-    /// target simply trade places (`AbstractContainerMenu.java:501-505`).
+    /// target simply trade places.
     #[test]
     fn control_hotbar_swap_without_overflow_is_a_plain_exchange() {
         let mut menu = Menu::player();
@@ -2170,10 +2148,10 @@ mod tests {
         assert_eq!(count_at(&menu, 36), Some(5));
     }
 
-    /// Issue #368: `give_to_player`'s overflow-displacement scan used to be a
+    /// `give_to_player`'s overflow-displacement scan used to be a
     /// plain `0..36` merge-then-fill pass, ignoring vanilla's real priority —
     /// the *selected* hotbar slot first, then the off-hand, only then a linear
-    /// scan (`Inventory.getSlotWithRemainingSpace`, `Inventory.java:224-240`).
+    /// scan (vanilla's own slot-with-remaining-space search).
     ///
     /// A torch sits in *both* native 0 (menu slot 36, room for 4) and native 4
     /// (menu slot 40, the *selected* slot, room for 63) when a second torch
@@ -2243,11 +2221,11 @@ mod tests {
         assert_eq!(count_at(&menu, 40), Some(2), "only the 1 remaining torch reaches native 4");
     }
 
-    // --- item-combiner menus: anvil / grindstone / smithing / enchanting (#253-#255) ---
+    // --- item-combiner menus: anvil / grindstone / smithing / enchanting ---
 
     /// [`Menu::item_combiner`]'s result slot is take-only, matching
-    /// `ItemCombinerMenu.createResultSlot`'s `mayPlace` override
-    /// (`ItemCombinerMenu.java:62-69`) — the anvil/grindstone shape
+    /// vanilla's own item-combiner result-slot placement override
+    /// — the anvil/grindstone shape
     /// (`container_size = 3, result_slot = 2`).
     #[test]
     fn item_combiner_result_slot_rejects_placement() {
@@ -2256,15 +2234,14 @@ mod tests {
             !menu.may_place(2, &stack("minecraft:diamond_pickaxe", 1)),
             "the result slot must reject a placed item, matching ItemCombinerMenu"
         );
-        // The two input slots are untouched — anvil's own `itemStack -> true`
-        // (`AnvilMenu.java:58-59`) accepts anything, so this only proves the
+        // The two input slots are untouched — anvil's own placement predicate
+        // accepts anything, so this only proves the
         // result slot is the *one* that changed.
         assert!(menu.may_place(0, &stack("minecraft:diamond_pickaxe", 1)));
         assert!(menu.may_place(1, &stack("minecraft:diamond_pickaxe", 1)));
     }
 
-    /// The smithing table shape: `container_size = 4, result_slot = 3`
-    /// (`SmithingMenu.java:21-29`).
+    /// The smithing table shape: `container_size = 4, result_slot = 3`.
     #[test]
     fn item_combiner_covers_the_smithing_table_shape() {
         let menu = Menu::item_combiner(4, 3, SpecialLayout::Smithing);
@@ -2275,7 +2252,7 @@ mod tests {
     }
 
     /// [`Menu::enchanting_table`]'s slot 1 accepts only lapis lazuli
-    /// (`EnchantmentMenu.java:61-71`); slot 0 (the item to enchant) accepts
+    /// (vanilla's own enchanting-table lapis-slot restriction); slot 0 (the item to enchant) accepts
     /// anything, matching the plain `Slot` vanilla gives it.
     #[test]
     fn enchanting_table_lapis_slot_rejects_non_lapis() {
@@ -2304,8 +2281,7 @@ mod tests {
     /// The anvil and grindstone are mechanically identical (`container_size =
     /// 3, result_slot = 2`) but must carry *different* [`SpecialLayout`]s —
     /// `lodestone-shell`'s `slot_layout` places their three slots at
-    /// completely different pixel positions (`AnvilMenu.java:42-45` vs
-    /// `GrindstoneMenu.java:48-60`), and `Menu` has no other field that could
+    /// completely different pixel positions, and `Menu` has no other field that could
     /// tell them apart.
     #[test]
     fn special_layout_distinguishes_menus_with_identical_mechanics() {
@@ -2321,7 +2297,7 @@ mod tests {
         );
     }
 
-    // -- plan_recipe_auto_fill (issue #163) ------------------------------
+    // -- plan_recipe_auto_fill ------------------------------
 
     /// A crafting table's 3×3: coal at menu slot 12, a stick at menu slot 20
     /// (both inside the `10..=36` main-storage range this menu reports —
@@ -2423,7 +2399,7 @@ mod tests {
 
     /// Auto-fill never draws from armour or off-hand, even when they hold a
     /// matching item — vanilla's own placement helper only ever walks
-    /// `Inventory.items` (main+hotbar). The player-inventory screen's 2×2
+    /// the player's main+hotbar list. The player-inventory screen's 2×2
     /// puts armour at menu slots `5..=8`; a coal "helmet" placed there must
     /// be invisible to the planner.
     #[test]
