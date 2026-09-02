@@ -123,16 +123,11 @@ pub struct TeleportConfirm {
     pub teleport_id: i32,
 }
 
-/// Clientbound `spawn_position` packet setting the client's compass target.
-///
-/// Wire layout: a single packed 1.8 [`Position`]. This is the crate's real use
-/// of the hand-written packed-position codec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:spawn_position", state = Play, bound = Client)]
-pub struct SpawnPosition {
-    /// Compass target block position.
-    pub location: Position,
-}
+// `SpawnPosition` is byte-identical to v47's (measured), shared via
+// `lodestone-protocol-common` -- see `packets::position`'s module docs. Not
+// shared with v735: its `Position` field type has an incompatible 1.14+ bit
+// layout.
+pub use lodestone_protocol_common::packets::position::SpawnPosition;
 
 /// Clientbound `update_health` packet.
 ///
@@ -294,18 +289,11 @@ impl Default for ClientSettings {
 /// being rejected as it is on protocol 47. There is no block-prediction
 /// `sequence` (added 1.19); the model's `sequence` is dropped deliberately.
 ///
-/// Wire layout: varint status, packed `position`, signed-byte face.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:block_dig", state = Play, bound = Server)]
-pub struct BlockDig {
-    /// Digging status code.
-    #[mc(varint)]
-    pub status: i32,
-    /// Target block position.
-    pub location: Position,
-    /// Face being mined (`0..=5`).
-    pub face: i8,
-}
+// `BlockDig` is byte-identical to v47's (measured), shared via
+// `lodestone-protocol-common` -- see `packets::position`'s module docs. Not
+// shared with v735: its `Position` field type has an incompatible 1.14+ bit
+// layout.
+pub use lodestone_protocol_common::packets::position::BlockDig;
 
 /// Serverbound `block_place` (player block placement / item use on a block).
 ///
