@@ -60,29 +60,30 @@ use lodestone_ecs::entity::{
 use lodestone_ecs::{Extract, ExtractSet};
 use lodestone_model::ItemStack;
 
-/// `Display.TextDisplay`'s registry path, as [`DisplayDraw::type_path`]
+/// Vanilla's own text-display entity's registry path, as [`DisplayDraw::type_path`]
 /// carries it (bare path, no namespace — matching
 /// `lodestone_shell::entities::EntityDraw::type_path`'s own convention).
 pub const TEXT_DISPLAY_TYPE_PATH: &str = "text_display";
-/// `Display.ItemDisplay`'s registry path.
+/// Vanilla's own item-display entity's registry path.
 pub const ITEM_DISPLAY_TYPE_PATH: &str = "item_display";
-/// `Display.BlockDisplay`'s registry path.
+/// Vanilla's own block-display entity's registry path.
 pub const BLOCK_DISPLAY_TYPE_PATH: &str = "block_display";
 
-/// Vanilla's `Display.TextDisplay` accessor defaults, applied wherever the
+/// Vanilla's own text-display entity accessor defaults, applied wherever the
 /// corresponding component has never been reported — matching every default
 /// this repo already documents on the `Display*` components themselves
 /// (`lodestone_ecs::entity::DisplayLineWidth` etc.).
 const DEFAULT_LINE_WIDTH: i32 = 200;
 const DEFAULT_BACKGROUND_COLOR: i32 = 0x4000_0000_u32 as i32;
 const DEFAULT_TEXT_OPACITY: i8 = -1;
-/// `Display.ItemDisplay`'s own accessor default for `DATA_ITEM_DISPLAY_ID`:
-/// `ItemDisplayContext.NONE`, ordinal `0`.
+/// Vanilla's own item-display entity's own accessor default for `DATA_ITEM_DISPLAY_ID`:
+/// its own "no context" enum value, ordinal `0`.
 ///
 /// **An earlier version of this constant was `FIXED`, on the stated grounds
-/// that `NONE` "draws nothing at all". That is false.** `ItemTransforms.getTransform`
+/// that `NONE` "draws nothing at all". That is false.** Vanilla's own
+/// item-transforms get-transform routine
 /// answers every context it has no `display` key for — `NONE` included — with
-/// `ItemTransform.NO_TRANSFORM`, i.e. the identity pose, so a context-less
+/// its own no-op transform, i.e. the identity pose, so a context-less
 /// `item_display` draws its model *unscaled and unrotated*, which is exactly
 /// what `/summon item_display {item:{…}}` looks like in vanilla. Defaulting to
 /// `FIXED` instead would silently apply the item frame's own half-scale pose to
@@ -92,7 +93,7 @@ const DEFAULT_TEXT_OPACITY: i8 = -1;
 const DEFAULT_ITEM_DISPLAY_CONTEXT: u8 = ItemDisplayContextOrdinal::NONE;
 
 /// The `ItemDisplayContext` ordinals this seam's consumers name rather than
-/// leave as bare integers — transcribed from `ItemDisplayContext.java`'s own
+/// leave as bare integers — transcribed from vanilla's own item-display-context
 /// declaration, which assigns each ordinal explicitly (`NONE(0)`,
 /// `THIRD_PERSON_LEFT_HAND(1)`, `THIRD_PERSON_RIGHT_HAND(2)`,
 /// `FIRST_PERSON_LEFT_HAND(3)`, `FIRST_PERSON_RIGHT_HAND(4)`, `HEAD(5)`,
@@ -105,11 +106,11 @@ impl ItemDisplayContextOrdinal {
 
 /// The [`lodestone_assets::DisplaySlot`] an `ItemDisplayContext` ordinal
 /// selects, or `None` for `NONE` (and for any out-of-range byte, which
-/// `ItemDisplayContext.BY_ID`'s `ByIdMap.OutOfBoundsStrategy.ZERO` also folds
+/// vanilla's own by-id lookup's out-of-bounds "zero" strategy also folds
 /// onto `NONE`).
 ///
-/// `None` is a real answer, not a failure: vanilla's `getTransform` returns
-/// `ItemTransform.NO_TRANSFORM` for it, so the caller poses the model with
+/// `None` is a real answer, not a failure: vanilla's own get-transform routine returns
+/// its own no-op transform for it, so the caller poses the model with
 /// `DisplayTransform::default()` — see [`DEFAULT_ITEM_DISPLAY_CONTEXT`].
 #[must_use]
 pub fn display_slot_for_context(ordinal: u8) -> Option<lodestone_assets::DisplaySlot> {
@@ -145,14 +146,14 @@ pub struct DisplayDraw {
     /// doc for why that is a deliberate, disclosed simplification for this
     /// entity family rather than an oversight.
     pub position: Vec3,
-    /// The entity's own reported yaw, degrees — `Display.BillboardConstraints::FIXED`'s
-    /// yaw source (`Entity.getYRot`). Irrelevant to every other billboard
+    /// The entity's own reported yaw, degrees — vanilla's own fixed-billboard
+    /// yaw source (its own entity yaw getter). Irrelevant to every other billboard
     /// mode, which reads the *camera's* yaw instead — see
     /// `lodestone_render::display::display_orientation`.
     pub entity_yaw: f32,
     /// The entity's own reported pitch, degrees — `Fixed`'s pitch source.
     pub entity_pitch: f32,
-    /// `Display.BillboardConstraints`, resolved from the raw wire ordinal —
+    /// Vanilla's own billboard-constraints enum, resolved from the raw wire ordinal —
     /// `Fixed` (vanilla's own accessor default) when never reported.
     pub billboard: lodestone_render::display::BillboardMode,
     /// The shared `translation`/`left_rotation`/`scale`/`right_rotation`
@@ -202,8 +203,8 @@ pub struct DisplayDraw {
     /// unreported — see [`DEFAULT_ITEM_DISPLAY_CONTEXT`] for why that default
     /// is `NONE` rather than `FIXED`.
     pub item_display_context: u8,
-    /// `Display.DATA_BRIGHTNESS_OVERRIDE_ID`, vanilla's **packed** form
-    /// (`Brightness.pack()` — `block << 4 | sky << 20`), or `None` when the
+    /// Vanilla's own brightness-override data accessor, vanilla's **packed** form
+    /// (its own pack routine — `block << 4 | sky << 20`), or `None` when the
     /// entity reported no override. Shared by all three subtypes.
     ///
     /// `-1` is vanilla's own "no override" sentinel and is folded to `None` at
@@ -245,11 +246,12 @@ impl DisplayDraw {
     /// override, in this renderer's `sky << 4 | block` layout — `None` when the
     /// caller must sample the world instead.
     ///
-    /// `DisplayRenderer.getSkyLightLevel`/`getBlockLightLevel` take the
+    /// Vanilla's own display-renderer sky/block light getters take the
     /// override's own nibbles in place of the sampled lightmap whenever it is
-    /// not `-1`, per axis; unpacking is `LightCoordsUtil.block`/`sky`
+    /// not `-1`, per axis; unpacking is vanilla's own light-coords block/sky
+    /// helpers
     /// (`packed >> 4 & 15` and `packed >> 20 & 15`) against
-    /// `Brightness.pack`'s `block << 4 | sky << 20`. The two layouts differ —
+    /// its own pack routine's `block << 4 | sky << 20`. The two layouts differ —
     /// vanilla's is a 32-bit lightmap coordinate and ours is one byte — so this
     /// is a repack, not a passthrough.
     #[must_use]
@@ -264,7 +266,8 @@ impl DisplayDraw {
     }
 }
 
-/// `Display.NO_BRIGHTNESS_OVERRIDE` — the sentinel `DATA_BRIGHTNESS_OVERRIDE_ID`
+/// Vanilla's own "no brightness override" sentinel — the value its own
+/// brightness-override accessor
 /// carries when no `brightness` NBT tag is set.
 pub const NO_BRIGHTNESS_OVERRIDE: i32 = -1;
 
@@ -608,8 +611,9 @@ mod tests {
     /// the nearest wrong hypothesis on this seam, is half a block away.
     ///
     /// A `block_display` model is block-local `0..1` and its entity position is
-    /// the model's own origin (`BlockDisplay.updateRenderSubState` applies no
-    /// offset, and neither does `submitInner`), unlike a falling block, whose
+    /// the model's own origin (vanilla's own block-display render-substate
+    /// update applies no
+    /// offset, and neither does its own inner-submit routine), unlike a falling block, whose
     /// entity spawns at the cell *centre*. Borrowing the falling block's shift
     /// would leave every hologram plausibly-but-wrongly placed.
     #[test]
