@@ -6514,8 +6514,8 @@ impl<'w> MobSim<'w> {
             // --- nearest player -------------------------------------------
             // Fed with **no range cut**, deliberately: vanilla's range for this
             // lives in the *goal*'s targeting conditions (`LookAtPlayerGoal`
-            // takes a `lookDistance`, 6.0F or 8.0F per species —
-            // `ai/goal/LookAtPlayerGoal.java:44-46`), not on the mob, and our
+            // takes a look-distance, 6.0F or 8.0F per species,
+            // set in its own constructor), not on the mob, and our
             // `LookAtPlayerGoal::can_use` applies exactly that cut itself
             // (`goals.rs`). Cutting here as well would silently take the
             // minimum of two ranges and make the goal's own parameter a lie.
@@ -6523,7 +6523,7 @@ impl<'w> MobSim<'w> {
                 nearest_by(&self.players, pos, |p| p.perception.position, |_| true, None);
 
             // --- temptation -----------------------------------------------
-            // The range *is* on the mob here (`Attributes.TEMPT_RANGE`), so it
+            // The range *is* on the mob here (vanilla's own tempt-range attribute), so it
             // belongs in the feed. See `TEMPT_RANGE`.
             //
             // The item test is per-species (`tempt_food`), which is why
@@ -6558,11 +6558,11 @@ impl<'w> MobSim<'w> {
             }
 
             // --- breeding partner -----------------------------------------
-            // Vanilla `Animal.canMate` (`animal/Animal.java:202-206`): the
+            // Vanilla's own generic "can mate" check: the
             // partner must be the *same class* and both must be in love. A
-            // baby cannot breed (`Animal.canFallInLove` gates on age), and
-            // `BreedGoal.canContinueToUse` additionally requires the partner
-            // not be panicking (`ai/goal/BreedGoal.java:43`) — enforced here
+            // baby cannot breed (vanilla's own "can fall in love" check gates on age), and
+            // `BreedGoal`'s own "can continue to use" check additionally requires the partner
+            // not be panicking — enforced here
             // too, since feeding a panicking partner would start the goal only
             // for it to abort on the next tick.
             if me.is_in_love() && !me.is_baby() {
@@ -6582,9 +6582,10 @@ impl<'w> MobSim<'w> {
             }
 
             // --- parent ---------------------------------------------------
-            // `ai/goal/FollowParentGoal.java:23` (`getAge() >= 0` → no goal)
-            // and `:34` (candidate must itself have `getAge() >= 0`, i.e. be an
-            // adult), searched over `inflate(8.0, 4.0, 8.0)` at `:29`.
+            // Vanilla's own follow-parent goal: no goal while this mob's own
+            // age is non-negative (adult),
+            // and the candidate must itself have a non-negative age, i.e. be an
+            // adult, searched over an `8.0, 4.0, 8.0` inflation.
             if me.is_baby() {
                 parent[i] = nearest_by(
                     &self.mobs,
@@ -6606,12 +6607,12 @@ impl<'w> MobSim<'w> {
             // exactly like partner/parent.
             //
             // Both flavours resolve, and the player one is what taming produces:
-            // vanilla's owner is a uuid (`TamableAnimal.DATA_OWNERUUID_ID`) and
-            // `getOwner()` resolves it against the level every time it is asked,
+            // vanilla's owner is a uuid (its own owner-uuid metadata field) and
+            // its own owner getter resolves it against the level every time it is asked,
             // which is what `player_position` does here. A tamed pet whose owner
             // is not in the list resolves to `None` — offline, or in another
             // dimension, which are the same two cases vanilla's
-            // `owner.level() != this.level()` covers — and `None` is the correct
+            // own "owner's level differs from this level" check covers — and `None` is the correct
             // answer rather than a stale last-known position: a pet must not
             // path toward where you were an hour ago.
             //
@@ -6652,9 +6653,9 @@ impl<'w> MobSim<'w> {
             }
 
             // --- nearest visible zombified piglin (issue #231) -------------
-            // A piglin's `AVOID` brain activity. No range cut lives on the
-            // mob in the jar (`PiglinSpecificSensor` reads whatever
-            // `NEAREST_VISIBLE_LIVING_ENTITIES` already gathered), so this
+            // A piglin's own "avoid" brain activity. No range cut lives on the
+            // mob in the jar (vanilla's own piglin-specific sensor reads whatever
+            // its own "nearest visible living entities" sensor already gathered), so this
             // reuses the same generous scan box `nearby_entities` above uses
             // for brain species, restricted to `zombified_piglin` and gated
             // on species the same way `threat[i]`/`temptation[i]` already
@@ -6670,10 +6671,11 @@ impl<'w> MobSim<'w> {
             }
 
             // --- nearest eligible tongue-attack prey (issue #230) ----------
-            // A frog's `TONGUE` brain activity. `FrogAttackablesSensor`'s own
-            // range is `TARGET_DETECTION_DISTANCE` (10.0F); `FROG_FOOD_SPECIES`
-            // is the host-side stand-in for `Frog.canEat`'s
-            // `EntityTypeTags.FROG_FOOD` check (see that constant's own doc
+            // A frog's own "tongue" brain activity. Vanilla's own frog-attackables
+            // sensor's own
+            // range is its own target-detection-distance constant (10.0F); `FROG_FOOD_SPECIES`
+            // is the host-side stand-in for vanilla's own "can eat" check's
+            // own frog-food entity-type tag (see that constant's own doc
             // for the disclosed size-1 narrowing this does not model).
             if species == "frog" {
                 nearest_attackable_food[i] = nearest_by(
@@ -6690,8 +6692,8 @@ impl<'w> MobSim<'w> {
             }
 
             // --- allay delivery target (issue #230) -------------------------
-            // `AllayAi::getItemDepositPosition`'s note-block half
-            // (`shouldDepositItemsAtLikedNoteblock`): only offered once
+            // Vanilla's own "get item deposit position" helper's note-block half
+            // (its own "should deposit items at liked noteblock" check): only offered once
             // there is something to deliver, a recently-heard note block is
             // still remembered, and the block there is still really a note
             // block (a player could have mined it since). One tick behind
@@ -6727,11 +6729,11 @@ impl<'w> MobSim<'w> {
             // `dot > 1.0 - coneSize / dist`. Line of sight is the same
             // disclosed gap `find_nearest_target` already carries — no world
             // raycast at this seam, erring permissive. The carved-pumpkin
-            // disguise check (`PLAYER_NOT_WEARING_DISGUISE_ITEM`) is not
+            // disguise check (vanilla's own "player not wearing disguise item"
+            // condition) is not
             // modelled either: `PlayerPerception` has no armour-slot data yet.
             //
-            // `0.025` is the enderman's own `coneSize`
-            // (`EnderMan.java:210`); this feed is per-mob, not per-species, so
+            // `0.025` is the enderman's own view-cone-size constant; this feed is per-mob, not per-species, so
             // every mob gets the same tolerance today — the only consumer is
             // `EndermanFreezeWhenLookedAt`, so this is not yet observably
             // wrong, but a second gaze-gated species with a different
@@ -6838,20 +6840,21 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// A player right-clicked a mob with (or without) an item — vanilla
-    /// `Mob.interact` → `mobInteract`, the single producer for taming, sitting,
+    /// A player right-clicked a mob with (or without) an item — vanilla's own
+    /// generic mob-interact dispatch reaching each species' own interaction
+    /// override, the single producer for taming, sitting,
     /// feeding and breeding.
     ///
     /// # The dispatch order is the specification
     ///
-    /// Vanilla's `mobInteract` overrides are nested `if` chains that end in
-    /// `super.mobInteract`, so *which arm wins* is as much a part of the port as
+    /// Vanilla's per-species interaction overrides are nested `if` chains that end in
+    /// their parent's own version, so *which arm wins* is as much a part of the port as
     /// the constants are. Two orderings that both "tame a wolf" differ
     /// observably: feeding a hurt tame wolf meat must heal it, **not** put it in
     /// love, and only once it is at full health does the same item breed it
-    /// (`Wolf.mobInteract`'s first arm, then `super` reaching
-    /// `Animal.mobInteract`). This method's arms are in that order and each one
-    /// names the vanilla method it comes from.
+    /// (the wolf's own interaction override's first arm, then its parent's
+    /// generic animal interaction). This method's arms are in that order and each one
+    /// names which vanilla interaction override it comes from, in prose.
     ///
     /// # What is deliberately not here
     ///
@@ -6864,24 +6867,24 @@ impl<'w> MobSim<'w> {
     /// caller's signal to fall through to whatever it does with an unconsumed
     /// right-click.
     /// Attaches or detaches a lead between `mob_id` and the player `holder` —
-    /// vanilla `Entity.interact`'s two leash-specific branches (excluding
+    /// vanilla's own generic entity-interact step's two leash-specific branches (excluding
     /// its sneak-multi-attach branch; see this method's own "not
     /// implemented" note).
     ///
     /// - If `mob_id` is already leashed to `holder`, detaches it (vanilla's
-    ///   `leashable.getLeashHolder() == player` arm) and reports whether a
+    ///   own "current holder is this player" arm) and reports whether a
     ///   `minecraft:lead` item should be spawned (`creative` mirrors
-    ///   `player.hasInfiniteMaterials()`, which this sim has no game-mode
+    ///   vanilla's own "has infinite materials" check, which this sim has no game-mode
     ///   state of its own to answer).
     /// - Else, if `holding_lead` and the mob is not already held by a
-    ///   *player* (vanilla's `!(leashable.getLeashHolder() instanceof Player)`
+    ///   *player* (vanilla's own "current holder is not a player"
     ///   guard — one player cannot steal another's leashed mob just by
     ///   holding a lead), attaches it to `holder`, dropping any existing
-    ///   non-player leash first exactly as vanilla's `dropLeash()` does
-    ///   before `setLeashedTo`.
+    ///   non-player leash first exactly as vanilla's own drop-leash call does
+    ///   before its own set-leashed-to call.
     /// - Otherwise refuses: not leashable, no lead in hand, or out of
-    ///   [`LEASH_TOO_FAR_DIST`] (`canHaveALeashAttachedTo`'s own
-    ///   `leashSnapDistance` check).
+    ///   [`LEASH_TOO_FAR_DIST`] (vanilla's own "can have a leash attached to"
+    ///   check's own snap-distance check).
     ///
     /// **Not implemented**: vanilla's sneak-right-click branch, which
     /// re-parents *every* mob already leashed to `holder` onto whatever
@@ -6947,12 +6950,13 @@ impl<'w> MobSim<'w> {
 
     /// Right-clicking a fence while holding a lead: re-parents every mob
     /// currently leashed to `holder` (the player) onto a knot at `fence_pos`
-    /// — vanilla `LeadItem.bindPlayerMobs`. Unlike vanilla this never spawns
-    /// a `LeashFenceKnotEntity`; see [`LeashHolder::Fence`]'s own doc
+    /// — vanilla's own lead-item "bind player mobs" call. Unlike vanilla this never spawns
+    /// a fence-knot decoration entity; see [`LeashHolder::Fence`]'s own doc
     /// comment for why, and for what that costs a real client (no visible
     /// knot to render or right-click).
     ///
-    /// **Simplified from vanilla's own scan**: `bindPlayerMobs` only
+    /// **Simplified from vanilla's own scan**: vanilla's own "bind player
+    /// mobs" call only
     /// re-parents mobs within a 32-block radius of `fence_pos`; this moves
     /// every mob leashed to `holder` regardless of distance from the fence.
     /// The two coincide in practice — a leashed mob is already capped at
@@ -6962,7 +6966,7 @@ impl<'w> MobSim<'w> {
     /// the other direction) could observe the difference.
     ///
     /// Returns the ids re-leashed; empty means no mob was leashed to
-    /// `holder` at all, matching vanilla's `InteractionResult.PASS`.
+    /// `holder` at all, matching vanilla's own pass-through result.
     pub fn try_leash_to_fence(&mut self, holder: Uuid, fence_pos: BlockPos) -> Vec<i32> {
         let mut moved = Vec::new();
         for mob in &mut self.mobs {
@@ -6975,33 +6979,37 @@ impl<'w> MobSim<'w> {
     }
 
     /// Spawns a wandering trader at `pos` with 1–2 leashed llama escorts —
-    /// the entity-spawn half of vanilla `WanderingTraderSpawner.spawn`
-    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java:75-120`).
+    /// the entity-spawn half of vanilla's own wandering-trader spawner's own
+    /// spawn call.
     /// Returns the trader's id and every llama actually spawned.
     ///
     /// **This is only the "given a spawn position, create the entity group"
-    /// half.** `WanderingTraderSpawner` itself is a `CustomSpawner` driven by
+    /// half.** Vanilla's own wandering-trader spawner itself is a generic
+    /// custom-spawner driven by
     /// the world tick with its own 1200-tick poll, a 24000-tick base delay,
     /// a climbing 25→75% chance, a player-anchored 48-block search for a
-    /// `PoiTypes.MEETING` point (falling back to the player), and a
-    /// `BiomeTags.WITHOUT_WANDERING_TRADER_SPAWNS` exclusion — none of which
+    /// meeting-point point-of-interest (falling back to the player), and a
+    /// "no wandering trader spawns" biome-tag exclusion — none of which
     /// exists in this crate. That whole cycle belongs beside
     /// [`crate::mob_spawn`]'s existing per-species natural-spawn cap/timer
     /// engine, a file outside this pass's ownership; see this session's
     /// broker note (wandering trader spawn cycle) for the exact shape a
     /// caller there needs.
     ///
-    /// **Simplified escort placement.** Vanilla's `tryToSpawnLlamaFor`
+    /// **Simplified escort placement.** Vanilla's own "try to spawn llama
+    /// for" step
     /// searches up to 10 candidate positions within 4 blocks and can fail to
     /// find space, so "2 attempts" does not guarantee 2 llamas. This always
     /// places both at fixed offsets (`+2, 0, 0` and `-2, 0, 0` from the
     /// trader) with no space check — this sim has no per-cell obstruction
-    /// query at the `MobSim` level the way vanilla's `BlockGetter` does, and
+    /// query at the `MobSim` level the way vanilla's own block-getter seam does, and
     /// two llamas beside an already-chosen valid trader spawn are the common
     /// case in practice.
     ///
-    /// **Wares are not generated.** `WanderingTrader.updateTrades` builds
-    /// its offer list from `TradeSets.WANDERING_TRADER_{BUYING,UNCOMMON,COMMON}`
+    /// **Wares are not generated.** Vanilla's own wandering-trader "update
+    /// trades" step builds
+    /// its offer list from its own buying/uncommon/common wandering-trader
+    /// trade-set tables
     /// — this crate has no merchant-offer/trade-table model at all yet (see
     /// the villager-trading work this is deliberately distinct from). A
     /// spawned trader here has no wares and cannot be traded with.
@@ -7039,7 +7047,8 @@ impl<'w> MobSim<'w> {
         let item = held_item.map(|k| k.path().to_owned());
         let item = item.as_deref();
 
-        // `Villager.mobInteract` is a full override, not an `Animal.mobInteract`
+        // Vanilla's own villager interaction override is a full override, not an
+        // animal-interaction
         // fall-through: a villager is never tameable, so this has to be a
         // short-circuit ahead of the `tame_mechanism` dispatch below rather
         // than another arm inside it (issue #245).
@@ -7062,12 +7071,12 @@ impl<'w> MobSim<'w> {
             return outcome;
         }
 
-        // `ZombieVillager.mobInteract` (issue #247): only the golden-apple-
+        // Vanilla's own zombie-villager interaction override (issue #247): only the golden-apple-
         // while-weakened case gets special handling. A golden apple used
-        // without Weakness (vanilla's own `InteractionResult.CONSUME`, which
+        // without Weakness (vanilla's own plain success result, which
         // does **not** reduce the stack) and every other item both fall
         // through to the generic dispatch below, which resolves to `Pass`
-        // for a zombie villager exactly as `super.mobInteract` does for any
+        // for a zombie villager exactly as its parent's generic interaction does for any
         // non-tameable monster — see `InteractOutcome::ZombieVillagerConversionStarted`'s
         // own doc for why that no-weakness arm is disclosed as `Pass` rather
         // than a distinct variant.
@@ -7080,9 +7089,9 @@ impl<'w> MobSim<'w> {
                 self.zombie_conversion_rng.next_int(bound)
             });
             let remaining_ticks = state.remaining_ticks;
-            // `SoundEvents.ZOMBIE_VILLAGER_CURE`'s own play call:
+            // Vanilla's own zombie-villager-cure sound's own play call:
             // `1.0F + random.nextFloat()` volume, `random.nextFloat() * 0.7F
-            // + 0.3F` pitch (`ZombieVillager.startConverting`).
+            // + 0.3F` pitch (vanilla's own "start converting" call).
             let volume = 1.0 + self.zombie_conversion_rng.next_f32();
             let pitch = self.zombie_conversion_rng.next_f32() * 0.7 + 0.3;
             let seed = i64::from(self.zombie_conversion_rng.next_int(i32::MAX));
@@ -7101,7 +7110,7 @@ impl<'w> MobSim<'w> {
             return InteractOutcome::ZombieVillagerConversionStarted;
         }
 
-        // `Allay.mobInteract`, both real arms of it (issue #230): duplication
+        // Vanilla's own allay interaction override, both real arms of it (issue #230): duplication
         // is checked first, matching the jar's own order, then the
         // empty-handed carrying gift. An allay is never tameable, so — like
         // the villager and zombie-villager arms above — this is a
@@ -7129,7 +7138,7 @@ impl<'w> MobSim<'w> {
                 // This short-circuit returns before the shared
                 // `outcome.particle()` tail below runs (the same reason the
                 // villager/zombie-villager arms above never reach it
-                // either), so `Allay.handleEntityEvent(18)`'s heart burst
+                // either), so vanilla's own allay entity-event handler's status-18 heart burst
                 // has to be pushed here directly rather than relying on that
                 // generic path.
                 self.pending_vocalisations
@@ -7147,13 +7156,13 @@ impl<'w> MobSim<'w> {
             return InteractOutcome::ItemGiven;
         }
 
-        // `Camel.mobInteract` is a full override, the same "not an
-        // `Animal.mobInteract` fall-through" shape as the villager arm
-        // above — a camel is `isTamed() == true` unconditionally
-        // (`Camel.isTamed`), so unlike the horse family there is no temper
+        // Vanilla's own camel interaction override is a full override, the same "not an
+        // animal-interaction fall-through" shape as the villager arm
+        // above — a camel is tamed unconditionally
+        // (its own "is tamed" check), so unlike the horse family there is no temper
         // roll to gate riding on at all. Only the empty-handed
-        // `doPlayerRide` half is ported: `isSecondaryUseActive()`'s
-        // inventory-GUI branch and `isFood`'s heal/age-up/love branch both
+        // mount-ride half is ported: vanilla's own "secondary use active" check's
+        // inventory-GUI branch and its own "is food" check's heal/age-up/love branch both
         // need machinery this crate does not have for this species yet
         // (a horse-style inventory screen, and a `camel` row in
         // `species::breeding_food` — a real, disclosed, still-missing gap,
@@ -7177,18 +7186,19 @@ impl<'w> MobSim<'w> {
                 self.interact_horse(mob_id, actor, item, max_temper)
             }
             Some(mechanism) => self.interact_tamable(mob_id, actor, item, &species, mechanism),
-            // Every other species goes straight to `Animal.mobInteract`.
+            // Every other species goes straight to vanilla's own generic
+            // animal interaction.
             None => self.interact_animal(mob_id, item, &species),
         };
 
-        // Vanilla's particles are `broadcastEntityEvent(this, (byte)6|7|18)`,
+        // Vanilla's particles are an entity-status broadcast with status
+        // `6`, `7`, or `18`,
         // which the *client* expands into a burst
-        // (`TamableAnimal.spawnTamingParticles`, `Animal.handleEntityEvent`).
-        // This server has no `ENTITY_EVENT` encoder, so the burst is published
+        // (vanilla's own taming/love-mode particle spawners). This server has no `ENTITY_EVENT` encoder, so the burst is published
         // directly as a `LEVEL_PARTICLES` packet with the same particle type,
         // count and Gaussian spread the client would have produced. A disclosed
-        // substitution, not an approximation of the visual: seven HEART or SMOKE
-        // particles at `getRandomY() + 0.5` either way.
+        // substitution, not an approximation of the visual: seven heart or smoke
+        // particles at a randomized offset plus half a block of height either way.
         if let Some(particle) = outcome.particle() {
             self.pending_vocalisations
                 .push(taming_particles(particle, pos));
