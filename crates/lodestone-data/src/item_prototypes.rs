@@ -17,29 +17,30 @@
 //!
 //! # What each one breaks while it is missing
 //!
-//! * **`minecraft:equippable`** — `ArmorSlot.mayPlace` is
-//!   `owner.isEquippableInSlot(stack, slot)` (`ArmorSlot.mayPlace`), which is
-//!   `slot == equippable.slot() && canUseSlot(…) && equippable.canBeEquippedBy(…)`
-//!   (`LivingEntity.isEquippableInSlot`). With no component, the only slot that
+//! * **`minecraft:equippable`** — vanilla's own armour-slot "may place" check is
+//!   an "is equippable in slot" check on the holding entity, which is
+//!   `slot == equippable.slot() && canUseSlot(…) && equippable.canBeEquippedBy(…)`.
+//!   With no component, the only slot that
 //!   accepts anything is `MAINHAND` — **no armour is equippable by any click
 //!   type**.
-//! * **`minecraft:max_stack_size`** — `ItemInstance.getMaxStackSize` is
-//!   `getOrDefault(MAX_STACK_SIZE, 1)`. Vanilla's
-//!   `DataComponents.COMMON_ITEM_COMPONENTS` sets `64`, so a
+//! * **`minecraft:max_stack_size`** — vanilla's own item-instance "get max
+//!   stack size" accessor is
+//!   `getOrDefault(MAX_STACK_SIZE, 1)`. Vanilla's own
+//!   common-item-components default component map sets `64`, so a
 //!   client that assumes 64 is right for most items and wrong for every bucket,
 //!   shulker box, tool and egg — every drag distributing those over-fills and is
 //!   corrected.
-//! * **`minecraft:max_damage`** — gates `ItemStack.isDamageableItem`
-//!   and therefore `ItemStack.isStackable`: without it two
+//! * **`minecraft:max_damage`** — gates vanilla's own "is damageable item" check
+//!   and therefore its own "is stackable" check: without it two
 //!   identically-componented swords merge into a stack of two.
 //!
-//! # Scope: the slot, not the whole `Equippable`
+//! # Scope: the slot, not the whole equippable component
 //!
-//! Vanilla's `Equippable` record has eleven fields. This census carries the two
-//! that decide placement — `slot()` and whether `allowedEntities` is empty — and
-//! deliberately not `equipSound`, `assetId`, `cameraOverlay`, `dispensable`,
-//! `swappable`, `damageOnHurt`, `equipOnInteract`, `canBeSheared` or
-//! `shearingSound`. See the module's own doc for the reasoning; a consumer
+//! Vanilla's own equippable component record has eleven fields. This census carries the two
+//! that decide placement — the slot and whether the allowed-entities set is empty — and
+//! deliberately not the equip sound, asset id, camera overlay, dispensable and
+//! swappable flags, damage-on-hurt, equip-on-interact, can-be-sheared or
+//! shearing-sound fields. See the module's own doc for the reasoning; a consumer
 //! needing those wants the wire component, not this table.
 
 use lodestone_model::{EquipmentSlot, ItemPrototype};
@@ -59,18 +60,18 @@ pub struct ItemPrototypeDef {
     pub max_stack_size: u8,
     /// `minecraft:max_damage`, or `None` when the prototype has none at all.
     pub max_damage: Option<u16>,
-    /// `Equippable.slot()`, or `None` for a non-equippable item.
+    /// Vanilla's own equippable component's slot field, or `None` for a non-equippable item.
     pub equip_slot: Option<EquipmentSlot>,
     /// Whether the prototype also carries `minecraft:damage`, which
-    /// `ItemStack.isDamageableItem` separately requires.
+    /// vanilla's own "is damageable item" check separately requires.
     ///
     /// In 26.2 this is exactly `max_damage.is_some()` for every one of the 1,537
     /// items — asserted, not assumed, by `tests/item_prototypes.rs` — so nothing
     /// reads it today. It is carried so a future version where the two diverge
-    /// fails that assertion instead of silently mis-answering `isDamageableItem`.
+    /// fails that assertion instead of silently mis-answering "is damageable item".
     pub has_damage: bool,
-    /// Whether `Equippable.allowedEntities` is empty, i.e. any entity may wear
-    /// it (`Equippable.canBeEquippedBy`).
+    /// Whether the equippable component's allowed-entities set is empty, i.e. any entity may wear
+    /// it (vanilla's own "can be equipped by" check).
     pub equippable_by_any_entity: bool,
 }
 

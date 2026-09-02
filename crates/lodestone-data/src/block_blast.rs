@@ -5,19 +5,19 @@
 //!
 //! # What it is
 //!
-//! Four facts per block, all of them fields on `Block`/`BlockBehaviour` that no
-//! subclass overrides:
+//! Four facts per block, all of them fields on vanilla's own block-behaviour
+//! base class that no subclass overrides:
 //!
 //! | field | vanilla | consumer |
 //! |---|---|---|
-//! | [`BlockBlast::explosion_resistance`] | `Block::getExplosionResistance` | `ServerExplosion::calculateExplodedPositions`' per-step ray cost |
-//! | [`BlockBlast::ignite_odds`] | `FireBlock`'s `igniteOdds` map | `FireBlock::getIgniteOdds` — *can fire start on this cell* |
-//! | [`BlockBlast::burn_odds`] | `FireBlock`'s `burnOdds` map | `FireBlock::checkBurnOut` — *can this block be consumed* |
-//! | [`BlockBlast::ignited_by_lava`] | `BlockStateBase::ignitedByLava` | `LavaFluid::isFlammable` — lava starting a fire nearby |
+//! | [`BlockBlast::explosion_resistance`] | vanilla's own "get explosion resistance" accessor | vanilla's own explosion "calculate exploded positions" step's per-step ray cost |
+//! | [`BlockBlast::ignite_odds`] | vanilla's own fire-block class's own ignite-odds map | vanilla's own fire-block "get ignite odds" accessor — *can fire start on this cell* |
+//! | [`BlockBlast::burn_odds`] | vanilla's own fire-block class's own burn-odds map | vanilla's own fire-block "check burn out" step — *can this block be consumed* |
+//! | [`BlockBlast::ignited_by_lava`] | vanilla's own block-state base class's own "ignited by lava" field | vanilla's own lava-fluid "is flammable" check — lava starting a fire nearby |
 //!
 //! **`ignite_odds > 0` and `ignited_by_lava` are different sets and neither
 //! contains the other.** Measured on the real dump: 207 blocks are flammable to
-//! fire, 312 are `ignitedByLava`, and both differences are non-empty — every
+//! fire, 312 are lava-ignitable, and both differences are non-empty — every
 //! *bed* and `note_block` is lava-ignitable but has no ignite odds, while every
 //! small *flower*, `hay_block`, `coal_block` and `scaffolding` has ignite odds
 //! but is **not** lava-ignitable. Deriving one from the other is therefore wrong
@@ -36,25 +36,28 @@
 //! time so the hot path is a single bounds-checked index with no string work at
 //! all:
 //!
-//! * `FluidState::getExplosionResistance`, via
-//!   `ExplosionDamageCalculator::getBlockExplosionResistance`'s
-//!   `max(block, fluid)` — so a waterlogged fence already reads `100.0`;
-//! * vanilla's `Optional.empty()` for a cell that is both air and fluid-free,
+//! * vanilla's own fluid-state "get explosion resistance" accessor, via
+//!   vanilla's own explosion damage calculator's "get block explosion
+//!   resistance" step's `max(block, fluid)` — so a waterlogged fence already
+//!   reads `100.0`;
+//! * vanilla's own empty-optional result for a cell that is both air and fluid-free,
 //!   encoded as [`EMPTY_RESISTANCE`].
 //!
 //! The neighbouring per-state string helper exists for callers that hold a state
 //! string rather than an id and is documented as the slow path.
 //!
-//! The two *fire* odds columns keep only the by-name form: `FireBlock`'s tick
+//! The two *fire* odds columns keep only the by-name form: vanilla's own
+//! fire-block tick
 //! reads at most a couple of dozen cells, so nothing there is hot, and the one
-//! state-level rule (`getBurnOdds`/`getIgniteOdds` return `0` for
+//! state-level rule (the ignite/burn-odds accessors return `0` for
 //! `waterlogged=true`) is a cheap property check.
 //!
 //! # Data provenance
 //!
-//! `blocks.json` carries neither `explosionResistance` nor any flammability
+//! `blocks.json` carries neither an explosion-resistance nor any flammability
 //! field, and the fire odds are not even reachable from a block's *properties* —
-//! they live in two private `Object2IntMap<Block>`s that `FireBlock::bootStrap`
+//! they live in two private maps that vanilla's own fire-block class's own
+//! bootstrap step
 //! fills at boot. So this is a JVM dump, generated the same way
 //! [`crate::hardness`] and [`crate::collision_shapes`] are: boot the real 26.2
 //! server headlessly and ask it. See `tests/block_blast.rs` for the generator
@@ -62,8 +65,8 @@
 //! `just oracle-blast-fire` / `just regen-blast-fire` to refresh.
 //!
 //! **A hand-transcribed flammability table would have been wrong.**
-//! `FireBlock::bootStrap` registers two of its entries through
-//! `Blocks.WOOL.forEach` / `Blocks.CARPET.forEach` rather than by name, so
+//! Vanilla's own fire-block bootstrap step registers two of its entries through
+//! a per-wool-colour and a per-carpet-colour loop rather than by name, so
 //! reading the decompiled source alone yields a table missing 32 blocks.
 //!
 //! # Memory design
@@ -91,17 +94,18 @@ pub use table::{BLOCK_COUNT, EMPTY_RESISTANCE, STATE_COUNT};
 /// One block's blast/flammability facts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlockBlast {
-    /// `Block::getExplosionResistance`. `0.0` for a block that costs a blast ray
+    /// Vanilla's own "get explosion resistance" accessor. `0.0` for a block that costs a blast ray
     /// nothing beyond the fixed step term; `3600000.0` for bedrock and friends.
     pub explosion_resistance: f32,
-    /// `FireBlock`'s `igniteOdds` for this block — `0` means fire can never start
-    /// *on* it (`FireBlock::canBurn` is `igniteOdds > 0`). Values in the real
+    /// Vanilla's own fire-block class's own ignite-odds map for this block — `0` means fire can never start
+    /// *on* it (its own "can burn" check is `igniteOdds > 0`). Values in the real
     /// table are exactly `{0, 5, 15, 30, 60}`.
     pub ignite_odds: u8,
-    /// `FireBlock`'s `burnOdds` — how readily `checkBurnOut` consumes the block
+    /// Vanilla's own fire-block class's own burn-odds map — how readily its own
+    /// "check burn out" step consumes the block
     /// itself. Values are exactly `{0, 5, 20, 60, 100}`.
     pub burn_odds: u8,
-    /// `BlockStateBase::ignitedByLava`. Read off the default state; the flag is a
+    /// Vanilla's own block-state base class's own "ignited by lava" field. Read off the default state; the flag is a
     /// per-block property, identical for every state.
     pub ignited_by_lava: bool,
 }
@@ -186,15 +190,17 @@ pub fn burn_odds_for_state(state: &str) -> u8 {
     blast_or_inert(state).burn_odds
 }
 
-/// The fluid `explosionResistance` both vanilla fluids report
-/// (`WaterFluid`/`LavaFluid` inherit `Fluid`'s `100.0F`), reachable through
-/// `FluidState::getExplosionResistance`.
+/// The fluid explosion resistance both vanilla fluids report
+/// (the water and lava fluid classes both inherit the base fluid class's
+/// `100.0F`), reachable through vanilla's own fluid-state "get explosion
+/// resistance" accessor.
 pub const FLUID_EXPLOSION_RESISTANCE: f32 = 100.0;
 
-/// **The explosion hot path.** `ExplosionDamageCalculator::getBlockExplosionResistance`
+/// **The explosion hot path.** Vanilla's own explosion damage calculator's
+/// "get block explosion resistance" step
 /// for the block state whose global id is `id`, as a single flat array index.
 ///
-/// `None` is vanilla's `Optional.empty()` — the cell is air *and* holds no fluid,
+/// `None` is vanilla's own empty-optional result — the cell is air *and* holds no fluid,
 /// so a blast ray pays no resistance term for it at all. `None` is also returned
 /// for an id outside `0..`[`STATE_COUNT`], which is the same inert answer.
 ///
@@ -266,8 +272,8 @@ mod tests {
         assert_eq!((stone.ignite_odds, stone.burn_odds), (0, 0));
     }
 
-    /// `Blocks.WOOL.forEach`/`Blocks.CARPET.forEach` are the two entries a
-    /// source-only transcription of `FireBlock::bootStrap` would miss, so pin one
+    /// The per-wool-colour and per-carpet-colour registration loops are the two entries a
+    /// source-only transcription of vanilla's own fire-block bootstrap step would miss, so pin one
     /// member of each: wool is `(30, 60)`, carpet `(60, 20)`.
     #[test]
     fn the_two_list_registered_families_are_present() {
@@ -291,7 +297,7 @@ mod tests {
         assert_eq!(ignite_odds_for_state("minecraft:oak_fence"), 5);
     }
 
-    /// Air with no fluid is `Optional.empty()`; every other case is a real
+    /// Air with no fluid is vanilla's own empty-optional result; every other case is a real
     /// number, and a waterlogged slab resists at the fluid's `100.0` rather than
     /// the slab's own `6.0`.
     #[test]
