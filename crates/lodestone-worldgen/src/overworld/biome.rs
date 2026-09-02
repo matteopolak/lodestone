@@ -65,8 +65,8 @@ impl OverworldGenerator {
     }
 
     /// Stage 2b: the **full** 4×4×4 biome grid for this column —
-    /// `16 × height/4` cells, one `MultiNoiseBiomeSource.getNoiseBiome` per
-    /// `QuartPos` cell, which is what `LevelChunkSection`'s biome container holds.
+    /// `16 × height/4` cells, one vanilla multi-noise biome lookup per
+    /// quart-position cell, which is what vanilla's own level-chunk-section's biome container holds.
     ///
     /// [`Self::biome_stage`]'s 16-entry surface array is the *same data* read at
     /// one Y per column — that function takes this grid as a parameter rather than
@@ -152,8 +152,9 @@ impl OverworldGenerator {
     }
 
     /// Biome for one *source chunk* in the carve neighbourhood — vanilla's
-    /// real `carverBiome` resolution (`NoiseBasedChunkGenerator.applyCarvers`):
-    /// sampled at the source chunk's own quart corner (`QuartPos.fromBlock`
+    /// real per-source-chunk carver-biome resolution (its own carve-application step):
+    /// sampled at the source chunk's own quart corner (vanilla's own
+    /// quart-from-block conversion
     /// of its min block X/Z, which is `source_cx * 16` / `source_cz * 16` —
     /// already quart-aligned since 16 is a multiple of 4, so no extra
     /// rounding is needed) and **`y = 0`**, not the source chunk's surface

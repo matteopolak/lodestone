@@ -1,4 +1,4 @@
-//! `NoiseChunk`-equivalent block-field sampling.
+//! Vanilla's own noise-chunk-sampler-equivalent block-field sampling.
 //!
 //! The density-function interpreter in [`super`] evaluates the *raw* noise
 //! router at a point (vanilla's own single-point context), which is what the router
@@ -193,14 +193,14 @@ impl NoiseChunkSampler {
     }
 
     /// The interpolated final-density value at a block, matching
-    /// `NoiseChunk.getInterpolatedDensity()`.
+    /// vanilla's own noise-chunk sampler's interpolated-density accessor.
     #[must_use]
     pub fn final_density(&self, x: i32, y: i32, z: i32) -> f64 {
         self.eval_root(x, y, z)
     }
 
-    /// Evaluates this sampler's root at a block through the `NoiseChunk`
-    /// wrapping (so `flat_cache` snaps XZ to the quart grid and forces `y = 0`,
+    /// Evaluates this sampler's root at a block through vanilla's own
+    /// noise-chunk-sampler wrapping (so `flat_cache` snaps XZ to the quart grid and forces `y = 0`,
     /// exactly as vanilla's wrapped `router.erosion()` / `router.depth()` do
     /// when the aquifer computes them at a `SinglePointContext`). For an
     /// `interpolated` root this is identical to

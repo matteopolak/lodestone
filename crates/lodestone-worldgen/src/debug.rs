@@ -1,9 +1,8 @@
-//! Debug-world generation — issue #519's fourth missing generator
+//! Debug-world generation — this change's fourth missing generator
 //! (`debug_all_block_states`), after `WorldType::{Amplified,LargeBiomes}` and
 //! [`crate::flat`] landed.
 //!
-//! Ports `DebugLevelSource` (`net.minecraft.world.level.levelgen
-//! .DebugLevelSource`): every block state in the registry laid out on a flat
+//! Ports vanilla's own debug-level source: every block state in the registry laid out on a flat
 //! grid, one state per odd `(x, z)` cell, at a fixed Y, with a barrier floor
 //! two rows below it. It has no seed, no noise router and — like
 //! [`crate::flat`] — no [`crate::density::Resolver`]: the whole layout is a
@@ -11,7 +10,7 @@
 //! version-free and holds no block registry of its own, so it cannot
 //! enumerate "every block state" itself — see [`DebugLevelSource::new`]).
 //!
-//! # The layout, transcribed from `DebugLevelSource.java`
+//! # The layout, transcribed from vanilla's own debug-level source
 //!
 //! * `BARRIER_HEIGHT` (`60`): every `(x, z)` in a generated chunk gets a
 //!   `minecraft:barrier` at this Y — a floor a player cannot dig through, so
@@ -24,23 +23,24 @@
 //! * The biome is fixed to `minecraft:plains` everywhere
 //!   (`new FixedBiomeSource(plains)`) — [`DEBUG_BIOME`].
 //!
-//! `getBlockStateFor`'s index math (`Mth.abs(worldX * GRID_WIDTH + worldZ)`
+//! Vanilla's own "get block state for"'s index math (its own math-helper
+//! absolute-value over `worldX * GRID_WIDTH + worldZ`
 //! after halving both coordinates) is transcribed in [`DebugLevelSource::state_for`]
-//! verbatim, including the `Mth.abs` call — it is a no-op under the guard
+//! verbatim, including that absolute-value call — it is a no-op under the guard
 //! that reaches it (`worldX > 0 && worldZ > 0` before halving keeps both
 //! halves non-negative), but a divergent transcription is exactly the trap
 //! CLAUDE.md's evidence-standards section names, so the port keeps it rather
 //! than "simplifying" the formula.
 
 /// World Y of the `minecraft:barrier` floor under the state grid —
-/// `DebugLevelSource.BARRIER_HEIGHT`.
+/// vanilla's own debug-level source's barrier-height constant.
 pub const BARRIER_Y: i32 = 60;
 
-/// World Y of the block-state grid itself — `DebugLevelSource.HEIGHT`.
+/// World Y of the block-state grid itself — vanilla's own debug-level source's height constant.
 pub const GRID_Y: i32 = 70;
 
-/// The fixed biome every column reports — `DebugLevelSource`'s constructor
-/// wraps a `FixedBiomeSource` around `Biomes.PLAINS`.
+/// The fixed biome every column reports — vanilla's own debug-level source's constructor
+/// wraps a fixed biome source around `Biomes.PLAINS`.
 pub const DEBUG_BIOME: &str = "minecraft:plains";
 
 /// One generated 16×16 column of a debug world: a barrier row at
@@ -106,8 +106,7 @@ impl DebugColumn {
     }
 }
 
-/// The debug-world generator — `DebugLevelSource`
-/// (`net.minecraft.world.level.levelgen.DebugLevelSource`). See the module
+/// The debug-world generator — vanilla's own debug-level source. See the module
 /// doc for the layout.
 #[derive(Debug, Clone)]
 pub struct DebugLevelSource {
@@ -177,8 +176,8 @@ impl DebugLevelSource {
     }
 
     /// The state placed at world `(world_x, world_z)` on the [`GRID_Y`] row —
-    /// `DebugLevelSource.getBlockStateFor`, transcribed verbatim (see the
-    /// module doc on the `Mth.abs` call).
+    /// vanilla's own debug-level source "get block state for", transcribed verbatim (see the
+    /// module doc on the absolute-value call).
     #[must_use]
     pub fn state_for(&self, world_x: i32, world_z: i32) -> &str {
         if world_x > 0 && world_z > 0 && world_x % 2 != 0 && world_z % 2 != 0 {

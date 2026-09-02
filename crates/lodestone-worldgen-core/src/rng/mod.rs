@@ -25,14 +25,14 @@ pub use any::{Algorithm, AnyPositionalFactory, AnyRandomSource};
 pub use legacy::{LegacyPositionalFactory, LegacyRandomSource};
 pub use xoroshiro::{XoroshiroPositionalFactory, XoroshiroRandomSource};
 
-/// `RandomSupport.mixStafford13` — the 64-bit finaliser used when upgrading a
+/// Vanilla's own random-support Stafford-13 mix — the 64-bit finaliser used when upgrading a
 /// seed to xoroshiro's 128-bit state. Exposed for parity testing.
 #[must_use]
 pub fn mix_stafford13_pub(z: i64) -> i64 {
     xoroshiro::mix_stafford13(z)
 }
 
-/// `Mth.getSeed(x, y, z)` — the positional hash used to key positional
+/// Vanilla's own math-helper get-seed at `(x, y, z)` — the positional hash used to key positional
 /// generators. Note the `x` term is a **32-bit** int multiply (it overflows and
 /// wraps before promotion to `long`), which is why parity is subtle.
 #[must_use]
@@ -57,7 +57,7 @@ pub trait RandomSource {
     /// fork-positional call).
     type Positional: PositionalRandomFactory;
     /// Forks an independent positional factory from the current state, exactly
-    /// as `RandomSource.forkPositional()`.
+    /// as vanilla's own random-source fork-positional.
     fn fork_positional(&mut self) -> Self::Positional;
     /// Re-seeds the generator, resetting any cached Gaussian.
     fn set_seed(&mut self, seed: i64);
@@ -180,11 +180,11 @@ impl<R: RandomSource> WorldgenRandom<R> {
     ///
     /// # The argument order at the call site is not what you would guess
     ///
-    /// `StructurePlacement.probabilityReducer` — the `default`
+    /// Vanilla's own structure-placement probability-reducer — the `default`
     /// `frequency_reduction_method`, the one 18 of the 20 bundled structure sets
     /// use — calls this as `setLargeFeatureWithSalt(seed, salt, sourceX, sourceZ)`:
     /// the *salt* lands in `x`, the chunk X in `z`, and the chunk Z in `blend`.
-    /// `RandomSpreadStructurePlacement.getPotentialStructureChunk` calls it the
+    /// Vanilla's own random-spread-placement potential-structure-chunk lookup calls it the
     /// straightforward way (`seed, gridX, gridZ, salt`). Both spellings are
     /// vanilla's own and both are load-bearing, so this method takes the
     /// parameters positionally and refuses to name them after their meaning.
@@ -203,7 +203,7 @@ impl<R: RandomSource> WorldgenRandom<R> {
 ///
 /// A free function rather than a method because vanilla's is `static` and needs no
 /// carrier state: it derives a fresh [`LegacyRandomSource`]
-/// (`RandomSource.createThreadLocalInstance`, i.e. plain `java.util.Random`, **not**
+/// (vanilla's own thread-local random-source constructor, i.e. plain `java.util.Random`, **not**
 /// xoroshiro) from the chunk coordinates and the world seed.
 ///
 /// # The three ways to get this subtly wrong
@@ -248,7 +248,7 @@ pub const SLIME_CHUNK_SALT: i64 = 987_234_911;
 ///
 /// The `nextInt(10) == 0` lives here rather than in [`seed_slime_chunk`] because
 /// vanilla puts it at the call site: the derivation is worldgen's, the predicate is
-/// spawning's. `Slime.checkSlimeSpawnRules` combines this with a *separate*
+/// spawning's. Vanilla's own slime-spawn-rules check combines this with a *separate*
 /// `random.nextInt(10) == 0` off the spawn RNG and `pos.getY() < 40`, neither of
 /// which belongs to this function.
 #[must_use]
