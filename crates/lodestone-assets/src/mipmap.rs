@@ -62,7 +62,7 @@ pub struct Transparency {
     pub has_translucent: bool,
 }
 
-/// Classifies an image's transparency, as vanilla's `NativeImage.computeTransparency`.
+/// Classifies an image's transparency, as vanilla's own native-image "compute transparency" step.
 pub fn compute_transparency(image: &Image) -> Transparency {
     let mut has_transparent = false;
     let mut has_translucent = false;
@@ -119,7 +119,7 @@ impl Luts {
         }
     }
 
-    /// Linear-light mean of four sRGB channel bytes, matching `ARGB.linearChannelMean`.
+    /// Linear-light mean of four sRGB channel bytes, matching vanilla's own ARGB "linear channel mean" step.
     fn linear_channel_mean(&self, c1: u8, c2: u8, c3: u8, c4: u8) -> u8 {
         let sum = self.srgb_to_linear[c1 as usize] as u32
             + self.srgb_to_linear[c2 as usize] as u32
@@ -157,7 +157,7 @@ thread_local! {
     static LUTS: Luts = Luts::build();
 }
 
-/// `ARGB.meanLinear`: alpha is the arithmetic mean; RGB is the linear-light mean.
+/// Vanilla's own ARGB "mean linear" step: alpha is the arithmetic mean; RGB is the linear-light mean.
 fn mean_linear(luts: &Luts, a: [u8; 4], b: [u8; 4], c: [u8; 4], d: [u8; 4]) -> [u8; 4] {
     [
         luts.linear_channel_mean(a[0], b[0], c[0], d[0]),
@@ -167,7 +167,7 @@ fn mean_linear(luts: &Luts, a: [u8; 4], b: [u8; 4], c: [u8; 4], d: [u8; 4]) -> [
     ]
 }
 
-/// `MipmapGenerator.darkenedAlphaBlend`: linear-average the four texels but skip
+/// Vanilla's own mipmap-generator "darkened alpha blend" step: linear-average the four texels but skip
 /// any with `alpha == 0`, always dividing by four (which darkens edges).
 fn darkened_alpha_blend(luts: &Luts, texels: [[u8; 4]; 4]) -> [u8; 4] {
     let mut acc = [0f32; 4];
@@ -183,7 +183,7 @@ fn darkened_alpha_blend(luts: &Luts, texels: [[u8; 4]; 4]) -> [u8; 4] {
         *v /= 4.0;
     }
     // `acc` is indexed R, G, B, A -- the same order the `[u8; 4]` texels are.
-    // Vanilla's own line reads `ARGB.color(aTotal, rTotal, gTotal, bTotal)`,
+    // Vanilla's own line reads its own ARGB "color" constructor `(aTotal, rTotal, gTotal, bTotal)`,
     // which is that same tuple written in *its* channel order, not a rotation
     // of it; transcribing the argument order literally rotates every channel
     // by one and paints the alpha into blue.
@@ -197,7 +197,7 @@ fn darkened_alpha_blend(luts: &Luts, texels: [[u8; 4]; 4]) -> [u8; 4] {
 
 /// Replaces every fully transparent texel's RGB with the nearest opaque texel's
 /// colour (keeping `alpha == 0`), via a 4-neighbour multi-source BFS. This is
-/// vanilla's `TextureUtil.solidify` and is what prevents cutouts bleeding toward
+/// vanilla's own texture-util "solidify" step and is what prevents cutouts bleeding toward
 /// transparent-black when downsampled.
 pub fn solidify(image: &mut Image) {
     let w = image.width as usize;
@@ -255,7 +255,7 @@ pub fn solidify(image: &mut Image) {
 }
 
 /// Fills transparent areas with a darkened copy of the darkest opaque colour,
-/// matching vanilla's `TextureUtil.fillEmptyAreasWithDarkColor`.
+/// matching vanilla's own texture-util "fill empty areas with dark color" step.
 fn fill_empty_with_dark(image: &mut Image) {
     let mut darkest = [0u8; 3];
     let mut min_brightness = u32::MAX;
@@ -283,8 +283,8 @@ fn fill_empty_with_dark(image: &mut Image) {
 }
 
 /// Estimates the fraction of the image that passes an alpha test at `alpha_ref`,
-/// bilinearly supersampling each 2×2 texel quad on a 4×4 grid — vanilla's
-/// `MipmapGenerator.alphaTestCoverage`.
+/// bilinearly supersampling each 2×2 texel quad on a 4×4 grid — vanilla's own
+/// mipmap-generator "alpha test coverage" step.
 pub fn alpha_test_coverage(image: &Image, alpha_ref: f32, alpha_scale: f32) -> f32 {
     let w = image.width as i64;
     let h = image.height as i64;
@@ -322,7 +322,7 @@ pub fn alpha_test_coverage(image: &Image, alpha_ref: f32, alpha_scale: f32) -> f
 }
 
 /// Rescales an image's alpha so its alpha-test coverage matches `desired`, then
-/// biases it — vanilla's `MipmapGenerator.scaleAlphaToCoverage`.
+/// biases it — vanilla's own mipmap-generator "scale alpha to coverage" step.
 fn scale_alpha_to_coverage(image: &mut Image, desired: f32, alpha_ref: f32, bias: f32) {
     let mut min_scale = 0.0f32;
     let mut max_scale = 4.0f32;
@@ -380,7 +380,7 @@ fn downsample(image: &Image, combine: impl Fn([[u8; 4]; 4]) -> [u8; 4]) -> Image
 }
 
 /// Generates the mip chain for a single image, faithfully reproducing vanilla's
-/// `MipmapGenerator.generateMipLevels`.
+/// own mipmap-generator "generate mip levels" step.
 ///
 /// Returns `levels + 1` images (`[0]` is the base), capped at
 /// [`max_mip_level`]. `alpha_cutoff_bias` is vanilla's per-texture bias (default

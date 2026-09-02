@@ -113,7 +113,7 @@ pub struct BakedModel {
     /// The baked quads, in element order then [`DIRECTIONS`] order.
     pub quads: Vec<BakedQuad>,
     /// Normalised atlas UVs `[u0, v0, u1, v1]` of the model's `#particle`
-    /// texture — vanilla's `BakedModel.particleIcon()`, the sprite that break
+    /// texture — vanilla's own baked-model "particle icon" accessor, the sprite that break
     /// and landing particles sample.
     ///
     /// This is **not** derivable from the quads: `grass_block` declares
@@ -125,7 +125,7 @@ pub struct BakedModel {
     /// The model's `ambientocclusion` flag (JSON default `true`), from the
     /// **first** model resolved for this state.
     ///
-    /// Mirrors vanilla's `ModelBlockRenderer.tesselateBlock`, which reads
+    /// Mirrors vanilla's own model-block-renderer "tesselate block" step, which reads
     /// `this.parts.getFirst().useAmbientOcclusion()` — a multipart block (e.g. a
     /// fence with several part models) is gated by its first part only, the same
     /// "first resolved model wins" rule [`particle_uv`](Self::particle_uv)
@@ -243,7 +243,7 @@ pub struct BakeOptions {
     /// high mips dominate.
     ///
     /// Note (verified against decompiled 26.2 `TextureAtlasSprite`): vanilla no
-    /// longer applies a per-quad `uvShrinkRatio` — that field is gone. Instead it
+    /// longer applies a per-quad UV-shrink-ratio field — that field is gone. Instead it
     /// pads every sprite in the atlas and computes UVs from the padded interior,
     /// so mips sample replicated gutter pixels rather than the neighbour. The
     /// structurally-faithful equivalent here is [`AtlasBuilder::with_padding`],
@@ -409,7 +409,7 @@ fn bake_face(
 }
 
 /// Pulls a face's four UVs toward the sprite centre by `texels` source texels
-/// (vanilla's `uvShrinkRatio` anti-bleed inset). Texel size is derived per-axis
+/// (vanilla's own UV-shrink-ratio anti-bleed inset). Texel size is derived per-axis
 /// from the sprite's frame rect so mixed sprite sizes each shrink correctly. The
 /// shift toward centre is clamped so UVs never cross it.
 fn inset_uvs(
@@ -682,7 +682,7 @@ fn uv_lock_transform(model_rot: &Affine, dir: Direction) -> Affine {
     block_center_to_corner(&t)
 }
 
-/// `BlockMath.VANILLA_UV_TRANSFORM_LOCAL_TO_GLOBAL`.
+/// Vanilla's own block-math local-to-global UV transform constant.
 fn uv_local_to_global(dir: Direction) -> Affine {
     use std::f32::consts::PI;
     let rot = match dir {
@@ -696,7 +696,7 @@ fn uv_local_to_global(dir: Direction) -> Affine {
     Affine::from_rot(rot)
 }
 
-/// `BlockMath.VANILLA_UV_TRANSFORM_GLOBAL_TO_LOCAL` (inverse of local-to-global).
+/// Vanilla's own block-math global-to-local UV transform constant (inverse of local-to-global).
 fn uv_global_to_local(dir: Direction) -> Affine {
     uv_local_to_global(dir).inverse_rigid()
 }
