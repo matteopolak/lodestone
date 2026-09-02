@@ -174,8 +174,8 @@ pub trait Resolver {
         Value::Object(serde_json::Map::new())
     }
 
-    /// The full `worldgen/biome/<name>.json` document for one biome (issue
-    /// #295 composition): its `carvers` array and per-step `features` lists,
+    /// The full `worldgen/biome/<name>.json` document for one biome: its
+    /// `carvers` array and per-step `features` lists,
     /// consumed by [`crate::overworld::OverworldGenerator`] to select which
     /// carvers/ore features run for a given biome. Default: `Value::Null`,
     /// which every consumer of this method treats as "no carvers, no ore
