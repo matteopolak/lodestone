@@ -18,11 +18,11 @@ state of the project; work that out yourself from the tracker and the tree.
   which you are passing on faith. Ask for "anything in this brief that turned out wrong" and read that
   part of the report first. When an agent contradicts you and is right, say so and move on.
 - **Parallel Cargo runs are supported through sccache.** Give each agent its own literal `--target-dir`
-  under `/tmp` and a bounded `-j` value, following [`docs/build-caching.md`](../build-caching.md).
+  under `/tmp` and a bounded `-j` value, following [`docs/repo-tooling.md`](../repo-tooling.md).
   A count taken while agents are mid-edit is still a sample rather than a measurement — the invariant is
   zero failures, never a number. Run a final integrated verification when a group lands, using the health
   checks in `CLAUDE.md` — `just health` (see
-  [`docs/task-runner.md`](../task-runner.md)), or the four `just check`/`check-all`/`check-seam`/`test`
+  [`docs/repo-tooling.md`](../repo-tooling.md)), or the four `just check`/`check-all`/`check-seam`/`test`
   recipes individually when you need to name which one failed. Feed failures back to the owning agent by
   name. Also run `just wasm-check` (and, less often, `just wasm-size`) as part of the same batched pass —
   nothing else calls either script.

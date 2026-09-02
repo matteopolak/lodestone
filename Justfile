@@ -1,6 +1,6 @@
 # Lodestone task runner — the canonical-COMMAND layer, not a script host.
 #
-# Division of labour (see docs/task-runner.md for the full writeup):
+# Division of labour (see docs/repo-tooling.md for the full writeup):
 #   xtask   keeps anything that parses Rust/workspace structure, generates a
 #           committed artifact, or needs its own test (the drift gates).
 #   just    holds the canonical INVOCATIONS — one to three lines each. No
@@ -14,7 +14,7 @@
 # the raw command beside it as the definition, so this file is never the only
 # record of what a recipe actually runs.
 
-# Per-agent private target dir (docs/build-caching.md). Deliberately NOT a
+# Per-agent private target dir (docs/repo-tooling.md). Deliberately NOT a
 # CARGO_*-prefixed name: sccache hashes CARGO_* env vars into its cache keys,
 # and the env-var form of --target-dir measured 0% cache hits vs 78-94% for
 # the FLAG form. just interpolates {{tdir}} into the command line BEFORE
@@ -26,7 +26,7 @@ tdir := env("LODESTONE_TARGET_DIR", "target")
 
 # Overridable job cap, defaulting to EMPTY — not hardcoded to 4. A fixed -j
 # here would silently throttle CI and any idle-machine run. Set
-# LODESTONE_JOBS=4 yourself for local multi-agent courtesy (docs/build-caching.md).
+# LODESTONE_JOBS=4 yourself for local multi-agent courtesy (docs/repo-tooling.md).
 jobs := env("LODESTONE_JOBS", "")
 jflag := if jobs != "" { "-j " + jobs } else { "" }
 
@@ -175,7 +175,7 @@ run-relay *args=relay_defaults:
 
 # cargo xtask <args>, pre-expanded. The `cargo xtask` alias in
 # .cargo/config.toml ("run --quiet --package xtask --") cannot carry
-# --target-dir (docs/build-caching.md), so agents were hand-expanding this
+# --target-dir (docs/repo-tooling.md), so agents were hand-expanding this
 # every time; this recipe bakes that expansion instead.
 xtask *args:
     cargo run -q -p xtask {{jflag}} --target-dir {{tdir}} -- {{args}}
@@ -253,7 +253,7 @@ regen-snow-support:
 
 # Re-dump the five per-block-state freeze_top_layer facts from the real 26.2
 # server, over the committed anchor. Needs Apple `container` (see
-# docs/oracle-runtimes.md). Follow with `just regen-snow-support`.
+# docs/oracles-and-benchmarks.md). Follow with `just regen-snow-support`.
 oracle-snow-support:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -272,7 +272,7 @@ oracle-snow-support:
 # Re-dump the four freeze_top_layer whole-chunk parity fixtures (issue #404's
 # U2) from the real 26.2 server. Each is one container run of a few minutes.
 # The gate reading them is crates/lodestone-server/src/worldgen_data.rs ::
-# top_layer_parity. See docs/worldgen-freeze-top-layer.md for why these four
+# top_layer_parity. See docs/worldgen-biomes.md for why these four
 # biomes and not others — windswept_hills is the one that discriminates the
 # height-adjusted temperature from the flat biome field.
 oracle-top-layer:
@@ -337,7 +337,7 @@ worldgen-sweep *args:
 # pass timings, with the section/draw-call counts beside every duration, and
 # records medians to bench-results/frame_profile.jsonl for a same-machine
 # comparison against the previous run. Needs a GPU adapter; skips loudly
-# without one. See docs/frame-profiling.md.
+# without one. See docs/render-benchmarks.md.
 #
 # Run it on an otherwise IDLE machine: a duration gathered while other agents
 # build gets attributed to the wrong cause (CLAUDE.md). The bench states its
@@ -378,7 +378,7 @@ bench-client-lovelier-smoke:
 
 # Live-oracle launchers — one recipe per canonical oracle. Each script
 # creates a fresh container and tears it down when it exits. See
-# docs/oracle-runtimes.md and CLAUDE.md for the spawn contracts.
+# docs/oracles-and-benchmarks.md and CLAUDE.md for the spawn contracts.
 oracle-creative:
     ./scripts/live-oracles/creative.sh
 
@@ -410,7 +410,7 @@ screenshots:
 # Re-dump the per-block blast-resistance + flammability facts (#312/#313) from
 # the real 26.2 server, over the committed anchor
 # (crates/lodestone-data/tests/support/blast_fire_jvm.txt). Needs Apple
-# `container` (see docs/oracle-runtimes.md). Follow with `just regen-blast-fire`.
+# `container` (see docs/oracles-and-benchmarks.md). Follow with `just regen-blast-fire`.
 oracle-blast-fire:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -433,7 +433,7 @@ oracle-blast-fire:
 regen-blast-fire:
     LODESTONE_REGEN=1 cargo test -p lodestone-data --test block_blast {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
 
-# Reproduces docs/pgo-experiment.md's baseline-vs-PGO instructions-retired
+# Reproduces docs/oracles-and-benchmarks.md's baseline-vs-PGO instructions-retired
 # comparison on demand (issue #556: opt-in, NOT a default build-config
 # change -- see that doc before reading anything into the number this
 # prints). Three full `--release` builds in a private CARGO_TARGET_DIR
@@ -450,7 +450,7 @@ pgo-probe:
 # PGO is deliberately NOT a default profile setting: the owner's call is that
 # it stays off until a real-workload measurement justifies it, and the only
 # number we have is 14.6% fewer instructions retired on a worldgen probe --
-# a proxy, not frame time or tick time. See docs/pgo-experiment.md.
+# a proxy, not frame time or tick time. See docs/oracles-and-benchmarks.md.
 #
 # These are three recipes rather than a `--pgo` flag on `run` for the reason
 # this file's header gives: a flag would mean parsing an argument and
