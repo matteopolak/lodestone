@@ -87,9 +87,8 @@ site rather than calling it directly, so re-grep `WorldScene::plan_frame` in `gp
 it as the production entry point). `strategy.rs` and the arena/translucency items are unaffected
 by that landing:
 
-* **`crates/lodestone-render/src/visibility.rs`** — `compute_visibility` is vanilla's
-  `VisGraph` (verified line-against-line with
-  `.cache/mc/26.2/client-src/net/minecraft/client/renderer/chunk/VisGraph.java`: the
+* **`crates/lodestone-render/src/visibility.rs`** — `compute_visibility` is vanilla's own
+  per-section visibility graph (verified line-against-line with the decompiled 26.2 source: the
   `< 256`-opaque sparse shortcut, the fully-solid shortcut, flood-fill face connectivity;
   our union-find over open cells computes the same face-pair relation as vanilla's
   edge-seeded flood). `walk_visible` is the camera BFS with the never-reverse-axis rule.
@@ -175,8 +174,9 @@ live counter in `gpu/frame.rs`. The design below is now a record of how, not a p
 **Where.** `gpu/frame.rs`: compute `camera.frustum()` once per frame (the machinery exists;
 `prepare_entities` already frustum-culls entities — terrain is the only unculled geometry).
 Guard all three loops with `frustum.section_visible(coord)` via a small
-`SectionKey → SectionCoord` helper (`origin()/16`). Apply vanilla's
-`offsetToFullyIncludeCameraCube(8)` equivalent (`SectionOcclusionGraph.offsetFrustum`):
+`SectionKey → SectionCoord` helper (`origin()/16`). Apply vanilla's own frustum-offset step
+(pushes the near plane back by roughly one section's worth of distance so the camera's own
+section cube is always fully included):
 translate the near plane back so sections straddling the camera never pop — without this,
 the section you stand in flickers at cell boundaries, which is the classic
 "correct-looking cull that fails at certain positions".
@@ -234,8 +234,8 @@ live counter in `gpu/frame.rs`.
 
 **What the free cull actually is.** Not the fog bound the briefing proposed (see
 Corrections). Vanilla does not render the streamed square: section membership is gated by
-`ChunkTrackingView.isInViewDistance`, whose real expression lives in
-`ChunkTrackingView.isWithinDistance` —
+vanilla's own in-view-distance check, whose real expression lives in a separate helper on the
+same type —
 
 ```java
 long dx = Math.max(0, Math.abs(chunkX - centerX) - 1);
@@ -243,8 +243,8 @@ long dz = Math.max(0, Math.abs(chunkZ - centerZ) - 1);
 return dx*dx + dz*dz < viewDistance * viewDistance;
 ```
 
-— a **rounded circle with a 1-chunk buffer**, applied by `SectionOcclusionGraph.
-getRelativeFrom`/`isInViewDistance` so out-of-circle sections are never drawn. Porting the
+— a **rounded circle with a 1-chunk buffer**, applied by vanilla's own section-occlusion graph
+so out-of-circle sections are never drawn. Porting the
 predicate verbatim is vanilla parity **by construction** and needs no fog argument at all.
 Computed membership counts (exact, from the predicate):
 
@@ -303,20 +303,21 @@ the module supports a soak mode deliberately.
 
 This is what makes caves cheap: standing on the surface, the frustum still contains the
 entire underground column; only connectivity reachability removes it. Vanilla's shape,
-confirmed from `SectionOcclusionGraph.java`: per-section face-connectivity computed **at
-mesh time** (`VisGraph` → `VisibilitySet`), a BFS from the camera **decoupled from the
+confirmed from its own occlusion-graph source: per-section face-connectivity computed **at
+mesh time** (a per-section visibility graph feeding a visibility-set), a BFS from the camera
+**decoupled from the
 frustum** (reachability is recomputed only when invalidated; the frustum is applied
 per-frame over the cached reachable set via the Octree walk), invalidation when the camera
-crosses an **8-block (half-section) cell** or FOV changes (`SectionOcclusionGraph.invalidateIfNeeded`),
+crosses an **8-block (half-section) cell** or FOV changes (vanilla's own invalidation check),
 incremental re-propagation from changed sections
-(`schedulePropagationFrom`), and the full rebuild ran **async** on a background executor.
+(vanilla's own propagation-scheduling call), and the full rebuild ran **async** on a background executor.
 
 #### U3a — producer + graph + shadow-mode counter (lands first, consumed by F3)
 
 * **Producer.** In the mesh worker (`mesher.rs`), compute `SectionVisibility` for every
   meshed section via `compute_visibility` over an adapter from the worker's existing
   snapshot (`SnapshotModelView::occludes_at` is the same face-culling occlusion predicate
-  family vanilla's `isSolidRender` feeds into `VisGraph.setOpaque`; erring toward
+  family vanilla's own solid-render check feeds into its opaque-marking step; erring toward
   "not opaque" only ever draws more — the safe direction). Ride it on
   `Meshed { key, mesh, visibility }`. Cost is bounded by the two shortcuts: most sections
   are sparse (<256 opaque → `all()`, no flood) or solid (no flood); the flood itself is
@@ -339,8 +340,9 @@ incremental re-propagation from changed sections
 
 * **Upgrade `walk_visible` to vanilla's node semantics before trusting it.** Verified
   divergence: our BFS visits each section once with a single entry face; vanilla
-  **merges source directions on re-reach** (`existingNode.addSourceDirection(direction)`,
-  in `SectionOcclusionGraph.runUpdates`) and passes a neighbour if *any* accumulated source
+  **merges source directions on re-reach** (its own node type accumulates every source
+  direction it has been reached from, in its own graph-update routine) and passes a neighbour if
+  *any* accumulated source
   face connects. Ours is stricter and can **over-cull** — a section reachable
   through face B but first visited through face C gets B's exits pruned. That is exactly
   the "geometry disappears at certain angles" bug class; fix it in `visibility.rs` first,
@@ -348,8 +350,8 @@ incremental re-propagation from changed sections
   current code must fail this test — that failure is the control proving the fixture can
   detect the defect).
 * **Decouple frustum from reachability, vanilla-style.** Walk with `|_| true` (the
-  never-reverse-axis direction masks already prune behind-camera expansion, as vanilla's
-  `directions` byte does); cache the reachable set; apply U1's frustum per frame over it.
+  never-reverse-axis direction masks already prune behind-camera expansion, as vanilla's own
+  per-node direction bitmask does); cache the reachable set; apply U1's frustum per frame over it.
   Camera rotation then never re-walks.
 * **Invalidation cadence (vanilla's, exactly):** re-walk when `floor(camera/8)` changes on
   any axis, on FOV change, and on any graph insert/remove (batched per frame). Synchronous
@@ -360,8 +362,8 @@ incremental re-propagation from changed sections
   the same switch — spectator-in-wall disables it). This is both the live false-cull
   diagnostic (toggle it: if terrain reappears, the walk over-culled) and the A/B lever for
   counters.
-* **Not ported:** vanilla's `MINIMUM_ADVANCED_CULLING_DISTANCE = 60` ray-march
-  (also in `SectionOcclusionGraph.runUpdates`) — an *additional* aggressive cull for distant sections with measured
+* **Not ported:** vanilla's own 60-block-minimum advanced-culling ray-march
+  (also in its own graph-update routine) — an *additional* aggressive cull for distant sections with measured
   false-cull history upstream (it is why vanilla caps it to >60 blocks). Skip it; the
   connectivity walk is the win, and the ray-march can be a separate later unit with its own
   soak if counters justify it.
@@ -486,7 +488,7 @@ parity bug at some camera angles today, independent of performance.
   the set; this is the interaction that makes U5 sequence after culling.
 * **Intra-section resort:** keep the water quad refs CPU-side (`TranslucentMesh`), resort
   on octant change and re-upload that section's index buffer via `write_buffer`. Cadence
-  is vanilla's (`LevelRenderer.scheduleTranslucentSectionResort`): nearby sections when the camera block
+  is vanilla's (its own translucent-section-resort scheduling call): nearby sections when the camera block
   changes, plus a round-robin `max(visible/8, 15)` per frame over the rest — bounded by
   counter, never all-sections-per-frame (`translucency.rs`'s own module doc: "sorting
   every section every frame is unaffordable").
@@ -535,11 +537,12 @@ behaviour; the mesh-worker's `occludes_at` being available off-thread; wgpu = "3
 in the workspace `Cargo.toml`'s `[workspace.dependencies]`.
 
 **Verified against the 26.2 decompiled client (record definitions, not summaries):**
-`VisGraph`'s 256-threshold and flood; `VisibilitySet`'s symmetric face-pair bitset;
-`SectionOcclusionGraph`'s async full rebuild, 8-block invalidation grid, frustum/walk
+vanilla's own per-section visibility graph's 256-threshold and flood; its visibility-set's
+symmetric face-pair bitset; its own section-occlusion graph's async full rebuild, 8-block
+invalidation grid, frustum/walk
 decoupling, source-direction merge, frustum offset, and the >60-block ray-march;
-`ChunkTrackingView.isWithinDistance`'s exact expression; `LevelRenderer`'s translucent
-resort cadence; `FogRenderer`'s span/start/end (via `fog.rs`'s quoted source, cross-checked
+its own in-view-distance helper's exact expression; its own level renderer's translucent
+resort cadence; its own fog-setup routine's span/start/end (via `fog.rs`'s quoted source, cross-checked
 against `docs/fog.md`).
 
 **Assumed (marked hypotheses, to be measured by the units' own counters):** the ~3
@@ -553,7 +556,7 @@ anywhere above.
 ## Corrections to the briefing
 
 1. **The fog formula quoted is the fog *start*, not the end.** `rd·16 − clamp(rd·16/10, 4, 64)`
-   is where fading *begins* (`FogRenderer.setupFog`, `fog.rs`'s `fog_factor`); geometry there is
+   is where fading *begins* (vanilla's own fog-setup routine, `fog.rs`'s `fog_factor`); geometry there is
    barely fogged. Full fog is at cylindrical distance ≥ **rd·16**.
 2. **"Fully fogged ⇒ provably invisible" does not hold.** A fully-fogged fragment is exactly
    the fog colour, which matches the below-horizon clear and the horizon rim — but a
@@ -576,7 +579,8 @@ anywhere above.
 7. **Not in the briefing at all, and the biggest fact in this plan:** the culling/
    submission stack the briefing asks to be designed **already exists in
    `lodestone-render`, tested and benched, with zero production consumers** — including a
-   faithful `VisGraph` port and the measured Metal multi-draw verdict. The work is
+   faithful port of vanilla's own per-section visibility graph and the measured Metal multi-draw
+   verdict. The work is
    dominated by wiring and by the walk-fidelity gap (U3b's source-direction merge), not by
    new architecture.
 
