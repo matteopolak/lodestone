@@ -1,14 +1,15 @@
-//! `Entity.fallDistance` — accumulation and every reset this crate maintains.
+//! Vanilla's own fall-distance field — accumulation and every reset this crate
+//! maintains.
 //!
 //! # Why this file exists
 //!
-//! `fall_distance` used to be a permanent `0.0`: read by
-//! `Player.maybeBackOffFromEdge`'s airborne branch, written by nothing. See
+//! `fall_distance` used to be a permanent `0.0`: read by vanilla's own
+//! edge-back-off step's airborne branch, written by nothing. See
 //! [`lodestone_physics::player::PlayerState::fall_distance`]'s doc for the full
-//! jar citation of every site now reproduced: the `checkFallDamage`
+//! jar citation of every site now reproduced: vanilla's own fall-damage check's
 //! accumulation and grounded reset, the water reset, the lava halving, the
 //! climbable reset, the Slow Falling/Levitation reset, the elytra
-//! `checkFallDistanceAccumulation` clamp, and the stuck-in-block reset.
+//! fall-distance-accumulation clamp, and the stuck-in-block reset.
 //!
 //! # The vacuity risk this file is written against
 //!
@@ -26,8 +27,8 @@
 //! Several tests derive their expected value from the tick's **measured
 //! position delta** (`state.position.y` before/after, read from the public
 //! field) rather than from a hand-typed number, and check that
-//! `state.fall_distance` matches what `checkFallDamage`'s formula
-//! (`fall_distance -= (float) ya`) predicts from that measurement — so the
+//! `state.fall_distance` matches what vanilla's own fall-damage check's
+//! formula (`fall_distance -= (float) ya`) predicts from that measurement — so the
 //! assertion is cross-checking two independently-observed quantities, not
 //! replaying the implementation's own arithmetic back at it.
 //!
@@ -111,7 +112,7 @@ fn free_fall_accumulation_matches_the_measured_position_delta() {
             "tick {tick_index}: landed in open sky — fixture is broken"
         );
         let ya = state.position.y - old_y;
-        // `checkFallDamage`'s own guard: only a real downward move accumulates.
+        // Vanilla's own fall-damage check's own guard: only a real downward move accumulates.
         if ya < 0.0 {
             expected -= f64::from(ya as f32);
         }
@@ -229,24 +230,25 @@ fn entering_water_resets_fall_distance_to_exactly_zero() {
 }
 
 /// Pins the **one named divergence** in this subsystem: the water reset that
-/// vanilla reaches from *inside* `move()`, which this crate does not model.
+/// vanilla reaches from *inside* its own move step, which this crate does not
+/// model.
 ///
-/// Hand-derived from the jar, not from this crate. `updateFluidInteraction` has
-/// **two** call sites, not one:
+/// Hand-derived from the jar, not from this crate. Vanilla's own
+/// fluid-interaction update has **two** call sites, not one:
 ///
-/// * `Entity.baseTick` (`Entity.java:537`), before `travel()` — the pre-move
+/// * its own base per-tick step, before its own travel step — the pre-move
 ///   evaluation this crate reproduces as `tick`'s dispatch summary; and
-/// * `LivingEntity.checkFallDamage` (`LivingEntity.java:365`),
-///   `if (!this.isInWater()) { this.updateFluidInteraction(); }`, which runs
-///   *inside* `move()` against the **post-move** position.
+/// * its own fall-damage check, which calls its own fluid-interaction update
+///   whenever its own in-water check is false, running *inside* its own move
+///   step against the **post-move** position.
 ///
-/// `Entity.isInWater()` is `return this.wasTouchingWater` (`Entity.java:1605-1607`)
-/// — a *cached* flag that `updateFluidInteraction` itself rewrites
-/// (`Entity.java:1657-1666`). So on the tick a fall first enters water, vanilla
-/// re-evaluates mid-`move`, hits `if (inWater) resetFallDistance()`
-/// (`Entity.java:1658-1659`), and the `super.checkFallDamage` accumulation that
-/// follows is then skipped because `!isInWater()` is now false
-/// (`Entity.java:1565`). Vanilla therefore ends the entry tick at **exactly 0.0**.
+/// Vanilla's own in-water check returns its own cached "was touching water"
+/// flag — a *cached* flag that the fluid-interaction update itself rewrites.
+/// So on the tick a fall first enters water, vanilla
+/// re-evaluates mid-move, hits its own "if in water, reset fall distance"
+/// branch, and the fall-damage check's accumulation that
+/// follows is then skipped because the in-water check is now false.
+/// Vanilla therefore ends the entry tick at **exactly 0.0**.
 ///
 /// This crate freezes the fluid summary for the whole tick, so the entry tick is
 /// still dispatched to `tick_air`, which accumulates that tick's descent.
@@ -466,9 +468,10 @@ fn levitation_resets_fall_distance_before_travel() {
 
 #[test]
 fn elytra_clamps_fall_distance_to_one_before_travel() {
-    // Real fall past the clamp threshold (1.0, not just maxDownStep), then
-    // start gliding. `checkFallDistanceAccumulation` clamps to 1.0 *before*
-    // travel(), so this tick's own elytra move (whatever small further
+    // Real fall past the clamp threshold (1.0, not just the max-down-step
+    // value), then start gliding. Vanilla's own fall-distance-accumulation
+    // clamp clamps to 1.0 *before* the travel step, so this tick's own
+    // elytra move (whatever small further
     // accumulation it contributes, measured the same way as the other
     // isolation tests) must land on top of exactly 1.0, not the pre-clamp
     // value.
@@ -578,9 +581,10 @@ fn real_accumulated_fall_distance_opens_the_edge_back_off_gate_that_zero_would_c
     let mut mid_air = None;
     for i in 0..40 {
         tick_air(&mut state, MovementInput::NONE, &world, &profile);
-        // Still airborne, feet within maxDownStep (0.6) of the floor top (1.0),
-        // and already past maxDownStep in accumulated fall_distance: the exact
-        // regime `Player.isAboveGround`'s airborne branch exists for.
+        // Still airborne, feet within the max-down-step value (0.6) of the
+        // floor top (1.0), and already past the max-down-step value in
+        // accumulated fall_distance: the exact regime vanilla's own "is above
+        // ground" check's airborne branch exists for.
         let height_above_floor = state.position.y - 1.0;
         if !state.on_ground && (0.0..0.6).contains(&height_above_floor) && state.fall_distance > 0.6
         {
@@ -639,16 +643,16 @@ fn real_accumulated_fall_distance_opens_the_edge_back_off_gate_that_zero_would_c
     let with_zero_fall_distance = run(0.0);
 
     // The control: a permanent 0.0 (the old, pre-accumulation behaviour) closes
-    // `canFallAtLeast` (the floor is within reach) and so backs the player off
-    // the ledge -- it must NOT reach 0.5 + 0.8.
+    // vanilla's own "can fall at least" check (the floor is within reach) and
+    // so backs the player off the ledge -- it must NOT reach 0.5 + 0.8.
     assert!(
         (with_zero_fall_distance - (0.5 + 0.8)).abs() > 1e-9,
         "control did not back off with fall_distance = 0.0 (got x = \
          {with_zero_fall_distance}) — the fixture cannot express the divergence \
          this test exists to show"
     );
-    // The real behaviour: fall_distance > maxDownStep closes the airborne
-    // branch outright (`fall_distance < maxDownStep` is false), so the gate
+    // The real behaviour: fall_distance past the max-down-step value closes
+    // the airborne branch outright (`fall_distance < maxDownStep` is false), so the gate
     // never engages and the player reaches the full delta.
     assert_eq!(
         with_real_fall_distance.to_bits(),
@@ -661,6 +665,6 @@ fn real_accumulated_fall_distance_opens_the_edge_back_off_gate_that_zero_would_c
         with_real_fall_distance.to_bits(),
         with_zero_fall_distance.to_bits(),
         "real accumulation made no difference at all vs. the old permanent 0.0 \
-         — this is the exact divergence issue #194 exists to close"
+         — this is the exact divergence this accumulation work exists to close"
     );
 }
