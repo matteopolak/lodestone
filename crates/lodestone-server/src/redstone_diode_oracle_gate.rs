@@ -22,19 +22,19 @@
 //!
 //! * **`pause-when-empty-seconds` defaults to `60`.** With no player
 //!   connected the dedicated server pauses the entire world after a minute:
-//!   `gameTime` stops dead, and since `ServerLevel.tick` runs
-//!   `this.blockTicks.tick(this.getGameTime(), ...)`, **no scheduled block
+//!   the game-time clock stops dead, and since the real per-tick rule gates
+//!   its scheduled block-tick queue on that same clock, **no scheduled block
 //!   tick ever fires again**. Redstone then looks simply dead — dust still
-//!   propagates (it is synchronous, inside the `setBlock` itself) while every
+//!   propagates (it is synchronous, inside the real set-block rule itself) while every
 //!   repeater, comparator, observer and torch sits inert forever. The oracle
 //!   world needs `pause-when-empty-seconds=0`. A falling-sand block is the
 //!   cheapest control: if sand placed in the air does not land, nothing is
 //!   ticking and every timing reading below is vacuous.
 //! * **`/tick step N` *does* advance scheduled block ticks.** An earlier note
-//!   in this repo said it did not. `TickRateManager.tick` sets
-//!   `runGameElements = !isFrozen || frozenTicksToRun > 0`, and
-//!   `ServerLevel.tick` gates `blockTicks.tick(...)` on exactly that value,
-//!   so a stepped tick runs them normally.
+//!   in this repo said it did not. Vanilla's own tick-rate-manager tick rule sets
+//!   the "run game elements" flag from the frozen/steps-remaining state, and
+//!   the real per-tick rule gates its scheduled block-tick queue on exactly that
+//!   value, so a stepped tick runs them normally.
 //!   The original observation was the paused-world symptom above.
 //! * **`time query gametime` is only a tick counter while the world runs.**
 //!   Under the pause it is a constant, which reads as "stepping does nothing".
@@ -342,7 +342,7 @@ fn a_repeater_scheduled_tick_produces_the_powered_state_the_live_server_showed()
 /// The paired rows are what make this more than "a repeater can lock": the
 /// same block unpowered, and the same block rotated, must both fail to lock,
 /// and a lit torch — a perfectly good power source — must fail too, because
-/// `RepeaterBlock.sideInputDiodesOnly()` is `true`.
+/// the real repeater's side-input-diodes-only rule is `true`.
 #[test]
 fn only_a_powered_diode_facing_the_right_way_locks_a_repeater() {
     // The main repeater faces west, so its side positions are north (z-1) and

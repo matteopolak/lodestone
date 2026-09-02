@@ -277,7 +277,7 @@ fn nothing_collapses_when_the_support_is_intact_or_unmodelled() {
     // A torch two cells away from the break, on floor that stays.
     let torch = BlockPos::new(4, FLOOR_Y + 1, 4);
     world.put(torch, "minecraft:torch");
-    // An ordinary block directly above the break — stone has no `canSurvive`.
+    // An ordinary block directly above the break — stone has no survival check.
     let stone = BlockPos::new(2, FLOOR_Y + 1, 2);
     world.put(stone, "minecraft:stone");
     let broken = BlockPos::new(2, FLOOR_Y, 2);
@@ -360,9 +360,9 @@ fn the_collapse_bound_truncates_a_runaway_column_and_nothing_shorter() {
 /// dependency, so one block family gives a clean pair with nothing else
 /// changing between the two arms.
 ///
-/// `Block.updateOrDestroy` reaches `Level.destroyBlock`, which — exactly like
-/// `Level.removeBlock` behind a player's break — writes
-/// `fluidState.createLegacyBlock()`, not `Blocks.AIR` unconditionally. Before
+/// The real update-or-destroy rule reaches the real destroy-block rule, which —
+/// exactly like the real remove-block rule behind a player's break — writes
+/// the fluid state's own legacy block form, not plain air unconditionally. Before
 /// this fix `collapse_unsupported` wrote literal air for both arms below, so a
 /// waterlogged sign or rail whose support vanished silently lost its water too.
 #[test]
@@ -394,7 +394,7 @@ fn a_collapsed_waterlogged_block_keeps_its_water_source_while_a_dry_one_goes_to_
         world.at(wet_rail),
         "minecraft:water[level=0]",
         "a waterlogged block's cell must keep its water source, not go to air \
-         — the level=0 legacy encoding is `FlowingFluid.getLegacyLevel`'s own \
+         — the level=0 legacy encoding is vanilla's own get-legacy-level rule's \
          value for a source"
     );
 }

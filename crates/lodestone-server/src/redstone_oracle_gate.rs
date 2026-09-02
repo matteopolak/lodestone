@@ -58,7 +58,7 @@
 //!   command*, before any tick was stepped.
 //! * A torch's inversion is **not** synchronous: under the same freeze the
 //!   torch did not flip, and only flipped once the server was allowed to
-//!   tick. Its delay is `RedstoneTorchBlock.TOGGLE_DELAY = 2`,
+//!   tick. Its delay is the real redstone-torch toggle delay, `2`,
 //!   read from the jar's own source rather than counted by hand.
 //!
 //! ## Two oracle traps worth not re-paying for
@@ -68,10 +68,10 @@
 //! rather than an error:
 //!
 //! * **`/setblock` does not reproduce a power source's natural update
-//!   fan-out.** `LeverBlock.updateNeighbours` — which notifies the attached
+//!   fan-out.** The real lever neighbour-update rule — which notifies the attached
 //!   block *and that block's own neighbours*, the reach a torch two blocks
 //!   away needs — runs from the lever's use/removal handlers, not from
-//!   `setBlock`. A lever flipped with `/setblock` therefore powers its block
+//!   the real set-block rule. A lever flipped with `/setblock` therefore powers its block
 //!   but never notifies the torch, which sits there lit forever. Redstone
 //!   **dust** is the correct trigger: its evaluator performs that fan-out on
 //!   every power change, through the ordinary neighbour-update path.
@@ -113,7 +113,7 @@ const ORACLE_DUST_ATTENUATION: &[(i32, u8)] = &[
     (15, 1),
 ];
 
-/// `RedstoneTorchBlock.TOGGLE_DELAY`, read
+/// The real redstone-torch toggle delay, read
 /// from the 26.2 jar's own source.
 const ORACLE_TORCH_TOGGLE_DELAY: u64 = 2;
 
@@ -427,8 +427,9 @@ fn a_torch_inversion_is_scheduled_at_exactly_two_ticks_not_applied_immediately()
 ///
 /// `crate::random_tick::propagate_and_react`'s own doc comment used to record
 /// that it implements only the *first* layer of
-/// `DefaultRedstoneWireEvaluator.updatePowerStrength`'s update fan-out — vanilla additionally
-/// fans out from each of the six neighbours' own positions. That doc called the omission
+/// the real redstone-wire power-strength-update rule's update fan-out — vanilla
+/// additionally fans out from each of the six neighbours' own positions. That doc
+/// called the omission
 /// a corner case affecting "a diagonal-over-conductor corner update".
 ///
 /// It is not a corner case. The geometry it misses is the **standard

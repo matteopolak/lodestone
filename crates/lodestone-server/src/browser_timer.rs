@@ -1,5 +1,4 @@
-//! A browser-compatible periodic driver for `server::serve_play`'s wasm32 arm
-//! (issue #636).
+//! A browser-compatible periodic driver for `server::serve_play`'s wasm32 arm.
 //!
 //! # What it is
 //!
