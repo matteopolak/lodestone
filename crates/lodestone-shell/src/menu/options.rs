@@ -10,7 +10,7 @@
 //!
 //! ## Why this is one mechanism and not thirteen screens
 //!
-//! `Options.java` declares 94 `OptionInstance` fields with 93 accessors, and
+//! vanilla's own options class declares 94 `OptionInstance` fields with 93 accessors, and
 //! every settings sub-screen is the same three lines:
 //! `HeaderAndFooterLayout` + an `OptionsList` + `addOptions()`. `OptionsList`
 //! offers exactly three shapes — `addBig` (one 310 px control),
@@ -342,7 +342,7 @@ pub enum LiveOption {
     /// `options.damageTiltStrength` →
     /// [`crate::config::Options::damage_tilt_strength`]. A `UnitDouble`
     /// defaulting to `1.0`, labelled with `Options::percentValueOrOffLabel`
-    /// (`Options.java`'s `damageTiltStrength` field) — so a stored `0.0` prints
+    /// (vanilla's own options class's `damageTiltStrength` field) — so a stored `0.0` prints
     /// **OFF**, not `0%`, unlike every other percent slider here.
     ///
     /// This was the exact inverse of the chat batch above, and worse: the field
@@ -392,7 +392,7 @@ pub enum LiveOption {
     /// An **`IntRange(30, 110)`** defaulting to `70`, so its handle comes from
     /// [`SliderRange`] like [`Self::RenderDistance`]'s and
     /// [`Self::unit_double`] answers `None` for it. The `Codec.DOUBLE.xmap`
-    /// between those two lines in `Options.java` is a *persistence* codec on the
+    /// between those two lines in vanilla's own options class is a *persistence* codec on the
     /// seven-argument `OptionInstance` overload, not a `ValueSet::xmap`; reading
     /// it as one puts the value at `70 * 40 + 70`.
     ///
@@ -738,7 +738,7 @@ impl LiveOption {
     ///
     /// True for four options on the tree, and it is not a stylistic
     /// choice: `cloudStatus`' stringifier is `(caption, value) ->
-    /// value.caption()` (the `cloudStatus` field in `Options.java`), which throws
+    /// value.caption()` (the `cloudStatus` field in vanilla's own options class), which throws
     /// its `caption` argument away and returns `CloudStatus.caption()` alone — so
     /// vanilla's Clouds button reads "Fancy", never "Clouds: Fancy". Every other
     /// live option here goes through `genericValueLabel`, `percentValueLabel` or
@@ -746,7 +746,7 @@ impl LiveOption {
     /// [`Cell::label`] composes by default.
     ///
     /// `InactivityFpsLimit`'s stringifier is the identical shape
-    /// (`(caption, value) -> value.caption()`, `Options.java`), so it joins
+    /// (`(caption, value) -> value.caption()`, vanilla's own options class), so it joins
     /// `CloudStatus` here — vanilla's "Reduce FPS when" button reads "AFK" or
     /// "Minimized" alone. `attackIndicator`'s is the same again
     /// (`(caption, value) -> ((AttackIndicatorStatus)value).caption()`), so
@@ -837,12 +837,12 @@ fn pixel_value(value: i32) -> String {
 
 /// One vanilla `OptionInstance`, reduced to what a row needs.
 ///
-/// `accessor` is the census key — `Options.java`'s own method name — so a row on
+/// `accessor` is the census key — vanilla's own options accessor method name — so a row on
 /// screen can be traced back to the field it stands for without guessing from
 /// the caption. It is also what `the_census_matches_the_written_one` counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptionSpec {
-    /// The `Options.java` accessor, e.g. `"renderDistance"`.
+    /// Vanilla's own options accessor name, e.g. `"renderDistance"`.
     pub accessor: &'static str,
     /// The caption, verbatim from `assets/minecraft/lang/en_us.json`.
     pub caption: &'static str,
@@ -974,8 +974,8 @@ impl Cell {
     ///   `OptionInstance.UnitDouble.INSTANCE` that default *is* the slider
     ///   fraction, because `UnitDouble.toSliderValue` is the identity
     ///  . [`UNIT_DOUBLE_DEFAULTS`] is that
-    ///   set, one entry per accessor, each cited to the `Options.java` line
-    ///   it boots from.
+    ///   set, one entry per accessor, each cited to the source line in
+    ///   vanilla's own options class it boots from.
     ///
     /// A slider whose accessor is not in [`UNIT_DOUBLE_DEFAULTS`] is built on
     /// some other value set — an `IntRange` or an `IntRange.xmap` — whose
@@ -1097,7 +1097,8 @@ impl Cell {
 /// exactly as [`UNIT_DOUBLE_DEFAULTS`] and [`INT_RANGE_SLIDERS`] already do.
 ///
 /// The accessor is a safe key here in a way a field *name* would not be — see
-/// `CLAUDE.md` on NBT's `Age` — because these are `Options.java`'s own field names
+/// `CLAUDE.md` on NBT's `Age` — because these are vanilla's own options
+/// accessor names
 /// and are unique within that class by construction.
 ///
 /// ## What is in it, and what is deliberately not
@@ -1175,7 +1176,7 @@ pub fn option_tooltip(accessor: &str) -> Option<&'static str> {
 }
 
 const UNIT_DOUBLE_DEFAULTS: &[(&str, f32)] = &[
-    // `Options.java`, `createSoundSliderOptionInstance`'s fifth
+    // vanilla's own options class, `createSoundSliderOptionInstance`'s fifth
     // argument — shared by all eleven `SoundSource` categories.
     ("soundSource.master", 1.0),
     ("soundSource.music", 1.0),
@@ -1188,40 +1189,40 @@ const UNIT_DOUBLE_DEFAULTS: &[(&str, f32)] = &[
     ("soundSource.ambient", 1.0),
     ("soundSource.voice", 1.0),
     ("soundSource.ui", 1.0),
-    // `Options.java` — look sensitivity, distinct from the live
+    // vanilla's own options class — look sensitivity, distinct from the live
     // `mouseWheelSensitivity` below.
     ("sensitivity", 0.5),
-    // `Options.java`.
+    // vanilla's own options class.
     ("chatOpacity", 1.0),
-    // `Options.java`.
+    // vanilla's own options class.
     ("chatLineSpacing", 0.0),
-    // `Options.java`.
+    // vanilla's own options class.
     ("textBackgroundOpacity", 0.5),
-    // `Options.java`.
+    // vanilla's own options class.
     ("panoramaSpeed", 1.0),
-    // `Options.java`.
+    // vanilla's own options class.
     ("chatScale", 1.0),
-    // `Options.java`.
+    // vanilla's own options class.
     ("chatWidth", 1.0),
-    // `Options.java`, default `ChatComponent.defaultUnfocusedPct()`
+    // vanilla's own options class, default `ChatComponent.defaultUnfocusedPct()`
     // = `70.0 / (getHeight(1.0) - 20)` = `70.0 / 160.0`
     //.
     ("chatHeightUnfocused", 70.0 / 160.0),
-    // `Options.java`.
+    // vanilla's own options class.
     ("chatHeightFocused", 1.0),
-    // `Options.java`.
+    // vanilla's own options class.
     ("screenEffectScale", 1.0),
-    // `Options.java`, `sqrt(1.0)`.
+    // vanilla's own options class, `sqrt(1.0)`.
     ("fovEffectScale", 1.0),
-    // `Options.java`, `sqrt(1.0)`.
+    // vanilla's own options class, `sqrt(1.0)`.
     ("darknessEffectScale", 1.0),
-    // `Options.java`.
+    // vanilla's own options class.
     ("glintSpeed", 0.5),
-    // `Options.java`.
+    // vanilla's own options class.
     ("glintStrength", 0.75),
-    // `Options.java`.
+    // vanilla's own options class.
     ("damageTiltStrength", 1.0),
-    // `Options.java`.
+    // vanilla's own options class.
     ("gamma", 0.5),
 ];
 
@@ -1257,19 +1258,9 @@ pub struct SliderRange {
 }
 
 impl SliderRange {
-    /// `IntRangeBase.toSliderValue`, verbatim:
-    ///
-    /// ```java
-    /// default double toSliderValue(final Integer value) {
-    ///    if (value == this.minInclusive()) {
-    ///       return 0.0;
-    ///    } else {
-    ///       return value == this.maxInclusive() ? 1.0
-    ///          : Mth.map(value.intValue() + 0.5, this.minInclusive(),
-    ///                    this.maxInclusive() + 1.0, 0.0, 1.0);
-    ///    }
-    /// }
-    /// ```
+    /// Vanilla's own int-range-to-slider-value conversion, verbatim: at the
+    /// minimum it is `0.0`, at the maximum it is `1.0`, and otherwise it is
+    /// `map(value + 0.5, min, max + 1.0, 0.0, 1.0)`.
     ///
     /// **The two endpoint special cases are load-bearing and are not an
     /// optimisation.** Without them the general `Mth.map` puts the *maximum*
@@ -1301,15 +1292,9 @@ impl SliderRange {
         (((v - lo) / (hi - lo)) as f32).clamp(0.0, 1.0)
     }
 
-    /// `IntRangeBase.fromSliderValue`, the
+    /// Vanilla's own slider-value-to-int-range conversion, the
     /// inverse a slider **drag** needs:
-    ///
-    /// ```java
-    /// default Integer fromSliderValue(final double value) {
-    ///    return Mth.floor(Mth.map(value, 0.0, 1.0, this.minInclusive(),
-    ///                             this.maxInclusive() + 1.0));
-    /// }
-    /// ```
+    /// `floor(map(value, 0.0, 1.0, min, max + 1.0))`.
     ///
     /// **The `max + 1` and the `floor` are the bucket model, not a fencepost
     /// slip** — see [`Self::to_slider_value`]'s doc: an `IntRange` slider selects
@@ -1336,14 +1321,10 @@ impl SliderRange {
 /// This client's `largeDistances`, the one bound in [`INT_RANGE_SLIDERS`] that
 /// vanilla decides at runtime rather than in a literal.
 ///
-/// `Options`' constructor reads
+/// Vanilla's own options constructor reads
 /// `Runtime.getRuntime().maxMemory() >= 1000000000L` **once** and uses it for
-/// both distance sliders' maximum:
-///
-/// ```java
-/// boolean largeDistances = Runtime.getRuntime().maxMemory() >= 1000000000L;
-/// … new OptionInstance.IntRange(2, largeDistances ? 32 : 16, false), 12, …
-/// ```
+/// both distance sliders' maximum: `largeDistances` gates the render-distance
+/// slider's max between `32` and `16` (with a `12`-chunk default either way).
 ///
 /// That test is a question about **the JVM's `-Xmx` heap cap**, not about the
 /// machine: it is `false` on a 64 GB box launched with `-Xmx512m`. This client
@@ -1366,25 +1347,25 @@ pub const LARGE_DISTANCES_MAX: i32 = 32;
 /// below therefore records `from(default)` with the conversion spelled out, not
 /// the default a player sees.
 ///
-/// Every entry names the `Options.java` line its bounds and default are read
+/// Every entry names the source line in vanilla's own options class its bounds and default are read
 /// from. Exhaustive over the settings tree's `slider(...)` rows: an accessor
 /// this client renders as a slider and that appears in neither this table nor
 /// [`UNIT_DOUBLE_DEFAULTS`] is one of the two documented non-`IntRange`
 /// leftovers — see [`int_range_default_fraction`].
 const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
-    // `Options.java`: `IntRange(1, 26).xmap(v -> v * 10, v -> v / 10,
+    // vanilla's own options class: `IntRange(1, 26).xmap(v -> v * 10, v -> v / 10,
     // true)`, default `120`. Pre-image `120 / 10 = 12`.
     ("framerateLimit", SliderRange { min: 1, max: 26 }, 12),
-    // `Options.java`: `IntRange(2, 20).xmap(v -> v / 4.0,
+    // vanilla's own options class: `IntRange(2, 20).xmap(v -> v / 4.0,
     // v -> (int)(v * 4.0), true)`, default `1.0`. Pre-image
     // `(int)(1.0 * 4.0) = 4`.
     ("entityDistanceScaling", SliderRange { min: 2, max: 20 }, 4),
-    // `Options.java`: `IntRange(2, 128, true)`, default `128` — the
+    // vanilla's own options class: `IntRange(2, 128, true)`, default `128` — the
     // maximum, so the endpoint case pins it to exactly 1.0.
     ("cloudRange", SliderRange { min: 2, max: 128 }, 128),
-    // `Options.java`: `IntRange(3, 10, true)`, default `10`.
+    // vanilla's own options class: `IntRange(3, 10, true)`, default `10`.
     ("weatherRadius", SliderRange { min: 3, max: 10 }, 10),
-    // `Options.java`: `IntRange(0, 40).xmap(v -> v / 20.0,
+    // vanilla's own options class: `IntRange(0, 40).xmap(v -> v / 20.0,
     // v -> (int)(v * 20.0), true)`, default `0.75`. Pre-image
     // `(int)(0.75 * 20.0) = 15`.
     (
@@ -1392,18 +1373,18 @@ const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
         SliderRange { min: 0, max: 40 },
         15,
     ),
-    // `Options.java`: `IntRange(0, 10)`, default `5`
+    // vanilla's own options class: `IntRange(0, 10)`, default `5`
     // (`BLURRINESS_DEFAULT_VALUE`).
     (
         "menuBackgroundBlurriness",
         SliderRange { min: 0, max: 10 },
         5,
     ),
-    // `Options.java`: `IntRange(0, 60).xmap(v -> v / 10.0,
+    // vanilla's own options class: `IntRange(0, 60).xmap(v -> v / 10.0,
     // v -> (int)(v * 10.0), true)`, default `0.0`. Pre-image `0` — the
     // minimum, so the endpoint case pins it to exactly 0.0.
     ("chatDelay", SliderRange { min: 0, max: 60 }, 0),
-    // `Options.java`: `IntRange(5, 100).xmap(v -> v / 10.0,
+    // vanilla's own options class: `IntRange(5, 100).xmap(v -> v / 10.0,
     // v -> (int)(v * 10.0), true)`, default `1.0`. Pre-image
     // `(int)(1.0 * 10.0) = 10`.
     (
@@ -1411,24 +1392,24 @@ const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
         SliderRange { min: 5, max: 100 },
         10,
     ),
-    // `Options.java`: `IntRange(0, 4)`, default `4`.
+    // vanilla's own options class: `IntRange(0, 4)`, default `4`.
     ("mipmapLevels", SliderRange { min: 0, max: 4 }, 4),
-    // `Options.java`: `IntRange(1, 3)`, default `2`. The value is an
+    // vanilla's own options class: `IntRange(1, 3)`, default `2`. The value is an
     // anisotropy *bit*, i.e. the displayed level is `1 << bit` — an exponent,
     // not the level, which does not change the fraction because the slider
     // maps the bit.
     ("maxAnisotropyBit", SliderRange { min: 1, max: 3 }, 2),
-    // `Options.java`: `IntRange(0, 7, false)`, default `2`.
+    // vanilla's own options class: `IntRange(0, 7, false)`, default `2`.
     ("biomeBlendRadius", SliderRange { min: 0, max: 7 }, 2),
-    // `Options.java`: `IntRange(0, 10)`, default `7`.
+    // vanilla's own options class: `IntRange(0, 10)`, default `7`.
     ("sprintWindow", SliderRange { min: 0, max: 10 }, 7),
-    // `Options.java`: `IntRange(30, 110)`, default `70`. The
+    // vanilla's own options class: `IntRange(30, 110)`, default `70`. The
     // `Codec.DOUBLE.xmap` on the line between them is a **persistence** codec
     // (the 7-arg `OptionInstance` overload, `OptionInstance.java`), not
     // a `ValueSet::xmap`, so it does not touch the slider at all — reading it
     // as one would put the handle at `(int)(70 * 40 + 70)`, far off the track.
     ("fov", SliderRange { min: 30, max: 110 }, 70),
-    // `Options.java`: `IntRange(2, largeDistances ? 32 : 16,
+    // vanilla's own options class: `IntRange(2, largeDistances ? 32 : 16,
     // false)`, default `12`. See [`LARGE_DISTANCES_MAX`] for the max.
     (
         "renderDistance",
@@ -1438,7 +1419,7 @@ const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
         },
         12,
     ),
-    // `Options.java`: `IntRange(DEBUG_ALLOW_LOW_SIM_DISTANCE ? 2 : 5,
+    // vanilla's own options class: `IntRange(DEBUG_ALLOW_LOW_SIM_DISTANCE ? 2 : 5,
     // largeDistances ? 32 : 16, false)`, default `12`. The min is `5`: the `2`
     // is behind `SharedConstants.DEBUG_ALLOW_LOW_SIM_DISTANCE`, a dev flag off
     // in a shipped client, and taking the debug branch would shift every
@@ -1453,15 +1434,11 @@ const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
     ),
 ];
 
-/// `graphicsPreset`'s fraction. Its value set is an
-/// `OptionInstance.SliderableEnum`, not an `IntRange`, so it has its own
-/// `toSliderValue`:
-///
-/// ```java
-/// if (value == this.values.getFirst()) { return 0.0; }
-/// else { return value == this.values.getLast() ? 1.0
-///        : Mth.map(this.values.indexOf(value), 0.0, this.values.size() - 1, 0.0, 1.0); }
-/// ```
+/// `graphicsPreset`'s fraction. Its value set is vanilla's own sliderable-enum
+/// kind, not an `IntRange`, so it has its own
+/// to-slider-value conversion: at the first value it is `0.0`, at the last it
+/// is `1.0`, and otherwise it is `map(index_of(value), 0.0, size - 1, 0.0,
+/// 1.0)`.
 ///
 /// Note the divisor is `size - 1`, **not** `size` — this family spaces its
 /// values at the track's two ends rather than at bucket centres, which is why
@@ -1668,7 +1645,7 @@ pub fn graphics_preset_from_fraction(fraction: f32) -> crate::config::GraphicsPr
 /// `IntRangeBase.toSliderValue` maps that int **linearly, except at the two
 /// endpoints**:
 /// `map(intValue + 0.5, min, max + 1, 0, 1)`. This inverts the stored double
-/// back to vanilla's int via `unlogMouse` (`Options.java`,
+/// back to vanilla's int via `unlogMouse` (vanilla's own options class,
 /// `Mth.floor` is a plain `floor`) and then applies the same map, so the
 /// shipped config default of `1.0`
 /// ([`crate::config::Options::default`]) lands on the same fraction a fresh
@@ -1729,7 +1706,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             if options.show_subtitles { "ON" } else { "OFF" }.to_string()
         }
         // `ToggleKeyMapping`'s own stringifier is `value ? KEY_TOGGLE :
-        // KEY_HOLD` (`ToggleKeyMapping`'s caller in `Options.java`),
+        // KEY_HOLD` (`ToggleKeyMapping`'s caller in vanilla's own options class),
         // i.e. "Toggle"/"Hold" — **not** ON/OFF, unlike every other boolean
         // option on this page. `en_us.json`'s `options.key.toggle`/
         // `options.key.hold`.
@@ -1926,7 +1903,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             lodestone_render::CloudStatus::Fancy => "Fancy".to_string(),
         },
         // `value == 260 ? genericValueLabel(caption, "Unlimited") :
-        // genericValueLabel(caption, "%s fps" % value)` (`Options.java`,
+        // genericValueLabel(caption, "%s fps" % value)` (vanilla's own options class,
         // `en_us.json`'s `options.framerate`/`options.framerateLimit.max`).
         LiveOption::FramerateLimit => {
             if options.framerate_limit >= crate::config::UNLIMITED_FRAMERATE_CUTOFF {
@@ -2579,7 +2556,7 @@ static ACCESSIBILITY: &[Entry] = &[
 /// These seven are the only controls in the tree that are **not**
 /// `OptionInstance`s at all — they are built inline from
 /// `options.isModelPartEnabled(part)` — so the `accessor` names below are
-/// vanilla's `PlayerModelPart` ids rather than `Options.java` methods.
+/// vanilla's `PlayerModelPart` ids rather than vanilla's own options class methods.
 static SKIN: &[Entry] = &[
     pair(
         cycle("modelPart.cape", "Cape"),
@@ -2602,11 +2579,11 @@ static SKIN: &[Entry] = &[
 /// never [`live_cycle`], and the Xbox link uses [`unsupported`] exactly like
 /// the Accessibility Guide and Credits buttons on other pages.
 ///
-/// `friendsList`/`allowFriendRequests` are not `Options.java` `OptionInstance`s
+/// `friendsList`/`allowFriendRequests` are not vanilla's own options class `OptionInstance`s
 /// at all — vanilla backs them with `PlayerSocialManager` state instead
 /// (`:89-104`) — so their `accessor` strings are synthetic, the same
 /// convention [`SKIN`] already uses for `PlayerModelPart` ids that are not
-/// `Options.java` methods either.
+/// vanilla's own options class methods either.
 ///
 /// `realmsNotifications`' caption is **not** `options.realmsNotifications`
 /// ("Realms News & Invites"): the `OptionInstance` is constructed with the
@@ -4228,7 +4205,7 @@ mod tests {
         // duplicate row: `textBackgroundOpacity`, `chatOpacity` and
         // `chatLineSpacing` are one `OptionInstance` each, placed on *both*
         // `ChatOptionsScreen` and `AccessibilityOptionsScreen`
-        // (`Options.java`, and the two screens' own option arrays). Both
+        // (vanilla's own options class, and the two screens' own option arrays). Both
         // rows drive the same `config::Options` field, so editing either moves
         // the other's label too — which is why `LiveOption` is keyed by the
         // option and not by the row.
