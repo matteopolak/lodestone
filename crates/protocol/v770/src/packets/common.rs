@@ -21,10 +21,10 @@ pub struct Pong {
 }
 
 /// The `ping_request` packet body, shared between the status and play
-/// states (`net.minecraft.network.protocol.ping.ServerboundPingRequestPacket`):
+/// states (vanilla's own serverbound ping-request packet):
 /// a single big-endian 64-bit client clock reading. In play, vanilla sends
 /// this periodically from the F3 debug overlay's network graph
-/// (`PingDebugMonitor`), independent of [`Pong`]'s server-initiated
+/// (its own ping-debug monitor), independent of [`Pong`]'s server-initiated
 /// challenge/response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct PingRequest {
@@ -70,13 +70,15 @@ pub struct ResourcePackResponse {
 }
 
 /// Serverbound `cookie_response`, shared by the Login, Configuration and Play
-/// states — `ServerCookiePacketListener` is common to all three
-/// (`ServerboundCookieResponsePacket.java`).
+/// states — vanilla's own server cookie-packet listener is common to all
+/// three (confirmed against the decompiled 26.2 source).
 ///
-/// Wire layout: the cookie key (a UTF string — `writeIdentifier` writes the
-/// same VarInt-length-prefixed UTF-8 as `writeUtf`, matching [`BrandPayload`]'s
+/// Wire layout: the cookie key (a UTF string — vanilla's own identifier
+/// writer writes the same VarInt-length-prefixed UTF-8 as its plain string
+/// writer, matching [`BrandPayload`]'s
 /// `channel`), then the payload as a nullable byte array
-/// (`writeNullable`/`ByteBufCodecs.byteArray(5120)`): a bool presence flag,
+/// (vanilla's own nullable wrapper over its own byte-array codec, capped at
+/// 5120): a bool presence flag,
 /// and if `true`, a VarInt length followed by that many raw bytes. Both
 /// halves fall out of `lodestone-core`'s blanket `Option<T>: Encode` and
 /// `Vec<u8>: Encode` impls with no `#[mc(...)]` needed — the payload is

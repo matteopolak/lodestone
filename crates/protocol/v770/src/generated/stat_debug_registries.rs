@@ -156,9 +156,10 @@ pub static DEBUG_SUBSCRIPTION_ENTRIES: [&str; 16] = [
 
 /// Which registry a stat's **value** id indexes, given its `stat_type` id.
 ///
-/// `Stat.STREAM_CODEC` is `registry(STAT_TYPE).dispatch(Stat::getType,
-/// StatType::streamCodec)`, and each `StatType` carries its own value registry
-/// (`StatType.java`). So the second VarInt in an `award_stats` entry is
+/// Vanilla's own stat stream codec is a registry codec over the stat-type
+/// registry, dispatching to each stat type's own value stream codec, and
+/// each stat type carries its own value registry (confirmed against the
+/// decompiled 26.2 source). So the second VarInt in an `award_stats` entry is
 /// meaningless without the first: id 3 under `minecraft:mined` is a block, under
 /// `minecraft:killed` an entity type, and under `minecraft:custom` one of the 77
 /// [`CUSTOM_STAT_ENTRIES`].
