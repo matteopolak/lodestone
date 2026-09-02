@@ -11461,7 +11461,8 @@ mod follow_range_tests {
     /// This matters because it decides what the fix can be. A guard of the shape
     /// `if r > 0.0 { r } else { DEFAULT }` is **dead code** — it never fires, and
     /// an unlisted species keeps the registry's 32.0, which is precisely the one
-    /// number `follow_range` never legitimately holds (`Mob.createMobAttributes()`
+    /// number `follow_range` never legitimately holds (vanilla's own generic
+    /// mob attribute builder
     /// overrides it to 16.0 for every mob). The wrong value sits *inside* the
     /// plausible range, so only instance presence can detect the miss.
     ///
@@ -11511,7 +11512,7 @@ mod follow_range_tests {
         assert_eq!(
             attr_present(&zombie, "follow_range"),
             Some(35.0),
-            "Zombie.java:133 sets FOLLOW_RANGE to 35.0"
+            "vanilla's own zombie attribute builder sets FOLLOW_RANGE to 35.0"
         );
     }
 
@@ -11577,7 +11578,8 @@ mod follow_range_tests {
     /// The property itself is still live and still production-reachable:
     /// [`MobSim::spawn_species`] reads `attr_present(…).unwrap_or(DEFAULT_FOLLOW_RANGE)`
     /// for **any** key, so an id with no template still has to land on
-    /// `Mob.createMobAttributes()`' 16.0 rather than the registry's 32.0. Only
+    /// vanilla's own generic mob attribute builder's 16.0 rather than the
+    /// registry's 32.0. Only
     /// the *observable* had to move: from "does it acquire a player at 17
     /// blocks" to the range the spawn path actually installed on the
     /// controller. That is a strictly narrower claim — it no longer proves the
@@ -11597,7 +11599,8 @@ mod follow_range_tests {
         let got = MobController::follow_range(&sim.get(id).expect("alive").mob);
         assert_eq!(
             got, DEFAULT_FOLLOW_RANGE,
-            "an unlisted species must fall back to Mob.createMobAttributes' 16.0"
+            "an unlisted species must fall back to vanilla's own generic mob \
+             attribute builder's 16.0"
         );
         assert_ne!(
             got, 32.0,
@@ -11615,8 +11618,8 @@ mod follow_range_tests {
         assert_eq!(
             MobController::follow_range(&sim.get(zid).expect("alive").mob),
             35.0,
-            "Zombie.java:133 — if this also reads 16.0 the accessor is not \
-             observing what spawn_species installed"
+            "vanilla's own zombie attribute builder — if this also reads 16.0 \
+             the accessor is not observing what spawn_species installed"
         );
     }
 }
@@ -11629,8 +11632,10 @@ mod anger_tests {
     /// The jar's grudge window, in ticks, stated **independently of
     /// [`ANGER_TICKS`]**.
     ///
-    /// `NeutralMob.PERSISTENT_ANGER_TIME = TimeUtil.rangeOfSeconds(20, 39)`,
-    /// and `rangeOfSeconds` multiplies by 20, giving `UniformInt.of(400, 780)`.
+    /// Vanilla's own neutral-mob persistent-anger constant is a seconds-based
+    /// range of `[20, 39]`,
+    /// and seconds convert to ticks by multiplying by 20, giving a uniform
+    /// range of `[400, 780]` ticks.
     ///
     /// **These literals are load-bearing and must not be replaced by a read of
     /// `ANGER_TICKS`.** The first version of this module did exactly that, and
@@ -11660,10 +11665,10 @@ mod anger_tests {
     ///
     /// The attacker position is placed well outside `flat_world`'s solid `±8`
     /// platform (issue #233): once the bee's anger-gated target row and
-    /// `Bee.BeeAttackGoal` both landed, a *nearby* attacker position let the
+    /// vanilla's own bee attack goal both landed, a *nearby* attacker position let the
     /// bee's own `MeleeAttackGoal` close the one-block gap and "sting" the
     /// bare position within the very first tick, clearing `anger`
-    /// (`stopBeingAngry()`, by design — see `roster::neutral::BEE`'s doc
+    /// (vanilla's own "stop being angry" call, by design — see `roster::neutral::BEE`'s doc
     /// comment) before this helper ever got to measure the grudge's real
     /// duration. This function measures **grudge duration**, not "does the
     /// mob's own combat ever run" — an attacker outside the walkable platform
