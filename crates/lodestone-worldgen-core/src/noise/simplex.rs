@@ -1,7 +1,7 @@
 //! `SimplexNoise` — vanilla's own simplex-noise class,
 //! the 2-D-only subset [`crate::feature::vegetation`] needs for
 //! vanilla's own biome-info-noise constant (grass/flower density,
-//! vanilla's own noise-threshold-count placement's `flowerNoise`). This is a **different**
+//! vanilla's own noise-threshold-count placement's own flower-noise field). This is a **different**
 //! noise primitive from [`super::normal::NormalNoise`]/[`super::perlin::PerlinNoise`]
 //! (which back the density-function router) — vanilla keeps them as separate
 //! classes with unrelated gradient tables, and so does this port.

@@ -83,7 +83,7 @@ fn expected_deviation(octave_span: i32) -> f64 {
 
 /// `0.16666666666666666 / expectedDeviation(maxOctave - minOctave)`, over the
 /// indices of the non-zero amplitudes. Shared by both constructor arms — the
-/// `useNewInitialization` flag changes how the two Perlin stacks are *seeded*,
+/// "use new initialization" flag changes how the two Perlin stacks are *seeded*,
 /// never this scale factor.
 fn value_factor(amplitudes: &[f64]) -> f64 {
     let mut min_octave = i32::MAX;

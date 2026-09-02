@@ -21,7 +21,8 @@
 //! `octaveSet.lastInt() == 0`, so that branch is unreachable for every caller
 //! this engine has — and reaching it would additionally require
 //! [`super::simplex::SimplexNoise`] to *retain* the `xo`/`yo`/`zo` offsets it
-//! currently discards (correctly: `useNoiseStart` is `false` at every call site).
+//! currently discards (correctly: vanilla's own "use noise start" flag is
+//! `false` at every call site).
 //! [`PerlinSimplexNoise::new`] therefore **panics** on a positive octave rather
 //! than silently producing a wrong field, which is the difference between a port
 //! with a named boundary and a port that is quietly wrong outside its tested
@@ -44,8 +45,9 @@ use super::simplex::SimplexNoise;
 /// octave sets whose largest octave is `0` (see the module doc).
 #[derive(Debug, Clone)]
 pub struct PerlinSimplexNoise {
-    /// `noiseLevels`, index 0 = the octave-`0` level. `None` for an octave the
-    /// set omits (vanilla's `consumeCount(262)` skip — no caller needs it yet,
+    /// Vanilla's own noise-levels field, index 0 = the octave-`0` level.
+    /// `None` for an octave the
+    /// set omits (vanilla's own 262-draw consume-count skip — no caller needs it yet,
     /// but the shape is kept so the draw order is vanilla's).
     levels: Vec<Option<SimplexNoise>>,
     highest_freq_input_factor: f64,
@@ -209,7 +211,8 @@ mod tests {
     /// [`super::super::simplex`] already ports and that `vegetation_parity`
     /// already validates against a real JVM dump. That makes this wrapper's
     /// scaling arithmetic checked against existing external evidence rather than
-    /// against itself: if `highestFreqInputFactor`/`highestFreqValueFactor` were
+    /// against itself: if vanilla's own highest-frequency input/value factor
+    /// fields were
     /// transcribed wrongly, the `[0]` case would stop agreeing.
     #[test]
     fn single_octave_matches_the_already_validated_simplex_reduction() {

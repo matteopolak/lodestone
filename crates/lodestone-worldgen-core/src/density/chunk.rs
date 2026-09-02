@@ -3,13 +3,13 @@
 //! The density-function interpreter in [`super`] evaluates the *raw* noise
 //! router at a point (vanilla's own single-point context), which is what the router
 //! parity tests prove. But the real server does **not** write that point field
-//! to blocks. Vanilla wraps the router in a `NoiseChunk`
+//! to blocks. Vanilla wraps the router in its own per-chunk noise-block field
 //! (its own noise-chunk class) which changes two node
 //! kinds:
 //!
 //! * **`interpolated`** samples its wrapped function only at the corners of a
-//!   4×8×4 (`cellWidth`×`cellHeight`×`cellWidth`) cell grid, then trilinearly
-//!   interpolates per block, in the `Mth.lerp3` nesting — **X innermost**, then
+//!   4×8×4 (cell-width×cell-height×cell-width) cell grid, then trilinearly
+//!   interpolates per block, in vanilla's own three-axis lerp's nesting — **X innermost**, then
 //!   Y, then Z. That order is bit-significant and it is *not* the one vanilla's
 //!   driver loop appears to produce; see `## Which interpolation order` below.
 //! * **`flat_cache`** snaps XZ to the quart grid (`blockX >> 2 << 2`) and forces
@@ -18,7 +18,7 @@
 //! All other markers (`cache_2d`, `cache_once`, `cache_all_in_cell`,
 //! `blend_density`) are value-transparent *in this evaluator*.
 //! [`NoiseChunkSampler`] reproduces that wrapping behaviour so
-//! `final_density(x, y, z)` equals `NoiseChunk.getInterpolatedDensity()`
+//! `final_density(x, y, z)` equals vanilla's own interpolated-density query
 //! block-for-block.
 //!
 //! ## This module is a façade
@@ -37,34 +37,41 @@
 //!
 //! ## Which interpolation order
 //!
-//! `NoiseChunk.NoiseInterpolator` has **two** value paths over the same eight
+//! Vanilla's own per-chunk noise-interpolator has **two** value paths over
+//! the same eight
 //! corners, and as floating-point expressions they are different:
 //!
 //! | vanilla path | expression | nesting |
 //! |---|---|---|
-//! | `fillingCell == true` | `Mth.lerp3` (`lerp2` is `lerp(dy, lerp(dx, x00, x10), lerp(dx, x01, x11))`) | **X inner**, Y, Z |
-//! | `fillingCell == false` | the incremental `updateForY` → `updateForX` → `updateForZ` chain | **Y inner**, X, Z |
+//! | the "filling cell" flag is true | vanilla's own three-axis lerp (its own
+//! two-axis lerp is `lerp(dy, lerp(dx, x00, x10), lerp(dx, x01, x11))`) | **X inner**, Y, Z |
+//! | the "filling cell" flag is false | the incremental per-axis update chain
+//! (Y update, then X update, then Z update) | **Y inner**, X, Z |
 //!
 //! The engine implements the **first**. That looks wrong on a first reading of
-//! `NoiseChunk`, because the driver loop (`selectCellYZ` → `updateForY` →
-//! `updateForX` → `updateForZ`) is visibly feeding the *second*. The resolution
-//! is two levels removed from the interpolator: `NoiseChunk`'s constructor
+//! vanilla's own field type, because the driver loop (its own per-cell
+//! selection, then the same Y/X/Z update chain) is visibly feeding the
+//! *second*. The resolution
+//! is two levels removed from the interpolator: vanilla's own field
+//! constructor
 //! does not read the router's `final_density`
 //! directly, it wraps it —
 //!
 //! ```text
-//! fullNoiseValue = DensityFunctions.cacheAllInCell(
-//!         DensityFunctions.add(wrappedRouter.finalDensity(), BeardifierMarker.INSTANCE))
-//!     .mapAll(this::wrap);
+//! full_noise_value = cache_all_in_cell(
+//!         add(wrapped_router.final_density(), beardifier_marker))
+//!     .map_all(self.wrap)
 //! ```
 //!
 //! — and that `cache_all_in_cell` is applied **in code, not in data** (no
 //! `minecraft:cache_all_in_cell` appears anywhere in 26.2's worldgen JSON, so
 //! reading the `noise_settings` document cannot see it). Its cell array is
-//! pre-filled inside `selectCellYZ`, which brackets the fill with
-//! `fillingCell = true` / `false`. So every value `getInterpolatedDensity()`
-//! returns for `final_density` was produced in the `fillingCell == true`
-//! regime — by `Mth.lerp3`. The incremental chain is never what
+//! pre-filled inside vanilla's own per-cell selection routine, which brackets
+//! the fill with
+//! the "filling cell" flag set true then false. So every value vanilla's own
+//! interpolated-density query
+//! returns for `final_density` was produced in the "filling cell is true"
+//! regime — by its own three-axis lerp. The incremental chain is never what
 //! `final_density` reads.
 //!
 //! **Measured, because the difference is ~1 ULP and therefore does not look like
@@ -84,7 +91,7 @@ use std::cell::RefCell;
 use super::Density;
 use crate::engine::{Bounds, Field, Geom, Program, Scratch};
 
-/// A stateless-per-block reimplementation of vanilla's `NoiseChunk` block field
+/// A stateless-per-block reimplementation of vanilla's own per-chunk block field
 /// for one column of density functions.
 ///
 /// Construct it from a built [`Density`] root (typically `final_density`), the
@@ -107,7 +114,7 @@ pub struct NoiseChunkSampler {
 
 impl NoiseChunkSampler {
     /// Creates a sampler. `cell_width`/`cell_height` are
-    /// `NoiseSettings.getCellWidth()/getCellHeight()` — 4 and 8 for the
+    /// vanilla's own noise-settings cell-width/cell-height queries — 4 and 8 for the
     /// overworld.
     ///
     /// Compiles `root` into a fresh [`Program`]. Callers generating many chunks

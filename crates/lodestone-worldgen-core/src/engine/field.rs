@@ -41,9 +41,9 @@ use crate::density::Context;
 /// the overworld.
 #[derive(Clone, Copy, Debug)]
 pub struct Geom {
-    /// `cellWidth`, the X/Z cell edge.
+    /// Vanilla's own cell-width field, the X/Z cell edge.
     pub cell_width: i32,
-    /// `cellHeight`, the Y cell edge.
+    /// Vanilla's own cell-height field, the Y cell edge.
     pub cell_height: i32,
 }
 
@@ -291,10 +291,12 @@ impl<'a> Field<'a> {
     ///
     /// `Mth.lerp3` — **X inner**, then Y, then Z. Vanilla's `NoiseInterpolator`
     /// computes the same eight corners two ways and they are different IEEE 754
-    /// expressions; the incremental `updateForY -> X -> Z` chain is Y-inner and
-    /// is **not** what `final_density` reads, because `NoiseChunk`'s constructor
-    /// wraps the router in a code-only `cacheAllInCell` whose array is filled
-    /// while `fillingCell == true`. Swapping this to the incremental chain takes
+    /// expressions; the incremental Y-then-X-then-Z update chain is Y-inner and
+    /// is **not** what `final_density` reads, because vanilla's own per-chunk
+    /// field's constructor
+    /// wraps the router in a code-only cache-all-in-cell wrapper whose array
+    /// is filled
+    /// while its own "filling cell" flag is true. Swapping this to the incremental chain takes
     /// the whole-chunk JVM gate from 98304/98304 to 90563/98304 — a 92% pass
     /// rate, which reads like a tolerance problem rather than a wrong algorithm.
     /// `docs/worldgen-density-engine.md` has the full account and

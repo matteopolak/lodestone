@@ -152,9 +152,10 @@ impl EndIslandNoise {
         doffs
     }
 
-    /// `compute(context)` — `(getHeightValue(blockX / 8, blockZ / 8) - 8.0) / 128.0`.
-    /// `blockY` is not read, which is why the router can wrap this in `cache_2d`
-    /// and why `TheEndBiomeSource` may sample it at any height.
+    /// `compute(context)` — vanilla's own height-value query at
+    /// `(x / 8, z / 8)`, then `(value - 8.0) / 128.0`.
+    /// The Y coordinate is not read, which is why the router can wrap this in `cache_2d`
+    /// and why vanilla's own End biome source may sample it at any height.
     #[must_use]
     pub fn compute(&self, block_x: i32, block_z: i32) -> f64 {
         (f64::from(self.height_value(block_x / 8, block_z / 8)) - 8.0) / 128.0

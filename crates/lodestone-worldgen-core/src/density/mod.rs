@@ -33,7 +33,7 @@
 //!   because both the original decision and its reversal were measurements and
 //!   the second one caught the first going stale:
 //!
-//!   The memo was added for `preliminarySurfaceLevel`'s own `cache2d(offset)` /
+//!   The memo was added for vanilla's own preliminary-surface-level query's own `cache2d(offset)` /
 //!   `cache2d(factor)` wrapping, which sits
 //!   directly above `find_top_surface`'s per-`y` scan, and a criterion paired
 //!   comparison measured **−4.4% (95% CI −6.0%..−2.7%, p < 0.05)** on `column()`'s
@@ -89,8 +89,10 @@
 //! * **`interpolated`** (vanilla's own `NoiseChunk.NoiseInterpolator` inner class)
 //!   marks a *different* boundary: vanilla only gives it real behaviour
 //!   (trilinear interpolation between 4×8×4 cell corners) when driven by
-//!   `NoiseChunk`'s own cell-filling loop state (`cellStartBlockY`,
-//!   `inCellX/Y/Z`, `interpolationCounter`) — state this point evaluator has
+//!   vanilla's own per-chunk field's own cell-filling loop state (its own
+//!   cell-start-block-Y field,
+//!   its own in-cell X/Y/Z fields, its own interpolation-counter field) —
+//!   state this point evaluator has
 //!   none of, and that [`NoiseChunkSampler`] (`chunk.rs`) already
 //!   reimplements correctly and separately for the shape stage. Caching this
 //!   node here (by whatever key) would be simulating the wrong machinery, not
@@ -132,7 +134,7 @@ pub use xz_memo::XzMemoId;
 /// Noise parameters loaded from a `worldgen/noise/*.json` file.
 #[derive(Debug, Clone)]
 pub struct NoiseParams {
-    /// `firstOctave`.
+    /// Vanilla's own first-octave field.
     pub first_octave: i32,
     /// `amplitudes`.
     pub amplitudes: Vec<f64>,
@@ -254,8 +256,9 @@ pub trait Resolver {
     ///
     /// **Order is not significant and callers must not depend on it.**
     /// `lodestone_worldgen::structure::StructureRegistry` re-orders whatever it
-    /// gets into vanilla's own bootstrap order (`StructureSets.bootstrap`), which
-    /// is the order `createStructures` walks.
+    /// gets into vanilla's own bootstrap order (its own structure-sets
+    /// bootstrap), which
+    /// is the order its own structure-creation walk uses.
     fn structure_set_ids(&self) -> Vec<String> {
         Vec::new()
     }
@@ -507,7 +510,7 @@ pub enum Density {
     /// `old_blended_noise`.
     Blended(BlendedNoise),
     /// `find_top_surface` — floors `upper_bound / cell_height` to a cell top,
-    /// then scans down by `cell_height` returning the first `blockY` where
+    /// then scans down by `cell_height` returning the first Y where
     /// `density(x, blockY, z) > 0.0`, else `lower_bound`.
     FindTopSurface {
         /// Density scanned per candidate Y.
@@ -1052,8 +1055,8 @@ pub struct Builder<'a> {
     ///
     /// Built lazily and **exactly once**, which is a correctness requirement and
     /// not only a cost one: `EndIslandNoise::new` burns 17,292 discarded
-    /// `nextInt`s plus a 256-step shuffle, and vanilla's
-    /// `EndIslandDensityFunction` is *one object* substituted into both of the
+    /// `nextInt`s plus a 256-step shuffle, and vanilla's own
+    /// end-island density-function type is *one object* substituted into both of the
     /// type's occurrences in 26.2's data (`noise_settings/end.json`'s `erosion`
     /// and `density_function/end/sloped_cheese.json`). Constructing it twice is
     /// value-identical here — it reads a fresh `LegacyRandomSource(seed)` and
@@ -1135,7 +1138,7 @@ impl<'a> Builder<'a> {
     fn instantiate_noise(&self, id: &str) -> NormalNoise {
         let params = self.resolver.noise(id);
         // Vanilla's own noise-wiring helper's visit-noise routine
-        // branches on the noise *id*, before `getOrCreateNoise` is ever reached,
+        // branches on the noise *id*, before its own get-or-create-noise call is ever reached,
         // and does so regardless of `legacy_random_source` — so this fork is not
         // conditional on `self.algorithm`. `newLegacyInstance(n)` is
         // `new LegacyRandomSource(seed + n)` on the raw world seed (`:50-52`).
@@ -1165,16 +1168,18 @@ impl<'a> Builder<'a> {
         self.instantiate_noise(id)
     }
 
-    /// The root positional factory (`RandomState.random`), forked from the
-    /// dimension seed. The surface system reuses this for `getSurfaceDepth`'s
-    /// per-column `at(x, 0, z)` draw and for `getOrCreateRandomFactory(name)`
+    /// The root positional factory (vanilla's own random-state's root
+    /// random field), forked from the
+    /// dimension seed. The surface system reuses this for its own
+    /// get-surface-depth's
+    /// per-column `at(x, 0, z)` draw and for its own get-or-create-random-factory call
     /// (`master.fromHashOf(name).forkPositional()`) used by `vertical_gradient`.
     #[must_use]
     pub fn positional_factory(&self) -> crate::rng::AnyPositionalFactory {
         self.master
     }
 
-    /// The RNG family this builder was created with — the `useLegacyInit` of
+    /// The RNG family this builder was created with — the "use legacy init" flag of
     /// vanilla's own random-state class. Exposed so a dimension pipeline can assert it read
     /// its own settings rather than inheriting the Overworld default.
     #[must_use]

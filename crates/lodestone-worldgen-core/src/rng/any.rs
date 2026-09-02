@@ -68,7 +68,7 @@ impl Algorithm {
     }
 
     /// Whether this is the legacy family — the question `RandomState`'s
-    /// `useLegacyInit` asks when it decides how to seed `BlendedNoise`.
+    /// vanilla's own "use legacy init" flag asks when it decides how to seed `BlendedNoise`.
     #[must_use]
     pub fn is_legacy(self) -> bool {
         matches!(self, Self::Legacy)

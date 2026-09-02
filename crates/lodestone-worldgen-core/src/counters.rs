@@ -235,8 +235,8 @@ pub struct Snapshot {
     /// `biome::nearest_biome` calls — climate nearest-neighbour searches.
     ///
     /// **Not brute-force any more.** U9 (`7ff942dd`) put a ported
-    /// `Climate.RTree` on this path, and `71dd8b22` then matched vanilla's own
-    /// traversal rather than its `findValueBruteForce`, so a "search" is now a
+    /// R-tree on this path, and `71dd8b22` then matched vanilla's own
+    /// traversal rather than its own brute-force search, so a "search" is now a
     /// pruned descent rather than a full table scan. Pair this with
     /// [`biome_rows_compared`](Self::biome_rows_compared) to get evaluations per
     /// search; neither is reconstructible from the other.
