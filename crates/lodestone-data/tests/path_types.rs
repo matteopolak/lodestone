@@ -7,7 +7,7 @@
 //! The dump (`oracle-java/pathtype_java.txt`, gitignored like `.cache/mc`) is
 //! produced by this crate's `PathTypeOracle.java`, which boots the real 26.2
 //! server, loads the vanilla data-pack tags, and dumps
-//! `WalkNodeEvaluator.getPathTypeFromState` for every one of the 32,366 states.
+//! vanilla's own "get path type from state" step for every one of the 32,366 states.
 //!
 //! Regenerate the committed table after a data bump with:
 //!
@@ -41,7 +41,7 @@ fn committed_path() -> PathBuf {
 // Generator (shared by regen and the drift check)
 // ---------------------------------------------------------------------------
 
-/// The path-type variant names vanilla's `getPathTypeFromState` can return.
+/// The path-type variant names vanilla's own "get path type from state" step can return.
 /// Anything outside this set in the dump is a bug (or a game change) and must
 /// fail loudly rather than emit an invalid Rust variant.
 const KNOWN_TYPES: &[&str] = &[

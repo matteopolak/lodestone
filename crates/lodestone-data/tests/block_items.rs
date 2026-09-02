@@ -7,8 +7,8 @@
 //! # Data provenance
 //!
 //! `tests/support/block_items_jvm.txt` is an authoritative dump produced by
-//! booting the real 26.2 server and walking `BuiltInRegistries.ITEM`, asking
-//! every item that is a `BlockItem` for its own `getBlock()` — `oracle-java/BlockItemOracle.java`.
+//! booting the real 26.2 server and walking vanilla's own item registry, asking
+//! every item that is a block item for its own "get block" accessor — `oracle-java/BlockItemOracle.java`.
 //!
 //! Neither `registries.json` nor `blocks.json` can answer this: the first is a
 //! flat list of item *names* with no item→block relation at all, the second is
