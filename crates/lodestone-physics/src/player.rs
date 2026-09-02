@@ -1779,7 +1779,7 @@ fn forward_direction(pitch: f32, yaw: f32) -> Vec3d {
     )
 }
 
-/// `BlockState.getCollisionShape(...).isEmpty()` for one cell — true when the
+/// Vanilla's own per-cell empty-collision-shape check — true when the
 /// block appends no collision boxes (air, most plants).
 fn block_has_no_collision(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> bool {
     let mut boxes = Vec::new();
@@ -1787,9 +1787,9 @@ fn block_has_no_collision(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> b
     boxes.is_empty()
 }
 
-/// `AABB.intersects(Vec3, Vec3)` (`AABB.java:249-253`) — the min/max of each
-/// coordinate pair, then the strict overlap test (a flush contact is *not* an
-/// intersection).
+/// Vanilla's own segment-vs-box intersection check — the min/max of each
+/// coordinate pair, then the strict overlap test (a flush contact is *not*
+/// an intersection).
 fn segment_intersects(box_: &Aabb, first: Vec3d, second: Vec3d) -> bool {
     let min_x = first.x.min(second.x);
     let min_y = first.y.min(second.y);
@@ -1805,15 +1805,15 @@ fn segment_intersects(box_: &Aabb, first: Vec3d, second: Vec3d) -> bool {
         && box_.max_z > min_z
 }
 
-/// `LivingEntity.aiStep`'s `noJumpDelay` countdown, run at the top of every
-/// travel path before the velocity snap-to-zero.
+/// Vanilla's own no-jump-delay countdown, run at the top of every travel
+/// path before the velocity snap-to-zero.
 fn decrement_no_jump_delay(state: &mut PlayerState) {
     if state.no_jump_delay > 0 {
         state.no_jump_delay -= 1;
     }
 }
 
-/// `aiStep`'s velocity snap-to-zero prologue: the horizontal components
+/// Vanilla's own velocity snap-to-zero prologue: the horizontal components
 /// collapse to zero below `9.0e-6` (a squared distance) and the vertical
 /// component collapses below `0.003`. Byte-identical across every travel path
 /// (air, water, lava, elytra), so it is factored out once rather than
@@ -1834,7 +1834,7 @@ fn snap_small_velocity(v: Vec3d) -> Vec3d {
 
 /// The sprint-flag write plus the client-side input transform shared by the
 /// air, water and lava travel paths: `state.sprinting = input.sprint` then
-/// `LocalPlayer.modifyInput`.
+/// vanilla's own input modifier.
 fn set_sprint_and_modify_input(
     state: &mut PlayerState,
     input: MovementInput,
