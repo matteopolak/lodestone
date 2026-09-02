@@ -4,32 +4,34 @@
 //! # Which sounds vanilla predicts, and how it actually decides
 //!
 //! Not a list — a **three-level method override**, and reading it off the call sites
-//! is the only reliable way. `Level.playSound` takes an `except` player, and the two
+//! is the only reliable way. Vanilla's own generic play-sound entry point takes an
+//! `except` player, and the two
 //! sides read that one argument in mirror-image ways:
 //!
 //! | | behaviour |
 //! |---|---|
-//! | `ClientLevel.playSeededSound` | plays locally **iff `except == minecraft.player`** |
-//! | `ServerLevel.playSeededSound` | broadcasts to everyone **except** that player |
+//! | the client-side seeded-sound variant | plays locally **iff `except == minecraft.player`** |
+//! | the server-side seeded-sound variant | broadcasts to everyone **except** that player |
 //!
 //! So `except` is simultaneously "who hears it locally" and "who is left out of the
 //! broadcast". Which player gets passed is then decided by three overrides:
 //!
-//! | method | passes | consequence for the local player |
+//! | override | passes | consequence for the local player |
 //! |---|---|---|
-//! | `Entity.playSound` | `null` | **silent** on the client; arrives only as a packet |
-//! | `Player.playSound` | `this` | predicted, and the server leaves that player out |
-//! | `LocalPlayer.playSound` | — calls `playLocalSound` | **unconditionally local**, no `except` check at all |
+//! | the base entity override | `null` | **silent** on the client; arrives only as a packet |
+//! | the player override | `this` | predicted, and the server leaves that player out |
+//! | the local-player override | — calls its own unconditional local-play routine | **unconditionally local**, no `except` check at all |
 //!
 //! The practical rule that falls out: **every `playSound(event, volume, pitch)` call
 //! reached with the local player as `this` is client-predicted**, because
-//! `LocalPlayer` overrides it to a straight local play. That covers footsteps
-//! (`Entity.playStepSound` → the override), muffled steps, and swim sounds.
+//! the local-player override overrides it to a straight local play. That covers footsteps
+//! (the entity step-sound routine → the override), muffled steps, and swim sounds.
 //!
-//! And it excludes attacks. `Player` routes those through a method vanilla literally
-//! names **`playServerSideSound`**, which passes `null`, as
-//! do the level-up (`Player.giveExperienceLevels`) and deflect
-//! (`Player.deflectProjectile`) sounds. So *swing and attack sounds
+//! And it excludes attacks. Vanilla's own player class routes those through a method
+//! whose very name says the intent — a server-side-only sound path — which passes
+//! `null`, as
+//! do the level-up (its own experience-level-grant routine) and deflect
+//! (its own projectile-deflection routine) sounds. So *swing and attack sounds
 //! are not predicted* — a guess to the contrary would have produced doubled hit
 //! sounds on every swing.
 //!
@@ -58,33 +60,33 @@ use std::collections::VecDeque;
 use glam::{DVec3, Vec3};
 use lodestone_audio::JavaRandom;
 
-/// `Entity.applyMovementEmissionAndPlaySound`'s `moveDistScale`. Distance travelled is
+/// Vanilla's own movement-emission-and-play-sound routine's `moveDistScale`. Distance travelled is
 /// scaled by this before accumulating, so the step threshold of 1.0 corresponds to
 /// `1 / 0.6 ≈ 1.667` blocks of travel.
 pub const MOVE_DIST_SCALE: f32 = 0.6;
 
-/// `Entity.nextStep`'s initial field value.
+/// Vanilla's own next-step field's initial value.
 pub const INITIAL_NEXT_STEP: f32 = 1.0;
 
-/// `Entity.playStepSound`'s volume multiplier on the block's sound type
+/// Vanilla's own play-step-sound routine's volume multiplier on the block's sound type
 /// (`soundType.getVolume() * 0.15F`).
 pub const STEP_VOLUME_SCALE: f32 = 0.15;
 
-/// `Entity.playMuffledStepSound`'s multipliers
+/// Vanilla's own muffled-step-sound routine's multipliers
 /// (`volume * 0.05F`, `pitch * 0.8F`). Used for the secondary sound when standing on
-/// a `COMBINATION_STEP_SOUND_BLOCKS` block, and underwater
-/// (`Player.playStepSound`).
+/// a combination-step-sound block, and underwater
+/// (vanilla's own player-class step-sound override).
 pub const MUFFLED_STEP_VOLUME_SCALE: f32 = 0.05;
 /// See [`MUFFLED_STEP_VOLUME_SCALE`].
 pub const MUFFLED_STEP_PITCH_SCALE: f32 = 0.8;
 
-/// `Entity.waterSwimSound`'s volume modifier when the entity is its own controller.
+/// Vanilla's own water-swim-sound routine's volume modifier when the entity is its own controller.
 /// It is `0.4` when a passenger is steering.
 pub const SWIM_SELF_VOLUME_MODIFIER: f32 = 0.35;
 /// See [`SWIM_SELF_VOLUME_MODIFIER`].
 pub const SWIM_PASSENGER_VOLUME_MODIFIER: f32 = 0.4;
 
-/// `Entity.playSwimSound`'s pitch jitter:
+/// Vanilla's own play-swim-sound routine's pitch jitter:
 /// `1.0 + (nextFloat() - nextFloat()) * 0.4`.
 ///
 /// Draws **twice**, in that order, so it is order-sensitive against a shared stream.
@@ -95,8 +97,8 @@ pub fn swim_pitch(rng: &mut JavaRandom) -> f32 {
     1.0 + (rng.next_f32() - rng.next_f32()) * 0.4
 }
 
-/// Vanilla's step-distance accumulator — `Entity.applyMovementEmissionAndPlaySound`
-/// plus `Entity.nextStep()`.
+/// Vanilla's step-distance accumulator — its own movement-emission-and-play-sound
+/// routine plus its own next-step routine.
 ///
 /// # Why this is a distance accumulator and not a timer
 ///
@@ -129,25 +131,25 @@ impl StepAccumulator {
         Self::default()
     }
 
-    /// Accumulated scaled distance (`Entity.moveDist`).
+    /// Accumulated scaled distance (vanilla's own move-dist field).
     pub fn move_dist(&self) -> f32 {
         self.move_dist
     }
 
-    /// The threshold the next step fires at (`Entity.nextStep`).
+    /// The threshold the next step fires at (vanilla's own next-step field).
     pub fn next_step(&self) -> f32 {
         self.next_step
     }
 
     /// Accumulate one movement and report whether the step threshold was crossed.
     ///
-    /// `moved` is vanilla's `clippedMovement` — the movement *actually achieved*
+    /// `moved` is vanilla's own clipped-movement value — the movement *actually achieved*
     /// after collision, not the movement requested, which is why walking into a wall
     /// produces no footsteps. `climbing` selects the full 3D length instead of the
-    /// horizontal component, in `Entity.applyMovementEmissionAndPlaySound`, so
+    /// horizontal component, in vanilla's own movement-emission-and-play-sound routine, so
     /// climbing a ladder does step.
-    /// `supporting_is_air` suppresses the step entirely (the same method's
-    /// `!supportingState.isAir()` guard), which is what keeps
+    /// `supporting_is_air` suppresses the step entirely (the same routine's
+    /// not-air-supporting-state guard), which is what keeps
     /// a falling or flying player silent.
     ///
     /// This only reports the crossing; call [`StepAccumulator::consume`] once a sound
@@ -162,7 +164,7 @@ impl StepAccumulator {
         self.move_dist > self.next_step && !supporting_is_air
     }
 
-    /// Re-arm the threshold after a step sound was produced — `Entity.nextStep()`:
+    /// Re-arm the threshold after a step sound was produced — vanilla's own next-step routine:
     /// `(int)move_dist + 1`, truncating.
     pub fn consume(&mut self) {
         self.next_step = self.move_dist.trunc() + 1.0;

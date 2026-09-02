@@ -111,11 +111,11 @@ impl SoundResolver {
     /// Applies vanilla's observable rules:
     /// * `instanceVolume = packetVolume * entryVolume`,
     /// * `instancePitch  = packetPitch  * entryPitch`
-    ///   (`AbstractSoundInstance.getVolume/getPitch`);
+    ///   (vanilla's own sound-instance volume/pitch accessors);
     /// * client attenuation uses the `sounds.json` entry distance, **not** the
     ///   packet's `fixed_range` (that is server-side culling only);
     ///   [`Spatialization::range`](lodestone_audio) then applies the
-    ///   `max(volume, 1)` scaling, matching `SoundEngine`.
+    ///   `max(volume, 1)` scaling, matching vanilla's own sound engine.
     pub fn resolve_instance(
         &mut self,
         event_name: &str,
@@ -128,7 +128,7 @@ impl SoundResolver {
         // One RNG for the whole resolution chain, seeded with the server's
         // value. `resolve` calls the closure once per weighted level (including
         // `type: event` recursion), exactly as vanilla's single `RandomSource`
-        // is threaded through `WeighedSoundEvents.getSound`.
+        // is threaded through its own weighted-sound-selection walk.
         let mut rng = JavaRandom::new(seed);
         let resolved = self
             .registry

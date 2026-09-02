@@ -33,8 +33,9 @@ const PITCH_DARK: LightSample = LightSample { sky: 0, block: 0 };
 /// asserted rather than assumed.
 #[test]
 fn cave_ambience_comes_from_the_dimension_and_nether_biomes_override_it() {
-    // The dimension layer: overworld and End carry LEGACY_CAVE_SETTINGS
-    // (both set in DimensionTypes.bootstrap).
+    // The dimension layer: overworld and End carry vanilla's own legacy-cave
+    // ambient-sound settings
+    // (both set in vanilla's own dimension-type bootstrap).
     for dim in ["overworld", "the_end"] {
         let d = dimension_ambient(dim)
             .unwrap_or_else(|| panic!("{dim} must declare ambient sounds"));
@@ -267,7 +268,7 @@ fn block_light_one_is_the_break_even_point_and_brighter_drains() {
 }
 
 /// Sky light drains at a different, much slower rate:
-/// `sky / 15 * 0.001` (`BiomeAmbientSoundsHandler.tick`). At full sky light that is
+/// `sky / 15 * 0.001` (vanilla's own biome-ambient-sounds tick routine). At full sky light that is
 /// exactly `0.001` per tick — 15x faster than the darkness accumulation, so stepping
 /// into daylight discards ~5 minutes of accumulated mood in ~20 seconds.
 #[test]
@@ -409,7 +410,7 @@ fn additions_fire_at_the_declared_tick_chance() {
 // 4. Loop crossfade
 // ---------------------------------------------------------------------------
 
-/// `BiomeAmbientSoundsHandler.LoopSoundInstance`: a 40-tick linear
+/// Vanilla's own loop-sound-instance type: a 40-tick linear
 /// fade, and the stop check happens **before** the counter moves.
 #[test]
 fn a_loop_fades_in_over_exactly_the_crossfade_time() {
@@ -431,7 +432,7 @@ fn a_loop_fades_in_over_exactly_the_crossfade_time() {
     );
 
     // Fading out from full takes 40 ticks to reach zero, then one extra tick at
-    // negative fade before stopping (`LoopSoundInstance.tick` checks before
+    // negative fade before stopping (vanilla's own loop-sound-instance tick routine checks before
     // incrementing). That extra tick is why the check order matters: reversing it
     // clips the loop.
     let mut fade = LoopFade::new();
@@ -515,7 +516,8 @@ fn stepping_between_two_loop_biomes_crossfades_rather_than_cutting() {
     assert_eq!(live, vec!["ambient.warped_forest.loop".to_string()]);
 
     // A steady biome must not restart or re-fade its loop — that is the check
-    // `Objects.equals(current, previous)` in `BiomeAmbientSoundsHandler.tick` exists for.
+    // vanilla's own current/previous equality check in its own biome-ambient-sounds
+    // tick routine exists for.
     for _ in 0..500 {
         let actions = loops.tick(Some("ambient.warped_forest.loop"));
         assert!(
@@ -558,8 +560,8 @@ fn leaving_a_loop_biome_for_a_loopless_one_fades_out_to_nothing() {
 // ---------------------------------------------------------------------------
 
 /// Footsteps are spaced by **distance**, not time. The scale is `0.6`
-/// (`Entity.applyMovementEmissionAndPlaySound`) against a threshold starting at `1.0`
-/// (`Entity.nextStep`'s field initializer), so the first
+/// (vanilla's own movement-emission-and-play-sound routine) against a threshold starting at `1.0`
+/// (vanilla's own next-step field initializer), so the first
 /// step lands after `1 / 0.6 = 1.667` blocks and subsequent ones on each further
 /// integer of accumulated scaled distance.
 #[test]
@@ -595,7 +597,7 @@ fn footsteps_are_spaced_by_distance_at_the_jars_scale() {
     assert_eq!(first, Some(17), "1/0.6 = 1.667 blocks -> tick 17 at 0.1/tick");
 
     // Vertical movement alone produces no steps, because the horizontal component is
-    // what accumulates (`Entity.applyMovementEmissionAndPlaySound`).
+    // what accumulates (vanilla's own movement-emission-and-play-sound routine).
     let mut acc = StepAccumulator::new();
     for _ in 0..1_000 {
         assert!(
@@ -630,7 +632,7 @@ fn footsteps_are_spaced_by_distance_at_the_jars_scale() {
     );
 }
 
-/// `Entity.nextStep()` re-arms to `(int)move_dist + 1` — the next
+/// Vanilla's own next-step routine re-arms to `(int)move_dist + 1` — the next
 /// integer boundary, **not** `move_dist + 1`. The difference is drift: with `+ 1`
 /// each step's overshoot accumulates and the spacing slowly grows.
 #[test]
@@ -656,7 +658,7 @@ fn the_step_threshold_rearms_to_the_next_integer_not_to_plus_one() {
 }
 
 /// A crossing that produced no sound leaves the threshold armed
-/// (`Entity.applyMovementEmissionAndPlaySound` only re-arms on `producedSideEffects`), which is why
+/// (vanilla's own movement-emission-and-play-sound routine only re-arms on `producedSideEffects`), which is why
 /// `advance` and `consume` are separate.
 #[test]
 fn a_silent_crossing_leaves_the_threshold_armed() {
@@ -669,7 +671,7 @@ fn a_silent_crossing_leaves_the_threshold_armed() {
     assert!(acc.advance(DVec3::new(0.01, 0.0, 0.0), false, false));
 }
 
-/// The swim pitch draws `nextFloat()` **twice**, in `Entity.playSwimSound`, giving a
+/// The swim pitch draws `nextFloat()` **twice**, in vanilla's own play-swim-sound routine, giving a
 /// triangular distribution about 1.0 bounded by `0.6..=1.4` — not the uniform
 /// distribution a single draw would give.
 #[test]

@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// `AmbientMoodSettings.LEGACY_CAVE_SETTINGS`. Every
+/// Vanilla's own legacy-cave mood settings. Every
 /// biome that sets a mood in real data reuses these three numbers with only the sound
 /// changed, which the value check below asserts.
 const LEGACY_TICK_DELAY: i64 = 6_000;
