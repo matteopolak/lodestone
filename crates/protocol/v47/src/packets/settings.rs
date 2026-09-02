@@ -1,12 +1,19 @@
 //! Client-configuration serverbound packets for protocol 47.
 //!
-//! These carry the player's client options and are all ordinary derived
-//! structs. The 1.8 wire shapes differ from later versions (no `main_hand`, a
-//! signed-byte `chat_flags`, a two-`f32` `abilities` tail), so they are defined
-//! here per-version rather than shared — the same shapes are duplicated in the
-//! v340/v735 crates under the project's duplication-over-sharing rule.
+//! `BrandPayload` is byte-identical across all three families (verified by
+//! hand; the naive struct scan misses it because a field-level doc comment
+//! names each family's own channel spelling) and now lives in
+//! `lodestone-protocol-common` with the derive's default `ProtocolRange::ALL`.
+//! `PlayerAbilities` is shared with v340 only (`#[mc(protocols = "47..=340")]`
+//! -- 1.16/v735 dropped the two speed floats to a single flags byte). `Settings`
+//! stays defined **here**: 1.8 has no `main_hand` and a signed-byte
+//! `chat_flags`, unlike the varint-based v340/v735 version shared as
+//! `lodestone-protocol-common`'s own `Settings` (declared 340..=754). See
+//! that crate's `packets::client_settings` module docs.
 
 use lodestone_macros::{Decode, Encode, Packet};
+
+pub use lodestone_protocol_common::packets::client_settings::{BrandPayload, PlayerAbilities};
 
 /// Serverbound `settings` (client settings).
 ///
@@ -34,50 +41,4 @@ pub struct Settings {
     pub chat_colors: bool,
     /// Displayed skin-part bitmask.
     pub skin_parts: u8,
-}
-
-/// Serverbound `custom_payload` carrying the client brand on the `MC|Brand`
-/// channel.
-///
-/// # 1.8 divergence
-///
-/// 1.8 uses the legacy pipe-namespaced channel name `MC|Brand` (1.13 renamed it
-/// to `minecraft:brand`). The brand itself is a length-prefixed string that
-/// occupies the whole payload, so it is modelled as an ordinary trailing
-/// `String` field rather than an opaque `restBuffer`.
-///
-/// Wire layout: string channel, string brand.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:custom_payload", state = Play, bound = Server)]
-pub struct BrandPayload {
-    /// Plugin-message channel, always `MC|Brand` for protocol 47.
-    #[mc(max = 32767)]
-    pub channel: String,
-    /// Client brand string.
-    #[mc(max = 32767)]
-    pub brand: String,
-}
-
-/// Serverbound `abilities` (player abilities) — the client toggling flight.
-///
-/// # 1.8 divergence
-///
-/// 1.8 (and 1.12) carry two trailing `f32` speed fields that the vanilla server
-/// **ignores** for the serverbound direction (it only reads the flying bit);
-/// 1.16 dropped them entirely. The model's `SetFlying` carries only the flying
-/// state, so the adapter sends the vanilla default speeds for the two ignored
-/// fields — they are constants, not an invented wire format, and never reach
-/// game logic.
-///
-/// Wire layout: signed-byte flags (bit `0x02` = flying), f32 flying speed, f32
-/// walking speed.
-#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:abilities", state = Play, bound = Server)]
-pub struct PlayerAbilities {
-    /// Ability flag bitset; bit `0x02` marks the client as flying.
-    pub flags: i8,
-    /// Flying speed — server-ignored serverbound; sent as the vanilla default.
-    pub flying_speed: f32,
-    /// Walking speed — server-ignored serverbound; sent as the vanilla default.
-    pub walking_speed: f32,
 }
