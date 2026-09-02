@@ -25,7 +25,7 @@ reproducing any method body. One file is a partial exception worth naming precis
 of the player-movement algorithm (its own header says so), written to obtain ground-truth
 `float`/`double` bit patterns from a real JVM; it is not decompiled or copied source, but it is
 a full, independently authored reimplementation of proprietary game logic, and its method names
-mirror vanilla's own (`restituteMovementAfterCollisions`, `travelFallFlying`) closely enough
+mirror two of vanilla's own movement-related method names closely enough
 that this is named explicitly rather than left implicit. `git log --diff-filter=A` over `*.java`,
 `*.class`, and `*.jar` was also checked against the current tree; the counts match, so no file
 of that class was ever added and later deleted.
