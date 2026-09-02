@@ -55,6 +55,51 @@ pub struct SpawnEntityLiving {
     pub metadata: EntityMetadata,
 }
 
+/// Clientbound `spawn_entity_living` as protocols 110 and 210 send it: the
+/// mob type is a single **unsigned byte**, not a VarInt.
+///
+/// 1.11 widened it when the mob id space outgrew 255. A VarInt read of a byte
+/// field is the worst kind of wrong here — for every id below 128 the two
+/// encodings coincide, so a shared struct would decode most of the vanilla
+/// mob set correctly and silently misread the rest along with every field
+/// after it. That is why this is a separate struct rather than a predicate.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(
+    name = "minecraft:spawn_entity_living",
+    state = Play,
+    bound = Client,
+    protocols = "110..=210"
+)]
+pub struct SpawnEntityLivingByteType {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Entity UUID.
+    pub entity_uuid: Uuid,
+    /// Mob type id (single byte in this era's first two releases).
+    pub kind: u8,
+    /// X coordinate.
+    pub x: f64,
+    /// Y coordinate.
+    pub y: f64,
+    /// Z coordinate.
+    pub z: f64,
+    /// Yaw as a signed-byte angle (`256` = 360°).
+    pub yaw: i8,
+    /// Pitch as a signed-byte angle.
+    pub pitch: i8,
+    /// Head pitch as a signed-byte angle.
+    pub head_pitch: i8,
+    /// Velocity X (fixed-point).
+    pub velocity_x: i16,
+    /// Velocity Y (fixed-point).
+    pub velocity_y: i16,
+    /// Velocity Z (fixed-point).
+    pub velocity_z: i16,
+    /// Initial data-watcher metadata.
+    pub metadata: EntityMetadata,
+}
+
 /// Clientbound `entity_metadata` — an incremental metadata update for an entity.
 ///
 /// The header is identical across versions (`varint entity id`, then the list);

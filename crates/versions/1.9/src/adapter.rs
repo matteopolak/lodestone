@@ -25,20 +25,23 @@ use crate::entity_types;
 use crate::item_types;
 use crate::particle_ids;
 use crate::packets::chunk::{ChunkShape, MapChunk, UnloadChunk};
-use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
+use crate::packets::common::{
+    KeepAliveRequest, KeepAliveRequestVarInt, KeepAliveResponse, KeepAliveResponseVarInt,
+};
 use crate::packets::entity::{
     EntityDestroy, EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
     NamedEntitySpawn, RelEntityMove, SpawnEntityExperienceOrb, SpawnEntityLiving,
-    SpawnEntityPainting, SpawnEntityWeather, SpawnObject,
+    SpawnEntityLivingByteType, SpawnEntityPainting, SpawnEntityWeather, SpawnObject,
 };
 use crate::packets::game::{
-    Animation, AttachEntity, BlockAction, BlockDig, BlockPlace, ClientCommand, ClientboundChat,
-    ClientboundEntityEquipment, ClientboundPositionLook, Collect, DifficultyPacket, EntityAction,
-    EntityEffect, JoinGame, KickDisconnect, NamedSoundEffect, OpenSignEntity, PlayerlistHeader,
-    RemoveEntityEffect, Respawn, ScoreboardDisplayObjective, ServerboundArmAnimation,
-    ServerboundChat, ServerboundFlying, ServerboundLook, ServerboundPosition,
-    ServerboundPositionLook, SetPassengers, SoundEffect, Spectate, SpawnPosition,
-    TeleportConfirm, UpdateHealth, UpdateTime, UseEntity, UseEntityAt, UseEntityInteract,
+    Animation, AttachEntity, BlockAction, BlockDig, BlockPlace, BlockPlaceByteCursor,
+    ClientCommand, ClientboundChat, ClientboundEntityEquipment, ClientboundPositionLook, Collect,
+    DifficultyPacket, EntityAction, EntityEffect, JoinGame, KickDisconnect, NamedSoundEffect,
+    NamedSoundEffectBytePitch, OpenSignEntity, PlayerlistHeader, RemoveEntityEffect, Respawn,
+    ScoreboardDisplayObjective, ServerboundArmAnimation, ServerboundChat, ServerboundFlying,
+    ServerboundLook, ServerboundPosition, ServerboundPositionLook, SetPassengers, SoundEffect,
+    SoundEffectBytePitch, Spectate, SpawnPosition, TeleportConfirm, UpdateHealth, UpdateTime,
+    UseEntity, UseEntityAt, UseEntityInteract, legacy_pitch, quantise_cursor,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -1184,10 +1187,15 @@ impl V340Adapter {
     }
 
     fn play_keep_alive(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let keep_alive: KeepAliveRequest = self.decode_body(payload)?;
-        return Ok(vec![Directive::Emit(ClientEvent::KeepAlive {
-            id: keep_alive.id,
-        })]);
+        // 1.12 widened the id from a VarInt to a fixed 64-bit integer. Both
+        // forms exist in this era, so the struct is chosen by protocol; see
+        // `packets::common`.
+        let id = if self.protocol >= PROTOCOL_1_12_2 {
+            self.decode_body::<KeepAliveRequest>(payload)?.id
+        } else {
+            i64::from(self.decode_body::<KeepAliveRequestVarInt>(payload)?.id)
+        };
+        return Ok(vec![Directive::Emit(ClientEvent::KeepAlive { id })]);
     }
 
     fn play_chat(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
@@ -1227,7 +1235,28 @@ impl V340Adapter {
     }
 
     fn play_spawn_entity_living(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        let body: SpawnEntityLiving = self.decode_body(payload)?;
+        // 1.11 widened the mob type from a byte to a VarInt; below that the
+        // byte form is a different struct (see `packets::entity`).
+        let body: SpawnEntityLiving = if self.protocol >= PROTOCOL_1_11_2 {
+            self.decode_body(payload)?
+        } else {
+            let legacy: SpawnEntityLivingByteType = self.decode_body(payload)?;
+            SpawnEntityLiving {
+                entity_id: legacy.entity_id,
+                entity_uuid: legacy.entity_uuid,
+                kind: i32::from(legacy.kind),
+                x: legacy.x,
+                y: legacy.y,
+                z: legacy.z,
+                yaw: legacy.yaw,
+                pitch: legacy.pitch,
+                head_pitch: legacy.head_pitch,
+                velocity_x: legacy.velocity_x,
+                velocity_y: legacy.velocity_y,
+                velocity_z: legacy.velocity_z,
+                metadata: legacy.metadata,
+            }
+        };
         let entity_type = entity_types::mob_type_name(body.kind)
             .ok_or_else(|| {
                 AdapterError::Decode(format!("unknown mob type id {} in spawn", body.kind))
@@ -1669,7 +1698,7 @@ impl V340Adapter {
         // Action-multiplexed, verified field-by-field against
         // minecraft-data's 1.12.2 `packet_title`: unlike 1.8, the `text`
         // switch has three cases (`0`/`1`/`2` — title/subtitle/action-bar,
-        // the action-bar case 1.12.2 adds), which pushes the
+        // the action-bar case 1.11 adds), which pushes the
         // fade-in/stay/fade-out case (times) to `3` and the two
         // argument-less actions to `4`/`5`. Action-bar text always
         // renders as an overlay, so it maps to the same `Chat`
@@ -1679,7 +1708,16 @@ impl V340Adapter {
         // same pair 26.2's `CLEAR_TITLES` folds into one `resetTimes`
         // bool.
         let mut reader = Reader::new(payload);
-        let action = reader.var_i32().map_err(dec_err)?;
+        let raw_action = reader.var_i32().map_err(dec_err)?;
+        // 1.11 inserted the action-bar case as `2`, shifting times/clear/reset
+        // up by one. Normalise the earlier numbering onto the 1.11+ one so the
+        // arm bodies below read a single vocabulary; the alternative -- two
+        // parallel matches -- is where a mis-numbered case hides.
+        let action = if self.protocol >= PROTOCOL_1_11_2 || raw_action < 2 {
+            raw_action
+        } else {
+            raw_action + 1
+        };
         let directive = match action {
             0 => {
                 let text = reader.string(32_767).map_err(dec_err)?;
@@ -1715,7 +1753,10 @@ impl V340Adapter {
             4 => Directive::Emit(ClientEvent::TitlesCleared { reset_times: false }),
             5 => Directive::Emit(ClientEvent::TitlesCleared { reset_times: true }),
             other => {
-                return Err(AdapterError::Decode(format!("unknown title action {other}")));
+                return Err(AdapterError::Decode(format!(
+                    "unknown title action {raw_action} (normalised to {other}) at protocol {}",
+                    self.protocol
+                )));
             }
         };
         reader.ensure_empty().map_err(dec_err)?;
@@ -2000,7 +2041,22 @@ impl V340Adapter {
         // fixed-point sound-position convention (real coordinate × 8);
         // this era carries no fixed audible range and no variant seed,
         // so both canonical fields are the "not present" default.
-        let body: NamedSoundEffect = self.decode_body_exact(payload)?;
+        // 1.10 widened the pitch from a quantised byte to a float; below that
+        // the byte form is a different struct (see `packets::game`).
+        let body: NamedSoundEffect = if self.protocol >= PROTOCOL_1_10_2 {
+            self.decode_body_exact(payload)?
+        } else {
+            let legacy: NamedSoundEffectBytePitch = self.decode_body_exact(payload)?;
+            NamedSoundEffect {
+                sound_name: legacy.sound_name,
+                sound_category: legacy.sound_category,
+                x: legacy.x,
+                y: legacy.y,
+                z: legacy.z,
+                volume: legacy.volume,
+                pitch: legacy_pitch(legacy.pitch),
+            }
+        };
         let category_ordinal = u8::try_from(body.sound_category).map_err(|_| {
             AdapterError::Decode(format!(
                 "named_sound_effect category {} is outside u8 range",
@@ -2037,7 +2093,20 @@ impl V340Adapter {
         // string name — resolved through the generated legacy
         // `sound_ids` table (`vendor/minecraft-data`'s
         // `pc/1.12.2/sounds.json`, wire-order network ids).
-        let body: SoundEffect = self.decode_body_exact(payload)?;
+        let body: SoundEffect = if self.protocol >= PROTOCOL_1_10_2 {
+            self.decode_body_exact(payload)?
+        } else {
+            let legacy: SoundEffectBytePitch = self.decode_body_exact(payload)?;
+            SoundEffect {
+                sound_id: legacy.sound_id,
+                sound_category: legacy.sound_category,
+                x: legacy.x,
+                y: legacy.y,
+                z: legacy.z,
+                volume: legacy.volume,
+                pitch: legacy_pitch(legacy.pitch),
+            }
+        };
         let category_ordinal = u8::try_from(body.sound_category).map_err(|_| {
             AdapterError::Decode(format!(
                 "sound_effect category {} is outside u8 range",
@@ -2405,6 +2474,10 @@ impl V340Adapter {
         return Ok(vec![Directive::Emit(ClientEvent::ItemPickup {
             item_entity_id: body.collected_entity_id,
             player_id: body.collector_entity_id,
+            // 1.11 added the stack size to this packet; 110 and 210 decode it
+            // as `0`, which is what the wire actually says -- the count is not
+            // knowable from this packet alone before 1.11, and inventing one
+            // would be worse than reporting the absence.
             amount: body.pickup_item_count,
         })]);
     }
@@ -2630,7 +2703,16 @@ impl V340Adapter {
         // warning_time, warning_blocks — matching
         // `ClientEvent::WorldBorderInitialized`'s field order one-for-one.
         let mut reader = Reader::new(payload);
-        let action = reader.var_i32().map_err(dec_err)?;
+        let raw_action = reader.var_i32().map_err(dec_err)?;
+        // 1.11 inserted the action-bar case as `2`, shifting times/clear/reset
+        // up by one. Normalise the earlier numbering onto the 1.11+ one so the
+        // arm bodies below read a single vocabulary; the alternative -- two
+        // parallel matches -- is where a mis-numbered case hides.
+        let action = if self.protocol >= PROTOCOL_1_11_2 || raw_action < 2 {
+            raw_action
+        } else {
+            raw_action + 1
+        };
         let directive = match action {
             0 => {
                 let radius = reader.f64().map_err(dec_err)?;
@@ -2809,8 +2891,23 @@ impl VersionAdapter for V340Adapter {
         }
         match action {
             ClientAction::KeepAliveResponse { id } => {
-                let body = KeepAliveResponse { id: *id };
-                Ok(Some((self.ids().keep_alive, self.encode_body(&body)?)))
+                let payload = if self.protocol >= PROTOCOL_1_12_2 {
+                    self.encode_body(&KeepAliveResponse { id: *id })?
+                } else {
+                    // The pre-1.12 id is a VarInt. The server only ever sends
+                    // ids it can itself round-trip through one, so a value
+                    // outside `i32` here means the id did not come from this
+                    // connection's own challenge -- refuse rather than
+                    // truncate into a response the server will not match.
+                    let id = i32::try_from(*id).map_err(|_| {
+                        AdapterError::Unsupported(format!(
+                            "protocol {} carries the keep_alive id as a VarInt; {id} does not fit",
+                            self.protocol
+                        ))
+                    })?;
+                    self.encode_body(&KeepAliveResponseVarInt { id })?
+                };
+                Ok(Some((self.ids().keep_alive, payload)))
             }
             ClientAction::SendChat { text } => {
                 let body = ServerboundChat {
@@ -2916,15 +3013,28 @@ impl VersionAdapter for V340Adapter {
                 inside_block: _,
                 sequence: _,
             } => {
-                let body = BlockPlace {
-                    location: Position(*pos),
-                    direction: face_ordinal(*face),
-                    hand: hand_ordinal(*hand),
-                    cursor_x: cursor.x,
-                    cursor_y: cursor.y,
-                    cursor_z: cursor.z,
+                let payload = if self.protocol >= PROTOCOL_1_11_2 {
+                    self.encode_body(&BlockPlace {
+                        location: Position(*pos),
+                        direction: face_ordinal(*face),
+                        hand: hand_ordinal(*hand),
+                        cursor_x: cursor.x,
+                        cursor_y: cursor.y,
+                        cursor_z: cursor.z,
+                    })?
+                } else {
+                    // 110 and 210 carry the cursor as three
+                    // sixteenth-of-a-face bytes, not three floats.
+                    self.encode_body(&BlockPlaceByteCursor {
+                        location: Position(*pos),
+                        direction: face_ordinal(*face),
+                        hand: hand_ordinal(*hand),
+                        cursor_x: quantise_cursor(cursor.x),
+                        cursor_y: quantise_cursor(cursor.y),
+                        cursor_z: quantise_cursor(cursor.z),
+                    })?
                 };
-                Ok(Some((self.ids().block_place, self.encode_body(&body)?)))
+                Ok(Some((self.ids().block_place, payload)))
             }
             // Using an item in the air: `block_place` with location (-1,-1,-1) and
             // direction -1.
@@ -2933,15 +3043,28 @@ impl VersionAdapter for V340Adapter {
                 rotation: _,
                 sequence: _,
             } => {
-                let body = BlockPlace {
-                    location: Position::new(-1, -1, -1),
-                    direction: -1,
-                    hand: hand_ordinal(*hand),
-                    cursor_x: 0.0,
-                    cursor_y: 0.0,
-                    cursor_z: 0.0,
+                let payload = if self.protocol >= PROTOCOL_1_11_2 {
+                    self.encode_body(&BlockPlace {
+                        location: Position::new(-1, -1, -1),
+                        direction: -1,
+                        hand: hand_ordinal(*hand),
+                        cursor_x: 0.0,
+                        cursor_y: 0.0,
+                        cursor_z: 0.0,
+                    })?
+                } else {
+                    // 110 and 210 carry the cursor as three
+                    // sixteenth-of-a-face bytes, not three floats.
+                    self.encode_body(&BlockPlaceByteCursor {
+                        location: Position::new(-1, -1, -1),
+                        direction: -1,
+                        hand: hand_ordinal(*hand),
+                        cursor_x: quantise_cursor(0.0),
+                        cursor_y: quantise_cursor(0.0),
+                        cursor_z: quantise_cursor(0.0),
+                    })?
                 };
-                Ok(Some((self.ids().block_place, self.encode_body(&body)?)))
+                Ok(Some((self.ids().block_place, payload)))
             }
 
             // Entity interaction. 1.9+ carries the hand for interact/interact-at
@@ -3146,10 +3269,22 @@ impl VersionAdapter for V340Adapter {
                         )));
                     }
                 };
+                if self.protocol == PROTOCOL_1_9_4 {
+                    // 1.9.4 alone expects the pushed pack's hash echoed back,
+                    // and `resource_pack_send` is on this family's IGNORED
+                    // list, so nothing here ever saw one. Sending an empty
+                    // hash would be a value we invented rather than one the
+                    // server pushed; refusing says so.
+                    return Err(AdapterError::Unsupported(
+                        "protocol 110 resource_pack_receive echoes the pushed pack's hash, \
+                         which this family does not yet capture (resource_pack_send is not \
+                         translated)"
+                            .to_owned(),
+                    ));
+                }
                 let body = ResourcePackReceive {
-                    // Protocol 110 echoes the pushed pack's hash back; every
-                    // later protocol in this era dropped it, and `until = 110`
-                    // keeps it off the wire here.
+                    // Dropped in 1.10; `until = 110` keeps it off the wire for
+                    // every protocol that reaches here.
                     hash: String::new(),
                     result,
                 };

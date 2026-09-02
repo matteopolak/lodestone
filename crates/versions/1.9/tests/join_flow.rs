@@ -321,13 +321,42 @@ fn server() -> ServerAddress {
 }
 
 #[test]
-fn supports_only_protocol_340() {
+fn supports_every_protocol_in_the_era_and_nothing_outside_it() {
     let adapter = V340Adapter::new();
-    assert!(adapter.supports(340));
-    assert!(!adapter.supports(776));
-    assert!(!adapter.supports(47));
+    for protocol in [110, 210, 316, 340] {
+        assert!(adapter.supports(protocol), "era member {protocol}");
+    }
+    // 47 is the release before this era opens and 754/776 are well after it
+    // closes; 109 and 341 are the immediately adjacent non-members, which is
+    // where an off-by-one in PROTOCOLS would show.
+    for protocol in [47, 109, 341, 754, 776] {
+        assert!(!adapter.supports(protocol), "non-member {protocol}");
+    }
     assert_eq!(adapter.protocol_version(), 340);
-    assert_eq!(adapter.minecraft_versions(), &["1.12.2"]);
+    assert_eq!(
+        adapter.minecraft_versions(),
+        &["1.9.4", "1.10.2", "1.11.2", "1.12.2"]
+    );
+}
+
+#[test]
+fn an_adapter_built_for_an_era_member_reports_that_protocol() {
+    for (protocol, expected_handshake) in [(110, 110), (210, 210), (316, 316), (340, 340)] {
+        let adapter = lodestone_v1_9::adapter_for(protocol);
+        assert_eq!(adapter.protocol_version(), protocol);
+
+        // The handshake is the one packet whose payload carries the protocol
+        // number itself, so it proves the construction argument reached the
+        // wire rather than only the accessor.
+        let directives = adapter.begin_login(&profile(), &server()).expect("begin");
+        let Directive::Send { payload, .. } = &directives[0] else {
+            panic!("first directive must be the handshake send");
+        };
+        let handshake: SetProtocol =
+            lodestone_core::decode_body(payload, lodestone_core::Ctx { version: protocol })
+                .expect("handshake decodes");
+        assert_eq!(handshake.protocol_version, expected_handshake);
+    }
 }
 
 #[test]
