@@ -9,10 +9,10 @@
 //!
 //! Nothing here is transcribed. Geometry is
 //! [`VersionAdapter::block_collision`] — the census dumped from the real 26.2
-//! server's `Block.BLOCK_STATE_REGISTRY`. The six name-keyed movement constants
+//! server's own block-state registry. The six name-keyed movement constants
 //! are [`lodestone_model::block_physics`], anchored to a JVM dump of all 1,196
 //! registered blocks. `blocks_motion` is
-//! [`VersionAdapter::block_blocks_motion`], the per-state `legacySolid` census.
+//! [`VersionAdapter::block_blocks_motion`], the per-state legacy-solid census.
 //! See `docs/collision-shapes.md` and `docs/block-physics-constants.md`.
 //!
 //! The one list that is *ours* is [`MUST_NOT_ENTER`], and it is a policy
@@ -36,7 +36,7 @@ pub trait BlockCensus {
     /// The canonical `minecraft:*` name of a state, for the name-keyed constants.
     fn name(&self, state: u32) -> Option<&'static str>;
 
-    /// `BlockState.blocksMotion()`, or `None` when there is no census.
+    /// Vanilla's own motion-blocking check, or `None` when there is no census.
     fn blocks_motion(&self, state: u32) -> Option<bool>;
 }
 
@@ -100,7 +100,7 @@ pub const MUST_NOT_ENTER: &[(&str, u32)] = &[
 pub struct BlockFacts {
     /// Block-local collision boxes — the census slice itself, never a copy.
     pub shape: &'static [BlockAabb],
-    /// `shape.max(Axis.Y)`, block-local and **uncapped**: a fence is `1.5`, a
+    /// The shape's own maximum Y extent, block-local and **uncapped**: a fence is `1.5`, a
     /// bottom slab `0.5`, soul sand `0.875`, air `0.0`.
     ///
     /// Clamping this to `1.0` makes a fence look step-able and routes navigation
@@ -113,24 +113,25 @@ pub struct BlockFacts {
     /// Whether the state has no collision at all. **Not** the same as safe:
     /// cobweb, fire and sweet berry bush are all passable.
     pub passable: bool,
-    /// `BlockState.blocksMotion()`.
+    /// Vanilla's own motion-blocking check.
     pub blocks_motion: bool,
-    /// `Block.getFriction` — 0.6 for all but five blocks in 26.2.
+    /// Vanilla's own friction accessor — 0.6 for all but five blocks in 26.2.
     pub friction: f32,
-    /// `Block.getSpeedFactor` — soul sand and honey are 0.4.
+    /// Vanilla's own speed-factor accessor — soul sand and honey are 0.4.
     pub speed_factor: f32,
-    /// `Block.getJumpFactor` — honey is 0.5.
+    /// Vanilla's own jump-factor accessor — honey is 0.5.
     pub jump_factor: f32,
-    /// Membership of `BlockTags.CLIMBABLE`.
+    /// Membership of `#minecraft:climbable`.
     pub climbable: bool,
     /// Whether the cell carries water.
     pub water: bool,
     /// Whether the cell carries lava.
     pub lava: bool,
-    /// `Entity.makeStuckInBlock`'s per-axis multiplier, for the three blocks
+    /// Vanilla's own stuck-in-block per-axis multiplier, for the three blocks
     /// that grab you.
     pub stuck_multiplier: Option<[f64; 3]>,
-    /// `Block.getBounceRestitution`, already net of `SUPPRESSES_BOUNCE`.
+    /// Vanilla's own bounce-restitution accessor, already net of the
+    /// suppresses-bounce flag.
     pub bounce_restitution: f32,
     /// Whether the navigator refuses to put the body in this cell at all.
     pub must_not_enter: bool,
@@ -361,16 +362,15 @@ impl FixtureCensus {
     pub const FENCE: u32 = 6;
     /// Lava.
     pub const LAVA: u32 = 7;
-    /// A ladder: `BlockTags.CLIMBABLE`, `forceSolidOff` (`blocks_motion` is
+    /// A ladder: `#minecraft:climbable`, vanilla's own force-solid-off flag (`blocks_motion` is
     /// `false` despite a nonzero collision shape — see `graph::stand_surface`'s
     /// own doc comment on why that shape must never be read as a stand
     /// surface).
     pub const LADDER: u32 = 8;
 }
 
-/// A real ladder's collision shape: `LadderBlock.SHAPES`
-/// (`.cache/mc/26.2/src/net/minecraft/world/level/block/LadderBlock.java:29`),
-/// `Block.boxZ(16.0, 13.0, 16.0)` — full `x`/`y`, a thin `z`-slab hugging one
+/// A real ladder's collision shape: vanilla's own per-facing ladder shapes,
+/// each a `16.0 x 13.0 x 16.0` box — full `x`/`y`, a thin `z`-slab hugging one
 /// face. The exact face is irrelevant to every legality rule in this crate
 /// (`graph::stand_surface`'s fix reads only `climbable`, never this shape), so
 /// one representative orientation is enough for a fixture.

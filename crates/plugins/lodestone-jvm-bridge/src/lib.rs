@@ -3,7 +3,8 @@
 //! ## What it is
 //!
 //! The Rust half of running **real, unmodified Bukkit/Spigot/Paper plugin jars**
-//! against this server, by backing Paper's own `net.minecraft.*` calls rather
+//! against this server, by backing Paper's own calls into vanilla's internal
+//! classes rather
 //! than reimplementing the Bukkit API. [`docs/java-plugin-bridge.md`] carries
 //! the whole design: the licensing decision, the measured census that sizes the
 //! work, the ABI decision, and the threading model this crate implements.

@@ -557,7 +557,7 @@ impl Search {
                 if delta > self.policy.max_fall_blocks {
                     return None;
                 }
-                // The real damage rule (`LivingEntity.java:1856`), priced rather
+                // The real damage rule, priced rather
                 // than merely gated: `max_fall_blocks` alone would make every
                 // legal drop free, and a policy that raises the cap should still
                 // prefer a shorter fall over a longer, dearer one.
