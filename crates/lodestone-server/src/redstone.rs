@@ -633,23 +633,23 @@ pub fn own_signal(state: &str) -> u8 {
 /// `DetectorRailBlock`, `TargetBlock`, `DaylightDetectorBlock` and
 /// `PoweredBlock`.
 ///
-/// Dust is deliberately excluded here: `RedStoneWireBlock.isSignalSource`
+/// Dust is deliberately excluded here: vanilla's own wire-block is-signal-source override
 /// returns its own `shouldSignal` flag, which the general query path always
-/// sees as `true` — `SignalGetter.getControlInputSignal` special-cases wire
+/// sees as `true` — vanilla's own signal-getter control-input-signal routine special-cases wire
 /// before ever reaching this check, so wire never needs this predicate.
 #[must_use]
 pub fn is_signal_source(state: &str) -> bool {
     is_torch(state) || is_diode(state) || is_observer(state) || is_input_source(state)
 }
 
-/// `BlockState.getSignal`'s per-block override — the *weak* signal a `state`
+/// Vanilla's own `getSignal`'s per-block override — the *weak* signal a `state`
 /// contributes toward a querier that reached it by travelling `direction`
 /// (i.e. `querier.relative(direction) == the position holding `state``, the
 /// same "direction travelled from the querier" convention every function in
 /// this module and `crate::neighbor_update::Notification` shares).
 ///
 /// `ignore_wire`: when `true`, a wire's own contribution is forced to `0` —
-/// mirrors `RedStoneWireBlock.getBlockSignal` toggling its private
+/// mirrors vanilla's own wire-block block-signal getter toggling its private
 /// `shouldSignal` flag off for the duration of its own
 /// `getBestNeighborSignal` call, so a
 /// wire recomputing its target strength never counts an adjacent wire's
@@ -699,7 +699,7 @@ pub fn weak_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8 {
         }
     } else if is_input_source(state) {
         // **None of the nine input families overrides `getSignal`.** They stop
-        // at `ownSignal`, so `BlockBehaviour.getSignal`'s own body —
+        // at `ownSignal`, so vanilla's own base block-behaviour get-signal's own body —
         // `return this.ownSignal(state, level, pos)` — applies, and the value is
         // the same in all six directions.
         //
@@ -714,7 +714,7 @@ pub fn weak_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8 {
     }
 }
 
-/// `BlockState.getDirectSignal`'s per-block override — the *strong* signal
+/// Vanilla's own `getDirectSignal`'s per-block override — the *strong* signal
 /// `state` sends into a conductor it touches, same direction convention as
 /// [`weak_signal`].
 ///
