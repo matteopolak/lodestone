@@ -70,6 +70,7 @@
 use std::collections::HashSet;
 
 use crate::ids::ResourceKey;
+use crate::text::Text;
 
 /// `StringArgumentType.StringType`'s three variants, in Brigadier's own
 /// declared enum order — `FriendlyByteBuf.writeEnum`/`readEnum` sends the
@@ -438,9 +439,20 @@ pub struct CommandSuggestionEntry {
     /// The literal replacement text for the input range this response
     /// carries.
     pub text: String,
-    /// An optional tooltip component, reduced to plain text. `None` when the
-    /// server sent no tooltip for this entry.
-    pub tooltip: Option<String>,
+    /// An optional tooltip component, carried as a real [`Text`] rather than
+    /// flattened to a legacy `§`-coded string. `None` when the server sent no
+    /// tooltip for this entry.
+    ///
+    /// A tooltip is a genuine JSON/NBT text component on the wire in every
+    /// family that carries one at all, and can legitimately hold a hex
+    /// colour (`TextColor::Rgb`, added in 1.16) that no legacy code can
+    /// represent — so a decode arm must not call
+    /// [`Text::to_legacy_string`](crate::text::Text::to_legacy_string) on
+    /// this field. `v47`/`v340` predate the transaction-id/range/tooltip
+    /// shape entirely (their `TAB_COMPLETE` is a bare `matches: string[]`),
+    /// so they always construct `None` here regardless of this field's
+    /// type; that is a real absence on the wire, not a flatten.
+    pub tooltip: Option<Text>,
 }
 
 /// Decode target for `minecraft:command_suggestions` (clientbound, id 15):

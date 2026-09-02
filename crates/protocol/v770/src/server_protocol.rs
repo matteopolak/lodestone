@@ -1761,7 +1761,11 @@ fn encode_commands_body(tree: &WireCommandTree) -> Vec<u8> {
 /// `start`, `length`), then a list of `Entry(String text, Optional<Component>
 /// tooltip)`. This server never attaches a tooltip to a suggestion — the
 /// `false` presence byte matches `CommandSuggestionEntry::tooltip` being
-/// `None` for every candidate `ServerCommands::suggest` produces.
+/// `None` for every candidate `ServerCommands::suggest` produces — so the
+/// `Some` arm below has no production caller today, but it encodes through
+/// [`command_suggestion_tooltip_nbt`] rather than a bare `{"text": ...}`
+/// compound precisely so a future caller that does attach a styled tooltip
+/// does not silently lose it the way the client-side decode used to.
 fn encode_command_suggestions_body(response: &CommandSuggestionsResponse) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(response.id);
@@ -1773,15 +1777,88 @@ fn encode_command_suggestions_body(response: &CommandSuggestionsResponse) -> Vec
         match &entry.tooltip {
             Some(tooltip) => {
                 w.bool(true);
-                let component =
-                    Nbt::Compound(vec![("text".to_owned(), Nbt::String(tooltip.clone()))]);
-                write_network_nbt(&mut w, &component)
-                    .expect("plain string NBT component always encodes");
+                write_network_nbt(&mut w, &command_suggestion_tooltip_nbt(tooltip))
+                    .expect("a command-suggestion tooltip built from a `Text` always encodes");
             }
             None => w.bool(false),
         }
     }
     w.into_vec()
+}
+
+/// Lowers a [`Text`] to a network-NBT chat component for the
+/// `minecraft:command_suggestions` tooltip field — the exact mirror of
+/// `V770Adapter::decode_command_suggestions`'s read side (`Text::from_nbt`),
+/// field for field: `text`/`translate`/`with`/`fallback`/`extra` plus every
+/// [`TextStyle`] field `lodestone_model::text::nbt_style` reads back
+/// (`color`, `bold`, `italic`, `underlined`, `strikethrough`, `obfuscated`,
+/// `font`).
+///
+/// Deliberately **not** [`text_to_nbt`]: that function is scoped to the
+/// disconnect-reason field alone and its own doc forbids reuse as a general
+/// serializer, precisely because it drops style — the one thing a command
+/// suggestion tooltip exists to carry (a hex colour has no legacy-code
+/// fallback). Click/hover/insertion are still omitted, matching
+/// [`text_to_nbt`]'s scope for the same reason: a tab-complete tooltip is a
+/// hover-only informational popup with no interactivity of its own to carry.
+fn command_suggestion_tooltip_nbt(text: &Text) -> Nbt {
+    let mut fields: Vec<(String, Nbt)> = Vec::new();
+    match &text.content {
+        TextContent::Literal(literal) => {
+            fields.push(("text".to_owned(), Nbt::String(literal.clone())));
+        }
+        TextContent::Translate {
+            key,
+            with,
+            fallback,
+        } => {
+            fields.push(("translate".to_owned(), Nbt::String(key.clone())));
+            if let Some(fallback) = fallback {
+                fields.push(("fallback".to_owned(), Nbt::String(fallback.clone())));
+            }
+            if !with.is_empty() {
+                fields.push((
+                    "with".to_owned(),
+                    Nbt::List {
+                        element_type: NbtTag::Compound,
+                        elements: with.iter().map(command_suggestion_tooltip_nbt).collect(),
+                    },
+                ));
+            }
+        }
+    }
+    let style = &text.style;
+    if let Some(color) = style.color {
+        fields.push(("color".to_owned(), Nbt::String(color.name())));
+    }
+    if let Some(bold) = style.bold {
+        fields.push(("bold".to_owned(), Nbt::Byte(bold as i8)));
+    }
+    if let Some(italic) = style.italic {
+        fields.push(("italic".to_owned(), Nbt::Byte(italic as i8)));
+    }
+    if let Some(underlined) = style.underlined {
+        fields.push(("underlined".to_owned(), Nbt::Byte(underlined as i8)));
+    }
+    if let Some(strikethrough) = style.strikethrough {
+        fields.push(("strikethrough".to_owned(), Nbt::Byte(strikethrough as i8)));
+    }
+    if let Some(obfuscated) = style.obfuscated {
+        fields.push(("obfuscated".to_owned(), Nbt::Byte(obfuscated as i8)));
+    }
+    if let Some(font) = style.font {
+        fields.push(("font".to_owned(), Nbt::String(font.name().to_owned())));
+    }
+    if !text.extra.is_empty() {
+        fields.push((
+            "extra".to_owned(),
+            Nbt::List {
+                element_type: NbtTag::Compound,
+                elements: text.extra.iter().map(command_suggestion_tooltip_nbt).collect(),
+            },
+        ));
+    }
+    Nbt::Compound(fields)
 }
 
 /// Hand-written encoder for the clientbound `system_chat` packet, which has no

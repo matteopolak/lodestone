@@ -181,6 +181,7 @@ use lodestone_command::{
 use lodestone_model::command_tree::{
     ArgumentParser, CommandSuggestionEntry, CommandTree, NodeKind, StringKind,
 };
+use lodestone_model::text::Text;
 
 /// Vanilla's cap on the recent-chat store — `new ArrayListDeque<>(100)` plus the
 /// `size() >= 100 → removeFirst()` guard in `ChatComponent.addRecentChat`.
@@ -644,7 +645,10 @@ pub struct Candidate {
     /// The literal replacement text.
     pub text: String,
     /// An optional tooltip, when the source (a server suggestion) had one.
-    pub tooltip: Option<String>,
+    /// Carried as a real [`Text`] rather than a flattened `§`-coded string so
+    /// a hex-coloured tooltip (`TextColor::Rgb`, added in 1.16) survives to
+    /// the draw site — see [`CommandSuggestionEntry::tooltip`]'s own doc.
+    pub tooltip: Option<Text>,
 }
 
 /// The result of [`complete`].
@@ -3291,12 +3295,12 @@ mod tests {
 
             let entries = vec![CommandSuggestionEntry {
                 text: "@a".to_string(),
-                tooltip: Some("all players".to_string()),
+                tooltip: Some(Text::literal("all players")),
             }];
             let received = requests.receive(id, entries).expect("current id honoured");
             assert_eq!(received.len(), 1);
             assert_eq!(received[0].text, "@a");
-            assert_eq!(received[0].tooltip.as_deref(), Some("all players"));
+            assert_eq!(received[0].tooltip, Some(Text::literal("all players")));
             assert!(!requests.is_pending());
         }
 

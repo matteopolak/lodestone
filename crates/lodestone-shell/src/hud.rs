@@ -40,7 +40,7 @@ use lodestone_render::{
 };
 
 use lodestone_assets::ItemAtlas;
-use lodestone_model::text::{TextColor, TextSpan, TextStyle};
+use lodestone_model::text::{Text, TextColor, TextSpan, TextStyle};
 
 use item_icon::{ColourStream, IconAssets, IconRenderer, IconSink, SpecialIconDraw};
 
@@ -4947,21 +4947,27 @@ fn draw_command_suggestions(
                 if !layout.contains(mx, my) {
                     continue;
                 }
-                let Some(text) = popup
+                // Via `Text::to_spans`, not `Text::to_legacy_string`: a
+                // server-sent tooltip can carry a hex colour
+                // (`TextColor::Rgb`), which the legacy flatten has no code
+                // for and would silently drop — see
+                // `CommandSuggestionEntry::tooltip`'s own doc.
+                let Some(spans) = popup
                     .candidates
                     .get(popup.selected)
-                    .and_then(|c| c.tooltip.as_deref())
+                    .and_then(|c| c.tooltip.as_ref())
+                    .map(Text::to_spans)
                 else {
                     continue;
                 };
                 let pad = 3.0 * pose_scale;
-                let tw = b.text_width(text, pose_scale);
+                let tw = b.spans_width(&spans, pose_scale);
                 let th = font::GLYPH_H as f32 * pose_scale;
                 // `renderTooltip`'s own offset from the cursor.
                 let tx = (mx + 12.0 * pose_scale).min((b.w - tw - pad * 2.0).max(0.0));
                 let ty = (my - 12.0 * pose_scale).max(0.0);
                 b.rect_px(tx, ty, tw + pad * 2.0, th + pad * 2.0, SUGGESTION_FILL);
-                b.text(text, tx + pad, ty + pad, pose_scale, [1.0, 1.0, 1.0, 1.0]);
+                b.text_spans(&spans, tx + pad, ty + pad, pose_scale, [1.0, 1.0, 1.0], 1.0);
             }
         }
     }

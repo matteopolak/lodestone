@@ -13,7 +13,8 @@ use lodestone_core::{Ctx, Encode, Reader, Writer};
 use lodestone_model::{
     AdapterError, AnimationAction, BossAction, BossColor, BossOverlay, ChatKind, ClientAction,
     ClientEvent, CollisionRule, ConnectionState, Difficulty, Directive, DisplaySlot, GameMode,
-    ObjectiveMode, ObjectiveRenderType, TeamAction, TeamColor, Vec3, VersionAdapter, Visibility,
+    ObjectiveMode, ObjectiveRenderType, TeamAction, TeamColor, Text, Vec3, VersionAdapter,
+    Visibility,
 };
 use lodestone_testsupport::assert_emits_set;
 use lodestone_v735::V735Adapter;
@@ -927,31 +928,28 @@ fn tab_complete_reply_reads_id_range_and_tooltips_straight_off_the_wire() {
             assert_eq!(suggestions[0].text, "Steve");
             assert_eq!(suggestions[0].tooltip, None);
             assert_eq!(suggestions[1].text, "Stella");
-            assert_eq!(suggestions[1].tooltip.as_deref(), Some("a player"));
+            assert_eq!(suggestions[1].tooltip, Some(Text::literal("a player")));
         }
         other => panic!("unexpected directives: {other:?}"),
     }
 }
 
-/// **Known, tracked bug (issue #656), pinned rather than silently left.**
+/// Regression test for a fixed bug: protocol 754 is Minecraft 1.16.5, which
+/// postdates 1.16's introduction of hex (`#rrggbb`) text colours, and a
+/// command-suggestion tooltip is a real JSON text component that can
+/// legitimately carry one. This decode arm used to flatten the tooltip
+/// through `Text::to_legacy_string()`, which has no legacy code for a hex
+/// colour and silently dropped it, leaving only the plain text behind.
 ///
-/// Protocol 754 is Minecraft 1.16.5, which postdates 1.16's introduction of
-/// hex (`#rrggbb`) text colours
-/// (`lodestone_model::text::TextColor::rgb`'s own doc: "a hex colour has no
-/// legacy code"). A tooltip here is a real JSON text component and can
-/// legitimately carry one, but `CommandSuggestionEntry::tooltip` is a plain
-/// `String`, so this decode arm has nowhere to put a colour except
-/// `Text::to_legacy_string()`, which drops any `TextColor::Rgb` outright.
-///
-/// This is real production behaviour today, not a hypothetical: it is
-/// asserted here so it cannot be "fixed" by an unrelated refactor without
-/// this test being noticed and updated. The actual fix needs
-/// `CommandSuggestionEntry::tooltip`'s type widened (to carry spans, or the
-/// raw `Text`) in `lodestone-model`, plus every protocol crate's
-/// construction site and every shell consumer updated to match — out of
-/// this crate's reach alone.
+/// `CommandSuggestionEntry::tooltip` is now a real
+/// [`lodestone_model::Text`] rather than a flattened `String`, and this
+/// decode arm keeps the value as `Text::from_json` produced it — no
+/// `to_legacy_string` call at all. `#1a2b3c` is deliberately a colour no
+/// legacy `§` code can express, so this cannot pass by accident: a
+/// regression back to the legacy flatten would report `TextColor`'s legacy
+/// fallback (or `None`), never `TextColor::Rgb(0x1a2b3c)`.
 #[test]
-fn tab_complete_reply_tooltip_hex_colour_is_lost_to_the_legacy_string_flatten() {
+fn tab_complete_reply_tooltip_hex_colour_survives_to_the_suggestion_entry() {
     let mut w = Writer::default();
     w.var_i32(1); // transaction id
     w.var_i32(0); // start
@@ -959,22 +957,20 @@ fn tab_complete_reply_tooltip_hex_colour_is_lost_to_the_legacy_string_flatten() 
     w.var_i32(1); // count
     w.string("op");
     w.bool(true);
-    w.string(r#"{"text":"admin","color":"#1a2b3c"}"#);
+    w.string(r##"{"text":"admin","color":"#1a2b3c"}"##);
 
     let directives = dispatch(play::clientbound::TAB_COMPLETE, &w.into_vec()).expect("handle");
     match directives.as_slice() {
         [Directive::Emit(ClientEvent::CommandSuggestionsReceived { suggestions, .. })] => {
             assert_eq!(suggestions.len(), 1);
             assert_eq!(suggestions[0].text, "op");
-            let tooltip = suggestions[0].tooltip.as_deref().expect("tooltip present");
+            let tooltip = suggestions[0].tooltip.as_ref().expect("tooltip present");
             assert_eq!(
-                tooltip, "admin",
-                "pinned known-bug value: the hex colour must be lost here today. If \
-                 this now differs (e.g. carries a `§` code or the assertion fails \
-                 because the field is no longer a `String`), the loss has been \
-                 fixed — update this test and `Text::to_legacy_string`'s doc, which \
-                 names this call site as the one open illegitimate caller."
+                tooltip.style.color,
+                Some(lodestone_model::text::TextColor::Rgb(0x1a2b3c)),
+                "the hex colour must survive to the suggestion entry, not just the text"
             );
+            assert_eq!(tooltip.content, lodestone_model::text::TextContent::Literal("admin".to_owned()));
         }
         other => panic!("unexpected directives: {other:?}"),
     }

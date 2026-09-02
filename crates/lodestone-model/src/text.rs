@@ -795,7 +795,7 @@ impl Text {
     /// literal in the tree's content is passed through unchanged rather than
     /// expanded and re-emitted.
     ///
-    /// # What this is for (issue #656)
+    /// # What this is for
     ///
     /// Two call shapes are legitimate; a third is a bug.
     ///
@@ -819,13 +819,11 @@ impl Text {
     /// puts on screen — is a bug: hex colours (`TextColor::Rgb`, added in
     /// 1.16) have no legacy code and silently vanish. Use
     /// [`to_spans`](Self::to_spans) and draw the spans instead. This was the
-    /// shape of two now-fixed production bugs (`styled_hover_name`'s tooltip
-    /// title/held-item draw sites, `ChatLog::recent`'s HUD draw path) and is
-    /// the shape of one still-open one (`v735`'s `TAB_COMPLETE` tooltip
-    /// decode flattens straight into `CommandSuggestionEntry::tooltip:
-    /// Option<String>`, which has no span-carrying representation to flatten
-    /// into instead — fixing it needs that field's type widened and every
-    /// protocol crate's construction site updated to match).
+    /// shape of three now-fixed production bugs (`styled_hover_name`'s
+    /// tooltip title/held-item draw sites, `ChatLog::recent`'s HUD draw
+    /// path, and `v735`'s `TAB_COMPLETE` tooltip decode, which used to
+    /// flatten straight into this call before `CommandSuggestionEntry::
+    /// tooltip` was widened to carry a real [`Text`] end to end).
     #[must_use]
     pub fn to_legacy_string(&self) -> String {
         let mut out = String::new();
