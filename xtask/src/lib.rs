@@ -6746,7 +6746,7 @@ fn path_is_generated_dir(relative: &Path) -> bool {
         .collect();
 
     if let [crates, protocol, _crate_name, src, generated] = components.as_slice() {
-        if *crates == "crates" && *protocol == "protocol" && *src == "src" && *generated == "generated"
+        if *crates == "crates" && *protocol == "versions" && *src == "src" && *generated == "generated"
         {
             return true;
         }
@@ -8929,7 +8929,7 @@ fn path_is_generated_packet_ids(relative: &Path) -> bool {
         components.as_slice(),
         [crates, protocol, _crate_name, src, generated, _file]
             if *crates == "crates"
-                && *protocol == "protocol"
+                && *protocol == "versions"
                 && *src == "src"
                 && *generated == "generated"
     )
@@ -11435,7 +11435,7 @@ fn handle_play(
         // `family != "v770"` filter is gone — the whole point of job 1a.
         assert_eq!(
             report.families.iter().map(|f| f.family.as_str()).collect::<Vec<_>>(),
-            vec!["v9", "v770"]
+            vec!["v9", "26.2"]
         );
         assert!(
             report.skipped.is_empty(),
@@ -11461,8 +11461,8 @@ fn handle_play(
         let family = report
             .families
             .iter()
-            .find(|family| family.family == "v770")
-            .expect("v770 fixture family exists");
+            .find(|family| family.family == "26.2")
+            .expect("26.2 fixture family exists");
         assert_eq!(family.play_clientbound_total, 5);
         assert_eq!(family.play_clientbound_reaches_consumer, 3);
         assert_eq!(family.play_clientbound_decoded, 4);
@@ -11488,7 +11488,7 @@ fn handle_play(
             )
         );
         assert!(report.render().contains(
-            "v770  clientbound decoded 4/5; emits 3/5; decoded-but-stranded 1 [SET_OBJECTIVE]"
+            "26.2  clientbound decoded 4/5; emits 3/5; decoded-but-stranded 1 [SET_OBJECTIVE]"
         ));
         assert!(!report.render().contains("consumed"));
         Ok(())
@@ -11501,7 +11501,7 @@ fn handle_play(
         // A third family directory matching the `vNN` naming convention but
         // missing `adapter.rs` — standing in for a family that has
         // bit-rotted past scannability. Before job 1a this test would have
-        // been moot (only v770 was ever scanned); now every `vNN` directory
+        // been moot (only the flagship family was ever scanned); now every family directory
         // is examined, so a family that can't be measured has to say so.
         std::fs::create_dir_all(workspace.join("crates/versions/v5/src/generated"))?;
         std::fs::write(
@@ -11516,7 +11516,7 @@ fn handle_play(
                 .iter()
                 .map(|f| f.family.as_str())
                 .collect::<Vec<_>>(),
-            vec!["v9", "v770"],
+            vec!["v9", "26.2"],
             "v5 has no adapter.rs and must be named as skipped, not silently absent"
         );
         assert_eq!(report.skipped.len(), 1);
@@ -11532,10 +11532,10 @@ fn handle_play(
     }
 
     /// Positive control for the `src/adapter/` directory-module shape
-    /// (v770's actual layout, split across `mod.rs` + submodules such as
+    /// (26.2's actual layout, split across `mod.rs` + submodules such as
     /// `chat.rs`). Before this was handled, `connectedness_report` only ever
     /// looked for a flat `src/adapter.rs`, so any family shaped like this —
-    /// v770 included, once its adapter grew past one file — was silently
+    /// 26.2 included, once its adapter grew past one file — was silently
     /// SKIPPED rather than scanned: the tool's own stated purpose
     /// ("Report v770 play packet reachability") was unmet by exactly the
     /// family it exists to check. This fixture also exercises cross-file
@@ -12751,7 +12751,7 @@ lodestone-v1 = { path = "../v1" }
                     "lodestone-client",
                     r#"
 [dependencies]
-lodestone-v1 = { path = "../protocol/v1" }
+lodestone-v1 = { path = "../versions/v1" }
 "#,
                 ),
             ],
@@ -12789,7 +12789,7 @@ lodestone-v1 = { path = "../protocol/v1" }
                     "lodestone-client",
                     r#"
 [dependencies]
-lodestone-v1 = { path = "../protocol/v1", optional = true }
+lodestone-v1 = { path = "../versions/v1", optional = true }
 
 [features]
 live-v1 = ["dep:lodestone-v1"]
@@ -12829,7 +12829,7 @@ live-v1 = ["dep:lodestone-v1"]
                     "lodestone-client",
                     r#"
 [dev-dependencies]
-lodestone-v1 = { path = "../protocol/v1" }
+lodestone-v1 = { path = "../versions/v1" }
 "#,
                 ),
             ],
@@ -13193,7 +13193,7 @@ reviewed = false
 role = "version-registry"
 
 [dependencies]
-lodestone-v1 = { path = "../protocol/v1", optional = true }
+lodestone-v1 = { path = "../versions/v1", optional = true }
 
 [features]
 v1 = ["dep:lodestone-v1"]
@@ -13235,7 +13235,7 @@ v1 = ["dep:lodestone-v1"]
 role = "version-registry"
 
 [dependencies]
-lodestone-v2 = { path = "../protocol/v2", optional = true }
+lodestone-v2 = { path = "../versions/v2", optional = true }
 "#,
                 ),
             ],
@@ -13477,7 +13477,7 @@ lodestone-v999 = { path = "../../crates/versions/v999" }
 role = "version-registry"
 
 [dependencies]
-lodestone-v1 = { path = "../protocol/v1" }
+lodestone-v1 = { path = "../versions/v1" }
 "#,
                 ),
             ],
@@ -13518,7 +13518,7 @@ lodestone-v1 = { path = "../protocol/v1" }
 role = "version-registry"
 
 [dependencies]
-lodestone-v1 = { path = "../protocol/v1", optional = true }
+lodestone-v1 = { path = "../versions/v1", optional = true }
 
 [features]
 v1 = ["dep:lodestone-v1"]
@@ -13529,7 +13529,7 @@ v1 = ["dep:lodestone-v1"]
                     "lodestone-client",
                     r#"
 [dependencies]
-lodestone-v1 = { path = "../protocol/v1", optional = true }
+lodestone-v1 = { path = "../versions/v1", optional = true }
 
 [features]
 live-v1 = ["dep:lodestone-v1"]
@@ -13572,7 +13572,7 @@ live-v1 = ["dep:lodestone-v1"]
                     "lodestone-client",
                     r#"
 [dependencies]
-lodestone-v1 = { path = "../protocol/v1", optional = true }
+lodestone-v1 = { path = "../versions/v1", optional = true }
 
 [features]
 live-v1 = ["dep:lodestone-v1"]
@@ -13612,7 +13612,7 @@ live-v1 = ["dep:lodestone-v1"]
                     "lodestone-client",
                     r#"
 [dependencies]
-lodestone-v1 = { path = "../protocol/v1" }
+lodestone-v1 = { path = "../versions/v1" }
 "#,
                 ),
             ],
@@ -13685,7 +13685,7 @@ compat = ["dep:lodestone-v1"]
                     "lodestone-registry",
                     r#"
 [dependencies]
-lodestone-v1 = { path = "../protocol/v1", optional = true }
+lodestone-v1 = { path = "../versions/v1", optional = true }
 
 [features]
 v1 = ["dep:lodestone-v1"]
@@ -13758,7 +13758,7 @@ live-v1 = ["lodestone-registry/v1"]
                 (
                     "crates/lodestone-registry",
                     "lodestone-registry",
-                    "[package.metadata.lodestone-isolation]\nrole = \"version-registry\"\n\n[dependencies]\nlodestone-v1 = { path = \"../protocol/v1\", optional = true }\n\n[features]\nv1 = [\"dep:lodestone-v1\"]\n",
+                    "[package.metadata.lodestone-isolation]\nrole = \"version-registry\"\n\n[dependencies]\nlodestone-v1 = { path = \"../versions/v1\", optional = true }\n\n[features]\nv1 = [\"dep:lodestone-v1\"]\n",
                 ),
             ],
         )?;
