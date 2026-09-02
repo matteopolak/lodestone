@@ -14416,7 +14416,7 @@ where
                 // not otherwise track (see `crate::vitals`'s module docs).
                 if let Some((x, y, z)) = player_pos {
                     // Issue #326 B1: border damage, applied *before* the
-                    // submersion test — vanilla's `LivingEntity.baseTick` runs
+                    // submersion test — vanilla's own base-tick routine runs
                     // the border `else if` ahead of the water-breath block.
                     // Snapshot the border once
                     // per timer tick and ask it for the damage the tracked
@@ -14551,7 +14551,7 @@ where
                 // reads it first). `MiningFatigueAura`'s own doc comment names
                 // both obligations this drains: the effect application and the
                 // `GUARDIAN_ELDER_EFFECT` game event (kind `10`,
-                // `ClientboundGameEventPacket.GUARDIAN_ELDER_EFFECT` — read
+                // vanilla's own game-event packet constant — read
                 // from the jar, not guessed).
                 if matches!(game_mode, GameMode::Survival | GameMode::Adventure) {
                     for aura in mobs.with(|sim| sim.take_mining_fatigue_auras()) {
@@ -14584,7 +14584,7 @@ where
 
                 // Burning. The ignition producer and the burn consumer in one place,
                 // because both need the same feet-cell read — vanilla splits them
-                // (`BaseFireBlock.entityInside` ignites, `Entity.baseTick` consumes)
+                // (its own fire-block entity-inside routine ignites, its own base-tick routine consumes)
                 // only because the block and the entity are different objects.
                 //
                 // The **feet** cell, not the eye: `entityInside` fires for any cell the
@@ -14615,7 +14615,7 @@ where
                         && !creative
                     {
                         match source_kind {
-                            // `BaseFireBlock.fireIgnite` — the player ramp, which is
+                            // Vanilla's own fire-block ignite routine — the player ramp, which is
                             // why running across one fire block can leave you unburnt.
                             // One draw per contact tick, from this connection's own
                             // stream.
@@ -14624,7 +14624,7 @@ where
                                 let ramp = 1 + i32::from(burn_rng.next_f32() < 0.5);
                                 burn.fire_ignite(true, ramp);
                             }
-                            // `Entity.lavaIgnite` — a flat 15 seconds, no ramp.
+                            // Vanilla's own entity lava-ignite routine — a flat 15 seconds, no ramp.
                             crate::burning::BurnSource::Lava => {
                                 burn.ignite_for_ticks(crate::burning::LAVA_IGNITE_TICKS);
                             }
