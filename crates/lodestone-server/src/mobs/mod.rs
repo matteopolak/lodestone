@@ -3394,8 +3394,8 @@ pub struct MobSim<'w> {
     /// weighted selection, on its own stream for the same isolation reason
     /// [`zombie_conversion_rng`](Self::zombie_conversion_rng) is separate.
     gossip_spread_rng: SpawnRng,
-    /// The `random.nextInt(7) + 1` draw
-    /// `Animal.finalizeSpawnChildFromBreeding` makes for the experience orb a
+    /// The `random.nextInt(7) + 1` draw vanilla's own
+    /// post-breeding child-finalization step makes for the experience orb a
     /// successful mating pops, on its own stream for [`tame_rng`](Self::tame_rng)'s
     /// reason: a breeding event must not shift which roll a tame attempt sees.
     breed_rng: SpawnRng,
@@ -3853,9 +3853,9 @@ pub struct PlayerHit {
     pub attacker_pos: Vec3,
 }
 
-/// One `Zombie.hurtServer` reinforcement roll that passed — the *decision*
-/// only. `Zombie.hurtServer` then searches up to 50 candidate positions
-/// against the live world for a valid one (`SpawnPlacements.isSpawnPositionOk`,
+/// One vanilla zombie hurt-handler reinforcement roll that passed — the *decision*
+/// only. Vanilla's own hurt-handler then searches up to 50 candidate positions
+/// against the live world for a valid one (vanilla's own spawn-position-ok check,
 /// no player within 7 blocks, unobstructed, no collision, no liquid unless
 /// the species tolerates it) and only spawns if one is found; this sim holds
 /// no live world (`world: &'w ChunkWorld` is an immutable borrow, same reason
@@ -3864,47 +3864,48 @@ pub struct PlayerHit {
 /// [`take_reinforcement_calls`](MobSim::take_reinforcement_calls).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReinforcementCall {
-    /// The calling zombie's position — `Mth.floor(this.getX()/Y/Z)`, the
+    /// The calling zombie's position — a per-axis floor of its own position, the
     /// search's own origin.
     pub position: Vec3,
-    /// The reinforcement's own entity type — always the caller's own type
-    /// (`this.getType()`), so a husk calls in a husk and so on.
+    /// The reinforcement's own entity type — always the caller's own type,
+    /// so a husk calls in a husk and so on.
     pub entity_type: ResourceKey,
     /// Who the reinforcement should target on arrival — the caller's own
     /// current attack target if it has one, else the attacker that just hit
-    /// it (`Zombie.hurtServer`'s own `target == null` fallback).
+    /// it (vanilla's own hurt-handler's own "no live target" fallback).
     pub target_id: i32,
 }
 
-/// `ElderGuardian.EFFECT_INTERVAL` — the aura's cadence in ticks
-/// (`ElderGuardian.customServerAiStep`'s `(tickCount + getId()) % 1200 == 0`).
+/// Vanilla's own elder-guardian effect-interval constant — the aura's cadence in ticks
+/// (vanilla's own AI step gates on `(tickCount + getId()) % 1200 == 0`).
 ///
-/// This sim tracks no per-mob `Entity.tickCount` (only [`SimMob::age`], which
+/// This sim tracks no per-mob generic tick-count field (only [`SimMob::age`], which
 /// is the *growth* timer, and [`MobSim::tick_count`], the world's own tick
 /// counter) — the same substitution [`bee_sting_death_roll`]'s own doc
 /// already uses `tick_count` for. Mixing the world tick with the mob's id
-/// keeps the same per-mob stagger vanilla's `getId()` offset gives (two elder
+/// keeps the same per-mob stagger vanilla's own entity-id offset gives (two elder
 /// guardians spawned on the same tick still pulse on different ticks), and
 /// the periodicity is unaffected by the offset between "ticks this world has
 /// run" and "ticks since this particular mob was created" — both are exact
 /// multiples of `ELDER_GUARDIAN_EFFECT_INTERVAL` apart.
 const ELDER_GUARDIAN_EFFECT_INTERVAL: u64 = 1200;
 
-/// `ElderGuardian.EFFECT_RADIUS` blocks — spherical, `Vec3.closerThan` in
-/// `MobEffectUtil.addEffectToPlayersAround`, not a box.
+/// Vanilla's own elder-guardian effect-radius constant, in blocks — spherical,
+/// a distance check in vanilla's own "add effect to players around" helper,
+/// not a box.
 pub const ELDER_GUARDIAN_EFFECT_RADIUS: f64 = 50.0;
 
-/// `ElderGuardian.EFFECT_DURATION` ticks — how long each pulse's
+/// Vanilla's own elder-guardian effect-duration constant, in ticks — how long each pulse's
 /// `minecraft:mining_fatigue` application lasts.
 pub const ELDER_GUARDIAN_EFFECT_DURATION: i32 = 6000;
 
-/// `ElderGuardian.EFFECT_AMPLIFIER` — Mining Fatigue III (0-indexed amplifier
+/// Vanilla's own elder-guardian effect-amplifier constant — Mining Fatigue III (0-indexed amplifier
 /// `2`).
 pub const ELDER_GUARDIAN_EFFECT_AMPLIFIER: u32 = 2;
 
 /// One player caught in an elder guardian's mining-fatigue pulse this tick —
-/// `ElderGuardian.customServerAiStep` calling
-/// `MobEffectUtil.addEffectToPlayersAround`, for
+/// vanilla's own elder-guardian AI step calling
+/// its own "add effect to players around" helper, for
 /// [`take_mining_fatigue_auras`](MobSim::take_mining_fatigue_auras) to hand a
 /// driver. The same handoff shape as [`PlayerHit`] above and for the
 /// identical reason: this sim owns no connection, so it can neither reach a
@@ -3915,8 +3916,8 @@ pub const ELDER_GUARDIAN_EFFECT_AMPLIFIER: u32 = 2;
 ///
 /// For each returned identity, whose gamemode the driver — not this sim,
 /// which tracks no gamemode — must confirm is survival (or adventure;
-/// `GameType.isSurvival()`'s own definition) before doing either of the
-/// following, per `MobEffectUtil.addEffectToPlayersAround`:
+/// vanilla's own "is survival" check's own definition) before doing either of the
+/// following, per vanilla's own "add effect to players around" helper:
 ///
 /// * Call `ActiveEffects::apply("minecraft:mining_fatigue",
 ///   `[`ELDER_GUARDIAN_EFFECT_DURATION`]`, `[`ELDER_GUARDIAN_EFFECT_AMPLIFIER`]`)`.
@@ -3924,15 +3925,15 @@ pub const ELDER_GUARDIAN_EFFECT_AMPLIFIER: u32 = 2;
 ///   already implement vanilla's redundant-application guard, so this list is
 ///   **not** pre-filtered by the target's current effect — every player
 ///   within radius is reported every pulse, exactly as
-///   `addEffectToPlayersAround`'s own player query is unconditional on the
+///   vanilla's own helper's player query is unconditional on the
 ///   *distance* clause and only the effect clause is conditional.
 /// * Send that player's connection a `GUARDIAN_ELDER_EFFECT` game event
-///   (`ClientboundGameEventPacket`), the screen-darkening warning — vanilla's
-///   own `isSilent() ? 0.0F : 1.0F` parameter has no sim-side equivalent
+///   (vanilla's own generic game-event packet), the screen-darkening warning — vanilla's
+///   own "silent ? 0.0 : 1.0" parameter has no sim-side equivalent
 ///   (silence is a per-mob NBT flag this sim does not model for elder
 ///   guardians), so the driver should send `1.0`.
 ///
-/// This sim deliberately does **not** replicate `!source.isAlliedTo(input)`:
+/// This sim deliberately does **not** replicate vanilla's own "is allied to" check:
 /// nothing in this codebase gives a mob a scoreboard team, so every survival
 /// player in range is always a valid target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3961,10 +3962,12 @@ pub struct ProjectileBlockHit {
     /// `crate::redstone_target::redstone_strength`'s own `hit_axis` parameter.
     pub axis: crate::redstone_target::HitAxis,
     /// The hit point's fractional position within the cell, each in `[0.0,
-    /// 1.0]` — `Mth.frac(hitLocation.{x,y,z})`.
+    /// 1.0]` — vanilla's own per-axis fractional-part helper applied to the
+    /// hit location.
     pub frac: Vec3,
     /// Whether the projectile was an arrow (`redstone_target::activation_duration`'s
-    /// 20-vs-8-tick split) — `AbstractArrow`, not `SpectralArrow`/`Trident`
+    /// 20-vs-8-tick split) — the base arrow entity, not the spectral arrow or
+    /// trident,
     /// carrying their own subclass distinctions this sim does not model; see
     /// [`resolve_projectile_impacts`](MobSim::resolve_projectile_impacts) for
     /// exactly which registry paths set this.
@@ -4102,8 +4105,8 @@ impl<'w> MobSim<'w> {
         self
     }
 
-    /// `level.isSpawningMonsters()` — the `spawn_mobs` game rule, gating
-    /// [`attack`](Self::attack)'s `Zombie.hurtServer` reinforcement roll
+    /// Vanilla's own "is spawning monsters" check — the `spawn_mobs` game rule, gating
+    /// [`attack`](Self::attack)'s zombie hurt-handler reinforcement roll
     /// alongside [`set_spawn_difficulty`](Self::set_spawn_difficulty)'s
     /// `hard` flag. `false` by default, matching every other spawn-difficulty
     /// input here: an unwired caller sees zero reinforcements rather than
@@ -4235,7 +4238,7 @@ impl<'w> MobSim<'w> {
     /// matter how many times it had been bought.
     ///
     /// On success, feeds the trade's xp reward into
-    /// [`SimMob::give_villager_xp`] — vanilla's `Villager.notifyTrade` path,
+    /// [`SimMob::give_villager_xp`] — vanilla's own "notify trade" path,
     /// also previously unreached, which is why no villager could level up.
     /// Returns `None` — nothing mutated — for an unknown mob/villager, an
     /// out-of-range index, or a refused (out-of-stock/unsatisfied) offer.
@@ -4321,8 +4324,8 @@ impl<'w> MobSim<'w> {
 
     /// The position of the player with this identity's uuid, if they are in the
     /// current player list — the resolution vanilla's
-    /// `EntityReference.get(…, ServerLevel, …)` performs for
-    /// `TamableAnimal.getOwner()`.
+    /// own entity-reference resolver performs for
+    /// its own tamed-animal owner getter.
     ///
     /// Keyed on the **uuid**, never on the entity id, for the reason
     /// [`PlayerIdentity`] gives: the entity id is reassigned per session, so a
