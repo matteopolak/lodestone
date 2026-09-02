@@ -537,11 +537,15 @@ struct FramedMapProjectionSnapshot {
     /// is paired correctly whatever the turn is.
     ///
     /// Read it against `docs/coplanar-overlay-depth.md`: the picture's own
-    /// polygon offset is worth `-20` values plus an unbounded slope term, so a
+    /// polygon offset is worth `20` values plus an unbounded slope term, so a
     /// margin of `-20` or worse at the centre means the picture is losing on
     /// geometry rather than on rounding. A margin comfortably above zero while
     /// the picture is visibly missing means the world pose is fine and
     /// something else owns those pixels.
+    ///
+    /// Under the reversed-Z projection the shipped `1.01 / 128` clearance is
+    /// worth thousands of these at every ordinary viewing distance, so a
+    /// *small* margin here is now itself the finding.
     centre_depth_ulp_margin: f32,
     points: [FramedMapProjectionPoint; 5],
 }
@@ -557,16 +561,18 @@ fn depth_ulp(value: f32) -> f32 {
 /// Signed separation of two window-space depths in representable values,
 /// positive when `map_clip` is nearer the eye than `comparison_clip`.
 ///
-/// Both are `[0, 1]` forward depths, so "nearer" is "smaller" — the opposite of
-/// vanilla's reversed-Z convention, which is why this returns
-/// `comparison - map` rather than the other way round.
+/// Both are reversed-Z `[0, 1]` depths, so "nearer" is "**greater**" — the same
+/// convention vanilla uses — which is why this returns `map - comparison`. This
+/// is a diagnostic the owner reads a *sign* off, so getting the direction
+/// backwards does not make it noisy, it makes it lie: a healthy picture would
+/// report as buried in its wall.
 fn depth_ulp_margin(map_clip: [f32; 4], comparison_clip: [f32; 4]) -> f32 {
     if map_clip[3] <= 0.0 || comparison_clip[3] <= 0.0 {
         return f32::NAN;
     }
     let map_depth = map_clip[2] / map_clip[3];
     let comparison_depth = comparison_clip[2] / comparison_clip[3];
-    (comparison_depth - map_depth) / depth_ulp(comparison_depth)
+    (map_depth - comparison_depth) / depth_ulp(comparison_depth)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -815,7 +821,9 @@ fn framed_map_projection(
         }
         let map_depth = point.map_clip[2] / point.map_clip[3];
         let comparison_depth = point.comparison_clip[2] / point.comparison_clip[3];
-        if map_depth < comparison_depth {
+        // Reversed-Z: nearer the eye is the *greater* depth. See
+        // `depth_ulp_margin`.
+        if map_depth > comparison_depth {
             map_in_front_mask |= 1 << index;
         }
     }
