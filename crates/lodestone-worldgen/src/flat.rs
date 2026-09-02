@@ -1,15 +1,15 @@
-//! Superflat world generation — issue #519's third missing generator, after
+//! Superflat world generation — this change's third missing generator, after
 //! `WorldType::{Amplified,LargeBiomes}` landed as pure wiring onto
 //! [`crate::overworld::OverworldGenerator`].
 //!
 //! Deliberately its own tiny [`FlatLevelSource`], not a degenerate
 //! `OverworldGenerator`: a flat world has no noise router, no biome climate
-//! sampling and no carvers (`FlatLevelSource.applyCarvers` is an empty
-//! override in vanilla — `FlatLevelSource.java`, package
-//! `net.minecraft.world.level.levelgen`), so composing it out of the
+//! sampling and no carvers (vanilla's own flat-level-source apply-carvers is
+//! an empty
+//! override in vanilla), so composing it out of the
 //! overworld pipeline would carry stages that do not apply to a flat world
 //! and could silently produce non-flat terrain under a flat world's name —
-//! the exact trap issue #519's own doc names ("a selection that silently
+//! the exact trap this change's own doc names ("a selection that silently
 //! produces ordinary terrain under a preset's name is worse than an absent
 //! option").
 //!
@@ -17,15 +17,15 @@
 //!
 //! **Ported**: the layer stack (`FlatLayerInfo`/`FlatLevelGeneratorSettings`,
 //! same package as `FlatLevelSource`) and the block field it produces, which
-//! is a flat world's entire defining behaviour — `fillFromNoise`/
-//! `getBaseColumn` place exactly this stack and nothing else generates the
+//! is a flat world's entire defining behaviour — vanilla's own fill and
+//! base-column queries place exactly this stack and nothing else generates the
 //! raw terrain. A flat world is therefore **fully determined** by its
 //! settings: no seed, no RNG, the same column at every `(x, z)`.
 //!
-//! **Not ported (documented, not silently dropped)**: vanilla's
-//! `adjustGenerationSettings` splices `features`/`lakes` into the *biome's
+//! **Not ported (documented, not silently dropped)**: vanilla's own
+//! adjust-generation-settings routine splices `features`/`lakes` into the *biome's
 //! own* decoration list (grass, flowers, lava lakes — real biome-decoration
-//! feature placement) and `createState` filters world structure sets by
+//! feature placement) and its own create-state routine filters world structure sets by
 //! `structure_overrides`. Both are decoration layered *on top of* the
 //! deterministic block field, not the field itself, so a preset with
 //! `"features": true` (e.g. `overworld`, `desert`, `tunnelers_dream`) still
@@ -47,7 +47,7 @@
 use serde_json::Value;
 
 /// One layer of a flat preset's `layers` list, before height-expansion —
-/// `FlatLayerInfo` (`net.minecraft.world.level.levelgen.flat.FlatLayerInfo`).
+/// vanilla's own per-layer record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatLayer {
     /// Registry id, e.g. `"minecraft:dirt"` — `FlatLayerInfo`'s `block`.
@@ -65,8 +65,9 @@ pub struct FlatLayer {
 /// (absent-field) world indistinguishable at exactly the case that matters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StructureOverrides {
-    /// The field was absent from the document. `FlatLevelSource.createState`
-    /// then falls back to `structureSets.listElements()` — every registered
+    /// The field was absent from the document. Vanilla's own flat-level-source
+    /// create-state routine
+    /// then falls back to every element of the structure-sets registry — every registered
     /// structure set — which this crate does not carry the registry to
     /// enumerate; a consumer wiring structures into a flat world must supply
     /// that full set itself when it sees this variant.
@@ -77,8 +78,8 @@ pub enum StructureOverrides {
     Explicit(Vec<String>),
 }
 
-/// A flat preset's settings — `FlatLevelGeneratorSettings`
-/// (`net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings`),
+/// A flat preset's settings — vanilla's own flat-level-generator-settings
+/// record,
 /// parsed straight off the bundled JSON shape (`{biome, features, lakes,
 /// layers, structure_overrides}`) shared by both a
 /// `flat_level_generator_preset/<id>`'s `.settings` object and a
@@ -108,8 +109,8 @@ impl FlatLevelGeneratorSettings {
     ///
     /// Missing `biome`/`features`/`lakes` take vanilla's own codec defaults
     /// (`minecraft:plains`, `false`, `false` —
-    /// `FlatLevelGeneratorSettings.CODEC`'s `lenientOptionalFieldOf`/
-    /// `optionalAlwaysPresentFieldOf`); a missing or malformed `layers` entry
+    /// vanilla's own settings codec's own lenient-optional and
+    /// always-present-optional field wrappers); a missing or malformed `layers` entry
     /// is dropped rather than panicking, matching this crate's
     /// `Resolver`-adjacent convention of "no data" over an abort — a caller
     /// that needs to know the parse was incomplete has
@@ -235,8 +236,9 @@ impl FlatColumn {
     }
 
     /// Canonical state at world `y`. `"minecraft:air"` above the layer stack
-    /// or below `min_y` — mirrors `FlatLevelSource::getBaseColumn`'s `null`
-    /// → `Blocks.AIR.defaultBlockState()` substitution.
+    /// or below `min_y` — mirrors vanilla's own flat-level-source
+    /// base-column query's `null`
+    /// → default-air-state substitution.
     #[must_use]
     pub fn block_state(&self, y: i32) -> &str {
         let row = y - self.min_y;
@@ -273,8 +275,7 @@ impl FlatColumn {
 }
 
 /// A superflat generator built from one [`FlatLevelGeneratorSettings`] plus
-/// the dimension's vertical bounds — `FlatLevelSource`
-/// (`net.minecraft.world.level.levelgen.FlatLevelSource`).
+/// the dimension's vertical bounds — vanilla's own flat-level-source type.
 ///
 /// Unlike [`crate::overworld::OverworldGenerator`] this needs no seed and no
 /// [`crate::density::Resolver`]: nothing about a flat world's raw terrain is
@@ -294,9 +295,10 @@ pub struct FlatLevelSource {
 impl FlatLevelSource {
     /// Builds the generator. `min_y`/`height` are the *dimension's* vertical
     /// bounds (e.g. -64/384 for the overworld), not a property of the
-    /// settings — vanilla's own `FlatLevelSource::getMinY`/`getGenDepth`
+    /// settings — vanilla's own flat-level-source min-Y/gen-depth queries
     /// hardcode 0/384 as an unrelated `ChunkGenerator` abstract-method
-    /// answer; the actual placement in `fillFromNoise`/`getBaseColumn` is
+    /// answer; the actual placement in vanilla's own fill and base-column
+    /// queries is
     /// always relative to the height accessor (dimension) it is handed, which
     /// is why this constructor takes the bounds explicitly rather than
     /// guessing them from the settings.
