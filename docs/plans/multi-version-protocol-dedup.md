@@ -544,3 +544,50 @@ overrides remain per gate until `legacy.sh` standardises them.
 `lodestone-testsupport`; `xtask` (`gen-packet-ids`, `connectedness`, `check-isolation`,
 `check-deletable`, `islands`, `new-version`); Apple `container` for every oracle; `.cache/mc/<ver>`
 jars (12 of 16 present) and `vendor/minecraft-data` (cross-check only).
+
+## Decisions taken
+
+The four open decisions above are now settled. Recorded here so a later stage does not
+re-litigate them.
+
+**1. Era grouping threshold: ≥85%, as proposed.** Ten era crates for sixteen versions. 1.13.2
+keeps its own crate — 73% is below threshold and it carries light-in-chunk, so folding it into
+`v498`'s era would put a real discontinuity inside one crate.
+
+**2. Crate naming: the lowest *Minecraft version* an era serves, not its protocol number.** The
+owner's reasoning: nobody reads a protocol number at a glance, and the crate name's job is to say
+which game an era covers. Directory and package names use an underscore, since a Rust package name
+cannot carry a dot:
+
+| today | becomes | serves |
+|---|---|---|
+| `v47` | `v1_8` | 1.8.9 |
+| `v340` | `v1_9` | 1.9.4 · 1.10.2 · 1.11.2 · 1.12.2 |
+| — | `v1_13` | 1.13.2 |
+| `v735` | `v1_14` | 1.14.4 · 1.15.2 · 1.16.5 |
+| — | `v1_17` | 1.17.1 · 1.18.2 |
+| — | `v1_19` | 1.19.4 |
+| — | `v1_20` | 1.20.6 |
+| `v770` | `v1_21` or `v26_2` | 1.21.11 and/or 26.2 — see decision 2b |
+| — | `v1_7` | 1.7.10 |
+
+This replaces the plan's earlier "lowest protocol served" suggestion (`v110`, `v498`, `v774`)
+everywhere it appears above; read those names as the Minecraft-version equivalents. It also
+resolves the inconsistency that motivated the question: `v735` never spoke protocol 735, and no
+scheme keyed on a protocol number survives a folder name that is not the protocol.
+
+**2b. Whether 26.2's crate absorbs 1.21.11 is still open, but it is now a measurement, not a
+decision.** Run Mojang's `--reports` on `.cache/mc/1.21.11/server.jar` under `container`, diff
+`packets.json` ids against 26.2's, then diff the decompiled packet classes for the shared ids.
+Below 85% they are two crates (`v1_21` and `v26_2`); at or above, one crate named `v1_21`. Take
+this measurement before stage 6, since it decides whether that stage carries a rename.
+
+**3. One `lodestone-protocol-common` crate, not a legacy/modern split.** A split would need a
+boundary drawn at a version, and the whole point of a container-level protocol range is that the
+boundary is per packet rather than per crate. If one crate later proves unwieldy, splitting it is
+mechanical; merging two is not.
+
+**4. Item canonicalisation happens *after* stage 4.** It is unbuilt under both the old and new
+regimes, so it is not a regression either way, and stage 4 is the calibration measurement for the
+whole payoff estimate — putting unrelated new work in front of it would delay the one number that
+can falsify this plan.
