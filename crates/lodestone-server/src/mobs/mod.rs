@@ -10133,7 +10133,8 @@ const PATROL_SPAWN_SEED: u64 = 0x5041_5452_4f4c_5f52;
 /// it is separate.
 const EQUIPMENT_ROLL_SEED: u64 = 0x4551_5549_505f_524f;
 
-/// Default seed for [`MobSim::goat_horn_rng`] — `Goat.finalizeSpawn`'s own
+/// Default seed for [`MobSim::goat_horn_rng`] — vanilla's own goat
+/// spawn-finalization's own
 /// pre-broken-horn roll. See [`TAME_ROLL_SEED`] for why it is separate.
 /// ASCII `"GOATHORN"`.
 const GOAT_HORN_ROLL_SEED: u64 = 0x474F_4154_484F_524E;
@@ -10150,14 +10151,14 @@ const REINFORCEMENT_ROLL_SEED: u64 = 0x5245_494E_464F_5243;
 /// for why it is separate. ASCII `"GATEWAYS"`.
 const GATEWAY_SHUFFLE_SEED: u64 = 0x4741_5445_5741_5953;
 
-/// `Zombie.hurtServer`'s own local (`existingAmount - 0.05`) — the permanent
+/// Vanilla's own zombie hurt-handler's own local (`existingAmount - 0.05`) — the permanent
 /// amount subtracted from the caller's own `SPAWN_REINFORCEMENTS_CHANCE`
 /// base each time it successfully calls one in, so a single zombie cannot
 /// call in an unbounded chain every tick it stays hurt.
 const ZOMBIE_REINFORCEMENT_CALLER_CHARGE: f64 = 0.05;
 
-/// `Zombie.ZOMBIE_REINFORCEMENT_CALLEE_CHARGE`'s amount (`-0.05F`,
-/// `ADD_VALUE`) — see
+/// Vanilla's own zombie reinforcement-callee-charge constant's amount (`-0.05F`,
+/// as an add-value attribute modifier) — see
 /// [`SimMob::apply_reinforcement_callee_charge`]'s own doc.
 const ZOMBIE_REINFORCEMENT_CALLEE_CHARGE: f64 = 0.05;
 
@@ -10172,9 +10173,9 @@ const ZOMBIE_REINFORCEMENT_CALLEE_CHARGE: f64 = 0.05;
 /// vanilla formula.
 const PATROL_TIMELINE_GATE: u64 = 120_000;
 
-/// Vanilla `WanderingTraderSpawner`'s own constants —
-/// `DEFAULT_TICK_DELAY`/`DEFAULT_SPAWN_DELAY`/`MIN_SPAWN_CHANCE`/
-/// `MAX_SPAWN_CHANCE`/`SPAWN_CHANCE_INCREASE`.
+/// Vanilla's own wandering-trader spawner's own constants —
+/// default tick-delay/default spawn-delay/min-spawn-chance/
+/// max-spawn-chance/spawn-chance-increase.
 const WANDERING_TRADER_TICK_DELAY: i32 = 1200;
 const WANDERING_TRADER_SPAWN_DELAY: i32 = 24_000;
 const WANDERING_TRADER_MIN_SPAWN_CHANCE: i32 = 25;
@@ -10206,8 +10207,9 @@ fn within_box(a: Vec3, b: Vec3, reach: f64) -> bool {
     (a.x - b.x).abs() < reach && (a.y - b.y).abs() < reach && (a.z - b.z).abs() < reach
 }
 
-/// Vanilla `Player.getEyeHeight()` for a standing player — `EntityDimensions`'
-/// `eyeHeight` for `EntityType.PLAYER`, `1.62`.
+/// Vanilla's own player eye-height getter for a standing player — the
+/// player entity type's own dimensions table's
+/// eye-height value, `1.62`.
 ///
 /// Used only for `followNearbyPlayer`'s aim point, which is *half* this above the
 /// player's feet.
@@ -10566,10 +10568,10 @@ fn surface_y(world: &ChunkWorld, x: i32, z: i32) -> Option<i32> {
     (world.min_y..=top).rev().find(|&y| world.is_solid(x, y, z))
 }
 
-/// Approximates `AbstractRaid`-free `getCurrentDifficultyAt(pos)
-/// .getEffectiveDifficulty()` for [`MobSim::run_patrol_spawn_cycle`]'s group
+/// Approximates vanilla's own no-active-raid "current difficulty at
+/// position, effective difficulty" formula for [`MobSim::run_patrol_spawn_cycle`]'s group
 /// size, `(int) Math.ceil(effectiveDifficulty) + 1`
-/// (`level/levelgen/PatrolSpawner.java:40`).
+/// (vanilla's own patrol-spawner group-size formula).
 ///
 /// Vanilla's effective difficulty is a continuous value accumulated per
 /// region over real playtime plus the current moon phase
