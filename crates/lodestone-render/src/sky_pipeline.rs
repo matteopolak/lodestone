@@ -316,9 +316,10 @@ const CLOUD_WGSL: &str = include_str!("shaders/sky_cloud.wgsl");
 // Pipelines
 // ---------------------------------------------------------------------------
 
-/// Vanilla's `BlendFunction.OVERLAY` (`.cache/mc/26.2/client-src/com/mojang/blaze3d/pipeline/BlendFunction.java`),
+/// Vanilla's `BlendFunction.OVERLAY` (26.2's decompiled blend-function
+/// declaration),
 /// which `RenderPipelines.CELESTIAL` and `.STARS` both use
-/// (`RenderPipelines.java`): colour is `src.rgb * src.a + dst.rgb` — additive,
+/// (vanilla's render-pipeline registration table): colour is `src.rgb * src.a + dst.rgb` — additive,
 /// weighted by the fragment's own alpha, with the destination **not**
 /// attenuated (`dst_factor: One`, not `OneMinusSrcAlpha` as ordinary alpha
 /// blending would use).
@@ -351,7 +352,7 @@ const CELESTIAL_BLEND: wgpu::BlendState = wgpu::BlendState {
 };
 
 /// Vanilla's `BlendFunction.TRANSLUCENT`, which `CLOUDS_SNIPPET` uses for both
-/// cloud pipelines (`RenderPipelines.java:106-113`): ordinary
+/// cloud pipelines (its render-pipeline registration table): ordinary
 /// `SrcAlpha`/`OneMinusSrcAlpha` compositing.
 ///
 /// The cloud pipeline was **opaque** (`blend: None`), which made
@@ -422,7 +423,7 @@ fn build_pipeline(
 }
 
 /// Vanilla's `BlendFunction.TRANSLUCENT`
-/// (`.cache/mc/26.2/client-src/com/mojang/blaze3d/pipeline/BlendFunction.java`),
+/// (26.2's decompiled blend-function declaration),
 /// which `RenderPipelines.SUNRISE_SUNSET` uses: ordinary
 /// `SrcAlpha`/`OneMinusSrcAlpha` colour blending, with `One`/`OneMinusSrcAlpha`
 /// on alpha.
@@ -840,7 +841,7 @@ pub struct SkyFrame {
     /// **This is a function of the player's render distance, not a constant**
     /// (issue #399). Set it with
     /// [`with_render_distance`](Self::with_render_distance), which applies
-    /// `AtmosphericFogEnvironment.java:73`'s
+    /// vanilla's atmospheric-fog-environment attribute's
     /// `min(renderDistanceInBlocks, SKY_FOG_END_DISTANCE)`. It is *not* the
     /// disc's radius, which stays [`crate::sky::SKY_DISC_RADIUS`]: shortening
     /// this saturates the outer part of the same disc to the fog colour rather
@@ -989,7 +990,7 @@ impl SkyFrame {
     /// place rather than being repeated in the render body.
     ///
     /// Void fog darkens the sky and the fog but **not** the sunrise band:
-    /// vanilla's darkening lives in `FogRenderer.computeFogColor`, which
+    /// vanilla's darkening lives in its fog-colour computation function, which
     /// produces the value `sky.fsh` mixes toward, and never touches
     /// `SUNRISE_SUNSET_COLOR`. (Below the world there is no horizon band
     /// visible anyway — but a gate that measured the band while standing in the
@@ -1013,8 +1014,9 @@ impl SkyFrame {
         // by an invented `0.9` ("so they read as solid rather than glowing"),
         // which made a noon cloud `#78A7FF × 0.9`: the reported blue-grey. Both
         // the base and the `0.9` are gone. Void fog does not touch clouds —
-        // `FogRenderer.computeFogColor` darkens the fog colour, and the cloud
-        // attribute is read straight off the probe in `LevelExtractor.java:202`.
+        // vanilla's fog-colour computation darkens the fog colour, and the cloud
+        // attribute is read straight off the probe in vanilla's level-extractor
+        // function.
         let cloud_rgb = cloud_color_for_time_of_day(self.time_of_day, crate::sky::CLOUD_COLOR_RGB);
         let cloud = [
             cloud_rgb[0],
@@ -1187,7 +1189,7 @@ impl SkyRenderer {
 
         // `Nearest`, not `Linear`: `clouds.png` is a hard binary mask (every
         // texel is either fully transparent or fully opaque white — see
-        // `load_cloud_texture`'s doc — vanilla's own `CloudRenderer.isCellEmpty`
+        // `load_cloud_texture`'s doc — vanilla's own cloud-renderer empty-cell check
         // is a per-*cell* boolean, never a partial-coverage float). Linear
         // filtering interpolates transparent-black and opaque-white texels
         // across every cell boundary; `CLOUD_WGSL`'s alpha-test threshold lets
@@ -1359,7 +1361,7 @@ impl SkyRenderer {
     ///
     /// Vanilla does exactly this and it is easy to miss, because vanilla's clear
     /// does not live in `SkyRenderer` at all:
-    /// `LevelRenderer.java:195-204` clears the main target to `fogColor` in its
+    /// its level-render function clears the main target to `fogColor` in its
     /// own `"clear"` pass, and every `SkyRenderer` render pass then passes
     /// `Optional.empty()` for the clear value. So the below-horizon void is the
     /// **fog colour** — which is also, by construction, the colour the disc's
@@ -1387,7 +1389,7 @@ impl SkyRenderer {
     ) {
         // `DimensionType.Skybox.NONE` — the Nether. Vanilla wraps its *whole*
         // sky pass in `if (state.skybox != DimensionType.Skybox.NONE)`
-        // (`LevelRenderer.addSkyPass`), so there is no disc, no sunrise band, no
+        // (its level-render function's sky-pass step), so there is no disc, no sunrise band, no
         // sun, no moon and no stars; its separate `"clear"` pass at the fog
         // colour still runs, and that clear is the entire sky the player sees.
         //
@@ -1462,7 +1464,7 @@ impl SkyRenderer {
         let angle = crate::sky::celestial_angle_for_time_of_day(time_of_day) * std::f32::consts::TAU;
 
         // The sunrise/sunset band, between the disc and the celestial bodies —
-        // vanilla's own order in `LevelRenderer.addSkyPass` (disc, sunrise,
+        // vanilla's own order in its level-render function's sky-pass step (disc, sunrise,
         // then sun/moon/stars), which matters because the band is translucent
         // and the sun must draw *over* it.
         let sunrise_alpha = sunrise[3];
@@ -1805,7 +1807,7 @@ mod tests {
         let default = SkyFrame::new(6_000, [0.2, 0.4, 0.8]);
         assert_eq!(default.sky_fog_end, crate::sky::SKY_FOG_END_DISTANCE);
 
-        // Hand-derived from `AtmosphericFogEnvironment.java:73`, not from the
+        // Hand-derived from vanilla's atmospheric-fog-environment attribute, not from the
         // helper: min(8 * 16, 512) and min(32 * 16, 512).
         assert_eq!(default.with_render_distance(8).sky_fog_end, 128.0);
         assert_eq!(default.with_render_distance(32).sky_fog_end, 512.0);
@@ -1827,7 +1829,7 @@ mod tests {
     /// `resolve_colors` passed `day_sky_color` as the base for the `CLOUD_COLOR`
     /// track, and then scaled the result by an invented `0.9`. Vanilla's base is
     /// the `CLOUD_COLOR` attribute, `ARGB.white(0.8F)` — RGB `0xFFFFFF`, alpha
-    /// `0.8` (`DimensionTypes.java:37`, `ARGB.java:188`).
+    /// `0.8` (vanilla's dimension-type defaults and packed-colour helpers).
     ///
     /// The discriminator has to be *chromatic*, not brightness: the old
     /// expression was `sky × 0.9`, so any "the clouds are bright at noon" check
