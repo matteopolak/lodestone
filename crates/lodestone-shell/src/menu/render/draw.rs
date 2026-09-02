@@ -30,7 +30,7 @@ pub(super) const TOOLTIP_BG: [f32; 4] = [16.0 / 255.0, 0.0, 16.0 / 255.0, 240.0 
 /// content box exactly 32 px tall, which is exactly
 /// `TransferableSelectionList.PackEntry.ICON_SIZE`.
 pub(super) const PACK_ROW_PAD: f32 = 2.0;
-/// `PackEntry.ICON_SIZE` (`TransferableSelectionList.java`) — and the [`ICON`]
+/// `PackEntry.ICON_SIZE` — and the [`ICON`]
 /// 32 the account and server lists already draw their mosaics at, so there is one
 /// mosaic size on this pass and not three.
 pub(super) const PACK_ICON: f32 = 32.0;
@@ -58,11 +58,11 @@ const PACK_DESC_ROWS: usize = 2;
 /// `0x808080`, vanilla's flat mid-grey, not this pass's own [`FG_DIM`].
 pub(super) const PACK_ENTRY_DIM: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
 /// The selected row's interior, `-16777216` — opaque black inside the 1 px
-/// outline (`AbstractSelectionList.java`), exactly as the server, account
+/// outline, exactly as the server, account
 /// and world lists draw theirs.
 pub(super) const PACK_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 /// The hovered row's icon dim, `fill(…, -1601138544)`
-/// (`TransferableSelectionList.java`) — `0xA0909090`, the same translucent
+/// — `0xA0909090`, the same translucent
 /// grey the multiplayer list puts under its own hover arrows, cited here from its
 /// own call site rather than shared with it.
 pub(super) const PACK_ICON_DARKEN: [f32; 4] = [144.0 / 255.0, 144.0 / 255.0, 144.0 / 255.0, 160.0 / 255.0];
@@ -80,7 +80,7 @@ pub(super) const PACK_UNSELECT_SPRITES: (&str, &str) = (
     "transferable_list/unselect_highlighted",
 );
 /// The fallback pack icon: vanilla's `PackSelectionScreen.DEFAULT_ICON`
-/// (`PackSelectionScreen.java`), `textures/misc/unknown_pack.png`, blitted for
+///, `textures/misc/unknown_pack.png`, blitted for
 /// any pack that ships no readable `pack.png` — which is every built-in row and
 /// most hand-made packs.
 ///
@@ -93,15 +93,15 @@ const TOOLTIP_FRAME_TOP: [f32; 4] = [80.0 / 255.0, 0.0, 1.0, 80.0 / 255.0];
 /// `tooltip/frame.png`'s bottom bar and the dark end of its side gradient —
 /// (40, 0, 127, 80).
 const TOOLTIP_FRAME_BOTTOM: [f32; 4] = [40.0 / 255.0, 0.0, 127.0 / 255.0, 80.0 / 255.0];
-/// `TooltipRenderUtil.PADDING` (`TooltipRenderUtil.java`) — the text's inset
+/// `TooltipRenderUtil.PADDING` — the text's inset
 /// from the tooltip's fill edges: 3 px each side, so a `w×h` content box carries
 /// a `(w+6)×(h+6)` fill.
 pub(super) const TOOLTIP_PAD: f32 = 3.0;
-/// `TooltipRenderUtil.MOUSE_OFFSET` (`TooltipRenderUtil.java`) — the content
+/// `TooltipRenderUtil.MOUSE_OFFSET` — the content
 /// box's top-left starts this far right of, and this far above, the cursor.
 pub(super) const TOOLTIP_MOUSE_OFFSET: f32 = 12.0;
 /// `ClientTextTooltip`'s line box: vanilla's 9 px `Font.lineHeight` plus a 1 px
-/// drop-shadow overhang (`ClientTextTooltip.java`), and the +2 interline
+/// drop-shadow overhang, and the +2 interline
 /// gap vanilla adds after the first line brings that second line's offset back to
 /// the same 12 as [`TOOLTIP_MOUSE_OFFSET`]. The first line starts at `y`; a
 /// 1-line tooltip is 8 px tall, an `n`-line one `10n`.
@@ -751,7 +751,7 @@ pub fn build(
     // point: each bevel faces the content.
     if let Some((cx, cy, cw, ch)) = chrome {
         // The **header** bar is suppressed when a tab bar owns this boundary
-        // instead (issue #567's visual audit — a full-width bar here used to
+        // instead (visual audit — a full-width bar here used to
         // run underneath the *entire* tab row, including the selected tab,
         // which is exactly what vanilla's own `MenuTabBar` does not do:
         // `MenuTabBar.extractWidgetRenderState` blits `Screen.HEADER_SEPARATOR`
@@ -883,7 +883,7 @@ fn tile_screen_background(b: &mut Quads<'_>, id: &str, width: f32, height: f32) 
 /// overlay on the icon.
 ///
 /// Mirrors `ServerSelectionList.OnlineServerEntry.extractContent`
-/// (`ServerSelectionList.java`) plus `AbstractSelectionList.extractItem`'s
+/// plus `AbstractSelectionList.extractItem`'s
 /// selection pass (`:354-370`), and it **decides nothing**: which sprite, which
 /// colour and which arrows apply are all resolved into [`ServerEntryView`] by
 /// [`server_list_frame`]. What it does own is everything canvas-dependent — the
@@ -903,7 +903,7 @@ fn tile_screen_background(b: &mut Quads<'_>, id: &str, width: f32, height: f32) 
 ///   ~44-character unbroken run to notice.
 /// - **The row's own background is the screen's**, not a per-row texture. Vanilla
 ///   blits `menu_list_background.png` tiled across the whole list band
-///   (`AbstractSelectionList.java`) and draws *no* per-row fill for an
+///   and draws *no* per-row fill for an
 ///   unselected row, so an unselected row here correctly paints nothing but its
 ///   content. The band texture itself is a loose `textures/gui/` PNG (the same
 ///   89-texture gap `resources.rs` documents) and is left to the flat [`BG`]
@@ -1050,7 +1050,7 @@ fn draw_server_entry(
     // incompatible server's version string —
     // `mouseX >= statusX && mouseX <= statusX + statusWidth && mouseY >=
     // getContentY() && mouseY <= getContentY() - 1 + 9`
-    // (`ServerSelectionList.java`). The ping-latency tooltip vanilla
+    //. The ping-latency tooltip vanilla
     // checks first (`:358-362`) is deliberately absent — the "who's online"
     // half of the screen is the half this shell has the model for, and the icon
     // and text rects are disjoint either way.
@@ -1422,8 +1422,7 @@ fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32,
     b.text(detail, text_x, cy + ACCOUNTS_DETAIL_Y, 1.0, ACCOUNTS_DIM);
 }
 
-/// Draws one world-list row — `WorldSelectionList.WorldListEntry.extractContent`
-/// (`WorldSelectionList.java`).
+/// Draws one world-list row — `WorldSelectionList.WorldListEntry.extractContent`.
 ///
 /// The selection outline, then three text lines at
 /// [`WORLD_LIST_LINE_DY`]'s offsets, all measured from the row's **content** rect
@@ -1514,8 +1513,7 @@ fn draw_world_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32, h
     }
 }
 
-/// Draws one resource-pack row — `TransferableSelectionList.PackEntry.extractContent`
-/// (`TransferableSelectionList.java`).
+/// Draws one resource-pack row — `TransferableSelectionList.PackEntry.extractContent`.
 ///
 /// The selection outline, the 32×32 `pack.png` thumbnail, the pack name, up to two
 /// description lines under it, and — while the row is the list's selection or under
@@ -1575,7 +1573,7 @@ fn draw_pack_entry(
     }
 
     // The content box: `getContentX()`/`getContentY()`, the entry inset by
-    // `CONTENT_PADDING` (`AbstractSelectionList.java`).
+    // `CONTENT_PADDING`.
     let (cx, cy) = (x + PACK_ROW_PAD, y + PACK_ROW_PAD);
 
     // `graphics.blit(…, this.pack.getIconTexture(), getContentX(), getContentY(), …,
@@ -1657,16 +1655,14 @@ fn draw_pack_entry(
 /// Mirrors `AbstractButton.extractDefaultSprite` +
 /// `Button.Plain.extractContents` (`AbstractButton.java`,
 /// `Button.java`) and, for icons,
-/// `SpriteIconButton.CenteredIcon.extractContents`
-/// (`SpriteIconButton.java`).
+/// `SpriteIconButton.CenteredIcon.extractContents`.
 /// **`server_scroll_list` is gone.** It rebuilt the multiplayer list's geometry per
 /// frame for the scrollbar, and it was the by-name call that made this file's
 /// scrollbar the *multiplayer* list's rather than the active screen's. Its job now
 /// belongs to `MenuNav::active_list`, which every screen answers, plus
 /// `widget::ListSpec::model` — one declaration, and the draw asks the frame instead
 /// of naming a screen. See `render::accounts_list_spec` for the second client.
-/// Draw a [`widget::ScrollList`]'s scrollbar — `extractScrollbar`
-/// (`AbstractScrollArea.java`).
+/// Draw a [`widget::ScrollList`]'s scrollbar — `extractScrollbar`.
 ///
 /// Track then thumb, both from the list's own [`widget::ScrollList::scrollbar_rects`]
 /// so the bar that draws and the bar [`widget::ScrollList::is_over_scrollbar`]
@@ -1737,7 +1733,7 @@ fn draw_widget(
     widget.hovered = hovered;
     widget.icon = row.icon;
     // `AbstractWidget.extractRenderState` wraps everything in `if (this.visible)`
-    // (`AbstractWidget.java`). No row sets this yet; the guard is here so
+    //. No row sets this yet; the guard is here so
     // that the day one does, it does not have to be remembered.
     if !widget.visible {
         return;
@@ -1769,14 +1765,14 @@ fn draw_widget(
         return;
     }
 
-    // `WidgetSprites::get(active, hoveredOrFocused)` (`WidgetSprites.java`)
+    // `WidgetSprites::get(active, hoveredOrFocused)`
     // with `AbstractButton`'s three-argument sprite set: disabled wins over
     // hovered, which is why a greyed-out button under the cursor still looks
     // greyed out. The rule lives in `menu::widget`; this only asks.
     //
     // A slider asks a *different* question — `AbstractSliderButton.getSprite()`
     // passes `isActive()` and `isFocused()` alone, so hovering one does not
-    // highlight it (`AbstractSliderButton.java`). Both predicates live on
+    // highlight it. Both predicates live on
     // `Widget`; neither is re-derived here.
     let background = if row.slider {
         widget.slider_background_sprite()
@@ -1807,7 +1803,7 @@ fn draw_widget(
     }
 
     // `AbstractSliderButton.extractWidgetRenderState` blits the handle right
-    // after the track and before the label (`AbstractSliderButton.java`):
+    // after the track and before the label:
     // `getX() + (int)(this.value * (this.width - 8))`, width 8, full row
     // height. `row.slider_value` is `None` for a slider this client holds no
     // value for at all (see its doc) — that slider keeps drawing bare, exactly
@@ -1852,7 +1848,7 @@ fn draw_widget(
     // `acceptScrollingWithDefaultCenter(msg, x+2, x+w-2, y, y+h)`
     // (`AbstractButton.java`, `AbstractWidget.java`), whose centre
     // is `(left + right) / 2` and whose top is
-    // `(top + bottom - lineHeight) / 2 + 1` (`ActiveTextCollector.java`).
+    // `(top + bottom - lineHeight) / 2 + 1`.
     let (left, right) = widget.content_span();
     let tw = b.text_width(&widget.message, 1.0);
     let label = if tw > right - left {
@@ -1869,7 +1865,7 @@ fn draw_widget(
 }
 
 /// Draws one [`MenuRow::tab`] entry — vanilla's `MenuTabButton.
-/// extractWidgetRenderState` (`MenuTabBar.java`): a `widget/tab*`
+/// extractWidgetRenderState`: a `widget/tab*`
 /// background keyed by `(selected, hoveredOrFocused)` (see [`widget::
 /// TAB_SPRITES`]'s own doc for why that is the right axis, not `active`),
 /// then — only while selected — the inset panel merge and the underline,
@@ -2035,7 +2031,7 @@ fn draw_arrow(b: &mut Quads<'_>, arrow: Arrow, x: f32, y: f32, w: f32, h: f32, c
 /// [`EditBox::background_sprite`] — which is `SPRITES.get(isActive(),
 /// isFocused())`, *not* the button's `isHoveredOrFocused()`, so hovering a field
 /// deliberately does not highlight it. Mirrors
-/// `EditBox.extractWidgetRenderState` (`EditBox.java`).
+/// `EditBox.extractWidgetRenderState`.
 ///
 /// ## The reposition, and why it is on a clone
 ///
@@ -2053,7 +2049,7 @@ fn draw_arrow(b: &mut Quads<'_>, arrow: Arrow, x: f32, y: f32, w: f32, h: f32, c
 ///   bullet used to justify that against [`TEXT_SCALE`] `2.0` — but a player
 ///   report (2026-08-04) caught that this function was the *only* thing on a
 ///   vanilla-positioned screen still drawing at that scale, against
-///   `9`-tall vanilla glyphs (`Font.java`) in a 20 px box: a 0.70 fill
+///   `9`-tall vanilla glyphs in a 20 px box: a 0.70 fill
 ///   ratio where every sibling widget (`draw_widget`'s buttons, at `1.0`)
 ///   sits at 0.45. Fixed by [`EDIT_TEXT_SCALE`] `1.0`, so a glyph is
 ///   `GLYPH_H * 1 = 7` tall — see that constant's own doc. The *horizontal*
@@ -2061,7 +2057,7 @@ fn draw_arrow(b: &mut Quads<'_>, arrow: Arrow, x: f32, y: f32, w: f32, h: f32, c
 ///   lockstep or the caret advance disagrees with the glyphs it steps over;
 ///   that half is `edit_box.rs`'s, not this function's.
 /// - **The append caret is a bar, not an `_` glyph.** `extractAppendCursor`
-///   draws the underscore character (`TextCursorUtils.java`), and the
+///   draws the underscore character, and the
 ///   jar-less fallback font here has no guaranteed `_`. Drawing a baseline bar
 ///   keeps the insert/append distinction visible without depending on a glyph
 ///   that may not exist, and the distinction itself
@@ -2074,7 +2070,7 @@ fn draw_edit_box(b: &mut Quads<'_>, edit: &EditBox, x: f32, y: f32, w: f32, h: f
     edit.widget.width = w;
     edit.widget.height = h;
     // `AbstractWidget.extractRenderState`'s `if (this.visible)`
-    // (`AbstractWidget.java`).
+    //.
     if !edit.widget.visible {
         return;
     }
@@ -2137,7 +2133,7 @@ fn draw_edit_box(b: &mut Quads<'_>, edit: &EditBox, x: f32, y: f32, w: f32, h: f
         }
     }
     // The hint (`EditBox.hint`) draws only when the box is empty *and*
-    // unfocused (`EditBox.java`), which is the opposite of a placeholder
+    // unfocused, which is the opposite of a placeholder
     // that vanishes on the first keystroke.
     if let Some(hint) = edit.hint.as_deref() {
         if state.before.is_empty() && state.after.is_empty() && !edit.widget.focused {

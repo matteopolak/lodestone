@@ -273,7 +273,7 @@ impl SignEditState {
 
     /// `populateAndSendPacket`'s equivalent here — `removed()`'s
     /// `ServerboundSignUpdatePacket` construction
-    /// (`AbstractSignEditScreen.java`). See the module doc: the caller must
+    ///. See the module doc: the caller must
     /// call this on **every** exit, not only a Done click.
     #[must_use]
     pub fn to_action(&self) -> ClientAction {

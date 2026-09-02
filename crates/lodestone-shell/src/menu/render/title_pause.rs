@@ -10,7 +10,7 @@ use super::*;
 /// horizontal row, then the Options/Quit pair as another horizontal row.
 ///
 /// **Vanilla's `TitleScreen` uses no layout class at all** — it hand-centres on
-/// `this.width / 2 - 100` and steps `topPos` by 24 (`TitleScreen.java`),
+/// `this.width / 2 - 100` and steps `topPos` by 24,
 /// and that fix's plan is explicit that a hand-arithmetic screen is legitimate
 /// vanilla. What makes this re-expression faithful rather than invented is that
 /// the two are *numerically identical*, which is not a coincidence:
@@ -20,7 +20,7 @@ use super::*;
 /// - the column's width is `max(200, 68, 200) = 200`, so centring it on
 ///   `width / 2` is `width / 2 - 100`;
 /// - `getHorizontalPosition(n, 3, 20)` is `width/2 - 34 + (n-1) * 24`
-///   (`TitleScreen.java`), and a 68 px row centred in the 200 px column
+///  , and a 68 px row centred in the 200 px column
 ///   is at `lerp(0.5, 0, 200 - 68) = 66`, i.e. `width/2 - 100 + 66` — the same
 ///   `width/2 - 34`. The 34 is `totalWidth / 2` and the 66 is `(200 - 68) / 2`;
 ///   they agree because `100 - 66 == 34`.
@@ -57,7 +57,7 @@ fn title_menu_column() -> layout::LinearLayout {
     column
 }
 
-/// Vanilla's `PauseScreen.createPauseMenu` (`PauseScreen.java`) as a real
+/// Vanilla's `PauseScreen.createPauseMenu` as a real
 /// [`layout::GridLayout`], arranged.
 ///
 /// `menu_padding_top` is `MENU_PADDING_TOP` (50) in production; it is a parameter
@@ -68,11 +68,11 @@ fn title_menu_column() -> layout::LinearLayout {
 /// The Options row takes vanilla's **`hasSingleplayerServer()`** branch
 /// (`:157-160`) when `published` is `false`: two half-width buttons, Options
 /// and Open to LAN, rather than one full-width Options. This client does
-/// host its own worlds, and since issue #535's scope 1 the second button has
+/// host its own worlds, and since scope 1 the second button has
 /// something to do — the previous version of this comment said "this client
 /// has no integrated server" and had been stale since singleplayer landed.
 ///
-/// `published` — issue #535's scope 2 — instead reproduces the *shape* of
+/// `published` — scope 2 — instead reproduces the *shape* of
 /// vanilla's other branch (`:160-164`, taken on a remote server): `Options`
 /// alone, full width, no gutter sibling. **Not vanilla's actual reason for
 /// taking that branch** — see [`PauseButton::OpenToLan`]'s own doc for why a
@@ -225,7 +225,7 @@ pub fn pause_grid_size() -> (f32, f32) {
 
 /// Vanilla's rect for one title-screen widget, from
 /// `TitleScreen.init`/`createNormalMenuOptions`
-/// (`TitleScreen.java`) — **read out of the arranged
+/// — **read out of the arranged
 /// `title_menu_column`**, not written down.
 ///
 /// The offsets are relative to [`Origin::TitleTop`], whose x is `width / 2`,
@@ -280,7 +280,7 @@ const ACCOUNTS_ENTRY_W: f32 = 90.0;
 const ACCOUNTS_ENTRY_MARGIN: f32 = 4.0;
 
 /// Vanilla's rect for one pause-screen widget, from
-/// `PauseScreen.createPauseMenu` (`PauseScreen.java`) — **read out of the
+/// `PauseScreen.createPauseMenu` — **read out of the
 /// arranged grid** (`pause_menu_grid_with`) rather than resolved by hand.
 ///
 /// It used to be a table of nine hand-derived offsets, and the derivation is
@@ -372,7 +372,7 @@ pub fn pause_slot(button: PauseButton, published: bool) -> Slot {
 
 /// Vanilla's rect for one death-screen button:
 /// `this.width / 2 - 100, this.height / 4 + 72 | 96, 200, 20`
-/// (`DeathScreen.java`). Both buttons share `x`; only `y` differs.
+///. Both buttons share `x`; only `y` differs.
 ///
 /// `height / 4 + 72` and `+ 96` are `Origin::TitleTop`'s own anchor
 /// (`height / 4 + 48`, `TitleScreen.java`) plus `24`/`48` — the death

@@ -566,13 +566,13 @@ impl RenderState {
     /// to turn fog off.
     ///
     /// `FogSettings::sky_color` is what the sky pass paints the disc centre with
-    /// (issue #96's per-biome tint). It is in the same struct rather than behind
+    /// (per-biome tint). It is in the same struct rather than behind
     /// its own setter precisely so a caller cannot update one and forget the
     /// other — see [`FogSettings`]' doc and
     /// [`set_clear_color`](Self::set_clear_color) below.
     /// `render_distance_chunks` rides along for the same reason `sky_color` is in
     /// the struct: the sky disc's gradient end is `min(render_distance, the
-    /// attribute)` (`AtmosphericFogEnvironment.java`), so it is a *second*
+    /// attribute)`, so it is a *second*
     /// consumer of the same number the fog band already needs. #399 shipped the
     /// gradient clamp with `SkyFrame` defaulting to the old constant 512 and this
     /// call site still passing it — the mechanism landed and reached zero pixels.
@@ -2013,7 +2013,7 @@ impl RenderState {
 
     /// Install the source for this frame's plugin billboards (see
     /// [`PluginBillboardsSource`]) — [`set_debug_lines_source`](Self::set_debug_lines_source)'s
-    /// sibling for issue #161's textured/billboard channel. Until installed,
+    /// sibling for textured/billboard channel. Until installed,
     /// [`render`](Self::render) draws none: this pass is a real pipeline, not
     /// a stub, but wired to nothing until a caller polls
     /// `lodestone_ecs::PluginBillboards` and hands the result here.

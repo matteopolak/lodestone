@@ -568,7 +568,7 @@ impl WindowApp {
 
         // The hand needs its own copy of the view bob: vanilla applies `bobView`
         // a *second* time to a fresh pose stack seeded with the unbobbed
-        // model-view (`GameRenderer.java`), rather than letting the hand
+        // model-view, rather than letting the hand
         // inherit the world's bobbed matrix. Without this the whole chain is an
         // island — `hand_view_proj` reads a source nothing installs, so the arm
         // stays rigid while the camera bobs, which is what the player reported.
@@ -671,7 +671,7 @@ impl WindowApp {
                 // is — and so `stack_skin_url`'s fetch is requested once.
                 skin: record.skin.clone(),
             });
-        // The item id, re-derived rather than cloned: issue #154's spyglass
+        // The item id, re-derived rather than cloned: spyglass
         // FOV/vignette needs the bare location further down in this function
         // (`ScreenEffects::scoping`), and the closure otherwise takes ownership
         // of the whole record for the render source's lifetime.
@@ -993,7 +993,7 @@ impl WindowApp {
         //
         // A ramping rain level therefore re-uploads the fog uniform every tick
         // rather than only on a fluid crossing. That is intended: the ramp is
-        // ±0.01/tick over ~100 ticks (`ServerLevel.java`), and a
+        // ±0.01/tick over ~100 ticks, and a
         // change-detected upload that ignored it would render a storm at clear-sky
         // colours until the player happened to swim.
         let weather_state = self.weather.as_ref().map(|w| w.state());
@@ -1247,7 +1247,7 @@ impl WindowApp {
             wearing_pumpkin,
             freeze_percent,
             // `Player.isScoping()` is `isUsingItem() && getUseItem().is(Items.
-            // SPYGLASS)` (`Player.java`). Both halves: `Sim::
+            // SPYGLASS)`. Both halves: `Sim::
             // using_item()` (the two-line accessor issue #154 was waiting
             // on) and `held_for_scoping`, the same item id already computed
             // above for the first-person hand pass.
@@ -1690,7 +1690,7 @@ impl WindowApp {
         // calls the same `HudRenderer::chat_interaction_at` directly off the
         // already-borrowed local instead of duplicating its logic.
         //
-        // `to_spans`, not `to_legacy_string` — issue #656's tooltip-title fix
+        // `to_spans`, not `to_legacy_string` — tooltip-title fix
         // gave `draw_chat_hover_tooltip` a span-carrying `wrap_spans`/
         // `text_spans` pair to draw with (the same primitives
         // `container::builder::Builder::shadowed_label_spans` already
@@ -1941,7 +1941,7 @@ impl WindowApp {
             );
         }
         let open_menu = self.sim.open_menu();
-        // The open merchant's trade list (issue #245's UI half), read once
+        // The open merchant's trade list (UI half), read once
         // per frame and reused both for the composed title below and for
         // `ContainerFrame::with_trades` — see `Sim::trades`'s own doc for why
         // this is cheap and safe to read unconditionally (empty, never a
@@ -1979,7 +1979,7 @@ impl WindowApp {
             player_menu = self.sim.player_menu();
             // **"Crafting"**, not "Inventory". `InventoryScreen`
             // passes `translatable("container.crafting")` as its title
-            // (`InventoryScreen.java`) — it names the 2x2 grid — and the
+            // — it names the 2x2 grid — and the
             // literal `"Inventory"` that used to sit here was wrong twice: wrong
             // word, and, going in as the *title*, drawn at the title anchor,
             // which on this one screen is `x = 97`. The word "Inventory" does
@@ -1997,11 +1997,11 @@ impl WindowApp {
             // constant here is not the #52 defect class repeating: vanilla reads
             // it from `Inventory.getDisplayName()`, itself the client-side
             // constant `translatable("container.inventory")`
-            // (`Inventory.java`), so there is no server component to resolve.
+            //, so there is no server component to resolve.
             let inventory_label =
                 crate::container::player_inventory_label(self.sim.translator().as_ref());
             // `merchant.trades` — "Trades", the merchant screen's second label
-            // (issue #245's UI half). Computed unconditionally like
+            // (UI half). Computed unconditionally like
             // `inventory_label` above; `ContainerFrame`'s own draw path is
             // what gates it on the screen actually being a merchant.
             let trades_label = crate::container::merchant_trades_label(self.sim.translator().as_ref());
@@ -2041,7 +2041,7 @@ impl WindowApp {
                 Some(self.anvil_rename.value.clone())
             });
             // The beacon screen's pending primary/secondary power selection
-            // (issue #613's `SetBeaconEffects` remainder).
+            // (`SetBeaconEffects` remainder).
             // `BeaconSelection::sync` is vanilla's own
             // `ContainerListener::dataChanged` — it re-derives the local
             // selection from `container_data` properties `1`/`2` exactly
@@ -2110,7 +2110,7 @@ impl WindowApp {
             let container_frame = ContainerFrame::new(container_menu, &container_title)
                 .with_inventory_label(&inventory_label)
                 .with_effects(&effect_rows)
-                // The trade list and which row is selected (issue #245's UI
+                // The trade list and which row is selected (UI
                 // half) — `Sim::trades` returns an empty (never absent) store
                 // off a non-merchant screen, and `draw_merchant_trades` only
                 // ever draws when `menu.special_layout()` is `Merchant`, so
@@ -2556,7 +2556,7 @@ impl WindowApp {
             menu_overlays_drawn += 1;
         }
 
-        // The book-editing screen (issue #613's `EditBook` remainder) — the
+        // The book-editing screen (`EditBook` remainder) — the
         // seventh overlay, same shape as the sign-editing block immediately
         // above and for the same reason: `menu::render::frame_for` has no arm
         // for it (it is an overlay, not a full screen), so without a draw
@@ -2570,7 +2570,7 @@ impl WindowApp {
             menu_overlays_drawn += 1;
         }
 
-        // The Spectator Menu (issue #613's `TeleportToEntity` remainder) —
+        // The Spectator Menu (`TeleportToEntity` remainder) —
         // the eighth overlay, same shape as the book-editing block
         // immediately above and for the same reason: `menu::render::frame_for`
         // has no arm for it (it is an overlay, not a full screen), so without
@@ -2737,7 +2737,7 @@ impl WindowApp {
 }
 
 /// Whether `redraw`'s per-frame housekeeping should send one
-/// `ClientAction::PingRequest` right now (issue #613's `PingRequest`
+/// `ClientAction::PingRequest` right now (`PingRequest`
 /// remainder) — pulled out as a pure function of its three inputs so the
 /// throttle can be checked with no window, no GPU and no session at all; see
 /// [`WindowApp::last_ping_request`]'s own doc for why F3 is the gate and one

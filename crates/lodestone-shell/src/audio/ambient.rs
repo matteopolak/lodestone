@@ -335,7 +335,7 @@ impl ShellAmbience {
 }
 
 /// Vanilla's step volume/pitch for a block's `SoundType` —
-/// `Entity.playStepSound` (`Entity.java`): `volume * 0.15`, pitch as-is.
+/// `Entity.playStepSound`: `volume * 0.15`, pitch as-is.
 ///
 /// Split out here rather than inlined at the call site so the two multipliers
 /// live beside the rest of the ambience constants and are not retyped.

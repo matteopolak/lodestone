@@ -202,8 +202,8 @@ const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 /// entirely) — passes an explicit `width` argument down to
 /// `SubmitNodeCollection.submitShapeOutline` (`:282`), sourced from
 /// `GameRenderer.gameRenderState().windowRenderState.appropriateLineWidth`
-/// (`LevelRenderer.java`). That width is attached per-vertex via
-/// `VertexConsumer.setLineWidth` (`ShapeOutlineFeatureRenderer.java`) and
+///. That width is attached per-vertex via
+/// `VertexConsumer.setLineWidth` and
 /// expanded into real screen-space quad geometry downstream, because — same
 /// conclusion the issue reached — wgpu (and modern Minecraft's own renderer,
 /// for the same reason) does not portably support a GPU line-width parameter.
@@ -225,7 +225,7 @@ const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 /// unchanged; only the geometry generation changed.
 ///
 /// The depth setup was also checked and left alone: vanilla's `LINES` render
-/// pipeline (`RenderPipelines.java`) uses `DepthStencilState.DEFAULT`
+/// pipeline uses `DepthStencilState.DEFAULT`
 /// (`GREATER_THAN_OR_EQUAL`, **no** bias) — the `LINES_DEPTH_BIAS` variant at
 /// `:572` exists but is not what the hit outline uses. Per `CLAUDE.md`,
 /// vanilla's `GREATER_THAN_OR_EQUAL` under reversed-Z is this engine's

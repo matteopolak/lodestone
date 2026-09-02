@@ -24,7 +24,7 @@
 //! it".
 //!
 //! Vanilla is `Entity.pick` → `Level.clip` with `ClipContext.Block.OUTLINE`
-//! (`Entity.java`), which walks the same DDA (`BlockGetter
+//!, which walks the same DDA (`BlockGetter
 //! .traverseBlocks`) and clips each cell's `state.getShape(…).toAabbs()` with
 //! `AABB.clip`. [`raycast`] now does exactly that, and two consequences follow
 //! that a cube-shaped hit test could not express:
@@ -516,7 +516,7 @@ mod tests {
     // * `CarpetBlock.java` — `SHAPE = Block.column(16.0, 0.0, 1.0)`, i.e.
     //   x/z `0..16` and y `0..1` in sixteenths: **1/16 of a block tall**.
     //   `LeafLitterBlock` is the same height via `SegmentableBlock
-    //   .getShapeHeight() = 1.0` (`SegmentableBlock.java`), over a
+    //   .getShapeHeight() = 1.0`, over a
     //   quarter of the cell per segment.
     // * `StairBlock.java` — `SHAPE_OUTER = or(column(16, 0, 8),
     //   box(0, 8, 0, 8, 16, 8))` and `SHAPE_STRAIGHT` unions its 90° rotation:
@@ -674,8 +674,7 @@ mod tests {
 
     /// A block whose outline is several disjoint boxes must have **all** of them
     /// tested, and the nearest must win. Vanilla's straight bottom stair:
-    /// a full-width slab `y 0..1/2` plus an upper step `x 0..1/2, y 1/2..1`
-    /// (`StairBlock.java`).
+    /// a full-width slab `y 0..1/2` plus an upper step `x 0..1/2, y 1/2..1`.
     #[test]
     fn every_box_of_a_multi_box_outline_is_tested_and_the_nearest_wins() {
         let stair = |x: i32, y: i32, z: i32, out: &mut Vec<PickBox>| {

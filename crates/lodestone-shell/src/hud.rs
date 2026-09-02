@@ -105,7 +105,7 @@ const VITALS_ROW_PITCH: f32 = 10.0;
 /// in unscaled logical pixels.
 ///
 /// Vanilla's input band is `fill(2, height - 14, width - 2, height - 2, …)`
-/// (`ChatScreen.java`) around an `EditBox` whose text sits at `height - 12`
+/// around an `EditBox` whose text sits at `height - 12`
 /// (`:56`) — 2px above the text and 2px below it. It is scaled by the chat pose
 /// scale at every use, alongside the glyph height, so the strip stays wrapped
 /// around the text at any chat scale.
@@ -1280,7 +1280,7 @@ pub(crate) const SPRITE_FLOATS_PER_VERTEX: usize = 8;
 pub const RECIPE_TOAST_TITLE: &str = "New Recipe(s) Unlocked!";
 /// Vanilla's `recipe.toast.description`, same source.
 pub const RECIPE_TOAST_DESCRIPTION: &str = "Check your recipe book";
-/// `RecipeToast.BACKGROUND_SPRITE` (`RecipeToast.java`) — `toast/recipe`,
+/// `RecipeToast.BACKGROUND_SPRITE` — `toast/recipe`,
 /// which really is present in 26.2's GUI atlas
 /// (`assets/minecraft/textures/gui/sprites/toast/recipe.png`), so the sprite
 /// path is reachable rather than permanently falling back.
@@ -1301,10 +1301,10 @@ pub const RECIPE_TOAST_SLIDE_MS: u64 = 600;
 /// - `Toast.width() == 160`, `Toast.height() == 32` (`Toast.java`; the
 ///   `DEFAULT_WIDTH`/`SLOT_HEIGHT` constants at `:14-15` carry the same values).
 /// - `xPos(screenWidth, visiblePortion) == screenWidth - width() *
-///   visiblePortion` (`Toast.java`). This is **not** a fixed right
+///   visiblePortion`. This is **not** a fixed right
 ///   margin: it is the slide-in, and at `visiblePortion == 1.0` the toast's
 ///   left edge sits exactly `160` from the right edge of the screen.
-/// - `yPos(firstSlotIndex) == firstSlotIndex * height()` (`Toast.java`),
+/// - `yPos(firstSlotIndex) == firstSlotIndex * height()`,
 ///   so the *first* toast is flush with the top of the screen at `y == 0`, not
 ///   inset by a margin. We only ever draw one, so `firstSlotIndex == 0`.
 /// - Contents (`RecipeToast.extractRenderState`, `RecipeToast.java`), all
@@ -1326,13 +1326,12 @@ pub struct RecipeToastView {
     pub visible_portion: f32,
 }
 
-/// `toast/advancement`, the completion toast's background sprite
-/// (`AdvancementToast.java`).
+/// `toast/advancement`, the completion toast's background sprite.
 pub const ADVANCEMENT_TOAST_SPRITE: &str = "toast/advancement";
 
 /// One advancement-completion toast.
 ///
-/// `AdvancementToast.extractRenderState` (`AdvancementToast.java`), the
+/// `AdvancementToast.extractRenderState`, the
 /// single-title-line branch: the type's own heading at `(30, 7)` in yellow — or
 /// `0xFFFF88FF` for a challenge — the advancement's title at `(30, 18)` in white,
 /// and its icon at `(8, 8)` unscaled, all over the same `160×32` background
@@ -1378,7 +1377,7 @@ pub struct HudFrame<'a> {
     /// `screen() == null` guard on this call, unlike the sibling
     /// `extractSubtitleOverlay` three lines below it, which does gate on
     /// `screen() == null || screen().isInGameUi()`. And `extractCrosshair` itself
-    /// (`Hud.java`) gates only on `options.getCameraType().isFirstPerson()`
+    /// gates only on `options.getCameraType().isFirstPerson()`
     /// and not being in spectator mode (or, in spectator, aiming at a
     /// `MenuProvider` via `canRenderCrosshairForSpectator`). So a vanilla
     /// crosshair stays visible — dimmed only by whatever the screen itself draws
@@ -1386,7 +1385,7 @@ pub struct HudFrame<'a> {
     ///
     /// We hide it outright instead, a confirmed divergence. The draw-order half
     /// vanilla relies on already exists on this side, just not wired to the
-    /// crosshair: `container.rs`'s dim gradient (issue #61's leftover) draws
+    /// crosshair: `container.rs`'s dim gradient (leftover) draws
     /// *after* the HUD pass and paints over it uniformly, which is exactly what
     /// dims [`Self::hotbar`] for free while a container is open. Matching
     /// vanilla for the crosshair is therefore a gating change in `app.rs`
@@ -1700,7 +1699,7 @@ pub struct HudFrame<'a> {
     ///
     /// **This is a diagnostic, not the real consumer.** Vanilla's border
     /// warning is a blue tint applied to the vignette in
-    /// `Hud.extractVignette` (`Hud.java`), which needs a
+    /// `Hud.extractVignette`, which needs a
     /// multiply-blend `RenderPipelines.VIGNETTE` equivalent and
     /// `misc/vignette.png` — neither of which exists in `lodestone-render`
     /// yet. This line is the same "did the datum actually reach the running
@@ -1997,36 +1996,35 @@ pub fn heart_fill(i: usize, health: f32) -> Option<HeartFill> {
 /// nothing to control.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChatDisplayOptions {
-    /// `options.chat.scale` (`Options.java`), `0.0..=1.0` — vanilla's
+    /// `options.chat.scale`, `0.0..=1.0` — vanilla's
     /// `ChatComponent.getScale`. This is the *entire* pose scale every chat
     /// draw multiplies by ([`chat_pose_scale`]); there is no HUD-side factor
     /// layered on top, matching `ChatComponent.extractRenderState`'s
     /// `pose.scale(scale, scale)`.
     pub scale: f32,
-    /// `options.chat.width` (`Options.java`), `0.0..=1.0`. Fed
+    /// `options.chat.width`, `0.0..=1.0`. Fed
     /// through [`chat_width_px`] (vanilla's `ChatComponent.getWidth`,
     /// `ChatComponent.java`) to size the chat box.
     pub width_pct: f32,
-    /// `options.chat.height.unfocused` (`Options.java`), `0.0..=1.0`
+    /// `options.chat.height.unfocused`, `0.0..=1.0`
     /// — box height while the chat box is **closed**.
     pub height_pct_unfocused: f32,
-    /// `options.chat.height.focused` (`Options.java`), `0.0..=1.0` —
+    /// `options.chat.height.focused`, `0.0..=1.0` —
     /// box height while the chat box is **open**.
     pub height_pct_focused: f32,
-    /// `options.chat.line_spacing` (`Options.java`), `0.0..=1.0`:
+    /// `options.chat.line_spacing`, `0.0..=1.0`:
     /// extra fraction of a line's height inserted between chat rows
     /// (`ChatComponent.java`, `entryHeight = messageHeight * (spacing +
     /// 1.0)`).
     pub line_spacing: f32,
-    /// `options.chat.opacity` (`Options.java`), `0.0..=1.0`. Text
-    /// alpha is `text_opacity * 0.9 + 0.1` (`ChatComponent.java`) — never
+    /// `options.chat.opacity`, `0.0..=1.0`. Text
+    /// alpha is `text_opacity * 0.9 + 0.1` — never
     /// fully transparent, matching vanilla.
     pub text_opacity: f32,
-    /// `options.accessibility.text_background_opacity` (`Options.java`),
-    /// `0.0..=1.0`. Used directly as the per-line background fill alpha
-    /// (`ChatComponent.java`).
+    /// `options.accessibility.text_background_opacity`,
+    /// `0.0..=1.0`. Used directly as the per-line background fill alpha.
     pub background_opacity: f32,
-    /// `options.chat.color` (`Options.java`). `false` strips every
+    /// `options.chat.color`. `false` strips every
     /// legacy `§` code before drawing a scrollback line
     /// (`ComponentRenderUtils.stripColor`, `ComponentRenderUtils.java`) —
     /// it never touches the input line, which cannot carry codes
@@ -2049,7 +2047,7 @@ impl Default for ChatDisplayOptions {
     }
 }
 
-/// Vanilla's `ChatComponent.getWidth` (`ChatComponent.java`): maps the
+/// Vanilla's `ChatComponent.getWidth`: maps the
 /// `0.0..=1.0` `chatWidth` option onto `40.0..=320.0` **screen** pixels — the
 /// same logical-canvas unit [`crate::menu::render::logical_canvas`] returns
 /// (see [`HudGeometry::build_inner`]'s own doc on why that canvas *is*
@@ -2061,7 +2059,7 @@ pub fn chat_width_px(pct: f32) -> f32 {
 }
 
 /// As [`chat_width_px`], vanilla's `ChatComponent.getHeight`
-/// (`ChatComponent.java`): maps `0.0..=1.0` onto `20.0..=180.0` screen
+///: maps `0.0..=1.0` onto `20.0..=180.0` screen
 /// pixels.
 #[must_use]
 pub fn chat_height_px(pct: f32) -> f32 {
@@ -2095,7 +2093,7 @@ pub fn chat_input_top(canvas_h: f32, pose_scale: f32) -> f32 {
 }
 
 /// The scrollback's own anchor — vanilla's `ChatComponent.extractRenderState`
-/// (`ChatComponent.java`): `final int chatBottom = Mth.floor((screenHeight -
+///: `final int chatBottom = Mth.floor((screenHeight -
 /// 40) / scale);`, computed in the pose's *local* (unscaled-by-chat-scale)
 /// coordinates and then carried back to screen/canvas pixels by the very
 /// `pose.scale(scale, scale)` that local value is drawn under — so the real
@@ -2128,7 +2126,7 @@ pub fn chat_bottom(canvas_h: f32, pose_scale: f32) -> f32 {
 }
 
 /// One scrollback row's vertical pitch — vanilla's `entryHeight = messageHeight
-/// * (lineSpacing + 1.0)` (`ChatComponent.java`), scaled by the chat pose
+/// * (lineSpacing + 1.0)`, scaled by the chat pose
 /// afterward. `messageHeight` is vanilla's literal `9`; `glyph_h + 2.0` is this
 /// HUD's own 5×7-font analogue of it.
 ///
@@ -2618,7 +2616,7 @@ impl HudGeometry {
             opts.height_pct_unfocused
         };
         let chat_box_h = chat_height_px(chat_height_pct.clamp(0.0, 1.0));
-        // `textOpacity = chatOpacity * 0.9 + 0.1` (`ChatComponent.java`) —
+        // `textOpacity = chatOpacity * 0.9 + 0.1` —
         // never fully transparent even at `chatOpacity == 0.0`.
         let chat_text_opacity = opts.text_opacity.clamp(0.0, 1.0).mul_add(0.9, 0.1);
         let chat_bg_opacity = opts.background_opacity.clamp(0.0, 1.0);
@@ -2635,7 +2633,7 @@ impl HudGeometry {
             // Derived from the *same* `input_y` and `chat_pose_scale` the text
             // draw below uses, so the strip and the glyphs cannot disagree.
             // Vanilla's band is `fill(2, height - 14, width - 2, height - 2, …)`
-            // (`ChatScreen.java`) with the `EditBox`'s text at `height - 12`
+            // with the `EditBox`'s text at `height - 12`
             // (`:56`) — i.e. symmetric 2px padding around the text — so the
             // padding is 2 units, scaled with everything else.
             //
@@ -2976,7 +2974,7 @@ impl HudGeometry {
 
         // The scrollback's own scroll indicator — vanilla's
         // `ChatComponent.extractRenderState`'s `if (total > 0 && isForeground)`
-        // block (`ChatComponent.java`). Drawn only while open
+        // block. Drawn only while open
         // (`isForeground`) and only once there is more history than fits on
         // screen (`virtualHeight != chatHeight`), matching vanilla's own two
         // gates. The two colours are vanilla's literal `13382451`/`3355562`
@@ -3043,7 +3041,7 @@ impl HudGeometry {
         // Crosshair: a white plus at the centre.
         //
         // `arm`/`thick` reproduce vanilla's actual ink, not its sprite's bounding
-        // box. `Hud.extractCrosshair` (`Hud.java`) blits the 15x15
+        // box. `Hud.extractCrosshair` blits the 15x15
         // `hud/crosshair` sprite (`assets/minecraft/textures/gui/sprites/hud/
         // crosshair.png`) at `((guiWidth-15)/2, (guiHeight-15)/2, 15, 15)` — but
         // that box is mostly transparent padding. Read directly off the PNG's own
@@ -3096,7 +3094,7 @@ impl HudGeometry {
             // *unless* a slow weapon (delay > 5 ticks) is aimed at a living,
             // in-range target, in which case a distinct "ready" icon
             // (`CROSSHAIR_ATTACK_INDICATOR_FULL_SPRITE`) replaces it
-            // (`Hud.java`). That icon needs the crosshair's target
+            //. That icon needs the crosshair's target
             // entity plus its liveness/range/weapon-delay, none of which
             // `HudFrame` carries — deliberately out of scope per
             // `docs/combat.md`'s crits/sweep cut for the same issue. At full
@@ -3427,7 +3425,7 @@ impl HudGeometry {
         // Title / subtitle: a large centred overlay mid-screen, fading with the
         // server-driven alpha. Drawn only while a server-sent title is active,
         // so it costs nothing off a server that sends none.
-        // `extractTitle` (`Hud.java`) translates once to the screen centre
+        // `extractTitle` translates once to the screen centre
         // (`:376`), then draws each string at an offset *inside* its own pose
         // scale — title `scale(4.0)` at `y = -10` (`:378,381`), subtitle
         // `scale(2.0)` at `y = 5` (`:385,387`). Multiplied out, those are the two
@@ -3905,8 +3903,7 @@ fn draw_debug_overlay(b: &mut Builder<'_>, frame: &HudFrame<'_>) {
 }
 
 /// The recipe-unlock toast's rect in **logical canvas pixels**, as
-/// `(x, y, w, h)` — `Toast::xPos`/`yPos` with `firstSlotIndex == 0`
-/// (`Toast.java`).
+/// `(x, y, w, h)` — `Toast::xPos`/`yPos` with `firstSlotIndex == 0`.
 ///
 /// This exists so the draw and any gate measuring it share **one** expression.
 /// A gate that restated `canvas_w - 160.0` would silently stop describing the
@@ -3927,8 +3924,7 @@ pub fn recipe_toast_rect(canvas_w: f32, visible_portion: f32) -> (f32, f32, f32,
 /// flat fill when no GUI atlas is attached — the same jar-less degradation
 /// every other element in this module uses, and the reason a coverage gate can
 /// run headless.
-/// Vanilla's `SubtitleOverlay` layout constants, all in logical GUI pixels
-/// (`SubtitleOverlay.java`).
+/// Vanilla's `SubtitleOverlay` layout constants, all in logical GUI pixels.
 mod subtitle_layout {
     /// The row's text height; `halfHeight` is the integer half of it.
     pub(super) const ROW_H: f32 = 9.0;
@@ -3946,7 +3942,7 @@ mod subtitle_layout {
 /// stacked upward from just above the hotbar, oldest at the bottom.
 ///
 /// Ported from `SubtitleOverlay.extractRenderState`
-/// (`SubtitleOverlay.java`). Two details are load-bearing:
+///. Two details are load-bearing:
 ///
 /// * **Every row is the same width**, `max(text widths)` plus the width of
 ///   `"<"`, `">"` and two spaces — so the arrow columns exist on every plate,
@@ -4283,7 +4279,7 @@ fn draw_recipe_toast(b: &mut Builder, toast: &RecipeToastView) {
     let (tx, ty, tw, th) = recipe_toast_rect(b.w, toast.visible_portion);
 
     // `blitSprite(BACKGROUND_SPRITE, 0, 0, width(), height())`
-    // (`RecipeToast.java`).
+    //.
     let quads = b.gui_geometry(RECIPE_TOAST_SPRITE, tx, ty, tw, th);
     if quads.is_empty() {
         // Jar-less: vanilla's toast art is an opaque light panel, so a flat
@@ -4296,7 +4292,7 @@ fn draw_recipe_toast(b: &mut Builder, toast: &RecipeToastView) {
     }
 
     // `-11534256 == 0xFF500050` and `-16777216 == 0xFF000000`
-    // (`RecipeToast.java`). Unscaled, and unshadowed (the trailing
+    //. Unscaled, and unshadowed (the trailing
     // `false`).
     const TITLE_COLOUR: [f32; 4] = [0x50 as f32 / 255.0, 0.0, 0x50 as f32 / 255.0, 1.0];
     const DESCRIPTION_COLOUR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
@@ -4322,7 +4318,7 @@ fn draw_recipe_toast(b: &mut Builder, toast: &RecipeToastView) {
         ty + 3.0 * STATION_SCALE,
         ICON * STATION_SCALE,
     );
-    // `fakeItem(unlockedItem, 8, 8)` (`RecipeToast.java`), unscaled.
+    // `fakeItem(unlockedItem, 8, 8)`, unscaled.
     b.item_icon(&toast.unlocked, tx + 8.0, ty + 8.0, ICON);
 }
 
@@ -4344,7 +4340,7 @@ fn draw_advancement_toast(b: &mut Builder, toast: &AdvancementToastView) {
     b.text(&toast.heading, tx + 30.0, ty + 7.0, 1.0, toast.heading_colour);
     b.text(&toast.title, tx + 30.0, ty + 18.0, 1.0, [1.0, 1.0, 1.0, 1.0]);
     if let Some(icon) = &toast.icon {
-        // `fakeItem(iconItem, 8, 8)` (`AdvancementToast.java`), unscaled.
+        // `fakeItem(iconItem, 8, 8)`, unscaled.
         b.item_icon(icon, tx + 8.0, ty + 8.0, 16.0);
     }
 }
@@ -4401,9 +4397,9 @@ fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) {
 /// from [`HudRenderer`]'s own cross-frame animation state.
 #[derive(Debug, Clone, Copy)]
 struct HudAnim {
-    /// Vanilla's heart-row `blink` (`Hud.java`).
+    /// Vanilla's heart-row `blink`.
     heart_blink: bool,
-    /// Vanilla's `displayHealth` (`Hud.java`) — the "ghost" heart
+    /// Vanilla's `displayHealth` — the "ghost" heart
     /// overlay's total. Equal to the current health while idle.
     display_health: i32,
     /// The wall-tick index this frame resolved to (see `hud/anim::wall_tick`)
@@ -4496,7 +4492,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // The gap above the hotbar is vanilla's own arithmetic, not a guess:
     // `ContextualBar.MARGIN_BOTTOM` (24) is the hotbar's 22px height plus a 2px
     // gap, and `ContextualBar.top` is `guiScaledHeight - MARGIN_BOTTOM - HEIGHT`
-    // (`ContextualBar.java`) — i.e. the bar sits *2px* above the
+    // — i.e. the bar sits *2px* above the
     // hotbar sprite, not 4. `hy` is already this cluster's hotbar-top in the
     // same logical-pixel space vanilla's `guiHeight` is in, so subtracting from
     // it (rather than restating an absolute `b.h`-based constant) is what keeps
@@ -4585,7 +4581,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
         // * **Too high** — `by - line_h` used a *font-metrics* gap
         //   (`(GLYPH_H + 2) * scale`, i.e. 20px at the old scale of 2), not
         //   vanilla's real one. `ContextualBar.extractExperienceLevel`
-        //   (`ContextualBar.java`) places the text at
+        //   places the text at
         //   `y = guiHeight - 24 - 9 - 2`, and the bar itself sits at
         //   `guiHeight - 24 - 5`: the text's top is exactly `6` logical px
         //   above the bar's top, full stop — not a value derived from glyph
@@ -4598,7 +4594,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
         // calls `graphics.text(font, str, x, y, colour, false)` — shadow
         // `false` — **five** times: four unshadowed black copies offset ±1px
         // on each axis (the outline), then one unshadowed copy in
-        // `0x80FF20` (`ContextualBar.java`). `Builder::text` would add
+        // `0x80FF20`. `Builder::text` would add
         // its own automatic drop shadow on top of a hand-rolled outline, so
         // this uses [`Builder::text_plain`] for all five passes, matching
         // vanilla's `shadow = false` exactly.
@@ -4681,13 +4677,13 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
         // The container background flashes to the "_blinking" sprite variant
         // for the same alternating windows the ghost overlay below uses —
         // vanilla draws it for *every* container regardless of that
-        // container's own fill state (`Hud.java`).
+        // container's own fill state.
         let container = if anim.heart_blink {
             "hud/heart/container_blinking"
         } else {
             "hud/heart/container"
         };
-        // Critical-health y-jitter (`Hud.java`): `currentHealth +
+        // Critical-health y-jitter: `currentHealth +
         // absorption <= 4`. Absorption is not modelled in `HudFrame` yet, so
         // this gates on health alone — a documented narrowing, not a silent
         // one.
@@ -4702,7 +4698,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
             b.sprite(container, x, y, icon, icon, white);
             // The "ghost" of health about to be lost, forced onto the
             // blinking sprite variant regardless of the fill state below —
-            // vanilla's `blink && halves < oldHealth` (`Hud.java`).
+            // vanilla's `blink && halves < oldHealth`.
             let halves = i * 2;
             if anim.heart_blink && (halves as i32) < anim.display_health {
                 let half = (halves as i32 + 1) == anim.display_health;
@@ -4729,7 +4725,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     }
     if frame.can_hurt_player && let Some(food) = frame.food {
         let food_f = food.max(0) as f32;
-        // Hunger-empty wobble (`Hud.java`): `frame.saturation` is
+        // Hunger-empty wobble: `frame.saturation` is
         // `None` off a build that has not wired it through yet (see
         // `HudFrame::saturation`'s doc) — treated as "not empty", so the row
         // stays flush rather than guessing.
@@ -5035,7 +5031,7 @@ fn strip_legacy(s: &str) -> String {
 /// allocation count changes. `pending_code` is likewise the selector `char`
 /// alone rather than an owned two-character `String`. Combined with
 /// [`ChatWrapCache`], which persists the result so a frame with no new message
-/// re-wraps nothing at all, this is issue #527's half (a).
+/// re-wraps nothing at all, this is half (a).
 ///
 /// **Splits on a literal `\n` first**, the same precedent
 /// [`chat_hover_tooltip_layout`]'s own `wrap` closure and
@@ -9507,7 +9503,7 @@ mod tests {
     /// `chat_options.text_opacity`: `hi` carries no `§` code, so its colour
     /// stays `base` throughout `Builder::text_legacy`'s fallback path and
     /// every glyph pixel's alpha is exactly the `alpha` parameter passed in —
-    /// here, `text_opacity * 0.9 + 0.1` (`ChatComponent.java`) at a fresh
+    /// here, `text_opacity * 0.9 + 0.1` at a fresh
     /// line's fade of `1.0`.
     #[test]
     fn chat_text_opacity_sets_the_exact_glyph_alpha() {
@@ -11510,7 +11506,7 @@ mod tests {
     ///   progress: 0.0` — no fill, since the fill only draws `if p > 0.0`) to
     ///   find the digit's top row. The **gap** between them is what
     ///   `ContextualBar.extractExperienceLevel` vs `ContextualBar.top`
-    ///   (`ContextualBar.java`) fixes at vanilla's `6` logical px —
+    ///   fixes at vanilla's `6` logical px —
     ///   independent of wherever the cluster's own bottom margin happens to
     ///   place the bar, so this cannot pass by coincidentally agreeing with our
     ///   own `by`.
@@ -12260,7 +12256,7 @@ mod recipe_toast_gate {
     ///
     /// This is the assertion that catches a transcription of `yPos` as "some
     /// top margin": `yPos(firstSlotIndex) == firstSlotIndex * height()`
-    /// (`Toast.java`), and with one toast `firstSlotIndex == 0`, so the
+    ///, and with one toast `firstSlotIndex == 0`, so the
     /// top edge is `y == 0` exactly. Predicted from the definition, not the
     /// call site.
     #[test]
@@ -12436,7 +12432,7 @@ mod chat_hover_tooltip_gate {
     /// is exercised directly here through `to_spans`, the exact conversion
     /// `app/redraw.rs`'s frame-building code applies before handing the
     /// text to `HudFrame::chat_hover_tooltip` — `to_legacy_string` sat here
-    /// until issue #656's fix routed this tooltip through spans instead, so
+    /// until fix routed this tooltip through spans instead, so
     /// a hex-coloured `show_text` hover keeps its real colour.
     #[test]
     fn a_hover_events_value_survives_to_spans_for_the_frame() {

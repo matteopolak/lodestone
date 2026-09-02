@@ -440,7 +440,7 @@ impl Sim {
                     // The *other* half of vanilla's `case 2001`, which this arm
                     // used to drop: `playLocalSound(pos, getBreakSound(), …)`.
                     // `Level.destroyBlock` fires the event with **no** excluded
-                    // entity (`Level.java`), so this is a genuinely
+                    // entity, so this is a genuinely
                     // server-sent sound, not a prediction — every client in range
                     // hears it, the breaker included. Note which breaks reach here:
                     // `Level.destroyBlock`'s callers (a torch losing support, fire

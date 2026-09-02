@@ -733,7 +733,7 @@ pub enum NetUpdate {
     /// The background task is attempting to connect.
     Connecting,
     /// The session task reached a named step of establishing the session —
-    /// issue #449's phase names for the loading screen.
+    /// phase names for the loading screen.
     ///
     /// **Sent only from real boundaries in [`run_session`]**, never on a timer:
     /// see [`crate::menu::loading::ConnectPhase`] for why there are three
@@ -757,7 +757,7 @@ pub enum NetUpdate {
         text: lodestone_model::Text,
         /// Whether this is player chat (vs system/game-info).
         player: bool,
-        /// The sender's profile UUID — issue #419's filter key, mirrored from
+        /// The sender's profile UUID — filter key, mirrored from
         /// [`ClientEvent::Chat`] verbatim. Only v770's signed `player_chat`
         /// carries one; system, disguised, action-bar and every legacy-family
         /// message are `None` (`None` must be shown, never hidden).
@@ -1155,7 +1155,7 @@ pub enum NetUpdate {
     /// published" failure and turned a harmless double-press of the pause
     /// menu's Open to LAN button into a full disconnect.
     Error(String),
-    /// A publish-to-LAN request failed server-side — issue #562's own
+    /// A publish-to-LAN request failed server-side — own
     /// button pressed twice, or before an integrated server exists to
     /// publish. **Never ends the session**, unlike [`Self::Error`]: the net
     /// thread's `publish_rx` loop stays in its own `loop {}` and keeps
@@ -1461,7 +1461,7 @@ enum Origin {
         /// that world's stored seed wins and this is ignored; see
         /// [`lodestone_server::region_source::resolve_world_seed`].
         seed: i64,
-        /// Which bundled generator to build (issue #592's items 1 and 2) — a
+        /// Which bundled generator to build (items 1 and 2) — a
         /// **creation** parameter, same rule as `seed` immediately above:
         /// only consulted when there is no existing world on disk to defer to.
         /// Not cfg-gated on `wasm32`, unlike `world_dir`/`lan_port`/
@@ -1483,7 +1483,7 @@ enum Origin {
         #[cfg(not(target_arch = "wasm32"))]
         world_dir: Option<std::path::PathBuf>,
         /// Open this world to LAN on this TCP port instead of serving it over the
-        /// in-memory duplex (issue #535's scope 1). `0` asks the OS for a port.
+        /// in-memory duplex (scope 1). `0` asks the OS for a port.
         ///
         /// `Some` selects `IntegratedServer::open_to_lan`, and the local player
         /// then joins over loopback like any other LAN client — one transport for
@@ -1493,7 +1493,7 @@ enum Origin {
         #[cfg(not(target_arch = "wasm32"))]
         lan_port: Option<u16>,
         /// Run the real RSA/AES online-mode handshake on the LAN listener
-        /// `lan_port` opens (issue #273's shell-side control). Ignored when
+        /// `lan_port` opens (shell-side control). Ignored when
         /// `lan_port` is `None` — a purely in-memory singleplayer connection
         /// never reads this field at all, so it cannot authenticate no matter
         /// what this is set to. See [`open_lan_world`]'s `lan_online_mode`.
@@ -2929,7 +2929,7 @@ async fn run_async(
                 // `docs/chunk-memory-pool-footprint.md` predates carvers, ores and
                 // vegetation composing in and is not the figure to reason from.
                 //
-                // `world_type` (issue #592's items 1 and 2) picks which of the
+                // `world_type` (items 1 and 2) picks which of the
                 // seven bundled generators to build — [`preset_chunk_source`]
                 // is the full mapping; `Normal` reproduces the old
                 // unconditional call exactly. `(min_y, height)` come back
@@ -2954,7 +2954,7 @@ async fn run_async(
                             return;
                         }
                     };
-                // Open to LAN (issue #535's scope 1). Taken before the
+                // Open to LAN (scope 1). Taken before the
                 // in-memory constructors below because it is a *different
                 // server*: `IntegratedServer::open_to_lan` binds a TCP listener
                 // and every client — this one included — dials it, so there is no
@@ -3349,7 +3349,7 @@ async fn run_async(
             #[cfg(target_arch = "wasm32")]
             None => identity,
         };
-        // Published immediately, not after login: issue #189's roster refresh
+        // Published immediately, not after login: roster refresh
         // needs the identity to exclude as soon as a session exists, and there
         // is nothing fallible between here and the value itself (unlike
         // `shared_handle`, which waits on a real handshake).
@@ -4077,7 +4077,7 @@ fn lan_motd(world_dir: Option<&std::path::Path>) -> String {
         .map_or_else(|| "Lodestone World".to_string(), |name| name.to_string_lossy().into_owned())
 }
 
-/// The `LanConfig::online_mode` a LAN-open should carry (issue #273's shell
+/// The `LanConfig::online_mode` a LAN-open should carry (shell
 /// control): `None` when the host did not ask for it — the same `None` every
 /// caller here passed before this field existed, so a host who leaves the
 /// toggle off gets exactly the old offline behaviour and this makes no network
@@ -4145,7 +4145,7 @@ async fn open_lan_world(
         // `open_persistent_with_mobs`' call site carries.
         Some(dir) => {
             // Singleplayer publish-to-LAN only ever opens the overworld's own
-            // region store — `source` here is type-erased (issue #592's item
+            // region store — `source` here is type-erased (item
             // 2: it may be any of seven generators, not only
             // `OverworldChunkSource`), but always overworld-shaped data.
             let region = lodestone_server::region_source::RegionChunkSource::new(
@@ -5062,7 +5062,7 @@ fn forward(
             biome_names.apply(&names);
             return Ok(());
         }
-        // The server's Brigadier command tree (issue #470's decode, issue
+        // The server's Brigadier command tree (decode, issue
         // #471's wire). Folded into the shared `CommandTreeCell` and not
         // forwarded — same shape as the two registry arms above: the whole
         // tree replaces at once, and the chat box and command-block screen
@@ -5096,7 +5096,7 @@ fn forward(
             );
             return Ok(());
         }
-        // The lightning flash (`ClientLevel.java`). A bolt is an ordinary
+        // The lightning flash. A bolt is an ordinary
         // entity on the wire, so this arm **observes** the spawn and returns
         // without producing a `NetUpdate`: entities already reach the shell
         // through the ECS ingest fold, and forwarding one here would put a second
@@ -5400,7 +5400,7 @@ mod tests {
     /// where an account happens to be selected — and every gate would share one
     /// premium player file. That is the shared-offline-name eviction hazard
     /// `connect_as` exists to avoid, so the two origins must differ.
-    /// The toggle's own discriminating pair (issue #273's shell-side
+    /// The toggle's own discriminating pair (shell-side
     /// control, `WorldCreationConfig::online_mode`): the default must stay
     /// offline — every caller before this field existed passed `false` here
     /// — and the enabled path must actually construct an `OnlineModeConfig`,
@@ -5634,7 +5634,7 @@ mod tests {
         );
         // …and the control that `forward` is genuinely running: an event that
         // *does* have a shell-side reaction still arrives, and carries its
-        // message flattened to plain text (issue #103's death screen reads
+        // message flattened to plain text (death screen reads
         // this straight off `NetUpdate::Death`, through `Sim::death_message`).
         forward(
             &tx,

@@ -34,7 +34,7 @@
 //! Always selected, always at the **bottom** of the Selected column, never
 //! removable — matched by construction rather than by a flag, exactly as
 //! vanilla's own fixed-position `Pack.Position.BOTTOM` built-in pack is
-//! (`Pack.java`): [`PackRow::builtin`] rows are appended by
+//!: [`PackRow::builtin`] rows are appended by
 //! [`PacksNav::rebuild`] after the user's, never enumerated as transfer
 //! targets, and [`crate::config::SelectedPacks`] does not persist it at all, so
 //! there is no state that could deselect it. Labelled the way vanilla labels
@@ -95,7 +95,7 @@
 //!   (`LinearLayout.horizontal().spacing(8)`, `PackSelectionScreen.java`)
 //!   through [`options::footer_rects`].
 //! - The two lists: `width/2 - 15 - 200` and `width/2 + 15`, each 200 px wide,
-//!   at the header's bottom (`PackSelectionScreen.java`). Row geometry:
+//!   at the header's bottom. Row geometry:
 //!   `TransferableSelectionList::getRowWidth() = width - 4` (`:44-46`), item
 //!   height 36, and the underlined header entry's `(int)(9.0F * 1.5F) = 13`
 //!   (`:59-60`, Java's truncating cast).
@@ -198,7 +198,7 @@ impl PackRow {
 
 // -- geometry, transcribed (see the module docs) -----------------------------
 
-/// `TransferableSelectionList`'s per-list width (`PackSelectionScreen.java`).
+/// `TransferableSelectionList`'s per-list width.
 pub const LIST_W: f32 = 200.0;
 /// The gap between each list's inner edge and the screen's centre —
 /// `this.width / 2 - 15 - 200` / `this.width / 2 + 15` (`:165,169`).

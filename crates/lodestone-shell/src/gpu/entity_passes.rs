@@ -357,7 +357,7 @@ fn apply_boat_rock(
 }
 
 /// Hides an armour stand's arms and/or base plate, per its
-/// `ArmorStand.DATA_CLIENT_FLAGS` byte — issue #643's remaining half, once
+/// `ArmorStand.DATA_CLIENT_FLAGS` byte — remaining half, once
 /// the byte itself reaches `EntityDraw::armor_stand`.
 ///
 /// Vanilla toggles `ModelPart.visible` directly

@@ -62,9 +62,8 @@ use crate::hud::VanillaFont;
 
 use super::builder::Builder;
 
-/// `TooltipRenderUtil.MOUSE_OFFSET` (`TooltipRenderUtil.java`) — the tooltip's
-/// text origin sits `(+12, -12)` from the cursor
-/// (`DefaultTooltipPositioner.java`).
+/// `TooltipRenderUtil.MOUSE_OFFSET` — the tooltip's
+/// text origin sits `(+12, -12)` from the cursor.
 const MOUSE_OFFSET: f32 = 12.0;
 /// `TooltipRenderUtil.PADDING` (`:13`), the same `3` on all four sides.
 const PADDING: f32 = 3.0;
@@ -82,7 +81,7 @@ const LINE_H: f32 = 9.0;
 ///
 /// This and the two border colours are the pre-sprite constants from
 /// `GuiGraphics.renderTooltipInternal`; 26.2 draws `tooltip/background` and
-/// `tooltip/frame` instead (`TooltipRenderUtil.java`), which are nine-slice
+/// `tooltip/frame` instead, which are nine-slice
 /// PNGs whose art reproduces exactly this look. See the module doc for why the
 /// sprites are out of reach from this stream.
 const TOOLTIP_BG: [f32; 4] = [16.0 / 255.0, 0.0, 16.0 / 255.0, 240.0 / 255.0];
@@ -111,7 +110,7 @@ const RED: [f32; 4] = [1.0, 85.0 / 255.0, 85.0 / 255.0, 1.0];
 /// (`"When Applied:"`) colour.
 const DARK_PURPLE: [f32; 4] = [170.0 / 255.0, 0.0, 170.0 / 255.0, 1.0];
 
-/// `ClientBundleTooltip.GRID_WIDTH`/`getWidth` (`ClientBundleTooltip.java`) —
+/// `ClientBundleTooltip.GRID_WIDTH`/`getWidth` —
 /// the bundle image component's own fixed width, centred within a wider box
 /// exactly like [`title_line`]'s text is left-aligned within it.
 const BUNDLE_GRID_W: f32 = 96.0;
@@ -179,7 +178,7 @@ pub(super) struct TooltipLine {
 /// order, restricted to what this build actually has data for.
 ///
 /// The first line is always the hover name. `advanced` adds
-/// `addDetailsToTooltip`'s `isAdvanced()` block (`ItemStack.java`), in
+/// `addDetailsToTooltip`'s `isAdvanced()` block, in
 /// vanilla's order: durability first (**only when damaged**), then the item id,
 /// then the component count.
 ///
@@ -320,7 +319,7 @@ fn hover_name(stack: &ItemStack) -> String {
     title_line(stack).text
 }
 
-/// `PotionContents.addPotionTooltip` (`PotionContents.java`) for a potion-family
+/// `PotionContents.addPotionTooltip` for a potion-family
 /// stack: empty for every other item (`stack.potion_effect_id()` is `None` unless
 /// [`super::creative::potion_color_for`] — or, on a real join, a decode this build
 /// does not yet perform — attached one; see this module's own doc for that gap).
@@ -593,7 +592,7 @@ fn format_attribute_amount(raw_amount: f64, percent: bool) -> String {
 ///   needing a second gate here.
 /// * **slot holds a stack** — vanilla's
 ///   `if (hoveredSlot != null && hoveredSlot.hasItem())`
-///   (`AbstractContainerScreen.java`).
+///  .
 /// * **nothing carried** — the same line's `&& carried.isEmpty()`. This is also
 ///   what makes the submission-order layering sound: the tooltip is emitted after
 ///   the carried stack, so if both could show at once the tooltip would cover it.
@@ -843,12 +842,12 @@ fn wrap_bundle_description(font: &VanillaFont) -> Vec<String> {
 }
 
 /// `BundleContents.getWeight`/`computeContentWeight`/`getWeight`
-/// (`BundleContents.java`) as an `f32` rather than an exact `Fraction` — this
+/// as an `f32` rather than an exact `Fraction` — this
 /// build has no rational type, and the progress bar only ever quantises the
 /// result to [`BUNDLE_PROGRESSBAR_FILL_MAX`] steps, so a float loses nothing
 /// the sprite could show. Recurses for a bundle nested inside a bundle
 /// (`BUNDLE_IN_BUNDLE_WEIGHT = 1/16`, added on top of the nested bundle's own
-/// weight) — the recursive-decode chain issue #692's audit found genuinely
+/// weight) — the recursive-decode chain audit found genuinely
 /// complete (see this module's caller for the pointer). A beehive's
 /// `minecraft:bees` clause (`getWeight`'s `BEEHIVE_WEIGHT = 1`) is not
 /// modelled: this build has no `Bees` component anywhere, so a bee nest
@@ -1275,7 +1274,7 @@ mod tests {
     /// The recursive clause: a bundle nested inside a bundle contributes its
     /// own weight plus [`BUNDLE_IN_BUNDLE_WEIGHT`]'s `1/16` —
     /// `BundleContents::getWeight`'s `nestedWeight.add(BUNDLE_IN_BUNDLE_WEIGHT)`.
-    /// This is also the discriminating case for issue #692's own claim that the
+    /// This is also the discriminating case for own claim that the
     /// recursive bundle-in-bundle decode is complete: a weight that only ever
     /// read the outer stack's own component would silently treat the inner
     /// bundle as weightless instead of `4/64 + 1/16`.

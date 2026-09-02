@@ -49,7 +49,7 @@
 //! - **Only `minecraft:writable_book` opens this screen.** A signed
 //!   `minecraft:written_book` opens vanilla's **read-only** `BookViewScreen`
 //!   instead, which sends nothing on the wire at all — out of scope for
-//!   issue #613's `EditBook` producer, which is specifically about the
+//!   `EditBook` producer, which is specifically about the
 //!   *editable* book.
 //!
 //! ## `saveChanges`'s slot addressing
@@ -164,7 +164,7 @@ impl BookEditState {
             .with_character_limit(PAGE_CHAR_LIMIT)
             .with_line_limit(PAGE_LINE_LIMIT);
         page.set_value(&pages[0], true);
-        // `setInitialFocus(this.titleBox)` (`BookSignScreen.java`): the title
+        // `setInitialFocus(this.titleBox)`: the title
         // box is the screen's only field, so it holds focus for its whole
         // life — see [`Self::title`]'s own doc on why this state does not
         // route focus through the generic multi-widget system.

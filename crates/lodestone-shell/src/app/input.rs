@@ -67,7 +67,7 @@ pub(crate) struct KeyGate {
     /// **chord** rather than a plain key — That fix.
     ///
     /// Vanilla models this as a second `KeyMapping`, `keyDebugModifier`, bound to
-    /// the *same* keysym as `keyDebugOverlay` (`Options.java`), plus the
+    /// the *same* keysym as `keyDebugOverlay`, plus the
     /// `modifierAndOverlayIsSame` bookkeeping in `KeyboardHandler`. Here it is a
     /// gate flag rather than a bindable action, so it lands in `resolve_key`
     /// where every other input decision already lives instead of behind a driver
@@ -118,7 +118,7 @@ pub(crate) struct KeyGate {
     /// chain.
     pub anvil_rename_active: bool,
     /// The local player's server-authoritative game mode is `Spectator`
-    /// (`Sim::is_spectator`) — issue #613's `TeleportToEntity` remainder.
+    /// (`Sim::is_spectator`) — `TeleportToEntity` remainder.
     /// Gates the hotbar-number-key intercept that opens
     /// [`crate::menu::spectator_menu`]'s screen; **not** gated on
     /// [`gameplay`](Self::gameplay) itself (that is asked separately at the
@@ -192,7 +192,7 @@ pub(crate) enum KeyOutcome {
     ///
     /// Unlike its two siblings above this does **not** toggle a render flag: it
     /// flips a *persisted option*, `Options.advancedItemTooltips`
-    /// (`Options.java`), which is what `ItemStack.getTooltipLines` consults
+    ///, which is what `ItemStack.getTooltipLines` consults
     /// through `TooltipFlag.Default.ADVANCED`. So the driver's arm writes it
     /// through `MenuNav` (which owns `Options` and persists eagerly) rather than
     /// into an `AtomicBool` — see
@@ -265,41 +265,41 @@ pub(crate) enum KeyOutcome {
     ///
     /// The gameplay one carries **no slot**: it is a bare action, and the server
     /// exchanges main hand for off hand itself
-    /// (`ServerGamePacketListenerImpl.java`). So this variant carries
+    ///. So this variant carries
     /// no payload — there is nothing to hit-test and nothing to address, which
     /// is exactly what distinguishes it from `ContainerSwap`.
     ///
     /// Vanilla's one guard is `!player.isSpectator()`
-    /// (`Minecraft.java`). That is session state rather than key state,
+    ///. That is session state rather than key state,
     /// so like `ContainerSwap`'s two guards it lives at the driver's `match` arm.
     SwapOffhand,
     /// A `ContainerInput::Throw` against the **hovered** slot while a
     /// container screen is open — vanilla's `key.drop` inside
     /// `AbstractContainerScreen.keyPressed`
-    /// (`AbstractContainerScreen.java`), gated there on
+    ///, gated there on
     /// `hoveredSlot != null && hoveredSlot.hasItem()` — **not** an empty
     /// cursor, which `doClick` applies itself once the click reaches it
-    /// (`AbstractContainerMenu.java`). `ctrl` selects drop-**stack**
+    ///. `ctrl` selects drop-**stack**
     /// (button `1`) over drop-one (button `0`), the only thing the modifier
     /// changes; carried here rather than read at the driver arm because
     /// `resolve_key` is where every other input decision already lives (see
     /// [`InputAction::Drop`]'s docs).
     ContainerDrop { ctrl: bool },
     /// `key.drop` pressed with **no screen open** — vanilla's own
-    /// `Minecraft.handleKeybinds` drop path (`Minecraft.java`). A
+    /// `Minecraft.handleKeybinds` drop path. A
     /// different mechanism from [`Self::ContainerDrop`], the same split
     /// [`Self::SwapOffhand`] makes against [`Self::ContainerSwap`]: this one
     /// carries no slot, only which of `ClientAction::DropSelectedItem`/
     /// `DropSelectedItemStack` `ctrl` selects.
     Drop { ctrl: bool },
     /// `key.pickItem` pressed with **no screen open** — vanilla's
-    /// `Minecraft.pickBlockOrEntity` (`Minecraft.java`). `ctrl` is
+    /// `Minecraft.pickBlockOrEntity`. `ctrl` is
     /// `hasControlDown()`, forwarded as `include_data` on whichever
     /// `ClientAction` fires, exactly the same carry-it-here split
     /// [`Self::Drop`] makes.
     PickItem { ctrl: bool },
     /// `key.pickItem` pressed with a container screen open — `ClickType::CLONE`
-    /// against the hovered slot (`AbstractContainerScreen.java`). No
+    /// against the hovered slot. No
     /// payload: unlike [`Self::ContainerDrop`], this click has no
     /// modifier-selected variant.
     ContainerPickItem,
@@ -452,7 +452,7 @@ pub(crate) fn resolve_key(
         Some(KeyOutcome::AnvilRename)
     } else if gate.container_open && pressed {
         // Vanilla's order, from `AbstractContainerScreen.keyPressed`
-        // (`AbstractContainerScreen.java`): the inventory binding closes
+        //: the inventory binding closes
         // the screen first, then `checkHotbarKeyPressed` tries the off-hand key
         // and then the nine hotbar keys. Anything else is swallowed — hence
         // `None`, not a fall-through, so no gameplay binding fires behind an open
@@ -651,8 +651,7 @@ pub(crate) fn resolve_key(
 
 /// Vanilla's `KeyboardHandler.decorateDebugComponent`/`debugFeedback`: every
 /// F3 chord that changes something prints a `[Debug]: <message>` line to
-/// chat, with the prefix bold and `ChatFormatting.YELLOW`
-/// (`KeyboardHandler.java`).
+/// chat, with the prefix bold and `ChatFormatting.YELLOW`.
 ///
 /// `YELLOW` is a legacy-representable colour — `TextColor::legacy_code()`
 /// returns `Some` for it — so this needs no
@@ -700,7 +699,7 @@ pub(crate) fn debug_enabled_feedback(label: &str, now: bool) -> String {
 }
 
 /// `KeyboardHandler.keyDebugCopyLocation`'s `String.format`
-/// (`KeyboardHandler.java`): `/execute in %s run tp @s %.2f %.2f %.2f %.2f
+///: `/execute in %s run tp @s %.2f %.2f %.2f %.2f
 /// %.2f`, the dimension identifier then x/y/z/yaw/pitch each to two decimal
 /// places. Pure so `KeyOutcome::CopyLocation`'s driver arm and this module's
 /// own test share the exact format rather than the test re-deriving it from
@@ -726,7 +725,7 @@ pub(crate) fn copy_location_command(
 ///
 /// # No local prediction, and that is the vanilla behaviour rather than a shortcut
 ///
-/// `Minecraft.handleKeybinds` (`Minecraft.java`) is the entire client
+/// `Minecraft.handleKeybinds` is the entire client
 /// half of this feature:
 ///
 /// ```text
@@ -776,7 +775,7 @@ pub(crate) fn offhand_swap_action(
 ///
 /// # The one guard
 ///
-/// `!player.isSpectator()` (`Minecraft.java`), the exact same guard
+/// `!player.isSpectator()`, the exact same guard
 /// `offhand_swap_action` applies and for the same reason: a spectator has
 /// nothing to drop, vanilla declines to send at all, and the server re-checks
 /// regardless (`ServerGamePacketListenerImpl`'s handling of

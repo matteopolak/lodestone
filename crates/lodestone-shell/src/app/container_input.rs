@@ -155,7 +155,7 @@ impl WindowApp {
                 }
             }
             // Vanilla's All/Craftable cycle-button
-            // (`RecipeBookComponent.java`). Cycling it re-browses the
+            //. Cycling it re-browses the
             // corpus through `craftable_in` and swaps the button art, so this
             // arm is two visible changes, not a flag.
             Hit::FilterButton => {
@@ -177,7 +177,7 @@ impl WindowApp {
     /// Resolve a click at the current cursor against the merchant screen's
     /// trade-list buttons and act on it, returning whether it **consumed**
     /// the click — vanilla's `postButtonClick`
-    /// (`MerchantScreen.java`): select the row, remember it, and
+    ///: select the row, remember it, and
     /// tell the server (that fix's UI half).
     ///
     /// Given first refusal the same way
@@ -211,7 +211,7 @@ impl WindowApp {
     }
 
     /// Resolves a click against the beacon screen's power buttons and
-    /// confirm/cancel controls (issue #613's `SetBeaconEffects` remainder),
+    /// confirm/cancel controls (`SetBeaconEffects` remainder),
     /// given first refusal for the same reason
     /// [`Self::handle_merchant_click`]'s own doc gives — this screen's
     /// buttons never overlap a real slot either, but a contended screen is
@@ -270,7 +270,7 @@ impl WindowApp {
         true
     }
 
-    /// The crafter's own click override (issue #613's `SetContainerSlotState`
+    /// The crafter's own click override (`SetContainerSlotState`
     /// remainder): a plain click on an empty, non-spectator crafter slot
     /// toggles that slot's enabled/disabled state — `CrafterScreen.slotClicked`
     /// (`.cache/mc/26.2/client-src`)'s `PICKUP` case: re-enable a disabled
@@ -330,7 +330,7 @@ impl WindowApp {
 
     /// One `MouseWheel` notch over a slot holding a bundle: scroll-selects
     /// which of its contents is highlighted and reports the new selection to
-    /// the server (issue #616's `BUNDLE_ITEM_SELECTED` / #613's
+    /// the server (`BUNDLE_ITEM_SELECTED` / #613's
     /// `SelectBundleItem` remainder — see `crate::container::bundle`'s module
     /// doc for the algorithm and why the tracked selection lives on
     /// `WindowApp` rather than mutated into the stack itself). Returns
@@ -632,7 +632,7 @@ impl WindowApp {
     /// (part 3).
     ///
     /// Vanilla's `AbstractContainerScreen.checkHotbarKeyPressed`
-    /// (`AbstractContainerScreen.java`) guards on exactly two pieces of
+    /// guards on exactly two pieces of
     /// **state**: `menu.getCarried().isEmpty()` and `hoveredSlot != null`. Both
     /// are checked here rather than in `resolve_key`, which only knows about keys.
     /// Failing either does nothing — the same thing an open container did with
@@ -700,7 +700,7 @@ impl WindowApp {
     /// Goes through [`MenuInput::key_pressed`] rather than building the
     /// `Click` directly the way [`Self::send_container_swap`] does, because
     /// `key_pressed` already carries vanilla's `hoveredSlot.hasItem()` guard
-    /// (`AbstractContainerScreen.java`) and the `PickItem`/`Drop`
+    /// and the `PickItem`/`Drop`
     /// `else if` — duplicating either here would be a second copy that can
     /// drift from the one `container.rs` already tests. `Click::drop_one`/
     /// `drop_stack` and `do_throw` (`lodestone-game`) were built and tested
@@ -745,7 +745,7 @@ impl WindowApp {
     }
 
     /// `key.pickItem` pressed with a container screen open — `ClickType::CLONE`
-    /// against the hovered slot (`AbstractContainerScreen.java`).
+    /// against the hovered slot.
     ///
     /// Identical in shape to [`Self::send_container_drop`] except that there is
     /// no modifier variant to carry: vanilla's clone click has no `ctrl` form.

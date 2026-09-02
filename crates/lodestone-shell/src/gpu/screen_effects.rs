@@ -58,7 +58,7 @@ pub struct ScreenEffects {
     /// Whether the local player is scoping with a held spyglass
     /// — vanilla's `Player.isScoping()`:
     /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
-    /// (`Player.java`). First-person-gated, like
+    ///. First-person-gated, like
     /// [`Self::wearing_pumpkin`] (both live inside `Hud.
     /// extractCameraOverlays`'s `if (getCameraType().isFirstPerson())`
     /// block, `Hud.java`) — unlike freeze/nausea/portal below.
@@ -99,11 +99,11 @@ impl ScreenEffects {
     ///   so that conjunct is omitted — never a false negative, since an
     ///   unmodelled state cannot suppress a draw it never influences);
     ///   pumpkin/scoping come from `Hud.extractCameraOverlays`'s own nested
-    ///   `if (getCameraType().isFirstPerson())` block (`Hud.java`).
+    ///   `if (getCameraType().isFirstPerson())` block.
     /// - [`Self::freeze_percent`]/[`Self::nausea_intensity`]/
     ///   [`Self::portal_intensity`] are **not** — vanilla draws
-    ///   `player.getTicksFrozen() > 0` (`Hud.java`) and the
-    ///   portal/confusion overlays (`Hud.java`) as *siblings* of the
+    ///   `player.getTicksFrozen() > 0` and the
+    ///   portal/confusion overlays as *siblings* of the
     ///   `if (isFirstPerson())` block, not nested inside it, so they paint in
     ///   third person too. Checked against the jar directly, not assumed —
     ///   see `docs/screen-overlays.md`.

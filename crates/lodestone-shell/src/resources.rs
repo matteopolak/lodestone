@@ -324,7 +324,7 @@ pub(crate) fn open_vanilla_pack_stack() -> Option<ResourceManager> {
 /// Lays the currently selected user packs on top of the built-in pack.
 ///
 /// `builtin` is the bottom of the stack — vanilla's own `Pack.Position.BOTTOM`
-/// fixed-position built-in pack (`Pack.java`), which is why the
+/// fixed-position built-in pack, which is why the
 /// Resource Packs screen can never move or remove it.
 fn build_pack_stack(builtin: Box<dyn ResourceSource>) -> ResourceManager {
     let mut sources: Vec<Box<dyn ResourceSource>> = vec![builtin];
@@ -347,7 +347,7 @@ pub fn resource_packs_dir() -> PathBuf {
 }
 
 /// The user's `datapacks/` folder — Create New World's Data Packs sub-screen
-/// (issue #592's More tab) scans this the same way [`resource_packs_dir`] is
+/// (More tab) scans this the same way [`resource_packs_dir`] is
 /// scanned for resource packs, through the identical [`scan_resource_packs_in`]
 /// / [`DiscoveredPack`] pair: a data pack and a resource pack share the exact
 /// on-disk shape (`pack.mcmeta` plus an optional `pack.png`), so nothing about
@@ -1378,7 +1378,7 @@ pub fn load_glint_texture() -> Option<lodestone_assets::Image> {
 /// [`GuiAtlas::build_with_extras`](lodestone_render::GuiAtlas::build_with_extras).
 ///
 /// Vanilla's `LogoRenderer` blits these two by raw path
-/// (`LogoRenderer.java`), not through the sprite atlas, so they live
+///, not through the sprite atlas, so they live
 /// outside `textures/gui/sprites/**` and [`load_gui_atlas`] can never see them.
 ///
 /// Both are **hi-res** in 26.2 — `minecraft.png` is 1024×256 and `edition.png`
@@ -1413,7 +1413,7 @@ pub const UNKNOWN_SERVER_TEXTURE: (&str, &str) = (
 );
 
 /// The Resource Packs screen's fallback pack icon —
-/// `PackSelectionScreen.DEFAULT_ICON` (`PackSelectionScreen.java`), blitted at
+/// `PackSelectionScreen.DEFAULT_ICON`, blitted at
 /// 32×32 for any pack that ships no readable `pack.png`, which includes the
 /// built-in row.
 ///

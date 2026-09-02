@@ -168,7 +168,7 @@ pub enum MenuAction {
     /// variant carries.
     ///
     /// It used to carry `Option<WorldCreationConfig>` — `None` meaning "the one
-    /// implicit world at `saves/world`". That was issue #468's reading (1) and it
+    /// implicit world at `saves/world`". That was reading (1) and it
     /// is why Create New World could not create a second world; see
     /// [`crate::saves`]'s module doc.
     ///
@@ -196,7 +196,7 @@ pub enum MenuAction {
     /// address it already has a result for. A refresh that skipped every row is a
     /// button that does nothing. This one discards the cached results first — which
     /// is also what vanilla does, by throwing the whole screen away and building a
-    /// new one with a fresh `ServerList` (`JoinMultiplayerScreen.java`).
+    /// new one with a fresh `ServerList`.
     RefreshList,
     /// The pause menu's "Quit to Title" was activated, or the
     /// death screen's "Title Screen" button was: [`UiState`] has already moved
@@ -343,7 +343,7 @@ pub mod sign_edit_row {
     pub const DONE: usize = super::sign_edit::LINE_COUNT;
 }
 /// `ManageServerScreen`'s `manageServer.resourcePack` cycle button
-/// (`ManageServerScreen.java`). **Live**: a click cycles
+///. **Live**: a click cycles
 /// [`super::servers::ServerPackPolicy`] (`MenuNav::click`'s `ServerEdit`
 /// arm), and the value is what a live join now reads to decide whether a
 /// pushed resource pack is silently applied, silently declined, or prompted
@@ -351,11 +351,11 @@ pub mod sign_edit_row {
 /// permanently inactive, on the grounds that `ServerEntry` carried no
 /// `pack_status` field to cycle; that gap is closed.
 pub const RESOURCE_PACK_ROW: usize = 2;
-/// `CommonComponents.GUI_DONE` (`ManageServerScreen.java`) — saves the
+/// `CommonComponents.GUI_DONE` — saves the
 /// form. A real, clickable row alongside the existing Enter/Tab keyboard path
 /// (see [`MenuNav::click`]'s `Screen::ServerEdit` arm).
 pub const DONE_ROW: usize = 3;
-/// `CommonComponents.GUI_CANCEL` (`ManageServerScreen.java`) — discards
+/// `CommonComponents.GUI_CANCEL` — discards
 /// the form. See [`DONE_ROW`].
 pub const CANCEL_ROW: usize = 4;
 
@@ -441,7 +441,7 @@ pub enum FormOutcome {
 /// whole state is derivable, and impossible for a text field: rebuilding one
 /// would reset the caret, the selection and the scroll offset sixty times a
 /// second. `Screen.rebuildWidgets` has exactly this consequence in vanilla too
-/// — it calls `clearFocus()` (`Screen.java`), so a rebuilt screen has no
+/// — it calls `clearFocus()`, so a rebuilt screen has no
 /// focus by construction.
 ///
 /// So this is the first menu state in the shell that is *widget* state rather
@@ -483,7 +483,7 @@ impl EditForm {
     /// A blank form for a new entry, focused on the name field.
     ///
     /// The initial focus is set explicitly, which is
-    /// `Screen.setInitialFocus(GuiEventListener)` (`Screen.java`) rather
+    /// `Screen.setInitialFocus(GuiEventListener)` rather
     /// than the no-argument overload — that one is gated on
     /// `minecraft.getLastInputType().isKeyboard()`, a piece of state this shell
     /// does not track. Without it the form would open with **nothing** focused
@@ -495,7 +495,7 @@ impl EditForm {
             super::render::field_row_rects(SEED_CANVAS.0, SEED_CANVAS.1);
         // The narration text was "Name"/"Address" — plausible-looking and
         // wrong. Vanilla's are `manageServer.enterName`/`manageServer.enterIp`
-        // (`ManageServerScreen.java`), whose `en_us.json` values are
+        //, whose `en_us.json` values are
         // "Server Name"/"Server Address" — which happen to already be what
         // `render.rs`'s (unrelated) `detail` line under each field shows, so
         // this was invisible on screen and only wrong to a screen reader.
@@ -610,7 +610,7 @@ impl EditForm {
     ///
     /// **That order is why Up/Down move between fields while Left/Right move the
     /// caret**, with no rule anywhere saying so: `EditBox.keyPressed` handles
-    /// 262/263 and declines 264/265 (`EditBox.java`), so the vertical
+    /// 262/263 and declines 264/265, so the vertical
     /// pair falls through to navigation and the horizontal pair never gets there.
     pub fn handle_key(&mut self, key: MenuKey) -> FormOutcome {
         // A printable character is `charTyped`, a *different* callback in vanilla
@@ -723,8 +723,8 @@ impl EditForm {
 /// banned account, `TitleScreen.java`).
 ///
 /// The three 20×20 icon buttons come from `CommonButtons`
-/// (`TitleScreen.java`); vanilla positions them with
-/// `getHorizontalPosition(i, 3, 20)` (`TitleScreen.java`).
+///; vanilla positions them with
+/// `getHorizontalPosition(i, 3, 20)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainButton {
     /// Open the singleplayer world list ([`Screen::WorldSelect`], issue #397) —
@@ -895,14 +895,14 @@ impl MainButton {
 ///
 /// Which Options layout is reproduced is a real fork in vanilla:
 /// `minecraft.hasSingleplayerServer()` splits the row into Options + Open to LAN
-/// (`PauseScreen.java`), and only the `else` branch gives Options the
-/// full 204 px width (`PauseScreen.java`). This client has no integrated
+///, and only the `else` branch gives Options the
+/// full 204 px width. This client has no integrated
 /// server at all (see the module docs), so `hasSingleplayerServer()` is
 /// unconditionally false for it and the full-width branch is the correct one.
 ///
 /// Vanilla's last button is labelled by
 /// `CommonComponents.disconnectButtonLabel(isLocalServer)` — "Save and Quit to
-/// Title" locally, "Disconnect" remotely (`CommonComponents.java`). This
+/// Title" locally, "Disconnect" remotely. This
 /// client uses "Disconnect" for both, because [`SessionKind::Singleplayer`] is
 /// currently the local dev world with no persistence: "Save and Quit" would
 /// promise a save that does not happen.
@@ -944,7 +944,7 @@ pub enum PauseButton {
     /// chat-signing context this client does not have (see
     /// [`super::social`]'s module docs). If secure chat signing lands, that
     /// is the doc to update, not this one — this comment used to be the only
-    /// place the dependency was written down, and issue #189's own tracking
+    /// place the dependency was written down, and own tracking
     /// note flagged that as a trap because comments drift; it no longer needs
     /// to be, now that `super::social`'s module docs carry it instead.
     PlayerReporting,
@@ -969,15 +969,15 @@ pub enum PauseButton {
     /// Vanilla's `menu.multiplayerOptions.button`, whose `en_us` value really is
     /// **"Open to LAN"** — the half-width sibling of [`Self::Options`] that
     /// `PauseScreen.createPauseMenu`'s `hasSingleplayerServer()` branch adds
-    /// (`PauseScreen.java`). Issue #535's scope 1.
+    ///. Issue #535's scope 1.
     ///
-    /// **Conditionally present, since issue #535's scope 2 — but not for the
+    /// **Conditionally present, since scope 2 — but not for the
     /// reason a first read of vanilla suggests.** `PauseScreen` in the 26.2
-    /// decompile (`PauseScreen.java`) shows this row whenever
+    /// decompile shows this row whenever
     /// `hasSingleplayerServer()` is true **regardless of publish state**: it
     /// is vanilla's `MultiplayerOptionsScreen` behind the button that changes,
     /// an on/off `CycleButton` seeded from `IntegratedServer.isPublished()`
-    /// (`MultiplayerOptionsScreen.java`) — vanilla never re-presses a "publish"
+    /// — vanilla never re-presses a "publish"
     /// action against an already-published world because the same button
     /// re-opens a form that can also *unpublish*. This client has no such
     /// form — [`MenuAction::OpenToLan`]'s consumer is a single-shot publish
@@ -1021,7 +1021,7 @@ pub const PAUSE_BUTTONS: [PauseButton; 10] = [
 ];
 
 /// [`PAUSE_BUTTONS`], minus [`PauseButton::OpenToLan`] — the row list once
-/// the world is published (issue #535's scope 2). See that variant's own doc
+/// the world is published (scope 2). See that variant's own doc
 /// for why this is an *omission* rather than a disabled row: this client's
 /// Open to LAN has no unpublish/toggle form behind it, unlike vanilla's, so a
 /// published world has nothing left for the row to do.
@@ -1087,7 +1087,7 @@ impl PauseButton {
     }
 
     /// The GUI sprite drawn centred in the button instead of a label, 15×15
-    /// inside a 20×20 button (`PauseScreen.java`).
+    /// inside a 20×20 button.
     #[must_use]
     pub fn icon(self) -> Option<&'static str> {
         match self {
@@ -1101,12 +1101,12 @@ impl PauseButton {
 }
 
 /// The multiplayer screen's title — `multiplayer.title`'s `en_us` string
-/// (`JoinMultiplayerScreen.java`), which
+///, which
 /// `HeaderAndFooterLayout.addTitleHeader` centres in the header band.
 pub const SERVER_LIST_TITLE: &str = "Play Multiplayer";
 
 /// `JoinMultiplayerScreen`'s seven footer buttons (#396), in the order they are
-/// added to the two footer rows (`JoinMultiplayerScreen.java`) — which is
+/// added to the two footer rows — which is
 /// also the order [`super::render::server_list_footer_slot`] reads out of the
 /// arranged layout, and the order the rows appear in after the server entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1164,8 +1164,7 @@ impl ServerListButton {
         }
     }
 
-    /// Vanilla's declared width: 100 for the top row, 74 for the lower one
-    /// (`JoinMultiplayerScreen.java`).
+    /// Vanilla's declared width: 100 for the top row, 74 for the lower one.
     ///
     /// The **draw** does not read this — [`super::render::server_list_footer_slot`]
     /// returns the width the arranged layout produced, which is the number that
@@ -1215,7 +1214,7 @@ impl ServerListButton {
 }
 
 /// The death screen's two widgets, vanilla's
-/// `DeathScreen.init` (`DeathScreen.java`). Both live; unlike
+/// `DeathScreen.init`. Both live; unlike
 /// [`MainButton`]/[`PauseButton`] there is nothing present-and-disabled here
 /// — vanilla itself only ever shows these two.
 ///
@@ -1307,7 +1306,7 @@ pub struct MenuNav {
     list_button: Option<usize>,
     /// How far the multiplayer list is scrolled down, **in logical pixels** —
     /// vanilla's `AbstractScrollArea.scrollAmount`, which is a `double` and is
-    /// subtracted straight from a row's y (`AbstractSelectionList.java`).
+    /// subtracted straight from a row's y.
     ///
     /// **This was a `usize` row counter until issue #445**, and that was the
     /// whole of the owner's bug report: one wheel notch is
@@ -1336,7 +1335,7 @@ pub struct MenuNav {
     /// position questions a row index cannot. There is exactly one such question
     /// so far and it is vanilla's: which quadrant of a server row's 32 px favicon
     /// the cursor is in decides whether a click joins, moves the row up, or moves
-    /// it down (`ServerSelectionList.java`).
+    /// it down.
     ///
     /// `None` until the first `CursorMoved`, which is the state a keyboard-only
     /// session is in — and the quadrant actions must then simply not fire, rather
@@ -2180,14 +2179,14 @@ impl MenuNav {
                     Some(crate::menu::options::list_spec(page, self.settings.scroll()))
                 }
             }
-            // Create New World's Game Rules sub-screen (issue #592's More
+            // Create New World's Game Rules sub-screen (More
             // tab). Gated on the nested mode, not the bare screen — the
             // ordinary Game/World/More tabs have no list at all, so an
             // unconditional arm here would hang a scrollbar beside them.
             super::Screen::CreateWorld if self.create_world.game_rules_open() => Some(
                 crate::menu::create_world::game_rules_list_spec(self.create_world.game_rules_scroll()),
             ),
-            // Create New World's Data Packs sub-screen (issue #592's More
+            // Create New World's Data Packs sub-screen (More
             // tab). Same guard shape as the Game Rules arm immediately
             // above, gated on its own nested mode — the length is not a
             // constant the way `GAME_RULES.len()` is, since it comes from a
@@ -2308,8 +2307,7 @@ impl MenuNav {
 
     /// Scrolls the multiplayer list by `notches` of mouse wheel — vanilla's
     /// `AbstractScrollArea::mouseScrolled`,
-    /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())`
-    /// (`AbstractScrollArea.java`).
+    /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())`.
     ///
     /// `notches` is winit's `scrollY` verbatim, so **positive scrolls up**
     /// (toward entry 0), matching vanilla's sign — the negation lives in
@@ -2392,7 +2390,7 @@ impl MenuNav {
     /// `None` when there is no cursor yet or it is outside that row.
     ///
     /// This is `relX`/`relY` in `OnlineServerEntry.mouseClicked` — `event.x() -
-    /// getContentX()` (`ServerSelectionList.java`) — and it is derived
+    /// getContentX()` — and it is derived
     /// through [`super::render::server_row_content_rect`], the same expression the
     /// draw uses, rather than restating the row geometry here. That is what keeps
     /// the highlighted quadrant and the quadrant that acts from drifting apart.
@@ -2526,7 +2524,7 @@ impl MenuNav {
     }
 
     /// Whether the pause menu should offer its own Open to LAN row at all —
-    /// vanilla's `hasSingleplayerServer()` branch (`PauseScreen.java`),
+    /// vanilla's `hasSingleplayerServer()` branch,
     /// **not** [`Self::is_lan_published`] alone: a multiplayer session has
     /// nothing local to publish and must take the same collapsed,
     /// full-width-Options shape a *published* singleplayer world does, even
@@ -2754,9 +2752,9 @@ impl MenuNav {
     ///
     /// A **disabled** row is still hovered, matching vanilla exactly:
     /// `AbstractWidget::extractRenderState` sets `isHovered` from geometry alone
-    /// and never consults `active` (`AbstractWidget.java`), while
+    /// and never consults `active`, while
     /// `WidgetSprites::get(active, focused)` returns `button_disabled` whichever
-    /// way `focused` went (`WidgetSprites.java`) — so a greyed-out button
+    /// way `focused` went — so a greyed-out button
     /// under the cursor looks greyed-out, not highlighted. The half that matters
     /// is the *click*: `key_main`/`key_paused` refuse Enter on a disabled button,
     /// which is why moving the highlight onto one here is safe.
@@ -2974,7 +2972,7 @@ impl MenuNav {
                     self.form.focus_row(row);
                     MenuAction::None
                 }
-                // Vanilla's Done/Cancel (`ManageServerScreen.java`), now
+                // Vanilla's Done/Cancel, now
                 // real clickable rows since the screen's framework conversion
                 // — see `save_entry`/`cancel_edit`, also reached by
                 // Enter/Escape so the two paths cannot disagree.
@@ -3098,7 +3096,7 @@ impl MenuNav {
         if ui.screen() == Screen::BookView {
             return self.activate_book_view_row(ui, row);
         }
-        // The Spectator Menu (issue #613's `TeleportToEntity` remainder) —
+        // The Spectator Menu (`TeleportToEntity` remainder) —
         // same #391 shape: every row is a button (a team category, a
         // player, or Back), never a field.
         if ui.screen() == Screen::SpectatorMenu {
@@ -3174,7 +3172,7 @@ impl MenuNav {
     /// and a server could not stay selected while the cursor travelled to Join. A
     /// player reported it immediately. Vanilla reaches
     /// `AbstractSelectionList.setSelected` only from `setFocused`
-    /// (`AbstractSelectionList.java`) and the click paths — never from
+    /// and the click paths — never from
     /// hover; `ServerSelectionList.java` shows what hover *does* draw,
     /// which is a `fill(…, -1601138544)` scrim over the 32 px favicon plus the
     /// join / move-up / move-down sprite for the quadrant under the cursor.
@@ -3199,7 +3197,7 @@ impl MenuNav {
     /// [`Self::click`]'s multiplayer arm (#396).
     ///
     /// The row half is `OnlineServerEntry.mouseClicked`
-    /// (`ServerSelectionList.java`) in vanilla's own order: the join
+    /// in vanilla's own order: the join
     /// quadrant first, then the two move quadrants with their index guards, and
     /// **selection last** — a plain click selects and does not join.
     ///
@@ -3237,7 +3235,7 @@ impl MenuNav {
                     return self.swap_rows(row, row + 1);
                 }
             }
-            // Vanilla's own order (`ServerSelectionList.java`): after
+            // Vanilla's own order: after
             // the icon-quadrant checks above, **unconditionally**,
             // `if (doubleClick) join()` — it fires wherever on the row the
             // click landed, icon or not. `entry_icon_cursor` played no part
@@ -3412,7 +3410,7 @@ impl MenuNav {
             // page turns, which the catch-all below, being Escape-only,
             // would drop.
             Screen::BookView => self.key_book_view(ui, key),
-            // The Spectator Menu (issue #613's `TeleportToEntity`
+            // The Spectator Menu (`TeleportToEntity`
             // remainder) — its own arm for the same reason as its siblings
             // above: the catch-all's `UiState::on_escape` would work too
             // (its `Screen::SpectatorMenu` arm calls
@@ -3512,7 +3510,7 @@ impl MenuNav {
                     }
                     // Vanilla constructs `LanguageSelectScreen`/
                     // `AccessibilityOptionsScreen` directly from the title
-                    // (`TitleScreen.java`), with `lastScreen = this`
+                    //, with `lastScreen = this`
                     // — never through `OptionsScreen`. `open_at` lands on the
                     // page with an empty stack so Escape/Done leaves straight
                     // back to the title (one Escape, not two through the root
@@ -3622,7 +3620,7 @@ impl MenuNav {
     }
 
     /// Discards the form; the list is untouched. Vanilla's `CommonComponents.GUI_CANCEL`
-    /// (`ManageServerScreen.java`) and Escape's own meaning on this
+    /// and Escape's own meaning on this
     /// screen ([`FormOutcome::Cancel`]) — shared by [`key_edit`](Self::key_edit)
     /// and [`Self::click`]'s [`CANCEL_ROW`] arm so the button and the key do
     /// the exact same thing rather than two copies that could drift apart.
@@ -3640,7 +3638,7 @@ impl MenuNav {
         if !self.form.is_valid() {
             // Refuse rather than saving a row that cannot be dialed. Vanilla
             // reaches the same outcome by disabling the Done button instead
-            // (`ManageServerScreen.java`); this screen has no per-row
+            //; this screen has no per-row
             // `active` flag to disable it with, so refusing on activation is
             // the equivalent it can express.
             return MenuAction::None;
@@ -3783,7 +3781,7 @@ impl MenuNav {
             }
             CommandBlockRow::Done => {
                 // `populateAndSendPacket(); this.onClose();`
-                // (`CommandBlockEditScreen.java`) — vanilla sends first
+                // — vanilla sends first
                 // and closes second, and the order matters here for the same
                 // reason: `close_command_block` drops `self.command_block`, so
                 // the payload has to be taken off `state` before it goes.
@@ -3812,7 +3810,7 @@ impl MenuNav {
         };
         match key {
             // `onClose()` → `onDone()` → `removed()`, which sends
-            // unconditionally (`AbstractSignEditScreen.java`) — see the module
+            // unconditionally — see the module
             // doc on why this screen has no Cancel that skips the send.
             MenuKey::Escape => {
                 let submit = state.to_submit();
@@ -3873,7 +3871,7 @@ impl MenuNav {
         MenuAction::SignUpdate(submit)
     }
 
-    /// The Spectator Menu (issue #613's `TeleportToEntity` remainder). No
+    /// The Spectator Menu (`TeleportToEntity` remainder). No
     /// keyboard row cursor — see [`spectator_menu::SpectatorMenuState::hovered`]'s
     /// own doc for why this is mouse-only, the same shape
     /// [`Self::key_book_edit`]'s doc names for its own screen's simplest
@@ -4119,7 +4117,7 @@ impl MenuNav {
 
     /// The one thing a [`super::world_select::WorldSelectOutcome`] can ask of
     /// the screen. Used to be an associated function that touched no
-    /// `MenuNav` state; issue #190's `CreateWorld` arm needs to reset
+    /// `MenuNav` state; `CreateWorld` arm needs to reset
     /// [`Self::create_world`] on entry (the same "fresh screen, not a
     /// resumed one" rule every other `open_*`/`reset` pair in this file
     /// follows), so it is a method now.
@@ -4200,7 +4198,7 @@ impl MenuNav {
     ///
     /// Both answers `close_confirm` **and re-read the list** —
     /// `WorldSelectionList.deleteWorld`'s callback calls `returnToScreen()`
-    /// outside its own `if (result)` (`WorldSelectionList.java`) — so the
+    /// outside its own `if (result)` — so the
     /// screen the player lands on always reflects the disk rather than what was
     /// enumerated before the confirmation opened. That matters even for a cancel:
     /// another process may have removed the world in the meantime.
@@ -4233,7 +4231,7 @@ impl MenuNav {
                 self.open_world_list(ui);
                 // Reported over a screen the player recognises rather than
                 // swallowed — vanilla logs it and raises `SystemToast
-                // .onWorldDeleteFailure` (`WorldSelectionList.java`), and
+                // .onWorldDeleteFailure`, and
                 // this shell has no toast layer, so the world list's own error
                 // line is where it goes (the same place a failed create goes).
                 if let Err(e) = result {
@@ -4327,7 +4325,7 @@ impl MenuNav {
     /// What a [`crate::menu::create_world::CreateWorldOutcome`] means at the
     /// `UiState` level.
     ///
-    /// `Create` (issue #190's queued patch): the screen is left *by the app*,
+    /// `Create` (queued patch): the screen is left *by the app*,
     /// not here — mirroring [`Self::apply_world_select`]'s `Play` arm above,
     /// for the identical reason: `begin_singleplayer` must stay able to show
     /// a launch failure over a screen the player recognises rather than over
@@ -4348,7 +4346,7 @@ impl MenuNav {
                 self.open_world_list(ui);
                 MenuAction::None
             }
-            // **This is where a world is actually created** (issue #468's reading
+            // **This is where a world is actually created** (reading
             // 2), and it is here rather than in `app.rs` because this is the layer
             // that knows the saves root — the same reason `ServerList::save_to` is
             // called from this file.
@@ -5081,7 +5079,7 @@ impl MenuNav {
         self.persist_options();
     }
 
-    /// Vanilla's `GraphicsPreset::apply` (`GraphicsPreset.java`), the
+    /// Vanilla's `GraphicsPreset::apply`, the
     /// three fields of its seventeen this client has real consumers for.
     ///
     /// | preset | `renderDistance` | `cloudStatus` | `cutoutLeaves` |
@@ -5208,7 +5206,7 @@ impl MenuNav {
     /// period): a click is the only way to move these rows, so a value parked at
     /// the maximum has to be able to come back down. Vanilla drags instead and
     /// therefore needs no wrap at all — this is a consequence of departure 1, not
-    /// a transcription of `IntRangeBase::next` (`OptionInstance.java`),
+    /// a transcription of `IntRangeBase::next`,
     /// which really does saturate.
     ///
     /// The bounds are `config`'s, which are vanilla's `IntRange(2, 32)` — the same
@@ -5494,7 +5492,7 @@ impl MenuNav {
     ///
     /// **Escape is deliberately absent from this match** — it falls to `_`,
     /// which does nothing. Vanilla's `DeathScreen.shouldCloseOnEsc()` returns
-    /// `false` (`DeathScreen.java`): the only way off this screen is a
+    /// `false`: the only way off this screen is a
     /// click. Every sibling `key_*` above calls `ui.on_escape()` for
     /// `MenuKey::Escape`; this one is the one screen that must not.
     fn key_death(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
@@ -5765,7 +5763,7 @@ impl MenuNav {
     }
 
     /// Steps `options.sprintWindow` by one 20 Hz tick and wraps between `0`
-    /// and `10` inclusive — vanilla's `IntRange(0, 10)` (`Options.java`),
+    /// and `10` inclusive — vanilla's `IntRange(0, 10)`,
     /// the same bounds `menu::options::INT_RANGE_SLIDERS` places the handle
     /// with, so the value a click can reach and the track it draws on cannot
     /// disagree. `0` is the "OFF" endpoint (double-tap sprint disabled).
@@ -5948,11 +5946,11 @@ pub fn on_screen_frame<'a>(
     if let Some(frame) = resource_pack_prompt_overlay_frame(ui, nav) {
         return Some(frame);
     }
-    // The seventh overlay screen (issue #613's `EditBook`), same shape again.
+    // The seventh overlay screen (`EditBook`), same shape again.
     if let Some(frame) = book_edit_overlay_frame(ui, nav) {
         return Some(frame);
     }
-    // The eighth overlay screen (issue #613's `TeleportToEntity`
+    // The eighth overlay screen (`TeleportToEntity`
     // remainder), same shape again.
     if let Some(frame) = spectator_menu_overlay_frame(ui, nav) {
         return Some(frame);
@@ -6001,7 +5999,7 @@ pub fn book_edit_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super:
 }
 
 /// The Spectator Menu's overlay frame, or `None` when that screen is not up
-/// (issue #613's `TeleportToEntity` remainder) — [`book_edit_overlay_frame`]'s
+/// (`TeleportToEntity` remainder) — [`book_edit_overlay_frame`]'s
 /// exact shape and for the same reason: [`on_screen_frame`] hit-tests a
 /// click against this, and `app/redraw.rs`'s overlay block draws it, so a
 /// second construction anywhere would be free to disagree with it. Unlike
@@ -6323,7 +6321,7 @@ pub fn routes_menu_input(ui: &UiState) -> bool {
 /// while the row it lands on is disabled.
 ///
 /// This is vanilla's own focus rule: `AbstractWidget::nextFocusPath` returns
-/// `null` for an inactive widget (`AbstractWidget.java`), so keyboard
+/// `null` for an inactive widget, so keyboard
 /// navigation never *lands* on a greyed-out button — which is what makes it safe
 /// to reproduce vanilla's full widget list with most of it disabled without the
 /// arrow keys walking through five dead rows.
@@ -6755,7 +6753,7 @@ mod tests {
     /// `CLAUDE.md`'s `ClientEvent::BiomeVisuals` precedent: an ordering change
     /// has to fail *here*, and no `cargo check` can see one. The wrap on the
     /// fourth press is the interesting entry, because it is vanilla's
-    /// `clearFocus()`-then-retry (`Screen.java`) and not `(i + 1) % n` —
+    /// `clearFocus()`-then-retry and not `(i + 1) % n` —
     /// see `super::focus`.
     #[test]
     fn tab_walks_the_form_fields_in_order_and_wraps() {
@@ -6863,7 +6861,7 @@ mod tests {
         )
         .expect("the edit form owns its frame");
         // Two fields plus the framework-conversion's three button rows —
-        // Resource Packs, Done, Cancel (`ManageServerScreen.java`).
+        // Resource Packs, Done, Cancel.
         assert_eq!(frame.rows.len(), 5);
         assert_eq!(frame.rows[NAME_FIELD].detail, "Server Name");
         assert_eq!(frame.rows[ADDRESS_FIELD].detail, "Server Address");
@@ -7378,7 +7376,7 @@ mod tests {
     ///
     /// The predicted numbers come from outside this client:
     /// `ChatComponent.getWidth(pct) = floor(pct * 280 + 40)`
-    /// (`ChatComponent.java`), so `1.0` is 320px and `0.0` is 40px, and
+    ///, so `1.0` is 320px and `0.0` is 40px, and
     /// `step_unit_double` wraps `1.0` straight to `0.0` — a 280px move on the
     /// very first click, which no rounding could fake.
     #[test]
@@ -8391,7 +8389,7 @@ mod tests {
         );
     }
 
-    /// **The gap issue #15's capture patch (`a6da3f6`) existed to close**:
+    /// **The gap capture patch (`a6da3f6`) existed to close**:
     /// a key with *no printable text* — an F-key, here, per that commit's own
     /// choice of `F1` over `F5` so a currently-unbound key is exercised —
     /// must be bindable end to end, not just started.
@@ -8464,7 +8462,7 @@ mod tests {
 
     /// Escape while capturing cancels the capture and leaves the binding
     /// exactly as it was — vanilla's own `keyPressed` sets `UNKNOWN`
-    /// unconditionally on Escape while capturing (`KeyBindsScreen.java`);
+    /// unconditionally on Escape while capturing;
     /// this client does not, for the `Pause`-unbind hazard
     /// `MenuNav::capture_binding`'s doc names. The control is the *other*
     /// direction: a genuine key still rebinds, so this is not "Escape is
@@ -8896,7 +8894,7 @@ mod tests {
     }
 
     /// **Toggling an Experiments flag reaches a real `level.dat` on disk**
-    /// (issue #693's Experiments half stops being decorative).
+    /// (Experiments half stops being decorative).
     ///
     /// Before this, `WorldCreationConfig::experiments` was collected and
     /// discarded: nothing between here and the freshly created world's save
@@ -8922,7 +8920,7 @@ mod tests {
         assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
         assert_eq!(ui.screen(), Screen::CreateWorld, "premise: World Creation is open");
 
-        // Experiments lives on the More tab (issue #567's tab layout).
+        // Experiments lives on the More tab (tab layout).
         assert_eq!(nav.click(&mut ui, MORE_TAB), MenuAction::None);
         let experiments_row = nav
             .create_world()
@@ -8980,7 +8978,7 @@ mod tests {
     /// **The owner's report, end to end at the nav layer: Create New World twice
     /// makes two worlds, both are listed, and either can be opened.**
     ///
-    /// This is the acceptance condition for issue #468's reading (2) and the
+    /// This is the acceptance condition for reading (2) and the
     /// regression gate for the wart reading (1) shipped with — *"Using Create New
     /// World just joins me to the existing world"*. Every step is the real screen
     /// flow (title → list → create → list), so it fails if any hop is unwired
@@ -9313,7 +9311,7 @@ mod tests {
     }
 
     /// **An untouched Seed field reaches the app as an empty string, not a
-    /// sentinel** (issue #190's queued patch, the random-seed half).
+    /// sentinel** (queued patch, the random-seed half).
     ///
     /// `app.rs::parse_seed` already proves empty text resolves to a fresh
     /// random `i64` (`empty_seed_is_random_not_a_fixed_fallback`) rather than
@@ -9921,7 +9919,7 @@ mod tests {
     #[test]
     fn escape_does_nothing_on_the_death_screen() {
         // Vanilla's `DeathScreen.shouldCloseOnEsc()` returns `false`
-        // (`DeathScreen.java`) — unlike every other screen in this
+        // — unlike every other screen in this
         // file, Escape here must not even unwind one level, let alone quit.
         let (mut nav, mut ui) = dead("death-escape");
         assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
@@ -10176,7 +10174,7 @@ mod tests {
     /// **Sign convention (#445):** `notches` is winit's `scrollY` verbatim, so
     /// **positive scrolls up** — the same sign vanilla's
     /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())` uses
-    /// (`AbstractScrollArea.java`). This is the *opposite* of the `rows`
+    ///. This is the *opposite* of the `rows`
     /// parameter it replaced, where positive meant down.
     #[test]
     fn the_mouse_wheel_scrolls_the_server_list_and_clamps() {
@@ -10215,8 +10213,8 @@ mod tests {
 
     /// `scrollRate = defaultEntryHeight / 2` for the 36 px server row —
     /// `AbstractScrollArea.defaultSettings(defaultEntryHeight / 2)`
-    /// (`AbstractSelectionList.java`), read back by `scrollRate()`
-    /// (`AbstractScrollArea.java`) and applied by `mouseScrolled`
+    ///, read back by `scrollRate()`
+    /// and applied by `mouseScrolled`
     /// (`:34`). Transcribed from `.cache/mc/26.2/client-src`, not guessed.
     const SCROLL_RATE_PX: f32 = 18.0;
 
@@ -10421,7 +10419,7 @@ mod tests {
     /// while the cursor travelled down to the Join button.
     ///
     /// Vanilla reaches `AbstractSelectionList.setSelected` only from `setFocused`
-    /// (`AbstractSelectionList.java`) and the click paths, never from
+    /// and the click paths, never from
     /// hover — so this asserts hover is inert on rows *and* that click still
     /// works, because "hover does nothing" is also satisfied by a screen where
     /// nothing works at all.
@@ -10474,7 +10472,7 @@ mod tests {
     }
 
     /// A click on a row **selects**; only the favicon's right half joins. That is
-    /// `OnlineServerEntry.mouseClicked`'s order (`ServerSelectionList.java`),
+    /// `OnlineServerEntry.mouseClicked`'s order,
     /// and it is also the `MenuNav::click` hazard #395 recorded from the other side:
     /// translating a click into `Enter` here would connect on any click on any row.
     #[test]
@@ -10509,7 +10507,7 @@ mod tests {
     fn a_double_click_on_the_row_body_joins_it() {
         // Player report (2026-08-04): vanilla's `if (doubleClick) join()`
         // fires wherever on the row the click landed
-        // (`ServerSelectionList.java`) — but `click_list` used to
+        // — but `click_list` used to
         // return early from `entry_icon_cursor` returning `None`/missing
         // every quadrant, before the double-click check ever ran, unless the
         // click happened to be inside the 32 px favicon. This point is well
@@ -11004,7 +11002,7 @@ mod tests {
                 ui.enter_dev_world();
                 nav.open_sign_edit(ui, sign_edit::SignEditOpen::default());
             }),
-            // Same shape again — issue #613's `EditBook` remainder. The frame
+            // Same shape again — `EditBook` remainder. The frame
             // is built from `MenuNav::book_edit`, so a bare `UiState` on this
             // screen is equally not the production state.
             ("BookEdit", |ui, nav| {
@@ -11205,7 +11203,7 @@ mod tests {
     ///
     /// `stats::frame` set `selected: 0` on a frame whose only row *is* Done, so
     /// it was drawn focused the moment the screen opened. Vanilla focuses
-    /// nothing: `Screen.setInitialFocus` (`Screen.java`) runs its whole
+    /// nothing: `Screen.setInitialFocus` runs its whole
     /// body only `if (this.minecraft.getLastInputType().isKeyboard())`, and this
     /// screen is reached by clicking the pause menu's Statistics button.
     /// `StatsScreen` does not override `setInitialFocus`, and even if the last

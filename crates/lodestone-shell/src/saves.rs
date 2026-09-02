@@ -44,7 +44,7 @@
 //! [`saves_dir`] is the root; every world is a subdirectory of it holding a
 //! `level.dat` (vanilla's own layout, so nothing had to move). Enumeration is
 //! `LevelStorageSource.findLevelCandidates` + `loadLevelSummaries`
-//! (`LevelStorageSource.java`) collapsed into one synchronous pass:
+//! collapsed into one synchronous pass:
 //!
 //! - list the root's entries, keep the **directories**, keep those with a
 //!   regular `level.dat` (vanilla additionally accepts the pre-1.13
@@ -146,21 +146,20 @@ pub const SAVES_DIR: &str = "saves";
 pub const DEFAULT_WORLD_NAME: &str = "world";
 
 /// `selectWorld.newWorld` — the name [`available_dir_name`] falls back to for an
-/// empty typed name, matching `WorldCreationUiState.findResultFolder`
-/// (`WorldCreationUiState.java`).
+/// empty typed name, matching `WorldCreationUiState.findResultFolder`.
 pub const DEFAULT_NEW_WORLD_NAME: &str = "New World";
 
 /// `WorldCreationUiState.findResultFolder`'s own second fallback (`:108`), used
 /// when the first one cannot produce a usable folder name at all.
 const LAST_RESORT_NAME: &str = "World";
 
-/// `SharedConstants.ILLEGAL_FILE_CHARACTERS` (`SharedConstants.java`),
+/// `SharedConstants.ILLEGAL_FILE_CHARACTERS`,
 /// verbatim and in vanilla's own order.
 const ILLEGAL_FILE_CHARACTERS: [char; 15] = [
     '/', '\n', '\r', '\t', '\0', '\u{c}', '`', '?', '*', '\\', '<', '>', '|', '"', ':',
 ];
 
-/// `FileUtil.MAX_FILE_NAME` (`FileUtil.java`).
+/// `FileUtil.MAX_FILE_NAME`.
 const MAX_FILE_NAME: usize = 255;
 
 /// The root every world folder lives under.
@@ -214,13 +213,13 @@ pub struct WorldSummary {
     /// to turn one back into a directory, and it re-checks that.
     pub dir_name: String,
     /// `LevelName`, or [`Self::dir_name`] when it is absent or empty —
-    /// `LevelSummary.getLevelName` (`LevelSummary.java`).
+    /// `LevelSummary.getLevelName`.
     pub display_name: String,
     /// `LastPlayed`, epoch millis, or `-1` when unknown.
     ///
     /// `-1` is vanilla's own sentinel, not ours: `SymlinkLevelSummary.getLastPlayed`
-    /// returns `-1L` (`LevelSummary.java`) and `WorldListEntry` tests
-    /// `lastPlayed != -1L` before formatting a date (`WorldSelectionList.java`).
+    /// returns `-1L` and `WorldListEntry` tests
+    /// `lastPlayed != -1L` before formatting a date.
     pub last_played: i64,
     /// `GameType`: 0 survival, 1 creative, 2 adventure, 3 spectator. `None`
     /// when the field is absent.
@@ -314,7 +313,7 @@ impl WorldSummary {
         out
     }
 
-    /// `WorldListEntry`'s second text line (`WorldSelectionList.java`):
+    /// `WorldListEntry`'s second text line:
     /// the folder name, plus the last-played timestamp in parentheses when
     /// there is one.
     ///
@@ -469,7 +468,7 @@ fn summarise_dir(path: &Path) -> Option<WorldSummary> {
     }
 }
 
-/// `FileUtil.sanitizeName` (`FileUtil.java`): every
+/// `FileUtil.sanitizeName`: every
 /// [`ILLEGAL_FILE_CHARACTERS`] becomes `_`, then so does every `.`, `/` and `"`.
 ///
 /// The second pass overlaps the first (`/` and `"` are in both lists) and is
@@ -705,7 +704,7 @@ pub fn create_world(
 /// Three steps, in this order and for these reasons:
 ///
 /// 1. `create_dir_all(root)` — vanilla's `findResultFolder` does the same
-///    (`WorldCreationUiState.java`), and it must happen before
+///   , and it must happen before
 ///    [`available_dir_name`] probes for a free name.
 /// 2. `create_dir` (**not** `create_dir_all`) for the world itself: the name
 ///    came from `available_dir_name`, so an `AlreadyExists` here means another
@@ -721,7 +720,7 @@ pub fn create_world(
 /// directory is new the requested seed is the one that wins.
 ///
 /// `enabled_features` is [`crate::menu::create_world::WorldCreationConfig::experiments`]
-/// (issue #693's Experiments half) — bare flag ids, [`ExperimentFlag::id`]'s
+/// (Experiments half) — bare flag ids, [`ExperimentFlag::id`]'s
 /// own shape — written into `level.dat`'s `enabled_features` field through
 /// [`lodestone_anvil::level_dat::LevelDat::with_enabled_features`]. Empty
 /// (nothing turned on) writes nothing extra, matching every other decorative

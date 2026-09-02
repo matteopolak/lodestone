@@ -1,5 +1,5 @@
 //! The beacon screen's power-selection buttons and confirm/cancel click
-//! surface (issue #613's `SetBeaconEffects` remainder).
+//! surface (`SetBeaconEffects` remainder).
 //!
 //! ## What it is
 //!

@@ -43,7 +43,7 @@
 //! This one contradicts the obvious reading. `ContainerEventHandler`'s tab walk
 //! runs off the end of the sorted child list and returns `null`; there is no
 //! modular arithmetic anywhere in it. The wrap is a **retry** one layer up
-//! (`Screen.java`):
+//!:
 //!
 //! ```text
 //! ComponentPath focusPath = super.nextFocusPath(navigationEvent);
@@ -76,7 +76,7 @@
 //!
 //! ## Arrow navigation is geometric, not ordinal
 //!
-//! `nextFocusPathInDirection` (`ContainerEventHandler.java`) is two
+//! `nextFocusPathInDirection` is two
 //! passes, and the second is the one that is easy to forget:
 //!
 //! 1. **Strict.** Keep children that *overlap the focused rect in the orthogonal
@@ -92,7 +92,7 @@
 //!
 //! ## The three registries, and why they are an island factory
 //!
-//! `Screen` keeps three lists (`Screen.java`) and a widget's membership
+//! `Screen` keeps three lists and a widget's membership
 //! decides what it can do:
 //!
 //! | added with | drawn | gets events | narrated |
@@ -141,7 +141,7 @@
 //! - **The edit-shortcut modifier is Cmd on macOS, not Ctrl.**
 //!   `InputQuirks.EDIT_SHORTCUT_KEY_MODIFIER` is `8` (SUPER) on OSX and `2`
 //!   (CONTROL) everywhere else, and *every* `isCut`/`isCopy`/`isPaste`/
-//!   `isSelectAll` goes through it (`InputWithModifiers.java`). A port that
+//!   `isSelectAll` goes through it. A port that
 //!   hardcodes Ctrl gives Mac users a client where Cmd+V does nothing — and this
 //!   is a Mac. [`EDIT_SHORTCUT_MODIFIER`] is the constant.
 //!
@@ -155,7 +155,7 @@
 //!   land with #396's list. [`FocusSet::mouse_clicked`] is here because it is
 //!   what *sets* focus, which is the subject.
 //! - **`setInitialFocus`.** It is gated on
-//!   `minecraft.getLastInputType().isKeyboard()` (`Screen.java`) — a
+//!   `minecraft.getLastInputType().isKeyboard()` — a
 //!   piece of state this shell does not track. [`super::nav::EditForm`] focuses
 //!   its first field explicitly instead, which is what
 //!   `setInitialFocus(GuiEventListener)` does.
@@ -195,7 +195,7 @@ pub const KEY_HOME: i32 = 268;
 /// `GLFW_KEY_END`.
 pub const KEY_END: i32 = 269;
 /// GLFW `GLFW_KEY_F5`, the code `JoinMultiplayerScreen.keyPressed` compares
-/// against to refresh the server list (`JoinMultiplayerScreen.java`).
+/// against to refresh the server list.
 pub const KEY_F5: i32 = 294;
 /// `GLFW_KEY_A` — Ctrl/Cmd+A is select-all.
 pub const KEY_A: i32 = 65;
@@ -217,8 +217,7 @@ pub const MOD_SUPER: i32 = 8;
 
 /// `InputQuirks.EDIT_SHORTCUT_KEY_MODIFIER`: the modifier bit every text-editing
 /// shortcut (`isSelectAll`/`isCopy`/`isPaste`/`isCut`) tests, which vanilla
-/// swaps to **Super** on macOS and leaves as **Control** elsewhere
-/// (`InputQuirks.java`).
+/// swaps to **Super** on macOS and leaves as **Control** elsewhere.
 ///
 /// Resolved at compile time from `target_os`, which is the closest thing to
 /// `Util.getPlatform()` available without a runtime probe. Hardcoding
@@ -231,8 +230,7 @@ pub const EDIT_SHORTCUT_MODIFIER: i32 = if cfg!(target_os = "macos") {
 };
 
 /// Vanilla's `KeyEvent` record (`client/input/KeyEvent.java`) plus the
-/// `InputWithModifiers` predicates the GUI actually asks it for
-/// (`InputWithModifiers.java`).
+/// `InputWithModifiers` predicates the GUI actually asks it for.
 ///
 /// `scancode` is dropped: nothing in `Screen`, `AbstractWidget` or `EditBox`
 /// reads it — only `KeyMapping` does, and key *bindings* are `keybinds.rs`'s
@@ -479,8 +477,7 @@ impl ScreenDirection {
     }
 
     /// The [`FocusNavigationEvent`] Screen builds for the arrow key with this
-    /// GLFW code, or `None` for any other key
-    /// (`Screen.java`).
+    /// GLFW code, or `None` for any other key.
     #[must_use]
     pub const fn from_key(key: i32) -> Option<Self> {
         match key {
@@ -759,8 +756,7 @@ impl ComponentPath {
     }
 }
 
-/// Which of `Screen`'s three child lists a widget was added to
-/// (`Screen.java`).
+/// Which of `Screen`'s three child lists a widget was added to.
 ///
 /// An enum rather than three parallel `Vec`s because the failure mode of getting
 /// it wrong is silent — see the module docs.
@@ -809,7 +805,7 @@ pub trait FocusTarget: core::fmt::Debug {
     fn set_focused(&mut self, focused: bool);
 
     /// The predicate inside `AbstractWidget.nextFocusPath`
-    /// (`AbstractWidget.java`): a leaf offers itself only when it is
+    ///: a leaf offers itself only when it is
     /// active and not *already* focused.
     fn takes_focus(&self) -> bool {
         self.is_active() && !self.is_focused()
@@ -821,7 +817,7 @@ pub trait FocusTarget: core::fmt::Debug {
         0
     }
 
-    /// `shouldTakeFocusAfterInteraction()` (`GuiEventListener.java`):
+    /// `shouldTakeFocusAfterInteraction()`:
     /// `true` by default, and `false` for a widget that wants a click to *do*
     /// something without keeping the keyboard.
     fn should_take_focus_after_interaction(&self) -> bool {
@@ -835,7 +831,7 @@ pub trait FocusTarget: core::fmt::Debug {
 
     /// `mouseClicked` on the child: did it consume the click?
     /// `AbstractWidget.mouseClicked` returns `false` for an inactive widget or a
-    /// click outside its bounds (`AbstractWidget.java`).
+    /// click outside its bounds.
     fn mouse_clicked(&mut self, x: f32, y: f32) -> bool {
         self.is_mouse_over(x, y)
     }
@@ -958,7 +954,7 @@ pub struct FocusSet {
     /// `AbstractContainerEventHandler.focused`.
     focused: Option<usize>,
     /// `Screen.shouldCloseOnEsc()`. `true` in vanilla's base class
-    /// (`Screen.java`); `DeathScreen` is the notable `false`.
+    ///; `DeathScreen` is the notable `false`.
     close_on_esc: bool,
 }
 
@@ -966,8 +962,7 @@ impl Default for FocusSet {
     /// **Not** `derive`d, for the same reason [`Widget`]'s is not: a derived
     /// `Default` would give `close_on_esc = false`, i.e. every screen built from
     /// `..Default::default()` would silently swallow Escape and trap the player.
-    /// Vanilla's `Screen.shouldCloseOnEsc()` returns `true`
-    /// (`Screen.java`).
+    /// Vanilla's `Screen.shouldCloseOnEsc()` returns `true`.
     fn default() -> Self {
         Self::new()
     }
@@ -1053,12 +1048,11 @@ impl FocusSet {
     }
 
     /// `AbstractContainerEventHandler.setFocused(child)`: unfocus the outgoing
-    /// child, focus the incoming one, and do neither when nothing changed
-    /// (`AbstractContainerEventHandler.java`).
+    /// child, focus the incoming one, and do neither when nothing changed.
     ///
     /// The no-op-when-equal guard is not an optimisation:
     /// `EditBox.setFocused(true)` resets the caret blink phase
-    /// (`EditBox.java`), so re-setting the same focus would restart it.
+    ///, so re-setting the same focus would restart it.
     pub fn set_focused(&mut self, kids: &mut dyn FocusChildren, next: Option<usize>) {
         if self.focused == next {
             return;
@@ -1118,14 +1112,14 @@ impl FocusSet {
     }
 
     /// `Screen.changeFocus(path)`: clear, then apply
-    /// (`Screen.java`). The clear is why Tab's wrap works — see the
+    ///. The clear is why Tab's wrap works — see the
     /// module docs.
     pub fn change_focus(&mut self, kids: &mut dyn FocusChildren, path: &ComponentPath) {
         self.clear_focus(kids);
         self.apply_focus(kids, path, true);
     }
 
-    /// `Screen.setInitialFocus(target)` (`Screen.java`): offer `id` an
+    /// `Screen.setInitialFocus(target)`: offer `id` an
     /// `InitialFocus` event and take the focus there if it accepts.
     pub fn set_initial_focus(&mut self, kids: &mut dyn FocusChildren, id: usize) {
         let accepts = kids.get(id).is_some_and(|c| c.takes_focus());
@@ -1187,7 +1181,7 @@ impl FocusSet {
         kids.get_mut(id).is_some_and(|child| child.char_typed(ch))
     }
 
-    /// `Screen.keyPressed` (`Screen.java`) in full, with the ordering
+    /// `Screen.keyPressed` in full, with the ordering
     /// intact: Escape, then the focused child, then — only if it declined — Tab
     /// and the arrows as focus navigation.
     ///
@@ -1257,7 +1251,7 @@ impl FocusSet {
 
     /// One child's `nextFocusPath`. A leaf's is
     /// `isActive() && !isFocused() ? leaf(this) : null`
-    /// (`AbstractWidget.java`), which is [`FocusTarget::takes_focus`].
+    ///, which is [`FocusTarget::takes_focus`].
     fn child_focus_path(
         &self,
         kids: &dyn FocusChildren,
@@ -1478,13 +1472,13 @@ impl FocusSet {
     }
 }
 
-/// `MouseHandler.DOUBLE_CLICK_THRESHOLD_MS` (`MouseHandler.java`): the exact
+/// `MouseHandler.DOUBLE_CLICK_THRESHOLD_MS`: the exact
 /// wire vanilla checks with `currentTime - lastClick.time() < 250L` —
 /// **strict** less-than, so a click exactly 250 ms after the last one is not a
 /// double.
 pub const DOUBLE_CLICK_THRESHOLD_MS: u64 = 250;
 
-/// `MouseHandler.onButton`'s double-click detector (`MouseHandler.java`),
+/// `MouseHandler.onButton`'s double-click detector,
 /// pulled out as a reusable primitive rather than re-derived per screen.
 ///
 /// ## Why this exists here and not in `container.rs` or `widget.rs`
@@ -1506,7 +1500,7 @@ pub const DOUBLE_CLICK_THRESHOLD_MS: u64 = 250;
 /// Vanilla's real predicate is
 /// `lastClick != null && currentTime - lastClick.time() < 250 &&
 /// lastClick.screen() == screen && lastClickButton == event.button()`
-/// (`MouseHandler.java`) — same **screen instance** and same **button**,
+/// — same **screen instance** and same **button**,
 /// not just "recently". [`DoubleClickTracker::click`] folds "same screen" and
 /// "same button" into a single caller-supplied `target: T` — the row/id being
 /// clicked — because every consumer here already only feeds it clicks that
@@ -2101,7 +2095,7 @@ mod tests {
         assert!(quirked.is_paste());
         assert!(!quirked.is_copy(), "and it keys on the letter too");
         // Shift or Alt disqualifies every one of them
-        // (`InputWithModifiers.java`).
+        //.
         assert!(
             !KeyEvent::with_modifiers(KEY_V, EDIT_SHORTCUT_MODIFIER | MOD_SHIFT).is_paste()
         );
@@ -2188,7 +2182,7 @@ mod tests {
 
     #[test]
     fn the_boundary_is_strictly_less_than_not_less_or_equal() {
-        // `currentTime - lastClick.time() < 250L` (`MouseHandler.java`) is
+        // `currentTime - lastClick.time() < 250L` is
         // strict. A click exactly at the boundary must not double — the wrong
         // hypothesis (`<=`) would report `true` here instead.
         let mut t: DoubleClickTracker<usize> = DoubleClickTracker::new();

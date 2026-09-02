@@ -26,7 +26,7 @@
 //!    (`copyRect(…, swapX = false, swapY = true)`, `CubeMapTexture.java`;
 //!    `swapY` writes source row `y` to target row `h-1-y`).
 //! 3. **The sampler is Linear**, from `TextureMetadataSection(blur = true, …)`
-//!    (`CubeMapTexture.java`). Almost every other menu texture in this repo is
+//!   . Almost every other menu texture in this repo is
 //!    Nearest; this one is deliberately not.
 //! 4. **The geometry carries no UVs** — `DefaultVertexFormat.POSITION`, 24
 //!    vertices, 6 quads ([`CUBE_QUADS`]). The fragment stage samples by
@@ -35,15 +35,15 @@
 //!    (`CubeMap.java`; `Projection` feeds `fov` to JOML's `setPerspective`,
 //!    whose first argument is `fovy`).
 //! 6. **The model-view is `rotationX(PI)` then `rotateX(10°)` then
-//!    `rotateY(spin)`** (`CubeMap.java`), where the 10° comes from
+//!    `rotateY(spin)`**, where the 10° comes from
 //!    `GuiRenderer.java`'s `cubeMap.render(10.0F, spin)` and `spin` is the
 //!    **negated** accumulator (`Panorama.java` passes `-this.spin`).
 //!
 //! Spin accumulates as `wrapDegrees(spin + realtimeDeltaTicks * panoramaSpeed *
-//! 0.1)` (`Panorama.java`). Note *realtime* delta ticks: the title screen
+//! 0.1)`. Note *realtime* delta ticks: the title screen
 //! has no world clock, so [`PanoramaRenderer::advance`] measures wall time and
 //! converts at [`TICKS_PER_SECOND`]. At the default `panoramaSpeed` of 1.0
-//! (`Options.java`) that is 2°/s — a three-minute revolution, which is
+//! that is 2°/s — a three-minute revolution, which is
 //! slow enough that "it looks static" is not evidence of a bug. (It *was* also
 //! genuinely invisible for one commit, for a different reason: the faces were
 //! being read from the jar's 1×1 stubs, and a solid-coloured cube looks identical
@@ -64,7 +64,7 @@
 //!
 //! **`panorama_overlay.png` is not drawn — and this is now measured on the real
 //! object, not on the jar's copy.** Vanilla blits it over the panorama at texture
-//! size 16×128, tiled to the full screen (`Panorama.java`). The asset-store
+//! size 16×128, tiled to the full screen. The asset-store
 //! object (hash `9dd32387…`, 86 bytes) decodes to **1×1 RGBA, one distinct value,
 //! `(255, 255, 255, 0)`, alpha extrema `(0, 0)`** — confirmed by hexdump: the
 //! IHDR is `1×1`, colour type 6, and the whole IDAT is `ff ff ff 00`. The 86 vs
@@ -97,8 +97,7 @@ use lodestone_assets::Image;
 /// which `CubeMapTexture` then suffixes.
 pub const PANORAMA_BASE: &str = "assets/minecraft/textures/gui/title/background/panorama";
 
-/// The per-face suffixes **in cubemap layer order** — `CubeMapTexture.SUFFIXES`
-/// (`CubeMapTexture.java`).
+/// The per-face suffixes **in cubemap layer order** — `CubeMapTexture.SUFFIXES`.
 ///
 /// Layer order for a cubemap is `+X, -X, +Y, -Y, +Z, -Z`, so this reads: `+X` is
 /// `panorama_1`, `-X` is `panorama_3`, `+Y` (up) is `panorama_5`, `-Y` (down) is
@@ -112,12 +111,11 @@ pub const FACE_SUFFIXES: [&str; 6] = ["_1", "_3", "_5", "_4", "_0", "_2"];
 pub const PANORAMA_OVERLAY_PATH: &str =
     "assets/minecraft/textures/gui/title/background/panorama_overlay.png";
 
-/// Vertical field of view, in degrees — `CubeMap.PROJECTION_FOV`
-/// (`CubeMap.java`).
+/// Vertical field of view, in degrees — `CubeMap.PROJECTION_FOV`.
 pub const FOV_DEGREES: f32 = 85.0;
-/// Near plane — `CubeMap.PROJECTION_Z_NEAR` (`CubeMap.java`).
+/// Near plane — `CubeMap.PROJECTION_Z_NEAR`.
 pub const Z_NEAR: f32 = 0.05;
-/// Far plane — `CubeMap.PROJECTION_Z_FAR` (`CubeMap.java`).
+/// Far plane — `CubeMap.PROJECTION_Z_FAR`.
 pub const Z_FAR: f32 = 10.0;
 /// Downward tilt applied before the yaw — `GuiRenderer.java` passes `10.0F`
 /// as `CubeMap.render`'s `rotXInDegrees`.
@@ -144,8 +142,7 @@ pub const TICKS_PER_SECOND: f32 = 20.0;
 /// 26.2's `client.jar`; `inworld_menu_background.png` is byte-identical), so
 /// vanilla's tiled 32 px blit is a flat 25 %-black wash and compositing it is a
 /// multiply by `1 - 64/255`. Vanilla applies it to every out-of-world screen
-/// **except** the title screen, whose `extractBackground` override is empty
-/// (`TitleScreen.java`).
+/// **except** the title screen, whose `extractBackground` override is empty.
 pub const MENU_BACKGROUND_DIM: f32 = 64.0 / 255.0;
 
 /// How much to darken the panorama on a given screen.
@@ -154,7 +151,7 @@ pub const MENU_BACKGROUND_DIM: f32 = 64.0 / 255.0;
 /// the blur, then `menu_background.png` — so every out-of-world screen wears the
 /// [`MENU_BACKGROUND_DIM`] wash. `TitleScreen` is the exception, and it is an
 /// *override* rather than a special case in the base class: `TitleScreen`'s
-/// `extractBackground` is empty (`TitleScreen.java`) and it draws the
+/// `extractBackground` is empty and it draws the
 /// panorama itself from `extractRenderState` (`:307`), so the title screen gets
 /// the raw cubemap with nothing over it.
 ///
@@ -171,7 +168,7 @@ pub fn dim_for_screen(is_title_screen: bool) -> f32 {
 }
 
 /// The unit cube, as vanilla lists it: six quads of four corners, verbatim from
-/// `CubeMap.initializeVertices` (`CubeMap.java`), in that order.
+/// `CubeMap.initializeVertices`, in that order.
 ///
 /// Quads rather than triangles so the transcription can be diffed against the
 /// Java line-for-line; [`cube_vertices`] expands each into vanilla's own two
@@ -241,7 +238,7 @@ pub fn cube_vertices() -> Vec<f32> {
     out
 }
 
-/// Vanilla's `Mth.wrapDegrees(float)` (`Mth.java`): reduce to
+/// Vanilla's `Mth.wrapDegrees(float)`: reduce to
 /// `[-180, 180)`.
 ///
 /// Ported rather than replaced with a `rem_euclid` because the accumulator is
@@ -269,7 +266,7 @@ pub fn wrap_degrees(angle: f32) -> f32 {
 /// transcription, not a re-derivation.
 ///
 /// `spin_degrees` is the value handed to `CubeMap.render`, i.e. already negated
-/// relative to [`PanoramaRenderer::spin_degrees`] (`Panorama.java`).
+/// relative to [`PanoramaRenderer::spin_degrees`].
 #[must_use]
 pub fn view_projection(width: u32, height: u32, spin_degrees: f32) -> Mat4 {
     let aspect = if height == 0 {

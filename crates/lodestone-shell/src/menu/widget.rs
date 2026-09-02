@@ -1,5 +1,5 @@
-//! Vanilla's **menu widget contract** — `AbstractWidget`, `AbstractButton`,
-//! `Button` and `WidgetSprites` — and with it the **disabled render path**.
+//! Vanilla's **menu widget contract** — its own abstract widget, abstract
+//! button, button and widget-sprites types — and with it the **disabled render path**.
 //!
 //! ## What it is
 //!
@@ -11,9 +11,9 @@
 //! all draw through it, so there is one definition of vanilla's rules rather than
 //! one per screen.
 //!
-//! This is the first child of the menu-framework epic (#392/#393). The layout
-//! containers that arrange these (#394) live in [`super::layout`] and attach
-//! through [`LayoutElement`]; focus/tab dispatch (#395) is still absent.
+//! This is the first child of the menu-framework work. The layout
+//! containers that arrange these live in [`super::layout`] and attach
+//! through [`LayoutElement`]; focus/tab dispatch is still absent.
 //!
 //! ## The disabled path is `active = false` and nothing else
 //!
@@ -22,23 +22,24 @@
 //!
 //! 1. **The sprite changes.** [`WidgetSprites::get`] is handed `active` and
 //!    routes to the disabled member of a four-state record.
-//! 2. **The label goes grey.** `AbstractWidget.WithInactiveMessage` merges
-//!    `Style.EMPTY.withColor(-6250336)` into the message
-//!    (`AbstractWidget.java`) — that is [`INACTIVE_MESSAGE_ARGB`], and it
+//! 2. **The label goes grey.** Vanilla's own "widget with inactive message"
+//!    wrapper merges
+//!    a signed-ARGB style into the message
+//!    — that is [`INACTIVE_MESSAGE_ARGB`], and it
 //!    is the *whole* visual difference for a widget with no disabled sprite.
 //!
-//! Plus one invisible thing: `AbstractWidget.nextFocusPath` returns `null` when
-//! `isActive()` is false (`AbstractWidget.java`), so an inactive widget
+//! Plus one invisible thing: vanilla's own next-focus-path lookup returns `null` when
+//! `isActive()` is false, so an inactive widget
 //! is unreachable by **keyboard**, not merely unclickable. [`Widget::takes_focus`]
 //! is that predicate; [`super::nav::MenuNav`]'s `step_enabled` is what already
 //! implements it for the two converted screens.
 //!
-//! **Do not invent disabled art for `Checkbox`, `EditBox` or
-//! `AbstractSliderButton`.** Verified against the 26.2 jar rather than taken on
-//! trust: `Checkbox.java` and `AbstractSliderButton.java` do not mention
+//! **Do not invent disabled art for the checkbox, edit-box or
+//! slider-button widgets.** Verified against the 26.2 jar rather than taken on
+//! trust: vanilla's own checkbox and slider-button classes do not mention
 //! `WidgetSprites` at all and pick between a plain and a `_highlighted` sprite by
-//! hand (`Checkbox.java`, `AbstractSliderButton.java`), and
-//! `EditBox.java` uses the **two**-argument `WidgetSprites` constructor —
+//! hand, and
+//! vanilla's own edit-box class uses the **two**-argument `WidgetSprites` constructor —
 //! `widget/text_field` and `widget/text_field_highlighted` — which collapses
 //! `disabled` onto `enabled`. All three rely on the grey label plus blocked input.
 //! Constructing them with [`Widget::new`] (no sprites) rather than
@@ -50,30 +51,33 @@
 //! - **Add state to [`Widget`], not to a screen.** The point of the type is that
 //!   the third screen does not write the blit a third time.
 //! - **The sprite's second argument is `isHoveredOrFocused()`, not
-//!   `isFocused()`.** This is worth reading twice, because both #393's body and
+//!   `isFocused()`.** This is worth reading twice, because both an earlier
+//!   design note and
 //!   `docs/ui-framework.md` say `isFocused()` and the jar disagrees:
-//!   `AbstractButton.extractDefaultSprite` passes
-//!   `SPRITES.get(this.active, … this.isHoveredOrFocused())`
-//!   (`AbstractButton.java`), and `isHoveredOrFocused()` is
-//!   `isHovered() || isFocused()` (`AbstractWidget.java`).
+//!   vanilla's own default-sprite extract routine passes
+//!   `SPRITES.get(this.active, … this.isHoveredOrFocused())`, and
+//!   `isHoveredOrFocused()` is
+//!   `isHovered() || isFocused()`.
 //!
-//!   #393 carried both facts in one `focused` field, because the shell had a
+//!   The earlier design carried both facts in one `focused` field, because the shell had a
 //!   single row cursor that the keyboard *and* [`super::nav::MenuNav::hover`]
-//!   moved. **#395 split them**: [`super::focus::FocusSet`] owns real keyboard
+//!   moved. **A later change split them**: [`super::focus::FocusSet`] owns real keyboard
 //!   focus, so [`Widget::hovered`] is now its own field and
 //!   [`Widget::is_hovered_or_focused`] is the join. Keep it an `||`. Dropping
 //!   either side compiles, passes every existing test that sets only `focused`,
 //!   and changes how every button in the client highlights.
 //!
-//!   [`super::edit_box::EditBox`] does **not** share this: `EditBox.java`
+//!   [`super::edit_box::EditBox`] does **not** share this: vanilla's own
+//!   edit-box class
 //!   passes `isFocused()` alone, so hovering a text field does not draw its
 //!   highlighted sprite. The `||` belongs to the button, not to the widget
 //!   contract.
-//! - **The two `get` arguments are not the same predicate.** `AbstractButton`
-//!   passes the raw `active` field, while `EditBox.java` passes
+//! - **The two `get` arguments are not the same predicate.** Vanilla's own
+//!   abstract button
+//!   passes the raw `active` field, while vanilla's own edit-box class passes
 //!   `isActive()` (i.e. `visible && active`). [`Widget::background_sprite`]
 //!   follows the button, because a widget that is not visible is not drawn at all
-//!   (`AbstractWidget.java`) so the distinction is unobservable for it.
+//!   so the distinction is unobservable for it.
 //! - **Never restate a colour or a sprite id in a screen.** Read
 //!   [`BUTTON_SPRITES`] and [`Widget::message_colour`]; the grey is *derived*
 //!   from vanilla's own signed ARGB constant by [`argb_to_rgba`], with
@@ -81,15 +85,14 @@
 //!   rather than a hand-typed `160.0 / 255.0` agreeing with itself.
 //! - **`button_disabled`'s nine-slice border is 1 where its siblings' are 3.**
 //!   Nothing here encodes any of them: [`lodestone_render::GuiAtlas`] reads each
-//!   from the sibling `.png.mcmeta`. Measured in #66; do not hardcode.
+//!   from the sibling `.png.mcmeta`. Measured against the real asset; do not hardcode.
 //!
 //! ## Not here, on purpose
 //!
-//! **No tooltip.** Vanilla's `WidgetTooltipHolder` is what makes "disabled with
-//! an explanation" honest (`TitleScreen.java`,
-//! `OptionsScreen.java`), and it belongs on this type eventually — but
+//! **No tooltip.** Vanilla's own tooltip-holder type is what makes "disabled with
+//! an explanation" honest, and it belongs on this type eventually — but
 //! nothing in this shell draws a hover tooltip, so a `tooltip` field would reach
-//! zero pixels. It lands with the screen-level input layer (#395), which is what
+//! zero pixels. It lands with the screen-level input layer, which is what
 //! knows how long the cursor has rested.
 //!
 //! ## Dependencies
@@ -100,8 +103,7 @@
 
 /// Vanilla's inactive-message colour as the **signed** ARGB integer the jar
 /// writes: `Style.EMPTY.withColor(-6250336)` in
-/// `AbstractWidget.WithInactiveMessage.defaultInactiveMessage`
-/// (`AbstractWidget.java`).
+/// `AbstractWidget.WithInactiveMessage.defaultInactiveMessage`.
 ///
 /// `-6250336 as u32` is `0xFF_A0_A0_A0` — opaque grey 160. Kept in vanilla's own
 /// spelling so it can be grepped for in the decompiled source, with
@@ -118,25 +120,24 @@ pub const INACTIVE_LABEL: [f32; 4] = [160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.
 /// An active widget's label colour: plain white.
 ///
 /// `AbstractButton` tints only the *sprite* with `ARGB.white(this.alpha)`
-/// (`AbstractButton.java`); the label keeps the component's own default, which
+///; the label keeps the component's own default, which
 /// for every menu button is white.
 pub const ACTIVE_LABEL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
-/// `Button.SMALL_WIDTH` (`Button.java`).
+/// `Button.SMALL_WIDTH`.
 pub const SMALL_WIDTH: f32 = 120.0;
-/// `Button.DEFAULT_WIDTH` (`Button.java`).
+/// `Button.DEFAULT_WIDTH`.
 pub const DEFAULT_WIDTH: f32 = 150.0;
-/// `Button.BIG_WIDTH` (`Button.java`) — the title screen's full-width rows.
+/// `Button.BIG_WIDTH` — the title screen's full-width rows.
 pub const BIG_WIDTH: f32 = 200.0;
-/// `Button.DEFAULT_HEIGHT` (`Button.java`) — every menu button's height.
+/// `Button.DEFAULT_HEIGHT` — every menu button's height.
 pub const DEFAULT_HEIGHT: f32 = 20.0;
-/// `Button.DEFAULT_SPACING` (`Button.java`), for #394's layout containers.
+/// `Button.DEFAULT_SPACING`, for #394's layout containers.
 pub const DEFAULT_SPACING: f32 = 8.0;
 
-/// `AbstractButton.TEXT_MARGIN` (`AbstractButton.java`): the inset the label's
+/// `AbstractButton.TEXT_MARGIN`: the inset the label's
 /// scroll window is measured from, passed as
-/// `extractScrollingStringOverContents(output, message, 2)`
-/// (`AbstractButton.java`).
+/// `extractScrollingStringOverContents(output, message, 2)`.
 pub const TEXT_MARGIN: f32 = 2.0;
 
 /// Unpacks a vanilla signed-ARGB integer into this shell's `[r, g, b, a]` in
@@ -158,7 +159,7 @@ pub fn argb_to_rgba(argb: i32) -> [f32; 4] {
     ]
 }
 
-/// Vanilla's `WidgetSprites` record (`WidgetSprites.java`): the four sprite ids
+/// Vanilla's `WidgetSprites` record: the four sprite ids
 /// a widget picks between, keyed by `(enabled, focused)`.
 ///
 /// The three collapsing constructors are vanilla's own, and the collapse is the
@@ -205,21 +206,21 @@ impl WidgetSprites {
         }
     }
 
-    /// Vanilla's 1-argument constructor (`WidgetSprites.java`): one sprite
+    /// Vanilla's 1-argument constructor: one sprite
     /// for every state.
     #[must_use]
     pub const fn uniform(sprite: &'static str) -> Self {
         Self::new(sprite, sprite, sprite, sprite)
     }
 
-    /// Vanilla's 2-argument constructor (`WidgetSprites.java`): a focused
+    /// Vanilla's 2-argument constructor: a focused
     /// variant but **no disabled art** — `EditBox`'s form.
     #[must_use]
     pub const fn focusable(sprite: &'static str, focused: &'static str) -> Self {
         Self::new(sprite, sprite, focused, focused)
     }
 
-    /// Vanilla's 3-argument constructor (`WidgetSprites.java`):
+    /// Vanilla's 3-argument constructor:
     /// `(enabled, disabled, focused, disabled)` — `AbstractButton`'s form.
     #[must_use]
     pub const fn with_disabled(
@@ -230,7 +231,7 @@ impl WidgetSprites {
         Self::new(enabled, disabled, focused, disabled)
     }
 
-    /// `WidgetSprites.get(enabled, focused)` (`WidgetSprites.java`),
+    /// `WidgetSprites.get(enabled, focused)`,
     /// transcribed branch for branch.
     #[must_use]
     pub const fn get(self, enabled: bool, focused: bool) -> &'static str {
@@ -248,7 +249,7 @@ impl WidgetSprites {
     }
 }
 
-/// `AbstractButton.SPRITES` (`AbstractButton.java`): the three
+/// `AbstractButton.SPRITES`: the three
 /// `widget/button*` ids every menu button selects between, through vanilla's
 /// 3-argument collapse.
 ///
@@ -262,7 +263,7 @@ pub const BUTTON_SPRITES: WidgetSprites = WidgetSprites::with_disabled(
     "widget/button_highlighted",
 );
 
-/// `AbstractSliderButton`'s track (`AbstractSliderButton.java`),
+/// `AbstractSliderButton`'s track,
 /// expressed through the **3**-argument collapse with `enabled` and `disabled`
 /// deliberately equal.
 ///
@@ -297,7 +298,7 @@ pub const BUTTON_SPRITES: WidgetSprites = WidgetSprites::with_disabled(
 /// `focusable` and `a_slider_has_a_track_but_no_disabled_track` caught it
 /// immediately, reporting `widget/slider_highlighted` for a greyed-out slider.
 ///
-/// `EditBox` genuinely is the 2-argument form (`EditBox.java`) and is not
+/// `EditBox` genuinely is the 2-argument form and is not
 /// affected, because `nextFocusPath` refuses focus to an inactive widget, so its
 /// disabled-and-focused state does not arise in vanilla.
 pub const SLIDER_SPRITES: WidgetSprites = WidgetSprites::with_disabled(
@@ -306,12 +307,12 @@ pub const SLIDER_SPRITES: WidgetSprites = WidgetSprites::with_disabled(
     "widget/slider_highlighted",
 );
 
-/// Vanilla's `AbstractWidget` (`AbstractWidget.java`): a menu control's
+/// Vanilla's `AbstractWidget`: a menu control's
 /// bounds, message and state.
 ///
 /// Field names and defaults follow the jar: `active` and `visible` are `true`,
 /// `focused` is `false`, and both `active` and `visible` are public because they
-/// are public fields there too (`AbstractWidget.java`) — every vanilla
+/// are public fields there too — every vanilla
 /// disable site is a plain `button.active = …` assignment
 /// (`OptionsSubScreen.java`, `TitleScreen.java`).
 #[derive(Debug, Clone, PartialEq)]
@@ -331,10 +332,9 @@ pub struct Widget {
     /// disabled API — see the module docs.
     pub active: bool,
     /// Whether the widget is drawn at all. `AbstractWidget.extractRenderState`
-    /// wraps everything in `if (this.visible)` (`AbstractWidget.java`).
+    /// wraps everything in `if (this.visible)`.
     pub visible: bool,
-    /// `AbstractWidget.focused` — **keyboard** focus alone
-    /// (`AbstractWidget.java`).
+    /// `AbstractWidget.focused` — **keyboard** focus alone.
     ///
     /// This used to carry `isHoveredOrFocused()`, because the shell had one row
     /// cursor that both the keyboard and the mouse moved. #395 split them:
@@ -344,7 +344,7 @@ pub struct Widget {
     /// that must not pick a side.
     pub focused: bool,
     /// `AbstractWidget.isHovered`, set from **geometry alone** every frame
-    /// (`AbstractWidget.java`) and never consulted about `active` — which
+    /// and never consulted about `active` — which
     /// is why a greyed-out button under the cursor still looks greyed out rather
     /// than vanishing.
     pub hovered: bool,
@@ -352,7 +352,7 @@ pub struct Widget {
     /// background of its own (the `Checkbox`/`EditBox`/slider family).
     pub sprites: Option<WidgetSprites>,
     /// A sprite drawn centred **instead of** [`Self::message`] — vanilla's
-    /// `SpriteIconButton.CenteredIcon` (`SpriteIconButton.java`).
+    /// `SpriteIconButton.CenteredIcon`.
     pub icon: Option<&'static str>,
 }
 
@@ -408,7 +408,7 @@ impl Widget {
     ///
     /// The **handle** is still not this type's business — vanilla draws it at
     /// `x + value * (width - 8)` from the widget's own `value`
-    /// (`AbstractSliderButton.java`), and a `Widget` holds no value, so
+    ///, and a `Widget` holds no value, so
     /// the caller passes one to the draw. This used to say nothing drew a
     /// handle at all, because every slider the settings tree rendered was
     /// inactive; that stopped being true once issue #203 gave
@@ -425,7 +425,7 @@ impl Widget {
         }
     }
 
-    /// `AbstractSliderButton.getSprite()` (`AbstractSliderButton.java`):
+    /// `AbstractSliderButton.getSprite()`:
     /// `isActive() && isFocused() && !canChangeValue ? HIGHLIGHTED : SLIDER`.
     ///
     /// **Both** arguments differ from [`Self::background_sprite`]'s, in the same
@@ -448,7 +448,7 @@ impl Widget {
     }
 
     /// `AbstractSliderButton.getHandleSprite()`
-    /// (`AbstractSliderButton.java`):
+    ///:
     /// `!isActive() || (!isHovered && !canChangeValue) ? SLIDER_HANDLE :
     /// SLIDER_HANDLE_HIGHLIGHTED`.
     ///
@@ -457,21 +457,11 @@ impl Widget {
     ///
     /// This used to collapse the condition to `isActive() && self.hovered`,
     /// borrowing [`Self::slider_background_sprite`]'s claim that
-    /// `canChangeValue` is a latch nothing here sets. Read
-    /// `AbstractSliderButton.setFocused` instead of the summary:
-    ///
-    /// ```java
-    /// public void setFocused(final boolean focused) {
-    ///    super.setFocused(focused);
-    ///    if (!focused) { this.canChangeValue = false; }
-    ///    else {
-    ///       InputType lastInputType = Minecraft.getInstance().getLastInputType();
-    ///       if (lastInputType == InputType.MOUSE || lastInputType == InputType.KEYBOARD_TAB) {
-    ///          this.canChangeValue = true;
-    ///       }
-    ///    }
-    /// }
-    /// ```
+    /// `canChangeValue` is a latch nothing here sets. Read vanilla's own
+    /// focus setter instead of the summary: it always propagates the
+    /// superclass focus change, then on losing focus clears
+    /// `canChangeValue`, and on gaining it sets `canChangeValue` when the
+    /// last input type was mouse or keyboard-Tab.
     ///
     /// A slider focused by mouse or by Tab — i.e. every way a player focuses one
     /// — has `canChangeValue == true`. So the honest collapse is
@@ -499,7 +489,7 @@ impl Widget {
         }
     }
 
-    /// `AbstractWidget.isActive()` (`AbstractWidget.java`):
+    /// `AbstractWidget.isActive()`:
     /// `visible && active`.
     ///
     /// Not the same question as [`Self::active`], and the difference is what
@@ -524,7 +514,7 @@ impl Widget {
         mx >= self.x && mx <= self.x + self.width && my >= self.y && my <= self.y + self.height
     }
 
-    /// `AbstractWidget.isMouseOver` (`AbstractWidget.java`):
+    /// `AbstractWidget.isMouseOver`:
     /// `isActive() && areCoordinatesInRectangle(..)`.
     ///
     /// This is the **click** half of the disabled path — the half that matters,
@@ -537,7 +527,7 @@ impl Widget {
 
     /// Whether a focus-navigation event would land on this widget:
     /// `AbstractWidget.nextFocusPath` returns a leaf only when `isActive()` and
-    /// not already focused, and `null` otherwise (`AbstractWidget.java`).
+    /// not already focused, and `null` otherwise.
     ///
     /// So an inactive widget is skipped by Tab and by the arrow keys, not just
     /// unclickable — which is what
@@ -548,7 +538,7 @@ impl Widget {
         self.is_active() && !self.focused
     }
 
-    /// `AbstractWidget.isHoveredOrFocused()` (`AbstractWidget.java`):
+    /// `AbstractWidget.isHoveredOrFocused()`:
     /// `isHovered() || isFocused()`.
     ///
     /// **The `||` is the whole point of this method existing.** #393 collapsed
@@ -565,7 +555,7 @@ impl Widget {
     /// The background sprite id, or `None` when this widget has no sprite
     /// background.
     ///
-    /// `AbstractButton.extractDefaultSprite` (`AbstractButton.java`):
+    /// `AbstractButton.extractDefaultSprite`:
     /// `SPRITES.get(this.active, this.isHoveredOrFocused())`. Note the first
     /// argument is the raw `active` field, not `isActive()` — see the module
     /// docs — and the second is [`Self::is_hovered_or_focused`], **not**
@@ -585,7 +575,7 @@ impl Widget {
     ///
     /// `AbstractWidget.WithInactiveMessage.getMessage()` is
     /// `this.active ? super.getMessage() : this.inactiveMessage`
-    /// (`AbstractWidget.java`) — keyed on `active`, like the sprite, not
+    /// — keyed on `active`, like the sprite, not
     /// on `isActive()`.
     #[must_use]
     pub fn message_colour(&self) -> [f32; 4] {
@@ -595,8 +585,7 @@ impl Widget {
     /// The horizontal window the label is centred in: `(x + 2, x + width - 2)`.
     ///
     /// `extractScrollingStringOverContents(output, message, TEXT_MARGIN)` →
-    /// `left = getX() + margin`, `right = getX() + getWidth() - margin`
-    /// (`AbstractWidget.java`).
+    /// `left = getX() + margin`, `right = getX() + getWidth() - margin`.
     #[must_use]
     pub fn content_span(&self) -> (f32, f32) {
         (self.x + TEXT_MARGIN, self.x + self.width - TEXT_MARGIN)
@@ -617,7 +606,7 @@ impl Widget {
     /// The top-left of a `side`×`side` icon centred in the widget.
     ///
     /// `SpriteIconButton.CenteredIcon.extractContents`
-    /// (`SpriteIconButton.java`); `spriteOffset` is zero at every call
+    ///; `spriteOffset` is zero at every call
     /// site, so this is a plain centre. Floored, so the icon lands on a pixel.
     #[must_use]
     pub fn icon_rect(&self, side: f32) -> (f32, f32) {
@@ -628,7 +617,7 @@ impl Widget {
     }
 }
 
-/// `SelectableEntry.mouseOverRightHalf` (`SelectableEntry.java`): the
+/// `SelectableEntry.mouseOverRightHalf`: the
 /// cursor is in the right half of a `size`×`size` icon whose top-left is the
 /// origin of `(rel_x, rel_y)`.
 ///
@@ -675,13 +664,13 @@ pub fn over_bottom_left_quarter(rel_x: f32, rel_y: f32, size: f32) -> bool {
 /// Two methods are not where vanilla puts them, both deliberately:
 ///
 /// - **`visitWidgets`** is here rather than only on `Layout`, as in vanilla
-///   (`LayoutElement.java`), and it is **required** — vanilla makes it
+///  , and it is **required** — vanilla makes it
 ///   abstract too, which is why `SpacerElement` has to write an explicit empty
-///   body (`SpacerElement.java`). A defaulted no-op would let a future
+///   body. A defaulted no-op would let a future
 ///   element type silently never reach a screen.
 /// - **`arrange_elements`** is here with a no-op default, where vanilla has it on
 ///   `Layout` and tests `child instanceof Layout` in the default body
-///   (`Layout.java`). Behaviourally identical, and it saves a downcast from
+///  . Behaviourally identical, and it saves a downcast from
 ///   `dyn LayoutElement`.
 pub trait LayoutElement: core::fmt::Debug {
     /// `getX()`.
@@ -702,7 +691,7 @@ pub trait LayoutElement: core::fmt::Debug {
     ///
     /// This is the only route from a layout tree to a draw — vanilla's screens
     /// are literally `layout.visitWidgets(this::addRenderableWidget)`
-    /// (`PauseScreen.java`) — and the reason a `SpacerElement` is measured
+    /// — and the reason a `SpacerElement` is measured
     /// but never drawn.
     fn visit_widgets(&self, visitor: &mut dyn FnMut(&Widget));
 
@@ -749,7 +738,7 @@ impl LayoutElement for Widget {
     }
 
     /// A widget *is* a leaf: it visits itself, exactly as
-    /// `AbstractWidget.visitWidgets` does (`AbstractWidget.java`).
+    /// `AbstractWidget.visitWidgets` does.
     fn visit_widgets(&self, visitor: &mut dyn FnMut(&Widget)) {
         visitor(self);
     }
@@ -757,40 +746,38 @@ impl LayoutElement for Widget {
 
 // -- the scrollable list ----------------------------------------------------
 
-/// `AbstractScrollArea.SCROLLBAR_WIDTH` (`AbstractScrollArea.java`), which is
+/// `AbstractScrollArea.SCROLLBAR_WIDTH`, which is
 /// also the `scrollbarWidth` every `defaultSettings` record carries (`:146`).
 pub const SCROLLBAR_WIDTH: f32 = 6.0;
 
-/// `AbstractScrollArea.SCROLLBAR_MIN_HEIGHT` (`AbstractScrollArea.java`), the
+/// `AbstractScrollArea.SCROLLBAR_MIN_HEIGHT`, the
 /// floor [`ScrollList::scroller_height`] clamps the thumb to.
 pub const SCROLLBAR_MIN_HEIGHT: f32 = 32.0;
 
 /// The gap `scrollerHeight()` leaves at the bottom of its own clamp:
-/// `Mth.clamp(…, 32, this.height - 8)` (`AbstractScrollArea.java`).
+/// `Mth.clamp(…, 32, this.height - 8)`.
 pub const SCROLLBAR_HEIGHT_INSET: f32 = 8.0;
 
-/// `AbstractSelectionList.Entry.CONTENT_PADDING` (`AbstractSelectionList.java`)
+/// `AbstractSelectionList.Entry.CONTENT_PADDING`
 /// — also the `+ 2` in `getFirstEntryY()` (`:104-106`) and half the `+ 4` in
 /// `contentHeight()` (`:198-206`). One constant because vanilla derives all three
 /// from the same 2 px inset, and splitting them is how they drift.
 pub const LIST_CONTENT_PADDING: f32 = 2.0;
 
-/// The thumb sprite: `AbstractScrollArea.SCROLLER_SPRITE`
-/// (`AbstractScrollArea.java`).
+/// The thumb sprite: `AbstractScrollArea.SCROLLER_SPRITE`.
 pub const SCROLLER_SPRITE: &str = "widget/scroller";
 
-/// The track sprite: `AbstractScrollArea.SCROLLER_BACKGROUND_SPRITE`
-/// (`AbstractScrollArea.java`).
+/// The track sprite: `AbstractScrollArea.SCROLLER_BACKGROUND_SPRITE`.
 pub const SCROLLER_BACKGROUND_SPRITE: &str = "widget/scroller_background";
 
 // -- the tab widget ---------------------------------------------
 //
-// Vanilla's `MenuTabBar.MenuTabButton` (`MenuTabBar.java`) — the tab
+// Vanilla's `MenuTabBar.MenuTabButton` — the tab
 // strip `StatsScreen` and `CreateWorldScreen` both use. Built once here rather
 // than per-screen, per the owner report: "Statistics and Create New World want
 // the same widget."
 
-/// `MenuTabButton.SPRITES` (`MenuTabBar.java`): the four `widget/tab*`
+/// `MenuTabButton.SPRITES`: the four `widget/tab*`
 /// ids a tab selects between.
 ///
 /// Keyed by `(selected, hoveredOrFocused)`, **not** `(active, …)` like every
@@ -808,7 +795,7 @@ pub const TAB_SPRITES: WidgetSprites = WidgetSprites::new(
 );
 
 /// `MenuTabButton.extractWidgetRenderState`'s `underlineColor`
-/// (`MenuTabBar.java`): vanilla's raw ARGB `-1` (white) while the tab is
+///: vanilla's raw ARGB `-1` (white) while the tab is
 /// clickable, `-6250336` while it is present-and-inactive (issue #564's
 /// Items/Mobs tabs, which have no data to show yet — see `stats.rs`'s module
 /// docs).
@@ -822,7 +809,7 @@ pub fn tab_underline_colour(active: bool) -> [f32; 4] {
     if active { ACTIVE_LABEL } else { INACTIVE_LABEL }
 }
 
-/// `MenuTabButton.renderLabel`'s `top` local (`MenuTabBar.java`):
+/// `MenuTabButton.renderLabel`'s `top` local:
 /// `getY() + (isSelected() ? 0 : 3)` — an unselected tab's label window
 /// starts 3 px lower because the selected tab alone draws the inset
 /// background/underline that would otherwise collide with a label sitting
@@ -899,9 +886,9 @@ pub const TAB_UNDERLINE_SIDE_MARGIN: f32 = 4.0;
 ///
 /// ## The offset is pixels, and that is the whole point
 ///
-/// `scrollAmount` is a `double` in vanilla (`AbstractScrollArea.java`) and
+/// `scrollAmount` is a `double` in vanilla and
 /// every consumer treats it as pixels: `repositionEntries` subtracts it straight
-/// from a y (`AbstractSelectionList.java`), and `mouseScrolled` moves it
+/// from a y, and `mouseScrolled` moves it
 /// by `scrollY * scrollRate()` where `scrollRate` is `defaultEntryHeight / 2`
 /// (`:44` via `AbstractScrollArea.defaultSettings`, `:145-147`).
 ///
@@ -916,7 +903,7 @@ pub const TAB_UNDERLINE_SIDE_MARGIN: f32 = 4.0;
 ///
 /// Checked rather than assumed, because "smooth" invites one:
 /// `setScrollAmount` is an immediate `Mth.clamp` with no target, no velocity and
-/// no per-frame approach (`AbstractScrollArea.java`), and
+/// no per-frame approach, and
 /// `smoothScroll`/`scrollAnimation`/`targetScroll` appear **nowhere** in
 /// `client/gui`. Smoothness in vanilla is entirely a consequence of the offset
 /// being pixel-granular. **Do not add easing** — it would be invention, and it
@@ -927,7 +914,7 @@ pub const TAB_UNDERLINE_SIDE_MARGIN: f32 = 4.0;
 ///
 /// These are separate fields in vanilla and nothing ever copies one into the
 /// other. `hovered` is recomputed from the mouse position at the top of every
-/// extract (`AbstractSelectionList.java`) and is only ever *read* as a
+/// extract and is only ever *read* as a
 /// boolean argument to the entry's own draw (`:360`). `selected` moves on a
 /// click, on a keyboard arrow, or through `setFocused` (`:299-311`) — never on a
 /// hover.
@@ -943,7 +930,7 @@ pub const TAB_UNDERLINE_SIDE_MARGIN: f32 = 4.0;
 ///   it ports. A convenience that has no vanilla counterpart belongs in the
 ///   screen, not here.
 /// - **The integer truncations are load-bearing.** `scrollerHeight` casts to
-///   `int` before clamping (`AbstractScrollArea.java`) and `scrollBarY` does
+///   `int` before clamping and `scrollBarY` does
 ///   `(int)scrollAmount * (height - scrollerHeight()) / maxScrollAmount()` in
 ///   **integer** arithmetic (`:104-108`). The `floor`s here are that arithmetic,
 ///   not defensive rounding — deleting them moves the thumb by up to a pixel and
@@ -1025,7 +1012,7 @@ impl ScrollList {
     }
 
     /// A list whose entries have **individual** heights — vanilla's
-    /// `addEntry(entry, height)` (`AbstractSelectionList.java`), where
+    /// `addEntry(entry, height)`, where
     /// `repositionEntries` advances its running `y` by each child's own height
     /// (`:143-152`) rather than by a constant.
     ///
@@ -1134,7 +1121,7 @@ impl ScrollList {
         self.row_h
     }
 
-    /// `getItemCount()` (`AbstractSelectionList.java`).
+    /// `getItemCount()`.
     #[must_use]
     pub fn len(&self) -> usize {
         self.len
@@ -1147,7 +1134,7 @@ impl ScrollList {
     }
 
     /// Re-seat the band and the entry count, then re-clamp — vanilla's
-    /// `updateSizeAndPosition` (`AbstractSelectionList.java`), which
+    /// `updateSizeAndPosition`, which
     /// ends in `refreshScrollAmount()`.
     ///
     /// **Call this every frame**, before reading any geometry. The band depends
@@ -1200,28 +1187,27 @@ impl ScrollList {
         self.refresh_scroll();
     }
 
-    /// `getFirstEntryY() = getY() + 2` (`AbstractSelectionList.java`).
+    /// `getFirstEntryY() = getY() + 2`.
     #[must_use]
     pub fn first_entry_y(&self) -> f32 {
         self.top + LIST_CONTENT_PADDING
     }
 
     /// `contentHeight()`: the entries' total height plus 4
-    /// (`AbstractSelectionList.java`) — the 2 px above the first entry
+    /// — the 2 px above the first entry
     /// and the 2 px below the last.
     #[must_use]
     pub fn content_height(&self) -> f32 {
         self.row_offset(self.len) + 2.0 * LIST_CONTENT_PADDING
     }
 
-    /// `maxScrollAmount() = max(0, contentHeight() - height)`
-    /// (`AbstractScrollArea.java`).
+    /// `maxScrollAmount() = max(0, contentHeight() - height)`.
     #[must_use]
     pub fn max_scroll(&self) -> f32 {
         (self.content_height() - self.height).max(0.0)
     }
 
-    /// `scrollable() = maxScrollAmount() > 0` (`AbstractScrollArea.java`).
+    /// `scrollable() = maxScrollAmount() > 0`.
     /// Also the gate on the scrollbar being drawn at all (`:126`).
     #[must_use]
     pub fn scrollable(&self) -> bool {
@@ -1230,7 +1216,7 @@ impl ScrollList {
 
     /// The top of entry `index`, in the same space the band is measured in:
     /// `getFirstEntryY() - scrollAmount() + index * height`, which is
-    /// `repositionEntries`' running `y` (`AbstractSelectionList.java`).
+    /// `repositionEntries`' running `y`.
     ///
     /// Vanilla truncates the offset once, at `(int)this.scrollAmount()`
     /// (`:144`), rather than per entry — so the whole column moves as a unit and
@@ -1242,8 +1228,7 @@ impl ScrollList {
     }
 
     /// Whether entry `index` is inside the band —
-    /// `child.getY() + child.getHeight() >= getY() && child.getY() <= getBottom()`
-    /// (`AbstractSelectionList.java`).
+    /// `child.getY() + child.getHeight() >= getY() && child.getY() <= getBottom()`.
     ///
     /// **This is a *partial*-overlap test, and now that is the whole point.** It
     /// was previously stood in for by "skip any row that is not wholly inside",
@@ -1325,14 +1310,13 @@ impl ScrollList {
 
     // -- the offset -------------------------------------------------------
 
-    /// `scrollAmount()` (`AbstractScrollArea.java`) — **pixels**.
+    /// `scrollAmount()` — **pixels**.
     #[must_use]
     pub fn scroll(&self) -> f32 {
         self.scroll
     }
 
-    /// `setScrollAmount`: `Mth.clamp(scrollAmount, 0, maxScrollAmount())`
-    /// (`AbstractScrollArea.java`).
+    /// `setScrollAmount`: `Mth.clamp(scrollAmount, 0, maxScrollAmount())`.
     ///
     /// A NaN would survive `clamp` and poison every y downstream, so it is
     /// mapped to 0 — vanilla cannot receive one (its inputs are all `int`-derived
@@ -1345,7 +1329,7 @@ impl ScrollList {
         };
     }
 
-    /// `refreshScrollAmount()` (`AbstractScrollArea.java`) — re-apply the
+    /// `refreshScrollAmount()` — re-apply the
     /// clamp after the band or the content changed.
     pub fn refresh_scroll(&mut self) {
         let s = self.scroll;
@@ -1365,8 +1349,7 @@ impl ScrollList {
         (self.row_h / 2.0).floor()
     }
 
-    /// `mouseScrolled`: `setScrollAmount(scrollAmount() - scrollY * scrollRate())`
-    /// (`AbstractScrollArea.java`).
+    /// `mouseScrolled`: `setScrollAmount(scrollAmount() - scrollY * scrollRate())`.
     ///
     /// `notches` is winit's `scrollY`, so **positive scrolls up** (toward entry
     /// 0), matching vanilla's sign.
@@ -1374,7 +1357,7 @@ impl ScrollList {
         self.set_scroll(self.scroll - notches * self.scroll_rate());
     }
 
-    /// `scrollToEntry` (`AbstractSelectionList.java`): the minimum move
+    /// `scrollToEntry`: the minimum move
     /// that brings entry `index` fully inside the band.
     ///
     /// Both deltas are computed against the *current* offset and applied in
@@ -1396,7 +1379,7 @@ impl ScrollList {
         }
     }
 
-    /// `centerScrollOn` (`AbstractSelectionList.java`).
+    /// `centerScrollOn`.
     pub fn center_on(&mut self, index: usize) {
         if index >= self.len {
             return;
@@ -1407,13 +1390,13 @@ impl ScrollList {
 
     // -- selection and hover, which are different things -------------------
 
-    /// `getSelected()` (`AbstractSelectionList.java`).
+    /// `getSelected()`.
     #[must_use]
     pub fn selected(&self) -> Option<usize> {
         self.selected
     }
 
-    /// `setSelected` (`AbstractSelectionList.java`), including its
+    /// `setSelected`, including its
     /// scroll-into-view.
     ///
     /// Vanilla scrolls when the entry is clipped at either edge **or** when the
@@ -1434,14 +1417,13 @@ impl ScrollList {
         }
     }
 
-    /// `getHovered()` (`AbstractSelectionList.java`).
+    /// `getHovered()`.
     #[must_use]
     pub fn hovered(&self) -> Option<usize> {
         self.hovered
     }
 
-    /// `this.hovered = isMouseOver(…) ? getEntryAtPosition(…) : null`
-    /// (`AbstractSelectionList.java`).
+    /// `this.hovered = isMouseOver(…) ? getEntryAtPosition(…) : null`.
     ///
     /// **This method must never touch [`Self::selected`], and there is no code
     /// path here by which it could.** That is not a stylistic note — it is the
@@ -1453,7 +1435,7 @@ impl ScrollList {
         self.hovered = hovered.filter(|&i| i < self.len);
     }
 
-    /// `getEntryAtPosition` (`AbstractSelectionList.java`) restricted to
+    /// `getEntryAtPosition` restricted to
     /// entries actually inside the band, then folded through
     /// [`Self::set_hovered`].
     ///
@@ -1490,14 +1472,14 @@ impl ScrollList {
 
     // -- the scrollbar ----------------------------------------------------
 
-    /// `scrollbarWidth()` (`AbstractScrollArea.java`).
+    /// `scrollbarWidth()`.
     #[must_use]
     pub fn scrollbar_width(&self) -> f32 {
         SCROLLBAR_WIDTH
     }
 
     /// `scrollBarX()` — and note **`AbstractSelectionList` overrides it**:
-    /// `getRowRight() + scrollbarWidth() + 2` (`AbstractSelectionList.java`),
+    /// `getRowRight() + scrollbarWidth() + 2`,
     /// *not* `AbstractScrollArea`'s `getRight() - scrollbarWidth()` (`:100-102`).
     ///
     /// So the bar sits 8 px to the **right** of the row, outside it, rather than
@@ -1509,8 +1491,7 @@ impl ScrollList {
         row_right + SCROLLBAR_WIDTH + 2.0
     }
 
-    /// `scrollerHeight() = Mth.clamp((int)((float)(height * height) / contentHeight()), 32, height - 8)`
-    /// (`AbstractScrollArea.java`).
+    /// `scrollerHeight() = Mth.clamp((int)((float)(height * height) / contentHeight()), 32, height - 8)`.
     ///
     /// The `floor` is vanilla's `(int)` cast. Note the upper clamp can be
     /// *below* the lower one on a very short band, and `Mth.clamp` resolves that
@@ -1527,7 +1508,7 @@ impl ScrollList {
             .min(self.height - SCROLLBAR_HEIGHT_INSET)
     }
 
-    /// `scrollBarY()` (`AbstractScrollArea.java`).
+    /// `scrollBarY()`.
     ///
     /// **Integer arithmetic throughout in vanilla**:
     /// `(int)scrollAmount * (height - scrollerHeight()) / maxScrollAmount() + getY()`,
@@ -1546,7 +1527,7 @@ impl ScrollList {
 
     /// The track and thumb rects as `(x, y, w, h)`, or `None` when the list does
     /// not scroll — `extractScrollbar` draws nothing unless `scrollable()`
-    /// (`AbstractScrollArea.java`), and this shell has no
+    ///, and this shell has no
     /// `disabledScrollerSprite`, so the `!scrollable()` branch (`:114-124`) has
     /// no counterpart.
     ///
@@ -1565,7 +1546,7 @@ impl ScrollList {
         ))
     }
 
-    /// `isOverScrollbar` (`AbstractScrollArea.java`). Note the asymmetry
+    /// `isOverScrollbar`. Note the asymmetry
     /// vanilla itself has: inclusive in x on **both** edges, half-open in y.
     #[must_use]
     pub fn is_over_scrollbar(&self, x: f32, y: f32, row_right: f32) -> bool {
@@ -1573,7 +1554,7 @@ impl ScrollList {
         x >= bar_x && x <= bar_x + self.scrollbar_width() && y >= self.top && y < self.bottom()
     }
 
-    /// `updateScrolling` (`AbstractScrollArea.java`): begin a thumb drag if
+    /// `updateScrolling`: begin a thumb drag if
     /// the press landed on the bar of a scrollable list. Returns whether it did,
     /// which is vanilla's own "I consumed this click".
     pub fn begin_drag(&mut self, x: f32, y: f32, row_right: f32) -> bool {
@@ -1581,7 +1562,7 @@ impl ScrollList {
         self.dragging
     }
 
-    /// `onRelease` (`AbstractScrollArea.java`).
+    /// `onRelease`.
     pub fn end_drag(&mut self) {
         self.dragging = false;
     }
@@ -1592,7 +1573,7 @@ impl ScrollList {
         self.dragging
     }
 
-    /// `mouseDragged` (`AbstractScrollArea.java`), the thumb-drag branch.
+    /// `mouseDragged`, the thumb-drag branch.
     ///
     /// Three cases, all vanilla's: above the band snaps to 0, below it snaps to
     /// `maxScrollAmount()`, and inside it multiplies the mouse delta by
@@ -1961,7 +1942,7 @@ mod tests {
         assert_eq!(INACTIVE_MESSAGE_ARGB as u32, 0xFF_A0_A0_A0);
         // The control: a *different* vanilla colour must not unpack to the same
         // thing, or the detector is insensitive to the input. `EditBox`'s
-        // `DEFAULT_TEXT_COLOR` is -2039584 (`EditBox.java`).
+        // `DEFAULT_TEXT_COLOR` is -2039584.
         assert_ne!(argb_to_rgba(-2_039_584), INACTIVE_LABEL);
         // White, for the active side.
         assert_eq!(argb_to_rgba(-1), ACTIVE_LABEL);
@@ -2108,7 +2089,7 @@ mod tests {
     #[test]
     fn a_sliders_handle_highlights_on_hover_or_focus() {
         // `AbstractSliderButton.getHandleSprite()`
-        // (`AbstractSliderButton.java`) is
+        // is
         // `!isActive() || (!isHovered && !canChangeValue) ? SLIDER_HANDLE : …`,
         // and `canChangeValue` is `true` for a slider focused by mouse or Tab
         // (`setFocused`) — **not** the always-false latch the track's own doc
@@ -2152,7 +2133,7 @@ mod tests {
 
     #[test]
     fn invisible_is_inactive_but_still_carries_its_active_flag() {
-        // `isActive()` is `visible && active` (`AbstractWidget.java`),
+        // `isActive()` is `visible && active`,
         // while the *sprite* and the *label* key on the raw `active` field.
         let mut w = Widget::button(0.0, 0.0, 200.0, 20.0, "Multiplayer");
         w.visible = false;
@@ -2170,7 +2151,7 @@ mod tests {
     #[test]
     fn an_inactive_widget_is_unreachable_by_keyboard_and_by_click() {
         // The invisible half of the disabled path: `nextFocusPath` returns null
-        // when `!isActive()` (`AbstractWidget.java`), so Tab skips it.
+        // when `!isActive()`, so Tab skips it.
         let mut w = Widget::button(10.0, 20.0, 200.0, 20.0, "Minecraft Realms");
         assert!(w.takes_focus());
         assert!(w.is_mouse_over(50.0, 25.0));
@@ -2178,7 +2159,7 @@ mod tests {
         assert!(!w.takes_focus());
         assert!(!w.is_mouse_over(50.0, 25.0));
         // But it is still *hovered* — vanilla sets `isHovered` from geometry
-        // alone and never consults `active` (`AbstractWidget.java`), which is
+        // alone and never consults `active`, which is
         // why a greyed-out button under the cursor looks greyed out rather than
         // vanishing.
         assert!(w.contains(50.0, 25.0));
@@ -2323,8 +2304,8 @@ mod tests {
     #[test]
     fn one_notch_is_half_an_entry_in_pixels() {
         // `mouseScrolled` moves by `scrollY * scrollRate()`
-        // (`AbstractScrollArea.java`) and `scrollRate` is
-        // `defaultEntryHeight / 2` (`AbstractSelectionList.java`). For a 36 px
+        // and `scrollRate` is
+        // `defaultEntryHeight / 2`. For a 36 px
         // entry that is *exactly* 18 px.
         //
         // This is the assertion a row-index implementation cannot satisfy, and it
@@ -2432,7 +2413,7 @@ mod tests {
     #[test]
     fn the_scroll_rate_truncates_like_vanillas_int_division() {
         // `scrollRate` is an `int` field of the `ScrollbarSettings` record
-        // (`AbstractScrollArea.java`) fed `defaultEntryHeight / 2` in
+        // fed `defaultEntryHeight / 2` in
         // **integer** division, so an odd row height loses the half pixel. The
         // settings list's 25 px entry is the live case.
         assert_eq!(ScrollList::new(25.0, 0.0, 100.0, 10).scroll_rate(), 12.0);
@@ -2442,16 +2423,16 @@ mod tests {
 
     #[test]
     fn content_height_and_max_scroll_are_vanillas() {
-        // `contentHeight() = Σ heights + 4` (`AbstractSelectionList.java`)
+        // `contentHeight() = Σ heights + 4`
         // and `maxScrollAmount() = max(0, contentHeight - height)`
-        // (`AbstractScrollArea.java`).
+        //.
         let list = server_shaped();
         assert_eq!(list.content_height(), 10.0 * 36.0 + 4.0);
         assert_eq!(list.max_scroll(), 364.0 - 200.0);
         assert!(list.scrollable());
 
         // A list that fits has max 0 and does not scroll — and therefore draws no
-        // scrollbar at all (`AbstractScrollArea.java`).
+        // scrollbar at all.
         let short = ScrollList::new(36.0, 32.0, 200.0, 2);
         assert_eq!(short.content_height(), 76.0);
         assert_eq!(short.max_scroll(), 0.0);
@@ -2474,7 +2455,7 @@ mod tests {
     #[test]
     fn shrinking_the_band_reclamps_the_offset() {
         // `updateSizeAndPosition` ends in `refreshScrollAmount()`
-        // (`AbstractSelectionList.java`). Without it a shrunk window stays
+        //. Without it a shrunk window stays
         // scrolled past its own content and the list draws empty.
         let mut list = server_shaped();
         list.set_scroll(164.0);
@@ -2485,7 +2466,7 @@ mod tests {
 
     #[test]
     fn row_tops_move_as_one_column_and_stay_a_row_apart() {
-        // `repositionEntries` (`AbstractSelectionList.java`) truncates the
+        // `repositionEntries` truncates the
         // offset **once**, outside the per-entry accumulation.
         let mut list = server_shaped();
         assert_eq!(list.row_top(0), 34.0, "getFirstEntryY() = getY() + 2");
@@ -2504,7 +2485,7 @@ mod tests {
     #[test]
     fn a_half_scrolled_row_is_visible_rather_than_skipped() {
         // The partial-overlap test of `extractListItems`
-        // (`AbstractSelectionList.java`). Row 0 is half above the band
+        //. Row 0 is half above the band
         // after one notch and must still be *drawn* — clipped, not dropped. The
         // old row-quantized code skipped it, which is why smooth scrolling needed
         // the clip in `render.rs` before it could be correct.
@@ -2651,7 +2632,7 @@ mod tests {
 
     /// **The smooth-scroll magnitude gate for a variable list.**
     ///
-    /// `scrollRate` is `defaultEntryHeight / 2` (`AbstractSelectionList.java`),
+    /// `scrollRate` is `defaultEntryHeight / 2`,
     /// and `defaultEntryHeight` is the *declared* default, **not** the height of
     /// whichever entry happens to be first. A settings list declaring 25 px
     /// therefore moves `floor(25/2) = 12` px per notch.
@@ -2778,7 +2759,7 @@ mod tests {
         // `AbstractSelectionList` **overrides** `scrollBarX()` to
         // `getRowRight() + scrollbarWidth() + 2` (`:289-291`). Getting this from
         // `AbstractScrollArea`'s un-overridden `getRight() - scrollbarWidth()`
-        // (`AbstractScrollArea.java`) would put the bar *inside* the list.
+        // would put the bar *inside* the list.
         let list = server_shaped();
         let row_right = 392.0;
         assert_eq!(list.scrollbar_x(row_right), 400.0);
@@ -2792,7 +2773,7 @@ mod tests {
     #[test]
     fn thumb_geometry_lands_flush_at_both_ends() {
         // `scrollerHeight()` = `clamp((int)(h*h / contentHeight), 32, h - 8)`
-        // (`AbstractScrollArea.java`). For h=200, content=364:
+        //. For h=200, content=364:
         // 200*200/364 = 109.89 -> 109, and clamp(109, 32, 192) = 109.
         let mut list = server_shaped();
         assert_eq!(list.scroller_height(), 109.0);
@@ -2819,7 +2800,7 @@ mod tests {
 
     #[test]
     fn the_thumb_never_shrinks_below_vanillas_floor() {
-        // `SCROLLBAR_MIN_HEIGHT` (`AbstractScrollArea.java`). A 500-entry list
+        // `SCROLLBAR_MIN_HEIGHT`. A 500-entry list
         // would compute a 2 px thumb, which is unusable.
         let long = ScrollList::new(36.0, 32.0, 200.0, 500);
         assert!(long.height() * long.height() / long.content_height() < 32.0);
@@ -2833,7 +2814,7 @@ mod tests {
 
     #[test]
     fn scroll_to_entry_moves_the_minimum_and_settles() {
-        // `scrollToEntry` (`AbstractSelectionList.java`).
+        // `scrollToEntry`.
         let mut list = server_shaped();
 
         // Entry 5 is below the band (top 34 + 5*36 = 214 > bottom 232 - 36).
@@ -2891,7 +2872,7 @@ mod tests {
 
     #[test]
     fn hovering_does_not_scroll_the_list_either() {
-        // `setSelected` scrolls into view (`AbstractSelectionList.java`);
+        // `setSelected` scrolls into view;
         // `this.hovered = …` (`:210`) does not. A hover handler that routed
         // through selection would yank the list under the cursor.
         let mut list = server_shaped();
@@ -2919,7 +2900,7 @@ mod tests {
 
     #[test]
     fn hover_and_click_hit_test_the_same_rows_the_draw_shows() {
-        // `getEntryAtPosition` (`AbstractSelectionList.java`) restricted
+        // `getEntryAtPosition` restricted
         // to the band. The point is that a click can no longer land on an entry
         // the draw skipped — the residual defect issue #402 recorded.
         let mut list = server_shaped();
@@ -2952,7 +2933,7 @@ mod tests {
 
     #[test]
     fn dragging_the_thumb_scales_by_the_page_fraction() {
-        // `mouseDragged` (`AbstractScrollArea.java`).
+        // `mouseDragged`.
         let list0 = server_shaped();
         let row_right = 392.0;
         let bar_x = list0.scrollbar_x(row_right);
@@ -2997,7 +2978,7 @@ mod tests {
         assert_eq!(track, (400.0, 32.0, 6.0, 200.0));
         assert_eq!(thumb, (400.0, 32.0, 6.0, 109.0));
 
-        // `isOverScrollbar` (`AbstractScrollArea.java`) must agree with the
+        // `isOverScrollbar` must agree with the
         // track it draws, or the bar is a picture you cannot grab.
         assert!(list.is_over_scrollbar(track.0, track.1, row_right));
         assert!(list.is_over_scrollbar(track.0 + track.2, track.1 + 10.0, row_right));

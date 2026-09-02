@@ -22,7 +22,7 @@ use super::*;
 /// Expected bytes are hand-derived from vanilla, not from this crate's own
 /// formula: `NIGHT_FOG_COLOR_MULTIPLIER_START = ARGB.colorFromFloat(1.0,
 /// 0.05, 0.05, 0.09)` and `..._END = colorFromFloat(1.0, 0.09, 0.09, 0.09)`
-/// (`Timelines.java`), where `as8BitChannel` **floors**
+///, where `as8BitChannel` **floors**
 /// (`ARGB.java`: `Mth.floor(value * 255.0F)`) — `0.05*255=12.75`
 /// floors to `12`, `0.09*255=22.95` floors to `22`, giving multiplier
 /// keyframes `(12,12,22)` at tick 13670 and `(22,22,22)` at tick 22330, not

@@ -68,7 +68,7 @@
 //!   the selection cursor, and selecting the one real entry.
 //! - **Decorative — the selection's effect.** Vanilla's `onDone` calls
 //!   `languageManager.setSelected` and `minecraft.reloadResourcePacks()`
-//!   (`LanguageSelectScreen.java`) when the selected code differs from
+//!   when the selected code differs from
 //!   the current one. It never can here: the one entry *is* the current
 //!   language, so the guard vanilla itself has (`!selectedEntry.code.equals(
 //!   this.languageManager.getSelected())`) is always false. Nothing is
@@ -86,7 +86,7 @@
 //! named — nothing here is measured off this crate's own output.
 //!
 //! - [`HEADER_HEIGHT`] = 36: `this.layout.setHeaderHeight((int)(12.0 + 9.0 +
-//!   15.0))` (`LanguageSelectScreen.java`) — **not** the generic
+//!   15.0))` — **not** the generic
 //!   `OptionsSubScreen` 33 every other page uses, because this header also
 //!   carries the search box.
 //! - [`FOOTER_HEIGHT`] = 53: `this.layout.setFooterHeight(53)` (`:35`) — also
@@ -95,7 +95,7 @@
 //!   `repositionElements` (`:84-89`) immediately calls
 //!   `this.languageSelectionList.updateSize(this.width, this.layout)`, which
 //!   is `updateSizeAndPosition(width, layout.getContentHeight(),
-//!   layout.getHeaderHeight())` (`AbstractSelectionList.java`) — i.e.
+//!   layout.getHeaderHeight())` — i.e.
 //!   the constructor's `33` is overwritten with the real header height (36)
 //!   before a frame is ever drawn. [`HEADER_HEIGHT`] is the value that
 //!   survives, not the constructor literal — a vanilla quirk worth recording
@@ -190,15 +190,14 @@ pub const HEADER_HEIGHT: f32 = 36.0;
 pub const FOOTER_HEIGHT: f32 = 53.0;
 /// `LanguageSelectionList`'s own `itemHeight` (`:106`).
 pub const ROW_H: f32 = 18.0;
-/// `getRowWidth() = super.getRowWidth() + 50` (`:136-138`), default `220`
-/// (`AbstractSelectionList.java`).
+/// `getRowWidth() = super.getRowWidth() + 50` (`:136-138`), default `220`.
 pub const ROW_WIDTH: f32 = 270.0;
 /// The search box's real size, `new EditBox(font, 0, 0, 200, 15, …)` (`:43`).
 pub const SEARCH_W: f32 = 200.0;
 pub const SEARCH_H: f32 = 15.0;
 
 /// `getRowLeft() = getX() + width / 2 - getRowWidth() / 2` on a full-width
-/// list (`getX() == 0`) (`AbstractSelectionList.java`).
+/// list (`getX() == 0`).
 #[must_use]
 pub fn row_left(width: f32) -> f32 {
     width * 0.5 - ROW_WIDTH * 0.5
@@ -600,7 +599,7 @@ impl LanguageNav {
     }
 
     /// Backspace in the search box — `EditBox.keyPressed`'s `deleteText(-1,
-    /// ctrl)` arm (`EditBox.java`), without the whole-word modifier.
+    /// ctrl)` arm, without the whole-word modifier.
     pub fn backspace(&mut self) {
         self.search.delete_chars(-1);
         self.after_filter_changed();

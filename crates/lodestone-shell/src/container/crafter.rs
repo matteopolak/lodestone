@@ -1,4 +1,4 @@
-//! The crafter's slot-disable toggle — issue #613's `SetContainerSlotState`
+//! The crafter's slot-disable toggle — `SetContainerSlotState`
 //! remainder, the client (producer) half.
 //!
 //! ## What it is

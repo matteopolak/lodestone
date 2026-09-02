@@ -323,7 +323,7 @@ pub mod clipboard {
     /// The clipboard's text contents, or an empty string if there is no
     /// clipboard, it holds no text, or the platform call fails — vanilla's own
     /// `getClipboard` swallows `UnsupportedFlavorException`/`IOException` the
-    /// same way (`KeyboardHandler.java`).
+    /// same way.
     #[must_use]
     pub fn get() -> String {
         with_handle(|cb| cb.get_text().ok()).flatten().unwrap_or_default()

@@ -499,7 +499,7 @@ fn the_server_list_shows_the_motd_players_and_latency_from_a_status() {
     assert!(!view.motd_is_error);
     // The status column is the player count, not the latency: vanilla puts
     // `formatPlayerCount` there and the round-trip only in the ping *sprite*
-    // and its tooltip (`ServerStatusPinger.java`).
+    // and its tooltip.
     assert_eq!(view.status, "3/20");
     assert!(!view.status_is_error);
     // 12 ms is the fastest bucket, so five bars. Asserted by identity — a gate
@@ -623,7 +623,7 @@ fn a_failed_ping_shows_its_reason_in_the_error_colour() {
     // The reason goes in the **MOTD** column and the status column stays
     // empty, which is vanilla's own arrangement: `onPingFailed` sets
     // `data.motd = CANT_CONNECT_MESSAGE` and `data.status` to empty
-    // (`ServerStatusPinger.java`).
+    //.
     assert_eq!(view.motd, "connection refused");
     assert!(
         view.motd_is_error,
@@ -1007,7 +1007,7 @@ fn assert_box(got: Option<(f32, f32, f32, f32)>, want: (f32, f32, f32, f32), wha
 /// A cache of `Ok` statuses, one per entry in `nav`'s list, each spec
 /// `(host, players, sample, online)` seeded so its row resolves to
 /// `ServerState::Successful` — the state vanilla shows the "who's online"
-/// tooltip for (`ServerSelectionList.java`).
+/// tooltip for.
 fn ok_statuses(
     nav: &MenuNav,
     specs: &[(&str, &str, &[&str], Option<u32>)],
@@ -1057,7 +1057,7 @@ fn ok_statuses(
 /// together: `server_list_frame` shapes the lines from the sample — vanilla's
 /// `... and N more ...` when the sample is short of the count — and
 /// `draw_server_entry` only shows the box when the cursor is over the status
-/// *text* (the player count), not over the row (`ServerSelectionList.java`).
+/// *text* (the player count), not over the row.
 #[test]
 fn the_who_is_online_tooltip_lists_the_sample_and_tracks_the_status_text() {
     let (nav, ui) = list_nav("who", &[("A", "a.example"), ("B", "b.example")]);
@@ -1066,7 +1066,7 @@ fn the_who_is_online_tooltip_lists_the_sample_and_tracks_the_status_text() {
         &[
             ("a.example", "5/20", &["Alice", "Bob"], Some(5)),
             // A server that omits the sample: legal and common, and vanilla's
-            // `else { data.playerList = List.of() }` (`ServerStatusPinger.java`)
+            // `else { data.playerList = List.of() }`
             // gives it no tooltip.
             ("b.example", "1/20", &[], Some(1)),
         ],
@@ -1326,7 +1326,7 @@ fn each_hovered_icon_quadrant_highlights_its_own_sprite() {
     }
 
     // Row 0 has nowhere to move up to, so its arrow must not be drawn at all —
-    // vanilla's `if (index > 0)` guard (`ServerSelectionList.java`).
+    // vanilla's `if (index > 0)` guard.
     let (ix0, iy0, iw0, ih0) = server_entry_icon_rect(0, V_W, 0.0);
     f.cursor = Some((ix0 + 4.0, iy0 + 4.0));
     let sprite = build(&f, Some(&atlas), None, V_W, V_H).sprite;
@@ -1715,7 +1715,7 @@ fn the_edit_form_shows_both_fields_and_marks_the_focused_one() {
     assert_eq!(f.rows[NAME_FIELD].label, "abc");
     assert_eq!(f.selected, NAME_FIELD, "the name field has focus");
     // Vanilla disables Done rather than printing a message
-    // (`ManageServerScreen.java`) — see `error_frame`'s sibling note
+    // — see `error_frame`'s sibling note
     // on why a `vanilla` frame's `message` is unused, and this screen's own
     // arm on why no extra label duplicates the disabled sprite.
     assert!(f.message.is_none(), "a vanilla frame draws no `message`");
@@ -2892,7 +2892,7 @@ fn restyle_wrapped_keeps_a_space_sitting_at_a_colour_boundary() {
 ///
 /// | hypothesis | one notch |
 /// |---|---|
-/// | vanilla, `floor(defaultEntryHeight / 2)` (`AbstractSelectionList.java`) | **18** |
+/// | vanilla, `floor(defaultEntryHeight / 2)` | **18** |
 /// | the row-index model this replaced, one notch one row | 36 |
 /// | a whole band, if the notch were mistaken for a page | 147 |
 ///
@@ -3521,7 +3521,7 @@ fn the_odd_stat_rows_zebra_grey_reaches_real_geometry_not_just_frame_metadata() 
 /// The unpublished row set — `nav.set_lan_published` is never called, so this
 /// is `MenuNav::pause_buttons`'s `PAUSE_BUTTONS` answer. See
 /// `the_published_pause_frame_drops_open_to_lan_and_reflows_options` below for
-/// the other one, added when issue #535's scope 2 made this list conditional.
+/// the other one, added when scope 2 made this list conditional.
 ///
 /// `set_has_singleplayer_server(true)` states the other half of that same
 /// gate explicitly — `MenuNav::open_to_lan_available`'s own doc explains why
@@ -3680,7 +3680,7 @@ const V_H: f32 = 480.0;
 fn the_title_screen_rects_are_vanillas_own() {
     use crate::menu::nav::MainButton as B;
     // Hand-derived from `TitleScreen.init` / `createNormalMenuOptions`
-    // (`TitleScreen.java`) at 854×480, *not* read back out of
+    // at 854×480, *not* read back out of
     // `title_slot`: topPos = 480/4 + 48 = 168, rows every 24 px, the icon
     // row from `getHorizontalPosition(n, 3, 20)` = 427 - 34 + (n-1)*24, and
     // the Options/Quit pair at `W/2 - 100` / `W/2 + 2`, 98 wide.
@@ -3716,14 +3716,14 @@ fn the_title_screen_rects_are_vanillas_own() {
     assert_eq!(qx - (ox + ow), 4.0, "title screen gutter");
 }
 
-/// The unpublished grid — issue #535's scope 2 gave `pause_slot` a second
+/// The unpublished grid — scope 2 gave `pause_slot` a second
 /// `published: true` arrangement (`the_published_pause_screen_drops_open_to_lan`
 /// below), so every rect here is pinned with `false` rather than left
 /// implicit.
 #[test]
 fn the_pause_screen_rects_are_vanillas_own() {
     use crate::menu::nav::PauseButton as B;
-    // Hand-derived from `PauseScreen.createPauseMenu` (`PauseScreen.java`)
+    // Hand-derived from `PauseScreen.createPauseMenu`
     // through `GridLayout.arrangeElements`, at 854×480: the 212×166 grid is
     // aligned (0.5, 0.25) so its origin is (321, 78); row y offsets inside it
     // are [0, 70, 94, 118, 142] and each child sits at its own padding.
@@ -3979,7 +3979,7 @@ fn death_screen_backdrop_is_a_red_gradient_not_a_flat_dim() {
 #[test]
 fn the_death_screen_rects_are_vanillas_own() {
     use crate::menu::nav::DeathButton as B;
-    // Hand-derived from `DeathScreen.init` (`DeathScreen.java`) at
+    // Hand-derived from `DeathScreen.init` at
     // 854×480: both buttons are `width/2-100, height/4+72|96, 200x20`,
     // and `height/4+72 == TitleTop.anchor().1 + 24` since `TitleTop` is
     // itself `floor(height/4) + 48` — 168 + 24 = 192, 168 + 48 = 216.
@@ -4562,7 +4562,7 @@ fn nine_slice_borders_come_from_the_mcmeta_not_a_constant() {
 fn a_disabled_label_is_drawn_in_vanillas_grey_and_an_enabled_one_in_white() {
     // `AbstractWidget.WithInactiveMessage.defaultInactiveMessage` recolours
     // an inactive widget's message to `-6250336` == `0xFFA0A0A0`
-    // (`AbstractWidget.java`). Assert the actual colour, with the
+    //. Assert the actual colour, with the
     // enabled case as the control.
     let slot = Slot {
         origin: Origin::ScreenTop,
@@ -4624,7 +4624,7 @@ fn a_disabled_label_is_drawn_in_vanillas_grey_and_an_enabled_one_in_white() {
 fn an_icon_button_draws_its_sprite_and_no_label() {
     // Vanilla's `SpriteIconButton.CenteredIcon` draws the button background
     // plus a 15×15 sprite centred in it, and no text
-    // (`SpriteIconButton.java`).
+    //.
     let atlas = GuiAtlas::build(&button_pack()).expect("synthetic atlas builds");
     let slot = Slot {
         origin: Origin::ScreenTop,
@@ -5774,7 +5774,7 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
 /// The empty-list notice fits the row it is centred in.
 ///
 /// Vanilla's `NoWorldsEntry` gives its `StringWidget` no `maxWidth`
-/// (`WorldSelectionList.java`), so nothing clips it and a longer
+///, so nothing clips it and a longer
 /// string would overhang the row. Measured with [`text_px`], the same
 /// fixed-advance measure the jar-less draw uses — the real vanilla font is
 /// narrower, so this is the conservative direction.
@@ -8671,7 +8671,7 @@ fn the_statistics_tab_bar_meshes_selected_tab_only_and_the_flanks_carry_the_head
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
-/// Create New World's own tab bar (issue #567's second consumer) at the same
+/// Create New World's own tab bar (second consumer) at the same
 /// canvas: the flanking separators are this bar's own concern regardless of
 /// whether a content band sits below it (unlike Statistics, this screen has
 /// no `ListSpec` at all), but the merge fill must **never** appear here —

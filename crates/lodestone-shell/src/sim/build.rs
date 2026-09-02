@@ -454,7 +454,7 @@ impl Sim {
             sensitivity: seed_sensitivity,
             // Issues #202/#444: hold-vs-toggle and auto-jump all default off
             // in vanilla; the sprint window boots at vanilla's shipped 7
-            // (`Options.java`), because a derived `0` would silently
+            //, because a derived `0` would silently
             // disable double-tap sprint for any caller that never calls
             // `set_sprint_window_ticks`.
             toggle_sneak: false,

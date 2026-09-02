@@ -250,7 +250,7 @@ pub struct VanillaFont {
     raster: RasterFont,
     /// `§k` obfuscated text's replacement pool: drawable codepoints grouped by
     /// `ceil(advance)`, mirroring `FontSet.glyphsByWidth`
-    /// (`FontSet.java`). Vanilla's own pool is built from *every*
+    ///. Vanilla's own pool is built from *every*
     /// active provider (including `space`), but only bitmap glyphs are
     /// drawable here, so this is restricted to codepoints
     /// [`RasterFont::raster`] actually returns pixels for — a codepoint with no
@@ -822,7 +822,7 @@ impl VanillaFont {
     ///
     /// Vanilla's `graphics.text(font, component, x, y, colour, shadow)` takes the
     /// flag as an argument, and the two container labels
-    /// (`AbstractContainerScreen.java`) pass `false`. Every other text
+    /// pass `false`. Every other text
     /// surface in this crate passes it implicitly by calling
     /// [`draw`](Self::draw), so the shadowless case needs its own name rather
     /// than a bool parameter on the common path.
@@ -1323,7 +1323,7 @@ fn recover_poisoned_lock<T>(result: Result<T, PoisonError<T>>) -> T {
 
 /// Groups every codepoint this font can actually draw pixels for by
 /// `ceil(advance)`, mirroring `FontSet.glyphsByWidth`
-/// (`FontSet.java`) restricted to codepoints
+/// restricted to codepoints
 /// [`RasterFont::raster`] returns coverage for. Built once at load time so
 /// `§k` never rebuilds it mid-draw.
 fn build_obfuscation_pool(raster: &RasterFont) -> HashMap<u32, Vec<char>> {
@@ -2469,7 +2469,7 @@ mod styling_tests {
         x1 - x0
     }
 
-    /// **Bold**: `BakedSheetGlyph.renderChar` (`BakedSheetGlyph.java`)
+    /// **Bold**: `BakedSheetGlyph.renderChar`
     /// redraws the same glyph a second time, offset `+boldOffset` in x. Ink's
     /// bounding box must therefore widen by *exactly* `BOLD_OFFSET` (at
     /// `scale = 1.0`, device px == logical px) — not "wider", the specific
@@ -2706,9 +2706,9 @@ mod styling_tests {
         );
     }
 
-    /// **Obfuscated**: `Font.getGlyph` (`Font.java`) swaps in a random
+    /// **Obfuscated**: `Font.getGlyph` swaps in a random
     /// same-width-class glyph every time it is asked, from a `RandomSource`
-    /// that is never reseeded (`Font.java`) — so two draws of the *same*
+    /// that is never reseeded — so two draws of the *same*
     /// `§k` string must produce **different** ink, which is what makes it read
     /// as animated rather than a one-shot scramble. A still frame cannot
     /// distinguish "animated" from "static but wrong", so this compares two

@@ -2837,7 +2837,7 @@ fn net_update_error_would_have_caught_the_old_already_published_kick() {
     );
 }
 
-/// The fix (issue #535's "kicks me" report): a second Open to LAN press —
+/// The fix ("kicks me" report): a second Open to LAN press —
 /// `IntegratedServer::publish` returning `AlreadyExists` — must reach the
 /// player as one more chat line on a session that is still alive, never as a
 /// disconnect. See `NetUpdate::LanPublishError`'s own doc for the full
@@ -3604,7 +3604,7 @@ fn held_item_overlay_spans_carry_hex_colour_from_a_real_item_to_a_vertex() {
 /// app_rs_still_threads_every_chat_option_into_the_hud_frame` and
 /// `redraw_rs_still_pushes_the_glint_options_to_all_three_sites` work around
 /// by grepping that file's own source text instead. This is the same
-/// technique for issue #656's held-item seam: `Sim::held_item_overlay_spans`
+/// technique for held-item seam: `Sim::held_item_overlay_spans`
 /// (`sim/session.rs`) reaching `HudFrame::held_item_spans` at the app-wiring
 /// layer, mirroring the pre-existing legacy `held_item_overlay` →
 /// `HudFrame::held_item` line right above it.
@@ -5371,7 +5371,7 @@ fn begin_attack_live_does_not_stab_with_an_ordinary_sword() {
 /// returned unconditionally after `interact_entity` whenever *any*
 /// entity was targeted — hostile mobs included, the overwhelmingly
 /// common combat case — so a bow or shield could never even start a use.
-/// Vanilla's own `case ENTITY` (`Minecraft.java`) only returns
+/// Vanilla's own `case ENTITY` only returns
 /// on a *successful* interact; anything else falls through to the
 /// generic use-item call (`:1730`) that actually raises a shield or
 /// draws a bow.
@@ -5414,7 +5414,7 @@ fn use_item_live_falls_through_to_generic_use_with_an_entity_targeted() {
 /// just past block reach with nothing behind it — `use_item_live` used to
 /// `return` with nothing sent. Vanilla's own `hitResult == null` path
 /// skips the block/entity switch entirely and still reaches the
-/// unconditional fallback (`Minecraft.java`).
+/// unconditional fallback.
 #[test]
 fn use_item_live_sends_generic_use_with_no_target_at_all() {
     let (net, actions, _feed) = NetClient::loopback_with_feed();
@@ -5439,7 +5439,7 @@ fn use_item_live_sends_generic_use_with_no_target_at_all() {
 /// Negative control for both tests above: an **empty** main hand must
 /// send nothing generic to use, matching vanilla's own
 /// `!heldItem.isEmpty()` guard at the same call site
-/// (`Minecraft.java`). Without this, "always send `UseItem`"
+///. Without this, "always send `UseItem`"
 /// would satisfy the two tests above vacuously.
 #[test]
 fn use_item_generic_sends_nothing_with_an_empty_main_hand() {
@@ -5674,7 +5674,7 @@ fn a_disagreeing_server_set_slot_overwrites_the_predicted_equip() {
 // `SnowballItem.use`/`EggItem.use`/`EnderpearlItem.use`/`ThrowablePotionItem.use`
 // (`.cache/mc/26.2/src/net/minecraft/world/item/`) all return
 // `InteractionResult.SUCCESS`, whose `swingSource()` is `CLIENT`
-// (`InteractionResult.java`) — vanilla's `Minecraft.startUseItem` swings on
+// — vanilla's `Minecraft.startUseItem` swings on
 // exactly that condition. `use_item_generic` is the shell's landing site for
 // all four (none of them is a block or an `EntityRayTarget` hit in the common
 // case). It used to call `swing_hand()` unconditionally whenever the main
@@ -6015,7 +6015,7 @@ fn an_entity_right_click_swings_exactly_once() {
 /// was actually in progress — the packet that was a serverbound island
 /// (encoded by all four protocol adapters, zero producers anywhere in
 /// this shell). Bow, crossbow and shield are all `useOnRelease() ==
-/// true` (`LivingEntity.java`) and cannot complete a
+/// true` and cannot complete a
 /// use without it.
 #[test]
 fn end_use_live_sends_release_use_item_after_a_use_press() {
@@ -6278,7 +6278,7 @@ fn holding_use_restarts_food_after_its_consume_duration() {
 }
 
 /// Vanilla's `getCurrentItemAttackStrengthDelay`/`getAttackStrengthScale`
-/// (`Player.java`): with no [`Attributes`] component at all (the
+///: with no [`Attributes`] component at all (the
 /// pre-login default `attribute_value` falls back to — see
 /// `no_attributes_component_folds_to_the_registry_default` in
 /// `lodestone_ecs::player`'s own tests for the identical fallback one
@@ -6343,8 +6343,7 @@ fn attack_strength_delay_follows_a_reported_attack_speed_attribute() {
 /// [`Sim::attack_entity`] must reset the ticker **immediately**, in the
 /// same call, not on the next tick — vanilla's
 /// `MultiPlayerGameMode.attack` calls `resetAttackStrengthTicker()`
-/// synchronously right after `player.attack(entity)`
-/// (`MultiPlayerGameMode.java`).
+/// synchronously right after `player.attack(entity)`.
 #[test]
 fn attacking_an_entity_resets_the_strength_ticker_immediately() {
     let mut sim = Sim::new(test_config());
@@ -6421,7 +6420,7 @@ fn crit_particle_count(sim: &mut Sim) -> usize {
 
 /// The positive case: full strength, airborne (falling, not grounded),
 /// not sprinting, not submerged, target is a `LivingEntity` — vanilla's
-/// `canCriticalAttack` (`Player.java`) is satisfied on every
+/// `canCriticalAttack` is satisfied on every
 /// clause this port models, so the attack must spawn crit particles.
 #[test]
 fn a_full_strength_airborne_hit_on_a_living_target_spawns_crit_particles() {
@@ -6780,7 +6779,7 @@ fn the_pick_predicate_matches_the_vanilla_entity_census() {
 /// (`ClientEvent::EntityVelocity`) naming the local player's own server
 /// entity id must overwrite `PlayerState.velocity` outright — vanilla's
 /// `Entity.lerpMotion` is `setDeltaMovement(movement)`, an unconditional
-/// replace, and `LocalPlayer` declares no override (`Entity.java`).
+/// replace, and `LocalPlayer` declares no override.
 /// Before this fix the event fell into the generic `Velocity` component
 /// instead, which nothing reads for the local player, so a server-applied
 /// hit never moved the client at all.
@@ -7241,7 +7240,7 @@ fn walking_accumulates_a_real_bob_that_only_the_render_camera_sees() {
 /// The camera-side half of `bobHurt`: a local-player damage report must reach
 /// the interpolated bob frame with its direction, and must **survive View
 /// Bobbing being off** — vanilla's `bobHurt` is unconditional
-/// (`GameRenderer.java`), only `bobView` is gated on the option.
+///, only `bobView` is gated on the option.
 ///
 /// The net-apply feed (`ClientEvent::EntityHurtAnimation` naming the local
 /// player's own id → [`Sim::on_local_player_hurt`]) is live now — `net.rs`'s
@@ -7965,10 +7964,10 @@ fn a_real_text_display_folded_through_ingest_and_extract_reaches_sim_display_dra
 /// **Vanilla's border-warning formula, against values computed outside this
 /// code.**
 ///
-/// `Hud.extractVignette` (`Hud.java`) on a *static* border reduces
+/// `Hud.extractVignette` on a *static* border reduces
 /// to `warningDistance == warningBlocks` exactly, because
 /// `StaticBorderExtent.getLerpSpeed()` returns `0.0`
-/// (`WorldBorder.java`) and `max(warningBlocks, 0)` is
+/// and `max(warningBlocks, 0)` is
 /// `warningBlocks`. That makes the arithmetic hand-checkable:
 ///
 /// A border of diameter 100 centred on the origin has its edge at ±50. A
@@ -8008,7 +8007,7 @@ fn the_border_warning_strength_matches_vanillas_hand_computed_value() {
 
     // Exactly at the edge is full strength; outside is clamped to 1.0 rather
     // than exceeding it, which is what vanilla's own `Mth.clamp` does one
-    // step later (`Hud.java`).
+    // step later.
     let (_, _, at_edge) = super::session::border_warning(&border, 50.0, 0.0, 0.0);
     assert!((at_edge - 1.0).abs() < 1e-6, "at the edge => 1 - 0/5 = 1.0: got {at_edge}");
     let (outside, _, beyond) = super::session::border_warning(&border, 80.0, 0.0, 0.0);

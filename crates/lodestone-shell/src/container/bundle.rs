@@ -1,4 +1,4 @@
-//! Bundle scroll-to-select tracking — issue #616's `BUNDLE_ITEM_SELECTED` /
+//! Bundle scroll-to-select tracking — `BUNDLE_ITEM_SELECTED` /
 //! #613's `SelectBundleItem` remainder, the client (producer) half.
 //!
 //! ## What it is
@@ -44,7 +44,7 @@
 
 use lodestone_game::item::ItemStack;
 
-/// `ScrollWheelHandler.getNextScrollWheelSelection` (`ScrollWheelHandler.java`):
+/// `ScrollWheelHandler.getNextScrollWheelSelection`:
 /// one notch steps by exactly one slot in the notch's direction, wrapping
 /// through `[0, limit)`. Only `wheel`'s *sign* matters, matching the real
 /// method's `Math.signum(wheel)`; `limit <= 0` (an empty or non-bundle slot)

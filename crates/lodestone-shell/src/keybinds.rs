@@ -38,9 +38,9 @@
 //!    than assuming: in older versions the debug keys were handled inline in
 //!    `KeyboardHandler`'s debug path, but 26.2 declares
 //!    `keyDebugOverlay = new KeyMapping("key.debug.overlay", KEYSYM, 292,
-//!    Category.DEBUG, -2)` (`Options.java`) and `KeyboardHandler` dispatches
+//!    Category.DEBUG, -2)` and `KeyboardHandler` dispatches
 //!    it through `KeyMapping::matches` like any other binding
-//!    (`KeyboardHandler.java`). So routing F3 through this table is
+//!   . So routing F3 through this table is
 //!    vanilla-*correct*, not a divergence. [`Category::Debug`] exists for it.
 //!
 //!    **And so are the F3 *chords*, which is the opposite of what this file
@@ -93,13 +93,13 @@
 //!
 //!    * **container half** (part 3 / that fix). `ContainerInput::SWAP` with
 //!      button `40` against the hovered slot
-//!      (`AbstractContainerScreen.java`), reached through `app.rs`'s
+//!     , reached through `app.rs`'s
 //!      `KeyOutcome::ContainerSwap` exactly like the number keys `1`–`9`.
 //!      `Click::offhand_swap` and `do_swap`'s `button == 40` arm were already in
 //!      place and tested; this binding is what finally reached them.
 //!    * **gameplay half**. With no screen open, vanilla sends a bare
 //!      `ServerboundPlayerActionPacket` / `SWAP_ITEM_WITH_OFFHAND`
-//!      (`Minecraft.java`) — **no slot, no hit test, no container**.
+//!      — **no slot, no hit test, no container**.
 //!      Reached through `KeyOutcome::SwapOffhand`, guarded on
 //!      `!player.isSpectator()` and sent with no local prediction, because
 //!      vanilla performs none either (the server does the exchange:
@@ -156,7 +156,7 @@ use lodestone_controller::Action;
 
 /// The group a binding is listed under in a Controls menu.
 ///
-/// Mirrors `KeyMapping.Category` (`KeyMapping.java`). All eight vanilla
+/// Mirrors `KeyMapping.Category`. All eight vanilla
 /// categories are present even though this client only populates six, so that
 /// adding (say) a creative hotbar-save binding later does not also require
 /// touching this enum and the menu's grouping at the same time.
@@ -189,7 +189,7 @@ impl Category {
     ];
 
     /// The category's vanilla identifier, as it appears in the translation key
-    /// `key.categories.<id>` (`KeyMapping.java`).
+    /// `key.categories.<id>`.
     #[must_use]
     pub fn id(self) -> &'static str {
         match self {
@@ -246,7 +246,7 @@ pub enum InputAction {
     /// PickItem` arm (`container.rs`) was built and tested with **no**
     /// producer for the *keyboard* form of the same screen — see
     /// [`crate::app::KeyOutcome::ContainerPickItem`]. With no screen open,
-    /// vanilla's `Minecraft.pickBlockOrEntity` (`Minecraft.java`)
+    /// vanilla's `Minecraft.pickBlockOrEntity`
     /// switches on the current `HitResult`: `ClientAction::
     /// PickItemFromEntity` when the crosshair is over an entity,
     /// `ClientAction::PickItemFromBlock` when it is over a block, nothing on
@@ -258,7 +258,7 @@ pub enum InputAction {
     PickItem,
     // -- inventory --------------------------------------------------------
     Inventory,
-    /// Vanilla's `key.swapOffhand` (`Options.java`).
+    /// Vanilla's `key.swapOffhand`.
     ///
     /// **Both halves are implemented, and they are two different mechanisms.**
     /// With a screen open it is a `ContainerInput::SWAP` with button `40` against
@@ -267,7 +267,7 @@ pub enum InputAction {
     /// `app.rs`'s `resolve_key` routes the two from different arms
     /// — see [`crate::app::KeyOutcome::SwapOffhand`] and the module docs.
     SwapOffhand,
-    /// Vanilla's `key.drop` (`Options.java`). Drop one item, or — with
+    /// Vanilla's `key.drop`. Drop one item, or — with
     /// Control held — the whole stack.
     ///
     /// **Two mechanisms depending on context, the same shape as
@@ -301,7 +301,7 @@ pub enum InputAction {
     ///
     /// **The odd one out: purely local, no packet.** Every other action in
     /// this enum ends at a `ClientAction`/container `Click`; this one ends at
-    /// a file. Vanilla's `Screenshot.grab` (`Screenshot.java`) copies
+    /// a file. Vanilla's `Screenshot.grab` copies
     /// the main render target's colour texture to a CPU buffer and writes it
     /// as a PNG to `<gameDirectory>/screenshots/`, named
     /// `Util.getFilenameFormattedDateTime()` (`yyyy-MM-dd_HH.mm.ss`, the
@@ -477,7 +477,7 @@ impl InputAction {
     }
 
     /// The Controls-menu group. Matches the `KeyMapping.Category` vanilla gives
-    /// the corresponding mapping (`Options.java`).
+    /// the corresponding mapping.
     #[must_use]
     pub fn category(self) -> Category {
         match self {
@@ -632,7 +632,7 @@ impl InputAction {
 /// ## Why there is no `Scroll` variant
 ///
 /// Checked rather than assumed. Vanilla's `InputConstants.Type` is exactly
-/// `KEYSYM`, `SCANCODE` and `MOUSE` (`InputConstants.java`) — there is
+/// `KEYSYM`, `SCANCODE` and `MOUSE` — there is
 /// no scroll type, so no vanilla `KeyMapping` can be bound to a wheel direction.
 /// The one thing this client does with the wheel is cycle the hotbar, which
 /// vanilla also handles outside the mapping table (in `MouseHandler`, not as a
@@ -929,7 +929,7 @@ fn key_from_name(name: &str) -> Option<KeyCode> {
 /// The persisted name for a mouse button.
 ///
 /// Vanilla names buttons 0/1/2 `left`/`right`/`middle` and numbers the rest
-/// `key.mouse.<n + 1>` (`InputConstants.java`), so winit's
+/// `key.mouse.<n + 1>`, so winit's
 /// `Other(3)` — the raw platform button index — is `key.mouse.4`, matching.
 /// winit's named `Back`/`Forward` have no vanilla counterpart and no fixed
 /// index, so they are namespaced rather than guessed onto 4/5.
@@ -1461,7 +1461,7 @@ mod tests {
         assert_eq!(Keybinds::in_category(Category::Movement).count(), 7);
         // Inventory: `key.inventory`, `key.swapOffhand`, `key.drop`, and the
         // nine hotbar slots — all twelve of vanilla's `Category.INVENTORY`
-        // mappings (`Options.java`).
+        // mappings.
         assert_eq!(Keybinds::in_category(Category::Inventory).count(), 12);
         // Misc lost a member to that fix (`key.lodestone.toggleFly` is gone) and
         // gained one back here (`key.screenshot`, that fix): `key.screenshot`,
@@ -1590,7 +1590,7 @@ mod tests {
             );
         }
         // Vanilla's numbering: button index 3 is `key.mouse.4`
-        // (`InputConstants.java`), not `key.mouse.3`.
+        //, not `key.mouse.3`.
         assert_eq!(Binding::Mouse(MouseButton::Other(3)).name(), "key.mouse.4");
         assert_eq!(Binding::Mouse(MouseButton::Other(7)).name(), "key.mouse.8");
         // The low numbers are left/right/middle's territory and must not also

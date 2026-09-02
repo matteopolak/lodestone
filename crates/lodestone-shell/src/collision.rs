@@ -388,8 +388,8 @@ fn fluid_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> Option<FluidCell> {
 ///
 /// `blocksMotion()` is `block != COBWEB && block != BAMBOO_SAPLING && isSolid()`,
 /// and `isSolid()` reads the cached `legacySolid` flag
-/// (`BlockBehaviour.java`) that `calculateSolid()`
-/// (`BlockBehaviour.java`) computes once per state. Only the *last* of
+/// that `calculateSolid()`
+/// computes once per state. Only the *last* of
 /// that method's branches is geometry — the first three are
 /// `Properties.forceSolidOn` (237 blocks in 26.2), `forceSolidOff` (8), and a
 /// null shape cache for the 23 `dynamicShape()` blocks. None of the three has a
@@ -433,7 +433,7 @@ fn blocks_motion_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
     }
 }
 
-/// `FlowingFluid.isSolidFace` (`FlowingFluid.java`), horizontal case:
+/// `FlowingFluid.isSolidFace`, horizontal case:
 /// `false` if the cell holds **the same fluid as `kind`** (the fluid asking —
 /// see [`CollisionView::is_solid_face`]'s doc for why that is not the cell's own
 /// fluid), `false` for ice, else `isFaceSturdy(FULL)` = [`shape_face_is_full`].
@@ -798,10 +798,10 @@ pub struct LiveCollision {
 /// no fluid, i.e. the ones `Entity.pick` must walk straight through without them
 /// being identifiable as "a fluid cell".
 ///
-/// All three register as `AirBlock` (`Blocks.java`), whose `getShape`
-/// returns `Shapes.empty()` (`AirBlock.java`), so none of them is targetable
+/// All three register as `AirBlock`, whose `getShape`
+/// returns `Shapes.empty()`, so none of them is targetable
 /// in vanilla. This matters because **`minecraft:air` is not the only air**:
-/// `WorldCarver` writes `Blocks.CAVE_AIR` (`WorldCarver.java`), as do lakes,
+/// `WorldCarver` writes `Blocks.CAVE_AIR`, as do lakes,
 /// monster rooms and strongholds, and the end's void column is `void_air`. Each is
 /// a *distinct block-state id*, so a pick predicate written as `state_id != 0`
 /// targets the empty space one block in front of the player's face in any carved
@@ -1153,7 +1153,7 @@ impl LiveCollision {
     /// `light` targetable as a side effect of having no baked model geometry.
     /// The real census says `LightBlock.getShape` is
     /// `isHoldingItem(Items.LIGHT) ? block() : empty()`
-    /// (`LightBlock.java`), dumped with no item held — so light is now
+    ///, dumped with no item held — so light is now
     /// **un**pickable, matching what vanilla does for every player who is not
     /// holding a light item. This is the correct default-case answer, and
     /// implementing the held-item exception would need the held stack
@@ -1219,10 +1219,10 @@ impl LiveCollision {
     /// switched off (`Fluid.NONE`, `Entity.pick`, `Entity.java`). So the
     /// real question is *does the block in this cell have a non-empty outline*:
     ///
-    /// * `LiquidBlock.getShape` → `Shapes.empty()` (`LiquidBlock.java`), so
+    /// * `LiquidBlock.getShape` → `Shapes.empty()`, so
     ///   open water and lava are never targeted;
-    /// * `KelpBlock`'s is `Block.column(16, 0, 9)` (`KelpBlock.java`) and
-    ///   `SeagrassBlock`'s is `Block.column(12, 0, 12)` (`SeagrassBlock.java`) —
+    /// * `KelpBlock`'s is `Block.column(16, 0, 9)` and
+    ///   `SeagrassBlock`'s is `Block.column(12, 0, 12)` —
     ///   **non-empty**, so kelp and seagrass are targeted and breakable, even though
     ///   both hardcode `getFluidState` → `Fluids.WATER`.
     ///
@@ -2303,7 +2303,7 @@ mod tests {
     /// pickable" clause kept `minecraft:light` targetable as a side effect of it
     /// having no baked model geometry. The real outline census says
     /// `LightBlock.getShape` is `isHoldingItem(Items.LIGHT) ? block() : empty()`
-    /// (`LightBlock.java`), dumped with no item held, so vanilla itself does
+    ///, dumped with no item held, so vanilla itself does
     /// not let you target a bare-handed light block — and now neither do we.
     ///
     /// `minecraft:barrier` is the control proving this is a real outline read and
@@ -2423,7 +2423,7 @@ mod tests {
         );
 
         // The 9/16 column belongs to the **head**, not the body. `Block.column(16,
-        // 0, 9)` is `KelpBlock`'s `SHAPE` (`KelpBlock.java`), passed to
+        // 0, 9)` is `KelpBlock`'s `SHAPE`, passed to
         // `GrowingPlantHeadBlock`; `kelp_plant` is the `GrowingPlantBodyBlock`
         // half, which overrides no shape and so outlines to a full cube. The
         // committed JVM dump agrees: `kelp_plant` is `0..1`, `kelp[age=0]` is
@@ -2924,7 +2924,7 @@ mod tests {
     fn is_solid_face_distinguishes_same_fluid_from_a_different_one() {
         // A waterlogged solid block: a real full-cube shape *and* a fluid.
         // Vanilla's `isSolidFace` only excludes the fluid asking the question
-        // (`FlowingFluid.java`), so a *different* fluid's falling jet must
+        //, so a *different* fluid's falling jet must
         // still see the sturdy face — the exact case the old "any fluid
         // present -> false" shortcut got wrong.
         const FULL_CUBE_LOCAL: &[BlockAabb] = &[BlockAabb {

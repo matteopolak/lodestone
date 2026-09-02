@@ -492,7 +492,7 @@ impl Sim {
     /// # Why this is predicted at all
     ///
     /// `LocalPlayer.playSound` overrides straight to `playLocalSound`
-    /// (`LocalPlayer.java`), so every step the local player takes is
+    ///, so every step the local player takes is
     /// client-side with no round trip. Swing and attack sounds are **not** — they
     /// go through the method vanilla names `playServerSideSound` — so this is
     /// deliberately steps only; see [`lodestone_sound::predict`].
@@ -574,7 +574,7 @@ impl Sim {
     /// `LevelEventHandler` `case 2001` this shell used to drop on the floor.
     ///
     /// `case 2001` does *two* things with the state id the event carries
-    /// (`LevelEventHandler.java`): `addDestroyBlockEffect` **and**
+    ///: `addDestroyBlockEffect` **and**
     /// `playLocalSound(pos, soundType.getBreakSound(), SoundSource.BLOCKS, …)`.
     /// Only the first was wired, so every block break in the game was visually
     /// right and silent — from an event already decoded, routed and handled. See
@@ -584,7 +584,7 @@ impl Sim {
     }
 
     /// Play a block's place sound at the centre of `block` — vanilla's
-    /// `BlockItem.place` tail (`BlockItem.java`), which passes the placing
+    /// `BlockItem.place` tail, which passes the placing
     /// player as the *excluded* entity, so on the acting client the sound is
     /// **predicted** rather than received. (`ClientLevel.playSound` inverts the
     /// exclusion: it plays only when `except == minecraft.player`.) Another
@@ -603,7 +603,7 @@ impl Sim {
     /// `BlockItem.java`):
     ///
     /// * the position is the **block centre** — `Level.playLocalSound(BlockPos, …)`
-    ///   forwards `pos.getX() + 0.5` and so on (`Level.java`);
+    ///   forwards `pos.getX() + 0.5` and so on;
     /// * the volume is `(soundType.getVolume() + 1.0) / 2.0` and the pitch is
     ///   `soundType.getPitch() * 0.8`, both computed by
     ///   [`lodestone_data::sound_types::BlockSoundType`] so neither multiplier is
@@ -651,7 +651,7 @@ impl Sim {
     /// A variant-selection seed for a sound this client decided to play.
     ///
     /// Vanilla uses `this.random.nextLong()` for a level event
-    /// (`ClientLevel.java`), i.e. the variant is *client*-chosen and needs
+    ///, i.e. the variant is *client*-chosen and needs
     /// no cross-client agreement — unlike a `SOUND` packet's seed, which must be
     /// passed through unchanged (`lodestone-audio/src/select.rs`).
     ///

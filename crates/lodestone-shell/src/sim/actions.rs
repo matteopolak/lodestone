@@ -31,13 +31,13 @@ use lodestone_ecs::player::{FireworkBoost, ItemUseTicks};
 use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
 use lodestone_physics::UseEffects;
 
-/// `TridentItem.THROW_THRESHOLD_TIME` (`TridentItem.java`) — how long the use
+/// `TridentItem.THROW_THRESHOLD_TIME` — how long the use
 /// button must be held before a release does anything at all. That fix.
 const RIPTIDE_MIN_HELD_TICKS: u32 = 10;
 
 /// The deterministic part of `FireworkRocketEntity`'s lifetime for a standard
 /// 1-gunpowder rocket: `10 * flightCount` with `flightCount = 1 +
-/// flightDuration = 2` (`FireworkRocketEntity.java`). See
+/// flightDuration = 2`. See
 /// [`Sim::start_firework_boost_if_gliding`] for the two random terms this
 /// deliberately omits and why. That fix.
 const FIREWORK_BOOST_TICKS: u32 = 20;
@@ -276,7 +276,7 @@ impl Sim {
             // `spawnDestroyParticles` → `level.levelEvent(player, 2001, …)`, and
             // `ClientLevel.levelEvent` ignores the exclusion and dispatches
             // straight into `LevelEventHandler`'s `case 2001` locally
-            // (`ClientLevel.java`) — sound and debris together. This is
+            // — sound and debris together. This is
             // the offline mirror of that; the live predicted break is still
             // silent because its emit lives in `interact.rs`'s ECS system, which
             // has no audio handle (see `docs/sound-playback.md`).
@@ -291,7 +291,7 @@ impl Sim {
 
     /// Begin an attack (left-click / attack button pressed).
     ///
-    /// Vanilla's `Minecraft.startAttack` (`Minecraft.java`) switches
+    /// Vanilla's `Minecraft.startAttack` switches
     /// on `hitResult.getType()` and swings the arm **unconditionally after the
     /// switch**, on every arm of it, miss included:
     ///
@@ -485,8 +485,8 @@ impl Sim {
     }
 
     /// `key.pickItem` — vanilla's `Minecraft.pickBlockOrEntity`
-    /// (`Minecraft.java`), middle-click by default
-    /// (`Options.java`). `include_data` is vanilla's `hasControlDown()`.
+    ///, middle-click by default
+    ///. `include_data` is vanilla's `hasControlDown()`.
     ///
     /// Entity wins over block, for the same reason [`Self::begin_attack_live`]
     /// already gives: [`EntityRayTarget`] is resolved as the *nearer* pick, so
@@ -593,7 +593,7 @@ impl Sim {
 
     /// Vanilla's local-only crit-particle prediction — `Player.attack`'s
     /// `criticalAttack = fullStrengthAttack && canCriticalAttack(entity)`
-    /// (`Player.java`), whose visual half is
+    ///, whose visual half is
     /// `attackVisualEffects`' `this.crit(entity)` call (`Player.java`,
     /// `LocalPlayer.crit` → `ParticleEngine.createTrackingEmitter`,
     /// `LocalPlayer.java`).
@@ -602,7 +602,7 @@ impl Sim {
     /// for this port
     ///
     /// `MultiPlayerGameMode.attack` runs the **client's own copy** of
-    /// `player.attack(entity)` (`MultiPlayerGameMode.java`) independently
+    /// `player.attack(entity)` independently
     /// of, and before, the server's authoritative copy of the same method —
     /// the server computes the real damage, the client predicts only the
     /// cosmetic trigger (sound + particle) so it does not wait a round trip to
@@ -612,11 +612,11 @@ impl Sim {
     ///
     /// # Condition, checked against the jar rather than assumed
     ///
-    /// `canCriticalAttack` (`Player.java`): `fallDistance > 0.0 &&
+    /// `canCriticalAttack`: `fallDistance > 0.0 &&
     /// !onGround && !onClimbable && !isInWater && !isMobilityRestricted &&
     /// !isPassenger && entity is LivingEntity && !isSprinting`.
     /// `fullStrengthAttack = getAttackStrengthScale(0.5F) > 0.9F`
-    /// (`Player.java`) is the caller's own gate, not part of
+    /// is the caller's own gate, not part of
     /// `canCriticalAttack` — hence [`Self::attack_strength_scale_at`] rather
     /// than reusing [`Self::attack_strength_scale`]'s `a = 0.0`, which is a
     /// different call site's (the crosshair's) partial-tick argument.
@@ -644,7 +644,7 @@ impl Sim {
     ///
     /// # The particle burst: one tick of `TrackingEmitter`, not three
     ///
-    /// `TrackingEmitter` (`TrackingEmitter.java`) runs for **3 ticks**,
+    /// `TrackingEmitter` runs for **3 ticks**,
     /// spawning up to 16 candidates per tick (filtered to a unit sphere,
     /// ~52% pass) that track the entity's *current* position each tick. This
     /// shell's particle system has no per-attack persistent emitter — every
@@ -808,7 +808,7 @@ impl Sim {
     /// (`crates/protocol/{v47,v340,v735,v770}/src/adapter.rs`) but with no
     /// producer anywhere in this shell before this method. Bow, crossbow and
     /// shield are all `useOnRelease() == true`
-    /// (`LivingEntity.java`) and structurally cannot
+    /// and structurally cannot
     /// complete a use without this packet — food and potions are
     /// `useOnRelease() == false` and auto-complete on the server's own tick
     /// count, which is exactly why this gap went unnoticed: eating and
@@ -956,7 +956,7 @@ impl Sim {
     ///
     /// Vanilla's rocket lives `10 * flightCount + random.nextInt(6) +
     /// random.nextInt(7)` ticks, `flightCount = 1 + fireworks.flightDuration()`
-    /// (`FireworkRocketEntity.java`), and boosts on every one of them while
+    ///, and boosts on every one of them while
     /// the holder is fall-flying. The two `nextInt` terms are rolled on the
     /// **server's** RNG, and the vanilla *client* never computes them at all: its
     /// copy of the rocket comes from `ClientboundAddEntityPacket` with
@@ -990,7 +990,7 @@ impl Sim {
         self.write(|w| w.resource_mut::<FireworkBoost>().0 = FIREWORK_BOOST_TICKS);
     }
 
-    /// `TridentItem.releaseUsing`'s riptide branch (`TridentItem.java`),
+    /// `TridentItem.releaseUsing`'s riptide branch,
     /// That fix — the driver `lodestone_physics::apply_riptide` was written
     /// for and never had.
     ///
@@ -1101,7 +1101,7 @@ impl Sim {
             .map_or(0, |enchantment| enchantment.level)
     }
 
-    /// `Entity.isInWaterOrRain()` (`Entity.java`), that fix.
+    /// `Entity.isInWaterOrRain()`, that fix.
     ///
     /// The water half is exact — the same [`lodestone_physics::FluidState`] the
     /// tick computed. The rain half is `Level.isRainingAt`, which is
@@ -1155,7 +1155,7 @@ impl Sim {
     /// Nothing here has to detect it, because vanilla's server corrects **both**
     /// candidate positions after *every* `use_item_on`, unconditionally — accepted,
     /// refused, or actually an interaction
-    /// (`ServerGamePacketListenerImpl.java`):
+    ///:
     ///
     /// ```text
     /// this.send(new ClientboundBlockUpdatePacket(level, pos));
@@ -1263,7 +1263,7 @@ impl Sim {
         // its hit position, not a guess here.
         //
         // **`case ENTITY` only returns here on a *successful* interact.**
-        // Vanilla's own switch (`Minecraft.java`) returns
+        // Vanilla's own switch returns
         // immediately only when `gameMode.interact(...) instanceof
         // InteractionResult.Success`; anything else hits an explicit `break;`
         // at `:1708` and falls through to the unconditional generic-use call
@@ -1300,7 +1300,7 @@ impl Sim {
         let Some(hit) = self.target() else {
             // Vanilla's own MISS/no-target path: a `null` `hitResult` skips
             // the whole `if (this.hitResult != null)` switch in
-            // `startUseItem` (`Minecraft.java`) and still reaches
+            // `startUseItem` and still reaches
             // the unconditional fallback at `:1730`. This used to `return`
             // here with **nothing sent at all** — aiming at open air, or at a
             // mob standing just past block reach with nothing behind it,
@@ -1425,7 +1425,7 @@ impl Sim {
                 let pos = prediction.pos;
                 self.predict_block([pos.x, pos.y, pos.z], state);
                 // Vanilla's placement sound is the tail of `BlockItem.place`
-                // (`BlockItem.java`), which passes the placing player as
+                //, which passes the placing player as
                 // `playSound`'s **excluded** entity — so the server broadcasts it
                 // to everyone but us, and our own copy is predicted locally by
                 // `ClientLevel.playSound`, whose exclusion test is inverted

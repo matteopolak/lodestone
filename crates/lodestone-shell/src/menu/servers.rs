@@ -283,7 +283,7 @@ impl ServerList {
     ///
     /// This is vanilla's `ServerList.swap` (`client/multiplayer/ServerList.java`),
     /// which is what the list row's move-up/move-down icons call
-    /// (`ServerSelectionList.java`). Both indices must be in range: a
+    ///. Both indices must be in range: a
     /// partially-applied reorder would silently drop an entry, and the caller is
     /// a mouse hit-test, so out-of-range is a routing bug rather than something
     /// to clamp into a different reorder than the player asked for.

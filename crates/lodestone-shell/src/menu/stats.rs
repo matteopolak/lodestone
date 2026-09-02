@@ -65,7 +65,7 @@
 //! - **Decorative**: every value shown, because nothing decodes the packet
 //!   that would populate one — see above. Enabling the pause button
 //!   ([`super::nav::PauseButton::Statistics`]) reflects that this screen now
-//!   exists and shows the honest (zero) state, per issue #188's own scope,
+//!   exists and shows the honest (zero) state, per own scope,
 //!   which asks for exactly that once the screen exists.
 //!
 //! ## Geometry
@@ -92,8 +92,8 @@ pub const TAB_LABELS: [&str; 3] = ["General", "Items", "Mobs"];
 pub const GENERAL_TAB: usize = 0;
 
 /// The pixel rect of tab `index` (into [`TAB_LABELS`]) at canvas `width` —
-/// vanilla's `MenuTabBar.arrangeElements` (`MenuTabBar.java`), via the shared
-/// [`layout::tab_bar_row_rect`] (issue #567's generalisation: this screen's own
+/// vanilla's `MenuTabBar.arrangeElements`, via the shared
+/// [`layout::tab_bar_row_rect`] (generalisation: this screen's own
 /// wrapper used to inline the arithmetic directly, which is what
 /// [`super::render::row_rect`]'s `MenuRow::tab` arm called into by name —
 /// harmless while Statistics was the only consumer, and a hard-coded
@@ -106,7 +106,7 @@ pub fn tab_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
 }
 
 /// The row index of Done — vanilla's `layout.addToFooter(Button.builder(
-/// GUI_DONE, …))` (`StatsScreen.java`). Was this screen's only [`MenuRow`]
+/// GUI_DONE, …))`. Was this screen's only [`MenuRow`]
 /// before issue #564 gave it three tab rows too; still `0` and still first,
 /// since the tabs are appended after it (see [`frame`]).
 ///
@@ -129,7 +129,7 @@ pub enum StatFormat {
     /// Redstone ticks (1/20 s) in, the largest whole unit over 0.5 out —
     /// `StatFormatter.TIME`. The `< 0.5 min` branch is `seconds + " s"` on a
     /// raw `f64`, **not** through `DECIMAL_FORMAT` — vanilla's own code, not
-    /// an inconsistency introduced here (`StatFormatter.java`).
+    /// an inconsistency introduced here.
     Time,
 }
 
@@ -388,7 +388,7 @@ impl StatsSnapshot {
 }
 
 /// One row: caption plus formatted value, in vanilla's **display** order —
-/// sorted by the translated caption (`StatsScreen.java`), not by
+/// sorted by the translated caption, not by
 /// [`GENERAL_STATS`]'s declaration order.
 #[must_use]
 pub fn general_rows(snapshot: &StatsSnapshot) -> Vec<(&'static str, String)> {
@@ -437,7 +437,7 @@ const NAME_LEFT_INSET: f32 = 4.0;
 /// repositionElements` calls `this.layout.setHeaderHeight(tabAreaTop)`, where
 /// `tabAreaTop` is the tab bar's own `getRectangle().bottom()` — a fixed
 /// [`layout::TAB_BAR_HEIGHT`] (24 px), since `MenuTabBar` is `y = 0` height
-/// `HEIGHT = 24` (`MenuTabBar.java`). Using the *default* 33 px header
+/// `HEIGHT = 24`. Using the *default* 33 px header
 /// here is exactly what put the General list's own top separator 9 px below
 /// where the tab row's underline sits — close enough to look plausible, far
 /// enough to still collide with a tab label drawn at `dy: 28`, which was the
@@ -489,7 +489,7 @@ pub fn row_label_y(row: u16, scroll: f32) -> f32 {
 }
 
 /// `GeneralStatisticsList.Entry.extractContent`'s zebra striping
-/// (`StatsScreen.java`): `index % 2 == 0 ? -1 : -4539718` — opaque white
+///: `index % 2 == 0 ? -1 : -4539718` — opaque white
 /// on an even displayed row, `0xFFBABABA` on an odd one. `index` is the row's
 /// position in the **already-sorted** list ([`general_rows`]'s output order),
 /// matching vanilla's `children().indexOf(this)`.
@@ -524,7 +524,7 @@ pub struct StatsNav {
     /// Vanilla focuses nothing here, and the jar is unusually explicit about
     /// it in two independent ways:
     ///
-    /// - `Screen.init` calls `setInitialFocus()` (`Screen.java`), whose
+    /// - `Screen.init` calls `setInitialFocus()`, whose
     ///   base implementation (`:161-169`) is wrapped entirely in
     ///   `if (this.minecraft.getLastInputType().isKeyboard())`. This screen is
     ///   reached by **clicking** the pause menu's Statistics button, so the
@@ -615,7 +615,7 @@ impl StatsNav {
     }
 
     /// Tab traversal: `Screen.keyPressed`'s `TabNavigation`
-    /// (`Screen.java`), which on this screen has exactly one focusable
+    ///, which on this screen has exactly one focusable
     /// child to land on. With one child, forward Tab focuses it and stays
     /// there — vanilla's wrap is `clearFocus()`-then-retry, which re-finds the
     /// same child — so this is idempotent rather than a toggle.
@@ -651,7 +651,7 @@ impl StatsNav {
 
 /// Builds the whole Statistics frame.
 ///
-/// ## No "Statistics" title label — issue #564's second half
+/// ## No "Statistics" title label — second half
 ///
 /// The owner: *"'Statistics' is [not] even supposed to be in the UI at all"*.
 /// Vanilla's `TITLE` (`gui.stats`) is passed to `Screen`'s constructor for
@@ -679,7 +679,7 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
     for (i, (caption, value)) in stats.iter().enumerate() {
         let y = row_label_y(i as u16, scroll);
         // Zebra striping — `GeneralStatisticsList.Entry.
-        // extractContent` (`StatsScreen.java`): both the name and the
+        // extractContent`: both the name and the
         // value get the *same* `color`, computed once per row from the
         // row's own displayed index (this loop's `i`, matching vanilla's
         // `children().indexOf(this)` in the already-sorted list).
@@ -1064,7 +1064,7 @@ mod tests {
         nav.scroll_by(-1.0, canvas);
 
         // `scrollRate` is `defaultEntryHeight / 2` under *integer* division
-        // (`AbstractSelectionList.java`): 14 / 2 = 7.
+        //: 14 / 2 = 7.
         let predicted = (ROW_H / 2.0).floor();
         assert_eq!(predicted, 7.0, "derived from this screen's own ROW_H of 14");
         assert_eq!(nav.scroll(), predicted, "one notch must be {predicted} px");

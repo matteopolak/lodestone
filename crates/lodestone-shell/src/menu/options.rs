@@ -52,9 +52,9 @@
 //! missing row silently changes the screen's shape.
 //!
 //! Vanilla disables its own controls for exactly this reason — the narrator
-//! button (`OptionsSubScreen.java`), the anisotropy slider
-//! (`VideoSettingsScreen.java`), telemetry
-//! (`OptionsScreen.java`) — so this is copying an idiom, not inventing
+//! button, the anisotropy slider
+//!, telemetry
+//! — so this is copying an idiom, not inventing
 //! one.
 //!
 //! ## What is deliberately *not* faithful, and why
@@ -63,7 +63,7 @@
 //!
 //! 1. **An inactive option shows its caption alone**, where vanilla shows
 //!    `genericValueLabel(caption, value)` — `"%s: %s"`
-//!    (`Options.java`). We hold no value for an option we do not
+//!   . We hold no value for an option we do not
 //!    honour, and printing one would be exactly the fabricated persistence this
 //!    issue exists to avoid: a row reading `Entity Shadows: ON` next to a client
 //!    that draws no shadows is a lie a screenshot cannot distinguish from a
@@ -101,7 +101,7 @@
 //!    *entries* and not the settings tree, whose rows are slotted widgets.
 //! 4. **Up/Down move the cursor over *every* control, including inactive
 //!    ones** — where `AbstractWidget.nextFocusPath` skips them
-//!    (`AbstractWidget.java`), as [`super::nav`]'s `step_enabled` does
+//!   , as [`super::nav`]'s `step_enabled` does
 //!    on the title and pause screens. On a screen whose *content* is the
 //!    inactive majority, skipping them would leave most rows unreachable
 //!    **and unscrollable**, i.e. invisible — which defeats the whole issue. The
@@ -135,36 +135,35 @@ use super::widget::{self, LayoutElement, Widget};
 // file and line named, in logical GUI pixels. Nothing here is measured off our
 // own output.
 
-/// `OptionsList.BIG_BUTTON_WIDTH` (`OptionsList.java`) — an `addBig` row, and
+/// `OptionsList.BIG_BUTTON_WIDTH` — an `addBig` row, and
 /// also the row width `getRowWidth()` returns (`:64-66`).
 pub const BIG_BUTTON_WIDTH: f32 = 310.0;
 /// The width `OptionInstance.createButton(options)` defaults to
-/// (`OptionInstance.java`), i.e. every `addSmall` control.
-/// `Button.DEFAULT_WIDTH` (`Button.java`) is the same 150.
+///, i.e. every `addSmall` control.
+/// `Button.DEFAULT_WIDTH` is the same 150.
 pub const SMALL_BUTTON_WIDTH: f32 = widget::DEFAULT_WIDTH;
-/// `OptionsList.DEFAULT_ITEM_HEIGHT` (`OptionsList.java`), passed as the
+/// `OptionsList.DEFAULT_ITEM_HEIGHT`, passed as the
 /// list's `itemHeight` (`:24`).
 pub const DEFAULT_ITEM_HEIGHT: f32 = 25.0;
-/// `OptionsList.Entry.X_OFFSET` (`OptionsList.java`): the pitch between the
+/// `OptionsList.Entry.X_OFFSET`: the pitch between the
 /// two columns of an `addSmall` row. Note it is **not** `SMALL_BUTTON_WIDTH`
 /// plus a gap that anything else in the file names — 160 is written down.
 pub const COLUMN_PITCH: f32 = 160.0;
 /// `OptionsList.Entry.extractContent`'s `this.screen.width / 2 - 155`
-/// (`OptionsList.java`). Kept as the inset rather than `BIG_BUTTON_WIDTH /
+///. Kept as the inset rather than `BIG_BUTTON_WIDTH /
 /// 2` because that is how the jar spells it, and because the two would silently
 /// stop agreeing if `getRowWidth()` ever changed alone.
 pub const ROW_LEFT_INSET: f32 = 155.0;
-/// `AbstractSelectionList.getFirstEntryY()`'s `getY() + 2`
-/// (`AbstractSelectionList.java`).
+/// `AbstractSelectionList.getFirstEntryY()`'s `getY() + 2`.
 pub const LIST_TOP_INSET: f32 = 2.0;
 /// `AbstractSelectionList.Entry.getContentY()`'s `getY() + 2` (`:481-483`) —
 /// where a row's widget is placed inside its 25 px entry.
 pub const ENTRY_CONTENT_INSET: f32 = 2.0;
-/// The `int lineHeight = 9` in `OptionsList.addHeader` (`OptionsList.java`),
-/// which is also `StringWidget`'s own height (`StringWidget.java`).
+/// The `int lineHeight = 9` in `OptionsList.addHeader`,
+/// which is also `StringWidget`'s own height.
 pub const HEADER_LINE_HEIGHT: f32 = 9.0;
 /// `OptionsList.addHeader`'s `paddingTop` for every header **after** the first:
-/// `lineHeight * 2` (`OptionsList.java`). The first header in a list gets
+/// `lineHeight * 2`. The first header in a list gets
 /// `0`, which is the whole reason this is a function of position rather than a
 /// constant height.
 pub const HEADER_PADDING_TOP: f32 = HEADER_LINE_HEIGHT * 2.0;
@@ -177,25 +176,24 @@ pub const HEADER_PADDING_BOTTOM: f32 = 4.0;
 pub const SUB_HEADER_HEIGHT: f32 = layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT;
 /// The footer band, on every page including the root.
 pub const FOOTER_HEIGHT: f32 = layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT;
-/// `new HeaderAndFooterLayout(this, 61, 33)` (`OptionsScreen.java`) — the
+/// `new HeaderAndFooterLayout(this, 61, 33)` — the
 /// root screen is the one page with a taller header, because its header carries
 /// the FOV slider and the Online button under the title.
 pub const ROOT_HEADER_HEIGHT: f32 = 61.0;
 /// `LinearLayout.vertical().spacing(8)` and `LinearLayout.horizontal()…
 /// spacing(8)` in `OptionsScreen.init` (`:52,55`), and the accessibility
-/// footer's `spacing(8)` (`AccessibilityOptionsScreen.java`).
+/// footer's `spacing(8)`.
 pub const ROOT_SPACING: i32 = 8;
-/// `gridLayout.defaultCellSetting().paddingHorizontal(4)`
-/// (`OptionsScreen.java`).
+/// `gridLayout.defaultCellSetting().paddingHorizontal(4)`.
 pub const GRID_PADDING_H: i32 = 4;
 /// `…paddingBottom(4)` on the same line.
 pub const GRID_PADDING_BOTTOM: i32 = 4;
-/// `OptionsScreen.COLUMNS` (`OptionsScreen.java`).
+/// `OptionsScreen.COLUMNS`.
 pub const GRID_COLUMNS: usize = 2;
 /// `Button.builder(GUI_DONE, …).width(200)` (`OptionsSubScreen.java`,
 /// `OptionsScreen.java`).
 pub const DONE_WIDTH: f32 = 200.0;
-/// Every menu button's height — `Button.DEFAULT_HEIGHT` (`Button.java`).
+/// Every menu button's height — `Button.DEFAULT_HEIGHT`.
 pub const WIDGET_H: f32 = widget::DEFAULT_HEIGHT;
 
 /// How many pixels of list a page may show, measured from
@@ -212,8 +210,7 @@ pub const LIST_WINDOW_PX: f32 =
 
 // -- the option model -------------------------------------------------------
 
-/// Which widget vanilla's `OptionInstance.createButton` builds for an option
-/// (`OptionInstance.java`).
+/// Which widget vanilla's `OptionInstance.createButton` builds for an option.
 ///
 /// The dispatch is on the `ValueSet`: a `CycleableValueSet` gets a
 /// `CycleButton` (`:232-249`) and a `SliderableValueSet` an
@@ -286,7 +283,7 @@ pub enum LiveOption {
     ///
     /// The first row of #444's six, and the one that needed no new subsystem:
     /// `MouseHandler.onScroll` applies it at the input boundary
-    /// (`MouseHandler.java`), which is `app/lifecycle.rs` here — so it
+    ///, which is `app/lifecycle.rs` here — so it
     /// affects **both** wheel consumers, the hotbar and every menu list, from one
     /// place. The other four are now live too (`toggleAttack`/`toggleUse`/
     /// `autoJump`/`sprintWindow` — see this enum's variants); only
@@ -328,7 +325,7 @@ pub enum LiveOption {
     /// `options.chatColors` → [`crate::config::Options::chat_colors`].
     ChatColors,
     /// `options.sensitivity` → [`crate::config::Options::sensitivity`]. A
-    /// `UnitDouble` (`Options.java`).
+    /// `UnitDouble`.
     ///
     /// Live since issue #443 moved it off the argv-only
     /// [`crate::config::Config`]. Before that a row for it would have been
@@ -337,7 +334,7 @@ pub enum LiveOption {
     Sensitivity,
     /// `options.renderDistance` → [`crate::config::Options::render_distance`].
     ///
-    /// An `IntRange(2, 32)` (`Options.java`), so unlike every other
+    /// An `IntRange(2, 32)`, so unlike every other
     /// live slider its handle position comes from [`SliderRange`] rather than
     /// from the stored value directly — [`LiveOption::unit_double`] answers
     /// `None` for it on purpose.
@@ -423,7 +420,7 @@ pub enum LiveOption {
     /// `options.renderClouds` → [`crate::config::Options::cloud_status`].
     ///
     /// Three states, not a boolean: `CloudStatus` is `OFF, FAST, FANCY`
-    /// (`CloudStatus.java`) and the cycle visits them in that declaration order,
+    /// and the cycle visits them in that declaration order,
     /// which is `CycleButton`'s own order.
     ///
     /// **The one live option in the tree whose label is the value alone** — see
@@ -447,7 +444,7 @@ pub enum LiveOption {
     /// [`crate::config::Options::inactivity_fps_limit`]. Two states,
     /// `Minimized`/`Afk`. **Discards its caption**, like [`Self::CloudStatus`]
     /// — vanilla's stringifier is `(caption, value) -> value.caption()`
-    /// (`Options.java`) — so [`Self::value_is_the_whole_label`] covers it
+    /// — so [`Self::value_is_the_whole_label`] covers it
     /// too.
     InactivityFpsLimit,
     /// `options.graphics.preset` → [`crate::config::Options::graphics_preset`].
@@ -462,7 +459,7 @@ pub enum LiveOption {
     CutoutLeaves,
     /// `options.mipmapLevels` → [`crate::config::Options::mipmap_levels`].
     ///
-    /// An **`IntRange(0, 4)`** (`Options.java`) like [`Self::RenderDistance`]
+    /// An **`IntRange(0, 4)`** like [`Self::RenderDistance`]
     /// and [`Self::Fov`], so its handle comes from [`SliderRange`] and
     /// [`Self::unit_double`] answers `None` for it.
     ///
@@ -483,7 +480,7 @@ pub enum LiveOption {
     EntityShadows,
     /// `options.weatherRadius` → [`crate::config::Options::weather_radius`].
     ///
-    /// An **`IntRange(3, 10)`** (`Options.java`) like [`Self::RenderDistance`],
+    /// An **`IntRange(3, 10)`** like [`Self::RenderDistance`],
     /// so its handle comes from [`SliderRange`] and [`Self::unit_double`]
     /// answers `None` for it.
     ///
@@ -503,7 +500,7 @@ pub enum LiveOption {
     /// `options.menuBackgroundBlurriness` →
     /// [`crate::config::Options::menu_background_blurriness`].
     ///
-    /// An **`IntRange(0, 10)`** (`Options.java`) like [`Self::RenderDistance`],
+    /// An **`IntRange(0, 10)`** like [`Self::RenderDistance`],
     /// so its handle comes from [`SliderRange`] and [`Self::unit_double`]
     /// answers `None` for it.
     ///
@@ -525,12 +522,12 @@ pub enum LiveOption {
     /// [`crate::config::Options::attack_indicator`].
     ///
     /// Three states, not a boolean: `AttackIndicatorStatus` is
-    /// `OFF, CROSSHAIR, HOTBAR` (`AttackIndicatorStatus.java`) and the cycle
+    /// `OFF, CROSSHAIR, HOTBAR` and the cycle
     /// visits them in that declaration order, `CloudStatus`'s shape.
     ///
     /// **Another whole-label option** — its stringifier is
     /// `(caption, value) -> ((AttackIndicatorStatus)value).caption()`
-    /// (`Options.java`), which discards the caption exactly as
+    ///, which discards the caption exactly as
     /// `cloudStatus`' and `inactivityFpsLimit`' do. See
     /// [`Self::value_is_the_whole_label`].
     ///
@@ -544,9 +541,9 @@ pub enum LiveOption {
     /// `options.particles` → [`crate::config::Options::particles`].
     ///
     /// Three states, `CloudStatus`'s shape: `ParticleStatus` is
-    /// `ALL, DECREASED, MINIMAL` (`ParticleStatus.java`) and the cycle visits
+    /// `ALL, DECREASED, MINIMAL` and the cycle visits
     /// them in that declaration order. **Another whole-label option** — its
-    /// stringifier is `(caption, value) -> value.caption()` (`Options.java`),
+    /// stringifier is `(caption, value) -> value.caption()`,
     /// which discards the caption. See [`Self::value_is_the_whole_label`].
     ///
     /// Its consumer is the `NetUpdate::Particles` arm in `crate::sim::net_apply`,
@@ -559,7 +556,7 @@ pub enum LiveOption {
     /// `options.biomeBlendRadius` →
     /// [`crate::config::Options::biome_blend_radius`].
     ///
-    /// An **`IntRange(0, 7)`** (`Options.java`) like [`Self::RenderDistance`],
+    /// An **`IntRange(0, 7)`** like [`Self::RenderDistance`],
     /// so its handle comes from [`SliderRange`] and [`Self::unit_double`]
     /// answers `None` for it.
     ///
@@ -585,7 +582,7 @@ impl LiveOption {
     /// not.
     ///
     /// `UnitDouble.toSliderValue` is the **identity**
-    /// (`OptionInstance.java`), so for these options the stored value
+    ///, so for these options the stored value
     /// *is* the slider fraction and [`Cell::slider_fraction`] can return it
     /// directly — no range to port, which is why this set was reachable
     /// without first closing issue #424.
@@ -799,21 +796,21 @@ impl LiveOption {
     }
 }
 
-/// `ChatComponent.getWidth` (`ChatComponent.java`):
+/// `ChatComponent.getWidth`:
 /// `Mth.floor(pct * 280.0 + 40.0)`, i.e. 40px at `0.0` and 320px at `1.0`.
 #[must_use]
 fn chat_width_px(pct: f32) -> i32 {
     (pct as f64 * 280.0 + 40.0).floor() as i32
 }
 
-/// `ChatComponent.getHeight` (`ChatComponent.java`):
+/// `ChatComponent.getHeight`:
 /// `Mth.floor(pct * 160.0 + 20.0)`, i.e. 20px at `0.0` and 180px at `1.0`.
 #[must_use]
 fn chat_height_px(pct: f32) -> i32 {
     (pct as f64 * 160.0 + 20.0).floor() as i32
 }
 
-/// The **value half** of `Options.percentValueLabel` (`Options.java`).
+/// The **value half** of `Options.percentValueLabel`.
 ///
 /// Vanilla's is `translatable("options.percent_value", caption, (int)(value *
 /// 100.0))` with the `en_us.json` pattern `"%s: %s%%"`. This client composes
@@ -831,7 +828,7 @@ fn percent_value(value: f32) -> String {
     format!("{}%", (value as f64 * 100.0) as i32)
 }
 
-/// The value half of `Options.pixelValueLabel` (`Options.java`),
+/// The value half of `Options.pixelValueLabel`,
 /// pattern `"%s: %spx"`. See [`percent_value`] for why the caption is absent.
 #[must_use]
 fn pixel_value(value: i32) -> String {
@@ -862,8 +859,7 @@ pub enum Action {
     Done,
     /// A control that is present because vanilla has it and inactive because
     /// this client cannot do it — the accessibility guide's external link
-    /// (`AccessibilityOptionsScreen.java`) and Credits & Attribution
-    /// (`OptionsScreen.java`).
+    /// and Credits & Attribution.
     Unsupported,
 }
 
@@ -894,7 +890,7 @@ impl Cell {
     /// The label drawn on the widget.
     ///
     /// An option shows `genericValueLabel(caption, value)` — vanilla's
-    /// `"%s: %s"` (`Options.java`) — when we hold a value for it, and
+    /// `"%s: %s"` — when we hold a value for it, and
     /// its **caption alone** when we do not. See the module docs' departure (1)
     /// for why that is not an omission.
     ///
@@ -964,7 +960,7 @@ impl Cell {
 
     /// The `[0, 1]` fraction along the track where
     /// `AbstractSliderButton.extractWidgetRenderState` blits the handle
-    /// (`AbstractSliderButton.java`), or `None` for a non-slider `Cell`
+    ///, or `None` for a non-slider `Cell`
     /// **or** a slider this client holds no value for at all.
     ///
     /// Two sources, neither a guess:
@@ -977,7 +973,7 @@ impl Cell {
     ///   default double, and for an option built on
     ///   `OptionInstance.UnitDouble.INSTANCE` that default *is* the slider
     ///   fraction, because `UnitDouble.toSliderValue` is the identity
-    ///   (`OptionInstance.java`). [`UNIT_DOUBLE_DEFAULTS`] is that
+    ///  . [`UNIT_DOUBLE_DEFAULTS`] is that
     ///   set, one entry per accessor, each cited to the `Options.java` line
     ///   it boots from.
     ///
@@ -1076,7 +1072,7 @@ impl Cell {
 /// [`Cell::slider_fraction`]'s doc for why the default *is* the fraction.
 ///
 /// `fovEffectScale`/`darknessEffectScale` additionally `.xmap(Mth::square,
-/// Math::sqrt)` (`Options.java`), i.e. `toSliderValue(v) =
+/// Math::sqrt)`, i.e. `toSliderValue(v) =
 /// sqrt(v)`; both default to `1.0`, and `sqrt(1.0) == 1.0`, so the xmap does
 /// not change the number recorded here.
 ///
@@ -1209,7 +1205,7 @@ const UNIT_DOUBLE_DEFAULTS: &[(&str, f32)] = &[
     ("chatWidth", 1.0),
     // `Options.java`, default `ChatComponent.defaultUnfocusedPct()`
     // = `70.0 / (getHeight(1.0) - 20)` = `70.0 / 160.0`
-    // (`ChatComponent.java`).
+    //.
     ("chatHeightUnfocused", 70.0 / 160.0),
     // `Options.java`.
     ("chatHeightFocused", 1.0),
@@ -1244,7 +1240,7 @@ fn unit_double_default_fraction(accessor: &str) -> Option<f32> {
 /// maxInclusive)` pair a slider needs before it can place a handle at all.
 ///
 /// `IntRange` is a record of exactly those two ints plus an
-/// `applyValueImmediately` flag (`OptionInstance.java`); the flag
+/// `applyValueImmediately` flag; the flag
 /// changes *when* vanilla commits a drag, never where the handle draws, so it
 /// is deliberately absent here.
 ///
@@ -1254,14 +1250,14 @@ fn unit_double_default_fraction(accessor: &str) -> Option<f32> {
 /// why each one is a citation rather than a plausible number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SliderRange {
-    /// `IntRange.minInclusive` (`OptionInstance.java`).
+    /// `IntRange.minInclusive`.
     pub min: i32,
     /// `IntRange.maxInclusive` (`:267`).
     pub max: i32,
 }
 
 impl SliderRange {
-    /// `IntRangeBase.toSliderValue` (`OptionInstance.java`), verbatim:
+    /// `IntRangeBase.toSliderValue`, verbatim:
     ///
     /// ```java
     /// default double toSliderValue(final Integer value) {
@@ -1305,7 +1301,7 @@ impl SliderRange {
         (((v - lo) / (hi - lo)) as f32).clamp(0.0, 1.0)
     }
 
-    /// `IntRangeBase.fromSliderValue` (`OptionInstance.java`), the
+    /// `IntRangeBase.fromSliderValue`, the
     /// inverse a slider **drag** needs:
     ///
     /// ```java
@@ -1342,7 +1338,7 @@ impl SliderRange {
 ///
 /// `Options`' constructor reads
 /// `Runtime.getRuntime().maxMemory() >= 1000000000L` **once** and uses it for
-/// both distance sliders' maximum (`Options.java`):
+/// both distance sliders' maximum:
 ///
 /// ```java
 /// boolean largeDistances = Runtime.getRuntime().maxMemory() >= 1000000000L;
@@ -1363,7 +1359,7 @@ pub const LARGE_DISTANCES_MAX: i32 = 32;
 /// pre-image** of vanilla's shipped default.
 ///
 /// Three columns, and the third is the subtle one. An `IntRange` slider may be
-/// `.xmap`'d to a non-integer displayed value (`OptionInstance.java`),
+/// `.xmap`'d to a non-integer displayed value,
 /// and `xmap`'s `toSliderValue` calls `from.applyAsInt(value)` *first* and then
 /// defers to the underlying `IntRangeBase` — so the fraction is always a
 /// function of the **int**, never of the displayed double. Each `.xmap`'d row
@@ -1459,7 +1455,7 @@ const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
 
 /// `graphicsPreset`'s fraction. Its value set is an
 /// `OptionInstance.SliderableEnum`, not an `IntRange`, so it has its own
-/// `toSliderValue` (`OptionInstance.java`):
+/// `toSliderValue`:
 ///
 /// ```java
 /// if (value == this.values.getFirst()) { return 0.0; }
@@ -1470,8 +1466,8 @@ const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
 /// Note the divisor is `size - 1`, **not** `size` — this family spaces its
 /// values at the track's two ends rather than at bucket centres, which is why
 /// it cannot borrow [`SliderRange`]. `GraphicsPreset` is
-/// `FAST, FANCY, FABULOUS, CUSTOM` (`GraphicsPreset.java`), so `size` is
-/// 4, and the default is `FANCY` (`Options.java`) at index 1 — one third
+/// `FAST, FANCY, FABULOUS, CUSTOM`, so `size` is
+/// 4, and the default is `FANCY` at index 1 — one third
 /// along.
 #[must_use]
 fn graphics_preset_default_fraction() -> f32 {
@@ -1532,7 +1528,7 @@ pub fn render_distance_slider_fraction(chunks: u32) -> f32 {
 /// cannot drift. Falls back to the range's own minimum if the table row ever
 /// goes missing, which is a visible handle at the left rather than none at all.
 /// Mirrors [`render_distance_slider_fraction`] — same shape, same reasoning,
-/// an `IntRange(0, 10)` (`Options.java`) rather than the chunk range.
+/// an `IntRange(0, 10)` rather than the chunk range.
 #[must_use]
 pub fn sprint_window_slider_fraction(ticks: u8) -> f32 {
     let range = INT_RANGE_SLIDERS
@@ -1547,7 +1543,7 @@ pub fn sprint_window_slider_fraction(ticks: u8) -> f32 {
 /// Reuses the same [`INT_RANGE_SLIDERS`] row the inactive version used, so the
 /// live handle and the frozen-default handle are placed by one expression and
 /// cannot drift. Mirrors [`sprint_window_slider_fraction`] — same shape, same
-/// reasoning, an `IntRange(0, 4)` (`Options.java`) rather than the tick range.
+/// reasoning, an `IntRange(0, 4)` rather than the tick range.
 #[must_use]
 pub fn mipmap_levels_slider_fraction(levels: u32) -> f32 {
     let range = INT_RANGE_SLIDERS
@@ -1624,7 +1620,7 @@ pub fn fov_slider_fraction(degrees: u32) -> f32 {
 /// with an `xmap` between the stored value and the bucket
 /// [`SliderRange`] operates on: `INT_RANGE_SLIDERS`'s `"framerateLimit"` row is
 /// `IntRange(1, 26)` over `fps / 10`, not over `fps` itself
-/// (`Options.java`). Dividing before handing it to `to_slider_value` is
+///. Dividing before handing it to `to_slider_value` is
 /// what keeps the handle and the stored fps agreeing about which bucket `120`
 /// (the default) lands in — bucket `12`, handle at `11.5 / 26`.
 #[must_use]
@@ -1638,7 +1634,7 @@ pub fn framerate_limit_slider_fraction(fps: u32) -> f32 {
 
 /// `graphicsPreset`'s slider fraction from the real, persisted preset —
 /// `SliderableEnum.toSliderValue`'s `values.indexOf(value) / (size - 1)`
-/// (`OptionInstance.java`), endpoints pinned exactly like
+///, endpoints pinned exactly like
 /// [`graphics_preset_default_fraction`] already does for the inactive row.
 #[must_use]
 pub fn graphics_preset_slider_fraction(preset: crate::config::GraphicsPreset) -> f32 {
@@ -1668,9 +1664,9 @@ pub fn graphics_preset_from_fraction(fraction: f32) -> crate::config::GraphicsPr
 /// rather than restating a table.
 ///
 /// Vanilla stores the option as `logMouse(intValue) = 10^(intValue / 100)`
-/// over `IntRange(-200, 100)` (`Options.java`), and
+/// over `IntRange(-200, 100)`, and
 /// `IntRangeBase.toSliderValue` maps that int **linearly, except at the two
-/// endpoints** (`OptionInstance.java`):
+/// endpoints**:
 /// `map(intValue + 0.5, min, max + 1, 0, 1)`. This inverts the stored double
 /// back to vanilla's int via `unlogMouse` (`Options.java`,
 /// `Mth.floor` is a plain `floor`) and then applies the same map, so the
@@ -1701,7 +1697,7 @@ pub fn mouse_wheel_slider_fraction(value: f32) -> f32 {
     fraction as f32
 }
 
-/// `Options.genericValueLabel` (`Options.java`):
+/// `Options.genericValueLabel`:
 /// `Component.translatable("options.generic_value", caption, value)`, whose
 /// `en_us.json` pattern is `"%s: %s"`.
 #[must_use]
@@ -1712,7 +1708,7 @@ pub fn generic_value_label(caption: &str, value: &str) -> String {
 /// The displayed value of one live option.
 ///
 /// `guiScale`'s stringifier is `value == 0 ? "options.guiScale.auto" :
-/// literal(value)` (`Options.java`) — note it returns the value **without**
+/// literal(value)` — note it returns the value **without**
 /// the caption, which is why `CycleButton` composes them and this does not.
 /// `bobView` is a plain boolean, so `CycleButton.onOffBuilder`'s
 /// `options.on`/`options.off` apply: `"ON"`/`"OFF"`, upper case in `en_us.json`.
@@ -1749,13 +1745,13 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::ToggleUse => {
             if options.toggle_use { "Toggle" } else { "Hold" }.to_string()
         }
-        // `createBoolean("options.autoJump", false)` (`Options.java`) —
+        // `createBoolean("options.autoJump", false)` —
         // the plain boolean stringifier, `OPTIONS_ON`/`OPTIONS_OFF`, not the
         // `ToggleKeyMapping` "Toggle"/"Hold".
         LiveOption::AutoJump => {
             if options.auto_jump { "ON" } else { "OFF" }.to_string()
         }
-        // `IntRange(0, 10)` (`Options.java`), stringifier
+        // `IntRange(0, 10)`, stringifier
         // `value == 0 ? genericValueLabel(caption, OPTION_OFF) :
         // genericValueLabel(caption, OPTION_VALUE, value)` — "OFF" at 0,
         // else the tick count.
@@ -1775,12 +1771,12 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::DiscreteMouseScroll => {
             if options.discrete_mouse_scroll { "ON" } else { "OFF" }.to_string()
         }
-        // `String.format(Locale.ROOT, "%.2f", value)` (`Options.java`).
+        // `String.format(Locale.ROOT, "%.2f", value)`.
         LiveOption::MouseWheelSensitivity => {
             format!("{:.2}", options.mouse_wheel_sensitivity)
         }
         // `value == 0.0 ? CommonComponents.optionStatus(caption, false) :
-        // percentValueLabel(caption, value)` (`Options.java`) — the one
+        // percentValueLabel(caption, value)` — the one
         // chat slider with an OFF caption, and `optionStatus(caption, false)`
         // is itself `genericValueLabel(caption, OPTION_OFF)`, so composing
         // `"OFF"` through [`Cell::label`] reproduces it exactly.
@@ -1792,24 +1788,24 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             }
         }
         // `pixelValueLabel(caption, ChatComponent.getWidth(value))`
-        // (`Options.java`).
+        //.
         LiveOption::ChatWidth => pixel_value(chat_width_px(options.chat_width)),
         // `pixelValueLabel(caption, ChatComponent.getHeight(value))`
-        // (`Options.java`).
+        //.
         LiveOption::ChatHeightFocused => pixel_value(chat_height_px(options.chat_height_focused)),
-        // As above (`Options.java`).
+        // As above.
         LiveOption::ChatHeightUnfocused => {
             pixel_value(chat_height_px(options.chat_height_unfocused))
         }
-        // Plain `Options::percentValueLabel` (`Options.java`).
+        // Plain `Options::percentValueLabel`.
         LiveOption::ChatLineSpacing => percent_value(options.chat_line_spacing),
         // **Affine, not plain percent**: `percentValueLabel(caption, value *
-        // 0.9 + 0.1)` (`Options.java`). So a stored `1.0` prints
+        // 0.9 + 0.1)`. So a stored `1.0` prints
         // `100%` but a stored `0.0` prints `10%`, never `0%` — chat text is
         // never fully transparent in vanilla. Transcribing this as a plain
         // percent would be wrong at every value but `1.0`.
         LiveOption::ChatOpacity => percent_value(options.chat_opacity * 0.9 + 0.1),
-        // Plain `Options::percentValueLabel` (`Options.java`).
+        // Plain `Options::percentValueLabel`.
         LiveOption::TextBackgroundOpacity => percent_value(options.chat_background_opacity),
         LiveOption::ChatColors => {
             if options.chat_colors { "ON" } else { "OFF" }.to_string()
@@ -1817,7 +1813,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         // **`2.0 * value`, and the doubling is the whole subtlety**:
         // `value == 0.0 -> "options.sensitivity.min", value == 1.0 ->
         // "options.sensitivity.max", else percentValueLabel(caption, 2.0 *
-        // value)` (`Options.java`). So the shipped default of `0.5`
+        // value)`. So the shipped default of `0.5`
         // prints **100%**, not 50%, and the maximum prints 200%. Printing the
         // stored number as a percentage directly would halve every label a
         // player reads while the mouse behaved correctly — a wire carrying the
@@ -1840,7 +1836,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             }
         }
         // `genericValueLabel(caption, translatable("options.chunks", value))`
-        // (`Options.java`). `en_us.json`'s pattern is `"%s Chunks"` — a
+        //. `en_us.json`'s pattern is `"%s Chunks"` — a
         // **capital** C, which is the sort of thing that only a look at the
         // language file gets right.
         LiveOption::RenderDistance => format!("{} Chunks", options.render_distance),
@@ -1920,7 +1916,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         }
         // `CloudStatus.caption()` — the enum's *own* component, keyed
         // `options.off`/`options.clouds.fast`/`options.clouds.fancy`
-        // (`CloudStatus.java`), i.e. "OFF"/"Fast"/"Fancy" in `en_us.json`.
+        //, i.e. "OFF"/"Fast"/"Fancy" in `en_us.json`.
         //
         // This is the whole label, not a value half: see
         // [`LiveOption::value_is_the_whole_label`].
@@ -1961,7 +1957,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::CutoutLeaves => {
             if options.cutout_leaves { "ON" } else { "OFF" }.to_string()
         }
-        // `IntRange(0, 4)` (`Options.java`) with no special-case stringifier —
+        // `IntRange(0, 4)` with no special-case stringifier —
         // unlike `Fov`'s "Normal"/"Quake Pro" pair, vanilla's mipmap slider has
         // no named values, so the plain depth is the whole value half.
         LiveOption::MipmapLevels => options.mipmap_levels.to_string(),
@@ -1969,14 +1965,14 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             if options.entity_shadows { "ON" } else { "OFF" }.to_string()
         }
         // `genericValueLabel(caption, translatable("options.blocks", value))`
-        // (`Options.java`). `en_us.json`'s pattern is `"%s Blocks"` — a
+        //. `en_us.json`'s pattern is `"%s Blocks"` — a
         // **capital** B, and **Blocks** rather than `RenderDistance`'s Chunks:
         // this slider is denominated in blocks and its Video-page neighbour
         // `cloudRange` is the chunk-denominated one.
         LiveOption::WeatherRadius => format!("{} Blocks", options.weather_radius),
         // `Options::genericValueOrOffLabel`: `value == 0 ?
         // genericValueLabel(caption, OPTION_OFF) : genericValueLabel(caption,
-        // value)` (`Options.java`) — the **integer** sibling of the
+        // value)` — the **integer** sibling of the
         // `percentValueOrOffLabel` the glint and volume sliders use, so a zero
         // reads OFF and every other value is the bare number with no unit.
         LiveOption::MenuBackgroundBlurriness => {
@@ -1988,7 +1984,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         }
         // `AttackIndicatorStatus.caption()` — the enum's own component, keyed
         // `options.off`/`options.attack.crosshair`/`options.attack.hotbar`
-        // (`AttackIndicatorStatus.java`), i.e. "OFF"/"Crosshair"/"Hotbar" in
+        //, i.e. "OFF"/"Crosshair"/"Hotbar" in
         // `en_us.json`.
         //
         // The whole label, not a value half: see
@@ -2000,7 +1996,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         },
         // `ParticleStatus.caption()` — the enum's own component, keyed
         // `options.particles.all`/`.decreased`/`.minimal`
-        // (`ParticleStatus.java`), i.e. "All"/"Decreased"/"Minimal" in
+        //, i.e. "All"/"Decreased"/"Minimal" in
         // `en_us.json`. Note these are **not** OFF/ON-shaped: even `Minimal`
         // is a level rather than an off state, which is why none of the three
         // reads "OFF".
@@ -2013,7 +2009,7 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             crate::config::ParticleLevel::Minimal => "Minimal".to_string(),
         },
         // `genericValueLabel(caption, translatable("options.biomeBlendRadius."
-        // + (value * 2 + 1)))` (`Options.java`) — the key is the window
+        // + (value * 2 + 1)))` — the key is the window
         // **width**, not the stored radius, and `en_us.json` gives each width
         // its own hand-written name rather than a format pattern.
         LiveOption::BiomeBlendRadius => biome_blend_caption(options.biome_blend_radius),
@@ -2055,13 +2051,13 @@ fn biome_blend_caption(radius: i32) -> String {
 pub enum Entry {
     /// `addHeader(text)`: a `StringWidget`, not a control. Its height is
     /// `paddingTop + 9 + 4` and its `paddingTop` is `0` for the first entry in
-    /// the list and `18` otherwise (`OptionsList.java`) — which is why
+    /// the list and `18` otherwise — which is why
     /// [`entry_height`] takes the index.
     Header(&'static str),
     /// `addBig(option)`: one 310 px control on its own row.
     Big(Cell),
     /// `addSmall(a, b)`: two 150 px controls 160 px apart, or one when the
-    /// option count is odd (`OptionsList.java`).
+    /// option count is odd.
     Small(Cell, Option<Cell>),
 }
 
@@ -2134,7 +2130,7 @@ const fn unsupported(label: &'static str) -> Cell {
 }
 
 /// The root's second header button — vanilla's `inWorld` fork
-/// (`OptionsScreen.java`). Outside a world it is a live link to
+///. Outside a world it is a live link to
 /// [`SettingsPage::Online`]; inside one it is `WorldOptionsScreen`, which this
 /// client does not build, so it stays the same `no_screen` placeholder shape
 /// every other unbuilt screen uses.
@@ -2175,7 +2171,7 @@ const fn lone(a: Cell) -> Entry {
 /// and `preferenceOptions` (`:79-81`).
 ///
 /// The pairing is `addSmall`'s: it walks the array two at a time
-/// (`OptionsList.java`), so the two columns of a row are consecutive
+///, so the two columns of a row are consecutive
 /// entries of vanilla's array and the last one is alone if the count is odd.
 static VIDEO: &[Entry] = &[
     head("Display"),
@@ -2291,7 +2287,7 @@ static VIDEO: &[Entry] = &[
 ///
 /// The four `toggle*` options are the only ones in the tree whose caption is a
 /// **keybind** name rather than an `options.*` key — `key.sneak`, `key.sprint`,
-/// `key.attack`, `key.use` (`Options.java`) — and their values are
+/// `key.attack`, `key.use` — and their values are
 /// `options.key.toggle`/`options.key.hold` rather than ON/OFF.
 ///
 /// **All four toggles are live** — Sneak/Sprint since #202
@@ -2600,7 +2596,7 @@ static SKIN: &[Entry] = &[
     pair(cycle("modelPart.hat", "Hat"), cycle("mainHand", "Main Hand")),
 ];
 
-/// `OnlineOptionsScreen.addOptions` (`OnlineOptionsScreen.java`), in its
+/// `OnlineOptionsScreen.addOptions`, in its
 /// own call order. Every control here is decorative — see
 /// [`SettingsPage::Online`]'s doc for why — so every accessor uses [`cycle`],
 /// never [`live_cycle`], and the Xbox link uses [`unsupported`] exactly like
@@ -2614,7 +2610,7 @@ static SKIN: &[Entry] = &[
 ///
 /// `realmsNotifications`' caption is **not** `options.realmsNotifications`
 /// ("Realms News & Invites"): the `OptionInstance` is constructed with the
-/// `.button` key (`Options.java`), whose `en_us.json` string is
+/// `.button` key, whose `en_us.json` string is
 /// "News & Invites". Easy to get backwards by reading the accessor name alone.
 static ONLINE: &[Entry] = &[
     head("Friends List"), // options.online.friends.header
@@ -2699,7 +2695,7 @@ pub enum SettingsPage {
     Accessibility,
     /// `SkinCustomizationScreen`.
     Skin,
-    /// `OnlineOptionsScreen` (`OnlineOptionsScreen.java`) — friends list,
+    /// `OnlineOptionsScreen` — friends list,
     /// requests, in-game notifications, presence visibility, an external Xbox
     /// Settings link, server-listing opt-out and Realms news/invites. All
     /// seven are **decorative**: this client has no `PlayerSocialManager`, no
@@ -2710,7 +2706,7 @@ pub enum SettingsPage {
     ///
     /// Reached from the root's second header button when
     /// [`super::UiState::settings_in_world`] is `false` — vanilla's own fork
-    /// (`OptionsScreen.java`): `in_world` picks `WorldOptionsScreen`
+    ///: `in_world` picks `WorldOptionsScreen`
     /// instead, which this client does not build, so that branch stays a
     /// `no_screen` placeholder and the button reads "World Options..." and
     /// stays inactive, exactly as it always has. See [`controls`]'s
@@ -2725,7 +2721,7 @@ pub enum SettingsPage {
     /// only so the match stays total.
     ///
     /// Reached from the Controls page's own "Key Binds..." button — vanilla's
-    /// own wiring (`ControlsScreen.java`), not the root grid.
+    /// own wiring, not the root grid.
     KeyBinds,
     /// `LanguageSelectScreen` — **not** an `OptionsList` page,
     /// same reason as [`SettingsPage::KeyBinds`]: [`SettingsNav`] delegates to
@@ -2812,8 +2808,8 @@ impl SettingsPage {
         }
     }
 
-    /// The header band's height: 61 on the root (`OptionsScreen.java`), the
-    /// inherited 33 everywhere else (`OptionsSubScreen.java`).
+    /// The header band's height: 61 on the root, the
+    /// inherited 33 everywhere else.
     #[must_use]
     pub fn header_height(self) -> f32 {
         if self == SettingsPage::Root {
@@ -2852,7 +2848,7 @@ impl SettingsPage {
     /// Every page but one is `OptionsSubScreen.addFooter`'s single 200 px Done
     /// (`:51-53`); Accessibility overrides it with a `LinearLayout.horizontal()
     /// .spacing(8)` of two default-width buttons — the external accessibility
-    /// guide, then Done (`AccessibilityOptionsScreen.java`).
+    /// guide, then Done.
     #[must_use]
     pub fn footer(self) -> &'static [Cell] {
         static ONE: &[Cell] = &[done()];
@@ -2953,7 +2949,7 @@ impl Control {
 ///
 /// List cells first (top to bottom, left to right), then the footer — which is
 /// `HeaderAndFooterLayout.visitChildren`'s own order, header then contents then
-/// footer (`HeaderAndFooterLayout.java`).
+/// footer.
 ///
 /// `in_world` is only consulted on [`SettingsPage::Root`] — see
 /// [`online_cell`] — and is otherwise ignored, exactly as vanilla's `inWorld`
@@ -3108,7 +3104,7 @@ pub fn entry_of_control(page: SettingsPage, control: usize) -> Option<usize> {
 ///
 /// `addEntry(entry)` uses the list's `defaultEntryHeight` of 25
 /// (`AbstractSelectionList.java`, `OptionsList.java`); `addHeader`
-/// passes `paddingTop + lineHeight + 4` explicitly (`OptionsList.java`),
+/// passes `paddingTop + lineHeight + 4` explicitly,
 /// where `paddingTop` is `0` for the first entry in the list and `18`
 /// otherwise (`:58`). That first-header case is the reason this takes an index
 /// rather than being a method on [`Entry`].
@@ -3124,7 +3120,7 @@ pub fn entry_height(entries: &[Entry], index: usize) -> f32 {
 }
 
 /// `OptionsList.addHeader`'s `paddingTop`: `0` when the list is still empty,
-/// `lineHeight * 2` otherwise (`OptionsList.java`).
+/// `lineHeight * 2` otherwise.
 ///
 /// "The list is still empty" is `index == 0`, because `addHeader` is called in
 /// entry order and every screen that uses a header opens with one.
@@ -3141,7 +3137,7 @@ pub fn header_padding_top(index: usize) -> f32 {
 /// the top of the window.
 ///
 /// `repositionEntries` accumulates `child.getHeight()` from
-/// `getFirstEntryY() - scrollAmount` (`AbstractSelectionList.java`);
+/// `getFirstEntryY() - scrollAmount`;
 /// snapping the scroll to an entry boundary makes that sum start at `first`.
 #[must_use]
 pub fn entry_offset(entries: &[Entry], index: usize) -> f32 {
@@ -3222,7 +3218,7 @@ pub fn visible_entries(entries: &[Entry], first: usize) -> std::ops::Range<usize
 }
 
 /// `OptionsList.Entry.extractContent`'s x for column `column`:
-/// `this.screen.width / 2 - 155 + column * 160` (`OptionsList.java`).
+/// `this.screen.width / 2 - 155 + column * 160`.
 ///
 /// The division is Java integer division on `screen.width`, hence [`layout::ipx`].
 #[must_use]
@@ -3261,8 +3257,7 @@ pub fn list_cell_origin(
 }
 
 /// `scroll` re-clamped to what a `height`-tall canvas can justify — vanilla's
-/// `refreshScrollAmount`, which `updateSizeAndPosition` runs after every resize
-/// (`AbstractSelectionList.java`).
+/// `refreshScrollAmount`, which `updateSizeAndPosition` runs after every resize.
 ///
 /// ## Why this exists, and what it fixed
 ///
@@ -3296,8 +3291,7 @@ pub fn drawn_scroll(page: SettingsPage, scroll: f32, height: f32) -> f32 {
 }
 
 /// The top-left of a header entry's `StringWidget`:
-/// `(screen.width / 2 - 155, getContentY() + paddingTop)`
-/// (`OptionsList.java`).
+/// `(screen.width / 2 - 155, getContentY() + paddingTop)`.
 #[must_use]
 pub fn list_header_origin(
     page: SettingsPage,
@@ -3314,7 +3308,7 @@ pub fn list_header_origin(
 
 /// A zero-width, 9 px `StringWidget` stand-in.
 ///
-/// The real one is `font.width(text)` wide (`StringWidget.java`), which is
+/// The real one is `font.width(text)` wide, which is
 /// not known in a layout pass with no font. Zero is safe for **placement** —
 /// every block it sits in is wider than the title in `en_us` ("Options" is
 /// ~40 px against a 308 px row), so the title never widens its parent — and the
@@ -3451,7 +3445,7 @@ pub fn placement_anchor(placement: Placement, width: f32, height: f32) -> (f32, 
 /// The y of a page title's line, inside its header band.
 ///
 /// The band's `FrameLayout` inherits `align(0.5, 0.5)`
-/// (`HeaderAndFooterLayout.java`), so a 9 px `StringWidget` in a 33 px
+///, so a 9 px `StringWidget` in a 33 px
 /// band sits at `Math.round(lerp(0.5, 0, 33 - 9)) = 12`. Asked of a real
 /// arranged layout rather than written down, because
 /// `AbstractChildWrapper::setY` **rounds** where `setX` truncates and the
@@ -3512,7 +3506,7 @@ pub struct SettingsNav {
     /// Scroll offset in **pixels**, not the index of the entry at
     /// the top of the window.
     scroll: f32,
-    /// Vanilla's `inWorld` (`OptionsScreen.java`): whether this screen
+    /// Vanilla's `inWorld`: whether this screen
     /// was opened from the pause menu rather than the title —
     /// [`super::UiState::settings_in_world`], threaded in once at
     /// [`Self::reset`]. It governs the root's Online/World Options button's
@@ -3671,7 +3665,7 @@ impl SettingsNav {
     /// Like [`Self::reset`], but lands directly on `page` with an **empty**
     /// page stack, instead of [`SettingsPage::Root`].
     ///
-    /// This is vanilla's title-screen icon buttons (`TitleScreen.java`):
+    /// This is vanilla's title-screen icon buttons:
     /// the Language/Accessibility icons construct `LanguageSelectScreen`/
     /// `AccessibilityOptionsScreen` directly with `lastScreen = this` (the
     /// title), never routing through `OptionsScreen`. An empty stack is what
@@ -3848,7 +3842,7 @@ impl SettingsNav {
     ///
     /// `Screen.shouldCloseOnEsc` is true for every options screen, and
     /// `OptionsSubScreen.onClose` returns to `lastScreen`
-    /// (`OptionsSubScreen.java`) — which is the page stack here.
+    /// — which is the page stack here.
     pub fn escape(&mut self) -> SettingsOutcome {
         self.back()
     }
@@ -3896,7 +3890,7 @@ impl SettingsNav {
     ///
     /// An **inactive** control does nothing at all, which is
     /// `AbstractWidget.mouseClicked`'s `isActive()` guard
-    /// (`AbstractWidget.java`) and the same shape as
+    /// and the same shape as
     /// [`super::nav::MenuNav`]'s `key_main` refusing Enter on a disabled title
     /// button.
     fn activate(&mut self, cell: Cell) -> SettingsOutcome {
@@ -3959,7 +3953,7 @@ const ERROR_COLOUR: [f32; 4] = [0.92, 0.45, 0.42, 1.0];
 
 /// Builds the whole settings frame for whichever page the cursor is on.
 ///
-/// The root header's Online/World Options fork (`OptionsScreen.java`) is
+/// The root header's Online/World Options fork is
 /// **not** decided here: `nav.visible()` already carries the right label *and*
 /// the right liveness for [`super::UiState::settings_in_world`], because
 /// [`SettingsNav::in_world`] was set from the same fact when the screen was
@@ -4597,13 +4591,13 @@ mod tests {
     /// asserted as an exact string.
     ///
     /// Each expectation originates outside this client: the pixel figures are
-    /// `ChatComponent.getWidth`/`getHeight` (`ChatComponent.java`), the
+    /// `ChatComponent.getWidth`/`getHeight`, the
     /// percentages are `Options.percentValueLabel`'s `(int)(value * 100.0)`
-    /// truncation (`Options.java`), and `chatScale`'s OFF branch is
-    /// `CommonComponents.optionStatus(caption, false)` (`Options.java`).
+    /// truncation, and `chatScale`'s OFF branch is
+    /// `CommonComponents.optionStatus(caption, false)`.
     ///
     /// The load-bearing row is `chatOpacity`, which is **affine**:
-    /// `percentValueLabel(caption, value * 0.9 + 0.1)` (`Options.java`). The
+    /// `percentValueLabel(caption, value * 0.9 + 0.1)`. The
     /// wrong-but-plausible transcription — a plain percent — agrees with the
     /// correct one at `1.0` and nowhere else, so this pins two more values where
     /// the two hypotheses differ by 10 and 5 percentage points. That is the
@@ -4837,7 +4831,7 @@ mod tests {
     fn the_migrated_labels_are_vanillas_own_strings() {
         let mut o = crate::config::Options::default();
 
-        // `percentValueLabel(caption, 2.0 * value)` (`Options.java`): the
+        // `percentValueLabel(caption, 2.0 * value)`: the
         // shipped default of 0.5 reads **100%**, and the wrong hypothesis —
         // printing the stored number as a percentage — reads 50%.
         o.sensitivity = 0.5;
@@ -4849,7 +4843,7 @@ mod tests {
              the mouse behaves correctly"
         );
         // Binary-exact values only. `percent_value` truncates, exactly as
-        // vanilla's `(int)(value * 100.0)` does (`Options.java`), but our
+        // vanilla's `(int)(value * 100.0)` does, but our
         // storage is `f32` where vanilla's is `double` — so a value like 0.35,
         // which is representable in neither, lands at 69.999... here and prints
         // **69%** where vanilla prints 70%. That divergence is a property of the
@@ -5661,7 +5655,7 @@ mod tests {
     fn only_slider_backed_options_are_sliders() {
         // `OptionInstance.createButton` dispatches on the `ValueSet`, and
         // `ClampingLazyMaxIntRange.createCycleButton()` is `true`
-        // (`OptionInstance.java`) — so GUI Scale, an int range, is a
+        // — so GUI Scale, an int range, is a
         // **cycle** button. Getting this backwards would draw a slider track
         // under the one option on the page that works.
         assert!(!live_cycle("guiScale", "GUI Scale", LiveOption::GuiScale).is_slider());
@@ -5676,7 +5670,7 @@ mod tests {
     fn header_heights_follow_the_first_entry_rule() {
         // `OptionsList.addHeader`: `paddingTop` is `0` when the list is empty
         // and `18` after, and the entry's height is `paddingTop + 9 + 4`
-        // (`OptionsList.java`). Video opens with a header and has two
+        //. Video opens with a header and has two
         // more, so it exercises both branches.
         let entries = SettingsPage::Video.entries();
         assert!(matches!(entries[0], Entry::Header(_)));
