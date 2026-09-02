@@ -1,83 +1,56 @@
-//! The scheduled-tick queue (issue #308, first half): vanilla's own
-//! `blockTicks`/`fluidTicks` machinery, collapsed to one generic
+//! The scheduled-tick queue (issue #308, first half): the real engine's own
+//! per-block and per-fluid tick machinery, collapsed to one generic
 //! [`ScheduledTickQueue<T>`] the tick loop instantiates twice.
 //!
-//! # Where this comes from in the jar
+//! # Where this comes from in the real engine
 //!
-//! `ServerLevel` keeps exactly two of these
-//! (`ServerLevel.java:209-210`):
+//! The real per-world state keeps exactly two of these tick queues, one
+//! keyed by block type and one by fluid type, and drains both once per
+//! world tick, **block before fluid**, each capped at a `65536`
+//! ticks-per-tick ceiling — see [`ScheduledTickQueue::drain_due`]'s
+//! `max_to_process` parameter for that same cap.
 //!
-//! ```text
-//! private final LevelTicks<Block> blockTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded);
-//! private final LevelTicks<Fluid> fluidTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded);
-//! ```
-//!
-//! and drains both once per world tick, **block before fluid**
-//! (`ServerLevel.java:388-391`):
-//!
-//! ```text
-//! this.blockTicks.tick(tick, 65536, this::tickBlock);
-//! this.fluidTicks.tick(tick, 65536, this::tickFluid);
-//! ```
-//!
-//! `65536` is `ServerLevel.MAX_SCHEDULED_TICKS_PER_TICK`
-//! (`ServerLevel.java:194`) — see [`ScheduledTickQueue::drain_due`]'s
-//! `max_to_process` parameter.
-//!
-//! Vanilla partitions each queue further, per chunk, via `LevelTicks<T>`
-//! (`LevelTicks.java`) holding one `LevelChunkTicks<T>`
-//! (`LevelChunkTicks.java`) per loaded chunk, so that draining one very full
+//! The real engine partitions each queue further, per chunk, via a
+//! per-world container holding one per-chunk tick container
+//! per loaded chunk, so that draining one very full
 //! chunk cannot starve every other chunk's due ticks in the same pass. This
 //! crate has no per-chunk tick-container registry yet (no chunk-load/unload
 //! lifecycle for blocks — see `crate::chunk`'s own module doc), so
-//! [`ScheduledTickQueue`] is the **single-container reduction** of vanilla's
-//! design: with exactly one container, `LevelTicks`'s own cross-container
-//! selection (`LevelTicks::drainContainers`/`drainFromCurrentContainer`,
-//! comparing containers by `ScheduledTick.INTRA_TICK_DRAIN_ORDER`) never has
+//! [`ScheduledTickQueue`] is the **single-container reduction** of the real
+//! design: with exactly one container, the real per-world container's own
+//! cross-container
+//! selection (comparing containers by their own intra-tick drain order)
+//! never has
 //! a second container to compare against, and the whole algorithm collapses
 //! to draining the single container's own queue in
-//! `ScheduledTick.DRAIN_ORDER` — which is exactly what this type does. This
+//! the real drain order — which is exactly what this type does. This
 //! is not an invented simplification: it is the real algorithm evaluated at
 //! the case this crate is actually in today. If a per-chunk tick-container
 //! registry is ever added, promote this to one `ScheduledTickQueue` per
-//! chunk plus the `LevelTicks`-level cross-container merge; the ordering
+//! chunk plus the per-world container's cross-container merge; the ordering
 //! contract below does not change.
 //!
-//! # The ordering contract, cited directly
+//! # The ordering contract, transcribed from the real engine
 //!
-//! `ScheduledTick.java:9-17`:
-//!
-//! ```text
-//! public static final Comparator<ScheduledTick<?>> DRAIN_ORDER = (o1, o2) -> {
-//!    int compare = Long.compare(o1.triggerTick, o2.triggerTick);
-//!    if (compare != 0) return compare;
-//!    compare = o1.priority.compareTo(o2.priority);
-//!    return compare != 0 ? compare : Long.compare(o1.subTickOrder, o2.subTickOrder);
-//! };
-//! ```
+//! The real drain-order comparator, transcribed as the rule it implements:
+//! compare by trigger tick first; if those are equal, compare by priority;
+//! if those are also equal, compare by insertion order.
 //!
 //! i.e. **trigger tick, then priority, then insertion order** — see
 //! [`TickPriority`] for the seven priorities and
 //! [`ScheduledTickQueue::drain_due`] for the collect-then-run split that
 //! keeps a tick scheduled *during* processing out of the pass currently
-//! running (`LevelTicks::tick`, `LevelTicks.java:81-91`: `collectTicks` fully
-//! populates `toRunThisTick` before `runCollectedTicks` invokes the output
-//! callback even once).
+//! running (the real per-chunk-container drain fully
+//! collects everything due before running any of the collected ticks' own
+//! callback, even once).
 //!
-//! # The per-position dedup, cited directly
+//! # The per-position dedup, transcribed from the real engine
 //!
-//! `LevelChunkTicks.java:53-57`:
+//! The real per-chunk container's schedule call, transcribed as the rule it
+//! implements: only actually enqueue the new tick if adding it to the
+//! per-position set reports that it was not already present.
 //!
-//! ```text
-//! public void schedule(final ScheduledTick<T> tick) {
-//!    if (this.ticksPerPosition.add(tick)) {
-//!       this.scheduleUnchecked(tick);
-//!    }
-//! }
-//! ```
-//!
-//! `ticksPerPosition` hashes/compares only on `(pos, type)`
-//! (`ScheduledTick.UNIQUE_TICK_HASH`, `ScheduledTick.java:22-34`) — a second
+//! That per-position set hashes/compares only on `(pos, type)` — a second
 //! `schedule` for a position/kind pair that already has one pending is
 //! silently dropped, regardless of the new call's `trigger_tick` or
 //! `priority`. [`ScheduledTickQueue::schedule`] mirrors this exactly.
@@ -87,18 +60,15 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Mirrors `net.minecraft.world.ticks.TickPriority`
-/// (`TickPriority.java:5-12`):
+/// Mirrors the real per-tick priority enum, in its real declared order:
+/// extremely high, very high, high, normal, low, very low, extremely low —
+/// each also carrying a signed numeric value (`-3` through `3`) that this
+/// port does not need to reproduce.
 ///
-/// ```text
-/// public enum TickPriority {
-///    EXTREMELY_HIGH(-3), VERY_HIGH(-2), HIGH(-1), NORMAL(0), LOW(1), VERY_LOW(2), EXTREMELY_LOW(3);
-/// }
-/// ```
-///
-/// Declared in that exact order deliberately: `ScheduledTick.DRAIN_ORDER`
-/// compares priorities with `Enum::compareTo`, which is Java's **ordinal**
-/// (declaration order), not the `-3..3` values shown above. Rust's derived
+/// Declared in that exact order deliberately: the real drain-order
+/// comparator
+/// compares priorities by their enum ordinal (declaration order), not the
+/// `-3..3` values mentioned above. Rust's derived
 /// [`Ord`] on an enum is likewise declaration-order, so listing the variants
 /// `ExtremelyHigh` first reproduces that comparison with no explicit value
 /// mapping needed — a smaller `TickPriority` here is exactly a smaller
@@ -115,19 +85,19 @@ pub enum TickPriority {
 }
 
 impl Default for TickPriority {
-    /// Vanilla's own 3-arg `ScheduledTick` constructor
-    /// (`ScheduledTick.java:36-38`) defaults to `NORMAL` for callers that
+    /// The real 3-arg scheduled-tick constructor
+    /// defaults to `NORMAL` for callers that
     /// don't care about priority.
     fn default() -> Self {
         TickPriority::Normal
     }
 }
 
-/// One scheduled tick, mirroring `net.minecraft.world.ticks.ScheduledTick`
-/// (`ScheduledTick.java:8`,
-/// `record ScheduledTick<T>(T type, BlockPos pos, long triggerTick, TickPriority priority, long subTickOrder)`).
+/// One scheduled tick, mirroring the real per-tick record: a type, a
+/// position, a trigger tick, a priority, and a sub-tick insertion order.
 ///
-/// `sub_tick_order` is a queue-assigned monotonic counter (vanilla's own
+/// `sub_tick_order` is a queue-assigned monotonic counter (the real
+/// implementation's own
 /// field of the same name) — the final tiebreaker when two ticks share both
 /// `trigger_tick` and `priority`, and it is what makes
 /// [`ScheduledTickQueue::drain_due`]'s output order a pure function of
@@ -143,9 +113,9 @@ pub struct ScheduledTick<T> {
     sub_tick_order: u64,
 }
 
-/// `BinaryHeap` wrapper implementing `DRAIN_ORDER`
-/// (`ScheduledTick.java:9-17`) with the comparison inverted, so
-/// `BinaryHeap` (a max-heap) pops the vanilla-*smallest* entry first — i.e.
+/// `BinaryHeap` wrapper implementing the real drain order
+/// with the comparison inverted, so
+/// `BinaryHeap` (a max-heap) pops the real-engine-*smallest* entry first — i.e.
 /// a genuine min-heap by `(trigger_tick, priority, sub_tick_order)`.
 #[derive(Debug)]
 struct HeapEntry<T>(ScheduledTick<T>);
@@ -171,19 +141,21 @@ impl<T> Ord for HeapEntry<T> {
         let other_key = (other.0.trigger_tick, other.0.priority, other.0.sub_tick_order);
         // Reversed on purpose (`other` compared against `self`): see the
         // struct doc comment above for why this turns `BinaryHeap`'s
-        // max-heap into vanilla `DRAIN_ORDER`'s min-first semantics.
+        // max-heap into the real drain order's min-first semantics.
         other_key.cmp(&self_key)
     }
 }
 
-/// The single-container reduction of vanilla's `LevelTicks<T>` — see this
+/// The single-container reduction of the real per-world tick container —
+/// see this
 /// module's own doc comment for why one container is the faithful case to
 /// model today, and what changes (nothing about the ordering contract) if a
 /// per-chunk registry is added later.
 ///
 /// `T` is the tick's payload — the block/fluid *kind* being ticked (this
 /// crate keys it by canonical block-state-name `String`, matching
-/// `ChunkColumn`'s own block representation; vanilla keys by `Block`/`Fluid`
+/// `ChunkColumn`'s own block representation; the real engine keys by the
+/// block/fluid
 /// registry object). `T: Eq + Hash + Clone` is required for the
 /// `(pos, kind)` dedup set — see [`schedule`](Self::schedule).
 #[derive(Debug)]
@@ -256,7 +228,7 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
     }
 
     /// `true` iff a tick for `(pos, kind)` is currently pending — mirrors
-    /// `LevelChunkTicks::hasScheduledTick` (`LevelChunkTicks.java:67-69`).
+    /// the real per-chunk container's own has-scheduled-tick query.
     #[must_use]
     pub fn has_scheduled(&self, pos: (i32, i32, i32), kind: &T) -> bool {
         self.scheduled.contains(&(pos, kind.clone()))
@@ -270,15 +242,15 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
     /// lands on disk. Added for #468's remaining half.
     ///
     /// Two schema traps for whoever serialises these, both measured against
-    /// 4,023 real vanilla chunks read with an independent parser, and both of
+    /// 4,023 real chunks read with an independent parser, and both of
     /// which the decompiled source reads misleadingly:
     ///
-    /// * vanilla's `p` is an `Int` carrying the priority **value** in `-3..3`,
+    /// * the real save format's `p` field is an `Int` carrying the priority **value** in `-3..3`,
     ///   **not** an ordinal. Our [`TickPriority`] is declaration-ordered so its
-    ///   `Ord` matches Java's `compareTo`, which makes `Normal`'s ordinal `3`
+    ///   `Ord` matches the real engine's own priority comparison, which makes `Normal`'s ordinal `3`
     ///   and its value `0` — writing the ordinal would silently turn every
     ///   normal tick into `EXTREMELY_LOW`.
-    /// * vanilla's `t` is a delay **relative to game time at save, and can be
+    /// * the real save format's `t` field is a delay **relative to game time at save, and can be
     ///   negative** (`-33` observed for an overdue lava tick). Loading is
     ///   `trigger_tick = game_time_at_load + delay`; an unsigned conversion
     ///   panics or wraps.
@@ -289,15 +261,13 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
     }
 
     /// Drains every tick due at or before `current_tick` (`trigger_tick <=
-    /// current_tick`), in `DRAIN_ORDER`, up to `max_to_process` entries —
-    /// mirrors `LevelTicks::tick`/`ServerLevel`'s `65536` cap
-    /// (`ServerLevel.java:194,389,391`).
+    /// current_tick`), in the real drain order, up to `max_to_process` entries —
+    /// mirrors the real per-world tick drain's own `65536` cap.
     ///
     /// Every returned entry is removed from the queue (and its dedup key)
     /// **before** this function returns — the whole `Vec` is popped from the
-    /// heap in one pass, mirroring `LevelTicks`'s own collect-then-run split
-    /// (`collectTicks` before `runCollectedTicks`,
-    /// `LevelTicks.java:81-91`). So a tick the caller schedules while
+    /// heap in one pass, mirroring the real per-world container's own collect-then-run split
+    /// (collect everything due before running any of it). So a tick the caller schedules while
     /// iterating the returned `Vec` (a common shape: "processing this
     /// scheduled tick causes a fresh one to be scheduled") is invisible to
     /// *this* call regardless of its `trigger_tick` — it can only be seen by
@@ -323,8 +293,8 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
     /// satisfies `matches`, regardless of `trigger_tick` — i.e. **interrupts**
     /// a pending tick rather than waiting for it to come due.
     ///
-    /// This is the queue-side half of vanilla's `PistonMovingBlockEntity
-    /// .finalTick()`/`preRemoveSideEffects` reaching a moving block entity
+    /// This is the queue-side half of the real moving-piston block entity's
+    /// own final-tick and pre-remove-side-effects hooks reaching a moving block entity
     /// *before* its own scheduled commit fires: `crate::piston`'s pending
     /// commit lives in this queue (see `piston::finish_kind`'s own doc
     /// comment — there is no per-position block-entity map on this reaction
@@ -427,17 +397,18 @@ pub struct StagedTick {
     pub trigger_tick: u64,
     /// As `ScheduledTick::priority`.
     pub priority: TickPriority,
-    /// `true` for `ServerLevel.fluidTicks`, `false` for `blockTicks`.
+    /// `true` for the real per-world fluid-tick queue, `false` for the
+    /// block-tick queue.
     pub fluid: bool,
 }
 
-/// The pair of queues [`ScheduledTickHandle`] guards, mirroring
-/// `ServerLevel.blockTicks`/`fluidTicks`.
+/// The pair of queues [`ScheduledTickHandle`] guards, mirroring the real
+/// per-world block-tick and fluid-tick queues.
 #[derive(Debug, Default)]
 pub struct ScheduledTickQueues {
-    /// `ServerLevel.blockTicks`.
+    /// The real per-world block-tick queue.
     pub block: ScheduledTickQueue<String>,
-    /// `ServerLevel.fluidTicks`.
+    /// The real per-world fluid-tick queue.
     pub fluid: ScheduledTickQueue<String>,
 }
 
@@ -587,7 +558,7 @@ mod tests {
         assert_eq!(q.len(), 1, "the not-yet-due tick must remain queued");
     }
 
-    /// Pins the dedup rule cited from `LevelChunkTicks.java:53-57`: a second
+    /// Pins the dedup rule transcribed from the real per-chunk container: a second
     /// `schedule` for the same `(pos, kind)` while one is already pending is
     /// dropped, and the *original* scheduling (trigger tick, priority) wins.
     #[test]
@@ -731,11 +702,12 @@ mod tests {
         assert_eq!(third.len(), 1, "the last one drains once the queue is nearly empty");
     }
 
-    /// `TickPriority`'s declared order must match vanilla's `-3..3` value
-    /// order (`TickPriority.java:6-12`) — the property `HeapEntry::cmp`
+    /// `TickPriority`'s declared order must match the real engine's `-3..3`
+    /// value
+    /// order — the property `HeapEntry::cmp`
     /// relies on via `#[derive(Ord)]`.
     #[test]
-    fn tick_priority_declaration_order_matches_vanilla_value_order() {
+    fn tick_priority_declaration_order_matches_real_value_order() {
         assert!(TickPriority::ExtremelyHigh < TickPriority::VeryHigh);
         assert!(TickPriority::VeryHigh < TickPriority::High);
         assert!(TickPriority::High < TickPriority::Normal);
