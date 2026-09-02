@@ -18,29 +18,30 @@
 //! placement = T(arm offset) · display_matrix(slot) · node_transformation
 //! ```
 //!
-//! * **arm offset** `(0.56, -0.52, -0.72)` — `ItemInHandRenderer.applyItemArmTransform`,
+//! * **arm offset** `(0.56, -0.52, -0.72)` — vanilla's item-arm transform function,
 //!   with `inverseArmHeight = 0` (a fully-equipped hand) and `attackAnim = 0`
 //!   (at rest the whole attack chain cancels to the identity).
-//! * **display slot** — `ItemTransforms.getTransform(FIRST_PERSON_RIGHT_HAND)` on the
+//! * **display slot** — vanilla's display-transforms accessor for `FIRST_PERSON_RIGHT_HAND` on the
 //!   `base` model's merged transforms. `assets/minecraft/models/item/template_skull.json`
 //!   **declares no `firstperson_righthand`**, so vanilla answers with the
-//!   `ItemTransform.NO_TRANSFORM` singleton, whose `apply` is the bare
+//!   no-transform singleton, whose `apply` is the bare
 //!   `translate(-0.5, -0.5, -0.5)` centring and nothing else.
 //! * **node transformation** — `assets/minecraft/items/player_head.json`'s own
 //!   `"transformation"` on the `minecraft:special` node:
 //!   `translation [0.5, 0, 0.5]`, `left_rotation [1, 0, 0, -0]`
 //!   (a JOML `(x, y, z, w)` quaternion, i.e. 180° about X), unit scale, identity
-//!   right rotation. `SpecialModelWrapper.Unbaked.bake` composes it *under* the
-//!   display transform via `Transformation.compose(parent, this.transformation)`,
-//!   and `ModelBakery` seeds the root with the identity.
-//! * **the mesh** — `SkullModel.createHeadModel`'s `addBox(-4, -8, -4, 8, 8, 8)`,
+//!   right rotation. Vanilla's unbaked special-model-wrapper bake function composes it *under* the
+//!   display transform via its transformation-record compose function (`Transformation.compose(parent, this.transformation)`),
+//!   and its model-bakery class seeds the root with the identity.
+//! * **the mesh** — vanilla's skull model's head-model-creation function's `addBox(-4, -8, -4, 8, 8, 8)`,
 //!   divided by 16 like every `ModelPart`, so `y ∈ [-0.5, 0]`: authored **Y-down**,
 //!   which is the whole reason the node transformation flips it.
 //!
-//! Neither `SkullSpecialRenderer.submit` nor `PlayerHeadSpecialRenderer.submit`
-//! adds a placement of its own — both call `SkullBlockRenderer.submitSkull`
+//! Neither vanilla's skull special-renderer's submit function nor its player-head
+//! special-renderer's submit function
+//! adds a placement of its own — both call vanilla's skull block-renderer's submit function
 //! directly. The ground/wall `scale(-1, -1, 1)` belongs to the *block-entity*
-//! path (`SkullBlockRenderer.submit`) and must not appear here.
+//! path (vanilla's skull block-renderer's submit function) and must not appear here.
 //!
 //! # What the numbers say, and what they do not
 //!
@@ -124,7 +125,7 @@ fn template_skull_display() -> DisplayTransforms {
 /// `assets/minecraft/models/item/template_chest.json`'s `firstperson_righthand`,
 /// transcribed from the jar. `item/chest` — the `base` a chest item's special
 /// node names — declares no `display` of its own and inherits this through
-/// `ResolvedModel.findTopTransform`'s per-slot walk.
+/// vanilla's resolved-model top-transform function's per-slot walk.
 fn template_chest_first_person() -> DisplayTransforms {
     DisplayTransforms::NONE.with(
         DisplaySlot::FirstPersonRightHand,
@@ -161,7 +162,7 @@ fn held_placement(display: &DisplayTransforms, node: &[ItemNodeTransform]) -> Ma
 }
 
 /// The baked mesh's own local AABB, so this gate is testing the *shipped* rig
-/// rather than a second, hand-typed copy of `SkullModel`'s box that could agree
+/// rather than a second, hand-typed copy of vanilla's skull model's box that could agree
 /// with vanilla while the rig did not.
 fn mesh_aabb(name: &str) -> (Vec3, Vec3) {
     let set = BlockEntityModelSet::load();
@@ -175,13 +176,13 @@ fn mesh_aabb(name: &str) -> (Vec3, Vec3) {
 /// that makes this a magnitude assertion rather than a direction check.
 const TOL: f32 = 1e-4;
 
-/// The base head box, `SkullModel.createHeadModel`'s
+/// The base head box, vanilla's skull model's head-model-creation function's
 /// `addBox(-4, -8, -4, 8, 8, 8)` at `PartPose.ZERO`, in blocks.
 const SKULL_HEAD_LO: Vec3 = Vec3::new(-0.25, -0.5, -0.25);
 /// The other corner of [`SKULL_HEAD_LO`]'s box.
 const SKULL_HEAD_HI: Vec3 = Vec3::new(0.25, 0.0, 0.25);
 
-/// `SkullModel.createHumanoidHeadLayer`'s `"hat"` overlay is the same box
+/// vanilla's skull model's humanoid-head-layer function's `"hat"` overlay is the same box
 /// under `new CubeDeformation(0.25F)`, which inflates symmetrically — so it
 /// widens the model's extent by a quarter texel on each of the six faces.
 ///
@@ -199,7 +200,7 @@ fn hat_hi() -> Vec3 {
 
 #[test]
 fn the_skull_rig_is_authored_y_down_exactly_as_vanilla_authors_it() {
-    // `SkullModel.createHeadModel`: `addBox(-4, -8, -4, 8, 8, 8)`, `PartPose.ZERO`,
+    // vanilla's skull model's head-model-creation function: `addBox(-4, -8, -4, 8, 8, 8)`, `PartPose.ZERO`,
     // `/16` at compile time. Every number below depends on this, and a rig baked
     // block-space-up instead would make the node transformation's 180°-about-X
     // flip push the head *down* rather than up — the same half-block error, from
@@ -211,7 +212,7 @@ fn the_skull_rig_is_authored_y_down_exactly_as_vanilla_authors_it() {
     // right for `skull_mob` and stale for `skull_humanoid`:
     // `createHumanoidHeadLayer` adds a `"hat"` child inflated `0.25`, and the
     // item path bakes the very same layer the block-entity path does
-    // (`SkullBlockRenderer.createModel` → `ModelLayers.PLAYER_HEAD` →
+    // (vanilla's skull block-renderer's create-model function → `ModelLayers.PLAYER_HEAD` →
     // `humanoidHeadLayer`), with vanilla's own `getExtentsForGui` walking the
     // whole root. So the hatted extent is the one vanilla measures for a held
     // head too, and asserting the bare box here was asserting the absence of a
@@ -268,8 +269,8 @@ fn a_held_player_head_lands_where_the_jar_says_and_nowhere_near_the_alternatives
     // The half-extent is `4 + 0.25` texels, not `4`: `ModelLayers.PLAYER_HEAD`
     // is `createHumanoidHeadLayer`, whose `"hat"` child is inflated `0.25`,
     // and the held-item path bakes that same layer
-    // (`SkullBlockRenderer.createModel`, shared with the block-entity path)
-    // while `SkullSpecialRenderer.getExtents` measures the whole root through
+    // (vanilla's skull block-renderer's create-model function, shared with the block-entity path)
+    // while vanilla's skull special-renderer's extents function measures the whole root through
     // `getExtentsForGui`. The bare-head numbers this gate carried before are
     // the *un-hatted* hypothesis, and they are computed below so the
     // assertion says which one it landed on.
@@ -318,7 +319,7 @@ fn a_held_player_head_lands_where_the_jar_says_and_nowhere_near_the_alternatives
     )
     .1
     .y;
-    // The centring omitted: `ItemTransform.apply`'s trailing translate(-0.5³),
+    // The centring omitted: vanilla's item-transform apply function's trailing translate(-0.5³),
     // which vanilla applies on *both* sides of its `NO_TRANSFORM` branch.
     let uncentred = max.y + 0.5;
 
