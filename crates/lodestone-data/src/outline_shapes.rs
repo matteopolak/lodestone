@@ -8,51 +8,51 @@
 //!
 //! # The outline shape is what block selection uses
 //!
-//! `Entity.pick` clips with `ClipContext.Block.OUTLINE` and
-//! `ClipContext.Fluid.NONE`, and
-//! `ClipContext.Block.OUTLINE` is `BlockStateBase::getShape`
-//! (`ClipContext.Block`'s enum constants). The three defaults diverge at the base class:
+//! Vanilla's own entity ray-pick step clips against a context whose block
+//! clipping mode is "outline" and whose fluid clipping mode is "none", and
+//! that outline clipping mode resolves to the state's own outline-shape
+//! accessor (an enum constant on the clip-context's block-mode type). The
+//! three defaults diverge at the block base class:
 //!
-//! | getter | default | source |
-//! | --- | --- | --- |
-//! | `getShape` (outline) | `Shapes.block()` | `BlockBehaviour.getShape` |
-//! | `getCollisionShape` | `hasCollision ? state.getShape(…) : Shapes.empty()` | `BlockBehaviour.getCollisionShape` |
-//! | `getInteractionShape` | `Shapes.empty()` | `BlockBehaviour.getInteractionShape` |
+//! | accessor | default |
+//! | --- | --- |
+//! | outline shape | a full unit cube |
+//! | collision shape | the outline shape if the block has collision, else empty |
+//! | interaction shape | empty |
 //!
-//! So every `noCollission()` block — kelp, seagrass, torches, cobweb, redstone
-//! wire, fire, every plant — has **no collision and a real outline**, and that is
-//! why neither "does it collide" nor "does the cell hold a fluid" can stand in
-//! for "can I target it":
+//! So every block vanilla marks as having no collision — kelp, seagrass,
+//! torches, cobweb, redstone wire, fire, every plant — has **no collision and
+//! a real outline**, and that is why neither "does it collide" nor "does the
+//! cell hold a fluid" can stand in for "can I target it":
 //!
-//! * `LiquidBlock.getShape` → `Shapes.empty()`, so
+//! * a liquid block's outline shape is always empty, so
 //!   open water and lava are never targeted;
-//! * `KelpBlock`'s is `Block.column(16, 0, 9)` (`KelpBlock.SHAPE`) and
-//!   `SeagrassBlock`'s `Block.column(12, 0, 12)` (`SeagrassBlock.SHAPE`) —
-//!   non-empty, so both are targetable despite hardcoding `getFluidState` to
-//!   water;
-//! * `WebBlock` has no `getShape` override at all, so cobweb outlines to a full
+//! * kelp's own outline shape is a `column(16, 0, 9)` and seagrass's own is a
+//!   `column(12, 0, 12)` — non-empty, so both are targetable despite
+//!   hardcoding their fluid state to water;
+//! * the cobweb block has no outline-shape override at all, so cobweb outlines to a full
 //!   unit cube while colliding with nothing.
 //!
 //! # The interaction shape refines the hit *face*; it does not add a hit
 //!
-//! Its one caller is `BlockGetter.clipWithInteractionOverride`: it clips the **outline** first, and only if that
+//! Its one caller is vanilla's own "clip with interaction override" step: it clips the **outline** first, and only if that
 //! hit does it clip the interaction shape and — when that hit is nearer —
-//! substitute its `Direction` into the outline's hit, keeping the outline's hit
+//! substitute its face direction into the outline's hit, keeping the outline's hit
 //! location. It can never make an unpickable block pickable. Only the cauldron
 //! family, hoppers, scaffolding and composters override it in 26.2 (8 distinct
 //! shapes, of which one is empty).
 //!
 //! # Two shapes are context-dependent and resolve to their default form
 //!
-//! `getShape` takes a `CollisionContext`; the census passes
-//! `CollisionContext.empty()` and `EmptyBlockGetter.INSTANCE`, which is exactly
-//! what vanilla's own shape cache does (`getOcclusionShape` →
-//! `state.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO)`,
-//! `BlockBehaviour.getOcclusionShape`). Two knowable consequences:
+//! The outline-shape accessor takes a collision context; the census passes
+//! the empty collision context and an empty block-getter singleton, which is exactly
+//! what vanilla's own shape cache does (its occlusion-shape accessor resolves
+//! through the same outline-shape accessor against that same empty getter and
+//! the origin position). Two knowable consequences:
 //!
-//! * **`minecraft:light` outlines to nothing** — its shape is
-//!   `context.isHoldingItem(Items.LIGHT) ? Shapes.block() : Shapes.empty()`
-//!   (`LightBlock.getShape`). A client that wants vanilla's held-light
+//! * **`minecraft:light` outlines to nothing** — its shape is a full cube only
+//!   while the context reports the viewer holding a light item, else empty.
+//!   A client that wants vanilla's held-light
 //!   behaviour must special-case it above this table; the table's answer (empty)
 //!   is the correct *not*-holding-a-light answer.
 //! * **`minecraft:scaffolding`** reports its standing rather than its descending

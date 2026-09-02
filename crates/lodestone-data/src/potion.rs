@@ -421,7 +421,8 @@ mod tests {
     }
 
     /// A `custom_color` component always wins, regardless of any effect list —
-    /// `getColorOr`'s first branch, `Optional::isPresent`.
+    /// vanilla's own "get color or" accessor's first branch, an early
+    /// present-optional check.
     #[test]
     fn custom_color_overrides_every_effect() {
         let swiftness = potion_id("minecraft:swiftness").unwrap();
@@ -429,9 +430,10 @@ mod tests {
         assert_eq!(custom, 0xFFFF_0000);
     }
 
-    /// `custom_effects` are appended to the potion's own list (`getAllEffects`), not
-    /// substituted for it — a bare `minecraft:potion` id with no holder plus one
-    /// custom effect must average that one effect alone.
+    /// `custom_effects` are appended to the potion's own list (vanilla's own
+    /// "get all effects" accessor), not substituted for it — a bare
+    /// `minecraft:potion` id with no holder plus one custom effect must
+    /// average that one effect alone.
     #[test]
     fn custom_effects_apply_with_no_potion_holder() {
         // mob effect id 0 = speed (see `MOB_EFFECT_NAMES`), amplifier 0.
@@ -498,9 +500,10 @@ mod tests {
     }
 
     /// The water-bottle control for the *effect list*, not just the colour: a water
-    /// bottle carries no `MobEffectInstance` at all, so `addPotionTooltip` takes its
-    /// `noEffects` branch and prints `"No Effects"` — this must be an empty entry
-    /// list, not a default/placeholder entry, proving the empty case is deliberate.
+    /// bottle carries no active mob-effect instance at all, so vanilla's own
+    /// "add potion tooltip" step takes its own no-effects branch and prints
+    /// `"No Effects"` — this must be an empty entry list, not a
+    /// default/placeholder entry, proving the empty case is deliberate.
     #[test]
     fn water_bottle_has_no_effect_entries() {
         let water = potion_id("minecraft:water").unwrap();
@@ -508,8 +511,9 @@ mod tests {
         assert_eq!(potion_attribute_modifiers(water), Vec::new());
     }
 
-    /// Amplifier 0 vs non-zero, the arm `getPotionDescription`'s `amplifier > 0` gate
-    /// gets wrong most often — a fixture using only amplifier 1 cannot see a build
+    /// Amplifier 0 vs non-zero, the arm vanilla's own "potion description" step's
+    /// `amplifier > 0` gate gets wrong most often — a fixture using only amplifier 1
+    /// cannot see a build
     /// that always renders a numeral. `swiftness` (amplifier 0) and `strong_swiftness`
     /// (amplifier 1) are the same effect, so amplifier is the only thing that differs.
     #[test]
