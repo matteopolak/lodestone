@@ -6,7 +6,7 @@
 //! The roster family for mobs whose attack is neither melee nor a projectile.
 //! Its reason to exist is the **guardian's beam**, which is a third attack
 //! shape: no projectile entity, no contact — a charge-up on a tick counter,
-//! then damage when the counter reaches the species' own `getAttackDuration()`.
+//! then damage when the counter reaches the species' own attack-duration getter.
 //! It needs neither [`MeleeAttackGoal`] nor the ranged-attack roster's
 //! (`super::ranged`) launch path, so this family does not wait on either.
 //!
@@ -22,26 +22,26 @@
 //!
 //! Add each species path to [`SPECIES`] and an arm to [`lookup`]; see
 //! [`super::hostile_melee`] for the shape and the citation discipline. Check each
-//! species' **own** `registerGoals` — see the elder guardian below for why
-//! "extends X and adds no `registerGoals`" is not the same as "behaves like X".
+//! species' **own** goal registration — see the elder guardian below for why
+//! "extends X and adds no goal registration of its own" is not the same as "behaves like X".
 //!
 //! # Two things this family deliberately does not contain
 //!
 //! ## The warden is not a `GoalSelector` mob at all, and it is not this unit's
 //!
-//! `monster/warden/Warden.java` declares **no `registerGoals` and no `addGoal`,
-//! anywhere in the file**. Its AI is `Warden.makeBrain`/`BRAIN_PROVIDER`, driven
-//! from `monster/warden/WardenAi.java`, so a warden's behaviour lives in the
+//! Vanilla's own warden class declares **no goal registration and no `addGoal`,
+//! anywhere in the file**. Its AI is its own brain-construction method, driven
+//! from its own warden AI class, so a warden's behaviour lives in the
 //! Brain driver — a separate unit of work, not yet built — and a warden table in
 //! this roster would be an empty table that lied about being one. There is
 //! nothing to transcribe.
 //!
 //! Its vibration sensing is a second, larger reason, and it is a **subsystem, not
-//! a goal**: `Warden implements VibrationSystem`, and it owns a
+//! a goal**: vanilla's own warden implements a vibration-system interface, and it owns a
 //! `DynamicGameEventListener<VibrationSystem.Listener>` field ticked by
-//! `VibrationSystem.Ticker.tick(serverLevel, …)` in `Warden.tick`,
-//! filtered by the `GameEventTags.WARDEN_CAN_LISTEN` tag through
-//! `Warden.VibrationUser.canReceiveVibration`. That is `level/gameevent/` — `GameEvent`,
+//! its own vibration-system ticker in its own per-tick update,
+//! filtered by its own can-listen tag through
+//! its own can-receive-vibration check. That is a level-wide event bus — `GameEvent`,
 //! `GameEventDispatcher`, `GameEventListenerRegistry`,
 //! `EuclideanGameEventListenerRegistry`, `PositionSource` and the whole
 //! `gameevent/vibrations/` package — a level-wide event bus with per-listener
@@ -50,7 +50,7 @@
 //! **None of it exists here, and the name `GameEvent` is already taken twice by
 //! unrelated things**, which is the trap: `lodestone_ecs::events::GameEvent` is
 //! the *client-side plugin* event bus, and `packet_ids::play::clientbound::GAME_EVENT`
-//! is vanilla's `ClientboundGameEventPacket` (weather and win-game codes). Neither has
+//! is vanilla's own game-event packet (weather and win-game codes). Neither has
 //! anything to do with vibrations. Grepping `GameEvent` and concluding "we have
 //! one" is the mistake available here.
 //!
@@ -67,27 +67,27 @@
 //! ## Anything that reduces to "launch a projectile on an interval" belongs to the ranged-attack roster
 //!
 //! The ghast's fireball is exactly that shape — `chargeTime == 20` then a
-//! `LargeFireball`, resetting to `-40` (`Ghast.GhastShootFireballGoal.tick`) —
+//! `LargeFireball`, resetting to `-40` (vanilla's own per-tick update) —
 //! so [`GHAST`]'s row for it is [`Coverage::Missing`](super::Coverage::Missing)
 //! rather than a second, competing implementation of the ranged-attack roster's
 //! goal (`super::ranged`). The drowned's
 //! trident is the same call and **already** lives in
 //! [`super::hostile_melee::DROWNED`] as a `Missing` row at goal-priority 2
-//! (`Drowned.DrownedTridentAttackGoal`); this file must not duplicate it.
+//! (vanilla's own drowned trident-attack goal); this file must not duplicate it.
 //!
 //! # Still unclaimed by this family, and why
 //!
 //! Recorded here so the next agent does not have to re-derive it:
 //!
-//! * **`shulker`** (`Shulker.registerGoals`) — four of its seven rows are its
+//! * **`shulker`** (vanilla's own shulker registration) — four of its seven rows are its
 //!   own nested classes (`ShulkerAttackGoal` fires a `ShulkerBullet`, so belongs
 //!   to the ranged-attack roster; plus `ShulkerPeekGoal`,
 //!   `ShulkerNearestAttackGoal`, `ShulkerDefenseAttackGoal`), and peeking is a
 //!   block-state/attachment mechanic with no seam here.
-//! * **`vex`** (`Vex.registerGoals`) and **`ravager`** (`Ravager.registerGoals`)
-//!   both call **`super.registerGoals()` as their first statement**, so their
+//! * **`vex`** (vanilla's own vex registration) and **`ravager`** (vanilla's own ravager registration)
+//!   both call **the base registration as their first statement**, so their
 //!   real tables are not the lines you can see. `Ravager extends Raider extends
-//!   PatrollingMonster`, which drags in the raid goals; `Vex.VexCopyOwnerTargetGoal`
+//!   PatrollingMonster`, which drags in the raid goals; vanilla's own vex copy-owner-target goal
 //!   needs an owner relation that does not exist. Transcribing either means
 //!   transcribing its whole ancestry, and getting that wrong silently is
 //!   precisely what the multiset gate is supposed to catch — so neither is
@@ -112,10 +112,10 @@ pub const SPECIES: &[&str] = &["guardian", "elder_guardian", "ghast"];
 pub fn lookup(species: &str) -> Option<&'static [Registration]> {
     match species {
         "guardian" => Some(GUARDIAN),
-        // `ElderGuardian` declares **no `registerGoals`** (`ElderGuardian.java`
-        // has no such method), so its transcription is byte-for-byte the
+        // `ElderGuardian` declares **no goal registration of its own**
+        // in vanilla, so its transcription is byte-for-byte the
         // guardian's. It still gets its own table, because
-        // `ElderGuardian.getAttackDuration` overrides it to 60 — the rows are
+        // vanilla's own elder-guardian attack-duration getter overrides it to 60 — the rows are
         // identical and the behaviour is not. Sharing `GUARDIAN`'s pointer the way
         // `hostile_melee` shares one table between a zombie and a husk would
         // silently give an elder the guardian's 80-tick charge.
@@ -127,14 +127,14 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 
 // -- the beam ----------------------------------------------------------------
 
-/// The guardian's charge-then-zap attack: `Guardian.GuardianAttackGoal`.
+/// The guardian's charge-then-zap attack: vanilla's own guardian attack goal.
 ///
 /// # Why it is not a ranged goal
 ///
 /// There is no projectile. The goal holds a tick counter, and when the counter
-/// reaches the guardian's `getAttackDuration()` the target is hurt directly,
+/// reaches the guardian's attack-duration getter the target is hurt directly,
 /// wherever it is. Nothing is spawned, nothing travels, and the mob does not close
-/// the distance — `GuardianAttackGoal.start` and every `GuardianAttackGoal.tick`
+/// the distance — vanilla's own start step and every per-tick update
 /// **stop** the navigation. So it shares no machinery with the ranged-attack
 /// roster's launch path and none with `MeleeAttackGoal`'s reach check.
 ///
@@ -142,14 +142,14 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 ///
 /// Two jar facts combine, and missing either gives a plausible wrong answer:
 ///
-/// * `GuardianAttackGoal.start` sets `attackTime = -10` — a lead-in, not a zero.
-/// * `GuardianAttackGoal.tick` increments **first** and then tests
+/// * Vanilla's own start step sets `attackTime = -10` — a lead-in, not a zero.
+/// * Vanilla's own per-tick update increments **first** and then tests
 ///   `attackTime >= getAttackDuration()`.
 ///
 /// So damage lands on the `duration + 10`-th tick the goal runs, not the
-/// `duration`-th: **90** for a guardian (`getAttackDuration()` → 80, matching
+/// `duration`-th: **90** for a guardian (its own attack-duration getter → 80, matching
 /// the `ATTACK_TIME = 80` constant) and **70** for an elder guardian
-/// (`ElderGuardian.getAttackDuration` → 60). At `attackTime == 0` — the 10th
+/// (vanilla's own elder-guardian attack-duration getter → 60). At `attackTime == 0` — the 10th
 /// tick — vanilla flips `DATA_ID_ATTACK_TARGET` and broadcasts entity event 21,
 /// which is what makes the beam *visible*; see "not modelled" below.
 ///
@@ -163,9 +163,9 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 ///
 /// # Not modelled, each with what it would need
 ///
-/// * **The visible beam.** `Guardian.setActiveAttackTarget` writes the
+/// * **The visible beam.** Vanilla's own active-attack-target setter writes the
 ///   `DATA_ID_ATTACK_TARGET` entity-metadata field and
-///   `Guardian.getAttackAnimationScale` drives the render. [`MobController`] has
+///   its own attack-animation-scale getter drives the render. [`MobController`] has
 ///   no metadata or entity-event seam, so this goal deals damage a player would
 ///   feel and draws no laser. Wiring it needs a metadata index from
 ///   `protocol/v770/oracle-java/EntityDataIndexOracle.java` — never hand-counted —
@@ -173,28 +173,28 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// * **The 1.0 magic-damage component.** Vanilla hurts the target *twice*:
 ///   `indirectMagic` for `magicDamage` (1.0, +2.0 on Hard, +2.0 for an elder) and
 ///   then `doHurtTarget` for the ordinary attack-damage hit, both in
-///   `GuardianAttackGoal.tick`. [`MobController::attack`] is the single melee
+///   vanilla's own per-tick update. [`MobController::attack`] is the single melee
 ///   verb, so ours is the `doHurtTarget` half only. There is no difficulty
 ///   concept here either.
 /// * **Line of sight.** Vanilla drops the target when `!hasLineOfSight`, in
-///   `GuardianAttackGoal.tick`. This seam has no raycast primitive — the same
+///   its own per-tick update. This seam has no raycast primitive — the same
 ///   disclosed simplification `SwellGoal`'s own doc comment already makes.
-/// * **`randomStrollGoal.trigger()` on stop**, in `GuardianAttackGoal.stop`,
+/// * **`randomStrollGoal.trigger()` on stop**, in vanilla's own stop step,
 ///   which has no seam.
 #[derive(Debug)]
 pub struct GuardianBeamGoal {
     /// The species' `getAttackDuration()`: 80 for a guardian, 60 for an elder.
     attack_duration: i32,
-    /// Vanilla's `GuardianAttackGoal.attackTime` field. Starts negative.
+    /// Vanilla's own `attackTime` field. Starts negative.
     attack_time: i32,
-    /// Vanilla's `GuardianAttackGoal.elder` flag, set in its constructor. An
+    /// Vanilla's own `elder` flag, set in its constructor. An
     /// elder keeps beaming a target that has closed inside 3 blocks; an
     /// ordinary guardian gives up in `canContinueToUse`.
     elder: bool,
 }
 
 impl GuardianBeamGoal {
-    /// `GuardianAttackGoal.start`'s lead-in, before the charge counter reaches
+    /// Vanilla's own start step's lead-in, before the charge counter reaches
     /// zero.
     const CHARGE_LEAD_IN: i32 = -10;
 
@@ -203,12 +203,12 @@ impl GuardianBeamGoal {
     const GUARDIAN_DURATION: i32 = 80;
 
     /// An elder guardian's overridden `getAttackDuration()`
-    /// (`ElderGuardian.getAttackDuration`).
+    /// (vanilla's own elder-guardian attack-duration getter).
     const ELDER_DURATION: i32 = 60;
 
     /// Vanilla's squared give-up distance for a non-elder
-    /// (`GuardianAttackGoal.canContinueToUse`, `distanceToSqr(target) > 9.0` —
-    /// 3 blocks). The same 9.0 appears in `Guardian.GuardianAttackSelector`,
+    /// (vanilla's own continue-eligibility check, `distanceToSqr(target) > 9.0` —
+    /// 3 blocks). The same 9.0 appears in vanilla's own guardian attack-target selector,
     /// which is why a guardian never beams something in its face.
     const MIN_RANGE_SQR: f64 = 9.0;
 
@@ -245,7 +245,7 @@ impl GuardianBeamGoal {
 
 impl Goal for GuardianBeamGoal {
     /// Vanilla sets `EnumSet.of(Goal.Flag.MOVE, Goal.Flag.LOOK)`, in
-    /// `GuardianAttackGoal`'s constructor, and this is transcribed exactly
+    /// vanilla's own constructor, and this is transcribed exactly
     /// rather than narrowed to `{MOVE}` the way `MeleeAttackGoal` is.
     ///
     /// The narrowing in `MeleeAttackGoal` is a pre-existing, deliberately
@@ -260,13 +260,13 @@ impl Goal for GuardianBeamGoal {
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
 
-    /// `GuardianAttackGoal.canUse`: a target exists and is alive. This seam's
+    /// Vanilla's own eligibility check: a target exists and is alive. This seam's
     /// target is a bare [`Vec3`], so there is no liveness to check.
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
         mob.attack_target().is_some()
     }
 
-    /// `GuardianAttackGoal.canContinueToUse`: `super` (which is `canUse`)
+    /// Vanilla's own continue-eligibility check: `super` (which is `canUse`)
     /// **and** — for a non-elder only — the target still being further than 3
     /// blocks away.
     fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
@@ -276,7 +276,7 @@ impl Goal for GuardianBeamGoal {
         self.elder || distance_sqr(target, mob.position()) > Self::MIN_RANGE_SQR
     }
 
-    /// `GuardianAttackGoal.start`: reset the counter to the lead-in, stop
+    /// Vanilla's own start step: reset the counter to the lead-in, stop
     /// navigating, and lock the look onto the target.
     fn start(&mut self, mob: &mut dyn MobController) {
         self.attack_time = Self::CHARGE_LEAD_IN;
@@ -286,13 +286,13 @@ impl Goal for GuardianBeamGoal {
         }
     }
 
-    /// `GuardianAttackGoal.stop`: clear the synced beam target and the attack
+    /// Vanilla's own stop step: clear the synced beam target and the attack
     /// target. Ours has only the latter.
     fn stop(&mut self, mob: &mut dyn MobController) {
         mob.set_attack_target(None);
     }
 
-    /// `GuardianAttackGoal.tick`, in vanilla's order: hold still, keep looking,
+    /// Vanilla's own per-tick update, in vanilla's order: hold still, keep looking,
     /// **then** increment, **then** test. Damage clears the target,
     /// so one acquisition buys exactly one beam.
     fn tick(&mut self, mob: &mut dyn MobController) {
@@ -310,13 +310,13 @@ impl Goal for GuardianBeamGoal {
 }
 
 /// `Guardian.GuardianAttackGoal(this)` on an ordinary guardian, registered in
-/// `Guardian.registerGoals`. Takes no speed — the goal never moves the mob.
+/// vanilla's own guardian goal registration. Takes no speed — the goal never moves the mob.
 pub fn guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(GuardianBeamGoal::guardian())
 }
 
 /// The same registration on an elder guardian, whose `getAttackDuration()` is 60
-/// (`ElderGuardian.getAttackDuration`).
+/// (vanilla's own elder-guardian attack-duration getter).
 ///
 /// A separate builder rather than a parameter because a [`Registration`] table is
 /// a `const` and `build` must be a plain `fn` item — a closure capturing the
@@ -327,10 +327,10 @@ pub fn elder_guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 
 // -- tables ------------------------------------------------------------------
 
-/// `Guardian.registerGoals`.
+/// Vanilla's own guardian goal registration.
 ///
-/// `registerGoals` does **not** call `super`, and `Monster` declares no
-/// `registerGoals` at all, so these seven rows are the guardian's entire table —
+/// It does **not** call `super`, and `Monster` declares no
+/// goal registration of its own at all, so these seven rows are the guardian's entire table —
 /// checked, not assumed, because two species in this family (`vex`, `ravager`) do
 /// call `super` and are excluded for exactly that reason.
 ///
@@ -339,7 +339,7 @@ pub fn elder_guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// * **`MoveTowardsRestrictionGoal`** at 5 walks a mob back inside its
 ///   `restrictTo` home radius. Nothing here has a home position, so there is
 ///   no seam to approximate — [`Coverage::Missing`](super::Coverage::Missing).
-/// * **The second `LookAtPlayerGoal`** at 8 targets `Guardian.class` at
+/// * **The second `LookAtPlayerGoal`** at 8 targets the guardian class at
 ///   12.0 blocks with a 0.01 probability — guardians eyeing each other. Ours takes
 ///   no target class and resolves through
 ///   [`MobController::nearest_player`], so it is `Missing`, **not** `CoveredBy`.
@@ -350,7 +350,7 @@ pub fn elder_guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 ///   second instance of our goal would duplicate the `Player` row rather than add
 ///   this one.
 /// * **The target row** at 1 is `LivingEntity.class` filtered by
-///   `Guardian.GuardianAttackSelector` — `Player`, `Squid` or `Axolotl`, further
+///   vanilla's own guardian attack-target selector — `Player`, `Squid` or `Axolotl`, further
 ///   than 3 blocks. Ours resolves to the nearest player, which is the selector's
 ///   first case; the squid and axolotl cases and the 3-block floor are the
 ///   disclosed narrowing every `nearest_attackable_target` row in this roster
@@ -379,19 +379,19 @@ pub static GUARDIAN: &[Registration] = &[
     ),
 ];
 
-/// `Guardian.registerGoals`, inherited verbatim by `ElderGuardian`.
+/// Vanilla's own guardian goal registration, inherited verbatim by `ElderGuardian`.
 ///
 /// **The rows are identical to [`GUARDIAN`]'s and the table is still separate.**
-/// `ElderGuardian` declares no `registerGoals`, so there is nothing to transcribe
-/// differently — but `ElderGuardian.getAttackDuration` overrides it to 60, so
+/// `ElderGuardian` declares no goal registration of its own, so there is nothing to transcribe
+/// differently — but vanilla's own elder-guardian attack-duration getter overrides it to 60, so
 /// its beam charges in 70 ticks where a guardian's takes 90, and
 /// `GuardianAttackGoal`'s own `elder` flag also removes its 3-block give-up
 /// range.
 ///
-/// This is the shape of trap the "check each species' own `registerGoals`" rule is
+/// This is the shape of trap the "check each species' own goal registration" rule is
 /// really about. The usual form is a subclass that *adds* a row —
 /// `WitherSkeleton` overriding and calling `super`. This is the inverse: the
-/// override is nowhere near `registerGoals`, so a multiset gate comparing tables
+/// override is nowhere near the goal registration, so a multiset gate comparing tables
 /// sees two identical, correct transcriptions and cannot fail. Only a gate that
 /// predicts the *tick count* can tell these two species apart, which is what
 /// `the_beam_lands_on_vanillas_ninetieth_tick_and_the_elders_on_its_seventieth`
@@ -410,7 +410,7 @@ pub static ELDER_GUARDIAN: &[Registration] = &[
     ),
 ];
 
-/// `Ghast.registerGoals`.
+/// Vanilla's own ghast goal registration.
 ///
 /// **Two of four rows are `Missing`, and the table exists anyway.** That is a
 /// deliberate trade, so read this before "fixing" it:
@@ -425,20 +425,20 @@ pub static ELDER_GUARDIAN: &[Registration] = &[
 /// a degraded version of flying, it is a different animal.
 ///
 /// * **`Ghast.RandomFloatAroundGoal`** at 5 and **`Ghast.GhastLookGoal`** at 7
-///   both drive `Ghast.GhastMoveControl`, a free-flight controller with no
+///   both drive vanilla's own ghast move-control, a free-flight controller with no
 ///   pathfinding. `NavigatingMob` is ground-based A\*; there is no flying
 ///   navigation seam at all, so these are not approximations waiting on a
 ///   constant, they are waiting on a navigator.
 /// * **`Ghast.GhastShootFireballGoal`** at 7 is now real —
-///   [`super::ranged::ghast_fireball`], a `Ghast.GhastShootFireballGoal.tick`
-///   port (charge to 20 ticks, launch a
+///   [`super::ranged::ghast_fireball`], a port of vanilla's own per-tick update
+///   (charge to 20 ticks, launch a
 ///   [`LargeFireball`](crate::ai::mob::ProjectileKind::LargeFireball), reset to
 ///   `-40`) through the same launch seam
 ///   ([`MobController::launch_projectile`]) the rest of the ranged-attack
 ///   roster uses. Its own doc discloses what it does not model: the
 ///   line-of-sight half of the range gate (no world/raycast access on
-///   `MobController`, issue #456) and the charging sound/visual state.
-/// * **The target row** at 1 is `Player.class` with a ±4-block vertical band,
+///   `MobController`) and the charging sound/visual state.
+/// * **The target row** at 1 is the player class with a ±4-block vertical band,
 ///   which ours does not model.
 pub static GHAST: &[Registration] = &[
     Registration::missing(Selector::Goal, 5, "Ghast.RandomFloatAroundGoal"),
@@ -489,19 +489,14 @@ mod tests {
             ),
         ];
 
-        let cases: &[(&str, &str, &[Row])] = &[
-            ("guardian", "monster/Guardian.java:74-82", guardian_rows),
+        let cases: &[(&str, &[Row])] = &[
+            ("guardian", guardian_rows),
             // `ElderGuardian` declares no `registerGoals`, so its expected rows
             // are the guardian's *same* cited lines. The difference between the
             // two species is `getAttackDuration()`, which no multiset can see.
-            (
-                "elder_guardian",
-                "monster/Guardian.java:74-82, inherited",
-                guardian_rows,
-            ),
+            ("elder_guardian", guardian_rows),
             (
                 "ghast",
-                "monster/Ghast.java:57-61",
                 &[
                     (Selector::Goal, 5, "Ghast.RandomFloatAroundGoal"),
                     (Selector::Goal, 7, "Ghast.GhastLookGoal"),
@@ -511,7 +506,7 @@ mod tests {
             ),
         ];
 
-        for &(species, cite, want) in cases {
+        for &(species, want) in cases {
             let got: Vec<Row> = registrations_for(species)
                 .iter()
                 .map(|r| (r.selector, r.priority, r.vanilla))
@@ -519,8 +514,8 @@ mod tests {
             assert_eq!(
                 got,
                 want.to_vec(),
-                "{species}'s table does not match {cite} — re-read the jar before \
-                 editing either side of this"
+                "{species}'s table does not match vanilla's own goal registration \
+                 — re-read the jar before editing either side of this"
             );
         }
     }
@@ -553,7 +548,7 @@ mod tests {
             !std::ptr::eq(guardian.as_ptr(), elder.as_ptr()),
             "an elder guardian must not share the guardian's table: the shared \
              pointer would give it the guardian's 80-tick charge instead of \
-             ElderGuardian.java:39-41's 60"
+             vanilla's own elder-guardian attack-duration getter's 60"
         );
     }
 
@@ -602,12 +597,12 @@ mod tests {
         }
     }
 
-    /// A guardian's `MOVEMENT_SPEED` (`Guardian.createAttributes`). Passed in
+    /// A guardian's `MOVEMENT_SPEED` (vanilla's own guardian attribute builder). Passed in
     /// explicitly because `lodestone_entity::attribute::type_spec` has **no
     /// guardian arm**, so the running game would build this context with `0.0`;
     /// see this unit's report.
     const GUARDIAN_SPEED: f64 = 0.5;
-    /// An elder guardian's (`ElderGuardian.createAttributes`).
+    /// An elder guardian's (vanilla's own elder-guardian attribute builder).
     const ELDER_SPEED: f64 = 0.3;
 
     /// Builds a real [`NavigatingMob`] over [`Flat`] and fills a [`GoalSelector`]
@@ -626,7 +621,7 @@ mod tests {
         let ctx = SpeciesContext::new(speed);
         let mob = NavigatingMob::new(
             world,
-            // A guardian is 0.85 × 0.85 (`EntityTypes.GUARDIAN`).
+            // A guardian is 0.85 × 0.85 (vanilla's own entity-type dimensions).
             MobShape::land(0.85, 0.85),
             Vec3::new(0.5, 0.0, 0.5),
             speed,
@@ -688,7 +683,7 @@ mod tests {
     #[test]
     fn the_beam_lands_on_vanillas_ninetieth_tick_and_the_elders_on_its_seventieth() {
         // Beyond the non-elder's 3-block give-up range
-        // (`GuardianAttackGoal.canContinueToUse`) so `can_continue_to_use` holds
+        // (vanilla's own continue-eligibility check) so `can_continue_to_use` holds
         // for the whole charge. The beam stops the navigation every tick, so
         // this distance does not change.
         let target = Vec3::new(6.5, 0.0, 0.5);
@@ -700,7 +695,7 @@ mod tests {
             guardian.first().copied(),
             Some(90),
             "a guardian's beam must land on tick 80 + 10 = 90. Measured \
-             {guardian:?}. Tick 80 means the -10 lead-in at Guardian.java:365 was \
+             {guardian:?}. Tick 80 means the -10 lead-in vanilla's own start step sets was \
              dropped; nothing at all means the beam is not reaching the goal \
              selector"
         );
@@ -709,7 +704,7 @@ mod tests {
             Some(70),
             "an elder guardian's beam must land on tick 60 + 10 = 70. Measured \
              {elder:?}. Tick 90 means ELDER_GUARDIAN is building the guardian's \
-             beam — ElderGuardian.java:39-41 overrides getAttackDuration() to 60, \
+             beam — vanilla's own elder-guardian attack-duration getter overrides it to 60, \
              and it does so nowhere near registerGoals, so the table gate cannot \
              see this"
         );
@@ -757,7 +752,7 @@ mod tests {
             "precondition: the first beam must land on tick 90, got {first:?}"
         );
 
-        // Vanilla's `GuardianAttackGoal.tick` clears the target after damage,
+        // Vanilla's own per-tick update clears the target after damage,
         // and `NavigatingMob::find_nearest_target` returns that same field, so a
         // guardian in this sim can never re-acquire on its own. Exactly one beam
         // per acquisition is therefore the correct observation, not a shortfall.
@@ -828,7 +823,7 @@ mod tests {
 
         assert!(
             flags.contains(Flag::Move) && flags.contains(Flag::Look),
-            "vanilla sets EnumSet.of(MOVE, LOOK) at Guardian.java:349"
+            "vanilla sets EnumSet.of(MOVE, LOOK) in its own constructor"
         );
         assert!(
             !flags.contains(Flag::Target),
