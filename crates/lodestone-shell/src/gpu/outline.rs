@@ -178,8 +178,8 @@ const VERTS_PER_EDGE: usize = 6;
 const FLOATS_PER_VERT: usize = 7;
 
 /// Minimum vanilla-style line width in logical pixels, and the reference
-/// window width it scales from. Ported from `Window.getAppropriateLineWidth`
-/// (`com/mojang/blaze3d/platform/Window.java`):
+/// window width it scales from. Ported from vanilla's own
+/// appropriate-line-width calculation:
 /// `max(2.5, windowWidth / 1920 * 2.5)`. That is the width the *real* hit
 /// outline draws with — see [`OutlineRenderer`]'s doc for why this is not the
 /// F3 debug-shape call site.
@@ -195,15 +195,15 @@ const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 ///
 /// An earlier version of this pass drew the 12 edges as `PrimitiveTopology::LineList`,
 /// which rasterizes at exactly one *physical* pixel regardless of resolution or
-/// DPI scale. Vanilla's real hit-outline draw — `LevelRenderer.submitBlockOutline`
-/// → `submitHitOutline`'s non-debug branch at `LevelRenderer.java` (**not**
+/// DPI scale. Vanilla's real hit-outline draw — its own submit-block-outline
+/// path's non-debug submit-hit-outline branch (**not**
 /// the F3-style collision/occlusion/interaction shape dump at `:740-758`, which
 /// is gated behind `SharedConstants.DEBUG_SHAPES` and is a different draw
 /// entirely) — passes an explicit `width` argument down to
-/// `SubmitNodeCollection.submitShapeOutline` (`:282`), sourced from
-/// `GameRenderer.gameRenderState().windowRenderState.appropriateLineWidth`
+/// its own submit-shape-outline call, sourced from
+/// vanilla's own game-render-state's window-render-state's appropriate-line-width
 ///. That width is attached per-vertex via
-/// `VertexConsumer.setLineWidth` and
+/// vanilla's own vertex-consumer set-line-width call and
 /// expanded into real screen-space quad geometry downstream, because — same
 /// conclusion the issue reached — wgpu (and modern Minecraft's own renderer,
 /// for the same reason) does not portably support a GPU line-width parameter.
@@ -220,7 +220,7 @@ const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 /// unlike the old 1-physical-pixel `LineList` line.
 ///
 /// The colour/alpha path was **not** the bug: vanilla's real (non-debug) hit
-/// outline draws at `ARGB.black(102)` — alpha ≈ 0.4 — while this pass already
+/// outline draws at vanilla's own opaque-black-with-alpha helper applied to `102` — alpha ≈ 0.4 — while this pass already
 /// used 0.6, so ours was already the more opaque of the two. That is left
 /// unchanged; only the geometry generation changed.
 ///

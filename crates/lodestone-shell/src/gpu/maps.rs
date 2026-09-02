@@ -1148,7 +1148,7 @@ const fn framed_map_light(frame_light: u8, glow: bool) -> u8 {
 ///
 /// # The in-plane rotation is quartered, not eighthed
 ///
-/// `ItemFrame.getRotation()` counts eighths and an ordinary framed item is drawn
+/// Vanilla's own item-frame rotation accessor counts eighths and an ordinary framed item is drawn
 /// at `rotation · 45°`, but the map branch is `rotation % 4 * 2` eighths — i.e.
 /// `(rotation % 4) · 90°`. A map only ever hangs at a right angle, and the odd
 /// half-steps fold onto the even ones rather than tilting the picture.

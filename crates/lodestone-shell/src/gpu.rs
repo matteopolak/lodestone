@@ -248,7 +248,7 @@ pub struct RenderState {
     /// renderer nobody pushes the option into draws exactly what it drew before.
     cloud_status: lodestone_render::CloudStatus,
     /// The connected **dimension's** own `Skybox` — vanilla's
-    /// `DimensionType.skybox()`, not a graphics option. Pushed down per frame by
+    /// own per-dimension skybox choice, not a graphics option. Pushed down per frame by
     /// `app/redraw.rs` from [`crate::Sim::sky_mode`] and stamped onto the
     /// `SkyFrame` this renderer builds.
     ///

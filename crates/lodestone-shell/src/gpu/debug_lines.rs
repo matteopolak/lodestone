@@ -182,7 +182,7 @@ pub(crate) fn entity_hitbox_vertices_with_states(
             HITBOX,
         );
 
-        // The look ray starts at `Entity.getEyeHeight()`, not a fraction of the
+        // The look ray starts at vanilla's own get-eye-height accessor, not a fraction of the
         // bounding-box height. Player poses explicitly override it: standing is
         // 1.62 rather than 1.53, crouching is 1.27, and the three prone poses
         // are 0.4. Minecraft's yaw is measured from +Z and increases clockwise,
@@ -440,7 +440,7 @@ pub(super) const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 
 /// `Window.getAppropriateLineWidth`'s own minimum — `max(2.5F, getWidth() /
 /// 1920.0F * 2.5F)` — for the passes that draw a line vanilla itself draws
-/// through `RenderTypes.lines()` rather than a diagnostic wireframe.
+/// through its own generic-line render type rather than a diagnostic wireframe.
 ///
 /// The fishing line is one (`FishingHookRenderer` reads
 /// `windowRenderState.appropriateLineWidth` verbatim), and so is the

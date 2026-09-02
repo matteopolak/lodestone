@@ -181,7 +181,7 @@ pub(super) struct EntityRenderer {
     ///
     /// # Eleven parts of one mesh, not eleven meshes
     ///
-    /// `ExperienceOrb.getIcon()` buckets an orb's value into one of eleven
+    /// Vanilla's own experience-orb icon lookup buckets an orb's value into one of eleven
     /// 16×16 cells, and the cell is baked into the quad's **UVs** — so the
     /// geometry differs per cell and cannot be one instanced quad. Making them
     /// eleven `PartRange`s of a single 44-vertex buffer means the whole orb pass
