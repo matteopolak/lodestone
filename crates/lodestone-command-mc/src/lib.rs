@@ -71,6 +71,7 @@ pub mod dimension;
 pub mod entity;
 pub mod entity_type;
 pub mod float_range;
+pub mod function;
 pub mod game_mode;
 pub mod heightmap;
 pub mod identifier;
@@ -93,6 +94,7 @@ pub use entity::{
 };
 pub use entity_type::{EntityTypeArg, EntityTypeInput};
 pub use float_range::{FloatRange, FloatRangeArg};
+pub use function::{FunctionArg, FunctionRef};
 pub use game_mode::GameModeArg;
 pub use heightmap::{HeightmapArg, HeightmapKind};
 pub use identifier::IdentifierArg;

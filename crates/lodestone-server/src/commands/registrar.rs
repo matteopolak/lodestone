@@ -361,6 +361,10 @@ pub struct Ctx<'a> {
     /// therefore fail closed if they somehow reach the contextual terminal.
     contextual_dispatch: Option<&'a CommandDispatch>,
     contextual_caller: Option<&'a CommandCaller>,
+    /// The enclosing tree, for [`Self::run_command`]. See
+    /// [`Dispatcher`]'s own field doc for why this is threaded here instead
+    /// of a second dispatcher.
+    commands: &'a super::ServerCommands,
 }
 
 impl<'a> Ctx<'a> {
@@ -482,6 +486,41 @@ impl<'a> Ctx<'a> {
                 Ok(result)
             }
             ContextualCommandResponse::Refused { message } => Err(message),
+        }
+    }
+
+    /// Runs one full command line (no leading `/`) through the same
+    /// pipeline a player's own typed command takes: this tree's built-ins
+    /// first, falling back to the host's contextual dispatch on a miss — the
+    /// identical fallback `/execute … run <command>` already gives.
+    /// [`super::function`]'s own executor calls this once per
+    /// `.mcfunction` line, so a function body reaches exactly what typing
+    /// each line individually would, running under **this** invocation's
+    /// (possibly already-rewritten, by an enclosing `/execute`) source.
+    ///
+    /// Feedback and effects the nested command produces are folded into this
+    /// `Ctx`'s own accumulators, so a function's whole output reads as one
+    /// reply — matching a real `.mcfunction`'s lines all executing under one
+    /// command invocation.
+    ///
+    /// # Errors
+    ///
+    /// The nested command's own refusal message: no built-in root matched
+    /// **and** no host contextual dispatch is installed or willing to run
+    /// it (`crate::command::UNKNOWN_COMMAND`), or a built-in matched and then
+    /// refused.
+    pub fn run_command(&mut self, command: &str) -> Result<(), String> {
+        if let Some(outcome) = self.commands.run(self.world, &self.source, command) {
+            match outcome.response {
+                crate::command::CommandResponse::Ran { feedback } => {
+                    self.feedback.extend(feedback);
+                    self.effects.extend(outcome.effects);
+                    Ok(())
+                }
+                crate::command::CommandResponse::Refused { message } => Err(message),
+            }
+        } else {
+            self.run_contextual(command).map(|_| ())
         }
     }
 
@@ -692,6 +731,12 @@ pub(super) struct Dispatcher<'a> {
     pub(super) modifiers: &'a HashMap<NodeId, Modifier>,
     pub(super) forks: &'a HashSet<NodeId>,
     pub(super) argument_nodes: &'a HashSet<NodeId>,
+    /// The enclosing [`super::ServerCommands`] this dispatch was called
+    /// through — so a nested command (`/function`'s own executor, one line at
+    /// a time) can recurse back into [`super::ServerCommands::run`] from
+    /// inside a [`Ctx`], the same tree, rather than needing a second,
+    /// independently-built dispatcher. See [`Ctx::run_command`].
+    pub(super) commands: &'a super::ServerCommands,
 }
 
 impl Dispatcher<'_> {
@@ -878,6 +923,7 @@ impl Dispatcher<'_> {
             store_sinks,
             contextual_dispatch,
             contextual_caller,
+            commands: self.commands,
         }
     }
 }

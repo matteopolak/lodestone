@@ -235,6 +235,12 @@ pub struct WorldStateHandle {
     /// parameter added to the `serve_connection*` wrappers. See
     /// `crate::plugin_crafting`'s own module doc.
     crafting_hooks: crate::plugin_crafting::CraftingStationHooks,
+    /// This world's loaded datapack functions and function tags (issue #48's
+    /// remainder), a sibling of `state`/`scoreboard`/`teams`/`nbt_storage`/
+    /// `stopwatches`/`crafting_hooks` for the identical reason: every command
+    /// entry point already receives this handle. See
+    /// `crate::commands::function_store`'s module doc.
+    functions: crate::commands::function_store::FunctionHandle,
 }
 
 impl WorldStateHandle {
@@ -302,6 +308,14 @@ impl WorldStateHandle {
     #[must_use]
     pub fn crafting_hooks(&self) -> &crate::plugin_crafting::CraftingStationHooks {
         &self.crafting_hooks
+    }
+
+    /// This world's loaded datapack functions and function tags — see
+    /// [`Self`]'s own field doc for why `/function`/`/reload` reach it
+    /// through here rather than through a store of their own.
+    #[must_use]
+    pub fn functions(&self) -> &crate::commands::function_store::FunctionHandle {
+        &self.functions
     }
 
     /// Whether this handle and `other` name the same store — for the sharing
