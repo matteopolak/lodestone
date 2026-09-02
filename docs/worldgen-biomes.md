@@ -15,13 +15,14 @@ final `TOP_LAYER_MODIFICATION` decoration step (`feature/top_layer.rs`).
 Each column samples six climate noises (temperature, humidity, continentalness, erosion, depth,
 weirdness) already computed for terrain shape, and finds the nearest match by squared distance in a
 ~7,594-row `(climate range, biome)` table (`biome_parameters/overworld.json`, dumped once from
-vanilla's own `MultiNoiseBiomeSourceParameterList`, since the ~700-row table it logically represents
+vanilla's own biome-parameter-list bootstrap, since the ~700-row table it logically represents
 is built by 1,124 lines of Java control flow rather than shipped as data). The search is a real port
-of vanilla's `Climate.RTree` (fan-out 6, built by vanilla's own splitting heuristic so node order is
+of vanilla's own climate-space R-tree (fan-out 6, built by vanilla's own splitting heuristic so node
+order is
 reproducible), not the brute-force reference next to it — the two structures agree on the minimum
 distance always, but resolve an exact **tie** differently, and vanilla's tree is the one a real
 server runs. A tie is the only place they can disagree, and it is real: vanilla's tie-break depends
-on the previous search on the same thread (`RTree.lastResult`, a `ThreadLocal`), which this engine
+on the previous search on the same thread (a thread-local "last result" field on the tree), which this engine
 deliberately does not reproduce — a demand-ordered, potentially reordered generator cannot have
 history-dependent output. The fresh-instance answer (first leaf reached with no seed) is what's
 implemented; a per-source-chunk memo (thread-local, direct-mapped on the low bits of chunk
@@ -50,8 +51,8 @@ right order or the surface pass silently erases it.
 
 `SurfaceSystem` interprets vanilla's `surface_rule` tree per column, now against a per-column `Ctx`
 carrying the real sampled biome and temperature (before biome variety existed, these were build-time
-constants for one fixed biome). Vanilla's Badlands surface rule (`SurfaceSystem.getBand`, the
-terracotta banding) is ported — `Rule::Bandlands`/`BandBlocks`, a 192-entry table built once per
+constants for one fixed biome). Vanilla's Badlands surface rule (its own terracotta-banding
+lookup) is ported — `Rule::Bandlands`/`BandBlocks`, a 192-entry table built once per
 world seed and now interned to `StateId`s rather than re-derived per probe, with `math::round`
 providing Java's half-up rounding semantics `f64::round`'s half-away-from-zero does not match.
 
