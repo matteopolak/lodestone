@@ -87,8 +87,8 @@ impl EquipmentSlot {
         match value {
             "head" => Some(Self::Head),
             // `"body"` is deliberately absent, not folded into `Chest`.
-            // Vanilla gates humanoid armour on `EquipmentSlot.Type.HUMANOID_ARMOR`
-            // (`EquipmentSlot.java:15-19`), which covers feet/legs/chest/head and
+            // Vanilla gates humanoid armour on its own humanoid-armour
+            // equipment-slot type, which covers feet/legs/chest/head and
             // **excludes** `BODY`. The prototype census makes this reachable
             // rather than theoretical: `wolf_armor` and all four
             // `*_horse_armor` items really are `body`, so folding them here put
@@ -106,8 +106,8 @@ impl EquipmentSlot {
     /// humanoid-armour positions, `None` for [`Offhand`](Self::Offhand).
     ///
     /// Restricted to `HUMANOID_ARMOR` the same way [`Self::from_name`] already
-    /// excludes `"body"`: vanilla's `Item.use()` → `Equippable.
-    /// swapWithEquipmentSlot` reaches any [`Self`] the component names, but the
+    /// excludes `"body"`: vanilla's own item-use step, through its own
+    /// swap-with-equipment-slot step, reaches any [`Self`] the component names, but the
     /// only slot a *player's own hotbar* right-click can land in is one of
     /// these four — `Offhand` has no real item that declares it (the shield
     /// mechanic goes through `minecraft:blocks_attacks`, not a swap), and
@@ -140,7 +140,7 @@ pub enum SlotKind {
     /// The off-hand slot (accepts any item, like vanilla's shield slot).
     Offhand,
     /// The enchanting table's currency slot: accepts only lapis lazuli
-    /// (`EnchantmentMenu.java:61-71`, the anonymous `Slot` whose `mayPlace`
+    /// (vanilla's own enchanting-table lapis slot, whose `mayPlace`
     /// checks `itemStack.is(Items.LAPIS_LAZULI)`). A dedicated variant rather
     /// than a closure predicate because [`Menu`](crate::menu::Menu) derives
     /// `PartialEq`/`Eq` (needed for [`crate::reconcile`]'s predict/reconcile
@@ -151,8 +151,8 @@ pub enum SlotKind {
 /// A view onto one index of one container, plus its rules.
 ///
 /// `container` indexes into the owning menu's container list; `index` is the
-/// slot within that container. `max_stack_size` is the slot's own cap (vanilla
-/// `Slot.getMaxStackSize`), combined with the item's cap at query time.
+/// slot within that container. `max_stack_size` is the slot's own cap (vanilla's
+/// own max-stack-size getter), combined with the item's cap at query time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slot {
     /// Which backing container this slot reads and writes.
@@ -163,8 +163,8 @@ pub struct Slot {
     pub kind: SlotKind,
     /// The slot's own maximum stack size before combining with the item's.
     pub max_stack_size: i32,
-    /// The GUI sprite drawn in this slot **while it is empty** — vanilla
-    /// `Slot.getNoItemIcon` (`Slot.java:81-83`), `null` on an ordinary slot.
+    /// The GUI sprite drawn in this slot **while it is empty** — vanilla's
+    /// own no-item-icon getter, `null` on an ordinary slot.
     ///
     /// A bare sprite id relative to `gui/sprites/`, e.g. `container/slot/helmet`,
     /// which is what `lodestone_render::GuiAtlas` keys on. Version-free: these are
@@ -173,9 +173,8 @@ pub struct Slot {
     ///
     /// # Why this is a field and not a match on the slot index
     ///
-    /// Vanilla stores it per slot too — `ArmorSlot` takes it as a constructor
-    /// argument (`ArmorSlot.java:63`) and the off-hand slot overrides the getter
-    /// (`InventoryMenu.java:68-72`) — and the reason is that the family is much
+    /// Vanilla stores it per slot too — its own armour-slot type takes it as a constructor
+    /// argument and the off-hand slot overrides the getter — and the reason is that the family is much
     /// larger than the player screen's four armour slots. 26.2 ships **36**
     /// `container/slot/*` sprites: horse armour, llama carpet, saddle, the five
     /// smithing/brewing ingredient hints, per-tool hints for the smithing table,
