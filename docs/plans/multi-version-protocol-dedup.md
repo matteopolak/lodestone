@@ -423,6 +423,7 @@ this block; the commands are given so you can. Stages 0-3 have landed:
 | 2 `lodestone-protocol-common` | ~1,500 lines; v1-8/v1-9/v1-14 `pub use` from it (15/21/16 references each) |
 | 3 dispatch tables | v1-8/v1-9/v1-14 carry 59/62/54 `Handler::new` entries and 20/32/52 `IGNORED` ones |
 | 4 first era crate | `lodestone_v1_9::PROTOCOLS` is `[110, 210, 316, 340]`, with a committed join capture per new protocol under `crates/versions/1.9/tests/captures/` |
+| 7 second era crate | `lodestone_v1_14::PROTOCOLS` is `[498, 578, 754]`, with a committed join capture per new protocol under `crates/versions/1.14/tests/captures/` |
 
 **Stage 4's measured cost, which is what this plan asked it to produce.** Diffed against
 `455a87d6`, excluding the three generated id tables (1,971 lines) and the three captured-byte
@@ -452,6 +453,32 @@ this era's eight deltas are retypes. Second, tests are roughly half the hand-wri
 about a dozen test lines, not another 300.
 
 See [`docs/protocol-1-9-era.md`](../protocol-1-9-era.md) for the era crate's own documentation.
+
+**Stage 7's measured cost, for comparison.** Diffed against `d9a926b1`, excluding the
+six generated tables (24,569 lines), the two captured-byte files (64 lines) and the four
+committed jar dumps (239,381 lines):
+
+| bucket | lines added |
+|---|---|
+| era-crate source (`crates/versions/1.14/src`, excluding `generated/`) | 1,524 |
+| shared-crate source (one `lodestone-protocol-common` range widening) | 10 |
+| oracle script and the committed world-upgrade transcript | 69 |
+| tests (in-file plus `tests/`) and the captures' README | 1,364 |
+| **hand-written total** | **2,967** |
+
+So ~1,534 hand-written *source* lines bought two protocols, about 767 each — higher than
+stage 4's 336 because this era needed three *kinds* of per-protocol data rather than one
+(ids, block states, entity types) and because its chunk framing genuinely differs three
+ways, not because the mechanism failed. The marginal figure is the one the plan named as
+its falsifier, and it holds: every hand-written line naming 578 or 1.15.2 counts **69**,
+against the ~500-line threshold. Two further corrections to the record. First, tests are
+again about half the cost and again are not copies. Second, a per-version *generated*
+data set is larger than stage 4 implied — 12k lines per protocol here, because a
+post-Flattening era needs its own block-state table — but it is generated from that
+version's own jar, so it costs review, not authorship.
+
+See [`docs/protocol-1-14-era.md`](../protocol-1-14-era.md) for that era crate's own
+documentation.
 
 `cargo xtask connectedness` currently reports v1-8 59/74, v1-9 62/80, v1-14 54/92, v26-2 141/141
 clientbound, with zero decoded-but-stranded in every family.
@@ -528,10 +555,17 @@ takes the 1.21.11 grouping (open decision 2). Proof: v26-2's 43,915 test lines a
 module, `connectedness` for v26-2 must not move; a legacy family gains a backported arm only with a
 capture from its own oracle (this is where the eight unreferenced jars finally get consumers).
 
-**Stage 7 — merge v1-14 into `v498` with 1.14.4/1.15.2 (medium).** v1-14's `chunk.rs` already
-documents the 1.14 light split and 1.15 biome array as the branches; the merge is the crate rename
-plus two id tables plus the branch. Proof: 1.16.5's canonicalisation gate unchanged; new captures for
-498 and 578 from the jars already on disk.
+**Stage 7 — merge v1-14 into an era crate with 1.14.4/1.15.2 (medium). Landed.** The crate
+keeps its `1.14` folder name (decision 2 renamed the scheme to era-start Minecraft versions
+before this stage ran, so there was no rename to do). Three things the estimate missed, all
+found by doing it: the branch is *three* chunk differences, not one — the biome array moves
+twice and the section long packing changes at 754; a post-Flattening era needs a
+**per-protocol block-state table** and a per-protocol entity registry, not just id tables,
+because the palettes hold 11,271/11,337/17,112 states and 102/103/108 entities; and
+`minecraft-data` models 1.14.4's `map_chunk` with no biome field at all, so the captures were
+load-bearing rather than confirmatory. Proof: 1.16.5's canonicalisation gate unchanged, new
+captures for 498 and 578 from the jars already on disk, and a replay that lands the flat
+preset's floor in canonical ids.
 
 **Stage 8 — remaining eras, in the order the existing plan's value ranking gives** (1.13.2, then
 1.19.4, 1.20.6, 1.21.11, 1.17.1/1.18.2, 1.7.10 last). Each is stage-5 scaffold + era-specific three

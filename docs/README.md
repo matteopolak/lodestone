@@ -331,6 +331,15 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   ballistics and impact resolution (snowballs, eggs, ender pearls, potions, fireballs,
   arrows), the fishing rod's bobber, the riptide trident and elytra firework boost
   impulses, primed TNT, and the block-destroying half of an explosion.
+- [The 1.14 era crate: one family, three protocols](./protocol-1-14-era.md) —
+  `crates/versions/1.14` (package `lodestone-v1-14`) serves Minecraft 1.14.4, 1.15.2
+  and 1.16.5 — protocols 498, 578 and 754 — from a single adapter, three generated
+  packet-id tables, three generated block-state tables, three generated entity
+  registries, and nine explicitly-carried shape deltas, rather than three copies of a
+  family. It is the second era crate, after [`the 1.9 era`](./protocol-1-9-era.md),
+  and the stage of
+  [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md)
+  that closes the pre-1.17 legacy gap between 1.13 and 1.17.
 - [The 1.9 era crate: one family, four protocols](./protocol-1-9-era.md) —
   `crates/versions/1.9` (package `lodestone-v1-9`) is the first *era* crate in this
   repo: one family serving Minecraft 1.9.4, 1.10.2, 1.11.2 and 1.12.2 — protocols
