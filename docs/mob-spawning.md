@@ -15,8 +15,8 @@ wholly custom entity type. Most of it lives under `crates/lodestone-server/src/m
 
 `tick::run_tick_loop`, once per tick, gated on the `spawn_mobs` game rule and skipped when no
 player is loaded: `MobSim::census` rebuilds `SpawnState` from the live population; for each chunk
-still under its per-`MobCategory` cap, `NaturalSpawner::cluster` runs vanilla's
-`spawnCategoryForChunk` and returns a **group**, not a single candidate — the RNG draw order and
+still under its per-`MobCategory` cap, `NaturalSpawner::cluster` runs vanilla's own
+per-chunk spawn-category algorithm and returns a **group**, not a single candidate — the RNG draw order and
 count *is* the spawn rate, so the cap is applied as the group is consumed rather than mid-draw.
 Each candidate becomes a real mob through `MobSim::spawn_species`, so it gets the species' real
 dimensions, attributes and goals; the spawn **category** comes from the biome list's own key, not
@@ -24,21 +24,19 @@ a hostile/friendly guess. `MobSim::despawn_pass` runs beside it against the near
 scale with the tick area actually simulated (49 columns → 11 monsters, 1 creature), not vanilla's
 289-column figure.
 
-**Peaceful** is two gates keyed on the per-type `notInPeaceful` flag
+**Peaceful** is two gates keyed on the per-type peaceful-exemption flag
 (`mob_spawn::allowed_in_peaceful`), never on `MobCategory == MONSTER` — vanilla keeps seven
 monsters alive on Peaceful (`piglin`, `shulker`, `ender_dragon`, `zombie_horse`,
 `zombie_nautilus`, `camel_husk`, `sulfur_cube`). One refuses the candidate before the species'
-predicate runs (the predicate itself draws from the RNG, so order matters); the other,
-`MobSim::remove_monsters`, evicts what's already alive, using the same classification
-`spawn_species` uses.
+predicate runs (order matters, since the predicate draws from the RNG); the other,
+`MobSim::remove_monsters`, evicts what's already alive using the same classification.
 
 **Light.** Every monster rule is a light test. `natural_spawn` computes it via
 `lodestone_world::compute_column_light` over the column's palette indices (one lookup per palette
-entry, not per cell), bounded by `LIGHT_BUDGET_PER_CYCLE` (4 columns/tick) and `LIGHT_TTL_TICKS`
-(200 ticks, then dropped wholesale — there's no per-block relight in this tree, so a torch
-suppresses spawns within ~10 s rather than instantly). An unlit column returns `None`, meaning
-**do not spawn**, never "treat as dark" — treating unknown light as darkness would turn the
-budget into a spawn-rate multiplier.
+entry), bounded by `LIGHT_BUDGET_PER_CYCLE` (4 columns/tick) and `LIGHT_TTL_TICKS` (200 ticks,
+then dropped wholesale — there's no per-block relight in this tree, so a torch suppresses spawns
+within ~10 s rather than instantly). An unlit column returns `None`, meaning **do not spawn**,
+never "treat as dark" — that would turn the budget into a spawn-rate multiplier.
 
 **Slime chunks** are the one predicate that's two alternatives rather than a conjunction: a
 swamp-surface arm (`swamp`/`mangrove_swamp`, `50 < y < 70`, `nextFloat() < surfaceSlimeSpawnChance`
@@ -69,16 +67,14 @@ documents: 795 spawner entries, non-empty in `monster` (63 biomes), `ambient` (5
 
 `MobCategory::parse` panics on an unknown key rather than dropping it silently. `weight` belongs
 to the outer `WeightedList` wrapper, not vanilla's `SpawnerData` record, though this table
-flattens the two; `MobSpawnCost`'s fields are read by name, so its `(energyBudget, charge)` record
-order versus the JSON's alphabetical keys is inert. Not modelled: `SpawnerData`'s `MISC`→`PIG`
-rewrite (unreachable anyway, since every 26.2 `misc` list is empty) and range validation on the
-counts (embedded generated assets, so a violation would be a build defect). Use `MobCategory::ALL`
-for declaration order, not incidental map order.
+flattens the two; fields are read by name, so record order versus the JSON's alphabetical keys is
+inert. Not modelled: `SpawnerData`'s `MISC`→`PIG` rewrite (unreachable anyway, since every 26.2
+`misc` list is empty) and count validation (embedded generated assets, so a violation would be a
+build defect). Use `MobCategory::ALL` for declaration order, not incidental map order.
 
-This is data, not a runtime spawner — the `SPAWN` chunk-generation stage, light/ground
+This is data, not a runtime spawner — the chunk-generation `SPAWN` stage, light/ground
 re-validation, and an entity-persistence decision are separate, larger work, mostly because most
-`Creature` rules need block light and a chunk-generation spawn with no entity persistence would
-silently re-run on every regen.
+`Creature` rules need block light and an un-persisted spawn would silently re-run on every regen.
 
 ### Spawn equipment
 
@@ -98,16 +94,13 @@ one function per species family:
 (`nextInt(3)` plus up to three `+1` bumps at 10.87% each), then a walk over
 `[Head, Chest, Legs, Feet]` stopping at the first slot filled (10% Hard / 25% otherwise chance),
 never overwriting an occupied slot. `EquipRandom` is the RNG seam so this crate stays free of a
-concrete RNG type. The drowned is the case worth naming: vanilla always registers
-`DrownedTridentAttackGoal` and gates it at *runtime* on holding a trident rather than by
-conditional registration, reproduced via `MobController::main_hand_item()` plus
-`RangedAttackGoal::with_required_main_hand("trident")`. `MobSim::spawn_species` rolls equipment on
+concrete RNG type. The drowned's trident goal is gated at *runtime* on holding a trident rather
+than by conditional registration (`MobController::main_hand_item()` plus
+`RangedAttackGoal::with_required_main_hand("trident")`). `MobSim::spawn_species` rolls equipment on
 its own `equipment_rng` stream (`EQUIPMENT_ROLL_SEED`), isolated from despawn/orb/tame streams so
-one roll can't shift another's outcome.
-
-Disclosed gaps: enchanted spawn gear is not modelled (no enchantment model exists at all); rolled
-equipment doesn't survive save/load (no equipment NBT); `Items.IRON_SPEAR` has no entry in
-`equipment::weapon_attack_damage` (a combat-stats gap, not an equipping one).
+one roll can't shift another's outcome. Not modelled: enchanted spawn gear (no enchantment model
+exists at all) and equipment surviving save/load (no equipment NBT); `Items.IRON_SPEAR` has no
+entry in `equipment::weapon_attack_damage` (a combat-stats gap, not an equipping one).
 
 ### Species-aware spawning
 
@@ -128,16 +121,15 @@ per-tick speed scale *and* the forward-input magnitude a mob's move vector multi
 per-tick thrust is the *square* of `speedModifier * movement_speed`, converging under friction
 (ground `0.6`, air drag `0.91`) to `requested_speed² / (1 - 0.6 * 0.91)`. `ai_ground_speed`
 implements that conversion for the kinematic follower's `step_per_tick`; roster goals still
-receive the *unconverted* attribute for their own multipliers. Checked live: a zombie (`0.23`)
-chasing a stationary villager measured ≈0.118 blocks/tick against a predicted `0.1165` — the
-unconverted attribute is roughly double either figure, matching a long-standing "mobs move too
-fast" report.
+receive the *unconverted* attribute. Checked live: a zombie (`0.23`) chasing a stationary villager
+measured ≈0.118 blocks/tick against a predicted `0.1165` — the unconverted attribute is roughly
+double either figure, matching a long-standing "mobs move too fast" report.
 
 Also resolved per tick from a real `DifficultyInstance`: the zombie family's door-breaking coin
-flip (`nextFloat() < difficultyModifier * 0.1`, rolled once at spawn, preserved across baby/adult
-shape changes) and its Hard-only reinforcement call (`nextDouble() * 0.1` randomized per mob at
-spawn, rolled on a landed hit, resolved through a simplified 50-candidate placement search). Not
-modelled: the "leader zombie" bonus that can also force door-breaking or boost stats on either.
+flip (rolled once at spawn, preserved across baby/adult shape changes) and its Hard-only
+reinforcement call (randomized per mob at spawn, rolled on a landed hit, resolved through a
+simplified 50-candidate placement search). Not modelled: the "leader zombie" bonus that can also
+force door-breaking or boost stats.
 
 ### Spawn eggs
 
@@ -216,13 +208,12 @@ The wolf's taming item is in **none** of its own food tags, so `breeding_food` a
 tame. Whether a species must be tamed before it can breed depends on whether its taming item
 overlaps its food tag: an untamed wolf fed meat misses the bone arm and really can fall in love;
 an untamed cat fed cod always attempts a tame instead. The horse's roll is a function of a
-persisted `Temper` counter, not a chance — certain to fail at 0, succeed at 100, each failure
-adding 5. Temper doesn't derive from `#horse_food`: `hay_block` is horse food and grants none,
-`red_mushroom` grants 3 without being in the tag — `horse_temper_gain` is its own table. Horse
-breeding needs `GOLDEN_CARROT`/`GOLDEN_APPLE`/`ENCHANTED_GOLDEN_APPLE` specifically, so its
-`breeding_food` row is empty. Disclosed deviation: vanilla only attempts the horse roll while
-ridden, behind its own 1-in-50 tick gate; with no passenger model here the attempt happens once
-per mount attempt instead — the roll arithmetic is unchanged.
+persisted `Temper` counter (certain to fail at 0, succeed at 100, each failure adding 5) that
+doesn't derive from `#horse_food` — `hay_block` is horse food and grants no temper, `red_mushroom`
+grants 3 without being in the tag — so `horse_temper_gain` is its own table. Horse breeding needs
+`GOLDEN_CARROT`/`GOLDEN_APPLE`/`ENCHANTED_GOLDEN_APPLE` specifically, so its `breeding_food` row is
+empty. With no passenger model here, the temper roll is attempted once per mount rather than
+behind vanilla's 1-in-50 ridden tick gate — the roll arithmetic itself is unchanged.
 
 `MobSim::interact` transcribes each species' `mobInteract` override in the **same clause order**:
 feeding a hurt tame wolf meat must heal it before the same item can put it in love, and the sit
@@ -231,23 +222,19 @@ not `!is_baby()` — a parent in its post-breeding cooldown is not a baby and st
 love.
 
 Two roster goals make ownership observable: `SitWhenOrderedToGoal` (a tame pet with no resolvable
-owner sits on its own — "pets settle when you log out"; an on-ground check and an owner-hurt
-suppression are disclosed omissions, since neither crosses the seam) and `FollowOwnerGoal`, whose
+owner sits on its own — "pets settle when you log out") and `FollowOwnerGoal`, whose
 `(speed, startDistance, stopDistance)` are arguments because vanilla's aren't uniform (wolf
-1.0/10/2, cat 1.0/10/5, parrot 1.0/5/1). Teleport-to-owner isn't implemented; sitting-suppresses-
-follow is. The sitting *order* (persisted, NBT round-trips as `Sitting`) and sitting *pose* (the
-synced flag bit) are separate state, matching vanilla — collapsing them loses the order whenever
-the goal is preempted.
+1.0/10/2, cat 1.0/10/5, parrot 1.0/5/1). The sitting *order* (persisted, NBT round-trips as
+`Sitting`) and sitting *pose* (the synced flag bit) are separate state, matching vanilla —
+collapsing them loses the order whenever the goal is preempted by a higher-priority flag holder.
 
 The right-click reaches a real client, and a tame/love/fail cue reaches the wire as a particle
-burst (seven HEART on success/love, seven SMOKE on failure) — a disclosed substitution for
-vanilla's client-expanded entity event, whose real encoder now exists but isn't used yet, so the
-pixels are unchanged either way. The collar itself is on the wire
-(`MetadataField::TamableFlags`/`HorseFlags`, index 18 — the most crowded index in the game, four
-`BYTE` claimants each with a different bit per class, so a shared variant would set an *unnamed*
-bit and silently read as untamed), but nothing past the server decodes it: the client's metadata
-reader, event model, ECS ingest and texture resolver have no tame/sit path, even though a tame
-wolf texture already exists with no production caller — see
+burst — a disclosed substitution for vanilla's client-expanded entity event. The collar itself is
+on the wire (`MetadataField::TamableFlags`/`HorseFlags`, index 18 — the most crowded index in the
+game, four `BYTE` claimants each with a different bit per class, so a shared variant would set an
+*unnamed* bit and silently read as untamed), but nothing past the server decodes it: the client's
+metadata reader, event model, ECS ingest and texture resolver have no tame/sit path, even though a
+tame wolf texture already exists with no production caller — see
 [`entity-rendering.md`](./entity-rendering.md).
 
 ### Custom entity types
@@ -258,10 +245,10 @@ for a novel registry entry, and vanilla itself has no such mechanism either. Res
 real vanilla type resolves to itself, a registered disguise resolves to its target, anything else
 is `None` — **never** a fallback, because network type id `0` is `minecraft:acacia_boat`, and an
 unresolved type used to stream as one with no error anywhere. `EntityDisguises::register` resolves
-the target eagerly and refuses rather than allow a disguise that would silently become a boat. A
-custom kind is barred from the `minecraft:` namespace (a bare unnamespaced key counts as
-`minecraft:` too) so it can never shadow a real type. It lives in `lodestone_data` because that's
-the only crate both the client and `lodestone-server` can reach.
+the target eagerly and refuses rather than allow a disguise that would silently become a boat, and
+a custom kind is barred from the `minecraft:` namespace so it can never shadow a real type. It
+lives in `lodestone_data` because that's the only crate both the client and `lodestone-server` can
+reach.
 
 **This registry has no production consumer yet.** The add-entity encoder still resolves a type
 with the unchecked fallback this registry exists to replace, and nothing between a mob's snapshot
@@ -282,18 +269,16 @@ define and validate a custom kind but cannot spawn one.
   is tameable but has no roster entry, since `AbstractHorse` isn't a `TamableAnimal` at all — not a
   gap). A new taming *mechanism* is a new `TameMechanism` variant, not a constant on an existing
   one — the four differ in trigger, roll shape and side effects.
-* **Never derive an item set from a tag without checking the method it actually gates.** Three
-  traps here are exactly a tag and a Java method disagreeing (bone vs. `#wolf_food`, `hay_block`
-  vs. `handleEating`'s temper grant, `red_mushroom` vs. `#horse_food`) — read `handleEating`/
-  `mobInteract` first, use the tag only as a cross-check.
-* **A tame or spawn chance needs a driven RNG in its gate**: assert the exact outcome on both
-  sides of the threshold, with a seed where the two mechanisms being separated actually disagree —
-  one chosen for `next_int(3)` proves nothing about `next_int(10)`.
-* **Entity metadata indices are not hand-countable.** Any new per-species metadata must take its
-  index from the entity-data-index oracle dump and check every class sharing it — which census
-  column separates the real claimants depends on which classes collide, and assuming a previous
-  collision's guard generalises is exactly how a wrongly-classified mob ships.
-* **RNG call order in a port must match exactly.** A reordered pair of `next_f32`/`next_int` calls
+* **Never derive an item set from a tag without checking the method it actually gates**, and a
+  tame or spawn chance needs a driven RNG in its gate. Three traps here are exactly a tag and a
+  Java method disagreeing (bone vs. `#wolf_food`, `hay_block` vs. `handleEating`'s temper grant,
+  `red_mushroom` vs. `#horse_food`) — read `handleEating`/`mobInteract` first, use the tag only as
+  a cross-check. A chance gate needs a seed where the two mechanisms being separated actually
+  disagree — one chosen for `next_int(3)` proves nothing about `next_int(10)`.
+* **Entity metadata indices are not hand-countable, and RNG call order in a port must match
+  exactly.** Any new per-species metadata must take its index from the entity-data-index oracle
+  dump and check every class sharing it — assuming a previous collision's guard generalises is
+  exactly how a wrongly-classified mob ships. A reordered pair of `next_f32`/`next_int` calls
   (equipment, placement, taming) changes what a fixed seed produces, even without any promise of
   matching a real vanilla server byte-for-byte.
 * **NBT field names collide across entity/item types, and a name-keyed schema must not assume they
@@ -328,16 +313,14 @@ No feature flags anywhere in this area. Spawner blocks have no analogue of vanil
 * `lodestone_data` — `light_props`, `block_states`, `collision_shapes`, `entity_dimensions`,
   `entity_types`, `entity_disguise`.
 * `lodestone_worldgen::spawners` via `worldgen_data::bundled_biome_spawners()` — the per-biome
-  lists, parsed once and cached.
-* `lodestone_entity::attribute` — `default_attributes`/`type_spec` for combat stats.
+  lists, parsed once and cached. `lodestone_entity::attribute` — `default_attributes`/`type_spec`.
 * `lodestone_entity::ai` — `MobController`, `NavigatingMob`, `roster` goal tables (`BreedGoal`,
   `FollowParentGoal`, `SitWhenOrderedToGoal`, `FollowOwnerGoal`, `RangedAttackGoal`).
-* `crate::mob_spawn` — the cap/despawn engine and `SpawnRng`. `crate::mobs` — `MobSim`/`SimMob`,
-  the production host for all of the above. `crate::effects::WorldEffect` and
-  `crate::tick::run_tick_loop` — the taming particle burst and the per-tick difficulty feed.
+* `crate::mob_spawn` (cap/despawn engine, `SpawnRng`), `crate::mobs` (`MobSim`/`SimMob`, the
+  production host for all of the above), `crate::effects::WorldEffect` and
+  `crate::tick::run_tick_loop` (taming particle burst, per-tick difficulty feed).
 * `.cache/mc/26.2/src/net/minecraft/world/entity/` — the pinned decompile every table above is
   checked against.
-* [`combat.md`](./combat.md) — the attribute-modifier fold spawn equipment feeds into, and
-  damage/knockback once a mob is live. [`mob-ai.md`](./mob-ai.md) — the goal scheduler these goals
-  run under. [`entity-rendering.md`](./entity-rendering.md) — what a client does with a spawned
-  mob's metadata.
+* [`combat.md`](./combat.md) (the attribute-modifier fold and damage/knockback once a mob is
+  live), [`mob-ai.md`](./mob-ai.md) (the goal scheduler), [`entity-rendering.md`](./entity-rendering.md)
+  (what a client does with a spawned mob's metadata).
