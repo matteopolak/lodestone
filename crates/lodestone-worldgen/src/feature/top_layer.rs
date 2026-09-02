@@ -1,58 +1,59 @@
-//! `TOP_LAYER_MODIFICATION` — vanilla's `freeze_top_layer`
-//! (`SnowAndFreezeFeature`): snow layers and surface ice, issue #404's U2.
+//! `TOP_LAYER_MODIFICATION` — vanilla's `freeze_top_layer` step: snow
+//! layers and surface ice.
 //!
-//! This is the **eleventh and last** decoration step
-//! (`GenerationStep.Decoration.TOP_LAYER_MODIFICATION.ordinal() == 10`), and it
-//! is in **every** biome's step list — `BiomeDefaultFeatures.java:413` adds it
-//! unconditionally from `addDefaultOverworldLandMesaFeatures`' shared tail, so
+//! This is the **eleventh and last** decoration step (ordinal 10), and it
+//! is in **every** biome's step list — vanilla's own default per-biome
+//! feature registration adds it
+//! unconditionally from a shared tail, so
 //! the step self-gates on temperature rather than on biome membership. That is
 //! why its absence showed up everywhere cold at once: before this module,
 //! nothing in this engine ever wrote `minecraft:snow` or surface ice.
 //!
 //! ## What vanilla does, line by line
 //!
-//! `SnowAndFreezeFeature.place` (`SnowAndFreezeFeature.java:20-49`) walks the
+//! Vanilla's own feature body walks the
 //! chunk's 16×16 columns, `dx` outer and `dz` inner, and per column:
 //!
-//! 1. `int y = level.getHeight(MOTION_BLOCKING, x, z)` — the first **free** Y
+//! 1. The first **free** Y
 //!    above the column's top motion-blocking-or-fluid block. See
 //!    [`motion_blocking_first_free`] for the two cancelling `±1`s behind that.
-//! 2. `topPos = (x, y, z)`, `belowPos = topPos.below()`.
-//! 3. `biome = level.getBiome(topPos)`.
-//! 4. **Ice**: `if biome.shouldFreeze(level, belowPos, false) → setBlock(belowPos,
-//!    ICE)`. Note `checkNeighbors = false`, so the four-way `isWaterAt` test in
-//!    `Biome.shouldFreeze` (`Biome.java:158-165`) never runs during world
+//! 2. `topPos = (x, y, z)`, `belowPos` = the position directly below `topPos`.
+//! 3. The biome at `topPos`.
+//! 4. **Ice**: if the biome's freeze predicate says yes at `belowPos` (with
+//!    neighbour checking off) → write ice at `belowPos`. Neighbour checking
+//!    off means the four-way adjacent-water test that predicate would
+//!    otherwise run never fires during world
 //!    generation — it is a *live-world* freeze concern only.
-//! 5. **Snow**: `if biome.shouldSnow(level, topPos) → setBlock(topPos, SNOW)`,
+//! 5. **Snow**: if the biome's snow predicate says yes at `topPos` → write
+//!    one snow layer at `topPos`,
 //!    then if the block at `belowPos` has the `snowy` property, set it `true`.
 //!
 //! Step 4 happens **before** step 5 and writes into the same column, which is
 //! load-bearing: on a frozen ocean the ice written at `belowPos` is what step 5
-//! then reads for `canSurvive`, and `minecraft:ice` is in
+//! then reads for its own survival check, and `minecraft:ice` is in
 //! `cannot_support_snow_layer`. So frozen oceans get bare ice, never
 //! snow-on-ice. Reordering the two produces a snow blanket over every frozen
 //! ocean, and no unit test of either predicate alone would notice.
 //!
 //! ## RNG: none, at all
 //!
-//! `SnowAndFreezeFeature.java` does not contain the string `random` — not as a
+//! Vanilla's own feature source does not contain the string `random` — not as a
 //! field, a parameter, or an unused import. Its placed feature
 //! (`placed_feature/freeze_top_layer.json`) is `[{"type": "minecraft:biome"}]`
-//! and nothing else, and `BiomeFilter.shouldPlace` never touches the
-//! `RandomSource` it is handed (`BiomeFilter.java:20-26`,
-//! `PlacementFilter.java:8-11`). So this step consumes **zero draws**, and the
+//! and nothing else, and the biome placement filter never touches the
+//! RNG source it is handed. So this step consumes **zero draws**, and the
 //! `TrapezoidInt`-as-`Uniform` draw-count desync that broke vegetation parity
 //! (`crate::feature::IntProvider::Trapezoid`'s doc comment) has no analogue
 //! here. Adding it also cannot desynchronise any earlier step: vanilla reseeds
-//! per feature with `setFeatureSeed(decorationSeed, globalFeatureIndex,
-//! stepIndex)` (`ChunkGenerator.java:389`), and this step's index is 10, past
+//! per feature from the decoration seed, a global feature index and the
+//! step index, and this step's index is 10, past
 //! every step this engine composes.
 //!
 //! ## The temperature source, which is the whole trap
 //!
-//! `Biome.warmEnoughToRain` is `getTemperature(pos, seaLevel) >= 0.15F`
-//! (`Biome.java:175-177`), and `getTemperature` is **height-adjusted**
-//! (`Biome.getHeightAdjustedTemperature`, `Biome.java:112-121`): above
+//! Vanilla's own "warm enough to rain" check is a per-position temperature
+//! query against a `0.15` threshold, and that query is **height-adjusted**:
+//! above
 //! `seaLevel + 17` it subtracts a noise-perturbed lapse rate. Using the flat
 //! biome `temperature` field instead — which is exactly what this crate's
 //! pre-existing [`crate::biome::cold_enough_to_snow`] does for *surface rules* —
@@ -75,28 +76,29 @@
 //! ## Approximations, named
 //!
 //! * **Block light is not modelled, and does not need to be.** Both predicates
-//!   gate on `level.getBrightness(LightLayer.BLOCK, pos) < 10`
-//!   (`Biome.java:150,188`). At the `features` chunk status that value is
-//!   **always 0**: `initialize_light` runs strictly after `features`
-//!   (`ChunkStatus.java:28-30`), and `BlockLightSectionStorage.getLightValue`
-//!   returns `0` for a section with no `DataLayer`
-//!   (`BlockLightSectionStorage.java:16-26`). So the gate is unconditionally
+//!   gate on the block light at that position being below `10`.
+//!   At the `features` chunk status that value is
+//!   **always 0**: light initialization runs strictly after the `features`
+//!   status, and a section with no light data
+//!   returns `0` for any block-light query. So the gate is unconditionally
 //!   satisfied in vanilla too. This is agreement, not a shortcut — do not
 //!   "improve" it by supplying real light.
-//! * **Biome is per-quart-column, not per block.** `level.getBiome(topPos)` is a
+//! * **Biome is per-quart-column, not per block.** Vanilla's own biome
+//!   lookup at `topPos` is a
 //!   3-D lookup; this engine's biome stage is 2-D (one sample per horizontal
 //!   quart, broadcast down the column — see `crate::biome`'s module doc and
 //!   census row 2 of `docs/plans/worldgen-parity.md`). Since `topPos` is at the
 //!   surface, which is the Y that stage already samples at, this is the closest
 //!   available answer rather than a new approximation, and it becomes exact when
-//!   U7 lands 3-D biomes.
-//! * **`Biome.getTemperature`'s 1024-entry `Long2FloatLinkedOpenHashMap`**
-//!   (`Biome.java:123-139`) is a pure memo keyed by `pos.asLong()`. Omitted: it
+//!   a future change lands 3-D biomes.
+//! * **Vanilla's own per-position temperature memo** is a pure cache keyed
+//!   by position. Omitted: it
 //!   cannot change a value, only how often one is computed.
-//! * **Collision shapes are read with no neighbours.** `canSurvive`'s
-//!   `isFaceFull` answer arrives pre-computed through [`SnowSupport`] from
-//!   `lodestone_data::snow_support`, whose dump calls the same two-argument
-//!   `getCollisionShape` overload vanilla's `canSurvive` does. See that module's
+//! * **Collision shapes are read with no neighbours.** Vanilla's own
+//!   survival check reads a
+//!   face-full answer that arrives pre-computed through [`SnowSupport`] from
+//!   `lodestone_data::snow_support`, whose dump calls the same
+//!   collision-shape query vanilla's own check does. See that module's
 //!   "Known scope".
 
 use std::collections::{HashMap, HashSet};
@@ -107,31 +109,30 @@ use serde_json::Value;
 use crate::dense_grid::DenseBlockGrid;
 use crate::noise::ClimateNoise;
 
-/// `GenerationStep.Decoration.TOP_LAYER_MODIFICATION.ordinal()` — the eleventh
+/// Vanilla's own decoration-step ordinal — the eleventh
 /// and last decoration step. One past `VEGETAL_DECORATION`
 /// ([`super::STEP_VEGETAL_DECORATION`], 9).
 pub const STEP_TOP_LAYER_MODIFICATION: i32 = 10;
 
-/// The block state `SnowAndFreezeFeature` writes at `topPos`:
-/// `Blocks.SNOW.defaultBlockState()`, i.e. one layer
-/// (`SnowLayerBlock` registers `LAYERS = 1` as its default,
-/// `SnowLayerBlock.java:38`).
+/// The block state vanilla's own feature writes at `topPos`:
+/// one snow layer (vanilla's snow-layer block registers a single layer as
+/// its default state).
 pub const SNOW_LAYER: &str = "minecraft:snow[layers=1]";
 
-/// The block state written at `belowPos` when a column freezes:
-/// `Blocks.ICE.defaultBlockState()`. `IceBlock` has no properties.
+/// The block state written at `belowPos` when a column freezes: vanilla's
+/// default ice state. Ice has no properties.
 pub const ICE: &str = "minecraft:ice";
 
-/// `Biome.warmEnoughToRain`'s threshold (`Biome.java:176`). A column snows when
+/// Vanilla's own "warm enough to rain" threshold. A column snows when
 /// its height-adjusted temperature is **strictly below** this.
 pub const RAIN_TEMPERATURE_THRESHOLD: f32 = 0.15;
 
-/// `Biome.getHeightAdjustedTemperature`'s `snowLevel` offset above sea level
-/// (`Biome.java:114`). Below this Y the biome's declared temperature is used
+/// Vanilla's own height-adjusted-temperature `snowLevel` offset above sea level.
+/// Below this Y the biome's declared temperature is used
 /// unmodified; above it the lapse rate applies.
 pub const SNOW_LEVEL_ABOVE_SEA: i32 = 17;
 
-/// `Biome.TemperatureModifier` (`Biome.java:388-420`).
+/// Vanilla's own per-biome temperature modifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TemperatureModifier {
     /// `NONE` — returns the biome's declared temperature unchanged.
@@ -146,8 +147,8 @@ pub enum TemperatureModifier {
 
 impl TemperatureModifier {
     /// Parses a biome document's `temperature_modifier` field. Absent means
-    /// `NONE` (`Biome.ClimateSettings.CODEC`'s
-    /// `optionalFieldOf("temperature_modifier", NONE)`, `Biome.java:363`).
+    /// `NONE` (vanilla's own climate-settings codec defaults it to `NONE`
+    /// when the field is omitted).
     ///
     /// # Panics
     /// Panics on an unrecognised value rather than silently falling back to
@@ -164,15 +165,15 @@ impl TemperatureModifier {
     }
 }
 
-/// One biome's `Biome.ClimateSettings` (`Biome.java:358`), minus `downfall`
+/// One biome's own climate settings, minus `downfall`
 /// (which no generation step reads — it is a client visual and a grass-colour
 /// input).
 #[derive(Clone, Copy, Debug)]
 pub struct BiomeClimate {
-    /// `hasPrecipitation`. Gates **snow only**: `Biome.shouldSnow` goes through
-    /// `getPrecipitationAt`, which returns `NONE` without it
-    /// (`Biome.java:104-110`), while `Biome.shouldFreeze` does **not** consult it
-    /// at all (`Biome.java:145-169`). So a `has_precipitation: false` biome that
+    /// `hasPrecipitation`. Gates **snow only**: vanilla's own snow predicate
+    /// goes through its own precipitation-at query, which returns `NONE`
+    /// without it, while vanilla's own freeze predicate does **not** consult it
+    /// at all. So a `has_precipitation: false` biome that
     /// is nonetheless cold enough would still form ice — vanilla's behaviour,
     /// preserved here even though no overworld biome reaches it (the coldest such
     /// biome is `temperature = 0.5`, which needs `y > ~360` to cross the
@@ -206,15 +207,15 @@ pub struct BiomeClimate {
 /// property-less name means.
 #[derive(Clone, Debug, Default)]
 pub struct SnowSupport {
-    /// `BlockState.blocksMotion()`, from `lodestone_data::block_solidity`.
+    /// Vanilla's own motion-blocking predicate, from `lodestone_data::block_solidity`.
     pub blocks_motion: StatePredicate,
-    /// `!BlockState.getFluidState().isEmpty()`.
+    /// Vanilla's own non-empty-fluid-state predicate.
     pub has_fluid_state: StatePredicate,
     /// `getFluidState().is(Fluids.WATER) && block instanceof LiquidBlock`.
     pub water_source: StatePredicate,
-    /// `Block.isFaceFull(collisionShape, UP)`.
+    /// Vanilla's own full-upward-face collision predicate.
     pub face_full_up: StatePredicate,
-    /// `BlockState.hasProperty(BlockStateProperties.SNOWY)`.
+    /// Vanilla's own `snowy` block-state property presence check.
     pub snowy_property: StatePredicate,
     /// `BlockTags.CANNOT_SUPPORT_SNOW_LAYER`, by block base name.
     pub cannot_support_snow_layer: HashSet<String>,
@@ -356,14 +357,14 @@ impl SnowSupport {
             || self.face_full_up.is_empty()
     }
 
-    /// `Heightmap.Types.MOTION_BLOCKING`'s predicate (`Heightmap.java:151`):
-    /// `input.blocksMotion() || !input.getFluidState().isEmpty()`.
+    /// Vanilla's own `MOTION_BLOCKING` heightmap predicate:
+    /// a block that blocks motion, or has a non-empty fluid state.
     #[must_use]
     pub fn motion_blocking(&self, state: &str) -> bool {
         self.blocks_motion.test(state) || self.has_fluid_state.test(state)
     }
 
-    /// `SnowLayerBlock.canSurvive` (`SnowLayerBlock.java:76-86`), where
+    /// Vanilla's own snow-layer survival check, where
     /// `below_state` is the state at `pos.below()`.
     ///
     /// The two tag checks run **before** the geometry check, and both directions
@@ -397,7 +398,7 @@ impl SnowSupport {
 ///
 /// Empty sets (never a panic) when the resolver has no data — matching
 /// [`crate::feature::vegetation::build_veg_tags`] and every other
-/// #295/#406/#427 resolver convention, so every existing `Resolver` in this
+/// resolver convention, so every existing `Resolver` in this
 /// crate's tests and benches keeps compiling and keeps generating exactly the
 /// snow-free world it did before.
 #[must_use]
@@ -422,7 +423,7 @@ pub fn build_snow_support(resolver: &dyn crate::density::Resolver) -> SnowSuppor
 /// **No new resolver method is needed for climate**: vanilla's own
 /// `worldgen/biome/*.json` carries all three fields, the embedded assets are
 /// verbatim copies of them, and `biome_document` already returns the whole
-/// document (issue #295 added it for `carvers` and the per-step `features`
+/// document (this change added it for `carvers` and the per-step `features`
 /// lists). This crate's pre-existing
 /// [`Resolver::biome_temperatures`](crate::density::Resolver::biome_temperatures)
 /// carries `temperature` alone and is deliberately left to its own caller —
@@ -434,7 +435,7 @@ pub fn build_snow_support(resolver: &dyn crate::density::Resolver) -> SnowSuppor
 /// [`apply_freeze_top_layer`] treats as "this biome does not freeze" rather than
 /// defaulting.
 ///
-/// Defaults follow `Biome.ClimateSettings.CODEC` (`Biome.java:359-366`):
+/// Defaults follow vanilla's own climate-settings codec:
 /// `has_precipitation` is required in vanilla's schema but defaulted to `true`
 /// here for robustness against a trimmed asset, and `temperature_modifier`
 /// defaults to `none`.
@@ -471,24 +472,25 @@ fn snow_layers(state: &str) -> Option<u32> {
         .and_then(|v| v.parse().ok())
 }
 
-/// `Biome.getHeightAdjustedTemperature(pos, seaLevel)` (`Biome.java:112-121`),
-/// which is what `Biome.getTemperature` returns once its memo is stripped.
+/// Vanilla's own height-adjusted temperature at a position, given a sea
+/// level — the value its own temperature query returns once its memo is
+/// stripped.
 ///
 /// ```text
-/// float adjusted = temperatureModifier.modifyTemperature(pos, baseTemperature);
-/// int snowLevel = seaLevel + 17;
-/// if (pos.getY() > snowLevel) {
-///     float v = (float)(TEMPERATURE_NOISE.getValue(pos.getX() / 8.0F, pos.getZ() / 8.0F, false) * 8.0);
-///     return adjusted - (v + pos.getY() - snowLevel) * 0.05F / 40.0F;
-/// }
-/// return adjusted;
+/// adjusted = temperature_modifier.modify(pos, base_temperature)   // f32
+/// snow_level = sea_level + 17
+/// if pos.y > snow_level:
+///     v = noise.get_value(pos.x / 8.0 as f32, pos.z / 8.0 as f32, false) * 8.0   // f32
+///     return adjusted - (v + pos.y - snow_level) * 0.05 / 40.0                   // f32
+/// return adjusted
 /// ```
 ///
 /// # Float typing is not incidental
 ///
-/// Every arithmetic step above is Java `float`, and the noise *input* is a
-/// `float` division widened to `double`: `pos.getX() / 8.0F` is `(double)((float)
-/// x / 8.0f)`, **not** `(double) x / 8.0`. Those differ for large coordinates,
+/// Every arithmetic step above is vanilla's `float`, and the noise *input* is a
+/// `float` division widened to `double`: `pos.x / 8.0` as vanilla computes it is
+/// the float division widened afterward,
+/// **not** a direct double division. Those differ for large coordinates,
 /// and computing the whole expression in `f64` shifts the snow line by a
 /// fraction of a block near the threshold — enough to move which columns snow.
 /// This port keeps `f32` throughout and widens only at the noise call, matching
@@ -496,11 +498,11 @@ fn snow_layers(state: &str) -> Option<u32> {
 ///
 /// # The `FROZEN` modifier
 ///
-/// `TemperatureModifier.FROZEN.modifyTemperature` (`Biome.java:395-409`) blends
+/// Vanilla's own frozen-modifier temperature blend blends
 /// three noise reads into an ice-patch mask and clamps the result to `0.2`
 /// (above the `0.15` rain threshold, i.e. *warmer*) inside a patch — so a frozen
-/// ocean is mostly ice with warmer, unfrozen gaps. Its `pos.getX() * 0.05`
-/// inputs are `int * double`, genuine `f64`, unlike the `/ 8.0F` above.
+/// ocean is mostly ice with warmer, unfrozen gaps. Its `pos.x * 0.05`
+/// inputs are an int-times-double product, genuine `f64`, unlike the `/ 8.0` above.
 #[must_use]
 pub fn height_adjusted_temperature(
     climate: &BiomeClimate,
@@ -542,7 +544,7 @@ pub fn height_adjusted_temperature(
     }
 }
 
-/// `Biome.warmEnoughToRain` (`Biome.java:175-177`).
+/// Vanilla's own "warm enough to rain" check.
 #[must_use]
 pub fn warm_enough_to_rain(
     climate: &BiomeClimate,
@@ -555,30 +557,32 @@ pub fn warm_enough_to_rain(
     height_adjusted_temperature(climate, noise, x, y, z, sea_level) >= RAIN_TEMPERATURE_THRESHOLD
 }
 
-/// `level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z)` as
-/// `SnowAndFreezeFeature` sees it: the first **free** Y above the column's
+/// Vanilla's own `MOTION_BLOCKING` heightmap query as
+/// vanilla's own feature sees it: the first **free** Y above the column's
 /// topmost motion-blocking-or-fluid block, or `min_y` for an entirely empty
 /// column.
 ///
 /// # The two `±1`s that cancel
 ///
-/// `Heightmap` stores `topMatchingY + 1` (`Heightmap.primeHeightmaps` does
-/// `setHeight(x, z, y + 1)`, `Heightmap.java:64`), so
-/// `Heightmap.getFirstAvailable` is the first free Y.
-/// `Heightmap.getHighestTaken` subtracts one (`Heightmap.java:114`) and
-/// `ChunkAccess.getHeight` routes to it — then `WorldGenRegion.getHeight` adds
-/// one back (`WorldGenRegion.java:435`). Net: the feature receives the first
+/// Vanilla's own heightmap stores `topMatchingY + 1` (its own priming pass
+/// stores that offset value), so
+/// its own "first available" query is the first free Y.
+/// Its own "highest taken" query subtracts one and
+/// the chunk-level height query routes to it — then the world-gen-region-level
+/// height query adds
+/// one back. Net: the feature receives the first
 /// free Y, so `topPos` is where snow goes and `belowPos` is the top solid or
 /// fluid block. Dropping either `±1` puts every snow layer one block out.
 ///
 /// # Why recomputing is equivalent to vanilla's incremental heightmap
 ///
 /// Vanilla primes these heightmaps once at the start of the `features` status
-/// (`ChunkStatusTasks.java:134-138`) and then maintains them through
-/// `Heightmap.update` as each feature places a block. `update` is an incremental
+/// and then maintains them through
+/// incremental per-block updates as each feature places a block. That update is
+/// an incremental
 /// form of exactly this scan: it early-outs below `firstAvailable - 2`, raises
 /// the height for an opaque block at or above it, and rescans downward when a
-/// non-opaque block replaces the current top (`Heightmap.java:81-108`). A fresh
+/// non-opaque block replaces the current top. A fresh
 /// top-down scan of the finished field lands on the same answer, and this step
 /// runs after every other feature, so there is nothing left to place.
 #[must_use]
@@ -658,7 +662,7 @@ pub fn apply_freeze_top_layer<'b>(
     let base_x = chunk_x * 16;
     let base_z = chunk_z * 16;
     let max_y = min_y + height - 1;
-    // `dx` outer, `dz` inner — `SnowAndFreezeFeature.java:26-27`. Iteration
+    // `dx` outer, `dz` inner — vanilla's own iteration order. Iteration
     // order cannot matter here (no column reads another), but it is kept
     // vanilla's so a future reader does not have to prove that again.
     for dx in 0..16 {
@@ -671,7 +675,7 @@ pub fn apply_freeze_top_layer<'b>(
             let top_y = motion_blocking_first_free(grid, support, x, z, min_y, height);
             let below_y = top_y - 1;
 
-            // --- ice: Biome.shouldFreeze(level, belowPos, checkNeighbors=false)
+            // --- ice: vanilla's own freeze predicate at belowPos, neighbour checking off
             let inside_below = below_y >= min_y && below_y <= max_y;
             if inside_below && !warm_enough_to_rain(climate, noise, x, below_y, z, sea_level) {
                 // The block-light gate (`< 10`) is unconditionally true during
@@ -682,7 +686,7 @@ pub fn apply_freeze_top_layer<'b>(
                 }
             }
 
-            // --- snow: Biome.shouldSnow(level, topPos)
+            // --- snow: vanilla's own snow predicate at topPos
             if !climate.has_precipitation {
                 continue;
             }
@@ -692,7 +696,7 @@ pub fn apply_freeze_top_layer<'b>(
             }
             let top_state = grid.get(x, top_y, z).to_owned();
             let top_base = base_id(&top_state);
-            // `state.isAir() || state.is(Blocks.SNOW)` (`Biome.java:190`).
+            // Vanilla's own check: air, or already a snow layer.
             if !(is_air(top_base) || top_base == "minecraft:snow") {
                 continue;
             }
@@ -718,7 +722,7 @@ pub fn apply_freeze_top_layer<'b>(
     counts
 }
 
-/// `belowState.setValue(SnowyBlock.SNOWY, true)` on a canonical state string.
+/// Vanilla's own `snowy` property set to `true`, on a canonical state string.
 ///
 /// Property order in a canonical string is alphabetical (see
 /// [`super::canon_state`]), and `snowy` is only ever carried by `grass_block`,
@@ -816,7 +820,7 @@ mod tests {
     }
 
     /// The height adjustment must be inert at or below `seaLevel + 17` and active
-    /// above it — the branch `Biome.java:115` takes.
+    /// above it — the branch vanilla's own check takes.
     #[test]
     fn height_adjustment_is_inert_at_or_below_snow_level() {
         let noise = ClimateNoise::new();
