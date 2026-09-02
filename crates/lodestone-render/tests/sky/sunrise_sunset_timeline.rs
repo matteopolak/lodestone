@@ -116,7 +116,7 @@ fn pack_opaque(rgb: [u8; 3]) -> u32 {
         | u32::from(rgb[2])
 }
 
-/// Vanilla's `ARGB.multiply` (`ARGB.java:80`) — byte-space, integer-truncating.
+/// Vanilla's `ARGB.multiply` (`ARGB`'s own decompiled source) — byte-space, integer-truncating.
 /// Reproduced here rather than imported because the crate's own composition
 /// path goes through linear RGB floats (`fog::multiply_gamma`), and this column
 /// exists to check the *shape* of that arithmetic independently of the float

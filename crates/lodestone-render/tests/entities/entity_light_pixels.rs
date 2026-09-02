@@ -501,7 +501,7 @@ fn lighting_census_by_location() {
 ///
 /// # Three predictions, named
 ///
-/// All three are arithmetic on `lightmap.fsh` and `Options.java:900`, written out
+/// All three are arithmetic on `lightmap.fsh` and `Options`'s own decompiled source, written out
 /// below rather than read back from `lodestone_render::light`.
 ///
 /// * [`LIT_RATIO`] — the correct one. At [`LIGHT_DIM`] the level is `7/15`,
@@ -580,7 +580,7 @@ fn a_mob_in_shadow_is_darker_than_the_same_mob_in_sunlight() {
 /// fix overshot: `get_brightness(0)` is indeed `0`, yet `lightmap.fsh` seeds its
 /// accumulator with `max(AmbientColor, nightVisionColor)` *before* adding either
 /// light half, and the overworld's `AMBIENT_LIGHT_COLOR` is `0x0A0A0A`
-/// (`DimensionTypes.java:36`), not black. After the `notGamma` mix an unlit
+/// (`DimensionTypes`'s own decompiled source), not black. After the `notGamma` mix an unlit
 /// surface reads `0.0935`. So a mob at light 0 is *very dark but not black*.
 ///
 /// This asserts a **band**, because there are three live hypotheses and a

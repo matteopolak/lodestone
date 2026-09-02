@@ -408,7 +408,7 @@ fn readback(
 ///
 /// Every number below is arithmetic on `assets/minecraft/shaders/core/
 /// lightmap.fsh` and `Timelines`/`EnvironmentAttributes` out of the real 26.2
-/// `client.jar`, plus `Options.java`'s default gamma — **not** read back from
+/// `client.jar`, plus `Options`'s own decompiled source's default gamma — **not** read back from
 /// this crate. For a sky-15, block-0 mob, `get_brightness(15/15) = 1.0` and
 /// `SkyFactor` at midnight is `0.24`, so `sky_brightness = 0.24` and:
 ///

@@ -11,8 +11,7 @@
 //! then drew **zero pixels**.
 //!
 //! The fix synthesises vanilla's geometry for those items:
-//! `ItemModelGenerator` (26.2,
-//! `net.minecraft.client.resources.model.cuboid`) extrudes the sprite into a
+//! vanilla's item-model-generator class (26.2) extrudes the sprite into a
 //! 1/16-block slab — a `SOUTH` face, a `NORTH` face with reversed `u`, and one
 //! edge quad per boundary texel of the sprite's **alpha outline**.
 //!

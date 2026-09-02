@@ -204,7 +204,7 @@ fn expected_fog_value(camera: &Camera, x: u32, y: u32) -> Option<f32> {
 /// [`expected_fog_value`] for an explicit `sky_fog_end`, in blocks.
 ///
 /// Issue #399 made the fog end a function of the render distance
-/// (`min(renderDistanceInBlocks, 512)`, `AtmosphericFogEnvironment.java:73`), so
+/// (`min(renderDistanceInBlocks, 512)`, `AtmosphericFogEnvironment`'s own decompiled source), so
 /// the expected value is no longer derivable from the disc's geometry alone. Note
 /// which half of that changed: the *disc* is still 512 blocks across and the
 /// membership test below is unchanged — only the divisor moves, which is why a
@@ -398,8 +398,8 @@ fn the_horizon_gradient_matches_the_per_pixel_fog_value() {
 /// must produce in blocks.
 ///
 /// Both `want_end` values are `Math.min(renderDistanceInChunks * 16, 512)` worked
-/// by hand from `AtmosphericFogEnvironment.java:73` plus
-/// `FogRenderer.java:185`/`:193` — **not** from
+/// by hand from `AtmosphericFogEnvironment`'s own decompiled source plus
+/// `FogRenderer`'s own decompiled source/`:193` — **not** from
 /// `sky_fog_end_for_render_distance`, which is code under test here.
 ///
 /// 8 and 32 are the pair that matters. 32 is the *only* render distance at which
@@ -462,7 +462,7 @@ fn the_horizon_gradient_ends_at_the_render_distance_not_at_a_constant() {
         assert_eq!(
             frame.sky_fog_end, want_end,
             "SkyFrame::with_render_distance({chunks}) produced a fog end of {} where \
-             AtmosphericFogEnvironment.java:73 says min({chunks} * 16, 512) = {want_end}",
+             vanilla's decompiled atmospheric-fog-environment source says min({chunks} * 16, 512) = {want_end}",
             frame.sky_fog_end
         );
         let pixels = render(&ctx, &camera, &frame);

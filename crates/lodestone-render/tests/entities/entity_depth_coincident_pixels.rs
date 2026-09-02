@@ -6,20 +6,20 @@
 //! snippet pins the depth state explicitly:
 //!
 //! ```text
-//! RenderPipelines.java:49-56
+//! vanilla's decompiled render-pipelines source
 //!   private static final RenderPipeline.Snippet ENTITY_SNIPPET = RenderPipeline.builder(...)
 //!      ...
 //!      .withDepthStencilState(DepthStencilState.DEFAULT)
 //!      .buildSnippet();
 //!
-//! DepthStencilState.java:5-6
+//! vanilla's decompiled depth-stencil-state source
 //!   public record DepthStencilState(CompareOp depthTest, boolean writeDepth,
 //!                                   float depthBiasScaleFactor, float depthBiasConstant) {
 //!      public static final DepthStencilState DEFAULT =
 //!          new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true);
 //! ```
 //!
-//! `ENTITY_SOLID` (`RenderPipelines.java:232`), `ENTITY_CUTOUT`
+//! `ENTITY_SOLID` (`RenderPipelines`'s own decompiled source), `ENTITY_CUTOUT`
 //! (`:245`), `ENTITY_CUTOUT_CULL` (`:238`) and `ENTITY_TRANSLUCENT` (`:274`)
 //! all inherit it — none of them overrides `withDepthStencilState`. This engine
 //! is reversed-Z like vanilla, so `GREATER_THAN_OR_EQUAL` is
@@ -59,7 +59,7 @@
 //!   plus a full sky contribution clamps at 1.0, and `not_gamma` is the identity
 //!   at 1.0.
 //! * The derived normal is `+Z`. Vanilla's two diffuse lights are
-//!   `Lighting.java:17-18`, `(0.2, 1.0, -0.7)` and `(-0.2, 1.0, 0.7)`
+//!   `Lighting`'s own decompiled source, `(0.2, 1.0, -0.7)` and `(-0.2, 1.0, 0.7)`
 //!   normalised, so `d0 = max(-0.7/√1.53, 0) = 0` and `d1 = 0.7/√1.53 =
 //!   0.565910`.
 //! * `light.glsl:3-4` gives `MINECRAFT_LIGHT_POWER 0.6` /
@@ -122,7 +122,7 @@ const CLEAR: wgpu::Color = wgpu::Color {
 const RED: [u8; 3] = [255, 0, 0];
 const BLUE: [u8; 3] = [0, 0, 255];
 
-/// `0.739546 * 255`, derived in the module docs from `Lighting.java:17-18` and
+/// `0.739546 * 255`, derived in the module docs from `Lighting`'s own decompiled source and
 /// `light.glsl:3-4`. The GPU's own rounding of the final sRGB encode is the only
 /// slack allowed.
 const EXPECTED_SURVIVOR_BYTE: i32 = 188;
