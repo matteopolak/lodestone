@@ -16,7 +16,7 @@
 //!
 //! ### 1. `Screen.keyPressed`: Escape, then the focused child, *then* navigation
 //!
-//! `Screen.java`, and the order is load-bearing:
+//! vanilla's own screen base, and the order is load-bearing:
 //!
 //! ```text
 //! 1. event.isEscape() && shouldCloseOnEsc()  -> onClose(), return true
@@ -34,7 +34,7 @@
 //! The corollary is the reason [`super::edit_box::EditBox`] can be dropped into
 //! a screen that already navigates with the arrow keys and not fight it:
 //! `EditBox.keyPressed` handles 262/263 (Left/Right) and 268/269 (Home/End) and
-//! explicitly **declines** 264/265 (Down/Up) — `EditBox.java` lists them
+//! explicitly **declines** 264/265 (Down/Up) — vanilla's own edit-box widget lists them
 //! in the `default:` group — so vertical arrows fall through to step 3 and move
 //! focus, while horizontal ones move the caret.
 //!
@@ -68,7 +68,7 @@
 //! ## Tab order is insertion order until something says otherwise
 //!
 //! `handleTabNavigation` sorts `children()` by `getTabOrderGroup()`
-//! (`TabOrderedElement.java`, default `0`) with `Collections.sort`, which is
+//! (vanilla's own tab-ordered-element interface, default `0`) with `Collections.sort`, which is
 //! **stable** — so an all-default screen tabs in the order widgets were added.
 //! [`FocusTarget::tab_order_group`] has the same default and
 //! [`FocusSet::next_focus_path`] uses `slice::sort_by_key`, which is Rust's
@@ -128,7 +128,7 @@
 //!   [`FocusSet`]/[`FocusTarget::apply_focus`] rather than on the path.
 //! - **[`ComponentPath`] is relative to the container that returned it.** In
 //!   vanilla every path returned by a container is wrapped
-//!   `ComponentPath.path(this, child)`, so the screen appears at its head; here
+//!   vanilla's own component-path type's `path(this, child)`, so the screen appears at its head; here
 //!   the [`FocusSet`] *is* `this`, so the head element of a returned path is
 //!   already a child id. Nothing nests yet — [`ComponentPath::Path`] exists for
 //!   the scroll list #396 needs, and [`FocusTarget::apply_focus`]'s default is
@@ -169,7 +169,7 @@ use super::layout::ipx;
 use super::widget::Widget;
 
 // GLFW key codes, spelled as vanilla's `switch` labels spell them so a port can
-// be diffed against `EditBox.java` and `Screen.java` directly.
+// be diffed against vanilla's own edit-box widget and vanilla's own screen base directly.
 /// `GLFW_KEY_ESCAPE`.
 pub const KEY_ESCAPE: i32 = 256;
 /// `GLFW_KEY_ENTER`.
@@ -220,7 +220,7 @@ pub const MOD_SUPER: i32 = 8;
 /// swaps to **Super** on macOS and leaves as **Control** elsewhere.
 ///
 /// Resolved at compile time from `target_os`, which is the closest thing to
-/// `Util.getPlatform()` available without a runtime probe. Hardcoding
+/// vanilla's own platform-utility type's `getPlatform()` available without a runtime probe. Hardcoding
 /// [`MOD_CONTROL`] would ship a client where Cmd+V silently does nothing on the
 /// platform this repo is developed on.
 pub const EDIT_SHORTCUT_MODIFIER: i32 = if cfg!(target_os = "macos") {
@@ -229,7 +229,7 @@ pub const EDIT_SHORTCUT_MODIFIER: i32 = if cfg!(target_os = "macos") {
     MOD_CONTROL
 };
 
-/// Vanilla's `KeyEvent` record (`client/input/KeyEvent.java`) plus the
+/// Vanilla's own `KeyEvent` record plus the
 /// `InputWithModifiers` predicates the GUI actually asks it for.
 ///
 /// `scancode` is dropped: nothing in `Screen`, `AbstractWidget` or `EditBox`
@@ -568,7 +568,7 @@ impl ScreenRectangle {
         }
     }
 
-    /// `empty()`, which is also `GuiEventListener.getRectangle()`'s default —
+    /// `empty()`, which is also vanilla's own gui-event-listener interface's `getRectangle()`'s default —
     /// and therefore what a widget that forgets to report its bounds navigates
     /// as.
     #[must_use]
@@ -714,13 +714,13 @@ pub enum ComponentPath {
 }
 
 impl ComponentPath {
-    /// `ComponentPath.leaf(component)`.
+    /// vanilla's own component-path type's `leaf(component)`.
     #[must_use]
     pub const fn leaf(id: usize) -> Self {
         Self::Leaf(id)
     }
 
-    /// `ComponentPath.path(container, childPath)`: `null` in, `null` out — which
+    /// vanilla's own component-path type's `path(container, childPath)`: `null` in, `null` out — which
     /// is the whole reason the static exists, and why every `nextFocusPath`
     /// caller can wrap unconditionally.
     #[must_use]
@@ -777,7 +777,7 @@ impl Registry {
         matches!(self, Self::RenderableWidget | Self::RenderableOnly)
     }
 
-    /// Whether `Screen.children()` holds this widget, i.e. whether it can be
+    /// Whether vanilla's own screen base's `children()` holds this widget, i.e. whether it can be
     /// clicked or focused at all. `addRenderableOnly` does **not** append here,
     /// which is the island.
     #[must_use]
@@ -915,7 +915,7 @@ pub trait FocusChildren {
 ///
 /// `Screen.keyPressed` returns `true` only for the Escape branch and `false`
 /// for *everything else* — including a keystroke a focused child consumed and
-/// including a navigation event that moved focus (`Screen.java`;
+/// including a navigation event that moved focus (vanilla's own screen base;
 /// the final `return false` is after the navigation block). That is fine in
 /// vanilla, where the caller only asks "should this fall through to a
 /// `KeyMapping`", and useless to a caller that has to decide whether the screen
@@ -953,7 +953,7 @@ pub struct FocusSet {
     narratables: Vec<usize>,
     /// `AbstractContainerEventHandler.focused`.
     focused: Option<usize>,
-    /// `Screen.shouldCloseOnEsc()`. `true` in vanilla's base class
+    /// vanilla's own screen base's `shouldCloseOnEsc()`. `true` in vanilla's base class
     ///; `DeathScreen` is the notable `false`.
     close_on_esc: bool,
 }
@@ -962,7 +962,7 @@ impl Default for FocusSet {
     /// **Not** `derive`d, for the same reason [`Widget`]'s is not: a derived
     /// `Default` would give `close_on_esc = false`, i.e. every screen built from
     /// `..Default::default()` would silently swallow Escape and trap the player.
-    /// Vanilla's `Screen.shouldCloseOnEsc()` returns `true`.
+    /// Vanilla's own screen base's `shouldCloseOnEsc()` returns `true`.
     fn default() -> Self {
         Self::new()
     }
@@ -1023,7 +1023,7 @@ impl FocusSet {
         }
     }
 
-    /// `Screen.children()` — dispatch and tab order.
+    /// vanilla's own screen base's `children()` — dispatch and tab order.
     #[must_use]
     pub fn children(&self) -> &[usize] {
         &self.children
@@ -1047,11 +1047,11 @@ impl FocusSet {
         self.focused
     }
 
-    /// `AbstractContainerEventHandler.setFocused(child)`: unfocus the outgoing
+    /// vanilla's own abstract container-event-handler base's `setFocused(child)`: unfocus the outgoing
     /// child, focus the incoming one, and do neither when nothing changed.
     ///
     /// The no-op-when-equal guard is not an optimisation:
-    /// `EditBox.setFocused(true)` resets the caret blink phase
+    /// vanilla's own edit-box widget's `setFocused(true)` resets the caret blink phase
     ///, so re-setting the same focus would restart it.
     pub fn set_focused(&mut self, kids: &mut dyn FocusChildren, next: Option<usize>) {
         if self.focused == next {
@@ -1078,7 +1078,7 @@ impl FocusSet {
         child.is_focused().then(|| child.current_focus_path(id))
     }
 
-    /// `ComponentPath.applyFocus(focused)` for a path this set produced.
+    /// vanilla's own component-path type's `applyFocus(focused)` for a path this set produced.
     pub fn apply_focus(
         &mut self,
         kids: &mut dyn FocusChildren,
@@ -1100,7 +1100,7 @@ impl FocusSet {
         }
     }
 
-    /// `Screen.clearFocus()`.
+    /// vanilla's own screen base's `clearFocus()`.
     pub fn clear_focus(&mut self, kids: &mut dyn FocusChildren) {
         if let Some(path) = self.current_focus_path(&*kids) {
             self.apply_focus(kids, &path, false);
@@ -1111,7 +1111,7 @@ impl FocusSet {
         }
     }
 
-    /// `Screen.changeFocus(path)`: clear, then apply
+    /// vanilla's own screen base's `changeFocus(path)`: clear, then apply
     ///. The clear is why Tab's wrap works — see the
     /// module docs.
     pub fn change_focus(&mut self, kids: &mut dyn FocusChildren, path: &ComponentPath) {
@@ -1119,7 +1119,7 @@ impl FocusSet {
         self.apply_focus(kids, path, true);
     }
 
-    /// `Screen.setInitialFocus(target)`: offer `id` an
+    /// vanilla's own screen base's `setInitialFocus(target)`: offer `id` an
     /// `InitialFocus` event and take the focus there if it accepts.
     pub fn set_initial_focus(&mut self, kids: &mut dyn FocusChildren, id: usize) {
         let accepts = kids.get(id).is_some_and(|c| c.takes_focus());
@@ -1129,7 +1129,7 @@ impl FocusSet {
         }
     }
 
-    /// `ContainerEventHandler.getChildAt(x, y)`: the **first** child in
+    /// vanilla's own container-event-handler interface's `getChildAt(x, y)`: the **first** child in
     /// `children()` order whose `isMouseOver` is true. Not the topmost — see the
     /// module docs.
     #[must_use]
@@ -1236,7 +1236,7 @@ impl FocusSet {
     ) -> Option<ComponentPath> {
         if let Some(id) = self.focused {
             if let Some(path) = self.child_focus_path(kids, id, event) {
-                // Vanilla wraps in `ComponentPath.path(this, ..)`; `this` is
+                // Vanilla wraps in vanilla's own component-path type's `path(this, ..)`; `this` is
                 // implicit here (module docs), so the child's own path is
                 // already relative to this container.
                 return Some(path);
@@ -2085,7 +2085,7 @@ mod tests {
 
     #[test]
     fn the_edit_shortcut_modifier_is_cmd_on_macos_and_ctrl_elsewhere() {
-        // `InputQuirks.java`. Asserted against `cfg!` rather than restated, so
+        // vanilla's own input-quirks constants. Asserted against `cfg!` rather than restated, so
         // this cannot agree with itself.
         assert_eq!(
             EDIT_SHORTCUT_MODIFIER,
@@ -2164,7 +2164,7 @@ mod tests {
     #[test]
     fn two_clicks_slower_than_the_threshold_do_not_double() {
         // The coordinator's requested control: run it, watch it fail to
-        // double. 300 ms is on the wrong side of `MouseHandler.java`'s strict
+        // double. 300 ms is on the wrong side of vanilla's own mouse-handler type's strict
         // `< 250L`, so the predicted value is `false`, not "some smaller
         // truthiness" — a wrong hypothesis here would be `true` if the
         // threshold were mistakenly read as `<=` or padded upward.
