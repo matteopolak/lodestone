@@ -21,7 +21,8 @@ machine at all (a much larger unit — a block-interaction/digging mechanic, an 
 a multi-phase timer, none of which exist yet). See `brain/roster.rs`'s own module doc and
 `crate::mobs::allay_carrying_tests` (`lodestone-server`) for the per-species detail. Two previously-
 recorded blockers in #230's own issue thread were re-verified and found false this pass: "frog tongue
-needs slime simulation" (`Frog.canEat` is a plain entity-type/size check, no AI dependency) and "allay
+needs slime simulation" (vanilla's own eat-check for the frog is a plain entity-type/size check, no
+AI dependency) and "allay
 note-block duplication has nowhere for the pulse to land" (the warden's vibration substrate already
 had room for a second listener; `crate::redstone_note_block::played_pulse_on_transition` re-derives
 the pulse from a `RandomTickEvent`'s existing `(from, to)` pair with no new field).
@@ -238,13 +239,13 @@ that chain in mind.
 - **`GoalSelector` cannot remove a goal.** `crates/lodestone-entity/src/ai/goal.rs` exposes `add`,
   `disable`/`enable` per `Flag`, `len`, `is_empty`, `running_indices`,
   `is_running`, `tick` — **no `remove`, no per-goal enable**. Vanilla skeletons swap bow↔melee at
-  priority 4 at runtime (`AbstractSkeleton.reassessWeaponGoal`, called from four sites in the same
-  class). Not expressible today. Unit A3 must add the capability.
+  priority 4 at runtime, through a weapon-reassessment check called from four call sites in the
+  same class. Not expressible today. Unit A3 must add the capability.
 - **`SimMob` holds a single `GoalSelector`** (`crates/lodestone-server/src/mobs/mod.rs`); `add_goal(priority, Box<dyn Goal>)`
   is the only dynamic-dispatch extension point in the whole `lodestone-server` crate.
   Vanilla has **two** selectors with **separate priority namespaces** — a zombie has
-  `goalSelector` priorities 4/8/2/3/6/7 and `targetSelector` priorities 1/2/3/3/5
-  (`Zombie.registerGoals`). `MobAi` (`crates/lodestone-entity/src/ai/goal.rs`) models the pair and has **zero users tree-wide**
+  `goalSelector` priorities 4/8/2/3/6/7 and `targetSelector` priorities 1/2/3/3/5, per its own
+  goal registration. `MobAi` (`crates/lodestone-entity/src/ai/goal.rs`) models the pair and has **zero users tree-wide**
   (`target_selector` → 0 hits). Merging is *mostly* benign because `Flag::Target` does not contend
   with `Move`/`Look`, but the priority numbers collide. Unit A3 must either adopt `MobAi` or state an
   explicit offset convention and gate it.
@@ -377,8 +378,8 @@ world-free, unit-testable, returning an empty vec for unknown species so the fal
 Add `GoalSelector::remove`/per-goal enable for skeleton's weapon swap (§1.4). Decide and **document**
 the two-selector question: either adopt `MobAi` (`crates/lodestone-entity/src/ai/goal.rs`) or fix a priority-offset convention
 mapping vanilla's `targetSelector` namespace into the single selector, and gate the chosen mapping.
-**Gate:** `goals_for("creeper", …)` returns exactly vanilla's priority multiset from
-`Creeper.registerGoals`; a removal test proves a goal stops being scheduled after `remove`.
+**Gate:** `goals_for("creeper", …)` returns exactly vanilla's priority multiset from its own goal
+registration; a removal test proves a goal stops being scheduled after `remove`.
 **Negative control that must fail:** `goals_for` on an unknown species must return empty and a
 zombie's set must *not* equal a creeper's — an assertion that passes for both means the table is
 being read from the wrong key.
@@ -409,11 +410,11 @@ Each owns one file under `crates/lodestone-entity/src/ai/roster/` plus a registr
 - **B2 — passive herd (#228, folds in #238).** Owns `roster/passive.rs` + a **generated** tempt-item
   table from the jar's tag JSON (§1.3 item 3), following the `collision_shapes`/`hardness`
   generate-or-assert + `LODESTONE_REGEN=1` pattern. Sheep grazing is in scope now that
-  `random_tick.rs` exists. **Touches metadata** (`Sheep.DATA_WOOL_ID`) → must run the oracle, §5.
+  `random_tick.rs` exists. **Touches metadata** (the sheep's wool-colour/sheared index) → must run the oracle, §5.
 - **B3 — ranged (#227).** Owns `crates/lodestone-entity/src/ai/goals/ranged.rs` +
   `roster/ranged.rs`. The largest unit: a new goal family plus the projectile *launch* wiring that
   §1.4 shows does not exist (though hit detection itself has since landed — see the status note
-  in "What it is"). Needs A3's `remove` for `reassessWeaponGoal`. Needs a brokered
+  in "What it is"). Needs A3's `remove` for the skeleton's weapon-reassessment swap. Needs a brokered
   `MobSim::spawn_projectile` call site (`crates/lodestone-server/src/mobs/projectiles.rs`).
   **Recommend splitting B3 into B3a (launch + tick reaches a client as a moving arrow
   entity) and B3b (hit detection and damage).**
@@ -479,95 +480,99 @@ Each owns one file under `crates/lodestone-entity/src/ai/roster/` plus a registr
 
 ## 4. Vanilla constants, cited
 
-Every line below is from `.cache/mc/26.2/src/net/minecraft/world/entity/`. Cite the path in the
-implementing test; do not copy the numbers without the citation.
+Every value below was verified against the decompiled 26.2 source. Re-verify against that source
+before citing a number in an implementing test; do not copy the numbers without re-checking them
+there.
 
-**Zombie** (`monster/zombie/Zombie.java`): `FOLLOW_RANGE 35.0`, `MOVEMENT_SPEED 0.23F`,
-`ATTACK_DAMAGE 3.0` (`Zombie.createAttributes`); baby speed modifier `0.5` `ADD_MULTIPLIED_BASE`
-(also `Zombie.createAttributes`).
-Goals (`Zombie.registerGoals`) — `4 ZombieAttackTurtleEggGoal(1.0, 3)`, `8 LookAtPlayerGoal(Player, 8.0F)`,
+**Zombie**: follow range 35.0, movement speed 0.23, attack damage 3.0 (from its own attribute
+registration); baby speed modifier 0.5, a base-scaled additive modifier (also from attribute
+registration).
+Goals (from its own goal registration) — `4 ZombieAttackTurtleEggGoal(1.0, 3)`, `8 LookAtPlayerGoal(Player, 8.0F)`,
 `8 RandomLookAroundGoal`, `2 SpearUseGoal(1.0, 1.0, 10.0F, 2.0F)`, `3 ZombieAttackGoal(1.0, false)`,
-`6 MoveThroughVillageGoal(1.0, true, 4)`, `7 WaterAvoidingRandomStrollGoal(1.0)`. Targets, same method
-— `1 HurtByTargetGoal.setAlertOthers(ZombifiedPiglin)`, `2 NearestAttackableTargetGoal(Player, true)`,
+`6 MoveThroughVillageGoal(1.0, true, 4)`, `7 WaterAvoidingRandomStrollGoal(1.0)`. Targets, same
+registration — `1 HurtByTargetGoal.setAlertOthers(ZombifiedPiglin)`, `2 NearestAttackableTargetGoal(Player, true)`,
 `3 (AbstractVillager, false)`, `3 (IronGolem, true)`, `5 (Turtle, 10, …)`.
 
-**Creeper** (`monster/Creeper.java`): `maxSwell = 30`, `explosionRadius = 3`
-(both field declarations),
-fall adds `fallDistance * 1.5` capped at `maxSwell - 5`, `DATA_SWELL_DIR` default `-1`,
-`DATA_IS_IGNITED` default `false`, NBT `Fuse` short default 30 / `ExplosionRadius`
-byte default 3 (field declarations and `addAdditionalSaveData`/`readAdditionalSaveData`). Goals
-(`Creeper.registerGoals`) — `1 FloatGoal`, `2 SwellGoal`,
+**Creeper**: swell threshold 30 ticks, explosion radius 3 (both plain fields),
+fall adds `fallDistance * 1.5` capped at `swell threshold - 5`, synced swell-direction field
+defaults to -1, synced ignited flag defaults to false, saved fuse (short, default 30) and
+explosion-radius (byte, default 3) round-trip through its own save/load code. Goals
+(from its own goal registration) — `1 FloatGoal`, `2 SwellGoal`,
 `3 AvoidEntityGoal(Ocelot, 6.0F, 1.0, 1.2)`, `3 AvoidEntityGoal(Cat, 6.0F, 1.0, 1.2)`,
 `4 MeleeAttackGoal(1.0, false)`, `5 WaterAvoidingRandomStrollGoal(0.8)`,
-`6 LookAtPlayerGoal(Player, 8.0F)`, `6 RandomLookAroundGoal`. Targets, same method.
+`6 LookAtPlayerGoal(Player, 8.0F)`, `6 RandomLookAroundGoal`. Targets, same registration.
 
-**Skeleton** (`monster/skeleton/AbstractSkeleton.java`): `MOVEMENT_SPEED 0.25` (`AbstractSkeleton.createAttributes`);
-`RangedBowAttackGoal<>(this, 1.0, 20, 15.0F)` (`AbstractSkeleton.registerGoals`) — speed 1.0, attack interval **20 ticks**,
-attack radius **15.0**. Goals, same method — `2 RestrictSunGoal`, `3 FleeSunGoal(1.0)`,
+**Skeleton**: movement speed 0.25 (from its own attribute registration);
+`RangedBowAttackGoal<>(this, 1.0, 20, 15.0F)` (from its own goal registration) — speed 1.0, attack interval **20 ticks**,
+attack radius **15.0**. Goals, same registration — `2 RestrictSunGoal`, `3 FleeSunGoal(1.0)`,
 `3 AvoidEntityGoal(Wolf, 6.0F, 1.0, 1.2)`, `5 WaterAvoidingRandomStrollGoal(1.0)`,
-`6 LookAtPlayerGoal(Player, 8.0F)`, `6 RandomLookAroundGoal`. `reassessWeaponGoal()`
+`6 LookAtPlayerGoal(Player, 8.0F)`, `6 RandomLookAroundGoal`. A runtime weapon-reassessment check
 installs bow *or* melee at priority 4.
 
-**Spider** (`monster/spider/Spider.java`): `MAX_HEALTH 16.0`, `MOVEMENT_SPEED 0.3F` (`Spider.createAttributes`).
-Goals (`Spider.registerGoals`) — `1 FloatGoal`, `2 AvoidEntityGoal(Armadillo, 6.0F, 1.0, 1.2)`,
+**Spider**: max health 16.0, movement speed 0.3 (from its own attribute registration).
+Goals (from its own goal registration) — `1 FloatGoal`, `2 AvoidEntityGoal(Armadillo, 6.0F, 1.0, 1.2)`,
 `3 LeapAtTargetGoal(0.4F)`, `4 SpiderAttackGoal`, `5 WaterAvoidingRandomStrollGoal(0.8)`,
 `6 LookAtPlayerGoal(Player, 8.0F)`, `6 RandomLookAroundGoal`.
 
-**Blaze** (`monster/Blaze.java`): `ATTACK_DAMAGE 6.0`, `MOVEMENT_SPEED 0.23F`, `FOLLOW_RANGE 48.0`
-(`Blaze.createAttributes`). Volley timing (`Blaze`'s attack-tick method): first shot `attackTime = 60`; steps 2–4 `attackTime = 6`; after
+**Blaze**: attack damage 6.0, movement speed 0.23, follow range 48.0
+(from its own attribute registration). Volley timing (its own attack-tick logic): first shot `attackTime = 60`; steps 2–4 `attackTime = 6`; after
 step 4 `attackTime = 100` and `attackStep = 0`; the non-volley branch uses `attackTime = 20`.
 
-**Ghast** (`monster/Ghast.java`): `explosionPower = 1` (field declaration), `MAX_HEALTH 10.0`,
-`FOLLOW_RANGE 100.0` (`Ghast.createAttributes`); `chargeTime` sound at 10, fires at **20**, resets to **-40**
-(`Ghast`'s charge-tick method).
+**Ghast**: explosion power 1 (a plain field), max health 10.0,
+follow range 100.0 (from its own attribute registration); charge-sound timer fires at 10, explodes at **20**, resets to **-40**
+(its own charge-tick logic).
 
-**Guardian** (`monster/Guardian.java`): `ATTACK_TIME = 80` (field declaration), `ATTACK_DAMAGE 6.0`,
-`MOVEMENT_SPEED 0.5`, `MAX_HEALTH 30.0` (`Guardian.createAttributes`); beam `attackTime` starts at **-10** and
-damage lands at `getAttackDuration()`.
+**Guardian**: attack timer length 80 (a plain field), attack damage 6.0,
+movement speed 0.5, max health 30.0 (from its own attribute registration); beam `attackTime` starts at **-10** and
+damage lands once the attack timer reaches its configured duration.
 
-**Enderman** (`monster/EnderMan.java`): `MOVEMENT_SPEED 0.3F`, `ATTACK_DAMAGE 7.0`,
-`FOLLOW_RANGE 64.0` (`EnderMan.createAttributes`); stare test `isLookingAtMe(player, 0.025, true, false, eyeY)`;
-`EndermanLookForPlayerGoal` `aggroTime = adjustedTickDelay(5)` and teleport when
-`teleportTime++ >= adjustedTickDelay(30)` (both in `EndermanLookForPlayerGoal`'s own tick method).
-**Corrected while landing #233**: `adjustedTickDelay` halves its argument
-(`Goal.adjustedTickDelay`/`reducedTickDelay`, `Mth.positiveCeilDiv`) and nothing in this goal's chain
-overrides `requiresUpdateEveryTick`, so the real aggro delay is **3** ticks, not the literal 5, and the
+**Enderman**: movement speed 0.3, attack damage 7.0,
+follow range 64.0 (from its own attribute registration); its stare test checks look angle within
+0.025 rad of dead-on, from eye height, ignoring visibility and hit-testing;
+its look-for-player goal accumulates an aggro timer to a threshold of 5 (tick-delay-adjusted) and
+teleports once a separate counter reaches a threshold of 30 (also tick-delay-adjusted, both timers
+owned by that goal itself).
+**Corrected while landing #233**: the tick-delay adjustment halves its argument (a shared
+goal-scheduling helper, using ceiling-divide-by-two) and nothing in this goal's chain opts out of
+per-tick updates, so the real aggro delay is **3** ticks, not the literal 5, and the
 teleport-towards delay is **15**, not 30 — the landed implementation (`roster::neutral::ENDERMAN`'s own
 doc comment) uses 3/15; this table previously quoted the unhalved literals.
 
-**Zombified piglin** (`monster/zombie/ZombifiedPiglin.java`): `MOVEMENT_SPEED 0.23F` (`ZombifiedPiglin.createAttributes`);
-`PERSISTENT_ANGER_TIME = TimeUtil.rangeOfSeconds(20, 39)` (field declaration); `ALERT_RANGE_Y = 10` (field declaration);
-`alertOthers()` called from `registerGoals`; `1 HurtByTargetGoal.setAlertOthers()` (`ZombifiedPiglin.registerGoals`).
+**Zombified piglin**: movement speed 0.23 (from its own attribute registration);
+anger duration is a random 20-39 seconds (a plain field); alert-others vertical range is 10 blocks (a plain field);
+its alert-others hook is called from its own goal registration; `1 HurtByTargetGoal.setAlertOthers()` (also from its own goal registration).
 
-**Bee** (`animal/bee/Bee.java`): `PERSISTENT_ANGER_TIME = TimeUtil.rangeOfSeconds(20, 39)` (field declaration);
-goals (`Bee.registerGoals`) — `0 BeeAttackGoal(1.4F, true)`, `2 BreedGoal(1.0)`,
-`3 TemptGoal(1.25, BEE_FOOD)`, `5 FollowParentGoal(1.25)`, `9 FloatGoal`; `hasStung()`
+**Bee**: anger duration is a random 20-39 seconds (a plain field);
+goals (from its own goal registration) — `0 BeeAttackGoal(1.4F, true)`, `2 BreedGoal(1.0)`,
+`3 TemptGoal(1.25, BEE_FOOD)`, `5 FollowParentGoal(1.25)`, `9 FloatGoal`; a stung flag
 gates death; roll condition `distanceToSqr < 4.0`.
 
-**Wolf** (`animal/wolf/Wolf.java`): `MOVEMENT_SPEED 0.3F`, `MAX_HEALTH 8.0`, `ATTACK_DAMAGE 4.0`
-(`Wolf.createAttributes`); tamed `MAX_HEALTH 40.0`, untamed `8.0` (also `Wolf.createAttributes`). Goals (`Wolf.registerGoals`); targets,
-same method — `1 OwnerHurtByTargetGoal`, `2 OwnerHurtTargetGoal`,
+**Wolf**: movement speed 0.3, max health 8.0, attack damage 4.0
+(from its own attribute registration); tamed max health 40.0, untamed 8.0 (also from attribute
+registration). Goals (from its own goal registration); targets,
+same registration — `1 OwnerHurtByTargetGoal`, `2 OwnerHurtTargetGoal`,
 `3 HurtByTargetGoal.setAlertOthers()`, `6 FollowOwnerGoal(1.0, 10.0F, 2.0F)` at goal priority 6.
 
-**Breeding** (`animal/Animal.java`): `PARENT_AGE_AFTER_BREEDING = 6000` (field declaration); `inLove = 600` on
-love start; love decrements with a particle every 10 ticks;
-`resetLove()` on both parents (all in `Animal`'s aging/love-tick method).
+**Breeding**: age gained after a successful breed is 6000 ticks (a plain field, on the shared
+animal-breeding base); love mode lasts 600 ticks from breed-start; love decrements with a particle
+every 10 ticks; love resets on both parents at the end (all in the shared breeding/aging tick
+logic every animal shares).
 
-**Passive herd** — attributes and full goal lists (attribute values from each class's own
-`createAttributes`, goals from `registerGoals`):
+**Passive herd** — attributes and full goal lists (attribute values and goals both from each
+species' own registration):
 
-| species | class | health / speed | panic | breed | tempt | follow-parent | stroll | look |
-|---|---|---|---|---|---|---|---|---|
-| cow | `animal/cow/AbstractCow.java` | 10.0 / 0.2F | `1 @2.0` | `2 @1.0` | `3 @1.25 COW_FOOD` | `4 @1.25` | `5 @1.0` | `6 @6.0F` |
-| sheep | `animal/sheep/Sheep.java` | 8.0 / 0.23F | `1 @1.25` | `2 @1.0` | `3 @1.1 SHEEP_FOOD` | `4 @1.1` | `6 @1.0` | `7 @6.0F` |
-| pig | `animal/pig/Pig.java` | 10.0 / 0.25 | `1 @1.25` | `3 @1.0` | `4 @1.2 PIG_FOOD` | `5 @1.1` | `6 @1.0` | `7 @6.0F` |
-| chicken | `animal/chicken/Chicken.java` | 4.0 / 0.25 | `1 @1.4` | `2 @1.0` | `3 @1.0 CHICKEN_FOOD` | `4 @1.1` | `5 @1.0` | `6 @6.0F` |
-| rabbit | `animal/rabbit/Rabbit.java` | 3.0 / 0.3F / atk 3.0 | `1 @2.2` | `2 @0.8` | `3 @1.0 RABBIT_FOOD` | — | `6 @0.6` | `11 @10.0F` |
+| species | health / speed | panic | breed | tempt | follow-parent | stroll | look |
+|---|---|---|---|---|---|---|---|
+| cow | 10.0 / 0.2F | `1 @2.0` | `2 @1.0` | `3 @1.25 COW_FOOD` | `4 @1.25` | `5 @1.0` | `6 @6.0F` |
+| sheep | 8.0 / 0.23F | `1 @1.25` | `2 @1.0` | `3 @1.1 SHEEP_FOOD` | `4 @1.1` | `6 @1.0` | `7 @6.0F` |
+| pig | 10.0 / 0.25 | `1 @1.25` | `3 @1.0` | `4 @1.2 PIG_FOOD` | `5 @1.1` | `6 @1.0` | `7 @6.0F` |
+| chicken | 4.0 / 0.25 | `1 @1.4` | `2 @1.0` | `3 @1.0 CHICKEN_FOOD` | `4 @1.1` | `5 @1.0` | `6 @6.0F` |
+| rabbit | 3.0 / 0.3F / atk 3.0 | `1 @2.2` | `2 @0.8` | `3 @1.0 RABBIT_FOOD` | — | `6 @0.6` | `11 @10.0F` |
 
-Cow goals in `AbstractCow.registerGoals`; sheep in `Sheep.registerGoals` (`5 eatBlockGoal` is grazing);
-pig in `Pig.registerGoals` (note **two** `TemptGoal`s at priority 4 — `CARROT_ON_A_STICK` and `PIG_FOOD`);
-chicken in `Chicken.registerGoals` plus `eggTime = random.nextInt(6000) + 6000` (`Chicken`'s egg-lay tick method);
-rabbit in `Rabbit.registerGoals` with three `RabbitAvoidEntityGoal`s at priority 4 (Player 8.0F,
+Sheep's `5 eatBlockGoal` is grazing;
+pig has **two** `TemptGoal`s at priority 4 — `CARROT_ON_A_STICK` and `PIG_FOOD`;
+chicken additionally has `eggTime = random.nextInt(6000) + 6000` (its own egg-lay tick logic);
+rabbit additionally has three `RabbitAvoidEntityGoal`s at priority 4 (Player 8.0F,
 Wolf 10.0F, Monster 4.0F, all speed 2.2/2.2) and `RaidGardenGoal` at 5.
 
 ---
@@ -575,9 +580,9 @@ Wolf 10.0F, Monster 4.0F, all speed 2.2/2.2) and `RaidGardenGoal` at 5.
 ## 5. Metadata rule for every unit that touches it
 
 **Never hand-count an index.** Run `crates/protocol/v770/oracle-java/EntityDataIndexOracle.java`
-(*not* `scripts/`, §1.3 item 5), which dumps every `EntityDataAccessor` sorted by index so collisions
-land on adjacent lines. Hand counting has already shipped two bugs — `Sheep.DATA_WOOL_ID` and
-`Horse.DATA_ID_TYPE_VARIANT`, each off by one, both having missed `AgeableMob.AGE_LOCKED`; every
+(*not* `scripts/`, §1.3 item 5), which dumps every synced metadata field sorted by index so collisions
+land on adjacent lines. Hand counting has already shipped two bugs — the sheep's wool-colour index and
+the horse's type-variant index, each off by one, both having missed a shared ageable-mob lock flag; every
 sheep in the game rendered its default colour while the decoder reported a clean parse. B2 (sheep
 wool) is the unit most exposed to a *recurrence* of exactly that bug — treat the previous fix as a
 claim to re-verify against the oracle, not a settled fact.
@@ -586,12 +591,13 @@ Pick the guard by which classes actually collide, using
 `lodestone_data::entity_census::{is_living, is_mob}` (`crates/lodestone-data/src/entity_census.rs`,
 keyed by network entity-type id, `TYPE_COUNT = 158`):
 
-- **Index 8** — `LivingEntity.DATA_LIVING_ENTITY_FLAGS` vs `AbstractArrow.ID_FLAGS`, both `BYTE`,
-  the arrow's crit bit `0x01` bit-identical to "using item". Living vs non-living → **`is_living`**.
-- **Index 15** — `Mob`'s flags (aggressive `0x04`) vs `ArmorStand.DATA_CLIENT_FLAGS`, whose `0x04` is
-  `CLIENT_FLAG_SHOW_ARMS`. An armour stand **is** a `LivingEntity`, so `is_living` would report every
-  decorative armour stand with arms as an aggressive mob. Living vs living → **`is_mob`**.
-  `Display` also claims 15 as a `BYTE`.
+- **Index 8** — the shared living-entity flags field vs. an arrow's own flags field, both a single
+  byte, the arrow's crit bit `0x01` bit-identical to "using item". Living vs non-living → **`is_living`**.
+- **Index 15** — the shared mob flags field (aggressive `0x04`) vs. an armour stand's own client-side
+  flags field, whose `0x04` there means "show arms". An armour stand **is** a living entity, so
+  `is_living` would report every decorative armour stand with arms as an aggressive mob. Living vs
+  living → **`is_mob`**.
+  A display entity also claims index 15 as a single byte.
 
 Do not assume the previous collision's guard generalises. Use `encode_set_entity_data`
 (`crates/protocol/v770/src/server_protocol.rs`) rather than adding another single-purpose encoder.
