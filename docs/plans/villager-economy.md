@@ -33,15 +33,16 @@ no line numbers.
   `PATH`. **No `JOB_SITE`, `POTENTIAL_JOB_SITE`, `HOME`, `MEETING_POINT` yet.**
 - `Activity` (`brain/activity.rs`) — **`CORE`, `IDLE`, `WORK`, `PLAY`, `REST`, `MEET`, `PANIC`,
   `FIGHT`, `AVOID`, `SWIM` are already declared.** The activity vocabulary for #231 exists.
-- `GateBehavior` with `OrderPolicy::Shuffled` + weighted run-one — vanilla's `RunOne` shape,
-  needed all over `VillagerGoalPackages`.
+- `GateBehavior` with `OrderPolicy::Shuffled` + weighted run-one — the weighted pick-one-of-many
+  shape every villager activity package leans on.
 - `BrainGoal` (`brain/driver.rs`) — the production driver: a `Goal` at priority 0 holding
   `Flag::Move + Flag::Look`, never interruptible, ticking the brain through
   `MobController::brain_mob`. `roster::goals_for` consults `brain::brain_for(species)`, and
   `MobSim::spawn_species` installs whatever `goals_for` returns — zero host-side knowledge of brains.
 - `BRAIN_SPECIES` (`brain/roster.rs`) — 20 species incl. **villager** and **piglin**, gated against
   the decompiled jar by `tests/brain_census.rs`. `zombie_villager` is correctly *not* a brain species
-  (it is a `Zombie`). Every brain species today gets the same generic CORE+IDLE `scaffold` — wander
+  (it runs the same goal-based AI a regular zombie does, not a Brain). Every brain species today
+  gets the same generic CORE+IDLE `scaffold` — wander
   and watch players, on real paths, in the running game.
 - `BrainMob` (`brain/mob.rs`) — the body seam, **10 methods**: rng, `game_time`, `position`,
   `in_water`, `move_to`/`navigation_done`/`navigation_stuck`/`stop_navigation`, `look_at`,
@@ -93,8 +94,8 @@ no line numbers.
 - **Serverbound `SELECT_TRADE` is decoded and discarded**: `v770::server_protocol` does
   `let _ = decode_full::<SelectTrade>(payload)` — a stranded packet, the serverbound island shape.
 - **The merchant *screen* is deliberately unimplemented**: `lodestone_shell::container::frame`
-  documents that `beacon` and `merchant` are excluded because `MerchantScreen.extractLabels`
-  composes trade-level text rather than merely moving an anchor.
+  documents that `beacon` and `merchant` are excluded because the merchant screen needs to compose
+  trade-level text rather than merely moving an anchor, unlike every other container screen.
 - **`VILLAGER_DATA` metadata decodes client-side** (`v770::packets::metadata`, serializer 18 → a
   villager type/profession/level variant) and the shell resolves variant textures
   (`EntityTexture::resolve` has a production caller since the mob-variant-texture fix). **But the
@@ -117,13 +118,14 @@ tree (`/usr/bin/grep -rn "Poi\|gossip\|Gossip"` across `lodestone-server`, `lode
 - **Trades are data files**: `.cache/mc/26.2/src/data/minecraft/villager_trade/<profession>/<1–5>/
   <name>.json` — plain `{gives, wants{id,count}, max_uses, xp, reputation_discount}` records — and
   `trade_set/<profession>/<level>.json` plus **`trade_set/wandering_trader/{buying,common,
-  uncommon}.json`** define the per-level pick sets. In 26.2 `VillagerTrades.java` is a
-  `BootstrapContext` data-gen class; the JSONs are the shipped truth. No container boot needed.
+  uncommon}.json`** define the per-level pick sets. In 26.2 the trade tables are produced by a
+  data-gen bootstrap class rather than hand-authored; the JSONs are the shipped truth. No container
+  boot needed.
 - **The villager schedule is a data file**: `.cache/mc/26.2/src/data/minecraft/timeline/
   villager_schedule.json` — keyframes `idle@10, work@2000, meet@9000, idle@11000, rest@12000`
-  (and the baby timeline) on a 24000-tick clock. 26.2 replaced the `Schedule` registry with
-  environment-attribute timelines (`Brain.setSchedule(EnvironmentAttributes.VILLAGER_ACTIVITY)` in
-  `Villager.java`); **do not transcribe pre-26.2 schedule constants from memory or wiki** — our
+  (and the baby timeline) on a 24000-tick clock. 26.2 replaced the old schedule-registry mechanism
+  with environment-attribute timelines set directly on the brain at spawn time;
+  **do not transcribe pre-26.2 schedule constants from memory or wiki** — our
   `Brain::set_schedule(Vec<(i32, Activity)>)` matches the keyframe shape exactly.
 - **Vanilla-authored POI region files**: `.cache/mc/survival/world/dimensions/minecraft/overworld/
   poi/*.mca` (and nether) — vanilla's own answer to "which blocks in this chunk are POIs, with what
@@ -135,10 +137,11 @@ tree (`/usr/bin/grep -rn "Poi\|gossip\|Gossip"` across `lodestone-server`, `lode
   other side.
 - 19 entity region files under `…/overworld/entities/` — whether they contain villagers with
   `Gossips`/`Offers` is unverified (§7).
-- Behaviour truth: `VillagerGoalPackages.java`, `GossipContainer.java` + `GossipType.java`,
-  `PoiTypes.java` (the block→POI table with capacities), `Villager.java`, `ZombieVillager.java`,
-  `WanderingTraderSpawner.java` (149 lines), `PatrolSpawner.java` (92 lines), `Raid.java` (847) +
-  `Raids.java` (196), all under `.cache/mc/26.2/src/`.
+- Behaviour truth for goal packages, gossip weighting and decay, the block→POI-type table with
+  capacities, villager and zombie-villager mechanics, the wandering-trader and patrol spawn
+  cadences, and full raid mechanics all lives in the decompiled source under `.cache/mc/26.2/src/`
+  — real files, not doc guesses. For scale: the wandering-trader spawner is under 150 lines, the
+  patrol spawner under 100, and the raid logic is the largest single piece here, at over 800.
 
 ---
 
@@ -146,14 +149,14 @@ tree (`/usr/bin/grep -rn "Poi\|gossip\|Gossip"` across `lodestone-server`, `lode
 
 | issue | verdict |
 |---|---|
-| #231 | **Half stale, and the other half has since landed.** Written as if the Brain behaviour system needs standing up; `Brain`, `BrainGoal`, activities, schedule support and the villager's production scaffold all landed with the Brain-driver commit ("the Brain AI system reaches a real mob on a real path"). What was actually missing — the villager *package* and the world-facts seam (§3.2) — is now built: `docs/villager-work-rest-schedule.md` is V2, landed close to this plan's own shape (schedule mode in `BrainGoal::tick`, `WalkToPoi` behaviours, `day_time`/POI-position feed into `NavigatingMob`, `BellClaims` as the third POI ledger). Golem-summon-on-hurt (§6's own "not built here") also landed separately, in `MobSim::tick_golem_summon`. Still open: piglin's own Brain package (bundled into #231, deliberately split out below), and V2's own disclosed cuts (no `WorkAtPoi`/sleep pose/trade-UI-at-work, no baby schedule). |
+| #231 | **Half stale, and the other half has since landed.** Written as if the Brain behaviour system needs standing up; `Brain`, `BrainGoal`, activities, schedule support and the villager's production scaffold all landed with the Brain-driver commit ("the Brain AI system reaches a real mob on a real path"). What was actually missing — the villager *package* and the world-facts seam (§3.2) — is now built: `docs/villager-work-rest-schedule.md` is V2, landed close to this plan's own shape (schedule mode in `BrainGoal::tick`, `WalkToPoi` behaviours, `day_time`/POI-position feed into `NavigatingMob`, `BellClaims` as the third POI ledger). Golem-summon-on-hurt (§6's own "not built here") also landed separately, in `MobSim::tick_golem_summon`. Still open: piglin's own Brain package (bundled into #231, deliberately split out below), and V2's own disclosed cuts (no work-at-poi restocking/sleep pose/trade-UI-at-work, no baby schedule). |
 | #243 | Accurate. POI registry genuinely absent. The "shared POI-count query with the iron-golem issue" note stands — design `PoiIndex`'s query for both callers, but do not build the golem half (§6). |
 | #244 | Accurate — "no gossip propagation exists" re-verified true. |
 | #245 | **Right direction, stale mechanism.** "Pull from the 26.2 jar's registry data, not minecraft-data" is correct, but there is no extraction problem left: trades are plain JSONs on disk (§1.5). The body also doesn't know the client data half (`MERCHANT_OFFERS` decode → `SessionTrades`) already exists and that the merchant *screen* was deliberately excluded — the UI is the missing client piece, not the decode. |
 | #246 | Accurate. Its advice to keep Hero of the Village separately-triggered is honoured: HotV lands inside the raid unit (§6). |
 | #247 | Accurate on mechanics but **silent on a real dependency**: mobs cannot hold status effects, so "weakness + golden apple" has no way to apply the weakness. §5 V7 makes the mob-effects substrate part of the unit. |
 | #240 | Accurate. Two things it doesn't know: `spawn_wandering_traders` is already a modelled game rule, and vanilla persists the spawner in `data/minecraft/wandering_trader.dat` (we have a vanilla-written fixture). |
-| #241 | **Stale on raid mechanics.** "Bad-omen-effect-triggers-on-village-entry" is the pre-1.21 flow. In 26.2: Bad Omen (from an ominous bottle) is converted on village entry into **`RAID_OMEN`** (`Raid.absorbRaidOmen`, `MobEffects.RAID_OMEN`), and the raid starts when Raid Omen expires at the player's position. Also stale on patrols: "not covered by anything in `ai/goals.rs` today" predates the pillager landing in `roster/ranged.rs` — the *mob* exists; only the leader-follow shape and the spawner are missing. The split it suggests (patrol vs raid) is right and adopted. |
+| #241 | **Stale on raid mechanics.** "Bad-omen-effect-triggers-on-village-entry" is the pre-1.21 flow. In 26.2: Bad Omen (from an ominous bottle) is converted on village entry into the Raid Omen effect, and the raid starts when Raid Omen expires at the player's position. Also stale on patrols: "not covered by anything in `ai/goals.rs` today" predates the pillager landing in `roster/ranged.rs` — the *mob* exists; only the leader-follow shape and the spawner are missing. The split it suggests (patrol vs raid) is right and adopted. |
 
 ---
 
@@ -173,9 +176,10 @@ answered in the tree, and the answer is the correct one:
   remember to add is how this repo's islands get built. `BrainGoal` rides the already-wired
   `goals_for → spawn_species → MobSim::tick` path and cannot be silently dropped.
 - **Expressing villager behaviour as `Goal`s is rejected** on three grounds. (a) Vanilla's villager
-  logic is memory-shaped: `ValidateNearbyPoi`, `PoiCompetitorScan`, `AcquirePoi`,
-  `AssignProfessionFromJobSite` coordinate through `JOB_SITE`/`POTENTIAL_JOB_SITE` memories with
-  expiry — flags-and-priorities has no equivalent of memory erasure on activity switch, and a
+  logic is memory-shaped: several small behaviours coordinate purely by writing and reading
+  `JOB_SITE`/`POTENTIAL_JOB_SITE` memories with expiry — scanning nearby POIs, resolving competing
+  claims, taking a job site, and assigning the resulting profession — and
+  flags-and-priorities has no equivalent of memory erasure on activity switch, and a
   translation layer would be a permanent divergence to maintain against every future vanilla port.
   (b) The villager is already routed to a brain in production; a goal-based villager means
   un-routing one of 20 species and forking the roster convention. (c) Schedule-driven activity
@@ -188,9 +192,10 @@ answered in the tree, and the answer is the correct one:
   never fires — each unit's negative control below exists for exactly that.
 
 One driver change is required: `BrainGoal` re-evaluates a static candidate list each tick;
-vanilla's villager switches activity **by schedule** (`brain.updateActivityFromSchedule` in
-`Villager.customServerAiStep`, plus the `UpdateActivityFromSchedule` behaviour at priority 99 in
-every package). `BrainGoal` grows an optional schedule mode: when enabled, `tick` calls
+vanilla's villager instead switches activity **by schedule**, re-checking it once per AI tick from
+its own top-level tick method, plus a fixed low-priority behaviour in every package whose only job
+is to keep the current activity in sync with the schedule. `BrainGoal` grows an optional schedule
+mode: when enabled, `tick` calls
 `Brain::update_activity_from_schedule(mob.day_time(), time)` before the candidate scan. `day_time`
 becomes a `BrainMob` method fed from `WorldState` through `MobSim` (the same route
 `NaturalSpawner::set_day_time` already takes).
@@ -206,22 +211,23 @@ Requirements, from the consumers: workstation claiming (#243), bed and meeting-p
 construction. All need: per-position type + capacity + occupancy, queries by type/predicate within a
 radius ("nearest unclaimed job site"), and invalidation when the block is broken or replaced.
 
-- **Why not port `PoiManager`?** Vanilla's is a `SectionStorage` with its own region persistence,
-  ticket lifecycles, and a `distanceToSqr`-ordered stream API — ~800 lines of machinery whose
+- **Why not port vanilla's own POI manager?** It is a persisted-section store with its own region
+  persistence, ticket lifecycles, and a distance-ordered stream API — ~800 lines of machinery whose
   persistence half duplicates information that is a pure function of chunk blocks. POI *existence*
-  can always be rebuilt by scanning loaded chunks against the `PoiTypes` table (14 workstations +
-  `home` = beds + `meeting` = bell, capacities 1/1/32 per `PoiTypes.java`). Only *claims* are real
-  state, and vanilla itself stores the claim twice (ticket in the poi file, `JOB_SITE` memory in the
-  villager). We store it once, on the villager, and rebuild occupancy from mobs at load. No new
-  region format, no double bookkeeping, same observable semantics.
+  can always be rebuilt by scanning loaded chunks against the vanilla POI-type table (14 workstations +
+  `home` = beds + `meeting` = bell, capacities 1/1/32, per that table's own registration). Only
+  *claims* are real state, and vanilla itself stores the claim twice (a ticket in the POI region
+  file, a job-site memory slot on the villager). We store it once, on the villager, and rebuild
+  occupancy from mobs at load. No new region format, no double bookkeeping, same observable
+  semantics.
 - **Where it lives:** `lodestone-server`, behind a `PoiHandle` clone of the
   `BlockEntityHandle` pattern. Not `lodestone-entity` — that crate is world-free by design; brains
   reach the index only through the `BrainMob` seam (a query closure/trait object handed to
   `NavigatingMob` the way `tick_with_terrain` hands in `block_state`).
 - **Maintenance:** populate on chunk activation by scanning sections for POI blocks; update from the
   same block-mutation choke the block-entity registry uses. The block→POI-type table is generated
-  from `PoiTypes.java` under the `LODESTONE_REGEN=1` generate-or-assert pattern (it is a jar claim;
-  hand lists have been wrong five times in this repo).
+  from vanilla's own POI-type registration under the `LODESTONE_REGEN=1` generate-or-assert pattern
+  (it is a jar claim; hand lists have been wrong five times in this repo).
 - **The validation oracle:** parse a vanilla `poi/*.mca` region with an independent gzip+NBT script
   (the `players/data` XP-table precedent), scan the corresponding `region/*.mca` chunks with our
   table, and require the derived POI set to match vanilla's records — chunks chosen for POI
@@ -262,8 +268,9 @@ lectern → robe reverts. The `AcquirePoi` walk itself is V2's; V1 may assign on
 
 **V3 — merchant screen, client side (#245's UI half).**
 *Primary cluster:* new `crates/lodestone-shell/src/container/merchant.rs`; wiring in
-`container/frame.rs` (its own doc names why merchant was excluded — trade-level text composition per
-`MerchantScreen.extractLabels`); the `SELECT_TRADE` send on the shell's serverbound path.
+`container/frame.rs` (its own doc names why merchant was excluded — it needs to compose trade-level
+text rather than simply relocate a fixed layout anchor); the `SELECT_TRADE` send on the shell's
+serverbound path.
 *Screen:* against any server that sends `MERCHANT_OFFERS` (a fixture-fed `SessionTrades` works for
 development; the real join once V4 lands), the trade list renders, arrows and prices draw, clicking
 a row sends `SELECT_TRADE`. Zero server files — fully parallel with everything.
@@ -286,7 +293,7 @@ banner.
 **V2 — schedule, commute, and panic: the villager Brain package (#231's villager half). Landed** —
 see `docs/villager-work-rest-schedule.md`; panic itself landed earlier (`docs/brain-target-acquisition.md`).
 *Primary cluster:* new `crates/lodestone-entity/src/brain/villager.rs` (the package builder:
-CORE/IDLE/WORK/MEET/REST/PANIC per `VillagerGoalPackages.java`); new behaviours beside
+CORE/IDLE/WORK/MEET/REST/PANIC, matching vanilla's own villager package split); new behaviours beside
 `brain/behaviors.rs`; new memory consts in `brain/memory.rs`; the schedule mode in
 `brain/driver.rs`; `BrainMob` widening in `brain/mob.rs` + the `NavigatingMob` fields
 (`ai/navigating_mob.rs`, exclusive for the window).
@@ -320,7 +327,7 @@ level-1 offers; executing a trade moves items and increments uses.
 
 **V5 — gossip and reputation (#244 + #246's base).**
 *Primary cluster:* new `crates/lodestone-server/src/gossip.rs` (the `GossipContainer` port: typed
-entries with per-type weight/max/decay from `GossipType.java`, daily decay, `transferFrom` with
+entries with per-type weight/max/decay from vanilla's own gossip-type table, daily decay, `transferFrom` with
 per-transfer decay and the discard threshold of 2, `getReputation` as the weighted sum); its
 integration in `villager.rs` (price adjustment via each trade's `reputation_discount` field —
 note the JSONs carry the discount factor per trade, not a global formula).
@@ -334,7 +341,7 @@ proximity census works without it.
 both edit `villager.rs`.
 *Scope:* per-trade XP from the trade JSONs, level thresholds and the badge via the
 `VillagerData` level field (V1's metadata variant carries it), restock when working at the claimed
-POI (`Villager.restock` semantics: uses reset, demand recomputed), locked-out offers.
+POI (vanilla's own restock semantics: uses reset, demand recomputed), locked-out offers.
 *Screen:* a sold-out trade shows the red X, the villager works at its site, the trade reopens; the
 badge upgrades on level-up.
 
@@ -371,10 +378,10 @@ markedly cheaper trades.
 
 **V10 — raids and Hero of the Village (#241b + the HotV slice of #246).**
 *Primary cluster:* new `crates/lodestone-server/src/raid.rs` (`Raid` + `Raids`: omen absorption,
-wave counts by difficulty from `Raid.getNumGroups`/its spawn tables, wave spawn placement, victory/
+wave counts by difficulty from vanilla's own wave-group formula and spawn tables, wave spawn placement, victory/
 defeat, the bell); Bad Omen / Raid Omen as *player* effects (the existing player-effect path
-suffices — `Raid.absorbRaidOmen` converts on village entry, raid starts on Raid-Omen expiry, **not**
-the pre-1.21 flow the issue describes); vindicator added to `roster/hostile_melee.rs` (a melee
+suffices — vanilla's own omen-absorption rule converts on village entry, raid starts on Raid-Omen
+expiry, **not** the pre-1.21 flow the issue describes); vindicator added to `roster/hostile_melee.rs` (a melee
 raider is cheap; see §6 for who is excluded).
 *Brokered:* `BOSS_EVENT` encode in `v770/src/server_protocol.rs` (client HUD already draws it);
 `tick.rs` raid-manager tick; persisted raid state matching the vanilla `raids.dat` fixture; the HotV
@@ -421,7 +428,7 @@ Shared, from `CLAUDE.md` — restated against these units:
   `encode_merchant_offers` is the live instance: our own decode's doc records that five
   `MerchantOffer` fields are big-endian `i32`s, not VarInts — and a round trip through our own
   encode+decode is satisfied by two symmetric misunderstandings. Gate against a byte string derived
-  from `ClientboundMerchantOffersPacket.write`, with pairwise-distinct field values so a
+  from vanilla's own merchant-offers packet writer, with pairwise-distinct field values so a
   transposition cannot survive. Same rule for `BOSS_EVENT` (V10).
 - **Permissive `BrainMob` defaults are silent behaviour-killers** (the perception-starvation shape).
   Every new seam method (V2: `day_time`, POI queries, hurt signal) needs a negative control: the
@@ -447,7 +454,7 @@ Shared, from `CLAUDE.md` — restated against these units:
 
 Unit-specific:
 
-- **V1:** the POI table is a jar claim — generate-or-assert against `PoiTypes.java`, and remember
+- **V1:** the POI table is a jar claim — generate-or-assert against vanilla's own POI-type registration, and remember
   `leatherworker` matches *cauldrons in any fill state* and `meeting` has capacity 32, not 1. The
   villager profession must **not** be assigned to babies or nitwits once those exist; encode the
   precondition now (profession assignment guarded on `profession == none && !baby`).
@@ -461,15 +468,16 @@ Unit-specific:
   generator output** ("N of M trades modelled") rather than silently skipping; a librarian with no
   book trades is a visible, named gap, not a bug report waiting to happen.
 - **V5:** `transferFrom` decays per transfer and discards below 2 — an equal-value fixture cannot
-  distinguish merge-max from merge-sum; pick values where the two policies differ
-  (`mergeValuesForTransfer` keeps the max, `mergeValuesForAddition` sums with cap).
+  distinguish merge-max from merge-sum; pick values where the two policies differ (a transfer merge
+  keeps the max of the two values, an addition merge sums them with a cap).
 - **V7:** classify the *call site*: conversion must survive a chunk save/load mid-timer
   (`ConversionTime` consumed, not name-listed), and the timer is randomised — the gate pins the rng.
 - **V8:** the spawner persists across restarts — assert against the vanilla
   `wandering_trader.dat` key names, and remember the biome exclusion tag
   (`WITHOUT_WANDERING_TRADER_SPAWNS`).
-- **V9/V10:** `Raids.canJoinRaid` requires `getNoActionTime() <= 2400` — a raider parked by a test
-  for two minutes silently stops counting toward the wave; keep gates short or tick the mob.
+- **V9/V10:** vanilla's own raid-join check requires an entity's idle time to stay at or under 2400
+  ticks — a raider parked by a test for two minutes silently stops counting toward the wave; keep
+  gates short or tick the mob.
 
 ---
 
@@ -490,9 +498,9 @@ Unit-specific:
   substrate (revisit after V7 as a small follow-up), the second is the leashing issue's
   entity-attach packet. Neither blocks the trader being visibly alive and tradeable.
 - **Ravager, evoker, and witch raid waves**: raids spawn only implemented raiders (pillager,
-  vindicator). The wave tables are generated in full from `Raid.java` with unimplemented types
-  **filtered and counted** — the same named-gap pattern as V4's loot-function trades — so later mob
-  work slots in without touching raid logic.
+  vindicator). The wave tables are generated in full from vanilla's own raid-wave data with
+  unimplemented types **filtered and counted** — the same named-gap pattern as V4's loot-function
+  trades — so later mob work slots in without touching raid logic.
 - **`HarvestFarmland`/`UseBonemeal` work behaviours**: WORK is commute-and-restock here. Farmer
   agriculture needs crop-interaction seams the brain does not have and the economy does not require.
 - **Hero of the Village as a standalone unit**: it is raid-triggered; building it before raids means
