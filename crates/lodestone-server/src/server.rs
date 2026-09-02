@@ -10556,7 +10556,7 @@ async fn publish_health<T, P>(
     // Every caller passes `LOCAL_PLAYER_ENTITY_ID`, never a `PlayerRegistry`
     // ticket id: every packet built from this reaches `conn` directly, this
     // connection's own socket, and the client only recognises itself under
-    // the constant its own `GameLogin.entity_id` (`begin_play_at`) claimed —
+    // the constant its own login entity-id field (`begin_play_at`) claimed —
     // see the call sites' own comments. Kept as a plain parameter rather than
     // inlining the constant here so a future caller broadcasting to *other*
     // connections is not tempted to reuse this function for that; it never
@@ -11964,7 +11964,7 @@ where
                 // (vanilla's own entity interact routine's two leash branches — detach-if-mine,
                 // attach-if-holding-a-lead) **before** `mobInteract`'s taming
                 // chain, and a consuming leash branch short-circuits the rest
-                // (`Mob.interact`: `if (superReaction != PASS) return
+                // (vanilla's own mob interact routine: `if (superReaction != PASS) return
                 // superReaction;`). `MobSim::try_leash` is checked first here
                 // for the same reason — a lead in hand must attach rather
                 // than roll a taming/feed/breed interaction against it.
@@ -12058,7 +12058,7 @@ where
                 }
                 // Vanilla consumes through `usePlayerItem`, a no-op in creative
                 // (vanilla's own has-infinite-materials check). A sit toggle is
-                // `InteractionResult.SUCCESS.withoutItem()` and consumes nothing,
+                // vanilla's own `SUCCESS.withoutItem()` interaction result and consumes nothing,
                 // which `InteractOutcome::consumes_item` already encodes.
                 //
                 // `consume_one` handles the creative case itself, so the game mode
@@ -14733,7 +14733,7 @@ where
                 // stands near an occupied village POI, remembering *where* that
                 // happened (`raid_omen_position`); its own raid-omen mob-effect
                 // apply-effect-tick routine, on Raid Omen's own last tick, spends that
-                // remembered position on `Raids.createOrExtendRaid`
+                // remembered position on vanilla's own raid create-or-extend routine
                 // (`MobSim::create_or_extend_raid`) — a flat 64-block radius query
                 // over occupied `#village` POIs, **not** `isVillage`'s own
                 // section-distance tracker, a different subsystem this port does
@@ -14995,11 +14995,11 @@ where
 
                 // Portal travel, last in the tick so a player who is about to be
                 // moved has already taken this tick's damage and hunger — vanilla's
-                // own order (`Entity.handlePortal` runs from `Entity.baseTick`, after
-                // `LivingEntity.baseTick`'s damage block).
+                // own order (vanilla's own handle-portal routine runs from its own base-tick routine, after
+                // that same base-tick routine's damage block).
                 //
                 // The counter is fed "which portal cell am I standing in", read at
-                // the player's **feet**, because `NetherPortalBlock.entityInside` is
+                // the player's **feet**, because vanilla's own nether-portal-block entity-inside routine is
                 // driven by the entity's bounding box and the feet cell is the one a
                 // standing player is always inside. Using the eye cell instead means
                 // a 3-tall portal only triggers on its middle row.
@@ -15007,7 +15007,7 @@ where
                     let feet = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
                     let feet_state = source.get().block_state(feet.x, feet.y, feet.z);
                     // An end portal shares this same counter — vanilla's
-                    // `Entity.portalProcess`/`portalCooldown` are generic across
+                    // vanilla's own `portalProcess`/`portalCooldown` are generic across
                     // portal types, not Nether-specific — so a player cannot be
                     // simultaneously ramping up a Nether trip and an End trip.
                     let in_end_portal = crate::portal::is_end_portal(&feet_state);
@@ -15032,7 +15032,7 @@ where
                     if let Some(entry) = portal.tick(standing_in, transition) {
                         let entry_state = source.get().block_state(entry.x, entry.y, entry.z);
                         let trip = if crate::portal::is_end_portal(&entry_state) {
-                            // `EndPortalBlock.getPortalDestination`'s `fromEnd`
+                            // vanilla's own end-portal-block get-portal-destination routine's `fromEnd`
                             // branch is not implemented (see
                             // `travel_through_end_portal`'s own doc) — reached
                             // only by standing in an end portal *inside* the
@@ -15219,7 +15219,7 @@ where
                 // vanilla's `broadcastDamageEvent` (which we send as
                 // `hurt_animation` — see `ServerProtocol::encode_hurt_animation`
                 // for why the route differs and the pixels do not) and
-                // `LivingEntity.die`'s `broadcastEntityEvent(this, (byte)3)`.
+                // vanilla's own entity-die routine's `broadcastEntityEvent(this, (byte)3)`.
                 //
                 // Without this a mob beaten to death never flashed and never tipped
                 // over: it simply disappeared when the next entity diff dropped it,
@@ -15240,7 +15240,7 @@ where
                     let directive = match animation {
                         crate::mobs::MobAnimation::Hurt { entity_id } => {
                             // `0.0` is vanilla's own value for a non-player, not a
-                            // placeholder: `LivingEntity.getHurtDir` is a constant
+                            // placeholder: vanilla's own get-hurt-dir routine is a constant
                             // and only `ServerPlayer` overrides it.
                             proto.encode_hurt_animation(entity_id, 0.0)
                         }
@@ -15269,7 +15269,7 @@ where
                 // timer:
                 //
                 // 1. Feed the voter count. Vanilla excludes spectators
-                //    (`SleepStatus.updateSleepingPlayers`); this crate has no
+                //    (vanilla's own update-sleeping-players routine); this crate has no
                 //    spectator concept, so every player in the shared
                 //    `PlayerRegistry` counts. Where no registry exists
                 //    (singleplayer), nothing is fed and
