@@ -1558,7 +1558,7 @@ pub enum ServerBound {
     },
     /// The client toggled a crafter slot's enabled/disabled state
     /// (`ServerboundContainerSlotStateChangedPacket`).
-    /// `ServerGamePacketListenerImpl.handleContainerSlotStateChanged`:
+    /// Vanilla's own container-slot-state-changed handler:
     /// `this.player.containerMenu instanceof CrafterMenu crafterMenu &&
     /// crafterMenu.getContainer() instanceof CrafterBlockEntity
     /// crafterBlockEntity` — refused for every other open menu, which this
@@ -1591,7 +1591,7 @@ pub enum ServerBound {
         pos: BlockPos,
         /// The command text to store, unfiltered.
         command: String,
-        /// `CommandBlockEntity.Mode`'s wire ordinal — see
+        /// Vanilla's own command-block-entity mode enum's wire ordinal — see
         /// `crate::command_block::base_name_for_mode_ordinal`'s own doc for
         /// the mapping; kept raw here rather than resolved in the protocol
         /// crate, matching every other packet-shaped variant's "wire shape
@@ -1606,7 +1606,7 @@ pub enum ServerBound {
     },
     /// A sign's text-edit submission (`ServerboundSignUpdatePacket`, issue
     /// #616's remainder). `crate::block_entities::apply_sign_update` is the
-    /// consumer: it re-checks vanilla's `SignBlockEntity.updateSignText` gate
+    /// consumer: it re-checks vanilla's own sign-block-entity update-sign-text gate
     /// (not waxed, and `editor` is the uuid `openTextEdit` granted) before
     /// writing either side's four lines.
     SignUpdate {
@@ -1624,7 +1624,7 @@ pub enum ServerBound {
     },
     /// A beacon's power-selection submission (`ServerboundSetBeaconPacket`,
     /// issue #616's remainder). `crate::server`'s consumer is
-    /// `BeaconMenu.updateEffects`: re-derive the pyramid tier, validate the
+    /// vanilla's own beacon-menu update-effects routine: re-derive the pyramid tier, validate the
     /// pair with `crate::beacon::validate_beacon_effects`, and on success
     /// consume one payment item and resync the menu's data slots.
     SetBeacon {
@@ -1638,12 +1638,12 @@ pub enum ServerBound {
     /// (`ServerboundEditBookPacket`, issue #616's remainder). Carries no
     /// `ItemStack` — the packet only names a slot and the new text;
     /// `crate::server`'s consumer looks the carried book up in the tracked
-    /// `PlayerInventory` itself, mirroring `handleEditBook`'s own
+    /// `PlayerInventory` itself, mirroring vanilla's own edit-book handler's own
     /// `this.player.getInventory().getItem(slot)`.
     EditBook {
         /// The native inventory slot holding the book — a hotbar index
         /// (`0..9`) or the off-hand (`40`); every other value is refused the
-        /// same way vanilla's own `Inventory.isHotbarSlot(slot) || slot ==
+        /// same way vanilla's own `isHotbarSlot(slot) || slot ==
         /// 40` gate refuses it.
         slot: i32,
         /// Draft or final page text, wire-shape only (raw, unfiltered) —
@@ -1656,7 +1656,7 @@ pub enum ServerBound {
     },
     /// A merchant trade-row selection (`ServerboundSelectTradePacket`, issue
     /// #616's remainder). Carries no window id — vanilla's own consumer,
-    /// `ServerGamePacketListenerImpl.handleSelectTrade`, checks only that
+    /// its own select-trade handler, checks only that
     /// `player.containerMenu instanceof MerchantMenu`, so `crate::server`'s
     /// consumer resolves the villager from this connection's own tracked
     /// open-merchant state rather than from anything on the wire.
@@ -1679,9 +1679,9 @@ pub enum ServerBound {
     },
     /// A bundle-tooltip highlight claim (`ServerboundSelectBundleItemPacket`,
     /// issue #692). Wire-invisible on ordinary decode — vanilla's own
-    /// `BundleContents.STREAM_CODEC` always reconstructs `selectedItem = -1`,
+    /// vanilla's own bundle-contents wire codec always reconstructs `selectedItem = -1`,
     /// so this is the *only* place the value ever appears — but server-side
-    /// load-bearing: `BundleContents.Mutable::removeOne` reads it to decide
+    /// load-bearing: vanilla's own bundle-contents remove-one routine reads it to decide
     /// which nested item a right-click extracts. `crate::server`'s consumer
     /// stores it in the tracked `PlayerInventory` (`set_selected_bundle_item`)
     /// for `container_click::pickup`'s next click to read.
