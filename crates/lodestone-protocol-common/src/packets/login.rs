@@ -2,18 +2,20 @@
 //!
 //! [`LoginStart`], [`EncryptionRequest`], [`EncryptionResponse`],
 //! [`LoginDisconnect`] and [`SetCompression`] are byte-identical across every
-//! protocol these three crates cover (47, 340, 754) -- measured: no
+//! protocol these three crates cover (47, 340, 498, 578, 754) -- measured: no
 //! hand-written codec on either side, so no `#[mc(protocols = ...)]` is
 //! declared and these keep the derive's default `ProtocolRange::ALL`.
 //!
-//! [`LoginSuccess`] is **not** in that set. 1.8 through 1.15 (protocols 47
-//! and 340) send the profile UUID as a dashed string; 1.16 (protocol 754,
-//! this crate's v1-14) switched to the 128-bit binary form the modern client
+//! [`LoginSuccess`] is **not** in that set. 1.8 through 1.15 (protocols 47,
+//! 340, 498 and 578) send the profile UUID as a dashed string; 1.16
+//! (protocol 754) switched to the 128-bit binary form the modern client
 //! uses. Same packet name, same position in the login flow, genuinely
 //! different wire type -- so `LoginSuccess` here is declared
-//! `#[mc(protocols = "47..=340")]` and v1-14 keeps its own binary-UUID
-//! version, matching the project's "separate structs where a field's type
-//! changes" rule.
+//! `#[mc(protocols = "47..=578")]` and v1-14 keeps its own binary-UUID
+//! version for 754, matching the project's "separate structs where a field's
+//! type changes" rule. The 498/578 half of that range is covered by the
+//! committed real-join captures under `crates/versions/1.14/tests/captures/`;
+//! widening it without one would be inheritance-by-range.
 
 use lodestone_macros::{Decode, Encode, Packet};
 
@@ -79,7 +81,7 @@ pub struct EncryptionRequest {
 /// UUID, which is why this struct's range stops at 340 -- see the module
 /// docs.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:success", state = Login, bound = Client, protocols = "47..=340")]
+#[mc(name = "minecraft:success", state = Login, bound = Client, protocols = "47..=578")]
 pub struct LoginSuccess {
     /// Dashed profile UUID string, such as `069a79f4-44e9-4726-a5be-fca90e38aaf5`.
     #[mc(max = 36)]

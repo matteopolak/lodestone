@@ -10,6 +10,8 @@
 #   1.10.2    v1-9    25582      25583      lodestone-mc1102
 #   1.11.2    v1-9    25584      25585      lodestone-mc1112
 #   1.12.2    v1-9    25568      25569      lodestone-legacy-1-12
+#   1.14.4    v1-14   25586      25587      lodestone-mc1144
+#   1.15.2    v1-14   25588      25589      lodestone-mc1152
 #   1.16.5    v1-14   25573      25574      lodestone-mc1165
 #
 # (1.8.9/1.12.2/1.16.5 container names and ports read directly off
@@ -17,7 +19,9 @@
 # messages -- not invented here. The three 1.9-era rows arrived with the era
 # merge that made crates/versions/1.9 speak 110, 210 and 316 as well as 340;
 # their ports avoid every port already used here and are named by
-# crates/versions/1.9/tests/capture_join.rs.)
+# crates/versions/1.9/tests/capture_join.rs. The two 1.14-era rows arrived
+# the same way, when crates/versions/1.14 gained 498 and 578; their ports are
+# named by crates/versions/1.14/tests/capture_join.rs.)
 #
 # 1.12.2 already had a working script (legacy-1.12.sh); this one covers the
 # rest, and also answers for 1.12.2 so one entry point serves them all.
@@ -25,7 +29,8 @@
 # name it directly, and there is no reason to disturb a script that already
 # works.
 #
-# Usage: ./legacy.sh <version>   (1.8.9 | 1.9.4 | 1.10.2 | 1.11.2 | 1.12.2 | 1.16.5)
+# Usage: ./legacy.sh <version>
+#        (1.8.9 | 1.9.4 | 1.10.2 | 1.11.2 | 1.12.2 | 1.14.4 | 1.15.2 | 1.16.5)
 #
 # Runtime: Apple `container`, not Docker -- see docs/oracles-and-benchmarks.md
 # ("Oracle runtimes: Apple container"). That content used to live in
@@ -47,7 +52,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 <version>" >&2
-  echo "  supported versions: 1.8.9 (v1-8); 1.9.4, 1.10.2, 1.11.2, 1.12.2 (v1-9); 1.16.5 (v1-14)" >&2
+  echo "  supported versions: 1.8.9 (v1-8); 1.9.4, 1.10.2, 1.11.2, 1.12.2 (v1-9); 1.14.4, 1.15.2, 1.16.5 (v1-14)" >&2
   exit 1
 }
 
@@ -63,7 +68,10 @@ VERSION="${1:-}"
 #   - v1-9 at 1.9.4/1.10.2/1.11.2 (capture_join.rs): a flat world only, so a
 #     join capture is small and its chunk columns are the same shape every
 #     run; nothing there depends on mobs
-#   - v1-14 (live_entity.rs / live_interaction.rs): "flat world, RCON enabled";
+#   - v1-14 at 1.14.4/1.15.2 (capture_join.rs): a flat world only, so a join
+#     capture is small and its chunk columns are the same shape every run;
+#     nothing there depends on mobs
+#   - v1-14 at 1.16.5 (live_entity.rs / live_interaction.rs): "flat world, RCON enabled";
 #     live_entity.rs additionally: "spawn-monsters=false/spawn-animals=false
 #     ... difficulty=peaceful" (it summons what it needs over RCON instead of
 #     relying on natural spawns)
@@ -100,6 +108,18 @@ case "$VERSION" in
     RCON_PORT=25569
     EXTRA_PROPS=()
     ;;
+  1.14.4)
+    NAME=lodestone-mc1144
+    GAME_PORT=25586
+    RCON_PORT=25587
+    EXTRA_PROPS=(level-type=FLAT)
+    ;;
+  1.15.2)
+    NAME=lodestone-mc1152
+    GAME_PORT=25588
+    RCON_PORT=25589
+    EXTRA_PROPS=(level-type=FLAT)
+    ;;
   1.16.5)
     NAME=lodestone-mc1165
     GAME_PORT=25573
@@ -121,11 +141,11 @@ if [ ! -f "$WORLD/server.jar" ]; then
   exit 1
 fi
 
-# The three 1.9-era jars arrive from `fetch-version` as a bare server.jar in
-# an otherwise empty directory, unlike 1.8.9/1.12.2/1.16.5 which were booted
-# by hand long ago. Accepting the EULA is what every other script in this
-# directory does for a fresh directory, and the server refuses to start
-# without it.
+# The three 1.9-era jars, and the two 1.14-era ones, arrive from
+# `fetch-version` as a bare server.jar in an otherwise empty directory, unlike
+# 1.8.9/1.12.2/1.16.5 which were booted by hand long ago. Accepting the EULA
+# is what every other script in this directory does for a fresh directory, and
+# the server refuses to start without it.
 printf 'eula=true\n' > "$WORLD/eula.txt"
 
 PROPS="$WORLD/server.properties"

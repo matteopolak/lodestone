@@ -1,5 +1,6 @@
-//! Version-specific framing for the 1.16.5 (protocol 754) chunk packets
-//! `minecraft:map_chunk` and `minecraft:unload_chunk`.
+//! Version-specific framing for this era's chunk packets
+//! `minecraft:map_chunk`, `minecraft:update_light` and
+//! `minecraft:unload_chunk`, across protocols 498, 578 and 754.
 //!
 //! # Why this is hand-written and *not* a derived `Decode`
 //!
@@ -9,8 +10,29 @@
 //! `i32 z`, `bool groundUp`, `varint bitMap`, `nbt heightmaps`, a biomes array
 //! present only on full columns, a `varint`-length `chunkData` **buffer**, then a
 //! `varint`-counted `blockEntities` array of raw `nbt`. The bytes *inside*
-//! `chunkData` have no declarative schema, so the layout below is transcribed
-//! from the 1.16 wire spec directly.
+//! `chunkData` have no declarative schema, so the layouts below were settled
+//! against real captured server bytes (`tests/captures/`), which is also the
+//! only reason the 498 biome placement below is right: `minecraft-data`
+//! models 1.14.4's `map_chunk` with **no biome field at all**, and a decoder
+//! that believes it leaves 1,024 bytes of the buffer unread.
+//!
+//! # Where the three protocols differ
+//!
+//! Three framing differences, each of which desynchronises rather than
+//! errors if taken from the wrong protocol:
+//!
+//! * **Where the biomes are.** At 498 a full column's biomes are a 2-D
+//!   `16x16` array of big-endian `i32`s **inside** `chunkData`, after the last
+//!   section. At 578 they left the buffer and became a bare 1,024-entry
+//!   (4x4x4 over the column) `i32` array *before* it, with no count. At 754
+//!   that array gained a VarInt length prefix and VarInt elements.
+//! * **How the section indices are packed.** 498 and 578 use the pre-1.16
+//!   *straddling* layout, where a value may cross a 64-bit boundary; 754 pads
+//!   each long. The two disagree about the long count for every width that
+//!   is not a divisor of 64, so this is caught rather than silently
+//!   misdecoded — but only because the count is checked.
+//! * **`update_light`'s leading `trustEdges` flag**, added at 754. One byte,
+//!   before four VarInt masks.
 //!
 //! # How 1.16.5 differs from the pre-1.13 families (v1-8/v1-9)
 //!
@@ -34,11 +56,12 @@
 //!   `WORLD_SURFACE`) long-array heightmap travels as an inline NBT compound
 //!   before the sections. It is consumed here (the world store recomputes
 //!   heightmaps lazily) to keep the zero-trailing-bytes detector meaningful.
-//! * **3-D biomes.** Full columns carry a flat array of **1024** biome ids
-//!   (4×4×4 cells over the whole 256-tall column = 16 sections × 64 cells), a
-//!   VarInt each, *before* the section blob — not the pre-1.15 256-byte 2-D
-//!   footer. These are real 3-D biomes, so no fabrication is needed (contrast
-//!   the v1-8/v1-9 down-sampling seam).
+//! * **3-D biomes, from 1.15.** Full columns at 578 and 754 carry a flat
+//!   array of **1024** biome ids (4×4×4 cells over the whole 256-tall column
+//!   = 16 sections × 64 cells). These are real 3-D biomes, so no fabrication
+//!   is needed. 498 is the pre-1.15 2-D case and *does* need the same
+//!   down-sampling seam v1-8/v1-9 document: 256 values, one per column, each
+//!   replicated up the whole height.
 //! * **Light is gone.** 1.14 split light out of `map_chunk` into the separate
 //!   `update_light` packet ([`UpdateLight`]), so a section here is just
 //!   `[blockCount: i16, PalettedContainer]` with **no** inline block/sky light.
@@ -53,31 +76,47 @@ use lodestone_world::{
     PalettedContainer, Result,
 };
 
-use crate::canonical::{self, FallbackTally};
+use crate::canonical::{CanonicalTable, FallbackTally};
 
 /// Number of block sections in a 1.16.5 column (fixed world height 0..256).
 const SECTION_COUNT: usize = 16;
 /// Biome cells per section (4×4×4).
 const BIOME_CELLS_PER_SECTION: usize = 64;
+/// Block-state cells per section (16×16×16).
+const BLOCK_ENTRIES: usize = 4096;
+/// Entries in a 1.15+ 3-D column biome array (4×4×4 cells over 16 sections).
+const THREE_D_BIOME_CELLS: usize = 1024;
+/// Entries in a 1.14 2-D column biome array (one per 16×16 column).
+const TWO_D_BIOME_CELLS: usize = 256;
 /// Bytes for one nibble light array (4096 nibbles).
 const LIGHT_BYTES: usize = 2048;
 
-/// Dimension shape needed to decode a 1.16.5 chunk column.
+/// Dimension shape needed to decode one protocol's chunk column.
 ///
-/// 1.16 columns are always 16 sections tall with `min_y = 0`. Unlike the
-/// pre-1.14 families, sky-light presence is **not** part of chunk decoding —
-/// light travels in the separate `update_light` packet — so this carries only
-/// the palette configuration and the air/default ids.
+/// Columns in this era are always 16 sections tall with `min_y = 0`. Unlike
+/// the pre-1.14 families, sky-light presence is **not** part of chunk
+/// decoding — light travels in the separate `update_light` packet — so this
+/// carries the palette configuration, the air/default ids, and the two
+/// things that make the framing protocol-specific: the negotiated
+/// [`protocol`](Self::protocol) and that protocol's own block-state table.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkShape {
-    /// Palette configuration for block-state containers (prefixed long arrays).
+    /// The negotiated protocol. Selects the biome placement and the section
+    /// index packing; never inferred from anything else here.
+    pub protocol: i32,
+    /// Palette configuration for block-state containers.
     pub block_kind: PaletteKind,
     /// Palette configuration for the 3-D biome containers.
     pub biome_kind: PaletteKind,
-    /// Block-state id treated as air — the **canonical 26.2**
-    /// [`canonical::air_state_id`], not 1.16.5's own flat state 0. Every
-    /// block this crate stores has already been translated by
-    /// [`canonical::resolve_or_air`] by the time it reaches a
+    /// This protocol's wire-state -> canonical 26.2 table. Held here rather
+    /// than looked up per call so a decode cannot reach a neighbouring
+    /// protocol's numbering — see [`crate::canonical`]'s module docs for
+    /// what that would look like (a lantern rendering as a bell).
+    pub canonical: &'static CanonicalTable,
+    /// Block-state id treated as air — the **canonical 26.2** air id from
+    /// [`Self::canonical`], not the wire's own flat state 0. Every block this
+    /// crate stores has already been translated by
+    /// [`CanonicalTable::resolve_or_air`] by the time it reaches a
     /// [`PalettedContainer`] (see [`decode_sections`]), so this must match
     /// that id space, not the wire's.
     pub air_id: u32,
@@ -86,33 +125,65 @@ pub struct ChunkShape {
 }
 
 impl ChunkShape {
-    /// The 1.16.5 overworld shape: 16 sections, `min_y = 0`, flat state ids in
-    /// prefixed-long paletted containers.
+    /// The overworld shape for `protocol`: 16 sections, `min_y = 0`, flat
+    /// state ids.
+    ///
+    /// The long-array framing is `Prefixed` for every protocol here (each
+    /// section's index array is preceded by a VarInt long count, as every
+    /// family <= 1.21.4 is). That is *not* the same axis as the straddling
+    /// difference: 498 and 578 prefix a count **and** straddle, which is why
+    /// [`decode_sections`] hand-unpacks them instead of calling
+    /// [`PalettedContainer::decode`].
+    ///
+    /// # Panics
+    ///
+    /// Panics for a protocol outside [`crate::PROTOCOLS`], via
+    /// [`crate::canonical::table_for`].
     #[must_use]
-    pub fn overworld() -> Self {
+    pub fn overworld(protocol: i32) -> Self {
+        let canonical = crate::canonical::table_for(protocol);
         Self {
+            protocol,
             block_kind: PaletteKind::block_states().with_framing(LongArrayFraming::Prefixed),
             biome_kind: PaletteKind::biomes().with_framing(LongArrayFraming::Prefixed),
-            air_id: canonical::air_state_id(),
+            canonical,
+            air_id: canonical.air_state_id(),
             biome_id: 0,
         }
     }
 
-    /// A dimension without sky light (nether/end). Since 1.16 does not carry
-    /// light in `map_chunk`, this is identical to [`ChunkShape::overworld`]; the
-    /// distinction is kept only so the adapter's dimension bookkeeping reads
-    /// naturally.
+    /// A dimension without sky light (nether/end). Since no protocol here
+    /// carries light in `map_chunk`, this is identical to
+    /// [`ChunkShape::overworld`]; the distinction is kept only so the
+    /// adapter's dimension bookkeeping reads naturally.
+    ///
+    /// # Panics
+    ///
+    /// Panics for a protocol outside [`crate::PROTOCOLS`].
     #[must_use]
-    pub fn no_skylight() -> Self {
-        Self::overworld()
+    pub fn no_skylight(protocol: i32) -> Self {
+        Self::overworld(protocol)
+    }
+
+    /// Whether this protocol carries a full column's biomes as a separate
+    /// field before `chunkData` (578, 754) rather than inside it (498).
+    const fn biomes_precede_sections(self) -> bool {
+        self.protocol >= crate::adapter::PROTOCOL_1_15_2
+    }
+
+    /// Whether this protocol packs section indices so a value never crosses a
+    /// 64-bit boundary (754) rather than the pre-1.16 straddling layout
+    /// (498, 578).
+    const fn padded_long_packing(self) -> bool {
+        self.protocol >= crate::adapter::PROTOCOL_1_16_5
     }
 }
 
-/// A decoded 1.16.5 chunk column: block and biome sections.
+/// A decoded chunk column: block and biome sections.
 ///
-/// 1.16 carries no light in the chunk packet (it arrives via `update_light`), so
-/// `light` is always the empty column light here; the block-entity list is
-/// consumed but not retained (see the module docs).
+/// No protocol here carries light in the chunk packet (it arrives via
+/// `update_light`), so `light` is always the empty column light; the
+/// block-entity list is consumed but not retained (see the module docs).
 #[derive(Debug, Clone)]
 pub struct ChunkData {
     /// Chunk column x coordinate (in chunks).
@@ -124,11 +195,11 @@ pub struct ChunkData {
     pub ground_up: bool,
     /// Block-state and biome sections.
     pub column: ChunkColumn,
-    /// Empty column light (1.16 light travels separately).
+    /// Empty column light (light travels separately from 1.14 on).
     pub light: ColumnLight,
-    /// How many blocks in this column had a wire state id outside 1.16.5's
-    /// own state range while bridging to a canonical 26.2 state — see
-    /// [`canonical::resolve_or_air`]. Zero for every real-world column;
+    /// How many blocks in this column had a wire state id outside the source
+    /// protocol's own state range while bridging to a canonical 26.2 state —
+    /// see [`CanonicalTable::resolve_or_air`]. Zero for every real-world column;
     /// surfaced here (and logged, see [`MapChunk::decode`]) rather than
     /// silently absorbed so a wrong mapping stays traceable per CLAUDE.md's
     /// evidence standards.
@@ -184,19 +255,12 @@ impl MapChunk {
         // recomputes heightmaps lazily and there is no consumer for the raw tag.
         read_named_nbt(r)?;
 
-        // Biomes: full columns carry a VarInt-length-prefixed array of biome
-        // ids (1024 = 4×4×4 over the whole column). The length prefix is a
-        // 1.16.2 change — 1.15/1.16.1 sent a bare fixed 1024-int array with no
-        // count. Partial updates carry no biomes at all.
-        let biomes = if ground_up {
-            let count = r.var_i32()?;
-            let count =
-                usize::try_from(count).map_err(|_| lodestone_core::Error::NegativeLength(count))?;
-            let mut all = Vec::with_capacity(count);
-            for _ in 0..count {
-                all.push(u32::try_from(r.var_i32()?).unwrap_or(0));
-            }
-            Some(all)
+        // Biomes, when this protocol puts them before `chunkData` (578, 754).
+        // 578 sends a bare fixed 1024-entry array of big-endian `i32`s with
+        // no count at all; 754 gave it a VarInt count and VarInt elements.
+        // Partial updates carry no biomes in either.
+        let mut biomes = if shape.biomes_precede_sections() && ground_up {
+            Some(read_column_biomes(r, shape.protocol)?)
         } else {
             None
         };
@@ -207,10 +271,23 @@ impl MapChunk {
             usize::try_from(raw_len).map_err(|_| lodestone_core::Error::NegativeLength(raw_len))?;
         let mut blob = r.take_reader(blob_len)?;
         let mut fallback = FallbackTally::default();
-        let column = decode_sections(&mut blob, shape, biomes.as_deref(), bitmask, &mut fallback)?;
-        // The declared chunkData length must exactly match the section geometry;
-        // any slack is a misparse.
+        let sections = read_section_values(&mut blob, shape, bitmask, &mut fallback)?;
+
+        // At 498 the biomes are the *tail of the buffer*, not a field before
+        // it: a full column ends with a 2-D 16x16 array of big-endian `i32`s,
+        // one per column, which the 4x4x4 container fabricates a vertical
+        // dimension for (the same seam v1-8 and v1-9 document). Reading them
+        // anywhere else leaves exactly 1,024 bytes unconsumed, which is what
+        // the `ensure_empty` below turns into an error instead of a chunk.
+        if !shape.biomes_precede_sections() && ground_up {
+            biomes = Some(read_flat_biomes(&mut blob, TWO_D_BIOME_CELLS)?);
+        }
+
+        // The declared chunkData length must exactly match the section
+        // geometry (plus, at 498, the biome tail); any slack is a misparse.
         blob.ensure_empty()?;
+
+        let column = build_column(shape, &sections, biomes.as_deref())?;
 
         // Block entities trail as full named-NBT compounds; consumed but not
         // retained to keep the zero-trailing-bytes gate honest.
@@ -227,8 +304,9 @@ impl MapChunk {
                 target: "v1-14::chunk",
                 x,
                 z,
+                protocol = shape.protocol,
                 out_of_range = fallback.out_of_range,
-                "substituted air for {} block(s) whose 1.16.5 wire state id could not be \
+                "substituted air for {} block(s) whose wire state id could not be \
                  resolved to a canonical 26.2 state",
                 fallback.out_of_range,
             );
@@ -245,16 +323,190 @@ impl MapChunk {
     }
 }
 
-/// Decodes the present sections from the `chunkData` buffer into version-free
-/// storage. Each present section is `[blockCount: i16, PalettedContainer]`; the
-/// per-column biome ids (when present) are sliced into per-section 4×4×4
-/// containers.
-fn decode_sections(
+/// Reads a full column's biome array from *before* `chunkData`, in whichever
+/// of the two pre-`chunkData` forms `protocol` uses.
+///
+/// 578 writes a bare `[i32; 1024]` — no count, so a decoder that expects one
+/// consumes the first biome as a length and runs off the end. 754 writes a
+/// VarInt count followed by that many VarInts.
+fn read_column_biomes(r: &mut Reader<'_>, protocol: i32) -> Result<Vec<u32>> {
+    if protocol >= crate::adapter::PROTOCOL_1_16_5 {
+        let count = r.var_i32()?;
+        let count =
+            usize::try_from(count).map_err(|_| lodestone_core::Error::NegativeLength(count))?;
+        let mut all = Vec::with_capacity(count);
+        for _ in 0..count {
+            all.push(u32::try_from(r.var_i32()?).unwrap_or(0));
+        }
+        Ok(all)
+    } else {
+        read_flat_biomes(r, THREE_D_BIOME_CELLS)
+    }
+}
+
+/// Reads `count` big-endian `i32` biome ids with no length prefix.
+fn read_flat_biomes(r: &mut Reader<'_>, count: usize) -> Result<Vec<u32>> {
+    let mut all = Vec::with_capacity(count);
+    for _ in 0..count {
+        all.push(u32::try_from(r.i32()?).unwrap_or(0));
+    }
+    Ok(all)
+}
+
+/// Decodes the present sections' block-state values out of the `chunkData`
+/// buffer, already translated into the canonical 26.2 id space.
+///
+/// Returns one `(section index, 4096 canonical state ids)` pair per present
+/// section, rather than a built column, so [`MapChunk::decode`] can consume
+/// the 498 biome tail that follows them **inside the same buffer** before
+/// assembling anything.
+///
+/// Each section is `[blockCount: i16, bitsPerBlock: u8, palette, longs]`.
+/// `blockCount` is advisory (the container carries the authoritative
+/// contents) but is present in every protocol here — 1.14 added it — and must
+/// be consumed.
+fn read_section_values(
     blob: &mut Reader<'_>,
     shape: &ChunkShape,
-    biomes: Option<&[u32]>,
     bitmask: u32,
     fallback: &mut FallbackTally,
+) -> Result<Vec<(usize, Vec<u32>)>> {
+    let mut out = Vec::new();
+    for index in 0..SECTION_COUNT {
+        if bitmask & (1 << index) == 0 {
+            continue;
+        }
+        // Non-air block count: advisory, but consumed so the geometry lines up.
+        let _block_count = blob.i16()?;
+        let raw_blocks: Vec<u32> = if shape.padded_long_packing() {
+            // 754's packing is exactly what `PalettedContainer::decode`
+            // implements, header and all.
+            PalettedContainer::decode(shape.block_kind, blob)?
+                .iter()
+                .collect()
+        } else {
+            decode_straddling_section(blob)?
+        };
+        // Translate every cell into the canonical 26.2 space before it
+        // reaches version-free storage: per cell rather than per palette
+        // entry, the same tradeoff `lodestone_v1_8`'s chunk decode documents
+        // — `resolve_or_air` is a plain array index, not a hot-path problem,
+        // and per-cell is what makes the tally count *blocks* substituted.
+        let translated: Vec<u32> = raw_blocks
+            .iter()
+            .map(|&state_id| shape.canonical.resolve_or_air(state_id, fallback))
+            .collect();
+        out.push((index, translated));
+    }
+    Ok(out)
+}
+
+/// Decodes one pre-1.16 (498/578) section body into 4096 raw wire state ids.
+///
+/// `[bitsPerBlock: u8][paletteLen: varint][palette: varint*][longCount:
+/// varint][longs: i64*]`, with the indices packed so a value **may** cross a
+/// 64-bit boundary. A `paletteLen` of zero means the direct/global palette:
+/// the indices are wire state ids themselves.
+///
+/// The declared long count is checked against the straddling geometry rather
+/// than trusted. That check is the whole reason a 754 column fed to this
+/// decoder fails loudly: for the four-bit width a flat world uses, padded
+/// packing declares 256 longs and straddling geometry wants 256 as well — but
+/// for the five-bit width the first non-flat column reaches, padded declares
+/// 342 and straddling 320.
+fn decode_straddling_section(blob: &mut Reader<'_>) -> Result<Vec<u32>> {
+    let bits = u32::from(blob.u8()?);
+    if bits == 0 || bits > 32 {
+        return Err(lodestone_core::Error::Custom(format!("invalid bits-per-block {bits}")).into());
+    }
+    let palette_len =
+        usize::try_from(blob.var_i32()?).map_err(|_| lodestone_core::Error::UnexpectedEof)?;
+    if palette_len > BLOCK_ENTRIES {
+        return Err(lodestone_core::Error::Custom(format!(
+            "palette length {palette_len} exceeds {BLOCK_ENTRIES}"
+        ))
+        .into());
+    }
+    let mut palette = Vec::with_capacity(palette_len);
+    for _ in 0..palette_len {
+        palette.push(u32::try_from(blob.var_i32()?).unwrap_or(0));
+    }
+
+    let declared =
+        usize::try_from(blob.var_i32()?).map_err(|_| lodestone_core::Error::UnexpectedEof)?;
+    let expected = straddling_long_count(bits, BLOCK_ENTRIES);
+    if declared != expected {
+        return Err(lodestone_core::Error::Custom(format!(
+            "long count {declared} disagrees with straddling geometry {expected} for {bits} bits"
+        ))
+        .into());
+    }
+    let mut longs = Vec::with_capacity(declared);
+    for _ in 0..declared {
+        longs.push(blob.i64()? as u64);
+    }
+
+    let indices = unpack_straddling(&longs, bits, BLOCK_ENTRIES);
+    let mut values = vec![0u32; BLOCK_ENTRIES];
+    for (out, &raw) in values.iter_mut().zip(indices.iter()) {
+        *out = if palette.is_empty() {
+            raw
+        } else {
+            *palette.get(raw as usize).ok_or_else(|| {
+                lodestone_world::WorldError::from(lodestone_core::Error::Custom(format!(
+                    "palette index {raw} escapes palette of {}",
+                    palette.len()
+                )))
+            })?
+        };
+    }
+    Ok(values)
+}
+
+/// Number of 64-bit longs the **pre-1.16 (straddling)** packing uses for
+/// `count` entries of `bits` width: values are packed with no per-long
+/// padding, so a value may cross a boundary and the total is
+/// `ceil(count * bits / 64)`.
+const fn straddling_long_count(bits: u32, count: usize) -> usize {
+    (count * bits as usize).div_ceil(64)
+}
+
+/// Unpacks `count` entries of `bits` width from `longs` using the pre-1.16
+/// **straddling** layout, where an entry that crosses a 64-bit boundary is
+/// reconstructed from the low bits of one long and the high bits of the next.
+///
+/// This is the crux of why [`PalettedContainer::decode`] cannot serve 498 and
+/// 578: it implements only the 1.16+ padded layout where entries never
+/// straddle.
+fn unpack_straddling(longs: &[u64], bits: u32, count: usize) -> Vec<u32> {
+    let mask: u64 = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let mut out = vec![0u32; count];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let bit_index = i * bits as usize;
+        let start = bit_index / 64;
+        let offset = (bit_index % 64) as u32;
+        let value = if offset + bits <= 64 {
+            (longs[start] >> offset) & mask
+        } else {
+            let low = longs[start] >> offset;
+            let high = longs[start + 1] << (64 - offset);
+            (low | high) & mask
+        };
+        *slot = value as u32;
+    }
+    out
+}
+
+/// Assembles the decoded sections and the column's biome array into
+/// version-free storage.
+fn build_column(
+    shape: &ChunkShape,
+    sections: &[(usize, Vec<u32>)],
+    biomes: Option<&[u32]>,
 ) -> Result<ChunkColumn> {
     let mut column = ChunkColumn::new(
         0,
@@ -265,57 +517,48 @@ fn decode_sections(
         shape.biome_id,
     );
 
-    for index in 0..SECTION_COUNT {
-        if bitmask & (1 << index) == 0 {
-            continue;
-        }
-        // Non-air block count: advisory, validated non-negative but otherwise
-        // unused (the container carries the authoritative contents).
-        let _block_count = blob.i16()?;
-        // `PalettedContainer::decode` yields 1.16.5's *own* flat state ids
-        // (the framing this crate hand-rolls nothing for — see the module
-        // docs). Translate every cell into the canonical 26.2 space before
-        // it reaches version-free storage: per cell rather than per palette
-        // entry, same tradeoff `lodestone_v1_8`'s chunk decode documents —
-        // `resolve_or_air` is a plain array index, not a hot-path problem,
-        // and per-cell is what makes the tally count *blocks* substituted.
-        let raw_blocks = PalettedContainer::decode(shape.block_kind, blob)?;
-        let translated: Vec<u32> = raw_blocks
-            .iter()
-            .map(|state_id| canonical::resolve_or_air(state_id, fallback))
-            .collect();
-        let blocks = PalettedContainer::from_values(shape.block_kind, &translated);
-
+    for (index, values) in sections {
+        let blocks = PalettedContainer::from_values(shape.block_kind, values);
         let biome_container = match biomes {
             Some(all) => {
-                PalettedContainer::from_values(shape.biome_kind, &section_biomes(all, index))
+                PalettedContainer::from_values(shape.biome_kind, &section_biomes(all, *index))
             }
             None => PalettedContainer::new(shape.biome_kind, shape.biome_id),
         };
-
         let section = ChunkSection::from_containers(blocks, biome_container, shape.air_id);
         if !section.is_empty(shape.biome_id) {
-            column.set_section(index, Some(section));
+            column.set_section(*index, Some(section));
         }
     }
 
     Ok(column)
 }
 
-/// Extracts one section's 64 biome cells from the column's 1024-entry biome
-/// array, mapping the wire's whole-column YZX index into the biome container's
-/// section-local YZX index.
+/// Extracts one section's 64 biome cells from the column's biome array.
 ///
-/// Wire index for a cell at 4×4×4-cell coordinates `(cx, cz, cy_global)` is
-/// `cy_global * 16 + cz * 4 + cx`; the container's local index is
-/// `(cy_local << 4) | (cz << 2) | cx` with `cy_global = section * 4 + cy_local`.
+/// For a 3-D array (578, 754) the wire index for a cell at 4×4×4-cell
+/// coordinates `(cx, cz, cy_global)` is `cy_global * 16 + cz * 4 + cx`; the
+/// container's local index is `(cy_local << 4) | (cz << 2) | cx` with
+/// `cy_global = section * 4 + cy_local`.
+///
+/// For the 2-D array 498 sends there is no vertical dimension at all, so
+/// every Y layer of every section reads the same XZ cell — the lossy
+/// fabrication the pre-1.15 biome seam forces, identical to v1-8's and
+/// v1-9's. The two cases are told apart by the array's own length, which is
+/// 1024 or 256 and nothing else.
 fn section_biomes(all: &[u32], section: usize) -> Vec<u32> {
     let mut cells = vec![0u32; BIOME_CELLS_PER_SECTION];
+    let two_d = all.len() == TWO_D_BIOME_CELLS;
     for cy_local in 0..4 {
         let cy_global = section * 4 + cy_local;
         for cz in 0..4 {
             for cx in 0..4 {
-                let wire = cy_global * 16 + cz * 4 + cx;
+                let wire = if two_d {
+                    // One value per column: the block at the cell's corner.
+                    (cz * 4) * 16 + cx * 4
+                } else {
+                    cy_global * 16 + cz * 4 + cx
+                };
                 let local = (cy_local << 4) | (cz << 2) | cx;
                 cells[local] = all.get(wire).copied().unwrap_or(0);
             }
@@ -325,7 +568,8 @@ fn section_biomes(all: &[u32], section: usize) -> Vec<u32> {
 }
 
 /// The `minecraft:update_light` packet (clientbound play), added in 1.14 when
-/// light left `map_chunk`.
+/// light left `map_chunk` — so it exists in every protocol of this era, and
+/// this era is the one that introduced it.
 ///
 /// A thin [`Packet`] marker: decoding is hand-written via [`UpdateLight::decode`]
 /// because `minecraft-data` models the light arrays as an opaque `restBuffer`.
@@ -350,20 +594,28 @@ impl UpdateLight {
     ///
     /// # 1.16 wire shape
     ///
-    /// `varint chunkX`, `varint chunkZ`, `bool trustEdges`, then four **VarInt**
-    /// masks (sky, block, empty-sky, empty-block — 1.16 uses single-VarInt masks,
-    /// not the 1.17 BitSet long arrays), followed by the present sky-light
-    /// arrays (each a `varint`-length-prefixed 2048-byte nibble array, in
-    /// ascending set-bit order) and then the present block-light arrays.
+    /// `varint chunkX`, `varint chunkZ`, then — **754 only** — `bool
+    /// trustEdges`, then four **VarInt** masks (sky, block, empty-sky,
+    /// empty-block; every protocol here uses single-VarInt masks, not the
+    /// 1.17 BitSet long arrays), followed by the present sky-light arrays
+    /// (each a `varint`-length-prefixed 2048-byte nibble array, in ascending
+    /// set-bit order) and then the present block-light arrays.
+    ///
+    /// The `trustEdges` flag is the only difference across this era, and it
+    /// is the reason this takes a `protocol` rather than being version-free:
+    /// reading a byte that is not there shifts all four masks, and a mask is
+    /// what decides how many 2048-byte arrays follow.
     ///
     /// # Errors
     ///
     /// Returns an error on truncated input or a light array whose declared
     /// length is not 2048 bytes.
-    pub fn decode(r: &mut Reader<'_>) -> Result<LightUpdate> {
+    pub fn decode(r: &mut Reader<'_>, protocol: i32) -> Result<LightUpdate> {
         let x = r.var_i32()?;
         let z = r.var_i32()?;
-        let _trust_edges = r.bool()?;
+        if protocol >= crate::adapter::PROTOCOL_1_16_5 {
+            let _trust_edges = r.bool()?;
+        }
         let sky_mask = mask_bits(r.var_i32()?);
         let block_mask = mask_bits(r.var_i32()?);
         let empty_sky_mask = mask_bits(r.var_i32()?);

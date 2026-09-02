@@ -1,0 +1,40 @@
+# Vanilla's own world upgrade, 1.15.2 -> 26.2: the outside oracle for the two
+# block-state bridging rules this family's canonicalisation needs and the
+# 1.16.5 side does not.
+#
+# Procedure (reproducible; every step is a real vanilla server, no lodestone
+# code involved):
+#
+#   1. ./scripts/live-oracles/legacy.sh 1.15.2
+#   2. over RCON on :25589, `setblock` each probe below into the flat world at
+#      the listed coordinates, then `save-all flush`
+#   3. stop that container, copy .cache/mc/1.15.2/world beside .cache/mc/26.2/
+#      server.jar in a scratch directory with an eula.txt and a server.properties
+#   4. boot that server.jar (Java 25) on the copied world; vanilla upgrades
+#      level.dat and every chunk it loads through its own data fixers
+#   5. `forceload add 0 0 16 16`, then read each probe back with
+#      `execute if block <pos> <candidate state>` over RCON, trying every
+#      candidate value of the changed property
+#
+# The answer is therefore what vanilla itself decided the old state becomes,
+# not a reading of any table.
+#
+# probe (1.15.2 state)                                          -> 26.2 state
+#
+# Walls: the four side properties stopped being booleans in 1.16 and became a
+# three-valued none/low/tall. Both values are pinned here; `tall` is a state
+# the old wire cannot express and vanilla never produces from one.
+cobblestone_wall[east=true,north=false,south=false,west=false,up=true,waterlogged=false]   -> cobblestone_wall[east=low,north=none,south=none,west=none,up=true,waterlogged=false]
+cobblestone_wall[east=false,north=false,south=false,west=false,up=true,waterlogged=false]  -> cobblestone_wall[east=none,north=none,south=none,west=none,up=true,waterlogged=false]
+cobblestone_wall[east=true,north=true,south=true,west=true,up=false,waterlogged=true]      -> cobblestone_wall[east=low,north=low,south=low,west=low,up=false,waterlogged=true]
+brick_wall[east=false,north=true,south=false,west=true,up=false,waterlogged=false]         -> brick_wall[east=none,north=low,south=none,west=low,up=false,waterlogged=false]
+#
+# Jigsaw: `facing` (6 values) became `orientation` (12) in 1.16. All six are
+# probed, so the two non-obvious vertical cases are measured, not extrapolated
+# from the four horizontal ones.
+jigsaw[facing=north] -> jigsaw[orientation=north_up]
+jigsaw[facing=south] -> jigsaw[orientation=south_up]
+jigsaw[facing=east]  -> jigsaw[orientation=east_up]
+jigsaw[facing=west]  -> jigsaw[orientation=west_up]
+jigsaw[facing=up]    -> jigsaw[orientation=up_north]
+jigsaw[facing=down]  -> jigsaw[orientation=down_south]

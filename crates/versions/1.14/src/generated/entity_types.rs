@@ -121,3 +121,4 @@ pub static ENTITY_TYPES: [(i32, &str); 108] = [
     (106, "minecraft:player"),
     (107, "minecraft:fishing_bobber"),
 ];
+
