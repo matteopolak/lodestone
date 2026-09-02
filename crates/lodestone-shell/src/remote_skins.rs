@@ -319,10 +319,10 @@ pub fn skin_for_profile(profile: &lodestone_game::tablist::GameProfile) -> Optio
     Some(skin)
 }
 
-/// `DefaultPlayerSkin.get(uuid)`'s sheet reference — the identity this account
+/// Vanilla's own default-player-skin lookup's sheet reference — the identity this account
 /// draws until (or unless) a real texture is bound for it.
 ///
-/// The uuid→`i64` pair is `UUID.getMostSignificantBits`/`getLeastSignificantBits`,
+/// The uuid→`i64` pair is the UUID's own most/least-significant-bits split,
 /// which is what vanilla's hash is defined over.
 #[must_use]
 pub fn default_sheet_for_uuid(id: uuid::Uuid) -> &'static str {
