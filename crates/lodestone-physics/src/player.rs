@@ -2710,29 +2710,26 @@ fn tick_elytra_among_entities(
     let old_y = state.position.y;
     do_move(state, view, profile, false, input.sneak, nearby);
 
-    // `Entity.move()`'s `checkFallDamage` call. Not water on this path.
+    // Vanilla's own fall-damage bookkeeping call. Not water on this path.
     accumulate_fall_distance(state, state.position.y - old_y, false);
 }
 
-/// `FireworkRocketEntity.tick`'s glide-boost impulse
-/// (`FireworkRocketEntity.java:122-137`), issue #206 — the elytra speed boost
-/// from using a firework rocket while gliding.
+/// Vanilla's own firework-rocket glide-boost impulse, issue #206 — the
+/// elytra speed boost from using a firework rocket while gliding.
 ///
 /// # What this function is, and is not, responsible for
 ///
-/// Vanilla applies this every tick a firework rocket entity is **attached** to
-/// a fall-flying player (`attachedToEntity != null && attachedToEntity.isFallFlying()`,
-/// `FireworkRocketEntity.java:122-123`). The rocket is its own entity, ticked
+/// Vanilla applies this every tick a firework rocket entity is **attached**
+/// to a fall-flying player. The rocket is its own entity, ticked
 /// independently by the level's normal entity loop — spawning it on right-
-/// click, tracking the attachment, and its `life` counter (which decides how
-/// many ticks the boost lasts before the rocket explodes,
-/// `FireworkRocketEntity.java:186-215`) are entity/item state this crate has
-/// no model of and does not attempt here. A driver must spawn/track the
-/// rocket (or an equivalent per-use counter) and call this once per tick for
-/// as long as vanilla's attached rocket would still be ticking, with
-/// [`PlayerState::fall_flying`] already `true` — this function does not check
-/// it, the same way [`tick_elytra`] is only ever reached through its caller's
-/// own `fall_flying` dispatch.
+/// click, tracking the attachment, and its own `life` counter (which
+/// decides how many ticks the boost lasts before the rocket explodes) are
+/// entity/item state this crate has no model of and does not attempt here.
+/// A driver must spawn/track the rocket (or an equivalent per-use counter)
+/// and call this once per tick for as long as vanilla's attached rocket
+/// would still be ticking, with [`PlayerState::fall_flying`] already `true`
+/// — this function does not check it, the same way [`tick_elytra`] is only
+/// ever reached through its caller's own `fall_flying` dispatch.
 ///
 /// **Ordering vanilla does not pin either.** The rocket ticks as an ordinary
 /// entity in the level's entity-iteration order, which is not defined relative
@@ -2742,9 +2739,9 @@ fn tick_elytra_among_entities(
 ///
 /// What *is* physics, reproduced exactly: `movement.add(lookAngle * 0.1 +
 /// (lookAngle * 1.5 - movement) * 0.5)`, component-wise, all in `double`
-/// (`Vec3` arithmetic — no `float` narrowing anywhere in the source line).
-/// `lookAngle` is `Entity.getLookAngle()` = [`calculate_view_vector`] at the
-/// player's current pitch/yaw.
+/// (no `float` narrowing anywhere in the source line). `lookAngle` is
+/// vanilla's own look-angle accessor, which is [`calculate_view_vector`] at
+/// the player's current pitch/yaw.
 pub fn apply_firework_boost(state: &mut PlayerState) {
     let look = calculate_view_vector(state.pitch, state.yaw);
     let m = state.velocity;
