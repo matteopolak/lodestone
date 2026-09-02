@@ -94,7 +94,7 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::RECIPE_BOOK_SETTINGS {
-            // `RecipeBookSettings.STREAM_CODEC` composes four `TypeSettings`, each
+            // `vanilla's own recipe book settings's own stream codec` composes four `TypeSettings`, each
             // two booleans, in the fixed order crafting, furnace, blast furnace,
             // smoker. Eight bytes, no length prefix and no discriminator — the
             // codec is `StreamCodec<FriendlyByteBuf, _>`, i.e. not registry-aware,
@@ -221,7 +221,7 @@ impl V770Adapter {
 /// affordance comes straight back.
 ///
 /// The patch codec length-prefixes neither the patch nor its individual
-/// components (26.2 `DataComponentPatch.STREAM_CODEC`, the undelimited variant
+/// components (26.2 `vanilla's own data component patch's own stream codec`, the undelimited variant
 /// clientbound stacks use), so an unrecognised component cannot be skipped in
 /// place — hence a partial outcome at all. See [`read_item_stack`].
 #[must_use]
@@ -242,7 +242,7 @@ pub(crate) enum DecodedStack {
 
 /// Decodes a clientbound optional item stack.
 ///
-/// Wire shape (26.2 `ItemStack.OPTIONAL_STREAM_CODEC`): a VarInt count — `<= 0`
+/// Wire shape (26.2 `vanilla's own item stack's own optional stream codec`): a VarInt count — `<= 0`
 /// means the empty stack — then the item registry id as a VarInt, then a
 /// `DataComponentPatch` (a VarInt count of added components and a VarInt count of
 /// removed components; both zero means an empty patch). Each added component is a
@@ -429,9 +429,9 @@ fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
 /// assigns holder ids — the `data/minecraft/banner_pattern/` file stems
 /// sorted by resource id.
 ///
-/// `Registries.BANNER_PATTERN` is dynamic exactly as
+/// `vanilla's own registries's own banner pattern` is dynamic exactly as
 /// [`TRIM_MATERIAL_IDS`]' registry is (it appears in
-/// `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` and in no built-in
+/// `vanilla's own registry data loader's own synchronized registries` and in no built-in
 /// `registries.json` report), so the same reasoning applies verbatim: the id
 /// order is `vanilla's resource-manager registry-load task`'s
 /// `.sorted(a by-key comparator())`, and `the equivalent datagen bootstrap routine`'s
@@ -515,7 +515,7 @@ const DYE_COLOR_NAMES: [&str; 16] = [
 /// Decodes `minecraft:banner_patterns`' payload — vanilla's own
 /// banner-pattern-layers stream codec, a list codec over each layer's own
 /// stream codec: a VarInt element count (unbounded on the wire — vanilla's
-/// no-arg list-codec overload caps at `Integer.MAX_VALUE`, not
+/// no-arg list-codec overload caps at `the maximum i32 value`, not
 /// a real limit) followed by that many layers. Each layer is a
 /// `Holder<BannerPattern>` — the same registry-holder codec shape
 /// [`read_armor_trim`] decodes: `0` introduces an inline `(identifier assetId,
@@ -578,8 +578,8 @@ fn read_banner_pattern_layers(reader: &mut Reader<'_>) -> Result<Vec<BannerPatte
     Ok(layers)
 }
 
-/// Decodes `minecraft:pot_decorations`' payload — `PotDecorations.STREAM_CODEC`,
-/// which is `vanilla's registry codec(Registries.ITEM).apply(vanilla's list codec (max 4))`.
+/// Decodes `minecraft:pot_decorations`' payload — `vanilla's own pot decorations's own stream codec`,
+/// which is `vanilla's registry codec(vanilla's own registries's own item).apply(vanilla's list codec (max 4))`.
 ///
 /// So the wire is a VarInt element count (vanilla's read-count helper, capped at 4)
 /// followed by that many **bare** item registry ids as VarInts. Two shapes it is
@@ -596,7 +596,7 @@ fn read_banner_pattern_layers(reader: &mut Reader<'_>) -> Result<Vec<BannerPatte
 ///   arm.
 ///
 /// `minecraft:brick` decodes to `None`, mirroring `getItem`'s
-/// `item == Items.BRICK ? an empty optional() : Optional.of(item)`. An id outside the
+/// `item == vanilla's own items's own brick ? an empty optional() : a present optional(item)`. An id outside the
 /// item registry decodes as `None` rather than failing, for the same reason
 /// [`TRIM_MATERIAL_IDS`] tolerates an unknown holder: the bytes are consumed
 /// either way, and that is the property keeping the rest of the packet readable.
@@ -626,13 +626,13 @@ fn read_pot_decorations(reader: &mut Reader<'_>) -> Result<PotDecorations, Adapt
     })
 }
 
-/// Decodes `minecraft:potion_contents`' payload — `PotionContents.STREAM_CODEC`:
+/// Decodes `minecraft:potion_contents`' payload — `vanilla's own potion contents's own stream codec`:
 /// `Optional<Holder<Potion>>`, `Optional<Integer>`, `List<MobEffectInstance>`, then
 /// `Optional<String>` — and folds it straight into the mixed ARGB colour via
 /// [`lodestone_data::potion::potion_color`], since nothing else in this client reads
 /// the raw potion id or effect list back out.
 fn read_potion_contents_color(reader: &mut Reader<'_>) -> Result<u32, AdapterError> {
-    // `Potion.STREAM_CODEC = vanilla's holder-registry codec(Registries.POTION)`: a
+    // `vanilla's own potion's own stream codec = vanilla's holder-registry codec(vanilla's own registries's own potion)`: a
     // plain 0-based VarInt registry id (the same shape `minecraft:mob_effect` uses),
     // wrapped in vanilla's optional-value codec — a bool presence flag then the value.
     let potion = if reader.bool().map_err(dec_err)? {
@@ -683,9 +683,9 @@ fn read_resolvable_profile(reader: &mut Reader<'_>) -> Result<ItemProfile, Adapt
             properties,
         }
     } else {
-        // `ResolvableProfile.Partial.STREAM_CODEC`: an optional name
+        // `vanilla's own resolvable profile's own partial's own stream codec`: an optional name
         // (`PLAYER_NAME.apply(optional)`, cap 16), an optional uuid
-        // (`UUIDUtil.STREAM_CODEC.apply(optional)`), then the same
+        // (`vanilla's own uuid util's own stream codec's own apply(optional)`), then the same
         // `GAME_PROFILE_PROPERTIES` as the full form — **not** optional itself,
         // just possibly empty.
         let name = if reader.bool().map_err(dec_err)? {
@@ -702,10 +702,10 @@ fn read_resolvable_profile(reader: &mut Reader<'_>) -> Result<ItemProfile, Adapt
         ItemProfile { name, id, properties }
     };
 
-    // `PlayerSkin.Patch.STREAM_CODEC`: three optional `Identifier` textures
-    // (`ClientAsset.ResourceTexture.STREAM_CODEC.apply(optional)`, each a bare
+    // `vanilla's own player skin's own patch's own stream codec`: three optional `Identifier` textures
+    // (`vanilla's own client asset's own resource texture's own stream codec's own apply(optional)`, each a bare
     // vanilla's UTF-8 string codec, cap 32767) then an optional `PlayerModelType`
-    // (`PlayerModelType.STREAM_CODEC.apply(optional)`). **The model field is a
+    // (`vanilla's own player model type's own stream codec's own apply(optional)`). **The model field is a
     // bool wrapping a bool** — one presence flag, and if true, one more
     // slim/wide flag — not a single flag the way every other optional in this
     // function is; collapsing the two would misread the byte after this
@@ -790,7 +790,7 @@ fn read_writable_book_content(reader: &mut Reader<'_>) -> Result<Vec<String>, Ad
 /// Vanilla's own written-book-content stream codec: `Filterable<String>`
 /// title (cap 32), plain `author` (a UTF-8 string codec, cap 32767), VarInt
 /// `generation`, a list-codec-capped (no explicit bound, so
-/// `Integer.MAX_VALUE` — read defensively bounded below) list of
+/// `the maximum i32 value` — read defensively bounded below) list of
 /// `Filterable<Component>` pages, then a `resolved` bool — in that
 /// declaration order, which is also the composite stream codec's order
 /// (confirmed against the decompiled 26.2 source).
@@ -834,8 +834,8 @@ fn read_written_book_content(reader: &mut Reader<'_>) -> Result<WrittenBookConte
     })
 }
 
-/// `MobEffectInstance.STREAM_CODEC.apply(vanilla's list codec())`: a VarInt count then
-/// that many `(MobEffect id, MobEffectInstance.Details)` pairs. Only the effect id
+/// `vanilla's own mob effect instance's own stream codec's own apply(vanilla's list codec())`: a VarInt count then
+/// that many `(MobEffect id, vanilla's own mob effect instance's own details)` pairs. Only the effect id
 /// and amplifier are kept — the colour mix needs nothing else — but every field is
 /// still read off the wire in declaration order, because skipping one would
 /// misalign every byte after it.
@@ -843,7 +843,7 @@ fn read_mob_effect_instances(reader: &mut Reader<'_>) -> Result<Vec<(i32, u8)>, 
     let count = read_count(reader, "potion custom_effects")?;
     let mut out = Vec::with_capacity(count.min(64));
     for _ in 0..count {
-        // `MobEffect.STREAM_CODEC = vanilla's holder-registry codec(Registries.MOB_EFFECT)`:
+        // `vanilla's own mob effect's own stream codec = vanilla's holder-registry codec(vanilla's own registries's own mob effect)`:
         // the same plain 0-based VarInt shape as the potion holder above.
         let effect_id = reader.var_i32().map_err(dec_err)?;
         let amplifier = read_mob_effect_details(reader)?;
@@ -852,12 +852,12 @@ fn read_mob_effect_instances(reader: &mut Reader<'_>) -> Result<Vec<(i32, u8)>, 
     Ok(out)
 }
 
-/// `MobEffectInstance.Details.STREAM_CODEC`: VarInt amplifier, VarInt duration, bool
+/// `vanilla's own mob effect instance's own details's own stream codec`: VarInt amplifier, VarInt duration, bool
 /// ambient, bool showParticles, bool showIcon, then `Optional<Details>` recursing
 /// into this same shape — **without** its own leading effect id, since `hiddenEffect`
 /// is a nested `Details`, not a nested `MobEffectInstance`. Returns just the
 /// amplifier, clamped into `u8` the way `MobEffectInstance`'s own constructor
-/// (`Mth.clamp(amplifier, 0, 255)`) does.
+/// (`vanilla's own mth's own clamp(amplifier, 0, 255)`) does.
 fn read_mob_effect_details(reader: &mut Reader<'_>) -> Result<u8, AdapterError> {
     let amplifier = reader.var_i32().map_err(dec_err)?;
     reader.var_i32().map_err(dec_err)?; // duration
@@ -1003,14 +1003,14 @@ fn read_component_patch(
                     AdapterError::Decode(format!("negative item max_damage {max}"))
                 })?);
             }
-            // `Repairable.STREAM_CODEC` is one `HolderSet<Item>`. The repair
+            // `vanilla's own repairable's own stream codec` is one `HolderSet<Item>`. The repair
             // items themselves have no consumer here, but this component is
             // unframed like every other patch payload, so consuming it is what
             // keeps a repaired item from ending the rest of its packet.
             Some("minecraft:repairable") => {
                 let _repair_items = read_holder_set(reader)?;
             }
-            // `Equippable.STREAM_CODEC` is an eleven-field record. Only its
+            // `vanilla's own equippable's own stream codec` is an eleven-field record. Only its
             // slot reaches `ItemComponents` today, but every field must be read:
             // a patched horse armour otherwise drops the remainder of the
             // container packet at this component.
@@ -1104,7 +1104,7 @@ fn read_component_patch(
                     .map(|s| (*s).to_owned());
             }
 
-            // Fixed-width scalars, **not** VarInts. `MapItemColor.STREAM_CODEC` is
+            // Fixed-width scalars, **not** VarInts. `vanilla's own map item color's own stream codec` is
             // vanilla's fixed-width `INT` codec (the same trap `minecraft:dyed_color` documents
             // above), and the two floats are vanilla's fixed-width `FLOAT` codec.
             Some("minecraft:map_color") => {
@@ -1129,7 +1129,7 @@ fn read_component_patch(
                 reader.string(32767).map_err(dec_err)?;
             }
 
-            // `ComponentSerialization.STREAM_CODEC` — the same network-NBT chat
+            // `vanilla's own component serialization's own stream codec` — the same network-NBT chat
             // component `minecraft:custom_name` uses. `item_name` is the *item's*
             // name rather than a rename, so it is consumed and not surfaced;
             // nothing here prefers it over `custom_name`.
@@ -1137,7 +1137,7 @@ fn read_component_patch(
                 read_network_nbt(reader).map_err(dec_err)?;
             }
 
-            // `ItemLore.STREAM_CODEC` is `ComponentSerialization.STREAM_CODEC
+            // `vanilla's own item lore's own stream codec` is `vanilla's own component serialization's own stream codec
             // .apply(vanilla's list codec (max 256))`: a VarInt count then that many
             // network-NBT components. 256 is the codec's own cap.
             Some("minecraft:lore") => {
@@ -1154,7 +1154,7 @@ fn read_component_patch(
                 }
             }
 
-            // `stored_enchantments` shares `ItemEnchantments.STREAM_CODEC` with
+            // `stored_enchantments` shares `vanilla's own item enchantments's own stream codec` with
             // `minecraft:enchantments`, so it reuses that reader — but it is an
             // enchanted *book*'s payload, not the stack's own effects, so it is
             // deliberately not merged into `components.enchantments`.
@@ -1186,7 +1186,7 @@ fn read_component_patch(
 
             // Decoded for the same reason as the trim, map id, pot decorations,
             // profile, the two book contents and bundle contents above: none of
-            // `BannerPatternLayers.Layer`'s sub-codecs is length-prefixed, so a
+            // `vanilla's own banner pattern layers's own layer`'s sub-codecs is length-prefixed, so a
             // banner or shield in any container truncated the rest of the packet
             // from that slot onward. See [`read_banner_pattern_layers`].
             Some("minecraft:banner_patterns") => {
@@ -1233,7 +1233,7 @@ fn read_component_patch(
                 ));
             }
 
-            // `UseEffects.STREAM_CODEC`: two bools (canSprint, interactVibrations)
+            // `vanilla's own use effects's own stream codec`: two bools (canSprint, interactVibrations)
             // then a float (speedMultiplier) — an eating/drinking speed-and-motion
             // modifier with no current consumer here; unframed like the rest of
             // this group, so a consumable stack carrying it would otherwise
@@ -1244,7 +1244,7 @@ fn read_component_patch(
                 reader.f32().map_err(dec_err)?;
             }
 
-            // `AdventureModePredicate.STREAM_CODEC` is a `List<BlockPredicate>`, and
+            // `vanilla's own adventure mode predicate's own stream codec` is a `List<BlockPredicate>`, and
             // `BlockPredicate`'s own codec carries a `DataComponentMatchers`, whose
             // `partial` half dispatches through a *second*, independent registry
             // (`data_component_predicate_type`, 15 entries) — several of which
@@ -1271,7 +1271,7 @@ fn read_component_patch(
                 return Ok((components, false));
             }
 
-            // `FoodProperties.DIRECT_STREAM_CODEC`: VarInt nutrition, float
+            // `vanilla's own food properties's own direct stream codec`: VarInt nutrition, float
             // saturation, bool canAlwaysEat.
             Some("minecraft:food") => {
                 reader.var_i32().map_err(dec_err)?;
@@ -1279,7 +1279,7 @@ fn read_component_patch(
                 reader.bool().map_err(dec_err)?;
             }
 
-            // `Consumable.STREAM_CODEC`: float consumeSeconds, `ItemUseAnimation`
+            // `vanilla's own consumable's own stream codec`: float consumeSeconds, `ItemUseAnimation`
             // (a bare `idMapper` VarInt), a `Holder<SoundEvent>`, bool
             // hasConsumeParticles, then the same `List<ConsumeEffect>` shape
             // `minecraft:death_protection` carries — see [`read_consume_effects`].
@@ -1295,7 +1295,7 @@ fn read_component_patch(
                 }
             }
 
-            // `UseRemainder.STREAM_CODEC` is a single `ItemStackTemplate` — the
+            // `vanilla's own use remainder's own stream codec` is a single `ItemStackTemplate` — the
             // stack an eaten/drunk item converts into (an empty bottle, a bowl).
             // Unframed like the rest of this group.
             Some("minecraft:use_remainder") => {
@@ -1307,7 +1307,7 @@ fn read_component_patch(
                 }
             }
 
-            // `UseCooldown.STREAM_CODEC`: float seconds, then an optional
+            // `vanilla's own use cooldown's own stream codec`: float seconds, then an optional
             // `Identifier` cooldown-group override (bool then a bare UTF8 string).
             Some("minecraft:use_cooldown") => {
                 reader.f32().map_err(dec_err)?;
@@ -1316,21 +1316,21 @@ fn read_component_patch(
                 }
             }
 
-            // `DamageResistant.STREAM_CODEC` is a single, non-optional
+            // `vanilla's own damage resistant's own stream codec` is a single, non-optional
             // `HolderSet<DamageType>` — the same wire shape [`read_holder_set`]
             // already reads for `Repairable`'s item set.
             Some("minecraft:damage_resistant") => {
                 let _ = read_holder_set(reader)?;
             }
 
-            // `Weapon.STREAM_CODEC`: VarInt itemDamagePerAttack, float
+            // `vanilla's own weapon's own stream codec`: VarInt itemDamagePerAttack, float
             // disableBlockingForSeconds.
             Some("minecraft:weapon") => {
                 reader.var_i32().map_err(dec_err)?;
                 reader.f32().map_err(dec_err)?;
             }
 
-            // `DeathProtection.STREAM_CODEC` is a single `List<ConsumeEffect>` — a
+            // `vanilla's own death protection's own stream codec` is a single `List<ConsumeEffect>` — a
             // totem-of-undying-shaped item's on-death effect list. See
             // [`read_consume_effects`]; an unrecognised `ConsumeEffect` variant is
             // itself an unframed dispatch this decoder cannot see past, so the same
@@ -1381,7 +1381,7 @@ fn read_component_patch(
                 }
             }
 
-            // `PiercingWeapon.STREAM_CODEC`: two bools (dealsKnockback, dismounts)
+            // `vanilla's own piercing weapon's own stream codec`: two bools (dealsKnockback, dismounts)
             // then two `Optional<Holder<SoundEvent>>` (sound, hitSound).
             Some("minecraft:piercing_weapon") => {
                 reader.bool().map_err(dec_err)?;
@@ -1394,7 +1394,7 @@ fn read_component_patch(
                 }
             }
 
-            // `KineticWeapon.STREAM_CODEC`: two VarInts (contactCooldownTicks,
+            // `vanilla's own kinetic weapon's own stream codec`: two VarInts (contactCooldownTicks,
             // delayTicks), three `Optional<Condition>` (each a VarInt
             // maxDurationTicks then two floats — minSpeed, minRelativeSpeed), two
             // floats (forwardMovement, damageMultiplier), then two
@@ -1419,14 +1419,14 @@ fn read_component_patch(
                 }
             }
 
-            // `SwingAnimation.STREAM_CODEC`: `SwingAnimationType` (a bare
+            // `vanilla's own swing animation's own stream codec`: `SwingAnimationType` (a bare
             // `idMapper` VarInt) then a VarInt duration.
             Some("minecraft:swing_animation") => {
                 reader.var_i32().map_err(dec_err)?;
                 reader.var_i32().map_err(dec_err)?;
             }
 
-            // `SuspiciousStewEffects.STREAM_CODEC`: a list of (`MobEffect` holder —
+            // `vanilla's own suspicious stew effects's own stream codec`: a list of (`MobEffect` holder —
             // the same bare `holderRegistry` VarInt `minecraft:potion_contents`'s
             // custom effects use — then a VarInt duration) pairs.
             Some("minecraft:suspicious_stew_effects") => {
@@ -1442,14 +1442,14 @@ fn read_component_patch(
                 }
             }
 
-            // `vanilla's typed-entity-data stream codec(EntityType.STREAM_CODEC)`: a bare
+            // `vanilla's typed-entity-data stream codec(vanilla's own entity type's own stream codec)`: a bare
             // registry VarInt (`EntityType`) then a network-NBT compound tag. See
             // [`read_typed_entity_data`].
             Some("minecraft:entity_data") => {
                 read_typed_entity_data(reader)?;
             }
 
-            // `CustomData.STREAM_CODEC` here (unlike plain `minecraft:custom_data`
+            // `vanilla's own custom data's own stream codec` here (unlike plain `minecraft:custom_data`
             // above, which has no `networkSynchronized` at all) is
             // vanilla's compound-tag codec directly — one network-NBT compound tag,
             // no leading type id.
@@ -1466,7 +1466,7 @@ fn read_component_patch(
                 read_typed_entity_data(reader)?;
             }
 
-            // `Instrument.STREAM_CODEC = vanilla's registry-holder codec(Registries.INSTRUMENT,
+            // `vanilla's own instrument's own stream codec = vanilla's registry-holder codec(vanilla's own registries's own instrument,
             // DIRECT_STREAM_CODEC)`: `0` for an inline instrument (a
             // `Holder<SoundEvent>`, then two floats — useDuration, range — then a
             // network-NBT chat component description), a positive value for a bare
@@ -1481,7 +1481,7 @@ fn read_component_patch(
                 }
             }
 
-            // `TrimMaterial.STREAM_CODEC = vanilla's registry-holder codec(Registries.TRIM_MATERIAL,
+            // `vanilla's own trim material's own stream codec = vanilla's registry-holder codec(vanilla's own registries's own trim material,
             // DIRECT_STREAM_CODEC)`: same `0`-inline / `id + 1`-reference shape as
             // `minecraft:instrument` above. The inline body is a
             // `MaterialAssetGroup` (a base asset-info UTF8 string, then a
@@ -1504,8 +1504,8 @@ fn read_component_patch(
                 }
             }
 
-            // `JukeboxPlayable.STREAM_CODEC` is a single `Holder<JukeboxSong>`;
-            // `JukeboxSong.STREAM_CODEC` uses the same vanilla's registry-holder codec
+            // `vanilla's own jukebox playable's own stream codec` is a single `Holder<JukeboxSong>`;
+            // `vanilla's own jukebox song's own stream codec` uses the same vanilla's registry-holder codec
             // discriminator again. The inline body is a `Holder<SoundEvent>`, a
             // network-NBT chat component description, a float lengthInSeconds and
             // a VarInt comparatorOutput.
@@ -1518,13 +1518,13 @@ fn read_component_patch(
                 }
             }
 
-            // `vanilla's holder-set codec(Registries.BANNER_PATTERN)` — the same
+            // `vanilla's holder-set codec(vanilla's own registries's own banner pattern)` — the same
             // `HolderSet<T>` shape [`read_holder_set`] already reads.
             Some("minecraft:provides_banner_patterns") => {
                 let _ = read_holder_set(reader)?;
             }
 
-            // `LodestoneTracker.STREAM_CODEC`: an `Optional<GlobalPos>` (bool, then
+            // `vanilla's own lodestone tracker's own stream codec`: an `Optional<GlobalPos>` (bool, then
             // a `ResourceKey<Level>` — a bare UTF8 identifier string — and a
             // packed-`i64` `BlockPos`), then a bool `tracked`.
             Some("minecraft:lodestone_tracker") => {
@@ -1540,7 +1540,7 @@ fn read_component_patch(
                 read_firework_explosion(reader)?;
             }
 
-            // `Fireworks.STREAM_CODEC`: VarInt flightDuration, then a
+            // `vanilla's own fireworks's own stream codec`: VarInt flightDuration, then a
             // `List<FireworkExplosion>` capped at 256 — [`read_firework_explosion`]
             // per entry.
             Some("minecraft:fireworks") => {
@@ -1556,7 +1556,7 @@ fn read_component_patch(
                 }
             }
 
-            // `ItemContainerContents.STREAM_CODEC`: a `List<Optional<ItemStackTemplate>>`
+            // `vanilla's own item container contents's own stream codec`: a `List<Optional<ItemStackTemplate>>`
             // capped at 256 — a shulker box's, chest boat's or bundle-adjacent
             // container's slot contents. Each present entry is
             // [`read_item_stack_template_tolerant`]; an unmodeled component inside
@@ -1580,7 +1580,7 @@ fn read_component_patch(
                 }
             }
 
-            // `BlockItemStateProperties.STREAM_CODEC` is a bare
+            // `vanilla's own block item state properties's own stream codec` is a bare
             // `Map<String, String>` — property name to serialised value, for a
             // block item placed with a specific state (`/give … [block_state={…}]`).
             // No wire-declared cap; bounded defensively — no vanilla block carries
@@ -1598,7 +1598,7 @@ fn read_component_patch(
                 }
             }
 
-            // `Bees.STREAM_CODEC`: a `List<Occupant>`, each a
+            // `vanilla's own bees's own stream codec`: a `List<Occupant>`, each a
             // [`read_typed_entity_data`] (`EntityType`-keyed) followed by two
             // VarInts (ticksInHive, minTicksInHive). No wire-declared cap; a
             // beehive holds at most three, so bounded defensively.
@@ -1616,7 +1616,7 @@ fn read_component_patch(
                 }
             }
 
-            // `SulfurCubeContent.STREAM_CODEC` is a single, non-optional
+            // `vanilla's own sulfur cube content's own stream codec` is a single, non-optional
             // `ItemStackTemplate` — the block item a sulfur cube has absorbed.
             Some("minecraft:sulfur_cube_content") => {
                 let (_, complete) = read_item_stack_template_tolerant(reader)?;
@@ -1627,14 +1627,14 @@ fn read_component_patch(
                 }
             }
 
-            // `SoundEvent.STREAM_CODEC` directly (not optional) — the same
+            // `vanilla's own sound event's own stream codec` directly (not optional) — the same
             // vanilla's registry-holder codec discriminator [`read_sound_event_holder`]
             // already reads.
             Some("minecraft:break_sound") => {
                 read_sound_event_holder(reader)?;
             }
 
-            // `PaintingVariant.STREAM_CODEC = vanilla's registry-holder codec(Registries.PAINTING_VARIANT,
+            // `vanilla's own painting variant's own stream codec = vanilla's registry-holder codec(vanilla's own registries's own painting variant,
             // DIRECT_STREAM_CODEC)`: same `0`-inline / `id + 1`-reference shape as
             // `minecraft:instrument` above. The inline body is two VarInts (width,
             // height), a bare UTF8 identifier (assetId), then two
@@ -1766,7 +1766,7 @@ fn read_component_patch(
     Ok((components, true))
 }
 
-/// Consumes `ConsumeEffect.STREAM_CODEC.apply(vanilla's list codec())` — the
+/// Consumes `vanilla's own consume effect's own stream codec's own apply(vanilla's list codec())` — the
 /// payload shape shared by `minecraft:consumable`'s `onConsumeEffects` and
 /// `minecraft:death_protection`'s `deathEffects`.
 ///
@@ -1863,7 +1863,7 @@ fn read_item_stack_template_tolerant(
     ))
 }
 
-/// Consumes one `FireworkExplosion.STREAM_CODEC`: `Shape` (a bare `idMapper`
+/// Consumes one `vanilla's own firework explosion's own stream codec`: `Shape` (a bare `idMapper`
 /// VarInt), a VarInt-counted `colors` list of fixed-width `i32`s, a
 /// same-shaped `fadeColors` list, then two bools (hasTrail, hasTwinkle).
 /// Shared by the top-level `minecraft:firework_explosion` component and each
@@ -1912,7 +1912,7 @@ fn read_network_nbt_bytes(reader: &mut Reader<'_>) -> Result<Vec<u8>, AdapterErr
 }
 
 /// Consumes a `minecraft:custom_model_data` payload
-/// (`CustomModelData.STREAM_CODEC`).
+/// (`vanilla's own custom model data's own stream codec`).
 ///
 /// Four independent VarInt-counted lists, in order: floats, flags (bools),
 /// strings, colours. **The colours are vanilla's fixed-width `INT` codec** — fixed-width
@@ -1940,10 +1940,10 @@ fn read_custom_model_data(reader: &mut Reader<'_>) -> Result<Vec<u32>, AdapterEr
     Ok(numeric)
 }
 
-/// Consumes a `minecraft:tooltip_display` payload (`TooltipDisplay.STREAM_CODEC`).
+/// Consumes a `minecraft:tooltip_display` payload (`vanilla's own tooltip display's own stream codec`).
 ///
 /// A bool `hideTooltip`, then a VarInt-counted collection of
-/// `DataComponentType.STREAM_CODEC` — which is vanilla's registry codec, i.e. a
+/// `vanilla's own data component type's own stream codec` — which is vanilla's registry codec, i.e. a
 /// bare data-component-type registry id per entry with no offset.
 ///
 /// This component replaced 1.21.4's `minecraft:hide_tooltip` and
@@ -1959,19 +1959,19 @@ fn read_tooltip_display(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
 }
 
 /// Consumes a `minecraft:attribute_modifiers` payload
-/// (`ItemAttributeModifiers.STREAM_CODEC`).
+/// (`vanilla's own item attribute modifiers's own stream codec`).
 ///
 /// A VarInt-counted list of `Entry`, each of which is, in wire order:
 ///
-/// * the attribute as `Attribute.STREAM_CODEC` = vanilla's holder-registry codec,
+/// * the attribute as `vanilla's own attribute's own stream codec` = vanilla's holder-registry codec,
 ///   a **bare** VarInt registry id — `holderRegistry` is `registry(…,
 ///   Registry::asHolderIdMap)`, so unlike vanilla's registry-holder codec there is no `+1`
 ///   and no inline-holder `0` sentinel;
-/// * the modifier as `AttributeModifier.STREAM_CODEC` — an `Identifier` string, a
-///   **`ByteBufCodecs.DOUBLE`** (fixed-width f64, not a float), then the operation
+/// * the modifier as `vanilla's own attribute modifier's own stream codec` — an `Identifier` string, a
+///   **`vanilla's own byte buf codecs's own double`** (fixed-width f64, not a float), then the operation
 ///   as an idMapper VarInt;
-/// * the slot group as `EquipmentSlotGroup.STREAM_CODEC`, an idMapper VarInt;
-/// * the display as `Display.STREAM_CODEC`, a VarInt `Display.Type` id dispatching
+/// * the slot group as `vanilla's own equipment slot group's own stream codec`, an idMapper VarInt;
+/// * the display as `vanilla's own display's own stream codec`, a VarInt `vanilla's own display's own type` id dispatching
 ///   to a payload: `default` (0) and `hidden` (1) are vanilla's unit stream codec, i.e.
 ///   **zero bytes**, and `override` (2) carries one network-NBT chat component.
 ///
@@ -1998,7 +1998,7 @@ fn read_attribute_modifiers(reader: &mut Reader<'_>) -> Result<(), AdapterError>
             other => {
                 return Err(AdapterError::Decode(format!(
                     "attribute modifier display type {other} is outside \
-                     ItemAttributeModifiers.Display.Type's 0..=2"
+                     vanilla's own item attribute modifiers's own display's own type's 0..=2"
                 )));
             }
         }
@@ -2006,7 +2006,7 @@ fn read_attribute_modifiers(reader: &mut Reader<'_>) -> Result<(), AdapterError>
     Ok(())
 }
 
-/// Decodes a `minecraft:tool` component (26.2 `Tool.STREAM_CODEC`).
+/// Decodes a `minecraft:tool` component (26.2 `vanilla's own tool's own stream codec`).
 ///
 /// Wire shape, in order: a VarInt-counted list of rules, then the default mining
 /// speed as an f32, the damage-per-block as a VarInt, and the
@@ -2052,7 +2052,7 @@ fn read_tool(reader: &mut Reader<'_>) -> Result<ItemTool, AdapterError> {
     ))
 }
 
-/// Decodes a `HolderSet<Block>` (26.2 `vanilla's holder-set codec(Registries.BLOCK)`).
+/// Decodes a `HolderSet<Block>` (26.2 `vanilla's holder-set codec(vanilla's own registries's own block)`).
 ///
 /// A single VarInt discriminates: `0` means a named tag follows as an
 /// identifier string; any `n > 0` means `n - 1` direct holders follow, each a
@@ -2220,7 +2220,7 @@ impl SlotDisplayItems {
     }
 }
 
-/// Walks one `SlotDisplay` (`SlotDisplay.STREAM_CODEC`), collecting the item ids
+/// Walks one `SlotDisplay` (`vanilla's own slot display's own stream codec`), collecting the item ids
 /// it can display.
 ///
 /// # This is a byte-exact walk, not a skip
@@ -2250,7 +2250,7 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
             items.push(reader.var_i32().map_err(dec_err)?);
         }
         slot_display::ITEM_STACK => {
-            // `ItemStackTemplate.STREAM_CODEC`: item id, count, then a
+            // `vanilla's own item stack template's own stream codec`: item id, count, then a
             // `DataComponentPatch` — which is exactly what `read_component_patch`
             // walks, including its bail-out on an unmodeled component type.
             let item_id = reader.var_i32().map_err(dec_err)?;
@@ -2280,7 +2280,7 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
             if !inner.complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
-            // `DataComponentType.STREAM_CODEC` is a bare VarInt registry id.
+            // `vanilla's own data component type's own stream codec` is a bare VarInt registry id.
             let _component_type = reader.var_i32().map_err(dec_err)?;
             items.extend(inner.items);
         }
@@ -2308,7 +2308,7 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
                 }
                 items.extend(inner.items);
             }
-            // `TrimPattern.STREAM_CODEC` is vanilla's registry-holder codec: `0` means an
+            // `vanilla's own trim pattern's own stream codec` is vanilla's registry-holder codec: `0` means an
             // inline `TrimPattern` follows, which this adapter does not model, so
             // that case abandons the packet rather than guessing at its length.
             let holder = reader.var_i32().map_err(dec_err)?;
@@ -2454,7 +2454,7 @@ fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<(Vec<i32>, Vec<
 /// Decodes vanilla's clientbound award-stats packet: a VarInt-counted map of
 /// `(stat_type id, value id) -> count`.
 ///
-/// `Stat.STREAM_CODEC` is `registry(STAT_TYPE).dispatch(Stat::getType,
+/// `vanilla's own stat's own stream codec` is `registry(STAT_TYPE).dispatch(Stat::getType,
 /// StatType::streamCodec)`, so the **second** id's registry depends on the first:
 /// a value under `minecraft:mined` is a block, under `minecraft:killed` an entity
 /// type, and under `minecraft:custom` one of the 77 custom stats. Resolving it
@@ -2530,7 +2530,7 @@ fn read_holder_set(reader: &mut Reader<'_>) -> Result<Vec<i32>, AdapterError> {
     Ok(items)
 }
 
-/// Consumes a `Holder<SoundEvent>` (`SoundEvent.STREAM_CODEC`).
+/// Consumes a `Holder<SoundEvent>` (`vanilla's own sound event's own stream codec`).
 ///
 /// vanilla's registry-holder codec writes `0` for a direct sound definition, whose body
 /// is an identifier and an optional fixed-range float; a positive value is a
@@ -2590,7 +2590,7 @@ fn read_equippable(reader: &mut Reader<'_>) -> Result<EquipmentSlot, AdapterErro
 /// [`read_slot_display`]. Each entry is a `RecipeDisplayEntry` then an `i8` flags
 /// byte (bit 0 notification, bit 1 highlight).
 ///
-/// `RecipeDisplayEntry`'s `group` field is `ByteBufCodecs.OPTIONAL_VAR_INT`: a
+/// `RecipeDisplayEntry`'s `group` field is `vanilla's own byte buf codecs's own var int`: a
 /// single VarInt where `0` is absent and a present value `v` is written `v + 1` —
 /// **not** the usual bool-then-value optional. A bool-prefixed reader would
 /// mis-frame every entry after the first.
@@ -2796,7 +2796,7 @@ fn read_item_cost(reader: &mut Reader<'_>) -> Result<Option<(i32, i32)>, Adapter
 
 /// Decodes vanilla's clientbound show-dialog packet's Play-state form.
 ///
-/// The field is `vanilla's registry-holder codec(Registries.DIALOG, …)`: a VarInt where `0`
+/// The field is `vanilla's registry-holder codec(vanilla's own registries's own dialog, …)`: a VarInt where `0`
 /// means "an inline value follows" and `n > 0` means registry id `n - 1` with no
 /// further bytes. **The off-by-one is the trap** — reading the raw VarInt as the
 /// id would reference the wrong dialog for every entry.
@@ -2822,7 +2822,7 @@ fn decode_show_dialog(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 /// `.cache/mc/26.2/generated/reports/registries.json`.
 ///
 /// A **built-in** registry, so the ids are fixed by the jar rather than synced
-/// during Configuration (`MapDecorationType.STREAM_CODEC` is
+/// during Configuration (`vanilla's own map decoration type's own stream codec` is
 /// vanilla's holder-registry codec, a bare VarInt registry id). That is why a
 /// table is correct here where it would be a guess for a dynamic registry — see
 /// [`TRIM_MATERIAL_IDS`] for the contrast.
@@ -2951,10 +2951,10 @@ fn decode_map_item_data(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> 
     })])
 }
 
-/// Reads one `ItemStackTemplate` (`ItemStackTemplate.STREAM_CODEC`).
+/// Reads one `ItemStackTemplate` (`vanilla's own item stack template's own stream codec`).
 ///
 /// **Not** the same shape as an `ItemStack`: the template writes the item holder
-/// *first* and the count second, where `ItemStack.OPTIONAL_STREAM_CODEC` leads
+/// *first* and the count second, where `vanilla's own item stack's own optional stream codec` leads
 /// with the count and uses `<= 0` as the empty sentinel. A template is never
 /// empty (its constructor rejects air and count 0), so there is no sentinel and
 /// no `Option`.
@@ -2982,7 +2982,7 @@ fn read_item_stack_template(reader: &mut Reader<'_>) -> Result<ItemStack, Adapte
 /// bundle-contents stream codec (an item-stack-template codec applied
 /// through a list codec, mapped straight onto its own `items` list).
 ///
-/// Each entry is `ItemStackTemplate.STREAM_CODEC`: item id, then count, then a
+/// Each entry is `vanilla's own item stack template's own stream codec`: item id, then count, then a
 /// **nested** `DataComponentPatch` — [`read_component_patch`] called
 /// recursively, deliberately, since a bundle can legally contain another bundle
 /// (`BUNDLE_IN_BUNDLE_WEIGHT`). An unmodeled component inside a *contained*
