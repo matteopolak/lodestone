@@ -5,16 +5,17 @@
 //! A painting is not a rig and not a billboard — it is a flat slab of `width x
 //! height` blocks hung on a wall, its front face carrying the variant's own
 //! standalone sprite and its back and four edges carrying one shared `back`
-//! tile. `PaintingRenderer.renderPainting` builds it as a grid of 1x1 cells,
+//! tile. Vanilla's own painting-renderer builds it as a grid of 1x1 cells,
 //! and this module reproduces that grid rather than collapsing it to one quad,
 //! for the reason [`painting_mesh`] documents.
 //!
 //! # Where the numbers come from
 //!
-//! * the **geometry** is `PaintingRenderer.renderPainting` (26.2), transcribed
+//! * the **geometry** is vanilla's own painting-renderer's grid-building function (26.2), transcribed
 //!   quad by quad;
-//! * the **placement** is `PaintingRenderer.submit`'s single
-//!   `Axis.YP.rotationDegrees(180 - direction.get2DDataValue() * 90)`;
+//! * the **placement** is vanilla's own painting-renderer's submit function's single
+//!   rotation about world `+Y` by `180 - facing_direction_index * 90` degrees,
+//!   where the facing direction's own 2D data-value accessor gives the index;
 //! * the **variant table** is the 51 files of `data/minecraft/painting_variant/`
 //!   in the pinned 26.2 jar, read mechanically.
 //!
@@ -28,7 +29,7 @@ use crate::models::ModelVertex;
 ///
 /// Read out of the pinned jar's own `data/minecraft/painting_variant/*.json` —
 /// 51 files, each carrying `width`, `height` and `asset_id` — rather than
-/// transcribed from `PaintingVariants.bootstrap`. Sorted by name, because
+/// transcribed from vanilla's own painting-variant bootstrap registration. Sorted by name, because
 /// **nothing here depends on registry order**: the wire carries a holder id
 /// into the *server's* `minecraft:painting_variant` registry, and the name that
 /// id resolves to is what reaches this table. Sorting by registry order instead
@@ -94,7 +95,7 @@ pub const PAINTING_VARIANTS: &[(&str, u32, u32)] = &[
 
 /// The shared back/edge tile every painting uses, whatever its variant.
 ///
-/// `PaintingRenderer.BACK_SPRITE_LOCATION` is the bare sprite id `back`, which
+/// Vanilla's own named back-sprite-location constant is the bare sprite id `back`, which
 /// resolves through the paintings atlas (`assets/minecraft/atlases/paintings.json`,
 /// a single `minecraft:directory` source over `painting` with an empty prefix)
 /// to this file. This engine binds the file directly rather than stitching an
@@ -177,12 +178,13 @@ pub fn painting_sizes() -> Vec<PaintingSize> {
     out
 }
 
-/// Half the painting's thickness in blocks — `PaintingRenderer.renderPainting`'s
-/// `0.03125F`, i.e. half of `Painting.DEPTH`'s `0.0625F`, one texel.
+/// Half the painting's thickness in blocks — vanilla's own grid-building
+/// function's
+/// `0.03125F`, i.e. half of vanilla's own named painting-depth constant's `0.0625F`, one texel.
 const HALF_DEPTH: f32 = 0.03125;
 
 /// The fraction of the back sprite an edge quad samples —
-/// `back.getV(0.0625F)` / `back.getU(0.0625F)`. One sixteenth, i.e. one texel
+/// the back sprite's own U/V accessors evaluated at `0.0625F`. One sixteenth, i.e. one texel
 /// row of the 16px back tile, matching the painting's own 1/16-block depth.
 const EDGE_SPRITE_FRACTION: f32 = 0.0625;
 
@@ -203,8 +205,8 @@ pub struct PaintingMesh {
 }
 
 /// Build the two meshes for a `width` x `height` painting, in the entity's own
-/// local space (Y **up**, unflipped — a painting is an `EntityRenderer`, not a
-/// `LivingEntityRenderer`, so there is no `scale(-1, -1, 1)` and no 1.501 lift).
+/// local space (Y **up**, unflipped — a painting is vanilla's own plain entity
+/// renderer, not vanilla's own living-entity renderer, so there is no `scale(-1, -1, 1)` and no 1.501 lift).
 ///
 /// # Why the cell grid is reproduced rather than collapsed
 ///
@@ -220,7 +222,7 @@ pub struct PaintingMesh {
 /// means closing that gap later is a change to the light lane, not a re-bake.
 ///
 /// The cell loop, the vertex order and the UV expressions are
-/// `PaintingRenderer.renderPainting`'s, transcribed. Note `x0` is the cell's
+/// vanilla's own grid-building function's, transcribed. Note `x0` is the cell's
 /// **+1** edge and `x1` its base edge, and that the front UVs count *down*
 /// (`width - segment_x`), which is what draws the image unmirrored once the
 /// placement's `180 - yaw` rotation is applied.
@@ -336,29 +338,30 @@ impl QuadSink {
     }
 }
 
-/// The world placement for one painting: `PaintingRenderer.submit`'s whole pose
-/// stack.
-///
-/// ```text
-/// T(position) · Ry(180 - yaw)
-/// ```
+/// The world placement for one painting: vanilla's own painting-renderer's
+/// submit function's whole pose
+/// stack — a translate by `position` composed with a rotation about world
+/// `+Y` by `180 - yaw` degrees.
 ///
 /// `position` is the entity's wire position, which for a painting is the slab's
-/// **centre** rather than a mob's feet — `Painting.calculateBoundingBox` places
+/// **centre** rather than a mob's feet — vanilla's own painting bounding-box
+/// calculation places
 /// it there, which is why [`painting_mesh`]'s local frame is centred on the
 /// origin in both axes.
 ///
 /// `yaw_degrees` is the entity's ordinary body yaw off the wire, and that is
-/// not a coincidence worth glossing over: `HangingEntity.setDirection` does
-/// `setYRot(direction.get2DDataValue() * 90)`, so a painting's facing **is**
+/// not a coincidence worth glossing over: vanilla's own hanging-entity
+/// direction setter sets the yaw directly from the facing direction's own 2D
+/// data-value times 90, so a painting's facing **is**
 /// its yaw and needs no separate direction field decoded from the spawn
 /// packet's Object Data. The four legal values are exactly `0` (south), `90`
 /// (west), `180` (north) and `270` (east), each of which survives the wire's
 /// byte-angle quantisation exactly.
 ///
 /// No `scale(-1, -1, 1)` and no 1.501 lift, unlike
-/// [`entity_model_matrix`](crate::entity::entity_model_matrix): `PaintingRenderer`
-/// extends `EntityRenderer`, not `LivingEntityRenderer`, and the mesh above is
+/// [`entity_model_matrix`](crate::entity::entity_model_matrix): vanilla's own
+/// painting renderer
+/// extends its plain entity renderer, not its living-entity renderer, and the mesh above is
 /// authored Y-up to match.
 #[must_use]
 pub fn painting_matrix(position: Vec3, yaw_degrees: f32) -> Mat4 {
