@@ -25,12 +25,12 @@
 //!    desync every client), and asks the [`SoundRegistry`] to resolve the event
 //!    name to a concrete `.ogg` via its weighted selection. Because the roll
 //!    closure is one RNG shared across the whole `type: event` chain, this
-//!    reproduces vanilla's `WeighedSoundEvents.getSound(RandomSource)` exactly
+//!    reproduces vanilla's own weighted-sound-selection walk exactly
 //!    for the (constant-volume/pitch) vanilla corpus.
 //! 2. Reads the resolved file's bytes from an injected [`ResourceSource`] and
 //!    decodes it (cached, so a repeated footstep decodes once).
-//! 3. Builds a [`SoundInstance`] whose parameters match
-//!    `SoundEngine`/`AbstractSoundInstance`:
+//! 3. Builds a [`SoundInstance`] whose parameters match vanilla's own
+//!    sound engine and sound-instance types:
 //!    * `volume = packet_volume * entry_volume` (they multiply)
 //!    * `pitch  = packet_pitch  * entry_pitch`
 //!    * audible range `= max(volume, 1) * entry.attenuation_distance` — the
@@ -39,13 +39,14 @@
 //! ## An honest correction, verified against decompiled 26.2
 //!
 //! The packet's `fixed_range` does **not** drive client-side attenuation. Zero
-//! `SoundEvent.getRange` call sites exist in the client; `SoundEngine.java`
+//! call sites of vanilla's own fixed-range accessor exist in the client; its
+//! own sound engine
 //! computes range purely from the `sounds.json` entry's `attenuation_distance`
-//! (`max(instanceVolume, 1) * sound.getAttenuationDistance()`). `fixed_range`
+//! (`max(instanceVolume, 1) * soundAttenuationDistance`). `fixed_range`
 //! is a *server-side* culling parameter (which players receive the packet at
 //! all). The driver therefore ignores `fixed_range` for attenuation and
 //! documents the field as carried-but-unused on the client audio path. See
-//! `SoundEngine.play` and `AbstractSoundInstance.getVolume`.
+//! vanilla's own sound-engine play routine and sound-instance volume accessor.
 
 mod driver;
 

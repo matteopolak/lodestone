@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// `Musics.createGameMusic`'s delays, used only to sanity
+/// Vanilla's own game-music helper's delays, used only to sanity
 /// check that the data says what the jar says.
 const GAME_MIN: i64 = 12_000;
 const GAME_MAX: i64 = 24_000;
@@ -92,8 +92,8 @@ fn parse_track(biome: &str, slot: &str, value: &serde_json::Value) -> Track {
                 key.as_str(),
                 "sound" | "min_delay" | "max_delay" | "replace_current_music"
             ),
-            "{biome}: unexpected key `{key}` in {slot} — the Music record grew a field \
-             and this generator needs teaching (Music.java:8)"
+            "{biome}: unexpected key `{key}` in {slot} — vanilla's own music record grew a field \
+             and this generator needs teaching"
         );
     }
     Track {
@@ -145,7 +145,7 @@ fn parse_all() -> BTreeMap<String, Parsed> {
                     assert!(
                         matches!(key.as_str(), "default" | "creative" | "underwater"),
                         "{name}: unexpected slot `{key}` in audio/background_music \
-                         (BackgroundMusic.java:14-21 declares exactly three)"
+                         (vanilla's own background-music record declares exactly three)"
                     );
                 }
                 (
@@ -284,8 +284,8 @@ fn committed_table_matches_the_biome_assets() {
 /// The values themselves, checked against the jar rather than against the table.
 ///
 /// This is separate from the drift check on purpose: the drift check proves the
-/// table matches the JSON, and this proves the *JSON* matches what `Musics.java`
-/// says, so a wrong asset dump cannot launder itself through a regenerated table.
+/// table matches the JSON, and this proves the *JSON* matches what vanilla's own
+/// music-selection helper says, so a wrong asset dump cannot launder itself through a regenerated table.
 #[test]
 fn every_biome_default_track_uses_the_jars_game_music_delays() {
     let parsed = parse_all();
@@ -302,15 +302,15 @@ fn every_biome_default_track_uses_the_jars_game_music_delays() {
                 (t.min_delay, t.max_delay),
                 (GAME_MIN, GAME_MAX),
                 "{name}/{slot} ({}) has delays {}..={}, but every biome slot in vanilla is a \
-                 createGameMusic track (Musics.java:19-21) at {GAME_MIN}..={GAME_MAX}",
+                 game-music track (vanilla's own music-selection helper) at {GAME_MIN}..={GAME_MAX}",
                 t.sound,
                 t.min_delay,
                 t.max_delay
             );
             assert!(
                 !t.replace,
-                "{name}/{slot} is flagged replace_current_music; createGameMusic passes false \
-                 (Musics.java:20), and a replacing biome track would restart on every biome step"
+                "{name}/{slot} is flagged replace_current_music; vanilla's own game-music \
+                 constructor passes false, and a replacing biome track would restart on every biome step"
             );
             assert!(
                 t.sound.starts_with("music."),
