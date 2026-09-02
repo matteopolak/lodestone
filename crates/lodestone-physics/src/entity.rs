@@ -546,15 +546,14 @@ pub(crate) fn travel_in_air_among_entities(
     let climb_z = mth::floor(motion.position.z);
     let climbing = !ctx.suppress_climbable && view.is_climbable(climb_x, climb_y, climb_z);
     if climbing {
-        // Issue #210. Vanilla's own on-climbable sneak-to-hold clamp
-        // carries one extra conjunct beyond "is this a climbable block":
-        // `!getInBlockState().is(Blocks.SCAFFOLDING)`, read at the **same**
-        // in-block position `climbing` above already
-        // queried. On a ladder or vine, sneaking while moving down clamps `yd`
-        // to `0.0` and you hang in place; on scaffolding that conjunct is
-        // `false`, so the clamp never engages and sneaking keeps descending at
-        // the ordinary `-0.15` cap — scaffolding does not offer a ladder's
-        // edge-hold.
+        // Vanilla's own on-climbable sneak-to-hold clamp carries one extra
+        // condition beyond "is this a climbable block": the in-block state
+        // must not be scaffolding, read at the **same** in-block position
+        // `climbing` above already queried. On a ladder or vine, sneaking
+        // while moving down clamps `yd` to `0.0` and you hang in place; on
+        // scaffolding that condition is false, so the clamp never engages
+        // and sneaking keeps descending at the ordinary `-0.15` cap —
+        // scaffolding does not offer a ladder's edge-hold.
         let on_scaffolding = view.is_scaffolding(climb_x, climb_y, climb_z);
         motion.velocity = handle_on_climbable(
             motion.velocity,

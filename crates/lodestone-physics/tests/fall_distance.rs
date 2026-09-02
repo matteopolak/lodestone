@@ -572,7 +572,7 @@ fn real_accumulated_fall_distance_opens_the_edge_back_off_gate_that_zero_would_c
     // Phase 1: a REAL fall, driven entirely by `tick_air` with no horizontal
     // input, from directly above solid ground (x = 0.5, well clear of the x = 1
     // edge) down toward the ledge platform. `fall_distance` here is 100% the
-    // product of the accumulation this change adds -- never hand-set.
+    // product of the accumulation logic below -- never hand-set.
     let world = ledge_at_x1();
     let profile = PhysicsProfile::mc_1_21();
     let mut state = PlayerState::at(Vec3d::new(0.5, 2.0, 0.5), -90.0);

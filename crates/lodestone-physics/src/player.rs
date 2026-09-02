@@ -1408,8 +1408,8 @@ pub fn riptide_spin_attack_strength(level: u32) -> f32 {
     1.5f32 + 0.75f32 * (level as f32 - 1.0)
 }
 
-/// Vanilla's own "can glide" check, with the player's own override, issue
-/// #206.
+/// Vanilla's own "can glide" check, together with the player's own override
+/// for it.
 ///
 /// `!flying && !onGround && !isPassenger && !hasEffect(LEVITATION)` plus "some
 /// equipment slot holds a glider". The last conjunct is **not** physics state —
@@ -2291,7 +2291,7 @@ fn jump_out_of_fluid(
 ///   per-tick block-effects pass, which its per-tick player update calls
 ///   *after* travel. They live one level up, in [`apply_bubble_column`],
 ///   beside the other block-inside effect this crate models
-///   ([`update_stuck_multiplier`]). Issue #199.
+///   ([`update_stuck_multiplier`]).
 /// * The Depth Strider (water-movement-efficiency) attribute has no source
 ///   in this repo — see [`PlayerState::water_movement_efficiency`]. The
 ///   arithmetic is here; the value is `0.0`.
@@ -2887,7 +2887,7 @@ fn for_each_swept_cell(old_bb: Aabb, new_bb: Aabb, mut f: impl FnMut(i32, i32, i
 /// it.
 ///
 /// **Sweeps the segment, via [`for_each_swept_cell`], rather than sampling only
-/// the final resting position.** #216: the old version floored/ceiled the
+/// the final resting position.** The old version floored/ceiled the
 /// post-move box alone, so a mover fast enough to pass through a cobweb or
 /// powder-snow cell without ending inside it took no impulse at all — the
 /// resting-box-only approximation the `apply_bubble_column` "Divergences" note
@@ -2978,7 +2978,6 @@ fn update_freezing(
 
 /// Vanilla's own bubble-column block-inside effect → its own inside/above
 /// bubble-column impulses — the soul-sand lift and the magma-block drain.
-/// Issue #199.
 ///
 /// # The four constants, and the branch that picks between them
 ///
@@ -3045,14 +3044,14 @@ fn update_freezing(
 ///   cell's impulse. This function still enumerates the cells of the post-move
 ///   bounding box only. **This used to be "exactly the approximation
 ///   `update_stuck_multiplier` makes for the same vanilla call", deliberately kept
-///   consistent; it no longer is.** #216 gave `update_stuck_multiplier` (and
-///   [`update_freezing`]) a real swept-segment test via
+///   consistent; it no longer is.** A later fix gave `update_stuck_multiplier`
+///   (and [`update_freezing`]) a real swept-segment test via
 ///   [`for_each_swept_cell`], because a fast mover grazing a cobweb or a thin
 ///   powder-snow layer without resting inside it is the exact defect a resting-box
-///   sample cannot see — and bubble columns were left as they were, since nothing
-///   in this issue asked for them and the case this function serves (a player
+///   sample cannot see — and bubble columns were left as they were, since that
+///   fix was scoped to those two and the case this function serves (a player
 ///   *riding* a column, displacement at most `0.7`/tick, well under a cell) does
-///   not need it. So as of #216 this is a **known, not a deliberately mirrored**,
+///   not need it. So this is now a **known, not a deliberately mirrored**,
 ///   approximation — worth revisiting with the same fix if a launched-through-a-
 ///   column case ever needs it.
 /// * **The deflation constant is `1.0e-5`, not vanilla's widened `1.0E-5F`.**

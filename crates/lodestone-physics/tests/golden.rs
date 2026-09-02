@@ -1286,7 +1286,7 @@ fn grounded_facing(x: f64, y: f64, z: f64, yaw: f32) -> PlayerState {
 //
 // The only three traces in this file with a **second entity in the world**. Every
 // other one runs against an empty neighbour slice, which is why they are all
-// byte-identical across this change: `tick_among_entities` with an empty slice is
+// byte-identical to their pre-push versions: `tick_among_entities` with an empty slice is
 // `tick`, `apply_entity_push` returns before reading anything, and
 // `collide_among_entities` with an empty collider slice prepends nothing to the
 // block colliders. Regenerating `golden_traces.rs` after adding these produced
