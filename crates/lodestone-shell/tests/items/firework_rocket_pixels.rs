@@ -61,7 +61,7 @@ use lodestone_ecs::entity::FireworkFlags;
 use lodestone_render::{AnimInput, BlockModels, Camera, GpuContext, HeadlessTarget, RenderTarget};
 
 /// The item a rocket falls back to when the wire reported no stack —
-/// `FireworkRocketEntity.getDefaultItem()`, and what this gate draws.
+/// vanilla's firework-rocket entity's default-item accessor, and what this gate draws.
 const ITEM: &str = "minecraft:firework_rocket";
 
 const W: u32 = 320;
@@ -92,7 +92,7 @@ fn rocket(id: i32, type_path: &str, flags: Option<FireworkFlags>, at: glam::Vec3
         id,
         type_path: std::sync::Arc::from(type_path),
         // Left `None` deliberately: the draw path falls back to
-        // `FireworkRocketEntity.getDefaultItem()`, which is what a rocket whose
+        // vanilla's firework-rocket entity's default-item accessor, which is what a rocket whose
         // item field was never marked dirty genuinely draws as, so this is the
         // *common* case rather than a degraded one.
         item: None,
