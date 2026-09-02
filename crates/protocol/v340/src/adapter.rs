@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LockResult, Mutex, MutexGuard, PoisonError};
 
-use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
+use lodestone_core::{Ctx, Decode, Encode, ProtocolRange, Reader, Writer};
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::block_states;
 use lodestone_data::mob_effects::mob_effect_name;
@@ -688,6 +688,101 @@ const DEFAULT_FLYING_SPEED: f32 = 0.05;
 /// Vanilla default walking speed, sent in the server-ignored serverbound field.
 const DEFAULT_WALKING_SPEED: f32 = 0.1;
 
+/// Signature every `play`-state clientbound handler shares: an inherent
+/// associated function coerced to a plain fn pointer, so `Handler<T>`
+/// stays `Copy` with no captured state. Kept uniform across all ~80
+/// packets in this family's `play::clientbound::ENTRIES` table even
+/// though most handlers use only a fraction of these parameters --
+/// exactly the mechanical, one-shape-fits-all point of a dispatch table.
+type PlayHandlerFn =
+    fn(&V340Adapter, &mut dyn WorldSink, &[u8]) -> Result<Vec<Directive>, AdapterError>;
+
+static PLAY_CLIENTBOUND_HANDLERS: &[(&str, lodestone_core::dispatch::Handler<PlayHandlerFn>)] = &[
+    ("minecraft:login", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_login)),
+    ("minecraft:map_chunk", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_map_chunk)),
+    ("minecraft:unload_chunk", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_unload_chunk)),
+    ("minecraft:keep_alive", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_keep_alive)),
+    ("minecraft:chat", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_chat)),
+    ("minecraft:position", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_position)),
+    ("minecraft:spawn_entity_living", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_spawn_entity_living)),
+    ("minecraft:spawn_entity", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_spawn_entity)),
+    ("minecraft:named_entity_spawn", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_named_entity_spawn)),
+    ("minecraft:rel_entity_move", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_rel_entity_move)),
+    ("minecraft:entity_look", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_look)),
+    ("minecraft:entity_move_look", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_move_look)),
+    ("minecraft:entity_teleport", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_teleport)),
+    ("minecraft:entity_velocity", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_velocity)),
+    ("minecraft:entity_destroy", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_destroy)),
+    ("minecraft:kick_disconnect", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_kick_disconnect)),
+    ("minecraft:update_health", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_update_health)),
+    ("minecraft:respawn", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_respawn)),
+    ("minecraft:entity_status", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_status)),
+    ("minecraft:entity_head_rotation", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_head_rotation)),
+    ("minecraft:block_change", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_block_change)),
+    ("minecraft:multi_block_change", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_multi_block_change)),
+    ("minecraft:open_window", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_open_window)),
+    ("minecraft:close_window", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_close_window)),
+    ("minecraft:window_items", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_window_items)),
+    ("minecraft:set_slot", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_set_slot)),
+    ("minecraft:craft_progress_bar", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_craft_progress_bar)),
+    ("minecraft:title", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_title)),
+    ("minecraft:tab_complete", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_tab_complete)),
+    ("minecraft:player_info", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_player_info)),
+    ("minecraft:held_item_slot", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_held_item_slot)),
+    ("minecraft:abilities", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_abilities)),
+    ("minecraft:block_action", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_block_action)),
+    ("minecraft:entity_equipment", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_equipment)),
+    ("minecraft:animation", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_animation)),
+    ("minecraft:named_sound_effect", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_named_sound_effect)),
+    ("minecraft:sound_effect", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_sound_effect)),
+    ("minecraft:scoreboard_display_objective", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_scoreboard_display_objective)),
+    ("minecraft:scoreboard_objective", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_scoreboard_objective)),
+    ("minecraft:scoreboard_score", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_scoreboard_score)),
+    ("minecraft:teams", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_teams)),
+    ("minecraft:boss_bar", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_boss_bar)),
+    ("minecraft:spawn_position", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_spawn_position)),
+    ("minecraft:update_time", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_update_time)),
+    ("minecraft:difficulty", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_difficulty)),
+    ("minecraft:playerlist_header", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_playerlist_header)),
+    ("minecraft:attach_entity", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_attach_entity)),
+    ("minecraft:set_passengers", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_set_passengers)),
+    ("minecraft:collect", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_collect)),
+    ("minecraft:entity_effect", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_effect)),
+    ("minecraft:remove_entity_effect", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_remove_entity_effect)),
+    ("minecraft:spawn_entity_weather", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_spawn_entity_weather)),
+    ("minecraft:spawn_entity_experience_orb", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_spawn_entity_experience_orb)),
+    ("minecraft:world_particles", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_world_particles)),
+    ("minecraft:experience", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_experience)),
+    ("minecraft:vehicle_move", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_vehicle_move)),
+    ("minecraft:set_cooldown", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_set_cooldown)),
+    ("minecraft:combat_event", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_combat_event)),
+    ("minecraft:world_border", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_world_border)),
+    ("minecraft:open_sign_entity", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_open_sign_entity)),
+    ("minecraft:select_advancement_tab", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_select_advancement_tab)),
+    ("minecraft:spawn_entity_painting", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_spawn_entity_painting)),
+];
+
+static PLAY_CLIENTBOUND_IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
+    lodestone_core::dispatch::IGNORED::new("minecraft:statistics", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:block_break_animation", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:tile_entity_data", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:transaction", "confirm-transaction handshake removed after 1.16; v770 has no clientbound equivalent"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:custom_payload", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:explosion", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:game_state_change", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:world_event", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:map", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:entity", "bare entity-id packet with no move/look payload (minecraft-data packet_entity is just {entityId}); nothing observable to translate"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:craft_recipe_response", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:bed", "removed protocol packet; modern client conveys the sleeping pose via entity metadata, v770 has no clientbound equivalent"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:unlock_recipes", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:resource_pack_send", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:camera", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:entity_metadata", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:advancements", "v770 has this; backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:entity_update_attributes", "v770 has this; backport"),
+];
+
 impl V340Adapter {
     /// Handles a clientbound packet while in the login state.
     ///
@@ -725,1559 +820,1656 @@ impl V340Adapter {
     }
 
     /// Handles a clientbound packet while in the play state.
+    ///
+    /// Dispatch is a `lodestone_core::dispatch::Table` built once from
+    /// `play::clientbound::ENTRIES`, `PLAY_CLIENTBOUND_HANDLERS` and
+    /// `PLAY_CLIENTBOUND_IGNORED`, replacing the former if-chain and its
+    /// silent trailing `_ =>` island: an id in `ENTRIES` with neither a
+    /// handler nor an `IGNORED` reason now fails table construction by name
+    /// instead of being dropped forever with nothing red anywhere.
     fn handle_play(
         &self,
         world: &mut dyn WorldSink,
         packet_id: i32,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
-        if packet_id == play::clientbound::LOGIN {
-            let body: JoinGame = decode_body(payload)?;
-            // Record whether this dimension carries sky light before any chunk
-            // arrives, so single `map_chunk` packets decode the right geometry.
-            self.set_dimension(body.dimension);
-            return Ok(vec![Directive::Emit(ClientEvent::Login {
-                entity_id: body.entity_id,
-                game_mode: game_mode(body.game_mode)?,
-                dimension: dimension_id(body.dimension)?,
-            })]);
+        static TABLE: std::sync::OnceLock<lodestone_core::dispatch::Table<'static, PlayHandlerFn>> =
+            std::sync::OnceLock::new();
+        let table = TABLE.get_or_init(|| {
+            lodestone_core::dispatch::Table::build(
+                PROTOCOL,
+                play::clientbound::ENTRIES,
+                PLAY_CLIENTBOUND_HANDLERS,
+                PLAY_CLIENTBOUND_IGNORED,
+            )
+            .expect(
+                "v340 play dispatch table must build: every play::clientbound::ENTRIES id needs \
+                 either a bound handler or a PLAY_CLIENTBOUND_IGNORED reason",
+            )
+        });
+        match table.get(packet_id) {
+            Some(handler) => handler(self, world, payload),
+            // A packet id absent from this protocol's own `ENTRIES` table -- a
+            // value outside 1.12.2's real wire range -- reaches here directly
+            // from the raw VarInt `handle_packet` decoded off the wire, with
+            // nothing upstream validating it against `ENTRIES` first (see
+            // `handle_packet`). `Table::build` guarantees every *listed* id
+            // resolves to a handler or an `IGNORED` reason; it says nothing
+            // about an id it was never told about, so this is deliberately not
+            // `unreachable!()` -- a malformed or non-vanilla server sending an
+            // out-of-table id must not be able to panic this client. Falling
+            // through silently is the same drop-recognises-nothing behaviour
+            // the old if-chain already had for anything it did not name, not a
+            // narrower one.
+            None => Ok(Vec::new()),
         }
-        if packet_id == play::clientbound::MAP_CHUNK {
-            // Decode the paletted 1.12.2 column into version-free storage and
-            // apply it to the world through the sink, emitting only a
-            // lightweight notification. 1.12.2 always sends a real column here
-            // (unloads use the dedicated unload_chunk packet), so this loads.
-            let shape = self.current_shape();
-            let mut reader = Reader::new(payload);
-            let data = MapChunk::decode(&mut reader, &shape)
-                .map_err(|err| AdapterError::Decode(err.to_string()))?;
-            // Zero trailing bytes across the whole packet is the single best
-            // detector of a subtly wrong layout: reject rather than apply a
-            // silently misaligned chunk.
-            reader
-                .ensure_empty()
-                .map_err(|err| AdapterError::Decode(err.to_string()))?;
-            let pos = ChunkPos::new(data.x, data.z);
-            world.load(
-                WorldChunkPos::new(data.x, data.z),
-                LoadedChunk::new(data.column, data.light, Heightmaps::new(), Vec::new()),
-            );
-            return Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })]);
-        }
-        if packet_id == play::clientbound::UNLOAD_CHUNK {
-            // 1.12.2 has a dedicated forget packet (two ints), unlike 1.8's
-            // empty-bitmask trick.
-            let body: UnloadChunk = decode_body(payload)?;
-            let pos = ChunkPos::new(body.chunk_x, body.chunk_z);
-            world.unload(WorldChunkPos::new(body.chunk_x, body.chunk_z));
-            return Ok(vec![Directive::Emit(ClientEvent::ChunkUnloaded { pos })]);
-        }
-        if packet_id == play::clientbound::KEEP_ALIVE {
-            let keep_alive: KeepAliveRequest = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::KeepAlive {
-                id: keep_alive.id,
-            })]);
-        }
-        if packet_id == play::clientbound::CHAT {
-            let body: ClientboundChat = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::Chat {
-                text: Text::from_json(&body.message),
-                kind: chat_kind(body.position),
-                // 1.12's chat packet carries no sender field — nothing to filter on.
-                sender: None,
-                ack: None,
-            })]);
-        }
-        if packet_id == play::clientbound::POSITION {
-            let body: ClientboundPositionLook = decode_body(payload)?;
-            let flags = TeleportFlags {
-                relative_x: body.flags & REL_X != 0,
-                relative_y: body.flags & REL_Y != 0,
-                relative_z: body.flags & REL_Z != 0,
-                relative_yaw: body.flags & REL_YAW != 0,
-                relative_pitch: body.flags & REL_PITCH != 0,
-            };
-            // 1.9+ requires echoing the teleport id back or the server
-            // rubber-bands the player. This confirm choreography lives entirely
-            // in the version crate; the driver just runs the directives in order.
-            let confirm = TeleportConfirm {
-                teleport_id: body.teleport_id,
-            };
-            return Ok(vec![
-                send(play::serverbound::TELEPORT_CONFIRM, &confirm)?,
-                Directive::Emit(ClientEvent::TeleportPlayer {
-                    pos: Vec3::new(body.x, body.y, body.z),
-                    rotation: Rotation::new(body.yaw, body.pitch),
-                    flags,
-                }),
-            ]);
-        }
-        if packet_id == play::clientbound::SPAWN_ENTITY_LIVING {
-            let body: SpawnEntityLiving = decode_body(payload)?;
-            let entity_type = entity_types::mob_type_name(body.kind)
-                .ok_or_else(|| {
-                    AdapterError::Decode(format!("unknown mob type id {} in spawn", body.kind))
-                })?
-                .parse()
-                .map_err(|_| {
-                    AdapterError::Decode(format!("mob type id {} is not a key", body.kind))
-                })?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
-                entity_id: body.entity_id,
-                uuid: Some(body.entity_uuid),
-                entity_type,
+    }
+
+    fn play_login(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: JoinGame = decode_body(payload)?;
+        // Record whether this dimension carries sky light before any chunk
+        // arrives, so single `map_chunk` packets decode the right geometry.
+        self.set_dimension(body.dimension);
+        return Ok(vec![Directive::Emit(ClientEvent::Login {
+            entity_id: body.entity_id,
+            game_mode: game_mode(body.game_mode)?,
+            dimension: dimension_id(body.dimension)?,
+        })]);
+    }
+
+    fn play_map_chunk(&self, world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Decode the paletted 1.12.2 column into version-free storage and
+        // apply it to the world through the sink, emitting only a
+        // lightweight notification. 1.12.2 always sends a real column here
+        // (unloads use the dedicated unload_chunk packet), so this loads.
+        let shape = self.current_shape();
+        let mut reader = Reader::new(payload);
+        let data = MapChunk::decode(&mut reader, &shape)
+            .map_err(|err| AdapterError::Decode(err.to_string()))?;
+        // Zero trailing bytes across the whole packet is the single best
+        // detector of a subtly wrong layout: reject rather than apply a
+        // silently misaligned chunk.
+        reader
+            .ensure_empty()
+            .map_err(|err| AdapterError::Decode(err.to_string()))?;
+        let pos = ChunkPos::new(data.x, data.z);
+        world.load(
+            WorldChunkPos::new(data.x, data.z),
+            LoadedChunk::new(data.column, data.light, Heightmaps::new(), Vec::new()),
+        );
+        return Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })]);
+    }
+
+    fn play_unload_chunk(&self, world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // 1.12.2 has a dedicated forget packet (two ints), unlike 1.8's
+        // empty-bitmask trick.
+        let body: UnloadChunk = decode_body(payload)?;
+        let pos = ChunkPos::new(body.chunk_x, body.chunk_z);
+        world.unload(WorldChunkPos::new(body.chunk_x, body.chunk_z));
+        return Ok(vec![Directive::Emit(ClientEvent::ChunkUnloaded { pos })]);
+    }
+
+    fn play_keep_alive(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let keep_alive: KeepAliveRequest = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::KeepAlive {
+            id: keep_alive.id,
+        })]);
+    }
+
+    fn play_chat(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: ClientboundChat = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::Chat {
+            text: Text::from_json(&body.message),
+            kind: chat_kind(body.position),
+            // 1.12's chat packet carries no sender field — nothing to filter on.
+            sender: None,
+            ack: None,
+        })]);
+    }
+
+    fn play_position(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: ClientboundPositionLook = decode_body(payload)?;
+        let flags = TeleportFlags {
+            relative_x: body.flags & REL_X != 0,
+            relative_y: body.flags & REL_Y != 0,
+            relative_z: body.flags & REL_Z != 0,
+            relative_yaw: body.flags & REL_YAW != 0,
+            relative_pitch: body.flags & REL_PITCH != 0,
+        };
+        // 1.9+ requires echoing the teleport id back or the server
+        // rubber-bands the player. This confirm choreography lives entirely
+        // in the version crate; the driver just runs the directives in order.
+        let confirm = TeleportConfirm {
+            teleport_id: body.teleport_id,
+        };
+        return Ok(vec![
+            send(play::serverbound::TELEPORT_CONFIRM, &confirm)?,
+            Directive::Emit(ClientEvent::TeleportPlayer {
                 pos: Vec3::new(body.x, body.y, body.z),
-                rotation: Rotation::new(unpack_degrees(body.yaw), unpack_degrees(body.pitch)),
-                velocity: Some(Vec3::new(
-                    f64::from(body.velocity_x) / VELOCITY_SCALE,
-                    f64::from(body.velocity_y) / VELOCITY_SCALE,
-                    f64::from(body.velocity_z) / VELOCITY_SCALE,
-                )),
-            })]);
-        }
-        if packet_id == play::clientbound::SPAWN_ENTITY {
-            let body: SpawnObject = decode_body(payload)?;
-            let type_id = i32::from(body.kind);
-            let entity_type = entity_types::object_type_name(type_id)
-                .ok_or_else(|| {
-                    AdapterError::Decode(format!("unknown object type id {type_id} in spawn"))
-                })?
-                .parse()
-                .map_err(|_| {
-                    AdapterError::Decode(format!("object type id {type_id} is not a key"))
-                })?;
-            // 1.12 always includes velocity, but a stationary object still
-            // reports zero; forward `None` only when all components are zero to
-            // match the semantic "no motion" rather than "explicit zero motion".
-            let velocity = if body.velocity_x == 0 && body.velocity_y == 0 && body.velocity_z == 0 {
-                None
-            } else {
-                Some(Vec3::new(
-                    f64::from(body.velocity_x) / VELOCITY_SCALE,
-                    f64::from(body.velocity_y) / VELOCITY_SCALE,
-                    f64::from(body.velocity_z) / VELOCITY_SCALE,
+                rotation: Rotation::new(body.yaw, body.pitch),
+                flags,
+            }),
+        ]);
+    }
+
+    fn play_spawn_entity_living(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: SpawnEntityLiving = decode_body(payload)?;
+        let entity_type = entity_types::mob_type_name(body.kind)
+            .ok_or_else(|| {
+                AdapterError::Decode(format!("unknown mob type id {} in spawn", body.kind))
+            })?
+            .parse()
+            .map_err(|_| {
+                AdapterError::Decode(format!("mob type id {} is not a key", body.kind))
+            })?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+            entity_id: body.entity_id,
+            uuid: Some(body.entity_uuid),
+            entity_type,
+            pos: Vec3::new(body.x, body.y, body.z),
+            rotation: Rotation::new(unpack_degrees(body.yaw), unpack_degrees(body.pitch)),
+            velocity: Some(Vec3::new(
+                f64::from(body.velocity_x) / VELOCITY_SCALE,
+                f64::from(body.velocity_y) / VELOCITY_SCALE,
+                f64::from(body.velocity_z) / VELOCITY_SCALE,
+            )),
+        })]);
+    }
+
+    fn play_spawn_entity(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: SpawnObject = decode_body(payload)?;
+        let type_id = i32::from(body.kind);
+        let entity_type = entity_types::object_type_name(type_id)
+            .ok_or_else(|| {
+                AdapterError::Decode(format!("unknown object type id {type_id} in spawn"))
+            })?
+            .parse()
+            .map_err(|_| {
+                AdapterError::Decode(format!("object type id {type_id} is not a key"))
+            })?;
+        // 1.12 always includes velocity, but a stationary object still
+        // reports zero; forward `None` only when all components are zero to
+        // match the semantic "no motion" rather than "explicit zero motion".
+        let velocity = if body.velocity_x == 0 && body.velocity_y == 0 && body.velocity_z == 0 {
+            None
+        } else {
+            Some(Vec3::new(
+                f64::from(body.velocity_x) / VELOCITY_SCALE,
+                f64::from(body.velocity_y) / VELOCITY_SCALE,
+                f64::from(body.velocity_z) / VELOCITY_SCALE,
+            ))
+        };
+        return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+            entity_id: body.entity_id,
+            uuid: Some(body.object_uuid),
+            entity_type,
+            pos: Vec3::new(body.x, body.y, body.z),
+            rotation: Rotation::new(unpack_degrees(body.yaw), unpack_degrees(body.pitch)),
+            velocity,
+        })]);
+    }
+
+    fn play_named_entity_spawn(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: NamedEntitySpawn = decode_body(payload)?;
+        let entity_type = entity_types::PLAYER
+            .parse()
+            .map_err(|_| AdapterError::Decode("player key invalid".to_owned()))?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+            entity_id: body.entity_id,
+            uuid: Some(body.player_uuid),
+            entity_type,
+            pos: Vec3::new(body.x, body.y, body.z),
+            rotation: Rotation::new(unpack_degrees(body.yaw), unpack_degrees(body.pitch)),
+            velocity: None,
+        })]);
+    }
+
+    fn play_rel_entity_move(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: RelEntityMove = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
+            entity_id: body.entity_id,
+            movement: EntityMovement::Relative(Vec3::new(
+                f64::from(body.dx) / MOVE_DELTA_SCALE,
+                f64::from(body.dy) / MOVE_DELTA_SCALE,
+                f64::from(body.dz) / MOVE_DELTA_SCALE,
+            )),
+            rotation: None,
+            on_ground: body.on_ground,
+        })]);
+    }
+
+    fn play_entity_look(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: EntityLook = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
+            entity_id: body.entity_id,
+            movement: EntityMovement::Relative(Vec3::new(0.0, 0.0, 0.0)),
+            rotation: Some(Rotation::new(
+                unpack_degrees(body.yaw),
+                unpack_degrees(body.pitch),
+            )),
+            on_ground: body.on_ground,
+        })]);
+    }
+
+    fn play_entity_move_look(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: EntityMoveLook = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
+            entity_id: body.entity_id,
+            movement: EntityMovement::Relative(Vec3::new(
+                f64::from(body.dx) / MOVE_DELTA_SCALE,
+                f64::from(body.dy) / MOVE_DELTA_SCALE,
+                f64::from(body.dz) / MOVE_DELTA_SCALE,
+            )),
+            rotation: Some(Rotation::new(
+                unpack_degrees(body.yaw),
+                unpack_degrees(body.pitch),
+            )),
+            on_ground: body.on_ground,
+        })]);
+    }
+
+    fn play_entity_teleport(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: EntityTeleport = decode_body(payload)?;
+        // 1.9+ sends the absolute position directly as `f64`; no
+        // fixed-point conversion, unlike 1.8.
+        return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
+            entity_id: body.entity_id,
+            movement: EntityMovement::Absolute(Vec3::new(body.x, body.y, body.z)),
+            rotation: Some(Rotation::new(
+                unpack_degrees(body.yaw),
+                unpack_degrees(body.pitch),
+            )),
+            on_ground: body.on_ground,
+        })]);
+    }
+
+    fn play_entity_velocity(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: EntityVelocityPacket = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntityVelocity {
+            entity_id: body.entity_id,
+            velocity: Vec3::new(
+                f64::from(body.velocity_x) / VELOCITY_SCALE,
+                f64::from(body.velocity_y) / VELOCITY_SCALE,
+                f64::from(body.velocity_z) / VELOCITY_SCALE,
+            ),
+        })]);
+    }
+
+    fn play_entity_destroy(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // A varint-counted list of varint ids. Now a derived struct: the
+        // `#[mc(varint)]`-on-`Vec<i32>` macro attribute (reported as a gap
+        // and since landed) encodes both the length and each element as a
+        // varint, replacing the former hand-decoded loop.
+        let body: EntityDestroy = decode_body_exact(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntityRemoved {
+            entity_ids: body.entity_ids,
+        })]);
+    }
+
+    fn play_kick_disconnect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: KickDisconnect = decode_body(payload)?;
+        return Ok(vec![Directive::Disconnect(json_reason_text(&body.reason))]);
+    }
+
+    fn play_update_health(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // f32 health, varint food, f32 saturation — verified against
+        // minecraft-data's 1.12.2 `packet_update_health` (identical to 1.8's
+        // own shape). `UpdateHealth` already existed in this crate but was
+        // only ever round-tripped in `tests/join_flow.rs`, never wired into
+        // `handle_play` — an island per CLAUDE.md's own definition (decoded
+        // nowhere in production, tested only against our own encoder).
+        let body: UpdateHealth = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::HealthChanged {
+            health: body.health,
+            food: body.food,
+            saturation: body.food_saturation,
+        })]);
+    }
+
+    fn play_respawn(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Signed int dimension, u8 difficulty, u8 game mode, string level
+        // type — verified against minecraft-data's 1.12.2
+        // `packet_respawn`. Like `join`'s `dimension`, `respawn`'s
+        // `game_mode` packs the hardcore flag in bit `0x8`; reusing the
+        // same `game_mode` helper masks it off identically. The dimension
+        // shape re-recorded here matters for the *next* `map_chunk`: a
+        // portal into the nether/end must flip `ChunkShape` before that
+        // column's light arrays are decoded, exactly as `LOGIN` does on
+        // first join.
+        let body: Respawn = decode_body(payload)?;
+        self.set_dimension(body.dimension);
+        return Ok(vec![Directive::Emit(ClientEvent::Respawned {
+            dimension: dimension_id(body.dimension)?,
+            game_mode: game_mode(body.game_mode)?,
+            previous_game_mode: None,
+            last_death_location: None,
+        })]);
+    }
+
+    fn play_entity_status(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // A raw (non-VarInt) `i32` entity id, then a raw status byte —
+        // verified against minecraft-data's 1.12.2 `packet_entity_status`
+        // (identical to 1.8's shape) and matching `lodestone-v770`'s own
+        // `ENTITY_EVENT` decode (`dec_err`, hand-`Reader` rather than a
+        // derived struct, since there is nothing else to model). Drives
+        // hurt/death animation, totem-of-undying particles, etc. — the
+        // consumer interprets `status` per the entity's own type, exactly
+        // as the modern decode already documents.
+        let mut reader = Reader::new(payload);
+        let entity_id = reader.i32().map_err(dec_err)?;
+        let status = reader.u8().map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntityStatus {
+            entity_id,
+            status,
+        })]);
+    }
+
+    fn play_entity_head_rotation(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // VarInt entity id, then a packed signed-byte yaw (256 steps per
+        // circle, same packing `unpack_degrees` already handles for body
+        // rotation) — verified against minecraft-data's 1.12.2
+        // `packet_entity_head_rotation`.
+        let mut reader = Reader::new(payload);
+        let entity_id = reader.var_i32().map_err(dec_err)?;
+        let packed = reader.i8().map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntityHeadRotation {
+            entity_id,
+            head_yaw: unpack_degrees(packed),
+        })]);
+    }
+
+    fn play_block_change(&self, world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // A packed pre-1.14 `position` (see `crate::packets::position`,
+        // x/y/z big-endian, y in the middle) plus the changed block's
+        // legacy composite id as a VarInt — verified against
+        // minecraft-data's 1.12.2 `packet_block_change`. Unlike 26.2's
+        // `block_update` (a real 32,366-state registry id straight off the
+        // wire), 1.12.2's value is pre-Flattening: bits `4..` are the
+        // numeric block id, the low 4 bits are metadata
+        // (`(old_block_id << 4) | meta`, the same composite `chunk.rs`
+        // already extracts per paletted section entry). `canonical::
+        // resolve_or_air` bridges it to a real 26.2 block-state id via the
+        // table built against the real 1.13.2 server jar's own
+        // `DataFixerUpper` flattening fix (see `crate::canonical`'s module
+        // docs) — not this crate's own encoder, and not a formula.
+        let mut reader = Reader::new(payload);
+        let pos: Position = Position::decode(&mut reader, CTX).map_err(dec_err)?;
+        let raw = reader.var_i32().map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        let raw = u16::try_from(raw)
+            .ok()
+            .filter(|&raw| raw <= 0x0FFF)
+            .ok_or_else(|| {
+                AdapterError::Decode(format!(
+                    "block_change composite id {raw} outside the 4095-slot legacy table"
                 ))
-            };
-            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
-                entity_id: body.entity_id,
-                uuid: Some(body.object_uuid),
-                entity_type,
-                pos: Vec3::new(body.x, body.y, body.z),
-                rotation: Rotation::new(unpack_degrees(body.yaw), unpack_degrees(body.pitch)),
-                velocity,
-            })]);
-        }
-        if packet_id == play::clientbound::NAMED_ENTITY_SPAWN {
-            let body: NamedEntitySpawn = decode_body(payload)?;
-            let entity_type = entity_types::PLAYER
-                .parse()
-                .map_err(|_| AdapterError::Decode("player key invalid".to_owned()))?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
-                entity_id: body.entity_id,
-                uuid: Some(body.player_uuid),
-                entity_type,
-                pos: Vec3::new(body.x, body.y, body.z),
-                rotation: Rotation::new(unpack_degrees(body.yaw), unpack_degrees(body.pitch)),
-                velocity: None,
-            })]);
-        }
-        if packet_id == play::clientbound::REL_ENTITY_MOVE {
-            let body: RelEntityMove = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
-                entity_id: body.entity_id,
-                movement: EntityMovement::Relative(Vec3::new(
-                    f64::from(body.dx) / MOVE_DELTA_SCALE,
-                    f64::from(body.dy) / MOVE_DELTA_SCALE,
-                    f64::from(body.dz) / MOVE_DELTA_SCALE,
-                )),
-                rotation: None,
-                on_ground: body.on_ground,
-            })]);
-        }
-        if packet_id == play::clientbound::ENTITY_LOOK {
-            let body: EntityLook = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
-                entity_id: body.entity_id,
-                movement: EntityMovement::Relative(Vec3::new(0.0, 0.0, 0.0)),
-                rotation: Some(Rotation::new(
-                    unpack_degrees(body.yaw),
-                    unpack_degrees(body.pitch),
-                )),
-                on_ground: body.on_ground,
-            })]);
-        }
-        if packet_id == play::clientbound::ENTITY_MOVE_LOOK {
-            let body: EntityMoveLook = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
-                entity_id: body.entity_id,
-                movement: EntityMovement::Relative(Vec3::new(
-                    f64::from(body.dx) / MOVE_DELTA_SCALE,
-                    f64::from(body.dy) / MOVE_DELTA_SCALE,
-                    f64::from(body.dz) / MOVE_DELTA_SCALE,
-                )),
-                rotation: Some(Rotation::new(
-                    unpack_degrees(body.yaw),
-                    unpack_degrees(body.pitch),
-                )),
-                on_ground: body.on_ground,
-            })]);
-        }
-        if packet_id == play::clientbound::ENTITY_TELEPORT {
-            let body: EntityTeleport = decode_body(payload)?;
-            // 1.9+ sends the absolute position directly as `f64`; no
-            // fixed-point conversion, unlike 1.8.
-            return Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
-                entity_id: body.entity_id,
-                movement: EntityMovement::Absolute(Vec3::new(body.x, body.y, body.z)),
-                rotation: Some(Rotation::new(
-                    unpack_degrees(body.yaw),
-                    unpack_degrees(body.pitch),
-                )),
-                on_ground: body.on_ground,
-            })]);
-        }
-        if packet_id == play::clientbound::ENTITY_VELOCITY {
-            let body: EntityVelocityPacket = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntityVelocity {
-                entity_id: body.entity_id,
-                velocity: Vec3::new(
-                    f64::from(body.velocity_x) / VELOCITY_SCALE,
-                    f64::from(body.velocity_y) / VELOCITY_SCALE,
-                    f64::from(body.velocity_z) / VELOCITY_SCALE,
-                ),
-            })]);
-        }
-        if packet_id == play::clientbound::ENTITY_DESTROY {
-            // A varint-counted list of varint ids. Now a derived struct: the
-            // `#[mc(varint)]`-on-`Vec<i32>` macro attribute (reported as a gap
-            // and since landed) encodes both the length and each element as a
-            // varint, replacing the former hand-decoded loop.
-            let body: EntityDestroy = decode_body_exact(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntityRemoved {
-                entity_ids: body.entity_ids,
-            })]);
-        }
-        if packet_id == play::clientbound::KICK_DISCONNECT {
-            let body: KickDisconnect = decode_body(payload)?;
-            return Ok(vec![Directive::Disconnect(json_reason_text(&body.reason))]);
-        }
-        if packet_id == play::clientbound::UPDATE_HEALTH {
-            // f32 health, varint food, f32 saturation — verified against
-            // minecraft-data's 1.12.2 `packet_update_health` (identical to 1.8's
-            // own shape). `UpdateHealth` already existed in this crate but was
-            // only ever round-tripped in `tests/join_flow.rs`, never wired into
-            // `handle_play` — an island per CLAUDE.md's own definition (decoded
-            // nowhere in production, tested only against our own encoder).
-            let body: UpdateHealth = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::HealthChanged {
-                health: body.health,
-                food: body.food,
-                saturation: body.food_saturation,
-            })]);
-        }
-        if packet_id == play::clientbound::RESPAWN {
-            // Signed int dimension, u8 difficulty, u8 game mode, string level
-            // type — verified against minecraft-data's 1.12.2
-            // `packet_respawn`. Like `join`'s `dimension`, `respawn`'s
-            // `game_mode` packs the hardcore flag in bit `0x8`; reusing the
-            // same `game_mode` helper masks it off identically. The dimension
-            // shape re-recorded here matters for the *next* `map_chunk`: a
-            // portal into the nether/end must flip `ChunkShape` before that
-            // column's light arrays are decoded, exactly as `LOGIN` does on
-            // first join.
-            let body: Respawn = decode_body(payload)?;
-            self.set_dimension(body.dimension);
-            return Ok(vec![Directive::Emit(ClientEvent::Respawned {
-                dimension: dimension_id(body.dimension)?,
-                game_mode: game_mode(body.game_mode)?,
-                previous_game_mode: None,
-                last_death_location: None,
-            })]);
-        }
-        if packet_id == play::clientbound::ENTITY_STATUS {
-            // A raw (non-VarInt) `i32` entity id, then a raw status byte —
-            // verified against minecraft-data's 1.12.2 `packet_entity_status`
-            // (identical to 1.8's shape) and matching `lodestone-v770`'s own
-            // `ENTITY_EVENT` decode (`dec_err`, hand-`Reader` rather than a
-            // derived struct, since there is nothing else to model). Drives
-            // hurt/death animation, totem-of-undying particles, etc. — the
-            // consumer interprets `status` per the entity's own type, exactly
-            // as the modern decode already documents.
-            let mut reader = Reader::new(payload);
-            let entity_id = reader.i32().map_err(dec_err)?;
-            let status = reader.u8().map_err(dec_err)?;
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntityStatus {
-                entity_id,
-                status,
-            })]);
-        }
-        if packet_id == play::clientbound::ENTITY_HEAD_ROTATION {
-            // VarInt entity id, then a packed signed-byte yaw (256 steps per
-            // circle, same packing `unpack_degrees` already handles for body
-            // rotation) — verified against minecraft-data's 1.12.2
-            // `packet_entity_head_rotation`.
-            let mut reader = Reader::new(payload);
-            let entity_id = reader.var_i32().map_err(dec_err)?;
-            let packed = reader.i8().map_err(dec_err)?;
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntityHeadRotation {
-                entity_id,
-                head_yaw: unpack_degrees(packed),
-            })]);
-        }
-        if packet_id == play::clientbound::BLOCK_CHANGE {
-            // A packed pre-1.14 `position` (see `crate::packets::position`,
-            // x/y/z big-endian, y in the middle) plus the changed block's
-            // legacy composite id as a VarInt — verified against
-            // minecraft-data's 1.12.2 `packet_block_change`. Unlike 26.2's
-            // `block_update` (a real 32,366-state registry id straight off the
-            // wire), 1.12.2's value is pre-Flattening: bits `4..` are the
-            // numeric block id, the low 4 bits are metadata
-            // (`(old_block_id << 4) | meta`, the same composite `chunk.rs`
-            // already extracts per paletted section entry). `canonical::
-            // resolve_or_air` bridges it to a real 26.2 block-state id via the
-            // table built against the real 1.13.2 server jar's own
-            // `DataFixerUpper` flattening fix (see `crate::canonical`'s module
-            // docs) — not this crate's own encoder, and not a formula.
-            let mut reader = Reader::new(payload);
-            let pos: Position = Position::decode(&mut reader, CTX).map_err(dec_err)?;
+            })?;
+        let old_block_id = (raw >> 4) as u8;
+        let meta = (raw & 0xF) as u8;
+        let mut tally = FallbackTally::default();
+        let state = canonical::resolve_or_air(old_block_id, meta, &mut tally);
+        let pos = pos.0;
+        world.set_block(pos.x, pos.y, pos.z, state);
+        // Writing a state is what creates/removes a block entity in
+        // vanilla (`LevelChunk.setBlockState`, no packet involved) — the
+        // same reasoning `lodestone-v770`'s `BLOCK_UPDATE` arm
+        // documents.
+        world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
+        return Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
+            section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),
+            blocks: vec![[
+                pos.x.rem_euclid(16) as u8,
+                pos.y.rem_euclid(16) as u8,
+                pos.z.rem_euclid(16) as u8,
+            ]],
+        })]);
+    }
+
+    fn play_multi_block_change(&self, world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Chunk X/Z (i32 each), then a VarInt-counted array of records —
+        // verified against minecraft-data's 1.12.2
+        // `packet_multi_block_change` (identical to 1.8's shape). Each
+        // record is `horizontalPos: u8` (high nibble relative X, low
+        // nibble relative Z — minecraft-data's `protocol.json` gives the
+        // field width but not this bit order; sourced from the
+        // long-stable external wire documentation for this exact packet,
+        // not from our own encoder, and flagged here as the one field in
+        // this pass not cross-checked against either the jar or a live
+        // capture), `y: u8` (full column height, unlike 26.2's
+        // section-relative nibble), then the same legacy composite VarInt
+        // `block_change` carries. 1.12.2 has no sections on the wire —
+        // ordinary full-height columns — so one packet's records can span
+        // several of `lodestone-world`'s 16-tall sections; each is
+        // resolved and written individually, then grouped by section so
+        // the emitted `SectionBlocksChanged` events match what a single
+        // `block_change` would have produced for the same cell.
+        let mut reader = Reader::new(payload);
+        let chunk_x = reader.i32().map_err(dec_err)?;
+        let chunk_z = reader.i32().map_err(dec_err)?;
+        // Resolved *before* the record loop, not inside it: the whole point
+        // of refusing rather than clamping (see `chunk_origin_block`) is
+        // that nothing is written for an out-of-range packet, and a check
+        // inside the loop would already have written earlier records.
+        let origin_x = chunk_origin_block(chunk_x, "x")?;
+        let origin_z = chunk_origin_block(chunk_z, "z")?;
+        let count = reader.var_i32().map_err(dec_err)?;
+        let count = usize::try_from(count).map_err(|_| {
+            AdapterError::Decode(format!("negative multi_block_change record count {count}"))
+        })?;
+        // A full-height 1.12.2 column holds at most 16*16*256 = 65536
+        // cells; cap the pre-allocation so a hostile count cannot force a
+        // large speculative allocation before the truncated body is
+        // rejected by the per-record reads below.
+        let mut by_section: HashMap<i32, Vec<[u8; 3]>> =
+            HashMap::with_capacity(count.min(16));
+        let mut tally = FallbackTally::default();
+        for _ in 0..count {
+            let horizontal = reader.u8().map_err(dec_err)?;
+            let y = i32::from(reader.u8().map_err(dec_err)?);
             let raw = reader.var_i32().map_err(dec_err)?;
-            reader.ensure_empty().map_err(dec_err)?;
             let raw = u16::try_from(raw)
                 .ok()
                 .filter(|&raw| raw <= 0x0FFF)
                 .ok_or_else(|| {
                     AdapterError::Decode(format!(
-                        "block_change composite id {raw} outside the 4095-slot legacy table"
+                        "multi_block_change composite id {raw} outside the 4095-slot \
+                         legacy table"
                     ))
                 })?;
             let old_block_id = (raw >> 4) as u8;
             let meta = (raw & 0xF) as u8;
-            let mut tally = FallbackTally::default();
             let state = canonical::resolve_or_air(old_block_id, meta, &mut tally);
-            let pos = pos.0;
-            world.set_block(pos.x, pos.y, pos.z, state);
-            // Writing a state is what creates/removes a block entity in
-            // vanilla (`LevelChunk.setBlockState`, no packet involved) — the
-            // same reasoning `lodestone-v770`'s `BLOCK_UPDATE` arm
-            // documents.
-            world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
-            return Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
-                section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),
-                blocks: vec![[
-                    pos.x.rem_euclid(16) as u8,
-                    pos.y.rem_euclid(16) as u8,
-                    pos.z.rem_euclid(16) as u8,
-                ]],
-            })]);
+            let rel_x = i32::from(horizontal >> 4);
+            let rel_z = i32::from(horizontal & 0xF);
+            // `rel_x`/`rel_z` are 4-bit nibbles (0..=15) and `origin_*` is
+            // already bounded by the world border, so these adds cannot
+            // overflow — the guard is at `chunk_origin_block`, above.
+            let x = origin_x + rel_x;
+            let z = origin_z + rel_z;
+            world.set_block(x, y, z, state);
+            world.sync_block_entity(x, y, z, block_entity_type(state));
+            by_section
+                .entry(y >> 4)
+                .or_default()
+                .push([rel_x as u8, y.rem_euclid(16) as u8, rel_z as u8]);
         }
-        if packet_id == play::clientbound::MULTI_BLOCK_CHANGE {
-            // Chunk X/Z (i32 each), then a VarInt-counted array of records —
-            // verified against minecraft-data's 1.12.2
-            // `packet_multi_block_change` (identical to 1.8's shape). Each
-            // record is `horizontalPos: u8` (high nibble relative X, low
-            // nibble relative Z — minecraft-data's `protocol.json` gives the
-            // field width but not this bit order; sourced from the
-            // long-stable external wire documentation for this exact packet,
-            // not from our own encoder, and flagged here as the one field in
-            // this pass not cross-checked against either the jar or a live
-            // capture), `y: u8` (full column height, unlike 26.2's
-            // section-relative nibble), then the same legacy composite VarInt
-            // `block_change` carries. 1.12.2 has no sections on the wire —
-            // ordinary full-height columns — so one packet's records can span
-            // several of `lodestone-world`'s 16-tall sections; each is
-            // resolved and written individually, then grouped by section so
-            // the emitted `SectionBlocksChanged` events match what a single
-            // `block_change` would have produced for the same cell.
-            let mut reader = Reader::new(payload);
-            let chunk_x = reader.i32().map_err(dec_err)?;
-            let chunk_z = reader.i32().map_err(dec_err)?;
-            // Resolved *before* the record loop, not inside it: the whole point
-            // of refusing rather than clamping (see `chunk_origin_block`) is
-            // that nothing is written for an out-of-range packet, and a check
-            // inside the loop would already have written earlier records.
-            let origin_x = chunk_origin_block(chunk_x, "x")?;
-            let origin_z = chunk_origin_block(chunk_z, "z")?;
-            let count = reader.var_i32().map_err(dec_err)?;
-            let count = usize::try_from(count).map_err(|_| {
-                AdapterError::Decode(format!("negative multi_block_change record count {count}"))
-            })?;
-            // A full-height 1.12.2 column holds at most 16*16*256 = 65536
-            // cells; cap the pre-allocation so a hostile count cannot force a
-            // large speculative allocation before the truncated body is
-            // rejected by the per-record reads below.
-            let mut by_section: HashMap<i32, Vec<[u8; 3]>> =
-                HashMap::with_capacity(count.min(16));
-            let mut tally = FallbackTally::default();
-            for _ in 0..count {
-                let horizontal = reader.u8().map_err(dec_err)?;
-                let y = i32::from(reader.u8().map_err(dec_err)?);
-                let raw = reader.var_i32().map_err(dec_err)?;
-                let raw = u16::try_from(raw)
-                    .ok()
-                    .filter(|&raw| raw <= 0x0FFF)
-                    .ok_or_else(|| {
-                        AdapterError::Decode(format!(
-                            "multi_block_change composite id {raw} outside the 4095-slot \
-                             legacy table"
-                        ))
-                    })?;
-                let old_block_id = (raw >> 4) as u8;
-                let meta = (raw & 0xF) as u8;
-                let state = canonical::resolve_or_air(old_block_id, meta, &mut tally);
-                let rel_x = i32::from(horizontal >> 4);
-                let rel_z = i32::from(horizontal & 0xF);
-                // `rel_x`/`rel_z` are 4-bit nibbles (0..=15) and `origin_*` is
-                // already bounded by the world border, so these adds cannot
-                // overflow — the guard is at `chunk_origin_block`, above.
-                let x = origin_x + rel_x;
-                let z = origin_z + rel_z;
-                world.set_block(x, y, z, state);
-                world.sync_block_entity(x, y, z, block_entity_type(state));
-                by_section
-                    .entry(y >> 4)
-                    .or_default()
-                    .push([rel_x as u8, y.rem_euclid(16) as u8, rel_z as u8]);
-            }
-            reader.ensure_empty().map_err(dec_err)?;
-            if by_section.is_empty() {
-                return Ok(Vec::new());
-            }
-            return Ok(by_section
-                .into_iter()
-                .map(|(section_y, blocks)| {
-                    Directive::Emit(ClientEvent::SectionBlocksChanged {
-                        section: SectionPos::new(chunk_x, section_y, chunk_z),
-                        blocks,
-                    })
+        reader.ensure_empty().map_err(dec_err)?;
+        if by_section.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Ok(by_section
+            .into_iter()
+            .map(|(section_y, blocks)| {
+                Directive::Emit(ClientEvent::SectionBlocksChanged {
+                    section: SectionPos::new(chunk_x, section_y, chunk_z),
+                    blocks,
                 })
-                .collect());
+            })
+            .collect());
+    }
+
+    fn play_open_window(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // `OpenWindow`'s codec already existed and was already tested
+        // (`tests/inventory.rs`, wire round trips only); nothing here
+        // ever called it, so no 1.12.2 container screen — a chest, a
+        // furnace, a crafting table — could ever open.
+        let body: OpenWindow = decode_body(payload)?;
+        let menu_type = resolve_menu_type(&body.inventory_type, body.slot_count);
+        return Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
+            window_id: i32::from(body.window_id),
+            menu_type,
+            title: Text::from_json(&body.window_title),
+        })]);
+    }
+
+    fn play_close_window(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: CloseWindow = decode_body_exact(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::ScreenClosed {
+            window_id: i32::from(body.window_id),
+        })]);
+    }
+
+    fn play_window_items(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // 1.12.2 has no container-synchronization state id (added in a
+        // much later version) and does not bundle the cursor item into
+        // this packet the way it might elsewhere, so `state_id` is a
+        // fixed 0 and `carried_item` stays `None` — this packet
+        // genuinely does not say.
+        let body: WindowItems = decode_body(payload)?;
+        let items = body.items.iter().map(slot_to_item_stack).collect();
+        return Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
+            window_id: i32::from(body.window_id),
+            state_id: 0,
+            items,
+            carried_item: None,
+        })]);
+    }
+
+    fn play_set_slot(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // 1.12.2 unifies what 26.2 splits into three packets
+        // (`SET_CURSOR_ITEM`/`SET_PLAYER_INVENTORY`/`CONTAINER_SET_SLOT`)
+        // behind one `window_id` sentinel: `-1` is the cursor (dragged
+        // item), `0` is the player's own inventory with no container
+        // screen open, anything else is a slot inside that open
+        // container — matching exactly the three-way split the canonical
+        // model already draws for the modern versions.
+        let body: SetSlot = decode_body(payload)?;
+        let item = slot_to_item_stack(&body.item);
+        if body.window_id == -1 {
+            return Ok(vec![Directive::Emit(ClientEvent::CursorItemChanged { item })]);
         }
-        if packet_id == play::clientbound::OPEN_WINDOW {
-            // `OpenWindow`'s codec already existed and was already tested
-            // (`tests/inventory.rs`, wire round trips only); nothing here
-            // ever called it, so no 1.12.2 container screen — a chest, a
-            // furnace, a crafting table — could ever open.
-            let body: OpenWindow = decode_body(payload)?;
-            let menu_type = resolve_menu_type(&body.inventory_type, body.slot_count);
-            return Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
-                window_id: i32::from(body.window_id),
-                menu_type,
-                title: Text::from_json(&body.window_title),
-            })]);
-        }
-        if packet_id == play::clientbound::CLOSE_WINDOW {
-            let body: CloseWindow = decode_body_exact(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::ScreenClosed {
-                window_id: i32::from(body.window_id),
-            })]);
-        }
-        if packet_id == play::clientbound::WINDOW_ITEMS {
-            // 1.12.2 has no container-synchronization state id (added in a
-            // much later version) and does not bundle the cursor item into
-            // this packet the way it might elsewhere, so `state_id` is a
-            // fixed 0 and `carried_item` stays `None` — this packet
-            // genuinely does not say.
-            let body: WindowItems = decode_body(payload)?;
-            let items = body.items.iter().map(slot_to_item_stack).collect();
-            return Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
-                window_id: i32::from(body.window_id),
-                state_id: 0,
-                items,
-                carried_item: None,
-            })]);
-        }
-        if packet_id == play::clientbound::SET_SLOT {
-            // 1.12.2 unifies what 26.2 splits into three packets
-            // (`SET_CURSOR_ITEM`/`SET_PLAYER_INVENTORY`/`CONTAINER_SET_SLOT`)
-            // behind one `window_id` sentinel: `-1` is the cursor (dragged
-            // item), `0` is the player's own inventory with no container
-            // screen open, anything else is a slot inside that open
-            // container — matching exactly the three-way split the canonical
-            // model already draws for the modern versions.
-            let body: SetSlot = decode_body(payload)?;
-            let item = slot_to_item_stack(&body.item);
-            if body.window_id == -1 {
-                return Ok(vec![Directive::Emit(ClientEvent::CursorItemChanged { item })]);
-            }
-            if body.window_id == 0 {
-                return Ok(vec![Directive::Emit(ClientEvent::InventorySlotChanged {
-                    slot: i32::from(body.slot),
-                    item,
-                })]);
-            }
-            return Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
-                window_id: i32::from(body.window_id),
-                state_id: 0,
+        if body.window_id == 0 {
+            return Ok(vec![Directive::Emit(ClientEvent::InventorySlotChanged {
                 slot: i32::from(body.slot),
                 item,
             })]);
         }
-        if packet_id == play::clientbound::CRAFT_PROGRESS_BAR {
-            // `packet_craft_progress_bar` (minecraft-data 1.12.2, identical
-            // to 1.8's shape): `windowId: u8, property: i16, value: i16` — no
-            // synchronization state id, so it maps directly onto the same
-            // `ContainerData` 26.2's `minecraft:container_set_data` produces.
-            let mut reader = Reader::new(payload);
-            let window_id = i32::from(reader.u8().map_err(dec_err)?);
-            let property = i32::from(reader.i16().map_err(dec_err)?);
-            let value = i32::from(reader.i16().map_err(dec_err)?);
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::ContainerData {
-                window_id,
-                property,
-                value,
-            })]);
+        return Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
+            window_id: i32::from(body.window_id),
+            state_id: 0,
+            slot: i32::from(body.slot),
+            item,
+        })]);
+    }
+
+    fn play_craft_progress_bar(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // `packet_craft_progress_bar` (minecraft-data 1.12.2, identical
+        // to 1.8's shape): `windowId: u8, property: i16, value: i16` — no
+        // synchronization state id, so it maps directly onto the same
+        // `ContainerData` 26.2's `minecraft:container_set_data` produces.
+        let mut reader = Reader::new(payload);
+        let window_id = i32::from(reader.u8().map_err(dec_err)?);
+        let property = i32::from(reader.i16().map_err(dec_err)?);
+        let value = i32::from(reader.i16().map_err(dec_err)?);
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![Directive::Emit(ClientEvent::ContainerData {
+            window_id,
+            property,
+            value,
+        })]);
+    }
+
+    fn play_title(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Action-multiplexed, verified field-by-field against
+        // minecraft-data's 1.12.2 `packet_title`: unlike 1.8, the `text`
+        // switch has three cases (`0`/`1`/`2` — title/subtitle/action-bar,
+        // the action-bar case 1.12.2 adds), which pushes the
+        // fade-in/stay/fade-out case (times) to `3` and the two
+        // argument-less actions to `4`/`5`. Action-bar text always
+        // renders as an overlay, so it maps to the same `Chat`
+        // `GameInfo` event the dedicated `SET_ACTION_BAR_TEXT` packet
+        // uses on 26.2 — there is no such dedicated packet before 1.17,
+        // it rides this one instead. `4`/`5` are clear-then-reset, the
+        // same pair 26.2's `CLEAR_TITLES` folds into one `resetTimes`
+        // bool.
+        let mut reader = Reader::new(payload);
+        let action = reader.var_i32().map_err(dec_err)?;
+        let directive = match action {
+            0 => {
+                let text = reader.string(32_767).map_err(dec_err)?;
+                Directive::Emit(ClientEvent::TitleText {
+                    text: Text::from_json(&text),
+                })
+            }
+            1 => {
+                let text = reader.string(32_767).map_err(dec_err)?;
+                Directive::Emit(ClientEvent::SubtitleText {
+                    text: Text::from_json(&text),
+                })
+            }
+            2 => {
+                let text = reader.string(32_767).map_err(dec_err)?;
+                Directive::Emit(ClientEvent::Chat {
+                    text: Text::from_json(&text),
+                    kind: ChatKind::GameInfo,
+                    sender: None,
+                    ack: None,
+                })
+            }
+            3 => {
+                let fade_in = reader.i32().map_err(dec_err)?;
+                let stay = reader.i32().map_err(dec_err)?;
+                let fade_out = reader.i32().map_err(dec_err)?;
+                Directive::Emit(ClientEvent::TitlesAnimation {
+                    fade_in,
+                    stay,
+                    fade_out,
+                })
+            }
+            4 => Directive::Emit(ClientEvent::TitlesCleared { reset_times: false }),
+            5 => Directive::Emit(ClientEvent::TitlesCleared { reset_times: true }),
+            other => {
+                return Err(AdapterError::Decode(format!("unknown title action {other}")));
+            }
+        };
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![directive]);
+    }
+
+    fn play_tab_complete(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // `packet_tab_complete` (minecraft-data 1.12.2, identical to
+        // 1.8's shape): a bare `matches: string[]`, no transaction id and
+        // no replacement range (both added in 1.13). See v47's identical
+        // arm and `pending_tab_complete`'s doc for why the id/range come
+        // from the outgoing request instead of the wire.
+        let mut reader = Reader::new(payload);
+        let count = reader.var_i32().map_err(dec_err)?;
+        let count = usize::try_from(count)
+            .map_err(|_| AdapterError::Decode(format!("invalid tab_complete count {count}")))?;
+        let mut matches = Vec::with_capacity(count.min(reader.remaining()));
+        for _ in 0..count {
+            matches.push(reader.string(32_767).map_err(dec_err)?);
         }
-        if packet_id == play::clientbound::TITLE {
-            // Action-multiplexed, verified field-by-field against
-            // minecraft-data's 1.12.2 `packet_title`: unlike 1.8, the `text`
-            // switch has three cases (`0`/`1`/`2` — title/subtitle/action-bar,
-            // the action-bar case 1.12.2 adds), which pushes the
-            // fade-in/stay/fade-out case (times) to `3` and the two
-            // argument-less actions to `4`/`5`. Action-bar text always
-            // renders as an overlay, so it maps to the same `Chat`
-            // `GameInfo` event the dedicated `SET_ACTION_BAR_TEXT` packet
-            // uses on 26.2 — there is no such dedicated packet before 1.17,
-            // it rides this one instead. `4`/`5` are clear-then-reset, the
-            // same pair 26.2's `CLEAR_TITLES` folds into one `resetTimes`
-            // bool.
-            let mut reader = Reader::new(payload);
-            let action = reader.var_i32().map_err(dec_err)?;
-            let directive = match action {
-                0 => {
-                    let text = reader.string(32_767).map_err(dec_err)?;
-                    Directive::Emit(ClientEvent::TitleText {
-                        text: Text::from_json(&text),
-                    })
-                }
-                1 => {
-                    let text = reader.string(32_767).map_err(dec_err)?;
-                    Directive::Emit(ClientEvent::SubtitleText {
-                        text: Text::from_json(&text),
-                    })
-                }
-                2 => {
-                    let text = reader.string(32_767).map_err(dec_err)?;
-                    Directive::Emit(ClientEvent::Chat {
-                        text: Text::from_json(&text),
-                        kind: ChatKind::GameInfo,
-                        sender: None,
-                        ack: None,
-                    })
-                }
-                3 => {
-                    let fade_in = reader.i32().map_err(dec_err)?;
-                    let stay = reader.i32().map_err(dec_err)?;
-                    let fade_out = reader.i32().map_err(dec_err)?;
-                    Directive::Emit(ClientEvent::TitlesAnimation {
-                        fade_in,
-                        stay,
-                        fade_out,
-                    })
-                }
-                4 => Directive::Emit(ClientEvent::TitlesCleared { reset_times: false }),
-                5 => Directive::Emit(ClientEvent::TitlesCleared { reset_times: true }),
-                other => {
-                    return Err(AdapterError::Decode(format!("unknown title action {other}")));
-                }
+        reader.ensure_empty().map_err(dec_err)?;
+        let pending = self.take_tab_complete();
+        let (id, command) = pending
+            .map(|p| (p.id, p.command))
+            .unwrap_or_else(|| (0, String::new()));
+        let start = last_word_index(&command) as i32;
+        let length = command.len() as i32 - start;
+        let suggestions = matches
+            .into_iter()
+            .map(|text| lodestone_model::CommandSuggestionEntry { text, tooltip: None })
+            .collect();
+        return Ok(vec![Directive::Emit(ClientEvent::CommandSuggestionsReceived {
+            id,
+            start,
+            length,
+            suggestions,
+        })]);
+    }
+
+    fn play_player_info(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // A single `action` applies to every entry in the packet —
+        // verified against minecraft-data's 1.12.2 `packet_player_info`
+        // `switch`, byte-identical to 1.8's shape, unlike 26.2's
+        // per-entry action bitmask. See `packets::player_info`'s module
+        // doc.
+        let body: PlayerInfo = decode_body_exact(payload)?;
+        let mut updated = Vec::new();
+        let mut removed = Vec::new();
+        for entry in body.entries {
+            let blank = || PlayerListEntry {
+                uuid: entry.uuid,
+                name: None,
+                game_mode: None,
+                latency: None,
+                display_name: None,
+                // 1.12.2 has no separate "listed" bit — every entry the
+                // server sends is, by construction, in the tab list.
+                listed: None,
+                properties: None,
+                // 1.12.2 predates secure chat sessions entirely.
+                chat_session: None,
+                // 1.12.2 predates both `UPDATE_LIST_ORDER` and `UPDATE_HAT`
+                // (added in 1.21.4's action-bitmask packet) entirely.
+                list_order: None,
+                hat_visible: None,
             };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![directive]);
+            match entry.action {
+                PlayerInfoAction::AddPlayer {
+                    name,
+                    properties,
+                    game_mode: raw_mode,
+                    ping,
+                    display_name,
+                } => {
+                    updated.push(PlayerListEntry {
+                        name: Some(name),
+                        game_mode: Some(game_mode(
+                            u8::try_from(raw_mode).map_err(|_| {
+                                AdapterError::Decode(format!(
+                                    "player_info game mode {raw_mode} out of range"
+                                ))
+                            })?,
+                        )?),
+                        latency: Some(ping),
+                        display_name: display_name.map(|json| Text::from_json(&json)),
+                        properties: Some(
+                            properties
+                                .into_iter()
+                                .map(|property| ProfileProperty {
+                                    name: property.name,
+                                    value: property.value,
+                                    signature: property.signature,
+                                })
+                                .collect(),
+                        ),
+                        ..blank()
+                    });
+                }
+                PlayerInfoAction::UpdateGameMode { game_mode: raw_mode } => {
+                    updated.push(PlayerListEntry {
+                        game_mode: Some(game_mode(
+                            u8::try_from(raw_mode).map_err(|_| {
+                                AdapterError::Decode(format!(
+                                    "player_info game mode {raw_mode} out of range"
+                                ))
+                            })?,
+                        )?),
+                        ..blank()
+                    });
+                }
+                PlayerInfoAction::UpdateLatency { ping } => {
+                    updated.push(PlayerListEntry {
+                        latency: Some(ping),
+                        ..blank()
+                    });
+                }
+                PlayerInfoAction::UpdateDisplayName { display_name } => {
+                    updated.push(PlayerListEntry {
+                        display_name: display_name.map(|json| Text::from_json(&json)),
+                        ..blank()
+                    });
+                }
+                PlayerInfoAction::RemovePlayer => {
+                    removed.push(entry.uuid);
+                }
+            }
         }
-        if packet_id == play::clientbound::TAB_COMPLETE {
-            // `packet_tab_complete` (minecraft-data 1.12.2, identical to
-            // 1.8's shape): a bare `matches: string[]`, no transaction id and
-            // no replacement range (both added in 1.13). See v47's identical
-            // arm and `pending_tab_complete`'s doc for why the id/range come
-            // from the outgoing request instead of the wire.
-            let mut reader = Reader::new(payload);
+        let mut directives = Vec::with_capacity(2);
+        if !updated.is_empty() {
+            directives.push(Directive::Emit(ClientEvent::PlayerListUpdate {
+                entries: updated,
+            }));
+        }
+        if !removed.is_empty() {
+            directives.push(Directive::Emit(ClientEvent::PlayerListRemove {
+                profile_ids: removed,
+            }));
+        }
+        return Ok(directives);
+    }
+
+    fn play_held_item_slot(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // A single signed byte, the newly-selected hotbar index —
+        // verified against minecraft-data's 1.12.2
+        // `packet_held_item_slot` (identical shape at every later
+        // version through 26.2). The already-defined [`HeldItemSlot`]
+        // struct (`packets::window`) was never dispatched from here;
+        // this is that decoder's first caller.
+        let body: HeldItemSlot = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::HeldSlotChanged {
+            slot: i32::from(body.slot),
+        })]);
+    }
+
+    fn play_abilities(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Signed-byte flags (bit 0x01 invulnerable, 0x02 flying, 0x04 can
+        // fly, 0x08 instabuild), then f32 flying speed, f32 walking speed
+        // — verified against minecraft-data's 1.12.2 `packet_abilities`,
+        // byte-identical to 1.8's shape. 1.12.2 reuses one packet *name*
+        // for both directions with different flag semantics (the
+        // serverbound `abilities` this crate already encodes for
+        // `SetFlying` carries only the flying bit); the clientbound
+        // shape decoded here is byte-identical, so it is hand-decoded
+        // rather than routed through the serverbound-tagged
+        // [`PlayerAbilities`] struct to avoid conflating the two
+        // directions' meaning.
+        let mut reader = Reader::new(payload);
+        let flags = reader.i8().map_err(dec_err)?;
+        let flying_speed = reader.f32().map_err(dec_err)?;
+        let walking_speed = reader.f32().map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![Directive::Emit(ClientEvent::AbilitiesChanged {
+            invulnerable: flags & ABILITY_INVULNERABLE != 0,
+            flying: flags & ABILITY_FLYING != 0,
+            can_fly: flags & ABILITY_CAN_FLY != 0,
+            instabuild: flags & ABILITY_INSTABUILD != 0,
+            flying_speed,
+            walking_speed,
+        })]);
+    }
+
+    fn play_block_action(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Packed position, two opaque bytes, then a varint legacy block
+        // *type* id — verified against minecraft-data's 1.12.2
+        // `packet_block_action` (identical to 1.8's shape). Without this,
+        // no note block ever plays, no piston ever animates, and no
+        // chest lid ever opens for a 1.12.2 connection: those are all
+        // this packet, not `block_change`.
+        let body: BlockAction = decode_body_exact(payload)?;
+        let block_id = u8::try_from(body.block_id).map_err(|_| {
+            AdapterError::Decode(format!(
+                "block_action block id {} is outside the legacy 0..=255 block-type space",
+                body.block_id
+            ))
+        })?;
+        // `block_action`'s wire shape carries no metadata component at
+        // all (unlike `block_change`'s `id:meta` composite), and every
+        // block that can trigger this event resolves to the same
+        // canonical block *family* key regardless of metadata — only
+        // within-family blockstate properties such as piston facing vary
+        // with it, and this event's `block` field only ever needs the
+        // family (see `ClientEvent::BlockEvent`'s doc). But `meta = 0` is
+        // not always a populated slot in the legacy flattening table:
+        // measured (`lodestone_v340::canonical::resolve`, a debug probe
+        // over every meta) that a legacy chest/ender_chest/trapped_chest
+        // id has **no** entry at meta `0` or `1` at all — those metas
+        // were never a real chest orientation, only `2..=5` (facing)
+        // were — so a fixed `meta = 0` would silently resolve every
+        // chest-lid `block_action` to air. Scanning every meta and
+        // taking the first `Resolved` slot is family-only-safe (any
+        // meta the table does populate names the same block) and
+        // correct for every id this packet has been observed to carry.
+        let state = (0u8..16)
+            .find_map(|meta| match canonical::resolve(block_id, meta) {
+                canonical::CanonicalBlockState::Resolved(state) => Some(state),
+                _ => None,
+            })
+            .unwrap_or_else(canonical::air_state_id);
+        let key: ResourceKey = block_states::block_name(state)
+            .unwrap_or("minecraft:air")
+            .parse()
+            .map_err(|_| {
+                AdapterError::Decode(format!(
+                    "resolved block name for legacy block_action id {block_id} is not a \
+                     valid resource key"
+                ))
+            })?;
+        return Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
+            pos: body.location.0,
+            b0: body.byte1,
+            b1: body.byte2,
+            block: key,
+        })]);
+    }
+
+    fn play_entity_equipment(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Verified against minecraft-data's 1.12.2
+        // `packet_entity_equipment`: a varint entity id, a varint
+        // `EquipmentSlot` ordinal, then a `slot` item stack. Unlike the
+        // modern packet this carries exactly one slot per message, so
+        // the emitted `equipment` vec always has a single entry.
+        let body: ClientboundEntityEquipment = decode_body_exact(payload)?;
+        let ordinal = u8::try_from(body.slot).map_err(|_| {
+            AdapterError::Decode(format!(
+                "entity_equipment slot ordinal {} is outside u8 range",
+                body.slot
+            ))
+        })?;
+        let slot = EquipmentSlot::from_ordinal(ordinal).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown entity_equipment slot ordinal {ordinal}"))
+        })?;
+        let item = slot_to_item_stack(&body.item);
+        return Ok(vec![Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+            entity_id: body.entity_id,
+            equipment: vec![EntityEquipment { slot, item }],
+        })]);
+    }
+
+    fn play_animation(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Verified against minecraft-data's 1.12.2 `packet_animation`: a
+        // varint entity id, then a raw animation code byte. See
+        // `Animation`'s own doc for the code table and why `1` maps to
+        // `Other` rather than a named variant.
+        let body: Animation = decode_body_exact(payload)?;
+        let action = match body.animation {
+            0 => AnimationAction::SwingMainHand,
+            2 => AnimationAction::WakeUp,
+            3 => AnimationAction::SwingOffHand,
+            4 => AnimationAction::CriticalHit,
+            5 => AnimationAction::MagicCriticalHit,
+            other => AnimationAction::Other(other),
+        };
+        return Ok(vec![Directive::Emit(ClientEvent::EntityAnimation {
+            entity_id: body.entity_id,
+            action,
+        })]);
+    }
+
+    fn play_named_sound_effect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Verified against minecraft-data's 1.12.2
+        // `packet_named_sound_effect`. `x`/`y`/`z` are vanilla's
+        // fixed-point sound-position convention (real coordinate × 8);
+        // this era carries no fixed audible range and no variant seed,
+        // so both canonical fields are the "not present" default.
+        let body: NamedSoundEffect = decode_body_exact(payload)?;
+        let category_ordinal = u8::try_from(body.sound_category).map_err(|_| {
+            AdapterError::Decode(format!(
+                "named_sound_effect category {} is outside u8 range",
+                body.sound_category
+            ))
+        })?;
+        let category = SoundCategory::from_ordinal(category_ordinal).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown sound category {category_ordinal}"))
+        })?;
+        let sound: ResourceKey = body.sound_name.parse().map_err(|_| {
+            AdapterError::Decode(format!(
+                "named_sound_effect sound name {:?} is not a valid resource key",
+                body.sound_name
+            ))
+        })?;
+        return Ok(vec![Directive::Emit(ClientEvent::Sound {
+            sound,
+            category,
+            pos: Vec3 {
+                x: f64::from(body.x) / 8.0,
+                y: f64::from(body.y) / 8.0,
+                z: f64::from(body.z) / 8.0,
+            },
+            volume: body.volume,
+            pitch: body.pitch,
+            fixed_range: None,
+            seed: 0,
+        })]);
+    }
+
+    fn play_sound_effect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Identical shape to `NAMED_SOUND_EFFECT` except the leading
+        // field is a varint `SoundEvent` registry id rather than a
+        // string name — resolved through the generated legacy
+        // `sound_ids` table (`vendor/minecraft-data`'s
+        // `pc/1.12.2/sounds.json`, wire-order network ids).
+        let body: SoundEffect = decode_body_exact(payload)?;
+        let category_ordinal = u8::try_from(body.sound_category).map_err(|_| {
+            AdapterError::Decode(format!(
+                "sound_effect category {} is outside u8 range",
+                body.sound_category
+            ))
+        })?;
+        let category = SoundCategory::from_ordinal(category_ordinal).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown sound category {category_ordinal}"))
+        })?;
+        let name = crate::sound_ids::sound_name(body.sound_id).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown legacy sound id {}", body.sound_id))
+        })?;
+        let sound: ResourceKey = name.parse().map_err(|_| {
+            AdapterError::Decode(format!(
+                "resolved sound name {name:?} is not a valid resource key"
+            ))
+        })?;
+        return Ok(vec![Directive::Emit(ClientEvent::Sound {
+            sound,
+            category,
+            pos: Vec3 {
+                x: f64::from(body.x) / 8.0,
+                y: f64::from(body.y) / 8.0,
+                z: f64::from(body.z) / 8.0,
+            },
+            volume: body.volume,
+            pitch: body.pitch,
+            fixed_range: None,
+            seed: 0,
+        })]);
+    }
+
+    fn play_scoreboard_display_objective(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Verified against minecraft-data's 1.12.2
+        // `packet_scoreboard_display_objective`: a raw `i8` slot
+        // position, then a string objective name. This protocol
+        // revision only ever sends 0/1/2 — the per-team-colour sidebar
+        // slots are a later addition — and clears the slot with an
+        // empty string rather than a dedicated marker.
+        let body: ScoreboardDisplayObjective = decode_body_exact(payload)?;
+        let slot = match body.position {
+            0 => DisplaySlot::List,
+            1 => DisplaySlot::Sidebar,
+            2 => DisplaySlot::BelowName,
+            other => {
+                return Err(AdapterError::Decode(format!(
+                    "unknown scoreboard display slot {other}"
+                )));
+            }
+        };
+        let objective = if body.name.is_empty() {
+            None
+        } else {
+            Some(body.name)
+        };
+        return Ok(vec![Directive::Emit(ClientEvent::DisplayObjective {
+            slot,
+            objective,
+        })]);
+    }
+
+    fn play_scoreboard_objective(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Mode-multiplexed (minecraft-data's 1.12.2
+        // `packet_scoreboard_objective`), so this is a hand-decoded
+        // `Reader` walk rather than a derived struct, mirroring
+        // `block_change`/`entity_status`'s treatment of the same shape.
+        // `displayText` is a **plain** legacy-formatted string at this
+        // protocol revision (JSON scoreboard text is a 1.13+ addition),
+        // so it goes through `Text::from_legacy`, not `from_json`.
+        let mut reader = Reader::new(payload);
+        let name = reader.string(16).map_err(dec_err)?;
+        let action = reader.i8().map_err(dec_err)?;
+        let event = match action {
+            0 | 2 => {
+                let display_text = reader.string(64).map_err(dec_err)?;
+                let render_type_str = reader.string(16).map_err(dec_err)?;
+                let render_type = match render_type_str.as_str() {
+                    "integer" => ObjectiveRenderType::Integer,
+                    "hearts" => ObjectiveRenderType::Hearts,
+                    other => {
+                        return Err(AdapterError::Decode(format!(
+                            "unknown objective render type {other:?}"
+                        )));
+                    }
+                };
+                ClientEvent::ObjectiveUpdate {
+                    name,
+                    mode: if action == 0 {
+                        ObjectiveMode::Add
+                    } else {
+                        ObjectiveMode::Change
+                    },
+                    display_name: Some(Text::from_legacy(&display_text)),
+                    render_type: Some(render_type),
+                    number_format: None,
+                }
+            }
+            1 => ClientEvent::ObjectiveUpdate {
+                name,
+                mode: ObjectiveMode::Remove,
+                display_name: None,
+                render_type: None,
+                number_format: None,
+            },
+            other => {
+                return Err(AdapterError::Decode(format!(
+                    "unknown scoreboard_objective action {other}"
+                )));
+            }
+        };
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![Directive::Emit(event)]);
+    }
+
+    fn play_scoreboard_score(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Verified against minecraft-data's 1.12.2
+        // `packet_scoreboard_score`: `itemName` is the score *holder*
+        // and `scoreName` is the *objective* — the mcdata field names
+        // are misleading, not the wire order. `scoreName` is read
+        // unconditionally (unlike `value`), so a `remove` action still
+        // names exactly one objective, never "reset all".
+        let mut reader = Reader::new(payload);
+        let holder = reader.string(64).map_err(dec_err)?;
+        let action = reader.var_i32().map_err(dec_err)?;
+        let objective = reader.string(16).map_err(dec_err)?;
+        let event = match action {
+            0 => {
+                let value = reader.var_i32().map_err(dec_err)?;
+                ClientEvent::ScoreUpdate {
+                    holder,
+                    objective,
+                    value,
+                    display: None,
+                    number_format: None,
+                }
+            }
+            1 => ClientEvent::ScoreReset {
+                holder,
+                objective: Some(objective),
+            },
+            other => {
+                return Err(AdapterError::Decode(format!(
+                    "unknown scoreboard_score action {other}"
+                )));
+            }
+        };
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![Directive::Emit(event)]);
+    }
+
+    fn play_teams(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Mode-multiplexed (minecraft-data's 1.12.2 `packet_teams`), so
+        // this is a hand-decoded `Reader` walk. Modes `0`
+        // (create) and `2` (update) share the full parameter block;
+        // `0` additionally carries the initial member list, and `3`/`4`
+        // (add/remove members) carry only a member list. `friendlyFire`
+        // packs two flags in one byte (`0x01` friendly fire, `0x02` see
+        // friendly invisibles) — vanilla's `PacketPlayOutScoreboardTeam`
+        // convention. The member-list count is capped against the
+        // payload's own remaining length before `Vec::with_capacity`,
+        // since `players` is exactly the attacker-influenced unbounded
+        // wire count this crate's own trap list warns about.
+        let mut reader = Reader::new(payload);
+        let team = reader.string(16).map_err(dec_err)?;
+        let mode = reader.i8().map_err(dec_err)?;
+        let read_members = |reader: &mut Reader<'_>| -> Result<Vec<String>, AdapterError> {
             let count = reader.var_i32().map_err(dec_err)?;
             let count = usize::try_from(count)
-                .map_err(|_| AdapterError::Decode(format!("invalid tab_complete count {count}")))?;
-            let mut matches = Vec::with_capacity(count.min(reader.remaining()));
+                .unwrap_or(0)
+                .min(reader.remaining());
+            let mut members = Vec::with_capacity(count);
             for _ in 0..count {
-                matches.push(reader.string(32_767).map_err(dec_err)?);
+                members.push(reader.string(16).map_err(dec_err)?);
             }
-            reader.ensure_empty().map_err(dec_err)?;
-            let pending = self.take_tab_complete();
-            let (id, command) = pending
-                .map(|p| (p.id, p.command))
-                .unwrap_or_else(|| (0, String::new()));
-            let start = last_word_index(&command) as i32;
-            let length = command.len() as i32 - start;
-            let suggestions = matches
-                .into_iter()
-                .map(|text| lodestone_model::CommandSuggestionEntry { text, tooltip: None })
-                .collect();
-            return Ok(vec![Directive::Emit(ClientEvent::CommandSuggestionsReceived {
-                id,
-                start,
-                length,
-                suggestions,
-            })]);
-        }
-        if packet_id == play::clientbound::PLAYER_INFO {
-            // A single `action` applies to every entry in the packet —
-            // verified against minecraft-data's 1.12.2 `packet_player_info`
-            // `switch`, byte-identical to 1.8's shape, unlike 26.2's
-            // per-entry action bitmask. See `packets::player_info`'s module
-            // doc.
-            let body: PlayerInfo = decode_body_exact(payload)?;
-            let mut updated = Vec::new();
-            let mut removed = Vec::new();
-            for entry in body.entries {
-                let blank = || PlayerListEntry {
-                    uuid: entry.uuid,
-                    name: None,
-                    game_mode: None,
-                    latency: None,
-                    display_name: None,
-                    // 1.12.2 has no separate "listed" bit — every entry the
-                    // server sends is, by construction, in the tab list.
-                    listed: None,
-                    properties: None,
-                    // 1.12.2 predates secure chat sessions entirely.
-                    chat_session: None,
-                    // 1.12.2 predates both `UPDATE_LIST_ORDER` and `UPDATE_HAT`
-                    // (added in 1.21.4's action-bitmask packet) entirely.
-                    list_order: None,
-                    hat_visible: None,
+            Ok(members)
+        };
+        let action = match mode {
+            0 | 2 => {
+                let display_name = reader.string(16).map_err(dec_err)?;
+                let prefix = reader.string(16).map_err(dec_err)?;
+                let suffix = reader.string(16).map_err(dec_err)?;
+                let friendly_flags = reader.i8().map_err(dec_err)?;
+                let visibility_str = reader.string(32).map_err(dec_err)?;
+                let collision_str = reader.string(32).map_err(dec_err)?;
+                let color_byte = reader.i8().map_err(dec_err)?;
+                let name_tag_visibility = match visibility_str.as_str() {
+                    "always" => Visibility::Always,
+                    "never" => Visibility::Never,
+                    "hideForOtherTeams" => Visibility::HideForOtherTeams,
+                    "hideForOwnTeam" => Visibility::HideForOwnTeam,
+                    other => {
+                        return Err(AdapterError::Decode(format!(
+                            "unknown team name-tag visibility {other:?}"
+                        )));
+                    }
                 };
-                match entry.action {
-                    PlayerInfoAction::AddPlayer {
-                        name,
-                        properties,
-                        game_mode: raw_mode,
-                        ping,
-                        display_name,
-                    } => {
-                        updated.push(PlayerListEntry {
-                            name: Some(name),
-                            game_mode: Some(game_mode(
-                                u8::try_from(raw_mode).map_err(|_| {
-                                    AdapterError::Decode(format!(
-                                        "player_info game mode {raw_mode} out of range"
-                                    ))
-                                })?,
-                            )?),
-                            latency: Some(ping),
-                            display_name: display_name.map(|json| Text::from_json(&json)),
-                            properties: Some(
-                                properties
-                                    .into_iter()
-                                    .map(|property| ProfileProperty {
-                                        name: property.name,
-                                        value: property.value,
-                                        signature: property.signature,
-                                    })
-                                    .collect(),
-                            ),
-                            ..blank()
-                        });
+                let collision_rule = match collision_str.as_str() {
+                    "always" => CollisionRule::Always,
+                    "never" => CollisionRule::Never,
+                    "pushOtherTeams" => CollisionRule::PushOtherTeams,
+                    "pushOwnTeam" => CollisionRule::PushOwnTeam,
+                    other => {
+                        return Err(AdapterError::Decode(format!(
+                            "unknown team collision rule {other:?}"
+                        )));
                     }
-                    PlayerInfoAction::UpdateGameMode { game_mode: raw_mode } => {
-                        updated.push(PlayerListEntry {
-                            game_mode: Some(game_mode(
-                                u8::try_from(raw_mode).map_err(|_| {
-                                    AdapterError::Decode(format!(
-                                        "player_info game mode {raw_mode} out of range"
-                                    ))
-                                })?,
-                            )?),
-                            ..blank()
-                        });
+                };
+                let params = Box::new(TeamParameters {
+                    display_name: Text::from_legacy(&display_name),
+                    prefix: Text::from_legacy(&prefix),
+                    suffix: Text::from_legacy(&suffix),
+                    name_tag_visibility,
+                    collision_rule,
+                    color: team_color_from_byte(color_byte),
+                    friendly_fire: friendly_flags & 0x01 != 0,
+                    see_friendly_invisibles: friendly_flags & 0x02 != 0,
+                });
+                if mode == 0 {
+                    TeamAction::Create {
+                        params,
+                        members: read_members(&mut reader)?,
                     }
-                    PlayerInfoAction::UpdateLatency { ping } => {
-                        updated.push(PlayerListEntry {
-                            latency: Some(ping),
-                            ..blank()
-                        });
-                    }
-                    PlayerInfoAction::UpdateDisplayName { display_name } => {
-                        updated.push(PlayerListEntry {
-                            display_name: display_name.map(|json| Text::from_json(&json)),
-                            ..blank()
-                        });
-                    }
-                    PlayerInfoAction::RemovePlayer => {
-                        removed.push(entry.uuid);
-                    }
+                } else {
+                    TeamAction::Update { params }
                 }
             }
-            let mut directives = Vec::with_capacity(2);
-            if !updated.is_empty() {
-                directives.push(Directive::Emit(ClientEvent::PlayerListUpdate {
-                    entries: updated,
-                }));
+            1 => TeamAction::Remove,
+            3 => TeamAction::AddMembers(read_members(&mut reader)?),
+            4 => TeamAction::RemoveMembers(read_members(&mut reader)?),
+            other => {
+                return Err(AdapterError::Decode(format!("unknown teams mode {other}")));
             }
-            if !removed.is_empty() {
-                directives.push(Directive::Emit(ClientEvent::PlayerListRemove {
-                    profile_ids: removed,
-                }));
+        };
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![Directive::Emit(ClientEvent::TeamUpdate {
+            name: team,
+            action,
+        })]);
+    }
+
+    fn play_boss_bar(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Action-multiplexed (minecraft-data's 1.12.2 `packet_boss_bar`),
+        // so this is a hand-decoded `Reader` walk. Title is a JSON chat
+        // component at this protocol revision (unlike the plain-string
+        // scoreboard/team fields above — the boss bar packet has carried
+        // `IChatComponent` since its 1.9 introduction, predating the
+        // 1.13 scoreboard/team JSON migration), so it goes through
+        // `Text::from_json`. `flags` packs three bits: `0x01` darken
+        // sky, `0x02` boss music, `0x04` create fog.
+        let mut reader = Reader::new(payload);
+        let id = reader.uuid().map_err(dec_err)?;
+        let action_ordinal = reader.var_i32().map_err(dec_err)?;
+        let action = match action_ordinal {
+            0 => {
+                let title = reader.string(32767).map_err(dec_err)?;
+                let progress = reader.f32().map_err(dec_err)?;
+                let color = boss_color_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
+                let overlay = boss_overlay_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
+                let flags = reader.u8().map_err(dec_err)?;
+                BossAction::Add {
+                    title: Box::new(Text::from_json(&title)),
+                    progress,
+                    color,
+                    overlay,
+                    darken: flags & 0x01 != 0,
+                    music: flags & 0x02 != 0,
+                    fog: flags & 0x04 != 0,
+                }
             }
-            return Ok(directives);
+            1 => BossAction::Remove,
+            2 => BossAction::UpdateProgress(reader.f32().map_err(dec_err)?),
+            3 => {
+                let title = reader.string(32767).map_err(dec_err)?;
+                BossAction::UpdateName(Box::new(Text::from_json(&title)))
+            }
+            4 => {
+                let color = boss_color_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
+                let overlay = boss_overlay_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
+                BossAction::UpdateStyle { color, overlay }
+            }
+            5 => {
+                let flags = reader.u8().map_err(dec_err)?;
+                BossAction::UpdateFlags {
+                    darken: flags & 0x01 != 0,
+                    music: flags & 0x02 != 0,
+                    fog: flags & 0x04 != 0,
+                }
+            }
+            other => {
+                return Err(AdapterError::Decode(format!(
+                    "unknown boss_bar action {other}"
+                )));
+            }
+        };
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![Directive::Emit(ClientEvent::BossBarUpdate { id, action })]);
+    }
+
+    fn play_spawn_position(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: SpawnPosition = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::SpawnPositionChanged {
+            dimension: dimension_id(self.current_dimension())?,
+            pos: body.location.0,
+            angle: 0.0,
+            pitch: 0.0,
+        })]);
+    }
+
+    fn play_update_time(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: UpdateTime = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::TimeChanged {
+            world_age: body.age,
+            time_of_day: body.time,
+        })]);
+    }
+
+    fn play_difficulty(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: DifficultyPacket = decode_body(payload)?;
+        let difficulty = match body.difficulty {
+            0 => Difficulty::Peaceful,
+            1 => Difficulty::Easy,
+            2 => Difficulty::Normal,
+            3 => Difficulty::Hard,
+            other => {
+                return Err(AdapterError::Decode(format!(
+                    "unknown difficulty id {other}"
+                )));
+            }
+        };
+        // 1.12.2 has no "locked" bit — that is a later addition.
+        return Ok(vec![Directive::Emit(ClientEvent::DifficultyChanged {
+            difficulty,
+            locked: false,
+        })]);
+    }
+
+    fn play_playerlist_header(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: PlayerlistHeader = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::TabListChanged {
+            header: Text::from_json(&body.header),
+            footer: Text::from_json(&body.footer),
+        })]);
+    }
+
+    fn play_attach_entity(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: AttachEntity = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntityLeashed {
+            entity_id: body.entity_id,
+            holder_id: (body.vehicle_id != 0).then_some(body.vehicle_id),
+        })]);
+    }
+
+    fn play_set_passengers(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: SetPassengers = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(
+            ClientEvent::EntityPassengersChanged {
+                vehicle_id: body.entity_id,
+                passenger_ids: body.passengers,
+            },
+        )]);
+    }
+
+    fn play_collect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: Collect = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::ItemPickup {
+            item_entity_id: body.collected_entity_id,
+            player_id: body.collector_entity_id,
+            amount: body.pickup_item_count,
+        })]);
+    }
+
+    fn play_entity_effect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: EntityEffect = decode_body(payload)?;
+        // 1.12.2's legacy effect id is 1-based; the shared
+        // `lodestone-data` registry table is the 0-based modern
+        // `minecraft:mob_effect` network id, and the two id spaces have
+        // been stable in the same relative order since Minecraft
+        // Beta 1.8 — verified entry-for-entry against
+        // `vendor/minecraft-data`'s `data/pc/1.12/effects.json` (ids
+        // `1..=27`) against `generated/mob_effects.rs`'s `MOB_EFFECT_NAMES`
+        // (indices `0..=26`).
+        let name = mob_effect_name(i32::from(body.effect_id) - 1).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown legacy effect id {}", body.effect_id))
+        })?;
+        let effect: ResourceKey = name
+            .parse()
+            .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
+        return Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
+            entity_id: body.entity_id,
+            effect,
+            amplifier: i32::from(body.amplifier),
+            duration_ticks: body.duration,
+            ambient: body.flags & 0x01 != 0,
+            visible: body.flags & 0x02 != 0,
+            // Neither bit exists at this protocol revision: vanilla
+            // 1.12.2 always shows the HUD icon and never blends.
+            show_icon: true,
+            blend: false,
+        })]);
+    }
+
+    fn play_remove_entity_effect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: RemoveEntityEffect = decode_body(payload)?;
+        let name = mob_effect_name(i32::from(body.effect_id) - 1).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown legacy effect id {}", body.effect_id))
+        })?;
+        let effect: ResourceKey = name
+            .parse()
+            .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
+        return Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
+            entity_id: body.entity_id,
+            effect,
+        })]);
+    }
+
+    fn play_spawn_entity_weather(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: SpawnEntityWeather = decode_body(payload)?;
+        let entity_type: ResourceKey = "minecraft:lightning_bolt"
+            .parse()
+            .map_err(|_| AdapterError::Decode("lightning_bolt key invalid".to_owned()))?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+            entity_id: body.entity_id,
+            uuid: None,
+            entity_type,
+            pos: Vec3::new(body.x, body.y, body.z),
+            rotation: Rotation::new(0.0, 0.0),
+            velocity: None,
+        })]);
+    }
+
+    fn play_spawn_entity_experience_orb(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: SpawnEntityExperienceOrb = decode_body(payload)?;
+        let entity_type: ResourceKey = "minecraft:experience_orb"
+            .parse()
+            .map_err(|_| AdapterError::Decode("experience_orb key invalid".to_owned()))?;
+        return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+            entity_id: body.entity_id,
+            uuid: None,
+            entity_type,
+            pos: Vec3::new(body.x, body.y, body.z),
+            rotation: Rotation::new(0.0, 0.0),
+            velocity: None,
+        })]);
+    }
+
+    fn play_world_particles(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Fixed-width prefix (verified against minecraft-data's 1.12.2
+        // `packet_world_particles`), then a legacy particle id whose
+        // rename crosswalk into the modern `minecraft:particle_type`
+        // registry lives in `crate::particle_ids` (see that module's
+        // docs for how it was derived — a real decompile, not a guess).
+        // Three legacy ids carry extra type-specific VarInts
+        // (`particle_ids::extra_varint_count`); this crate cannot yet
+        // model their payload as a typed `ParticleOptions` variant
+        // (`lodestone-model` is off limits here — see the brokered-hunk
+        // note this pass reports), so they are read and discarded, same
+        // as `lodestone-v770` does for any particle name it does not
+        // specifically parse a payload for.
+        let mut reader = Reader::new(payload);
+        let particle_id = reader.i32().map_err(dec_err)?;
+        let long_distance = reader.bool().map_err(dec_err)?;
+        let x = reader.f32().map_err(dec_err)?;
+        let y = reader.f32().map_err(dec_err)?;
+        let z = reader.f32().map_err(dec_err)?;
+        let offset_x = reader.f32().map_err(dec_err)?;
+        let offset_y = reader.f32().map_err(dec_err)?;
+        let offset_z = reader.f32().map_err(dec_err)?;
+        let max_speed = reader.f32().map_err(dec_err)?;
+        let count = reader.i32().map_err(dec_err)?;
+        for _ in 0..particle_ids::extra_varint_count(particle_id) {
+            reader.var_i32().map_err(dec_err)?;
         }
-        if packet_id == play::clientbound::HELD_ITEM_SLOT {
-            // A single signed byte, the newly-selected hotbar index —
-            // verified against minecraft-data's 1.12.2
-            // `packet_held_item_slot` (identical shape at every later
-            // version through 26.2). The already-defined [`HeldItemSlot`]
-            // struct (`packets::window`) was never dispatched from here;
-            // this is that decoder's first caller.
-            let body: HeldItemSlot = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::HeldSlotChanged {
-                slot: i32::from(body.slot),
-            })]);
-        }
-        if packet_id == play::clientbound::ABILITIES {
-            // Signed-byte flags (bit 0x01 invulnerable, 0x02 flying, 0x04 can
-            // fly, 0x08 instabuild), then f32 flying speed, f32 walking speed
-            // — verified against minecraft-data's 1.12.2 `packet_abilities`,
-            // byte-identical to 1.8's shape. 1.12.2 reuses one packet *name*
-            // for both directions with different flag semantics (the
-            // serverbound `abilities` this crate already encodes for
-            // `SetFlying` carries only the flying bit); the clientbound
-            // shape decoded here is byte-identical, so it is hand-decoded
-            // rather than routed through the serverbound-tagged
-            // [`PlayerAbilities`] struct to avoid conflating the two
-            // directions' meaning.
-            let mut reader = Reader::new(payload);
-            let flags = reader.i8().map_err(dec_err)?;
-            let flying_speed = reader.f32().map_err(dec_err)?;
-            let walking_speed = reader.f32().map_err(dec_err)?;
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::AbilitiesChanged {
-                invulnerable: flags & ABILITY_INVULNERABLE != 0,
-                flying: flags & ABILITY_FLYING != 0,
-                can_fly: flags & ABILITY_CAN_FLY != 0,
-                instabuild: flags & ABILITY_INSTABUILD != 0,
-                flying_speed,
-                walking_speed,
-            })]);
-        }
-        if packet_id == play::clientbound::BLOCK_ACTION {
-            // Packed position, two opaque bytes, then a varint legacy block
-            // *type* id — verified against minecraft-data's 1.12.2
-            // `packet_block_action` (identical to 1.8's shape). Without this,
-            // no note block ever plays, no piston ever animates, and no
-            // chest lid ever opens for a 1.12.2 connection: those are all
-            // this packet, not `block_change`.
-            let body: BlockAction = decode_body_exact(payload)?;
-            let block_id = u8::try_from(body.block_id).map_err(|_| {
-                AdapterError::Decode(format!(
-                    "block_action block id {} is outside the legacy 0..=255 block-type space",
-                    body.block_id
-                ))
-            })?;
-            // `block_action`'s wire shape carries no metadata component at
-            // all (unlike `block_change`'s `id:meta` composite), and every
-            // block that can trigger this event resolves to the same
-            // canonical block *family* key regardless of metadata — only
-            // within-family blockstate properties such as piston facing vary
-            // with it, and this event's `block` field only ever needs the
-            // family (see `ClientEvent::BlockEvent`'s doc). But `meta = 0` is
-            // not always a populated slot in the legacy flattening table:
-            // measured (`lodestone_v340::canonical::resolve`, a debug probe
-            // over every meta) that a legacy chest/ender_chest/trapped_chest
-            // id has **no** entry at meta `0` or `1` at all — those metas
-            // were never a real chest orientation, only `2..=5` (facing)
-            // were — so a fixed `meta = 0` would silently resolve every
-            // chest-lid `block_action` to air. Scanning every meta and
-            // taking the first `Resolved` slot is family-only-safe (any
-            // meta the table does populate names the same block) and
-            // correct for every id this packet has been observed to carry.
-            let state = (0u8..16)
-                .find_map(|meta| match canonical::resolve(block_id, meta) {
-                    canonical::CanonicalBlockState::Resolved(state) => Some(state),
-                    _ => None,
+        reader.ensure_empty().map_err(dec_err)?;
+        let name = particle_ids::particle_key(particle_id).ok_or_else(|| {
+            AdapterError::Decode(format!("unmapped legacy particle id {particle_id}"))
+        })?;
+        let particle: ResourceKey = name
+            .parse()
+            .map_err(|_| AdapterError::Decode(format!("particle id {name} is not a key")))?;
+        return Ok(vec![Directive::Emit(ClientEvent::Particles {
+            particle,
+            long_distance,
+            // 1.12's `WORLD_PARTICLES` has no always-show field: the
+            // packet carries `longDistance` and nothing else, and the
+            // flag was added with the 26.2-era packet. `false` is
+            // therefore the honest value here, not an unported one --
+            // there is nothing on this wire to port.
+            always_show: false,
+            pos: Vec3::new(f64::from(x), f64::from(y), f64::from(z)),
+            offset: Vec3f::new(offset_x, offset_y, offset_z),
+            max_speed,
+            count,
+            options: ParticleOptions::None,
+        })]);
+    }
+
+    fn play_experience(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let progress = reader.f32().map_err(dec_err)?;
+        let level = reader.var_i32().map_err(dec_err)?;
+        let total = reader.var_i32().map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![Directive::Emit(ClientEvent::ExperienceChanged {
+            progress,
+            level,
+            total,
+        })]);
+    }
+
+    fn play_vehicle_move(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let x = reader.f64().map_err(dec_err)?;
+        let y = reader.f64().map_err(dec_err)?;
+        let z = reader.f64().map_err(dec_err)?;
+        let yaw = reader.f32().map_err(dec_err)?;
+        let pitch = reader.f32().map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![Directive::Emit(ClientEvent::VehicleMoved {
+            pos: Vec3::new(x, y, z),
+            yaw,
+            pitch,
+        })]);
+    }
+
+    fn play_set_cooldown(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let item_id = reader.var_i32().map_err(dec_err)?;
+        let cooldown_ticks = reader.var_i32().map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        let item_id =
+            i16::try_from(item_id).map_err(|_| AdapterError::Decode(format!(
+                "cooldown item id {item_id} out of legacy item-id range"
+            )))?;
+        let name = item_types::item_name(item_id).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown legacy item id {item_id} in set_cooldown"))
+        })?;
+        let group: ResourceKey = name
+            .parse()
+            .map_err(|_| AdapterError::Decode(format!("item id {name} is not a key")))?;
+        return Ok(vec![Directive::Emit(ClientEvent::ItemCooldown {
+            group,
+            duration_ticks: cooldown_ticks,
+        })]);
+    }
+
+    fn play_combat_event(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Action-multiplexed, verified field-by-field against
+        // minecraft-data's 1.12.2 `packet_combat_event`: event `0` (enter
+        // combat) carries nothing further; event `1` (end combat) reads a
+        // VarInt duration then a raw `i32` entity id (the model's
+        // `PlayerCombatEnded` has no slot for the id, so it is read and
+        // discarded — matching 26.2's own `ClientboundPlayerCombatEndPacket`,
+        // which dropped it too); event `2` (entity died) reads a VarInt
+        // player id, a raw `i32` entity id, then a JSON death-message
+        // string, both discarded except the message, matching modern
+        // `PLAYER_COMBAT_KILL`'s shape (`lodestone-v770`'s adapter).
+        let mut reader = Reader::new(payload);
+        let event = reader.var_i32().map_err(dec_err)?;
+        let directive = match event {
+            0 => Directive::Emit(ClientEvent::PlayerCombatEntered),
+            1 => {
+                let duration_ticks = reader.var_i32().map_err(dec_err)?;
+                reader.i32().map_err(dec_err)?; // entity id, unused downstream
+                Directive::Emit(ClientEvent::PlayerCombatEnded { duration_ticks })
+            }
+            2 => {
+                reader.var_i32().map_err(dec_err)?; // player id, unused downstream
+                reader.i32().map_err(dec_err)?; // killer entity id, unused downstream
+                let message = reader.string(32767).map_err(dec_err)?;
+                Directive::Emit(ClientEvent::Death {
+                    message: Text::from_json(&message),
                 })
-                .unwrap_or_else(canonical::air_state_id);
-            let key: ResourceKey = block_states::block_name(state)
-                .unwrap_or("minecraft:air")
-                .parse()
-                .map_err(|_| {
-                    AdapterError::Decode(format!(
-                        "resolved block name for legacy block_action id {block_id} is not a \
-                         valid resource key"
-                    ))
-                })?;
-            return Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
-                pos: body.location.0,
-                b0: body.byte1,
-                b1: body.byte2,
-                block: key,
-            })]);
-        }
-        if packet_id == play::clientbound::ENTITY_EQUIPMENT {
-            // Verified against minecraft-data's 1.12.2
-            // `packet_entity_equipment`: a varint entity id, a varint
-            // `EquipmentSlot` ordinal, then a `slot` item stack. Unlike the
-            // modern packet this carries exactly one slot per message, so
-            // the emitted `equipment` vec always has a single entry.
-            let body: ClientboundEntityEquipment = decode_body_exact(payload)?;
-            let ordinal = u8::try_from(body.slot).map_err(|_| {
-                AdapterError::Decode(format!(
-                    "entity_equipment slot ordinal {} is outside u8 range",
-                    body.slot
-                ))
-            })?;
-            let slot = EquipmentSlot::from_ordinal(ordinal).ok_or_else(|| {
-                AdapterError::Decode(format!("unknown entity_equipment slot ordinal {ordinal}"))
-            })?;
-            let item = slot_to_item_stack(&body.item);
-            return Ok(vec![Directive::Emit(ClientEvent::EntityEquipmentUpdated {
-                entity_id: body.entity_id,
-                equipment: vec![EntityEquipment { slot, item }],
-            })]);
-        }
-        if packet_id == play::clientbound::ANIMATION {
-            // Verified against minecraft-data's 1.12.2 `packet_animation`: a
-            // varint entity id, then a raw animation code byte. See
-            // `Animation`'s own doc for the code table and why `1` maps to
-            // `Other` rather than a named variant.
-            let body: Animation = decode_body_exact(payload)?;
-            let action = match body.animation {
-                0 => AnimationAction::SwingMainHand,
-                2 => AnimationAction::WakeUp,
-                3 => AnimationAction::SwingOffHand,
-                4 => AnimationAction::CriticalHit,
-                5 => AnimationAction::MagicCriticalHit,
-                other => AnimationAction::Other(other),
-            };
-            return Ok(vec![Directive::Emit(ClientEvent::EntityAnimation {
-                entity_id: body.entity_id,
-                action,
-            })]);
-        }
-        if packet_id == play::clientbound::NAMED_SOUND_EFFECT {
-            // Verified against minecraft-data's 1.12.2
-            // `packet_named_sound_effect`. `x`/`y`/`z` are vanilla's
-            // fixed-point sound-position convention (real coordinate × 8);
-            // this era carries no fixed audible range and no variant seed,
-            // so both canonical fields are the "not present" default.
-            let body: NamedSoundEffect = decode_body_exact(payload)?;
-            let category_ordinal = u8::try_from(body.sound_category).map_err(|_| {
-                AdapterError::Decode(format!(
-                    "named_sound_effect category {} is outside u8 range",
-                    body.sound_category
-                ))
-            })?;
-            let category = SoundCategory::from_ordinal(category_ordinal).ok_or_else(|| {
-                AdapterError::Decode(format!("unknown sound category {category_ordinal}"))
-            })?;
-            let sound: ResourceKey = body.sound_name.parse().map_err(|_| {
-                AdapterError::Decode(format!(
-                    "named_sound_effect sound name {:?} is not a valid resource key",
-                    body.sound_name
-                ))
-            })?;
-            return Ok(vec![Directive::Emit(ClientEvent::Sound {
-                sound,
-                category,
-                pos: Vec3 {
-                    x: f64::from(body.x) / 8.0,
-                    y: f64::from(body.y) / 8.0,
-                    z: f64::from(body.z) / 8.0,
-                },
-                volume: body.volume,
-                pitch: body.pitch,
-                fixed_range: None,
-                seed: 0,
-            })]);
-        }
-        if packet_id == play::clientbound::SOUND_EFFECT {
-            // Identical shape to `NAMED_SOUND_EFFECT` except the leading
-            // field is a varint `SoundEvent` registry id rather than a
-            // string name — resolved through the generated legacy
-            // `sound_ids` table (`vendor/minecraft-data`'s
-            // `pc/1.12.2/sounds.json`, wire-order network ids).
-            let body: SoundEffect = decode_body_exact(payload)?;
-            let category_ordinal = u8::try_from(body.sound_category).map_err(|_| {
-                AdapterError::Decode(format!(
-                    "sound_effect category {} is outside u8 range",
-                    body.sound_category
-                ))
-            })?;
-            let category = SoundCategory::from_ordinal(category_ordinal).ok_or_else(|| {
-                AdapterError::Decode(format!("unknown sound category {category_ordinal}"))
-            })?;
-            let name = crate::sound_ids::sound_name(body.sound_id).ok_or_else(|| {
-                AdapterError::Decode(format!("unknown legacy sound id {}", body.sound_id))
-            })?;
-            let sound: ResourceKey = name.parse().map_err(|_| {
-                AdapterError::Decode(format!(
-                    "resolved sound name {name:?} is not a valid resource key"
-                ))
-            })?;
-            return Ok(vec![Directive::Emit(ClientEvent::Sound {
-                sound,
-                category,
-                pos: Vec3 {
-                    x: f64::from(body.x) / 8.0,
-                    y: f64::from(body.y) / 8.0,
-                    z: f64::from(body.z) / 8.0,
-                },
-                volume: body.volume,
-                pitch: body.pitch,
-                fixed_range: None,
-                seed: 0,
-            })]);
-        }
-        if packet_id == play::clientbound::SCOREBOARD_DISPLAY_OBJECTIVE {
-            // Verified against minecraft-data's 1.12.2
-            // `packet_scoreboard_display_objective`: a raw `i8` slot
-            // position, then a string objective name. This protocol
-            // revision only ever sends 0/1/2 — the per-team-colour sidebar
-            // slots are a later addition — and clears the slot with an
-            // empty string rather than a dedicated marker.
-            let body: ScoreboardDisplayObjective = decode_body_exact(payload)?;
-            let slot = match body.position {
-                0 => DisplaySlot::List,
-                1 => DisplaySlot::Sidebar,
-                2 => DisplaySlot::BelowName,
-                other => {
-                    return Err(AdapterError::Decode(format!(
-                        "unknown scoreboard display slot {other}"
-                    )));
-                }
-            };
-            let objective = if body.name.is_empty() {
-                None
-            } else {
-                Some(body.name)
-            };
-            return Ok(vec![Directive::Emit(ClientEvent::DisplayObjective {
-                slot,
-                objective,
-            })]);
-        }
-        if packet_id == play::clientbound::SCOREBOARD_OBJECTIVE {
-            // Mode-multiplexed (minecraft-data's 1.12.2
-            // `packet_scoreboard_objective`), so this is a hand-decoded
-            // `Reader` walk rather than a derived struct, mirroring
-            // `block_change`/`entity_status`'s treatment of the same shape.
-            // `displayText` is a **plain** legacy-formatted string at this
-            // protocol revision (JSON scoreboard text is a 1.13+ addition),
-            // so it goes through `Text::from_legacy`, not `from_json`.
-            let mut reader = Reader::new(payload);
-            let name = reader.string(16).map_err(dec_err)?;
-            let action = reader.i8().map_err(dec_err)?;
-            let event = match action {
-                0 | 2 => {
-                    let display_text = reader.string(64).map_err(dec_err)?;
-                    let render_type_str = reader.string(16).map_err(dec_err)?;
-                    let render_type = match render_type_str.as_str() {
-                        "integer" => ObjectiveRenderType::Integer,
-                        "hearts" => ObjectiveRenderType::Hearts,
-                        other => {
-                            return Err(AdapterError::Decode(format!(
-                                "unknown objective render type {other:?}"
-                            )));
-                        }
-                    };
-                    ClientEvent::ObjectiveUpdate {
-                        name,
-                        mode: if action == 0 {
-                            ObjectiveMode::Add
-                        } else {
-                            ObjectiveMode::Change
-                        },
-                        display_name: Some(Text::from_legacy(&display_text)),
-                        render_type: Some(render_type),
-                        number_format: None,
-                    }
-                }
-                1 => ClientEvent::ObjectiveUpdate {
-                    name,
-                    mode: ObjectiveMode::Remove,
-                    display_name: None,
-                    render_type: None,
-                    number_format: None,
-                },
-                other => {
-                    return Err(AdapterError::Decode(format!(
-                        "unknown scoreboard_objective action {other}"
-                    )));
-                }
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(event)]);
-        }
-        if packet_id == play::clientbound::SCOREBOARD_SCORE {
-            // Verified against minecraft-data's 1.12.2
-            // `packet_scoreboard_score`: `itemName` is the score *holder*
-            // and `scoreName` is the *objective* — the mcdata field names
-            // are misleading, not the wire order. `scoreName` is read
-            // unconditionally (unlike `value`), so a `remove` action still
-            // names exactly one objective, never "reset all".
-            let mut reader = Reader::new(payload);
-            let holder = reader.string(64).map_err(dec_err)?;
-            let action = reader.var_i32().map_err(dec_err)?;
-            let objective = reader.string(16).map_err(dec_err)?;
-            let event = match action {
-                0 => {
-                    let value = reader.var_i32().map_err(dec_err)?;
-                    ClientEvent::ScoreUpdate {
-                        holder,
-                        objective,
-                        value,
-                        display: None,
-                        number_format: None,
-                    }
-                }
-                1 => ClientEvent::ScoreReset {
-                    holder,
-                    objective: Some(objective),
-                },
-                other => {
-                    return Err(AdapterError::Decode(format!(
-                        "unknown scoreboard_score action {other}"
-                    )));
-                }
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(event)]);
-        }
-        if packet_id == play::clientbound::TEAMS {
-            // Mode-multiplexed (minecraft-data's 1.12.2 `packet_teams`), so
-            // this is a hand-decoded `Reader` walk. Modes `0`
-            // (create) and `2` (update) share the full parameter block;
-            // `0` additionally carries the initial member list, and `3`/`4`
-            // (add/remove members) carry only a member list. `friendlyFire`
-            // packs two flags in one byte (`0x01` friendly fire, `0x02` see
-            // friendly invisibles) — vanilla's `PacketPlayOutScoreboardTeam`
-            // convention. The member-list count is capped against the
-            // payload's own remaining length before `Vec::with_capacity`,
-            // since `players` is exactly the attacker-influenced unbounded
-            // wire count this crate's own trap list warns about.
-            let mut reader = Reader::new(payload);
-            let team = reader.string(16).map_err(dec_err)?;
-            let mode = reader.i8().map_err(dec_err)?;
-            let read_members = |reader: &mut Reader<'_>| -> Result<Vec<String>, AdapterError> {
-                let count = reader.var_i32().map_err(dec_err)?;
-                let count = usize::try_from(count)
-                    .unwrap_or(0)
-                    .min(reader.remaining());
-                let mut members = Vec::with_capacity(count);
-                for _ in 0..count {
-                    members.push(reader.string(16).map_err(dec_err)?);
-                }
-                Ok(members)
-            };
-            let action = match mode {
-                0 | 2 => {
-                    let display_name = reader.string(16).map_err(dec_err)?;
-                    let prefix = reader.string(16).map_err(dec_err)?;
-                    let suffix = reader.string(16).map_err(dec_err)?;
-                    let friendly_flags = reader.i8().map_err(dec_err)?;
-                    let visibility_str = reader.string(32).map_err(dec_err)?;
-                    let collision_str = reader.string(32).map_err(dec_err)?;
-                    let color_byte = reader.i8().map_err(dec_err)?;
-                    let name_tag_visibility = match visibility_str.as_str() {
-                        "always" => Visibility::Always,
-                        "never" => Visibility::Never,
-                        "hideForOtherTeams" => Visibility::HideForOtherTeams,
-                        "hideForOwnTeam" => Visibility::HideForOwnTeam,
-                        other => {
-                            return Err(AdapterError::Decode(format!(
-                                "unknown team name-tag visibility {other:?}"
-                            )));
-                        }
-                    };
-                    let collision_rule = match collision_str.as_str() {
-                        "always" => CollisionRule::Always,
-                        "never" => CollisionRule::Never,
-                        "pushOtherTeams" => CollisionRule::PushOtherTeams,
-                        "pushOwnTeam" => CollisionRule::PushOwnTeam,
-                        other => {
-                            return Err(AdapterError::Decode(format!(
-                                "unknown team collision rule {other:?}"
-                            )));
-                        }
-                    };
-                    let params = Box::new(TeamParameters {
-                        display_name: Text::from_legacy(&display_name),
-                        prefix: Text::from_legacy(&prefix),
-                        suffix: Text::from_legacy(&suffix),
-                        name_tag_visibility,
-                        collision_rule,
-                        color: team_color_from_byte(color_byte),
-                        friendly_fire: friendly_flags & 0x01 != 0,
-                        see_friendly_invisibles: friendly_flags & 0x02 != 0,
-                    });
-                    if mode == 0 {
-                        TeamAction::Create {
-                            params,
-                            members: read_members(&mut reader)?,
-                        }
-                    } else {
-                        TeamAction::Update { params }
-                    }
-                }
-                1 => TeamAction::Remove,
-                3 => TeamAction::AddMembers(read_members(&mut reader)?),
-                4 => TeamAction::RemoveMembers(read_members(&mut reader)?),
-                other => {
-                    return Err(AdapterError::Decode(format!("unknown teams mode {other}")));
-                }
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::TeamUpdate {
-                name: team,
-                action,
-            })]);
-        }
-        if packet_id == play::clientbound::BOSS_BAR {
-            // Action-multiplexed (minecraft-data's 1.12.2 `packet_boss_bar`),
-            // so this is a hand-decoded `Reader` walk. Title is a JSON chat
-            // component at this protocol revision (unlike the plain-string
-            // scoreboard/team fields above — the boss bar packet has carried
-            // `IChatComponent` since its 1.9 introduction, predating the
-            // 1.13 scoreboard/team JSON migration), so it goes through
-            // `Text::from_json`. `flags` packs three bits: `0x01` darken
-            // sky, `0x02` boss music, `0x04` create fog.
-            let mut reader = Reader::new(payload);
-            let id = reader.uuid().map_err(dec_err)?;
-            let action_ordinal = reader.var_i32().map_err(dec_err)?;
-            let action = match action_ordinal {
-                0 => {
-                    let title = reader.string(32767).map_err(dec_err)?;
-                    let progress = reader.f32().map_err(dec_err)?;
-                    let color = boss_color_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
-                    let overlay = boss_overlay_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
-                    let flags = reader.u8().map_err(dec_err)?;
-                    BossAction::Add {
-                        title: Box::new(Text::from_json(&title)),
-                        progress,
-                        color,
-                        overlay,
-                        darken: flags & 0x01 != 0,
-                        music: flags & 0x02 != 0,
-                        fog: flags & 0x04 != 0,
-                    }
-                }
-                1 => BossAction::Remove,
-                2 => BossAction::UpdateProgress(reader.f32().map_err(dec_err)?),
-                3 => {
-                    let title = reader.string(32767).map_err(dec_err)?;
-                    BossAction::UpdateName(Box::new(Text::from_json(&title)))
-                }
-                4 => {
-                    let color = boss_color_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
-                    let overlay = boss_overlay_from_ordinal(reader.var_i32().map_err(dec_err)?)?;
-                    BossAction::UpdateStyle { color, overlay }
-                }
-                5 => {
-                    let flags = reader.u8().map_err(dec_err)?;
-                    BossAction::UpdateFlags {
-                        darken: flags & 0x01 != 0,
-                        music: flags & 0x02 != 0,
-                        fog: flags & 0x04 != 0,
-                    }
-                }
-                other => {
-                    return Err(AdapterError::Decode(format!(
-                        "unknown boss_bar action {other}"
-                    )));
-                }
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::BossBarUpdate { id, action })]);
-        }
-        if packet_id == play::clientbound::SPAWN_POSITION {
-            let body: SpawnPosition = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::SpawnPositionChanged {
-                dimension: dimension_id(self.current_dimension())?,
-                pos: body.location.0,
-                angle: 0.0,
-                pitch: 0.0,
-            })]);
-        }
-        if packet_id == play::clientbound::UPDATE_TIME {
-            let body: UpdateTime = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::TimeChanged {
-                world_age: body.age,
-                time_of_day: body.time,
-            })]);
-        }
-        if packet_id == play::clientbound::DIFFICULTY {
-            let body: DifficultyPacket = decode_body(payload)?;
-            let difficulty = match body.difficulty {
-                0 => Difficulty::Peaceful,
-                1 => Difficulty::Easy,
-                2 => Difficulty::Normal,
-                3 => Difficulty::Hard,
-                other => {
-                    return Err(AdapterError::Decode(format!(
-                        "unknown difficulty id {other}"
-                    )));
-                }
-            };
-            // 1.12.2 has no "locked" bit — that is a later addition.
-            return Ok(vec![Directive::Emit(ClientEvent::DifficultyChanged {
-                difficulty,
-                locked: false,
-            })]);
-        }
-        if packet_id == play::clientbound::PLAYERLIST_HEADER {
-            let body: PlayerlistHeader = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::TabListChanged {
-                header: Text::from_json(&body.header),
-                footer: Text::from_json(&body.footer),
-            })]);
-        }
-        if packet_id == play::clientbound::ATTACH_ENTITY {
-            let body: AttachEntity = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntityLeashed {
-                entity_id: body.entity_id,
-                holder_id: (body.vehicle_id != 0).then_some(body.vehicle_id),
-            })]);
-        }
-        if packet_id == play::clientbound::SET_PASSENGERS {
-            let body: SetPassengers = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(
-                ClientEvent::EntityPassengersChanged {
-                    vehicle_id: body.entity_id,
-                    passenger_ids: body.passengers,
-                },
-            )]);
-        }
-        if packet_id == play::clientbound::COLLECT {
-            let body: Collect = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::ItemPickup {
-                item_entity_id: body.collected_entity_id,
-                player_id: body.collector_entity_id,
-                amount: body.pickup_item_count,
-            })]);
-        }
-        if packet_id == play::clientbound::ENTITY_EFFECT {
-            let body: EntityEffect = decode_body(payload)?;
-            // 1.12.2's legacy effect id is 1-based; the shared
-            // `lodestone-data` registry table is the 0-based modern
-            // `minecraft:mob_effect` network id, and the two id spaces have
-            // been stable in the same relative order since Minecraft
-            // Beta 1.8 — verified entry-for-entry against
-            // `vendor/minecraft-data`'s `data/pc/1.12/effects.json` (ids
-            // `1..=27`) against `generated/mob_effects.rs`'s `MOB_EFFECT_NAMES`
-            // (indices `0..=26`).
-            let name = mob_effect_name(i32::from(body.effect_id) - 1).ok_or_else(|| {
-                AdapterError::Decode(format!("unknown legacy effect id {}", body.effect_id))
-            })?;
-            let effect: ResourceKey = name
-                .parse()
-                .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
-            return Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
-                entity_id: body.entity_id,
-                effect,
-                amplifier: i32::from(body.amplifier),
-                duration_ticks: body.duration,
-                ambient: body.flags & 0x01 != 0,
-                visible: body.flags & 0x02 != 0,
-                // Neither bit exists at this protocol revision: vanilla
-                // 1.12.2 always shows the HUD icon and never blends.
-                show_icon: true,
-                blend: false,
-            })]);
-        }
-        if packet_id == play::clientbound::REMOVE_ENTITY_EFFECT {
-            let body: RemoveEntityEffect = decode_body(payload)?;
-            let name = mob_effect_name(i32::from(body.effect_id) - 1).ok_or_else(|| {
-                AdapterError::Decode(format!("unknown legacy effect id {}", body.effect_id))
-            })?;
-            let effect: ResourceKey = name
-                .parse()
-                .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
-            return Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
-                entity_id: body.entity_id,
-                effect,
-            })]);
-        }
-        if packet_id == play::clientbound::SPAWN_ENTITY_WEATHER {
-            let body: SpawnEntityWeather = decode_body(payload)?;
-            let entity_type: ResourceKey = "minecraft:lightning_bolt"
-                .parse()
-                .map_err(|_| AdapterError::Decode("lightning_bolt key invalid".to_owned()))?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
-                entity_id: body.entity_id,
-                uuid: None,
-                entity_type,
-                pos: Vec3::new(body.x, body.y, body.z),
-                rotation: Rotation::new(0.0, 0.0),
-                velocity: None,
-            })]);
-        }
-        if packet_id == play::clientbound::SPAWN_ENTITY_EXPERIENCE_ORB {
-            let body: SpawnEntityExperienceOrb = decode_body(payload)?;
-            let entity_type: ResourceKey = "minecraft:experience_orb"
-                .parse()
-                .map_err(|_| AdapterError::Decode("experience_orb key invalid".to_owned()))?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
-                entity_id: body.entity_id,
-                uuid: None,
-                entity_type,
-                pos: Vec3::new(body.x, body.y, body.z),
-                rotation: Rotation::new(0.0, 0.0),
-                velocity: None,
-            })]);
-        }
-        if packet_id == play::clientbound::WORLD_PARTICLES {
-            // Fixed-width prefix (verified against minecraft-data's 1.12.2
-            // `packet_world_particles`), then a legacy particle id whose
-            // rename crosswalk into the modern `minecraft:particle_type`
-            // registry lives in `crate::particle_ids` (see that module's
-            // docs for how it was derived — a real decompile, not a guess).
-            // Three legacy ids carry extra type-specific VarInts
-            // (`particle_ids::extra_varint_count`); this crate cannot yet
-            // model their payload as a typed `ParticleOptions` variant
-            // (`lodestone-model` is off limits here — see the brokered-hunk
-            // note this pass reports), so they are read and discarded, same
-            // as `lodestone-v770` does for any particle name it does not
-            // specifically parse a payload for.
-            let mut reader = Reader::new(payload);
-            let particle_id = reader.i32().map_err(dec_err)?;
-            let long_distance = reader.bool().map_err(dec_err)?;
-            let x = reader.f32().map_err(dec_err)?;
-            let y = reader.f32().map_err(dec_err)?;
-            let z = reader.f32().map_err(dec_err)?;
-            let offset_x = reader.f32().map_err(dec_err)?;
-            let offset_y = reader.f32().map_err(dec_err)?;
-            let offset_z = reader.f32().map_err(dec_err)?;
-            let max_speed = reader.f32().map_err(dec_err)?;
-            let count = reader.i32().map_err(dec_err)?;
-            for _ in 0..particle_ids::extra_varint_count(particle_id) {
-                reader.var_i32().map_err(dec_err)?;
             }
-            reader.ensure_empty().map_err(dec_err)?;
-            let name = particle_ids::particle_key(particle_id).ok_or_else(|| {
-                AdapterError::Decode(format!("unmapped legacy particle id {particle_id}"))
-            })?;
-            let particle: ResourceKey = name
+            other => {
+                return Err(AdapterError::Decode(format!(
+                    "unknown combat_event action {other}"
+                )));
+            }
+        };
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![directive]);
+    }
+
+    fn play_world_border(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // Action-multiplexed, verified field-by-field against
+        // minecraft-data's 1.12.2 `packet_world_border`. Action `3`
+        // ("initialize") is the only one that carries every field, in
+        // this exact order: x, z, old_radius, new_radius, speed (VarLong
+        // lerp-time ms), portal_boundary (VarInt absolute max size),
+        // warning_time, warning_blocks — matching
+        // `ClientEvent::WorldBorderInitialized`'s field order one-for-one.
+        let mut reader = Reader::new(payload);
+        let action = reader.var_i32().map_err(dec_err)?;
+        let directive = match action {
+            0 => {
+                let radius = reader.f64().map_err(dec_err)?;
+                Directive::Emit(ClientEvent::WorldBorderSizeChanged { size: radius })
+            }
+            1 => {
+                let old_radius = reader.f64().map_err(dec_err)?;
+                let new_radius = reader.f64().map_err(dec_err)?;
+                let speed = reader.var_i64().map_err(dec_err)?;
+                Directive::Emit(ClientEvent::WorldBorderSizeLerping {
+                    old_size: old_radius,
+                    new_size: new_radius,
+                    lerp_time_ms: speed,
+                })
+            }
+            2 => {
+                let x = reader.f64().map_err(dec_err)?;
+                let z = reader.f64().map_err(dec_err)?;
+                Directive::Emit(ClientEvent::WorldBorderCenterChanged { x, z })
+            }
+            3 => {
+                let x = reader.f64().map_err(dec_err)?;
+                let z = reader.f64().map_err(dec_err)?;
+                let old_radius = reader.f64().map_err(dec_err)?;
+                let new_radius = reader.f64().map_err(dec_err)?;
+                let speed = reader.var_i64().map_err(dec_err)?;
+                let portal_boundary = reader.var_i32().map_err(dec_err)?;
+                let warning_time = reader.var_i32().map_err(dec_err)?;
+                let warning_blocks = reader.var_i32().map_err(dec_err)?;
+                Directive::Emit(ClientEvent::WorldBorderInitialized {
+                    x,
+                    z,
+                    old_size: old_radius,
+                    new_size: new_radius,
+                    lerp_time_ms: speed,
+                    absolute_max_size: portal_boundary,
+                    warning_blocks,
+                    warning_time,
+                })
+            }
+            4 => {
+                let warning_time = reader.var_i32().map_err(dec_err)?;
+                Directive::Emit(ClientEvent::WorldBorderWarningDelayChanged { warning_time })
+            }
+            5 => {
+                let warning_blocks = reader.var_i32().map_err(dec_err)?;
+                Directive::Emit(ClientEvent::WorldBorderWarningDistanceChanged {
+                    warning_blocks,
+                })
+            }
+            other => {
+                return Err(AdapterError::Decode(format!(
+                    "unknown world_border action {other}"
+                )));
+            }
+        };
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![directive]);
+    }
+
+    fn play_open_sign_entity(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: OpenSignEntity = decode_body(payload)?;
+        return Ok(vec![Directive::Emit(ClientEvent::SignEditorOpened {
+            pos: body.location.0,
+            // 1.12.2 has no front/back text distinction — that is a
+            // later (1.20) addition, so this always edits the one text
+            // a legacy sign has.
+            is_front_text: true,
+        })]);
+    }
+
+    fn play_select_advancement_tab(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        // An optional string, verified against minecraft-data's 1.12.2
+        // `packet_select_advancement_tab`: a presence bool then the
+        // string when present — hand-decoded because the derive macro's
+        // `Option<T>` models a `#[mc(present_if = ...)]` condition on
+        // another field, not a wire presence byte.
+        let mut reader = Reader::new(payload);
+        let present = reader.bool().map_err(dec_err)?;
+        let tab = if present {
+            let id = reader.string(32767).map_err(dec_err)?;
+            let identifier: Identifier = id
                 .parse()
-                .map_err(|_| AdapterError::Decode(format!("particle id {name} is not a key")))?;
-            return Ok(vec![Directive::Emit(ClientEvent::Particles {
-                particle,
-                long_distance,
-                // 1.12's `WORLD_PARTICLES` has no always-show field: the
-                // packet carries `longDistance` and nothing else, and the
-                // flag was added with the 26.2-era packet. `false` is
-                // therefore the honest value here, not an unported one --
-                // there is nothing on this wire to port.
-                always_show: false,
-                pos: Vec3::new(f64::from(x), f64::from(y), f64::from(z)),
-                offset: Vec3f::new(offset_x, offset_y, offset_z),
-                max_speed,
-                count,
-                options: ParticleOptions::None,
-            })]);
-        }
-        if packet_id == play::clientbound::EXPERIENCE {
-            let mut reader = Reader::new(payload);
-            let progress = reader.f32().map_err(dec_err)?;
-            let level = reader.var_i32().map_err(dec_err)?;
-            let total = reader.var_i32().map_err(dec_err)?;
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::ExperienceChanged {
-                progress,
-                level,
-                total,
-            })]);
-        }
-        if packet_id == play::clientbound::VEHICLE_MOVE {
-            let mut reader = Reader::new(payload);
-            let x = reader.f64().map_err(dec_err)?;
-            let y = reader.f64().map_err(dec_err)?;
-            let z = reader.f64().map_err(dec_err)?;
-            let yaw = reader.f32().map_err(dec_err)?;
-            let pitch = reader.f32().map_err(dec_err)?;
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::VehicleMoved {
-                pos: Vec3::new(x, y, z),
-                yaw,
-                pitch,
-            })]);
-        }
-        if packet_id == play::clientbound::SET_COOLDOWN {
-            let mut reader = Reader::new(payload);
-            let item_id = reader.var_i32().map_err(dec_err)?;
-            let cooldown_ticks = reader.var_i32().map_err(dec_err)?;
-            reader.ensure_empty().map_err(dec_err)?;
-            let item_id =
-                i16::try_from(item_id).map_err(|_| AdapterError::Decode(format!(
-                    "cooldown item id {item_id} out of legacy item-id range"
-                )))?;
-            let name = item_types::item_name(item_id).ok_or_else(|| {
-                AdapterError::Decode(format!("unknown legacy item id {item_id} in set_cooldown"))
-            })?;
-            let group: ResourceKey = name
-                .parse()
-                .map_err(|_| AdapterError::Decode(format!("item id {name} is not a key")))?;
-            return Ok(vec![Directive::Emit(ClientEvent::ItemCooldown {
-                group,
-                duration_ticks: cooldown_ticks,
-            })]);
-        }
-        if packet_id == play::clientbound::COMBAT_EVENT {
-            // Action-multiplexed, verified field-by-field against
-            // minecraft-data's 1.12.2 `packet_combat_event`: event `0` (enter
-            // combat) carries nothing further; event `1` (end combat) reads a
-            // VarInt duration then a raw `i32` entity id (the model's
-            // `PlayerCombatEnded` has no slot for the id, so it is read and
-            // discarded — matching 26.2's own `ClientboundPlayerCombatEndPacket`,
-            // which dropped it too); event `2` (entity died) reads a VarInt
-            // player id, a raw `i32` entity id, then a JSON death-message
-            // string, both discarded except the message, matching modern
-            // `PLAYER_COMBAT_KILL`'s shape (`lodestone-v770`'s adapter).
-            let mut reader = Reader::new(payload);
-            let event = reader.var_i32().map_err(dec_err)?;
-            let directive = match event {
-                0 => Directive::Emit(ClientEvent::PlayerCombatEntered),
-                1 => {
-                    let duration_ticks = reader.var_i32().map_err(dec_err)?;
-                    reader.i32().map_err(dec_err)?; // entity id, unused downstream
-                    Directive::Emit(ClientEvent::PlayerCombatEnded { duration_ticks })
-                }
-                2 => {
-                    reader.var_i32().map_err(dec_err)?; // player id, unused downstream
-                    reader.i32().map_err(dec_err)?; // killer entity id, unused downstream
-                    let message = reader.string(32767).map_err(dec_err)?;
-                    Directive::Emit(ClientEvent::Death {
-                        message: Text::from_json(&message),
-                    })
-                }
-                other => {
-                    return Err(AdapterError::Decode(format!(
-                        "unknown combat_event action {other}"
-                    )));
-                }
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![directive]);
-        }
-        if packet_id == play::clientbound::WORLD_BORDER {
-            // Action-multiplexed, verified field-by-field against
-            // minecraft-data's 1.12.2 `packet_world_border`. Action `3`
-            // ("initialize") is the only one that carries every field, in
-            // this exact order: x, z, old_radius, new_radius, speed (VarLong
-            // lerp-time ms), portal_boundary (VarInt absolute max size),
-            // warning_time, warning_blocks — matching
-            // `ClientEvent::WorldBorderInitialized`'s field order one-for-one.
-            let mut reader = Reader::new(payload);
-            let action = reader.var_i32().map_err(dec_err)?;
-            let directive = match action {
-                0 => {
-                    let radius = reader.f64().map_err(dec_err)?;
-                    Directive::Emit(ClientEvent::WorldBorderSizeChanged { size: radius })
-                }
-                1 => {
-                    let old_radius = reader.f64().map_err(dec_err)?;
-                    let new_radius = reader.f64().map_err(dec_err)?;
-                    let speed = reader.var_i64().map_err(dec_err)?;
-                    Directive::Emit(ClientEvent::WorldBorderSizeLerping {
-                        old_size: old_radius,
-                        new_size: new_radius,
-                        lerp_time_ms: speed,
-                    })
-                }
-                2 => {
-                    let x = reader.f64().map_err(dec_err)?;
-                    let z = reader.f64().map_err(dec_err)?;
-                    Directive::Emit(ClientEvent::WorldBorderCenterChanged { x, z })
-                }
-                3 => {
-                    let x = reader.f64().map_err(dec_err)?;
-                    let z = reader.f64().map_err(dec_err)?;
-                    let old_radius = reader.f64().map_err(dec_err)?;
-                    let new_radius = reader.f64().map_err(dec_err)?;
-                    let speed = reader.var_i64().map_err(dec_err)?;
-                    let portal_boundary = reader.var_i32().map_err(dec_err)?;
-                    let warning_time = reader.var_i32().map_err(dec_err)?;
-                    let warning_blocks = reader.var_i32().map_err(dec_err)?;
-                    Directive::Emit(ClientEvent::WorldBorderInitialized {
-                        x,
-                        z,
-                        old_size: old_radius,
-                        new_size: new_radius,
-                        lerp_time_ms: speed,
-                        absolute_max_size: portal_boundary,
-                        warning_blocks,
-                        warning_time,
-                    })
-                }
-                4 => {
-                    let warning_time = reader.var_i32().map_err(dec_err)?;
-                    Directive::Emit(ClientEvent::WorldBorderWarningDelayChanged { warning_time })
-                }
-                5 => {
-                    let warning_blocks = reader.var_i32().map_err(dec_err)?;
-                    Directive::Emit(ClientEvent::WorldBorderWarningDistanceChanged {
-                        warning_blocks,
-                    })
-                }
-                other => {
-                    return Err(AdapterError::Decode(format!(
-                        "unknown world_border action {other}"
-                    )));
-                }
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![directive]);
-        }
-        if packet_id == play::clientbound::OPEN_SIGN_ENTITY {
-            let body: OpenSignEntity = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::SignEditorOpened {
-                pos: body.location.0,
-                // 1.12.2 has no front/back text distinction — that is a
-                // later (1.20) addition, so this always edits the one text
-                // a legacy sign has.
-                is_front_text: true,
-            })]);
-        }
-        if packet_id == play::clientbound::SELECT_ADVANCEMENT_TAB {
-            // An optional string, verified against minecraft-data's 1.12.2
-            // `packet_select_advancement_tab`: a presence bool then the
-            // string when present — hand-decoded because the derive macro's
-            // `Option<T>` models a `#[mc(present_if = ...)]` condition on
-            // another field, not a wire presence byte.
-            let mut reader = Reader::new(payload);
-            let present = reader.bool().map_err(dec_err)?;
-            let tab = if present {
-                let id = reader.string(32767).map_err(dec_err)?;
-                let identifier: Identifier = id
-                    .parse()
-                    .map_err(|_| AdapterError::Decode(format!("invalid tab id {id}")))?;
-                Some(identifier)
-            } else {
-                None
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::AdvancementsTabSelected {
-                tab,
-            })]);
-        }
-        if packet_id == play::clientbound::SPAWN_ENTITY_PAINTING {
-            let body: SpawnEntityPainting = decode_body(payload)?;
-            let entity_type: ResourceKey = "minecraft:painting"
-                .parse()
-                .map_err(|_| AdapterError::Decode("painting key invalid".to_owned()))?;
-            let pos = body.location.0;
-            return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
-                entity_id: body.entity_id,
-                uuid: Some(body.entity_uuid),
-                entity_type,
-                pos: Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)),
-                // The legacy motive name and facing direction have no home
-                // in this crate yet (no legacy motive -> modern
-                // `minecraft:painting_variant` crosswalk, and no yaw
-                // conversion for the facing byte) — dropped, same treatment
-                // as `spawn_entity_painting`'s other unmodelled fields.
-                rotation: Rotation::new(0.0, 0.0),
-                velocity: None,
-            })]);
-        }
-        // Everything else in play is intentionally ignored for now.
-        Ok(Vec::new())
+                .map_err(|_| AdapterError::Decode(format!("invalid tab id {id}")))?;
+            Some(identifier)
+        } else {
+            None
+        };
+        reader.ensure_empty().map_err(dec_err)?;
+        return Ok(vec![Directive::Emit(ClientEvent::AdvancementsTabSelected {
+            tab,
+        })]);
+    }
+
+    fn play_spawn_entity_painting(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: SpawnEntityPainting = decode_body(payload)?;
+        let entity_type: ResourceKey = "minecraft:painting"
+            .parse()
+            .map_err(|_| AdapterError::Decode("painting key invalid".to_owned()))?;
+        let pos = body.location.0;
+        return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+            entity_id: body.entity_id,
+            uuid: Some(body.entity_uuid),
+            entity_type,
+            pos: Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)),
+            // The legacy motive name and facing direction have no home
+            // in this crate yet (no legacy motive -> modern
+            // `minecraft:painting_variant` crosswalk, and no yaw
+            // conversion for the facing byte) — dropped, same treatment
+            // as `spawn_entity_painting`'s other unmodelled fields.
+            rotation: Rotation::new(0.0, 0.0),
+            velocity: None,
+        })]);
     }
 }
 
@@ -2844,6 +3036,66 @@ mod movement_tests {
                 .expect("poisoned state is recovered")
                 .map(|(id, _)| id),
             Some(play::serverbound::POSITION)
+        );
+    }
+}
+
+#[cfg(test)]
+mod dispatch_coverage_tests {
+    use super::*;
+    use lodestone_core::dispatch::{DispatchError, Table};
+
+    /// `Table::build` succeeding is a real, falsifiable claim here: it fails
+    /// loudly the moment any `play::clientbound::ENTRIES` id has neither a
+    /// bound handler nor a `PLAY_CLIENTBOUND_IGNORED` reason -- the former
+    /// silent `_ =>` island, reborn as a construction-time error.
+    #[test]
+    fn play_dispatch_table_builds_and_covers_every_entry() {
+        let table = Table::build(
+            PROTOCOL,
+            play::clientbound::ENTRIES,
+            PLAY_CLIENTBOUND_HANDLERS,
+            PLAY_CLIENTBOUND_IGNORED,
+        )
+        .expect("real v340 play tables must build");
+
+        assert_eq!(table.len(), PLAY_CLIENTBOUND_HANDLERS.len());
+        assert_eq!(
+            play::clientbound::ENTRIES.len(),
+            PLAY_CLIENTBOUND_HANDLERS.len() + PLAY_CLIENTBOUND_IGNORED.len(),
+            "every id in ENTRIES must be either handled or explicitly ignored"
+        );
+    }
+
+    /// Negative control: drop one real `IGNORED` entry (`minecraft:statistics`,
+    /// which has no bound handler either) and `Table::build` must now refuse
+    /// to build, naming the newly-unaccounted-for id -- proving the detector
+    /// this stage relies on actually fires rather than the happy path above
+    /// passing by construction.
+    #[test]
+    fn dropping_an_ignored_entry_fails_construction() {
+        let mut ignored: Vec<lodestone_core::dispatch::IGNORED> =
+            PLAY_CLIENTBOUND_IGNORED.to_vec();
+        let removed_index = ignored
+            .iter()
+            .position(|entry| entry.name == "minecraft:statistics")
+            .expect("minecraft:statistics is a real IGNORED entry");
+        ignored.remove(removed_index);
+
+        let err = Table::build(
+            PROTOCOL,
+            play::clientbound::ENTRIES,
+            PLAY_CLIENTBOUND_HANDLERS,
+            &ignored,
+        )
+        .expect_err("removing statistics's IGNORED entry must reintroduce the `_ =>` island");
+
+        assert_eq!(
+            err,
+            DispatchError::UnlistedId {
+                name: "minecraft:statistics",
+                id: play::clientbound::STATISTICS,
+            }
         );
     }
 }
