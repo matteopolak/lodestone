@@ -8671,9 +8671,10 @@ impl<'w> MobSim<'w> {
         state
     }
 
-    /// Runs one patrol-spawn tick — the vanilla `PatrolSpawner` port
-    /// (`level/levelgen/PatrolSpawner.java`, 92 lines). Meant to be called
-    /// once per server tick, mirroring vanilla's `CustomSpawner.tick`: the
+    /// Runs one patrol-spawn tick — vanilla's own patrol-spawner port
+    /// (a 92-line generic custom-spawner). Meant to be called
+    /// once per server tick, mirroring vanilla's own generic custom-spawner
+    /// update: the
     /// internal countdown is decremented every call regardless of whether
     /// anything ends up spawning, so calling this less often than once a
     /// tick would make patrols rarer than vanilla rather than merely
@@ -8690,7 +8691,7 @@ impl<'w> MobSim<'w> {
     /// already builds each cycle.
     ///
     /// `spawn_patrols` is the game rule of the same name; `is_bright_outside`
-    /// is vanilla's `ServerLevel.isBrightOutside()` — day and not thundering
+    /// is vanilla's own "is bright outside" check — day and not thundering
     /// — collapsed to a caller-supplied bool because no weather state crosses
     /// this seam yet.
     ///
@@ -8704,15 +8705,16 @@ impl<'w> MobSim<'w> {
     ///
     /// * **No spectator filter and no village-proximity check.** Neither a
     ///   spectator flag nor a POI/village census exists on this seam.
-    /// * **No block-light check** (`checkPatrollingMonsterSpawnRules`'s
-    ///   `getBrightness(BLOCK, pos) > 8 ? false : …`). [`ChunkWorld`] carries
+    /// * **No block-light check** (vanilla's own "check patrolling monster
+    ///   spawn rules" step's own
+    ///   block-brightness-above-8 test). [`ChunkWorld`] carries
     ///   block *identity*, not light — the same limit `natural_spawn`'s
     ///   caller-supplied light cache exists to work around for the mobs that
     ///   need it, which this method does not have access to.
-    /// * **`isValidEmptySpawnBlock` is approximated** as "two blocks of open
+    /// * **Vanilla's own "is valid empty spawn block" check is approximated** as "two blocks of open
     ///   air above the surface", with no fluid-state check.
-    /// * [`patrol_group_size`] approximates `getCurrentDifficultyAt(pos)
-    ///   .getEffectiveDifficulty()`, a continuous formula this crate has no
+    /// * [`patrol_group_size`] approximates vanilla's own
+    ///   "current-difficulty-at-position, effective difficulty" formula, a continuous formula this crate has no
     ///   moon-phase or accumulated regional-difficulty state to compute, with
     ///   a per-[`Difficulty`]-enum constant.
     pub fn run_patrol_spawn_cycle(
@@ -8768,7 +8770,8 @@ impl<'w> MobSim<'w> {
         let pillager: ResourceKey = "minecraft:pillager".parse().expect("valid key");
         let mut spawned = 0;
         for i in 0..group_size {
-            // `NaturalSpawner.isValidEmptySpawnBlock` + this method's own
+            // Vanilla's own natural-spawner "is valid empty spawn block"
+            // check + this method's own
             // "not modelled" note: a surface exists and there are two open
             // cells above it. `None`/`false` both mean "no valid cell here".
             let spawn_ok = surface_y(world, spawn_x, spawn_z).filter(|&surface| {
@@ -8788,7 +8791,7 @@ impl<'w> MobSim<'w> {
                     .expect("just spawned")
                     .set_patrolling(true);
                 if i == 0 {
-                    // `findPatrolTarget`: `-500 + nextInt(1000)` on both
+                    // Vanilla's own "find patrol target" step: `-500 + nextInt(1000)` on both
                     // axes, offset from the mob's *own* spawn position.
                     let tx = f64::from(self.patrol_rng.next_int(1_000) - 500);
                     let tz = f64::from(self.patrol_rng.next_int(1_000) - 500);
@@ -8800,7 +8803,7 @@ impl<'w> MobSim<'w> {
             } else if i == 0 {
                 // The leader's own spawn attempt failed — vanilla abandons
                 // the whole group rather than trying a different member
-                // first (`PatrolSpawner.java:44-47`'s `break`).
+                // first (its own patrol-spawner's own early-break).
                 break;
             }
             spawn_x += self.patrol_rng.next_int(5) - self.patrol_rng.next_int(5);
@@ -8814,9 +8817,8 @@ impl<'w> MobSim<'w> {
         spawned
     }
 
-    /// Issue #240: the wandering trader's own spawn cycle — vanilla
-    /// `WanderingTraderSpawner.tick`/`spawn`
-    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java`).
+    /// Issue #240: the wandering trader's own spawn cycle — vanilla's own
+    /// wandering-trader spawner's own tick/spawn steps.
     /// Same shape as [`run_patrol_spawn_cycle`](Self::run_patrol_spawn_cycle):
     /// a live, player-following `world` snapshot supplied by the caller
     /// (never `self.world`, which is a stale snapshot — see that method's
@@ -8824,19 +8826,20 @@ impl<'w> MobSim<'w> {
     /// the caller reads, and every counter this cycle owns living on `self`
     /// so the driver need only call this once per tick.
     ///
-    /// **No persistence**: vanilla stores `tickDelay`/`spawnDelay`/
-    /// `spawnChance` in a `WanderingTraderData` saved-data file, so the
+    /// **No persistence**: vanilla stores its own tick-delay/spawn-delay/
+    /// spawn-chance fields in its own saved-data file, so the
     /// cycle survives a server restart. This crate has no save/load for
     /// `MobSim` at all, so every field here resets with a fresh `MobSim` —
     /// a disclosed gap, not a silent one.
     ///
-    /// **Simplified from `WanderingTraderSpawner.spawn`**, matching the
+    /// **Simplified from vanilla's own wandering-trader spawner's own spawn
+    /// call**, matching the
     /// gaps `docs/wandering-trader.md` already discloses for
     /// [`spawn_wandering_trader`](Self::spawn_wandering_trader) itself:
-    /// no `PoiTypes.MEETING` search (always searches around a random
-    /// player's own position), no `BiomeTags.WITHOUT_WANDERING_TRADER_SPAWNS`
-    /// exclusion, no `hasEnoughSpace` collision check, and no
-    /// `setDespawnDelay`/`setWanderTarget`/`setHomeTo` afterwards (this sim
+    /// no meeting-point-of-interest search (always searches around a random
+    /// player's own position), no "no wandering trader spawns" biome-tag
+    /// exclusion, no "has enough space" collision check, and no
+    /// despawn-delay/wander-target/home-position setters afterwards (this sim
     /// has no despawn-delay or home-position fields to set them on).
     ///
     /// Returns the trader's entity id on a successful spawn.
@@ -8869,14 +8872,15 @@ impl<'w> MobSim<'w> {
             return None;
         }
         if self.players.is_empty() {
-            // vanilla `spawn`'s `getRandomPlayer() == null` arm returns
+            // Vanilla's own spawn call's "no random player found" arm returns
             // `true` — a "success" for chance-reset purposes — without
             // drawing further or spawning anything.
             self.trader_spawn_chance = WANDERING_TRADER_MIN_SPAWN_CHANCE;
             return None;
         }
-        // `spawn`'s own extra one-in-ten gate, drawn only once a player
-        // exists — vanilla's short-circuit on `player == null` above skips
+        // Vanilla's own spawn call's own extra one-in-ten gate, drawn only
+        // once a player
+        // exists — vanilla's short-circuit on "no player found" above skips
         // this draw entirely, which is why the empty-players check has to
         // come first rather than being folded into a single `if`.
         if self.trader_rng.next_int(10) != 0 {
@@ -8887,9 +8891,10 @@ impl<'w> MobSim<'w> {
             .perception
             .position;
         let reference = (player_pos.x.floor() as i32, player_pos.z.floor() as i32);
-        // `findSpawnPositionNear`: up to 10 candidates within a 48-block
-        // radius, first one with a real surface wins. No `isSpawnPositionOk`
-        // check beyond "a column exists here" — see the gaps disclosed
+        // Vanilla's own "find spawn position near" step: up to 10 candidates
+        // within a 48-block
+        // radius, first one with a real surface wins. No "is spawn position
+        // ok" check beyond "a column exists here" — see the gaps disclosed
         // above.
         let mut spawn_pos = None;
         for _ in 0..10 {
@@ -8918,8 +8923,8 @@ impl<'w> MobSim<'w> {
         self.mob_drops = allowed;
     }
 
-    /// Discards every mob Peaceful forbids — vanilla's `Mob.checkDespawn` guard,
-    /// `difficulty == PEACEFUL && !getType().isAllowedInPeaceful()`. Returns how
+    /// Discards every mob Peaceful forbids — vanilla's own "check despawn" guard,
+    /// peaceful difficulty and not allowed-in-peaceful for the type. Returns how
     /// many were removed.
     ///
     /// Rolls **no** loot: vanilla's peaceful sweep is `discard()`, not a death, so a
@@ -8933,7 +8938,7 @@ impl<'w> MobSim<'w> {
     /// vex, ravager, hoglin or warden alive on Peaceful — and slimes really do
     /// spawn here, because `crate::natural_spawn` models slime chunks. In the other
     /// direction the flag keeps a shulker and a piglin, which vanilla also keeps
-    /// and which a `MobCategory.MONSTER` test would delete.
+    /// and which a monster-category test would delete.
     pub fn remove_monsters(&mut self) -> usize {
         let before = self.mobs.len();
         self.mobs
@@ -8951,11 +8956,12 @@ impl<'w> MobSim<'w> {
     /// creeper dropped nothing — the same defect in three places. Every removal
     /// now funnels through here, so a new death cause gets drops for free.
     ///
-    /// Vanilla's chain is `LivingEntity.die` → `dropAllDeathLoot` →
-    /// `dropFromLootTable` → `Entity.spawnAtLocation`: the table is
+    /// Vanilla's chain is its own generic die handler → "drop all death loot" →
+    /// "drop from loot table" → "spawn at location": the table is
     /// `entities/<type>` ([`crate::block_drops::mob_loot_table_id`]) and each
     /// stack becomes an item entity at the mob's own position with the
-    /// `ItemEntity` constructor's velocity — **not** `popResource`'s jittered
+    /// item-entity constructor's velocity — **not** vanilla's own
+    /// "pop resource" call's jittered
     /// cell position, which is a block's drop.
     ///
     /// Rolls in the **empty** loot context, so `killed_by_player` is `false` and
