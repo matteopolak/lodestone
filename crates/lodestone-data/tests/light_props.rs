@@ -8,13 +8,13 @@
 //!
 //! Every other per-block-state table in this crate is dumped from the real 26.2
 //! jar. This one is not, and the reason is structural rather than laziness:
-//! `getLightDampening` and `getLightEmission` are **not** exposed on
-//! `BlockBehaviour.Properties`. `lightEmission` is a `ToIntFunction<BlockState>`
-//! stored on a private field (`BlockBehaviour.Properties.lightEmission`, read once
-//! into a private `lightEmission` field by `BlockBehaviour.BlockStateBase`'s
+//! vanilla's own "get light dampening" and "get light emission" accessors are **not** exposed on
+//! its own block-properties builder. Light emission is a per-state function
+//! stored on a private field (read once
+//! into a private field by the block-state base class's own
 //! constructor), and dampening is a protected
-//! method with per-block overrides (`BlockBehaviour.getLightDampening`, overridden by
-//! `LeavesBlock` and `TintedGlassBlock`). Reading either needs the running jar,
+//! method with per-block overrides (overridden by
+//! the leaves and tinted-glass block classes). Reading either needs the running jar,
 //! and this table is generated from two *committed* sources instead:
 //!
 //! 1. **`tests/support/light_props_mcdata.txt`** — a committed extract of
@@ -26,12 +26,12 @@
 //!    per-state corrections and for the 30 blocks 1.21.11 does not have.
 //!
 //! Source 1 was cross-checked against source 2's own formula
-//! (`getLightDampening` = `isSolidRender() ? 15 : propagatesSkylightDown() ? 0 : 1`,
-//! `BlockBehaviour.getLightDampening`) on the cases that formula separates:
+//! (vanilla's own "get light dampening" accessor = `isSolidRender() ? 15 : propagatesSkylightDown() ? 0 : 1`)
+//! on the cases that formula separates:
 //! `stone` → 15 (full occlusion shape), `stone_slab` → 0 (not a full occlusion
 //! shape, shape not full so skylight propagates), `water` → 1 (fluid state
 //! non-empty, so skylight does *not* propagate), `tinted_glass` → 15 (the
-//! `TintedGlassBlock` override), `oak_leaves` → 1, `ice` → 1. Two independent
+//! tinted-glass block's own override), `oak_leaves` → 1, `ice` → 1. Two independent
 //! sources agreeing on the cases that discriminate is the evidence here; a
 //! single source restating itself would not be.
 //!
@@ -44,7 +44,7 @@
 //! | property | correction | why |
 //! |---|---|---|
 //! | `type=double` | dampening `15` | a double slab *is* a full cube, so `isSolidRender()` holds where the block's default (`bottom`) fails it |
-//! | `waterlogged=true` | dampening `max(1, ·)` | `propagatesSkylightDown`'s default requires `fluidState.isEmpty()` (`BlockBehaviour.propagatesSkylightDown`), so a waterlogged non-solid costs 1, not 0 |
+//! | `waterlogged=true` | dampening `max(1, ·)` | vanilla's own "propagates skylight down" default requires `fluidState.isEmpty()`, so a waterlogged non-solid costs 1, not 0 |
 //! | `lit=false` | emission `0` | an unlit furnace/campfire/redstone torch emits nothing; `blocks.json` records whichever the block's *default* state is |
 //!
 //! **Every correction, and every residual gap, moves the table toward darker or
@@ -129,23 +129,23 @@ const MCDATA: &str = include_str!("support/light_props_mcdata.txt");
 
 /// The 30 blocks 26.2 adds that `vendor/minecraft-data 1.21.11` does not carry,
 /// with the `(dampening, emission)` read out of their registrations in
-/// `net/minecraft/world/level/block/Blocks.java` (26.2, de-obfuscated):
+/// vanilla's own block-registration source (26.2, de-obfuscated):
 ///
 /// * The nine full cubes — `SULFUR`/`CINNABAR` and their `polished_`,
 ///   `_bricks`, `chiseled_` and `POTENT_SULFUR` copies — are plain
-///   `Properties.of()` with **no** `noOcclusion()` (`Blocks.SULFUR` and its
-///   `ofLegacyCopy`/`ofFullCopy` siblings), so
-///   their occlusion shape is a full cube, `solidRender` holds and dampening is
+///   default-properties builders with **no** no-occlusion flag (and its
+///   legacy-copy/full-copy sibling builders), so
+///   their occlusion shape is a full cube, solid-render holds and dampening is
 ///   15.
-/// * The eighteen `_slab`/`_stairs`/`_wall` variants are `registerSlab`/
-///   `registerStair`/`registerWall` copies, whose occlusion shape is not a full
+/// * The eighteen `_slab`/`_stairs`/`_wall` variants are register-slab/
+///   register-stair/register-wall copies, whose occlusion shape is not a full
 ///   cube; their shape is not full either, so skylight propagates and dampening
 ///   is 0. (`type=double` slabs are lifted back to 15 by the per-state
 ///   correction, which is why this entry is not wrong for them.)
-/// * `GOLDEN_DANDELION` is a `FlowerBlock` with `noCollision()`
-///   (`Blocks.GOLDEN_DANDELION`), `POTTED_GOLDEN_DANDELION` a `FlowerPotBlock`, and
-///   `SULFUR_SPIKE` is `noOcclusion()` + `dynamicShape()`
-///   (`Blocks.SULFUR_SPIKE`) — none a full cube, so 0.
+/// * `GOLDEN_DANDELION` is a flower block with a no-collision flag,
+///   `POTTED_GOLDEN_DANDELION` a flower-pot block, and
+///   `SULFUR_SPIKE` has a no-occlusion flag plus a dynamic-shape flag
+///   — none a full cube, so 0.
 ///
 /// **Not one of the 30 calls `.lightLevel(...)`**, so every emission is 0.
 const NEW_IN_26_2: &[(&str, u8, u8)] = &[
@@ -261,9 +261,9 @@ fn resolved(id: u32, by_name: &BTreeMap<String, (u8, u8)>) -> (u8, u8) {
         .unwrap_or_else(|| panic!("no light props for block {short} (state {id})"));
     for &(key, value) in block_states::properties(id).unwrap_or(&[]) {
         match (key, value) {
-            // A double slab is a full cube: `solidRender` holds, dampening 15.
+            // A double slab is a full cube: solid-render holds, dampening 15.
             ("type", "double") => dampening = 15,
-            // `propagatesSkylightDown`'s default requires an empty fluid state.
+            // Vanilla's own "propagates skylight down" default requires an empty fluid state.
             ("waterlogged", "true") => dampening = dampening.max(1),
             // `blocks.json` records the *default* state's emission.
             ("lit", "false") => emission = 0,
@@ -414,7 +414,7 @@ fn out_of_range_ids_are_none() {
 }
 
 /// The cross-check that anchors source 1 against source 2: the six cases
-/// vanilla's own `getLightDampening` formula
+/// vanilla's own "get light dampening" formula
 /// (`isSolidRender() ? 15 : propagatesSkylightDown() ? 0 : 1`) separates.
 /// `blocks.json` was written by a different project from a different version, so
 /// agreement here is two independent readings of the same vanilla behaviour, not
