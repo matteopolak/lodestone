@@ -1,39 +1,32 @@
-//! End-crystal beam healing — a port of `EnderDragon.checkCrystals` (the
+//! End-crystal beam healing — a port of the real ender dragon's
+//! check-crystals step (the
 //! nearest-crystal tracking and the heal-per-tick clause) plus the crystal
-//! side of the interaction, `EndCrystal.hurtServer`/`onDestroyedBy` and
-//! `AbstractDragonPhaseInstance.onCrystalDestroyed`
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/boss/enderdragon/{EnderDragon,EndCrystal}.java`).
+//! side of the interaction, the real end crystal's hurt/destroyed hooks and
+//! the real dragon phase's own on-crystal-destroyed hook.
 //!
 //! # The heal amount, exactly
 //!
-//! `EnderDragon.checkCrystals`:
-//!
-//! ```text
-//! if (this.nearestCrystal != null) {
-//!    if (this.nearestCrystal.isRemoved()) {
-//!       this.nearestCrystal = null;
-//!    } else if (this.tickCount % 10 == 0 && this.getHealth() < this.getMaxHealth()) {
-//!       this.setHealth(this.getHealth() + 1.0F);
-//!    }
-//! }
-//! ```
+//! The real check-crystals step, transcribed as the rule it implements: if
+//! there is a nearest crystal, then either it has been removed (in which
+//! case forget it), or — on a tick divisible by 10, and only while below max
+//! health — heal by exactly `1.0`.
 //!
 //! Two clauses, both required: a live nearest crystal, **and**
-//! `tickCount % 10 == 0` — the heal is not "1/10 HP per tick", it is exactly
+//! a tick divisible by 10 — the heal is not "1/10 HP per tick", it is exactly
 //! **1.0 HP once every 10 ticks** (a proc, not a smeared rate), and it never
-//! overshoots `max_health` (`setHealth` clamps).
+//! overshoots `max_health` (the real health setter clamps).
 
-/// The exact per-proc heal amount — `EnderDragon.checkCrystals`'s
-/// `this.setHealth(this.getHealth() + 1.0F)`.
+/// The exact per-proc heal amount — the real check-crystals step's own
+/// health increment.
 pub const HEAL_AMOUNT: f32 = 1.0;
 
-/// The proc interval, in ticks — `this.tickCount % 10 == 0`.
+/// The proc interval, in ticks — the real "tick count divisible by 10" gate.
 pub const HEAL_INTERVAL_TICKS: i32 = 10;
 
-/// The rescan-roll interval — `this.random.nextInt(10) == 0` decides,
+/// The rescan-roll interval — a draw with bound 10 hitting zero decides,
 /// **every** tick, whether to rescan for the nearest crystal (not gated by
-/// `tickCount`, unlike the heal itself). `rng_below_ten` is the caller's
-/// `random.nextInt(10)` result.
+/// the tick count, unlike the heal itself). `rng_below_ten` is the caller's
+/// own draw result.
 #[must_use]
 pub fn should_rescan_crystals(rng_below_ten: u32) -> bool {
     rng_below_ten == 0
