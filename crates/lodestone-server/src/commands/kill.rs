@@ -1,9 +1,9 @@
-//! `/kill`, from `KillCommand.java`.
+//! `/kill`.
 //!
-//! # Targets are `players()`, not vanilla's `entities()`
+//! # Targets are `players()`, not the real "any entity" selector
 //!
-//! Vanilla's `<targets>` is `EntityArgument.entities()` — any entity, not just
-//! players. This server's [`crate::commands::CommandWorld`] only ever carries
+//! The real `<targets>` argument matches any entity, not just players. This
+//! server's [`crate::commands::CommandWorld`] only ever carries
 //! [`crate::commands::PlayerCandidate`]s (see [`crate::commands::source`]'s
 //! module doc for why: entity resolution needs a world this crate deliberately
 //! does not depend on), so `players()` is the same narrowing `/gamemode` and
@@ -22,7 +22,7 @@ use lodestone_command_mc::EntityArg;
 
 use super::registrar::Registrar;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const KILL_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {
@@ -30,7 +30,7 @@ pub(super) fn register(registrar: &mut Registrar) {
     let kill = registrar.literal(root, "kill");
     registrar.require_level(kill, KILL_LEVEL);
 
-    // Bare `/kill` — self. `getPlayerOrException`'s own console refusal.
+    // Bare `/kill` — self. The real console-refusal for a non-player source.
     registrar.exec(kill, |ctx| {
         let Some(uuid) = ctx.source.uuid() else {
             return Err("That command can only be used by a player".to_string());

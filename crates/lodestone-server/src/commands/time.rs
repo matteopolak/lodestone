@@ -1,31 +1,29 @@
-//! `/time`, from `TimeCommand.java` — query, set and add against
+//! `/time` — query, set and add against
 //! [`crate::world_state::WorldStateHandle`]'s clock.
 //!
 //! # `set` writes `day_time`, never `game_time`
 //!
-//! Vanilla's `/time set` is `level.setDayTime(...)` — it never touches
-//! `gameTime`, which keeps counting regardless (`ServerLevel.tickTime`'s own
-//! unconditional half; see [`crate::world_state`]'s module doc for why that
-//! asymmetry exists at all). `/time add` reads the *current* `day_time` and adds
-//! to it, so it composes with an intervening `advance_time false`.
+//! The real `/time set` never touches the always-advancing game-time counter
+//! (see [`crate::world_state`]'s module doc for why that asymmetry exists at
+//! all). `/time add` reads the *current* `day_time` and adds to it, so it
+//! composes with an intervening `advance_time false`.
 //!
 //! # The four named values, and why they are not a fifth argument node
 //!
-//! `day`/`night`/`noon`/`midnight` are vanilla's `TimeCommand`-registered
-//! literals, each carrying a fixed tick constant (`TimeCommand.java`'s own
-//! table) rather than being a `time()` argument's suggestion — a suggestion is
-//! text the *player* still has to accept, a literal is a command the tree
-//! already resolved. `<time>` is the fifth, numeric child.
+//! `day`/`night`/`noon`/`midnight` are registered as literals, each carrying
+//! a fixed tick constant, rather than being a `time()` argument's suggestion
+//! — a suggestion is text the *player* still has to accept, a literal is a
+//! command the tree already resolved. `<time>` is the fifth, numeric child.
 
 use lodestone_command_mc::TimeArg;
 
 use super::registrar::Registrar;
 use super::CommandResult;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const TIME_LEVEL: u8 = 2;
 
-/// `TimeCommand`'s own constants for the four named values (`TimeCommand.java`).
+/// The real constants for the four named values.
 const DAY: i64 = 1_000;
 const NOON: i64 = 6_000;
 const NIGHT: i64 = 13_000;
@@ -60,10 +58,10 @@ pub(super) fn register(registrar: &mut Registrar) {
     });
 
     // ---- query --------------------------------------------------------------
-    // `TimeCommand.QueryType` — `daytime` is `dayTime % 24000` (what the client
-    // renders), `gametime` is the raw always-advancing counter, `day` is whole
-    // days elapsed. Three pairwise-distinct expressions over the same clock, so
-    // a transposition between them would be visible immediately.
+    // `daytime` is `dayTime % 24000` (what the client renders), `gametime` is
+    // the raw always-advancing counter, `day` is whole days elapsed. Three
+    // pairwise-distinct expressions over the same clock, so a transposition
+    // between them would be visible immediately.
     let query = registrar.literal(time, "query");
     let daytime = registrar.literal(query, "daytime");
     registrar.exec(daytime, |ctx| query_time(ctx, ctx.world.state.time().day_time.rem_euclid(24_000)));

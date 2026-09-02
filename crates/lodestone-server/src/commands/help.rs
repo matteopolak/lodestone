@@ -1,19 +1,19 @@
-//! `/help`, from `HelpCommand.java` — the root listing only.
+//! `/help` — the root listing only.
 //!
 //! # What this leaves out
 //!
-//! Vanilla's `/help <command>` prints that command's own usage strings, built
-//! from every executable path through its subtree
-//! (`Commands.getStructure(...)`'s recursive walk). No such per-command usage
-//! text exists here — a [`super::registrar::Registrar`]-built tree tracks
-//! parsers and executors, not English descriptions — so this registers only
-//! the bare `/help`, which lists the root command names
+//! The real `/help <command>` prints that command's own usage strings, built
+//! from every executable path through its subtree (a recursive walk of the
+//! command tree). No such per-command usage text exists here — a
+//! [`super::registrar::Registrar`]-built tree tracks parsers and executors,
+//! not English descriptions — so this registers only the bare `/help`, which
+//! lists the root command names
 //! [`super::registrar::Ctx::root_command_names`] already derives from the tree
 //! itself.
 
 use super::registrar::Registrar;
 
-/// Vanilla's `/help` is available to everyone.
+/// `/help` is available to everyone.
 const HELP_LEVEL: u8 = 0;
 
 pub(super) fn register(registrar: &mut Registrar) {
